@@ -1,0 +1,19 @@
+[package]
+name = "smros"
+version = "0.1.0"
+edition = "2021"
+authors = ["SMROS Developers"]
+
+[dependencies]
+volatile = "0.4"
+spin = "0.9"
+cortex-a = "8"
+tock-registers = "0.8"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "z"
