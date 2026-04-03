@@ -16,7 +16,7 @@ mod scheduler;
 mod drivers;
 
 use serial::Serial;
-use scheduler::{get_scheduler, schedule, yield_now, start_first_thread};
+use scheduler::{schedule, yield_now, start_first_thread};
 
 // Global allocator for no_std environment
 struct KernelAllocator;
@@ -271,24 +271,23 @@ context_switch:
 
     // Calculate context base for current thread (TCB + 0x10 for context)
     add     x16, x0, #0x10
-    
+
     // Save all callee-saved registers
-    // x19-x28 at offsets 0x98-0xD8 from context base
+    // x19-x28 at offsets 0x98-0xE0 from context base
     stp     x19, x20, [x16, #0x98]
     stp     x21, x22, [x16, #0xA8]
     stp     x23, x24, [x16, #0xB8]
     stp     x25, x26, [x16, #0xC8]
     stp     x27, x28, [x16, #0xD8]
-    
+
     // Save FP (x29) at offset 0xE8 and LR (x30) at offset 0xF0
     stp     x29, x30, [x16, #0xE8]
-    
+
     // Save current SP at offset 0xF8
     mov     x17, sp
     str     x17, [x16, #0xF8]
-    
+
     // Save the return address (PC) at offset 0x100
-    // The LR contains the return address for this function call
     str     x30, [x16, #0x100]
 
     // Load next thread context base
@@ -304,7 +303,7 @@ context_switch:
     ldp     x23, x24, [x16, #0xB8]
     ldp     x25, x26, [x16, #0xC8]
     ldp     x27, x28, [x16, #0xD8]
-    
+
     // Restore FP and LR (at offsets 0xE8 and 0xF0)
     ldp     x29, x30, [x16, #0xE8]
 
@@ -330,29 +329,25 @@ context_switch_start:
     orr     x16, x16, #0x80
     msr     daif, x16
 
-    // Load next thread's context base (TCB + 0x10 for context, + 0x98 for x19 area = 0xA8)
-    add     x16, x0, #0xA8
+    // Load next thread's context base (TCB + 0x10 for context)
+    add     x16, x0, #0x10
 
-    // Restore callee-saved registers (x19-x28)
-    // x19 is at context offset 0x98, so from x16 (which is context+0x98), x19 is at offset 0
-    ldp     x19, x20, [x16, #0]
-    ldp     x21, x22, [x16, #16]
-    ldp     x23, x24, [x16, #32]
-    ldp     x25, x26, [x16, #48]
-    ldp     x27, x28, [x16, #64]
-    
-    // Restore FP (x29) at context offset 0xE8, which is x16 + 0x50 (0xE8 - 0x98 = 0x50 = 80)
-    ldr     x29, [x16, #80]
-    
-    // Restore LR (x30) at context offset 0xF0, which is x16 + 0x58 (0xF0 - 0x98 = 0x58 = 88)
-    ldr     x30, [x16, #88]
-
-    // Restore SP from context offset 0xF8, which is x16 + 0x60 (0xF8 - 0x98 = 0x60 = 96)
-    ldr     x17, [x16, #96]
+    // Restore SP first (at offset 0xF8)
+    ldr     x17, [x16, #0xF8]
     mov     sp, x17
 
-    // Load thread entry point from context.pc (TCB offset 0x110 = 0x10 + 0x100)
-    ldr     x16, [x0, #0x110]
+    // Restore callee-saved registers (x19-x28)
+    ldp     x19, x20, [x16, #0x98]
+    ldp     x21, x22, [x16, #0xA8]
+    ldp     x23, x24, [x16, #0xB8]
+    ldp     x25, x26, [x16, #0xC8]
+    ldp     x27, x28, [x16, #0xD8]
+
+    // Restore FP (x29) at offset 0xE8 and LR (x30) at offset 0xF0
+    ldp     x29, x30, [x16, #0xE8]
+
+    // Load thread entry point from context.pc (offset 0x100)
+    ldr     x16, [x16, #0x100]
 
     // Enable interrupts
     mrs     x17, daif
@@ -380,7 +375,7 @@ const KERNEL_BANNER: &str = r#"
 #[no_mangle]
 pub extern "C" fn kernel_main() -> ! {
     // Initialize serial console
-    let mut serial = unsafe { Serial::new() };
+    let mut serial = Serial::new();
     serial.init();
 
     // Print kernel banner
@@ -397,16 +392,12 @@ pub extern "C" fn kernel_main() -> ! {
 
     // Initialize interrupt controller
     serial.write_str("[OK] Initializing GIC interrupt controller... ");
-    unsafe {
-        interrupt::init();
-    }
+    interrupt::init();
     serial.write_str("done\n");
 
     // Initialize timer
     serial.write_str("[OK] Initializing ARM Generic Timer... ");
-    unsafe {
-        timer::init();
-    }
+    timer::init();
     serial.write_str("done\n");
     
     serial.write_str("[INFO] Timer frequency: ");
@@ -416,8 +407,7 @@ pub extern "C" fn kernel_main() -> ! {
 
     // Initialize scheduler
     serial.write_str("[OK] Initializing preemptive RR scheduler... ");
-    let scheduler = get_scheduler();
-    scheduler.init();
+    scheduler::scheduler().init();
     serial.write_str("done\n");
 
     // Enable timer interrupts
@@ -427,6 +417,7 @@ pub extern "C" fn kernel_main() -> ! {
 
     // Unmask interrupts
     serial.write_str("[OK] Unmasking CPU interrupts... ");
+    // SAFETY: Accessing DAIF register is safe in kernel mode
     unsafe {
         let daif: u64;
         core::arch::asm!(
@@ -448,17 +439,18 @@ pub extern "C" fn kernel_main() -> ! {
     serial.write_str("Creating 4 worker threads with Round-Robin scheduling...\n\n");
 
     // Create worker threads
-    let _thread1 = scheduler.create_thread(thread_worker_1, "worker-1");
-    let _thread2 = scheduler.create_thread(thread_worker_2, "worker-2");
-    let _thread3 = scheduler.create_thread(thread_worker_3, "worker-3");
-    let _thread4 = scheduler.create_thread(thread_worker_4, "worker-4");
+    let s = scheduler::scheduler();
+    s.create_thread(thread_worker_1, "worker-1");
+    s.create_thread(thread_worker_2, "worker-2");
+    s.create_thread(thread_worker_3, "worker-3");
+    s.create_thread(thread_worker_4, "worker-4");
 
     serial.write_str("\n[INFO] All threads created. Starting execution...\n");
     serial.write_str("[INFO] Each thread runs for 3 iterations then terminates\n");
     serial.write_str("[INFO] Testing voluntary yield context switches\n\n");
 
     // Print initial scheduler status
-    scheduler.print_status(&mut serial);
+    scheduler::scheduler().print_status(&mut serial);
 
     serial.write_str("\n[INFO] Starting first worker thread...\n");
 
@@ -469,7 +461,7 @@ pub extern "C" fn kernel_main() -> ! {
     serial.write_str("\n[INFO] All worker threads completed!\n");
 
     // Print final scheduler status
-    scheduler.print_status(&mut serial);
+    scheduler::scheduler().print_status(&mut serial);
 
     serial.write_str("\n[INFO] Kernel is now idle (press Ctrl+A+X to exit QEMU)\n");
 
@@ -481,8 +473,7 @@ pub extern "C" fn kernel_main() -> ! {
 
 /// Worker thread 1
 extern "C" fn thread_worker_1() -> ! {
-    let mut serial = unsafe { Serial::new() };
-    let scheduler = get_scheduler();
+    let mut serial = Serial::new();
 
     serial.write_str("[Thread-1] Started!\n");
     
@@ -491,22 +482,19 @@ extern "C" fn thread_worker_1() -> ! {
         print_number(&mut serial, i + 1);
         serial.write_str("/3\n");
 
-        // Do some work (busy wait for a bit)
         for _ in 0..100000 {
             core::hint::spin_loop();
         }
 
         serial.write_str("[Thread-1] About to yield...\n");
-        // Yield to let other threads run
         yield_now();
         serial.write_str("[Thread-1] Returned from yield!\n");
     }
 
     serial.write_str("[Thread-1] Completed all iterations, terminating...\n");
-    scheduler.terminate_current();
+    scheduler::scheduler().terminate_current();
     schedule();
 
-    // Should never reach here, but just in case
     loop {
         cortex_a::asm::wfi();
     }
@@ -514,8 +502,7 @@ extern "C" fn thread_worker_1() -> ! {
 
 /// Worker thread 2
 extern "C" fn thread_worker_2() -> ! {
-    let mut serial = unsafe { Serial::new() };
-    let scheduler = get_scheduler();
+    let mut serial = Serial::new();
 
     serial.write_str("[Thread-2] Started!\n");
     
@@ -524,22 +511,19 @@ extern "C" fn thread_worker_2() -> ! {
         print_number(&mut serial, i + 1);
         serial.write_str("/3\n");
 
-        // Do some work (busy wait for a bit)
         for _ in 0..100000 {
             core::hint::spin_loop();
         }
 
         serial.write_str("[Thread-2] About to yield...\n");
-        // Yield to let other threads run
         yield_now();
         serial.write_str("[Thread-2] Returned from yield!\n");
     }
 
     serial.write_str("[Thread-2] Completed all iterations, terminating...\n");
-    scheduler.terminate_current();
+    scheduler::scheduler().terminate_current();
     schedule();
 
-    // Should never reach here, but just in case
     loop {
         cortex_a::asm::wfi();
     }
@@ -547,8 +531,7 @@ extern "C" fn thread_worker_2() -> ! {
 
 /// Worker thread 3
 extern "C" fn thread_worker_3() -> ! {
-    let mut serial = unsafe { Serial::new() };
-    let scheduler = get_scheduler();
+    let mut serial = Serial::new();
 
     serial.write_str("[Thread-3] Started!\n");
     
@@ -557,22 +540,19 @@ extern "C" fn thread_worker_3() -> ! {
         print_number(&mut serial, i + 1);
         serial.write_str("/3\n");
 
-        // Do some work (busy wait for a bit)
         for _ in 0..100000 {
             core::hint::spin_loop();
         }
 
         serial.write_str("[Thread-3] About to yield...\n");
-        // Yield to let other threads run
         yield_now();
         serial.write_str("[Thread-3] Returned from yield!\n");
     }
 
     serial.write_str("[Thread-3] Completed all iterations, terminating...\n");
-    scheduler.terminate_current();
+    scheduler::scheduler().terminate_current();
     schedule();
 
-    // Should never reach here, but just in case
     loop {
         cortex_a::asm::wfi();
     }
@@ -580,8 +560,7 @@ extern "C" fn thread_worker_3() -> ! {
 
 /// Worker thread 4
 extern "C" fn thread_worker_4() -> ! {
-    let mut serial = unsafe { Serial::new() };
-    let scheduler = get_scheduler();
+    let mut serial = Serial::new();
 
     serial.write_str("[Thread-4] Started!\n");
     
@@ -590,22 +569,19 @@ extern "C" fn thread_worker_4() -> ! {
         print_number(&mut serial, i + 1);
         serial.write_str("/3\n");
 
-        // Do some work (busy wait for a bit)
         for _ in 0..100000 {
             core::hint::spin_loop();
         }
 
         serial.write_str("[Thread-4] About to yield...\n");
-        // Yield to let other threads run
         yield_now();
         serial.write_str("[Thread-4] Returned from yield!\n");
     }
 
     serial.write_str("[Thread-4] Completed all iterations, terminating...\n");
-    scheduler.terminate_current();
+    scheduler::scheduler().terminate_current();
     schedule();
 
-    // Should never reach here, but just in case
     loop {
         cortex_a::asm::wfi();
     }
@@ -616,14 +592,13 @@ extern "C" fn thread_worker_4() -> ! {
 extern "C" fn timer_interrupt_handler() {
     // Clear the timer interrupt
     timer::clear_interrupt();
-    
+
     // Acknowledge the interrupt at GIC
     let interrupt_id = interrupt::acknowledge_interrupt();
-    
+
     // Update scheduler tick count
-    let scheduler = get_scheduler();
-    scheduler.on_timer_tick();
-    
+    scheduler::scheduler().on_timer_tick();
+
     // End of interrupt
     interrupt::end_of_interrupt(interrupt_id);
 }
@@ -631,14 +606,14 @@ extern "C" fn timer_interrupt_handler() {
 /// Check if preemption is needed
 #[no_mangle]
 extern "C" fn check_preemption() {
-    let scheduler = get_scheduler();
+    let s = scheduler::scheduler();
     
-    if scheduler.should_preempt() {
+    if s.should_preempt() {
         // Reset time slice for the next thread
-        if let Some(next_id) = scheduler.schedule() {
-            scheduler.reset_time_slice(next_id);
+        if let Some(next_id) = s.schedule_next() {
+            s.reset_time_slice(next_id);
         }
-        
+
         // Perform context switch
         schedule();
     }
@@ -688,7 +663,7 @@ fn print_system_info(serial: &mut Serial) {
 /// Panic handler
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    let mut serial = unsafe { Serial::new() };
+    let mut serial = Serial::new();
     serial.init();
     
     serial.write_str("\n!!! KERNEL PANIC !!!\n");

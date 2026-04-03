@@ -4,8 +4,9 @@
 //! It manages multiple threads and performs context switching on timer ticks.
 
 use crate::thread::{
-    ThreadControlBlock, ThreadId, ThreadState, MAX_THREADS, DEFAULT_STACK_SIZE, ThreadStack,
+    ThreadControlBlock, ThreadId, ThreadState, MAX_THREADS, DEFAULT_STACK_SIZE, ThreadStack, SendPtr,
 };
+use core::cell::UnsafeCell;
 use core::ptr;
 
 /// Scheduler structure
@@ -29,7 +30,25 @@ pub struct Scheduler {
     time_slice_ticks: u32,
 
     /// Static stack for idle thread
-    idle_stack: *mut u8,
+    idle_stack: SendPtr,
+}
+
+// SAFETY: The scheduler is only accessed from one thread at a time
+// (cooperative scheduling ensures no concurrent access)
+unsafe impl Send for Scheduler {}
+unsafe impl Sync for Scheduler {}
+
+/// Global scheduler instance wrapped in UnsafeCell for interior mutability
+struct SchedulerCell(UnsafeCell<Scheduler>);
+unsafe impl Sync for SchedulerCell {}
+
+static SCHEDULER: SchedulerCell = SchedulerCell(UnsafeCell::new(Scheduler::new()));
+
+/// Get a mutable reference to the global scheduler
+/// SAFETY: This is safe because we only access the scheduler from one thread at a time
+/// and we ensure no references are held across context switches.
+pub fn scheduler() -> &'static mut Scheduler {
+    unsafe { &mut *SCHEDULER.0.get() }
 }
 
 impl Scheduler {
@@ -42,7 +61,7 @@ impl Scheduler {
             active_threads: 0,
             tick_count: 0,
             time_slice_ticks: 10, // 10 ticks per time slice (100ms at 100Hz)
-            idle_stack: ptr::null_mut(),
+            idle_stack: SendPtr(ptr::null_mut()),
         }
     }
 
@@ -56,9 +75,8 @@ impl Scheduler {
 
         // Allocate idle thread stack
         static mut IDLE_STACK: [u8; DEFAULT_STACK_SIZE] = [0; DEFAULT_STACK_SIZE];
-        unsafe {
-            self.idle_stack = IDLE_STACK.as_mut_ptr();
-        }
+        // SAFETY: We're single-threaded during init, so this is safe
+        self.idle_stack = SendPtr(unsafe { IDLE_STACK.as_mut_ptr() });
 
         // Create idle thread (thread 0)
         self.create_idle_thread();
@@ -74,7 +92,7 @@ impl Scheduler {
         let tcb = &mut self.threads[0];
         tcb.init_idle(
             idle_thread_entry,
-            self.idle_stack,
+            self.idle_stack.0,
             DEFAULT_STACK_SIZE,
         );
     }
@@ -137,7 +155,7 @@ impl Scheduler {
     }
 
     /// Schedule the next thread (Round-Robin)
-    pub fn schedule(&mut self) -> Option<ThreadId> {
+    pub fn schedule_next(&mut self) -> Option<ThreadId> {
         if self.active_threads <= 1 {
             return Some(ThreadId::IDLE);
         }
@@ -210,7 +228,7 @@ impl Scheduler {
         let stack_info = if let Some(tcb) = self.get_thread_mut(current_id) {
             tcb.state = ThreadState::Terminated;
             tcb.time_slice = 0;
-            (tcb.stack, tcb.stack_size, tcb.id.0)
+            (tcb.stack.0, tcb.stack_size, tcb.id.0)
         } else {
             (ptr::null_mut(), 0, 0)
         };
@@ -219,11 +237,11 @@ impl Scheduler {
 
         // Free stack (only for non-idle threads)
         if !stack_info.0.is_null() && stack_info.2 != 0 {
-            let layout = unsafe {
-                alloc::alloc::Layout::from_size_align_unchecked(stack_info.1, 16)
-            };
-            unsafe {
-                alloc::alloc::dealloc(stack_info.0, layout);
+            // SAFETY: stack was allocated with Layout::from_size_align(DEFAULT_STACK_SIZE, 16)
+            if let Ok(layout) = alloc::alloc::Layout::from_size_align(stack_info.1, 16) {
+                unsafe {
+                    alloc::alloc::dealloc(stack_info.0, layout);
+                }
             }
         }
     }
@@ -266,50 +284,38 @@ extern "C" fn idle_thread_entry() -> ! {
     }
 }
 
-/// Global scheduler instance
-static mut SCHEDULER: Scheduler = Scheduler::new();
-
-/// Get a reference to the global scheduler
-pub fn get_scheduler() -> &'static mut Scheduler {
-    unsafe { &mut SCHEDULER }
-}
-
 /// Perform a context switch to the next thread
 pub fn schedule() {
-    unsafe {
-        let scheduler = &mut SCHEDULER;
+    let s = scheduler();
+    
+    // Find next thread to run
+    if let Some(next_id) = s.schedule_next() {
+        let current_id = s.current_thread;
 
-        // Find next thread to run
-        if let Some(next_id) = scheduler.schedule() {
-            let current_id = scheduler.current_thread;
+        if next_id == current_id {
+            // No need to switch
+            return;
+        }
 
-            if next_id == current_id {
-                // No need to switch
-                return;
+        // Update states - get raw pointers first to avoid borrow issues
+        let current_tcb_ptr = s.get_thread_mut(current_id).unwrap() as *mut ThreadControlBlock;
+        let next_tcb_ptr = s.get_thread_mut(next_id).unwrap() as *mut ThreadControlBlock;
+
+        // Update states through raw pointers
+        unsafe {
+            if (*current_tcb_ptr).state == ThreadState::Running {
+                (*current_tcb_ptr).state = ThreadState::Ready;
             }
+            (*next_tcb_ptr).state = ThreadState::Running;
+            (*next_tcb_ptr).time_slice = s.time_slice_ticks;
+        }
 
-            // Update states
-            if let Some(current_tcb) = scheduler.get_thread_mut(current_id) {
-                if current_tcb.state == ThreadState::Running {
-                    current_tcb.state = ThreadState::Ready;
-                }
-            }
+        s.current_thread = next_id;
 
-            let time_slice = scheduler.time_slice_ticks;
-            if let Some(next_tcb) = scheduler.get_thread_mut(next_id) {
-                next_tcb.state = ThreadState::Running;
-                next_tcb.time_slice = time_slice;
-            }
-
-            scheduler.current_thread = next_id;
-
-            // Perform context switch
-            let current_ctx =
-                scheduler.get_thread_mut(current_id).unwrap() as *mut ThreadControlBlock;
-            let next_ctx =
-                scheduler.get_thread_mut(next_id).unwrap() as *mut ThreadControlBlock;
-
-            context_switch(current_ctx, next_ctx);
+        // Perform context switch
+        // SAFETY: These pointers are valid TCB references
+        unsafe {
+            context_switch(current_tcb_ptr, next_tcb_ptr);
         }
     }
 }
@@ -317,45 +323,44 @@ pub fn schedule() {
 /// Start the first user thread (called from kernel_main)
 /// This function never returns - it jumps to the first thread
 pub fn start_first_thread() -> ! {
-    unsafe {
-        let scheduler = &mut SCHEDULER;
+    let s = scheduler();
 
-        // Find first ready thread
-        let mut found_thread: Option<usize> = None;
-        for i in 1..MAX_THREADS {
-            if scheduler.threads[i].state == ThreadState::Ready {
-                found_thread = Some(i);
-                break;
-            }
+    // Find first ready thread
+    let mut found_thread: Option<usize> = None;
+    for i in 1..MAX_THREADS {
+        if s.threads[i].state == ThreadState::Ready {
+            found_thread = Some(i);
+            break;
+        }
+    }
+
+    if let Some(i) = found_thread {
+        let next_id = ThreadId(i);
+
+        // Update states - get raw pointers first
+        let current_id = s.current_thread;
+        let current_tcb_ptr = s.get_thread_mut(current_id).unwrap() as *mut ThreadControlBlock;
+        let next_tcb_ptr = s.get_thread_mut(next_id).unwrap() as *mut ThreadControlBlock;
+
+        // Update states through raw pointers
+        unsafe {
+            (*current_tcb_ptr).state = ThreadState::Ready;
+            (*next_tcb_ptr).state = ThreadState::Running;
+            (*next_tcb_ptr).time_slice = s.time_slice_ticks;
         }
 
-        if let Some(i) = found_thread {
-            let next_id = ThreadId(i);
+        s.current_thread = next_id;
 
-            // Update states
-            let current_id = scheduler.current_thread;
-            if let Some(current_tcb) = scheduler.get_thread_mut(current_id) {
-                current_tcb.state = ThreadState::Ready;
-            }
-
-            let time_slice = scheduler.time_slice_ticks;
-            if let Some(next_tcb) = scheduler.get_thread_mut(next_id) {
-                next_tcb.state = ThreadState::Running;
-                next_tcb.time_slice = time_slice;
-            }
-
-            scheduler.current_thread = next_id;
-
-            // Jump to the first thread (don't save current context)
-            let next_ctx =
-                scheduler.get_thread_mut(next_id).unwrap() as *mut ThreadControlBlock;
-            context_switch_start(next_ctx);
+        // Jump to the first thread (don't save current context)
+        // SAFETY: This is safe - we're jumping to a valid thread entry point
+        unsafe {
+            context_switch_start(next_tcb_ptr);
         }
+    }
 
-        // No ready thread found, just halt
-        loop {
-            cortex_a::asm::wfi();
-        }
+    // No ready thread found, just halt
+    loop {
+        cortex_a::asm::wfi();
     }
 }
 
@@ -389,23 +394,19 @@ fn print_number(serial: &mut crate::serial::Serial, mut num: u32) {
 
 /// Yield the current thread's time slice voluntarily
 pub fn yield_now() {
-    unsafe {
-        // Just reset the time slice to force a context switch
-        let scheduler = &mut SCHEDULER;
-        if let Some(tcb) = scheduler.get_thread_mut(scheduler.current_thread) {
-            tcb.time_slice = 0; // Force preemption
-        }
-        schedule();
+    // Reset time slice to force preemption
+    let s = scheduler();
+    if let Some(tcb) = s.get_thread_mut(s.current_thread) {
+        tcb.time_slice = 0;
     }
+    schedule();
 }
 
 /// Sleep for a number of ticks
 pub fn sleep_ticks(_ticks: u32) {
-    unsafe {
-        let scheduler = &mut SCHEDULER;
-        if let Some(tcb) = scheduler.get_thread_mut(scheduler.current_thread) {
-            tcb.state = ThreadState::Blocked;
-        }
-        schedule();
+    let s = scheduler();
+    if let Some(tcb) = s.get_thread_mut(s.current_thread) {
+        tcb.state = ThreadState::Blocked;
     }
+    schedule();
 }

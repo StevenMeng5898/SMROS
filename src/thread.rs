@@ -134,6 +134,13 @@ impl CpuContext {
     }
 }
 
+/// Wrapper for raw pointers to implement Send/Sync
+/// SAFETY: We ensure these pointers are only used in single-threaded contexts
+/// or protected by proper synchronization.
+pub struct SendPtr(pub *mut u8);
+unsafe impl Send for SendPtr {}
+unsafe impl Sync for SendPtr {}
+
 /// Thread Control Block (TCB) - represents a thread object
 #[repr(C)]
 pub struct ThreadControlBlock {
@@ -147,7 +154,7 @@ pub struct ThreadControlBlock {
     pub context: CpuContext,
 
     /// Thread stack pointer
-    pub stack: *mut u8,
+    pub stack: SendPtr,
 
     /// Stack size
     pub stack_size: usize,
@@ -172,7 +179,7 @@ impl ThreadControlBlock {
             id: ThreadId::INVALID,
             state: ThreadState::Empty,
             context: CpuContext::default_context(),
-            stack: ptr::null_mut(),
+            stack: SendPtr(ptr::null_mut()),
             stack_size: 0,
             entry: None,
             time_slice: 0,
@@ -195,7 +202,7 @@ impl ThreadControlBlock {
         self.state = ThreadState::Ready;
         self.entry = Some(entry);
         self.name = name;
-        self.stack = stack;
+        self.stack = SendPtr(stack);
         self.stack_size = stack_size;
         self.time_slice = time_slice;
         self.total_ticks = 0;
@@ -211,7 +218,7 @@ impl ThreadControlBlock {
         self.state = ThreadState::Ready;
         self.entry = Some(idle_entry);
         self.name = "idle";
-        self.stack = stack;
+        self.stack = SendPtr(stack);
         self.stack_size = stack_size;
         self.time_slice = 10;
         self.total_ticks = 0;
@@ -238,7 +245,7 @@ impl ThreadControlBlock {
         serial.write_str("  ");
         serial.write_str(self.name);
         // Pad name to 12 characters
-        for _ in 0..(12 - self.name.len()) {
+        for _ in 0..(12usize.saturating_sub(self.name.len())) {
             serial.write_byte(b' ');
         }
         print_number(serial, self.time_slice);
@@ -250,8 +257,6 @@ impl ThreadControlBlock {
 
 /// Thread exit wrapper - called when a thread returns
 extern "C" fn thread_exit_wrapper() -> ! {
-    // This should never be called directly
-    // Thread termination is handled by the scheduler
     loop {
         cortex_a::asm::wfi();
     }
@@ -279,7 +284,7 @@ fn print_number(serial: &mut crate::serial::Serial, mut num: u32) {
     }
 }
 
-/// Thread stack allocator
+/// Thread stack allocator - safe wrapper around raw allocation
 pub struct ThreadStack {
     ptr: *mut u8,
     size: usize,
@@ -288,9 +293,8 @@ pub struct ThreadStack {
 impl ThreadStack {
     /// Allocate a new thread stack
     pub fn alloc(size: usize) -> Option<Self> {
-        let layout = unsafe {
-            alloc::alloc::Layout::from_size_align_unchecked(size, 16)
-        };
+        // SAFETY: size is DEFAULT_STACK_SIZE (8KB) which is valid and 16-byte aligned
+        let layout = alloc::alloc::Layout::from_size_align(size, 16).ok()?;
 
         let ptr = unsafe { alloc::alloc::alloc(layout) };
 
@@ -315,9 +319,9 @@ impl ThreadStack {
 impl Drop for ThreadStack {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
-            let layout = unsafe {
-                alloc::alloc::Layout::from_size_align_unchecked(self.size, 16)
-            };
+            // SAFETY: ptr was allocated with the same layout in alloc()
+            let layout = alloc::alloc::Layout::from_size_align(self.size, 16)
+                .expect("Invalid layout");
             unsafe {
                 alloc::alloc::dealloc(self.ptr, layout);
             }

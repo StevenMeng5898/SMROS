@@ -7,7 +7,6 @@ build = "build.rs"
 
 [dependencies]
 volatile = "0.4"
-spin = "0.9"
 cortex-a = "8"
 tock-registers = "0.8"
 
