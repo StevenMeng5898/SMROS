@@ -14,9 +14,11 @@ mod interrupt;
 mod thread;
 mod scheduler;
 mod drivers;
+mod smp;
 
 use serial::Serial;
-use scheduler::{schedule, yield_now, start_first_thread};
+use scheduler::{schedule, yield_now, start_first_thread, schedule_on_cpu, yield_now_on_cpu, start_first_thread_for_cpu};
+use smp::{boot_all_cpus, print_status as smp_print_status, current_cpu_id};
 
 // Global allocator for no_std environment
 struct KernelAllocator;
@@ -70,6 +72,36 @@ core::arch::global_asm!(
 .globl _start
 
 _start:
+    // Check if this is the boot CPU (CPU0) or a secondary CPU
+    // Read MPIDR to determine which CPU we are
+    mrs     x19, mpidr_el1
+    and     x19, x19, #0xFF       // Extract affinity level 0 (CPU ID)
+    
+    // If CPU0, continue with normal boot
+    cbz     x19, 1f
+    
+    // Secondary CPU: jump to secondary entry point
+    // Set up stack from x3 (passed from PSCI CPU_ON call)
+    mov     sp, x3
+    
+    // Clear BSS for secondary CPU (shared with CPU0)
+    // BSS is already cleared by CPU0, so skip this
+    
+    // Set exception vector base address
+    ldr     x1, =exception_vectors
+    msr     vbar_el1, x1
+    
+    // Branch to secondary CPU entry point
+    bl      secondary_cpu_entry
+    
+    // Halt if returns (should never happen)
+2:
+    wfi
+    b       2b
+
+1:
+    // Boot CPU (CPU0) continues with normal initialization
+    
     // Mask all interrupts
     mrs     x1, daif
     orr     x1, x1, #0x3C0
@@ -83,12 +115,12 @@ _start:
     ldr     x1, =__bss_start
     ldr     x2, =__bss_end
     mov     x3, #0
-1:
+3:
     cmp     x1, x2
-    b.eq    2f
+    b.eq    4f
     str     x3, [x1], #8
-    b       1b
-2:
+    b       3b
+4:
 
     // Set exception vector base address
     ldr     x1, =exception_vectors
@@ -98,9 +130,38 @@ _start:
     bl      kernel_main
 
     // Halt if kernel returns (should never happen)
-3:
+5:
     wfi
-    b       3b
+    b       5b
+
+// Secondary CPU entry point - must be visible for PSCI CPU_ON
+// This is called when a secondary CPU boots via PSCI
+.globl secondary_entry
+.type secondary_entry, %function
+secondary_entry:
+    // PSCI CPU_ON passes context_id in x2 (we passed stack_ptr here)
+    
+    // Set stack pointer from x2
+    mov     sp, x2
+    
+    // Align stack to 16 bytes
+    mov     x1, x2
+    and     x1, x1, #~0xF
+    mov     sp, x1
+    
+    // Enable FP/SIMD
+    mrs     x1, cpacr_el1
+    orr     x1, x1, #(0x3 << 20)
+    msr     cpacr_el1, x1
+    isb
+    
+    // Jump to Rust entry point
+    b       secondary_cpu_entry
+    
+    // Should never reach here
+6:
+    wfi
+    b       6b
 
 // Exception vectors - must be 2KB aligned and each vector is 0x80 bytes
 .align 11
@@ -399,11 +460,14 @@ pub extern "C" fn kernel_main() -> ! {
     serial.write_str("[OK] Initializing ARM Generic Timer... ");
     timer::init();
     serial.write_str("done\n");
-    
+
     serial.write_str("[INFO] Timer frequency: ");
     let freq = timer::get_frequency();
     print_number(&mut serial, (freq / 1000000) as u32);
     serial.write_str(" MHz\n");
+
+    // Initialize SMP support
+    smp::init();
 
     // Initialize scheduler
     serial.write_str("[OK] Initializing preemptive RR scheduler... ");
@@ -435,22 +499,33 @@ pub extern "C" fn kernel_main() -> ! {
     }
     serial.write_str("done\n");
 
-    serial.write_str("\n--- Multi-thread Sample Test ---\n");
-    serial.write_str("Creating 4 worker threads with Round-Robin scheduling...\n\n");
+    // Boot all secondary CPUs
+    serial.write_str("\n--- SMP Multi-Core Initialization ---\n");
+    boot_all_cpus();
+    smp_print_status();
 
-    // Create worker threads
+    serial.write_str("\n--- Multi-thread SMP Sample Test ---\n");
+    serial.write_str("Creating 4 worker threads with CPU affinity...\n\n");
+
+    // Create worker threads bound to specific CPUs
     let s = scheduler::scheduler();
-    s.create_thread(thread_worker_1, "worker-1");
-    s.create_thread(thread_worker_2, "worker-2");
-    s.create_thread(thread_worker_3, "worker-3");
-    s.create_thread(thread_worker_4, "worker-4");
+    s.create_thread_on_cpu(thread_worker_1, "worker-1", Some(0));
+    s.create_thread_on_cpu(thread_worker_2, "worker-2", Some(1));
+    s.create_thread_on_cpu(thread_worker_3, "worker-3", Some(2));
+    s.create_thread_on_cpu(thread_worker_4, "worker-4", Some(3));
 
-    serial.write_str("\n[INFO] All threads created. Starting execution...\n");
-    serial.write_str("[INFO] Each thread runs for 3 iterations then terminates\n");
-    serial.write_str("[INFO] Testing voluntary yield context switches\n\n");
+    serial.write_str("\n[INFO] All threads created with CPU affinity:\n");
+    serial.write_str("  - worker-1 -> CPU 0\n");
+    serial.write_str("  - worker-2 -> CPU 1\n");
+    serial.write_str("  - worker-3 -> CPU 2\n");
+    serial.write_str("  - worker-4 -> CPU 3\n\n");
+    serial.write_str("[INFO] Scheduler will dispatch threads to their assigned CPUs\n\n");
 
-    // Print initial scheduler status
+    // Print initial scheduler status  
     scheduler::scheduler().print_status(&mut serial);
+
+    // Give secondary CPUs some time to boot (they boot asynchronously)
+    serial.write_str("[INFO] Starting worker threads (secondary CPUs booting in background)...\n\n");
 
     serial.write_str("\n[INFO] Starting first worker thread...\n");
 
@@ -474,11 +549,17 @@ pub extern "C" fn kernel_main() -> ! {
 /// Worker thread 1
 extern "C" fn thread_worker_1() -> ! {
     let mut serial = Serial::new();
+    // Get our assigned CPU from scheduler
+    let my_cpu = scheduler::scheduler().get_thread(scheduler::scheduler().current()).map(|t| t.cpu_affinity).flatten().unwrap_or(0);
 
-    serial.write_str("[Thread-1] Started!\n");
-    
+    serial.write_str("[Thread-1/CPU");
+    smp::print_number(&mut serial, my_cpu as u32);
+    serial.write_str("] Started!\n");
+
     for i in 0..3 {
-        serial.write_str("[Thread-1] Running iteration ");
+        serial.write_str("[Thread-1/CPU");
+        smp::print_number(&mut serial, my_cpu as u32);
+        serial.write_str("] Running iteration ");
         print_number(&mut serial, i + 1);
         serial.write_str("/3\n");
 
@@ -486,12 +567,18 @@ extern "C" fn thread_worker_1() -> ! {
             core::hint::spin_loop();
         }
 
-        serial.write_str("[Thread-1] About to yield...\n");
+        serial.write_str("[Thread-1/CPU");
+        smp::print_number(&mut serial, my_cpu as u32);
+        serial.write_str("] About to yield...\n");
         yield_now();
-        serial.write_str("[Thread-1] Returned from yield!\n");
+        serial.write_str("[Thread-1/CPU");
+        smp::print_number(&mut serial, my_cpu as u32);
+        serial.write_str("] Returned from yield!\n");
     }
 
-    serial.write_str("[Thread-1] Completed all iterations, terminating...\n");
+    serial.write_str("[Thread-1/CPU");
+    smp::print_number(&mut serial, my_cpu as u32);
+    serial.write_str("] Completed all iterations, terminating...\n");
     scheduler::scheduler().terminate_current();
     schedule();
 
@@ -503,11 +590,16 @@ extern "C" fn thread_worker_1() -> ! {
 /// Worker thread 2
 extern "C" fn thread_worker_2() -> ! {
     let mut serial = Serial::new();
+    let my_cpu = scheduler::scheduler().get_thread(scheduler::scheduler().current()).map(|t| t.cpu_affinity).flatten().unwrap_or(1);
 
-    serial.write_str("[Thread-2] Started!\n");
-    
+    serial.write_str("[Thread-2/CPU");
+    smp::print_number(&mut serial, my_cpu as u32);
+    serial.write_str("] Started!\n");
+
     for i in 0..3 {
-        serial.write_str("[Thread-2] Running iteration ");
+        serial.write_str("[Thread-2/CPU");
+        smp::print_number(&mut serial, my_cpu as u32);
+        serial.write_str("] Running iteration ");
         print_number(&mut serial, i + 1);
         serial.write_str("/3\n");
 
@@ -515,12 +607,18 @@ extern "C" fn thread_worker_2() -> ! {
             core::hint::spin_loop();
         }
 
-        serial.write_str("[Thread-2] About to yield...\n");
+        serial.write_str("[Thread-2/CPU");
+        smp::print_number(&mut serial, my_cpu as u32);
+        serial.write_str("] About to yield...\n");
         yield_now();
-        serial.write_str("[Thread-2] Returned from yield!\n");
+        serial.write_str("[Thread-2/CPU");
+        smp::print_number(&mut serial, my_cpu as u32);
+        serial.write_str("] Returned from yield!\n");
     }
 
-    serial.write_str("[Thread-2] Completed all iterations, terminating...\n");
+    serial.write_str("[Thread-2/CPU");
+    smp::print_number(&mut serial, my_cpu as u32);
+    serial.write_str("] Completed all iterations, terminating...\n");
     scheduler::scheduler().terminate_current();
     schedule();
 
@@ -532,11 +630,16 @@ extern "C" fn thread_worker_2() -> ! {
 /// Worker thread 3
 extern "C" fn thread_worker_3() -> ! {
     let mut serial = Serial::new();
+    let my_cpu = scheduler::scheduler().get_thread(scheduler::scheduler().current()).map(|t| t.cpu_affinity).flatten().unwrap_or(2);
 
-    serial.write_str("[Thread-3] Started!\n");
-    
+    serial.write_str("[Thread-3/CPU");
+    smp::print_number(&mut serial, my_cpu as u32);
+    serial.write_str("] Started!\n");
+
     for i in 0..3 {
-        serial.write_str("[Thread-3] Running iteration ");
+        serial.write_str("[Thread-3/CPU");
+        smp::print_number(&mut serial, my_cpu as u32);
+        serial.write_str("] Running iteration ");
         print_number(&mut serial, i + 1);
         serial.write_str("/3\n");
 
@@ -544,12 +647,18 @@ extern "C" fn thread_worker_3() -> ! {
             core::hint::spin_loop();
         }
 
-        serial.write_str("[Thread-3] About to yield...\n");
+        serial.write_str("[Thread-3/CPU");
+        smp::print_number(&mut serial, my_cpu as u32);
+        serial.write_str("] About to yield...\n");
         yield_now();
-        serial.write_str("[Thread-3] Returned from yield!\n");
+        serial.write_str("[Thread-3/CPU");
+        smp::print_number(&mut serial, my_cpu as u32);
+        serial.write_str("] Returned from yield!\n");
     }
 
-    serial.write_str("[Thread-3] Completed all iterations, terminating...\n");
+    serial.write_str("[Thread-3/CPU");
+    smp::print_number(&mut serial, my_cpu as u32);
+    serial.write_str("] Completed all iterations, terminating...\n");
     scheduler::scheduler().terminate_current();
     schedule();
 
@@ -561,11 +670,16 @@ extern "C" fn thread_worker_3() -> ! {
 /// Worker thread 4
 extern "C" fn thread_worker_4() -> ! {
     let mut serial = Serial::new();
+    let my_cpu = scheduler::scheduler().get_thread(scheduler::scheduler().current()).map(|t| t.cpu_affinity).flatten().unwrap_or(3);
 
-    serial.write_str("[Thread-4] Started!\n");
-    
+    serial.write_str("[Thread-4/CPU");
+    smp::print_number(&mut serial, my_cpu as u32);
+    serial.write_str("] Started!\n");
+
     for i in 0..3 {
-        serial.write_str("[Thread-4] Running iteration ");
+        serial.write_str("[Thread-4/CPU");
+        smp::print_number(&mut serial, my_cpu as u32);
+        serial.write_str("] Running iteration ");
         print_number(&mut serial, i + 1);
         serial.write_str("/3\n");
 
@@ -573,12 +687,18 @@ extern "C" fn thread_worker_4() -> ! {
             core::hint::spin_loop();
         }
 
-        serial.write_str("[Thread-4] About to yield...\n");
+        serial.write_str("[Thread-4/CPU");
+        smp::print_number(&mut serial, my_cpu as u32);
+        serial.write_str("] About to yield...\n");
         yield_now();
-        serial.write_str("[Thread-4] Returned from yield!\n");
+        serial.write_str("[Thread-4/CPU");
+        smp::print_number(&mut serial, my_cpu as u32);
+        serial.write_str("] Returned from yield!\n");
     }
 
-    serial.write_str("[Thread-4] Completed all iterations, terminating...\n");
+    serial.write_str("[Thread-4/CPU");
+    smp::print_number(&mut serial, my_cpu as u32);
+    serial.write_str("] Completed all iterations, terminating...\n");
     scheduler::scheduler().terminate_current();
     schedule();
 
@@ -606,16 +726,17 @@ extern "C" fn timer_interrupt_handler() {
 /// Check if preemption is needed
 #[no_mangle]
 extern "C" fn check_preemption() {
+    let cpu_id = current_cpu_id();
     let s = scheduler::scheduler();
-    
+
     if s.should_preempt() {
         // Reset time slice for the next thread
-        if let Some(next_id) = s.schedule_next() {
+        if let Some(next_id) = s.schedule_next_for_cpu(cpu_id as usize) {
             s.reset_time_slice(next_id);
         }
 
-        // Perform context switch
-        schedule();
+        // Perform context switch on this CPU
+        schedule_on_cpu(cpu_id as usize);
     }
 }
 

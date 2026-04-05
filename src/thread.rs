@@ -170,6 +170,13 @@ pub struct ThreadControlBlock {
 
     /// Thread name (for debugging)
     pub name: &'static str,
+
+    /// CPU affinity (which CPU this thread should run on)
+    /// None = any CPU, Some(n) = specific CPU
+    pub cpu_affinity: Option<usize>,
+
+    /// Which CPU this thread is currently executing on
+    pub current_cpu: Option<usize>,
 }
 
 impl ThreadControlBlock {
@@ -185,6 +192,8 @@ impl ThreadControlBlock {
             time_slice: 0,
             total_ticks: 0,
             name: "",
+            cpu_affinity: None,
+            current_cpu: None,
         }
     }
 
@@ -197,6 +206,7 @@ impl ThreadControlBlock {
         stack: *mut u8,
         stack_size: usize,
         time_slice: u32,
+        cpu_affinity: Option<usize>,
     ) {
         self.id = id;
         self.state = ThreadState::Ready;
@@ -206,6 +216,8 @@ impl ThreadControlBlock {
         self.stack_size = stack_size;
         self.time_slice = time_slice;
         self.total_ticks = 0;
+        self.cpu_affinity = cpu_affinity;
+        self.current_cpu = cpu_affinity; // Initially scheduled on affinity CPU
 
         // Set up initial context
         let stack_top = (stack as u64) + (stack_size as u64);
@@ -222,6 +234,7 @@ impl ThreadControlBlock {
         self.stack_size = stack_size;
         self.time_slice = 10;
         self.total_ticks = 0;
+        self.cpu_affinity = None;
 
         let stack_top = (stack as u64) + (stack_size as u64);
         self.context = CpuContext::new(idle_entry, stack_top);
@@ -248,6 +261,18 @@ impl ThreadControlBlock {
         for _ in 0..(12usize.saturating_sub(self.name.len())) {
             serial.write_byte(b' ');
         }
+        
+        // Print current CPU (where it's actually running)
+        match self.current_cpu {
+            Some(cpu) => {
+                print_number(serial, cpu as u32);
+            }
+            None => {
+                serial.write_str("*");
+            }
+        }
+        serial.write_str("    ");
+        
         print_number(serial, self.time_slice);
         serial.write_str("         ");
         print_number(serial, self.total_ticks);

@@ -2,7 +2,21 @@
   "permissions": {
     "allow": [
       "Bash(make *)",
-      "Bash(timeout *)"
+      "Bash(timeout *)",
+      "Bash(cargo build *)",
+      "Bash(cp *)",
+      "Bash(sleep *)",
+      "Bash(kill *)",
+      "Bash(cat *)",
+      "Bash(rm *)",
+      "Bash(qemu-system-aarch64 *)",
+      "Bash(objdump *)",
+      "Bash(aarch64-linux-gnu-objdump *)",
+      "Bash(pkill *)",
+      "Bash(cd *)",
+      "Bash(tail *)",
+      "Bash(grep *)",
+      "Bash(head *)"
     ]
   },
   "$version": 3

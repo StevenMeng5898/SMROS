@@ -9,6 +9,9 @@ use crate::thread::{
 use core::cell::UnsafeCell;
 use core::ptr;
 
+/// Maximum number of CPUs for thread binding
+pub const MAX_CPUS: usize = 4;
+
 /// Scheduler structure
 pub struct Scheduler {
     /// Thread control blocks
@@ -103,6 +106,16 @@ impl Scheduler {
         entry: extern "C" fn() -> !,
         name: &'static str,
     ) -> Option<ThreadId> {
+        self.create_thread_on_cpu(entry, name, None)
+    }
+
+    /// Create a new thread bound to a specific CPU
+    pub fn create_thread_on_cpu(
+        &mut self,
+        entry: extern "C" fn() -> !,
+        name: &'static str,
+        cpu_affinity: Option<usize>,
+    ) -> Option<ThreadId> {
         // Find an empty slot
         for i in 1..MAX_THREADS {
             if self.threads[i].state == ThreadState::Empty {
@@ -117,6 +130,7 @@ impl Scheduler {
                     stack.as_ptr(),
                     DEFAULT_STACK_SIZE,
                     self.time_slice_ticks,
+                    cpu_affinity,
                 );
 
                 // Leak the stack (it will be freed when thread terminates)
@@ -180,6 +194,39 @@ impl Scheduler {
         }
 
         // No ready worker thread found, run idle
+        Some(ThreadId::IDLE)
+    }
+
+    /// Schedule the next thread for a specific CPU (CPU-aware scheduling)
+    pub fn schedule_next_for_cpu(&mut self, cpu_id: usize) -> Option<ThreadId> {
+        if self.active_threads <= 1 {
+            return Some(ThreadId::IDLE);
+        }
+
+        let start = self.next_thread;
+        let mut attempts = 0;
+        let current = self.current_thread.0;
+
+        // Find a thread that is bound to this CPU (or unbound)
+        while attempts < MAX_THREADS {
+            let idx = (start + attempts) % MAX_THREADS;
+
+            if idx != current
+                && idx != 0
+                && self.threads[idx].state == ThreadState::Ready
+            {
+                let thread_cpu = self.threads[idx].cpu_affinity;
+                // Only schedule if thread is bound to this CPU or unbound
+                if thread_cpu.is_none() || thread_cpu == Some(cpu_id) {
+                    self.next_thread = (idx + 1) % MAX_THREADS;
+                    return Some(ThreadId(idx));
+                }
+            }
+
+            attempts += 1;
+        }
+
+        // No ready thread for this CPU found, run idle
         Some(ThreadId::IDLE)
     }
 
@@ -264,7 +311,7 @@ impl Scheduler {
         print_number(serial, self.tick_count as u32);
         serial.write_str("\n");
         serial.write_str("\nThread Table:\n");
-        serial.write_str("ID  State      Name        TimeSlice  TotalTicks\n");
+        serial.write_str("ID  State      Name        CPU  TimeSlice  TotalTicks\n");
 
         for i in 0..MAX_THREADS {
             let tcb = &self.threads[i];
@@ -400,6 +447,104 @@ pub fn yield_now() {
         tcb.time_slice = 0;
     }
     schedule();
+}
+
+/// Yield the current thread's time slice on a specific CPU
+pub fn yield_now_on_cpu(cpu_id: usize) {
+    let s = scheduler();
+    if let Some(tcb) = s.get_thread_mut(s.current_thread) {
+        tcb.time_slice = 0;
+    }
+    schedule_on_cpu(cpu_id);
+}
+
+/// Perform a context switch to the next thread on a specific CPU
+pub fn schedule_on_cpu(cpu_id: usize) {
+    let s = scheduler();
+
+    // Find next thread to run for this CPU
+    if let Some(next_id) = s.schedule_next_for_cpu(cpu_id) {
+        let current_id = s.current_thread;
+
+        if next_id == current_id {
+            // No need to switch
+            return;
+        }
+
+        // Update states - get raw pointers first to avoid borrow issues
+        let current_tcb_ptr = s.get_thread_mut(current_id).unwrap() as *mut ThreadControlBlock;
+        let next_tcb_ptr = s.get_thread_mut(next_id).unwrap() as *mut ThreadControlBlock;
+
+        // Update states through raw pointers
+        unsafe {
+            if (*current_tcb_ptr).state == ThreadState::Running {
+                (*current_tcb_ptr).state = ThreadState::Ready;
+            }
+            (*next_tcb_ptr).state = ThreadState::Running;
+            (*next_tcb_ptr).time_slice = s.time_slice_ticks;
+            // Mark which logical CPU this thread is running on
+            (*next_tcb_ptr).current_cpu = Some(cpu_id);
+        }
+
+        s.current_thread = next_id;
+
+        // Perform context switch
+        // SAFETY: These pointers are valid TCB references
+        unsafe {
+            context_switch(current_tcb_ptr, next_tcb_ptr);
+        }
+    }
+}
+
+/// Start the first user thread on a specific CPU (called from secondary CPU entry)
+/// This function never returns - it jumps to the first thread for this CPU
+pub fn start_first_thread_for_cpu(cpu_id: usize) -> ! {
+    let s = scheduler();
+
+    // Mark CPU as fully online before trying to start threads
+    crate::smp::mark_cpu_online();
+
+    // Find first ready thread bound to this CPU or unbound
+    let mut found_thread: Option<usize> = None;
+    for i in 1..MAX_THREADS {
+        if s.threads[i].state == ThreadState::Ready {
+            // Check if thread is bound to this CPU or unbound
+            let thread_cpu = s.threads[i].cpu_affinity;
+            if thread_cpu.is_none() || thread_cpu == Some(cpu_id) {
+                found_thread = Some(i);
+                break;
+            }
+        }
+    }
+
+    if let Some(i) = found_thread {
+        let next_id = ThreadId(i);
+
+        // Update states - get raw pointers first
+        let current_id = s.current_thread;
+        let current_tcb_ptr = s.get_thread_mut(current_id).unwrap() as *mut ThreadControlBlock;
+        let next_tcb_ptr = s.get_thread_mut(next_id).unwrap() as *mut ThreadControlBlock;
+
+        // Update states through raw pointers
+        unsafe {
+            (*current_tcb_ptr).state = ThreadState::Ready;
+            (*next_tcb_ptr).state = ThreadState::Running;
+            (*next_tcb_ptr).time_slice = s.time_slice_ticks;
+        }
+
+        s.current_thread = next_id;
+
+        // Jump to the first thread (don't save current context)
+        // SAFETY: This is safe - we're jumping to a valid thread entry point
+        unsafe {
+            context_switch_start(next_tcb_ptr);
+        }
+    }
+
+    // No ready thread found for this CPU, enter idle loop
+    loop {
+        cortex_a::asm::wfi();
+    }
 }
 
 /// Sleep for a number of ticks

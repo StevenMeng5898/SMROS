@@ -8,11 +8,13 @@ ENTRY(_start)
 SECTIONS
 {
     . = KERNEL_BASE;
-    
+
     .text : ALIGN(4K)
     {
         *(.text.boot)
         *(.text .text.*)
+        /* Ensure secondary_entry is in text section */
+        KEEP(*(.text.secondary_entry))
         . = ALIGN(4K);
     }
     
