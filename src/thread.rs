@@ -111,9 +111,9 @@ impl CpuContext {
             x16: 0, x17: 0, x18: 0, x19: 0, x20: 0, x21: 0, x22: 0, x23: 0,
             x24: 0, x25: 0, x26: 0, x27: 0, x28: 0,
             fp: 0,
-            lr: thread_exit_wrapper as u64,
+            lr: thread_exit_wrapper as *const () as u64,
             sp: stack_top,
-            pc: entry as u64,
+            pc: entry as *const () as u64,
             pstate: 0x3C5, // EL1, interrupts enabled
         }
     }
@@ -134,11 +134,19 @@ impl CpuContext {
     }
 }
 
-/// Wrapper for raw pointers to implement Send/Sync
-/// SAFETY: We ensure these pointers are only used in single-threaded contexts
-/// or protected by proper synchronization.
+/// Wrapper for raw pointers to implement Send/Sync.
+///
+/// SAFETY: `SendPtr` wraps a raw pointer but is only used within `ThreadControlBlock`
+/// fields (`stack`) that are exclusively owned by the scheduler. The scheduler ensures
+/// no concurrent access occurs.
+#[repr(transparent)]
 pub struct SendPtr(pub *mut u8);
+
+// SAFETY: SendPtr is a transparent wrapper around *mut u8. The scheduler owns
+// all pointers exclusively and ensures no concurrent access.
 unsafe impl Send for SendPtr {}
+
+// SAFETY: See Send impl above. Sync is safe because the scheduler serializes access.
 unsafe impl Sync for SendPtr {}
 
 /// Thread Control Block (TCB) - represents a thread object
@@ -318,9 +326,10 @@ pub struct ThreadStack {
 impl ThreadStack {
     /// Allocate a new thread stack
     pub fn alloc(size: usize) -> Option<Self> {
-        // SAFETY: size is DEFAULT_STACK_SIZE (8KB) which is valid and 16-byte aligned
         let layout = alloc::alloc::Layout::from_size_align(size, 16).ok()?;
 
+        // SAFETY: `size` is DEFAULT_STACK_SIZE (8KB) which is valid and 16-byte aligned.
+        // The global allocator is our KernelAllocator bump allocator, which is safe to use.
         let ptr = unsafe { alloc::alloc::alloc(layout) };
 
         if ptr.is_null() {
@@ -345,10 +354,10 @@ impl Drop for ThreadStack {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
             // SAFETY: ptr was allocated with the same layout in alloc()
-            let layout = alloc::alloc::Layout::from_size_align(self.size, 16)
-                .expect("Invalid layout");
-            unsafe {
-                alloc::alloc::dealloc(self.ptr, layout);
+            if let Ok(layout) = alloc::alloc::Layout::from_size_align(self.size, 16) {
+                unsafe {
+                    alloc::alloc::dealloc(self.ptr, layout);
+                }
             }
         }
     }

@@ -1,12 +1,13 @@
 #![no_std]
 #![no_main]
-#![feature(alloc_error_handler)]
 
 extern crate alloc;
 
 use core::panic::PanicInfo;
 use tock_registers::interfaces::Readable;
 use core::alloc::Layout;
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 mod serial;
 mod timer;
@@ -20,36 +21,59 @@ use serial::Serial;
 use scheduler::{schedule, yield_now, start_first_thread, schedule_on_cpu, yield_now_on_cpu, start_first_thread_for_cpu};
 use smp::{boot_all_cpus, print_status as smp_print_status, current_cpu_id};
 
+/// A Sync wrapper around UnsafeCell that is safe to use as a static.
+struct SyncUnsafeCell<T>(UnsafeCell<T>);
+unsafe impl<T> Sync for SyncUnsafeCell<T> {}
+impl<T> SyncUnsafeCell<T> {
+    const fn new(value: T) -> Self {
+        Self(UnsafeCell::new(value))
+    }
+    fn get(&self) -> *mut T {
+        self.0.get()
+    }
+}
+
 // Global allocator for no_std environment
 struct KernelAllocator;
 
 #[global_allocator]
 static ALLOCATOR: KernelAllocator = KernelAllocator;
 
+// 1MB heap for the kernel bump allocator
+static HEAP: SyncUnsafeCell<[u8; 0x100000]> = SyncUnsafeCell::new([0; 0x100000]);
+static HEAP_POS: AtomicUsize = AtomicUsize::new(0);
+
+// SAFETY: This is a simple bump allocator for a kernel. The heap buffer is
+// exclusively owned by the allocator. In a real kernel, you'd add proper
+// synchronization or use a lock-free allocator design.
 unsafe impl alloc::alloc::GlobalAlloc for KernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // Simple bump allocator using a static buffer
-        // For a real kernel, you'd use proper page allocation
-        static mut HEAP: [u8; 0x100000] = [0; 0x100000]; // 1MB heap
-        static mut HEAP_POS: usize = 0;
-        
         let align = layout.align();
         let size = layout.size();
-        
-        // Align the current position
-        let mut pos = HEAP_POS;
-        let offset = pos % align;
-        if offset != 0 {
-            pos += align - offset;
+
+        // Atomically fetch and update the heap position
+        let mut pos = HEAP_POS.load(Ordering::Relaxed);
+        loop {
+            let offset = pos % align;
+            let aligned_pos = if offset != 0 { pos + align - offset } else { pos };
+
+            if aligned_pos + size > 0x100000 {
+                return core::ptr::null_mut();
+            }
+
+            match HEAP_POS.compare_exchange_weak(
+                pos,
+                aligned_pos + size,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    let ptr = (*HEAP.get()).as_mut_ptr().add(aligned_pos);
+                    return ptr;
+                }
+                Err(new_pos) => pos = new_pos,
+            }
         }
-        
-        if pos + size > HEAP.len() {
-            return ptr::null_mut();
-        }
-        
-        let ptr = HEAP.as_mut_ptr().add(pos);
-        HEAP_POS = pos + size;
-        ptr
     }
 
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
@@ -57,13 +81,6 @@ unsafe impl alloc::alloc::GlobalAlloc for KernelAllocator {
         // For a real kernel, you'd implement proper deallocation
     }
 }
-
-#[alloc_error_handler]
-fn alloc_error(_layout: Layout) -> ! {
-    panic!("Allocation error");
-}
-
-use core::ptr;
 
 // Boot assembly code and context switch
 core::arch::global_asm!(
@@ -481,16 +498,19 @@ pub extern "C" fn kernel_main() -> ! {
 
     // Unmask interrupts
     serial.write_str("[OK] Unmasking CPU interrupts... ");
-    // SAFETY: Accessing DAIF register is safe in kernel mode
+    // SAFETY: Reading and writing DAIF is safe in kernel mode. We only clear
+    // the IRQ mask bit, leaving other flags intact.
+    let daif: u64;
     unsafe {
-        let daif: u64;
         core::arch::asm!(
             "mrs {daif}, daif",
             daif = out(reg) daif,
             options(nomem, nostack, preserves_flags),
         );
-        // Clear I (IRQ mask) bit
-        let daif = daif & !0x80;
+    }
+    // Clear I (IRQ mask) bit
+    let daif = daif & !0x80;
+    unsafe {
         core::arch::asm!(
             "msr daif, {daif}",
             daif = in(reg) daif,
@@ -786,9 +806,9 @@ fn print_system_info(serial: &mut Serial) {
 fn panic(info: &PanicInfo) -> ! {
     let mut serial = Serial::new();
     serial.init();
-    
+
     serial.write_str("\n!!! KERNEL PANIC !!!\n");
-    
+
     if let Some(location) = info.location() {
         serial.write_str("[PANIC] In file ");
         serial.write_str(location.file());
@@ -817,9 +837,9 @@ fn panic(info: &PanicInfo) -> ! {
         serial.write_buf(&buf[..i]);
         serial.write_str("\n");
     }
-    
+
     serial.write_str("\n[ERROR] System halted\n");
-    
+
     loop {
         cortex_a::asm::wfi();
     }

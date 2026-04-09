@@ -9,6 +9,20 @@ use crate::thread::{
 use core::cell::UnsafeCell;
 use core::ptr;
 
+/// A Sync wrapper around UnsafeCell that is safe to use as a static.
+/// SAFETY: This is safe because the scheduler ensures only one thread accesses
+/// the idle stack at a time (during init).
+struct SyncUnsafeCell<T>(UnsafeCell<T>);
+unsafe impl<T> Sync for SyncUnsafeCell<T> {}
+impl<T> SyncUnsafeCell<T> {
+    const fn new(value: T) -> Self {
+        Self(UnsafeCell::new(value))
+    }
+    fn get(&self) -> *mut T {
+        self.0.get()
+    }
+}
+
 /// Maximum number of CPUs for thread binding
 pub const MAX_CPUS: usize = 4;
 
@@ -36,20 +50,27 @@ pub struct Scheduler {
     idle_stack: SendPtr,
 }
 
-// SAFETY: The scheduler is only accessed from one thread at a time
-// (cooperative scheduling ensures no concurrent access)
+// SAFETY: The scheduler is only accessed from one thread at a time.
+// Cooperative scheduling and interrupt disabling during context switches
+// ensure no concurrent mutable access occurs.
 unsafe impl Send for Scheduler {}
+// SAFETY: Sync is safe because all mutable state is either atomic or
+// protected by the scheduler's cooperative scheduling model.
 unsafe impl Sync for Scheduler {}
 
-/// Global scheduler instance wrapped in UnsafeCell for interior mutability
+/// Global scheduler instance wrapped in UnsafeCell for interior mutability.
 struct SchedulerCell(UnsafeCell<Scheduler>);
+
+// SAFETY: SchedulerCell provides interior mutability for the global scheduler.
+// Access is serialized by the scheduler's design - only one thread runs at a time
+// and interrupts are disabled during context switches.
 unsafe impl Sync for SchedulerCell {}
 
 static SCHEDULER: SchedulerCell = SchedulerCell(UnsafeCell::new(Scheduler::new()));
 
-/// Get a mutable reference to the global scheduler
-/// SAFETY: This is safe because we only access the scheduler from one thread at a time
-/// and we ensure no references are held across context switches.
+/// Get a mutable reference to the global scheduler.
+// SAFETY: This is safe because we only access the scheduler from one thread at a time
+// and we ensure no references are held across context switches.
 pub fn scheduler() -> &'static mut Scheduler {
     unsafe { &mut *SCHEDULER.0.get() }
 }
@@ -76,10 +97,12 @@ impl Scheduler {
             self.threads[i].state = ThreadState::Empty;
         }
 
-        // Allocate idle thread stack
-        static mut IDLE_STACK: [u8; DEFAULT_STACK_SIZE] = [0; DEFAULT_STACK_SIZE];
-        // SAFETY: We're single-threaded during init, so this is safe
-        self.idle_stack = SendPtr(unsafe { IDLE_STACK.as_mut_ptr() });
+        // Allocate idle thread stack using a Sync wrapper around UnsafeCell
+        static IDLE_STACK: SyncUnsafeCell<[u8; DEFAULT_STACK_SIZE]> =
+            SyncUnsafeCell::new([0; DEFAULT_STACK_SIZE]);
+        // SAFETY: We're single-threaded during init, so no aliasing mutable
+        // references exist. The SyncUnsafeCell provides interior mutability safely.
+        self.idle_stack = SendPtr(unsafe { (*IDLE_STACK.get()).as_mut_ptr() });
 
         // Create idle thread (thread 0)
         self.create_idle_thread();
@@ -412,6 +435,9 @@ pub fn start_first_thread() -> ! {
 }
 
 // External assembly function for context switching (defined in main.rs)
+// SAFETY: ThreadControlBlock is #[repr(C)] and SendPtr is #[repr(transparent)],
+// so the layout is C-compatible for FFI calls.
+#[allow(improper_ctypes)]
 extern "C" {
     fn context_switch(current: *mut ThreadControlBlock, next: *mut ThreadControlBlock);
     fn context_switch_start(next: *mut ThreadControlBlock) -> !;

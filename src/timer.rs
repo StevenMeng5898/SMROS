@@ -21,15 +21,65 @@ static TIMER_FREQUENCY: AtomicU64 = AtomicU64::new(0);
 /// Timer tick period in timer counts (for 10ms tick)
 static TICK_PERIOD: AtomicU64 = AtomicU64::new(0);
 
+/// Read the Counter-timer Frequency Register
+fn read_cntfrq_el0() -> u64 {
+    let val: u64;
+    // SAFETY: Reading CNTFRQ_EL0 is a standard ARM system register access.
+    // This is safe because it's a read-only register that returns the timer frequency.
+    unsafe {
+        core::arch::asm!(
+            "mrs {val}, cntfrq_el0",
+            val = out(reg) val,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    val
+}
+
+/// Read the Counter-timer Physical Count Register
+fn read_cntpct_el0() -> u64 {
+    let val: u64;
+    // SAFETY: Reading CNTPCT_EL0 is a standard ARM system register access.
+    // This is safe because it's a read-only register that returns the current tick count.
+    unsafe {
+        core::arch::asm!(
+            "mrs {val}, cntpct_el0",
+            val = out(reg) val,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    val
+}
+
+/// Write the Counter-timer Physical Timer CompareValue Register
+fn write_cntp_cval_el0(value: u64) {
+    // SAFETY: Writing CNTP_CVAL_EL0 sets the timer compare value.
+    // This is safe because we own the timer and are single-threaded during init.
+    unsafe {
+        core::arch::asm!(
+            "msr cntp_cval_el0, {value}",
+            value = in(reg) value,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+/// Write the Counter-timer Physical Timer Control Register
+fn write_cntp_ctl_el0(value: u64) {
+    // SAFETY: Writing CNTP_CTL_EL0 controls the physical timer.
+    // This is safe because we own the timer and are single-threaded during init.
+    unsafe {
+        core::arch::asm!(
+            "msr cntp_ctl_el0, {value}",
+            value = in(reg) value,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
 /// Initialize the ARM Generic Timer
-///
-/// # Safety
-/// This function accesses system registers directly.
-/// Must only be called once during kernel initialization.
 pub fn init() {
-    // SAFETY: We're reading system registers during early boot.
-    // This is safe because we're single-threaded at this point.
-    let freq = unsafe { read_cntfrq_el0() };
+    let freq = read_cntfrq_el0();
     TIMER_FREQUENCY.store(freq, Ordering::Relaxed);
 
     // Set tick period for 10ms (100Hz scheduler tick)
@@ -37,67 +87,15 @@ pub fn init() {
     TICK_PERIOD.store(tick_period, Ordering::Relaxed);
 
     // Disable timer during setup
-    unsafe { write_cntp_ctl_el0(0) };
+    write_cntp_ctl_el0(0);
 
     // Set the timer to fire after TICK_PERIOD counts
-    let current_count = unsafe { read_cntpct_el0() };
+    let current_count = read_cntpct_el0();
     let compare_value = current_count.wrapping_add(tick_period);
-    unsafe { write_cntp_cval_el0(compare_value) };
+    write_cntp_cval_el0(compare_value);
 
     // Enable timer with interrupt unmasked
-    unsafe { write_cntp_ctl_el0(CNTP_CTL_ENABLE | CNTP_CTL_IMASK) };
-}
-
-/// Read the Counter-timer Frequency Register
-///
-/// # Safety
-/// Accesses ARM system register directly.
-unsafe fn read_cntfrq_el0() -> u64 {
-    let val: u64;
-    core::arch::asm!(
-        "mrs {val}, cntfrq_el0",
-        val = out(reg) val,
-        options(nomem, nostack, preserves_flags),
-    );
-    val
-}
-
-/// Read the Counter-timer Physical Count Register
-///
-/// # Safety
-/// Accesses ARM system register directly.
-unsafe fn read_cntpct_el0() -> u64 {
-    let val: u64;
-    core::arch::asm!(
-        "mrs {val}, cntpct_el0",
-        val = out(reg) val,
-        options(nomem, nostack, preserves_flags),
-    );
-    val
-}
-
-/// Write the Counter-timer Physical Timer CompareValue Register
-///
-/// # Safety
-/// Accesses ARM system register directly.
-unsafe fn write_cntp_cval_el0(value: u64) {
-    core::arch::asm!(
-        "msr cntp_cval_el0, {value}",
-        value = in(reg) value,
-        options(nomem, nostack, preserves_flags),
-    );
-}
-
-/// Write the Counter-timer Physical Timer Control Register
-///
-/// # Safety
-/// Accesses ARM system register directly.
-unsafe fn write_cntp_ctl_el0(value: u64) {
-    core::arch::asm!(
-        "msr cntp_ctl_el0, {value}",
-        value = in(reg) value,
-        options(nomem, nostack, preserves_flags),
-    );
+    write_cntp_ctl_el0(CNTP_CTL_ENABLE | CNTP_CTL_IMASK);
 }
 
 /// Get the timer frequency
@@ -111,19 +109,15 @@ pub fn get_tick_count() -> u64 {
     if period == 0 {
         return 0;
     }
-    // SAFETY: read_cntpct_el0 is safe to call after init
-    unsafe { read_cntpct_el0() / period }
+    read_cntpct_el0() / period
 }
 
 /// Arm the timer for the next tick
 pub fn arm_next_tick() {
     let period = TICK_PERIOD.load(Ordering::Relaxed);
-    // SAFETY: These register accesses are safe after init
-    unsafe {
-        let current_count = read_cntpct_el0();
-        let compare_value = current_count.wrapping_add(period);
-        write_cntp_cval_el0(compare_value);
-    }
+    let current_count = read_cntpct_el0();
+    let compare_value = current_count.wrapping_add(period);
+    write_cntp_cval_el0(compare_value);
 }
 
 /// Clear timer interrupt by re-arming the timer

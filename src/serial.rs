@@ -114,13 +114,15 @@ impl Serial {
 
     /// Read a register (safe wrapper around volatile read)
     fn read_reg(&self, offset: usize) -> u32 {
-        // SAFETY: base is a valid MMIO address and offset is a known constant
+        // SAFETY: `self.base` is UART_BASE (0x9000000), a valid MMIO address
+        // defined by the QEMU virt machine spec. `offset` is a known constant.
         unsafe { read_volatile((self.base + offset) as *const u32) }
     }
 
     /// Write a register (safe wrapper around volatile write)
     fn write_reg(&self, offset: usize, value: u32) {
-        // SAFETY: base is a valid MMIO address and offset is a known constant
+        // SAFETY: `self.base` is UART_BASE (0x9000000), a valid MMIO address
+        // defined by the QEMU virt machine spec. `offset` is a known constant.
         unsafe { write_volatile((self.base + offset) as *mut u32, value) }
     }
 }

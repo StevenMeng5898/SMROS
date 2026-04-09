@@ -12,7 +12,6 @@ pub const MAX_CPUS: usize = 4;
 /// PSCI (Power State Coordination Interface) function IDs
 /// QEMU virt machine uses PSCI 0.2+ to boot secondary CPUs
 const PSCI_0_2_FN_CPU_ON_64: u32 = 0xC4000003; // 64-bit CPU_ON
-const PSCI_0_2_FN_CPU_ON_32: u32 = 0x84000003; // 32-bit CPU_ON
 
 /// PSCI return codes
 const PSCI_RET_SUCCESS: i64 = 0;
@@ -60,8 +59,8 @@ pub struct PerCpuData {
     pub secondary_entry_flag: AtomicU64,
 }
 
-// SAFETY: Per-CPU data is accessed from multiple CPUs
-// but we ensure proper synchronization with atomics
+// SAFETY: Per-CPU data is accessed from multiple CPUs but we ensure proper
+// synchronization with atomics. The boot_lock serializes CPU boot operations.
 unsafe impl Send for PerCpuData {}
 unsafe impl Sync for PerCpuData {}
 
@@ -86,19 +85,24 @@ impl PerCpuData {
 }
 
 /// Get a reference to the global per-CPU data
-pub fn per_cpu() -> &'static PerCpuData {
-    unsafe { &PER_CPU }
+pub fn per_cpu() -> *const PerCpuData {
+    // SAFETY: Returns a raw pointer to avoid shared reference to mutable static.
+    // The caller is responsible for ensuring safe access.
+    &raw const PER_CPU
 }
 
 /// Get a mutable reference to the global per-CPU data
-pub fn per_cpu_mut() -> &'static mut PerCpuData {
-    unsafe { &mut PER_CPU }
+pub fn per_cpu_mut() -> *mut PerCpuData {
+    // SAFETY: Returns a raw pointer to avoid mutable reference to mutable static.
+    // This is only called during single-threaded initialization.
+    &raw mut PER_CPU
 }
 
 /// Read MPIDR_EL1 to get the current CPU's affinity
 pub fn read_mpidr() -> u64 {
     let mpidr: u64;
-    // SAFETY: Reading MPIDR is safe on any CPU
+    // SAFETY: Reading MPIDR_EL1 is a standard ARM system register read.
+    // It returns the current CPU's multiprocessor affinity information.
     unsafe {
         core::arch::asm!(
             "mrs {mpidr}, mpidr_el1",
@@ -128,9 +132,9 @@ pub fn is_boot_cpu() -> bool {
 /// * `context_id` - Context ID passed to the entry point
 fn psci_cpu_on(target_cpu: u64, entry_point: u64, context_id: u64) -> i64 {
     let ret: i64;
-    // SAFETY: HVC call to PSCI firmware
-    // QEMU uses HVC as the PSCI conduit
-    // Use 64-bit CPU_ON function ID since we're in AArch64
+    // SAFETY: HVC call to PSCI firmware. QEMU uses HVC as the PSCI conduit.
+    // We use the 64-bit CPU_ON function ID since we're in AArch64.
+    // The registers are clobbered per the PSCI specification (SMC Calling Convention).
     unsafe {
         core::arch::asm!(
             "hvc #0",
@@ -187,7 +191,7 @@ pub fn boot_secondary_cpu(cpu_id: u32, stack_ptr: u64) -> Result<(), &'static st
     match result {
         PSCI_RET_SUCCESS | PSCI_RET_ON_PENDING => {
             // Update CPU state
-            let per_cpu = per_cpu_mut();
+            let per_cpu = unsafe { &mut *per_cpu_mut() };
             per_cpu.cpu_info[cpu_id as usize].cpu_id = cpu_id;
             per_cpu.cpu_info[cpu_id as usize].state = CpuState::Booting;
             per_cpu.cpu_info[cpu_id as usize].mpidr = display_mpidr;
@@ -247,7 +251,9 @@ fn secondary_entry_address() -> u64 {
     extern "C" {
         fn secondary_entry();
     }
-    secondary_entry as u64
+    // SAFETY: secondary_entry is defined in global_asm! in main.rs.
+    // The function pointer is valid for the lifetime of the kernel.
+    secondary_entry as *const () as u64
 }
 
 /// Initialize SMP subsystem (called from CPU0)
@@ -258,7 +264,7 @@ pub fn init() {
     serial.write_str("[SMP] Initializing SMP support...\n");
 
     // Initialize per-CPU data
-    let per_cpu = per_cpu_mut();
+    let per_cpu = unsafe { &mut *per_cpu_mut() };
     
     // CPU0 is already online
     per_cpu.cpu_info[0].cpu_id = 0;
@@ -282,7 +288,7 @@ pub fn boot_all_cpus() {
     serial.write_str("[SMP] Scheduler will distribute threads across 4 logical CPUs\n");
     
     // Initialize all CPUs as online for scheduling purposes
-    let per_cpu = per_cpu_mut();
+    let per_cpu = unsafe { &mut *per_cpu_mut() };
     for i in 0..MAX_CPUS {
         per_cpu.cpu_info[i].cpu_id = i as u32;
         per_cpu.cpu_info[i].state = CpuState::Online;
@@ -297,7 +303,7 @@ pub fn boot_all_cpus() {
 pub fn mark_cpu_online() {
     let cpu_id = current_cpu_id();
     if cpu_id < MAX_CPUS as u32 {
-        let per_cpu = per_cpu_mut();
+        let per_cpu = unsafe { &mut *per_cpu_mut() };
         per_cpu.cpu_info[cpu_id as usize].state = CpuState::Online;
         let count = per_cpu.online_count.fetch_add(1, Ordering::Relaxed) + 1;
         
@@ -321,7 +327,8 @@ pub fn print_status() {
 
     serial.write_str("\n=== SMP Status ===\n");
     serial.write_str("Online CPUs: ");
-    print_number(&mut serial, per_cpu().online_count.load(Ordering::Relaxed));
+    let per_cpu = unsafe { &*per_cpu() };
+    print_number(&mut serial, per_cpu.online_count.load(Ordering::Relaxed));
     serial.write_str("/");
     print_number(&mut serial, MAX_CPUS as u32);
     serial.write_str("\n\n");
@@ -330,8 +337,8 @@ pub fn print_status() {
         serial.write_str("CPU");
         print_number(&mut serial, i as u32);
         serial.write_str(": ");
-        
-        let cpu_info = per_cpu().cpu_info[i];
+
+        let cpu_info = per_cpu.cpu_info[i];
         match cpu_info.state {
             CpuState::Offline => serial.write_str("Offline"),
             CpuState::Booting => serial.write_str("Booting"),
@@ -376,7 +383,7 @@ pub extern "C" fn secondary_cpu_entry() -> ! {
     serial.init();
 
     let cpu_id = current_cpu_id();
-    
+
     serial.write_str("[CPU");
     print_number(&mut serial, cpu_id);
     serial.write_str("] Secondary CPU started!\n");
@@ -385,7 +392,9 @@ pub extern "C" fn secondary_cpu_entry() -> ! {
     extern "C" {
         fn exception_vectors();
     }
-    // SAFETY: Setting VBAR is safe on any CPU
+    // SAFETY: Setting VBAR_EL1 is safe here. We're setting the exception vector
+    // base address for this CPU, and the exception_vectors symbol is defined in
+    // global_asm! in main.rs.
     unsafe {
         core::arch::asm!(
             "msr vbar_el1, {vbar}",
@@ -399,7 +408,7 @@ pub extern "C" fn secondary_cpu_entry() -> ! {
     serial.write_str("] Exception vectors set\n");
 
     // Enable FP/SIMD
-    // SAFETY: Modifying CPACR is safe
+    // SAFETY: Modifying CPACR_EL1 to enable FP/SIMD is safe in EL1 kernel mode.
     unsafe {
         let cpacr: u64;
         core::arch::asm!(
@@ -421,7 +430,8 @@ pub extern "C" fn secondary_cpu_entry() -> ! {
     serial.write_str("] FP/SIMD enabled\n");
 
     // Unmask interrupts
-    // SAFETY: Modifying DAIF is safe
+    // SAFETY: Modifying DAIF to unmask IRQs is safe in EL1 kernel mode.
+    // We only clear the I (IRQ) bit, leaving other interrupt masks intact.
     unsafe {
         let daif: u64;
         core::arch::asm!(
@@ -455,31 +465,29 @@ pub extern "C" fn secondary_cpu_entry() -> ! {
 /// CPU idle loop - each CPU runs this when it has no work
 fn cpu_idle_loop(cpu_id: u32) -> ! {
     let mut serial = Serial::new();
-    
+
     serial.write_str("[CPU");
     print_number(&mut serial, cpu_id);
     serial.write_str("] Entering idle loop\n");
 
-    // Simple per-CPU counter to demonstrate multi-core execution
-    static mut CPU_COUNTERS: [u64; MAX_CPUS] = [0; MAX_CPUS];
-    
+    // Simple per-CPU counter using atomics to avoid undefined behavior
+    static CPU_COUNTERS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
     let mut count = 0u64;
     loop {
         count += 1;
-        
+
         // Every 100000 iterations, print a message
         if count % 100000 == 0 {
-            unsafe {
-                CPU_COUNTERS[cpu_id as usize] = count;
-            }
-            
+            CPU_COUNTERS[cpu_id as usize].store(count, Ordering::Relaxed);
+
             serial.write_str("[CPU");
             print_number(&mut serial, cpu_id);
             serial.write_str("] Loop count: ");
             print_number_u64(&mut serial, count);
             serial.write_str("\n");
         }
-        
+
         // Spin for a bit
         for _ in 0..10000 {
             core::hint::spin_loop();

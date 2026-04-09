@@ -37,51 +37,61 @@ const PRIORITY_HIGH: u8 = 0x50;
 /// Physical Timer IRQ number (ARM Generic Timer)
 pub const TIMER_IRQ: u32 = 30;
 
-/// Initialize the GICv2 interrupt controller
-///
-/// # Safety
-/// This function accesses hardware registers directly.
-/// Must only be called once during kernel initialization.
-pub fn init() {
-    // SAFETY: We're accessing GIC registers during early boot.
-    // This is safe because we're single-threaded at this point.
+/// Write a GIC register (MMIO access)
+fn write_reg(base: usize, offset: usize, value: u32) {
+    // SAFETY: GICD_BASE and GICC_BASE are valid MMIO addresses defined by the
+    // QEMU virt machine spec. Offsets are constants from the GICv2 TRM.
     unsafe {
-        // Enable the distributor
-        write_reg(GICD_BASE, GICD_CTLR, GICD_CTLR_ENABLE);
-
-        // Configure all interrupts as Group 0 (secure)
-        write_reg(GICD_BASE, GICD_IGROUPR, 0x00000000);
-
-        // Set priority for timer interrupt (PPI 30)
-        let priority_offset = GICD_IPRIORITYR + (TIMER_IRQ as usize / 4) * 4;
-        let mut priorities = read_reg(GICD_BASE, priority_offset);
-        let byte_shift = (TIMER_IRQ % 4) as usize * 8;
-        priorities &= !(0xFF << byte_shift);
-        priorities |= (PRIORITY_HIGH as u32) << byte_shift;
-        write_reg(GICD_BASE, priority_offset, priorities);
-
-        // Set target CPU for PPIs (CPU0)
-        let target_offset = GICD_ITARGETSR + (TIMER_IRQ as usize / 4) * 4;
-        let mut targets = read_reg(GICD_BASE, target_offset);
-        let byte_shift = (TIMER_IRQ % 4) as usize * 8;
-        targets &= !(0xFF << byte_shift);
-        targets |= 0x01 << byte_shift;
-        write_reg(GICD_BASE, target_offset, targets);
-
-        // Enable the timer interrupt at distributor
-        let enable_offset = GICD_ISENABLER + (TIMER_IRQ as usize / 32) * 4;
-        let enable_bit = 1 << (TIMER_IRQ % 32);
-        write_reg(GICD_BASE, enable_offset, enable_bit);
-
-        // Enable the CPU interface
-        write_reg(GICC_BASE, GICC_CTLR, GICC_CTLR_ENABLE);
-
-        // Set priority mask to allow all priorities
-        write_reg(GICC_BASE, GICC_PMR, 0xFF);
-
-        // Set binary point
-        write_reg(GICC_BASE, GICC_BPR, 0);
+        write_volatile((base + offset) as *mut u32, value);
     }
+}
+
+/// Read a GIC register (MMIO access)
+fn read_reg(base: usize, offset: usize) -> u32 {
+    // SAFETY: GICD_BASE and GICC_BASE are valid MMIO addresses defined by the
+    // QEMU virt machine spec. Offsets are constants from the GICv2 TRM.
+    unsafe {
+        read_volatile((base + offset) as *const u32)
+    }
+}
+
+/// Initialize the GICv2 interrupt controller
+pub fn init() {
+    // Enable the distributor
+    write_reg(GICD_BASE, GICD_CTLR, GICD_CTLR_ENABLE);
+
+    // Configure all interrupts as Group 0 (secure)
+    write_reg(GICD_BASE, GICD_IGROUPR, 0x00000000);
+
+    // Set priority for timer interrupt (PPI 30)
+    let priority_offset = GICD_IPRIORITYR + (TIMER_IRQ as usize / 4) * 4;
+    let mut priorities = read_reg(GICD_BASE, priority_offset);
+    let byte_shift = (TIMER_IRQ % 4) as usize * 8;
+    priorities &= !(0xFF << byte_shift);
+    priorities |= (PRIORITY_HIGH as u32) << byte_shift;
+    write_reg(GICD_BASE, priority_offset, priorities);
+
+    // Set target CPU for PPIs (CPU0)
+    let target_offset = GICD_ITARGETSR + (TIMER_IRQ as usize / 4) * 4;
+    let mut targets = read_reg(GICD_BASE, target_offset);
+    let byte_shift = (TIMER_IRQ % 4) as usize * 8;
+    targets &= !(0xFF << byte_shift);
+    targets |= 0x01 << byte_shift;
+    write_reg(GICD_BASE, target_offset, targets);
+
+    // Enable the timer interrupt at distributor
+    let enable_offset = GICD_ISENABLER + (TIMER_IRQ as usize / 32) * 4;
+    let enable_bit = 1 << (TIMER_IRQ % 32);
+    write_reg(GICD_BASE, enable_offset, enable_bit);
+
+    // Enable the CPU interface
+    write_reg(GICC_BASE, GICC_CTLR, GICC_CTLR_ENABLE);
+
+    // Set priority mask to allow all priorities
+    write_reg(GICC_BASE, GICC_PMR, 0xFF);
+
+    // Set binary point
+    write_reg(GICC_BASE, GICC_BPR, 0);
 }
 
 /// Enable the timer interrupt
@@ -92,31 +102,11 @@ pub fn enable_timer_interrupt() {
 
 /// Acknowledge an interrupt and return the interrupt ID
 pub fn acknowledge_interrupt() -> u32 {
-    // SAFETY: Reading GIC register is safe after init
-    let iar = unsafe { read_reg(GICC_BASE, GICC_IAR) };
+    let iar = read_reg(GICC_BASE, GICC_IAR);
     iar & 0x3FF // Return interrupt ID (lower 10 bits)
 }
 
 /// Signal end of interrupt
 pub fn end_of_interrupt(interrupt_id: u32) {
-    // SAFETY: Writing GIC register is safe after init
-    unsafe {
-        write_reg(GICC_BASE, GICC_EOIR, interrupt_id);
-    }
-}
-
-/// Write a GIC register
-///
-/// # Safety
-/// Accesses memory-mapped hardware registers.
-unsafe fn write_reg(base: usize, offset: usize, value: u32) {
-    write_volatile((base + offset) as *mut u32, value);
-}
-
-/// Read a GIC register
-///
-/// # Safety
-/// Accesses memory-mapped hardware registers.
-unsafe fn read_reg(base: usize, offset: usize) -> u32 {
-    read_volatile((base + offset) as *const u32)
+    write_reg(GICC_BASE, GICC_EOIR, interrupt_id);
 }
