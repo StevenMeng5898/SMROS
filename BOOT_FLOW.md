@@ -2,11 +2,11 @@
 
 ## Overview
 
-SMROS is a preemptive multitasking ARM64 OS kernel with SMP multi-core support, written in Rust and designed to run on QEMU's `virt` machine. The boot process follows the standard ARM64 bare-metal boot sequence with multi-core extensions: **Bootloader → Assembly Boot Code → Rust Kernel Entry → Hardware Initialization → SMP Boot → Scheduler Start → Multi-Threaded Execution**.
+SMROS is a preemptive multitasking ARM64 OS kernel with SMP multi-core support and multi-process memory management, written in Rust and designed to run on QEMU's `virt` machine. The boot process follows the standard ARM64 bare-metal boot sequence with multi-core extensions: **Bootloader → Assembly Boot Code → Rust Kernel Entry → Hardware Initialization → SMP Boot → Process Creation → Interactive Shell**.
 
 ---
 
-## Boot Flow Diagram
+## Boot Flow Diagram (v0.3.0)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -28,18 +28,20 @@ SMROS is a preemptive multitasking ARM64 OS kernel with SMP multi-core support, 
                            ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 3. Rust Kernel Entry (kernel_main in main.rs) - CPU0 Only              │
-│    - Initialize Serial (PL011 UART)                                    │
-│    - Print kernel banner & version (v0.2.0)                            │
+│    - Initialize Serial (PL011 UART) with input support                 │
+│    - Print kernel banner & version (v0.3.0)                            │
 │    - Print system information                                          │
 │    - Initialize GIC interrupt controller                               │
 │    - Initialize ARM Generic Timer                                      │
 │    - Initialize SMP support                                            │
+│    - Initialize memory management (processes, pages, segments)         │
+│    - Create sample processes (init, shell, editor, compiler)           │
 │    - Initialize preemptive RR scheduler                                │
 │    - Enable timer interrupts (100Hz)                                   │
 │    - Unmask CPU interrupts                                             │
 │    - Boot secondary CPUs via PSCI                                      │
-│    - Create worker threads with CPU affinity                           │
-│    - Start first thread (jumps to scheduler)                           │
+│    - Print process & memory status                                     │
+│    - Enter interactive shell                                           │
 └──────────────────────────┬──────────────────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -48,18 +50,50 @@ SMROS is a preemptive multitasking ARM64 OS kernel with SMP multi-core support, 
 │    - secondary_entry sets up stack from context_id                     │
 │    - secondary_cpu_entry() initializes CPU                             │
 │    - Enables FP/SIMD, exception vectors, interrupts                    │
-│    - Starts scheduler for this CPU                                     │
+│    - Marks CPU as online                                               │
 └──────────────────────────┬──────────────────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ 5. Multi-Threaded Execution                                            │
-│    - Scheduler dispatches threads to CPUs based on affinity            │
-│    - Timer interrupts trigger preemption (every 10ms)                  │
-│    - Context switching between threads                                 │
-│    - Worker threads run with yield/schedule cycles                     │
-│    - Idle thread runs when no work available                           │
+│ 5. Interactive Shell Mode (NEW in v0.3.0)                              │
+│    - Shell prints welcome banner                                       │
+│    - Waits for user input via serial console                           │
+│    - Parses and executes commands:                                     │
+│      * ps, top, tree, kill (process management)                        │
+│      * meminfo, pages, heap (memory management)                        │
+│      * help, version, uptime, echo, clear, etc.                        │
+│    - Runs indefinitely until user exits QEMU                           │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Version History
+
+### v0.3.0 (Current) - Multi-Process & Interactive Shell
+
+- **Multi-Process Support**: Process isolation with separate address spaces
+- **4K Page Management**: Bitmap-based page frame allocator
+- **Segment Management**: Code, data, heap, stack segments per process
+- **Interactive Shell**: 15+ commands (ps, top, meminfo, etc.)
+- **Serial Input**: Line editing with backspace, Ctrl+C, Ctrl+U, Ctrl+L
+- **Process Creation**: Sample processes created at boot (init, shell, editor, compiler)
+- **No Worker Threads**: Replaced multi-thread demo with shell
+
+### v0.2.0 - Preemptive Multithreading
+
+- Preemptive Round-Robin Scheduler
+- SMP Multi-Core Support (4 CPUs)
+- Thread Management with CPU Affinity
+- Context Switching
+- GICv2 Interrupt Controller
+- ARM Generic Timer (100Hz)
+- Worker Thread Demo (4 threads)
+
+### v0.1.0 - Basic Kernel
+
+- Basic serial output
+- Simple kernel entry
+- Boot assembly code
 
 ---
 
@@ -768,7 +802,182 @@ qemu-system-aarch64 \
 
 ---
 
-## Complete Boot Timeline
+## Multi-Process Memory Management (NEW in v0.3.0)
+
+### Process Address Space Layout
+
+Each process in SMROS gets its own virtual address space with isolated segments:
+
+```
+Process Virtual Memory (per process):
+
+0x0000_0000_0000_0000 ──────────────┐
+                                     │ Code Segment (1 page, r-x)
+0x0000_0000_0001_0000 ──────────────┤
+                                     │ Data Segment (1 page, rw-)
+0x0000_0000_0002_0000 ──────────────┤
+                                     │ Heap Segment (4 pages, rw-)
+                                     │ Grows upward ↑
+0x0000_0000_0006_0000 ──────────────┤
+                                     │ (gap)
+0x0000_0000_000F_0000 ──────────────┤
+                                     │ Stack Segment (2 pages, rw-)
+                                     │ Grows downward ↓
+0x0000_0000_0011_0000 ──────────────┘
+```
+
+### Page Frame Allocator
+
+Physical memory management with bitmap allocator:
+
+- **Total Physical Memory**: 16MB (4096 pages × 4KB)
+- **Bitmap Size**: 64 × 64-bit integers (4096 bits)
+- **Allocation Strategy**: First-fit bitmap scan
+- **Max Pages per Process**: 64 pages (256KB virtual memory)
+
+**Allocation Example:**
+```rust
+// Allocate a page
+if let Some(pfn) = PageFrameAllocator::alloc() {
+    // PFN = Physical Frame Number
+    // Map to virtual address in process page table
+    process.pages[idx] = PageEntry {
+        pfn: pfn,
+        valid: true,
+        writable: true,
+        executable: false,
+        user_accessible: true,
+    };
+}
+```
+
+### Process Creation Flow
+
+When `create_process("name")` is called:
+
+1. **Find empty PCB slot** - Scan process table for `ProcessState::Empty`
+2. **Assign PID** - Atomic increment of `next_pid`
+3. **Initialize PCB**:
+   - Set PID, parent PID (1 = init), name
+   - Set state to `Ready`
+4. **Create Address Space**:
+   - Allocate code segment (1 page from physical allocator)
+   - Allocate data segment (1 page)
+   - Allocate heap segment (4 pages)
+   - Allocate stack segment (2 pages)
+   - Set up page table entries
+5. **Update counters** - `active_processes += 1`
+
+### Process Memory Isolation
+
+Each process has:
+- **Separate page table** - No shared pages between processes
+- **Separate heap** - Independent heap allocation
+- **Separate stack** - Isolated stack space
+- **Permission flags** - Read/write/execute controls per page
+
+---
+
+## Interactive Shell (NEW in v0.3.0)
+
+### Shell Entry Point
+
+After all initialization, `kernel_main()` calls:
+
+```rust
+memory::start_shell();
+```
+
+This function:
+1. Creates `Shell` struct with serial and input buffer
+2. Initializes serial for input/output
+3. Prints welcome banner
+4. Enters infinite command loop
+
+### Shell Main Loop
+
+```rust
+pub fn run(&mut self) -> ! {
+    self.print_welcome();
+    
+    loop {
+        self.print_prompt();           // "smros$ "
+        let len = self.serial.read_line(&mut self.input_buf);
+        
+        if len == 0 { continue; }
+        
+        let args = Self::parse_command(command_str);
+        if args.is_empty() { continue; }
+        
+        self.execute_command(&args);
+    }
+}
+```
+
+### Serial Input Processing
+
+The `read_line()` function handles:
+
+- **Blocking wait** - Waits indefinitely for input
+- **Character echo** - Sends each character back to terminal
+- **Backspace handling** - Deletes previous character with visual feedback
+- **Control characters**:
+  - `Ctrl+C` (0x03) - Cancel line
+  - `Ctrl+U` (0x15) - Clear entire line
+  - `Ctrl+L` (0x0C) - Clear screen
+- **Line termination** - Enter (CR/LF) ends input
+
+### Command Execution
+
+Commands are dispatched via `match` statement:
+
+```rust
+match cmd {
+    "help"    => cmd_help(serial, args),
+    "ps"      => cmd_ps(serial, args),
+    "top"     => cmd_top(serial, args),
+    "meminfo" => cmd_meminfo(serial, args),
+    "pages"   => cmd_pages(serial, args),
+    "heap"    => cmd_heap(serial, args),
+    "tree"    => cmd_tree(serial, args),
+    "kill"    => cmd_kill(serial, args),
+    "info"    => cmd_info(serial, args),
+    "uptime"  => cmd_uptime(serial, args),
+    "version" => cmd_version(serial, args),
+    "whoami"  => cmd_whoami(serial, args),
+    "echo"    => cmd_echo(serial, args),
+    "clear"   => cmd_clear(serial, args),
+    _         => print_error(serial, cmd),
+}
+```
+
+### Shell Commands Overview
+
+#### Process Management
+
+- **`ps`** - Lists all processes with PID, state, name, threads, parent
+- **`top`** - Formatted process monitor with memory usage
+- **`tree`** - Process tree visualization
+- **`kill <pid>`** - Terminates a process (protects init process)
+- **`info [pid]`** - Detailed address space info
+
+#### Memory Management
+
+- **`meminfo`** - System memory stats (total/used/free)
+- **`pages`** - Per-process page allocation details
+- **`heap`** - Heap usage per process
+
+#### System Commands
+
+- **`help`** - Command reference
+- **`version`** - Kernel version and features
+- **`uptime`** - Scheduler tick count
+- **`echo`** - Print text
+- **`clear`** - Clear screen (ANSI codes)
+
+---
+
+## Complete Boot Timeline (v0.3.0)
 
 ```
 Time →
@@ -797,7 +1006,7 @@ kernel_main() (Rust) - CPU0
     │
     ├─ serial.init() → 115200 8N1, FIFO
     │
-    ├─ Print banner "SMROS ARM64 Kernel with Preemptive RR Scheduler v0.2.0"
+    ├─ Print banner "SMROS ARM64 Kernel v0.3.0"
     │
     ├─ Print "[OK] Kernel initialized..."
     │
@@ -811,6 +1020,16 @@ kernel_main() (Rust) - CPU0
     │
     ├─ smp::init() → Per-CPU data structures
     │
+    ├─ memory::init() → Process & memory management
+    │   ├─ Initialize process manager
+    │   ├─ Create init process (PID 1)
+    │   ├─ Allocate init's address space:
+    │   │   ├─ Code segment (1 page @ 0x0000, r-x)
+    │   │   ├─ Data segment (1 page @ 0x1000, rw-)
+    │   │   ├─ Heap segment (4 pages @ 0x2000, rw-)
+    │   │   └─ Stack segment (2 pages @ 0xF000, rw-)
+    │   └─ Initialize page frame allocator
+    │
     ├─ scheduler::init() → Create idle thread
     │
     ├─ enable_timer_interrupt() → PPI 30 enabled
@@ -823,8 +1042,7 @@ kernel_main() (Rust) - CPU0
     │   │   ├─ Enable FP/SIMD
     │   │   ├─ Set VBAR_EL1
     │   │   ├─ Unmask interrupts
-    │   │   ├─ Mark CPU online
-    │   │   └─ start_first_thread_for_cpu(1) → Idle loop
+    │   │   └─ Mark CPU online
     │   │
     │   ├─ [CPU2] secondary_entry → secondary_cpu_entry()
     │   │   └─ (Same as CPU1)
@@ -832,58 +1050,121 @@ kernel_main() (Rust) - CPU0
     │   └─ [CPU3] secondary_entry → secondary_cpu_entry()
     │       └─ (Same as CPU1)
     │
-    ├─ Create 4 worker threads with CPU affinity
-    │   ├─ worker-1 → CPU 0
-    │   ├─ worker-2 → CPU 1
-    │   ├─ worker-3 → CPU 2
-    │   └─ worker-4 → CPU 3
+    ├─ Create sample processes for demo
+    │   ├─ shell (PID 2)
+    │   ├─ editor (PID 3)
+    │   └─ compiler (PID 4)
     │
-    ├─ start_first_thread() → Jump to worker-1
-    │   │
-    │   ├─ context_switch_start() → Load worker-1 context
-    │   │
-    │   └─ [CPU0 now running worker-1]
-    │       │
-    │       ├─ Print "[Thread-1/CPU0] Started!"
-    │       │
-    │       ├─ Loop 3 times:
-    │       │   ├─ Work (spin loop)
-    │       │   ├─ yield_now() → schedule()
-    │       │   │   └─ [Context switch to next ready thread]
-    │       │   └─ Resume after yield
-    │       │
-    │       ├─ terminate_current()
-    │       │
-    │       └─ schedule() → Next thread or idle
+    ├─ Print process & memory status
+    │   ├─ Process table (PID, state, name, segments, pages)
+    │   ├─ Physical memory usage (total/used/free pages)
+    │   └─ Per-process address space details
     │
-    │   [Timer IRQ every 10ms]
-    │   ├─ irq_handler_sp (assembly)
-    │   ├─ timer_interrupt_handler()
-    │   │   ├─ clear_interrupt()
-    │   │   ├─ acknowledge_interrupt()
-    │   │   ├─ scheduler.on_timer_tick()
-    │   │   └─ end_of_interrupt()
-    │   └─ check_preemption()
-    │       └─ If time_slice == 0: schedule_on_cpu()
+    ├─ Print "[INFO] Boot complete! Entering shell..."
     │
     ▼
-Multi-Threaded Execution (All 4 CPUs)
+memory::start_shell() - Interactive Shell Mode
     │
-    ├─ CPU0: worker-1 (or idle)
-    ├─ CPU1: worker-2 (or idle)
-    ├─ CPU2: worker-3 (or idle)
-    └─ CPU3: worker-4 (or idle)
+    ├─ Create Shell struct
+    │   ├─ serial: Serial instance
+    │   └─ input_buf: [u8; 256]
     │
-    └─ [All threads complete]
+    ├─ Print welcome banner
+    │   ╔═══════════════════════════════════════════╗
+    │   ║  SMROS Shell v0.3.0 - Process Management  ║
+    │   ╚═══════════════════════════════════════════╝
+    │
+    └─ Enter shell main loop:
         │
-        ▼
-    kernel_main() resumes (after all workers done)
+        ├─ [Loop]
+        │   ├─ Print prompt: "smros$ "
+        │   │
+        │   ├─ Wait for user input (serial.read_line)
+        │   │   ├─ Read characters one-by-one
+        │   │   ├─ Echo each character
+        │   │   ├─ Handle backspace/Ctrl+C/etc.
+        │   │   └─ Terminate on Enter
+        │   │
+        │   ├─ Parse command (split by whitespace)
+        │   │
+        │   ├─ Execute command:
+        │   │   ├─ "help" → Show command reference
+        │   │   ├─ "ps" → List all processes
+        │   │   ├─ "top" → Process monitor
+        │   │   ├─ "meminfo" → Memory statistics
+        │   │   ├─ "pages" → Page allocation details
+        │   │   ├─ "heap" → Heap usage
+        │   │   ├─ "tree" → Process tree
+        │   │   ├─ "kill" → Terminate process
+        │   │   ├─ "info" → Process details
+        │   │   ├─ "version" → Kernel version
+        │   │   ├─ "uptime" → System uptime
+        │   │   ├─ "echo" → Print text
+        │   │   ├─ "clear" → Clear screen
+        │   │   └─ unknown → Error message
+        │   │
+        │   └─ Print output to serial console
         │
-        ├─ Print "All worker threads completed!"
-        │
-        ├─ Print scheduler status
-        │
-        └─ Idle loop: loop { wfi(); }
+        └─ [Continue loop indefinitely]
+        
+    │
+    ▼
+User Exits QEMU (Ctrl+A, X)
+    │
+    └─ QEMU terminates
+
+─────────────────────────────────────────────────────────────────────────────────
+```
+
+## Key Changes from v0.2.0 to v0.3.0
+
+### Removed
+- ❌ Worker thread creation (thread_worker_1 through thread_worker_4)
+- ❌ `start_first_thread()` call
+- ❌ Multi-threaded execution demo
+- ❌ Idle loop at end of `kernel_main()`
+
+### Added
+- ✅ Memory management initialization (`memory::init()`)
+- ✅ Process creation (init, shell, editor, compiler)
+- ✅ Process & memory status printing
+- ✅ Interactive shell entry (`memory::start_shell()`)
+- ✅ Serial input support (read_line, backspace, Ctrl+C, etc.)
+- ✅ 15+ shell commands (ps, top, meminfo, pages, heap, tree, etc.)
+
+### Changed Flow
+- **v0.2.0**: Boot → Initialize → Create threads → Run threads → Idle loop
+- **v0.3.0**: Boot → Initialize → Create processes → Enter shell → Wait for commands
+
+---
+
+## Interrupt Handling (Reference from v0.2.0)
+
+**Trigger:** Timer IRQ fires every 10ms (PPI 30)
+
+### IRQ Entry (Assembly)
+
+Defined in `global_asm!()` block in `main.rs`:
+
+```assembly
+irq_handler_sp:
+    // Save caller-saved registers (x0-x15)
+    sub     sp, sp, #128
+    stp     x0, x1, [sp, #0]
+    // ... (save x2-x15)
+
+    // Call timer interrupt handler
+    bl      timer_interrupt_handler
+
+    // Check if preemption is needed
+    bl      check_preemption
+
+    // Restore caller-saved registers
+    ldp     x0, x1, [sp, #0]
+    // ... (restore x2-x15)
+    add     sp, sp, #128
+
+    eret
 ```
 
 ---
@@ -895,11 +1176,12 @@ Multi-Threaded Execution (All 4 CPUs)
 | `linker/kernel.ld` | Defines memory layout, sections, and symbols (`_start`, `__stack_top`, etc.) |
 | `.cargo/config.toml` | Sets target (`aarch64-unknown-none`), linker flags, and `build-std` |
 | `src/main.rs` | Contains `_start` assembly, exception vectors, context switch, and `kernel_main()` |
-| `src/serial.rs` | PL011 UART driver for serial console output |
+| `src/serial.rs` | PL011 UART driver for serial I/O with line input |
 | `src/timer.rs` | ARM Generic Timer driver for system timing and scheduler ticks |
 | `src/interrupt.rs` | GICv2 interrupt controller driver |
 | `src/scheduler.rs` | Preemptive round-robin scheduler with CPU affinity |
 | `src/thread.rs` | Thread control block, CPU context, and stack management |
+| `src/memory.rs` | Multi-process memory management & interactive shell |
 | `src/smp.rs` | SMP multi-core support (PSCI CPU_ON, per-CPU data) |
 | `src/drivers.rs` | Driver module re-exports |
 | `Cargo.toml` | Dependencies (`cortex-a`, `tock-registers`, `volatile`, `cc`), panic strategy |
@@ -918,7 +1200,7 @@ Multi-Threaded Execution (All 4 CPUs)
 
 ---
 
-## Implemented Features (v0.2.0)
+## Implemented Features (v0.3.0)
 
 - [x] Exception vector table (16 entries with IRQ handlers)
 - [x] Interrupt handling (GICv2 with timer IRQ)
@@ -929,14 +1211,18 @@ Multi-Threaded Execution (All 4 CPUs)
 - [x] SMP multi-core boot (PSCI CPU_ON for 4 CPUs)
 - [x] CPU affinity for threads
 - [x] Heap/allocator initialization (1MB bump allocator)
+- [x] **Multi-process memory management** (NEW)
+- [x] **4K page-based allocation** (NEW)
+- [x] **Process isolation with segments** (NEW)
+- [x] **Interactive shell with 15+ commands** (NEW)
+- [x] **Serial input with line editing** (NEW)
 - [x] Voluntary thread yield (`yield_now()`)
 - [x] Thread termination and cleanup
 
-## Future Boot Enhancements (Not Yet Implemented)
+## Future Enhancements (Not Yet Implemented)
 
 - [ ] MMU setup (currently running with identity mapping)
-- [ ] Virtual memory management
-- [ ] Page allocator
+- [ ] True virtual memory with page tables
 - [ ] Multi-core scheduling (true parallel execution)
 - [ ] Device tree parsing
 - [ ] Memory protection (EL1/EL0 separation)
@@ -944,6 +1230,9 @@ Multi-Threaded Execution (All 4 CPUs)
 - [ ] IPC mechanisms
 - [ ] File system support
 - [ ] Network driver
+- [ ] Command history in shell
+- [ ] Tab completion
+- [ ] Process creation from shell
 
 ---
 
@@ -958,3 +1247,4 @@ Multi-Threaded Execution (All 4 CPUs)
 - [PSCI Specification](https://developer.arm.com/documentation/den0022/latest/)
 - [AArch64 Exception Levels](https://developer.arm.com/documentation/102411/0100/Exception-levels)
 - [ARM Context Switching Guide](https://developer.arm.com/documentation/100934/0100/Context-switching)
+

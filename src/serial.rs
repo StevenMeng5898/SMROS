@@ -19,6 +19,7 @@ const UART_ICR: usize = 0x44; // Interrupt Clear Register
 
 /// Flag Register bits
 const FR_TXFF: u32 = 1 << 5; // Transmit FIFO Full
+const FR_RXFE: u32 = 1 << 4; // Receive FIFO Empty
 
 /// Line Control Register bits
 const LCRH_WLEN_8: u32 = 3 << 5; // 8-bit word length
@@ -110,6 +111,91 @@ impl Serial {
         for &byte in buf {
             self.write_byte(byte);
         }
+    }
+
+    /// Read a byte from the serial port (blocking)
+    pub fn read_byte(&mut self) -> u8 {
+        // Wait until RX FIFO is not empty
+        while (self.read_reg(UART_FR) & FR_RXFE) != 0 {
+            core::hint::spin_loop();
+        }
+
+        // Read the byte
+        (self.read_reg(UART_DR) & 0xFF) as u8
+    }
+
+    /// Check if a byte is available (non-blocking)
+    pub fn has_byte(&mut self) -> bool {
+        (self.read_reg(UART_FR) & FR_RXFE) == 0
+    }
+
+    /// Read a line of input with basic editing support
+    /// Returns the number of characters read (excluding null terminator)
+    /// Supports: backspace, enter, echo characters
+    pub fn read_line(&mut self, buf: &mut [u8]) -> usize {
+        let mut pos = 0;
+
+        loop {
+            let ch = self.read_byte();
+
+            match ch {
+                b'\r' | b'\n' => {
+                    // Enter - terminate the line
+                    self.write_str("\r\n");
+                    break;
+                }
+                b'\x7f' | b'\x08' => {
+                    // Backspace (DEL or BS)
+                    if pos > 0 {
+                        pos -= 1;
+                        // Echo: backspace-space-backspace
+                        self.write_str("\x08 \x08");
+                    }
+                }
+                0x1B => {
+                    // Escape sequence - ignore for now
+                    // Consume the rest of the escape sequence
+                    for _ in 0..2 {
+                        self.read_byte();
+                    }
+                }
+                0x03 => {
+                    // Ctrl+C - cancel line
+                    self.write_str("^C\r\n");
+                    pos = 0;
+                    break;
+                }
+                0x15 => {
+                    // Ctrl+U - clear line
+                    while pos > 0 {
+                        pos -= 1;
+                        self.write_str("\x08 \x08");
+                    }
+                }
+                0x0C => {
+                    // Ctrl+L - clear screen
+                    self.write_str("\x1B[2J\x1B[H");
+                }
+                _ => {
+                    // Regular character
+                    if pos < buf.len() - 1 && ch >= 0x20 && ch <= 0x7E {
+                        buf[pos] = ch;
+                        pos += 1;
+                        self.write_byte(ch);
+                    }
+                }
+            }
+        }
+
+        // Null-terminate the string
+        if pos < buf.len() {
+            buf[pos] = 0;
+        } else {
+            buf[buf.len() - 1] = 0;
+            pos = buf.len() - 1;
+        }
+
+        pos
     }
 
     /// Read a register (safe wrapper around volatile read)

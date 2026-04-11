@@ -17,7 +17,8 @@
       "Bash(tail *)",
       "Bash(grep *)",
       "Bash(head *)",
-      "Bash(rustup *)"
+      "Bash(rustup *)",
+      "Bash(true)"
     ]
   },
   "$version": 3

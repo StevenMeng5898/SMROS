@@ -7,7 +7,7 @@ A preemptive multitasking ARM64 OS kernel framework written in Rust, designed to
 - **Bare-metal Rust**: No standard library, pure `#![no_std]` kernel
 - **ARM64 Architecture**: Targets AArch64 processors
 - **QEMU Support**: Runs on QEMU virt machine with 4 CPU cores
-- **Serial Console**: PL011 UART driver for output
+- **Serial Console**: PL011 UART driver for output with interactive shell
 - **Boot Assembly**: Custom boot code for ARM64 initialization
 - **Preemptive Round-Robin Scheduler**: Time-slice based scheduling with voluntary and forced preemption
 - **SMP Multi-Core Support**: Boots and manages multiple CPU cores using PSCI
@@ -18,6 +18,10 @@ A preemptive multitasking ARM64 OS kernel framework written in Rust, designed to
 - **Memory Allocator**: Global kernel allocator with bump allocation
 - **Exception Vectors**: Full exception vector table with IRQ handlers
 - **Panic Handler**: Graceful kernel panic handling with serial output
+- **Multi-Process Support**: Process isolation with separate address spaces
+- **4K Page Management**: Page-based memory allocation with bitmap allocator
+- **Segment Management**: Code, data, heap, and stack segments per process
+- **Interactive Shell**: Built-in shell with commands like `top`, `ps`, `meminfo`, etc.
 
 ## Prerequisites
 
@@ -111,12 +115,13 @@ SMROS/
 │   └── kernel.ld       # Linker script for ARM64
 ├── src/
 │   ├── main.rs         # Kernel entry point, boot assembly, exception vectors
-│   ├── serial.rs       # PL011 UART driver
+│   ├── serial.rs       # PL011 UART driver with input support
 │   ├── timer.rs        # ARM Generic Timer driver
 │   ├── interrupt.rs    # GICv2 interrupt controller driver
 │   ├── scheduler.rs    # Preemptive round-robin scheduler
 │   ├── thread.rs       # Thread management (TCB, CPU context, stack)
 │   ├── smp.rs          # SMP multi-core support (PSCI CPU_ON)
+│   ├── memory.rs       # Multi-process memory management & shell
 │   ├── drivers.rs      # Driver module re-exports
 │   └── context_switch.S # Assembly context switch code
 └── scripts/
@@ -127,6 +132,8 @@ SMROS/
 
 ## Memory Layout
 
+### Kernel Physical Memory Layout
+
 ```
 0x00000000 - 0x0007FFFF: Reserved
 0x00080000 - 0x3FFFFFFF: Available RAM
@@ -136,9 +143,37 @@ Stack: 512KB allocated at kernel end
 Heap:  1MB static bump allocator
 ```
 
+### Process Virtual Memory Layout (per process)
+
+```
+0x0000_0000_0000_0000 - Code Segment (1 page, r-x)
+0x0000_0000_0001_0000 - Data Segment (1 page, rw-)
+0x0000_0000_0002_0000 - Heap Segment (4 pages, rw-, grows up)
+...
+0x0000_0000_000F_0000 - Stack Segment (2 pages, rw-, grows down)
+```
+
+### Page Management
+
+- **Page Size**: 4KB (0x1000 bytes)
+- **Max Pages per Process**: 64 pages (256KB)
+- **Total System Pages**: 4096 pages (16MB)
+- **Allocator**: Bitmap-based page frame allocator
+
 ## Serial Output
 
-The kernel uses the PL011 UART at address `0x9000000` for serial output, which is mapped to the QEMU serial console.
+The kernel uses the PL011 UART at address `0x9000000` for serial I/O, which is mapped to the QEMU serial console.
+
+### Serial Features
+
+- **Output**: String, byte, hex, and buffer writing
+- **Input**: Blocking and non-blocking byte reading
+- **Line Input**: Interactive line editing with:
+  - Backspace support (DEL/BS)
+  - Ctrl+C (cancel line)
+  - Ctrl+U (clear line)
+  - Ctrl+L (clear screen)
+  - Character echo
 
 ## Interrupt Handling
 
@@ -186,6 +221,74 @@ Secondary CPUs are booted using PSCI (Power State Coordination Interface):
 - **CPU States**: Offline, Booting, Online
 - **Per-CPU Data**: Cache-line aligned structures for each CPU
 - **CPU-Aware Scheduling**: Threads bound to specific CPUs are scheduled on those CPUs
+
+## Multi-Process Memory Management
+
+SMROS implements process isolation with separate virtual address spaces:
+
+### Process Control Block (PCB)
+
+Each process has:
+- **PID**: Unique process identifier
+- **State**: Empty, Ready, Running, Blocked, Terminated
+- **Parent PID**: Parent process reference
+- **Thread Count**: Number of threads in process
+- **Address Space**: Isolated virtual memory
+
+### Address Space Layout
+
+Each process gets its own virtual memory with:
+- **Code Segment**: Read-only, executable (1 page)
+- **Data Segment**: Read-write, initialized data (1 page)
+- **Heap Segment**: Read-write, grows upward (4 pages, 16KB)
+- **Stack Segment**: Read-write, grows downward (2 pages, 8KB)
+
+### Page Frame Allocator
+
+Physical memory is managed with a bitmap allocator:
+- **Page Size**: 4KB (standard ARM64 granule)
+- **Total Pages**: 4096 (16MB physical memory)
+- **Max Pages per Process**: 64 (256KB virtual memory)
+- **Allocation**: Bitmap-based, O(n) allocation
+
+### Memory Protection
+
+Pages have permission flags:
+- **Valid**: Whether page is mapped
+- **Writable**: Read-write vs read-only
+- **Executable**: Can contain executable code
+- **User Accessible**: User vs kernel mode access
+
+## Interactive Shell
+
+After boot, SMROS enters an interactive shell with 15+ commands:
+
+### Process Management Commands
+
+- **`ps`**: List all processes with PID, state, name
+- **`top`**: Process monitor with memory usage
+- **`tree`**: Process tree visualization
+- **`kill <pid>`**: Terminate a process
+- **`info [pid]`**: Detailed process memory info
+
+### Memory Management Commands
+
+- **`meminfo`**: System memory information
+- **`pages`**: Page allocation details
+- **`heap`**: Heap usage per process
+
+### System Commands
+
+- **`help`**: Show available commands
+- **`version`**: Kernel version and features
+- **`uptime`**: System uptime
+- **`whoami`**: Current user
+- **`date`**: Date/time (stub)
+- **`echo <text>`**: Print text
+- **`cat <file>`**: Display file (stub)
+- **`clear`**: Clear screen
+
+See `SHELL.md` for complete shell documentation.
 
 ## Customization
 
