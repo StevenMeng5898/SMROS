@@ -1,9 +1,11 @@
+#![allow(dead_code)]
+
 //! Preemptive Round-Robin Scheduler
 //!
 //! This module implements a preemptive Round-Robin scheduler for SMROS.
 //! It manages multiple threads and performs context switching on timer ticks.
 
-use crate::thread::{
+use crate::kernel_objects::thread::{
     ThreadControlBlock, ThreadId, ThreadState, MAX_THREADS, DEFAULT_STACK_SIZE, ThreadStack, SendPtr,
 };
 use core::cell::UnsafeCell;
@@ -322,7 +324,7 @@ impl Scheduler {
     }
 
     /// Print scheduler status
-    pub fn print_status(&self, serial: &mut crate::serial::Serial) {
+    pub fn print_status(&self, serial: &mut crate::kernel_lowlevel::serial::Serial) {
         serial.write_str("\n=== Scheduler Status ===\n");
         serial.write_str("Active threads: ");
         print_number(serial, self.active_threads as u32);
@@ -350,6 +352,13 @@ impl Scheduler {
 /// Idle thread entry point
 extern "C" fn idle_thread_entry() -> ! {
     loop {
+        // Immediately try to schedule another thread
+        // If shell (or other threads) are ready, switch to them
+        // This prevents deadlocks and ensures cooperative scheduling
+        schedule();
+        
+        // If we returned here, no other threads were ready
+        // Wait for interrupt (timer will trigger scheduler check)
         cortex_a::asm::wfi();
     }
 }
@@ -444,7 +453,7 @@ extern "C" {
 }
 
 /// Helper function to print a number
-fn print_number(serial: &mut crate::serial::Serial, mut num: u32) {
+fn print_number(serial: &mut crate::kernel_lowlevel::serial::Serial, mut num: u32) {
     if num == 0 {
         serial.write_byte(b'0');
         return;
@@ -528,7 +537,7 @@ pub fn start_first_thread_for_cpu(cpu_id: usize) -> ! {
     let s = scheduler();
 
     // Mark CPU as fully online before trying to start threads
-    crate::smp::mark_cpu_online();
+    crate::kernel_lowlevel::smp::mark_cpu_online();
 
     // Find first ready thread bound to this CPU or unbound
     let mut found_thread: Option<usize> = None;

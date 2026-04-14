@@ -9,19 +9,15 @@ use core::alloc::Layout;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-mod serial;
-mod timer;
-mod interrupt;
-mod thread;
-mod scheduler;
-mod drivers;
-mod smp;
-mod memory;
+mod kernel_lowlevel;
+mod kernel_objects;
+mod syscall;
+mod user_level;
 
-use serial::Serial;
-use scheduler::schedule_on_cpu;
-use smp::{boot_all_cpus, print_status as smp_print_status, current_cpu_id};
-use memory::process_manager;
+use kernel_lowlevel::serial::Serial;
+use kernel_objects::scheduler::schedule_on_cpu;
+use kernel_lowlevel::smp::{boot_all_cpus, print_status as smp_print_status, current_cpu_id};
+use kernel_lowlevel::memory::process_manager;
 
 /// A Sync wrapper around UnsafeCell that is safe to use as a static.
 struct SyncUnsafeCell<T>(UnsafeCell<T>);
@@ -334,9 +330,80 @@ irq_handler_lower:
 
     eret
 
-// Exception Handler (placeholder)
+// Exception Handler - handles all synchronous exceptions
 exception_handler:
-    b       .
+    // Save all general purpose registers to stack
+    sub     sp, sp, #256
+    stp     x0, x1, [sp, #0]
+    stp     x2, x3, [sp, #16]
+    stp     x4, x5, [sp, #32]
+    stp     x6, x7, [sp, #48]
+    stp     x8, x9, [sp, #64]
+    stp     x10, x11, [sp, #80]
+    stp     x12, x13, [sp, #96]
+    stp     x14, x15, [sp, #112]
+    stp     x16, x17, [sp, #128]
+    stp     x18, x19, [sp, #144]
+    stp     x20, x21, [sp, #160]
+    stp     x22, x23, [sp, #176]
+    stp     x24, x25, [sp, #192]
+    stp     x26, x27, [sp, #208]
+    stp     x28, x29, [sp, #224]
+
+    // Read exception class from ESR_EL1
+    mrs     x0, esr_el1
+    ubfx    x0, x0, #26, #6  // Extract EC field (bits 31:26)
+    
+    // EC = 0x15 for SVC from AArch64
+    cmp     x0, #0x15
+    b.ne    99f // Not SVC, jump to error handler
+    
+    // This is SVC exception - handle syscall
+    // Load syscall number from x8 (saved at sp+64)
+    ldr     x0, [sp, #64]
+    
+    // Load syscall arguments from saved registers
+    ldp     x1, x2, [sp, #0]    // x0, x1 -> arg0, arg1
+    ldp     x3, x4, [sp, #32]   // x4, x5 -> arg2, arg3  
+    ldp     x5, x6, [sp, #48]   // x6, x7 -> arg4, arg5
+    
+    // Call Rust syscall handler
+    // Arguments: x0=syscall_num, x1-x6=args
+    bl      handle_syscall_simple
+    
+    // Save result back to x0 position on stack
+    str     x0, [sp, #0]
+    b       3f
+    
+99:
+    // General exception - return error
+    mov     x0, #-38  // ENOSYS
+    str     x0, [sp, #0]
+    
+3:  // Restore registers and return
+    ldp     x0, x1, [sp, #0]
+    ldp     x2, x3, [sp, #16]
+    ldp     x4, x5, [sp, #32]
+    ldp     x6, x7, [sp, #48]
+    ldp     x8, x9, [sp, #64]
+    ldp     x10, x11, [sp, #80]
+    ldp     x12, x13, [sp, #96]
+    ldp     x14, x15, [sp, #112]
+    ldp     x16, x17, [sp, #128]
+    ldp     x18, x19, [sp, #144]
+    ldp     x20, x21, [sp, #160]
+    ldp     x22, x23, [sp, #176]
+    ldp     x24, x25, [sp, #192]
+    ldp     x26, x27, [sp, #208]
+    ldp     x28, x29, [sp, #224]
+    add     sp, sp, #256
+    
+    // Advance ELR past the SVC instruction (SVC is 4 bytes)
+    mrs     x0, elr_el1
+    add     x0, x0, #4
+    msr     elr_el1, x0
+    
+    eret
 
 // Context Switch Function
 // Arguments: x0 = current TCB pointer, x1 = next TCB pointer
@@ -472,35 +539,60 @@ pub extern "C" fn kernel_main() -> ! {
 
     // Initialize interrupt controller
     serial.write_str("[OK] Initializing GIC interrupt controller... ");
-    interrupt::init();
+    kernel_lowlevel::interrupt::init();
     serial.write_str("done\n");
 
     // Initialize timer
     serial.write_str("[OK] Initializing ARM Generic Timer... ");
-    timer::init();
+    kernel_lowlevel::timer::init();
     serial.write_str("done\n");
 
     serial.write_str("[INFO] Timer frequency: ");
-    let freq = timer::get_frequency();
+    let freq = kernel_lowlevel::timer::get_frequency();
     print_number(&mut serial, (freq / 1000000) as u32);
     serial.write_str(" MHz\n");
 
     // Initialize SMP support
-    smp::init();
+    kernel_lowlevel::smp::init();
 
     // Initialize memory management
     serial.write_str("[OK] Initializing memory management... ");
-    memory::init();
+    kernel_lowlevel::memory::init();
+    serial.write_str("done\n");
+
+    // Initialize syscall interface
+    serial.write_str("[OK] Initializing syscall interface... ");
+    crate::syscall::init();
+    serial.write_str("done\n");
+
+    // Initialize MMU
+    serial.write_str("[OK] Initializing MMU... ");
+    kernel_lowlevel::mmu::init();
+    serial.write_str("done\n");
+
+    // Initialize syscall handler
+    serial.write_str("[OK] Initializing syscall handler... ");
+    crate::syscall::init();
+    serial.write_str("done\n");
+
+    // Initialize channel subsystem
+    serial.write_str("[OK] Initializing channel subsystem... ");
+    crate::kernel_objects::channel::init();
+    serial.write_str("done\n");
+
+    // Initialize user-level process management
+    serial.write_str("[OK] Initializing user-level process management... ");
+    crate::user_level::user_process::init();
     serial.write_str("done\n");
 
     // Initialize scheduler
     serial.write_str("[OK] Initializing preemptive RR scheduler... ");
-    scheduler::scheduler().init();
+    crate::kernel_objects::scheduler::scheduler().init();
     serial.write_str("done\n");
 
     // Enable timer interrupts
     serial.write_str("[OK] Enabling timer interrupts (100Hz tick)... ");
-    interrupt::enable_timer_interrupt();
+    kernel_lowlevel::interrupt::enable_timer_interrupt();
     serial.write_str("done\n");
 
     // Unmask interrupts
@@ -548,33 +640,46 @@ pub extern "C" fn kernel_main() -> ! {
     // Print process and memory status
     pm.print_status(&mut serial);
 
-    serial.write_str("\n[INFO] Boot complete! Entering shell...\n");
+    serial.write_str("\n[INFO] Boot complete! Starting user test process...\n");
 
-    // Enter the interactive shell
-    memory::start_shell();
+    // Run user test process to verify syscalls work
+    crate::user_level::user_test::run_user_test();
+
+    serial.write_str("\n[INFO] User test complete! Starting user shell...\n");
+
+    // Start user shell as a scheduled thread
+    crate::user_level::user_shell::start_user_shell();
+
+    // Start the scheduler - this jumps to the first ready thread (shell)
+    // and never returns. The scheduler handles context switching.
+    serial.write_str("[KERNEL] Starting scheduler - jumping to shell thread...\n\n");
+    crate::kernel_objects::scheduler::start_first_thread();
 }
 
 /// Timer interrupt handler
 #[no_mangle]
 extern "C" fn timer_interrupt_handler() {
     // Clear the timer interrupt
-    timer::clear_interrupt();
+    kernel_lowlevel::timer::clear_interrupt();
 
     // Acknowledge the interrupt at GIC
-    let interrupt_id = interrupt::acknowledge_interrupt();
+    let interrupt_id = kernel_lowlevel::interrupt::acknowledge_interrupt();
 
-    // Update scheduler tick count
-    scheduler::scheduler().on_timer_tick();
+    // Update scheduler tick count (decrements time_slice)
+    crate::kernel_objects::scheduler::scheduler().on_timer_tick();
+
+    // Check if preemption is needed (time_slice expired)
+    check_preemption();
 
     // End of interrupt
-    interrupt::end_of_interrupt(interrupt_id);
+    kernel_lowlevel::interrupt::end_of_interrupt(interrupt_id);
 }
 
 /// Check if preemption is needed
 #[no_mangle]
 extern "C" fn check_preemption() {
     let cpu_id = current_cpu_id();
-    let s = scheduler::scheduler();
+    let s = crate::kernel_objects::scheduler::scheduler();
 
     if s.should_preempt() {
         // Reset time slice for the next thread

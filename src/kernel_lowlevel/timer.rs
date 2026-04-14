@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! ARM Generic Timer Driver
 //!
 //! This module provides access to the ARM Generic Timer (CNTFRQ, CNTPCT, CNTP_TVAL, etc.)

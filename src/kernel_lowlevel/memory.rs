@@ -6,7 +6,44 @@
 //! - Process address spaces with isolated memory
 //! - Safe, stable Rust implementation for bare-metal ARM64
 //!
-//! Memory Layout per Process:
+//! # Syscall Compatibility
+//!
+//! This memory management system is designed to be compatible with both Linux and Zircon
+//! system call interfaces, following the architecture of the grt-zcore project:
+//! <https://github.com/StevenMeng5898/grt-zcore>
+//!
+//! ## Linux Syscall Compatibility
+//! The following Linux memory syscalls are supported (see `syscall.rs`):
+//! - `sys_mmap` - Map files or devices into memory
+//! - `sys_munmap` - Unmap files or devices from memory
+//! - `sys_mprotect` - Set protection on a region of memory
+//! - `sys_brk` - Change program break (heap allocation)
+//!
+//! ## Zircon Syscall Compatibility
+//! The following Zircon memory syscalls are supported (see `syscall.rs`):
+//! - `sys_vmo_create` - Create a Virtual Memory Object
+//! - `sys_vmo_read` / `sys_vmo_write` - Read/write VMO
+//! - `sys_vmo_get_size` / `sys_vmo_set_size` - Query/resize VMO
+//! - `sys_vmo_op_range` - Perform operations on VMO range (commit, decommit, zero)
+//! - `sys_vmar_map` - Map VMO into Virtual Memory Address Region
+//! - `sys_vmar_unmap` - Unmap from VMAR
+//! - `sys_vmar_allocate` - Allocate subregion in VMAR
+//! - `sys_vmar_protect` - Set protection on VMAR pages
+//! - `sys_vmar_destroy` - Destroy VMAR
+//!
+//! ## Architecture Mapping
+//!
+//! SMROS Component          | Zircon Equivalent     | Linux Equivalent
+//! -------------------------|----------------------|------------------
+//! ProcessAddressSpace      | Process + VMAR       | mm_struct
+//! MemorySegment            | VMO mapping          | vm_area_struct
+//! PageEntry                | Page table entry     | PTE
+//! PageFrameAllocator       | PhysAlloc            | buddy allocator
+//! ProcessControlBlock      | Process object       | task_struct
+//! heap_alloc()             | vmar.allocate()      | brk/mmap
+//! stack_alloc()            | vmar.map(stack)      | mmap(MAP_STACK)
+//!
+//! # Memory Layout per Process
 //! ```text
 //! 0x0000_0000_0000_0000 - Code Segment (text)
 //! 0x0000_0000_0001_0000 - Data Segment
@@ -14,6 +51,8 @@
 //! ...
 //! 0x0000_0000_FFFF_0000 - Stack Segment (grows downward)
 //! ```
+
+#![allow(dead_code)]
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use alloc::vec::Vec;
@@ -347,9 +386,9 @@ impl ProcessAddressSpace {
     }
 
     /// Print address space information
-    pub fn print_info(&self, serial: &mut crate::serial::Serial) {
+    pub fn print_info(&self, serial: &mut crate::kernel_lowlevel::serial::Serial) {
         serial.write_str("  Process ");
-        crate::smp::print_number(serial, self.pid as u32);
+        crate::kernel_lowlevel::smp::print_number(serial, self.pid as u32);
         serial.write_str(" Address Space:\n");
 
         serial.write_str("    Segments:\n");
@@ -366,16 +405,16 @@ impl ProcessAddressSpace {
             serial.write_str(" - 0x");
             print_hex(serial, seg.end_vaddr() as u64);
             serial.write_str(" (");
-            crate::smp::print_number(serial, seg.page_count as u32);
+            crate::kernel_lowlevel::smp::print_number(serial, seg.page_count as u32);
             serial.write_str(" pages, ");
             serial.write_str(seg.permissions.as_str());
             serial.write_str(")\n");
         }
 
         serial.write_str("    Valid Pages: ");
-        crate::smp::print_number(serial, self.valid_page_count as u32);
+        crate::kernel_lowlevel::smp::print_number(serial, self.valid_page_count as u32);
         serial.write_str("/");
-        crate::smp::print_number(serial, MAX_PAGES_PER_PROCESS as u32);
+        crate::kernel_lowlevel::smp::print_number(serial, MAX_PAGES_PER_PROCESS as u32);
         serial.write_str("\n");
 
         serial.write_str("    Heap: 0x");
@@ -383,7 +422,7 @@ impl ProcessAddressSpace {
         serial.write_str(" - 0x");
         print_hex(serial, self.heap_current as u64);
         serial.write_str(" (used: ");
-        crate::smp::print_number(serial, ((self.heap_current - 0x2000) / 1024) as u32);
+        crate::kernel_lowlevel::smp::print_number(serial, ((self.heap_current - 0x2000) / 1024) as u32);
         serial.write_str("KB)\n");
 
         serial.write_str("    Stack: 0x");
@@ -677,25 +716,25 @@ impl ProcessManager {
     }
 
     /// Print process manager status
-    pub fn print_status(&self, serial: &mut crate::serial::Serial) {
+    pub fn print_status(&self, serial: &mut crate::kernel_lowlevel::serial::Serial) {
         serial.write_str("\n=== Process & Memory Management Status ===\n");
         serial.write_str("Active Processes: ");
-        crate::smp::print_number(serial, self.active_processes as u32);
+        crate::kernel_lowlevel::smp::print_number(serial, self.active_processes as u32);
         serial.write_str("/");
-        crate::smp::print_number(serial, MAX_PROCESSES as u32);
+        crate::kernel_lowlevel::smp::print_number(serial, MAX_PROCESSES as u32);
         serial.write_str("\n\n");
 
         serial.write_str("Physical Memory:\n");
         serial.write_str("  Total Pages: ");
-        crate::smp::print_number(serial, PageFrameAllocator::total_pages() as u32);
+        crate::kernel_lowlevel::smp::print_number(serial, PageFrameAllocator::total_pages() as u32);
         serial.write_str(" (");
-        crate::smp::print_number(serial, (PageFrameAllocator::total_pages() * PAGE_SIZE / 1024) as u32);
+        crate::kernel_lowlevel::smp::print_number(serial, (PageFrameAllocator::total_pages() * PAGE_SIZE / 1024) as u32);
         serial.write_str(" KB)\n");
         serial.write_str("  Allocated: ");
-        crate::smp::print_number(serial, PageFrameAllocator::allocated_pages() as u32);
+        crate::kernel_lowlevel::smp::print_number(serial, PageFrameAllocator::allocated_pages() as u32);
         serial.write_str(" pages\n");
         serial.write_str("  Free: ");
-        crate::smp::print_number(serial, PageFrameAllocator::free_pages() as u32);
+        crate::kernel_lowlevel::smp::print_number(serial, PageFrameAllocator::free_pages() as u32);
         serial.write_str(" pages\n\n");
 
         serial.write_str("Process Table:\n");
@@ -704,7 +743,7 @@ impl ProcessManager {
         for i in 0..MAX_PROCESSES {
             let pcb = &self.processes[i];
             if pcb.state != ProcessState::Empty {
-                crate::smp::print_number(serial, pcb.pid as u32);
+                crate::kernel_lowlevel::smp::print_number(serial, pcb.pid as u32);
                 serial.write_str("    ");
                 serial.write_str(pcb.state.as_str());
                 serial.write_str("  ");
@@ -712,11 +751,11 @@ impl ProcessManager {
                 for _ in 0..(12usize.saturating_sub(pcb.name.len())) {
                     serial.write_byte(b' ');
                 }
-                crate::smp::print_number(serial, pcb.thread_count as u32);
+                crate::kernel_lowlevel::smp::print_number(serial, pcb.thread_count as u32);
                 serial.write_str("         ");
-                crate::smp::print_number(serial, pcb.address_space.valid_segment_count as u32);
+                crate::kernel_lowlevel::smp::print_number(serial, pcb.address_space.valid_segment_count as u32);
                 serial.write_str("        ");
-                crate::smp::print_number(serial, pcb.address_space.valid_page_count as u32);
+                crate::kernel_lowlevel::smp::print_number(serial, pcb.address_space.valid_page_count as u32);
                 serial.write_str("\n");
             }
         }
@@ -748,7 +787,7 @@ pub fn process_manager() -> &'static mut ProcessManager {
 }
 
 /// Helper function to print hex number
-fn print_hex(serial: &mut crate::serial::Serial, mut num: u64) {
+fn print_hex(serial: &mut crate::kernel_lowlevel::serial::Serial, mut num: u64) {
     if num == 0 {
         serial.write_str("0000");
         return;
@@ -778,7 +817,7 @@ fn print_hex(serial: &mut crate::serial::Serial, mut num: u64) {
 
 /// Initialize the memory management subsystem
 pub fn init() {
-    let mut serial = crate::serial::Serial::new();
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
     serial.init();
 
     serial.write_str("[MEM] Initializing memory management...\n");
@@ -788,18 +827,18 @@ pub fn init() {
 
     serial.write_str("[MEM] Process manager initialized with init process (PID 1)\n");
     serial.write_str("[MEM] Page size: 4KB (");
-    crate::smp::print_number(&mut serial, (PAGE_SIZE / 1024) as u32);
+    crate::kernel_lowlevel::smp::print_number(&mut serial, (PAGE_SIZE / 1024) as u32);
     serial.write_str(" KB)\n");
     serial.write_str("[MEM] Max processes: ");
-    crate::smp::print_number(&mut serial, MAX_PROCESSES as u32);
+    crate::kernel_lowlevel::smp::print_number(&mut serial, MAX_PROCESSES as u32);
     serial.write_str(", Max pages per process: ");
-    crate::smp::print_number(&mut serial, MAX_PAGES_PER_PROCESS as u32);
+    crate::kernel_lowlevel::smp::print_number(&mut serial, MAX_PAGES_PER_PROCESS as u32);
     serial.write_str("\n");
 }
 
 /// Demo: Create multiple processes and show memory layout
 pub fn demo_processes() {
-    let mut serial = crate::serial::Serial::new();
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
     serial.init();
 
     serial.write_str("\n--- Multi-Process Memory Management Demo ---\n");
@@ -810,19 +849,19 @@ pub fn demo_processes() {
     // Create some sample processes
     if let Some(pid1) = pm.create_process("shell") {
         serial.write_str("[MEM] Created process 'shell' with PID ");
-        crate::smp::print_number(&mut serial, pid1 as u32);
+        crate::kernel_lowlevel::smp::print_number(&mut serial, pid1 as u32);
         serial.write_str("\n");
     }
 
     if let Some(pid2) = pm.create_process("editor") {
         serial.write_str("[MEM] Created process 'editor' with PID ");
-        crate::smp::print_number(&mut serial, pid2 as u32);
+        crate::kernel_lowlevel::smp::print_number(&mut serial, pid2 as u32);
         serial.write_str("\n");
     }
 
     if let Some(pid3) = pm.create_process("compiler") {
         serial.write_str("[MEM] Created process 'compiler' with PID ");
-        crate::smp::print_number(&mut serial, pid3 as u32);
+        crate::kernel_lowlevel::smp::print_number(&mut serial, pid3 as u32);
         serial.write_str("\n");
     }
 
@@ -836,12 +875,12 @@ pub fn demo_processes() {
 pub struct ShellCommand {
     pub name: &'static str,
     pub description: &'static str,
-    pub handler: fn(&mut crate::serial::Serial, &[&str]),
+    pub handler: fn(&mut crate::kernel_lowlevel::serial::Serial, &[&str]),
 }
 
 /// Shell context
 pub struct Shell {
-    pub serial: crate::serial::Serial,
+    pub serial: crate::kernel_lowlevel::serial::Serial,
     pub input_buf: [u8; 256],
     pub command_history: [&'static str; 10],
     pub history_index: usize,
@@ -851,7 +890,7 @@ impl Shell {
     /// Create a new shell
     pub fn new() -> Self {
         Shell {
-            serial: crate::serial::Serial::new(),
+            serial: crate::kernel_lowlevel::serial::Serial::new(),
             input_buf: [0; 256],
             command_history: [""; 10],
             history_index: 0,
@@ -956,7 +995,7 @@ impl Shell {
 }
 
 /// Command: help - Show available commands
-fn cmd_help(serial: &mut crate::serial::Serial, _args: &[&str]) {
+fn cmd_help(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str]) {
     serial.write_str("\nAvailable Commands:\n");
     serial.write_str("═══════════════════════════════════════════════════════\n");
     serial.write_str("  Command       Description\n");
@@ -981,7 +1020,7 @@ fn cmd_help(serial: &mut crate::serial::Serial, _args: &[&str]) {
 }
 
 /// Command: ps - List all processes
-fn cmd_ps(serial: &mut crate::serial::Serial, _args: &[&str]) {
+fn cmd_ps(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str]) {
     let pm = process_manager();
 
     serial.write_str("\n  PID  State      Name         Threads  Parent\n");
@@ -991,7 +1030,7 @@ fn cmd_ps(serial: &mut crate::serial::Serial, _args: &[&str]) {
     for i in 0..MAX_PROCESSES {
         if let Some(pcb) = pm.get_process(i) {
             if pcb.state != ProcessState::Empty {
-                crate::smp::print_number(serial, pcb.pid as u32);
+                crate::kernel_lowlevel::smp::print_number(serial, pcb.pid as u32);
                 serial.write_str("    ");
                 serial.write_str(pcb.state.as_str());
                 serial.write_str("  ");
@@ -999,9 +1038,9 @@ fn cmd_ps(serial: &mut crate::serial::Serial, _args: &[&str]) {
                 for _ in 0..(12usize.saturating_sub(pcb.name.len())) {
                     serial.write_byte(b' ');
                 }
-                crate::smp::print_number(serial, pcb.thread_count as u32);
+                crate::kernel_lowlevel::smp::print_number(serial, pcb.thread_count as u32);
                 serial.write_str("         ");
-                crate::smp::print_number(serial, pcb.parent_pid as u32);
+                crate::kernel_lowlevel::smp::print_number(serial, pcb.parent_pid as u32);
                 serial.write_str("\n");
                 count += 1;
             }
@@ -1010,12 +1049,12 @@ fn cmd_ps(serial: &mut crate::serial::Serial, _args: &[&str]) {
 
     serial.write_str("  ─────────────────────────────────────────────\n");
     serial.write_str("  Total: ");
-    crate::smp::print_number(serial, count as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, count as u32);
     serial.write_str(" process(es)\n");
 }
 
 /// Command: top - Show process status (interactive-like display)
-fn cmd_top(serial: &mut crate::serial::Serial, _args: &[&str]) {
+fn cmd_top(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str]) {
     let pm = process_manager();
 
     serial.write_str("\n┌─────────────────────────────────────────────────────────────┐\n");
@@ -1042,14 +1081,14 @@ fn cmd_top(serial: &mut crate::serial::Serial, _args: &[&str]) {
                     serial.write_byte(b' ');
                 }
                 serial.write_str(" │    ");
-                crate::smp::print_number(serial, pcb.address_space.valid_segment_count as u32);
+                crate::kernel_lowlevel::smp::print_number(serial, pcb.address_space.valid_segment_count as u32);
                 serial.write_str("   │   ");
-                crate::smp::print_number(serial, pcb.address_space.valid_page_count as u32);
+                crate::kernel_lowlevel::smp::print_number(serial, pcb.address_space.valid_page_count as u32);
                 serial.write_str("   │  ");
 
                 // Show heap usage
                 let heap_used = pcb.address_space.heap_current - 0x2000;
-                crate::smp::print_number(serial, (heap_used / 1024) as u32);
+                crate::kernel_lowlevel::smp::print_number(serial, (heap_used / 1024) as u32);
                 serial.write_str("KB   │\n");
             }
         }
@@ -1059,22 +1098,22 @@ fn cmd_top(serial: &mut crate::serial::Serial, _args: &[&str]) {
 
     // Memory summary
     serial.write_str("│ Memory: ");
-    crate::smp::print_number(serial, PageFrameAllocator::allocated_pages() as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, PageFrameAllocator::allocated_pages() as u32);
     serial.write_str(" used / ");
-    crate::smp::print_number(serial, PageFrameAllocator::total_pages() as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, PageFrameAllocator::total_pages() as u32);
     serial.write_str(" total pages           │\n");
 
     serial.write_str("│ Free: ");
-    crate::smp::print_number(serial, PageFrameAllocator::free_pages() as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, PageFrameAllocator::free_pages() as u32);
     serial.write_str(" pages (");
-    crate::smp::print_number(serial, (PageFrameAllocator::free_pages() * PAGE_SIZE / 1024) as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, (PageFrameAllocator::free_pages() * PAGE_SIZE / 1024) as u32);
     serial.write_str(" KB)                        │\n");
 
     serial.write_str("└─────────────────────────────────────────────────────────────┘\n");
 }
 
 /// Command: meminfo - Show memory information
-fn cmd_meminfo(serial: &mut crate::serial::Serial, _args: &[&str]) {
+fn cmd_meminfo(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str]) {
     let total_pages = PageFrameAllocator::total_pages();
     let used_pages = PageFrameAllocator::allocated_pages();
     let free_pages = PageFrameAllocator::free_pages();
@@ -1088,31 +1127,31 @@ fn cmd_meminfo(serial: &mut crate::serial::Serial, _args: &[&str]) {
     serial.write_str("├─────────────────────────────────────────┤\n");
     serial.write_str("│  Total Memory:                          │\n");
     serial.write_str("│    Pages: ");
-    crate::smp::print_number(serial, total_pages as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, total_pages as u32);
     serial.write_str("                            │\n");
     serial.write_str("│    Size:  ");
-    crate::smp::print_number(serial, total_kb as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, total_kb as u32);
     serial.write_str(" KB (");
-    crate::smp::print_number(serial, (total_kb / 1024) as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, (total_kb / 1024) as u32);
     serial.write_str(" MB)                   │\n");
     serial.write_str("│                                         │\n");
     serial.write_str("│  Used Memory:                           │\n");
     serial.write_str("│    Pages: ");
-    crate::smp::print_number(serial, used_pages as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, used_pages as u32);
     serial.write_str("                            │\n");
     serial.write_str("│    Size:  ");
-    crate::smp::print_number(serial, used_kb as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, used_kb as u32);
     serial.write_str(" KB                          │\n");
     serial.write_str("│    Usage: ");
-    crate::smp::print_number(serial, usage_pct as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, usage_pct as u32);
     serial.write_str("%                             │\n");
     serial.write_str("│                                         │\n");
     serial.write_str("│  Free Memory:                           │\n");
     serial.write_str("│    Pages: ");
-    crate::smp::print_number(serial, free_pages as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, free_pages as u32);
     serial.write_str("                            │\n");
     serial.write_str("│    Size:  ");
-    crate::smp::print_number(serial, free_kb as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, free_kb as u32);
     serial.write_str(" KB                          │\n");
     serial.write_str("│                                         │\n");
     serial.write_str("│  Page Size: 4 KB (4096 bytes)           │\n");
@@ -1120,7 +1159,7 @@ fn cmd_meminfo(serial: &mut crate::serial::Serial, _args: &[&str]) {
 }
 
 /// Command: pages - Show page allocation details
-fn cmd_pages(serial: &mut crate::serial::Serial, _args: &[&str]) {
+fn cmd_pages(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str]) {
     let pm = process_manager();
 
     serial.write_str("\n  Page Allocation Details:\n");
@@ -1132,11 +1171,11 @@ fn cmd_pages(serial: &mut crate::serial::Serial, _args: &[&str]) {
                 serial.write_str("  Process: ");
                 serial.write_str(pcb.name);
                 serial.write_str(" (PID ");
-                crate::smp::print_number(serial, pcb.pid as u32);
+                crate::kernel_lowlevel::smp::print_number(serial, pcb.pid as u32);
                 serial.write_str(")\n");
                 serial.write_str("  ──────────────────────────────────────\n");
                 serial.write_str("    Total Pages: ");
-                crate::smp::print_number(serial, pcb.address_space.valid_page_count as u32);
+                crate::kernel_lowlevel::smp::print_number(serial, pcb.address_space.valid_page_count as u32);
                 serial.write_str("\n");
                 serial.write_str("    Page Table:\n");
 
@@ -1144,7 +1183,7 @@ fn cmd_pages(serial: &mut crate::serial::Serial, _args: &[&str]) {
                     let page = &pcb.address_space.pages[j];
                     if page.valid {
                         serial.write_str("      Page[");
-                        crate::smp::print_number(serial, j as u32);
+                        crate::kernel_lowlevel::smp::print_number(serial, j as u32);
                         serial.write_str("] PFN=");
                         print_hex_u64(serial, page.pfn);
                         if page.writable {
@@ -1166,18 +1205,18 @@ fn cmd_pages(serial: &mut crate::serial::Serial, _args: &[&str]) {
 
     serial.write_str("  Summary:\n");
     serial.write_str("    Total system pages: ");
-    crate::smp::print_number(serial, PageFrameAllocator::total_pages() as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, PageFrameAllocator::total_pages() as u32);
     serial.write_str("\n");
     serial.write_str("    Allocated pages: ");
-    crate::smp::print_number(serial, PageFrameAllocator::allocated_pages() as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, PageFrameAllocator::allocated_pages() as u32);
     serial.write_str("\n");
     serial.write_str("    Free pages: ");
-    crate::smp::print_number(serial, PageFrameAllocator::free_pages() as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, PageFrameAllocator::free_pages() as u32);
     serial.write_str("\n");
 }
 
 /// Command: heap - Show heap usage for processes
-fn cmd_heap(serial: &mut crate::serial::Serial, _args: &[&str]) {
+fn cmd_heap(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str]) {
     let pm = process_manager();
 
     serial.write_str("\n  Process Heap Usage:\n");
@@ -1198,11 +1237,11 @@ fn cmd_heap(serial: &mut crate::serial::Serial, _args: &[&str]) {
                 let heap_max = pcb.address_space.heap_max - 0x2000;
                 let heap_free = heap_max - heap_used;
 
-                crate::smp::print_number(serial, (heap_used / 1024) as u32);
+                crate::kernel_lowlevel::smp::print_number(serial, (heap_used / 1024) as u32);
                 serial.write_str(" KB        ");
-                crate::smp::print_number(serial, (heap_max / 1024) as u32);
+                crate::kernel_lowlevel::smp::print_number(serial, (heap_max / 1024) as u32);
                 serial.write_str(" KB       ");
-                crate::smp::print_number(serial, (heap_free / 1024) as u32);
+                crate::kernel_lowlevel::smp::print_number(serial, (heap_free / 1024) as u32);
                 serial.write_str(" KB\n");
             }
         }
@@ -1212,7 +1251,7 @@ fn cmd_heap(serial: &mut crate::serial::Serial, _args: &[&str]) {
 }
 
 /// Command: tree - Show process tree
-fn cmd_tree(serial: &mut crate::serial::Serial, _args: &[&str]) {
+fn cmd_tree(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str]) {
     serial.write_str("\n  Process Tree:\n");
     serial.write_str("  ════════════════════════════════\n\n");
 
@@ -1231,7 +1270,7 @@ fn cmd_tree(serial: &mut crate::serial::Serial, _args: &[&str]) {
 
 /// Helper to print process tree recursively
 fn print_process_tree(
-    serial: &mut crate::serial::Serial,
+    serial: &mut crate::kernel_lowlevel::serial::Serial,
     pcb: &ProcessControlBlock,
     _prefix: &str,
     is_last: bool,
@@ -1244,7 +1283,7 @@ fn print_process_tree(
     }
 
     serial.write_str("[");
-    crate::smp::print_number(serial, pcb.pid as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, pcb.pid as u32);
     serial.write_str("] ");
     serial.write_str(pcb.name);
     serial.write_str(" (");
@@ -1276,7 +1315,7 @@ fn print_process_tree(
 }
 
 /// Command: kill - Terminate a process
-fn cmd_kill(serial: &mut crate::serial::Serial, args: &[&str]) {
+fn cmd_kill(serial: &mut crate::kernel_lowlevel::serial::Serial, args: &[&str]) {
     if args.len() < 2 {
         serial.write_str("Usage: kill <pid>\n");
         return;
@@ -1304,17 +1343,17 @@ fn cmd_kill(serial: &mut crate::serial::Serial, args: &[&str]) {
     let pm = process_manager();
     if pm.terminate_process(pid) {
         serial.write_str("Process ");
-        crate::smp::print_number(serial, pid as u32);
+        crate::kernel_lowlevel::smp::print_number(serial, pid as u32);
         serial.write_str(" terminated.\n");
     } else {
         serial.write_str("Process ");
-        crate::smp::print_number(serial, pid as u32);
+        crate::kernel_lowlevel::smp::print_number(serial, pid as u32);
         serial.write_str(" not found.\n");
     }
 }
 
 /// Command: info - Show detailed process info
-fn cmd_info(serial: &mut crate::serial::Serial, args: &[&str]) {
+fn cmd_info(serial: &mut crate::kernel_lowlevel::serial::Serial, args: &[&str]) {
     let pm = process_manager();
 
     if args.len() < 2 {
@@ -1341,24 +1380,24 @@ fn cmd_info(serial: &mut crate::serial::Serial, args: &[&str]) {
             pcb.address_space.print_info(serial);
         } else {
             serial.write_str("Process ");
-            crate::smp::print_number(serial, pid as u32);
+            crate::kernel_lowlevel::smp::print_number(serial, pid as u32);
             serial.write_str(" not found.\n");
         }
     }
 }
 
 /// Command: uptime - Show system uptime
-fn cmd_uptime(serial: &mut crate::serial::Serial, _args: &[&str]) {
+fn cmd_uptime(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str]) {
     // In a real kernel, you'd read from a timer
     // For now, show a placeholder
     serial.write_str("System uptime: (timer integration pending)\n");
     serial.write_str("Scheduler tick count: ");
-    crate::smp::print_number(serial, crate::scheduler::scheduler().get_tick_count() as u32);
+    crate::kernel_lowlevel::smp::print_number(serial, crate::kernel_objects::scheduler::scheduler().get_tick_count() as u32);
     serial.write_str("\n");
 }
 
 /// Command: version - Show kernel version
-fn cmd_version(serial: &mut crate::serial::Serial, _args: &[&str]) {
+fn cmd_version(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str]) {
     serial.write_str("SMROS ARM64 Kernel v0.3.0\n");
     serial.write_str("Features:\n");
     serial.write_str("  - Preemptive Round-Robin Scheduler\n");
@@ -1370,17 +1409,17 @@ fn cmd_version(serial: &mut crate::serial::Serial, _args: &[&str]) {
 }
 
 /// Command: whoami - Show current user
-fn cmd_whoami(serial: &mut crate::serial::Serial, _args: &[&str]) {
+fn cmd_whoami(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str]) {
     serial.write_str("root\n");
 }
 
 /// Command: date - Show current date/time (stub)
-fn cmd_date(serial: &mut crate::serial::Serial, _args: &[&str]) {
+fn cmd_date(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str]) {
     serial.write_str("Date/Time: (RTC not yet implemented)\n");
 }
 
 /// Command: echo - Print text
-fn cmd_echo(serial: &mut crate::serial::Serial, args: &[&str]) {
+fn cmd_echo(serial: &mut crate::kernel_lowlevel::serial::Serial, args: &[&str]) {
     if args.len() < 2 {
         serial.write_str("\n");
         return;
@@ -1396,7 +1435,7 @@ fn cmd_echo(serial: &mut crate::serial::Serial, args: &[&str]) {
 }
 
 /// Command: cat - Display file contents (stub)
-fn cmd_cat(serial: &mut crate::serial::Serial, args: &[&str]) {
+fn cmd_cat(serial: &mut crate::kernel_lowlevel::serial::Serial, args: &[&str]) {
     if args.len() < 2 {
         serial.write_str("Usage: cat <file>\n");
         return;
@@ -1408,12 +1447,12 @@ fn cmd_cat(serial: &mut crate::serial::Serial, args: &[&str]) {
 }
 
 /// Command: clear - Clear the screen
-fn cmd_clear(serial: &mut crate::serial::Serial, _args: &[&str]) {
+fn cmd_clear(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str]) {
     serial.write_str("\x1B[2J\x1B[H");
 }
 
 /// Helper: Print hex number
-fn print_hex_u64(serial: &mut crate::serial::Serial, num: u64) {
+fn print_hex_u64(serial: &mut crate::kernel_lowlevel::serial::Serial, num: u64) {
     serial.write_str("0x");
     let hex_chars = b"0123456789abcdef";
     if num == 0 {
@@ -1437,7 +1476,7 @@ fn print_hex_u64(serial: &mut crate::serial::Serial, num: u64) {
 }
 
 /// Helper: Print a padded number with fixed width
-fn print_padded_number(serial: &mut crate::serial::Serial, num: u32, width: usize) {
+fn print_padded_number(serial: &mut crate::kernel_lowlevel::serial::Serial, num: u32, width: usize) {
     // Count digits
     let mut temp = num;
     let mut digits = 0;
@@ -1455,7 +1494,7 @@ fn print_padded_number(serial: &mut crate::serial::Serial, num: u32, width: usiz
         serial.write_byte(b' ');
     }
 
-    crate::smp::print_number(serial, num);
+    crate::kernel_lowlevel::smp::print_number(serial, num);
 }
 
 /// Start the shell (called from kernel_main)

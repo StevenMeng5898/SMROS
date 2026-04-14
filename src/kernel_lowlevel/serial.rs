@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! PL011 UART Serial Driver for QEMU ARM64
 //!
 //! This module provides basic serial output functionality

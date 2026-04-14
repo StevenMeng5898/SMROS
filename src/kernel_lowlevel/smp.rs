@@ -1,10 +1,11 @@
+#![allow(dead_code)]
 //! SMP (Symmetric Multi-Processing) Support for ARM64
 //!
 //! This module provides functionality for booting secondary CPUs,
 //! CPU affinity management, and per-CPU data structures.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use crate::serial::Serial;
+use crate::kernel_lowlevel::serial::Serial;
 
 /// Maximum number of CPUs supported
 pub const MAX_CPUS: usize = 4;
@@ -202,6 +203,7 @@ pub fn boot_secondary_cpu(cpu_id: u32, stack_ptr: u64) -> Result<(), &'static st
         PSCI_RET_NOT_PRESENT => Err("CPU not present"),
         PSCI_RET_DENIED => Err("PSCI call denied"),
         PSCI_RET_INVALID_ADDRESS => Err("Invalid address"),
+        #[allow(unused_assignments)]
         _ => {
             let mut buf = [0u8; 10];
             let mut i = 0;
@@ -238,7 +240,7 @@ pub fn boot_secondary_cpu(cpu_id: u32, stack_ptr: u64) -> Result<(), &'static st
                 j += 1;
             }
             msg[j] = b')';
-            msg[j+1] = b'\n';
+            msg[j + 1] = b'\n';
             Err("Unknown error")
         }
     }
@@ -459,7 +461,7 @@ pub extern "C" fn secondary_cpu_entry() -> ! {
     serial.write_str("] CPU online! Starting scheduler for this CPU...\n");
 
     // Start the scheduler for this CPU and run threads bound to it
-    crate::scheduler::start_first_thread_for_cpu(cpu_id as usize);
+    crate::kernel_objects::scheduler::start_first_thread_for_cpu(cpu_id as usize);
 }
 
 /// CPU idle loop - each CPU runs this when it has no work

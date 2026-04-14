@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Thread Management Module
 //!
 //! This module provides thread abstraction for the SMROS scheduler.
@@ -259,7 +261,7 @@ impl ThreadControlBlock {
     }
 
     /// Print thread information to serial
-    pub fn print_info(&self, serial: &mut crate::serial::Serial) {
+    pub fn print_info(&self, serial: &mut crate::kernel_lowlevel::serial::Serial) {
         print_number(serial, self.id.0 as u32);
         serial.write_str("   ");
         serial.write_str(self.state.as_str());
@@ -296,7 +298,7 @@ extern "C" fn thread_exit_wrapper() -> ! {
 }
 
 /// Print a number to serial (helper function)
-fn print_number(serial: &mut crate::serial::Serial, mut num: u32) {
+fn print_number(serial: &mut crate::kernel_lowlevel::serial::Serial, mut num: u32) {
     if num == 0 {
         serial.write_byte(b'0');
         return;

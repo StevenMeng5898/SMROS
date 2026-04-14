@@ -18,7 +18,13 @@
       "Bash(grep *)",
       "Bash(head *)",
       "Bash(rustup *)",
-      "Bash(true)"
+      "Bash(true)",
+      "WebFetch(github.com)",
+      "WebSearch",
+      "WebFetch(raw.githubusercontent.com)",
+      "Bash(mkdir *)",
+      "Bash(mv *)",
+      "Bash(cargo check *)"
     ]
   },
   "$version": 3
