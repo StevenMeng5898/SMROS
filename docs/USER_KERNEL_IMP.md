@@ -1,8 +1,8 @@
-# EL0/EL1 Separation Implementation Guide
+# User/Kernel Separation Implementation Guide
 
 ## Overview
 
-This document describes the implementation of EL0/EL1 separation in SMROS, moving the shell and other processes to user mode (EL0), and implementing the necessary kernel objects for Zircon syscall compatibility.
+This document describes the implementation of user/kernel separation in SMROS, with the shell running as a scheduled user-mode thread, and the kernel objects for Zircon syscall compatibility.
 
 ## What Was Implemented
 

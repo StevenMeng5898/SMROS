@@ -115,15 +115,27 @@ SMROS/
 │   └── kernel.ld       # Linker script for ARM64
 ├── src/
 │   ├── main.rs         # Kernel entry point, boot assembly, exception vectors
-│   ├── serial.rs       # PL011 UART driver with input support
-│   ├── timer.rs        # ARM Generic Timer driver
-│   ├── interrupt.rs    # GICv2 interrupt controller driver
-│   ├── scheduler.rs    # Preemptive round-robin scheduler
-│   ├── thread.rs       # Thread management (TCB, CPU context, stack)
-│   ├── smp.rs          # SMP multi-core support (PSCI CPU_ON)
-│   ├── memory.rs       # Multi-process memory management & shell
-│   ├── drivers.rs      # Driver module re-exports
-│   └── context_switch.S # Assembly context switch code
+│   ├── context_switch.S # Assembly context switch code
+│   ├── kernel_lowlevel/ # Low-level kernel drivers
+│   │   ├── mod.rs
+│   │   ├── serial.rs   # PL011 UART driver with input support
+│   │   ├── timer.rs    # ARM Generic Timer driver
+│   │   ├── interrupt.rs # GICv2 interrupt controller driver
+│   │   ├── smp.rs      # SMP multi-core support (PSCI CPU_ON)
+│   │   ├── memory.rs   # Multi-process memory management
+│   │   └── mmu.rs      # MMU initialization and page tables
+│   ├── kernel_objects/ # Kernel objects and subsystems
+│   │   ├── mod.rs
+│   │   ├── scheduler.rs # Preemptive round-robin scheduler
+│   │   ├── thread.rs   # Thread management (TCB, CPU context, stack)
+│   │   └── channel.rs  # Inter-process communication channels
+│   ├── syscall/        # System call interface
+│   │   └── mod.rs
+│   └── user_level/     # User-level process management
+│       ├── mod.rs
+│       ├── user_process.rs # Process management
+│       ├── user_shell.rs   # Interactive shell
+│       └── user_test.rs    # Test processes
 └── scripts/
     ├── build.sh        # Build script
     ├── run.sh          # Run script (debug mode)
@@ -261,32 +273,24 @@ Pages have permission flags:
 
 ## Interactive Shell
 
-After boot, SMROS enters an interactive shell with 15+ commands:
+After boot, SMROS starts an interactive user-mode shell (v0.5.0) with 11 commands:
 
 ### Process Management Commands
 
-- **`ps`**: List all processes with PID, state, name
-- **`top`**: Process monitor with memory usage
-- **`tree`**: Process tree visualization
-- **`kill <pid>`**: Terminate a process
-- **`info [pid]`**: Detailed process memory info
-
-### Memory Management Commands
-
-- **`meminfo`**: System memory information
-- **`pages`**: Page allocation details
-- **`heap`**: Heap usage per process
+- **`ps`**: List all processes with PID, state, name, threads, parent
+- **`top`**: Process monitor with memory usage and scheduler stats
+- **`meminfo`**: System memory information (total, used, free)
+- **`uptime`**: System uptime display
+- **`kill <pid>`**: Terminate a process by PID
 
 ### System Commands
 
 - **`help`**: Show available commands
 - **`version`**: Kernel version and features
-- **`uptime`**: System uptime
-- **`whoami`**: Current user
-- **`date`**: Date/time (stub)
+- **`testsc`**: Test syscall interface (getpid, write, mmap)
 - **`echo <text>`**: Print text
-- **`cat <file>`**: Display file (stub)
 - **`clear`**: Clear screen
+- **`exit`**: Exit the shell
 
 See `SHELL.md` for complete shell documentation.
 

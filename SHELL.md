@@ -2,7 +2,7 @@
 
 ## Overview
 
-The SMROS kernel now includes a fully interactive shell with comprehensive process and memory management commands. After boot completion, the kernel enters the shell instead of running the multi-thread worker sample.
+The SMROS kernel includes a fully interactive user-mode shell (v0.5.0) with comprehensive process and memory management commands. The shell runs as a scheduled thread and provides system monitoring capabilities. After boot completion, the kernel starts the user shell instead of running the old multi-thread worker sample.
 
 ## Shell Features
 
