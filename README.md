@@ -1,385 +1,204 @@
-# SMROS - ARM64 OS Kernel
+# SMROS
 
-A preemptive multitasking ARM64 OS kernel framework written in Rust, designed to run on QEMU with SMP multi-core support.
+SMROS is an experimental bare-metal AArch64 kernel written in Rust for QEMU's `virt` machine. The current tree boots to a serial shell, initializes the low-level platform drivers, brings up a simple process manager, and carries an in-progress Linux/Zircon-flavored syscall layer.
 
-## Features
+## Current Status
 
-- **Bare-metal Rust**: No standard library, pure `#![no_std]` kernel
-- **ARM64 Architecture**: Targets AArch64 processors
-- **QEMU Support**: Runs on QEMU virt machine with 4 CPU cores
-- **Serial Console**: PL011 UART driver for output with interactive shell
-- **Boot Assembly**: Custom boot code for ARM64 initialization
-- **Preemptive Round-Robin Scheduler**: Time-slice based scheduling with voluntary and forced preemption
-- **SMP Multi-Core Support**: Boots and manages multiple CPU cores using PSCI
-- **Thread Management**: Full thread abstraction with CPU affinity binding
-- **Context Switching**: Assembly-based context switch for ARM64
-- **GICv2 Interrupt Controller**: Hardware interrupt handling
-- **ARM Generic Timer**: System timer with configurable tick rate (100Hz default)
-- **Memory Allocator**: Global kernel allocator with bump allocation
-- **Exception Vectors**: Full exception vector table with IRQ handlers
-- **Panic Handler**: Graceful kernel panic handling with serial output
-- **Multi-Process Support**: Process isolation with separate address spaces
-- **4K Page Management**: Page-based memory allocation with bitmap allocator
-- **Segment Management**: Code, data, heap, and stack segments per process
-- **Interactive Shell**: Built-in shell with commands like `top`, `ps`, `meminfo`, etc.
+- Boots on `qemu-system-aarch64` and reaches the `smros>` shell prompt.
+- Uses inline ARM64 boot assembly in `src/main.rs`.
+- Links the thread switch routines from `src/kernel_lowlevel/context_switch.S`.
+- Initializes PL011 UART, GICv2, the ARM generic timer, MMU/page-table helpers, SMP bookkeeping, kernel objects, and the scheduler.
+- Provides a simple process manager with fixed code, data, heap, and stack segments per process.
+- Organizes kernel objects under `src/kernel_objects/`.
+- Splits syscall code under `src/syscall/`.
+- Includes EL0 scaffolding under `src/user_level/`, but the live shell still runs as an EL1 scheduled thread.
 
-## Prerequisites
+## Toolchain
 
-### Rust Toolchain
+SMROS currently requires nightly Rust because `.cargo/config.toml` enables `build-std`.
+
+### Required Tools
+
+- `rustup`
+- `rust-src`
+- `qemu-system-aarch64`
+- `make` for the documented build/run flow
+
+### Recommended Setup
 
 ```bash
-# Install Rust (if not already installed)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Install ARM64 target
+rustup toolchain install nightly
+rustup override set nightly
 rustup target add aarch64-unknown-none
-
-# Install rust-src component for build-std
 rustup component add rust-src
 ```
 
-### QEMU
+### QEMU Packages
 
 ```bash
-# Ubuntu/Debian
+# Ubuntu / Debian
 sudo apt-get install qemu-system-arm
-
-# macOS
-brew install qemu
 
 # Arch Linux
 sudo pacman -S qemu
+
+# macOS
+brew install qemu
 ```
 
-## Building
+## Build
+
+The preferred build entry point is the `Makefile`:
 
 ```bash
-# Using Make
 make build
-
-# Or using cargo directly
-cargo build --release
-
-# The kernel image will be created as kernel8.img
 ```
 
-## Running
+That produces:
+
+- `target/aarch64-unknown-none/release/smros`
+- `kernel8.img`
+
+You can also build manually:
 
 ```bash
-# Using Make (builds and runs)
-make run
-
-# Or using the script
-./scripts/run-simple.sh
-
-# Or manually with QEMU (4 CPU cores for SMP)
-qemu-system-aarch64 -M virt -cpu cortex-a57 -m 512M -smp 4 -nographic -kernel kernel8.img
+cargo build --release
+cp target/aarch64-unknown-none/release/smros kernel8.img
 ```
 
-### Exit QEMU
+## Run
 
-Press `Ctrl+A`, then `X` to exit QEMU.
+### Normal Boot
 
-## Debugging
+```bash
+make run
+```
 
-### Debug Mode (with logging)
+### Debug Logging
 
 ```bash
 make debug
 ```
 
-This runs QEMU with additional logging. Check `qemu.log` for details.
+This writes QEMU diagnostics to `qemu.log`.
 
-### GDB Debugging
+### GDB Stub
 
 ```bash
-# Start QEMU with GDB server
 make gdb
+```
 
-# In another terminal, connect with GDB
+Then from another terminal:
+
+```bash
 gdb
 (gdb) target remote :1234
 (gdb) symbol-file target/aarch64-unknown-none/release/smros
 ```
 
-## Project Structure
+### Manual QEMU Command
 
+```bash
+qemu-system-aarch64 \
+  -M virt \
+  -cpu cortex-a57 \
+  -smp 4 \
+  -m 512M \
+  -nographic \
+  -kernel kernel8.img
 ```
+
+Exit QEMU with `Ctrl+A`, then `X`.
+
+## Expected Boot Sequence
+
+The current release build is expected to:
+
+1. Print the kernel banner and platform initialization logs.
+2. Initialize interrupt, timer, SMP, memory, MMU, syscall, channel, and scheduler subsystems.
+3. Create three demo processes: `shell`, `editor`, and `compiler`.
+4. Run the boot-time user test harness.
+5. Start the shell thread and transfer control to the scheduler.
+6. Reach the `smros>` prompt.
+
+## Repository Layout
+
+```text
 SMROS/
-├── Cargo.toml          # Rust package configuration
-├── Makefile            # Build automation
-├── build.rs            # Build script for C compilation
-├── .cargo/
-│   └── config.toml     # Cargo configuration for ARM64
-├── linker/
-│   └── kernel.ld       # Linker script for ARM64
+├── .cargo/config.toml          # Target and build-std configuration
+├── Cargo.toml                  # Package metadata
+├── Makefile                    # Preferred build and run entry points
+├── build.rs                    # Empty build script; assembly is linked via global_asm!
+├── linker/kernel.ld            # AArch64 linker script
 ├── src/
-│   ├── main.rs         # Kernel entry point, boot assembly, exception vectors
-│   ├── context_switch.S # Assembly context switch code
-│   ├── kernel_lowlevel/ # Low-level kernel drivers
+│   ├── main.rs                 # Boot assembly, exception vectors, kernel entry
+│   ├── kernel_lowlevel/        # Platform and low-level kernel code
+│   │   ├── context_switch.S
+│   │   ├── drivers.rs
+│   │   ├── interrupt.rs
+│   │   ├── memory.rs
+│   │   ├── mmu.rs
 │   │   ├── mod.rs
-│   │   ├── serial.rs   # PL011 UART driver with input support
-│   │   ├── timer.rs    # ARM Generic Timer driver
-│   │   ├── interrupt.rs # GICv2 interrupt controller driver
-│   │   ├── smp.rs      # SMP multi-core support (PSCI CPU_ON)
-│   │   ├── memory.rs   # Multi-process memory management
-│   │   └── mmu.rs      # MMU initialization and page tables
-│   ├── kernel_objects/ # Kernel objects and subsystems
-│   │   ├── mod.rs
-│   │   ├── scheduler.rs # Preemptive round-robin scheduler
-│   │   ├── thread.rs   # Thread management (TCB, CPU context, stack)
-│   │   └── channel.rs  # Inter-process communication channels
-│   ├── syscall/        # System call interface
-│   │   └── mod.rs
-│   └── user_level/     # User-level process management
-│       ├── mod.rs
-│       ├── user_process.rs # Process management
-│       ├── user_shell.rs   # Interactive shell
-│       └── user_test.rs    # Test processes
-└── scripts/
-    ├── build.sh        # Build script
-    ├── run.sh          # Run script (debug mode)
-    └── run-simple.sh   # Run script (simple mode)
+│   │   ├── serial.rs
+│   │   ├── smp.rs
+│   │   └── timer.rs
+│   ├── kernel_objects/         # Threads, scheduler, handles, VMO, VMAR, channels
+│   ├── syscall/                # Syscall definitions, dispatch, and handler helpers
+│   └── user_level/             # User-process scaffolding, shell, and test helpers
+├── docs/                       # Design and status documents
+└── scripts/                    # Helper scripts (Makefile remains the documented flow)
 ```
 
-## Memory Layout
-
-### Kernel Physical Memory Layout
-
-```
-0x00000000 - 0x0007FFFF: Reserved
-0x00080000 - 0x3FFFFFFF: Available RAM
-0x40000000 - ...:         Kernel code/data
-...
-Stack: 512KB allocated at kernel end
-Heap:  1MB static bump allocator
-```
-
-### Process Virtual Memory Layout (per process)
-
-```
-0x0000_0000_0000_0000 - Code Segment (1 page, r-x)
-0x0000_0000_0001_0000 - Data Segment (1 page, rw-)
-0x0000_0000_0002_0000 - Heap Segment (4 pages, rw-, grows up)
-...
-0x0000_0000_000F_0000 - Stack Segment (2 pages, rw-, grows down)
-```
-
-### Page Management
-
-- **Page Size**: 4KB (0x1000 bytes)
-- **Max Pages per Process**: 64 pages (256KB)
-- **Total System Pages**: 4096 pages (16MB)
-- **Allocator**: Bitmap-based page frame allocator
-
-## Serial Output
-
-The kernel uses the PL011 UART at address `0x9000000` for serial I/O, which is mapped to the QEMU serial console.
-
-### Serial Features
-
-- **Output**: String, byte, hex, and buffer writing
-- **Input**: Blocking and non-blocking byte reading
-- **Line Input**: Interactive line editing with:
-  - Backspace support (DEL/BS)
-  - Ctrl+C (cancel line)
-  - Ctrl+U (clear line)
-  - Ctrl+L (clear screen)
-  - Character echo
-
-## Interrupt Handling
-
-The kernel implements a GICv2 interrupt controller driver for handling hardware interrupts:
-
-- **GIC Distributor**: Configures interrupt groups, priorities, and CPU targets
-- **GIC CPU Interface**: Acknowledges and ends interrupts
-- **Timer Interrupt (PPI 30)**: Used for scheduler ticks at 100Hz
-- **Exception Vectors**: Full 16-entry vector table with handlers for synchronous exceptions and IRQs
-
-## Timer Driver
-
-The ARM Generic Timer provides system timing:
-
-- **Counter-timer Frequency**: Read from `CNTFRQ_EL0`
-- **Physical Count**: Read from `CNTPCT_EL0`
-- **Compare Value**: Set via `CNTP_CVAL_EL0` for periodic ticks
-- **Tick Rate**: 100Hz (10ms interval) by default
-
-## Scheduler
-
-The preemptive round-robin scheduler manages thread execution:
-
-- **Time Slice**: 10 ticks (100ms at 100Hz) per thread
-- **Preemption**: Forced context switch when time slice expires
-- **Voluntary Yield**: Threads can yield via `yield_now()`
-- **Thread States**: Empty, Ready, Running, Blocked, Terminated
-- **Max Threads**: 16 concurrent threads
-- **Idle Thread**: Always present (thread 0)
-
-## Thread Management
-
-Threads are managed via Thread Control Blocks (TCBs):
-
-- **CPU Context**: Full ARM64 register state (x0-x28, FP, LR, SP, PC, PSTATE)
-- **Stack Allocation**: 8KB per thread, dynamically allocated
-- **CPU Affinity**: Threads can be bound to specific CPUs
-- **Thread Entry**: `extern "C" fn() -> !` (never returns)
-
-## SMP Multi-Core Support
-
-Secondary CPUs are booted using PSCI (Power State Coordination Interface):
-
-- **PSCI CPU_ON**: HVC call to boot secondary CPUs
-- **CPU States**: Offline, Booting, Online
-- **Per-CPU Data**: Cache-line aligned structures for each CPU
-- **CPU-Aware Scheduling**: Threads bound to specific CPUs are scheduled on those CPUs
-
-## Multi-Process Memory Management
-
-SMROS implements process isolation with separate virtual address spaces:
-
-### Process Control Block (PCB)
-
-Each process has:
-- **PID**: Unique process identifier
-- **State**: Empty, Ready, Running, Blocked, Terminated
-- **Parent PID**: Parent process reference
-- **Thread Count**: Number of threads in process
-- **Address Space**: Isolated virtual memory
-
-### Address Space Layout
-
-Each process gets its own virtual memory with:
-- **Code Segment**: Read-only, executable (1 page)
-- **Data Segment**: Read-write, initialized data (1 page)
-- **Heap Segment**: Read-write, grows upward (4 pages, 16KB)
-- **Stack Segment**: Read-write, grows downward (2 pages, 8KB)
-
-### Page Frame Allocator
-
-Physical memory is managed with a bitmap allocator:
-- **Page Size**: 4KB (standard ARM64 granule)
-- **Total Pages**: 4096 (16MB physical memory)
-- **Max Pages per Process**: 64 (256KB virtual memory)
-- **Allocation**: Bitmap-based, O(n) allocation
-
-### Memory Protection
-
-Pages have permission flags:
-- **Valid**: Whether page is mapped
-- **Writable**: Read-write vs read-only
-- **Executable**: Can contain executable code
-- **User Accessible**: User vs kernel mode access
-
-## Interactive Shell
-
-After boot, SMROS starts an interactive user-mode shell (v0.5.0) with 11 commands:
-
-### Process Management Commands
-
-- **`ps`**: List all processes with PID, state, name, threads, parent
-- **`top`**: Process monitor with memory usage and scheduler stats
-- **`meminfo`**: System memory information (total, used, free)
-- **`uptime`**: System uptime display
-- **`kill <pid>`**: Terminate a process by PID
-
-### System Commands
-
-- **`help`**: Show available commands
-- **`version`**: Kernel version and features
-- **`testsc`**: Test syscall interface (getpid, write, mmap)
-- **`echo <text>`**: Print text
-- **`clear`**: Clear screen
-- **`exit`**: Exit the shell
-
-See `SHELL.md` for complete shell documentation.
-
-## Customization
-
-### Adding New Drivers
-
-1. Create a new module in `src/`
-2. Add the module declaration in `main.rs` or `drivers.rs`
-3. Initialize the driver in `kernel_main()`
-
-### Adding New Threads
-
-```rust
-// Create a thread on any CPU
-scheduler::scheduler().create_thread(my_thread_func, "my-thread");
-
-// Create a thread bound to a specific CPU
-scheduler::scheduler().create_thread_on_cpu(my_thread_func, "my-thread", Some(0));
-```
-
-### Changing Memory Layout
-
-Edit `linker/kernel.ld` to modify:
-
-- Kernel base address
-- Section alignment
-- Stack size
-
-### Changing Timer Frequency
-
-Modify the tick period calculation in `src/timer.rs`:
-
-```rust
-// For 100Hz (10ms tick)
-let tick_period = freq / 100;
-
-// For 1000Hz (1ms tick)
-let tick_period = freq / 1000;
-```
-
-### Adding Interrupt Handling
-
-1. Define handlers in exception vectors in `main.rs`
-2. Implement handler functions in Rust
-3. Configure interrupt priorities in `interrupt.rs`
-
-## Troubleshooting
-
-### Build Errors
-
-```bash
-# Ensure ARM64 target is installed
-rustup target add aarch64-unknown-none
-
-# Ensure rust-src is available
-rustup component add rust-src
-```
-
-### QEMU Errors
-
-```bash
-# Verify QEMU installation
-qemu-system-aarch64 --version
-
-# Check machine type support
-qemu-system-aarch64 -M help | grep virt
-```
-
-## Dependencies
-
-
-| Crate            | Version | Usage                                                           |
-| ---------------- | ------- | --------------------------------------------------------------- |
-| `cortex-a`       | 8       | Register access (`MPIDR_EL1`, `SCTLR_EL1`), `wfi()` instruction |
-| `tock-registers` | 0.8     | Register interface traits                                       |
-| `volatile`       | 0.4     | Volatile memory access (for hardware registers)                 |
-| `cc`             | 1.0     | Build dependency for C code compilation                         |
-
-## License
-
-This project is open source,  based on MiT Licnse
-
-## References
-
-- [Rust Embedded Book](https://docs.rust-embedded.org/book/)
-- [ARM Architecture Reference Manual](https://developer.arm.com/documentation/)
-- [QEMU ARM64 Virt Machine](https://www.qemu.org/docs/master/system/arm/virt.html)
-- [ARM Generic Timer Documentation](https://developer.arm.com/documentation/100746/0100/aarch64-register-descriptions/cntfrq-el0)
-- [GICv2 Architecture Specification](https://developer.arm.com/documentation/ihi0048/latest/)
-- [PSCI Specification](https://developer.arm.com/documentation/den0022/latest/)
-- [AArch64 Exception Levels](https://developer.arm.com/documentation/102411/0100/Exception-levels)
+## Key Subsystems
+
+### Low-Level Platform
+
+- PL011 serial console
+- GICv2 interrupt controller
+- ARM generic timer
+- ARM64 exception vectors
+- ARM64 context switch assembly
+
+### Scheduling and Threads
+
+- Fixed maximum of 16 threads
+- Idle thread plus scheduled worker threads
+- Round-robin scheduler with per-thread time-slice bookkeeping
+- CPU affinity support in the scheduler data model
+
+### Process and Memory Model
+
+- Fixed maximum of 16 processes
+- 4 KiB pages
+- 4096 physical page frames tracked by a bitmap allocator
+- Per-process address space model with four fixed segments:
+  - code at `0x0000`
+  - data at `0x1000`
+  - heap at `0x2000`
+  - stack at `0xF000`
+
+### Kernel Objects
+
+- Handle table
+- VMO
+- VMAR
+- Channel
+- Thread and scheduler objects
+
+## Documentation Map
+
+- `docs/BOOT_FLOW.md`: current boot path from QEMU entry to shell prompt
+- `docs/KERNEL_OBJECTS_DIRECTORY.md`: current `src/kernel_objects/` layout
+- `docs/MEMORY_SYSCALLS_IMPLEMENTED.md`: status of memory-related syscalls
+- `docs/SYSCALL_COMPATIBILITY.md`: syscall entry points and dispatch reality
+- `docs/USER_KERNEL_IMP.md`: current EL0 and user/kernel boundary status
+- `docs/USER_SHELL_KERNEL_OBJECT.md`: shell integration and object layout notes
+- `docs/USER_TEST.md`: current test harness behavior
+
+## Known Limitations
+
+- The shell banner says "User-Mode Shell", but the shell currently runs as an EL1 kernel thread.
+- `run_user_test()` logs `[EL0]`, but its active checks call syscall functions directly from kernel mode.
+- The syscall layer is only partially implemented; many paths are placeholders or bookkeeping-only.
+- The active SVC bridge is not yet a full Linux/Zircon ABI implementation.
+- Some boot-time status output still contains garbled or NUL characters.

@@ -1,375 +1,165 @@
-# User/Kernel Separation Implementation Guide
+# User / Kernel Boundary: Current Implementation
 
-## Overview
+This document describes the actual state of user/kernel separation in the current tree.
 
-This document describes the implementation of user/kernel separation in SMROS, with the shell running as a scheduled user-mode thread, and the kernel objects for Zircon syscall compatibility.
+The short version is:
 
-## What Was Implemented
+- EL0 scaffolding exists
+- MMU and page-table helpers exist
+- an `svc` bridge exists
+- the live boot path still runs the shell and test harness from EL1
 
-### 1. MMU and Page Table Support (`src/mmu.rs`)
+## Relevant Files
 
-**Purpose**: Provide memory management unit (MMU) support with page tables for memory isolation between EL0 and EL1.
+- `src/kernel_lowlevel/mmu.rs`
+- `src/syscall/syscall_handler.rs`
+- `src/syscall/syscall_dispatch.rs`
+- `src/user_level/user_process.rs`
+- `src/user_level/user_shell.rs`
+- `src/user_level/user_test.rs`
+- `src/main.rs`
 
-**Key Components**:
-- `PageTableEntry`: Represents a page table entry with proper ARM64 flags
-- `PageTableManager`: Manages page tables for both user space (TTBR0) and kernel space (TTBR1)
-- `Vma`: Virtual Memory Area descriptor for tracking memory regions
-- Memory mapping functions:
-  - `map_user_region()`: Maps memory accessible from EL0
-  - `map_kernel_region()`: Maps kernel-only memory (EL1)
+## What Exists Today
 
-**Features**:
-- Support for user-accessible pages (AP_EL0 flag)
-- Read/write/execute permissions
-- Proper cache attributes
-- TLB invalidation on address space switch
+### MMU and Page-Table Helpers
 
-### 2. Syscall Handler (`src/syscall_handler.rs`)
+`src/kernel_lowlevel/mmu.rs` provides:
 
-**Purpose**: Handle system calls from EL0 processes via SVC exception.
+- page-table entry definitions
+- TTBR0 and TTBR1 root allocation
+- `PageTableManager`
+- user-region mapping helpers
+- kernel-region mapping helpers
+- address-space bookkeeping through VMAs
 
-**Key Components**:
-- `handle_svc_exception_from_el0()`: Main SVC handler called from assembly exception vector
-- `get_syscall_result()`: Helper to retrieve syscall result
-- Dispatch logic for both Linux and Zircon syscalls
+This is the kernel's main scaffolding for eventual EL0 isolation.
 
-**Flow**:
-1. EL0 process executes `svc #0` instruction
-2. CPU traps to EL1 exception handler (assembly in `main.rs`)
-3. Exception handler saves all registers on stack
-4. Calls `handle_svc_exception_from_el0()` with saved context
-5. Handler extracts syscall number from x8 register
-6. Dispatches to appropriate syscall implementation (Linux or Zircon)
-7. Stores result in x0
-8. Assembly restores registers and executes `eret` to return to EL0
+### User Process Structure
 
-### 3. EL0 Process Management (`src/el0_process.rs`)
+`src/user_level/user_process.rs` defines `UserProcess`, which carries:
 
-**Purpose**: Manage processes that run at EL0 (user mode).
+- a base `ProcessControlBlock`
+- a `PageTableManager`
+- user stack address and size
+- user entry point
+- placeholder process and VMAR handles
+- an `initialized` flag
 
-**Key Components**:
-- `UserProcess`: Extended PCB with EL0-specific data
-  - Page table manager instance
-  - User stack virtual address
-  - Entry point for user-mode code
-  - Process and VMAR handles (Zircon compatibility)
-- `create_user_process()`: Creates a new user-mode process
-- `init_user_process()`: Sets up user-space memory layout
-- `switch_to_el0()`: Assembly function to transition from EL1 to EL0
+The same file also provides:
 
-**Memory Layout for EL0 Processes**:
-```
-0x0000_0000 - Code segment (read-execute, user-accessible)
-0x0000_1000 - Data segment (read-write, user-accessible)
-0x0000_2000 - Heap (read-write, user-accessible, 4 pages)
-0xFFFF_0000 - Stack (read-write, user-accessible, 2 pages, grows down)
-```
+- `create_user_process()`
+- lookup helpers
+- `switch_to_el0()`
 
-### 4. Channel Kernel Object (`src/channel.rs`)
+### EL0 Test and Shell Entry Points
 
-**Purpose**: Implement Zircon-style channels for inter-process communication (IPC).
+`src/user_level/user_test.rs` contains:
 
-**Key Components**:
-- `Channel`: Bidirectional message passing between processes
-- `ChannelMessage`: Message data with optional handle transfer
-- `ChannelTable`: Global table managing all channels
-- Syscall implementations:
-  - `sys_channel_create()`: Create a new channel (returns two handles)
-  - `sys_channel_read()`: Read message from channel
-  - `sys_channel_write()`: Write message to channel
-  - `sys_channel_call_noretry()`: Atomic write+read operation
+- `linux_syscall()` using `svc #0`
+- `user_test_process_entry()`
+- `user_busy_loop_entry()`
 
-**Features**:
-- Two endpoint handles (handle0, handle1)
-- Message queues for each endpoint
-- Handle transfer in messages
-- Signal state for wait operations
-- Peer closed notification
+`src/user_level/user_shell.rs` contains:
 
-### 5. EL0 Test Process (`src/el0_test.rs`)
+- `user_shell_entry()`
+- `start_user_shell()`
+- the live shell implementation
 
-**Purpose**: Test process that runs in EL0 and validates syscall functionality.
+These files are the current staging area for user-mode work.
 
-**Key Components**:
-- `linux_syscall()`: Inline assembly function to make syscalls from EL0
-- Test functions:
-  - `test_getpid()`: Test getpid syscall
-  - `test_mmap()`: Test anonymous memory mapping
-  - `test_write()`: Test write to file descriptor
-  - `test_exit()`: Test process exit
-- Entry points:
-  - `el0_test_process_entry()`: Main test process
-  - `el0_shell_entry()`: User-mode shell entry point
-  - `el0_busy_loop_entry()`: Simple busy loop
+### Exception Handling
 
-**Example Usage**:
-```rust
-// Make a syscall from EL0
-let pid = unsafe { linux_syscall(172, [0; 6]) }; // getpid
+The live synchronous exception handler is assembled in `src/main.rs`. For `svc` exceptions it currently calls `handle_syscall_simple()`.
 
-// Map anonymous memory
-let addr = unsafe { linux_syscall(222, [0, 4096, 3, 0x22, 0, 0]) }; // mmap
+`src/syscall/syscall_handler.rs` also contains `handle_svc_exception_from_el0()`, but that is not the handler the current assembly vectors use.
 
-// Exit process
-unsafe { linux_syscall(93, [0, 0, 0, 0, 0, 0]); } // exit
-```
+## What The Boot Path Actually Does
 
-### 6. Exception Handler Updates (`src/main.rs`)
+During a normal boot:
 
-**Purpose**: Update assembly exception vectors to handle SVC from EL0.
+1. `kernel_main()` calls `user_process::init()`.
+2. `kernel_main()` calls `run_user_test()`.
+3. `kernel_main()` calls `start_user_shell()`.
+4. `start_user_shell()` creates a normal scheduler thread.
+5. `start_first_thread()` jumps into that EL1 thread.
 
-**Key Changes**:
-- Enhanced `exception_handler` to detect SVC exceptions from EL0
-- Extract exception syndrome register (ESR_EL1) to identify exception type
-- Check for EC = 0x15 (SVC from AArch64)
-- Call Rust syscall handler with saved register context
-- Properly restore registers and return to EL0 via `eret`
+No part of the normal boot path:
 
-**Assembly Flow**:
-```assembly
-exception_handler:
-    // Save all registers to stack
-    stp x0, x1, [sp, #0]
-    stp x2, x3, [sp, #16]
-    ...
-    
-    // Read exception registers
-    mrs x0, esr_el1
-    mrs x1, elr_el1
-    mrs x2, spsr_el1
-    mrs x3, sp_el0
-    
-    // Check if SVC from EL0
-    ubfx x4, x0, #26, #6
-    cmp x4, #0x15
-    b.ne 1f
-    
-    // Call syscall handler
-    bl handle_svc_exception_from_el0
-    
-    // Restore registers
-    ldp x0, x1, [sp, #0]
-    ...
-    
-    // Return to EL0
-    eret
-```
+- creates a real EL0 process and runs it
+- calls `switch_to_el0()`
+- executes `user_test_process_entry()` in EL0
+- executes `user_shell_entry()` after an EL transition
 
-## Architecture
+## Current State By Area
 
-### Execution Levels
+| Area | Current State | Notes |
+|------|---------------|-------|
+| Page-table manager | present | real scaffolding in `mmu.rs` |
+| User-process data model | present | `UserProcess` exists |
+| EL0 transition helper | present | `switch_to_el0()` exists |
+| Live shell in EL0 | not active | shell runs as EL1 thread |
+| Live test process in EL0 | not active | boot test runs in kernel mode |
+| Full register-frame EL0 syscall handler | not active | current vectors use `handle_syscall_simple()` |
+| Zircon-on-SVC path | not active | active `svc` path routes Linux-only |
 
-```
-┌─────────────────────────────────────────┐
-│          EL1 (Kernel Mode)              │
-│  - Full hardware access                 │
-│  - Exception handlers                   │
-│  - Syscall dispatch                     │
-│  - Memory management                    │
-│  - Scheduler                            │
-│  - Device drivers                       │
-└─────────────────┬───────────────────────┘
-                  │ SVC #0 (syscall)
-                  │ Exception return (eret)
-┌─────────────────┴───────────────────────┐
-│          EL0 (User Mode)                │
-│  - Restricted access                    │
-│  - Shell process                        │
-│  - Test processes                       │
-│  - User applications                    │
-│  - Can only access user-mapped memory   │
-└─────────────────────────────────────────┘
+## Why The Shell Is Not Yet A Real User Process
+
+The shell source still contains future-facing comments about EL0. In the current implementation:
+
+- `start_user_shell()` uses `scheduler().create_thread(...)`
+- the shell thread executes with normal kernel thread context
+- shell commands call kernel services directly
+- serial input is polled directly from PL011 registers
+
+So the shell is currently a kernel-resident diagnostic shell, not an isolated user process.
+
+## Why `run_user_test()` Is Not Yet A Real EL0 Test
+
+`run_user_test()` in `src/user_level/user_test.rs` currently:
+
+- prints `[EL0]` log prefixes
+- directly calls `sys_getpid()`
+- directly calls `sys_mmap()`
+- prints TODO steps for real EL0 bring-up
+
+That makes it a boot-time syscall smoke test, not a real exception-level transition test.
+
+## What Is Already Useful
+
+Even though the live boot path stays in EL1, the existing scaffolding is still valuable:
+
+- `UserProcess` defines the shape of a future EL0 process object
+- `switch_to_el0()` captures the intended register transition
+- `linux_syscall()` provides a future EL0-side calling convention
+- `PageTableManager` already has the necessary mapping helpers
+
+## What Still Needs To Happen For True EL0 Execution
+
+To move from scaffolding to real user-mode execution, the kernel still needs to:
+
+1. create an actual user process during boot
+2. map user code/data/heap/stack into TTBR0-backed tables
+3. load a real EL0 entry point and stack
+4. call `switch_to_el0()`
+5. route `svc` exceptions through a fully correct EL0 handler
+6. make syscall numbering and return handling consistent across the tree
+7. enforce process-owned handles and memory rather than direct kernel calls
+
+## Bottom Line
+
+The current tree has meaningful EL0 groundwork, but the live system boundary is still:
+
+```text
+kernel code
+  -> scheduler thread
+  -> shell and test helpers
 ```
 
-### Syscall Flow
+not:
 
+```text
+EL0 process
+  -> SVC
+  -> EL1 syscall dispatch
+  -> ERET back to EL0
 ```
-EL0 Process
-    │
-    ├─ Executes: svc #0
-    │
-    ↓
-CPU Exception (traps to EL1)
-    │
-    ├─ Saves PC to ELR_EL1
-    ├─ Saves state to SPSR_EL1
-    ├─ Jumps to exception vector
-    │
-    ↓
-Assembly Exception Handler
-    │
-    ├─ Saves all registers to stack
-    ├─ Reads ESR_EL1, ELR_EL1, SPSR_EL1, SP_EL0
-    ├─ Checks if SVC exception (EC = 0x15)
-    ├─ Calls: handle_svc_exception_from_el0()
-    │
-    ↓
-Rust Syscall Handler
-    │
-    ├─ Extracts syscall number from x8
-    ├─ Extracts arguments from x0-x7
-    ├─ Dispatches to syscall implementation
-    │   ├─ Linux syscalls (< 1000)
-    │   └─ Zircon syscalls (≥ 1000)
-    ├─ Stores result in x0
-    └─ Advances ELR_EL1 past svc instruction
-    │
-    ↓
-Assembly Exception Handler (return)
-    │
-    ├─ Restores all registers from stack
-    ├─ x0 contains syscall result
-    └─ Executes: eret
-    │
-    ↓
-EL0 Process (resumes)
-    │
-    └─ x0 contains syscall result
-```
-
-## Kernel Objects Implemented
-
-### 1. VMA (Virtual Memory Area)
-- **Location**: `src/mmu.rs`
-- **Purpose**: Describe virtual memory regions with permissions
-- **Used by**: PageTableManager for tracking mapped regions
-
-### 2. VMO (Virtual Memory Object)
-- **Location**: `src/syscall.rs` (already existed)
-- **Purpose**: Zircon-style virtual memory objects
-- **Operations**: create, read, write, resize, commit, decommit
-
-### 3. VMAR (Virtual Memory Address Region)
-- **Location**: `src/syscall.rs` (already existed)
-- **Purpose**: Manage virtual address space layout
-- **Operations**: map, unmap, allocate, protect, destroy
-
-### 4. Channel
-- **Location**: `src/channel.rs`
-- **Purpose**: IPC mechanism for message passing
-- **Operations**: create, read, write, call
-- **Features**: Two endpoints, message queues, handle transfer
-
-### 5. Handle Table
-- **Location**: `src/syscall.rs` (already existed)
-- **Purpose**: Track kernel object handles per process
-- **Operations**: add, remove, duplicate, get_rights
-
-### 6. Process/Thread Handles
-- **Location**: `src/el0_process.rs`, `src/syscall.rs`
-- **Purpose**: Represent process and thread objects
-- **Integration**: UserProcess extends PCB with EL0 data
-
-## Testing
-
-### Building
-```bash
-cargo build --target aarch64-unknown-none
-```
-
-### Running in QEMU
-```bash
-make run
-# or
-qemu-system-aarch64 -machine virt -cpu cortex-a53 -nographic \
-    -kernel kernel8.img -smp 4
-```
-
-### Expected Behavior
-
-1. **Boot Sequence**:
-   - Kernel boots at EL1
-   - Initializes MMU, syscall handler, channels, EL0 process manager
-   - Creates sample processes
-
-2. **EL0 Process Creation**:
-   - Test process created with user-mode entry point
-   - Memory mapped with proper permissions
-   - Page tables configured for user accessibility
-
-3. **Syscall Test**:
-   - EL0 test process makes syscalls via `svc #0`
-   - Traps to EL1 exception handler
-   - Syscall dispatched and executed
-   - Result returned to EL0
-   - Test process prints success messages
-
-4. **Shell in EL0**:
-   - Shell runs in user mode
-   - Makes syscalls for I/O operations
-   - Cannot access kernel memory directly
-
-## What's Not Yet Implemented
-
-The following kernel objects are defined but need full implementation:
-
-1. **Socket**: Network/stream IPC (type defined, no implementation)
-2. **Event**: Event signaling (type defined, no implementation)
-3. **Port**: Event port mechanism (type defined, no implementation)
-4. **Timer**: Timer objects (type defined, no implementation)
-5. **Futex**: Fast userspace mutex (syscall stubs exist)
-6. **Full MMU**: Complete 4-level page table walk (simplified version implemented)
-7. **Address Space Isolation**: Per-process page tables (infrastructure ready)
-8. **Copy-on-Write**: For fork/exec (VMO support exists)
-
-## Key Files Modified/Created
-
-### New Files
-- `src/mmu.rs` - MMU and page table management
-- `src/syscall_handler.rs` - SVC exception handler
-- `src/el0_process.rs` - EL0 process management
-- `src/channel.rs` - Channel IPC implementation
-- `src/el0_test.rs` - EL0 test process
-
-### Modified Files
-- `src/main.rs` - Added new modules, updated exception handler, initialized new subsystems
-- `Cargo.toml` - No changes needed (bitflags already present)
-
-## Syscall Compatibility
-
-### Linux Syscalls (Working)
-- ✅ `sys_mmap` - Anonymous memory mapping
-- ✅ `sys_munmap` - Unmap memory
-- ✅ `sys_mprotect` - Change protection (stub)
-- ✅ `sys_fork` - Create process
-- ✅ `sys_exit` - Exit process
-- ✅ `sys_getpid` - Get process ID (placeholder)
-- ✅ `sys_getppid` - Get parent PID (placeholder)
-- ✅ `sys_kill` - Kill process
-
-### Zircon Syscalls (Working)
-- ✅ `sys_vmo_create` - Create VMO
-- ✅ `sys_vmo_read` / `sys_vmo_write` - Read/write VMO
-- ✅ `sys_vmo_get_size` / `sys_vmo_set_size` - Resize VMO
-- ✅ `sys_vmo_op_range` - VMO operations
-- ✅ `sys_vmar_map` / `sys_vmar_unmap` - VMAR mapping
-- ✅ `sys_vmar_allocate` / `sys_vmar_protect` / `sys_vmar_destroy` - VMAR operations
-- ✅ `sys_handle_close` / `sys_handle_duplicate` - Handle operations
-- ✅ `sys_process_create` - Create process
-- ✅ `sys_channel_create` - Create channel
-- ✅ `sys_channel_read` / `sys_channel_write` - Channel I/O
-
-## Debugging Tips
-
-1. **Syscall Not Working**: Check ESR_EL1 in exception handler to verify EC code
-2. **Permission Faults**: Verify page table entries have AP_EL0 flag set
-3. **Invalid Address**: Ensure user process only accesses user-mapped memory
-4. **Exception Loop**: Check that ELR_EL1 is advanced past svc instruction
-
-## Future Work
-
-1. Implement full 4-level page table walk
-2. Add proper address space isolation with ASIDs
-3. Implement remaining kernel objects (socket, event, port, timer)
-4. Add futex support for synchronization
-5. Implement copy-on-write for fork
-6. Add proper user-mode shell with command parsing
-7. Implement filesystem support for execve
-8. Add proper timer and clock syscalls
-
-## References
-
-- ARM Architecture Reference Manual (ARM DDI 0487)
-- Zircon Kernel Documentation: https://fuchsia.dev/fuchsia-src/concepts/kernel
-- ARM Exception Levels: https://developer.arm.com/documentation/102412/0100/Exception-levels
-- grt-zcore project: https://github.com/StevenMeng5898/grt-zcore

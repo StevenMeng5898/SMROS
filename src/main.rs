@@ -80,7 +80,7 @@ unsafe impl alloc::alloc::GlobalAlloc for KernelAllocator {
     }
 }
 
-// Boot assembly code and context switch
+// Boot assembly code
 core::arch::global_asm!(
     r#"
 .section .text.boot, "ax"
@@ -405,106 +405,10 @@ exception_handler:
     
     eret
 
-// Context Switch Function
-// Arguments: x0 = current TCB pointer, x1 = next TCB pointer
-// This function saves the current thread context and restores the next thread context
-.globl context_switch
-.type context_switch, %function
-context_switch:
-    // Disable interrupts during context switch
-    mrs     x16, daif
-    orr     x16, x16, #0x80
-    msr     daif, x16
-
-    // Calculate context base for current thread (TCB + 0x10 for context)
-    add     x16, x0, #0x10
-
-    // Save all callee-saved registers
-    // x19-x28 at offsets 0x98-0xE0 from context base
-    stp     x19, x20, [x16, #0x98]
-    stp     x21, x22, [x16, #0xA8]
-    stp     x23, x24, [x16, #0xB8]
-    stp     x25, x26, [x16, #0xC8]
-    stp     x27, x28, [x16, #0xD8]
-
-    // Save FP (x29) at offset 0xE8 and LR (x30) at offset 0xF0
-    stp     x29, x30, [x16, #0xE8]
-
-    // Save current SP at offset 0xF8
-    mov     x17, sp
-    str     x17, [x16, #0xF8]
-
-    // Save the return address (PC) at offset 0x100
-    str     x30, [x16, #0x100]
-
-    // Load next thread context base
-    add     x16, x1, #0x10
-
-    // Restore SP first (at offset 0xF8)
-    ldr     x17, [x16, #0xF8]
-    mov     sp, x17
-
-    // Restore callee-saved registers
-    ldp     x19, x20, [x16, #0x98]
-    ldp     x21, x22, [x16, #0xA8]
-    ldp     x23, x24, [x16, #0xB8]
-    ldp     x25, x26, [x16, #0xC8]
-    ldp     x27, x28, [x16, #0xD8]
-
-    // Restore FP and LR (at offsets 0xE8 and 0xF0)
-    ldp     x29, x30, [x16, #0xE8]
-
-    // Load the saved PC (return address) at offset 0x100
-    ldr     x16, [x16, #0x100]
-
-    // Enable interrupts
-    mrs     x17, daif
-    bic     x17, x17, #0x80
-    msr     daif, x17
-
-    // Branch to the saved PC
-    br      x16
-
-// Context Switch Start Function (for first thread switch only)
-// Arguments: x0 = next TCB pointer
-// This function jumps to the next thread without saving current context
-.globl context_switch_start
-.type context_switch_start, %function
-context_switch_start:
-    // Disable interrupts
-    mrs     x16, daif
-    orr     x16, x16, #0x80
-    msr     daif, x16
-
-    // Load next thread's context base (TCB + 0x10 for context)
-    add     x16, x0, #0x10
-
-    // Restore SP first (at offset 0xF8)
-    ldr     x17, [x16, #0xF8]
-    mov     sp, x17
-
-    // Restore callee-saved registers (x19-x28)
-    ldp     x19, x20, [x16, #0x98]
-    ldp     x21, x22, [x16, #0xA8]
-    ldp     x23, x24, [x16, #0xB8]
-    ldp     x25, x26, [x16, #0xC8]
-    ldp     x27, x28, [x16, #0xD8]
-
-    // Restore FP (x29) at offset 0xE8 and LR (x30) at offset 0xF0
-    ldp     x29, x30, [x16, #0xE8]
-
-    // Load thread entry point from context.pc (offset 0x100)
-    ldr     x16, [x16, #0x100]
-
-    // Enable interrupts
-    mrs     x17, daif
-    bic     x17, x17, #0x80
-    msr     daif, x17
-
-    // Jump to thread entry
-    br      x16
 "#,
 );
+
+core::arch::global_asm!(include_str!("kernel_lowlevel/context_switch.S"));
 
 /// Kernel version
 const KERNEL_VERSION: &str = "0.2.0";

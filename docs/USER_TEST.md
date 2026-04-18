@@ -1,283 +1,112 @@
-# SMROS User Test Results - Syscall Verification
+# User Test Harness: Current Behavior
 
-## Summary
+This document explains what the current user test code actually validates.
 
-Successfully implemented user/kernel separation infrastructure and verified syscall implementations work correctly in SMROS.
+## Relevant Files
 
-## What Was Completed
+- `src/user_level/user_test.rs`
+- `src/user_level/user_process.rs`
+- `src/user_level/user_shell.rs`
+- `src/main.rs`
 
-### ✅ 1. Kernel Objects Implemented
+## Two Different Test Layers Exist
 
-All required kernel objects for Zircon syscall compatibility are implemented:
+The tree currently contains both:
 
-| Kernel Object | File | Status | Description |
-|--------------|------|--------|-------------|
-| **VMA** (Virtual Memory Area) | `src/kernel_lowlevel/mmu.rs` | ✅ Complete | Memory region descriptors with permissions |
-| **VMO** (Virtual Memory Object) | `src/kernel_objects/vmo.rs` | ✅ Complete | Virtual memory objects with read/write/resize |
-| **VMAR** (Virtual Memory Address Region) | `src/kernel_objects/vmar.rs` | ✅ Complete | Virtual address space management |
-| **Channel** | `src/kernel_objects/channel.rs` | ✅ Complete | IPC mechanism with create/read/write |
-| **Handle Table** | `src/kernel_objects/handle.rs` | ✅ Complete | Per-process handle management |
-| **Thread** | `src/kernel_objects/thread.rs` | ✅ Complete | Thread management with TCB |
-| **Scheduler** | `src/kernel_objects/scheduler.rs` | ✅ Complete | Preemptive round-robin scheduler |
+1. an active boot-time smoke test
+2. future-facing EL0 test entry points
 
-### ✅ 2. User/Kernel Infrastructure
+Those are not the same thing.
 
-| Component | File | Status | Description |
-|-----------|------|--------|-------------|
-| **MMU/Page Tables** | `src/kernel_lowlevel/mmu.rs` | ✅ Complete | Page table support |
-| **Exception Handler** | `src/main.rs` | ✅ Complete | SVC detection and dispatch from assembly |
-| **Syscall Handler** | `src/syscall/syscall_dispatch.rs` | ✅ Complete | Routes syscalls from exception handler |
-| **User Process Manager** | `src/user_level/user_process.rs` | ✅ Complete | User process creation and management |
-| **User Test Process** | `src/user_level/user_test.rs` | ✅ Complete | Tests syscall functionality |
+## Active Boot-Time Test
 
-### ✅ 3. Syscall Testing Results
-
-The kernel was built and executed in QEMU. Test results:
-
-```
-[USER] Setting up test process...
-[USER] Testing syscall interface...
-[USER] Testing getpid...
-[USER] getpid returned: 1 (SUCCESS)
-[USER] Testing mmap...
-[USER] mmap returned: 0x1000 (SUCCESS)
-[USER] Test process complete!
-```
-
-**Tested Syscalls:**
-- ✅ `sys_getpid()` - Returns PID 1 (correct for kernel)
-- ✅ `sys_mmap()` - Returns valid memory address 0x1000
-
-### 📋 Files Created/Modified
-
-**Current Directory Structure:**
-1. `src/kernel_lowlevel/` - Low-level hardware drivers
-   - `mmu.rs` - MMU and page table management
-   - `memory.rs` - Multi-process memory management
-2. `src/kernel_objects/` - Kernel objects (8 files)
-3. `src/syscall/` - Syscall interface layer (4 files)
-4. `src/user_level/` - User-mode processes (4 files)
-5. `src/main.rs` - Kernel entry point, exception handler, test invocation
-
-## Architecture
-
-### Current State (Kernel Testing)
-
-```
-┌─────────────────────────────────────┐
-│       Kernel Mode                   │
-│                                     │
-│  ┌───────────────────────────────┐  │
-│  │ kernel_main()                 │  │
-│  │   ↓                           │  │
-│  │ user_test::run_user_test()   │  │
-│  │   ↓                           │  │
-│  │ sys_getpid() → Returns 1 ✅   │  │
-│  │ sys_mmap() → Returns 0x1000 ✅│  │
-│  └───────────────────────────────┘  │
-│                                     │
-│  Exception Handler (ready for SVC) │
-│  - Detects SVC exceptions          │
-│  - Dispatches to syscall impls     │
-│  - Returns result                  │
-└─────────────────────────────────────┘
-```
-
-### Target Architecture (Full User Mode)
-
-```
-┌─────────────────────────────────────┐
-│       Kernel Mode                   │
-│  - Exception handlers               │
-│  - Syscall dispatch                 │
-│  - Memory management                │
-│  - Scheduler                        │
-└──────────────┬──────────────────────┘
-               │ SVC #0 (syscall)
-               │ Exception return
-┌──────────────┴──────────────────────┐
-│       User Mode                     │
-│  - Shell process                    │
-│  - Test processes                   │
-│  - User applications                │
-│  - Makes syscalls via SVC          │
-└─────────────────────────────────────┘
-```
-
-## What Works Now
-
-### ✅ Fully Implemented and Tested
-
-1. **VMO (Virtual Memory Object)**
-   - Create paged VMOs
-   - Read/write operations
-   - Resize (for resizable VMOs)
-   - Commit/decommit pages
-   - Zero operations
-
-2. **VMAR (Virtual Memory Address Region)**
-   - Map VMOs into address space
-   - Unmap regions
-   - Allocate subregions
-   - Change protection
-   - Destroy VMAR
-
-3. **Channel IPC**
-   - Create channels (two endpoints)
-   - Read/write messages
-   - Handle transfer
-   - Signal state
-
-4. **Handle Management**
-   - Add/remove handles
-   - Duplicate handles
-   - Rights system
-
-5. **Syscall Interface**
-   - Linux syscalls: getpid, mmap, munmap, fork, exit, kill
-   - Zircon syscalls: VMO, VMAR, channel operations
-   - Error handling
-
-6. **Exception Handler**
-   - Detects SVC exceptions
-   - Extracts syscall number
-   - Dispatches to implementations
-   - Returns results
-
-### 🔧 Implementation Details
-
-**Syscall Flow:**
-```
-User Code (user mode or kernel mode)
-    ↓
-svc #0 instruction
-    ↓
-CPU Exception (traps to kernel mode)
-    ↓
-Assembly Exception Handler
-    - Saves all registers
-    - Reads ESR_EL1 (exception class)
-    - Checks for SVC (EC = 0x15)
-    - Calls Rust handler
-    ↓
-Rust Syscall Dispatch
-    - Extracts syscall number from x8
-    - Extracts arguments from x0-x5
-    - Dispatches to implementation
-    ↓
-Syscall Implementation
-    - Executes syscall logic
-    - Returns result in x0
-    ↓
-Assembly Exception Handler (return)
-    - Restores registers
-    - Advances ELR_EL1 past svc
-    - Executes eret
-    ↓
-User Code resumes (x0 = result)
-```
-
-## Remaining Work
-
-### 🔄 To Complete Full User Mode Execution
-
-The infrastructure is ready, but to execute processes in actual user mode:
-
-1. **Page Table Setup** (Infrastructure exists, needs activation)
-   ```
-   - Map user pages with proper flags
-   - Configure page tables for user space
-   - Set proper permissions
-   ```
-
-2. **Kernel→User Transition** (Code written, needs testing)
-   ```assembly
-   - Configure SPSR_EL1 for user mode
-   - Set ELR_EL1 to user entry point
-   - Set SP_EL0 to user stack
-   - Execute ERET to switch to user mode
-   ```
-
-3. **User Test Process** (Entry point ready)
-   ```rust
-   - user_test_process_entry() exists
-   - Makes syscalls via svc #0
-   - Will trap to kernel exception handler
-   ```
-
-### Steps to Enable Full EL0:
+The live boot path calls:
 
 ```rust
-// In kernel_main, after setup:
-unsafe {
-    // 1. Setup user page tables
-    let mut pt = PageTableManager::new().unwrap();
-    pt.map_user_region(0x0, code_pfn, 0x1000, true, false, true);
-    pt.map_user_region(0x1000, data_pfn, 0x1000, true, true, false);
-    pt.switch_to();
-    
-    // 2. Configure EL0 execution
-    let user_sp = 0xFFFF_F000; // User stack top
-    let user_entry = 0x0; // User code entry
-    
-    // 3. Drop to EL0
-    core::arch::asm!(
-        "msr sp_el0, {sp}",
-        "msr elr_el1, {entry}",
-        "msr spsr_el1, {spsr}",
-        "eret",
-        sp = in(reg) user_sp,
-        entry = in(reg) user_entry,
-        spsr = in(reg) 0x0, // EL0t
-        options(noreturn),
-    );
-}
+crate::user_level::user_test::run_user_test();
 ```
 
-## Test Commands
+`run_user_test()` currently:
 
-### Build Kernel
-```bash
-cd /home/steven/workspace/SMROS
-make
-```
+- prints `[EL0]`-prefixed log lines
+- directly calls `sys_getpid()`
+- directly calls `sys_mmap()`
+- prints TODO steps for real EL0 bring-up
 
-### Run in QEMU
-```bash
-qemu-system-aarch64 -machine virt -cpu cortex-a53 -nographic \
-    -kernel kernel8.img -smp 1
-```
+This means the current boot-time test is a kernel-mode smoke test of syscall functions, not a real EL0-to-EL1 trap path.
 
-### Expected Output
-```
-[USER] Setting up test process...
-[USER] Testing syscall interface...
-[USER] Testing getpid...
-[USER] getpid returned: 1 (SUCCESS)
-[USER] Testing mmap...
-[USER] mmap returned: 0x1000 (SUCCESS)
-[USER] Test process complete!
-```
+## Future-Facing EL0 Helpers
 
-## Key Achievements
+`src/user_level/user_test.rs` also contains:
 
-1. ✅ **All kernel objects implemented** (VMA, VMO, VMAR, Channel, Handles, Thread, Scheduler)
-2. ✅ **Syscall interface verified** (getpid, mmap work correctly)
-3. ✅ **Exception handler functional** (SVC detection and dispatch)
-4. ✅ **User infrastructure ready** (Page tables, process manager, test process)
-5. ✅ **Build system working** (No compilation errors, zero warnings)
-6. ✅ **QEMU execution successful** (Kernel boots and runs tests)
-7. ✅ **User shell functional** (11 commands working)
+- `linux_syscall()`
+- `test_getpid()`
+- `test_mmap()`
+- `test_write()`
+- `test_exit()`
+- `user_test_process_entry()`
+- `user_busy_loop_entry()`
 
-## Conclusion
+These helpers are intended for a future boot path that actually drops into EL0.
 
-The user/kernel separation infrastructure is **complete and functional**. All kernel objects required for Zircon syscall compatibility are implemented. The syscall implementations work correctly as verified by the test process.
+## What The Current Boot Test Proves
 
-The system runs successfully with:
-- User-mode shell (v0.5.0) running as scheduled thread
-- 11 functional shell commands
-- Full syscall compatibility (Linux & Zircon)
-- Preemptive round-robin scheduler
-- SMP multi-core support
+Today the active test proves:
 
-**Current Status:** All infrastructure and syscall implementations working, shell fully operational with 11 commands.
+- the syscall module is linked and callable
+- `sys_getpid()` returns a sensible placeholder result
+- `sys_mmap()` returns an address-like success result
+- boot continues into shell startup afterward
+
+## What The Current Boot Test Does Not Prove
+
+Today the active test does not prove:
+
+- real EL0 execution
+- real `svc` exception entry from a user process
+- correct `eret` return to EL0
+- stable Linux ABI numbering
+- Zircon syscall reachability through the active exception vectors
+- complete user-space memory isolation
+
+## The Shell's `testsc` Command
+
+The shell exposes a `testsc` command that acts as an additional smoke test.
+
+It currently:
+
+- performs a lightweight write-style syscall helper call
+- directly calls `sys_getpid()`
+- directly calls `sys_mmap()`
+
+Treat it as a developer smoke test, not as a full syscall compliance suite.
+
+## Why The Logs Still Say `[EL0]`
+
+The prefixes in `run_user_test()` reflect the intended direction of the project, not the current execution mode.
+
+As the code stands today:
+
+- the kernel initializes user-process scaffolding
+- the test harness remains in EL1
+- the shell remains in EL1
+
+## What Is Needed For A Real EL0 Test
+
+To convert the current scaffolding into a real user-mode test path, the kernel still needs to:
+
+1. build or place executable user code into a user mapping
+2. create a real `UserProcess`
+3. install TTBR0 page tables for that process
+4. set up `SP_EL0`, `ELR_EL1`, and `SPSR_EL1`
+5. call `switch_to_el0()`
+6. return syscall results through a fully correct EL0 register-frame path
+
+## Bottom Line
+
+The current user test code is useful, but it should be described accurately:
+
+- active test path: kernel-mode smoke test
+- inactive but present scaffolding: future EL0 syscall test path
+
+That distinction matters when evaluating boot logs or shell output.

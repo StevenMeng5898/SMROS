@@ -1,292 +1,191 @@
-# Kernel Objects Directory Structure - Complete
+# Kernel Objects Directory
 
-## Summary
+This document describes the current `src/kernel_objects/` layout and how those modules are used by the live kernel.
 
-Successfully reorganized kernel objects from a single file into a proper directory structure with one file per kernel object type.
+## Directory Layout
 
-## New Directory Structure
-
-```
-src/
-├── kernel_objects/              ← NEW DIRECTORY
-│   ├── mod.rs                   (56 lines)  - Module declarations and manager
-│   ├── types.rs                 (203 lines) - Shared types and constants
-│   ├── handle.rs                (97 lines)  - HandleTable implementation
-│   ├── vmo.rs                   (249 lines) - VMO implementation
-│   └── vmar.rs                  (195 lines) - VMAR implementation
-├── syscall.rs                   (1397 lines) - Syscall implementations
-├── main.rs                      (790 lines)  - Kernel entry point
-└── ...                          (other modules)
+```text
+src/kernel_objects/
+├── mod.rs
+├── channel.rs
+├── handle.rs
+├── scheduler.rs
+├── thread.rs
+├── types.rs
+├── vmar.rs
+└── vmo.rs
 ```
 
-## File Organization
+## File Responsibilities
 
-### kernel_objects/types.rs (203 lines)
-**Purpose:** Shared types, constants, and error codes
+| File | Purpose | Current Role |
+|------|---------|--------------|
+| `mod.rs` | module declarations, light re-exports, global `KernelObjectManager` | owns the global handle-table wrapper |
+| `thread.rs` | `CpuContext`, `ThreadState`, `ThreadId`, `ThreadControlBlock`, stack helpers | live thread object model used by the scheduler |
+| `scheduler.rs` | global scheduler, idle thread, context-switch entry points, tick accounting | live scheduling path used to start the shell |
+| `types.rs` | shared handle/object enums, rights, VM flags, Zircon-style errors, page helpers | shared definitions for the syscall and object layers |
+| `handle.rs` | fixed-size handle table and handle duplication/removal helpers | currently a simple in-kernel table, not a full per-process capability system |
+| `vmo.rs` | VMO constructors and operations | backing object model for memory syscalls |
+| `vmar.rs` | VMAR bookkeeping and mapping/protection helpers | bookkeeping layer for Zircon-style VM regions |
+| `channel.rs` | channel object, global channel table, channel syscall wrappers | live channel subsystem initialization plus syscall helpers |
 
-**Contents:**
-- Constants: `MAX_HANDLES_PER_PROCESS`, `INVALID_HANDLE`
-- Handle types: `HandleValue`, `ObjectType`
-- Rights enum and bitflags
-- VM options: `VmOptions`, `MmuFlags`, `VmoCloneFlags`, `VmarFlags`
-- VMO types: `VmoType`, `VmoOpType`, `CachePolicy`
-- Error types: `ZxError`, `ZxResult`
-- Helper functions: `pages()`, `roundup_pages()`
+## `mod.rs`
 
-### kernel_objects/handle.rs (97 lines)
-**Purpose:** Handle table management
+`mod.rs` currently:
 
-**Contents:**
-- `HandleEntry` struct
-- `HandleTable` struct and implementation
-  - `new()` - Create table
-  - `add()` - Add handle
-  - `remove()` - Remove handle
-  - `get_rights()` - Query rights
-  - `duplicate()` - Duplicate handle
+- declares all object modules
+- re-exports:
+  - `types::*`
+  - `handle::*`
+  - `vmo::*`
+  - `scheduler::*`
+- owns `KernelObjectManager`
+- exposes a single global `HandleTable`
 
-### kernel_objects/vmo.rs (249 lines)
-**Purpose:** Virtual Memory Object
+Important detail: `vmar`, `channel`, and `thread` are public modules, but they are not fully re-exported from `mod.rs`. Code that needs them normally imports them via their module paths.
 
-**Contents:**
-- `Vmo` struct
-- Creation methods:
-  - `new_paged()` - Regular paged VMO
-  - `new_paged_with_resizable()` - Resizable VMO
-  - `new_physical()` - Physical VMO
-  - `new_contiguous()` - Contiguous VMO
-- Operations:
-  - `read()`, `write()` - I/O operations
-  - `commit()`, `decommit()` - Page management
-  - `zero()` - Zero range
-  - `set_len()` - Resize (resizable VMOs)
-  - `create_child()`, `create_slice()` - Child VMOs
-  - `get_physical_addresses()` - Query physical addresses
-  - `set_cache_policy()` - Set caching
+## `thread.rs`
 
-### kernel_objects/vmar.rs (195 lines)
-**Purpose:** Virtual Memory Address Region
+`thread.rs` is the ABI-sensitive part of the directory.
 
-**Contents:**
-- `VmarMapping` struct
-- `Vmar` struct
-- Methods:
-  - `new()` - Create VMAR
-  - `map()`, `map_ext()` - Map VMOs
-  - `unmap()` - Unmap region
-  - `unmap_handle_close_thread_exit()` - Thread exit unmap
-  - `protect()` - Change permissions
-  - `destroy()` - Destroy VMAR
-  - `allocate()` - Allocate subregion
-  - `find_free_region()`, `find_free_region_aligned()` - Internal helpers
+It defines:
 
-### kernel_objects/mod.rs (56 lines)
-**Purpose:** Module root and manager
+- `ThreadState`
+- `ThreadId`
+- `CpuContext`
+- `ThreadControlBlock`
+- stack utilities used by the scheduler
 
-**Contents:**
-- Module declarations
-- Re-exports of all public types
-- `KernelObjectManager` struct
-- Global instance and accessor function
-- `init()` function
+`CpuContext` and `ThreadControlBlock` must stay layout-compatible with `src/kernel_lowlevel/context_switch.S`. That file saves and restores fields based on fixed offsets.
 
-## Benefits of This Structure
+## `scheduler.rs`
 
-### 1. **Clear Separation of Concerns**
-```
-types.rs    → Type definitions only
-handle.rs   → Handle management only
-vmo.rs      → VMO implementation only
-vmar.rs     → VMAR implementation only
-mod.rs      → Module organization only
-```
+`scheduler.rs` implements the live thread scheduler.
 
-### 2. **Easier Navigation**
-- Need to modify VMO? → Edit `vmo.rs`
-- Need to add handle features? → Edit `handle.rs`
-- Need new types? → Edit `types.rs`
-- No more searching through 2000+ line files
+Main responsibilities:
 
-### 3. **Better Maintainability**
-- Each file is < 250 lines (easy to understand)
-- Clear boundaries between components
-- Parallel development possible on different files
+- create the idle thread
+- create worker threads
+- track the current thread and next runnable thread
+- account for scheduler ticks
+- perform `context_switch()` and `context_switch_start()`
+- expose CPU-aware helpers such as `schedule_on_cpu()`
 
-### 4. **Proper Rust Module Structure**
-- Follows Rust best practices
-- Directory with mod.rs pattern
-- Clean re-exports for external use
+This is one of the most active modules in the current kernel: the shell reaches users through this scheduler path.
 
-## Usage Examples
+## `types.rs`
 
-### From External Modules (e.g., syscall.rs)
+`types.rs` contains the shared object vocabulary:
 
-```rust
-// Import all kernel object types
-use crate::kernel_objects::{
-    Vmo, Vmar, HandleTable, HandleValue,
-    ZxError, ZxResult, VmoType,
-    MAX_HANDLES_PER_PROCESS,
-};
+- `HandleValue`
+- `ObjectType`
+- `Rights`
+- `VmOptions`
+- `MmuFlags`
+- `VmoCloneFlags`
+- `VmarFlags`
+- `VmoType`
+- `VmoOpType`
+- `CachePolicy`
+- `ZxError`
+- `ZxResult`
+- `pages()` and `roundup_pages()`
 
-// Or use the re-exports from syscall.rs
-use crate::syscall::{
-    Vmo, Vmar, HandleTable,  // Re-exported from kernel_objects
-};
-```
+These definitions are used both by the object layer and by `src/syscall/syscall.rs`.
 
-### Creating a VMO
+## `handle.rs`
 
-```rust
-use crate::kernel_objects::Vmo;
+`handle.rs` currently provides a simple fixed-size handle table with:
 
-// Create paged VMO
-let vmo = Vmo::new_paged(10)?;  // 10 pages
+- `add()`
+- `remove()`
+- `get_rights()`
+- `duplicate()`
 
-// Create contiguous VMO
-let vmo = Vmo::new_contiguous(0x10000)?;  // 64KB
+This is intentionally simple and currently closer to a global kernel utility than a complete per-process capability implementation.
 
-// Create physical VMO
-let vmo = Vmo::new_physical(0x8000_0000, 0x1000)?;
-```
+## `vmo.rs`
 
-### Using Handle Table
+`vmo.rs` supports:
 
-```rust
-use crate::kernel_objects::{HandleTable, ObjectType, Rights};
+- paged VMOs
+- resizable VMOs
+- physical VMOs
+- contiguous VMOs
+- size queries and resize
+- child and slice creation
+- placeholder read/write/zero/commit behavior
 
-let mut table = HandleTable::new();
-let handle = table.add(ObjectType::Vmo, Rights::DEFAULT_VMO as u32)?;
-```
+The constructors do perform real page-frame allocation through `PageFrameAllocator`, but many higher-level operations remain lightweight or placeholder-only.
 
-## Build and Test Results
+## `vmar.rs`
 
-### Compilation
-```bash
-$ cargo build --target aarch64-unknown-none
-   Compiling smros v0.1.0
-    Finished `dev` profile [unoptimized + debuginfo]
-✅ No errors, only warnings
-```
+`vmar.rs` manages a software model of virtual regions:
 
-### QEMU Test
-```
-[INFO] EL0 test complete! Starting EL0 shell...
-[KERNEL] Starting EL0 shell...
-[KERNEL] Shell entry point: 0x0x400017c8
-[KERNEL] Shell would run at EL0 with:
-[KERNEL]   - User stack at 0xFFFF_0000
-[KERNEL]   - Entry at el0_shell_entry
-[KERNEL]   - Page tables with AP_EL0 flag
-[KERNEL]   - SPSR_EL1 = 0x0 (EL0t mode)
-[KERNEL]   - ERET to drop to EL0
-[KERNEL] Shell setup complete!
-✅ Kernel boots and runs successfully
-```
+- base address and size
+- region allocation
+- mappings
+- protection bookkeeping
+- subregion allocation
+- destroy/unmap helpers
 
-## Code Statistics
+Today this is primarily a bookkeeping layer. It is not yet a full, live mirror of the actual page-table state used by the running shell/process demo.
 
-| Component | Lines | Purpose |
-|-----------|-------|---------|
-| **types.rs** | 203 | Shared types and constants |
-| **handle.rs** | 97 | Handle table management |
-| **vmo.rs** | 249 | Virtual Memory Object |
-| **vmar.rs** | 195 | Virtual Memory Address Region |
-| **mod.rs** | 56 | Module organization |
-| **Total** | **800** | All kernel objects |
+## `channel.rs`
 
-### Comparison
+`channel.rs` includes:
 
-| Metric | Before | After | Change |
-|--------|--------|-------|--------|
-| **Files** | 1 (kernel_objects.rs) | 5 (directory) | +4 files |
-| **Largest File** | 750 lines | 249 lines | -67% |
-| **Average File Size** | 750 lines | 160 lines | -79% |
-| **Organization** | Single monolithic file | One file per object | ✅ Much better |
+- `Channel`
+- `ChannelMessage`
+- `ChannelTable`
+- global `CHANNEL_TABLE`
+- syscall helpers:
+  - `sys_channel_create`
+  - `sys_channel_read`
+  - `sys_channel_write`
+  - `sys_channel_call_noretry`
 
-## Module Dependency Graph
+`kernel_main()` calls `channel::init()`, so the subsystem is part of the live boot path. The syscall wrappers exist, but they are not yet wired into the active Zircon dispatch table used by the current kernel.
 
-```
-main.rs
-  └── kernel_objects/
-        ├── mod.rs (re-exports all)
-        │     └── types.rs (base types)
-        │     └── handle.rs (uses types)
-        │     └── vmo.rs (uses types)
-        │     └── vmar.rs (uses types + vmo)
-        │
-  └── syscall.rs
-        └── re-exports kernel_objects types
-  
-  └── el0_shell.rs
-  └── el0_test.rs
-  └── el0_process.rs
-  └── channel.rs
-```
+## How The Directory Is Used Today
 
-## What Each File Owns
+### Live Boot Path
 
-### types.rs Owns:
-- ✅ All constants
-- ✅ All enum definitions
-- ✅ All bitflags definitions
-- ✅ Error types
-- ✅ Type aliases
-- ✅ Simple helper functions
+The current boot path directly uses:
 
-### handle.rs Owns:
-- ✅ HandleEntry struct
-- ✅ HandleTable struct
-- ✅ All handle operations
+- `scheduler.rs` to create and run the shell thread
+- `thread.rs` for TCB/context layout
+- `channel.rs` for subsystem initialization
 
-### vmo.rs Owns:
-- ✅ Vmo struct
-- ✅ All VMO creation methods
-- ✅ All VMO operations (read, write, commit, etc.)
-- ✅ VMO child/slice creation
+### Syscall Layer
 
-### vmar.rs Owns:
-- ✅ VmarMapping struct
-- ✅ Vmar struct
-- ✅ All VMAR operations (map, unmap, protect, etc.)
-- ✅ Region allocation
+`src/syscall/syscall.rs` depends on:
 
-### mod.rs Owns:
-- ✅ Module declarations
-- ✅ Re-exports
-- ✅ KernelObjectManager
-- ✅ Global instance management
+- `types.rs`
+- `handle.rs`
+- `vmo.rs`
+- `vmar.rs`
 
-## Future Extensions
+### User-Level Scaffolding
 
-### Easy to Add:
-1. **New Kernel Objects** (e.g., Port, Event, Socket)
-   - Create new file: `kernel_objects/port.rs`
-   - Add to mod.rs: `mod port;` and `pub use port::*;`
-   - Done!
+`src/user_level/` depends on:
 
-2. **New VMO Features**
-   - Edit only `vmo.rs`
-   - No impact on other files
+- `scheduler.rs` for thread creation
+- `thread.rs` for user-thread context scaffolding
 
-3. **Handle Table Enhancements**
-   - Edit only `handle.rs`
-   - Isolated changes
+## Current Design Reality
 
-4. **New VMAR Operations**
-   - Edit only `vmar.rs`
-   - Clean separation
+The refactor into a dedicated `kernel_objects/` directory is complete at the source layout level. The runtime wiring is more selective:
 
-## Conclusion
+- threads and the scheduler are live
+- channels are initialized and usable as kernel objects
+- VMO/VMAR objects exist and back syscall helpers
+- handle management remains simplified
+- object-to-process ownership is not yet fully modeled
 
-The kernel objects are now properly organized in a directory structure with:
+## Current Limitations
 
-✅ **One file per kernel object** (VMO, VMAR, Handle)
-✅ **Shared types separated** (types.rs)
-✅ **Module root manages** exports (mod.rs)
-✅ **Clear ownership** and boundaries
-✅ **Easy to navigate** and maintain
-✅ **Follows Rust best practices** for module structure
-✅ **Builds and runs successfully** in QEMU
-
-This structure is production-ready and follows standard Rust conventions for organizing related types and implementations!
+- The global handle table is not yet a full per-process handle namespace.
+- Channel syscall helpers exist, but the current Zircon dispatch table does not expose them.
+- VMAR state is not yet a full source of truth for hardware mappings.
+- Several object operations are placeholders intended to keep the interface shape stable while the kernel matures.
