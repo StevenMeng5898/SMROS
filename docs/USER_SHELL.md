@@ -1,6 +1,8 @@
-# Shell and Kernel Objects: Current Integration
+# User Shell: Current Integration
 
-This document summarizes how the current shell is wired into the kernel and how that relates to the `kernel_objects/` refactor.
+This document summarizes how the current shell is wired into the kernel.
+
+For the `src/kernel_objects/` layout and object responsibilities, see `docs/KERNEL_OBJECTS_DIRECTORY.md`.
 
 ## Current Shell Status
 
@@ -85,57 +87,6 @@ So it mixes the future-facing syscall helper path with direct kernel function ca
 ### `exit`
 
 `exit` does not tear down the shell process. It simply parks the current thread in a `wfi()` loop.
-
-## Relationship To `kernel_objects/`
-
-The `kernel_objects/` split is the right source layout for the current codebase:
-
-- thread and scheduler code live under `src/kernel_objects/`
-- handle, VMO, VMAR, and channel code also live there
-- syscall code lives separately under `src/syscall/`
-
-This means the shell now sits above a clearer layering:
-
-```text
-user_level/user_shell.rs
-  -> kernel_objects/scheduler.rs
-  -> kernel_lowlevel/memory.rs
-  -> syscall/syscall.rs
-  -> kernel_objects/* for object abstractions
-```
-
-## Kernel Objects That Matter To The Shell Today
-
-### Scheduler and Threads
-
-These are the most important live kernel objects for shell execution:
-
-- the shell is created as a scheduler thread
-- the shell starts only after `start_first_thread()`
-- thread context is restored by `context_switch_start`
-
-### Process Manager
-
-The shell surfaces process-manager state through commands like:
-
-- `ps`
-- `top`
-- `kill`
-
-### Memory Subsystem
-
-The shell exposes allocator and process-memory state through:
-
-- `meminfo`
-- `top`
-
-### VMO / VMAR / Handle Objects
-
-These objects are present in the tree and used by the syscall layer, but the normal shell command set does not manage them directly yet.
-
-### Channels
-
-The channel subsystem is initialized during boot, but the shell does not currently expose commands for channel creation or message passing.
 
 ## Practical Interpretation
 
