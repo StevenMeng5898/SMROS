@@ -63,7 +63,7 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
     },
     ShellCommand {
         name: "testsc",
-        description: "Test syscall interface (getpid, write, mmap)",
+        description: "Test Linux and Zircon memory syscalls",
         handler: cmd_test_syscall,
     },
     ShellCommand {
@@ -268,7 +268,8 @@ fn cmd_version(ctx: &mut ShellContext, _args: &[&str]) {
 
 /// Command: testsc - Test syscall interface
 fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
-    ctx.serial.write_str("\n=== Syscall Test ===\n\n");
+    ctx.serial.write_str("\n=== Memory Syscall Test ===\n\n");
+    print_memory_syscall_snapshot(ctx, "before");
 
     // Test 1: Write syscall
     ctx.serial.write_str("[TEST] Testing write syscall... ");
@@ -296,27 +297,226 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         }
     }
 
-    // Test 3: Mmap syscall
-    ctx.serial.write_str("[TEST] Testing mmap syscall... ");
-    const MAP_PRIVATE: usize = 1 << 1;
-    const MAP_ANONYMOUS: usize = 1 << 5;
-    let flags = MAP_PRIVATE | MAP_ANONYMOUS;
-    let prot = 0x3; // PROT_READ | PROT_WRITE
-
-    let result = crate::syscall::sys_mmap(0, 4096, prot, flags, 0, 0);
-    match result {
-        Ok(addr) => {
-            ctx.serial.write_str("[OK] mmap returned address 0x");
+    // Test 3: Linux brk syscall
+    ctx.serial.write_str("[TEST] Testing brk syscall... ");
+    let brk_base = match crate::syscall::sys_brk(0) {
+        Ok(addr) => addr,
+        Err(e) => {
+            ctx.serial.write_str("[FAIL] Error ");
+            print_number(&mut ctx.serial, e as u32);
+            ctx.serial.write_str("\n");
+            return;
+        }
+    };
+    let brk_target = brk_base + (PAGE_SIZE * 2);
+    match crate::syscall::sys_brk(brk_target) {
+        Ok(addr) if addr == brk_target => {
+            ctx.serial.write_str("[OK] brk moved to 0x");
             print_hex(&mut ctx.serial, addr as u64);
             ctx.serial.write_str("\n");
+        }
+        Ok(addr) => {
+            ctx.serial.write_str("[FAIL] brk stopped at 0x");
+            print_hex(&mut ctx.serial, addr as u64);
+            ctx.serial.write_str("\n");
+            return;
         }
         Err(e) => {
             ctx.serial.write_str("[FAIL] Error ");
             print_number(&mut ctx.serial, e as u32);
             ctx.serial.write_str("\n");
+            return;
         }
     }
 
+    // Test 4: Linux mmap/mprotect/mremap/munmap
+    ctx.serial.write_str("[TEST] Testing Linux mmap path... ");
+    const MAP_PRIVATE: usize = 1 << 1;
+    const MAP_ANONYMOUS: usize = 1 << 5;
+    const MREMAP_MAYMOVE: usize = 1 << 0;
+    let flags = MAP_PRIVATE | MAP_ANONYMOUS;
+    let prot = 0x3; // PROT_READ | PROT_WRITE
+
+    let mapped_addr = match crate::syscall::sys_mmap(0, PAGE_SIZE * 2, prot, flags, 0, 0) {
+        Ok(addr) => {
+            ctx.serial.write_str("[OK] mmap returned address 0x");
+            print_hex(&mut ctx.serial, addr as u64);
+            ctx.serial.write_str("\n");
+            addr
+        }
+        Err(e) => {
+            ctx.serial.write_str("[FAIL] Error ");
+            print_number(&mut ctx.serial, e as u32);
+            ctx.serial.write_str("\n");
+            return;
+        }
+    };
+
+    ctx.serial.write_str("[TEST] Testing mremap syscall... ");
+    let remapped_addr = match crate::syscall::sys_mremap(
+        mapped_addr,
+        PAGE_SIZE * 2,
+        PAGE_SIZE * 3,
+        MREMAP_MAYMOVE,
+        0,
+    ) {
+        Ok(addr) => {
+            ctx.serial.write_str("[OK] mremap returned 0x");
+            print_hex(&mut ctx.serial, addr as u64);
+            ctx.serial.write_str("\n");
+            addr
+        }
+        Err(e) => {
+            ctx.serial.write_str("[FAIL] Error ");
+            print_number(&mut ctx.serial, e as u32);
+            ctx.serial.write_str("\n");
+            return;
+        }
+    };
+
+    ctx.serial.write_str("[TEST] Testing mprotect syscall... ");
+    match crate::syscall::sys_mprotect(remapped_addr, PAGE_SIZE, 0x1) {
+        Ok(_) => ctx.serial.write_str("[OK] mprotect updated mapping permissions\n"),
+        Err(e) => {
+            ctx.serial.write_str("[FAIL] Error ");
+            print_number(&mut ctx.serial, e as u32);
+            ctx.serial.write_str("\n");
+            return;
+        }
+    }
+
+    ctx.serial.write_str("[TEST] Testing munmap syscall... ");
+    match crate::syscall::sys_munmap(remapped_addr, PAGE_SIZE * 3) {
+        Ok(_) => ctx.serial.write_str("[OK] munmap removed the mapping\n"),
+        Err(e) => {
+            ctx.serial.write_str("[FAIL] Error ");
+            print_number(&mut ctx.serial, e as u32);
+            ctx.serial.write_str("\n");
+            return;
+        }
+    }
+
+    // Restore brk so repeated test runs show stable stats.
+    let _ = crate::syscall::sys_brk(brk_base);
+
+    // Test 5: Zircon VMO/VMAR syscalls
+    ctx.serial.write_str("[TEST] Testing Zircon VMO create/read/write... ");
+    let mut vmo_handle = 0u32;
+    if let Err(e) = crate::syscall::sys_vmo_create((PAGE_SIZE * 2) as u64, 1, &mut vmo_handle) {
+        ctx.serial.write_str("[FAIL] create error ");
+        print_number(&mut ctx.serial, (-(e as i32)) as u32);
+        ctx.serial.write_str("\n");
+        return;
+    }
+
+    let payload = b"smros-memory";
+    if crate::syscall::sys_vmo_write(vmo_handle, payload, 0).is_err() {
+        ctx.serial.write_str("[FAIL] write failed\n");
+        return;
+    }
+    let mut read_back = [0u8; 12];
+    if crate::syscall::sys_vmo_read(vmo_handle, &mut read_back, 0).is_err() || read_back != *payload {
+        ctx.serial.write_str("[FAIL] read verification failed\n");
+        return;
+    }
+    ctx.serial.write_str("[OK] VMO handle 0x");
+    print_hex(&mut ctx.serial, vmo_handle as u64);
+    ctx.serial.write_str(" preserved data\n");
+
+    ctx.serial.write_str("[TEST] Testing VMO size and op_range syscalls... ");
+    let mut size = 0usize;
+    if crate::syscall::sys_vmo_get_size(vmo_handle, &mut size).is_err() || size != PAGE_SIZE * 2 {
+        ctx.serial.write_str("[FAIL] get_size mismatch\n");
+        return;
+    }
+    if crate::syscall::sys_vmo_set_size(vmo_handle, PAGE_SIZE * 3).is_err() {
+        ctx.serial.write_str("[FAIL] set_size failed\n");
+        return;
+    }
+    if crate::syscall::sys_vmo_op_range(vmo_handle, crate::syscall::VmoOpType::Commit as u32, 0, PAGE_SIZE).is_err()
+        || crate::syscall::sys_vmo_op_range(vmo_handle, crate::syscall::VmoOpType::Zero as u32, 0, payload.len()).is_err()
+        || crate::syscall::sys_vmo_op_range(vmo_handle, crate::syscall::VmoOpType::Lock as u32, 0, PAGE_SIZE).is_err()
+        || crate::syscall::sys_vmo_op_range(vmo_handle, crate::syscall::VmoOpType::Unlock as u32, 0, PAGE_SIZE).is_err()
+        || crate::syscall::sys_vmo_op_range(vmo_handle, crate::syscall::VmoOpType::CacheSync as u32, 0, PAGE_SIZE).is_err()
+        || crate::syscall::sys_vmo_op_range(vmo_handle, crate::syscall::VmoOpType::Decommit as u32, PAGE_SIZE * 2, PAGE_SIZE).is_err()
+    {
+        ctx.serial.write_str("[FAIL] op_range failed\n");
+        return;
+    }
+    ctx.serial.write_str("[OK] size, commit, zero, lock, unlock, cache, and decommit all succeeded\n");
+
+    let root_vmar = crate::syscall::memory_root_vmar_handle();
+    ctx.serial.write_str("[TEST] Testing VMAR map/protect/allocate/unmap/destroy... ");
+    let mut mapped_vaddr = 0usize;
+    if crate::syscall::sys_vmar_map(
+        root_vmar,
+        crate::syscall::VmOptions::PERM_RW.bits(),
+        0,
+        vmo_handle,
+        0,
+        PAGE_SIZE,
+        &mut mapped_vaddr,
+    )
+    .is_err()
+    {
+        ctx.serial.write_str("[FAIL] vmar_map failed\n");
+        return;
+    }
+
+    if crate::syscall::sys_vmar_protect(
+        root_vmar,
+        crate::syscall::VmOptions::PERM_READ.bits(),
+        mapped_vaddr as u64,
+        PAGE_SIZE as u64,
+    )
+    .is_err()
+    {
+        ctx.serial.write_str("[FAIL] vmar_protect failed\n");
+        return;
+    }
+
+    let mut child_vmar = 0u32;
+    let mut child_addr = 0usize;
+    if crate::syscall::sys_vmar_allocate(root_vmar, 0, 0, (PAGE_SIZE * 2) as u64, &mut child_vmar, &mut child_addr).is_err() {
+        ctx.serial.write_str("[FAIL] vmar_allocate failed\n");
+        return;
+    }
+
+    let mut child_map = 0usize;
+    if crate::syscall::sys_vmar_map(
+        child_vmar,
+        crate::syscall::VmOptions::PERM_READ.bits(),
+        0,
+        vmo_handle,
+        0,
+        PAGE_SIZE,
+        &mut child_map,
+    )
+    .is_err()
+        || crate::syscall::sys_vmar_unmap(child_vmar, child_map, PAGE_SIZE).is_err()
+        || crate::syscall::sys_vmar_unmap_handle_close_thread_exit(root_vmar, mapped_vaddr, PAGE_SIZE).is_err()
+        || crate::syscall::sys_vmar_destroy(child_vmar).is_err()
+    {
+        ctx.serial.write_str("[FAIL] VMAR lifecycle step failed\n");
+        return;
+    }
+
+    ctx.serial.write_str("[OK] root=0x");
+    print_hex(&mut ctx.serial, root_vmar as u64);
+    ctx.serial.write_str(", child=0x");
+    print_hex(&mut ctx.serial, child_vmar as u64);
+    ctx.serial.write_str("\n");
+
+    ctx.serial.write_str("[TEST] Closing VMO handle... ");
+    match crate::syscall::sys_handle_close(vmo_handle) {
+        Ok(_) => ctx.serial.write_str("[OK] handle closed\n"),
+        Err(_) => {
+            ctx.serial.write_str("[FAIL] handle close failed\n");
+            return;
+        }
+    }
+
+    print_memory_syscall_snapshot(ctx, "after");
     ctx.serial.write_str("\n=== Test Complete ===\n\n");
 }
 
@@ -475,6 +675,41 @@ fn cmd_meminfo(ctx: &mut ShellContext, _args: &[&str]) {
     ctx.serial.write_str("│                                         │\n");
     ctx.serial.write_str("│  Page Size: 4 KB (4096 bytes)           │\n");
     ctx.serial.write_str("└─────────────────────────────────────────┘\n");
+
+    let stats = crate::syscall::memory_syscall_stats();
+    ctx.serial.write_str("  Linux VM: maps=");
+    print_number(&mut ctx.serial, stats.linux_mapping_count as u32);
+    ctx.serial.write_str(", bytes=");
+    print_number(&mut ctx.serial, stats.linux_mapped_bytes as u32);
+    ctx.serial.write_str(", pages=");
+    print_number(&mut ctx.serial, stats.linux_committed_pages as u32);
+    ctx.serial.write_str("\n");
+
+    ctx.serial.write_str("  Linux brk: start=0x");
+    print_hex(&mut ctx.serial, stats.brk_start as u64);
+    ctx.serial.write_str(", current=0x");
+    print_hex(&mut ctx.serial, stats.brk_current as u64);
+    ctx.serial.write_str(", limit=0x");
+    print_hex(&mut ctx.serial, stats.brk_limit as u64);
+    ctx.serial.write_str(", pages=");
+    print_number(&mut ctx.serial, stats.brk_committed_pages as u32);
+    ctx.serial.write_str("\n");
+
+    ctx.serial.write_str("  Zircon VM: vmos=");
+    print_number(&mut ctx.serial, stats.zircon_vmo_count as u32);
+    ctx.serial.write_str(", bytes=");
+    print_number(&mut ctx.serial, stats.zircon_vmo_bytes as u32);
+    ctx.serial.write_str(", pages=");
+    print_number(&mut ctx.serial, stats.zircon_vmo_committed_pages as u32);
+    ctx.serial.write_str("\n");
+
+    ctx.serial.write_str("  Zircon VMAR: vmars=");
+    print_number(&mut ctx.serial, stats.zircon_vmar_count as u32);
+    ctx.serial.write_str(", mappings=");
+    print_number(&mut ctx.serial, stats.zircon_mapping_count as u32);
+    ctx.serial.write_str(", root=0x");
+    print_hex(&mut ctx.serial, stats.zircon_root_vmar_handle as u64);
+    ctx.serial.write_str("\n");
 }
 
 /// Command: uptime - Show system uptime
@@ -614,11 +849,10 @@ fn print_number(serial: &mut Serial, mut num: u32) {
 
 fn print_hex(serial: &mut Serial, num: u64) {
     if num == 0 {
-        serial.write_str("0x0");
+        serial.write_byte(b'0');
         return;
     }
 
-    serial.write_str("0x");
     let hex_chars = b"0123456789abcdef";
     let mut buf = [0u8; 16];
     let mut i = 0;
@@ -633,6 +867,27 @@ fn print_hex(serial: &mut Serial, num: u64) {
     for j in (0..i).rev() {
         serial.write_byte(buf[j]);
     }
+}
+
+fn print_memory_syscall_snapshot(ctx: &mut ShellContext, label: &str) {
+    let stats = crate::syscall::memory_syscall_stats();
+    ctx.serial.write_str("[MEM] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str(": linux_maps=");
+    print_number(&mut ctx.serial, stats.linux_mapping_count as u32);
+    ctx.serial.write_str(", linux_pages=");
+    print_number(&mut ctx.serial, stats.linux_committed_pages as u32);
+    ctx.serial.write_str(", brk_pages=");
+    print_number(&mut ctx.serial, stats.brk_committed_pages as u32);
+    ctx.serial.write_str(", vmos=");
+    print_number(&mut ctx.serial, stats.zircon_vmo_count as u32);
+    ctx.serial.write_str(", vmars=");
+    print_number(&mut ctx.serial, stats.zircon_vmar_count as u32);
+    ctx.serial.write_str(", vmar_maps=");
+    print_number(&mut ctx.serial, stats.zircon_mapping_count as u32);
+    ctx.serial.write_str(", root=0x");
+    print_hex(&mut ctx.serial, stats.zircon_root_vmar_handle as u64);
+    ctx.serial.write_str("\n");
 }
 
 // ============================================================================

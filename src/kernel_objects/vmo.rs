@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 use core::sync::atomic::AtomicU32;
+use alloc::vec;
 use alloc::vec::Vec;
 use super::types::*;
 use crate::kernel_lowlevel::memory::PageFrameAllocator;
@@ -19,8 +20,10 @@ pub struct Vmo {
     pub size: usize,
     /// Number of pages
     pub page_count: usize,
-    /// Physical page frame numbers (if allocated)
-    pub pfns: Option<Vec<u64>>,
+    /// Physical page frame numbers for each page. `None` means decommitted.
+    pub pfns: Option<Vec<Option<u64>>>,
+    /// Software copy of the VMO contents used by read/write tests.
+    pub data: Vec<u8>,
     /// Cache policy
     pub cache_policy: CachePolicy,
     /// Reference count
@@ -30,27 +33,77 @@ pub struct Vmo {
 }
 
 impl Vmo {
-    /// Create a new paged VMO
-    pub fn new_paged(page_count: usize) -> Option<Self> {
+    fn alloc_paged_pfns(page_count: usize) -> Option<Vec<Option<u64>>> {
         let mut pfns = Vec::with_capacity(page_count);
 
         for _ in 0..page_count {
             if let Some(pfn) = PageFrameAllocator::alloc() {
-                pfns.push(pfn);
+                pfns.push(Some(pfn));
             } else {
-                for pfn in &pfns {
-                    PageFrameAllocator::free(*pfn);
+                for pfn in pfns.into_iter().flatten() {
+                    PageFrameAllocator::free(pfn);
                 }
                 return None;
             }
         }
 
+        Some(pfns)
+    }
+
+    fn alloc_physical_pfns(paddr: u64, page_count: usize) -> Vec<Option<u64>> {
+        let mut pfns = Vec::with_capacity(page_count);
+
+        for i in 0..page_count {
+            pfns.push(Some((paddr >> 12) + i as u64));
+        }
+
+        pfns
+    }
+
+    fn checked_end(&self, offset: usize, len: usize) -> ZxResult<usize> {
+        offset
+            .checked_add(len)
+            .filter(|end| *end <= self.size)
+            .ok_or(ZxError::ErrOutOfRange)
+    }
+
+    fn ensure_range_committed(&mut self, offset: usize, len: usize) -> ZxResult {
+        if len == 0 {
+            return Ok(());
+        }
+
+        self.checked_end(offset, len)?;
+        let start_page = offset / crate::kernel_lowlevel::memory::PAGE_SIZE;
+        let end_page = (offset + len + crate::kernel_lowlevel::memory::PAGE_SIZE - 1)
+            / crate::kernel_lowlevel::memory::PAGE_SIZE;
+
+        if let Some(ref mut pfns) = self.pfns {
+            for page in start_page..end_page {
+                if page >= pfns.len() {
+                    return Err(ZxError::ErrOutOfRange);
+                }
+
+                if pfns[page].is_none() {
+                    pfns[page] = Some(PageFrameAllocator::alloc().ok_or(ZxError::ErrNoMemory)?);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Create a new paged VMO
+    pub fn new_paged(page_count: usize) -> Option<Self> {
+        let pfns = Self::alloc_paged_pfns(page_count)?;
+        let size = page_count * crate::kernel_lowlevel::memory::PAGE_SIZE;
+
         Some(Self {
             handle: HandleValue(INVALID_HANDLE),
             vmo_type: VmoType::Paged,
-            size: page_count * crate::kernel_lowlevel::memory::PAGE_SIZE,
+            size,
             page_count,
             pfns: Some(pfns),
+            data: vec![0; size],
             cache_policy: CachePolicy::Cached,
             ref_count: AtomicU32::new(1),
             resizable: false,
@@ -70,18 +123,16 @@ impl Vmo {
     /// Create a physical VMO (backed by specific physical memory)
     pub fn new_physical(paddr: u64, size: usize) -> Option<Self> {
         let page_count = pages(size);
-        let mut pfns = Vec::with_capacity(page_count);
-
-        for i in 0..page_count {
-            pfns.push((paddr >> 12) + i as u64);
-        }
+        let rounded_size = page_count * crate::kernel_lowlevel::memory::PAGE_SIZE;
+        let pfns = Self::alloc_physical_pfns(paddr, page_count);
 
         Some(Self {
             handle: HandleValue(INVALID_HANDLE),
             vmo_type: VmoType::Physical,
-            size,
+            size: rounded_size,
             page_count,
             pfns: Some(pfns),
+            data: vec![0; rounded_size],
             cache_policy: CachePolicy::Cached,
             ref_count: AtomicU32::new(1),
             resizable: false,
@@ -91,25 +142,16 @@ impl Vmo {
     /// Create a contiguous VMO (physically contiguous memory)
     pub fn new_contiguous(size: usize) -> Option<Self> {
         let page_count = pages(size);
-        let mut pfns = Vec::with_capacity(page_count);
-
-        for _ in 0..page_count {
-            if let Some(pfn) = PageFrameAllocator::alloc() {
-                pfns.push(pfn);
-            } else {
-                for pfn in &pfns {
-                    PageFrameAllocator::free(*pfn);
-                }
-                return None;
-            }
-        }
+        let rounded_size = page_count * crate::kernel_lowlevel::memory::PAGE_SIZE;
+        let pfns = Self::alloc_paged_pfns(page_count)?;
 
         Some(Self {
             handle: HandleValue(INVALID_HANDLE),
             vmo_type: VmoType::Contiguous,
-            size,
+            size: rounded_size,
             page_count,
             pfns: Some(pfns),
+            data: vec![0; rounded_size],
             cache_policy: CachePolicy::Cached,
             ref_count: AtomicU32::new(1),
             resizable: false,
@@ -119,7 +161,7 @@ impl Vmo {
     /// Get physical addresses for this VMO
     pub fn get_physical_addresses(&self) -> Option<Vec<u64>> {
         self.pfns.as_ref().map(|pfns| {
-            pfns.iter().map(|pfn| pfn << 12).collect()
+            pfns.iter().filter_map(|pfn| pfn.map(|val| val << 12)).collect()
         })
     }
 
@@ -131,6 +173,14 @@ impl Vmo {
     /// Get VMO size
     pub fn len(&self) -> usize {
         self.size
+    }
+
+    /// Get the number of committed pages.
+    pub fn committed_pages(&self) -> usize {
+        self.pfns
+            .as_ref()
+            .map(|pfns| pfns.iter().filter(|pfn| pfn.is_some()).count())
+            .unwrap_or(0)
     }
 
     /// Check if VMO is empty
@@ -149,14 +199,15 @@ impl Vmo {
             return Err(ZxError::ErrNotSupported);
         }
 
-        let new_page_count = (new_size + crate::kernel_lowlevel::memory::PAGE_SIZE - 1) / crate::kernel_lowlevel::memory::PAGE_SIZE;
+        let new_page_count = pages(new_size);
+        let rounded_size = new_page_count * crate::kernel_lowlevel::memory::PAGE_SIZE;
 
         if new_page_count > self.page_count {
             let additional = new_page_count - self.page_count;
             if let Some(ref mut pfns) = self.pfns {
                 for _ in 0..additional {
                     if let Some(pfn) = PageFrameAllocator::alloc() {
-                        pfns.push(pfn);
+                        pfns.push(Some(pfn));
                     } else {
                         return Err(ZxError::ErrNoMemory);
                     }
@@ -166,7 +217,7 @@ impl Vmo {
             let remove = self.page_count - new_page_count;
             if let Some(ref mut pfns) = self.pfns {
                 for _ in 0..remove {
-                    if let Some(pfn) = pfns.pop() {
+                    if let Some(Some(pfn)) = pfns.pop() {
                         PageFrameAllocator::free(pfn);
                     }
                 }
@@ -174,54 +225,75 @@ impl Vmo {
         }
 
         self.page_count = new_page_count;
-        self.size = new_page_count * crate::kernel_lowlevel::memory::PAGE_SIZE;
+        self.size = rounded_size;
+        self.data.resize(rounded_size, 0);
         Ok(())
     }
 
     /// Read from VMO
     pub fn read(&self, offset: usize, buf: &mut [u8]) -> ZxResult {
-        if offset + buf.len() > self.size {
-            return Err(ZxError::ErrOutOfRange);
+        let end = self.checked_end(offset, buf.len())?;
+        buf.copy_from_slice(&self.data[offset..end]);
+
+        Ok(())
+    }
+
+    /// Write to VMO
+    pub fn write(&mut self, offset: usize, buf: &[u8]) -> ZxResult {
+        let end = self.checked_end(offset, buf.len())?;
+        self.ensure_range_committed(offset, buf.len())?;
+        self.data[offset..end].copy_from_slice(buf);
+
+        Ok(())
+    }
+
+    /// Commit pages for a range
+    pub fn commit(&mut self, offset: usize, len: usize) -> ZxResult {
+        self.ensure_range_committed(offset, len)?;
+        Ok(())
+    }
+
+    /// Decommit pages for a range
+    pub fn decommit(&mut self, offset: usize, len: usize) -> ZxResult {
+        self.checked_end(offset, len)?;
+        let start_page = offset / crate::kernel_lowlevel::memory::PAGE_SIZE;
+        let end_page = (offset + len) / crate::kernel_lowlevel::memory::PAGE_SIZE;
+
+        if let Some(ref mut pfns) = self.pfns {
+            for i in start_page..end_page.min(pfns.len()) {
+                if let Some(pfn) = pfns[i].take() {
+                    PageFrameAllocator::free(pfn);
+                }
+            }
         }
 
-        for byte in buf.iter_mut() {
+        for byte in &mut self.data[offset..offset + len] {
             *byte = 0;
         }
 
         Ok(())
     }
 
-    /// Write to VMO
-    pub fn write(&self, offset: usize, buf: &[u8]) -> ZxResult {
-        if offset + buf.len() > self.size {
-            return Err(ZxError::ErrOutOfRange);
+    /// Zero a range
+    pub fn zero(&mut self, offset: usize, len: usize) -> ZxResult {
+        self.checked_end(offset, len)?;
+
+        for byte in &mut self.data[offset..offset + len] {
+            *byte = 0;
         }
 
         Ok(())
     }
 
-    /// Commit pages for a range
-    pub fn commit(&self, _offset: usize, _len: usize) -> ZxResult {
-        Ok(())
-    }
-
-    /// Decommit pages for a range
-    pub fn decommit(&self, offset: usize, len: usize) -> ZxResult {
-        let start_page = offset / crate::kernel_lowlevel::memory::PAGE_SIZE;
-        let num_pages = len / crate::kernel_lowlevel::memory::PAGE_SIZE;
-
-        if let Some(ref pfns) = self.pfns {
-            for i in start_page..(start_page + num_pages).min(pfns.len()) {
-                PageFrameAllocator::free(pfns[i]);
+    /// Release all committed page frames held by this VMO.
+    pub fn release_pages(&mut self) {
+        if let Some(ref mut pfns) = self.pfns {
+            for pfn in pfns.iter_mut() {
+                if let Some(frame) = pfn.take() {
+                    PageFrameAllocator::free(frame);
+                }
             }
         }
-
-        Ok(())
-    }
-
-    /// Zero a range
-    pub fn zero(&self, _offset: usize, _len: usize) -> ZxResult {
-        Ok(())
     }
 
     /// Create a child VMO

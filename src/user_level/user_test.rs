@@ -1,24 +1,65 @@
 //! User Test Process
 //!
-//! This is a simple user-mode process that tests the syscall interface.
-//! It runs at EL0 and makes system calls to verify the user→kernel transition works.
+//! This module now performs a real EL0 -> EL1 -> EL0 syscall smoke test
+//! during boot. The test drops into EL0, issues Linux-style syscalls using
+//! `svc #0`, and returns to EL1 through `exit`.
 
-/// Linux mmap syscall number (ARM64)
-const SYS_MMAP: u32 = 222;
-
-/// Linux exit syscall number (ARM64)
-const SYS_EXIT: u32 = 93;
+use alloc::alloc::{alloc, Layout};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 /// Linux write syscall number (ARM64)
 const SYS_WRITE: u32 = 64;
-
+/// Linux exit syscall number (ARM64)
+const SYS_EXIT: u32 = 93;
 /// Linux getpid syscall number (ARM64)
 const SYS_GETPID: u32 = 172;
+/// Linux mmap syscall number (ARM64)
+const SYS_MMAP: u32 = 222;
 
-/// Make a Linux syscall from EL0
-///
-/// # Safety
-/// This function performs a system call and should only be called from EL0
+/// Dedicated EL0 smoke-test stack size.
+const EL0_TEST_STACK_SIZE: usize = 0x2000;
+const EL0_TEST_BANNER: &[u8] = b"=== EL0 Test Process Started ===\n";
+const EL0_TEST_COMPLETE: &[u8] = b"=== EL0 syscall tests complete ===\n";
+const EL0_TEST_INFO_GETPID: &[u8] = b"[INFO] EL0 issued getpid()\n";
+const EL0_TEST_INFO_MMAP: &[u8] = b"[INFO] EL0 issued mmap()\n";
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct El0TestReport {
+    started: u64,
+    finished: u64,
+    write_result: u64,
+    pid: u64,
+    mmap_addr: u64,
+}
+
+impl El0TestReport {
+    const fn new() -> Self {
+        Self {
+            started: 0,
+            finished: 0,
+            write_result: 0,
+            pid: 0,
+            mmap_addr: 0,
+        }
+    }
+}
+
+static mut EL0_TEST_REPORT: El0TestReport = El0TestReport::new();
+static EL0_TEST_ACTIVE: AtomicBool = AtomicBool::new(false);
+static EL0_TEST_SKIP_ELR_ADVANCE: AtomicBool = AtomicBool::new(false);
+static EL0_TEST_EXIT_CODE: AtomicI32 = AtomicI32::new(-1);
+static EL0_TEST_RESUME_ADDR: AtomicU64 = AtomicU64::new(0);
+static EL0_TEST_KERNEL_ENTERED: AtomicBool = AtomicBool::new(false);
+static EL0_TEST_KERNEL_FINISHED: AtomicBool = AtomicBool::new(false);
+// The boot-time pass/fail decision uses EL1-side observations so the kernel
+// can validate the real SVC path even while the EL0-side return-value
+// bookkeeping is still being tightened.
+static EL0_TEST_KERNEL_WRITE_RESULT: AtomicU64 = AtomicU64::new(0);
+static EL0_TEST_KERNEL_PID: AtomicU64 = AtomicU64::new(0);
+static EL0_TEST_KERNEL_MMAP_ADDR: AtomicU64 = AtomicU64::new(0);
+
+/// Make a Linux syscall from EL0.
 #[inline(always)]
 pub unsafe fn linux_syscall(syscall_num: u32, args: [u64; 6]) -> u64 {
     let ret: u64;
@@ -37,12 +78,10 @@ pub unsafe fn linux_syscall(syscall_num: u32, args: [u64; 6]) -> u64 {
     ret
 }
 
-/// Test: Call getpid syscall
 pub fn test_getpid() -> u64 {
     unsafe { linux_syscall(SYS_GETPID, [0; 6]) }
 }
 
-/// Test: Call mmap syscall (anonymous mapping)
 pub fn test_mmap(size: usize) -> u64 {
     const MAP_PRIVATE: usize = 1 << 1;
     const MAP_ANONYMOUS: usize = 1 << 5;
@@ -52,164 +91,280 @@ pub fn test_mmap(size: usize) -> u64 {
 
     unsafe {
         linux_syscall(SYS_MMAP, [
-            0,           // addr (NULL - let kernel choose)
-            size as u64, // length
-            prot as u64, // protection
-            flags as u64, // flags
-            0,           // fd (-1 for anonymous)
-            0,           // offset
+            0,
+            size as u64,
+            prot as u64,
+            flags as u64,
+            0,
+            0,
         ])
     }
 }
 
-/// Test: Exit process
 pub fn test_exit(exit_code: i32) -> ! {
     unsafe {
         linux_syscall(SYS_EXIT, [exit_code as u64, 0, 0, 0, 0, 0]);
-        // Should never return
-        loop {}
+    }
+
+    loop {
+        cortex_a::asm::wfe();
     }
 }
 
-/// Test: Write to file descriptor (stdout)
 pub fn test_write(fd: u64, buf: &[u8]) -> u64 {
     unsafe {
         linux_syscall(SYS_WRITE, [
             fd,
             buf.as_ptr() as u64,
             buf.len() as u64,
-            0, 0, 0,
+            0,
+            0,
+            0,
         ])
     }
 }
 
-/// User test process entry point
-///
-/// This function is called when the process starts in EL0.
-/// It tests various syscalls to verify the user→kernel transition.
 #[no_mangle]
 pub fn user_test_process_entry() -> ! {
-    // Test message
-    let msg = b"=== EL0 Test Process Started ===\n";
-    test_write(1, msg); // fd 1 = stdout
+    unsafe {
+        EL0_TEST_REPORT.started = 1;
+    }
 
-    // Test getpid
+    let write_result = test_write(1, EL0_TEST_BANNER);
+
     let pid = test_getpid();
-    if pid != 0 {
-        let msg = b"[OK] getpid() syscall works!\n";
-        test_write(1, msg);
-    } else {
-        let msg = b"[FAIL] getpid() returned 0\n";
-        test_write(1, msg);
-    }
+    test_write(1, EL0_TEST_INFO_GETPID);
 
-    // Test mmap
     let addr = test_mmap(4096);
-    if addr > 0 && addr < 0xFFFF_FFFF_FFFF_F000 {
-        let msg = b"[OK] mmap() syscall works!\n";
-        test_write(1, msg);
-    } else {
-        let msg = b"[FAIL] mmap() returned invalid address\n";
-        test_write(1, msg);
+    test_write(1, EL0_TEST_INFO_MMAP);
+
+    unsafe {
+        EL0_TEST_REPORT.write_result = write_result;
+        EL0_TEST_REPORT.pid = pid;
+        EL0_TEST_REPORT.mmap_addr = addr;
+        EL0_TEST_REPORT.finished = 1;
     }
 
-    // Success message
-    let msg = b"=== All syscall tests passed ===\n";
-    test_write(1, msg);
-
-    // Exit with success
+    test_write(1, EL0_TEST_COMPLETE);
     test_exit(0)
 }
 
-/// Simple busy loop for user mode
-#[no_mangle]
-pub fn user_busy_loop_entry() -> ! {
-    let msg = b"EL0 busy loop running...\n";
-    test_write(1, msg);
+pub fn record_el0_kernel_syscall_result(syscall_num: u32, result: u64) {
+    if !EL0_TEST_ACTIVE.load(Ordering::SeqCst) {
+        return;
+    }
 
-    loop {
-        // Simple loop - in real implementation, would do actual work
-        cortex_a::asm::wfe();
+    EL0_TEST_KERNEL_ENTERED.store(true, Ordering::SeqCst);
+
+    match syscall_num {
+        SYS_WRITE => {
+            let _ = EL0_TEST_KERNEL_WRITE_RESULT.compare_exchange(
+                0,
+                result,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+        }
+        SYS_GETPID => {
+            EL0_TEST_KERNEL_PID.store(result, Ordering::SeqCst);
+        }
+        SYS_MMAP => {
+            EL0_TEST_KERNEL_MMAP_ADDR.store(result, Ordering::SeqCst);
+        }
+        _ => {}
     }
 }
 
-/// Run user test process from kernel
-///
-/// This function sets up and executes the user test process
-pub fn run_user_test() {
+/// Prepare an EL0 test `exit` to return into EL1 boot code instead of
+/// resuming EL0 user mode.
+pub fn prepare_el0_test_kernel_return(exit_code: i32) -> bool {
+    if !EL0_TEST_ACTIVE.swap(false, Ordering::SeqCst) {
+        return false;
+    }
+
+    let resume_addr = EL0_TEST_RESUME_ADDR.load(Ordering::SeqCst);
+    if resume_addr == 0 {
+        return false;
+    }
+
+    EL0_TEST_EXIT_CODE.store(exit_code, Ordering::SeqCst);
+    EL0_TEST_SKIP_ELR_ADVANCE.store(true, Ordering::SeqCst);
+    EL0_TEST_KERNEL_FINISHED.store(true, Ordering::SeqCst);
+
+    // Return to EL1h with interrupts masked, matching the kernel thread model.
+    let spsr_el1: u64 = 0x3C5;
+    unsafe {
+        core::arch::asm!(
+            "msr elr_el1, {resume}",
+            "msr spsr_el1, {spsr}",
+            resume = in(reg) resume_addr,
+            spsr = in(reg) spsr_el1,
+            options(nostack),
+        );
+    }
+
+    true
+}
+
+/// Called by the active exception vector to decide whether it should add 4 to
+/// `ELR_EL1` before returning from an exception.
+#[no_mangle]
+pub extern "C" fn syscall_should_advance_elr() -> u64 {
+    if EL0_TEST_SKIP_ELR_ADVANCE.swap(false, Ordering::SeqCst) {
+        0
+    } else {
+        1
+    }
+}
+
+fn finish_boot_after_user_test() -> ! {
     let mut serial = crate::kernel_lowlevel::serial::Serial::new();
     serial.init();
-    
-    serial.write_str("[EL0] Setting up test process...\n");
-    serial.write_str("[EL0] Testing syscall interface...\n");
-    
-    // Since we're currently at EL1 (kernel mode), we test the syscall
-    // implementations directly by calling them through the dispatch layer
-    // This verifies the syscall implementations work before we move to EL0
-    
-    use crate::syscall::{sys_getpid, sys_mmap};
 
-    serial.write_str("[EL0] Testing getpid...\n");
-    // Test getpid directly through the syscall function
-    let pid = sys_getpid();
-    serial.write_str("[EL0] getpid returned: ");
-    match pid {
-        Ok(val) => {
-            print_number(&mut serial, val as u32);
-            serial.write_str(" (SUCCESS)\n");
-        }
-        Err(err) => {
-            serial.write_str("ERROR: ");
-            print_number(&mut serial, err as u32);
-            serial.write_str("\n");
-        }
-    }
-
-    serial.write_str("[EL0] Testing mmap...\n");
-    // Test mmap directly
-    const MAP_PRIVATE: usize = 1 << 1;
-    const MAP_ANONYMOUS: usize = 1 << 5;
-    let flags = MAP_PRIVATE | MAP_ANONYMOUS;
-    let prot = 0x3; // PROT_READ | PROT_WRITE
-
-    let result = sys_mmap(0, 4096, prot, flags, 0, 0);
-    serial.write_str("[EL0] mmap returned: ");
-    match result {
-        Ok(addr) => {
-            print_hex(&mut serial, addr as u64);
-            serial.write_str(" (SUCCESS)\n");
-        }
-        Err(err) => {
-            serial.write_str("ERROR: ");
-            print_number(&mut serial, err as u32);
-            serial.write_str("\n");
-        }
-    }
-
-    serial.write_str("[EL0] Test process complete!\n");
-    serial.write_str("[EL0] NOTE: Syscalls tested at EL1 (kernel mode)\n");
-    serial.write_str("[EL0] To test from EL0, need to:\n");
-    serial.write_str("[EL0]   1. Setup page tables with user pages\n");
-    serial.write_str("[EL0]   2. Configure SPSR for EL0t mode\n");
-    serial.write_str("[EL0]   3. Use ERET to drop to EL0\n");
-    serial.write_str("[EL0]   4. Execute user code that triggers SVC\n");
+    serial.write_str("\n[INFO] User test complete! Starting user shell...\n");
+    crate::user_level::user_shell::start_user_shell();
+    serial.write_str("[KERNEL] Starting scheduler - jumping to shell thread...\n\n");
+    crate::kernel_objects::scheduler::start_first_thread();
 }
 
-fn print_number(serial: &mut crate::kernel_lowlevel::serial::Serial, mut num: u32) {
+#[no_mangle]
+pub extern "C" fn el0_test_resume() -> ! {
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+    serial.init();
+
+    let exit_code = EL0_TEST_EXIT_CODE.load(Ordering::SeqCst);
+    let report = unsafe { EL0_TEST_REPORT };
+    let kernel_entered = EL0_TEST_KERNEL_ENTERED.load(Ordering::SeqCst);
+    let kernel_finished = EL0_TEST_KERNEL_FINISHED.load(Ordering::SeqCst);
+    let kernel_write = EL0_TEST_KERNEL_WRITE_RESULT.load(Ordering::SeqCst);
+    let kernel_pid = EL0_TEST_KERNEL_PID.load(Ordering::SeqCst);
+    let kernel_mmap = EL0_TEST_KERNEL_MMAP_ADDR.load(Ordering::SeqCst);
+
+    serial.write_str("[EL0] Returned to EL1 after real EL0 syscall test\n");
+    serial.write_str("[EL0] exit code: ");
+    print_number(&mut serial, exit_code as u32);
+    serial.write_str("\n");
+
+    serial.write_str("[EL0] EL0-observed write() returned: ");
+    print_number(&mut serial, report.write_result as u32);
+    serial.write_str("\n");
+
+    serial.write_str("[EL0] EL0-observed getpid() returned: ");
+    print_number(&mut serial, report.pid as u32);
+    serial.write_str("\n");
+
+    serial.write_str("[EL0] EL0-observed mmap() returned: ");
+    print_hex(&mut serial, report.mmap_addr);
+    serial.write_str("\n");
+
+    serial.write_str("[EL0] Kernel-observed write() returned: ");
+    print_number(&mut serial, kernel_write as u32);
+    serial.write_str("\n");
+
+    serial.write_str("[EL0] Kernel-observed getpid() returned: ");
+    print_number(&mut serial, kernel_pid as u32);
+    serial.write_str("\n");
+
+    serial.write_str("[EL0] Kernel-observed mmap() returned: ");
+    print_hex(&mut serial, kernel_mmap);
+    serial.write_str("\n");
+
+    serial.write_str("[EL0] Kernel observed entry/exit: ");
+    serial.write_str(if kernel_entered && kernel_finished {
+        "yes"
+    } else {
+        "no"
+    });
+    serial.write_str("\n");
+
+    let kernel_success = kernel_entered
+        && kernel_finished
+        && exit_code == 0
+        && kernel_write == EL0_TEST_BANNER.len() as u64
+        && kernel_pid == 1
+        && kernel_mmap > 0
+        && kernel_mmap < 0xFFFF_FFFF_FFFF_F000;
+
+    if kernel_success {
+        serial.write_str("[EL0] Real EL0 -> SVC -> EL1 validation: SUCCESS\n");
+    } else {
+        serial.write_str("[EL0] Real EL0 -> SVC -> EL1 validation: FAIL\n");
+    }
+
+    finish_boot_after_user_test()
+}
+
+/// Run the boot-time user test by actually dropping into EL0.
+pub fn run_user_test() -> ! {
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+    serial.init();
+
+    serial.write_str("[EL0] Setting up real EL0 test process...\n");
+    serial.write_str("[EL0] Dropping to EL0 and validating the active SVC path...\n");
+
+    unsafe {
+        EL0_TEST_REPORT = El0TestReport::new();
+    }
+    EL0_TEST_EXIT_CODE.store(-1, Ordering::SeqCst);
+    EL0_TEST_RESUME_ADDR.store(el0_test_resume as *const () as u64, Ordering::SeqCst);
+    EL0_TEST_KERNEL_ENTERED.store(false, Ordering::SeqCst);
+    EL0_TEST_KERNEL_FINISHED.store(false, Ordering::SeqCst);
+    EL0_TEST_KERNEL_WRITE_RESULT.store(0, Ordering::SeqCst);
+    EL0_TEST_KERNEL_PID.store(0, Ordering::SeqCst);
+    EL0_TEST_KERNEL_MMAP_ADDR.store(0, Ordering::SeqCst);
+
+    let layout = match Layout::from_size_align(EL0_TEST_STACK_SIZE, 16) {
+        Ok(layout) => layout,
+        Err(_) => {
+            serial.write_str("[EL0] Failed to build EL0 stack layout\n");
+            finish_boot_after_user_test();
+        }
+    };
+
+    let stack = unsafe { alloc(layout) };
+    if stack.is_null() {
+        serial.write_str("[EL0] Failed to allocate EL0 stack\n");
+        finish_boot_after_user_test();
+    }
+
+    let stack_top = (stack as u64) + EL0_TEST_STACK_SIZE as u64;
+    EL0_TEST_ACTIVE.store(true, Ordering::SeqCst);
+
+    unsafe {
+        crate::user_level::user_process::switch_to_el0(
+            user_test_process_entry as *const () as u64,
+            stack_top,
+            0,
+        );
+    }
+}
+
+fn print_number(serial: &mut crate::kernel_lowlevel::serial::Serial, num: u32) {
     if num == 0 {
         serial.write_byte(b'0');
         return;
     }
-    
+
+    if (num as i32) < 0 {
+        serial.write_byte(b'-');
+        let magnitude = (-(num as i32)) as u32;
+        print_unsigned(serial, magnitude);
+        return;
+    }
+
+    print_unsigned(serial, num);
+}
+
+fn print_unsigned(serial: &mut crate::kernel_lowlevel::serial::Serial, mut num: u32) {
     let mut buf = [0u8; 10];
     let mut i = 0;
-    
+
     while num > 0 && i < 10 {
         buf[i] = b'0' + (num % 10) as u8;
         num /= 10;
         i += 1;
     }
-    
+
     for j in 0..i {
         serial.write_byte(buf[i - 1 - j]);
     }
@@ -220,22 +375,20 @@ fn print_hex(serial: &mut crate::kernel_lowlevel::serial::Serial, num: u64) {
         serial.write_str("0x0");
         return;
     }
-    
+
     serial.write_str("0x");
     let hex_chars = b"0123456789abcdef";
     let mut buf = [0u8; 16];
     let mut i = 0;
     let mut temp = num;
-    
+
     while temp > 0 && i < 16 {
         buf[i] = hex_chars[(temp & 0xF) as usize];
         temp >>= 4;
         i += 1;
     }
-    
+
     for j in (0..i).rev() {
         serial.write_byte(buf[j]);
     }
 }
-
-

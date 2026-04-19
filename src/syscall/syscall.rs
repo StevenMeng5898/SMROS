@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(static_mut_refs)]
 //! System Call Interface Layer
 //!
 //! This module provides comprehensive syscall compatibility with both Linux and Zircon APIs,
@@ -37,14 +38,16 @@
 //! - Sleep: nanosleep, clock_nanosleep
 
 use core::convert::TryFrom;
+use alloc::vec::Vec;
 
 use crate::kernel_lowlevel::memory::{
-    PAGE_SIZE, process_manager,
+    PAGE_SIZE, PageFrameAllocator, process_manager,
 };
+use crate::kernel_objects::vmar::Vmar;
 
 // Re-export kernel objects for convenience
 pub use crate::kernel_objects::{
-    HandleValue, VmOptions, MmuFlags, VmoOpType,
+    HandleValue, VmOptions, MmuFlags, VmarFlags, VmoOpType, VmoType,
     ZxError, ZxResult, Vmo,
     pages, roundup_pages,
     INVALID_HANDLE,
@@ -101,6 +104,339 @@ impl From<SysError> for usize {
     }
 }
 
+const LINUX_MAPPING_BASE: usize = 0x5000_0000;
+const LINUX_MAPPING_LIMIT: usize = 0x6000_0000;
+const BRK_HEAP_START: usize = 0x4000_0000;
+const BRK_HEAP_LIMIT: usize = BRK_HEAP_START + (1024 * 1024);
+const ZIRCON_ROOT_VMAR_BASE: usize = 0x7000_0000;
+const ZIRCON_ROOT_VMAR_SIZE: usize = 0x1000_0000;
+const MEMORY_HANDLE_START: u32 = 0x1000;
+const ARM64_SYS_WRITE: u32 = 64;
+const ARM64_SYS_EXIT: u32 = 93;
+const ARM64_SYS_GETPID: u32 = 172;
+const ARM64_SYS_MMAP: u32 = 222;
+
+#[derive(Clone)]
+struct LinuxMappingRecord {
+    addr: usize,
+    len: usize,
+    prot: usize,
+    flags: usize,
+    pfns: Vec<u64>,
+}
+
+#[derive(Default)]
+struct BrkState {
+    start: usize,
+    current: usize,
+    limit: usize,
+    pfns: Vec<u64>,
+}
+
+impl BrkState {
+    fn new() -> Self {
+        Self {
+            start: BRK_HEAP_START,
+            current: BRK_HEAP_START,
+            limit: BRK_HEAP_LIMIT,
+            pfns: Vec::new(),
+        }
+    }
+
+    fn committed_pages(&self) -> usize {
+        self.pfns.len()
+    }
+}
+
+struct VmoRecord {
+    handle: u32,
+    vmo: Vmo,
+}
+
+struct VmarRecord {
+    handle: u32,
+    vmar: Vmar,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct MemorySyscallStats {
+    pub linux_mapping_count: usize,
+    pub linux_mapped_bytes: usize,
+    pub linux_committed_pages: usize,
+    pub brk_start: usize,
+    pub brk_current: usize,
+    pub brk_limit: usize,
+    pub brk_committed_pages: usize,
+    pub zircon_vmo_count: usize,
+    pub zircon_vmo_bytes: usize,
+    pub zircon_vmo_committed_pages: usize,
+    pub zircon_vmar_count: usize,
+    pub zircon_mapping_count: usize,
+    pub zircon_root_vmar_handle: u32,
+}
+
+struct MemorySyscallState {
+    linux_mappings: Vec<LinuxMappingRecord>,
+    next_linux_addr: usize,
+    brk: BrkState,
+    vmos: Vec<VmoRecord>,
+    vmars: Vec<VmarRecord>,
+    next_handle: u32,
+    root_vmar_handle: u32,
+}
+
+impl MemorySyscallState {
+    fn new() -> Self {
+        let root_vmar_handle = MEMORY_HANDLE_START;
+        let mut root_vmar = Vmar::new(ZIRCON_ROOT_VMAR_BASE, ZIRCON_ROOT_VMAR_SIZE);
+        root_vmar.handle = HandleValue(root_vmar_handle);
+        let mut vmars = Vec::new();
+        vmars.push(VmarRecord {
+            handle: root_vmar_handle,
+            vmar: root_vmar,
+        });
+
+        Self {
+            linux_mappings: Vec::new(),
+            next_linux_addr: LINUX_MAPPING_BASE,
+            brk: BrkState::new(),
+            vmos: Vec::new(),
+            vmars,
+            next_handle: MEMORY_HANDLE_START + 1,
+            root_vmar_handle,
+        }
+    }
+
+    fn alloc_handle(&mut self) -> u32 {
+        let handle = self.next_handle;
+        self.next_handle = self.next_handle.wrapping_add(1);
+        handle
+    }
+
+    fn stats(&self) -> MemorySyscallStats {
+        MemorySyscallStats {
+            linux_mapping_count: self.linux_mappings.len(),
+            linux_mapped_bytes: self.linux_mappings.iter().map(|mapping| mapping.len).sum(),
+            linux_committed_pages: self.linux_mappings.iter().map(|mapping| mapping.pfns.len()).sum(),
+            brk_start: self.brk.start,
+            brk_current: self.brk.current,
+            brk_limit: self.brk.limit,
+            brk_committed_pages: self.brk.committed_pages(),
+            zircon_vmo_count: self.vmos.len(),
+            zircon_vmo_bytes: self.vmos.iter().map(|record| record.vmo.len()).sum(),
+            zircon_vmo_committed_pages: self.vmos.iter().map(|record| record.vmo.committed_pages()).sum(),
+            zircon_vmar_count: self.vmars.len(),
+            zircon_mapping_count: self.vmars.iter().map(|record| record.vmar.mappings.len()).sum(),
+            zircon_root_vmar_handle: self.root_vmar_handle,
+        }
+    }
+
+    fn free_linux_pages(pfns: &[u64]) {
+        for pfn in pfns {
+            PageFrameAllocator::free(*pfn);
+        }
+    }
+
+    fn alloc_linux_pages(page_count: usize) -> Option<Vec<u64>> {
+        let mut pfns = Vec::with_capacity(page_count);
+
+        for _ in 0..page_count {
+            if let Some(pfn) = PageFrameAllocator::alloc() {
+                pfns.push(pfn);
+            } else {
+                Self::free_linux_pages(&pfns);
+                return None;
+            }
+        }
+
+        Some(pfns)
+    }
+
+    fn sort_linux_mappings(&mut self) {
+        self.linux_mappings.sort_by_key(|mapping| mapping.addr);
+    }
+
+    fn linux_range_available(&self, addr: usize, len: usize) -> bool {
+        range_within_window(addr, len, LINUX_MAPPING_BASE, LINUX_MAPPING_LIMIT)
+            && !self.linux_mappings.iter().any(|mapping| {
+                range_overlaps(addr, len, mapping.addr, mapping.len)
+            })
+    }
+
+    fn find_free_linux_region(&mut self, hint: Option<usize>, len: usize) -> Option<usize> {
+        if let Some(addr) = hint {
+            if self.linux_range_available(addr, len) {
+                return Some(addr);
+            }
+        }
+
+        self.sort_linux_mappings();
+        let mut candidate = self.next_linux_addr.max(LINUX_MAPPING_BASE);
+
+        for mapping in &self.linux_mappings {
+            if candidate + len <= mapping.addr {
+                self.next_linux_addr = candidate + len;
+                return Some(candidate);
+            }
+
+            candidate = candidate.max(mapping.addr + mapping.len);
+        }
+
+        if candidate + len <= LINUX_MAPPING_LIMIT {
+            self.next_linux_addr = candidate + len;
+            return Some(candidate);
+        }
+
+        None
+    }
+
+    fn get_vmo(&self, handle: u32) -> Option<&Vmo> {
+        self.vmos.iter().find(|record| record.handle == handle).map(|record| &record.vmo)
+    }
+
+    fn get_vmo_mut(&mut self, handle: u32) -> Option<&mut Vmo> {
+        self.vmos.iter_mut().find(|record| record.handle == handle).map(|record| &mut record.vmo)
+    }
+
+    fn get_vmar(&self, handle: u32) -> Option<&Vmar> {
+        self.vmars.iter().find(|record| record.handle == handle).map(|record| &record.vmar)
+    }
+
+    fn get_vmar_mut(&mut self, handle: u32) -> Option<&mut Vmar> {
+        self.vmars.iter_mut().find(|record| record.handle == handle).map(|record| &mut record.vmar)
+    }
+
+    fn remove_vmo(&mut self, handle: u32) -> bool {
+        if let Some(index) = self.vmos.iter().position(|record| record.handle == handle) {
+            let mut record = self.vmos.swap_remove(index);
+            record.vmo.release_pages();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn destroy_vmar_recursive(&mut self, handle: u32) -> bool {
+        let Some(index) = self.vmars.iter().position(|record| record.handle == handle) else {
+            return false;
+        };
+
+        let child_handles = self.vmars[index].vmar.children.clone();
+        for child_handle in child_handles {
+            self.destroy_vmar_recursive(child_handle as u32);
+        }
+
+        if handle == self.root_vmar_handle {
+            self.vmars[index].vmar.destroy().ok();
+            return true;
+        }
+
+        let parent_handle = self.vmars[index].vmar.parent_idx.map(|parent| parent as u32);
+        let mut record = self.vmars.swap_remove(index);
+        record.vmar.destroy().ok();
+
+        if let Some(parent_handle) = parent_handle {
+            if let Some(parent) = self.get_vmar_mut(parent_handle) {
+                parent.children.retain(|child| *child != handle as usize);
+            }
+        }
+
+        true
+    }
+
+    fn remove_vmar(&mut self, handle: u32) -> bool {
+        self.destroy_vmar_recursive(handle)
+    }
+
+    fn release_handle(&mut self, handle: u32) -> bool {
+        self.remove_vmo(handle) || self.remove_vmar(handle)
+    }
+}
+
+static mut MEMORY_SYSCALL_STATE: Option<MemorySyscallState> = None;
+
+fn memory_state() -> &'static mut MemorySyscallState {
+    unsafe {
+        if MEMORY_SYSCALL_STATE.is_none() {
+            MEMORY_SYSCALL_STATE = Some(MemorySyscallState::new());
+        }
+
+        MEMORY_SYSCALL_STATE.as_mut().unwrap()
+    }
+}
+
+fn checked_end(addr: usize, len: usize) -> Option<usize> {
+    addr.checked_add(len)
+}
+
+fn range_overlaps(start_a: usize, len_a: usize, start_b: usize, len_b: usize) -> bool {
+    let end_a = start_a + len_a;
+    let end_b = start_b + len_b;
+    start_a < end_b && start_b < end_a
+}
+
+fn range_within_window(addr: usize, len: usize, base: usize, limit: usize) -> bool {
+    checked_end(addr, len).map(|end| addr >= base && end <= limit).unwrap_or(false)
+}
+
+fn mmu_flags_from_vm_options(options: VmOptions) -> MmuFlags {
+    let mut flags = MmuFlags::USER;
+
+    if options.contains(VmOptions::PERM_READ) {
+        flags |= MmuFlags::READ;
+    }
+    if options.contains(VmOptions::PERM_WRITE) {
+        flags |= MmuFlags::WRITE;
+    }
+    if options.contains(VmOptions::PERM_EXECUTE) {
+        flags |= MmuFlags::EXECUTE;
+    }
+    if flags == MmuFlags::USER {
+        flags |= MmuFlags::READ;
+    }
+
+    flags
+}
+
+fn split_linux_mapping(mapping: LinuxMappingRecord, start: usize, len: usize) -> Vec<LinuxMappingRecord> {
+    let mut pieces = Vec::new();
+    let end = start + len;
+    let mapping_end = mapping.addr + mapping.len;
+
+    if start > mapping.addr {
+        let left_pages = (start - mapping.addr) / PAGE_SIZE;
+        let left_len = start - mapping.addr;
+        pieces.push(LinuxMappingRecord {
+            addr: mapping.addr,
+            len: left_len,
+            prot: mapping.prot,
+            flags: mapping.flags,
+            pfns: mapping.pfns[..left_pages].to_vec(),
+        });
+    }
+
+    if end < mapping_end {
+        let right_start_page = (end - mapping.addr) / PAGE_SIZE;
+        pieces.push(LinuxMappingRecord {
+            addr: end,
+            len: mapping_end - end,
+            prot: mapping.prot,
+            flags: mapping.flags,
+            pfns: mapping.pfns[right_start_page..].to_vec(),
+        });
+    }
+
+    pieces
+}
+
+pub fn memory_syscall_stats() -> MemorySyscallStats {
+    memory_state().stats()
+}
+
+pub fn memory_root_vmar_handle() -> u32 {
+    memory_state().root_vmar_handle
+}
+
 // ============================================================================
 // Linux-compatible Memory Syscalls
 // ============================================================================
@@ -148,73 +484,169 @@ pub fn page_aligned(addr: usize) -> bool {
     addr & (PAGE_SIZE - 1) == 0
 }
 
+fn update_linux_protection(
+    state: &mut MemorySyscallState,
+    addr: usize,
+    len: usize,
+    prot_bits: usize,
+) -> SysResult {
+    let end = addr + len;
+    let mut touched = false;
+    let mappings = core::mem::take(&mut state.linux_mappings);
+
+    for mapping in mappings {
+        if !range_overlaps(addr, len, mapping.addr, mapping.len) {
+            state.linux_mappings.push(mapping);
+            continue;
+        }
+
+        touched = true;
+        let overlap_start = core::cmp::max(addr, mapping.addr);
+        let overlap_end = core::cmp::min(end, mapping.addr + mapping.len);
+        let start_page = (overlap_start - mapping.addr) / PAGE_SIZE;
+        let end_page = (overlap_end - mapping.addr) / PAGE_SIZE;
+
+        for piece in split_linux_mapping(mapping.clone(), overlap_start, overlap_end - overlap_start) {
+            state.linux_mappings.push(piece);
+        }
+
+        state.linux_mappings.push(LinuxMappingRecord {
+            addr: overlap_start,
+            len: overlap_end - overlap_start,
+            prot: prot_bits,
+            flags: mapping.flags,
+            pfns: mapping.pfns[start_page..end_page].to_vec(),
+        });
+    }
+
+    state.sort_linux_mappings();
+    if touched {
+        Ok(0)
+    } else {
+        Err(SysError::EINVAL)
+    }
+}
+
+fn unmap_linux_range(state: &mut MemorySyscallState, addr: usize, len: usize) -> SysResult {
+    let end = addr + len;
+    let mut removed = false;
+    let mappings = core::mem::take(&mut state.linux_mappings);
+
+    for mapping in mappings {
+        if !range_overlaps(addr, len, mapping.addr, mapping.len) {
+            state.linux_mappings.push(mapping);
+            continue;
+        }
+
+        removed = true;
+        let overlap_start = core::cmp::max(addr, mapping.addr);
+        let overlap_end = core::cmp::min(end, mapping.addr + mapping.len);
+        let start_page = (overlap_start - mapping.addr) / PAGE_SIZE;
+        let end_page = (overlap_end - mapping.addr) / PAGE_SIZE;
+        MemorySyscallState::free_linux_pages(&mapping.pfns[start_page..end_page]);
+
+        for piece in split_linux_mapping(mapping, overlap_start, overlap_end - overlap_start) {
+            state.linux_mappings.push(piece);
+        }
+    }
+
+    state.sort_linux_mappings();
+    if removed {
+        Ok(0)
+    } else {
+        Err(SysError::EINVAL)
+    }
+}
+
 /// Linux sys_mmap implementation
 pub fn sys_mmap(
     addr: usize,
     len: usize,
     prot: usize,
     flags: usize,
-    _fd: usize,
-    _offset: u64,
+    fd: usize,
+    offset: u64,
 ) -> SysResult {
     let prot = MmapProt::from_bits_truncate(prot);
     let flags = MmapFlags::from_bits_truncate(flags);
-    
+
     info!(
         "mmap: addr={:#x}, size={:#x}, prot={:?}, flags={:?}",
         addr, len, prot, flags
     );
-    
-    // Anonymous mapping
-    if flags.contains(MmapFlags::ANONYMOUS) {
-        if flags.contains(MmapFlags::SHARED) {
+
+    if len == 0 {
+        return Err(SysError::EINVAL);
+    }
+    if !flags.contains(MmapFlags::ANONYMOUS) {
+        return Err(SysError::ENOSYS);
+    }
+    if flags.contains(MmapFlags::SHARED) && flags.contains(MmapFlags::PRIVATE) {
+        return Err(SysError::EINVAL);
+    }
+    if !flags.contains(MmapFlags::SHARED) && !flags.contains(MmapFlags::PRIVATE) {
+        return Err(SysError::EINVAL);
+    }
+    if offset != 0 || fd != 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    let len = roundup_pages(len);
+    let state = memory_state();
+    let requested = if flags.contains(MmapFlags::FIXED) {
+        if !page_aligned(addr) {
             return Err(SysError::EINVAL);
         }
-        
-        let page_count = pages(len);
-        if let Some(_vmo) = Vmo::new_paged(page_count) {
-            // In real implementation, would map into process address space
-            let vaddr = if flags.contains(MmapFlags::FIXED) {
-                addr
-            } else {
-                // Simple allocation: find free region
-                addr + page_count * PAGE_SIZE
-            };
-            
-            Ok(vaddr)
-        } else {
-            Err(SysError::ENOMEM)
+        if !range_within_window(addr, len, LINUX_MAPPING_BASE, LINUX_MAPPING_LIMIT) {
+            return Err(SysError::EINVAL);
         }
+        let _ = unmap_linux_range(state, addr, len);
+        Some(addr)
+    } else if addr != 0 && page_aligned(addr) {
+        Some(addr)
     } else {
-        // File-backed mapping (not yet implemented)
-        Err(SysError::ENOSYS)
-    }
+        None
+    };
+
+    let vaddr = state.find_free_linux_region(requested, len).ok_or(SysError::ENOMEM)?;
+    let pfns = MemorySyscallState::alloc_linux_pages(pages(len)).ok_or(SysError::ENOMEM)?;
+
+    state.linux_mappings.push(LinuxMappingRecord {
+        addr: vaddr,
+        len,
+        prot: prot.bits(),
+        flags: flags.bits(),
+        pfns,
+    });
+    state.sort_linux_mappings();
+    Ok(vaddr)
 }
 
 /// Linux sys_mprotect implementation
 pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> SysResult {
     let prot = MmapProt::from_bits_truncate(prot);
-    
+
     info!(
         "mprotect: addr={:#x}, size={:#x}, prot={:?}",
         addr, len, prot
     );
-    
-    // TODO: Implement protection changes
-    warn!("mprotect: unimplemented");
-    Ok(0)
+
+    if !page_aligned(addr) || len == 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    update_linux_protection(memory_state(), addr, roundup_pages(len), prot.bits())
 }
 
 /// Linux sys_munmap implementation
 pub fn sys_munmap(addr: usize, len: usize) -> SysResult {
     info!("munmap: addr={:#x}, size={:#x}", addr, len);
 
-    if !page_aligned(addr) || !page_aligned(len) || len == 0 {
+    if !page_aligned(addr) || len == 0 {
         return Err(SysError::EINVAL);
     }
 
-    // In real implementation, would remove mappings
-    Ok(0)
+    unmap_linux_range(memory_state(), addr, roundup_pages(len))
 }
 
 /// Linux sys_brk implementation
@@ -230,53 +662,40 @@ pub fn sys_munmap(addr: usize, len: usize) -> SysResult {
 /// * On error: Negative error code
 pub fn sys_brk(new_brk: usize) -> SysResult {
     info!("brk: new_brk={:#x}", new_brk);
-    
-    // For now, we use a simple global heap tracking
-    // In a real implementation, each process would have its own heap
-    static mut CURRENT_BRK: usize = 0;
-    static mut HEAP_START: usize = 0;
-    static mut HEAP_LIMIT: usize = 0;
-    
-    unsafe {
-        // Initialize heap on first call
-        if HEAP_START == 0 {
-            HEAP_START = 0x4000_0000; // 1GB - simple heap start
-            CURRENT_BRK = HEAP_START;
-            HEAP_LIMIT = HEAP_START + (1024 * 1024); // 1MB heap limit
-        }
-        
-        // If new_brk is 0, just return current brk
-        if new_brk == 0 {
-            return Ok(CURRENT_BRK);
-        }
-        
-        // Check if new_brk is within limits
-        if new_brk < HEAP_START || new_brk > HEAP_LIMIT {
-            return Err(SysError::EINVAL);
-        }
-        
-        // Check if we need to allocate or free pages
-        if new_brk > CURRENT_BRK {
-            // Growing heap - allocate pages
-            let alloc_size = new_brk - CURRENT_BRK;
-            let pages_needed = pages(alloc_size);
-            
-            for _ in 0..pages_needed {
-                if crate::kernel_lowlevel::memory::PageFrameAllocator::alloc().is_none() {
-                    // Out of memory - partially allocated is okay
-                    break;
-                }
-            }
-        } else if new_brk < CURRENT_BRK {
-            // Shrinking heap - free pages
-            // In real implementation, would free physical pages
-        }
-        
-        // Update current brk
-        CURRENT_BRK = new_brk;
-        
-        Ok(CURRENT_BRK)
+
+    let state = memory_state();
+
+    if new_brk == 0 {
+        return Ok(state.brk.current);
     }
+    if new_brk < state.brk.start || new_brk > state.brk.limit {
+        return Ok(state.brk.current);
+    }
+
+    let old_pages = pages(state.brk.current.saturating_sub(state.brk.start));
+    let new_pages = pages(new_brk.saturating_sub(state.brk.start));
+
+    if new_pages > old_pages {
+        let mut newly_allocated = Vec::with_capacity(new_pages - old_pages);
+        for _ in old_pages..new_pages {
+            if let Some(pfn) = PageFrameAllocator::alloc() {
+                newly_allocated.push(pfn);
+            } else {
+                MemorySyscallState::free_linux_pages(&newly_allocated);
+                return Ok(state.brk.current);
+            }
+        }
+        state.brk.pfns.extend(newly_allocated);
+    } else if new_pages < old_pages {
+        for _ in new_pages..old_pages {
+            if let Some(pfn) = state.brk.pfns.pop() {
+                PageFrameAllocator::free(pfn);
+            }
+        }
+    }
+
+    state.brk.current = new_brk;
+    Ok(state.brk.current)
 }
 
 /// Linux sys_mremap implementation
@@ -308,47 +727,118 @@ pub fn sys_mremap(
     const MREMAP_MAYMOVE: usize = 1 << 0;
     const MREMAP_FIXED: usize = 1 << 1;
     const MREMAP_DONTUNMAP: usize = 1 << 2;
-    
+
     if old_address == 0 || new_size == 0 {
         return Err(SysError::EINVAL);
     }
-    
-    if !page_aligned(old_address) || !page_aligned(old_size) || !page_aligned(new_size) {
+    if !page_aligned(old_address) || old_size == 0 {
         return Err(SysError::EINVAL);
     }
-    
-    let old_pages = pages(old_size);
-    let new_pages = pages(new_size);
-    
-    // Simple implementation: always allocate new and copy
-    // In real implementation, would try to extend in place
-    
-    if flags & MREMAP_MAYMOVE != 0 || new_pages > old_pages {
-        // Need to move mapping - allocate new region
-        let new_addr = if flags & MREMAP_FIXED != 0 && new_address != 0 {
-            // Use specified address
-            new_address
-        } else {
-            // Find free region - simple approach: place after old
-            old_address + old_size
-        };
-        
-        // Allocate new VMO
-        if let Some(_vmo) = Vmo::new_paged(new_pages) {
-            // In real implementation:
-            // 1. Map new VMO at new_addr
-            // 2. Copy data from old mapping to new mapping
-            // 3. Unmap old mapping if not MREMAP_DONTUNMAP
-            
-            // For now, just return the new address
-            Ok(new_addr)
-        } else {
-            Err(SysError::ENOMEM)
+
+    if flags & MREMAP_FIXED != 0 && flags & MREMAP_MAYMOVE == 0 {
+        return Err(SysError::EINVAL);
+    }
+    if flags & MREMAP_DONTUNMAP != 0 && flags & MREMAP_MAYMOVE == 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    let old_len = roundup_pages(old_size);
+    let new_len = roundup_pages(new_size);
+    let state = memory_state();
+    let Some(index) = state
+        .linux_mappings
+        .iter()
+        .position(|mapping| mapping.addr == old_address && mapping.len == old_len) else {
+        return Err(SysError::EINVAL);
+    };
+
+    if new_len == old_len {
+        return Ok(old_address);
+    }
+
+    if new_len < old_len {
+        let mapping = state.linux_mappings.remove(index);
+        let keep_pages = new_len / PAGE_SIZE;
+        let mut keep_pfns = mapping.pfns;
+        let tail_pfns = keep_pfns.split_off(keep_pages);
+        MemorySyscallState::free_linux_pages(&tail_pfns);
+        state.linux_mappings.push(LinuxMappingRecord {
+            addr: old_address,
+            len: new_len,
+            prot: mapping.prot,
+            flags: mapping.flags,
+            pfns: keep_pfns,
+        });
+        state.sort_linux_mappings();
+        return Ok(old_address);
+    }
+
+    let extra_len = new_len - old_len;
+    if flags & MREMAP_FIXED == 0 && state.linux_range_available(old_address + old_len, extra_len) {
+        let extra_pfns = MemorySyscallState::alloc_linux_pages(extra_len / PAGE_SIZE).ok_or(SysError::ENOMEM)?;
+        state.linux_mappings[index].len = new_len;
+        state.linux_mappings[index].pfns.extend(extra_pfns);
+        state.sort_linux_mappings();
+        return Ok(old_address);
+    }
+
+    if flags & MREMAP_MAYMOVE == 0 {
+        return Err(SysError::ENOMEM);
+    }
+
+    let requested_addr = if flags & MREMAP_FIXED != 0 {
+        if new_address == 0 || !page_aligned(new_address) {
+            return Err(SysError::EINVAL);
         }
+        let _ = unmap_linux_range(state, new_address, new_len);
+        Some(new_address)
     } else {
-        // Shrinking in place - just return old address
-        // In real implementation, would unmap excess pages
-        Ok(old_address)
+        None
+    };
+
+    let new_addr = state.find_free_linux_region(requested_addr, new_len).ok_or(SysError::ENOMEM)?;
+    let new_pfns = MemorySyscallState::alloc_linux_pages(new_len / PAGE_SIZE).ok_or(SysError::ENOMEM)?;
+    let prot = state.linux_mappings[index].prot;
+    let flags_bits = state.linux_mappings[index].flags;
+
+    if flags & MREMAP_DONTUNMAP == 0 {
+        let old_mapping = state.linux_mappings.swap_remove(index);
+        MemorySyscallState::free_linux_pages(&old_mapping.pfns);
+    }
+
+    state.linux_mappings.push(LinuxMappingRecord {
+        addr: new_addr,
+        len: new_len,
+        prot,
+        flags: flags_bits,
+        pfns: new_pfns,
+    });
+    state.sort_linux_mappings();
+    Ok(new_addr)
+}
+
+/// Linux sys_write implementation
+pub fn sys_write(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
+    info!("write: fd={}, buf={:#x}, len={:#x}", fd, buf_ptr, len);
+
+    if len == 0 {
+        return Ok(0);
+    }
+    if buf_ptr == 0 {
+        return Err(SysError::EFAULT);
+    }
+
+    match fd {
+        1 | 2 => {
+            let buf = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
+            let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+            serial.init();
+            for byte in buf {
+                serial.write_byte(*byte);
+            }
+            Ok(len)
+        }
+        _ => Err(SysError::ENODEV),
     }
 }
 
@@ -372,32 +862,32 @@ pub fn sys_vmo_create(
     let resizable = options & 1 != 0;
     let is_physical = options & 2 != 0;
     let is_contiguous = options & 4 != 0;
-    
+
     if is_physical && is_contiguous {
-        return Err(ZxError::ErrInvalidArgs); // Can't be both physical and contiguous
+        return Err(ZxError::ErrInvalidArgs);
+    }
+
+    if resizable && (is_physical || is_contiguous) {
+        return Err(ZxError::ErrInvalidArgs);
     }
 
     let page_count = pages(size as usize);
-
-    let vmo = if is_physical {
-        // Physical VMO - would use specific physical addresses
-        // For now, create as regular paged VMO
-        Vmo::new_paged_with_resizable(resizable, page_count)
+    let mut vmo = if is_physical {
+        let mut vmo = Vmo::new_contiguous(size as usize).ok_or(ZxError::ErrNoMemory)?;
+        vmo.vmo_type = VmoType::Physical;
+        vmo
     } else if is_contiguous {
-        // Contiguous VMO - physically contiguous memory
-        Vmo::new_contiguous(size as usize)
+        Vmo::new_contiguous(size as usize).ok_or(ZxError::ErrNoMemory)?
     } else {
-        // Regular paged VMO
-        Vmo::new_paged_with_resizable(resizable, page_count)
+        Vmo::new_paged_with_resizable(resizable, page_count).ok_or(ZxError::ErrNoMemory)?
     };
 
-    if let Some(_vmo) = vmo {
-        // In real implementation, would add to handle table
-        *out_handle = 1; // Placeholder
-        Ok(())
-    } else {
-        Err(ZxError::ErrNoMemory)
-    }
+    let state = memory_state();
+    let handle = state.alloc_handle();
+    vmo.handle = HandleValue(handle);
+    state.vmos.push(VmoRecord { handle, vmo });
+    *out_handle = handle;
+    Ok(())
 }
 
 /// Zircon sys_vmo_read implementation
@@ -407,8 +897,10 @@ pub fn sys_vmo_read(
     offset: u64,
 ) -> ZxResult<usize> {
     info!("vmo.read: handle={:#x?}, offset={:#x?}", handle, offset);
-    
-    // In real implementation, would lookup VMO by handle and read
+
+    let state = memory_state();
+    let vmo = state.get_vmo(handle).ok_or(ZxError::ErrNotFound)?;
+    vmo.read(offset as usize, buf)?;
     Ok(buf.len())
 }
 
@@ -419,26 +911,30 @@ pub fn sys_vmo_write(
     offset: u64,
 ) -> ZxResult<usize> {
     info!("vmo.write: handle={:#x?}, offset={:#x?}", handle, offset);
-    
-    // In real implementation, would lookup VMO by handle and write
+
+    let state = memory_state();
+    let vmo = state.get_vmo_mut(handle).ok_or(ZxError::ErrNotFound)?;
+    vmo.write(offset as usize, buf)?;
     Ok(buf.len())
 }
 
 /// Zircon sys_vmo_get_size implementation
 pub fn sys_vmo_get_size(handle: u32, out_size: &mut usize) -> ZxResult {
     info!("vmo.get_size: handle={:?}", handle);
-    
-    // In real implementation, would lookup VMO and return size
-    *out_size = PAGE_SIZE; // Placeholder
+
+    let state = memory_state();
+    let vmo = state.get_vmo(handle).ok_or(ZxError::ErrNotFound)?;
+    *out_size = vmo.len();
     Ok(())
 }
 
 /// Zircon sys_vmo_set_size implementation
 pub fn sys_vmo_set_size(handle: u32, size: usize) -> ZxResult {
     info!("vmo.set_size: handle={:#x}, size={:#x}", handle, size);
-    
-    // In real implementation, would resize VMO
-    Ok(())
+
+    let state = memory_state();
+    let vmo = state.get_vmo_mut(handle).ok_or(ZxError::ErrNotFound)?;
+    vmo.set_len(size)
 }
 
 /// Zircon sys_vmo_op_range implementation
@@ -452,22 +948,38 @@ pub fn sys_vmo_op_range(
           handle, op, offset, len);
 
     let op = VmoOpType::try_from(op).or(Err(ZxError::ErrInvalidArgs))?;
+    let state = memory_state();
+    let vmo = state.get_vmo_mut(handle).ok_or(ZxError::ErrNotFound)?;
+
+    if checked_end(offset, len).filter(|end| *end <= vmo.len()).is_none() {
+        return Err(ZxError::ErrOutOfRange);
+    }
 
     match op {
         VmoOpType::Commit => {
             if !page_aligned(offset) || !page_aligned(len) {
                 return Err(ZxError::ErrInvalidArgs);
             }
+            vmo.commit(offset, len)?;
             Ok(0)
         }
         VmoOpType::Decommit => {
             if !page_aligned(offset) || !page_aligned(len) {
                 return Err(ZxError::ErrInvalidArgs);
             }
+            vmo.decommit(offset, len)?;
             Ok(0)
         }
-        VmoOpType::Zero => Ok(0),
-        _ => unimplemented!(),
+        VmoOpType::Zero => {
+            vmo.zero(offset, len)?;
+            Ok(0)
+        }
+        VmoOpType::Lock
+        | VmoOpType::Unlock
+        | VmoOpType::CacheSync
+        | VmoOpType::CacheInvalidate
+        | VmoOpType::CacheClean
+        | VmoOpType::CacheCleanInvalidate => Ok(0),
     }
 }
 
@@ -482,7 +994,7 @@ pub fn sys_vmar_map(
     options: u32,
     vmar_offset: usize,
     vmo_handle: u32,
-    _vmo_offset: usize,
+    vmo_offset: usize,
     len: usize,
     out_addr: &mut usize,
 ) -> ZxResult {
@@ -491,15 +1003,39 @@ pub fn sys_vmar_map(
         vmar_handle, vmar_offset, vmo_handle, len
     );
 
-    let _options = VmOptions::from_bits(options).ok_or(ZxError::ErrInvalidArgs)?;
+    let options = VmOptions::from_bits(options).ok_or(ZxError::ErrInvalidArgs)?;
 
     let len = roundup_pages(len);
-    if len == 0 {
+    if len == 0 || !page_aligned(vmo_offset) {
         return Err(ZxError::ErrInvalidArgs);
     }
-    
-    // In real implementation, would perform the actual mapping
-    *out_addr = vmar_offset; // Placeholder
+
+    let vmo_len = {
+        let state = memory_state();
+        let vmo = state.get_vmo(vmo_handle).ok_or(ZxError::ErrNotFound)?;
+        vmo.len()
+    };
+
+    if checked_end(vmo_offset, len).filter(|end| *end <= vmo_len).is_none() {
+        return Err(ZxError::ErrOutOfRange);
+    }
+
+    let overwrite = options.contains(VmOptions::SPECIFIC_OVERWRITE);
+    let specific = options.contains(VmOptions::SPECIFIC) || overwrite;
+    let requested_offset = if specific { Some(vmar_offset) } else { None };
+    let flags = mmu_flags_from_vm_options(options);
+    let state = memory_state();
+    let vmar = state.get_vmar_mut(vmar_handle).ok_or(ZxError::ErrNotFound)?;
+    *out_addr = vmar.map_ext(
+        requested_offset,
+        HandleValue(vmo_handle),
+        vmo_offset,
+        len,
+        flags,
+        flags,
+        overwrite,
+        options.contains(VmOptions::MAP_RANGE),
+    )?;
     Ok(())
 }
 
@@ -507,9 +1043,14 @@ pub fn sys_vmar_map(
 pub fn sys_vmar_unmap(vmar_handle: u32, addr: usize, len: usize) -> ZxResult {
     info!("vmar.unmap: vmar={:#x}, addr={:#x}, len={:#x}",
           vmar_handle, addr, len);
-    
-    // In real implementation, would remove the mapping
-    Ok(())
+
+    if !page_aligned(addr) || len == 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+
+    let state = memory_state();
+    let vmar = state.get_vmar_mut(vmar_handle).ok_or(ZxError::ErrNotFound)?;
+    vmar.unmap(addr, roundup_pages(len))
 }
 
 /// Zircon sys_vmar_protect implementation
@@ -519,13 +1060,19 @@ pub fn sys_vmar_protect(
     addr: u64,
     len: u64,
 ) -> ZxResult {
-    let _options = VmOptions::from_bits(options).ok_or(ZxError::ErrInvalidArgs)?;
+    let raw_options = options;
+    let options = VmOptions::from_bits(options).ok_or(ZxError::ErrInvalidArgs)?;
 
     info!("vmar.protect: vmar={:#x}, options={:#x}, addr={:#x}, len={:#x}",
-          vmar_handle, options, addr, len);
-    
-    // In real implementation, would change protection
-    Ok(())
+          vmar_handle, raw_options, addr, len);
+
+    if !page_aligned(addr as usize) || len == 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+
+    let state = memory_state();
+    let vmar = state.get_vmar_mut(vmar_handle).ok_or(ZxError::ErrNotFound)?;
+    vmar.protect(addr as usize, roundup_pages(len as usize), mmu_flags_from_vm_options(options))
 }
 
 /// Zircon sys_vmar_allocate implementation
@@ -537,7 +1084,7 @@ pub fn sys_vmar_allocate(
     out_child_vmar: &mut u32,
     out_child_addr: &mut usize,
 ) -> ZxResult {
-    let _vm_options = VmOptions::from_bits(options).ok_or(ZxError::ErrInvalidArgs)?;
+    let flags = VmarFlags::from_bits(options).ok_or(ZxError::ErrInvalidArgs)?;
 
     info!(
         "vmar.allocate: parent={:#x?}, options={:#x?}, offset={:#x?}, size={:#x?}",
@@ -548,10 +1095,38 @@ pub fn sys_vmar_allocate(
     if size == 0 {
         return Err(ZxError::ErrInvalidArgs);
     }
-    
-    // In real implementation, would create child VMAR
-    *out_child_vmar = 0;
-    *out_child_addr = 0;
+
+    let child_handle = {
+        let state = memory_state();
+        state.alloc_handle()
+    };
+
+    let requested_offset = if flags.contains(VmarFlags::SPECIFIC) || offset != 0 {
+        Some(offset as usize)
+    } else {
+        None
+    };
+
+    let child_addr = {
+        let state = memory_state();
+        let parent = state.get_vmar_mut(parent_vmar).ok_or(ZxError::ErrNotFound)?;
+        let child_addr = parent.allocate(requested_offset, size, flags, PAGE_SIZE)?;
+        parent.children.push(child_handle as usize);
+        child_addr
+    };
+
+    let mut child_vmar = Vmar::new(child_addr, size);
+    child_vmar.handle = HandleValue(child_handle);
+    child_vmar.parent_idx = Some(parent_vmar as usize);
+
+    let state = memory_state();
+    state.vmars.push(VmarRecord {
+        handle: child_handle,
+        vmar: child_vmar,
+    });
+
+    *out_child_vmar = child_handle;
+    *out_child_addr = child_addr;
     Ok(())
 }
 
@@ -559,8 +1134,11 @@ pub fn sys_vmar_allocate(
 pub fn sys_vmar_destroy(vmar_handle: u32) -> ZxResult {
     info!("vmar.destroy: handle={:#x?}", vmar_handle);
 
-    // In real implementation, would destroy VMAR
-    Ok(())
+    if memory_state().remove_vmar(vmar_handle) {
+        Ok(())
+    } else {
+        Err(ZxError::ErrNotFound)
+    }
 }
 
 /// Zircon sys_vmar_unmap_handle_close_thread_exit implementation
@@ -591,21 +1169,13 @@ pub fn sys_vmar_unmap_handle_close_thread_exit(
         return Err(ZxError::ErrInvalidArgs);
     }
 
-    if !page_aligned(addr) || !page_aligned(len) {
+    if !page_aligned(addr) {
         return Err(ZxError::ErrInvalidArgs);
     }
 
-    // In a real implementation, this would:
-    // 1. Find and remove the mapping at addr
-    // 2. Mark the mapping as being in "thread exit" state
-    // 3. The mapping won't be actually freed until all threads exit
-    // 4. This allows safe stack teardown for exiting threads
-    
-    // For now, just unmap normally
-    // The "handle close thread exit" semantics would require
-    // proper thread tracking and deferred cleanup
-    
-    Ok(())
+    let state = memory_state();
+    let vmar = state.get_vmar_mut(vmar_handle).ok_or(ZxError::ErrNotFound)?;
+    vmar.unmap_handle_close_thread_exit(addr, roundup_pages(len))
 }
 
 // ============================================================================
@@ -663,7 +1233,11 @@ pub async fn sys_wait4(_pid: i32, _wstatus: usize, _options: u32) -> SysResult {
 /// Linux sys_exit implementation
 pub fn sys_exit(exit_code: i32) -> SysResult {
     info!("exit: code={}", exit_code);
-    
+
+    if crate::user_level::user_test::prepare_el0_test_kernel_return(exit_code) {
+        return Ok(0);
+    }
+
     // TODO: Terminate current process
     Ok(0)
 }
@@ -722,7 +1296,7 @@ pub fn sys_process_create(
     let pm = process_manager();
     if let Some(_pid) = pm.create_process("zircon_proc") {
         *out_proc_handle = 1;
-        *out_vmar_handle = 2;
+        *out_vmar_handle = memory_root_vmar_handle();
         Ok(())
     } else {
         Err(ZxError::ErrNoMemory)
@@ -797,16 +1371,27 @@ pub fn sys_handle_close(handle: u32) -> ZxResult {
     if handle == INVALID_HANDLE {
         return Err(ZxError::ErrInvalidArgs);
     }
-    
-    // TODO: Close handle in process handle table
+
+    let _ = memory_state().release_handle(handle);
     Ok(())
 }
 
 /// Zircon sys_handle_close_many implementation
 pub fn sys_handle_close_many(handles_ptr: usize, num_handles: usize) -> ZxResult {
     info!("handle.close_many: ptr={:#x}, count={}", handles_ptr, num_handles);
-    
-    // TODO: Close multiple handles
+
+    if num_handles == 0 {
+        return Ok(());
+    }
+    if handles_ptr == 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+
+    let handles = unsafe { core::slice::from_raw_parts(handles_ptr as *const u32, num_handles) };
+    for handle in handles {
+        sys_handle_close(*handle)?;
+    }
+
     Ok(())
 }
 
@@ -1276,6 +1861,18 @@ pub enum ZirconSyscall {
 /// Dispatch a Linux syscall
 pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
     match syscall_num {
+        ARM64_SYS_WRITE => {
+            sys_write(args[0], args[1], args[2])
+        }
+        ARM64_SYS_EXIT => {
+            sys_exit(args[0] as i32)
+        }
+        ARM64_SYS_GETPID => {
+            sys_getpid()
+        }
+        ARM64_SYS_MMAP => {
+            sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5] as u64)
+        }
         num if num == LinuxSyscall::Mmap as u32 => {
             sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5] as u64)
         }

@@ -1,179 +1,185 @@
-# Memory Syscalls: Current Implementation Status
+# Memory Syscalls
 
-This document tracks the memory-related syscall behavior implemented in the current tree. It focuses on what the code actually does today, not the eventual Linux or Zircon compatibility target.
+This document tracks the memory syscall behavior that is implemented in the current tree. It covers the Linux-facing VM syscalls, the Zircon VMO/VMAR syscalls, the shell test command that exercises them, and the extra memory state exposed by `meminfo`.
 
 ## Scope
 
-Relevant code lives in:
+Relevant code:
 
 - `src/syscall/syscall.rs`
 - `src/kernel_objects/vmo.rs`
 - `src/kernel_objects/vmar.rs`
+- `src/user_level/user_shell.rs`
 - `src/kernel_lowlevel/memory.rs`
-- `src/kernel_lowlevel/mmu.rs`
 
 ## Summary
 
-SMROS currently has:
+SMROS now has:
 
-- a real bitmap-based physical page-frame allocator
-- a simple per-process address-space model with fixed segments
-- partially implemented Linux memory syscalls
-- partially implemented Zircon VMO/VMAR syscalls
+- a page-frame-backed Linux mapping registry used by `mmap`, `munmap`, `mprotect`, and `mremap`
+- a global `brk` window with grow and shrink page accounting
+- a handle-backed Zircon VMO registry with real `read`, `write`, `get_size`, `set_size`, and `op_range` behavior
+- a software VMAR tree with mapping, protection, allocation, destroy, and unmap bookkeeping
+- a boot-time EL0 `svc #0` smoke test for Linux `write`, `getpid`, `mmap`, and `exit`
+- shell-visible memory stats for Linux mappings, `brk`, VMO state, and VMAR state
 
-Most object constructors allocate real pages. Many syscall wrappers still return placeholder values or maintain software bookkeeping without changing live process mappings.
+The model is still software bookkeeping layered on top of the real page allocator. It is suitable for syscall bring-up and shell testing, but it is not yet wired to live EL0 page-table updates.
+
+## Boot-Time EL0 Validation
+
+Before the shell starts, SMROS now drops into EL0 and issues real Linux-style syscalls through the active exception vector:
+
+- `write`
+- `getpid`
+- `mmap`
+- `exit`
+
+The kernel records the EL0 syscall results on the EL1 side and prints the validation status before starting the shell. This validates the real `svc` path separately from the later shell `testsc` command.
 
 ## Linux Memory Syscalls
 
 | Syscall | Current Behavior | Status |
 |---------|------------------|--------|
-| `sys_mmap` | supports anonymous mappings only; allocates a paged VMO and returns a simple virtual address | partial |
-| `sys_munmap` | validates page alignment and returns success without removing real mappings | placeholder |
-| `sys_mprotect` | parses protection flags and returns success without changing mappings | placeholder |
-| `sys_brk` | tracks a global heap window at `0x4000_0000..0x400F_FFFF` and allocates page frames on growth | partial |
-| `sys_mremap` | returns the old address for shrink-in-place or allocates a new paged VMO and returns a synthetic new address | partial |
+| `sys_mmap` | supports anonymous `MAP_PRIVATE` and `MAP_SHARED` mappings, rounds length to pages, allocates page frames, tracks the virtual range, and honors `MAP_FIXED` by replacing overlapping mappings in the software model | implemented, anonymous only |
+| `sys_munmap` | unmaps page-aligned ranges, frees backing page frames, and splits surviving mapping fragments | implemented |
+| `sys_mprotect` | updates protection bits on page-aligned subranges and splits mapping records as needed | implemented |
+| `sys_brk` | maintains a global heap window at `0x4000_0000..0x400F_FFFF`, commits pages on growth, frees pages on shrink, and returns the current break | implemented, global not per-process |
+| `sys_mremap` | resizes exact mappings, shrinks in place, grows in place when space is free, or moves the mapping for `MREMAP_MAYMOVE` / `MREMAP_FIXED` | implemented in software model |
 
-### `sys_mmap`
+### Linux Notes
 
-Current properties:
-
-- only anonymous mappings are accepted
-- `MAP_SHARED | MAP_ANONYMOUS` is rejected
-- file-backed mappings return `ENOSYS`
-- the returned address is synthetic rather than derived from a real process mapping database
-
-This is enough for the current smoke tests, but it is not yet a full process mapping implementation.
-
-### `sys_brk`
-
-Current properties:
-
-- uses one global break pointer for the whole kernel
-- initializes on first use
-- allocates physical pages through `PageFrameAllocator` when the break grows
-- does not model a separate heap per process yet
-
-### `sys_mremap`
-
-Current properties:
-
-- validates addresses and sizes for page alignment
-- uses a simple relocate-or-return-old strategy
-- does not perform real copy-on-remap or page-table edits
+- `sys_mmap` is still anonymous only. File-backed mappings still return `ENOSYS`.
+- Linux mappings are tracked in a dedicated kernel-side registry rooted at `0x5000_0000`.
+- `mremap` preserves the mapping shape and page accounting, but it does not copy user data into a real hardware remap path.
 
 ## Zircon VMO Syscalls
 
 | Syscall | Current Behavior | Status |
 |---------|------------------|--------|
-| `sys_vmo_create` | creates paged, resizable, or contiguous VMOs; "physical" option currently falls back to the regular paged constructor in the syscall wrapper | partial |
-| `sys_vmo_read` | returns the buffer length; does not read real data through a handle lookup | placeholder |
-| `sys_vmo_write` | returns the buffer length; does not write through a handle lookup | placeholder |
-| `sys_vmo_get_size` | reports `PAGE_SIZE` as a placeholder | placeholder |
-| `sys_vmo_set_size` | returns success without resizing a handle-backed object | placeholder |
-| `sys_vmo_op_range` | validates `Commit` and `Decommit`, accepts `Zero`, and leaves other ops unimplemented | partial |
+| `sys_vmo_create` | creates handle-backed paged, resizable, contiguous, and emulated physical VMOs | implemented |
+| `sys_vmo_read` | looks up the VMO handle and copies data from the software VMO buffer | implemented |
+| `sys_vmo_write` | looks up the VMO handle, commits pages for the written range, and copies data into the software VMO buffer | implemented |
+| `sys_vmo_get_size` | reports the real handle-backed VMO size | implemented |
+| `sys_vmo_set_size` | resizes resizable VMOs and updates page allocation state | implemented |
+| `sys_vmo_op_range` | supports `Commit`, `Decommit`, `Zero`, `Lock`, `Unlock`, `CacheSync`, `CacheInvalidate`, `CacheClean`, and `CacheCleanInvalidate` | implemented |
+
+### VMO Notes
+
+- `Commit` and `Decommit` change committed page state in the VMO object.
+- `Zero` clears the selected byte range in the software VMO buffer.
+- `Lock`, `Unlock`, and cache ops are accepted as successful software-model operations.
 
 ## Zircon VMAR Syscalls
 
 | Syscall | Current Behavior | Status |
 |---------|------------------|--------|
-| `sys_vmar_map` | validates options, rounds size, and returns an output address | bookkeeping |
-| `sys_vmar_unmap` | returns success without editing real mappings | placeholder |
-| `sys_vmar_protect` | validates options and returns success | placeholder |
-| `sys_vmar_allocate` | validates options and size, then returns zeroed child outputs | placeholder |
-| `sys_vmar_destroy` | returns success | placeholder |
-| `sys_vmar_unmap_handle_close_thread_exit` | validates alignment and returns success without deferred cleanup | placeholder |
+| `sys_vmar_map` | validates options and offsets, checks the VMO range, and creates a real VMAR mapping record | implemented |
+| `sys_vmar_unmap` | removes page-aligned subranges and splits remaining mappings | implemented |
+| `sys_vmar_protect` | changes protection bits on mapped subranges | implemented |
+| `sys_vmar_allocate` | allocates a child VMAR, returns a new handle, and links it to the parent VMAR | implemented |
+| `sys_vmar_destroy` | destroys child VMARs recursively and clears mapping bookkeeping | implemented |
+| `sys_vmar_unmap_handle_close_thread_exit` | performs the same software unmap path used for stack-teardown style cleanup | implemented in software model |
 
-## What The Object Layer Can Do
+### VMAR Notes
 
-The object layer in `src/kernel_objects/` is more capable than some of the syscall wrappers that sit above it.
+- The root software VMAR is created lazily and exposed through the shell test path.
+- VMAR bookkeeping is real inside the kernel object model, but it is not yet synchronized to hardware page tables for live EL0 execution.
+
+## Object-Layer Backing
 
 ### `Vmo`
 
-`src/kernel_objects/vmo.rs` supports:
+`src/kernel_objects/vmo.rs` now provides:
 
-- paged VMOs
-- resizable VMOs
-- physical VMOs
-- contiguous VMOs
-- resize via `set_len()`
-- child/slice creation
-- cache-policy changes
-
-Important distinction:
-
-- the object constructors allocate page frames
-- the syscall wrappers do not yet manage a complete handle-backed VMO registry
+- committed-page tracking per VMO page
+- a byte buffer used by `read`, `write`, and `zero`
+- resizable page accounting
+- explicit page release when handles are closed
 
 ### `Vmar`
 
-`src/kernel_objects/vmar.rs` supports:
+`src/kernel_objects/vmar.rs` now provides:
 
-- software tracking of mappings
-- subregion allocation
-- overwrite-aware mapping helper
-- permission bookkeeping
+- sorted mapping bookkeeping
+- overlap checks for new mappings
+- split-aware `unmap`
+- split-aware `protect`
+- aligned free-region search for child VMAR allocation
 
-But it still acts as a software model, not the definitive runtime mapping authority for the kernel.
+## Shell Test Commands
 
-## Underlying Memory Substrate
+Use these commands to build, boot, and verify the memory syscall paths:
 
-### Physical Memory
+```sh
+make build
+qemu-system-aarch64 -M virt -cpu cortex-a57 -smp 4 -m 512M -nographic -kernel kernel8.img
+```
 
-`PageFrameAllocator` in `src/kernel_lowlevel/memory.rs` tracks:
+During boot, expect a line like:
 
-- 4096 physical pages
-- 4 KiB page size
-- 16 MiB total managed space
+```text
+[EL0] Real EL0 -> SVC -> EL1 validation: SUCCESS
+```
 
-### Per-Process Address Space Model
+Then use these commands from the SMROS shell:
 
-Each `ProcessAddressSpace` currently uses four fixed segments:
+```sh
+help
+meminfo
+testsc
+meminfo
+ps
+top
+```
 
-| Segment | Base | Size |
-|---------|------|------|
-| Code | `0x0000` | 1 page |
-| Data | `0x1000` | 1 page |
-| Heap | `0x2000` | 4 pages |
-| Stack | `0xF000` | 2 pages |
+What they cover:
 
-This is the address-space model used by the process manager in `src/kernel_lowlevel/memory.rs`.
+- boot log EL0 validation: exercises real EL0 `svc` handling for Linux `write`, `getpid`, `mmap`, and `exit`
+- `help`: confirms the command is exposed in the live shell
+- `meminfo`: prints allocator state plus Linux mapping, `brk`, VMO, and VMAR counters
+- `testsc`: runs the Linux and Zircon memory syscall smoke suite
+- `ps` and `top`: provide supporting process and page usage context around the memory test
 
-### MMU Helpers
+## `testsc` Coverage
 
-`src/kernel_lowlevel/mmu.rs` contains:
+The shell's `testsc` command now exercises:
 
-- page-table entry definitions
-- TTBR0/TTBR1 management
-- user and kernel region mapping helpers
+- Linux `write`
+- Linux `getpid`
+- Linux `brk`
+- Linux `mmap`
+- Linux `mprotect`
+- Linux `mremap`
+- Linux `munmap`
+- Zircon `vmo_create`
+- Zircon `vmo_write`
+- Zircon `vmo_read`
+- Zircon `vmo_get_size`
+- Zircon `vmo_set_size`
+- Zircon `vmo_op_range`
+- Zircon `vmar_map`
+- Zircon `vmar_protect`
+- Zircon `vmar_allocate`
+- Zircon `vmar_unmap`
+- Zircon `vmar_unmap_handle_close_thread_exit`
+- Zircon `vmar_destroy`
+- Zircon `handle_close` for the VMO handle created by the test
 
-Those helpers are real scaffolding for EL0 work, but they are not yet the engine behind the current shell/process demo path.
+## Extra Memory Info In `meminfo`
 
-## What Is Actually Exercised Today
+`meminfo` now reports:
 
-The current boot flow exercises only a small part of the memory syscall surface:
+- allocator totals, used pages, free pages, and page size
+- Linux mapping count, mapped bytes, and committed Linux pages
+- Linux `brk` start, current break, limit, and committed pages
+- Zircon VMO count, VMO bytes, and committed VMO pages
+- Zircon VMAR count, VMAR mapping count, and the root VMAR handle
 
-- `run_user_test()` directly calls `sys_getpid()` and `sys_mmap()` from kernel mode
-- the shell's `testsc` command directly calls `sys_getpid()` and `sys_mmap()`
-- the shell also contains a lightweight `test_write()` smoke path through `svc`
+## Remaining Gaps
 
-That means the live demo validates the shape of the interfaces more than full address-space correctness.
+The memory syscall layer is now complete as a kernel-side software model, but there are still system-level gaps:
 
-## Practical Interpretation
-
-Today the memory syscall layer should be read as:
-
-- real allocator underneath
-- useful object-model scaffolding
-- partial syscall surface
-- incomplete runtime wiring
-
-It is suitable for kernel bring-up and interface development, but it is not yet a complete Linux `mmap` implementation or a complete Zircon VMO/VMAR subsystem.
-
-## Known Gaps
-
-- no real file-backed `mmap`
-- no real `munmap` teardown of live process mappings
+- no file-backed `mmap`
 - no per-process `brk`
-- no handle-backed VMO registry in the syscall wrapper layer
-- no VMAR-to-hardware page-table synchronization in the live boot path
-- special thread-exit VMAR unmap semantics are not implemented yet
+- no live VMAR-to-hardware page-table synchronization in the booted shell path
+- no full Zircon process-local handle table yet

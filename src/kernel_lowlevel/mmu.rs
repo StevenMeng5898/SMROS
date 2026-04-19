@@ -59,6 +59,7 @@ pub const SCTLR_I: u64 = 1 << 12; // Instruction cache enable
 const PT_LEVEL_COUNT: usize = 4;
 const PT_ENTRIES: usize = 512; // 2^9 entries per table
 const PT_ENTRY_SIZE: usize = 8; // 64-bit entries
+const MAX_PAGE_TABLE_PAGES: usize = 32;
 
 /// Page table entry
 #[repr(C)]
@@ -151,6 +152,19 @@ impl PageTableEntry {
 
     pub fn set_sh(&mut self, sharability: u64) {
         self.value = (self.value & !0x300) | ((sharability << 8) & 0x300);
+    }
+}
+
+#[repr(C, align(4096))]
+struct PageTablePage {
+    entries: [PageTableEntry; PT_ENTRIES],
+}
+
+impl PageTablePage {
+    const fn new() -> Self {
+        Self {
+            entries: [PageTableEntry::new(); PT_ENTRIES],
+        }
     }
 }
 
@@ -383,14 +397,24 @@ impl PageTableManager {
 
 /// Map a page table page to a virtual address
 fn map_page_table(pfn: u64) -> Option<*mut PageTableEntry> {
-    // For simplicity, use identity mapping (kernel direct mapping)
-    // In a real kernel, you'd use proper virtual address allocation
-    let vaddr = 0x4000_0000 + (pfn as usize) * PAGE_SIZE; // Simple mapping
-    Some(vaddr as *mut PageTableEntry)
+    let _ = pfn;
+
+    unsafe {
+        if NEXT_PAGE_TABLE_SLOT >= MAX_PAGE_TABLE_PAGES {
+            return None;
+        }
+
+        let slot = NEXT_PAGE_TABLE_SLOT;
+        NEXT_PAGE_TABLE_SLOT += 1;
+        Some(PAGE_TABLE_POOL[slot].entries.as_mut_ptr())
+    }
 }
 
 /// Global page table manager for kernel
 static mut KERNEL_PAGETABLE_MANAGER: Option<PageTableManager> = None;
+static mut PAGE_TABLE_POOL: [PageTablePage; MAX_PAGE_TABLE_PAGES] =
+    [const { PageTablePage::new() }; MAX_PAGE_TABLE_PAGES];
+static mut NEXT_PAGE_TABLE_SLOT: usize = 0;
 
 /// Initialize MMU subsystem
 pub fn init() {

@@ -57,8 +57,8 @@ pub extern "C" fn handle_syscall_simple(
 ) -> u64 {
     let args = [arg0 as usize, arg1 as usize, arg2 as usize, 
                 arg3 as usize, arg4 as usize, arg5 as usize];
-    
-    if syscall_num < 1000 {
+
+    let result = if syscall_num < 1000 {
         // Linux syscall
         match dispatch_linux_syscall(syscall_num as u32, args) {
             Ok(val) => val as u64,
@@ -67,6 +67,8 @@ pub extern "C" fn handle_syscall_simple(
     } else {
         // Zircon syscall (not yet fully implemented)
         (-(SysError::ENOSYS as i32)) as u64
-    }
-}
+    };
 
+    crate::user_level::user_test::record_el0_kernel_syscall_result(syscall_num as u32, result);
+    result
+}

@@ -364,8 +364,8 @@ exception_handler:
     
     // Load syscall arguments from saved registers
     ldp     x1, x2, [sp, #0]    // x0, x1 -> arg0, arg1
-    ldp     x3, x4, [sp, #32]   // x4, x5 -> arg2, arg3  
-    ldp     x5, x6, [sp, #48]   // x6, x7 -> arg4, arg5
+    ldp     x3, x4, [sp, #16]   // x2, x3 -> arg2, arg3
+    ldp     x5, x6, [sp, #32]   // x4, x5 -> arg4, arg5
     
     // Call Rust syscall handler
     // Arguments: x0=syscall_num, x1-x6=args
@@ -380,7 +380,17 @@ exception_handler:
     mov     x0, #-38  // ENOSYS
     str     x0, [sp, #0]
     
-3:  // Restore registers and return
+3:
+    // Advance ELR past the SVC instruction (SVC is 4 bytes) before
+    // restoring user registers, otherwise the helper call would clobber the
+    // syscall return value in x0.
+    bl      syscall_should_advance_elr
+    cbz     x0, 5f
+    mrs     x0, elr_el1
+    add     x0, x0, #4
+    msr     elr_el1, x0
+
+5:  // Restore registers and return
     ldp     x0, x1, [sp, #0]
     ldp     x2, x3, [sp, #16]
     ldp     x4, x5, [sp, #32]
@@ -397,12 +407,6 @@ exception_handler:
     ldp     x26, x27, [sp, #208]
     ldp     x28, x29, [sp, #224]
     add     sp, sp, #256
-    
-    // Advance ELR past the SVC instruction (SVC is 4 bytes)
-    mrs     x0, elr_el1
-    add     x0, x0, #4
-    msr     elr_el1, x0
-    
     eret
 
 "#,
@@ -546,18 +550,9 @@ pub extern "C" fn kernel_main() -> ! {
 
     serial.write_str("\n[INFO] Boot complete! Starting user test process...\n");
 
-    // Run user test process to verify syscalls work
+    // Run the syscall validation by dropping into EL0. This function
+    // continues the boot flow itself after the EL0 test exits.
     crate::user_level::user_test::run_user_test();
-
-    serial.write_str("\n[INFO] User test complete! Starting user shell...\n");
-
-    // Start user shell as a scheduled thread
-    crate::user_level::user_shell::start_user_shell();
-
-    // Start the scheduler - this jumps to the first ready thread (shell)
-    // and never returns. The scheduler handles context switching.
-    serial.write_str("[KERNEL] Starting scheduler - jumping to shell thread...\n\n");
-    crate::kernel_objects::scheduler::start_first_thread();
 }
 
 /// Timer interrupt handler
