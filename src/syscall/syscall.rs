@@ -274,16 +274,18 @@ impl MemorySyscallState {
         let mut candidate = self.next_linux_addr.max(LINUX_MAPPING_BASE);
 
         for mapping in &self.linux_mappings {
-            if candidate + len <= mapping.addr {
-                self.next_linux_addr = candidate + len;
+            let candidate_end = checked_end(candidate, len)?;
+            if candidate_end <= mapping.addr {
+                self.next_linux_addr = candidate_end;
                 return Some(candidate);
             }
 
-            candidate = candidate.max(mapping.addr + mapping.len);
+            candidate = candidate.max(checked_end(mapping.addr, mapping.len)?);
         }
 
-        if candidate + len <= LINUX_MAPPING_LIMIT {
-            self.next_linux_addr = candidate + len;
+        let candidate_end = checked_end(candidate, len)?;
+        if candidate_end <= LINUX_MAPPING_LIMIT {
+            self.next_linux_addr = candidate_end;
             return Some(candidate);
         }
 
@@ -366,13 +368,18 @@ fn memory_state() -> &'static mut MemorySyscallState {
 }
 
 fn checked_end(addr: usize, len: usize) -> Option<usize> {
-    addr.checked_add(len)
+    if addr <= usize::MAX - len {
+        Some(addr + len)
+    } else {
+        None
+    }
 }
 
 fn range_overlaps(start_a: usize, len_a: usize, start_b: usize, len_b: usize) -> bool {
-    let end_a = start_a + len_a;
-    let end_b = start_b + len_b;
-    start_a < end_b && start_b < end_a
+    match (checked_end(start_a, len_a), checked_end(start_b, len_b)) {
+        (Some(end_a), Some(end_b)) => start_a < end_b && start_b < end_a,
+        _ => false,
+    }
 }
 
 fn range_within_window(addr: usize, len: usize, base: usize, limit: usize) -> bool {
@@ -400,8 +407,12 @@ fn mmu_flags_from_vm_options(options: VmOptions) -> MmuFlags {
 
 fn split_linux_mapping(mapping: LinuxMappingRecord, start: usize, len: usize) -> Vec<LinuxMappingRecord> {
     let mut pieces = Vec::new();
-    let end = start + len;
-    let mapping_end = mapping.addr + mapping.len;
+    let Some(end) = checked_end(start, len) else {
+        return pieces;
+    };
+    let Some(mapping_end) = checked_end(mapping.addr, mapping.len) else {
+        return pieces;
+    };
 
     if start > mapping.addr {
         let left_pages = (start - mapping.addr) / PAGE_SIZE;
@@ -481,7 +492,7 @@ bitflags::bitflags! {
 
 /// Helper: check if address is page-aligned
 pub fn page_aligned(addr: usize) -> bool {
-    addr & (PAGE_SIZE - 1) == 0
+    addr % PAGE_SIZE == 0
 }
 
 fn update_linux_protection(
@@ -490,7 +501,7 @@ fn update_linux_protection(
     len: usize,
     prot_bits: usize,
 ) -> SysResult {
-    let end = addr + len;
+    let end = checked_end(addr, len).ok_or(SysError::EINVAL)?;
     let mut touched = false;
     let mappings = core::mem::take(&mut state.linux_mappings);
 
@@ -502,7 +513,8 @@ fn update_linux_protection(
 
         touched = true;
         let overlap_start = core::cmp::max(addr, mapping.addr);
-        let overlap_end = core::cmp::min(end, mapping.addr + mapping.len);
+        let mapping_end = checked_end(mapping.addr, mapping.len).ok_or(SysError::EINVAL)?;
+        let overlap_end = core::cmp::min(end, mapping_end);
         let start_page = (overlap_start - mapping.addr) / PAGE_SIZE;
         let end_page = (overlap_end - mapping.addr) / PAGE_SIZE;
 
@@ -528,7 +540,7 @@ fn update_linux_protection(
 }
 
 fn unmap_linux_range(state: &mut MemorySyscallState, addr: usize, len: usize) -> SysResult {
-    let end = addr + len;
+    let end = checked_end(addr, len).ok_or(SysError::EINVAL)?;
     let mut removed = false;
     let mappings = core::mem::take(&mut state.linux_mappings);
 
@@ -540,7 +552,8 @@ fn unmap_linux_range(state: &mut MemorySyscallState, addr: usize, len: usize) ->
 
         removed = true;
         let overlap_start = core::cmp::max(addr, mapping.addr);
-        let overlap_end = core::cmp::min(end, mapping.addr + mapping.len);
+        let mapping_end = checked_end(mapping.addr, mapping.len).ok_or(SysError::EINVAL)?;
+        let overlap_end = core::cmp::min(end, mapping_end);
         let start_page = (overlap_start - mapping.addr) / PAGE_SIZE;
         let end_page = (overlap_end - mapping.addr) / PAGE_SIZE;
         MemorySyscallState::free_linux_pages(&mapping.pfns[start_page..end_page]);
@@ -774,7 +787,8 @@ pub fn sys_mremap(
     }
 
     let extra_len = new_len - old_len;
-    if flags & MREMAP_FIXED == 0 && state.linux_range_available(old_address + old_len, extra_len) {
+    let grow_start = checked_end(old_address, old_len).ok_or(SysError::EINVAL)?;
+    if flags & MREMAP_FIXED == 0 && state.linux_range_available(grow_start, extra_len) {
         let extra_pfns = MemorySyscallState::alloc_linux_pages(extra_len / PAGE_SIZE).ok_or(SysError::ENOMEM)?;
         state.linux_mappings[index].len = new_len;
         state.linux_mappings[index].pfns.extend(extra_pfns);

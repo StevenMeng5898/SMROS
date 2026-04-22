@@ -5,7 +5,7 @@ TARGET = $(ARCH)
 KERNEL = kernel8.img
 BUILD_DIR = target/$(TARGET)/release
 
-.PHONY: all build run clean debug help
+.PHONY: all build run clean debug help verus-setup verus-syscall
 
 all: build
 
@@ -66,6 +66,14 @@ install-target:
 	@echo "Installing ARM64 target..."
 	@rustup target add $(TARGET)
 
+# Install local Verus toolchain used by the verification harness
+verus-setup:
+	@./scripts/setup-verus.sh
+
+# Verify the first syscall proof harness with Verus
+verus-syscall:
+	@./scripts/verify-syscall-verus.sh
+
 # Show help
 help:
 	@echo "SMROS ARM64 Kernel Makefile"
@@ -77,6 +85,8 @@ help:
 	@echo "  debug     - Run with QEMU in debug mode"
 	@echo "  gdb       - Run with QEMU GDB server"
 	@echo "  clean     - Clean build artifacts"
+	@echo "  verus-setup   - Install the pinned Verus toolchain locally"
+	@echo "  verus-syscall - Verify the syscall proof harness with Verus"
 	@echo "  help      - Show this help message"
 	@echo ""
 	@echo "Usage:"

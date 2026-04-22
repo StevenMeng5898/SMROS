@@ -1,0 +1,4 @@
+/target/
+/kernel8.img
+/.tools/
+/verification/*/target/
