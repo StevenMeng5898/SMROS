@@ -37,20 +37,20 @@
 //! - Timer: create, set, cancel
 //! - Sleep: nanosleep, clock_nanosleep
 
-use core::convert::TryFrom;
 use alloc::vec::Vec;
+use core::convert::TryFrom;
 
-use crate::kernel_lowlevel::memory::{
-    PAGE_SIZE, PageFrameAllocator, process_manager,
+use super::address_logic::{
+    checked_end, fixed_linux_mmap_request_ok as shared_fixed_linux_mmap_request_ok,
+    page_aligned as shared_page_aligned, range_overlaps, range_within_window,
 };
+use crate::kernel_lowlevel::memory::{process_manager, PageFrameAllocator, PAGE_SIZE};
 use crate::kernel_objects::vmar::Vmar;
 
 // Re-export kernel objects for convenience
 pub use crate::kernel_objects::{
-    HandleValue, VmOptions, MmuFlags, VmarFlags, VmoOpType, VmoType,
-    ZxError, ZxResult, Vmo,
-    pages, roundup_pages,
-    INVALID_HANDLE,
+    pages, roundup_pages, HandleValue, MmuFlags, VmOptions, VmarFlags, Vmo, VmoOpType, VmoType,
+    ZxError, ZxResult, INVALID_HANDLE,
 };
 
 // Simple logging macros (placeholder for real logging)
@@ -217,16 +217,28 @@ impl MemorySyscallState {
         MemorySyscallStats {
             linux_mapping_count: self.linux_mappings.len(),
             linux_mapped_bytes: self.linux_mappings.iter().map(|mapping| mapping.len).sum(),
-            linux_committed_pages: self.linux_mappings.iter().map(|mapping| mapping.pfns.len()).sum(),
+            linux_committed_pages: self
+                .linux_mappings
+                .iter()
+                .map(|mapping| mapping.pfns.len())
+                .sum(),
             brk_start: self.brk.start,
             brk_current: self.brk.current,
             brk_limit: self.brk.limit,
             brk_committed_pages: self.brk.committed_pages(),
             zircon_vmo_count: self.vmos.len(),
             zircon_vmo_bytes: self.vmos.iter().map(|record| record.vmo.len()).sum(),
-            zircon_vmo_committed_pages: self.vmos.iter().map(|record| record.vmo.committed_pages()).sum(),
+            zircon_vmo_committed_pages: self
+                .vmos
+                .iter()
+                .map(|record| record.vmo.committed_pages())
+                .sum(),
             zircon_vmar_count: self.vmars.len(),
-            zircon_mapping_count: self.vmars.iter().map(|record| record.vmar.mappings.len()).sum(),
+            zircon_mapping_count: self
+                .vmars
+                .iter()
+                .map(|record| record.vmar.mappings.len())
+                .sum(),
             zircon_root_vmar_handle: self.root_vmar_handle,
         }
     }
@@ -258,9 +270,10 @@ impl MemorySyscallState {
 
     fn linux_range_available(&self, addr: usize, len: usize) -> bool {
         range_within_window(addr, len, LINUX_MAPPING_BASE, LINUX_MAPPING_LIMIT)
-            && !self.linux_mappings.iter().any(|mapping| {
-                range_overlaps(addr, len, mapping.addr, mapping.len)
-            })
+            && !self
+                .linux_mappings
+                .iter()
+                .any(|mapping| range_overlaps(addr, len, mapping.addr, mapping.len))
     }
 
     fn find_free_linux_region(&mut self, hint: Option<usize>, len: usize) -> Option<usize> {
@@ -293,19 +306,31 @@ impl MemorySyscallState {
     }
 
     fn get_vmo(&self, handle: u32) -> Option<&Vmo> {
-        self.vmos.iter().find(|record| record.handle == handle).map(|record| &record.vmo)
+        self.vmos
+            .iter()
+            .find(|record| record.handle == handle)
+            .map(|record| &record.vmo)
     }
 
     fn get_vmo_mut(&mut self, handle: u32) -> Option<&mut Vmo> {
-        self.vmos.iter_mut().find(|record| record.handle == handle).map(|record| &mut record.vmo)
+        self.vmos
+            .iter_mut()
+            .find(|record| record.handle == handle)
+            .map(|record| &mut record.vmo)
     }
 
     fn get_vmar(&self, handle: u32) -> Option<&Vmar> {
-        self.vmars.iter().find(|record| record.handle == handle).map(|record| &record.vmar)
+        self.vmars
+            .iter()
+            .find(|record| record.handle == handle)
+            .map(|record| &record.vmar)
     }
 
     fn get_vmar_mut(&mut self, handle: u32) -> Option<&mut Vmar> {
-        self.vmars.iter_mut().find(|record| record.handle == handle).map(|record| &mut record.vmar)
+        self.vmars
+            .iter_mut()
+            .find(|record| record.handle == handle)
+            .map(|record| &mut record.vmar)
     }
 
     fn remove_vmo(&mut self, handle: u32) -> bool {
@@ -333,7 +358,10 @@ impl MemorySyscallState {
             return true;
         }
 
-        let parent_handle = self.vmars[index].vmar.parent_idx.map(|parent| parent as u32);
+        let parent_handle = self.vmars[index]
+            .vmar
+            .parent_idx
+            .map(|parent| parent as u32);
         let mut record = self.vmars.swap_remove(index);
         record.vmar.destroy().ok();
 
@@ -367,25 +395,6 @@ fn memory_state() -> &'static mut MemorySyscallState {
     }
 }
 
-fn checked_end(addr: usize, len: usize) -> Option<usize> {
-    if addr <= usize::MAX - len {
-        Some(addr + len)
-    } else {
-        None
-    }
-}
-
-fn range_overlaps(start_a: usize, len_a: usize, start_b: usize, len_b: usize) -> bool {
-    match (checked_end(start_a, len_a), checked_end(start_b, len_b)) {
-        (Some(end_a), Some(end_b)) => start_a < end_b && start_b < end_a,
-        _ => false,
-    }
-}
-
-fn range_within_window(addr: usize, len: usize, base: usize, limit: usize) -> bool {
-    checked_end(addr, len).map(|end| addr >= base && end <= limit).unwrap_or(false)
-}
-
 fn mmu_flags_from_vm_options(options: VmOptions) -> MmuFlags {
     let mut flags = MmuFlags::USER;
 
@@ -405,7 +414,11 @@ fn mmu_flags_from_vm_options(options: VmOptions) -> MmuFlags {
     flags
 }
 
-fn split_linux_mapping(mapping: LinuxMappingRecord, start: usize, len: usize) -> Vec<LinuxMappingRecord> {
+fn split_linux_mapping(
+    mapping: LinuxMappingRecord,
+    start: usize,
+    len: usize,
+) -> Vec<LinuxMappingRecord> {
     let mut pieces = Vec::new();
     let Some(end) = checked_end(start, len) else {
         return pieces;
@@ -492,7 +505,17 @@ bitflags::bitflags! {
 
 /// Helper: check if address is page-aligned
 pub fn page_aligned(addr: usize) -> bool {
-    addr % PAGE_SIZE == 0
+    shared_page_aligned(addr, PAGE_SIZE)
+}
+
+fn fixed_linux_mmap_request_ok(addr: usize, len: usize) -> bool {
+    shared_fixed_linux_mmap_request_ok(
+        addr,
+        len,
+        PAGE_SIZE,
+        LINUX_MAPPING_BASE,
+        LINUX_MAPPING_LIMIT,
+    )
 }
 
 fn update_linux_protection(
@@ -518,7 +541,9 @@ fn update_linux_protection(
         let start_page = (overlap_start - mapping.addr) / PAGE_SIZE;
         let end_page = (overlap_end - mapping.addr) / PAGE_SIZE;
 
-        for piece in split_linux_mapping(mapping.clone(), overlap_start, overlap_end - overlap_start) {
+        for piece in
+            split_linux_mapping(mapping.clone(), overlap_start, overlap_end - overlap_start)
+        {
             state.linux_mappings.push(piece);
         }
 
@@ -607,10 +632,7 @@ pub fn sys_mmap(
     let len = roundup_pages(len);
     let state = memory_state();
     let requested = if flags.contains(MmapFlags::FIXED) {
-        if !page_aligned(addr) {
-            return Err(SysError::EINVAL);
-        }
-        if !range_within_window(addr, len, LINUX_MAPPING_BASE, LINUX_MAPPING_LIMIT) {
+        if !fixed_linux_mmap_request_ok(addr, len) {
             return Err(SysError::EINVAL);
         }
         let _ = unmap_linux_range(state, addr, len);
@@ -621,7 +643,9 @@ pub fn sys_mmap(
         None
     };
 
-    let vaddr = state.find_free_linux_region(requested, len).ok_or(SysError::ENOMEM)?;
+    let vaddr = state
+        .find_free_linux_region(requested, len)
+        .ok_or(SysError::ENOMEM)?;
     let pfns = MemorySyscallState::alloc_linux_pages(pages(len)).ok_or(SysError::ENOMEM)?;
 
     state.linux_mappings.push(LinuxMappingRecord {
@@ -736,7 +760,7 @@ pub fn sys_mremap(
         "mremap: old_addr={:#x}, old_size={:#x}, new_size={:#x}, flags={:#x}",
         old_address, old_size, new_size, flags
     );
-    
+
     const MREMAP_MAYMOVE: usize = 1 << 0;
     const MREMAP_FIXED: usize = 1 << 1;
     const MREMAP_DONTUNMAP: usize = 1 << 2;
@@ -761,7 +785,8 @@ pub fn sys_mremap(
     let Some(index) = state
         .linux_mappings
         .iter()
-        .position(|mapping| mapping.addr == old_address && mapping.len == old_len) else {
+        .position(|mapping| mapping.addr == old_address && mapping.len == old_len)
+    else {
         return Err(SysError::EINVAL);
     };
 
@@ -789,7 +814,8 @@ pub fn sys_mremap(
     let extra_len = new_len - old_len;
     let grow_start = checked_end(old_address, old_len).ok_or(SysError::EINVAL)?;
     if flags & MREMAP_FIXED == 0 && state.linux_range_available(grow_start, extra_len) {
-        let extra_pfns = MemorySyscallState::alloc_linux_pages(extra_len / PAGE_SIZE).ok_or(SysError::ENOMEM)?;
+        let extra_pfns =
+            MemorySyscallState::alloc_linux_pages(extra_len / PAGE_SIZE).ok_or(SysError::ENOMEM)?;
         state.linux_mappings[index].len = new_len;
         state.linux_mappings[index].pfns.extend(extra_pfns);
         state.sort_linux_mappings();
@@ -810,8 +836,11 @@ pub fn sys_mremap(
         None
     };
 
-    let new_addr = state.find_free_linux_region(requested_addr, new_len).ok_or(SysError::ENOMEM)?;
-    let new_pfns = MemorySyscallState::alloc_linux_pages(new_len / PAGE_SIZE).ok_or(SysError::ENOMEM)?;
+    let new_addr = state
+        .find_free_linux_region(requested_addr, new_len)
+        .ok_or(SysError::ENOMEM)?;
+    let new_pfns =
+        MemorySyscallState::alloc_linux_pages(new_len / PAGE_SIZE).ok_or(SysError::ENOMEM)?;
     let prot = state.linux_mappings[index].prot;
     let flags_bits = state.linux_mappings[index].flags;
 
@@ -861,18 +890,14 @@ pub fn sys_write(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
 // ============================================================================
 
 /// Zircon sys_vmo_create implementation
-pub fn sys_vmo_create(
-    size: u64,
-    options: u32,
-    out_handle: &mut u32,
-) -> ZxResult {
+pub fn sys_vmo_create(size: u64, options: u32, out_handle: &mut u32) -> ZxResult {
     info!("vmo.create: size={:#x?}, options={:#x?}", size, options);
 
     // Options flags:
     // bit 0: resizable
     // bit 1: physical (if set, creates physical VMO)
     // bit 2: contiguous (if set, creates contiguous VMO)
-    
+
     let resizable = options & 1 != 0;
     let is_physical = options & 2 != 0;
     let is_contiguous = options & 4 != 0;
@@ -905,11 +930,7 @@ pub fn sys_vmo_create(
 }
 
 /// Zircon sys_vmo_read implementation
-pub fn sys_vmo_read(
-    handle: u32,
-    buf: &mut [u8],
-    offset: u64,
-) -> ZxResult<usize> {
+pub fn sys_vmo_read(handle: u32, buf: &mut [u8], offset: u64) -> ZxResult<usize> {
     info!("vmo.read: handle={:#x?}, offset={:#x?}", handle, offset);
 
     let state = memory_state();
@@ -919,11 +940,7 @@ pub fn sys_vmo_read(
 }
 
 /// Zircon sys_vmo_write implementation
-pub fn sys_vmo_write(
-    handle: u32,
-    buf: &[u8],
-    offset: u64,
-) -> ZxResult<usize> {
+pub fn sys_vmo_write(handle: u32, buf: &[u8], offset: u64) -> ZxResult<usize> {
     info!("vmo.write: handle={:#x?}, offset={:#x?}", handle, offset);
 
     let state = memory_state();
@@ -952,20 +969,20 @@ pub fn sys_vmo_set_size(handle: u32, size: usize) -> ZxResult {
 }
 
 /// Zircon sys_vmo_op_range implementation
-pub fn sys_vmo_op_range(
-    handle: u32,
-    op: u32,
-    offset: usize,
-    len: usize,
-) -> ZxResult<usize> {
-    info!("vmo.op_range: handle={:#x}, op={:#X}, offset={:#x}, len={:#x}",
-          handle, op, offset, len);
+pub fn sys_vmo_op_range(handle: u32, op: u32, offset: usize, len: usize) -> ZxResult<usize> {
+    info!(
+        "vmo.op_range: handle={:#x}, op={:#X}, offset={:#x}, len={:#x}",
+        handle, op, offset, len
+    );
 
     let op = VmoOpType::try_from(op).or(Err(ZxError::ErrInvalidArgs))?;
     let state = memory_state();
     let vmo = state.get_vmo_mut(handle).ok_or(ZxError::ErrNotFound)?;
 
-    if checked_end(offset, len).filter(|end| *end <= vmo.len()).is_none() {
+    if checked_end(offset, len)
+        .filter(|end| *end <= vmo.len())
+        .is_none()
+    {
         return Err(ZxError::ErrOutOfRange);
     }
 
@@ -1030,7 +1047,10 @@ pub fn sys_vmar_map(
         vmo.len()
     };
 
-    if checked_end(vmo_offset, len).filter(|end| *end <= vmo_len).is_none() {
+    if checked_end(vmo_offset, len)
+        .filter(|end| *end <= vmo_len)
+        .is_none()
+    {
         return Err(ZxError::ErrOutOfRange);
     }
 
@@ -1039,7 +1059,9 @@ pub fn sys_vmar_map(
     let requested_offset = if specific { Some(vmar_offset) } else { None };
     let flags = mmu_flags_from_vm_options(options);
     let state = memory_state();
-    let vmar = state.get_vmar_mut(vmar_handle).ok_or(ZxError::ErrNotFound)?;
+    let vmar = state
+        .get_vmar_mut(vmar_handle)
+        .ok_or(ZxError::ErrNotFound)?;
     *out_addr = vmar.map_ext(
         requested_offset,
         HandleValue(vmo_handle),
@@ -1055,38 +1077,45 @@ pub fn sys_vmar_map(
 
 /// Zircon sys_vmar_unmap implementation
 pub fn sys_vmar_unmap(vmar_handle: u32, addr: usize, len: usize) -> ZxResult {
-    info!("vmar.unmap: vmar={:#x}, addr={:#x}, len={:#x}",
-          vmar_handle, addr, len);
+    info!(
+        "vmar.unmap: vmar={:#x}, addr={:#x}, len={:#x}",
+        vmar_handle, addr, len
+    );
 
     if !page_aligned(addr) || len == 0 {
         return Err(ZxError::ErrInvalidArgs);
     }
 
     let state = memory_state();
-    let vmar = state.get_vmar_mut(vmar_handle).ok_or(ZxError::ErrNotFound)?;
+    let vmar = state
+        .get_vmar_mut(vmar_handle)
+        .ok_or(ZxError::ErrNotFound)?;
     vmar.unmap(addr, roundup_pages(len))
 }
 
 /// Zircon sys_vmar_protect implementation
-pub fn sys_vmar_protect(
-    vmar_handle: u32,
-    options: u32,
-    addr: u64,
-    len: u64,
-) -> ZxResult {
+pub fn sys_vmar_protect(vmar_handle: u32, options: u32, addr: u64, len: u64) -> ZxResult {
     let raw_options = options;
     let options = VmOptions::from_bits(options).ok_or(ZxError::ErrInvalidArgs)?;
 
-    info!("vmar.protect: vmar={:#x}, options={:#x}, addr={:#x}, len={:#x}",
-          vmar_handle, raw_options, addr, len);
+    info!(
+        "vmar.protect: vmar={:#x}, options={:#x}, addr={:#x}, len={:#x}",
+        vmar_handle, raw_options, addr, len
+    );
 
     if !page_aligned(addr as usize) || len == 0 {
         return Err(ZxError::ErrInvalidArgs);
     }
 
     let state = memory_state();
-    let vmar = state.get_vmar_mut(vmar_handle).ok_or(ZxError::ErrNotFound)?;
-    vmar.protect(addr as usize, roundup_pages(len as usize), mmu_flags_from_vm_options(options))
+    let vmar = state
+        .get_vmar_mut(vmar_handle)
+        .ok_or(ZxError::ErrNotFound)?;
+    vmar.protect(
+        addr as usize,
+        roundup_pages(len as usize),
+        mmu_flags_from_vm_options(options),
+    )
 }
 
 /// Zircon sys_vmar_allocate implementation
@@ -1123,7 +1152,9 @@ pub fn sys_vmar_allocate(
 
     let child_addr = {
         let state = memory_state();
-        let parent = state.get_vmar_mut(parent_vmar).ok_or(ZxError::ErrNotFound)?;
+        let parent = state
+            .get_vmar_mut(parent_vmar)
+            .ok_or(ZxError::ErrNotFound)?;
         let child_addr = parent.allocate(requested_offset, size, flags, PAGE_SIZE)?;
         parent.children.push(child_handle as usize);
         child_addr
@@ -1188,7 +1219,9 @@ pub fn sys_vmar_unmap_handle_close_thread_exit(
     }
 
     let state = memory_state();
-    let vmar = state.get_vmar_mut(vmar_handle).ok_or(ZxError::ErrNotFound)?;
+    let vmar = state
+        .get_vmar_mut(vmar_handle)
+        .ok_or(ZxError::ErrNotFound)?;
     vmar.unmap_handle_close_thread_exit(addr, roundup_pages(len))
 }
 
@@ -1199,7 +1232,7 @@ pub fn sys_vmar_unmap_handle_close_thread_exit(
 /// Linux sys_fork implementation
 pub fn sys_fork() -> SysResult {
     info!("fork");
-    
+
     let pm = process_manager();
     if let Some(pid) = pm.create_process("forked") {
         Ok(pid)
@@ -1229,7 +1262,7 @@ pub fn sys_clone(
 /// Linux sys_execve implementation
 pub fn sys_execve(_path: usize, _argv: usize, _envp: usize) -> SysResult {
     info!("execve: path={:#x}", _path);
-    
+
     // TODO: Implement execve
     warn!("execve: unimplemented");
     Err(SysError::ENOSYS)
@@ -1238,7 +1271,7 @@ pub fn sys_execve(_path: usize, _argv: usize, _envp: usize) -> SysResult {
 /// Linux sys_wait4 implementation
 pub async fn sys_wait4(_pid: i32, _wstatus: usize, _options: u32) -> SysResult {
     info!("wait4: pid={}, options={:#x}", _pid, _options);
-    
+
     // TODO: Implement wait4
     warn!("wait4: unimplemented");
     Err(SysError::ENOSYS)
@@ -1259,7 +1292,7 @@ pub fn sys_exit(exit_code: i32) -> SysResult {
 /// Linux sys_exit_group implementation
 pub fn sys_exit_group(exit_code: i32) -> SysResult {
     info!("exit_group: code={}", exit_code);
-    
+
     // TODO: Terminate all threads in process group
     Ok(0)
 }
@@ -1279,11 +1312,11 @@ pub fn sys_getppid() -> SysResult {
 /// Linux sys_kill implementation
 pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
     info!("kill: pid={}, signal={}", pid, signum);
-    
+
     if pid <= 0 {
         return Err(SysError::ESRCH);
     }
-    
+
     let pm = process_manager();
     if pm.terminate_process(pid as usize) {
         Ok(0)
@@ -1305,8 +1338,11 @@ pub fn sys_process_create(
     out_proc_handle: &mut u32,
     out_vmar_handle: &mut u32,
 ) -> ZxResult {
-    info!("process.create: job={:#x}, name_len={}", job_handle, name_len);
-    
+    info!(
+        "process.create: job={:#x}, name_len={}",
+        job_handle, name_len
+    );
+
     let pm = process_manager();
     if let Some(_pid) = pm.create_process("zircon_proc") {
         *out_proc_handle = 1;
@@ -1320,7 +1356,7 @@ pub fn sys_process_create(
 /// Zircon sys_process_exit implementation
 pub fn sys_process_exit(handle: u32, exit_code: i32) -> ZxResult {
     info!("process.exit: handle={:#x}, code={}", handle, exit_code);
-    
+
     // TODO: Terminate process
     Ok(())
 }
@@ -1338,7 +1374,7 @@ pub fn sys_thread_create(
         "thread.create: proc={:#x}, name_len={}, entry={:#x}",
         proc_handle, name_len, entry_point
     );
-    
+
     // TODO: Create thread
     *out_thread_handle = 0;
     Ok(())
@@ -1352,8 +1388,11 @@ pub fn sys_thread_start(
     _arg1: usize,
     _arg2: usize,
 ) -> ZxResult {
-    info!("thread.start: handle={:#x}, entry={:#x}", thread_handle, entry_point);
-    
+    info!(
+        "thread.start: handle={:#x}, entry={:#x}",
+        thread_handle, entry_point
+    );
+
     // TODO: Start thread execution
     Ok(())
 }
@@ -1361,7 +1400,7 @@ pub fn sys_thread_start(
 /// Zircon sys_thread_exit implementation
 pub fn sys_thread_exit() -> ZxResult {
     info!("thread.exit");
-    
+
     // TODO: Terminate current thread
     Ok(())
 }
@@ -1369,7 +1408,7 @@ pub fn sys_thread_exit() -> ZxResult {
 /// Zircon sys_task_kill implementation
 pub fn sys_task_kill(task_handle: u32) -> ZxResult {
     info!("task.kill: handle={:#x}", task_handle);
-    
+
     // TODO: Kill task
     Ok(())
 }
@@ -1392,7 +1431,10 @@ pub fn sys_handle_close(handle: u32) -> ZxResult {
 
 /// Zircon sys_handle_close_many implementation
 pub fn sys_handle_close_many(handles_ptr: usize, num_handles: usize) -> ZxResult {
-    info!("handle.close_many: ptr={:#x}, count={}", handles_ptr, num_handles);
+    info!(
+        "handle.close_many: ptr={:#x}, count={}",
+        handles_ptr, num_handles
+    );
 
     if num_handles == 0 {
         return Ok(());
@@ -1410,26 +1452,21 @@ pub fn sys_handle_close_many(handles_ptr: usize, num_handles: usize) -> ZxResult
 }
 
 /// Zircon sys_handle_duplicate implementation
-pub fn sys_handle_duplicate(
-    handle: u32,
-    rights: u32,
-    out_handle: &mut u32,
-) -> ZxResult {
-    info!("handle.duplicate: handle={:#x}, rights={:#x}", handle, rights);
-    
+pub fn sys_handle_duplicate(handle: u32, rights: u32, out_handle: &mut u32) -> ZxResult {
+    info!(
+        "handle.duplicate: handle={:#x}, rights={:#x}",
+        handle, rights
+    );
+
     // TODO: Duplicate handle with new rights
     *out_handle = handle; // Placeholder
     Ok(())
 }
 
 /// Zircon sys_handle_replace implementation
-pub fn sys_handle_replace(
-    handle: u32,
-    rights: u32,
-    out_handle: &mut u32,
-) -> ZxResult {
+pub fn sys_handle_replace(handle: u32, rights: u32, out_handle: &mut u32) -> ZxResult {
     info!("handle.replace: handle={:#x}, rights={:#x}", handle, rights);
-    
+
     // TODO: Replace handle with new rights
     *out_handle = handle; // Placeholder
     Ok(())
@@ -1446,30 +1483,34 @@ pub async fn sys_object_wait_one(
     _deadline: u64,
     out_pending: &mut u32,
 ) -> ZxResult {
-    info!("object.wait_one: handle={:#x}, signals={:#x}", handle, signals);
-    
+    info!(
+        "object.wait_one: handle={:#x}, signals={:#x}",
+        handle, signals
+    );
+
     // TODO: Wait for signals
     *out_pending = 0;
     Ok(())
 }
 
 /// Zircon sys_object_wait_many implementation
-pub async fn sys_object_wait_many(
-    _items_ptr: usize,
-    count: usize,
-    _deadline: u64,
-) -> ZxResult {
-    info!("object.wait_many: count={}, deadline={:#x}", count, _deadline);
-    
+pub async fn sys_object_wait_many(_items_ptr: usize, count: usize, _deadline: u64) -> ZxResult {
+    info!(
+        "object.wait_many: count={}, deadline={:#x}",
+        count, _deadline
+    );
+
     // TODO: Wait for multiple objects
     Ok(())
 }
 
 /// Zircon sys_object_signal implementation
 pub fn sys_object_signal(handle: u32, clear_mask: u32, set_mask: u32) -> ZxResult {
-    info!("object.signal: handle={:#x}, clear={:#x}, set={:#x}",
-          handle, clear_mask, set_mask);
-    
+    info!(
+        "object.signal: handle={:#x}, clear={:#x}, set={:#x}",
+        handle, clear_mask, set_mask
+    );
+
     // TODO: Signal object
     Ok(())
 }
@@ -1483,7 +1524,7 @@ pub fn sys_object_get_info(
     out_actual_size: &mut usize,
 ) -> ZxResult {
     info!("object.get_info: handle={:#x}, topic={:#x}", handle, topic);
-    
+
     // TODO: Get object info
     *out_actual_size = 0;
     Ok(())
@@ -1496,8 +1537,11 @@ pub fn sys_object_get_property(
     _buffer: usize,
     _buffer_size: usize,
 ) -> ZxResult {
-    info!("object.get_property: handle={:#x}, prop={:#x}", handle, prop_id);
-    
+    info!(
+        "object.get_property: handle={:#x}, prop={:#x}",
+        handle, prop_id
+    );
+
     // TODO: Get property
     Ok(())
 }
@@ -1509,8 +1553,11 @@ pub fn sys_object_set_property(
     _buffer: usize,
     _buffer_size: usize,
 ) -> ZxResult {
-    info!("object.set_property: handle={:#x}, prop={:#x}", handle, prop_id);
-    
+    info!(
+        "object.set_property: handle={:#x}, prop={:#x}",
+        handle, prop_id
+    );
+
     // TODO: Set property
     Ok(())
 }
@@ -1528,7 +1575,7 @@ pub fn sys_clock_get_monotonic() -> ZxResult<u64> {
 /// Zircon sys_nanosleep implementation
 pub async fn sys_nanosleep(deadline: u64) -> ZxResult {
     info!("nanosleep: deadline={:#x}", deadline);
-    
+
     // TODO: Implement sleep
     Ok(())
 }
@@ -1536,7 +1583,7 @@ pub async fn sys_nanosleep(deadline: u64) -> ZxResult {
 /// Linux sys_clock_gettime implementation
 pub fn sys_clock_gettime(_clock: usize, _buf: usize) -> SysResult {
     info!("clock_gettime: clock={}", _clock);
-    
+
     // TODO: Implement clock_gettime
     Ok(0)
 }
@@ -1544,7 +1591,7 @@ pub fn sys_clock_gettime(_clock: usize, _buf: usize) -> SysResult {
 /// Linux sys_nanosleep implementation
 pub async fn sys_nanosleep_linux(_req: usize) -> SysResult {
     info!("nanosleep (linux)");
-    
+
     // TODO: Implement nanosleep
     Ok(0)
 }
@@ -1773,7 +1820,7 @@ pub enum LinuxSyscall {
     Munmap = 213,
     Clone = 214,
     Execve = 215,
-    Mmap = 216,  // Note: actual number may differ
+    Mmap = 216, // Note: actual number may differ
     Mprotect = 217,
     Mremap = 218,
     Msync = 219,
@@ -1875,51 +1922,25 @@ pub enum ZirconSyscall {
 /// Dispatch a Linux syscall
 pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
     match syscall_num {
-        ARM64_SYS_WRITE => {
-            sys_write(args[0], args[1], args[2])
-        }
-        ARM64_SYS_EXIT => {
-            sys_exit(args[0] as i32)
-        }
-        ARM64_SYS_GETPID => {
-            sys_getpid()
-        }
-        ARM64_SYS_MMAP => {
-            sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5] as u64)
-        }
+        ARM64_SYS_WRITE => sys_write(args[0], args[1], args[2]),
+        ARM64_SYS_EXIT => sys_exit(args[0] as i32),
+        ARM64_SYS_GETPID => sys_getpid(),
+        ARM64_SYS_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5] as u64),
         num if num == LinuxSyscall::Mmap as u32 => {
             sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5] as u64)
         }
-        num if num == LinuxSyscall::Munmap as u32 => {
-            sys_munmap(args[0], args[1])
-        }
-        num if num == LinuxSyscall::Mprotect as u32 => {
-            sys_mprotect(args[0], args[1], args[2])
-        }
-        num if num == LinuxSyscall::Brk as u32 => {
-            sys_brk(args[0])
-        }
+        num if num == LinuxSyscall::Munmap as u32 => sys_munmap(args[0], args[1]),
+        num if num == LinuxSyscall::Mprotect as u32 => sys_mprotect(args[0], args[1], args[2]),
+        num if num == LinuxSyscall::Brk as u32 => sys_brk(args[0]),
         num if num == LinuxSyscall::Mremap as u32 => {
             sys_mremap(args[0], args[1], args[2], args[3], args[4])
         }
-        num if num == LinuxSyscall::Fork as u32 => {
-            sys_fork()
-        }
-        num if num == LinuxSyscall::Exit as u32 => {
-            sys_exit(args[0] as i32)
-        }
-        num if num == LinuxSyscall::ExitGroup as u32 => {
-            sys_exit_group(args[0] as i32)
-        }
-        num if num == LinuxSyscall::Getpid as u32 => {
-            sys_getpid()
-        }
-        num if num == LinuxSyscall::Getppid as u32 => {
-            sys_getppid()
-        }
-        num if num == LinuxSyscall::Kill as u32 => {
-            sys_kill(args[0] as isize, args[1])
-        }
+        num if num == LinuxSyscall::Fork as u32 => sys_fork(),
+        num if num == LinuxSyscall::Exit as u32 => sys_exit(args[0] as i32),
+        num if num == LinuxSyscall::ExitGroup as u32 => sys_exit_group(args[0] as i32),
+        num if num == LinuxSyscall::Getpid as u32 => sys_getpid(),
+        num if num == LinuxSyscall::Getppid as u32 => sys_getppid(),
+        num if num == LinuxSyscall::Kill as u32 => sys_kill(args[0] as isize, args[1]),
         num if num == LinuxSyscall::Gettid as u32 => {
             Ok(1) // Placeholder
         }
@@ -1957,8 +1978,16 @@ pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<u
         }
         num if num == ZirconSyscall::VmarMap as u32 => {
             let mut addr = 0usize;
-            sys_vmar_map(args[0] as u32, args[1] as u32, args[2], args[3] as u32,
-                        args[4], args[5], &mut addr).map(|_| addr)
+            sys_vmar_map(
+                args[0] as u32,
+                args[1] as u32,
+                args[2],
+                args[3] as u32,
+                args[4],
+                args[5],
+                &mut addr,
+            )
+            .map(|_| addr)
         }
         num if num == ZirconSyscall::VmarUnmap as u32 => {
             sys_vmar_unmap(args[0] as u32, args[1], args[2]).map(|_| 0)
@@ -1969,8 +1998,15 @@ pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<u
         num if num == ZirconSyscall::ProcessCreate as u32 => {
             let mut proc_h = 0u32;
             let mut vmar_h = 0u32;
-            sys_process_create(args[0] as u32, args[1], args[2], args[3] as u32,
-                             &mut proc_h, &mut vmar_h).map(|_| proc_h as usize)
+            sys_process_create(
+                args[0] as u32,
+                args[1],
+                args[2],
+                args[3] as u32,
+                &mut proc_h,
+                &mut vmar_h,
+            )
+            .map(|_| proc_h as usize)
         }
         _ => {
             warn!("Unimplemented Zircon syscall: {}", syscall_num);

@@ -3,21 +3,21 @@
 
 extern crate alloc;
 
-use core::panic::PanicInfo;
-use tock_registers::interfaces::Readable;
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
+use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use tock_registers::interfaces::Readable;
 
 mod kernel_lowlevel;
 mod kernel_objects;
 mod syscall;
 mod user_level;
 
-use kernel_lowlevel::serial::Serial;
-use kernel_objects::scheduler::schedule_on_cpu;
-use kernel_lowlevel::smp::{boot_all_cpus, print_status as smp_print_status, current_cpu_id};
 use kernel_lowlevel::memory::process_manager;
+use kernel_lowlevel::serial::Serial;
+use kernel_lowlevel::smp::{boot_all_cpus, current_cpu_id, print_status as smp_print_status};
+use kernel_objects::scheduler::schedule_on_cpu;
 
 /// A Sync wrapper around UnsafeCell that is safe to use as a static.
 struct SyncUnsafeCell<T>(UnsafeCell<T>);
@@ -53,7 +53,11 @@ unsafe impl alloc::alloc::GlobalAlloc for KernelAllocator {
         let mut pos = HEAP_POS.load(Ordering::Relaxed);
         loop {
             let offset = pos % align;
-            let aligned_pos = if offset != 0 { pos + align - offset } else { pos };
+            let aligned_pos = if offset != 0 {
+                pos + align - offset
+            } else {
+                pos
+            };
 
             if aligned_pos + size > 0x100000 {
                 return core::ptr::null_mut();
@@ -237,7 +241,7 @@ exception_vectors:
 // IRQ Handler (Current EL with SPx)
 irq_handler_sp:
     // Save caller-saved registers
-    sub     sp, sp, #128
+    sub     sp, sp, #144
     stp     x0, x1, [sp, #0]
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]
@@ -246,6 +250,7 @@ irq_handler_sp:
     stp     x10, x11, [sp, #80]
     stp     x12, x13, [sp, #96]
     stp     x14, x15, [sp, #112]
+    stp     x30, xzr, [sp, #128]
 
     // Call timer interrupt handler
     bl      timer_interrupt_handler
@@ -262,14 +267,15 @@ irq_handler_sp:
     ldp     x10, x11, [sp, #80]
     ldp     x12, x13, [sp, #96]
     ldp     x14, x15, [sp, #112]
-    add     sp, sp, #128
+    ldp     x30, xzr, [sp, #128]
+    add     sp, sp, #144
 
     eret
 
 // IRQ Handler (Current EL with SP0)
 irq_handler:
     // Save caller-saved registers
-    sub     sp, sp, #128
+    sub     sp, sp, #144
     stp     x0, x1, [sp, #0]
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]
@@ -278,6 +284,7 @@ irq_handler:
     stp     x10, x11, [sp, #80]
     stp     x12, x13, [sp, #96]
     stp     x14, x15, [sp, #112]
+    stp     x30, xzr, [sp, #128]
 
     // Call timer interrupt handler
     bl      timer_interrupt_handler
@@ -294,14 +301,15 @@ irq_handler:
     ldp     x10, x11, [sp, #80]
     ldp     x12, x13, [sp, #96]
     ldp     x14, x15, [sp, #112]
-    add     sp, sp, #128
+    ldp     x30, xzr, [sp, #128]
+    add     sp, sp, #144
 
     eret
 
 // IRQ Handler (Lower EL using AArch64)
 irq_handler_lower:
     // Save caller-saved registers
-    sub     sp, sp, #128
+    sub     sp, sp, #144
     stp     x0, x1, [sp, #0]
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]
@@ -310,6 +318,7 @@ irq_handler_lower:
     stp     x10, x11, [sp, #80]
     stp     x12, x13, [sp, #96]
     stp     x14, x15, [sp, #112]
+    stp     x30, xzr, [sp, #128]
 
     // Call timer interrupt handler
     bl      timer_interrupt_handler
@@ -326,7 +335,8 @@ irq_handler_lower:
     ldp     x10, x11, [sp, #80]
     ldp     x12, x13, [sp, #96]
     ldp     x14, x15, [sp, #112]
-    add     sp, sp, #128
+    ldp     x30, xzr, [sp, #128]
+    add     sp, sp, #144
 
     eret
 
@@ -349,6 +359,7 @@ exception_handler:
     stp     x24, x25, [sp, #192]
     stp     x26, x27, [sp, #208]
     stp     x28, x29, [sp, #224]
+    stp     x30, xzr, [sp, #240]
 
     // Read exception class from ESR_EL1
     mrs     x0, esr_el1
@@ -370,7 +381,7 @@ exception_handler:
     // Call Rust syscall handler
     // Arguments: x0=syscall_num, x1-x6=args
     bl      handle_syscall_simple
-    
+
     // Save result back to x0 position on stack
     str     x0, [sp, #0]
     b       3f
@@ -381,9 +392,9 @@ exception_handler:
     str     x0, [sp, #0]
     
 3:
-    // Advance ELR past the SVC instruction (SVC is 4 bytes) before
-    // restoring user registers, otherwise the helper call would clobber the
-    // syscall return value in x0.
+    // On AArch64 SVC, ELR_EL1 already points at the next instruction. Keep
+    // the hook so tests can override the behavior if needed, but do not
+    // advance by default.
     bl      syscall_should_advance_elr
     cbz     x0, 5f
     mrs     x0, elr_el1
@@ -406,6 +417,7 @@ exception_handler:
     ldp     x24, x25, [sp, #192]
     ldp     x26, x27, [sp, #208]
     ldp     x28, x29, [sp, #224]
+    ldp     x30, xzr, [sp, #240]
     add     sp, sp, #256
     eret
 
@@ -597,16 +609,16 @@ fn print_number(serial: &mut Serial, mut num: u32) {
         serial.write_byte(b'0');
         return;
     }
-    
+
     let mut buf = [0u8; 10];
     let mut i = 0;
-    
+
     while num > 0 && i < 10 {
         buf[i] = b'0' + (num % 10) as u8;
         num /= 10;
         i += 1;
     }
-    
+
     // Print in reverse order
     for j in 0..i {
         serial.write_byte(buf[i - 1 - j]);
@@ -616,19 +628,19 @@ fn print_number(serial: &mut Serial, mut num: u32) {
 /// Print system information
 fn print_system_info(serial: &mut Serial) {
     serial.write_str("\n--- System Information ---\n");
-    
+
     // Read and print CPU IDx
     let mpidr = cortex_a::registers::MPIDR_EL1.get();
     serial.write_str("[CPU] MPIDR_EL1: 0x");
     serial.write_hex(mpidr);
     serial.write_str("\n");
-    
+
     // Read and print system control register
     let sctlr = cortex_a::registers::SCTLR_EL1.get();
     serial.write_str("[SYS] SCTLR_EL1: 0x");
     serial.write_hex(sctlr);
     serial.write_str("\n");
-    
+
     serial.write_str("--------------------------\n");
 }
 

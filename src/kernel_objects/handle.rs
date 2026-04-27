@@ -4,8 +4,8 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicU32, Ordering};
 use super::types::*;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Handle entry in the handle table
 #[derive(Clone)]

@@ -4,10 +4,7 @@
 //! When an EL0 process executes an SVC instruction, control transfers to EL1
 //! where this handler dispatches the syscall to the appropriate implementation.
 
-use crate::syscall::syscall::{
-    dispatch_linux_syscall, dispatch_zircon_syscall,
-    SysError,
-};
+use crate::syscall::syscall::{dispatch_linux_syscall, dispatch_zircon_syscall, SysError};
 
 /// Handle SVC exception from EL0 - called from assembly exception handler
 ///
@@ -27,13 +24,13 @@ pub unsafe extern "C" fn handle_svc_exception_from_el0(
     // Get syscall number from x8 (saved on stack by assembly)
     // The stack layout is set by the assembly exception handler
     let stack_ptr = sp_el0 as *mut u64;
-    
+
     // Read saved registers from stack
     // x0 is at sp + 0, x1 at sp + 8, etc.
     // x8 is at sp + 64 (8th pair, first element)
     let saved_regs = (stack_ptr.wrapping_sub(256 / 8)) as *const [u64; 30];
     let regs = &*saved_regs;
-    
+
     let x0 = regs[0];
     let x1 = regs[1];
     let x2 = regs[2];
@@ -43,21 +40,30 @@ pub unsafe extern "C" fn handle_svc_exception_from_el0(
     let x6 = regs[6];
     let x7 = regs[7];
     let x8 = regs[8];
-    
+
     let syscall_num = x8 as u32;
-    
+
     // Extract arguments (x0-x5 for Linux, x0-x7 for Zircon)
     let args_linux = [
-        x0 as usize, x1 as usize, x2 as usize,
-        x3 as usize, x4 as usize, x5 as usize,
+        x0 as usize,
+        x1 as usize,
+        x2 as usize,
+        x3 as usize,
+        x4 as usize,
+        x5 as usize,
     ];
-    
+
     let args_zircon = [
-        x0 as usize, x1 as usize, x2 as usize,
-        x3 as usize, x4 as usize, x5 as usize,
-        x6 as usize, x7 as usize,
+        x0 as usize,
+        x1 as usize,
+        x2 as usize,
+        x3 as usize,
+        x4 as usize,
+        x5 as usize,
+        x6 as usize,
+        x7 as usize,
     ];
-    
+
     // Dispatch syscall
     let result = if syscall_num < 1000 {
         // Linux syscall
@@ -69,12 +75,15 @@ pub unsafe extern "C" fn handle_svc_exception_from_el0(
             Err(_) => Err(SysError::ENOSYS),
         }
     };
-    
+
     // Store result - will be loaded by assembly
     // For now, we need a different approach - modify stack directly
     // This is complex, so let's use a simpler approach with global
-    SYSCALL_RESULT.store(result.unwrap_or(0) as u64, core::sync::atomic::Ordering::Relaxed);
-    
+    SYSCALL_RESULT.store(
+        result.unwrap_or(0) as u64,
+        core::sync::atomic::Ordering::Relaxed,
+    );
+
     // Advance ELR past the SVC instruction
     core::arch::asm!(
         "msr elr_el1, {elr}",

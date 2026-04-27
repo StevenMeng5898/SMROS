@@ -24,11 +24,15 @@ pub const INVALID_HANDLE: u32 = 0xFFFF_FFFF;
 pub struct HandleValue(pub u32);
 
 impl From<u32> for HandleValue {
-    fn from(v: u32) -> Self { Self(v) }
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
 }
 
 impl From<HandleValue> for u32 {
-    fn from(h: HandleValue) -> Self { h.0 }
+    fn from(h: HandleValue) -> Self {
+        h.0
+    }
 }
 
 /// Kernel object types
@@ -64,10 +68,17 @@ pub enum Rights {
     Signal = 1 << 8,
     SignalPeer = 1 << 9,
     Wait = 1 << 10,
-    DefaultVmo = Rights::Duplicate as u32 | Rights::Transfer as u32 | Rights::Map as u32
-                | Rights::GetProperty as u32 | Rights::SetProperty as u32,
-    DefaultVmar = Rights::Duplicate as u32 | Rights::Transfer as u32 | Rights::Map as u32
-                 | Rights::Read as u32 | Rights::Write as u32 | Rights::Execute as u32,
+    DefaultVmo = Rights::Duplicate as u32
+        | Rights::Transfer as u32
+        | Rights::Map as u32
+        | Rights::GetProperty as u32
+        | Rights::SetProperty as u32,
+    DefaultVmar = Rights::Duplicate as u32
+        | Rights::Transfer as u32
+        | Rights::Map as u32
+        | Rights::Read as u32
+        | Rights::Write as u32
+        | Rights::Execute as u32,
 }
 
 // ============================================================================
@@ -215,10 +226,12 @@ pub type ZxResult<T = ()> = Result<T, ZxError>;
 
 /// Helper: convert bytes to pages
 pub fn pages(size: usize) -> usize {
-    (size + crate::kernel_lowlevel::memory::PAGE_SIZE - 1) / crate::kernel_lowlevel::memory::PAGE_SIZE
+    (size + crate::kernel_lowlevel::memory::PAGE_SIZE - 1)
+        / crate::kernel_lowlevel::memory::PAGE_SIZE
 }
 
 /// Round up to page boundary
 pub fn roundup_pages(size: usize) -> usize {
-    (size + crate::kernel_lowlevel::memory::PAGE_SIZE - 1) & !(crate::kernel_lowlevel::memory::PAGE_SIZE - 1)
+    (size + crate::kernel_lowlevel::memory::PAGE_SIZE - 1)
+        & !(crate::kernel_lowlevel::memory::PAGE_SIZE - 1)
 }

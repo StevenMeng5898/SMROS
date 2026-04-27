@@ -10,13 +10,11 @@
 //! - Message sending and receiving
 //! - Handle management for channels
 
-use core::sync::atomic::{AtomicU32, Ordering};
-use alloc::vec::Vec;
+use crate::syscall::{HandleValue, ZxError, ZxResult};
 use alloc::collections::VecDeque;
 use alloc::vec;
-use crate::syscall::{
-    HandleValue, ZxError, ZxResult,
-};
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Maximum message size for channels
 pub const MAX_CHANNEL_MSG_SIZE: usize = 65536;
@@ -109,12 +107,7 @@ impl Channel {
     }
 
     /// Write a message to the channel
-    pub fn write(
-        &mut self,
-        endpoint: HandleValue,
-        data: &[u8],
-        handles: &[u32],
-    ) -> ZxResult {
+    pub fn write(&mut self, endpoint: HandleValue, data: &[u8], handles: &[u32]) -> ZxResult {
         if self.state != ChannelState::Active {
             return Err(ZxError::ErrPeerClosed);
         }
@@ -261,16 +254,18 @@ impl ChannelTable {
 
     /// Get channel by handle
     pub fn get_channel(&mut self, handle: HandleValue) -> Option<&mut Channel> {
-        self.channels.iter_mut().find(|c| {
-            c.handle0 == handle || c.handle1 == handle
-        })
+        self.channels
+            .iter_mut()
+            .find(|c| c.handle0 == handle || c.handle1 == handle)
     }
 
     /// Remove a channel
     pub fn remove_channel(&mut self, handle: HandleValue) -> bool {
-        if let Some(pos) = self.channels.iter().position(|c| {
-            c.handle0 == handle || c.handle1 == handle
-        }) {
+        if let Some(pos) = self
+            .channels
+            .iter()
+            .position(|c| c.handle0 == handle || c.handle1 == handle)
+        {
             self.channels.remove(pos);
             true
         } else {
@@ -369,9 +364,7 @@ pub fn sys_channel_write(
     let data = vec![0u8; bytes_count]; // Placeholder - would copy from user
 
     match channel_table().get_channel(h) {
-        Some(channel) => {
-            channel.write(h, &data, &[])
-        }
+        Some(channel) => channel.write(h, &data, &[]),
         None => Err(ZxError::ErrNotFound),
     }
 }
@@ -393,7 +386,13 @@ pub fn sys_channel_call_noretry(
     // Write first, then read
     sys_channel_write(handle, options, wr_bytes_ptr, wr_num_bytes, 0, 0)?;
     sys_channel_read(
-        handle, options, rd_bytes_ptr, rd_num_bytes,
-        0, 0, out_actual_bytes, out_actual_handles
+        handle,
+        options,
+        rd_bytes_ptr,
+        rd_num_bytes,
+        0,
+        0,
+        out_actual_bytes,
+        out_actual_handles,
     )
 }

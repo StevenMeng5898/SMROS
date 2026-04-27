@@ -4,12 +4,14 @@
 //! to interact with the kernel. It uses the syscall interface
 //! for I/O operations instead of direct hardware access.
 
+use crate::kernel_lowlevel::memory::{
+    process_manager, PageFrameAllocator, ProcessState, PAGE_SIZE,
+};
+use crate::kernel_lowlevel::serial::Serial;
+use crate::kernel_objects::scheduler;
+use crate::user_level::user_test::test_write;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::kernel_objects::scheduler;
-use crate::kernel_lowlevel::serial::Serial;
-use crate::kernel_lowlevel::memory::{process_manager, ProcessState, PAGE_SIZE, PageFrameAllocator};
-use crate::user_level::user_test::test_write;
 
 /// Shell command handlers
 struct ShellCommand {
@@ -261,9 +263,11 @@ fn cmd_help(ctx: &mut ShellContext, _args: &[&str]) {
 
 /// Command: version - Show kernel version
 fn cmd_version(ctx: &mut ShellContext, _args: &[&str]) {
-    ctx.serial.write_str("\nSMROS v0.5.0 - Simple Operating System\n");
+    ctx.serial
+        .write_str("\nSMROS v0.5.0 - Simple Operating System\n");
     ctx.serial.write_str("Architecture: ARM64 (AArch64)\n");
-    ctx.serial.write_str("Features: Multi-process, Syscalls, Preemptive Scheduler\n\n");
+    ctx.serial
+        .write_str("Features: Multi-process, Syscalls, Preemptive Scheduler\n\n");
 }
 
 /// Command: testsc - Test syscall interface
@@ -376,7 +380,9 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
 
     ctx.serial.write_str("[TEST] Testing mprotect syscall... ");
     match crate::syscall::sys_mprotect(remapped_addr, PAGE_SIZE, 0x1) {
-        Ok(_) => ctx.serial.write_str("[OK] mprotect updated mapping permissions\n"),
+        Ok(_) => ctx
+            .serial
+            .write_str("[OK] mprotect updated mapping permissions\n"),
         Err(e) => {
             ctx.serial.write_str("[FAIL] Error ");
             print_number(&mut ctx.serial, e as u32);
@@ -400,7 +406,8 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     let _ = crate::syscall::sys_brk(brk_base);
 
     // Test 5: Zircon VMO/VMAR syscalls
-    ctx.serial.write_str("[TEST] Testing Zircon VMO create/read/write... ");
+    ctx.serial
+        .write_str("[TEST] Testing Zircon VMO create/read/write... ");
     let mut vmo_handle = 0u32;
     if let Err(e) = crate::syscall::sys_vmo_create((PAGE_SIZE * 2) as u64, 1, &mut vmo_handle) {
         ctx.serial.write_str("[FAIL] create error ");
@@ -415,7 +422,8 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         return;
     }
     let mut read_back = [0u8; 12];
-    if crate::syscall::sys_vmo_read(vmo_handle, &mut read_back, 0).is_err() || read_back != *payload {
+    if crate::syscall::sys_vmo_read(vmo_handle, &mut read_back, 0).is_err() || read_back != *payload
+    {
         ctx.serial.write_str("[FAIL] read verification failed\n");
         return;
     }
@@ -423,7 +431,8 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     print_hex(&mut ctx.serial, vmo_handle as u64);
     ctx.serial.write_str(" preserved data\n");
 
-    ctx.serial.write_str("[TEST] Testing VMO size and op_range syscalls... ");
+    ctx.serial
+        .write_str("[TEST] Testing VMO size and op_range syscalls... ");
     let mut size = 0usize;
     if crate::syscall::sys_vmo_get_size(vmo_handle, &mut size).is_err() || size != PAGE_SIZE * 2 {
         ctx.serial.write_str("[FAIL] get_size mismatch\n");
@@ -433,20 +442,58 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         ctx.serial.write_str("[FAIL] set_size failed\n");
         return;
     }
-    if crate::syscall::sys_vmo_op_range(vmo_handle, crate::syscall::VmoOpType::Commit as u32, 0, PAGE_SIZE).is_err()
-        || crate::syscall::sys_vmo_op_range(vmo_handle, crate::syscall::VmoOpType::Zero as u32, 0, payload.len()).is_err()
-        || crate::syscall::sys_vmo_op_range(vmo_handle, crate::syscall::VmoOpType::Lock as u32, 0, PAGE_SIZE).is_err()
-        || crate::syscall::sys_vmo_op_range(vmo_handle, crate::syscall::VmoOpType::Unlock as u32, 0, PAGE_SIZE).is_err()
-        || crate::syscall::sys_vmo_op_range(vmo_handle, crate::syscall::VmoOpType::CacheSync as u32, 0, PAGE_SIZE).is_err()
-        || crate::syscall::sys_vmo_op_range(vmo_handle, crate::syscall::VmoOpType::Decommit as u32, PAGE_SIZE * 2, PAGE_SIZE).is_err()
+    if crate::syscall::sys_vmo_op_range(
+        vmo_handle,
+        crate::syscall::VmoOpType::Commit as u32,
+        0,
+        PAGE_SIZE,
+    )
+    .is_err()
+        || crate::syscall::sys_vmo_op_range(
+            vmo_handle,
+            crate::syscall::VmoOpType::Zero as u32,
+            0,
+            payload.len(),
+        )
+        .is_err()
+        || crate::syscall::sys_vmo_op_range(
+            vmo_handle,
+            crate::syscall::VmoOpType::Lock as u32,
+            0,
+            PAGE_SIZE,
+        )
+        .is_err()
+        || crate::syscall::sys_vmo_op_range(
+            vmo_handle,
+            crate::syscall::VmoOpType::Unlock as u32,
+            0,
+            PAGE_SIZE,
+        )
+        .is_err()
+        || crate::syscall::sys_vmo_op_range(
+            vmo_handle,
+            crate::syscall::VmoOpType::CacheSync as u32,
+            0,
+            PAGE_SIZE,
+        )
+        .is_err()
+        || crate::syscall::sys_vmo_op_range(
+            vmo_handle,
+            crate::syscall::VmoOpType::Decommit as u32,
+            PAGE_SIZE * 2,
+            PAGE_SIZE,
+        )
+        .is_err()
     {
         ctx.serial.write_str("[FAIL] op_range failed\n");
         return;
     }
-    ctx.serial.write_str("[OK] size, commit, zero, lock, unlock, cache, and decommit all succeeded\n");
+    ctx.serial
+        .write_str("[OK] size, commit, zero, lock, unlock, cache, and decommit all succeeded\n");
 
     let root_vmar = crate::syscall::memory_root_vmar_handle();
-    ctx.serial.write_str("[TEST] Testing VMAR map/protect/allocate/unmap/destroy... ");
+    ctx.serial
+        .write_str("[TEST] Testing VMAR map/protect/allocate/unmap/destroy... ");
     let mut mapped_vaddr = 0usize;
     if crate::syscall::sys_vmar_map(
         root_vmar,
@@ -477,7 +524,16 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
 
     let mut child_vmar = 0u32;
     let mut child_addr = 0usize;
-    if crate::syscall::sys_vmar_allocate(root_vmar, 0, 0, (PAGE_SIZE * 2) as u64, &mut child_vmar, &mut child_addr).is_err() {
+    if crate::syscall::sys_vmar_allocate(
+        root_vmar,
+        0,
+        0,
+        (PAGE_SIZE * 2) as u64,
+        &mut child_vmar,
+        &mut child_addr,
+    )
+    .is_err()
+    {
         ctx.serial.write_str("[FAIL] vmar_allocate failed\n");
         return;
     }
@@ -494,7 +550,12 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     )
     .is_err()
         || crate::syscall::sys_vmar_unmap(child_vmar, child_map, PAGE_SIZE).is_err()
-        || crate::syscall::sys_vmar_unmap_handle_close_thread_exit(root_vmar, mapped_vaddr, PAGE_SIZE).is_err()
+        || crate::syscall::sys_vmar_unmap_handle_close_thread_exit(
+            root_vmar,
+            mapped_vaddr,
+            PAGE_SIZE,
+        )
+        .is_err()
         || crate::syscall::sys_vmar_destroy(child_vmar).is_err()
     {
         ctx.serial.write_str("[FAIL] VMAR lifecycle step failed\n");
@@ -542,8 +603,10 @@ fn cmd_clear(_ctx: &mut ShellContext, _args: &[&str]) {
 fn cmd_ps(ctx: &mut ShellContext, _args: &[&str]) {
     let pm = process_manager();
 
-    ctx.serial.write_str("\n  PID  State      Name         Threads  Parent\n");
-    ctx.serial.write_str("  ─────────────────────────────────────────────\n");
+    ctx.serial
+        .write_str("\n  PID  State      Name         Threads  Parent\n");
+    ctx.serial
+        .write_str("  ─────────────────────────────────────────────\n");
 
     let mut count = 0;
     for i in 0..crate::kernel_lowlevel::memory::MAX_PROCESSES {
@@ -566,7 +629,8 @@ fn cmd_ps(ctx: &mut ShellContext, _args: &[&str]) {
         }
     }
 
-    ctx.serial.write_str("  ─────────────────────────────────────────────\n");
+    ctx.serial
+        .write_str("  ─────────────────────────────────────────────\n");
     ctx.serial.write_str("  Total: ");
     print_number(&mut ctx.serial, count as u32);
     ctx.serial.write_str(" process(es)\n");
@@ -576,13 +640,18 @@ fn cmd_ps(ctx: &mut ShellContext, _args: &[&str]) {
 fn cmd_top(ctx: &mut ShellContext, _args: &[&str]) {
     let pm = process_manager();
 
-    ctx.serial.write_str("\n┌─────────────────────────────────────────────────────────────┐\n");
-    ctx.serial.write_str("│              SMROS Process Monitor (top)                    │\n");
-    ctx.serial.write_str("├─────────────────────────────────────────────────────────────┤\n");
+    ctx.serial
+        .write_str("\n┌─────────────────────────────────────────────────────────────┐\n");
+    ctx.serial
+        .write_str("│              SMROS Process Monitor (top)                    │\n");
+    ctx.serial
+        .write_str("├─────────────────────────────────────────────────────────────┤\n");
 
     // Header
-    ctx.serial.write_str("│  PID  │ State    │ Name       │ Threads  │ CPU Time │\n");
-    ctx.serial.write_str("│───────┼──────────┼────────────┼──────────┼──────────│\n");
+    ctx.serial
+        .write_str("│  PID  │ State    │ Name       │ Threads  │ CPU Time │\n");
+    ctx.serial
+        .write_str("│───────┼──────────┼────────────┼──────────┼──────────│\n");
 
     for i in 0..crate::kernel_lowlevel::memory::MAX_PROCESSES {
         if let Some(pcb) = pm.get_process(i) {
@@ -607,7 +676,8 @@ fn cmd_top(ctx: &mut ShellContext, _args: &[&str]) {
         }
     }
 
-    ctx.serial.write_str("├─────────────────────────────────────────────────────────────┤\n");
+    ctx.serial
+        .write_str("├─────────────────────────────────────────────────────────────┤\n");
 
     // Show scheduler info
     let s = scheduler::scheduler();
@@ -617,7 +687,10 @@ fn cmd_top(ctx: &mut ShellContext, _args: &[&str]) {
 
     // Memory summary
     ctx.serial.write_str("│ Memory: ");
-    print_number(&mut ctx.serial, PageFrameAllocator::allocated_pages() as u32);
+    print_number(
+        &mut ctx.serial,
+        PageFrameAllocator::allocated_pages() as u32,
+    );
     ctx.serial.write_str(" used / ");
     print_number(&mut ctx.serial, PageFrameAllocator::total_pages() as u32);
     ctx.serial.write_str(" total pages           │\n");
@@ -625,10 +698,14 @@ fn cmd_top(ctx: &mut ShellContext, _args: &[&str]) {
     ctx.serial.write_str("│ Free: ");
     print_number(&mut ctx.serial, PageFrameAllocator::free_pages() as u32);
     ctx.serial.write_str(" pages (");
-    print_number(&mut ctx.serial, (PageFrameAllocator::free_pages() * PAGE_SIZE / 1024) as u32);
+    print_number(
+        &mut ctx.serial,
+        (PageFrameAllocator::free_pages() * PAGE_SIZE / 1024) as u32,
+    );
     ctx.serial.write_str(" KB)                        │\n");
 
-    ctx.serial.write_str("└─────────────────────────────────────────────────────────────┘\n");
+    ctx.serial
+        .write_str("└─────────────────────────────────────────────────────────────┘\n");
 }
 
 /// Command: meminfo - Show memory information
@@ -639,12 +716,20 @@ fn cmd_meminfo(ctx: &mut ShellContext, _args: &[&str]) {
     let total_kb = total_pages * PAGE_SIZE / 1024;
     let used_kb = used_pages * PAGE_SIZE / 1024;
     let free_kb = free_pages * PAGE_SIZE / 1024;
-    let usage_pct = if total_pages > 0 { (used_pages * 100) / total_pages } else { 0 };
+    let usage_pct = if total_pages > 0 {
+        (used_pages * 100) / total_pages
+    } else {
+        0
+    };
 
-    ctx.serial.write_str("\n┌─────────────────────────────────────────┐\n");
-    ctx.serial.write_str("│           Memory Information            │\n");
-    ctx.serial.write_str("├─────────────────────────────────────────┤\n");
-    ctx.serial.write_str("│  Total Memory:                          │\n");
+    ctx.serial
+        .write_str("\n┌─────────────────────────────────────────┐\n");
+    ctx.serial
+        .write_str("│           Memory Information            │\n");
+    ctx.serial
+        .write_str("├─────────────────────────────────────────┤\n");
+    ctx.serial
+        .write_str("│  Total Memory:                          │\n");
     ctx.serial.write_str("│    Pages: ");
     print_number(&mut ctx.serial, total_pages as u32);
     ctx.serial.write_str("                            │\n");
@@ -653,8 +738,10 @@ fn cmd_meminfo(ctx: &mut ShellContext, _args: &[&str]) {
     ctx.serial.write_str(" KB (");
     print_number(&mut ctx.serial, (total_kb / 1024) as u32);
     ctx.serial.write_str(" MB)                   │\n");
-    ctx.serial.write_str("│                                         │\n");
-    ctx.serial.write_str("│  Used Memory:                           │\n");
+    ctx.serial
+        .write_str("│                                         │\n");
+    ctx.serial
+        .write_str("│  Used Memory:                           │\n");
     ctx.serial.write_str("│    Pages: ");
     print_number(&mut ctx.serial, used_pages as u32);
     ctx.serial.write_str("                            │\n");
@@ -664,17 +751,22 @@ fn cmd_meminfo(ctx: &mut ShellContext, _args: &[&str]) {
     ctx.serial.write_str("│    Usage: ");
     print_number(&mut ctx.serial, usage_pct as u32);
     ctx.serial.write_str("%                             │\n");
-    ctx.serial.write_str("│                                         │\n");
-    ctx.serial.write_str("│  Free Memory:                           │\n");
+    ctx.serial
+        .write_str("│                                         │\n");
+    ctx.serial
+        .write_str("│  Free Memory:                           │\n");
     ctx.serial.write_str("│    Pages: ");
     print_number(&mut ctx.serial, free_pages as u32);
     ctx.serial.write_str("                            │\n");
     ctx.serial.write_str("│    Size:  ");
     print_number(&mut ctx.serial, free_kb as u32);
     ctx.serial.write_str(" KB                          │\n");
-    ctx.serial.write_str("│                                         │\n");
-    ctx.serial.write_str("│  Page Size: 4 KB (4096 bytes)           │\n");
-    ctx.serial.write_str("└─────────────────────────────────────────┘\n");
+    ctx.serial
+        .write_str("│                                         │\n");
+    ctx.serial
+        .write_str("│  Page Size: 4 KB (4096 bytes)           │\n");
+    ctx.serial
+        .write_str("└─────────────────────────────────────────┘\n");
 
     let stats = crate::syscall::memory_syscall_stats();
     ctx.serial.write_str("  Linux VM: maps=");
@@ -716,7 +808,7 @@ fn cmd_meminfo(ctx: &mut ShellContext, _args: &[&str]) {
 fn cmd_uptime(ctx: &mut ShellContext, _args: &[&str]) {
     let s = scheduler::scheduler();
     let ticks = s.get_tick_count();
-    
+
     // Assuming 100Hz timer (10ms per tick)
     let seconds = ticks / 100;
     let minutes = seconds / 60;

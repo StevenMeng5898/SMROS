@@ -24,12 +24,12 @@ const FR_RXFE: u32 = 1 << 4; // Receive FIFO Empty
 
 /// Line Control Register bits
 const LCRH_WLEN_8: u32 = 3 << 5; // 8-bit word length
-const LCRH_FEN: u32 = 1 << 4;    // Enable FIFOs
+const LCRH_FEN: u32 = 1 << 4; // Enable FIFOs
 
 /// Control Register bits
-const CR_UARTEN: u32 = 1 << 0;   // UART Enable
-const CR_TXE: u32 = 1 << 8;      // Transmit Enable
-const CR_RXE: u32 = 1 << 9;      // Receive Enable
+const CR_UARTEN: u32 = 1 << 0; // UART Enable
+const CR_TXE: u32 = 1 << 8; // Transmit Enable
+const CR_RXE: u32 = 1 << 9; // Receive Enable
 
 /// Serial port structure
 pub struct Serial {

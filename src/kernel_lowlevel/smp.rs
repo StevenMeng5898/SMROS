@@ -4,8 +4,8 @@
 //! This module provides functionality for booting secondary CPUs,
 //! CPU affinity management, and per-CPU data structures.
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::kernel_lowlevel::serial::Serial;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Maximum number of CPUs supported
 pub const MAX_CPUS: usize = 4;
@@ -174,7 +174,7 @@ pub fn boot_secondary_cpu(cpu_id: u32, stack_ptr: u64) -> Result<(), &'static st
 
     // For display purposes, add the U bit
     let display_mpidr = 0x80000000 | (cpu_id as u64);
-    
+
     // Debug: print PSCI result
     let mut serial = Serial::new();
     serial.init();
@@ -267,7 +267,7 @@ pub fn init() {
 
     // Initialize per-CPU data
     let per_cpu = unsafe { &mut *per_cpu_mut() };
-    
+
     // CPU0 is already online
     per_cpu.cpu_info[0].cpu_id = 0;
     per_cpu.cpu_info[0].state = CpuState::Online;
@@ -288,7 +288,7 @@ pub fn boot_all_cpus() {
     serial.write_str("[SMP] Multi-core initialization...\n");
     serial.write_str("[SMP] Note: Using logical CPU affinity model\n");
     serial.write_str("[SMP] Scheduler will distribute threads across 4 logical CPUs\n");
-    
+
     // Initialize all CPUs as online for scheduling purposes
     let per_cpu = unsafe { &mut *per_cpu_mut() };
     for i in 0..MAX_CPUS {
@@ -296,8 +296,10 @@ pub fn boot_all_cpus() {
         per_cpu.cpu_info[i].state = CpuState::Online;
         per_cpu.cpu_info[i].mpidr = 0x80000000 | (i as u64);
     }
-    per_cpu.online_count.store(MAX_CPUS as u32, Ordering::Relaxed);
-    
+    per_cpu
+        .online_count
+        .store(MAX_CPUS as u32, Ordering::Relaxed);
+
     serial.write_str("[SMP] All 4 logical CPUs initialized\n");
 }
 
@@ -308,7 +310,7 @@ pub fn mark_cpu_online() {
         let per_cpu = unsafe { &mut *per_cpu_mut() };
         per_cpu.cpu_info[cpu_id as usize].state = CpuState::Online;
         let count = per_cpu.online_count.fetch_add(1, Ordering::Relaxed) + 1;
-        
+
         // Print confirmation (best effort - may interleave with other output)
         let mut serial = Serial::new();
         serial.init();
@@ -346,7 +348,7 @@ pub fn print_status() {
             CpuState::Booting => serial.write_str("Booting"),
             CpuState::Online => serial.write_str("Online"),
         }
-        
+
         serial.write_str("  MPIDR: 0x");
         serial.write_hex(cpu_info.mpidr);
         serial.write_str("\n");

@@ -13,8 +13,8 @@ const CNTP_CTL_EL0: usize = 0xFC80; // Counter-timer Physical Timer Control Regi
 const CNTP_CVAL_EL0: usize = 0xFC90; // Counter-timer Physical Timer CompareValue Register
 
 /// CNTP_CTL_EL0 bits
-const CNTP_CTL_ENABLE: u64 = 1 << 0;  // Timer enable
-const CNTP_CTL_IMASK: u64 = 1 << 1;   // Timer interrupt mask
+const CNTP_CTL_ENABLE: u64 = 1 << 0; // Timer enable
+const CNTP_CTL_IMASK: u64 = 1 << 1; // Timer interrupt mask
 
 /// Timer tick frequency (set at runtime)
 static TIMER_FREQUENCY: AtomicU64 = AtomicU64::new(0);

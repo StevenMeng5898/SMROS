@@ -12,18 +12,18 @@ const GICD_BASE: usize = 0x8000000;
 const GICC_BASE: usize = 0x8010000;
 
 /// Distributor Register offsets
-const GICD_CTLR: usize = 0x000;   // Distributor Control Register
+const GICD_CTLR: usize = 0x000; // Distributor Control Register
 const GICD_IGROUPR: usize = 0x080; // Interrupt Group Registers
 const GICD_ISENABLER: usize = 0x100; // Interrupt Set-Enable Registers
 const GICD_IPRIORITYR: usize = 0x400; // Interrupt Priority Registers
-const GICD_ITARGETSR: usize = 0x800;  // Interrupt Processor Targets Registers
+const GICD_ITARGETSR: usize = 0x800; // Interrupt Processor Targets Registers
 
 /// CPU Interface Register offsets
-const GICC_CTLR: usize = 0x000;   // CPU Interface Control Register
-const GICC_PMR: usize = 0x004;    // Priority Mask Register
-const GICC_BPR: usize = 0x008;    // Binary Point Register
-const GICC_IAR: usize = 0x00C;    // Interrupt Acknowledge Register
-const GICC_EOIR: usize = 0x010;   // End of Interrupt Register
+const GICC_CTLR: usize = 0x000; // CPU Interface Control Register
+const GICC_PMR: usize = 0x004; // Priority Mask Register
+const GICC_BPR: usize = 0x008; // Binary Point Register
+const GICC_IAR: usize = 0x00C; // Interrupt Acknowledge Register
+const GICC_EOIR: usize = 0x010; // End of Interrupt Register
 
 /// GICD_CTLR bits
 const GICD_CTLR_ENABLE: u32 = 1 << 0;
@@ -50,9 +50,7 @@ fn write_reg(base: usize, offset: usize, value: u32) {
 fn read_reg(base: usize, offset: usize) -> u32 {
     // SAFETY: GICD_BASE and GICC_BASE are valid MMIO addresses defined by the
     // QEMU virt machine spec. Offsets are constants from the GICv2 TRM.
-    unsafe {
-        read_volatile((base + offset) as *const u32)
-    }
+    unsafe { read_volatile((base + offset) as *const u32) }
 }
 
 /// Initialize the GICv2 interrupt controller

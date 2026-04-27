@@ -108,10 +108,35 @@ impl CpuContext {
     /// Create a new CPU context for a thread
     pub fn new(entry: extern "C" fn() -> !, stack_top: u64) -> Self {
         CpuContext {
-            x0: 0, x1: 0, x2: 0, x3: 0, x4: 0, x5: 0, x6: 0, x7: 0,
-            x8: 0, x9: 0, x10: 0, x11: 0, x12: 0, x13: 0, x14: 0, x15: 0,
-            x16: 0, x17: 0, x18: 0, x19: 0, x20: 0, x21: 0, x22: 0, x23: 0,
-            x24: 0, x25: 0, x26: 0, x27: 0, x28: 0,
+            x0: 0,
+            x1: 0,
+            x2: 0,
+            x3: 0,
+            x4: 0,
+            x5: 0,
+            x6: 0,
+            x7: 0,
+            x8: 0,
+            x9: 0,
+            x10: 0,
+            x11: 0,
+            x12: 0,
+            x13: 0,
+            x14: 0,
+            x15: 0,
+            x16: 0,
+            x17: 0,
+            x18: 0,
+            x19: 0,
+            x20: 0,
+            x21: 0,
+            x22: 0,
+            x23: 0,
+            x24: 0,
+            x25: 0,
+            x26: 0,
+            x27: 0,
+            x28: 0,
             fp: 0,
             lr: thread_exit_wrapper as *const () as u64,
             sp: stack_top,
@@ -123,10 +148,35 @@ impl CpuContext {
     /// Create a default CPU context (for idle thread)
     pub const fn default_context() -> Self {
         CpuContext {
-            x0: 0, x1: 0, x2: 0, x3: 0, x4: 0, x5: 0, x6: 0, x7: 0,
-            x8: 0, x9: 0, x10: 0, x11: 0, x12: 0, x13: 0, x14: 0, x15: 0,
-            x16: 0, x17: 0, x18: 0, x19: 0, x20: 0, x21: 0, x22: 0, x23: 0,
-            x24: 0, x25: 0, x26: 0, x27: 0, x28: 0,
+            x0: 0,
+            x1: 0,
+            x2: 0,
+            x3: 0,
+            x4: 0,
+            x5: 0,
+            x6: 0,
+            x7: 0,
+            x8: 0,
+            x9: 0,
+            x10: 0,
+            x11: 0,
+            x12: 0,
+            x13: 0,
+            x14: 0,
+            x15: 0,
+            x16: 0,
+            x17: 0,
+            x18: 0,
+            x19: 0,
+            x20: 0,
+            x21: 0,
+            x22: 0,
+            x23: 0,
+            x24: 0,
+            x25: 0,
+            x26: 0,
+            x27: 0,
+            x28: 0,
             fp: 0,
             lr: 0,
             sp: 0,
@@ -235,7 +285,12 @@ impl ThreadControlBlock {
     }
 
     /// Initialize the idle thread
-    pub fn init_idle(&mut self, idle_entry: extern "C" fn() -> !, stack: *mut u8, stack_size: usize) {
+    pub fn init_idle(
+        &mut self,
+        idle_entry: extern "C" fn() -> !,
+        stack: *mut u8,
+        stack_size: usize,
+    ) {
         self.id = ThreadId::IDLE;
         self.state = ThreadState::Ready;
         self.entry = Some(idle_entry);
@@ -271,7 +326,7 @@ impl ThreadControlBlock {
         for _ in 0..(12usize.saturating_sub(self.name.len())) {
             serial.write_byte(b' ');
         }
-        
+
         // Print current CPU (where it's actually running)
         match self.current_cpu {
             Some(cpu) => {
@@ -282,7 +337,7 @@ impl ThreadControlBlock {
             }
         }
         serial.write_str("    ");
-        
+
         print_number(serial, self.time_slice);
         serial.write_str("         ");
         print_number(serial, self.total_ticks);

@@ -4,8 +4,8 @@
 
 #![allow(dead_code)]
 
-use alloc::vec::Vec;
 use super::types::*;
+use alloc::vec::Vec;
 
 fn page_aligned(addr: usize) -> bool {
     addr & (crate::kernel_lowlevel::memory::PAGE_SIZE - 1) == 0

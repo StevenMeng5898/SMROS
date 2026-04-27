@@ -10,9 +10,7 @@
 //! - Process context for exception handling
 
 use crate::kernel_lowlevel::memory::{
-    PAGE_SIZE, ProcessControlBlock,
-    PageFrameAllocator,
-    process_manager,
+    process_manager, PageFrameAllocator, ProcessControlBlock, PAGE_SIZE,
 };
 use crate::kernel_lowlevel::mmu::PageTableManager;
 use crate::kernel_objects::thread::{ThreadControlBlock, ThreadId, DEFAULT_STACK_SIZE};
@@ -172,14 +170,9 @@ impl UserProcess {
         let mut tcb = ThreadControlBlock::new();
 
         // Allocate stack for the thread
-        let layout = alloc::alloc::Layout::from_size_align(
-            DEFAULT_STACK_SIZE,
-            16,
-        ).ok()?;
+        let layout = alloc::alloc::Layout::from_size_align(DEFAULT_STACK_SIZE, 16).ok()?;
 
-        let stack = unsafe {
-            alloc::alloc::alloc(layout)
-        };
+        let stack = unsafe { alloc::alloc::alloc(layout) };
 
         if stack.is_null() {
             return None;
@@ -195,7 +188,7 @@ impl UserProcess {
             self.pcb.name,
             stack,
             DEFAULT_STACK_SIZE,
-            10, // time slice
+            10,   // time slice
             None, // no CPU affinity
         );
 
@@ -213,15 +206,11 @@ impl UserProcess {
 
 /// Global user process table
 static mut USER_PROCESSES: [Option<UserProcess>; 16] = [
-    None, None, None, None, None, None, None, None,
-    None, None, None, None, None, None, None, None,
+    None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
 ];
 
 /// Create a new user process
-pub fn create_user_process(
-    name: &'static str,
-    entry_point: extern "C" fn() -> !,
-) -> Option<usize> {
+pub fn create_user_process(name: &'static str, entry_point: extern "C" fn() -> !) -> Option<usize> {
     let pm = process_manager();
 
     // Create PCB first
@@ -286,11 +275,7 @@ pub fn get_user_process_mut(pid: usize) -> Option<&'static mut UserProcess> {
 /// This function performs low-level CPU operations and should only be called
 /// from kernel code with proper setup.
 #[no_mangle]
-pub unsafe extern "C" fn switch_to_el0(
-    entry_point: u64,
-    user_stack: u64,
-    ttbr0: u64,
-) -> ! {
+pub unsafe extern "C" fn switch_to_el0(entry_point: u64, user_stack: u64, ttbr0: u64) -> ! {
     // Set TTBR0 for user space page tables
     core::arch::asm!(
         "msr ttbr0_el1, {ttbr0}",
@@ -331,10 +316,7 @@ pub unsafe extern "C" fn switch_to_el0(
     // These would be set by EL2 code before dropping to EL1
 
     // Return to EL0 using ERET
-    core::arch::asm!(
-        "eret",
-        options(noreturn),
-    );
+    core::arch::asm!("eret", options(noreturn),);
 }
 
 /// Initialize EL0 process management

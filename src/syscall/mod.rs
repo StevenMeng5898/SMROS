@@ -7,6 +7,7 @@
 //!
 //! Each aspect is in its own file for better organization.
 
+pub(crate) mod address_logic;
 pub mod syscall;
 pub mod syscall_dispatch;
 pub mod syscall_handler;

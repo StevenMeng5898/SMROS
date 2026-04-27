@@ -11,10 +11,10 @@
 //!
 //! These modules handle low-level operations that form the foundation of the kernel.
 
+pub mod drivers;
+pub mod interrupt;
 pub mod memory;
 pub mod mmu;
 pub mod serial;
-pub mod timer;
-pub mod interrupt;
 pub mod smp;
-pub mod drivers;
+pub mod timer;

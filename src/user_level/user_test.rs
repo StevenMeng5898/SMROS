@@ -22,39 +22,18 @@ const EL0_TEST_BANNER: &[u8] = b"=== EL0 Test Process Started ===\n";
 const EL0_TEST_COMPLETE: &[u8] = b"=== EL0 syscall tests complete ===\n";
 const EL0_TEST_INFO_GETPID: &[u8] = b"[INFO] EL0 issued getpid()\n";
 const EL0_TEST_INFO_MMAP: &[u8] = b"[INFO] EL0 issued mmap()\n";
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct El0TestReport {
-    started: u64,
-    finished: u64,
-    write_result: u64,
-    pid: u64,
-    mmap_addr: u64,
-}
-
-impl El0TestReport {
-    const fn new() -> Self {
-        Self {
-            started: 0,
-            finished: 0,
-            write_result: 0,
-            pid: 0,
-            mmap_addr: 0,
-        }
-    }
-}
-
-static mut EL0_TEST_REPORT: El0TestReport = El0TestReport::new();
+const EL0_TEST_EXIT_OK: i32 = 0;
+const EL0_TEST_EXIT_WRITE_RESULT_MISMATCH: i32 = 10;
+const EL0_TEST_EXIT_GETPID_RESULT_MISMATCH: i32 = 11;
+const EL0_TEST_EXIT_GETPID_LOG_WRITE_MISMATCH: i32 = 12;
+const EL0_TEST_EXIT_MMAP_RESULT_MISMATCH: i32 = 13;
+const EL0_TEST_EXIT_MMAP_LOG_WRITE_MISMATCH: i32 = 14;
+const EL0_TEST_EXIT_COMPLETE_LOG_WRITE_MISMATCH: i32 = 15;
 static EL0_TEST_ACTIVE: AtomicBool = AtomicBool::new(false);
-static EL0_TEST_SKIP_ELR_ADVANCE: AtomicBool = AtomicBool::new(false);
 static EL0_TEST_EXIT_CODE: AtomicI32 = AtomicI32::new(-1);
 static EL0_TEST_RESUME_ADDR: AtomicU64 = AtomicU64::new(0);
 static EL0_TEST_KERNEL_ENTERED: AtomicBool = AtomicBool::new(false);
 static EL0_TEST_KERNEL_FINISHED: AtomicBool = AtomicBool::new(false);
-// The boot-time pass/fail decision uses EL1-side observations so the kernel
-// can validate the real SVC path even while the EL0-side return-value
-// bookkeeping is still being tightened.
 static EL0_TEST_KERNEL_WRITE_RESULT: AtomicU64 = AtomicU64::new(0);
 static EL0_TEST_KERNEL_PID: AtomicU64 = AtomicU64::new(0);
 static EL0_TEST_KERNEL_MMAP_ADDR: AtomicU64 = AtomicU64::new(0);
@@ -62,17 +41,16 @@ static EL0_TEST_KERNEL_MMAP_ADDR: AtomicU64 = AtomicU64::new(0);
 /// Make a Linux syscall from EL0.
 #[inline(always)]
 pub unsafe fn linux_syscall(syscall_num: u32, args: [u64; 6]) -> u64 {
-    let ret: u64;
+    let mut ret = args[0];
     core::arch::asm!(
         "svc #0",
         in("x8") syscall_num,
-        in("x0") args[0],
+        inlateout("x0") ret,
         in("x1") args[1],
         in("x2") args[2],
         in("x3") args[3],
         in("x4") args[4],
         in("x5") args[5],
-        lateout("x0") ret,
         options(nostack),
     );
     ret
@@ -89,16 +67,7 @@ pub fn test_mmap(size: usize) -> u64 {
     let flags = MAP_PRIVATE | MAP_ANONYMOUS;
     let prot = 0x3; // PROT_READ | PROT_WRITE
 
-    unsafe {
-        linux_syscall(SYS_MMAP, [
-            0,
-            size as u64,
-            prot as u64,
-            flags as u64,
-            0,
-            0,
-        ])
-    }
+    unsafe { linux_syscall(SYS_MMAP, [0, size as u64, prot as u64, flags as u64, 0, 0]) }
 }
 
 pub fn test_exit(exit_code: i32) -> ! {
@@ -113,40 +82,40 @@ pub fn test_exit(exit_code: i32) -> ! {
 
 pub fn test_write(fd: u64, buf: &[u8]) -> u64 {
     unsafe {
-        linux_syscall(SYS_WRITE, [
-            fd,
-            buf.as_ptr() as u64,
-            buf.len() as u64,
-            0,
-            0,
-            0,
-        ])
+        linux_syscall(
+            SYS_WRITE,
+            [fd, buf.as_ptr() as u64, buf.len() as u64, 0, 0, 0],
+        )
     }
 }
 
 #[no_mangle]
 pub fn user_test_process_entry() -> ! {
-    unsafe {
-        EL0_TEST_REPORT.started = 1;
-    }
-
     let write_result = test_write(1, EL0_TEST_BANNER);
+    if write_result != EL0_TEST_BANNER.len() as u64 {
+        test_exit(EL0_TEST_EXIT_WRITE_RESULT_MISMATCH);
+    }
 
     let pid = test_getpid();
-    test_write(1, EL0_TEST_INFO_GETPID);
-
-    let addr = test_mmap(4096);
-    test_write(1, EL0_TEST_INFO_MMAP);
-
-    unsafe {
-        EL0_TEST_REPORT.write_result = write_result;
-        EL0_TEST_REPORT.pid = pid;
-        EL0_TEST_REPORT.mmap_addr = addr;
-        EL0_TEST_REPORT.finished = 1;
+    if pid != 1 {
+        test_exit(EL0_TEST_EXIT_GETPID_RESULT_MISMATCH);
+    }
+    if test_write(1, EL0_TEST_INFO_GETPID) != EL0_TEST_INFO_GETPID.len() as u64 {
+        test_exit(EL0_TEST_EXIT_GETPID_LOG_WRITE_MISMATCH);
     }
 
-    test_write(1, EL0_TEST_COMPLETE);
-    test_exit(0)
+    let addr = test_mmap(4096);
+    if addr < 0x5000_0000 || addr >= 0x6000_0000 || addr % 4096 != 0 {
+        test_exit(EL0_TEST_EXIT_MMAP_RESULT_MISMATCH);
+    }
+    if test_write(1, EL0_TEST_INFO_MMAP) != EL0_TEST_INFO_MMAP.len() as u64 {
+        test_exit(EL0_TEST_EXIT_MMAP_LOG_WRITE_MISMATCH);
+    }
+
+    if test_write(1, EL0_TEST_COMPLETE) != EL0_TEST_COMPLETE.len() as u64 {
+        test_exit(EL0_TEST_EXIT_COMPLETE_LOG_WRITE_MISMATCH);
+    }
+    test_exit(EL0_TEST_EXIT_OK)
 }
 
 pub fn record_el0_kernel_syscall_result(syscall_num: u32, result: u64) {
@@ -188,7 +157,6 @@ pub fn prepare_el0_test_kernel_return(exit_code: i32) -> bool {
     }
 
     EL0_TEST_EXIT_CODE.store(exit_code, Ordering::SeqCst);
-    EL0_TEST_SKIP_ELR_ADVANCE.store(true, Ordering::SeqCst);
     EL0_TEST_KERNEL_FINISHED.store(true, Ordering::SeqCst);
 
     // Return to EL1h with interrupts masked, matching the kernel thread model.
@@ -210,11 +178,7 @@ pub fn prepare_el0_test_kernel_return(exit_code: i32) -> bool {
 /// `ELR_EL1` before returning from an exception.
 #[no_mangle]
 pub extern "C" fn syscall_should_advance_elr() -> u64 {
-    if EL0_TEST_SKIP_ELR_ADVANCE.swap(false, Ordering::SeqCst) {
-        0
-    } else {
-        1
-    }
+    0
 }
 
 fn finish_boot_after_user_test() -> ! {
@@ -233,7 +197,6 @@ pub extern "C" fn el0_test_resume() -> ! {
     serial.init();
 
     let exit_code = EL0_TEST_EXIT_CODE.load(Ordering::SeqCst);
-    let report = unsafe { EL0_TEST_REPORT };
     let kernel_entered = EL0_TEST_KERNEL_ENTERED.load(Ordering::SeqCst);
     let kernel_finished = EL0_TEST_KERNEL_FINISHED.load(Ordering::SeqCst);
     let kernel_write = EL0_TEST_KERNEL_WRITE_RESULT.load(Ordering::SeqCst);
@@ -244,17 +207,8 @@ pub extern "C" fn el0_test_resume() -> ! {
     serial.write_str("[EL0] exit code: ");
     print_number(&mut serial, exit_code as u32);
     serial.write_str("\n");
-
-    serial.write_str("[EL0] EL0-observed write() returned: ");
-    print_number(&mut serial, report.write_result as u32);
-    serial.write_str("\n");
-
-    serial.write_str("[EL0] EL0-observed getpid() returned: ");
-    print_number(&mut serial, report.pid as u32);
-    serial.write_str("\n");
-
-    serial.write_str("[EL0] EL0-observed mmap() returned: ");
-    print_hex(&mut serial, report.mmap_addr);
+    serial.write_str("[EL0] exit meaning: ");
+    serial.write_str(el0_test_exit_meaning(exit_code));
     serial.write_str("\n");
 
     serial.write_str("[EL0] Kernel-observed write() returned: ");
@@ -279,7 +233,7 @@ pub extern "C" fn el0_test_resume() -> ! {
 
     let kernel_success = kernel_entered
         && kernel_finished
-        && exit_code == 0
+        && exit_code == EL0_TEST_EXIT_OK
         && kernel_write == EL0_TEST_BANNER.len() as u64
         && kernel_pid == 1
         && kernel_mmap > 0
@@ -302,9 +256,6 @@ pub fn run_user_test() -> ! {
     serial.write_str("[EL0] Setting up real EL0 test process...\n");
     serial.write_str("[EL0] Dropping to EL0 and validating the active SVC path...\n");
 
-    unsafe {
-        EL0_TEST_REPORT = El0TestReport::new();
-    }
     EL0_TEST_EXIT_CODE.store(-1, Ordering::SeqCst);
     EL0_TEST_RESUME_ADDR.store(el0_test_resume as *const () as u64, Ordering::SeqCst);
     EL0_TEST_KERNEL_ENTERED.store(false, Ordering::SeqCst);
@@ -336,6 +287,23 @@ pub fn run_user_test() -> ! {
             stack_top,
             0,
         );
+    }
+}
+
+fn el0_test_exit_meaning(exit_code: i32) -> &'static str {
+    match exit_code {
+        EL0_TEST_EXIT_OK => "all EL0-observed syscall return values matched expectations",
+        EL0_TEST_EXIT_WRITE_RESULT_MISMATCH => "banner write() returned an unexpected value",
+        EL0_TEST_EXIT_GETPID_RESULT_MISMATCH => "getpid() returned an unexpected value",
+        EL0_TEST_EXIT_GETPID_LOG_WRITE_MISMATCH => {
+            "post-getpid write() returned an unexpected value"
+        }
+        EL0_TEST_EXIT_MMAP_RESULT_MISMATCH => "mmap() returned an unexpected value",
+        EL0_TEST_EXIT_MMAP_LOG_WRITE_MISMATCH => "post-mmap write() returned an unexpected value",
+        EL0_TEST_EXIT_COMPLETE_LOG_WRITE_MISMATCH => {
+            "final completion write() returned an unexpected value"
+        }
+        _ => "unexpected exit code",
     }
 }
 

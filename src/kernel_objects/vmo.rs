@@ -4,11 +4,11 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::AtomicU32;
-use alloc::vec;
-use alloc::vec::Vec;
 use super::types::*;
 use crate::kernel_lowlevel::memory::PageFrameAllocator;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::sync::atomic::AtomicU32;
 
 /// Virtual Memory Object
 pub struct Vmo {
@@ -161,7 +161,9 @@ impl Vmo {
     /// Get physical addresses for this VMO
     pub fn get_physical_addresses(&self) -> Option<Vec<u64>> {
         self.pfns.as_ref().map(|pfns| {
-            pfns.iter().filter_map(|pfn| pfn.map(|val| val << 12)).collect()
+            pfns.iter()
+                .filter_map(|pfn| pfn.map(|val| val << 12))
+                .collect()
         })
     }
 
@@ -298,7 +300,8 @@ impl Vmo {
 
     /// Create a child VMO
     pub fn create_child(&self, resizable: bool, _offset: usize, size: usize) -> ZxResult<Self> {
-        let page_count = (size + crate::kernel_lowlevel::memory::PAGE_SIZE - 1) / crate::kernel_lowlevel::memory::PAGE_SIZE;
+        let page_count = (size + crate::kernel_lowlevel::memory::PAGE_SIZE - 1)
+            / crate::kernel_lowlevel::memory::PAGE_SIZE;
         if let Some(mut child) = Self::new_paged(page_count) {
             child.resizable = resizable;
             if resizable {
@@ -312,7 +315,8 @@ impl Vmo {
 
     /// Create a slice of this VMO
     pub fn create_slice(&self, _offset: usize, size: usize) -> ZxResult<Self> {
-        let page_count = (size + crate::kernel_lowlevel::memory::PAGE_SIZE - 1) / crate::kernel_lowlevel::memory::PAGE_SIZE;
+        let page_count = (size + crate::kernel_lowlevel::memory::PAGE_SIZE - 1)
+            / crate::kernel_lowlevel::memory::PAGE_SIZE;
         if let Some(mut child) = Self::new_paged(page_count) {
             child.vmo_type = VmoType::Paged;
             Ok(child)

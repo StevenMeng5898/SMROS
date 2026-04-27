@@ -6,7 +6,8 @@
 //! It manages multiple threads and performs context switching on timer ticks.
 
 use crate::kernel_objects::thread::{
-    ThreadControlBlock, ThreadId, ThreadState, MAX_THREADS, DEFAULT_STACK_SIZE, ThreadStack, SendPtr,
+    SendPtr, ThreadControlBlock, ThreadId, ThreadStack, ThreadState, DEFAULT_STACK_SIZE,
+    MAX_THREADS,
 };
 use core::cell::UnsafeCell;
 use core::ptr;
@@ -118,11 +119,7 @@ impl Scheduler {
     /// Create the idle thread
     fn create_idle_thread(&mut self) {
         let tcb = &mut self.threads[0];
-        tcb.init_idle(
-            idle_thread_entry,
-            self.idle_stack.0,
-            DEFAULT_STACK_SIZE,
-        );
+        tcb.init_idle(idle_thread_entry, self.idle_stack.0, DEFAULT_STACK_SIZE);
     }
 
     /// Create a new thread
@@ -207,10 +204,7 @@ impl Scheduler {
             let idx = (start + attempts) % MAX_THREADS;
 
             // Skip the current thread and idle thread (unless it's the only option)
-            if idx != current
-                && idx != 0
-                && self.threads[idx].state == ThreadState::Ready
-            {
+            if idx != current && idx != 0 && self.threads[idx].state == ThreadState::Ready {
                 self.next_thread = (idx + 1) % MAX_THREADS;
                 return Some(ThreadId(idx));
             }
@@ -236,10 +230,7 @@ impl Scheduler {
         while attempts < MAX_THREADS {
             let idx = (start + attempts) % MAX_THREADS;
 
-            if idx != current
-                && idx != 0
-                && self.threads[idx].state == ThreadState::Ready
-            {
+            if idx != current && idx != 0 && self.threads[idx].state == ThreadState::Ready {
                 let thread_cpu = self.threads[idx].cpu_affinity;
                 // Only schedule if thread is bound to this CPU or unbound
                 if thread_cpu.is_none() || thread_cpu == Some(cpu_id) {
@@ -356,7 +347,7 @@ extern "C" fn idle_thread_entry() -> ! {
         // If shell (or other threads) are ready, switch to them
         // This prevents deadlocks and ensures cooperative scheduling
         schedule();
-        
+
         // If we returned here, no other threads were ready
         // Wait for interrupt (timer will trigger scheduler check)
         cortex_a::asm::wfi();
@@ -366,7 +357,7 @@ extern "C" fn idle_thread_entry() -> ! {
 /// Perform a context switch to the next thread
 pub fn schedule() {
     let s = scheduler();
-    
+
     // Find next thread to run
     if let Some(next_id) = s.schedule_next() {
         let current_id = s.current_thread;

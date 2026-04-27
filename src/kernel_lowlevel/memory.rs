@@ -54,8 +54,8 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Page size: 4KB (standard ARM64 granule)
 pub const PAGE_SIZE: usize = 0x1000;
@@ -422,7 +422,10 @@ impl ProcessAddressSpace {
         serial.write_str(" - 0x");
         print_hex(serial, self.heap_current as u64);
         serial.write_str(" (used: ");
-        crate::kernel_lowlevel::smp::print_number(serial, ((self.heap_current - 0x2000) / 1024) as u32);
+        crate::kernel_lowlevel::smp::print_number(
+            serial,
+            ((self.heap_current - 0x2000) / 1024) as u32,
+        );
         serial.write_str("KB)\n");
 
         serial.write_str("    Stack: 0x");
@@ -464,12 +467,7 @@ impl ProcessControlBlock {
     }
 
     /// Initialize a new process
-    pub fn init(
-        &mut self,
-        pid: usize,
-        parent_pid: usize,
-        name: &'static str,
-    ) -> bool {
+    pub fn init(&mut self, pid: usize, parent_pid: usize, name: &'static str) -> bool {
         self.pid = pid;
         self.parent_pid = parent_pid;
         self.name = name;
@@ -601,7 +599,8 @@ impl AllocatorCell {
     }
 }
 
-static ALLOCATOR: AllocatorCell = AllocatorCell(core::cell::UnsafeCell::new(PageFrameAllocator::new()));
+static ALLOCATOR: AllocatorCell =
+    AllocatorCell(core::cell::UnsafeCell::new(PageFrameAllocator::new()));
 
 /// Process manager - manages all processes in the system
 pub struct ProcessManager {
@@ -728,10 +727,16 @@ impl ProcessManager {
         serial.write_str("  Total Pages: ");
         crate::kernel_lowlevel::smp::print_number(serial, PageFrameAllocator::total_pages() as u32);
         serial.write_str(" (");
-        crate::kernel_lowlevel::smp::print_number(serial, (PageFrameAllocator::total_pages() * PAGE_SIZE / 1024) as u32);
+        crate::kernel_lowlevel::smp::print_number(
+            serial,
+            (PageFrameAllocator::total_pages() * PAGE_SIZE / 1024) as u32,
+        );
         serial.write_str(" KB)\n");
         serial.write_str("  Allocated: ");
-        crate::kernel_lowlevel::smp::print_number(serial, PageFrameAllocator::allocated_pages() as u32);
+        crate::kernel_lowlevel::smp::print_number(
+            serial,
+            PageFrameAllocator::allocated_pages() as u32,
+        );
         serial.write_str(" pages\n");
         serial.write_str("  Free: ");
         crate::kernel_lowlevel::smp::print_number(serial, PageFrameAllocator::free_pages() as u32);
@@ -753,9 +758,15 @@ impl ProcessManager {
                 }
                 crate::kernel_lowlevel::smp::print_number(serial, pcb.thread_count as u32);
                 serial.write_str("         ");
-                crate::kernel_lowlevel::smp::print_number(serial, pcb.address_space.valid_segment_count as u32);
+                crate::kernel_lowlevel::smp::print_number(
+                    serial,
+                    pcb.address_space.valid_segment_count as u32,
+                );
                 serial.write_str("        ");
-                crate::kernel_lowlevel::smp::print_number(serial, pcb.address_space.valid_page_count as u32);
+                crate::kernel_lowlevel::smp::print_number(
+                    serial,
+                    pcb.address_space.valid_page_count as u32,
+                );
                 serial.write_str("\n");
             }
         }
@@ -779,7 +790,8 @@ impl ProcessManager {
 struct ProcessManagerCell(core::cell::UnsafeCell<ProcessManager>);
 unsafe impl Sync for ProcessManagerCell {}
 
-static PROCESS_MANAGER: ProcessManagerCell = ProcessManagerCell(core::cell::UnsafeCell::new(ProcessManager::new()));
+static PROCESS_MANAGER: ProcessManagerCell =
+    ProcessManagerCell(core::cell::UnsafeCell::new(ProcessManager::new()));
 
 /// Get a mutable reference to the global process manager
 pub fn process_manager() -> &'static mut ProcessManager {
@@ -939,13 +951,19 @@ impl Shell {
     /// Print welcome message
     fn print_welcome(&mut self) {
         self.serial.write_str("\n");
-        self.serial.write_str("╔═══════════════════════════════════════════════════════════╗\n");
-        self.serial.write_str("║                                                           ║\n");
-        self.serial.write_str("║          SMROS Shell v0.3.0 - Process Management          ║\n");
-        self.serial.write_str("║                                                           ║\n");
-        self.serial.write_str("╚═══════════════════════════════════════════════════════════╝\n");
+        self.serial
+            .write_str("╔═══════════════════════════════════════════════════════════╗\n");
+        self.serial
+            .write_str("║                                                           ║\n");
+        self.serial
+            .write_str("║          SMROS Shell v0.3.0 - Process Management          ║\n");
+        self.serial
+            .write_str("║                                                           ║\n");
+        self.serial
+            .write_str("╚═══════════════════════════════════════════════════════════╝\n");
         self.serial.write_str("\n");
-        self.serial.write_str("Type 'help' for available commands.\n\n");
+        self.serial
+            .write_str("Type 'help' for available commands.\n\n");
     }
 
     /// Parse command line into arguments (static version to avoid borrow issues)
@@ -988,7 +1006,8 @@ impl Shell {
             _ => {
                 self.serial.write_str("Unknown command: ");
                 self.serial.write_str(cmd);
-                self.serial.write_str("\nType 'help' for available commands.\n");
+                self.serial
+                    .write_str("\nType 'help' for available commands.\n");
             }
         }
     }
@@ -1081,9 +1100,15 @@ fn cmd_top(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str]) 
                     serial.write_byte(b' ');
                 }
                 serial.write_str(" │    ");
-                crate::kernel_lowlevel::smp::print_number(serial, pcb.address_space.valid_segment_count as u32);
+                crate::kernel_lowlevel::smp::print_number(
+                    serial,
+                    pcb.address_space.valid_segment_count as u32,
+                );
                 serial.write_str("   │   ");
-                crate::kernel_lowlevel::smp::print_number(serial, pcb.address_space.valid_page_count as u32);
+                crate::kernel_lowlevel::smp::print_number(
+                    serial,
+                    pcb.address_space.valid_page_count as u32,
+                );
                 serial.write_str("   │  ");
 
                 // Show heap usage
@@ -1106,7 +1131,10 @@ fn cmd_top(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str]) 
     serial.write_str("│ Free: ");
     crate::kernel_lowlevel::smp::print_number(serial, PageFrameAllocator::free_pages() as u32);
     serial.write_str(" pages (");
-    crate::kernel_lowlevel::smp::print_number(serial, (PageFrameAllocator::free_pages() * PAGE_SIZE / 1024) as u32);
+    crate::kernel_lowlevel::smp::print_number(
+        serial,
+        (PageFrameAllocator::free_pages() * PAGE_SIZE / 1024) as u32,
+    );
     serial.write_str(" KB)                        │\n");
 
     serial.write_str("└─────────────────────────────────────────────────────────────┘\n");
@@ -1120,7 +1148,11 @@ fn cmd_meminfo(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&st
     let total_kb = total_pages * PAGE_SIZE / 1024;
     let used_kb = used_pages * PAGE_SIZE / 1024;
     let free_kb = free_pages * PAGE_SIZE / 1024;
-    let usage_pct = if total_pages > 0 { (used_pages * 100) / total_pages } else { 0 };
+    let usage_pct = if total_pages > 0 {
+        (used_pages * 100) / total_pages
+    } else {
+        0
+    };
 
     serial.write_str("\n┌─────────────────────────────────────────┐\n");
     serial.write_str("│           Memory Information            │\n");
@@ -1175,7 +1207,10 @@ fn cmd_pages(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str]
                 serial.write_str(")\n");
                 serial.write_str("  ──────────────────────────────────────\n");
                 serial.write_str("    Total Pages: ");
-                crate::kernel_lowlevel::smp::print_number(serial, pcb.address_space.valid_page_count as u32);
+                crate::kernel_lowlevel::smp::print_number(
+                    serial,
+                    pcb.address_space.valid_page_count as u32,
+                );
                 serial.write_str("\n");
                 serial.write_str("    Page Table:\n");
 
@@ -1392,7 +1427,10 @@ fn cmd_uptime(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str
     // For now, show a placeholder
     serial.write_str("System uptime: (timer integration pending)\n");
     serial.write_str("Scheduler tick count: ");
-    crate::kernel_lowlevel::smp::print_number(serial, crate::kernel_objects::scheduler::scheduler().get_tick_count() as u32);
+    crate::kernel_lowlevel::smp::print_number(
+        serial,
+        crate::kernel_objects::scheduler::scheduler().get_tick_count() as u32,
+    );
     serial.write_str("\n");
 }
 
@@ -1476,7 +1514,11 @@ fn print_hex_u64(serial: &mut crate::kernel_lowlevel::serial::Serial, num: u64) 
 }
 
 /// Helper: Print a padded number with fixed width
-fn print_padded_number(serial: &mut crate::kernel_lowlevel::serial::Serial, num: u32, width: usize) {
+fn print_padded_number(
+    serial: &mut crate::kernel_lowlevel::serial::Serial,
+    num: u32,
+    width: usize,
+) {
     // Count digits
     let mut temp = num;
     let mut digits = 0;
@@ -1503,4 +1545,3 @@ pub fn start_shell() -> ! {
     shell.init();
     shell.run();
 }
-

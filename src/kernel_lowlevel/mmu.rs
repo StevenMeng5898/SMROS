@@ -9,8 +9,8 @@
 #![allow(dead_code)]
 #![allow(static_mut_refs)]
 
+use crate::kernel_lowlevel::memory::{PageFrameAllocator, PAGE_SIZE};
 use alloc::vec::Vec;
-use crate::kernel_lowlevel::memory::{PAGE_SIZE, PageFrameAllocator};
 
 // Page table entry flags
 bitflags::bitflags! {
@@ -278,11 +278,8 @@ impl PageTableManager {
             }
 
             // Add VMA
-            self.vmas.push(Vma::new(
-                addr,
-                addr + PAGE_SIZE,
-                PageAttr::empty(),
-            ));
+            self.vmas
+                .push(Vma::new(addr, addr + PAGE_SIZE, PageAttr::empty()));
 
             addr += PAGE_SIZE;
             paddr += PAGE_SIZE as u64;
@@ -385,12 +382,7 @@ impl PageTableManager {
             );
 
             // TLB invalidate
-            core::arch::asm!(
-                "tlbi vmalle1is",
-                "dsb ish",
-                "isb",
-                options(nostack),
-            );
+            core::arch::asm!("tlbi vmalle1is", "dsb ish", "isb", options(nostack),);
         }
     }
 }
@@ -422,7 +414,8 @@ pub fn init() {
         KERNEL_PAGETABLE_MANAGER = PageTableManager::new();
     }
     crate::kernel_lowlevel::serial::Serial::new().init();
-    crate::kernel_lowlevel::serial::Serial::new().write_str("[MMU] Page table manager initialized\n");
+    crate::kernel_lowlevel::serial::Serial::new()
+        .write_str("[MMU] Page table manager initialized\n");
 }
 
 /// Get kernel page table manager

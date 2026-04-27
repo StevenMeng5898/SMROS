@@ -14,19 +14,19 @@
 #![allow(static_mut_refs)]
 
 // Module declarations
-pub mod types;
-pub mod thread;
-pub mod handle;
-pub mod vmo;
-pub mod vmar;
 pub mod channel;
+pub mod handle;
 pub mod scheduler;
+pub mod thread;
+pub mod types;
+pub mod vmar;
+pub mod vmo;
 
 // Re-export all public types
-pub use types::*;
 pub use handle::*;
-pub use vmo::*;
 pub use scheduler::*;
+pub use types::*;
+pub use vmo::*;
 
 // ============================================================================
 // Kernel Object Manager
