@@ -9,6 +9,7 @@
 
 pub(crate) mod address_logic;
 pub mod syscall;
+pub(crate) mod syscall_bridge;
 pub mod syscall_dispatch;
 pub mod syscall_handler;
 

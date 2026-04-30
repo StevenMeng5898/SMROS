@@ -4,7 +4,13 @@
 //! When an EL0 process executes an SVC instruction, control transfers to EL1
 //! where this handler dispatches the syscall to the appropriate implementation.
 
-use crate::syscall::syscall::{dispatch_linux_syscall, dispatch_zircon_syscall, SysError};
+use crate::syscall::{
+    syscall::{dispatch_linux_syscall, dispatch_zircon_syscall, SysError},
+    syscall_bridge::{
+        is_linux_syscall_number, linux_args_from_regs, linux_sys_result_to_u64,
+        saved_regs_ptr_from_el0_sp, syscall_num_from_regs, zircon_args_from_regs,
+    },
+};
 
 /// Handle SVC exception from EL0 - called from assembly exception handler
 ///
@@ -21,66 +27,37 @@ pub unsafe extern "C" fn handle_svc_exception_from_el0(
     _spsr_el1: u64,
     sp_el0: u64,
 ) {
-    // Get syscall number from x8 (saved on stack by assembly)
-    // The stack layout is set by the assembly exception handler
-    let stack_ptr = sp_el0 as *mut u64;
-
     // Read saved registers from stack
     // x0 is at sp + 0, x1 at sp + 8, etc.
     // x8 is at sp + 64 (8th pair, first element)
-    let saved_regs = (stack_ptr.wrapping_sub(256 / 8)) as *const [u64; 30];
+    let saved_regs = saved_regs_ptr_from_el0_sp(sp_el0);
     let regs = &*saved_regs;
 
-    let x0 = regs[0];
-    let x1 = regs[1];
-    let x2 = regs[2];
-    let x3 = regs[3];
-    let x4 = regs[4];
-    let x5 = regs[5];
-    let x6 = regs[6];
-    let x7 = regs[7];
-    let x8 = regs[8];
-
-    let syscall_num = x8 as u32;
+    let syscall_num = syscall_num_from_regs(regs);
 
     // Extract arguments (x0-x5 for Linux, x0-x7 for Zircon)
-    let args_linux = [
-        x0 as usize,
-        x1 as usize,
-        x2 as usize,
-        x3 as usize,
-        x4 as usize,
-        x5 as usize,
-    ];
-
-    let args_zircon = [
-        x0 as usize,
-        x1 as usize,
-        x2 as usize,
-        x3 as usize,
-        x4 as usize,
-        x5 as usize,
-        x6 as usize,
-        x7 as usize,
-    ];
+    let args_linux = linux_args_from_regs(regs);
+    let args_zircon = zircon_args_from_regs(regs);
 
     // Dispatch syscall
-    let result = if syscall_num < 1000 {
+    let result = if is_linux_syscall_number(syscall_num) {
         // Linux syscall
-        dispatch_linux_syscall(syscall_num, args_linux)
-    } else {
+        dispatch_linux_syscall(syscall_num as u32, args_linux)
+    } else if syscall_num <= u32::MAX as u64 {
         // Zircon syscall - map error to Linux for now
-        match dispatch_zircon_syscall(syscall_num, args_zircon) {
+        match dispatch_zircon_syscall(syscall_num as u32, args_zircon) {
             Ok(val) => Ok(val),
             Err(_) => Err(SysError::ENOSYS),
         }
+    } else {
+        Err(SysError::ENOSYS)
     };
 
     // Store result - will be loaded by assembly
     // For now, we need a different approach - modify stack directly
     // This is complex, so let's use a simpler approach with global
     SYSCALL_RESULT.store(
-        result.unwrap_or(0) as u64,
+        linux_sys_result_to_u64(result),
         core::sync::atomic::Ordering::Relaxed,
     );
 

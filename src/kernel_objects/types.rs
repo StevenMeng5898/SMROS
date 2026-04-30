@@ -226,12 +226,10 @@ pub type ZxResult<T = ()> = Result<T, ZxError>;
 
 /// Helper: convert bytes to pages
 pub fn pages(size: usize) -> usize {
-    (size + crate::kernel_lowlevel::memory::PAGE_SIZE - 1)
-        / crate::kernel_lowlevel::memory::PAGE_SIZE
+    super::object_logic::pages(size, crate::kernel_lowlevel::memory::PAGE_SIZE)
 }
 
 /// Round up to page boundary
 pub fn roundup_pages(size: usize) -> usize {
-    (size + crate::kernel_lowlevel::memory::PAGE_SIZE - 1)
-        & !(crate::kernel_lowlevel::memory::PAGE_SIZE - 1)
+    super::object_logic::roundup_pages(size, crate::kernel_lowlevel::memory::PAGE_SIZE)
 }

@@ -4,11 +4,11 @@
 
 #![allow(dead_code)]
 
-use super::types::*;
+use super::{object_logic, types::*};
 use alloc::vec::Vec;
 
 fn page_aligned(addr: usize) -> bool {
-    addr & (crate::kernel_lowlevel::memory::PAGE_SIZE - 1) == 0
+    object_logic::page_aligned(addr, crate::kernel_lowlevel::memory::PAGE_SIZE)
 }
 
 /// Memory mapping in a VMAR
@@ -66,7 +66,7 @@ impl Vmar {
     }
 
     fn end_addr(&self) -> usize {
-        self.base_addr + self.size
+        object_logic::checked_end(self.base_addr, self.size).unwrap_or(usize::MAX)
     }
 
     fn sort_mappings(&mut self) {
@@ -74,17 +74,11 @@ impl Vmar {
     }
 
     fn contains_range(&self, vaddr: usize, len: usize) -> bool {
-        let Some(end) = vaddr.checked_add(len) else {
-            return false;
-        };
-
-        vaddr >= self.base_addr && end <= self.end_addr()
+        object_logic::range_within(vaddr, len, self.base_addr, self.size)
     }
 
     fn ranges_overlap(start_a: usize, len_a: usize, start_b: usize, len_b: usize) -> bool {
-        let end_a = start_a + len_a;
-        let end_b = start_b + len_b;
-        start_a < end_b && start_b < end_a
+        object_logic::ranges_overlap(start_a, len_a, start_b, len_b)
     }
 
     fn range_available(&self, vaddr: usize, len: usize) -> bool {
@@ -97,8 +91,8 @@ impl Vmar {
         })
     }
 
-    fn align_up(addr: usize, align: usize) -> usize {
-        (addr + align - 1) & !(align - 1)
+    fn align_up(addr: usize, align: usize) -> Option<usize> {
+        object_logic::align_up_checked(addr, align)
     }
 
     /// Map a VMO into this VMAR
@@ -158,7 +152,9 @@ impl Vmar {
     ) -> ZxResult<usize> {
         if overwrite {
             let offset = vmar_offset.ok_or(ZxError::ErrInvalidArgs)?;
-            match self.unmap(self.base_addr + offset, roundup_pages(len)) {
+            let addr =
+                object_logic::checked_end(self.base_addr, offset).ok_or(ZxError::ErrOutOfRange)?;
+            match self.unmap(addr, roundup_pages(len)) {
                 Ok(()) | Err(ZxError::ErrNotFound) => {}
                 Err(err) => return Err(err),
             }
@@ -176,7 +172,7 @@ impl Vmar {
             return Err(ZxError::ErrOutOfRange);
         }
 
-        let end = vaddr + len;
+        let end = object_logic::checked_end(vaddr, len).ok_or(ZxError::ErrOutOfRange)?;
         let mut removed_any = false;
         let mappings = core::mem::take(&mut self.mappings);
 
@@ -187,7 +183,8 @@ impl Vmar {
             }
 
             removed_any = true;
-            let mapping_end = mapping.vaddr + mapping.size;
+            let mapping_end = object_logic::checked_end(mapping.vaddr, mapping.size)
+                .ok_or(ZxError::ErrOutOfRange)?;
 
             if vaddr > mapping.vaddr {
                 self.mappings.push(VmarMapping {
@@ -230,7 +227,7 @@ impl Vmar {
             return Err(ZxError::ErrOutOfRange);
         }
 
-        let end = vaddr + len;
+        let end = object_logic::checked_end(vaddr, len).ok_or(ZxError::ErrOutOfRange)?;
         let mut updated_any = false;
         let mappings = core::mem::take(&mut self.mappings);
 
@@ -241,7 +238,8 @@ impl Vmar {
             }
 
             updated_any = true;
-            let mapping_end = mapping.vaddr + mapping.size;
+            let mapping_end = object_logic::checked_end(mapping.vaddr, mapping.size)
+                .ok_or(ZxError::ErrOutOfRange)?;
 
             if vaddr > mapping.vaddr {
                 self.mappings.push(VmarMapping {
@@ -315,7 +313,7 @@ impl Vmar {
                 if !page_aligned(off) {
                     return Err(ZxError::ErrInvalidArgs);
                 }
-                self.base_addr + off
+                object_logic::checked_end(self.base_addr, off).ok_or(ZxError::ErrOutOfRange)?
             }
             None => self.find_free_region_aligned(size, align)?,
         };
@@ -337,14 +335,18 @@ impl Vmar {
                 continue;
             }
 
-            if candidate + size <= mapping.vaddr {
+            if object_logic::checked_end(candidate, size)
+                .filter(|end| *end <= mapping.vaddr)
+                .is_some()
+            {
                 return Ok(candidate);
             }
 
-            candidate = mapping.vaddr + mapping.size;
+            candidate = object_logic::checked_end(mapping.vaddr, mapping.size)
+                .ok_or(ZxError::ErrNoMemory)?;
         }
 
-        if candidate + size <= self.base_addr + self.size {
+        if self.contains_range(candidate, size) {
             return Ok(candidate);
         }
 
@@ -354,21 +356,26 @@ impl Vmar {
     /// Find a free region with alignment
     fn find_free_region_aligned(&mut self, size: usize, align: usize) -> ZxResult<usize> {
         self.sort_mappings();
-        let mut candidate = Self::align_up(self.base_addr, align);
+        let mut candidate = Self::align_up(self.base_addr, align).ok_or(ZxError::ErrNoMemory)?;
 
         for mapping in &self.mappings {
             if !mapping.valid {
                 continue;
             }
 
-            if candidate + size <= mapping.vaddr {
+            if object_logic::checked_end(candidate, size)
+                .filter(|end| *end <= mapping.vaddr)
+                .is_some()
+            {
                 return Ok(candidate);
             }
 
-            candidate = Self::align_up(mapping.vaddr + mapping.size, align);
+            let next = object_logic::checked_end(mapping.vaddr, mapping.size)
+                .ok_or(ZxError::ErrNoMemory)?;
+            candidate = Self::align_up(next, align).ok_or(ZxError::ErrNoMemory)?;
         }
 
-        if candidate + size <= self.base_addr + self.size {
+        if self.contains_range(candidate, size) {
             return Ok(candidate);
         }
 

@@ -7,6 +7,8 @@
 
 use core::ptr;
 
+use super::object_logic;
+
 /// Maximum number of concurrent threads
 pub const MAX_THREADS: usize = 16;
 
@@ -307,12 +309,12 @@ impl ThreadControlBlock {
 
     /// Check if thread is in a runnable state
     pub fn is_runnable(&self) -> bool {
-        self.state == ThreadState::Ready || self.state == ThreadState::Running
+        object_logic::thread_is_runnable(self.state, ThreadState::Ready, ThreadState::Running)
     }
 
     /// Check if thread is the idle thread
     pub fn is_idle(&self) -> bool {
-        self.id == ThreadId::IDLE
+        object_logic::thread_is_idle(self.id.0)
     }
 
     /// Print thread information to serial

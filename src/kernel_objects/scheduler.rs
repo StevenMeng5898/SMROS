@@ -5,6 +5,7 @@
 //! This module implements a preemptive Round-Robin scheduler for SMROS.
 //! It manages multiple threads and performs context switching on timer ticks.
 
+use crate::kernel_objects::object_logic;
 use crate::kernel_objects::thread::{
     SendPtr, ThreadControlBlock, ThreadId, ThreadStack, ThreadState, DEFAULT_STACK_SIZE,
     MAX_THREADS,
@@ -201,10 +202,14 @@ impl Scheduler {
         let current = self.current_thread.0;
 
         while attempts < MAX_THREADS {
-            let idx = (start + attempts) % MAX_THREADS;
+            let idx = object_logic::scheduler_candidate_index(start, attempts, MAX_THREADS);
 
             // Skip the current thread and idle thread (unless it's the only option)
-            if idx != current && idx != 0 && self.threads[idx].state == ThreadState::Ready {
+            if object_logic::scheduler_can_run(
+                idx,
+                current,
+                self.threads[idx].state == ThreadState::Ready,
+            ) {
                 self.next_thread = (idx + 1) % MAX_THREADS;
                 return Some(ThreadId(idx));
             }
@@ -228,12 +233,20 @@ impl Scheduler {
 
         // Find a thread that is bound to this CPU (or unbound)
         while attempts < MAX_THREADS {
-            let idx = (start + attempts) % MAX_THREADS;
+            let idx = object_logic::scheduler_candidate_index(start, attempts, MAX_THREADS);
 
-            if idx != current && idx != 0 && self.threads[idx].state == ThreadState::Ready {
+            if object_logic::scheduler_can_run(
+                idx,
+                current,
+                self.threads[idx].state == ThreadState::Ready,
+            ) {
                 let thread_cpu = self.threads[idx].cpu_affinity;
                 // Only schedule if thread is bound to this CPU or unbound
-                if thread_cpu.is_none() || thread_cpu == Some(cpu_id) {
+                if object_logic::scheduler_cpu_allowed(
+                    thread_cpu.is_some(),
+                    thread_cpu.unwrap_or(0),
+                    cpu_id,
+                ) {
                     self.next_thread = (idx + 1) % MAX_THREADS;
                     return Some(ThreadId(idx));
                 }
@@ -263,7 +276,7 @@ impl Scheduler {
     /// Check if preemption is needed
     pub fn should_preempt(&self) -> bool {
         if let Some(tcb) = self.get_thread(self.current_thread) {
-            tcb.time_slice == 0 && self.active_threads > 1
+            object_logic::scheduler_should_preempt(tcb.time_slice, self.active_threads)
         } else {
             false
         }

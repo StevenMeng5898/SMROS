@@ -16,6 +16,7 @@
 // Module declarations
 pub mod channel;
 pub mod handle;
+pub(crate) mod object_logic;
 pub mod scheduler;
 pub mod thread;
 pub mod types;

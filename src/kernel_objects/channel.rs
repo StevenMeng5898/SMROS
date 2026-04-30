@@ -16,6 +16,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use super::object_logic;
+
 /// Maximum message size for channels
 pub const MAX_CHANNEL_MSG_SIZE: usize = 65536;
 
@@ -112,11 +114,12 @@ impl Channel {
             return Err(ZxError::ErrPeerClosed);
         }
 
-        if data.len() > self.max_msg_size {
-            return Err(ZxError::ErrInvalidArgs);
-        }
-
-        if handles.len() > MAX_CHANNEL_MSG_HANDLES {
+        if !object_logic::channel_message_fits(
+            data.len(),
+            handles.len(),
+            self.max_msg_size,
+            MAX_CHANNEL_MSG_HANDLES,
+        ) {
             return Err(ZxError::ErrInvalidArgs);
         }
 
@@ -200,23 +203,18 @@ impl Channel {
 
     /// Get signal state (for wait operations)
     pub fn get_signal_state(&self, endpoint: HandleValue) -> u32 {
-        let mut signals = 0;
-
         let queue = if endpoint == self.handle0 {
             &self.queue0
         } else {
             &self.queue1
         };
 
-        if !queue.is_empty() {
-            signals |= CHANNEL_SIGNAL_READABLE;
-        }
-
-        if self.state == ChannelState::PeerClosed {
-            signals |= CHANNEL_SIGNAL_PEER_CLOSED;
-        }
-
-        signals
+        object_logic::channel_signal_state(
+            !queue.is_empty(),
+            self.state == ChannelState::PeerClosed,
+            CHANNEL_SIGNAL_READABLE,
+            CHANNEL_SIGNAL_PEER_CLOSED,
+        )
     }
 }
 

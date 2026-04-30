@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use super::types::*;
+use super::{object_logic, types::*};
 use crate::kernel_lowlevel::memory::PageFrameAllocator;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -61,8 +61,7 @@ impl Vmo {
     }
 
     fn checked_end(&self, offset: usize, len: usize) -> ZxResult<usize> {
-        offset
-            .checked_add(len)
+        object_logic::checked_end(offset, len)
             .filter(|end| *end <= self.size)
             .ok_or(ZxError::ErrOutOfRange)
     }
@@ -72,10 +71,9 @@ impl Vmo {
             return Ok(());
         }
 
-        self.checked_end(offset, len)?;
+        let end = self.checked_end(offset, len)?;
         let start_page = offset / crate::kernel_lowlevel::memory::PAGE_SIZE;
-        let end_page = (offset + len + crate::kernel_lowlevel::memory::PAGE_SIZE - 1)
-            / crate::kernel_lowlevel::memory::PAGE_SIZE;
+        let end_page = pages(end);
 
         if let Some(ref mut pfns) = self.pfns {
             for page in start_page..end_page {

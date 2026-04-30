@@ -3,7 +3,13 @@
 //! This module provides the interface between the assembly exception handler
 //! and the Rust syscall implementations.
 
-use crate::syscall::{dispatch_linux_syscall, SysError};
+use crate::syscall::{
+    dispatch_linux_syscall,
+    syscall_bridge::{
+        is_linux_syscall_number, linux_args_from_u64s, linux_sys_result_to_u64, sys_error_to_u64,
+    },
+    SysError,
+};
 
 /// Handle syscall from assembly exception handler
 ///
@@ -44,7 +50,7 @@ pub unsafe extern "C" fn handle_syscall() -> u64 {
     // Actually, this is getting too complex. Let me use a simpler approach:
     // Just return ENOSYS for now to show the mechanism works
 
-    -(SysError::ENOSYS as i32) as u64
+    sys_error_to_u64(SysError::ENOSYS)
 }
 
 /// Simple syscall handler that takes arguments directly
@@ -59,24 +65,14 @@ pub extern "C" fn handle_syscall_simple(
     arg4: u64,
     arg5: u64,
 ) -> u64 {
-    let args = [
-        arg0 as usize,
-        arg1 as usize,
-        arg2 as usize,
-        arg3 as usize,
-        arg4 as usize,
-        arg5 as usize,
-    ];
+    let args = linux_args_from_u64s(arg0, arg1, arg2, arg3, arg4, arg5);
 
-    let result = if syscall_num < 1000 {
+    let result = if is_linux_syscall_number(syscall_num) {
         // Linux syscall
-        match dispatch_linux_syscall(syscall_num as u32, args) {
-            Ok(val) => val as u64,
-            Err(err) => (-(err as i32)) as u64,
-        }
+        linux_sys_result_to_u64(dispatch_linux_syscall(syscall_num as u32, args))
     } else {
         // Zircon syscall (not yet fully implemented)
-        (-(SysError::ENOSYS as i32)) as u64
+        sys_error_to_u64(SysError::ENOSYS)
     };
 
     crate::user_level::user_test::record_el0_kernel_syscall_result(syscall_num as u32, result);

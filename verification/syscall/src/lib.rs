@@ -3,10 +3,19 @@ use vstd::prelude::*;
 verus! {
 
 include!("../../../src/syscall/address_logic_shared.rs");
+include!("../../../src/syscall/syscall_bridge_shared.rs");
 
 pub const PAGE_SIZE: usize = 4096;
 pub const LINUX_MAPPING_BASE: usize = 0x5000_0000;
 pub const LINUX_MAPPING_LIMIT: usize = 0x6000_0000;
+pub const SMROS_SYSCALL_LINUX_THRESHOLD_U64: u64 =
+    smros_syscall_linux_threshold_u64!();
+pub const SMROS_SAVED_REG_FRAME_BYTES: usize = smros_saved_reg_frame_bytes!();
+pub const SMROS_SAVED_REG_WORDS: usize = smros_saved_reg_words!();
+pub const SMROS_SAVED_REG_COUNT: usize = smros_saved_reg_count!();
+pub const SMROS_SYSCALL_NUMBER_REG_INDEX: usize = smros_syscall_number_reg_index!();
+pub const SMROS_SYSCALL_ARG_COUNT_LINUX: usize = smros_syscall_arg_count_linux!();
+pub const SMROS_SYSCALL_ARG_COUNT_ZIRCON: usize = smros_syscall_arg_count_zircon!();
 
 #[derive(Copy, Clone)]
 struct LinuxRange {
@@ -74,6 +83,30 @@ spec fn linux_range_available_spec(addr: int, len: int, mappings: Seq<LinuxRange
         LINUX_MAPPING_BASE as int,
         LINUX_MAPPING_LIMIT as int,
     ) && no_overlap_with_mappings_spec(addr, len, mappings)
+}
+
+spec fn linux_syscall_number_spec(syscall_num: int) -> bool {
+    0 <= syscall_num && syscall_num < SMROS_SYSCALL_LINUX_THRESHOLD_U64 as int
+}
+
+spec fn linux_errno_return_spec(errno: int) -> int {
+    if errno == 0 {
+        0
+    } else {
+        u64::MAX as int + 1 - errno
+    }
+}
+
+spec fn linux_sys_result_return_spec(is_ok: bool, value: int, errno: int) -> int {
+    if is_ok {
+        value
+    } else {
+        linux_errno_return_spec(errno)
+    }
+}
+
+spec fn saved_reg_arg_spec(regs: Seq<u64>, idx: int) -> int {
+    regs[idx] as int
 }
 
 fn checked_end(addr: usize, len: usize) -> (out: Option<usize>)
@@ -181,6 +214,63 @@ fn linux_range_available(addr: usize, len: usize, mappings: &Vec<LinuxRange>) ->
         && no_overlap_with_mappings(addr, len, mappings)
 }
 
+fn is_linux_syscall_number(syscall_num: u64) -> (out: bool)
+    ensures
+        out == linux_syscall_number_spec(syscall_num as int),
+{
+    smros_is_linux_syscall_number_u64_body!(syscall_num)
+}
+
+fn linux_errno_code_to_u64(errno: u32) -> (out: u64)
+    ensures
+        out as int == linux_errno_return_spec(errno as int),
+{
+    smros_linux_errno_to_u64_body!(errno)
+}
+
+fn linux_sys_result_to_u64_model(is_ok: bool, value: usize, errno: u32) -> (out: u64)
+    ensures
+        out as int == linux_sys_result_return_spec(is_ok, value as int, errno as int),
+{
+    if is_ok {
+        value as u64
+    } else {
+        linux_errno_code_to_u64(errno)
+    }
+}
+
+fn syscall_num_from_regs(regs: &Vec<u64>) -> (out: u64)
+    requires
+        regs.len() == SMROS_SAVED_REG_COUNT,
+    ensures
+        out == regs@[SMROS_SYSCALL_NUMBER_REG_INDEX as int],
+{
+    assert(SMROS_SYSCALL_NUMBER_REG_INDEX < regs.len());
+    smros_syscall_num_from_regs_body!(regs)
+}
+
+fn syscall_arg_from_reg(regs: &Vec<u64>, idx: usize) -> (out: usize)
+    requires
+        regs.len() == SMROS_SAVED_REG_COUNT,
+        idx < SMROS_SYSCALL_ARG_COUNT_ZIRCON,
+        regs@[idx as int] as int <= usize::MAX as int,
+    ensures
+        out as int == saved_reg_arg_spec(regs@, idx as int),
+{
+    assert(SMROS_SYSCALL_ARG_COUNT_ZIRCON <= SMROS_SAVED_REG_COUNT);
+    assert(idx < regs.len());
+    smros_syscall_arg_from_reg_body!(regs, idx)
+}
+
+fn syscall_arg_from_u64(arg: u64) -> (out: usize)
+    requires
+        arg as int <= usize::MAX as int,
+    ensures
+        out as int == arg as int,
+{
+    smros_syscall_arg_from_u64_body!(arg)
+}
+
 proof fn checked_end_spec_returns_sum_when_it_fits(addr: int, len: int)
     requires
         0 <= addr,
@@ -262,6 +352,28 @@ proof fn range_start_after_end_means_no_overlap(
     ensures
         !range_overlaps_spec(start_a, len_a, start_b, len_b),
 {
+}
+
+proof fn syscall_bridge_layout_matches_exception_frame()
+    ensures
+        SMROS_SAVED_REG_FRAME_BYTES == SMROS_SAVED_REG_COUNT * 8,
+        SMROS_SAVED_REG_WORDS == SMROS_SAVED_REG_COUNT,
+        SMROS_SYSCALL_ARG_COUNT_LINUX == 6,
+        SMROS_SYSCALL_ARG_COUNT_ZIRCON == 8,
+        SMROS_SYSCALL_ARG_COUNT_LINUX <= SMROS_SYSCALL_ARG_COUNT_ZIRCON,
+        SMROS_SYSCALL_ARG_COUNT_ZIRCON <= SMROS_SYSCALL_NUMBER_REG_INDEX,
+        SMROS_SYSCALL_NUMBER_REG_INDEX < SMROS_SAVED_REG_COUNT,
+{
+}
+
+proof fn syscall_bridge_route_smoke() {
+    assert(linux_syscall_number_spec(0));
+    assert(linux_syscall_number_spec(999));
+    assert(!linux_syscall_number_spec(1000));
+    assert(!linux_syscall_number_spec(u64::MAX as int));
+
+    assert(linux_errno_return_spec(0) == 0);
+    assert(linux_errno_return_spec(38) == u64::MAX as int + 1 - 38);
 }
 
 proof fn syscall_address_logic_smoke() {

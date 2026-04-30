@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use super::types::*;
+use super::{object_logic, types::*};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Handle entry in the handle table
@@ -86,7 +86,7 @@ impl HandleTable {
     pub fn duplicate(&mut self, handle: HandleValue, rights: u32) -> Option<HandleValue> {
         for i in 0..MAX_HANDLES_PER_PROCESS {
             if self.entries[i].valid && self.entries[i].handle == handle {
-                let new_rights = rights & self.entries[i].rights;
+                let new_rights = object_logic::intersect_rights(rights, self.entries[i].rights);
                 return self.add(self.entries[i].obj_type, new_rights);
             }
         }
