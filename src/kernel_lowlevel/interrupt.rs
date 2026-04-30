@@ -5,6 +5,8 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
+use super::lowlevel_logic;
+
 /// GICv2 Distributor Base Address (QEMU virt machine)
 const GICD_BASE: usize = 0x8000000;
 
@@ -41,16 +43,16 @@ pub const TIMER_IRQ: u32 = 30;
 fn write_reg(base: usize, offset: usize, value: u32) {
     // SAFETY: GICD_BASE and GICC_BASE are valid MMIO addresses defined by the
     // QEMU virt machine spec. Offsets are constants from the GICv2 TRM.
-    unsafe {
-        write_volatile((base + offset) as *mut u32, value);
-    }
+    let addr = lowlevel_logic::mmio_addr(base, offset).unwrap_or(base);
+    unsafe { write_volatile(addr as *mut u32, value) }
 }
 
 /// Read a GIC register (MMIO access)
 fn read_reg(base: usize, offset: usize) -> u32 {
     // SAFETY: GICD_BASE and GICC_BASE are valid MMIO addresses defined by the
     // QEMU virt machine spec. Offsets are constants from the GICv2 TRM.
-    unsafe { read_volatile((base + offset) as *const u32) }
+    let addr = lowlevel_logic::mmio_addr(base, offset).unwrap_or(base);
+    unsafe { read_volatile(addr as *const u32) }
 }
 
 /// Initialize the GICv2 interrupt controller
@@ -62,24 +64,22 @@ pub fn init() {
     write_reg(GICD_BASE, GICD_IGROUPR, 0x00000000);
 
     // Set priority for timer interrupt (PPI 30)
-    let priority_offset = GICD_IPRIORITYR + (TIMER_IRQ as usize / 4) * 4;
+    let priority_offset = lowlevel_logic::gic_reg_offset(GICD_IPRIORITYR, TIMER_IRQ, 4);
     let mut priorities = read_reg(GICD_BASE, priority_offset);
-    let byte_shift = (TIMER_IRQ % 4) as usize * 8;
-    priorities &= !(0xFF << byte_shift);
-    priorities |= (PRIORITY_HIGH as u32) << byte_shift;
+    let byte_shift = lowlevel_logic::gic_byte_shift(TIMER_IRQ);
+    priorities = lowlevel_logic::gic_set_byte_field(priorities, byte_shift, PRIORITY_HIGH);
     write_reg(GICD_BASE, priority_offset, priorities);
 
     // Set target CPU for PPIs (CPU0)
-    let target_offset = GICD_ITARGETSR + (TIMER_IRQ as usize / 4) * 4;
+    let target_offset = lowlevel_logic::gic_reg_offset(GICD_ITARGETSR, TIMER_IRQ, 4);
     let mut targets = read_reg(GICD_BASE, target_offset);
-    let byte_shift = (TIMER_IRQ % 4) as usize * 8;
-    targets &= !(0xFF << byte_shift);
-    targets |= 0x01 << byte_shift;
+    let byte_shift = lowlevel_logic::gic_byte_shift(TIMER_IRQ);
+    targets = lowlevel_logic::gic_set_byte_field(targets, byte_shift, 0x01);
     write_reg(GICD_BASE, target_offset, targets);
 
     // Enable the timer interrupt at distributor
-    let enable_offset = GICD_ISENABLER + (TIMER_IRQ as usize / 32) * 4;
-    let enable_bit = 1 << (TIMER_IRQ % 32);
+    let enable_offset = lowlevel_logic::gic_reg_offset(GICD_ISENABLER, TIMER_IRQ, 32);
+    let enable_bit = lowlevel_logic::gic_enable_bit(TIMER_IRQ);
     write_reg(GICD_BASE, enable_offset, enable_bit);
 
     // Enable the CPU interface
@@ -101,7 +101,7 @@ pub fn enable_timer_interrupt() {
 /// Acknowledge an interrupt and return the interrupt ID
 pub fn acknowledge_interrupt() -> u32 {
     let iar = read_reg(GICC_BASE, GICC_IAR);
-    iar & 0x3FF // Return interrupt ID (lower 10 bits)
+    lowlevel_logic::gic_interrupt_id(iar) // Return interrupt ID (lower 10 bits)
 }
 
 /// Signal end of interrupt

@@ -57,6 +57,8 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::lowlevel_logic;
+
 /// Page size: 4KB (standard ARM64 granule)
 pub const PAGE_SIZE: usize = 0x1000;
 
@@ -151,16 +153,13 @@ impl MemorySegment {
 
     /// Get segment size in bytes
     pub fn size(&self) -> usize {
-        self.page_count * PAGE_SIZE
+        lowlevel_logic::segment_size(self.page_count, PAGE_SIZE).unwrap_or(usize::MAX)
     }
 
     /// Get segment end address
     pub fn end_vaddr(&self) -> usize {
-        if self.valid {
-            self.base_vaddr + self.size()
-        } else {
-            0
-        }
+        lowlevel_logic::segment_end(self.valid, self.base_vaddr, self.page_count, PAGE_SIZE)
+            .unwrap_or(usize::MAX)
     }
 }
 
@@ -285,7 +284,13 @@ impl ProcessAddressSpace {
             return false;
         }
 
-        if page_count == 0 || self.valid_page_count + page_count > MAX_PAGES_PER_PROCESS {
+        if !lowlevel_logic::memory_capacity_ok(
+            self.valid_segment_count,
+            page_count,
+            self.valid_page_count,
+            MAX_SEGMENTS,
+            MAX_PAGES_PER_PROCESS,
+        ) {
             return false;
         }
 
@@ -297,10 +302,16 @@ impl ProcessAddressSpace {
                 self.pages[page_idx] = PageEntry {
                     pfn,
                     valid: true,
-                    writable: permissions == SegmentPermission::ReadWrite
-                        || permissions == SegmentPermission::Write,
-                    executable: permissions == SegmentPermission::ReadExecute
-                        || permissions == SegmentPermission::Execute,
+                    writable: lowlevel_logic::permission_writable(
+                        permissions,
+                        SegmentPermission::Write,
+                        SegmentPermission::ReadWrite,
+                    ),
+                    executable: lowlevel_logic::permission_executable(
+                        permissions,
+                        SegmentPermission::Execute,
+                        SegmentPermission::ReadExecute,
+                    ),
                     user_accessible: true,
                 };
             } else {
@@ -334,46 +345,34 @@ impl ProcessAddressSpace {
 
     /// Allocate heap memory (grow heap upward)
     pub fn heap_alloc(&mut self, size: usize) -> Option<usize> {
-        // Align to page boundary
-        let aligned_size = (size + PAGE_SIZE - 1) & PAGE_MASK;
-
-        if self.heap_current + aligned_size > self.heap_max {
-            return None;
-        }
-
-        let addr = self.heap_current;
-        self.heap_current += aligned_size;
+        let (addr, next) =
+            lowlevel_logic::heap_alloc(self.heap_current, self.heap_max, size, PAGE_SIZE)?;
+        self.heap_current = next;
         Some(addr)
     }
 
     /// Allocate stack space (grow stack downward)
     pub fn stack_alloc(&mut self, size: usize) -> Option<usize> {
-        // Align to page boundary
-        let aligned_size = (size + PAGE_SIZE - 1) & PAGE_MASK;
-
-        if self.stack_current < aligned_size {
-            return None;
-        }
-
-        self.stack_current -= aligned_size;
+        self.stack_current = lowlevel_logic::stack_alloc(self.stack_current, size, PAGE_SIZE)?;
         Some(self.stack_current)
     }
 
     /// Get virtual address for a page index
     pub fn page_to_vaddr(&self, page_idx: usize) -> Option<usize> {
-        if page_idx >= self.valid_page_count {
-            return None;
-        }
-
-        // Simple linear mapping: page_idx * PAGE_SIZE
-        Some(page_idx * PAGE_SIZE)
+        lowlevel_logic::page_to_vaddr(page_idx, self.valid_page_count, PAGE_SIZE)
     }
 
     /// Find segment containing a virtual address
     pub fn find_segment_for_vaddr(&self, vaddr: usize) -> Option<&MemorySegment> {
         for i in 0..self.valid_segment_count {
             let seg = &self.segments[i];
-            if seg.valid && vaddr >= seg.base_vaddr && vaddr < seg.end_vaddr() {
+            if lowlevel_logic::segment_contains(
+                seg.valid,
+                seg.base_vaddr,
+                seg.page_count,
+                PAGE_SIZE,
+                vaddr,
+            ) {
                 return Some(seg);
             }
         }
@@ -556,14 +555,14 @@ impl PageFrameAllocator {
 
     /// Free a page frame
     pub fn free(pfn: u64) {
-        if pfn as usize >= 4096 {
+        if !lowlevel_logic::pfn_valid(pfn, 4096) {
             return;
         }
 
         let allocator = unsafe { &mut *ALLOCATOR.get() };
-        let i = (pfn as usize) / 64;
-        let bit = (pfn as usize) % 64;
-        let mask = 1u64 << bit;
+        let i = lowlevel_logic::bitmap_word_index(pfn);
+        let bit = lowlevel_logic::bitmap_bit_index(pfn);
+        let mask = lowlevel_logic::bitmap_mask(bit);
 
         if allocator.bitmap[i] & mask != 0 {
             allocator.bitmap[i] &= !mask;
@@ -654,7 +653,7 @@ impl ProcessManager {
 
     /// Get a process by index
     pub fn get_process(&self, index: usize) -> Option<&ProcessControlBlock> {
-        if index < MAX_PROCESSES {
+        if lowlevel_logic::process_index_valid(index, MAX_PROCESSES) {
             Some(&self.processes[index])
         } else {
             None
@@ -663,7 +662,7 @@ impl ProcessManager {
 
     /// Get a mutable reference to a process by index
     pub fn get_process_mut(&mut self, index: usize) -> Option<&mut ProcessControlBlock> {
-        if index < MAX_PROCESSES {
+        if lowlevel_logic::process_index_valid(index, MAX_PROCESSES) {
             Some(&mut self.processes[index])
         } else {
             None

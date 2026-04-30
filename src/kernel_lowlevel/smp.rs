@@ -7,6 +7,8 @@
 use crate::kernel_lowlevel::serial::Serial;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use super::lowlevel_logic;
+
 /// Maximum number of CPUs supported
 pub const MAX_CPUS: usize = 4;
 
@@ -117,7 +119,7 @@ pub fn read_mpidr() -> u64 {
 /// Get the current CPU ID (from MPIDR affinity level 0)
 pub fn current_cpu_id() -> u32 {
     let mpidr = read_mpidr();
-    (mpidr & 0xFF) as u32
+    lowlevel_logic::cpu_id_from_mpidr(mpidr)
 }
 
 /// Check if we're running on the boot CPU (CPU0)
@@ -156,7 +158,7 @@ fn psci_cpu_on(target_cpu: u64, entry_point: u64, context_id: u64) -> i64 {
 /// * `cpu_id` - CPU ID (0-3 for QEMU virt)
 /// * `stack_ptr` - Stack pointer for the new CPU
 pub fn boot_secondary_cpu(cpu_id: u32, stack_ptr: u64) -> Result<(), &'static str> {
-    if cpu_id >= MAX_CPUS as u32 {
+    if !lowlevel_logic::valid_cpu_id(cpu_id, MAX_CPUS) {
         return Err("Invalid CPU ID");
     }
 
@@ -173,7 +175,7 @@ pub fn boot_secondary_cpu(cpu_id: u32, stack_ptr: u64) -> Result<(), &'static st
     let result = psci_cpu_on(target_mpidr, entry_point, stack_ptr);
 
     // For display purposes, add the U bit
-    let display_mpidr = 0x80000000 | (cpu_id as u64);
+    let display_mpidr = lowlevel_logic::display_mpidr(cpu_id);
 
     // Debug: print PSCI result
     let mut serial = Serial::new();
@@ -182,15 +184,14 @@ pub fn boot_secondary_cpu(cpu_id: u32, stack_ptr: u64) -> Result<(), &'static st
     print_number(&mut serial, cpu_id);
     serial.write_str(" PSCI result: 0x");
     // Print result in hex
-    let hex_chars = b"0123456789abcdef";
     for i in 0..16 {
-        let nibble = ((result as u64) >> (60 - i * 4)) & 0xF;
-        serial.write_byte(hex_chars[nibble as usize]);
+        let nibble = (((result as u64) >> (60 - i * 4)) & 0xF) as u8;
+        serial.write_byte(lowlevel_logic::hex_digit(nibble));
     }
     serial.write_str("\n");
 
     match result {
-        PSCI_RET_SUCCESS | PSCI_RET_ON_PENDING => {
+        result if lowlevel_logic::psci_success(result, PSCI_RET_SUCCESS, PSCI_RET_ON_PENDING) => {
             // Update CPU state
             let per_cpu = unsafe { &mut *per_cpu_mut() };
             per_cpu.cpu_info[cpu_id as usize].cpu_id = cpu_id;
@@ -294,7 +295,7 @@ pub fn boot_all_cpus() {
     for i in 0..MAX_CPUS {
         per_cpu.cpu_info[i].cpu_id = i as u32;
         per_cpu.cpu_info[i].state = CpuState::Online;
-        per_cpu.cpu_info[i].mpidr = 0x80000000 | (i as u64);
+        per_cpu.cpu_info[i].mpidr = lowlevel_logic::display_mpidr(i as u32);
     }
     per_cpu
         .online_count
@@ -306,7 +307,7 @@ pub fn boot_all_cpus() {
 /// Mark the current CPU as online (called from secondary CPU entry)
 pub fn mark_cpu_online() {
     let cpu_id = current_cpu_id();
-    if cpu_id < MAX_CPUS as u32 {
+    if lowlevel_logic::valid_cpu_id(cpu_id, MAX_CPUS) {
         let per_cpu = unsafe { &mut *per_cpu_mut() };
         per_cpu.cpu_info[cpu_id as usize].state = CpuState::Online;
         let count = per_cpu.online_count.fetch_add(1, Ordering::Relaxed) + 1;

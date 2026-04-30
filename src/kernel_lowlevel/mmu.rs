@@ -12,6 +12,8 @@
 use crate::kernel_lowlevel::memory::{PageFrameAllocator, PAGE_SIZE};
 use alloc::vec::Vec;
 
+use super::lowlevel_logic;
+
 // Page table entry flags
 bitflags::bitflags! {
     pub struct PageAttr: u64 {
@@ -78,64 +80,40 @@ impl PageTableEntry {
     }
 
     pub fn set_valid(&mut self, valid: bool) {
-        if valid {
-            self.value |= 1;
-        } else {
-            self.value &= !1;
-        }
+        self.value = lowlevel_logic::pte_set_flag(self.value, 1, valid);
     }
 
     pub fn set_block(&mut self, block: bool) {
-        if block {
-            self.value |= 1 << 1;
-        } else {
-            self.value &= !(1 << 1);
-        }
+        self.value = lowlevel_logic::pte_set_flag(self.value, 1 << 1, block);
     }
 
     pub fn set_ap_el0(&mut self, allow: bool) {
-        if allow {
-            self.value |= 1 << 6;
-        } else {
-            self.value &= !(1 << 6);
-        }
+        self.value = lowlevel_logic::pte_set_flag(self.value, 1 << 6, allow);
     }
 
     pub fn set_ap_read_only(&mut self, read_only: bool) {
-        if read_only {
-            self.value |= 1 << 7;
-        } else {
-            self.value &= !(1 << 7);
-        }
+        self.value = lowlevel_logic::pte_set_flag(self.value, 1 << 7, read_only);
     }
 
     pub fn set_xn(&mut self, execute_never: bool) {
-        if execute_never {
-            self.value |= 1 << 54;
-        } else {
-            self.value &= !(1 << 54);
-        }
+        self.value = lowlevel_logic::pte_set_flag(self.value, 1 << 54, execute_never);
     }
 
     pub fn set_pxn(&mut self, privileged_execute_never: bool) {
-        if privileged_execute_never {
-            self.value |= 1 << 53;
-        } else {
-            self.value &= !(1 << 53);
-        }
+        self.value = lowlevel_logic::pte_set_flag(self.value, 1 << 53, privileged_execute_never);
     }
 
     pub fn set_output_address(&mut self, paddr: u64) {
         // Output address is bits [47:12] for level 3
-        self.value = (self.value & 0xFFF) | (paddr & 0x0000_FFFF_FFFF_F000);
+        self.value = lowlevel_logic::pte_set_output_address(self.value, paddr);
     }
 
     pub fn get_output_address(&self) -> u64 {
-        self.value & 0x0000_FFFF_FFFF_F000
+        lowlevel_logic::pte_output_address(self.value)
     }
 
     pub fn is_table(&self) -> bool {
-        self.is_valid() && !self.is_block()
+        lowlevel_logic::pte_table(self.value)
     }
 
     pub fn is_block(&self) -> bool {
@@ -143,7 +121,7 @@ impl PageTableEntry {
     }
 
     pub fn set_attr_idx(&mut self, idx: u64) {
-        self.value = (self.value & !0x1C) | ((idx << 2) & 0x1C);
+        self.value = lowlevel_logic::pte_attr_idx(self.value, idx);
     }
 
     pub fn set_af(&mut self) {
@@ -151,7 +129,7 @@ impl PageTableEntry {
     }
 
     pub fn set_sh(&mut self, sharability: u64) {
-        self.value = (self.value & !0x300) | ((sharability << 8) & 0x300);
+        self.value = lowlevel_logic::pte_sh(self.value, sharability);
     }
 }
 
@@ -196,7 +174,7 @@ impl Vma {
     }
 
     pub fn size(&self) -> usize {
-        self.end - self.start
+        lowlevel_logic::vma_size(self.start, self.end)
     }
 }
 
@@ -342,7 +320,7 @@ impl PageTableManager {
     fn walk_page_tables_ttbr0(&mut self, vaddr: usize) -> *mut PageTableEntry {
         // For simplicity, we use a single-level table with 1MB block mappings
         // In a real kernel, you'd walk all 4 levels
-        let idx = (vaddr >> 21) & (PT_ENTRIES - 1); // 2MB blocks
+        let idx = lowlevel_logic::pt_index(vaddr, PT_ENTRIES); // 2MB blocks
 
         if idx >= PT_ENTRIES {
             return core::ptr::null_mut();
@@ -353,7 +331,7 @@ impl PageTableManager {
 
     /// Walk page tables for TTBR1 (kernel space)
     fn walk_page_tables_ttbr1(&mut self, vaddr: usize) -> *mut PageTableEntry {
-        let idx = ((vaddr >> 21) & (PT_ENTRIES - 1)) as usize;
+        let idx = lowlevel_logic::pt_index(vaddr, PT_ENTRIES);
 
         if idx >= PT_ENTRIES {
             return core::ptr::null_mut();

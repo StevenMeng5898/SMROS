@@ -6,6 +6,8 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::lowlevel_logic;
+
 /// ARM Generic Timer registers (Physical Timer)
 const CNTFRQ_EL0: usize = 0xFD80; // Counter-timer Frequency Register
 const CNTPCT_EL0: usize = 0xFD40; // Counter-timer Physical Count Register
@@ -84,7 +86,7 @@ pub fn init() {
     TIMER_FREQUENCY.store(freq, Ordering::Relaxed);
 
     // Set tick period for 10ms (100Hz scheduler tick)
-    let tick_period = freq / 100;
+    let tick_period = lowlevel_logic::timer_period(freq);
     TICK_PERIOD.store(tick_period, Ordering::Relaxed);
 
     // Disable timer during setup
@@ -92,11 +94,11 @@ pub fn init() {
 
     // Set the timer to fire after TICK_PERIOD counts
     let current_count = read_cntpct_el0();
-    let compare_value = current_count.wrapping_add(tick_period);
+    let compare_value = lowlevel_logic::timer_compare(current_count, tick_period);
     write_cntp_cval_el0(compare_value);
 
     // Enable timer with interrupt unmasked
-    write_cntp_ctl_el0(CNTP_CTL_ENABLE | CNTP_CTL_IMASK);
+    write_cntp_ctl_el0(lowlevel_logic::timer_ctl(CNTP_CTL_ENABLE, CNTP_CTL_IMASK));
 }
 
 /// Get the timer frequency
@@ -107,17 +109,14 @@ pub fn get_frequency() -> u64 {
 /// Get the current tick count
 pub fn get_tick_count() -> u64 {
     let period = TICK_PERIOD.load(Ordering::Relaxed);
-    if period == 0 {
-        return 0;
-    }
-    read_cntpct_el0() / period
+    lowlevel_logic::timer_tick_count(read_cntpct_el0(), period)
 }
 
 /// Arm the timer for the next tick
 pub fn arm_next_tick() {
     let period = TICK_PERIOD.load(Ordering::Relaxed);
     let current_count = read_cntpct_el0();
-    let compare_value = current_count.wrapping_add(period);
+    let compare_value = lowlevel_logic::timer_compare(current_count, period);
     write_cntp_cval_el0(compare_value);
 }
 

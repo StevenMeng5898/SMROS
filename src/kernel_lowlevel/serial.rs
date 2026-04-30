@@ -6,6 +6,8 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
+use super::lowlevel_logic;
+
 /// PL011 UART Base Address for QEMU virt machine
 const UART_BASE: usize = 0x9000000;
 
@@ -53,19 +55,22 @@ impl Serial {
         self.write_reg(UART_FBRD, 2);
 
         // Set line control: 8-bit word, FIFO enabled
-        self.write_reg(UART_LCRH, LCRH_WLEN_8 | LCRH_FEN);
+        self.write_reg(UART_LCRH, lowlevel_logic::uart_lcrh(LCRH_WLEN_8, LCRH_FEN));
 
         // Clear any pending interrupts
         self.write_reg(UART_ICR, 0x7FF);
 
         // Enable UART, TX, and RX
-        self.write_reg(UART_CR, CR_UARTEN | CR_TXE | CR_RXE);
+        self.write_reg(
+            UART_CR,
+            lowlevel_logic::uart_control(CR_UARTEN, CR_TXE, CR_RXE),
+        );
     }
 
     /// Write a byte to the serial port
     pub fn write_byte(&mut self, byte: u8) {
         // Wait until TX FIFO is not full
-        while (self.read_reg(UART_FR) & FR_TXFF) != 0 {
+        while !lowlevel_logic::uart_tx_ready(self.read_reg(UART_FR), FR_TXFF) {
             core::hint::spin_loop();
         }
 
@@ -127,7 +132,7 @@ impl Serial {
 
     /// Check if a byte is available (non-blocking)
     pub fn has_byte(&mut self) -> bool {
-        (self.read_reg(UART_FR) & FR_RXFE) == 0
+        lowlevel_logic::uart_has_byte(self.read_reg(UART_FR), FR_RXFE)
     }
 
     /// Read a line of input with basic editing support
@@ -179,7 +184,7 @@ impl Serial {
                 }
                 _ => {
                     // Regular character
-                    if pos < buf.len() - 1 && ch >= 0x20 && ch <= 0x7E {
+                    if pos < buf.len() - 1 && lowlevel_logic::ascii_printable(ch) {
                         buf[pos] = ch;
                         pos += 1;
                         self.write_byte(ch);
@@ -203,13 +208,15 @@ impl Serial {
     fn read_reg(&self, offset: usize) -> u32 {
         // SAFETY: `self.base` is UART_BASE (0x9000000), a valid MMIO address
         // defined by the QEMU virt machine spec. `offset` is a known constant.
-        unsafe { read_volatile((self.base + offset) as *const u32) }
+        let addr = lowlevel_logic::mmio_addr(self.base, offset).unwrap_or(self.base);
+        unsafe { read_volatile(addr as *const u32) }
     }
 
     /// Write a register (safe wrapper around volatile write)
     fn write_reg(&self, offset: usize, value: u32) {
         // SAFETY: `self.base` is UART_BASE (0x9000000), a valid MMIO address
         // defined by the QEMU virt machine spec. `offset` is a known constant.
-        unsafe { write_volatile((self.base + offset) as *mut u32, value) }
+        let addr = lowlevel_logic::mmio_addr(self.base, offset).unwrap_or(self.base);
+        unsafe { write_volatile(addr as *mut u32, value) }
     }
 }

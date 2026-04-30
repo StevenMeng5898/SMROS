@@ -6,10 +6,13 @@ The current verified slice is the standalone proof file at `verification/syscall
 
 `verification/kernel_objects/src/lib.rs` verifies pure helper logic and modeled state transitions for every `src/kernel_objects/` file: shared types/page rounding, handle lookup/rights masking, VMO range checks, VMAR range availability, channel limits/signals, thread state predicates, scheduler selection, and the no-algorithm module wiring in `mod.rs`.
 
+`verification/kernel_lowlevel/src/lib.rs` verifies pure helper logic for every `src/kernel_lowlevel/` Rust file: memory segment/page arithmetic, process lookup predicates, bitmap allocator indexing, page-table-entry bit updates, UART/GIC/timer register computations, SMP CPU-id/PSCI predicates, and the no-algorithm driver/module wiring.
+
 Commands:
 
 - `make verus-setup`
 - `make verus-syscall`
 - `make verus-kernel-objects`
+- `make verus-kernel-lowlevel`
 
-The setup script downloads the pinned Verus release into `/.tools/verus/current` and installs the Rust toolchain requested by that Verus release.
+The setup script downloads the pinned Verus release into `.tools/verus/current` and installs the Rust toolchain requested by that Verus release.

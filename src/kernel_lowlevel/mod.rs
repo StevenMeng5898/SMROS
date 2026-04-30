@@ -13,6 +13,7 @@
 
 pub mod drivers;
 pub mod interrupt;
+pub(crate) mod lowlevel_logic;
 pub mod memory;
 pub mod mmu;
 pub mod serial;

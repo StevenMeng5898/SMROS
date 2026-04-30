@@ -5,7 +5,7 @@ TARGET = $(ARCH)
 KERNEL = kernel8.img
 BUILD_DIR = target/$(TARGET)/release
 
-.PHONY: all build run clean debug help verus-setup verus-syscall verus-kernel-objects
+.PHONY: all build run clean debug help verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel
 
 all: build
 
@@ -78,6 +78,10 @@ verus-syscall:
 verus-kernel-objects:
 	@./scripts/verify-kernel-objects-verus.sh
 
+# Verify the kernel low-level proof harness with Verus
+verus-kernel-lowlevel:
+	@./scripts/verify-kernel-lowlevel-verus.sh
+
 # Show help
 help:
 	@echo "SMROS ARM64 Kernel Makefile"
@@ -92,6 +96,7 @@ help:
 	@echo "  verus-setup   - Install the pinned Verus toolchain locally"
 	@echo "  verus-syscall - Verify the syscall proof harness with Verus"
 	@echo "  verus-kernel-objects - Verify the kernel object proof harness with Verus"
+	@echo "  verus-kernel-lowlevel - Verify the kernel low-level proof harness with Verus"
 	@echo "  help      - Show this help message"
 	@echo ""
 	@echo "Usage:"
