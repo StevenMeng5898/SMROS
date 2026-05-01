@@ -230,14 +230,14 @@ There are multiple syscall helper files under `src/syscall/`, but the path used 
 ```text
 exception_handler in src/main.rs
   -> handle_syscall_simple()
-  -> dispatch_linux_syscall()
+  -> dispatch_linux_syscall() or dispatch_zircon_syscall()
   -> concrete sys_* implementation
 ```
 
 Important consequences:
 
-- the active `svc` bridge is Linux-style only
-- syscall numbers `>= 1000` still return `ENOSYS` in the live SVC path
+- syscall numbers below `1000` use the Linux dispatch table
+- syscall numbers from `1000` through `1000 + u32::MAX` use the Zircon dispatch table after subtracting `1000`
 - `handle_svc_exception_from_el0()` exists, but is not the handler used by the current assembly
 - `sys_exit()` has a special boot-test hook through `prepare_el0_test_kernel_return()`
 
@@ -273,4 +273,4 @@ A normal QEMU boot currently prints these milestones before reaching the prompt:
 - The shell is still an EL1 scheduler thread despite the "User-Mode Shell" banner.
 - The boot-time EL0 test validates syscall transition mechanics, but not a fully isolated user address space.
 - The active exception path bypasses the more elaborate `handle_svc_exception_from_el0()` helper.
-- The live SVC path still only routes Linux-style syscall numbers.
+- Zircon calls are routed through the live SVC path, but process/thread ownership and handle rights are still simplified kernel-side models.

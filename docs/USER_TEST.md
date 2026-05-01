@@ -13,8 +13,8 @@ This document explains what the current user test code actually validates.
 
 The tree currently contains both:
 
-1. an active boot-time smoke test
-2. future-facing EL0 test entry points
+1. an active boot-time EL0 syscall smoke test
+2. additional shell-level syscall smoke tests
 
 Those are not the same thing.
 
@@ -29,15 +29,17 @@ crate::user_level::user_test::run_user_test();
 `run_user_test()` currently:
 
 - prints `[EL0]`-prefixed log lines
-- directly calls `sys_getpid()`
-- directly calls `sys_mmap()`
-- prints TODO steps for real EL0 bring-up
+- prepares a small EL0 stack
+- drops into EL0 with `switch_to_el0()`
+- runs `user_test_process_entry()`
+- issues Linux-style `svc #0` calls for `write`, `getpid`, `mmap`, and `exit`
+- resumes at `el0_test_resume()` and validates the EL0-observed and EL1-observed syscall results
 
-This means the current boot-time test is a kernel-mode smoke test of syscall functions, not a real EL0-to-EL1 trap path.
+This means the current boot-time test now validates the real EL0-to-EL1 syscall trap path. It still uses a lightweight `ttbr0 = 0` setup, so it is not yet a fully isolated userspace process.
 
-## Future-Facing EL0 Helpers
+## EL0 Helpers
 
-`src/user_level/user_test.rs` also contains:
+`src/user_level/user_test.rs` contains:
 
 - `linux_syscall()`
 - `test_getpid()`
@@ -47,26 +49,25 @@ This means the current boot-time test is a kernel-mode smoke test of syscall fun
 - `user_test_process_entry()`
 - `user_busy_loop_entry()`
 
-These helpers are intended for a future boot path that actually drops into EL0.
+These helpers back the active boot-time EL0 test and remain useful for expanding the EL0 coverage.
 
 ## What The Current Boot Test Proves
 
 Today the active test proves:
 
-- the syscall module is linked and callable
-- `sys_getpid()` returns a sensible placeholder result
-- `sys_mmap()` returns an address-like success result
+- the active exception vector can enter EL1 from EL0 via `svc #0`
+- Linux syscall numbers for `write`, `getpid`, `mmap`, and `exit` route through `handle_syscall_simple()`
+- syscall results are observed consistently by the EL0 code and the EL1 validation hook
 - boot continues into shell startup afterward
 
 ## What The Current Boot Test Does Not Prove
 
 Today the active test does not prove:
 
-- real EL0 execution
-- real `svc` exception entry from a user process
-- correct `eret` return to EL0
-- stable Linux ABI numbering
-- Zircon syscall reachability through the active exception vectors
+- fully isolated user page tables
+- a real per-process userspace address space
+- a complete Linux ABI
+- a complete Zircon ABI
 - complete user-space memory isolation
 
 ## The Shell's `testsc` Command
@@ -76,8 +77,8 @@ The shell exposes a `testsc` command that acts as an additional smoke test.
 It currently:
 
 - performs a lightweight write-style syscall helper call
-- directly calls `sys_getpid()`
-- directly calls `sys_mmap()`
+- directly exercises Linux process/time and memory syscall helpers
+- directly exercises Zircon VMO/VMAR, handle/object, channel, process/thread, wait/signal, and clock helpers
 
 Treat it as a developer smoke test, not as a full syscall compliance suite.
 
@@ -88,12 +89,12 @@ The prefixes in `run_user_test()` reflect the intended direction of the project,
 As the code stands today:
 
 - the kernel initializes user-process scaffolding
-- the test harness remains in EL1
+- the boot-time syscall test executes in EL0
 - the shell remains in EL1
 
-## What Is Needed For A Real EL0 Test
+## What Is Needed For A Full EL0 Process
 
-To convert the current scaffolding into a real user-mode test path, the kernel still needs to:
+To convert the current smoke test into a fully isolated user process, the kernel still needs to:
 
 1. build or place executable user code into a user mapping
 2. create a real `UserProcess`
@@ -106,7 +107,7 @@ To convert the current scaffolding into a real user-mode test path, the kernel s
 
 The current user test code is useful, but it should be described accurately:
 
-- active test path: kernel-mode smoke test
-- inactive but present scaffolding: future EL0 syscall test path
+- active boot path: real EL0 syscall smoke test with lightweight address-space setup
+- shell `testsc`: broader EL1 developer smoke test for syscall helper behavior
 
 That distinction matters when evaluating boot logs or shell output.

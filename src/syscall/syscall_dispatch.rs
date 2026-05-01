@@ -4,11 +4,12 @@
 //! and the Rust syscall implementations.
 
 use crate::syscall::{
-    dispatch_linux_syscall,
+    dispatch_linux_syscall, dispatch_zircon_syscall,
     syscall_bridge::{
         is_linux_syscall_number, linux_args_from_u64s, linux_sys_result_to_u64, sys_error_to_u64,
     },
-    SysError,
+    syscall_logic::{is_zircon_syscall_number, zircon_syscall_from_raw},
+    SysError, ZxError,
 };
 
 /// Handle syscall from assembly exception handler
@@ -70,11 +71,20 @@ pub extern "C" fn handle_syscall_simple(
     let result = if is_linux_syscall_number(syscall_num) {
         // Linux syscall
         linux_sys_result_to_u64(dispatch_linux_syscall(syscall_num as u32, args))
+    } else if is_zircon_syscall_number(syscall_num) {
+        let zircon_args = [args[0], args[1], args[2], args[3], args[4], args[5], 0, 0];
+        match dispatch_zircon_syscall(zircon_syscall_from_raw(syscall_num), zircon_args) {
+            Ok(value) => value as u64,
+            Err(err) => zircon_error_to_u64(err),
+        }
     } else {
-        // Zircon syscall (not yet fully implemented)
         sys_error_to_u64(SysError::ENOSYS)
     };
 
     crate::user_level::user_test::record_el0_kernel_syscall_result(syscall_num as u32, result);
     result
+}
+
+fn zircon_error_to_u64(err: ZxError) -> u64 {
+    err as i32 as i64 as u64
 }

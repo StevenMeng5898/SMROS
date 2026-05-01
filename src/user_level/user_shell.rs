@@ -302,6 +302,39 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         }
     }
 
+    // Test 2b: Linux process and time syscalls
+    ctx.serial
+        .write_str("[TEST] Testing Linux process/time syscalls... ");
+    let exec_path = b"/bin/smros-test\0";
+    let mut wait_status = 1i32;
+    #[repr(C)]
+    struct ShellTimespec {
+        tv_sec: i64,
+        tv_nsec: i64,
+    }
+    let mut now = ShellTimespec {
+        tv_sec: -1,
+        tv_nsec: -1,
+    };
+    let sleep_req = ShellTimespec {
+        tv_sec: 0,
+        tv_nsec: 1,
+    };
+    if crate::syscall::sys_getppid().is_err()
+        || crate::syscall::sys_gettid().is_err()
+        || crate::syscall::sys_execve(exec_path.as_ptr() as usize, 0, 0).is_err()
+        || crate::syscall::sys_wait4(0, &mut wait_status as *mut i32 as usize, 0).is_err()
+        || wait_status != 0
+        || crate::syscall::sys_clock_gettime(1, &mut now as *mut ShellTimespec as usize).is_err()
+        || now.tv_sec < 0
+        || now.tv_nsec < 0
+        || crate::syscall::sys_nanosleep_linux(&sleep_req as *const ShellTimespec as usize).is_err()
+    {
+        ctx.serial.write_str("[FAIL] process/time path failed\n");
+        return;
+    }
+    ctx.serial.write_str("[OK] process/time calls returned\n");
+
     // Test 3: Linux brk syscall
     ctx.serial.write_str("[TEST] Testing brk syscall... ");
     let brk_base = match crate::syscall::sys_brk(0) {
@@ -574,6 +607,146 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     ctx.serial.write_str(", child=0x");
     print_hex(&mut ctx.serial, child_vmar as u64);
     ctx.serial.write_str("\n");
+
+    ctx.serial
+        .write_str("[TEST] Testing Zircon handle/object calls... ");
+    let mut dup_handle = 0u32;
+    let mut info_value = 0u64;
+    let mut actual_size = 0usize;
+    let mut property_value = 0x534d_524f_5359_5343u64;
+    let mut property_readback = 0u64;
+    if crate::syscall::sys_handle_duplicate(vmo_handle, 0, &mut dup_handle).is_err()
+        || dup_handle != vmo_handle
+        || crate::syscall::sys_object_get_info(
+            vmo_handle,
+            0,
+            &mut info_value as *mut u64 as usize,
+            core::mem::size_of::<u64>(),
+            &mut actual_size,
+        )
+        .is_err()
+        || actual_size != core::mem::size_of::<u64>()
+        || crate::syscall::sys_object_set_property(
+            vmo_handle,
+            0,
+            &mut property_value as *mut u64 as usize,
+            core::mem::size_of::<u64>(),
+        )
+        .is_err()
+        || crate::syscall::sys_object_get_property(
+            vmo_handle,
+            0,
+            &mut property_readback as *mut u64 as usize,
+            core::mem::size_of::<u64>(),
+        )
+        .is_err()
+        || property_readback != property_value
+    {
+        ctx.serial
+            .write_str("[FAIL] handle/object metadata failed\n");
+        return;
+    }
+    ctx.serial
+        .write_str("[OK] metadata and property calls returned\n");
+
+    ctx.serial
+        .write_str("[TEST] Testing Zircon channel IPC calls... ");
+    let mut channel0 = 0u32;
+    let mut channel1 = 0u32;
+    let channel_payload = b"ipc-ok";
+    let mut channel_readback = [0u8; 6];
+    let mut actual_bytes = 0usize;
+    let mut actual_handles = 0usize;
+    if crate::syscall::sys_channel_create(0, &mut channel0, &mut channel1).is_err()
+        || crate::syscall::sys_channel_write(
+            channel0,
+            0,
+            channel_payload.as_ptr() as usize,
+            channel_payload.len(),
+            0,
+            0,
+        )
+        .is_err()
+        || crate::syscall::sys_channel_read(
+            channel1,
+            0,
+            channel_readback.as_mut_ptr() as usize,
+            channel_readback.len(),
+            0,
+            0,
+            &mut actual_bytes,
+            &mut actual_handles,
+        )
+        .is_err()
+        || actual_bytes != channel_payload.len()
+        || actual_handles != 0
+        || channel_readback != *channel_payload
+        || crate::syscall::sys_handle_close(channel0).is_err()
+    {
+        ctx.serial.write_str("[FAIL] channel IPC failed\n");
+        return;
+    }
+    ctx.serial.write_str("[OK] channel message round-tripped\n");
+
+    ctx.serial
+        .write_str("[TEST] Testing Zircon process/thread/wait calls... ");
+    #[repr(C)]
+    struct ShellWaitItem {
+        handle: u32,
+        waitfor: u32,
+        pending: u32,
+    }
+    const TEST_SIGNAL: u32 = 1 << 24;
+    let mut proc_handle = 0u32;
+    let mut proc_vmar = 0u32;
+    let mut thread_handle = 0u32;
+    let mut pending = 0u32;
+    let mut wait_item = ShellWaitItem {
+        handle: 0,
+        waitfor: TEST_SIGNAL,
+        pending: 0,
+    };
+    if crate::syscall::sys_process_create(0, 0, 0, 0, &mut proc_handle, &mut proc_vmar).is_err()
+        || crate::syscall::sys_thread_create(
+            proc_handle,
+            0,
+            0,
+            0x1000,
+            PAGE_SIZE,
+            &mut thread_handle,
+        )
+        .is_err()
+        || crate::syscall::sys_thread_start(thread_handle, 0x1000, 0x8000, 1, 2).is_err()
+        || crate::syscall::sys_object_signal(thread_handle, 0, TEST_SIGNAL).is_err()
+        || crate::syscall::sys_object_wait_one(thread_handle, TEST_SIGNAL, 0, &mut pending).is_err()
+        || pending & TEST_SIGNAL == 0
+    {
+        ctx.serial
+            .write_str("[FAIL] process/thread/wait setup failed\n");
+        return;
+    }
+    wait_item.handle = thread_handle;
+    if crate::syscall::sys_object_wait_many(&mut wait_item as *mut ShellWaitItem as usize, 1, 0)
+        .is_err()
+        || wait_item.pending & TEST_SIGNAL == 0
+        || crate::syscall::sys_nanosleep(0).is_err()
+        || crate::syscall::sys_clock_get_monotonic().is_err()
+        || crate::syscall::sys_task_kill(thread_handle).is_err()
+        || crate::syscall::sys_process_exit(proc_handle, 0).is_err()
+    {
+        ctx.serial
+            .write_str("[FAIL] process/thread/wait lifecycle failed\n");
+        return;
+    }
+    let close_many = [thread_handle, proc_handle];
+    if crate::syscall::sys_handle_close_many(close_many.as_ptr() as usize, close_many.len())
+        .is_err()
+    {
+        ctx.serial.write_str("[FAIL] close_many failed\n");
+        return;
+    }
+    ctx.serial
+        .write_str("[OK] process/thread lifecycle completed\n");
 
     ctx.serial.write_str("[TEST] Closing VMO handle... ");
     match crate::syscall::sys_handle_close(vmo_handle) {

@@ -8,8 +8,9 @@ use crate::syscall::{
     syscall::{dispatch_linux_syscall, dispatch_zircon_syscall, SysError},
     syscall_bridge::{
         is_linux_syscall_number, linux_args_from_regs, linux_sys_result_to_u64,
-        saved_regs_ptr_from_el0_sp, syscall_num_from_regs, zircon_args_from_regs,
+        saved_regs_ptr_from_el0_sp, sys_error_to_u64, syscall_num_from_regs, zircon_args_from_regs,
     },
+    syscall_logic::{is_zircon_syscall_number, zircon_syscall_from_raw},
 };
 
 /// Handle SVC exception from EL0 - called from assembly exception handler
@@ -39,27 +40,22 @@ pub unsafe extern "C" fn handle_svc_exception_from_el0(
     let args_linux = linux_args_from_regs(regs);
     let args_zircon = zircon_args_from_regs(regs);
 
-    // Dispatch syscall
     let result = if is_linux_syscall_number(syscall_num) {
         // Linux syscall
-        dispatch_linux_syscall(syscall_num as u32, args_linux)
-    } else if syscall_num <= u32::MAX as u64 {
-        // Zircon syscall - map error to Linux for now
-        match dispatch_zircon_syscall(syscall_num as u32, args_zircon) {
-            Ok(val) => Ok(val),
-            Err(_) => Err(SysError::ENOSYS),
+        linux_sys_result_to_u64(dispatch_linux_syscall(syscall_num as u32, args_linux))
+    } else if is_zircon_syscall_number(syscall_num) {
+        match dispatch_zircon_syscall(zircon_syscall_from_raw(syscall_num), args_zircon) {
+            Ok(val) => val as u64,
+            Err(err) => err as i32 as i64 as u64,
         }
     } else {
-        Err(SysError::ENOSYS)
+        sys_error_to_u64(SysError::ENOSYS)
     };
 
     // Store result - will be loaded by assembly
     // For now, we need a different approach - modify stack directly
     // This is complex, so let's use a simpler approach with global
-    SYSCALL_RESULT.store(
-        linux_sys_result_to_u64(result),
-        core::sync::atomic::Ordering::Relaxed,
-    );
+    SYSCALL_RESULT.store(result, core::sync::atomic::Ordering::Relaxed);
 
     // Advance ELR past the SVC instruction
     core::arch::asm!(

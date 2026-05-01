@@ -12,6 +12,7 @@ pub mod syscall;
 pub(crate) mod syscall_bridge;
 pub mod syscall_dispatch;
 pub mod syscall_handler;
+pub(crate) mod syscall_logic;
 
 pub use syscall::*;
 

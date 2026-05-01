@@ -98,9 +98,9 @@ No part of the normal boot path:
 | User-process data model | present | `UserProcess` exists |
 | EL0 transition helper | present | `switch_to_el0()` exists |
 | Live shell in EL0 | not active | shell runs as EL1 thread |
-| Live test process in EL0 | not active | boot test runs in kernel mode |
+| Live test process in EL0 | active | boot test drops to EL0 and returns through the active exception path |
 | Full register-frame EL0 syscall handler | not active | current vectors use `handle_syscall_simple()` |
-| Zircon-on-SVC path | not active | active `svc` path routes Linux-only |
+| Zircon-on-SVC path | active | raw syscall numbers `1000 + zircon_number` route through `dispatch_zircon_syscall()` |
 
 ## Why The Shell Is Not Yet A Real User Process
 

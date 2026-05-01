@@ -145,7 +145,7 @@ Today this is primarily a bookkeeping layer. It is not yet a full, live mirror o
   - `sys_channel_write`
   - `sys_channel_call_noretry`
 
-`kernel_main()` calls `channel::init()`, so the subsystem is part of the live boot path. The syscall wrappers exist, but they are not yet wired into the active Zircon dispatch table used by the current kernel.
+`kernel_main()` calls `channel::init()`, so the subsystem is part of the live boot path. The syscall wrappers are routed through `dispatch_zircon_syscall()` and can also be reached from the active SVC bridge with syscall numbers `1000 + zircon_number`.
 
 ## How The Directory Is Used Today
 
@@ -165,6 +165,7 @@ The current boot path directly uses:
 - `handle.rs`
 - `vmo.rs`
 - `vmar.rs`
+- `channel.rs`
 
 ### User-Level Scaffolding
 
@@ -186,6 +187,6 @@ The refactor into a dedicated `kernel_objects/` directory is complete at the sou
 ## Current Limitations
 
 - The global handle table is not yet a full per-process handle namespace.
-- Channel syscall helpers exist, but the current Zircon dispatch table does not expose them.
+- Channel syscall helpers are exposed through the current Zircon dispatch table.
 - VMAR state is not yet a full source of truth for hardware mappings.
 - Several object operations are placeholders intended to keep the interface shape stable while the kernel matures.

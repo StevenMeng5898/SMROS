@@ -32,15 +32,15 @@ The live exception vector path in `src/main.rs` uses:
 ```text
 exception_handler
   -> handle_syscall_simple()
-  -> dispatch_linux_syscall()
+  -> dispatch_linux_syscall() or dispatch_zircon_syscall()
 ```
 
 Important detail:
 
 - if `syscall_num < 1000`, the active bridge treats it as a Linux syscall
-- if `syscall_num >= 1000`, `handle_syscall_simple()` currently returns `ENOSYS`
+- if `1000 <= syscall_num <= 1000 + u32::MAX`, the bridge treats it as a Zircon syscall and subtracts `1000` before dispatch
 
-So the active `svc` path does not currently expose the Zircon dispatcher.
+So the active `svc` path now exposes both the Linux dispatcher and the Zircon dispatcher.
 
 ### 3. Alternative EL0 Handler Scaffolding
 
@@ -60,25 +60,17 @@ So the active `svc` path does not currently expose the Zircon dispatcher.
 | `fork` | creates a demo process through the process manager |
 | `exit` | placeholder success |
 | `exit_group` | placeholder success |
+| `nanosleep` | validates request pointer and returns success |
+| `clock_gettime` | writes a simple realtime/monotonic `timespec` |
+| `clone` | creates a demo process through the process manager |
+| `execve` | validates path pointer and returns success |
+| `wait4` | writes a zero wait status when provided |
 | `getpid` | returns `1` |
 | `getppid` | returns `0` |
 | `kill` | terminates a process through the process manager |
-| `gettid` | placeholder `1` from the dispatcher |
+| `gettid` | returns `1` |
 
 These are the only Linux-style syscalls reachable through the current active `svc` bridge.
-
-## Linux Functions Present But Not In The Active Dispatch Table
-
-`src/syscall/syscall.rs` also contains functions such as:
-
-- `sys_vfork()`
-- `sys_clone()`
-- `sys_execve()`
-- `sys_wait4()`
-- `sys_clock_gettime()`
-- `sys_nanosleep_linux()`
-
-Those functions exist in source, but they are not wired into the active `dispatch_linux_syscall()` match table in the current tree.
 
 ## Linux Compatibility Caveats
 
@@ -93,45 +85,42 @@ Those functions exist in source, but they are not wired into the active `dispatc
 
 | Syscall | Current Behavior |
 |---------|------------------|
-| `HandleClose` | validates handle and returns placeholder success |
+| `HandleClose` | validates and releases known memory/channel/task handles |
+| `HandleCloseMany` | closes a user-provided handle array |
 | `HandleDuplicate` | returns a duplicated placeholder handle value |
+| `HandleReplace` | validates and returns the handle value |
+| `ObjectGetInfo` | validates object handle and reports a small metadata word |
+| `ObjectGetProperty` | reads the modeled object property value |
+| `ObjectSetProperty` | writes the modeled object property value |
+| `ObjectSignal` | updates modeled object signal bits |
+| `ObjectWaitOne` | checks modeled pending signals |
+| `ObjectWaitMany` | checks a user-provided wait item array |
+| `ThreadCreate` | creates a modeled thread handle under a modeled process |
+| `ThreadStart` | marks a modeled thread as started |
+| `ThreadExit` | returns success for the current modeled thread |
+| `TaskKill` | marks modeled process/thread handles terminated or closes other known handles |
 | `VmoCreate` | partial VMO construction |
-| `VmoRead` | placeholder read path |
-| `VmoWrite` | placeholder write path |
-| `VmoGetSize` | placeholder size reporting |
+| `VmoRead` | copies VMO bytes into the supplied buffer |
+| `VmoWrite` | copies supplied bytes into the VMO |
+| `VmoGetSize` | reports tracked VMO size |
+| `VmoSetSize` | resizes tracked VMO state |
+| `VmoOpRange` | validates and applies supported VMO range operations |
 | `VmarMap` | bookkeeping-only map path |
-| `VmarUnmap` | placeholder unmap path |
+| `VmarUnmap` | removes tracked VMAR mappings |
+| `VmarAllocate` | creates a tracked child VMAR |
+| `VmarProtect` | updates tracked VMAR mapping permissions |
+| `VmarDestroy` | destroys tracked VMAR state |
 | `VmarUnmapHandleCloseThreadExit` | validation plus placeholder cleanup |
-| `ProcessCreate` | creates a demo process and returns placeholder handles |
+| `ProcessCreate` | creates modeled process and root VMAR handles |
+| `ProcessExit` | marks modeled process handles terminated |
+| `ChannelCreate` | creates a pair of channel endpoint handles |
+| `ChannelRead` | copies queued channel message bytes/handles into user buffers |
+| `ChannelWrite` | copies user buffers into a queued channel message |
+| `ChannelCallNoretry` | modeled write-then-read channel call without handle transfer |
+| `Nanosleep` | returns success |
+| `ClockGetMonotonic` | returns scheduler ticks as nanoseconds |
 
-These are reachable only through direct Rust calls to `dispatch_zircon_syscall()` today. They are not reachable from the active `svc` handler used by the booted kernel.
-
-## Zircon Functions Present But Not Exposed By `dispatch_zircon_syscall()`
-
-The tree also contains source implementations for:
-
-- `sys_vmo_set_size()`
-- `sys_vmo_op_range()`
-- `sys_vmar_protect()`
-- `sys_vmar_allocate()`
-- `sys_vmar_destroy()`
-- `sys_process_exit()`
-- `sys_thread_create()`
-- `sys_thread_start()`
-- `sys_thread_exit()`
-- `sys_task_kill()`
-- `sys_handle_close_many()`
-- `sys_handle_replace()`
-- `sys_object_wait_one()`
-- `sys_object_wait_many()`
-- `sys_object_signal()`
-- `sys_object_get_info()`
-- `sys_object_get_property()`
-- `sys_object_set_property()`
-- `sys_clock_get_monotonic()`
-- `sys_nanosleep()`
-
-These functions are part of the compatibility scaffold, but they are not all part of the currently exposed Zircon dispatch table.
+These are reachable through direct Rust calls to `dispatch_zircon_syscall()` and through the active `svc` bridge by using raw syscall numbers starting at `1000`.
 
 ## Channel Syscalls
 
@@ -142,36 +131,35 @@ Channel syscall wrappers live in `src/kernel_objects/channel.rs`:
 - `sys_channel_write()`
 - `sys_channel_call_noretry()`
 
-The channel object layer is present and initialized during boot, but these wrappers are not currently routed through `dispatch_zircon_syscall()`.
+The channel object layer is present, initialized during boot, and routed through `dispatch_zircon_syscall()`.
 
 ## Practical Compatibility Model
 
 The current syscall layer is best understood as:
 
 - a partially functional Linux-style dispatch path for bring-up
-- a partially exposed Zircon-style object API for kernel-side experimentation
+- a routed Zircon-style object API for kernel-side experimentation
 - a larger amount of future-facing scaffolding for EL0 work
 
 It is not yet:
 
 - a complete Linux userspace ABI
-- a complete Zircon syscall ABI
+- a complete Zircon syscall ABI or rights model
 - a stable compatibility contract for external binaries
 
 ## Live Boot Reality
 
 During normal boot:
 
-- `run_user_test()` directly calls syscall functions from kernel mode
+- `run_user_test()` drops to EL0 and validates the active Linux `svc` path
 - the shell runs as an EL1 thread
-- the active `svc` bridge only targets the Linux dispatch table
+- the active `svc` bridge targets Linux syscall numbers below `1000` and Zircon syscall numbers at `1000 + zircon_number`
 
 That means the current boot flow exercises the syscall layer mainly as an internal kernel interface, not as a fully isolated user/kernel boundary.
 
 ## Known Limitations
 
-- Active `svc` routing bypasses `dispatch_zircon_syscall()`.
-- Many syscall handlers return placeholder success values.
-- Several functions exist in source but are not wired into dispatch.
+- The shell still calls most syscall tests directly from EL1 rather than as isolated EL0 userspace.
+- Some process/thread semantics are modeled records, not full scheduler integration.
 - File-descriptor style Linux syscalls are not implemented as a general subsystem.
 - Handle ownership and lifetime tracking are still simplified.

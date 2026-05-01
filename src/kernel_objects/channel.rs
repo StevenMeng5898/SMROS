@@ -10,9 +10,8 @@
 //! - Message sending and receiving
 //! - Handle management for channels
 
-use crate::syscall::{HandleValue, ZxError, ZxResult};
+use crate::syscall::{syscall_logic, HandleValue, ZxError, ZxResult};
 use alloc::collections::VecDeque;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -314,32 +313,60 @@ pub fn sys_channel_create(
 pub fn sys_channel_read(
     handle: u32,
     options: u32,
-    _bytes_ptr: usize,
-    _bytes_len: usize,
-    _handles_ptr: usize,
-    _handles_count: usize,
+    bytes_ptr: usize,
+    bytes_len: usize,
+    handles_ptr: usize,
+    handles_count: usize,
     out_bytes_actual: &mut usize,
     out_handles_actual: &mut usize,
 ) -> crate::syscall::ZxResult {
     if options != 0 {
         return Err(ZxError::ErrInvalidArgs);
     }
+    if !syscall_logic::channel_buffers_valid(bytes_ptr, bytes_len, handles_ptr, handles_count) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
 
     let h = HandleValue(handle);
-    let mut data = Vec::new();
-    let mut handles = Vec::new();
 
     match channel_table().get_channel(h) {
         Some(channel) => {
-            match channel.read(h, &mut data, &mut handles) {
-                Ok(()) => {
-                    *out_bytes_actual = data.len();
-                    *out_handles_actual = handles.len();
-                    // In real implementation, would copy to user buffers
-                    Ok(())
-                }
-                Err(e) => Err(e),
+            let queue = if h == channel.handle0 {
+                &mut channel.queue0
+            } else if h == channel.handle1 {
+                &mut channel.queue1
+            } else {
+                return Err(ZxError::ErrInvalidArgs);
+            };
+
+            let Some(message) = queue.front() else {
+                return Err(ZxError::ErrShouldWait);
+            };
+
+            *out_bytes_actual = message.data.len();
+            *out_handles_actual = message.handles.len();
+
+            if message.data.len() > bytes_len || message.handles.len() > handles_count {
+                return Err(ZxError::ErrOutOfRange);
             }
+
+            let message = queue.pop_front().ok_or(ZxError::ErrShouldWait)?;
+
+            if !message.data.is_empty() {
+                let out = unsafe {
+                    core::slice::from_raw_parts_mut(bytes_ptr as *mut u8, message.data.len())
+                };
+                out.copy_from_slice(&message.data);
+            }
+
+            if !message.handles.is_empty() {
+                let out = unsafe {
+                    core::slice::from_raw_parts_mut(handles_ptr as *mut u32, message.handles.len())
+                };
+                out.copy_from_slice(&message.handles);
+            }
+
+            Ok(())
         }
         None => Err(ZxError::ErrNotFound),
     }
@@ -349,20 +376,32 @@ pub fn sys_channel_read(
 pub fn sys_channel_write(
     handle: u32,
     options: u32,
-    _bytes_ptr: usize,
+    bytes_ptr: usize,
     bytes_count: usize,
-    _handles_ptr: usize,
-    _handles_count: usize,
+    handles_ptr: usize,
+    handles_count: usize,
 ) -> crate::syscall::ZxResult {
     if options != 0 {
         return Err(ZxError::ErrInvalidArgs);
     }
+    if !syscall_logic::channel_buffers_valid(bytes_ptr, bytes_count, handles_ptr, handles_count) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
 
     let h = HandleValue(handle);
-    let data = vec![0u8; bytes_count]; // Placeholder - would copy from user
+    let data = if bytes_count == 0 {
+        &[][..]
+    } else {
+        unsafe { core::slice::from_raw_parts(bytes_ptr as *const u8, bytes_count) }
+    };
+    let handles = if handles_count == 0 {
+        &[][..]
+    } else {
+        unsafe { core::slice::from_raw_parts(handles_ptr as *const u32, handles_count) }
+    };
 
     match channel_table().get_channel(h) {
-        Some(channel) => channel.write(h, &data, &[]),
+        Some(channel) => channel.write(h, data, handles),
         None => Err(ZxError::ErrNotFound),
     }
 }
@@ -373,13 +412,17 @@ pub fn sys_channel_call_noretry(
     options: u32,
     wr_bytes_ptr: usize,
     wr_num_bytes: usize,
-    _wr_num_handles: usize,
+    wr_num_handles: usize,
     rd_bytes_ptr: usize,
     rd_num_bytes: usize,
-    _rd_num_handles: usize,
+    rd_num_handles: usize,
     out_actual_bytes: &mut usize,
     out_actual_handles: &mut usize,
 ) -> crate::syscall::ZxResult {
+    if wr_num_handles != 0 || rd_num_handles != 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+
     // Atomic write+read operation
     // Write first, then read
     sys_channel_write(handle, options, wr_bytes_ptr, wr_num_bytes, 0, 0)?;

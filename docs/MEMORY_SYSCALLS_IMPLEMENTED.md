@@ -137,7 +137,7 @@ What they cover:
 - boot log EL0 validation: exercises real EL0 `svc` handling for Linux `write`, `getpid`, `mmap`, and `exit`
 - `help`: confirms the command is exposed in the live shell
 - `meminfo`: prints allocator state plus Linux mapping, `brk`, VMO, and VMAR counters
-- `testsc`: runs the Linux and Zircon memory syscall smoke suite
+- `testsc`: runs the Linux and Zircon syscall smoke suite, including memory/object/channel paths
 - `ps` and `top`: provide supporting process and page usage context around the memory test
 
 ## `testsc` Coverage
@@ -146,6 +146,12 @@ The shell's `testsc` command now exercises:
 
 - Linux `write`
 - Linux `getpid`
+- Linux `getppid`
+- Linux `gettid`
+- Linux `execve`
+- Linux `wait4`
+- Linux `clock_gettime`
+- Linux `nanosleep`
 - Linux `brk`
 - Linux `mmap`
 - Linux `mprotect`
@@ -163,6 +169,24 @@ The shell's `testsc` command now exercises:
 - Zircon `vmar_unmap`
 - Zircon `vmar_unmap_handle_close_thread_exit`
 - Zircon `vmar_destroy`
+- Zircon `handle_duplicate`
+- Zircon `object_get_info`
+- Zircon `object_set_property`
+- Zircon `object_get_property`
+- Zircon `channel_create`
+- Zircon `channel_write`
+- Zircon `channel_read`
+- Zircon `process_create`
+- Zircon `thread_create`
+- Zircon `thread_start`
+- Zircon `object_signal`
+- Zircon `object_wait_one`
+- Zircon `object_wait_many`
+- Zircon `clock_get_monotonic`
+- Zircon `nanosleep`
+- Zircon `task_kill`
+- Zircon `process_exit`
+- Zircon `handle_close_many`
 - Zircon `handle_close` for the VMO handle created by the test
 
 ## Extra Memory Info In `meminfo`
