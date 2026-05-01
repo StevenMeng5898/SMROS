@@ -7,6 +7,8 @@
 use alloc::alloc::{alloc, Layout};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
+use crate::user_level::user_logic;
+
 /// Linux write syscall number (ARM64)
 const SYS_WRITE: u32 = 64;
 /// Linux exit syscall number (ARM64)
@@ -105,7 +107,7 @@ pub fn user_test_process_entry() -> ! {
     }
 
     let addr = test_mmap(4096);
-    if addr < 0x5000_0000 || addr >= 0x6000_0000 || addr % 4096 != 0 {
+    if !user_logic::mmap_result_ok(addr) {
         test_exit(EL0_TEST_EXIT_MMAP_RESULT_MISMATCH);
     }
     if test_write(1, EL0_TEST_INFO_MMAP) != EL0_TEST_INFO_MMAP.len() as u64 {
@@ -160,7 +162,7 @@ pub fn prepare_el0_test_kernel_return(exit_code: i32) -> bool {
     EL0_TEST_KERNEL_FINISHED.store(true, Ordering::SeqCst);
 
     // Return to EL1h with interrupts masked, matching the kernel thread model.
-    let spsr_el1: u64 = 0x3C5;
+    let spsr_el1: u64 = user_logic::el1h_spsr_masked();
     unsafe {
         core::arch::asm!(
             "msr elr_el1, {resume}",
@@ -178,7 +180,7 @@ pub fn prepare_el0_test_kernel_return(exit_code: i32) -> bool {
 /// `ELR_EL1` before returning from an exception.
 #[no_mangle]
 pub extern "C" fn syscall_should_advance_elr() -> u64 {
-    0
+    user_logic::syscall_should_advance_elr()
 }
 
 fn finish_boot_after_user_test() -> ! {
@@ -231,13 +233,15 @@ pub extern "C" fn el0_test_resume() -> ! {
     });
     serial.write_str("\n");
 
-    let kernel_success = kernel_entered
-        && kernel_finished
-        && exit_code == EL0_TEST_EXIT_OK
-        && kernel_write == EL0_TEST_BANNER.len() as u64
-        && kernel_pid == 1
-        && kernel_mmap > 0
-        && kernel_mmap < 0xFFFF_FFFF_FFFF_F000;
+    let kernel_success = user_logic::kernel_success(
+        kernel_entered,
+        kernel_finished,
+        exit_code,
+        kernel_write,
+        kernel_pid,
+        kernel_mmap,
+        EL0_TEST_BANNER.len(),
+    );
 
     if kernel_success {
         serial.write_str("[EL0] Real EL0 -> SVC -> EL1 validation: SUCCESS\n");
@@ -278,7 +282,13 @@ pub fn run_user_test() -> ! {
         finish_boot_after_user_test();
     }
 
-    let stack_top = (stack as u64) + EL0_TEST_STACK_SIZE as u64;
+    let stack_top = match user_logic::stack_top_u64(stack as u64, EL0_TEST_STACK_SIZE) {
+        Some(stack_top) => stack_top,
+        None => {
+            serial.write_str("[EL0] EL0 stack top overflow\n");
+            finish_boot_after_user_test();
+        }
+    };
     EL0_TEST_ACTIVE.store(true, Ordering::SeqCst);
 
     unsafe {
@@ -313,9 +323,10 @@ fn print_number(serial: &mut crate::kernel_lowlevel::serial::Serial, num: u32) {
         return;
     }
 
-    if (num as i32) < 0 {
+    let signed = num as i32;
+    if signed < 0 {
         serial.write_byte(b'-');
-        let magnitude = (-(num as i32)) as u32;
+        let magnitude = (-(signed as i64)) as u32;
         print_unsigned(serial, magnitude);
         return;
     }

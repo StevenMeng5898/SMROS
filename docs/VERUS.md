@@ -8,11 +8,14 @@ The current verified slice is the standalone proof file at `verification/syscall
 
 `verification/kernel_lowlevel/src/lib.rs` verifies pure helper logic for every `src/kernel_lowlevel/` Rust file: memory segment/page arithmetic, process lookup predicates, bitmap allocator indexing, page-table-entry bit updates, UART/GIC/timer register computations, SMP CPU-id/PSCI predicates, and the no-algorithm driver/module wiring.
 
+`verification/user_level/src/lib.rs` verifies pure helper logic for `src/main.rs` and every `src/user_level/` Rust file: the kernel bump allocator alignment/end computation, EL0 process memory-layout arithmetic, user process lookup predicates, shell input/decimal parsing/time and memory summaries, and the boot-time EL0 syscall-test decision rules.
+
 Commands:
 
 - `make verus-setup`
 - `make verus-syscall`
 - `make verus-kernel-objects`
 - `make verus-kernel-lowlevel`
+- `make verus-user-level`
 
 The setup script downloads the pinned Verus release into `.tools/verus/current` and installs the Rust toolchain requested by that Verus release.

@@ -14,6 +14,7 @@ use crate::kernel_lowlevel::memory::{
 };
 use crate::kernel_lowlevel::mmu::PageTableManager;
 use crate::kernel_objects::thread::{ThreadControlBlock, ThreadId, DEFAULT_STACK_SIZE};
+use crate::user_level::user_logic;
 
 /// User process control block - extends PCB with EL0-specific data
 #[repr(C)]
@@ -86,12 +87,13 @@ impl UserProcess {
             Some(pfn) => pfn,
             None => return false,
         };
-        let code_vaddr = 0x0000_0000;
+        let code_paddr = match user_logic::pfn_to_paddr(code_pfn, PAGE_SIZE) {
+            Some(paddr) => paddr,
+            None => return false,
+        };
+        let code_vaddr = user_logic::USER_CODE_VADDR;
         if !pt.map_user_region(
-            code_vaddr,
-            code_pfn << 12,
-            PAGE_SIZE,
-            true,  // readable
+            code_vaddr, code_paddr, PAGE_SIZE, true,  // readable
             false, // not writable
             true,  // executable
         ) {
@@ -103,12 +105,13 @@ impl UserProcess {
             Some(pfn) => pfn,
             None => return false,
         };
-        let data_vaddr = 0x0000_1000;
+        let data_paddr = match user_logic::pfn_to_paddr(data_pfn, PAGE_SIZE) {
+            Some(paddr) => paddr,
+            None => return false,
+        };
+        let data_vaddr = user_logic::USER_DATA_VADDR;
         if !pt.map_user_region(
-            data_vaddr,
-            data_pfn << 12,
-            PAGE_SIZE,
-            true,  // readable
+            data_vaddr, data_paddr, PAGE_SIZE, true,  // readable
             true,  // writable
             false, // not executable
         ) {
@@ -116,18 +119,23 @@ impl UserProcess {
         }
 
         // Map heap (read-write, user-accessible, multiple pages)
-        let heap_vaddr = 0x0000_2000;
-        let heap_pages = 4;
+        let heap_vaddr = user_logic::USER_HEAP_VADDR;
+        let heap_pages = user_logic::USER_HEAP_PAGES;
         for i in 0..heap_pages {
             let heap_pfn = match PageFrameAllocator::alloc() {
                 Some(pfn) => pfn,
                 None => return false,
             };
+            let page_vaddr = match user_logic::page_offset_vaddr(heap_vaddr, i, PAGE_SIZE) {
+                Some(vaddr) => vaddr,
+                None => return false,
+            };
+            let heap_paddr = match user_logic::pfn_to_paddr(heap_pfn, PAGE_SIZE) {
+                Some(paddr) => paddr,
+                None => return false,
+            };
             if !pt.map_user_region(
-                heap_vaddr + i * PAGE_SIZE,
-                heap_pfn << 12,
-                PAGE_SIZE,
-                true,  // readable
+                page_vaddr, heap_paddr, PAGE_SIZE, true,  // readable
                 true,  // writable
                 false, // not executable
             ) {
@@ -136,16 +144,24 @@ impl UserProcess {
         }
 
         // Map user stack (read-write, user-accessible, grows downward)
-        let stack_vaddr = 0xFFFF_0000;
-        let stack_pages = 2;
+        let stack_vaddr = user_logic::USER_STACK_VADDR;
+        let stack_pages = user_logic::USER_STACK_PAGES;
         for i in 0..stack_pages {
             let stack_pfn = match PageFrameAllocator::alloc() {
                 Some(pfn) => pfn,
                 None => return false,
             };
+            let page_vaddr = match user_logic::page_offset_vaddr(stack_vaddr, i, PAGE_SIZE) {
+                Some(vaddr) => vaddr,
+                None => return false,
+            };
+            let stack_paddr = match user_logic::pfn_to_paddr(stack_pfn, PAGE_SIZE) {
+                Some(paddr) => paddr,
+                None => return false,
+            };
             if !pt.map_user_region(
-                stack_vaddr + i * PAGE_SIZE,
-                stack_pfn << 12,
+                page_vaddr,
+                stack_paddr,
                 PAGE_SIZE,
                 true,  // readable
                 true,  // writable
@@ -155,8 +171,15 @@ impl UserProcess {
             }
         }
 
-        self.user_stack_vaddr = stack_vaddr + stack_pages * PAGE_SIZE;
-        self.user_stack_size = stack_pages * PAGE_SIZE;
+        self.user_stack_vaddr =
+            match user_logic::page_offset_vaddr(stack_vaddr, stack_pages, PAGE_SIZE) {
+                Some(vaddr) => vaddr,
+                None => return false,
+            };
+        self.user_stack_size = match user_logic::page_offset_vaddr(0, stack_pages, PAGE_SIZE) {
+            Some(size) => size,
+            None => return false,
+        };
 
         // Initialize PCB address space
         self.pcb.address_space.init(self.pcb.pid);
@@ -178,7 +201,7 @@ impl UserProcess {
             return None;
         }
 
-        let stack_top = (stack as u64).wrapping_add(DEFAULT_STACK_SIZE as u64);
+        let stack_top = user_logic::stack_top_u64(stack as u64, DEFAULT_STACK_SIZE)?;
 
         // Initialize thread context for EL0 execution
         tcb.init(
@@ -188,8 +211,8 @@ impl UserProcess {
             self.pcb.name,
             stack,
             DEFAULT_STACK_SIZE,
-            10,   // time slice
-            None, // no CPU affinity
+            user_logic::USER_THREAD_TIME_SLICE, // time slice
+            None,                               // no CPU affinity
         );
 
         // Modify context for EL0 execution
@@ -198,7 +221,7 @@ impl UserProcess {
 
         // Set PSTATE for EL0 with interrupts enabled
         // M[1:0] = 0b00 (EL0t), D=1, A=1, I=1, F=1
-        tcb.context.pstate = 0x3C0; // EL0t, all interrupts masked
+        tcb.context.pstate = user_logic::el0_thread_pstate(); // EL0t, all interrupts masked
 
         Some(tcb)
     }
@@ -222,7 +245,7 @@ pub fn create_user_process(name: &'static str, entry_point: extern "C" fn() -> !
             if USER_PROCESSES[i].is_none() {
                 let mut user_proc = UserProcess::new(
                     pid,
-                    1, // parent is init
+                    user_logic::USER_INIT_PARENT_PID, // parent is init
                     name,
                     entry_point as usize,
                 )?;
@@ -302,7 +325,7 @@ pub unsafe extern "C" fn switch_to_el0(entry_point: u64, user_stack: u64, ttbr0:
 
     // Setup SPSR_EL1 for EL0t mode with interrupts enabled
     // M[1:0] = 0b00 (EL0t), D=0, A=0, I=0, F=0 (enable interrupts)
-    let spsr: u64 = 0x0; // EL0t, all interrupts enabled
+    let spsr: u64 = user_logic::el0_spsr(); // EL0t, all interrupts enabled
 
     core::arch::asm!(
         "msr spsr_el1, {spsr}",

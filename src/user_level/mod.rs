@@ -10,6 +10,7 @@
 
 #![allow(dead_code)]
 
+pub(crate) mod user_logic;
 pub mod user_process;
 pub mod user_shell;
 pub mod user_test;

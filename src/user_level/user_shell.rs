@@ -9,6 +9,7 @@ use crate::kernel_lowlevel::memory::{
 };
 use crate::kernel_lowlevel::serial::Serial;
 use crate::kernel_objects::scheduler;
+use crate::user_level::user_logic;
 use crate::user_level::user_test::test_write;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -166,7 +167,7 @@ impl UserShell {
                     self.input_len -= 1;
                     self.print("\x08 \x08");
                 }
-            } else if c.is_ascii_graphic() || c == b' ' {
+            } else if user_logic::ascii_shell_input(c) {
                 // Printable character
                 if self.input_len < 255 {
                     self.input_buf[self.input_len] = c;
@@ -187,7 +188,7 @@ impl UserShell {
 
     /// Execute a command
     fn execute_command(&mut self, cmd: &str, args: &[&str]) {
-        self.context.command_count += 1;
+        self.context.command_count = self.context.command_count.saturating_add(1);
 
         // Find command in table
         for command in SHELL_COMMANDS {
@@ -312,7 +313,13 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
             return;
         }
     };
-    let brk_target = brk_base + (PAGE_SIZE * 2);
+    let brk_target = match user_logic::page_offset_vaddr(brk_base, 2, PAGE_SIZE) {
+        Some(addr) => addr,
+        None => {
+            ctx.serial.write_str("[FAIL] brk target overflow\n");
+            return;
+        }
+    };
     match crate::syscall::sys_brk(brk_target) {
         Ok(addr) if addr == brk_target => {
             ctx.serial.write_str("[OK] brk moved to 0x");
@@ -700,7 +707,7 @@ fn cmd_top(ctx: &mut ShellContext, _args: &[&str]) {
     ctx.serial.write_str(" pages (");
     print_number(
         &mut ctx.serial,
-        (PageFrameAllocator::free_pages() * PAGE_SIZE / 1024) as u32,
+        user_logic::pages_to_kb(PageFrameAllocator::free_pages(), PAGE_SIZE) as u32,
     );
     ctx.serial.write_str(" KB)                        │\n");
 
@@ -713,14 +720,10 @@ fn cmd_meminfo(ctx: &mut ShellContext, _args: &[&str]) {
     let total_pages = PageFrameAllocator::total_pages();
     let used_pages = PageFrameAllocator::allocated_pages();
     let free_pages = PageFrameAllocator::free_pages();
-    let total_kb = total_pages * PAGE_SIZE / 1024;
-    let used_kb = used_pages * PAGE_SIZE / 1024;
-    let free_kb = free_pages * PAGE_SIZE / 1024;
-    let usage_pct = if total_pages > 0 {
-        (used_pages * 100) / total_pages
-    } else {
-        0
-    };
+    let total_kb = user_logic::pages_to_kb(total_pages, PAGE_SIZE);
+    let used_kb = user_logic::pages_to_kb(used_pages, PAGE_SIZE);
+    let free_kb = user_logic::pages_to_kb(free_pages, PAGE_SIZE);
+    let usage_pct = user_logic::usage_percent(used_pages, total_pages);
 
     ctx.serial
         .write_str("\n┌─────────────────────────────────────────┐\n");
@@ -810,10 +813,7 @@ fn cmd_uptime(ctx: &mut ShellContext, _args: &[&str]) {
     let ticks = s.get_tick_count();
 
     // Assuming 100Hz timer (10ms per tick)
-    let seconds = ticks / 100;
-    let minutes = seconds / 60;
-    let hours = minutes / 60;
-    let days = hours / 24;
+    let (seconds, minutes, hours, days) = user_logic::uptime_parts(ticks);
 
     ctx.serial.write_str("\nSystem Uptime: ");
     if days > 0 {
@@ -867,12 +867,9 @@ fn cmd_kill(ctx: &mut ShellContext, args: &[&str]) {
 /// Parse a decimal number from a string
 fn parse_number(s: &str) -> Option<usize> {
     let mut result: usize = 0;
-    for c in s.chars() {
-        if c >= '0' && c <= '9' {
-            result = result * 10 + (c as usize - '0' as usize);
-        } else {
-            return None;
-        }
+    for byte in s.bytes() {
+        let digit = user_logic::decimal_digit_value(byte)?;
+        result = user_logic::parse_digit_step(result, digit)?;
     }
     Some(result)
 }
@@ -896,7 +893,7 @@ fn print_padded_number(serial: &mut Serial, num: u32, width: usize) {
 
     // Pad with spaces if needed
     let num_len = i;
-    for _ in 0..(width.saturating_sub(num_len)) {
+    for _ in 0..user_logic::saturating_sub(width, num_len) {
         serial.write_byte(b' ');
     }
 

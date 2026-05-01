@@ -11,6 +11,7 @@ use tock_registers::interfaces::Readable;
 
 mod kernel_lowlevel;
 mod kernel_objects;
+mod main_logic;
 mod syscall;
 mod user_level;
 
@@ -38,7 +39,8 @@ struct KernelAllocator;
 static ALLOCATOR: KernelAllocator = KernelAllocator;
 
 // 1MB heap for the kernel bump allocator
-static HEAP: SyncUnsafeCell<[u8; 0x100000]> = SyncUnsafeCell::new([0; 0x100000]);
+static HEAP: SyncUnsafeCell<[u8; main_logic::KERNEL_HEAP_SIZE]> =
+    SyncUnsafeCell::new([0; main_logic::KERNEL_HEAP_SIZE]);
 static HEAP_POS: AtomicUsize = AtomicUsize::new(0);
 
 // SAFETY: This is a simple bump allocator for a kernel. The heap buffer is
@@ -52,20 +54,15 @@ unsafe impl alloc::alloc::GlobalAlloc for KernelAllocator {
         // Atomically fetch and update the heap position
         let mut pos = HEAP_POS.load(Ordering::Relaxed);
         loop {
-            let offset = pos % align;
-            let aligned_pos = if offset != 0 {
-                pos + align - offset
-            } else {
-                pos
-            };
-
-            if aligned_pos + size > 0x100000 {
-                return core::ptr::null_mut();
-            }
+            let (aligned_pos, next_pos) =
+                match main_logic::bump_alloc_next(pos, size, align, main_logic::KERNEL_HEAP_SIZE) {
+                    Some(next) => next,
+                    None => return core::ptr::null_mut(),
+                };
 
             match HEAP_POS.compare_exchange_weak(
                 pos,
-                aligned_pos + size,
+                next_pos,
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
