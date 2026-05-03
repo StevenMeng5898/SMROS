@@ -47,6 +47,8 @@ use super::address_logic::{
 use crate::kernel_lowlevel::memory::{process_manager, PageFrameAllocator, PAGE_SIZE};
 use crate::kernel_objects::channel;
 use crate::kernel_objects::compat;
+use crate::kernel_objects::fifo;
+use crate::kernel_objects::fifo_logic;
 use crate::kernel_objects::scheduler;
 use crate::kernel_objects::socket;
 use crate::kernel_objects::vmar::Vmar;
@@ -1087,6 +1089,7 @@ fn kernel_object_handle_known(handle: u32) -> bool {
         return true;
     }
     channel_handle_known(handle)
+        || fifo::fifo_table().contains(HandleValue(handle))
         || socket::socket_table().contains(HandleValue(handle))
         || compat::handle_known(HandleValue(handle))
 }
@@ -1102,6 +1105,8 @@ fn object_signal_state(handle: u32) -> ZxResult<u32> {
 
     if let Some(channel_signal) = channel_signal {
         Ok(channel_signal | memory_state().get_signal_value(handle))
+    } else if let Some(signals) = fifo::fifo_table().signals(HandleValue(handle)) {
+        Ok(signals | memory_state().get_signal_value(handle))
     } else if let Some(signals) = socket::socket_table().signals(HandleValue(handle)) {
         Ok(signals | memory_state().get_signal_value(handle))
     } else if let Some(signals) = compat::table().signals(HandleValue(handle)) {
@@ -1114,6 +1119,10 @@ fn object_signal_state(handle: u32) -> ZxResult<u32> {
 fn set_object_signal_state(handle: u32, clear_mask: u32, set_mask: u32) -> ZxResult<u32> {
     if memory_state().handle_known(handle) || channel_handle_known(handle) {
         Ok(memory_state().update_signal_value(handle, clear_mask, set_mask))
+    } else if let Some(signals) =
+        fifo::fifo_table().update_signals(HandleValue(handle), clear_mask, set_mask)
+    {
+        Ok(signals)
     } else if let Some(signals) =
         socket::socket_table().update_signals(HandleValue(handle), clear_mask, set_mask)
     {
@@ -4266,6 +4275,7 @@ pub fn sys_handle_close(handle: u32) -> ZxResult {
 
     if memory_state().release_handle(handle)
         || channel::channel_table().remove_channel(HandleValue(handle))
+        || fifo::fifo_table().close(HandleValue(handle))
         || socket::socket_table().close(HandleValue(handle))
         || compat::close_handle(HandleValue(handle))
     {
@@ -4431,6 +4441,11 @@ pub fn sys_object_signal_peer(handle: u32, clear_mask: u32, set_mask: u32) -> Zx
 
     if socket::socket_table().contains(HandleValue(handle)) {
         return socket::socket_table()
+            .signal_peer(HandleValue(handle), clear_mask, set_mask)
+            .map(|_| ());
+    }
+    if fifo::fifo_table().contains(HandleValue(handle)) {
+        return fifo::fifo_table()
             .signal_peer(HandleValue(handle), clear_mask, set_mask)
             .map(|_| ());
     }
@@ -4677,10 +4692,7 @@ pub fn sys_fifo_create(
     out_handle0: &mut u32,
     out_handle1: &mut u32,
 ) -> ZxResult {
-    if elem_count == 0 || elem_size == 0 || options != 0 {
-        return Err(ZxError::ErrInvalidArgs);
-    }
-    let (h0, h1) = compat::create_pair(ObjectType::Fifo)?;
+    let (h0, h1) = fifo::fifo_table().create_pair(elem_count, elem_size, options)?;
     *out_handle0 = h0.0;
     *out_handle1 = h1.0;
     Ok(())
@@ -4693,7 +4705,7 @@ pub fn sys_fifo_write(
     count: usize,
     out_actual: &mut usize,
 ) -> ZxResult {
-    let byte_len = elem_size.checked_mul(count).ok_or(ZxError::ErrOutOfRange)?;
+    let byte_len = fifo_logic::transfer_bytes(elem_size, count).ok_or(ZxError::ErrOutOfRange)?;
     if elem_size == 0 || !syscall_logic::user_buffer_valid(buffer, byte_len) {
         return Err(ZxError::ErrInvalidArgs);
     }
@@ -4702,7 +4714,7 @@ pub fn sys_fifo_write(
     } else {
         unsafe { core::slice::from_raw_parts(buffer as *const u8, byte_len) }
     };
-    *out_actual = compat::table().write_bytes(HandleValue(handle), bytes)? / elem_size;
+    *out_actual = fifo::fifo_table().write(HandleValue(handle), elem_size, bytes)?;
     Ok(())
 }
 
@@ -4713,7 +4725,7 @@ pub fn sys_fifo_read(
     count: usize,
     out_actual: &mut usize,
 ) -> ZxResult {
-    let byte_len = elem_size.checked_mul(count).ok_or(ZxError::ErrOutOfRange)?;
+    let byte_len = fifo_logic::transfer_bytes(elem_size, count).ok_or(ZxError::ErrOutOfRange)?;
     if elem_size == 0 || !syscall_logic::user_buffer_valid(buffer, byte_len) {
         return Err(ZxError::ErrInvalidArgs);
     }
@@ -4722,7 +4734,7 @@ pub fn sys_fifo_read(
     } else {
         unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, byte_len) }
     };
-    *out_actual = compat::table().read_bytes(HandleValue(handle), out)? / elem_size;
+    *out_actual = fifo::fifo_table().read(HandleValue(handle), elem_size, out)?;
     Ok(())
 }
 

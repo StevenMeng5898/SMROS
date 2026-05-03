@@ -16,6 +16,8 @@
 // Module declarations
 pub mod channel;
 pub mod compat;
+pub mod fifo;
+pub(crate) mod fifo_logic;
 pub mod handle;
 pub(crate) mod object_logic;
 pub mod scheduler;

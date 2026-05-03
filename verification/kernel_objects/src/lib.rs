@@ -3,6 +3,7 @@ use vstd::prelude::*;
 verus! {
 
 include!("../../../src/kernel_objects/object_logic_shared.rs");
+include!("../../../src/kernel_objects/fifo_logic_shared.rs");
 include!("../../../src/kernel_objects/socket_logic_shared.rs");
 
 pub const PAGE_SIZE: usize = 4096;
@@ -13,6 +14,10 @@ pub const MAX_CHANNEL_MSG_HANDLES: usize = 64;
 pub const CHANNEL_SIGNAL_READABLE: u32 = 1;
 pub const CHANNEL_SIGNAL_WRITABLE: u32 = 2;
 pub const CHANNEL_SIGNAL_PEER_CLOSED: u32 = 4;
+pub const FIFO_MAX_ELEMS: usize = 64;
+pub const FIFO_MAX_ELEM_SIZE: usize = 64;
+pub const FIFO_BUFFER_SIZE: usize = FIFO_MAX_ELEMS * FIFO_MAX_ELEM_SIZE;
+pub const FIFO_CREATE_OPTIONS_MASK: u32 = 0;
 pub const SOCKET_SIZE: usize = 128 * 2048;
 pub const SOCKET_DATAGRAM: u32 = 1;
 pub const SOCKET_CREATE_MASK: u32 = SOCKET_DATAGRAM;
@@ -186,6 +191,79 @@ spec fn socket_options_valid_spec(options: u32, mask: u32) -> bool {
     (options & !mask) == 0
 }
 
+spec fn fifo_options_valid_spec(options: u32, mask: u32) -> bool {
+    (options & !mask) == 0
+}
+
+spec fn fifo_transfer_bytes_spec(elem_size: int, count: int) -> Option<int> {
+    if elem_size < 0 || count < 0 {
+        Option::<int>::None
+    } else if count == 0 {
+        Some(0)
+    } else if 0 <= elem_size && 0 <= count && elem_size <= usize::MAX as int / count {
+        Some(elem_size * count)
+    } else {
+        Option::<int>::None
+    }
+}
+
+spec fn fifo_ring_index_spec(read_pos: int, offset: int, capacity: int) -> int {
+    if capacity <= 0 {
+        0
+    } else {
+        (read_pos % capacity + offset % capacity) % capacity
+    }
+}
+
+spec fn fifo_remaining_capacity_spec(len: int, capacity: int) -> int {
+    if len >= capacity {
+        0
+    } else {
+        capacity - len
+    }
+}
+
+spec fn fifo_min_count_spec(left: int, right: int) -> int {
+    if left <= right {
+        left
+    } else {
+        right
+    }
+}
+
+spec fn fifo_capacity_valid_spec(
+    elem_count: int,
+    elem_size: int,
+    max_count: int,
+    max_size: int,
+    max_bytes: int,
+) -> bool {
+    elem_count != 0
+        && elem_size != 0
+        && elem_count <= max_count
+        && elem_size <= max_size
+        && match fifo_transfer_bytes_spec(elem_count, elem_size) {
+            Some(bytes) => bytes <= max_bytes,
+            None => false,
+        }
+}
+
+spec fn fifo_refresh_read_signals_spec(signals: u32, len: int, readable_signal: u32) -> u32 {
+    if len == 0 {
+        signals & !readable_signal
+    } else {
+        signals | readable_signal
+    }
+}
+
+spec fn fifo_refresh_write_signals_spec(signals: u32, remaining: int, writable_signal: u32) -> u32 {
+    if remaining == 0 {
+        signals & !writable_signal
+    } else {
+        signals | writable_signal
+    }
+}
+
 spec fn socket_mask_options_spec(options: u32, mask: u32) -> u32 {
     options & mask
 }
@@ -335,6 +413,77 @@ fn ko_signal_update(current: u32, clear_mask: u32, set_mask: u32) -> (out: u32)
         out == object_signal_update_spec(current, clear_mask, set_mask),
 {
     smros_ko_signal_update_body!(current, clear_mask, set_mask)
+}
+
+fn fifo_options_valid(options: u32, mask: u32) -> (out: bool)
+    ensures
+        out == fifo_options_valid_spec(options, mask),
+{
+    smros_fifo_options_valid_body!(options, mask)
+}
+
+fn fifo_transfer_bytes(elem_size: usize, count: usize) -> (out: Option<usize>)
+    ensures
+        count == 0 ==> out == Option::<usize>::Some(0),
+{
+    smros_fifo_transfer_bytes_body!(elem_size, count)
+}
+
+fn fifo_ring_index(read_pos: usize, offset: usize, capacity: usize) -> (out: usize)
+    ensures
+        capacity == 0 ==> out == 0,
+        capacity > 0 ==> out < capacity,
+{
+    assert(capacity > 0 ==> read_pos % capacity < capacity);
+    assert(capacity > 0 ==> offset % capacity < capacity);
+    smros_fifo_ring_index_body!(read_pos, offset, capacity)
+}
+
+fn fifo_remaining_capacity(len: usize, capacity: usize) -> (out: usize)
+    ensures
+        out as int == fifo_remaining_capacity_spec(len as int, capacity as int),
+        out <= capacity,
+{
+    smros_fifo_remaining_capacity_body!(len, capacity)
+}
+
+fn fifo_min_count(left: usize, right: usize) -> (out: usize)
+    ensures
+        out as int == fifo_min_count_spec(left as int, right as int),
+        out <= left,
+        out <= right,
+{
+    smros_fifo_min_count_body!(left, right)
+}
+
+fn fifo_capacity_valid(
+    elem_count: usize,
+    elem_size: usize,
+    max_count: usize,
+    max_size: usize,
+    max_bytes: usize,
+) -> (out: bool)
+    ensures
+        out ==> elem_count != 0,
+        out ==> elem_size != 0,
+        out ==> elem_count <= max_count,
+        out ==> elem_size <= max_size,
+{
+    smros_fifo_capacity_valid_body!(elem_count, elem_size, max_count, max_size, max_bytes)
+}
+
+fn fifo_refresh_read_signals(signals: u32, len: usize, readable_signal: u32) -> (out: u32)
+    ensures
+        out == fifo_refresh_read_signals_spec(signals, len as int, readable_signal),
+{
+    smros_fifo_refresh_read_signals_body!(signals, len, readable_signal)
+}
+
+fn fifo_refresh_write_signals(signals: u32, remaining: usize, writable_signal: u32) -> (out: u32)
+    ensures
+        out == fifo_refresh_write_signals_spec(signals, remaining as int, writable_signal),
+{
+    smros_fifo_refresh_write_signals_body!(signals, remaining, writable_signal)
 }
 
 fn socket_options_valid(options: u32, mask: u32) -> (out: bool)
@@ -822,6 +971,79 @@ proof fn scheduler_smoke() {
     assert(!scheduler_should_preempt_spec(0, 1));
     assert(scheduler_can_run_spec(1, 2, true));
     assert(!scheduler_can_run_spec(0, 2, true));
+}
+
+fn fifo_option_masks_smoke() {
+    assert(fifo_options_valid_spec(0, FIFO_CREATE_OPTIONS_MASK)) by(bit_vector);
+    assert(!fifo_options_valid_spec(1, FIFO_CREATE_OPTIONS_MASK)) by(bit_vector);
+
+    let empty = fifo_options_valid(0, FIFO_CREATE_OPTIONS_MASK);
+    let non_empty = fifo_options_valid(1, FIFO_CREATE_OPTIONS_MASK);
+
+    assert(empty);
+    assert(!non_empty);
+}
+
+fn fifo_transfer_smoke() {
+    let zero_count = fifo_transfer_bytes(usize::MAX, 0);
+
+    assert(zero_count == Option::<usize>::Some(0));
+}
+
+fn fifo_capacity_smoke() {
+    let invalid_zero_count = fifo_capacity_valid(
+        0,
+        FIFO_MAX_ELEM_SIZE,
+        FIFO_MAX_ELEMS,
+        FIFO_MAX_ELEM_SIZE,
+        FIFO_BUFFER_SIZE,
+    );
+    let invalid_large_count = fifo_capacity_valid(
+        FIFO_MAX_ELEMS + 1,
+        FIFO_MAX_ELEM_SIZE,
+        FIFO_MAX_ELEMS,
+        FIFO_MAX_ELEM_SIZE,
+        FIFO_BUFFER_SIZE,
+    );
+    let wrapped_index = fifo_ring_index(FIFO_MAX_ELEMS - 1, 1, FIFO_MAX_ELEMS);
+    let empty_remaining = fifo_remaining_capacity(0, FIFO_MAX_ELEMS);
+    let full_remaining = fifo_remaining_capacity(FIFO_MAX_ELEMS, FIFO_MAX_ELEMS);
+    let partial_min = fifo_min_count(8, FIFO_MAX_ELEMS);
+
+    assert(!invalid_zero_count);
+    assert(!invalid_large_count);
+    assert(wrapped_index < FIFO_MAX_ELEMS);
+    assert(empty_remaining == FIFO_MAX_ELEMS);
+    assert(full_remaining == 0);
+    assert(partial_min == 8);
+}
+
+fn fifo_signal_smoke() {
+    let read_empty = fifo_refresh_read_signals(CHANNEL_SIGNAL_READABLE, 0, CHANNEL_SIGNAL_READABLE);
+    let read_ready = fifo_refresh_read_signals(0, 1, CHANNEL_SIGNAL_READABLE);
+    let write_full = fifo_refresh_write_signals(CHANNEL_SIGNAL_WRITABLE, 0, CHANNEL_SIGNAL_WRITABLE);
+    let write_ready = fifo_refresh_write_signals(0, 1, CHANNEL_SIGNAL_WRITABLE);
+
+    assert(read_empty == fifo_refresh_read_signals_spec(
+        CHANNEL_SIGNAL_READABLE,
+        0,
+        CHANNEL_SIGNAL_READABLE,
+    ));
+    assert(read_ready == fifo_refresh_read_signals_spec(
+        0,
+        1,
+        CHANNEL_SIGNAL_READABLE,
+    ));
+    assert(write_full == fifo_refresh_write_signals_spec(
+        CHANNEL_SIGNAL_WRITABLE,
+        0,
+        CHANNEL_SIGNAL_WRITABLE,
+    ));
+    assert(write_ready == fifo_refresh_write_signals_spec(
+        0,
+        1,
+        CHANNEL_SIGNAL_WRITABLE,
+    ));
 }
 
 fn socket_option_masks_smoke() {

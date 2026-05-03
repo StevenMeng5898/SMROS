@@ -1030,6 +1030,373 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         .write_str("[OK] socket kernel object tests completed\n");
 
     ctx.serial
+        .write_str("[TEST] Testing Zircon FIFO IPC calls...\n");
+    const FIFO_ELEM_COUNT: usize = 4;
+    const FIFO_ELEM_SIZE: usize = core::mem::size_of::<u32>();
+    const FIFO_TEST_SIGNAL: u32 = 1 << 25;
+    let mut fifo0 = 0u32;
+    let mut fifo1 = 0u32;
+    let mut fifo_actual = 0usize;
+    let mut fifo_pending = 0u32;
+
+    match crate::syscall::sys_fifo_create(0, FIFO_ELEM_SIZE, 0, &mut fifo0, &mut fifo1) {
+        Err(crate::syscall::ZxError::ErrInvalidArgs) => {
+            print_fifo_ok(ctx, "reject zero elem count");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject zero elem count unexpectedly succeeded\n");
+            let _ = crate::syscall::sys_handle_close(fifo0);
+            let _ = crate::syscall::sys_handle_close(fifo1);
+            return;
+        }
+        Err(e) => {
+            print_fifo_error(ctx, "reject zero elem count", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_fifo_create(
+        crate::kernel_objects::fifo::FIFO_MAX_ELEMS + 1,
+        FIFO_ELEM_SIZE,
+        0,
+        &mut fifo0,
+        &mut fifo1,
+    ) {
+        Err(crate::syscall::ZxError::ErrOutOfRange) => {
+            print_fifo_ok(ctx, "reject oversized elem count");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject oversized elem count unexpectedly succeeded\n");
+            let _ = crate::syscall::sys_handle_close(fifo0);
+            let _ = crate::syscall::sys_handle_close(fifo1);
+            return;
+        }
+        Err(e) => {
+            print_fifo_error(ctx, "reject oversized elem count", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_fifo_create(
+        FIFO_ELEM_COUNT,
+        FIFO_ELEM_SIZE,
+        0,
+        &mut fifo0,
+        &mut fifo1,
+    ) {
+        Ok(_) => {
+            ctx.serial.write_str("  [OK] create handles=0x");
+            print_hex(&mut ctx.serial, fifo0 as u64);
+            ctx.serial.write_str(",0x");
+            print_hex(&mut ctx.serial, fifo1 as u64);
+            ctx.serial.write_str("\n");
+        }
+        Err(e) => {
+            print_fifo_error(ctx, "create", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_object_wait_one(
+        fifo0,
+        crate::kernel_objects::channel::CHANNEL_SIGNAL_WRITABLE,
+        0,
+        &mut fifo_pending,
+    ) {
+        Ok(_) if fifo_pending & crate::kernel_objects::channel::CHANNEL_SIGNAL_WRITABLE != 0 => {
+            print_fifo_ok(ctx, "initial writable signal");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] initial writable signal pending=0x");
+            print_hex(&mut ctx.serial, fifo_pending as u64);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_fifo_error(ctx, "initial writable signal", e);
+            return;
+        }
+    }
+
+    let fifo_first_write = [11u32, 22, 33];
+    match crate::syscall::sys_fifo_write(
+        fifo0,
+        FIFO_ELEM_SIZE,
+        fifo_first_write.as_ptr() as usize,
+        fifo_first_write.len(),
+        &mut fifo_actual,
+    ) {
+        Ok(_) if fifo_actual == fifo_first_write.len() => {
+            print_fifo_ok(ctx, "write three elements");
+        }
+        Ok(_) => {
+            print_fifo_count_mismatch(
+                ctx,
+                "write three elements count",
+                fifo_first_write.len(),
+                fifo_actual,
+            );
+            return;
+        }
+        Err(e) => {
+            print_fifo_error(ctx, "write three elements", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_object_wait_one(
+        fifo1,
+        crate::kernel_objects::channel::CHANNEL_SIGNAL_READABLE,
+        0,
+        &mut fifo_pending,
+    ) {
+        Ok(_) if fifo_pending & crate::kernel_objects::channel::CHANNEL_SIGNAL_READABLE != 0 => {
+            print_fifo_ok(ctx, "peer readable signal");
+        }
+        Ok(_) => {
+            ctx.serial.write_str("  [FAIL] peer readable pending=0x");
+            print_hex(&mut ctx.serial, fifo_pending as u64);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_fifo_error(ctx, "peer readable signal", e);
+            return;
+        }
+    }
+
+    let mut fifo_read_two = [0u32; 2];
+    match crate::syscall::sys_fifo_read(
+        fifo1,
+        FIFO_ELEM_SIZE,
+        fifo_read_two.as_mut_ptr() as usize,
+        fifo_read_two.len(),
+        &mut fifo_actual,
+    ) {
+        Ok(_) if fifo_actual == fifo_read_two.len() && fifo_read_two == [11u32, 22] => {
+            print_fifo_ok(ctx, "read preserves order");
+        }
+        Ok(_) => {
+            ctx.serial.write_str("  [FAIL] read preserves order count=");
+            print_number(&mut ctx.serial, fifo_actual as u32);
+            ctx.serial.write_str(", values=");
+            print_number(&mut ctx.serial, fifo_read_two[0]);
+            ctx.serial.write_str(",");
+            print_number(&mut ctx.serial, fifo_read_two[1]);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_fifo_error(ctx, "read preserves order", e);
+            return;
+        }
+    }
+
+    let fifo_second_write = [44u32, 55, 66, 77];
+    match crate::syscall::sys_fifo_write(
+        fifo0,
+        FIFO_ELEM_SIZE,
+        fifo_second_write.as_ptr() as usize,
+        fifo_second_write.len(),
+        &mut fifo_actual,
+    ) {
+        Ok(_) if fifo_actual == 3 => {
+            print_fifo_ok(ctx, "partial write when peer nearly full");
+        }
+        Ok(_) => {
+            print_fifo_count_mismatch(ctx, "partial write count", 3, fifo_actual);
+            return;
+        }
+        Err(e) => {
+            print_fifo_error(ctx, "partial write when peer nearly full", e);
+            return;
+        }
+    }
+
+    let mut fifo_read_all = [0u32; 4];
+    match crate::syscall::sys_fifo_read(
+        fifo1,
+        FIFO_ELEM_SIZE,
+        fifo_read_all.as_mut_ptr() as usize,
+        fifo_read_all.len(),
+        &mut fifo_actual,
+    ) {
+        Ok(_) if fifo_actual == fifo_read_all.len() && fifo_read_all == [33u32, 44, 55, 66] => {
+            print_fifo_ok(ctx, "read wrapped elements");
+        }
+        Ok(_) => {
+            ctx.serial.write_str("  [FAIL] read wrapped count=");
+            print_number(&mut ctx.serial, fifo_actual as u32);
+            ctx.serial.write_str(", values=");
+            for value in fifo_read_all {
+                print_number(&mut ctx.serial, value);
+                ctx.serial.write_str(" ");
+            }
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_fifo_error(ctx, "read wrapped elements", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_fifo_read(
+        fifo1,
+        FIFO_ELEM_SIZE,
+        fifo_read_all.as_mut_ptr() as usize,
+        0,
+        &mut fifo_actual,
+    ) {
+        Ok(_) if fifo_actual == 0 => print_fifo_ok(ctx, "zero-count read"),
+        Ok(_) => {
+            print_fifo_count_mismatch(ctx, "zero-count read", 0, fifo_actual);
+            return;
+        }
+        Err(e) => {
+            print_fifo_error(ctx, "zero-count read", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_fifo_write(fifo0, FIFO_ELEM_SIZE, 0, 0, &mut fifo_actual) {
+        Ok(_) if fifo_actual == 0 => print_fifo_ok(ctx, "zero-count write"),
+        Ok(_) => {
+            print_fifo_count_mismatch(ctx, "zero-count write", 0, fifo_actual);
+            return;
+        }
+        Err(e) => {
+            print_fifo_error(ctx, "zero-count write", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_fifo_read(
+        fifo1,
+        FIFO_ELEM_SIZE,
+        fifo_read_all.as_mut_ptr() as usize,
+        fifo_read_all.len(),
+        &mut fifo_actual,
+    ) {
+        Err(crate::syscall::ZxError::ErrShouldWait) => {
+            print_fifo_ok(ctx, "empty read should wait");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] empty read unexpectedly read=");
+            print_number(&mut ctx.serial, fifo_actual as u32);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_fifo_error(ctx, "empty read should wait", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_fifo_write(
+        fifo0,
+        FIFO_ELEM_SIZE * 2,
+        fifo_second_write.as_ptr() as usize,
+        1,
+        &mut fifo_actual,
+    ) {
+        Err(crate::syscall::ZxError::ErrInvalidArgs) => {
+            print_fifo_ok(ctx, "reject mismatched elem size");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject mismatched elem size unexpectedly wrote=");
+            print_number(&mut ctx.serial, fifo_actual as u32);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_fifo_error(ctx, "reject mismatched elem size", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_object_signal_peer(fifo0, 0, FIFO_TEST_SIGNAL) {
+        Ok(_) => print_fifo_ok(ctx, "signal peer"),
+        Err(e) => {
+            print_fifo_error(ctx, "signal peer", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_object_wait_one(fifo1, FIFO_TEST_SIGNAL, 0, &mut fifo_pending) {
+        Ok(_) if fifo_pending & FIFO_TEST_SIGNAL != 0 => {
+            print_fifo_ok(ctx, "wait peer signal");
+        }
+        Ok(_) => {
+            ctx.serial.write_str("  [FAIL] wait peer signal pending=0x");
+            print_hex(&mut ctx.serial, fifo_pending as u64);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_fifo_error(ctx, "wait peer signal", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_handle_close(fifo0) {
+        Ok(_) => print_fifo_ok(ctx, "close writer endpoint"),
+        Err(e) => {
+            print_fifo_error(ctx, "close writer endpoint", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_object_wait_one(
+        fifo1,
+        crate::kernel_objects::channel::CHANNEL_SIGNAL_PEER_CLOSED,
+        0,
+        &mut fifo_pending,
+    ) {
+        Ok(_) if fifo_pending & crate::kernel_objects::channel::CHANNEL_SIGNAL_PEER_CLOSED != 0 => {
+            print_fifo_ok(ctx, "peer closed signal");
+        }
+        Ok(_) => {
+            ctx.serial.write_str("  [FAIL] peer closed pending=0x");
+            print_hex(&mut ctx.serial, fifo_pending as u64);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_fifo_error(ctx, "peer closed signal", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_fifo_read(
+        fifo1,
+        FIFO_ELEM_SIZE,
+        fifo_read_all.as_mut_ptr() as usize,
+        fifo_read_all.len(),
+        &mut fifo_actual,
+    ) {
+        Err(crate::syscall::ZxError::ErrPeerClosed) => {
+            print_fifo_ok(ctx, "empty read after peer close");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] empty read after peer close unexpectedly read=");
+            print_number(&mut ctx.serial, fifo_actual as u32);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_fifo_error(ctx, "empty read after peer close", e);
+            return;
+        }
+    }
+    let _ = crate::syscall::sys_handle_close(fifo1);
+    ctx.serial
+        .write_str("[OK] FIFO kernel object tests completed\n");
+
+    ctx.serial
         .write_str("[TEST] Testing Zircon process/thread/wait calls... ");
     #[repr(C)]
     struct ShellWaitItem {
@@ -1502,6 +1869,30 @@ fn print_socket_count_mismatch(
     expected: usize,
     actual: usize,
 ) {
+    ctx.serial.write_str("  [FAIL] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str(" expected=");
+    print_number(&mut ctx.serial, expected as u32);
+    ctx.serial.write_str(", actual=");
+    print_number(&mut ctx.serial, actual as u32);
+    ctx.serial.write_str("\n");
+}
+
+fn print_fifo_ok(ctx: &mut ShellContext, label: &str) {
+    ctx.serial.write_str("  [OK] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str("\n");
+}
+
+fn print_fifo_error(ctx: &mut ShellContext, label: &str, err: crate::syscall::ZxError) {
+    ctx.serial.write_str("  [FAIL] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str(" error=");
+    print_zx_error(&mut ctx.serial, err);
+    ctx.serial.write_str("\n");
+}
+
+fn print_fifo_count_mismatch(ctx: &mut ShellContext, label: &str, expected: usize, actual: usize) {
     ctx.serial.write_str("  [FAIL] ");
     ctx.serial.write_str(label);
     ctx.serial.write_str(" expected=");
