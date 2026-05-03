@@ -48,6 +48,7 @@ use crate::kernel_lowlevel::memory::{process_manager, PageFrameAllocator, PAGE_S
 use crate::kernel_objects::channel;
 use crate::kernel_objects::compat;
 use crate::kernel_objects::scheduler;
+use crate::kernel_objects::socket;
 use crate::kernel_objects::vmar::Vmar;
 use crate::syscall::syscall_logic;
 
@@ -425,6 +426,8 @@ const ZX_USER_SIGNAL_0: u32 = 1 << 24;
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
 const COMPAT_FD_START: usize = 3;
+const LINUX_AF_UNIX: usize = 1;
+const LINUX_AF_LOCAL: usize = LINUX_AF_UNIX;
 const LINUX_AF_INET: usize = 2;
 const LINUX_AF_NETLINK: usize = 16;
 const LINUX_AF_PACKET: usize = 17;
@@ -1083,7 +1086,9 @@ fn kernel_object_handle_known(handle: u32) -> bool {
     if memory_state().handle_known(handle) {
         return true;
     }
-    channel_handle_known(handle) || compat::handle_known(HandleValue(handle))
+    channel_handle_known(handle)
+        || socket::socket_table().contains(HandleValue(handle))
+        || compat::handle_known(HandleValue(handle))
 }
 
 fn object_signal_state(handle: u32) -> ZxResult<u32> {
@@ -1097,6 +1102,8 @@ fn object_signal_state(handle: u32) -> ZxResult<u32> {
 
     if let Some(channel_signal) = channel_signal {
         Ok(channel_signal | memory_state().get_signal_value(handle))
+    } else if let Some(signals) = socket::socket_table().signals(HandleValue(handle)) {
+        Ok(signals | memory_state().get_signal_value(handle))
     } else if let Some(signals) = compat::table().signals(HandleValue(handle)) {
         Ok(signals | memory_state().get_signal_value(handle))
     } else {
@@ -1107,6 +1114,10 @@ fn object_signal_state(handle: u32) -> ZxResult<u32> {
 fn set_object_signal_state(handle: u32, clear_mask: u32, set_mask: u32) -> ZxResult<u32> {
     if memory_state().handle_known(handle) || channel_handle_known(handle) {
         Ok(memory_state().update_signal_value(handle, clear_mask, set_mask))
+    } else if let Some(signals) =
+        socket::socket_table().update_signals(HandleValue(handle), clear_mask, set_mask)
+    {
+        Ok(signals)
     } else if let Some(signals) =
         compat::table().update_signals(HandleValue(handle), clear_mask, set_mask)
     {
@@ -1549,6 +1560,11 @@ pub fn sys_write(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
                 .map(|record| record.handle)
                 .ok_or(SysError::ENODEV)?;
             let buf = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
+            if socket::socket_table().contains(HandleValue(handle)) {
+                return socket::socket_table()
+                    .write(HandleValue(handle), buf)
+                    .map_err(|_| SysError::EIO);
+            }
             compat::table()
                 .write_bytes(HandleValue(handle), buf)
                 .map_err(|_| SysError::EIO)
@@ -1573,6 +1589,14 @@ pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
         .map(|record| record.handle)
         .ok_or(SysError::ENODEV)?;
     let out = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, len) };
+
+    if socket::socket_table().contains(HandleValue(handle)) {
+        return match socket::socket_table().read(HandleValue(handle), 0, out) {
+            Ok(read) => Ok(read),
+            Err(ZxError::ErrShouldWait) => Ok(0),
+            Err(_) => Err(SysError::EIO),
+        };
+    }
 
     match compat::table().read_bytes(HandleValue(handle), out) {
         Ok(read) => Ok(read),
@@ -2390,9 +2414,23 @@ pub fn sys_socketpair(
     if fds_ptr == 0 {
         return Err(SysError::EFAULT);
     }
-    let (left, right) =
+    let socket_kind = socket_type & LINUX_SOCK_TYPE_MASK;
+    let (left, right) = if (domain == LINUX_AF_UNIX || domain == LINUX_AF_LOCAL)
+        && socket_kind == LINUX_SOCK_STREAM
+    {
+        socket::socket_table()
+            .create_pair(0)
+            .map_err(|_| SysError::ENOMEM)?
+    } else if (domain == LINUX_AF_UNIX || domain == LINUX_AF_LOCAL)
+        && socket_kind == LINUX_SOCK_DGRAM
+    {
+        socket::socket_table()
+            .create_pair(socket::SOCKET_DATAGRAM)
+            .map_err(|_| SysError::ENOMEM)?
+    } else {
         compat::create_pair(linux_socket_object_type(domain, socket_type, protocol))
-            .map_err(|_| SysError::ENOMEM)?;
+            .map_err(|_| SysError::ENOMEM)?
+    };
     let state = memory_state();
     let left_fd = state.alloc_fd(left.0, true, true);
     let right_fd = state.alloc_fd(right.0, true, true);
@@ -4228,6 +4266,7 @@ pub fn sys_handle_close(handle: u32) -> ZxResult {
 
     if memory_state().release_handle(handle)
         || channel::channel_table().remove_channel(HandleValue(handle))
+        || socket::socket_table().close(HandleValue(handle))
         || compat::close_handle(HandleValue(handle))
     {
         Ok(())
@@ -4390,6 +4429,12 @@ pub fn sys_object_signal_peer(handle: u32, clear_mask: u32, set_mask: u32) -> Zx
         handle, clear_mask, set_mask
     );
 
+    if socket::socket_table().contains(HandleValue(handle)) {
+        return socket::socket_table()
+            .signal_peer(HandleValue(handle), clear_mask, set_mask)
+            .map(|_| ());
+    }
+
     compat::table()
         .signal_peer(HandleValue(handle), clear_mask, set_mask)
         .map(|_| ())
@@ -4451,6 +4496,20 @@ pub fn sys_object_get_info(
         return Err(ZxError::ErrInvalidArgs);
     }
 
+    if topic == socket::OBJECT_INFO_TOPIC_SOCKET {
+        let info = socket::socket_table()
+            .info(HandleValue(handle))
+            .ok_or(ZxError::ErrNotFound)?;
+        let info_size = core::mem::size_of::<socket::SocketInfo>();
+        *out_actual_size = info_size;
+        if buffer_size >= info_size {
+            unsafe {
+                core::ptr::write(buffer as *mut socket::SocketInfo, info);
+            }
+        }
+        return Ok(());
+    }
+
     *out_actual_size = core::mem::size_of::<u64>();
     if buffer_size >= core::mem::size_of::<u64>() {
         unsafe {
@@ -4479,8 +4538,9 @@ pub fn sys_object_get_property(
         return Err(ZxError::ErrInvalidArgs);
     }
 
-    let value = compat::table()
-        .property(HandleValue(handle))
+    let value = socket::socket_table()
+        .property(HandleValue(handle), prop_id)
+        .or_else(|| compat::table().property(HandleValue(handle)))
         .unwrap_or_else(|| memory_state().get_property_value(handle));
     unsafe {
         core::ptr::write(buffer as *mut u64, value);
@@ -4508,6 +4568,11 @@ pub fn sys_object_set_property(
     }
 
     let value = unsafe { core::ptr::read(buffer as *const u64) };
+    match socket::socket_table().set_property(HandleValue(handle), prop_id, value) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(e) => return Err(e),
+    }
     if !compat::table().set_property(HandleValue(handle), value) {
         memory_state().set_property_value(handle, value);
     }
@@ -4548,10 +4613,7 @@ pub fn sys_eventpair_create(
 }
 
 pub fn sys_socket_create(options: u32, out_handle0: &mut u32, out_handle1: &mut u32) -> ZxResult {
-    if options != 0 {
-        return Err(ZxError::ErrInvalidArgs);
-    }
-    let (h0, h1) = compat::create_pair(ObjectType::Socket)?;
+    let (h0, h1) = socket::socket_table().create_pair(options)?;
     *out_handle0 = h0.0;
     *out_handle1 = h1.0;
     Ok(())
@@ -4572,7 +4634,7 @@ pub fn sys_socket_write(
     } else {
         unsafe { core::slice::from_raw_parts(buffer as *const u8, len) }
     };
-    *out_actual = compat::table().write_bytes(HandleValue(handle), bytes)?;
+    *out_actual = socket::socket_table().write(HandleValue(handle), bytes)?;
     Ok(())
 }
 
@@ -4583,7 +4645,7 @@ pub fn sys_socket_read(
     len: usize,
     out_actual: &mut usize,
 ) -> ZxResult {
-    if options != 0 || !syscall_logic::user_buffer_valid(buffer, len) {
+    if !syscall_logic::user_buffer_valid(buffer, len) {
         return Err(ZxError::ErrInvalidArgs);
     }
     let out = if len == 0 {
@@ -4591,33 +4653,21 @@ pub fn sys_socket_read(
     } else {
         unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, len) }
     };
-    *out_actual = compat::table().read_bytes(HandleValue(handle), out)?;
+    *out_actual = socket::socket_table().read(HandleValue(handle), options, out)?;
     Ok(())
 }
 
 pub fn sys_socket_share(handle: u32, socket_to_share: u32) -> ZxResult {
-    if !compat::handle_known(HandleValue(handle))
-        || !compat::handle_known(HandleValue(socket_to_share))
-    {
-        return Err(ZxError::ErrNotFound);
-    }
-    Ok(())
+    socket::socket_table().share(HandleValue(handle), HandleValue(socket_to_share))
 }
 
 pub fn sys_socket_accept(handle: u32, out_handle: &mut u32) -> ZxResult {
-    if !compat::handle_known(HandleValue(handle)) {
-        return Err(ZxError::ErrNotFound);
-    }
-    *out_handle = compat::create_object(ObjectType::Socket)?.0;
+    *out_handle = socket::socket_table().accept(HandleValue(handle))?.0;
     Ok(())
 }
 
-pub fn sys_socket_shutdown(handle: u32, _options: u32) -> ZxResult {
-    if compat::handle_known(HandleValue(handle)) {
-        Ok(())
-    } else {
-        Err(ZxError::ErrNotFound)
-    }
+pub fn sys_socket_shutdown(handle: u32, options: u32) -> ZxResult {
+    socket::socket_table().shutdown(HandleValue(handle), options)
 }
 
 pub fn sys_fifo_create(

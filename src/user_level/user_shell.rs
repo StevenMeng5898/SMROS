@@ -689,6 +689,347 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     ctx.serial.write_str("[OK] channel message round-tripped\n");
 
     ctx.serial
+        .write_str("[TEST] Testing Zircon socket IPC calls...\n");
+    #[repr(C)]
+    #[derive(Default)]
+    struct ShellSocketInfo {
+        options: u32,
+        padding1: u32,
+        rx_buf_max: u64,
+        rx_buf_size: u64,
+        rx_buf_available: u64,
+        tx_buf_max: u64,
+        tx_buf_size: u64,
+    }
+    const SOCKET_DATAGRAM: u32 = crate::kernel_objects::socket::SOCKET_DATAGRAM;
+    const SOCKET_PEEK: u32 = crate::kernel_objects::socket::SOCKET_PEEK;
+    const SOCKET_SHUTDOWN_READ: u32 = crate::kernel_objects::socket::SOCKET_SHUTDOWN_READ;
+    const SOCKET_RX_THRESHOLD_PROPERTY: u32 =
+        crate::kernel_objects::socket::SOCKET_PROPERTY_RX_THRESHOLD;
+    const SOCKET_INFO_TOPIC: u32 = crate::kernel_objects::socket::OBJECT_INFO_TOPIC_SOCKET;
+
+    let mut socket0 = 0u32;
+    let mut socket1 = 0u32;
+    let socket_payload = b"socket-ok";
+    let mut socket_written = 0usize;
+    let mut socket_peek = [0u8; 9];
+    let mut socket_readback = [0u8; 9];
+    let mut socket_info = ShellSocketInfo::default();
+    let mut socket_info_actual = 0usize;
+    let mut threshold = 1u64;
+    let mut threshold_readback = 0u64;
+
+    match crate::syscall::sys_socket_create(0, &mut socket0, &mut socket1) {
+        Ok(_) => {
+            ctx.serial.write_str("  [OK] stream create handles=0x");
+            print_hex(&mut ctx.serial, socket0 as u64);
+            ctx.serial.write_str(",0x");
+            print_hex(&mut ctx.serial, socket1 as u64);
+            ctx.serial.write_str("\n");
+        }
+        Err(e) => {
+            print_socket_error(ctx, "stream create", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_socket_write(
+        socket0,
+        0,
+        socket_payload.as_ptr() as usize,
+        socket_payload.len(),
+        &mut socket_written,
+    ) {
+        Ok(_) if socket_written == socket_payload.len() => {
+            print_socket_ok(ctx, "stream write");
+        }
+        Ok(_) => {
+            print_socket_count_mismatch(
+                ctx,
+                "stream write count",
+                socket_payload.len(),
+                socket_written,
+            );
+            return;
+        }
+        Err(e) => {
+            print_socket_error(ctx, "stream write", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_socket_read(
+        socket1,
+        SOCKET_PEEK,
+        socket_peek.as_mut_ptr() as usize,
+        socket_peek.len(),
+        &mut socket_written,
+    ) {
+        Ok(_) if socket_written == socket_payload.len() && socket_peek == *socket_payload => {
+            print_socket_ok(ctx, "stream peek");
+        }
+        Ok(_) => {
+            print_socket_count_mismatch(
+                ctx,
+                "stream peek count",
+                socket_payload.len(),
+                socket_written,
+            );
+            return;
+        }
+        Err(e) => {
+            print_socket_error(ctx, "stream peek", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_object_get_info(
+        socket1,
+        SOCKET_INFO_TOPIC,
+        &mut socket_info as *mut ShellSocketInfo as usize,
+        core::mem::size_of::<ShellSocketInfo>(),
+        &mut socket_info_actual,
+    ) {
+        Ok(_)
+            if socket_info_actual == core::mem::size_of::<ShellSocketInfo>()
+                && socket_info.rx_buf_available == socket_payload.len() as u64
+                && socket_info.rx_buf_size == socket_payload.len() as u64 =>
+        {
+            print_socket_ok(ctx, "socket info");
+        }
+        Ok(_) => {
+            ctx.serial.write_str("  [FAIL] socket info actual=");
+            print_number(&mut ctx.serial, socket_info_actual as u32);
+            ctx.serial.write_str(", rx_size=");
+            print_number(&mut ctx.serial, socket_info.rx_buf_size as u32);
+            ctx.serial.write_str(", rx_available=");
+            print_number(&mut ctx.serial, socket_info.rx_buf_available as u32);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_socket_error(ctx, "socket info", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_object_set_property(
+        socket1,
+        SOCKET_RX_THRESHOLD_PROPERTY,
+        &mut threshold as *mut u64 as usize,
+        core::mem::size_of::<u64>(),
+    ) {
+        Ok(_) => print_socket_ok(ctx, "set rx threshold"),
+        Err(e) => {
+            print_socket_error(ctx, "set rx threshold", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_object_get_property(
+        socket1,
+        SOCKET_RX_THRESHOLD_PROPERTY,
+        &mut threshold_readback as *mut u64 as usize,
+        core::mem::size_of::<u64>(),
+    ) {
+        Ok(_) if threshold_readback == threshold => {
+            print_socket_ok(ctx, "get rx threshold");
+        }
+        Ok(_) => {
+            ctx.serial.write_str("  [FAIL] get rx threshold expected=");
+            print_number(&mut ctx.serial, threshold as u32);
+            ctx.serial.write_str(", actual=");
+            print_number(&mut ctx.serial, threshold_readback as u32);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_socket_error(ctx, "get rx threshold", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_socket_read(
+        socket1,
+        0,
+        socket_readback.as_mut_ptr() as usize,
+        socket_readback.len(),
+        &mut socket_written,
+    ) {
+        Ok(_) if socket_written == socket_payload.len() && socket_readback == *socket_payload => {
+            print_socket_ok(ctx, "stream read");
+        }
+        Ok(_) => {
+            print_socket_count_mismatch(
+                ctx,
+                "stream read count",
+                socket_payload.len(),
+                socket_written,
+            );
+            return;
+        }
+        Err(e) => {
+            print_socket_error(ctx, "stream read", e);
+            return;
+        }
+    }
+
+    let mut datagram0 = 0u32;
+    let mut datagram1 = 0u32;
+    let datagram_payload = b"datagram";
+    let mut datagram_readback = [0u8; 4];
+    let mut datagram_actual = 0usize;
+    match crate::syscall::sys_socket_create(SOCKET_DATAGRAM, &mut datagram0, &mut datagram1) {
+        Ok(_) => print_socket_ok(ctx, "datagram create"),
+        Err(e) => {
+            print_socket_error(ctx, "datagram create", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_socket_write(
+        datagram0,
+        0,
+        datagram_payload.as_ptr() as usize,
+        datagram_payload.len(),
+        &mut datagram_actual,
+    ) {
+        Ok(_) if datagram_actual == datagram_payload.len() => {
+            print_socket_ok(ctx, "datagram write");
+        }
+        Ok(_) => {
+            print_socket_count_mismatch(
+                ctx,
+                "datagram write count",
+                datagram_payload.len(),
+                datagram_actual,
+            );
+            return;
+        }
+        Err(e) => {
+            print_socket_error(ctx, "datagram write", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_socket_read(
+        datagram1,
+        0,
+        datagram_readback.as_mut_ptr() as usize,
+        datagram_readback.len(),
+        &mut datagram_actual,
+    ) {
+        Ok(_) if datagram_actual == datagram_readback.len() && datagram_readback == *b"data" => {
+            print_socket_ok(ctx, "datagram truncate read");
+        }
+        Ok(_) => {
+            print_socket_count_mismatch(
+                ctx,
+                "datagram truncate count",
+                datagram_readback.len(),
+                datagram_actual,
+            );
+            return;
+        }
+        Err(e) => {
+            print_socket_error(ctx, "datagram truncate read", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_socket_read(
+        datagram1,
+        0,
+        datagram_readback.as_mut_ptr() as usize,
+        datagram_readback.len(),
+        &mut datagram_actual,
+    ) {
+        Err(crate::syscall::ZxError::ErrShouldWait) => {
+            print_socket_ok(ctx, "datagram tail discard");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] datagram tail discard unexpectedly read count=");
+            print_number(&mut ctx.serial, datagram_actual as u32);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_socket_error(ctx, "datagram tail discard", e);
+            return;
+        }
+    }
+
+    let mut shared0 = 0u32;
+    let mut shared1 = 0u32;
+    let mut accepted = 0u32;
+    let shutdown_payload = b"x";
+    match crate::syscall::sys_socket_create(0, &mut shared0, &mut shared1) {
+        Ok(_) => print_socket_ok(ctx, "shared socket create"),
+        Err(e) => {
+            print_socket_error(ctx, "shared socket create", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_socket_share(socket0, shared0) {
+        Ok(_) => print_socket_ok(ctx, "socket share"),
+        Err(e) => {
+            print_socket_error(ctx, "socket share", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_socket_accept(socket1, &mut accepted) {
+        Ok(_) if accepted == shared0 => print_socket_ok(ctx, "socket accept"),
+        Ok(_) => {
+            ctx.serial.write_str("  [FAIL] socket accept expected=0x");
+            print_hex(&mut ctx.serial, shared0 as u64);
+            ctx.serial.write_str(", actual=0x");
+            print_hex(&mut ctx.serial, accepted as u64);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_socket_error(ctx, "socket accept", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_socket_shutdown(socket1, SOCKET_SHUTDOWN_READ) {
+        Ok(_) => print_socket_ok(ctx, "socket shutdown read"),
+        Err(e) => {
+            print_socket_error(ctx, "socket shutdown read", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_socket_write(
+        socket0,
+        0,
+        shutdown_payload.as_ptr() as usize,
+        shutdown_payload.len(),
+        &mut socket_written,
+    ) {
+        Err(crate::syscall::ZxError::ErrBadState) => {
+            print_socket_ok(ctx, "shutdown blocks peer write");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] shutdown blocks peer write unexpectedly wrote=");
+            print_number(&mut ctx.serial, socket_written as u32);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_socket_error(ctx, "shutdown blocks peer write", e);
+            return;
+        }
+    }
+
+    let _ = crate::syscall::sys_handle_close(socket0);
+    let _ = crate::syscall::sys_handle_close(socket1);
+    let _ = crate::syscall::sys_handle_close(datagram0);
+    let _ = crate::syscall::sys_handle_close(datagram1);
+    let _ = crate::syscall::sys_handle_close(shared0);
+    let _ = crate::syscall::sys_handle_close(shared1);
+    ctx.serial
+        .write_str("[OK] socket kernel object tests completed\n");
+
+    ctx.serial
         .write_str("[TEST] Testing Zircon process/thread/wait calls... ");
     #[repr(C)]
     struct ShellWaitItem {
@@ -1129,6 +1470,45 @@ fn print_hex(serial: &mut Serial, num: u64) {
     for j in (0..i).rev() {
         serial.write_byte(buf[j]);
     }
+}
+
+fn print_zx_error(serial: &mut Serial, err: crate::syscall::ZxError) {
+    let code = err as i32;
+    if code < 0 {
+        serial.write_str("-");
+        print_number(serial, (-code) as u32);
+    } else {
+        print_number(serial, code as u32);
+    }
+}
+
+fn print_socket_ok(ctx: &mut ShellContext, label: &str) {
+    ctx.serial.write_str("  [OK] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str("\n");
+}
+
+fn print_socket_error(ctx: &mut ShellContext, label: &str, err: crate::syscall::ZxError) {
+    ctx.serial.write_str("  [FAIL] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str(" error=");
+    print_zx_error(&mut ctx.serial, err);
+    ctx.serial.write_str("\n");
+}
+
+fn print_socket_count_mismatch(
+    ctx: &mut ShellContext,
+    label: &str,
+    expected: usize,
+    actual: usize,
+) {
+    ctx.serial.write_str("  [FAIL] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str(" expected=");
+    print_number(&mut ctx.serial, expected as u32);
+    ctx.serial.write_str(", actual=");
+    print_number(&mut ctx.serial, actual as u32);
+    ctx.serial.write_str("\n");
 }
 
 fn print_memory_syscall_snapshot(ctx: &mut ShellContext, label: &str) {

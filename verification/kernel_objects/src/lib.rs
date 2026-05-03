@@ -3,6 +3,7 @@ use vstd::prelude::*;
 verus! {
 
 include!("../../../src/kernel_objects/object_logic_shared.rs");
+include!("../../../src/kernel_objects/socket_logic_shared.rs");
 
 pub const PAGE_SIZE: usize = 4096;
 pub const MAX_HANDLES_PER_PROCESS: usize = 1024;
@@ -10,7 +11,18 @@ pub const INVALID_HANDLE: u32 = 0xffff_ffff;
 pub const MAX_CHANNEL_MSG_SIZE: usize = 65536;
 pub const MAX_CHANNEL_MSG_HANDLES: usize = 64;
 pub const CHANNEL_SIGNAL_READABLE: u32 = 1;
+pub const CHANNEL_SIGNAL_WRITABLE: u32 = 2;
 pub const CHANNEL_SIGNAL_PEER_CLOSED: u32 = 4;
+pub const SOCKET_SIZE: usize = 128 * 2048;
+pub const SOCKET_DATAGRAM: u32 = 1;
+pub const SOCKET_CREATE_MASK: u32 = SOCKET_DATAGRAM;
+pub const SOCKET_PEEK: u32 = 1 << 3;
+pub const SOCKET_READ_OPTIONS_MASK: u32 = SOCKET_PEEK;
+pub const SOCKET_SHUTDOWN_WRITE: u32 = 1;
+pub const SOCKET_SHUTDOWN_READ: u32 = 1 << 1;
+pub const SOCKET_SHUTDOWN_MASK: u32 = SOCKET_SHUTDOWN_WRITE | SOCKET_SHUTDOWN_READ;
+pub const SOCKET_SIGNAL_READ_THRESHOLD: u32 = 1 << 10;
+pub const SOCKET_SIGNAL_WRITE_THRESHOLD: u32 = 1 << 11;
 pub const MAX_THREADS: usize = 16;
 pub const THREAD_EMPTY: u8 = 0;
 pub const THREAD_READY: u8 = 1;
@@ -170,6 +182,81 @@ spec fn object_signal_update_spec(current: u32, clear_mask: u32, set_mask: u32) 
     (current & !clear_mask) | set_mask
 }
 
+spec fn socket_options_valid_spec(options: u32, mask: u32) -> bool {
+    (options & !mask) == 0
+}
+
+spec fn socket_mask_options_spec(options: u32, mask: u32) -> u32 {
+    options & mask
+}
+
+spec fn socket_ring_index_spec(read_pos: int, offset: int, capacity: int) -> int {
+    if capacity <= 0 {
+        0
+    } else {
+        (read_pos % capacity + offset % capacity) % capacity
+    }
+}
+
+spec fn socket_remaining_capacity_spec(len: int, capacity: int) -> int {
+    if len >= capacity {
+        0
+    } else {
+        capacity - len
+    }
+}
+
+spec fn socket_min_count_spec(left: int, right: int) -> int {
+    if left <= right {
+        left
+    } else {
+        right
+    }
+}
+
+spec fn socket_threshold_met_spec(threshold: int, observed: int) -> bool {
+    threshold != 0 && observed >= threshold
+}
+
+spec fn socket_refresh_read_signals_spec(
+    signals: u32,
+    len: int,
+    threshold: int,
+    readable_signal: u32,
+    threshold_signal: u32,
+) -> u32 {
+    let readable_updated = if len == 0 {
+        signals & !readable_signal
+    } else {
+        signals | readable_signal
+    };
+    if socket_threshold_met_spec(threshold, len) {
+        readable_updated | threshold_signal
+    } else {
+        readable_updated & !threshold_signal
+    }
+}
+
+spec fn socket_refresh_write_signals_spec(
+    signals: u32,
+    write_disabled: bool,
+    remaining: int,
+    threshold: int,
+    writable_signal: u32,
+    threshold_signal: u32,
+) -> u32 {
+    let writable_updated = if write_disabled || remaining == 0 {
+        signals & !writable_signal
+    } else {
+        signals | writable_signal
+    };
+    if socket_threshold_met_spec(threshold, remaining) {
+        writable_updated | threshold_signal
+    } else {
+        writable_updated & !threshold_signal
+    }
+}
+
 fn ko_pages(size: usize, page_size: usize) -> (out: usize)
     ensures
         out as int == pages_spec(size as int, page_size as int),
@@ -248,6 +335,107 @@ fn ko_signal_update(current: u32, clear_mask: u32, set_mask: u32) -> (out: u32)
         out == object_signal_update_spec(current, clear_mask, set_mask),
 {
     smros_ko_signal_update_body!(current, clear_mask, set_mask)
+}
+
+fn socket_options_valid(options: u32, mask: u32) -> (out: bool)
+    ensures
+        out == socket_options_valid_spec(options, mask),
+{
+    smros_socket_options_valid_body!(options, mask)
+}
+
+fn socket_mask_options(options: u32, mask: u32) -> (out: u32)
+    ensures
+        out == socket_mask_options_spec(options, mask),
+{
+    smros_socket_mask_options_body!(options, mask)
+}
+
+fn socket_ring_index(read_pos: usize, offset: usize, capacity: usize) -> (out: usize)
+    ensures
+        capacity == 0 ==> out == 0,
+        capacity > 0 ==> out < capacity,
+{
+    assert(capacity > 0 ==> read_pos % capacity < capacity);
+    assert(capacity > 0 ==> offset % capacity < capacity);
+    smros_socket_ring_index_body!(read_pos, offset, capacity)
+}
+
+fn socket_remaining_capacity(len: usize, capacity: usize) -> (out: usize)
+    ensures
+        out as int == socket_remaining_capacity_spec(len as int, capacity as int),
+        out <= capacity,
+{
+    smros_socket_remaining_capacity_body!(len, capacity)
+}
+
+fn socket_min_count(left: usize, right: usize) -> (out: usize)
+    ensures
+        out as int == socket_min_count_spec(left as int, right as int),
+        out <= left,
+        out <= right,
+{
+    smros_socket_min_count_body!(left, right)
+}
+
+fn socket_threshold_met(threshold: usize, observed: usize) -> (out: bool)
+    ensures
+        out == socket_threshold_met_spec(threshold as int, observed as int),
+{
+    smros_socket_threshold_met_body!(threshold, observed)
+}
+
+fn socket_refresh_read_signals(
+    signals: u32,
+    len: usize,
+    threshold: usize,
+    readable_signal: u32,
+    threshold_signal: u32,
+) -> (out: u32)
+    ensures
+        out == socket_refresh_read_signals_spec(
+            signals,
+            len as int,
+            threshold as int,
+            readable_signal,
+            threshold_signal,
+        ),
+{
+    smros_socket_refresh_read_signals_body!(
+        signals,
+        len,
+        threshold,
+        readable_signal,
+        threshold_signal
+    )
+}
+
+fn socket_refresh_write_signals(
+    signals: u32,
+    write_disabled: bool,
+    remaining: usize,
+    threshold: usize,
+    writable_signal: u32,
+    threshold_signal: u32,
+) -> (out: u32)
+    ensures
+        out == socket_refresh_write_signals_spec(
+            signals,
+            write_disabled,
+            remaining as int,
+            threshold as int,
+            writable_signal,
+            threshold_signal,
+        ),
+{
+    smros_socket_refresh_write_signals_body!(
+        signals,
+        write_disabled,
+        remaining,
+        threshold,
+        writable_signal,
+        threshold_signal
+    )
 }
 
 fn handle_get_rights_model(entries: &Vec<HandleEntryModel>, handle: u32) -> (out: Option<u32>)
@@ -634,6 +822,178 @@ proof fn scheduler_smoke() {
     assert(!scheduler_should_preempt_spec(0, 1));
     assert(scheduler_can_run_spec(1, 2, true));
     assert(!scheduler_can_run_spec(0, 2, true));
+}
+
+fn socket_option_masks_smoke() {
+    assert(socket_options_valid_spec(0, SOCKET_CREATE_MASK)) by(bit_vector);
+    assert(socket_options_valid_spec(SOCKET_DATAGRAM, SOCKET_CREATE_MASK)) by(bit_vector);
+    assert(!socket_options_valid_spec(SOCKET_PEEK, SOCKET_CREATE_MASK)) by(bit_vector);
+    assert(socket_options_valid_spec(0, SOCKET_READ_OPTIONS_MASK)) by(bit_vector);
+    assert(socket_options_valid_spec(SOCKET_PEEK, SOCKET_READ_OPTIONS_MASK)) by(bit_vector);
+    assert(!socket_options_valid_spec(SOCKET_DATAGRAM, SOCKET_READ_OPTIONS_MASK)) by(bit_vector);
+    assert(socket_mask_options_spec(
+        SOCKET_SHUTDOWN_READ | SOCKET_SHUTDOWN_WRITE | SOCKET_PEEK,
+        SOCKET_SHUTDOWN_MASK,
+    ) == SOCKET_SHUTDOWN_MASK) by(bit_vector);
+
+    let create_empty = socket_options_valid(0, SOCKET_CREATE_MASK);
+    let create_datagram = socket_options_valid(SOCKET_DATAGRAM, SOCKET_CREATE_MASK);
+    let create_peek = socket_options_valid(SOCKET_PEEK, SOCKET_CREATE_MASK);
+    let read_empty = socket_options_valid(0, SOCKET_READ_OPTIONS_MASK);
+    let read_peek = socket_options_valid(SOCKET_PEEK, SOCKET_READ_OPTIONS_MASK);
+    let read_datagram = socket_options_valid(SOCKET_DATAGRAM, SOCKET_READ_OPTIONS_MASK);
+    let shutdown_masked = socket_mask_options(
+        SOCKET_SHUTDOWN_READ | SOCKET_SHUTDOWN_WRITE | SOCKET_PEEK,
+        SOCKET_SHUTDOWN_MASK,
+    );
+
+    assert(create_empty);
+    assert(create_datagram);
+    assert(!create_peek);
+    assert(read_empty);
+    assert(read_peek);
+    assert(!read_datagram);
+    assert(shutdown_masked == SOCKET_SHUTDOWN_MASK);
+}
+
+fn socket_threshold_smoke() {
+    let socket_size = SOCKET_SIZE;
+    let before_full = SOCKET_SIZE - 1;
+    let zero_threshold = socket_threshold_met(0, SOCKET_SIZE);
+    let exact_threshold = socket_threshold_met(1, 1);
+    let threshold_with_space = socket_threshold_met(1, SOCKET_SIZE);
+    let threshold_before_full = socket_threshold_met(socket_size, before_full);
+
+    assert(!zero_threshold);
+    assert(exact_threshold);
+    assert(threshold_with_space);
+    assert(!threshold_before_full);
+}
+
+fn socket_capacity_smoke() {
+    let socket_size = SOCKET_SIZE;
+    let over_socket_size = SOCKET_SIZE + 1;
+    let last_socket_index = SOCKET_SIZE - 1;
+    let empty_remaining = socket_remaining_capacity(0, SOCKET_SIZE);
+    let full_remaining = socket_remaining_capacity(SOCKET_SIZE, SOCKET_SIZE);
+    let overfull_remaining = socket_remaining_capacity(over_socket_size, socket_size);
+    let small_min = socket_min_count(9, SOCKET_SIZE);
+    let capped_min = socket_min_count(over_socket_size, socket_size);
+    let wrapped_index = socket_ring_index(last_socket_index, 1, socket_size);
+
+    assert(empty_remaining == SOCKET_SIZE);
+    assert(full_remaining == 0);
+    assert(overfull_remaining == 0);
+    assert(small_min == 9);
+    assert(capped_min == socket_size);
+    assert(wrapped_index < socket_size);
+}
+
+fn socket_signal_smoke() {
+    assert(CHANNEL_SIGNAL_READABLE & SOCKET_SIGNAL_READ_THRESHOLD == 0) by(bit_vector);
+    assert(CHANNEL_SIGNAL_WRITABLE & SOCKET_SIGNAL_WRITE_THRESHOLD == 0) by(bit_vector);
+
+    let read_empty = socket_refresh_read_signals(
+        CHANNEL_SIGNAL_READABLE | SOCKET_SIGNAL_READ_THRESHOLD,
+        0,
+        1,
+        CHANNEL_SIGNAL_READABLE,
+        SOCKET_SIGNAL_READ_THRESHOLD,
+    );
+    assert(read_empty
+        == socket_refresh_read_signals_spec(
+            CHANNEL_SIGNAL_READABLE | SOCKET_SIGNAL_READ_THRESHOLD,
+            0,
+            1,
+            CHANNEL_SIGNAL_READABLE,
+            SOCKET_SIGNAL_READ_THRESHOLD,
+        ));
+    assert(read_empty
+        == socket_refresh_read_signals_spec(
+            CHANNEL_SIGNAL_READABLE | SOCKET_SIGNAL_READ_THRESHOLD,
+            0,
+            1,
+            CHANNEL_SIGNAL_READABLE,
+            SOCKET_SIGNAL_READ_THRESHOLD,
+        ));
+
+    let read_ready = socket_refresh_read_signals(
+        0,
+        2,
+        1,
+        CHANNEL_SIGNAL_READABLE,
+        SOCKET_SIGNAL_READ_THRESHOLD,
+    );
+    assert(read_ready
+        == socket_refresh_read_signals_spec(
+            0,
+            2,
+            1,
+            CHANNEL_SIGNAL_READABLE,
+            SOCKET_SIGNAL_READ_THRESHOLD,
+        ));
+    assert(read_ready
+        == socket_refresh_read_signals_spec(
+            0,
+            2,
+            1,
+            CHANNEL_SIGNAL_READABLE,
+            SOCKET_SIGNAL_READ_THRESHOLD,
+        ));
+
+    let write_blocked = socket_refresh_write_signals(
+        CHANNEL_SIGNAL_WRITABLE | SOCKET_SIGNAL_WRITE_THRESHOLD,
+        true,
+        SOCKET_SIZE,
+        1,
+        CHANNEL_SIGNAL_WRITABLE,
+        SOCKET_SIGNAL_WRITE_THRESHOLD,
+    );
+    assert(write_blocked
+        == socket_refresh_write_signals_spec(
+            CHANNEL_SIGNAL_WRITABLE | SOCKET_SIGNAL_WRITE_THRESHOLD,
+            true,
+            SOCKET_SIZE as int,
+            1,
+            CHANNEL_SIGNAL_WRITABLE,
+            SOCKET_SIGNAL_WRITE_THRESHOLD,
+        ));
+    assert(write_blocked
+        == socket_refresh_write_signals_spec(
+            CHANNEL_SIGNAL_WRITABLE | SOCKET_SIGNAL_WRITE_THRESHOLD,
+            true,
+            SOCKET_SIZE as int,
+            1,
+            CHANNEL_SIGNAL_WRITABLE,
+            SOCKET_SIGNAL_WRITE_THRESHOLD,
+        ));
+
+    let write_ready = socket_refresh_write_signals(
+        0,
+        false,
+        SOCKET_SIZE,
+        1,
+        CHANNEL_SIGNAL_WRITABLE,
+        SOCKET_SIGNAL_WRITE_THRESHOLD,
+    );
+    assert(write_ready
+        == socket_refresh_write_signals_spec(
+            0,
+            false,
+            SOCKET_SIZE as int,
+            1,
+            CHANNEL_SIGNAL_WRITABLE,
+            SOCKET_SIGNAL_WRITE_THRESHOLD,
+        ));
+    assert(write_ready
+        == socket_refresh_write_signals_spec(
+            0,
+            false,
+            SOCKET_SIZE as int,
+            1,
+            CHANNEL_SIGNAL_WRITABLE,
+            SOCKET_SIGNAL_WRITE_THRESHOLD,
+        ));
 }
 
 proof fn kernel_object_mod_has_no_pure_runtime_obligation() {

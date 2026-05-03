@@ -142,6 +142,12 @@ _start:
     ldr     x1, =exception_vectors
     msr     vbar_el1, x1
 
+    // Enable FP/SIMD before Rust code can emit vector instructions.
+    mrs     x1, cpacr_el1
+    orr     x1, x1, #(0x3 << 20)
+    msr     cpacr_el1, x1
+    isb
+
     // Branch to Rust kernel entry point
     bl      kernel_main
 

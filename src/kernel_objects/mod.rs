@@ -19,6 +19,8 @@ pub mod compat;
 pub mod handle;
 pub(crate) mod object_logic;
 pub mod scheduler;
+pub mod socket;
+pub(crate) mod socket_logic;
 pub mod thread;
 pub mod types;
 pub mod vmar;
