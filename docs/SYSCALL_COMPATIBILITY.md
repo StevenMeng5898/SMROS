@@ -9,6 +9,7 @@ This document describes the syscall layer as it exists in the current source tre
 - `src/syscall/syscall_dispatch.rs`
 - `src/syscall/syscall_handler.rs`
 - `src/kernel_objects/channel.rs`
+- `src/kernel_objects/compat.rs`
 - `src/main.rs`
 
 ## Current Architecture
@@ -50,75 +51,41 @@ So the active `svc` path now exposes both the Linux dispatcher and the Zircon di
 
 ## Linux Syscalls Currently Dispatched By `dispatch_linux_syscall()`
 
-| Syscall | Current Behavior |
-|---------|------------------|
-| `mmap` | partial anonymous mapping support |
-| `munmap` | validation plus placeholder success |
-| `mprotect` | placeholder success |
-| `brk` | partial global heap tracking |
-| `mremap` | partial relocate-or-return-old behavior |
-| `fork` | creates a demo process through the process manager |
-| `exit` | placeholder success |
-| `exit_group` | placeholder success |
-| `nanosleep` | validates request pointer and returns success |
-| `clock_gettime` | writes a simple realtime/monotonic `timespec` |
-| `clone` | creates a demo process through the process manager |
-| `execve` | validates path pointer and returns success |
-| `wait4` | writes a zero wait status when provided |
-| `getpid` | returns `1` |
-| `getppid` | returns `0` |
-| `kill` | terminates a process through the process manager |
-| `gettid` | returns `1` |
+The dispatcher now imports the ARM64 Linux syscall interface from the sample tree as named `ARM64_SYS_*` constants. All 301 non-commented sample syscall numbers are represented in the dispatcher. Implemented entries are routed to modeled SMROS behavior; recognized but unsupported entries return `ENOSYS` explicitly instead of falling through as unknown numbers.
 
-These are the only Linux-style syscalls reachable through the current active `svc` bridge.
+Implemented groups:
+
+- Memory: `mmap`, `munmap`, `mprotect`, `mremap`, `brk`, `madvise`
+- Process/task: `clone`, `fork`, `vfork`, `execve`, `wait4`, `exit`, `exit_group`, `kill`, `tkill`, `tgkill`
+- Identity/scheduler: `getpid`, `getppid`, `gettid`, `getuid`, `geteuid`, `getgid`, `getegid`, `sched_yield`, `set_tid_address`
+- Time/resource: `nanosleep`, `clock_gettime`, `clock_getres`, `clock_nanosleep`, `gettimeofday`, `times`, `getrusage`, `prlimit64`, `sysinfo`
+- Basic I/O: `read`, `write`, `close`, `pipe2`, `dup`, `dup3`, `fcntl`, `openat`, vector I/O, `sendfile`, `copy_file_range`
+- Modeled Linux objects: file descriptors backed by `LinuxFile`, `LinuxPipe`, TCP/UDP/raw/netlink socket categories, `eventfd`, `signalfd`, `timerfd`, `inotify`, `memfd`, semaphores, shared memory, and message queues
+- Misc bring-up helpers: `getrandom`, `uname`, `umask`, robust-list stubs
 
 ## Linux Compatibility Caveats
 
-- The Linux syscall surface is not complete.
-- The numbering is still experimental and should not be treated as a stable ARM64 ABI promise.
-- There is no general file-descriptor layer behind `open/read/write/close`.
+- The Linux syscall interface is covered at the dispatcher level, but many filesystem, networking, IPC, io_uring, module, and namespace syscalls intentionally return `ENOSYS`.
+- The file-descriptor layer is still a small compatibility table, mainly for stdio and modeled pipes.
 - The current user-level smoke tests do not validate a full Linux userspace ABI.
 
 ## Zircon Side
 
 ## Zircon Syscalls Currently Dispatched By `dispatch_zircon_syscall()`
 
-| Syscall | Current Behavior |
-|---------|------------------|
-| `HandleClose` | validates and releases known memory/channel/task handles |
-| `HandleCloseMany` | closes a user-provided handle array |
-| `HandleDuplicate` | returns a duplicated placeholder handle value |
-| `HandleReplace` | validates and returns the handle value |
-| `ObjectGetInfo` | validates object handle and reports a small metadata word |
-| `ObjectGetProperty` | reads the modeled object property value |
-| `ObjectSetProperty` | writes the modeled object property value |
-| `ObjectSignal` | updates modeled object signal bits |
-| `ObjectWaitOne` | checks modeled pending signals |
-| `ObjectWaitMany` | checks a user-provided wait item array |
-| `ThreadCreate` | creates a modeled thread handle under a modeled process |
-| `ThreadStart` | marks a modeled thread as started |
-| `ThreadExit` | returns success for the current modeled thread |
-| `TaskKill` | marks modeled process/thread handles terminated or closes other known handles |
-| `VmoCreate` | partial VMO construction |
-| `VmoRead` | copies VMO bytes into the supplied buffer |
-| `VmoWrite` | copies supplied bytes into the VMO |
-| `VmoGetSize` | reports tracked VMO size |
-| `VmoSetSize` | resizes tracked VMO state |
-| `VmoOpRange` | validates and applies supported VMO range operations |
-| `VmarMap` | bookkeeping-only map path |
-| `VmarUnmap` | removes tracked VMAR mappings |
-| `VmarAllocate` | creates a tracked child VMAR |
-| `VmarProtect` | updates tracked VMAR mapping permissions |
-| `VmarDestroy` | destroys tracked VMAR state |
-| `VmarUnmapHandleCloseThreadExit` | validation plus placeholder cleanup |
-| `ProcessCreate` | creates modeled process and root VMAR handles |
-| `ProcessExit` | marks modeled process handles terminated |
-| `ChannelCreate` | creates a pair of channel endpoint handles |
-| `ChannelRead` | copies queued channel message bytes/handles into user buffers |
-| `ChannelWrite` | copies user buffers into a queued channel message |
-| `ChannelCallNoretry` | modeled write-then-read channel call without handle transfer |
-| `Nanosleep` | returns success |
-| `ClockGetMonotonic` | returns scheduler ticks as nanoseconds |
+The dispatcher uses the sample `zx-syscall-numbers.h` numbering. All 167 non-commented sample syscall defines, including `ZX_SYS_COUNT`, are represented in the enum and explicit dispatch table. Implemented entries are routed to concrete or modeled behavior; recognized but unsupported hardware/platform entries return `ERR_NOT_SUPPORTED`.
+
+Implemented groups:
+
+- Handles/objects: close, close-many, duplicate, replace, get/set property, get-info, signal, signal-peer, wait-one, wait-many, wait-async validation
+- Tasks: process/thread create/start/exit, process read/write-memory placeholders, task kill, suspend-token, job create/policy/critical placeholders
+- Memory objects: VMO create/read/write/get-size/set-size/op-range/create-child/create-physical/create-contiguous/cache-policy/replace-as-executable
+- VMAR: allocate, map, unmap, protect, destroy, unmap-handle-close-thread-exit
+- IPC/lightweight objects: channels, sockets, FIFOs, events, eventpairs, ports, timers, debug logs, resources, streams and stream vector I/O
+- Platform and device-shaped objects: IOMMU, BTI, PMT, interrupts, PCI devices, guests, VCPUs, profiles, pagers, framebuffer, ktrace, and mtrace interfaces
+- Time/random/debug: clock get/create/read/update/adjust, monotonic clock, nanosleep, CPRNG draw/add-entropy, debug read/write/send-command
+
+Unsupported but recognized calls remain explicit for operations that cannot be meaningfully modeled yet, such as `ioports_request`, privileged power-control details, and hardware effects behind PCI/interrupt/hypervisor calls.
 
 These are reachable through direct Rust calls to `dispatch_zircon_syscall()` and through the active `svc` bridge by using raw syscall numbers starting at `1000`.
 
@@ -137,14 +104,15 @@ The channel object layer is present, initialized during boot, and routed through
 
 The current syscall layer is best understood as:
 
-- a partially functional Linux-style dispatch path for bring-up
-- a routed Zircon-style object API for kernel-side experimentation
+- a Linux ARM64 dispatch path with explicit interface coverage and modeled behavior for common bring-up calls
+- a Zircon dispatch path aligned to the sample syscall numbers
+- a lightweight compatibility object table for object types that do not yet have full subsystems
 - a larger amount of future-facing scaffolding for EL0 work
 
 It is not yet:
 
-- a complete Linux userspace ABI
-- a complete Zircon syscall ABI or rights model
+- a complete Linux userspace implementation
+- a complete Zircon rights/security model
 - a stable compatibility contract for external binaries
 
 ## Live Boot Reality
@@ -161,5 +129,6 @@ That means the current boot flow exercises the syscall layer mainly as an intern
 
 - The shell still calls most syscall tests directly from EL1 rather than as isolated EL0 userspace.
 - Some process/thread semantics are modeled records, not full scheduler integration.
-- File-descriptor style Linux syscalls are not implemented as a general subsystem.
+- File-descriptor style Linux syscalls are modeled only where needed for stdio and compatibility pipes.
 - Handle ownership and lifetime tracking are still simplified.
+- Platform/hardware-heavy Zircon calls are interface-covered but intentionally return `ERR_NOT_SUPPORTED`.

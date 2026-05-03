@@ -8,6 +8,7 @@ This document describes the current `src/kernel_objects/` layout and how those m
 src/kernel_objects/
 ├── mod.rs
 ├── channel.rs
+├── compat.rs
 ├── handle.rs
 ├── scheduler.rs
 ├── thread.rs
@@ -25,6 +26,7 @@ src/kernel_objects/
 | `scheduler.rs` | global scheduler, idle thread, context-switch entry points, tick accounting | live scheduling path used to start the shell |
 | `types.rs` | shared handle/object enums, rights, VM flags, Zircon-style errors, page helpers | shared definitions for the syscall and object layers |
 | `handle.rs` | fixed-size handle table and handle duplication/removal helpers | currently a simple in-kernel table, not a full per-process capability system |
+| `compat.rs` | lightweight compatibility objects with handle lifetime, peer links, signals, properties, and byte queues | backs Zircon object interfaces that do not yet have full subsystems |
 | `vmo.rs` | VMO constructors and operations | backing object model for memory syscalls |
 | `vmar.rs` | VMAR bookkeeping and mapping/protection helpers | bookkeeping layer for Zircon-style VM regions |
 | `channel.rs` | channel object, global channel table, channel syscall wrappers | live channel subsystem initialization plus syscall helpers |
@@ -93,16 +95,32 @@ This is one of the most active modules in the current kernel: the shell reaches 
 
 These definitions are used both by the object layer and by `src/syscall/syscall.rs`.
 
+`ObjectType` now includes the sample Zircon object families (`EventPair`, `Fifo`, `Stream`, `DebugLog`, `Clock`, `Job`, `SuspendToken`, `Exception`, `Iommu`, `Bti`, `Pmt`, `PciDevice`, `Guest`, `Vcpu`, `Profile`, `Pager`, framebuffer/trace objects) and the Linux object families needed by the sample tree (`LinuxFile`, `LinuxPipe`, TCP/UDP/raw/netlink sockets, `EventFd`, `SignalFd`, `TimerFd`, `Inotify`, `MemFd`, `PidFd`, IPC/semaphore/shared-memory categories).
+
 ## `handle.rs`
 
 `handle.rs` currently provides a simple fixed-size handle table with:
 
 - `add()`
+- `add_existing()`
 - `remove()`
 - `get_rights()`
+- `contains()`
 - `duplicate()`
 
 This is intentionally simple and currently closer to a global kernel utility than a complete per-process capability implementation.
+
+## `compat.rs`
+
+`compat.rs` provides a small global compatibility object table for interface coverage. It supports:
+
+- single objects and peer pairs
+- handle close and existence checks
+- signal update/read state
+- one `u64` property value per object
+- bounded byte queues for modeled sockets, FIFOs, streams, Linux files, Linux pipes, and Linux socket categories
+
+This module is deliberately not a substitute for full subsystems such as PCI, interrupts, networking, or a real per-process capability model. It gives common Linux/Zircon syscall entrypoints deterministic behavior while unsupported platform-heavy calls still return explicit unsupported errors.
 
 ## `vmo.rs`
 
@@ -166,6 +184,7 @@ The current boot path directly uses:
 - `vmo.rs`
 - `vmar.rs`
 - `channel.rs`
+- `compat.rs`
 
 ### User-Level Scaffolding
 
@@ -180,6 +199,7 @@ The refactor into a dedicated `kernel_objects/` directory is complete at the sou
 
 - threads and the scheduler are live
 - channels are initialized and usable as kernel objects
+- compatibility objects back events, eventpairs, sockets, FIFOs, ports, timers, clocks, debug logs, resources, streams, suspend tokens, jobs, profiles, pagers, IOMMU/BTI/PMT, interrupts, PCI devices, guests, VCPUs, and modeled Linux file/socket/IPC descriptor objects at an interface level
 - VMO/VMAR objects exist and back syscall helpers
 - handle management remains simplified
 - object-to-process ownership is not yet fully modeled

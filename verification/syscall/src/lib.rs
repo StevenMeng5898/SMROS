@@ -155,6 +155,14 @@ spec fn linux_clock_id_supported_spec(clock_id: int) -> bool {
     0 <= clock_id && clock_id <= 1
 }
 
+spec fn linux_syscall_interface_known_spec(syscall_num: int) -> bool {
+    0 <= syscall_num && (syscall_num <= 446 || syscall_num == 600)
+}
+
+spec fn zircon_syscall_interface_known_spec(syscall_num: int) -> bool {
+    0 <= syscall_num && (syscall_num <= 154 || (183 <= syscall_num && syscall_num <= 211))
+}
+
 fn checked_end(addr: usize, len: usize) -> (out: Option<usize>)
     ensures
         match out {
@@ -331,6 +339,20 @@ fn linux_clock_id_supported(clock_id: usize) -> (out: bool)
         out == linux_clock_id_supported_spec(clock_id as int),
 {
     smros_linux_clock_id_supported_body!(clock_id)
+}
+
+fn linux_syscall_interface_known(syscall_num: u32) -> (out: bool)
+    ensures
+        out == linux_syscall_interface_known_spec(syscall_num as int),
+{
+    smros_linux_syscall_interface_known_body!(syscall_num)
+}
+
+fn zircon_syscall_interface_known(syscall_num: u32) -> (out: bool)
+    ensures
+        out == zircon_syscall_interface_known_spec(syscall_num as int),
+{
+    smros_zircon_syscall_interface_known_body!(syscall_num)
 }
 
 fn linux_errno_code_to_u64(errno: u32) -> (out: u64)
@@ -516,6 +538,19 @@ proof fn syscall_zircon_logic_smoke() {
     assert(linux_clock_id_supported_spec(0));
     assert(linux_clock_id_supported_spec(1));
     assert(!linux_clock_id_supported_spec(2));
+
+    assert(linux_syscall_interface_known_spec(0));
+    assert(linux_syscall_interface_known_spec(446));
+    assert(linux_syscall_interface_known_spec(600));
+    assert(!linux_syscall_interface_known_spec(447));
+    assert(!linux_syscall_interface_known_spec(601));
+
+    assert(zircon_syscall_interface_known_spec(0));
+    assert(zircon_syscall_interface_known_spec(154));
+    assert(zircon_syscall_interface_known_spec(183));
+    assert(zircon_syscall_interface_known_spec(211));
+    assert(!zircon_syscall_interface_known_spec(155));
+    assert(!zircon_syscall_interface_known_spec(212));
 }
 
 proof fn syscall_address_logic_smoke() {

@@ -162,6 +162,14 @@ spec fn ready_state(state: u8) -> bool {
     state as int == THREAD_READY as int
 }
 
+spec fn handle_is_valid_spec(handle: int, invalid: int) -> bool {
+    handle != 0 && handle != invalid
+}
+
+spec fn object_signal_update_spec(current: u32, clear_mask: u32, set_mask: u32) -> u32 {
+    (current & !clear_mask) | set_mask
+}
+
 fn ko_pages(size: usize, page_size: usize) -> (out: usize)
     ensures
         out as int == pages_spec(size as int, page_size as int),
@@ -226,6 +234,20 @@ fn ko_intersect_rights(requested: u32, existing: u32) -> (out: u32)
         out == requested & existing,
 {
     smros_ko_intersect_rights_body!(requested, existing)
+}
+
+fn ko_handle_is_valid(handle: u32, invalid: u32) -> (out: bool)
+    ensures
+        out == handle_is_valid_spec(handle as int, invalid as int),
+{
+    smros_ko_handle_is_valid_body!(handle, invalid)
+}
+
+fn ko_signal_update(current: u32, clear_mask: u32, set_mask: u32) -> (out: u32)
+    ensures
+        out == object_signal_update_spec(current, clear_mask, set_mask),
+{
+    smros_ko_signal_update_body!(current, clear_mask, set_mask)
 }
 
 fn handle_get_rights_model(entries: &Vec<HandleEntryModel>, handle: u32) -> (out: Option<u32>)

@@ -46,6 +46,7 @@ use super::address_logic::{
 };
 use crate::kernel_lowlevel::memory::{process_manager, PageFrameAllocator, PAGE_SIZE};
 use crate::kernel_objects::channel;
+use crate::kernel_objects::compat;
 use crate::kernel_objects::scheduler;
 use crate::kernel_objects::vmar::Vmar;
 use crate::syscall::syscall_logic;
@@ -55,8 +56,8 @@ pub use crate::kernel_objects::channel::{
     sys_channel_call_noretry, sys_channel_create, sys_channel_read, sys_channel_write,
 };
 pub use crate::kernel_objects::{
-    pages, roundup_pages, HandleValue, MmuFlags, VmOptions, VmarFlags, Vmo, VmoOpType, VmoType,
-    ZxError, ZxResult, INVALID_HANDLE,
+    pages, roundup_pages, CachePolicy, HandleValue, MmuFlags, ObjectType, VmOptions, VmarFlags,
+    Vmo, VmoCloneFlags, VmoOpType, VmoType, ZxError, ZxResult, INVALID_HANDLE,
 };
 
 // Simple logging macros (placeholder for real logging)
@@ -117,26 +118,323 @@ const BRK_HEAP_LIMIT: usize = BRK_HEAP_START + (1024 * 1024);
 const ZIRCON_ROOT_VMAR_BASE: usize = 0x7000_0000;
 const ZIRCON_ROOT_VMAR_SIZE: usize = 0x1000_0000;
 const MEMORY_HANDLE_START: u32 = 0x1000;
+const ARM64_SYS_IO_SETUP: u32 = 0;
+const ARM64_SYS_IO_DESTROY: u32 = 1;
+const ARM64_SYS_IO_SUBMIT: u32 = 2;
+const ARM64_SYS_IO_CANCEL: u32 = 3;
+const ARM64_SYS_IO_GETEVENTS: u32 = 4;
+const ARM64_SYS_SETXATTR: u32 = 5;
+const ARM64_SYS_LSETXATTR: u32 = 6;
+const ARM64_SYS_FSETXATTR: u32 = 7;
+const ARM64_SYS_GETXATTR: u32 = 8;
+const ARM64_SYS_LGETXATTR: u32 = 9;
+const ARM64_SYS_FGETXATTR: u32 = 10;
+const ARM64_SYS_LISTXATTR: u32 = 11;
+const ARM64_SYS_LLISTXATTR: u32 = 12;
+const ARM64_SYS_FLISTXATTR: u32 = 13;
+const ARM64_SYS_REMOVEXATTR: u32 = 14;
+const ARM64_SYS_LREMOVEXATTR: u32 = 15;
+const ARM64_SYS_FREMOVEXATTR: u32 = 16;
+const ARM64_SYS_GETCWD: u32 = 17;
+const ARM64_SYS_EVENTFD2: u32 = 19;
+const ARM64_SYS_EPOLL_CREATE1: u32 = 20;
+const ARM64_SYS_EPOLL_CTL: u32 = 21;
+const ARM64_SYS_EPOLL_PWAIT: u32 = 22;
+const ARM64_SYS_INOTIFY_INIT1: u32 = 26;
+const ARM64_SYS_INOTIFY_ADD_WATCH: u32 = 27;
+const ARM64_SYS_INOTIFY_RM_WATCH: u32 = 28;
+const ARM64_SYS_OPENAT: u32 = 56;
+const ARM64_SYS_PIPE2: u32 = 59;
+const ARM64_SYS_GETDENTS64: u32 = 61;
 const ARM64_SYS_WRITE: u32 = 64;
+const ARM64_SYS_READ: u32 = 63;
+const ARM64_SYS_CLOSE: u32 = 57;
+const ARM64_SYS_DUP: u32 = 23;
+const ARM64_SYS_DUP3: u32 = 24;
+const ARM64_SYS_FCNTL: u32 = 25;
+const ARM64_SYS_IOCTL: u32 = 29;
+const ARM64_SYS_FLOCK: u32 = 32;
+const ARM64_SYS_MKNODAT: u32 = 33;
+const ARM64_SYS_MKDIRAT: u32 = 34;
+const ARM64_SYS_UNLINKAT: u32 = 35;
+const ARM64_SYS_SYMLINKAT: u32 = 36;
+const ARM64_SYS_LINKAT: u32 = 37;
+const ARM64_SYS_RENAMEAT: u32 = 38;
+const ARM64_SYS_UMOUNT2: u32 = 39;
+const ARM64_SYS_MOUNT: u32 = 40;
+const ARM64_SYS_PIVOT_ROOT: u32 = 41;
+const ARM64_SYS_NFSSERVCTL: u32 = 42;
+const ARM64_SYS_STATFS: u32 = 43;
+const ARM64_SYS_FSTATFS: u32 = 44;
+const ARM64_SYS_TRUNCATE: u32 = 45;
+const ARM64_SYS_FTRUNCATE: u32 = 46;
+const ARM64_SYS_FALLOCATE: u32 = 47;
+const ARM64_SYS_FACCESSAT: u32 = 48;
+const ARM64_SYS_CHDIR: u32 = 49;
+const ARM64_SYS_FCHDIR: u32 = 50;
+const ARM64_SYS_CHROOT: u32 = 51;
+const ARM64_SYS_FCHMOD: u32 = 52;
+const ARM64_SYS_FCHMODAT: u32 = 53;
+const ARM64_SYS_FCHOWNAT: u32 = 54;
+const ARM64_SYS_FCHOWN: u32 = 55;
+const ARM64_SYS_LSEEK: u32 = 62;
+const ARM64_SYS_READV: u32 = 65;
+const ARM64_SYS_WRITEV: u32 = 66;
+const ARM64_SYS_PREAD64: u32 = 67;
+const ARM64_SYS_PWRITE64: u32 = 68;
+const ARM64_SYS_PREADV: u32 = 69;
+const ARM64_SYS_PWRITEV: u32 = 70;
+const ARM64_SYS_SENDFILE: u32 = 71;
+const ARM64_SYS_PSELECT6: u32 = 72;
+const ARM64_SYS_PPOLL: u32 = 73;
+const ARM64_SYS_SIGNALFD4: u32 = 74;
+const ARM64_SYS_VMSPLICE: u32 = 75;
+const ARM64_SYS_SPLICE: u32 = 76;
+const ARM64_SYS_TEE: u32 = 77;
+const ARM64_SYS_READLINKAT: u32 = 78;
+const ARM64_SYS_NEWFSTATAT: u32 = 79;
+const ARM64_SYS_FSTATAT: u32 = ARM64_SYS_NEWFSTATAT;
+const ARM64_SYS_FSTAT: u32 = 80;
+const ARM64_SYS_SYNC: u32 = 81;
+const ARM64_SYS_FSYNC: u32 = 82;
+const ARM64_SYS_FDATASYNC: u32 = 83;
+const ARM64_SYS_SYNC_FILE_RANGE: u32 = 84;
+const ARM64_SYS_TIMERFD_CREATE: u32 = 85;
+const ARM64_SYS_TIMERFD_SETTIME: u32 = 86;
+const ARM64_SYS_TIMERFD_GETTIME: u32 = 87;
+const ARM64_SYS_UTIMENSAT: u32 = 88;
 const ARM64_SYS_EXIT: u32 = 93;
 const ARM64_SYS_EXIT_GROUP: u32 = 94;
+const ARM64_SYS_WAITID: u32 = 95;
+const ARM64_SYS_SET_TID_ADDRESS: u32 = 96;
+const ARM64_SYS_UNSHARE: u32 = 97;
+const ARM64_SYS_FUTEX: u32 = 98;
+const ARM64_SYS_SET_ROBUST_LIST: u32 = 99;
+const ARM64_SYS_GET_ROBUST_LIST: u32 = 100;
 const ARM64_SYS_NANOSLEEP: u32 = 101;
+const ARM64_SYS_GETITIMER: u32 = 102;
+const ARM64_SYS_SETITIMER: u32 = 103;
+const ARM64_SYS_TIMER_CREATE: u32 = 107;
+const ARM64_SYS_TIMER_GETTIME: u32 = 108;
+const ARM64_SYS_TIMER_GETOVERRUN: u32 = 109;
+const ARM64_SYS_TIMER_SETTIME: u32 = 110;
+const ARM64_SYS_TIMER_DELETE: u32 = 111;
+const ARM64_SYS_CLOCK_SETTIME: u32 = 112;
 const ARM64_SYS_CLOCK_GETTIME: u32 = 113;
+const ARM64_SYS_CLOCK_GETRES: u32 = 114;
+const ARM64_SYS_CLOCK_NANOSLEEP: u32 = 115;
+const ARM64_SYS_SCHED_SETPARAM: u32 = 118;
+const ARM64_SYS_SCHED_SETSCHEDULER: u32 = 119;
+const ARM64_SYS_SCHED_GETSCHEDULER: u32 = 120;
+const ARM64_SYS_SCHED_GETPARAM: u32 = 121;
+const ARM64_SYS_SCHED_SETAFFINITY: u32 = 122;
+const ARM64_SYS_SCHED_GETAFFINITY: u32 = 123;
+const ARM64_SYS_SCHED_YIELD: u32 = 124;
+const ARM64_SYS_SCHED_GET_PRIORITY_MAX: u32 = 125;
+const ARM64_SYS_SCHED_GET_PRIORITY_MIN: u32 = 126;
+const ARM64_SYS_SCHED_RR_GET_INTERVAL: u32 = 127;
 const ARM64_SYS_KILL: u32 = 129;
+const ARM64_SYS_TKILL: u32 = 130;
+const ARM64_SYS_TGKILL: u32 = 131;
+const ARM64_SYS_SIGALTSTACK: u32 = 132;
+const ARM64_SYS_RT_SIGSUSPEND: u32 = 133;
+const ARM64_SYS_RT_SIGACTION: u32 = 134;
+const ARM64_SYS_RT_SIGPROCMASK: u32 = 135;
+const ARM64_SYS_RT_SIGPENDING: u32 = 136;
+const ARM64_SYS_RT_SIGTIMEDWAIT: u32 = 137;
+const ARM64_SYS_RT_SIGQUEUEINFO: u32 = 138;
+const ARM64_SYS_RT_SIGRETURN: u32 = 139;
+const ARM64_SYS_SETPRIORITY: u32 = 140;
+const ARM64_SYS_GETPRIORITY: u32 = 141;
+const ARM64_SYS_SETREGID: u32 = 143;
+const ARM64_SYS_SETGID: u32 = 144;
+const ARM64_SYS_SETREUID: u32 = 145;
+const ARM64_SYS_SETUID: u32 = 146;
+const ARM64_SYS_SETRESUID: u32 = 147;
+const ARM64_SYS_GETRESUID: u32 = 148;
+const ARM64_SYS_SETRESGID: u32 = 149;
+const ARM64_SYS_GETRESGID: u32 = 150;
+const ARM64_SYS_SETFSUID: u32 = 151;
+const ARM64_SYS_SETFSGID: u32 = 152;
+const ARM64_SYS_TIMES: u32 = 153;
+const ARM64_SYS_SETPGID: u32 = 154;
+const ARM64_SYS_GETPGID: u32 = 155;
+const ARM64_SYS_GETSID: u32 = 156;
+const ARM64_SYS_SETSID: u32 = 157;
+const ARM64_SYS_GETGROUPS: u32 = 158;
+const ARM64_SYS_SETGROUPS: u32 = 159;
+const ARM64_SYS_UNAME: u32 = 160;
+const ARM64_SYS_SETHOSTNAME: u32 = 161;
+const ARM64_SYS_SETDOMAINNAME: u32 = 162;
+const ARM64_SYS_GETRLIMIT: u32 = 163;
+const ARM64_SYS_SETRLIMIT: u32 = 164;
+const ARM64_SYS_GETRUSAGE: u32 = 165;
+const ARM64_SYS_UMASK: u32 = 166;
+const ARM64_SYS_PRCTL: u32 = 167;
+const ARM64_SYS_GETCPU: u32 = 168;
+const ARM64_SYS_GETTIMEOFDAY: u32 = 169;
 const ARM64_SYS_GETPID: u32 = 172;
 const ARM64_SYS_GETPPID: u32 = 173;
+const ARM64_SYS_GETUID: u32 = 174;
+const ARM64_SYS_GETEUID: u32 = 175;
+const ARM64_SYS_GETGID: u32 = 176;
+const ARM64_SYS_GETEGID: u32 = 177;
 const ARM64_SYS_GETTID: u32 = 178;
+const ARM64_SYS_SYSINFO: u32 = 179;
+const ARM64_SYS_MSGGET: u32 = 186;
+const ARM64_SYS_MSGCTL: u32 = 187;
+const ARM64_SYS_MSGRCV: u32 = 188;
+const ARM64_SYS_MSGSND: u32 = 189;
+const ARM64_SYS_SEMGET: u32 = 190;
+const ARM64_SYS_SEMCTL: u32 = 191;
+const ARM64_SYS_SEMTIMEDOP: u32 = 192;
+const ARM64_SYS_SEMOP: u32 = 193;
+const ARM64_SYS_SHMGET: u32 = 194;
+const ARM64_SYS_SHMCTL: u32 = 195;
+const ARM64_SYS_SHMAT: u32 = 196;
+const ARM64_SYS_SHMDT: u32 = 197;
+const ARM64_SYS_SOCKET: u32 = 198;
+const ARM64_SYS_SOCKETPAIR: u32 = 199;
+const ARM64_SYS_BIND: u32 = 200;
+const ARM64_SYS_LISTEN: u32 = 201;
+const ARM64_SYS_ACCEPT: u32 = 202;
+const ARM64_SYS_CONNECT: u32 = 203;
+const ARM64_SYS_GETSOCKNAME: u32 = 204;
+const ARM64_SYS_GETPEERNAME: u32 = 205;
+const ARM64_SYS_SENDTO: u32 = 206;
+const ARM64_SYS_RECVFROM: u32 = 207;
+const ARM64_SYS_SETSOCKOPT: u32 = 208;
+const ARM64_SYS_GETSOCKOPT: u32 = 209;
+const ARM64_SYS_SHUTDOWN: u32 = 210;
+const ARM64_SYS_SENDMSG: u32 = 211;
+const ARM64_SYS_RECVMSG: u32 = 212;
+const ARM64_SYS_READAHEAD: u32 = 213;
 const ARM64_SYS_BRK: u32 = 214;
 const ARM64_SYS_MUNMAP: u32 = 215;
 const ARM64_SYS_MREMAP: u32 = 216;
 const ARM64_SYS_CLONE: u32 = 220;
 const ARM64_SYS_EXECVE: u32 = 221;
 const ARM64_SYS_MMAP: u32 = 222;
+const ARM64_SYS_FADVISE64: u32 = 223;
 const ARM64_SYS_MPROTECT: u32 = 226;
+const ARM64_SYS_MSYNC: u32 = 227;
+const ARM64_SYS_MLOCK: u32 = 228;
+const ARM64_SYS_MUNLOCK: u32 = 229;
+const ARM64_SYS_MLOCKALL: u32 = 230;
+const ARM64_SYS_MUNLOCKALL: u32 = 231;
+const ARM64_SYS_MINCORE: u32 = 232;
+const ARM64_SYS_MADVISE: u32 = 233;
+const ARM64_SYS_REMAP_FILE_PAGES: u32 = 234;
+const ARM64_SYS_RT_TGSIGQUEUEINFO: u32 = 240;
+const ARM64_SYS_ACCEPT4: u32 = 242;
+const ARM64_SYS_RECVMMSG: u32 = 243;
 const ARM64_SYS_WAIT4: u32 = 260;
+const ARM64_SYS_PRLIMIT64: u32 = 261;
+const ARM64_SYS_GETRANDOM: u32 = 278;
+const ARM64_SYS_MEMFD_CREATE: u32 = 279;
+const ARM64_SYS_MEMBARRIER: u32 = 283;
+const ARM64_SYS_COPY_FILE_RANGE: u32 = 285;
+const ARM64_SYS_PREADV2: u32 = 286;
+const ARM64_SYS_PWRITEV2: u32 = 287;
+const ARM64_SYS_STATX: u32 = 291;
+const ARM64_SYS_CLOSE_RANGE: u32 = 436;
+const ARM64_SYS_OPENAT2: u32 = 437;
+const ARM64_SYS_FACCESSAT2: u32 = 439;
+const ARM64_SYS_EPOLL_PWAIT2: u32 = 441;
+const ARM64_SYS_LOOKUP_DCOOKIE: u32 = 18;
+const ARM64_SYS_IOPRIO_SET: u32 = 30;
+const ARM64_SYS_IOPRIO_GET: u32 = 31;
+const ARM64_SYS_VHANGUP: u32 = 58;
+const ARM64_SYS_QUOTACTL: u32 = 60;
+const ARM64_SYS_ACCT: u32 = 89;
+const ARM64_SYS_CAPGET: u32 = 90;
+const ARM64_SYS_CAPSET: u32 = 91;
+const ARM64_SYS_PERSONALITY: u32 = 92;
+const ARM64_SYS_KEXEC_LOAD: u32 = 104;
+const ARM64_SYS_INIT_MODULE: u32 = 105;
+const ARM64_SYS_DELETE_MODULE: u32 = 106;
+const ARM64_SYS_SYSLOG: u32 = 116;
+const ARM64_SYS_PTRACE: u32 = 117;
+const ARM64_SYS_RESTART_SYSCALL: u32 = 128;
+const ARM64_SYS_REBOOT: u32 = 142;
+const ARM64_SYS_SETTIMEOFDAY: u32 = 170;
+const ARM64_SYS_ADJTIMEX: u32 = 171;
+const ARM64_SYS_MQ_OPEN: u32 = 180;
+const ARM64_SYS_MQ_UNLINK: u32 = 181;
+const ARM64_SYS_MQ_TIMEDSEND: u32 = 182;
+const ARM64_SYS_MQ_TIMEDRECEIVE: u32 = 183;
+const ARM64_SYS_MQ_NOTIFY: u32 = 184;
+const ARM64_SYS_MQ_GETSETATTR: u32 = 185;
+const ARM64_SYS_ADD_KEY: u32 = 217;
+const ARM64_SYS_REQUEST_KEY: u32 = 218;
+const ARM64_SYS_KEYCTL: u32 = 219;
+const ARM64_SYS_SWAPON: u32 = 224;
+const ARM64_SYS_SWAPOFF: u32 = 225;
+const ARM64_SYS_MBIND: u32 = 235;
+const ARM64_SYS_GET_MEMPOLICY: u32 = 236;
+const ARM64_SYS_SET_MEMPOLICY: u32 = 237;
+const ARM64_SYS_MIGRATE_PAGES: u32 = 238;
+const ARM64_SYS_MOVE_PAGES: u32 = 239;
+const ARM64_SYS_PERF_EVENT_OPEN: u32 = 241;
+const ARM64_SYS_FANOTIFY_INIT: u32 = 262;
+const ARM64_SYS_FANOTIFY_MARK: u32 = 263;
+const ARM64_SYS_NAME_TO_HANDLE_AT: u32 = 264;
+const ARM64_SYS_OPEN_BY_HANDLE_AT: u32 = 265;
+const ARM64_SYS_CLOCK_ADJTIME: u32 = 266;
+const ARM64_SYS_SYNCFS: u32 = 267;
+const ARM64_SYS_SETNS: u32 = 268;
+const ARM64_SYS_SENDMMSG: u32 = 269;
+const ARM64_SYS_PROCESS_VM_READV: u32 = 270;
+const ARM64_SYS_PROCESS_VM_WRITEV: u32 = 271;
+const ARM64_SYS_KCMP: u32 = 272;
+const ARM64_SYS_FINIT_MODULE: u32 = 273;
+const ARM64_SYS_SCHED_SETATTR: u32 = 274;
+const ARM64_SYS_SCHED_GETATTR: u32 = 275;
+const ARM64_SYS_RENAMEAT2: u32 = 276;
+const ARM64_SYS_SECCOMP: u32 = 277;
+const ARM64_SYS_BPF: u32 = 280;
+const ARM64_SYS_EXECVEAT: u32 = 281;
+const ARM64_SYS_USERFAULTFD: u32 = 282;
+const ARM64_SYS_MLOCK2: u32 = 284;
+const ARM64_SYS_PKEY_MPROTECT: u32 = 288;
+const ARM64_SYS_PKEY_ALLOC: u32 = 289;
+const ARM64_SYS_PKEY_FREE: u32 = 290;
+const ARM64_SYS_IO_PGETEVENTS: u32 = 292;
+const ARM64_SYS_RSEQ: u32 = 293;
+const ARM64_SYS_KEXEC_FILE_LOAD: u32 = 294;
+const ARM64_SYS_PIDFD_SEND_SIGNAL: u32 = 424;
+const ARM64_SYS_IO_URING_SETUP: u32 = 425;
+const ARM64_SYS_IO_URING_ENTER: u32 = 426;
+const ARM64_SYS_IO_URING_REGISTER: u32 = 427;
+const ARM64_SYS_OPEN_TREE: u32 = 428;
+const ARM64_SYS_MOVE_MOUNT: u32 = 429;
+const ARM64_SYS_FSOPEN: u32 = 430;
+const ARM64_SYS_FSCONFIG: u32 = 431;
+const ARM64_SYS_FSMOUNT: u32 = 432;
+const ARM64_SYS_FSPICK: u32 = 433;
+const ARM64_SYS_PIDFD_OPEN: u32 = 434;
+const ARM64_SYS_CLONE3: u32 = 435;
+const ARM64_SYS_PIDFD_GETFD: u32 = 438;
+const ARM64_SYS_PROCESS_MADVISE: u32 = 440;
+const ARM64_SYS_MOUNT_SETATTR: u32 = 442;
+const ARM64_SYS_LANDLOCK_CREATE_RULESET: u32 = 444;
+const ARM64_SYS_LANDLOCK_ADD_RULE: u32 = 445;
+const ARM64_SYS_LANDLOCK_RESTRICT_SELF: u32 = 446;
 const ZX_SIGNAL_TERMINATED: u32 = 1 << 3;
 const ZX_USER_SIGNAL_0: u32 = 1 << 24;
+const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
+const COMPAT_FD_START: usize = 3;
+const LINUX_AF_INET: usize = 2;
+const LINUX_AF_NETLINK: usize = 16;
+const LINUX_AF_PACKET: usize = 17;
+const LINUX_SOCK_TYPE_MASK: usize = 0xff;
+const LINUX_SOCK_STREAM: usize = 1;
+const LINUX_SOCK_DGRAM: usize = 2;
+const LINUX_SOCK_RAW: usize = 3;
+const LINUX_IPPROTO_IP: usize = 0;
+const LINUX_IPPROTO_TCP: usize = 6;
+const LINUX_IPPROTO_UDP: usize = 17;
 
 #[derive(Clone)]
 struct LinuxMappingRecord {
@@ -205,6 +503,14 @@ struct SignalRecord {
     property_value: u64,
 }
 
+#[derive(Clone)]
+struct LinuxFdRecord {
+    fd: usize,
+    handle: u32,
+    readable: bool,
+    writable: bool,
+}
+
 #[repr(C)]
 struct ZxWaitItem {
     handle: u32,
@@ -216,6 +522,88 @@ struct ZxWaitItem {
 struct LinuxTimespec {
     tv_sec: i64,
     tv_nsec: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxTimeval {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+#[repr(C)]
+struct LinuxTms {
+    tms_utime: isize,
+    tms_stime: isize,
+    tms_cutime: isize,
+    tms_cstime: isize,
+}
+
+#[repr(C)]
+struct LinuxRusage {
+    ru_utime: LinuxTimeval,
+    ru_stime: LinuxTimeval,
+    rest: [isize; 14],
+}
+
+#[repr(C)]
+struct LinuxRlimit64 {
+    rlim_cur: u64,
+    rlim_max: u64,
+}
+
+#[repr(C)]
+struct LinuxSysinfo {
+    uptime: isize,
+    loads: [usize; 3],
+    totalram: usize,
+    freeram: usize,
+    sharedram: usize,
+    bufferram: usize,
+    totalswap: usize,
+    freeswap: usize,
+    procs: u16,
+    pad: u16,
+    totalhigh: usize,
+    freehigh: usize,
+    mem_unit: u32,
+}
+
+#[repr(C)]
+struct LinuxIovec {
+    base: usize,
+    len: usize,
+}
+
+#[repr(C)]
+struct LinuxStat {
+    data: [u8; 128],
+}
+
+#[repr(C)]
+struct LinuxStatFs {
+    f_type: i64,
+    f_bsize: i64,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
+    f_fsid: (i32, i32),
+    f_namelen: isize,
+    f_frsize: isize,
+    f_flags: isize,
+    f_spare: [isize; 4],
+}
+
+#[repr(C)]
+struct LinuxUtsname {
+    sysname: [u8; 65],
+    nodename: [u8; 65],
+    release: [u8; 65],
+    version: [u8; 65],
+    machine: [u8; 65],
+    domainname: [u8; 65],
 }
 
 #[derive(Clone, Copy, Default)]
@@ -244,7 +632,9 @@ struct MemorySyscallState {
     processes: Vec<ProcessRecord>,
     threads: Vec<ThreadRecord>,
     signals: Vec<SignalRecord>,
+    linux_fds: Vec<LinuxFdRecord>,
     next_handle: u32,
+    next_fd: usize,
     root_vmar_handle: u32,
 }
 
@@ -268,7 +658,9 @@ impl MemorySyscallState {
             processes: Vec::new(),
             threads: Vec::new(),
             signals: Vec::new(),
+            linux_fds: Vec::new(),
             next_handle: MEMORY_HANDLE_START + 1,
+            next_fd: COMPAT_FD_START,
             root_vmar_handle,
         }
     }
@@ -556,6 +948,48 @@ impl MemorySyscallState {
             || self.remove_process(handle)
             || self.remove_thread(handle)
     }
+
+    fn alloc_fd(&mut self, handle: u32, readable: bool, writable: bool) -> usize {
+        let fd = self.next_fd;
+        self.next_fd = self.next_fd.saturating_add(1);
+        self.linux_fds.push(LinuxFdRecord {
+            fd,
+            handle,
+            readable,
+            writable,
+        });
+        fd
+    }
+
+    fn alloc_fd_from(
+        &mut self,
+        min_fd: usize,
+        handle: u32,
+        readable: bool,
+        writable: bool,
+    ) -> usize {
+        let mut fd = min_fd.max(COMPAT_FD_START);
+        while self.linux_fds.iter().any(|record| record.fd == fd) {
+            fd = fd.saturating_add(1);
+        }
+        self.next_fd = self.next_fd.max(fd.saturating_add(1));
+        self.linux_fds.push(LinuxFdRecord {
+            fd,
+            handle,
+            readable,
+            writable,
+        });
+        fd
+    }
+
+    fn get_fd(&self, fd: usize) -> Option<&LinuxFdRecord> {
+        self.linux_fds.iter().find(|record| record.fd == fd)
+    }
+
+    fn close_fd(&mut self, fd: usize) -> Option<u32> {
+        let index = self.linux_fds.iter().position(|record| record.fd == fd)?;
+        Some(self.linux_fds.swap_remove(index).handle)
+    }
 }
 
 static mut MEMORY_SYSCALL_STATE: Option<MemorySyscallState> = None;
@@ -649,7 +1083,7 @@ fn kernel_object_handle_known(handle: u32) -> bool {
     if memory_state().handle_known(handle) {
         return true;
     }
-    channel_handle_known(handle)
+    channel_handle_known(handle) || compat::handle_known(HandleValue(handle))
 }
 
 fn object_signal_state(handle: u32) -> ZxResult<u32> {
@@ -663,6 +1097,8 @@ fn object_signal_state(handle: u32) -> ZxResult<u32> {
 
     if let Some(channel_signal) = channel_signal {
         Ok(channel_signal | memory_state().get_signal_value(handle))
+    } else if let Some(signals) = compat::table().signals(HandleValue(handle)) {
+        Ok(signals | memory_state().get_signal_value(handle))
     } else {
         Err(ZxError::ErrNotFound)
     }
@@ -671,6 +1107,10 @@ fn object_signal_state(handle: u32) -> ZxResult<u32> {
 fn set_object_signal_state(handle: u32, clear_mask: u32, set_mask: u32) -> ZxResult<u32> {
     if memory_state().handle_known(handle) || channel_handle_known(handle) {
         Ok(memory_state().update_signal_value(handle, clear_mask, set_mask))
+    } else if let Some(signals) =
+        compat::table().update_signals(HandleValue(handle), clear_mask, set_mask)
+    {
+        Ok(signals)
     } else {
         Err(ZxError::ErrNotFound)
     }
@@ -1102,8 +1542,1529 @@ pub fn sys_write(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
             }
             Ok(len)
         }
-        _ => Err(SysError::ENODEV),
+        _ => {
+            let handle = memory_state()
+                .get_fd(fd)
+                .filter(|record| record.writable)
+                .map(|record| record.handle)
+                .ok_or(SysError::ENODEV)?;
+            let buf = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
+            compat::table()
+                .write_bytes(HandleValue(handle), buf)
+                .map_err(|_| SysError::EIO)
+        }
     }
+}
+
+/// Linux sys_read implementation.
+pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
+    info!("read: fd={}, buf={:#x}, len={:#x}", fd, buf_ptr, len);
+
+    if len == 0 {
+        return Ok(0);
+    }
+    if buf_ptr == 0 {
+        return Err(SysError::EFAULT);
+    }
+
+    let handle = memory_state()
+        .get_fd(fd)
+        .filter(|record| record.readable)
+        .map(|record| record.handle)
+        .ok_or(SysError::ENODEV)?;
+    let out = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, len) };
+
+    match compat::table().read_bytes(HandleValue(handle), out) {
+        Ok(read) => Ok(read),
+        Err(ZxError::ErrShouldWait) => Ok(0),
+        Err(_) => Err(SysError::EIO),
+    }
+}
+
+/// Linux sys_close implementation.
+pub fn sys_close(fd: usize) -> SysResult {
+    if fd <= 2 {
+        return Ok(0);
+    }
+
+    let handle = memory_state().close_fd(fd).ok_or(SysError::EBUSY)?;
+    let _ = sys_handle_close(handle);
+    Ok(0)
+}
+
+/// Linux sys_pipe2 implementation.
+pub fn sys_pipe2(fds_ptr: usize, _flags: usize) -> SysResult {
+    if fds_ptr == 0 {
+        return Err(SysError::EFAULT);
+    }
+
+    let (read_handle, write_handle) =
+        compat::create_pair(ObjectType::LinuxPipe).map_err(|_| SysError::ENOMEM)?;
+    let state = memory_state();
+    let read_fd = state.alloc_fd(read_handle.0, true, false);
+    let write_fd = state.alloc_fd(write_handle.0, false, true);
+
+    unsafe {
+        let out = fds_ptr as *mut i32;
+        core::ptr::write(out, read_fd as i32);
+        core::ptr::write(out.add(1), write_fd as i32);
+    }
+
+    Ok(0)
+}
+
+pub fn sys_dup(fd: usize) -> SysResult {
+    let record = memory_state().get_fd(fd).cloned().ok_or(SysError::EBUSY)?;
+    Ok(memory_state().alloc_fd(record.handle, record.readable, record.writable))
+}
+
+pub fn sys_dup3(fd: usize, new_fd: usize, _flags: usize) -> SysResult {
+    let record = memory_state().get_fd(fd).cloned().ok_or(SysError::EBUSY)?;
+    let _ = memory_state().close_fd(new_fd);
+    memory_state().linux_fds.push(LinuxFdRecord {
+        fd: new_fd,
+        handle: record.handle,
+        readable: record.readable,
+        writable: record.writable,
+    });
+    Ok(new_fd)
+}
+
+pub fn sys_getrandom(buf_ptr: usize, len: usize, _flags: u32) -> SysResult {
+    if !syscall_logic::user_buffer_valid(buf_ptr, len) {
+        return Err(SysError::EFAULT);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+
+    let seed = monotonic_nanos() as u8;
+    let out = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, len) };
+    for (index, byte) in out.iter_mut().enumerate() {
+        *byte = seed
+            .wrapping_add((index as u8).wrapping_mul(37))
+            .wrapping_add(0xA5);
+    }
+    Ok(len)
+}
+
+fn linux_fd_known(fd: usize) -> bool {
+    fd <= 2 || memory_state().get_fd(fd).is_some()
+}
+
+fn linux_fd_handle(fd: usize) -> Result<u32, SysError> {
+    memory_state()
+        .get_fd(fd)
+        .map(|record| record.handle)
+        .ok_or(SysError::ENODEV)
+}
+
+fn linux_socket_object_type(domain: usize, socket_type: usize, protocol: usize) -> ObjectType {
+    let socket_kind = socket_type & LINUX_SOCK_TYPE_MASK;
+
+    match (domain, socket_kind, protocol) {
+        (LINUX_AF_INET, LINUX_SOCK_STREAM, LINUX_IPPROTO_IP | LINUX_IPPROTO_TCP) => {
+            ObjectType::LinuxTcpSocket
+        }
+        (LINUX_AF_INET, LINUX_SOCK_DGRAM, LINUX_IPPROTO_IP | LINUX_IPPROTO_UDP) => {
+            ObjectType::LinuxUdpSocket
+        }
+        (LINUX_AF_INET | LINUX_AF_PACKET, LINUX_SOCK_RAW, _) => ObjectType::LinuxRawSocket,
+        (LINUX_AF_NETLINK, _, _) => ObjectType::LinuxNetlinkSocket,
+        _ => ObjectType::Socket,
+    }
+}
+
+fn linux_zero_user(ptr: usize, len: usize) -> SysResult {
+    if !syscall_logic::user_buffer_valid(ptr, len) {
+        return Err(SysError::EFAULT);
+    }
+    if len != 0 {
+        unsafe {
+            core::ptr::write_bytes(ptr as *mut u8, 0, len);
+        }
+    }
+    Ok(0)
+}
+
+fn linux_write_cstr(buf: usize, len: usize, value: &[u8]) -> SysResult {
+    if len == 0 || buf == 0 {
+        return Err(SysError::EFAULT);
+    }
+    if value.len().saturating_add(1) > len {
+        return Err(SysError::EINVAL);
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(value.as_ptr(), buf as *mut u8, value.len());
+        core::ptr::write((buf + value.len()) as *mut u8, 0);
+    }
+    Ok(buf)
+}
+
+fn linux_write_stat(stat_ptr: usize) -> SysResult {
+    linux_zero_user(stat_ptr, core::mem::size_of::<LinuxStat>())
+}
+
+fn linux_write_statfs(buf: usize) -> SysResult {
+    if buf == 0 {
+        return Err(SysError::EFAULT);
+    }
+    unsafe {
+        core::ptr::write(
+            buf as *mut LinuxStatFs,
+            LinuxStatFs {
+                f_type: 0x534d_524f,
+                f_bsize: PAGE_SIZE as i64,
+                f_blocks: 256,
+                f_bfree: 128,
+                f_bavail: 128,
+                f_files: 256,
+                f_ffree: 128,
+                f_fsid: (0, 0),
+                f_namelen: 255,
+                f_frsize: PAGE_SIZE as isize,
+                f_flags: 0,
+                f_spare: [0; 4],
+            },
+        );
+    }
+    Ok(0)
+}
+
+fn linux_write_uts_field(field: &mut [u8; 65], value: &[u8]) {
+    let count = core::cmp::min(value.len(), field.len() - 1);
+    field[..count].copy_from_slice(&value[..count]);
+    field[count] = 0;
+}
+
+/// Linux sys_pipe wrapper.
+pub fn sys_pipe(fds_ptr: usize) -> SysResult {
+    sys_pipe2(fds_ptr, 0)
+}
+
+/// Linux sys_dup2 wrapper.
+pub fn sys_dup2(fd: usize, new_fd: usize) -> SysResult {
+    sys_dup3(fd, new_fd, 0)
+}
+
+pub fn sys_eventfd2(_initval: usize, _flags: usize) -> SysResult {
+    let handle = compat::create_object(ObjectType::EventFd).map_err(|_| SysError::ENOMEM)?;
+    Ok(memory_state().alloc_fd(handle.0, true, true))
+}
+
+pub fn sys_epoll_create1(_flags: usize) -> SysResult {
+    let handle = compat::create_object(ObjectType::Port).map_err(|_| SysError::ENOMEM)?;
+    Ok(memory_state().alloc_fd(handle.0, true, true))
+}
+
+pub fn sys_epoll_ctl(epfd: usize, _op: usize, fd: usize, event: usize) -> SysResult {
+    if !linux_fd_known(epfd) || !linux_fd_known(fd) {
+        return Err(SysError::ENODEV);
+    }
+    if event == 0 {
+        return Err(SysError::EFAULT);
+    }
+    Ok(0)
+}
+
+pub fn sys_epoll_pwait(
+    epfd: usize,
+    events: usize,
+    maxevents: usize,
+    _timeout: isize,
+    _sigmask: usize,
+) -> SysResult {
+    if !linux_fd_known(epfd) {
+        return Err(SysError::ENODEV);
+    }
+    if maxevents != 0 && events == 0 {
+        return Err(SysError::EFAULT);
+    }
+    Ok(0)
+}
+
+/// Linux sys_open wrapper.
+pub fn sys_open(path: usize, flags: usize, mode: usize) -> SysResult {
+    sys_openat(usize::MAX - 99, path, flags, mode)
+}
+
+/// Linux sys_openat compatibility implementation.
+pub fn sys_openat(_dirfd: usize, path: usize, flags: usize, _mode: usize) -> SysResult {
+    if path == 0 {
+        return Err(SysError::EFAULT);
+    }
+
+    let handle = compat::create_object(ObjectType::LinuxFile).map_err(|_| SysError::ENOMEM)?;
+    let access_mode = flags & 0b11;
+    let readable = access_mode != 1;
+    let writable = access_mode != 0;
+    Ok(memory_state().alloc_fd(handle.0, readable, writable))
+}
+
+pub fn sys_access(path: usize, mode: usize) -> SysResult {
+    sys_faccessat(usize::MAX - 99, path, mode, 0)
+}
+
+pub fn sys_xattr_path(path: usize, _name: usize, value: usize, size: usize) -> SysResult {
+    if path == 0 {
+        return Err(SysError::EFAULT);
+    }
+    if size != 0 && value == 0 {
+        return Err(SysError::EFAULT);
+    }
+    Ok(0)
+}
+
+pub fn sys_xattr_fd(fd: usize, _name: usize, value: usize, size: usize) -> SysResult {
+    if !linux_fd_known(fd) {
+        return Err(SysError::ENODEV);
+    }
+    if size != 0 && value == 0 {
+        return Err(SysError::EFAULT);
+    }
+    Ok(0)
+}
+
+pub fn sys_faccessat(_dirfd: usize, path: usize, mode: usize, _flags: usize) -> SysResult {
+    if path == 0 {
+        return Err(SysError::EFAULT);
+    }
+    if mode & !0o7 != 0 {
+        return Err(SysError::EINVAL);
+    }
+    Ok(0)
+}
+
+pub fn sys_faccessat2(dirfd: usize, path: usize, mode: usize, flags: usize) -> SysResult {
+    sys_faccessat(dirfd, path, mode, flags)
+}
+
+pub fn sys_path_noop(path: usize) -> SysResult {
+    if path == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_getcwd(buf: usize, len: usize) -> SysResult {
+    linux_write_cstr(buf, len, b"/")
+}
+
+pub fn sys_chdir(path: usize) -> SysResult {
+    if path == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_fchdir(fd: usize) -> SysResult {
+    if linux_fd_known(fd) {
+        Ok(0)
+    } else {
+        Err(SysError::ENODEV)
+    }
+}
+
+pub fn sys_chroot(path: usize) -> SysResult {
+    sys_chdir(path)
+}
+
+pub fn sys_mkdir(path: usize, mode: usize) -> SysResult {
+    sys_mkdirat(usize::MAX - 99, path, mode)
+}
+
+pub fn sys_mkdirat(_dirfd: usize, path: usize, _mode: usize) -> SysResult {
+    if path == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_mknodat(_dirfd: usize, path: usize, _mode: usize, _dev: usize) -> SysResult {
+    if path == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_rmdir(path: usize) -> SysResult {
+    if path == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_link(oldpath: usize, newpath: usize) -> SysResult {
+    sys_linkat(usize::MAX - 99, oldpath, usize::MAX - 99, newpath, 0)
+}
+
+pub fn sys_linkat(
+    _olddirfd: usize,
+    oldpath: usize,
+    _newdirfd: usize,
+    newpath: usize,
+    _flags: usize,
+) -> SysResult {
+    if oldpath == 0 || newpath == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_symlinkat(oldpath: usize, _newdirfd: usize, newpath: usize) -> SysResult {
+    if oldpath == 0 || newpath == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_unlink(path: usize) -> SysResult {
+    sys_unlinkat(usize::MAX - 99, path, 0)
+}
+
+pub fn sys_unlinkat(_dirfd: usize, path: usize, _flags: usize) -> SysResult {
+    if path == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_rename(oldpath: usize, newpath: usize) -> SysResult {
+    sys_renameat(usize::MAX - 99, oldpath, usize::MAX - 99, newpath)
+}
+
+pub fn sys_renameat(
+    _olddirfd: usize,
+    oldpath: usize,
+    _newdirfd: usize,
+    newpath: usize,
+) -> SysResult {
+    if oldpath == 0 || newpath == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_readlink(path: usize, buf: usize, len: usize) -> SysResult {
+    sys_readlinkat(usize::MAX - 99, path, buf, len)
+}
+
+pub fn sys_readlinkat(_dirfd: usize, path: usize, buf: usize, len: usize) -> SysResult {
+    if path == 0 {
+        return Err(SysError::EFAULT);
+    }
+    if len != 0 && buf == 0 {
+        return Err(SysError::EFAULT);
+    }
+    Ok(0)
+}
+
+pub fn sys_stat(path: usize, stat_ptr: usize) -> SysResult {
+    sys_fstatat(usize::MAX - 99, path, stat_ptr, 0)
+}
+
+pub fn sys_lstat(path: usize, stat_ptr: usize) -> SysResult {
+    sys_fstatat(usize::MAX - 99, path, stat_ptr, 0)
+}
+
+pub fn sys_fstat(fd: usize, stat_ptr: usize) -> SysResult {
+    if !linux_fd_known(fd) {
+        return Err(SysError::ENODEV);
+    }
+    linux_write_stat(stat_ptr)
+}
+
+pub fn sys_fstatat(_dirfd: usize, path: usize, stat_ptr: usize, _flags: usize) -> SysResult {
+    if path == 0 {
+        return Err(SysError::EFAULT);
+    }
+    linux_write_stat(stat_ptr)
+}
+
+pub fn sys_statfs(path: usize, buf: usize) -> SysResult {
+    if path == 0 {
+        return Err(SysError::EFAULT);
+    }
+    linux_write_statfs(buf)
+}
+
+pub fn sys_fstatfs(fd: usize, buf: usize) -> SysResult {
+    if !linux_fd_known(fd) {
+        return Err(SysError::ENODEV);
+    }
+    linux_write_statfs(buf)
+}
+
+pub fn sys_truncate(path: usize, _len: usize) -> SysResult {
+    if path == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_ftruncate(fd: usize, _len: usize) -> SysResult {
+    if linux_fd_known(fd) {
+        Ok(0)
+    } else {
+        Err(SysError::ENODEV)
+    }
+}
+
+pub fn sys_fallocate(fd: usize, _mode: usize, _offset: usize, _len: usize) -> SysResult {
+    if linux_fd_known(fd) {
+        Ok(0)
+    } else {
+        Err(SysError::ENODEV)
+    }
+}
+
+pub fn sys_chmod(path: usize, _mode: usize) -> SysResult {
+    if path == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_fchmod(fd: usize, _mode: usize) -> SysResult {
+    if linux_fd_known(fd) {
+        Ok(0)
+    } else {
+        Err(SysError::ENODEV)
+    }
+}
+
+pub fn sys_fchmodat(_dirfd: usize, path: usize, mode: usize, _flags: usize) -> SysResult {
+    sys_chmod(path, mode)
+}
+
+pub fn sys_chown(path: usize, _uid: usize, _gid: usize) -> SysResult {
+    if path == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_fchown(fd: usize, _uid: usize, _gid: usize) -> SysResult {
+    if linux_fd_known(fd) {
+        Ok(0)
+    } else {
+        Err(SysError::ENODEV)
+    }
+}
+
+pub fn sys_fchownat(
+    _dirfd: usize,
+    path: usize,
+    uid: usize,
+    gid: usize,
+    _flags: usize,
+) -> SysResult {
+    sys_chown(path, uid, gid)
+}
+
+pub fn sys_sync() -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_fsync(fd: usize) -> SysResult {
+    if linux_fd_known(fd) {
+        Ok(0)
+    } else {
+        Err(SysError::ENODEV)
+    }
+}
+
+pub fn sys_fdatasync(fd: usize) -> SysResult {
+    sys_fsync(fd)
+}
+
+pub fn sys_sync_file_range(fd: usize, _offset: usize, _nbytes: usize, _flags: usize) -> SysResult {
+    sys_fsync(fd)
+}
+
+pub fn sys_utimensat(_dirfd: usize, path: usize, times: usize, _flags: usize) -> SysResult {
+    if path == 0 {
+        return Err(SysError::EFAULT);
+    }
+    if times != 0
+        && !syscall_logic::user_buffer_valid(times, 2 * core::mem::size_of::<LinuxTimespec>())
+    {
+        return Err(SysError::EFAULT);
+    }
+    Ok(0)
+}
+
+pub fn sys_signalfd4(_fd: usize, mask: usize, sizemask: usize, _flags: usize) -> SysResult {
+    if !syscall_logic::user_buffer_valid(mask, sizemask) {
+        return Err(SysError::EFAULT);
+    }
+    let handle = compat::create_object(ObjectType::SignalFd).map_err(|_| SysError::ENOMEM)?;
+    Ok(memory_state().alloc_fd(handle.0, true, false))
+}
+
+pub fn sys_inotify_init1(_flags: usize) -> SysResult {
+    let handle = compat::create_object(ObjectType::Inotify).map_err(|_| SysError::ENOMEM)?;
+    Ok(memory_state().alloc_fd(handle.0, true, false))
+}
+
+pub fn sys_inotify_add_watch(fd: usize, path: usize, _mask: usize) -> SysResult {
+    if !linux_fd_known(fd) {
+        return Err(SysError::ENODEV);
+    }
+    if path == 0 {
+        return Err(SysError::EFAULT);
+    }
+    Ok(1)
+}
+
+pub fn sys_inotify_rm_watch(fd: usize, _wd: usize) -> SysResult {
+    if linux_fd_known(fd) {
+        Ok(0)
+    } else {
+        Err(SysError::ENODEV)
+    }
+}
+
+pub fn sys_ioctl(
+    fd: usize,
+    _request: usize,
+    _arg1: usize,
+    _arg2: usize,
+    _arg3: usize,
+) -> SysResult {
+    if linux_fd_known(fd) {
+        Ok(0)
+    } else {
+        Err(SysError::ENODEV)
+    }
+}
+
+pub fn sys_flock(fd: usize, _operation: usize) -> SysResult {
+    if linux_fd_known(fd) {
+        Ok(0)
+    } else {
+        Err(SysError::ENODEV)
+    }
+}
+
+pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult {
+    const F_DUPFD: usize = 0;
+    const F_GETFD: usize = 1;
+    const F_SETFD: usize = 2;
+    const F_GETFL: usize = 3;
+    const F_SETFL: usize = 4;
+    const F_DUPFD_CLOEXEC: usize = 1030;
+
+    match cmd {
+        F_DUPFD | F_DUPFD_CLOEXEC => {
+            let record = memory_state().get_fd(fd).cloned().ok_or(SysError::ENODEV)?;
+            Ok(memory_state().alloc_fd_from(arg, record.handle, record.readable, record.writable))
+        }
+        F_GETFD | F_GETFL => {
+            if linux_fd_known(fd) {
+                Ok(0)
+            } else {
+                Err(SysError::ENODEV)
+            }
+        }
+        F_SETFD | F_SETFL => {
+            if linux_fd_known(fd) {
+                Ok(0)
+            } else {
+                Err(SysError::ENODEV)
+            }
+        }
+        _ => Err(SysError::EINVAL),
+    }
+}
+
+pub fn sys_getdents64(fd: usize, buf: usize, len: usize) -> SysResult {
+    if !linux_fd_known(fd) {
+        return Err(SysError::ENODEV);
+    }
+    if !syscall_logic::user_buffer_valid(buf, len) {
+        return Err(SysError::EFAULT);
+    }
+    Ok(0)
+}
+
+pub fn sys_lseek(fd: usize, offset: i64, whence: usize) -> SysResult {
+    if !linux_fd_known(fd) {
+        return Err(SysError::ENODEV);
+    }
+    if whence > 2 {
+        return Err(SysError::EINVAL);
+    }
+    Ok(if offset < 0 { 0 } else { offset as usize })
+}
+
+pub fn sys_pread(fd: usize, buf: usize, len: usize, _offset: u64) -> SysResult {
+    sys_read(fd, buf, len)
+}
+
+pub fn sys_pwrite(fd: usize, buf: usize, len: usize, _offset: u64) -> SysResult {
+    sys_write(fd, buf, len)
+}
+
+pub fn sys_preadv(fd: usize, iov_ptr: usize, iov_count: usize, _offset: u64) -> SysResult {
+    sys_readv(fd, iov_ptr, iov_count)
+}
+
+pub fn sys_pwritev(fd: usize, iov_ptr: usize, iov_count: usize, _offset: u64) -> SysResult {
+    sys_writev(fd, iov_ptr, iov_count)
+}
+
+pub fn sys_readv(fd: usize, iov_ptr: usize, iov_count: usize) -> SysResult {
+    if iov_count == 0 {
+        return Ok(0);
+    }
+    let byte_len = iov_count
+        .checked_mul(core::mem::size_of::<LinuxIovec>())
+        .ok_or(SysError::EINVAL)?;
+    if !syscall_logic::user_buffer_valid(iov_ptr, byte_len) {
+        return Err(SysError::EFAULT);
+    }
+
+    let iovs = unsafe { core::slice::from_raw_parts(iov_ptr as *const LinuxIovec, iov_count) };
+    let mut total = 0usize;
+    for iov in iovs {
+        if iov.len == 0 {
+            continue;
+        }
+        if iov.base == 0 {
+            return Err(SysError::EFAULT);
+        }
+        let read = sys_read(fd, iov.base, iov.len)?;
+        total = total.saturating_add(read);
+        if read < iov.len {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+pub fn sys_writev(fd: usize, iov_ptr: usize, iov_count: usize) -> SysResult {
+    if iov_count == 0 {
+        return Ok(0);
+    }
+    let byte_len = iov_count
+        .checked_mul(core::mem::size_of::<LinuxIovec>())
+        .ok_or(SysError::EINVAL)?;
+    if !syscall_logic::user_buffer_valid(iov_ptr, byte_len) {
+        return Err(SysError::EFAULT);
+    }
+
+    let iovs = unsafe { core::slice::from_raw_parts(iov_ptr as *const LinuxIovec, iov_count) };
+    let mut total = 0usize;
+    for iov in iovs {
+        if iov.len == 0 {
+            continue;
+        }
+        if iov.base == 0 {
+            return Err(SysError::EFAULT);
+        }
+        total = total.saturating_add(sys_write(fd, iov.base, iov.len)?);
+    }
+    Ok(total)
+}
+
+pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize) -> SysResult {
+    sys_copy_file_range(in_fd, offset_ptr, out_fd, 0, count, 0)
+}
+
+pub fn sys_copy_file_range(
+    in_fd: usize,
+    in_offset: usize,
+    out_fd: usize,
+    out_offset: usize,
+    count: usize,
+    flags: usize,
+) -> SysResult {
+    if flags != 0 {
+        return Err(SysError::EINVAL);
+    }
+    let mut buffer = [0u8; 256];
+    let mut total = 0usize;
+    while total < count {
+        let chunk = core::cmp::min(buffer.len(), count - total);
+        let read = sys_read(in_fd, buffer.as_mut_ptr() as usize, chunk)?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(sys_write(out_fd, buffer.as_ptr() as usize, read)?);
+        if read < chunk {
+            break;
+        }
+    }
+    if in_offset != 0 {
+        unsafe {
+            let old = core::ptr::read(in_offset as *const u64);
+            core::ptr::write(in_offset as *mut u64, old.saturating_add(total as u64));
+        }
+    }
+    if out_offset != 0 {
+        unsafe {
+            let old = core::ptr::read(out_offset as *const u64);
+            core::ptr::write(out_offset as *mut u64, old.saturating_add(total as u64));
+        }
+    }
+    Ok(total)
+}
+
+pub fn sys_splice(
+    in_fd: usize,
+    in_offset: usize,
+    out_fd: usize,
+    out_offset: usize,
+    len: usize,
+    _flags: usize,
+) -> SysResult {
+    sys_copy_file_range(in_fd, in_offset, out_fd, out_offset, len, 0)
+}
+
+pub fn sys_tee(in_fd: usize, out_fd: usize, len: usize, _flags: usize) -> SysResult {
+    sys_copy_file_range(in_fd, 0, out_fd, 0, len, 0)
+}
+
+pub fn sys_vmsplice(fd: usize, iov_ptr: usize, iov_count: usize, _flags: usize) -> SysResult {
+    sys_writev(fd, iov_ptr, iov_count)
+}
+
+pub fn sys_poll(fds: usize, nfds: usize, _timeout: isize) -> SysResult {
+    if nfds != 0 && fds == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_ppoll(fds: usize, nfds: usize, _timeout: usize, _sigmask: usize) -> SysResult {
+    sys_poll(fds, nfds, 0)
+}
+
+pub fn sys_select(
+    _nfds: usize,
+    _readfds: usize,
+    _writefds: usize,
+    _exceptfds: usize,
+    _timeout: usize,
+) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_pselect6(
+    nfds: usize,
+    readfds: usize,
+    writefds: usize,
+    exceptfds: usize,
+    timeout: usize,
+    _sigmask: usize,
+) -> SysResult {
+    sys_select(nfds, readfds, writefds, exceptfds, timeout)
+}
+
+pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> SysResult {
+    let handle = compat::create_object(linux_socket_object_type(domain, socket_type, protocol))
+        .map_err(|_| SysError::ENOMEM)?;
+    Ok(memory_state().alloc_fd(handle.0, true, true))
+}
+
+pub fn sys_socketpair(
+    domain: usize,
+    socket_type: usize,
+    protocol: usize,
+    fds_ptr: usize,
+) -> SysResult {
+    if fds_ptr == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let (left, right) =
+        compat::create_pair(linux_socket_object_type(domain, socket_type, protocol))
+            .map_err(|_| SysError::ENOMEM)?;
+    let state = memory_state();
+    let left_fd = state.alloc_fd(left.0, true, true);
+    let right_fd = state.alloc_fd(right.0, true, true);
+
+    unsafe {
+        let out = fds_ptr as *mut i32;
+        core::ptr::write(out, left_fd as i32);
+        core::ptr::write(out.add(1), right_fd as i32);
+    }
+
+    Ok(0)
+}
+
+pub fn sys_bind(sockfd: usize, addr: usize, addrlen: usize) -> SysResult {
+    linux_fd_handle(sockfd)?;
+    if !syscall_logic::user_buffer_valid(addr, addrlen) {
+        return Err(SysError::EFAULT);
+    }
+    Ok(0)
+}
+
+pub fn sys_connect(sockfd: usize, addr: usize, addrlen: usize) -> SysResult {
+    sys_bind(sockfd, addr, addrlen)
+}
+
+pub fn sys_listen(sockfd: usize, _backlog: usize) -> SysResult {
+    linux_fd_handle(sockfd).map(|_| 0)
+}
+
+pub fn sys_accept(sockfd: usize, addr: usize, addrlen: usize) -> SysResult {
+    let handle = linux_fd_handle(sockfd)?;
+    if addrlen != 0 {
+        unsafe {
+            core::ptr::write(addrlen as *mut u32, 0);
+        }
+    }
+    if addr != 0 {
+        unsafe {
+            core::ptr::write_bytes(addr as *mut u8, 0, 16);
+        }
+    }
+    let record = memory_state()
+        .get_fd(sockfd)
+        .cloned()
+        .ok_or(SysError::ENODEV)?;
+    Ok(memory_state().alloc_fd(handle, record.readable, record.writable))
+}
+
+pub fn sys_getsockname(sockfd: usize, addr: usize, addrlen: usize) -> SysResult {
+    linux_fd_handle(sockfd)?;
+    if addr == 0 || addrlen == 0 {
+        return Err(SysError::EFAULT);
+    }
+    unsafe {
+        let len = core::ptr::read(addrlen as *const u32) as usize;
+        if len != 0 {
+            core::ptr::write_bytes(addr as *mut u8, 0, len);
+        }
+        core::ptr::write(addrlen as *mut u32, 0);
+    }
+    Ok(0)
+}
+
+pub fn sys_getpeername(sockfd: usize, addr: usize, addrlen: usize) -> SysResult {
+    sys_getsockname(sockfd, addr, addrlen)
+}
+
+pub fn sys_setsockopt(
+    sockfd: usize,
+    _level: usize,
+    _optname: usize,
+    optval: usize,
+    optlen: usize,
+) -> SysResult {
+    linux_fd_handle(sockfd)?;
+    if !syscall_logic::user_buffer_valid(optval, optlen) {
+        return Err(SysError::EFAULT);
+    }
+    Ok(0)
+}
+
+pub fn sys_getsockopt(
+    sockfd: usize,
+    _level: usize,
+    _optname: usize,
+    optval: usize,
+    optlen: usize,
+) -> SysResult {
+    linux_fd_handle(sockfd)?;
+    if optlen == 0 {
+        return Err(SysError::EFAULT);
+    }
+    unsafe {
+        let len = core::ptr::read(optlen as *const u32) as usize;
+        if optval != 0 && len >= core::mem::size_of::<u32>() {
+            core::ptr::write(optval as *mut u32, 0);
+            core::ptr::write(optlen as *mut u32, core::mem::size_of::<u32>() as u32);
+        } else {
+            core::ptr::write(optlen as *mut u32, 0);
+        }
+    }
+    Ok(0)
+}
+
+pub fn sys_sendto(
+    sockfd: usize,
+    buf: usize,
+    len: usize,
+    _flags: usize,
+    dest_addr: usize,
+    addrlen: usize,
+) -> SysResult {
+    if dest_addr != 0 && !syscall_logic::user_buffer_valid(dest_addr, addrlen) {
+        return Err(SysError::EFAULT);
+    }
+    sys_write(sockfd, buf, len)
+}
+
+pub fn sys_recvfrom(
+    sockfd: usize,
+    buf: usize,
+    len: usize,
+    _flags: usize,
+    src_addr: usize,
+    addrlen: usize,
+) -> SysResult {
+    let read = sys_read(sockfd, buf, len)?;
+    if src_addr != 0 && addrlen != 0 {
+        unsafe {
+            let len = core::ptr::read(addrlen as *const u32) as usize;
+            core::ptr::write_bytes(src_addr as *mut u8, 0, len);
+            core::ptr::write(addrlen as *mut u32, 0);
+        }
+    }
+    Ok(read)
+}
+
+pub fn sys_recvmsg(sockfd: usize, msg: usize, _flags: usize) -> SysResult {
+    linux_fd_handle(sockfd)?;
+    if msg == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_sendmsg(sockfd: usize, msg: usize, _flags: usize) -> SysResult {
+    linux_fd_handle(sockfd)?;
+    if msg == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_recvmmsg(
+    sockfd: usize,
+    msgvec: usize,
+    vlen: usize,
+    flags: usize,
+    _timeout: usize,
+) -> SysResult {
+    if vlen == 0 {
+        return Ok(0);
+    }
+    sys_recvmsg(sockfd, msgvec, flags).map(|_| 0)
+}
+
+pub fn sys_shutdown(sockfd: usize, _howto: usize) -> SysResult {
+    linux_fd_handle(sockfd)?;
+    Ok(0)
+}
+
+pub fn sys_semget(_key: usize, nsems: usize, _flags: usize) -> SysResult {
+    if nsems > 256 {
+        return Err(SysError::EINVAL);
+    }
+    Ok(compat::create_object(ObjectType::Semaphore)
+        .map_err(|_| SysError::ENOMEM)?
+        .0 as usize)
+}
+
+pub fn sys_semctl(id: usize, _num: usize, _cmd: usize, _arg: usize) -> SysResult {
+    if compat::handle_known(HandleValue(id as u32)) {
+        Ok(0)
+    } else {
+        Err(SysError::EINVAL)
+    }
+}
+
+pub fn sys_semop(id: usize, ops: usize, num_ops: usize) -> SysResult {
+    if !compat::handle_known(HandleValue(id as u32)) {
+        return Err(SysError::EINVAL);
+    }
+    if num_ops != 0 && ops == 0 {
+        return Err(SysError::EFAULT);
+    }
+    Ok(0)
+}
+
+pub fn sys_msgget(_key: usize, _flags: usize) -> SysResult {
+    Ok(compat::create_object(ObjectType::MessageQueue)
+        .map_err(|_| SysError::ENOMEM)?
+        .0 as usize)
+}
+
+pub fn sys_msgctl(id: usize, _cmd: usize, buffer: usize) -> SysResult {
+    if !compat::handle_known(HandleValue(id as u32)) {
+        return Err(SysError::EINVAL);
+    }
+    if buffer != 0 {
+        linux_zero_user(buffer, 128)?;
+    }
+    Ok(0)
+}
+
+pub fn sys_msgsnd(id: usize, msg_ptr: usize, msg_size: usize, _flags: usize) -> SysResult {
+    if !compat::handle_known(HandleValue(id as u32)) {
+        return Err(SysError::EINVAL);
+    }
+    if !syscall_logic::user_buffer_valid(msg_ptr, msg_size) {
+        return Err(SysError::EFAULT);
+    }
+    Ok(0)
+}
+
+pub fn sys_msgrcv(
+    id: usize,
+    msg_ptr: usize,
+    msg_size: usize,
+    _msg_type: isize,
+    _flags: usize,
+) -> SysResult {
+    if !compat::handle_known(HandleValue(id as u32)) {
+        return Err(SysError::EINVAL);
+    }
+    if !syscall_logic::user_buffer_valid(msg_ptr, msg_size) {
+        return Err(SysError::EFAULT);
+    }
+    Ok(0)
+}
+
+pub fn sys_shmget(_key: usize, size: usize, _shmflg: usize) -> SysResult {
+    if size == 0 {
+        return Err(SysError::EINVAL);
+    }
+    let handle = compat::create_object(ObjectType::SharedMemory).map_err(|_| SysError::ENOMEM)?;
+    let _ = compat::table().set_property(handle, size as u64);
+    Ok(handle.0 as usize)
+}
+
+pub fn sys_shmat(id: usize, addr: usize, _shmflg: usize) -> SysResult {
+    let handle = HandleValue(id as u32);
+    if !compat::handle_known(handle) {
+        return Err(SysError::EINVAL);
+    }
+    let size = compat::table()
+        .property(handle)
+        .map(|value| value as usize)
+        .unwrap_or(PAGE_SIZE)
+        .max(PAGE_SIZE);
+    let flags = MmapFlags::PRIVATE.bits() | MmapFlags::ANONYMOUS.bits();
+    sys_mmap(
+        addr,
+        size,
+        MmapProt::READ.bits() | MmapProt::WRITE.bits(),
+        flags,
+        0,
+        0,
+    )
+    .or_else(|_| {
+        sys_mmap(
+            0,
+            size,
+            MmapProt::READ.bits() | MmapProt::WRITE.bits(),
+            flags,
+            0,
+            0,
+        )
+    })
+}
+
+pub fn sys_shmdt(_id: usize, addr: usize, _shmflg: usize) -> SysResult {
+    if addr == 0 {
+        Err(SysError::EINVAL)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_shmctl(id: usize, _cmd: usize, buffer: usize) -> SysResult {
+    if !compat::handle_known(HandleValue(id as u32)) {
+        return Err(SysError::EINVAL);
+    }
+    if buffer != 0 {
+        let _ = linux_zero_user(buffer, 128)?;
+    }
+    Ok(0)
+}
+
+pub fn sys_rt_sigaction(
+    _signum: usize,
+    _act: usize,
+    oldact: usize,
+    sigsetsize: usize,
+) -> SysResult {
+    if oldact != 0 {
+        linux_zero_user(oldact, sigsetsize)?;
+    }
+    Ok(0)
+}
+
+pub fn sys_rt_sigprocmask(_how: isize, _set: usize, oldset: usize, sigsetsize: usize) -> SysResult {
+    if oldset != 0 {
+        linux_zero_user(oldset, sigsetsize)?;
+    }
+    Ok(0)
+}
+
+pub fn sys_rt_sigreturn() -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> SysResult {
+    linux_zero_user(set, sigsetsize)
+}
+
+pub fn sys_rt_sigtimedwait(
+    set: usize,
+    info: usize,
+    _timeout: usize,
+    sigsetsize: usize,
+) -> SysResult {
+    if !syscall_logic::user_buffer_valid(set, sigsetsize) {
+        return Err(SysError::EFAULT);
+    }
+    if info != 0 {
+        linux_zero_user(info, 128)?;
+    }
+    Ok(0)
+}
+
+pub fn sys_rt_sigsuspend(mask: usize, sigsetsize: usize) -> SysResult {
+    if !syscall_logic::user_buffer_valid(mask, sigsetsize) {
+        return Err(SysError::EFAULT);
+    }
+    Err(SysError::EINTR)
+}
+
+pub fn sys_rt_sigqueueinfo(_pid: usize, _sig: usize, info: usize) -> SysResult {
+    if info == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_sigaltstack(_ss: usize, old_ss: usize) -> SysResult {
+    if old_ss != 0 {
+        linux_zero_user(old_ss, 24)?;
+    }
+    Ok(0)
+}
+
+pub fn sys_tkill(tid: usize, signum: usize) -> SysResult {
+    sys_kill(tid as isize, signum)
+}
+
+pub fn sys_tgkill(_tgid: usize, tid: usize, signum: usize) -> SysResult {
+    sys_tkill(tid, signum)
+}
+
+pub fn sys_set_priority(_priority: usize) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_get_priority(_which: usize, _who: usize) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_sched_getaffinity(_pid: usize, len: usize, mask: usize) -> SysResult {
+    if !syscall_logic::user_buffer_valid(mask, len) {
+        return Err(SysError::EFAULT);
+    }
+    if len != 0 {
+        unsafe {
+            core::ptr::write_bytes(mask as *mut u8, 0xff, len);
+        }
+    }
+    Ok(len)
+}
+
+pub fn sys_sched_setaffinity(_pid: usize, len: usize, mask: usize) -> SysResult {
+    if !syscall_logic::user_buffer_valid(mask, len) {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_sched_getparam(_pid: usize, param: usize) -> SysResult {
+    linux_zero_user(param, core::mem::size_of::<i32>())
+}
+
+pub fn sys_sched_setparam(_pid: usize, param: usize) -> SysResult {
+    if param == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_sched_getscheduler(_pid: usize) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_sched_setscheduler(_pid: usize, _policy: usize, param: usize) -> SysResult {
+    if param == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_sched_get_priority_max(_policy: usize) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_sched_get_priority_min(_policy: usize) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_sched_rr_get_interval(_pid: usize, tp: usize) -> SysResult {
+    linux_zero_user(tp, core::mem::size_of::<LinuxTimespec>())
+}
+
+pub fn sys_yield() -> SysResult {
+    sys_sched_yield()
+}
+
+pub fn sys_arch_prctl(code: i32, _addr: usize) -> SysResult {
+    const ARCH_SET_FS: i32 = 0x1002;
+    const ARCH_GET_FS: i32 = 0x1003;
+    match code {
+        ARCH_SET_FS | ARCH_GET_FS => Ok(0),
+        _ => Err(SysError::EINVAL),
+    }
+}
+
+pub fn sys_uname(buf: usize) -> SysResult {
+    if buf == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let mut uts = LinuxUtsname {
+        sysname: [0; 65],
+        nodename: [0; 65],
+        release: [0; 65],
+        version: [0; 65],
+        machine: [0; 65],
+        domainname: [0; 65],
+    };
+    linux_write_uts_field(&mut uts.sysname, b"Linux");
+    linux_write_uts_field(&mut uts.nodename, b"smros");
+    linux_write_uts_field(&mut uts.release, b"0.1-smros");
+    linux_write_uts_field(&mut uts.version, b"SMROS");
+    linux_write_uts_field(&mut uts.machine, b"aarch64");
+    linux_write_uts_field(&mut uts.domainname, b"localdomain");
+    unsafe {
+        core::ptr::write(buf as *mut LinuxUtsname, uts);
+    }
+    Ok(0)
+}
+
+pub fn sys_time(time_ptr: usize) -> SysResult {
+    let seconds = (monotonic_nanos() / 1_000_000_000) as usize;
+    if time_ptr != 0 {
+        unsafe {
+            core::ptr::write(time_ptr as *mut usize, seconds);
+        }
+    }
+    Ok(seconds)
+}
+
+pub fn sys_getitimer(_which: usize, curr_value: usize) -> SysResult {
+    linux_zero_user(curr_value, 32)
+}
+
+pub fn sys_setitimer(_which: usize, new_value: usize, old_value: usize) -> SysResult {
+    if new_value == 0 {
+        return Err(SysError::EFAULT);
+    }
+    if old_value != 0 {
+        linux_zero_user(old_value, 32)?;
+    }
+    Ok(0)
+}
+
+pub fn sys_timerfd_create(_clockid: usize, _flags: usize) -> SysResult {
+    let handle = compat::create_object(ObjectType::TimerFd).map_err(|_| SysError::ENOMEM)?;
+    Ok(memory_state().alloc_fd(handle.0, true, true))
+}
+
+pub fn sys_timerfd_settime(
+    fd: usize,
+    _flags: usize,
+    new_value: usize,
+    old_value: usize,
+) -> SysResult {
+    if !linux_fd_known(fd) {
+        return Err(SysError::ENODEV);
+    }
+    if new_value == 0 {
+        return Err(SysError::EFAULT);
+    }
+    if old_value != 0 {
+        linux_zero_user(old_value, 32)?;
+    }
+    Ok(0)
+}
+
+pub fn sys_timerfd_gettime(fd: usize, curr_value: usize) -> SysResult {
+    if !linux_fd_known(fd) {
+        return Err(SysError::ENODEV);
+    }
+    linux_zero_user(curr_value, 32)
+}
+
+pub fn sys_linux_timer_create(_clockid: usize, _sevp: usize, timerid: usize) -> SysResult {
+    if timerid == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let handle = compat::create_object(ObjectType::Timer).map_err(|_| SysError::ENOMEM)?;
+    unsafe {
+        core::ptr::write(timerid as *mut usize, handle.0 as usize);
+    }
+    Ok(0)
+}
+
+pub fn sys_linux_timer_settime(
+    timerid: usize,
+    _flags: usize,
+    new_value: usize,
+    old_value: usize,
+) -> SysResult {
+    if !compat::handle_known(HandleValue(timerid as u32)) {
+        return Err(SysError::EINVAL);
+    }
+    if new_value == 0 {
+        return Err(SysError::EFAULT);
+    }
+    if old_value != 0 {
+        linux_zero_user(old_value, 32)?;
+    }
+    Ok(0)
+}
+
+pub fn sys_linux_timer_gettime(timerid: usize, curr_value: usize) -> SysResult {
+    if !compat::handle_known(HandleValue(timerid as u32)) {
+        return Err(SysError::EINVAL);
+    }
+    linux_zero_user(curr_value, 32)
+}
+
+pub fn sys_linux_timer_getoverrun(timerid: usize) -> SysResult {
+    if compat::handle_known(HandleValue(timerid as u32)) {
+        Ok(0)
+    } else {
+        Err(SysError::EINVAL)
+    }
+}
+
+pub fn sys_linux_timer_delete(timerid: usize) -> SysResult {
+    if compat::close_handle(HandleValue(timerid as u32)) {
+        Ok(0)
+    } else {
+        Err(SysError::EINVAL)
+    }
+}
+
+pub fn sys_clock_settime(clockid: usize, tp: usize) -> SysResult {
+    if !syscall_logic::linux_clock_id_supported(clockid) {
+        return Err(SysError::EINVAL);
+    }
+    if tp == 0 {
+        return Err(SysError::EFAULT);
+    }
+    Ok(0)
+}
+
+pub fn sys_clock_nanosleep(clockid: usize, _flags: usize, req: usize, _rem: usize) -> SysResult {
+    if !syscall_logic::linux_clock_id_supported(clockid) {
+        return Err(SysError::EINVAL);
+    }
+    sys_nanosleep_linux(req)
+}
+
+pub fn sys_block_in_kernel() -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_futex(
+    uaddr: usize,
+    _op: u32,
+    _val: u32,
+    _val2: usize,
+    _uaddr2: usize,
+    _val3: u32,
+) -> SysResult {
+    if uaddr == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+fn linux_iov_write_compat(handle: u32, vector: usize, vector_size: usize) -> ZxResult<usize> {
+    if vector_size == 0 {
+        return Ok(0);
+    }
+    let byte_len = vector_size
+        .checked_mul(core::mem::size_of::<LinuxIovec>())
+        .ok_or(ZxError::ErrInvalidArgs)?;
+    if !syscall_logic::user_buffer_valid(vector, byte_len) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let iovs = unsafe { core::slice::from_raw_parts(vector as *const LinuxIovec, vector_size) };
+    let mut total = 0usize;
+    for iov in iovs {
+        if iov.len == 0 {
+            continue;
+        }
+        if iov.base == 0 {
+            return Err(ZxError::ErrInvalidArgs);
+        }
+        let bytes = unsafe { core::slice::from_raw_parts(iov.base as *const u8, iov.len) };
+        total = total.saturating_add(compat::table().write_bytes(HandleValue(handle), bytes)?);
+    }
+    Ok(total)
+}
+
+fn linux_iov_read_compat(handle: u32, vector: usize, vector_size: usize) -> ZxResult<usize> {
+    if vector_size == 0 {
+        return Ok(0);
+    }
+    let byte_len = vector_size
+        .checked_mul(core::mem::size_of::<LinuxIovec>())
+        .ok_or(ZxError::ErrInvalidArgs)?;
+    if !syscall_logic::user_buffer_valid(vector, byte_len) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let iovs = unsafe { core::slice::from_raw_parts(vector as *const LinuxIovec, vector_size) };
+    let mut total = 0usize;
+    for iov in iovs {
+        if iov.len == 0 {
+            continue;
+        }
+        if iov.base == 0 {
+            return Err(ZxError::ErrInvalidArgs);
+        }
+        let out = unsafe { core::slice::from_raw_parts_mut(iov.base as *mut u8, iov.len) };
+        match compat::table().read_bytes(HandleValue(handle), out) {
+            Ok(read) => {
+                total = total.saturating_add(read);
+                if read < iov.len {
+                    break;
+                }
+            }
+            Err(ZxError::ErrShouldWait) if total != 0 => break,
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(total)
 }
 
 // ============================================================================
@@ -1233,6 +3194,132 @@ pub fn sys_vmo_op_range(handle: u32, op: u32, offset: usize, len: usize) -> ZxRe
         | VmoOpType::CacheClean
         | VmoOpType::CacheCleanInvalidate => Ok(0),
     }
+}
+
+/// Zircon sys_vmo_create_child implementation.
+pub fn sys_vmo_create_child(
+    handle: u32,
+    options: u32,
+    offset: usize,
+    size: usize,
+    out_handle: &mut u32,
+) -> ZxResult {
+    info!(
+        "vmo.create_child: handle={:#x}, options={:#x}, offset={:#x}, size={:#x}",
+        handle, options, offset, size
+    );
+
+    let flags = VmoCloneFlags::from_bits(options).ok_or(ZxError::ErrInvalidArgs)?;
+    let resizable = flags.contains(VmoCloneFlags::RESIZABLE);
+    let is_slice = flags.contains(VmoCloneFlags::SLICE);
+
+    let child = {
+        let state = memory_state();
+        let parent = state.get_vmo(handle).ok_or(ZxError::ErrNotFound)?;
+        if checked_end(offset, size)
+            .filter(|end| *end <= parent.len())
+            .is_none()
+        {
+            return Err(ZxError::ErrOutOfRange);
+        }
+
+        if is_slice {
+            parent.create_slice(offset, size)?
+        } else {
+            parent.create_child(resizable, offset, size)?
+        }
+    };
+
+    let state = memory_state();
+    let child_handle = state.alloc_handle();
+    let mut child = child;
+    child.handle = HandleValue(child_handle);
+    state.vmos.push(VmoRecord {
+        handle: child_handle,
+        vmo: child,
+    });
+    *out_handle = child_handle;
+    Ok(())
+}
+
+/// Zircon sys_vmo_create_physical implementation.
+pub fn sys_vmo_create_physical(
+    _resource: u32,
+    paddr: u64,
+    size: usize,
+    out_handle: &mut u32,
+) -> ZxResult {
+    info!("vmo.create_physical: paddr={:#x}, size={:#x}", paddr, size);
+
+    if size == 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+
+    let mut vmo = Vmo::new_physical(paddr, size).ok_or(ZxError::ErrNoMemory)?;
+    let state = memory_state();
+    let handle = state.alloc_handle();
+    vmo.handle = HandleValue(handle);
+    state.vmos.push(VmoRecord { handle, vmo });
+    *out_handle = handle;
+    Ok(())
+}
+
+/// Zircon sys_vmo_create_contiguous implementation.
+pub fn sys_vmo_create_contiguous(
+    _bti: u32,
+    size: usize,
+    _alignment_log2: u32,
+    out_handle: &mut u32,
+) -> ZxResult {
+    info!("vmo.create_contiguous: size={:#x}", size);
+
+    if size == 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+
+    let mut vmo = Vmo::new_contiguous(size).ok_or(ZxError::ErrNoMemory)?;
+    let state = memory_state();
+    let handle = state.alloc_handle();
+    vmo.handle = HandleValue(handle);
+    state.vmos.push(VmoRecord { handle, vmo });
+    *out_handle = handle;
+    Ok(())
+}
+
+/// Zircon sys_vmo_replace_as_executable implementation.
+pub fn sys_vmo_replace_as_executable(handle: u32, _vmex: u32, out_handle: &mut u32) -> ZxResult {
+    info!("vmo.replace_as_executable: handle={:#x}", handle);
+
+    if !memory_state()
+        .vmos
+        .iter()
+        .any(|record| record.handle == handle)
+    {
+        return Err(ZxError::ErrNotFound);
+    }
+
+    *out_handle = handle;
+    Ok(())
+}
+
+/// Zircon sys_vmo_set_cache_policy implementation.
+pub fn sys_vmo_set_cache_policy(handle: u32, policy: u32) -> ZxResult {
+    let policy = match policy {
+        0 => CachePolicy::Cached,
+        1 => CachePolicy::Uncached,
+        2 => CachePolicy::UncachedDevice,
+        3 => CachePolicy::WriteCombining,
+        _ => return Err(ZxError::ErrInvalidArgs),
+    };
+
+    let state = memory_state();
+    let vmo = state.get_vmo_mut(handle).ok_or(ZxError::ErrNotFound)?;
+    vmo.set_cache_policy(policy)
+}
+
+/// Zircon compatibility alias used by the sample syscall crate.
+pub fn sys_vmo_cache_policy(handle: u32, policy: u32) -> ZxResult {
+    sys_vmo_set_cache_policy(handle, policy)
 }
 
 // ============================================================================
@@ -1541,6 +3628,77 @@ pub fn sys_gettid() -> SysResult {
     Ok(1)
 }
 
+pub fn sys_getuid() -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_geteuid() -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_getgid() -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_getegid() -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_setuid(_uid: usize) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_setgid(_gid: usize) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_setreuid(_ruid: usize, _euid: usize) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_setregid(_rgid: usize, _egid: usize) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_setresuid(_ruid: usize, _euid: usize, _suid: usize) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_getresuid(ruid: usize, euid: usize, suid: usize) -> SysResult {
+    if ruid != 0 {
+        unsafe {
+            core::ptr::write(ruid as *mut u32, 0);
+        }
+    }
+    if euid != 0 {
+        unsafe {
+            core::ptr::write(euid as *mut u32, 0);
+        }
+    }
+    if suid != 0 {
+        unsafe {
+            core::ptr::write(suid as *mut u32, 0);
+        }
+    }
+    Ok(0)
+}
+
+pub fn sys_setresgid(_rgid: usize, _egid: usize, _sgid: usize) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_getresgid(rgid: usize, egid: usize, sgid: usize) -> SysResult {
+    sys_getresuid(rgid, egid, sgid)
+}
+
+pub fn sys_setfsuid(_uid: usize) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_setfsgid(_gid: usize) -> SysResult {
+    Ok(0)
+}
+
 /// Linux sys_kill implementation
 pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
     info!("kill: pid={}, signal={}", pid, signum);
@@ -1555,6 +3713,178 @@ pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
     } else {
         Err(SysError::ESRCH)
     }
+}
+
+pub fn sys_set_tid_address(_tidptr: usize) -> SysResult {
+    sys_gettid()
+}
+
+pub fn sys_set_robust_list(head: usize, len: usize) -> SysResult {
+    if !syscall_logic::user_buffer_valid(head, len) {
+        return Err(SysError::EFAULT);
+    }
+    Ok(0)
+}
+
+pub fn sys_get_robust_list(_pid: isize, head_ptr: usize, len_ptr: usize) -> SysResult {
+    if head_ptr == 0 || len_ptr == 0 {
+        return Err(SysError::EFAULT);
+    }
+    unsafe {
+        core::ptr::write(head_ptr as *mut usize, 0);
+        core::ptr::write(len_ptr as *mut usize, 0);
+    }
+    Ok(0)
+}
+
+pub fn sys_sched_yield() -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_umask(_mask: usize) -> SysResult {
+    Ok(0o022)
+}
+
+pub fn sys_setpgid(_pid: usize, _pgid: usize) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_getpgid(_pid: usize) -> SysResult {
+    Ok(1)
+}
+
+pub fn sys_getsid(_pid: usize) -> SysResult {
+    Ok(1)
+}
+
+pub fn sys_setsid() -> SysResult {
+    Ok(1)
+}
+
+pub fn sys_getgroups(size: usize, list: usize) -> SysResult {
+    if size != 0 && list == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_setgroups(size: usize, list: usize) -> SysResult {
+    if size != 0 && list == 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_prctl(
+    _option: usize,
+    _arg2: usize,
+    _arg3: usize,
+    _arg4: usize,
+    _arg5: usize,
+) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_getcpu(cpu: usize, node: usize, _cache: usize) -> SysResult {
+    if cpu != 0 {
+        unsafe {
+            core::ptr::write(cpu as *mut u32, 0);
+        }
+    }
+    if node != 0 {
+        unsafe {
+            core::ptr::write(node as *mut u32, 0);
+        }
+    }
+    Ok(0)
+}
+
+pub fn sys_madvise(_addr: usize, _len: usize, _advice: usize) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_waitid(
+    _which: usize,
+    _pid: usize,
+    infop: usize,
+    _options: usize,
+    _rusage: usize,
+) -> SysResult {
+    if infop != 0 {
+        linux_zero_user(infop, 128)?;
+    }
+    Ok(0)
+}
+
+pub fn sys_close_range(first: usize, last: usize, _flags: usize) -> SysResult {
+    if first > last {
+        return Err(SysError::EINVAL);
+    }
+    for fd in first..=last {
+        if fd > 1024 {
+            break;
+        }
+        let _ = sys_close(fd);
+    }
+    Ok(0)
+}
+
+pub fn sys_memfd_create(_name: usize, _flags: usize) -> SysResult {
+    let handle = compat::create_object(ObjectType::MemFd).map_err(|_| SysError::ENOMEM)?;
+    Ok(memory_state().alloc_fd(handle.0, true, true))
+}
+
+pub fn sys_membarrier(_cmd: usize, _flags: usize, _cpu_id: usize) -> SysResult {
+    Ok(0)
+}
+
+pub fn sys_statx(
+    _dirfd: usize,
+    path: usize,
+    _flags: usize,
+    _mask: usize,
+    statxbuf: usize,
+) -> SysResult {
+    if path == 0 || statxbuf == 0 {
+        return Err(SysError::EFAULT);
+    }
+    linux_zero_user(statxbuf, 256)
+}
+
+pub fn sys_memory_noop(addr: usize, len: usize) -> SysResult {
+    if !syscall_logic::user_buffer_valid(addr, len) {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(0)
+    }
+}
+
+pub fn sys_mincore(addr: usize, len: usize, vec: usize) -> SysResult {
+    if !syscall_logic::user_buffer_valid(addr, len)
+        || !syscall_logic::user_buffer_valid(vec, pages(len))
+    {
+        return Err(SysError::EFAULT);
+    }
+    if len != 0 {
+        unsafe {
+            core::ptr::write_bytes(vec as *mut u8, 1, pages(len));
+        }
+    }
+    Ok(0)
+}
+
+pub fn sys_readahead(fd: usize, _offset: usize, _count: usize) -> SysResult {
+    if linux_fd_known(fd) {
+        Ok(0)
+    } else {
+        Err(SysError::ENODEV)
+    }
+}
+
+pub fn sys_fadvise64(fd: usize, _offset: usize, _len: usize, _advice: usize) -> SysResult {
+    sys_readahead(fd, 0, 0)
 }
 
 // ============================================================================
@@ -1633,7 +3963,7 @@ pub fn sys_thread_create(
     name_ptr: usize,
     name_len: usize,
     entry_point: usize,
-    stack_size: usize,
+    _stack_size: usize,
     out_thread_handle: &mut u32,
 ) -> ZxResult {
     info!(
@@ -1647,10 +3977,6 @@ pub fn sys_thread_create(
     {
         return Err(ZxError::ErrInvalidArgs);
     }
-    if entry_point == 0 || stack_size == 0 {
-        return Err(ZxError::ErrInvalidArgs);
-    }
-
     let handle = state.alloc_handle();
     state.threads.push(ThreadRecord {
         handle,
@@ -1700,6 +4026,49 @@ pub fn sys_thread_exit() -> ZxResult {
     Ok(())
 }
 
+/// Zircon sys_thread_read_state placeholder.
+pub fn sys_thread_read_state(
+    thread_handle: u32,
+    _kind: u32,
+    buffer: usize,
+    buffer_size: usize,
+) -> ZxResult {
+    if !memory_state()
+        .threads
+        .iter()
+        .any(|record| record.handle == thread_handle)
+        || !syscall_logic::user_buffer_valid(buffer, buffer_size)
+    {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+
+    if buffer_size >= core::mem::size_of::<u64>() {
+        unsafe {
+            core::ptr::write(buffer as *mut u64, thread_handle as u64);
+        }
+    }
+    Ok(())
+}
+
+/// Zircon sys_thread_write_state placeholder.
+pub fn sys_thread_write_state(
+    thread_handle: u32,
+    _kind: u32,
+    buffer: usize,
+    buffer_size: usize,
+) -> ZxResult {
+    if !memory_state()
+        .threads
+        .iter()
+        .any(|record| record.handle == thread_handle)
+        || !syscall_logic::user_buffer_valid(buffer, buffer_size)
+    {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+
+    Ok(())
+}
+
 /// Zircon sys_task_kill implementation
 pub fn sys_task_kill(task_handle: u32) -> ZxResult {
     info!("task.kill: handle={:#x}", task_handle);
@@ -1729,6 +4098,122 @@ pub fn sys_task_kill(task_handle: u32) -> ZxResult {
     sys_handle_close(task_handle)
 }
 
+/// Zircon sys_process_start placeholder.
+pub fn sys_process_start(
+    proc_handle: u32,
+    thread_handle: u32,
+    entry: usize,
+    stack: usize,
+    arg1: usize,
+    arg2: usize,
+) -> ZxResult {
+    if !memory_state().process_handle_known(proc_handle) {
+        return Err(ZxError::ErrNotFound);
+    }
+    sys_thread_start(thread_handle, entry, stack, arg1, arg2)
+}
+
+/// Zircon sys_process_read_memory placeholder.
+pub fn sys_process_read_memory(
+    proc_handle: u32,
+    _vaddr: usize,
+    buffer: usize,
+    len: usize,
+) -> ZxResult<usize> {
+    if !memory_state().process_handle_known(proc_handle)
+        || !syscall_logic::user_buffer_valid(buffer, len)
+    {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+
+    if len != 0 {
+        let out = unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, len) };
+        out.fill(0);
+    }
+    Ok(len)
+}
+
+/// Zircon sys_process_write_memory placeholder.
+pub fn sys_process_write_memory(
+    proc_handle: u32,
+    _vaddr: usize,
+    buffer: usize,
+    len: usize,
+) -> ZxResult<usize> {
+    if !memory_state().process_handle_known(proc_handle)
+        || !syscall_logic::user_buffer_valid(buffer, len)
+    {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+
+    Ok(len)
+}
+
+/// Zircon sys_job_create implementation.
+pub fn sys_job_create(parent_job: u32, options: u32, out_handle: &mut u32) -> ZxResult {
+    if options != 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    if parent_job != 0 && !kernel_object_handle_known(parent_job) {
+        return Err(ZxError::ErrNotFound);
+    }
+
+    *out_handle = compat::create_object(ObjectType::Job)?.0;
+    Ok(())
+}
+
+pub fn sys_job_set_policy(
+    job_handle: u32,
+    _options: u32,
+    _topic: u32,
+    policy_ptr: usize,
+    policy_count: usize,
+) -> ZxResult {
+    if !kernel_object_handle_known(job_handle)
+        || !syscall_logic::user_buffer_valid(policy_ptr, policy_count)
+    {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    Ok(())
+}
+
+pub fn sys_job_set_critical(job_handle: u32, _options: u32, proc_handle: u32) -> ZxResult {
+    if !kernel_object_handle_known(job_handle) || !memory_state().process_handle_known(proc_handle)
+    {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    Ok(())
+}
+
+pub fn sys_task_bind_exception_port(
+    task_handle: u32,
+    port_handle: u32,
+    _key: u64,
+    _options: u32,
+) -> ZxResult {
+    if !kernel_object_handle_known(task_handle)
+        || (port_handle != INVALID_HANDLE && !kernel_object_handle_known(port_handle))
+    {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    Ok(())
+}
+
+pub fn sys_task_resume_from_exception(task_handle: u32, exception: u32, _options: u32) -> ZxResult {
+    if !kernel_object_handle_known(task_handle) || !kernel_object_handle_known(exception) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    Ok(())
+}
+
+pub fn sys_task_suspend_token(task_handle: u32, out_handle: &mut u32) -> ZxResult {
+    if !kernel_object_handle_known(task_handle) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    *out_handle = compat::create_object(ObjectType::SuspendToken)?.0;
+    Ok(())
+}
+
 // ============================================================================
 // Handle Syscalls (Zircon)
 // ============================================================================
@@ -1743,6 +4228,7 @@ pub fn sys_handle_close(handle: u32) -> ZxResult {
 
     if memory_state().release_handle(handle)
         || channel::channel_table().remove_channel(HandleValue(handle))
+        || compat::close_handle(HandleValue(handle))
     {
         Ok(())
     } else {
@@ -1797,6 +4283,33 @@ pub fn sys_handle_replace(handle: u32, rights: u32, out_handle: &mut u32) -> ZxR
 
     *out_handle = handle;
     Ok(())
+}
+
+pub fn sys_channel_write_etc(
+    handle: u32,
+    options: u32,
+    bytes_ptr: usize,
+    bytes_count: usize,
+    handles_ptr: usize,
+    handles_count: usize,
+) -> ZxResult {
+    sys_channel_write(
+        handle,
+        options,
+        bytes_ptr,
+        bytes_count,
+        handles_ptr,
+        handles_count,
+    )
+}
+
+pub fn sys_channel_call_finish(
+    _deadline: u64,
+    _args: usize,
+    _actual_bytes: usize,
+    _actual_handles: usize,
+) -> ZxResult {
+    Err(ZxError::ErrBadState)
 }
 
 // ============================================================================
@@ -1870,6 +4383,59 @@ pub fn sys_object_signal(handle: u32, clear_mask: u32, set_mask: u32) -> ZxResul
     set_object_signal_state(handle, clear_mask, set_mask).map(|_| ())
 }
 
+/// Zircon sys_object_signal_peer implementation.
+pub fn sys_object_signal_peer(handle: u32, clear_mask: u32, set_mask: u32) -> ZxResult {
+    info!(
+        "object.signal_peer: handle={:#x}, clear={:#x}, set={:#x}",
+        handle, clear_mask, set_mask
+    );
+
+    compat::table()
+        .signal_peer(HandleValue(handle), clear_mask, set_mask)
+        .map(|_| ())
+}
+
+/// Zircon sys_object_wait_async placeholder.
+pub fn sys_object_wait_async(
+    handle: u32,
+    port_handle: u32,
+    _key: u64,
+    signals: u32,
+    options: u32,
+) -> ZxResult {
+    info!(
+        "object.wait_async: handle={:#x}, port={:#x}, signals={:#x}",
+        handle, port_handle, signals
+    );
+
+    if options != 0
+        || !kernel_object_handle_known(handle)
+        || !kernel_object_handle_known(port_handle)
+    {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+
+    Ok(())
+}
+
+/// Zircon sys_object_get_child placeholder.
+pub fn sys_object_get_child(
+    handle: u32,
+    koid: u64,
+    _rights: u32,
+    out_handle: &mut u32,
+) -> ZxResult {
+    if !kernel_object_handle_known(handle) {
+        return Err(ZxError::ErrNotFound);
+    }
+    if koid == 0 || koid == handle as u64 {
+        *out_handle = handle;
+        Ok(())
+    } else {
+        Err(ZxError::ErrNotFound)
+    }
+}
+
 /// Zircon sys_object_get_info implementation
 pub fn sys_object_get_info(
     handle: u32,
@@ -1913,7 +4479,9 @@ pub fn sys_object_get_property(
         return Err(ZxError::ErrInvalidArgs);
     }
 
-    let value = memory_state().get_property_value(handle);
+    let value = compat::table()
+        .property(HandleValue(handle))
+        .unwrap_or_else(|| memory_state().get_property_value(handle));
     unsafe {
         core::ptr::write(buffer as *mut u64, value);
     }
@@ -1940,8 +4508,983 @@ pub fn sys_object_set_property(
     }
 
     let value = unsafe { core::ptr::read(buffer as *const u64) };
-    memory_state().set_property_value(handle, value);
+    if !compat::table().set_property(HandleValue(handle), value) {
+        memory_state().set_property_value(handle, value);
+    }
     Ok(())
+}
+
+pub fn sys_object_set_profile(handle: u32, profile: u32, _options: u32) -> ZxResult {
+    if !kernel_object_handle_known(handle) || !kernel_object_handle_known(profile) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Lightweight Zircon Compatibility Objects
+// ============================================================================
+
+pub fn sys_event_create(options: u32, out_handle: &mut u32) -> ZxResult {
+    if options != 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    *out_handle = compat::create_object(ObjectType::Event)?.0;
+    Ok(())
+}
+
+pub fn sys_eventpair_create(
+    options: u32,
+    out_handle0: &mut u32,
+    out_handle1: &mut u32,
+) -> ZxResult {
+    if options != 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let (h0, h1) = compat::create_pair(ObjectType::EventPair)?;
+    *out_handle0 = h0.0;
+    *out_handle1 = h1.0;
+    Ok(())
+}
+
+pub fn sys_socket_create(options: u32, out_handle0: &mut u32, out_handle1: &mut u32) -> ZxResult {
+    if options != 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let (h0, h1) = compat::create_pair(ObjectType::Socket)?;
+    *out_handle0 = h0.0;
+    *out_handle1 = h1.0;
+    Ok(())
+}
+
+pub fn sys_socket_write(
+    handle: u32,
+    options: u32,
+    buffer: usize,
+    len: usize,
+    out_actual: &mut usize,
+) -> ZxResult {
+    if options != 0 || !syscall_logic::user_buffer_valid(buffer, len) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let bytes = if len == 0 {
+        &[][..]
+    } else {
+        unsafe { core::slice::from_raw_parts(buffer as *const u8, len) }
+    };
+    *out_actual = compat::table().write_bytes(HandleValue(handle), bytes)?;
+    Ok(())
+}
+
+pub fn sys_socket_read(
+    handle: u32,
+    options: u32,
+    buffer: usize,
+    len: usize,
+    out_actual: &mut usize,
+) -> ZxResult {
+    if options != 0 || !syscall_logic::user_buffer_valid(buffer, len) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let out = if len == 0 {
+        &mut [][..]
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, len) }
+    };
+    *out_actual = compat::table().read_bytes(HandleValue(handle), out)?;
+    Ok(())
+}
+
+pub fn sys_socket_share(handle: u32, socket_to_share: u32) -> ZxResult {
+    if !compat::handle_known(HandleValue(handle))
+        || !compat::handle_known(HandleValue(socket_to_share))
+    {
+        return Err(ZxError::ErrNotFound);
+    }
+    Ok(())
+}
+
+pub fn sys_socket_accept(handle: u32, out_handle: &mut u32) -> ZxResult {
+    if !compat::handle_known(HandleValue(handle)) {
+        return Err(ZxError::ErrNotFound);
+    }
+    *out_handle = compat::create_object(ObjectType::Socket)?.0;
+    Ok(())
+}
+
+pub fn sys_socket_shutdown(handle: u32, _options: u32) -> ZxResult {
+    if compat::handle_known(HandleValue(handle)) {
+        Ok(())
+    } else {
+        Err(ZxError::ErrNotFound)
+    }
+}
+
+pub fn sys_fifo_create(
+    elem_count: usize,
+    elem_size: usize,
+    options: u32,
+    out_handle0: &mut u32,
+    out_handle1: &mut u32,
+) -> ZxResult {
+    if elem_count == 0 || elem_size == 0 || options != 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let (h0, h1) = compat::create_pair(ObjectType::Fifo)?;
+    *out_handle0 = h0.0;
+    *out_handle1 = h1.0;
+    Ok(())
+}
+
+pub fn sys_fifo_write(
+    handle: u32,
+    elem_size: usize,
+    buffer: usize,
+    count: usize,
+    out_actual: &mut usize,
+) -> ZxResult {
+    let byte_len = elem_size.checked_mul(count).ok_or(ZxError::ErrOutOfRange)?;
+    if elem_size == 0 || !syscall_logic::user_buffer_valid(buffer, byte_len) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let bytes = if byte_len == 0 {
+        &[][..]
+    } else {
+        unsafe { core::slice::from_raw_parts(buffer as *const u8, byte_len) }
+    };
+    *out_actual = compat::table().write_bytes(HandleValue(handle), bytes)? / elem_size;
+    Ok(())
+}
+
+pub fn sys_fifo_read(
+    handle: u32,
+    elem_size: usize,
+    buffer: usize,
+    count: usize,
+    out_actual: &mut usize,
+) -> ZxResult {
+    let byte_len = elem_size.checked_mul(count).ok_or(ZxError::ErrOutOfRange)?;
+    if elem_size == 0 || !syscall_logic::user_buffer_valid(buffer, byte_len) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let out = if byte_len == 0 {
+        &mut [][..]
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, byte_len) }
+    };
+    *out_actual = compat::table().read_bytes(HandleValue(handle), out)? / elem_size;
+    Ok(())
+}
+
+pub fn sys_port_create(options: u32, out_handle: &mut u32) -> ZxResult {
+    if options != 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    *out_handle = compat::create_object(ObjectType::Port)?.0;
+    Ok(())
+}
+
+pub fn sys_port_queue(port_handle: u32, packet: usize) -> ZxResult {
+    if !compat::handle_known(HandleValue(port_handle)) || packet == 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    compat::table()
+        .update_signals(HandleValue(port_handle), 0, ZX_USER_SIGNAL_0)
+        .ok_or(ZxError::ErrNotFound)?;
+    Ok(())
+}
+
+pub fn sys_port_wait(port_handle: u32, _deadline: u64, packet: usize) -> ZxResult {
+    if !compat::handle_known(HandleValue(port_handle)) || packet == 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    unsafe {
+        core::ptr::write_bytes(packet as *mut u8, 0, 32);
+    }
+    Ok(())
+}
+
+pub fn sys_profile_create(
+    _root_resource: u32,
+    options: u32,
+    _profile: usize,
+    out_handle: &mut u32,
+) -> ZxResult {
+    if options != 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    *out_handle = compat::create_object(ObjectType::Profile)?.0;
+    Ok(())
+}
+
+pub fn sys_timer_create(options: u32, _clock_id: u32, out_handle: &mut u32) -> ZxResult {
+    if options != 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    *out_handle = compat::create_object(ObjectType::Timer)?.0;
+    Ok(())
+}
+
+pub fn sys_timer_set(handle: u32, _deadline: u64, _slack: i64) -> ZxResult {
+    if compat::table()
+        .update_signals(HandleValue(handle), 0, ZX_USER_SIGNAL_0)
+        .is_some()
+    {
+        Ok(())
+    } else {
+        Err(ZxError::ErrNotFound)
+    }
+}
+
+pub fn sys_timer_cancel(handle: u32) -> ZxResult {
+    if compat::table()
+        .update_signals(HandleValue(handle), ZX_USER_SIGNAL_0, 0)
+        .is_some()
+    {
+        Ok(())
+    } else {
+        Err(ZxError::ErrNotFound)
+    }
+}
+
+pub fn sys_debuglog_create(_resource: u32, options: u32, out_handle: &mut u32) -> ZxResult {
+    if options != 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    *out_handle = compat::create_object(ObjectType::DebugLog)?.0;
+    Ok(())
+}
+
+pub fn sys_debuglog_write(handle: u32, options: u32, buffer: usize, len: usize) -> ZxResult {
+    if options != 0 || !compat::handle_known(HandleValue(handle)) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let _ = sys_write(1, buffer, len);
+    Ok(())
+}
+
+pub fn sys_debuglog_read(handle: u32, options: u32, buffer: usize, len: usize) -> ZxResult<usize> {
+    if options != 0 || !syscall_logic::user_buffer_valid(buffer, len) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let out = if len == 0 {
+        &mut [][..]
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, len) }
+    };
+    compat::table().read_bytes(HandleValue(handle), out)
+}
+
+pub fn sys_resource_create(
+    parent: u32,
+    options: u32,
+    _base: u64,
+    _size: usize,
+    _name: usize,
+    name_len: usize,
+    out_handle: &mut u32,
+) -> ZxResult {
+    if options != 0 || (parent != 0 && !kernel_object_handle_known(parent)) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    if name_len > 32 {
+        return Err(ZxError::ErrOutOfRange);
+    }
+    *out_handle = compat::create_object(ObjectType::Resource)?.0;
+    Ok(())
+}
+
+pub fn sys_cprng_draw_once(buffer: usize, len: usize) -> ZxResult {
+    if !syscall_logic::user_buffer_valid(buffer, len) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    if len != 0 {
+        let seed = monotonic_nanos() as u8;
+        let out = unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, len) };
+        for (index, byte) in out.iter_mut().enumerate() {
+            *byte = seed
+                .wrapping_add((index as u8).wrapping_mul(17))
+                .wrapping_add(0x5A);
+        }
+    }
+    Ok(())
+}
+
+pub fn sys_cprng_add_entropy(buffer: usize, len: usize) -> ZxResult {
+    if syscall_logic::user_buffer_valid(buffer, len) {
+        Ok(())
+    } else {
+        Err(ZxError::ErrInvalidArgs)
+    }
+}
+
+pub fn sys_debug_read(buffer: usize, len: usize) -> ZxResult<usize> {
+    if !syscall_logic::user_buffer_valid(buffer, len) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    if len != 0 {
+        unsafe {
+            core::ptr::write_bytes(buffer as *mut u8, 0, len);
+        }
+    }
+    Ok(0)
+}
+
+pub fn sys_debug_write(buffer: usize, len: usize) -> ZxResult {
+    sys_write(1, buffer, len)
+        .map(|_| ())
+        .map_err(|_| ZxError::ErrInvalidArgs)
+}
+
+pub fn sys_debug_send_command(buffer: usize, len: usize) -> ZxResult {
+    if syscall_logic::user_buffer_valid(buffer, len) {
+        Ok(())
+    } else {
+        Err(ZxError::ErrInvalidArgs)
+    }
+}
+
+pub fn sys_ktrace_read(handle: u32, buffer: usize, len: usize, out_actual: &mut usize) -> ZxResult {
+    if handle != 0 && !kernel_object_handle_known(handle) {
+        return Err(ZxError::ErrNotFound);
+    }
+    *out_actual = sys_debug_read(buffer, len)?;
+    Ok(())
+}
+
+pub fn sys_ktrace_control(_handle: u32, _action: u32, _options: u32, _ptr: usize) -> ZxResult {
+    Ok(())
+}
+
+pub fn sys_ktrace_write(_handle: u32, _id: u32, _arg0: u64, _arg1: u64) -> ZxResult {
+    Ok(())
+}
+
+pub fn sys_mtrace_control(
+    _handle: u32,
+    _kind: u32,
+    _action: u32,
+    _options: u32,
+    _ptr: usize,
+) -> ZxResult {
+    Ok(())
+}
+
+pub fn sys_system_get_event(
+    _root_resource: u32,
+    _event_kind: u32,
+    out_handle: &mut u32,
+) -> ZxResult {
+    *out_handle = compat::create_object(ObjectType::Event)?.0;
+    Ok(())
+}
+
+pub fn sys_create_exception_channel(task: u32, option: u32, out_handle: &mut u32) -> ZxResult {
+    if option > 1 || !kernel_object_handle_known(task) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let mut h0 = 0u32;
+    let mut h1 = 0u32;
+    sys_channel_create(0, &mut h0, &mut h1)?;
+    *out_handle = h0;
+    Ok(())
+}
+
+pub fn sys_exception_get_thread(exception: u32, out_handle: &mut u32) -> ZxResult {
+    if !kernel_object_handle_known(exception) {
+        return Err(ZxError::ErrNotFound);
+    }
+    *out_handle = compat::create_object(ObjectType::Thread)?.0;
+    Ok(())
+}
+
+pub fn sys_exception_get_process(exception: u32, out_handle: &mut u32) -> ZxResult {
+    if !kernel_object_handle_known(exception) {
+        return Err(ZxError::ErrNotFound);
+    }
+    *out_handle = compat::create_object(ObjectType::Process)?.0;
+    Ok(())
+}
+
+pub fn sys_iommu_create(
+    _resource: u32,
+    type_: u32,
+    desc: usize,
+    desc_size: usize,
+    out_handle: &mut u32,
+) -> ZxResult {
+    if desc_size != 0 && desc == 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    if type_ != 0 {
+        return Err(ZxError::ErrNotSupported);
+    }
+    *out_handle = compat::create_object(ObjectType::Iommu)?.0;
+    Ok(())
+}
+
+pub fn sys_bti_create(iommu: u32, options: u32, _bti_id: u64, out_handle: &mut u32) -> ZxResult {
+    if options != 0 || !kernel_object_handle_known(iommu) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    *out_handle = compat::create_object(ObjectType::Bti)?.0;
+    Ok(())
+}
+
+pub fn sys_bti_pin(
+    bti: u32,
+    _options: u32,
+    vmo: u32,
+    offset: usize,
+    size: usize,
+    addrs: usize,
+    addrs_count: usize,
+    out_handle: &mut u32,
+) -> ZxResult {
+    if !kernel_object_handle_known(bti) || memory_state().get_vmo(vmo).is_none() {
+        return Err(ZxError::ErrNotFound);
+    }
+    if !page_aligned(offset) || !page_aligned(size) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    if addrs_count != 0 && addrs == 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    for index in 0..addrs_count {
+        unsafe {
+            core::ptr::write(
+                (addrs as *mut u64).add(index),
+                (offset + index * PAGE_SIZE) as u64,
+            );
+        }
+    }
+    *out_handle = compat::create_object(ObjectType::Pmt)?.0;
+    Ok(())
+}
+
+pub fn sys_pmt_unpin(pmt: u32) -> ZxResult {
+    sys_handle_close(pmt).or(Ok(()))
+}
+
+pub fn sys_bti_release_quarantine(bti: u32) -> ZxResult {
+    if kernel_object_handle_known(bti) {
+        Ok(())
+    } else {
+        Err(ZxError::ErrNotFound)
+    }
+}
+
+pub fn sys_pc_firmware_tables(_resource: u32, acpi_rsdp_ptr: usize, smbios_ptr: usize) -> ZxResult {
+    if acpi_rsdp_ptr != 0 {
+        unsafe {
+            core::ptr::write(acpi_rsdp_ptr as *mut u64, 0);
+        }
+    }
+    if smbios_ptr != 0 {
+        unsafe {
+            core::ptr::write(smbios_ptr as *mut u64, 0);
+        }
+    }
+    Err(ZxError::ErrNotSupported)
+}
+
+pub fn sys_framebuffer_get_info(info: usize) -> ZxResult {
+    if info == 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    unsafe {
+        core::ptr::write_bytes(info as *mut u8, 0, 32);
+    }
+    Ok(())
+}
+
+pub fn sys_framebuffer_set_range(_vmo: u32, _len: usize, _format: u32) -> ZxResult {
+    Err(ZxError::ErrNotSupported)
+}
+
+pub fn sys_interrupt_create(
+    _resource: u32,
+    _src_num: usize,
+    _options: u32,
+    out_handle: &mut u32,
+) -> ZxResult {
+    *out_handle = compat::create_object(ObjectType::Interrupt)?.0;
+    Ok(())
+}
+
+pub fn sys_interrupt_bind(interrupt: u32, port: u32, _key: u64, _options: u32) -> ZxResult {
+    if !kernel_object_handle_known(interrupt) || !kernel_object_handle_known(port) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    Ok(())
+}
+
+pub fn sys_interrupt_bind_vcpu(interrupt: u32, vcpu: u32, _options: u32) -> ZxResult {
+    if !kernel_object_handle_known(interrupt) || !kernel_object_handle_known(vcpu) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    Ok(())
+}
+
+pub fn sys_interrupt_trigger(interrupt: u32, _options: u32, _timestamp: i64) -> ZxResult {
+    if compat::table()
+        .update_signals(HandleValue(interrupt), 0, ZX_USER_SIGNAL_0)
+        .is_some()
+    {
+        Ok(())
+    } else {
+        Err(ZxError::ErrNotFound)
+    }
+}
+
+pub fn sys_interrupt_ack(interrupt: u32) -> ZxResult {
+    if compat::table()
+        .update_signals(HandleValue(interrupt), ZX_USER_SIGNAL_0, 0)
+        .is_some()
+    {
+        Ok(())
+    } else {
+        Err(ZxError::ErrNotFound)
+    }
+}
+
+pub fn sys_interrupt_destroy(interrupt: u32) -> ZxResult {
+    sys_handle_close(interrupt)
+}
+
+pub fn sys_interrupt_wait(interrupt: u32, out_timestamp: usize) -> ZxResult {
+    if !kernel_object_handle_known(interrupt) {
+        return Err(ZxError::ErrNotFound);
+    }
+    if out_timestamp != 0 {
+        unsafe {
+            core::ptr::write(out_timestamp as *mut i64, monotonic_nanos() as i64);
+        }
+    }
+    Ok(())
+}
+
+pub fn sys_pci_add_subtract_io_range(
+    _handle: u32,
+    _mmio: bool,
+    _base: u64,
+    _len: u64,
+    _add: bool,
+) -> ZxResult {
+    Err(ZxError::ErrNotSupported)
+}
+
+pub fn sys_pci_cfg_pio_rw(
+    _handle: u32,
+    _bus: u8,
+    _dev: u8,
+    _func: u8,
+    _offset: u8,
+    _value_ptr: usize,
+    _width: usize,
+    _write: bool,
+) -> ZxResult {
+    Err(ZxError::ErrNotSupported)
+}
+
+pub fn sys_pci_init(_handle: u32, _init_buf: usize, _len: u32) -> ZxResult {
+    Err(ZxError::ErrNotSupported)
+}
+
+pub fn sys_pci_map_interrupt(_dev: u32, _irq: i32, out_handle: &mut u32) -> ZxResult {
+    *out_handle = compat::create_object(ObjectType::Interrupt)?.0;
+    Ok(())
+}
+
+pub fn sys_pci_get_nth_device(
+    _handle: u32,
+    _index: u32,
+    out_info: usize,
+    out_handle: &mut u32,
+) -> ZxResult {
+    if out_info != 0 {
+        unsafe {
+            core::ptr::write_bytes(out_info as *mut u8, 0, 64);
+        }
+    }
+    *out_handle = compat::create_object(ObjectType::PciDevice)?.0;
+    Ok(())
+}
+
+pub fn sys_pci_get_bar(
+    handle: u32,
+    _bar_num: u32,
+    out_bar: usize,
+    out_handle: &mut u32,
+) -> ZxResult {
+    if !kernel_object_handle_known(handle) {
+        return Err(ZxError::ErrNotFound);
+    }
+    if out_bar != 0 {
+        unsafe {
+            core::ptr::write_bytes(out_bar as *mut u8, 0, 24);
+        }
+    }
+    let mut vmo = 0u32;
+    sys_vmo_create(PAGE_SIZE as u64, 0, &mut vmo)?;
+    *out_handle = vmo;
+    Ok(())
+}
+
+pub fn sys_pci_enable_bus_master(handle: u32, _enable: bool) -> ZxResult {
+    if kernel_object_handle_known(handle) {
+        Ok(())
+    } else {
+        Err(ZxError::ErrNotFound)
+    }
+}
+
+pub fn sys_pci_query_irq_mode(handle: u32, _mode: u32, out_max_irqs: usize) -> ZxResult {
+    if !kernel_object_handle_known(handle) {
+        return Err(ZxError::ErrNotFound);
+    }
+    if out_max_irqs != 0 {
+        unsafe {
+            core::ptr::write(out_max_irqs as *mut u32, 1);
+        }
+    }
+    Ok(())
+}
+
+pub fn sys_pci_set_irq_mode(handle: u32, _mode: u32, _requested_irq_count: u32) -> ZxResult {
+    if kernel_object_handle_known(handle) {
+        Ok(())
+    } else {
+        Err(ZxError::ErrNotFound)
+    }
+}
+
+pub fn sys_pci_reset_device(handle: u32) -> ZxResult {
+    if kernel_object_handle_known(handle) {
+        Ok(())
+    } else {
+        Err(ZxError::ErrNotFound)
+    }
+}
+
+pub fn sys_pci_config_read(handle: u32, _offset: usize, _width: usize, out_val: usize) -> ZxResult {
+    if !kernel_object_handle_known(handle) {
+        return Err(ZxError::ErrNotFound);
+    }
+    if out_val != 0 {
+        unsafe {
+            core::ptr::write(out_val as *mut u32, 0);
+        }
+    }
+    Ok(())
+}
+
+pub fn sys_pci_config_write(handle: u32, _offset: usize, _width: usize, _value: u32) -> ZxResult {
+    if kernel_object_handle_known(handle) {
+        Ok(())
+    } else {
+        Err(ZxError::ErrNotFound)
+    }
+}
+
+pub fn sys_smc_call(_handle: u32, parameters: usize, out_smc_result: usize) -> ZxResult {
+    if parameters == 0 || out_smc_result == 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    unsafe {
+        core::ptr::write_bytes(out_smc_result as *mut u8, 0, 64);
+    }
+    Err(ZxError::ErrNotSupported)
+}
+
+pub fn sys_guest_create(
+    _resource: u32,
+    options: u32,
+    guest_handle: &mut u32,
+    vmar_handle: &mut u32,
+) -> ZxResult {
+    if options != 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    *guest_handle = compat::create_object(ObjectType::Guest)?.0;
+    let mut child_addr = 0usize;
+    sys_vmar_allocate(
+        memory_root_vmar_handle(),
+        0,
+        0,
+        ZIRCON_ROOT_VMAR_SIZE as u64,
+        vmar_handle,
+        &mut child_addr,
+    )?;
+    Ok(())
+}
+
+pub fn sys_guest_set_trap(
+    handle: u32,
+    _kind: u32,
+    _addr: u64,
+    _size: u64,
+    port_handle: u32,
+    _key: u64,
+) -> ZxResult {
+    if !kernel_object_handle_known(handle) {
+        return Err(ZxError::ErrNotFound);
+    }
+    if port_handle != INVALID_HANDLE && !kernel_object_handle_known(port_handle) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    Ok(())
+}
+
+pub fn sys_vcpu_create(
+    guest_handle: u32,
+    options: u32,
+    _entry: u64,
+    out_handle: &mut u32,
+) -> ZxResult {
+    if options != 0 || !kernel_object_handle_known(guest_handle) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    *out_handle = compat::create_object(ObjectType::Vcpu)?.0;
+    Ok(())
+}
+
+pub fn sys_vcpu_resume(handle: u32, user_packet: usize) -> ZxResult {
+    if !kernel_object_handle_known(handle) {
+        return Err(ZxError::ErrNotFound);
+    }
+    if user_packet != 0 {
+        unsafe {
+            core::ptr::write_bytes(user_packet as *mut u8, 0, 48);
+        }
+    }
+    Err(ZxError::ErrNotSupported)
+}
+
+pub fn sys_vcpu_interrupt(handle: u32, _vector: u32) -> ZxResult {
+    if kernel_object_handle_known(handle) {
+        Ok(())
+    } else {
+        Err(ZxError::ErrNotFound)
+    }
+}
+
+pub fn sys_vcpu_read_state(
+    handle: u32,
+    _kind: u32,
+    user_buffer: usize,
+    buffer_size: usize,
+) -> ZxResult {
+    if !kernel_object_handle_known(handle)
+        || !syscall_logic::user_buffer_valid(user_buffer, buffer_size)
+    {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    if buffer_size != 0 {
+        unsafe {
+            core::ptr::write_bytes(user_buffer as *mut u8, 0, buffer_size);
+        }
+    }
+    Ok(())
+}
+
+pub fn sys_vcpu_write_state(
+    handle: u32,
+    _kind: u32,
+    user_buffer: usize,
+    buffer_size: usize,
+) -> ZxResult {
+    if !kernel_object_handle_known(handle)
+        || !syscall_logic::user_buffer_valid(user_buffer, buffer_size)
+    {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    Ok(())
+}
+
+pub fn sys_system_mexec(_kernel_vmo: u32, _bootimage_vmo: u32) -> ZxResult {
+    Err(ZxError::ErrNotSupported)
+}
+
+pub fn sys_system_mexec_payload_get(_buffer: usize, _buffer_size: usize) -> ZxResult {
+    Err(ZxError::ErrNotSupported)
+}
+
+pub fn sys_system_powerctl(_resource: u32, _cmd: u32, _arg: usize) -> ZxResult {
+    Err(ZxError::ErrNotSupported)
+}
+
+pub fn sys_pager_create(options: u32, out_handle: &mut u32) -> ZxResult {
+    if options != 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    *out_handle = compat::create_object(ObjectType::Pager)?.0;
+    Ok(())
+}
+
+pub fn sys_pager_create_vmo(
+    pager: u32,
+    options: u32,
+    _port: u32,
+    _key: u64,
+    size: usize,
+    out_handle: &mut u32,
+) -> ZxResult {
+    if options != 0 || !kernel_object_handle_known(pager) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    sys_vmo_create(size as u64, 0, out_handle)
+}
+
+pub fn sys_pager_detach_vmo(pager: u32, vmo: u32) -> ZxResult {
+    if !kernel_object_handle_known(pager) || memory_state().get_vmo(vmo).is_none() {
+        return Err(ZxError::ErrNotFound);
+    }
+    Ok(())
+}
+
+pub fn sys_pager_supply_pages(
+    pager: u32,
+    pager_vmo: u32,
+    _offset: usize,
+    _len: usize,
+    aux_vmo: u32,
+    _aux_offset: usize,
+) -> ZxResult {
+    if !kernel_object_handle_known(pager)
+        || memory_state().get_vmo(pager_vmo).is_none()
+        || memory_state().get_vmo(aux_vmo).is_none()
+    {
+        return Err(ZxError::ErrNotFound);
+    }
+    Ok(())
+}
+
+pub fn sys_stream_create(
+    options: u32,
+    vmo_handle: u32,
+    _seek: usize,
+    out_handle: &mut u32,
+) -> ZxResult {
+    if options & !0b11 != 0 || memory_state().get_vmo(vmo_handle).is_none() {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    *out_handle = compat::create_object(ObjectType::Stream)?.0;
+    Ok(())
+}
+
+pub fn sys_stream_seek(handle: u32, _whence: u32, offset: i64, out_seek: &mut usize) -> ZxResult {
+    if !compat::handle_known(HandleValue(handle)) {
+        return Err(ZxError::ErrNotFound);
+    }
+    *out_seek = if offset < 0 { 0 } else { offset as usize };
+    Ok(())
+}
+
+pub fn sys_stream_writev(
+    handle: u32,
+    options: u32,
+    vector: usize,
+    vector_size: usize,
+    actual_count: usize,
+) -> ZxResult {
+    if options & !1 != 0 || !compat::handle_known(HandleValue(handle)) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let written = linux_iov_write_compat(handle, vector, vector_size)?;
+    if actual_count != 0 {
+        unsafe {
+            core::ptr::write(actual_count as *mut usize, written);
+        }
+    }
+    Ok(())
+}
+
+pub fn sys_stream_writev_at(
+    handle: u32,
+    options: u32,
+    _offset: usize,
+    vector: usize,
+    vector_size: usize,
+    actual_count: usize,
+) -> ZxResult {
+    if options != 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    sys_stream_writev(handle, 0, vector, vector_size, actual_count)
+}
+
+pub fn sys_stream_readv(
+    handle: u32,
+    options: u32,
+    vector: usize,
+    vector_size: usize,
+    actual_count: usize,
+) -> ZxResult {
+    if options != 0 || !compat::handle_known(HandleValue(handle)) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let read = linux_iov_read_compat(handle, vector, vector_size)?;
+    if actual_count != 0 {
+        unsafe {
+            core::ptr::write(actual_count as *mut usize, read);
+        }
+    }
+    Ok(())
+}
+
+pub fn sys_stream_readv_at(
+    handle: u32,
+    options: u32,
+    _offset: usize,
+    vector: usize,
+    vector_size: usize,
+    actual_count: usize,
+) -> ZxResult {
+    if options != 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    sys_stream_readv(handle, 0, vector, vector_size, actual_count)
+}
+
+pub fn sys_futex_wait(
+    value_ptr: usize,
+    _current_value: i32,
+    _new_owner: u32,
+    _deadline: u64,
+) -> ZxResult {
+    if value_ptr == 0 {
+        Err(ZxError::ErrInvalidArgs)
+    } else {
+        Err(ZxError::ErrTimedOut)
+    }
+}
+
+pub fn sys_futex_wake(value_ptr: usize, _count: u32) -> ZxResult {
+    if value_ptr == 0 {
+        Err(ZxError::ErrInvalidArgs)
+    } else {
+        Ok(())
+    }
+}
+
+pub fn sys_futex_wake_single_owner(value_ptr: usize) -> ZxResult {
+    sys_futex_wake(value_ptr, 1)
+}
+
+pub fn sys_futex_requeue(
+    value_ptr: usize,
+    _wake_count: u32,
+    _current_value: i32,
+    requeue_ptr: usize,
+    _requeue_count: u32,
+    _new_requeue_owner: u32,
+) -> ZxResult {
+    if value_ptr == 0 || requeue_ptr == 0 {
+        Err(ZxError::ErrInvalidArgs)
+    } else {
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -1951,6 +5494,50 @@ pub fn sys_object_set_property(
 /// Zircon sys_clock_get_monotonic implementation
 pub fn sys_clock_get_monotonic() -> ZxResult<u64> {
     Ok(monotonic_nanos())
+}
+
+pub fn sys_clock_create(options: u32, _args: usize, out_handle: &mut u32) -> ZxResult {
+    if options != 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    *out_handle = compat::create_object(ObjectType::Clock)?.0;
+    Ok(())
+}
+
+pub fn sys_clock_get(clock_id: u32, out_time: usize) -> ZxResult {
+    if clock_id as usize > CLOCK_MONOTONIC || out_time == 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    unsafe {
+        core::ptr::write(out_time as *mut u64, monotonic_nanos());
+    }
+    Ok(())
+}
+
+pub fn sys_clock_read(handle: u32, out_time: usize) -> ZxResult {
+    if !compat::handle_known(HandleValue(handle)) || out_time == 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    unsafe {
+        core::ptr::write(out_time as *mut u64, monotonic_nanos());
+    }
+    Ok(())
+}
+
+pub fn sys_clock_adjust(_resource: u32, clock_id: u32, _offset: u64) -> ZxResult {
+    if clock_id as usize > CLOCK_MONOTONIC {
+        Err(ZxError::ErrInvalidArgs)
+    } else {
+        Ok(())
+    }
+}
+
+pub fn sys_clock_update(handle: u32, _options: u64, _args: usize) -> ZxResult {
+    if compat::handle_known(HandleValue(handle)) {
+        Ok(())
+    } else {
+        Err(ZxError::ErrNotFound)
+    }
 }
 
 /// Zircon sys_nanosleep implementation
@@ -1970,17 +5557,147 @@ pub fn sys_clock_gettime(clock: usize, buf: usize) -> SysResult {
         return Err(SysError::EFAULT);
     }
 
-    let now = if clock == CLOCK_MONOTONIC {
-        monotonic_nanos()
-    } else {
-        0
-    };
+    let now = monotonic_nanos().max(1);
     let timespec = LinuxTimespec {
         tv_sec: (now / 1_000_000_000) as i64,
         tv_nsec: (now % 1_000_000_000) as i64,
     };
     unsafe {
         core::ptr::write(buf as *mut LinuxTimespec, timespec);
+    }
+    Ok(0)
+}
+
+pub fn sys_clock_getres(clock: usize, buf: usize) -> SysResult {
+    if !syscall_logic::linux_clock_id_supported(clock) {
+        return Err(SysError::EINVAL);
+    }
+    if buf != 0 {
+        unsafe {
+            core::ptr::write(
+                buf as *mut LinuxTimespec,
+                LinuxTimespec {
+                    tv_sec: 0,
+                    tv_nsec: 10_000_000,
+                },
+            );
+        }
+    }
+    Ok(0)
+}
+
+pub fn sys_gettimeofday(tv: usize, _tz: usize) -> SysResult {
+    if tv != 0 {
+        let now = monotonic_nanos().max(1);
+        unsafe {
+            core::ptr::write(
+                tv as *mut LinuxTimeval,
+                LinuxTimeval {
+                    tv_sec: (now / 1_000_000_000) as i64,
+                    tv_usec: ((now % 1_000_000_000) / 1_000) as i64,
+                },
+            );
+        }
+    }
+    Ok(0)
+}
+
+pub fn sys_times(buf: usize) -> SysResult {
+    let ticks = scheduler::scheduler().get_tick_count() as isize;
+    if buf != 0 {
+        unsafe {
+            core::ptr::write(
+                buf as *mut LinuxTms,
+                LinuxTms {
+                    tms_utime: ticks,
+                    tms_stime: ticks,
+                    tms_cutime: 0,
+                    tms_cstime: 0,
+                },
+            );
+        }
+    }
+    Ok(ticks as usize)
+}
+
+pub fn sys_getrusage(_who: usize, usage: usize) -> SysResult {
+    if usage == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let now = monotonic_nanos().max(1);
+    let timeval = LinuxTimeval {
+        tv_sec: (now / 1_000_000_000) as i64,
+        tv_usec: ((now % 1_000_000_000) / 1_000) as i64,
+    };
+    unsafe {
+        core::ptr::write(
+            usage as *mut LinuxRusage,
+            LinuxRusage {
+                ru_utime: timeval,
+                ru_stime: timeval,
+                rest: [0; 14],
+            },
+        );
+    }
+    Ok(0)
+}
+
+pub fn sys_prlimit64(
+    _pid: usize,
+    _resource: usize,
+    new_limit: usize,
+    old_limit: usize,
+) -> SysResult {
+    if new_limit != 0
+        && !syscall_logic::user_buffer_valid(new_limit, core::mem::size_of::<LinuxRlimit64>())
+    {
+        return Err(SysError::EFAULT);
+    }
+    if old_limit != 0 {
+        unsafe {
+            core::ptr::write(
+                old_limit as *mut LinuxRlimit64,
+                LinuxRlimit64 {
+                    rlim_cur: u64::MAX,
+                    rlim_max: u64::MAX,
+                },
+            );
+        }
+    }
+    Ok(0)
+}
+
+pub fn sys_getrlimit(resource: usize, old_limit: usize) -> SysResult {
+    sys_prlimit64(0, resource, 0, old_limit)
+}
+
+pub fn sys_setrlimit(resource: usize, new_limit: usize) -> SysResult {
+    sys_prlimit64(0, resource, new_limit, 0)
+}
+
+pub fn sys_sysinfo(info: usize) -> SysResult {
+    if info == 0 {
+        return Err(SysError::EFAULT);
+    }
+    unsafe {
+        core::ptr::write(
+            info as *mut LinuxSysinfo,
+            LinuxSysinfo {
+                uptime: (monotonic_nanos() / 1_000_000_000) as isize,
+                loads: [0; 3],
+                totalram: 1024 * 1024,
+                freeram: 512 * 1024,
+                sharedram: 0,
+                bufferram: 0,
+                totalswap: 0,
+                freeswap: 0,
+                procs: 1,
+                pad: 0,
+                totalhigh: 0,
+                freehigh: 0,
+                mem_unit: 1,
+            },
+        );
     }
     Ok(0)
 }
@@ -2240,82 +5957,183 @@ pub enum LinuxSyscall {
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZirconSyscall {
-    HandleClose = 0,
-    HandleCloseMany = 1,
-    HandleDuplicate = 2,
-    HandleReplace = 3,
-    ObjectGetInfo = 4,
-    ObjectGetProperty = 5,
-    ObjectSetProperty = 6,
-    ObjectSignal = 7,
-    ObjectSignalPeer = 8,
-    ObjectWaitOne = 9,
-    ObjectWaitMany = 10,
-    ObjectWaitAsync = 11,
-    ThreadCreate = 12,
-    ThreadStart = 13,
-    ThreadWriteState = 14,
-    ThreadReadState = 15,
-    TaskKill = 16,
-    ThreadExit = 17,
-    ProcessCreate = 18,
-    ProcessStart = 19,
-    ProcessReadMemory = 20,
-    ProcessWriteMemory = 21,
-    ProcessExit = 22,
-    JobCreate = 23,
-    JobSetPolicy = 24,
-    JobSetCritical = 25,
-    TaskSuspendToken = 26,
-    ChannelCreate = 27,
-    ChannelRead = 28,
-    ChannelWrite = 29,
-    ChannelWriteEtc = 30,
-    ChannelCallNoretry = 31,
-    ChannelCallFinish = 32,
-    SocketCreate = 33,
-    SocketWrite = 34,
-    SocketRead = 35,
-    SocketShutdown = 36,
-    StreamCreate = 37,
-    StreamWritev = 38,
-    StreamReadv = 39,
-    StreamSeek = 40,
-    FifoCreate = 41,
-    FifoRead = 42,
-    FifoWrite = 43,
-    EventCreate = 44,
-    EventpairCreate = 45,
-    PortCreate = 46,
-    PortWait = 47,
-    PortQueue = 48,
-    FutexWait = 49,
-    FutexWake = 50,
-    FutexRequeue = 51,
-    VmoCreate = 52,
-    VmoRead = 53,
-    VmoWrite = 54,
-    VmoGetSize = 55,
-    VmoSetSize = 56,
-    VmoOpRange = 57,
-    VmarMap = 58,
-    VmarUnmap = 59,
-    VmarAllocate = 60,
-    VmarProtect = 61,
-    VmarDestroy = 62,
-    VmarUnmapHandleCloseThreadExit = 75,
-    CprngDrawOnce = 63,
-    Nanosleep = 64,
-    ClockCreate = 65,
-    ClockGet = 66,
-    ClockGetMonotonic = 67,
-    TimerCreate = 68,
-    TimerSet = 69,
-    TimerCancel = 70,
-    DebugWrite = 71,
-    DebuglogCreate = 72,
-    ResourceCreate = 73,
-    SystemGetEvent = 74,
+    ClockGet = 0,
+    ClockGetNew = 1,
+    ClockGetMonotonic = 2,
+    Nanosleep = 3,
+    ClockAdjust = 4,
+    SystemGetEvent = 5,
+    HandleClose = 6,
+    HandleCloseMany = 7,
+    HandleDuplicate = 8,
+    HandleReplace = 9,
+    ObjectWaitOne = 10,
+    ObjectWaitMany = 11,
+    ObjectWaitAsync = 12,
+    ObjectSignal = 13,
+    ObjectSignalPeer = 14,
+    ObjectGetProperty = 15,
+    ObjectSetProperty = 16,
+    ObjectGetInfo = 17,
+    ObjectGetChild = 18,
+    ObjectSetProfile = 19,
+    ChannelCreate = 20,
+    ChannelRead = 21,
+    ChannelReadEtc = 22,
+    ChannelWrite = 23,
+    ChannelWriteEtc = 24,
+    ChannelCallNoretry = 25,
+    ChannelCallFinish = 26,
+    SocketCreate = 27,
+    SocketWrite = 28,
+    SocketRead = 29,
+    SocketShare = 30,
+    SocketAccept = 31,
+    SocketShutdown = 32,
+    ThreadExit = 33,
+    ThreadCreate = 34,
+    ThreadStart = 35,
+    ThreadReadState = 36,
+    ThreadWriteState = 37,
+    ProcessExit = 38,
+    ProcessCreate = 39,
+    ProcessStart = 40,
+    ProcessReadMemory = 41,
+    ProcessWriteMemory = 42,
+    JobCreate = 43,
+    JobSetPolicy = 44,
+    TaskBindExceptionPort = 45,
+    TaskSuspend = 46,
+    TaskSuspendToken = 47,
+    TaskResumeFromException = 48,
+    TaskCreateExceptionChannel = 49,
+    TaskKill = 50,
+    ExceptionGetThread = 51,
+    ExceptionGetProcess = 52,
+    EventCreate = 53,
+    EventpairCreate = 54,
+    FutexWait = 55,
+    FutexWake = 56,
+    FutexRequeue = 57,
+    FutexWakeSingleOwner = 58,
+    FutexRequeueSingleOwner = 59,
+    FutexGetOwner = 60,
+    PortCreate = 61,
+    PortQueue = 62,
+    PortWait = 63,
+    PortCancel = 64,
+    TimerCreate = 65,
+    TimerSet = 66,
+    TimerCancel = 67,
+    VmoCreate = 68,
+    VmoRead = 69,
+    VmoWrite = 70,
+    VmoGetSize = 71,
+    VmoSetSize = 72,
+    VmoOpRange = 73,
+    VmoCreateChild = 74,
+    VmoSetCachePolicy = 75,
+    VmoReplaceAsExecutable = 76,
+    VmarAllocate = 77,
+    VmarDestroy = 78,
+    VmarMap = 79,
+    VmarUnmap = 80,
+    VmarProtect = 81,
+    CprngDrawOnce = 82,
+    CprngAddEntropy = 83,
+    FifoCreate = 84,
+    FifoRead = 85,
+    FifoWrite = 86,
+    ProfileCreate = 87,
+    DebuglogCreate = 88,
+    DebuglogWrite = 89,
+    DebuglogRead = 90,
+    KtraceRead = 91,
+    KtraceControl = 92,
+    KtraceWrite = 93,
+    MtraceControl = 94,
+    DebugRead = 95,
+    DebugWrite = 96,
+    DebugSendCommand = 97,
+    InterruptCreate = 98,
+    InterruptBind = 99,
+    InterruptWait = 100,
+    InterruptDestroy = 101,
+    InterruptAck = 102,
+    InterruptTrigger = 103,
+    InterruptBindVcpu = 104,
+    IoportsRequest = 105,
+    VmoCreateContiguous = 106,
+    VmoCreatePhysical = 107,
+    IommuCreate = 108,
+    BtiCreate = 109,
+    BtiPin = 110,
+    BtiReleaseQuarantine = 111,
+    PmtUnpin = 112,
+    FramebufferGetInfo = 113,
+    FramebufferSetRange = 114,
+    PciGetNthDevice = 115,
+    PciEnableBusMaster = 116,
+    PciResetDevice = 117,
+    PciConfigRead = 118,
+    PciConfigWrite = 119,
+    PciCfgPioRw = 120,
+    PciGetBar = 121,
+    PciMapInterrupt = 122,
+    PciQueryIrqMode = 123,
+    PciSetIrqMode = 124,
+    PciInit = 125,
+    PciAddSubtractIoRange = 126,
+    PcFirmwareTables = 127,
+    SmcCall = 128,
+    ResourceCreate = 129,
+    GuestCreate = 130,
+    GuestSetTrap = 131,
+    VcpuCreate = 132,
+    VcpuResume = 133,
+    VcpuInterrupt = 134,
+    VcpuReadState = 135,
+    VcpuWriteState = 136,
+    SystemMexec = 137,
+    SystemMexecPayloadGet = 138,
+    SystemPowerctl = 139,
+    PagerCreate = 140,
+    PagerCreateVmo = 141,
+    PagerDetachVmo = 142,
+    PagerSupplyPages = 143,
+    SyscallTest0 = 144,
+    SyscallTest1 = 145,
+    SyscallTest2 = 146,
+    SyscallTest3 = 147,
+    SyscallTest4 = 148,
+    SyscallTest5 = 149,
+    SyscallTest6 = 150,
+    SyscallTest7 = 151,
+    SyscallTest8 = 152,
+    SyscallTestWrapper = 153,
+    Count = 154,
+    JobSetCritical = 183,
+    StreamCreate = 187,
+    StreamWritev = 188,
+    StreamWritevAt = 189,
+    StreamReadv = 190,
+    StreamReadvAt = 191,
+    StreamSeek = 192,
+    ClockCreate = 197,
+    ClockRead = 198,
+    ClockUpdate = 199,
+    FutexWakeHandleCloseThreadExit = 200,
+    VmarUnmapHandleCloseThreadExit = 201,
+    SystemGetEventCompat = 202,
+    TaskCreateExceptionChannelCompat = 203,
+    BtiReleaseQuarantineCompat = 204,
+    PcFirmwareTablesCompat = 205,
+    InterruptTriggerCompat = 206,
+    InterruptDestroyCompat = 207,
+    InterruptAckCompat = 208,
+    ExceptionGetThreadCompat = 209,
+    ExceptionGetProcessCompat = 210,
+    IoportsRequestCompat = 211,
 }
 
 // ============================================================================
@@ -2325,25 +6143,321 @@ pub enum ZirconSyscall {
 /// Dispatch a Linux syscall
 pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
     match syscall_num {
+        ARM64_SYS_IO_SETUP
+        | ARM64_SYS_IO_DESTROY
+        | ARM64_SYS_IO_SUBMIT
+        | ARM64_SYS_IO_CANCEL
+        | ARM64_SYS_IO_GETEVENTS => Err(SysError::ENOSYS),
+        ARM64_SYS_LOOKUP_DCOOKIE
+        | ARM64_SYS_IOPRIO_SET
+        | ARM64_SYS_IOPRIO_GET
+        | ARM64_SYS_VHANGUP
+        | ARM64_SYS_QUOTACTL
+        | ARM64_SYS_ACCT
+        | ARM64_SYS_CAPGET
+        | ARM64_SYS_CAPSET
+        | ARM64_SYS_PERSONALITY
+        | ARM64_SYS_KEXEC_LOAD
+        | ARM64_SYS_INIT_MODULE
+        | ARM64_SYS_DELETE_MODULE
+        | ARM64_SYS_SYSLOG
+        | ARM64_SYS_PTRACE
+        | ARM64_SYS_RESTART_SYSCALL
+        | ARM64_SYS_REBOOT
+        | ARM64_SYS_SETTIMEOFDAY
+        | ARM64_SYS_ADJTIMEX
+        | ARM64_SYS_MQ_OPEN
+        | ARM64_SYS_MQ_UNLINK
+        | ARM64_SYS_MQ_TIMEDSEND
+        | ARM64_SYS_MQ_TIMEDRECEIVE
+        | ARM64_SYS_MQ_NOTIFY
+        | ARM64_SYS_MQ_GETSETATTR
+        | ARM64_SYS_ADD_KEY
+        | ARM64_SYS_REQUEST_KEY
+        | ARM64_SYS_KEYCTL
+        | ARM64_SYS_SWAPON
+        | ARM64_SYS_SWAPOFF
+        | ARM64_SYS_MBIND
+        | ARM64_SYS_GET_MEMPOLICY
+        | ARM64_SYS_SET_MEMPOLICY
+        | ARM64_SYS_MIGRATE_PAGES
+        | ARM64_SYS_MOVE_PAGES
+        | ARM64_SYS_PERF_EVENT_OPEN
+        | ARM64_SYS_FANOTIFY_INIT
+        | ARM64_SYS_FANOTIFY_MARK
+        | ARM64_SYS_NAME_TO_HANDLE_AT
+        | ARM64_SYS_OPEN_BY_HANDLE_AT
+        | ARM64_SYS_CLOCK_ADJTIME
+        | ARM64_SYS_SYNCFS
+        | ARM64_SYS_SETNS
+        | ARM64_SYS_SENDMMSG
+        | ARM64_SYS_PROCESS_VM_READV
+        | ARM64_SYS_PROCESS_VM_WRITEV
+        | ARM64_SYS_KCMP
+        | ARM64_SYS_FINIT_MODULE
+        | ARM64_SYS_SCHED_SETATTR
+        | ARM64_SYS_SCHED_GETATTR
+        | ARM64_SYS_RENAMEAT2
+        | ARM64_SYS_SECCOMP
+        | ARM64_SYS_BPF
+        | ARM64_SYS_EXECVEAT
+        | ARM64_SYS_USERFAULTFD
+        | ARM64_SYS_MLOCK2
+        | ARM64_SYS_PKEY_MPROTECT
+        | ARM64_SYS_PKEY_ALLOC
+        | ARM64_SYS_PKEY_FREE
+        | ARM64_SYS_IO_PGETEVENTS
+        | ARM64_SYS_RSEQ
+        | ARM64_SYS_KEXEC_FILE_LOAD
+        | ARM64_SYS_PIDFD_SEND_SIGNAL
+        | ARM64_SYS_IO_URING_SETUP
+        | ARM64_SYS_IO_URING_ENTER
+        | ARM64_SYS_IO_URING_REGISTER
+        | ARM64_SYS_OPEN_TREE
+        | ARM64_SYS_MOVE_MOUNT
+        | ARM64_SYS_FSOPEN
+        | ARM64_SYS_FSCONFIG
+        | ARM64_SYS_FSMOUNT
+        | ARM64_SYS_FSPICK
+        | ARM64_SYS_PIDFD_OPEN
+        | ARM64_SYS_CLONE3
+        | ARM64_SYS_PIDFD_GETFD
+        | ARM64_SYS_PROCESS_MADVISE
+        | ARM64_SYS_MOUNT_SETATTR
+        | ARM64_SYS_LANDLOCK_CREATE_RULESET
+        | ARM64_SYS_LANDLOCK_ADD_RULE
+        | ARM64_SYS_LANDLOCK_RESTRICT_SELF => Err(SysError::ENOSYS),
+        ARM64_SYS_SETXATTR | ARM64_SYS_LSETXATTR => {
+            sys_xattr_path(args[0], args[1], args[2], args[3])
+        }
+        ARM64_SYS_FSETXATTR => sys_xattr_fd(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_GETXATTR | ARM64_SYS_LGETXATTR | ARM64_SYS_LISTXATTR | ARM64_SYS_LLISTXATTR => {
+            sys_xattr_path(args[0], args[1], args[2], args[3])
+        }
+        ARM64_SYS_FGETXATTR | ARM64_SYS_FLISTXATTR => {
+            sys_xattr_fd(args[0], args[1], args[2], args[3])
+        }
+        ARM64_SYS_REMOVEXATTR | ARM64_SYS_LREMOVEXATTR => sys_xattr_path(args[0], args[1], 0, 0),
+        ARM64_SYS_FREMOVEXATTR => sys_xattr_fd(args[0], args[1], 0, 0),
+        ARM64_SYS_GETCWD => sys_getcwd(args[0], args[1]),
+        ARM64_SYS_EVENTFD2 => sys_eventfd2(args[0], args[1]),
+        ARM64_SYS_EPOLL_CREATE1 => sys_epoll_create1(args[0]),
+        ARM64_SYS_EPOLL_CTL => sys_epoll_ctl(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_EPOLL_PWAIT | ARM64_SYS_EPOLL_PWAIT2 => {
+            sys_epoll_pwait(args[0], args[1], args[2], args[3] as isize, args[4])
+        }
+        ARM64_SYS_INOTIFY_INIT1 => sys_inotify_init1(args[0]),
+        ARM64_SYS_INOTIFY_ADD_WATCH => sys_inotify_add_watch(args[0], args[1], args[2]),
+        ARM64_SYS_INOTIFY_RM_WATCH => sys_inotify_rm_watch(args[0], args[1]),
+        ARM64_SYS_READ => sys_read(args[0], args[1], args[2]),
         ARM64_SYS_WRITE => sys_write(args[0], args[1], args[2]),
+        ARM64_SYS_CLOSE => sys_close(args[0]),
+        ARM64_SYS_OPENAT => sys_openat(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_MKNODAT => sys_mknodat(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_MKDIRAT => sys_mkdirat(args[0], args[1], args[2]),
+        ARM64_SYS_UNLINKAT => sys_unlinkat(args[0], args[1], args[2]),
+        ARM64_SYS_SYMLINKAT => sys_symlinkat(args[0], args[1], args[2]),
+        ARM64_SYS_LINKAT => sys_linkat(args[0], args[1], args[2], args[3], args[4]),
+        ARM64_SYS_RENAMEAT => sys_renameat(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_UMOUNT2 | ARM64_SYS_MOUNT | ARM64_SYS_PIVOT_ROOT | ARM64_SYS_NFSSERVCTL => {
+            Err(SysError::ENOSYS)
+        }
+        ARM64_SYS_STATFS => sys_statfs(args[0], args[1]),
+        ARM64_SYS_FSTATFS => sys_fstatfs(args[0], args[1]),
+        ARM64_SYS_TRUNCATE => sys_truncate(args[0], args[1]),
+        ARM64_SYS_FTRUNCATE => sys_ftruncate(args[0], args[1]),
+        ARM64_SYS_FALLOCATE => sys_fallocate(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_FACCESSAT | ARM64_SYS_FACCESSAT2 => {
+            sys_faccessat2(args[0], args[1], args[2], args[3])
+        }
+        ARM64_SYS_CHDIR => sys_chdir(args[0]),
+        ARM64_SYS_FCHDIR => sys_fchdir(args[0]),
+        ARM64_SYS_CHROOT => sys_chroot(args[0]),
+        ARM64_SYS_FCHMOD => sys_fchmod(args[0], args[1]),
+        ARM64_SYS_FCHMODAT => sys_fchmodat(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_FCHOWN => sys_fchown(args[0], args[1], args[2]),
+        ARM64_SYS_FCHOWNAT => sys_fchownat(args[0], args[1], args[2], args[3], args[4]),
+        ARM64_SYS_LSEEK => sys_lseek(args[0], args[1] as i64, args[2]),
+        ARM64_SYS_READV => sys_readv(args[0], args[1], args[2]),
+        ARM64_SYS_WRITEV => sys_writev(args[0], args[1], args[2]),
+        ARM64_SYS_PREAD64 => sys_pread(args[0], args[1], args[2], args[3] as u64),
+        ARM64_SYS_PWRITE64 => sys_pwrite(args[0], args[1], args[2], args[3] as u64),
+        ARM64_SYS_PREADV | ARM64_SYS_PREADV2 => {
+            sys_preadv(args[0], args[1], args[2], args[3] as u64)
+        }
+        ARM64_SYS_PWRITEV | ARM64_SYS_PWRITEV2 => {
+            sys_pwritev(args[0], args[1], args[2], args[3] as u64)
+        }
+        ARM64_SYS_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_PSELECT6 => sys_pselect6(args[0], args[1], args[2], args[3], args[4], args[5]),
+        ARM64_SYS_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_SIGNALFD4 => sys_signalfd4(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_VMSPLICE => sys_vmsplice(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_SPLICE => sys_splice(args[0], args[1], args[2], args[3], args[4], args[5]),
+        ARM64_SYS_TEE => sys_tee(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_READLINKAT => sys_readlinkat(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_NEWFSTATAT => sys_fstatat(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_FSTAT => sys_fstat(args[0], args[1]),
+        ARM64_SYS_SYNC => sys_sync(),
+        ARM64_SYS_FSYNC => sys_fsync(args[0]),
+        ARM64_SYS_FDATASYNC => sys_fdatasync(args[0]),
+        ARM64_SYS_SYNC_FILE_RANGE => sys_sync_file_range(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_TIMERFD_CREATE => sys_timerfd_create(args[0], args[1]),
+        ARM64_SYS_TIMERFD_SETTIME => sys_timerfd_settime(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_TIMERFD_GETTIME => sys_timerfd_gettime(args[0], args[1]),
+        ARM64_SYS_UTIMENSAT => sys_utimensat(args[0], args[1], args[2], args[3]),
         ARM64_SYS_EXIT => sys_exit(args[0] as i32),
         ARM64_SYS_EXIT_GROUP => sys_exit_group(args[0] as i32),
+        ARM64_SYS_WAITID => sys_waitid(args[0], args[1], args[2], args[3], args[4]),
         ARM64_SYS_NANOSLEEP => sys_nanosleep_linux(args[0]),
+        ARM64_SYS_GETITIMER => sys_getitimer(args[0], args[1]),
+        ARM64_SYS_SETITIMER => sys_setitimer(args[0], args[1], args[2]),
+        ARM64_SYS_TIMER_CREATE => sys_linux_timer_create(args[0], args[1], args[2]),
+        ARM64_SYS_TIMER_GETTIME => sys_linux_timer_gettime(args[0], args[1]),
+        ARM64_SYS_TIMER_GETOVERRUN => sys_linux_timer_getoverrun(args[0]),
+        ARM64_SYS_TIMER_SETTIME => sys_linux_timer_settime(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_TIMER_DELETE => sys_linux_timer_delete(args[0]),
+        ARM64_SYS_CLOCK_SETTIME => sys_clock_settime(args[0], args[1]),
         ARM64_SYS_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1]),
+        ARM64_SYS_CLOCK_GETRES => sys_clock_getres(args[0], args[1]),
+        ARM64_SYS_CLOCK_NANOSLEEP => sys_clock_nanosleep(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_SCHED_SETPARAM => sys_sched_setparam(args[0], args[1]),
+        ARM64_SYS_SCHED_SETSCHEDULER => sys_sched_setscheduler(args[0], args[1], args[2]),
+        ARM64_SYS_SCHED_GETSCHEDULER => sys_sched_getscheduler(args[0]),
+        ARM64_SYS_SCHED_GETPARAM => sys_sched_getparam(args[0], args[1]),
+        ARM64_SYS_SCHED_SETAFFINITY => sys_sched_setaffinity(args[0], args[1], args[2]),
+        ARM64_SYS_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0], args[1], args[2]),
+        ARM64_SYS_SCHED_GET_PRIORITY_MAX => sys_sched_get_priority_max(args[0]),
+        ARM64_SYS_SCHED_GET_PRIORITY_MIN => sys_sched_get_priority_min(args[0]),
+        ARM64_SYS_SCHED_RR_GET_INTERVAL => sys_sched_rr_get_interval(args[0], args[1]),
         ARM64_SYS_KILL => sys_kill(args[0] as isize, args[1]),
+        ARM64_SYS_TKILL => sys_tkill(args[0], args[1]),
+        ARM64_SYS_TGKILL => sys_tgkill(args[0], args[1], args[2]),
+        ARM64_SYS_SIGALTSTACK => sys_sigaltstack(args[0], args[1]),
+        ARM64_SYS_RT_SIGSUSPEND => sys_rt_sigsuspend(args[0], args[1]),
+        ARM64_SYS_RT_SIGACTION => sys_rt_sigaction(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_RT_SIGPROCMASK => sys_rt_sigprocmask(args[0] as isize, args[1], args[2], args[3]),
+        ARM64_SYS_RT_SIGPENDING => sys_rt_sigpending(args[0], args[1]),
+        ARM64_SYS_RT_SIGTIMEDWAIT => sys_rt_sigtimedwait(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_RT_SIGQUEUEINFO | ARM64_SYS_RT_TGSIGQUEUEINFO => {
+            sys_rt_sigqueueinfo(args[0], args[1], args[2])
+        }
+        ARM64_SYS_RT_SIGRETURN => sys_rt_sigreturn(),
+        ARM64_SYS_SETPRIORITY => sys_set_priority(args[1]),
+        ARM64_SYS_GETPRIORITY => sys_get_priority(args[0], args[1]),
+        ARM64_SYS_SETREGID => sys_setregid(args[0], args[1]),
+        ARM64_SYS_SETGID => sys_setgid(args[0]),
+        ARM64_SYS_SETREUID => sys_setreuid(args[0], args[1]),
+        ARM64_SYS_SETUID => sys_setuid(args[0]),
+        ARM64_SYS_SETRESUID => sys_setresuid(args[0], args[1], args[2]),
+        ARM64_SYS_GETRESUID => sys_getresuid(args[0], args[1], args[2]),
+        ARM64_SYS_SETRESGID => sys_setresgid(args[0], args[1], args[2]),
+        ARM64_SYS_GETRESGID => sys_getresgid(args[0], args[1], args[2]),
+        ARM64_SYS_SETFSUID => sys_setfsuid(args[0]),
+        ARM64_SYS_SETFSGID => sys_setfsgid(args[0]),
+        ARM64_SYS_SETPGID => sys_setpgid(args[0], args[1]),
+        ARM64_SYS_GETPGID => sys_getpgid(args[0]),
+        ARM64_SYS_GETSID => sys_getsid(args[0]),
+        ARM64_SYS_SETSID => sys_setsid(),
+        ARM64_SYS_GETGROUPS => sys_getgroups(args[0], args[1]),
+        ARM64_SYS_SETGROUPS => sys_setgroups(args[0], args[1]),
+        ARM64_SYS_SETHOSTNAME | ARM64_SYS_SETDOMAINNAME => sys_path_noop(args[0]),
+        ARM64_SYS_GETRLIMIT => sys_getrlimit(args[0], args[1]),
+        ARM64_SYS_SETRLIMIT => sys_setrlimit(args[0], args[1]),
         ARM64_SYS_GETPID => sys_getpid(),
         ARM64_SYS_GETPPID => sys_getppid(),
+        ARM64_SYS_GETUID => sys_getuid(),
+        ARM64_SYS_GETEUID => sys_geteuid(),
+        ARM64_SYS_GETGID => sys_getgid(),
+        ARM64_SYS_GETEGID => sys_getegid(),
         ARM64_SYS_GETTID => sys_gettid(),
+        ARM64_SYS_SYSINFO => sys_sysinfo(args[0]),
+        ARM64_SYS_MSGGET => sys_msgget(args[0], args[1]),
+        ARM64_SYS_MSGCTL => sys_msgctl(args[0], args[1], args[2]),
+        ARM64_SYS_MSGRCV => sys_msgrcv(args[0], args[1], args[2], args[3] as isize, args[4]),
+        ARM64_SYS_MSGSND => sys_msgsnd(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_SEMGET => sys_semget(args[0], args[1], args[2]),
+        ARM64_SYS_SEMCTL => sys_semctl(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_SEMOP | ARM64_SYS_SEMTIMEDOP => sys_semop(args[0], args[1], args[2]),
+        ARM64_SYS_SHMGET => sys_shmget(args[0], args[1], args[2]),
+        ARM64_SYS_SHMCTL => sys_shmctl(args[0], args[1], args[2]),
+        ARM64_SYS_SHMAT => sys_shmat(args[0], args[1], args[2]),
+        ARM64_SYS_SHMDT => sys_shmdt(args[0], args[1], args[2]),
+        ARM64_SYS_SOCKET => sys_socket(args[0], args[1], args[2]),
+        ARM64_SYS_SOCKETPAIR => sys_socketpair(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_BIND => sys_bind(args[0], args[1], args[2]),
+        ARM64_SYS_LISTEN => sys_listen(args[0], args[1]),
+        ARM64_SYS_ACCEPT | ARM64_SYS_ACCEPT4 => sys_accept(args[0], args[1], args[2]),
+        ARM64_SYS_CONNECT => sys_connect(args[0], args[1], args[2]),
+        ARM64_SYS_GETSOCKNAME => sys_getsockname(args[0], args[1], args[2]),
+        ARM64_SYS_GETPEERNAME => sys_getpeername(args[0], args[1], args[2]),
+        ARM64_SYS_SENDTO => sys_sendto(args[0], args[1], args[2], args[3], args[4], args[5]),
+        ARM64_SYS_RECVFROM => sys_recvfrom(args[0], args[1], args[2], args[3], args[4], args[5]),
+        ARM64_SYS_SETSOCKOPT => sys_setsockopt(args[0], args[1], args[2], args[3], args[4]),
+        ARM64_SYS_GETSOCKOPT => sys_getsockopt(args[0], args[1], args[2], args[3], args[4]),
+        ARM64_SYS_SHUTDOWN => sys_shutdown(args[0], args[1]),
+        ARM64_SYS_SENDMSG => sys_sendmsg(args[0], args[1], args[2]),
+        ARM64_SYS_RECVMSG => sys_recvmsg(args[0], args[1], args[2]),
+        ARM64_SYS_RECVMMSG => sys_recvmmsg(args[0], args[1], args[2], args[3], args[4]),
+        ARM64_SYS_READAHEAD => sys_readahead(args[0], args[1], args[2]),
+        ARM64_SYS_GETTIMEOFDAY => sys_gettimeofday(args[0], args[1]),
         ARM64_SYS_BRK => sys_brk(args[0]),
         ARM64_SYS_MUNMAP => sys_munmap(args[0], args[1]),
         ARM64_SYS_MREMAP => sys_mremap(args[0], args[1], args[2], args[3], args[4]),
         ARM64_SYS_CLONE => sys_clone(args[0], args[1], args[2], args[3], args[4]),
         ARM64_SYS_EXECVE => sys_execve(args[0], args[1], args[2]),
         ARM64_SYS_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5] as u64),
+        ARM64_SYS_FADVISE64 => sys_fadvise64(args[0], args[1], args[2], args[3]),
         ARM64_SYS_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
+        ARM64_SYS_MSYNC => sys_memory_noop(args[0], args[1]),
+        ARM64_SYS_MLOCK | ARM64_SYS_MUNLOCK => sys_memory_noop(args[0], args[1]),
+        ARM64_SYS_MLOCKALL | ARM64_SYS_MUNLOCKALL => Ok(0),
+        ARM64_SYS_MINCORE => sys_mincore(args[0], args[1], args[2]),
+        ARM64_SYS_MADVISE => sys_madvise(args[0], args[1], args[2]),
+        ARM64_SYS_REMAP_FILE_PAGES => Ok(0),
         ARM64_SYS_WAIT4 => sys_wait4(args[0] as i32, args[1], args[2] as u32),
+        ARM64_SYS_PRLIMIT64 => sys_prlimit64(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_GETRANDOM => sys_getrandom(args[0], args[1], args[2] as u32),
+        ARM64_SYS_MEMFD_CREATE => sys_memfd_create(args[0], args[1]),
+        ARM64_SYS_MEMBARRIER => sys_membarrier(args[0], args[1], args[2]),
+        ARM64_SYS_COPY_FILE_RANGE => {
+            sys_copy_file_range(args[0], args[1], args[2], args[3], args[4], args[5])
+        }
+        ARM64_SYS_STATX => sys_statx(args[0], args[1], args[2], args[3], args[4]),
+        ARM64_SYS_CLOSE_RANGE => sys_close_range(args[0], args[1], args[2]),
+        ARM64_SYS_OPENAT2 => sys_openat(args[0], args[1], 0, 0),
+        ARM64_SYS_SCHED_YIELD => sys_sched_yield(),
+        ARM64_SYS_UMASK => sys_umask(args[0]),
+        ARM64_SYS_PIPE2 => sys_pipe2(args[0], args[1]),
+        ARM64_SYS_DUP => sys_dup(args[0]),
+        ARM64_SYS_DUP3 => sys_dup3(args[0], args[1], args[2]),
+        ARM64_SYS_FCNTL => sys_fcntl(args[0], args[1], args[2]),
+        ARM64_SYS_IOCTL => sys_ioctl(args[0], args[1], args[2], args[3], args[4]),
+        ARM64_SYS_FLOCK => sys_flock(args[0], args[1]),
+        ARM64_SYS_GETDENTS64 => sys_getdents64(args[0], args[1], args[2]),
+        ARM64_SYS_UNSHARE => Ok(0),
+        ARM64_SYS_FUTEX => sys_futex(
+            args[0],
+            args[1] as u32,
+            args[2] as u32,
+            args[3],
+            args[4],
+            args[5] as u32,
+        ),
+        ARM64_SYS_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
+        ARM64_SYS_SET_ROBUST_LIST => sys_set_robust_list(args[0], args[1]),
+        ARM64_SYS_GET_ROBUST_LIST => sys_get_robust_list(args[0] as isize, args[1], args[2]),
+        ARM64_SYS_TIMES => sys_times(args[0]),
+        ARM64_SYS_GETRUSAGE => sys_getrusage(args[0], args[1]),
+        ARM64_SYS_UNAME => sys_uname(args[0]),
+        ARM64_SYS_PRCTL => sys_prctl(args[0], args[1], args[2], args[3], args[4]),
+        ARM64_SYS_GETCPU => sys_getcpu(args[0], args[1], args[2]),
         num if num == LinuxSyscall::Fork as u32 => sys_fork(),
         num if num == LinuxSyscall::Vfork as u32 => sys_vfork(),
+        num if syscall_logic::linux_syscall_interface_known(num) => {
+            warn!("Unsupported Linux syscall interface: {}", syscall_num);
+            Err(SysError::ENOSYS)
+        }
         _ => {
             warn!("Unimplemented Linux syscall: {}", syscall_num);
             Err(SysError::ENOSYS)
@@ -2354,6 +6468,22 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
 /// Dispatch a Zircon syscall
 pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<usize> {
     match syscall_num {
+        num if num == ZirconSyscall::ClockGet as u32
+            || num == ZirconSyscall::ClockGetNew as u32 =>
+        {
+            sys_clock_get(args[0] as u32, args[1]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::ClockGetMonotonic as u32 => {
+            sys_clock_get_monotonic().map(|value| value as usize)
+        }
+        num if num == ZirconSyscall::Nanosleep as u32 => sys_nanosleep(args[0] as u64).map(|_| 0),
+        num if num == ZirconSyscall::ClockAdjust as u32 => {
+            sys_clock_adjust(args[0] as u32, args[1] as u32, args[2] as u64).map(|_| 0)
+        }
+        num if num == ZirconSyscall::SystemGetEvent as u32 => {
+            let mut out = 0u32;
+            sys_system_get_event(args[0] as u32, args[1] as u32, &mut out).map(|_| out as usize)
+        }
         num if num == ZirconSyscall::HandleClose as u32 => {
             sys_handle_close(args[0] as u32).map(|_| 0)
         }
@@ -2388,6 +6518,9 @@ pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<u
         num if num == ZirconSyscall::ObjectSignal as u32 => {
             sys_object_signal(args[0] as u32, args[1] as u32, args[2] as u32).map(|_| 0)
         }
+        num if num == ZirconSyscall::ObjectSignalPeer as u32 => {
+            sys_object_signal_peer(args[0] as u32, args[1] as u32, args[2] as u32).map(|_| 0)
+        }
         num if num == ZirconSyscall::ObjectWaitOne as u32 => {
             let mut pending = 0u32;
             sys_object_wait_one(args[0] as u32, args[1] as u32, args[2] as u64, &mut pending)
@@ -2396,16 +6529,98 @@ pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<u
         num if num == ZirconSyscall::ObjectWaitMany as u32 => {
             sys_object_wait_many(args[0], args[1], args[2] as u64).map(|_| 0)
         }
+        num if num == ZirconSyscall::ObjectWaitAsync as u32 => sys_object_wait_async(
+            args[0] as u32,
+            args[1] as u32,
+            args[2] as u64,
+            args[3] as u32,
+            args[4] as u32,
+        )
+        .map(|_| 0),
+        num if num == ZirconSyscall::ObjectGetChild as u32 => {
+            let mut out = 0u32;
+            sys_object_get_child(args[0] as u32, args[1] as u64, args[2] as u32, &mut out)
+                .map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::ObjectSetProfile as u32 => {
+            sys_object_set_profile(args[0] as u32, args[1] as u32, args[2] as u32).map(|_| 0)
+        }
         num if num == ZirconSyscall::ThreadCreate as u32 => {
             let mut out = 0u32;
-            sys_thread_create(args[0] as u32, args[1], args[2], args[3], args[4], &mut out)
+            sys_thread_create(args[0] as u32, args[1], args[2], 0, 0, &mut out)
                 .map(|_| out as usize)
         }
         num if num == ZirconSyscall::ThreadStart as u32 => {
             sys_thread_start(args[0] as u32, args[1], args[2], args[3], args[4]).map(|_| 0)
         }
+        num if num == ZirconSyscall::ThreadReadState as u32 => {
+            sys_thread_read_state(args[0] as u32, args[1] as u32, args[2], args[3]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::ThreadWriteState as u32 => {
+            sys_thread_write_state(args[0] as u32, args[1] as u32, args[2], args[3]).map(|_| 0)
+        }
         num if num == ZirconSyscall::TaskKill as u32 => sys_task_kill(args[0] as u32).map(|_| 0),
         num if num == ZirconSyscall::ThreadExit as u32 => sys_thread_exit().map(|_| 0),
+        num if num == ZirconSyscall::ProcessStart as u32 => sys_process_start(
+            args[0] as u32,
+            args[1] as u32,
+            args[2],
+            args[3],
+            args[4],
+            args[5],
+        )
+        .map(|_| 0),
+        num if num == ZirconSyscall::ProcessReadMemory as u32 => {
+            sys_process_read_memory(args[0] as u32, args[1], args[2], args[3])
+        }
+        num if num == ZirconSyscall::ProcessWriteMemory as u32 => {
+            sys_process_write_memory(args[0] as u32, args[1], args[2], args[3])
+        }
+        num if num == ZirconSyscall::JobCreate as u32 => {
+            let mut out = 0u32;
+            sys_job_create(args[0] as u32, args[1] as u32, &mut out).map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::JobSetPolicy as u32 => sys_job_set_policy(
+            args[0] as u32,
+            args[1] as u32,
+            args[2] as u32,
+            args[3],
+            args[4],
+        )
+        .map(|_| 0),
+        num if num == ZirconSyscall::JobSetCritical as u32 => {
+            sys_job_set_critical(args[0] as u32, args[1] as u32, args[2] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::TaskBindExceptionPort as u32 => sys_task_bind_exception_port(
+            args[0] as u32,
+            args[1] as u32,
+            args[2] as u64,
+            args[3] as u32,
+        )
+        .map(|_| 0),
+        num if num == ZirconSyscall::TaskSuspend as u32
+            || num == ZirconSyscall::TaskSuspendToken as u32 =>
+        {
+            let mut out = 0u32;
+            sys_task_suspend_token(args[0] as u32, &mut out).map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::TaskResumeFromException as u32 => {
+            sys_task_resume_from_exception(args[0] as u32, args[1] as u32, args[2] as u32)
+                .map(|_| 0)
+        }
+        num if num == ZirconSyscall::TaskCreateExceptionChannel as u32 => {
+            let mut out = 0u32;
+            sys_create_exception_channel(args[0] as u32, args[1] as u32, &mut out)
+                .map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::ExceptionGetThread as u32 => {
+            let mut out = 0u32;
+            sys_exception_get_thread(args[0] as u32, &mut out).map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::ExceptionGetProcess as u32 => {
+            let mut out = 0u32;
+            sys_exception_get_process(args[0] as u32, &mut out).map(|_| out as usize)
+        }
         num if num == ZirconSyscall::VmoCreate as u32 => {
             let mut out = 0u32;
             sys_vmo_create(args[0] as u64, args[1] as u32, &mut out).map(|_| out as usize)
@@ -2441,6 +6656,29 @@ pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<u
         }
         num if num == ZirconSyscall::VmoOpRange as u32 => {
             sys_vmo_op_range(args[0] as u32, args[1] as u32, args[2], args[3])
+        }
+        num if num == ZirconSyscall::VmoCreateChild as u32 => {
+            let mut out = 0u32;
+            sys_vmo_create_child(args[0] as u32, args[1] as u32, args[2], args[3], &mut out)
+                .map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::VmoSetCachePolicy as u32 => {
+            sys_vmo_set_cache_policy(args[0] as u32, args[1] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::VmoReplaceAsExecutable as u32 => {
+            let mut out = 0u32;
+            sys_vmo_replace_as_executable(args[0] as u32, args[1] as u32, &mut out)
+                .map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::VmoCreateContiguous as u32 => {
+            let mut out = 0u32;
+            sys_vmo_create_contiguous(args[0] as u32, args[1], args[2] as u32, &mut out)
+                .map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::VmoCreatePhysical as u32 => {
+            let mut out = 0u32;
+            sys_vmo_create_physical(args[0] as u32, args[1] as u64, args[2], &mut out)
+                .map(|_| out as usize)
         }
         num if num == ZirconSyscall::VmarMap as u32 => {
             let mut addr = 0usize;
@@ -2521,7 +6759,31 @@ pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<u
             )
             .map(|_| actual_bytes)
         }
+        num if num == ZirconSyscall::ChannelReadEtc as u32 => {
+            let mut actual_bytes = 0usize;
+            let mut actual_handles = 0usize;
+            sys_channel_read(
+                args[0] as u32,
+                args[1] as u32,
+                args[2],
+                args[3],
+                args[4],
+                args[5],
+                &mut actual_bytes,
+                &mut actual_handles,
+            )
+            .map(|_| actual_bytes)
+        }
         num if num == ZirconSyscall::ChannelWrite as u32 => sys_channel_write(
+            args[0] as u32,
+            args[1] as u32,
+            args[2],
+            args[3],
+            args[4],
+            args[5],
+        )
+        .map(|_| 0),
+        num if num == ZirconSyscall::ChannelWriteEtc as u32 => sys_channel_write(
             args[0] as u32,
             args[1] as u32,
             args[2],
@@ -2547,9 +6809,461 @@ pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<u
             )
             .map(|_| actual_bytes)
         }
-        num if num == ZirconSyscall::Nanosleep as u32 => sys_nanosleep(args[0] as u64).map(|_| 0),
-        num if num == ZirconSyscall::ClockGetMonotonic as u32 => {
-            sys_clock_get_monotonic().map(|value| value as usize)
+        num if num == ZirconSyscall::ChannelCallFinish as u32 => Err(ZxError::ErrNotSupported),
+        num if num == ZirconSyscall::SocketCreate as u32 => {
+            let mut h0 = 0u32;
+            let mut h1 = 0u32;
+            sys_socket_create(args[0] as u32, &mut h0, &mut h1)
+                .map(|_| ((h0 as usize) << 32) | h1 as usize)
+        }
+        num if num == ZirconSyscall::SocketWrite as u32 => {
+            let mut actual = 0usize;
+            sys_socket_write(
+                args[0] as u32,
+                args[1] as u32,
+                args[2],
+                args[3],
+                &mut actual,
+            )
+            .map(|_| actual)
+        }
+        num if num == ZirconSyscall::SocketRead as u32 => {
+            let mut actual = 0usize;
+            sys_socket_read(
+                args[0] as u32,
+                args[1] as u32,
+                args[2],
+                args[3],
+                &mut actual,
+            )
+            .map(|_| actual)
+        }
+        num if num == ZirconSyscall::SocketShare as u32 => {
+            sys_socket_share(args[0] as u32, args[1] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::SocketAccept as u32 => {
+            let mut out = 0u32;
+            sys_socket_accept(args[0] as u32, &mut out).map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::SocketShutdown as u32 => {
+            sys_socket_shutdown(args[0] as u32, args[1] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::EventCreate as u32 => {
+            let mut out = 0u32;
+            sys_event_create(args[0] as u32, &mut out).map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::EventpairCreate as u32 => {
+            let mut h0 = 0u32;
+            let mut h1 = 0u32;
+            sys_eventpair_create(args[0] as u32, &mut h0, &mut h1)
+                .map(|_| ((h0 as usize) << 32) | h1 as usize)
+        }
+        num if num == ZirconSyscall::FifoCreate as u32 => {
+            let mut h0 = 0u32;
+            let mut h1 = 0u32;
+            sys_fifo_create(args[0], args[1], args[2] as u32, &mut h0, &mut h1)
+                .map(|_| ((h0 as usize) << 32) | h1 as usize)
+        }
+        num if num == ZirconSyscall::FifoRead as u32 => {
+            let mut actual = 0usize;
+            sys_fifo_read(args[0] as u32, args[1], args[2], args[3], &mut actual).map(|_| actual)
+        }
+        num if num == ZirconSyscall::FifoWrite as u32 => {
+            let mut actual = 0usize;
+            sys_fifo_write(args[0] as u32, args[1], args[2], args[3], &mut actual).map(|_| actual)
+        }
+        num if num == ZirconSyscall::PortCreate as u32 => {
+            let mut out = 0u32;
+            sys_port_create(args[0] as u32, &mut out).map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::PortQueue as u32 => {
+            sys_port_queue(args[0] as u32, args[1]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::PortWait as u32 => {
+            sys_port_wait(args[0] as u32, args[1] as u64, args[2]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::PortCancel as u32 => Ok(0),
+        num if num == ZirconSyscall::TimerCreate as u32 => {
+            let mut out = 0u32;
+            sys_timer_create(args[0] as u32, args[1] as u32, &mut out).map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::TimerSet as u32 => {
+            sys_timer_set(args[0] as u32, args[1] as u64, args[2] as i64).map(|_| 0)
+        }
+        num if num == ZirconSyscall::TimerCancel as u32 => {
+            sys_timer_cancel(args[0] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::FutexWait as u32 => {
+            sys_futex_wait(args[0], args[1] as i32, args[2] as u32, args[3] as u64).map(|_| 0)
+        }
+        num if num == ZirconSyscall::FutexWake as u32
+            || num == ZirconSyscall::FutexWakeSingleOwner as u32 =>
+        {
+            sys_futex_wake(args[0], args[1] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::FutexRequeue as u32
+            || num == ZirconSyscall::FutexRequeueSingleOwner as u32 =>
+        {
+            sys_futex_requeue(
+                args[0],
+                args[1] as u32,
+                args[2] as i32,
+                args[3],
+                args[4] as u32,
+                args[5] as u32,
+            )
+            .map(|_| 0)
+        }
+        num if num == ZirconSyscall::FutexGetOwner as u32 => Ok(0),
+        num if num == ZirconSyscall::CprngDrawOnce as u32 => {
+            sys_cprng_draw_once(args[0], args[1]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::CprngAddEntropy as u32 => {
+            sys_cprng_add_entropy(args[0], args[1]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::ProfileCreate as u32 => {
+            let mut out = 0u32;
+            sys_profile_create(args[0] as u32, args[1] as u32, args[2], &mut out)
+                .map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::KtraceRead as u32 => {
+            let mut actual = 0usize;
+            sys_ktrace_read(args[0] as u32, args[1], args[2], &mut actual).map(|_| actual)
+        }
+        num if num == ZirconSyscall::KtraceControl as u32 => {
+            sys_ktrace_control(args[0] as u32, args[1] as u32, args[2] as u32, args[3]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::KtraceWrite as u32 => sys_ktrace_write(
+            args[0] as u32,
+            args[1] as u32,
+            args[2] as u64,
+            args[3] as u64,
+        )
+        .map(|_| 0),
+        num if num == ZirconSyscall::MtraceControl as u32 => sys_mtrace_control(
+            args[0] as u32,
+            args[1] as u32,
+            args[2] as u32,
+            args[3] as u32,
+            args[4],
+        )
+        .map(|_| 0),
+        num if num == ZirconSyscall::DebugRead as u32 => sys_debug_read(args[0], args[1]),
+        num if num == ZirconSyscall::ClockCreate as u32 => {
+            let mut out = 0u32;
+            sys_clock_create(args[0] as u32, args[1], &mut out).map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::ClockRead as u32 => {
+            sys_clock_read(args[0] as u32, args[1]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::ClockUpdate as u32 => {
+            sys_clock_update(args[0] as u32, args[1] as u64, args[2]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::DebugWrite as u32 => {
+            sys_debug_write(args[0], args[1]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::DebugSendCommand as u32 => {
+            sys_debug_send_command(args[0], args[1]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::DebuglogCreate as u32 => {
+            let mut out = 0u32;
+            sys_debuglog_create(args[0] as u32, args[1] as u32, &mut out).map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::DebuglogWrite as u32 => {
+            sys_debuglog_write(args[0] as u32, args[1] as u32, args[2], args[3]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::DebuglogRead as u32 => {
+            sys_debuglog_read(args[0] as u32, args[1] as u32, args[2], args[3])
+        }
+        num if num == ZirconSyscall::ResourceCreate as u32 => {
+            let mut out = 0u32;
+            sys_resource_create(
+                args[0] as u32,
+                args[1] as u32,
+                args[2] as u64,
+                args[3],
+                args[4],
+                args[5],
+                &mut out,
+            )
+            .map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::StreamCreate as u32 => {
+            let mut out = 0u32;
+            sys_stream_create(args[0] as u32, args[1] as u32, args[2], &mut out)
+                .map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::StreamSeek as u32 => {
+            let mut seek = 0usize;
+            sys_stream_seek(args[0] as u32, args[1] as u32, args[2] as i64, &mut seek).map(|_| seek)
+        }
+        num if num == ZirconSyscall::StreamWritev as u32 => {
+            sys_stream_writev(args[0] as u32, args[1] as u32, args[2], args[3], args[4]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::StreamWritevAt as u32 => sys_stream_writev_at(
+            args[0] as u32,
+            args[1] as u32,
+            args[2],
+            args[3],
+            args[4],
+            args[5],
+        )
+        .map(|_| 0),
+        num if num == ZirconSyscall::StreamReadv as u32 => {
+            sys_stream_readv(args[0] as u32, args[1] as u32, args[2], args[3], args[4]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::StreamReadvAt as u32 => sys_stream_readv_at(
+            args[0] as u32,
+            args[1] as u32,
+            args[2],
+            args[3],
+            args[4],
+            args[5],
+        )
+        .map(|_| 0),
+        num if num == ZirconSyscall::FutexWakeHandleCloseThreadExit as u32 => {
+            let _ = sys_futex_wake(args[0], args[1] as u32);
+            let _ = sys_handle_close(args[3] as u32);
+            sys_thread_exit().map(|_| 0)
+        }
+        num if num == ZirconSyscall::IommuCreate as u32 => {
+            let mut out = 0u32;
+            sys_iommu_create(args[0] as u32, args[1] as u32, args[2], args[3], &mut out)
+                .map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::BtiCreate as u32 => {
+            let mut out = 0u32;
+            sys_bti_create(args[0] as u32, args[1] as u32, args[2] as u64, &mut out)
+                .map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::BtiPin as u32 => {
+            let mut out = 0u32;
+            sys_bti_pin(
+                args[0] as u32,
+                args[1] as u32,
+                args[2] as u32,
+                args[3],
+                args[4],
+                args[5],
+                args[6],
+                &mut out,
+            )
+            .map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::BtiReleaseQuarantine as u32
+            || num == ZirconSyscall::BtiReleaseQuarantineCompat as u32 =>
+        {
+            sys_bti_release_quarantine(args[0] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::PmtUnpin as u32 => sys_pmt_unpin(args[0] as u32).map(|_| 0),
+        num if num == ZirconSyscall::FramebufferGetInfo as u32 => {
+            sys_framebuffer_get_info(args[0]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::FramebufferSetRange as u32 => {
+            sys_framebuffer_set_range(args[0] as u32, args[1], args[2] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::InterruptCreate as u32 => {
+            let mut out = 0u32;
+            sys_interrupt_create(args[0] as u32, args[1], args[2] as u32, &mut out)
+                .map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::InterruptBind as u32 => sys_interrupt_bind(
+            args[0] as u32,
+            args[1] as u32,
+            args[2] as u64,
+            args[3] as u32,
+        )
+        .map(|_| 0),
+        num if num == ZirconSyscall::InterruptBindVcpu as u32 => {
+            sys_interrupt_bind_vcpu(args[0] as u32, args[1] as u32, args[2] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::InterruptWait as u32 => {
+            sys_interrupt_wait(args[0] as u32, args[1]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::InterruptDestroy as u32
+            || num == ZirconSyscall::InterruptDestroyCompat as u32 =>
+        {
+            sys_interrupt_destroy(args[0] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::InterruptAck as u32
+            || num == ZirconSyscall::InterruptAckCompat as u32 =>
+        {
+            sys_interrupt_ack(args[0] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::InterruptTrigger as u32
+            || num == ZirconSyscall::InterruptTriggerCompat as u32 =>
+        {
+            sys_interrupt_trigger(args[0] as u32, args[1] as u32, args[2] as i64).map(|_| 0)
+        }
+        num if num == ZirconSyscall::IoportsRequest as u32
+            || num == ZirconSyscall::IoportsRequestCompat as u32 =>
+        {
+            Err(ZxError::ErrNotSupported)
+        }
+        num if num == ZirconSyscall::PciGetNthDevice as u32 => {
+            let mut out = 0u32;
+            sys_pci_get_nth_device(args[0] as u32, args[1] as u32, args[2], &mut out)
+                .map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::PciEnableBusMaster as u32 => {
+            sys_pci_enable_bus_master(args[0] as u32, args[1] != 0).map(|_| 0)
+        }
+        num if num == ZirconSyscall::PciResetDevice as u32 => {
+            sys_pci_reset_device(args[0] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::PciConfigRead as u32 => {
+            sys_pci_config_read(args[0] as u32, args[1], args[2], args[3]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::PciConfigWrite as u32 => {
+            sys_pci_config_write(args[0] as u32, args[1], args[2], args[3] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::PciCfgPioRw as u32 => sys_pci_cfg_pio_rw(
+            args[0] as u32,
+            args[1] as u8,
+            args[2] as u8,
+            args[3] as u8,
+            args[4] as u8,
+            args[5],
+            args[6],
+            args[7] != 0,
+        )
+        .map(|_| 0),
+        num if num == ZirconSyscall::PciGetBar as u32 => {
+            let mut out = 0u32;
+            sys_pci_get_bar(args[0] as u32, args[1] as u32, args[2], &mut out).map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::PciMapInterrupt as u32 => {
+            let mut out = 0u32;
+            sys_pci_map_interrupt(args[0] as u32, args[1] as i32, &mut out).map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::PciQueryIrqMode as u32 => {
+            sys_pci_query_irq_mode(args[0] as u32, args[1] as u32, args[2]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::PciSetIrqMode as u32 => {
+            sys_pci_set_irq_mode(args[0] as u32, args[1] as u32, args[2] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::PciInit as u32 => {
+            sys_pci_init(args[0] as u32, args[1], args[2] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::PciAddSubtractIoRange as u32 => sys_pci_add_subtract_io_range(
+            args[0] as u32,
+            args[1] != 0,
+            args[2] as u64,
+            args[3] as u64,
+            args[4] != 0,
+        )
+        .map(|_| 0),
+        num if num == ZirconSyscall::PcFirmwareTables as u32
+            || num == ZirconSyscall::PcFirmwareTablesCompat as u32 =>
+        {
+            sys_pc_firmware_tables(args[0] as u32, args[1], args[2]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::SmcCall as u32 => {
+            sys_smc_call(args[0] as u32, args[1], args[2]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::GuestCreate as u32 => {
+            let mut guest = 0u32;
+            let mut vmar = 0u32;
+            sys_guest_create(args[0] as u32, args[1] as u32, &mut guest, &mut vmar)
+                .map(|_| ((guest as usize) << 32) | vmar as usize)
+        }
+        num if num == ZirconSyscall::GuestSetTrap as u32 => sys_guest_set_trap(
+            args[0] as u32,
+            args[1] as u32,
+            args[2] as u64,
+            args[3] as u64,
+            args[4] as u32,
+            args[5] as u64,
+        )
+        .map(|_| 0),
+        num if num == ZirconSyscall::VcpuCreate as u32 => {
+            let mut out = 0u32;
+            sys_vcpu_create(args[0] as u32, args[1] as u32, args[2] as u64, &mut out)
+                .map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::VcpuResume as u32 => {
+            sys_vcpu_resume(args[0] as u32, args[1]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::VcpuInterrupt as u32 => {
+            sys_vcpu_interrupt(args[0] as u32, args[1] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::VcpuReadState as u32 => {
+            sys_vcpu_read_state(args[0] as u32, args[1] as u32, args[2], args[3]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::VcpuWriteState as u32 => {
+            sys_vcpu_write_state(args[0] as u32, args[1] as u32, args[2], args[3]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::SystemMexec as u32 => {
+            sys_system_mexec(args[0] as u32, args[1] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::SystemMexecPayloadGet as u32 => {
+            sys_system_mexec_payload_get(args[0], args[1]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::SystemPowerctl as u32 => {
+            sys_system_powerctl(args[0] as u32, args[1] as u32, args[2]).map(|_| 0)
+        }
+        num if num == ZirconSyscall::PagerCreate as u32 => {
+            let mut out = 0u32;
+            sys_pager_create(args[0] as u32, &mut out).map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::PagerCreateVmo as u32 => {
+            let mut out = 0u32;
+            sys_pager_create_vmo(
+                args[0] as u32,
+                args[1] as u32,
+                args[2] as u32,
+                args[3] as u64,
+                args[4],
+                &mut out,
+            )
+            .map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::PagerDetachVmo as u32 => {
+            sys_pager_detach_vmo(args[0] as u32, args[1] as u32).map(|_| 0)
+        }
+        num if num == ZirconSyscall::PagerSupplyPages as u32 => sys_pager_supply_pages(
+            args[0] as u32,
+            args[1] as u32,
+            args[2],
+            args[3],
+            args[4] as u32,
+            args[5],
+        )
+        .map(|_| 0),
+        num if num == ZirconSyscall::SyscallTest0 as u32
+            || num == ZirconSyscall::SyscallTest1 as u32
+            || num == ZirconSyscall::SyscallTest2 as u32
+            || num == ZirconSyscall::SyscallTest3 as u32
+            || num == ZirconSyscall::SyscallTest4 as u32
+            || num == ZirconSyscall::SyscallTest5 as u32
+            || num == ZirconSyscall::SyscallTest6 as u32
+            || num == ZirconSyscall::SyscallTest7 as u32
+            || num == ZirconSyscall::SyscallTest8 as u32
+            || num == ZirconSyscall::SyscallTestWrapper as u32 =>
+        {
+            Ok(0)
+        }
+        num if num == ZirconSyscall::Count as u32 => Err(ZxError::ErrNotSupported),
+        num if num == ZirconSyscall::SystemGetEventCompat as u32 => {
+            let mut out = 0u32;
+            sys_system_get_event(args[0] as u32, args[1] as u32, &mut out).map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::TaskCreateExceptionChannelCompat as u32 => {
+            let mut out = 0u32;
+            sys_create_exception_channel(args[0] as u32, args[1] as u32, &mut out)
+                .map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::ExceptionGetThreadCompat as u32 => {
+            let mut out = 0u32;
+            sys_exception_get_thread(args[0] as u32, &mut out).map(|_| out as usize)
+        }
+        num if num == ZirconSyscall::ExceptionGetProcessCompat as u32 => {
+            let mut out = 0u32;
+            sys_exception_get_process(args[0] as u32, &mut out).map(|_| out as usize)
+        }
+        num if syscall_logic::zircon_syscall_interface_known(num) => {
+            warn!("Unsupported Zircon syscall interface: {}", syscall_num);
+            Err(ZxError::ErrNotSupported)
         }
         _ => {
             warn!("Unimplemented Zircon syscall: {}", syscall_num);

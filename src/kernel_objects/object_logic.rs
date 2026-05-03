@@ -32,6 +32,14 @@ pub(crate) fn intersect_rights(requested: u32, existing: u32) -> u32 {
     smros_ko_intersect_rights_body!(requested, existing)
 }
 
+pub(crate) fn handle_is_valid(handle: u32, invalid: u32) -> bool {
+    smros_ko_handle_is_valid_body!(handle, invalid)
+}
+
+pub(crate) fn signal_update(current: u32, clear_mask: u32, set_mask: u32) -> u32 {
+    smros_ko_signal_update_body!(current, clear_mask, set_mask)
+}
+
 pub(crate) fn channel_message_fits(
     data_len: usize,
     handles_len: usize,

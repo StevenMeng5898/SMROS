@@ -45,6 +45,9 @@ impl HandleTable {
     /// Add a new handle
     pub fn add(&mut self, obj_type: ObjectType, rights: u32) -> Option<HandleValue> {
         let handle_num = self.next_handle.fetch_add(1, Ordering::Relaxed);
+        if !object_logic::handle_is_valid(handle_num, INVALID_HANDLE) {
+            return None;
+        }
 
         for i in 0..MAX_HANDLES_PER_PROCESS {
             if !self.entries[i].valid {
@@ -59,6 +62,27 @@ impl HandleTable {
         }
 
         None
+    }
+
+    /// Add a specific handle value when importing an object managed by another table.
+    pub fn add_existing(&mut self, handle: HandleValue, obj_type: ObjectType, rights: u32) -> bool {
+        if !object_logic::handle_is_valid(handle.0, INVALID_HANDLE) || self.contains(handle) {
+            return false;
+        }
+
+        for i in 0..MAX_HANDLES_PER_PROCESS {
+            if !self.entries[i].valid {
+                self.entries[i] = HandleEntry {
+                    handle,
+                    obj_type,
+                    rights,
+                    valid: true,
+                };
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Remove a handle
@@ -80,6 +104,11 @@ impl HandleTable {
             }
         }
         None
+    }
+
+    /// Check whether a handle exists in the table.
+    pub fn contains(&self, handle: HandleValue) -> bool {
+        self.get_rights(handle).is_some()
     }
 
     /// Duplicate a handle

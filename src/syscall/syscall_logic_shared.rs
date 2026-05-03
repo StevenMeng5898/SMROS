@@ -50,3 +50,16 @@ macro_rules! smros_linux_clock_id_supported_body {
         $clock_id <= 1
     }};
 }
+
+macro_rules! smros_linux_syscall_interface_known_body {
+    ($syscall_num:expr) => {{
+        $syscall_num <= 446 || $syscall_num == 600
+    }};
+}
+
+macro_rules! smros_zircon_syscall_interface_known_body {
+    ($syscall_num:expr) => {{
+        $syscall_num <= 154
+            || (183 <= $syscall_num && $syscall_num <= 211)
+    }};
+}

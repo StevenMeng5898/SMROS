@@ -90,6 +90,18 @@ macro_rules! smros_ko_intersect_rights_body {
     }};
 }
 
+macro_rules! smros_ko_handle_is_valid_body {
+    ($handle:expr, $invalid:expr) => {{
+        $handle != 0 && $handle != $invalid
+    }};
+}
+
+macro_rules! smros_ko_signal_update_body {
+    ($current:expr, $clear_mask:expr, $set_mask:expr) => {{
+        ($current & !$clear_mask) | $set_mask
+    }};
+}
+
 macro_rules! smros_ko_channel_message_fits_body {
     ($data_len:expr, $handles_len:expr, $max_data_len:expr, $max_handles_len:expr) => {{
         $data_len <= $max_data_len && $handles_len <= $max_handles_len

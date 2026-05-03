@@ -38,3 +38,11 @@ pub(crate) fn wait_satisfied(observed: u32, requested: u32) -> bool {
 pub(crate) fn linux_clock_id_supported(clock_id: usize) -> bool {
     smros_linux_clock_id_supported_body!(clock_id)
 }
+
+pub(crate) fn linux_syscall_interface_known(syscall_num: u32) -> bool {
+    smros_linux_syscall_interface_known_body!(syscall_num)
+}
+
+pub(crate) fn zircon_syscall_interface_known(syscall_num: u32) -> bool {
+    smros_zircon_syscall_interface_known_body!(syscall_num)
+}
