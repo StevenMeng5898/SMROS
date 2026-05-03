@@ -650,6 +650,433 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         .write_str("[OK] metadata and property calls returned\n");
 
     ctx.serial
+        .write_str("[TEST] Testing Zircon object signal calls...\n");
+    const SIGNAL_USER0: u32 = 1 << 24;
+    const SIGNAL_USER1: u32 = 1 << 25;
+    let mut signal_pending = 0u32;
+
+    match crate::syscall::sys_object_signal(vmo_handle, 0, SIGNAL_USER0) {
+        Ok(_) => print_signal_ok(ctx, "set user signal"),
+        Err(e) => {
+            print_signal_error(ctx, "set user signal", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_object_wait_one(vmo_handle, SIGNAL_USER0, 0, &mut signal_pending) {
+        Ok(_) if signal_pending & SIGNAL_USER0 != 0 => {
+            print_signal_ok(ctx, "wait user signal");
+        }
+        Ok(_) => {
+            ctx.serial.write_str("  [FAIL] wait user signal pending=0x");
+            print_hex(&mut ctx.serial, signal_pending as u64);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_signal_error(ctx, "wait user signal", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_object_signal(vmo_handle, SIGNAL_USER0, 0) {
+        Ok(_) => print_signal_ok(ctx, "clear user signal"),
+        Err(e) => {
+            print_signal_error(ctx, "clear user signal", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_object_wait_one(vmo_handle, SIGNAL_USER0, 0, &mut signal_pending) {
+        Err(crate::syscall::ZxError::ErrTimedOut) if signal_pending & SIGNAL_USER0 == 0 => {
+            print_signal_ok(ctx, "cleared user signal no longer waits");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] cleared user signal still satisfied pending=0x");
+            print_hex(&mut ctx.serial, signal_pending as u64);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_signal_error(ctx, "cleared user signal no longer waits", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_object_signal(
+        vmo_handle,
+        0,
+        crate::kernel_objects::channel::CHANNEL_SIGNAL_READABLE,
+    ) {
+        Err(crate::syscall::ZxError::ErrInvalidArgs) => {
+            print_signal_ok(ctx, "reject kernel-owned signal bit");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject kernel-owned signal bit unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_signal_error(ctx, "reject kernel-owned signal bit", e);
+            return;
+        }
+    }
+
+    let mut eventpair0 = 0u32;
+    let mut eventpair1 = 0u32;
+    match crate::syscall::sys_eventpair_create(0, &mut eventpair0, &mut eventpair1) {
+        Ok(_) => print_signal_ok(ctx, "eventpair create"),
+        Err(e) => {
+            print_signal_error(ctx, "eventpair create", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_object_signal_peer(eventpair0, 0, SIGNAL_USER1) {
+        Ok(_) => print_signal_ok(ctx, "signal peer user bit"),
+        Err(e) => {
+            print_signal_error(ctx, "signal peer user bit", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_object_wait_one(eventpair1, SIGNAL_USER1, 0, &mut signal_pending) {
+        Ok(_) if signal_pending & SIGNAL_USER1 != 0 => {
+            print_signal_ok(ctx, "wait peer user bit");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] wait peer user bit pending=0x");
+            print_hex(&mut ctx.serial, signal_pending as u64);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_signal_error(ctx, "wait peer user bit", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_object_signal_peer(
+        eventpair0,
+        0,
+        crate::kernel_objects::channel::CHANNEL_SIGNAL_READABLE,
+    ) {
+        Err(crate::syscall::ZxError::ErrInvalidArgs) => {
+            print_signal_ok(ctx, "reject peer kernel-owned signal bit");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject peer kernel-owned signal bit unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_signal_error(ctx, "reject peer kernel-owned signal bit", e);
+            return;
+        }
+    }
+    let _ = crate::syscall::sys_handle_close(eventpair0);
+    let _ = crate::syscall::sys_handle_close(eventpair1);
+    ctx.serial.write_str("[OK] object signal tests completed\n");
+
+    ctx.serial
+        .write_str("[TEST] Testing Zircon port calls...\n");
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct ShellPortPacket {
+        key: u64,
+        packet_type: u32,
+        status: i32,
+        data0: u64,
+        data1: u64,
+        data2: u64,
+        data3: u64,
+    }
+    const PORT_PACKET_USER: u32 = crate::kernel_objects::port::PORT_PACKET_TYPE_USER;
+    const PORT_PACKET_SIGNAL_ONE: u32 = crate::kernel_objects::port::PORT_PACKET_TYPE_SIGNAL_ONE;
+    let mut port_handle = 0u32;
+    let mut queued_packet = ShellPortPacket {
+        key: 0x5052_5401,
+        packet_type: PORT_PACKET_USER,
+        status: 0,
+        data0: 10,
+        data1: 20,
+        data2: 30,
+        data3: 40,
+    };
+    let mut received_packet = ShellPortPacket::default();
+
+    match crate::syscall::sys_port_create(0, &mut port_handle) {
+        Ok(_) => print_port_ok(ctx, "create"),
+        Err(e) => {
+            print_port_error(ctx, "create", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_port_wait(
+        port_handle,
+        0,
+        &mut received_packet as *mut ShellPortPacket as usize,
+    ) {
+        Err(crate::syscall::ZxError::ErrTimedOut) => print_port_ok(ctx, "empty wait times out"),
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] empty wait unexpectedly returned packet\n");
+            return;
+        }
+        Err(e) => {
+            print_port_error(ctx, "empty wait times out", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_port_queue(
+        port_handle,
+        &mut queued_packet as *mut ShellPortPacket as usize,
+    ) {
+        Ok(_) => print_port_ok(ctx, "queue user packet"),
+        Err(e) => {
+            print_port_error(ctx, "queue user packet", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_object_wait_one(
+        port_handle,
+        crate::kernel_objects::channel::CHANNEL_SIGNAL_READABLE,
+        0,
+        &mut signal_pending,
+    ) {
+        Ok(_) if signal_pending & crate::kernel_objects::channel::CHANNEL_SIGNAL_READABLE != 0 => {
+            print_port_ok(ctx, "readable after queue");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] readable after queue pending=0x");
+            print_hex(&mut ctx.serial, signal_pending as u64);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_port_error(ctx, "readable after queue", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_port_wait(
+        port_handle,
+        0,
+        &mut received_packet as *mut ShellPortPacket as usize,
+    ) {
+        Ok(_)
+            if received_packet.key == queued_packet.key
+                && received_packet.packet_type == PORT_PACKET_USER
+                && received_packet.data0 == 10
+                && received_packet.data3 == 40 =>
+        {
+            print_port_ok(ctx, "wait user packet");
+        }
+        Ok(_) => {
+            ctx.serial.write_str("  [FAIL] wait user packet key=0x");
+            print_hex(&mut ctx.serial, received_packet.key);
+            ctx.serial.write_str(", type=");
+            print_number(&mut ctx.serial, received_packet.packet_type);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_port_error(ctx, "wait user packet", e);
+            return;
+        }
+    }
+
+    queued_packet.key = 0x5052_5402;
+    match crate::syscall::sys_port_queue(
+        port_handle,
+        &mut queued_packet as *mut ShellPortPacket as usize,
+    ) {
+        Ok(_) => print_port_ok(ctx, "queue cancel packet"),
+        Err(e) => {
+            print_port_error(ctx, "queue cancel packet", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_port_cancel(port_handle, vmo_handle, queued_packet.key) {
+        Ok(removed) if removed == 0 => print_port_ok(ctx, "cancel ignores user packet"),
+        Ok(removed) => {
+            print_port_count_mismatch(ctx, "cancel ignores user packet", 0, removed);
+            return;
+        }
+        Err(e) => {
+            print_port_error(ctx, "cancel ignores user packet", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_port_wait(
+        port_handle,
+        0,
+        &mut received_packet as *mut ShellPortPacket as usize,
+    ) {
+        Ok(_)
+            if received_packet.key == queued_packet.key
+                && received_packet.packet_type == PORT_PACKET_USER =>
+        {
+            print_port_ok(ctx, "wait uncanceled user packet");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] wait uncanceled user packet key=0x");
+            print_hex(&mut ctx.serial, received_packet.key);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_port_error(ctx, "wait uncanceled user packet", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_object_wait_async(
+        vmo_handle,
+        port_handle,
+        0x5052_5404,
+        SIGNAL_USER1,
+        0,
+    ) {
+        Ok(_) => print_port_ok(ctx, "register async wait for cancel"),
+        Err(e) => {
+            print_port_error(ctx, "register async wait for cancel", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_port_cancel(port_handle, vmo_handle, 0x5052_5404) {
+        Ok(removed) if removed == 1 => print_port_ok(ctx, "cancel async wait"),
+        Ok(removed) => {
+            print_port_count_mismatch(ctx, "cancel async wait", 1, removed);
+            return;
+        }
+        Err(e) => {
+            print_port_error(ctx, "cancel async wait", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_object_signal(vmo_handle, 0, SIGNAL_USER1) {
+        Ok(_) => print_port_ok(ctx, "signal canceled source"),
+        Err(e) => {
+            print_port_error(ctx, "signal canceled source", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_port_wait(
+        port_handle,
+        0,
+        &mut received_packet as *mut ShellPortPacket as usize,
+    ) {
+        Err(crate::syscall::ZxError::ErrTimedOut) => {
+            print_port_ok(ctx, "canceled packet removed");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] canceled packet unexpectedly returned key=0x");
+            print_hex(&mut ctx.serial, received_packet.key);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_port_error(ctx, "canceled packet removed", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_object_wait_async(
+        vmo_handle,
+        port_handle,
+        0x5052_5403,
+        SIGNAL_USER0,
+        0,
+    ) {
+        Ok(_) => print_port_ok(ctx, "wait async queues signal packet"),
+        Err(e) => {
+            print_port_error(ctx, "wait async queues signal packet", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_port_wait(
+        port_handle,
+        0,
+        &mut received_packet as *mut ShellPortPacket as usize,
+    ) {
+        Err(crate::syscall::ZxError::ErrTimedOut) => {
+            print_port_ok(ctx, "unsignaled wait stays queued")
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] unsignaled wait unexpectedly returned key=0x");
+            print_hex(&mut ctx.serial, received_packet.key);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_port_error(ctx, "unsignaled wait stays queued", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_object_signal(vmo_handle, 0, SIGNAL_USER0) {
+        Ok(_) => print_port_ok(ctx, "signal source for async wait"),
+        Err(e) => {
+            print_port_error(ctx, "signal source for async wait", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_port_wait(
+        port_handle,
+        0,
+        &mut received_packet as *mut ShellPortPacket as usize,
+    ) {
+        Ok(_)
+            if received_packet.key == 0x5052_5403
+                && received_packet.packet_type == PORT_PACKET_SIGNAL_ONE
+                && received_packet.data0 == SIGNAL_USER0 as u64
+                && (received_packet.data1 & SIGNAL_USER0 as u64) != 0 =>
+        {
+            print_port_ok(ctx, "wait async signal packet");
+        }
+        Ok(_) => {
+            ctx.serial.write_str("  [FAIL] async packet key=0x");
+            print_hex(&mut ctx.serial, received_packet.key);
+            ctx.serial.write_str(", type=");
+            print_number(&mut ctx.serial, received_packet.packet_type);
+            ctx.serial.write_str(", data1=0x");
+            print_hex(&mut ctx.serial, received_packet.data1);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_port_error(ctx, "wait async signal packet", e);
+            return;
+        }
+    }
+    match crate::syscall::dispatch_zircon_syscall(
+        crate::syscall::ZirconSyscall::PortCancel as u32,
+        [
+            port_handle as usize,
+            vmo_handle as usize,
+            0x5052_5403,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+    ) {
+        Ok(removed) if removed == 1 => print_port_ok(ctx, "dispatch port cancel async"),
+        Ok(removed) => {
+            ctx.serial
+                .write_str("  [FAIL] dispatch port cancel async expected=1, actual=");
+            print_number(&mut ctx.serial, removed as u32);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_port_error(ctx, "dispatch port cancel async", e);
+            return;
+        }
+    }
+    let _ = crate::syscall::sys_handle_close(port_handle);
+    ctx.serial.write_str("[OK] port tests completed\n");
+
+    ctx.serial
         .write_str("[TEST] Testing Zircon channel IPC calls... ");
     let mut channel0 = 0u32;
     let mut channel1 = 0u32;
@@ -1397,6 +1824,174 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         .write_str("[OK] FIFO kernel object tests completed\n");
 
     ctx.serial
+        .write_str("[TEST] Testing Zircon futex calls...\n");
+    let mut futex_a = 7i32;
+    let mut futex_b = 11i32;
+    let futex_a_ptr = &mut futex_a as *mut i32 as usize;
+    let futex_b_ptr = &mut futex_b as *mut i32 as usize;
+
+    match crate::syscall::sys_futex_wait(0, 0, 0, 0) {
+        Err(crate::syscall::ZxError::ErrInvalidArgs) => {
+            print_futex_ok(ctx, "reject null wait pointer");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject null wait pointer unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_futex_error(ctx, "reject null wait pointer", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_futex_wake(futex_a_ptr + 1, 1) {
+        Err(crate::syscall::ZxError::ErrInvalidArgs) => {
+            print_futex_ok(ctx, "reject unaligned wake pointer");
+        }
+        Ok(count) => {
+            ctx.serial
+                .write_str("  [FAIL] reject unaligned wake pointer unexpectedly woke=");
+            print_number(&mut ctx.serial, count);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_futex_error(ctx, "reject unaligned wake pointer", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_futex_wait(futex_a_ptr, 99, 0, 0) {
+        Err(crate::syscall::ZxError::ErrBadState) => {
+            print_futex_ok(ctx, "reject mismatched value");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject mismatched value unexpectedly waited\n");
+            return;
+        }
+        Err(e) => {
+            print_futex_error(ctx, "reject mismatched value", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_futex_wait(futex_a_ptr, futex_a, 0x44, 1) {
+        Ok(_) => print_futex_ok(ctx, "record waiter with owner"),
+        Err(e) => {
+            print_futex_error(ctx, "record waiter with owner", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_futex_get_owner(futex_a_ptr) {
+        Ok(owner) if owner == 0x44 => print_futex_ok(ctx, "get owner"),
+        Ok(owner) => {
+            ctx.serial
+                .write_str("  [FAIL] get owner expected=68, actual=");
+            print_number(&mut ctx.serial, owner);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_futex_error(ctx, "get owner", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_futex_wake(futex_a_ptr, 1) {
+        Ok(count) if count == 1 => print_futex_ok(ctx, "wake waiter"),
+        Ok(count) => {
+            print_futex_count_mismatch(ctx, "wake waiter count", 1, count);
+            return;
+        }
+        Err(e) => {
+            print_futex_error(ctx, "wake waiter", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_futex_get_owner(futex_a_ptr) {
+        Ok(owner) if owner == 0 => print_futex_ok(ctx, "owner cleared after wake"),
+        Ok(owner) => {
+            ctx.serial
+                .write_str("  [FAIL] owner cleared after wake actual=");
+            print_number(&mut ctx.serial, owner);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_futex_error(ctx, "owner cleared after wake", e);
+            return;
+        }
+    }
+
+    if crate::syscall::sys_futex_wait(futex_a_ptr, futex_a, 0x51, 1).is_err()
+        || crate::syscall::sys_futex_wait(futex_a_ptr, futex_a, 0x52, 1).is_err()
+        || crate::syscall::sys_futex_wait(futex_a_ptr, futex_a, 0x53, 1).is_err()
+    {
+        ctx.serial
+            .write_str("  [FAIL] setup requeue waiters failed\n");
+        return;
+    }
+    match crate::syscall::sys_futex_requeue(futex_a_ptr, 1, futex_a, futex_b_ptr, 2, 0x99) {
+        Ok((woken, requeued)) if woken == 1 && requeued == 2 => {
+            print_futex_ok(ctx, "wake and requeue waiters");
+        }
+        Ok((woken, requeued)) => {
+            ctx.serial
+                .write_str("  [FAIL] wake and requeue expected=1/2, actual=");
+            print_number(&mut ctx.serial, woken);
+            ctx.serial.write_str("/");
+            print_number(&mut ctx.serial, requeued);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_futex_error(ctx, "wake and requeue waiters", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_futex_get_owner(futex_b_ptr) {
+        Ok(owner) if owner == 0x99 => print_futex_ok(ctx, "requeue owner"),
+        Ok(owner) => {
+            ctx.serial
+                .write_str("  [FAIL] requeue owner expected=153, actual=");
+            print_number(&mut ctx.serial, owner);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_futex_error(ctx, "requeue owner", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_futex_wake_single_owner(futex_b_ptr) {
+        Ok(count) if count == 1 => print_futex_ok(ctx, "wake single owner"),
+        Ok(count) => {
+            print_futex_count_mismatch(ctx, "wake single owner count", 1, count);
+            return;
+        }
+        Err(e) => {
+            print_futex_error(ctx, "wake single owner", e);
+            return;
+        }
+    }
+    match crate::syscall::dispatch_zircon_syscall(
+        crate::syscall::ZirconSyscall::FutexWake as u32,
+        [futex_b_ptr, 8, 0, 0, 0, 0, 0, 0],
+    ) {
+        Ok(count) if count == 1 => print_futex_ok(ctx, "dispatch futex wake"),
+        Ok(count) => {
+            ctx.serial
+                .write_str("  [FAIL] dispatch futex wake expected=1, actual=");
+            print_number(&mut ctx.serial, count as u32);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_futex_error(ctx, "dispatch futex wake", e);
+            return;
+        }
+    }
+    ctx.serial.write_str("[OK] futex tests completed\n");
+
+    ctx.serial
         .write_str("[TEST] Testing Zircon process/thread/wait calls... ");
     #[repr(C)]
     struct ShellWaitItem {
@@ -1899,6 +2494,68 @@ fn print_fifo_count_mismatch(ctx: &mut ShellContext, label: &str, expected: usiz
     print_number(&mut ctx.serial, expected as u32);
     ctx.serial.write_str(", actual=");
     print_number(&mut ctx.serial, actual as u32);
+    ctx.serial.write_str("\n");
+}
+
+fn print_futex_ok(ctx: &mut ShellContext, label: &str) {
+    ctx.serial.write_str("  [OK] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str("\n");
+}
+
+fn print_futex_error(ctx: &mut ShellContext, label: &str, err: crate::syscall::ZxError) {
+    ctx.serial.write_str("  [FAIL] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str(" error=");
+    print_zx_error(&mut ctx.serial, err);
+    ctx.serial.write_str("\n");
+}
+
+fn print_futex_count_mismatch(ctx: &mut ShellContext, label: &str, expected: u32, actual: u32) {
+    ctx.serial.write_str("  [FAIL] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str(" expected=");
+    print_number(&mut ctx.serial, expected);
+    ctx.serial.write_str(", actual=");
+    print_number(&mut ctx.serial, actual);
+    ctx.serial.write_str("\n");
+}
+
+fn print_port_ok(ctx: &mut ShellContext, label: &str) {
+    ctx.serial.write_str("  [OK] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str("\n");
+}
+
+fn print_port_error(ctx: &mut ShellContext, label: &str, err: crate::syscall::ZxError) {
+    ctx.serial.write_str("  [FAIL] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str(" error=");
+    print_zx_error(&mut ctx.serial, err);
+    ctx.serial.write_str("\n");
+}
+
+fn print_port_count_mismatch(ctx: &mut ShellContext, label: &str, expected: u32, actual: u32) {
+    ctx.serial.write_str("  [FAIL] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str(" expected=");
+    print_number(&mut ctx.serial, expected);
+    ctx.serial.write_str(", actual=");
+    print_number(&mut ctx.serial, actual);
+    ctx.serial.write_str("\n");
+}
+
+fn print_signal_ok(ctx: &mut ShellContext, label: &str) {
+    ctx.serial.write_str("  [OK] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str("\n");
+}
+
+fn print_signal_error(ctx: &mut ShellContext, label: &str, err: crate::syscall::ZxError) {
+    ctx.serial.write_str("  [FAIL] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str(" error=");
+    print_zx_error(&mut ctx.serial, err);
     ctx.serial.write_str("\n");
 }
 

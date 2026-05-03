@@ -4,6 +4,8 @@ verus! {
 
 include!("../../../src/kernel_objects/object_logic_shared.rs");
 include!("../../../src/kernel_objects/fifo_logic_shared.rs");
+include!("../../../src/kernel_objects/futex_logic_shared.rs");
+include!("../../../src/kernel_objects/port_logic_shared.rs");
 include!("../../../src/kernel_objects/socket_logic_shared.rs");
 
 pub const PAGE_SIZE: usize = 4096;
@@ -18,6 +20,7 @@ pub const FIFO_MAX_ELEMS: usize = 64;
 pub const FIFO_MAX_ELEM_SIZE: usize = 64;
 pub const FIFO_BUFFER_SIZE: usize = FIFO_MAX_ELEMS * FIFO_MAX_ELEM_SIZE;
 pub const FIFO_CREATE_OPTIONS_MASK: u32 = 0;
+pub const FUTEX_ALIGN: usize = 4;
 pub const SOCKET_SIZE: usize = 128 * 2048;
 pub const SOCKET_DATAGRAM: u32 = 1;
 pub const SOCKET_CREATE_MASK: u32 = SOCKET_DATAGRAM;
@@ -28,6 +31,14 @@ pub const SOCKET_SHUTDOWN_READ: u32 = 1 << 1;
 pub const SOCKET_SHUTDOWN_MASK: u32 = SOCKET_SHUTDOWN_WRITE | SOCKET_SHUTDOWN_READ;
 pub const SOCKET_SIGNAL_READ_THRESHOLD: u32 = 1 << 10;
 pub const SOCKET_SIGNAL_WRITE_THRESHOLD: u32 = 1 << 11;
+pub const PORT_PACKET_SIZE: usize = 48;
+pub const PORT_CREATE_OPTIONS_MASK: u32 = 0;
+pub const PORT_QUEUE_CAPACITY: usize = 32;
+pub const WAIT_ASYNC_TIMESTAMP: u32 = 1 << 0;
+pub const WAIT_ASYNC_BOOT_TIMESTAMP: u32 = 1 << 1;
+pub const WAIT_ASYNC_EDGE: u32 = 1 << 2;
+pub const WAIT_ASYNC_OPTIONS_MASK: u32 =
+    WAIT_ASYNC_TIMESTAMP | WAIT_ASYNC_BOOT_TIMESTAMP | WAIT_ASYNC_EDGE;
 pub const MAX_THREADS: usize = 16;
 pub const THREAD_EMPTY: u8 = 0;
 pub const THREAD_READY: u8 = 1;
@@ -187,8 +198,73 @@ spec fn object_signal_update_spec(current: u32, clear_mask: u32, set_mask: u32) 
     (current & !clear_mask) | set_mask
 }
 
+spec fn futex_ptr_valid_spec(ptr: int, align: int) -> bool {
+    ptr != 0 && align != 0 && ptr % align == 0
+}
+
+spec fn futex_value_matches_spec(observed: int, expected: int) -> bool {
+    observed == expected
+}
+
+spec fn futex_min_count_spec(left: int, right: int) -> int {
+    if left <= right {
+        left
+    } else {
+        right
+    }
+}
+
+spec fn futex_saturating_add_spec(left: int, right: int) -> int {
+    if left + right > u32::MAX as int {
+        u32::MAX as int
+    } else {
+        left + right
+    }
+}
+
 spec fn socket_options_valid_spec(options: u32, mask: u32) -> bool {
     (options & !mask) == 0
+}
+
+spec fn port_options_valid_spec(options: u32, mask: u32) -> bool {
+    (options & !mask) == 0
+}
+
+spec fn port_packet_ptr_valid_spec(ptr: int, size: int) -> bool {
+    ptr != 0 && size != 0
+}
+
+spec fn port_queue_has_space_spec(len: int, capacity: int) -> bool {
+    len < capacity
+}
+
+spec fn port_signal_packet_allowed_spec(observed: u32, signals: u32) -> bool {
+    signals == 0 || (observed & signals) != 0
+}
+
+spec fn port_wait_async_options_valid_spec(
+    options: u32,
+    mask: u32,
+    timestamp: u32,
+    boot_timestamp: u32,
+) -> bool {
+    (options & !mask) == 0
+        && !((options & timestamp) != 0 && (options & boot_timestamp) != 0)
+}
+
+spec fn port_observer_should_queue_spec(
+    previous: u32,
+    observed: u32,
+    signals: u32,
+    edge: bool,
+) -> bool {
+    let previously_allowed = port_signal_packet_allowed_spec(previous, signals);
+    let currently_allowed = port_signal_packet_allowed_spec(observed, signals);
+    if edge {
+        !previously_allowed && currently_allowed
+    } else {
+        currently_allowed
+    }
 }
 
 spec fn fifo_options_valid_spec(options: u32, mask: u32) -> bool {
@@ -415,6 +491,38 @@ fn ko_signal_update(current: u32, clear_mask: u32, set_mask: u32) -> (out: u32)
     smros_ko_signal_update_body!(current, clear_mask, set_mask)
 }
 
+fn futex_ptr_valid(ptr: usize, align: usize) -> (out: bool)
+    ensures
+        out == futex_ptr_valid_spec(ptr as int, align as int),
+{
+    smros_futex_ptr_valid_body!(ptr, align)
+}
+
+fn futex_value_matches(observed: i32, expected: i32) -> (out: bool)
+    ensures
+        out == futex_value_matches_spec(observed as int, expected as int),
+{
+    smros_futex_value_matches_body!(observed, expected)
+}
+
+fn futex_min_count(left: u32, right: u32) -> (out: u32)
+    ensures
+        out as int == futex_min_count_spec(left as int, right as int),
+        out <= left,
+        out <= right,
+{
+    smros_futex_min_count_body!(left, right)
+}
+
+fn futex_saturating_add(left: u32, right: u32) -> (out: u32)
+    ensures
+        out as int == futex_saturating_add_spec(left as int, right as int),
+        out >= left,
+        out >= right,
+{
+    smros_futex_saturating_add_body!(left, right)
+}
+
 fn fifo_options_valid(options: u32, mask: u32) -> (out: bool)
     ensures
         out == fifo_options_valid_spec(options, mask),
@@ -484,6 +592,58 @@ fn fifo_refresh_write_signals(signals: u32, remaining: usize, writable_signal: u
         out == fifo_refresh_write_signals_spec(signals, remaining as int, writable_signal),
 {
     smros_fifo_refresh_write_signals_body!(signals, remaining, writable_signal)
+}
+
+fn port_options_valid(options: u32, mask: u32) -> (out: bool)
+    ensures
+        out == port_options_valid_spec(options, mask),
+{
+    smros_port_options_valid_body!(options, mask)
+}
+
+fn port_packet_ptr_valid(ptr: usize, size: usize) -> (out: bool)
+    ensures
+        out == port_packet_ptr_valid_spec(ptr as int, size as int),
+{
+    smros_port_packet_ptr_valid_body!(ptr, size)
+}
+
+fn port_queue_has_space(len: usize, capacity: usize) -> (out: bool)
+    ensures
+        out == port_queue_has_space_spec(len as int, capacity as int),
+{
+    smros_port_queue_has_space_body!(len, capacity)
+}
+
+fn port_signal_packet_allowed(observed: u32, signals: u32) -> (out: bool)
+    ensures
+        out == port_signal_packet_allowed_spec(observed, signals),
+{
+    smros_port_signal_packet_allowed_body!(observed, signals)
+}
+
+fn port_wait_async_options_valid(
+    options: u32,
+    mask: u32,
+    timestamp: u32,
+    boot_timestamp: u32,
+) -> (out: bool)
+    ensures
+        out == port_wait_async_options_valid_spec(options, mask, timestamp, boot_timestamp),
+{
+    smros_port_wait_async_options_valid_body!(options, mask, timestamp, boot_timestamp)
+}
+
+fn port_observer_should_queue(
+    previous: u32,
+    observed: u32,
+    signals: u32,
+    edge: bool,
+) -> (out: bool)
+    ensures
+        out == port_observer_should_queue_spec(previous, observed, signals, edge),
+{
+    smros_port_observer_should_queue_body!(previous, observed, signals, edge)
 }
 
 fn socket_options_valid(options: u32, mask: u32) -> (out: bool)
@@ -1044,6 +1204,126 @@ fn fifo_signal_smoke() {
         1,
         CHANNEL_SIGNAL_WRITABLE,
     ));
+}
+
+fn futex_helper_smoke() {
+    let valid_ptr = futex_ptr_valid(0x1000, FUTEX_ALIGN);
+    let null_ptr = futex_ptr_valid(0, FUTEX_ALIGN);
+    let unaligned_ptr = futex_ptr_valid(0x1001, FUTEX_ALIGN);
+    let value_match = futex_value_matches(7, 7);
+    let value_mismatch = futex_value_matches(7, 8);
+    let small_min = futex_min_count(2, 5);
+    let capped_min = futex_min_count(8, 3);
+    let add_small = futex_saturating_add(2, 3);
+    let add_overflow = futex_saturating_add(u32::MAX, 1);
+
+    assert(valid_ptr);
+    assert(!null_ptr);
+    assert(!unaligned_ptr);
+    assert(value_match);
+    assert(!value_mismatch);
+    assert(small_min == 2);
+    assert(capped_min == 3);
+    assert(add_small == 5);
+    assert(add_overflow == u32::MAX);
+}
+
+fn port_option_masks_smoke() {
+    assert(port_options_valid_spec(0, PORT_CREATE_OPTIONS_MASK)) by(bit_vector);
+    assert(!port_options_valid_spec(1, PORT_CREATE_OPTIONS_MASK)) by(bit_vector);
+    assert(port_wait_async_options_valid_spec(
+        0,
+        WAIT_ASYNC_OPTIONS_MASK,
+        WAIT_ASYNC_TIMESTAMP,
+        WAIT_ASYNC_BOOT_TIMESTAMP,
+    )) by(bit_vector);
+    assert(port_wait_async_options_valid_spec(
+        WAIT_ASYNC_EDGE,
+        WAIT_ASYNC_OPTIONS_MASK,
+        WAIT_ASYNC_TIMESTAMP,
+        WAIT_ASYNC_BOOT_TIMESTAMP,
+    )) by(bit_vector);
+    assert(!port_wait_async_options_valid_spec(
+        WAIT_ASYNC_TIMESTAMP | WAIT_ASYNC_BOOT_TIMESTAMP,
+        WAIT_ASYNC_OPTIONS_MASK,
+        WAIT_ASYNC_TIMESTAMP,
+        WAIT_ASYNC_BOOT_TIMESTAMP,
+    )) by(bit_vector);
+
+    let create_empty = port_options_valid(0, PORT_CREATE_OPTIONS_MASK);
+    let create_bad = port_options_valid(1, PORT_CREATE_OPTIONS_MASK);
+    let async_edge = port_wait_async_options_valid(
+        WAIT_ASYNC_EDGE,
+        WAIT_ASYNC_OPTIONS_MASK,
+        WAIT_ASYNC_TIMESTAMP,
+        WAIT_ASYNC_BOOT_TIMESTAMP,
+    );
+    let async_bad_timestamp_pair = port_wait_async_options_valid(
+        WAIT_ASYNC_TIMESTAMP | WAIT_ASYNC_BOOT_TIMESTAMP,
+        WAIT_ASYNC_OPTIONS_MASK,
+        WAIT_ASYNC_TIMESTAMP,
+        WAIT_ASYNC_BOOT_TIMESTAMP,
+    );
+
+    assert(create_empty);
+    assert(!create_bad);
+    assert(async_edge);
+    assert(!async_bad_timestamp_pair);
+}
+
+fn port_packet_and_queue_smoke() {
+    let valid_packet = port_packet_ptr_valid(0x1000, PORT_PACKET_SIZE);
+    let null_packet = port_packet_ptr_valid(0, PORT_PACKET_SIZE);
+    let zero_sized_packet = port_packet_ptr_valid(0x1000, 0);
+    let queue_empty = port_queue_has_space(0, PORT_QUEUE_CAPACITY);
+    let queue_last_slot = port_queue_has_space(PORT_QUEUE_CAPACITY - 1, PORT_QUEUE_CAPACITY);
+    let queue_full = port_queue_has_space(PORT_QUEUE_CAPACITY, PORT_QUEUE_CAPACITY);
+
+    assert(valid_packet);
+    assert(!null_packet);
+    assert(!zero_sized_packet);
+    assert(queue_empty);
+    assert(queue_last_slot);
+    assert(!queue_full);
+}
+
+fn port_signal_smoke() {
+    let any_signal = port_signal_packet_allowed(0, 0);
+    let matched_signal = port_signal_packet_allowed(CHANNEL_SIGNAL_READABLE, CHANNEL_SIGNAL_READABLE);
+    let missed_signal = port_signal_packet_allowed(0, CHANNEL_SIGNAL_READABLE);
+    let level_ready = port_observer_should_queue(
+        CHANNEL_SIGNAL_READABLE,
+        CHANNEL_SIGNAL_READABLE,
+        CHANNEL_SIGNAL_READABLE,
+        false,
+    );
+    let edge_ready = port_observer_should_queue(
+        0,
+        CHANNEL_SIGNAL_READABLE,
+        CHANNEL_SIGNAL_READABLE,
+        true,
+    );
+    let edge_already_ready = port_observer_should_queue(
+        CHANNEL_SIGNAL_READABLE,
+        CHANNEL_SIGNAL_READABLE,
+        CHANNEL_SIGNAL_READABLE,
+        true,
+    );
+
+    assert(any_signal);
+    assert(port_signal_packet_allowed_spec(
+        CHANNEL_SIGNAL_READABLE,
+        CHANNEL_SIGNAL_READABLE,
+    )) by(bit_vector);
+    assert(!port_signal_packet_allowed_spec(0, CHANNEL_SIGNAL_READABLE)) by(bit_vector);
+    assert(matched_signal
+        == port_signal_packet_allowed_spec(CHANNEL_SIGNAL_READABLE, CHANNEL_SIGNAL_READABLE));
+    assert(missed_signal == port_signal_packet_allowed_spec(0, CHANNEL_SIGNAL_READABLE));
+    assert(matched_signal);
+    assert(!missed_signal);
+    assert(level_ready);
+    assert(edge_ready);
+    assert(!edge_already_ready);
 }
 
 fn socket_option_masks_smoke() {

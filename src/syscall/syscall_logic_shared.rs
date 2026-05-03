@@ -39,6 +39,30 @@ macro_rules! smros_syscall_signal_update_body {
     }};
 }
 
+macro_rules! smros_syscall_signal_mask_allowed_body {
+    ($clear_mask:expr, $set_mask:expr, $allowed_mask:expr) => {{
+        (($clear_mask | $set_mask) & !$allowed_mask) == 0
+    }};
+}
+
+macro_rules! smros_syscall_user_signal_mask_body {
+    () => {{
+        0xffu32 << 24
+    }};
+}
+
+macro_rules! smros_syscall_event_signal_mask_body {
+    () => {{
+        smros_syscall_user_signal_mask_body!() | (1u32 << 4)
+    }};
+}
+
+macro_rules! smros_syscall_eventpair_signal_mask_body {
+    () => {{
+        smros_syscall_user_signal_mask_body!() | (1u32 << 4)
+    }};
+}
+
 macro_rules! smros_syscall_wait_satisfied_body {
     ($observed:expr, $requested:expr) => {{
         $requested == 0 || ($observed & $requested) != 0

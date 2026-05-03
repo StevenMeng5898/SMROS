@@ -49,6 +49,8 @@ use crate::kernel_objects::channel;
 use crate::kernel_objects::compat;
 use crate::kernel_objects::fifo;
 use crate::kernel_objects::fifo_logic;
+use crate::kernel_objects::futex;
+use crate::kernel_objects::port;
 use crate::kernel_objects::scheduler;
 use crate::kernel_objects::socket;
 use crate::kernel_objects::vmar::Vmar;
@@ -1090,6 +1092,7 @@ fn kernel_object_handle_known(handle: u32) -> bool {
     }
     channel_handle_known(handle)
         || fifo::fifo_table().contains(HandleValue(handle))
+        || port::port_table().contains(HandleValue(handle))
         || socket::socket_table().contains(HandleValue(handle))
         || compat::handle_known(HandleValue(handle))
 }
@@ -1107,6 +1110,8 @@ fn object_signal_state(handle: u32) -> ZxResult<u32> {
         Ok(channel_signal | memory_state().get_signal_value(handle))
     } else if let Some(signals) = fifo::fifo_table().signals(HandleValue(handle)) {
         Ok(signals | memory_state().get_signal_value(handle))
+    } else if let Some(signals) = port::port_table().signals(HandleValue(handle)) {
+        Ok(signals | memory_state().get_signal_value(handle))
     } else if let Some(signals) = socket::socket_table().signals(HandleValue(handle)) {
         Ok(signals | memory_state().get_signal_value(handle))
     } else if let Some(signals) = compat::table().signals(HandleValue(handle)) {
@@ -1117,23 +1122,43 @@ fn object_signal_state(handle: u32) -> ZxResult<u32> {
 }
 
 fn set_object_signal_state(handle: u32, clear_mask: u32, set_mask: u32) -> ZxResult<u32> {
-    if memory_state().handle_known(handle) || channel_handle_known(handle) {
+    let user_signals_allowed =
+        syscall_logic::signal_mask_allowed(clear_mask, set_mask, syscall_logic::user_signal_mask());
+
+    let updated = if memory_state().handle_known(handle) || channel_handle_known(handle) {
+        if !user_signals_allowed {
+            return Err(ZxError::ErrInvalidArgs);
+        }
         Ok(memory_state().update_signal_value(handle, clear_mask, set_mask))
-    } else if let Some(signals) =
-        fifo::fifo_table().update_signals(HandleValue(handle), clear_mask, set_mask)
-    {
-        Ok(signals)
-    } else if let Some(signals) =
-        socket::socket_table().update_signals(HandleValue(handle), clear_mask, set_mask)
-    {
-        Ok(signals)
-    } else if let Some(signals) =
-        compat::table().update_signals(HandleValue(handle), clear_mask, set_mask)
-    {
-        Ok(signals)
+    } else if fifo::fifo_table().contains(HandleValue(handle)) {
+        if !user_signals_allowed {
+            return Err(ZxError::ErrInvalidArgs);
+        }
+        fifo::fifo_table()
+            .update_signals(HandleValue(handle), clear_mask, set_mask)
+            .ok_or(ZxError::ErrNotFound)
+    } else if port::port_table().contains(HandleValue(handle)) {
+        if !user_signals_allowed {
+            return Err(ZxError::ErrInvalidArgs);
+        }
+        port::port_table()
+            .update_signals(HandleValue(handle), clear_mask, set_mask)
+            .ok_or(ZxError::ErrNotFound)
+    } else if socket::socket_table().contains(HandleValue(handle)) {
+        if !user_signals_allowed {
+            return Err(ZxError::ErrInvalidArgs);
+        }
+        socket::socket_table()
+            .update_signals(HandleValue(handle), clear_mask, set_mask)
+            .ok_or(ZxError::ErrNotFound)
+    } else if compat::handle_known(HandleValue(handle)) {
+        compat::table().update_signals_checked(HandleValue(handle), clear_mask, set_mask)
     } else {
         Err(ZxError::ErrNotFound)
-    }
+    }?;
+
+    port::port_table().notify_signal(HandleValue(handle), updated);
+    Ok(updated)
 }
 
 fn monotonic_nanos() -> u64 {
@@ -4276,6 +4301,7 @@ pub fn sys_handle_close(handle: u32) -> ZxResult {
     if memory_state().release_handle(handle)
         || channel::channel_table().remove_channel(HandleValue(handle))
         || fifo::fifo_table().close(HandleValue(handle))
+        || port::port_table().close(HandleValue(handle))
         || socket::socket_table().close(HandleValue(handle))
         || compat::close_handle(HandleValue(handle))
     {
@@ -4440,11 +4466,25 @@ pub fn sys_object_signal_peer(handle: u32, clear_mask: u32, set_mask: u32) -> Zx
     );
 
     if socket::socket_table().contains(HandleValue(handle)) {
+        if !syscall_logic::signal_mask_allowed(
+            clear_mask,
+            set_mask,
+            syscall_logic::user_signal_mask(),
+        ) {
+            return Err(ZxError::ErrInvalidArgs);
+        }
         return socket::socket_table()
             .signal_peer(HandleValue(handle), clear_mask, set_mask)
             .map(|_| ());
     }
     if fifo::fifo_table().contains(HandleValue(handle)) {
+        if !syscall_logic::signal_mask_allowed(
+            clear_mask,
+            set_mask,
+            syscall_logic::user_signal_mask(),
+        ) {
+            return Err(ZxError::ErrInvalidArgs);
+        }
         return fifo::fifo_table()
             .signal_peer(HandleValue(handle), clear_mask, set_mask)
             .map(|_| ());
@@ -4455,11 +4495,11 @@ pub fn sys_object_signal_peer(handle: u32, clear_mask: u32, set_mask: u32) -> Zx
         .map(|_| ())
 }
 
-/// Zircon sys_object_wait_async placeholder.
+/// Zircon sys_object_wait_async implementation.
 pub fn sys_object_wait_async(
     handle: u32,
     port_handle: u32,
-    _key: u64,
+    key: u64,
     signals: u32,
     options: u32,
 ) -> ZxResult {
@@ -4468,13 +4508,34 @@ pub fn sys_object_wait_async(
         handle, port_handle, signals
     );
 
-    if options != 0
-        || !kernel_object_handle_known(handle)
-        || !kernel_object_handle_known(port_handle)
+    if !crate::kernel_objects::port_logic::wait_async_options_valid(
+        options,
+        port::WAIT_ASYNC_OPTIONS_MASK,
+        port::WAIT_ASYNC_TIMESTAMP,
+        port::WAIT_ASYNC_BOOT_TIMESTAMP,
+    ) || !kernel_object_handle_known(handle)
     {
         return Err(ZxError::ErrInvalidArgs);
     }
 
+    let observed = object_signal_state(handle)?;
+    port::port_table()
+        .queue_signal(
+            HandleValue(port_handle),
+            HandleValue(handle),
+            key,
+            observed,
+            signals,
+            options,
+        )
+        .map(|_| ())
+        .map_err(|err| {
+            if err == ZxError::ErrNotFound {
+                ZxError::ErrInvalidArgs
+            } else {
+                err
+            }
+        })?;
     Ok(())
 }
 
@@ -4739,31 +4800,42 @@ pub fn sys_fifo_read(
 }
 
 pub fn sys_port_create(options: u32, out_handle: &mut u32) -> ZxResult {
-    if options != 0 {
-        return Err(ZxError::ErrInvalidArgs);
-    }
-    *out_handle = compat::create_object(ObjectType::Port)?.0;
+    *out_handle = port::port_table().create(options)?.0;
     Ok(())
 }
 
 pub fn sys_port_queue(port_handle: u32, packet: usize) -> ZxResult {
-    if !compat::handle_known(HandleValue(port_handle)) || packet == 0 {
+    if !port::port_table().contains(HandleValue(port_handle))
+        || !crate::kernel_objects::port_logic::packet_ptr_valid(packet, port::PORT_PACKET_SIZE)
+        || !syscall_logic::user_buffer_valid(packet, port::PORT_PACKET_SIZE)
+    {
         return Err(ZxError::ErrInvalidArgs);
     }
-    compat::table()
-        .update_signals(HandleValue(port_handle), 0, ZX_USER_SIGNAL_0)
-        .ok_or(ZxError::ErrNotFound)?;
+    let queued = unsafe { core::ptr::read(packet as *const port::PortPacket) };
+    port::port_table().queue(HandleValue(port_handle), queued)?;
     Ok(())
 }
 
-pub fn sys_port_wait(port_handle: u32, _deadline: u64, packet: usize) -> ZxResult {
-    if !compat::handle_known(HandleValue(port_handle)) || packet == 0 {
+pub fn sys_port_wait(port_handle: u32, deadline: u64, packet: usize) -> ZxResult {
+    if !port::port_table().contains(HandleValue(port_handle))
+        || !crate::kernel_objects::port_logic::packet_ptr_valid(packet, port::PORT_PACKET_SIZE)
+        || !syscall_logic::user_buffer_valid(packet, port::PORT_PACKET_SIZE)
+    {
         return Err(ZxError::ErrInvalidArgs);
     }
+    let received = port::port_table().wait(HandleValue(port_handle), deadline)?;
     unsafe {
-        core::ptr::write_bytes(packet as *mut u8, 0, 32);
+        core::ptr::write(packet as *mut port::PortPacket, received);
     }
     Ok(())
+}
+
+pub fn sys_port_cancel(port_handle: u32, source: u32, key: u64) -> ZxResult<u32> {
+    if !port::port_table().contains(HandleValue(port_handle)) || !kernel_object_handle_known(source)
+    {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    port::port_table().cancel(HandleValue(port_handle), HandleValue(source), key)
 }
 
 pub fn sys_profile_create(
@@ -5511,42 +5583,41 @@ pub fn sys_stream_readv_at(
 
 pub fn sys_futex_wait(
     value_ptr: usize,
-    _current_value: i32,
-    _new_owner: u32,
-    _deadline: u64,
+    current_value: i32,
+    new_owner: u32,
+    deadline: u64,
 ) -> ZxResult {
-    if value_ptr == 0 {
-        Err(ZxError::ErrInvalidArgs)
-    } else {
-        Err(ZxError::ErrTimedOut)
-    }
+    futex::futex_table().wait(value_ptr, current_value, new_owner, deadline)
 }
 
-pub fn sys_futex_wake(value_ptr: usize, _count: u32) -> ZxResult {
-    if value_ptr == 0 {
-        Err(ZxError::ErrInvalidArgs)
-    } else {
-        Ok(())
-    }
+pub fn sys_futex_wake(value_ptr: usize, count: u32) -> ZxResult<u32> {
+    futex::futex_table().wake(value_ptr, count)
 }
 
-pub fn sys_futex_wake_single_owner(value_ptr: usize) -> ZxResult {
+pub fn sys_futex_wake_single_owner(value_ptr: usize) -> ZxResult<u32> {
     sys_futex_wake(value_ptr, 1)
 }
 
 pub fn sys_futex_requeue(
     value_ptr: usize,
-    _wake_count: u32,
-    _current_value: i32,
+    wake_count: u32,
+    current_value: i32,
     requeue_ptr: usize,
-    _requeue_count: u32,
-    _new_requeue_owner: u32,
-) -> ZxResult {
-    if value_ptr == 0 || requeue_ptr == 0 {
-        Err(ZxError::ErrInvalidArgs)
-    } else {
-        Ok(())
-    }
+    requeue_count: u32,
+    new_requeue_owner: u32,
+) -> ZxResult<(u32, u32)> {
+    futex::futex_table().requeue(
+        value_ptr,
+        wake_count,
+        current_value,
+        requeue_ptr,
+        requeue_count,
+        new_requeue_owner,
+    )
+}
+
+pub fn sys_futex_get_owner(value_ptr: usize) -> ZxResult<u32> {
+    futex::futex_table().get_owner(value_ptr)
 }
 
 // ============================================================================
@@ -6944,7 +7015,10 @@ pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<u
         num if num == ZirconSyscall::PortWait as u32 => {
             sys_port_wait(args[0] as u32, args[1] as u64, args[2]).map(|_| 0)
         }
-        num if num == ZirconSyscall::PortCancel as u32 => Ok(0),
+        num if num == ZirconSyscall::PortCancel as u32 => {
+            sys_port_cancel(args[0] as u32, args[1] as u32, args[2] as u64)
+                .map(|removed| removed as usize)
+        }
         num if num == ZirconSyscall::TimerCreate as u32 => {
             let mut out = 0u32;
             sys_timer_create(args[0] as u32, args[1] as u32, &mut out).map(|_| out as usize)
@@ -6958,10 +7032,11 @@ pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<u
         num if num == ZirconSyscall::FutexWait as u32 => {
             sys_futex_wait(args[0], args[1] as i32, args[2] as u32, args[3] as u64).map(|_| 0)
         }
-        num if num == ZirconSyscall::FutexWake as u32
-            || num == ZirconSyscall::FutexWakeSingleOwner as u32 =>
-        {
-            sys_futex_wake(args[0], args[1] as u32).map(|_| 0)
+        num if num == ZirconSyscall::FutexWake as u32 => {
+            sys_futex_wake(args[0], args[1] as u32).map(|count| count as usize)
+        }
+        num if num == ZirconSyscall::FutexWakeSingleOwner as u32 => {
+            sys_futex_wake_single_owner(args[0]).map(|count| count as usize)
         }
         num if num == ZirconSyscall::FutexRequeue as u32
             || num == ZirconSyscall::FutexRequeueSingleOwner as u32 =>
@@ -6974,9 +7049,11 @@ pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<u
                 args[4] as u32,
                 args[5] as u32,
             )
-            .map(|_| 0)
+            .map(|(woken, requeued)| ((woken as usize) << 32) | requeued as usize)
         }
-        num if num == ZirconSyscall::FutexGetOwner as u32 => Ok(0),
+        num if num == ZirconSyscall::FutexGetOwner as u32 => {
+            sys_futex_get_owner(args[0]).map(|owner| owner as usize)
+        }
         num if num == ZirconSyscall::CprngDrawOnce as u32 => {
             sys_cprng_draw_once(args[0], args[1]).map(|_| 0)
         }

@@ -19,6 +19,11 @@ pub const SMROS_SAVED_REG_COUNT: usize = smros_saved_reg_count!();
 pub const SMROS_SYSCALL_NUMBER_REG_INDEX: usize = smros_syscall_number_reg_index!();
 pub const SMROS_SYSCALL_ARG_COUNT_LINUX: usize = smros_syscall_arg_count_linux!();
 pub const SMROS_SYSCALL_ARG_COUNT_ZIRCON: usize = smros_syscall_arg_count_zircon!();
+pub const ZX_USER_SIGNAL_MASK: u32 = 0xffu32 << 24;
+pub const ZX_EVENT_SIGNALED: u32 = 1u32 << 4;
+pub const ZX_EVENTPAIR_SIGNALED: u32 = 1u32 << 4;
+pub const ZX_EVENT_SIGNAL_MASK: u32 = ZX_USER_SIGNAL_MASK | ZX_EVENT_SIGNALED;
+pub const ZX_EVENTPAIR_SIGNAL_MASK: u32 = ZX_USER_SIGNAL_MASK | ZX_EVENTPAIR_SIGNALED;
 
 #[derive(Copy, Clone)]
 struct LinuxRange {
@@ -145,6 +150,10 @@ spec fn channel_buffers_valid_spec(
 
 spec fn signal_update_spec(current: u32, clear_mask: u32, set_mask: u32) -> u32 {
     (current & !clear_mask) | set_mask
+}
+
+spec fn signal_mask_allowed_spec(clear_mask: u32, set_mask: u32, allowed_mask: u32) -> bool {
+    ((clear_mask | set_mask) & !allowed_mask) == 0
 }
 
 spec fn wait_satisfied_spec(observed: u32, requested: u32) -> bool {
@@ -325,6 +334,34 @@ fn signal_update(current: u32, clear_mask: u32, set_mask: u32) -> (out: u32)
         out == signal_update_spec(current, clear_mask, set_mask),
 {
     smros_syscall_signal_update_body!(current, clear_mask, set_mask)
+}
+
+fn signal_mask_allowed(clear_mask: u32, set_mask: u32, allowed_mask: u32) -> (out: bool)
+    ensures
+        out == signal_mask_allowed_spec(clear_mask, set_mask, allowed_mask),
+{
+    smros_syscall_signal_mask_allowed_body!(clear_mask, set_mask, allowed_mask)
+}
+
+fn user_signal_mask() -> (out: u32)
+    ensures
+        out == ZX_USER_SIGNAL_MASK,
+{
+    smros_syscall_user_signal_mask_body!()
+}
+
+fn event_signal_mask() -> (out: u32)
+    ensures
+        out == ZX_EVENT_SIGNAL_MASK,
+{
+    smros_syscall_event_signal_mask_body!()
+}
+
+fn eventpair_signal_mask() -> (out: u32)
+    ensures
+        out == ZX_EVENTPAIR_SIGNAL_MASK,
+{
+    smros_syscall_eventpair_signal_mask_body!()
 }
 
 fn wait_satisfied(observed: u32, requested: u32) -> (out: bool)
@@ -535,6 +572,14 @@ proof fn syscall_zircon_logic_smoke() {
 
     assert(wait_satisfied_spec(0, 0));
 
+    assert(signal_mask_allowed_spec(1u32 << 24, 1u32 << 25, ZX_USER_SIGNAL_MASK)) by(bit_vector);
+    assert(!signal_mask_allowed_spec(1u32, 0, ZX_USER_SIGNAL_MASK)) by(bit_vector);
+    assert(signal_mask_allowed_spec(
+        1u32 << 4,
+        1u32 << 24,
+        ZX_EVENTPAIR_SIGNAL_MASK,
+    )) by(bit_vector);
+
     assert(linux_clock_id_supported_spec(0));
     assert(linux_clock_id_supported_spec(1));
     assert(!linux_clock_id_supported_spec(2));
@@ -551,6 +596,22 @@ proof fn syscall_zircon_logic_smoke() {
     assert(zircon_syscall_interface_known_spec(211));
     assert(!zircon_syscall_interface_known_spec(155));
     assert(!zircon_syscall_interface_known_spec(212));
+}
+
+fn syscall_signal_mask_exec_smoke() {
+    let user_mask = user_signal_mask();
+    let event_mask = event_signal_mask();
+    let eventpair_mask = eventpair_signal_mask();
+    let user_allowed = signal_mask_allowed(1u32 << 24, 1u32 << 25, user_mask);
+    let kernel_rejected = signal_mask_allowed(1u32, 0, user_mask);
+    let eventpair_allowed = signal_mask_allowed(1u32 << 4, 1u32 << 24, eventpair_mask);
+
+    assert(user_mask == ZX_USER_SIGNAL_MASK);
+    assert(event_mask == ZX_EVENT_SIGNAL_MASK);
+    assert(eventpair_mask == ZX_EVENTPAIR_SIGNAL_MASK);
+    assert(user_allowed == signal_mask_allowed_spec(1u32 << 24, 1u32 << 25, user_mask));
+    assert(kernel_rejected == signal_mask_allowed_spec(1u32, 0, user_mask));
+    assert(eventpair_allowed == signal_mask_allowed_spec(1u32 << 4, 1u32 << 24, eventpair_mask));
 }
 
 proof fn syscall_address_logic_smoke() {

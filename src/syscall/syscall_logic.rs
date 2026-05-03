@@ -31,6 +31,22 @@ pub(crate) fn signal_update(current: u32, clear_mask: u32, set_mask: u32) -> u32
     smros_syscall_signal_update_body!(current, clear_mask, set_mask)
 }
 
+pub(crate) fn signal_mask_allowed(clear_mask: u32, set_mask: u32, allowed_mask: u32) -> bool {
+    smros_syscall_signal_mask_allowed_body!(clear_mask, set_mask, allowed_mask)
+}
+
+pub(crate) fn user_signal_mask() -> u32 {
+    smros_syscall_user_signal_mask_body!()
+}
+
+pub(crate) fn event_signal_mask() -> u32 {
+    smros_syscall_event_signal_mask_body!()
+}
+
+pub(crate) fn eventpair_signal_mask() -> u32 {
+    smros_syscall_eventpair_signal_mask_body!()
+}
+
 pub(crate) fn wait_satisfied(observed: u32, requested: u32) -> bool {
     smros_syscall_wait_satisfied_body!(observed, requested)
 }

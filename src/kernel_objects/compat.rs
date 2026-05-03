@@ -106,6 +106,16 @@ impl CompatObjectTable {
             .map(|object| object.obj_type)
     }
 
+    pub fn signal_mask(&self, handle: HandleValue) -> Option<u32> {
+        let object_type = self.object_type(handle)?;
+        let mask = match object_type {
+            ObjectType::Event => crate::syscall::syscall_logic::event_signal_mask(),
+            ObjectType::EventPair => crate::syscall::syscall_logic::eventpair_signal_mask(),
+            _ => crate::syscall::syscall_logic::user_signal_mask(),
+        };
+        Some(mask)
+    }
+
     pub fn close(&mut self, handle: HandleValue) -> bool {
         let Some(index) = self
             .objects
@@ -156,18 +166,42 @@ impl CompatObjectTable {
             })
     }
 
+    pub fn update_signals_checked(
+        &mut self,
+        handle: HandleValue,
+        clear_mask: u32,
+        set_mask: u32,
+    ) -> ZxResult<u32> {
+        let allowed_mask = self.signal_mask(handle).ok_or(ZxError::ErrNotFound)?;
+        if !crate::syscall::syscall_logic::signal_mask_allowed(clear_mask, set_mask, allowed_mask) {
+            return Err(ZxError::ErrInvalidArgs);
+        }
+        self.update_signals(handle, clear_mask, set_mask)
+            .ok_or(ZxError::ErrNotFound)
+    }
+
     pub fn signal_peer(
         &mut self,
         handle: HandleValue,
         clear_mask: u32,
         set_mask: u32,
     ) -> ZxResult<u32> {
-        let peer = self
+        let (peer, allowed_mask) = self
             .objects
             .iter()
             .find(|object| object.handle == handle && !object.closed)
-            .and_then(|object| object.peer)
-            .ok_or(ZxError::ErrPeerClosed)?;
+            .map(|object| {
+                let allowed_mask = match object.obj_type {
+                    ObjectType::EventPair => crate::syscall::syscall_logic::eventpair_signal_mask(),
+                    _ => crate::syscall::syscall_logic::user_signal_mask(),
+                };
+                (object.peer, allowed_mask)
+            })
+            .ok_or(ZxError::ErrNotFound)?;
+        if !crate::syscall::syscall_logic::signal_mask_allowed(clear_mask, set_mask, allowed_mask) {
+            return Err(ZxError::ErrInvalidArgs);
+        }
+        let peer = peer.ok_or(ZxError::ErrPeerClosed)?;
 
         self.update_signals(peer, clear_mask, set_mask)
             .ok_or(ZxError::ErrPeerClosed)
