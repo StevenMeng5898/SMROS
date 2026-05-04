@@ -2522,6 +2522,435 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     let _ = crate::syscall::sys_handle_close(guest_vmar);
     ctx.serial.write_str("[OK] hypervisor tests completed\n");
 
+    ctx.serial
+        .write_str("[TEST] Testing Linux signal calls...\n");
+    let mut sigset = 0xffff_ffff_ffff_ffffu64;
+    let mut siginfo = [0xffu8; 128];
+    match crate::syscall::sys_rt_sigaction(
+        0,
+        0,
+        &mut sigset as *mut u64 as usize,
+        core::mem::size_of::<u64>(),
+    ) {
+        Err(crate::syscall::SysError::EINVAL) => print_linux_ok(ctx, "reject signal zero action"),
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject signal zero action unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "reject signal zero action", e);
+            return;
+        }
+    }
+    if crate::syscall::sys_rt_sigaction(
+        2,
+        0,
+        &mut sigset as *mut u64 as usize,
+        core::mem::size_of::<u64>(),
+    )
+    .is_err()
+        || sigset != 0
+        || crate::syscall::sys_rt_sigprocmask(
+            0,
+            0,
+            &mut sigset as *mut u64 as usize,
+            core::mem::size_of::<u64>(),
+        )
+        .is_err()
+        || crate::syscall::sys_rt_sigpending(
+            &mut sigset as *mut u64 as usize,
+            core::mem::size_of::<u64>(),
+        )
+        .is_err()
+        || crate::syscall::sys_rt_sigtimedwait(
+            &mut sigset as *mut u64 as usize,
+            siginfo.as_mut_ptr() as usize,
+            0,
+            core::mem::size_of::<u64>(),
+        )
+        .is_err()
+        || crate::syscall::sys_rt_sigqueueinfo(1, 10, siginfo.as_ptr() as usize).is_err()
+        || crate::syscall::sys_kill(1, 0).is_err()
+    {
+        ctx.serial
+            .write_str("  [FAIL] modeled signal path failed\n");
+        return;
+    }
+    print_linux_ok(ctx, "signal masks and queue info");
+    match crate::syscall::sys_signalfd4(
+        usize::MAX,
+        &sigset as *const u64 as usize,
+        core::mem::size_of::<u64>(),
+        0,
+    ) {
+        Ok(fd) => {
+            print_linux_ok(ctx, "signalfd create");
+            let _ = crate::syscall::sys_close(fd);
+        }
+        Err(e) => {
+            print_linux_error(ctx, "signalfd create", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_signalfd4(
+        usize::MAX,
+        &sigset as *const u64 as usize,
+        core::mem::size_of::<u64>() + 1,
+        0,
+    ) {
+        Err(crate::syscall::SysError::EINVAL) => print_linux_ok(ctx, "reject bad sigset size"),
+        Ok(fd) => {
+            ctx.serial
+                .write_str("  [FAIL] reject bad sigset size unexpectedly fd=");
+            print_number(&mut ctx.serial, fd as u32);
+            ctx.serial.write_str("\n");
+            let _ = crate::syscall::sys_close(fd);
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "reject bad sigset size", e);
+            return;
+        }
+    }
+
+    ctx.serial.write_str("[TEST] Testing Linux IPC calls...\n");
+    let semaphore_id = match crate::syscall::sys_semget(0, 2, 0) {
+        Ok(id) => {
+            print_linux_ok(ctx, "semget");
+            id
+        }
+        Err(e) => {
+            print_linux_error(ctx, "semget", e);
+            return;
+        }
+    };
+    let semop = [0u16; 3];
+    if crate::syscall::sys_semctl(semaphore_id, 0, 0, 0).is_err()
+        || crate::syscall::sys_semop(semaphore_id, semop.as_ptr() as usize, 1).is_err()
+    {
+        ctx.serial
+            .write_str("  [FAIL] semaphore object ops failed\n");
+        return;
+    }
+    print_linux_ok(ctx, "semaphore object ops");
+    match crate::syscall::sys_semget(0, 0, 0) {
+        Err(crate::syscall::SysError::EINVAL) => print_linux_ok(ctx, "reject zero sem count"),
+        Ok(id) => {
+            ctx.serial
+                .write_str("  [FAIL] reject zero sem count unexpectedly id=");
+            print_number(&mut ctx.serial, id as u32);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "reject zero sem count", e);
+            return;
+        }
+    }
+    let msg_id = match crate::syscall::sys_msgget(0, 0) {
+        Ok(id) => {
+            print_linux_ok(ctx, "msgget");
+            id
+        }
+        Err(e) => {
+            print_linux_error(ctx, "msgget", e);
+            return;
+        }
+    };
+    let msg_payload = b"linux-ipc";
+    let mut msg_readback = [0u8; 9];
+    match crate::syscall::sys_msgsnd(msg_id, msg_payload.as_ptr() as usize, msg_payload.len(), 0) {
+        Ok(0) => print_linux_ok(ctx, "msgsnd returns zero"),
+        Ok(value) => {
+            print_linux_count_mismatch(ctx, "msgsnd return", 0, value);
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "msgsnd", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_msgrcv(
+        msg_id,
+        msg_readback.as_mut_ptr() as usize,
+        msg_readback.len(),
+        0,
+        0,
+    ) {
+        Ok(read) if read == msg_payload.len() && msg_readback == *msg_payload => {
+            print_linux_ok(ctx, "msgrcv round trip");
+        }
+        Ok(read) => {
+            print_linux_count_mismatch(ctx, "msgrcv count", msg_payload.len(), read);
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "msgrcv", e);
+            return;
+        }
+    }
+    let shm_id = match crate::syscall::sys_shmget(0, PAGE_SIZE, 0) {
+        Ok(id) => {
+            print_linux_ok(ctx, "shmget");
+            id
+        }
+        Err(e) => {
+            print_linux_error(ctx, "shmget", e);
+            return;
+        }
+    };
+    let shm_addr = match crate::syscall::sys_shmat(shm_id, 0, 0) {
+        Ok(addr) if addr != 0 => {
+            print_linux_ok(ctx, "shmat");
+            addr
+        }
+        Ok(_) => {
+            ctx.serial.write_str("  [FAIL] shmat returned null\n");
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "shmat", e);
+            return;
+        }
+    };
+    if crate::syscall::sys_shmdt(shm_id, shm_addr, 0).is_err()
+        || crate::syscall::sys_shmctl(shm_id, 0, siginfo.as_mut_ptr() as usize).is_err()
+    {
+        ctx.serial
+            .write_str("  [FAIL] shared memory object ops failed\n");
+        return;
+    }
+    print_linux_ok(ctx, "shared memory object ops");
+
+    ctx.serial.write_str("[TEST] Testing Linux net calls...\n");
+    const AF_UNIX: usize = 1;
+    const AF_INET: usize = 2;
+    const SOCK_STREAM: usize = 1;
+    const SOCK_DGRAM: usize = 2;
+    const IPPROTO_TCP: usize = 6;
+    let mut socket_pair = [0i32; 2];
+    match crate::syscall::sys_socketpair(AF_UNIX, SOCK_STREAM, 0, socket_pair.as_mut_ptr() as usize)
+    {
+        Ok(_) => print_linux_ok(ctx, "socketpair"),
+        Err(e) => {
+            print_linux_error(ctx, "socketpair", e);
+            return;
+        }
+    }
+    let net_payload = b"net-ok";
+    let mut net_readback = [0u8; 6];
+    let mut sock_addr = [0u8; 16];
+    if crate::syscall::sys_sendto(
+        socket_pair[0] as usize,
+        net_payload.as_ptr() as usize,
+        net_payload.len(),
+        0,
+        0,
+        0,
+    )
+    .is_err()
+    {
+        ctx.serial.write_str("  [FAIL] sendto socketpair failed\n");
+        let _ = crate::syscall::sys_close(socket_pair[0] as usize);
+        let _ = crate::syscall::sys_close(socket_pair[1] as usize);
+        return;
+    }
+    match crate::syscall::sys_recvfrom(
+        socket_pair[1] as usize,
+        net_readback.as_mut_ptr() as usize,
+        net_readback.len(),
+        0,
+        0,
+        0,
+    ) {
+        Ok(read) if read == net_payload.len() && net_readback == *net_payload => {
+            print_linux_ok(ctx, "sendto recvfrom pair");
+        }
+        Ok(read) => {
+            print_linux_count_mismatch(ctx, "recvfrom count", net_payload.len(), read);
+            let _ = crate::syscall::sys_close(socket_pair[0] as usize);
+            let _ = crate::syscall::sys_close(socket_pair[1] as usize);
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "recvfrom pair", e);
+            let _ = crate::syscall::sys_close(socket_pair[0] as usize);
+            let _ = crate::syscall::sys_close(socket_pair[1] as usize);
+            return;
+        }
+    }
+    if crate::syscall::sys_sendto(
+        socket_pair[0] as usize,
+        net_payload.as_ptr() as usize,
+        net_payload.len(),
+        0,
+        0,
+        0,
+    )
+    .is_err()
+    {
+        ctx.serial
+            .write_str("  [FAIL] second sendto socketpair failed\n");
+        let _ = crate::syscall::sys_close(socket_pair[0] as usize);
+        let _ = crate::syscall::sys_close(socket_pair[1] as usize);
+        return;
+    }
+    let mut recv_addr_len = sock_addr.len() as u32;
+    if crate::syscall::sys_recvfrom(
+        socket_pair[1] as usize,
+        net_readback.as_mut_ptr() as usize,
+        net_readback.len(),
+        0,
+        sock_addr.as_mut_ptr() as usize,
+        &mut recv_addr_len as *mut u32 as usize,
+    )
+    .is_err()
+        || recv_addr_len != 0
+    {
+        ctx.serial
+            .write_str("  [FAIL] recvfrom address path failed\n");
+        let _ = crate::syscall::sys_close(socket_pair[0] as usize);
+        let _ = crate::syscall::sys_close(socket_pair[1] as usize);
+        return;
+    }
+    print_linux_ok(ctx, "recvfrom address path");
+    let mut sock_addr_len = sock_addr.len() as u32;
+    if crate::syscall::sys_getsockname(
+        socket_pair[0] as usize,
+        sock_addr.as_mut_ptr() as usize,
+        &mut sock_addr_len as *mut u32 as usize,
+    )
+    .is_err()
+        || sock_addr_len != 0
+        || crate::syscall::sys_setsockopt(socket_pair[0] as usize, 1, 1, 0, 0).is_err()
+        || crate::syscall::sys_shutdown(socket_pair[0] as usize, 2).is_err()
+    {
+        ctx.serial
+            .write_str("  [FAIL] socket option/name path failed\n");
+        let _ = crate::syscall::sys_close(socket_pair[0] as usize);
+        let _ = crate::syscall::sys_close(socket_pair[1] as usize);
+        return;
+    }
+    print_linux_ok(ctx, "socket option/name path");
+    let tcp_fd = match crate::syscall::sys_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP) {
+        Ok(fd) => {
+            print_linux_ok(ctx, "inet socket create");
+            fd
+        }
+        Err(e) => {
+            print_linux_error(ctx, "inet socket create", e);
+            let _ = crate::syscall::sys_close(socket_pair[0] as usize);
+            let _ = crate::syscall::sys_close(socket_pair[1] as usize);
+            return;
+        }
+    };
+    match crate::syscall::sys_socket(AF_UNIX, 3, 0) {
+        Err(crate::syscall::SysError::EINVAL) => print_linux_ok(ctx, "reject invalid socket combo"),
+        Ok(fd) => {
+            ctx.serial
+                .write_str("  [FAIL] reject invalid socket combo unexpectedly fd=");
+            print_number(&mut ctx.serial, fd as u32);
+            ctx.serial.write_str("\n");
+            let _ = crate::syscall::sys_close(fd);
+            let _ = crate::syscall::sys_close(tcp_fd);
+            let _ = crate::syscall::sys_close(socket_pair[0] as usize);
+            let _ = crate::syscall::sys_close(socket_pair[1] as usize);
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "reject invalid socket combo", e);
+            let _ = crate::syscall::sys_close(tcp_fd);
+            let _ = crate::syscall::sys_close(socket_pair[0] as usize);
+            let _ = crate::syscall::sys_close(socket_pair[1] as usize);
+            return;
+        }
+    }
+    let _ = crate::syscall::sys_close(tcp_fd);
+    let _ = crate::syscall::sys_close(socket_pair[0] as usize);
+    let _ = crate::syscall::sys_close(socket_pair[1] as usize);
+
+    ctx.serial.write_str("[TEST] Testing Linux misc calls...\n");
+    let memfd_name = b"smros-memfd\0";
+    let memfd = match crate::syscall::sys_memfd_create(memfd_name.as_ptr() as usize, 0x1) {
+        Ok(fd) => {
+            print_linux_ok(ctx, "memfd create");
+            fd
+        }
+        Err(e) => {
+            print_linux_error(ctx, "memfd create", e);
+            return;
+        }
+    };
+    let mut random_bytes = [0u8; 8];
+    if crate::syscall::sys_getrandom(random_bytes.as_mut_ptr() as usize, random_bytes.len(), 0x1)
+        .is_err()
+        || crate::syscall::sys_eventfd2(1, 0).is_err()
+        || crate::syscall::sys_epoll_create1(0).is_err()
+        || crate::syscall::sys_membarrier(0, 0, 0).is_err()
+        || random_bytes == [0u8; 8]
+    {
+        ctx.serial.write_str("  [FAIL] misc positive path failed\n");
+        let _ = crate::syscall::sys_close(memfd);
+        return;
+    }
+    print_linux_ok(ctx, "random eventfd epoll membarrier");
+    match crate::syscall::sys_getrandom(random_bytes.as_mut_ptr() as usize, random_bytes.len(), 4) {
+        Err(crate::syscall::SysError::EINVAL) => print_linux_ok(ctx, "reject bad getrandom flags"),
+        Ok(value) => {
+            ctx.serial
+                .write_str("  [FAIL] reject bad getrandom flags unexpectedly read=");
+            print_number(&mut ctx.serial, value as u32);
+            ctx.serial.write_str("\n");
+            let _ = crate::syscall::sys_close(memfd);
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "reject bad getrandom flags", e);
+            let _ = crate::syscall::sys_close(memfd);
+            return;
+        }
+    }
+    match crate::syscall::sys_memfd_create(memfd_name.as_ptr() as usize, 0x8000_0000) {
+        Err(crate::syscall::SysError::EINVAL) => print_linux_ok(ctx, "reject bad memfd flags"),
+        Ok(fd) => {
+            ctx.serial
+                .write_str("  [FAIL] reject bad memfd flags unexpectedly fd=");
+            print_number(&mut ctx.serial, fd as u32);
+            ctx.serial.write_str("\n");
+            let _ = crate::syscall::sys_close(fd);
+            let _ = crate::syscall::sys_close(memfd);
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "reject bad memfd flags", e);
+            let _ = crate::syscall::sys_close(memfd);
+            return;
+        }
+    }
+    match crate::syscall::sys_close_range(memfd, memfd, 0) {
+        Ok(_) => print_linux_ok(ctx, "close_range closes memfd"),
+        Err(e) => {
+            print_linux_error(ctx, "close_range closes memfd", e);
+            let _ = crate::syscall::sys_close(memfd);
+            return;
+        }
+    }
+    match crate::syscall::sys_close_range(9, 8, 0) {
+        Err(crate::syscall::SysError::EINVAL) => print_linux_ok(ctx, "reject bad close_range"),
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject bad close_range unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "reject bad close_range", e);
+            return;
+        }
+    }
+    ctx.serial
+        .write_str("[OK] Linux signal, IPC, misc, and net tests completed\n");
+
     ctx.serial.write_str("[TEST] Closing VMO handle... ");
     match crate::syscall::sys_handle_close(vmo_handle) {
         Ok(_) => ctx.serial.write_str("[OK] handle closed\n"),
@@ -2913,6 +3342,34 @@ fn print_zx_error(serial: &mut Serial, err: crate::syscall::ZxError) {
     } else {
         print_number(serial, code as u32);
     }
+}
+
+fn print_sys_error(serial: &mut Serial, err: crate::syscall::SysError) {
+    print_number(serial, err as u32);
+}
+
+fn print_linux_ok(ctx: &mut ShellContext, label: &str) {
+    ctx.serial.write_str("  [OK] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str("\n");
+}
+
+fn print_linux_error(ctx: &mut ShellContext, label: &str, err: crate::syscall::SysError) {
+    ctx.serial.write_str("  [FAIL] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str(" errno=");
+    print_sys_error(&mut ctx.serial, err);
+    ctx.serial.write_str("\n");
+}
+
+fn print_linux_count_mismatch(ctx: &mut ShellContext, label: &str, expected: usize, actual: usize) {
+    ctx.serial.write_str("  [FAIL] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str(" expected=");
+    print_number(&mut ctx.serial, expected as u32);
+    ctx.serial.write_str(", actual=");
+    print_number(&mut ctx.serial, actual as u32);
+    ctx.serial.write_str("\n");
 }
 
 fn print_socket_ok(ctx: &mut ShellContext, label: &str) {

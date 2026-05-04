@@ -55,6 +55,84 @@ pub(crate) fn linux_clock_id_supported(clock_id: usize) -> bool {
     smros_linux_clock_id_supported_body!(clock_id)
 }
 
+pub(crate) fn linux_signal_valid(signum: usize, max_signal: usize) -> bool {
+    smros_linux_signal_valid_body!(signum, max_signal)
+}
+
+pub(crate) fn linux_signal_action_valid(signum: usize, max_signal: usize) -> bool {
+    smros_linux_signal_action_valid_body!(signum, max_signal)
+}
+
+pub(crate) fn linux_sigset_size_valid(size: usize, expected: usize) -> bool {
+    smros_linux_sigset_size_valid_body!(size, expected)
+}
+
+pub(crate) fn linux_ipc_count_valid(count: usize, max_count: usize) -> bool {
+    smros_linux_ipc_count_valid_body!(count, max_count)
+}
+
+pub(crate) fn linux_ipc_size_valid(size: usize, max_size: usize) -> bool {
+    smros_linux_ipc_size_valid_body!(size, max_size)
+}
+
+pub(crate) fn linux_msg_size_valid(size: usize, max_size: usize) -> bool {
+    smros_linux_msg_size_valid_body!(size, max_size)
+}
+
+pub(crate) fn linux_socket_domain_supported(
+    domain: usize,
+    unix: usize,
+    local: usize,
+    inet: usize,
+    netlink: usize,
+    packet: usize,
+) -> bool {
+    smros_linux_socket_domain_supported_body!(domain, unix, local, inet, netlink, packet)
+}
+
+pub(crate) fn linux_socket_type_supported(
+    socket_type: usize,
+    mask: usize,
+    stream: usize,
+    dgram: usize,
+    raw: usize,
+) -> bool {
+    smros_linux_socket_type_supported_body!(socket_type, mask, stream, dgram, raw)
+}
+
+pub(crate) fn linux_socket_domain_type_supported(
+    domain: usize,
+    kind: usize,
+    unix: usize,
+    local: usize,
+    inet: usize,
+    netlink: usize,
+    packet: usize,
+    stream: usize,
+    dgram: usize,
+    raw: usize,
+) -> bool {
+    smros_linux_socket_domain_type_supported_body!(
+        domain, kind, unix, local, inet, netlink, packet, stream, dgram, raw
+    )
+}
+
+pub(crate) fn linux_socket_addr_valid(ptr: usize, len: usize) -> bool {
+    smros_linux_socket_addr_valid_body!(ptr, len)
+}
+
+pub(crate) fn linux_fd_range_valid(first: usize, last: usize) -> bool {
+    smros_linux_fd_range_valid_body!(first, last)
+}
+
+pub(crate) fn linux_memfd_flags_valid(flags: usize, allowed_mask: usize) -> bool {
+    smros_linux_memfd_flags_valid_body!(flags, allowed_mask)
+}
+
+pub(crate) fn linux_getrandom_flags_valid(flags: u32, allowed_mask: u32) -> bool {
+    smros_linux_getrandom_flags_valid_body!(flags, allowed_mask)
+}
+
 pub(crate) fn zircon_clock_id_supported(clock_id: u32) -> bool {
     smros_zircon_clock_id_supported_body!(clock_id)
 }

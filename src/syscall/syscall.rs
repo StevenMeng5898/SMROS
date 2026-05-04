@@ -105,6 +105,7 @@ pub enum SysError {
     ENODEV = 19,
     EINVAL = 22,
     ENOSYS = 38,
+    ENOTSOCK = 88,
 }
 
 /// Syscall result type
@@ -466,9 +467,20 @@ const LINUX_SOCK_TYPE_MASK: usize = 0xff;
 const LINUX_SOCK_STREAM: usize = 1;
 const LINUX_SOCK_DGRAM: usize = 2;
 const LINUX_SOCK_RAW: usize = 3;
+const LINUX_SOCK_NONBLOCK: usize = 0x800;
+const LINUX_SOCK_CLOEXEC: usize = 0x80000;
+const LINUX_SOCK_ALLOWED_FLAGS: usize =
+    LINUX_SOCK_TYPE_MASK | LINUX_SOCK_NONBLOCK | LINUX_SOCK_CLOEXEC;
 const LINUX_IPPROTO_IP: usize = 0;
 const LINUX_IPPROTO_TCP: usize = 6;
 const LINUX_IPPROTO_UDP: usize = 17;
+const LINUX_MAX_SIGNAL: usize = 64;
+const LINUX_SIGSET_SIZE: usize = core::mem::size_of::<u64>();
+const LINUX_MAX_SEMAPHORES: usize = 256;
+const LINUX_MAX_IPC_BYTES: usize = 65536;
+const LINUX_MAX_MSG_BYTES: usize = 8192;
+const LINUX_MEMFD_ALLOWED_FLAGS: usize = 0x0001 | 0x0002 | 0x0004;
+const LINUX_GETRANDOM_ALLOWED_FLAGS: u32 = 0x0001 | 0x0002;
 
 #[derive(Clone)]
 struct LinuxMappingRecord {
@@ -1023,6 +1035,15 @@ impl MemorySyscallState {
     fn close_fd(&mut self, fd: usize) -> Option<u32> {
         let index = self.linux_fds.iter().position(|record| record.fd == fd)?;
         Some(self.linux_fds.swap_remove(index).handle)
+    }
+
+    fn close_fd_record(&mut self, fd: usize) -> Option<LinuxFdRecord> {
+        let index = self.linux_fds.iter().position(|record| record.fd == fd)?;
+        Some(self.linux_fds.swap_remove(index))
+    }
+
+    fn handle_has_fd(&self, handle: u32) -> bool {
+        self.linux_fds.iter().any(|record| record.handle == handle)
     }
 }
 
@@ -1672,8 +1693,11 @@ pub fn sys_close(fd: usize) -> SysResult {
         return Ok(0);
     }
 
-    let handle = memory_state().close_fd(fd).ok_or(SysError::EBUSY)?;
-    let _ = sys_handle_close(handle);
+    let record = memory_state().close_fd_record(fd).ok_or(SysError::EBUSY)?;
+    let handle_still_open = memory_state().handle_has_fd(record.handle);
+    if !handle_still_open {
+        let _ = sys_handle_close(record.handle);
+    }
     Ok(0)
 }
 
@@ -1715,7 +1739,10 @@ pub fn sys_dup3(fd: usize, new_fd: usize, _flags: usize) -> SysResult {
     Ok(new_fd)
 }
 
-pub fn sys_getrandom(buf_ptr: usize, len: usize, _flags: u32) -> SysResult {
+pub fn sys_getrandom(buf_ptr: usize, len: usize, flags: u32) -> SysResult {
+    if !syscall_logic::linux_getrandom_flags_valid(flags, LINUX_GETRANDOM_ALLOWED_FLAGS) {
+        return Err(SysError::EINVAL);
+    }
     if !syscall_logic::user_buffer_valid(buf_ptr, len) {
         return Err(SysError::EFAULT);
     }
@@ -1757,6 +1784,66 @@ fn linux_socket_object_type(domain: usize, socket_type: usize, protocol: usize) 
         (LINUX_AF_INET | LINUX_AF_PACKET, LINUX_SOCK_RAW, _) => ObjectType::LinuxRawSocket,
         (LINUX_AF_NETLINK, _, _) => ObjectType::LinuxNetlinkSocket,
         _ => ObjectType::Socket,
+    }
+}
+
+fn linux_socket_args_valid(domain: usize, socket_type: usize) -> bool {
+    syscall_logic::linux_memfd_flags_valid(socket_type, LINUX_SOCK_ALLOWED_FLAGS)
+        && syscall_logic::linux_socket_domain_supported(
+            domain,
+            LINUX_AF_UNIX,
+            LINUX_AF_LOCAL,
+            LINUX_AF_INET,
+            LINUX_AF_NETLINK,
+            LINUX_AF_PACKET,
+        )
+        && syscall_logic::linux_socket_type_supported(
+            socket_type,
+            LINUX_SOCK_TYPE_MASK,
+            LINUX_SOCK_STREAM,
+            LINUX_SOCK_DGRAM,
+            LINUX_SOCK_RAW,
+        )
+        && syscall_logic::linux_socket_domain_type_supported(
+            domain,
+            socket_type & LINUX_SOCK_TYPE_MASK,
+            LINUX_AF_UNIX,
+            LINUX_AF_LOCAL,
+            LINUX_AF_INET,
+            LINUX_AF_NETLINK,
+            LINUX_AF_PACKET,
+            LINUX_SOCK_STREAM,
+            LINUX_SOCK_DGRAM,
+            LINUX_SOCK_RAW,
+        )
+}
+
+fn linux_compat_handle_is_type(handle: u32, object_type: ObjectType) -> bool {
+    compat::table().is_type(HandleValue(handle), object_type)
+}
+
+fn linux_handle_is_socket(handle: u32) -> bool {
+    if socket::socket_table().contains(HandleValue(handle)) {
+        return true;
+    }
+    matches!(
+        compat::table().object_type(HandleValue(handle)),
+        Some(
+            ObjectType::Socket
+                | ObjectType::LinuxTcpSocket
+                | ObjectType::LinuxUdpSocket
+                | ObjectType::LinuxRawSocket
+                | ObjectType::LinuxNetlinkSocket
+        )
+    )
+}
+
+fn linux_socket_fd_handle(fd: usize) -> Result<u32, SysError> {
+    let handle = linux_fd_handle(fd)?;
+    if linux_handle_is_socket(handle) {
+        Ok(handle)
+    } else {
+        Err(SysError::ENOTSOCK)
     }
 }
 
@@ -1832,12 +1919,20 @@ pub fn sys_dup2(fd: usize, new_fd: usize) -> SysResult {
     sys_dup3(fd, new_fd, 0)
 }
 
-pub fn sys_eventfd2(_initval: usize, _flags: usize) -> SysResult {
+pub fn sys_eventfd2(_initval: usize, flags: usize) -> SysResult {
+    const LINUX_EVENTFD_ALLOWED_FLAGS: usize = 0x1 | 0x800 | 0x80000;
+    if !syscall_logic::linux_memfd_flags_valid(flags, LINUX_EVENTFD_ALLOWED_FLAGS) {
+        return Err(SysError::EINVAL);
+    }
     let handle = compat::create_object(ObjectType::EventFd).map_err(|_| SysError::ENOMEM)?;
     Ok(memory_state().alloc_fd(handle.0, true, true))
 }
 
-pub fn sys_epoll_create1(_flags: usize) -> SysResult {
+pub fn sys_epoll_create1(flags: usize) -> SysResult {
+    const LINUX_EPOLL_ALLOWED_FLAGS: usize = 0x80000;
+    if !syscall_logic::linux_memfd_flags_valid(flags, LINUX_EPOLL_ALLOWED_FLAGS) {
+        return Err(SysError::EINVAL);
+    }
     let handle = compat::create_object(ObjectType::Port).map_err(|_| SysError::ENOMEM)?;
     Ok(memory_state().alloc_fd(handle.0, true, true))
 }
@@ -2191,7 +2286,14 @@ pub fn sys_utimensat(_dirfd: usize, path: usize, times: usize, _flags: usize) ->
     Ok(0)
 }
 
-pub fn sys_signalfd4(_fd: usize, mask: usize, sizemask: usize, _flags: usize) -> SysResult {
+pub fn sys_signalfd4(_fd: usize, mask: usize, sizemask: usize, flags: usize) -> SysResult {
+    const LINUX_SIGNALFD_ALLOWED_FLAGS: usize = 0x800 | 0x80000;
+    if !syscall_logic::linux_memfd_flags_valid(flags, LINUX_SIGNALFD_ALLOWED_FLAGS) {
+        return Err(SysError::EINVAL);
+    }
+    if !syscall_logic::linux_sigset_size_valid(sizemask, LINUX_SIGSET_SIZE) {
+        return Err(SysError::EINVAL);
+    }
     if !syscall_logic::user_buffer_valid(mask, sizemask) {
         return Err(SysError::EFAULT);
     }
@@ -2461,6 +2563,9 @@ pub fn sys_pselect6(
 }
 
 pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> SysResult {
+    if !linux_socket_args_valid(domain, socket_type) {
+        return Err(SysError::EINVAL);
+    }
     let handle = compat::create_object(linux_socket_object_type(domain, socket_type, protocol))
         .map_err(|_| SysError::ENOMEM)?;
     Ok(memory_state().alloc_fd(handle.0, true, true))
@@ -2474,6 +2579,9 @@ pub fn sys_socketpair(
 ) -> SysResult {
     if fds_ptr == 0 {
         return Err(SysError::EFAULT);
+    }
+    if !linux_socket_args_valid(domain, socket_type) {
+        return Err(SysError::EINVAL);
     }
     let socket_kind = socket_type & LINUX_SOCK_TYPE_MASK;
     let (left, right) = if (domain == LINUX_AF_UNIX || domain == LINUX_AF_LOCAL)
@@ -2506,8 +2614,8 @@ pub fn sys_socketpair(
 }
 
 pub fn sys_bind(sockfd: usize, addr: usize, addrlen: usize) -> SysResult {
-    linux_fd_handle(sockfd)?;
-    if !syscall_logic::user_buffer_valid(addr, addrlen) {
+    linux_socket_fd_handle(sockfd)?;
+    if !syscall_logic::linux_socket_addr_valid(addr, addrlen) {
         return Err(SysError::EFAULT);
     }
     Ok(0)
@@ -2518,11 +2626,14 @@ pub fn sys_connect(sockfd: usize, addr: usize, addrlen: usize) -> SysResult {
 }
 
 pub fn sys_listen(sockfd: usize, _backlog: usize) -> SysResult {
-    linux_fd_handle(sockfd).map(|_| 0)
+    linux_socket_fd_handle(sockfd).map(|_| 0)
 }
 
 pub fn sys_accept(sockfd: usize, addr: usize, addrlen: usize) -> SysResult {
-    let handle = linux_fd_handle(sockfd)?;
+    let handle = linux_socket_fd_handle(sockfd)?;
+    if addrlen != 0 && addr == 0 {
+        return Err(SysError::EFAULT);
+    }
     if addrlen != 0 {
         unsafe {
             core::ptr::write(addrlen as *mut u32, 0);
@@ -2541,7 +2652,7 @@ pub fn sys_accept(sockfd: usize, addr: usize, addrlen: usize) -> SysResult {
 }
 
 pub fn sys_getsockname(sockfd: usize, addr: usize, addrlen: usize) -> SysResult {
-    linux_fd_handle(sockfd)?;
+    linux_socket_fd_handle(sockfd)?;
     if addr == 0 || addrlen == 0 {
         return Err(SysError::EFAULT);
     }
@@ -2566,8 +2677,8 @@ pub fn sys_setsockopt(
     optval: usize,
     optlen: usize,
 ) -> SysResult {
-    linux_fd_handle(sockfd)?;
-    if !syscall_logic::user_buffer_valid(optval, optlen) {
+    linux_socket_fd_handle(sockfd)?;
+    if !syscall_logic::linux_socket_addr_valid(optval, optlen) {
         return Err(SysError::EFAULT);
     }
     Ok(0)
@@ -2580,12 +2691,15 @@ pub fn sys_getsockopt(
     optval: usize,
     optlen: usize,
 ) -> SysResult {
-    linux_fd_handle(sockfd)?;
+    linux_socket_fd_handle(sockfd)?;
     if optlen == 0 {
         return Err(SysError::EFAULT);
     }
     unsafe {
         let len = core::ptr::read(optlen as *const u32) as usize;
+        if optval == 0 && len != 0 {
+            return Err(SysError::EFAULT);
+        }
         if optval != 0 && len >= core::mem::size_of::<u32>() {
             core::ptr::write(optval as *mut u32, 0);
             core::ptr::write(optlen as *mut u32, core::mem::size_of::<u32>() as u32);
@@ -2604,7 +2718,8 @@ pub fn sys_sendto(
     dest_addr: usize,
     addrlen: usize,
 ) -> SysResult {
-    if dest_addr != 0 && !syscall_logic::user_buffer_valid(dest_addr, addrlen) {
+    linux_socket_fd_handle(sockfd)?;
+    if dest_addr != 0 && !syscall_logic::linux_socket_addr_valid(dest_addr, addrlen) {
         return Err(SysError::EFAULT);
     }
     sys_write(sockfd, buf, len)
@@ -2618,6 +2733,10 @@ pub fn sys_recvfrom(
     src_addr: usize,
     addrlen: usize,
 ) -> SysResult {
+    linux_socket_fd_handle(sockfd)?;
+    if src_addr == 0 && addrlen != 0 {
+        return Err(SysError::EFAULT);
+    }
     let read = sys_read(sockfd, buf, len)?;
     if src_addr != 0 && addrlen != 0 {
         unsafe {
@@ -2630,7 +2749,7 @@ pub fn sys_recvfrom(
 }
 
 pub fn sys_recvmsg(sockfd: usize, msg: usize, _flags: usize) -> SysResult {
-    linux_fd_handle(sockfd)?;
+    linux_socket_fd_handle(sockfd)?;
     if msg == 0 {
         Err(SysError::EFAULT)
     } else {
@@ -2639,7 +2758,7 @@ pub fn sys_recvmsg(sockfd: usize, msg: usize, _flags: usize) -> SysResult {
 }
 
 pub fn sys_sendmsg(sockfd: usize, msg: usize, _flags: usize) -> SysResult {
-    linux_fd_handle(sockfd)?;
+    linux_socket_fd_handle(sockfd)?;
     if msg == 0 {
         Err(SysError::EFAULT)
     } else {
@@ -2661,12 +2780,12 @@ pub fn sys_recvmmsg(
 }
 
 pub fn sys_shutdown(sockfd: usize, _howto: usize) -> SysResult {
-    linux_fd_handle(sockfd)?;
+    linux_socket_fd_handle(sockfd)?;
     Ok(0)
 }
 
 pub fn sys_semget(_key: usize, nsems: usize, _flags: usize) -> SysResult {
-    if nsems > 256 {
+    if !syscall_logic::linux_ipc_count_valid(nsems, LINUX_MAX_SEMAPHORES) {
         return Err(SysError::EINVAL);
     }
     Ok(compat::create_object(ObjectType::Semaphore)
@@ -2675,7 +2794,7 @@ pub fn sys_semget(_key: usize, nsems: usize, _flags: usize) -> SysResult {
 }
 
 pub fn sys_semctl(id: usize, _num: usize, _cmd: usize, _arg: usize) -> SysResult {
-    if compat::handle_known(HandleValue(id as u32)) {
+    if linux_compat_handle_is_type(id as u32, ObjectType::Semaphore) {
         Ok(0)
     } else {
         Err(SysError::EINVAL)
@@ -2683,7 +2802,7 @@ pub fn sys_semctl(id: usize, _num: usize, _cmd: usize, _arg: usize) -> SysResult
 }
 
 pub fn sys_semop(id: usize, ops: usize, num_ops: usize) -> SysResult {
-    if !compat::handle_known(HandleValue(id as u32)) {
+    if !linux_compat_handle_is_type(id as u32, ObjectType::Semaphore) {
         return Err(SysError::EINVAL);
     }
     if num_ops != 0 && ops == 0 {
@@ -2699,7 +2818,7 @@ pub fn sys_msgget(_key: usize, _flags: usize) -> SysResult {
 }
 
 pub fn sys_msgctl(id: usize, _cmd: usize, buffer: usize) -> SysResult {
-    if !compat::handle_known(HandleValue(id as u32)) {
+    if !linux_compat_handle_is_type(id as u32, ObjectType::MessageQueue) {
         return Err(SysError::EINVAL);
     }
     if buffer != 0 {
@@ -2709,13 +2828,24 @@ pub fn sys_msgctl(id: usize, _cmd: usize, buffer: usize) -> SysResult {
 }
 
 pub fn sys_msgsnd(id: usize, msg_ptr: usize, msg_size: usize, _flags: usize) -> SysResult {
-    if !compat::handle_known(HandleValue(id as u32)) {
+    if !linux_compat_handle_is_type(id as u32, ObjectType::MessageQueue) {
+        return Err(SysError::EINVAL);
+    }
+    if !syscall_logic::linux_msg_size_valid(msg_size, LINUX_MAX_MSG_BYTES) {
         return Err(SysError::EINVAL);
     }
     if !syscall_logic::user_buffer_valid(msg_ptr, msg_size) {
         return Err(SysError::EFAULT);
     }
-    Ok(0)
+    let bytes = if msg_size == 0 {
+        &[][..]
+    } else {
+        unsafe { core::slice::from_raw_parts(msg_ptr as *const u8, msg_size) }
+    };
+    compat::table()
+        .write_bytes(HandleValue(id as u32), bytes)
+        .map(|_| 0)
+        .map_err(|_| SysError::EIO)
 }
 
 pub fn sys_msgrcv(
@@ -2725,17 +2855,29 @@ pub fn sys_msgrcv(
     _msg_type: isize,
     _flags: usize,
 ) -> SysResult {
-    if !compat::handle_known(HandleValue(id as u32)) {
+    if !linux_compat_handle_is_type(id as u32, ObjectType::MessageQueue) {
+        return Err(SysError::EINVAL);
+    }
+    if !syscall_logic::linux_msg_size_valid(msg_size, LINUX_MAX_MSG_BYTES) {
         return Err(SysError::EINVAL);
     }
     if !syscall_logic::user_buffer_valid(msg_ptr, msg_size) {
         return Err(SysError::EFAULT);
     }
-    Ok(0)
+    let out = if msg_size == 0 {
+        &mut [][..]
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(msg_ptr as *mut u8, msg_size) }
+    };
+    match compat::table().read_bytes(HandleValue(id as u32), out) {
+        Ok(read) => Ok(read),
+        Err(ZxError::ErrShouldWait) => Ok(0),
+        Err(_) => Err(SysError::EIO),
+    }
 }
 
 pub fn sys_shmget(_key: usize, size: usize, _shmflg: usize) -> SysResult {
-    if size == 0 {
+    if !syscall_logic::linux_ipc_size_valid(size, LINUX_MAX_IPC_BYTES) {
         return Err(SysError::EINVAL);
     }
     let handle = compat::create_object(ObjectType::SharedMemory).map_err(|_| SysError::ENOMEM)?;
@@ -2745,7 +2887,7 @@ pub fn sys_shmget(_key: usize, size: usize, _shmflg: usize) -> SysResult {
 
 pub fn sys_shmat(id: usize, addr: usize, _shmflg: usize) -> SysResult {
     let handle = HandleValue(id as u32);
-    if !compat::handle_known(handle) {
+    if !compat::table().is_type(handle, ObjectType::SharedMemory) {
         return Err(SysError::EINVAL);
     }
     let size = compat::table()
@@ -2783,7 +2925,7 @@ pub fn sys_shmdt(_id: usize, addr: usize, _shmflg: usize) -> SysResult {
 }
 
 pub fn sys_shmctl(id: usize, _cmd: usize, buffer: usize) -> SysResult {
-    if !compat::handle_known(HandleValue(id as u32)) {
+    if !linux_compat_handle_is_type(id as u32, ObjectType::SharedMemory) {
         return Err(SysError::EINVAL);
     }
     if buffer != 0 {
@@ -2792,12 +2934,12 @@ pub fn sys_shmctl(id: usize, _cmd: usize, buffer: usize) -> SysResult {
     Ok(0)
 }
 
-pub fn sys_rt_sigaction(
-    _signum: usize,
-    _act: usize,
-    oldact: usize,
-    sigsetsize: usize,
-) -> SysResult {
+pub fn sys_rt_sigaction(signum: usize, _act: usize, oldact: usize, sigsetsize: usize) -> SysResult {
+    if !syscall_logic::linux_signal_action_valid(signum, LINUX_MAX_SIGNAL)
+        || !syscall_logic::linux_sigset_size_valid(sigsetsize, LINUX_SIGSET_SIZE)
+    {
+        return Err(SysError::EINVAL);
+    }
     if oldact != 0 {
         linux_zero_user(oldact, sigsetsize)?;
     }
@@ -2805,6 +2947,9 @@ pub fn sys_rt_sigaction(
 }
 
 pub fn sys_rt_sigprocmask(_how: isize, _set: usize, oldset: usize, sigsetsize: usize) -> SysResult {
+    if !syscall_logic::linux_sigset_size_valid(sigsetsize, LINUX_SIGSET_SIZE) {
+        return Err(SysError::EINVAL);
+    }
     if oldset != 0 {
         linux_zero_user(oldset, sigsetsize)?;
     }
@@ -2816,6 +2961,9 @@ pub fn sys_rt_sigreturn() -> SysResult {
 }
 
 pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> SysResult {
+    if !syscall_logic::linux_sigset_size_valid(sigsetsize, LINUX_SIGSET_SIZE) {
+        return Err(SysError::EINVAL);
+    }
     linux_zero_user(set, sigsetsize)
 }
 
@@ -2825,6 +2973,9 @@ pub fn sys_rt_sigtimedwait(
     _timeout: usize,
     sigsetsize: usize,
 ) -> SysResult {
+    if !syscall_logic::linux_sigset_size_valid(sigsetsize, LINUX_SIGSET_SIZE) {
+        return Err(SysError::EINVAL);
+    }
     if !syscall_logic::user_buffer_valid(set, sigsetsize) {
         return Err(SysError::EFAULT);
     }
@@ -2835,18 +2986,28 @@ pub fn sys_rt_sigtimedwait(
 }
 
 pub fn sys_rt_sigsuspend(mask: usize, sigsetsize: usize) -> SysResult {
+    if !syscall_logic::linux_sigset_size_valid(sigsetsize, LINUX_SIGSET_SIZE) {
+        return Err(SysError::EINVAL);
+    }
     if !syscall_logic::user_buffer_valid(mask, sigsetsize) {
         return Err(SysError::EFAULT);
     }
     Err(SysError::EINTR)
 }
 
-pub fn sys_rt_sigqueueinfo(_pid: usize, _sig: usize, info: usize) -> SysResult {
+pub fn sys_rt_sigqueueinfo(_pid: usize, sig: usize, info: usize) -> SysResult {
+    if !syscall_logic::linux_signal_action_valid(sig, LINUX_MAX_SIGNAL) {
+        return Err(SysError::EINVAL);
+    }
     if info == 0 {
         Err(SysError::EFAULT)
     } else {
         Ok(0)
     }
+}
+
+pub fn sys_rt_tgsigqueueinfo(_tgid: usize, _tid: usize, sig: usize, info: usize) -> SysResult {
+    sys_rt_sigqueueinfo(_tid, sig, info)
 }
 
 pub fn sys_sigaltstack(_ss: usize, old_ss: usize) -> SysResult {
@@ -3802,8 +3963,14 @@ pub fn sys_setfsgid(_gid: usize) -> SysResult {
 pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
     info!("kill: pid={}, signal={}", pid, signum);
 
+    if !syscall_logic::linux_signal_valid(signum, LINUX_MAX_SIGNAL) {
+        return Err(SysError::EINVAL);
+    }
     if pid <= 0 {
         return Err(SysError::ESRCH);
+    }
+    if signum == 0 {
+        return Ok(0);
     }
 
     let pm = process_manager();
@@ -3918,7 +4085,7 @@ pub fn sys_waitid(
 }
 
 pub fn sys_close_range(first: usize, last: usize, _flags: usize) -> SysResult {
-    if first > last {
+    if !syscall_logic::linux_fd_range_valid(first, last) {
         return Err(SysError::EINVAL);
     }
     for fd in first..=last {
@@ -3930,12 +4097,21 @@ pub fn sys_close_range(first: usize, last: usize, _flags: usize) -> SysResult {
     Ok(0)
 }
 
-pub fn sys_memfd_create(_name: usize, _flags: usize) -> SysResult {
+pub fn sys_memfd_create(name: usize, flags: usize) -> SysResult {
+    if name == 0 {
+        return Err(SysError::EFAULT);
+    }
+    if !syscall_logic::linux_memfd_flags_valid(flags, LINUX_MEMFD_ALLOWED_FLAGS) {
+        return Err(SysError::EINVAL);
+    }
     let handle = compat::create_object(ObjectType::MemFd).map_err(|_| SysError::ENOMEM)?;
     Ok(memory_state().alloc_fd(handle.0, true, true))
 }
 
-pub fn sys_membarrier(_cmd: usize, _flags: usize, _cpu_id: usize) -> SysResult {
+pub fn sys_membarrier(_cmd: usize, flags: usize, _cpu_id: usize) -> SysResult {
+    if flags != 0 {
+        return Err(SysError::EINVAL);
+    }
     Ok(0)
 }
 
@@ -6636,9 +6812,8 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_RT_SIGPROCMASK => sys_rt_sigprocmask(args[0] as isize, args[1], args[2], args[3]),
         ARM64_SYS_RT_SIGPENDING => sys_rt_sigpending(args[0], args[1]),
         ARM64_SYS_RT_SIGTIMEDWAIT => sys_rt_sigtimedwait(args[0], args[1], args[2], args[3]),
-        ARM64_SYS_RT_SIGQUEUEINFO | ARM64_SYS_RT_TGSIGQUEUEINFO => {
-            sys_rt_sigqueueinfo(args[0], args[1], args[2])
-        }
+        ARM64_SYS_RT_SIGQUEUEINFO => sys_rt_sigqueueinfo(args[0], args[1], args[2]),
+        ARM64_SYS_RT_TGSIGQUEUEINFO => sys_rt_tgsigqueueinfo(args[0], args[1], args[2], args[3]),
         ARM64_SYS_RT_SIGRETURN => sys_rt_sigreturn(),
         ARM64_SYS_SETPRIORITY => sys_set_priority(args[1]),
         ARM64_SYS_GETPRIORITY => sys_get_priority(args[0], args[1]),

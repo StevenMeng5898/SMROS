@@ -75,6 +75,99 @@ macro_rules! smros_linux_clock_id_supported_body {
     }};
 }
 
+macro_rules! smros_linux_signal_valid_body {
+    ($signum:expr, $max_signal:expr) => {{
+        $signum <= $max_signal
+    }};
+}
+
+macro_rules! smros_linux_signal_action_valid_body {
+    ($signum:expr, $max_signal:expr) => {{
+        $signum != 0 && $signum <= $max_signal
+    }};
+}
+
+macro_rules! smros_linux_sigset_size_valid_body {
+    ($size:expr, $expected:expr) => {{
+        $size == $expected
+    }};
+}
+
+macro_rules! smros_linux_ipc_count_valid_body {
+    ($count:expr, $max_count:expr) => {{
+        $count != 0 && $count <= $max_count
+    }};
+}
+
+macro_rules! smros_linux_ipc_size_valid_body {
+    ($size:expr, $max_size:expr) => {{
+        $size != 0 && $size <= $max_size
+    }};
+}
+
+macro_rules! smros_linux_msg_size_valid_body {
+    ($size:expr, $max_size:expr) => {{
+        $size <= $max_size
+    }};
+}
+
+macro_rules! smros_linux_socket_domain_supported_body {
+    ($domain:expr, $unix:expr, $local:expr, $inet:expr, $netlink:expr, $packet:expr) => {{
+        $domain == $unix
+            || $domain == $local
+            || $domain == $inet
+            || $domain == $netlink
+            || $domain == $packet
+    }};
+}
+
+macro_rules! smros_linux_socket_type_supported_body {
+    ($socket_type:expr, $mask:expr, $stream:expr, $dgram:expr, $raw:expr) => {{
+        {
+            let kind = $socket_type & $mask;
+            kind == $stream || kind == $dgram || kind == $raw
+        }
+    }};
+}
+
+macro_rules! smros_linux_socket_domain_type_supported_body {
+    ($domain:expr, $kind:expr, $unix:expr, $local:expr, $inet:expr, $netlink:expr, $packet:expr, $stream:expr, $dgram:expr, $raw:expr) => {{
+        if $domain == $unix || $domain == $local {
+            $kind == $stream || $kind == $dgram
+        } else if $domain == $inet {
+            $kind == $stream || $kind == $dgram || $kind == $raw
+        } else if $domain == $netlink || $domain == $packet {
+            $kind == $dgram || $kind == $raw
+        } else {
+            false
+        }
+    }};
+}
+
+macro_rules! smros_linux_socket_addr_valid_body {
+    ($ptr:expr, $len:expr) => {{
+        smros_syscall_user_buffer_valid_body!($ptr, $len)
+    }};
+}
+
+macro_rules! smros_linux_fd_range_valid_body {
+    ($first:expr, $last:expr) => {{
+        $first <= $last
+    }};
+}
+
+macro_rules! smros_linux_memfd_flags_valid_body {
+    ($flags:expr, $allowed_mask:expr) => {{
+        ($flags & !$allowed_mask) == 0
+    }};
+}
+
+macro_rules! smros_linux_getrandom_flags_valid_body {
+    ($flags:expr, $allowed_mask:expr) => {{
+        ($flags & !$allowed_mask) == 0
+    }};
+}
+
 macro_rules! smros_zircon_clock_id_supported_body {
     ($clock_id:expr) => {{
         $clock_id <= 1

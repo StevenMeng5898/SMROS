@@ -47,6 +47,26 @@ pub const ZX_VCPU_STATE: u32 = 0;
 pub const ZX_VCPU_IO: u32 = 1;
 pub const ZX_VCPU_STATE_SIZE: usize = 256;
 pub const ZX_VCPU_IO_SIZE: usize = 24;
+pub const LINUX_AF_UNIX: usize = 1;
+pub const LINUX_AF_LOCAL: usize = LINUX_AF_UNIX;
+pub const LINUX_AF_INET: usize = 2;
+pub const LINUX_AF_NETLINK: usize = 16;
+pub const LINUX_AF_PACKET: usize = 17;
+pub const LINUX_SOCK_TYPE_MASK: usize = 0xff;
+pub const LINUX_SOCK_STREAM: usize = 1;
+pub const LINUX_SOCK_DGRAM: usize = 2;
+pub const LINUX_SOCK_RAW: usize = 3;
+pub const LINUX_SOCK_NONBLOCK: usize = 0x800;
+pub const LINUX_SOCK_CLOEXEC: usize = 0x80000;
+pub const LINUX_SOCK_ALLOWED_FLAGS: usize =
+    LINUX_SOCK_TYPE_MASK | LINUX_SOCK_NONBLOCK | LINUX_SOCK_CLOEXEC;
+pub const LINUX_MAX_SIGNAL: usize = 64;
+pub const LINUX_SIGSET_SIZE: usize = 8;
+pub const LINUX_MAX_SEMAPHORES: usize = 256;
+pub const LINUX_MAX_IPC_BYTES: usize = 65536;
+pub const LINUX_MAX_MSG_BYTES: usize = 8192;
+pub const LINUX_MEMFD_ALLOWED_FLAGS: usize = 0x0001 | 0x0002 | 0x0004;
+pub const LINUX_GETRANDOM_ALLOWED_FLAGS: u32 = 0x0001 | 0x0002;
 
 #[derive(Copy, Clone)]
 struct LinuxRange {
@@ -185,6 +205,91 @@ spec fn wait_satisfied_spec(observed: u32, requested: u32) -> bool {
 
 spec fn linux_clock_id_supported_spec(clock_id: int) -> bool {
     0 <= clock_id && clock_id <= 1
+}
+
+spec fn linux_signal_valid_spec(signum: int, max_signal: int) -> bool {
+    0 <= signum && signum <= max_signal
+}
+
+spec fn linux_signal_action_valid_spec(signum: int, max_signal: int) -> bool {
+    0 < signum && signum <= max_signal
+}
+
+spec fn linux_sigset_size_valid_spec(size: int, expected: int) -> bool {
+    size == expected
+}
+
+spec fn linux_ipc_count_valid_spec(count: int, max_count: int) -> bool {
+    0 < count && count <= max_count
+}
+
+spec fn linux_ipc_size_valid_spec(size: int, max_size: int) -> bool {
+    0 < size && size <= max_size
+}
+
+spec fn linux_msg_size_valid_spec(size: int, max_size: int) -> bool {
+    0 <= size && size <= max_size
+}
+
+spec fn linux_socket_domain_supported_spec(
+    domain: usize,
+    unix: usize,
+    local: usize,
+    inet: usize,
+    netlink: usize,
+    packet: usize,
+) -> bool {
+    domain == unix || domain == local || domain == inet || domain == netlink || domain == packet
+}
+
+spec fn linux_socket_type_supported_spec(
+    socket_type: usize,
+    mask: usize,
+    stream: usize,
+    dgram: usize,
+    raw: usize,
+) -> bool {
+    let kind = socket_type & mask;
+    kind == stream || kind == dgram || kind == raw
+}
+
+spec fn linux_socket_domain_type_supported_spec(
+    domain: usize,
+    kind: usize,
+    unix: usize,
+    local: usize,
+    inet: usize,
+    netlink: usize,
+    packet: usize,
+    stream: usize,
+    dgram: usize,
+    raw: usize,
+) -> bool {
+    if domain == unix || domain == local {
+        kind == stream || kind == dgram
+    } else if domain == inet {
+        kind == stream || kind == dgram || kind == raw
+    } else if domain == netlink || domain == packet {
+        kind == dgram || kind == raw
+    } else {
+        false
+    }
+}
+
+spec fn linux_socket_addr_valid_spec(ptr: int, len: int) -> bool {
+    user_buffer_valid_spec(ptr, len)
+}
+
+spec fn linux_fd_range_valid_spec(first: int, last: int) -> bool {
+    first <= last
+}
+
+spec fn linux_usize_options_within_mask_spec(options: usize, allowed_mask: usize) -> bool {
+    (options & !allowed_mask) == 0
+}
+
+spec fn linux_u32_options_within_mask_spec(options: u32, allowed_mask: u32) -> bool {
+    (options & !allowed_mask) == 0
 }
 
 spec fn zircon_clock_id_supported_spec(clock_id: int) -> bool {
@@ -467,6 +572,125 @@ fn linux_clock_id_supported(clock_id: usize) -> (out: bool)
         out == linux_clock_id_supported_spec(clock_id as int),
 {
     smros_linux_clock_id_supported_body!(clock_id)
+}
+
+fn linux_signal_valid(signum: usize, max_signal: usize) -> (out: bool)
+    ensures
+        out == linux_signal_valid_spec(signum as int, max_signal as int),
+{
+    smros_linux_signal_valid_body!(signum, max_signal)
+}
+
+fn linux_signal_action_valid(signum: usize, max_signal: usize) -> (out: bool)
+    ensures
+        out == linux_signal_action_valid_spec(signum as int, max_signal as int),
+{
+    smros_linux_signal_action_valid_body!(signum, max_signal)
+}
+
+fn linux_sigset_size_valid(size: usize, expected: usize) -> (out: bool)
+    ensures
+        out == linux_sigset_size_valid_spec(size as int, expected as int),
+{
+    smros_linux_sigset_size_valid_body!(size, expected)
+}
+
+fn linux_ipc_count_valid(count: usize, max_count: usize) -> (out: bool)
+    ensures
+        out == linux_ipc_count_valid_spec(count as int, max_count as int),
+{
+    smros_linux_ipc_count_valid_body!(count, max_count)
+}
+
+fn linux_ipc_size_valid(size: usize, max_size: usize) -> (out: bool)
+    ensures
+        out == linux_ipc_size_valid_spec(size as int, max_size as int),
+{
+    smros_linux_ipc_size_valid_body!(size, max_size)
+}
+
+fn linux_msg_size_valid(size: usize, max_size: usize) -> (out: bool)
+    ensures
+        out == linux_msg_size_valid_spec(size as int, max_size as int),
+{
+    smros_linux_msg_size_valid_body!(size, max_size)
+}
+
+fn linux_socket_domain_supported(
+    domain: usize,
+    unix: usize,
+    local: usize,
+    inet: usize,
+    netlink: usize,
+    packet: usize,
+) -> (out: bool)
+    ensures
+        out == linux_socket_domain_supported_spec(domain, unix, local, inet, netlink, packet),
+{
+    smros_linux_socket_domain_supported_body!(domain, unix, local, inet, netlink, packet)
+}
+
+fn linux_socket_type_supported(
+    socket_type: usize,
+    mask: usize,
+    stream: usize,
+    dgram: usize,
+    raw: usize,
+) -> (out: bool)
+    ensures
+        out == linux_socket_type_supported_spec(socket_type, mask, stream, dgram, raw),
+{
+    smros_linux_socket_type_supported_body!(socket_type, mask, stream, dgram, raw)
+}
+
+fn linux_socket_domain_type_supported(
+    domain: usize,
+    kind: usize,
+    unix: usize,
+    local: usize,
+    inet: usize,
+    netlink: usize,
+    packet: usize,
+    stream: usize,
+    dgram: usize,
+    raw: usize,
+) -> (out: bool)
+    ensures
+        out == linux_socket_domain_type_supported_spec(
+            domain, kind, unix, local, inet, netlink, packet, stream, dgram, raw,
+        ),
+{
+    smros_linux_socket_domain_type_supported_body!(
+        domain, kind, unix, local, inet, netlink, packet, stream, dgram, raw
+    )
+}
+
+fn linux_socket_addr_valid(ptr: usize, len: usize) -> (out: bool)
+    ensures
+        out == linux_socket_addr_valid_spec(ptr as int, len as int),
+{
+    smros_linux_socket_addr_valid_body!(ptr, len)
+}
+
+fn linux_fd_range_valid(first: usize, last: usize) -> (out: bool)
+    ensures
+        out == linux_fd_range_valid_spec(first as int, last as int),
+{
+    smros_linux_fd_range_valid_body!(first, last)
+}
+
+fn linux_memfd_flags_valid(flags: usize, allowed_mask: usize) -> (out: bool)
+    ensures
+        out == linux_usize_options_within_mask_spec(flags, allowed_mask),
+{
+    smros_linux_memfd_flags_valid_body!(flags, allowed_mask)
+}
+
+fn linux_getrandom_flags_valid(flags: u32, allowed_mask: u32) -> (out: bool)
+    ensures
+        out == linux_u32_options_within_mask_spec(flags, allowed_mask),
+{
+    smros_linux_getrandom_flags_valid_body!(flags, allowed_mask)
 }
 
 fn zircon_clock_id_supported(clock_id: u32) -> (out: bool)
@@ -853,6 +1077,74 @@ proof fn syscall_zircon_logic_smoke() {
     assert(linux_clock_id_supported_spec(1));
     assert(!linux_clock_id_supported_spec(2));
 
+    assert(linux_signal_valid_spec(0, LINUX_MAX_SIGNAL as int));
+    assert(linux_signal_action_valid_spec(1, LINUX_MAX_SIGNAL as int));
+    assert(!linux_signal_action_valid_spec(0, LINUX_MAX_SIGNAL as int));
+    assert(!linux_signal_valid_spec(65, LINUX_MAX_SIGNAL as int));
+    assert(linux_sigset_size_valid_spec(LINUX_SIGSET_SIZE as int, LINUX_SIGSET_SIZE as int));
+    assert(!linux_sigset_size_valid_spec(16, LINUX_SIGSET_SIZE as int));
+    assert(linux_ipc_count_valid_spec(1, LINUX_MAX_SEMAPHORES as int));
+    assert(!linux_ipc_count_valid_spec(0, LINUX_MAX_SEMAPHORES as int));
+    assert(linux_ipc_size_valid_spec(PAGE_SIZE as int, LINUX_MAX_IPC_BYTES as int));
+    assert(!linux_ipc_size_valid_spec(0, LINUX_MAX_IPC_BYTES as int));
+    assert(linux_msg_size_valid_spec(0, LINUX_MAX_MSG_BYTES as int));
+    assert(!linux_msg_size_valid_spec(8193, LINUX_MAX_MSG_BYTES as int));
+    assert(linux_socket_domain_supported_spec(
+        LINUX_AF_INET,
+        LINUX_AF_UNIX,
+        LINUX_AF_LOCAL,
+        LINUX_AF_INET,
+        LINUX_AF_NETLINK,
+        LINUX_AF_PACKET,
+    ));
+    assert(!linux_socket_domain_supported_spec(
+        99,
+        LINUX_AF_UNIX,
+        LINUX_AF_LOCAL,
+        LINUX_AF_INET,
+        LINUX_AF_NETLINK,
+        LINUX_AF_PACKET,
+    ));
+    assert(linux_socket_type_supported_spec(
+        LINUX_SOCK_STREAM,
+        LINUX_SOCK_TYPE_MASK,
+        LINUX_SOCK_STREAM,
+        LINUX_SOCK_DGRAM,
+        LINUX_SOCK_RAW,
+    )) by(bit_vector);
+    assert(linux_socket_domain_type_supported_spec(
+        LINUX_AF_UNIX,
+        LINUX_SOCK_DGRAM,
+        LINUX_AF_UNIX,
+        LINUX_AF_LOCAL,
+        LINUX_AF_INET,
+        LINUX_AF_NETLINK,
+        LINUX_AF_PACKET,
+        LINUX_SOCK_STREAM,
+        LINUX_SOCK_DGRAM,
+        LINUX_SOCK_RAW,
+    ));
+    assert(!linux_socket_domain_type_supported_spec(
+        LINUX_AF_UNIX,
+        LINUX_SOCK_RAW,
+        LINUX_AF_UNIX,
+        LINUX_AF_LOCAL,
+        LINUX_AF_INET,
+        LINUX_AF_NETLINK,
+        LINUX_AF_PACKET,
+        LINUX_SOCK_STREAM,
+        LINUX_SOCK_DGRAM,
+        LINUX_SOCK_RAW,
+    ));
+    assert(linux_socket_addr_valid_spec(0, 0));
+    assert(!linux_socket_addr_valid_spec(0, 1));
+    assert(linux_fd_range_valid_spec(3, 3));
+    assert(!linux_fd_range_valid_spec(4, 3));
+    assert(linux_usize_options_within_mask_spec(1, LINUX_MEMFD_ALLOWED_FLAGS)) by(bit_vector);
+    assert(!linux_usize_options_within_mask_spec(8, LINUX_MEMFD_ALLOWED_FLAGS)) by(bit_vector);
+    assert(linux_u32_options_within_mask_spec(1, LINUX_GETRANDOM_ALLOWED_FLAGS)) by(bit_vector);
+    assert(!linux_u32_options_within_mask_spec(4, LINUX_GETRANDOM_ALLOWED_FLAGS)) by(bit_vector);
+
     assert(zircon_clock_id_supported_spec(0));
     assert(zircon_clock_id_supported_spec(1));
     assert(!zircon_clock_id_supported_spec(2));
@@ -1049,6 +1341,160 @@ fn syscall_time_debug_system_exception_exec_smoke() {
         ZX_EXCEPTION_CHANNEL_DEBUGGER,
         ZX_EXCEPTION_CHANNEL_OPTIONS_MASK,
     ));
+}
+
+fn syscall_linux_signal_ipc_misc_net_exec_smoke() {
+    let signal_zero_valid = linux_signal_valid(0, LINUX_MAX_SIGNAL);
+    let signal_zero_action = linux_signal_action_valid(0, LINUX_MAX_SIGNAL);
+    let signal_term_action = linux_signal_action_valid(15, LINUX_MAX_SIGNAL);
+    let sigset_ok = linux_sigset_size_valid(LINUX_SIGSET_SIZE, LINUX_SIGSET_SIZE);
+    let sigset_bad = linux_sigset_size_valid(LINUX_SIGSET_SIZE + 1, LINUX_SIGSET_SIZE);
+    let sem_count_ok = linux_ipc_count_valid(2, LINUX_MAX_SEMAPHORES);
+    let sem_count_bad = linux_ipc_count_valid(0, LINUX_MAX_SEMAPHORES);
+    let shm_size_ok = linux_ipc_size_valid(PAGE_SIZE, LINUX_MAX_IPC_BYTES);
+    let shm_size_bad = linux_ipc_size_valid(0, LINUX_MAX_IPC_BYTES);
+    let msg_size_ok = linux_msg_size_valid(LINUX_MAX_MSG_BYTES, LINUX_MAX_MSG_BYTES);
+    let msg_size_bad = linux_msg_size_valid(LINUX_MAX_MSG_BYTES + 1, LINUX_MAX_MSG_BYTES);
+    let inet_domain = linux_socket_domain_supported(
+        LINUX_AF_INET,
+        LINUX_AF_UNIX,
+        LINUX_AF_LOCAL,
+        LINUX_AF_INET,
+        LINUX_AF_NETLINK,
+        LINUX_AF_PACKET,
+    );
+    let stream_type = linux_socket_type_supported(
+        LINUX_SOCK_STREAM,
+        LINUX_SOCK_TYPE_MASK,
+        LINUX_SOCK_STREAM,
+        LINUX_SOCK_DGRAM,
+        LINUX_SOCK_RAW,
+    );
+    let unix_stream = linux_socket_domain_type_supported(
+        LINUX_AF_UNIX,
+        LINUX_SOCK_STREAM,
+        LINUX_AF_UNIX,
+        LINUX_AF_LOCAL,
+        LINUX_AF_INET,
+        LINUX_AF_NETLINK,
+        LINUX_AF_PACKET,
+        LINUX_SOCK_STREAM,
+        LINUX_SOCK_DGRAM,
+        LINUX_SOCK_RAW,
+    );
+    let unix_raw = linux_socket_domain_type_supported(
+        LINUX_AF_UNIX,
+        LINUX_SOCK_RAW,
+        LINUX_AF_UNIX,
+        LINUX_AF_LOCAL,
+        LINUX_AF_INET,
+        LINUX_AF_NETLINK,
+        LINUX_AF_PACKET,
+        LINUX_SOCK_STREAM,
+        LINUX_SOCK_DGRAM,
+        LINUX_SOCK_RAW,
+    );
+    let socket_flags_ok = linux_memfd_flags_valid(
+        LINUX_SOCK_STREAM | LINUX_SOCK_CLOEXEC,
+        LINUX_SOCK_ALLOWED_FLAGS,
+    );
+    let socket_flags_bad = linux_memfd_flags_valid(
+        LINUX_SOCK_STREAM | 0x4000,
+        LINUX_SOCK_ALLOWED_FLAGS,
+    );
+    let socket_addr_zero = linux_socket_addr_valid(0, 0);
+    let socket_addr_bad = linux_socket_addr_valid(0, 16);
+    let close_range_ok = linux_fd_range_valid(3, 4);
+    let close_range_bad = linux_fd_range_valid(5, 4);
+    let memfd_flags_ok = linux_memfd_flags_valid(1, LINUX_MEMFD_ALLOWED_FLAGS);
+    let memfd_flags_bad = linux_memfd_flags_valid(8, LINUX_MEMFD_ALLOWED_FLAGS);
+    let getrandom_flags_ok = linux_getrandom_flags_valid(1, LINUX_GETRANDOM_ALLOWED_FLAGS);
+    let getrandom_flags_bad = linux_getrandom_flags_valid(4, LINUX_GETRANDOM_ALLOWED_FLAGS);
+
+    assert(signal_zero_valid == linux_signal_valid_spec(0, LINUX_MAX_SIGNAL as int));
+    assert(signal_zero_action == linux_signal_action_valid_spec(0, LINUX_MAX_SIGNAL as int));
+    assert(signal_term_action == linux_signal_action_valid_spec(15, LINUX_MAX_SIGNAL as int));
+    assert(sigset_ok == linux_sigset_size_valid_spec(
+        LINUX_SIGSET_SIZE as int,
+        LINUX_SIGSET_SIZE as int,
+    ));
+    assert(sigset_bad == linux_sigset_size_valid_spec(
+        (LINUX_SIGSET_SIZE + 1) as int,
+        LINUX_SIGSET_SIZE as int,
+    ));
+    assert(sem_count_ok == linux_ipc_count_valid_spec(2, LINUX_MAX_SEMAPHORES as int));
+    assert(sem_count_bad == linux_ipc_count_valid_spec(0, LINUX_MAX_SEMAPHORES as int));
+    assert(shm_size_ok == linux_ipc_size_valid_spec(PAGE_SIZE as int, LINUX_MAX_IPC_BYTES as int));
+    assert(shm_size_bad == linux_ipc_size_valid_spec(0, LINUX_MAX_IPC_BYTES as int));
+    assert(msg_size_ok == linux_msg_size_valid_spec(
+        LINUX_MAX_MSG_BYTES as int,
+        LINUX_MAX_MSG_BYTES as int,
+    ));
+    assert(msg_size_bad == linux_msg_size_valid_spec(
+        (LINUX_MAX_MSG_BYTES + 1) as int,
+        LINUX_MAX_MSG_BYTES as int,
+    ));
+    assert(inet_domain == linux_socket_domain_supported_spec(
+        LINUX_AF_INET,
+        LINUX_AF_UNIX,
+        LINUX_AF_LOCAL,
+        LINUX_AF_INET,
+        LINUX_AF_NETLINK,
+        LINUX_AF_PACKET,
+    ));
+    assert(stream_type == linux_socket_type_supported_spec(
+        LINUX_SOCK_STREAM,
+        LINUX_SOCK_TYPE_MASK,
+        LINUX_SOCK_STREAM,
+        LINUX_SOCK_DGRAM,
+        LINUX_SOCK_RAW,
+    ));
+    assert(unix_stream == linux_socket_domain_type_supported_spec(
+        LINUX_AF_UNIX,
+        LINUX_SOCK_STREAM,
+        LINUX_AF_UNIX,
+        LINUX_AF_LOCAL,
+        LINUX_AF_INET,
+        LINUX_AF_NETLINK,
+        LINUX_AF_PACKET,
+        LINUX_SOCK_STREAM,
+        LINUX_SOCK_DGRAM,
+        LINUX_SOCK_RAW,
+    ));
+    assert(unix_raw == linux_socket_domain_type_supported_spec(
+        LINUX_AF_UNIX,
+        LINUX_SOCK_RAW,
+        LINUX_AF_UNIX,
+        LINUX_AF_LOCAL,
+        LINUX_AF_INET,
+        LINUX_AF_NETLINK,
+        LINUX_AF_PACKET,
+        LINUX_SOCK_STREAM,
+        LINUX_SOCK_DGRAM,
+        LINUX_SOCK_RAW,
+    ));
+    assert(linux_usize_options_within_mask_spec(
+        LINUX_SOCK_STREAM | LINUX_SOCK_CLOEXEC,
+        LINUX_SOCK_ALLOWED_FLAGS,
+    )) by(bit_vector);
+    assert(socket_flags_ok);
+    assert(!linux_usize_options_within_mask_spec(
+        LINUX_SOCK_STREAM | 0x4000,
+        LINUX_SOCK_ALLOWED_FLAGS,
+    )) by(bit_vector);
+    assert(!socket_flags_bad);
+    assert(socket_addr_zero == linux_socket_addr_valid_spec(0, 0));
+    assert(socket_addr_bad == linux_socket_addr_valid_spec(0, 16));
+    assert(close_range_ok == linux_fd_range_valid_spec(3, 4));
+    assert(close_range_bad == linux_fd_range_valid_spec(5, 4));
+    assert(linux_usize_options_within_mask_spec(1, LINUX_MEMFD_ALLOWED_FLAGS)) by(bit_vector);
+    assert(memfd_flags_ok);
+    assert(!linux_usize_options_within_mask_spec(8, LINUX_MEMFD_ALLOWED_FLAGS)) by(bit_vector);
+    assert(!memfd_flags_bad);
+    assert(linux_u32_options_within_mask_spec(1, LINUX_GETRANDOM_ALLOWED_FLAGS)) by(bit_vector);
+    assert(getrandom_flags_ok);
+    assert(!linux_u32_options_within_mask_spec(4, LINUX_GETRANDOM_ALLOWED_FLAGS)) by(bit_vector);
+    assert(!getrandom_flags_bad);
 }
 
 fn syscall_hypervisor_exec_smoke() {
