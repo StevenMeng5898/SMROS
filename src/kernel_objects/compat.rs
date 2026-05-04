@@ -23,6 +23,8 @@ pub struct CompatObject {
     pub peer: Option<HandleValue>,
     pub signals: u32,
     pub property_value: u64,
+    pub options: u32,
+    pub state_value: u64,
     pub queue: VecDeque<u8>,
     pub closed: bool,
 }
@@ -35,6 +37,8 @@ impl CompatObject {
             peer,
             signals: 0,
             property_value: 0,
+            options: 0,
+            state_value: 0,
             queue: VecDeque::new(),
             closed: false,
         }
@@ -70,12 +74,22 @@ impl CompatObjectTable {
     }
 
     pub fn create(&mut self, obj_type: ObjectType) -> ZxResult<HandleValue> {
+        self.create_with_options(obj_type, 0)
+    }
+
+    pub fn create_with_options(
+        &mut self,
+        obj_type: ObjectType,
+        options: u32,
+    ) -> ZxResult<HandleValue> {
         if self.objects.len() >= MAX_COMPAT_OBJECTS {
             return Err(ZxError::ErrNoMemory);
         }
 
         let handle = self.alloc_handle().ok_or(ZxError::ErrNoMemory)?;
-        self.objects.push(CompatObject::new(handle, obj_type, None));
+        let mut object = CompatObject::new(handle, obj_type, None);
+        object.options = options;
+        self.objects.push(object);
         Ok(handle)
     }
 
@@ -104,6 +118,37 @@ impl CompatObjectTable {
             .iter()
             .find(|object| object.handle == handle && !object.closed)
             .map(|object| object.obj_type)
+    }
+
+    pub fn is_type(&self, handle: HandleValue, obj_type: ObjectType) -> bool {
+        self.object_type(handle) == Some(obj_type)
+    }
+
+    pub fn options(&self, handle: HandleValue) -> Option<u32> {
+        self.objects
+            .iter()
+            .find(|object| object.handle == handle && !object.closed)
+            .map(|object| object.options)
+    }
+
+    pub fn set_state_value(&mut self, handle: HandleValue, value: u64) -> bool {
+        if let Some(object) = self
+            .objects
+            .iter_mut()
+            .find(|object| object.handle == handle && !object.closed)
+        {
+            object.state_value = value;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn state_value(&self, handle: HandleValue) -> Option<u64> {
+        self.objects
+            .iter()
+            .find(|object| object.handle == handle && !object.closed)
+            .map(|object| object.state_value)
     }
 
     pub fn signal_mask(&self, handle: HandleValue) -> Option<u32> {
@@ -293,6 +338,10 @@ pub fn table() -> &'static mut CompatObjectTable {
 
 pub fn create_object(obj_type: ObjectType) -> ZxResult<HandleValue> {
     table().create(obj_type)
+}
+
+pub fn create_object_with_options(obj_type: ObjectType, options: u32) -> ZxResult<HandleValue> {
+    table().create_with_options(obj_type, options)
 }
 
 pub fn create_pair(obj_type: ObjectType) -> ZxResult<(HandleValue, HandleValue)> {

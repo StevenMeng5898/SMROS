@@ -2051,6 +2051,477 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     ctx.serial
         .write_str("[OK] process/thread lifecycle completed\n");
 
+    ctx.serial
+        .write_str("[TEST] Testing Zircon time/debug/system/exception calls...\n");
+    let mut clock_handle = 0u32;
+    let mut clock_value = 0u64;
+    let mut timer_handle = 0u32;
+    let mut timer_pending = 0u32;
+    let mut debuglog_handle = 0u32;
+    let debug_payload = b"debuglog-ok";
+    let mut debug_readback = [0u8; 11];
+    let mut debug_zero = [0xffu8; 4];
+    let mut system_event = 0u32;
+    let mut exception_proc = 0u32;
+    let mut exception_vmar = 0u32;
+    let mut exception_channel = 0u32;
+    let mut exception_packet = [0u8; 8];
+    let mut exception_handles = [0u32; 1];
+    let mut exception_bytes_actual = 0usize;
+    let mut exception_handles_actual = 0usize;
+    let mut exception_thread = 0u32;
+    let mut exception_process = 0u32;
+
+    match crate::syscall::sys_clock_get(1, &mut clock_value as *mut u64 as usize) {
+        Ok(_) => print_time_debug_ok(ctx, "clock get monotonic id"),
+        Err(e) => {
+            print_time_debug_error(ctx, "clock get monotonic id", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_clock_get(2, &mut clock_value as *mut u64 as usize) {
+        Err(crate::syscall::ZxError::ErrInvalidArgs) => {
+            print_time_debug_ok(ctx, "reject invalid clock id");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject invalid clock id unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_time_debug_error(ctx, "reject invalid clock id", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_clock_create(1, 0, &mut clock_handle) {
+        Ok(_) => print_time_debug_ok(ctx, "clock create auto-start"),
+        Err(e) => {
+            print_time_debug_error(ctx, "clock create auto-start", e);
+            return;
+        }
+    }
+    if crate::syscall::sys_clock_read(clock_handle, &mut clock_value as *mut u64 as usize).is_err()
+        || crate::syscall::sys_clock_update(clock_handle, 1, 0).is_err()
+        || crate::syscall::dispatch_zircon_syscall(
+            crate::syscall::ZirconSyscall::ClockRead as u32,
+            [
+                clock_handle as usize,
+                &mut clock_value as *mut u64 as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+        )
+        .is_err()
+    {
+        ctx.serial.write_str("  [FAIL] clock read/update failed\n");
+        return;
+    }
+    print_time_debug_ok(ctx, "clock read/update/dispatch");
+    match crate::syscall::sys_clock_update(clock_handle, 4, 0) {
+        Err(crate::syscall::ZxError::ErrInvalidArgs) => {
+            print_time_debug_ok(ctx, "reject invalid clock update option");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject invalid clock update option unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_time_debug_error(ctx, "reject invalid clock update option", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_timer_create(0, 1, &mut timer_handle) {
+        Ok(_) => print_time_debug_ok(ctx, "timer create"),
+        Err(e) => {
+            print_time_debug_error(ctx, "timer create", e);
+            return;
+        }
+    }
+    if crate::syscall::sys_timer_set(timer_handle, 0, 0).is_err()
+        || crate::syscall::sys_object_wait_one(timer_handle, 1 << 7, 0, &mut timer_pending).is_err()
+        || timer_pending & (1 << 7) == 0
+    {
+        ctx.serial.write_str("  [FAIL] timer set/signaled failed\n");
+        return;
+    }
+    print_time_debug_ok(ctx, "timer set signals expired deadline");
+    if crate::syscall::sys_timer_cancel(timer_handle).is_err() {
+        ctx.serial.write_str("  [FAIL] timer cancel failed\n");
+        return;
+    }
+    match crate::syscall::sys_object_wait_one(timer_handle, 1 << 7, 0, &mut timer_pending) {
+        Err(crate::syscall::ZxError::ErrTimedOut) if timer_pending & (1 << 7) == 0 => {
+            print_time_debug_ok(ctx, "timer cancel clears signal");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] timer cancel left signal pending=0x");
+            print_hex(&mut ctx.serial, timer_pending as u64);
+            ctx.serial.write_str("\n");
+            return;
+        }
+        Err(e) => {
+            print_time_debug_error(ctx, "timer cancel clears signal", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_debuglog_create(0, 0, &mut debuglog_handle) {
+        Ok(_) => print_time_debug_ok(ctx, "debuglog create"),
+        Err(e) => {
+            print_time_debug_error(ctx, "debuglog create", e);
+            return;
+        }
+    }
+    if crate::syscall::sys_debuglog_write(
+        debuglog_handle,
+        0,
+        debug_payload.as_ptr() as usize,
+        debug_payload.len(),
+    )
+    .is_err()
+        || crate::syscall::sys_debuglog_read(
+            debuglog_handle,
+            0,
+            debug_readback.as_mut_ptr() as usize,
+            debug_readback.len(),
+        )
+        .ok()
+            != Some(debug_payload.len())
+        || debug_readback != *debug_payload
+    {
+        ctx.serial
+            .write_str("  [FAIL] debuglog write/read failed\n");
+        return;
+    }
+    print_time_debug_ok(ctx, "debuglog write/read");
+    if crate::syscall::sys_debug_read(debug_zero.as_mut_ptr() as usize, debug_zero.len()).ok()
+        != Some(0)
+        || debug_zero != [0u8; 4]
+        || crate::syscall::sys_debug_write(debug_payload.as_ptr() as usize, debug_payload.len())
+            .is_err()
+        || crate::syscall::sys_debug_send_command(
+            debug_payload.as_ptr() as usize,
+            debug_payload.len(),
+        )
+        .is_err()
+    {
+        ctx.serial
+            .write_str("  [FAIL] debug read/write/send-command failed\n");
+        return;
+    }
+    print_time_debug_ok(ctx, "debug read/write/send-command");
+
+    match crate::syscall::sys_system_get_event(0, 0, &mut system_event) {
+        Ok(_) => print_time_debug_ok(ctx, "system get event"),
+        Err(e) => {
+            print_time_debug_error(ctx, "system get event", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_system_get_event(0, 4, &mut system_event) {
+        Err(crate::syscall::ZxError::ErrInvalidArgs) => {
+            print_time_debug_ok(ctx, "reject invalid system event kind");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject invalid system event kind unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_time_debug_error(ctx, "reject invalid system event kind", e);
+            return;
+        }
+    }
+
+    if crate::syscall::sys_process_create(0, 0, 0, 0, &mut exception_proc, &mut exception_vmar)
+        .is_err()
+        || crate::syscall::sys_create_exception_channel(exception_proc, 0, &mut exception_channel)
+            .is_err()
+        || crate::syscall::sys_channel_read(
+            exception_channel,
+            0,
+            exception_packet.as_mut_ptr() as usize,
+            exception_packet.len(),
+            exception_handles.as_mut_ptr() as usize,
+            exception_handles.len(),
+            &mut exception_bytes_actual,
+            &mut exception_handles_actual,
+        )
+        .is_err()
+        || exception_bytes_actual != exception_packet.len()
+        || exception_handles_actual != 1
+        || crate::syscall::sys_exception_get_thread(exception_handles[0], &mut exception_thread)
+            .is_err()
+        || crate::syscall::sys_exception_get_process(exception_handles[0], &mut exception_process)
+            .is_err()
+        || crate::syscall::sys_task_resume_from_exception(exception_proc, exception_handles[0], 0)
+            .is_err()
+    {
+        ctx.serial
+            .write_str("  [FAIL] exception channel lifecycle failed\n");
+        return;
+    }
+    print_time_debug_ok(ctx, "exception channel lifecycle");
+    match crate::syscall::sys_create_exception_channel(exception_proc, 2, &mut exception_channel) {
+        Err(crate::syscall::ZxError::ErrInvalidArgs) => {
+            print_time_debug_ok(ctx, "reject invalid exception option");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject invalid exception option unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_time_debug_error(ctx, "reject invalid exception option", e);
+            return;
+        }
+    }
+
+    let _ = crate::syscall::sys_handle_close(clock_handle);
+    let _ = crate::syscall::sys_handle_close(timer_handle);
+    let _ = crate::syscall::sys_handle_close(debuglog_handle);
+    let _ = crate::syscall::sys_handle_close(system_event);
+    let _ = crate::syscall::sys_handle_close(exception_channel);
+    let _ = crate::syscall::sys_handle_close(exception_handles[0]);
+    let _ = crate::syscall::sys_handle_close(exception_thread);
+    let _ = crate::syscall::sys_handle_close(exception_process);
+    let _ = crate::syscall::sys_handle_close(exception_proc);
+    ctx.serial
+        .write_str("[OK] time/debug/system/exception tests completed\n");
+
+    ctx.serial
+        .write_str("[TEST] Testing Zircon hypervisor calls...\n");
+    let mut guest_handle = 0u32;
+    let mut guest_vmar = 0u32;
+    let mut guest_port = 0u32;
+    let mut vcpu_handle = 0u32;
+    let mut vcpu_packet = [0xffu8; 48];
+    let mut vcpu_state = [0xffu8; 256];
+    let mut vcpu_io = [0x5au8; 24];
+    let smc_params = [0u8; 64];
+    let mut smc_result = [0xffu8; 64];
+
+    match crate::syscall::sys_guest_create(0, 0, &mut guest_handle, &mut guest_vmar) {
+        Ok(_) => print_hypervisor_ok(ctx, "guest create"),
+        Err(e) => {
+            print_hypervisor_error(ctx, "guest create", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_guest_create(0, 1, &mut guest_handle, &mut guest_vmar) {
+        Err(crate::syscall::ZxError::ErrInvalidArgs) => {
+            print_hypervisor_ok(ctx, "reject invalid guest option");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject invalid guest option unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_hypervisor_error(ctx, "reject invalid guest option", e);
+            return;
+        }
+    }
+    if crate::syscall::sys_port_create(0, &mut guest_port).is_err()
+        || crate::syscall::sys_guest_set_trap(
+            guest_handle,
+            1,
+            0x4000,
+            PAGE_SIZE as u64,
+            guest_port,
+            0x55,
+        )
+        .is_err()
+    {
+        ctx.serial.write_str("  [FAIL] guest trap setup failed\n");
+        return;
+    }
+    print_hypervisor_ok(ctx, "guest memory trap");
+    match crate::syscall::sys_guest_set_trap(
+        guest_handle,
+        3,
+        0x4000,
+        PAGE_SIZE as u64,
+        guest_port,
+        0,
+    ) {
+        Err(crate::syscall::ZxError::ErrInvalidArgs) => {
+            print_hypervisor_ok(ctx, "reject invalid trap kind");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject invalid trap kind unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_hypervisor_error(ctx, "reject invalid trap kind", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_guest_set_trap(
+        guest_handle,
+        1,
+        0x4001,
+        PAGE_SIZE as u64,
+        guest_port,
+        0,
+    ) {
+        Err(crate::syscall::ZxError::ErrInvalidArgs) => {
+            print_hypervisor_ok(ctx, "reject unaligned memory trap");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject unaligned memory trap unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_hypervisor_error(ctx, "reject unaligned memory trap", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_guest_set_trap(guest_handle, 2, 3, 7, guest_port, 0) {
+        Ok(_) => print_hypervisor_ok(ctx, "guest io trap"),
+        Err(e) => {
+            print_hypervisor_error(ctx, "guest io trap", e);
+            return;
+        }
+    }
+
+    match crate::syscall::sys_vcpu_create(guest_handle, 0, 0x8000, &mut vcpu_handle) {
+        Ok(_) => print_hypervisor_ok(ctx, "vcpu create"),
+        Err(e) => {
+            print_hypervisor_error(ctx, "vcpu create", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_vcpu_create(guest_handle, 0, 0x8001, &mut vcpu_handle) {
+        Err(crate::syscall::ZxError::ErrInvalidArgs) => {
+            print_hypervisor_ok(ctx, "reject unaligned vcpu entry");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject unaligned vcpu entry unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_hypervisor_error(ctx, "reject unaligned vcpu entry", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_vcpu_resume(vcpu_handle, vcpu_packet.as_mut_ptr() as usize) {
+        Err(crate::syscall::ZxError::ErrNotSupported) if vcpu_packet == [0u8; 48] => {
+            print_hypervisor_ok(ctx, "vcpu resume packet modeled");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] vcpu resume unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_hypervisor_error(ctx, "vcpu resume packet modeled", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_vcpu_interrupt(vcpu_handle, 128) {
+        Ok(_) => print_hypervisor_ok(ctx, "vcpu interrupt"),
+        Err(e) => {
+            print_hypervisor_error(ctx, "vcpu interrupt", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_vcpu_interrupt(vcpu_handle, 1024) {
+        Err(crate::syscall::ZxError::ErrInvalidArgs) => {
+            print_hypervisor_ok(ctx, "reject invalid interrupt vector");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject invalid interrupt vector unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_hypervisor_error(ctx, "reject invalid interrupt vector", e);
+            return;
+        }
+    }
+    if crate::syscall::sys_vcpu_read_state(
+        vcpu_handle,
+        0,
+        vcpu_state.as_mut_ptr() as usize,
+        vcpu_state.len(),
+    )
+    .is_err()
+        || vcpu_state != [0u8; 256]
+        || crate::syscall::sys_vcpu_write_state(
+            vcpu_handle,
+            0,
+            vcpu_state.as_ptr() as usize,
+            vcpu_state.len(),
+        )
+        .is_err()
+        || crate::syscall::sys_vcpu_write_state(
+            vcpu_handle,
+            1,
+            vcpu_io.as_ptr() as usize,
+            vcpu_io.len(),
+        )
+        .is_err()
+    {
+        ctx.serial
+            .write_str("  [FAIL] vcpu state read/write failed\n");
+        return;
+    }
+    print_hypervisor_ok(ctx, "vcpu state read/write");
+    match crate::syscall::sys_vcpu_read_state(
+        vcpu_handle,
+        1,
+        vcpu_io.as_mut_ptr() as usize,
+        vcpu_io.len(),
+    ) {
+        Err(crate::syscall::ZxError::ErrInvalidArgs) => {
+            print_hypervisor_ok(ctx, "reject invalid read-state kind");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] reject invalid read-state kind unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_hypervisor_error(ctx, "reject invalid read-state kind", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_smc_call(
+        0,
+        smc_params.as_ptr() as usize,
+        smc_result.as_mut_ptr() as usize,
+    ) {
+        Err(crate::syscall::ZxError::ErrNotSupported) if smc_result == [0u8; 64] => {
+            print_hypervisor_ok(ctx, "smc call unsupported with zero result");
+        }
+        Ok(_) => {
+            ctx.serial
+                .write_str("  [FAIL] smc call unexpectedly succeeded\n");
+            return;
+        }
+        Err(e) => {
+            print_hypervisor_error(ctx, "smc call unsupported with zero result", e);
+            return;
+        }
+    }
+
+    let _ = crate::syscall::sys_handle_close(vcpu_handle);
+    let _ = crate::syscall::sys_handle_close(guest_port);
+    let _ = crate::syscall::sys_handle_close(guest_handle);
+    let _ = crate::syscall::sys_handle_close(guest_vmar);
+    ctx.serial.write_str("[OK] hypervisor tests completed\n");
+
     ctx.serial.write_str("[TEST] Closing VMO handle... ");
     match crate::syscall::sys_handle_close(vmo_handle) {
         Ok(_) => ctx.serial.write_str("[OK] handle closed\n"),
@@ -2552,6 +3023,34 @@ fn print_signal_ok(ctx: &mut ShellContext, label: &str) {
 }
 
 fn print_signal_error(ctx: &mut ShellContext, label: &str, err: crate::syscall::ZxError) {
+    ctx.serial.write_str("  [FAIL] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str(" error=");
+    print_zx_error(&mut ctx.serial, err);
+    ctx.serial.write_str("\n");
+}
+
+fn print_time_debug_ok(ctx: &mut ShellContext, label: &str) {
+    ctx.serial.write_str("  [OK] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str("\n");
+}
+
+fn print_time_debug_error(ctx: &mut ShellContext, label: &str, err: crate::syscall::ZxError) {
+    ctx.serial.write_str("  [FAIL] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str(" error=");
+    print_zx_error(&mut ctx.serial, err);
+    ctx.serial.write_str("\n");
+}
+
+fn print_hypervisor_ok(ctx: &mut ShellContext, label: &str) {
+    ctx.serial.write_str("  [OK] ");
+    ctx.serial.write_str(label);
+    ctx.serial.write_str("\n");
+}
+
+fn print_hypervisor_error(ctx: &mut ShellContext, label: &str, err: crate::syscall::ZxError) {
     ctx.serial.write_str("  [FAIL] ");
     ctx.serial.write_str(label);
     ctx.serial.write_str(" error=");

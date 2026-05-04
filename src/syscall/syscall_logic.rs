@@ -55,6 +55,108 @@ pub(crate) fn linux_clock_id_supported(clock_id: usize) -> bool {
     smros_linux_clock_id_supported_body!(clock_id)
 }
 
+pub(crate) fn zircon_clock_id_supported(clock_id: u32) -> bool {
+    smros_zircon_clock_id_supported_body!(clock_id)
+}
+
+pub(crate) fn zircon_clock_create_options_valid(options: u32, allowed_mask: u32) -> bool {
+    smros_zircon_clock_create_options_valid_body!(options, allowed_mask)
+}
+
+pub(crate) fn zircon_clock_update_options_valid(options: u64, allowed_mask: u64) -> bool {
+    smros_zircon_clock_update_options_valid_body!(options, allowed_mask)
+}
+
+pub(crate) fn zircon_timer_options_valid(options: u32, allowed_mask: u32) -> bool {
+    smros_zircon_timer_options_valid_body!(options, allowed_mask)
+}
+
+pub(crate) fn zircon_timer_deadline_expired(deadline: u64, now: u64) -> bool {
+    smros_zircon_timer_deadline_expired_body!(deadline, now)
+}
+
+pub(crate) fn zircon_debuglog_create_options_valid(options: u32, allowed_mask: u32) -> bool {
+    smros_zircon_debuglog_create_options_valid_body!(options, allowed_mask)
+}
+
+pub(crate) fn zircon_debuglog_io_options_valid(options: u32, allowed_mask: u32) -> bool {
+    smros_zircon_debuglog_io_options_valid_body!(options, allowed_mask)
+}
+
+pub(crate) fn zircon_system_event_kind_valid(kind: u32, max_kind: u32) -> bool {
+    smros_zircon_system_event_kind_valid_body!(kind, max_kind)
+}
+
+pub(crate) fn zircon_exception_channel_options_valid(options: u32, allowed_mask: u32) -> bool {
+    smros_zircon_exception_channel_options_valid_body!(options, allowed_mask)
+}
+
+pub(crate) fn zircon_hypervisor_options_valid(options: u32, allowed_mask: u32) -> bool {
+    smros_zircon_hypervisor_options_valid_body!(options, allowed_mask)
+}
+
+pub(crate) fn zircon_guest_trap_kind_valid(kind: u32, max_kind: u32) -> bool {
+    smros_zircon_guest_trap_kind_valid_body!(kind, max_kind)
+}
+
+pub(crate) fn zircon_guest_trap_is_bell(kind: u32, bell: u32) -> bool {
+    smros_zircon_guest_trap_is_bell_body!(kind, bell)
+}
+
+pub(crate) fn zircon_guest_trap_is_mem(kind: u32, mem: u32) -> bool {
+    smros_zircon_guest_trap_is_mem_body!(kind, mem)
+}
+
+pub(crate) fn zircon_guest_trap_range_valid(addr: u64, size: u64, limit: u64) -> bool {
+    smros_zircon_guest_trap_range_valid_body!(addr, size, limit)
+}
+
+pub(crate) fn zircon_guest_trap_alignment_valid(
+    kind: u32,
+    addr: u64,
+    size: u64,
+    bell: u32,
+    mem: u32,
+    page_size: u64,
+) -> bool {
+    smros_zircon_guest_trap_alignment_valid_body!(kind, addr, size, bell, mem, page_size)
+}
+
+pub(crate) fn zircon_vcpu_entry_valid(entry: u64, alignment: u64) -> bool {
+    smros_zircon_vcpu_entry_valid_body!(entry, alignment)
+}
+
+pub(crate) fn zircon_vcpu_interrupt_vector_valid(vector: u32, max_vector: u32) -> bool {
+    smros_zircon_vcpu_interrupt_vector_valid_body!(vector, max_vector)
+}
+
+pub(crate) fn zircon_vcpu_read_state_args_valid(
+    kind: u32,
+    buffer_size: usize,
+    state_kind: u32,
+    state_size: usize,
+) -> bool {
+    smros_zircon_vcpu_read_state_args_valid_body!(kind, buffer_size, state_kind, state_size)
+}
+
+pub(crate) fn zircon_vcpu_write_state_args_valid(
+    kind: u32,
+    buffer_size: usize,
+    state_kind: u32,
+    state_size: usize,
+    io_kind: u32,
+    io_size: usize,
+) -> bool {
+    smros_zircon_vcpu_write_state_args_valid_body!(
+        kind,
+        buffer_size,
+        state_kind,
+        state_size,
+        io_kind,
+        io_size
+    )
+}
+
 pub(crate) fn linux_syscall_interface_known(syscall_num: u32) -> bool {
     smros_linux_syscall_interface_known_body!(syscall_num)
 }

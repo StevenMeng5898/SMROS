@@ -427,8 +427,35 @@ const ARM64_SYS_LANDLOCK_ADD_RULE: u32 = 445;
 const ARM64_SYS_LANDLOCK_RESTRICT_SELF: u32 = 446;
 const ZX_SIGNAL_TERMINATED: u32 = 1 << 3;
 const ZX_USER_SIGNAL_0: u32 = 1 << 24;
+const ZX_TIMER_SIGNALED: u32 = 1 << 7;
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
+const ZX_CLOCK_OPT_AUTO_START: u32 = 1 << 0;
+const ZX_CLOCK_UPDATE_OPTION_SYNTHETIC_VALUE_VALID: u64 = 1 << 0;
+const ZX_CLOCK_UPDATE_OPTION_REFERENCE_VALUE_VALID: u64 = 1 << 1;
+const ZX_CLOCK_UPDATE_OPTIONS_MASK: u64 =
+    ZX_CLOCK_UPDATE_OPTION_SYNTHETIC_VALUE_VALID | ZX_CLOCK_UPDATE_OPTION_REFERENCE_VALUE_VALID;
+const ZX_TIMER_OPTIONS_MASK: u32 = 0;
+const ZX_DEBUGLOG_CREATE_OPTIONS_MASK: u32 = 0;
+const ZX_DEBUGLOG_OPTIONS_MASK: u32 = 0;
+const ZX_SYSTEM_EVENT_KIND_MAX: u32 = 3;
+const ZX_EXCEPTION_CHANNEL_DEBUGGER: u32 = 1 << 0;
+const ZX_EXCEPTION_CHANNEL_OPTIONS_MASK: u32 = ZX_EXCEPTION_CHANNEL_DEBUGGER;
+const ZX_HYPERVISOR_OPTIONS_MASK: u32 = 0;
+const ZX_GUEST_TRAP_BELL: u32 = 0;
+const ZX_GUEST_TRAP_MEM: u32 = 1;
+const ZX_GUEST_TRAP_IO: u32 = 2;
+const ZX_GUEST_TRAP_KIND_MAX: u32 = ZX_GUEST_TRAP_IO;
+const ZX_GUEST_PHYS_LIMIT: u64 = 0x1_0000_0000;
+const ZX_VCPU_ENTRY_ALIGNMENT: u64 = 4;
+const ZX_VCPU_INTERRUPT_VECTOR_MAX: u32 = 1023;
+const ZX_VCPU_STATE: u32 = 0;
+const ZX_VCPU_IO: u32 = 1;
+const ZX_VCPU_STATE_SIZE: usize = 256;
+const ZX_VCPU_IO_SIZE: usize = 24;
+const ZX_VCPU_PACKET_SIZE: usize = 48;
+const ZX_SMC_PARAMETERS_SIZE: usize = 64;
+const ZX_SMC_RESULT_SIZE: usize = 64;
 const COMPAT_FD_START: usize = 3;
 const LINUX_AF_UNIX: usize = 1;
 const LINUX_AF_LOCAL: usize = LINUX_AF_UNIX;
@@ -4261,8 +4288,14 @@ pub fn sys_task_bind_exception_port(
     task_handle: u32,
     port_handle: u32,
     _key: u64,
-    _options: u32,
+    options: u32,
 ) -> ZxResult {
+    if !syscall_logic::zircon_exception_channel_options_valid(
+        options,
+        ZX_EXCEPTION_CHANNEL_OPTIONS_MASK,
+    ) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
     if !kernel_object_handle_known(task_handle)
         || (port_handle != INVALID_HANDLE && !kernel_object_handle_known(port_handle))
     {
@@ -4271,10 +4304,16 @@ pub fn sys_task_bind_exception_port(
     Ok(())
 }
 
-pub fn sys_task_resume_from_exception(task_handle: u32, exception: u32, _options: u32) -> ZxResult {
-    if !kernel_object_handle_known(task_handle) || !kernel_object_handle_known(exception) {
+pub fn sys_task_resume_from_exception(task_handle: u32, exception: u32, options: u32) -> ZxResult {
+    if options != 0 {
         return Err(ZxError::ErrInvalidArgs);
     }
+    if !kernel_object_handle_known(task_handle)
+        || !compat::table().is_type(HandleValue(exception), ObjectType::Exception)
+    {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let _ = compat::table().update_signals(HandleValue(exception), ZX_USER_SIGNAL_0, 0);
     Ok(())
 }
 
@@ -4852,27 +4891,41 @@ pub fn sys_profile_create(
 }
 
 pub fn sys_timer_create(options: u32, _clock_id: u32, out_handle: &mut u32) -> ZxResult {
-    if options != 0 {
+    if !syscall_logic::zircon_timer_options_valid(options, ZX_TIMER_OPTIONS_MASK) {
         return Err(ZxError::ErrInvalidArgs);
     }
-    *out_handle = compat::create_object(ObjectType::Timer)?.0;
+    *out_handle = compat::create_object_with_options(ObjectType::Timer, options)?.0;
     Ok(())
 }
 
-pub fn sys_timer_set(handle: u32, _deadline: u64, _slack: i64) -> ZxResult {
-    if compat::table()
-        .update_signals(HandleValue(handle), 0, ZX_USER_SIGNAL_0)
-        .is_some()
-    {
-        Ok(())
-    } else {
-        Err(ZxError::ErrNotFound)
+pub fn sys_timer_set(handle: u32, deadline: u64, slack: i64) -> ZxResult {
+    if slack < 0 || !compat::table().is_type(HandleValue(handle), ObjectType::Timer) {
+        return Err(ZxError::ErrInvalidArgs);
     }
+
+    let now = monotonic_nanos();
+    let set_mask = if syscall_logic::zircon_timer_deadline_expired(deadline, now) {
+        ZX_TIMER_SIGNALED
+    } else {
+        0
+    };
+
+    if !compat::table().set_state_value(HandleValue(handle), deadline) {
+        return Err(ZxError::ErrNotFound);
+    }
+    compat::table()
+        .update_signals(HandleValue(handle), ZX_TIMER_SIGNALED, set_mask)
+        .ok_or(ZxError::ErrNotFound)?;
+    Ok(())
 }
 
 pub fn sys_timer_cancel(handle: u32) -> ZxResult {
+    if !compat::table().is_type(HandleValue(handle), ObjectType::Timer) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let _ = compat::table().set_state_value(HandleValue(handle), 0);
     if compat::table()
-        .update_signals(HandleValue(handle), ZX_USER_SIGNAL_0, 0)
+        .update_signals(HandleValue(handle), ZX_TIMER_SIGNALED, 0)
         .is_some()
     {
         Ok(())
@@ -4882,23 +4935,38 @@ pub fn sys_timer_cancel(handle: u32) -> ZxResult {
 }
 
 pub fn sys_debuglog_create(_resource: u32, options: u32, out_handle: &mut u32) -> ZxResult {
-    if options != 0 {
+    if !syscall_logic::zircon_debuglog_create_options_valid(
+        options,
+        ZX_DEBUGLOG_CREATE_OPTIONS_MASK,
+    ) {
         return Err(ZxError::ErrInvalidArgs);
     }
-    *out_handle = compat::create_object(ObjectType::DebugLog)?.0;
+    *out_handle = compat::create_object_with_options(ObjectType::DebugLog, options)?.0;
     Ok(())
 }
 
 pub fn sys_debuglog_write(handle: u32, options: u32, buffer: usize, len: usize) -> ZxResult {
-    if options != 0 || !compat::handle_known(HandleValue(handle)) {
+    if !syscall_logic::zircon_debuglog_io_options_valid(options, ZX_DEBUGLOG_OPTIONS_MASK)
+        || !compat::table().is_type(HandleValue(handle), ObjectType::DebugLog)
+        || !syscall_logic::user_buffer_valid(buffer, len)
+    {
         return Err(ZxError::ErrInvalidArgs);
     }
+    let bytes = if len == 0 {
+        &[][..]
+    } else {
+        unsafe { core::slice::from_raw_parts(buffer as *const u8, len) }
+    };
+    let _ = compat::table().write_bytes(HandleValue(handle), bytes)?;
     let _ = sys_write(1, buffer, len);
     Ok(())
 }
 
 pub fn sys_debuglog_read(handle: u32, options: u32, buffer: usize, len: usize) -> ZxResult<usize> {
-    if options != 0 || !syscall_logic::user_buffer_valid(buffer, len) {
+    if !syscall_logic::zircon_debuglog_io_options_valid(options, ZX_DEBUGLOG_OPTIONS_MASK)
+        || !compat::table().is_type(HandleValue(handle), ObjectType::DebugLog)
+        || !syscall_logic::user_buffer_valid(buffer, len)
+    {
         return Err(ZxError::ErrInvalidArgs);
     }
     let out = if len == 0 {
@@ -4965,6 +5033,9 @@ pub fn sys_debug_read(buffer: usize, len: usize) -> ZxResult<usize> {
 }
 
 pub fn sys_debug_write(buffer: usize, len: usize) -> ZxResult {
+    if !syscall_logic::user_buffer_valid(buffer, len) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
     sys_write(1, buffer, len)
         .map(|_| ())
         .map_err(|_| ZxError::ErrInvalidArgs)
@@ -5006,26 +5077,44 @@ pub fn sys_mtrace_control(
 
 pub fn sys_system_get_event(
     _root_resource: u32,
-    _event_kind: u32,
+    event_kind: u32,
     out_handle: &mut u32,
 ) -> ZxResult {
+    if !syscall_logic::zircon_system_event_kind_valid(event_kind, ZX_SYSTEM_EVENT_KIND_MAX) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
     *out_handle = compat::create_object(ObjectType::Event)?.0;
     Ok(())
 }
 
-pub fn sys_create_exception_channel(task: u32, option: u32, out_handle: &mut u32) -> ZxResult {
-    if option > 1 || !kernel_object_handle_known(task) {
+pub fn sys_create_exception_channel(task: u32, options: u32, out_handle: &mut u32) -> ZxResult {
+    if !syscall_logic::zircon_exception_channel_options_valid(
+        options,
+        ZX_EXCEPTION_CHANNEL_OPTIONS_MASK,
+    ) || !kernel_object_handle_known(task)
+    {
         return Err(ZxError::ErrInvalidArgs);
     }
     let mut h0 = 0u32;
     let mut h1 = 0u32;
     sys_channel_create(0, &mut h0, &mut h1)?;
+    let exception = compat::create_object(ObjectType::Exception)?;
+    let handles = [exception.0];
+    let packet = [0u8; 8];
+    let _ = sys_channel_write(
+        h1,
+        0,
+        packet.as_ptr() as usize,
+        packet.len(),
+        handles.as_ptr() as usize,
+        handles.len(),
+    );
     *out_handle = h0;
     Ok(())
 }
 
 pub fn sys_exception_get_thread(exception: u32, out_handle: &mut u32) -> ZxResult {
-    if !kernel_object_handle_known(exception) {
+    if !compat::table().is_type(HandleValue(exception), ObjectType::Exception) {
         return Err(ZxError::ErrNotFound);
     }
     *out_handle = compat::create_object(ObjectType::Thread)?.0;
@@ -5033,7 +5122,7 @@ pub fn sys_exception_get_thread(exception: u32, out_handle: &mut u32) -> ZxResul
 }
 
 pub fn sys_exception_get_process(exception: u32, out_handle: &mut u32) -> ZxResult {
-    if !kernel_object_handle_known(exception) {
+    if !compat::table().is_type(HandleValue(exception), ObjectType::Exception) {
         return Err(ZxError::ErrNotFound);
     }
     *out_handle = compat::create_object(ObjectType::Process)?.0;
@@ -5321,12 +5410,17 @@ pub fn sys_pci_config_write(handle: u32, _offset: usize, _width: usize, _value: 
     }
 }
 
-pub fn sys_smc_call(_handle: u32, parameters: usize, out_smc_result: usize) -> ZxResult {
-    if parameters == 0 || out_smc_result == 0 {
+pub fn sys_smc_call(handle: u32, parameters: usize, out_smc_result: usize) -> ZxResult {
+    if handle != 0 && !compat::table().is_type(HandleValue(handle), ObjectType::Resource) {
+        return Err(ZxError::ErrNotFound);
+    }
+    if !syscall_logic::user_buffer_valid(parameters, ZX_SMC_PARAMETERS_SIZE)
+        || !syscall_logic::user_buffer_valid(out_smc_result, ZX_SMC_RESULT_SIZE)
+    {
         return Err(ZxError::ErrInvalidArgs);
     }
     unsafe {
-        core::ptr::write_bytes(out_smc_result as *mut u8, 0, 64);
+        core::ptr::write_bytes(out_smc_result as *mut u8, 0, ZX_SMC_RESULT_SIZE);
     }
     Err(ZxError::ErrNotSupported)
 }
@@ -5337,10 +5431,10 @@ pub fn sys_guest_create(
     guest_handle: &mut u32,
     vmar_handle: &mut u32,
 ) -> ZxResult {
-    if options != 0 {
+    if !syscall_logic::zircon_hypervisor_options_valid(options, ZX_HYPERVISOR_OPTIONS_MASK) {
         return Err(ZxError::ErrInvalidArgs);
     }
-    *guest_handle = compat::create_object(ObjectType::Guest)?.0;
+    *guest_handle = compat::create_object_with_options(ObjectType::Guest, options)?.0;
     let mut child_addr = 0usize;
     sys_vmar_allocate(
         memory_root_vmar_handle(),
@@ -5355,61 +5449,101 @@ pub fn sys_guest_create(
 
 pub fn sys_guest_set_trap(
     handle: u32,
-    _kind: u32,
-    _addr: u64,
-    _size: u64,
+    kind: u32,
+    addr: u64,
+    size: u64,
     port_handle: u32,
-    _key: u64,
+    key: u64,
 ) -> ZxResult {
-    if !kernel_object_handle_known(handle) {
+    if !compat::table().is_type(HandleValue(handle), ObjectType::Guest) {
         return Err(ZxError::ErrNotFound);
     }
-    if port_handle != INVALID_HANDLE && !kernel_object_handle_known(port_handle) {
+    if !syscall_logic::zircon_guest_trap_kind_valid(kind, ZX_GUEST_TRAP_KIND_MAX)
+        || !syscall_logic::zircon_guest_trap_range_valid(addr, size, ZX_GUEST_PHYS_LIMIT)
+        || !syscall_logic::zircon_guest_trap_alignment_valid(
+            kind,
+            addr,
+            size,
+            ZX_GUEST_TRAP_BELL,
+            ZX_GUEST_TRAP_MEM,
+            PAGE_SIZE as u64,
+        )
+        || (port_handle != INVALID_HANDLE && !port::port_table().contains(HandleValue(port_handle)))
+    {
         return Err(ZxError::ErrInvalidArgs);
     }
+    let trap_is_page_backed = syscall_logic::zircon_guest_trap_is_bell(kind, ZX_GUEST_TRAP_BELL)
+        || syscall_logic::zircon_guest_trap_is_mem(kind, ZX_GUEST_TRAP_MEM);
+    let trap_encoding = ((kind as u64) << 56) | (key & 0x00ff_ffff_ffff_ffff);
+    let modeled_trap = if trap_is_page_backed {
+        trap_encoding | 1
+    } else {
+        trap_encoding
+    };
+    let _ = compat::table().set_state_value(HandleValue(handle), modeled_trap);
     Ok(())
 }
 
 pub fn sys_vcpu_create(
     guest_handle: u32,
     options: u32,
-    _entry: u64,
+    entry: u64,
     out_handle: &mut u32,
 ) -> ZxResult {
-    if options != 0 || !kernel_object_handle_known(guest_handle) {
+    if !syscall_logic::zircon_hypervisor_options_valid(options, ZX_HYPERVISOR_OPTIONS_MASK)
+        || !compat::table().is_type(HandleValue(guest_handle), ObjectType::Guest)
+        || !syscall_logic::zircon_vcpu_entry_valid(entry, ZX_VCPU_ENTRY_ALIGNMENT)
+    {
         return Err(ZxError::ErrInvalidArgs);
     }
-    *out_handle = compat::create_object(ObjectType::Vcpu)?.0;
+    let handle = compat::create_object_with_options(ObjectType::Vcpu, options)?;
+    let _ = compat::table().set_state_value(handle, entry);
+    *out_handle = handle.0;
     Ok(())
 }
 
 pub fn sys_vcpu_resume(handle: u32, user_packet: usize) -> ZxResult {
-    if !kernel_object_handle_known(handle) {
+    if !compat::table().is_type(HandleValue(handle), ObjectType::Vcpu) {
         return Err(ZxError::ErrNotFound);
+    }
+    if !syscall_logic::user_buffer_valid(user_packet, ZX_VCPU_PACKET_SIZE) {
+        return Err(ZxError::ErrInvalidArgs);
     }
     if user_packet != 0 {
         unsafe {
-            core::ptr::write_bytes(user_packet as *mut u8, 0, 48);
+            core::ptr::write_bytes(user_packet as *mut u8, 0, ZX_VCPU_PACKET_SIZE);
         }
     }
     Err(ZxError::ErrNotSupported)
 }
 
-pub fn sys_vcpu_interrupt(handle: u32, _vector: u32) -> ZxResult {
-    if kernel_object_handle_known(handle) {
-        Ok(())
-    } else {
+pub fn sys_vcpu_interrupt(handle: u32, vector: u32) -> ZxResult {
+    if !compat::table().is_type(HandleValue(handle), ObjectType::Vcpu) {
         Err(ZxError::ErrNotFound)
+    } else if !syscall_logic::zircon_vcpu_interrupt_vector_valid(
+        vector,
+        ZX_VCPU_INTERRUPT_VECTOR_MAX,
+    ) {
+        Err(ZxError::ErrInvalidArgs)
+    } else {
+        let _ = compat::table().set_state_value(HandleValue(handle), vector as u64);
+        Ok(())
     }
 }
 
 pub fn sys_vcpu_read_state(
     handle: u32,
-    _kind: u32,
+    kind: u32,
     user_buffer: usize,
     buffer_size: usize,
 ) -> ZxResult {
-    if !kernel_object_handle_known(handle)
+    if !compat::table().is_type(HandleValue(handle), ObjectType::Vcpu)
+        || !syscall_logic::zircon_vcpu_read_state_args_valid(
+            kind,
+            buffer_size,
+            ZX_VCPU_STATE,
+            ZX_VCPU_STATE_SIZE,
+        )
         || !syscall_logic::user_buffer_valid(user_buffer, buffer_size)
     {
         return Err(ZxError::ErrInvalidArgs);
@@ -5424,15 +5558,24 @@ pub fn sys_vcpu_read_state(
 
 pub fn sys_vcpu_write_state(
     handle: u32,
-    _kind: u32,
+    kind: u32,
     user_buffer: usize,
     buffer_size: usize,
 ) -> ZxResult {
-    if !kernel_object_handle_known(handle)
+    if !compat::table().is_type(HandleValue(handle), ObjectType::Vcpu)
+        || !syscall_logic::zircon_vcpu_write_state_args_valid(
+            kind,
+            buffer_size,
+            ZX_VCPU_STATE,
+            ZX_VCPU_STATE_SIZE,
+            ZX_VCPU_IO,
+            ZX_VCPU_IO_SIZE,
+        )
         || !syscall_logic::user_buffer_valid(user_buffer, buffer_size)
     {
         return Err(ZxError::ErrInvalidArgs);
     }
+    let _ = compat::table().set_state_value(HandleValue(handle), kind as u64);
     Ok(())
 }
 
@@ -5630,15 +5773,22 @@ pub fn sys_clock_get_monotonic() -> ZxResult<u64> {
 }
 
 pub fn sys_clock_create(options: u32, _args: usize, out_handle: &mut u32) -> ZxResult {
-    if options != 0 {
+    if !syscall_logic::zircon_clock_create_options_valid(options, ZX_CLOCK_OPT_AUTO_START) {
         return Err(ZxError::ErrInvalidArgs);
     }
-    *out_handle = compat::create_object(ObjectType::Clock)?.0;
+    let handle = compat::create_object_with_options(ObjectType::Clock, options)?;
+    let synthetic_time = if options & ZX_CLOCK_OPT_AUTO_START != 0 {
+        monotonic_nanos()
+    } else {
+        0
+    };
+    let _ = compat::table().set_state_value(handle, synthetic_time);
+    *out_handle = handle.0;
     Ok(())
 }
 
 pub fn sys_clock_get(clock_id: u32, out_time: usize) -> ZxResult {
-    if clock_id as usize > CLOCK_MONOTONIC || out_time == 0 {
+    if !syscall_logic::zircon_clock_id_supported(clock_id) || out_time == 0 {
         return Err(ZxError::ErrInvalidArgs);
     }
     unsafe {
@@ -5648,29 +5798,43 @@ pub fn sys_clock_get(clock_id: u32, out_time: usize) -> ZxResult {
 }
 
 pub fn sys_clock_read(handle: u32, out_time: usize) -> ZxResult {
-    if !compat::handle_known(HandleValue(handle)) || out_time == 0 {
+    if !compat::table().is_type(HandleValue(handle), ObjectType::Clock) || out_time == 0 {
         return Err(ZxError::ErrInvalidArgs);
     }
+    let stored = compat::table()
+        .state_value(HandleValue(handle))
+        .unwrap_or(0);
+    let value = stored.max(monotonic_nanos());
     unsafe {
-        core::ptr::write(out_time as *mut u64, monotonic_nanos());
+        core::ptr::write(out_time as *mut u64, value);
     }
     Ok(())
 }
 
 pub fn sys_clock_adjust(_resource: u32, clock_id: u32, _offset: u64) -> ZxResult {
-    if clock_id as usize > CLOCK_MONOTONIC {
+    if !syscall_logic::zircon_clock_id_supported(clock_id) {
         Err(ZxError::ErrInvalidArgs)
     } else {
         Ok(())
     }
 }
 
-pub fn sys_clock_update(handle: u32, _options: u64, _args: usize) -> ZxResult {
-    if compat::handle_known(HandleValue(handle)) {
-        Ok(())
-    } else {
-        Err(ZxError::ErrNotFound)
+pub fn sys_clock_update(handle: u32, options: u64, _args: usize) -> ZxResult {
+    if !syscall_logic::zircon_clock_update_options_valid(options, ZX_CLOCK_UPDATE_OPTIONS_MASK) {
+        return Err(ZxError::ErrInvalidArgs);
     }
+    if !compat::table().is_type(HandleValue(handle), ObjectType::Clock) {
+        return Err(ZxError::ErrNotFound);
+    }
+    let value = if options & ZX_CLOCK_UPDATE_OPTION_SYNTHETIC_VALUE_VALID != 0 {
+        monotonic_nanos()
+    } else {
+        compat::table()
+            .state_value(HandleValue(handle))
+            .unwrap_or(0)
+    };
+    let _ = compat::table().set_state_value(HandleValue(handle), value);
+    Ok(())
 }
 
 /// Zircon sys_nanosleep implementation

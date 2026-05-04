@@ -24,6 +24,29 @@ pub const ZX_EVENT_SIGNALED: u32 = 1u32 << 4;
 pub const ZX_EVENTPAIR_SIGNALED: u32 = 1u32 << 4;
 pub const ZX_EVENT_SIGNAL_MASK: u32 = ZX_USER_SIGNAL_MASK | ZX_EVENT_SIGNALED;
 pub const ZX_EVENTPAIR_SIGNAL_MASK: u32 = ZX_USER_SIGNAL_MASK | ZX_EVENTPAIR_SIGNALED;
+pub const ZX_CLOCK_OPT_AUTO_START: u32 = 1u32 << 0;
+pub const ZX_CLOCK_UPDATE_OPTION_SYNTHETIC_VALUE_VALID: u64 = 1u64 << 0;
+pub const ZX_CLOCK_UPDATE_OPTION_REFERENCE_VALUE_VALID: u64 = 1u64 << 1;
+pub const ZX_CLOCK_UPDATE_OPTIONS_MASK: u64 =
+    ZX_CLOCK_UPDATE_OPTION_SYNTHETIC_VALUE_VALID | ZX_CLOCK_UPDATE_OPTION_REFERENCE_VALUE_VALID;
+pub const ZX_TIMER_OPTIONS_MASK: u32 = 0;
+pub const ZX_DEBUGLOG_CREATE_OPTIONS_MASK: u32 = 0;
+pub const ZX_DEBUGLOG_OPTIONS_MASK: u32 = 0;
+pub const ZX_SYSTEM_EVENT_KIND_MAX: u32 = 3;
+pub const ZX_EXCEPTION_CHANNEL_DEBUGGER: u32 = 1u32 << 0;
+pub const ZX_EXCEPTION_CHANNEL_OPTIONS_MASK: u32 = ZX_EXCEPTION_CHANNEL_DEBUGGER;
+pub const ZX_HYPERVISOR_OPTIONS_MASK: u32 = 0;
+pub const ZX_GUEST_TRAP_BELL: u32 = 0;
+pub const ZX_GUEST_TRAP_MEM: u32 = 1;
+pub const ZX_GUEST_TRAP_IO: u32 = 2;
+pub const ZX_GUEST_TRAP_KIND_MAX: u32 = ZX_GUEST_TRAP_IO;
+pub const ZX_GUEST_PHYS_LIMIT: u64 = 0x1_0000_0000;
+pub const ZX_VCPU_ENTRY_ALIGNMENT: u64 = 4;
+pub const ZX_VCPU_INTERRUPT_VECTOR_MAX: u32 = 1023;
+pub const ZX_VCPU_STATE: u32 = 0;
+pub const ZX_VCPU_IO: u32 = 1;
+pub const ZX_VCPU_STATE_SIZE: usize = 256;
+pub const ZX_VCPU_IO_SIZE: usize = 24;
 
 #[derive(Copy, Clone)]
 struct LinuxRange {
@@ -162,6 +185,74 @@ spec fn wait_satisfied_spec(observed: u32, requested: u32) -> bool {
 
 spec fn linux_clock_id_supported_spec(clock_id: int) -> bool {
     0 <= clock_id && clock_id <= 1
+}
+
+spec fn zircon_clock_id_supported_spec(clock_id: int) -> bool {
+    0 <= clock_id && clock_id <= 1
+}
+
+spec fn u32_options_within_mask_spec(options: u32, allowed_mask: u32) -> bool {
+    (options & !allowed_mask) == 0
+}
+
+spec fn u64_options_within_mask_spec(options: u64, allowed_mask: u64) -> bool {
+    (options & !allowed_mask) == 0
+}
+
+spec fn zircon_timer_deadline_expired_spec(deadline: u64, now: u64) -> bool {
+    deadline <= now
+}
+
+spec fn zircon_system_event_kind_valid_spec(kind: int, max_kind: int) -> bool {
+    0 <= kind && kind <= max_kind
+}
+
+spec fn zircon_guest_trap_range_valid_spec(addr: int, size: int, limit: int) -> bool {
+    0 <= addr && 0 < size && addr <= limit && size <= limit - addr
+}
+
+spec fn zircon_guest_trap_alignment_valid_spec(
+    kind: int,
+    addr: int,
+    size: int,
+    bell: int,
+    mem: int,
+    page_size: int,
+) -> bool {
+    if kind == bell || kind == mem {
+        page_size > 0 && addr % page_size == 0 && size % page_size == 0
+    } else {
+        true
+    }
+}
+
+spec fn zircon_vcpu_entry_valid_spec(entry: int, alignment: int) -> bool {
+    alignment > 0 && entry % alignment == 0
+}
+
+spec fn zircon_vcpu_interrupt_vector_valid_spec(vector: int, max_vector: int) -> bool {
+    0 <= vector && vector <= max_vector
+}
+
+spec fn zircon_vcpu_read_state_args_valid_spec(
+    kind: int,
+    buffer_size: int,
+    state_kind: int,
+    state_size: int,
+) -> bool {
+    kind == state_kind && buffer_size == state_size
+}
+
+spec fn zircon_vcpu_write_state_args_valid_spec(
+    kind: int,
+    buffer_size: int,
+    state_kind: int,
+    state_size: int,
+    io_kind: int,
+    io_size: int,
+) -> bool {
+    (kind == state_kind && buffer_size == state_size)
+        || (kind == io_kind && buffer_size == io_size)
 }
 
 spec fn linux_syscall_interface_known_spec(syscall_num: int) -> bool {
@@ -378,6 +469,184 @@ fn linux_clock_id_supported(clock_id: usize) -> (out: bool)
     smros_linux_clock_id_supported_body!(clock_id)
 }
 
+fn zircon_clock_id_supported(clock_id: u32) -> (out: bool)
+    ensures
+        out == zircon_clock_id_supported_spec(clock_id as int),
+{
+    smros_zircon_clock_id_supported_body!(clock_id)
+}
+
+fn zircon_clock_create_options_valid(options: u32, allowed_mask: u32) -> (out: bool)
+    ensures
+        out == u32_options_within_mask_spec(options, allowed_mask),
+{
+    smros_zircon_clock_create_options_valid_body!(options, allowed_mask)
+}
+
+fn zircon_clock_update_options_valid(options: u64, allowed_mask: u64) -> (out: bool)
+    ensures
+        out == u64_options_within_mask_spec(options, allowed_mask),
+{
+    smros_zircon_clock_update_options_valid_body!(options, allowed_mask)
+}
+
+fn zircon_timer_options_valid(options: u32, allowed_mask: u32) -> (out: bool)
+    ensures
+        out == u32_options_within_mask_spec(options, allowed_mask),
+{
+    smros_zircon_timer_options_valid_body!(options, allowed_mask)
+}
+
+fn zircon_timer_deadline_expired(deadline: u64, now: u64) -> (out: bool)
+    ensures
+        out == zircon_timer_deadline_expired_spec(deadline, now),
+{
+    smros_zircon_timer_deadline_expired_body!(deadline, now)
+}
+
+fn zircon_debuglog_create_options_valid(options: u32, allowed_mask: u32) -> (out: bool)
+    ensures
+        out == u32_options_within_mask_spec(options, allowed_mask),
+{
+    smros_zircon_debuglog_create_options_valid_body!(options, allowed_mask)
+}
+
+fn zircon_debuglog_io_options_valid(options: u32, allowed_mask: u32) -> (out: bool)
+    ensures
+        out == u32_options_within_mask_spec(options, allowed_mask),
+{
+    smros_zircon_debuglog_io_options_valid_body!(options, allowed_mask)
+}
+
+fn zircon_system_event_kind_valid(kind: u32, max_kind: u32) -> (out: bool)
+    ensures
+        out == zircon_system_event_kind_valid_spec(kind as int, max_kind as int),
+{
+    smros_zircon_system_event_kind_valid_body!(kind, max_kind)
+}
+
+fn zircon_exception_channel_options_valid(options: u32, allowed_mask: u32) -> (out: bool)
+    ensures
+        out == u32_options_within_mask_spec(options, allowed_mask),
+{
+    smros_zircon_exception_channel_options_valid_body!(options, allowed_mask)
+}
+
+fn zircon_hypervisor_options_valid(options: u32, allowed_mask: u32) -> (out: bool)
+    ensures
+        out == u32_options_within_mask_spec(options, allowed_mask),
+{
+    smros_zircon_hypervisor_options_valid_body!(options, allowed_mask)
+}
+
+fn zircon_guest_trap_kind_valid(kind: u32, max_kind: u32) -> (out: bool)
+    ensures
+        out == zircon_system_event_kind_valid_spec(kind as int, max_kind as int),
+{
+    smros_zircon_guest_trap_kind_valid_body!(kind, max_kind)
+}
+
+fn zircon_guest_trap_is_bell(kind: u32, bell: u32) -> (out: bool)
+    ensures
+        out == (kind == bell),
+{
+    smros_zircon_guest_trap_is_bell_body!(kind, bell)
+}
+
+fn zircon_guest_trap_is_mem(kind: u32, mem: u32) -> (out: bool)
+    ensures
+        out == (kind == mem),
+{
+    smros_zircon_guest_trap_is_mem_body!(kind, mem)
+}
+
+fn zircon_guest_trap_range_valid(addr: u64, size: u64, limit: u64) -> (out: bool)
+    ensures
+        out == zircon_guest_trap_range_valid_spec(addr as int, size as int, limit as int),
+{
+    smros_zircon_guest_trap_range_valid_body!(addr, size, limit)
+}
+
+fn zircon_guest_trap_alignment_valid(
+    kind: u32,
+    addr: u64,
+    size: u64,
+    bell: u32,
+    mem: u32,
+    page_size: u64,
+) -> (out: bool)
+    ensures
+        out == zircon_guest_trap_alignment_valid_spec(
+            kind as int,
+            addr as int,
+            size as int,
+            bell as int,
+            mem as int,
+            page_size as int,
+        ),
+{
+    smros_zircon_guest_trap_alignment_valid_body!(kind, addr, size, bell, mem, page_size)
+}
+
+fn zircon_vcpu_entry_valid(entry: u64, alignment: u64) -> (out: bool)
+    ensures
+        out == zircon_vcpu_entry_valid_spec(entry as int, alignment as int),
+{
+    smros_zircon_vcpu_entry_valid_body!(entry, alignment)
+}
+
+fn zircon_vcpu_interrupt_vector_valid(vector: u32, max_vector: u32) -> (out: bool)
+    ensures
+        out == zircon_vcpu_interrupt_vector_valid_spec(vector as int, max_vector as int),
+{
+    smros_zircon_vcpu_interrupt_vector_valid_body!(vector, max_vector)
+}
+
+fn zircon_vcpu_read_state_args_valid(
+    kind: u32,
+    buffer_size: usize,
+    state_kind: u32,
+    state_size: usize,
+) -> (out: bool)
+    ensures
+        out == zircon_vcpu_read_state_args_valid_spec(
+            kind as int,
+            buffer_size as int,
+            state_kind as int,
+            state_size as int,
+        ),
+{
+    smros_zircon_vcpu_read_state_args_valid_body!(kind, buffer_size, state_kind, state_size)
+}
+
+fn zircon_vcpu_write_state_args_valid(
+    kind: u32,
+    buffer_size: usize,
+    state_kind: u32,
+    state_size: usize,
+    io_kind: u32,
+    io_size: usize,
+) -> (out: bool)
+    ensures
+        out == zircon_vcpu_write_state_args_valid_spec(
+            kind as int,
+            buffer_size as int,
+            state_kind as int,
+            state_size as int,
+            io_kind as int,
+            io_size as int,
+        ),
+{
+    smros_zircon_vcpu_write_state_args_valid_body!(
+        kind,
+        buffer_size,
+        state_kind,
+        state_size,
+        io_kind,
+        io_size
+    )
+}
+
 fn linux_syscall_interface_known(syscall_num: u32) -> (out: bool)
     ensures
         out == linux_syscall_interface_known_spec(syscall_num as int),
@@ -584,6 +853,126 @@ proof fn syscall_zircon_logic_smoke() {
     assert(linux_clock_id_supported_spec(1));
     assert(!linux_clock_id_supported_spec(2));
 
+    assert(zircon_clock_id_supported_spec(0));
+    assert(zircon_clock_id_supported_spec(1));
+    assert(!zircon_clock_id_supported_spec(2));
+
+    assert(u32_options_within_mask_spec(0, ZX_CLOCK_OPT_AUTO_START)) by(bit_vector);
+    assert(u32_options_within_mask_spec(
+        ZX_CLOCK_OPT_AUTO_START,
+        ZX_CLOCK_OPT_AUTO_START,
+    )) by(bit_vector);
+    assert(!u32_options_within_mask_spec(2, ZX_CLOCK_OPT_AUTO_START)) by(bit_vector);
+    assert(u64_options_within_mask_spec(
+        ZX_CLOCK_UPDATE_OPTIONS_MASK,
+        ZX_CLOCK_UPDATE_OPTIONS_MASK,
+    )) by(bit_vector);
+    assert(!u64_options_within_mask_spec(4, ZX_CLOCK_UPDATE_OPTIONS_MASK)) by(bit_vector);
+
+    assert(u32_options_within_mask_spec(0, ZX_TIMER_OPTIONS_MASK)) by(bit_vector);
+    assert(!u32_options_within_mask_spec(1, ZX_TIMER_OPTIONS_MASK)) by(bit_vector);
+    assert(zircon_timer_deadline_expired_spec(5, 5));
+    assert(zircon_timer_deadline_expired_spec(4, 5));
+    assert(!zircon_timer_deadline_expired_spec(6, 5));
+
+    assert(u32_options_within_mask_spec(0, ZX_DEBUGLOG_CREATE_OPTIONS_MASK)) by(bit_vector);
+    assert(!u32_options_within_mask_spec(1, ZX_DEBUGLOG_CREATE_OPTIONS_MASK)) by(bit_vector);
+    assert(u32_options_within_mask_spec(0, ZX_DEBUGLOG_OPTIONS_MASK)) by(bit_vector);
+    assert(!u32_options_within_mask_spec(1, ZX_DEBUGLOG_OPTIONS_MASK)) by(bit_vector);
+
+    assert(zircon_system_event_kind_valid_spec(0, ZX_SYSTEM_EVENT_KIND_MAX as int));
+    assert(zircon_system_event_kind_valid_spec(3, ZX_SYSTEM_EVENT_KIND_MAX as int));
+    assert(!zircon_system_event_kind_valid_spec(4, ZX_SYSTEM_EVENT_KIND_MAX as int));
+    assert(u32_options_within_mask_spec(
+        ZX_EXCEPTION_CHANNEL_DEBUGGER,
+        ZX_EXCEPTION_CHANNEL_OPTIONS_MASK,
+    )) by(bit_vector);
+    assert(!u32_options_within_mask_spec(2, ZX_EXCEPTION_CHANNEL_OPTIONS_MASK)) by(bit_vector);
+
+    assert(u32_options_within_mask_spec(0, ZX_HYPERVISOR_OPTIONS_MASK)) by(bit_vector);
+    assert(!u32_options_within_mask_spec(1, ZX_HYPERVISOR_OPTIONS_MASK)) by(bit_vector);
+    assert(zircon_system_event_kind_valid_spec(
+        ZX_GUEST_TRAP_BELL as int,
+        ZX_GUEST_TRAP_KIND_MAX as int,
+    ));
+    assert(zircon_system_event_kind_valid_spec(
+        ZX_GUEST_TRAP_IO as int,
+        ZX_GUEST_TRAP_KIND_MAX as int,
+    ));
+    assert(!zircon_system_event_kind_valid_spec(
+        3,
+        ZX_GUEST_TRAP_KIND_MAX as int,
+    ));
+    assert(zircon_guest_trap_range_valid_spec(
+        0x1000,
+        PAGE_SIZE as int,
+        ZX_GUEST_PHYS_LIMIT as int,
+    ));
+    assert(!zircon_guest_trap_range_valid_spec(
+        0x1000,
+        0,
+        ZX_GUEST_PHYS_LIMIT as int,
+    ));
+    assert(!zircon_guest_trap_range_valid_spec(
+        ZX_GUEST_PHYS_LIMIT as int,
+        PAGE_SIZE as int,
+        ZX_GUEST_PHYS_LIMIT as int,
+    ));
+    assert(zircon_guest_trap_alignment_valid_spec(
+        ZX_GUEST_TRAP_MEM as int,
+        0x2000,
+        PAGE_SIZE as int,
+        ZX_GUEST_TRAP_BELL as int,
+        ZX_GUEST_TRAP_MEM as int,
+        PAGE_SIZE as int,
+    ));
+    assert(!zircon_guest_trap_alignment_valid_spec(
+        ZX_GUEST_TRAP_MEM as int,
+        0x2001,
+        PAGE_SIZE as int,
+        ZX_GUEST_TRAP_BELL as int,
+        ZX_GUEST_TRAP_MEM as int,
+        PAGE_SIZE as int,
+    ));
+    assert(zircon_guest_trap_alignment_valid_spec(
+        ZX_GUEST_TRAP_IO as int,
+        3,
+        7,
+        ZX_GUEST_TRAP_BELL as int,
+        ZX_GUEST_TRAP_MEM as int,
+        PAGE_SIZE as int,
+    ));
+    assert(zircon_vcpu_entry_valid_spec(0x4000, ZX_VCPU_ENTRY_ALIGNMENT as int));
+    assert(!zircon_vcpu_entry_valid_spec(0x4001, ZX_VCPU_ENTRY_ALIGNMENT as int));
+    assert(zircon_vcpu_interrupt_vector_valid_spec(
+        1023,
+        ZX_VCPU_INTERRUPT_VECTOR_MAX as int,
+    ));
+    assert(!zircon_vcpu_interrupt_vector_valid_spec(
+        1024,
+        ZX_VCPU_INTERRUPT_VECTOR_MAX as int,
+    ));
+    assert(zircon_vcpu_read_state_args_valid_spec(
+        ZX_VCPU_STATE as int,
+        ZX_VCPU_STATE_SIZE as int,
+        ZX_VCPU_STATE as int,
+        ZX_VCPU_STATE_SIZE as int,
+    ));
+    assert(!zircon_vcpu_read_state_args_valid_spec(
+        ZX_VCPU_IO as int,
+        ZX_VCPU_IO_SIZE as int,
+        ZX_VCPU_STATE as int,
+        ZX_VCPU_STATE_SIZE as int,
+    ));
+    assert(zircon_vcpu_write_state_args_valid_spec(
+        ZX_VCPU_IO as int,
+        ZX_VCPU_IO_SIZE as int,
+        ZX_VCPU_STATE as int,
+        ZX_VCPU_STATE_SIZE as int,
+        ZX_VCPU_IO as int,
+        ZX_VCPU_IO_SIZE as int,
+    ));
+
     assert(linux_syscall_interface_known_spec(0));
     assert(linux_syscall_interface_known_spec(446));
     assert(linux_syscall_interface_known_spec(600));
@@ -612,6 +1001,177 @@ fn syscall_signal_mask_exec_smoke() {
     assert(user_allowed == signal_mask_allowed_spec(1u32 << 24, 1u32 << 25, user_mask));
     assert(kernel_rejected == signal_mask_allowed_spec(1u32, 0, user_mask));
     assert(eventpair_allowed == signal_mask_allowed_spec(1u32 << 4, 1u32 << 24, eventpair_mask));
+}
+
+fn syscall_time_debug_system_exception_exec_smoke() {
+    let clock_auto_start =
+        zircon_clock_create_options_valid(ZX_CLOCK_OPT_AUTO_START, ZX_CLOCK_OPT_AUTO_START);
+    let clock_bad = zircon_clock_create_options_valid(2, ZX_CLOCK_OPT_AUTO_START);
+    let clock_update = zircon_clock_update_options_valid(
+        ZX_CLOCK_UPDATE_OPTIONS_MASK,
+        ZX_CLOCK_UPDATE_OPTIONS_MASK,
+    );
+    let timer_zero = zircon_timer_options_valid(0, ZX_TIMER_OPTIONS_MASK);
+    let timer_bad = zircon_timer_options_valid(1, ZX_TIMER_OPTIONS_MASK);
+    let timer_expired = zircon_timer_deadline_expired(10, 10);
+    let debuglog_zero = zircon_debuglog_create_options_valid(0, ZX_DEBUGLOG_CREATE_OPTIONS_MASK);
+    let debuglog_bad = zircon_debuglog_io_options_valid(1, ZX_DEBUGLOG_OPTIONS_MASK);
+    let event_ok = zircon_system_event_kind_valid(3, ZX_SYSTEM_EVENT_KIND_MAX);
+    let event_bad = zircon_system_event_kind_valid(4, ZX_SYSTEM_EVENT_KIND_MAX);
+    let exception_debugger = zircon_exception_channel_options_valid(
+        ZX_EXCEPTION_CHANNEL_DEBUGGER,
+        ZX_EXCEPTION_CHANNEL_OPTIONS_MASK,
+    );
+
+    assert(clock_auto_start == u32_options_within_mask_spec(
+        ZX_CLOCK_OPT_AUTO_START,
+        ZX_CLOCK_OPT_AUTO_START,
+    ));
+    assert(clock_bad == u32_options_within_mask_spec(2, ZX_CLOCK_OPT_AUTO_START));
+    assert(clock_update == u64_options_within_mask_spec(
+        ZX_CLOCK_UPDATE_OPTIONS_MASK,
+        ZX_CLOCK_UPDATE_OPTIONS_MASK,
+    ));
+    assert(timer_zero == u32_options_within_mask_spec(0, ZX_TIMER_OPTIONS_MASK));
+    assert(timer_bad == u32_options_within_mask_spec(1, ZX_TIMER_OPTIONS_MASK));
+    assert(timer_expired == zircon_timer_deadline_expired_spec(10, 10));
+    assert(debuglog_zero == u32_options_within_mask_spec(0, ZX_DEBUGLOG_CREATE_OPTIONS_MASK));
+    assert(debuglog_bad == u32_options_within_mask_spec(1, ZX_DEBUGLOG_OPTIONS_MASK));
+    assert(event_ok == zircon_system_event_kind_valid_spec(
+        3,
+        ZX_SYSTEM_EVENT_KIND_MAX as int,
+    ));
+    assert(event_bad == zircon_system_event_kind_valid_spec(
+        4,
+        ZX_SYSTEM_EVENT_KIND_MAX as int,
+    ));
+    assert(exception_debugger == u32_options_within_mask_spec(
+        ZX_EXCEPTION_CHANNEL_DEBUGGER,
+        ZX_EXCEPTION_CHANNEL_OPTIONS_MASK,
+    ));
+}
+
+fn syscall_hypervisor_exec_smoke() {
+    let guest_options = zircon_hypervisor_options_valid(0, ZX_HYPERVISOR_OPTIONS_MASK);
+    let bad_guest_options = zircon_hypervisor_options_valid(1, ZX_HYPERVISOR_OPTIONS_MASK);
+    let trap_kind_ok = zircon_guest_trap_kind_valid(ZX_GUEST_TRAP_MEM, ZX_GUEST_TRAP_KIND_MAX);
+    let trap_kind_bad = zircon_guest_trap_kind_valid(3, ZX_GUEST_TRAP_KIND_MAX);
+    let trap_bell = zircon_guest_trap_is_bell(ZX_GUEST_TRAP_BELL, ZX_GUEST_TRAP_BELL);
+    let trap_mem = zircon_guest_trap_is_mem(ZX_GUEST_TRAP_MEM, ZX_GUEST_TRAP_MEM);
+    let trap_range_ok =
+        zircon_guest_trap_range_valid(0x4000, PAGE_SIZE as u64, ZX_GUEST_PHYS_LIMIT);
+    let trap_range_bad = zircon_guest_trap_range_valid(0x4000, 0, ZX_GUEST_PHYS_LIMIT);
+    let trap_align_ok = zircon_guest_trap_alignment_valid(
+        ZX_GUEST_TRAP_MEM,
+        0x4000,
+        PAGE_SIZE as u64,
+        ZX_GUEST_TRAP_BELL,
+        ZX_GUEST_TRAP_MEM,
+        PAGE_SIZE as u64,
+    );
+    let trap_align_bad = zircon_guest_trap_alignment_valid(
+        ZX_GUEST_TRAP_MEM,
+        0x4001,
+        PAGE_SIZE as u64,
+        ZX_GUEST_TRAP_BELL,
+        ZX_GUEST_TRAP_MEM,
+        PAGE_SIZE as u64,
+    );
+    let entry_ok = zircon_vcpu_entry_valid(0x8000, ZX_VCPU_ENTRY_ALIGNMENT);
+    let entry_bad = zircon_vcpu_entry_valid(0x8001, ZX_VCPU_ENTRY_ALIGNMENT);
+    let vector_ok =
+        zircon_vcpu_interrupt_vector_valid(128, ZX_VCPU_INTERRUPT_VECTOR_MAX);
+    let vector_bad =
+        zircon_vcpu_interrupt_vector_valid(1024, ZX_VCPU_INTERRUPT_VECTOR_MAX);
+    let read_state_ok = zircon_vcpu_read_state_args_valid(
+        ZX_VCPU_STATE,
+        ZX_VCPU_STATE_SIZE,
+        ZX_VCPU_STATE,
+        ZX_VCPU_STATE_SIZE,
+    );
+    let read_state_bad = zircon_vcpu_read_state_args_valid(
+        ZX_VCPU_IO,
+        ZX_VCPU_IO_SIZE,
+        ZX_VCPU_STATE,
+        ZX_VCPU_STATE_SIZE,
+    );
+    let write_io_ok = zircon_vcpu_write_state_args_valid(
+        ZX_VCPU_IO,
+        ZX_VCPU_IO_SIZE,
+        ZX_VCPU_STATE,
+        ZX_VCPU_STATE_SIZE,
+        ZX_VCPU_IO,
+        ZX_VCPU_IO_SIZE,
+    );
+
+    assert(guest_options == u32_options_within_mask_spec(0, ZX_HYPERVISOR_OPTIONS_MASK));
+    assert(bad_guest_options == u32_options_within_mask_spec(1, ZX_HYPERVISOR_OPTIONS_MASK));
+    assert(trap_kind_ok == zircon_system_event_kind_valid_spec(
+        ZX_GUEST_TRAP_MEM as int,
+        ZX_GUEST_TRAP_KIND_MAX as int,
+    ));
+    assert(trap_kind_bad == zircon_system_event_kind_valid_spec(
+        3,
+        ZX_GUEST_TRAP_KIND_MAX as int,
+    ));
+    assert(trap_bell);
+    assert(trap_mem);
+    assert(trap_range_ok == zircon_guest_trap_range_valid_spec(
+        0x4000,
+        PAGE_SIZE as int,
+        ZX_GUEST_PHYS_LIMIT as int,
+    ));
+    assert(trap_range_bad == zircon_guest_trap_range_valid_spec(
+        0x4000,
+        0,
+        ZX_GUEST_PHYS_LIMIT as int,
+    ));
+    assert(trap_align_ok == zircon_guest_trap_alignment_valid_spec(
+        ZX_GUEST_TRAP_MEM as int,
+        0x4000,
+        PAGE_SIZE as int,
+        ZX_GUEST_TRAP_BELL as int,
+        ZX_GUEST_TRAP_MEM as int,
+        PAGE_SIZE as int,
+    ));
+    assert(trap_align_bad == zircon_guest_trap_alignment_valid_spec(
+        ZX_GUEST_TRAP_MEM as int,
+        0x4001,
+        PAGE_SIZE as int,
+        ZX_GUEST_TRAP_BELL as int,
+        ZX_GUEST_TRAP_MEM as int,
+        PAGE_SIZE as int,
+    ));
+    assert(entry_ok == zircon_vcpu_entry_valid_spec(0x8000, ZX_VCPU_ENTRY_ALIGNMENT as int));
+    assert(entry_bad == zircon_vcpu_entry_valid_spec(0x8001, ZX_VCPU_ENTRY_ALIGNMENT as int));
+    assert(vector_ok == zircon_vcpu_interrupt_vector_valid_spec(
+        128,
+        ZX_VCPU_INTERRUPT_VECTOR_MAX as int,
+    ));
+    assert(vector_bad == zircon_vcpu_interrupt_vector_valid_spec(
+        1024,
+        ZX_VCPU_INTERRUPT_VECTOR_MAX as int,
+    ));
+    assert(read_state_ok == zircon_vcpu_read_state_args_valid_spec(
+        ZX_VCPU_STATE as int,
+        ZX_VCPU_STATE_SIZE as int,
+        ZX_VCPU_STATE as int,
+        ZX_VCPU_STATE_SIZE as int,
+    ));
+    assert(read_state_bad == zircon_vcpu_read_state_args_valid_spec(
+        ZX_VCPU_IO as int,
+        ZX_VCPU_IO_SIZE as int,
+        ZX_VCPU_STATE as int,
+        ZX_VCPU_STATE_SIZE as int,
+    ));
+    assert(write_io_ok == zircon_vcpu_write_state_args_valid_spec(
+        ZX_VCPU_IO as int,
+        ZX_VCPU_IO_SIZE as int,
+        ZX_VCPU_STATE as int,
+        ZX_VCPU_STATE_SIZE as int,
+        ZX_VCPU_IO as int,
+        ZX_VCPU_IO_SIZE as int,
+    ));
 }
 
 proof fn syscall_address_logic_smoke() {
