@@ -2951,6 +2951,346 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     ctx.serial
         .write_str("[OK] Linux signal, IPC, misc, and net tests completed\n");
 
+    ctx.serial
+        .write_str("[TEST] Testing Linux file, dir, fd, poll, and stat calls...\n");
+    #[repr(C)]
+    struct ShellIovec {
+        base: usize,
+        len: usize,
+    }
+    #[repr(C)]
+    struct ShellPollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    let file_path = b"/tmp/smros-file\0";
+    let dir_path = b"/tmp\0";
+    let file_fd =
+        match crate::syscall::sys_openat(usize::MAX - 99, file_path.as_ptr() as usize, 2, 0) {
+            Ok(fd) => {
+                print_linux_ok(ctx, "open file");
+                fd
+            }
+            Err(e) => {
+                print_linux_error(ctx, "open file", e);
+                return;
+            }
+        };
+    let dir_fd = match crate::syscall::sys_openat(
+        usize::MAX - 99,
+        dir_path.as_ptr() as usize,
+        0o200000,
+        0,
+    ) {
+        Ok(fd) => {
+            print_linux_ok(ctx, "open directory");
+            fd
+        }
+        Err(e) => {
+            print_linux_error(ctx, "open directory", e);
+            let _ = crate::syscall::sys_close(file_fd);
+            return;
+        }
+    };
+    match crate::syscall::sys_openat(usize::MAX - 99, file_path.as_ptr() as usize, 0x8000_0000, 0) {
+        Err(crate::syscall::SysError::EINVAL) => print_linux_ok(ctx, "reject bad open flags"),
+        Ok(fd) => {
+            ctx.serial
+                .write_str("  [FAIL] reject bad open flags unexpectedly fd=");
+            print_number(&mut ctx.serial, fd as u32);
+            ctx.serial.write_str("\n");
+            let _ = crate::syscall::sys_close(fd);
+            let _ = crate::syscall::sys_close(file_fd);
+            let _ = crate::syscall::sys_close(dir_fd);
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "reject bad open flags", e);
+            let _ = crate::syscall::sys_close(file_fd);
+            let _ = crate::syscall::sys_close(dir_fd);
+            return;
+        }
+    }
+
+    let file_payload = b"file-fd";
+    let mut file_readback = [0u8; 7];
+    if crate::syscall::sys_write(file_fd, file_payload.as_ptr() as usize, file_payload.len())
+        .is_err()
+        || crate::syscall::sys_read(
+            file_fd,
+            file_readback.as_mut_ptr() as usize,
+            file_readback.len(),
+        )
+        .is_err()
+        || file_readback != *file_payload
+    {
+        ctx.serial.write_str("  [FAIL] file read/write failed\n");
+        let _ = crate::syscall::sys_close(file_fd);
+        let _ = crate::syscall::sys_close(dir_fd);
+        return;
+    }
+    print_linux_ok(ctx, "file read/write");
+
+    let dup_fd = match crate::syscall::sys_dup(file_fd) {
+        Ok(fd) => {
+            print_linux_ok(ctx, "dup fd");
+            fd
+        }
+        Err(e) => {
+            print_linux_error(ctx, "dup fd", e);
+            let _ = crate::syscall::sys_close(file_fd);
+            let _ = crate::syscall::sys_close(dir_fd);
+            return;
+        }
+    };
+    let dup3_fd = match crate::syscall::sys_dup3(file_fd, dup_fd + 10, 0o2000000) {
+        Ok(fd) => {
+            print_linux_ok(ctx, "dup3 fd");
+            fd
+        }
+        Err(e) => {
+            print_linux_error(ctx, "dup3 fd", e);
+            let _ = crate::syscall::sys_close(dup_fd);
+            let _ = crate::syscall::sys_close(file_fd);
+            let _ = crate::syscall::sys_close(dir_fd);
+            return;
+        }
+    };
+    if crate::syscall::sys_fcntl(file_fd, 1, 0).is_err()
+        || crate::syscall::sys_fcntl(file_fd, 2, 0o2000000).is_err()
+        || crate::syscall::sys_fcntl(file_fd, 4, 0o4000).is_err()
+    {
+        ctx.serial.write_str("  [FAIL] fcntl fd ops failed\n");
+        let _ = crate::syscall::sys_close(dup3_fd);
+        let _ = crate::syscall::sys_close(dup_fd);
+        let _ = crate::syscall::sys_close(file_fd);
+        let _ = crate::syscall::sys_close(dir_fd);
+        return;
+    }
+    print_linux_ok(ctx, "fcntl fd ops");
+    match crate::syscall::sys_dup3(file_fd, file_fd, 0) {
+        Err(crate::syscall::SysError::EINVAL) => print_linux_ok(ctx, "reject dup3 same fd"),
+        Ok(fd) => {
+            ctx.serial
+                .write_str("  [FAIL] reject dup3 same fd unexpectedly fd=");
+            print_number(&mut ctx.serial, fd as u32);
+            ctx.serial.write_str("\n");
+            let _ = crate::syscall::sys_close(dup3_fd);
+            let _ = crate::syscall::sys_close(dup_fd);
+            let _ = crate::syscall::sys_close(file_fd);
+            let _ = crate::syscall::sys_close(dir_fd);
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "reject dup3 same fd", e);
+            let _ = crate::syscall::sys_close(dup3_fd);
+            let _ = crate::syscall::sys_close(dup_fd);
+            let _ = crate::syscall::sys_close(file_fd);
+            let _ = crate::syscall::sys_close(dir_fd);
+            return;
+        }
+    }
+
+    let mut dirents = [0xffu8; 64];
+    if crate::syscall::sys_getdents64(dir_fd, dirents.as_mut_ptr() as usize, dirents.len()).is_err()
+        || dirents != [0u8; 64]
+        || crate::syscall::sys_fchdir(dir_fd).is_err()
+    {
+        ctx.serial.write_str("  [FAIL] directory fd ops failed\n");
+        let _ = crate::syscall::sys_close(dup3_fd);
+        let _ = crate::syscall::sys_close(dup_fd);
+        let _ = crate::syscall::sys_close(file_fd);
+        let _ = crate::syscall::sys_close(dir_fd);
+        return;
+    }
+    print_linux_ok(ctx, "directory fd ops");
+    match crate::syscall::sys_getdents64(file_fd, dirents.as_mut_ptr() as usize, dirents.len()) {
+        Err(crate::syscall::SysError::ENODEV) => print_linux_ok(ctx, "reject getdents on file"),
+        Ok(value) => {
+            ctx.serial
+                .write_str("  [FAIL] reject getdents on file unexpectedly returned=");
+            print_number(&mut ctx.serial, value as u32);
+            ctx.serial.write_str("\n");
+            let _ = crate::syscall::sys_close(dup3_fd);
+            let _ = crate::syscall::sys_close(dup_fd);
+            let _ = crate::syscall::sys_close(file_fd);
+            let _ = crate::syscall::sys_close(dir_fd);
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "reject getdents on file", e);
+            let _ = crate::syscall::sys_close(dup3_fd);
+            let _ = crate::syscall::sys_close(dup_fd);
+            let _ = crate::syscall::sys_close(file_fd);
+            let _ = crate::syscall::sys_close(dir_fd);
+            return;
+        }
+    }
+
+    let mut stat_buf = [0xffu8; 256];
+    let mut statfs_buf = [0u8; 160];
+    if crate::syscall::sys_fstat(file_fd, stat_buf.as_mut_ptr() as usize).is_err()
+        || crate::syscall::sys_fstatat(
+            usize::MAX - 99,
+            file_path.as_ptr() as usize,
+            stat_buf.as_mut_ptr() as usize,
+            0,
+        )
+        .is_err()
+        || crate::syscall::sys_statfs(
+            file_path.as_ptr() as usize,
+            statfs_buf.as_mut_ptr() as usize,
+        )
+        .is_err()
+        || crate::syscall::sys_fstatfs(file_fd, statfs_buf.as_mut_ptr() as usize).is_err()
+        || crate::syscall::sys_statx(
+            usize::MAX - 99,
+            file_path.as_ptr() as usize,
+            0,
+            0x7ff,
+            stat_buf.as_mut_ptr() as usize,
+        )
+        .is_err()
+    {
+        ctx.serial.write_str("  [FAIL] stat path failed\n");
+        let _ = crate::syscall::sys_close(dup3_fd);
+        let _ = crate::syscall::sys_close(dup_fd);
+        let _ = crate::syscall::sys_close(file_fd);
+        let _ = crate::syscall::sys_close(dir_fd);
+        return;
+    }
+    print_linux_ok(ctx, "stat and statfs ops");
+    match crate::syscall::sys_statx(
+        usize::MAX - 99,
+        file_path.as_ptr() as usize,
+        0x8000_0000,
+        0x7ff,
+        stat_buf.as_mut_ptr() as usize,
+    ) {
+        Err(crate::syscall::SysError::EINVAL) => print_linux_ok(ctx, "reject bad statx flags"),
+        Ok(value) => {
+            ctx.serial
+                .write_str("  [FAIL] reject bad statx flags unexpectedly returned=");
+            print_number(&mut ctx.serial, value as u32);
+            ctx.serial.write_str("\n");
+            let _ = crate::syscall::sys_close(dup3_fd);
+            let _ = crate::syscall::sys_close(dup_fd);
+            let _ = crate::syscall::sys_close(file_fd);
+            let _ = crate::syscall::sys_close(dir_fd);
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "reject bad statx flags", e);
+            let _ = crate::syscall::sys_close(dup3_fd);
+            let _ = crate::syscall::sys_close(dup_fd);
+            let _ = crate::syscall::sys_close(file_fd);
+            let _ = crate::syscall::sys_close(dir_fd);
+            return;
+        }
+    }
+
+    let iov_a = b"iv";
+    let iov_b = b"ec";
+    let iovs = [
+        ShellIovec {
+            base: iov_a.as_ptr() as usize,
+            len: iov_a.len(),
+        },
+        ShellIovec {
+            base: iov_b.as_ptr() as usize,
+            len: iov_b.len(),
+        },
+    ];
+    if crate::syscall::sys_writev(file_fd, iovs.as_ptr() as usize, iovs.len()).is_err() {
+        ctx.serial.write_str("  [FAIL] writev failed\n");
+        let _ = crate::syscall::sys_close(dup3_fd);
+        let _ = crate::syscall::sys_close(dup_fd);
+        let _ = crate::syscall::sys_close(file_fd);
+        let _ = crate::syscall::sys_close(dir_fd);
+        return;
+    }
+    print_linux_ok(ctx, "writev");
+    let mut polls = [
+        ShellPollFd {
+            fd: file_fd as i32,
+            events: 0x0001 | 0x0004,
+            revents: 0,
+        },
+        ShellPollFd {
+            fd: -1,
+            events: 0x0001,
+            revents: 7,
+        },
+    ];
+    match crate::syscall::sys_poll(polls.as_mut_ptr() as usize, polls.len(), 0) {
+        Ok(ready) if ready == 1 && polls[0].revents != 0 && polls[1].revents == 0 => {
+            print_linux_ok(ctx, "poll fd readiness");
+        }
+        Ok(ready) => {
+            ctx.serial.write_str("  [FAIL] poll ready=");
+            print_number(&mut ctx.serial, ready as u32);
+            ctx.serial.write_str(", revents=");
+            print_number(&mut ctx.serial, polls[0].revents as u32);
+            ctx.serial.write_str("\n");
+            let _ = crate::syscall::sys_close(dup3_fd);
+            let _ = crate::syscall::sys_close(dup_fd);
+            let _ = crate::syscall::sys_close(file_fd);
+            let _ = crate::syscall::sys_close(dir_fd);
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "poll fd readiness", e);
+            let _ = crate::syscall::sys_close(dup3_fd);
+            let _ = crate::syscall::sys_close(dup_fd);
+            let _ = crate::syscall::sys_close(file_fd);
+            let _ = crate::syscall::sys_close(dir_fd);
+            return;
+        }
+    }
+    polls[0].events = 0x4000;
+    match crate::syscall::sys_poll(polls.as_mut_ptr() as usize, 1, 0) {
+        Err(crate::syscall::SysError::EINVAL) => print_linux_ok(ctx, "reject bad poll events"),
+        Ok(value) => {
+            ctx.serial
+                .write_str("  [FAIL] reject bad poll events unexpectedly returned=");
+            print_number(&mut ctx.serial, value as u32);
+            ctx.serial.write_str("\n");
+            let _ = crate::syscall::sys_close(dup3_fd);
+            let _ = crate::syscall::sys_close(dup_fd);
+            let _ = crate::syscall::sys_close(file_fd);
+            let _ = crate::syscall::sys_close(dir_fd);
+            return;
+        }
+        Err(e) => {
+            print_linux_error(ctx, "reject bad poll events", e);
+            let _ = crate::syscall::sys_close(dup3_fd);
+            let _ = crate::syscall::sys_close(dup_fd);
+            let _ = crate::syscall::sys_close(file_fd);
+            let _ = crate::syscall::sys_close(dir_fd);
+            return;
+        }
+    }
+    if crate::syscall::sys_lseek(file_fd, 0, 0).is_err()
+        || crate::syscall::sys_ftruncate(file_fd, 0).is_err()
+        || crate::syscall::sys_fsync(file_fd).is_err()
+        || crate::syscall::sys_sync_file_range(file_fd, 0, 0, 0).is_err()
+    {
+        ctx.serial.write_str("  [FAIL] fd maintenance ops failed\n");
+        let _ = crate::syscall::sys_close(dup3_fd);
+        let _ = crate::syscall::sys_close(dup_fd);
+        let _ = crate::syscall::sys_close(file_fd);
+        let _ = crate::syscall::sys_close(dir_fd);
+        return;
+    }
+    print_linux_ok(ctx, "fd maintenance ops");
+    let _ = crate::syscall::sys_close(dup3_fd);
+    let _ = crate::syscall::sys_close(dup_fd);
+    let _ = crate::syscall::sys_close(file_fd);
+    let _ = crate::syscall::sys_close(dir_fd);
+    ctx.serial
+        .write_str("[OK] Linux file, dir, fd, poll, and stat tests completed\n");
+
     ctx.serial.write_str("[TEST] Closing VMO handle... ");
     match crate::syscall::sys_handle_close(vmo_handle) {
         Ok(_) => ctx.serial.write_str("[OK] handle closed\n"),

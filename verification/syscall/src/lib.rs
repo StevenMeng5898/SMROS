@@ -67,6 +67,44 @@ pub const LINUX_MAX_IPC_BYTES: usize = 65536;
 pub const LINUX_MAX_MSG_BYTES: usize = 8192;
 pub const LINUX_MEMFD_ALLOWED_FLAGS: usize = 0x0001 | 0x0002 | 0x0004;
 pub const LINUX_GETRANDOM_ALLOWED_FLAGS: u32 = 0x0001 | 0x0002;
+pub const LINUX_STDIO_FD_MAX: usize = 2;
+pub const LINUX_O_ACCMODE: usize = 0o3;
+pub const LINUX_O_RDONLY: usize = 0;
+pub const LINUX_O_WRONLY: usize = 1;
+pub const LINUX_O_RDWR: usize = 2;
+pub const LINUX_O_CREAT: usize = 0o100;
+pub const LINUX_O_EXCL: usize = 0o200;
+pub const LINUX_O_TRUNC: usize = 0o1000;
+pub const LINUX_O_APPEND: usize = 0o2000;
+pub const LINUX_O_NONBLOCK: usize = 0o4000;
+pub const LINUX_O_DIRECTORY: usize = 0o200000;
+pub const LINUX_O_CLOEXEC: usize = 0o2000000;
+pub const LINUX_OPEN_ALLOWED_FLAGS: usize = LINUX_O_ACCMODE
+    | LINUX_O_CREAT
+    | LINUX_O_EXCL
+    | LINUX_O_TRUNC
+    | LINUX_O_APPEND
+    | LINUX_O_NONBLOCK
+    | LINUX_O_DIRECTORY
+    | LINUX_O_CLOEXEC;
+pub const LINUX_PIPE_ALLOWED_FLAGS: usize = LINUX_O_CLOEXEC | LINUX_O_NONBLOCK;
+pub const LINUX_FCNTL_STATUS_ALLOWED_FLAGS: usize = LINUX_O_APPEND | LINUX_O_NONBLOCK;
+pub const LINUX_ACCESS_MODE_MASK: usize = 0o7;
+pub const LINUX_AT_REMOVEDIR: usize = 0x200;
+pub const LINUX_UNLINK_ALLOWED_FLAGS: usize = LINUX_AT_REMOVEDIR;
+pub const LINUX_RENAME_NOREPLACE: usize = 1;
+pub const LINUX_RENAME_EXCHANGE: usize = 2;
+pub const LINUX_RENAME_WHITEOUT: usize = 4;
+pub const LINUX_RENAME_ALLOWED_FLAGS: usize =
+    LINUX_RENAME_NOREPLACE | LINUX_RENAME_EXCHANGE | LINUX_RENAME_WHITEOUT;
+pub const LINUX_AT_SYMLINK_NOFOLLOW: usize = 0x100;
+pub const LINUX_AT_EMPTY_PATH: usize = 0x1000;
+pub const LINUX_STAT_ALLOWED_FLAGS: usize = LINUX_AT_SYMLINK_NOFOLLOW | LINUX_AT_EMPTY_PATH;
+pub const LINUX_STATX_BASIC_STATS: usize = 0x7ff;
+pub const LINUX_SEEK_MAX_WHENCE: usize = 5;
+pub const LINUX_MAX_IOV: usize = 1024;
+pub const LINUX_MAX_POLL_FDS: usize = 1024;
+pub const LINUX_POLL_ALLOWED_EVENTS: i16 = 0x0001 | 0x0004 | 0x0008 | 0x0010 | 0x0020 | 0x0040;
 
 #[derive(Copy, Clone)]
 struct LinuxRange {
@@ -289,6 +327,66 @@ spec fn linux_usize_options_within_mask_spec(options: usize, allowed_mask: usize
 }
 
 spec fn linux_u32_options_within_mask_spec(options: u32, allowed_mask: u32) -> bool {
+    (options & !allowed_mask) == 0
+}
+
+spec fn linux_open_access_mode_valid_spec(
+    flags: usize,
+    access_mask: usize,
+    read_only: usize,
+    write_only: usize,
+    read_write: usize,
+) -> bool {
+    let access = flags & access_mask;
+    access == read_only || access == write_only || access == read_write
+}
+
+spec fn linux_open_is_directory_spec(flags: usize, directory_flag: usize) -> bool {
+    (flags & directory_flag) != 0
+}
+
+spec fn linux_fd_target_valid_spec(fd: int, stdio_max: int) -> bool {
+    0 <= fd && fd <= stdio_max
+}
+
+spec fn linux_dup3_args_valid_spec(old_fd: int, new_fd: int) -> bool {
+    old_fd != new_fd
+}
+
+spec fn linux_fcntl_cmd_supported_spec(
+    cmd: int,
+    dupfd: int,
+    getfd: int,
+    setfd: int,
+    getfl: int,
+    setfl: int,
+    dupfd_cloexec: int,
+) -> bool {
+    cmd == dupfd
+        || cmd == getfd
+        || cmd == setfd
+        || cmd == getfl
+        || cmd == setfl
+        || cmd == dupfd_cloexec
+}
+
+spec fn linux_lseek_whence_valid_spec(whence: int, max_whence: int) -> bool {
+    0 <= whence && whence <= max_whence
+}
+
+spec fn linux_iov_count_valid_spec(count: int, max_count: int) -> bool {
+    0 <= count && count <= max_count
+}
+
+spec fn linux_iov_bytes_valid_spec(count: int, elem_size: int, max_count: int) -> bool {
+    0 <= count && 0 < elem_size && count <= max_count && count <= usize::MAX as int / elem_size
+}
+
+spec fn linux_poll_count_valid_spec(count: int, max_count: int) -> bool {
+    0 <= count && count <= max_count
+}
+
+spec fn linux_i16_options_within_mask_spec(options: i16, allowed_mask: i16) -> bool {
     (options & !allowed_mask) == 0
 }
 
@@ -691,6 +789,169 @@ fn linux_getrandom_flags_valid(flags: u32, allowed_mask: u32) -> (out: bool)
         out == linux_u32_options_within_mask_spec(flags, allowed_mask),
 {
     smros_linux_getrandom_flags_valid_body!(flags, allowed_mask)
+}
+
+fn linux_open_access_mode_valid(
+    flags: usize,
+    access_mask: usize,
+    read_only: usize,
+    write_only: usize,
+    read_write: usize,
+) -> (out: bool)
+    ensures
+        out == linux_open_access_mode_valid_spec(
+            flags, access_mask, read_only, write_only, read_write,
+        ),
+{
+    smros_linux_open_access_mode_valid_body!(
+        flags,
+        access_mask,
+        read_only,
+        write_only,
+        read_write
+    )
+}
+
+fn linux_open_flags_valid(flags: usize, allowed_mask: usize) -> (out: bool)
+    ensures
+        out == linux_usize_options_within_mask_spec(flags, allowed_mask),
+{
+    smros_linux_open_flags_valid_body!(flags, allowed_mask)
+}
+
+fn linux_open_is_directory(flags: usize, directory_flag: usize) -> (out: bool)
+    ensures
+        out == linux_open_is_directory_spec(flags, directory_flag),
+{
+    smros_linux_open_is_directory_body!(flags, directory_flag)
+}
+
+fn linux_fd_target_valid(fd: usize, stdio_max: usize) -> (out: bool)
+    ensures
+        out == linux_fd_target_valid_spec(fd as int, stdio_max as int),
+{
+    smros_linux_fd_target_valid_body!(fd, stdio_max)
+}
+
+fn linux_pipe_flags_valid(flags: usize, allowed_mask: usize) -> (out: bool)
+    ensures
+        out == linux_usize_options_within_mask_spec(flags, allowed_mask),
+{
+    smros_linux_pipe_flags_valid_body!(flags, allowed_mask)
+}
+
+fn linux_dup3_args_valid(old_fd: usize, new_fd: usize) -> (out: bool)
+    ensures
+        out == linux_dup3_args_valid_spec(old_fd as int, new_fd as int),
+{
+    smros_linux_dup3_args_valid_body!(old_fd, new_fd)
+}
+
+fn linux_fcntl_cmd_supported(
+    cmd: usize,
+    dupfd: usize,
+    getfd: usize,
+    setfd: usize,
+    getfl: usize,
+    setfl: usize,
+    dupfd_cloexec: usize,
+) -> (out: bool)
+    ensures
+        out == linux_fcntl_cmd_supported_spec(
+            cmd as int,
+            dupfd as int,
+            getfd as int,
+            setfd as int,
+            getfl as int,
+            setfl as int,
+            dupfd_cloexec as int,
+        ),
+{
+    smros_linux_fcntl_cmd_supported_body!(cmd, dupfd, getfd, setfd, getfl, setfl, dupfd_cloexec)
+}
+
+fn linux_fcntl_flags_valid(flags: usize, allowed_mask: usize) -> (out: bool)
+    ensures
+        out == linux_usize_options_within_mask_spec(flags, allowed_mask),
+{
+    smros_linux_fcntl_flags_valid_body!(flags, allowed_mask)
+}
+
+fn linux_path_mode_valid(mode: usize, allowed_mask: usize) -> (out: bool)
+    ensures
+        out == linux_usize_options_within_mask_spec(mode, allowed_mask),
+{
+    smros_linux_path_mode_valid_body!(mode, allowed_mask)
+}
+
+fn linux_unlink_flags_valid(flags: usize, allowed_mask: usize) -> (out: bool)
+    ensures
+        out == linux_usize_options_within_mask_spec(flags, allowed_mask),
+{
+    smros_linux_unlink_flags_valid_body!(flags, allowed_mask)
+}
+
+fn linux_rename_flags_valid(flags: usize, allowed_mask: usize) -> (out: bool)
+    ensures
+        out == linux_usize_options_within_mask_spec(flags, allowed_mask),
+{
+    smros_linux_rename_flags_valid_body!(flags, allowed_mask)
+}
+
+fn linux_stat_flags_valid(flags: usize, allowed_mask: usize) -> (out: bool)
+    ensures
+        out == linux_usize_options_within_mask_spec(flags, allowed_mask),
+{
+    smros_linux_stat_flags_valid_body!(flags, allowed_mask)
+}
+
+fn linux_stat_mask_valid(mask: usize, allowed_mask: usize) -> (out: bool)
+    ensures
+        out == linux_usize_options_within_mask_spec(mask, allowed_mask),
+{
+    smros_linux_stat_mask_valid_body!(mask, allowed_mask)
+}
+
+fn linux_lseek_whence_valid(whence: usize, max_whence: usize) -> (out: bool)
+    ensures
+        out == linux_lseek_whence_valid_spec(whence as int, max_whence as int),
+{
+    smros_linux_lseek_whence_valid_body!(whence, max_whence)
+}
+
+fn linux_iov_count_valid(count: usize, max_count: usize) -> (out: bool)
+    ensures
+        out == linux_iov_count_valid_spec(count as int, max_count as int),
+{
+    smros_linux_iov_count_valid_body!(count, max_count)
+}
+
+fn linux_iov_bytes_valid(count: usize, elem_size: usize, max_count: usize) -> (out: bool)
+    ensures
+        out == linux_iov_bytes_valid_spec(count as int, elem_size as int, max_count as int),
+{
+    smros_linux_iov_bytes_valid_body!(count, elem_size, max_count)
+}
+
+fn linux_poll_count_valid(count: usize, max_count: usize) -> (out: bool)
+    ensures
+        out == linux_poll_count_valid_spec(count as int, max_count as int),
+{
+    smros_linux_poll_count_valid_body!(count, max_count)
+}
+
+fn linux_poll_events_valid(events: i16, allowed_mask: i16) -> (out: bool)
+    ensures
+        out == linux_i16_options_within_mask_spec(events, allowed_mask),
+{
+    smros_linux_poll_events_valid_body!(events, allowed_mask)
+}
+
+fn linux_copy_flags_valid(flags: usize, allowed_mask: usize) -> (out: bool)
+    ensures
+        out == linux_usize_options_within_mask_spec(flags, allowed_mask),
+{
+    smros_linux_copy_flags_valid_body!(flags, allowed_mask)
 }
 
 fn zircon_clock_id_supported(clock_id: u32) -> (out: bool)
@@ -1495,6 +1756,158 @@ fn syscall_linux_signal_ipc_misc_net_exec_smoke() {
     assert(getrandom_flags_ok);
     assert(!linux_u32_options_within_mask_spec(4, LINUX_GETRANDOM_ALLOWED_FLAGS)) by(bit_vector);
     assert(!getrandom_flags_bad);
+}
+
+fn syscall_linux_file_dir_fd_poll_stat_exec_smoke() {
+    let open_rdwr = linux_open_access_mode_valid(
+        LINUX_O_RDWR,
+        LINUX_O_ACCMODE,
+        LINUX_O_RDONLY,
+        LINUX_O_WRONLY,
+        LINUX_O_RDWR,
+    );
+    let open_bad_access = linux_open_access_mode_valid(
+        3,
+        LINUX_O_ACCMODE,
+        LINUX_O_RDONLY,
+        LINUX_O_WRONLY,
+        LINUX_O_RDWR,
+    );
+    let open_flags_ok = linux_open_flags_valid(
+        LINUX_O_RDWR | LINUX_O_CREAT | LINUX_O_CLOEXEC,
+        LINUX_OPEN_ALLOWED_FLAGS,
+    );
+    let open_flags_bad = linux_open_flags_valid(0x8000_0000, LINUX_OPEN_ALLOWED_FLAGS);
+    let open_dir = linux_open_is_directory(LINUX_O_DIRECTORY, LINUX_O_DIRECTORY);
+    let stdio_ok = linux_fd_target_valid(2, LINUX_STDIO_FD_MAX);
+    let stdio_bad = linux_fd_target_valid(3, LINUX_STDIO_FD_MAX);
+    let pipe_flags_ok = linux_pipe_flags_valid(LINUX_O_CLOEXEC, LINUX_PIPE_ALLOWED_FLAGS);
+    let pipe_flags_bad = linux_pipe_flags_valid(LINUX_O_APPEND, LINUX_PIPE_ALLOWED_FLAGS);
+    let dup_args_ok = linux_dup3_args_valid(3, 4);
+    let dup_args_bad = linux_dup3_args_valid(3, 3);
+    let fcntl_cmd_ok = linux_fcntl_cmd_supported(4, 0, 1, 2, 3, 4, 1030);
+    let fcntl_cmd_bad = linux_fcntl_cmd_supported(99, 0, 1, 2, 3, 4, 1030);
+    let fcntl_flags_ok =
+        linux_fcntl_flags_valid(LINUX_O_NONBLOCK, LINUX_FCNTL_STATUS_ALLOWED_FLAGS);
+    let fcntl_flags_bad =
+        linux_fcntl_flags_valid(LINUX_O_CREAT, LINUX_FCNTL_STATUS_ALLOWED_FLAGS);
+    let access_mode_ok = linux_path_mode_valid(0o7, LINUX_ACCESS_MODE_MASK);
+    let access_mode_bad = linux_path_mode_valid(0o10, LINUX_ACCESS_MODE_MASK);
+    let unlink_flags_ok = linux_unlink_flags_valid(LINUX_AT_REMOVEDIR, LINUX_UNLINK_ALLOWED_FLAGS);
+    let unlink_flags_bad = linux_unlink_flags_valid(0x4000, LINUX_UNLINK_ALLOWED_FLAGS);
+    let rename_flags_ok =
+        linux_rename_flags_valid(LINUX_RENAME_NOREPLACE, LINUX_RENAME_ALLOWED_FLAGS);
+    let rename_flags_bad = linux_rename_flags_valid(8, LINUX_RENAME_ALLOWED_FLAGS);
+    let stat_flags_ok =
+        linux_stat_flags_valid(LINUX_AT_SYMLINK_NOFOLLOW, LINUX_STAT_ALLOWED_FLAGS);
+    let stat_flags_bad = linux_stat_flags_valid(0x8000, LINUX_STAT_ALLOWED_FLAGS);
+    let stat_mask_ok = linux_stat_mask_valid(LINUX_STATX_BASIC_STATS, LINUX_STATX_BASIC_STATS);
+    let stat_mask_bad = linux_stat_mask_valid(0x8000, LINUX_STATX_BASIC_STATS);
+    let seek_ok = linux_lseek_whence_valid(5, LINUX_SEEK_MAX_WHENCE);
+    let seek_bad = linux_lseek_whence_valid(6, LINUX_SEEK_MAX_WHENCE);
+    let iov_count_ok = linux_iov_count_valid(1024, LINUX_MAX_IOV);
+    let iov_count_bad = linux_iov_count_valid(1025, LINUX_MAX_IOV);
+    let iov_bytes_ok = linux_iov_bytes_valid(2, 16, LINUX_MAX_IOV);
+    let iov_bytes_bad = linux_iov_bytes_valid(1025, 16, LINUX_MAX_IOV);
+    let poll_count_ok = linux_poll_count_valid(1024, LINUX_MAX_POLL_FDS);
+    let poll_count_bad = linux_poll_count_valid(1025, LINUX_MAX_POLL_FDS);
+    let poll_events_ok = linux_poll_events_valid(0x0005i16, LINUX_POLL_ALLOWED_EVENTS);
+    let poll_events_bad = linux_poll_events_valid(0x4000i16, LINUX_POLL_ALLOWED_EVENTS);
+    let copy_flags_ok = linux_copy_flags_valid(0, 0);
+    let copy_flags_bad = linux_copy_flags_valid(1, 0);
+
+    assert(open_rdwr == linux_open_access_mode_valid_spec(
+        LINUX_O_RDWR,
+        LINUX_O_ACCMODE,
+        LINUX_O_RDONLY,
+        LINUX_O_WRONLY,
+        LINUX_O_RDWR,
+    ));
+    assert(open_bad_access == linux_open_access_mode_valid_spec(
+        3,
+        LINUX_O_ACCMODE,
+        LINUX_O_RDONLY,
+        LINUX_O_WRONLY,
+        LINUX_O_RDWR,
+    ));
+    assert(linux_usize_options_within_mask_spec(
+        LINUX_O_RDWR | LINUX_O_CREAT | LINUX_O_CLOEXEC,
+        LINUX_OPEN_ALLOWED_FLAGS,
+    )) by(bit_vector);
+    assert(open_flags_ok);
+    assert(!linux_usize_options_within_mask_spec(0x8000_0000, LINUX_OPEN_ALLOWED_FLAGS)) by(bit_vector);
+    assert(!open_flags_bad);
+    assert(open_dir == linux_open_is_directory_spec(LINUX_O_DIRECTORY, LINUX_O_DIRECTORY));
+    assert(stdio_ok == linux_fd_target_valid_spec(2, LINUX_STDIO_FD_MAX as int));
+    assert(stdio_bad == linux_fd_target_valid_spec(3, LINUX_STDIO_FD_MAX as int));
+    assert(linux_usize_options_within_mask_spec(LINUX_O_CLOEXEC, LINUX_PIPE_ALLOWED_FLAGS))
+        by(bit_vector);
+    assert(pipe_flags_ok);
+    assert(!linux_usize_options_within_mask_spec(LINUX_O_APPEND, LINUX_PIPE_ALLOWED_FLAGS))
+        by(bit_vector);
+    assert(!pipe_flags_bad);
+    assert(dup_args_ok == linux_dup3_args_valid_spec(3, 4));
+    assert(dup_args_bad == linux_dup3_args_valid_spec(3, 3));
+    assert(fcntl_cmd_ok == linux_fcntl_cmd_supported_spec(4, 0, 1, 2, 3, 4, 1030));
+    assert(fcntl_cmd_bad == linux_fcntl_cmd_supported_spec(99, 0, 1, 2, 3, 4, 1030));
+    assert(linux_usize_options_within_mask_spec(
+        LINUX_O_NONBLOCK,
+        LINUX_FCNTL_STATUS_ALLOWED_FLAGS,
+    )) by(bit_vector);
+    assert(fcntl_flags_ok);
+    assert(!linux_usize_options_within_mask_spec(
+        LINUX_O_CREAT,
+        LINUX_FCNTL_STATUS_ALLOWED_FLAGS,
+    )) by(bit_vector);
+    assert(!fcntl_flags_bad);
+    assert(linux_usize_options_within_mask_spec(0o7, LINUX_ACCESS_MODE_MASK)) by(bit_vector);
+    assert(access_mode_ok);
+    assert(!linux_usize_options_within_mask_spec(0o10, LINUX_ACCESS_MODE_MASK)) by(bit_vector);
+    assert(!access_mode_bad);
+    assert(linux_usize_options_within_mask_spec(LINUX_AT_REMOVEDIR, LINUX_UNLINK_ALLOWED_FLAGS))
+        by(bit_vector);
+    assert(unlink_flags_ok);
+    assert(!linux_usize_options_within_mask_spec(0x4000, LINUX_UNLINK_ALLOWED_FLAGS))
+        by(bit_vector);
+    assert(!unlink_flags_bad);
+    assert(linux_usize_options_within_mask_spec(
+        LINUX_RENAME_NOREPLACE,
+        LINUX_RENAME_ALLOWED_FLAGS,
+    )) by(bit_vector);
+    assert(rename_flags_ok);
+    assert(!linux_usize_options_within_mask_spec(8, LINUX_RENAME_ALLOWED_FLAGS)) by(bit_vector);
+    assert(!rename_flags_bad);
+    assert(linux_usize_options_within_mask_spec(
+        LINUX_AT_SYMLINK_NOFOLLOW,
+        LINUX_STAT_ALLOWED_FLAGS,
+    )) by(bit_vector);
+    assert(stat_flags_ok);
+    assert(!linux_usize_options_within_mask_spec(0x8000, LINUX_STAT_ALLOWED_FLAGS)) by(bit_vector);
+    assert(!stat_flags_bad);
+    assert(linux_usize_options_within_mask_spec(
+        LINUX_STATX_BASIC_STATS,
+        LINUX_STATX_BASIC_STATS,
+    )) by(bit_vector);
+    assert(stat_mask_ok);
+    assert(!linux_usize_options_within_mask_spec(0x8000, LINUX_STATX_BASIC_STATS)) by(bit_vector);
+    assert(!stat_mask_bad);
+    assert(seek_ok == linux_lseek_whence_valid_spec(5, LINUX_SEEK_MAX_WHENCE as int));
+    assert(seek_bad == linux_lseek_whence_valid_spec(6, LINUX_SEEK_MAX_WHENCE as int));
+    assert(iov_count_ok == linux_iov_count_valid_spec(1024, LINUX_MAX_IOV as int));
+    assert(iov_count_bad == linux_iov_count_valid_spec(1025, LINUX_MAX_IOV as int));
+    assert(iov_bytes_ok == linux_iov_bytes_valid_spec(2, 16, LINUX_MAX_IOV as int));
+    assert(iov_bytes_bad == linux_iov_bytes_valid_spec(1025, 16, LINUX_MAX_IOV as int));
+    assert(poll_count_ok == linux_poll_count_valid_spec(1024, LINUX_MAX_POLL_FDS as int));
+    assert(poll_count_bad == linux_poll_count_valid_spec(1025, LINUX_MAX_POLL_FDS as int));
+    assert(linux_i16_options_within_mask_spec(0x0005i16, LINUX_POLL_ALLOWED_EVENTS)) by(bit_vector);
+    assert(poll_events_ok);
+    assert(!linux_i16_options_within_mask_spec(0x4000i16, LINUX_POLL_ALLOWED_EVENTS))
+        by(bit_vector);
+    assert(!poll_events_bad);
+    assert(linux_usize_options_within_mask_spec(0, 0)) by(bit_vector);
+    assert(copy_flags_ok);
+    assert(!linux_usize_options_within_mask_spec(1, 0)) by(bit_vector);
+    assert(!copy_flags_bad);
 }
 
 fn syscall_hypervisor_exec_smoke() {

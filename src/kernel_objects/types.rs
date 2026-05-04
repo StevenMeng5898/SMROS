@@ -91,6 +91,7 @@ pub enum ObjectType {
     LinuxSignal = 50,
     LinuxEventBus = 51,
     LinuxDevice = 52,
+    LinuxDir = 53,
 }
 
 /// Handle rights bitmask

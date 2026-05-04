@@ -133,6 +133,96 @@ pub(crate) fn linux_getrandom_flags_valid(flags: u32, allowed_mask: u32) -> bool
     smros_linux_getrandom_flags_valid_body!(flags, allowed_mask)
 }
 
+pub(crate) fn linux_open_access_mode_valid(
+    flags: usize,
+    access_mask: usize,
+    read_only: usize,
+    write_only: usize,
+    read_write: usize,
+) -> bool {
+    smros_linux_open_access_mode_valid_body!(flags, access_mask, read_only, write_only, read_write)
+}
+
+pub(crate) fn linux_open_flags_valid(flags: usize, allowed_mask: usize) -> bool {
+    smros_linux_open_flags_valid_body!(flags, allowed_mask)
+}
+
+pub(crate) fn linux_open_is_directory(flags: usize, directory_flag: usize) -> bool {
+    smros_linux_open_is_directory_body!(flags, directory_flag)
+}
+
+pub(crate) fn linux_fd_target_valid(fd: usize, stdio_max: usize) -> bool {
+    smros_linux_fd_target_valid_body!(fd, stdio_max)
+}
+
+pub(crate) fn linux_pipe_flags_valid(flags: usize, allowed_mask: usize) -> bool {
+    smros_linux_pipe_flags_valid_body!(flags, allowed_mask)
+}
+
+pub(crate) fn linux_dup3_args_valid(old_fd: usize, new_fd: usize) -> bool {
+    smros_linux_dup3_args_valid_body!(old_fd, new_fd)
+}
+
+pub(crate) fn linux_fcntl_cmd_supported(
+    cmd: usize,
+    dupfd: usize,
+    getfd: usize,
+    setfd: usize,
+    getfl: usize,
+    setfl: usize,
+    dupfd_cloexec: usize,
+) -> bool {
+    smros_linux_fcntl_cmd_supported_body!(cmd, dupfd, getfd, setfd, getfl, setfl, dupfd_cloexec)
+}
+
+pub(crate) fn linux_fcntl_flags_valid(flags: usize, allowed_mask: usize) -> bool {
+    smros_linux_fcntl_flags_valid_body!(flags, allowed_mask)
+}
+
+pub(crate) fn linux_path_mode_valid(mode: usize, allowed_mask: usize) -> bool {
+    smros_linux_path_mode_valid_body!(mode, allowed_mask)
+}
+
+pub(crate) fn linux_unlink_flags_valid(flags: usize, allowed_mask: usize) -> bool {
+    smros_linux_unlink_flags_valid_body!(flags, allowed_mask)
+}
+
+pub(crate) fn linux_rename_flags_valid(flags: usize, allowed_mask: usize) -> bool {
+    smros_linux_rename_flags_valid_body!(flags, allowed_mask)
+}
+
+pub(crate) fn linux_stat_flags_valid(flags: usize, allowed_mask: usize) -> bool {
+    smros_linux_stat_flags_valid_body!(flags, allowed_mask)
+}
+
+pub(crate) fn linux_stat_mask_valid(mask: usize, allowed_mask: usize) -> bool {
+    smros_linux_stat_mask_valid_body!(mask, allowed_mask)
+}
+
+pub(crate) fn linux_lseek_whence_valid(whence: usize, max_whence: usize) -> bool {
+    smros_linux_lseek_whence_valid_body!(whence, max_whence)
+}
+
+pub(crate) fn linux_iov_count_valid(count: usize, max_count: usize) -> bool {
+    smros_linux_iov_count_valid_body!(count, max_count)
+}
+
+pub(crate) fn linux_iov_bytes_valid(count: usize, elem_size: usize, max_count: usize) -> bool {
+    smros_linux_iov_bytes_valid_body!(count, elem_size, max_count)
+}
+
+pub(crate) fn linux_poll_count_valid(count: usize, max_count: usize) -> bool {
+    smros_linux_poll_count_valid_body!(count, max_count)
+}
+
+pub(crate) fn linux_poll_events_valid(events: i16, allowed_mask: i16) -> bool {
+    smros_linux_poll_events_valid_body!(events, allowed_mask)
+}
+
+pub(crate) fn linux_copy_flags_valid(flags: usize, allowed_mask: usize) -> bool {
+    smros_linux_copy_flags_valid_body!(flags, allowed_mask)
+}
+
 pub(crate) fn zircon_clock_id_supported(clock_id: u32) -> bool {
     smros_zircon_clock_id_supported_body!(clock_id)
 }

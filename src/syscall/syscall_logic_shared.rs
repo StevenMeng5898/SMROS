@@ -168,6 +168,128 @@ macro_rules! smros_linux_getrandom_flags_valid_body {
     }};
 }
 
+macro_rules! smros_linux_open_access_mode_valid_body {
+    ($flags:expr, $access_mask:expr, $read_only:expr, $write_only:expr, $read_write:expr) => {{
+        {
+            let access = $flags & $access_mask;
+            access == $read_only || access == $write_only || access == $read_write
+        }
+    }};
+}
+
+macro_rules! smros_linux_open_flags_valid_body {
+    ($flags:expr, $allowed_mask:expr) => {{
+        ($flags & !$allowed_mask) == 0
+    }};
+}
+
+macro_rules! smros_linux_open_is_directory_body {
+    ($flags:expr, $directory_flag:expr) => {{
+        ($flags & $directory_flag) != 0
+    }};
+}
+
+macro_rules! smros_linux_fd_target_valid_body {
+    ($fd:expr, $stdio_max:expr) => {{
+        $fd <= $stdio_max
+    }};
+}
+
+macro_rules! smros_linux_pipe_flags_valid_body {
+    ($flags:expr, $allowed_mask:expr) => {{
+        ($flags & !$allowed_mask) == 0
+    }};
+}
+
+macro_rules! smros_linux_dup3_args_valid_body {
+    ($old_fd:expr, $new_fd:expr) => {{
+        $old_fd != $new_fd
+    }};
+}
+
+macro_rules! smros_linux_fcntl_cmd_supported_body {
+    ($cmd:expr, $dupfd:expr, $getfd:expr, $setfd:expr, $getfl:expr, $setfl:expr, $dupfd_cloexec:expr) => {{
+        $cmd == $dupfd
+            || $cmd == $getfd
+            || $cmd == $setfd
+            || $cmd == $getfl
+            || $cmd == $setfl
+            || $cmd == $dupfd_cloexec
+    }};
+}
+
+macro_rules! smros_linux_fcntl_flags_valid_body {
+    ($flags:expr, $allowed_mask:expr) => {{
+        ($flags & !$allowed_mask) == 0
+    }};
+}
+
+macro_rules! smros_linux_path_mode_valid_body {
+    ($mode:expr, $allowed_mask:expr) => {{
+        ($mode & !$allowed_mask) == 0
+    }};
+}
+
+macro_rules! smros_linux_unlink_flags_valid_body {
+    ($flags:expr, $allowed_mask:expr) => {{
+        ($flags & !$allowed_mask) == 0
+    }};
+}
+
+macro_rules! smros_linux_rename_flags_valid_body {
+    ($flags:expr, $allowed_mask:expr) => {{
+        ($flags & !$allowed_mask) == 0
+    }};
+}
+
+macro_rules! smros_linux_stat_flags_valid_body {
+    ($flags:expr, $allowed_mask:expr) => {{
+        ($flags & !$allowed_mask) == 0
+    }};
+}
+
+macro_rules! smros_linux_stat_mask_valid_body {
+    ($mask:expr, $allowed_mask:expr) => {{
+        ($mask & !$allowed_mask) == 0
+    }};
+}
+
+macro_rules! smros_linux_lseek_whence_valid_body {
+    ($whence:expr, $max_whence:expr) => {{
+        $whence <= $max_whence
+    }};
+}
+
+macro_rules! smros_linux_iov_count_valid_body {
+    ($count:expr, $max_count:expr) => {{
+        $count <= $max_count
+    }};
+}
+
+macro_rules! smros_linux_iov_bytes_valid_body {
+    ($count:expr, $elem_size:expr, $max_count:expr) => {{
+        $elem_size != 0 && $count <= $max_count && $count <= usize::MAX / $elem_size
+    }};
+}
+
+macro_rules! smros_linux_poll_count_valid_body {
+    ($count:expr, $max_count:expr) => {{
+        $count <= $max_count
+    }};
+}
+
+macro_rules! smros_linux_poll_events_valid_body {
+    ($events:expr, $allowed_mask:expr) => {{
+        ($events & !$allowed_mask) == 0
+    }};
+}
+
+macro_rules! smros_linux_copy_flags_valid_body {
+    ($flags:expr, $allowed_mask:expr) => {{
+        ($flags & !$allowed_mask) == 0
+    }};
+}
+
 macro_rules! smros_zircon_clock_id_supported_body {
     ($clock_id:expr) => {{
         $clock_id <= 1

@@ -458,6 +458,44 @@ const ZX_VCPU_PACKET_SIZE: usize = 48;
 const ZX_SMC_PARAMETERS_SIZE: usize = 64;
 const ZX_SMC_RESULT_SIZE: usize = 64;
 const COMPAT_FD_START: usize = 3;
+const LINUX_STDIO_FD_MAX: usize = 2;
+const LINUX_O_ACCMODE: usize = 0o3;
+const LINUX_O_RDONLY: usize = 0;
+const LINUX_O_WRONLY: usize = 1;
+const LINUX_O_RDWR: usize = 2;
+const LINUX_O_CREAT: usize = 0o100;
+const LINUX_O_EXCL: usize = 0o200;
+const LINUX_O_TRUNC: usize = 0o1000;
+const LINUX_O_APPEND: usize = 0o2000;
+const LINUX_O_NONBLOCK: usize = 0o4000;
+const LINUX_O_DIRECTORY: usize = 0o200000;
+const LINUX_O_CLOEXEC: usize = 0o2000000;
+const LINUX_OPEN_ALLOWED_FLAGS: usize = LINUX_O_ACCMODE
+    | LINUX_O_CREAT
+    | LINUX_O_EXCL
+    | LINUX_O_TRUNC
+    | LINUX_O_APPEND
+    | LINUX_O_NONBLOCK
+    | LINUX_O_DIRECTORY
+    | LINUX_O_CLOEXEC;
+const LINUX_PIPE_ALLOWED_FLAGS: usize = LINUX_O_CLOEXEC | LINUX_O_NONBLOCK;
+const LINUX_FCNTL_STATUS_ALLOWED_FLAGS: usize = LINUX_O_APPEND | LINUX_O_NONBLOCK;
+const LINUX_ACCESS_MODE_MASK: usize = 0o7;
+const LINUX_AT_REMOVEDIR: usize = 0x200;
+const LINUX_UNLINK_ALLOWED_FLAGS: usize = LINUX_AT_REMOVEDIR;
+const LINUX_RENAME_NOREPLACE: usize = 1;
+const LINUX_RENAME_EXCHANGE: usize = 2;
+const LINUX_RENAME_WHITEOUT: usize = 4;
+const LINUX_RENAME_ALLOWED_FLAGS: usize =
+    LINUX_RENAME_NOREPLACE | LINUX_RENAME_EXCHANGE | LINUX_RENAME_WHITEOUT;
+const LINUX_AT_SYMLINK_NOFOLLOW: usize = 0x100;
+const LINUX_AT_EMPTY_PATH: usize = 0x1000;
+const LINUX_STAT_ALLOWED_FLAGS: usize = LINUX_AT_SYMLINK_NOFOLLOW | LINUX_AT_EMPTY_PATH;
+const LINUX_STATX_BASIC_STATS: usize = 0x7ff;
+const LINUX_SEEK_MAX_WHENCE: usize = 5;
+const LINUX_MAX_IOV: usize = 1024;
+const LINUX_MAX_POLL_FDS: usize = 1024;
+const LINUX_POLL_ALLOWED_EVENTS: i16 = 0x0001 | 0x0004 | 0x0008 | 0x0010 | 0x0020 | 0x0040;
 const LINUX_AF_UNIX: usize = 1;
 const LINUX_AF_LOCAL: usize = LINUX_AF_UNIX;
 const LINUX_AF_INET: usize = 2;
@@ -619,6 +657,13 @@ struct LinuxSysinfo {
 struct LinuxIovec {
     base: usize,
     len: usize,
+}
+
+#[repr(C)]
+struct LinuxPollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
 }
 
 #[repr(C)]
@@ -1005,6 +1050,16 @@ impl MemorySyscallState {
             writable,
         });
         fd
+    }
+
+    fn update_fd_access(&mut self, fd: usize, readable: bool, writable: bool) -> bool {
+        if let Some(record) = self.linux_fds.iter_mut().find(|record| record.fd == fd) {
+            record.readable = readable;
+            record.writable = writable;
+            true
+        } else {
+            false
+        }
     }
 
     fn alloc_fd_from(
@@ -1702,7 +1757,10 @@ pub fn sys_close(fd: usize) -> SysResult {
 }
 
 /// Linux sys_pipe2 implementation.
-pub fn sys_pipe2(fds_ptr: usize, _flags: usize) -> SysResult {
+pub fn sys_pipe2(fds_ptr: usize, flags: usize) -> SysResult {
+    if !syscall_logic::linux_pipe_flags_valid(flags, LINUX_PIPE_ALLOWED_FLAGS) {
+        return Err(SysError::EINVAL);
+    }
     if fds_ptr == 0 {
         return Err(SysError::EFAULT);
     }
@@ -1727,7 +1785,13 @@ pub fn sys_dup(fd: usize) -> SysResult {
     Ok(memory_state().alloc_fd(record.handle, record.readable, record.writable))
 }
 
-pub fn sys_dup3(fd: usize, new_fd: usize, _flags: usize) -> SysResult {
+pub fn sys_dup3(fd: usize, new_fd: usize, flags: usize) -> SysResult {
+    if !syscall_logic::linux_dup3_args_valid(fd, new_fd) {
+        return Err(SysError::EINVAL);
+    }
+    if !syscall_logic::linux_pipe_flags_valid(flags, LINUX_O_CLOEXEC) {
+        return Err(SysError::EINVAL);
+    }
     let record = memory_state().get_fd(fd).cloned().ok_or(SysError::EBUSY)?;
     let _ = memory_state().close_fd(new_fd);
     memory_state().linux_fds.push(LinuxFdRecord {
@@ -1769,6 +1833,34 @@ fn linux_fd_handle(fd: usize) -> Result<u32, SysError> {
         .get_fd(fd)
         .map(|record| record.handle)
         .ok_or(SysError::ENODEV)
+}
+
+fn linux_fd_object_type(fd: usize) -> Option<ObjectType> {
+    let handle = memory_state().get_fd(fd)?.handle;
+    compat::table().object_type(HandleValue(handle))
+}
+
+fn linux_fd_is_dir(fd: usize) -> bool {
+    linux_fd_object_type(fd) == Some(ObjectType::LinuxDir)
+}
+
+fn linux_fd_is_file(fd: usize) -> bool {
+    matches!(
+        linux_fd_object_type(fd),
+        Some(ObjectType::LinuxFile | ObjectType::LinuxDir | ObjectType::MemFd)
+    )
+}
+
+fn linux_fd_is_file_or_pipe(fd: usize) -> bool {
+    matches!(
+        linux_fd_object_type(fd),
+        Some(
+            ObjectType::LinuxFile
+                | ObjectType::LinuxDir
+                | ObjectType::MemFd
+                | ObjectType::LinuxPipe
+        )
+    )
 }
 
 fn linux_socket_object_type(domain: usize, socket_type: usize, protocol: usize) -> ObjectType {
@@ -1916,7 +2008,15 @@ pub fn sys_pipe(fds_ptr: usize) -> SysResult {
 
 /// Linux sys_dup2 wrapper.
 pub fn sys_dup2(fd: usize, new_fd: usize) -> SysResult {
-    sys_dup3(fd, new_fd, 0)
+    if fd == new_fd {
+        if linux_fd_known(fd) {
+            Ok(new_fd)
+        } else {
+            Err(SysError::ENODEV)
+        }
+    } else {
+        sys_dup3(fd, new_fd, 0)
+    }
 }
 
 pub fn sys_eventfd2(_initval: usize, flags: usize) -> SysResult {
@@ -1969,15 +2069,36 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SysResult {
 }
 
 /// Linux sys_openat compatibility implementation.
-pub fn sys_openat(_dirfd: usize, path: usize, flags: usize, _mode: usize) -> SysResult {
+pub fn sys_openat(dirfd: usize, path: usize, flags: usize, _mode: usize) -> SysResult {
     if path == 0 {
         return Err(SysError::EFAULT);
     }
+    if dirfd != usize::MAX - 99
+        && !syscall_logic::linux_fd_target_valid(dirfd, LINUX_STDIO_FD_MAX)
+        && !linux_fd_is_dir(dirfd)
+    {
+        return Err(SysError::ENODEV);
+    }
+    if !syscall_logic::linux_open_access_mode_valid(
+        flags,
+        LINUX_O_ACCMODE,
+        LINUX_O_RDONLY,
+        LINUX_O_WRONLY,
+        LINUX_O_RDWR,
+    ) || !syscall_logic::linux_open_flags_valid(flags, LINUX_OPEN_ALLOWED_FLAGS)
+    {
+        return Err(SysError::EINVAL);
+    }
 
-    let handle = compat::create_object(ObjectType::LinuxFile).map_err(|_| SysError::ENOMEM)?;
-    let access_mode = flags & 0b11;
-    let readable = access_mode != 1;
-    let writable = access_mode != 0;
+    let object_type = if syscall_logic::linux_open_is_directory(flags, LINUX_O_DIRECTORY) {
+        ObjectType::LinuxDir
+    } else {
+        ObjectType::LinuxFile
+    };
+    let handle = compat::create_object(object_type).map_err(|_| SysError::ENOMEM)?;
+    let access_mode = flags & LINUX_O_ACCMODE;
+    let readable = access_mode != LINUX_O_WRONLY;
+    let writable = access_mode != LINUX_O_RDONLY;
     Ok(memory_state().alloc_fd(handle.0, readable, writable))
 }
 
@@ -2009,13 +2130,16 @@ pub fn sys_faccessat(_dirfd: usize, path: usize, mode: usize, _flags: usize) -> 
     if path == 0 {
         return Err(SysError::EFAULT);
     }
-    if mode & !0o7 != 0 {
+    if !syscall_logic::linux_path_mode_valid(mode, LINUX_ACCESS_MODE_MASK) {
         return Err(SysError::EINVAL);
     }
     Ok(0)
 }
 
 pub fn sys_faccessat2(dirfd: usize, path: usize, mode: usize, flags: usize) -> SysResult {
+    if !syscall_logic::linux_stat_flags_valid(flags, LINUX_STAT_ALLOWED_FLAGS) {
+        return Err(SysError::EINVAL);
+    }
     sys_faccessat(dirfd, path, mode, flags)
 }
 
@@ -2040,7 +2164,7 @@ pub fn sys_chdir(path: usize) -> SysResult {
 }
 
 pub fn sys_fchdir(fd: usize) -> SysResult {
-    if linux_fd_known(fd) {
+    if linux_fd_is_dir(fd) {
         Ok(0)
     } else {
         Err(SysError::ENODEV)
@@ -2109,12 +2233,14 @@ pub fn sys_unlink(path: usize) -> SysResult {
     sys_unlinkat(usize::MAX - 99, path, 0)
 }
 
-pub fn sys_unlinkat(_dirfd: usize, path: usize, _flags: usize) -> SysResult {
+pub fn sys_unlinkat(_dirfd: usize, path: usize, flags: usize) -> SysResult {
     if path == 0 {
-        Err(SysError::EFAULT)
-    } else {
-        Ok(0)
+        return Err(SysError::EFAULT);
     }
+    if !syscall_logic::linux_unlink_flags_valid(flags, LINUX_UNLINK_ALLOWED_FLAGS) {
+        return Err(SysError::EINVAL);
+    }
+    Ok(0)
 }
 
 pub fn sys_rename(oldpath: usize, newpath: usize) -> SysResult {
@@ -2132,6 +2258,19 @@ pub fn sys_renameat(
     } else {
         Ok(0)
     }
+}
+
+pub fn sys_renameat2(
+    olddirfd: usize,
+    oldpath: usize,
+    newdirfd: usize,
+    newpath: usize,
+    flags: usize,
+) -> SysResult {
+    if !syscall_logic::linux_rename_flags_valid(flags, LINUX_RENAME_ALLOWED_FLAGS) {
+        return Err(SysError::EINVAL);
+    }
+    sys_renameat(olddirfd, oldpath, newdirfd, newpath)
 }
 
 pub fn sys_readlink(path: usize, buf: usize, len: usize) -> SysResult {
@@ -2157,15 +2296,18 @@ pub fn sys_lstat(path: usize, stat_ptr: usize) -> SysResult {
 }
 
 pub fn sys_fstat(fd: usize, stat_ptr: usize) -> SysResult {
-    if !linux_fd_known(fd) {
+    if !linux_fd_is_file_or_pipe(fd) && !linux_fd_is_dir(fd) {
         return Err(SysError::ENODEV);
     }
     linux_write_stat(stat_ptr)
 }
 
-pub fn sys_fstatat(_dirfd: usize, path: usize, stat_ptr: usize, _flags: usize) -> SysResult {
+pub fn sys_fstatat(_dirfd: usize, path: usize, stat_ptr: usize, flags: usize) -> SysResult {
     if path == 0 {
         return Err(SysError::EFAULT);
+    }
+    if !syscall_logic::linux_stat_flags_valid(flags, LINUX_STAT_ALLOWED_FLAGS) {
+        return Err(SysError::EINVAL);
     }
     linux_write_stat(stat_ptr)
 }
@@ -2178,7 +2320,7 @@ pub fn sys_statfs(path: usize, buf: usize) -> SysResult {
 }
 
 pub fn sys_fstatfs(fd: usize, buf: usize) -> SysResult {
-    if !linux_fd_known(fd) {
+    if !linux_fd_is_file_or_pipe(fd) && !linux_fd_is_dir(fd) {
         return Err(SysError::ENODEV);
     }
     linux_write_statfs(buf)
@@ -2193,7 +2335,7 @@ pub fn sys_truncate(path: usize, _len: usize) -> SysResult {
 }
 
 pub fn sys_ftruncate(fd: usize, _len: usize) -> SysResult {
-    if linux_fd_known(fd) {
+    if linux_fd_is_file(fd) {
         Ok(0)
     } else {
         Err(SysError::ENODEV)
@@ -2201,7 +2343,7 @@ pub fn sys_ftruncate(fd: usize, _len: usize) -> SysResult {
 }
 
 pub fn sys_fallocate(fd: usize, _mode: usize, _offset: usize, _len: usize) -> SysResult {
-    if linux_fd_known(fd) {
+    if linux_fd_is_file(fd) {
         Ok(0)
     } else {
         Err(SysError::ENODEV)
@@ -2217,7 +2359,7 @@ pub fn sys_chmod(path: usize, _mode: usize) -> SysResult {
 }
 
 pub fn sys_fchmod(fd: usize, _mode: usize) -> SysResult {
-    if linux_fd_known(fd) {
+    if linux_fd_is_file(fd) {
         Ok(0)
     } else {
         Err(SysError::ENODEV)
@@ -2237,7 +2379,7 @@ pub fn sys_chown(path: usize, _uid: usize, _gid: usize) -> SysResult {
 }
 
 pub fn sys_fchown(fd: usize, _uid: usize, _gid: usize) -> SysResult {
-    if linux_fd_known(fd) {
+    if linux_fd_is_file(fd) {
         Ok(0)
     } else {
         Err(SysError::ENODEV)
@@ -2259,7 +2401,7 @@ pub fn sys_sync() -> SysResult {
 }
 
 pub fn sys_fsync(fd: usize) -> SysResult {
-    if linux_fd_known(fd) {
+    if linux_fd_is_file_or_pipe(fd) {
         Ok(0)
     } else {
         Err(SysError::ENODEV)
@@ -2354,6 +2496,18 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult {
     const F_SETFL: usize = 4;
     const F_DUPFD_CLOEXEC: usize = 1030;
 
+    if !syscall_logic::linux_fcntl_cmd_supported(
+        cmd,
+        F_DUPFD,
+        F_GETFD,
+        F_SETFD,
+        F_GETFL,
+        F_SETFL,
+        F_DUPFD_CLOEXEC,
+    ) {
+        return Err(SysError::EINVAL);
+    }
+
     match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC => {
             let record = memory_state().get_fd(fd).cloned().ok_or(SysError::ENODEV)?;
@@ -2366,23 +2520,39 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult {
                 Err(SysError::ENODEV)
             }
         }
-        F_SETFD | F_SETFL => {
-            if linux_fd_known(fd) {
-                Ok(0)
-            } else {
-                Err(SysError::ENODEV)
+        F_SETFD => {
+            if !linux_fd_known(fd) {
+                return Err(SysError::ENODEV);
             }
+            if !syscall_logic::linux_fcntl_flags_valid(arg, LINUX_O_CLOEXEC) {
+                return Err(SysError::EINVAL);
+            }
+            Ok(0)
+        }
+        F_SETFL => {
+            if !linux_fd_known(fd) {
+                return Err(SysError::ENODEV);
+            }
+            if !syscall_logic::linux_fcntl_flags_valid(arg, LINUX_FCNTL_STATUS_ALLOWED_FLAGS) {
+                return Err(SysError::EINVAL);
+            }
+            Ok(0)
         }
         _ => Err(SysError::EINVAL),
     }
 }
 
 pub fn sys_getdents64(fd: usize, buf: usize, len: usize) -> SysResult {
-    if !linux_fd_known(fd) {
+    if !linux_fd_is_dir(fd) {
         return Err(SysError::ENODEV);
     }
     if !syscall_logic::user_buffer_valid(buf, len) {
         return Err(SysError::EFAULT);
+    }
+    if len != 0 {
+        unsafe {
+            core::ptr::write_bytes(buf as *mut u8, 0, len);
+        }
     }
     Ok(0)
 }
@@ -2391,7 +2561,7 @@ pub fn sys_lseek(fd: usize, offset: i64, whence: usize) -> SysResult {
     if !linux_fd_known(fd) {
         return Err(SysError::ENODEV);
     }
-    if whence > 2 {
+    if !syscall_logic::linux_lseek_whence_valid(whence, LINUX_SEEK_MAX_WHENCE) {
         return Err(SysError::EINVAL);
     }
     Ok(if offset < 0 { 0 } else { offset as usize })
@@ -2417,9 +2587,16 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iov_count: usize) -> SysResult {
     if iov_count == 0 {
         return Ok(0);
     }
-    let byte_len = iov_count
-        .checked_mul(core::mem::size_of::<LinuxIovec>())
-        .ok_or(SysError::EINVAL)?;
+    if !syscall_logic::linux_iov_count_valid(iov_count, LINUX_MAX_IOV)
+        || !syscall_logic::linux_iov_bytes_valid(
+            iov_count,
+            core::mem::size_of::<LinuxIovec>(),
+            LINUX_MAX_IOV,
+        )
+    {
+        return Err(SysError::EINVAL);
+    }
+    let byte_len = iov_count * core::mem::size_of::<LinuxIovec>();
     if !syscall_logic::user_buffer_valid(iov_ptr, byte_len) {
         return Err(SysError::EFAULT);
     }
@@ -2446,9 +2623,16 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iov_count: usize) -> SysResult {
     if iov_count == 0 {
         return Ok(0);
     }
-    let byte_len = iov_count
-        .checked_mul(core::mem::size_of::<LinuxIovec>())
-        .ok_or(SysError::EINVAL)?;
+    if !syscall_logic::linux_iov_count_valid(iov_count, LINUX_MAX_IOV)
+        || !syscall_logic::linux_iov_bytes_valid(
+            iov_count,
+            core::mem::size_of::<LinuxIovec>(),
+            LINUX_MAX_IOV,
+        )
+    {
+        return Err(SysError::EINVAL);
+    }
+    let byte_len = iov_count * core::mem::size_of::<LinuxIovec>();
     if !syscall_logic::user_buffer_valid(iov_ptr, byte_len) {
         return Err(SysError::EFAULT);
     }
@@ -2479,8 +2663,11 @@ pub fn sys_copy_file_range(
     count: usize,
     flags: usize,
 ) -> SysResult {
-    if flags != 0 {
+    if !syscall_logic::linux_copy_flags_valid(flags, 0) {
         return Err(SysError::EINVAL);
+    }
+    if !linux_fd_is_file_or_pipe(in_fd) || !linux_fd_is_file_or_pipe(out_fd) {
+        return Err(SysError::ENODEV);
     }
     let mut buffer = [0u8; 256];
     let mut total = 0usize;
@@ -2516,25 +2703,69 @@ pub fn sys_splice(
     out_fd: usize,
     out_offset: usize,
     len: usize,
-    _flags: usize,
+    flags: usize,
 ) -> SysResult {
+    if !syscall_logic::linux_copy_flags_valid(flags, 0) {
+        return Err(SysError::EINVAL);
+    }
     sys_copy_file_range(in_fd, in_offset, out_fd, out_offset, len, 0)
 }
 
-pub fn sys_tee(in_fd: usize, out_fd: usize, len: usize, _flags: usize) -> SysResult {
+pub fn sys_tee(in_fd: usize, out_fd: usize, len: usize, flags: usize) -> SysResult {
+    if !syscall_logic::linux_copy_flags_valid(flags, 0) {
+        return Err(SysError::EINVAL);
+    }
     sys_copy_file_range(in_fd, 0, out_fd, 0, len, 0)
 }
 
-pub fn sys_vmsplice(fd: usize, iov_ptr: usize, iov_count: usize, _flags: usize) -> SysResult {
+pub fn sys_vmsplice(fd: usize, iov_ptr: usize, iov_count: usize, flags: usize) -> SysResult {
+    if !syscall_logic::linux_copy_flags_valid(flags, 0) {
+        return Err(SysError::EINVAL);
+    }
     sys_writev(fd, iov_ptr, iov_count)
 }
 
 pub fn sys_poll(fds: usize, nfds: usize, _timeout: isize) -> SysResult {
-    if nfds != 0 && fds == 0 {
-        Err(SysError::EFAULT)
-    } else {
-        Ok(0)
+    if !syscall_logic::linux_poll_count_valid(nfds, LINUX_MAX_POLL_FDS) {
+        return Err(SysError::EINVAL);
     }
+    if nfds == 0 {
+        return Ok(0);
+    }
+    let byte_len = nfds
+        .checked_mul(core::mem::size_of::<LinuxPollFd>())
+        .ok_or(SysError::EINVAL)?;
+    if !syscall_logic::user_buffer_valid(fds, byte_len) {
+        return Err(SysError::EFAULT);
+    }
+    let poll_fds = unsafe { core::slice::from_raw_parts_mut(fds as *mut LinuxPollFd, nfds) };
+    let mut ready = 0usize;
+    for poll_fd in poll_fds {
+        poll_fd.revents = 0;
+        if poll_fd.fd < 0 {
+            continue;
+        }
+        if !syscall_logic::linux_poll_events_valid(poll_fd.events, LINUX_POLL_ALLOWED_EVENTS) {
+            return Err(SysError::EINVAL);
+        }
+        let fd = poll_fd.fd as usize;
+        if !linux_fd_known(fd) {
+            poll_fd.revents = 0x0020;
+            ready = ready.saturating_add(1);
+            continue;
+        }
+        let record = memory_state().get_fd(fd).cloned().ok_or(SysError::ENODEV)?;
+        if record.readable && (poll_fd.events & 0x0001) != 0 {
+            poll_fd.revents |= 0x0001;
+        }
+        if record.writable && (poll_fd.events & 0x0004) != 0 {
+            poll_fd.revents |= 0x0004;
+        }
+        if poll_fd.revents != 0 {
+            ready = ready.saturating_add(1);
+        }
+    }
+    Ok(ready)
 }
 
 pub fn sys_ppoll(fds: usize, nfds: usize, _timeout: usize, _sigmask: usize) -> SysResult {
@@ -2542,12 +2773,23 @@ pub fn sys_ppoll(fds: usize, nfds: usize, _timeout: usize, _sigmask: usize) -> S
 }
 
 pub fn sys_select(
-    _nfds: usize,
-    _readfds: usize,
-    _writefds: usize,
-    _exceptfds: usize,
+    nfds: usize,
+    readfds: usize,
+    writefds: usize,
+    exceptfds: usize,
     _timeout: usize,
 ) -> SysResult {
+    let word_bits = usize::BITS as usize;
+    let words = nfds.checked_add(word_bits - 1).ok_or(SysError::EINVAL)? / word_bits;
+    let bytes = words
+        .checked_mul(core::mem::size_of::<usize>())
+        .ok_or(SysError::EINVAL)?;
+    if !syscall_logic::user_buffer_valid(readfds, bytes)
+        || !syscall_logic::user_buffer_valid(writefds, bytes)
+        || !syscall_logic::user_buffer_valid(exceptfds, bytes)
+    {
+        return Err(SysError::EFAULT);
+    }
     Ok(0)
 }
 
@@ -4118,12 +4360,17 @@ pub fn sys_membarrier(_cmd: usize, flags: usize, _cpu_id: usize) -> SysResult {
 pub fn sys_statx(
     _dirfd: usize,
     path: usize,
-    _flags: usize,
-    _mask: usize,
+    flags: usize,
+    mask: usize,
     statxbuf: usize,
 ) -> SysResult {
     if path == 0 || statxbuf == 0 {
         return Err(SysError::EFAULT);
+    }
+    if !syscall_logic::linux_stat_flags_valid(flags, LINUX_STAT_ALLOWED_FLAGS)
+        || !syscall_logic::linux_stat_mask_valid(mask, LINUX_STATX_BASIC_STATS)
+    {
+        return Err(SysError::EINVAL);
     }
     linux_zero_user(statxbuf, 256)
 }
@@ -6670,7 +6917,6 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         | ARM64_SYS_FINIT_MODULE
         | ARM64_SYS_SCHED_SETATTR
         | ARM64_SYS_SCHED_GETATTR
-        | ARM64_SYS_RENAMEAT2
         | ARM64_SYS_SECCOMP
         | ARM64_SYS_BPF
         | ARM64_SYS_EXECVEAT
@@ -6732,6 +6978,7 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_SYMLINKAT => sys_symlinkat(args[0], args[1], args[2]),
         ARM64_SYS_LINKAT => sys_linkat(args[0], args[1], args[2], args[3], args[4]),
         ARM64_SYS_RENAMEAT => sys_renameat(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_RENAMEAT2 => sys_renameat2(args[0], args[1], args[2], args[3], args[4]),
         ARM64_SYS_UMOUNT2 | ARM64_SYS_MOUNT | ARM64_SYS_PIVOT_ROOT | ARM64_SYS_NFSSERVCTL => {
             Err(SysError::ENOSYS)
         }
