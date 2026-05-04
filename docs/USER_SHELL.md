@@ -55,7 +55,8 @@ The shell directly uses:
 - `process_manager()` for `ps`, `top`, `kill`
 - `scheduler::scheduler()` for `top` and `uptime`
 - `PageFrameAllocator` for `meminfo`
-- `crate::syscall::sys_getpid()` and `crate::syscall::sys_mmap()` inside `testsc`
+- many `crate::syscall::sys_*()` helpers inside `testsc`
+- the EL0 `test_write()` helper for the first write smoke call
 
 ### Direct Serial Access
 
@@ -75,8 +76,21 @@ This is another reason it should be considered a kernel shell in the current tre
 It currently:
 
 - attempts a write-style smoke call through `test_write()`
-- directly calls `sys_getpid()`
-- directly calls `sys_mmap()`
+- directly exercises Linux process/time calls
+- directly exercises Linux memory calls and memory accounting
+- directly exercises Zircon VMO/VMAR, handle/object, signal/wait, port, channel, socket, FIFO, futex, process/thread, time/debug/system/exception, and hypervisor helpers
+- directly exercises Linux signal, IPC, networking, misc, file, directory, fd, poll, and stat helpers
+
+Successful current runs include markers such as:
+
+```text
+[OK] time/debug/system/exception tests completed
+[OK] hypervisor tests completed
+[OK] Linux signal, IPC, misc, and net tests completed
+[OK] Linux file, dir, fd, poll, and stat tests completed
+```
+
+The file/fd section creates modeled `LinuxFile` and `LinuxDir` compatibility objects, tests fd duplication and `fcntl`, moves bytes through the file object's queue, checks directory-only `getdents64`, validates stat/statx buffers, checks `writev`, `poll`, `lseek`, `ftruncate`, and sync-style calls, then closes the fds.
 
 So it mixes the future-facing syscall helper path with direct kernel function calls.
 

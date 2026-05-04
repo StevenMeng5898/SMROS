@@ -7,7 +7,8 @@ The short version is:
 - EL0 scaffolding exists
 - MMU and page-table helpers exist
 - an `svc` bridge exists
-- the live boot path still runs the shell and test harness from EL1
+- the boot path runs a real EL0 syscall smoke test
+- the live shell still runs from EL1
 
 ## Relevant Files
 
@@ -79,16 +80,19 @@ During a normal boot:
 
 1. `kernel_main()` calls `user_process::init()`.
 2. `kernel_main()` calls `run_user_test()`.
-3. `kernel_main()` calls `start_user_shell()`.
-4. `start_user_shell()` creates a normal scheduler thread.
-5. `start_first_thread()` jumps into that EL1 thread.
+3. `run_user_test()` allocates a small EL0 stack and calls `switch_to_el0()`.
+4. `user_test_process_entry()` runs at EL0 and issues Linux `svc #0` calls.
+5. `sys_exit()` redirects the return path to `el0_test_resume()` in EL1.
+6. `finish_boot_after_user_test()` calls `start_user_shell()`.
+7. `start_user_shell()` creates a normal scheduler thread.
+8. `start_first_thread()` jumps into that EL1 shell thread.
 
 No part of the normal boot path:
 
 - creates a real EL0 process and runs it
-- calls `switch_to_el0()`
-- executes `user_test_process_entry()` in EL0
 - executes `user_shell_entry()` after an EL transition
+- installs a process-specific TTBR0 page table for the EL0 test
+- enforces per-process handle ownership for the shell
 
 ## Current State By Area
 
@@ -113,25 +117,28 @@ The shell source still contains future-facing comments about EL0. In the current
 
 So the shell is currently a kernel-resident diagnostic shell, not an isolated user process.
 
-## Why `run_user_test()` Is Not Yet A Real EL0 Test
+## What The Boot-Time EL0 Test Does
 
 `run_user_test()` in `src/user_level/user_test.rs` currently:
 
 - prints `[EL0]` log prefixes
-- directly calls `sys_getpid()`
-- directly calls `sys_mmap()`
-- prints TODO steps for real EL0 bring-up
+- prepares a dedicated 8 KiB EL0 stack
+- marks the EL0 test active for syscall-result recording
+- calls `switch_to_el0(user_test_process_entry, stack_top, 0)`
+- uses `svc #0` from EL0 for Linux `write`, `getpid`, `mmap`, and `exit`
+- resumes kernel boot through `prepare_el0_test_kernel_return()` and `el0_test_resume()`
 
-That makes it a boot-time syscall smoke test, not a real exception-level transition test.
+That makes it a real exception-level transition test. It is still not a fully isolated user process because the test uses the lightweight `ttbr0 = 0` setup and does not install a process-owned address space.
 
 ## What Is Already Useful
 
-Even though the live boot path stays in EL1, the existing scaffolding is still valuable:
+The existing scaffolding is useful for the next step toward a real userspace:
 
 - `UserProcess` defines the shape of a future EL0 process object
 - `switch_to_el0()` captures the intended register transition
-- `linux_syscall()` provides a future EL0-side calling convention
+- `linux_syscall()` is already used by the boot-time EL0 smoke test
 - `PageTableManager` already has the necessary mapping helpers
+- the active exception vector already routes Linux numbers below `1000` and Zircon numbers at `1000 + zircon_number`
 
 ## What Still Needs To Happen For True EL0 Execution
 
@@ -147,15 +154,24 @@ To move from scaffolding to real user-mode execution, the kernel still needs to:
 
 ## Bottom Line
 
-The current tree has meaningful EL0 groundwork, but the live system boundary is still:
+The current tree has a working EL0 syscall smoke path, but not a fully isolated userspace runtime. The shell boundary is still:
 
 ```text
 kernel code
   -> scheduler thread
-  -> shell and test helpers
+  -> shell and shell-level test helpers
 ```
 
-not:
+The boot-time smoke path is:
+
+```text
+EL0 test payload
+  -> SVC
+  -> EL1 syscall dispatch
+  -> EL1 resume hook
+```
+
+What is still missing is the full process model:
 
 ```text
 EL0 process

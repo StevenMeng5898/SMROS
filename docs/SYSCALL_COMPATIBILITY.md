@@ -59,14 +59,24 @@ Implemented groups:
 - Process/task: `clone`, `fork`, `vfork`, `execve`, `wait4`, `exit`, `exit_group`, `kill`, `tkill`, `tgkill`
 - Identity/scheduler: `getpid`, `getppid`, `gettid`, `getuid`, `geteuid`, `getgid`, `getegid`, `sched_yield`, `set_tid_address`
 - Time/resource: `nanosleep`, `clock_gettime`, `clock_getres`, `clock_nanosleep`, `gettimeofday`, `times`, `getrusage`, `prlimit64`, `sysinfo`
-- Basic I/O: `read`, `write`, `close`, `pipe2`, `dup`, `dup3`, `fcntl`, `openat`, vector I/O, `sendfile`, `copy_file_range`
-- Modeled Linux objects: file descriptors backed by `LinuxFile`, `LinuxPipe`, TCP/UDP/raw/netlink socket categories, `eventfd`, `signalfd`, `timerfd`, `inotify`, `memfd`, semaphores, shared memory, and message queues
-- Misc bring-up helpers: `getrandom`, `uname`, `umask`, robust-list stubs
+- Basic I/O and fd management: `read`, `write`, `close`, `close_range`, `pipe2`, `dup`, `dup2`, `dup3`, `fcntl`, `ioctl`, `flock`
+- File and directory compatibility: `openat`, `openat2`, `getdents64`, `readlinkat`, `faccessat`, `faccessat2`, `mknodat`, `mkdirat`, `unlinkat`, `symlinkat`, `linkat`, `renameat`, `renameat2`, `chdir`, `fchdir`, `chroot`, `fchmod*`, `fchown*`
+- Stat and sync paths: `fstat`, `newfstatat`, `statfs`, `fstatfs`, `statx`, `truncate`, `ftruncate`, `fallocate`, `fsync`, `fdatasync`, `sync`, `sync_file_range`, `utimensat`
+- Vector and copy I/O: `readv`, `writev`, `pread64`, `pwrite64`, `preadv`, `pwritev`, `sendfile`, `copy_file_range`, `splice`, `tee`, `vmsplice`
+- Poll/event helpers: `pselect6`, `ppoll`, `eventfd2`, `epoll_create1`, `epoll_ctl`, `epoll_pwait`, `epoll_pwait2`, `signalfd4`, `timerfd_*`, `inotify_*`
+- Signals: `rt_sigaction`, `rt_sigprocmask`, `rt_sigpending`, `rt_sigtimedwait`, `rt_sigqueueinfo`, `rt_tgsigqueueinfo`, `rt_sigsuspend`, `rt_sigreturn`, `sigaltstack`
+- Linux IPC: `semget`, `semctl`, `semop`, `semtimedop`, `msgget`, `msgctl`, `msgsnd`, `msgrcv`, `shmget`, `shmctl`, `shmat`, `shmdt`
+- Networking: `socket`, `socketpair`, `bind`, `listen`, `accept`, `accept4`, `connect`, `getsockname`, `getpeername`, `sendto`, `recvfrom`, `sendmsg`, `recvmsg`, `recvmmsg`, `setsockopt`, `getsockopt`, `shutdown`
+- Modeled Linux objects: file descriptors backed by `LinuxFile`, `LinuxDir`, `LinuxPipe`, TCP/UDP/raw/netlink socket categories, `eventfd`, `signalfd`, `timerfd`, `inotify`, `memfd`, semaphores, shared memory, and message queues
+- Misc bring-up helpers: `getrandom`, `memfd_create`, `membarrier`, `uname`, `umask`, robust-list stubs, xattr validation stubs
 
 ## Linux Compatibility Caveats
 
 - The Linux syscall interface is covered at the dispatcher level, but many filesystem, networking, IPC, io_uring, module, and namespace syscalls intentionally return `ENOSYS`.
-- The file-descriptor layer is still a small compatibility table, mainly for stdio and modeled pipes.
+- The file-descriptor layer is a compatibility table. Linux fd numbers point to modeled kernel object handles with readable/writable bits.
+- `LinuxFile` and `LinuxDir` objects are not backed by a persistent namespace. Regular file writes append to a bounded byte queue; reads consume from that queue. Directory fds validate directory-only operations such as `getdents64`, but directory entries are currently returned as an empty zeroed buffer.
+- Stat, statfs, and statx paths validate arguments and zero output buffers; they do not yet expose real inode or filesystem metadata.
+- Socket and IPC syscalls are modeled enough for deterministic syscall tests, not for a complete network stack or SysV IPC implementation.
 - The current user-level smoke tests do not validate a full Linux userspace ABI.
 
 ## Zircon Side
@@ -82,8 +92,10 @@ Implemented groups:
 - Memory objects: VMO create/read/write/get-size/set-size/op-range/create-child/create-physical/create-contiguous/cache-policy/replace-as-executable
 - VMAR: allocate, map, unmap, protect, destroy, unmap-handle-close-thread-exit
 - IPC/lightweight objects: channels, sockets, FIFOs, events, eventpairs, ports, timers, debug logs, resources, streams and stream vector I/O
+- Time/debug/system/exception: clock get/create/read/update/adjust, monotonic clock, nanosleep, timers, debuglog create/read/write, debug read/write/send-command, system event handles, exception channel create/get-thread/get-process/finish
+- Hypervisor: guest create, memory and I/O trap registration, VCPU create/resume/interrupt/read-state/write-state, SMC call modeling
 - Platform and device-shaped objects: IOMMU, BTI, PMT, interrupts, PCI devices, guests, VCPUs, profiles, pagers, framebuffer, ktrace, and mtrace interfaces
-- Time/random/debug: clock get/create/read/update/adjust, monotonic clock, nanosleep, CPRNG draw/add-entropy, debug read/write/send-command
+- Random/debug: CPRNG draw/add-entropy plus debug command helpers
 
 Unsupported but recognized calls remain explicit for operations that cannot be meaningfully modeled yet, such as `ioports_request`, privileged power-control details, and hardware effects behind PCI/interrupt/hypervisor calls.
 
@@ -106,6 +118,7 @@ The current syscall layer is best understood as:
 
 - a Linux ARM64 dispatch path with explicit interface coverage and modeled behavior for common bring-up calls
 - a Zircon dispatch path aligned to the sample syscall numbers
+- a Linux fd table where fd records point to compatibility object handles
 - a lightweight compatibility object table for object types that do not yet have full subsystems
 - a larger amount of future-facing scaffolding for EL0 work
 
@@ -129,6 +142,6 @@ That means the current boot flow exercises the syscall layer mainly as an intern
 
 - The shell still calls most syscall tests directly from EL1 rather than as isolated EL0 userspace.
 - Some process/thread semantics are modeled records, not full scheduler integration.
-- File-descriptor style Linux syscalls are modeled only where needed for stdio and compatibility pipes.
+- File-descriptor style Linux syscalls are modeled for files, directories, pipes, sockets, event-like objects, IPC objects, and memfd, but not with a real VFS or persistent filesystem.
 - Handle ownership and lifetime tracking are still simplified.
 - Platform/hardware-heavy Zircon calls are interface-covered but intentionally return `ERR_NOT_SUPPORTED`.

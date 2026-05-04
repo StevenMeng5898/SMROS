@@ -11,7 +11,9 @@ SMROS is an experimental bare-metal AArch64 kernel written in Rust for QEMU's `v
 - Provides a simple process manager with fixed code, data, heap, and stack segments per process.
 - Organizes kernel objects under `src/kernel_objects/`.
 - Splits syscall code under `src/syscall/`.
-- Includes EL0 scaffolding under `src/user_level/`, but the live shell still runs as an EL1 scheduled thread.
+- Runs a boot-time EL0 `svc #0` smoke test for Linux `write`, `getpid`, `mmap`, and `exit`.
+- Includes EL0 process scaffolding under `src/user_level/`; the live shell still runs as an EL1 scheduled thread.
+- Provides modeled Linux and Zircon syscall compatibility for bring-up tests, including memory, IPC, object, timer/debug, hypervisor, networking, and file-descriptor paths.
 
 ## Toolchain
 
@@ -184,6 +186,7 @@ SMROS/
 - VMAR
 - Channel
 - Thread and scheduler objects
+- Lightweight compatibility objects for modeled Linux and Zircon handles, including files, directories, pipes, sockets, IPC objects, timers, clocks, ports, guests, and VCPUs
 
 ## Documentation Map
 
@@ -192,13 +195,16 @@ SMROS/
 - `docs/MEMORY_SYSCALLS_IMPLEMENTED.md`: status of memory-related syscalls
 - `docs/SYSCALL_COMPATIBILITY.md`: syscall entry points and dispatch reality
 - `docs/USER_KERNEL_IMP.md`: current EL0 and user/kernel boundary status
-- `docs/USER_SHELL_KERNEL_OBJECT.md`: shell integration and object layout notes
+- `docs/USER_SHELL.md`: shell integration and command behavior
 - `docs/USER_TEST.md`: current test harness behavior
+- `docs/VERUS.md`: standalone Verus verification harnesses and commands
 
 ## Known Limitations
 
 - The shell banner says "User-Mode Shell", but the shell currently runs as an EL1 kernel thread.
-- `run_user_test()` logs `[EL0]`, but its active checks call syscall functions directly from kernel mode.
-- The syscall layer is only partially implemented; many paths are placeholders or bookkeeping-only.
-- The active SVC bridge is not yet a full Linux/Zircon ABI implementation.
+- The boot-time EL0 test uses a lightweight `TTBR0_EL1 = 0` setup, not a fully isolated process address space.
+- The shell `testsc` command directly calls most syscall helpers from EL1; it is a developer smoke test, not an external ABI compliance suite.
+- The syscall layer is broad but modeled; many paths are interface validation, object bookkeeping, or deterministic placeholders.
+- The Linux file model uses compatibility objects and byte queues. It does not yet provide a persistent namespace, inode layer, or disk-backed filesystem.
+- The active SVC bridge is not yet a full Linux/Zircon ABI implementation with per-process handles and memory isolation.
 - Some boot-time status output still contains garbled or NUL characters.

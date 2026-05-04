@@ -95,7 +95,7 @@ This is one of the most active modules in the current kernel: the shell reaches 
 
 These definitions are used both by the object layer and by `src/syscall/syscall.rs`.
 
-`ObjectType` now includes the sample Zircon object families (`EventPair`, `Fifo`, `Stream`, `DebugLog`, `Clock`, `Job`, `SuspendToken`, `Exception`, `Iommu`, `Bti`, `Pmt`, `PciDevice`, `Guest`, `Vcpu`, `Profile`, `Pager`, framebuffer/trace objects) and the Linux object families needed by the sample tree (`LinuxFile`, `LinuxPipe`, TCP/UDP/raw/netlink sockets, `EventFd`, `SignalFd`, `TimerFd`, `Inotify`, `MemFd`, `PidFd`, IPC/semaphore/shared-memory categories).
+`ObjectType` now includes the sample Zircon object families (`EventPair`, `Fifo`, `Stream`, `DebugLog`, `Clock`, `Job`, `SuspendToken`, `Exception`, `Iommu`, `Bti`, `Pmt`, `PciDevice`, `Guest`, `Vcpu`, `Profile`, `Pager`, framebuffer/trace objects) and the Linux object families needed by the sample tree (`LinuxFile`, `LinuxDir`, `LinuxPipe`, TCP/UDP/raw/netlink sockets, `EventFd`, `SignalFd`, `TimerFd`, `Inotify`, `MemFd`, `PidFd`, `Futex`, Linux process/thread/signal/event/device categories, IPC/semaphore/shared-memory/message-queue categories).
 
 ## `handle.rs`
 
@@ -118,9 +118,21 @@ This is intentionally simple and currently closer to a global kernel utility tha
 - handle close and existence checks
 - signal update/read state
 - one `u64` property value per object
-- bounded byte queues for modeled sockets, FIFOs, streams, Linux files, Linux pipes, and Linux socket categories
+- one `u64` state value per object for modeled timer, clock, guest, VCPU, and similar state
+- option bits recorded at object creation
+- bounded byte queues for modeled sockets, FIFOs, streams, Linux files, Linux pipes, debug logs, message queues, and Linux socket categories
 
 This module is deliberately not a substitute for full subsystems such as PCI, interrupts, networking, or a real per-process capability model. It gives common Linux/Zircon syscall entrypoints deterministic behavior while unsupported platform-heavy calls still return explicit unsupported errors.
+
+Linux file and directory fds use this table through `src/syscall/syscall.rs`:
+
+- `openat()` creates either a `LinuxFile` or `LinuxDir` compatibility object.
+- the Linux fd table stores the compat handle plus readable/writable bits.
+- `read()` and `write()` move bytes through the object's bounded queue.
+- `dup`, `dup3`, and `fcntl` duplicate or validate fd records while preserving the underlying handle.
+- `close()` removes one fd record and closes the compat handle only when no fd still references it.
+- `getdents64()` requires `LinuxDir` and currently returns an empty zeroed directory buffer.
+- stat and statfs helpers validate pointers and zero output buffers instead of reading real inode metadata.
 
 ## `vmo.rs`
 
@@ -199,7 +211,7 @@ The refactor into a dedicated `kernel_objects/` directory is complete at the sou
 
 - threads and the scheduler are live
 - channels are initialized and usable as kernel objects
-- compatibility objects back events, eventpairs, sockets, FIFOs, ports, timers, clocks, debug logs, resources, streams, suspend tokens, jobs, profiles, pagers, IOMMU/BTI/PMT, interrupts, PCI devices, guests, VCPUs, and modeled Linux file/socket/IPC descriptor objects at an interface level
+- compatibility objects back events, eventpairs, sockets, FIFOs, ports, timers, clocks, debug logs, resources, streams, suspend tokens, jobs, exceptions, profiles, pagers, IOMMU/BTI/PMT, interrupts, PCI devices, guests, VCPUs, and modeled Linux file/directory/pipe/socket/IPC descriptor objects at an interface level
 - VMO/VMAR objects exist and back syscall helpers
 - handle management remains simplified
 - object-to-process ownership is not yet fully modeled
@@ -209,4 +221,5 @@ The refactor into a dedicated `kernel_objects/` directory is complete at the sou
 - The global handle table is not yet a full per-process handle namespace.
 - Channel syscall helpers are exposed through the current Zircon dispatch table.
 - VMAR state is not yet a full source of truth for hardware mappings.
+- Linux file and directory compatibility objects are not a real VFS; they provide fd/object behavior for syscall bring-up.
 - Several object operations are placeholders intended to keep the interface shape stable while the kernel matures.

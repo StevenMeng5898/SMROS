@@ -268,9 +268,12 @@ A normal QEMU boot currently prints these milestones before reaching the prompt:
 9. Shell startup messages
 10. `smros>` prompt
 
+After the prompt, the shell `testsc` command runs the broader developer smoke suite. Current successful runs cover Linux memory/process/time, signal, IPC, networking, misc, file, directory, fd, poll, and stat paths, plus Zircon VMO/VMAR, handle/object, signal/wait, port, channel, socket, FIFO, futex, process/thread, time/debug/system/exception, and hypervisor paths.
+
 ## Known Gaps
 
 - The shell is still an EL1 scheduler thread despite the "User-Mode Shell" banner.
 - The boot-time EL0 test validates syscall transition mechanics, but not a fully isolated user address space.
 - The active exception path bypasses the more elaborate `handle_svc_exception_from_el0()` helper.
 - Zircon calls are routed through the live SVC path, but process/thread ownership and handle rights are still simplified kernel-side models.
+- Linux file and directory syscalls are modeled through compatibility objects, not through a persistent VFS or disk-backed filesystem.

@@ -22,6 +22,7 @@ SMROS now has:
 - a software VMAR tree with mapping, protection, allocation, destroy, and unmap bookkeeping
 - a boot-time EL0 `svc #0` smoke test for Linux `write`, `getpid`, `mmap`, and `exit`
 - shell-visible memory stats for Linux mappings, `brk`, VMO state, and VMAR state
+- shell `testsc` coverage for the broader syscall compatibility model, including Linux file/fd/poll/stat paths and Zircon time/debug/system/exception and hypervisor paths
 
 The model is still software bookkeeping layered on top of the real page allocator. It is suitable for syscall bring-up and shell testing, but it is not yet wired to live EL0 page-table updates.
 
@@ -152,6 +153,20 @@ The shell's `testsc` command now exercises:
 - Linux `wait4`
 - Linux `clock_gettime`
 - Linux `nanosleep`
+- Linux `getrandom`
+- Linux `memfd_create`
+- Linux `close_range`
+- Linux signal action/mask/queue helpers
+- Linux `signalfd4`
+- Linux SysV semaphore, message queue, and shared-memory helpers
+- Linux socket, socketpair, send/receive, address, and socket-option helpers
+- Linux `openat` for modeled files and directories
+- Linux `dup`, `dup3`, and `fcntl`
+- Linux `getdents64`
+- Linux `fstat`, `fstatat`, `statfs`, `fstatfs`, and `statx`
+- Linux `writev`
+- Linux `poll`
+- Linux `lseek`, `ftruncate`, `fsync`, and `sync_file_range`
 - Linux `brk`
 - Linux `mmap`
 - Linux `mprotect`
@@ -180,9 +195,23 @@ The shell's `testsc` command now exercises:
 - Zircon `thread_create`
 - Zircon `thread_start`
 - Zircon `object_signal`
+- Zircon `object_signal_peer`
 - Zircon `object_wait_one`
 - Zircon `object_wait_many`
+- Zircon port create, queue, wait, wait-async, and cancel helpers
+- Zircon socket stream, datagram, shared, shutdown, info, and threshold helpers
+- Zircon FIFO create/read/write/signal/close behavior
+- Zircon futex wait/wake/requeue/owner behavior
 - Zircon `clock_get_monotonic`
+- Zircon clock create/read/update
+- Zircon timer create/set/cancel
+- Zircon debuglog create/read/write
+- Zircon debug read/write/send-command
+- Zircon system event handles
+- Zircon exception channel lifecycle helpers
+- Zircon guest create/trap helpers
+- Zircon VCPU create/resume/interrupt/read-state/write-state helpers
+- Zircon SMC call modeling
 - Zircon `nanosleep`
 - Zircon `task_kill`
 - Zircon `process_exit`
