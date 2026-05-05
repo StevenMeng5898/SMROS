@@ -62,7 +62,8 @@ pub use crate::kernel_objects::channel::{
 };
 pub use crate::kernel_objects::{
     pages, roundup_pages, CachePolicy, HandleValue, MmuFlags, ObjectType, VmOptions, VmarFlags,
-    Vmo, VmoCloneFlags, VmoOpType, VmoType, ZxError, ZxResult, INVALID_HANDLE,
+    Vmo, VmoCloneFlags, VmoOpType, VmoType, ZxError, ZxResult, Rights, RIGHT_SAME_RIGHTS,
+    INVALID_HANDLE,
 };
 
 // Simple logging macros (placeholder for real logging)
@@ -564,10 +565,19 @@ struct VmarRecord {
 
 struct ProcessRecord {
     handle: u32,
+    job_handle: u32,
     pid: usize,
     root_vmar_handle: u32,
     exited: bool,
     exit_code: i32,
+}
+
+struct JobRecord {
+    handle: u32,
+    parent: Option<u32>,
+    child_count: usize,
+    policy_count: usize,
+    critical_process: Option<u32>,
 }
 
 struct ThreadRecord {
@@ -579,6 +589,14 @@ struct ThreadRecord {
     arg2: usize,
     started: bool,
     exited: bool,
+}
+
+#[derive(Clone, Copy)]
+struct KernelHandleRecord {
+    handle: u32,
+    object_handle: u32,
+    obj_type: ObjectType,
+    rights: u32,
 }
 
 struct SignalRecord {
@@ -720,8 +738,10 @@ struct MemorySyscallState {
     brk: BrkState,
     vmos: Vec<VmoRecord>,
     vmars: Vec<VmarRecord>,
+    jobs: Vec<JobRecord>,
     processes: Vec<ProcessRecord>,
     threads: Vec<ThreadRecord>,
+    handles: Vec<KernelHandleRecord>,
     signals: Vec<SignalRecord>,
     linux_fds: Vec<LinuxFdRecord>,
     next_handle: u32,
@@ -739,6 +759,13 @@ impl MemorySyscallState {
             handle: root_vmar_handle,
             vmar: root_vmar,
         });
+        let mut handles = Vec::new();
+        handles.push(KernelHandleRecord {
+            handle: root_vmar_handle,
+            object_handle: root_vmar_handle,
+            obj_type: ObjectType::Vmar,
+            rights: crate::kernel_objects::default_rights_for_object(ObjectType::Vmar),
+        });
 
         Self {
             linux_mappings: Vec::new(),
@@ -746,8 +773,10 @@ impl MemorySyscallState {
             brk: BrkState::new(),
             vmos: Vec::new(),
             vmars,
+            jobs: Vec::new(),
             processes: Vec::new(),
             threads: Vec::new(),
+            handles,
             signals: Vec::new(),
             linux_fds: Vec::new(),
             next_handle: MEMORY_HANDLE_START + 1,
@@ -760,6 +789,124 @@ impl MemorySyscallState {
         let handle = self.next_handle;
         self.next_handle = self.next_handle.wrapping_add(1);
         handle
+    }
+
+    fn register_handle(
+        &mut self,
+        handle: u32,
+        object_handle: u32,
+        obj_type: ObjectType,
+        rights: u32,
+    ) -> bool {
+        if syscall_logic::handle_invalid(handle, INVALID_HANDLE)
+            || !crate::kernel_objects::rights_are_valid(rights)
+            || self.handles.iter().any(|record| record.handle == handle)
+        {
+            return false;
+        }
+
+        self.handles.push(KernelHandleRecord {
+            handle,
+            object_handle,
+            obj_type,
+            rights,
+        });
+        true
+    }
+
+    fn register_object_handle(&mut self, handle: u32, obj_type: ObjectType) -> bool {
+        self.register_handle(
+            handle,
+            handle,
+            obj_type,
+            crate::kernel_objects::default_rights_for_object(obj_type),
+        )
+    }
+
+    fn alloc_object_handle(&mut self, obj_type: ObjectType) -> u32 {
+        let handle = self.alloc_handle();
+        let _ = self.register_object_handle(handle, obj_type);
+        handle
+    }
+
+    fn handle_record(&self, handle: u32) -> Option<KernelHandleRecord> {
+        self.handles
+            .iter()
+            .find(|record| record.handle == handle)
+            .copied()
+    }
+
+    fn handle_object_type(&self, handle: u32) -> Option<ObjectType> {
+        self.handle_record(handle).map(|record| record.obj_type)
+    }
+
+    fn handle_rights(&self, handle: u32) -> Option<u32> {
+        self.handle_record(handle).map(|record| record.rights)
+    }
+
+    fn handle_has_rights(&self, handle: u32, required: u32) -> bool {
+        self.handle_rights(handle)
+            .map(|rights| crate::kernel_objects::rights_contain(rights, required))
+            .unwrap_or(false)
+    }
+
+    fn resolve_handle(&self, handle: u32, obj_type: ObjectType) -> Option<u32> {
+        self.handle_record(handle)
+            .filter(|record| record.obj_type == obj_type)
+            .map(|record| record.object_handle)
+    }
+
+    fn duplicate_handle(&mut self, handle: u32, requested_rights: u32) -> ZxResult<u32> {
+        let record = self.handle_record(handle).ok_or(ZxError::ErrNotFound)?;
+        if !crate::kernel_objects::object_logic::duplicate_rights_allowed(
+            record.rights,
+            requested_rights,
+            Rights::Duplicate as u32,
+            RIGHT_SAME_RIGHTS,
+            crate::kernel_objects::RIGHTS_ALL,
+        ) {
+            return Err(ZxError::ErrAccessDenied);
+        }
+
+        let rights = if requested_rights == RIGHT_SAME_RIGHTS {
+            record.rights
+        } else {
+            requested_rights
+        };
+        let new_handle = self.alloc_handle();
+        if self.register_handle(new_handle, record.object_handle, record.obj_type, rights) {
+            Ok(new_handle)
+        } else {
+            Err(ZxError::ErrNoMemory)
+        }
+    }
+
+    fn replace_handle(&mut self, handle: u32, requested_rights: u32) -> ZxResult<u32> {
+        let record = self.handle_record(handle).ok_or(ZxError::ErrNotFound)?;
+        if !crate::kernel_objects::object_logic::replace_rights_allowed(
+            record.rights,
+            requested_rights,
+            RIGHT_SAME_RIGHTS,
+            crate::kernel_objects::RIGHTS_ALL,
+        ) {
+            return Err(ZxError::ErrAccessDenied);
+        }
+
+        let rights = if requested_rights == RIGHT_SAME_RIGHTS {
+            record.rights
+        } else {
+            requested_rights
+        };
+        let new_handle = self.alloc_handle();
+        if !self.register_handle(new_handle, record.object_handle, record.obj_type, rights) {
+            return Err(ZxError::ErrNoMemory);
+        }
+        if self.release_handle(handle) {
+            Ok(new_handle)
+        } else {
+            let _ = self.release_handle(new_handle);
+            Err(ZxError::ErrNotFound)
+        }
     }
 
     fn stats(&self) -> MemorySyscallStats {
@@ -855,6 +1002,7 @@ impl MemorySyscallState {
     }
 
     fn get_vmo(&self, handle: u32) -> Option<&Vmo> {
+        let handle = self.resolve_handle(handle, ObjectType::Vmo)?;
         self.vmos
             .iter()
             .find(|record| record.handle == handle)
@@ -862,6 +1010,7 @@ impl MemorySyscallState {
     }
 
     fn get_vmo_mut(&mut self, handle: u32) -> Option<&mut Vmo> {
+        let handle = self.resolve_handle(handle, ObjectType::Vmo)?;
         self.vmos
             .iter_mut()
             .find(|record| record.handle == handle)
@@ -869,6 +1018,7 @@ impl MemorySyscallState {
     }
 
     fn get_vmar(&self, handle: u32) -> Option<&Vmar> {
+        let handle = self.resolve_handle(handle, ObjectType::Vmar)?;
         self.vmars
             .iter()
             .find(|record| record.handle == handle)
@@ -876,6 +1026,7 @@ impl MemorySyscallState {
     }
 
     fn get_vmar_mut(&mut self, handle: u32) -> Option<&mut Vmar> {
+        let handle = self.resolve_handle(handle, ObjectType::Vmar)?;
         self.vmars
             .iter_mut()
             .find(|record| record.handle == handle)
@@ -883,29 +1034,89 @@ impl MemorySyscallState {
     }
 
     fn get_process_mut(&mut self, handle: u32) -> Option<&mut ProcessRecord> {
+        let handle = self.resolve_handle(handle, ObjectType::Process)?;
         self.processes
             .iter_mut()
             .find(|record| record.handle == handle)
     }
 
+    fn get_job(&self, handle: u32) -> Option<&JobRecord> {
+        let handle = self.resolve_handle(handle, ObjectType::Job)?;
+        self.jobs.iter().find(|record| record.handle == handle)
+    }
+
+    fn get_job_mut(&mut self, handle: u32) -> Option<&mut JobRecord> {
+        let handle = self.resolve_handle(handle, ObjectType::Job)?;
+        self.jobs.iter_mut().find(|record| record.handle == handle)
+    }
+
     fn get_thread_mut(&mut self, handle: u32) -> Option<&mut ThreadRecord> {
+        let handle = self.resolve_handle(handle, ObjectType::Thread)?;
         self.threads
             .iter_mut()
             .find(|record| record.handle == handle)
     }
 
+    fn task_handle_known(&self, handle: u32) -> bool {
+        if !self.live_handle_known(handle) {
+            return false;
+        }
+        matches!(
+            self.handle_object_type(handle),
+            Some(ObjectType::Job | ObjectType::Process | ObjectType::Thread)
+        )
+    }
+
     fn handle_known(&self, handle: u32) -> bool {
-        self.vmos.iter().any(|record| record.handle == handle)
-            || self.vmars.iter().any(|record| record.handle == handle)
-            || self.processes.iter().any(|record| record.handle == handle)
-            || self.threads.iter().any(|record| record.handle == handle)
+        self.handle_record(handle).is_some()
+    }
+
+    fn live_handle_known(&self, handle: u32) -> bool {
+        let Some(record) = self.handle_record(handle) else {
+            return false;
+        };
+        match record.obj_type {
+            ObjectType::Vmo => self
+                .vmos
+                .iter()
+                .any(|object| object.handle == record.object_handle),
+            ObjectType::Vmar => self
+                .vmars
+                .iter()
+                .any(|object| object.handle == record.object_handle),
+            ObjectType::Job => self
+                .jobs
+                .iter()
+                .any(|object| object.handle == record.object_handle),
+            ObjectType::Process => self
+                .processes
+                .iter()
+                .any(|object| object.handle == record.object_handle),
+            ObjectType::Thread => self
+                .threads
+                .iter()
+                .any(|object| object.handle == record.object_handle),
+            _ => true,
+        }
     }
 
     fn process_handle_known(&self, handle: u32) -> bool {
-        self.processes.iter().any(|record| record.handle == handle)
+        let Some(object_handle) = self.resolve_handle(handle, ObjectType::Process) else {
+            return false;
+        };
+        self.processes
+            .iter()
+            .any(|record| record.handle == object_handle)
+    }
+
+    fn signal_key(&self, handle: u32) -> u32 {
+        self.handle_record(handle)
+            .map(|record| record.object_handle)
+            .unwrap_or(handle)
     }
 
     fn get_signal_value(&self, handle: u32) -> u32 {
+        let handle = self.signal_key(handle);
         self.signals
             .iter()
             .find(|record| record.handle == handle)
@@ -914,6 +1125,7 @@ impl MemorySyscallState {
     }
 
     fn get_property_value(&self, handle: u32) -> u64 {
+        let handle = self.signal_key(handle);
         self.signals
             .iter()
             .find(|record| record.handle == handle)
@@ -922,6 +1134,7 @@ impl MemorySyscallState {
     }
 
     fn set_property_value(&mut self, handle: u32, value: u64) {
+        let handle = self.signal_key(handle);
         if let Some(record) = self
             .signals
             .iter_mut()
@@ -938,6 +1151,7 @@ impl MemorySyscallState {
     }
 
     fn update_signal_value(&mut self, handle: u32, clear_mask: u32, set_mask: u32) -> u32 {
+        let handle = self.signal_key(handle);
         if let Some(record) = self
             .signals
             .iter_mut()
@@ -957,7 +1171,29 @@ impl MemorySyscallState {
     }
 
     fn remove_vmo(&mut self, handle: u32) -> bool {
-        if let Some(index) = self.vmos.iter().position(|record| record.handle == handle) {
+        let Some(record) = self.handle_record(handle) else {
+            return false;
+        };
+        if record.obj_type != ObjectType::Vmo {
+            return false;
+        }
+
+        let object_handle = record.object_handle;
+        let shared = self
+            .handles
+            .iter()
+            .any(|entry| entry.handle != handle && entry.object_handle == object_handle);
+        self.handles.retain(|entry| entry.handle != handle);
+        self.signals.retain(|signal| signal.handle != handle);
+        if shared {
+            return true;
+        }
+
+        if let Some(index) = self
+            .vmos
+            .iter()
+            .position(|record| record.handle == object_handle)
+        {
             let mut record = self.vmos.swap_remove(index);
             record.vmo.release_pages();
             true
@@ -978,6 +1214,8 @@ impl MemorySyscallState {
 
         if handle == self.root_vmar_handle {
             self.vmars[index].vmar.destroy().ok();
+            self.handles.retain(|entry| entry.object_handle != handle);
+            self.signals.retain(|signal| signal.handle != handle);
             return true;
         }
 
@@ -987,6 +1225,8 @@ impl MemorySyscallState {
             .map(|parent| parent as u32);
         let mut record = self.vmars.swap_remove(index);
         record.vmar.destroy().ok();
+        self.handles.retain(|entry| entry.object_handle != handle);
+        self.signals.retain(|signal| signal.handle != handle);
 
         if let Some(parent_handle) = parent_handle {
             if let Some(parent) = self.get_vmar_mut(parent_handle) {
@@ -998,21 +1238,107 @@ impl MemorySyscallState {
     }
 
     fn remove_vmar(&mut self, handle: u32) -> bool {
-        self.destroy_vmar_recursive(handle)
+        let Some(record) = self.handle_record(handle) else {
+            return false;
+        };
+        if record.obj_type != ObjectType::Vmar {
+            return false;
+        }
+
+        let object_handle = record.object_handle;
+        let shared = self
+            .handles
+            .iter()
+            .any(|entry| entry.handle != handle && entry.object_handle == object_handle);
+        self.handles.retain(|entry| entry.handle != handle);
+        self.signals.retain(|signal| signal.handle != handle);
+        if shared {
+            return true;
+        }
+
+        self.destroy_vmar_recursive(object_handle)
+    }
+
+    fn remove_job(&mut self, handle: u32) -> bool {
+        let Some(record) = self.handle_record(handle) else {
+            return false;
+        };
+        if record.obj_type != ObjectType::Job {
+            return false;
+        }
+
+        let object_handle = record.object_handle;
+        let shared = self
+            .handles
+            .iter()
+            .any(|entry| entry.handle != handle && entry.object_handle == object_handle);
+        self.handles.retain(|entry| entry.handle != handle);
+        self.signals.retain(|signal| signal.handle != handle);
+        if shared {
+            return true;
+        }
+
+        if let Some(index) = self.jobs.iter().position(|record| record.handle == object_handle) {
+            let parent = self.jobs[index].parent;
+            self.jobs.swap_remove(index);
+            if let Some(parent) = parent {
+                if let Some(parent_job) = self.jobs.iter_mut().find(|record| record.handle == parent)
+                {
+                    parent_job.child_count = parent_job.child_count.saturating_sub(1);
+                }
+            }
+            true
+        } else {
+            false
+        }
     }
 
     fn remove_process(&mut self, handle: u32) -> bool {
+        let Some(record) = self.handle_record(handle) else {
+            return false;
+        };
+        if record.obj_type != ObjectType::Process {
+            return false;
+        }
+
+        let object_handle = record.object_handle;
+        let shared = self
+            .handles
+            .iter()
+            .any(|entry| entry.handle != handle && entry.object_handle == object_handle);
+        self.handles.retain(|entry| entry.handle != handle);
+        self.signals.retain(|signal| signal.handle != handle);
+        if shared {
+            return true;
+        }
+
         if let Some(index) = self
             .processes
             .iter()
-            .position(|record| record.handle == handle)
+            .position(|record| record.handle == object_handle)
         {
             let record = self.processes.swap_remove(index);
             if record.pid != 0 {
                 let _ = process_manager().terminate_process(record.pid);
             }
-            let _ = self.remove_vmar(record.root_vmar_handle);
-            self.signals.retain(|signal| signal.handle != handle);
+            if let Some(job) = self
+                .jobs
+                .iter_mut()
+                .find(|job| job.handle == record.job_handle)
+            {
+                job.child_count = job.child_count.saturating_sub(1);
+            }
+            let root_vmar_handle = self
+                .handles
+                .iter()
+                .find(|entry| {
+                    entry.obj_type == ObjectType::Vmar
+                        && entry.object_handle == record.root_vmar_handle
+                })
+                .map(|entry| entry.handle);
+            if let Some(root_vmar_handle) = root_vmar_handle {
+                let _ = self.remove_vmar(root_vmar_handle);
+            }
             true
         } else {
             false
@@ -1020,13 +1346,30 @@ impl MemorySyscallState {
     }
 
     fn remove_thread(&mut self, handle: u32) -> bool {
+        let Some(record) = self.handle_record(handle) else {
+            return false;
+        };
+        if record.obj_type != ObjectType::Thread {
+            return false;
+        }
+
+        let object_handle = record.object_handle;
+        let shared = self
+            .handles
+            .iter()
+            .any(|entry| entry.handle != handle && entry.object_handle == object_handle);
+        self.handles.retain(|entry| entry.handle != handle);
+        self.signals.retain(|signal| signal.handle != handle);
+        if shared {
+            return true;
+        }
+
         if let Some(index) = self
             .threads
             .iter()
-            .position(|record| record.handle == handle)
+            .position(|record| record.handle == object_handle)
         {
             self.threads.swap_remove(index);
-            self.signals.retain(|signal| signal.handle != handle);
             true
         } else {
             false
@@ -1036,6 +1379,7 @@ impl MemorySyscallState {
     fn release_handle(&mut self, handle: u32) -> bool {
         self.remove_vmo(handle)
             || self.remove_vmar(handle)
+            || self.remove_job(handle)
             || self.remove_process(handle)
             || self.remove_thread(handle)
     }
@@ -1186,23 +1530,75 @@ fn channel_handle_known(handle: u32) -> bool {
         .is_some()
 }
 
-fn kernel_object_handle_known(handle: u32) -> bool {
+fn handle_known_type(handle: u32) -> Option<ObjectType> {
     if syscall_logic::handle_invalid(handle, INVALID_HANDLE) {
-        return false;
+        return None;
     }
-    if memory_state().handle_known(handle) {
-        return true;
+    let state = memory_state();
+    if state.live_handle_known(handle) {
+        let obj_type = state.handle_object_type(handle)?;
+        return Some(obj_type);
     }
-    channel_handle_known(handle)
-        || fifo::fifo_table().contains(HandleValue(handle))
-        || port::port_table().contains(HandleValue(handle))
-        || socket::socket_table().contains(HandleValue(handle))
-        || compat::handle_known(HandleValue(handle))
+    if channel_handle_known(handle) {
+        return Some(ObjectType::Channel);
+    }
+    if fifo::fifo_table().contains(HandleValue(handle)) {
+        return Some(ObjectType::Fifo);
+    }
+    if port::port_table().contains(HandleValue(handle)) {
+        return Some(ObjectType::Port);
+    }
+    if socket::socket_table().contains(HandleValue(handle)) {
+        return Some(ObjectType::Socket);
+    }
+    compat::table().object_type(HandleValue(handle))
+}
+
+fn handle_known_rights(handle: u32) -> Option<u32> {
+    let obj_type = handle_known_type(handle)?;
+    if memory_state().live_handle_known(handle) {
+        let rights = memory_state().handle_rights(handle)?;
+        return Some(rights);
+    }
+    if let Some(rights) = channel::channel_table().rights(HandleValue(handle)) {
+        return Some(rights);
+    }
+    if let Some(rights) = fifo::fifo_table().rights(HandleValue(handle)) {
+        return Some(rights);
+    }
+    if let Some(rights) = port::port_table().rights(HandleValue(handle)) {
+        return Some(rights);
+    }
+    if let Some(rights) = socket::socket_table().rights(HandleValue(handle)) {
+        return Some(rights);
+    }
+    compat::table()
+        .rights(HandleValue(handle))
+        .or(Some(crate::kernel_objects::default_rights_for_object(obj_type)))
+}
+
+fn handle_has_rights(handle: u32, required: u32) -> bool {
+    handle_known_rights(handle)
+        .map(|rights| crate::kernel_objects::rights_contain(rights, required))
+        .unwrap_or(false)
+}
+
+fn kernel_object_handle_known(handle: u32) -> bool {
+    handle_known_type(handle).is_some()
 }
 
 fn object_signal_state(handle: u32) -> ZxResult<u32> {
-    if memory_state().handle_known(handle) {
-        return Ok(memory_state().get_signal_value(handle));
+    let state = memory_state();
+    if state.live_handle_known(handle) {
+        let record = state.handle_record(handle).ok_or(ZxError::ErrNotFound)?;
+        if record.obj_type == ObjectType::Channel {
+            let channel_signal = channel::channel_table()
+                .get_channel(HandleValue(record.object_handle))
+                .map(|channel| channel.get_signal_state(HandleValue(record.object_handle)))
+                .ok_or(ZxError::ErrNotFound)?;
+            return Ok(channel_signal | state.get_signal_value(handle));
+        }
+        return Ok(state.get_signal_value(handle));
     }
 
     let channel_signal = channel::channel_table()
@@ -1228,7 +1624,12 @@ fn set_object_signal_state(handle: u32, clear_mask: u32, set_mask: u32) -> ZxRes
     let user_signals_allowed =
         syscall_logic::signal_mask_allowed(clear_mask, set_mask, syscall_logic::user_signal_mask());
 
-    let updated = if memory_state().handle_known(handle) || channel_handle_known(handle) {
+    let updated = if memory_state().live_handle_known(handle) {
+        if !user_signals_allowed {
+            return Err(ZxError::ErrInvalidArgs);
+        }
+        Ok(memory_state().update_signal_value(handle, clear_mask, set_mask))
+    } else if channel_handle_known(handle) {
         if !user_signals_allowed {
             return Err(ZxError::ErrInvalidArgs);
         }
@@ -3606,7 +4007,7 @@ pub fn sys_vmo_create(size: u64, options: u32, out_handle: &mut u32) -> ZxResult
     };
 
     let state = memory_state();
-    let handle = state.alloc_handle();
+    let handle = state.alloc_object_handle(ObjectType::Vmo);
     vmo.handle = HandleValue(handle);
     state.vmos.push(VmoRecord { handle, vmo });
     *out_handle = handle;
@@ -3618,6 +4019,9 @@ pub fn sys_vmo_read(handle: u32, buf: &mut [u8], offset: u64) -> ZxResult<usize>
     info!("vmo.read: handle={:#x?}, offset={:#x?}", handle, offset);
 
     let state = memory_state();
+    if !state.handle_has_rights(handle, Rights::Read as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
     let vmo = state.get_vmo(handle).ok_or(ZxError::ErrNotFound)?;
     vmo.read(offset as usize, buf)?;
     Ok(buf.len())
@@ -3628,6 +4032,9 @@ pub fn sys_vmo_write(handle: u32, buf: &[u8], offset: u64) -> ZxResult<usize> {
     info!("vmo.write: handle={:#x?}, offset={:#x?}", handle, offset);
 
     let state = memory_state();
+    if !state.handle_has_rights(handle, Rights::Write as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
     let vmo = state.get_vmo_mut(handle).ok_or(ZxError::ErrNotFound)?;
     vmo.write(offset as usize, buf)?;
     Ok(buf.len())
@@ -3638,6 +4045,9 @@ pub fn sys_vmo_get_size(handle: u32, out_size: &mut usize) -> ZxResult {
     info!("vmo.get_size: handle={:?}", handle);
 
     let state = memory_state();
+    if !state.handle_has_rights(handle, Rights::GetProperty as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
     let vmo = state.get_vmo(handle).ok_or(ZxError::ErrNotFound)?;
     *out_size = vmo.len();
     Ok(())
@@ -3648,6 +4058,9 @@ pub fn sys_vmo_set_size(handle: u32, size: usize) -> ZxResult {
     info!("vmo.set_size: handle={:#x}, size={:#x}", handle, size);
 
     let state = memory_state();
+    if !state.handle_has_rights(handle, Rights::Resize as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
     let vmo = state.get_vmo_mut(handle).ok_or(ZxError::ErrNotFound)?;
     vmo.set_len(size)
 }
@@ -3661,6 +4074,18 @@ pub fn sys_vmo_op_range(handle: u32, op: u32, offset: usize, len: usize) -> ZxRe
 
     let op = VmoOpType::try_from(op).or(Err(ZxError::ErrInvalidArgs))?;
     let state = memory_state();
+    let required_right = match op {
+        VmoOpType::Commit
+        | VmoOpType::Decommit
+        | VmoOpType::Zero
+        | VmoOpType::Lock
+        | VmoOpType::Unlock => Rights::Write as u32,
+        VmoOpType::CacheSync | VmoOpType::CacheInvalidate | VmoOpType::CacheClean
+        | VmoOpType::CacheCleanInvalidate => Rights::Read as u32,
+    };
+    if !state.handle_has_rights(handle, required_right) {
+        return Err(ZxError::ErrAccessDenied);
+    }
     let vmo = state.get_vmo_mut(handle).ok_or(ZxError::ErrNotFound)?;
 
     if checked_end(offset, len)
@@ -3717,6 +4142,9 @@ pub fn sys_vmo_create_child(
 
     let child = {
         let state = memory_state();
+        if !state.handle_has_rights(handle, Rights::Duplicate as u32 | Rights::Read as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         let parent = state.get_vmo(handle).ok_or(ZxError::ErrNotFound)?;
         if checked_end(offset, size)
             .filter(|end| *end <= parent.len())
@@ -3733,7 +4161,7 @@ pub fn sys_vmo_create_child(
     };
 
     let state = memory_state();
-    let child_handle = state.alloc_handle();
+    let child_handle = state.alloc_object_handle(ObjectType::Vmo);
     let mut child = child;
     child.handle = HandleValue(child_handle);
     state.vmos.push(VmoRecord {
@@ -3759,7 +4187,7 @@ pub fn sys_vmo_create_physical(
 
     let mut vmo = Vmo::new_physical(paddr, size).ok_or(ZxError::ErrNoMemory)?;
     let state = memory_state();
-    let handle = state.alloc_handle();
+    let handle = state.alloc_object_handle(ObjectType::Vmo);
     vmo.handle = HandleValue(handle);
     state.vmos.push(VmoRecord { handle, vmo });
     *out_handle = handle;
@@ -3781,7 +4209,7 @@ pub fn sys_vmo_create_contiguous(
 
     let mut vmo = Vmo::new_contiguous(size).ok_or(ZxError::ErrNoMemory)?;
     let state = memory_state();
-    let handle = state.alloc_handle();
+    let handle = state.alloc_object_handle(ObjectType::Vmo);
     vmo.handle = HandleValue(handle);
     state.vmos.push(VmoRecord { handle, vmo });
     *out_handle = handle;
@@ -3792,15 +4220,35 @@ pub fn sys_vmo_create_contiguous(
 pub fn sys_vmo_replace_as_executable(handle: u32, _vmex: u32, out_handle: &mut u32) -> ZxResult {
     info!("vmo.replace_as_executable: handle={:#x}", handle);
 
-    if !memory_state()
-        .vmos
-        .iter()
-        .any(|record| record.handle == handle)
-    {
+    let state = memory_state();
+    if state.get_vmo(handle).is_none() {
         return Err(ZxError::ErrNotFound);
     }
 
-    *out_handle = handle;
+    let source_rights = state
+        .handle_rights(handle)
+        .ok_or(ZxError::ErrNotFound)?;
+    let executable_rights = source_rights | Rights::Execute as u32;
+    if !crate::kernel_objects::rights_are_valid(executable_rights) {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let object_handle = state
+        .resolve_handle(handle, ObjectType::Vmo)
+        .ok_or(ZxError::ErrNotFound)?;
+    let executable_handle = state.alloc_handle();
+    if !state.register_handle(
+        executable_handle,
+        object_handle,
+        ObjectType::Vmo,
+        executable_rights,
+    ) {
+        return Err(ZxError::ErrNoMemory);
+    }
+    if !state.release_handle(handle) {
+        let _ = state.release_handle(executable_handle);
+        return Err(ZxError::ErrNotFound);
+    }
+    *out_handle = executable_handle;
     Ok(())
 }
 
@@ -3815,6 +4263,9 @@ pub fn sys_vmo_set_cache_policy(handle: u32, policy: u32) -> ZxResult {
     };
 
     let state = memory_state();
+    if !state.handle_has_rights(handle, Rights::SetProperty as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
     let vmo = state.get_vmo_mut(handle).ok_or(ZxError::ErrNotFound)?;
     vmo.set_cache_policy(policy)
 }
@@ -3853,6 +4304,21 @@ pub fn sys_vmar_map(
 
     let vmo_len = {
         let state = memory_state();
+        let mut vmo_required_rights = Rights::Map as u32;
+        if options.contains(VmOptions::PERM_READ) {
+            vmo_required_rights |= Rights::Read as u32;
+        }
+        if options.contains(VmOptions::PERM_WRITE) {
+            vmo_required_rights |= Rights::Write as u32;
+        }
+        if options.contains(VmOptions::PERM_EXECUTE) {
+            vmo_required_rights |= Rights::Execute as u32;
+        }
+        if !state.handle_has_rights(vmar_handle, Rights::Map as u32)
+            || !state.handle_has_rights(vmo_handle, vmo_required_rights)
+        {
+            return Err(ZxError::ErrAccessDenied);
+        }
         let vmo = state.get_vmo(vmo_handle).ok_or(ZxError::ErrNotFound)?;
         vmo.len()
     };
@@ -3869,6 +4335,9 @@ pub fn sys_vmar_map(
     let requested_offset = if specific { Some(vmar_offset) } else { None };
     let flags = mmu_flags_from_vm_options(options);
     let state = memory_state();
+    if !state.handle_has_rights(vmar_handle, Rights::OpChildren as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
     let vmar = state
         .get_vmar_mut(vmar_handle)
         .ok_or(ZxError::ErrNotFound)?;
@@ -3897,6 +4366,9 @@ pub fn sys_vmar_unmap(vmar_handle: u32, addr: usize, len: usize) -> ZxResult {
     }
 
     let state = memory_state();
+    if !state.handle_has_rights(vmar_handle, Rights::OpChildren as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
     let vmar = state
         .get_vmar_mut(vmar_handle)
         .ok_or(ZxError::ErrNotFound)?;
@@ -3918,6 +4390,9 @@ pub fn sys_vmar_protect(vmar_handle: u32, options: u32, addr: u64, len: u64) -> 
     }
 
     let state = memory_state();
+    if !state.handle_has_rights(vmar_handle, Rights::Map as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
     let vmar = state
         .get_vmar_mut(vmar_handle)
         .ok_or(ZxError::ErrNotFound)?;
@@ -3949,25 +4424,24 @@ pub fn sys_vmar_allocate(
         return Err(ZxError::ErrInvalidArgs);
     }
 
-    let child_handle = {
-        let state = memory_state();
-        state.alloc_handle()
-    };
-
     let requested_offset = if flags.contains(VmarFlags::SPECIFIC) || offset != 0 {
         Some(offset as usize)
     } else {
         None
     };
 
-    let child_addr = {
+    let (child_handle, child_addr) = {
         let state = memory_state();
+        if !state.handle_has_rights(parent_vmar, Rights::OpChildren as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
+        let child_handle = state.alloc_object_handle(ObjectType::Vmar);
         let parent = state
             .get_vmar_mut(parent_vmar)
             .ok_or(ZxError::ErrNotFound)?;
         let child_addr = parent.allocate(requested_offset, size, flags, PAGE_SIZE)?;
         parent.children.push(child_handle as usize);
-        child_addr
+        (child_handle, child_addr)
     };
 
     let mut child_vmar = Vmar::new(child_addr, size);
@@ -3989,7 +4463,11 @@ pub fn sys_vmar_allocate(
 pub fn sys_vmar_destroy(vmar_handle: u32) -> ZxResult {
     info!("vmar.destroy: handle={:#x?}", vmar_handle);
 
-    if memory_state().remove_vmar(vmar_handle) {
+    let state = memory_state();
+    if !state.handle_has_rights(vmar_handle, Rights::OpChildren as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
+    if state.remove_vmar(vmar_handle) {
         Ok(())
     } else {
         Err(ZxError::ErrNotFound)
@@ -4029,6 +4507,9 @@ pub fn sys_vmar_unmap_handle_close_thread_exit(
     }
 
     let state = memory_state();
+    if !state.handle_has_rights(vmar_handle, Rights::OpChildren as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
     let vmar = state
         .get_vmar_mut(vmar_handle)
         .ok_or(ZxError::ErrNotFound)?;
@@ -4434,12 +4915,24 @@ pub fn sys_process_create(
     if options != 0 || !syscall_logic::user_buffer_valid(name_ptr, name_len) {
         return Err(ZxError::ErrInvalidArgs);
     }
+    if job_handle == 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    {
+        let state = memory_state();
+        if state.get_job(job_handle).is_none() {
+            return Err(ZxError::ErrNotFound);
+        }
+        if !state.handle_has_rights(job_handle, Rights::ManageProcess as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
+    }
 
     let pid = process_manager().create_process("zircon_proc").unwrap_or(0);
 
     let state = memory_state();
-    let proc_handle = state.alloc_handle();
-    let vmar_handle = state.alloc_handle();
+    let proc_handle = state.alloc_object_handle(ObjectType::Process);
+    let vmar_handle = state.alloc_object_handle(ObjectType::Vmar);
     let mut root_vmar = Vmar::new(ZIRCON_ROOT_VMAR_BASE, ZIRCON_ROOT_VMAR_SIZE);
     root_vmar.handle = HandleValue(vmar_handle);
 
@@ -4449,11 +4942,15 @@ pub fn sys_process_create(
     });
     state.processes.push(ProcessRecord {
         handle: proc_handle,
+        job_handle,
         pid,
         root_vmar_handle: vmar_handle,
         exited: false,
         exit_code: 0,
     });
+    if let Some(job) = state.get_job_mut(job_handle) {
+        job.child_count = job.child_count.saturating_add(1);
+    }
 
     *out_proc_handle = proc_handle;
     *out_vmar_handle = vmar_handle;
@@ -4465,6 +4962,9 @@ pub fn sys_process_exit(handle: u32, exit_code: i32) -> ZxResult {
     info!("process.exit: handle={:#x}, code={}", handle, exit_code);
 
     let state = memory_state();
+    if !state.handle_has_rights(handle, Rights::Signal as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
     let pid_to_terminate = {
         let proc = state.get_process_mut(handle).ok_or(ZxError::ErrNotFound)?;
         let pid_to_terminate = if !proc.exited && proc.pid != 0 {
@@ -4503,10 +5003,16 @@ pub fn sys_thread_create(
     {
         return Err(ZxError::ErrInvalidArgs);
     }
-    let handle = state.alloc_handle();
+    if !state.handle_has_rights(proc_handle, Rights::ManageThread as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
+    let process_object = state
+        .resolve_handle(proc_handle, ObjectType::Process)
+        .ok_or(ZxError::ErrInvalidArgs)?;
+    let handle = state.alloc_object_handle(ObjectType::Thread);
     state.threads.push(ThreadRecord {
         handle,
-        process_handle: proc_handle,
+        process_handle: process_object,
         entry_point,
         stack_top: 0,
         arg1: 0,
@@ -4532,6 +5038,9 @@ pub fn sys_thread_start(
     );
 
     let state = memory_state();
+    if !state.handle_has_rights(thread_handle, Rights::Write as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
     let thread = state
         .get_thread_mut(thread_handle)
         .ok_or(ZxError::ErrNotFound)?;
@@ -4559,13 +5068,15 @@ pub fn sys_thread_read_state(
     buffer: usize,
     buffer_size: usize,
 ) -> ZxResult {
-    if !memory_state()
-        .threads
-        .iter()
-        .any(|record| record.handle == thread_handle)
-        || !syscall_logic::user_buffer_valid(buffer, buffer_size)
-    {
+    let state = memory_state();
+    if !syscall_logic::user_buffer_valid(buffer, buffer_size) {
         return Err(ZxError::ErrInvalidArgs);
+    }
+    if state.get_thread_mut(thread_handle).is_none() {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    if !state.handle_has_rights(thread_handle, Rights::Read as u32) {
+        return Err(ZxError::ErrAccessDenied);
     }
 
     if buffer_size >= core::mem::size_of::<u64>() {
@@ -4583,13 +5094,15 @@ pub fn sys_thread_write_state(
     buffer: usize,
     buffer_size: usize,
 ) -> ZxResult {
-    if !memory_state()
-        .threads
-        .iter()
-        .any(|record| record.handle == thread_handle)
-        || !syscall_logic::user_buffer_valid(buffer, buffer_size)
-    {
+    let state = memory_state();
+    if !syscall_logic::user_buffer_valid(buffer, buffer_size) {
         return Err(ZxError::ErrInvalidArgs);
+    }
+    if state.get_thread_mut(thread_handle).is_none() {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    if !state.handle_has_rights(thread_handle, Rights::Write as u32) {
+        return Err(ZxError::ErrAccessDenied);
     }
 
     Ok(())
@@ -4601,6 +5114,11 @@ pub fn sys_task_kill(task_handle: u32) -> ZxResult {
 
     {
         let state = memory_state();
+        if state.task_handle_known(task_handle)
+            && !state.handle_has_rights(task_handle, Rights::Destroy as u32)
+        {
+            return Err(ZxError::ErrAccessDenied);
+        }
         if let Some(proc) = state.get_process_mut(task_handle) {
             let pid_to_terminate = if !proc.exited && proc.pid != 0 {
                 Some(proc.pid)
@@ -4633,8 +5151,28 @@ pub fn sys_process_start(
     arg1: usize,
     arg2: usize,
 ) -> ZxResult {
-    if !memory_state().process_handle_known(proc_handle) {
+    let state = memory_state();
+    if !state.process_handle_known(proc_handle) {
         return Err(ZxError::ErrNotFound);
+    }
+    if !state.handle_has_rights(proc_handle, Rights::ManageThread as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
+    let Some(thread_record) = state.handle_record(thread_handle) else {
+        return Err(ZxError::ErrNotFound);
+    };
+    let proc_object = state
+        .resolve_handle(proc_handle, ObjectType::Process)
+        .ok_or(ZxError::ErrNotFound)?;
+    if thread_record.obj_type != ObjectType::Thread {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    if !state
+        .threads
+        .iter()
+        .any(|thread| thread.handle == thread_record.object_handle && thread.process_handle == proc_object)
+    {
+        return Err(ZxError::ErrInvalidArgs);
     }
     sys_thread_start(thread_handle, entry, stack, arg1, arg2)
 }
@@ -4646,10 +5184,12 @@ pub fn sys_process_read_memory(
     buffer: usize,
     len: usize,
 ) -> ZxResult<usize> {
-    if !memory_state().process_handle_known(proc_handle)
-        || !syscall_logic::user_buffer_valid(buffer, len)
-    {
+    let state = memory_state();
+    if !state.process_handle_known(proc_handle) || !syscall_logic::user_buffer_valid(buffer, len) {
         return Err(ZxError::ErrInvalidArgs);
+    }
+    if !state.handle_has_rights(proc_handle, Rights::Read as u32) {
+        return Err(ZxError::ErrAccessDenied);
     }
 
     if len != 0 {
@@ -4666,10 +5206,12 @@ pub fn sys_process_write_memory(
     buffer: usize,
     len: usize,
 ) -> ZxResult<usize> {
-    if !memory_state().process_handle_known(proc_handle)
-        || !syscall_logic::user_buffer_valid(buffer, len)
-    {
+    let state = memory_state();
+    if !state.process_handle_known(proc_handle) || !syscall_logic::user_buffer_valid(buffer, len) {
         return Err(ZxError::ErrInvalidArgs);
+    }
+    if !state.handle_has_rights(proc_handle, Rights::Write as u32) {
+        return Err(ZxError::ErrAccessDenied);
     }
 
     Ok(len)
@@ -4680,11 +5222,36 @@ pub fn sys_job_create(parent_job: u32, options: u32, out_handle: &mut u32) -> Zx
     if options != 0 {
         return Err(ZxError::ErrInvalidArgs);
     }
-    if parent_job != 0 && !kernel_object_handle_known(parent_job) {
-        return Err(ZxError::ErrNotFound);
+    if parent_job != 0 {
+        let state = memory_state();
+        if state.get_job(parent_job).is_none() {
+            return Err(ZxError::ErrNotFound);
+        }
+        if !state.handle_has_rights(parent_job, Rights::ManageJob as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
     }
 
-    *out_handle = compat::create_object(ObjectType::Job)?.0;
+    let state = memory_state();
+    let parent_object = if parent_job == 0 {
+        None
+    } else {
+        state.resolve_handle(parent_job, ObjectType::Job)
+    };
+    let handle = state.alloc_object_handle(ObjectType::Job);
+    state.jobs.push(JobRecord {
+        handle,
+        parent: parent_object,
+        child_count: 0,
+        policy_count: 0,
+        critical_process: None,
+    });
+    if parent_job != 0 {
+        if let Some(parent) = state.get_job_mut(parent_job) {
+            parent.child_count = parent.child_count.saturating_add(1);
+        }
+    }
+    *out_handle = handle;
     Ok(())
 }
 
@@ -4695,18 +5262,38 @@ pub fn sys_job_set_policy(
     policy_ptr: usize,
     policy_count: usize,
 ) -> ZxResult {
-    if !kernel_object_handle_known(job_handle)
-        || !syscall_logic::user_buffer_valid(policy_ptr, policy_count)
-    {
+    if !syscall_logic::user_buffer_valid(policy_ptr, policy_count) {
         return Err(ZxError::ErrInvalidArgs);
     }
+    let state = memory_state();
+    if !state.handle_has_rights(job_handle, Rights::SetPolicy as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
+    let Some(job) = state.get_job_mut(job_handle) else {
+        return Err(ZxError::ErrNotFound);
+    };
+    job.policy_count = policy_count;
     Ok(())
 }
 
 pub fn sys_job_set_critical(job_handle: u32, _options: u32, proc_handle: u32) -> ZxResult {
-    if !kernel_object_handle_known(job_handle) || !memory_state().process_handle_known(proc_handle)
-    {
+    let state = memory_state();
+    if !state.process_handle_known(proc_handle) {
         return Err(ZxError::ErrInvalidArgs);
+    }
+    if state.get_job(job_handle).is_none() {
+        return Err(ZxError::ErrNotFound);
+    }
+    if !state.handle_has_rights(job_handle, Rights::SetPolicy as u32)
+        || !state.handle_has_rights(proc_handle, Rights::GetProperty as u32)
+    {
+        return Err(ZxError::ErrAccessDenied);
+    }
+    let proc_object = state
+        .resolve_handle(proc_handle, ObjectType::Process)
+        .ok_or(ZxError::ErrInvalidArgs)?;
+    if let Some(job) = state.get_job_mut(job_handle) {
+        job.critical_process = Some(proc_object);
     }
     Ok(())
 }
@@ -4728,6 +5315,12 @@ pub fn sys_task_bind_exception_port(
     {
         return Err(ZxError::ErrInvalidArgs);
     }
+    if !handle_has_rights(task_handle, Rights::Inspect as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
+    if port_handle != INVALID_HANDLE && !handle_has_rights(port_handle, Rights::Write as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
     Ok(())
 }
 
@@ -4740,6 +5333,11 @@ pub fn sys_task_resume_from_exception(task_handle: u32, exception: u32, options:
     {
         return Err(ZxError::ErrInvalidArgs);
     }
+    if !handle_has_rights(task_handle, Rights::Inspect as u32)
+        || !handle_has_rights(exception, Rights::Inspect as u32)
+    {
+        return Err(ZxError::ErrAccessDenied);
+    }
     let _ = compat::table().update_signals(HandleValue(exception), ZX_USER_SIGNAL_0, 0);
     Ok(())
 }
@@ -4747,6 +5345,9 @@ pub fn sys_task_resume_from_exception(task_handle: u32, exception: u32, options:
 pub fn sys_task_suspend_token(task_handle: u32, out_handle: &mut u32) -> ZxResult {
     if !kernel_object_handle_known(task_handle) {
         return Err(ZxError::ErrInvalidArgs);
+    }
+    if !handle_has_rights(task_handle, Rights::Inspect as u32) {
+        return Err(ZxError::ErrAccessDenied);
     }
     *out_handle = compat::create_object(ObjectType::SuspendToken)?.0;
     Ok(())
@@ -4809,9 +5410,24 @@ pub fn sys_handle_duplicate(handle: u32, rights: u32, out_handle: &mut u32) -> Z
     if !kernel_object_handle_known(handle) {
         return Err(ZxError::ErrInvalidArgs);
     }
-
-    *out_handle = handle;
-    Ok(())
+    if memory_state().live_handle_known(handle) {
+        *out_handle = memory_state().duplicate_handle(handle, rights)?;
+        return Ok(());
+    }
+    if channel_handle_known(handle) {
+        return Err(ZxError::ErrNotSupported);
+    }
+    let existing_rights = handle_known_rights(handle).ok_or(ZxError::ErrInvalidArgs)?;
+    if !crate::kernel_objects::object_logic::duplicate_rights_allowed(
+        existing_rights,
+        rights,
+        Rights::Duplicate as u32,
+        RIGHT_SAME_RIGHTS,
+        crate::kernel_objects::RIGHTS_ALL,
+    ) {
+        return Err(ZxError::ErrAccessDenied);
+    }
+    Err(ZxError::ErrNotSupported)
 }
 
 /// Zircon sys_handle_replace implementation
@@ -4821,9 +5437,25 @@ pub fn sys_handle_replace(handle: u32, rights: u32, out_handle: &mut u32) -> ZxR
     if !kernel_object_handle_known(handle) {
         return Err(ZxError::ErrInvalidArgs);
     }
-
-    *out_handle = handle;
-    Ok(())
+    if memory_state().live_handle_known(handle) {
+        *out_handle = memory_state().replace_handle(handle, rights)?;
+        return Ok(());
+    }
+    if channel_handle_known(handle) {
+        channel::channel_table().duplicate_endpoint_rights(HandleValue(handle), rights, true)?;
+        *out_handle = handle;
+        return Ok(());
+    }
+    let existing_rights = handle_known_rights(handle).ok_or(ZxError::ErrInvalidArgs)?;
+    if !crate::kernel_objects::object_logic::replace_rights_allowed(
+        existing_rights,
+        rights,
+        RIGHT_SAME_RIGHTS,
+        crate::kernel_objects::RIGHTS_ALL,
+    ) {
+        return Err(ZxError::ErrAccessDenied);
+    }
+    Err(ZxError::ErrNotSupported)
 }
 
 pub fn sys_channel_write_etc(
@@ -4870,6 +5502,9 @@ pub fn sys_object_wait_one(
     );
 
     let observed = object_signal_state(handle)?;
+    if !handle_has_rights(handle, Rights::Wait as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
     *out_pending = observed;
 
     if syscall_logic::wait_satisfied(observed, signals) || deadline != 0 {
@@ -4900,6 +5535,9 @@ pub fn sys_object_wait_many(items_ptr: usize, count: usize, deadline: u64) -> Zx
     let mut satisfied = false;
 
     for item in items.iter_mut() {
+        if !handle_has_rights(item.handle, Rights::Wait as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         let observed = object_signal_state(item.handle)?;
         item.pending = observed;
         if syscall_logic::wait_satisfied(observed, item.waitfor) {
@@ -4921,6 +5559,9 @@ pub fn sys_object_signal(handle: u32, clear_mask: u32, set_mask: u32) -> ZxResul
         handle, clear_mask, set_mask
     );
 
+    if !handle_has_rights(handle, Rights::Signal as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
     set_object_signal_state(handle, clear_mask, set_mask).map(|_| ())
 }
 
@@ -4930,6 +5571,10 @@ pub fn sys_object_signal_peer(handle: u32, clear_mask: u32, set_mask: u32) -> Zx
         "object.signal_peer: handle={:#x}, clear={:#x}, set={:#x}",
         handle, clear_mask, set_mask
     );
+
+    if !handle_has_rights(handle, Rights::SignalPeer as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
 
     if socket::socket_table().contains(HandleValue(handle)) {
         if !syscall_logic::signal_mask_allowed(
@@ -4983,6 +5628,11 @@ pub fn sys_object_wait_async(
     {
         return Err(ZxError::ErrInvalidArgs);
     }
+    if !handle_has_rights(handle, Rights::Wait as u32)
+        || !handle_has_rights(port_handle, Rights::Write as u32)
+    {
+        return Err(ZxError::ErrAccessDenied);
+    }
 
     let observed = object_signal_state(handle)?;
     port::port_table()
@@ -5015,6 +5665,9 @@ pub fn sys_object_get_child(
     if !kernel_object_handle_known(handle) {
         return Err(ZxError::ErrNotFound);
     }
+    if !handle_has_rights(handle, Rights::Inspect as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
     if koid == 0 || koid == handle as u64 {
         *out_handle = handle;
         Ok(())
@@ -5036,6 +5689,9 @@ pub fn sys_object_get_info(
     if !kernel_object_handle_known(handle) || !syscall_logic::user_buffer_valid(buffer, buffer_size)
     {
         return Err(ZxError::ErrInvalidArgs);
+    }
+    if !handle_has_rights(handle, Rights::Inspect as u32) {
+        return Err(ZxError::ErrAccessDenied);
     }
 
     if topic == socket::OBJECT_INFO_TOPIC_SOCKET {
@@ -5079,6 +5735,9 @@ pub fn sys_object_get_property(
     {
         return Err(ZxError::ErrInvalidArgs);
     }
+    if !handle_has_rights(handle, Rights::GetProperty as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
 
     let value = socket::socket_table()
         .property(HandleValue(handle), prop_id)
@@ -5108,6 +5767,9 @@ pub fn sys_object_set_property(
     {
         return Err(ZxError::ErrInvalidArgs);
     }
+    if !handle_has_rights(handle, Rights::SetProperty as u32) {
+        return Err(ZxError::ErrAccessDenied);
+    }
 
     let value = unsafe { core::ptr::read(buffer as *const u64) };
     match socket::socket_table().set_property(HandleValue(handle), prop_id, value) {
@@ -5124,6 +5786,9 @@ pub fn sys_object_set_property(
 pub fn sys_object_set_profile(handle: u32, profile: u32, _options: u32) -> ZxResult {
     if !kernel_object_handle_known(handle) || !kernel_object_handle_known(profile) {
         return Err(ZxError::ErrInvalidArgs);
+    }
+    if !handle_has_rights(handle, Rights::SetProperty as u32) {
+        return Err(ZxError::ErrAccessDenied);
     }
     Ok(())
 }

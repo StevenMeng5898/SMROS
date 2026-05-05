@@ -97,6 +97,8 @@ These definitions are used both by the object layer and by `src/syscall/syscall.
 
 `ObjectType` now includes the sample Zircon object families (`EventPair`, `Fifo`, `Stream`, `DebugLog`, `Clock`, `Job`, `SuspendToken`, `Exception`, `Iommu`, `Bti`, `Pmt`, `PciDevice`, `Guest`, `Vcpu`, `Profile`, `Pager`, framebuffer/trace objects) and the Linux object families needed by the sample tree (`LinuxFile`, `LinuxDir`, `LinuxPipe`, TCP/UDP/raw/netlink sockets, `EventFd`, `SignalFd`, `TimerFd`, `Inotify`, `MemFd`, `PidFd`, `Futex`, Linux process/thread/signal/event/device categories, IPC/semaphore/shared-memory/message-queue categories).
 
+`Rights` follows the Zircon handle-right bit layout, including policy, destroy, inspect, task-management, VMAR child-operation, VMO resize, and VMO-management bits. The syscall model keeps object identity separate from handle rights for memory/task objects. Duplication is a capability operation that requires `Duplicate` and a valid subset or `RIGHT_SAME_RIGHTS`; replacement consumes the source handle and only requires the requested rights to be valid and non-escalating.
+
 ## `handle.rs`
 
 `handle.rs` currently provides a simple fixed-size handle table with:
@@ -105,8 +107,11 @@ These definitions are used both by the object layer and by `src/syscall/syscall.
 - `add_existing()`
 - `remove()`
 - `get_rights()`
+- `get_object_type()`
+- `has_rights()`
 - `contains()`
 - `duplicate()`
+- `replace()`
 
 This is intentionally simple and currently closer to a global kernel utility than a complete per-process capability implementation.
 

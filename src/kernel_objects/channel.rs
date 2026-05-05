@@ -10,6 +10,9 @@
 //! - Message sending and receiving
 //! - Handle management for channels
 
+use crate::kernel_objects::types::{
+    default_rights_for_object, ObjectType, Rights, RIGHT_SAME_RIGHTS,
+};
 use crate::syscall::{syscall_logic, HandleValue, ZxError, ZxResult};
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -80,6 +83,10 @@ pub struct Channel {
     pub ref_count: AtomicU32,
     /// Maximum message size
     pub max_msg_size: usize,
+    /// Rights for the first endpoint handle
+    pub rights0: u32,
+    /// Rights for the second endpoint handle
+    pub rights1: u32,
 }
 
 impl Channel {
@@ -104,13 +111,46 @@ impl Channel {
             state: ChannelState::Active,
             ref_count: AtomicU32::new(2), // Two endpoints
             max_msg_size: MAX_CHANNEL_MSG_SIZE,
+            rights0: default_rights_for_object(ObjectType::Channel),
+            rights1: default_rights_for_object(ObjectType::Channel),
         }
+    }
+
+    fn endpoint_rights(&self, endpoint: HandleValue) -> Option<u32> {
+        if endpoint == self.handle0 {
+            Some(self.rights0)
+        } else if endpoint == self.handle1 {
+            Some(self.rights1)
+        } else {
+            None
+        }
+    }
+
+    fn set_endpoint_rights(&mut self, endpoint: HandleValue, rights: u32) -> bool {
+        if endpoint == self.handle0 {
+            self.rights0 = rights;
+            true
+        } else if endpoint == self.handle1 {
+            self.rights1 = rights;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn has_rights(&self, endpoint: HandleValue, required: u32) -> bool {
+        self.endpoint_rights(endpoint)
+            .map(|rights| crate::kernel_objects::rights_contain(rights, required))
+            .unwrap_or(false)
     }
 
     /// Write a message to the channel
     pub fn write(&mut self, endpoint: HandleValue, data: &[u8], handles: &[u32]) -> ZxResult {
         if self.state != ChannelState::Active {
             return Err(ZxError::ErrPeerClosed);
+        }
+        if !self.has_rights(endpoint, Rights::Write as u32) {
+            return Err(ZxError::ErrAccessDenied);
         }
 
         if !object_logic::channel_message_fits(
@@ -145,6 +185,9 @@ impl Channel {
     ) -> ZxResult {
         if self.state != ChannelState::Active {
             return Err(ZxError::ErrPeerClosed);
+        }
+        if !self.has_rights(endpoint, Rights::Read as u32) {
+            return Err(ZxError::ErrAccessDenied);
         }
 
         // Get the queue for this endpoint
@@ -283,6 +326,58 @@ impl ChannelTable {
             Some(channel) => channel.read(handle, out, &mut handles),
             None => Err(ZxError::ErrNotFound),
         }
+    }
+
+    pub fn rights(&mut self, handle: HandleValue) -> Option<u32> {
+        self.get_channel(handle)
+            .and_then(|channel| channel.endpoint_rights(handle))
+    }
+
+    pub fn duplicate_endpoint_rights(
+        &mut self,
+        handle: HandleValue,
+        requested_rights: u32,
+        replace: bool,
+    ) -> ZxResult {
+        let index = self
+            .channels
+            .iter()
+            .position(|channel| channel.handle0 == handle || channel.handle1 == handle)
+            .ok_or(ZxError::ErrNotFound)?;
+        let existing_rights = self.channels[index]
+            .endpoint_rights(handle)
+            .ok_or(ZxError::ErrNotFound)?;
+        let allowed = if replace {
+            object_logic::replace_rights_allowed(
+                existing_rights,
+                requested_rights,
+                RIGHT_SAME_RIGHTS,
+                crate::kernel_objects::RIGHTS_ALL,
+            )
+        } else {
+            object_logic::duplicate_rights_allowed(
+                existing_rights,
+                requested_rights,
+                Rights::Duplicate as u32,
+                RIGHT_SAME_RIGHTS,
+                crate::kernel_objects::RIGHTS_ALL,
+            )
+        };
+        if !allowed {
+            return Err(ZxError::ErrAccessDenied);
+        }
+        let rights = if requested_rights == RIGHT_SAME_RIGHTS {
+            existing_rights
+        } else {
+            requested_rights
+        };
+
+        if replace {
+            if !self.channels[index].set_endpoint_rights(handle, rights) {
+                return Err(ZxError::ErrNotFound);
+            }
+        }
+        Ok(())
     }
 }
 

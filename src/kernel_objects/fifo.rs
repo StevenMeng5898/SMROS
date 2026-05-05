@@ -18,6 +18,7 @@ const FIFO_CREATE_OPTIONS_MASK: u32 = 0;
 pub struct FifoEndpoint {
     pub handle: HandleValue,
     pub peer: Option<HandleValue>,
+    pub rights: u32,
     pub signals: u32,
     pub elem_count: usize,
     pub elem_size: usize,
@@ -32,6 +33,7 @@ impl FifoEndpoint {
         Self {
             handle: HandleValue(INVALID_HANDLE),
             peer: None,
+            rights: 0,
             signals: 0,
             elem_count: 0,
             elem_size: 0,
@@ -51,6 +53,9 @@ impl FifoEndpoint {
     ) {
         self.handle = handle;
         self.peer = Some(peer);
+        self.rights = crate::kernel_objects::default_rights_for_object(
+            crate::kernel_objects::ObjectType::Fifo,
+        );
         self.signals = crate::kernel_objects::channel::CHANNEL_SIGNAL_WRITABLE;
         self.elem_count = elem_count;
         self.elem_size = elem_size;
@@ -62,6 +67,7 @@ impl FifoEndpoint {
     fn clear(&mut self) {
         self.handle = HandleValue(INVALID_HANDLE);
         self.peer = None;
+        self.rights = 0;
         self.signals = 0;
         self.elem_count = 0;
         self.elem_size = 0;
@@ -241,6 +247,16 @@ impl FifoTable {
             .map(|index| self.endpoints[index].signals)
     }
 
+    pub fn rights(&self, handle: HandleValue) -> Option<u32> {
+        self.index(handle).map(|index| self.endpoints[index].rights)
+    }
+
+    pub fn has_rights(&self, handle: HandleValue, required: u32) -> bool {
+        self.rights(handle)
+            .map(|rights| crate::kernel_objects::rights_contain(rights, required))
+            .unwrap_or(false)
+    }
+
     pub fn update_signals(
         &mut self,
         handle: HandleValue,
@@ -260,6 +276,9 @@ impl FifoTable {
         set_mask: u32,
     ) -> ZxResult<u32> {
         let index = self.index(handle).ok_or(ZxError::ErrNotFound)?;
+        if !self.has_rights(handle, crate::kernel_objects::Rights::SignalPeer as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         let peer = self.endpoints[index].peer.ok_or(ZxError::ErrPeerClosed)?;
         self.update_signals(peer, clear_mask, set_mask)
             .ok_or(ZxError::ErrPeerClosed)
@@ -304,6 +323,9 @@ impl FifoTable {
         bytes: &[u8],
     ) -> ZxResult<usize> {
         let writer_index = self.index(handle).ok_or(ZxError::ErrNotFound)?;
+        if !self.has_rights(handle, crate::kernel_objects::Rights::Write as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         if elem_size == 0 || elem_size != self.endpoints[writer_index].elem_size {
             return Err(ZxError::ErrInvalidArgs);
         }
@@ -348,6 +370,9 @@ impl FifoTable {
         out: &mut [u8],
     ) -> ZxResult<usize> {
         let reader_index = self.index(handle).ok_or(ZxError::ErrNotFound)?;
+        if !self.has_rights(handle, crate::kernel_objects::Rights::Read as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         if elem_size == 0 || elem_size != self.endpoints[reader_index].elem_size {
             return Err(ZxError::ErrInvalidArgs);
         }

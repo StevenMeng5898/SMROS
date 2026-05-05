@@ -32,6 +32,43 @@ pub(crate) fn intersect_rights(requested: u32, existing: u32) -> u32 {
     smros_ko_intersect_rights_body!(requested, existing)
 }
 
+pub(crate) fn rights_subset(requested: u32, existing: u32) -> bool {
+    smros_ko_rights_subset_body!(requested, existing)
+}
+
+pub(crate) fn rights_has(rights: u32, required: u32) -> bool {
+    smros_ko_rights_has_body!(rights, required)
+}
+
+pub(crate) fn rights_valid(rights: u32, known_mask: u32) -> bool {
+    smros_ko_rights_valid_body!(rights, known_mask)
+}
+
+pub(crate) fn duplicate_rights_allowed(
+    existing: u32,
+    requested: u32,
+    duplicate_right: u32,
+    same_rights: u32,
+    known_mask: u32,
+) -> bool {
+    smros_ko_duplicate_rights_allowed_body!(
+        existing,
+        requested,
+        duplicate_right,
+        same_rights,
+        known_mask
+    )
+}
+
+pub(crate) fn replace_rights_allowed(
+    existing: u32,
+    requested: u32,
+    same_rights: u32,
+    known_mask: u32,
+) -> bool {
+    smros_ko_replace_rights_allowed_body!(existing, requested, same_rights, known_mask)
+}
+
 pub(crate) fn handle_is_valid(handle: u32, invalid: u32) -> bool {
     smros_ko_handle_is_valid_body!(handle, invalid)
 }

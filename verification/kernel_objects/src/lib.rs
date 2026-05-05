@@ -46,6 +46,97 @@ pub const THREAD_RUNNING: u8 = 2;
 pub const THREAD_BLOCKED: u8 = 3;
 pub const THREAD_TERMINATED: u8 = 4;
 pub const THREAD_ID_IDLE: usize = 0;
+pub const RIGHT_DUPLICATE: u32 = 1 << 0;
+pub const RIGHT_TRANSFER: u32 = 1 << 1;
+pub const RIGHT_READ: u32 = 1 << 2;
+pub const RIGHT_WRITE: u32 = 1 << 3;
+pub const RIGHT_EXECUTE: u32 = 1 << 4;
+pub const RIGHT_MAP: u32 = 1 << 5;
+pub const RIGHT_GET_PROPERTY: u32 = 1 << 6;
+pub const RIGHT_SET_PROPERTY: u32 = 1 << 7;
+pub const RIGHT_ENUMERATE: u32 = 1 << 8;
+pub const RIGHT_DESTROY: u32 = 1 << 9;
+pub const RIGHT_SET_POLICY: u32 = 1 << 10;
+pub const RIGHT_GET_POLICY: u32 = 1 << 11;
+pub const RIGHT_SIGNAL: u32 = 1 << 12;
+pub const RIGHT_SIGNAL_PEER: u32 = 1 << 13;
+pub const RIGHT_WAIT: u32 = 1 << 14;
+pub const RIGHT_INSPECT: u32 = 1 << 15;
+pub const RIGHT_MANAGE_JOB: u32 = 1 << 16;
+pub const RIGHT_MANAGE_PROCESS: u32 = 1 << 17;
+pub const RIGHT_MANAGE_THREAD: u32 = 1 << 18;
+pub const RIGHT_APPLY_PROFILE: u32 = 1 << 19;
+pub const RIGHT_MANAGE_SOCKET: u32 = 1 << 20;
+pub const RIGHT_OP_CHILDREN: u32 = 1 << 21;
+pub const RIGHT_RESIZE: u32 = 1 << 22;
+pub const RIGHT_ATTACH_VMO: u32 = 1 << 23;
+pub const RIGHT_MANAGE_VMO: u32 = 1 << 24;
+pub const RIGHT_SAME_RIGHTS: u32 = 0x8000_0000;
+pub const RIGHTS_ALL: u32 = RIGHT_DUPLICATE
+    | RIGHT_TRANSFER
+    | RIGHT_READ
+    | RIGHT_WRITE
+    | RIGHT_EXECUTE
+    | RIGHT_MAP
+    | RIGHT_GET_PROPERTY
+    | RIGHT_SET_PROPERTY
+    | RIGHT_ENUMERATE
+    | RIGHT_DESTROY
+    | RIGHT_SET_POLICY
+    | RIGHT_GET_POLICY
+    | RIGHT_SIGNAL
+    | RIGHT_SIGNAL_PEER
+    | RIGHT_WAIT
+    | RIGHT_INSPECT
+    | RIGHT_MANAGE_JOB
+    | RIGHT_MANAGE_PROCESS
+    | RIGHT_MANAGE_THREAD
+    | RIGHT_APPLY_PROFILE
+    | RIGHT_MANAGE_SOCKET
+    | RIGHT_OP_CHILDREN
+    | RIGHT_RESIZE
+    | RIGHT_ATTACH_VMO
+    | RIGHT_MANAGE_VMO;
+pub const DEFAULT_JOB_RIGHTS: u32 = RIGHT_DUPLICATE
+    | RIGHT_TRANSFER
+    | RIGHT_READ
+    | RIGHT_WRITE
+    | RIGHT_GET_PROPERTY
+    | RIGHT_SET_PROPERTY
+    | RIGHT_ENUMERATE
+    | RIGHT_DESTROY
+    | RIGHT_SET_POLICY
+    | RIGHT_GET_POLICY
+    | RIGHT_SIGNAL
+    | RIGHT_WAIT
+    | RIGHT_INSPECT
+    | RIGHT_MANAGE_JOB
+    | RIGHT_MANAGE_PROCESS
+    | RIGHT_MANAGE_THREAD;
+pub const DEFAULT_PROCESS_RIGHTS: u32 = RIGHT_DUPLICATE
+    | RIGHT_TRANSFER
+    | RIGHT_READ
+    | RIGHT_WRITE
+    | RIGHT_GET_PROPERTY
+    | RIGHT_SET_PROPERTY
+    | RIGHT_ENUMERATE
+    | RIGHT_DESTROY
+    | RIGHT_SIGNAL
+    | RIGHT_WAIT
+    | RIGHT_INSPECT
+    | RIGHT_MANAGE_PROCESS
+    | RIGHT_MANAGE_THREAD;
+pub const DEFAULT_THREAD_RIGHTS: u32 = RIGHT_DUPLICATE
+    | RIGHT_TRANSFER
+    | RIGHT_READ
+    | RIGHT_WRITE
+    | RIGHT_GET_PROPERTY
+    | RIGHT_SET_PROPERTY
+    | RIGHT_DESTROY
+    | RIGHT_SIGNAL
+    | RIGHT_WAIT
+    | RIGHT_INSPECT
+    | RIGHT_MANAGE_THREAD;
 
 #[derive(Copy, Clone)]
 struct HandleEntryModel {
@@ -192,6 +283,40 @@ spec fn ready_state(state: u8) -> bool {
 
 spec fn handle_is_valid_spec(handle: int, invalid: int) -> bool {
     handle != 0 && handle != invalid
+}
+
+spec fn rights_valid_spec(rights: u32, known_mask: u32) -> bool {
+    (rights & !known_mask) == 0
+}
+
+spec fn rights_subset_spec(requested: u32, existing: u32) -> bool {
+    (requested & !existing) == 0
+}
+
+spec fn rights_has_spec(rights: u32, required: u32) -> bool {
+    (rights & required) == required
+}
+
+spec fn duplicate_rights_allowed_spec(
+    existing: u32,
+    requested: u32,
+    duplicate_right: u32,
+    same_rights: u32,
+    known_mask: u32,
+) -> bool {
+    rights_has_spec(existing, duplicate_right)
+        && (requested == same_rights
+            || (rights_valid_spec(requested, known_mask) && rights_subset_spec(requested, existing)))
+}
+
+spec fn replace_rights_allowed_spec(
+    existing: u32,
+    requested: u32,
+    same_rights: u32,
+    known_mask: u32,
+) -> bool {
+    requested == same_rights
+        || (rights_valid_spec(requested, known_mask) && rights_subset_spec(requested, existing))
 }
 
 spec fn object_signal_update_spec(current: u32, clear_mask: u32, set_mask: u32) -> u32 {
@@ -475,6 +600,64 @@ fn ko_intersect_rights(requested: u32, existing: u32) -> (out: u32)
         out == requested & existing,
 {
     smros_ko_intersect_rights_body!(requested, existing)
+}
+
+fn ko_rights_subset(requested: u32, existing: u32) -> (out: bool)
+    ensures
+        out == rights_subset_spec(requested, existing),
+{
+    smros_ko_rights_subset_body!(requested, existing)
+}
+
+fn ko_rights_has(rights: u32, required: u32) -> (out: bool)
+    ensures
+        out == rights_has_spec(rights, required),
+{
+    smros_ko_rights_has_body!(rights, required)
+}
+
+fn ko_rights_valid(rights: u32, known_mask: u32) -> (out: bool)
+    ensures
+        out == rights_valid_spec(rights, known_mask),
+{
+    smros_ko_rights_valid_body!(rights, known_mask)
+}
+
+fn ko_duplicate_rights_allowed(
+    existing: u32,
+    requested: u32,
+    duplicate_right: u32,
+    same_rights: u32,
+    known_mask: u32,
+) -> (out: bool)
+    ensures
+        out == duplicate_rights_allowed_spec(
+            existing,
+            requested,
+            duplicate_right,
+            same_rights,
+            known_mask,
+        ),
+{
+    smros_ko_duplicate_rights_allowed_body!(
+        existing,
+        requested,
+        duplicate_right,
+        same_rights,
+        known_mask
+    )
+}
+
+fn ko_replace_rights_allowed(
+    existing: u32,
+    requested: u32,
+    same_rights: u32,
+    known_mask: u32,
+) -> (out: bool)
+    ensures
+        out == replace_rights_allowed_spec(existing, requested, same_rights, known_mask),
+{
+    smros_ko_replace_rights_allowed_body!(existing, requested, same_rights, known_mask)
 }
 
 fn ko_handle_is_valid(handle: u32, invalid: u32) -> (out: bool)
@@ -783,6 +966,38 @@ fn handle_get_rights_model(entries: &Vec<HandleEntryModel>, handle: u32) -> (out
     None
 }
 
+fn handle_rights_allow_duplicate_found_model(
+    entries: &Vec<HandleEntryModel>,
+    handle: u32,
+    requested: u32,
+) -> (out: bool)
+    requires
+        exists|i: int| 0 <= i < entries@.len() && entries@[i].valid && entries@[i].handle == handle,
+    ensures
+        out ==> exists|i: int|
+            0 <= i < entries@.len()
+                && entries@[i].valid
+                && entries@[i].handle == handle
+                && duplicate_rights_allowed_spec(
+                    entries@[i].rights,
+                    requested,
+                    RIGHT_DUPLICATE,
+                    RIGHT_SAME_RIGHTS,
+                    RIGHTS_ALL,
+                ),
+{
+    match handle_get_rights_model(entries, handle) {
+        Some(existing) => ko_duplicate_rights_allowed(
+            existing,
+            requested,
+            RIGHT_DUPLICATE,
+            RIGHT_SAME_RIGHTS,
+            RIGHTS_ALL,
+        ),
+        None => false,
+    }
+}
+
 fn vmo_checked_end_model(offset: usize, len: usize, size: usize) -> (out: Option<usize>)
     ensures
         match out {
@@ -1077,6 +1292,109 @@ proof fn types_constants_smoke()
         INVALID_HANDLE == 0xffff_ffff,
         PAGE_SIZE == 4096,
 {
+}
+
+fn capability_rights_smoke() {
+    assert(rights_valid_spec(DEFAULT_JOB_RIGHTS, RIGHTS_ALL)) by(bit_vector);
+    assert(rights_valid_spec(DEFAULT_PROCESS_RIGHTS, RIGHTS_ALL)) by(bit_vector);
+    assert(rights_valid_spec(DEFAULT_THREAD_RIGHTS, RIGHTS_ALL)) by(bit_vector);
+    assert(!rights_valid_spec(RIGHT_SAME_RIGHTS, RIGHTS_ALL)) by(bit_vector);
+    assert(rights_has_spec(DEFAULT_JOB_RIGHTS, RIGHT_MANAGE_PROCESS)) by(bit_vector);
+    assert(rights_has_spec(DEFAULT_JOB_RIGHTS, RIGHT_SET_POLICY)) by(bit_vector);
+    assert(rights_has_spec(DEFAULT_THREAD_RIGHTS, RIGHT_DESTROY)) by(bit_vector);
+    assert(rights_has_spec(DEFAULT_PROCESS_RIGHTS, RIGHT_MANAGE_THREAD)) by(bit_vector);
+    assert(!rights_has_spec(DEFAULT_THREAD_RIGHTS, RIGHT_MANAGE_JOB)) by(bit_vector);
+    assert(rights_subset_spec(RIGHT_READ | RIGHT_WRITE, DEFAULT_PROCESS_RIGHTS)) by(bit_vector);
+    assert(!rights_subset_spec(RIGHT_MANAGE_JOB, DEFAULT_PROCESS_RIGHTS)) by(bit_vector);
+
+    let same = ko_duplicate_rights_allowed(
+        DEFAULT_PROCESS_RIGHTS,
+        RIGHT_SAME_RIGHTS,
+        RIGHT_DUPLICATE,
+        RIGHT_SAME_RIGHTS,
+        RIGHTS_ALL,
+    );
+    let subset = ko_duplicate_rights_allowed(
+        DEFAULT_PROCESS_RIGHTS,
+        RIGHT_READ | RIGHT_WRITE,
+        RIGHT_DUPLICATE,
+        RIGHT_SAME_RIGHTS,
+        RIGHTS_ALL,
+    );
+    let escalation = ko_duplicate_rights_allowed(
+        DEFAULT_THREAD_RIGHTS,
+        RIGHT_MANAGE_JOB,
+        RIGHT_DUPLICATE,
+        RIGHT_SAME_RIGHTS,
+        RIGHTS_ALL,
+    );
+    let no_duplicate_cap = ko_duplicate_rights_allowed(
+        DEFAULT_THREAD_RIGHTS & !RIGHT_DUPLICATE,
+        RIGHT_READ,
+        RIGHT_DUPLICATE,
+        RIGHT_SAME_RIGHTS,
+        RIGHTS_ALL,
+    );
+    let replace_without_duplicate = ko_replace_rights_allowed(
+        DEFAULT_THREAD_RIGHTS & !RIGHT_DUPLICATE,
+        RIGHT_READ,
+        RIGHT_SAME_RIGHTS,
+        RIGHTS_ALL,
+    );
+    let replace_escalation = ko_replace_rights_allowed(
+        DEFAULT_THREAD_RIGHTS,
+        RIGHT_MANAGE_JOB,
+        RIGHT_SAME_RIGHTS,
+        RIGHTS_ALL,
+    );
+
+    assert(duplicate_rights_allowed_spec(
+        DEFAULT_PROCESS_RIGHTS,
+        RIGHT_SAME_RIGHTS,
+        RIGHT_DUPLICATE,
+        RIGHT_SAME_RIGHTS,
+        RIGHTS_ALL,
+    )) by(bit_vector);
+    assert(duplicate_rights_allowed_spec(
+        DEFAULT_PROCESS_RIGHTS,
+        RIGHT_READ | RIGHT_WRITE,
+        RIGHT_DUPLICATE,
+        RIGHT_SAME_RIGHTS,
+        RIGHTS_ALL,
+    )) by(bit_vector);
+    assert(!duplicate_rights_allowed_spec(
+        DEFAULT_THREAD_RIGHTS,
+        RIGHT_MANAGE_JOB,
+        RIGHT_DUPLICATE,
+        RIGHT_SAME_RIGHTS,
+        RIGHTS_ALL,
+    )) by(bit_vector);
+    assert(!duplicate_rights_allowed_spec(
+        DEFAULT_THREAD_RIGHTS & !RIGHT_DUPLICATE,
+        RIGHT_READ,
+        RIGHT_DUPLICATE,
+        RIGHT_SAME_RIGHTS,
+        RIGHTS_ALL,
+    )) by(bit_vector);
+    assert(replace_rights_allowed_spec(
+        DEFAULT_THREAD_RIGHTS & !RIGHT_DUPLICATE,
+        RIGHT_READ,
+        RIGHT_SAME_RIGHTS,
+        RIGHTS_ALL,
+    )) by(bit_vector);
+    assert(!replace_rights_allowed_spec(
+        DEFAULT_THREAD_RIGHTS,
+        RIGHT_MANAGE_JOB,
+        RIGHT_SAME_RIGHTS,
+        RIGHTS_ALL,
+    )) by(bit_vector);
+
+    assert(same);
+    assert(subset);
+    assert(!escalation);
+    assert(!no_duplicate_cap);
+    assert(replace_without_duplicate);
+    assert(!replace_escalation);
 }
 
 proof fn vmo_checked_end_rejects_overflow(offset: int, len: int, size: int)

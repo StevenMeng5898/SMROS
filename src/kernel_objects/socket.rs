@@ -50,6 +50,7 @@ pub struct SocketInfo {
 pub struct SocketEndpoint {
     pub handle: HandleValue,
     pub peer: Option<HandleValue>,
+    pub rights: u32,
     pub signals: u32,
     pub options: u32,
     pub data: [u8; SOCKET_SIZE],
@@ -73,6 +74,7 @@ impl SocketEndpoint {
         Self {
             handle: HandleValue(INVALID_HANDLE),
             peer: None,
+            rights: 0,
             signals: 0,
             options: 0,
             data: [0; SOCKET_SIZE],
@@ -95,6 +97,9 @@ impl SocketEndpoint {
     fn activate(&mut self, handle: HandleValue, peer: HandleValue, options: u32) {
         self.handle = handle;
         self.peer = Some(peer);
+        self.rights = crate::kernel_objects::default_rights_for_object(
+            crate::kernel_objects::ObjectType::Socket,
+        );
         self.signals = crate::kernel_objects::channel::CHANNEL_SIGNAL_WRITABLE;
         self.options = options;
         self.read_pos = 0;
@@ -113,6 +118,7 @@ impl SocketEndpoint {
     fn clear(&mut self) {
         self.handle = HandleValue(INVALID_HANDLE);
         self.peer = None;
+        self.rights = 0;
         self.signals = 0;
         self.options = 0;
         self.read_pos = 0;
@@ -354,6 +360,16 @@ impl SocketTable {
             .map(|index| self.endpoints[index].signals)
     }
 
+    pub fn rights(&self, handle: HandleValue) -> Option<u32> {
+        self.index(handle).map(|index| self.endpoints[index].rights)
+    }
+
+    pub fn has_rights(&self, handle: HandleValue, required: u32) -> bool {
+        self.rights(handle)
+            .map(|rights| crate::kernel_objects::rights_contain(rights, required))
+            .unwrap_or(false)
+    }
+
     pub fn update_signals(
         &mut self,
         handle: HandleValue,
@@ -373,12 +389,18 @@ impl SocketTable {
         set_mask: u32,
     ) -> ZxResult<u32> {
         let index = self.index(handle).ok_or(ZxError::ErrNotFound)?;
+        if !self.has_rights(handle, crate::kernel_objects::Rights::SignalPeer as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         let peer = self.endpoints[index].peer.ok_or(ZxError::ErrPeerClosed)?;
         self.update_signals(peer, clear_mask, set_mask)
             .ok_or(ZxError::ErrPeerClosed)
     }
 
     pub fn property(&self, handle: HandleValue, prop_id: u32) -> Option<u64> {
+        if !self.has_rights(handle, crate::kernel_objects::Rights::GetProperty as u32) {
+            return None;
+        }
         let endpoint = &self.endpoints[self.index(handle)?];
         match prop_id {
             SOCKET_PROPERTY_RX_THRESHOLD => Some(endpoint.read_threshold as u64),
@@ -396,6 +418,9 @@ impl SocketTable {
         let Some(index) = self.index(handle) else {
             return Ok(false);
         };
+        if !self.has_rights(handle, crate::kernel_objects::Rights::SetProperty as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
 
         match prop_id {
             SOCKET_PROPERTY_RX_THRESHOLD => {
@@ -459,6 +484,9 @@ impl SocketTable {
 
     pub fn write(&mut self, handle: HandleValue, bytes: &[u8]) -> ZxResult<usize> {
         let writer_index = self.index(handle).ok_or(ZxError::ErrNotFound)?;
+        if !self.has_rights(handle, crate::kernel_objects::Rights::Write as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         if self.endpoints[writer_index].write_disabled {
             return Err(ZxError::ErrBadState);
         }
@@ -513,6 +541,9 @@ impl SocketTable {
         }
 
         let index = self.index(handle).ok_or(ZxError::ErrNotFound)?;
+        if !self.has_rights(handle, crate::kernel_objects::Rights::Read as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         if self.endpoints[index].len == 0 {
             if self.endpoints[index].peer.is_none() {
                 return Err(ZxError::ErrPeerClosed);
@@ -597,6 +628,9 @@ impl SocketTable {
 
     pub fn shutdown(&mut self, handle: HandleValue, options: u32) -> ZxResult {
         let index = self.index(handle).ok_or(ZxError::ErrNotFound)?;
+        if !self.has_rights(handle, crate::kernel_objects::Rights::Write as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         let options = socket_logic::mask_options(options, SOCKET_SHUTDOWN_MASK);
         let read = options & SOCKET_SHUTDOWN_READ != 0;
         let write = options & SOCKET_SHUTDOWN_WRITE != 0;
@@ -637,6 +671,9 @@ impl SocketTable {
 
     pub fn share(&mut self, handle: HandleValue, shared: HandleValue) -> ZxResult {
         let index = self.index(handle).ok_or(ZxError::ErrNotFound)?;
+        if !self.has_rights(handle, crate::kernel_objects::Rights::Transfer as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         if self.index(shared).is_none() {
             return Err(ZxError::ErrNotFound);
         }
@@ -649,6 +686,9 @@ impl SocketTable {
 
     pub fn accept(&mut self, handle: HandleValue) -> ZxResult<HandleValue> {
         let index = self.index(handle).ok_or(ZxError::ErrNotFound)?;
+        if !self.has_rights(handle, crate::kernel_objects::Rights::Transfer as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         let shared = self.endpoints[index]
             .pop_shared()
             .ok_or(ZxError::ErrShouldWait)?;
@@ -659,6 +699,9 @@ impl SocketTable {
     }
 
     pub fn info(&self, handle: HandleValue) -> Option<SocketInfo> {
+        if !self.has_rights(handle, crate::kernel_objects::Rights::Inspect as u32) {
+            return None;
+        }
         let index = self.index(handle)?;
         let endpoint = &self.endpoints[index];
         let rx_size = endpoint.len;

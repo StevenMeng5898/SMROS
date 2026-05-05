@@ -90,6 +90,41 @@ macro_rules! smros_ko_intersect_rights_body {
     }};
 }
 
+macro_rules! smros_ko_rights_subset_body {
+    ($requested:expr, $existing:expr) => {{
+        ($requested & !$existing) == 0
+    }};
+}
+
+macro_rules! smros_ko_rights_has_body {
+    ($rights:expr, $required:expr) => {{
+        ($rights & $required) == $required
+    }};
+}
+
+macro_rules! smros_ko_rights_valid_body {
+    ($rights:expr, $known_mask:expr) => {{
+        ($rights & !$known_mask) == 0
+    }};
+}
+
+macro_rules! smros_ko_duplicate_rights_allowed_body {
+    ($existing:expr, $requested:expr, $duplicate_right:expr, $same_rights:expr, $known_mask:expr) => {{
+        smros_ko_rights_has_body!($existing, $duplicate_right)
+            && ($requested == $same_rights
+                || (smros_ko_rights_valid_body!($requested, $known_mask)
+                    && smros_ko_rights_subset_body!($requested, $existing)))
+    }};
+}
+
+macro_rules! smros_ko_replace_rights_allowed_body {
+    ($existing:expr, $requested:expr, $same_rights:expr, $known_mask:expr) => {{
+        $requested == $same_rights
+            || (smros_ko_rights_valid_body!($requested, $known_mask)
+                && smros_ko_rights_subset_body!($requested, $existing))
+    }};
+}
+
 macro_rules! smros_ko_handle_is_valid_body {
     ($handle:expr, $invalid:expr) => {{
         $handle != 0 && $handle != $invalid

@@ -44,6 +44,10 @@ impl HandleTable {
 
     /// Add a new handle
     pub fn add(&mut self, obj_type: ObjectType, rights: u32) -> Option<HandleValue> {
+        if !rights_are_valid(rights) {
+            return None;
+        }
+
         let handle_num = self.next_handle.fetch_add(1, Ordering::Relaxed);
         if !object_logic::handle_is_valid(handle_num, INVALID_HANDLE) {
             return None;
@@ -66,7 +70,10 @@ impl HandleTable {
 
     /// Add a specific handle value when importing an object managed by another table.
     pub fn add_existing(&mut self, handle: HandleValue, obj_type: ObjectType, rights: u32) -> bool {
-        if !object_logic::handle_is_valid(handle.0, INVALID_HANDLE) || self.contains(handle) {
+        if !object_logic::handle_is_valid(handle.0, INVALID_HANDLE)
+            || !rights_are_valid(rights)
+            || self.contains(handle)
+        {
             return false;
         }
 
@@ -106,6 +113,23 @@ impl HandleTable {
         None
     }
 
+    /// Get handle object type.
+    pub fn get_object_type(&self, handle: HandleValue) -> Option<ObjectType> {
+        for i in 0..MAX_HANDLES_PER_PROCESS {
+            if self.entries[i].valid && self.entries[i].handle == handle {
+                return Some(self.entries[i].obj_type);
+            }
+        }
+        None
+    }
+
+    /// Check whether a handle has all required rights.
+    pub fn has_rights(&self, handle: HandleValue, required: u32) -> bool {
+        self.get_rights(handle)
+            .map(|rights| rights_contain(rights, required))
+            .unwrap_or(false)
+    }
+
     /// Check whether a handle exists in the table.
     pub fn contains(&self, handle: HandleValue) -> bool {
         self.get_rights(handle).is_some()
@@ -115,8 +139,53 @@ impl HandleTable {
     pub fn duplicate(&mut self, handle: HandleValue, rights: u32) -> Option<HandleValue> {
         for i in 0..MAX_HANDLES_PER_PROCESS {
             if self.entries[i].valid && self.entries[i].handle == handle {
-                let new_rights = object_logic::intersect_rights(rights, self.entries[i].rights);
-                return self.add(self.entries[i].obj_type, new_rights);
+                let existing_rights = self.entries[i].rights;
+                if !object_logic::duplicate_rights_allowed(
+                    existing_rights,
+                    rights,
+                    Rights::Duplicate as u32,
+                    RIGHT_SAME_RIGHTS,
+                    RIGHTS_ALL,
+                ) {
+                    return None;
+                }
+                let new_rights = if rights == RIGHT_SAME_RIGHTS {
+                    existing_rights
+                } else {
+                    rights
+                };
+                let obj_type = self.entries[i].obj_type;
+                return self.add(obj_type, new_rights);
+            }
+        }
+        None
+    }
+
+    /// Replace a handle with a new one and remove the source on success.
+    pub fn replace(&mut self, handle: HandleValue, rights: u32) -> Option<HandleValue> {
+        for i in 0..MAX_HANDLES_PER_PROCESS {
+            if self.entries[i].valid && self.entries[i].handle == handle {
+                let existing_rights = self.entries[i].rights;
+                if !object_logic::replace_rights_allowed(
+                    existing_rights,
+                    rights,
+                    RIGHT_SAME_RIGHTS,
+                    RIGHTS_ALL,
+                ) {
+                    return None;
+                }
+                let new_rights = if rights == RIGHT_SAME_RIGHTS {
+                    existing_rights
+                } else {
+                    rights
+                };
+                let obj_type = self.entries[i].obj_type;
+                let new_handle = self.add(obj_type, new_rights)?;
+                if self.remove(handle) {
+                    return Some(new_handle);
+                }
+                let _ = self.remove(new_handle);
+                return None;
             }
         }
         None

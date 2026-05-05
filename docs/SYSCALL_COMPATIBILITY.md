@@ -126,7 +126,7 @@ The current syscall layer is best understood as:
 It is not yet:
 
 - a complete Linux userspace implementation
-- a complete Zircon rights/security model
+- a complete Zircon security model; the modeled kernel-object path now does enforce handle rights for the core job/process/thread, VMO/VMAR, signal/wait/property, and handle duplicate/replace operations
 - a stable compatibility contract for external binaries
 
 ## Live Boot Reality

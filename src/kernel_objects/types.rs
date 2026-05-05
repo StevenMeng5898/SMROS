@@ -107,20 +107,232 @@ pub enum Rights {
     Map = 1 << 5,
     GetProperty = 1 << 6,
     SetProperty = 1 << 7,
-    Signal = 1 << 8,
-    SignalPeer = 1 << 9,
-    Wait = 1 << 10,
+    Enumerate = 1 << 8,
+    Destroy = 1 << 9,
+    SetPolicy = 1 << 10,
+    GetPolicy = 1 << 11,
+    Signal = 1 << 12,
+    SignalPeer = 1 << 13,
+    Wait = 1 << 14,
+    Inspect = 1 << 15,
+    ManageJob = 1 << 16,
+    ManageProcess = 1 << 17,
+    ManageThread = 1 << 18,
+    ApplyProfile = 1 << 19,
+    ManageSocket = 1 << 20,
+    OpChildren = 1 << 21,
+    Resize = 1 << 22,
+    AttachVmo = 1 << 23,
+    ManageVmo = 1 << 24,
     DefaultVmo = Rights::Duplicate as u32
         | Rights::Transfer as u32
-        | Rights::Map as u32
-        | Rights::GetProperty as u32
-        | Rights::SetProperty as u32,
-    DefaultVmar = Rights::Duplicate as u32
-        | Rights::Transfer as u32
-        | Rights::Map as u32
         | Rights::Read as u32
         | Rights::Write as u32
-        | Rights::Execute as u32,
+        | Rights::Map as u32
+        | Rights::GetProperty as u32
+        | Rights::SetProperty as u32
+        | Rights::Signal as u32
+        | Rights::Inspect as u32
+        | Rights::Resize as u32,
+    DefaultVmar = Rights::Duplicate as u32
+        | Rights::Transfer as u32
+        | Rights::Read as u32
+        | Rights::Write as u32
+        | Rights::Execute as u32
+        | Rights::Map as u32
+        | Rights::GetProperty as u32
+        | Rights::SetProperty as u32
+        | Rights::Destroy as u32
+        | Rights::Inspect as u32
+        | Rights::OpChildren as u32,
+    DefaultChannel = Rights::Duplicate as u32
+        | Rights::Transfer as u32
+        | Rights::Read as u32
+        | Rights::Write as u32
+        | Rights::Signal as u32
+        | Rights::SignalPeer as u32
+        | Rights::Wait as u32,
+    DefaultJob = Rights::Duplicate as u32
+        | Rights::Transfer as u32
+        | Rights::Read as u32
+        | Rights::Write as u32
+        | Rights::GetProperty as u32
+        | Rights::SetProperty as u32
+        | Rights::Enumerate as u32
+        | Rights::Destroy as u32
+        | Rights::SetPolicy as u32
+        | Rights::GetPolicy as u32
+        | Rights::Signal as u32
+        | Rights::Wait as u32
+        | Rights::Inspect as u32
+        | Rights::ManageJob as u32
+        | Rights::ManageProcess as u32
+        | Rights::ManageThread as u32,
+    DefaultProcess = Rights::Duplicate as u32
+        | Rights::Transfer as u32
+        | Rights::Read as u32
+        | Rights::Write as u32
+        | Rights::GetProperty as u32
+        | Rights::SetProperty as u32
+        | Rights::Enumerate as u32
+        | Rights::Destroy as u32
+        | Rights::Signal as u32
+        | Rights::Wait as u32
+        | Rights::Inspect as u32
+        | Rights::ManageProcess as u32
+        | Rights::ManageThread as u32,
+    DefaultThread = Rights::Duplicate as u32
+        | Rights::Transfer as u32
+        | Rights::Read as u32
+        | Rights::Write as u32
+        | Rights::GetProperty as u32
+        | Rights::SetProperty as u32
+        | Rights::Destroy as u32
+        | Rights::Signal as u32
+        | Rights::Wait as u32
+        | Rights::Inspect as u32
+        | Rights::ManageThread as u32,
+}
+
+pub const RIGHT_SAME_RIGHTS: u32 = 0x8000_0000;
+pub const RIGHTS_BASIC: u32 = Rights::Duplicate as u32
+    | Rights::Transfer as u32
+    | Rights::Wait as u32
+    | Rights::Inspect as u32;
+pub const RIGHTS_PROPERTY: u32 = Rights::GetProperty as u32 | Rights::SetProperty as u32;
+pub const RIGHTS_POLICY: u32 = Rights::GetPolicy as u32 | Rights::SetPolicy as u32;
+pub const RIGHTS_SIGNAL: u32 = Rights::Signal as u32 | Rights::SignalPeer as u32;
+pub const RIGHTS_IO: u32 = Rights::Read as u32 | Rights::Write as u32 | Rights::Execute as u32;
+pub const RIGHTS_MEMORY: u32 = Rights::Map as u32;
+pub const RIGHTS_TASK: u32 = Rights::Enumerate as u32
+    | Rights::Destroy as u32
+    | Rights::ManageJob as u32
+    | Rights::ManageProcess as u32
+    | Rights::ManageThread as u32
+    | Rights::ApplyProfile as u32;
+pub const RIGHTS_SOCKET: u32 = Rights::ManageSocket as u32;
+pub const RIGHTS_EXTENDED: u32 = Rights::OpChildren as u32
+    | Rights::Resize as u32
+    | Rights::AttachVmo as u32
+    | Rights::ManageVmo as u32;
+pub const RIGHTS_ALL: u32 =
+    RIGHTS_BASIC
+        | RIGHTS_PROPERTY
+        | RIGHTS_POLICY
+        | RIGHTS_SIGNAL
+        | RIGHTS_IO
+        | RIGHTS_MEMORY
+        | RIGHTS_TASK
+        | RIGHTS_SOCKET
+        | RIGHTS_EXTENDED;
+
+pub const DEFAULT_EVENT_RIGHTS: u32 = Rights::Duplicate as u32
+    | Rights::Transfer as u32
+    | Rights::GetProperty as u32
+    | Rights::SetProperty as u32
+    | Rights::Signal as u32
+    | Rights::Wait as u32
+    | Rights::Inspect as u32;
+
+pub const DEFAULT_EVENTPAIR_RIGHTS: u32 = DEFAULT_EVENT_RIGHTS | Rights::SignalPeer as u32;
+
+pub const DEFAULT_PORT_RIGHTS: u32 = Rights::Duplicate as u32
+    | Rights::Transfer as u32
+    | Rights::Read as u32
+    | Rights::Write as u32
+    | Rights::GetProperty as u32
+    | Rights::SetProperty as u32
+    | Rights::Inspect as u32;
+
+pub const DEFAULT_SOCKET_RIGHTS: u32 = Rights::DefaultChannel as u32
+    | Rights::GetProperty as u32
+    | Rights::SetProperty as u32
+    | Rights::Inspect as u32;
+
+pub const DEFAULT_RESOURCE_RIGHTS: u32 = Rights::Duplicate as u32
+    | Rights::Transfer as u32
+    | Rights::Read as u32
+    | Rights::Write as u32
+    | Rights::Inspect as u32;
+
+pub const DEFAULT_INTERRUPT_RIGHTS: u32 =
+    RIGHTS_BASIC | RIGHTS_IO | Rights::Signal as u32;
+
+pub const DEFAULT_STREAM_RIGHTS: u32 = RIGHTS_BASIC | RIGHTS_PROPERTY | Rights::Signal as u32;
+
+pub const DEFAULT_CLOCK_RIGHTS: u32 = RIGHTS_BASIC | RIGHTS_IO;
+
+pub const DEFAULT_SUSPEND_TOKEN_RIGHTS: u32 = Rights::Transfer as u32 | Rights::Inspect as u32;
+
+pub const DEFAULT_EXCEPTION_RIGHTS: u32 =
+    Rights::Transfer as u32 | RIGHTS_PROPERTY | Rights::Inspect as u32;
+
+pub fn rights_are_valid(rights: u32) -> bool {
+    super::object_logic::rights_valid(rights, RIGHTS_ALL)
+}
+
+pub fn rights_contain(rights: u32, required: u32) -> bool {
+    super::object_logic::rights_has(rights, required)
+}
+
+pub fn rights_are_subset(requested: u32, existing: u32) -> bool {
+    super::object_logic::rights_subset(requested, existing)
+}
+
+pub fn default_rights_for_object(obj_type: ObjectType) -> u32 {
+    match obj_type {
+        ObjectType::Vmo => Rights::DefaultVmo as u32,
+        ObjectType::Vmar => Rights::DefaultVmar as u32,
+        ObjectType::Channel => Rights::DefaultChannel as u32,
+        ObjectType::Job => Rights::DefaultJob as u32,
+        ObjectType::Process | ObjectType::LinuxProcess => Rights::DefaultProcess as u32,
+        ObjectType::Thread | ObjectType::LinuxThread => Rights::DefaultThread as u32,
+        ObjectType::Fifo => Rights::DefaultChannel as u32,
+        ObjectType::Socket => DEFAULT_SOCKET_RIGHTS,
+        ObjectType::Event => DEFAULT_EVENT_RIGHTS,
+        ObjectType::EventPair => DEFAULT_EVENTPAIR_RIGHTS,
+        ObjectType::Port => DEFAULT_PORT_RIGHTS,
+        ObjectType::Timer => DEFAULT_EVENT_RIGHTS,
+        ObjectType::Resource => DEFAULT_RESOURCE_RIGHTS,
+        ObjectType::Interrupt => DEFAULT_INTERRUPT_RIGHTS,
+        ObjectType::Stream => DEFAULT_STREAM_RIGHTS,
+        ObjectType::DebugLog => DEFAULT_SOCKET_RIGHTS,
+        ObjectType::Clock => DEFAULT_CLOCK_RIGHTS,
+        ObjectType::SuspendToken => DEFAULT_SUSPEND_TOKEN_RIGHTS,
+        ObjectType::Exception => DEFAULT_EXCEPTION_RIGHTS,
+        ObjectType::Iommu
+        | ObjectType::Bti
+        | ObjectType::Pmt
+        | ObjectType::PciDevice
+        | ObjectType::Guest
+        | ObjectType::Vcpu
+        | ObjectType::Semaphore
+        | ObjectType::SharedMemory
+        | ObjectType::Profile
+        | ObjectType::Pager
+        | ObjectType::Framebuffer
+        | ObjectType::Ktrace
+        | ObjectType::Mtrace
+        | ObjectType::MessageQueue
+        | ObjectType::EventFd
+        | ObjectType::SignalFd
+        | ObjectType::TimerFd
+        | ObjectType::Inotify
+        | ObjectType::IoUring
+        | ObjectType::MemFd
+        | ObjectType::PidFd
+        | ObjectType::Futex
+        | ObjectType::LinuxFile
+        | ObjectType::LinuxPipe
+        | ObjectType::LinuxTcpSocket
+        | ObjectType::LinuxUdpSocket
+        | ObjectType::LinuxRawSocket
+        | ObjectType::LinuxNetlinkSocket
+        | ObjectType::LinuxSignal
+        | ObjectType::LinuxEventBus
+        | ObjectType::LinuxDevice
+        | ObjectType::LinuxDir => DEFAULT_EVENT_RIGHTS | RIGHTS_IO,
+    }
 }
 
 // ============================================================================

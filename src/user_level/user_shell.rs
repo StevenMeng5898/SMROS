@@ -992,8 +992,14 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     let mut actual_size = 0usize;
     let mut property_value = 0x534d_524f_5359_5343u64;
     let mut property_readback = 0u64;
-    if crate::syscall::sys_handle_duplicate(vmo_handle, 0, &mut dup_handle).is_err()
-        || dup_handle != vmo_handle
+    if crate::syscall::sys_handle_duplicate(
+        vmo_handle,
+        crate::syscall::RIGHT_SAME_RIGHTS,
+        &mut dup_handle,
+    )
+    .is_err()
+        || dup_handle == 0
+        || dup_handle == vmo_handle
         || crate::syscall::sys_object_get_info(
             vmo_handle,
             0,
@@ -1030,16 +1036,24 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         .write_str("[TEST] Testing Zircon object signal calls...\n");
     const SIGNAL_USER0: u32 = 1 << 24;
     const SIGNAL_USER1: u32 = 1 << 25;
+    let mut signal_event = 0u32;
     let mut signal_pending = 0u32;
 
-    match crate::syscall::sys_object_signal(vmo_handle, 0, SIGNAL_USER0) {
+    match crate::syscall::sys_event_create(0, &mut signal_event) {
+        Ok(_) => print_signal_ok(ctx, "event create"),
+        Err(e) => {
+            print_signal_error(ctx, "event create", e);
+            return;
+        }
+    }
+    match crate::syscall::sys_object_signal(signal_event, 0, SIGNAL_USER0) {
         Ok(_) => print_signal_ok(ctx, "set user signal"),
         Err(e) => {
             print_signal_error(ctx, "set user signal", e);
             return;
         }
     }
-    match crate::syscall::sys_object_wait_one(vmo_handle, SIGNAL_USER0, 0, &mut signal_pending) {
+    match crate::syscall::sys_object_wait_one(signal_event, SIGNAL_USER0, 0, &mut signal_pending) {
         Ok(_) if signal_pending & SIGNAL_USER0 != 0 => {
             print_signal_ok(ctx, "wait user signal");
         }
@@ -1054,14 +1068,14 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
             return;
         }
     }
-    match crate::syscall::sys_object_signal(vmo_handle, SIGNAL_USER0, 0) {
+    match crate::syscall::sys_object_signal(signal_event, SIGNAL_USER0, 0) {
         Ok(_) => print_signal_ok(ctx, "clear user signal"),
         Err(e) => {
             print_signal_error(ctx, "clear user signal", e);
             return;
         }
     }
-    match crate::syscall::sys_object_wait_one(vmo_handle, SIGNAL_USER0, 0, &mut signal_pending) {
+    match crate::syscall::sys_object_wait_one(signal_event, SIGNAL_USER0, 0, &mut signal_pending) {
         Err(crate::syscall::ZxError::ErrTimedOut) if signal_pending & SIGNAL_USER0 == 0 => {
             print_signal_ok(ctx, "cleared user signal no longer waits");
         }
@@ -1078,7 +1092,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         }
     }
     match crate::syscall::sys_object_signal(
-        vmo_handle,
+        signal_event,
         0,
         crate::kernel_objects::channel::CHANNEL_SIGNAL_READABLE,
     ) {
@@ -1210,27 +1224,6 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
             return;
         }
     }
-    match crate::syscall::sys_object_wait_one(
-        port_handle,
-        crate::kernel_objects::channel::CHANNEL_SIGNAL_READABLE,
-        0,
-        &mut signal_pending,
-    ) {
-        Ok(_) if signal_pending & crate::kernel_objects::channel::CHANNEL_SIGNAL_READABLE != 0 => {
-            print_port_ok(ctx, "readable after queue");
-        }
-        Ok(_) => {
-            ctx.serial
-                .write_str("  [FAIL] readable after queue pending=0x");
-            print_hex(&mut ctx.serial, signal_pending as u64);
-            ctx.serial.write_str("\n");
-            return;
-        }
-        Err(e) => {
-            print_port_error(ctx, "readable after queue", e);
-            return;
-        }
-    }
     match crate::syscall::sys_port_wait(
         port_handle,
         0,
@@ -1305,7 +1298,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     }
 
     match crate::syscall::sys_object_wait_async(
-        vmo_handle,
+        signal_event,
         port_handle,
         0x5052_5404,
         SIGNAL_USER1,
@@ -1317,7 +1310,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
             return;
         }
     }
-    match crate::syscall::sys_port_cancel(port_handle, vmo_handle, 0x5052_5404) {
+    match crate::syscall::sys_port_cancel(port_handle, signal_event, 0x5052_5404) {
         Ok(removed) if removed == 1 => print_port_ok(ctx, "cancel async wait"),
         Ok(removed) => {
             print_port_count_mismatch(ctx, "cancel async wait", 1, removed);
@@ -1328,7 +1321,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
             return;
         }
     }
-    match crate::syscall::sys_object_signal(vmo_handle, 0, SIGNAL_USER1) {
+    match crate::syscall::sys_object_signal(signal_event, 0, SIGNAL_USER1) {
         Ok(_) => print_port_ok(ctx, "signal canceled source"),
         Err(e) => {
             print_port_error(ctx, "signal canceled source", e);
@@ -1357,7 +1350,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     }
 
     match crate::syscall::sys_object_wait_async(
-        vmo_handle,
+        signal_event,
         port_handle,
         0x5052_5403,
         SIGNAL_USER0,
@@ -1389,7 +1382,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
             return;
         }
     }
-    match crate::syscall::sys_object_signal(vmo_handle, 0, SIGNAL_USER0) {
+    match crate::syscall::sys_object_signal(signal_event, 0, SIGNAL_USER0) {
         Ok(_) => print_port_ok(ctx, "signal source for async wait"),
         Err(e) => {
             print_port_error(ctx, "signal source for async wait", e);
@@ -1428,7 +1421,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         crate::syscall::ZirconSyscall::PortCancel as u32,
         [
             port_handle as usize,
-            vmo_handle as usize,
+            signal_event as usize,
             0x5052_5403,
             0,
             0,
@@ -1451,6 +1444,8 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         }
     }
     let _ = crate::syscall::sys_handle_close(port_handle);
+    let _ = crate::syscall::sys_handle_close(signal_event);
+    let _ = crate::syscall::sys_handle_close(dup_handle);
     ctx.serial.write_str("[OK] port tests completed\n");
 
     ctx.serial
@@ -2377,6 +2372,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         pending: u32,
     }
     const TEST_SIGNAL: u32 = 1 << 24;
+    let mut job_handle = 0u32;
     let mut proc_handle = 0u32;
     let mut proc_vmar = 0u32;
     let mut thread_handle = 0u32;
@@ -2386,7 +2382,16 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         waitfor: TEST_SIGNAL,
         pending: 0,
     };
-    if crate::syscall::sys_process_create(0, 0, 0, 0, &mut proc_handle, &mut proc_vmar).is_err()
+    if crate::syscall::sys_job_create(0, 0, &mut job_handle).is_err()
+        || crate::syscall::sys_process_create(
+            job_handle,
+            0,
+            0,
+            0,
+            &mut proc_handle,
+            &mut proc_vmar,
+        )
+        .is_err()
         || crate::syscall::sys_thread_create(
             proc_handle,
             0,
@@ -2418,7 +2423,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
             .write_str("[FAIL] process/thread/wait lifecycle failed\n");
         return;
     }
-    let close_many = [thread_handle, proc_handle];
+    let close_many = [thread_handle, proc_handle, job_handle];
     if crate::syscall::sys_handle_close_many(close_many.as_ptr() as usize, close_many.len())
         .is_err()
     {
@@ -2439,6 +2444,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     let mut debug_readback = [0u8; 11];
     let mut debug_zero = [0xffu8; 4];
     let mut system_event = 0u32;
+    let mut exception_job = 0u32;
     let mut exception_proc = 0u32;
     let mut exception_vmar = 0u32;
     let mut exception_channel = 0u32;
@@ -2617,7 +2623,15 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         }
     }
 
-    if crate::syscall::sys_process_create(0, 0, 0, 0, &mut exception_proc, &mut exception_vmar)
+    if crate::syscall::sys_job_create(0, 0, &mut exception_job).is_err()
+        || crate::syscall::sys_process_create(
+            exception_job,
+            0,
+            0,
+            0,
+            &mut exception_proc,
+            &mut exception_vmar,
+        )
         .is_err()
         || crate::syscall::sys_create_exception_channel(exception_proc, 0, &mut exception_channel)
             .is_err()
@@ -2670,6 +2684,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     let _ = crate::syscall::sys_handle_close(exception_thread);
     let _ = crate::syscall::sys_handle_close(exception_process);
     let _ = crate::syscall::sys_handle_close(exception_proc);
+    let _ = crate::syscall::sys_handle_close(exception_job);
     ctx.serial
         .write_str("[OK] time/debug/system/exception tests completed\n");
 

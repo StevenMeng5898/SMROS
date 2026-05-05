@@ -87,6 +87,7 @@ impl PortObserver {
 #[derive(Clone, Copy)]
 struct PortObject {
     handle: HandleValue,
+    rights: u32,
     packets: [PortPacket; MAX_PORT_PACKETS],
     packet_sources: [HandleValue; MAX_PORT_PACKETS],
     observers: [PortObserver; MAX_PORT_OBSERVERS],
@@ -100,6 +101,7 @@ impl PortObject {
     pub const fn empty() -> Self {
         Self {
             handle: HandleValue(INVALID_HANDLE),
+            rights: 0,
             packets: [PortPacket::empty(); MAX_PORT_PACKETS],
             packet_sources: [PORT_USER_PACKET_SOURCE; MAX_PORT_PACKETS],
             observers: [PortObserver::empty(); MAX_PORT_OBSERVERS],
@@ -112,6 +114,9 @@ impl PortObject {
 
     fn activate(&mut self, handle: HandleValue) {
         self.handle = handle;
+        self.rights = crate::kernel_objects::default_rights_for_object(
+            crate::kernel_objects::ObjectType::Port,
+        );
         self.packets = [PortPacket::empty(); MAX_PORT_PACKETS];
         self.packet_sources = [PORT_USER_PACKET_SOURCE; MAX_PORT_PACKETS];
         self.observers = [PortObserver::empty(); MAX_PORT_OBSERVERS];
@@ -123,6 +128,7 @@ impl PortObject {
 
     fn clear(&mut self) {
         self.handle = HandleValue(INVALID_HANDLE);
+        self.rights = 0;
         self.packets = [PortPacket::empty(); MAX_PORT_PACKETS];
         self.packet_sources = [PORT_USER_PACKET_SOURCE; MAX_PORT_PACKETS];
         self.observers = [PortObserver::empty(); MAX_PORT_OBSERVERS];
@@ -298,6 +304,16 @@ impl PortTable {
         self.index(handle).map(|index| self.ports[index].signals)
     }
 
+    pub fn rights(&self, handle: HandleValue) -> Option<u32> {
+        self.index(handle).map(|index| self.ports[index].rights)
+    }
+
+    pub fn has_rights(&self, handle: HandleValue, required: u32) -> bool {
+        self.rights(handle)
+            .map(|rights| crate::kernel_objects::rights_contain(rights, required))
+            .unwrap_or(false)
+    }
+
     pub fn update_signals(
         &mut self,
         handle: HandleValue,
@@ -312,11 +328,17 @@ impl PortTable {
 
     pub fn queue(&mut self, handle: HandleValue, packet: PortPacket) -> ZxResult {
         let index = self.index(handle).ok_or(ZxError::ErrNotFound)?;
+        if !self.has_rights(handle, crate::kernel_objects::Rights::Write as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         self.ports[index].push(packet, PORT_USER_PACKET_SOURCE)
     }
 
     pub fn wait(&mut self, handle: HandleValue, deadline: u64) -> ZxResult<PortPacket> {
         let index = self.index(handle).ok_or(ZxError::ErrNotFound)?;
+        if !self.has_rights(handle, crate::kernel_objects::Rights::Read as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         if let Some(packet) = self.ports[index].pop() {
             Ok(packet)
         } else if deadline == 0 {
@@ -328,6 +350,9 @@ impl PortTable {
 
     pub fn cancel(&mut self, handle: HandleValue, source: HandleValue, key: u64) -> ZxResult<u32> {
         let index = self.index(handle).ok_or(ZxError::ErrNotFound)?;
+        if !self.has_rights(handle, crate::kernel_objects::Rights::Write as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         let mut removed = self.ports[index].compact_without(source, key);
 
         for observer in &mut self.ports[index].observers {
@@ -350,6 +375,9 @@ impl PortTable {
         options: u32,
     ) -> ZxResult<bool> {
         let index = self.index(port).ok_or(ZxError::ErrNotFound)?;
+        if !self.has_rights(port, crate::kernel_objects::Rights::Write as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         self.ports[index].register_observer(source, key, observed, signals, options)?;
         if !port_logic::signal_packet_allowed(observed, signals) {
             return Ok(false);

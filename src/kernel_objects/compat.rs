@@ -8,7 +8,10 @@
 #![allow(dead_code)]
 #![allow(static_mut_refs)]
 
-use super::{object_logic, HandleValue, ObjectType, ZxError, ZxResult, INVALID_HANDLE};
+use super::{
+    default_rights_for_object, object_logic, rights_are_valid, HandleValue, ObjectType, ZxError,
+    ZxResult, INVALID_HANDLE,
+};
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
@@ -25,12 +28,13 @@ pub struct CompatObject {
     pub property_value: u64,
     pub options: u32,
     pub state_value: u64,
+    pub rights: u32,
     pub queue: VecDeque<u8>,
     pub closed: bool,
 }
 
 impl CompatObject {
-    fn new(handle: HandleValue, obj_type: ObjectType, peer: Option<HandleValue>) -> Self {
+    fn new(handle: HandleValue, obj_type: ObjectType, peer: Option<HandleValue>, rights: u32) -> Self {
         Self {
             handle,
             obj_type,
@@ -39,6 +43,7 @@ impl CompatObject {
             property_value: 0,
             options: 0,
             state_value: 0,
+            rights,
             queue: VecDeque::new(),
             closed: false,
         }
@@ -74,7 +79,7 @@ impl CompatObjectTable {
     }
 
     pub fn create(&mut self, obj_type: ObjectType) -> ZxResult<HandleValue> {
-        self.create_with_options(obj_type, 0)
+        self.create_with_options_and_rights(obj_type, 0, default_rights_for_object(obj_type))
     }
 
     pub fn create_with_options(
@@ -82,12 +87,24 @@ impl CompatObjectTable {
         obj_type: ObjectType,
         options: u32,
     ) -> ZxResult<HandleValue> {
+        self.create_with_options_and_rights(obj_type, options, default_rights_for_object(obj_type))
+    }
+
+    pub fn create_with_options_and_rights(
+        &mut self,
+        obj_type: ObjectType,
+        options: u32,
+        rights: u32,
+    ) -> ZxResult<HandleValue> {
         if self.objects.len() >= MAX_COMPAT_OBJECTS {
             return Err(ZxError::ErrNoMemory);
         }
+        if !rights_are_valid(rights) {
+            return Err(ZxError::ErrInvalidArgs);
+        }
 
         let handle = self.alloc_handle().ok_or(ZxError::ErrNoMemory)?;
-        let mut object = CompatObject::new(handle, obj_type, None);
+        let mut object = CompatObject::new(handle, obj_type, None, rights);
         object.options = options;
         self.objects.push(object);
         Ok(handle)
@@ -100,10 +117,11 @@ impl CompatObjectTable {
 
         let left = self.alloc_handle().ok_or(ZxError::ErrNoMemory)?;
         let right = self.alloc_handle().ok_or(ZxError::ErrNoMemory)?;
+        let rights = default_rights_for_object(obj_type);
         self.objects
-            .push(CompatObject::new(left, obj_type, Some(right)));
+            .push(CompatObject::new(left, obj_type, Some(right), rights));
         self.objects
-            .push(CompatObject::new(right, obj_type, Some(left)));
+            .push(CompatObject::new(right, obj_type, Some(left), rights));
         Ok((left, right))
     }
 
@@ -122,6 +140,19 @@ impl CompatObjectTable {
 
     pub fn is_type(&self, handle: HandleValue, obj_type: ObjectType) -> bool {
         self.object_type(handle) == Some(obj_type)
+    }
+
+    pub fn rights(&self, handle: HandleValue) -> Option<u32> {
+        self.objects
+            .iter()
+            .find(|object| object.handle == handle && !object.closed)
+            .map(|object| object.rights)
+    }
+
+    pub fn has_rights(&self, handle: HandleValue, required: u32) -> bool {
+        self.rights(handle)
+            .map(|rights| super::rights_contain(rights, required))
+            .unwrap_or(false)
     }
 
     pub fn options(&self, handle: HandleValue) -> Option<u32> {
@@ -273,6 +304,9 @@ impl CompatObjectTable {
     }
 
     pub fn write_bytes(&mut self, handle: HandleValue, bytes: &[u8]) -> ZxResult<usize> {
+        if !self.has_rights(handle, super::Rights::Write as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         let target = {
             let object = self
                 .objects
@@ -303,6 +337,9 @@ impl CompatObjectTable {
     }
 
     pub fn read_bytes(&mut self, handle: HandleValue, out: &mut [u8]) -> ZxResult<usize> {
+        if !self.has_rights(handle, super::Rights::Read as u32) {
+            return Err(ZxError::ErrAccessDenied);
+        }
         let object = self
             .objects
             .iter_mut()
@@ -342,6 +379,10 @@ pub fn create_object(obj_type: ObjectType) -> ZxResult<HandleValue> {
 
 pub fn create_object_with_options(obj_type: ObjectType, options: u32) -> ZxResult<HandleValue> {
     table().create_with_options(obj_type, options)
+}
+
+pub fn create_object_with_rights(obj_type: ObjectType, rights: u32) -> ZxResult<HandleValue> {
+    table().create_with_options_and_rights(obj_type, 0, rights)
 }
 
 pub fn create_pair(obj_type: ObjectType) -> ZxResult<(HandleValue, HandleValue)> {
