@@ -145,3 +145,172 @@ macro_rules! smros_user_kernel_success_body {
             && $kernel_mmap < 0xFFFF_FFFF_FFFF_F000u64
     }};
 }
+
+macro_rules! smros_user_component_start_allowed_body {
+    ($binary_exists:expr, $destroyed:expr, $already_started:expr) => {{
+        $already_started || ($binary_exists && !$destroyed)
+    }};
+}
+
+macro_rules! smros_user_namespace_rights_valid_body {
+    ($rights:expr, $allowed_mask:expr) => {{
+        $rights & !$allowed_mask == 0
+    }};
+}
+
+macro_rules! smros_user_fxfs_file_size_valid_body {
+    ($size:expr, $max_size:expr) => {{
+        $size <= $max_size
+    }};
+}
+
+macro_rules! smros_user_fxfs_node_capacity_valid_body {
+    ($nodes:expr, $max_nodes:expr) => {{
+        $nodes < $max_nodes
+    }};
+}
+
+macro_rules! smros_user_fxfs_dirent_capacity_valid_body {
+    ($entries:expr, $max_entries:expr) => {{
+        $entries < $max_entries
+    }};
+}
+
+macro_rules! smros_user_fxfs_append_size_body {
+    ($old_size:expr, $append_len:expr) => {{
+        $old_size.checked_add($append_len)
+    }};
+}
+
+macro_rules! smros_user_fxfs_write_end_body {
+    ($offset:expr, $len:expr) => {{
+        $offset.checked_add($len)
+    }};
+}
+
+macro_rules! smros_user_fxfs_seek_valid_body {
+    ($offset:expr, $size:expr) => {{
+        $offset <= $size
+    }};
+}
+
+macro_rules! smros_user_fxfs_replay_count_valid_body {
+    ($replayed:expr, $journal_records:expr) => {{
+        $replayed <= $journal_records
+    }};
+}
+
+macro_rules! smros_user_svc_name_valid_body {
+    ($len:expr, $max_len:expr) => {{
+        $len > 0 && $len <= $max_len
+    }};
+}
+
+macro_rules! smros_user_svc_rights_valid_body {
+    ($rights:expr, $allowed_mask:expr) => {{
+        $rights != 0 && ($rights & !$allowed_mask) == 0
+    }};
+}
+
+macro_rules! smros_user_svc_ipc_message_size_valid_body {
+    ($size:expr, $expected:expr) => {{
+        $size == $expected
+    }};
+}
+
+macro_rules! smros_user_svc_ipc_header_valid_body {
+    ($magic:expr, $version:expr, $expected_magic:expr, $expected_version:expr) => {{
+        $magic == $expected_magic && $version == $expected_version
+    }};
+}
+
+macro_rules! smros_user_svc_protocol_allowed_body {
+    ($service:expr, $ordinal:expr, $component_manager:expr, $runner:expr, $filesystem:expr, $component_start:expr, $runner_load:expr, $filesystem_describe:expr) => {{
+        ($service == $component_manager && $ordinal == $component_start)
+            || ($service == $runner && $ordinal == $runner_load)
+            || ($service == $filesystem && $ordinal == $filesystem_describe)
+    }};
+}
+
+macro_rules! smros_user_component_thread_launch_valid_body {
+    ($process_created:expr, $queued:expr, $thread_created:expr) => {{
+        $process_created && $queued && $thread_created
+    }};
+}
+
+macro_rules! smros_user_component_return_active_body {
+    ($pid:expr) => {{
+        $pid != 0
+    }};
+}
+
+macro_rules! smros_user_elf_header_bounds_valid_body {
+    ($image_len:expr, $header_size:expr) => {{
+        $image_len >= $header_size
+    }};
+}
+
+macro_rules! smros_user_elf_magic_valid_body {
+    ($b0:expr, $b1:expr, $b2:expr, $b3:expr) => {{
+        $b0 == 0x7fu8 && $b1 == 0x45u8 && $b2 == 0x4cu8 && $b3 == 0x46u8
+    }};
+}
+
+macro_rules! smros_user_elf_class_data_valid_body {
+    ($class:expr, $data:expr, $version:expr) => {{
+        $class == 2u8 && $data == 1u8 && $version == 1u8
+    }};
+}
+
+macro_rules! smros_user_elf_type_valid_body {
+    ($elf_type:expr, $exec_type:expr, $dyn_type:expr) => {{
+        $elf_type == $exec_type || $elf_type == $dyn_type
+    }};
+}
+
+macro_rules! smros_user_elf_machine_valid_body {
+    ($machine:expr, $expected:expr) => {{
+        $machine == $expected
+    }};
+}
+
+macro_rules! smros_user_elf_entry_valid_body {
+    ($entry:expr) => {{
+        $entry != 0
+    }};
+}
+
+macro_rules! smros_user_elf_phdr_table_valid_body {
+    ($phoff:expr, $phentsize:expr, $phnum:expr, $image_len:expr, $expected_phentsize:expr, $max_phnum:expr) => {{
+        if $phentsize != $expected_phentsize || $phnum == 0 || $phnum > $max_phnum {
+            false
+        } else {
+            match $phentsize.checked_mul($phnum) {
+                Some(table_size) => match $phoff.checked_add(table_size) {
+                    Some(end) => end <= $image_len,
+                    None => false,
+                },
+                None => false,
+            }
+        }
+    }};
+}
+
+macro_rules! smros_user_elf_segment_bounds_valid_body {
+    ($offset:expr, $file_size:expr, $mem_size:expr, $image_len:expr) => {{
+        if $mem_size < $file_size {
+            false
+        } else {
+            match $offset.checked_add($file_size) {
+                Some(end) => end <= $image_len,
+                None => false,
+            }
+        }
+    }};
+}
+
+macro_rules! smros_user_elf_vaddr_range_valid_body {
+    ($vaddr:expr, $mem_size:expr) => {{
+        $vaddr.checked_add($mem_size).is_some()
+    }};
+}

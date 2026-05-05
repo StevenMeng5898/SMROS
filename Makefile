@@ -3,6 +3,7 @@
 ARCH = aarch64-unknown-none
 TARGET = $(ARCH)
 KERNEL = kernel8.img
+FXFS_DISK = smros-fxfs.img
 BUILD_DIR = target/$(TARGET)/release
 
 .PHONY: all build run clean debug help verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level
@@ -16,8 +17,12 @@ build:
 	@cp $(BUILD_DIR)/smros $(KERNEL)
 	@echo "Build complete: $(KERNEL)"
 
+$(FXFS_DISK):
+	@echo "Creating persistent FxFS disk image: $(FXFS_DISK)"
+	@qemu-img create -f raw $(FXFS_DISK) 16M >/dev/null
+
 # Run with QEMU (simple mode)
-run: build
+run: build $(FXFS_DISK)
 	@echo "Starting QEMU..."
 	@qemu-system-aarch64 \
 		-M virt \
@@ -25,10 +30,12 @@ run: build
 		-smp 4 \
 		-m 512M \
 		-nographic \
-		-kernel $(KERNEL)
+		-kernel $(KERNEL) \
+		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs \
+		-device virtio-blk-device,drive=fxfs
 
 # Run with QEMU (debug mode with logging)
-debug: build
+debug: build $(FXFS_DISK)
 	@echo "Starting QEMU in debug mode..."
 	@qemu-system-aarch64 \
 		-M virt \
@@ -37,12 +44,14 @@ debug: build
 		-m 512M \
 		-nographic \
 		-kernel $(KERNEL) \
+		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs \
+		-device virtio-blk-device,drive=fxfs \
 		-serial mon:stdio \
 		-d int,cpu_reset \
 		-D qemu.log
 
 # Run with GDB server
-gdb: build
+gdb: build $(FXFS_DISK)
 	@echo "Starting QEMU with GDB server on port 1234..."
 	@qemu-system-aarch64 \
 		-M virt \
@@ -51,6 +60,8 @@ gdb: build
 		-m 512M \
 		-nographic \
 		-kernel $(KERNEL) \
+		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs \
+		-device virtio-blk-device,drive=fxfs \
 		-S -s
 
 # Clean build artifacts

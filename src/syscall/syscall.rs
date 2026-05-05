@@ -4105,6 +4105,10 @@ pub fn sys_exit(exit_code: i32) -> SysResult {
         return Ok(0);
     }
 
+    if crate::user_level::component::prepare_component_return(exit_code) {
+        return Ok(0);
+    }
+
     // No current-process binding is modeled yet; the EL0 smoke test exits through the hook above.
     Ok(0)
 }

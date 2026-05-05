@@ -505,13 +505,20 @@ pub extern "C" fn kernel_main() -> ! {
 
     // Initialize user-level process management
     serial.write_str("[OK] Initializing user-level process management... ");
-    crate::user_level::user_process::init();
+    crate::user_level::init();
     serial.write_str("done\n");
 
     // Initialize scheduler
     serial.write_str("[OK] Initializing preemptive RR scheduler... ");
     crate::kernel_objects::scheduler::scheduler().init();
     serial.write_str("done\n");
+
+    serial.write_str("[OK] Starting bootstrap component EL0 launchers... ");
+    if crate::user_level::component::start_boot_component_threads() {
+        serial.write_str("done\n");
+    } else {
+        serial.write_str("partial\n");
+    }
 
     // Enable timer interrupts
     serial.write_str("[OK] Enabling timer interrupts (100Hz tick)... ");

@@ -14,6 +14,9 @@ use crate::user_level::user_test::test_write;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+const SHELL_INPUT_CAPACITY: usize = 255;
+const SHELL_HISTORY_CAPACITY: usize = 16;
+
 /// Shell command handlers
 struct ShellCommand {
     name: &'static str,
@@ -25,6 +28,46 @@ struct ShellCommand {
 struct ShellContext {
     serial: Serial,
     command_count: u32,
+    cwd: String,
+}
+
+impl ShellContext {
+    fn read_line(&mut self) -> String {
+        let mut input_buf = [0u8; 256];
+        let mut input_len = 0usize;
+
+        loop {
+            const UART_BASE: usize = 0x9000000;
+            const UART_FR: usize = 0x18;
+            const UART_DR: usize = 0x00;
+            const FR_RXFE: u32 = 1 << 4;
+
+            let fr = unsafe { core::ptr::read_volatile((UART_BASE + UART_FR) as *const u32) };
+            if fr & FR_RXFE != 0 {
+                cortex_a::asm::wfe();
+                continue;
+            }
+
+            let c = unsafe { core::ptr::read_volatile((UART_BASE + UART_DR) as *const u8) };
+            if c == b'\r' || c == b'\n' {
+                self.serial.write_str("\n");
+                break;
+            } else if c == b'\x08' || c == b'\x7f' {
+                if input_len > 0 {
+                    input_len -= 1;
+                    self.serial.write_str("\x08 \x08");
+                }
+            } else if user_logic::ascii_shell_input(c) || c == b'\t' {
+                if input_len < 255 {
+                    input_buf[input_len] = if c == b'\t' { b' ' } else { c };
+                    input_len += 1;
+                    self.serial.write_byte(if c == b'\t' { b' ' } else { c });
+                }
+            }
+        }
+
+        String::from_utf8_lossy(&input_buf[..input_len]).into_owned()
+    }
 }
 
 /// Available shell commands
@@ -55,6 +98,76 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_meminfo,
     },
     ShellCommand {
+        name: "components",
+        description: "Show minimal component framework state",
+        handler: cmd_components,
+    },
+    ShellCommand {
+        name: "fxfs",
+        description: "Show FxFS object-store and block-driver state",
+        handler: cmd_fxfs,
+    },
+    ShellCommand {
+        name: "drivers",
+        description: "Show user-space device tree and driver bindings",
+        handler: cmd_drivers,
+    },
+    ShellCommand {
+        name: "pwd",
+        description: "Show current FxFS directory",
+        handler: cmd_pwd,
+    },
+    ShellCommand {
+        name: "ls",
+        description: "List FxFS directory entries",
+        handler: cmd_ls,
+    },
+    ShellCommand {
+        name: "cd",
+        description: "Change current FxFS directory",
+        handler: cmd_cd,
+    },
+    ShellCommand {
+        name: "cd..",
+        description: "Change to parent FxFS directory",
+        handler: cmd_cd_up,
+    },
+    ShellCommand {
+        name: "mkdir",
+        description: "Create an FxFS directory",
+        handler: cmd_mkdir,
+    },
+    ShellCommand {
+        name: "write",
+        description: "Write text to an FxFS file",
+        handler: cmd_write,
+    },
+    ShellCommand {
+        name: "cat",
+        description: "Read an FxFS file",
+        handler: cmd_cat,
+    },
+    ShellCommand {
+        name: "cp",
+        description: "Copy an FxFS file",
+        handler: cmd_cp,
+    },
+    ShellCommand {
+        name: "mv",
+        description: "Move or rename an FxFS file",
+        handler: cmd_mv,
+    },
+    ShellCommand {
+        name: "vi",
+        description: "Edit an FxFS file",
+        handler: cmd_vi,
+    },
+    ShellCommand {
+        name: "svc",
+        description: "Show /svc service directory and IPC state",
+        handler: cmd_svc,
+    },
+    ShellCommand {
         name: "uptime",
         description: "Show system uptime",
         handler: cmd_uptime,
@@ -80,6 +193,11 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_clear,
     },
     ShellCommand {
+        name: "reboot",
+        description: "Reboot the machine through PSCI",
+        handler: cmd_reboot,
+    },
+    ShellCommand {
         name: "exit",
         description: "Exit the shell",
         handler: cmd_exit,
@@ -91,6 +209,9 @@ pub struct UserShell {
     context: ShellContext,
     input_buf: [u8; 256],
     input_len: usize,
+    input_cursor: usize,
+    history: Vec<String>,
+    history_index: usize,
 }
 
 impl UserShell {
@@ -103,9 +224,13 @@ impl UserShell {
             context: ShellContext {
                 serial,
                 command_count: 0,
+                cwd: String::from("/"),
             },
             input_buf: [0; 256],
             input_len: 0,
+            input_cursor: 0,
+            history: Vec::new(),
+            history_index: 0,
         }
     }
 
@@ -129,56 +254,306 @@ impl UserShell {
 
     /// Print shell prompt
     fn print_prompt(&mut self) {
-        self.print("smros> ");
+        self.print("smros:");
+        let cwd = self.context.cwd.clone();
+        self.print(cwd.as_str());
+        self.print("> ");
+    }
+
+    fn input_line(&self) -> String {
+        String::from_utf8_lossy(&self.input_buf[..self.input_len]).into_owned()
+    }
+
+    fn set_input_line(&mut self, line: &str) {
+        let bytes = line.as_bytes();
+        self.input_len = core::cmp::min(bytes.len(), SHELL_INPUT_CAPACITY);
+        self.input_cursor = self.input_len;
+        for (index, byte) in bytes.iter().take(self.input_len).enumerate() {
+            self.input_buf[index] = *byte;
+        }
+        self.repaint_input_line();
+    }
+
+    fn repaint_input_line(&mut self) {
+        self.print("\r");
+        self.print_prompt();
+        let line = self.input_line();
+        self.print(line.as_str());
+        self.print("\x1b[K");
+        for _ in 0..self.input_len.saturating_sub(self.input_cursor) {
+            self.print("\x1b[D");
+        }
+    }
+
+    fn move_cursor_left(&mut self) {
+        if self.input_cursor > 0 {
+            self.input_cursor -= 1;
+            self.print("\x1b[D");
+        }
+    }
+
+    fn move_cursor_right(&mut self) {
+        if self.input_cursor < self.input_len {
+            self.input_cursor += 1;
+            self.print("\x1b[C");
+        }
+    }
+
+    fn insert_input_byte(&mut self, c: u8) {
+        if self.input_len >= SHELL_INPUT_CAPACITY {
+            return;
+        }
+
+        let inserted_at_end = self.input_cursor == self.input_len;
+        for index in (self.input_cursor..self.input_len).rev() {
+            self.input_buf[index + 1] = self.input_buf[index];
+        }
+        self.input_buf[self.input_cursor] = c;
+        self.input_len += 1;
+        self.input_cursor += 1;
+        self.history_index = self.history.len();
+
+        if inserted_at_end {
+            self.print_byte(c);
+        } else {
+            self.repaint_input_line();
+        }
+    }
+
+    fn delete_input_byte_before_cursor(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+
+        for index in self.input_cursor..self.input_len {
+            self.input_buf[index - 1] = self.input_buf[index];
+        }
+        self.input_cursor -= 1;
+        self.input_len -= 1;
+        self.history_index = self.history.len();
+        self.repaint_input_line();
+    }
+
+    fn remember_history(&mut self, line: &str) {
+        if line.is_empty() {
+            return;
+        }
+        if self
+            .history
+            .last()
+            .map(|previous| previous.as_str() == line)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        if self.history.len() == SHELL_HISTORY_CAPACITY {
+            self.history.remove(0);
+        }
+        self.history.push(String::from(line));
+    }
+
+    fn show_previous_history(&mut self) {
+        if self.history.is_empty() || self.history_index == 0 {
+            return;
+        }
+        self.history_index -= 1;
+        let line = self.history[self.history_index].clone();
+        self.set_input_line(line.as_str());
+    }
+
+    fn show_next_history(&mut self) {
+        if self.history_index >= self.history.len() {
+            return;
+        }
+        self.history_index += 1;
+        if self.history_index == self.history.len() {
+            self.set_input_line("");
+        } else {
+            let line = self.history[self.history_index].clone();
+            self.set_input_line(line.as_str());
+        }
+    }
+
+    fn try_read_uart_byte() -> Option<u8> {
+        const UART_BASE: usize = 0x9000000;
+        const UART_FR: usize = 0x18;
+        const UART_DR: usize = 0x00;
+        const FR_RXFE: u32 = 1 << 4;
+
+        let fr = unsafe { core::ptr::read_volatile((UART_BASE + UART_FR) as *const u32) };
+        if fr & FR_RXFE != 0 {
+            None
+        } else {
+            Some(unsafe { core::ptr::read_volatile((UART_BASE + UART_DR) as *const u8) })
+        }
+    }
+
+    fn read_uart_byte() -> u8 {
+        loop {
+            if let Some(c) = Self::try_read_uart_byte() {
+                return c;
+            }
+            cortex_a::asm::wfe();
+        }
+    }
+
+    fn read_uart_byte_with_retry(retries: usize) -> Option<u8> {
+        for _ in 0..retries {
+            if let Some(c) = Self::try_read_uart_byte() {
+                return Some(c);
+            }
+            cortex_a::asm::wfe();
+        }
+        None
+    }
+
+    fn handle_escape_sequence(&mut self) {
+        let Some(sequence_type) = Self::read_uart_byte_with_retry(16) else {
+            return;
+        };
+        let Some(command) = Self::read_uart_byte_with_retry(16) else {
+            return;
+        };
+        match (sequence_type, command) {
+            (b'[', b'A') | (b'O', b'A') => self.show_previous_history(),
+            (b'[', b'B') | (b'O', b'B') => self.show_next_history(),
+            (b'[', b'C') | (b'O', b'C') => self.move_cursor_right(),
+            (b'[', b'D') | (b'O', b'D') => self.move_cursor_left(),
+            _ => {}
+        }
+    }
+
+    fn complete_input(&mut self) {
+        let current = String::from_utf8_lossy(&self.input_buf[..self.input_cursor]).into_owned();
+        if current.is_empty() {
+            self.print("\n");
+            self.print_completion_commands("");
+            self.repaint_input_line();
+            return;
+        }
+
+        let token_start = current
+            .as_bytes()
+            .iter()
+            .rposition(|byte| *byte == b' ')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let token = &current[token_start..];
+        let completed = if token_start == 0 {
+            self.complete_command(token)
+        } else {
+            self.complete_fxfs_path(token)
+        };
+
+        if let Some(completed) = completed {
+            if completed.len() > token.len() {
+                let suffix = &completed.as_bytes()[token.len()..];
+                for byte in suffix {
+                    self.insert_input_byte(*byte);
+                }
+            }
+        } else if token_start == 0 {
+            self.print("\n");
+            self.print_completion_commands(token);
+            self.repaint_input_line();
+        } else {
+            self.print("\n");
+            self.print_completion_paths(token);
+            self.repaint_input_line();
+        }
+    }
+
+    fn complete_command(&self, prefix: &str) -> Option<String> {
+        let mut match_name: Option<&str> = None;
+        for command in SHELL_COMMANDS {
+            if command.name.starts_with(prefix) {
+                if match_name.is_some() {
+                    return None;
+                }
+                match_name = Some(command.name);
+            }
+        }
+        match_name.map(|name| {
+            let mut completed = String::from(name);
+            completed.push(' ');
+            completed
+        })
+    }
+
+    fn print_completion_commands(&mut self, prefix: &str) {
+        for command in SHELL_COMMANDS {
+            if command.name.starts_with(prefix) {
+                self.print("  ");
+                self.print(command.name);
+                self.print("\n");
+            }
+        }
+    }
+
+    fn complete_fxfs_path(&self, token: &str) -> Option<String> {
+        let (dir_token, name_prefix) = split_completion_path(token);
+        let dir_path = normalize_fxfs_path(self.context.cwd.as_str(), dir_token.as_str())?;
+        let entries = crate::user_level::fxfs::entries(dir_path.as_str()).ok()?;
+        let mut matched: Option<String> = None;
+        for entry in entries {
+            if entry.name.starts_with(name_prefix.as_str()) {
+                let candidate = join_completion_path(dir_token.as_str(), entry.name.as_str());
+                if matched.is_some() {
+                    return None;
+                }
+                matched = Some(candidate);
+            }
+        }
+        matched
+    }
+
+    fn print_completion_paths(&mut self, token: &str) {
+        let (dir_token, name_prefix) = split_completion_path(token);
+        let Some(dir_path) = normalize_fxfs_path(self.context.cwd.as_str(), dir_token.as_str())
+        else {
+            return;
+        };
+        if let Ok(entries) = crate::user_level::fxfs::entries(dir_path.as_str()) {
+            for entry in entries {
+                if entry.name.starts_with(name_prefix.as_str()) {
+                    self.print("  ");
+                    self.print(
+                        join_completion_path(dir_token.as_str(), entry.name.as_str()).as_str(),
+                    );
+                    self.print("\n");
+                }
+            }
+        }
     }
 
     /// Read a line of input from serial (waits for timer interrupt to yield)
     fn read_line(&mut self) -> String {
         self.input_len = 0;
+        self.input_cursor = 0;
+        self.history_index = self.history.len();
 
         loop {
-            // Read from UART data register
-            const UART_BASE: usize = 0x9000000;
-            const UART_FR: usize = 0x18;
-            const UART_DR: usize = 0x00;
-            const FR_RXFE: u32 = 1 << 4;
-
-            // Check if RX FIFO is empty
-            let fr = unsafe { core::ptr::read_volatile((UART_BASE + UART_FR) as *const u32) };
-
-            if fr & FR_RXFE != 0 {
-                // No data available - wait for next timer tick
-                // This gives the user time to type (10ms at 100Hz)
-                // Then preemption will return to this thread
-                cortex_a::asm::wfe();
-                continue;
-            }
-
-            // Read character
-            let c = unsafe { core::ptr::read_volatile((UART_BASE + UART_DR) as *const u8) };
+            let c = Self::read_uart_byte();
 
             if c == b'\r' || c == b'\n' {
                 // End of line
                 self.print("\n");
                 break;
+            } else if c == b'\t' {
+                self.complete_input();
+            } else if c == b'\x1b' {
+                self.handle_escape_sequence();
             } else if c == b'\x08' || c == b'\x7f' {
                 // Backspace
-                if self.input_len > 0 {
-                    self.input_len -= 1;
-                    self.print("\x08 \x08");
-                }
+                self.delete_input_byte_before_cursor();
             } else if user_logic::ascii_shell_input(c) {
                 // Printable character
-                if self.input_len < 255 {
-                    self.input_buf[self.input_len] = c;
-                    self.input_len += 1;
-                    self.print_byte(c);
-                }
+                self.insert_input_byte(c);
             }
         }
 
         // Return the line as a String to avoid borrowing issues
-        String::from_utf8_lossy(&self.input_buf[..self.input_len]).into_owned()
+        self.input_line()
     }
 
     /// Print a single byte
@@ -224,6 +599,8 @@ impl UserShell {
             if parts.is_empty() {
                 continue;
             }
+
+            self.remember_history(line.as_str());
 
             let cmd = parts[0];
 
@@ -3291,6 +3668,20 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     ctx.serial
         .write_str("[OK] Linux file, dir, fd, poll, and stat tests completed\n");
 
+    ctx.serial
+        .write_str("[TEST] Testing minimal component framework and FxFS... ");
+    if crate::user_level::component::smoke_test()
+        && crate::user_level::fxfs::smoke_test()
+        && crate::user_level::svc::smoke_test()
+    {
+        ctx.serial
+            .write_str("[OK] component framework, FxFS, and /svc IPC returned\n");
+    } else {
+        ctx.serial
+            .write_str("[FAIL] component framework, FxFS, or /svc IPC failed\n");
+        return;
+    }
+
     ctx.serial.write_str("[TEST] Closing VMO handle... ");
     match crate::syscall::sys_handle_close(vmo_handle) {
         Ok(_) => ctx.serial.write_str("[OK] handle closed\n"),
@@ -3316,10 +3707,688 @@ fn cmd_echo(ctx: &mut ShellContext, args: &[&str]) {
     ctx.serial.write_str("\n\n");
 }
 
+/// Command: components - Show minimal component framework state
+fn cmd_components(ctx: &mut ShellContext, _args: &[&str]) {
+    let stats = crate::user_level::component::stats();
+    ctx.serial.write_str("\nComponents: ");
+    print_number(&mut ctx.serial, stats.components as u32);
+    ctx.serial.write_str(" total, ");
+    print_number(&mut ctx.serial, stats.started as u32);
+    ctx.serial.write_str(" started\n");
+    ctx.serial.write_str("Component threads: ");
+    print_number(&mut ctx.serial, stats.runnable_threads as u32);
+    ctx.serial.write_str("  Exited: ");
+    print_number(&mut ctx.serial, stats.exited as u32);
+    ctx.serial.write_str("  ELF loaded: ");
+    print_number(&mut ctx.serial, stats.loaded_images as u32);
+    ctx.serial.write_str("  Load errors: ");
+    print_number(&mut ctx.serial, stats.load_errors as u32);
+    ctx.serial.write_str("\n");
+
+    ctx.serial.write_str(
+        "  ID  State       PID   TID   Exit  Segs  Entry              Runner  Moniker\n",
+    );
+    ctx.serial.write_str(
+        "  --------------------------------------------------------------------------\n",
+    );
+    for component in crate::user_level::component::snapshot() {
+        ctx.serial.write_str("  ");
+        print_number(&mut ctx.serial, component.id as u32);
+        ctx.serial.write_str("   ");
+        ctx.serial.write_str(component.state.as_str());
+        for _ in 0..(11usize.saturating_sub(component.state.as_str().len())) {
+            ctx.serial.write_byte(b' ');
+        }
+        match component.pid {
+            Some(pid) => print_number(&mut ctx.serial, pid as u32),
+            None => ctx.serial.write_str("-"),
+        }
+        ctx.serial.write_str("     ");
+        match component.thread_id {
+            Some(tid) => print_number(&mut ctx.serial, tid as u32),
+            None => ctx.serial.write_str("-"),
+        }
+        ctx.serial.write_str("     ");
+        if component.exited {
+            print_number(&mut ctx.serial, component.exit_code as u32);
+        } else {
+            ctx.serial.write_str("-");
+        }
+        ctx.serial.write_str("     ");
+        if component.loaded_segments > 0 {
+            print_number(&mut ctx.serial, component.loaded_segments as u32);
+        } else {
+            ctx.serial.write_str("-");
+        }
+        ctx.serial.write_str("     ");
+        match component.loaded_entry {
+            Some(entry) => {
+                ctx.serial.write_str("0x");
+                print_hex(&mut ctx.serial, entry);
+            }
+            None => {
+                ctx.serial.write_str("-");
+                if let Some(err) = component.load_error {
+                    ctx.serial.write_str("(");
+                    ctx.serial.write_str(err.as_str());
+                    ctx.serial.write_str(")");
+                }
+            }
+        }
+        ctx.serial.write_str("     ");
+        ctx.serial.write_str(component.runner.as_str());
+        ctx.serial.write_str("     ");
+        ctx.serial.write_str(component.moniker);
+        ctx.serial.write_str("\n");
+    }
+    ctx.serial.write_str("\n");
+}
+
+fn normalize_fxfs_path(cwd: &str, path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    if !path.starts_with('/') {
+        for part in cwd.split('/') {
+            if !part.is_empty() {
+                parts.push(part);
+            }
+        }
+    }
+
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            let _ = parts.pop();
+            continue;
+        }
+        parts.push(part);
+    }
+
+    let mut normalized = String::from("/");
+    for (index, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            return None;
+        }
+        if index > 0 {
+            normalized.push('/');
+        }
+        normalized.push_str(part);
+    }
+    Some(normalized)
+}
+
+fn split_completion_path(token: &str) -> (String, String) {
+    match token.rfind('/') {
+        Some(index) => {
+            let (dir, name) = token.split_at(index + 1);
+            let dir = if dir.is_empty() { "." } else { dir };
+            (String::from(dir), String::from(name))
+        }
+        None => (String::from("."), String::from(token)),
+    }
+}
+
+fn join_completion_path(dir_token: &str, name: &str) -> String {
+    if dir_token == "." {
+        return String::from(name);
+    }
+    let mut out = String::from(dir_token);
+    if !out.ends_with('/') {
+        out.push('/');
+    }
+    out.push_str(name);
+    out
+}
+
+fn read_fxfs_file_to_vec(path: &str) -> Result<Vec<u8>, crate::user_level::fxfs::FxfsError> {
+    let attrs = crate::user_level::fxfs::attrs(path)?;
+    let mut out = Vec::new();
+    out.resize(attrs.size, 0);
+    let size = crate::user_level::fxfs::read_file(path, &mut out)?;
+    out.truncate(size);
+    Ok(out)
+}
+
+fn print_bytes_as_text(ctx: &mut ShellContext, bytes: &[u8]) {
+    for byte in bytes {
+        if user_logic::ascii_shell_input(*byte) || *byte == b'\n' || *byte == b'\t' {
+            ctx.serial.write_byte(*byte);
+        } else {
+            ctx.serial.write_byte(b'.');
+        }
+    }
+}
+
+fn print_fxfs_error(ctx: &mut ShellContext, err: crate::user_level::fxfs::FxfsError) {
+    let label = match err {
+        crate::user_level::fxfs::FxfsError::NotMounted => "not mounted",
+        crate::user_level::fxfs::FxfsError::InvalidPath => "invalid path",
+        crate::user_level::fxfs::FxfsError::NotFound => "not found",
+        crate::user_level::fxfs::FxfsError::AlreadyExists => "already exists",
+        crate::user_level::fxfs::FxfsError::NoSpace => "no space",
+        crate::user_level::fxfs::FxfsError::NotDirectory => "not a directory",
+        crate::user_level::fxfs::FxfsError::IsDirectory => "is a directory",
+        crate::user_level::fxfs::FxfsError::NotFile => "not a file",
+        crate::user_level::fxfs::FxfsError::InvalidOffset => "invalid offset",
+        crate::user_level::fxfs::FxfsError::StorageUnavailable => "storage unavailable",
+        crate::user_level::fxfs::FxfsError::StorageCorrupt => "storage corrupt",
+    };
+    ctx.serial.write_str(label);
+}
+
+fn print_driver_error(ctx: &mut ShellContext, err: crate::user_level::drivers::UserDriverError) {
+    let label = match err {
+        crate::user_level::drivers::UserDriverError::NotInitialized => "not initialized",
+        crate::user_level::drivers::UserDriverError::NotFound => "not found",
+        crate::user_level::drivers::UserDriverError::NotReady => "not ready",
+        crate::user_level::drivers::UserDriverError::OutOfRange => "out of range",
+        crate::user_level::drivers::UserDriverError::InvalidBlock => "invalid block",
+        crate::user_level::drivers::UserDriverError::Unsupported => "unsupported",
+        crate::user_level::drivers::UserDriverError::Io => "io error",
+        crate::user_level::drivers::UserDriverError::Timeout => "timeout",
+    };
+    ctx.serial.write_str(label);
+}
+
+fn print_fxfs_entry(ctx: &mut ShellContext, entry: &crate::user_level::fxfs::FxfsDirEntry) {
+    ctx.serial.write_str("  ");
+    ctx.serial.write_str(entry.kind.as_str());
+    ctx.serial.write_str("  ");
+    print_number(&mut ctx.serial, entry.object_id as u32);
+    ctx.serial.write_str("      ");
+    print_number(&mut ctx.serial, entry.size as u32);
+    ctx.serial.write_str("    0");
+    print_octal(&mut ctx.serial, entry.attrs.mode);
+    ctx.serial.write_str("  ");
+    print_number(&mut ctx.serial, entry.attrs.link_count);
+    ctx.serial.write_str("      ");
+    print_number(&mut ctx.serial, entry.attrs.uid);
+    ctx.serial.write_str(":");
+    print_number(&mut ctx.serial, entry.attrs.gid);
+    ctx.serial.write_str("   ");
+    ctx.serial.write_str(entry.name.as_str());
+    ctx.serial.write_str("\n");
+}
+
+fn cmd_pwd(ctx: &mut ShellContext, _args: &[&str]) {
+    ctx.serial.write_str(ctx.cwd.as_str());
+    ctx.serial.write_str("\n");
+}
+
+fn cmd_ls(ctx: &mut ShellContext, args: &[&str]) {
+    let target = args.first().copied().unwrap_or(".");
+    let Some(path) = normalize_fxfs_path(ctx.cwd.as_str(), target) else {
+        ctx.serial.write_str("ls: invalid path\n");
+        return;
+    };
+
+    match crate::user_level::fxfs::entries(path.as_str()) {
+        Ok(entries) => {
+            ctx.serial
+                .write_str("  Kind  Object  Size  Mode    Links  Owner  Name\n");
+            for entry in &entries {
+                print_fxfs_entry(ctx, entry);
+            }
+        }
+        Err(crate::user_level::fxfs::FxfsError::NotDirectory) => {
+            match crate::user_level::fxfs::attrs(path.as_str()) {
+                Ok(attrs) => {
+                    ctx.serial.write_str("  file  ");
+                    print_number(&mut ctx.serial, attrs.size as u32);
+                    ctx.serial.write_str(" bytes  ");
+                    ctx.serial.write_str(path.as_str());
+                    ctx.serial.write_str("\n");
+                }
+                Err(err) => {
+                    ctx.serial.write_str("ls: ");
+                    print_fxfs_error(ctx, err);
+                    ctx.serial.write_str("\n");
+                }
+            }
+        }
+        Err(err) => {
+            ctx.serial.write_str("ls: ");
+            print_fxfs_error(ctx, err);
+            ctx.serial.write_str("\n");
+        }
+    }
+}
+
+fn cmd_cd(ctx: &mut ShellContext, args: &[&str]) {
+    let target = args.first().copied().unwrap_or("/");
+    let Some(path) = normalize_fxfs_path(ctx.cwd.as_str(), target) else {
+        ctx.serial.write_str("cd: invalid path\n");
+        return;
+    };
+
+    match crate::user_level::fxfs::entries(path.as_str()) {
+        Ok(_) => {
+            ctx.cwd = path;
+        }
+        Err(err) => {
+            ctx.serial.write_str("cd: ");
+            print_fxfs_error(ctx, err);
+            ctx.serial.write_str("\n");
+        }
+    }
+}
+
+fn cmd_cd_up(ctx: &mut ShellContext, _args: &[&str]) {
+    cmd_cd(ctx, &[".."]);
+}
+
+fn cmd_mkdir(ctx: &mut ShellContext, args: &[&str]) {
+    let Some(target) = args.first() else {
+        ctx.serial.write_str("mkdir: missing path\n");
+        return;
+    };
+    let Some(path) = normalize_fxfs_path(ctx.cwd.as_str(), target) else {
+        ctx.serial.write_str("mkdir: invalid path\n");
+        return;
+    };
+    match crate::user_level::fxfs::create_dir(path.as_str()) {
+        Ok(_) => {
+            ctx.serial.write_str("created ");
+            ctx.serial.write_str(path.as_str());
+            ctx.serial.write_str("\n");
+        }
+        Err(err) => {
+            ctx.serial.write_str("mkdir: ");
+            print_fxfs_error(ctx, err);
+            ctx.serial.write_str("\n");
+        }
+    }
+}
+
+fn cmd_write(ctx: &mut ShellContext, args: &[&str]) {
+    let Some(target) = args.first() else {
+        ctx.serial.write_str("write: missing path\n");
+        return;
+    };
+    let Some(path) = normalize_fxfs_path(ctx.cwd.as_str(), target) else {
+        ctx.serial.write_str("write: invalid path\n");
+        return;
+    };
+
+    let mut data = String::new();
+    for (index, arg) in args.iter().skip(1).enumerate() {
+        if index > 0 {
+            data.push(' ');
+        }
+        data.push_str(arg);
+    }
+
+    match crate::user_level::fxfs::write_file(path.as_str(), data.as_bytes()) {
+        Ok(size) => {
+            ctx.serial.write_str("wrote ");
+            print_number(&mut ctx.serial, size as u32);
+            ctx.serial.write_str(" bytes to ");
+            ctx.serial.write_str(path.as_str());
+            ctx.serial.write_str("\n");
+        }
+        Err(err) => {
+            ctx.serial.write_str("write: ");
+            print_fxfs_error(ctx, err);
+            ctx.serial.write_str("\n");
+        }
+    }
+}
+
+fn cmd_cat(ctx: &mut ShellContext, args: &[&str]) {
+    let Some(target) = args.first() else {
+        ctx.serial.write_str("cat: missing path\n");
+        return;
+    };
+    let Some(path) = normalize_fxfs_path(ctx.cwd.as_str(), target) else {
+        ctx.serial.write_str("cat: invalid path\n");
+        return;
+    };
+    match read_fxfs_file_to_vec(path.as_str()) {
+        Ok(out) => {
+            print_bytes_as_text(ctx, &out);
+            ctx.serial.write_str("\n");
+        }
+        Err(err) => {
+            ctx.serial.write_str("cat: ");
+            print_fxfs_error(ctx, err);
+            ctx.serial.write_str("\n");
+        }
+    }
+}
+
+fn cmd_cp(ctx: &mut ShellContext, args: &[&str]) {
+    if args.len() < 2 {
+        ctx.serial
+            .write_str("cp: expected source and destination\n");
+        return;
+    }
+    let Some(src) = normalize_fxfs_path(ctx.cwd.as_str(), args[0]) else {
+        ctx.serial.write_str("cp: invalid source path\n");
+        return;
+    };
+    let Some(dst) = normalize_fxfs_path(ctx.cwd.as_str(), args[1]) else {
+        ctx.serial.write_str("cp: invalid destination path\n");
+        return;
+    };
+
+    let data = match read_fxfs_file_to_vec(src.as_str()) {
+        Ok(data) => data,
+        Err(err) => {
+            ctx.serial.write_str("cp: source ");
+            print_fxfs_error(ctx, err);
+            ctx.serial.write_str("\n");
+            return;
+        }
+    };
+    match crate::user_level::fxfs::write_file(dst.as_str(), &data) {
+        Ok(size) => {
+            ctx.serial.write_str("copied ");
+            print_number(&mut ctx.serial, size as u32);
+            ctx.serial.write_str(" bytes\n");
+        }
+        Err(err) => {
+            ctx.serial.write_str("cp: destination ");
+            print_fxfs_error(ctx, err);
+            ctx.serial.write_str("\n");
+        }
+    }
+}
+
+fn cmd_mv(ctx: &mut ShellContext, args: &[&str]) {
+    if args.len() < 2 {
+        ctx.serial
+            .write_str("mv: expected source and destination\n");
+        return;
+    }
+    let Some(src) = normalize_fxfs_path(ctx.cwd.as_str(), args[0]) else {
+        ctx.serial.write_str("mv: invalid source path\n");
+        return;
+    };
+    let Some(dst) = normalize_fxfs_path(ctx.cwd.as_str(), args[1]) else {
+        ctx.serial.write_str("mv: invalid destination path\n");
+        return;
+    };
+    if src == dst {
+        ctx.serial
+            .write_str("mv: source and destination are the same\n");
+        return;
+    }
+
+    let data = match read_fxfs_file_to_vec(src.as_str()) {
+        Ok(data) => data,
+        Err(err) => {
+            ctx.serial.write_str("mv: source ");
+            print_fxfs_error(ctx, err);
+            ctx.serial.write_str("\n");
+            return;
+        }
+    };
+    if let Err(err) = crate::user_level::fxfs::write_file(dst.as_str(), &data) {
+        ctx.serial.write_str("mv: destination ");
+        print_fxfs_error(ctx, err);
+        ctx.serial.write_str("\n");
+        return;
+    }
+    match crate::user_level::fxfs::delete_file(src.as_str()) {
+        Ok(()) => {
+            ctx.serial.write_str("moved ");
+            ctx.serial.write_str(src.as_str());
+            ctx.serial.write_str(" to ");
+            ctx.serial.write_str(dst.as_str());
+            ctx.serial.write_str("\n");
+        }
+        Err(err) => {
+            ctx.serial
+                .write_str("mv: copied but could not remove source: ");
+            print_fxfs_error(ctx, err);
+            ctx.serial.write_str("\n");
+        }
+    }
+}
+
+fn cmd_vi(ctx: &mut ShellContext, args: &[&str]) {
+    let Some(target) = args.first() else {
+        ctx.serial.write_str("vi: missing path\n");
+        return;
+    };
+    let Some(path) = normalize_fxfs_path(ctx.cwd.as_str(), target) else {
+        ctx.serial.write_str("vi: invalid path\n");
+        return;
+    };
+
+    ctx.serial.write_str("\n--- ");
+    ctx.serial.write_str(path.as_str());
+    ctx.serial.write_str(" ---\n");
+    let mut buffer = match read_fxfs_file_to_vec(path.as_str()) {
+        Ok(existing) if !existing.is_empty() => {
+            print_bytes_as_text(ctx, &existing);
+            if existing.last().copied() != Some(b'\n') {
+                ctx.serial.write_str("\n");
+            }
+            existing
+        }
+        Ok(existing) => existing,
+        Err(crate::user_level::fxfs::FxfsError::NotFound) => Vec::new(),
+        Err(err) => {
+            ctx.serial.write_str("vi: ");
+            print_fxfs_error(ctx, err);
+            ctx.serial.write_str("\n");
+            return;
+        }
+    };
+
+    ctx.serial
+        .write_str("--- enter text, :wq saves, :q cancels, :p prints buffer ---\n");
+    loop {
+        ctx.serial.write_str("vi> ");
+        let line = ctx.read_line();
+        if line == ":q" {
+            ctx.serial.write_str("vi: canceled\n");
+            return;
+        }
+        if line == ":p" {
+            print_bytes_as_text(ctx, &buffer);
+            if buffer.last().copied() != Some(b'\n') {
+                ctx.serial.write_str("\n");
+            }
+            continue;
+        }
+        if line == ":wq" {
+            match crate::user_level::fxfs::write_file(path.as_str(), &buffer) {
+                Ok(size) => {
+                    ctx.serial.write_str("vi: wrote ");
+                    print_number(&mut ctx.serial, size as u32);
+                    ctx.serial.write_str(" bytes\n");
+                }
+                Err(err) => {
+                    ctx.serial.write_str("vi: ");
+                    print_fxfs_error(ctx, err);
+                    ctx.serial.write_str("\n");
+                }
+            }
+            return;
+        }
+        if buffer.len().saturating_add(line.len()).saturating_add(1) > 4096 {
+            ctx.serial.write_str("vi: buffer full\n");
+            continue;
+        }
+        buffer.extend_from_slice(line.as_bytes());
+        buffer.push(b'\n');
+    }
+}
+
+/// Command: fxfs - Show minimal FxFS object-store state
+fn cmd_fxfs(ctx: &mut ShellContext, _args: &[&str]) {
+    let stats = crate::user_level::fxfs::stats();
+    ctx.serial.write_str("\nFxFS mounted: ");
+    ctx.serial
+        .write_str(if stats.mounted { "yes" } else { "no" });
+    ctx.serial.write_str("  Block backed: ");
+    ctx.serial
+        .write_str(if stats.block_backed { "yes" } else { "no" });
+    ctx.serial.write_str("  Last sync: ");
+    ctx.serial.write_str(if stats.last_sync_ok {
+        "ok"
+    } else {
+        "not synced"
+    });
+    if let Some(err) = stats.last_storage_error {
+        ctx.serial.write_str(" (");
+        print_fxfs_error(ctx, err);
+        ctx.serial.write_str(")");
+    }
+    ctx.serial.write_str("\nBlock bytes: ");
+    print_number(&mut ctx.serial, stats.block_bytes as u32);
+    ctx.serial.write_str("\nNodes: ");
+    print_number(&mut ctx.serial, stats.nodes as u32);
+    ctx.serial.write_str("  Dirs: ");
+    print_number(&mut ctx.serial, stats.directories as u32);
+    ctx.serial.write_str("  Files: ");
+    print_number(&mut ctx.serial, stats.files as u32);
+    ctx.serial.write_str("  Dirents: ");
+    print_number(&mut ctx.serial, stats.dir_entries as u32);
+    ctx.serial.write_str("  Bytes: ");
+    print_number(&mut ctx.serial, stats.bytes as u32);
+    ctx.serial.write_str("\nJournal records: ");
+    print_number(&mut ctx.serial, stats.journal_records as u32);
+    ctx.serial.write_str("  Replayed: ");
+    print_number(&mut ctx.serial, stats.replayed_records as u32);
+    ctx.serial.write_str("  Sequence: ");
+    print_number(&mut ctx.serial, stats.sequence as u32);
+    ctx.serial.write_str("\n\nCurrent directory: ");
+    ctx.serial.write_str(ctx.cwd.as_str());
+    ctx.serial
+        .write_str("\n\n/pkg/bin:\n  Kind  Object  Size  Mode    Links  Owner  Name\n");
+
+    match crate::user_level::fxfs::entries("/pkg/bin") {
+        Ok(entries) => {
+            for entry in entries {
+                print_fxfs_entry(ctx, &entry);
+            }
+        }
+        Err(_) => ctx.serial.write_str("  <unavailable>\n"),
+    }
+    ctx.serial.write_str("\n");
+}
+
+/// Command: drivers - Show user-space device tree and driver state
+fn cmd_drivers(ctx: &mut ShellContext, _args: &[&str]) {
+    let stats = crate::user_level::drivers::stats();
+    ctx.serial.write_str("\nUser driver framework: ");
+    ctx.serial.write_str(if stats.initialized {
+        "ready"
+    } else {
+        "not ready"
+    });
+    ctx.serial.write_str("  Machine: ");
+    ctx.serial.write_str(stats.machine);
+    ctx.serial.write_str("\nDevice-tree nodes: ");
+    print_number(&mut ctx.serial, stats.nodes as u32);
+    ctx.serial.write_str("  Bindings: ");
+    print_number(&mut ctx.serial, stats.bindings as u32);
+    ctx.serial.write_str("\nBlock vblk0: ");
+    ctx.serial.write_str(if stats.block_ready {
+        "ready"
+    } else {
+        "not ready"
+    });
+    ctx.serial.write_str("  blocks=");
+    print_number(&mut ctx.serial, stats.block_count as u32);
+    ctx.serial.write_str("  block_size=");
+    print_number(&mut ctx.serial, stats.block_size as u32);
+    ctx.serial.write_str("  bytes=");
+    print_number(&mut ctx.serial, stats.bytes as u32);
+    ctx.serial.write_str("  mmio=0x");
+    print_hex(&mut ctx.serial, stats.mmio_base as u64);
+    ctx.serial.write_str("  status=0x");
+    print_hex(&mut ctx.serial, stats.device_status as u64);
+    if let Some(err) = stats.last_error {
+        ctx.serial.write_str("  last_error=");
+        print_driver_error(ctx, err);
+    }
+    ctx.serial.write_str("\nI/O: reads=");
+    print_number(&mut ctx.serial, stats.reads as u32);
+    ctx.serial.write_str(" writes=");
+    print_number(&mut ctx.serial, stats.writes as u32);
+    ctx.serial.write_str(" flushes=");
+    print_number(&mut ctx.serial, stats.flushes as u32);
+    ctx.serial.write_str(" bytes_read=");
+    print_number(&mut ctx.serial, stats.bytes_read as u32);
+    ctx.serial.write_str(" bytes_written=");
+    print_number(&mut ctx.serial, stats.bytes_written as u32);
+    ctx.serial.write_str("\n\nNodes:\n");
+
+    for node in crate::user_level::drivers::device_nodes() {
+        ctx.serial.write_str("  ");
+        ctx.serial.write_str(node.kind.as_str());
+        ctx.serial.write_str("  ");
+        ctx.serial.write_str(node.compatible);
+        ctx.serial.write_str("  ");
+        ctx.serial.write_str(node.path);
+        if let Some(reg) = node.reg {
+            ctx.serial.write_str("  reg=0x");
+            print_hex(&mut ctx.serial, reg.base);
+            ctx.serial.write_str("+0x");
+            print_hex(&mut ctx.serial, reg.size);
+        }
+        if let Some(irq) = node.irq {
+            ctx.serial.write_str("  irq=");
+            print_number(&mut ctx.serial, irq);
+        }
+        ctx.serial.write_str("\n");
+    }
+
+    ctx.serial.write_str("\nBindings:\n");
+    for binding in crate::user_level::drivers::bindings() {
+        ctx.serial.write_str("  ");
+        ctx.serial.write_str(binding.device_name);
+        ctx.serial.write_str("  ");
+        ctx.serial.write_str(binding.driver);
+        ctx.serial.write_str("  <- ");
+        ctx.serial.write_str(binding.node_path);
+        ctx.serial.write_str("\n");
+    }
+    ctx.serial.write_str("\n");
+}
+
+/// Command: svc - Show minimal service directory and fixed-message IPC state
+fn cmd_svc(ctx: &mut ShellContext, _args: &[&str]) {
+    let stats = crate::user_level::svc::stats();
+    ctx.serial.write_str("\n/svc services: ");
+    print_number(&mut ctx.serial, stats.services as u32);
+    ctx.serial.write_str("  Connections: ");
+    print_number(&mut ctx.serial, stats.connections as u32);
+    ctx.serial.write_str("  Requests: ");
+    print_number(&mut ctx.serial, stats.requests as u32);
+    ctx.serial.write_str("  Replies: ");
+    print_number(&mut ctx.serial, stats.replies as u32);
+    ctx.serial.write_str("  Last status: ");
+    print_zx_status_i32(&mut ctx.serial, stats.last_status);
+    ctx.serial.write_str("\n\nServices:\n");
+
+    for service in crate::user_level::svc::services() {
+        ctx.serial.write_str("  ");
+        ctx.serial.write_str(service.kind.as_str());
+        ctx.serial.write_str("  rights=0x");
+        print_hex(&mut ctx.serial, service.rights as u64);
+        ctx.serial.write_str("  /svc/");
+        ctx.serial.write_str(service.name);
+        ctx.serial.write_str("\n");
+    }
+    ctx.serial.write_str("\n");
+}
+
 /// Command: clear - Clear screen
 fn cmd_clear(_ctx: &mut ShellContext, _args: &[&str]) {
     // Send ANSI clear screen code
     // In real impl, would use: _ctx.serial.write_str("\x1b[2J\x1b[H");
+}
+
+/// Command: reboot - Reset machine through PSCI
+fn cmd_reboot(ctx: &mut ShellContext, _args: &[&str]) {
+    ctx.serial.write_str("Rebooting...\n");
+    crate::kernel_lowlevel::smp::system_reset();
 }
 
 /// Command: ps - List all processes
@@ -3674,8 +4743,31 @@ fn print_hex(serial: &mut Serial, num: u64) {
     }
 }
 
+fn print_octal(serial: &mut Serial, mut num: u32) {
+    if num == 0 {
+        serial.write_byte(b'0');
+        return;
+    }
+
+    let mut buf = [0u8; 12];
+    let mut i = 0;
+    while num > 0 && i < buf.len() {
+        buf[i] = b'0' + (num & 0x7) as u8;
+        num >>= 3;
+        i += 1;
+    }
+
+    for j in (0..i).rev() {
+        serial.write_byte(buf[j]);
+    }
+}
+
 fn print_zx_error(serial: &mut Serial, err: crate::syscall::ZxError) {
     let code = err as i32;
+    print_zx_status_i32(serial, code);
+}
+
+fn print_zx_status_i32(serial: &mut Serial, code: i32) {
     if code < 0 {
         serial.write_str("-");
         print_number(serial, (-code) as u32);

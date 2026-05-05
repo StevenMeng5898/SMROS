@@ -322,6 +322,23 @@ impl Scheduler {
         }
     }
 
+    /// Mark the current thread terminated without freeing its stack.
+    ///
+    /// This is used by EL0 launcher return paths that are still executing on
+    /// the launcher stack while selecting the next runnable thread.
+    pub fn finish_current_without_stack_free(&mut self) {
+        let current_id = self.current_thread;
+        if let Some(tcb) = self.get_thread_mut(current_id) {
+            if tcb.state != ThreadState::Terminated {
+                tcb.state = ThreadState::Terminated;
+                tcb.time_slice = 0;
+                if self.active_threads > 0 {
+                    self.active_threads -= 1;
+                }
+            }
+        }
+    }
+
     /// Get tick count
     pub fn get_tick_count(&self) -> u64 {
         self.tick_count

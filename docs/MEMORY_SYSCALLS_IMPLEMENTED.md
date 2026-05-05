@@ -23,6 +23,8 @@ SMROS now has:
 - a boot-time EL0 `svc #0` smoke test for Linux `write`, `getpid`, `mmap`, and `exit`
 - shell-visible memory stats for Linux mappings, `brk`, VMO state, and VMAR state
 - shell `testsc` coverage for the broader syscall compatibility model, including Linux file/fd/poll/stat paths and Zircon time/debug/system/exception and hypervisor paths
+- a richer in-memory FxFS-shaped object store used by the first component framework scaffold
+- a minimal `/svc` fixed-message IPC layer that uses Zircon channels for component-manager, runner, and filesystem service requests
 
 The model is still software bookkeeping layered on top of the real page allocator. It is suitable for syscall bring-up and shell testing, but it is not yet wired to live EL0 page-table updates.
 
@@ -167,6 +169,10 @@ The shell's `testsc` command now exercises:
 - Linux `writev`
 - Linux `poll`
 - Linux `lseek`, `ftruncate`, `fsync`, and `sync_file_range`
+- component topology startup for `/bootstrap/fxfs` and `/bootstrap/user-init`
+- minimal ELF loader metadata for bootstrap component binaries
+- FxFS-shaped `/pkg/bin` lookup plus `/data` file write, append, truncate, seek/read, attribute, and replay checks
+- `/svc` service connection and fixed request/reply checks over Zircon channels
 - Linux `brk`
 - Linux `mmap`
 - Linux `mprotect`

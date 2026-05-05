@@ -269,6 +269,21 @@ impl ChannelTable {
             false
         }
     }
+
+    pub fn write_message(&mut self, handle: HandleValue, data: &[u8]) -> ZxResult {
+        match self.get_channel(handle) {
+            Some(channel) => channel.write(handle, data, &[]),
+            None => Err(ZxError::ErrNotFound),
+        }
+    }
+
+    pub fn read_message(&mut self, handle: HandleValue, out: &mut Vec<u8>) -> ZxResult {
+        let mut handles = Vec::new();
+        match self.get_channel(handle) {
+            Some(channel) => channel.read(handle, out, &mut handles),
+            None => Err(ZxError::ErrNotFound),
+        }
+    }
 }
 
 /// Global channel table

@@ -15,6 +15,7 @@ pub const MAX_CPUS: usize = 4;
 /// PSCI (Power State Coordination Interface) function IDs
 /// QEMU virt machine uses PSCI 0.2+ to boot secondary CPUs
 const PSCI_0_2_FN_CPU_ON_64: u32 = 0xC4000003; // 64-bit CPU_ON
+const PSCI_0_2_FN_SYSTEM_RESET: u32 = 0x84000009;
 
 /// PSCI return codes
 const PSCI_RET_SUCCESS: i64 = 0;
@@ -150,6 +151,27 @@ fn psci_cpu_on(target_cpu: u64, entry_point: u64, context_id: u64) -> i64 {
         );
     }
     ret
+}
+
+/// Ask PSCI firmware to reset the system.
+pub fn system_reset() -> ! {
+    let mut serial = Serial::new();
+    serial.init();
+    serial.write_str("[PSCI] System reset requested\n");
+
+    unsafe {
+        core::arch::asm!(
+            "hvc #0",
+            in("w0") PSCI_0_2_FN_SYSTEM_RESET,
+            lateout("x0") _,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+
+    serial.write_str("[PSCI] System reset returned; halting\n");
+    loop {
+        cortex_a::asm::wfe();
+    }
 }
 
 /// Boot a secondary CPU

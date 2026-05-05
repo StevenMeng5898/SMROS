@@ -37,6 +37,9 @@ The shell currently registers these commands:
 - `ps`
 - `top`
 - `meminfo`
+- `components`
+- `fxfs`
+- `svc`
 - `uptime`
 - `kill`
 - `testsc`
@@ -80,6 +83,7 @@ It currently:
 - directly exercises Linux memory calls and memory accounting
 - directly exercises Zircon VMO/VMAR, handle/object, signal/wait, port, channel, socket, FIFO, futex, process/thread, time/debug/system/exception, and hypervisor helpers
 - directly exercises Linux signal, IPC, networking, misc, file, directory, fd, poll, and stat helpers
+- directly checks the minimal component framework, FxFS-shaped object-store paths, and `/svc` fixed-message IPC
 
 Successful current runs include markers such as:
 
@@ -88,9 +92,18 @@ Successful current runs include markers such as:
 [OK] hypervisor tests completed
 [OK] Linux signal, IPC, misc, and net tests completed
 [OK] Linux file, dir, fd, poll, and stat tests completed
+[OK] component framework, FxFS, and /svc IPC returned
 ```
 
 The file/fd section creates modeled `LinuxFile` and `LinuxDir` compatibility objects, tests fd duplication and `fcntl`, moves bytes through the file object's queue, checks directory-only `getdents64`, validates stat/statx buffers, checks `writev`, `poll`, `lseek`, `ftruncate`, and sync-style calls, then closes the fds.
+
+The component/FxFS/`/svc` section verifies that the boot topology is installed, `/bootstrap/fxfs` has a modeled process and launcher thread, `/pkg/bin` entries exist, a small `/data` file can be written, appended, truncated, seek-read, checked for attributes, and replayed through the in-memory journal model, and fixed component-manager, runner, and filesystem service messages round-trip over Zircon channels.
+
+The `components` command also shows the minimal ELF loader state. A successful boot currently reports three loaded ELF images, zero load errors, one PT_LOAD segment per bootstrap image, and an entry address for `/`, `/bootstrap/fxfs`, and `/bootstrap/user-init`.
+
+The `fxfs` command shows object-store statistics, directory-entry count, journal replay count, and the generated boot ELF files in `/pkg/bin`. The listing includes object id, size, mode, link count, uid/gid owner, and name; the current trampoline images are 120 bytes each.
+
+The `svc` command shows registered services, connection count, request/reply counters, and the last fixed-message status. A clean boot starts with three services and zero connections; after `testsc`, the smoke path has three connections, three requests, and three replies.
 
 So it mixes the future-facing syscall helper path with direct kernel function calls.
 

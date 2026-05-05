@@ -80,6 +80,7 @@ It currently:
 - directly exercises Linux process/time and memory syscall helpers
 - directly exercises Zircon VMO/VMAR, handle/object, signal/wait, port, channel, socket, FIFO, futex, process/thread, time/debug/system/exception, and hypervisor helpers
 - directly exercises Linux signal, SysV IPC, socket/networking, misc, file, directory, fd, vector I/O, poll, and stat helpers
+- directly checks the minimal component framework, ELF loader metadata, FxFS-shaped object store, and `/svc` fixed-message IPC
 
 Treat it as a developer smoke test, not as a full syscall compliance suite.
 
@@ -95,6 +96,7 @@ Current successful shell runs include these group completion markers:
 [OK] hypervisor tests completed
 [OK] Linux signal, IPC, misc, and net tests completed
 [OK] Linux file, dir, fd, poll, and stat tests completed
+[OK] component framework, FxFS, and /svc IPC returned
 ```
 
 ## Why The Logs Still Say `[EL0]`
@@ -124,5 +126,6 @@ The current user test code is useful, but it should be described accurately:
 
 - active boot path: real EL0 syscall smoke test with lightweight address-space setup
 - shell `testsc`: broader EL1 developer smoke test for syscall helper behavior
+- shell `components`/`fxfs`/`svc`: visibility into boot ELF load metadata, FxFS object attributes, directory entries, journal replay state, and fixed-message service IPC counters
 
 That distinction matters when evaluating boot logs or shell output.

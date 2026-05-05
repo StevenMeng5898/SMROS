@@ -2,6 +2,10 @@
 //!
 //! This module contains all user-level process implementations:
 //! - User Process Management
+//! - Minimal component framework
+//! - Minimal FxFS-shaped object store
+//! - Minimal ELF image loader
+//! - Minimal Fuchsia-style service directory and fixed-message IPC
 //! - User Shell (user-mode shell)
 //! - User Test Processes
 //!
@@ -10,6 +14,11 @@
 
 #![allow(dead_code)]
 
+pub mod component;
+pub mod drivers;
+pub mod elf;
+pub mod fxfs;
+pub mod svc;
 pub(crate) mod user_logic;
 pub mod user_process;
 pub mod user_shell;
@@ -18,4 +27,18 @@ pub mod user_test;
 /// Initialize user-level process subsystem
 pub fn init() {
     user_process::init();
+    let drivers_ready = drivers::init();
+    if component::init() && svc::init() {
+        let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+        serial.init();
+        if drivers_ready {
+            serial.write_str(
+                "[USER] Driver framework, component framework, FxFS, and /svc initialized\n",
+            );
+        } else {
+            serial.write_str(
+                "[USER] Component framework, FxFS, and /svc initialized without block driver\n",
+            );
+        }
+    }
 }

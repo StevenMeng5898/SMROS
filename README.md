@@ -14,6 +14,7 @@ SMROS is an experimental bare-metal AArch64 kernel written in Rust for QEMU's `v
 - Runs a boot-time EL0 `svc #0` smoke test for Linux `write`, `getpid`, `mmap`, and `exit`.
 - Includes EL0 process scaffolding under `src/user_level/`; the live shell still runs as an EL1 scheduled thread.
 - Provides modeled Linux and Zircon syscall compatibility for bring-up tests, including memory, IPC, object, timer/debug, hypervisor, networking, and file-descriptor paths.
+- Includes an initial Fuchsia-inspired userspace scaffold: component instances, namespace entries, minimal ELF64/AArch64 loading from FxFS into the SMROS user-process table, scheduler launcher threads that drop component payloads to EL0, a `/svc` service directory with fixed-message channel IPC, and a richer in-memory FxFS-shaped object store with attributes, object-id directory entries, append/truncate/seek semantics, and journal replay metadata.
 
 ## Toolchain
 
@@ -146,7 +147,7 @@ SMROS/
 │   │   └── timer.rs
 │   ├── kernel_objects/         # Threads, scheduler, handles, VMO, VMAR, channels
 │   ├── syscall/                # Syscall definitions, dispatch, and handler helpers
-│   └── user_level/             # User-process scaffolding, shell, and test helpers
+│   └── user_level/             # User-process, ELF loader, component/FxFS, /svc, shell, and tests
 ├── docs/                       # Design and status documents
 └── scripts/                    # Helper scripts (Makefile remains the documented flow)
 ```
@@ -187,6 +188,7 @@ SMROS/
 - Channel
 - Thread and scheduler objects
 - Lightweight compatibility objects for modeled Linux and Zircon handles, including files, directories, pipes, sockets, IPC objects, timers, clocks, ports, guests, and VCPUs
+- Minimal component framework, ELF loader, `/svc` service directory, and FxFS-shaped object store under `src/user_level/`
 
 ## Documentation Map
 
@@ -206,5 +208,6 @@ SMROS/
 - The shell `testsc` command directly calls most syscall helpers from EL1; it is a developer smoke test, not an external ABI compliance suite.
 - The syscall layer is broad but modeled; many paths are interface validation, object bookkeeping, or deterministic placeholders.
 - The Linux file model uses compatibility objects and byte queues. It does not yet provide a persistent namespace, inode layer, or disk-backed filesystem.
+- The Fuchsia-inspired userspace framework is a scaffold. It parses minimal ELF64/AArch64 images from FxFS, records load metadata, and exchanges fixed structs over Zircon channels through `/svc`, but it does not yet copy real ELF segments into TTBR0-backed user mappings, run full FIDL bindings, resolve packages, or persist FxFS to a block device.
 - The active SVC bridge is not yet a full Linux/Zircon ABI implementation with per-process handles and memory isolation.
 - Some boot-time status output still contains garbled or NUL characters.

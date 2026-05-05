@@ -204,6 +204,10 @@ The current boot path directly uses:
 
 - `scheduler.rs` for thread creation
 - `thread.rs` for user-thread context scaffolding
+- `src/user_level/component.rs` for a minimal Fuchsia-style component topology
+- `src/user_level/elf.rs` for minimal ELF64/AArch64 boot-component parsing
+- `src/user_level/fxfs.rs` for an in-memory FxFS-shaped object store used by the component namespace scaffold
+- `src/user_level/svc.rs` for a minimal `/svc` directory using Zircon channels and fixed request/reply structs
 
 ## Current Design Reality
 
@@ -213,6 +217,7 @@ The refactor into a dedicated `kernel_objects/` directory is complete at the sou
 - channels are initialized and usable as kernel objects
 - compatibility objects back events, eventpairs, sockets, FIFOs, ports, timers, clocks, debug logs, resources, streams, suspend tokens, jobs, exceptions, profiles, pagers, IOMMU/BTI/PMT, interrupts, PCI devices, guests, VCPUs, and modeled Linux file/directory/pipe/socket/IPC descriptor objects at an interface level
 - VMO/VMAR objects exist and back syscall helpers
+- user-level component, ELF loader, `/svc`, and FxFS scaffolding exists under `src/user_level/`, not `src/kernel_objects/`
 - handle management remains simplified
 - object-to-process ownership is not yet fully modeled
 
@@ -222,4 +227,5 @@ The refactor into a dedicated `kernel_objects/` directory is complete at the sou
 - Channel syscall helpers are exposed through the current Zircon dispatch table.
 - VMAR state is not yet a full source of truth for hardware mappings.
 - Linux file and directory compatibility objects are not a real VFS; they provide fd/object behavior for syscall bring-up.
+- FxFS is currently an in-memory userspace scaffold with object attributes, explicit directory entries, and journal replay metadata, not a block-backed kernel object subsystem.
 - Several object operations are placeholders intended to keep the interface shape stable while the kernel matures.

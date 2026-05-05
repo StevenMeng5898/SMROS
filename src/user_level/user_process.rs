@@ -14,7 +14,18 @@ use crate::kernel_lowlevel::memory::{
 };
 use crate::kernel_lowlevel::mmu::PageTableManager;
 use crate::kernel_objects::thread::{ThreadControlBlock, ThreadId, DEFAULT_STACK_SIZE};
-use crate::user_level::user_logic;
+use crate::user_level::{elf::ElfImage, user_logic};
+
+pub const USER_MAX_ELF_SEGMENTS: usize = 4;
+
+#[derive(Clone, Copy, Debug)]
+pub struct UserLoadedSegment {
+    pub vaddr: u64,
+    pub mem_size: u64,
+    pub file_size: u64,
+    pub file_offset: u64,
+    pub flags: u32,
+}
 
 /// User process control block - extends PCB with EL0-specific data
 #[repr(C)]
@@ -33,6 +44,14 @@ pub struct UserProcess {
     pub proc_handle: u32,
     /// VMAR handle (for Zircon compatibility)
     pub vmar_handle: u32,
+    /// Primary scheduler thread for this process, when one exists
+    pub primary_thread_id: Option<usize>,
+    /// Entry parsed from the ELF image backing this process.
+    pub loaded_entry_point: Option<u64>,
+    /// PT_LOAD segment metadata parsed from the ELF image.
+    pub loaded_segments: [Option<UserLoadedSegment>; USER_MAX_ELF_SEGMENTS],
+    /// Number of parsed PT_LOAD segments.
+    pub loaded_segment_count: usize,
     /// Whether this process is initialized
     pub initialized: bool,
 }
@@ -61,6 +80,10 @@ impl UserProcess {
             entry_point,
             proc_handle: 0,
             vmar_handle: 0,
+            primary_thread_id: None,
+            loaded_entry_point: None,
+            loaded_segments: [None, None, None, None],
+            loaded_segment_count: 0,
             initialized: false,
         })
     }
@@ -287,6 +310,64 @@ pub fn get_user_process_mut(pid: usize) -> Option<&'static mut UserProcess> {
         }
     }
     None
+}
+
+/// Return the initialized EL0 stack top for a user process.
+pub fn user_stack_top(pid: usize) -> Option<u64> {
+    let process = get_user_process(pid)?;
+    if !process.initialized || process.user_stack_vaddr == 0 {
+        return None;
+    }
+    Some(process.user_stack_vaddr as u64)
+}
+
+/// Bind a scheduler thread to a user process record.
+pub fn bind_primary_thread(pid: usize, thread_id: ThreadId) -> bool {
+    let Some(process) = get_user_process_mut(pid) else {
+        return false;
+    };
+    process.primary_thread_id = Some(thread_id.as_usize());
+    if let Some(pcb) = process_manager().get_process_by_pid_mut(pid) {
+        pcb.thread_count = pcb.thread_count.saturating_add(1);
+    }
+    true
+}
+
+pub fn set_loaded_elf(pid: usize, image: &ElfImage) -> bool {
+    if image.segments.is_empty() || image.segments.len() > USER_MAX_ELF_SEGMENTS {
+        return false;
+    }
+    let Some(process) = get_user_process_mut(pid) else {
+        return false;
+    };
+
+    process.entry_point = image.entry as usize;
+    process.loaded_entry_point = Some(image.entry);
+    process.loaded_segments = [None, None, None, None];
+    process.loaded_segment_count = image.segments.len();
+
+    for (index, segment) in image.segments.iter().enumerate() {
+        if index >= USER_MAX_ELF_SEGMENTS {
+            return false;
+        }
+        process.loaded_segments[index] = Some(UserLoadedSegment {
+            vaddr: segment.vaddr,
+            mem_size: segment.mem_size,
+            file_size: segment.file_size,
+            file_offset: segment.file_offset,
+            flags: segment.flags,
+        });
+    }
+
+    true
+}
+
+pub fn loaded_entry_point(pid: usize) -> Option<u64> {
+    get_user_process(pid)?.loaded_entry_point
+}
+
+pub fn loaded_segment_count(pid: usize) -> Option<usize> {
+    Some(get_user_process(pid)?.loaded_segment_count)
 }
 
 /// Switch to user mode (EL0)

@@ -120,6 +120,7 @@ The current syscall layer is best understood as:
 - a Zircon dispatch path aligned to the sample syscall numbers
 - a Linux fd table where fd records point to compatibility object handles
 - a lightweight compatibility object table for object types that do not yet have full subsystems
+- a first Fuchsia-inspired userspace scaffold with component instances, namespace entries, minimal ELF64/AArch64 loading from FxFS, ELF-runner-shaped process launch, a `/svc` service directory using Zircon channels with fixed request/reply structs, and an in-memory FxFS-shaped object store with attributes, object-id directory entries, file-position semantics, and journal replay metadata
 - a larger amount of future-facing scaffolding for EL0 work
 
 It is not yet:
@@ -143,5 +144,6 @@ That means the current boot flow exercises the syscall layer mainly as an intern
 - The shell still calls most syscall tests directly from EL1 rather than as isolated EL0 userspace.
 - Some process/thread semantics are modeled records, not full scheduler integration.
 - File-descriptor style Linux syscalls are modeled for files, directories, pipes, sockets, event-like objects, IPC objects, and memfd, but not with a real VFS or persistent filesystem.
+- The component/FxFS/`/svc` scaffold is internal kernel-side state today. It parses boot ELF metadata from FxFS, models object metadata plus journal replay in memory, and exchanges fixed service messages over Zircon channels, but it is not yet a userspace component manager, full FIDL runtime, package resolver, copied-segment ELF runtime, or block-backed FxFS server.
 - Handle ownership and lifetime tracking are still simplified.
 - Platform/hardware-heavy Zircon calls are interface-covered but intentionally return `ERR_NOT_SUPPORTED`.
