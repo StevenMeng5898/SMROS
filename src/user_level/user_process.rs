@@ -13,7 +13,7 @@ use crate::kernel_lowlevel::memory::{
     process_manager, PageFrameAllocator, ProcessControlBlock, PAGE_SIZE,
 };
 use crate::kernel_lowlevel::mmu::PageTableManager;
-use crate::kernel_objects::thread::{ThreadControlBlock, ThreadId, DEFAULT_STACK_SIZE};
+use crate::kernel_lowlevel::thread::{ThreadControlBlock, ThreadId, DEFAULT_STACK_SIZE};
 use crate::user_level::{elf::ElfImage, user_logic};
 
 pub const USER_MAX_ELF_SEGMENTS: usize = 4;

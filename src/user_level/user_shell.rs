@@ -4240,6 +4240,12 @@ fn cmd_fxfs(ctx: &mut ShellContext, _args: &[&str]) {
     }
     ctx.serial.write_str("\nBlock bytes: ");
     print_number(&mut ctx.serial, stats.block_bytes as u32);
+    ctx.serial.write_str("  Slots: ");
+    print_number(&mut ctx.serial, stats.storage_slots as u32);
+    ctx.serial.write_str("  Active: ");
+    print_number(&mut ctx.serial, stats.active_slot as u32);
+    ctx.serial.write_str("  Slot bytes: ");
+    print_number(&mut ctx.serial, stats.slot_bytes as u32);
     ctx.serial.write_str("\nNodes: ");
     print_number(&mut ctx.serial, stats.nodes as u32);
     ctx.serial.write_str("  Dirs: ");

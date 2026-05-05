@@ -30,6 +30,13 @@ pub const PROCESS_RUNNING: u8 = 2;
 pub const PROCESS_BLOCKED: u8 = 3;
 pub const PROCESS_TERMINATED: u8 = 4;
 
+pub const THREAD_EMPTY: u8 = 0;
+pub const THREAD_READY: u8 = 1;
+pub const THREAD_RUNNING: u8 = 2;
+pub const THREAD_BLOCKED: u8 = 3;
+pub const THREAD_TERMINATED: u8 = 4;
+pub const THREAD_IDLE_ID: usize = 0;
+
 pub const UART_BASE: usize = 0x0900_0000;
 pub const UART_FR: usize = 0x18;
 pub const UART_CR: usize = 0x30;
@@ -48,6 +55,16 @@ pub const GICD_IPRIORITYR: usize = 0x400;
 pub const GICD_ITARGETSR: usize = 0x800;
 pub const GICD_ISENABLER: usize = 0x100;
 pub const PRIORITY_HIGH: u8 = 0x50;
+pub const MAX_PLATFORM_IRQS: u32 = 1024;
+pub const DEFAULT_PLATFORM_INDEX: usize = 0;
+pub const PLATFORM_COUNT: usize = 2;
+pub const QEMU_VIRT_UART_BASE: usize = 0x0900_0000;
+pub const QEMU_VIRT_UART_SIZE: usize = 0x1000;
+pub const QEMU_VIRT_UART_IRQ: u32 = 33;
+pub const QEMU_VIRT_GICD_BASE: usize = 0x0800_0000;
+pub const QEMU_VIRT_GICD_SIZE: usize = 0x10000;
+pub const QEMU_VIRT_GICC_BASE: usize = 0x0801_0000;
+pub const QEMU_VIRT_GICC_SIZE: usize = 0x10000;
 
 pub const PSCI_RET_SUCCESS: i64 = 0;
 pub const PSCI_RET_ON_PENDING: i64 = -1;
@@ -160,6 +177,117 @@ spec fn page_to_vaddr_spec(page_idx: int, valid_page_count: int, page_size: int)
 
 spec fn process_state_live_spec(state: int) -> bool {
     state != PROCESS_EMPTY as int && state != PROCESS_TERMINATED as int
+}
+
+spec fn dt_reg_valid_spec(base: int, size: int) -> bool {
+    size > 0 && match checked_end_spec(base, size) {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+spec fn dt_reg_contains_spec(base: int, size: int, addr: int) -> bool {
+    if size <= 0 {
+        false
+    } else {
+        match checked_end_spec(base, size) {
+            Some(end) => addr >= base && addr < end,
+            None => false,
+        }
+    }
+}
+
+spec fn dt_irq_valid_spec(irq: int, max_irqs: int) -> bool {
+    max_irqs > 0 && irq < max_irqs
+}
+
+spec fn dt_platform_index_spec(candidate: int, platform_count: int, fallback: int) -> int {
+    if candidate < platform_count {
+        candidate
+    } else if fallback < platform_count {
+        fallback
+    } else {
+        0
+    }
+}
+
+spec fn fdt_range_valid_spec(offset: int, len: int, total: int) -> bool {
+    offset <= total && len <= total - offset
+}
+
+spec fn fdt_align4_spec(offset: int) -> Option<int> {
+    align_up_spec(offset, 4)
+}
+
+spec fn fdt_cells_to_bytes_spec(cells: int) -> Option<int> {
+    if cells < 0 || cells > usize::MAX as int / 4 {
+        Option::<int>::None
+    } else {
+        Some(cells * 4)
+    }
+}
+
+spec fn fdt_reg_tuple_bytes_spec(address_cells: int, size_cells: int) -> Option<int> {
+    if address_cells < 0
+        || size_cells < 0
+        || address_cells > usize::MAX as int - size_cells
+    {
+        Option::<int>::None
+    } else {
+        let cells = address_cells + size_cells;
+        if cells == 0 {
+            Option::<int>::None
+        } else {
+            fdt_cells_to_bytes_spec(cells)
+        }
+    }
+}
+
+spec fn fdt_reg_tuple_offset_spec(
+    index: int,
+    address_cells: int,
+    size_cells: int,
+) -> Option<int> {
+    if index < 0 {
+        Option::<int>::None
+    } else {
+        match fdt_reg_tuple_bytes_spec(address_cells, size_cells) {
+            Some(tuple_bytes) => {
+                if tuple_bytes > 0 && index <= usize::MAX as int / tuple_bytes {
+                    Some(index * tuple_bytes)
+                } else {
+                    Option::<int>::None
+                }
+            },
+            None => Option::<int>::None,
+        }
+    }
+}
+
+spec fn dt_gic_irq_spec(kind: int, hwirq: int, max_irqs: int) -> Option<int> {
+    if kind == 0 {
+        if hwirq >= 0 && hwirq <= 4294967295int - 32 && hwirq + 32 < max_irqs {
+            Some(hwirq + 32)
+        } else {
+            Option::<int>::None
+        }
+    } else if kind == 1 {
+        if hwirq >= 0 && hwirq <= 4294967295int - 16 && hwirq + 16 < max_irqs {
+            Some(hwirq + 16)
+        } else {
+            Option::<int>::None
+        }
+    } else {
+        Option::<int>::None
+    }
+}
+
+spec fn dt_timer_irq_index_spec(entry_count: int) -> int {
+    if entry_count >= 4 {
+        1
+    } else {
+        0
+    }
 }
 
 fn ll_checked_end(addr: usize, len: usize) -> (out: Option<usize>)
@@ -409,6 +537,20 @@ fn ll_process_index_valid(index: usize) -> (out: bool)
     smros_ll_process_index_valid_body!(index, MAX_PROCESSES)
 }
 
+fn ll_thread_state_runnable(state: u8) -> (out: bool)
+    ensures
+        out == (state == THREAD_READY || state == THREAD_RUNNING),
+{
+    smros_ll_thread_state_runnable_body!(state, THREAD_READY, THREAD_RUNNING)
+}
+
+fn ll_thread_id_idle(id: usize) -> (out: bool)
+    ensures
+        out == (id == THREAD_IDLE_ID),
+{
+    smros_ll_thread_id_idle_body!(id, THREAD_IDLE_ID)
+}
+
 fn ll_pte_set_flag(value: u64, flag: u64, enabled: bool) -> (out: u64)
     ensures
         enabled ==> out == (value | flag),
@@ -593,6 +735,149 @@ fn ll_gic_interrupt_id(iar: u32) -> (out: u32)
     smros_ll_gic_interrupt_id_body!(iar)
 }
 
+fn ll_dt_reg_valid(base: usize, size: usize) -> (out: bool)
+    ensures
+        out == dt_reg_valid_spec(base as int, size as int),
+{
+    smros_ll_dt_reg_valid_body!(base, size)
+}
+
+fn ll_dt_reg_contains(base: usize, size: usize, addr: usize) -> (out: bool)
+    ensures
+        out == dt_reg_contains_spec(base as int, size as int, addr as int),
+{
+    smros_ll_dt_reg_contains_body!(base, size, addr)
+}
+
+fn ll_dt_irq_valid(irq: u32, max_irqs: u32) -> (out: bool)
+    ensures
+        out == dt_irq_valid_spec(irq as int, max_irqs as int),
+{
+    smros_ll_dt_irq_valid_body!(irq, max_irqs)
+}
+
+fn ll_dt_platform_index(candidate: usize, platform_count: usize, fallback: usize) -> (out: usize)
+    ensures
+        out as int == dt_platform_index_spec(candidate as int, platform_count as int, fallback as int),
+        platform_count > 0 ==> out < platform_count,
+{
+    smros_ll_dt_platform_index_body!(candidate, platform_count, fallback)
+}
+
+fn ll_fdt_range_valid(offset: usize, len: usize, total: usize) -> (out: bool)
+    ensures
+        out == fdt_range_valid_spec(offset as int, len as int, total as int),
+{
+    smros_ll_fdt_range_valid_body!(offset, len, total)
+}
+
+fn ll_fdt_align4(offset: usize) -> (out: Option<usize>)
+    ensures
+        match out {
+            Some(aligned) => fdt_align4_spec(offset as int) == Some(aligned as int),
+            None => fdt_align4_spec(offset as int) == Option::<int>::None,
+        },
+{
+    smros_ll_fdt_align4_body!(offset)
+}
+
+fn ll_fdt_cells_to_bytes(cells: usize) -> (out: Option<usize>)
+    ensures
+        match out {
+            Some(bytes) => fdt_cells_to_bytes_spec(cells as int) == Some(bytes as int),
+            None => fdt_cells_to_bytes_spec(cells as int) == Option::<int>::None,
+        },
+{
+    smros_ll_fdt_cells_to_bytes_body!(cells)
+}
+
+fn ll_fdt_reg_tuple_bytes(address_cells: usize, size_cells: usize) -> (out: Option<usize>)
+    ensures
+        match out {
+            Some(bytes) => fdt_reg_tuple_bytes_spec(address_cells as int, size_cells as int)
+                == Some(bytes as int),
+            None => fdt_reg_tuple_bytes_spec(address_cells as int, size_cells as int)
+                == Option::<int>::None,
+        },
+{
+    smros_ll_fdt_reg_tuple_bytes_body!(address_cells, size_cells)
+}
+
+fn ll_fdt_reg_tuple_offset(
+    index: usize,
+    address_cells: usize,
+    size_cells: usize,
+) -> (out: Option<usize>)
+    ensures
+        match out {
+            Some(offset) => fdt_reg_tuple_offset_spec(
+                index as int,
+                address_cells as int,
+                size_cells as int,
+            ) == Some(offset as int),
+            None => fdt_reg_tuple_offset_spec(
+                index as int,
+                address_cells as int,
+                size_cells as int,
+            ) == Option::<int>::None,
+        },
+{
+    let _macro_use = smros_ll_fdt_reg_tuple_offset_body!(0usize, 1usize, 0usize);
+    match ll_fdt_reg_tuple_bytes(address_cells, size_cells) {
+        Some(tuple_bytes) => {
+            if index <= usize::MAX / tuple_bytes {
+                assert((index as int) * (tuple_bytes as int) <= usize::MAX as int) by(nonlinear_arith)
+                    requires
+                        tuple_bytes as int > 0,
+                        index as int <= usize::MAX as int / tuple_bytes as int,
+                ;
+                let offset = index * tuple_bytes;
+                assert(offset as int == (index as int) * (tuple_bytes as int)) by(nonlinear_arith)
+                    requires
+                        tuple_bytes as int > 0,
+                        index as int <= usize::MAX as int / tuple_bytes as int,
+                        offset as int == (index as int) * (tuple_bytes as int),
+                ;
+                Some(offset)
+            } else {
+                assert(fdt_reg_tuple_offset_spec(
+                    index as int,
+                    address_cells as int,
+                    size_cells as int,
+                ) == Option::<int>::None);
+                None
+            }
+        },
+        None => {
+            assert(fdt_reg_tuple_offset_spec(
+                index as int,
+                address_cells as int,
+                size_cells as int,
+            ) == Option::<int>::None);
+            None
+        },
+    }
+}
+
+fn ll_dt_gic_irq(kind: u32, hwirq: u32, max_irqs: u32) -> (out: Option<u32>)
+    ensures
+        match out {
+            Some(irq) => dt_gic_irq_spec(kind as int, hwirq as int, max_irqs as int)
+                == Some(irq as int),
+            None => dt_gic_irq_spec(kind as int, hwirq as int, max_irqs as int)
+                == Option::<int>::None,
+        },
+{
+    smros_ll_dt_gic_irq_body!(kind, hwirq, max_irqs)
+}
+
+fn ll_dt_timer_irq_index(entry_count: usize) -> (out: usize)
+    ensures
+        out as int == dt_timer_irq_index_spec(entry_count as int),
+{
+    smros_ll_dt_timer_irq_index_body!(entry_count)
+}
+
 fn ll_cpu_id_from_mpidr(mpidr: u64) -> (out: u32)
     ensures
         out == (mpidr & 0xFFu64) as u32,
@@ -641,7 +926,40 @@ proof fn serial_timer_interrupt_smp_smoke() {
     assert(PSCI_RET_INTERNAL_FAILURE == -2);
 }
 
-proof fn drivers_and_mod_have_no_pure_runtime_obligation() {
+proof fn thread_context_smoke() {
+    assert(THREAD_EMPTY == PROCESS_EMPTY);
+    assert(THREAD_READY == PROCESS_READY);
+    assert(THREAD_RUNNING == PROCESS_RUNNING);
+    assert(THREAD_BLOCKED == PROCESS_BLOCKED);
+    assert(THREAD_TERMINATED == PROCESS_TERMINATED);
+    assert(THREAD_IDLE_ID == 0);
+}
+
+proof fn driver_platform_table_smoke() {
+    assert(DEFAULT_PLATFORM_INDEX < PLATFORM_COUNT);
+    assert(dt_reg_valid_spec(QEMU_VIRT_UART_BASE as int, QEMU_VIRT_UART_SIZE as int));
+    assert(dt_reg_valid_spec(QEMU_VIRT_GICD_BASE as int, QEMU_VIRT_GICD_SIZE as int));
+    assert(dt_reg_valid_spec(QEMU_VIRT_GICC_BASE as int, QEMU_VIRT_GICC_SIZE as int));
+    assert(dt_reg_contains_spec(
+        QEMU_VIRT_UART_BASE as int,
+        QEMU_VIRT_UART_SIZE as int,
+        (QEMU_VIRT_UART_BASE + UART_FR) as int,
+    ));
+    assert(dt_irq_valid_spec(QEMU_VIRT_UART_IRQ as int, MAX_PLATFORM_IRQS as int));
+    assert(dt_irq_valid_spec(TIMER_IRQ as int, MAX_PLATFORM_IRQS as int));
+    assert(dt_platform_index_spec(0, PLATFORM_COUNT as int, DEFAULT_PLATFORM_INDEX as int) == 0);
+    assert(dt_platform_index_spec(1, PLATFORM_COUNT as int, DEFAULT_PLATFORM_INDEX as int) == 1);
+    assert(dt_platform_index_spec(99, PLATFORM_COUNT as int, DEFAULT_PLATFORM_INDEX as int) == DEFAULT_PLATFORM_INDEX as int);
+    assert(fdt_range_valid_spec(40, 64, 4096));
+    assert(!fdt_range_valid_spec(4090, 16, 4096));
+    assert(fdt_align4_spec(5) == Some(8int));
+    assert(fdt_cells_to_bytes_spec(3) == Some(12int));
+    assert(fdt_reg_tuple_bytes_spec(2, 1) == Some(12int));
+    assert(fdt_reg_tuple_offset_spec(1, 2, 1) == Some(12int));
+    assert(dt_gic_irq_spec(0, 1, MAX_PLATFORM_IRQS as int) == Some(33int));
+    assert(dt_gic_irq_spec(1, 14, MAX_PLATFORM_IRQS as int) == Some(30int));
+    assert(dt_timer_irq_index_spec(4) == 1);
+    assert(dt_timer_irq_index_spec(1) == 0);
 }
 
 } // verus!

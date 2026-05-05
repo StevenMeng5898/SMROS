@@ -1,13 +1,14 @@
 #![allow(dead_code)]
 
-//! Thread Management Module
+//! ARM64 Thread Context Module
 //!
-//! This module provides thread abstraction for the SMROS scheduler.
-//! It defines Thread objects, Thread IDs, and CPU context structures.
+//! This module provides the low-level thread context and context-switch ABI used
+//! by the SMROS scheduler. It owns the ARM64 register layout that must match
+//! `context_switch.S`.
 
 use core::ptr;
 
-use super::object_logic;
+use super::lowlevel_logic;
 
 /// Maximum number of concurrent threads
 pub const MAX_THREADS: usize = 16;
@@ -309,12 +310,12 @@ impl ThreadControlBlock {
 
     /// Check if thread is in a runnable state
     pub fn is_runnable(&self) -> bool {
-        object_logic::thread_is_runnable(self.state, ThreadState::Ready, ThreadState::Running)
+        thread_state_is_runnable(self.state)
     }
 
     /// Check if thread is the idle thread
     pub fn is_idle(&self) -> bool {
-        object_logic::thread_is_idle(self.id.0)
+        thread_id_is_idle(self.id)
     }
 
     /// Print thread information to serial
@@ -350,8 +351,54 @@ impl ThreadControlBlock {
 /// Thread exit wrapper - called when a thread returns
 extern "C" fn thread_exit_wrapper() -> ! {
     loop {
-        cortex_a::asm::wfi();
+        wait_for_interrupt();
     }
+}
+
+/// Return true when a thread state can be selected by the scheduler.
+pub fn thread_state_is_runnable(state: ThreadState) -> bool {
+    lowlevel_logic::thread_state_runnable(state, ThreadState::Ready, ThreadState::Running)
+}
+
+/// Return true when a thread ID denotes the architecture idle thread.
+pub fn thread_id_is_idle(id: ThreadId) -> bool {
+    lowlevel_logic::thread_id_idle(id.0, ThreadId::IDLE.0)
+}
+
+/// Wait until the next interrupt.
+#[inline(always)]
+pub fn wait_for_interrupt() {
+    cortex_a::asm::wfi();
+}
+
+// External assembly functions for ARM64 context switching.
+//
+// SAFETY: ThreadControlBlock is #[repr(C)] and SendPtr is #[repr(transparent)],
+// so the layout is compatible with the assembly offsets in context_switch.S.
+#[allow(improper_ctypes)]
+extern "C" {
+    fn context_switch(current: *mut ThreadControlBlock, next: *mut ThreadControlBlock);
+    fn context_switch_start(next: *mut ThreadControlBlock) -> !;
+}
+
+/// Save the current thread context and restore the next one.
+///
+/// # Safety
+/// `current` and `next` must be valid, uniquely borrowed TCB pointers, and
+/// their layout must match `context_switch.S`.
+pub unsafe fn switch_context(current: *mut ThreadControlBlock, next: *mut ThreadControlBlock) {
+    unsafe {
+        context_switch(current, next);
+    }
+}
+
+/// Start executing the first scheduled thread without saving the current context.
+///
+/// # Safety
+/// `next` must point to a valid initialized TCB whose context can be restored by
+/// `context_switch.S`.
+pub unsafe fn start_context(next: *mut ThreadControlBlock) -> ! {
+    unsafe { context_switch_start(next) }
 }
 
 /// Print a number to serial (helper function)

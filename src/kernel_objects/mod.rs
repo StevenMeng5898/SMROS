@@ -1,12 +1,11 @@
 //! Kernel Objects Module
 //!
 //! This module contains all kernel object implementations:
-//! - Thread Management
 //! - VMO (Virtual Memory Object)
 //! - VMAR (Virtual Memory Address Region)
 //! - Handle Table
 //! - Channel (IPC mechanism)
-//! - Scheduler (Thread scheduling)
+//! - Scheduler (architecture-neutral scheduling policy)
 //!
 //! Each kernel object is in its own file for better organization.
 
@@ -27,7 +26,6 @@ pub(crate) mod port_logic;
 pub mod scheduler;
 pub mod socket;
 pub(crate) mod socket_logic;
-pub mod thread;
 pub mod types;
 pub mod vmar;
 pub mod vmo;

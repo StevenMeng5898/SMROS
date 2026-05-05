@@ -5,11 +5,11 @@
 //! This module implements a preemptive Round-Robin scheduler for SMROS.
 //! It manages multiple threads and performs context switching on timer ticks.
 
-use crate::kernel_objects::object_logic;
-use crate::kernel_objects::thread::{
-    SendPtr, ThreadControlBlock, ThreadId, ThreadStack, ThreadState, DEFAULT_STACK_SIZE,
+use crate::kernel_lowlevel::thread::{
+    self, SendPtr, ThreadControlBlock, ThreadId, ThreadStack, ThreadState, DEFAULT_STACK_SIZE,
     MAX_THREADS,
 };
+use crate::kernel_objects::object_logic;
 use core::cell::UnsafeCell;
 use core::ptr;
 
@@ -380,7 +380,7 @@ extern "C" fn idle_thread_entry() -> ! {
 
         // If we returned here, no other threads were ready
         // Wait for interrupt (timer will trigger scheduler check)
-        cortex_a::asm::wfi();
+        thread::wait_for_interrupt();
     }
 }
 
@@ -415,7 +415,7 @@ pub fn schedule() {
         // Perform context switch
         // SAFETY: These pointers are valid TCB references
         unsafe {
-            context_switch(current_tcb_ptr, next_tcb_ptr);
+            thread::switch_context(current_tcb_ptr, next_tcb_ptr);
         }
     }
 }
@@ -454,23 +454,14 @@ pub fn start_first_thread() -> ! {
         // Jump to the first thread (don't save current context)
         // SAFETY: This is safe - we're jumping to a valid thread entry point
         unsafe {
-            context_switch_start(next_tcb_ptr);
+            thread::start_context(next_tcb_ptr);
         }
     }
 
     // No ready thread found, just halt
     loop {
-        cortex_a::asm::wfi();
+        thread::wait_for_interrupt();
     }
-}
-
-// External assembly function for context switching (defined in main.rs)
-// SAFETY: ThreadControlBlock is #[repr(C)] and SendPtr is #[repr(transparent)],
-// so the layout is C-compatible for FFI calls.
-#[allow(improper_ctypes)]
-extern "C" {
-    fn context_switch(current: *mut ThreadControlBlock, next: *mut ThreadControlBlock);
-    fn context_switch_start(next: *mut ThreadControlBlock) -> !;
 }
 
 /// Helper function to print a number
@@ -547,7 +538,7 @@ pub fn schedule_on_cpu(cpu_id: usize) {
         // Perform context switch
         // SAFETY: These pointers are valid TCB references
         unsafe {
-            context_switch(current_tcb_ptr, next_tcb_ptr);
+            thread::switch_context(current_tcb_ptr, next_tcb_ptr);
         }
     }
 }
@@ -593,13 +584,13 @@ pub fn start_first_thread_for_cpu(cpu_id: usize) -> ! {
         // Jump to the first thread (don't save current context)
         // SAFETY: This is safe - we're jumping to a valid thread entry point
         unsafe {
-            context_switch_start(next_tcb_ptr);
+            thread::start_context(next_tcb_ptr);
         }
     }
 
     // No ready thread found for this CPU, enter idle loop
     loop {
-        cortex_a::asm::wfi();
+        thread::wait_for_interrupt();
     }
 }
 

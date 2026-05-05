@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::lowlevel_logic;
+use super::{drivers, lowlevel_logic};
 
 /// ARM Generic Timer registers (Physical Timer)
 const CNTFRQ_EL0: usize = 0xFD80; // Counter-timer Frequency Register
@@ -82,6 +82,7 @@ fn write_cntp_ctl_el0(value: u64) {
 
 /// Initialize the ARM Generic Timer
 pub fn init() {
+    let _platform_irq = interrupt_id();
     let freq = read_cntfrq_el0();
     TIMER_FREQUENCY.store(freq, Ordering::Relaxed);
 
@@ -104,6 +105,11 @@ pub fn init() {
 /// Get the timer frequency
 pub fn get_frequency() -> u64 {
     TIMER_FREQUENCY.load(Ordering::Relaxed)
+}
+
+/// Get the platform interrupt ID wired to the ARM physical timer.
+pub fn interrupt_id() -> u32 {
+    drivers::timer_irq()
 }
 
 /// Get the current tick count

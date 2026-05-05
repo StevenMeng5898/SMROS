@@ -31,5 +31,5 @@ qemu-system-aarch64 \
     -m 512M \
     -nographic \
     -kernel "$KERNEL_IMAGE" \
-    -drive file="$FXFS_DISK",if=none,format=raw,id=fxfs \
+    -drive file="$FXFS_DISK",if=none,format=raw,id=fxfs,cache=writethrough \
     -device virtio-blk-device,drive=fxfs

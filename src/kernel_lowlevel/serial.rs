@@ -6,10 +6,11 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
-use super::lowlevel_logic;
+use super::{drivers, lowlevel_logic};
 
-/// PL011 UART Base Address for QEMU virt machine
-const UART_BASE: usize = 0x9000000;
+/// Boot-safe PL011 UART base. Runtime code resolves the active base from
+/// kernel_lowlevel::drivers so other ARM platforms can reuse this driver.
+const UART_BASE: usize = drivers::QEMU_VIRT_UART_BASE;
 
 /// UART Register offsets
 const UART_DR: usize = 0x00; // Data Register
@@ -40,13 +41,14 @@ pub struct Serial {
 
 impl Serial {
     /// Create a new Serial instance
-    /// Safe because UART_BASE is a known valid MMIO address
     pub const fn new() -> Self {
         Serial { base: UART_BASE }
     }
 
     /// Initialize the UART
     pub fn init(&mut self) {
+        self.base = drivers::uart_base();
+
         // Disable UART during configuration
         self.write_reg(UART_CR, 0);
 
@@ -208,7 +210,7 @@ impl Serial {
     fn read_reg(&self, offset: usize) -> u32 {
         // SAFETY: `self.base` is UART_BASE (0x9000000), a valid MMIO address
         // defined by the QEMU virt machine spec. `offset` is a known constant.
-        let addr = lowlevel_logic::mmio_addr(self.base, offset).unwrap_or(self.base);
+        let addr = self.checked_mmio_addr(offset);
         unsafe { read_volatile(addr as *const u32) }
     }
 
@@ -216,7 +218,15 @@ impl Serial {
     fn write_reg(&self, offset: usize, value: u32) {
         // SAFETY: `self.base` is UART_BASE (0x9000000), a valid MMIO address
         // defined by the QEMU virt machine spec. `offset` is a known constant.
-        let addr = lowlevel_logic::mmio_addr(self.base, offset).unwrap_or(self.base);
+        let addr = self.checked_mmio_addr(offset);
         unsafe { write_volatile(addr as *mut u32, value) }
+    }
+
+    fn checked_mmio_addr(&self, offset: usize) -> usize {
+        let size = drivers::uart_size();
+        match lowlevel_logic::mmio_addr(self.base, offset) {
+            Some(addr) if lowlevel_logic::dt_reg_contains(self.base, size, addr) => addr,
+            _ => self.base,
+        }
     }
 }

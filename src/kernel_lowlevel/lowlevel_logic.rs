@@ -96,6 +96,14 @@ pub(crate) fn process_index_valid(index: usize, max_processes: usize) -> bool {
     smros_ll_process_index_valid_body!(index, max_processes)
 }
 
+pub(crate) fn thread_state_runnable<T: Copy + PartialEq>(state: T, ready: T, running: T) -> bool {
+    smros_ll_thread_state_runnable_body!(state, ready, running)
+}
+
+pub(crate) fn thread_id_idle<T: Copy + PartialEq>(id: T, idle: T) -> bool {
+    smros_ll_thread_id_idle_body!(id, idle)
+}
+
 pub(crate) fn pte_set_flag(value: u64, flag: u64, enabled: bool) -> u64 {
     smros_ll_pte_set_flag_body!(value, flag, enabled)
 }
@@ -190,6 +198,54 @@ pub(crate) fn gic_enable_bit(irq: u32) -> u32 {
 
 pub(crate) fn gic_interrupt_id(iar: u32) -> u32 {
     smros_ll_gic_interrupt_id_body!(iar)
+}
+
+pub(crate) fn dt_reg_valid(base: usize, size: usize) -> bool {
+    smros_ll_dt_reg_valid_body!(base, size)
+}
+
+pub(crate) fn dt_reg_contains(base: usize, size: usize, addr: usize) -> bool {
+    smros_ll_dt_reg_contains_body!(base, size, addr)
+}
+
+pub(crate) fn dt_irq_valid(irq: u32, max_irqs: u32) -> bool {
+    smros_ll_dt_irq_valid_body!(irq, max_irqs)
+}
+
+pub(crate) fn dt_platform_index(candidate: usize, platform_count: usize, fallback: usize) -> usize {
+    smros_ll_dt_platform_index_body!(candidate, platform_count, fallback)
+}
+
+pub(crate) fn fdt_range_valid(offset: usize, len: usize, total: usize) -> bool {
+    smros_ll_fdt_range_valid_body!(offset, len, total)
+}
+
+pub(crate) fn fdt_align4(offset: usize) -> Option<usize> {
+    smros_ll_fdt_align4_body!(offset)
+}
+
+pub(crate) fn fdt_cells_to_bytes(cells: usize) -> Option<usize> {
+    smros_ll_fdt_cells_to_bytes_body!(cells)
+}
+
+pub(crate) fn fdt_reg_tuple_bytes(address_cells: usize, size_cells: usize) -> Option<usize> {
+    smros_ll_fdt_reg_tuple_bytes_body!(address_cells, size_cells)
+}
+
+pub(crate) fn fdt_reg_tuple_offset(
+    index: usize,
+    address_cells: usize,
+    size_cells: usize,
+) -> Option<usize> {
+    smros_ll_fdt_reg_tuple_offset_body!(index, address_cells, size_cells)
+}
+
+pub(crate) fn dt_gic_irq(kind: u32, hwirq: u32, max_irqs: u32) -> Option<u32> {
+    smros_ll_dt_gic_irq_body!(kind, hwirq, max_irqs)
+}
+
+pub(crate) fn dt_timer_irq_index(entry_count: usize) -> usize {
+    smros_ll_dt_timer_irq_index_body!(entry_count)
 }
 
 pub(crate) fn cpu_id_from_mpidr(mpidr: u64) -> u32 {

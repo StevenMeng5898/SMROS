@@ -88,13 +88,27 @@ core::arch::global_asm!(
 .globl _start
 
 _start:
+    // AArch64 Linux Image header. QEMU's `virt` -kernel path uses this to
+    // load us at RAM_BASE + text_offset and pass the FDT pointer in x0.
+    b       1f
+    .word   0
+    .quad   0x00200000
+    .quad   __kernel_end - _start
+    .quad   0
+    .quad   0
+    .quad   0
+    .quad   0
+    .word   0x644d5241
+    .word   0
+
+1:
     // Check if this is the boot CPU (CPU0) or a secondary CPU
     // Read MPIDR to determine which CPU we are
     mrs     x19, mpidr_el1
     and     x19, x19, #0xFF       // Extract affinity level 0 (CPU ID)
     
     // If CPU0, continue with normal boot
-    cbz     x19, 1f
+    cbz     x19, 2f
     
     // Secondary CPU: jump to secondary entry point
     // Set up stack from x3 (passed from PSCI CPU_ON call)
@@ -111,12 +125,13 @@ _start:
     bl      secondary_cpu_entry
     
     // Halt if returns (should never happen)
-2:
+3:
     wfi
-    b       2b
+    b       3b
 
-1:
+2:
     // Boot CPU (CPU0) continues with normal initialization
+    mov     x20, x0
     
     // Mask all interrupts
     mrs     x1, daif
@@ -131,12 +146,12 @@ _start:
     ldr     x1, =__bss_start
     ldr     x2, =__bss_end
     mov     x3, #0
-3:
-    cmp     x1, x2
-    b.eq    4f
-    str     x3, [x1], #8
-    b       3b
 4:
+    cmp     x1, x2
+    b.eq    5f
+    str     x3, [x1], #8
+    b       4b
+5:
 
     // Set exception vector base address
     ldr     x1, =exception_vectors
@@ -148,13 +163,14 @@ _start:
     msr     cpacr_el1, x1
     isb
 
-    // Branch to Rust kernel entry point
+    // Branch to Rust kernel entry point with the FDT pointer from x0.
+    mov     x0, x20
     bl      kernel_main
 
     // Halt if kernel returns (should never happen)
-5:
+6:
     wfi
-    b       5b
+    b       6b
 
 // Secondary CPU entry point - must be visible for PSCI CPU_ON
 // This is called when a secondary CPU boots via PSCI
@@ -443,7 +459,9 @@ const KERNEL_BANNER: &str = r#"
 
 /// Main kernel entry point
 #[no_mangle]
-pub extern "C" fn kernel_main() -> ! {
+pub extern "C" fn kernel_main(fdt_base: usize) -> ! {
+    let _ = kernel_lowlevel::drivers::init_from_fdt(fdt_base);
+
     // Initialize serial console
     let mut serial = Serial::new();
     serial.init();
@@ -456,6 +474,8 @@ pub extern "C" fn kernel_main() -> ! {
     serial.write_str("[OK] Kernel initialized successfully!\n");
     serial.write_str("[OK] Serial console initialized\n");
     serial.write_str("[OK] ARM64 architecture detected\n");
+
+    kernel_lowlevel::drivers::describe(&mut serial);
 
     // Print system information
     print_system_info(&mut serial);

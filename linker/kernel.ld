@@ -1,7 +1,10 @@
 /* ARM64 Kernel Linker Script */
 
-/* Kernel load address - QEMU virt machine loads 64-bit kernels at 0x40000000 */
-KERNEL_BASE = 0x40000000;
+/* Kernel load address.
+ * QEMU virt places the Linux FDT at RAM base (0x40000000). Keep the kernel
+ * above that early-boot blob so x0 still points to intact device-tree data.
+ */
+KERNEL_BASE = 0x40200000;
 
 ENTRY(_start)
 

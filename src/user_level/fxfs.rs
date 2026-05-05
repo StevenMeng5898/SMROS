@@ -23,6 +23,8 @@ const FXFS_MAX_JOURNAL_RECORDS: usize = 128;
 const FXFS_BLOCK_MAGIC: u32 = 0x5346_5846;
 const FXFS_BLOCK_VERSION: u16 = 1;
 const FXFS_BLOCK_HEADER_LEN: u16 = 56;
+const FXFS_BLOCK_SLOT_COUNT: usize = 2;
+const FXFS_MIN_SLOT_BYTES: usize = 64 * 1024;
 const FXFS_DEFAULT_UID: u32 = 0;
 const FXFS_DEFAULT_GID: u32 = 0;
 const FXFS_DIR_MODE: u32 = 0o040755;
@@ -140,6 +142,16 @@ struct FxfsDirectoryEntry {
     object_id: u64,
 }
 
+struct LoadedFxfsImage {
+    active_slot: usize,
+    next_object_id: u64,
+    sequence: u64,
+    replayed_records: usize,
+    objects: Vec<FxfsObject>,
+    dirents: Vec<FxfsDirectoryEntry>,
+    journal: Vec<FxfsJournalRecord>,
+}
+
 #[derive(Clone, Debug)]
 pub struct FxfsDirEntry {
     pub object_id: u64,
@@ -156,6 +168,9 @@ pub struct FxfsStats {
     pub last_sync_ok: bool,
     pub last_storage_error: Option<FxfsError>,
     pub block_bytes: usize,
+    pub storage_slots: usize,
+    pub active_slot: usize,
+    pub slot_bytes: usize,
     pub nodes: usize,
     pub directories: usize,
     pub files: usize,
@@ -237,6 +252,45 @@ fn fxfs_checksum(data: &[u8]) -> u32 {
     checksum
 }
 
+fn fxfs_header_is_blank(header: &[u8]) -> bool {
+    header.iter().all(|byte| *byte == 0)
+}
+
+fn fxfs_align_down(value: usize, align: usize) -> usize {
+    if align == 0 {
+        value
+    } else {
+        value - (value % align)
+    }
+}
+
+fn fxfs_storage_layout() -> Result<(usize, usize), FxfsError> {
+    let block_capacity = drivers::block_capacity();
+    if block_capacity < FXFS_BLOCK_HEADER_LEN as usize {
+        return Err(FxfsError::StorageUnavailable);
+    }
+
+    let block_size = drivers::block_size();
+    let usable_capacity = if block_capacity > block_size {
+        block_capacity - block_size
+    } else {
+        block_capacity
+    };
+
+    if usable_capacity >= FXFS_MIN_SLOT_BYTES * FXFS_BLOCK_SLOT_COUNT {
+        let slot_size = fxfs_align_down(usable_capacity / FXFS_BLOCK_SLOT_COUNT, block_size);
+        if slot_size >= FXFS_BLOCK_HEADER_LEN as usize {
+            return Ok((FXFS_BLOCK_SLOT_COUNT, slot_size));
+        }
+    }
+
+    Ok((1, usable_capacity))
+}
+
+fn fxfs_slot_offset(slot: usize, slot_size: usize) -> usize {
+    slot.saturating_mul(slot_size)
+}
+
 fn kind_to_u8(kind: FxfsNodeKind) -> u8 {
     match kind {
         FxfsNodeKind::Directory => 1,
@@ -290,6 +344,7 @@ pub struct FxfsState {
     block_backed: bool,
     last_sync_ok: bool,
     last_storage_error: Option<FxfsError>,
+    active_slot: usize,
     next_object_id: u64,
     sequence: u64,
     replayed_records: usize,
@@ -305,6 +360,7 @@ impl FxfsState {
             block_backed: false,
             last_sync_ok: false,
             last_storage_error: None,
+            active_slot: 0,
             next_object_id: FXFS_ROOT_OBJECT_ID + 1,
             sequence: 0,
             replayed_records: 0,
@@ -380,13 +436,23 @@ impl FxfsState {
         self.block_backed = drivers::init() && drivers::block_ready();
         self.last_sync_ok = false;
         self.last_storage_error = None;
-        if self.block_backed && self.load_from_block().is_ok() {
-            self.last_sync_ok = true;
-            self.last_storage_error = None;
-            return Ok(());
+        if self.block_backed {
+            match self.load_from_block() {
+                Ok(()) => {
+                    self.last_sync_ok = true;
+                    self.last_storage_error = None;
+                    return Ok(());
+                }
+                Err(FxfsError::NotFound) => {}
+                Err(err) => {
+                    self.last_storage_error = Some(err);
+                    return Err(err);
+                }
+            }
         }
 
         self.mounted = true;
+        self.active_slot = 0;
         self.next_object_id = FXFS_ROOT_OBJECT_ID + 1;
         self.sequence = 0;
         self.replayed_records = 0;
@@ -474,23 +540,41 @@ impl FxfsState {
         Ok(image)
     }
 
-    fn sync_to_block(&self) -> Result<(), FxfsError> {
+    fn sync_to_block(&mut self) -> Result<(), FxfsError> {
         if !drivers::block_ready() {
             return Err(FxfsError::StorageUnavailable);
         }
         let image = self.serialize_image()?;
-        drivers::block_write_at(0, &image).map_err(|_| FxfsError::StorageUnavailable)?;
+        let (slot_count, slot_size) = fxfs_storage_layout()?;
+        if image.len() > slot_size {
+            return Err(FxfsError::NoSpace);
+        }
+
+        let next_slot = if slot_count > 1 {
+            (self.active_slot + 1) % slot_count
+        } else {
+            0
+        };
+        let offset = fxfs_slot_offset(next_slot, slot_size);
+        drivers::block_write_at(offset, &image).map_err(|_| FxfsError::StorageUnavailable)?;
         drivers::block_flush().map_err(|_| FxfsError::StorageUnavailable)?;
+        self.active_slot = next_slot;
         Ok(())
     }
 
-    fn load_from_block(&mut self) -> Result<(), FxfsError> {
-        if !drivers::block_ready() {
-            return Err(FxfsError::StorageUnavailable);
+    fn load_image_from_slot(
+        &self,
+        slot: usize,
+        slot_size: usize,
+    ) -> Result<Option<LoadedFxfsImage>, FxfsError> {
+        let mut header = [0u8; FXFS_BLOCK_HEADER_LEN as usize];
+        let slot_offset = fxfs_slot_offset(slot, slot_size);
+        drivers::block_read_at(slot_offset, &mut header)
+            .map_err(|_| FxfsError::StorageUnavailable)?;
+        if fxfs_header_is_blank(&header) {
+            return Ok(None);
         }
 
-        let mut header = [0u8; FXFS_BLOCK_HEADER_LEN as usize];
-        drivers::block_read_at(0, &mut header).map_err(|_| FxfsError::StorageUnavailable)?;
         let mut pos = 0usize;
         if read_u32(&header, &mut pos)? != FXFS_BLOCK_MAGIC {
             return Err(FxfsError::StorageCorrupt);
@@ -503,7 +587,7 @@ impl FxfsState {
             return Err(FxfsError::StorageCorrupt);
         }
         let total_len = read_u32(&header, &mut pos)? as usize;
-        if total_len < header_len || total_len > drivers::block_capacity() {
+        if total_len < header_len || total_len > slot_size {
             return Err(FxfsError::StorageCorrupt);
         }
         let checksum = read_u32(&header, &mut pos)?;
@@ -527,7 +611,7 @@ impl FxfsState {
         let mut body = Vec::new();
         body.resize(body_len, 0);
         if body_len > 0 {
-            drivers::block_read_at(header_len, &mut body)
+            drivers::block_read_at(slot_offset + header_len, &mut body)
                 .map_err(|_| FxfsError::StorageUnavailable)?;
         }
         if fxfs_checksum(&body) != checksum {
@@ -610,15 +694,62 @@ impl FxfsState {
             return Err(FxfsError::StorageCorrupt);
         }
 
+        Ok(Some(LoadedFxfsImage {
+            active_slot: slot,
+            next_object_id,
+            sequence,
+            replayed_records,
+            objects,
+            dirents,
+            journal,
+        }))
+    }
+
+    fn load_from_block(&mut self) -> Result<(), FxfsError> {
+        if !drivers::block_ready() {
+            return Err(FxfsError::StorageUnavailable);
+        }
+
+        let (slot_count, slot_size) = fxfs_storage_layout()?;
+        let mut best: Option<LoadedFxfsImage> = None;
+        let mut saw_corrupt = false;
+
+        for slot in 0..slot_count {
+            match self.load_image_from_slot(slot, slot_size) {
+                Ok(Some(image)) => {
+                    if best
+                        .as_ref()
+                        .map(|candidate| image.sequence > candidate.sequence)
+                        .unwrap_or(true)
+                    {
+                        best = Some(image);
+                    }
+                }
+                Ok(None) => {}
+                Err(FxfsError::StorageCorrupt) => {
+                    saw_corrupt = true;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        let Some(image) = best else {
+            if saw_corrupt {
+                return Err(FxfsError::StorageCorrupt);
+            }
+            return Err(FxfsError::NotFound);
+        };
+
         self.mounted = true;
         self.block_backed = true;
         self.last_sync_ok = true;
-        self.next_object_id = next_object_id;
-        self.sequence = sequence;
-        self.replayed_records = replayed_records;
-        self.objects = objects;
-        self.dirents = dirents;
-        self.journal = journal;
+        self.active_slot = image.active_slot;
+        self.next_object_id = image.next_object_id;
+        self.sequence = image.sequence;
+        self.replayed_records = image.replayed_records;
+        self.objects = image.objects;
+        self.dirents = image.dirents;
+        self.journal = image.journal;
         Ok(())
     }
 
@@ -759,6 +890,15 @@ impl FxfsState {
 
     fn create_dir(&mut self, path: &str) -> Result<u64, FxfsError> {
         let (parent_id, name) = self.parent_and_name(path)?;
+        if let Some(object_id) = self.child_object_id(parent_id, name) {
+            let index = self
+                .find_object_index(object_id)
+                .ok_or(FxfsError::NotFound)?;
+            if self.objects[index].kind == FxfsNodeKind::Directory {
+                return Ok(object_id);
+            }
+            return Err(FxfsError::NotDirectory);
+        }
         let object_id = self.create_object(parent_id, name, FxfsNodeKind::Directory, &[])?;
         self.record(FxfsJournalOp::CreateDir, object_id, parent_id, 0);
         self.persist();
@@ -775,6 +915,9 @@ impl FxfsState {
             Ok(index) => {
                 if self.objects[index].kind == FxfsNodeKind::Directory {
                     return Err(FxfsError::IsDirectory);
+                }
+                if self.objects[index].data.as_slice() == data {
+                    return Ok(data.len());
                 }
                 self.objects[index].data.clear();
                 self.objects[index].data.extend_from_slice(data);
@@ -897,10 +1040,6 @@ impl FxfsState {
         let len = core::cmp::min(out.len(), available);
         out[..len].copy_from_slice(&self.objects[index].data[cursor.offset..cursor.offset + len]);
         cursor.offset = cursor.offset.saturating_add(len);
-        let object_id = self.objects[index].object_id;
-        self.touch_file_read(index);
-        self.record(FxfsJournalOp::ReadFile, object_id, 0, len);
-        self.persist();
         Ok(len)
     }
 
@@ -950,15 +1089,6 @@ impl FxfsState {
 
     fn attrs(&mut self, path: &str) -> Result<FxfsAttributes, FxfsError> {
         let index = self.resolve_path(path)?;
-        let object_id = self.objects[index].object_id;
-        self.touch_file_read(index);
-        self.record(
-            FxfsJournalOp::Lookup,
-            object_id,
-            0,
-            self.objects[index].attrs.size,
-        );
-        self.persist();
         Ok(self.objects[index].attrs)
     }
 
@@ -984,17 +1114,7 @@ impl FxfsState {
     }
 
     fn exists(&mut self, path: &str) -> bool {
-        match self.resolve_path(path) {
-            Ok(index) => {
-                let object_id = self.objects[index].object_id;
-                let size = self.objects[index].attrs.size;
-                self.touch_file_read(index);
-                self.record(FxfsJournalOp::Lookup, object_id, 0, size);
-                self.persist();
-                true
-            }
-            Err(_) => false,
-        }
+        self.resolve_path(path).is_ok()
     }
 
     fn entries(&self, path: &str) -> Result<Vec<FxfsDirEntry>, FxfsError> {
@@ -1085,6 +1205,13 @@ impl FxfsState {
             last_sync_ok: self.last_sync_ok,
             last_storage_error: self.last_storage_error,
             block_bytes: drivers::block_capacity(),
+            storage_slots: fxfs_storage_layout()
+                .map(|(slot_count, _)| slot_count)
+                .unwrap_or(0),
+            active_slot: self.active_slot,
+            slot_bytes: fxfs_storage_layout()
+                .map(|(_, slot_size)| slot_size)
+                .unwrap_or(0),
             nodes: self.objects.len(),
             directories,
             files,

@@ -7,6 +7,7 @@
 //! - Timer Driver (ARM Generic Timer)
 //! - Interrupt Controller (GICv2)
 //! - SMP Support (Symmetric Multi-Processing)
+//! - ARM64 Thread Context Switching
 //! - Hardware Drivers
 //!
 //! These modules handle low-level operations that form the foundation of the kernel.
@@ -18,4 +19,5 @@ pub mod memory;
 pub mod mmu;
 pub mod serial;
 pub mod smp;
+pub mod thread;
 pub mod timer;

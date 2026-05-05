@@ -22,8 +22,8 @@ fi
 # Build the kernel
 cargo build --release
 
-# Copy the kernel binary to a convenient location
-cp target/aarch64-unknown-none/release/smros kernel8.img
+# Emit a raw AArch64 Linux Image for QEMU's -kernel loader.
+aarch64-linux-gnu-objcopy -O binary target/aarch64-unknown-none/release/smros kernel8.img
 
 echo ""
 echo "================================"
@@ -36,5 +36,5 @@ echo ""
 echo "Or manually:"
 echo "  qemu-img create -f raw smros-fxfs.img 16M"
 echo "  qemu-system-aarch64 -M virt -cpu cortex-a57 -nographic -kernel kernel8.img \\"
-echo "    -drive file=smros-fxfs.img,if=none,format=raw,id=fxfs \\"
+echo "    -drive file=smros-fxfs.img,if=none,format=raw,id=fxfs,cache=writethrough \\"
 echo "    -device virtio-blk-device,drive=fxfs"

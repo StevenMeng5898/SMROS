@@ -137,6 +137,18 @@ macro_rules! smros_ll_process_index_valid_body {
     }};
 }
 
+macro_rules! smros_ll_thread_state_runnable_body {
+    ($state:expr, $ready:expr, $running:expr) => {{
+        $state == $ready || $state == $running
+    }};
+}
+
+macro_rules! smros_ll_thread_id_idle_body {
+    ($id:expr, $idle:expr) => {{
+        $id == $idle
+    }};
+}
+
 macro_rules! smros_ll_pte_set_flag_body {
     ($value:expr, $flag:expr, $enabled:expr) => {{
         if $enabled {
@@ -294,6 +306,112 @@ macro_rules! smros_ll_gic_enable_bit_body {
 macro_rules! smros_ll_gic_interrupt_id_body {
     ($iar:expr) => {{
         $iar & 0x3FFu32
+    }};
+}
+
+macro_rules! smros_ll_dt_reg_valid_body {
+    ($base:expr, $size:expr) => {{
+        if $size == 0 {
+            false
+        } else {
+            match smros_ll_checked_end_body!($base, $size) {
+                Some(_) => true,
+                None => false,
+            }
+        }
+    }};
+}
+
+macro_rules! smros_ll_dt_reg_contains_body {
+    ($base:expr, $size:expr, $addr:expr) => {{
+        if $size == 0 {
+            false
+        } else {
+            match smros_ll_checked_end_body!($base, $size) {
+                Some(end) => $addr >= $base && $addr < end,
+                None => false,
+            }
+        }
+    }};
+}
+
+macro_rules! smros_ll_dt_irq_valid_body {
+    ($irq:expr, $max_irqs:expr) => {{
+        $max_irqs != 0 && $irq < $max_irqs
+    }};
+}
+
+macro_rules! smros_ll_dt_platform_index_body {
+    ($candidate:expr, $platform_count:expr, $fallback:expr) => {{
+        if $candidate < $platform_count {
+            $candidate
+        } else if $fallback < $platform_count {
+            $fallback
+        } else {
+            0
+        }
+    }};
+}
+
+macro_rules! smros_ll_fdt_range_valid_body {
+    ($offset:expr, $len:expr, $total:expr) => {{
+        $offset <= $total && $len <= $total - $offset
+    }};
+}
+
+macro_rules! smros_ll_fdt_align4_body {
+    ($offset:expr) => {{
+        smros_ll_align_up_body!($offset, 4usize)
+    }};
+}
+
+macro_rules! smros_ll_fdt_cells_to_bytes_body {
+    ($cells:expr) => {{
+        $cells.checked_mul(4usize)
+    }};
+}
+
+macro_rules! smros_ll_fdt_reg_tuple_bytes_body {
+    ($address_cells:expr, $size_cells:expr) => {{
+        match $address_cells.checked_add($size_cells) {
+            Some(cells) if cells != 0 => smros_ll_fdt_cells_to_bytes_body!(cells),
+            _ => None,
+        }
+    }};
+}
+
+macro_rules! smros_ll_fdt_reg_tuple_offset_body {
+    ($index:expr, $address_cells:expr, $size_cells:expr) => {{
+        match smros_ll_fdt_reg_tuple_bytes_body!($address_cells, $size_cells) {
+            Some(tuple_bytes) => $index.checked_mul(tuple_bytes),
+            None => None,
+        }
+    }};
+}
+
+macro_rules! smros_ll_dt_gic_irq_body {
+    ($kind:expr, $hwirq:expr, $max_irqs:expr) => {{
+        let translated = if $kind == 0 {
+            $hwirq.checked_add(32)
+        } else if $kind == 1 {
+            $hwirq.checked_add(16)
+        } else {
+            None
+        };
+        match translated {
+            Some(irq) if irq < $max_irqs => Some(irq),
+            _ => None,
+        }
+    }};
+}
+
+macro_rules! smros_ll_dt_timer_irq_index_body {
+    ($entry_count:expr) => {{
+        if $entry_count >= 4 {
+            1usize
+        } else {
+            0usize
+        }
     }};
 }
 

@@ -25,6 +25,7 @@ SMROS currently requires nightly Rust because `.cargo/config.toml` enables `buil
 - `rustup`
 - `rust-src`
 - `qemu-system-aarch64`
+- `aarch64-linux-gnu-objcopy` from GNU binutils
 - `make` for the documented build/run flow
 
 ### Recommended Setup
@@ -66,7 +67,7 @@ You can also build manually:
 
 ```bash
 cargo build --release
-cp target/aarch64-unknown-none/release/smros kernel8.img
+aarch64-linux-gnu-objcopy -O binary target/aarch64-unknown-none/release/smros kernel8.img
 ```
 
 ## Run

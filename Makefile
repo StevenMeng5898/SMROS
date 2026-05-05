@@ -14,7 +14,7 @@ all: build
 build:
 	@echo "Building SMROS ARM64 Kernel..."
 	@cargo build --release
-	@cp $(BUILD_DIR)/smros $(KERNEL)
+	@aarch64-linux-gnu-objcopy -O binary $(BUILD_DIR)/smros $(KERNEL)
 	@echo "Build complete: $(KERNEL)"
 
 $(FXFS_DISK):
@@ -31,7 +31,7 @@ run: build $(FXFS_DISK)
 		-m 512M \
 		-nographic \
 		-kernel $(KERNEL) \
-		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs \
+		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs,cache=writethrough \
 		-device virtio-blk-device,drive=fxfs
 
 # Run with QEMU (debug mode with logging)
@@ -44,7 +44,7 @@ debug: build $(FXFS_DISK)
 		-m 512M \
 		-nographic \
 		-kernel $(KERNEL) \
-		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs \
+		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs,cache=writethrough \
 		-device virtio-blk-device,drive=fxfs \
 		-serial mon:stdio \
 		-d int,cpu_reset \
@@ -60,7 +60,7 @@ gdb: build $(FXFS_DISK)
 		-m 512M \
 		-nographic \
 		-kernel $(KERNEL) \
-		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs \
+		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs,cache=writethrough \
 		-device virtio-blk-device,drive=fxfs \
 		-S -s
 
