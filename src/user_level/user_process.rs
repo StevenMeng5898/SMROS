@@ -14,6 +14,7 @@ use crate::kernel_lowlevel::memory::{
 };
 use crate::kernel_lowlevel::mmu::PageTableManager;
 use crate::kernel_lowlevel::thread::{ThreadControlBlock, ThreadId, DEFAULT_STACK_SIZE};
+use crate::kernel_objects::right::{self, ProcessRightProfile};
 use crate::user_level::{elf::ElfImage, user_logic};
 
 pub const USER_MAX_ELF_SEGMENTS: usize = 4;
@@ -44,6 +45,8 @@ pub struct UserProcess {
     pub proc_handle: u32,
     /// VMAR handle (for Zircon compatibility)
     pub vmar_handle: u32,
+    /// Capability profile assigned to this user-space process.
+    pub right_profile: ProcessRightProfile,
     /// Primary scheduler thread for this process, when one exists
     pub primary_thread_id: Option<usize>,
     /// Entry parsed from the ELF image backing this process.
@@ -68,6 +71,10 @@ impl UserProcess {
         if !pcb.init(pid, parent_pid, name) {
             return None;
         }
+        let right_profile = right::process_right_profile_for_name(name);
+        if !right_profile.rights_valid() {
+            return None;
+        }
 
         // Create page table manager for this process
         let page_table = PageTableManager::new()?;
@@ -80,6 +87,7 @@ impl UserProcess {
             entry_point,
             proc_handle: 0,
             vmar_handle: 0,
+            right_profile,
             primary_thread_id: None,
             loaded_entry_point: None,
             loaded_segments: [None, None, None, None],
@@ -368,6 +376,14 @@ pub fn loaded_entry_point(pid: usize) -> Option<u64> {
 
 pub fn loaded_segment_count(pid: usize) -> Option<usize> {
     Some(get_user_process(pid)?.loaded_segment_count)
+}
+
+pub fn right_profile(pid: usize) -> Option<ProcessRightProfile> {
+    Some(get_user_process(pid)?.right_profile)
+}
+
+pub fn process_rights(pid: usize) -> Option<u32> {
+    Some(get_user_process(pid)?.right_profile.process_rights)
 }
 
 /// Switch to user mode (EL0)

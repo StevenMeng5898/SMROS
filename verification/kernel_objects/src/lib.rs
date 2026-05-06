@@ -137,6 +137,31 @@ pub const DEFAULT_THREAD_RIGHTS: u32 = RIGHT_DUPLICATE
     | RIGHT_WAIT
     | RIGHT_INSPECT
     | RIGHT_MANAGE_THREAD;
+pub const DEFAULT_VMAR_RIGHTS: u32 = RIGHT_DUPLICATE
+    | RIGHT_TRANSFER
+    | RIGHT_READ
+    | RIGHT_WRITE
+    | RIGHT_EXECUTE
+    | RIGHT_MAP
+    | RIGHT_GET_PROPERTY
+    | RIGHT_SET_PROPERTY
+    | RIGHT_DESTROY
+    | RIGHT_INSPECT
+    | RIGHT_OP_CHILDREN;
+pub const SANDBOX_PROCESS_DENIED_RIGHTS: u32 = RIGHT_MANAGE_PROCESS | RIGHT_SET_PROPERTY;
+pub const SANDBOX_ROOT_VMAR_DENIED_RIGHTS: u32 = RIGHT_SET_PROPERTY;
+pub const SANDBOX_JOB_DENIED_RIGHTS: u32 = RIGHT_MANAGE_JOB
+    | RIGHT_MANAGE_PROCESS
+    | RIGHT_MANAGE_THREAD
+    | RIGHT_SET_POLICY
+    | RIGHT_SET_PROPERTY;
+pub const SANDBOX_THREAD_DENIED_RIGHTS: u32 = RIGHT_MANAGE_THREAD | RIGHT_SET_PROPERTY;
+pub const SANDBOX_PROCESS_RIGHTS: u32 =
+    DEFAULT_PROCESS_RIGHTS & !SANDBOX_PROCESS_DENIED_RIGHTS;
+pub const SANDBOX_ROOT_VMAR_RIGHTS: u32 =
+    DEFAULT_VMAR_RIGHTS & !SANDBOX_ROOT_VMAR_DENIED_RIGHTS;
+pub const SANDBOX_JOB_RIGHTS: u32 = DEFAULT_JOB_RIGHTS & !SANDBOX_JOB_DENIED_RIGHTS;
+pub const SANDBOX_THREAD_RIGHTS: u32 = DEFAULT_THREAD_RIGHTS & !SANDBOX_THREAD_DENIED_RIGHTS;
 
 #[derive(Copy, Clone)]
 struct HandleEntryModel {
@@ -317,6 +342,37 @@ spec fn replace_rights_allowed_spec(
 ) -> bool {
     requested == same_rights
         || (rights_valid_spec(requested, known_mask) && rights_subset_spec(requested, existing))
+}
+
+spec fn process_right_profile_valid_spec(
+    process_rights: u32,
+    root_vmar_rights: u32,
+    job_rights: u32,
+    thread_rights: u32,
+    known_mask: u32,
+) -> bool {
+    rights_valid_spec(process_rights, known_mask)
+        && rights_valid_spec(root_vmar_rights, known_mask)
+        && rights_valid_spec(job_rights, known_mask)
+        && rights_valid_spec(thread_rights, known_mask)
+}
+
+spec fn process_right_profile_is_restricted_spec(
+    process_rights: u32,
+    root_vmar_rights: u32,
+    job_rights: u32,
+    thread_rights: u32,
+) -> bool {
+    !rights_has_spec(process_rights, RIGHT_MANAGE_PROCESS)
+        && !rights_has_spec(process_rights, RIGHT_SET_PROPERTY)
+        && !rights_has_spec(root_vmar_rights, RIGHT_SET_PROPERTY)
+        && !rights_has_spec(job_rights, RIGHT_MANAGE_JOB)
+        && !rights_has_spec(job_rights, RIGHT_MANAGE_PROCESS)
+        && !rights_has_spec(job_rights, RIGHT_MANAGE_THREAD)
+        && !rights_has_spec(job_rights, RIGHT_SET_POLICY)
+        && !rights_has_spec(job_rights, RIGHT_SET_PROPERTY)
+        && !rights_has_spec(thread_rights, RIGHT_MANAGE_THREAD)
+        && !rights_has_spec(thread_rights, RIGHT_SET_PROPERTY)
 }
 
 spec fn object_signal_update_spec(current: u32, clear_mask: u32, set_mask: u32) -> u32 {
@@ -621,6 +677,54 @@ fn ko_rights_valid(rights: u32, known_mask: u32) -> (out: bool)
         out == rights_valid_spec(rights, known_mask),
 {
     smros_ko_rights_valid_body!(rights, known_mask)
+}
+
+fn ko_process_right_profile_valid(
+    process_rights: u32,
+    root_vmar_rights: u32,
+    job_rights: u32,
+    thread_rights: u32,
+    known_mask: u32,
+) -> (out: bool)
+    ensures
+        out == process_right_profile_valid_spec(
+            process_rights,
+            root_vmar_rights,
+            job_rights,
+            thread_rights,
+            known_mask,
+        ),
+{
+    ko_rights_valid(process_rights, known_mask)
+        && ko_rights_valid(root_vmar_rights, known_mask)
+        && ko_rights_valid(job_rights, known_mask)
+        && ko_rights_valid(thread_rights, known_mask)
+}
+
+fn ko_process_right_profile_is_restricted(
+    process_rights: u32,
+    root_vmar_rights: u32,
+    job_rights: u32,
+    thread_rights: u32,
+) -> (out: bool)
+    ensures
+        out == process_right_profile_is_restricted_spec(
+            process_rights,
+            root_vmar_rights,
+            job_rights,
+            thread_rights,
+        ),
+{
+    !ko_rights_has(process_rights, RIGHT_MANAGE_PROCESS)
+        && !ko_rights_has(process_rights, RIGHT_SET_PROPERTY)
+        && !ko_rights_has(root_vmar_rights, RIGHT_SET_PROPERTY)
+        && !ko_rights_has(job_rights, RIGHT_MANAGE_JOB)
+        && !ko_rights_has(job_rights, RIGHT_MANAGE_PROCESS)
+        && !ko_rights_has(job_rights, RIGHT_MANAGE_THREAD)
+        && !ko_rights_has(job_rights, RIGHT_SET_POLICY)
+        && !ko_rights_has(job_rights, RIGHT_SET_PROPERTY)
+        && !ko_rights_has(thread_rights, RIGHT_MANAGE_THREAD)
+        && !ko_rights_has(thread_rights, RIGHT_SET_PROPERTY)
 }
 
 fn ko_duplicate_rights_allowed(
@@ -1814,6 +1918,57 @@ fn socket_signal_smoke() {
             CHANNEL_SIGNAL_WRITABLE,
             SOCKET_SIGNAL_WRITE_THRESHOLD,
         ));
+}
+
+fn process_right_profile_smoke() {
+    let trusted_valid = ko_process_right_profile_valid(
+        DEFAULT_PROCESS_RIGHTS,
+        DEFAULT_VMAR_RIGHTS,
+        DEFAULT_JOB_RIGHTS,
+        DEFAULT_THREAD_RIGHTS,
+        RIGHTS_ALL,
+    );
+    let sandbox_valid = ko_process_right_profile_valid(
+        SANDBOX_PROCESS_RIGHTS,
+        SANDBOX_ROOT_VMAR_RIGHTS,
+        SANDBOX_JOB_RIGHTS,
+        SANDBOX_THREAD_RIGHTS,
+        RIGHTS_ALL,
+    );
+    let sandbox_restricted = ko_process_right_profile_is_restricted(
+        SANDBOX_PROCESS_RIGHTS,
+        SANDBOX_ROOT_VMAR_RIGHTS,
+        SANDBOX_JOB_RIGHTS,
+        SANDBOX_THREAD_RIGHTS,
+    );
+
+    assert(rights_valid_spec(DEFAULT_PROCESS_RIGHTS, RIGHTS_ALL)) by(bit_vector);
+    assert(rights_valid_spec(DEFAULT_VMAR_RIGHTS, RIGHTS_ALL)) by(bit_vector);
+    assert(rights_valid_spec(DEFAULT_JOB_RIGHTS, RIGHTS_ALL)) by(bit_vector);
+    assert(rights_valid_spec(DEFAULT_THREAD_RIGHTS, RIGHTS_ALL)) by(bit_vector);
+    assert(process_right_profile_valid_spec(
+        DEFAULT_PROCESS_RIGHTS,
+        DEFAULT_VMAR_RIGHTS,
+        DEFAULT_JOB_RIGHTS,
+        DEFAULT_THREAD_RIGHTS,
+        RIGHTS_ALL,
+    )) by(bit_vector);
+    assert(process_right_profile_valid_spec(
+        SANDBOX_PROCESS_RIGHTS,
+        SANDBOX_ROOT_VMAR_RIGHTS,
+        SANDBOX_JOB_RIGHTS,
+        SANDBOX_THREAD_RIGHTS,
+        RIGHTS_ALL,
+    )) by(bit_vector);
+    assert(process_right_profile_is_restricted_spec(
+        SANDBOX_PROCESS_RIGHTS,
+        SANDBOX_ROOT_VMAR_RIGHTS,
+        SANDBOX_JOB_RIGHTS,
+        SANDBOX_THREAD_RIGHTS,
+    )) by(bit_vector);
+    assert(trusted_valid);
+    assert(sandbox_valid);
+    assert(sandbox_restricted);
 }
 
 proof fn kernel_object_mod_has_no_pure_runtime_obligation() {

@@ -50,7 +50,10 @@ use crate::kernel_objects::compat;
 use crate::kernel_objects::fifo;
 use crate::kernel_objects::fifo_logic;
 use crate::kernel_objects::futex;
+use crate::kernel_objects::job::JobRecord;
 use crate::kernel_objects::port;
+use crate::kernel_objects::process::{ProcessRecord, ThreadRecord};
+use crate::kernel_objects::right::{self, ProcessRightProfile};
 use crate::kernel_objects::scheduler;
 use crate::kernel_objects::socket;
 use crate::kernel_objects::vmar::Vmar;
@@ -563,34 +566,6 @@ struct VmarRecord {
     vmar: Vmar,
 }
 
-struct ProcessRecord {
-    handle: u32,
-    job_handle: u32,
-    pid: usize,
-    root_vmar_handle: u32,
-    exited: bool,
-    exit_code: i32,
-}
-
-struct JobRecord {
-    handle: u32,
-    parent: Option<u32>,
-    child_count: usize,
-    policy_count: usize,
-    critical_process: Option<u32>,
-}
-
-struct ThreadRecord {
-    handle: u32,
-    process_handle: u32,
-    entry_point: usize,
-    stack_top: usize,
-    arg1: usize,
-    arg2: usize,
-    started: bool,
-    exited: bool,
-}
-
 #[derive(Clone, Copy)]
 struct KernelHandleRecord {
     handle: u32,
@@ -823,10 +798,32 @@ impl MemorySyscallState {
         )
     }
 
+    fn register_object_handle_with_rights(
+        &mut self,
+        handle: u32,
+        obj_type: ObjectType,
+        rights: u32,
+    ) -> bool {
+        self.register_handle(handle, handle, obj_type, rights)
+    }
+
     fn alloc_object_handle(&mut self, obj_type: ObjectType) -> u32 {
         let handle = self.alloc_handle();
         let _ = self.register_object_handle(handle, obj_type);
         handle
+    }
+
+    fn alloc_object_handle_with_rights(
+        &mut self,
+        obj_type: ObjectType,
+        rights: u32,
+    ) -> ZxResult<u32> {
+        let handle = self.alloc_handle();
+        if self.register_object_handle_with_rights(handle, obj_type, rights) {
+            Ok(handle)
+        } else {
+            Err(ZxError::ErrInvalidArgs)
+        }
     }
 
     fn handle_record(&self, handle: u32) -> Option<KernelHandleRecord> {
@@ -1038,6 +1035,12 @@ impl MemorySyscallState {
         self.processes
             .iter_mut()
             .find(|record| record.handle == handle)
+    }
+
+    fn get_process_by_object(&self, object_handle: u32) -> Option<&ProcessRecord> {
+        self.processes
+            .iter()
+            .find(|record| record.handle == object_handle)
     }
 
     fn get_job(&self, handle: u32) -> Option<&JobRecord> {
@@ -1284,7 +1287,7 @@ impl MemorySyscallState {
             if let Some(parent) = parent {
                 if let Some(parent_job) = self.jobs.iter_mut().find(|record| record.handle == parent)
                 {
-                    parent_job.child_count = parent_job.child_count.saturating_sub(1);
+                    parent_job.remove_child();
                 }
             }
             true
@@ -1326,7 +1329,7 @@ impl MemorySyscallState {
                 .iter_mut()
                 .find(|job| job.handle == record.job_handle)
             {
-                job.child_count = job.child_count.saturating_sub(1);
+                job.remove_child();
             }
             let root_vmar_handle = self
                 .handles
@@ -4898,6 +4901,26 @@ pub fn sys_fadvise64(fd: usize, _offset: usize, _len: usize, _advice: usize) -> 
 // Zircon Process/Task Syscalls
 // ============================================================================
 
+fn process_profile_from_user_name(
+    name_ptr: usize,
+    name_len: usize,
+) -> (ProcessRightProfile, &'static str) {
+    if name_ptr != 0 && name_len != 0 {
+        let len = name_len.min(right::MAX_PROCESS_NAME_BYTES);
+        let bytes = unsafe { core::slice::from_raw_parts(name_ptr as *const u8, len) };
+        let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+        if let Ok(name) = core::str::from_utf8(&bytes[..end]) {
+            if !name.is_empty() {
+                let profile = right::process_right_profile_for_name(name);
+                return (profile, right::canonical_process_name(profile.kind));
+            }
+        }
+    }
+
+    let profile = right::process_right_profile_for_name("zircon_proc");
+    (profile, right::canonical_process_name(profile.kind))
+}
+
 /// Zircon sys_process_create implementation
 pub fn sys_process_create(
     job_handle: u32,
@@ -4928,11 +4951,18 @@ pub fn sys_process_create(
         }
     }
 
-    let pid = process_manager().create_process("zircon_proc").unwrap_or(0);
+    let (right_profile, process_name) = process_profile_from_user_name(name_ptr, name_len);
+    if !right_profile.rights_valid() {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+
+    let pid = process_manager().create_process(process_name).unwrap_or(0);
 
     let state = memory_state();
-    let proc_handle = state.alloc_object_handle(ObjectType::Process);
-    let vmar_handle = state.alloc_object_handle(ObjectType::Vmar);
+    let proc_handle =
+        state.alloc_object_handle_with_rights(ObjectType::Process, right_profile.process_rights)?;
+    let vmar_handle =
+        state.alloc_object_handle_with_rights(ObjectType::Vmar, right_profile.root_vmar_rights)?;
     let mut root_vmar = Vmar::new(ZIRCON_ROOT_VMAR_BASE, ZIRCON_ROOT_VMAR_SIZE);
     root_vmar.handle = HandleValue(vmar_handle);
 
@@ -4940,16 +4970,15 @@ pub fn sys_process_create(
         handle: vmar_handle,
         vmar: root_vmar,
     });
-    state.processes.push(ProcessRecord {
-        handle: proc_handle,
+    state.processes.push(ProcessRecord::new(
+        proc_handle,
         job_handle,
         pid,
-        root_vmar_handle: vmar_handle,
-        exited: false,
-        exit_code: 0,
-    });
+        vmar_handle,
+        right_profile,
+    ));
     if let Some(job) = state.get_job_mut(job_handle) {
-        job.child_count = job.child_count.saturating_add(1);
+        job.add_child();
     }
 
     *out_proc_handle = proc_handle;
@@ -4967,14 +4996,7 @@ pub fn sys_process_exit(handle: u32, exit_code: i32) -> ZxResult {
     }
     let pid_to_terminate = {
         let proc = state.get_process_mut(handle).ok_or(ZxError::ErrNotFound)?;
-        let pid_to_terminate = if !proc.exited && proc.pid != 0 {
-            Some(proc.pid)
-        } else {
-            None
-        };
-        proc.exited = true;
-        proc.exit_code = exit_code;
-        pid_to_terminate
+        proc.mark_exited(exit_code)
     };
     if let Some(pid) = pid_to_terminate {
         let _ = process_manager().terminate_process(pid);
@@ -5009,17 +5031,14 @@ pub fn sys_thread_create(
     let process_object = state
         .resolve_handle(proc_handle, ObjectType::Process)
         .ok_or(ZxError::ErrInvalidArgs)?;
-    let handle = state.alloc_object_handle(ObjectType::Thread);
-    state.threads.push(ThreadRecord {
-        handle,
-        process_handle: process_object,
-        entry_point,
-        stack_top: 0,
-        arg1: 0,
-        arg2: 0,
-        started: false,
-        exited: false,
-    });
+    let thread_rights = state
+        .get_process_by_object(process_object)
+        .map(|process| process.right_profile.thread_rights)
+        .unwrap_or(Rights::DefaultThread as u32);
+    let handle = state.alloc_object_handle_with_rights(ObjectType::Thread, thread_rights)?;
+    state
+        .threads
+        .push(ThreadRecord::new(handle, process_object, entry_point));
     *out_thread_handle = handle;
     Ok(())
 }
@@ -5044,14 +5063,9 @@ pub fn sys_thread_start(
     let thread = state
         .get_thread_mut(thread_handle)
         .ok_or(ZxError::ErrNotFound)?;
-    if thread.exited || thread.started || entry_point == 0 {
+    if !thread.start(entry_point, _stack_top, _arg1, _arg2) {
         return Err(ZxError::ErrBadState);
     }
-    thread.entry_point = entry_point;
-    thread.stack_top = _stack_top;
-    thread.arg1 = _arg1;
-    thread.arg2 = _arg2;
-    thread.started = true;
     Ok(())
 }
 
@@ -5120,12 +5134,7 @@ pub fn sys_task_kill(task_handle: u32) -> ZxResult {
             return Err(ZxError::ErrAccessDenied);
         }
         if let Some(proc) = state.get_process_mut(task_handle) {
-            let pid_to_terminate = if !proc.exited && proc.pid != 0 {
-                Some(proc.pid)
-            } else {
-                None
-            };
-            proc.exited = true;
+            let pid_to_terminate = proc.mark_exited(0);
             if let Some(pid) = pid_to_terminate {
                 let _ = process_manager().terminate_process(pid);
             }
@@ -5133,7 +5142,7 @@ pub fn sys_task_kill(task_handle: u32) -> ZxResult {
             return Ok(());
         }
         if let Some(thread) = state.get_thread_mut(task_handle) {
-            thread.exited = true;
+            thread.mark_exited();
             state.update_signal_value(task_handle, 0, ZX_SIGNAL_TERMINATED);
             return Ok(());
         }
@@ -5239,16 +5248,10 @@ pub fn sys_job_create(parent_job: u32, options: u32, out_handle: &mut u32) -> Zx
         state.resolve_handle(parent_job, ObjectType::Job)
     };
     let handle = state.alloc_object_handle(ObjectType::Job);
-    state.jobs.push(JobRecord {
-        handle,
-        parent: parent_object,
-        child_count: 0,
-        policy_count: 0,
-        critical_process: None,
-    });
+    state.jobs.push(JobRecord::new(handle, parent_object));
     if parent_job != 0 {
         if let Some(parent) = state.get_job_mut(parent_job) {
-            parent.child_count = parent.child_count.saturating_add(1);
+            parent.add_child();
         }
     }
     *out_handle = handle;
@@ -5272,7 +5275,7 @@ pub fn sys_job_set_policy(
     let Some(job) = state.get_job_mut(job_handle) else {
         return Err(ZxError::ErrNotFound);
     };
-    job.policy_count = policy_count;
+    job.set_policy_count(policy_count);
     Ok(())
 }
 
@@ -5293,7 +5296,7 @@ pub fn sys_job_set_critical(job_handle: u32, _options: u32, proc_handle: u32) ->
         .resolve_handle(proc_handle, ObjectType::Process)
         .ok_or(ZxError::ErrInvalidArgs)?;
     if let Some(job) = state.get_job_mut(job_handle) {
-        job.critical_process = Some(proc_object);
+        job.set_critical_process(proc_object);
     }
     Ok(())
 }

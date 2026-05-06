@@ -1,4 +1,5 @@
 /target/
 /kernel8.img
+/smros-fxfs.img
 /.tools/
 /verification/*/target/

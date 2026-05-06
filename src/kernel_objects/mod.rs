@@ -4,6 +4,8 @@
 //! - VMO (Virtual Memory Object)
 //! - VMAR (Virtual Memory Address Region)
 //! - Handle Table
+//! - Job and process task objects
+//! - Capability right profiles
 //! - Channel (IPC mechanism)
 //! - Scheduler (architecture-neutral scheduling policy)
 //!
@@ -20,9 +22,12 @@ pub(crate) mod fifo_logic;
 pub mod futex;
 pub(crate) mod futex_logic;
 pub mod handle;
+pub mod job;
 pub(crate) mod object_logic;
 pub mod port;
 pub(crate) mod port_logic;
+pub mod process;
+pub mod right;
 pub mod scheduler;
 pub mod socket;
 pub(crate) mod socket_logic;
