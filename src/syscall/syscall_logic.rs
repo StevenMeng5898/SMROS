@@ -159,6 +159,10 @@ pub(crate) fn linux_pipe_flags_valid(flags: usize, allowed_mask: usize) -> bool 
     smros_linux_pipe_flags_valid_body!(flags, allowed_mask)
 }
 
+pub(crate) fn linux_namespace_flags_valid(flags: usize, allowed_mask: usize) -> bool {
+    smros_linux_namespace_flags_valid_body!(flags, allowed_mask)
+}
+
 pub(crate) fn linux_dup3_args_valid(old_fd: usize, new_fd: usize) -> bool {
     smros_linux_dup3_args_valid_body!(old_fd, new_fd)
 }

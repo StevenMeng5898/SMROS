@@ -6,7 +6,7 @@ For the `src/kernel_objects/` layout and object responsibilities, see `docs/KERN
 
 ## Current Shell Status
 
-The shell lives in `src/user_level/user_shell.rs`.
+The shell lives in `src/user_level/services/user_shell.rs`.
 
 Important reality:
 

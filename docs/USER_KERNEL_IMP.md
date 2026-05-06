@@ -18,13 +18,13 @@ The short version is:
 - `src/kernel_lowlevel/mmu.rs`
 - `src/syscall/syscall_handler.rs`
 - `src/syscall/syscall_dispatch.rs`
-- `src/user_level/user_process.rs`
-- `src/user_level/elf.rs`
-- `src/user_level/component.rs`
-- `src/user_level/fxfs.rs`
-- `src/user_level/svc.rs`
-- `src/user_level/user_shell.rs`
-- `src/user_level/user_test.rs`
+- `src/user_level/apps/user_process.rs`
+- `src/user_level/services/elf.rs`
+- `src/user_level/services/component.rs`
+- `src/user_level/services/fxfs.rs`
+- `src/user_level/services/svc.rs`
+- `src/user_level/services/user_shell.rs`
+- `src/user_level/apps/user_test.rs`
 - `src/main.rs`
 
 ## What Exists Today
@@ -44,7 +44,7 @@ This is the kernel's main scaffolding for eventual EL0 isolation.
 
 ### User Process Structure
 
-`src/user_level/user_process.rs` defines `UserProcess`, which carries:
+`src/user_level/apps/user_process.rs` defines `UserProcess`, which carries:
 
 - a base `ProcessControlBlock`
 - a `PageTableManager`
@@ -62,7 +62,7 @@ The same file also provides:
 
 ### Minimal Component and FxFS Scaffold
 
-`src/user_level/component.rs` provides a Fuchsia-inspired component topology with:
+`src/user_level/services/component.rs` provides a Fuchsia-inspired component topology with:
 
 - component instances and monikers
 - a single ELF-runner-shaped launch path
@@ -70,7 +70,7 @@ The same file also provides:
 - a boot topology containing `/`, `/bootstrap/fxfs`, and `/bootstrap/user-init`
 - scheduler launcher threads that call `switch_to_el0()` for bootstrap component payloads
 
-`src/user_level/elf.rs` is the current minimal loader:
+`src/user_level/services/elf.rs` is the current minimal loader:
 
 - accepts ELF64 little-endian AArch64 images
 - validates the ELF header, program-header table, entry, and PT_LOAD segment bounds
@@ -79,7 +79,7 @@ The same file also provides:
 
 It does not yet copy segment bytes into process-owned user mappings.
 
-`src/user_level/fxfs.rs` provides the current storage backing for that scaffold:
+`src/user_level/services/fxfs.rs` provides the current storage backing for that scaffold:
 
 - an in-memory object store
 - directory and file object ids with explicit parent/name directory entries
@@ -91,7 +91,7 @@ It does not yet copy segment bytes into process-owned user mappings.
 
 This follows the shape of current Fuchsia userspace enough for SMROS bring-up, but it is not a direct source port and it is not yet a separate userspace service.
 
-`src/user_level/svc.rs` provides a small service directory under `/svc`:
+`src/user_level/services/svc.rs` provides a small service directory under `/svc`:
 
 - `fuchsia.component.Manager`
 - `fuchsia.component.runner.Elf`
@@ -101,13 +101,13 @@ Connecting to a service creates a Zircon channel pair from the kernel channel ta
 
 ### EL0 Test and Shell Entry Points
 
-`src/user_level/user_test.rs` contains:
+`src/user_level/apps/user_test.rs` contains:
 
 - `linux_syscall()` using `svc #0`
 - `user_test_process_entry()`
 - `user_busy_loop_entry()`
 
-`src/user_level/user_shell.rs` contains:
+`src/user_level/services/user_shell.rs` contains:
 
 - `user_shell_entry()`
 - `start_user_shell()`
@@ -172,7 +172,7 @@ So the shell is currently a kernel-resident diagnostic shell, not an isolated us
 
 ## What The Boot-Time EL0 Test Does
 
-`run_user_test()` in `src/user_level/user_test.rs` currently:
+`run_user_test()` in `src/user_level/apps/user_test.rs` currently:
 
 - prints `[EL0]` log prefixes
 - prepares a dedicated 8 KiB EL0 stack

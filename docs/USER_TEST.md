@@ -4,9 +4,9 @@ This document explains what the current user test code actually validates.
 
 ## Relevant Files
 
-- `src/user_level/user_test.rs`
-- `src/user_level/user_process.rs`
-- `src/user_level/user_shell.rs`
+- `src/user_level/apps/user_test.rs`
+- `src/user_level/apps/user_process.rs`
+- `src/user_level/services/user_shell.rs`
 - `src/main.rs`
 
 ## Two Different Test Layers Exist
@@ -39,7 +39,7 @@ This means the current boot-time test now validates the real EL0-to-EL1 syscall 
 
 ## EL0 Helpers
 
-`src/user_level/user_test.rs` contains:
+`src/user_level/apps/user_test.rs` contains:
 
 - `linux_syscall()`
 - `test_getpid()`

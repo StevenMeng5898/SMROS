@@ -5,7 +5,7 @@ use vstd::prelude::*;
 verus! {
 
 include!("../../../src/main_logic_shared.rs");
-include!("../../../src/user_level/user_logic_shared.rs");
+include!("../../../src/user_level/services/user_logic_shared.rs");
 
 pub const KERNEL_HEAP_SIZE: usize = 0x100000;
 pub const PAGE_SIZE: usize = 4096;

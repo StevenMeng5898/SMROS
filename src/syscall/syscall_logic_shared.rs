@@ -201,6 +201,12 @@ macro_rules! smros_linux_pipe_flags_valid_body {
     }};
 }
 
+macro_rules! smros_linux_namespace_flags_valid_body {
+    ($flags:expr, $allowed_mask:expr) => {{
+        ($flags & !$allowed_mask) == 0
+    }};
+}
+
 macro_rules! smros_linux_dup3_args_valid_body {
     ($old_fd:expr, $new_fd:expr) => {{
         $old_fd != $new_fd

@@ -1,22 +1,17 @@
-//! User-space driver framework for SMROS bring-up.
-//!
-//! SMROS does not pass QEMU's live FDT into userspace yet, so this module keeps
-//! a Linux-device-tree-shaped table for QEMU `virt` devices and binds drivers
-//! against it. The block device is a real virtio-mmio block driver; attach a
-//! persistent QEMU raw image with `-drive ...,if=none,id=fxfs -device
-//! virtio-blk-device,drive=fxfs`.
+//! VirtIO-MMIO block driver for QEMU `virt`.
 
 #![allow(dead_code)]
 #![allow(static_mut_refs)]
 
-use alloc::vec::Vec;
 use core::mem::size_of;
 
-const QEMU_VIRT_MACHINE: &str = "linux,dummy-virt";
-const QEMU_VIRTIO_MMIO_BASE: usize = 0x0a00_0000;
-const QEMU_VIRTIO_MMIO_STRIDE: usize = 0x200;
-const QEMU_VIRTIO_MMIO_SLOT_COUNT: usize = 32;
-const QEMU_VIRTIO_BLOCK_SIZE: usize = 512;
+use super::UserDriverError;
+
+pub const MMIO_BASE: usize = 0x0a00_0000;
+pub const MMIO_STRIDE: usize = 0x200;
+pub const MMIO_SLOT_COUNT: usize = 32;
+pub const BLOCK_SIZE: usize = 512;
+
 const QEMU_VIRTIO_F_VERSION_1: u64 = 1 << 32;
 const VIRTIO_BLK_F_FLUSH: u64 = 1 << 9;
 const VIRTIO_BLK_F_CONFIG_WCE: u64 = 1 << 11;
@@ -67,90 +62,6 @@ const REG_QUEUE_DEVICE_HIGH: usize = 0x0a4;
 const REG_CONFIG_GENERATION: usize = 0x0fc;
 const REG_CONFIG_CAPACITY: usize = 0x100;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UserDriverError {
-    NotInitialized,
-    NotFound,
-    NotReady,
-    OutOfRange,
-    InvalidBlock,
-    Unsupported,
-    Io,
-    Timeout,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UserDeviceKind {
-    Cpu,
-    Memory,
-    Serial,
-    InterruptController,
-    Timer,
-    VirtioMmio,
-    Block,
-}
-
-impl UserDeviceKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            UserDeviceKind::Cpu => "cpu",
-            UserDeviceKind::Memory => "memory",
-            UserDeviceKind::Serial => "serial",
-            UserDeviceKind::InterruptController => "interrupt-controller",
-            UserDeviceKind::Timer => "timer",
-            UserDeviceKind::VirtioMmio => "virtio-mmio",
-            UserDeviceKind::Block => "block",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct UserDeviceReg {
-    pub base: u64,
-    pub size: u64,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct UserDeviceNode {
-    pub path: &'static str,
-    pub name: &'static str,
-    pub compatible: &'static str,
-    pub status: &'static str,
-    pub kind: UserDeviceKind,
-    pub reg: Option<UserDeviceReg>,
-    pub irq: Option<u32>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct UserDriverBinding {
-    pub node_path: &'static str,
-    pub driver: &'static str,
-    pub device_name: &'static str,
-    pub kind: UserDeviceKind,
-    pub block_size: usize,
-    pub block_count: usize,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct UserDriverStats {
-    pub initialized: bool,
-    pub machine: &'static str,
-    pub nodes: usize,
-    pub bindings: usize,
-    pub block_ready: bool,
-    pub mmio_base: usize,
-    pub device_status: u32,
-    pub last_error: Option<UserDriverError>,
-    pub block_size: usize,
-    pub block_count: usize,
-    pub bytes: usize,
-    pub reads: u64,
-    pub writes: u64,
-    pub flushes: u64,
-    pub bytes_read: u64,
-    pub bytes_written: u64,
-}
-
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
 struct VirtqDesc {
@@ -196,7 +107,7 @@ struct VirtioBlockQueue {
     used: VirtqUsed,
     req: VirtioBlkReq,
     status: u8,
-    data: [u8; QEMU_VIRTIO_BLOCK_SIZE],
+    data: [u8; BLOCK_SIZE],
 }
 
 impl VirtioBlockQueue {
@@ -225,7 +136,7 @@ impl VirtioBlockQueue {
                 sector: 0,
             },
             status: 0xff,
-            data: [0; QEMU_VIRTIO_BLOCK_SIZE],
+            data: [0; BLOCK_SIZE],
         }
     }
 }
@@ -251,7 +162,7 @@ impl QemuVirtBlockDriver {
         Self {
             ready: false,
             modern: false,
-            mmio_base: QEMU_VIRTIO_MMIO_BASE,
+            mmio_base: MMIO_BASE,
             flush_supported: false,
             capacity_blocks: 0,
             last_used_idx: 0,
@@ -265,8 +176,8 @@ impl QemuVirtBlockDriver {
     }
 
     fn bind(&mut self) -> Result<(), UserDriverError> {
-        for slot in 0..QEMU_VIRTIO_MMIO_SLOT_COUNT {
-            let base = QEMU_VIRTIO_MMIO_BASE + slot * QEMU_VIRTIO_MMIO_STRIDE;
+        for slot in 0..MMIO_SLOT_COUNT {
+            let base = MMIO_BASE + slot * MMIO_STRIDE;
             if self.bind_at(base).is_ok() {
                 self.last_error = None;
                 return Ok(());
@@ -415,9 +326,9 @@ impl QemuVirtBlockDriver {
         }
         let mut done = 0usize;
         while done < out.len() {
-            let block = (offset + done) / QEMU_VIRTIO_BLOCK_SIZE;
-            let block_offset = (offset + done) % QEMU_VIRTIO_BLOCK_SIZE;
-            let len = core::cmp::min(QEMU_VIRTIO_BLOCK_SIZE - block_offset, out.len() - done);
+            let block = (offset + done) / BLOCK_SIZE;
+            let block_offset = (offset + done) % BLOCK_SIZE;
+            let len = core::cmp::min(BLOCK_SIZE - block_offset, out.len() - done);
             if let Err(err) = self.read_block(block, unsafe { &mut VIRTIO_QUEUE.data }) {
                 self.last_error = Some(err);
                 return Err(err);
@@ -445,10 +356,10 @@ impl QemuVirtBlockDriver {
         }
         let mut done = 0usize;
         while done < data.len() {
-            let block = (offset + done) / QEMU_VIRTIO_BLOCK_SIZE;
-            let block_offset = (offset + done) % QEMU_VIRTIO_BLOCK_SIZE;
-            let len = core::cmp::min(QEMU_VIRTIO_BLOCK_SIZE - block_offset, data.len() - done);
-            if block_offset != 0 || len != QEMU_VIRTIO_BLOCK_SIZE {
+            let block = (offset + done) / BLOCK_SIZE;
+            let block_offset = (offset + done) % BLOCK_SIZE;
+            let len = core::cmp::min(BLOCK_SIZE - block_offset, data.len() - done);
+            if block_offset != 0 || len != BLOCK_SIZE {
                 if let Err(err) = self.read_block(block, unsafe { &mut VIRTIO_QUEUE.data }) {
                     self.last_error = Some(err);
                     return Err(err);
@@ -462,7 +373,7 @@ impl QemuVirtBlockDriver {
                 VIRTIO_BLK_T_OUT,
                 block as u64,
                 unsafe { VIRTIO_QUEUE.data.as_mut_ptr() },
-                QEMU_VIRTIO_BLOCK_SIZE,
+                BLOCK_SIZE,
             ) {
                 self.last_error = Some(err);
                 return Err(err);
@@ -476,7 +387,7 @@ impl QemuVirtBlockDriver {
     }
 
     fn read_block(&mut self, block: usize, out: &mut [u8]) -> Result<usize, UserDriverError> {
-        if out.len() != QEMU_VIRTIO_BLOCK_SIZE {
+        if out.len() != BLOCK_SIZE {
             return Err(UserDriverError::InvalidBlock);
         }
         if block >= self.capacity_blocks {
@@ -491,7 +402,7 @@ impl QemuVirtBlockDriver {
     }
 
     fn write_block(&mut self, block: usize, data: &[u8]) -> Result<usize, UserDriverError> {
-        if data.len() != QEMU_VIRTIO_BLOCK_SIZE {
+        if data.len() != BLOCK_SIZE {
             return Err(UserDriverError::InvalidBlock);
         }
         if block >= self.capacity_blocks {
@@ -504,7 +415,7 @@ impl QemuVirtBlockDriver {
             VIRTIO_BLK_T_OUT,
             block as u64,
             unsafe { VIRTIO_QUEUE.data.as_mut_ptr() },
-            QEMU_VIRTIO_BLOCK_SIZE,
+            BLOCK_SIZE,
         ) {
             self.last_error = Some(err);
             return Err(err);
@@ -523,7 +434,7 @@ impl QemuVirtBlockDriver {
                 VIRTIO_BLK_T_OUT,
                 block as u64,
                 unsafe { VIRTIO_QUEUE.data.as_mut_ptr() },
-                QEMU_VIRTIO_BLOCK_SIZE,
+                BLOCK_SIZE,
             ) {
                 self.last_error = Some(err);
                 return Err(err);
@@ -532,7 +443,7 @@ impl QemuVirtBlockDriver {
         self.writes = self.writes.saturating_add(1);
         self.bytes_written = self
             .bytes_written
-            .saturating_add((self.capacity_blocks * QEMU_VIRTIO_BLOCK_SIZE) as u64);
+            .saturating_add((self.capacity_blocks * BLOCK_SIZE) as u64);
         Ok(())
     }
 
@@ -615,7 +526,7 @@ impl QemuVirtBlockDriver {
 
     fn check_range(&self, offset: usize, len: usize) -> Result<(), UserDriverError> {
         let end = offset.checked_add(len).ok_or(UserDriverError::OutOfRange)?;
-        let capacity = self.capacity_blocks * QEMU_VIRTIO_BLOCK_SIZE;
+        let capacity = self.capacity_blocks * BLOCK_SIZE;
         if end > capacity {
             Err(UserDriverError::OutOfRange)
         } else {
@@ -624,163 +535,90 @@ impl QemuVirtBlockDriver {
     }
 }
 
-struct UserDriverFramework {
-    initialized: bool,
-    nodes: Vec<UserDeviceNode>,
-    bindings: Vec<UserDriverBinding>,
-    block: QemuVirtBlockDriver,
-}
-
-impl UserDriverFramework {
-    fn new() -> Self {
-        Self {
-            initialized: false,
-            nodes: Vec::new(),
-            bindings: Vec::new(),
-            block: QemuVirtBlockDriver::new(),
-        }
-    }
-
-    fn init(&mut self) -> bool {
-        if self.initialized {
-            return true;
-        }
-
-        self.nodes.clear();
-        self.bindings.clear();
-        self.install_qemu_virt_tree();
-        self.probe();
-        self.initialized = self.block.ready;
-        self.initialized
-    }
-
-    fn install_qemu_virt_tree(&mut self) {
-        self.nodes.push(UserDeviceNode {
-            path: "/cpus/cpu@0",
-            name: "cpu@0",
-            compatible: "arm,cortex-a57",
-            status: "okay",
-            kind: UserDeviceKind::Cpu,
-            reg: Some(UserDeviceReg { base: 0, size: 1 }),
-            irq: None,
-        });
-        self.nodes.push(UserDeviceNode {
-            path: "/memory@40000000",
-            name: "memory@40000000",
-            compatible: "qemu,virt-memory",
-            status: "okay",
-            kind: UserDeviceKind::Memory,
-            reg: Some(UserDeviceReg {
-                base: 0x4000_0000,
-                size: 0x2000_0000,
-            }),
-            irq: None,
-        });
-        self.nodes.push(UserDeviceNode {
-            path: "/pl011@9000000",
-            name: "pl011@9000000",
-            compatible: "arm,pl011",
-            status: "okay",
-            kind: UserDeviceKind::Serial,
-            reg: Some(UserDeviceReg {
-                base: 0x0900_0000,
-                size: 0x1000,
-            }),
-            irq: Some(33),
-        });
-        self.nodes.push(UserDeviceNode {
-            path: "/intc@8000000",
-            name: "intc@8000000",
-            compatible: "arm,cortex-a15-gic",
-            status: "okay",
-            kind: UserDeviceKind::InterruptController,
-            reg: Some(UserDeviceReg {
-                base: 0x0800_0000,
-                size: 0x10000,
-            }),
-            irq: None,
-        });
-        self.nodes.push(UserDeviceNode {
-            path: "/timer",
-            name: "timer",
-            compatible: "arm,armv8-timer",
-            status: "okay",
-            kind: UserDeviceKind::Timer,
-            reg: None,
-            irq: Some(27),
-        });
-        self.nodes.push(UserDeviceNode {
-            path: "/virtio_mmio@a000000",
-            name: "virtio_mmio@a000000..a003e00",
-            compatible: "virtio,mmio",
-            status: "okay",
-            kind: UserDeviceKind::VirtioMmio,
-            reg: Some(UserDeviceReg {
-                base: QEMU_VIRTIO_MMIO_BASE as u64,
-                size: (QEMU_VIRTIO_MMIO_STRIDE * QEMU_VIRTIO_MMIO_SLOT_COUNT) as u64,
-            }),
-            irq: Some(48),
-        });
-    }
-
-    fn probe(&mut self) {
-        for node in &self.nodes {
-            if node.compatible == "virtio,mmio"
-                && node.status == "okay"
-                && node.kind == UserDeviceKind::VirtioMmio
-                && self.block.bind().is_ok()
-            {
-                self.bindings.push(UserDriverBinding {
-                    node_path: node.path,
-                    driver: "qemu-virtio-mmio-block",
-                    device_name: "vblk0",
-                    kind: UserDeviceKind::Block,
-                    block_size: QEMU_VIRTIO_BLOCK_SIZE,
-                    block_count: self.block.capacity_blocks,
-                });
-            }
-        }
-    }
-
-    fn stats(&self) -> UserDriverStats {
-        let block_count = self.block.capacity_blocks;
-        UserDriverStats {
-            initialized: self.initialized,
-            machine: QEMU_VIRT_MACHINE,
-            nodes: self.nodes.len(),
-            bindings: self.bindings.len(),
-            block_ready: self.block.ready,
-            mmio_base: self.block.mmio_base,
-            device_status: if self.block.ready {
-                set_active_mmio_base(self.block.mmio_base);
-                mmio_read(REG_STATUS)
-            } else {
-                0
-            },
-            last_error: self.block.last_error,
-            block_size: QEMU_VIRTIO_BLOCK_SIZE,
-            block_count,
-            bytes: block_count.saturating_mul(QEMU_VIRTIO_BLOCK_SIZE),
-            reads: self.block.reads,
-            writes: self.block.writes,
-            flushes: self.block.flushes,
-            bytes_read: self.block.bytes_read,
-            bytes_written: self.block.bytes_written,
-        }
-    }
-}
-
-static mut DRIVER_FRAMEWORK: Option<UserDriverFramework> = None;
+static mut DRIVER: QemuVirtBlockDriver = QemuVirtBlockDriver::new();
 static mut VIRTIO_QUEUE: VirtioBlockQueue = VirtioBlockQueue::new();
-static mut ACTIVE_VIRTIO_MMIO_BASE: usize = QEMU_VIRTIO_MMIO_BASE;
+static mut ACTIVE_VIRTIO_MMIO_BASE: usize = MMIO_BASE;
 
-fn framework() -> &'static mut UserDriverFramework {
-    unsafe {
-        if DRIVER_FRAMEWORK.is_none() {
-            DRIVER_FRAMEWORK = Some(UserDriverFramework::new());
-        }
-        DRIVER_FRAMEWORK.as_mut().unwrap()
+fn driver() -> &'static mut QemuVirtBlockDriver {
+    unsafe { &mut DRIVER }
+}
+
+pub fn bind() -> Result<(), UserDriverError> {
+    driver().bind()
+}
+
+pub fn ready() -> bool {
+    driver().ready
+}
+
+pub fn mmio_base() -> usize {
+    driver().mmio_base
+}
+
+pub fn device_status() -> u32 {
+    let driver = driver();
+    if driver.ready {
+        set_active_mmio_base(driver.mmio_base);
+        mmio_read(REG_STATUS)
+    } else {
+        0
     }
+}
+
+pub fn last_error() -> Option<UserDriverError> {
+    driver().last_error
+}
+
+pub fn capacity_blocks() -> usize {
+    driver().capacity_blocks
+}
+
+pub fn capacity_bytes() -> usize {
+    capacity_blocks().saturating_mul(BLOCK_SIZE)
+}
+
+pub fn reads() -> u64 {
+    driver().reads
+}
+
+pub fn writes() -> u64 {
+    driver().writes
+}
+
+pub fn flushes() -> u64 {
+    driver().flushes
+}
+
+pub fn bytes_read() -> u64 {
+    driver().bytes_read
+}
+
+pub fn bytes_written() -> u64 {
+    driver().bytes_written
+}
+
+pub fn read_at(offset: usize, out: &mut [u8]) -> Result<usize, UserDriverError> {
+    driver().read_at(offset, out)
+}
+
+pub fn write_at(offset: usize, data: &[u8]) -> Result<usize, UserDriverError> {
+    driver().write_at(offset, data)
+}
+
+pub fn read(block: usize, out: &mut [u8]) -> Result<usize, UserDriverError> {
+    driver().read_block(block, out)
+}
+
+pub fn write(block: usize, data: &[u8]) -> Result<usize, UserDriverError> {
+    driver().write_block(block, data)
+}
+
+pub fn clear() -> Result<(), UserDriverError> {
+    driver().clear()
+}
+
+pub fn flush() -> Result<(), UserDriverError> {
+    driver().flush()
 }
 
 fn set_active_mmio_base(base: usize) {
@@ -805,97 +643,4 @@ fn memory_barrier() {
     unsafe {
         core::arch::asm!("dsb sy", options(nostack, preserves_flags));
     }
-}
-
-pub fn init() -> bool {
-    framework().init()
-}
-
-pub fn stats() -> UserDriverStats {
-    framework().stats()
-}
-
-pub fn device_nodes() -> Vec<UserDeviceNode> {
-    framework().nodes.clone()
-}
-
-pub fn bindings() -> Vec<UserDriverBinding> {
-    framework().bindings.clone()
-}
-
-pub fn block_ready() -> bool {
-    framework().block.ready
-}
-
-pub fn block_size() -> usize {
-    QEMU_VIRTIO_BLOCK_SIZE
-}
-
-pub fn block_count() -> usize {
-    framework().block.capacity_blocks
-}
-
-pub fn block_capacity() -> usize {
-    block_count().saturating_mul(QEMU_VIRTIO_BLOCK_SIZE)
-}
-
-pub fn block_read_at(offset: usize, out: &mut [u8]) -> Result<usize, UserDriverError> {
-    if !framework().initialized && !framework().init() {
-        return Err(UserDriverError::NotInitialized);
-    }
-    framework().block.read_at(offset, out)
-}
-
-pub fn block_write_at(offset: usize, data: &[u8]) -> Result<usize, UserDriverError> {
-    if !framework().initialized && !framework().init() {
-        return Err(UserDriverError::NotInitialized);
-    }
-    framework().block.write_at(offset, data)
-}
-
-pub fn block_read(block: usize, out: &mut [u8]) -> Result<usize, UserDriverError> {
-    if !framework().initialized && !framework().init() {
-        return Err(UserDriverError::NotInitialized);
-    }
-    framework().block.read_block(block, out)
-}
-
-pub fn block_write(block: usize, data: &[u8]) -> Result<usize, UserDriverError> {
-    if !framework().initialized && !framework().init() {
-        return Err(UserDriverError::NotInitialized);
-    }
-    framework().block.write_block(block, data)
-}
-
-pub fn block_clear() -> Result<(), UserDriverError> {
-    if !framework().initialized && !framework().init() {
-        return Err(UserDriverError::NotInitialized);
-    }
-    framework().block.clear()
-}
-
-pub fn block_flush() -> Result<(), UserDriverError> {
-    if !framework().initialized && !framework().init() {
-        return Err(UserDriverError::NotInitialized);
-    }
-    framework().block.flush()
-}
-
-pub fn smoke_test() -> bool {
-    if !init() || !block_ready() || block_count() < 2 {
-        return false;
-    }
-    let mut block = [0u8; QEMU_VIRTIO_BLOCK_SIZE];
-    if block_read(1, &mut block).is_err() {
-        return false;
-    }
-    let saved = block;
-    block[0..11].copy_from_slice(b"smros-block");
-    if block_write(1, &block).is_err() {
-        return false;
-    }
-    let mut out = [0u8; QEMU_VIRTIO_BLOCK_SIZE];
-    let ok = block_read(1, &mut out).is_ok() && out[0..11] == *b"smros-block";
-    let _ = block_write(1, &saved);
-    ok && block_flush().is_ok()
 }

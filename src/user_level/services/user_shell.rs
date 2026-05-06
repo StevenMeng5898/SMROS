@@ -173,6 +173,16 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_porttest,
     },
     ShellCommand {
+        name: "dockertest",
+        description: "Run Docker/runc compatibility surface tests",
+        handler: cmd_dockertest,
+    },
+    ShellCommand {
+        name: "docker",
+        description: "Run local Docker/OCI images",
+        handler: cmd_docker,
+    },
+    ShellCommand {
         name: "uptime",
         description: "Show system uptime",
         handler: cmd_uptime,
@@ -3699,6 +3709,10 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         return;
     }
 
+    if !run_docker_compat_tests(ctx) {
+        return;
+    }
+
     ctx.serial.write_str("[TEST] Closing VMO handle... ");
     match crate::syscall::sys_handle_close(vmo_handle) {
         Ok(_) => ctx.serial.write_str("[OK] handle closed\n"),
@@ -3795,6 +3809,185 @@ fn run_ported_app_tests(ctx: &mut ShellContext) -> bool {
     }
 
     true
+}
+
+fn print_docker_compat_error(
+    serial: &mut Serial,
+    err: crate::user_level::docker_compat::DockerCompatError,
+) {
+    let text = match err {
+        crate::user_level::docker_compat::DockerCompatError::FxfsInit => "fxfs init",
+        crate::user_level::docker_compat::DockerCompatError::FxfsPrepare => "fxfs prepare",
+        crate::user_level::docker_compat::DockerCompatError::OciInstall => "oci bundle install",
+        crate::user_level::docker_compat::DockerCompatError::OciRead => "oci config read",
+        crate::user_level::docker_compat::DockerCompatError::OciParse => "oci config parse",
+        crate::user_level::docker_compat::DockerCompatError::RightsConfig(_) => "rights config",
+        crate::user_level::docker_compat::DockerCompatError::RuntimeJob(_) => "runtime job",
+        crate::user_level::docker_compat::DockerCompatError::RuntimeProcess(_) => "runtime process",
+        crate::user_level::docker_compat::DockerCompatError::RuntimeThread(_) => "runtime thread",
+        crate::user_level::docker_compat::DockerCompatError::RuntimeStart(_) => "runtime start",
+        crate::user_level::docker_compat::DockerCompatError::Namespace(_) => "namespace",
+        crate::user_level::docker_compat::DockerCompatError::Mount(_) => "mount",
+        crate::user_level::docker_compat::DockerCompatError::PivotRoot(_) => "pivot_root",
+        crate::user_level::docker_compat::DockerCompatError::Chroot(_) => "chroot",
+        crate::user_level::docker_compat::DockerCompatError::Uts(_) => "uts",
+        crate::user_level::docker_compat::DockerCompatError::NoNewPrivs(_) => "no_new_privs",
+        crate::user_level::docker_compat::DockerCompatError::Seccomp(_) => "seccomp",
+        crate::user_level::docker_compat::DockerCompatError::CapGet(_) => "capget",
+        crate::user_level::docker_compat::DockerCompatError::CapSet(_) => "capset",
+        crate::user_level::docker_compat::DockerCompatError::CgroupOpen(_) => "cgroup open",
+        crate::user_level::docker_compat::DockerCompatError::CgroupWrite(_) => "cgroup write",
+        crate::user_level::docker_compat::DockerCompatError::CgroupClose(_) => "cgroup close",
+        crate::user_level::docker_compat::DockerCompatError::AppArmorOpen(_) => "apparmor open",
+        crate::user_level::docker_compat::DockerCompatError::AppArmorWrite(_) => "apparmor write",
+        crate::user_level::docker_compat::DockerCompatError::AppArmorClose(_) => "apparmor close",
+        crate::user_level::docker_compat::DockerCompatError::StateMismatch => "state mismatch",
+    };
+    serial.write_str(text);
+    match err {
+        crate::user_level::docker_compat::DockerCompatError::Namespace(code)
+        | crate::user_level::docker_compat::DockerCompatError::Mount(code)
+        | crate::user_level::docker_compat::DockerCompatError::PivotRoot(code)
+        | crate::user_level::docker_compat::DockerCompatError::Chroot(code)
+        | crate::user_level::docker_compat::DockerCompatError::Uts(code)
+        | crate::user_level::docker_compat::DockerCompatError::NoNewPrivs(code)
+        | crate::user_level::docker_compat::DockerCompatError::Seccomp(code)
+        | crate::user_level::docker_compat::DockerCompatError::CapGet(code)
+        | crate::user_level::docker_compat::DockerCompatError::CapSet(code)
+        | crate::user_level::docker_compat::DockerCompatError::CgroupOpen(code)
+        | crate::user_level::docker_compat::DockerCompatError::CgroupWrite(code)
+        | crate::user_level::docker_compat::DockerCompatError::CgroupClose(code)
+        | crate::user_level::docker_compat::DockerCompatError::AppArmorOpen(code)
+        | crate::user_level::docker_compat::DockerCompatError::AppArmorWrite(code)
+        | crate::user_level::docker_compat::DockerCompatError::AppArmorClose(code) => {
+            serial.write_str(" error=");
+            print_number(serial, code as u32);
+        }
+        crate::user_level::docker_compat::DockerCompatError::RightsConfig(code)
+        | crate::user_level::docker_compat::DockerCompatError::RuntimeJob(code)
+        | crate::user_level::docker_compat::DockerCompatError::RuntimeProcess(code)
+        | crate::user_level::docker_compat::DockerCompatError::RuntimeThread(code)
+        | crate::user_level::docker_compat::DockerCompatError::RuntimeStart(code) => {
+            serial.write_str(" zx=");
+            print_number(serial, (-(code as i32)) as u32);
+        }
+        _ => {}
+    }
+}
+
+fn run_docker_compat_tests(ctx: &mut ShellContext) -> bool {
+    ctx.serial
+        .write_str("[TEST] Testing Docker/runc compatibility surfaces... ");
+    match crate::user_level::docker_compat::run_docker_runtime_port() {
+        Ok(result) => {
+            ctx.serial.write_str("[OK] ns=0x");
+            print_hex(&mut ctx.serial, result.namespace_flags as u64);
+            ctx.serial.write_str(" mounts=");
+            print_number(&mut ctx.serial, result.mount_count as u32);
+            ctx.serial.write_str(" seccomp=");
+            print_number(&mut ctx.serial, result.seccomp_mode as u32);
+            ctx.serial.write_str(" filters=");
+            print_number(&mut ctx.serial, result.seccomp_filters as u32);
+            ctx.serial.write_str(" oci=");
+            print_number(&mut ctx.serial, result.oci_config_bytes as u32);
+            ctx.serial.write_str("B mounts=");
+            print_number(&mut ctx.serial, result.oci_mounts as u32);
+            ctx.serial.write_str(" args=");
+            print_number(&mut ctx.serial, result.oci_args as u32);
+            ctx.serial.write_str(" env=");
+            print_number(&mut ctx.serial, result.oci_env as u32);
+            ctx.serial.write_str(" masked=");
+            print_number(&mut ctx.serial, result.masked_paths as u32);
+            ctx.serial.write_str(" ro=");
+            print_number(&mut ctx.serial, result.readonly_paths as u32);
+            ctx.serial.write_str(" proc=0x");
+            print_hex(&mut ctx.serial, result.process_handle as u64);
+            ctx.serial.write_str(" thread=0x");
+            print_hex(&mut ctx.serial, result.thread_handle as u64);
+            ctx.serial.write_str("\n");
+            true
+        }
+        Err(err) => {
+            ctx.serial.write_str("[FAIL] ");
+            print_docker_compat_error(&mut ctx.serial, err);
+            ctx.serial.write_str("\n");
+            false
+        }
+    }
+}
+
+/// Command: dockertest - Run Docker/runc compatibility smoke tests
+fn cmd_dockertest(ctx: &mut ShellContext, _args: &[&str]) {
+    ctx.serial
+        .write_str("\n=== Docker/runc Compatibility Test ===\n\n");
+    let _ = run_docker_compat_tests(ctx);
+    ctx.serial.write_str("\n");
+}
+
+/// Command: docker - Run local Docker/OCI images
+fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
+    if args.is_empty() {
+        ctx.serial
+            .write_str("usage: docker images | docker run <image> [command...]\n\n");
+        return;
+    }
+
+    match args[0] {
+        "images" => match crate::user_level::docker_compat::builtin_image_info() {
+            Ok(image) => {
+                ctx.serial
+                    .write_str("REPOSITORY          TAG       LAYERS  CONFIG  ROOTFS\n");
+                ctx.serial.write_str("smros/hello         latest    ");
+                print_number(&mut ctx.serial, image.layers as u32);
+                ctx.serial.write_str("       ");
+                print_number(&mut ctx.serial, image.config_bytes as u32);
+                ctx.serial.write_str("B    ");
+                ctx.serial.write_str(image.rootfs);
+                ctx.serial.write_str("\n\n");
+            }
+            Err(err) => {
+                ctx.serial.write_str("docker images failed: ");
+                print_docker_compat_error(&mut ctx.serial, err);
+                ctx.serial.write_str("\n\n");
+            }
+        },
+        "run" => {
+            if args.len() < 2 {
+                ctx.serial
+                    .write_str("usage: docker run <image> [command...]\n\n");
+                return;
+            }
+            ctx.serial.write_str("[DOCKER] run ");
+            ctx.serial.write_str(args[1]);
+            ctx.serial.write_str("\n");
+            match crate::user_level::docker_compat::run_docker_image(args[1], &args[2..]) {
+                Ok(result) => {
+                    ctx.serial.write_str("[OK] image=");
+                    ctx.serial.write_str(result.image);
+                    ctx.serial.write_str(" proc=0x");
+                    print_hex(&mut ctx.serial, result.runtime.process_handle as u64);
+                    ctx.serial.write_str(" thread=0x");
+                    print_hex(&mut ctx.serial, result.runtime.thread_handle as u64);
+                    ctx.serial.write_str(" ns=0x");
+                    print_hex(&mut ctx.serial, result.runtime.namespace_flags as u64);
+                    ctx.serial.write_str(" mounts=");
+                    print_number(&mut ctx.serial, result.runtime.mount_count as u32);
+                    ctx.serial.write_str(" seccomp=");
+                    print_number(&mut ctx.serial, result.runtime.seccomp_mode as u32);
+                    ctx.serial.write_str("\n\n");
+                }
+                Err(err) => {
+                    ctx.serial.write_str("[FAIL] ");
+                    print_docker_compat_error(&mut ctx.serial, err);
+                    ctx.serial.write_str("\n\n");
+                }
+            }
+        }
+        _ => {
+            ctx.serial
+                .write_str("usage: docker images | docker run <image> [command...]\n\n");
+        }
+    }
 }
 
 /// Command: porttest - Run ported app compatibility smoke tests

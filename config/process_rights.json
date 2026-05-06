@@ -128,6 +128,30 @@
       "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "destroy", "inspect", "op_children"],
       "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "get_policy", "signal", "wait", "inspect"],
       "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "destroy", "signal", "wait", "inspect"]
+    },
+    {
+      "name": "dockerd",
+      "kind": "guest",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "get_policy", "signal", "wait", "inspect"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "destroy", "signal", "wait", "inspect"]
+    },
+    {
+      "name": "containerd",
+      "kind": "guest",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "get_policy", "signal", "wait", "inspect"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "destroy", "signal", "wait", "inspect"]
+    },
+    {
+      "name": "runc",
+      "kind": "guest",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "get_policy", "signal", "wait", "inspect"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "destroy", "signal", "wait", "inspect"]
     }
   ]
 }

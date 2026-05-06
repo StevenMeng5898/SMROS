@@ -14,16 +14,13 @@
 
 #![allow(dead_code)]
 
-pub mod compat_apps;
-pub mod component;
+pub mod apps;
 pub mod drivers;
-pub mod elf;
-pub mod fxfs;
-pub mod svc;
-pub(crate) mod user_logic;
-pub mod user_process;
-pub mod user_shell;
-pub mod user_test;
+pub mod services;
+
+pub use apps::{user_process, user_test};
+pub(crate) use services::user_logic;
+pub use services::{compat_apps, component, docker_compat, elf, fxfs, svc, user_shell};
 
 /// Initialize user-level process subsystem
 pub fn init() {

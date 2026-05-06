@@ -9,7 +9,7 @@ Relevant code:
 - `src/syscall/syscall.rs`
 - `src/kernel_objects/vmo.rs`
 - `src/kernel_objects/vmar.rs`
-- `src/user_level/user_shell.rs`
+- `src/user_level/services/user_shell.rs`
 - `src/kernel_lowlevel/memory.rs`
 
 ## Summary

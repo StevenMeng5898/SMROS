@@ -10,7 +10,7 @@ use super::types::{
 };
 
 pub const MAX_PROCESS_NAME_BYTES: usize = 32;
-pub const MAX_PROCESS_RIGHT_CONFIG_ENTRIES: usize = 16;
+pub const MAX_PROCESS_RIGHT_CONFIG_ENTRIES: usize = 24;
 pub const BOOT_PROCESS_RIGHT_CONFIG_JSON: &str = include_str!("../../config/process_rights.json");
 
 pub const TRUSTED_PROCESS_RIGHTS: u32 = Rights::DefaultProcess as u32;
@@ -609,6 +609,7 @@ pub fn user_process_kind_for_name(name: &str) -> UserProcessKind {
         "user_init" | "user-init" | "init" => UserProcessKind::UserInit,
         "shell" | "user_shell" => UserProcessKind::Shell,
         "test" | "smros-test" | "zircon_proc" => UserProcessKind::Test,
+        "dockerd" | "containerd" | "runc" => UserProcessKind::Guest,
         _ => UserProcessKind::Guest,
     }
 }

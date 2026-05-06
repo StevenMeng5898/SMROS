@@ -209,10 +209,10 @@ The current boot path directly uses:
 
 - `scheduler.rs` for thread creation
 - `thread.rs` for user-thread context scaffolding
-- `src/user_level/component.rs` for a minimal Fuchsia-style component topology
-- `src/user_level/elf.rs` for minimal ELF64/AArch64 boot-component parsing
-- `src/user_level/fxfs.rs` for an in-memory FxFS-shaped object store used by the component namespace scaffold
-- `src/user_level/svc.rs` for a minimal `/svc` directory using Zircon channels and fixed request/reply structs
+- `src/user_level/services/component.rs` for a minimal Fuchsia-style component topology
+- `src/user_level/services/elf.rs` for minimal ELF64/AArch64 boot-component parsing
+- `src/user_level/services/fxfs.rs` for an in-memory FxFS-shaped object store used by the component namespace scaffold
+- `src/user_level/services/svc.rs` for a minimal `/svc` directory using Zircon channels and fixed request/reply structs
 
 ## Current Design Reality
 

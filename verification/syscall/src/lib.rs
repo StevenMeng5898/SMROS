@@ -105,6 +105,20 @@ pub const LINUX_SEEK_MAX_WHENCE: usize = 5;
 pub const LINUX_MAX_IOV: usize = 1024;
 pub const LINUX_MAX_POLL_FDS: usize = 1024;
 pub const LINUX_POLL_ALLOWED_EVENTS: i16 = 0x0001 | 0x0004 | 0x0008 | 0x0010 | 0x0020 | 0x0040;
+pub const LINUX_CLONE_NEWNS: usize = 0x0002_0000;
+pub const LINUX_CLONE_NEWCGROUP: usize = 0x0200_0000;
+pub const LINUX_CLONE_NEWUTS: usize = 0x0400_0000;
+pub const LINUX_CLONE_NEWIPC: usize = 0x0800_0000;
+pub const LINUX_CLONE_NEWUSER: usize = 0x1000_0000;
+pub const LINUX_CLONE_NEWPID: usize = 0x2000_0000;
+pub const LINUX_CLONE_NEWNET: usize = 0x4000_0000;
+pub const LINUX_CONTAINER_NAMESPACE_FLAGS: usize = LINUX_CLONE_NEWNS
+    | LINUX_CLONE_NEWCGROUP
+    | LINUX_CLONE_NEWUTS
+    | LINUX_CLONE_NEWIPC
+    | LINUX_CLONE_NEWUSER
+    | LINUX_CLONE_NEWPID
+    | LINUX_CLONE_NEWNET;
 
 #[derive(Copy, Clone)]
 struct LinuxRange {
@@ -838,6 +852,13 @@ fn linux_pipe_flags_valid(flags: usize, allowed_mask: usize) -> (out: bool)
         out == linux_usize_options_within_mask_spec(flags, allowed_mask),
 {
     smros_linux_pipe_flags_valid_body!(flags, allowed_mask)
+}
+
+fn linux_namespace_flags_valid(flags: usize, allowed_mask: usize) -> (out: bool)
+    ensures
+        out == linux_usize_options_within_mask_spec(flags, allowed_mask),
+{
+    smros_linux_namespace_flags_valid_body!(flags, allowed_mask)
 }
 
 fn linux_dup3_args_valid(old_fd: usize, new_fd: usize) -> (out: bool)
@@ -1671,6 +1692,12 @@ fn syscall_linux_signal_ipc_misc_net_exec_smoke() {
     let memfd_flags_bad = linux_memfd_flags_valid(8, LINUX_MEMFD_ALLOWED_FLAGS);
     let getrandom_flags_ok = linux_getrandom_flags_valid(1, LINUX_GETRANDOM_ALLOWED_FLAGS);
     let getrandom_flags_bad = linux_getrandom_flags_valid(4, LINUX_GETRANDOM_ALLOWED_FLAGS);
+    let namespace_flags_ok = linux_namespace_flags_valid(
+        LINUX_CLONE_NEWNS | LINUX_CLONE_NEWCGROUP | LINUX_CLONE_NEWNET,
+        LINUX_CONTAINER_NAMESPACE_FLAGS,
+    );
+    let namespace_flags_bad =
+        linux_namespace_flags_valid(0x8000_0000, LINUX_CONTAINER_NAMESPACE_FLAGS);
 
     assert(signal_zero_valid == linux_signal_valid_spec(0, LINUX_MAX_SIGNAL as int));
     assert(signal_zero_action == linux_signal_action_valid_spec(0, LINUX_MAX_SIGNAL as int));
@@ -1756,6 +1783,16 @@ fn syscall_linux_signal_ipc_misc_net_exec_smoke() {
     assert(getrandom_flags_ok);
     assert(!linux_u32_options_within_mask_spec(4, LINUX_GETRANDOM_ALLOWED_FLAGS)) by(bit_vector);
     assert(!getrandom_flags_bad);
+    assert(linux_usize_options_within_mask_spec(
+        LINUX_CLONE_NEWNS | LINUX_CLONE_NEWCGROUP | LINUX_CLONE_NEWNET,
+        LINUX_CONTAINER_NAMESPACE_FLAGS,
+    )) by(bit_vector);
+    assert(namespace_flags_ok);
+    assert(!linux_usize_options_within_mask_spec(
+        0x8000_0000,
+        LINUX_CONTAINER_NAMESPACE_FLAGS,
+    )) by(bit_vector);
+    assert(!namespace_flags_bad);
 }
 
 fn syscall_linux_file_dir_fd_poll_stat_exec_smoke() {

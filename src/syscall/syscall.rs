@@ -525,6 +525,61 @@ const LINUX_MAX_IPC_BYTES: usize = 65536;
 const LINUX_MAX_MSG_BYTES: usize = 8192;
 const LINUX_MEMFD_ALLOWED_FLAGS: usize = 0x0001 | 0x0002 | 0x0004;
 const LINUX_GETRANDOM_ALLOWED_FLAGS: u32 = 0x0001 | 0x0002;
+const LINUX_CLONE_NEWNS: usize = 0x0002_0000;
+const LINUX_CLONE_NEWCGROUP: usize = 0x0200_0000;
+const LINUX_CLONE_NEWUTS: usize = 0x0400_0000;
+const LINUX_CLONE_NEWIPC: usize = 0x0800_0000;
+const LINUX_CLONE_NEWUSER: usize = 0x1000_0000;
+const LINUX_CLONE_NEWPID: usize = 0x2000_0000;
+const LINUX_CLONE_NEWNET: usize = 0x4000_0000;
+const LINUX_CONTAINER_NAMESPACE_FLAGS: usize = LINUX_CLONE_NEWNS
+    | LINUX_CLONE_NEWCGROUP
+    | LINUX_CLONE_NEWUTS
+    | LINUX_CLONE_NEWIPC
+    | LINUX_CLONE_NEWUSER
+    | LINUX_CLONE_NEWPID
+    | LINUX_CLONE_NEWNET;
+const LINUX_MOUNT_ALLOWED_FLAGS: usize = 0x1
+    | 0x2
+    | 0x4
+    | 0x8
+    | 0x10
+    | 0x20
+    | 0x40
+    | 0x80
+    | 0x400
+    | 0x800
+    | 0x1000
+    | 0x2000
+    | 0x4000
+    | 0x8000
+    | 0x10000
+    | 0x20000
+    | 0x40000
+    | 0x100000
+    | 0x200000
+    | 0x400000
+    | 0x800000;
+const LINUX_UMOUNT_ALLOWED_FLAGS: usize = 0x1 | 0x2 | 0x4 | 0x8;
+const LINUX_SECCOMP_MODE_STRICT: usize = 1;
+const LINUX_SECCOMP_MODE_FILTER: usize = 2;
+const LINUX_SECCOMP_SET_MODE_STRICT: usize = 0;
+const LINUX_SECCOMP_SET_MODE_FILTER: usize = 1;
+const LINUX_SECCOMP_GET_ACTION_AVAIL: usize = 2;
+const LINUX_SECCOMP_GET_NOTIF_SIZES: usize = 3;
+const LINUX_SECCOMP_FILTER_FLAG_TSYNC: usize = 1 << 0;
+const LINUX_SECCOMP_FILTER_FLAG_LOG: usize = 1 << 1;
+const LINUX_SECCOMP_FILTER_FLAG_SPEC_ALLOW: usize = 1 << 2;
+const LINUX_SECCOMP_FILTER_FLAG_NEW_LISTENER: usize = 1 << 3;
+const LINUX_SECCOMP_FILTER_ALLOWED_FLAGS: usize = LINUX_SECCOMP_FILTER_FLAG_TSYNC
+    | LINUX_SECCOMP_FILTER_FLAG_LOG
+    | LINUX_SECCOMP_FILTER_FLAG_SPEC_ALLOW
+    | LINUX_SECCOMP_FILTER_FLAG_NEW_LISTENER;
+const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+const LINUX_CAP_LAST_CAP: u32 = 40;
+const LINUX_CAP_FULL_SET: u64 = (1u64 << (LINUX_CAP_LAST_CAP + 1)) - 1;
+const LINUX_MAX_MOUNTS: usize = 16;
+const LINUX_UTS_NAME_MAX: usize = 64;
 
 #[derive(Clone)]
 struct LinuxMappingRecord {
@@ -594,6 +649,11 @@ struct LinuxFdRecord {
 struct LinuxFxfsFileRecord {
     handle: u32,
     cursor: fxfs::FxfsCursor,
+}
+
+#[derive(Clone, Copy)]
+struct LinuxMountRecord {
+    flags: usize,
 }
 
 #[repr(C)]
@@ -698,6 +758,20 @@ struct LinuxUtsname {
     domainname: [u8; 65],
 }
 
+#[repr(C)]
+struct LinuxCapUserHeader {
+    version: u32,
+    pid: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxCapUserData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct MemorySyscallStats {
     pub linux_mapping_count: usize,
@@ -715,6 +789,24 @@ pub struct MemorySyscallStats {
     pub zircon_root_vmar_handle: u32,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct LinuxContainerStats {
+    pub namespace_flags: usize,
+    pub setns_count: usize,
+    pub mount_count: usize,
+    pub mount_flags: usize,
+    pub pivot_rooted: bool,
+    pub chrooted: bool,
+    pub no_new_privs: bool,
+    pub seccomp_mode: usize,
+    pub seccomp_filters: usize,
+    pub cap_effective: u64,
+    pub cap_permitted: u64,
+    pub cap_inheritable: u64,
+    pub hostname_set: bool,
+    pub domainname_set: bool,
+}
+
 struct MemorySyscallState {
     linux_mappings: Vec<LinuxMappingRecord>,
     next_linux_addr: usize,
@@ -728,6 +820,19 @@ struct MemorySyscallState {
     signals: Vec<SignalRecord>,
     linux_fds: Vec<LinuxFdRecord>,
     linux_fxfs_files: Vec<LinuxFxfsFileRecord>,
+    linux_mounts: Vec<LinuxMountRecord>,
+    linux_namespace_flags: usize,
+    linux_setns_count: usize,
+    linux_pivot_rooted: bool,
+    linux_chrooted: bool,
+    linux_no_new_privs: bool,
+    linux_seccomp_mode: usize,
+    linux_seccomp_filters: usize,
+    linux_cap_effective: u64,
+    linux_cap_permitted: u64,
+    linux_cap_inheritable: u64,
+    linux_hostname_set: bool,
+    linux_domainname_set: bool,
     next_handle: u32,
     next_fd: usize,
     root_vmar_handle: u32,
@@ -764,6 +869,19 @@ impl MemorySyscallState {
             signals: Vec::new(),
             linux_fds: Vec::new(),
             linux_fxfs_files: Vec::new(),
+            linux_mounts: Vec::new(),
+            linux_namespace_flags: 0,
+            linux_setns_count: 0,
+            linux_pivot_rooted: false,
+            linux_chrooted: false,
+            linux_no_new_privs: false,
+            linux_seccomp_mode: 0,
+            linux_seccomp_filters: 0,
+            linux_cap_effective: LINUX_CAP_FULL_SET,
+            linux_cap_permitted: LINUX_CAP_FULL_SET,
+            linux_cap_inheritable: 0,
+            linux_hostname_set: false,
+            linux_domainname_set: false,
             next_handle: MEMORY_HANDLE_START + 1,
             next_fd: COMPAT_FD_START,
             root_vmar_handle,
@@ -1491,6 +1609,66 @@ impl MemorySyscallState {
             self.linux_fxfs_files.swap_remove(index);
         }
     }
+
+    fn apply_linux_namespace_flags(&mut self, flags: usize) {
+        self.linux_namespace_flags |= flags & LINUX_CONTAINER_NAMESPACE_FLAGS;
+    }
+
+    fn record_linux_setns(&mut self, namespace: usize) {
+        self.apply_linux_namespace_flags(namespace);
+        self.linux_setns_count = self.linux_setns_count.saturating_add(1);
+    }
+
+    fn record_linux_mount(&mut self, flags: usize) -> SysResult {
+        if self.linux_mounts.len() >= LINUX_MAX_MOUNTS {
+            return Err(SysError::EBUSY);
+        }
+        self.linux_mounts.push(LinuxMountRecord { flags });
+        Ok(0)
+    }
+
+    fn record_linux_umount(&mut self) {
+        let _ = self.linux_mounts.pop();
+    }
+
+    fn reset_linux_container_state(&mut self) {
+        self.linux_mounts.clear();
+        self.linux_namespace_flags = 0;
+        self.linux_setns_count = 0;
+        self.linux_pivot_rooted = false;
+        self.linux_chrooted = false;
+        self.linux_no_new_privs = false;
+        self.linux_seccomp_mode = 0;
+        self.linux_seccomp_filters = 0;
+        self.linux_cap_effective = LINUX_CAP_FULL_SET;
+        self.linux_cap_permitted = LINUX_CAP_FULL_SET;
+        self.linux_cap_inheritable = 0;
+        self.linux_hostname_set = false;
+        self.linux_domainname_set = false;
+    }
+
+    fn linux_container_stats(&self) -> LinuxContainerStats {
+        let mut mount_flags = 0usize;
+        for mount in &self.linux_mounts {
+            mount_flags |= mount.flags;
+        }
+        LinuxContainerStats {
+            namespace_flags: self.linux_namespace_flags,
+            setns_count: self.linux_setns_count,
+            mount_count: self.linux_mounts.len(),
+            mount_flags,
+            pivot_rooted: self.linux_pivot_rooted,
+            chrooted: self.linux_chrooted,
+            no_new_privs: self.linux_no_new_privs,
+            seccomp_mode: self.linux_seccomp_mode,
+            seccomp_filters: self.linux_seccomp_filters,
+            cap_effective: self.linux_cap_effective,
+            cap_permitted: self.linux_cap_permitted,
+            cap_inheritable: self.linux_cap_inheritable,
+            hostname_set: self.linux_hostname_set,
+            domainname_set: self.linux_domainname_set,
+        }
+    }
 }
 
 static mut MEMORY_SYSCALL_STATE: Option<MemorySyscallState> = None;
@@ -1522,6 +1700,53 @@ fn linux_user_cstr(ptr: usize, max_len: usize) -> Result<&'static str, SysError>
     }
 
     Err(SysError::EINVAL)
+}
+
+fn linux_path_is_container_pseudo_file(path: &str) -> bool {
+    path.starts_with("/sys/fs/cgroup/") || path.starts_with("/proc/self/attr/")
+}
+
+fn linux_prepare_fxfs_cursor(
+    path: &str,
+    object_type: ObjectType,
+    flags: usize,
+    access_mode: usize,
+) -> Option<fxfs::FxfsCursor> {
+    if object_type != ObjectType::LinuxFile {
+        return None;
+    }
+
+    let readonly_existing = access_mode == LINUX_O_RDONLY
+        && flags & (LINUX_O_CREAT | LINUX_O_TRUNC | LINUX_O_APPEND) == 0;
+    let container_pseudo = linux_path_is_container_pseudo_file(path);
+    if !readonly_existing && !container_pseudo {
+        return None;
+    }
+
+    if container_pseudo {
+        if flags & LINUX_O_CREAT != 0 && !fxfs::exists(path) && fxfs::write_file(path, &[]).is_err()
+        {
+            return None;
+        }
+        if flags & LINUX_O_TRUNC != 0 && fxfs::write_file(path, &[]).is_err() {
+            return None;
+        }
+    }
+
+    let mut cursor = fxfs::open_cursor(path).ok()?;
+    if flags & LINUX_O_APPEND != 0 {
+        let attrs = fxfs::attrs(path).ok()?;
+        let _ = fxfs::seek_cursor(&mut cursor, attrs.size).ok()?;
+    }
+    Some(cursor)
+}
+
+pub fn linux_container_stats() -> LinuxContainerStats {
+    memory_state().linux_container_stats()
+}
+
+pub fn reset_linux_container_state() {
+    memory_state().reset_linux_container_state();
 }
 
 fn mmu_flags_from_vm_options(options: VmOptions) -> MmuFlags {
@@ -2570,16 +2795,9 @@ pub fn sys_openat(dirfd: usize, path: usize, flags: usize, _mode: usize) -> SysR
     } else {
         ObjectType::LinuxFile
     };
-    let access_mode = flags & LINUX_O_ACCMODE;
     let path_str = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
-    let fxfs_cursor = if object_type == ObjectType::LinuxFile
-        && access_mode == LINUX_O_RDONLY
-        && flags & (LINUX_O_CREAT | LINUX_O_TRUNC | LINUX_O_APPEND) == 0
-    {
-        fxfs::open_cursor(path_str).ok()
-    } else {
-        None
-    };
+    let access_mode = flags & LINUX_O_ACCMODE;
+    let fxfs_cursor = linux_prepare_fxfs_cursor(path_str, object_type, flags, access_mode);
     let handle = compat::create_object(object_type).map_err(|_| SysError::ENOMEM)?;
     let readable = access_mode != LINUX_O_WRONLY;
     let writable = access_mode != LINUX_O_RDONLY;
@@ -2661,7 +2879,48 @@ pub fn sys_fchdir(fd: usize) -> SysResult {
 }
 
 pub fn sys_chroot(path: usize) -> SysResult {
-    sys_chdir(path)
+    sys_chdir(path)?;
+    memory_state().linux_chrooted = true;
+    Ok(0)
+}
+
+pub fn sys_mount(
+    source: usize,
+    target: usize,
+    filesystemtype: usize,
+    flags: usize,
+    _data: usize,
+) -> SysResult {
+    if target == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let propagation_only = source == 0 && filesystemtype == 0 && flags != 0;
+    if source == 0 && filesystemtype == 0 && !propagation_only {
+        return Err(SysError::EFAULT);
+    }
+    if flags & !LINUX_MOUNT_ALLOWED_FLAGS != 0 {
+        return Err(SysError::EINVAL);
+    }
+    memory_state().record_linux_mount(flags)
+}
+
+pub fn sys_umount2(target: usize, flags: usize) -> SysResult {
+    if target == 0 {
+        return Err(SysError::EFAULT);
+    }
+    if flags & !LINUX_UMOUNT_ALLOWED_FLAGS != 0 {
+        return Err(SysError::EINVAL);
+    }
+    memory_state().record_linux_umount();
+    Ok(0)
+}
+
+pub fn sys_pivot_root(new_root: usize, put_old: usize) -> SysResult {
+    if new_root == 0 || put_old == 0 {
+        return Err(SysError::EFAULT);
+    }
+    memory_state().linux_pivot_rooted = true;
+    Ok(0)
 }
 
 pub fn sys_mkdir(path: usize, mode: usize) -> SysResult {
@@ -4635,7 +4894,16 @@ pub fn sys_clone(
     _child_tid: usize,
 ) -> SysResult {
     info!("clone: flags={:#x}, newsp={:#x}", flags, newsp);
+    memory_state().apply_linux_namespace_flags(flags);
     sys_fork()
+}
+
+pub fn sys_clone3(args: usize, size: usize) -> SysResult {
+    if args == 0 || size < core::mem::size_of::<u64>() {
+        return Err(SysError::EFAULT);
+    }
+    let flags = unsafe { core::ptr::read(args as *const u64) as usize };
+    sys_clone(flags, 0, 0, 0, 0)
 }
 
 /// Linux sys_execve implementation
@@ -4858,14 +5126,132 @@ pub fn sys_setgroups(size: usize, list: usize) -> SysResult {
     }
 }
 
+pub fn sys_capget(header: usize, data: usize) -> SysResult {
+    if header == 0 || data == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let stats = linux_container_stats();
+    unsafe {
+        let header_ptr = header as *mut LinuxCapUserHeader;
+        let requested = core::ptr::read(header_ptr).version;
+        if requested != 0 && requested != LINUX_CAPABILITY_VERSION_3 {
+            return Err(SysError::EINVAL);
+        }
+        core::ptr::write(
+            header_ptr,
+            LinuxCapUserHeader {
+                version: LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            },
+        );
+        let data_ptr = data as *mut LinuxCapUserData;
+        core::ptr::write(
+            data_ptr,
+            LinuxCapUserData {
+                effective: stats.cap_effective as u32,
+                permitted: stats.cap_permitted as u32,
+                inheritable: stats.cap_inheritable as u32,
+            },
+        );
+        core::ptr::write(
+            data_ptr.add(1),
+            LinuxCapUserData {
+                effective: (stats.cap_effective >> 32) as u32,
+                permitted: (stats.cap_permitted >> 32) as u32,
+                inheritable: (stats.cap_inheritable >> 32) as u32,
+            },
+        );
+    }
+    Ok(0)
+}
+
+pub fn sys_capset(header: usize, data: usize) -> SysResult {
+    if header == 0 || data == 0 {
+        return Err(SysError::EFAULT);
+    }
+    unsafe {
+        let version = core::ptr::read(header as *const LinuxCapUserHeader).version;
+        if version != LINUX_CAPABILITY_VERSION_3 {
+            return Err(SysError::EINVAL);
+        }
+        let data_ptr = data as *const LinuxCapUserData;
+        let lo = core::ptr::read(data_ptr);
+        let hi = core::ptr::read(data_ptr.add(1));
+        let state = memory_state();
+        state.linux_cap_effective =
+            (((hi.effective as u64) << 32) | lo.effective as u64) & LINUX_CAP_FULL_SET;
+        state.linux_cap_permitted =
+            (((hi.permitted as u64) << 32) | lo.permitted as u64) & LINUX_CAP_FULL_SET;
+        state.linux_cap_inheritable =
+            (((hi.inheritable as u64) << 32) | lo.inheritable as u64) & LINUX_CAP_FULL_SET;
+    }
+    Ok(0)
+}
+
+pub fn sys_sethostname(name: usize, len: usize) -> SysResult {
+    if !syscall_logic::user_buffer_valid(name, len) || len > LINUX_UTS_NAME_MAX {
+        return Err(SysError::EFAULT);
+    }
+    memory_state().linux_hostname_set = true;
+    Ok(0)
+}
+
+pub fn sys_setdomainname(name: usize, len: usize) -> SysResult {
+    if !syscall_logic::user_buffer_valid(name, len) || len > LINUX_UTS_NAME_MAX {
+        return Err(SysError::EFAULT);
+    }
+    memory_state().linux_domainname_set = true;
+    Ok(0)
+}
+
 pub fn sys_prctl(
-    _option: usize,
-    _arg2: usize,
+    option: usize,
+    arg2: usize,
     _arg3: usize,
     _arg4: usize,
     _arg5: usize,
 ) -> SysResult {
-    Ok(0)
+    const PR_SET_NO_NEW_PRIVS: usize = 38;
+    const PR_GET_NO_NEW_PRIVS: usize = 39;
+    const PR_SET_SECCOMP: usize = 22;
+    const PR_GET_SECCOMP: usize = 21;
+    const PR_SET_NAME: usize = 15;
+    const PR_GET_NAME: usize = 16;
+    const PR_CAPBSET_READ: usize = 23;
+    const PR_CAPBSET_DROP: usize = 24;
+    const PR_SET_DUMPABLE: usize = 4;
+    const PR_GET_DUMPABLE: usize = 3;
+
+    match option {
+        PR_SET_NO_NEW_PRIVS => {
+            if arg2 > 1 {
+                return Err(SysError::EINVAL);
+            }
+            memory_state().linux_no_new_privs = arg2 != 0;
+            Ok(0)
+        }
+        PR_GET_NO_NEW_PRIVS => Ok(memory_state().linux_no_new_privs as usize),
+        PR_SET_SECCOMP => sys_seccomp_mode(arg2, 0),
+        PR_GET_SECCOMP => Ok(memory_state().linux_seccomp_mode),
+        PR_SET_NAME => {
+            if arg2 == 0 {
+                Err(SysError::EFAULT)
+            } else {
+                Ok(0)
+            }
+        }
+        PR_GET_NAME => linux_write_cstr(arg2, 16, b"smros-docker").map(|_| 0),
+        PR_CAPBSET_READ => {
+            if arg2 > LINUX_CAP_LAST_CAP as usize {
+                Err(SysError::EINVAL)
+            } else {
+                Ok(1)
+            }
+        }
+        PR_CAPBSET_DROP | PR_SET_DUMPABLE => Ok(0),
+        PR_GET_DUMPABLE => Ok(1),
+        _ => Ok(0),
+    }
 }
 
 pub fn sys_getcpu(cpu: usize, node: usize, _cache: usize) -> SysResult {
@@ -4928,6 +5314,76 @@ pub fn sys_membarrier(_cmd: usize, flags: usize, _cpu_id: usize) -> SysResult {
         return Err(SysError::EINVAL);
     }
     Ok(0)
+}
+
+pub fn sys_unshare(flags: usize) -> SysResult {
+    if !syscall_logic::linux_namespace_flags_valid(flags, LINUX_CONTAINER_NAMESPACE_FLAGS) {
+        return Err(SysError::EINVAL);
+    }
+    memory_state().apply_linux_namespace_flags(flags);
+    Ok(0)
+}
+
+pub fn sys_setns(fd: usize, nstype: usize) -> SysResult {
+    if !linux_fd_known(fd) {
+        return Err(SysError::ENODEV);
+    }
+    if nstype != 0
+        && !syscall_logic::linux_namespace_flags_valid(nstype, LINUX_CONTAINER_NAMESPACE_FLAGS)
+    {
+        return Err(SysError::EINVAL);
+    }
+    memory_state().record_linux_setns(nstype);
+    Ok(0)
+}
+
+fn sys_seccomp_mode(mode: usize, _filter: usize) -> SysResult {
+    match mode {
+        LINUX_SECCOMP_MODE_STRICT => {
+            memory_state().linux_seccomp_mode = LINUX_SECCOMP_MODE_STRICT;
+            Ok(0)
+        }
+        LINUX_SECCOMP_MODE_FILTER => {
+            let state = memory_state();
+            state.linux_seccomp_mode = LINUX_SECCOMP_MODE_FILTER;
+            state.linux_seccomp_filters = state.linux_seccomp_filters.saturating_add(1);
+            Ok(0)
+        }
+        _ => Err(SysError::EINVAL),
+    }
+}
+
+pub fn sys_seccomp(operation: usize, flags: usize, args: usize) -> SysResult {
+    match operation {
+        LINUX_SECCOMP_SET_MODE_STRICT => {
+            if flags != 0 {
+                Err(SysError::EINVAL)
+            } else {
+                sys_seccomp_mode(LINUX_SECCOMP_MODE_STRICT, args)
+            }
+        }
+        LINUX_SECCOMP_SET_MODE_FILTER => {
+            if flags & !LINUX_SECCOMP_FILTER_ALLOWED_FLAGS != 0 {
+                Err(SysError::EINVAL)
+            } else {
+                sys_seccomp_mode(LINUX_SECCOMP_MODE_FILTER, args)
+            }
+        }
+        LINUX_SECCOMP_GET_ACTION_AVAIL => {
+            if args == 0 {
+                Err(SysError::EFAULT)
+            } else {
+                Ok(0)
+            }
+        }
+        LINUX_SECCOMP_GET_NOTIF_SIZES => {
+            if args == 0 {
+                return Err(SysError::EFAULT);
+            }
+            linux_zero_user(args, 6)
+        }
+        _ => Err(SysError::EINVAL),
+    }
 }
 
 pub fn sys_statx(
@@ -7634,10 +8090,7 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         | ARM64_SYS_IOPRIO_SET
         | ARM64_SYS_IOPRIO_GET
         | ARM64_SYS_VHANGUP
-        | ARM64_SYS_QUOTACTL
         | ARM64_SYS_ACCT
-        | ARM64_SYS_CAPGET
-        | ARM64_SYS_CAPSET
         | ARM64_SYS_PERSONALITY
         | ARM64_SYS_KEXEC_LOAD
         | ARM64_SYS_INIT_MODULE
@@ -7671,7 +8124,6 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         | ARM64_SYS_OPEN_BY_HANDLE_AT
         | ARM64_SYS_CLOCK_ADJTIME
         | ARM64_SYS_SYNCFS
-        | ARM64_SYS_SETNS
         | ARM64_SYS_SENDMMSG
         | ARM64_SYS_PROCESS_VM_READV
         | ARM64_SYS_PROCESS_VM_WRITEV
@@ -7679,7 +8131,6 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         | ARM64_SYS_FINIT_MODULE
         | ARM64_SYS_SCHED_SETATTR
         | ARM64_SYS_SCHED_GETATTR
-        | ARM64_SYS_SECCOMP
         | ARM64_SYS_BPF
         | ARM64_SYS_EXECVEAT
         | ARM64_SYS_USERFAULTFD
@@ -7694,17 +8145,9 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         | ARM64_SYS_IO_URING_SETUP
         | ARM64_SYS_IO_URING_ENTER
         | ARM64_SYS_IO_URING_REGISTER
-        | ARM64_SYS_OPEN_TREE
-        | ARM64_SYS_MOVE_MOUNT
-        | ARM64_SYS_FSOPEN
-        | ARM64_SYS_FSCONFIG
-        | ARM64_SYS_FSMOUNT
         | ARM64_SYS_FSPICK
-        | ARM64_SYS_PIDFD_OPEN
-        | ARM64_SYS_CLONE3
         | ARM64_SYS_PIDFD_GETFD
         | ARM64_SYS_PROCESS_MADVISE
-        | ARM64_SYS_MOUNT_SETATTR
         | ARM64_SYS_LANDLOCK_CREATE_RULESET
         | ARM64_SYS_LANDLOCK_ADD_RULE
         | ARM64_SYS_LANDLOCK_RESTRICT_SELF => Err(SysError::ENOSYS),
@@ -7741,9 +8184,10 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_LINKAT => sys_linkat(args[0], args[1], args[2], args[3], args[4]),
         ARM64_SYS_RENAMEAT => sys_renameat(args[0], args[1], args[2], args[3]),
         ARM64_SYS_RENAMEAT2 => sys_renameat2(args[0], args[1], args[2], args[3], args[4]),
-        ARM64_SYS_UMOUNT2 | ARM64_SYS_MOUNT | ARM64_SYS_PIVOT_ROOT | ARM64_SYS_NFSSERVCTL => {
-            Err(SysError::ENOSYS)
-        }
+        ARM64_SYS_UMOUNT2 => sys_umount2(args[0], args[1]),
+        ARM64_SYS_MOUNT => sys_mount(args[0], args[1], args[2], args[3], args[4]),
+        ARM64_SYS_PIVOT_ROOT => sys_pivot_root(args[0], args[1]),
+        ARM64_SYS_NFSSERVCTL => Err(SysError::ENOSYS),
         ARM64_SYS_STATFS => sys_statfs(args[0], args[1]),
         ARM64_SYS_FSTATFS => sys_fstatfs(args[0], args[1]),
         ARM64_SYS_TRUNCATE => sys_truncate(args[0], args[1]),
@@ -7842,7 +8286,8 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_SETSID => sys_setsid(),
         ARM64_SYS_GETGROUPS => sys_getgroups(args[0], args[1]),
         ARM64_SYS_SETGROUPS => sys_setgroups(args[0], args[1]),
-        ARM64_SYS_SETHOSTNAME | ARM64_SYS_SETDOMAINNAME => sys_path_noop(args[0]),
+        ARM64_SYS_SETHOSTNAME => sys_sethostname(args[0], args[1]),
+        ARM64_SYS_SETDOMAINNAME => sys_setdomainname(args[0], args[1]),
         ARM64_SYS_GETRLIMIT => sys_getrlimit(args[0], args[1]),
         ARM64_SYS_SETRLIMIT => sys_setrlimit(args[0], args[1]),
         ARM64_SYS_GETPID => sys_getpid(),
@@ -7886,6 +8331,7 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_MUNMAP => sys_munmap(args[0], args[1]),
         ARM64_SYS_MREMAP => sys_mremap(args[0], args[1], args[2], args[3], args[4]),
         ARM64_SYS_CLONE => sys_clone(args[0], args[1], args[2], args[3], args[4]),
+        ARM64_SYS_CLONE3 => sys_clone3(args[0], args[1]),
         ARM64_SYS_EXECVE => sys_execve(args[0], args[1], args[2]),
         ARM64_SYS_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5] as u64),
         ARM64_SYS_FADVISE64 => sys_fadvise64(args[0], args[1], args[2], args[3]),
@@ -7901,6 +8347,18 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_GETRANDOM => sys_getrandom(args[0], args[1], args[2] as u32),
         ARM64_SYS_MEMFD_CREATE => sys_memfd_create(args[0], args[1]),
         ARM64_SYS_MEMBARRIER => sys_membarrier(args[0], args[1], args[2]),
+        ARM64_SYS_SECCOMP => sys_seccomp(args[0], args[1], args[2]),
+        ARM64_SYS_CAPGET => sys_capget(args[0], args[1]),
+        ARM64_SYS_CAPSET => sys_capset(args[0], args[1]),
+        ARM64_SYS_SETNS => sys_setns(args[0], args[1]),
+        ARM64_SYS_QUOTACTL
+        | ARM64_SYS_OPEN_TREE
+        | ARM64_SYS_MOVE_MOUNT
+        | ARM64_SYS_FSOPEN
+        | ARM64_SYS_FSCONFIG
+        | ARM64_SYS_FSMOUNT
+        | ARM64_SYS_PIDFD_OPEN
+        | ARM64_SYS_MOUNT_SETATTR => Ok(0),
         ARM64_SYS_COPY_FILE_RANGE => {
             sys_copy_file_range(args[0], args[1], args[2], args[3], args[4], args[5])
         }
@@ -7916,7 +8374,7 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_IOCTL => sys_ioctl(args[0], args[1], args[2], args[3], args[4]),
         ARM64_SYS_FLOCK => sys_flock(args[0], args[1]),
         ARM64_SYS_GETDENTS64 => sys_getdents64(args[0], args[1], args[2]),
-        ARM64_SYS_UNSHARE => Ok(0),
+        ARM64_SYS_UNSHARE => sys_unshare(args[0]),
         ARM64_SYS_FUTEX => sys_futex(
             args[0],
             args[1] as u32,
