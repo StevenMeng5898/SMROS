@@ -36,4 +36,3 @@ impl JobRecord {
         self.critical_process = Some(process);
     }
 }
-

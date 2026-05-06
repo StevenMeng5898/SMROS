@@ -58,15 +58,16 @@ use crate::kernel_objects::scheduler;
 use crate::kernel_objects::socket;
 use crate::kernel_objects::vmar::Vmar;
 use crate::syscall::syscall_logic;
+use crate::user_level::fxfs;
 
 // Re-export kernel objects for convenience
 pub use crate::kernel_objects::channel::{
     sys_channel_call_noretry, sys_channel_create, sys_channel_read, sys_channel_write,
 };
 pub use crate::kernel_objects::{
-    pages, roundup_pages, CachePolicy, HandleValue, MmuFlags, ObjectType, VmOptions, VmarFlags,
-    Vmo, VmoCloneFlags, VmoOpType, VmoType, ZxError, ZxResult, Rights, RIGHT_SAME_RIGHTS,
-    INVALID_HANDLE,
+    pages, roundup_pages, CachePolicy, HandleValue, MmuFlags, ObjectType, Rights, VmOptions,
+    VmarFlags, Vmo, VmoCloneFlags, VmoOpType, VmoType, ZxError, ZxResult, INVALID_HANDLE,
+    RIGHT_SAME_RIGHTS,
 };
 
 // Simple logging macros (placeholder for real logging)
@@ -482,6 +483,7 @@ const LINUX_OPEN_ALLOWED_FLAGS: usize = LINUX_O_ACCMODE
     | LINUX_O_NONBLOCK
     | LINUX_O_DIRECTORY
     | LINUX_O_CLOEXEC;
+const LINUX_PATH_MAX_BYTES: usize = 4096;
 const LINUX_PIPE_ALLOWED_FLAGS: usize = LINUX_O_CLOEXEC | LINUX_O_NONBLOCK;
 const LINUX_FCNTL_STATUS_ALLOWED_FLAGS: usize = LINUX_O_APPEND | LINUX_O_NONBLOCK;
 const LINUX_ACCESS_MODE_MASK: usize = 0o7;
@@ -586,6 +588,12 @@ struct LinuxFdRecord {
     handle: u32,
     readable: bool,
     writable: bool,
+}
+
+#[derive(Clone, Copy)]
+struct LinuxFxfsFileRecord {
+    handle: u32,
+    cursor: fxfs::FxfsCursor,
 }
 
 #[repr(C)]
@@ -719,6 +727,7 @@ struct MemorySyscallState {
     handles: Vec<KernelHandleRecord>,
     signals: Vec<SignalRecord>,
     linux_fds: Vec<LinuxFdRecord>,
+    linux_fxfs_files: Vec<LinuxFxfsFileRecord>,
     next_handle: u32,
     next_fd: usize,
     root_vmar_handle: u32,
@@ -754,6 +763,7 @@ impl MemorySyscallState {
             handles,
             signals: Vec::new(),
             linux_fds: Vec::new(),
+            linux_fxfs_files: Vec::new(),
             next_handle: MEMORY_HANDLE_START + 1,
             next_fd: COMPAT_FD_START,
             root_vmar_handle,
@@ -1281,11 +1291,16 @@ impl MemorySyscallState {
             return true;
         }
 
-        if let Some(index) = self.jobs.iter().position(|record| record.handle == object_handle) {
+        if let Some(index) = self
+            .jobs
+            .iter()
+            .position(|record| record.handle == object_handle)
+        {
             let parent = self.jobs[index].parent;
             self.jobs.swap_remove(index);
             if let Some(parent) = parent {
-                if let Some(parent_job) = self.jobs.iter_mut().find(|record| record.handle == parent)
+                if let Some(parent_job) =
+                    self.jobs.iter_mut().find(|record| record.handle == parent)
                 {
                     parent_job.remove_child();
                 }
@@ -1447,6 +1462,35 @@ impl MemorySyscallState {
     fn handle_has_fd(&self, handle: u32) -> bool {
         self.linux_fds.iter().any(|record| record.handle == handle)
     }
+
+    fn bind_linux_fxfs_file(&mut self, handle: u32, cursor: fxfs::FxfsCursor) {
+        if let Some(record) = self
+            .linux_fxfs_files
+            .iter_mut()
+            .find(|record| record.handle == handle)
+        {
+            record.cursor = cursor;
+        } else {
+            self.linux_fxfs_files
+                .push(LinuxFxfsFileRecord { handle, cursor });
+        }
+    }
+
+    fn linux_fxfs_file_mut(&mut self, handle: u32) -> Option<&mut LinuxFxfsFileRecord> {
+        self.linux_fxfs_files
+            .iter_mut()
+            .find(|record| record.handle == handle)
+    }
+
+    fn remove_linux_fxfs_file(&mut self, handle: u32) {
+        if let Some(index) = self
+            .linux_fxfs_files
+            .iter()
+            .position(|record| record.handle == handle)
+        {
+            self.linux_fxfs_files.swap_remove(index);
+        }
+    }
 }
 
 static mut MEMORY_SYSCALL_STATE: Option<MemorySyscallState> = None;
@@ -1459,6 +1503,25 @@ fn memory_state() -> &'static mut MemorySyscallState {
 
         MEMORY_SYSCALL_STATE.as_mut().unwrap()
     }
+}
+
+fn linux_user_cstr(ptr: usize, max_len: usize) -> Result<&'static str, SysError> {
+    if ptr == 0 {
+        return Err(SysError::EFAULT);
+    }
+
+    let mut len = 0usize;
+    while len < max_len {
+        let addr = ptr.checked_add(len).ok_or(SysError::EFAULT)?;
+        let byte = unsafe { core::ptr::read(addr as *const u8) };
+        if byte == 0 {
+            let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
+            return core::str::from_utf8(bytes).map_err(|_| SysError::EINVAL);
+        }
+        len = len.saturating_add(1);
+    }
+
+    Err(SysError::EINVAL)
 }
 
 fn mmu_flags_from_vm_options(options: VmOptions) -> MmuFlags {
@@ -1575,9 +1638,9 @@ fn handle_known_rights(handle: u32) -> Option<u32> {
     if let Some(rights) = socket::socket_table().rights(HandleValue(handle)) {
         return Some(rights);
     }
-    compat::table()
-        .rights(HandleValue(handle))
-        .or(Some(crate::kernel_objects::default_rights_for_object(obj_type)))
+    compat::table().rights(HandleValue(handle)).or(Some(
+        crate::kernel_objects::default_rights_for_object(obj_type),
+    ))
 }
 
 fn handle_has_rights(handle: u32, required: u32) -> bool {
@@ -2106,6 +2169,9 @@ pub fn sys_write(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
                     .write(HandleValue(handle), buf)
                     .map_err(|_| SysError::EIO);
             }
+            if let Some(file) = memory_state().linux_fxfs_file_mut(handle) {
+                return fxfs::cursor_write(&mut file.cursor, buf).map_err(|_| SysError::EIO);
+            }
             compat::table()
                 .write_bytes(HandleValue(handle), buf)
                 .map_err(|_| SysError::EIO)
@@ -2139,6 +2205,10 @@ pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
         };
     }
 
+    if let Some(file) = memory_state().linux_fxfs_file_mut(handle) {
+        return fxfs::cursor_read(&mut file.cursor, out).map_err(|_| SysError::EIO);
+    }
+
     match compat::table().read_bytes(HandleValue(handle), out) {
         Ok(read) => Ok(read),
         Err(ZxError::ErrShouldWait) => Ok(0),
@@ -2155,6 +2225,7 @@ pub fn sys_close(fd: usize) -> SysResult {
     let record = memory_state().close_fd_record(fd).ok_or(SysError::EBUSY)?;
     let handle_still_open = memory_state().handle_has_fd(record.handle);
     if !handle_still_open {
+        memory_state().remove_linux_fxfs_file(record.handle);
         let _ = sys_handle_close(record.handle);
     }
     Ok(0)
@@ -2499,11 +2570,25 @@ pub fn sys_openat(dirfd: usize, path: usize, flags: usize, _mode: usize) -> SysR
     } else {
         ObjectType::LinuxFile
     };
-    let handle = compat::create_object(object_type).map_err(|_| SysError::ENOMEM)?;
     let access_mode = flags & LINUX_O_ACCMODE;
+    let path_str = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
+    let fxfs_cursor = if object_type == ObjectType::LinuxFile
+        && access_mode == LINUX_O_RDONLY
+        && flags & (LINUX_O_CREAT | LINUX_O_TRUNC | LINUX_O_APPEND) == 0
+    {
+        fxfs::open_cursor(path_str).ok()
+    } else {
+        None
+    };
+    let handle = compat::create_object(object_type).map_err(|_| SysError::ENOMEM)?;
     let readable = access_mode != LINUX_O_WRONLY;
     let writable = access_mode != LINUX_O_RDONLY;
-    Ok(memory_state().alloc_fd(handle.0, readable, writable))
+    let state = memory_state();
+    let fd = state.alloc_fd(handle.0, readable, writable);
+    if let Some(cursor) = fxfs_cursor {
+        state.bind_linux_fxfs_file(handle.0, cursor);
+    }
+    Ok(fd)
 }
 
 pub fn sys_access(path: usize, mode: usize) -> SysResult {
@@ -4083,7 +4168,9 @@ pub fn sys_vmo_op_range(handle: u32, op: u32, offset: usize, len: usize) -> ZxRe
         | VmoOpType::Zero
         | VmoOpType::Lock
         | VmoOpType::Unlock => Rights::Write as u32,
-        VmoOpType::CacheSync | VmoOpType::CacheInvalidate | VmoOpType::CacheClean
+        VmoOpType::CacheSync
+        | VmoOpType::CacheInvalidate
+        | VmoOpType::CacheClean
         | VmoOpType::CacheCleanInvalidate => Rights::Read as u32,
     };
     if !state.handle_has_rights(handle, required_right) {
@@ -4228,9 +4315,7 @@ pub fn sys_vmo_replace_as_executable(handle: u32, _vmex: u32, out_handle: &mut u
         return Err(ZxError::ErrNotFound);
     }
 
-    let source_rights = state
-        .handle_rights(handle)
-        .ok_or(ZxError::ErrNotFound)?;
+    let source_rights = state.handle_rights(handle).ok_or(ZxError::ErrNotFound)?;
     let executable_rights = source_rights | Rights::Execute as u32;
     if !crate::kernel_objects::rights_are_valid(executable_rights) {
         return Err(ZxError::ErrInvalidArgs);
@@ -4912,7 +4997,10 @@ fn process_profile_from_user_name(
     if name_ptr != 0 && name_len != 0 {
         let len = name_len.min(right::MAX_PROCESS_NAME_BYTES);
         let bytes = unsafe { core::slice::from_raw_parts(name_ptr as *const u8, len) };
-        let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+        let end = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(bytes.len());
         if let Ok(name) = core::str::from_utf8(&bytes[..end]) {
             if !name.is_empty() {
                 let profile = right::process_right_profile_for_name_checked(name)?;
@@ -5180,11 +5268,9 @@ pub fn sys_process_start(
     if thread_record.obj_type != ObjectType::Thread {
         return Err(ZxError::ErrInvalidArgs);
     }
-    if !state
-        .threads
-        .iter()
-        .any(|thread| thread.handle == thread_record.object_handle && thread.process_handle == proc_object)
-    {
+    if !state.threads.iter().any(|thread| {
+        thread.handle == thread_record.object_handle && thread.process_handle == proc_object
+    }) {
         return Err(ZxError::ErrInvalidArgs);
     }
     sys_thread_start(thread_handle, entry, stack, arg1, arg2)

@@ -37,8 +37,7 @@ pub const SANDBOX_PROCESS_RIGHTS: u32 =
     rights_without(TRUSTED_PROCESS_RIGHTS, SANDBOX_PROCESS_DENIED_RIGHTS);
 pub const SANDBOX_ROOT_VMAR_RIGHTS: u32 =
     rights_without(TRUSTED_ROOT_VMAR_RIGHTS, SANDBOX_ROOT_VMAR_DENIED_RIGHTS);
-pub const SANDBOX_JOB_RIGHTS: u32 =
-    rights_without(TRUSTED_JOB_RIGHTS, SANDBOX_JOB_DENIED_RIGHTS);
+pub const SANDBOX_JOB_RIGHTS: u32 = rights_without(TRUSTED_JOB_RIGHTS, SANDBOX_JOB_DENIED_RIGHTS);
 pub const SANDBOX_THREAD_RIGHTS: u32 =
     rights_without(TRUSTED_THREAD_RIGHTS, SANDBOX_THREAD_DENIED_RIGHTS);
 
@@ -557,9 +556,7 @@ fn parse_right_name(name: &str) -> ZxResult<u32> {
     }
 }
 
-pub fn parse_process_right_config_json(
-    json: &'static str,
-) -> ZxResult<ParsedProcessRightConfig> {
+pub fn parse_process_right_config_json(json: &'static str) -> ZxResult<ParsedProcessRightConfig> {
     ProcessRightJsonParser::new(json).parse()
 }
 
@@ -640,9 +637,7 @@ pub fn process_right_profile_for_name_checked(name: &str) -> ZxResult<ProcessRig
     if let Some(profile) = config.profile_for_name(name) {
         return Ok(profile);
     }
-    config
-        .profile_for_name("guest")
-        .ok_or(ZxError::ErrBadState)
+    config.profile_for_name("guest").ok_or(ZxError::ErrBadState)
 }
 
 pub fn process_right_profile_for_name(name: &str) -> ProcessRightProfile {

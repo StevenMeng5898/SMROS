@@ -96,4 +96,3 @@ impl ThreadRecord {
 pub const fn default_process_right_profile() -> ProcessRightProfile {
     trusted_process_right_profile(UserProcessKind::Test)
 }
-

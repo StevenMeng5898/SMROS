@@ -69,6 +69,7 @@ clean:
 	@echo "Cleaning..."
 	@cargo clean
 	@rm -f $(KERNEL)
+	@rm -f $(FXFS_DISK)
 	@rm -f qemu.log
 	@echo "Clean complete"
 

@@ -14,6 +14,7 @@
 
 #![allow(dead_code)]
 
+pub mod compat_apps;
 pub mod component;
 pub mod drivers;
 pub mod elf;

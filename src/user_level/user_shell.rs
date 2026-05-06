@@ -168,6 +168,11 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_svc,
     },
     ShellCommand {
+        name: "porttest",
+        description: "Run Linux cat and Fuchsia /svc app ports",
+        handler: cmd_porttest,
+    },
+    ShellCommand {
         name: "uptime",
         description: "Show system uptime",
         handler: cmd_uptime,
@@ -2383,15 +2388,8 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         pending: 0,
     };
     if crate::syscall::sys_job_create(0, 0, &mut job_handle).is_err()
-        || crate::syscall::sys_process_create(
-            job_handle,
-            0,
-            0,
-            0,
-            &mut proc_handle,
-            &mut proc_vmar,
-        )
-        .is_err()
+        || crate::syscall::sys_process_create(job_handle, 0, 0, 0, &mut proc_handle, &mut proc_vmar)
+            .is_err()
         || crate::syscall::sys_thread_create(
             proc_handle,
             0,
@@ -3697,6 +3695,10 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         return;
     }
 
+    if !run_ported_app_tests(ctx) {
+        return;
+    }
+
     ctx.serial.write_str("[TEST] Closing VMO handle... ");
     match crate::syscall::sys_handle_close(vmo_handle) {
         Ok(_) => ctx.serial.write_str("[OK] handle closed\n"),
@@ -3720,6 +3722,87 @@ fn cmd_echo(ctx: &mut ShellContext, args: &[&str]) {
         ctx.serial.write_str(arg);
     }
     ctx.serial.write_str("\n\n");
+}
+
+fn print_compat_app_error(
+    serial: &mut Serial,
+    err: crate::user_level::compat_apps::CompatAppError,
+) {
+    let text = match err {
+        crate::user_level::compat_apps::CompatAppError::FxfsInit => "fxfs init",
+        crate::user_level::compat_apps::CompatAppError::FxfsWrite => "fxfs write",
+        crate::user_level::compat_apps::CompatAppError::LinuxOpen(_) => "linux openat",
+        crate::user_level::compat_apps::CompatAppError::LinuxRead(_) => "linux read",
+        crate::user_level::compat_apps::CompatAppError::LinuxWrite(_) => "linux write",
+        crate::user_level::compat_apps::CompatAppError::LinuxClose(_) => "linux close",
+        crate::user_level::compat_apps::CompatAppError::LinuxReadMismatch => {
+            "linux cat read mismatch"
+        }
+        crate::user_level::compat_apps::CompatAppError::SvcInit => "svc init",
+        crate::user_level::compat_apps::CompatAppError::SvcConnect => "svc connect",
+        crate::user_level::compat_apps::CompatAppError::SvcCall => "svc call",
+        crate::user_level::compat_apps::CompatAppError::SvcReply => "svc reply",
+    };
+    serial.write_str(text);
+    match err {
+        crate::user_level::compat_apps::CompatAppError::LinuxOpen(code)
+        | crate::user_level::compat_apps::CompatAppError::LinuxRead(code)
+        | crate::user_level::compat_apps::CompatAppError::LinuxWrite(code)
+        | crate::user_level::compat_apps::CompatAppError::LinuxClose(code) => {
+            serial.write_str(" error=");
+            print_number(serial, code as u32);
+        }
+        _ => {}
+    }
+}
+
+fn run_ported_app_tests(ctx: &mut ShellContext) -> bool {
+    ctx.serial
+        .write_str("[TEST] Testing ported Linux cat app... ");
+    match crate::user_level::compat_apps::run_linux_cat_port() {
+        Ok(result) => {
+            ctx.serial.write_str("[OK] read ");
+            print_number(&mut ctx.serial, result.bytes_read as u32);
+            ctx.serial
+                .write_str(" bytes through Linux openat/read/write\n");
+        }
+        Err(err) => {
+            ctx.serial.write_str("[FAIL] ");
+            print_compat_app_error(&mut ctx.serial, err);
+            ctx.serial.write_str("\n");
+            return false;
+        }
+    }
+
+    ctx.serial
+        .write_str("[TEST] Testing ported Fuchsia /svc app... ");
+    match crate::user_level::compat_apps::run_fuchsia_svc_client_port() {
+        Ok(result) => {
+            ctx.serial.write_str("[OK] requests=");
+            print_number(&mut ctx.serial, result.requests as u32);
+            ctx.serial.write_str(" replies=");
+            print_number(&mut ctx.serial, result.replies as u32);
+            ctx.serial.write_str(" fs_nodes=");
+            print_number(&mut ctx.serial, result.filesystem_nodes as u32);
+            ctx.serial.write_str("\n");
+        }
+        Err(err) => {
+            ctx.serial.write_str("[FAIL] ");
+            print_compat_app_error(&mut ctx.serial, err);
+            ctx.serial.write_str("\n");
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Command: porttest - Run ported app compatibility smoke tests
+fn cmd_porttest(ctx: &mut ShellContext, _args: &[&str]) {
+    ctx.serial
+        .write_str("\n=== Ported Linux/Fuchsia App Test ===\n\n");
+    let _ = run_ported_app_tests(ctx);
+    ctx.serial.write_str("\n");
 }
 
 /// Command: components - Show minimal component framework state

@@ -34,7 +34,12 @@ pub struct CompatObject {
 }
 
 impl CompatObject {
-    fn new(handle: HandleValue, obj_type: ObjectType, peer: Option<HandleValue>, rights: u32) -> Self {
+    fn new(
+        handle: HandleValue,
+        obj_type: ObjectType,
+        peer: Option<HandleValue>,
+        rights: u32,
+    ) -> Self {
         Self {
             handle,
             obj_type,

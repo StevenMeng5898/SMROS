@@ -179,6 +179,8 @@ pub struct ServiceDirectory {
     next_connection_id: usize,
     services: Vec<ServiceEntry>,
     connections: Vec<ServiceConnection>,
+    total_requests: usize,
+    total_replies: usize,
     last_status: i32,
 }
 
@@ -189,6 +191,8 @@ impl ServiceDirectory {
             next_connection_id: 1,
             services: Vec::new(),
             connections: Vec::new(),
+            total_requests: 0,
+            total_replies: 0,
             last_status: 0,
         }
     }
@@ -201,6 +205,8 @@ impl ServiceDirectory {
         self.next_connection_id = 1;
         self.services.clear();
         self.connections.clear();
+        self.total_requests = 0;
+        self.total_replies = 0;
         self.last_status = 0;
 
         let _ = fxfs::create_dir("/svc");
@@ -252,26 +258,34 @@ impl ServiceDirectory {
         Ok(client.0)
     }
 
-    fn find_connection_by_client_mut(&mut self, client: u32) -> Option<&mut ServiceConnection> {
-        self.connections
-            .iter_mut()
-            .find(|connection| connection.client == client)
+    fn disconnect(&mut self, client: u32) -> ZxResult {
+        let index = self
+            .connections
+            .iter()
+            .position(|connection| connection.client == client)
+            .ok_or(ZxError::ErrNotFound)?;
+        let connection = self.connections.swap_remove(index);
+        let _ = channel::channel_table().remove_channel(HandleValue(connection.client));
+        Ok(())
     }
 
     fn call(&mut self, client: u32, request: IpcMessage) -> ZxResult<IpcMessage> {
-        let connection = self
-            .find_connection_by_client_mut(client)
+        let index = self
+            .connections
+            .iter()
+            .position(|connection| connection.client == client)
             .ok_or(ZxError::ErrNotFound)?;
-        if !user_logic::svc_protocol_allowed(connection.service.id(), request.ordinal as u16) {
+        let service = self.connections[index].service;
+        if !user_logic::svc_protocol_allowed(service.id(), request.ordinal as u16) {
             self.last_status = ZxError::ErrNotSupported as i32;
             return Err(ZxError::ErrNotSupported);
         }
 
-        let server = connection.server;
-        let service = connection.service;
+        let server = self.connections[index].server;
         let encoded = request.encode();
         channel::channel_table().write_message(HandleValue(client), &encoded)?;
-        connection.requests = connection.requests.saturating_add(1);
+        self.connections[index].requests = self.connections[index].requests.saturating_add(1);
+        self.total_requests = self.total_requests.saturating_add(1);
 
         let mut bytes = Vec::new();
         channel::channel_table().read_message(HandleValue(server), &mut bytes)?;
@@ -282,23 +296,18 @@ impl ServiceDirectory {
         let mut reply_readback = Vec::new();
         channel::channel_table().read_message(HandleValue(client), &mut reply_readback)?;
         let decoded_reply = IpcMessage::decode(&reply_readback).ok_or(ZxError::ErrInvalidArgs)?;
-        connection.replies = connection.replies.saturating_add(1);
+        self.connections[index].replies = self.connections[index].replies.saturating_add(1);
+        self.total_replies = self.total_replies.saturating_add(1);
         self.last_status = decoded_reply.status;
         Ok(decoded_reply)
     }
 
     fn stats(&self) -> ServiceStats {
-        let mut requests = 0usize;
-        let mut replies = 0usize;
-        for connection in &self.connections {
-            requests = requests.saturating_add(connection.requests);
-            replies = replies.saturating_add(connection.replies);
-        }
         ServiceStats {
             services: self.services.len(),
             connections: self.connections.len(),
-            requests,
-            replies,
+            requests: self.total_requests,
+            replies: self.total_replies,
             last_status: self.last_status,
         }
     }
@@ -346,6 +355,10 @@ pub fn init() -> bool {
 
 pub fn connect(name: &str) -> ZxResult<u32> {
     directory().connect(name)
+}
+
+pub fn disconnect(client: u32) -> ZxResult {
+    directory().disconnect(client)
 }
 
 pub fn call(client: u32, request: IpcMessage) -> ZxResult<IpcMessage> {
@@ -400,12 +413,16 @@ pub fn smoke_test() -> bool {
         Err(_) => return false,
     };
 
-    component_reply.status == 0
+    let ok = component_reply.status == 0
         && component_reply.arg0 == 2
         && runner_reply.status == 0
         && runner_reply.arg1 == 1
         && fs_reply.status == 0
         && fs_reply.arg0 >= 1
         && stats().requests >= 3
-        && stats().replies >= 3
+        && stats().replies >= 3;
+    let _ = disconnect(component);
+    let _ = disconnect(runner);
+    let _ = disconnect(filesystem);
+    ok
 }

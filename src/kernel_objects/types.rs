@@ -215,16 +215,15 @@ pub const RIGHTS_EXTENDED: u32 = Rights::OpChildren as u32
     | Rights::Resize as u32
     | Rights::AttachVmo as u32
     | Rights::ManageVmo as u32;
-pub const RIGHTS_ALL: u32 =
-    RIGHTS_BASIC
-        | RIGHTS_PROPERTY
-        | RIGHTS_POLICY
-        | RIGHTS_SIGNAL
-        | RIGHTS_IO
-        | RIGHTS_MEMORY
-        | RIGHTS_TASK
-        | RIGHTS_SOCKET
-        | RIGHTS_EXTENDED;
+pub const RIGHTS_ALL: u32 = RIGHTS_BASIC
+    | RIGHTS_PROPERTY
+    | RIGHTS_POLICY
+    | RIGHTS_SIGNAL
+    | RIGHTS_IO
+    | RIGHTS_MEMORY
+    | RIGHTS_TASK
+    | RIGHTS_SOCKET
+    | RIGHTS_EXTENDED;
 
 pub const DEFAULT_EVENT_RIGHTS: u32 = Rights::Duplicate as u32
     | Rights::Transfer as u32
@@ -255,8 +254,7 @@ pub const DEFAULT_RESOURCE_RIGHTS: u32 = Rights::Duplicate as u32
     | Rights::Write as u32
     | Rights::Inspect as u32;
 
-pub const DEFAULT_INTERRUPT_RIGHTS: u32 =
-    RIGHTS_BASIC | RIGHTS_IO | Rights::Signal as u32;
+pub const DEFAULT_INTERRUPT_RIGHTS: u32 = RIGHTS_BASIC | RIGHTS_IO | Rights::Signal as u32;
 
 pub const DEFAULT_STREAM_RIGHTS: u32 = RIGHTS_BASIC | RIGHTS_PROPERTY | Rights::Signal as u32;
 
