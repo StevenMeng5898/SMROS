@@ -1,0 +1,133 @@
+{
+  "version": 1,
+  "processes": [
+    {
+      "name": "component_mgr",
+      "kind": "component_manager",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_process", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "set_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "set_policy", "get_policy", "signal", "wait", "inspect", "manage_job", "manage_process", "manage_thread"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "destroy", "signal", "wait", "inspect", "manage_thread"]
+    },
+    {
+      "name": "component_manager",
+      "kind": "component_manager",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_process", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "set_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "set_policy", "get_policy", "signal", "wait", "inspect", "manage_job", "manage_process", "manage_thread"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "destroy", "signal", "wait", "inspect", "manage_thread"]
+    },
+    {
+      "name": "elf_runner",
+      "kind": "runner",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_process", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "set_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "set_policy", "get_policy", "signal", "wait", "inspect", "manage_job", "manage_process", "manage_thread"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "destroy", "signal", "wait", "inspect", "manage_thread"]
+    },
+    {
+      "name": "runner",
+      "kind": "runner",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_process", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "set_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "set_policy", "get_policy", "signal", "wait", "inspect", "manage_job", "manage_process", "manage_thread"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "destroy", "signal", "wait", "inspect", "manage_thread"]
+    },
+    {
+      "name": "fxfs",
+      "kind": "filesystem",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "get_policy", "signal", "wait", "inspect"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "destroy", "signal", "wait", "inspect"]
+    },
+    {
+      "name": "filesystem",
+      "kind": "filesystem",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "get_policy", "signal", "wait", "inspect"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "destroy", "signal", "wait", "inspect"]
+    },
+    {
+      "name": "smros-fxfs",
+      "kind": "filesystem",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "get_policy", "signal", "wait", "inspect"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "destroy", "signal", "wait", "inspect"]
+    },
+    {
+      "name": "user_init",
+      "kind": "user_init",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_process", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "set_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "get_policy", "signal", "wait", "inspect"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "destroy", "signal", "wait", "inspect", "manage_thread"]
+    },
+    {
+      "name": "user-init",
+      "kind": "user_init",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_process", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "set_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "get_policy", "signal", "wait", "inspect"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "destroy", "signal", "wait", "inspect", "manage_thread"]
+    },
+    {
+      "name": "init",
+      "kind": "user_init",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_process", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "set_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "get_policy", "signal", "wait", "inspect"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "destroy", "signal", "wait", "inspect", "manage_thread"]
+    },
+    {
+      "name": "shell",
+      "kind": "shell",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_process", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "set_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "get_policy", "signal", "wait", "inspect"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "destroy", "signal", "wait", "inspect", "manage_thread"]
+    },
+    {
+      "name": "user_shell",
+      "kind": "shell",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_process", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "set_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "get_policy", "signal", "wait", "inspect"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "destroy", "signal", "wait", "inspect", "manage_thread"]
+    },
+    {
+      "name": "test",
+      "kind": "test",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_process", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "set_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "set_policy", "get_policy", "signal", "wait", "inspect", "manage_job", "manage_process", "manage_thread"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "destroy", "signal", "wait", "inspect", "manage_thread"]
+    },
+    {
+      "name": "smros-test",
+      "kind": "test",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_process", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "set_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "set_policy", "get_policy", "signal", "wait", "inspect", "manage_job", "manage_process", "manage_thread"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "destroy", "signal", "wait", "inspect", "manage_thread"]
+    },
+    {
+      "name": "zircon_proc",
+      "kind": "test",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_process", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "set_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "enumerate", "destroy", "set_policy", "get_policy", "signal", "wait", "inspect", "manage_job", "manage_process", "manage_thread"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "set_property", "destroy", "signal", "wait", "inspect", "manage_thread"]
+    },
+    {
+      "name": "guest",
+      "kind": "guest",
+      "process_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "signal", "wait", "inspect", "manage_thread"],
+      "root_vmar_rights": ["duplicate", "transfer", "read", "write", "execute", "map", "get_property", "destroy", "inspect", "op_children"],
+      "job_rights": ["duplicate", "transfer", "read", "write", "get_property", "enumerate", "destroy", "get_policy", "signal", "wait", "inspect"],
+      "thread_rights": ["duplicate", "transfer", "read", "write", "get_property", "destroy", "signal", "wait", "inspect"]
+    }
+  ]
+}

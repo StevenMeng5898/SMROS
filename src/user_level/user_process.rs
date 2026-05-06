@@ -71,7 +71,7 @@ impl UserProcess {
         if !pcb.init(pid, parent_pid, name) {
             return None;
         }
-        let right_profile = right::process_right_profile_for_name(name);
+        let right_profile = right::process_right_profile_for_name_checked(name).ok()?;
         if !right_profile.rights_valid() {
             return None;
         }

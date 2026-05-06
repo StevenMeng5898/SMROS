@@ -4904,21 +4904,25 @@ pub fn sys_fadvise64(fd: usize, _offset: usize, _len: usize, _advice: usize) -> 
 fn process_profile_from_user_name(
     name_ptr: usize,
     name_len: usize,
-) -> (ProcessRightProfile, &'static str) {
+) -> ZxResult<(ProcessRightProfile, &'static str)> {
+    if !right::process_right_config_initialized() {
+        return Err(ZxError::ErrBadState);
+    }
+
     if name_ptr != 0 && name_len != 0 {
         let len = name_len.min(right::MAX_PROCESS_NAME_BYTES);
         let bytes = unsafe { core::slice::from_raw_parts(name_ptr as *const u8, len) };
         let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
         if let Ok(name) = core::str::from_utf8(&bytes[..end]) {
             if !name.is_empty() {
-                let profile = right::process_right_profile_for_name(name);
-                return (profile, right::canonical_process_name(profile.kind));
+                let profile = right::process_right_profile_for_name_checked(name)?;
+                return Ok((profile, right::canonical_process_name(profile.kind)));
             }
         }
     }
 
-    let profile = right::process_right_profile_for_name("zircon_proc");
-    (profile, right::canonical_process_name(profile.kind))
+    let profile = right::process_right_profile_for_name_checked("zircon_proc")?;
+    Ok((profile, right::canonical_process_name(profile.kind)))
 }
 
 /// Zircon sys_process_create implementation
@@ -4951,7 +4955,7 @@ pub fn sys_process_create(
         }
     }
 
-    let (right_profile, process_name) = process_profile_from_user_name(name_ptr, name_len);
+    let (right_profile, process_name) = process_profile_from_user_name(name_ptr, name_len)?;
     if !right_profile.rights_valid() {
         return Err(ZxError::ErrInvalidArgs);
     }

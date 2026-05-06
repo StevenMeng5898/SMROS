@@ -76,5 +76,5 @@ pub fn kernel_object_manager() -> &'static mut KernelObjectManager {
 
 /// Initialize kernel objects
 pub fn init() {
-    // Kernel objects are statically initialized
+    right::init_boot_right_config().expect("kernel object right config failed");
 }

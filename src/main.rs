@@ -503,6 +503,11 @@ pub extern "C" fn kernel_main(fdt_base: usize) -> ! {
     kernel_lowlevel::memory::init();
     serial.write_str("done\n");
 
+    // Install kernel-owned capability profiles before any user process exists.
+    serial.write_str("[OK] Installing kernel object rights config... ");
+    crate::kernel_objects::init();
+    serial.write_str("done\n");
+
     // Initialize syscall interface
     serial.write_str("[OK] Initializing syscall interface... ");
     crate::syscall::init();

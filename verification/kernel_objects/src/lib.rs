@@ -162,6 +162,8 @@ pub const SANDBOX_ROOT_VMAR_RIGHTS: u32 =
     DEFAULT_VMAR_RIGHTS & !SANDBOX_ROOT_VMAR_DENIED_RIGHTS;
 pub const SANDBOX_JOB_RIGHTS: u32 = DEFAULT_JOB_RIGHTS & !SANDBOX_JOB_DENIED_RIGHTS;
 pub const SANDBOX_THREAD_RIGHTS: u32 = DEFAULT_THREAD_RIGHTS & !SANDBOX_THREAD_DENIED_RIGHTS;
+pub const MAX_PROCESS_RIGHT_CONFIG_ENTRIES: usize = 16;
+pub const PROCESS_RIGHT_CONFIG_JSON_ENTRY_COUNT: usize = 16;
 
 #[derive(Copy, Clone)]
 struct HandleEntryModel {
@@ -373,6 +375,23 @@ spec fn process_right_profile_is_restricted_spec(
         && !rights_has_spec(job_rights, RIGHT_SET_PROPERTY)
         && !rights_has_spec(thread_rights, RIGHT_MANAGE_THREAD)
         && !rights_has_spec(thread_rights, RIGHT_SET_PROPERTY)
+}
+
+spec fn boot_process_right_config_shape_spec(config_len: int, capacity: int) -> bool {
+    config_len > 0 && config_len <= capacity
+}
+
+spec fn json_process_right_config_install_allowed_spec(
+    parsed_entries: int,
+    capacity: int,
+    trusted_profile_valid: bool,
+    sandbox_profile_valid: bool,
+    sandbox_profile_restricted: bool,
+) -> bool {
+    boot_process_right_config_shape_spec(parsed_entries, capacity)
+        && trusted_profile_valid
+        && sandbox_profile_valid
+        && sandbox_profile_restricted
 }
 
 spec fn object_signal_update_spec(current: u32, clear_mask: u32, set_mask: u32) -> u32 {
@@ -725,6 +744,35 @@ fn ko_process_right_profile_is_restricted(
         && !ko_rights_has(job_rights, RIGHT_SET_PROPERTY)
         && !ko_rights_has(thread_rights, RIGHT_MANAGE_THREAD)
         && !ko_rights_has(thread_rights, RIGHT_SET_PROPERTY)
+}
+
+fn ko_boot_process_right_config_shape(config_len: usize, capacity: usize) -> (out: bool)
+    ensures
+        out == boot_process_right_config_shape_spec(config_len as int, capacity as int),
+{
+    config_len > 0 && config_len <= capacity
+}
+
+fn ko_json_process_right_config_install_allowed(
+    parsed_entries: usize,
+    capacity: usize,
+    trusted_profile_valid: bool,
+    sandbox_profile_valid: bool,
+    sandbox_profile_restricted: bool,
+) -> (out: bool)
+    ensures
+        out == json_process_right_config_install_allowed_spec(
+            parsed_entries as int,
+            capacity as int,
+            trusted_profile_valid,
+            sandbox_profile_valid,
+            sandbox_profile_restricted,
+        ),
+{
+    ko_boot_process_right_config_shape(parsed_entries, capacity)
+        && trusted_profile_valid
+        && sandbox_profile_valid
+        && sandbox_profile_restricted
 }
 
 fn ko_duplicate_rights_allowed(
@@ -1969,6 +2017,72 @@ fn process_right_profile_smoke() {
     assert(trusted_valid);
     assert(sandbox_valid);
     assert(sandbox_restricted);
+}
+
+fn boot_process_right_config_smoke() {
+    let shape_ok = ko_boot_process_right_config_shape(
+        PROCESS_RIGHT_CONFIG_JSON_ENTRY_COUNT,
+        MAX_PROCESS_RIGHT_CONFIG_ENTRIES,
+    );
+
+    assert(boot_process_right_config_shape_spec(
+        PROCESS_RIGHT_CONFIG_JSON_ENTRY_COUNT as int,
+        MAX_PROCESS_RIGHT_CONFIG_ENTRIES as int,
+    ));
+    assert(process_right_profile_valid_spec(
+        DEFAULT_PROCESS_RIGHTS,
+        DEFAULT_VMAR_RIGHTS,
+        DEFAULT_JOB_RIGHTS,
+        DEFAULT_THREAD_RIGHTS,
+        RIGHTS_ALL,
+    )) by(bit_vector);
+    assert(process_right_profile_valid_spec(
+        SANDBOX_PROCESS_RIGHTS,
+        SANDBOX_ROOT_VMAR_RIGHTS,
+        SANDBOX_JOB_RIGHTS,
+        SANDBOX_THREAD_RIGHTS,
+        RIGHTS_ALL,
+    )) by(bit_vector);
+    assert(process_right_profile_is_restricted_spec(
+        SANDBOX_PROCESS_RIGHTS,
+        SANDBOX_ROOT_VMAR_RIGHTS,
+        SANDBOX_JOB_RIGHTS,
+        SANDBOX_THREAD_RIGHTS,
+    )) by(bit_vector);
+
+    let trusted_valid = ko_process_right_profile_valid(
+        DEFAULT_PROCESS_RIGHTS,
+        DEFAULT_VMAR_RIGHTS,
+        DEFAULT_JOB_RIGHTS,
+        DEFAULT_THREAD_RIGHTS,
+        RIGHTS_ALL,
+    );
+    let sandbox_valid = ko_process_right_profile_valid(
+        SANDBOX_PROCESS_RIGHTS,
+        SANDBOX_ROOT_VMAR_RIGHTS,
+        SANDBOX_JOB_RIGHTS,
+        SANDBOX_THREAD_RIGHTS,
+        RIGHTS_ALL,
+    );
+    let sandbox_restricted = ko_process_right_profile_is_restricted(
+        SANDBOX_PROCESS_RIGHTS,
+        SANDBOX_ROOT_VMAR_RIGHTS,
+        SANDBOX_JOB_RIGHTS,
+        SANDBOX_THREAD_RIGHTS,
+    );
+    let install_allowed = ko_json_process_right_config_install_allowed(
+        PROCESS_RIGHT_CONFIG_JSON_ENTRY_COUNT,
+        MAX_PROCESS_RIGHT_CONFIG_ENTRIES,
+        trusted_valid,
+        sandbox_valid,
+        sandbox_restricted,
+    );
+
+    assert(shape_ok);
+    assert(trusted_valid);
+    assert(sandbox_valid);
+    assert(sandbox_restricted);
+    assert(install_allowed);
 }
 
 proof fn kernel_object_mod_has_no_pure_runtime_obligation() {
