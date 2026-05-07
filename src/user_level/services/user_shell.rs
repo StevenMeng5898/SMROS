@@ -113,6 +113,41 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_drivers,
     },
     ShellCommand {
+        name: "ifconfig",
+        description: "Show network interface state",
+        handler: cmd_ifconfig,
+    },
+    ShellCommand {
+        name: "dns",
+        description: "Resolve a host through QEMU user networking",
+        handler: cmd_dns,
+    },
+    ShellCommand {
+        name: "dhcp",
+        description: "Configure eth0 with DHCP",
+        handler: cmd_dhcp,
+    },
+    ShellCommand {
+        name: "ping",
+        description: "Send an ICMP echo request",
+        handler: cmd_ping,
+    },
+    ShellCommand {
+        name: "curl",
+        description: "Fetch an HTTP URL",
+        handler: cmd_curl,
+    },
+    ShellCommand {
+        name: "ftp",
+        description: "Read an FTP server banner",
+        handler: cmd_ftp,
+    },
+    ShellCommand {
+        name: "tls",
+        description: "Test TLS support",
+        handler: cmd_tls,
+    },
+    ShellCommand {
         name: "pwd",
         description: "Show current FxFS directory",
         handler: cmd_pwd,
@@ -4132,6 +4167,97 @@ fn join_completion_path(dir_token: &str, name: &str) -> String {
     out
 }
 
+fn parse_ipv4(input: &str) -> Option<[u8; 4]> {
+    let mut out = [0u8; 4];
+    let mut count = 0usize;
+    for part in input.split('.') {
+        if count >= 4 || part.is_empty() {
+            return None;
+        }
+        let mut value = 0u32;
+        for byte in part.as_bytes() {
+            if *byte < b'0' || *byte > b'9' {
+                return None;
+            }
+            value = value.checked_mul(10)?.checked_add((*byte - b'0') as u32)?;
+            if value > 255 {
+                return None;
+            }
+        }
+        out[count] = value as u8;
+        count += 1;
+    }
+    if count == 4 {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+enum PingTarget<'a> {
+    Address([u8; 4]),
+    Host(&'a str),
+    Invalid,
+}
+
+fn ping_target(input: Option<&str>) -> PingTarget<'_> {
+    let Some(raw) = input else {
+        return PingTarget::Address(crate::user_level::net::QEMU_USER_GATEWAY);
+    };
+    if let Some(ip) = parse_ipv4(raw) {
+        return PingTarget::Address(ip);
+    }
+    if let Some((_scheme, host, _path)) = parse_url(raw) {
+        return if host_valid(host) {
+            PingTarget::Host(host)
+        } else {
+            PingTarget::Invalid
+        };
+    }
+    if host_valid(raw) {
+        PingTarget::Host(raw)
+    } else {
+        PingTarget::Invalid
+    }
+}
+
+fn parse_url(url: &str) -> Option<(&str, &str, &str)> {
+    let scheme_end = url.find("://")?;
+    let scheme = &url[..scheme_end];
+    let rest = &url[scheme_end + 3..];
+    if rest.is_empty() {
+        return None;
+    }
+    match rest.find('/') {
+        Some(path_start) if path_start > 0 => {
+            Some((scheme, &rest[..path_start], &rest[path_start..]))
+        }
+        Some(_) => None,
+        None => Some((scheme, rest, "/")),
+    }
+}
+
+fn host_valid(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 || host.starts_with('.') || host.ends_with('.') {
+        return false;
+    }
+    for label in host.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return false;
+        }
+        for byte in label.as_bytes() {
+            if !((*byte >= b'a' && *byte <= b'z')
+                || (*byte >= b'A' && *byte <= b'Z')
+                || (*byte >= b'0' && *byte <= b'9')
+                || *byte == b'-')
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn read_fxfs_file_to_vec(path: &str) -> Result<Vec<u8>, crate::user_level::fxfs::FxfsError> {
     let attrs = crate::user_level::fxfs::attrs(path)?;
     let mut out = Vec::new();
@@ -4178,6 +4304,26 @@ fn print_driver_error(ctx: &mut ShellContext, err: crate::user_level::drivers::U
         crate::user_level::drivers::UserDriverError::Unsupported => "unsupported",
         crate::user_level::drivers::UserDriverError::Io => "io error",
         crate::user_level::drivers::UserDriverError::Timeout => "timeout",
+    };
+    ctx.serial.write_str(label);
+}
+
+fn print_net_error(ctx: &mut ShellContext, err: crate::user_level::net::NetError) {
+    let label = match err {
+        crate::user_level::net::NetError::Driver(driver_err) => {
+            print_driver_error(ctx, driver_err);
+            return;
+        }
+        crate::user_level::net::NetError::NotReady => "not ready",
+        crate::user_level::net::NetError::InvalidHost => "invalid host",
+        crate::user_level::net::NetError::InvalidUrl => "invalid url",
+        crate::user_level::net::NetError::BufferTooSmall => "buffer too small",
+        crate::user_level::net::NetError::MalformedPacket => "malformed packet",
+        crate::user_level::net::NetError::Timeout => "timeout",
+        crate::user_level::net::NetError::NoAddress => "no address",
+        crate::user_level::net::NetError::Unsupported => "unsupported",
+        crate::user_level::net::NetError::ConnectionReset => "connection reset",
+        crate::user_level::net::NetError::TlsUnsupported => "tls unsupported",
     };
     ctx.serial.write_str(label);
 }
@@ -4614,6 +4760,37 @@ fn cmd_drivers(ctx: &mut ShellContext, _args: &[&str]) {
     print_number(&mut ctx.serial, stats.bytes_read as u32);
     ctx.serial.write_str(" bytes_written=");
     print_number(&mut ctx.serial, stats.bytes_written as u32);
+    ctx.serial.write_str("\nNetwork eth0: ");
+    ctx.serial.write_str(if stats.net_ready {
+        "ready"
+    } else {
+        "not ready"
+    });
+    ctx.serial.write_str("  link=");
+    ctx.serial
+        .write_str(if stats.net_link_up { "up" } else { "down" });
+    ctx.serial.write_str("  mtu=");
+    print_number(&mut ctx.serial, stats.net_mtu as u32);
+    ctx.serial.write_str("  mac=");
+    print_mac(&mut ctx.serial, stats.net_mac);
+    ctx.serial.write_str("  mmio=0x");
+    print_hex(&mut ctx.serial, stats.net_mmio_base as u64);
+    ctx.serial.write_str("  status=0x");
+    print_hex(&mut ctx.serial, stats.net_device_status as u64);
+    if let Some(err) = stats.net_last_error {
+        ctx.serial.write_str("  last_error=");
+        print_driver_error(ctx, err);
+    }
+    ctx.serial.write_str("\nNet I/O: rx_packets=");
+    print_number(&mut ctx.serial, stats.net_rx_packets as u32);
+    ctx.serial.write_str(" tx_packets=");
+    print_number(&mut ctx.serial, stats.net_tx_packets as u32);
+    ctx.serial.write_str(" rx_bytes=");
+    print_number(&mut ctx.serial, stats.net_rx_bytes as u32);
+    ctx.serial.write_str(" tx_bytes=");
+    print_number(&mut ctx.serial, stats.net_tx_bytes as u32);
+    ctx.serial.write_str(" dropped=");
+    print_number(&mut ctx.serial, stats.net_dropped_packets as u32);
     ctx.serial.write_str("\n\nNodes:\n");
 
     for node in crate::user_level::drivers::device_nodes() {
@@ -4644,9 +4821,238 @@ fn cmd_drivers(ctx: &mut ShellContext, _args: &[&str]) {
         ctx.serial.write_str(binding.driver);
         ctx.serial.write_str("  <- ");
         ctx.serial.write_str(binding.node_path);
+        if binding.kind == crate::user_level::drivers::UserDeviceKind::Network {
+            ctx.serial.write_str("  mtu=");
+            print_number(&mut ctx.serial, binding.mtu as u32);
+            ctx.serial.write_str("  mac=");
+            print_mac(&mut ctx.serial, binding.mac);
+        }
         ctx.serial.write_str("\n");
     }
     ctx.serial.write_str("\n");
+}
+
+/// Command: ifconfig - Show network interface state
+fn cmd_ifconfig(ctx: &mut ShellContext, _args: &[&str]) {
+    let cfg = crate::user_level::net::config();
+    ctx.serial.write_str("\neth0: ");
+    ctx.serial
+        .write_str(if crate::user_level::drivers::net_ready() {
+            "ready"
+        } else {
+            "not ready"
+        });
+    ctx.serial.write_str("  link=");
+    ctx.serial
+        .write_str(if cfg.link_up { "up" } else { "down" });
+    ctx.serial.write_str("  mtu=");
+    print_number(&mut ctx.serial, cfg.mtu as u32);
+    ctx.serial.write_str("\n  mac ");
+    print_mac(&mut ctx.serial, cfg.mac);
+    ctx.serial.write_str("  inet ");
+    print_ipv4(&mut ctx.serial, cfg.ip);
+    ctx.serial.write_str("  gateway ");
+    print_ipv4(&mut ctx.serial, cfg.gateway);
+    ctx.serial.write_str("  dns ");
+    print_ipv4(&mut ctx.serial, cfg.dns);
+    ctx.serial.write_str("  dhcp=");
+    ctx.serial
+        .write_str(if cfg.dhcp_configured { "yes" } else { "no" });
+    if cfg.lease_seconds > 0 {
+        ctx.serial.write_str(" lease=");
+        print_number(&mut ctx.serial, cfg.lease_seconds);
+        ctx.serial.write_str("s");
+    }
+    ctx.serial.write_str("\n\n");
+}
+
+/// Command: dhcp - Configure eth0 with DHCP
+fn cmd_dhcp(ctx: &mut ShellContext, _args: &[&str]) {
+    ctx.serial.write_str("\nDHCP eth0 ... ");
+    match crate::user_level::net::dhcp_configure() {
+        Ok(cfg) => {
+            ctx.serial.write_str("[OK] ip=");
+            print_ipv4(&mut ctx.serial, cfg.ip);
+            ctx.serial.write_str(" gateway=");
+            print_ipv4(&mut ctx.serial, cfg.gateway);
+            ctx.serial.write_str(" dns=");
+            print_ipv4(&mut ctx.serial, cfg.dns);
+            ctx.serial.write_str("\n\n");
+        }
+        Err(err) => {
+            ctx.serial.write_str("[FAIL] ");
+            print_net_error(ctx, err);
+            ctx.serial.write_str("\n\n");
+        }
+    }
+}
+
+/// Command: dns - Resolve a host through QEMU user networking
+fn cmd_dns(ctx: &mut ShellContext, args: &[&str]) {
+    let host = if args.is_empty() {
+        crate::user_level::net::DEFAULT_DNS_HOST
+    } else {
+        args[0]
+    };
+
+    ctx.serial.write_str("\nDNS query: ");
+    ctx.serial.write_str(host);
+    ctx.serial.write_str(" ... ");
+    match crate::user_level::net::dns_lookup_a(host) {
+        Ok(ip) => {
+            ctx.serial.write_str("[OK] ");
+            print_ipv4(&mut ctx.serial, ip);
+            ctx.serial.write_str("\n\n");
+        }
+        Err(err) => {
+            ctx.serial.write_str("[FAIL] ");
+            print_net_error(ctx, err);
+            ctx.serial.write_str("\n\n");
+        }
+    }
+}
+
+/// Command: ping - Send an ICMP echo request
+fn cmd_ping(ctx: &mut ShellContext, args: &[&str]) {
+    let (target, target_label) = match ping_target(args.first().copied()) {
+        PingTarget::Address(ip) => (ip, None),
+        PingTarget::Host(host) => match crate::user_level::net::dns_lookup_a(host) {
+            Ok(ip) => (ip, Some(host)),
+            Err(err) => {
+                ctx.serial.write_str("ping: resolve ");
+                ctx.serial.write_str(host);
+                ctx.serial.write_str(" failed: ");
+                print_net_error(ctx, err);
+                ctx.serial.write_str("\n");
+                return;
+            }
+        },
+        PingTarget::Invalid => {
+            ctx.serial
+                .write_str("ping: expected IPv4 address, host, or URL\n");
+            return;
+        }
+    };
+
+    ctx.serial.write_str("\nPING ");
+    if let Some(host) = target_label {
+        ctx.serial.write_str(host);
+        ctx.serial.write_str(" (");
+    }
+    print_ipv4(&mut ctx.serial, target);
+    if target_label.is_some() {
+        ctx.serial.write_str(")");
+    }
+    ctx.serial.write_str(" ... ");
+    match crate::user_level::net::ping(target) {
+        Ok(reply) => {
+            ctx.serial.write_str("[OK] from ");
+            print_ipv4(&mut ctx.serial, reply.from);
+            ctx.serial.write_str(" bytes=");
+            print_number(&mut ctx.serial, reply.bytes as u32);
+            ctx.serial.write_str(" ttl=");
+            print_number(&mut ctx.serial, reply.ttl as u32);
+            ctx.serial.write_str("\n\n");
+        }
+        Err(err) => {
+            ctx.serial.write_str("[FAIL] ");
+            if err == crate::user_level::net::NetError::Timeout && target_label.is_some() {
+                ctx.serial
+                    .write_str("icmp timeout (host resolved; try dns or curl)");
+            } else {
+                print_net_error(ctx, err);
+            }
+            ctx.serial.write_str("\n\n");
+        }
+    }
+}
+
+/// Command: curl - Fetch an HTTP URL
+fn cmd_curl(ctx: &mut ShellContext, args: &[&str]) {
+    let url = args.first().copied().unwrap_or("http://example.com/");
+    let Some((scheme, host, path)) = parse_url(url) else {
+        ctx.serial.write_str("curl: invalid URL\n");
+        return;
+    };
+    if scheme == "https" {
+        ctx.serial
+            .write_str("curl: https:// requires TLS, which is not implemented yet\n");
+        ctx.serial
+            .write_str("curl: network is up to TCP/HTTP; try `dns ");
+        ctx.serial.write_str(host);
+        ctx.serial.write_str("` or `ping ");
+        ctx.serial.write_str(host);
+        ctx.serial.write_str("`\n");
+        return;
+    }
+    if scheme != "http" {
+        ctx.serial
+            .write_str("curl: only http:// is supported by this stack\n");
+        return;
+    }
+
+    let mut out = [0u8; 1536];
+    ctx.serial.write_str("\nHTTP GET ");
+    ctx.serial.write_str(host);
+    ctx.serial.write_str(path);
+    ctx.serial.write_str(" ... ");
+    match crate::user_level::net::http_get(host, path, &mut out) {
+        Ok(response) => {
+            ctx.serial.write_str("[OK] status=");
+            print_number(&mut ctx.serial, response.status_code as u32);
+            ctx.serial.write_str(" from ");
+            print_ipv4(&mut ctx.serial, response.remote_ip);
+            ctx.serial.write_str(" bytes=");
+            print_number(&mut ctx.serial, response.bytes_read as u32);
+            ctx.serial.write_str("\n");
+            print_bytes_as_text(ctx, &out[..core::cmp::min(response.bytes_read, 512)]);
+            ctx.serial.write_str("\n\n");
+        }
+        Err(err) => {
+            ctx.serial.write_str("[FAIL] ");
+            print_net_error(ctx, err);
+            ctx.serial.write_str("\n\n");
+        }
+    }
+}
+
+/// Command: ftp - Read an FTP server banner
+fn cmd_ftp(ctx: &mut ShellContext, args: &[&str]) {
+    let host = args.first().copied().unwrap_or("speedtest.tele2.net");
+    let mut out = [0u8; 512];
+    ctx.serial.write_str("\nFTP banner ");
+    ctx.serial.write_str(host);
+    ctx.serial.write_str(" ... ");
+    match crate::user_level::net::ftp_banner(host, &mut out) {
+        Ok(response) => {
+            ctx.serial.write_str("[OK] status=");
+            print_number(&mut ctx.serial, response.status_code as u32);
+            ctx.serial.write_str(" from ");
+            print_ipv4(&mut ctx.serial, response.remote_ip);
+            ctx.serial.write_str("\n");
+            print_bytes_as_text(ctx, &out[..core::cmp::min(response.bytes_read, 256)]);
+            ctx.serial.write_str("\n\n");
+        }
+        Err(err) => {
+            ctx.serial.write_str("[FAIL] ");
+            print_net_error(ctx, err);
+            ctx.serial.write_str("\n\n");
+        }
+    }
+}
+
+/// Command: tls - Report TLS support state
+fn cmd_tls(ctx: &mut ShellContext, _args: &[&str]) {
+    let mut out = [0u8; 64];
+    ctx.serial.write_str("\nTLS test ... ");
+    match crate::user_level::net::tls_get("example.com", "/", &mut out) {
+        Err(err) => {
+            ctx.serial.write_str("[FAIL] ");
+            print_net_error(ctx, err);
+            ctx.serial.write_str("\n\n");
+        }
+        Ok(_) => ctx.serial.write_str("[OK]\n\n"),
+    }
 }
 
 /// Command: svc - Show minimal service directory and fixed-message IPC state
@@ -5038,6 +5444,30 @@ fn print_hex(serial: &mut Serial, num: u64) {
     for j in (0..i).rev() {
         serial.write_byte(buf[j]);
     }
+}
+
+fn print_mac(serial: &mut Serial, mac: [u8; 6]) {
+    for (index, byte) in mac.iter().enumerate() {
+        if index > 0 {
+            serial.write_byte(b':');
+        }
+        print_fixed_hex_byte(serial, *byte);
+    }
+}
+
+fn print_ipv4(serial: &mut Serial, ip: [u8; 4]) {
+    for (index, octet) in ip.iter().enumerate() {
+        if index > 0 {
+            serial.write_byte(b'.');
+        }
+        print_number(serial, *octet as u32);
+    }
+}
+
+fn print_fixed_hex_byte(serial: &mut Serial, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    serial.write_byte(HEX[(byte >> 4) as usize]);
+    serial.write_byte(HEX[(byte & 0x0f) as usize]);
 }
 
 fn print_octal(serial: &mut Serial, mut num: u32) {

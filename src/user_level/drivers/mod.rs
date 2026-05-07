@@ -10,6 +10,7 @@
 use alloc::vec::Vec;
 
 pub mod block;
+pub mod net;
 
 const QEMU_VIRT_MACHINE: &str = "linux,dummy-virt";
 
@@ -34,6 +35,7 @@ pub enum UserDeviceKind {
     Timer,
     VirtioMmio,
     Block,
+    Network,
 }
 
 impl UserDeviceKind {
@@ -46,6 +48,7 @@ impl UserDeviceKind {
             UserDeviceKind::Timer => "timer",
             UserDeviceKind::VirtioMmio => "virtio-mmio",
             UserDeviceKind::Block => "block",
+            UserDeviceKind::Network => "network",
         }
     }
 }
@@ -75,6 +78,8 @@ pub struct UserDriverBinding {
     pub kind: UserDeviceKind,
     pub block_size: usize,
     pub block_count: usize,
+    pub mtu: usize,
+    pub mac: [u8; 6],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -95,6 +100,18 @@ pub struct UserDriverStats {
     pub flushes: u64,
     pub bytes_read: u64,
     pub bytes_written: u64,
+    pub net_ready: bool,
+    pub net_mmio_base: usize,
+    pub net_device_status: u32,
+    pub net_last_error: Option<UserDriverError>,
+    pub net_mac: [u8; 6],
+    pub net_link_up: bool,
+    pub net_mtu: usize,
+    pub net_rx_packets: u64,
+    pub net_tx_packets: u64,
+    pub net_rx_bytes: u64,
+    pub net_tx_bytes: u64,
+    pub net_dropped_packets: u64,
 }
 
 struct UserDriverFramework {
@@ -121,7 +138,7 @@ impl UserDriverFramework {
         self.bindings.clear();
         self.install_qemu_virt_tree();
         self.probe();
-        self.initialized = block::ready();
+        self.initialized = block::ready() || net::ready();
         self.initialized
     }
 
@@ -195,12 +212,16 @@ impl UserDriverFramework {
     }
 
     fn probe(&mut self) {
+        let mut block_bound = false;
+        let mut net_bound = false;
         for node in &self.nodes {
             if node.compatible == "virtio,mmio"
                 && node.status == "okay"
                 && node.kind == UserDeviceKind::VirtioMmio
+                && !block_bound
                 && block::bind().is_ok()
             {
+                block_bound = true;
                 self.bindings.push(UserDriverBinding {
                     node_path: node.path,
                     driver: "qemu-virtio-mmio-block",
@@ -208,6 +229,27 @@ impl UserDriverFramework {
                     kind: UserDeviceKind::Block,
                     block_size: block::BLOCK_SIZE,
                     block_count: block::capacity_blocks(),
+                    mtu: 0,
+                    mac: [0; 6],
+                });
+            }
+
+            if node.compatible == "virtio,mmio"
+                && node.status == "okay"
+                && node.kind == UserDeviceKind::VirtioMmio
+                && !net_bound
+                && net::bind().is_ok()
+            {
+                net_bound = true;
+                self.bindings.push(UserDriverBinding {
+                    node_path: node.path,
+                    driver: "qemu-virtio-mmio-net",
+                    device_name: "eth0",
+                    kind: UserDeviceKind::Network,
+                    block_size: 0,
+                    block_count: 0,
+                    mtu: net::ETHERNET_MTU,
+                    mac: net::mac(),
                 });
             }
         }
@@ -232,6 +274,18 @@ impl UserDriverFramework {
             flushes: block::flushes(),
             bytes_read: block::bytes_read(),
             bytes_written: block::bytes_written(),
+            net_ready: net::ready(),
+            net_mmio_base: net::mmio_base(),
+            net_device_status: net::device_status(),
+            net_last_error: net::last_error(),
+            net_mac: net::mac(),
+            net_link_up: net::link_up(),
+            net_mtu: net::ETHERNET_MTU,
+            net_rx_packets: net::rx_packets(),
+            net_tx_packets: net::tx_packets(),
+            net_rx_bytes: net::rx_bytes(),
+            net_tx_bytes: net::tx_bytes(),
+            net_dropped_packets: net::dropped_packets(),
         }
     }
 }
@@ -319,6 +373,42 @@ pub fn block_flush() -> Result<(), UserDriverError> {
         return Err(UserDriverError::NotInitialized);
     }
     block::flush()
+}
+
+pub fn net_ready() -> bool {
+    net::ready()
+}
+
+pub fn net_mac() -> [u8; 6] {
+    net::mac()
+}
+
+pub fn net_link_up() -> bool {
+    net::link_up()
+}
+
+pub fn net_send_frame(frame: &[u8]) -> Result<usize, UserDriverError> {
+    if !framework().initialized && !framework().init() {
+        return Err(UserDriverError::NotInitialized);
+    }
+    net::send_frame(frame)
+}
+
+pub fn net_receive_frame(out: &mut [u8]) -> Result<usize, UserDriverError> {
+    if !framework().initialized && !framework().init() {
+        return Err(UserDriverError::NotInitialized);
+    }
+    net::receive_frame(out)
+}
+
+pub fn net_receive_frame_timeout(
+    out: &mut [u8],
+    timeout_spins: usize,
+) -> Result<usize, UserDriverError> {
+    if !framework().initialized && !framework().init() {
+        return Err(UserDriverError::NotInitialized);
+    }
+    net::receive_frame_timeout(out, timeout_spins)
 }
 
 pub fn smoke_test() -> bool {

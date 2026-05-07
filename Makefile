@@ -32,7 +32,9 @@ run: build $(FXFS_DISK)
 		-nographic \
 		-kernel $(KERNEL) \
 		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs,cache=writethrough \
-		-device virtio-blk-device,drive=fxfs
+		-device virtio-blk-device,drive=fxfs \
+		-netdev user,id=smrosnet \
+		-device virtio-net-device,netdev=smrosnet
 
 # Run with QEMU (debug mode with logging)
 debug: build $(FXFS_DISK)
@@ -46,6 +48,8 @@ debug: build $(FXFS_DISK)
 		-kernel $(KERNEL) \
 		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs,cache=writethrough \
 		-device virtio-blk-device,drive=fxfs \
+		-netdev user,id=smrosnet \
+		-device virtio-net-device,netdev=smrosnet \
 		-serial mon:stdio \
 		-d int,cpu_reset \
 		-D qemu.log
@@ -62,6 +66,8 @@ gdb: build $(FXFS_DISK)
 		-kernel $(KERNEL) \
 		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs,cache=writethrough \
 		-device virtio-blk-device,drive=fxfs \
+		-netdev user,id=smrosnet \
+		-device virtio-net-device,netdev=smrosnet \
 		-S -s
 
 # Clean build artifacts
