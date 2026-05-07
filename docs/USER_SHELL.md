@@ -39,7 +39,31 @@ The shell currently registers these commands:
 - `meminfo`
 - `components`
 - `fxfs`
+- `drivers`
+- `ifconfig`
+- `dns`
+- `dhcp`
+- `ping`
+- `curl`
+- `ftp`
+- `tls`
+- `pwd`
+- `ls`
+- `cd`
+- `cd..`
+- `mkdir`
+- `write`
+- `cat`
+- `cp`
+- `mv`
+- `rm`
+- `vi`
+- `mount`
+- `share`
 - `svc`
+- `porttest`
+- `dockertest`
+- `docker`
 - `uptime`
 - `kill`
 - `testsc`
@@ -103,6 +127,26 @@ The `components` command also shows the minimal ELF loader state. A successful b
 
 The `fxfs` command shows object-store statistics, directory-entry count, journal replay count, and the generated boot ELF files in `/pkg/bin`. The listing includes object id, size, mode, link count, uid/gid owner, and name; the current trampoline images are 120 bytes each.
 
+### Host Shared Snapshot
+
+Files placed in the repository's `host_shared/` directory are embedded at build time and exposed inside the shell as `/shared`.
+
+Useful commands:
+
+```text
+mount
+mount share
+share
+ls /shared
+cd /shared
+vi /shared/test
+rm /shared/test
+```
+
+`mount share` refreshes `/shared` from the snapshot compiled into the current kernel image. It does not read the host directory live while QEMU is already running. To see files added to `host_shared/` after boot, rebuild and restart with `make run`; then use `share` or `ls /shared`.
+
+The current implementation is a build-time FxFS snapshot because the guest has virtio block and net drivers, but no 9p or virtio-fs filesystem driver yet. Files larger than 4 MiB are skipped by the build script and reported in the `share` command's skipped list. Shell-created files and edits under `/shared` are FxFS-local changes. Deleting a snapshot file such as `/shared/test` records a persisted tombstone in `/config/host-share-deleted`, so the file stays deleted across reboot while the same `smros-fxfs.img` is used. Remove `smros-fxfs.img` with `make clean-fxfs` to reset those tombstones.
+
 The `svc` command shows registered services, connection count, request/reply counters, and the last fixed-message status. A clean boot starts with three services and zero connections; after `testsc`, the smoke path has three connections, three requests, and three replies.
 
 So it mixes the future-facing syscall helper path with direct kernel function calls.
@@ -133,5 +177,6 @@ It should not yet be treated as:
 
 - Shell execution is still EL1-only.
 - Shell input/output bypasses any future user-space I/O abstraction.
+- `/shared` is a build-time snapshot of `host_shared/`, not a live two-way host mount.
 - `clear` and `exit` are placeholders.
 - The "user-mode" label reflects the intended direction, not the current runtime mode.

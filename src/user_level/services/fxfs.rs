@@ -13,13 +13,15 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::user_level::{drivers, user_logic};
+use crate::user_level::{drivers, host_share, user_logic};
 
 const FXFS_ROOT_OBJECT_ID: u64 = 1;
-const FXFS_MAX_OBJECTS: usize = 128;
-const FXFS_MAX_DIRENTS: usize = 192;
-const FXFS_MAX_FILE_BYTES: usize = 4096;
-const FXFS_MAX_JOURNAL_RECORDS: usize = 128;
+const FXFS_MAX_OBJECTS: usize = 512;
+const FXFS_MAX_DIRENTS: usize = 768;
+const FXFS_MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
+const FXFS_MAX_JOURNAL_RECORDS: usize = 1024;
+const FXFS_SHARED_ROOT: &str = "/shared";
+const FXFS_HOST_SHARE_DELETED_PATH: &str = "/config/host-share-deleted";
 const FXFS_BLOCK_MAGIC: u32 = 0x5346_5846;
 const FXFS_BLOCK_VERSION: u16 = 1;
 const FXFS_BLOCK_HEADER_LEN: u16 = 56;
@@ -339,6 +341,66 @@ fn journal_op_from_u8(value: u8) -> Result<FxfsJournalOp, FxfsError> {
     }
 }
 
+fn fxfs_parent_path(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "/" {
+        return None;
+    }
+    let split = trimmed.rfind('/')?;
+    if split == 0 {
+        Some(String::from("/"))
+    } else {
+        Some(String::from(&trimmed[..split]))
+    }
+}
+
+fn fxfs_host_share_path(relative: &str) -> Result<String, FxfsError> {
+    if relative.is_empty() || relative.starts_with('/') || relative.contains("//") {
+        return Err(FxfsError::InvalidPath);
+    }
+
+    let mut path = String::from(FXFS_SHARED_ROOT);
+    for part in relative.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err(FxfsError::InvalidPath);
+        }
+        path.push('/');
+        path.push_str(part);
+    }
+    Ok(path)
+}
+
+fn fxfs_path_is_shared(path: &str) -> bool {
+    path == FXFS_SHARED_ROOT
+        || path
+            .strip_prefix(FXFS_SHARED_ROOT)
+            .map(|suffix| suffix.starts_with('/'))
+            .unwrap_or(false)
+}
+
+fn fxfs_id_in_list(ids: &[u64], object_id: u64) -> bool {
+    ids.iter().any(|id| *id == object_id)
+}
+
+fn fxfs_host_share_file_exists(relative: &str) -> bool {
+    host_share::HOST_SHARE_FILES
+        .iter()
+        .any(|file| file.path == relative)
+}
+
+fn fxfs_deleted_data_contains(data: &[u8], relative: &str) -> bool {
+    let Ok(text) = core::str::from_utf8(data) else {
+        return false;
+    };
+    text.lines().any(|line| line == relative)
+}
+
+fn fxfs_shared_relative_path(path: &str) -> Option<&str> {
+    path.strip_prefix(FXFS_SHARED_ROOT)
+        .and_then(|suffix| suffix.strip_prefix('/'))
+        .filter(|relative| !relative.is_empty())
+}
+
 pub struct FxfsState {
     mounted: bool,
     block_backed: bool,
@@ -441,6 +503,7 @@ impl FxfsState {
                 Ok(()) => {
                     self.last_sync_ok = true;
                     self.last_storage_error = None;
+                    self.install_host_share()?;
                     return Ok(());
                 }
                 Err(FxfsError::NotFound) => {}
@@ -479,13 +542,38 @@ impl FxfsState {
         self.write_file("/pkg/bin/fxfs", b"smros fxfs service")?;
         self.write_file("/pkg/bin/user-init", b"smros user init")?;
         self.write_file("/config/build-info/product", b"SMROS-Fuchsia-minimal")?;
-        self.persist();
+        self.install_host_share()?;
         Ok(())
     }
 
     fn serialize_image(&self) -> Result<Vec<u8>, FxfsError> {
         let mut body = Vec::new();
-        for object in &self.objects {
+        let mut persist_object_ids = Vec::new();
+        if let Some(root_index) = self.find_object_index(FXFS_ROOT_OBJECT_ID) {
+            persist_object_ids.push(self.objects[root_index].object_id);
+        }
+        let mut index = 0usize;
+        while index < persist_object_ids.len() {
+            let parent_id = persist_object_ids[index];
+            for dirent in &self.dirents {
+                if dirent.parent_id != parent_id {
+                    continue;
+                }
+                if parent_id == FXFS_ROOT_OBJECT_ID && dirent.name == "shared" {
+                    continue;
+                }
+                if !fxfs_id_in_list(&persist_object_ids, dirent.object_id) {
+                    persist_object_ids.push(dirent.object_id);
+                }
+            }
+            index += 1;
+        }
+
+        for object_id in &persist_object_ids {
+            let index = self
+                .find_object_index(*object_id)
+                .ok_or(FxfsError::NotFound)?;
+            let object = &self.objects[index];
             push_u64(&mut body, object.object_id);
             push_u8(&mut body, kind_to_u8(object.kind));
             push_u32(&mut body, object.attrs.mode);
@@ -500,6 +588,11 @@ impl FxfsState {
             body.extend_from_slice(&object.data);
         }
         for dirent in &self.dirents {
+            if !fxfs_id_in_list(&persist_object_ids, dirent.parent_id)
+                || !fxfs_id_in_list(&persist_object_ids, dirent.object_id)
+            {
+                continue;
+            }
             if dirent.name.len() > u16::MAX as usize {
                 return Err(FxfsError::NoSpace);
             }
@@ -532,8 +625,16 @@ impl FxfsState {
         push_u64(&mut image, self.next_object_id);
         push_u64(&mut image, self.sequence);
         push_u64(&mut image, self.replayed_records as u64);
-        push_u32(&mut image, self.objects.len() as u32);
-        push_u32(&mut image, self.dirents.len() as u32);
+        push_u32(&mut image, persist_object_ids.len() as u32);
+        let persist_dirent_count = self
+            .dirents
+            .iter()
+            .filter(|dirent| {
+                fxfs_id_in_list(&persist_object_ids, dirent.parent_id)
+                    && fxfs_id_in_list(&persist_object_ids, dirent.object_id)
+            })
+            .count();
+        push_u32(&mut image, persist_dirent_count as u32);
         push_u32(&mut image, self.journal.len() as u32);
         push_u32(&mut image, 0);
         image.extend_from_slice(&body);
@@ -800,6 +901,29 @@ impl FxfsState {
         self.find_object_index(object_id).ok_or(FxfsError::NotFound)
     }
 
+    fn object_is_under_shared(&self, object_id: u64) -> bool {
+        let Some(shared_id) = self.child_object_id(FXFS_ROOT_OBJECT_ID, "shared") else {
+            return false;
+        };
+        if object_id == shared_id {
+            return true;
+        }
+
+        let mut current = object_id;
+        loop {
+            let Some(dirent) = self.dirents.iter().find(|entry| entry.object_id == current) else {
+                return false;
+            };
+            if dirent.parent_id == shared_id {
+                return true;
+            }
+            if dirent.parent_id == FXFS_ROOT_OBJECT_ID {
+                return false;
+            }
+            current = dirent.parent_id;
+        }
+    }
+
     fn parent_and_name<'a>(&self, path: &'a str) -> Result<(u64, &'a str), FxfsError> {
         self.ensure_mounted()?;
         if !path.starts_with('/') {
@@ -901,7 +1025,9 @@ impl FxfsState {
         }
         let object_id = self.create_object(parent_id, name, FxfsNodeKind::Directory, &[])?;
         self.record(FxfsJournalOp::CreateDir, object_id, parent_id, 0);
-        self.persist();
+        if !fxfs_path_is_shared(path) {
+            self.persist();
+        }
         Ok(object_id)
     }
 
@@ -924,7 +1050,9 @@ impl FxfsState {
                 self.touch_file_write(index);
                 let object_id = self.objects[index].object_id;
                 self.record(FxfsJournalOp::WriteFile, object_id, 0, data.len());
-                self.persist();
+                if !fxfs_path_is_shared(path) {
+                    self.persist();
+                }
                 Ok(data.len())
             }
             Err(FxfsError::NotFound) => {
@@ -932,7 +1060,9 @@ impl FxfsState {
                 let object_id = self.create_object(parent_id, name, FxfsNodeKind::File, data)?;
                 self.record(FxfsJournalOp::CreateFile, object_id, parent_id, data.len());
                 self.record(FxfsJournalOp::WriteFile, object_id, parent_id, data.len());
-                self.persist();
+                if !fxfs_path_is_shared(path) {
+                    self.persist();
+                }
                 Ok(data.len())
             }
             Err(err) => Err(err),
@@ -960,7 +1090,9 @@ impl FxfsState {
             0,
             self.objects[index].data.len(),
         );
-        self.persist();
+        if !fxfs_path_is_shared(path) {
+            self.persist();
+        }
         Ok(data.len())
     }
 
@@ -976,11 +1108,16 @@ impl FxfsState {
         self.touch_file_write(index);
         let object_id = self.objects[index].object_id;
         self.record(FxfsJournalOp::TruncateFile, object_id, 0, size);
-        self.persist();
+        if !fxfs_path_is_shared(path) {
+            self.persist();
+        }
         Ok(size)
     }
 
     fn delete_file(&mut self, path: &str) -> Result<(), FxfsError> {
+        let shared_relative = fxfs_shared_relative_path(path)
+            .filter(|relative| fxfs_host_share_file_exists(relative))
+            .map(String::from);
         let index = self.resolve_path(path)?;
         if self.objects[index].kind == FxfsNodeKind::Directory {
             return Err(FxfsError::IsDirectory);
@@ -996,8 +1133,160 @@ impl FxfsState {
         self.objects.remove(index);
         self.touch_directory(parent_id);
         self.record(FxfsJournalOp::DeleteFile, object_id, parent_id, 0);
-        self.persist();
+        if let Some(relative) = shared_relative {
+            self.remember_host_share_deleted(relative.as_str())?;
+        } else if !fxfs_path_is_shared(path) {
+            self.persist();
+        }
         Ok(())
+    }
+
+    fn remove_object_tree(&mut self, object_id: u64) -> Result<(), FxfsError> {
+        let index = self
+            .find_object_index(object_id)
+            .ok_or(FxfsError::NotFound)?;
+        if self.objects[index].kind == FxfsNodeKind::Directory {
+            let children: Vec<u64> = self
+                .dirents
+                .iter()
+                .filter(|entry| entry.parent_id == object_id)
+                .map(|entry| entry.object_id)
+                .collect();
+            for child_id in children {
+                self.remove_object_tree(child_id)?;
+            }
+        }
+
+        self.dirents.retain(|entry| entry.object_id != object_id);
+        if let Some(index) = self.find_object_index(object_id) {
+            self.objects.remove(index);
+        }
+        Ok(())
+    }
+
+    fn clear_dir_contents(&mut self, path: &str) -> Result<(), FxfsError> {
+        let dir_id = self.resolve_object_id(path)?;
+        let dir_index = self.find_object_index(dir_id).ok_or(FxfsError::NotFound)?;
+        if self.objects[dir_index].kind != FxfsNodeKind::Directory {
+            return Err(FxfsError::NotDirectory);
+        }
+
+        let children: Vec<u64> = self
+            .dirents
+            .iter()
+            .filter(|entry| entry.parent_id == dir_id)
+            .map(|entry| entry.object_id)
+            .collect();
+        for child_id in children {
+            self.remove_object_tree(child_id)?;
+        }
+        self.touch_directory(dir_id);
+        self.record(FxfsJournalOp::TruncateFile, dir_id, dir_id, 0);
+        Ok(())
+    }
+
+    fn ensure_dir_tree(&mut self, path: &str) -> Result<(), FxfsError> {
+        self.ensure_mounted()?;
+        if path == "/" {
+            return Ok(());
+        }
+        if !path.starts_with('/') {
+            return Err(FxfsError::InvalidPath);
+        }
+
+        let mut current = String::from("/");
+        for part in path.split('/').filter(|part| !part.is_empty()) {
+            if part == "." || part == ".." {
+                return Err(FxfsError::InvalidPath);
+            }
+            if current.len() > 1 {
+                current.push('/');
+            }
+            current.push_str(part);
+            self.create_dir(current.as_str())?;
+        }
+        Ok(())
+    }
+
+    fn host_share_deleted_data(&self) -> Option<&[u8]> {
+        let object_id = self.resolve_object_id(FXFS_HOST_SHARE_DELETED_PATH).ok()?;
+        let index = self.find_object_index(object_id)?;
+        if self.objects[index].kind != FxfsNodeKind::File {
+            return None;
+        }
+        Some(self.objects[index].data.as_slice())
+    }
+
+    fn host_share_deleted_contains(&self, relative: &str) -> bool {
+        self.host_share_deleted_data()
+            .map(|data| fxfs_deleted_data_contains(data, relative))
+            .unwrap_or(false)
+    }
+
+    fn remember_host_share_deleted(&mut self, relative: &str) -> Result<(), FxfsError> {
+        if self.host_share_deleted_contains(relative) {
+            return Ok(());
+        }
+
+        self.ensure_dir_tree("/config")?;
+        let mut data = self
+            .host_share_deleted_data()
+            .map(|data| data.to_vec())
+            .unwrap_or_else(Vec::new);
+        if data.last().copied().is_some_and(|byte| byte != b'\n') {
+            data.push(b'\n');
+        }
+        data.extend_from_slice(relative.as_bytes());
+        data.push(b'\n');
+        if !user_logic::fxfs_file_size_valid(data.len()) {
+            return Err(FxfsError::NoSpace);
+        }
+        self.write_file(FXFS_HOST_SHARE_DELETED_PATH, &data)?;
+        Ok(())
+    }
+
+    fn install_host_share_without_persist(&mut self) -> Result<(), FxfsError> {
+        self.ensure_dir_tree(FXFS_SHARED_ROOT)?;
+        self.clear_dir_contents(FXFS_SHARED_ROOT)?;
+        let deleted = self
+            .host_share_deleted_data()
+            .map(|data| data.to_vec())
+            .unwrap_or_else(Vec::new);
+
+        for dir in host_share::HOST_SHARE_DIRS {
+            let path = fxfs_host_share_path(dir)?;
+            self.ensure_dir_tree(path.as_str())?;
+        }
+
+        for file in host_share::HOST_SHARE_FILES {
+            if fxfs_deleted_data_contains(&deleted, file.path) {
+                continue;
+            }
+            let path = fxfs_host_share_path(file.path)?;
+            if let Some(parent) = fxfs_parent_path(path.as_str()) {
+                self.ensure_dir_tree(parent.as_str())?;
+            }
+            self.write_file(path.as_str(), file.data)?;
+        }
+        Ok(())
+    }
+
+    fn install_host_share(&mut self) -> Result<(), FxfsError> {
+        self.ensure_mounted()?;
+        let block_backed = self.block_backed;
+        let last_sync_ok = self.last_sync_ok;
+        let last_storage_error = self.last_storage_error;
+
+        self.block_backed = false;
+        let result = self.install_host_share_without_persist();
+        self.block_backed = block_backed;
+        if result.is_ok() {
+            self.persist();
+        } else {
+            self.last_sync_ok = last_sync_ok;
+            self.last_storage_error = last_storage_error;
+        }
+        result
     }
 
     fn open_cursor(&self, path: &str) -> Result<FxfsCursor, FxfsError> {
@@ -1068,7 +1357,9 @@ impl FxfsState {
             0,
             self.objects[index].data.len(),
         );
-        self.persist();
+        if !self.object_is_under_shared(object_id) {
+            self.persist();
+        }
         Ok(data.len())
     }
 
@@ -1265,6 +1556,10 @@ pub fn truncate_file(path: &str, size: usize) -> Result<usize, FxfsError> {
 
 pub fn delete_file(path: &str) -> Result<(), FxfsError> {
     state().delete_file(path)
+}
+
+pub fn mount_host_share() -> Result<(), FxfsError> {
+    state().install_host_share()
 }
 
 pub fn read_file(path: &str, out: &mut [u8]) -> Result<usize, FxfsError> {

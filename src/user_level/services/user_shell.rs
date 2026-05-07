@@ -193,9 +193,24 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_mv,
     },
     ShellCommand {
+        name: "rm",
+        description: "Remove an FxFS file",
+        handler: cmd_rm,
+    },
+    ShellCommand {
         name: "vi",
         description: "Edit an FxFS file",
         handler: cmd_vi,
+    },
+    ShellCommand {
+        name: "mount",
+        description: "Show mounts or refresh /shared from host_shared",
+        handler: cmd_mount,
+    },
+    ShellCommand {
+        name: "share",
+        description: "List the host_shared snapshot at /shared",
+        handler: cmd_share,
     },
     ShellCommand {
         name: "svc",
@@ -4584,6 +4599,30 @@ fn cmd_mv(ctx: &mut ShellContext, args: &[&str]) {
     }
 }
 
+fn cmd_rm(ctx: &mut ShellContext, args: &[&str]) {
+    let Some(target) = args.first() else {
+        ctx.serial.write_str("rm: missing path\n");
+        return;
+    };
+    let Some(path) = normalize_fxfs_path(ctx.cwd.as_str(), target) else {
+        ctx.serial.write_str("rm: invalid path\n");
+        return;
+    };
+
+    match crate::user_level::fxfs::delete_file(path.as_str()) {
+        Ok(()) => {
+            ctx.serial.write_str("removed ");
+            ctx.serial.write_str(path.as_str());
+            ctx.serial.write_str("\n");
+        }
+        Err(err) => {
+            ctx.serial.write_str("rm: ");
+            print_fxfs_error(ctx, err);
+            ctx.serial.write_str("\n");
+        }
+    }
+}
+
 fn cmd_vi(ctx: &mut ShellContext, args: &[&str]) {
     let Some(target) = args.first() else {
         ctx.serial.write_str("vi: missing path\n");
@@ -4646,12 +4685,164 @@ fn cmd_vi(ctx: &mut ShellContext, args: &[&str]) {
             }
             return;
         }
-        if buffer.len().saturating_add(line.len()).saturating_add(1) > 4096 {
+        if buffer.len().saturating_add(line.len()).saturating_add(1)
+            > user_logic::USER_FXFS_MAX_FILE_BYTES
+        {
             ctx.serial.write_str("vi: buffer full\n");
             continue;
         }
         buffer.extend_from_slice(line.as_bytes());
         buffer.push(b'\n');
+    }
+}
+
+fn print_host_share_summary(ctx: &mut ShellContext) {
+    ctx.serial.write_str("host_shared files=");
+    print_usize(
+        &mut ctx.serial,
+        crate::user_level::host_share::HOST_SHARE_FILES.len(),
+    );
+    ctx.serial.write_str(" dirs=");
+    print_usize(
+        &mut ctx.serial,
+        crate::user_level::host_share::HOST_SHARE_DIRS.len(),
+    );
+    ctx.serial.write_str(" skipped=");
+    print_usize(
+        &mut ctx.serial,
+        crate::user_level::host_share::HOST_SHARE_SKIPPED.len(),
+    );
+}
+
+fn print_host_share_skipped(ctx: &mut ShellContext) {
+    if crate::user_level::host_share::HOST_SHARE_SKIPPED.is_empty() {
+        return;
+    }
+
+    ctx.serial.write_str("\nSkipped host_shared files:\n");
+    for skipped in crate::user_level::host_share::HOST_SHARE_SKIPPED {
+        ctx.serial.write_str("  ");
+        ctx.serial.write_str(skipped.path);
+        ctx.serial.write_str("  ");
+        ctx.serial.write_str(skipped.reason);
+        ctx.serial.write_str("  ");
+        print_usize(&mut ctx.serial, skipped.size);
+        ctx.serial.write_str(" bytes\n");
+    }
+}
+
+/// Command: mount - Show mounts or refresh the host_shared snapshot
+fn cmd_mount(ctx: &mut ShellContext, args: &[&str]) {
+    if args.is_empty() {
+        let stats = crate::user_level::fxfs::stats();
+        ctx.serial.write_str("\nMounted filesystems:\n");
+        ctx.serial.write_str("  fxfs on / type fxfs");
+        if stats.block_backed {
+            ctx.serial.write_str(" (block-backed");
+            if stats.last_sync_ok {
+                ctx.serial.write_str(", synced");
+            } else {
+                ctx.serial.write_str(", not synced");
+            }
+            ctx.serial.write_str(")");
+        } else {
+            ctx.serial.write_str(" (memory)");
+        }
+        ctx.serial
+            .write_str("\n  host_shared on /shared type fxfs.snapshot (build-time)\n\n");
+        ctx.serial
+            .write_str("Use: mount share    refresh /shared from the embedded snapshot\n");
+        ctx.serial
+            .write_str("Live host directory sharing needs a 9p or virtio-fs guest driver.\n\n");
+        return;
+    }
+
+    match args[0] {
+        "share" | "shared" | "/shared" | "host_shared" => {
+            match crate::user_level::fxfs::mount_host_share() {
+                Ok(()) => {
+                    ctx.serial.write_str("mounted host_shared at /shared (");
+                    print_host_share_summary(ctx);
+                    ctx.serial.write_str(")\n");
+                    print_host_share_skipped(ctx);
+                }
+                Err(err) => {
+                    ctx.serial.write_str("mount: ");
+                    print_fxfs_error(ctx, err);
+                    ctx.serial.write_str("\n");
+                }
+            }
+        }
+        _ => {
+            ctx.serial
+                .write_str("usage: mount [share|shared|/shared|host_shared]\n");
+        }
+    }
+}
+
+/// Command: share - List the host_shared snapshot exposed under /shared
+fn cmd_share(ctx: &mut ShellContext, args: &[&str]) {
+    let mut target_index = 0usize;
+    if args.first().copied() == Some("refresh") {
+        match crate::user_level::fxfs::mount_host_share() {
+            Ok(()) => {
+                ctx.serial.write_str("refreshed /shared from host_shared\n");
+            }
+            Err(err) => {
+                ctx.serial.write_str("share: refresh ");
+                print_fxfs_error(ctx, err);
+                ctx.serial.write_str("\n");
+                return;
+            }
+        }
+        target_index = 1;
+    }
+
+    let target = args.get(target_index).copied().unwrap_or("/shared");
+    let base = if target.starts_with('/') {
+        ctx.cwd.as_str()
+    } else {
+        "/shared"
+    };
+    let Some(path) = normalize_fxfs_path(base, target) else {
+        ctx.serial.write_str("share: invalid path\n");
+        return;
+    };
+
+    ctx.serial.write_str("\n/shared snapshot (");
+    print_host_share_summary(ctx);
+    ctx.serial.write_str(")\n");
+
+    match crate::user_level::fxfs::entries(path.as_str()) {
+        Ok(entries) => {
+            ctx.serial
+                .write_str("  Kind  Object  Size  Mode    Links  Owner  Name\n");
+            for entry in &entries {
+                print_fxfs_entry(ctx, entry);
+            }
+            print_host_share_skipped(ctx);
+        }
+        Err(crate::user_level::fxfs::FxfsError::NotDirectory) => {
+            match crate::user_level::fxfs::attrs(path.as_str()) {
+                Ok(attrs) => {
+                    ctx.serial.write_str("  file  ");
+                    print_usize(&mut ctx.serial, attrs.size);
+                    ctx.serial.write_str(" bytes  ");
+                    ctx.serial.write_str(path.as_str());
+                    ctx.serial.write_str("\n");
+                }
+                Err(err) => {
+                    ctx.serial.write_str("share: ");
+                    print_fxfs_error(ctx, err);
+                    ctx.serial.write_str("\n");
+                }
+            }
+        }
+        Err(err) => {
+            ctx.serial.write_str("share: ");
+            print_fxfs_error(ctx, err);
+            ctx.serial.write_str("\n");
+        }
     }
 }
 
@@ -4966,7 +5157,8 @@ fn cmd_ping(ctx: &mut ShellContext, args: &[&str]) {
                         print_number(&mut ctx.serial, reply.port as u32);
                         ctx.serial.write_str(" from ");
                         print_ipv4(&mut ctx.serial, reply.remote_ip);
-                        ctx.serial.write_str(" (icmp blocked by QEMU user networking)");
+                        ctx.serial
+                            .write_str(" (icmp blocked by QEMU user networking)");
                     }
                     Err(tcp_err) => {
                         ctx.serial.write_str("[FAIL] ");
@@ -5430,6 +5622,26 @@ fn print_number(serial: &mut Serial, mut num: u32) {
     let mut i = 0;
 
     while num > 0 && i < 10 {
+        buf[i] = b'0' + (num % 10) as u8;
+        num /= 10;
+        i += 1;
+    }
+
+    for j in 0..i {
+        serial.write_byte(buf[i - 1 - j]);
+    }
+}
+
+fn print_usize(serial: &mut Serial, mut num: usize) {
+    if num == 0 {
+        serial.write_byte(b'0');
+        return;
+    }
+
+    let mut buf = [0u8; 20];
+    let mut i = 0;
+
+    while num > 0 && i < buf.len() {
         buf[i] = b'0' + (num % 10) as u8;
         num /= 10;
         i += 1;

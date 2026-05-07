@@ -7,7 +7,7 @@ verus! {
 include!("../../../src/main_logic_shared.rs");
 include!("../../../src/user_level/services/user_logic_shared.rs");
 
-pub const KERNEL_HEAP_SIZE: usize = 0x100000;
+pub const KERNEL_HEAP_SIZE: usize = 0x0400_0000;
 pub const PAGE_SIZE: usize = 4096;
 pub const USER_PROCESS_CAPACITY: usize = 16;
 pub const USER_INIT_PARENT_PID: usize = 1;
@@ -22,9 +22,9 @@ pub const DEFAULT_STACK_SIZE: usize = 0x4000;
 pub const USER_MMAP_BASE: u64 = 0x5000_0000;
 pub const USER_MMAP_LIMIT: u64 = 0x6000_0000;
 pub const USER_NAMESPACE_RIGHTS_MASK: u32 = 0x7;
-pub const USER_FXFS_MAX_NODES: usize = 128;
-pub const USER_FXFS_MAX_DIRENTS: usize = 192;
-pub const USER_FXFS_MAX_FILE_BYTES: usize = 4096;
+pub const USER_FXFS_MAX_NODES: usize = 512;
+pub const USER_FXFS_MAX_DIRENTS: usize = 768;
+pub const USER_FXFS_MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
 pub const USER_ELF_HEADER_SIZE: usize = 64;
 pub const USER_ELF_PHDR_SIZE: usize = 56;
 pub const USER_ELF_MAX_PHDRS: usize = 8;

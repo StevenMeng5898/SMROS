@@ -235,10 +235,16 @@ pub fn parse(image: &[u8]) -> Result<ElfImage, ElfError> {
 }
 
 pub fn load_from_fxfs(path: &str) -> Result<ElfImage, ElfError> {
-    let mut image = [0u8; user_logic::USER_FXFS_MAX_FILE_BYTES];
+    let attrs = crate::user_level::fxfs::attrs(path).map_err(|_| ElfError::Storage)?;
+    if !user_logic::fxfs_file_size_valid(attrs.size) {
+        return Err(ElfError::Storage);
+    }
+    let mut image = Vec::new();
+    image.resize(attrs.size, 0);
     let len =
         crate::user_level::fxfs::read_file(path, &mut image).map_err(|_| ElfError::Storage)?;
-    parse(&image[..len])
+    image.truncate(len);
+    parse(&image)
 }
 
 /// Build a tiny valid ELF image whose entry is the current SMROS EL0 trampoline.

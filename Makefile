@@ -6,7 +6,7 @@ KERNEL = kernel8.img
 FXFS_DISK = smros-fxfs.img
 BUILD_DIR = target/$(TARGET)/release
 
-.PHONY: all build run clean debug help verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level
+.PHONY: all build run clean clean-fxfs debug help verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level
 
 all: build
 
@@ -75,9 +75,13 @@ clean:
 	@echo "Cleaning..."
 	@cargo clean
 	@rm -f $(KERNEL)
-	@rm -f $(FXFS_DISK)
 	@rm -f qemu.log
-	@echo "Clean complete"
+	@echo "Clean complete (kept $(FXFS_DISK))"
+
+# Reset persistent FxFS disk image
+clean-fxfs:
+	@echo "Removing persistent FxFS disk image: $(FXFS_DISK)"
+	@rm -f $(FXFS_DISK)
 
 # Install ARM64 target
 install-target:
@@ -114,7 +118,8 @@ help:
 	@echo "  run       - Build and run with QEMU"
 	@echo "  debug     - Run with QEMU in debug mode"
 	@echo "  gdb       - Run with QEMU GDB server"
-	@echo "  clean     - Clean build artifacts"
+	@echo "  clean     - Clean build artifacts, keeping $(FXFS_DISK)"
+	@echo "  clean-fxfs - Remove the persistent FxFS disk image"
 	@echo "  verus-setup   - Install the pinned Verus toolchain locally"
 	@echo "  verus-syscall - Verify the syscall proof harness with Verus"
 	@echo "  verus-kernel-objects - Verify the kernel object proof harness with Verus"
@@ -127,4 +132,5 @@ help:
 	@echo "  make run      - Build and run in QEMU"
 	@echo "  make debug    - Run with debug logging"
 	@echo "  make gdb      - Run with GDB server"
-	@echo "  make clean    - Clean everything"
+	@echo "  make clean    - Clean build outputs, keeping $(FXFS_DISK)"
+	@echo "  make clean-fxfs - Remove $(FXFS_DISK)"
