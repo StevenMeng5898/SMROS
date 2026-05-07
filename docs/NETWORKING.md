@@ -55,7 +55,13 @@ Current limits:
   `dns <host>`, `ping <host-or-url>`, or plain `http://` URLs until TLS exists.
 - `dns <host>` is the resolver test. `ping <host>` resolves the host first and
   then sends ICMP; external ICMP can still time out under QEMU user networking
-  even when DNS and TCP/HTTP are working.
+  even when DNS and TCP/HTTP are working. On Linux hosts, allow unprivileged
+  ICMP echo sockets before starting QEMU if external ping is blocked:
+
+  ```sh
+  sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
+  ```
+
 - Linux socket syscalls are still modeled compatibility objects. The NIC-backed
   socket integration added here is the user-level `TcpSocket` facade used by
   `curl` and `ftp`; routing Linux `socket`/`connect`/`send`/`recv` syscalls

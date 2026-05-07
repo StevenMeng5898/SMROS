@@ -129,7 +129,7 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
     },
     ShellCommand {
         name: "ping",
-        description: "Send an ICMP echo request",
+        description: "Check network reachability",
         handler: cmd_ping,
     },
     ShellCommand {
@@ -4912,7 +4912,7 @@ fn cmd_dns(ctx: &mut ShellContext, args: &[&str]) {
     }
 }
 
-/// Command: ping - Send an ICMP echo request
+/// Command: ping - Check network reachability
 fn cmd_ping(ctx: &mut ShellContext, args: &[&str]) {
     let (target, target_label) = match ping_target(args.first().copied()) {
         PingTarget::Address(ip) => (ip, None),
@@ -4955,11 +4955,27 @@ fn cmd_ping(ctx: &mut ShellContext, args: &[&str]) {
             ctx.serial.write_str("\n\n");
         }
         Err(err) => {
-            ctx.serial.write_str("[FAIL] ");
             if err == crate::user_level::net::NetError::Timeout && target_label.is_some() {
-                ctx.serial
-                    .write_str("icmp timeout (host resolved; try dns or curl)");
+                match crate::user_level::net::tcp_probe(
+                    target,
+                    &crate::user_level::net::PING_TCP_FALLBACK_PORTS,
+                ) {
+                    Ok(reply) => {
+                        ctx.serial.write_str("[OK] ");
+                        ctx.serial.write_str("reachable via tcp/");
+                        print_number(&mut ctx.serial, reply.port as u32);
+                        ctx.serial.write_str(" from ");
+                        print_ipv4(&mut ctx.serial, reply.remote_ip);
+                        ctx.serial.write_str(" (icmp blocked by QEMU user networking)");
+                    }
+                    Err(tcp_err) => {
+                        ctx.serial.write_str("[FAIL] ");
+                        ctx.serial.write_str("icmp timeout; tcp probe failed: ");
+                        print_net_error(ctx, tcp_err);
+                    }
+                }
             } else {
+                ctx.serial.write_str("[FAIL] ");
                 print_net_error(ctx, err);
             }
             ctx.serial.write_str("\n\n");

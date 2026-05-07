@@ -22,6 +22,7 @@ const DNS_PORT: u16 = 53;
 const DNS_QUERY_ID_BASE: u16 = 0x534d;
 const DNS_SOURCE_PORT_BASE: u16 = 49152;
 const DNS_MAX_MESSAGE: usize = 512;
+const DNS_QUERY_ATTEMPTS: usize = 3;
 const DNS_RECV_ATTEMPTS: usize = 96;
 const NET_POLL_SPINS: usize = 1_000_000;
 const DHCP_CLIENT_PORT: u16 = 68;
@@ -44,7 +45,9 @@ const TCP_FLAG_PSH: u16 = 0x08;
 const TCP_FLAG_ACK: u16 = 0x10;
 const TCP_WINDOW_SIZE: u16 = 4096;
 const HTTP_PORT: u16 = 80;
+const HTTPS_PORT: u16 = 443;
 const FTP_PORT: u16 = 21;
+pub const PING_TCP_FALLBACK_PORTS: [u16; 2] = [HTTP_PORT, HTTPS_PORT];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetError {
@@ -99,6 +102,19 @@ pub struct PingReply {
     pub from: [u8; 4],
     pub bytes: usize,
     pub ttl: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TcpProbeKind {
+    Connected,
+    Reset,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TcpProbeReply {
+    pub remote_ip: [u8; 4],
+    pub port: u16,
+    pub kind: TcpProbeKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -244,6 +260,35 @@ pub fn ping(ip: [u8; 4]) -> Result<PingReply, NetError> {
     receive_icmp_echo_reply(ip)
 }
 
+pub fn tcp_probe(ip: [u8; 4], ports: &[u16]) -> Result<TcpProbeReply, NetError> {
+    ensure_ready()?;
+    let mut last_err = NetError::Timeout;
+
+    for port in ports {
+        let peer = NetworkSocketAddr { ip, port: *port };
+        match tcp_connect(peer) {
+            Ok(mut socket) => {
+                let _ = socket.close();
+                return Ok(TcpProbeReply {
+                    remote_ip: ip,
+                    port: *port,
+                    kind: TcpProbeKind::Connected,
+                });
+            }
+            Err(NetError::ConnectionReset) => {
+                return Ok(TcpProbeReply {
+                    remote_ip: ip,
+                    port: *port,
+                    kind: TcpProbeKind::Reset,
+                });
+            }
+            Err(err) => last_err = err,
+        }
+    }
+
+    Err(last_err)
+}
+
 pub fn http_get(host: &str, path: &str, out: &mut [u8]) -> Result<HttpResponse, NetError> {
     let remote_ip = dns_lookup_a(host)?;
     let mut socket = tcp_connect(NetworkSocketAddr {
@@ -348,11 +393,20 @@ fn dns_lookup_with_route(
     dns_ip: [u8; 4],
     route_ip: [u8; 4],
 ) -> Result<[u8; 4], NetError> {
-    let (query_id, source_port) = next_dns_query_token();
     let mut route_mac = [0u8; 6];
     resolve_mac(route_ip, &mut route_mac)?;
-    send_dns_query(host, dns_ip, route_mac, query_id, source_port)?;
-    receive_dns_response(dns_ip, route_ip, query_id, source_port)
+
+    for _ in 0..DNS_QUERY_ATTEMPTS {
+        let (query_id, source_port) = next_dns_query_token();
+        send_dns_query(host, dns_ip, route_mac, query_id, source_port)?;
+        match receive_dns_response(dns_ip, route_ip, query_id, source_port) {
+            Ok(ip) => return Ok(ip),
+            Err(NetError::Timeout) => {}
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(NetError::Timeout)
 }
 
 fn ensure_ready() -> Result<(), NetError> {

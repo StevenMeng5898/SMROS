@@ -32,4 +32,6 @@ qemu-system-aarch64 \
     -nographic \
     -kernel "$KERNEL_IMAGE" \
     -drive file="$FXFS_DISK",if=none,format=raw,id=fxfs,cache=writethrough \
-    -device virtio-blk-device,drive=fxfs
+    -device virtio-blk-device,drive=fxfs \
+    -netdev user,id=smrosnet \
+    -device virtio-net-device,netdev=smrosnet
