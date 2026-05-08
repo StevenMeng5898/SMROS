@@ -74,10 +74,13 @@ The same file also provides:
 
 - accepts ELF64 little-endian AArch64 images
 - validates the ELF header, program-header table, entry, and PT_LOAD segment bounds
+- records dynamic metadata from `PT_INTERP` and `DT_NEEDED` so the shell can resolve `/shared/lib` loader and libc dependencies
 - records parsed entry and segment metadata on `UserProcess`
 - provides tiny boot ELF images for the current component trampoline
 
-It does not yet copy segment bytes into process-owned user mappings.
+`src/user_level/services/run_elf.rs` is the current shell launcher for dynamic PIE binaries. It copies PT_LOAD bytes for the main executable and interpreter into the Linux mmap window, builds a Linux argv/env/auxv stack, enters the dynamic loader at EL0, and returns to the shell through the `exit` hook.
+
+This is still an identity-mapped bring-up path, not a fully isolated process model. It does not yet copy segments into process-owned TTBR0-backed user mappings.
 
 `src/user_level/services/fxfs.rs` provides the current storage backing for that scaffold:
 
@@ -141,6 +144,7 @@ No part of the normal boot path:
 - creates a real EL0 process and runs it
 - executes `user_shell_entry()` after an EL transition
 - installs a process-specific TTBR0 page table for the EL0 test
+- maps shell-loaded ELF `PT_LOAD` bytes into a new process address space
 - enforces per-process handle ownership for the shell
 - runs component manager, FxFS, or user-init as fully isolated userspace servers with copied ELF segments
 - runs full FIDL protocols or generated bindings
@@ -190,6 +194,7 @@ The existing scaffolding is useful for the next step toward a real userspace:
 - `UserProcess` defines the shape of a future EL0 process object
 - `switch_to_el0()` captures the intended register transition
 - `linux_syscall()` is already used by the boot-time EL0 smoke test
+- Linux `mmap` can now back FxFS files into the guest memory window, which is enough for the dynamic loader to request shared-library file mappings once an EL0 process handoff exists
 - `PageTableManager` already has the necessary mapping helpers
 - the component runner already reads ELF metadata from FxFS before starting bootstrap processes
 - `/svc` already exercises a component-manager to runner to filesystem style request chain over Zircon channels

@@ -238,7 +238,7 @@ The shell's `testsc` command now exercises:
 
 The memory syscall layer is now complete as a kernel-side software model, but there are still system-level gaps:
 
-- no file-backed `mmap`
+- file-backed `mmap` is available for FxFS-backed Linux file descriptors, enough for the dynamic loader to map shared libraries from `/shared/lib` or `/lib`
 - no per-process `brk`
 - no live VMAR-to-hardware page-table synchronization in the booted shell path
 - no full Zircon process-local handle table yet

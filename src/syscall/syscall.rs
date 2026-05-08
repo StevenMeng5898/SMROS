@@ -37,6 +37,7 @@
 //! - Timer: create, set, cancel
 //! - Sleep: nanosleep, clock_nanosleep
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 
@@ -473,7 +474,9 @@ const LINUX_O_EXCL: usize = 0o200;
 const LINUX_O_TRUNC: usize = 0o1000;
 const LINUX_O_APPEND: usize = 0o2000;
 const LINUX_O_NONBLOCK: usize = 0o4000;
+const LINUX_O_LARGEFILE: usize = 0o100000;
 const LINUX_O_DIRECTORY: usize = 0o200000;
+const LINUX_O_NOFOLLOW: usize = 0o400000;
 const LINUX_O_CLOEXEC: usize = 0o2000000;
 const LINUX_OPEN_ALLOWED_FLAGS: usize = LINUX_O_ACCMODE
     | LINUX_O_CREAT
@@ -481,7 +484,9 @@ const LINUX_OPEN_ALLOWED_FLAGS: usize = LINUX_O_ACCMODE
     | LINUX_O_TRUNC
     | LINUX_O_APPEND
     | LINUX_O_NONBLOCK
+    | LINUX_O_LARGEFILE
     | LINUX_O_DIRECTORY
+    | LINUX_O_NOFOLLOW
     | LINUX_O_CLOEXEC;
 const LINUX_PATH_MAX_BYTES: usize = 4096;
 const LINUX_PIPE_ALLOWED_FLAGS: usize = LINUX_O_CLOEXEC | LINUX_O_NONBLOCK;
@@ -645,10 +650,11 @@ struct LinuxFdRecord {
     writable: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct LinuxFxfsFileRecord {
     handle: u32,
     cursor: fxfs::FxfsCursor,
+    path: String,
 }
 
 #[derive(Clone, Copy)]
@@ -1581,17 +1587,28 @@ impl MemorySyscallState {
         self.linux_fds.iter().any(|record| record.handle == handle)
     }
 
-    fn bind_linux_fxfs_file(&mut self, handle: u32, cursor: fxfs::FxfsCursor) {
+    fn bind_linux_fxfs_file(&mut self, handle: u32, path: String, cursor: fxfs::FxfsCursor) {
         if let Some(record) = self
             .linux_fxfs_files
             .iter_mut()
             .find(|record| record.handle == handle)
         {
             record.cursor = cursor;
+            record.path = path;
         } else {
             self.linux_fxfs_files
-                .push(LinuxFxfsFileRecord { handle, cursor });
+                .push(LinuxFxfsFileRecord {
+                    handle,
+                    cursor,
+                    path,
+                });
         }
+    }
+
+    fn linux_fxfs_file(&self, handle: u32) -> Option<&LinuxFxfsFileRecord> {
+        self.linux_fxfs_files
+            .iter()
+            .find(|record| record.handle == handle)
     }
 
     fn linux_fxfs_file_mut(&mut self, handle: u32) -> Option<&mut LinuxFxfsFileRecord> {
@@ -1704,6 +1721,14 @@ fn linux_user_cstr(ptr: usize, max_len: usize) -> Result<&'static str, SysError>
 
 fn linux_path_is_container_pseudo_file(path: &str) -> bool {
     path.starts_with("/sys/fs/cgroup/") || path.starts_with("/proc/self/attr/")
+}
+
+fn linux_path_visible(path: &str) -> bool {
+    fxfs::attrs(path).is_ok()
+        || linux_path_is_container_pseudo_file(path)
+        || crate::user_level::run_elf::active_exec_path()
+            .map(|exec_path| exec_path == path)
+            .unwrap_or(false)
 }
 
 fn linux_prepare_fxfs_cursor(
@@ -2117,16 +2142,27 @@ pub fn sys_mmap(
     if len == 0 {
         return Err(SysError::EINVAL);
     }
-    if !flags.contains(MmapFlags::ANONYMOUS) {
-        return Err(SysError::ENOSYS);
-    }
     if flags.contains(MmapFlags::SHARED) && flags.contains(MmapFlags::PRIVATE) {
         return Err(SysError::EINVAL);
     }
     if !flags.contains(MmapFlags::SHARED) && !flags.contains(MmapFlags::PRIVATE) {
         return Err(SysError::EINVAL);
     }
-    if offset != 0 || fd != 0 {
+
+    let anonymous = flags.contains(MmapFlags::ANONYMOUS);
+    let file_path = if anonymous {
+        if offset != 0 {
+            return Err(SysError::EINVAL);
+        }
+        None
+    } else {
+        if !page_aligned(offset as usize) {
+            return Err(SysError::EINVAL);
+        }
+        Some(linux_fxfs_path_for_fd(fd, true)?)
+    };
+
+    if checked_end(addr, len).is_none() {
         return Err(SysError::EINVAL);
     }
 
@@ -2157,6 +2193,18 @@ pub fn sys_mmap(
         pfns,
     });
     state.sort_linux_mappings();
+
+    linux_zero_user(vaddr, len)?;
+    if let Some(path) = file_path {
+        let attrs = fxfs::attrs(path.as_str()).map_err(|_| SysError::EIO)?;
+        let offset = offset as usize;
+        if offset < attrs.size {
+            let read_len = core::cmp::min(len, attrs.size - offset);
+            let out = unsafe { core::slice::from_raw_parts_mut(vaddr as *mut u8, read_len) };
+            let _ = fxfs::read_file_at(path.as_str(), offset, out).map_err(|_| SysError::EIO)?;
+        }
+    }
+
     Ok(vaddr)
 }
 
@@ -2202,6 +2250,7 @@ pub fn sys_brk(new_brk: usize) -> SysResult {
     info!("brk: new_brk={:#x}", new_brk);
 
     let state = memory_state();
+    let old_brk = state.brk.current;
 
     if new_brk == 0 {
         return Ok(state.brk.current);
@@ -2233,6 +2282,9 @@ pub fn sys_brk(new_brk: usize) -> SysResult {
     }
 
     state.brk.current = new_brk;
+    if new_brk > old_brk {
+        let _ = linux_zero_user(old_brk, new_brk - old_brk);
+    }
     Ok(state.brk.current)
 }
 
@@ -2535,6 +2587,18 @@ fn linux_fd_handle(fd: usize) -> Result<u32, SysError> {
         .ok_or(SysError::ENODEV)
 }
 
+fn linux_fxfs_path_for_fd(fd: usize, require_readable: bool) -> Result<String, SysError> {
+    let state = memory_state();
+    let record = state
+        .get_fd(fd)
+        .filter(|record| !require_readable || record.readable)
+        .ok_or(SysError::ENODEV)?;
+    let file = state
+        .linux_fxfs_file(record.handle)
+        .ok_or(SysError::ENODEV)?;
+    Ok(file.path.clone())
+}
+
 fn linux_fd_object_type(fd: usize) -> Option<ObjectType> {
     let handle = memory_state().get_fd(fd)?.handle;
     compat::table().object_type(HandleValue(handle))
@@ -2665,8 +2729,49 @@ fn linux_write_cstr(buf: usize, len: usize, value: &[u8]) -> SysResult {
     Ok(buf)
 }
 
+fn linux_write_stat_from_attrs(stat_ptr: usize, attrs: fxfs::FxfsAttributes) -> SysResult {
+    const ST_DEV_OFF: usize = 0;
+    const ST_INO_OFF: usize = 8;
+    const ST_MODE_OFF: usize = 16;
+    const ST_NLINK_OFF: usize = 20;
+    const ST_UID_OFF: usize = 24;
+    const ST_GID_OFF: usize = 28;
+    const ST_SIZE_OFF: usize = 48;
+    const ST_BLKSIZE_OFF: usize = 56;
+    const ST_BLOCKS_OFF: usize = 64;
+
+    linux_zero_user(stat_ptr, core::mem::size_of::<LinuxStat>())?;
+
+    let size = core::cmp::min(attrs.size, i64::MAX as usize) as i64;
+    let blocks = ((attrs.size.saturating_add(511)) / 512) as i64;
+    unsafe {
+        core::ptr::write_unaligned((stat_ptr + ST_DEV_OFF) as *mut u64, 1);
+        core::ptr::write_unaligned((stat_ptr + ST_INO_OFF) as *mut u64, 1);
+        core::ptr::write_unaligned((stat_ptr + ST_MODE_OFF) as *mut u32, attrs.mode);
+        core::ptr::write_unaligned((stat_ptr + ST_NLINK_OFF) as *mut u32, attrs.link_count);
+        core::ptr::write_unaligned((stat_ptr + ST_UID_OFF) as *mut u32, attrs.uid);
+        core::ptr::write_unaligned((stat_ptr + ST_GID_OFF) as *mut u32, attrs.gid);
+        core::ptr::write_unaligned((stat_ptr + ST_SIZE_OFF) as *mut i64, size);
+        core::ptr::write_unaligned((stat_ptr + ST_BLKSIZE_OFF) as *mut i32, PAGE_SIZE as i32);
+        core::ptr::write_unaligned((stat_ptr + ST_BLOCKS_OFF) as *mut i64, blocks);
+    }
+    Ok(0)
+}
+
 fn linux_write_stat(stat_ptr: usize) -> SysResult {
-    linux_zero_user(stat_ptr, core::mem::size_of::<LinuxStat>())
+    linux_write_stat_from_attrs(
+        stat_ptr,
+        fxfs::FxfsAttributes {
+            mode: 0o100644,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            created_at: 0,
+            modified_at: 0,
+            accessed_at: 0,
+            link_count: 1,
+        },
+    )
 }
 
 fn linux_write_statfs(buf: usize) -> SysResult {
@@ -2797,6 +2902,13 @@ pub fn sys_openat(dirfd: usize, path: usize, flags: usize, _mode: usize) -> SysR
     };
     let path_str = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
     let access_mode = flags & LINUX_O_ACCMODE;
+    if object_type == ObjectType::LinuxFile
+        && access_mode == LINUX_O_RDONLY
+        && flags & LINUX_O_CREAT == 0
+        && !linux_path_visible(path_str)
+    {
+        return Err(SysError::ENOENT);
+    }
     let fxfs_cursor = linux_prepare_fxfs_cursor(path_str, object_type, flags, access_mode);
     let handle = compat::create_object(object_type).map_err(|_| SysError::ENOMEM)?;
     let readable = access_mode != LINUX_O_WRONLY;
@@ -2804,7 +2916,7 @@ pub fn sys_openat(dirfd: usize, path: usize, flags: usize, _mode: usize) -> SysR
     let state = memory_state();
     let fd = state.alloc_fd(handle.0, readable, writable);
     if let Some(cursor) = fxfs_cursor {
-        state.bind_linux_fxfs_file(handle.0, cursor);
+        state.bind_linux_fxfs_file(handle.0, String::from(path_str), cursor);
     }
     Ok(fd)
 }
@@ -2839,6 +2951,10 @@ pub fn sys_faccessat(_dirfd: usize, path: usize, mode: usize, _flags: usize) -> 
     }
     if !syscall_logic::linux_path_mode_valid(mode, LINUX_ACCESS_MODE_MASK) {
         return Err(SysError::EINVAL);
+    }
+    let path_str = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
+    if !linux_path_visible(path_str) {
+        return Err(SysError::ENOENT);
     }
     Ok(0)
 }
@@ -3032,6 +3148,23 @@ pub fn sys_readlinkat(_dirfd: usize, path: usize, buf: usize, len: usize) -> Sys
     if len != 0 && buf == 0 {
         return Err(SysError::EFAULT);
     }
+    let path_str = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
+    if path_str == "/proc/self/exe" {
+        let Some(exec_path) = crate::user_level::run_elf::active_exec_path() else {
+            return Err(SysError::ENOENT);
+        };
+        let bytes = exec_path.as_bytes();
+        let write_len = core::cmp::min(len, bytes.len());
+        if write_len != 0 {
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, write_len);
+            }
+        }
+        return Ok(write_len);
+    }
+    if !linux_path_visible(path_str) {
+        return Err(SysError::ENOENT);
+    }
     Ok(0)
 }
 
@@ -3047,6 +3180,11 @@ pub fn sys_fstat(fd: usize, stat_ptr: usize) -> SysResult {
     if !linux_fd_is_file_or_pipe(fd) && !linux_fd_is_dir(fd) {
         return Err(SysError::ENODEV);
     }
+    if let Ok(path) = linux_fxfs_path_for_fd(fd, false) {
+        if let Ok(attrs) = fxfs::attrs(path.as_str()) {
+            return linux_write_stat_from_attrs(stat_ptr, attrs);
+        }
+    }
     linux_write_stat(stat_ptr)
 }
 
@@ -3056,6 +3194,13 @@ pub fn sys_fstatat(_dirfd: usize, path: usize, stat_ptr: usize, flags: usize) ->
     }
     if !syscall_logic::linux_stat_flags_valid(flags, LINUX_STAT_ALLOWED_FLAGS) {
         return Err(SysError::EINVAL);
+    }
+    let path_str = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
+    if let Ok(attrs) = fxfs::attrs(path_str) {
+        return linux_write_stat_from_attrs(stat_ptr, attrs);
+    }
+    if !linux_path_visible(path_str) {
+        return Err(SysError::ENOENT);
     }
     linux_write_stat(stat_ptr)
 }
@@ -3305,17 +3450,65 @@ pub fn sys_getdents64(fd: usize, buf: usize, len: usize) -> SysResult {
     Ok(0)
 }
 
-pub fn sys_lseek(fd: usize, offset: i64, whence: usize) -> SysResult {
-    if !linux_fd_known(fd) {
-        return Err(SysError::ENODEV);
+fn linux_lseek_target(base: usize, offset: i64) -> Option<usize> {
+    if offset >= 0 {
+        base.checked_add(offset as usize)
+    } else {
+        base.checked_sub(offset.checked_neg()? as usize)
     }
+}
+
+pub fn sys_lseek(fd: usize, offset: i64, whence: usize) -> SysResult {
     if !syscall_logic::linux_lseek_whence_valid(whence, LINUX_SEEK_MAX_WHENCE) {
         return Err(SysError::EINVAL);
     }
-    Ok(if offset < 0 { 0 } else { offset as usize })
+    let state = memory_state();
+    let record = state.get_fd(fd).cloned().ok_or(SysError::ENODEV)?;
+    if let Some(file) = state.linux_fxfs_file_mut(record.handle) {
+        const SEEK_SET: usize = 0;
+        const SEEK_CUR: usize = 1;
+        const SEEK_END: usize = 2;
+
+        let base = match whence {
+            SEEK_SET => 0,
+            SEEK_CUR => file.cursor.offset(),
+            SEEK_END => fxfs::attrs(file.path.as_str())
+                .map_err(|_| SysError::EIO)?
+                .size,
+            _ => return Err(SysError::EINVAL),
+        };
+        let target = linux_lseek_target(base, offset).ok_or(SysError::EINVAL)?;
+        fxfs::seek_cursor(&mut file.cursor, target).map_err(|_| SysError::EINVAL)?;
+        return Ok(target);
+    }
+
+    Ok(linux_lseek_target(0, offset).unwrap_or(0))
 }
 
-pub fn sys_pread(fd: usize, buf: usize, len: usize, _offset: u64) -> SysResult {
+pub fn sys_pread(fd: usize, buf: usize, len: usize, offset: u64) -> SysResult {
+    if len == 0 {
+        return Ok(0);
+    }
+    if buf == 0 {
+        return Err(SysError::EFAULT);
+    }
+
+    let file = {
+        let state = memory_state();
+        let record = state
+            .get_fd(fd)
+            .filter(|record| record.readable)
+            .cloned()
+            .ok_or(SysError::ENODEV)?;
+        state.linux_fxfs_file(record.handle).cloned()
+    };
+
+    if let Some(mut file) = file {
+        let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) };
+        fxfs::seek_cursor(&mut file.cursor, offset as usize).map_err(|_| SysError::EINVAL)?;
+        return fxfs::cursor_read(&mut file.cursor, out).map_err(|_| SysError::EIO);
+    }
+
     sys_read(fd, buf, len)
 }
 
@@ -4946,7 +5139,11 @@ pub fn sys_exit(exit_code: i32) -> SysResult {
         return Ok(0);
     }
 
-    // No current-process binding is modeled yet; the EL0 smoke test exits through the hook above.
+    if crate::user_level::run_elf::prepare_run_elf_return(exit_code) {
+        return Ok(0);
+    }
+
+    // No current-process binding is modeled yet; EL0 exits through the hooks above.
     Ok(0)
 }
 
@@ -8080,7 +8277,7 @@ pub enum ZirconSyscall {
 
 /// Dispatch a Linux syscall
 pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
-    match syscall_num {
+    let result = match syscall_num {
         ARM64_SYS_IO_SETUP
         | ARM64_SYS_IO_DESTROY
         | ARM64_SYS_IO_SUBMIT
@@ -8139,7 +8336,6 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         | ARM64_SYS_PKEY_ALLOC
         | ARM64_SYS_PKEY_FREE
         | ARM64_SYS_IO_PGETEVENTS
-        | ARM64_SYS_RSEQ
         | ARM64_SYS_KEXEC_FILE_LOAD
         | ARM64_SYS_PIDFD_SEND_SIGNAL
         | ARM64_SYS_IO_URING_SETUP
@@ -8151,6 +8347,7 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         | ARM64_SYS_LANDLOCK_CREATE_RULESET
         | ARM64_SYS_LANDLOCK_ADD_RULE
         | ARM64_SYS_LANDLOCK_RESTRICT_SELF => Err(SysError::ENOSYS),
+        ARM64_SYS_RSEQ => Err(SysError::EINVAL),
         ARM64_SYS_SETXATTR | ARM64_SYS_LSETXATTR => {
             sys_xattr_path(args[0], args[1], args[2], args[3])
         }
@@ -8193,9 +8390,8 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_TRUNCATE => sys_truncate(args[0], args[1]),
         ARM64_SYS_FTRUNCATE => sys_ftruncate(args[0], args[1]),
         ARM64_SYS_FALLOCATE => sys_fallocate(args[0], args[1], args[2], args[3]),
-        ARM64_SYS_FACCESSAT | ARM64_SYS_FACCESSAT2 => {
-            sys_faccessat2(args[0], args[1], args[2], args[3])
-        }
+        ARM64_SYS_FACCESSAT => sys_faccessat(args[0], args[1], args[2], 0),
+        ARM64_SYS_FACCESSAT2 => sys_faccessat2(args[0], args[1], args[2], args[3]),
         ARM64_SYS_CHDIR => sys_chdir(args[0]),
         ARM64_SYS_FCHDIR => sys_fchdir(args[0]),
         ARM64_SYS_CHROOT => sys_chroot(args[0]),
@@ -8401,7 +8597,8 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
             warn!("Unimplemented Linux syscall: {}", syscall_num);
             Err(SysError::ENOSYS)
         }
-    }
+    };
+    result
 }
 
 /// Dispatch a Zircon syscall

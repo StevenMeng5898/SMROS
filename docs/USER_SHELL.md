@@ -57,6 +57,7 @@ The shell currently registers these commands:
 - `cp`
 - `mv`
 - `rm`
+- `run`
 - `vi`
 - `mount`
 - `share`
@@ -141,11 +142,15 @@ ls /shared
 cd /shared
 vi /shared/test
 rm /shared/test
+run hello.elf
+run /shared/hello.elf
 ```
 
 `mount share` refreshes `/shared` from the snapshot compiled into the current kernel image. It does not read the host directory live while QEMU is already running. To see files added to `host_shared/` after boot, rebuild and restart with `make run`; then use `share` or `ls /shared`.
 
 The current implementation is a build-time FxFS snapshot because the guest has virtio block and net drivers, but no 9p or virtio-fs filesystem driver yet. Files larger than 4 MiB are skipped by the build script and reported in the `share` command's skipped list. Shell-created files and edits under `/shared` are FxFS-local changes. Deleting a snapshot file such as `/shared/test` records a persisted tombstone in `/config/host-share-deleted`, so the file stays deleted across reboot while the same `smros-fxfs.img` is used. Remove `smros-fxfs.img` with `make clean-fxfs` to reset those tombstones.
+
+The `run` command loads a dynamic PIE ELF from FxFS, parses `PT_INTERP` and `DT_NEEDED`, resolves the dynamic loader and C library from `/shared/lib` or `/lib`, builds an argv/env/auxv stack, and enters the loader from an EL0 launcher thread. For example, `run hello.elf` from `/shared` uses `hello.elf`, `/shared/lib/ld-linux-aarch64.so.1`, and `/shared/lib/libc.so.6` and returns to the shell after the program calls `exit`.
 
 The `svc` command shows registered services, connection count, request/reply counters, and the last fixed-message status. A clean boot starts with three services and zero connections; after `testsc`, the smoke path has three connections, three requests, and three replies.
 

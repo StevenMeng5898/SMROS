@@ -198,6 +198,11 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_rm,
     },
     ShellCommand {
+        name: "run",
+        description: "Load an ELF and resolve /shared/lib dependencies",
+        handler: cmd_run,
+    },
+    ShellCommand {
         name: "vi",
         description: "Edit an FxFS file",
         handler: cmd_vi,
@@ -4282,6 +4287,52 @@ fn read_fxfs_file_to_vec(path: &str) -> Result<Vec<u8>, crate::user_level::fxfs:
     Ok(out)
 }
 
+fn fxfs_path_exists(path: &str) -> bool {
+    crate::user_level::fxfs::attrs(path).is_ok()
+}
+
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+fn resolve_run_path(cwd: &str, target: &str) -> Option<String> {
+    let direct = normalize_fxfs_path(cwd, target)?;
+    if fxfs_path_exists(direct.as_str()) {
+        return Some(direct);
+    }
+
+    if !target.contains('/') {
+        let shared = normalize_fxfs_path("/shared", target)?;
+        if fxfs_path_exists(shared.as_str()) {
+            return Some(shared);
+        }
+    }
+
+    Some(direct)
+}
+
+fn resolve_run_library_path(name_or_path: &str) -> Option<String> {
+    if name_or_path.starts_with('/') && fxfs_path_exists(name_or_path) {
+        return Some(String::from(name_or_path));
+    }
+
+    let name = basename(name_or_path);
+
+    let mut shared = String::from("/shared/lib/");
+    shared.push_str(name);
+    if fxfs_path_exists(shared.as_str()) {
+        return Some(shared);
+    }
+
+    let mut lib = String::from("/lib/");
+    lib.push_str(name);
+    if fxfs_path_exists(lib.as_str()) {
+        return Some(lib);
+    }
+
+    None
+}
+
 fn print_bytes_as_text(ctx: &mut ShellContext, bytes: &[u8]) {
     for byte in bytes {
         if user_logic::ascii_shell_input(*byte) || *byte == b'\n' || *byte == b'\t' {
@@ -4307,6 +4358,10 @@ fn print_fxfs_error(ctx: &mut ShellContext, err: crate::user_level::fxfs::FxfsEr
         crate::user_level::fxfs::FxfsError::StorageCorrupt => "storage corrupt",
     };
     ctx.serial.write_str(label);
+}
+
+fn print_elf_error(ctx: &mut ShellContext, err: crate::user_level::elf::ElfError) {
+    ctx.serial.write_str(err.as_str());
 }
 
 fn print_driver_error(ctx: &mut ShellContext, err: crate::user_level::drivers::UserDriverError) {
@@ -4621,6 +4676,98 @@ fn cmd_rm(ctx: &mut ShellContext, args: &[&str]) {
             ctx.serial.write_str("\n");
         }
     }
+}
+
+fn cmd_run(ctx: &mut ShellContext, args: &[&str]) {
+    let Some(target) = args.first() else {
+        ctx.serial.write_str("run: missing elf path\n");
+        ctx.serial.write_str("usage: run <elf-path> [args...]\n");
+        return;
+    };
+    let Some(path) = resolve_run_path(ctx.cwd.as_str(), target) else {
+        ctx.serial.write_str("run: invalid path\n");
+        return;
+    };
+
+    let image = match crate::user_level::elf::load_from_fxfs(path.as_str()) {
+        Ok(image) => image,
+        Err(err) => {
+            ctx.serial.write_str("run: ELF ");
+            print_elf_error(ctx, err);
+            ctx.serial.write_str("\n");
+            return;
+        }
+    };
+
+    ctx.serial.write_str("run: ");
+    ctx.serial.write_str(path.as_str());
+    ctx.serial.write_str("\n  type: ");
+    ctx.serial
+        .write_str(if image.dynamic { "dynamic" } else { "static" });
+    if image.elf_type == crate::user_level::elf::ELF_TYPE_DYN {
+        ctx.serial.write_str(" PIE");
+    }
+    ctx.serial.write_str("\n  entry: 0x");
+    print_hex(&mut ctx.serial, image.entry);
+    ctx.serial.write_str("\n  load segments: ");
+    print_usize(&mut ctx.serial, image.segments.len());
+    ctx.serial.write_str("\n");
+
+    if let Some(interpreter) = image.interpreter.as_ref() {
+        let Some(resolved) = resolve_run_library_path(interpreter.as_str()) else {
+            ctx.serial
+                .write_str("run: ELF dynamic-interpreter-missing: ");
+            ctx.serial.write_str(interpreter.as_str());
+            ctx.serial
+                .write_str(" (copy the loader into /shared/lib or /lib)\n");
+            return;
+        };
+        ctx.serial.write_str("  interpreter: ");
+        ctx.serial.write_str(interpreter.as_str());
+        if resolved.as_str() != interpreter.as_str() {
+            ctx.serial.write_str(" -> ");
+            ctx.serial.write_str(resolved.as_str());
+        }
+        ctx.serial.write_str("\n");
+    }
+
+    if !image.needed.is_empty() {
+        ctx.serial.write_str("  needed:\n");
+        for needed in &image.needed {
+            let Some(resolved) = resolve_run_library_path(needed.as_str()) else {
+                ctx.serial
+                    .write_str("run: ELF dynamic-dependency-missing: ");
+                ctx.serial.write_str(needed.as_str());
+                ctx.serial
+                    .write_str(" (copy DT_NEEDED libraries into /shared/lib or /lib)\n");
+                return;
+            };
+            ctx.serial.write_str("    ");
+            ctx.serial.write_str(needed.as_str());
+            ctx.serial.write_str(" -> ");
+            ctx.serial.write_str(resolved.as_str());
+            ctx.serial.write_str("\n");
+        }
+    }
+
+    let mut argv = Vec::new();
+    argv.push(path.clone());
+    for arg in args.iter().skip(1) {
+        argv.push(String::from(*arg));
+    }
+
+    match crate::user_level::run_elf::spawn(path.clone(), argv) {
+        Ok(()) => ctx
+            .serial
+            .write_str("run: started dynamic loader thread\n"),
+        Err(err) => {
+            ctx.serial.write_str("run: ELF launch-failed: ");
+            ctx.serial.write_str(err.as_str());
+            ctx.serial.write_str("\n");
+            return;
+        }
+    }
+    scheduler::yield_now();
 }
 
 fn cmd_vi(ctx: &mut ShellContext, args: &[&str]) {

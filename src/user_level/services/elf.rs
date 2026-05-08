@@ -1,31 +1,40 @@
 //! Minimal ELF64/AArch64 image parser for boot userspace components.
 //!
 //! This loader intentionally handles only the first bring-up shape SMROS uses:
-//! little-endian ELF64 images with a small program-header table and PT_LOAD
-//! segments. It records load metadata for component processes; real copying of
-//! segment bytes into per-process EL0 mappings is the next loader stage.
+//! little-endian ELF64 images with a small program-header table, PT_LOAD
+//! segments, and enough dynamic metadata to resolve PT_INTERP/DT_NEEDED from
+//! the shell. It records load metadata for component processes; real copying
+//! of segment bytes into per-process EL0 mappings is the next loader stage.
 
 #![allow(dead_code)]
 
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::user_level::user_logic;
 
 pub const ELF_HEADER_SIZE: usize = 64;
 pub const ELF_PHDR_SIZE: usize = 56;
-pub const ELF_MAX_PHDRS: usize = 8;
+pub const ELF_MAX_PHDRS: usize = 16;
 pub const ELF_MAX_LOAD_SEGMENTS: usize = 4;
 pub const ELF_MACHINE_AARCH64: u16 = 183;
 
 const ELF_CLASS_64: u8 = 2;
 const ELF_DATA_LSB: u8 = 1;
 const ELF_VERSION_CURRENT: u8 = 1;
-const ELF_TYPE_EXEC: u16 = 2;
-const ELF_TYPE_DYN: u16 = 3;
+pub const ELF_TYPE_EXEC: u16 = 2;
+pub const ELF_TYPE_DYN: u16 = 3;
+const ELF_PT_DYNAMIC: u32 = 2;
+const ELF_PT_INTERP: u32 = 3;
 const ELF_PT_LOAD: u32 = 1;
 const ELF_PF_EXEC: u32 = 1;
 const ELF_PF_READ: u32 = 4;
 const ELF_BOOT_ALIGN: u64 = 4096;
+const ELF_DYN_ENTRY_SIZE: usize = 16;
+const ELF_DT_NULL: u64 = 0;
+const ELF_DT_NEEDED: u64 = 1;
+const ELF_DT_STRTAB: u64 = 5;
+const ELF_DT_STRSZ: u64 = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ElfError {
@@ -74,8 +83,15 @@ pub struct ElfSegment {
 
 #[derive(Clone, Debug)]
 pub struct ElfImage {
+    pub elf_type: u16,
     pub entry: u64,
+    pub phoff: u64,
+    pub phentsize: u16,
+    pub phnum: u16,
     pub segments: Vec<ElfSegment>,
+    pub interpreter: Option<String>,
+    pub needed: Vec<String>,
+    pub dynamic: bool,
 }
 
 fn read_u16_le(image: &[u8], offset: usize) -> Option<u16> {
@@ -116,6 +132,111 @@ fn read_u64_le(image: &[u8], offset: usize) -> Option<u64> {
     ]))
 }
 
+fn read_c_string(image: &[u8], offset: usize, max_len: usize) -> Result<String, ElfError> {
+    let end = offset.checked_add(max_len).ok_or(ElfError::BadSegment)?;
+    if end > image.len() {
+        return Err(ElfError::BadSegment);
+    }
+
+    let mut string_end = offset;
+    while string_end < end && image[string_end] != 0 {
+        string_end += 1;
+    }
+    core::str::from_utf8(&image[offset..string_end])
+        .map(|value| value.to_string())
+        .map_err(|_| ElfError::BadSegment)
+}
+
+fn file_offset_for_vaddr(segments: &[ElfSegment], vaddr: u64) -> Option<usize> {
+    for segment in segments {
+        let segment_end = segment.vaddr.checked_add(segment.file_size)?;
+        if vaddr >= segment.vaddr && vaddr < segment_end {
+            let delta = vaddr.checked_sub(segment.vaddr)?;
+            let file_offset = segment.file_offset.checked_add(delta)?;
+            if file_offset <= usize::MAX as u64 {
+                return Some(file_offset as usize);
+            }
+        }
+    }
+    None
+}
+
+fn parse_needed(
+    image: &[u8],
+    segments: &[ElfSegment],
+    dynamic_offset: usize,
+    dynamic_size: usize,
+) -> Result<Vec<String>, ElfError> {
+    let dynamic_end = dynamic_offset
+        .checked_add(dynamic_size)
+        .ok_or(ElfError::BadSegment)?;
+    if dynamic_end > image.len() {
+        return Err(ElfError::BadSegment);
+    }
+
+    let mut strtab_vaddr = None;
+    let mut strtab_size = None;
+    let mut needed_offsets = Vec::new();
+    let mut cursor = dynamic_offset;
+
+    while cursor
+        .checked_add(ELF_DYN_ENTRY_SIZE)
+        .map(|end| end <= dynamic_end)
+        .unwrap_or(false)
+    {
+        let tag = read_u64_le(image, cursor).ok_or(ElfError::BadSegment)?;
+        let value = read_u64_le(image, cursor + 8).ok_or(ElfError::BadSegment)?;
+        if tag == ELF_DT_NULL {
+            break;
+        }
+        if tag == ELF_DT_NEEDED {
+            needed_offsets.push(value);
+        } else if tag == ELF_DT_STRTAB {
+            strtab_vaddr = Some(value);
+        } else if tag == ELF_DT_STRSZ {
+            strtab_size = Some(value);
+        }
+        cursor += ELF_DYN_ENTRY_SIZE;
+    }
+
+    if needed_offsets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let strtab_vaddr = strtab_vaddr.ok_or(ElfError::BadSegment)?;
+    let strtab_size = strtab_size.ok_or(ElfError::BadSegment)?;
+    if strtab_size > usize::MAX as u64 {
+        return Err(ElfError::BadSegment);
+    }
+    let strtab_file_offset =
+        file_offset_for_vaddr(segments, strtab_vaddr).ok_or(ElfError::BadSegment)?;
+    let strtab_size = strtab_size as usize;
+    let strtab_end = strtab_file_offset
+        .checked_add(strtab_size)
+        .ok_or(ElfError::BadSegment)?;
+    if strtab_end > image.len() {
+        return Err(ElfError::BadSegment);
+    }
+
+    let mut needed = Vec::new();
+    for name_offset in needed_offsets {
+        if name_offset > usize::MAX as u64 {
+            return Err(ElfError::BadSegment);
+        }
+        let name_offset = name_offset as usize;
+        if name_offset >= strtab_size {
+            return Err(ElfError::BadSegment);
+        }
+        let file_offset = strtab_file_offset
+            .checked_add(name_offset)
+            .ok_or(ElfError::BadSegment)?;
+        let max_len = strtab_size - name_offset;
+        needed.push(read_c_string(image, file_offset, max_len)?);
+    }
+
+    Ok(needed)
+}
+
 fn write_u16_le(image: &mut [u8], offset: usize, value: u16) {
     let bytes = value.to_le_bytes();
     image[offset..offset + 2].copy_from_slice(&bytes);
@@ -142,8 +263,8 @@ pub fn parse(image: &[u8]) -> Result<ElfImage, ElfError> {
         return Err(ElfError::UnsupportedClass);
     }
 
-    let e_type = read_u16_le(image, 16).ok_or(ElfError::ShortHeader)?;
-    if !user_logic::elf_type_valid(e_type) {
+    let elf_type = read_u16_le(image, 16).ok_or(ElfError::ShortHeader)?;
+    if !user_logic::elf_type_valid(elf_type) {
         return Err(ElfError::UnsupportedType);
     }
 
@@ -175,6 +296,8 @@ pub fn parse(image: &[u8]) -> Result<ElfImage, ElfError> {
     }
 
     let mut segments = Vec::new();
+    let mut interpreter = None;
+    let mut dynamic_table = None;
     for index in 0..phnum {
         let Some(header_offset) = phentsize
             .checked_mul(index)
@@ -184,13 +307,6 @@ pub fn parse(image: &[u8]) -> Result<ElfImage, ElfError> {
         };
 
         let p_type = read_u32_le(image, header_offset).ok_or(ElfError::BadProgramHeaderTable)?;
-        if p_type != ELF_PT_LOAD {
-            continue;
-        }
-        if segments.len() >= ELF_MAX_LOAD_SEGMENTS {
-            return Err(ElfError::TooManySegments);
-        }
-
         let flags = read_u32_le(image, header_offset + 4).ok_or(ElfError::BadProgramHeaderTable)?;
         let file_offset =
             read_u64_le(image, header_offset + 8).ok_or(ElfError::BadProgramHeaderTable)?;
@@ -202,6 +318,49 @@ pub fn parse(image: &[u8]) -> Result<ElfImage, ElfError> {
             read_u64_le(image, header_offset + 40).ok_or(ElfError::BadProgramHeaderTable)?;
         let align =
             read_u64_le(image, header_offset + 48).ok_or(ElfError::BadProgramHeaderTable)?;
+
+        if p_type == ELF_PT_INTERP {
+            if file_offset > usize::MAX as u64
+                || file_size > usize::MAX as u64
+                || !user_logic::elf_segment_bounds_valid(
+                    file_offset as usize,
+                    file_size as usize,
+                    file_size as usize,
+                    image.len(),
+                )
+            {
+                return Err(ElfError::BadSegment);
+            }
+            interpreter = Some(read_c_string(
+                image,
+                file_offset as usize,
+                file_size as usize,
+            )?);
+            continue;
+        }
+
+        if p_type == ELF_PT_DYNAMIC {
+            if file_offset > usize::MAX as u64
+                || file_size > usize::MAX as u64
+                || !user_logic::elf_segment_bounds_valid(
+                    file_offset as usize,
+                    file_size as usize,
+                    file_size as usize,
+                    image.len(),
+                )
+            {
+                return Err(ElfError::BadSegment);
+            }
+            dynamic_table = Some((file_offset as usize, file_size as usize));
+            continue;
+        }
+
+        if p_type != ELF_PT_LOAD {
+            continue;
+        }
+        if segments.len() >= ELF_MAX_LOAD_SEGMENTS {
+            return Err(ElfError::TooManySegments);
+        }
 
         if file_offset > usize::MAX as u64
             || file_size > usize::MAX as u64
@@ -231,7 +390,23 @@ pub fn parse(image: &[u8]) -> Result<ElfImage, ElfError> {
         return Err(ElfError::MissingLoadSegment);
     }
 
-    Ok(ElfImage { entry, segments })
+    let needed = match dynamic_table {
+        Some((offset, size)) => parse_needed(image, &segments, offset, size)?,
+        None => Vec::new(),
+    };
+    let dynamic = interpreter.is_some() || !needed.is_empty();
+
+    Ok(ElfImage {
+        elf_type,
+        entry,
+        phoff: phoff_u64,
+        phentsize: phentsize as u16,
+        phnum: phnum as u16,
+        segments,
+        interpreter,
+        needed,
+        dynamic,
+    })
 }
 
 pub fn load_from_fxfs(path: &str) -> Result<ElfImage, ElfError> {
