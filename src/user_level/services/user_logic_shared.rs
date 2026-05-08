@@ -17,6 +17,29 @@ macro_rules! smros_user_page_offset_body {
     }};
 }
 
+macro_rules! smros_user_page_down_body {
+    ($value:expr, $page_size:expr) => {{
+        if $page_size == 0 {
+            None
+        } else {
+            $value.checked_sub($value % $page_size)
+        }
+    }};
+}
+
+macro_rules! smros_user_page_up_body {
+    ($value:expr, $page_size:expr) => {{
+        if $page_size == 0 {
+            None
+        } else {
+            match $value.checked_add($page_size - 1) {
+                Some(adjusted) => adjusted.checked_sub(adjusted % $page_size),
+                None => None,
+            }
+        }
+    }};
+}
+
 macro_rules! smros_user_pfn_to_paddr_body {
     ($pfn:expr, $page_size:expr) => {{
         $pfn.checked_mul($page_size)
@@ -78,6 +101,18 @@ macro_rules! smros_user_parse_digit_step_body {
     }};
 }
 
+macro_rules! smros_user_ipv4_octet_step_body {
+    ($value:expr, $digit:expr) => {{
+        match $value.checked_mul(10) {
+            Some(scaled) => match scaled.checked_add($digit) {
+                Some(next) if next <= 255 => Some(next),
+                _ => None,
+            },
+            None => None,
+        }
+    }};
+}
+
 macro_rules! smros_user_saturating_sub_body {
     ($lhs:expr, $rhs:expr) => {{
         if $lhs >= $rhs {
@@ -123,6 +158,27 @@ macro_rules! smros_user_uptime_parts_body {
 macro_rules! smros_user_mmap_result_ok_body {
     ($addr:expr, $page_size:expr, $base:expr, $limit:expr) => {{
         $page_size != 0 && $addr >= $base && $addr < $limit && $addr % $page_size == 0
+    }};
+}
+
+macro_rules! smros_user_dns_host_len_valid_body {
+    ($len:expr, $max_len:expr) => {{
+        $len > 0 && $len <= $max_len
+    }};
+}
+
+macro_rules! smros_user_dns_label_len_valid_body {
+    ($len:expr, $max_len:expr) => {{
+        $len > 0 && $len <= $max_len
+    }};
+}
+
+macro_rules! smros_user_dns_label_byte_valid_body {
+    ($byte:expr) => {{
+        ($byte >= 0x61u8 && $byte <= 0x7au8)
+            || ($byte >= 0x41u8 && $byte <= 0x5au8)
+            || ($byte >= 0x30u8 && $byte <= 0x39u8)
+            || $byte == 0x2du8
     }};
 }
 
@@ -312,5 +368,24 @@ macro_rules! smros_user_elf_segment_bounds_valid_body {
 macro_rules! smros_user_elf_vaddr_range_valid_body {
     ($vaddr:expr, $mem_size:expr) => {{
         $vaddr.checked_add($mem_size).is_some()
+    }};
+}
+
+macro_rules! smros_user_elf_segment_mapping_range_body {
+    ($vaddr:expr, $mem_size:expr, $page_size:expr) => {{
+        if $mem_size == 0 {
+            None
+        } else {
+            match smros_user_checked_end_body!($vaddr, $mem_size) {
+                Some(end) => match smros_user_page_down_body!($vaddr, $page_size) {
+                    Some(start) => match smros_user_page_up_body!(end, $page_size) {
+                        Some(aligned_end) => Some((start, aligned_end)),
+                        None => None,
+                    },
+                    None => None,
+                },
+                None => None,
+            }
+        }
     }};
 }

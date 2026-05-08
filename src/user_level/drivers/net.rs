@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(static_mut_refs)]
 
-use super::UserDriverError;
+use super::{driver_logic, UserDriverError};
 
 pub const MMIO_BASE: usize = 0x0a00_0000;
 pub const MMIO_STRIDE: usize = 0x200;
@@ -164,7 +164,9 @@ impl QemuVirtNetDriver {
 
     fn bind(&mut self) -> Result<(), UserDriverError> {
         for slot in 0..MMIO_SLOT_COUNT {
-            let base = MMIO_BASE + slot * MMIO_STRIDE;
+            let Some(base) = driver_logic::mmio_slot_base(MMIO_BASE, slot, MMIO_STRIDE) else {
+                continue;
+            };
             if self.bind_at(base).is_ok() {
                 self.last_error = None;
                 return Ok(());
@@ -181,35 +183,39 @@ impl QemuVirtNetDriver {
         self.mmio_base = base;
         set_active_mmio_base(base);
 
-        if mmio_read(REG_MAGIC_VALUE) != VIRTIO_MAGIC_VALUE
-            || mmio_read(REG_DEVICE_ID) != VIRTIO_DEVICE_ID_NET
-            || mmio_read(REG_VENDOR_ID) != VIRTIO_MMIO_VENDOR_QEMU
-        {
+        if !driver_logic::virtio_identity_valid(
+            mmio_read(REG_MAGIC_VALUE),
+            mmio_read(REG_DEVICE_ID),
+            VIRTIO_DEVICE_ID_NET,
+            mmio_read(REG_VENDOR_ID),
+            VIRTIO_MMIO_VENDOR_QEMU,
+        ) {
             return Err(UserDriverError::NotFound);
         }
 
         let version = mmio_read(REG_VERSION);
-        if version != VIRTIO_MMIO_VERSION_MODERN && version != VIRTIO_MMIO_VERSION_LEGACY {
+        if !driver_logic::virtio_version_supported(
+            version,
+            VIRTIO_MMIO_VERSION_LEGACY,
+            VIRTIO_MMIO_VERSION_MODERN,
+        ) {
             return Err(UserDriverError::Unsupported);
         }
-        self.modern = version == VIRTIO_MMIO_VERSION_MODERN;
+        self.modern = driver_logic::virtio_version_is_modern(version, VIRTIO_MMIO_VERSION_MODERN);
 
         mmio_write(REG_STATUS, 0);
         mmio_write(REG_STATUS, VIRTIO_STATUS_ACKNOWLEDGE);
         mmio_write(REG_STATUS, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
 
         let features = self.read_device_features();
-        let mut accepted = 0u64;
-        if features & VIRTIO_NET_F_MAC != 0 {
-            accepted |= VIRTIO_NET_F_MAC;
-        }
-        if features & VIRTIO_NET_F_STATUS != 0 {
-            accepted |= VIRTIO_NET_F_STATUS;
-            self.status_supported = true;
-        }
-        if self.modern {
-            accepted |= VIRTIO_F_VERSION_1;
-        }
+        let accepted = driver_logic::virtio_net_accepted_features(
+            features,
+            VIRTIO_NET_F_MAC,
+            VIRTIO_NET_F_STATUS,
+            VIRTIO_F_VERSION_1,
+            self.modern,
+        );
+        self.status_supported = driver_logic::virtio_feature_present(accepted, VIRTIO_NET_F_STATUS);
         self.write_driver_features(accepted);
 
         if self.modern {
@@ -263,7 +269,7 @@ impl QemuVirtNetDriver {
     ) -> Result<(), UserDriverError> {
         mmio_write(REG_QUEUE_SEL, queue);
         let max_queue = mmio_read(REG_QUEUE_NUM_MAX);
-        if max_queue == 0 || max_queue < VIRTIO_QUEUE_SIZE as u32 {
+        if !driver_logic::virtio_queue_size_valid(max_queue, VIRTIO_QUEUE_SIZE) {
             self.fail();
             return Err(UserDriverError::Unsupported);
         }
@@ -367,7 +373,12 @@ impl QemuVirtNetDriver {
             self.last_error = Some(err);
             return Err(err);
         }
-        if frame.len() > ETHERNET_FRAME_MAX || frame.len() + VIRTIO_NET_HDR_LEN > NET_BUFFER_SIZE {
+        if !driver_logic::net_tx_frame_len_valid(
+            frame.len(),
+            ETHERNET_FRAME_MAX,
+            VIRTIO_NET_HDR_LEN,
+            NET_BUFFER_SIZE,
+        ) {
             self.last_error = Some(UserDriverError::OutOfRange);
             return Err(UserDriverError::OutOfRange);
         }
@@ -440,15 +451,26 @@ impl QemuVirtNetDriver {
                 }
 
                 let packet_len = used.len as usize;
-                if packet_len < VIRTIO_NET_HDR_LEN {
+                if !driver_logic::net_rx_packet_len_valid(
+                    packet_len,
+                    VIRTIO_NET_HDR_LEN,
+                    NET_BUFFER_SIZE,
+                ) {
                     self.post_receive_buffer(desc_id);
                     self.dropped_packets = self.dropped_packets.saturating_add(1);
                     self.last_error = Some(UserDriverError::Io);
                     return Err(UserDriverError::Io);
                 }
 
-                let frame_len = packet_len - VIRTIO_NET_HDR_LEN;
-                if frame_len > out.len() {
+                let Some(frame_len) =
+                    driver_logic::net_rx_frame_len(packet_len, VIRTIO_NET_HDR_LEN)
+                else {
+                    self.post_receive_buffer(desc_id);
+                    self.dropped_packets = self.dropped_packets.saturating_add(1);
+                    self.last_error = Some(UserDriverError::Io);
+                    return Err(UserDriverError::Io);
+                };
+                if !driver_logic::net_rx_output_len_valid(frame_len, out.len()) {
                     self.post_receive_buffer(desc_id);
                     self.dropped_packets = self.dropped_packets.saturating_add(1);
                     self.last_error = Some(UserDriverError::OutOfRange);

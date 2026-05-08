@@ -5,6 +5,7 @@ use vstd::prelude::*;
 verus! {
 
 include!("../../../src/main_logic_shared.rs");
+include!("../../../src/user_level/drivers/driver_logic_shared.rs");
 include!("../../../src/user_level/services/user_logic_shared.rs");
 
 pub const KERNEL_HEAP_SIZE: usize = 0x0400_0000;
@@ -42,6 +43,28 @@ pub const USER_SVC_FILESYSTEM: u16 = 2;
 pub const USER_SVC_COMPONENT_START: u16 = 1;
 pub const USER_SVC_RUNNER_LOAD_ELF: u16 = 2;
 pub const USER_SVC_FILESYSTEM_DESCRIBE: u16 = 3;
+pub const USER_DRIVER_MMIO_BASE: usize = 0x0a00_0000;
+pub const USER_DRIVER_MMIO_STRIDE: usize = 0x200;
+pub const USER_DRIVER_MMIO_SLOT_COUNT: usize = 32;
+pub const USER_DRIVER_BLOCK_SIZE: usize = 512;
+pub const USER_DRIVER_ETHERNET_MTU: usize = 1500;
+pub const USER_DRIVER_ETHERNET_HEADER_LEN: usize = 14;
+pub const USER_DRIVER_ETHERNET_FRAME_MAX: usize = USER_DRIVER_ETHERNET_HEADER_LEN
+    + USER_DRIVER_ETHERNET_MTU;
+pub const USER_DRIVER_NET_HDR_LEN: usize = 10;
+pub const USER_DRIVER_NET_BUFFER_SIZE: usize = 2048;
+pub const USER_DRIVER_VIRTIO_QUEUE_SIZE: u16 = 8;
+pub const USER_DRIVER_VIRTIO_MAGIC: u32 = 0x7472_6976;
+pub const USER_DRIVER_VIRTIO_VENDOR_QEMU: u32 = 0x554d_4551;
+pub const USER_DRIVER_VIRTIO_VERSION_LEGACY: u32 = 1;
+pub const USER_DRIVER_VIRTIO_VERSION_MODERN: u32 = 2;
+pub const USER_DRIVER_VIRTIO_DEVICE_NET: u32 = 1;
+pub const USER_DRIVER_VIRTIO_DEVICE_BLOCK: u32 = 2;
+pub const USER_DRIVER_VIRTIO_F_VERSION_1: u64 = 1u64 << 32;
+pub const USER_DRIVER_VIRTIO_BLK_F_FLUSH: u64 = 1u64 << 9;
+pub const USER_DRIVER_VIRTIO_BLK_F_CONFIG_WCE: u64 = 1u64 << 11;
+pub const USER_DRIVER_VIRTIO_NET_F_MAC: u64 = 1u64 << 5;
+pub const USER_DRIVER_VIRTIO_NET_F_STATUS: u64 = 1u64 << 16;
 
 pub const SYS_WRITE: u32 = 64;
 pub const SYS_EXIT: u32 = 93;
@@ -90,6 +113,14 @@ spec fn checked_mul_spec(lhs: int, rhs: int) -> Option<int> {
     }
 }
 
+spec fn checked_sub_spec(lhs: int, rhs: int) -> Option<int> {
+    if 0 <= lhs && 0 <= rhs && rhs <= lhs {
+        Some(lhs - rhs)
+    } else {
+        Option::<int>::None
+    }
+}
+
 spec fn align_up_spec(pos: int, align: int) -> Option<int> {
     if pos < 0 || align <= 0 {
         Option::<int>::None
@@ -131,6 +162,23 @@ spec fn page_offset_spec(base: int, page_index: int, page_size: int) -> Option<i
     }
 }
 
+spec fn page_down_spec(value: int, page_size: int) -> Option<int> {
+    if 0 <= value && 0 < page_size {
+        checked_sub_spec(value, value % page_size)
+    } else {
+        Option::<int>::None
+    }
+}
+
+spec fn page_up_spec(value: int, page_size: int) -> Option<int> {
+    if 0 <= value && 0 < page_size && value <= usize::MAX as int - (page_size - 1) {
+        let adjusted = value + page_size - 1;
+        checked_sub_spec(adjusted, adjusted % page_size)
+    } else {
+        Option::<int>::None
+    }
+}
+
 spec fn pfn_to_paddr_spec(pfn: int, page_size: int) -> Option<int> {
     if 0 <= pfn && 0 <= page_size && (page_size == 0 || pfn <= u64::MAX as int / page_size) {
         Some(pfn * page_size)
@@ -145,6 +193,142 @@ spec fn stack_top_u64_spec(stack_base: int, stack_size: int) -> Option<int> {
     } else {
         Option::<int>::None
     }
+}
+
+spec fn driver_mmio_slot_base_spec(base: int, slot: int, stride: int) -> Option<int> {
+    if 0 <= base
+        && 0 <= slot
+        && 0 <= stride
+        && (stride == 0 || slot <= usize::MAX as int / stride)
+    {
+        checked_end_spec(base, slot * stride)
+    } else {
+        Option::<int>::None
+    }
+}
+
+spec fn driver_virtio_identity_valid_spec(
+    magic: int,
+    device_id: int,
+    expected_device: int,
+    vendor: int,
+    expected_vendor: int,
+) -> bool {
+    magic == USER_DRIVER_VIRTIO_MAGIC as int
+        && device_id == expected_device
+        && vendor == expected_vendor
+}
+
+spec fn driver_virtio_version_supported_spec(version: int, legacy: int, modern: int) -> bool {
+    version == legacy || version == modern
+}
+
+spec fn driver_virtio_version_is_modern_spec(version: int, modern: int) -> bool {
+    version == modern
+}
+
+spec fn driver_virtio_queue_size_valid_spec(max_queue: int, queue_size: int) -> bool {
+    queue_size != 0 && max_queue >= queue_size
+}
+
+spec fn driver_virtio_block_accepted_features_spec(
+    features: u64,
+    flush: u64,
+    config_wce: u64,
+) -> u64 {
+    features & (flush | config_wce)
+}
+
+spec fn driver_virtio_driver_features_spec(accepted: u64, version_1: u64, modern: bool) -> u64 {
+    if modern {
+        accepted | version_1
+    } else {
+        accepted
+    }
+}
+
+spec fn driver_virtio_net_accepted_features_spec(
+    features: u64,
+    mac: u64,
+    status: u64,
+    version_1: u64,
+    modern: bool,
+) -> u64 {
+    let accepted_mac = if features & mac != 0u64 {
+        0u64 | mac
+    } else {
+        0u64
+    };
+    let accepted_status = if features & status != 0u64 {
+        accepted_mac | status
+    } else {
+        accepted_mac
+    };
+    let accepted_version = if modern {
+        accepted_status | version_1
+    } else {
+        accepted_status
+    };
+    accepted_version
+}
+
+spec fn driver_block_capacity_bytes_spec(blocks: int, block_size: int) -> int {
+    match checked_mul_spec(blocks, block_size) {
+        Some(bytes) => bytes,
+        None => usize::MAX as int,
+    }
+}
+
+spec fn driver_block_range_valid_spec(
+    offset: int,
+    len: int,
+    blocks: int,
+    block_size: int,
+) -> bool {
+    match checked_mul_spec(blocks, block_size) {
+        Some(capacity) => match checked_end_spec(offset, len) {
+            Some(end) => end <= capacity,
+            None => false,
+        },
+        None => false,
+    }
+}
+
+spec fn driver_block_len_valid_spec(len: int, block_size: int) -> bool {
+    len == block_size
+}
+
+spec fn driver_block_id_valid_spec(block: int, capacity_blocks: int) -> bool {
+    block < capacity_blocks
+}
+
+spec fn driver_net_tx_frame_len_valid_spec(
+    frame_len: int,
+    max_frame: int,
+    header_len: int,
+    buffer_size: int,
+) -> bool {
+    frame_len <= max_frame
+        && match checked_end_spec(frame_len, header_len) {
+            Some(total) => total <= buffer_size,
+            None => false,
+        }
+}
+
+spec fn driver_net_rx_packet_len_valid_spec(
+    packet_len: int,
+    header_len: int,
+    buffer_size: int,
+) -> bool {
+    packet_len >= header_len && packet_len <= buffer_size
+}
+
+spec fn driver_net_rx_frame_len_spec(packet_len: int, header_len: int) -> Option<int> {
+    checked_sub_spec(packet_len, header_len)
+}
+
+spec fn driver_net_rx_output_len_valid_spec(frame_len: int, out_len: int) -> bool {
+    frame_len <= out_len
 }
 
 spec fn ascii_shell_input_spec(byte: int) -> bool {
@@ -166,6 +350,19 @@ spec fn parse_digit_step_spec(result: int, digit: int) -> Option<int> {
         && result * 10 <= usize::MAX as int - digit
     {
         Some(result * 10 + digit)
+    } else {
+        Option::<int>::None
+    }
+}
+
+spec fn ipv4_octet_step_spec(value: int, digit: int) -> Option<int> {
+    if 0 <= value && 0 <= digit && value <= u32::MAX as int / 10 {
+        let scaled = value * 10;
+        if scaled <= u32::MAX as int - digit && scaled + digit <= 255 {
+            Some(scaled + digit)
+        } else {
+            Option::<int>::None
+        }
     } else {
         Option::<int>::None
     }
@@ -207,6 +404,21 @@ spec fn uptime_parts_spec(ticks: int) -> (int, int, int, int) {
 
 spec fn mmap_result_ok_spec(addr: int, page_size: int, base: int, limit: int) -> bool {
     page_size != 0 && addr >= base && addr < limit && addr % page_size == 0
+}
+
+spec fn dns_host_len_valid_spec(len: int, max_len: int) -> bool {
+    0 < len && len <= max_len
+}
+
+spec fn dns_label_len_valid_spec(len: int, max_len: int) -> bool {
+    0 < len && len <= max_len
+}
+
+spec fn dns_label_byte_valid_spec(byte: int) -> bool {
+    (0x61 <= byte && byte <= 0x7a)
+        || (0x41 <= byte && byte <= 0x5a)
+        || (0x30 <= byte && byte <= 0x39)
+        || byte == 0x2d
 }
 
 spec fn kernel_success_spec(
@@ -380,6 +592,27 @@ spec fn elf_vaddr_range_valid_spec(vaddr: int, mem_size: int) -> bool {
     0 <= vaddr && 0 <= mem_size && vaddr <= u64::MAX as int - mem_size
 }
 
+spec fn elf_segment_mapping_range_spec(
+    vaddr: int,
+    mem_size: int,
+    page_size: int,
+) -> Option<(int, int)> {
+    if mem_size == 0 {
+        Option::<(int, int)>::None
+    } else {
+        match checked_end_spec(vaddr, mem_size) {
+            Some(end) => match page_down_spec(vaddr, page_size) {
+                Some(start) => match page_up_spec(end, page_size) {
+                    Some(aligned_end) => Some((start, aligned_end)),
+                    None => Option::<(int, int)>::None,
+                },
+                None => Option::<(int, int)>::None,
+            },
+            None => Option::<(int, int)>::None,
+        }
+    }
+}
+
 spec fn user_test_exit_code_spec(
     write_result: int,
     pid: int,
@@ -504,6 +737,26 @@ fn user_page_offset(base: usize, page_index: usize, page_size: usize) -> (out: O
     smros_user_page_offset_body!(base, page_index, page_size)
 }
 
+fn user_page_down(value: usize, page_size: usize) -> (out: Option<usize>)
+    ensures
+        match out {
+            Some(aligned) => page_down_spec(value as int, page_size as int) == Some(aligned as int),
+            None => page_down_spec(value as int, page_size as int) == Option::<int>::None,
+        },
+{
+    smros_user_page_down_body!(value, page_size)
+}
+
+fn user_page_up(value: usize, page_size: usize) -> (out: Option<usize>)
+    ensures
+        match out {
+            Some(aligned) => page_up_spec(value as int, page_size as int) == Some(aligned as int),
+            None => page_up_spec(value as int, page_size as int) == Option::<int>::None,
+        },
+{
+    smros_user_page_up_body!(value, page_size)
+}
+
 fn user_pfn_to_paddr(pfn: u64, page_size: u64) -> (out: Option<u64>)
     requires
         page_size > 0,
@@ -534,6 +787,207 @@ fn user_stack_top_u64(stack_base: u64, stack_size: usize) -> (out: Option<u64>)
         },
 {
     smros_user_stack_top_u64_body!(stack_base, stack_size)
+}
+
+fn driver_mmio_slot_base(base: usize, slot: usize, stride: usize) -> (out: Option<usize>)
+    ensures
+        match out {
+            Some(slot_base) => driver_mmio_slot_base_spec(base as int, slot as int, stride as int)
+                == Some(slot_base as int),
+            None => driver_mmio_slot_base_spec(base as int, slot as int, stride as int)
+                == Option::<int>::None,
+        },
+{
+    match user_checked_mul(slot, stride) {
+        Some(offset) => user_checked_end(base, offset),
+        None => None,
+    }
+}
+
+fn driver_virtio_identity_valid(
+    magic: u32,
+    device_id: u32,
+    expected_device: u32,
+    vendor: u32,
+    expected_vendor: u32,
+) -> (out: bool)
+    ensures
+        out == driver_virtio_identity_valid_spec(
+            magic as int,
+            device_id as int,
+            expected_device as int,
+            vendor as int,
+            expected_vendor as int,
+        ),
+{
+    smros_driver_virtio_identity_valid_body!(
+        magic,
+        device_id,
+        expected_device,
+        vendor,
+        expected_vendor
+    )
+}
+
+fn driver_virtio_version_supported(version: u32, legacy: u32, modern: u32) -> (out: bool)
+    ensures
+        out == driver_virtio_version_supported_spec(
+            version as int,
+            legacy as int,
+            modern as int,
+        ),
+{
+    smros_driver_virtio_version_supported_body!(version, legacy, modern)
+}
+
+fn driver_virtio_version_is_modern(version: u32, modern: u32) -> (out: bool)
+    ensures
+        out == driver_virtio_version_is_modern_spec(version as int, modern as int),
+{
+    smros_driver_virtio_version_is_modern_body!(version, modern)
+}
+
+fn driver_virtio_queue_size_valid(max_queue: u32, queue_size: u16) -> (out: bool)
+    ensures
+        out == driver_virtio_queue_size_valid_spec(max_queue as int, queue_size as int),
+{
+    smros_driver_virtio_queue_size_valid_body!(max_queue, queue_size)
+}
+
+fn driver_virtio_feature_present(features: u64, feature: u64) -> (out: bool)
+    ensures
+        out == (features & feature != 0),
+{
+    smros_driver_virtio_feature_present_body!(features, feature)
+}
+
+fn driver_virtio_block_accepted_features(
+    features: u64,
+    flush: u64,
+    config_wce: u64,
+) -> (out: u64)
+    ensures
+        out == driver_virtio_block_accepted_features_spec(features, flush, config_wce),
+{
+    smros_driver_virtio_block_accepted_features_body!(features, flush, config_wce)
+}
+
+fn driver_virtio_driver_features(accepted: u64, version_1: u64, modern: bool) -> (out: u64)
+    ensures
+        out == driver_virtio_driver_features_spec(accepted, version_1, modern),
+{
+    smros_driver_virtio_driver_features_body!(accepted, version_1, modern)
+}
+
+fn driver_virtio_net_accepted_features(
+    features: u64,
+    mac: u64,
+    status: u64,
+    version_1: u64,
+    modern: bool,
+) -> (out: u64)
+    ensures
+        out == driver_virtio_net_accepted_features_spec(features, mac, status, version_1, modern),
+{
+    smros_driver_virtio_net_accepted_features_body!(features, mac, status, version_1, modern)
+}
+
+fn driver_block_capacity_bytes(blocks: usize, block_size: usize) -> (out: usize)
+    ensures
+        out as int == driver_block_capacity_bytes_spec(blocks as int, block_size as int),
+{
+    match user_checked_mul(blocks, block_size) {
+        Some(bytes) => bytes,
+        None => usize::MAX,
+    }
+}
+
+fn driver_block_range_valid(
+    offset: usize,
+    len: usize,
+    blocks: usize,
+    block_size: usize,
+) -> (out: bool)
+    ensures
+        out == driver_block_range_valid_spec(
+            offset as int,
+            len as int,
+            blocks as int,
+            block_size as int,
+        ),
+{
+    match user_checked_mul(blocks, block_size) {
+        Some(capacity) => match user_checked_end(offset, len) {
+            Some(end) => end <= capacity,
+            None => false,
+        },
+        None => false,
+    }
+}
+
+fn driver_block_len_valid(len: usize, block_size: usize) -> (out: bool)
+    ensures
+        out == driver_block_len_valid_spec(len as int, block_size as int),
+{
+    smros_driver_block_len_valid_body!(len, block_size)
+}
+
+fn driver_block_id_valid(block: usize, capacity_blocks: usize) -> (out: bool)
+    ensures
+        out == driver_block_id_valid_spec(block as int, capacity_blocks as int),
+{
+    smros_driver_block_id_valid_body!(block, capacity_blocks)
+}
+
+fn driver_net_tx_frame_len_valid(
+    frame_len: usize,
+    max_frame: usize,
+    header_len: usize,
+    buffer_size: usize,
+) -> (out: bool)
+    ensures
+        out == driver_net_tx_frame_len_valid_spec(
+            frame_len as int,
+            max_frame as int,
+            header_len as int,
+            buffer_size as int,
+        ),
+{
+    smros_driver_net_tx_frame_len_valid_body!(frame_len, max_frame, header_len, buffer_size)
+}
+
+fn driver_net_rx_packet_len_valid(
+    packet_len: usize,
+    header_len: usize,
+    buffer_size: usize,
+) -> (out: bool)
+    ensures
+        out == driver_net_rx_packet_len_valid_spec(
+            packet_len as int,
+            header_len as int,
+            buffer_size as int,
+        ),
+{
+    smros_driver_net_rx_packet_len_valid_body!(packet_len, header_len, buffer_size)
+}
+
+fn driver_net_rx_frame_len(packet_len: usize, header_len: usize) -> (out: Option<usize>)
+    ensures
+        match out {
+            Some(frame_len) => driver_net_rx_frame_len_spec(packet_len as int, header_len as int)
+                == Some(frame_len as int),
+            None => driver_net_rx_frame_len_spec(packet_len as int, header_len as int)
+                == Option::<int>::None,
+        },
+{
+    smros_driver_net_rx_frame_len_body!(packet_len, header_len)
+}
+
+fn driver_net_rx_output_len_valid(frame_len: usize, out_len: usize) -> (out: bool)
+    ensures
+        out == driver_net_rx_output_len_valid_spec(frame_len as int, out_len as int),
+{
+    smros_driver_net_rx_output_len_valid_body!(frame_len, out_len)
 }
 
 fn user_el0_thread_pstate() -> (out: u64)
@@ -591,6 +1045,16 @@ fn user_parse_digit_step(result: usize, digit: usize) -> (out: Option<usize>)
     smros_user_parse_digit_step_body!(result, digit)
 }
 
+fn user_ipv4_octet_step(value: u32, digit: u32) -> (out: Option<u32>)
+    ensures
+        match out {
+            Some(next) => ipv4_octet_step_spec(value as int, digit as int) == Some(next as int),
+            None => ipv4_octet_step_spec(value as int, digit as int) == Option::<int>::None,
+        },
+{
+    smros_user_ipv4_octet_step_body!(value, digit)
+}
+
 fn user_saturating_sub(lhs: usize, rhs: usize) -> (out: usize)
     ensures
         out as int == saturating_sub_spec(lhs as int, rhs as int),
@@ -641,6 +1105,27 @@ fn user_mmap_result_ok(addr: u64) -> (out: bool)
         ),
 {
     smros_user_mmap_result_ok_body!(addr, PAGE_SIZE as u64, USER_MMAP_BASE, USER_MMAP_LIMIT)
+}
+
+fn user_dns_host_len_valid(len: usize, max_len: usize) -> (out: bool)
+    ensures
+        out == dns_host_len_valid_spec(len as int, max_len as int),
+{
+    smros_user_dns_host_len_valid_body!(len, max_len)
+}
+
+fn user_dns_label_len_valid(len: usize, max_len: usize) -> (out: bool)
+    ensures
+        out == dns_label_len_valid_spec(len as int, max_len as int),
+{
+    smros_user_dns_label_len_valid_body!(len, max_len)
+}
+
+fn user_dns_label_byte_valid(byte: u8) -> (out: bool)
+    ensures
+        out == dns_label_byte_valid_spec(byte as int),
+{
+    smros_user_dns_label_byte_valid_body!(byte)
 }
 
 fn user_kernel_success(
@@ -936,6 +1421,28 @@ fn user_elf_vaddr_range_valid(vaddr: u64, mem_size: u64) -> (out: bool)
     smros_user_elf_vaddr_range_valid_body!(vaddr, mem_size)
 }
 
+fn user_elf_segment_mapping_range(
+    vaddr: usize,
+    mem_size: usize,
+    page_size: usize,
+) -> (out: Option<(usize, usize)>)
+    ensures
+        match out {
+            Some((start, end)) => elf_segment_mapping_range_spec(
+                vaddr as int,
+                mem_size as int,
+                page_size as int,
+            ) == Some((start as int, end as int)),
+            None => elf_segment_mapping_range_spec(
+                vaddr as int,
+                mem_size as int,
+                page_size as int,
+            ) == Option::<(int, int)>::None,
+        },
+{
+    smros_user_elf_segment_mapping_range_body!(vaddr, mem_size, page_size)
+}
+
 fn find_empty_user_process_slot(slots: &Vec<UserProcessSlotModel>) -> (out: Option<usize>)
     ensures
         match out {
@@ -1095,6 +1602,170 @@ proof fn user_process_layout_smoke() {
     assert(0u64 == smros_user_el0_spsr_body!());
 }
 
+fn user_driver_logic_smoke() {
+    let slot0 = driver_mmio_slot_base(
+        USER_DRIVER_MMIO_BASE,
+        0,
+        USER_DRIVER_MMIO_STRIDE,
+    );
+    let slot31 = driver_mmio_slot_base(
+        USER_DRIVER_MMIO_BASE,
+        USER_DRIVER_MMIO_SLOT_COUNT - 1,
+        USER_DRIVER_MMIO_STRIDE,
+    );
+    let slot_overflow = driver_mmio_slot_base(usize::MAX, 1, 1);
+    let block_identity_ok = driver_virtio_identity_valid(
+        USER_DRIVER_VIRTIO_MAGIC,
+        USER_DRIVER_VIRTIO_DEVICE_BLOCK,
+        USER_DRIVER_VIRTIO_DEVICE_BLOCK,
+        USER_DRIVER_VIRTIO_VENDOR_QEMU,
+        USER_DRIVER_VIRTIO_VENDOR_QEMU,
+    );
+    let net_identity_ok = driver_virtio_identity_valid(
+        USER_DRIVER_VIRTIO_MAGIC,
+        USER_DRIVER_VIRTIO_DEVICE_NET,
+        USER_DRIVER_VIRTIO_DEVICE_NET,
+        USER_DRIVER_VIRTIO_VENDOR_QEMU,
+        USER_DRIVER_VIRTIO_VENDOR_QEMU,
+    );
+    let identity_bad = driver_virtio_identity_valid(
+        0,
+        USER_DRIVER_VIRTIO_DEVICE_BLOCK,
+        USER_DRIVER_VIRTIO_DEVICE_BLOCK,
+        USER_DRIVER_VIRTIO_VENDOR_QEMU,
+        USER_DRIVER_VIRTIO_VENDOR_QEMU,
+    );
+    let legacy_ok = driver_virtio_version_supported(
+        USER_DRIVER_VIRTIO_VERSION_LEGACY,
+        USER_DRIVER_VIRTIO_VERSION_LEGACY,
+        USER_DRIVER_VIRTIO_VERSION_MODERN,
+    );
+    let modern_ok = driver_virtio_version_supported(
+        USER_DRIVER_VIRTIO_VERSION_MODERN,
+        USER_DRIVER_VIRTIO_VERSION_LEGACY,
+        USER_DRIVER_VIRTIO_VERSION_MODERN,
+    );
+    let version_bad = driver_virtio_version_supported(
+        3,
+        USER_DRIVER_VIRTIO_VERSION_LEGACY,
+        USER_DRIVER_VIRTIO_VERSION_MODERN,
+    );
+    let is_modern = driver_virtio_version_is_modern(
+        USER_DRIVER_VIRTIO_VERSION_MODERN,
+        USER_DRIVER_VIRTIO_VERSION_MODERN,
+    );
+    let queue_ok = driver_virtio_queue_size_valid(8, USER_DRIVER_VIRTIO_QUEUE_SIZE);
+    let queue_bad = driver_virtio_queue_size_valid(7, USER_DRIVER_VIRTIO_QUEUE_SIZE);
+    let block_features = driver_virtio_block_accepted_features(
+        USER_DRIVER_VIRTIO_BLK_F_FLUSH | USER_DRIVER_VIRTIO_F_VERSION_1,
+        USER_DRIVER_VIRTIO_BLK_F_FLUSH,
+        USER_DRIVER_VIRTIO_BLK_F_CONFIG_WCE,
+    );
+    let block_features_modern = driver_virtio_driver_features(
+        block_features,
+        USER_DRIVER_VIRTIO_F_VERSION_1,
+        true,
+    );
+    let net_features = driver_virtio_net_accepted_features(
+        USER_DRIVER_VIRTIO_NET_F_MAC | USER_DRIVER_VIRTIO_NET_F_STATUS,
+        USER_DRIVER_VIRTIO_NET_F_MAC,
+        USER_DRIVER_VIRTIO_NET_F_STATUS,
+        USER_DRIVER_VIRTIO_F_VERSION_1,
+        true,
+    );
+    let status_present = driver_virtio_feature_present(
+        USER_DRIVER_VIRTIO_NET_F_STATUS,
+        USER_DRIVER_VIRTIO_NET_F_STATUS,
+    );
+    let capacity = driver_block_capacity_bytes(4, USER_DRIVER_BLOCK_SIZE);
+    let capacity_overflow = driver_block_capacity_bytes(usize::MAX, 2);
+    let range_ok = driver_block_range_valid(512, 512, 4, USER_DRIVER_BLOCK_SIZE);
+    let range_bad_end = driver_block_range_valid(2048, 1, 4, USER_DRIVER_BLOCK_SIZE);
+    let range_bad_capacity = driver_block_range_valid(0, 1, usize::MAX, 2);
+    let block_len_ok = driver_block_len_valid(USER_DRIVER_BLOCK_SIZE, USER_DRIVER_BLOCK_SIZE);
+    let block_len_bad = driver_block_len_valid(1, USER_DRIVER_BLOCK_SIZE);
+    let block_id_ok = driver_block_id_valid(3, 4);
+    let block_id_bad = driver_block_id_valid(4, 4);
+    let tx_ok = driver_net_tx_frame_len_valid(
+        USER_DRIVER_ETHERNET_FRAME_MAX,
+        USER_DRIVER_ETHERNET_FRAME_MAX,
+        USER_DRIVER_NET_HDR_LEN,
+        USER_DRIVER_NET_BUFFER_SIZE,
+    );
+    let tx_bad = driver_net_tx_frame_len_valid(
+        USER_DRIVER_ETHERNET_FRAME_MAX + 1,
+        USER_DRIVER_ETHERNET_FRAME_MAX,
+        USER_DRIVER_NET_HDR_LEN,
+        USER_DRIVER_NET_BUFFER_SIZE,
+    );
+    let rx_packet_ok = driver_net_rx_packet_len_valid(
+        USER_DRIVER_NET_HDR_LEN + 64,
+        USER_DRIVER_NET_HDR_LEN,
+        USER_DRIVER_NET_BUFFER_SIZE,
+    );
+    let rx_packet_bad = driver_net_rx_packet_len_valid(
+        USER_DRIVER_NET_HDR_LEN - 1,
+        USER_DRIVER_NET_HDR_LEN,
+        USER_DRIVER_NET_BUFFER_SIZE,
+    );
+    let rx_frame = driver_net_rx_frame_len(USER_DRIVER_NET_HDR_LEN + 64, USER_DRIVER_NET_HDR_LEN);
+    let rx_frame_bad = driver_net_rx_frame_len(USER_DRIVER_NET_HDR_LEN - 1, USER_DRIVER_NET_HDR_LEN);
+    let rx_out_ok = driver_net_rx_output_len_valid(64, 64);
+    let rx_out_bad = driver_net_rx_output_len_valid(65, 64);
+
+    assert(slot0 == Some(USER_DRIVER_MMIO_BASE));
+    assert(slot31 == Some((USER_DRIVER_MMIO_BASE + 31 * USER_DRIVER_MMIO_STRIDE) as usize));
+    assert(slot_overflow == Option::<usize>::None);
+    assert(block_identity_ok);
+    assert(net_identity_ok);
+    assert(!identity_bad);
+    assert(legacy_ok);
+    assert(modern_ok);
+    assert(!version_bad);
+    assert(is_modern);
+    assert(queue_ok);
+    assert(!queue_bad);
+    assert(((USER_DRIVER_VIRTIO_BLK_F_FLUSH | USER_DRIVER_VIRTIO_F_VERSION_1)
+        & (USER_DRIVER_VIRTIO_BLK_F_FLUSH | USER_DRIVER_VIRTIO_BLK_F_CONFIG_WCE))
+        == USER_DRIVER_VIRTIO_BLK_F_FLUSH) by(bit_vector);
+    assert(block_features == USER_DRIVER_VIRTIO_BLK_F_FLUSH);
+    assert(block_features_modern == USER_DRIVER_VIRTIO_BLK_F_FLUSH
+        | USER_DRIVER_VIRTIO_F_VERSION_1);
+    assert(((USER_DRIVER_VIRTIO_NET_F_MAC | USER_DRIVER_VIRTIO_NET_F_STATUS)
+        & USER_DRIVER_VIRTIO_NET_F_MAC) != 0u64) by(bit_vector);
+    assert(((USER_DRIVER_VIRTIO_NET_F_MAC | USER_DRIVER_VIRTIO_NET_F_STATUS)
+        & USER_DRIVER_VIRTIO_NET_F_STATUS) != 0u64) by(bit_vector);
+    assert((0u64 | USER_DRIVER_VIRTIO_NET_F_MAC) | USER_DRIVER_VIRTIO_NET_F_STATUS
+        | USER_DRIVER_VIRTIO_F_VERSION_1 == USER_DRIVER_VIRTIO_NET_F_MAC
+        | USER_DRIVER_VIRTIO_NET_F_STATUS
+        | USER_DRIVER_VIRTIO_F_VERSION_1) by(bit_vector);
+    assert(net_features == USER_DRIVER_VIRTIO_NET_F_MAC
+        | USER_DRIVER_VIRTIO_NET_F_STATUS
+        | USER_DRIVER_VIRTIO_F_VERSION_1);
+    assert((USER_DRIVER_VIRTIO_NET_F_STATUS & USER_DRIVER_VIRTIO_NET_F_STATUS) != 0u64)
+        by(bit_vector);
+    assert(status_present
+        == ((USER_DRIVER_VIRTIO_NET_F_STATUS & USER_DRIVER_VIRTIO_NET_F_STATUS) != 0u64));
+    assert(status_present);
+    assert(capacity == 2048);
+    assert(capacity_overflow == usize::MAX);
+    assert(range_ok);
+    assert(!range_bad_end);
+    assert(!range_bad_capacity);
+    assert(block_len_ok);
+    assert(!block_len_bad);
+    assert(block_id_ok);
+    assert(!block_id_bad);
+    assert(tx_ok);
+    assert(!tx_bad);
+    assert(rx_packet_ok);
+    assert(!rx_packet_bad);
+    assert(rx_frame == Some(64usize));
+    assert(rx_frame_bad == Option::<usize>::None);
+    assert(rx_out_ok);
+    assert(!rx_out_bad);
+}
+
 proof fn user_shell_logic_smoke() {
     assert(ascii_shell_input_spec(0x20));
     assert(ascii_shell_input_spec(0x7e));
@@ -1108,6 +1779,17 @@ proof fn user_shell_logic_smoke() {
     assert(pages_to_kb_spec(2int, PAGE_SIZE as int) == 8);
     assert(usage_percent_spec(25int, 100int) == 25);
     assert(uptime_parts_spec(86400int * 100int).3 == 1);
+    assert(ipv4_octet_step_spec(19int, 2int) == Some(192int));
+    assert(ipv4_octet_step_spec(25int, 6int) == Option::<int>::None);
+    assert(dns_host_len_valid_spec(1int, 253int));
+    assert(!dns_host_len_valid_spec(0int, 253int));
+    assert(dns_label_len_valid_spec(63int, 63int));
+    assert(!dns_label_len_valid_spec(64int, 63int));
+    assert(dns_label_byte_valid_spec(0x61int));
+    assert(dns_label_byte_valid_spec(0x5aint));
+    assert(dns_label_byte_valid_spec(0x39int));
+    assert(dns_label_byte_valid_spec(0x2dint));
+    assert(!dns_label_byte_valid_spec(0x5fint));
 }
 
 fn user_component_fxfs_exec_smoke() {
@@ -1238,6 +1920,22 @@ fn user_component_fxfs_exec_smoke() {
     let elf_segment_bad = user_elf_segment_bounds_valid(100, 32, 16, 120);
     let elf_vaddr_ok = user_elf_vaddr_range_valid(0x1000, 4096);
     let elf_vaddr_bad = user_elf_vaddr_range_valid(u64::MAX, 1);
+    let page_down_ok = user_page_down(0x1234, PAGE_SIZE);
+    let page_down_bad = user_page_down(0x1234, 0);
+    let page_up_ok = user_page_up(0x1234, PAGE_SIZE);
+    let page_up_aligned = user_page_up(0x2000, PAGE_SIZE);
+    let page_up_bad = user_page_up(usize::MAX, PAGE_SIZE);
+    let dns_host_len_ok = user_dns_host_len_valid(253, 253);
+    let dns_host_len_bad = user_dns_host_len_valid(254, 253);
+    let dns_label_len_ok = user_dns_label_len_valid(63, 63);
+    let dns_label_len_bad = user_dns_label_len_valid(0, 63);
+    let dns_label_alpha = user_dns_label_byte_valid(0x61u8);
+    let dns_label_bad = user_dns_label_byte_valid(0x5fu8);
+    let ipv4_step_ok = user_ipv4_octet_step(24, 5);
+    let ipv4_step_bad = user_ipv4_octet_step(25, 6);
+    let elf_map_ok = user_elf_segment_mapping_range(0x1234, 0x2000, PAGE_SIZE);
+    let elf_map_empty = user_elf_segment_mapping_range(0x1234, 0, PAGE_SIZE);
+    let elf_map_overflow = user_elf_segment_mapping_range(usize::MAX, 2, PAGE_SIZE);
 
     assert(start_ok == component_start_allowed_spec(true, false, false));
     assert(start_existing == component_start_allowed_spec(false, true, true));
@@ -1381,6 +2079,22 @@ fn user_component_fxfs_exec_smoke() {
     assert(elf_segment_bad == elf_segment_bounds_valid_spec(100, 32, 16, 120));
     assert(elf_vaddr_ok == elf_vaddr_range_valid_spec(0x1000, 4096));
     assert(elf_vaddr_bad == elf_vaddr_range_valid_spec(u64::MAX as int, 1));
+    assert(page_down_ok == Some(0x1000usize));
+    assert(page_down_bad == Option::<usize>::None);
+    assert(page_up_ok == Some(0x2000usize));
+    assert(page_up_aligned == Some(0x2000usize));
+    assert(page_up_bad == Option::<usize>::None);
+    assert(dns_host_len_ok == dns_host_len_valid_spec(253, 253));
+    assert(dns_host_len_bad == dns_host_len_valid_spec(254, 253));
+    assert(dns_label_len_ok == dns_label_len_valid_spec(63, 63));
+    assert(dns_label_len_bad == dns_label_len_valid_spec(0, 63));
+    assert(dns_label_alpha == dns_label_byte_valid_spec(0x61));
+    assert(dns_label_bad == dns_label_byte_valid_spec(0x5f));
+    assert(ipv4_step_ok == Some(245u32));
+    assert(ipv4_step_bad == Option::<u32>::None);
+    assert(elf_map_ok == Some((0x1000usize, 0x4000usize)));
+    assert(elf_map_empty == Option::<(usize, usize)>::None);
+    assert(elf_map_overflow == Option::<(usize, usize)>::None);
 }
 
 proof fn user_test_syscall_smoke() {

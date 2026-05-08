@@ -10,6 +10,7 @@
 use alloc::vec::Vec;
 
 pub mod block;
+pub(crate) mod driver_logic;
 pub mod net;
 
 const QEMU_VIRT_MACHINE: &str = "linux,dummy-virt";

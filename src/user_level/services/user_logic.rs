@@ -37,6 +37,14 @@ pub(crate) fn page_offset_vaddr(base: usize, page_index: usize, page_size: usize
     smros_user_page_offset_body!(base, page_index, page_size)
 }
 
+pub(crate) fn page_down(value: usize, page_size: usize) -> Option<usize> {
+    smros_user_page_down_body!(value, page_size)
+}
+
+pub(crate) fn page_up(value: usize, page_size: usize) -> Option<usize> {
+    smros_user_page_up_body!(value, page_size)
+}
+
 pub(crate) fn pfn_to_paddr(pfn: u64, page_size: usize) -> Option<u64> {
     smros_user_pfn_to_paddr_body!(pfn, page_size as u64)
 }
@@ -73,6 +81,10 @@ pub(crate) fn parse_digit_step(result: usize, digit: usize) -> Option<usize> {
     smros_user_parse_digit_step_body!(result, digit)
 }
 
+pub(crate) fn ipv4_octet_step(value: u32, digit: u32) -> Option<u32> {
+    smros_user_ipv4_octet_step_body!(value, digit)
+}
+
 pub(crate) fn saturating_sub(lhs: usize, rhs: usize) -> usize {
     smros_user_saturating_sub_body!(lhs, rhs)
 }
@@ -91,6 +103,18 @@ pub(crate) fn uptime_parts(ticks: u64) -> (u64, u64, u64, u64) {
 
 pub(crate) fn mmap_result_ok(addr: u64) -> bool {
     smros_user_mmap_result_ok_body!(addr, 4096u64, USER_MMAP_BASE, USER_MMAP_LIMIT)
+}
+
+pub(crate) fn dns_host_len_valid(len: usize) -> bool {
+    smros_user_dns_host_len_valid_body!(len, 253usize)
+}
+
+pub(crate) fn dns_label_len_valid(len: usize) -> bool {
+    smros_user_dns_label_len_valid_body!(len, 63usize)
+}
+
+pub(crate) fn dns_label_byte_valid(byte: u8) -> bool {
+    smros_user_dns_label_byte_valid_body!(byte)
 }
 
 pub(crate) fn kernel_success(
@@ -245,4 +269,12 @@ pub(crate) fn elf_segment_bounds_valid(
 
 pub(crate) fn elf_vaddr_range_valid(vaddr: u64, mem_size: u64) -> bool {
     smros_user_elf_vaddr_range_valid_body!(vaddr, mem_size)
+}
+
+pub(crate) fn elf_segment_mapping_range(
+    vaddr: usize,
+    mem_size: usize,
+    page_size: usize,
+) -> Option<(usize, usize)> {
+    smros_user_elf_segment_mapping_range_body!(vaddr, mem_size, page_size)
 }

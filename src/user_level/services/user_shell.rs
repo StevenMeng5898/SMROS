@@ -4199,10 +4199,7 @@ fn parse_ipv4(input: &str) -> Option<[u8; 4]> {
             if *byte < b'0' || *byte > b'9' {
                 return None;
             }
-            value = value.checked_mul(10)?.checked_add((*byte - b'0') as u32)?;
-            if value > 255 {
-                return None;
-            }
+            value = user_logic::ipv4_octet_step(value, (*byte - b'0') as u32)?;
         }
         out[count] = value as u8;
         count += 1;
@@ -4258,19 +4255,15 @@ fn parse_url(url: &str) -> Option<(&str, &str, &str)> {
 }
 
 fn host_valid(host: &str) -> bool {
-    if host.is_empty() || host.len() > 253 || host.starts_with('.') || host.ends_with('.') {
+    if !user_logic::dns_host_len_valid(host.len()) || host.starts_with('.') || host.ends_with('.') {
         return false;
     }
     for label in host.split('.') {
-        if label.is_empty() || label.len() > 63 {
+        if !user_logic::dns_label_len_valid(label.len()) {
             return false;
         }
         for byte in label.as_bytes() {
-            if !((*byte >= b'a' && *byte <= b'z')
-                || (*byte >= b'A' && *byte <= b'Z')
-                || (*byte >= b'0' && *byte <= b'9')
-                || *byte == b'-')
-            {
+            if !user_logic::dns_label_byte_valid(*byte) {
                 return false;
             }
         }
@@ -4757,9 +4750,7 @@ fn cmd_run(ctx: &mut ShellContext, args: &[&str]) {
     }
 
     match crate::user_level::run_elf::spawn(path.clone(), argv) {
-        Ok(()) => ctx
-            .serial
-            .write_str("run: started dynamic loader thread\n"),
+        Ok(()) => ctx.serial.write_str("run: started dynamic loader thread\n"),
         Err(err) => {
             ctx.serial.write_str("run: ELF launch-failed: ");
             ctx.serial.write_str(err.as_str());

@@ -297,8 +297,7 @@ fn elf_mapping_span(image: &elf::ElfImage) -> Option<(usize, usize)> {
         }
         let vaddr = segment.vaddr as usize;
         let mem_size = usize::try_from(segment.mem_size).ok()?;
-        let start = page_down(vaddr);
-        let end = page_up(vaddr.checked_add(mem_size)?)?;
+        let (start, end) = user_logic::elf_segment_mapping_range(vaddr, mem_size, PAGE_SIZE)?;
         min_addr = core::cmp::min(min_addr, start);
         max_addr = core::cmp::max(max_addr, end);
     }
@@ -309,25 +308,9 @@ fn elf_mapping_span(image: &elf::ElfImage) -> Option<(usize, usize)> {
     Some((min_addr, max_addr - min_addr))
 }
 
-fn page_down(value: usize) -> usize {
-    value & !(PAGE_SIZE - 1)
-}
-
-fn page_up(value: usize) -> Option<usize> {
-    value
-        .checked_add(PAGE_SIZE - 1)
-        .map(|value| value & !(PAGE_SIZE - 1))
-}
-
 fn sync_instruction_cache() {
     unsafe {
-        core::arch::asm!(
-            "dsb ishst",
-            "ic iallu",
-            "dsb ish",
-            "isb",
-            options(nostack),
-        );
+        core::arch::asm!("dsb ishst", "ic iallu", "dsb ish", "isb", options(nostack),);
     }
 }
 
@@ -355,10 +338,7 @@ impl StackBuilder {
     }
 
     fn push_bytes(&mut self, bytes: &[u8]) -> Result<usize, RunElfError> {
-        self.sp = self
-            .sp
-            .checked_sub(bytes.len())
-            .ok_or(RunElfError::Stack)?;
+        self.sp = self.sp.checked_sub(bytes.len()).ok_or(RunElfError::Stack)?;
         if self.sp < self.base {
             return Err(RunElfError::Stack);
         }
@@ -395,8 +375,8 @@ fn build_initial_stack(request: &RunRequest, main: &elf::ElfImage) -> Result<u64
     let mut stack = StackBuilder::new(RUN_ELF_STACK_SIZE)?;
 
     let random_ptr = stack.push_bytes(&[
-        0x41, 0x52, 0x4d, 0x36, 0x34, 0x2d, 0x53, 0x4d, 0x52, 0x4f, 0x53, 0x2d, 0x45, 0x4c,
-        0x46, 0x21,
+        0x41, 0x52, 0x4d, 0x36, 0x34, 0x2d, 0x53, 0x4d, 0x52, 0x4f, 0x53, 0x2d, 0x45, 0x4c, 0x46,
+        0x21,
     ])?;
     let platform_ptr = stack.push_cstr("aarch64")?;
     let env_ld_path = stack.push_cstr("LD_LIBRARY_PATH=/shared/lib:/lib")?;

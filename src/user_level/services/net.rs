@@ -2,7 +2,10 @@
 
 #![allow(dead_code)]
 
-use crate::user_level::drivers::{self, net::ETHERNET_FRAME_MAX, UserDriverError};
+use crate::user_level::{
+    drivers::{self, net::ETHERNET_FRAME_MAX, UserDriverError},
+    user_logic,
+};
 
 pub const QEMU_USER_IP: [u8; 4] = [10, 0, 2, 15];
 pub const QEMU_USER_GATEWAY: [u8; 4] = [10, 0, 2, 2];
@@ -699,16 +702,16 @@ fn encode_dns_name(host: &str, out: &mut [u8], mut offset: usize) -> Result<usiz
 }
 
 fn validate_dns_host(host: &str) -> Result<(), NetError> {
-    if host.is_empty() || host.len() > 253 {
+    if !user_logic::dns_host_len_valid(host.len()) {
         return Err(NetError::InvalidHost);
     }
 
     for label in host.as_bytes().split(|byte| *byte == b'.') {
-        if label.is_empty() || label.len() > 63 {
+        if !user_logic::dns_label_len_valid(label.len()) {
             return Err(NetError::InvalidHost);
         }
         for byte in label {
-            if !dns_label_byte_valid(*byte) {
+            if !user_logic::dns_label_byte_valid(*byte) {
                 return Err(NetError::InvalidHost);
             }
         }
@@ -718,10 +721,7 @@ fn validate_dns_host(host: &str) -> Result<(), NetError> {
 }
 
 fn dns_label_byte_valid(byte: u8) -> bool {
-    (byte >= b'a' && byte <= b'z')
-        || (byte >= b'A' && byte <= b'Z')
-        || (byte >= b'0' && byte <= b'9')
-        || byte == b'-'
+    user_logic::dns_label_byte_valid(byte)
 }
 
 fn receive_dns_response(

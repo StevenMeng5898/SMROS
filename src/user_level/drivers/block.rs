@@ -5,7 +5,7 @@
 
 use core::mem::size_of;
 
-use super::UserDriverError;
+use super::{driver_logic, UserDriverError};
 
 pub const MMIO_BASE: usize = 0x0a00_0000;
 pub const MMIO_STRIDE: usize = 0x200;
@@ -177,7 +177,9 @@ impl QemuVirtBlockDriver {
 
     fn bind(&mut self) -> Result<(), UserDriverError> {
         for slot in 0..MMIO_SLOT_COUNT {
-            let base = MMIO_BASE + slot * MMIO_STRIDE;
+            let Some(base) = driver_logic::mmio_slot_base(MMIO_BASE, slot, MMIO_STRIDE) else {
+                continue;
+            };
             if self.bind_at(base).is_ok() {
                 self.last_error = None;
                 return Ok(());
@@ -194,31 +196,42 @@ impl QemuVirtBlockDriver {
         self.mmio_base = base;
         set_active_mmio_base(base);
 
-        if mmio_read(REG_MAGIC_VALUE) != VIRTIO_MAGIC_VALUE
-            || mmio_read(REG_DEVICE_ID) != VIRTIO_DEVICE_ID_BLOCK
-            || mmio_read(REG_VENDOR_ID) != VIRTIO_MMIO_VENDOR_QEMU
-        {
+        if !driver_logic::virtio_identity_valid(
+            mmio_read(REG_MAGIC_VALUE),
+            mmio_read(REG_DEVICE_ID),
+            VIRTIO_DEVICE_ID_BLOCK,
+            mmio_read(REG_VENDOR_ID),
+            VIRTIO_MMIO_VENDOR_QEMU,
+        ) {
             return Err(UserDriverError::NotFound);
         }
 
         let version = mmio_read(REG_VERSION);
-        if version != VIRTIO_MMIO_VERSION_MODERN && version != VIRTIO_MMIO_VERSION_LEGACY {
+        if !driver_logic::virtio_version_supported(
+            version,
+            VIRTIO_MMIO_VERSION_LEGACY,
+            VIRTIO_MMIO_VERSION_MODERN,
+        ) {
             return Err(UserDriverError::Unsupported);
         }
-        self.modern = version == VIRTIO_MMIO_VERSION_MODERN;
+        self.modern = driver_logic::virtio_version_is_modern(version, VIRTIO_MMIO_VERSION_MODERN);
 
         mmio_write(REG_STATUS, 0);
         mmio_write(REG_STATUS, VIRTIO_STATUS_ACKNOWLEDGE);
         mmio_write(REG_STATUS, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
 
         let features = self.read_device_features();
-        let accepted = features & (VIRTIO_BLK_F_FLUSH | VIRTIO_BLK_F_CONFIG_WCE);
-        self.flush_supported = accepted & VIRTIO_BLK_F_FLUSH != 0;
-        if self.modern {
-            self.write_driver_features(accepted | QEMU_VIRTIO_F_VERSION_1);
-        } else {
-            self.write_driver_features(accepted);
-        }
+        let accepted = driver_logic::virtio_block_accepted_features(
+            features,
+            VIRTIO_BLK_F_FLUSH,
+            VIRTIO_BLK_F_CONFIG_WCE,
+        );
+        self.flush_supported = driver_logic::virtio_feature_present(accepted, VIRTIO_BLK_F_FLUSH);
+        self.write_driver_features(driver_logic::virtio_driver_features(
+            accepted,
+            QEMU_VIRTIO_F_VERSION_1,
+            self.modern,
+        ));
 
         if self.modern {
             self.add_status(VIRTIO_STATUS_FEATURES_OK);
@@ -230,7 +243,7 @@ impl QemuVirtBlockDriver {
 
         mmio_write(REG_QUEUE_SEL, 0);
         let max_queue = mmio_read(REG_QUEUE_NUM_MAX);
-        if max_queue == 0 || max_queue < VIRTIO_QUEUE_SIZE as u32 {
+        if !driver_logic::virtio_queue_size_valid(max_queue, VIRTIO_QUEUE_SIZE) {
             self.fail();
             return Err(UserDriverError::Unsupported);
         }
@@ -387,10 +400,10 @@ impl QemuVirtBlockDriver {
     }
 
     fn read_block(&mut self, block: usize, out: &mut [u8]) -> Result<usize, UserDriverError> {
-        if out.len() != BLOCK_SIZE {
+        if !driver_logic::block_len_valid(out.len(), BLOCK_SIZE) {
             return Err(UserDriverError::InvalidBlock);
         }
-        if block >= self.capacity_blocks {
+        if !driver_logic::block_id_valid(block, self.capacity_blocks) {
             return Err(UserDriverError::OutOfRange);
         }
         if let Err(err) = self.submit(VIRTIO_BLK_T_IN, block as u64, out.as_mut_ptr(), out.len()) {
@@ -402,10 +415,10 @@ impl QemuVirtBlockDriver {
     }
 
     fn write_block(&mut self, block: usize, data: &[u8]) -> Result<usize, UserDriverError> {
-        if data.len() != BLOCK_SIZE {
+        if !driver_logic::block_len_valid(data.len(), BLOCK_SIZE) {
             return Err(UserDriverError::InvalidBlock);
         }
-        if block >= self.capacity_blocks {
+        if !driver_logic::block_id_valid(block, self.capacity_blocks) {
             return Err(UserDriverError::OutOfRange);
         }
         unsafe {
@@ -443,7 +456,9 @@ impl QemuVirtBlockDriver {
         self.writes = self.writes.saturating_add(1);
         self.bytes_written = self
             .bytes_written
-            .saturating_add((self.capacity_blocks * BLOCK_SIZE) as u64);
+            .saturating_add(
+                driver_logic::block_capacity_bytes(self.capacity_blocks, BLOCK_SIZE) as u64,
+            );
         Ok(())
     }
 
@@ -525,12 +540,10 @@ impl QemuVirtBlockDriver {
     }
 
     fn check_range(&self, offset: usize, len: usize) -> Result<(), UserDriverError> {
-        let end = offset.checked_add(len).ok_or(UserDriverError::OutOfRange)?;
-        let capacity = self.capacity_blocks * BLOCK_SIZE;
-        if end > capacity {
-            Err(UserDriverError::OutOfRange)
-        } else {
+        if driver_logic::block_range_valid(offset, len, self.capacity_blocks, BLOCK_SIZE) {
             Ok(())
+        } else {
+            Err(UserDriverError::OutOfRange)
         }
     }
 }
@@ -574,7 +587,7 @@ pub fn capacity_blocks() -> usize {
 }
 
 pub fn capacity_bytes() -> usize {
-    capacity_blocks().saturating_mul(BLOCK_SIZE)
+    driver_logic::block_capacity_bytes(capacity_blocks(), BLOCK_SIZE)
 }
 
 pub fn reads() -> u64 {
