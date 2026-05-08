@@ -8,7 +8,7 @@ The current verified syscall slice is the standalone proof file at `verification
 
 `verification/kernel_lowlevel/src/lib.rs` verifies pure helper logic for every `src/kernel_lowlevel/` Rust file: memory segment/page arithmetic, process lookup predicates, bitmap allocator indexing, page-table-entry bit updates, UART/GIC/timer register computations, SMP CPU-id/PSCI predicates, and the no-algorithm driver/module wiring.
 
-`verification/user_level/src/lib.rs` verifies pure helper logic for `src/main.rs` and the user-level Rust modules: the kernel bump allocator alignment/end computation, EL0 process memory-layout arithmetic, user process lookup predicates, shell input/decimal parsing/time and memory summaries, minimal ELF header/program-header/segment bounds checks, `/svc` fixed-message protocol predicates, and the boot-time EL0 syscall-test decision rules.
+`verification/user_level/src/lib.rs` verifies pure helper logic for `src/main.rs` and the user-level Rust modules: the kernel bump allocator alignment/end computation, EL0 process memory-layout arithmetic, user process lookup predicates, shell input/decimal parsing/time and memory summaries, DNS/IPv4 parsing predicates, minimal ELF header/program-header/segment bounds checks, dynamic ELF mapping-range arithmetic, `/svc` fixed-message protocol predicates, FxFS bounds predicates, user-level VirtIO driver helper predicates, and the boot-time EL0 syscall-test decision rules.
 
 Commands:
 
@@ -29,4 +29,6 @@ Recent verification smoke coverage includes:
 - Zircon signal/wait/object predicates
 - Zircon clock, timer, debuglog, system event, and exception option predicates
 - Zircon guest trap, VCPU entry, interrupt vector, and VCPU state buffer predicates
-- user-level component/FxFS predicates, including FxFS append/write-end/seek/replay-count checks, `/svc` service/protocol predicates, and minimal ELF loader bounds predicates
+- user-level component/FxFS predicates, including FxFS append/write-end/seek/replay-count checks, `/svc` service/protocol predicates, minimal ELF loader bounds predicates, dynamic-loader segment mapping checks, DNS/IPv4 validation, and user-level VirtIO block/net driver range/feature/queue predicates
+
+Recent `make verus-user-level` runs verify 169 user-level proof obligations with zero errors.

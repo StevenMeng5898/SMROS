@@ -1,6 +1,6 @@
 # SMROS Networking
 
-SMROS now has a user-level VirtIO-MMIO network driver for QEMU `virt`.
+SMROS now has user-level VirtIO-MMIO block and network drivers for QEMU `virt`. This document focuses on networking; the block driver backs the persistent FxFS image used by the shell and `/shared` tombstones.
 
 The default `make run`, `make debug`, and `make gdb` targets attach:
 
@@ -12,6 +12,8 @@ The default `make run`, `make debug`, and `make gdb` targets attach:
 The driver binds the QEMU VirtIO net device as `eth0`, reads the device MAC,
 posts receive buffers, and exposes raw Ethernet send/receive through
 `crate::user_level::drivers`.
+
+The driver path now shares verified pure helper logic for MMIO slot address computation, VirtIO identity/version/queue validation, feature-mask selection, TX frame length checks, and RX packet/frame bounds. Hardware MMIO and volatile queue operations remain runtime-only.
 
 The first network service layer now includes:
 

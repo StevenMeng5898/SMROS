@@ -60,7 +60,7 @@ Implemented groups:
 - Identity/scheduler: `getpid`, `getppid`, `gettid`, `getuid`, `geteuid`, `getgid`, `getegid`, `sched_yield`, `set_tid_address`
 - Time/resource: `nanosleep`, `clock_gettime`, `clock_getres`, `clock_nanosleep`, `gettimeofday`, `times`, `getrusage`, `prlimit64`, `sysinfo`
 - Basic I/O and fd management: `read`, `write`, `close`, `close_range`, `pipe2`, `dup`, `dup2`, `dup3`, `fcntl`, `ioctl`, `flock`
-- File and directory compatibility: `openat`, `openat2`, `getdents64`, `readlinkat`, `faccessat`, `faccessat2`, `mknodat`, `mkdirat`, `unlinkat`, `symlinkat`, `linkat`, `renameat`, `renameat2`, `chdir`, `fchdir`, `chroot`, `fchmod*`, `fchown*`
+- File and directory compatibility: `openat`, `openat2`, `getdents64`, `readlinkat`, `faccessat`, `faccessat2`, `mknodat`, `mkdirat`, `unlinkat`, `symlinkat`, `linkat`, `renameat`, `renameat2`, `chdir`, `fchdir`, `chroot`, `fchmod*`, `fchown*`; Linux file fds can bind to FxFS paths for open/read/write/stat and file-backed `mmap`
 - Stat and sync paths: `fstat`, `newfstatat`, `statfs`, `fstatfs`, `statx`, `truncate`, `ftruncate`, `fallocate`, `fsync`, `fdatasync`, `sync`, `sync_file_range`, `utimensat`
 - Vector and copy I/O: `readv`, `writev`, `pread64`, `pwrite64`, `preadv`, `pwritev`, `sendfile`, `copy_file_range`, `splice`, `tee`, `vmsplice`
 - Poll/event helpers: `pselect6`, `ppoll`, `eventfd2`, `epoll_create1`, `epoll_ctl`, `epoll_pwait`, `epoll_pwait2`, `signalfd4`, `timerfd_*`, `inotify_*`
@@ -74,8 +74,9 @@ Implemented groups:
 
 - The Linux syscall interface is covered at the dispatcher level, but many filesystem, networking, IPC, io_uring, module, and namespace syscalls intentionally return `ENOSYS`.
 - The file-descriptor layer is a compatibility table. Linux fd numbers point to modeled kernel object handles with readable/writable bits.
-- `LinuxFile` and `LinuxDir` objects are not backed by a persistent namespace. Regular file writes append to a bounded byte queue; reads consume from that queue. Directory fds validate directory-only operations such as `getdents64`, but directory entries are currently returned as an empty zeroed buffer.
-- Stat, statfs, and statx paths validate arguments and zero output buffers; they do not yet expose real inode or filesystem metadata.
+- `LinuxFile` and `LinuxDir` objects still use the compatibility table. When opened paths resolve in FxFS, regular file reads/writes use FxFS cursors and stat/fstat can report FxFS attributes. Other compatibility files still use bounded byte queues.
+- Directory fds validate directory-only operations such as `getdents64`, but directory entries are currently returned as an empty zeroed buffer.
+- Stat/fstatat can report FxFS attributes for visible FxFS paths; statfs paths still return a modeled filesystem record.
 - Socket and IPC syscalls are modeled enough for deterministic syscall tests, not for a complete network stack or SysV IPC implementation.
 - The current user-level smoke tests do not validate a full Linux userspace ABI.
 
@@ -120,7 +121,8 @@ The current syscall layer is best understood as:
 - a Zircon dispatch path aligned to the sample syscall numbers
 - a Linux fd table where fd records point to compatibility object handles
 - a lightweight compatibility object table for object types that do not yet have full subsystems
-- a first Fuchsia-inspired userspace scaffold with component instances, namespace entries, minimal ELF64/AArch64 loading from FxFS, ELF-runner-shaped process launch, a `/svc` service directory using Zircon channels with fixed request/reply structs, and an in-memory FxFS-shaped object store with attributes, object-id directory entries, file-position semantics, and journal replay metadata
+- a first Fuchsia-inspired userspace scaffold with component instances, namespace entries, minimal ELF64/AArch64 loading from FxFS, ELF-runner-shaped process launch, a `/svc` service directory using Zircon channels with fixed request/reply structs, a block-backed FxFS-shaped object store when virtio-blk is present, and `/shared` build-snapshot support
+- a shell `run` path that can launch dynamic PIE AArch64 ELF files with loader/libc dependencies in `/shared/lib` or `/lib`
 - a larger amount of future-facing scaffolding for EL0 work
 
 It is not yet:
@@ -136,6 +138,7 @@ During normal boot:
 - `run_user_test()` drops to EL0 and validates the active Linux `svc` path
 - the shell runs as an EL1 thread
 - the active `svc` bridge targets Linux syscall numbers below `1000` and Zircon syscall numbers at `1000 + zircon_number`
+- dynamic PIE programs launched by the shell enter EL0 through the current identity-mapped dynamic-loader handoff, then return to the shell through the Linux `exit` hook
 
 That means the current boot flow exercises the syscall layer mainly as an internal kernel interface, not as a fully isolated user/kernel boundary.
 
@@ -143,7 +146,8 @@ That means the current boot flow exercises the syscall layer mainly as an intern
 
 - The shell still calls most syscall tests directly from EL1 rather than as isolated EL0 userspace.
 - Some process/thread semantics are modeled records, not full scheduler integration.
-- File-descriptor style Linux syscalls are modeled for files, directories, pipes, sockets, event-like objects, IPC objects, and memfd, but not with a real VFS or persistent filesystem.
-- The component/FxFS/`/svc` scaffold is internal kernel-side state today. It parses boot ELF metadata from FxFS, models object metadata plus journal replay in memory, and exchanges fixed service messages over Zircon channels, but it is not yet a userspace component manager, full FIDL runtime, package resolver, copied-segment ELF runtime, or block-backed FxFS server.
+- File-descriptor style Linux syscalls are modeled for files, directories, pipes, sockets, event-like objects, IPC objects, and memfd. FxFS-backed Linux file fds now exist, but this is still not a complete VFS.
+- The component/FxFS/`/svc` scaffold is internal kernel-side state today. It parses boot ELF metadata from FxFS, models object metadata plus journal replay, persists to `smros-fxfs.img` when available, and exchanges fixed service messages over Zircon channels, but it is not yet a userspace component manager, full FIDL runtime, package resolver, or full FxFS server.
+- External dynamic PIE execution is a bring-up path, not a stable Linux ABI promise or isolated process model.
 - Handle ownership and lifetime tracking are still simplified.
 - Platform/hardware-heavy Zircon calls are interface-covered but intentionally return `ERR_NOT_SUPPORTED`.

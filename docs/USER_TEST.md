@@ -81,6 +81,8 @@ It currently:
 - directly exercises Zircon VMO/VMAR, handle/object, signal/wait, port, channel, socket, FIFO, futex, process/thread, time/debug/system/exception, and hypervisor helpers
 - directly exercises Linux signal, SysV IPC, socket/networking, misc, file, directory, fd, vector I/O, poll, and stat helpers
 - directly checks the minimal component framework, ELF loader metadata, FxFS-shaped object store, and `/svc` fixed-message IPC
+- runs ported compatibility smoke targets for a Linux `cat`-style FxFS reader and a Fuchsia `/svc` client
+- checks Docker/runc compatibility surfaces for OCI-style config parsing, namespace/mount/seccomp/cgroup syscall modeling, and built-in image metadata
 
 Treat it as a developer smoke test, not as a full syscall compliance suite.
 
@@ -98,6 +100,8 @@ Current successful shell runs include these group completion markers:
 [OK] Linux file, dir, fd, poll, and stat tests completed
 [OK] component framework, FxFS, and /svc IPC returned
 ```
+
+The exact command output can also include compatibility-app and Docker/runc group messages depending on the current smoke path.
 
 ## Why The Logs Still Say `[EL0]`
 
@@ -127,5 +131,6 @@ The current user test code is useful, but it should be described accurately:
 - active boot path: real EL0 syscall smoke test with lightweight address-space setup
 - shell `testsc`: broader EL1 developer smoke test for syscall helper behavior
 - shell `components`/`fxfs`/`svc`: visibility into boot ELF load metadata, FxFS object attributes, directory entries, journal replay state, and fixed-message service IPC counters
+- shell `run`: dynamic PIE launch smoke path for FxFS-hosted AArch64 binaries with `/shared/lib` dependencies
 
 That distinction matters when evaluating boot logs or shell output.

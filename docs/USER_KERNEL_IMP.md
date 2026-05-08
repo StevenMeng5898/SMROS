@@ -10,6 +10,9 @@ The short version is:
 - a minimal component framework and FxFS-shaped object store now initialize during user-level setup
 - a minimal ELF64/AArch64 loader parses boot component binaries from FxFS
 - a minimal `/svc` service directory uses Zircon channels and fixed message structs for component-manager, runner, and filesystem requests
+- user-level VirtIO-MMIO block and net drivers initialize under QEMU `virt`
+- FxFS is block-backed by `smros-fxfs.img` when virtio-blk is present
+- the shell can launch a dynamic PIE ELF through `src/user_level/services/run_elf.rs`
 - the boot path runs a real EL0 syscall smoke test
 - the live shell still runs from EL1
 
@@ -22,7 +25,11 @@ The short version is:
 - `src/user_level/services/elf.rs`
 - `src/user_level/services/component.rs`
 - `src/user_level/services/fxfs.rs`
+- `src/user_level/services/host_share.rs`
+- `src/user_level/services/run_elf.rs`
 - `src/user_level/services/svc.rs`
+- `src/user_level/drivers/block.rs`
+- `src/user_level/drivers/net.rs`
 - `src/user_level/services/user_shell.rs`
 - `src/user_level/apps/user_test.rs`
 - `src/main.rs`
@@ -78,21 +85,25 @@ The same file also provides:
 - records parsed entry and segment metadata on `UserProcess`
 - provides tiny boot ELF images for the current component trampoline
 
-`src/user_level/services/run_elf.rs` is the current shell launcher for dynamic PIE binaries. It copies PT_LOAD bytes for the main executable and interpreter into the Linux mmap window, builds a Linux argv/env/auxv stack, enters the dynamic loader at EL0, and returns to the shell through the `exit` hook.
+`src/user_level/services/run_elf.rs` is the current shell launcher for dynamic PIE binaries. It copies PT_LOAD bytes for the main executable and interpreter into the Linux mmap window, builds a Linux argv/env/auxv stack, enters the dynamic loader at EL0, and returns to the shell through the `exit` hook. Libraries are resolved from `/shared/lib` or `/lib`.
 
 This is still an identity-mapped bring-up path, not a fully isolated process model. It does not yet copy segments into process-owned TTBR0-backed user mappings.
 
 `src/user_level/services/fxfs.rs` provides the current storage backing for that scaffold:
 
-- an in-memory object store
+- an in-memory object table with optional block-image persistence
 - directory and file object ids with explicit parent/name directory entries
 - object attributes: mode, uid/gid, byte size, created/modified/accessed timestamps, and link count
 - seed paths under `/pkg`, `/data`, `/tmp`, `/svc`, and `/config`
 - append, truncate, read-at, cursor seek/read/write, and full-file write operations
 - a small logical journal for create, lookup, read, write, append, truncate, attribute update, and replay operations
-- an in-memory replay model that reapplies journal metadata effects to the current object table
+- a replay model that reapplies journal metadata effects to the current object table
+- block-image persistence through the user-level virtio-blk driver when the standard QEMU device is present
+- a build-time `host_shared/` snapshot exposed at `/shared`
 
 This follows the shape of current Fuchsia userspace enough for SMROS bring-up, but it is not a direct source port and it is not yet a separate userspace service.
+
+`/shared` is not a live host mount. `build.rs` embeds repository-local `host_shared/` files into the kernel image, and FxFS installs that snapshot under `/shared`. Deleted snapshot files are remembered in `/config/host-share-deleted` and persist while the same `smros-fxfs.img` is kept.
 
 `src/user_level/services/svc.rs` provides a small service directory under `/svc`:
 
@@ -129,7 +140,7 @@ The live synchronous exception handler is assembled in `src/main.rs`. For `svc` 
 During a normal boot:
 
 1. `kernel_main()` calls `user_level::init()`.
-2. `user_level::init()` initializes user process state, mounts the FxFS-shaped store, installs tiny ELF boot images under `/pkg/bin`, installs the minimal component boot topology, and registers `/svc` services.
+2. `user_level::init()` initializes user process state, probes user-level VirtIO drivers, mounts the FxFS-shaped store, installs the `host_shared/` snapshot under `/shared`, installs tiny ELF boot images under `/pkg/bin`, installs the minimal component boot topology, and registers `/svc` services.
 3. After `scheduler().init()`, `component::start_boot_component_threads()` creates scheduler launcher threads for bootstrap components.
 4. `kernel_main()` calls `run_user_test()`.
 5. `run_user_test()` allocates a small EL0 stack and calls `switch_to_el0()`.
@@ -159,6 +170,9 @@ No part of the normal boot path:
 | Live shell in EL0 | not active | shell runs as EL1 thread |
 | Live test process in EL0 | active | boot test drops to EL0 and returns through the active exception path |
 | Minimal ELF loader | active | parses FxFS ELF files and records entry/segment metadata |
+| Shell dynamic PIE launcher | active bring-up path | maps executable/interpreter into the Linux mmap window and enters loader at EL0 |
+| User-level VirtIO drivers | active | block and net bind under standard QEMU `virt` targets |
+| Block-backed FxFS | active when virtio-blk is present | `make clean` keeps `smros-fxfs.img`; `make clean-fxfs` resets it |
 | `/svc` fixed-message IPC | active | service connections use Zircon channels and fixed request/reply structs |
 | Full register-frame EL0 syscall handler | not active | current vectors use `handle_syscall_simple()` |
 | Zircon-on-SVC path | active | raw syscall numbers `1000 + zircon_number` route through `dispatch_zircon_syscall()` |
@@ -194,7 +208,7 @@ The existing scaffolding is useful for the next step toward a real userspace:
 - `UserProcess` defines the shape of a future EL0 process object
 - `switch_to_el0()` captures the intended register transition
 - `linux_syscall()` is already used by the boot-time EL0 smoke test
-- Linux `mmap` can now back FxFS files into the guest memory window, which is enough for the dynamic loader to request shared-library file mappings once an EL0 process handoff exists
+- Linux `mmap` can back FxFS files into the guest memory window, which supports the current dynamic-loader bring-up path
 - `PageTableManager` already has the necessary mapping helpers
 - the component runner already reads ELF metadata from FxFS before starting bootstrap processes
 - `/svc` already exercises a component-manager to runner to filesystem style request chain over Zircon channels
@@ -211,6 +225,7 @@ To move from scaffolding to real user-mode execution, the kernel still needs to:
 5. route `svc` exceptions through a fully correct EL0 handler
 6. make syscall numbering and return handling consistent across the tree
 7. enforce process-owned handles and memory rather than direct kernel calls
+8. move dynamic ELF execution from the identity-mapped launcher path to process-owned mappings
 
 ## Bottom Line
 

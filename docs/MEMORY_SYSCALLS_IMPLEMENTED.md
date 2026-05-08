@@ -23,10 +23,12 @@ SMROS now has:
 - a boot-time EL0 `svc #0` smoke test for Linux `write`, `getpid`, `mmap`, and `exit`
 - shell-visible memory stats for Linux mappings, `brk`, VMO state, and VMAR state
 - shell `testsc` coverage for the broader syscall compatibility model, including Linux file/fd/poll/stat paths and Zircon time/debug/system/exception and hypervisor paths
-- a richer in-memory FxFS-shaped object store used by the first component framework scaffold
+- a richer FxFS-shaped object store with an in-memory object table and block-image persistence when virtio-blk is present
+- user-level VirtIO block persistence for the FxFS image when QEMU provides `smros-fxfs.img`
+- FxFS-backed Linux file descriptors for open/read/write/stat and file-backed `mmap`
 - a minimal `/svc` fixed-message IPC layer that uses Zircon channels for component-manager, runner, and filesystem service requests
 
-The model is still software bookkeeping layered on top of the real page allocator. It is suitable for syscall bring-up and shell testing, but it is not yet wired to live EL0 page-table updates.
+The model is still software bookkeeping layered on top of the real page allocator. It is suitable for syscall bring-up, the dynamic-loader bring-up path, and shell testing, but it is not yet a full per-process hardware page-table runtime.
 
 ## Boot-Time EL0 Validation
 
@@ -43,7 +45,7 @@ The kernel records the EL0 syscall results on the EL1 side and prints the valida
 
 | Syscall | Current Behavior | Status |
 |---------|------------------|--------|
-| `sys_mmap` | supports anonymous `MAP_PRIVATE` and `MAP_SHARED` mappings, rounds length to pages, allocates page frames, tracks the virtual range, and honors `MAP_FIXED` by replacing overlapping mappings in the software model | implemented, anonymous only |
+| `sys_mmap` | supports anonymous `MAP_PRIVATE`/`MAP_SHARED` mappings and FxFS-backed file mappings through Linux fd records, rounds length to pages, allocates page frames, tracks the virtual range, honors `MAP_FIXED` by replacing overlapping mappings, zero-fills the range, and copies file bytes when a file fd is supplied | implemented in software model |
 | `sys_munmap` | unmaps page-aligned ranges, frees backing page frames, and splits surviving mapping fragments | implemented |
 | `sys_mprotect` | updates protection bits on page-aligned subranges and splits mapping records as needed | implemented |
 | `sys_brk` | maintains a global heap window at `0x4000_0000..0x400F_FFFF`, commits pages on growth, frees pages on shrink, and returns the current break | implemented, global not per-process |
@@ -51,9 +53,10 @@ The kernel records the EL0 syscall results on the EL1 side and prints the valida
 
 ### Linux Notes
 
-- `sys_mmap` is still anonymous only. File-backed mappings still return `ENOSYS`.
+- File-backed `mmap` is implemented for FxFS-backed Linux file descriptors. Other fd categories still return an error.
 - Linux mappings are tracked in a dedicated kernel-side registry rooted at `0x5000_0000`.
 - `mremap` preserves the mapping shape and page accounting, but it does not copy user data into a real hardware remap path.
+- The shell dynamic-loader path uses this Linux mapping window to place the main PIE, interpreter, and stack.
 
 ## Zircon VMO Syscalls
 
@@ -111,11 +114,11 @@ The kernel records the EL0 syscall results on the EL1 side and prints the valida
 
 ## Shell Test Commands
 
-Use these commands to build, boot, and verify the memory syscall paths:
+Use the default run target to build, boot, attach the virtio-blk image and
+virtio-net device, and verify the memory syscall paths:
 
 ```sh
-make build
-qemu-system-aarch64 -M virt -cpu cortex-a57 -smp 4 -m 512M -nographic -kernel kernel8.img
+make run
 ```
 
 During boot, expect a line like:
@@ -238,7 +241,7 @@ The shell's `testsc` command now exercises:
 
 The memory syscall layer is now complete as a kernel-side software model, but there are still system-level gaps:
 
-- file-backed `mmap` is available for FxFS-backed Linux file descriptors, enough for the dynamic loader to map shared libraries from `/shared/lib` or `/lib`
+- file-backed `mmap` is available for FxFS-backed Linux file descriptors and is used by the dynamic loader support path
 - no per-process `brk`
 - no live VMAR-to-hardware page-table synchronization in the booted shell path
 - no full Zircon process-local handle table yet

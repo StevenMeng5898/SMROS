@@ -131,13 +131,13 @@ This module is deliberately not a substitute for full subsystems such as PCI, in
 
 Linux file and directory fds use this table through `src/syscall/syscall.rs`:
 
-- `openat()` creates either a `LinuxFile` or `LinuxDir` compatibility object.
+- `openat()` creates either a `LinuxFile` or `LinuxDir` compatibility object. If the path resolves in FxFS, the fd also carries an FxFS cursor.
 - the Linux fd table stores the compat handle plus readable/writable bits.
-- `read()` and `write()` move bytes through the object's bounded queue.
+- `read()` and `write()` use the FxFS cursor for FxFS-backed files; other modeled files still move bytes through the object's bounded queue.
 - `dup`, `dup3`, and `fcntl` duplicate or validate fd records while preserving the underlying handle.
 - `close()` removes one fd record and closes the compat handle only when no fd still references it.
 - `getdents64()` requires `LinuxDir` and currently returns an empty zeroed directory buffer.
-- stat and statfs helpers validate pointers and zero output buffers instead of reading real inode metadata.
+- stat/fstat helpers report FxFS attributes for FxFS-backed paths and otherwise return modeled zeroed records. statfs remains modeled.
 
 ## `vmo.rs`
 
@@ -211,7 +211,10 @@ The current boot path directly uses:
 - `thread.rs` for user-thread context scaffolding
 - `src/user_level/services/component.rs` for a minimal Fuchsia-style component topology
 - `src/user_level/services/elf.rs` for minimal ELF64/AArch64 boot-component parsing
-- `src/user_level/services/fxfs.rs` for an in-memory FxFS-shaped object store used by the component namespace scaffold
+- `src/user_level/services/fxfs.rs` for a block-backed-when-available FxFS-shaped object store used by the component namespace scaffold
+- `src/user_level/services/host_share.rs` for the build-time `/shared` snapshot
+- `src/user_level/services/run_elf.rs` for the shell dynamic PIE launcher
+- `src/user_level/drivers/` for user-level VirtIO block/net drivers
 - `src/user_level/services/svc.rs` for a minimal `/svc` directory using Zircon channels and fixed request/reply structs
 
 ## Current Design Reality
@@ -232,5 +235,5 @@ The refactor into a dedicated `kernel_objects/` directory is complete at the sou
 - Channel syscall helpers are exposed through the current Zircon dispatch table.
 - VMAR state is not yet a full source of truth for hardware mappings.
 - Linux file and directory compatibility objects are not a real VFS; they provide fd/object behavior for syscall bring-up.
-- FxFS is currently an in-memory userspace scaffold with object attributes, explicit directory entries, and journal replay metadata, not a block-backed kernel object subsystem.
+- FxFS is a user-level scaffold with object attributes, explicit directory entries, journal replay metadata, and block-image persistence through the user-level virtio-blk driver when present. It is still not a kernel object subsystem or full FxFS port.
 - Several object operations are placeholders intended to keep the interface shape stable while the kernel matures.

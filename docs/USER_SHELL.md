@@ -70,6 +70,7 @@ The shell currently registers these commands:
 - `testsc`
 - `echo`
 - `clear`
+- `reboot`
 - `exit`
 
 ## How The Shell Talks To The Kernel
@@ -110,6 +111,8 @@ It currently:
 - directly exercises Linux signal, IPC, networking, misc, file, directory, fd, poll, and stat helpers
 - directly checks the minimal component framework, FxFS-shaped object-store paths, and `/svc` fixed-message IPC
 
+So it mixes the future-facing syscall helper path with direct kernel function calls.
+
 Successful current runs include markers such as:
 
 ```text
@@ -122,7 +125,7 @@ Successful current runs include markers such as:
 
 The file/fd section creates modeled `LinuxFile` and `LinuxDir` compatibility objects, tests fd duplication and `fcntl`, moves bytes through the file object's queue, checks directory-only `getdents64`, validates stat/statx buffers, checks `writev`, `poll`, `lseek`, `ftruncate`, and sync-style calls, then closes the fds.
 
-The component/FxFS/`/svc` section verifies that the boot topology is installed, `/bootstrap/fxfs` has a modeled process and launcher thread, `/pkg/bin` entries exist, a small `/data` file can be written, appended, truncated, seek-read, checked for attributes, and replayed through the in-memory journal model, and fixed component-manager, runner, and filesystem service messages round-trip over Zircon channels.
+The component/FxFS/`/svc` section verifies that the boot topology is installed, `/bootstrap/fxfs` has a modeled process and launcher thread, `/pkg/bin` entries exist, a small `/data` file can be written, appended, truncated, seek-read, checked for attributes, and replayed through the journal model, and fixed component-manager, runner, and filesystem service messages round-trip over Zircon channels.
 
 The `components` command also shows the minimal ELF loader state. A successful boot currently reports three loaded ELF images, zero load errors, one PT_LOAD segment per bootstrap image, and an entry address for `/`, `/bootstrap/fxfs`, and `/bootstrap/user-init`.
 
@@ -152,9 +155,17 @@ The current implementation is a build-time FxFS snapshot because the guest has v
 
 The `run` command loads a dynamic PIE ELF from FxFS, parses `PT_INTERP` and `DT_NEEDED`, resolves the dynamic loader and C library from `/shared/lib` or `/lib`, builds an argv/env/auxv stack, and enters the loader from an EL0 launcher thread. For example, `run hello.elf` from `/shared` uses `hello.elf`, `/shared/lib/ld-linux-aarch64.so.1`, and `/shared/lib/libc.so.6` and returns to the shell after the program calls `exit`.
 
-The `svc` command shows registered services, connection count, request/reply counters, and the last fixed-message status. A clean boot starts with three services and zero connections; after `testsc`, the smoke path has three connections, three requests, and three replies.
+The launcher currently supports dynamic PIE binaries (`ET_DYN`) with a dynamic interpreter. Static `ET_EXEC` execution is still reported as unsupported. The implementation maps PT_LOAD bytes for the main executable and interpreter into the Linux mmap window and uses the current identity-mapped EL0 bring-up model, not a process-owned TTBR0 address space.
 
-So it mixes the future-facing syscall helper path with direct kernel function calls.
+### Block-Backed FxFS
+
+The default QEMU targets attach `smros-fxfs.img` through virtio-blk. FxFS loads from that image when it exists and writes metadata/data changes back to it after mutating non-`/shared` paths. `make clean` keeps the image; use `make clean-fxfs` to reset it.
+
+The `mount` command shows whether FxFS is block-backed and whether the last sync succeeded.
+
+### `svc`
+
+The `svc` command shows registered services, connection count, request/reply counters, and the last fixed-message status. A clean boot starts with three services and zero connections; after `testsc`, the smoke path has three connections, three requests, and three replies.
 
 ### `clear`
 
@@ -183,5 +194,6 @@ It should not yet be treated as:
 - Shell execution is still EL1-only.
 - Shell input/output bypasses any future user-space I/O abstraction.
 - `/shared` is a build-time snapshot of `host_shared/`, not a live two-way host mount.
+- FxFS is persistent only when the virtio-blk-backed `smros-fxfs.img` is present.
 - `clear` and `exit` are placeholders.
 - The "user-mode" label reflects the intended direction, not the current runtime mode.
