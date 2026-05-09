@@ -4750,7 +4750,11 @@ fn cmd_run(ctx: &mut ShellContext, args: &[&str]) {
     }
 
     match crate::user_level::run_elf::spawn(path.clone(), argv) {
-        Ok(()) => ctx.serial.write_str("run: started dynamic loader thread\n"),
+        Ok(()) => {
+            ctx.serial.write_str("run: started dynamic loader thread\n");
+            ctx.serial
+                .write_str("run: program output begins below; exit code 0 means success\n");
+        }
         Err(err) => {
             ctx.serial.write_str("run: ELF launch-failed: ");
             ctx.serial.write_str(err.as_str());

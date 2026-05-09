@@ -275,7 +275,7 @@ macro_rules! smros_ll_timer_tick_count_body {
 
 macro_rules! smros_ll_timer_ctl_body {
     ($enable:expr, $imask:expr) => {{
-        $enable | $imask
+        $enable & !$imask
     }};
 }
 

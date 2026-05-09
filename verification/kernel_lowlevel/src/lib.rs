@@ -688,7 +688,7 @@ fn ll_timer_tick_count(counter: u64, period: u64) -> (out: u64)
 
 fn ll_timer_ctl() -> (out: u64)
     ensures
-        out == (CNTP_CTL_ENABLE | CNTP_CTL_IMASK),
+        out == (CNTP_CTL_ENABLE & !CNTP_CTL_IMASK),
 {
     smros_ll_timer_ctl_body!(CNTP_CTL_ENABLE, CNTP_CTL_IMASK)
 }
@@ -920,7 +920,7 @@ proof fn mmu_constants_smoke() {
 
 proof fn serial_timer_interrupt_smp_smoke() {
     assert(CR_UARTEN | CR_TXE | CR_RXE == 0x301) by (bit_vector);
-    assert(CNTP_CTL_ENABLE | CNTP_CTL_IMASK == 3) by (bit_vector);
+    assert(CNTP_CTL_ENABLE & !CNTP_CTL_IMASK == 1) by (bit_vector);
     assert(TIMER_IRQ == 30);
     assert(PRIORITY_HIGH == 0x50);
     assert(PSCI_RET_INTERNAL_FAILURE == -2);

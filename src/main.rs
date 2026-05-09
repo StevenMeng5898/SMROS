@@ -259,8 +259,8 @@ exception_vectors:
 
 // IRQ Handler (Current EL with SPx)
 irq_handler_sp:
-    // Save caller-saved registers
-    sub     sp, sp, #144
+    // Save all general-purpose registers because IRQs interrupt arbitrary code.
+    sub     sp, sp, #256
     stp     x0, x1, [sp, #0]
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]
@@ -269,15 +269,19 @@ irq_handler_sp:
     stp     x10, x11, [sp, #80]
     stp     x12, x13, [sp, #96]
     stp     x14, x15, [sp, #112]
-    stp     x30, xzr, [sp, #128]
+    stp     x16, x17, [sp, #128]
+    stp     x18, x19, [sp, #144]
+    stp     x20, x21, [sp, #160]
+    stp     x22, x23, [sp, #176]
+    stp     x24, x25, [sp, #192]
+    stp     x26, x27, [sp, #208]
+    stp     x28, x29, [sp, #224]
+    stp     x30, xzr, [sp, #240]
 
     // Call timer interrupt handler
     bl      timer_interrupt_handler
 
-    // Check if preemption is needed
-    bl      check_preemption
-
-    // Restore caller-saved registers
+    // Restore registers
     ldp     x0, x1, [sp, #0]
     ldp     x2, x3, [sp, #16]
     ldp     x4, x5, [sp, #32]
@@ -286,15 +290,22 @@ irq_handler_sp:
     ldp     x10, x11, [sp, #80]
     ldp     x12, x13, [sp, #96]
     ldp     x14, x15, [sp, #112]
-    ldp     x30, xzr, [sp, #128]
-    add     sp, sp, #144
+    ldp     x16, x17, [sp, #128]
+    ldp     x18, x19, [sp, #144]
+    ldp     x20, x21, [sp, #160]
+    ldp     x22, x23, [sp, #176]
+    ldp     x24, x25, [sp, #192]
+    ldp     x26, x27, [sp, #208]
+    ldp     x28, x29, [sp, #224]
+    ldp     x30, xzr, [sp, #240]
+    add     sp, sp, #256
 
     eret
 
 // IRQ Handler (Current EL with SP0)
 irq_handler:
-    // Save caller-saved registers
-    sub     sp, sp, #144
+    // Save all general-purpose registers because IRQs interrupt arbitrary code.
+    sub     sp, sp, #256
     stp     x0, x1, [sp, #0]
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]
@@ -303,15 +314,19 @@ irq_handler:
     stp     x10, x11, [sp, #80]
     stp     x12, x13, [sp, #96]
     stp     x14, x15, [sp, #112]
-    stp     x30, xzr, [sp, #128]
+    stp     x16, x17, [sp, #128]
+    stp     x18, x19, [sp, #144]
+    stp     x20, x21, [sp, #160]
+    stp     x22, x23, [sp, #176]
+    stp     x24, x25, [sp, #192]
+    stp     x26, x27, [sp, #208]
+    stp     x28, x29, [sp, #224]
+    stp     x30, xzr, [sp, #240]
 
     // Call timer interrupt handler
     bl      timer_interrupt_handler
 
-    // Check if preemption is needed
-    bl      check_preemption
-
-    // Restore caller-saved registers
+    // Restore registers
     ldp     x0, x1, [sp, #0]
     ldp     x2, x3, [sp, #16]
     ldp     x4, x5, [sp, #32]
@@ -320,15 +335,23 @@ irq_handler:
     ldp     x10, x11, [sp, #80]
     ldp     x12, x13, [sp, #96]
     ldp     x14, x15, [sp, #112]
-    ldp     x30, xzr, [sp, #128]
-    add     sp, sp, #144
+    ldp     x16, x17, [sp, #128]
+    ldp     x18, x19, [sp, #144]
+    ldp     x20, x21, [sp, #160]
+    ldp     x22, x23, [sp, #176]
+    ldp     x24, x25, [sp, #192]
+    ldp     x26, x27, [sp, #208]
+    ldp     x28, x29, [sp, #224]
+    ldp     x30, xzr, [sp, #240]
+    add     sp, sp, #256
 
     eret
 
 // IRQ Handler (Lower EL using AArch64)
 irq_handler_lower:
-    // Save caller-saved registers
-    sub     sp, sp, #144
+    // Save a complete EL0 register frame. Timer-based signal delivery may
+    // patch x0/x30 and ELR_EL1 before returning to user code.
+    sub     sp, sp, #256
     stp     x0, x1, [sp, #0]
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]
@@ -337,15 +360,23 @@ irq_handler_lower:
     stp     x10, x11, [sp, #80]
     stp     x12, x13, [sp, #96]
     stp     x14, x15, [sp, #112]
-    stp     x30, xzr, [sp, #128]
+    stp     x16, x17, [sp, #128]
+    stp     x18, x19, [sp, #144]
+    stp     x20, x21, [sp, #160]
+    stp     x22, x23, [sp, #176]
+    stp     x24, x25, [sp, #192]
+    stp     x26, x27, [sp, #208]
+    stp     x28, x29, [sp, #224]
+    stp     x30, xzr, [sp, #240]
 
     // Call timer interrupt handler
     bl      timer_interrupt_handler
 
-    // Check if preemption is needed
-    bl      check_preemption
+    // Give the Linux compatibility layer a chance to deliver SIGALRM.
+    mov     x0, sp
+    bl      deliver_linux_timer_signal_from_irq
 
-    // Restore caller-saved registers
+    // Restore registers
     ldp     x0, x1, [sp, #0]
     ldp     x2, x3, [sp, #16]
     ldp     x4, x5, [sp, #32]
@@ -354,8 +385,15 @@ irq_handler_lower:
     ldp     x10, x11, [sp, #80]
     ldp     x12, x13, [sp, #96]
     ldp     x14, x15, [sp, #112]
-    ldp     x30, xzr, [sp, #128]
-    add     sp, sp, #144
+    ldp     x16, x17, [sp, #128]
+    ldp     x18, x19, [sp, #144]
+    ldp     x20, x21, [sp, #160]
+    ldp     x22, x23, [sp, #176]
+    ldp     x24, x25, [sp, #192]
+    ldp     x26, x27, [sp, #208]
+    ldp     x28, x29, [sp, #224]
+    ldp     x30, xzr, [sp, #240]
+    add     sp, sp, #256
 
     eret
 
@@ -610,12 +648,6 @@ extern "C" fn timer_interrupt_handler() {
 
     // Acknowledge the interrupt at GIC
     let interrupt_id = kernel_lowlevel::interrupt::acknowledge_interrupt();
-
-    // Update scheduler tick count (decrements time_slice)
-    crate::kernel_objects::scheduler::scheduler().on_timer_tick();
-
-    // Check if preemption is needed (time_slice expired)
-    check_preemption();
 
     // End of interrupt
     kernel_lowlevel::interrupt::end_of_interrupt(interrupt_id);

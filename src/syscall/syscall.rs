@@ -40,6 +40,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::address_logic::{
     checked_end, fixed_linux_mmap_request_ok as shared_fixed_linux_mmap_request_ok,
@@ -525,6 +526,11 @@ const LINUX_IPPROTO_TCP: usize = 6;
 const LINUX_IPPROTO_UDP: usize = 17;
 const LINUX_MAX_SIGNAL: usize = 64;
 const LINUX_SIGSET_SIZE: usize = core::mem::size_of::<u64>();
+const LINUX_SIGALRM: usize = 14;
+const LINUX_ITIMER_REAL: usize = 0;
+const LINUX_ITIMER_MAX: usize = 2;
+const LINUX_TIMER_HZ: u64 = 100;
+const LINUX_TIMER_DISABLED: u64 = 0;
 const LINUX_MAX_SEMAPHORES: usize = 256;
 const LINUX_MAX_IPC_BYTES: usize = 65536;
 const LINUX_MAX_MSG_BYTES: usize = 8192;
@@ -680,6 +686,13 @@ struct LinuxTimespec {
 struct LinuxTimeval {
     tv_sec: i64,
     tv_usec: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxItimerval {
+    it_interval: LinuxTimeval,
+    it_value: LinuxTimeval,
 }
 
 #[repr(C)]
@@ -1596,12 +1609,11 @@ impl MemorySyscallState {
             record.cursor = cursor;
             record.path = path;
         } else {
-            self.linux_fxfs_files
-                .push(LinuxFxfsFileRecord {
-                    handle,
-                    cursor,
-                    path,
-                });
+            self.linux_fxfs_files.push(LinuxFxfsFileRecord {
+                handle,
+                cursor,
+                path,
+            });
         }
     }
 
@@ -1689,6 +1701,8 @@ impl MemorySyscallState {
 }
 
 static mut MEMORY_SYSCALL_STATE: Option<MemorySyscallState> = None;
+static LINUX_SIGALRM_HANDLER: AtomicU64 = AtomicU64::new(0);
+static LINUX_REAL_TIMER_DEADLINE_TICK: AtomicU64 = AtomicU64::new(LINUX_TIMER_DISABLED);
 
 fn memory_state() -> &'static mut MemorySyscallState {
     unsafe {
@@ -1982,9 +1996,76 @@ fn set_object_signal_state(handle: u32, clear_mask: u32, set_mask: u32) -> ZxRes
 }
 
 fn monotonic_nanos() -> u64 {
-    scheduler::scheduler()
-        .get_tick_count()
-        .saturating_mul(10_000_000)
+    crate::kernel_lowlevel::timer::get_tick_count().saturating_mul(10_000_000)
+}
+
+fn linux_timeval_is_zero(timeval: LinuxTimeval) -> bool {
+    timeval.tv_sec == 0 && timeval.tv_usec == 0
+}
+
+fn linux_timeval_to_ticks(timeval: LinuxTimeval) -> u64 {
+    if timeval.tv_sec < 0 || timeval.tv_usec < 0 {
+        return 0;
+    }
+    let seconds = timeval.tv_sec as u64;
+    let micros = timeval.tv_usec as u64;
+    seconds.saturating_mul(LINUX_TIMER_HZ).saturating_add(
+        micros
+            .saturating_mul(LINUX_TIMER_HZ)
+            .saturating_add(999_999)
+            / 1_000_000,
+    )
+}
+
+fn linux_timeval_from_ticks(ticks: u64) -> LinuxTimeval {
+    LinuxTimeval {
+        tv_sec: (ticks / LINUX_TIMER_HZ) as i64,
+        tv_usec: ((ticks % LINUX_TIMER_HZ) * 1_000_000 / LINUX_TIMER_HZ) as i64,
+    }
+}
+
+pub fn reset_linux_signal_timer_state() {
+    LINUX_SIGALRM_HANDLER.store(0, Ordering::SeqCst);
+    LINUX_REAL_TIMER_DEADLINE_TICK.store(LINUX_TIMER_DISABLED, Ordering::SeqCst);
+}
+
+#[no_mangle]
+pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) {
+    if saved_regs == 0 {
+        return;
+    }
+
+    let deadline = LINUX_REAL_TIMER_DEADLINE_TICK.load(Ordering::SeqCst);
+    if deadline == LINUX_TIMER_DISABLED {
+        return;
+    }
+    if crate::kernel_lowlevel::timer::get_tick_count() < deadline {
+        return;
+    }
+
+    let handler = LINUX_SIGALRM_HANDLER.load(Ordering::SeqCst);
+    if handler == 0 || handler == usize::MAX as u64 {
+        LINUX_REAL_TIMER_DEADLINE_TICK.store(LINUX_TIMER_DISABLED, Ordering::SeqCst);
+        return;
+    }
+
+    LINUX_REAL_TIMER_DEADLINE_TICK.store(LINUX_TIMER_DISABLED, Ordering::SeqCst);
+
+    let return_pc: u64;
+    unsafe {
+        core::arch::asm!(
+            "mrs {return_pc}, elr_el1",
+            return_pc = out(reg) return_pc,
+            options(nomem, nostack, preserves_flags),
+        );
+        core::ptr::write(saved_regs as *mut u64, LINUX_SIGALRM as u64);
+        core::ptr::write((saved_regs + 240) as *mut u64, return_pc);
+        core::arch::asm!(
+            "msr elr_el1, {handler}",
+            handler = in(reg) handler,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
 }
 
 // ============================================================================
@@ -2713,6 +2794,13 @@ fn linux_zero_user(ptr: usize, len: usize) -> SysResult {
         }
     }
     Ok(0)
+}
+
+fn linux_read_u64_user(ptr: usize) -> Result<u64, SysError> {
+    if !syscall_logic::user_buffer_valid(ptr, core::mem::size_of::<u64>()) {
+        return Err(SysError::EFAULT);
+    }
+    Ok(unsafe { core::ptr::read(ptr as *const u64) })
 }
 
 fn linux_write_cstr(buf: usize, len: usize, value: &[u8]) -> SysResult {
@@ -3472,9 +3560,11 @@ pub fn sys_lseek(fd: usize, offset: i64, whence: usize) -> SysResult {
         let base = match whence {
             SEEK_SET => 0,
             SEEK_CUR => file.cursor.offset(),
-            SEEK_END => fxfs::attrs(file.path.as_str())
-                .map_err(|_| SysError::EIO)?
-                .size,
+            SEEK_END => {
+                fxfs::attrs(file.path.as_str())
+                    .map_err(|_| SysError::EIO)?
+                    .size
+            }
             _ => return Err(SysError::EINVAL),
         };
         let target = linux_lseek_target(base, offset).ok_or(SysError::EINVAL)?;
@@ -4117,7 +4207,7 @@ pub fn sys_shmctl(id: usize, _cmd: usize, buffer: usize) -> SysResult {
     Ok(0)
 }
 
-pub fn sys_rt_sigaction(signum: usize, _act: usize, oldact: usize, sigsetsize: usize) -> SysResult {
+pub fn sys_rt_sigaction(signum: usize, act: usize, oldact: usize, sigsetsize: usize) -> SysResult {
     if !syscall_logic::linux_signal_action_valid(signum, LINUX_MAX_SIGNAL)
         || !syscall_logic::linux_sigset_size_valid(sigsetsize, LINUX_SIGSET_SIZE)
     {
@@ -4125,6 +4215,20 @@ pub fn sys_rt_sigaction(signum: usize, _act: usize, oldact: usize, sigsetsize: u
     }
     if oldact != 0 {
         linux_zero_user(oldact, sigsetsize)?;
+        if signum == LINUX_SIGALRM {
+            unsafe {
+                core::ptr::write(
+                    oldact as *mut u64,
+                    LINUX_SIGALRM_HANDLER.load(Ordering::SeqCst),
+                );
+            }
+        }
+    }
+    if act != 0 {
+        let handler = linux_read_u64_user(act)?;
+        if signum == LINUX_SIGALRM {
+            LINUX_SIGALRM_HANDLER.store(handler, Ordering::SeqCst);
+        }
     }
     Ok(0)
 }
@@ -4319,16 +4423,56 @@ pub fn sys_time(time_ptr: usize) -> SysResult {
     Ok(seconds)
 }
 
-pub fn sys_getitimer(_which: usize, curr_value: usize) -> SysResult {
-    linux_zero_user(curr_value, 32)
+pub fn sys_getitimer(which: usize, curr_value: usize) -> SysResult {
+    if which > LINUX_ITIMER_MAX {
+        return Err(SysError::EINVAL);
+    }
+    linux_zero_user(curr_value, core::mem::size_of::<LinuxItimerval>())?;
+    if which == LINUX_ITIMER_REAL {
+        let deadline = LINUX_REAL_TIMER_DEADLINE_TICK.load(Ordering::SeqCst);
+        if deadline != LINUX_TIMER_DISABLED {
+            let now = crate::kernel_lowlevel::timer::get_tick_count();
+            let remaining_ticks = deadline.saturating_sub(now);
+            let remaining = linux_timeval_from_ticks(remaining_ticks);
+            unsafe {
+                core::ptr::write(
+                    curr_value as *mut LinuxItimerval,
+                    LinuxItimerval {
+                        it_interval: LinuxTimeval {
+                            tv_sec: 0,
+                            tv_usec: 0,
+                        },
+                        it_value: remaining,
+                    },
+                );
+            }
+        }
+    }
+    Ok(0)
 }
 
-pub fn sys_setitimer(_which: usize, new_value: usize, old_value: usize) -> SysResult {
+pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> SysResult {
+    if which > LINUX_ITIMER_MAX {
+        return Err(SysError::EINVAL);
+    }
     if new_value == 0 {
         return Err(SysError::EFAULT);
     }
     if old_value != 0 {
-        linux_zero_user(old_value, 32)?;
+        sys_getitimer(which, old_value)?;
+    }
+    if !syscall_logic::user_buffer_valid(new_value, core::mem::size_of::<LinuxItimerval>()) {
+        return Err(SysError::EFAULT);
+    }
+    if which == LINUX_ITIMER_REAL {
+        let timer = unsafe { core::ptr::read(new_value as *const LinuxItimerval) };
+        if linux_timeval_is_zero(timer.it_value) {
+            LINUX_REAL_TIMER_DEADLINE_TICK.store(LINUX_TIMER_DISABLED, Ordering::SeqCst);
+        } else {
+            let ticks = linux_timeval_to_ticks(timer.it_value).max(1);
+            let deadline = crate::kernel_lowlevel::timer::get_tick_count().saturating_add(ticks);
+            LINUX_REAL_TIMER_DEADLINE_TICK.store(deadline, Ordering::SeqCst);
+        }
     }
     Ok(0)
 }

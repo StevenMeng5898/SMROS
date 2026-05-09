@@ -9,9 +9,9 @@ use alloc::alloc::{alloc, Layout};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
-use crate::kernel_lowlevel::memory::PAGE_SIZE;
+use crate::kernel_lowlevel::{memory::PAGE_SIZE, timer};
 use crate::kernel_objects::scheduler;
 use crate::syscall;
 use crate::user_level::{elf, fxfs, user_logic, user_process};
@@ -21,6 +21,7 @@ const RUN_ELF_INTERP_BASE: usize = 0x5100_0000;
 const RUN_ELF_STACK_SIZE: usize = 0x20_000;
 const RUN_ELF_MAP_PROT: usize = 0x1 | 0x2 | 0x4; // PROT_READ | PROT_WRITE | PROT_EXEC
 const RUN_ELF_MAP_FIXED_ANON_PRIVATE: usize = (1 << 4) | (1 << 5) | (1 << 1);
+const RUN_ELF_TIMER_HZ: u64 = 100;
 
 const AT_NULL: u64 = 0;
 const AT_PHDR: u64 = 3;
@@ -90,6 +91,7 @@ impl<T> RunSlot<T> {
 
 static RUN_ACTIVE: AtomicBool = AtomicBool::new(false);
 static RUN_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
+static RUN_START_TICK: AtomicU64 = AtomicU64::new(0);
 static PENDING_RUN: RunSlot<Option<RunRequest>> = RunSlot::new(None);
 static ACTIVE_PATH: RunSlot<Option<String>> = RunSlot::new(None);
 
@@ -97,6 +99,7 @@ pub fn spawn(path: String, argv: Vec<String>) -> Result<(), RunElfError> {
     if RUN_ACTIVE.swap(true, Ordering::SeqCst) {
         return Err(RunElfError::Busy);
     }
+    syscall::reset_linux_signal_timer_state();
 
     unsafe {
         let pending = &mut *PENDING_RUN.get();
@@ -106,6 +109,7 @@ pub fn spawn(path: String, argv: Vec<String>) -> Result<(), RunElfError> {
         }
         *pending = Some(RunRequest { path, argv });
     }
+    RUN_START_TICK.store(timer::get_tick_count(), Ordering::SeqCst);
 
     scheduler::scheduler()
         .create_thread(run_elf_launcher_entry, "run_elf")
@@ -114,7 +118,9 @@ pub fn spawn(path: String, argv: Vec<String>) -> Result<(), RunElfError> {
             unsafe {
                 *PENDING_RUN.get() = None;
             }
+            RUN_START_TICK.store(0, Ordering::SeqCst);
             RUN_ACTIVE.store(false, Ordering::SeqCst);
+            syscall::reset_linux_signal_timer_state();
             RunElfError::Thread
         })
 }
@@ -128,10 +134,8 @@ pub fn prepare_run_elf_return(exit_code: i32) -> bool {
         return false;
     }
 
+    syscall::reset_linux_signal_timer_state();
     RUN_EXIT_CODE.store(exit_code, Ordering::SeqCst);
-    unsafe {
-        *ACTIVE_PATH.get() = None;
-    }
 
     let spsr_el1 = user_logic::el1h_spsr_masked();
     unsafe {
@@ -163,6 +167,7 @@ extern "C" fn run_elf_launcher_entry() -> ! {
         },
         Err(err) => {
             RUN_ACTIVE.store(false, Ordering::SeqCst);
+            syscall::reset_linux_signal_timer_state();
             unsafe {
                 *ACTIVE_PATH.get() = None;
             }
@@ -180,9 +185,36 @@ extern "C" fn run_elf_launcher_entry() -> ! {
 pub extern "C" fn run_elf_launcher_resume() -> ! {
     let mut serial = crate::kernel_lowlevel::serial::Serial::new();
     serial.init();
-    serial.write_str("\nrun: process exited ");
-    print_i32(&mut serial, RUN_EXIT_CODE.load(Ordering::SeqCst));
+    let exit_code = RUN_EXIT_CODE.load(Ordering::SeqCst);
+    let start_tick = RUN_START_TICK.load(Ordering::SeqCst);
+    let elapsed_ticks = timer::get_tick_count().saturating_sub(start_tick);
+    let active_path = unsafe { (&*ACTIVE_PATH.get()).clone() };
+
+    serial.write_str("\nrun: program output ended\n");
+    serial.write_str("run: process finished\n");
+    serial.write_str("  path: ");
+    match active_path.as_ref() {
+        Some(path) => serial.write_str(path.as_str()),
+        None => serial.write_str("<unknown>"),
+    }
+    serial.write_str("\n  exit code: ");
+    print_i32(&mut serial, exit_code);
+    if exit_code == 0 {
+        serial.write_str(" (success)");
+    } else {
+        serial.write_str(" (failure)");
+    }
+    serial.write_str("\n  elapsed: ");
+    print_elapsed_ticks(&mut serial, elapsed_ticks);
+    serial.write_str(" (");
+    print_u64(&mut serial, elapsed_ticks);
+    serial.write_str(" timer ticks)");
     serial.write_str("\n");
+
+    RUN_START_TICK.store(0, Ordering::SeqCst);
+    unsafe {
+        *ACTIVE_PATH.get() = None;
+    }
     finish_launcher_thread();
 }
 
@@ -450,18 +482,30 @@ fn build_initial_stack(request: &RunRequest, main: &elf::ElfImage) -> Result<u64
 fn print_i32(serial: &mut crate::kernel_lowlevel::serial::Serial, value: i32) {
     if value < 0 {
         serial.write_byte(b'-');
-        print_u32(serial, value.wrapping_neg() as u32);
+        print_u64(serial, value.wrapping_neg() as u32 as u64);
     } else {
-        print_u32(serial, value as u32);
+        print_u64(serial, value as u64);
     }
 }
 
-fn print_u32(serial: &mut crate::kernel_lowlevel::serial::Serial, mut value: u32) {
+fn print_elapsed_ticks(serial: &mut crate::kernel_lowlevel::serial::Serial, ticks: u64) {
+    let seconds = ticks / RUN_ELF_TIMER_HZ;
+    let centiseconds = ticks % RUN_ELF_TIMER_HZ;
+    print_u64(serial, seconds);
+    serial.write_byte(b'.');
+    if centiseconds < 10 {
+        serial.write_byte(b'0');
+    }
+    print_u64(serial, centiseconds);
+    serial.write_byte(b's');
+}
+
+fn print_u64(serial: &mut crate::kernel_lowlevel::serial::Serial, mut value: u64) {
     if value == 0 {
         serial.write_byte(b'0');
         return;
     }
-    let mut buf = [0u8; 10];
+    let mut buf = [0u8; 20];
     let mut len = 0usize;
     while value > 0 && len < buf.len() {
         buf[len] = b'0' + (value % 10) as u8;
