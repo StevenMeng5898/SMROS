@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::kernel_objects::right;
 use crate::kernel_objects::{Rights, ZxError};
@@ -54,6 +55,7 @@ const RUNC_THREAD_NAME: &[u8] = b"runc-main";
 const RUNC_ENTRY_POINT: usize = 0x1000;
 const RUNC_STACK_TOP: usize = 0x8000;
 const DOCKER_IMAGE_ROOT: &str = "/docker/images";
+const DOCKER_CONTAINER_ROOT: &str = "/docker/containers";
 const SAMPLE_IMAGE_NAME: &str = "smros/hello:latest";
 const SAMPLE_IMAGE_ALIAS: &str = "hello-world:latest";
 const SAMPLE_IMAGE_SHORT: &str = "smros/hello";
@@ -62,6 +64,11 @@ const SAMPLE_IMAGE_ROOTFS: &str = "/docker/images/smros_hello_latest/rootfs";
 const SAMPLE_IMAGE_MANIFEST: &str = "/docker/images/smros_hello_latest/manifest.json";
 const SAMPLE_IMAGE_CONFIG: &str = "/docker/images/smros_hello_latest/config.json";
 const DOCKER_IMAGE_CONFIG_MAX_BYTES: usize = 4096;
+const DOCKER_CONTAINER_RECORD_MAX_BYTES: usize = 2048;
+const DOCKER_CONTAINER_LOG_MAX_BYTES: usize = 1024;
+const DOCKER_MAX_CONTAINER_NAME_BYTES: usize = 48;
+const DOCKER_MAX_COMMAND_ITEMS: usize = 16;
+const DOCKER_MAX_CONTAINERS: usize = 32;
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 const APPARMOR_CURRENT: &str = "/proc/self/attr/current";
@@ -218,6 +225,10 @@ pub enum DockerCompatError {
     AppArmorOpen(SysError),
     AppArmorWrite(SysError),
     AppArmorClose(SysError),
+    ContainerExists,
+    ContainerNotFound,
+    ContainerInvalid,
+    ContainerState,
     StateMismatch,
 }
 
@@ -250,9 +261,38 @@ pub struct DockerImageInfo {
     pub layers: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DockerContainer {
+    pub id: String,
+    pub image: String,
+    pub command: String,
+    pub args: String,
+    pub status: DockerContainerStatus,
+    pub exit_code: i32,
+    pub runtime: Option<DockerCompatResult>,
+    pub log_bytes: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DockerContainerStatus {
+    Created,
+    Running,
+    Exited,
+}
+
+impl DockerContainerStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DockerContainerStatus::Created => "created",
+            DockerContainerStatus::Running => "running",
+            DockerContainerStatus::Exited => "exited",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DockerRunResult {
-    pub image: &'static str,
+    pub container: DockerContainer,
     pub runtime: DockerCompatResult,
 }
 
@@ -278,6 +318,7 @@ pub fn install_builtin_docker_images() -> Result<(), DockerCompatError> {
     }
     let _ = fxfs::create_dir("/docker");
     let _ = fxfs::create_dir(DOCKER_IMAGE_ROOT);
+    let _ = fxfs::create_dir(DOCKER_CONTAINER_ROOT);
     let _ = fxfs::create_dir(SAMPLE_IMAGE_DIR);
     let _ = fxfs::create_dir(SAMPLE_IMAGE_ROOTFS);
     let _ = fxfs::create_dir("/docker/images/smros_hello_latest/rootfs/bin");
@@ -293,6 +334,7 @@ pub fn install_builtin_docker_images() -> Result<(), DockerCompatError> {
         .map_err(|_| DockerCompatError::OciInstall)?;
     fxfs::write_file(SAMPLE_IMAGE_CONFIG, SAMPLE_IMAGE_CONFIG_JSON.as_bytes())
         .map_err(|_| DockerCompatError::OciInstall)?;
+    prune_invalid_container_entries();
     Ok(())
 }
 
@@ -317,6 +359,21 @@ pub fn run_docker_image(
     image: &str,
     command: &[&str],
 ) -> Result<DockerRunResult, DockerCompatError> {
+    let container = create_docker_container(image, command, None)?;
+    let started = start_docker_container(container.id.as_str())?;
+    finish_docker_container(started.container.id.as_str(), 0)?;
+    let completed = inspect_docker_container(started.container.id.as_str())?;
+    Ok(DockerRunResult {
+        container: completed,
+        runtime: started.runtime,
+    })
+}
+
+pub fn create_docker_container(
+    image: &str,
+    command: &[&str],
+    name: Option<&str>,
+) -> Result<DockerContainer, DockerCompatError> {
     install_builtin_docker_images()?;
     let image_name = resolve_builtin_image_name(image).ok_or(DockerCompatError::OciRead)?;
 
@@ -325,12 +382,502 @@ pub fn run_docker_image(
         .map_err(|_| DockerCompatError::OciRead)?;
     let config = core::str::from_utf8(&config_bytes[..config_len])
         .map_err(|_| DockerCompatError::OciParse)?;
-    let request = docker_image_config_to_oci_request(config, image_name, command)?;
+    validate_docker_command(command)?;
+    let id = match name {
+        Some(value) => {
+            if !docker_name_valid(value) || container_exists(value) {
+                return Err(DockerCompatError::ContainerExists);
+            }
+            String::from(value)
+        }
+        None => next_container_id()?,
+    };
+
+    let dir = container_dir_path(id.as_str());
+    let _ = fxfs::create_dir(dir.as_str());
+    let mut container = DockerContainer {
+        id,
+        image: String::from(image_name),
+        command: docker_command_display(config, command)?,
+        args: docker_command_args(command)?,
+        status: DockerContainerStatus::Created,
+        exit_code: 0,
+        runtime: None,
+        log_bytes: 0,
+    };
+    write_container_log(container.id.as_str(), &[])?;
+    write_container_record(&container)?;
+    container.log_bytes = 0;
+    Ok(container)
+}
+
+pub fn start_docker_container(reference: &str) -> Result<DockerRunResult, DockerCompatError> {
+    install_builtin_docker_images()?;
+    let id = resolve_container_id(reference)?;
+    let mut container = load_container_record(id.as_str())?;
+    if container.status == DockerContainerStatus::Running {
+        return Err(DockerCompatError::ContainerState);
+    }
+
+    let mut config_bytes = [0u8; DOCKER_IMAGE_CONFIG_MAX_BYTES];
+    let config_len = fxfs::read_file(SAMPLE_IMAGE_CONFIG, &mut config_bytes)
+        .map_err(|_| DockerCompatError::OciRead)?;
+    let config = core::str::from_utf8(&config_bytes[..config_len])
+        .map_err(|_| DockerCompatError::OciParse)?;
+    let args = docker_record_args(container.args.as_str());
+    let request = docker_image_config_to_oci_request(config, container.image.as_str(), &args)?;
     let runtime = run_oci_runtime_request(&request, config_len)?;
-    Ok(DockerRunResult {
-        image: image_name,
+
+    let log = docker_container_log_payload(&container);
+    write_container_log(container.id.as_str(), log.as_bytes())?;
+    container.status = DockerContainerStatus::Running;
+    container.exit_code = 0;
+    container.runtime = Some(runtime);
+    container.log_bytes = log.len();
+    write_container_record(&container)?;
+
+    Ok(DockerRunResult { container, runtime })
+}
+
+pub fn stop_docker_container(reference: &str) -> Result<DockerContainer, DockerCompatError> {
+    let id = resolve_container_id(reference)?;
+    let container = load_container_record(id.as_str())?;
+    if container.status != DockerContainerStatus::Running {
+        return Err(DockerCompatError::ContainerState);
+    }
+    finish_docker_container(id.as_str(), 0)?;
+    inspect_docker_container(id.as_str())
+}
+
+pub fn remove_docker_container(reference: &str) -> Result<(), DockerCompatError> {
+    let id = resolve_container_id(reference)?;
+    let container = load_container_record(id.as_str())?;
+    if container.status == DockerContainerStatus::Running {
+        return Err(DockerCompatError::ContainerState);
+    }
+    let record = container_record_path(id.as_str());
+    let log = container_log_path(id.as_str());
+    let _ = fxfs::delete_file(log.as_str());
+    fxfs::delete_file(record.as_str()).map_err(|_| DockerCompatError::ContainerNotFound)
+}
+
+pub fn inspect_docker_container(reference: &str) -> Result<DockerContainer, DockerCompatError> {
+    let id = resolve_container_id(reference)?;
+    load_container_record(id.as_str())
+}
+
+pub fn list_docker_containers(all: bool) -> Result<Vec<DockerContainer>, DockerCompatError> {
+    install_builtin_docker_images()?;
+    let entries =
+        fxfs::entries(DOCKER_CONTAINER_ROOT).map_err(|_| DockerCompatError::FxfsPrepare)?;
+    let mut containers = Vec::new();
+    for entry in entries {
+        if containers.len() >= DOCKER_MAX_CONTAINERS {
+            break;
+        }
+        let record_path = container_record_path(entry.name.as_str());
+        if !fxfs::exists(record_path.as_str()) {
+            continue;
+        }
+        if let Ok(container) = load_container_record(entry.name.as_str()) {
+            if all || container.status == DockerContainerStatus::Running {
+                containers.push(container);
+            }
+        }
+    }
+    Ok(containers)
+}
+
+pub fn docker_container_logs(reference: &str, out: &mut [u8]) -> Result<usize, DockerCompatError> {
+    let id = resolve_container_id(reference)?;
+    let path = container_log_path(id.as_str());
+    fxfs::read_file(path.as_str(), out).map_err(|_| DockerCompatError::ContainerNotFound)
+}
+
+fn finish_docker_container(reference: &str, exit_code: i32) -> Result<(), DockerCompatError> {
+    let id = resolve_container_id(reference)?;
+    let mut container = load_container_record(id.as_str())?;
+    if container.status != DockerContainerStatus::Exited {
+        if let Some(runtime) = container.runtime {
+            let _ = syscall::sys_handle_close(runtime.thread_handle);
+            let _ = syscall::sys_handle_close(runtime.process_handle);
+            let _ = syscall::sys_handle_close(runtime.job_handle);
+        }
+    }
+    container.status = DockerContainerStatus::Exited;
+    container.exit_code = exit_code;
+    write_container_record(&container)
+}
+
+fn validate_docker_command(command: &[&str]) -> Result<(), DockerCompatError> {
+    if command.len() > DOCKER_MAX_COMMAND_ITEMS {
+        return Err(DockerCompatError::OciParse);
+    }
+    for item in command {
+        if item.is_empty()
+            || item.len() > 128
+            || item.as_bytes().contains(&0)
+            || item.as_bytes().iter().any(|byte| *byte < 0x20)
+            || item.as_bytes().contains(&b'|')
+            || item.as_bytes().contains(&b'\n')
+        {
+            return Err(DockerCompatError::OciParse);
+        }
+    }
+    Ok(())
+}
+
+fn docker_name_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= DOCKER_MAX_CONTAINER_NAME_BYTES
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b'.'))
+}
+
+fn container_exists(id: &str) -> bool {
+    let path = container_record_path(id);
+    fxfs::exists(path.as_str())
+}
+
+fn prune_invalid_container_entries() {
+    let Ok(entries) = fxfs::entries(DOCKER_CONTAINER_ROOT) else {
+        return;
+    };
+    for entry in entries {
+        let record = container_record_path(entry.name.as_str());
+        let log = container_log_path(entry.name.as_str());
+        if !fxfs::exists(record.as_str()) {
+            let _ = fxfs::delete_file(log.as_str());
+        }
+    }
+}
+
+fn next_container_id() -> Result<String, DockerCompatError> {
+    let mut index = 1usize;
+    while index <= 9999 {
+        let mut id = String::from("smros");
+        append_usize(&mut id, index, 4);
+        if !container_exists(id.as_str()) {
+            return Ok(id);
+        }
+        index += 1;
+    }
+    Err(DockerCompatError::ContainerExists)
+}
+
+fn resolve_container_id(reference: &str) -> Result<String, DockerCompatError> {
+    if !docker_name_valid(reference) {
+        return Err(DockerCompatError::ContainerInvalid);
+    }
+    if container_exists(reference) {
+        return Ok(String::from(reference));
+    }
+
+    let entries =
+        fxfs::entries(DOCKER_CONTAINER_ROOT).map_err(|_| DockerCompatError::ContainerNotFound)?;
+    let mut found: Option<String> = None;
+    for entry in entries {
+        let record = container_record_path(entry.name.as_str());
+        if fxfs::exists(record.as_str()) && entry.name.starts_with(reference) {
+            if found.is_some() {
+                return Err(DockerCompatError::ContainerInvalid);
+            }
+            found = Some(entry.name);
+        }
+    }
+    found.ok_or(DockerCompatError::ContainerNotFound)
+}
+
+fn write_container_record(container: &DockerContainer) -> Result<(), DockerCompatError> {
+    let path = container_record_path(container.id.as_str());
+    let mut record = String::new();
+    push_record_field(&mut record, "id", container.id.as_str());
+    push_record_field(&mut record, "image", container.image.as_str());
+    push_record_field(&mut record, "command", container.command.as_str());
+    push_record_field(&mut record, "args", container.args.as_str());
+    push_record_field(&mut record, "status", container.status.as_str());
+    push_record_field(
+        &mut record,
+        "exit",
+        signed_to_string(container.exit_code).as_str(),
+    );
+    push_record_field(
+        &mut record,
+        "log",
+        usize_to_string(container.log_bytes).as_str(),
+    );
+    if let Some(runtime) = container.runtime {
+        push_record_field(
+            &mut record,
+            "job",
+            usize_to_string(runtime.job_handle as usize).as_str(),
+        );
+        push_record_field(
+            &mut record,
+            "process",
+            usize_to_string(runtime.process_handle as usize).as_str(),
+        );
+        push_record_field(
+            &mut record,
+            "thread",
+            usize_to_string(runtime.thread_handle as usize).as_str(),
+        );
+        push_record_field(
+            &mut record,
+            "ns",
+            usize_to_string(runtime.namespace_flags).as_str(),
+        );
+        push_record_field(
+            &mut record,
+            "mounts",
+            usize_to_string(runtime.mount_count).as_str(),
+        );
+        push_record_field(
+            &mut record,
+            "seccomp",
+            usize_to_string(runtime.seccomp_mode).as_str(),
+        );
+        push_record_field(
+            &mut record,
+            "filters",
+            usize_to_string(runtime.seccomp_filters).as_str(),
+        );
+        push_record_field(
+            &mut record,
+            "cap",
+            usize_to_string(runtime.cap_effective as usize).as_str(),
+        );
+    }
+    fxfs::write_file(path.as_str(), record.as_bytes())
+        .map(|_| ())
+        .map_err(|_| DockerCompatError::FxfsPrepare)
+}
+
+fn load_container_record(id: &str) -> Result<DockerContainer, DockerCompatError> {
+    let path = container_record_path(id);
+    let mut bytes = [0u8; DOCKER_CONTAINER_RECORD_MAX_BYTES];
+    let len = fxfs::read_file(path.as_str(), &mut bytes)
+        .map_err(|_| DockerCompatError::ContainerNotFound)?;
+    let record =
+        core::str::from_utf8(&bytes[..len]).map_err(|_| DockerCompatError::ContainerInvalid)?;
+    let id_value = record_field(record, "id").ok_or(DockerCompatError::ContainerInvalid)?;
+    let image = record_field(record, "image").ok_or(DockerCompatError::ContainerInvalid)?;
+    let command = record_field(record, "command").ok_or(DockerCompatError::ContainerInvalid)?;
+    let args = record_field(record, "args").unwrap_or("");
+    let status = parse_container_status(
+        record_field(record, "status").ok_or(DockerCompatError::ContainerInvalid)?,
+    )?;
+    let exit_code = parse_i32(record_field(record, "exit").unwrap_or("0"))
+        .ok_or(DockerCompatError::ContainerInvalid)?;
+    let log_bytes = parse_usize(record_field(record, "log").unwrap_or("0"))
+        .ok_or(DockerCompatError::ContainerInvalid)?;
+    let runtime = parse_container_runtime(record);
+
+    Ok(DockerContainer {
+        id: String::from(id_value),
+        image: String::from(image),
+        command: String::from(command),
+        args: String::from(args),
+        status,
+        exit_code,
         runtime,
+        log_bytes,
     })
+}
+
+fn parse_container_runtime(record: &str) -> Option<DockerCompatResult> {
+    let job = parse_usize(record_field(record, "job")?)? as u32;
+    let process = parse_usize(record_field(record, "process")?)? as u32;
+    let thread = parse_usize(record_field(record, "thread")?)? as u32;
+    let namespace_flags = parse_usize(record_field(record, "ns")?)?;
+    let mount_count = parse_usize(record_field(record, "mounts")?)?;
+    let seccomp_mode = parse_usize(record_field(record, "seccomp")?)?;
+    let seccomp_filters = parse_usize(record_field(record, "filters")?)?;
+    let cap_effective = parse_usize(record_field(record, "cap")?)? as u64;
+    Some(DockerCompatResult {
+        namespace_flags,
+        mount_count,
+        seccomp_mode,
+        seccomp_filters,
+        cap_effective,
+        cgroup_bytes: CGROUP_PAYLOAD.len(),
+        apparmor_bytes: apparmor_enforce_payload("docker-default").len(),
+        oci_config_bytes: 0,
+        oci_mounts: 3,
+        oci_args: 0,
+        oci_env: 0,
+        masked_paths: 6,
+        readonly_paths: 6,
+        job_handle: job,
+        process_handle: process,
+        thread_handle: thread,
+    })
+}
+
+fn parse_container_status(value: &str) -> Result<DockerContainerStatus, DockerCompatError> {
+    match value {
+        "created" => Ok(DockerContainerStatus::Created),
+        "running" => Ok(DockerContainerStatus::Running),
+        "exited" => Ok(DockerContainerStatus::Exited),
+        _ => Err(DockerCompatError::ContainerInvalid),
+    }
+}
+
+fn push_record_field(out: &mut String, key: &str, value: &str) {
+    out.push_str(key);
+    out.push('=');
+    out.push_str(value);
+    out.push('\n');
+}
+
+fn record_field<'a>(record: &'a str, key: &str) -> Option<&'a str> {
+    let key_bytes = key.as_bytes();
+    let bytes = record.as_bytes();
+    let mut line_start = 0usize;
+    while line_start < bytes.len() {
+        let mut line_end = line_start;
+        while line_end < bytes.len() && bytes[line_end] != b'\n' {
+            line_end += 1;
+        }
+        let line = &bytes[line_start..line_end];
+        if line.len() > key_bytes.len()
+            && line.starts_with(key_bytes)
+            && line[key_bytes.len()] == b'='
+        {
+            return core::str::from_utf8(&line[key_bytes.len() + 1..]).ok();
+        }
+        line_start = line_end.saturating_add(1);
+    }
+    None
+}
+
+fn write_container_log(id: &str, data: &[u8]) -> Result<(), DockerCompatError> {
+    let path = container_log_path(id);
+    let payload = if data.len() > DOCKER_CONTAINER_LOG_MAX_BYTES {
+        &data[..DOCKER_CONTAINER_LOG_MAX_BYTES]
+    } else {
+        data
+    };
+    fxfs::write_file(path.as_str(), payload)
+        .map(|_| ())
+        .map_err(|_| DockerCompatError::FxfsPrepare)
+}
+
+fn docker_container_log_payload(container: &DockerContainer) -> String {
+    let mut log = String::from("SMROS Docker container ");
+    log.push_str(container.id.as_str());
+    log.push('\n');
+    log.push_str("image=");
+    log.push_str(container.image.as_str());
+    log.push('\n');
+    log.push_str("command=");
+    log.push_str(container.command.as_str());
+    log.push('\n');
+    log.push_str("runtime=runc namespace/cgroup/seccomp compatibility path\n");
+    log
+}
+
+fn docker_command_display(
+    image_config: &str,
+    command: &[&str],
+) -> Result<String, DockerCompatError> {
+    let mut out = String::new();
+    if command.is_empty() {
+        let config = json_object_after(image_config, "config")?;
+        let entrypoint = json_array_after(config, "Entrypoint")?;
+        let cmd = json_array_after(config, "Cmd")?;
+        push_command_display_items(&mut out, entrypoint)?;
+        push_command_display_items(&mut out, cmd)?;
+    } else {
+        for item in command {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(item);
+        }
+    }
+    Ok(out)
+}
+
+fn push_command_display_items(out: &mut String, input: &str) -> Result<(), DockerCompatError> {
+    let bytes = input.as_bytes();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        if bytes[pos] == b'"' {
+            let start = pos + 1;
+            pos = start;
+            while pos < bytes.len() {
+                match bytes[pos] {
+                    b'"' => {
+                        if !out.is_empty() {
+                            out.push(' ');
+                        }
+                        out.push_str(&input[start..pos]);
+                        break;
+                    }
+                    b'\\' => return Err(DockerCompatError::OciParse),
+                    _ => pos += 1,
+                }
+            }
+        }
+        pos += 1;
+    }
+    Ok(())
+}
+
+fn docker_command_args(command: &[&str]) -> Result<String, DockerCompatError> {
+    validate_docker_command(command)?;
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < command.len() {
+        if index > 0 {
+            out.push('|');
+        }
+        out.push_str(command[index]);
+        index += 1;
+    }
+    Ok(out)
+}
+
+fn docker_record_args(input: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    if input.is_empty() {
+        return out;
+    }
+    let bytes = input.as_bytes();
+    let mut start = 0usize;
+    let mut pos = 0usize;
+    while pos <= bytes.len() {
+        if pos == bytes.len() || bytes[pos] == b'|' {
+            if let Ok(value) = core::str::from_utf8(&bytes[start..pos]) {
+                out.push(value);
+            }
+            start = pos.saturating_add(1);
+        }
+        pos += 1;
+    }
+    out
+}
+
+fn container_dir_path(id: &str) -> String {
+    let mut out = String::from(DOCKER_CONTAINER_ROOT);
+    out.push('/');
+    out.push_str(id);
+    out
+}
+
+fn container_record_path(id: &str) -> String {
+    let mut out = container_dir_path(id);
+    out.push_str("/state");
+    out
+}
+
+fn container_log_path(id: &str) -> String {
+    let mut out = container_dir_path(id);
+    out.push_str("/log");
+    out
 }
 
 fn run_oci_runtime_request(
@@ -445,6 +992,8 @@ fn install_sample_oci_bundle() -> Result<(), DockerCompatError> {
         return Err(DockerCompatError::FxfsInit);
     }
     let _ = fxfs::create_dir("/oci");
+    let _ = fxfs::create_dir("/docker");
+    let _ = fxfs::create_dir(DOCKER_CONTAINER_ROOT);
     let _ = fxfs::create_dir(OCI_BUNDLE_DIR);
     let _ = fxfs::create_dir(OCI_ROOTFS_DIR);
     let _ = fxfs::create_dir("/oci/docker-smoke/rootfs/bin");
@@ -1163,4 +1712,89 @@ fn c_string(path: &str) -> String {
     let mut out = String::from(path);
     out.push('\0');
     out
+}
+
+fn usize_to_string(mut value: usize) -> String {
+    if value == 0 {
+        return String::from("0");
+    }
+    let mut buf = [0u8; 20];
+    let mut len = 0usize;
+    while value != 0 && len < buf.len() {
+        buf[len] = b'0' + (value % 10) as u8;
+        value /= 10;
+        len += 1;
+    }
+    let mut out = String::new();
+    while len > 0 {
+        len -= 1;
+        out.push(buf[len] as char);
+    }
+    out
+}
+
+fn signed_to_string(value: i32) -> String {
+    if value < 0 {
+        let mut out = String::from("-");
+        out.push_str(usize_to_string(value.unsigned_abs() as usize).as_str());
+        out
+    } else {
+        usize_to_string(value as usize)
+    }
+}
+
+fn append_usize(out: &mut String, mut value: usize, min_width: usize) {
+    let mut buf = [0u8; 20];
+    let mut len = 0usize;
+    if value == 0 {
+        buf[len] = b'0';
+        len += 1;
+    }
+    while value != 0 && len < buf.len() {
+        buf[len] = b'0' + (value % 10) as u8;
+        value /= 10;
+        len += 1;
+    }
+    while len < min_width && len < buf.len() {
+        buf[len] = b'0';
+        len += 1;
+    }
+    while len > 0 {
+        len -= 1;
+        out.push(buf[len] as char);
+    }
+}
+
+fn parse_usize(value: &str) -> Option<usize> {
+    if value.is_empty() {
+        return None;
+    }
+    let mut out = 0usize;
+    for byte in value.bytes() {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        out = out.checked_mul(10)?.checked_add((byte - b'0') as usize)?;
+    }
+    Some(out)
+}
+
+fn parse_i32(value: &str) -> Option<i32> {
+    if let Some(rest) = value.strip_prefix('-') {
+        let abs = parse_usize(rest)?;
+        if abs > i32::MAX as usize + 1 {
+            return None;
+        }
+        if abs == i32::MAX as usize + 1 {
+            Some(i32::MIN)
+        } else {
+            Some(-(abs as i32))
+        }
+    } else {
+        let parsed = parse_usize(value)?;
+        if parsed > i32::MAX as usize {
+            return None;
+        }
+        Some(parsed as i32)
+    }
 }

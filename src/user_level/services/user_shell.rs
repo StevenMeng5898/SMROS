@@ -3896,6 +3896,16 @@ fn print_docker_compat_error(
         crate::user_level::docker_compat::DockerCompatError::AppArmorOpen(_) => "apparmor open",
         crate::user_level::docker_compat::DockerCompatError::AppArmorWrite(_) => "apparmor write",
         crate::user_level::docker_compat::DockerCompatError::AppArmorClose(_) => "apparmor close",
+        crate::user_level::docker_compat::DockerCompatError::ContainerExists => "container exists",
+        crate::user_level::docker_compat::DockerCompatError::ContainerNotFound => {
+            "container not found"
+        }
+        crate::user_level::docker_compat::DockerCompatError::ContainerInvalid => {
+            "invalid container"
+        }
+        crate::user_level::docker_compat::DockerCompatError::ContainerState => {
+            "invalid container state"
+        }
         crate::user_level::docker_compat::DockerCompatError::StateMismatch => "state mismatch",
     };
     serial.write_str(text);
@@ -3982,8 +3992,7 @@ fn cmd_dockertest(ctx: &mut ShellContext, _args: &[&str]) {
 /// Command: docker - Run local Docker/OCI images
 fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
     if args.is_empty() {
-        ctx.serial
-            .write_str("usage: docker images | docker run <image> [command...]\n\n");
+        print_docker_usage(ctx);
         return;
     }
 
@@ -4006,6 +4015,67 @@ fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
                 ctx.serial.write_str("\n\n");
             }
         },
+        "ps" => {
+            let all = args.len() > 1 && args[1] == "-a";
+            match crate::user_level::docker_compat::list_docker_containers(all) {
+                Ok(containers) => {
+                    ctx.serial
+                        .write_str("CONTAINER ID  IMAGE               STATUS   COMMAND\n");
+                    for container in containers {
+                        print_docker_container_row(ctx, &container);
+                    }
+                    ctx.serial.write_str("\n");
+                }
+                Err(err) => {
+                    ctx.serial.write_str("docker ps failed: ");
+                    print_docker_compat_error(&mut ctx.serial, err);
+                    ctx.serial.write_str("\n\n");
+                }
+            }
+        }
+        "create" => {
+            if args.len() < 2 {
+                ctx.serial
+                    .write_str("usage: docker create <image> [command...]\n\n");
+                return;
+            }
+            match crate::user_level::docker_compat::create_docker_container(
+                args[1],
+                &args[2..],
+                None,
+            ) {
+                Ok(container) => {
+                    ctx.serial.write_str(container.id.as_str());
+                    ctx.serial.write_str("\n\n");
+                }
+                Err(err) => {
+                    ctx.serial.write_str("docker create failed: ");
+                    print_docker_compat_error(&mut ctx.serial, err);
+                    ctx.serial.write_str("\n\n");
+                }
+            }
+        }
+        "start" => {
+            if args.len() < 2 {
+                ctx.serial.write_str("usage: docker start <container>\n\n");
+                return;
+            }
+            match crate::user_level::docker_compat::start_docker_container(args[1]) {
+                Ok(result) => {
+                    ctx.serial.write_str(result.container.id.as_str());
+                    ctx.serial.write_str(" proc=0x");
+                    print_hex(&mut ctx.serial, result.runtime.process_handle as u64);
+                    ctx.serial.write_str(" thread=0x");
+                    print_hex(&mut ctx.serial, result.runtime.thread_handle as u64);
+                    ctx.serial.write_str("\n\n");
+                }
+                Err(err) => {
+                    ctx.serial.write_str("docker start failed: ");
+                    print_docker_compat_error(&mut ctx.serial, err);
+                    ctx.serial.write_str("\n\n");
+                }
+            }
+        }
         "run" => {
             if args.len() < 2 {
                 ctx.serial
@@ -4017,8 +4087,10 @@ fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
             ctx.serial.write_str("\n");
             match crate::user_level::docker_compat::run_docker_image(args[1], &args[2..]) {
                 Ok(result) => {
-                    ctx.serial.write_str("[OK] image=");
-                    ctx.serial.write_str(result.image);
+                    ctx.serial.write_str("[OK] id=");
+                    ctx.serial.write_str(result.container.id.as_str());
+                    ctx.serial.write_str(" image=");
+                    ctx.serial.write_str(result.container.image.as_str());
                     ctx.serial.write_str(" proc=0x");
                     print_hex(&mut ctx.serial, result.runtime.process_handle as u64);
                     ctx.serial.write_str(" thread=0x");
@@ -4029,6 +4101,8 @@ fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
                     print_number(&mut ctx.serial, result.runtime.mount_count as u32);
                     ctx.serial.write_str(" seccomp=");
                     print_number(&mut ctx.serial, result.runtime.seccomp_mode as u32);
+                    ctx.serial.write_str(" status=");
+                    ctx.serial.write_str(result.container.status.as_str());
                     ctx.serial.write_str("\n\n");
                 }
                 Err(err) => {
@@ -4038,11 +4112,149 @@ fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
                 }
             }
         }
+        "inspect" => {
+            if args.len() < 2 {
+                ctx.serial
+                    .write_str("usage: docker inspect <container>\n\n");
+                return;
+            }
+            match crate::user_level::docker_compat::inspect_docker_container(args[1]) {
+                Ok(container) => {
+                    print_docker_container_detail(ctx, &container);
+                    ctx.serial.write_str("\n");
+                }
+                Err(err) => {
+                    ctx.serial.write_str("docker inspect failed: ");
+                    print_docker_compat_error(&mut ctx.serial, err);
+                    ctx.serial.write_str("\n\n");
+                }
+            }
+        }
+        "logs" => {
+            if args.len() < 2 {
+                ctx.serial.write_str("usage: docker logs <container>\n\n");
+                return;
+            }
+            let mut log = [0u8; 1024];
+            match crate::user_level::docker_compat::docker_container_logs(args[1], &mut log) {
+                Ok(len) => {
+                    if len == 0 {
+                        ctx.serial.write_str("\n");
+                    } else if let Ok(text) = core::str::from_utf8(&log[..len]) {
+                        ctx.serial.write_str(text);
+                        if !text.ends_with('\n') {
+                            ctx.serial.write_str("\n");
+                        }
+                    } else {
+                        ctx.serial.write_str("docker logs: non-utf8 log\n");
+                    }
+                    ctx.serial.write_str("\n");
+                }
+                Err(err) => {
+                    ctx.serial.write_str("docker logs failed: ");
+                    print_docker_compat_error(&mut ctx.serial, err);
+                    ctx.serial.write_str("\n\n");
+                }
+            }
+        }
+        "stop" => {
+            if args.len() < 2 {
+                ctx.serial.write_str("usage: docker stop <container>\n\n");
+                return;
+            }
+            match crate::user_level::docker_compat::stop_docker_container(args[1]) {
+                Ok(container) => {
+                    ctx.serial.write_str(container.id.as_str());
+                    ctx.serial.write_str("\n\n");
+                }
+                Err(err) => {
+                    ctx.serial.write_str("docker stop failed: ");
+                    print_docker_compat_error(&mut ctx.serial, err);
+                    ctx.serial.write_str("\n\n");
+                }
+            }
+        }
+        "rm" => {
+            if args.len() < 2 {
+                ctx.serial.write_str("usage: docker rm <container>\n\n");
+                return;
+            }
+            match crate::user_level::docker_compat::remove_docker_container(args[1]) {
+                Ok(()) => {
+                    ctx.serial.write_str(args[1]);
+                    ctx.serial.write_str("\n\n");
+                }
+                Err(err) => {
+                    ctx.serial.write_str("docker rm failed: ");
+                    print_docker_compat_error(&mut ctx.serial, err);
+                    ctx.serial.write_str("\n\n");
+                }
+            }
+        }
         _ => {
-            ctx.serial
-                .write_str("usage: docker images | docker run <image> [command...]\n\n");
+            print_docker_usage(ctx);
         }
     }
+}
+
+fn print_docker_usage(ctx: &mut ShellContext) {
+    ctx.serial.write_str(
+        "usage: docker images | docker ps [-a] | docker create <image> [command...] | docker start <container> | docker run <image> [command...] | docker inspect <container> | docker logs <container> | docker stop <container> | docker rm <container>\n\n",
+    );
+}
+
+fn print_docker_container_row(
+    ctx: &mut ShellContext,
+    container: &crate::user_level::docker_compat::DockerContainer,
+) {
+    ctx.serial.write_str(container.id.as_str());
+    ctx.serial.write_str("  ");
+    ctx.serial.write_str(container.image.as_str());
+    ctx.serial.write_str("  ");
+    ctx.serial.write_str(container.status.as_str());
+    ctx.serial.write_str("  ");
+    ctx.serial.write_str(container.command.as_str());
+    ctx.serial.write_str("\n");
+}
+
+fn print_docker_container_detail(
+    ctx: &mut ShellContext,
+    container: &crate::user_level::docker_compat::DockerContainer,
+) {
+    ctx.serial.write_str("Id: ");
+    ctx.serial.write_str(container.id.as_str());
+    ctx.serial.write_str("\nImage: ");
+    ctx.serial.write_str(container.image.as_str());
+    ctx.serial.write_str("\nCommand: ");
+    ctx.serial.write_str(container.command.as_str());
+    ctx.serial.write_str("\nState: ");
+    ctx.serial.write_str(container.status.as_str());
+    ctx.serial.write_str("\nExitCode: ");
+    if container.exit_code < 0 {
+        ctx.serial.write_str("-");
+        print_number(&mut ctx.serial, container.exit_code.unsigned_abs());
+    } else {
+        print_number(&mut ctx.serial, container.exit_code as u32);
+    }
+    ctx.serial.write_str("\nLogBytes: ");
+    print_number(&mut ctx.serial, container.log_bytes as u32);
+    if let Some(runtime) = container.runtime {
+        ctx.serial.write_str("\nRuntime:\n  job=0x");
+        print_hex(&mut ctx.serial, runtime.job_handle as u64);
+        ctx.serial.write_str("\n  process=0x");
+        print_hex(&mut ctx.serial, runtime.process_handle as u64);
+        ctx.serial.write_str("\n  thread=0x");
+        print_hex(&mut ctx.serial, runtime.thread_handle as u64);
+        ctx.serial.write_str("\n  namespaces=0x");
+        print_hex(&mut ctx.serial, runtime.namespace_flags as u64);
+        ctx.serial.write_str("\n  mounts=");
+        print_number(&mut ctx.serial, runtime.mount_count as u32);
+        ctx.serial.write_str("\n  seccomp=");
+        print_number(&mut ctx.serial, runtime.seccomp_mode as u32);
+        ctx.serial.write_str("\n  filters=");
+        print_number(&mut ctx.serial, runtime.seccomp_filters as u32);
+    }
+    ctx.serial.write_str("\n");
 }
 
 /// Command: porttest - Run ported app compatibility smoke tests

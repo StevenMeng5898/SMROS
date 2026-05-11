@@ -156,6 +156,9 @@ run hello.elf
 testsc
 dockertest
 docker images
+docker run smros/hello
+docker ps -a
+docker logs smros0001
 ```
 
 `run hello.elf` from `/shared` expects an AArch64 dynamic PIE and resolves its interpreter and needed libraries from `/shared/lib` or `/lib`, for example:
