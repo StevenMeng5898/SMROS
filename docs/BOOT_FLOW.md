@@ -34,6 +34,10 @@ QEMU
 SMROS is normally started with:
 
 ```bash
+./scripts/setup-qemu-icmp.sh --ensure
+```
+
+```bash
 qemu-system-aarch64 \
   -M virt \
   -cpu cortex-a57 \
@@ -46,6 +50,10 @@ qemu-system-aarch64 \
   -netdev user,id=smrosnet \
   -device virtio-net-device,netdev=smrosnet
 ```
+
+The `make run`, `make debug`, `make gdb`, `scripts/run.sh`, and
+`scripts/run-simple.sh` launch paths run that setup step automatically on Linux
+hosts so QEMU user networking can pass external ICMP echo traffic.
 
 QEMU enters the kernel at `_start`, which is emitted by the `global_asm!` block in `src/main.rs`.
 

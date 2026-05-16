@@ -20,6 +20,8 @@ if [ ! -f "$FXFS_DISK" ]; then
     qemu-img create -f raw "$FXFS_DISK" 16M >/dev/null
 fi
 
+./scripts/setup-qemu-icmp.sh --ensure
+
 echo "Starting QEMU with SMROS ARM64 Kernel..."
 echo "Press Ctrl+A, then X to exit QEMU"
 echo ""

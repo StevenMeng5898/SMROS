@@ -80,6 +80,13 @@ make run
 - `virtio-blk-device` backed by `smros-fxfs.img`
 - QEMU user networking through `virtio-net-device`
 
+On Linux hosts, `make run`, `make debug`, `make gdb`, and the run scripts
+first run `scripts/setup-qemu-icmp.sh --ensure`. This persists and applies
+`net.ipv4.ping_group_range = 0 2147483647` under `/etc/sysctl.d/` so QEMU user
+networking can create unprivileged ICMP echo sockets. Without this host setting,
+external `ping` can resolve DNS and still fall back to TCP with an `icmp blocked`
+diagnostic.
+
 `make clean` removes build outputs and keeps `smros-fxfs.img`. Use `make clean-fxfs` when you want to reset the persistent FxFS image and `/shared` deletion tombstones.
 
 ### Debug Logging
@@ -105,6 +112,12 @@ gdb
 ```
 
 ### Manual QEMU Command
+
+On Linux, run the host ICMP setup once before launching QEMU manually:
+
+```bash
+./scripts/setup-qemu-icmp.sh --ensure
+```
 
 ```bash
 qemu-system-aarch64 \
