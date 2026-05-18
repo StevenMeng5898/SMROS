@@ -214,7 +214,11 @@ unsafe fn alloc_from_free_list(state: &mut KernelAllocatorState, layout: Layout)
     core::ptr::null_mut()
 }
 
-unsafe fn insert_free_block(state: &mut KernelAllocatorState, block_start: usize, block_size: usize) {
+unsafe fn insert_free_block(
+    state: &mut KernelAllocatorState,
+    block_start: usize,
+    block_size: usize,
+) {
     if block_size < size_of::<FreeBlock>() {
         return;
     }

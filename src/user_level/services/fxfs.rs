@@ -684,11 +684,23 @@ impl FxfsState {
         let checksum = fxfs_checksum(&image[body_start..]);
         let mut header_pos = 0usize;
         write_u32_at(&mut image[..body_start], &mut header_pos, FXFS_BLOCK_MAGIC)?;
-        write_u16_at(&mut image[..body_start], &mut header_pos, FXFS_BLOCK_VERSION)?;
-        write_u16_at(&mut image[..body_start], &mut header_pos, FXFS_BLOCK_HEADER_LEN)?;
+        write_u16_at(
+            &mut image[..body_start],
+            &mut header_pos,
+            FXFS_BLOCK_VERSION,
+        )?;
+        write_u16_at(
+            &mut image[..body_start],
+            &mut header_pos,
+            FXFS_BLOCK_HEADER_LEN,
+        )?;
         write_u32_at(&mut image[..body_start], &mut header_pos, total_len as u32)?;
         write_u32_at(&mut image[..body_start], &mut header_pos, checksum)?;
-        write_u64_at(&mut image[..body_start], &mut header_pos, self.next_object_id)?;
+        write_u64_at(
+            &mut image[..body_start],
+            &mut header_pos,
+            self.next_object_id,
+        )?;
         write_u64_at(&mut image[..body_start], &mut header_pos, self.sequence)?;
         write_u64_at(
             &mut image[..body_start],

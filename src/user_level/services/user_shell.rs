@@ -4041,7 +4041,8 @@ fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
         },
         "pull" => {
             if args.len() < 2 {
-                ctx.serial.write_str("usage: docker pull <image-or-http-url>\n\n");
+                ctx.serial
+                    .write_str("usage: docker pull <image-or-http-url>\n\n");
                 return;
             }
             ctx.serial.write_str("[DOCKER] pull ");
@@ -4065,7 +4066,9 @@ fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
                         if let Some(path) =
                             crate::user_level::docker_compat::staged_registry_archive_path(args[1])
                         {
-                            ctx.serial.write_str("\nstage with host script, then retry; expected archive: ");
+                            ctx.serial.write_str(
+                                "\nstage with host script, then retry; expected archive: ",
+                            );
                             ctx.serial.write_str(path.as_str());
                         }
                     }
@@ -4075,7 +4078,8 @@ fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
         }
         "load" => {
             let Some(input) = docker_load_input_arg(args) else {
-                ctx.serial.write_str("usage: docker load [-i|--input] <archive.tar>\n\n");
+                ctx.serial
+                    .write_str("usage: docker load [-i|--input] <archive.tar>\n\n");
                 return;
             };
             let Some(path) = resolve_docker_load_path(ctx.cwd.as_str(), input) else {
@@ -4114,15 +4118,16 @@ fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
             }
         }
         "create" => {
-            if args.len() < 2 {
-                ctx.serial
-                    .write_str("usage: docker create <image> [command...]\n\n");
+            let Some(parsed) = docker_container_args(args, false) else {
+                ctx.serial.write_str(
+                    "usage: docker create [--name <name>] [-i] [-t] <image> [command...]\n\n",
+                );
                 return;
-            }
+            };
             match crate::user_level::docker_compat::create_docker_container(
-                args[1],
-                &args[2..],
-                None,
+                parsed.image,
+                parsed.command,
+                parsed.name,
             ) {
                 Ok(container) => {
                     ctx.serial.write_str(container.id.as_str());
@@ -4157,15 +4162,31 @@ fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
             }
         }
         "run" => {
-            if args.len() < 2 {
-                ctx.serial
-                    .write_str("usage: docker run <image> [command...]\n\n");
+            let Some(parsed) = docker_container_args(args, true) else {
+                ctx.serial.write_str(
+                    "usage: docker run [-i] [-t] [--rm] [--name <name>] <image> [command...]\n\n",
+                );
+                return;
+            };
+            ctx.serial.write_str("[DOCKER] run ");
+            ctx.serial.write_str(parsed.image);
+            ctx.serial.write_str("\n");
+            if parsed.interactive && parsed.tty {
+                match run_interactive_docker_container(ctx, &parsed) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        ctx.serial.write_str("[FAIL] ");
+                        print_docker_compat_error(&mut ctx.serial, err);
+                        ctx.serial.write_str("\n\n");
+                    }
+                }
                 return;
             }
-            ctx.serial.write_str("[DOCKER] run ");
-            ctx.serial.write_str(args[1]);
-            ctx.serial.write_str("\n");
-            match crate::user_level::docker_compat::run_docker_image(args[1], &args[2..]) {
+            match crate::user_level::docker_compat::run_docker_image_named(
+                parsed.image,
+                parsed.command,
+                parsed.name,
+            ) {
                 Ok(result) => {
                     ctx.serial.write_str("[OK] id=");
                     ctx.serial.write_str(result.container.id.as_str());
@@ -4283,6 +4304,80 @@ fn print_docker_usage(ctx: &mut ShellContext) {
     );
 }
 
+struct DockerContainerArgs<'a> {
+    image: &'a str,
+    command: &'a [&'a str],
+    name: Option<&'a str>,
+    interactive: bool,
+    tty: bool,
+    rm: bool,
+}
+
+fn docker_container_args<'a>(
+    args: &'a [&'a str],
+    allow_rm: bool,
+) -> Option<DockerContainerArgs<'a>> {
+    if args.len() < 2 {
+        return None;
+    }
+
+    let mut index = 1usize;
+    let mut name = None;
+    let mut interactive = false;
+    let mut tty = false;
+    let mut rm = false;
+    while index < args.len() {
+        match args[index] {
+            "-i" | "--interactive" => {
+                interactive = true;
+                index += 1;
+            }
+            "-t" | "--tty" => {
+                tty = true;
+                index += 1;
+            }
+            "-it" | "-ti" => {
+                interactive = true;
+                tty = true;
+                index += 1;
+            }
+            "--rm" if allow_rm => {
+                rm = true;
+                index += 1;
+            }
+            "--name" => {
+                if index + 1 >= args.len() {
+                    return None;
+                }
+                name = Some(args[index + 1]);
+                index += 2;
+            }
+            value if value.starts_with("--name=") => {
+                let value = &value["--name=".len()..];
+                if value.is_empty() {
+                    return None;
+                }
+                name = Some(value);
+                index += 1;
+            }
+            value if value.starts_with('-') => return None,
+            _ => break,
+        }
+    }
+
+    if index >= args.len() {
+        return None;
+    }
+    Some(DockerContainerArgs {
+        image: args[index],
+        command: &args[index + 1..],
+        name,
+        interactive,
+        tty,
+        rm,
+    })
+}
+
 fn docker_load_input_arg<'a>(args: &'a [&str]) -> Option<&'a str> {
     if args.len() == 2 {
         if let Some(value) = args[1].strip_prefix("--input=") {
@@ -4294,6 +4389,178 @@ fn docker_load_input_arg<'a>(args: &'a [&str]) -> Option<&'a str> {
         return Some(args[2]);
     }
     None
+}
+
+fn run_interactive_docker_container(
+    ctx: &mut ShellContext,
+    parsed: &DockerContainerArgs<'_>,
+) -> Result<(), crate::user_level::docker_compat::DockerCompatError> {
+    let image = crate::user_level::docker_compat::docker_image_info(parsed.image)?;
+    let container = crate::user_level::docker_compat::create_docker_container(
+        parsed.image,
+        parsed.command,
+        parsed.name,
+    )?;
+    let started = crate::user_level::docker_compat::start_docker_container(container.id.as_str())?;
+    ctx.serial.write_str("[OK] attached id=");
+    ctx.serial.write_str(started.container.id.as_str());
+    ctx.serial.write_str(" image=");
+    ctx.serial.write_str(started.container.image.as_str());
+    ctx.serial.write_str("\n");
+    run_docker_shell(ctx, started.container.id.as_str(), image.rootfs.as_str());
+    let stopped =
+        crate::user_level::docker_compat::stop_docker_container(started.container.id.as_str())?;
+    if parsed.rm {
+        let _ = crate::user_level::docker_compat::remove_docker_container(stopped.id.as_str());
+    }
+    ctx.serial.write_str("[DOCKER] detached ");
+    ctx.serial.write_str(stopped.id.as_str());
+    ctx.serial.write_str(" status=");
+    ctx.serial.write_str(stopped.status.as_str());
+    ctx.serial.write_str("\n\n");
+    Ok(())
+}
+
+fn run_docker_shell(ctx: &mut ShellContext, container_id: &str, rootfs: &str) {
+    let mut cwd = String::from("/");
+    loop {
+        ctx.serial.write_str(container_id);
+        ctx.serial.write_str(":");
+        ctx.serial.write_str(cwd.as_str());
+        ctx.serial.write_str("# ");
+        let line = ctx.read_line();
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+        match parts[0] {
+            "exit" | "logout" => break,
+            "pwd" => {
+                ctx.serial.write_str(cwd.as_str());
+                ctx.serial.write_str("\n");
+            }
+            "cd" => docker_shell_cd(ctx, rootfs, &mut cwd, parts.get(1).copied().unwrap_or("/")),
+            "ls" => docker_shell_ls(
+                ctx,
+                rootfs,
+                cwd.as_str(),
+                parts.get(1).copied().unwrap_or("."),
+            ),
+            "cat" => {
+                if parts.len() < 2 {
+                    ctx.serial.write_str("cat: missing path\n");
+                } else {
+                    docker_shell_cat(ctx, rootfs, cwd.as_str(), parts[1]);
+                }
+            }
+            "echo" => docker_shell_echo(ctx, &parts[1..]),
+            "help" => ctx.serial.write_str("builtins: pwd ls cd cat echo exit\n"),
+            _ => {
+                ctx.serial.write_str(parts[0]);
+                ctx.serial
+                    .write_str(": command not available in SMROS modeled container shell\n");
+            }
+        }
+    }
+}
+
+fn docker_shell_cd(ctx: &mut ShellContext, rootfs: &str, cwd: &mut String, target: &str) {
+    let Some(path) = docker_rooted_path(rootfs, cwd.as_str(), target) else {
+        ctx.serial.write_str("cd: invalid path\n");
+        return;
+    };
+    match crate::user_level::fxfs::entries(path.as_str()) {
+        Ok(_) => {
+            if let Some(display) = docker_display_path(rootfs, path.as_str()) {
+                *cwd = display;
+            }
+        }
+        Err(err) => {
+            ctx.serial.write_str("cd: ");
+            print_fxfs_error(ctx, err);
+            ctx.serial.write_str("\n");
+        }
+    }
+}
+
+fn docker_shell_ls(ctx: &mut ShellContext, rootfs: &str, cwd: &str, target: &str) {
+    let Some(path) = docker_rooted_path(rootfs, cwd, target) else {
+        ctx.serial.write_str("ls: invalid path\n");
+        return;
+    };
+    match crate::user_level::fxfs::entries(path.as_str()) {
+        Ok(entries) => {
+            for entry in entries {
+                ctx.serial.write_str(entry.name.as_str());
+                if matches!(entry.kind, crate::user_level::fxfs::FxfsNodeKind::Directory) {
+                    ctx.serial.write_str("/");
+                }
+                ctx.serial.write_str("\n");
+            }
+        }
+        Err(crate::user_level::fxfs::FxfsError::NotDirectory) => {
+            if let Some(display) = docker_display_path(rootfs, path.as_str()) {
+                ctx.serial.write_str(display.as_str());
+                ctx.serial.write_str("\n");
+            }
+        }
+        Err(err) => {
+            ctx.serial.write_str("ls: ");
+            print_fxfs_error(ctx, err);
+            ctx.serial.write_str("\n");
+        }
+    }
+}
+
+fn docker_shell_cat(ctx: &mut ShellContext, rootfs: &str, cwd: &str, target: &str) {
+    let Some(path) = docker_rooted_path(rootfs, cwd, target) else {
+        ctx.serial.write_str("cat: invalid path\n");
+        return;
+    };
+    match read_fxfs_file_to_vec(path.as_str()) {
+        Ok(bytes) => {
+            print_bytes_as_text(ctx, &bytes);
+            ctx.serial.write_str("\n");
+        }
+        Err(err) => {
+            ctx.serial.write_str("cat: ");
+            print_fxfs_error(ctx, err);
+            ctx.serial.write_str("\n");
+        }
+    }
+}
+
+fn docker_shell_echo(ctx: &mut ShellContext, args: &[&str]) {
+    for (index, arg) in args.iter().enumerate() {
+        if index > 0 {
+            ctx.serial.write_str(" ");
+        }
+        ctx.serial.write_str(arg);
+    }
+    ctx.serial.write_str("\n");
+}
+
+fn docker_rooted_path(rootfs: &str, cwd: &str, target: &str) -> Option<String> {
+    let display = if target.starts_with('/') {
+        normalize_fxfs_path("/", target)?
+    } else {
+        normalize_fxfs_path(cwd, target)?
+    };
+    let mut out = String::from(rootfs.trim_end_matches('/'));
+    if display != "/" {
+        out.push_str(display.as_str());
+    }
+    Some(out)
+}
+
+fn docker_display_path(rootfs: &str, path: &str) -> Option<String> {
+    let rootfs = rootfs.trim_end_matches('/');
+    if path == rootfs {
+        return Some(String::from("/"));
+    }
+    path.strip_prefix(rootfs)
+        .filter(|suffix| suffix.starts_with('/'))
+        .map(String::from)
 }
 
 fn resolve_docker_load_path(cwd: &str, target: &str) -> Option<String> {

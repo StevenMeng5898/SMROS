@@ -385,6 +385,11 @@ pub fn builtin_image_info() -> Result<DockerImageInfo, DockerCompatError> {
     image_info(SAMPLE_IMAGE_NAME)
 }
 
+pub fn docker_image_info(image: &str) -> Result<DockerImageInfo, DockerCompatError> {
+    install_builtin_docker_images()?;
+    image_info(image)
+}
+
 pub fn list_docker_images() -> Result<Vec<DockerImageInfo>, DockerCompatError> {
     install_builtin_docker_images()?;
     let entries = fxfs::entries(DOCKER_IMAGE_ROOT).map_err(|_| DockerCompatError::FxfsPrepare)?;
@@ -418,7 +423,8 @@ pub fn load_docker_image(path: &str) -> Result<DockerImageLoadResult, DockerComp
     }
     let mut archive = Vec::new();
     archive.resize(attrs.size, 0);
-    let len = fxfs::read_file(path, archive.as_mut_slice()).map_err(|_| DockerCompatError::OciRead)?;
+    let len =
+        fxfs::read_file(path, archive.as_mut_slice()).map_err(|_| DockerCompatError::OciRead)?;
     archive.truncate(len);
     load_docker_archive(&archive, DockerImageSource::Archive)
 }
@@ -461,7 +467,16 @@ pub fn run_docker_image(
     image: &str,
     command: &[&str],
 ) -> Result<DockerRunResult, DockerCompatError> {
-    let container = create_docker_container(image, command, None)?;
+    run_docker_image_named(image, command, None)
+}
+
+pub fn run_docker_image_named(
+    image: &str,
+    command: &[&str],
+    name: Option<&str>,
+) -> Result<DockerRunResult, DockerCompatError> {
+    let _persist_guard = fxfs::suspend_persist();
+    let container = create_docker_container(image, command, name)?;
     let started = start_docker_container(container.id.as_str())?;
     finish_docker_container(started.container.id.as_str(), 0)?;
     let completed = inspect_docker_container(started.container.id.as_str())?;
@@ -476,6 +491,7 @@ pub fn create_docker_container(
     command: &[&str],
     name: Option<&str>,
 ) -> Result<DockerContainer, DockerCompatError> {
+    let _persist_guard = fxfs::suspend_persist();
     install_builtin_docker_images()?;
     let image_record = resolve_image_record(image)?;
 
@@ -514,6 +530,7 @@ pub fn create_docker_container(
 }
 
 pub fn start_docker_container(reference: &str) -> Result<DockerRunResult, DockerCompatError> {
+    let _persist_guard = fxfs::suspend_persist();
     install_builtin_docker_images()?;
     let id = resolve_container_id(reference)?;
     let mut container = load_container_record(id.as_str())?;
@@ -598,6 +615,7 @@ pub fn docker_container_logs(reference: &str, out: &mut [u8]) -> Result<usize, D
 }
 
 fn finish_docker_container(reference: &str, exit_code: i32) -> Result<(), DockerCompatError> {
+    let _persist_guard = fxfs::suspend_persist();
     let id = resolve_container_id(reference)?;
     let mut container = load_container_record(id.as_str())?;
     if container.status != DockerContainerStatus::Exited {
@@ -971,9 +989,10 @@ fn load_docker_archive(
     archive: &[u8],
     source: DockerImageSource,
 ) -> Result<DockerImageLoadResult, DockerCompatError> {
-    let manifest = tar_file_bytes(archive, "manifest.json")
-        .ok_or(DockerCompatError::ArchiveInvalid)?;
-    let manifest_text = core::str::from_utf8(manifest).map_err(|_| DockerCompatError::ArchiveInvalid)?;
+    let manifest =
+        tar_file_bytes(archive, "manifest.json").ok_or(DockerCompatError::ArchiveInvalid)?;
+    let manifest_text =
+        core::str::from_utf8(manifest).map_err(|_| DockerCompatError::ArchiveInvalid)?;
     let config_name = docker_save_config_name(manifest_text)?;
     let repo_tag = docker_save_repo_tag(manifest_text)?;
     let layers = docker_save_layers(manifest_text)?;
@@ -982,7 +1001,8 @@ fn load_docker_archive(
     }
 
     let config = tar_file_bytes(archive, config_name).ok_or(DockerCompatError::ArchiveInvalid)?;
-    let config_text = core::str::from_utf8(config).map_err(|_| DockerCompatError::ArchiveInvalid)?;
+    let config_text =
+        core::str::from_utf8(config).map_err(|_| DockerCompatError::ArchiveInvalid)?;
     validate_image_config(config_text)?;
 
     let image_name = normalize_image_reference(repo_tag)?;
@@ -995,13 +1015,14 @@ fn load_docker_archive(
 
     let _persist_guard = fxfs::suspend_persist();
     prepare_image_dirs(image_dir.as_str(), rootfs.as_str(), blobs.as_str())?;
-    fxfs::write_file(manifest_path.as_str(), manifest).map_err(|_| DockerCompatError::OciInstall)?;
+    fxfs::write_file(manifest_path.as_str(), manifest)
+        .map_err(|_| DockerCompatError::OciInstall)?;
     fxfs::write_file(config_path.as_str(), config).map_err(|_| DockerCompatError::OciInstall)?;
 
     let mut layer_count = 0usize;
     for layer in layers {
-        let layer_bytes = tar_file_bytes(archive, layer.as_str())
-            .ok_or(DockerCompatError::ArchiveInvalid)?;
+        let layer_bytes =
+            tar_file_bytes(archive, layer.as_str()).ok_or(DockerCompatError::ArchiveInvalid)?;
         if is_gzip(layer_bytes) {
             return Err(DockerCompatError::ArchiveUnsupported);
         }
@@ -1066,17 +1087,22 @@ fn http_download_body(host: &str, path: &str) -> Result<Vec<u8>, DockerCompatErr
     })
     .map_err(DockerCompatError::Network)?;
     let request = build_http_archive_request(host, path)?;
-    socket.write(request.as_bytes()).map_err(DockerCompatError::Network)?;
+    socket
+        .write(request.as_bytes())
+        .map_err(DockerCompatError::Network)?;
 
     let mut response = Vec::new();
     response.resize(DOCKER_HTTP_RESPONSE_MAX_BYTES, 0);
-    let bytes_read = socket.read(response.as_mut_slice()).map_err(DockerCompatError::Network)?;
+    let bytes_read = socket
+        .read(response.as_mut_slice())
+        .map_err(DockerCompatError::Network)?;
     let _ = socket.close();
     response.truncate(bytes_read);
     if parse_http_status(response.as_slice()) != Some(200) {
         return Err(DockerCompatError::Network(net::NetError::NoAddress));
     }
-    let body_start = http_body_offset(response.as_slice()).ok_or(DockerCompatError::ArchiveInvalid)?;
+    let body_start =
+        http_body_offset(response.as_slice()).ok_or(DockerCompatError::ArchiveInvalid)?;
     if body_start >= response.len() {
         return Err(DockerCompatError::ArchiveInvalid);
     }
@@ -1249,7 +1275,9 @@ fn extract_layer_tar(layer: &[u8], rootfs: &str) -> Result<(), DockerCompatError
         }
         let size = tar_octal(&header[124..136]).ok_or(DockerCompatError::ArchiveInvalid)?;
         let file_start = offset + TAR_BLOCK_BYTES;
-        let file_end = file_start.checked_add(size).ok_or(DockerCompatError::ArchiveInvalid)?;
+        let file_end = file_start
+            .checked_add(size)
+            .ok_or(DockerCompatError::ArchiveInvalid)?;
         if file_end > layer.len() {
             return Err(DockerCompatError::ArchiveInvalid);
         }
@@ -1464,7 +1492,9 @@ fn image_info(image: &str) -> Result<DockerImageInfo, DockerCompatError> {
     image_info_from_record(&record)
 }
 
-fn image_info_from_record(record: &DockerImageRecord) -> Result<DockerImageInfo, DockerCompatError> {
+fn image_info_from_record(
+    record: &DockerImageRecord,
+) -> Result<DockerImageInfo, DockerCompatError> {
     let manifest_bytes = fxfs::attrs(record.manifest_path.as_str())
         .map_err(|_| DockerCompatError::OciRead)?
         .size;
@@ -1504,16 +1534,21 @@ fn write_image_record(record: &DockerImageRecord) -> Result<(), DockerCompatErro
     push_record_field(&mut data, "manifest", record.manifest_path.as_str());
     push_record_field(&mut data, "config", record.config_path.as_str());
     push_record_field(&mut data, "layers", usize_to_string(record.layers).as_str());
-    fxfs::write_file(docker_image_meta_path_from_dir(dir.as_str()).as_str(), data.as_bytes())
-        .map(|_| ())
-        .map_err(|_| DockerCompatError::FxfsPrepare)
+    fxfs::write_file(
+        docker_image_meta_path_from_dir(dir.as_str()).as_str(),
+        data.as_bytes(),
+    )
+    .map(|_| ())
+    .map_err(|_| DockerCompatError::FxfsPrepare)
 }
 
 fn load_image_record_from_dir(dir: &str) -> Result<DockerImageRecord, DockerCompatError> {
     let path = docker_image_meta_path_from_dir(dir);
     let mut bytes = [0u8; DOCKER_CONTAINER_RECORD_MAX_BYTES];
-    let len = fxfs::read_file(path.as_str(), &mut bytes).map_err(|_| DockerCompatError::ImageNotFound)?;
-    let record = core::str::from_utf8(&bytes[..len]).map_err(|_| DockerCompatError::ImageInvalid)?;
+    let len =
+        fxfs::read_file(path.as_str(), &mut bytes).map_err(|_| DockerCompatError::ImageNotFound)?;
+    let record =
+        core::str::from_utf8(&bytes[..len]).map_err(|_| DockerCompatError::ImageInvalid)?;
     let name = record_field(record, "name").ok_or(DockerCompatError::ImageInvalid)?;
     let rootfs = record_field(record, "rootfs").ok_or(DockerCompatError::ImageInvalid)?;
     let manifest_path = record_field(record, "manifest").ok_or(DockerCompatError::ImageInvalid)?;
@@ -1712,8 +1747,10 @@ fn docker_image_config_to_oci_request<'a>(
 
     let arg0 = if !command.is_empty() {
         command[0]
-    } else {
+    } else if json_string_array_count(entrypoint) > 0 {
         first_string_in_array(entrypoint)?
+    } else {
+        first_string_in_array(cmd)?
     };
     let image_cmd_args =
         json_string_array_count(entrypoint).saturating_add(json_string_array_count(cmd));
@@ -1769,7 +1806,9 @@ fn install_runtime_bundle_for_image(
     push_runtime_args(&mut bundle, image_config, command)?;
     bundle.push_str(",\n");
     bundle.push_str("    \"env\": ");
-    bundle.push_str(json_array_after(json_object_after(image_config, "config")?, "Env").unwrap_or("[]"));
+    bundle.push_str(
+        json_array_after(json_object_after(image_config, "config")?, "Env").unwrap_or("[]"),
+    );
     bundle.push_str(",\n");
     bundle.push_str("    \"noNewPrivileges\": true,\n");
     bundle.push_str("    \"apparmorProfile\": \"docker-default\",\n");
@@ -2307,10 +2346,9 @@ fn image_reference_has_tag(value: &str) -> bool {
 fn image_reference_valid(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 160
-        && value
-            .as_bytes()
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'/' | b'.' | b'-' | b'_' | b':'))
+        && value.as_bytes().iter().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(*byte, b'/' | b'.' | b'-' | b'_' | b':')
+        })
         && !value.starts_with('/')
         && !value.ends_with('/')
         && !value.contains("//")
@@ -2320,10 +2358,9 @@ fn image_reference_valid(value: &str) -> bool {
 fn image_reference_valid_with_optional_tag(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 160
-        && value
-            .as_bytes()
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'/' | b'.' | b'-' | b'_' | b':'))
+        && value.as_bytes().iter().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(*byte, b'/' | b'.' | b'-' | b'_' | b':')
+        })
         && !value.starts_with('/')
         && !value.ends_with('/')
         && !value.contains("//")
