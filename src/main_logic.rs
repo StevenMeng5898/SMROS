@@ -2,6 +2,7 @@ include!("main_logic_shared.rs");
 
 pub(crate) const KERNEL_HEAP_SIZE: usize = 0x0400_0000;
 
+#[allow(dead_code)]
 pub(crate) fn bump_alloc_next(
     pos: usize,
     size: usize,

@@ -184,7 +184,7 @@ The boot-time test currently passes `ttbr0 = 0`, so this validates the exception
 - virtio-blk backed by `smros-fxfs.img`
 - virtio-net backed by QEMU user networking
 
-The FxFS-shaped store uses the block device when available. It loads the newest valid image slot from `smros-fxfs.img`; if the image is empty, it creates a fresh root tree. `make clean` keeps that image, while `make clean-fxfs` removes it.
+The FxFS-shaped store uses the block device when available. It loads the newest valid image slot from `smros-fxfs.img`; if the image is empty, it creates a fresh root tree. New run targets create a 128 MiB image, large enough for staged Docker archives and extracted rootfs metadata. `make clean` keeps that image, while `make clean-fxfs` removes it.
 
 During `user_level::init()`, the FxFS-shaped store is mounted and the component manager installs three boot package files:
 

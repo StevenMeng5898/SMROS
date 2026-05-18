@@ -4,6 +4,7 @@ ARCH = aarch64-unknown-none
 TARGET = $(ARCH)
 KERNEL = kernel8.img
 FXFS_DISK = smros-fxfs.img
+FXFS_DISK_SIZE = 128M
 BUILD_DIR = target/$(TARGET)/release
 
 .PHONY: all build run clean clean-fxfs debug gdb qemu-icmp help verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level
@@ -19,7 +20,7 @@ build:
 
 $(FXFS_DISK):
 	@echo "Creating persistent FxFS disk image: $(FXFS_DISK)"
-	@qemu-img create -f raw $(FXFS_DISK) 16M >/dev/null
+	@qemu-img create -f raw $(FXFS_DISK) $(FXFS_DISK_SIZE) >/dev/null
 
 qemu-icmp:
 	@./scripts/setup-qemu-icmp.sh --ensure

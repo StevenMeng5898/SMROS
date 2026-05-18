@@ -147,15 +147,48 @@ vi /shared/test
 rm /shared/test
 run hello.elf
 run /shared/hello.elf
+docker images
+docker pull smros/hello
+docker pull http://10.0.2.2:8000/my-image.tar
+docker load /shared/my-image.tar
+docker run my/image:latest
 ```
 
 `mount share` refreshes `/shared` from the snapshot compiled into the current kernel image. It does not read the host directory live while QEMU is already running. To see files added to `host_shared/` after boot, rebuild and restart with `make run`; then use `share` or `ls /shared`.
 
-The current implementation is a build-time FxFS snapshot because the guest has virtio block and net drivers, but no 9p or virtio-fs filesystem driver yet. Files larger than 4 MiB are skipped by the build script and reported in the `share` command's skipped list. Shell-created files and edits under `/shared` are FxFS-local changes. Deleting a snapshot file such as `/shared/test` records a persisted tombstone in `/config/host-share-deleted`, so the file stays deleted across reboot while the same `smros-fxfs.img` is used. Remove `smros-fxfs.img` with `make clean-fxfs` to reset those tombstones.
+The current implementation is a build-time FxFS snapshot because the guest has virtio block and net drivers, but no 9p or virtio-fs filesystem driver yet. Files larger than 64 MiB are skipped by the build script and reported in the `share` command's skipped list. Shell-created files and edits under `/shared` are FxFS-local changes. Deleting a snapshot file such as `/shared/test` records a persisted tombstone in `/config/host-share-deleted`, so the file stays deleted across reboot while the same `smros-fxfs.img` is used. Remove `smros-fxfs.img` with `make clean-fxfs` to reset those tombstones.
 
 The `run` command loads a dynamic PIE ELF from FxFS, parses `PT_INTERP` and `DT_NEEDED`, resolves the dynamic loader and C library from `/shared/lib` or `/lib`, builds an argv/env/auxv stack, and enters the loader from an EL0 launcher thread. For example, `run hello.elf` from `/shared` uses `hello.elf`, `/shared/lib/ld-linux-aarch64.so.1`, and `/shared/lib/libc.so.6` and returns to the shell after the program calls `exit`.
 
 The launcher currently supports dynamic PIE binaries (`ET_DYN`) with a dynamic interpreter. Static `ET_EXEC` execution is still reported as unsupported. The implementation maps PT_LOAD bytes for the main executable and interpreter into the Linux mmap window and uses the current identity-mapped EL0 bring-up model, not a process-owned TTBR0 address space.
+
+### Docker Image Pull And Load
+
+The `docker` command now has a persistent local image table under `/docker/images`.
+`docker images` lists all image metadata records, not only the built-in sample.
+
+`docker load <archive.tar>` reads a SMROS-loadable Docker archive from FxFS,
+parses `manifest.json`, stores the config and layer tar files, extracts regular
+files and directories from uncompressed layers into the image rootfs, and writes
+an `image.meta` record. The loaded image can be used by `docker run`,
+`docker create`, and `docker start` through the existing modeled runc path. Use
+`scripts/pull-docker-image.sh` to convert a registry image into this archive
+shape on the host.
+
+`docker pull <image-or-http-url>` supports two current paths: built-in aliases
+such as `smros/hello`, and plain HTTP URLs that point directly at an
+uncompressed image archive, for example a tar served from the host to QEMU user
+networking. Full Docker Registry pulls remain intentionally unsupported because
+this kernel stack does not yet implement TLS or registry bearer-token auth.
+
+Use `scripts/pull-docker-image.sh <image> host_shared/<name>.tar` on the host
+for HTTPS registries such as `docker.1ms.run`. The helper defaults to
+`DOCKER_PLATFORM=linux/arm64`, matching the QEMU guest. Rebuild afterward so the
+new host_shared snapshot is embedded, and run `make clean-fxfs` once if an older
+small `smros-fxfs.img` already exists. Then run `docker load /shared/<name>.tar`
+inside SMROS.
+For `docker.1ms.run/library/alpine:latest`, `docker pull` also checks the staged
+fallback path `/shared/alpine.tar`.
 
 ### Block-Backed FxFS
 

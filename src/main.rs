@@ -5,8 +5,9 @@ extern crate alloc;
 
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
+use core::mem::{align_of, size_of};
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use tock_registers::interfaces::Readable;
 
 mod kernel_lowlevel;
@@ -38,46 +39,247 @@ struct KernelAllocator;
 #[global_allocator]
 static ALLOCATOR: KernelAllocator = KernelAllocator;
 
-// 1MB heap for the kernel bump allocator
+#[repr(C)]
+struct FreeBlock {
+    size: usize,
+    next: *mut FreeBlock,
+}
+
+#[repr(C)]
+struct AllocationHeader {
+    block_start: usize,
+    block_size: usize,
+}
+
+struct KernelAllocatorState {
+    initialized: bool,
+    free_head: *mut FreeBlock,
+}
+
+struct AllocIrqGuard {
+    daif: usize,
+}
+
+// 64 MiB heap for kernel dynamic allocations.
 static HEAP: SyncUnsafeCell<[u8; main_logic::KERNEL_HEAP_SIZE]> =
     SyncUnsafeCell::new([0; main_logic::KERNEL_HEAP_SIZE]);
-static HEAP_POS: AtomicUsize = AtomicUsize::new(0);
+static ALLOC_STATE: SyncUnsafeCell<KernelAllocatorState> =
+    SyncUnsafeCell::new(KernelAllocatorState {
+        initialized: false,
+        free_head: core::ptr::null_mut(),
+    });
+static ALLOC_LOCK: AtomicBool = AtomicBool::new(false);
 
-// SAFETY: This is a simple bump allocator for a kernel. The heap buffer is
-// exclusively owned by the allocator. In a real kernel, you'd add proper
-// synchronization or use a lock-free allocator design.
-unsafe impl alloc::alloc::GlobalAlloc for KernelAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let align = layout.align();
-        let size = layout.size();
+fn allocator_align_up(value: usize, align: usize) -> Option<usize> {
+    if align == 0 || !align.is_power_of_two() {
+        return None;
+    }
+    let mask = align - 1;
+    value.checked_add(mask).map(|next| next & !mask)
+}
 
-        // Atomically fetch and update the heap position
-        let mut pos = HEAP_POS.load(Ordering::Relaxed);
-        loop {
-            let (aligned_pos, next_pos) =
-                match main_logic::bump_alloc_next(pos, size, align, main_logic::KERNEL_HEAP_SIZE) {
-                    Some(next) => next,
-                    None => return core::ptr::null_mut(),
-                };
+fn allocator_lock() -> AllocIrqGuard {
+    let daif: usize;
+    unsafe {
+        core::arch::asm!("mrs {}, daif", out(reg) daif, options(nomem, nostack, preserves_flags));
+        let masked = daif | 0x3c0;
+        core::arch::asm!("msr daif, {}", in(reg) masked, options(nomem, nostack, preserves_flags));
+    }
+    while ALLOC_LOCK
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    AllocIrqGuard { daif }
+}
 
-            match HEAP_POS.compare_exchange_weak(
-                pos,
-                next_pos,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    let ptr = (*HEAP.get()).as_mut_ptr().add(aligned_pos);
-                    return ptr;
-                }
-                Err(new_pos) => pos = new_pos,
-            }
+impl Drop for AllocIrqGuard {
+    fn drop(&mut self) {
+        ALLOC_LOCK.store(false, Ordering::Release);
+        unsafe {
+            core::arch::asm!("msr daif, {}", in(reg) self.daif, options(nomem, nostack, preserves_flags));
         }
     }
+}
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        // Simple implementation - no deallocation (memory leak)
-        // For a real kernel, you'd implement proper deallocation
+unsafe fn init_kernel_allocator(state: &mut KernelAllocatorState) {
+    let heap_start = (*HEAP.get()).as_mut_ptr() as usize;
+    let heap_end = heap_start + main_logic::KERNEL_HEAP_SIZE;
+    let block_start = match allocator_align_up(heap_start, align_of::<FreeBlock>()) {
+        Some(value) => value,
+        None => {
+            state.initialized = true;
+            state.free_head = core::ptr::null_mut();
+            return;
+        }
+    };
+    if block_start + size_of::<FreeBlock>() > heap_end {
+        state.initialized = true;
+        state.free_head = core::ptr::null_mut();
+        return;
+    }
+    let block = block_start as *mut FreeBlock;
+    (*block).size = heap_end - block_start;
+    (*block).next = core::ptr::null_mut();
+    state.initialized = true;
+    state.free_head = block;
+}
+
+unsafe fn replace_free_block(
+    state: &mut KernelAllocatorState,
+    prev: *mut FreeBlock,
+    old: *mut FreeBlock,
+    replacement: *mut FreeBlock,
+) {
+    if prev.is_null() {
+        state.free_head = replacement;
+    } else {
+        (*prev).next = replacement;
+    }
+    let _ = old;
+}
+
+unsafe fn alloc_from_free_list(state: &mut KernelAllocatorState, layout: Layout) -> *mut u8 {
+    if !state.initialized {
+        init_kernel_allocator(state);
+    }
+
+    let request_size = layout.size().max(1);
+    let request_align = layout.align().max(align_of::<FreeBlock>());
+    let min_free = size_of::<FreeBlock>();
+    let header_size = size_of::<AllocationHeader>();
+
+    let mut prev = core::ptr::null_mut();
+    let mut current = state.free_head;
+    while !current.is_null() {
+        let block_start = current as usize;
+        let block_size = (*current).size;
+        let block_end = match block_start.checked_add(block_size) {
+            Some(value) => value,
+            None => return core::ptr::null_mut(),
+        };
+        let payload_addr = match allocator_align_up(block_start + header_size, request_align) {
+            Some(value) => value,
+            None => return core::ptr::null_mut(),
+        };
+        let header_addr = payload_addr - header_size;
+        let alloc_end = match payload_addr.checked_add(request_size) {
+            Some(value) => value,
+            None => return core::ptr::null_mut(),
+        };
+        if alloc_end <= block_end {
+            let next = (*current).next;
+            let prefix_size = header_addr - block_start;
+            let has_prefix = prefix_size >= min_free;
+            let alloc_start = if has_prefix { header_addr } else { block_start };
+            let suffix_start = match allocator_align_up(alloc_end, align_of::<FreeBlock>()) {
+                Some(value) => value,
+                None => return core::ptr::null_mut(),
+            };
+            let suffix_size = block_end - suffix_start;
+            let has_suffix = suffix_size >= min_free;
+            let alloc_size = if has_suffix {
+                suffix_start - alloc_start
+            } else {
+                block_end - alloc_start
+            };
+
+            if has_prefix {
+                (*current).size = prefix_size;
+                if has_suffix {
+                    let suffix = suffix_start as *mut FreeBlock;
+                    (*suffix).size = suffix_size;
+                    (*suffix).next = next;
+                    (*current).next = suffix;
+                }
+            } else if has_suffix {
+                let suffix = suffix_start as *mut FreeBlock;
+                (*suffix).size = suffix_size;
+                (*suffix).next = next;
+                replace_free_block(state, prev, current, suffix);
+            } else {
+                replace_free_block(state, prev, current, next);
+            }
+
+            let header = header_addr as *mut AllocationHeader;
+            (*header).block_start = alloc_start;
+            (*header).block_size = alloc_size;
+            return payload_addr as *mut u8;
+        }
+
+        prev = current;
+        current = (*current).next;
+    }
+    core::ptr::null_mut()
+}
+
+unsafe fn insert_free_block(state: &mut KernelAllocatorState, block_start: usize, block_size: usize) {
+    if block_size < size_of::<FreeBlock>() {
+        return;
+    }
+
+    let heap_start = (*HEAP.get()).as_mut_ptr() as usize;
+    let heap_end = heap_start + main_logic::KERNEL_HEAP_SIZE;
+    let block_end = match block_start.checked_add(block_size) {
+        Some(value) => value,
+        None => return,
+    };
+    if block_start < heap_start || block_end > heap_end {
+        return;
+    }
+
+    let mut prev = core::ptr::null_mut();
+    let mut current = state.free_head;
+    while !current.is_null() && (current as usize) < block_start {
+        prev = current;
+        current = (*current).next;
+    }
+
+    let block = block_start as *mut FreeBlock;
+    (*block).size = block_size;
+    (*block).next = current;
+
+    if prev.is_null() {
+        state.free_head = block;
+    } else {
+        (*prev).next = block;
+    }
+
+    if !current.is_null() && block_start + (*block).size == current as usize {
+        (*block).size += (*current).size;
+        (*block).next = (*current).next;
+    }
+
+    if !prev.is_null() {
+        let prev_end = prev as usize + (*prev).size;
+        if prev_end == block_start {
+            (*prev).size += (*block).size;
+            (*prev).next = (*block).next;
+        }
+    }
+}
+
+// SAFETY: The heap buffer is exclusively managed behind a global spin lock.
+// Freed allocations are returned to a coalescing free list stored inside the
+// heap itself, so large temporary Vec buffers do not permanently consume heap.
+unsafe impl alloc::alloc::GlobalAlloc for KernelAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let _guard = allocator_lock();
+        alloc_from_free_list(&mut *ALLOC_STATE.get(), layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+        if ptr.is_null() {
+            return;
+        }
+        let _guard = allocator_lock();
+        let header = (ptr as usize - size_of::<AllocationHeader>()) as *const AllocationHeader;
+        insert_free_block(
+            &mut *ALLOC_STATE.get(),
+            (*header).block_start,
+            (*header).block_size,
+        );
     }
 }
 

@@ -892,8 +892,9 @@ impl TcpSocket {
         }
         let mut rx = [0u8; ETHERNET_FRAME_MAX];
         let mut total = 0usize;
+        let attempts = core::cmp::max(64, core::cmp::min(4096, out.len() / 256 + 64));
 
-        for _ in 0..64 {
+        for _ in 0..attempts {
             match drivers::net_receive_frame_timeout(&mut rx, NET_POLL_SPINS) {
                 Ok(len) => {
                     if let Some(segment) =

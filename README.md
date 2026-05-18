@@ -169,9 +169,40 @@ run hello.elf
 testsc
 dockertest
 docker images
+docker pull smros/hello
+docker load /shared/my-image.tar
 docker run smros/hello
 docker ps -a
 docker logs smros0001
+```
+
+`docker load` accepts SMROS-loadable Docker archive tars already stored in FxFS,
+including under `/shared`. The archive must contain `manifest.json`, a config
+JSON, and uncompressed layer tar members. It stores the config and layers under
+`/docker/images` and extracts regular files into the image rootfs. `docker pull`
+can install the built-in sample image by name and can fetch a plain
+`http://.../*.tar` archive before feeding the same loader. HTTPS Docker Registry
+pulls are still reported as unsupported until TLS and bearer-token auth exist.
+
+For registry images today, use the host helper. It pulls the `linux/arm64`
+image with Docker, exports a single uncompressed layer, and writes the archive
+shape SMROS can load:
+
+```bash
+./scripts/pull-docker-image.sh docker.1ms.run/library/alpine:latest host_shared/alpine.tar
+make clean-fxfs
+make run
+```
+
+```text
+docker load /shared/alpine.tar
+```
+
+After `/shared/alpine.tar` is present, the same registry-shaped command also
+uses that staged archive as a fallback:
+
+```text
+docker pull docker.1ms.run/library/alpine:latest
 ```
 
 `run hello.elf` from `/shared` expects an AArch64 dynamic PIE and resolves its interpreter and needed libraries from `/shared/lib` or `/lib`, for example:

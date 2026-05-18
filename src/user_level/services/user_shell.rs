@@ -3896,6 +3896,16 @@ fn print_docker_compat_error(
         crate::user_level::docker_compat::DockerCompatError::AppArmorOpen(_) => "apparmor open",
         crate::user_level::docker_compat::DockerCompatError::AppArmorWrite(_) => "apparmor write",
         crate::user_level::docker_compat::DockerCompatError::AppArmorClose(_) => "apparmor close",
+        crate::user_level::docker_compat::DockerCompatError::Network(_) => "network",
+        crate::user_level::docker_compat::DockerCompatError::ImageNotFound => "image not found",
+        crate::user_level::docker_compat::DockerCompatError::ImageInvalid => "invalid image",
+        crate::user_level::docker_compat::DockerCompatError::ArchiveInvalid => "invalid archive",
+        crate::user_level::docker_compat::DockerCompatError::ArchiveUnsupported => {
+            "unsupported archive"
+        }
+        crate::user_level::docker_compat::DockerCompatError::RegistryUnsupported => {
+            "unsupported registry"
+        }
         crate::user_level::docker_compat::DockerCompatError::ContainerExists => "container exists",
         crate::user_level::docker_compat::DockerCompatError::ContainerNotFound => {
             "container not found"
@@ -3935,6 +3945,23 @@ fn print_docker_compat_error(
         | crate::user_level::docker_compat::DockerCompatError::RuntimeStart(code) => {
             serial.write_str(" zx=");
             print_number(serial, (-(code as i32)) as u32);
+        }
+        crate::user_level::docker_compat::DockerCompatError::Network(code) => {
+            serial.write_str(": ");
+            let label = match code {
+                crate::user_level::net::NetError::Driver(_) => "driver",
+                crate::user_level::net::NetError::NotReady => "not ready",
+                crate::user_level::net::NetError::InvalidHost => "invalid host",
+                crate::user_level::net::NetError::InvalidUrl => "invalid url",
+                crate::user_level::net::NetError::BufferTooSmall => "buffer too small",
+                crate::user_level::net::NetError::MalformedPacket => "malformed packet",
+                crate::user_level::net::NetError::Timeout => "timeout",
+                crate::user_level::net::NetError::NoAddress => "no address",
+                crate::user_level::net::NetError::Unsupported => "unsupported",
+                crate::user_level::net::NetError::ConnectionReset => "connection reset",
+                crate::user_level::net::NetError::TlsUnsupported => "tls unsupported",
+            };
+            serial.write_str(label);
         }
         _ => {}
     }
@@ -3997,16 +4024,13 @@ fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
     }
 
     match args[0] {
-        "images" => match crate::user_level::docker_compat::builtin_image_info() {
-            Ok(image) => {
+        "images" => match crate::user_level::docker_compat::list_docker_images() {
+            Ok(images) => {
                 ctx.serial
                     .write_str("REPOSITORY          TAG       LAYERS  CONFIG  ROOTFS\n");
-                ctx.serial.write_str("smros/hello         latest    ");
-                print_number(&mut ctx.serial, image.layers as u32);
-                ctx.serial.write_str("       ");
-                print_number(&mut ctx.serial, image.config_bytes as u32);
-                ctx.serial.write_str("B    ");
-                ctx.serial.write_str(image.rootfs);
+                for image in images {
+                    print_docker_image_row(ctx, &image);
+                }
                 ctx.serial.write_str("\n\n");
             }
             Err(err) => {
@@ -4015,6 +4039,62 @@ fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
                 ctx.serial.write_str("\n\n");
             }
         },
+        "pull" => {
+            if args.len() < 2 {
+                ctx.serial.write_str("usage: docker pull <image-or-http-url>\n\n");
+                return;
+            }
+            ctx.serial.write_str("[DOCKER] pull ");
+            ctx.serial.write_str(args[1]);
+            ctx.serial.write_str("\n");
+            match crate::user_level::docker_compat::pull_docker_image(args[1]) {
+                Ok(result) => {
+                    ctx.serial.write_str("[OK] ");
+                    print_docker_load_result(ctx, &result);
+                    ctx.serial.write_str("\n\n");
+                }
+                Err(err) => {
+                    ctx.serial.write_str("[FAIL] ");
+                    print_docker_compat_error(&mut ctx.serial, err);
+                    if matches!(
+                        err,
+                        crate::user_level::docker_compat::DockerCompatError::Network(
+                            crate::user_level::net::NetError::TlsUnsupported
+                        )
+                    ) {
+                        if let Some(path) =
+                            crate::user_level::docker_compat::staged_registry_archive_path(args[1])
+                        {
+                            ctx.serial.write_str("\nstage with host script, then retry; expected archive: ");
+                            ctx.serial.write_str(path.as_str());
+                        }
+                    }
+                    ctx.serial.write_str("\n\n");
+                }
+            }
+        }
+        "load" => {
+            let Some(input) = docker_load_input_arg(args) else {
+                ctx.serial.write_str("usage: docker load [-i|--input] <archive.tar>\n\n");
+                return;
+            };
+            let Some(path) = resolve_docker_load_path(ctx.cwd.as_str(), input) else {
+                ctx.serial.write_str("docker load failed: invalid path\n\n");
+                return;
+            };
+            match crate::user_level::docker_compat::load_docker_image(path.as_str()) {
+                Ok(result) => {
+                    ctx.serial.write_str("[OK] ");
+                    print_docker_load_result(ctx, &result);
+                    ctx.serial.write_str("\n\n");
+                }
+                Err(err) => {
+                    ctx.serial.write_str("docker load failed: ");
+                    print_docker_compat_error(&mut ctx.serial, err);
+                    ctx.serial.write_str("\n\n");
+                }
+            }
+        }
         "ps" => {
             let all = args.len() > 1 && args[1] == "-a";
             match crate::user_level::docker_compat::list_docker_containers(all) {
@@ -4199,8 +4279,79 @@ fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
 
 fn print_docker_usage(ctx: &mut ShellContext) {
     ctx.serial.write_str(
-        "usage: docker images | docker ps [-a] | docker create <image> [command...] | docker start <container> | docker run <image> [command...] | docker inspect <container> | docker logs <container> | docker stop <container> | docker rm <container>\n\n",
+        "usage: docker images | docker pull <image-or-http-url> | docker load [-i|--input] <archive.tar> | docker ps [-a] | docker create <image> [command...] | docker start <container> | docker run <image> [command...] | docker inspect <container> | docker logs <container> | docker stop <container> | docker rm <container>\n\n",
     );
+}
+
+fn docker_load_input_arg<'a>(args: &'a [&str]) -> Option<&'a str> {
+    if args.len() == 2 {
+        if let Some(value) = args[1].strip_prefix("--input=") {
+            return (!value.is_empty()).then_some(value);
+        }
+        return Some(args[1]);
+    }
+    if args.len() == 3 && (args[1] == "-i" || args[1] == "--input") {
+        return Some(args[2]);
+    }
+    None
+}
+
+fn resolve_docker_load_path(cwd: &str, target: &str) -> Option<String> {
+    let direct = normalize_fxfs_path(cwd, target)?;
+    if fxfs_path_exists(direct.as_str()) || target.starts_with('/') || target.contains('/') {
+        return Some(direct);
+    }
+
+    let shared = normalize_fxfs_path("/shared", target)?;
+    if fxfs_path_exists(shared.as_str()) {
+        return Some(shared);
+    }
+    Some(direct)
+}
+
+fn print_docker_image_row(
+    ctx: &mut ShellContext,
+    image: &crate::user_level::docker_compat::DockerImageInfo,
+) {
+    let (repo, tag) = docker_repo_tag(image.name.as_str());
+    ctx.serial.write_str(repo);
+    ctx.serial.write_str("  ");
+    ctx.serial.write_str(tag);
+    ctx.serial.write_str("    ");
+    print_number(&mut ctx.serial, image.layers as u32);
+    ctx.serial.write_str("       ");
+    print_number(&mut ctx.serial, image.config_bytes as u32);
+    ctx.serial.write_str("B    ");
+    ctx.serial.write_str(image.rootfs.as_str());
+    ctx.serial.write_str("\n");
+}
+
+fn print_docker_load_result(
+    ctx: &mut ShellContext,
+    result: &crate::user_level::docker_compat::DockerImageLoadResult,
+) {
+    ctx.serial.write_str("image=");
+    ctx.serial.write_str(result.image.name.as_str());
+    ctx.serial.write_str(" source=");
+    ctx.serial.write_str(match result.source {
+        crate::user_level::docker_compat::DockerImageSource::Builtin => "builtin",
+        crate::user_level::docker_compat::DockerImageSource::Archive => "archive",
+        crate::user_level::docker_compat::DockerImageSource::HttpArchive => "http",
+    });
+    ctx.serial.write_str(" layers=");
+    print_number(&mut ctx.serial, result.image.layers as u32);
+    ctx.serial.write_str(" bytes=");
+    print_usize(&mut ctx.serial, result.bytes);
+    ctx.serial.write_str(" rootfs=");
+    ctx.serial.write_str(result.image.rootfs.as_str());
+}
+
+fn docker_repo_tag(name: &str) -> (&str, &str) {
+    if let Some(split) = name.rfind(':') {
+        (&name[..split], &name[split + 1..])
+    } else {
+        (name, "latest")
+    }
 }
 
 fn print_docker_container_row(

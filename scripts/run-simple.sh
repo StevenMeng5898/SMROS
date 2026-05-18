@@ -8,6 +8,7 @@ cd "$SCRIPT_DIR/.."
 
 KERNEL_IMAGE="${1:-kernel8.img}"
 FXFS_DISK="${FXFS_DISK:-smros-fxfs.img}"
+FXFS_DISK_SIZE="${FXFS_DISK_SIZE:-128M}"
 
 if [ ! -f "$KERNEL_IMAGE" ]; then
     echo "Kernel image not found: $KERNEL_IMAGE"
@@ -17,7 +18,7 @@ fi
 
 if [ ! -f "$FXFS_DISK" ]; then
     echo "Creating persistent FxFS disk image: $FXFS_DISK"
-    qemu-img create -f raw "$FXFS_DISK" 16M >/dev/null
+    qemu-img create -f raw "$FXFS_DISK" "$FXFS_DISK_SIZE" >/dev/null
 fi
 
 ./scripts/setup-qemu-icmp.sh --ensure

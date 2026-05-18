@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use crate::kernel_objects::right;
 use crate::kernel_objects::{Rights, ZxError};
 use crate::syscall::{self, SysError};
-use crate::user_level::fxfs;
+use crate::user_level::{fxfs, net};
 
 const AT_FDCWD: usize = usize::MAX - 99;
 const CLONE_NEWNS: usize = 0x0002_0000;
@@ -56,6 +56,7 @@ const RUNC_ENTRY_POINT: usize = 0x1000;
 const RUNC_STACK_TOP: usize = 0x8000;
 const DOCKER_IMAGE_ROOT: &str = "/docker/images";
 const DOCKER_CONTAINER_ROOT: &str = "/docker/containers";
+const DOCKER_IMAGE_META_FILE: &str = "image.meta";
 const SAMPLE_IMAGE_NAME: &str = "smros/hello:latest";
 const SAMPLE_IMAGE_ALIAS: &str = "hello-world:latest";
 const SAMPLE_IMAGE_SHORT: &str = "smros/hello";
@@ -64,11 +65,15 @@ const SAMPLE_IMAGE_ROOTFS: &str = "/docker/images/smros_hello_latest/rootfs";
 const SAMPLE_IMAGE_MANIFEST: &str = "/docker/images/smros_hello_latest/manifest.json";
 const SAMPLE_IMAGE_CONFIG: &str = "/docker/images/smros_hello_latest/config.json";
 const DOCKER_IMAGE_CONFIG_MAX_BYTES: usize = 4096;
+const DOCKER_PULL_MAX_BYTES: usize = 64 * 1024 * 1024;
+const DOCKER_HTTP_RESPONSE_MAX_BYTES: usize = 64 * 1024 * 1024;
+const TAR_BLOCK_BYTES: usize = 512;
 const DOCKER_CONTAINER_RECORD_MAX_BYTES: usize = 2048;
 const DOCKER_CONTAINER_LOG_MAX_BYTES: usize = 1024;
 const DOCKER_MAX_CONTAINER_NAME_BYTES: usize = 48;
 const DOCKER_MAX_COMMAND_ITEMS: usize = 16;
 const DOCKER_MAX_CONTAINERS: usize = 32;
+const DOCKER_MAX_IMAGES: usize = 32;
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 const APPARMOR_CURRENT: &str = "/proc/self/attr/current";
@@ -225,6 +230,12 @@ pub enum DockerCompatError {
     AppArmorOpen(SysError),
     AppArmorWrite(SysError),
     AppArmorClose(SysError),
+    Network(net::NetError),
+    ImageNotFound,
+    ImageInvalid,
+    ArchiveInvalid,
+    ArchiveUnsupported,
+    RegistryUnsupported,
     ContainerExists,
     ContainerNotFound,
     ContainerInvalid,
@@ -252,13 +263,36 @@ pub struct DockerCompatResult {
     pub thread_handle: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DockerImageInfo {
-    pub name: &'static str,
-    pub rootfs: &'static str,
+    pub name: String,
+    pub rootfs: String,
     pub manifest_bytes: usize,
     pub config_bytes: usize,
     pub layers: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DockerImageSource {
+    Builtin,
+    Archive,
+    HttpArchive,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DockerImageLoadResult {
+    pub image: DockerImageInfo,
+    pub source: DockerImageSource,
+    pub bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DockerImageRecord {
+    name: String,
+    rootfs: String,
+    manifest_path: String,
+    config_path: String,
+    layers: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -334,25 +368,93 @@ pub fn install_builtin_docker_images() -> Result<(), DockerCompatError> {
         .map_err(|_| DockerCompatError::OciInstall)?;
     fxfs::write_file(SAMPLE_IMAGE_CONFIG, SAMPLE_IMAGE_CONFIG_JSON.as_bytes())
         .map_err(|_| DockerCompatError::OciInstall)?;
+    let record = DockerImageRecord {
+        name: String::from(SAMPLE_IMAGE_NAME),
+        rootfs: String::from(SAMPLE_IMAGE_ROOTFS),
+        manifest_path: String::from(SAMPLE_IMAGE_MANIFEST),
+        config_path: String::from(SAMPLE_IMAGE_CONFIG),
+        layers: 1,
+    };
+    write_image_record(&record)?;
     prune_invalid_container_entries();
     Ok(())
 }
 
 pub fn builtin_image_info() -> Result<DockerImageInfo, DockerCompatError> {
     install_builtin_docker_images()?;
-    let manifest_bytes = fxfs::attrs(SAMPLE_IMAGE_MANIFEST)
-        .map_err(|_| DockerCompatError::OciRead)?
-        .size;
-    let config_bytes = fxfs::attrs(SAMPLE_IMAGE_CONFIG)
-        .map_err(|_| DockerCompatError::OciRead)?
-        .size;
-    Ok(DockerImageInfo {
-        name: SAMPLE_IMAGE_NAME,
-        rootfs: SAMPLE_IMAGE_ROOTFS,
-        manifest_bytes,
-        config_bytes,
-        layers: 1,
-    })
+    image_info(SAMPLE_IMAGE_NAME)
+}
+
+pub fn list_docker_images() -> Result<Vec<DockerImageInfo>, DockerCompatError> {
+    install_builtin_docker_images()?;
+    let entries = fxfs::entries(DOCKER_IMAGE_ROOT).map_err(|_| DockerCompatError::FxfsPrepare)?;
+    let mut images = Vec::new();
+    for entry in entries {
+        if images.len() >= DOCKER_MAX_IMAGES {
+            break;
+        }
+        let dir = docker_image_dir_path(entry.name.as_str());
+        let meta = docker_image_meta_path_from_dir(dir.as_str());
+        if !fxfs::exists(meta.as_str()) {
+            continue;
+        }
+        if let Ok(record) = load_image_record_from_dir(dir.as_str()) {
+            if let Ok(info) = image_info_from_record(&record) {
+                images.push(info);
+            }
+        }
+    }
+    Ok(images)
+}
+
+pub fn load_docker_image(path: &str) -> Result<DockerImageLoadResult, DockerCompatError> {
+    install_builtin_docker_images()?;
+    if !path.starts_with('/') || path.as_bytes().contains(&0) {
+        return Err(DockerCompatError::ArchiveInvalid);
+    }
+    let attrs = fxfs::attrs(path).map_err(|_| DockerCompatError::OciRead)?;
+    if attrs.size == 0 || attrs.size > DOCKER_PULL_MAX_BYTES {
+        return Err(DockerCompatError::ArchiveUnsupported);
+    }
+    let mut archive = Vec::new();
+    archive.resize(attrs.size, 0);
+    let len = fxfs::read_file(path, archive.as_mut_slice()).map_err(|_| DockerCompatError::OciRead)?;
+    archive.truncate(len);
+    load_docker_archive(&archive, DockerImageSource::Archive)
+}
+
+pub fn pull_docker_image(reference: &str) -> Result<DockerImageLoadResult, DockerCompatError> {
+    install_builtin_docker_images()?;
+    if let Some(name) = resolve_builtin_image_name(reference) {
+        let image = image_info(name)?;
+        return Ok(DockerImageLoadResult {
+            image,
+            source: DockerImageSource::Builtin,
+            bytes: 0,
+        });
+    }
+
+    if let Some((scheme, host, path)) = parse_pull_url(reference) {
+        if scheme == "https" {
+            return Err(DockerCompatError::Network(net::NetError::TlsUnsupported));
+        }
+        if scheme != "http" {
+            return Err(DockerCompatError::RegistryUnsupported);
+        }
+        let archive = http_download_body(host, path)?;
+        return load_docker_archive(archive.as_slice(), DockerImageSource::HttpArchive);
+    }
+
+    if normalize_image_reference(reference).is_ok() {
+        if let Some(path) = staged_registry_archive_path(reference) {
+            if fxfs::exists(path.as_str()) {
+                return load_docker_image(path.as_str());
+            }
+        }
+        return Err(DockerCompatError::Network(net::NetError::TlsUnsupported));
+    }
+
+    Err(DockerCompatError::ImageInvalid)
 }
 
 pub fn run_docker_image(
@@ -375,10 +477,10 @@ pub fn create_docker_container(
     name: Option<&str>,
 ) -> Result<DockerContainer, DockerCompatError> {
     install_builtin_docker_images()?;
-    let image_name = resolve_builtin_image_name(image).ok_or(DockerCompatError::OciRead)?;
+    let image_record = resolve_image_record(image)?;
 
     let mut config_bytes = [0u8; DOCKER_IMAGE_CONFIG_MAX_BYTES];
-    let config_len = fxfs::read_file(SAMPLE_IMAGE_CONFIG, &mut config_bytes)
+    let config_len = fxfs::read_file(image_record.config_path.as_str(), &mut config_bytes)
         .map_err(|_| DockerCompatError::OciRead)?;
     let config = core::str::from_utf8(&config_bytes[..config_len])
         .map_err(|_| DockerCompatError::OciParse)?;
@@ -397,7 +499,7 @@ pub fn create_docker_container(
     let _ = fxfs::create_dir(dir.as_str());
     let mut container = DockerContainer {
         id,
-        image: String::from(image_name),
+        image: image_record.name,
         command: docker_command_display(config, command)?,
         args: docker_command_args(command)?,
         status: DockerContainerStatus::Created,
@@ -420,12 +522,13 @@ pub fn start_docker_container(reference: &str) -> Result<DockerRunResult, Docker
     }
 
     let mut config_bytes = [0u8; DOCKER_IMAGE_CONFIG_MAX_BYTES];
-    let config_len = fxfs::read_file(SAMPLE_IMAGE_CONFIG, &mut config_bytes)
+    let image_record = resolve_image_record(container.image.as_str())?;
+    let config_len = fxfs::read_file(image_record.config_path.as_str(), &mut config_bytes)
         .map_err(|_| DockerCompatError::OciRead)?;
     let config = core::str::from_utf8(&config_bytes[..config_len])
         .map_err(|_| DockerCompatError::OciParse)?;
     let args = docker_record_args(container.args.as_str());
-    let request = docker_image_config_to_oci_request(config, container.image.as_str(), &args)?;
+    let request = docker_image_config_to_oci_request(&image_record, config, &args)?;
     let runtime = run_oci_runtime_request(&request, config_len)?;
 
     let log = docker_container_log_payload(&container);
@@ -786,8 +889,11 @@ fn docker_command_display(
     let mut out = String::new();
     if command.is_empty() {
         let config = json_object_after(image_config, "config")?;
-        let entrypoint = json_array_after(config, "Entrypoint")?;
-        let cmd = json_array_after(config, "Cmd")?;
+        let entrypoint = json_array_after(config, "Entrypoint").unwrap_or("[]");
+        let cmd = json_array_after(config, "Cmd").unwrap_or("[]");
+        if json_string_array_count(entrypoint).saturating_add(json_string_array_count(cmd)) == 0 {
+            return Err(DockerCompatError::OciParse);
+        }
         push_command_display_items(&mut out, entrypoint)?;
         push_command_display_items(&mut out, cmd)?;
     } else {
@@ -858,6 +964,590 @@ fn docker_record_args(input: &str) -> Vec<&str> {
         }
         pos += 1;
     }
+    out
+}
+
+fn load_docker_archive(
+    archive: &[u8],
+    source: DockerImageSource,
+) -> Result<DockerImageLoadResult, DockerCompatError> {
+    let manifest = tar_file_bytes(archive, "manifest.json")
+        .ok_or(DockerCompatError::ArchiveInvalid)?;
+    let manifest_text = core::str::from_utf8(manifest).map_err(|_| DockerCompatError::ArchiveInvalid)?;
+    let config_name = docker_save_config_name(manifest_text)?;
+    let repo_tag = docker_save_repo_tag(manifest_text)?;
+    let layers = docker_save_layers(manifest_text)?;
+    if layers.is_empty() {
+        return Err(DockerCompatError::ArchiveInvalid);
+    }
+
+    let config = tar_file_bytes(archive, config_name).ok_or(DockerCompatError::ArchiveInvalid)?;
+    let config_text = core::str::from_utf8(config).map_err(|_| DockerCompatError::ArchiveInvalid)?;
+    validate_image_config(config_text)?;
+
+    let image_name = normalize_image_reference(repo_tag)?;
+    let key = image_storage_key(image_name.as_str());
+    let image_dir = docker_image_dir_path(key.as_str());
+    let rootfs = docker_image_rootfs_path(key.as_str());
+    let blobs = docker_image_blobs_path(key.as_str());
+    let manifest_path = docker_image_manifest_path(key.as_str());
+    let config_path = docker_image_config_path(key.as_str());
+
+    let _persist_guard = fxfs::suspend_persist();
+    prepare_image_dirs(image_dir.as_str(), rootfs.as_str(), blobs.as_str())?;
+    fxfs::write_file(manifest_path.as_str(), manifest).map_err(|_| DockerCompatError::OciInstall)?;
+    fxfs::write_file(config_path.as_str(), config).map_err(|_| DockerCompatError::OciInstall)?;
+
+    let mut layer_count = 0usize;
+    for layer in layers {
+        let layer_bytes = tar_file_bytes(archive, layer.as_str())
+            .ok_or(DockerCompatError::ArchiveInvalid)?;
+        if is_gzip(layer_bytes) {
+            return Err(DockerCompatError::ArchiveUnsupported);
+        }
+        extract_layer_tar(layer_bytes, rootfs.as_str())?;
+        layer_count += 1;
+    }
+
+    let record = DockerImageRecord {
+        name: image_name,
+        rootfs,
+        manifest_path,
+        config_path,
+        layers: layer_count,
+    };
+    write_image_record(&record)?;
+    fxfs::flush_persist();
+    Ok(DockerImageLoadResult {
+        image: image_info_from_record(&record)?,
+        source,
+        bytes: archive.len(),
+    })
+}
+
+fn parse_pull_url(input: &str) -> Option<(&str, &str, &str)> {
+    let scheme_end = input.find("://")?;
+    let scheme = &input[..scheme_end];
+    let rest = &input[scheme_end + 3..];
+    let slash = rest.find('/')?;
+    let host = &rest[..slash];
+    let path = &rest[slash..];
+    if scheme.is_empty() || host.is_empty() || path.is_empty() {
+        return None;
+    }
+    Some((scheme, host, path))
+}
+
+pub fn staged_registry_archive_path(reference: &str) -> Option<String> {
+    let normalized = normalize_image_reference(reference).ok()?;
+    let without_tag = match normalized.rfind(':') {
+        Some(split) => &normalized[..split],
+        None => normalized.as_str(),
+    };
+    let image_part = without_tag.rsplit('/').next()?;
+    if !simple_path_component(image_part) {
+        return None;
+    }
+    let mut out = String::from("/shared/");
+    out.push_str(image_part);
+    out.push_str(".tar");
+    Some(out)
+}
+
+fn http_download_body(host: &str, path: &str) -> Result<Vec<u8>, DockerCompatError> {
+    let (dial_host, port) = parse_http_host_port(host)?;
+    let remote_ip = parse_ipv4_addr(dial_host)
+        .map(Ok)
+        .unwrap_or_else(|| net::dns_lookup_a(dial_host))
+        .map_err(DockerCompatError::Network)?;
+    let mut socket = net::tcp_connect(net::NetworkSocketAddr {
+        ip: remote_ip,
+        port,
+    })
+    .map_err(DockerCompatError::Network)?;
+    let request = build_http_archive_request(host, path)?;
+    socket.write(request.as_bytes()).map_err(DockerCompatError::Network)?;
+
+    let mut response = Vec::new();
+    response.resize(DOCKER_HTTP_RESPONSE_MAX_BYTES, 0);
+    let bytes_read = socket.read(response.as_mut_slice()).map_err(DockerCompatError::Network)?;
+    let _ = socket.close();
+    response.truncate(bytes_read);
+    if parse_http_status(response.as_slice()) != Some(200) {
+        return Err(DockerCompatError::Network(net::NetError::NoAddress));
+    }
+    let body_start = http_body_offset(response.as_slice()).ok_or(DockerCompatError::ArchiveInvalid)?;
+    if body_start >= response.len() {
+        return Err(DockerCompatError::ArchiveInvalid);
+    }
+    let body = response[body_start..].to_vec();
+    if body.is_empty() || body.len() > DOCKER_PULL_MAX_BYTES {
+        return Err(DockerCompatError::ArchiveUnsupported);
+    }
+    Ok(body)
+}
+
+fn parse_http_host_port(host: &str) -> Result<(&str, u16), DockerCompatError> {
+    if host.is_empty() {
+        return Err(DockerCompatError::ImageInvalid);
+    }
+    if let Some(split) = host.rfind(':') {
+        let name = &host[..split];
+        let port = parse_usize(&host[split + 1..]).ok_or(DockerCompatError::ImageInvalid)?;
+        if name.is_empty() || port == 0 || port > u16::MAX as usize {
+            return Err(DockerCompatError::ImageInvalid);
+        }
+        Ok((name, port as u16))
+    } else {
+        Ok((host, 80))
+    }
+}
+
+fn build_http_archive_request(host: &str, path: &str) -> Result<String, DockerCompatError> {
+    if !path.starts_with('/') || path.as_bytes().contains(&0) || path.len() > 512 {
+        return Err(DockerCompatError::ImageInvalid);
+    }
+    let mut request = String::from("GET ");
+    request.push_str(path);
+    request.push_str(" HTTP/1.0\r\nHost: ");
+    request.push_str(host);
+    request.push_str("\r\nUser-Agent: SMROS-Docker/0.1\r\nConnection: close\r\n\r\n");
+    if request.len() > 1024 {
+        return Err(DockerCompatError::ImageInvalid);
+    }
+    Ok(request)
+}
+
+fn parse_http_status(response: &[u8]) -> Option<u16> {
+    if response.len() < 12 || &response[0..5] != b"HTTP/" {
+        return None;
+    }
+    let mut offset = 5usize;
+    while offset < response.len() && response[offset] != b' ' {
+        offset += 1;
+    }
+    if offset + 4 > response.len() {
+        return None;
+    }
+    let code = &response[offset + 1..offset + 4];
+    if code.iter().all(|byte| byte.is_ascii_digit()) {
+        Some(
+            ((code[0] - b'0') as u16) * 100
+                + ((code[1] - b'0') as u16) * 10
+                + (code[2] - b'0') as u16,
+        )
+    } else {
+        None
+    }
+}
+
+fn http_body_offset(response: &[u8]) -> Option<usize> {
+    if response.len() < 4 {
+        return None;
+    }
+    let mut pos = 0usize;
+    while pos + 3 < response.len() {
+        if &response[pos..pos + 4] == b"\r\n\r\n" {
+            return Some(pos + 4);
+        }
+        pos += 1;
+    }
+    None
+}
+
+fn validate_image_config(config: &str) -> Result<(), DockerCompatError> {
+    let rootfs = json_object_after(config, "rootfs")?;
+    let diff_ids = json_array_after(rootfs, "diff_ids")?;
+    let cfg = json_object_after(config, "config")?;
+    if json_string_array_count(diff_ids) == 0 {
+        return Err(DockerCompatError::ArchiveInvalid);
+    }
+    if let Ok(working_dir) = json_string_after(cfg, "WorkingDir") {
+        if !working_dir.is_empty() && !working_dir.starts_with('/') {
+            return Err(DockerCompatError::ArchiveInvalid);
+        }
+    }
+    Ok(())
+}
+
+fn docker_save_config_name(manifest: &str) -> Result<&str, DockerCompatError> {
+    let value = json_string_after(manifest, "Config")?;
+    if !tar_member_name_safe(value) {
+        return Err(DockerCompatError::ArchiveInvalid);
+    }
+    Ok(value)
+}
+
+fn docker_save_repo_tag(manifest: &str) -> Result<&str, DockerCompatError> {
+    let tags = json_array_after(manifest, "RepoTags")?;
+    let value = first_string_in_array(tags)?;
+    if !image_reference_valid(value) && !image_reference_valid_with_optional_tag(value) {
+        return Err(DockerCompatError::ArchiveInvalid);
+    }
+    Ok(value)
+}
+
+fn docker_save_layers(manifest: &str) -> Result<Vec<String>, DockerCompatError> {
+    let array = json_array_after(manifest, "Layers")?;
+    let mut layers = Vec::new();
+    let bytes = array.as_bytes();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        if bytes[pos] == b'"' {
+            let start = pos + 1;
+            pos = start;
+            while pos < bytes.len() {
+                match bytes[pos] {
+                    b'"' => {
+                        let value = &array[start..pos];
+                        if !tar_member_name_safe(value) {
+                            return Err(DockerCompatError::ArchiveInvalid);
+                        }
+                        layers.push(String::from(value));
+                        break;
+                    }
+                    b'\\' => return Err(DockerCompatError::ArchiveInvalid),
+                    _ => pos += 1,
+                }
+            }
+        }
+        pos += 1;
+    }
+    Ok(layers)
+}
+
+fn tar_file_bytes<'a>(archive: &'a [u8], name: &str) -> Option<&'a [u8]> {
+    let mut offset = 0usize;
+    while offset + TAR_BLOCK_BYTES <= archive.len() {
+        let header = &archive[offset..offset + TAR_BLOCK_BYTES];
+        if tar_header_empty(header) {
+            return None;
+        }
+        let size = tar_octal(&header[124..136])?;
+        let file_start = offset + TAR_BLOCK_BYTES;
+        let file_end = file_start.checked_add(size)?;
+        if file_end > archive.len() {
+            return None;
+        }
+        if tar_name_matches(header, name) {
+            let kind = header[156];
+            if kind == 0 || kind == b'0' {
+                return Some(&archive[file_start..file_end]);
+            }
+        }
+        offset = file_start.checked_add(tar_padded_len(size)?)?;
+    }
+    None
+}
+
+fn extract_layer_tar(layer: &[u8], rootfs: &str) -> Result<(), DockerCompatError> {
+    let mut offset = 0usize;
+    while offset + TAR_BLOCK_BYTES <= layer.len() {
+        let header = &layer[offset..offset + TAR_BLOCK_BYTES];
+        if tar_header_empty(header) {
+            return Ok(());
+        }
+        let size = tar_octal(&header[124..136]).ok_or(DockerCompatError::ArchiveInvalid)?;
+        let file_start = offset + TAR_BLOCK_BYTES;
+        let file_end = file_start.checked_add(size).ok_or(DockerCompatError::ArchiveInvalid)?;
+        if file_end > layer.len() {
+            return Err(DockerCompatError::ArchiveInvalid);
+        }
+        let name = tar_header_name(header).ok_or(DockerCompatError::ArchiveInvalid)?;
+        if name.contains(".wh.") {
+            offset = file_start
+                .checked_add(tar_padded_len(size).ok_or(DockerCompatError::ArchiveInvalid)?)
+                .ok_or(DockerCompatError::ArchiveInvalid)?;
+            continue;
+        }
+        match header[156] {
+            0 | b'0' => {
+                let dest = rootfs_child_path(rootfs, name)?;
+                ensure_parent_dirs(dest.as_str())?;
+                fxfs::write_file(dest.as_str(), &layer[file_start..file_end])
+                    .map_err(|_| DockerCompatError::OciInstall)?;
+            }
+            b'5' => {
+                let dest = rootfs_child_path(rootfs, name)?;
+                ensure_dir_tree(dest.as_str())?;
+            }
+            _ => {}
+        }
+        offset = file_start
+            .checked_add(tar_padded_len(size).ok_or(DockerCompatError::ArchiveInvalid)?)
+            .ok_or(DockerCompatError::ArchiveInvalid)?;
+    }
+    Ok(())
+}
+
+fn prepare_image_dirs(image_dir: &str, rootfs: &str, blobs: &str) -> Result<(), DockerCompatError> {
+    let _ = fxfs::create_dir("/docker");
+    let _ = fxfs::create_dir(DOCKER_IMAGE_ROOT);
+    let _ = fxfs::create_dir(image_dir);
+    let _ = fxfs::create_dir(rootfs);
+    let _ = fxfs::create_dir(blobs);
+    ensure_dir_tree(rootfs)?;
+    ensure_dir_tree(blobs)?;
+    Ok(())
+}
+
+fn ensure_parent_dirs(path: &str) -> Result<(), DockerCompatError> {
+    if let Some(split) = path.rfind('/') {
+        if split > 0 {
+            ensure_dir_tree(&path[..split])?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_dir_tree(path: &str) -> Result<(), DockerCompatError> {
+    if !path.starts_with('/') || path.as_bytes().contains(&0) {
+        return Err(DockerCompatError::ArchiveInvalid);
+    }
+    let mut current = String::new();
+    current.push('/');
+    for part in path.trim_matches('/').split('/') {
+        if part.is_empty() {
+            continue;
+        }
+        if !simple_path_component(part) {
+            return Err(DockerCompatError::ArchiveInvalid);
+        }
+        if current.len() > 1 {
+            current.push('/');
+        }
+        current.push_str(part);
+        let _ = fxfs::create_dir(current.as_str());
+    }
+    Ok(())
+}
+
+fn rootfs_child_path(rootfs: &str, member: &str) -> Result<String, DockerCompatError> {
+    if !tar_member_name_safe(member) {
+        return Err(DockerCompatError::ArchiveInvalid);
+    }
+    let mut out = String::from(rootfs);
+    for part in member.trim_matches('/').split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if !rootfs_path_component(part) {
+            return Err(DockerCompatError::ArchiveInvalid);
+        }
+        out.push('/');
+        out.push_str(part);
+    }
+    Ok(out)
+}
+
+fn tar_header_empty(header: &[u8]) -> bool {
+    header.iter().all(|byte| *byte == 0)
+}
+
+fn tar_name_matches(header: &[u8], expected: &str) -> bool {
+    tar_header_name(header) == Some(expected)
+}
+
+fn tar_header_name(header: &[u8]) -> Option<&str> {
+    if header.len() < TAR_BLOCK_BYTES {
+        return None;
+    }
+    let name = tar_string(&header[0..100])?;
+    if !tar_member_name_safe(name) {
+        return None;
+    }
+    Some(name)
+}
+
+fn tar_string(input: &[u8]) -> Option<&str> {
+    let mut end = 0usize;
+    while end < input.len() && input[end] != 0 {
+        end += 1;
+    }
+    core::str::from_utf8(&input[..end]).ok()
+}
+
+fn tar_octal(input: &[u8]) -> Option<usize> {
+    let mut value = 0usize;
+    let mut saw_digit = false;
+    for byte in input {
+        match *byte {
+            0 | b' ' => {
+                if saw_digit {
+                    break;
+                }
+            }
+            b'0'..=b'7' => {
+                saw_digit = true;
+                value = value.checked_mul(8)?.checked_add((byte - b'0') as usize)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(value)
+}
+
+fn tar_padded_len(size: usize) -> Option<usize> {
+    size.checked_add(TAR_BLOCK_BYTES - 1)
+        .map(|value| value / TAR_BLOCK_BYTES * TAR_BLOCK_BYTES)
+}
+
+fn is_gzip(input: &[u8]) -> bool {
+    input.len() >= 2 && input[0] == 0x1f && input[1] == 0x8b
+}
+
+fn tar_member_name_safe(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 180
+        && !value.starts_with('/')
+        && !value.contains("..")
+        && !value.contains("//")
+        && !value.as_bytes().contains(&0)
+}
+
+fn simple_path_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value.len() <= 255
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'-' | b'_'))
+}
+
+fn rootfs_path_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value.len() <= 255
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| matches!(*byte, 0x21..=0x7e) && *byte != b'/')
+}
+
+fn docker_image_rootfs_path(key: &str) -> String {
+    let mut out = docker_image_dir_path(key);
+    out.push_str("/rootfs");
+    out
+}
+
+fn docker_image_blobs_path(key: &str) -> String {
+    let mut out = docker_image_dir_path(key);
+    out.push_str("/blobs");
+    out
+}
+
+fn docker_image_manifest_path(key: &str) -> String {
+    let mut out = docker_image_dir_path(key);
+    out.push_str("/manifest.json");
+    out
+}
+
+fn docker_image_config_path(key: &str) -> String {
+    let mut out = docker_image_dir_path(key);
+    out.push_str("/config.json");
+    out
+}
+
+fn docker_image_blob_path(key: &str, layer_index: usize) -> String {
+    let mut out = docker_image_blobs_path(key);
+    out.push_str("/layer");
+    append_usize(&mut out, layer_index, 2);
+    out.push_str(".tar");
+    out
+}
+
+fn image_info(image: &str) -> Result<DockerImageInfo, DockerCompatError> {
+    let record = resolve_image_record(image)?;
+    image_info_from_record(&record)
+}
+
+fn image_info_from_record(record: &DockerImageRecord) -> Result<DockerImageInfo, DockerCompatError> {
+    let manifest_bytes = fxfs::attrs(record.manifest_path.as_str())
+        .map_err(|_| DockerCompatError::OciRead)?
+        .size;
+    let config_bytes = fxfs::attrs(record.config_path.as_str())
+        .map_err(|_| DockerCompatError::OciRead)?
+        .size;
+    Ok(DockerImageInfo {
+        name: record.name.clone(),
+        rootfs: record.rootfs.clone(),
+        manifest_bytes,
+        config_bytes,
+        layers: record.layers,
+    })
+}
+
+fn resolve_image_record(image: &str) -> Result<DockerImageRecord, DockerCompatError> {
+    let normalized = normalize_image_reference(image)?;
+    let dir = docker_image_dir_path(image_storage_key(normalized.as_str()).as_str());
+    if fxfs::exists(docker_image_meta_path_from_dir(dir.as_str()).as_str()) {
+        return load_image_record_from_dir(dir.as_str());
+    }
+
+    if let Some(name) = resolve_builtin_image_name(image) {
+        let dir = docker_image_dir_path(image_storage_key(name).as_str());
+        return load_image_record_from_dir(dir.as_str());
+    }
+
+    Err(DockerCompatError::ImageNotFound)
+}
+
+fn write_image_record(record: &DockerImageRecord) -> Result<(), DockerCompatError> {
+    let dir = docker_image_dir_path(image_storage_key(record.name.as_str()).as_str());
+    let _ = fxfs::create_dir(dir.as_str());
+    let mut data = String::new();
+    push_record_field(&mut data, "name", record.name.as_str());
+    push_record_field(&mut data, "rootfs", record.rootfs.as_str());
+    push_record_field(&mut data, "manifest", record.manifest_path.as_str());
+    push_record_field(&mut data, "config", record.config_path.as_str());
+    push_record_field(&mut data, "layers", usize_to_string(record.layers).as_str());
+    fxfs::write_file(docker_image_meta_path_from_dir(dir.as_str()).as_str(), data.as_bytes())
+        .map(|_| ())
+        .map_err(|_| DockerCompatError::FxfsPrepare)
+}
+
+fn load_image_record_from_dir(dir: &str) -> Result<DockerImageRecord, DockerCompatError> {
+    let path = docker_image_meta_path_from_dir(dir);
+    let mut bytes = [0u8; DOCKER_CONTAINER_RECORD_MAX_BYTES];
+    let len = fxfs::read_file(path.as_str(), &mut bytes).map_err(|_| DockerCompatError::ImageNotFound)?;
+    let record = core::str::from_utf8(&bytes[..len]).map_err(|_| DockerCompatError::ImageInvalid)?;
+    let name = record_field(record, "name").ok_or(DockerCompatError::ImageInvalid)?;
+    let rootfs = record_field(record, "rootfs").ok_or(DockerCompatError::ImageInvalid)?;
+    let manifest_path = record_field(record, "manifest").ok_or(DockerCompatError::ImageInvalid)?;
+    let config_path = record_field(record, "config").ok_or(DockerCompatError::ImageInvalid)?;
+    let layers = parse_usize(record_field(record, "layers").unwrap_or("0"))
+        .ok_or(DockerCompatError::ImageInvalid)?;
+    if !image_reference_valid(name)
+        || !rootfs.starts_with('/')
+        || !manifest_path.starts_with('/')
+        || !config_path.starts_with('/')
+        || layers == 0
+    {
+        return Err(DockerCompatError::ImageInvalid);
+    }
+    Ok(DockerImageRecord {
+        name: String::from(name),
+        rootfs: String::from(rootfs),
+        manifest_path: String::from(manifest_path),
+        config_path: String::from(config_path),
+        layers,
+    })
+}
+
+fn docker_image_dir_path(key: &str) -> String {
+    let mut out = String::from(DOCKER_IMAGE_ROOT);
+    out.push('/');
+    out.push_str(key);
+    out
+}
+
+fn docker_image_meta_path_from_dir(dir: &str) -> String {
+    let mut out = String::from(dir);
+    out.push('/');
+    out.push_str(DOCKER_IMAGE_META_FILE);
     out
 }
 
@@ -1008,15 +1698,15 @@ fn install_sample_oci_bundle() -> Result<(), DockerCompatError> {
 }
 
 fn docker_image_config_to_oci_request<'a>(
+    image_record: &'a DockerImageRecord,
     image_config: &'a str,
-    image_name: &str,
     command: &'a [&'a str],
 ) -> Result<OciRuntimeRequest<'a>, DockerCompatError> {
     let config = json_object_after(image_config, "config")?;
-    let env = json_array_after(config, "Env")?;
-    let entrypoint = json_array_after(config, "Entrypoint")?;
-    let cmd = json_array_after(config, "Cmd")?;
-    let working_dir = json_string_after(config, "WorkingDir")?;
+    let env = json_array_after(config, "Env").unwrap_or("[]");
+    let entrypoint = json_array_after(config, "Entrypoint").unwrap_or("[]");
+    let cmd = json_array_after(config, "Cmd").unwrap_or("[]");
+    let working_dir = json_string_after(config, "WorkingDir").unwrap_or("/");
     let rootfs = json_object_after(image_config, "rootfs")?;
     let diff_ids = json_array_after(rootfs, "diff_ids")?;
 
@@ -1041,10 +1731,10 @@ fn docker_image_config_to_oci_request<'a>(
         return Err(DockerCompatError::OciParse);
     }
 
-    install_runtime_bundle_for_image(image_name, image_config, command)?;
+    install_runtime_bundle_for_image(image_record, image_config, command)?;
 
     Ok(OciRuntimeRequest {
-        root_path: SAMPLE_IMAGE_ROOTFS,
+        root_path: image_record.rootfs.as_str(),
         arg0,
         args,
         env: json_string_array_count(env),
@@ -1063,14 +1753,14 @@ fn docker_image_config_to_oci_request<'a>(
 }
 
 fn install_runtime_bundle_for_image(
-    image_name: &str,
+    image_record: &DockerImageRecord,
     image_config: &str,
     command: &[&str],
 ) -> Result<(), DockerCompatError> {
     let mut bundle = String::from("{\n");
     bundle.push_str("  \"ociVersion\": \"1.1.0\",\n");
     bundle.push_str("  \"root\": { \"path\": \"");
-    bundle.push_str(SAMPLE_IMAGE_ROOTFS);
+    bundle.push_str(image_record.rootfs.as_str());
     bundle.push_str("\", \"readonly\": true },\n");
     bundle.push_str("  \"process\": {\n");
     bundle.push_str("    \"terminal\": false,\n");
@@ -1079,10 +1769,7 @@ fn install_runtime_bundle_for_image(
     push_runtime_args(&mut bundle, image_config, command)?;
     bundle.push_str(",\n");
     bundle.push_str("    \"env\": ");
-    bundle.push_str(json_array_after(
-        json_object_after(image_config, "config")?,
-        "Env",
-    )?);
+    bundle.push_str(json_array_after(json_object_after(image_config, "config")?, "Env").unwrap_or("[]"));
     bundle.push_str(",\n");
     bundle.push_str("    \"noNewPrivileges\": true,\n");
     bundle.push_str("    \"apparmorProfile\": \"docker-default\",\n");
@@ -1106,7 +1793,7 @@ fn install_runtime_bundle_for_image(
     bundle.push_str("    \"seccomp\": { \"defaultAction\": \"SCMP_ACT_ERRNO\", \"architectures\": [\"SCMP_ARCH_AARCH64\"], \"syscalls\": [] }\n");
     bundle.push_str("  },\n");
     bundle.push_str("  \"annotations\": { \"org.opencontainers.image.ref.name\": \"");
-    bundle.push_str(image_name);
+    bundle.push_str(image_record.name.as_str());
     bundle.push_str("\" }\n");
     bundle.push_str("}\n");
 
@@ -1589,6 +2276,108 @@ fn default_docker_capability_mask() -> u64 {
     mask
 }
 
+fn normalize_image_reference(image: &str) -> Result<String, DockerCompatError> {
+    let trimmed = image.trim();
+    if trimmed.is_empty() || trimmed.len() > 160 || trimmed.as_bytes().contains(&0) {
+        return Err(DockerCompatError::ImageInvalid);
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return Err(DockerCompatError::ImageInvalid);
+    }
+    let mut out = String::from(trimmed);
+    if !image_reference_has_tag(out.as_str()) {
+        out.push_str(":latest");
+    }
+    if !image_reference_valid(out.as_str()) {
+        return Err(DockerCompatError::ImageInvalid);
+    }
+    Ok(out)
+}
+
+fn image_reference_has_tag(value: &str) -> bool {
+    let last_slash = value.rfind('/').unwrap_or(0);
+    let tag_search = if last_slash == 0 && !value.starts_with('/') {
+        value
+    } else {
+        &value[last_slash + 1..]
+    };
+    tag_search.contains(':')
+}
+
+fn image_reference_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 160
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'/' | b'.' | b'-' | b'_' | b':'))
+        && !value.starts_with('/')
+        && !value.ends_with('/')
+        && !value.contains("//")
+        && value.contains(':')
+}
+
+fn image_reference_valid_with_optional_tag(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 160
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'/' | b'.' | b'-' | b'_' | b':'))
+        && !value.starts_with('/')
+        && !value.ends_with('/')
+        && !value.contains("//")
+}
+
+fn image_storage_key(image: &str) -> String {
+    let mut out = String::new();
+    for byte in image.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            out.push(byte as char);
+        } else {
+            out.push('_');
+        }
+    }
+    out
+}
+
+fn parse_ipv4_addr(input: &str) -> Option<[u8; 4]> {
+    let bytes = input.as_bytes();
+    let mut octets = [0u8; 4];
+    let mut octet_index = 0usize;
+    let mut value = 0u16;
+    let mut digits = 0usize;
+    for byte in bytes {
+        match *byte {
+            b'0'..=b'9' => {
+                value = value.checked_mul(10)?.checked_add((byte - b'0') as u16)?;
+                if value > 255 {
+                    return None;
+                }
+                digits += 1;
+                if digits > 3 {
+                    return None;
+                }
+            }
+            b'.' => {
+                if digits == 0 || octet_index >= 3 {
+                    return None;
+                }
+                octets[octet_index] = value as u8;
+                octet_index += 1;
+                value = 0;
+                digits = 0;
+            }
+            _ => return None,
+        }
+    }
+    if digits == 0 || octet_index != 3 {
+        return None;
+    }
+    octets[octet_index] = value as u8;
+    Some(octets)
+}
+
 fn resolve_builtin_image_name(image: &str) -> Option<&'static str> {
     match image {
         SAMPLE_IMAGE_NAME | SAMPLE_IMAGE_ALIAS | SAMPLE_IMAGE_SHORT | "hello-world" | "hello" => {
@@ -1606,10 +2395,11 @@ fn push_runtime_args(
     out.push('[');
     if command.is_empty() {
         let config = json_object_after(image_config, "config")?;
-        let entrypoint = json_array_after(config, "Entrypoint")?;
-        let cmd = json_array_after(config, "Cmd")?;
-        push_string_array_items(out, entrypoint, false)?;
-        push_string_array_items(out, cmd, json_string_array_count(entrypoint) != 0)?;
+        let entrypoint = json_array_after(config, "Entrypoint").unwrap_or("[]");
+        let cmd = json_array_after(config, "Cmd").unwrap_or("[]");
+        let mut needs_comma = false;
+        push_string_array_items(out, entrypoint, &mut needs_comma)?;
+        push_string_array_items(out, cmd, &mut needs_comma)?;
     } else {
         let mut index = 0usize;
         while index < command.len() {
@@ -1627,7 +2417,7 @@ fn push_runtime_args(
 fn push_string_array_items(
     out: &mut String,
     input: &str,
-    mut needs_comma: bool,
+    needs_comma: &mut bool,
 ) -> Result<(), DockerCompatError> {
     let bytes = input.as_bytes();
     let mut pos = 0usize;
@@ -1638,11 +2428,11 @@ fn push_string_array_items(
             while pos < bytes.len() {
                 match bytes[pos] {
                     b'"' => {
-                        if needs_comma {
+                        if *needs_comma {
                             out.push_str(", ");
                         }
                         push_json_string(out, &input[start..pos])?;
-                        needs_comma = true;
+                        *needs_comma = true;
                         break;
                     }
                     b'\\' => return Err(DockerCompatError::OciParse),

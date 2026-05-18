@@ -16,9 +16,9 @@ use alloc::vec::Vec;
 use crate::user_level::{drivers, host_share, user_logic};
 
 const FXFS_ROOT_OBJECT_ID: u64 = 1;
-const FXFS_MAX_OBJECTS: usize = 512;
-const FXFS_MAX_DIRENTS: usize = 768;
-const FXFS_MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
+const FXFS_MAX_OBJECTS: usize = 8192;
+const FXFS_MAX_DIRENTS: usize = 8192;
+const FXFS_MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 const FXFS_MAX_JOURNAL_RECORDS: usize = 1024;
 const FXFS_SHARED_ROOT: &str = "/shared";
 const FXFS_HOST_SHARE_DELETED_PATH: &str = "/config/host-share-deleted";
@@ -189,6 +189,10 @@ pub struct FxfsCursor {
     offset: usize,
 }
 
+pub struct FxfsPersistGuard {
+    active: bool,
+}
+
 impl FxfsCursor {
     pub fn object_id(self) -> u64 {
         self.object_id
@@ -213,6 +217,28 @@ fn push_u32(out: &mut Vec<u8>, value: u32) {
 
 fn push_u64(out: &mut Vec<u8>, value: u64) {
     out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_bytes_at(out: &mut [u8], pos: &mut usize, bytes: &[u8]) -> Result<(), FxfsError> {
+    let end = pos.checked_add(bytes.len()).ok_or(FxfsError::NoSpace)?;
+    if end > out.len() {
+        return Err(FxfsError::NoSpace);
+    }
+    out[*pos..end].copy_from_slice(bytes);
+    *pos = end;
+    Ok(())
+}
+
+fn write_u16_at(out: &mut [u8], pos: &mut usize, value: u16) -> Result<(), FxfsError> {
+    write_bytes_at(out, pos, &value.to_le_bytes())
+}
+
+fn write_u32_at(out: &mut [u8], pos: &mut usize, value: u32) -> Result<(), FxfsError> {
+    write_bytes_at(out, pos, &value.to_le_bytes())
+}
+
+fn write_u64_at(out: &mut [u8], pos: &mut usize, value: u64) -> Result<(), FxfsError> {
+    write_bytes_at(out, pos, &value.to_le_bytes())
 }
 
 fn read_bytes<'a>(data: &'a [u8], pos: &mut usize, len: usize) -> Result<&'a [u8], FxfsError> {
@@ -406,6 +432,8 @@ pub struct FxfsState {
     block_backed: bool,
     last_sync_ok: bool,
     last_storage_error: Option<FxfsError>,
+    persist_suspended: usize,
+    persist_pending: bool,
     active_slot: usize,
     next_object_id: u64,
     sequence: u64,
@@ -422,6 +450,8 @@ impl FxfsState {
             block_backed: false,
             last_sync_ok: false,
             last_storage_error: None,
+            persist_suspended: 0,
+            persist_pending: false,
             active_slot: 0,
             next_object_id: FXFS_ROOT_OBJECT_ID + 1,
             sequence: 0,
@@ -460,10 +490,15 @@ impl FxfsState {
     }
 
     fn persist(&mut self) {
+        if self.persist_suspended > 0 {
+            self.persist_pending = true;
+            return;
+        }
         if !self.block_backed {
             self.last_sync_ok = false;
             return;
         }
+        self.persist_pending = false;
         match self.sync_to_block() {
             Ok(()) => {
                 self.last_sync_ok = true;
@@ -473,6 +508,19 @@ impl FxfsState {
                 self.last_sync_ok = false;
                 self.last_storage_error = Some(err);
             }
+        }
+    }
+
+    fn suspend_persist(&mut self) {
+        self.persist_suspended = self.persist_suspended.saturating_add(1);
+    }
+
+    fn resume_persist(&mut self) {
+        if self.persist_suspended > 0 {
+            self.persist_suspended -= 1;
+        }
+        if self.persist_suspended == 0 && self.persist_pending {
+            self.persist();
         }
     }
 
@@ -498,6 +546,8 @@ impl FxfsState {
         self.block_backed = drivers::init() && drivers::block_ready();
         self.last_sync_ok = false;
         self.last_storage_error = None;
+        self.persist_suspended = 0;
+        self.persist_pending = false;
         if self.block_backed {
             match self.load_from_block() {
                 Ok(()) => {
@@ -519,6 +569,8 @@ impl FxfsState {
         self.next_object_id = FXFS_ROOT_OBJECT_ID + 1;
         self.sequence = 0;
         self.replayed_records = 0;
+        self.persist_suspended = 0;
+        self.persist_pending = false;
         self.objects.clear();
         self.dirents.clear();
         self.journal.clear();
@@ -547,7 +599,6 @@ impl FxfsState {
     }
 
     fn serialize_image(&self) -> Result<Vec<u8>, FxfsError> {
-        let mut body = Vec::new();
         let mut persist_object_ids = Vec::new();
         if let Some(root_index) = self.find_object_index(FXFS_ROOT_OBJECT_ID) {
             persist_object_ids.push(self.objects[root_index].object_id);
@@ -569,23 +620,36 @@ impl FxfsState {
             index += 1;
         }
 
+        let persist_dirent_count = self
+            .dirents
+            .iter()
+            .filter(|dirent| {
+                fxfs_id_in_list(&persist_object_ids, dirent.parent_id)
+                    && fxfs_id_in_list(&persist_object_ids, dirent.object_id)
+            })
+            .count();
+
+        let mut image = Vec::new();
+        image.resize(FXFS_BLOCK_HEADER_LEN as usize, 0);
+        let body_start = image.len();
+
         for object_id in &persist_object_ids {
             let index = self
                 .find_object_index(*object_id)
                 .ok_or(FxfsError::NotFound)?;
             let object = &self.objects[index];
-            push_u64(&mut body, object.object_id);
-            push_u8(&mut body, kind_to_u8(object.kind));
-            push_u32(&mut body, object.attrs.mode);
-            push_u32(&mut body, object.attrs.uid);
-            push_u32(&mut body, object.attrs.gid);
-            push_u64(&mut body, object.attrs.size as u64);
-            push_u64(&mut body, object.attrs.created_at);
-            push_u64(&mut body, object.attrs.modified_at);
-            push_u64(&mut body, object.attrs.accessed_at);
-            push_u32(&mut body, object.attrs.link_count);
-            push_u32(&mut body, object.data.len() as u32);
-            body.extend_from_slice(&object.data);
+            push_u64(&mut image, object.object_id);
+            push_u8(&mut image, kind_to_u8(object.kind));
+            push_u32(&mut image, object.attrs.mode);
+            push_u32(&mut image, object.attrs.uid);
+            push_u32(&mut image, object.attrs.gid);
+            push_u64(&mut image, object.attrs.size as u64);
+            push_u64(&mut image, object.attrs.created_at);
+            push_u64(&mut image, object.attrs.modified_at);
+            push_u64(&mut image, object.attrs.accessed_at);
+            push_u32(&mut image, object.attrs.link_count);
+            push_u32(&mut image, object.data.len() as u32);
+            image.extend_from_slice(&object.data);
         }
         for dirent in &self.dirents {
             if !fxfs_id_in_list(&persist_object_ids, dirent.parent_id)
@@ -596,48 +660,57 @@ impl FxfsState {
             if dirent.name.len() > u16::MAX as usize {
                 return Err(FxfsError::NoSpace);
             }
-            push_u64(&mut body, dirent.parent_id);
-            push_u64(&mut body, dirent.object_id);
-            push_u16(&mut body, dirent.name.len() as u16);
-            body.extend_from_slice(dirent.name.as_bytes());
+            push_u64(&mut image, dirent.parent_id);
+            push_u64(&mut image, dirent.object_id);
+            push_u16(&mut image, dirent.name.len() as u16);
+            image.extend_from_slice(dirent.name.as_bytes());
         }
         for record in &self.journal {
-            push_u64(&mut body, record.sequence);
-            push_u8(&mut body, journal_op_to_u8(record.op));
-            push_u64(&mut body, record.object_id);
-            push_u64(&mut body, record.parent_id);
-            push_u64(&mut body, record.size as u64);
+            push_u64(&mut image, record.sequence);
+            push_u8(&mut image, journal_op_to_u8(record.op));
+            push_u64(&mut image, record.object_id);
+            push_u64(&mut image, record.parent_id);
+            push_u64(&mut image, record.size as u64);
         }
 
+        let body_len = image.len() - body_start;
         let total_len = (FXFS_BLOCK_HEADER_LEN as usize)
-            .checked_add(body.len())
+            .checked_add(body_len)
             .ok_or(FxfsError::NoSpace)?;
         if total_len > drivers::block_capacity() {
             return Err(FxfsError::NoSpace);
         }
 
-        let mut image = Vec::new();
-        push_u32(&mut image, FXFS_BLOCK_MAGIC);
-        push_u16(&mut image, FXFS_BLOCK_VERSION);
-        push_u16(&mut image, FXFS_BLOCK_HEADER_LEN);
-        push_u32(&mut image, total_len as u32);
-        push_u32(&mut image, fxfs_checksum(&body));
-        push_u64(&mut image, self.next_object_id);
-        push_u64(&mut image, self.sequence);
-        push_u64(&mut image, self.replayed_records as u64);
-        push_u32(&mut image, persist_object_ids.len() as u32);
-        let persist_dirent_count = self
-            .dirents
-            .iter()
-            .filter(|dirent| {
-                fxfs_id_in_list(&persist_object_ids, dirent.parent_id)
-                    && fxfs_id_in_list(&persist_object_ids, dirent.object_id)
-            })
-            .count();
-        push_u32(&mut image, persist_dirent_count as u32);
-        push_u32(&mut image, self.journal.len() as u32);
-        push_u32(&mut image, 0);
-        image.extend_from_slice(&body);
+        let checksum = fxfs_checksum(&image[body_start..]);
+        let mut header_pos = 0usize;
+        write_u32_at(&mut image[..body_start], &mut header_pos, FXFS_BLOCK_MAGIC)?;
+        write_u16_at(&mut image[..body_start], &mut header_pos, FXFS_BLOCK_VERSION)?;
+        write_u16_at(&mut image[..body_start], &mut header_pos, FXFS_BLOCK_HEADER_LEN)?;
+        write_u32_at(&mut image[..body_start], &mut header_pos, total_len as u32)?;
+        write_u32_at(&mut image[..body_start], &mut header_pos, checksum)?;
+        write_u64_at(&mut image[..body_start], &mut header_pos, self.next_object_id)?;
+        write_u64_at(&mut image[..body_start], &mut header_pos, self.sequence)?;
+        write_u64_at(
+            &mut image[..body_start],
+            &mut header_pos,
+            self.replayed_records as u64,
+        )?;
+        write_u32_at(
+            &mut image[..body_start],
+            &mut header_pos,
+            persist_object_ids.len() as u32,
+        )?;
+        write_u32_at(
+            &mut image[..body_start],
+            &mut header_pos,
+            persist_dirent_count as u32,
+        )?;
+        write_u32_at(
+            &mut image[..body_start],
+            &mut header_pos,
+            self.journal.len() as u32,
+        )?;
+        write_u32_at(&mut image[..body_start], &mut header_pos, 0)?;
         Ok(image)
     }
 
@@ -1515,6 +1588,15 @@ impl FxfsState {
     }
 }
 
+impl Drop for FxfsPersistGuard {
+    fn drop(&mut self) {
+        if self.active {
+            state().resume_persist();
+            self.active = false;
+        }
+    }
+}
+
 static mut FXFS_STATE: Option<FxfsState> = None;
 
 fn state() -> &'static mut FxfsState {
@@ -1556,6 +1638,15 @@ pub fn truncate_file(path: &str, size: usize) -> Result<usize, FxfsError> {
 
 pub fn delete_file(path: &str) -> Result<(), FxfsError> {
     state().delete_file(path)
+}
+
+pub fn suspend_persist() -> FxfsPersistGuard {
+    state().suspend_persist();
+    FxfsPersistGuard { active: true }
+}
+
+pub fn flush_persist() {
+    state().persist()
 }
 
 pub fn mount_host_share() -> Result<(), FxfsError> {

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const HOST_SHARE_DIR: &str = "host_shared";
-const HOST_SHARE_MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const HOST_SHARE_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 struct SnapshotFile {
