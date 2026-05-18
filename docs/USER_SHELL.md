@@ -68,6 +68,7 @@ The shell currently registers these commands:
 - `uptime`
 - `kill`
 - `testsc`
+- `fuzzsc`
 - `echo`
 - `clear`
 - `reboot`
@@ -112,6 +113,34 @@ It currently:
 - directly checks the minimal component framework, FxFS-shaped object-store paths, and `/svc` fixed-message IPC
 
 So it mixes the future-facing syscall helper path with direct kernel function calls.
+
+### `fuzzsc`
+
+`fuzzsc [seed] [iterations]` is a syzkaller-inspired syscall fuzzer wired into
+the shell. It also accepts named parameters:
+
+```text
+fuzzsc seed=<n> iterations=<n> time=<seconds>
+fuzzsc iter <n> ms=<milliseconds>
+```
+
+It runs at the dispatcher layer and mutates structured arguments for the modeled
+Linux ARM64 and Zircon syscall tables.
+
+It is deliberately a safe interactive fuzzer:
+
+- pointer arguments target kernel-owned scratch buffers instead of arbitrary
+  invalid addresses
+- non-returning and shell-destructive calls are skipped
+- clone-style process creation is skipped in the default round
+- each run closes tracked handles, fds, and mappings before returning
+
+The command prints call, success, error, `ENOSYS`, unsupported, and object-count
+totals, including completed/configured iterations and timeout status when a time
+limit is used. Explicit iteration values are not clamped; the time limit, when
+present, is the early-stop condition. It is not a full external syzkaller
+executor with coverage feedback yet; it is the in-kernel fuzzing entry point for
+broad syscall-dispatch coverage.
 
 Successful current runs include markers such as:
 

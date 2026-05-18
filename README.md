@@ -167,6 +167,7 @@ vi /shared/test
 rm /shared/test
 run hello.elf
 testsc
+fuzzsc
 dockertest
 docker images
 docker pull smros/hello
@@ -183,6 +184,16 @@ JSON, and uncompressed layer tar members. It stores the config and layers under
 can install the built-in sample image by name and can fetch a plain
 `http://.../*.tar` archive before feeding the same loader. HTTPS Docker Registry
 pulls are still reported as unsupported until TLS and bearer-token auth exist.
+
+`fuzzsc [seed] [iterations]` runs the syzkaller-inspired syscall fuzzer from the
+shell. It also accepts named limits such as
+`fuzzsc seed=1234 iterations=4 time=2` or `fuzzsc iter 4 ms=500`. It mutates
+structured Linux and Zircon syscall arguments against the live dispatch tables,
+prints a compact pass/error/unsupported summary, and skips non-returning or
+destructive calls such as process exit, kill, close-many, and clone-style task
+creation so the interactive shell stays alive.
+Explicit iteration values run exactly that many completed rounds unless a
+nonzero time budget expires first.
 
 For registry images today, use the host helper. It pulls the `linux/arm64`
 image with Docker, exports a single uncompressed layer, and writes the archive

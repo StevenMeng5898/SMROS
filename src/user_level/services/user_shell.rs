@@ -253,6 +253,11 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_test_syscall,
     },
     ShellCommand {
+        name: "fuzzsc",
+        description: "Fuzz Linux and Zircon syscall dispatchers",
+        handler: cmd_fuzz_syscall,
+    },
+    ShellCommand {
         name: "echo",
         description: "Echo arguments back",
         handler: cmd_echo,
@@ -3779,6 +3784,311 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
 
     print_memory_syscall_snapshot(ctx, "after");
     ctx.serial.write_str("\n=== Test Complete ===\n\n");
+}
+
+/// Command: fuzzsc - Fuzz syscall dispatchers
+fn cmd_fuzz_syscall(ctx: &mut ShellContext, args: &[&str]) {
+    let options = match parse_fuzz_command_options(ctx, args) {
+        Some(options) => options,
+        None => return,
+    };
+
+    ctx.serial.write_str("\n=== Syscall Fuzzer ===\n");
+    ctx.serial.write_str("[FUZZ] seed=0x");
+    print_hex(&mut ctx.serial, options.seed);
+    ctx.serial.write_str(" iterations=");
+    print_usize(&mut ctx.serial, options.iterations);
+    if options.time_limit_ticks != 0 {
+        ctx.serial.write_str(" time_ticks=");
+        print_usize(&mut ctx.serial, options.time_limit_ticks as usize);
+    }
+    ctx.serial.write_str("\n");
+
+    let report: crate::syscall::SyscallFuzzReport = if options.time_limit_ticks == 0 {
+        crate::syscall::fuzz_syscalls(options.seed, options.iterations)
+    } else {
+        crate::syscall::fuzz_syscalls_with_config(crate::syscall::SyscallFuzzConfig {
+            seed: options.seed,
+            iterations: options.iterations,
+            time_limit_ticks: options.time_limit_ticks,
+        })
+    };
+
+    ctx.serial.write_str("[OK] syscall fuzz completed\n");
+    ctx.serial.write_str("  seed=0x");
+    print_hex(&mut ctx.serial, report.seed);
+    ctx.serial.write_str(" iterations=");
+    print_usize(&mut ctx.serial, report.completed_iterations);
+    ctx.serial.write_str("/");
+    print_usize(&mut ctx.serial, report.iterations);
+    if report.time_limit_ticks != 0 {
+        ctx.serial.write_str(" time_ticks=");
+        print_usize(&mut ctx.serial, report.elapsed_ticks as usize);
+        ctx.serial.write_str("/");
+        print_usize(&mut ctx.serial, report.time_limit_ticks as usize);
+        ctx.serial.write_str(" timed_out=");
+        ctx.serial
+            .write_str(if report.timed_out { "yes" } else { "no" });
+    }
+    ctx.serial.write_str(" skipped=");
+    print_usize(&mut ctx.serial, report.skipped);
+    ctx.serial.write_str("\n");
+
+    ctx.serial.write_str("  Linux: calls=");
+    print_usize(&mut ctx.serial, report.linux_calls);
+    ctx.serial.write_str(" ok=");
+    print_usize(&mut ctx.serial, report.linux_ok);
+    ctx.serial.write_str(" err=");
+    print_usize(&mut ctx.serial, report.linux_err);
+    ctx.serial.write_str(" enosys=");
+    print_usize(&mut ctx.serial, report.linux_enosys);
+    ctx.serial.write_str("\n");
+
+    ctx.serial.write_str("  Zircon: calls=");
+    print_usize(&mut ctx.serial, report.zircon_calls);
+    ctx.serial.write_str(" ok=");
+    print_usize(&mut ctx.serial, report.zircon_ok);
+    ctx.serial.write_str(" err=");
+    print_usize(&mut ctx.serial, report.zircon_err);
+    ctx.serial.write_str(" unsupported=");
+    print_usize(&mut ctx.serial, report.zircon_unsupported);
+    ctx.serial.write_str("\n");
+
+    ctx.serial.write_str("  Objects: handles=");
+    print_usize(&mut ctx.serial, report.created_handles);
+    ctx.serial.write_str(" fds=");
+    print_usize(&mut ctx.serial, report.created_fds);
+    ctx.serial.write_str("\n\n");
+}
+
+const FUZZ_SHELL_DEFAULT_SEED: u64 = 1_511_431_206;
+const FUZZ_SHELL_DEFAULT_ITERATIONS: usize = 2;
+const FUZZ_TICKS_PER_SECOND: u64 = 100;
+const FUZZ_MILLIS_PER_TICK: u64 = 10;
+
+struct FuzzCommandOptions {
+    seed: u64,
+    iterations: usize,
+    time_limit_ticks: u64,
+}
+
+#[derive(Clone, Copy)]
+enum FuzzArgKind {
+    Seed,
+    Iterations,
+    TimeSeconds,
+    TimeMillis,
+}
+
+fn parse_fuzz_command_options(ctx: &mut ShellContext, args: &[&str]) -> Option<FuzzCommandOptions> {
+    let mut seed = FUZZ_SHELL_DEFAULT_SEED;
+    let mut iterations = FUZZ_SHELL_DEFAULT_ITERATIONS;
+    let mut time_limit_ticks = 0u64;
+    let mut seed_set = false;
+    let mut iterations_set = false;
+    let mut time_set = false;
+    let mut index = 0usize;
+
+    while index < args.len() {
+        let arg = args[index];
+        if matches!(arg, "help" | "--help" | "-h") {
+            print_fuzz_usage(ctx);
+            return None;
+        }
+
+        if let Some((key, value)) = split_fuzz_assignment(arg) {
+            let Some(kind) = fuzz_arg_kind(key) else {
+                ctx.serial.write_str("Unknown fuzz parameter: ");
+                ctx.serial.write_str(key);
+                ctx.serial.write_str("\n");
+                print_fuzz_usage(ctx);
+                return None;
+            };
+            if !apply_fuzz_option(
+                ctx,
+                kind,
+                value,
+                &mut seed,
+                &mut iterations,
+                &mut time_limit_ticks,
+                &mut seed_set,
+                &mut iterations_set,
+                &mut time_set,
+            ) {
+                return None;
+            }
+        } else if let Some(kind) = fuzz_arg_kind(arg) {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                ctx.serial.write_str("Missing value for fuzz parameter: ");
+                ctx.serial.write_str(arg);
+                ctx.serial.write_str("\n");
+                print_fuzz_usage(ctx);
+                return None;
+            };
+            if !apply_fuzz_option(
+                ctx,
+                kind,
+                value,
+                &mut seed,
+                &mut iterations,
+                &mut time_limit_ticks,
+                &mut seed_set,
+                &mut iterations_set,
+                &mut time_set,
+            ) {
+                return None;
+            }
+        } else if !seed_set {
+            if !apply_fuzz_option(
+                ctx,
+                FuzzArgKind::Seed,
+                arg,
+                &mut seed,
+                &mut iterations,
+                &mut time_limit_ticks,
+                &mut seed_set,
+                &mut iterations_set,
+                &mut time_set,
+            ) {
+                return None;
+            }
+        } else if !iterations_set {
+            if !apply_fuzz_option(
+                ctx,
+                FuzzArgKind::Iterations,
+                arg,
+                &mut seed,
+                &mut iterations,
+                &mut time_limit_ticks,
+                &mut seed_set,
+                &mut iterations_set,
+                &mut time_set,
+            ) {
+                return None;
+            }
+        } else {
+            ctx.serial.write_str("Unexpected fuzz argument: ");
+            ctx.serial.write_str(arg);
+            ctx.serial.write_str("\n");
+            print_fuzz_usage(ctx);
+            return None;
+        }
+
+        index += 1;
+    }
+
+    if time_set && time_limit_ticks != 0 && !iterations_set {
+        iterations = usize::MAX;
+    }
+
+    Some(FuzzCommandOptions {
+        seed,
+        iterations,
+        time_limit_ticks,
+    })
+}
+
+fn apply_fuzz_option(
+    ctx: &mut ShellContext,
+    kind: FuzzArgKind,
+    value: &str,
+    seed: &mut u64,
+    iterations: &mut usize,
+    time_limit_ticks: &mut u64,
+    seed_set: &mut bool,
+    iterations_set: &mut bool,
+    time_set: &mut bool,
+) -> bool {
+    if value.is_empty() {
+        ctx.serial.write_str("Missing fuzz parameter value\n");
+        print_fuzz_usage(ctx);
+        return false;
+    }
+
+    let Some(parsed) = parse_number(value) else {
+        match kind {
+            FuzzArgKind::Seed => ctx.serial.write_str("Invalid seed: "),
+            FuzzArgKind::Iterations => ctx.serial.write_str("Invalid iteration count: "),
+            FuzzArgKind::TimeSeconds | FuzzArgKind::TimeMillis => {
+                ctx.serial.write_str("Invalid time limit: ")
+            }
+        }
+        ctx.serial.write_str(value);
+        ctx.serial.write_str("\n");
+        return false;
+    };
+
+    match kind {
+        FuzzArgKind::Seed => {
+            *seed = parsed as u64;
+            *seed_set = true;
+        }
+        FuzzArgKind::Iterations => {
+            *iterations = parsed;
+            *iterations_set = true;
+        }
+        FuzzArgKind::TimeSeconds => {
+            *time_limit_ticks = (parsed as u64).saturating_mul(FUZZ_TICKS_PER_SECOND);
+            *time_set = true;
+        }
+        FuzzArgKind::TimeMillis => {
+            *time_limit_ticks = millis_to_fuzz_ticks(parsed);
+            *time_set = true;
+        }
+    }
+
+    true
+}
+
+fn split_fuzz_assignment(arg: &str) -> Option<(&str, &str)> {
+    let mut index = 0usize;
+    for byte in arg.bytes() {
+        if byte == b'=' {
+            return Some((&arg[..index], &arg[index + 1..]));
+        }
+        index += 1;
+    }
+    None
+}
+
+fn fuzz_arg_kind(key: &str) -> Option<FuzzArgKind> {
+    let key = strip_fuzz_key_prefix(key);
+    match key {
+        "seed" => Some(FuzzArgKind::Seed),
+        "iter" | "iters" | "iteration" | "iterations" => Some(FuzzArgKind::Iterations),
+        "time" | "timeout" | "sec" | "secs" | "second" | "seconds" => {
+            Some(FuzzArgKind::TimeSeconds)
+        }
+        "ms" | "msec" | "millis" | "millisecond" | "milliseconds" => Some(FuzzArgKind::TimeMillis),
+        _ => None,
+    }
+}
+
+fn strip_fuzz_key_prefix(key: &str) -> &str {
+    if let Some(stripped) = key.strip_prefix("--") {
+        stripped
+    } else if let Some(stripped) = key.strip_prefix('-') {
+        stripped
+    } else {
+        key
+    }
+}
+
+fn millis_to_fuzz_ticks(milliseconds: usize) -> u64 {
+    if milliseconds == 0 {
+        0
+    } else {
+        (milliseconds as u64).saturating_add(FUZZ_MILLIS_PER_TICK - 1) / FUZZ_MILLIS_PER_TICK
+    }
+}
+
+fn print_fuzz_usage(ctx: &mut ShellContext) {
+    ctx.serial.write_str("Usage: fuzzsc [seed] [iterations]\n");
+    ctx.serial
+        .write_str("       fuzzsc seed=<n> iterations=<n> time=<seconds>\n");
+    ctx.serial
+        .write_str("       fuzzsc iter <n> time <seconds> | ms=<milliseconds>\n");
 }
 
 /// Command: echo - Echo arguments

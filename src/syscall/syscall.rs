@@ -62,6 +62,10 @@ use crate::kernel_objects::vmar::Vmar;
 use crate::syscall::syscall_logic;
 use crate::user_level::fxfs;
 
+#[path = "fuzz.rs"]
+mod fuzz;
+pub use fuzz::{fuzz_syscalls, fuzz_syscalls_with_config, SyscallFuzzConfig, SyscallFuzzReport};
+
 // Re-export kernel objects for convenience
 pub use crate::kernel_objects::channel::{
     sys_channel_call_noretry, sys_channel_create, sys_channel_read, sys_channel_write,

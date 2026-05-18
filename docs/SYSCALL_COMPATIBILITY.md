@@ -123,6 +123,7 @@ The current syscall layer is best understood as:
 - a lightweight compatibility object table for object types that do not yet have full subsystems
 - a first Fuchsia-inspired userspace scaffold with component instances, namespace entries, minimal ELF64/AArch64 loading from FxFS, ELF-runner-shaped process launch, a `/svc` service directory using Zircon channels with fixed request/reply structs, a block-backed FxFS-shaped object store when virtio-blk is present, and `/shared` build-snapshot support
 - a shell `run` path that can launch dynamic PIE AArch64 ELF files with loader/libc dependencies in `/shared/lib` or `/lib`
+- a shell `fuzzsc` command that runs syzkaller-inspired structured fuzzing against the Linux and Zircon dispatch tables
 - a larger amount of future-facing scaffolding for EL0 work
 
 It is not yet:
@@ -141,6 +142,32 @@ During normal boot:
 - dynamic PIE programs launched by the shell enter EL0 through the current identity-mapped dynamic-loader handoff, then return to the shell through the Linux `exit` hook
 
 That means the current boot flow exercises the syscall layer mainly as an internal kernel interface, not as a fully isolated user/kernel boundary.
+
+## Syscall Fuzzing
+
+`src/syscall/fuzz.rs` contains the in-kernel syscall fuzzer used by the shell
+command:
+
+```text
+fuzzsc [seed] [iterations]
+fuzzsc seed=<n> iterations=<n> time=<seconds>
+fuzzsc iter <n> ms=<milliseconds>
+```
+
+The fuzzer walks the Linux ARM64 dispatcher range and the Zircon dispatcher
+range with deterministic mutations derived from the seed. Arguments are shaped
+from valid scratch buffers, C strings, handles, fds, mappings, iovecs, wait
+items, and small boundary values so the run stresses syscall validation and
+object bookkeeping without relying on arbitrary invalid kernel pointers.
+When `time` or `ms` is supplied, the fuzzer checks the deadline during the
+dispatcher walk and reports whether it timed out. Explicit iteration values run
+unchanged unless that deadline expires first.
+
+Safe interactive runs skip non-returning or state-destroying calls including
+exit, kill, close-many, VMAR destroy/unmap, interrupt destroy, and clone-style
+task creation. The command reports Linux successes/errors/`ENOSYS`, Zircon
+successes/errors/unsupported calls, skipped calls, and tracked object counts.
+It is not yet a full syzkaller executor with coverage feedback.
 
 ## Known Limitations
 
