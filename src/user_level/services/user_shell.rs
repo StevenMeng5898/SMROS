@@ -238,6 +238,16 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_docker,
     },
     ShellCommand {
+        name: "gemma",
+        description: "Run the native Gemma model service",
+        handler: cmd_gemma,
+    },
+    ShellCommand {
+        name: "hermes",
+        description: "Run Hermes on the native Gemma provider",
+        handler: cmd_hermes,
+    },
+    ShellCommand {
         name: "uptime",
         description: "Show system uptime",
         handler: cmd_uptime,
@@ -3426,6 +3436,11 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     }
     let file_path = b"/tmp/smros-file\0";
     let dir_path = b"/tmp\0";
+    if crate::user_level::fxfs::write_file("/tmp/smros-file", b"").is_err() {
+        ctx.serial
+            .write_str("  [FAIL] prepare stat fixture failed\n");
+        return;
+    }
     let file_fd =
         match crate::syscall::sys_openat(usize::MAX - 99, file_path.as_ptr() as usize, 2, 0) {
             Ok(fd) => {
@@ -3773,6 +3788,14 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         return;
     }
 
+    if !run_gemma_tests(ctx) {
+        return;
+    }
+
+    if !run_hermes_agent_tests(ctx) {
+        return;
+    }
+
     ctx.serial.write_str("[TEST] Closing VMO handle... ");
     match crate::syscall::sys_handle_close(vmo_handle) {
         Ok(_) => ctx.serial.write_str("[OK] handle closed\n"),
@@ -4101,6 +4124,17 @@ fn cmd_echo(ctx: &mut ShellContext, args: &[&str]) {
         ctx.serial.write_str(arg);
     }
     ctx.serial.write_str("\n\n");
+}
+
+fn join_args(args: &[&str], start: usize) -> String {
+    let mut out = String::new();
+    for (index, arg) in args.iter().enumerate().skip(start) {
+        if index > start {
+            out.push(' ');
+        }
+        out.push_str(arg);
+    }
+    out
 }
 
 fn print_compat_app_error(
@@ -4604,6 +4638,256 @@ fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
         }
         _ => {
             print_docker_usage(ctx);
+        }
+    }
+}
+
+/// Command: hermes - Run the native Hermes agent compatibility port
+fn cmd_hermes(ctx: &mut ShellContext, args: &[&str]) {
+    if args.is_empty() {
+        print_hermes_usage(ctx);
+        return;
+    }
+
+    match args[0] {
+        "info" | "status" => match crate::user_level::hermes_agent::info() {
+            Ok(info) => print_hermes_info(ctx, &info),
+            Err(err) => {
+                ctx.serial.write_str("hermes: ");
+                ctx.serial.write_str(err.as_str());
+                ctx.serial.write_str("\n");
+            }
+        },
+        "test" | "smoke" => {
+            ctx.serial.write_str("\n=== Hermes Agent Port Test ===\n\n");
+            let _ = run_hermes_agent_tests(ctx);
+            ctx.serial.write_str("\n");
+        }
+        "ask" | "run" => {
+            if args.len() < 2 {
+                ctx.serial.write_str("usage: hermes ask <prompt>\n");
+                return;
+            }
+            let prompt = join_args(args, 1);
+            match crate::user_level::hermes_agent::run_prompt(prompt.as_str()) {
+                Ok(turn) => {
+                    ctx.serial.write_str("Hermes: ");
+                    ctx.serial.write_str(turn.answer.as_str());
+                    ctx.serial.write_str("\n  tools=");
+                    print_usize(&mut ctx.serial, turn.tool_calls);
+                    ctx.serial.write_str(" skills=");
+                    print_usize(&mut ctx.serial, turn.skill_hits);
+                    ctx.serial.write_str(" delegates=");
+                    print_usize(&mut ctx.serial, turn.delegated_agents);
+                    ctx.serial.write_str(" memory=");
+                    print_usize(&mut ctx.serial, turn.memory_writes);
+                    ctx.serial.write_str(" transcript=");
+                    print_usize(&mut ctx.serial, turn.transcript_bytes);
+                    ctx.serial.write_str("B\n");
+                }
+                Err(err) => {
+                    ctx.serial.write_str("hermes: ");
+                    ctx.serial.write_str(err.as_str());
+                    ctx.serial.write_str("\n");
+                }
+            }
+        }
+        _ => print_hermes_usage(ctx),
+    }
+}
+
+/// Command: gemma - Run the native Gemma model service
+fn cmd_gemma(ctx: &mut ShellContext, args: &[&str]) {
+    if args.is_empty() {
+        print_gemma_usage(ctx);
+        return;
+    }
+
+    match args[0] {
+        "info" | "status" => match crate::user_level::gemma::info() {
+            Ok(info) => print_gemma_info(ctx, &info),
+            Err(err) => {
+                ctx.serial.write_str("gemma: ");
+                ctx.serial.write_str(err.as_str());
+                ctx.serial.write_str("\n");
+            }
+        },
+        "test" | "smoke" => {
+            ctx.serial
+                .write_str("\n=== Gemma Model Service Test ===\n\n");
+            let _ = run_gemma_tests(ctx);
+            ctx.serial.write_str("\n");
+        }
+        "ask" | "run" => {
+            if args.len() < 2 {
+                ctx.serial.write_str("usage: gemma ask <prompt>\n");
+                return;
+            }
+            let prompt = join_args(args, 1);
+            match crate::user_level::gemma::generate(prompt.as_str(), "shell=gemma", 64) {
+                Ok(generation) => {
+                    ctx.serial.write_str("Gemma: ");
+                    ctx.serial.write_str(generation.text.as_str());
+                    ctx.serial.write_str("\n  backend=");
+                    ctx.serial.write_str(generation.backend);
+                    ctx.serial.write_str(" prompt_tokens=");
+                    print_usize(&mut ctx.serial, generation.prompt_tokens);
+                    ctx.serial.write_str(" generated_tokens=");
+                    print_usize(&mut ctx.serial, generation.generated_tokens);
+                    ctx.serial.write_str("\n");
+                }
+                Err(err) => {
+                    ctx.serial.write_str("gemma: ");
+                    ctx.serial.write_str(err.as_str());
+                    ctx.serial.write_str("\n");
+                }
+            }
+        }
+        _ => print_gemma_usage(ctx),
+    }
+}
+
+fn print_gemma_usage(ctx: &mut ShellContext) {
+    ctx.serial.write_str("usage: gemma <info|test|ask>\n");
+    ctx.serial.write_str("       gemma ask <prompt>\n");
+}
+
+fn print_gemma_info(ctx: &mut ShellContext, info: &crate::user_level::gemma::GemmaModelInfo) {
+    ctx.serial.write_str("Gemma model service\n");
+    ctx.serial.write_str("  provider: ");
+    ctx.serial.write_str(info.provider);
+    ctx.serial.write_str("\n  model: ");
+    ctx.serial.write_str(info.model);
+    ctx.serial.write_str("\n  family: ");
+    ctx.serial.write_str(info.family);
+    ctx.serial.write_str("\n  architecture: ");
+    ctx.serial.write_str(info.architecture);
+    ctx.serial.write_str("\n  backend: ");
+    ctx.serial.write_str(info.backend);
+    ctx.serial.write_str("\n  context_tokens=");
+    print_usize(&mut ctx.serial, info.context_tokens);
+    ctx.serial.write_str(" max_output_tokens=");
+    print_usize(&mut ctx.serial, info.max_output_tokens);
+    ctx.serial.write_str(" manifest=");
+    print_usize(&mut ctx.serial, info.manifest_bytes);
+    ctx.serial.write_str("B\n");
+}
+
+fn run_gemma_tests(ctx: &mut ShellContext) -> bool {
+    ctx.serial
+        .write_str("[TEST] Testing Gemma model service... ");
+    match crate::user_level::gemma::run_full_test() {
+        Ok(report) if report.passed() => {
+            ctx.serial.write_str("[OK] manifest=");
+            ctx.serial
+                .write_str(if report.manifest_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" prompt=");
+            ctx.serial
+                .write_str(if report.prompt_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" generation=");
+            ctx.serial
+                .write_str(if report.generation_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" backend=");
+            ctx.serial.write_str(report.generation.backend);
+            ctx.serial.write_str(" tokens=");
+            print_usize(&mut ctx.serial, report.generation.generated_tokens);
+            ctx.serial.write_str("\n");
+            true
+        }
+        Ok(report) => {
+            ctx.serial.write_str("[FAIL] incomplete report tokens=");
+            print_usize(&mut ctx.serial, report.generation.generated_tokens);
+            ctx.serial.write_str("\n");
+            false
+        }
+        Err(err) => {
+            ctx.serial.write_str("[FAIL] ");
+            ctx.serial.write_str(err.as_str());
+            ctx.serial.write_str("\n");
+            false
+        }
+    }
+}
+
+fn print_hermes_usage(ctx: &mut ShellContext) {
+    ctx.serial.write_str("usage: hermes <info|test|ask>\n");
+    ctx.serial.write_str("       hermes ask <prompt>\n");
+}
+
+fn print_hermes_info(
+    ctx: &mut ShellContext,
+    info: &crate::user_level::hermes_agent::HermesAgentInfo,
+) {
+    ctx.serial.write_str("Hermes Agent port\n");
+    ctx.serial.write_str("  upstream: ");
+    ctx.serial.write_str(info.upstream);
+    ctx.serial.write_str(" v");
+    ctx.serial.write_str(info.upstream_version);
+    ctx.serial.write_str("\n  provider: ");
+    ctx.serial.write_str(info.provider);
+    ctx.serial.write_str("\n  model: ");
+    ctx.serial.write_str(info.model);
+    ctx.serial.write_str("\n  personality: ");
+    ctx.serial.write_str(info.personality);
+    ctx.serial.write_str("\n  tools=");
+    print_usize(&mut ctx.serial, info.tools);
+    ctx.serial.write_str(" skills=");
+    print_usize(&mut ctx.serial, info.skills);
+    ctx.serial.write_str(" memory_items=");
+    print_usize(&mut ctx.serial, info.memory_items);
+    ctx.serial.write_str(" cron=");
+    print_usize(&mut ctx.serial, info.cron_jobs);
+    ctx.serial.write_str(" transcripts=");
+    print_usize(&mut ctx.serial, info.transcripts);
+    ctx.serial.write_str(" backend=");
+    ctx.serial.write_str(info.generation_backend);
+    ctx.serial.write_str("\n");
+}
+
+fn run_hermes_agent_tests(ctx: &mut ShellContext) -> bool {
+    ctx.serial
+        .write_str("[TEST] Testing Hermes agent SMROS port... ");
+    match crate::user_level::hermes_agent::run_full_test() {
+        Ok(report) if report.passed() => {
+            ctx.serial.write_str("[OK] config=");
+            ctx.serial
+                .write_str(if report.config_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" model=");
+            ctx.serial
+                .write_str(if report.model_route_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" skills=");
+            ctx.serial
+                .write_str(if report.skill_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" memory=");
+            ctx.serial
+                .write_str(if report.memory_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" tools=");
+            print_usize(&mut ctx.serial, report.turn.tool_calls);
+            ctx.serial.write_str(" delegates=");
+            print_usize(&mut ctx.serial, report.turn.delegated_agents);
+            ctx.serial.write_str(" transcript=");
+            print_usize(&mut ctx.serial, report.turn.transcript_bytes);
+            ctx.serial.write_str("B gemma_tokens=");
+            print_usize(&mut ctx.serial, report.turn.model_tokens);
+            ctx.serial.write_str(" svc=");
+            ctx.serial
+                .write_str(if report.svc_ok { "yes" } else { "no" });
+            ctx.serial.write_str("\n");
+            true
+        }
+        Ok(report) => {
+            ctx.serial.write_str("[FAIL] incomplete report tools=");
+            print_usize(&mut ctx.serial, report.turn.tool_calls);
+            ctx.serial.write_str(" delegates=");
+            print_usize(&mut ctx.serial, report.turn.delegated_agents);
+            ctx.serial.write_str("\n");
+            false
+        }
+        Err(err) => {
+            ctx.serial.write_str("[FAIL] ");
+            ctx.serial.write_str(err.as_str());
+            ctx.serial.write_str("\n");
+            false
         }
     }
 }

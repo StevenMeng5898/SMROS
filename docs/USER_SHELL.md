@@ -65,6 +65,8 @@ The shell currently registers these commands:
 - `porttest`
 - `dockertest`
 - `docker`
+- `gemma`
+- `hermes`
 - `uptime`
 - `kill`
 - `testsc`
@@ -181,11 +183,45 @@ docker pull smros/hello
 docker pull http://10.0.2.2:8000/my-image.tar
 docker load /shared/my-image.tar
 docker run my/image:latest
+gemma info
+gemma test
+gemma ask test gemma on smros
+hermes info
+hermes test
+hermes ask test hermes on smros
 ```
 
 `mount share` refreshes `/shared` from the snapshot compiled into the current kernel image. It does not read the host directory live while QEMU is already running. To see files added to `host_shared/` after boot, rebuild and restart with `make run`; then use `share` or `ls /shared`.
 
 The current implementation is a build-time FxFS snapshot because the guest has virtio block and net drivers, but no 9p or virtio-fs filesystem driver yet. Files larger than 64 MiB are skipped by the build script and reported in the `share` command's skipped list. Shell-created files and edits under `/shared` are FxFS-local changes. Deleting a snapshot file such as `/shared/test` records a persisted tombstone in `/config/host-share-deleted`, so the file stays deleted across reboot while the same `smros-fxfs.img` is used. Remove `smros-fxfs.img` with `make clean-fxfs` to reset those tombstones.
+
+### Hermes Agent Port
+
+`gemma` exposes the native SMROS Gemma model service. It installs model
+metadata, prompt formatting, bounded generation, and generation logs under
+`/data/gemma`. Full Google Gemma weights are still too large for the default
+512 MiB SMROS/QEMU profile, so this is the SMROS-native backend boundary that a
+future full-weight runner can replace.
+
+`hermes` exposes a native SMROS compatibility port of `NousResearch/hermes-agent`.
+The upstream Hermes project is a Python 3.11 application, while SMROS does not
+yet host a Python runtime. Hermes now routes `ask` through the SMROS Gemma
+provider (`gemma/gemma-3n-e2b-smros`) and validates provider/model routing,
+skill lookup, memory updates, tool calls, subagent delegation, cron metadata,
+`/svc`, Gemma generation, and transcript persistence under `/data/hermes`.
+
+Useful commands:
+
+```text
+gemma info
+gemma test
+gemma ask test gemma agent on SMROS
+hermes info
+hermes test
+hermes ask test hermes agent on SMROS
+```
+
+The shell `testsc` suite includes both the Gemma and Hermes full smoke tests.
 
 The `run` command loads a dynamic PIE ELF from FxFS, parses `PT_INTERP` and `DT_NEEDED`, resolves the dynamic loader and C library from `/shared/lib` or `/lib`, builds an argv/env/auxv stack, and enters the loader from an EL0 launcher thread. For example, `run hello.elf` from `/shared` uses `hello.elf`, `/shared/lib/ld-linux-aarch64.so.1`, and `/shared/lib/libc.so.6` and returns to the shell after the program calls `exit`.
 

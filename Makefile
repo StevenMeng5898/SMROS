@@ -7,7 +7,7 @@ FXFS_DISK = smros-fxfs.img
 FXFS_DISK_SIZE = 128M
 BUILD_DIR = target/$(TARGET)/release
 
-.PHONY: all build run clean clean-fxfs debug gdb qemu-icmp help verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level
+.PHONY: all build run clean clean-fxfs debug gdb qemu-icmp help verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
 
 all: build
 
@@ -112,6 +112,10 @@ verus-kernel-lowlevel:
 verus-user-level:
 	@./scripts/verify-user-level-verus.sh
 
+# Verify the user-level services proof harness with Verus
+verus-services:
+	@./scripts/verify-services-verus.sh
+
 # Show help
 help:
 	@echo "SMROS ARM64 Kernel Makefile"
@@ -130,6 +134,7 @@ help:
 	@echo "  verus-kernel-objects - Verify the kernel object proof harness with Verus"
 	@echo "  verus-kernel-lowlevel - Verify the kernel low-level proof harness with Verus"
 	@echo "  verus-user-level - Verify main.rs and user-level proof harness with Verus"
+	@echo "  verus-services - Verify src/user_level/services proof slices with Verus"
 	@echo "  help      - Show this help message"
 	@echo ""
 	@echo "Usage:"

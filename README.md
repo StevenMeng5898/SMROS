@@ -175,6 +175,11 @@ docker load /shared/my-image.tar
 docker run smros/hello
 docker ps -a
 docker logs smros0001
+gemma info
+gemma test
+hermes info
+hermes test
+hermes ask test hermes agent on SMROS
 ```
 
 `docker load` accepts SMROS-loadable Docker archive tars already stored in FxFS,
@@ -194,6 +199,20 @@ destructive calls such as process exit, kill, close-many, and clone-style task
 creation so the interactive shell stays alive.
 Explicit iteration values run exactly that many completed rounds unless a
 nonzero time budget expires first.
+
+`gemma` exposes the native SMROS Gemma model service. It installs model
+metadata, prompt formatting, bounded generation, and generation logs under
+`/data/gemma`. Full Google Gemma weights are still too large for the default
+512 MiB SMROS/QEMU profile, so this is the SMROS-native backend boundary that a
+future full-weight runner can replace.
+
+`hermes` is a native SMROS compatibility port of
+`NousResearch/hermes-agent`. Upstream Hermes is a Python 3.11 application, so
+SMROS does not execute the original package directly yet. Hermes now routes
+`ask` through the SMROS Gemma provider (`gemma/gemma-3n-e2b-smros`) and validates
+config, provider/model routing, skills, memory, tool calls, delegated subagents,
+cron metadata, `/svc`, Gemma generation, and transcript persistence under
+`/data/hermes`. `gemma test`, `hermes test`, and `testsc` cover the path.
 
 For registry images today, use the host helper. It pulls the `linux/arm64`
 image with Docker, exports a single uncompressed layer, and writes the archive
@@ -315,9 +334,10 @@ make verus-syscall
 make verus-kernel-objects
 make verus-kernel-lowlevel
 make verus-user-level
+make verus-services
 ```
 
-The user-level harness now covers pure helper logic for `src/main.rs`, user process layout, shell parsing, FxFS, `/svc`, ELF parsing, dynamic ELF launch arithmetic, DNS/IPv4 validation, and user-level VirtIO driver checks.
+The user-level harness now covers pure helper logic for `src/main.rs`, user process layout, shell parsing, FxFS, `/svc`, ELF parsing, dynamic ELF launch arithmetic, DNS/IPv4 validation, and user-level VirtIO driver checks. The services harness covers proof slices for every file under `src/user_level/services`, including Gemma/Hermes prompt-routing predicates, Docker/path/archive validation, network sizing checks, FxFS/ELF/service predicates, and shell command input checks.
 
 ## Known Limitations
 

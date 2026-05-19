@@ -5,6 +5,8 @@ pub mod component;
 pub mod docker_compat;
 pub mod elf;
 pub mod fxfs;
+pub mod gemma;
+pub mod hermes_agent;
 pub mod host_share;
 pub mod net;
 pub mod run_elf;
