@@ -8,6 +8,7 @@ pub mod fxfs;
 pub mod gemma;
 pub mod hermes_agent;
 pub mod host_share;
+pub mod html_ui;
 pub mod net;
 pub mod run_elf;
 pub mod svc;

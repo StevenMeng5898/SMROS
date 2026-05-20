@@ -179,6 +179,8 @@ gemma info
 gemma test
 hermes info
 hermes test
+hermes ui
+hui
 hermes ask test hermes agent on SMROS
 ```
 
@@ -213,6 +215,7 @@ SMROS does not execute the original package directly yet. Hermes now routes
 config, provider/model routing, skills, memory, tool calls, delegated subagents,
 cron metadata, `/svc`, Gemma generation, and transcript persistence under
 `/data/hermes`. `gemma test`, `hermes test`, and `testsc` cover the path.
+Use `hermes ui` or `hui` for the full-screen keyboard/mouse terminal UI.
 
 For registry images today, use the host helper. It pulls the `linux/arm64`
 image with Docker, exports a single uncompressed layer, and writes the archive

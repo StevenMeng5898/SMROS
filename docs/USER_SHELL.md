@@ -188,6 +188,11 @@ gemma test
 gemma ask test gemma on smros
 hermes info
 hermes test
+hermes skills
+hermes ui
+hui
+hermes web
+hermes web text
 hermes ask test hermes on smros
 ```
 
@@ -208,7 +213,25 @@ The upstream Hermes project is a Python 3.11 application, while SMROS does not
 yet host a Python runtime. Hermes now routes `ask` through the SMROS Gemma
 provider (`gemma/gemma-3n-e2b-smros`) and validates provider/model routing,
 skill lookup, memory updates, tool calls, subagent delegation, cron metadata,
-`/svc`, Gemma generation, and transcript persistence under `/data/hermes`.
+`/svc`, Gemma generation, the generated web UI, and transcript persistence
+under `/data/hermes`.
+
+Hermes installs four native SMROS skills under `/data/hermes/skills`:
+`smros-kernel`, `hermes-web-ui`, `smros-ops`, and `hermes-memory`. Prompt
+routing reports the matched skills in the shell response. The web UI renderer
+writes a static HTML model to `/data/hermes/web/index.html`. By default,
+`hermes web` parses that HTML and renders a richer CPU-drawn native UI surface:
+panels, status tiles, buttons, text, and skill rows are rasterized into
+`/data/hermes/web/hermes-ui.ppm`, with an ANSI color preview printed in the
+serial shell. Use `hermes web text` for the older text-only shell view, and
+`hermes web source` only when you explicitly want to inspect the HTML source.
+For interaction, use `hermes ui` or the shorter `hui` entry. That opens a
+full-screen Hermes UI on the serial terminal with a focused prompt field,
+buttons, response panel, keyboard navigation, and xterm mouse tracking. Type in
+the prompt field, press Enter or click Send to submit, Tab between controls,
+use arrow keys or the mouse wheel to move through the response panel, click
+Clear to reset the prompt, and press Esc or click Exit to return to the normal
+`smros>` shell.
 
 Useful commands:
 
@@ -218,6 +241,12 @@ gemma test
 gemma ask test gemma agent on SMROS
 hermes info
 hermes test
+hermes skills
+hermes ui
+hui
+hermes web
+hermes web text
+hermes web source
 hermes ask test hermes agent on SMROS
 ```
 

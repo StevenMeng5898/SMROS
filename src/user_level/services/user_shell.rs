@@ -248,6 +248,11 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_hermes,
     },
     ShellCommand {
+        name: "hui",
+        description: "Open the interactive Hermes UI",
+        handler: cmd_hermes_ui,
+    },
+    ShellCommand {
         name: "uptime",
         description: "Show system uptime",
         handler: cmd_uptime,
@@ -4663,6 +4668,85 @@ fn cmd_hermes(ctx: &mut ShellContext, args: &[&str]) {
             let _ = run_hermes_agent_tests(ctx);
             ctx.serial.write_str("\n");
         }
+        "skills" => match crate::user_level::hermes_agent::list_skills() {
+            Ok(skills) => {
+                ctx.serial.write_str("Hermes skills\n");
+                for skill in skills {
+                    ctx.serial.write_str("  ");
+                    ctx.serial.write_str(skill.slug);
+                    ctx.serial.write_str(" - ");
+                    ctx.serial.write_str(skill.description);
+                    ctx.serial.write_str("\n    ");
+                    ctx.serial.write_str(skill.path);
+                    ctx.serial.write_str("\n");
+                }
+            }
+            Err(err) => {
+                ctx.serial.write_str("hermes: ");
+                ctx.serial.write_str(err.as_str());
+                ctx.serial.write_str("\n");
+            }
+        },
+        "web" | "ui" => {
+            if args[0] == "ui" && args.len() == 1 {
+                run_hermes_ui_entry(ctx);
+            } else if args.get(1).copied() == Some("source") || args.get(1).copied() == Some("html")
+            {
+                match crate::user_level::hermes_agent::render_web_ui() {
+                    Ok(web) => {
+                        ctx.serial.write_str(web.html.as_str());
+                        ctx.serial.write_str("\n");
+                    }
+                    Err(err) => {
+                        ctx.serial.write_str("hermes: ");
+                        ctx.serial.write_str(err.as_str());
+                        ctx.serial.write_str("\n");
+                    }
+                }
+            } else if args.get(1).copied() == Some("text") {
+                match crate::user_level::hermes_agent::render_native_ui(78) {
+                    Ok(view) => {
+                        ctx.serial.write_str(view.rendered.as_str());
+                        ctx.serial.write_str("source=");
+                        ctx.serial.write_str(view.source_path);
+                        ctx.serial.write_str(" widgets=");
+                        print_usize(&mut ctx.serial, view.widgets);
+                        ctx.serial.write_str(" width=");
+                        print_usize(&mut ctx.serial, view.width);
+                        ctx.serial.write_str("\n");
+                    }
+                    Err(err) => {
+                        ctx.serial.write_str("hermes: ");
+                        ctx.serial.write_str(err.as_str());
+                        ctx.serial.write_str("\n");
+                    }
+                }
+            } else {
+                match crate::user_level::hermes_agent::render_cpu_ui() {
+                    Ok(view) => {
+                        ctx.serial.write_str(view.preview.as_str());
+                        ctx.serial.write_str("\nimage=");
+                        ctx.serial.write_str(view.image_path);
+                        ctx.serial.write_str(" source=");
+                        ctx.serial.write_str(view.source_path);
+                        ctx.serial.write_str(" size=");
+                        print_usize(&mut ctx.serial, view.width);
+                        ctx.serial.write_str("x");
+                        print_usize(&mut ctx.serial, view.height);
+                        ctx.serial.write_str(" bytes=");
+                        print_usize(&mut ctx.serial, view.image_bytes);
+                        ctx.serial.write_str(" widgets=");
+                        print_usize(&mut ctx.serial, view.widgets);
+                        ctx.serial.write_str("\n");
+                    }
+                    Err(err) => {
+                        ctx.serial.write_str("hermes: ");
+                        ctx.serial.write_str(err.as_str());
+                        ctx.serial.write_str("\n");
+                    }
+                }
+            }
+        }
         "ask" | "run" => {
             if args.len() < 2 {
                 ctx.serial.write_str("usage: hermes ask <prompt>\n");
@@ -4677,6 +4761,9 @@ fn cmd_hermes(ctx: &mut ShellContext, args: &[&str]) {
                     print_usize(&mut ctx.serial, turn.tool_calls);
                     ctx.serial.write_str(" skills=");
                     print_usize(&mut ctx.serial, turn.skill_hits);
+                    ctx.serial.write_str(" [");
+                    ctx.serial.write_str(turn.skill_summary.as_str());
+                    ctx.serial.write_str("]");
                     ctx.serial.write_str(" delegates=");
                     print_usize(&mut ctx.serial, turn.delegated_agents);
                     ctx.serial.write_str(" memory=");
@@ -4694,6 +4781,11 @@ fn cmd_hermes(ctx: &mut ShellContext, args: &[&str]) {
         }
         _ => print_hermes_usage(ctx),
     }
+}
+
+/// Command: hui - Open the interactive Hermes UI
+fn cmd_hermes_ui(ctx: &mut ShellContext, _args: &[&str]) {
+    run_hermes_ui_entry(ctx);
 }
 
 /// Command: gemma - Run the native Gemma model service
@@ -4810,8 +4902,1444 @@ fn run_gemma_tests(ctx: &mut ShellContext) -> bool {
 }
 
 fn print_hermes_usage(ctx: &mut ShellContext) {
-    ctx.serial.write_str("usage: hermes <info|test|ask>\n");
+    ctx.serial
+        .write_str("usage: hermes <info|test|skills|web|ui|ask>\n");
     ctx.serial.write_str("       hermes ask <prompt>\n");
+    ctx.serial
+        .write_str("       hermes ui  # full-screen keyboard/mouse UI\n");
+    ctx.serial.write_str("       hermes web [text|source]\n");
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HermesUiFocus {
+    Prompt,
+    Send,
+    Clear,
+    Load,
+    Test,
+    Exit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HermesUiKey {
+    Char(u8),
+    Enter,
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+    Tab,
+    BackTab,
+    Esc,
+    CtrlC,
+    CtrlL,
+    CtrlN,
+    CtrlU,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HermesMouseButton {
+    Left,
+    WheelUp,
+    WheelDown,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HermesMouseEvent {
+    x: usize,
+    y: usize,
+    button: HermesMouseButton,
+    pressed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HermesUiEvent {
+    Key(HermesUiKey),
+    Mouse(HermesMouseEvent),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HermesUiCommand {
+    Continue,
+    Submit,
+    RunTest,
+    Exit,
+}
+
+struct HermesUiState {
+    prompt: String,
+    prompt_cursor: usize,
+    prompt_scroll: usize,
+    last_answer: String,
+    metrics: String,
+    runtime: String,
+    activity: String,
+    status: String,
+    focus: HermesUiFocus,
+    response_scroll: usize,
+    active_preset: usize,
+    dirty: HermesUiDirty,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HermesUiDirty {
+    layout: bool,
+    header: bool,
+    prompt: bool,
+    actions: bool,
+    response: bool,
+    runtime: bool,
+    activity: bool,
+    presets: bool,
+    status: bool,
+}
+
+const HERMES_UI_WIDTH: usize = 80;
+const HERMES_UI_HEIGHT: usize = 30;
+const HERMES_UI_PROMPT_MAX: usize = 320;
+const HERMES_UI_LEFT_COL: usize = 2;
+const HERMES_UI_LEFT_WIDTH: usize = 52;
+const HERMES_UI_RIGHT_COL: usize = 55;
+const HERMES_UI_RIGHT_WIDTH: usize = 24;
+const HERMES_UI_PROMPT_BOX_ROW: usize = 4;
+const HERMES_UI_PROMPT_BOX_HEIGHT: usize = 6;
+const HERMES_UI_PROMPT_COL: usize = 4;
+const HERMES_UI_PROMPT_ROW: usize = 6;
+const HERMES_UI_PROMPT_WIDTH: usize = 48;
+const HERMES_UI_RUNTIME_ROW: usize = 4;
+const HERMES_UI_RUNTIME_HEIGHT: usize = 7;
+const HERMES_UI_RESPONSE_BOX_ROW: usize = 12;
+const HERMES_UI_RESPONSE_BOX_HEIGHT: usize = 13;
+const HERMES_UI_RESPONSE_COL: usize = 4;
+const HERMES_UI_RESPONSE_ROW: usize = 14;
+const HERMES_UI_RESPONSE_WIDTH: usize = 48;
+const HERMES_UI_RESPONSE_ROWS: usize = 10;
+const HERMES_UI_ACTIVITY_ROW: usize = 12;
+const HERMES_UI_ACTIVITY_HEIGHT: usize = 13;
+const HERMES_UI_PRESET_ROW: usize = 26;
+const HERMES_UI_PRESET_HEIGHT: usize = 3;
+const HERMES_UI_SEND_COL: usize = 4;
+const HERMES_UI_CLEAR_COL: usize = 14;
+const HERMES_UI_LOAD_COL: usize = 24;
+const HERMES_UI_TEST_COL: usize = 34;
+const HERMES_UI_EXIT_COL: usize = 44;
+const HERMES_UI_BUTTON_ROW: usize = 10;
+const HERMES_UI_BUTTON_WIDTH: usize = 9;
+const HERMES_UI_STATUS_ROW: usize = 30;
+const HERMES_UI_PRESETS: &[&str] = &[
+    "test hermes web ui on SMROS with memory and skills",
+    "summarize FxFS, /svc, and Gemma state",
+    "plan a Hermes smoke test for network and Docker",
+    "review recent memory and transcript context",
+];
+
+impl HermesUiDirty {
+    fn all() -> Self {
+        Self {
+            layout: true,
+            header: true,
+            prompt: true,
+            actions: true,
+            response: true,
+            runtime: true,
+            activity: true,
+            presets: true,
+            status: true,
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self {
+            layout: false,
+            header: false,
+            prompt: false,
+            actions: false,
+            response: false,
+            runtime: false,
+            activity: false,
+            presets: false,
+            status: false,
+        };
+    }
+}
+
+impl HermesUiState {
+    fn new() -> Self {
+        let prompt = String::from(HERMES_UI_PRESETS[0]);
+        let prompt_cursor = prompt.len();
+        let mut state = Self {
+            prompt,
+            prompt_cursor,
+            prompt_scroll: 0,
+            last_answer: String::from(
+                "Ready. Compose a prompt, send it, and Hermes will update this response panel.",
+            ),
+            metrics: String::new(),
+            runtime: String::new(),
+            activity: String::from("No turn submitted yet."),
+            status: String::from("Ready"),
+            focus: HermesUiFocus::Prompt,
+            response_scroll: 0,
+            active_preset: 0,
+            dirty: HermesUiDirty::all(),
+        };
+        state.refresh_metrics();
+        state.sync_prompt_scroll();
+        state
+    }
+
+    fn refresh_metrics(&mut self) {
+        self.metrics.clear();
+        self.runtime.clear();
+        match crate::user_level::hermes_agent::info() {
+            Ok(info) => {
+                self.metrics.push_str(info.provider);
+                self.metrics.push_str(" | ");
+                self.metrics.push_str(info.model);
+                self.metrics.push_str(" | tools ");
+                append_usize_shell(&mut self.metrics, info.tools);
+                self.metrics.push_str(" | skills ");
+                append_usize_shell(&mut self.metrics, info.skills);
+                self.metrics.push_str(" | memory ");
+                append_usize_shell(&mut self.metrics, info.memory_items);
+                self.metrics.push_str(" | transcripts ");
+                append_usize_shell(&mut self.metrics, info.transcripts);
+
+                self.runtime.push_str("provider: ");
+                self.runtime.push_str(info.provider);
+                self.runtime.push_str("\nmodel: ");
+                self.runtime.push_str(info.model);
+                self.runtime.push_str("\nbackend: ");
+                self.runtime.push_str(info.generation_backend);
+                self.runtime.push_str("\ntools: ");
+                append_usize_shell(&mut self.runtime, info.tools);
+                self.runtime.push_str("  skills: ");
+                append_usize_shell(&mut self.runtime, info.skills);
+                self.runtime.push_str("\nmemory: ");
+                append_usize_shell(&mut self.runtime, info.memory_items);
+                self.runtime.push_str("  sessions: ");
+                append_usize_shell(&mut self.runtime, info.transcripts);
+                self.runtime.push_str("\nui: ");
+                self.runtime.push_str(info.web_ui_path);
+            }
+            Err(err) => {
+                self.metrics.push_str("Hermes status unavailable: ");
+                self.metrics.push_str(err.as_str());
+                self.runtime.push_str("status unavailable\n");
+                self.runtime.push_str(err.as_str());
+            }
+        }
+        self.dirty.header = true;
+        self.dirty.runtime = true;
+    }
+
+    fn sync_prompt_scroll(&mut self) {
+        if self.prompt_cursor < self.prompt_scroll {
+            self.prompt_scroll = self.prompt_cursor;
+        }
+        if self.prompt_cursor >= self.prompt_scroll.saturating_add(HERMES_UI_PROMPT_WIDTH) {
+            self.prompt_scroll = self
+                .prompt_cursor
+                .saturating_sub(HERMES_UI_PROMPT_WIDTH.saturating_sub(1));
+        }
+    }
+
+    fn insert_byte(&mut self, byte: u8) {
+        if self.prompt.len() >= HERMES_UI_PROMPT_MAX {
+            self.status = String::from("Prompt is full");
+            self.dirty.status = true;
+            return;
+        }
+        self.prompt.insert(self.prompt_cursor, byte as char);
+        self.prompt_cursor += 1;
+        self.status = String::from("Editing prompt");
+        self.sync_prompt_scroll();
+        self.dirty.prompt = true;
+        self.dirty.status = true;
+    }
+
+    fn delete_before_cursor(&mut self) {
+        if self.prompt_cursor == 0 {
+            return;
+        }
+        self.prompt_cursor -= 1;
+        self.prompt.remove(self.prompt_cursor);
+        self.status = String::from("Editing prompt");
+        self.sync_prompt_scroll();
+        self.dirty.prompt = true;
+        self.dirty.status = true;
+    }
+
+    fn delete_at_cursor(&mut self) {
+        if self.prompt_cursor >= self.prompt.len() {
+            return;
+        }
+        self.prompt.remove(self.prompt_cursor);
+        self.status = String::from("Editing prompt");
+        self.sync_prompt_scroll();
+        self.dirty.prompt = true;
+        self.dirty.status = true;
+    }
+
+    fn move_prompt_left(&mut self) {
+        if self.prompt_cursor > 0 {
+            self.prompt_cursor -= 1;
+            self.sync_prompt_scroll();
+            self.dirty.prompt = true;
+        }
+    }
+
+    fn move_prompt_right(&mut self) {
+        if self.prompt_cursor < self.prompt.len() {
+            self.prompt_cursor += 1;
+            self.sync_prompt_scroll();
+            self.dirty.prompt = true;
+        }
+    }
+
+    fn set_prompt_cursor_from_screen(&mut self, x: usize) {
+        let offset = x.saturating_sub(HERMES_UI_PROMPT_COL);
+        self.prompt_cursor = self
+            .prompt_scroll
+            .saturating_add(offset)
+            .min(self.prompt.len());
+        self.sync_prompt_scroll();
+        self.dirty.prompt = true;
+    }
+
+    fn clear_prompt(&mut self) {
+        self.prompt.clear();
+        self.prompt_cursor = 0;
+        self.prompt_scroll = 0;
+        self.response_scroll = 0;
+        self.last_answer = String::from("Prompt cleared.");
+        self.activity = String::from("Composer cleared.");
+        self.status = String::from("Cleared");
+        self.focus = HermesUiFocus::Prompt;
+        self.dirty.prompt = true;
+        self.dirty.actions = true;
+        self.dirty.response = true;
+        self.dirty.activity = true;
+        self.dirty.status = true;
+    }
+
+    fn focus_next(&mut self) {
+        self.focus = match self.focus {
+            HermesUiFocus::Prompt => HermesUiFocus::Send,
+            HermesUiFocus::Send => HermesUiFocus::Clear,
+            HermesUiFocus::Clear => HermesUiFocus::Load,
+            HermesUiFocus::Load => HermesUiFocus::Test,
+            HermesUiFocus::Test => HermesUiFocus::Exit,
+            HermesUiFocus::Exit => HermesUiFocus::Prompt,
+        };
+        self.dirty.prompt = true;
+        self.dirty.actions = true;
+        self.dirty.status = true;
+    }
+
+    fn focus_previous(&mut self) {
+        self.focus = match self.focus {
+            HermesUiFocus::Prompt => HermesUiFocus::Exit,
+            HermesUiFocus::Send => HermesUiFocus::Prompt,
+            HermesUiFocus::Clear => HermesUiFocus::Send,
+            HermesUiFocus::Load => HermesUiFocus::Clear,
+            HermesUiFocus::Test => HermesUiFocus::Load,
+            HermesUiFocus::Exit => HermesUiFocus::Test,
+        };
+        self.dirty.prompt = true;
+        self.dirty.actions = true;
+        self.dirty.status = true;
+    }
+
+    fn load_active_preset(&mut self) {
+        self.prompt.clear();
+        self.prompt.push_str(HERMES_UI_PRESETS[self.active_preset]);
+        self.prompt_cursor = self.prompt.len();
+        self.prompt_scroll = 0;
+        self.focus = HermesUiFocus::Prompt;
+        self.status = String::from("Preset loaded");
+        self.sync_prompt_scroll();
+        self.dirty.prompt = true;
+        self.dirty.actions = true;
+        self.dirty.presets = true;
+        self.dirty.status = true;
+    }
+
+    fn next_preset(&mut self) {
+        self.active_preset = (self.active_preset + 1) % HERMES_UI_PRESETS.len();
+        self.status = String::from("Preset selected");
+        self.dirty.presets = true;
+        self.dirty.status = true;
+    }
+
+    fn previous_preset(&mut self) {
+        if self.active_preset == 0 {
+            self.active_preset = HERMES_UI_PRESETS.len().saturating_sub(1);
+        } else {
+            self.active_preset -= 1;
+        }
+        self.status = String::from("Preset selected");
+        self.dirty.presets = true;
+        self.dirty.status = true;
+    }
+
+    fn scroll_response_up(&mut self, amount: usize) {
+        self.response_scroll = self.response_scroll.saturating_sub(amount);
+        self.dirty.response = true;
+        self.dirty.status = true;
+    }
+
+    fn scroll_response_down(&mut self, amount: usize) {
+        self.response_scroll = self.response_scroll.saturating_add(amount);
+        self.dirty.response = true;
+        self.dirty.status = true;
+    }
+
+    fn force_redraw(&mut self) {
+        self.status = String::from("Redrawn");
+        self.dirty = HermesUiDirty::all();
+    }
+}
+
+fn run_hermes_ui_entry(ctx: &mut ShellContext) {
+    let mut state = HermesUiState::new();
+    hermes_ui_enter(ctx);
+
+    loop {
+        hermes_ui_render(ctx, &mut state);
+        let event = hermes_ui_read_event();
+        match hermes_ui_handle_event(&mut state, event) {
+            HermesUiCommand::Continue => {}
+            HermesUiCommand::Submit => hermes_ui_submit(ctx, &mut state),
+            HermesUiCommand::RunTest => hermes_ui_run_test(ctx, &mut state),
+            HermesUiCommand::Exit => break,
+        }
+    }
+
+    hermes_ui_leave(ctx);
+    ctx.serial.write_str("leaving Hermes UI\n");
+}
+
+fn hermes_ui_enter(ctx: &mut ShellContext) {
+    ctx.serial
+        .write_str("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[2J\x1b[H");
+}
+
+fn hermes_ui_leave(ctx: &mut ShellContext) {
+    ctx.serial
+        .write_str("\x1b[0m\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l");
+}
+
+fn hermes_ui_submit(ctx: &mut ShellContext, state: &mut HermesUiState) {
+    let prompt = String::from(trim_ascii_shell(state.prompt.as_str()));
+    if prompt.is_empty() {
+        state.last_answer = String::from("Prompt is empty.");
+        state.status = String::from("Nothing to send");
+        state.dirty.response = true;
+        state.dirty.status = true;
+        return;
+    }
+
+    state.status = String::from("Submitting...");
+    state.activity =
+        String::from("Running tools, skills, delegation, Gemma, and transcript write.");
+    state.dirty.response = true;
+    state.dirty.activity = true;
+    state.dirty.status = true;
+    hermes_ui_render(ctx, state);
+    match crate::user_level::hermes_agent::run_prompt(prompt.as_str()) {
+        Ok(turn) => {
+            state.last_answer.clear();
+            state.last_answer.push_str(turn.answer.as_str());
+            state.last_answer.push_str("\nmetrics: tools=");
+            append_usize_shell(&mut state.last_answer, turn.tool_calls);
+            state.last_answer.push_str(" skills=");
+            append_usize_shell(&mut state.last_answer, turn.skill_hits);
+            state.last_answer.push_str(" delegates=");
+            append_usize_shell(&mut state.last_answer, turn.delegated_agents);
+            state.last_answer.push_str(" transcript=");
+            append_usize_shell(&mut state.last_answer, turn.transcript_bytes);
+            state.last_answer.push('B');
+            state.activity.clear();
+            state.activity.push_str("prompt bytes=");
+            append_usize_shell(&mut state.activity, turn.prompt.len());
+            state.activity.push_str("\ntools=");
+            append_usize_shell(&mut state.activity, turn.tool_calls);
+            state.activity.push_str(" skills=");
+            append_usize_shell(&mut state.activity, turn.skill_hits);
+            state.activity.push_str("\ndelegates=");
+            append_usize_shell(&mut state.activity, turn.delegated_agents);
+            state.activity.push_str(" tokens=");
+            append_usize_shell(&mut state.activity, turn.model_tokens);
+            state.activity.push_str("\ntranscript=");
+            append_usize_shell(&mut state.activity, turn.transcript_bytes);
+            state.activity.push_str("B\nskills: ");
+            state.activity.push_str(turn.skill_summary.as_str());
+            state.status = String::from("Response updated");
+            state.response_scroll = 0;
+            state.refresh_metrics();
+            state.dirty.response = true;
+            state.dirty.activity = true;
+            state.dirty.status = true;
+        }
+        Err(err) => {
+            state.last_answer.clear();
+            state.last_answer.push_str("Hermes error: ");
+            state.last_answer.push_str(err.as_str());
+            state.activity.clear();
+            state.activity.push_str("Last run failed: ");
+            state.activity.push_str(err.as_str());
+            state.status = String::from("Hermes error");
+            state.response_scroll = 0;
+            state.dirty.response = true;
+            state.dirty.activity = true;
+            state.dirty.status = true;
+        }
+    }
+}
+
+fn hermes_ui_run_test(ctx: &mut ShellContext, state: &mut HermesUiState) {
+    state.status = String::from("Running smoke test...");
+    state.activity = String::from("Executing hermes test path.");
+    state.dirty.activity = true;
+    state.dirty.status = true;
+    hermes_ui_render(ctx, state);
+
+    match crate::user_level::hermes_agent::run_full_test() {
+        Ok(report) if report.passed() => {
+            state.last_answer = String::from(
+                "Hermes smoke test passed. Config, model route, skills, memory, tools, delegation, Gemma, cron, transcript, /svc, and web UI are healthy.",
+            );
+            state.activity.clear();
+            state.activity.push_str("test: pass\ntools=");
+            append_usize_shell(&mut state.activity, report.turn.tool_calls);
+            state.activity.push_str(" delegates=");
+            append_usize_shell(&mut state.activity, report.turn.delegated_agents);
+            state.activity.push_str("\ntokens=");
+            append_usize_shell(&mut state.activity, report.turn.model_tokens);
+            state.activity.push_str(" transcript=");
+            append_usize_shell(&mut state.activity, report.turn.transcript_bytes);
+            state.activity.push('B');
+            state.status = String::from("Smoke test passed");
+            state.response_scroll = 0;
+            state.refresh_metrics();
+        }
+        Ok(report) => {
+            state.last_answer = String::from("Hermes smoke test returned an incomplete report.");
+            state.activity.clear();
+            state.activity.push_str("test: incomplete\ntools=");
+            append_usize_shell(&mut state.activity, report.turn.tool_calls);
+            state.activity.push_str(" tokens=");
+            append_usize_shell(&mut state.activity, report.turn.model_tokens);
+            state.status = String::from("Smoke test incomplete");
+            state.response_scroll = 0;
+        }
+        Err(err) => {
+            state.last_answer.clear();
+            state.last_answer.push_str("Hermes smoke test failed: ");
+            state.last_answer.push_str(err.as_str());
+            state.activity.clear();
+            state.activity.push_str("test: failed\n");
+            state.activity.push_str(err.as_str());
+            state.status = String::from("Smoke test failed");
+            state.response_scroll = 0;
+        }
+    }
+    state.dirty.response = true;
+    state.dirty.activity = true;
+    state.dirty.status = true;
+}
+
+fn hermes_ui_handle_event(state: &mut HermesUiState, event: HermesUiEvent) -> HermesUiCommand {
+    match event {
+        HermesUiEvent::Key(key) => hermes_ui_handle_key(state, key),
+        HermesUiEvent::Mouse(mouse) => hermes_ui_handle_mouse(state, mouse),
+    }
+}
+
+fn hermes_ui_handle_key(state: &mut HermesUiState, key: HermesUiKey) -> HermesUiCommand {
+    match key {
+        HermesUiKey::Esc | HermesUiKey::CtrlC => return HermesUiCommand::Exit,
+        HermesUiKey::Enter => match state.focus {
+            HermesUiFocus::Prompt | HermesUiFocus::Send => return HermesUiCommand::Submit,
+            HermesUiFocus::Clear => state.clear_prompt(),
+            HermesUiFocus::Load => state.load_active_preset(),
+            HermesUiFocus::Test => return HermesUiCommand::RunTest,
+            HermesUiFocus::Exit => return HermesUiCommand::Exit,
+        },
+        HermesUiKey::Tab => state.focus_next(),
+        HermesUiKey::BackTab => state.focus_previous(),
+        HermesUiKey::Left => {
+            if state.focus == HermesUiFocus::Prompt {
+                state.move_prompt_left();
+            } else {
+                state.focus_previous();
+            }
+        }
+        HermesUiKey::Right => {
+            if state.focus == HermesUiFocus::Prompt {
+                state.move_prompt_right();
+            } else {
+                state.focus_next();
+            }
+        }
+        HermesUiKey::Home => {
+            state.prompt_cursor = 0;
+            state.sync_prompt_scroll();
+            state.dirty.prompt = true;
+        }
+        HermesUiKey::End => {
+            state.prompt_cursor = state.prompt.len();
+            state.sync_prompt_scroll();
+            state.dirty.prompt = true;
+        }
+        HermesUiKey::Backspace => state.delete_before_cursor(),
+        HermesUiKey::Delete => state.delete_at_cursor(),
+        HermesUiKey::CtrlL => state.force_redraw(),
+        HermesUiKey::CtrlN => state.next_preset(),
+        HermesUiKey::CtrlU => state.clear_prompt(),
+        HermesUiKey::Up => state.scroll_response_up(1),
+        HermesUiKey::Down => state.scroll_response_down(1),
+        HermesUiKey::PageUp => state.scroll_response_up(HERMES_UI_RESPONSE_ROWS),
+        HermesUiKey::PageDown => state.scroll_response_down(HERMES_UI_RESPONSE_ROWS),
+        HermesUiKey::Char(byte) => {
+            if state.focus == HermesUiFocus::Prompt {
+                state.insert_byte(byte);
+            } else {
+                match byte.to_ascii_lowercase() {
+                    b's' => return HermesUiCommand::Submit,
+                    b'c' => state.clear_prompt(),
+                    b'l' => state.load_active_preset(),
+                    b'n' => state.next_preset(),
+                    b'p' => state.previous_preset(),
+                    b't' => return HermesUiCommand::RunTest,
+                    b'q' => return HermesUiCommand::Exit,
+                    _ => {}
+                }
+            }
+        }
+        HermesUiKey::Unknown => {}
+    }
+    HermesUiCommand::Continue
+}
+
+fn hermes_ui_handle_mouse(state: &mut HermesUiState, mouse: HermesMouseEvent) -> HermesUiCommand {
+    if mouse.button == HermesMouseButton::WheelUp {
+        state.scroll_response_up(1);
+        return HermesUiCommand::Continue;
+    }
+    if mouse.button == HermesMouseButton::WheelDown {
+        state.scroll_response_down(1);
+        return HermesUiCommand::Continue;
+    }
+    if mouse.button != HermesMouseButton::Left || !mouse.pressed {
+        return HermesUiCommand::Continue;
+    }
+
+    if mouse.y == HERMES_UI_PROMPT_ROW && mouse.x >= HERMES_UI_PROMPT_COL {
+        state.focus = HermesUiFocus::Prompt;
+        state.set_prompt_cursor_from_screen(mouse.x);
+        state.status = String::from("Editing prompt");
+        state.dirty.actions = true;
+        state.dirty.status = true;
+        return HermesUiCommand::Continue;
+    }
+    if hermes_ui_point_in_button(mouse.x, mouse.y, HERMES_UI_SEND_COL) {
+        state.focus = HermesUiFocus::Send;
+        state.dirty.actions = true;
+        return HermesUiCommand::Submit;
+    }
+    if hermes_ui_point_in_button(mouse.x, mouse.y, HERMES_UI_CLEAR_COL) {
+        state.focus = HermesUiFocus::Clear;
+        state.clear_prompt();
+        return HermesUiCommand::Continue;
+    }
+    if hermes_ui_point_in_button(mouse.x, mouse.y, HERMES_UI_LOAD_COL) {
+        state.focus = HermesUiFocus::Load;
+        state.load_active_preset();
+        return HermesUiCommand::Continue;
+    }
+    if hermes_ui_point_in_button(mouse.x, mouse.y, HERMES_UI_TEST_COL) {
+        state.focus = HermesUiFocus::Test;
+        state.dirty.actions = true;
+        return HermesUiCommand::RunTest;
+    }
+    if hermes_ui_point_in_button(mouse.x, mouse.y, HERMES_UI_EXIT_COL) {
+        state.focus = HermesUiFocus::Exit;
+        state.dirty.actions = true;
+        return HermesUiCommand::Exit;
+    }
+    if mouse.y >= HERMES_UI_RESPONSE_ROW
+        && mouse.y < HERMES_UI_RESPONSE_ROW.saturating_add(HERMES_UI_RESPONSE_ROWS)
+    {
+        state.focus = HermesUiFocus::Prompt;
+        state.status = String::from("Response selected");
+        state.dirty.actions = true;
+        state.dirty.status = true;
+    }
+    if mouse.y >= HERMES_UI_PRESET_ROW
+        && mouse.y < HERMES_UI_PRESET_ROW.saturating_add(HERMES_UI_PRESET_HEIGHT)
+    {
+        state.next_preset();
+        state.load_active_preset();
+    }
+    HermesUiCommand::Continue
+}
+
+fn hermes_ui_point_in_button(x: usize, y: usize, col: usize) -> bool {
+    y == HERMES_UI_BUTTON_ROW && x >= col && x < col.saturating_add(HERMES_UI_BUTTON_WIDTH)
+}
+
+fn hermes_ui_read_event() -> HermesUiEvent {
+    let byte = UserShell::read_uart_byte();
+    match byte {
+        b'\r' | b'\n' => HermesUiEvent::Key(HermesUiKey::Enter),
+        b'\t' => HermesUiEvent::Key(HermesUiKey::Tab),
+        b'\x03' => HermesUiEvent::Key(HermesUiKey::CtrlC),
+        b'\x0c' => HermesUiEvent::Key(HermesUiKey::CtrlL),
+        b'\x0e' => HermesUiEvent::Key(HermesUiKey::CtrlN),
+        b'\x15' => HermesUiEvent::Key(HermesUiKey::CtrlU),
+        b'\x08' | b'\x7f' => HermesUiEvent::Key(HermesUiKey::Backspace),
+        b'\x1b' => hermes_ui_read_escape_event(),
+        byte if user_logic::ascii_shell_input(byte) => HermesUiEvent::Key(HermesUiKey::Char(byte)),
+        _ => HermesUiEvent::Key(HermesUiKey::Unknown),
+    }
+}
+
+fn hermes_ui_read_escape_event() -> HermesUiEvent {
+    let Some(first) = hermes_ui_read_sequence_byte() else {
+        return HermesUiEvent::Key(HermesUiKey::Esc);
+    };
+    if first != b'[' && first != b'O' {
+        return HermesUiEvent::Key(HermesUiKey::Esc);
+    }
+
+    let Some(second) = hermes_ui_read_sequence_byte() else {
+        return HermesUiEvent::Key(HermesUiKey::Esc);
+    };
+    if first == b'O' {
+        return HermesUiEvent::Key(match second {
+            b'A' => HermesUiKey::Up,
+            b'B' => HermesUiKey::Down,
+            b'C' => HermesUiKey::Right,
+            b'D' => HermesUiKey::Left,
+            b'H' => HermesUiKey::Home,
+            b'F' => HermesUiKey::End,
+            _ => HermesUiKey::Unknown,
+        });
+    }
+
+    match second {
+        b'A' => HermesUiEvent::Key(HermesUiKey::Up),
+        b'B' => HermesUiEvent::Key(HermesUiKey::Down),
+        b'C' => HermesUiEvent::Key(HermesUiKey::Right),
+        b'D' => HermesUiEvent::Key(HermesUiKey::Left),
+        b'H' => HermesUiEvent::Key(HermesUiKey::Home),
+        b'F' => HermesUiEvent::Key(HermesUiKey::End),
+        b'Z' => HermesUiEvent::Key(HermesUiKey::BackTab),
+        b'<' => hermes_ui_read_sgr_mouse_event(),
+        b'M' => hermes_ui_read_legacy_mouse_event(),
+        byte if byte.is_ascii_digit() => hermes_ui_read_csi_numbered_event(byte),
+        _ => HermesUiEvent::Key(HermesUiKey::Unknown),
+    }
+}
+
+fn hermes_ui_read_csi_numbered_event(first: u8) -> HermesUiEvent {
+    let mut bytes = [0u8; 8];
+    let mut len = 0usize;
+    bytes[len] = first;
+    len += 1;
+    while len < bytes.len() {
+        let Some(byte) = hermes_ui_read_sequence_byte() else {
+            break;
+        };
+        bytes[len] = byte;
+        len += 1;
+        if byte == b'~' || byte.is_ascii_alphabetic() {
+            break;
+        }
+    }
+
+    let key = if len >= 2 && bytes[len - 1] == b'~' {
+        match bytes[0] {
+            b'1' | b'7' => HermesUiKey::Home,
+            b'3' => HermesUiKey::Delete,
+            b'5' => HermesUiKey::PageUp,
+            b'6' => HermesUiKey::PageDown,
+            b'4' | b'8' => HermesUiKey::End,
+            _ => HermesUiKey::Unknown,
+        }
+    } else {
+        HermesUiKey::Unknown
+    };
+    HermesUiEvent::Key(key)
+}
+
+fn hermes_ui_read_sgr_mouse_event() -> HermesUiEvent {
+    let mut values = [0usize; 3];
+    let mut value_index = 0usize;
+    let mut current = 0usize;
+    let mut have_digit = false;
+
+    for _ in 0..24 {
+        let Some(byte) = hermes_ui_read_sequence_byte() else {
+            return HermesUiEvent::Key(HermesUiKey::Unknown);
+        };
+        if byte.is_ascii_digit() {
+            current = current
+                .saturating_mul(10)
+                .saturating_add((byte - b'0') as usize);
+            have_digit = true;
+        } else if byte == b';' {
+            if value_index >= values.len() || !have_digit {
+                return HermesUiEvent::Key(HermesUiKey::Unknown);
+            }
+            values[value_index] = current;
+            value_index += 1;
+            current = 0;
+            have_digit = false;
+        } else if byte == b'M' || byte == b'm' {
+            if value_index >= values.len() || !have_digit {
+                return HermesUiEvent::Key(HermesUiKey::Unknown);
+            }
+            values[value_index] = current;
+            return HermesUiEvent::Mouse(HermesMouseEvent {
+                x: values[1],
+                y: values[2],
+                button: hermes_mouse_button(values[0]),
+                pressed: byte == b'M',
+            });
+        } else {
+            return HermesUiEvent::Key(HermesUiKey::Unknown);
+        }
+    }
+
+    HermesUiEvent::Key(HermesUiKey::Unknown)
+}
+
+fn hermes_ui_read_legacy_mouse_event() -> HermesUiEvent {
+    let Some(button_byte) = hermes_ui_read_sequence_byte() else {
+        return HermesUiEvent::Key(HermesUiKey::Unknown);
+    };
+    let Some(x_byte) = hermes_ui_read_sequence_byte() else {
+        return HermesUiEvent::Key(HermesUiKey::Unknown);
+    };
+    let Some(y_byte) = hermes_ui_read_sequence_byte() else {
+        return HermesUiEvent::Key(HermesUiKey::Unknown);
+    };
+    if button_byte < 32 || x_byte < 32 || y_byte < 32 {
+        return HermesUiEvent::Key(HermesUiKey::Unknown);
+    }
+    let code = (button_byte - 32) as usize;
+    HermesUiEvent::Mouse(HermesMouseEvent {
+        x: (x_byte - 32) as usize,
+        y: (y_byte - 32) as usize,
+        button: hermes_mouse_button(code),
+        pressed: code & 0x3 != 0x3,
+    })
+}
+
+fn hermes_ui_read_sequence_byte() -> Option<u8> {
+    for _ in 0..4096 {
+        if let Some(byte) = UserShell::try_read_uart_byte() {
+            return Some(byte);
+        }
+        core::hint::spin_loop();
+    }
+    None
+}
+
+fn hermes_mouse_button(code: usize) -> HermesMouseButton {
+    if code & 64 != 0 {
+        if code & 1 == 0 {
+            HermesMouseButton::WheelUp
+        } else {
+            HermesMouseButton::WheelDown
+        }
+    } else {
+        match code & 0x3 {
+            0 => HermesMouseButton::Left,
+            _ => HermesMouseButton::Other,
+        }
+    }
+}
+
+fn hermes_ui_render(ctx: &mut ShellContext, state: &mut HermesUiState) {
+    state.sync_prompt_scroll();
+    let total_response_lines =
+        wrapped_line_count(state.last_answer.as_str(), HERMES_UI_RESPONSE_WIDTH).max(1);
+    let max_scroll = total_response_lines.saturating_sub(HERMES_UI_RESPONSE_ROWS);
+    if state.response_scroll > max_scroll {
+        state.response_scroll = max_scroll;
+        state.dirty.response = true;
+    }
+
+    if state.dirty.layout {
+        ctx.serial.write_str("\x1b[0m\x1b[2J\x1b[H");
+        hermes_ui_draw_box(
+            ctx,
+            HERMES_UI_PROMPT_BOX_ROW,
+            HERMES_UI_LEFT_COL,
+            HERMES_UI_LEFT_WIDTH,
+            HERMES_UI_PROMPT_BOX_HEIGHT,
+            "Prompt Composer",
+            false,
+        );
+        hermes_ui_draw_box(
+            ctx,
+            HERMES_UI_RUNTIME_ROW,
+            HERMES_UI_RIGHT_COL,
+            HERMES_UI_RIGHT_WIDTH,
+            HERMES_UI_RUNTIME_HEIGHT,
+            "Runtime",
+            false,
+        );
+        hermes_ui_draw_box(
+            ctx,
+            HERMES_UI_RESPONSE_BOX_ROW,
+            HERMES_UI_LEFT_COL,
+            HERMES_UI_LEFT_WIDTH,
+            HERMES_UI_RESPONSE_BOX_HEIGHT,
+            "Response",
+            false,
+        );
+        hermes_ui_draw_box(
+            ctx,
+            HERMES_UI_ACTIVITY_ROW,
+            HERMES_UI_RIGHT_COL,
+            HERMES_UI_RIGHT_WIDTH,
+            HERMES_UI_ACTIVITY_HEIGHT,
+            "Activity",
+            false,
+        );
+        hermes_ui_draw_box(
+            ctx,
+            HERMES_UI_PRESET_ROW,
+            HERMES_UI_LEFT_COL,
+            HERMES_UI_WIDTH - 2,
+            HERMES_UI_PRESET_HEIGHT,
+            "Presets",
+            false,
+        );
+        state.dirty.header = true;
+        state.dirty.prompt = true;
+        state.dirty.actions = true;
+        state.dirty.response = true;
+        state.dirty.runtime = true;
+        state.dirty.activity = true;
+        state.dirty.presets = true;
+        state.dirty.status = true;
+    }
+
+    if state.dirty.header {
+        hermes_ui_move(ctx, 1, 1);
+        ctx.serial
+            .write_str("\x1b[38;2;255;255;255m\x1b[48;2;7;72;137m");
+        hermes_ui_push_fixed(&mut ctx.serial, " Hermes Agent for SMROS", HERMES_UI_WIDTH);
+
+        hermes_ui_move(ctx, 2, 1);
+        ctx.serial
+            .write_str("\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m");
+        hermes_ui_push_fixed(&mut ctx.serial, state.metrics.as_str(), HERMES_UI_WIDTH);
+    }
+
+    if state.dirty.prompt {
+        hermes_ui_draw_prompt_panel(ctx, state);
+    }
+
+    if state.dirty.actions {
+        hermes_ui_draw_actions(ctx, state);
+    }
+
+    if state.dirty.response {
+        hermes_ui_draw_response_panel(ctx, state, total_response_lines);
+    }
+
+    if state.dirty.runtime {
+        hermes_ui_draw_side_panel(
+            ctx,
+            HERMES_UI_RUNTIME_ROW + 1,
+            HERMES_UI_RIGHT_COL + 2,
+            HERMES_UI_RIGHT_WIDTH - 4,
+            HERMES_UI_RUNTIME_HEIGHT - 2,
+            state.runtime.as_str(),
+        );
+    }
+
+    if state.dirty.activity {
+        hermes_ui_draw_side_panel(
+            ctx,
+            HERMES_UI_ACTIVITY_ROW + 1,
+            HERMES_UI_RIGHT_COL + 2,
+            HERMES_UI_RIGHT_WIDTH - 4,
+            HERMES_UI_ACTIVITY_HEIGHT - 2,
+            state.activity.as_str(),
+        );
+    }
+
+    if state.dirty.presets {
+        hermes_ui_draw_presets(ctx, state);
+    }
+
+    if state.dirty.status {
+        hermes_ui_draw_status(ctx, state);
+    }
+
+    ctx.serial.write_str("\x1b[0m");
+    state.dirty.clear();
+}
+
+fn hermes_ui_draw_prompt_panel(ctx: &mut ShellContext, state: &HermesUiState) {
+    hermes_ui_clear_area(
+        ctx,
+        HERMES_UI_PROMPT_BOX_ROW + 1,
+        HERMES_UI_LEFT_COL + 1,
+        HERMES_UI_LEFT_WIDTH - 2,
+        HERMES_UI_PROMPT_BOX_HEIGHT - 2,
+        "\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m",
+    );
+    hermes_ui_move(ctx, HERMES_UI_PROMPT_BOX_ROW + 1, HERMES_UI_LEFT_COL + 2);
+    ctx.serial
+        .write_str("\x1b[38;2;88;99;108m\x1b[48;2;255;255;255m");
+    hermes_ui_push_fixed(
+        &mut ctx.serial,
+        "Enter sends. Ctrl-N preset, Ctrl-U clear, Ctrl-L redraw.",
+        HERMES_UI_LEFT_WIDTH - 4,
+    );
+    hermes_ui_draw_prompt(ctx, state);
+    hermes_ui_move(ctx, HERMES_UI_PROMPT_BOX_ROW + 4, HERMES_UI_LEFT_COL + 2);
+    ctx.serial
+        .write_str("\x1b[38;2;88;99;108m\x1b[48;2;255;255;255m");
+    let mut meta = String::from("chars ");
+    append_usize_shell(&mut meta, state.prompt.len());
+    meta.push('/');
+    append_usize_shell(&mut meta, HERMES_UI_PROMPT_MAX);
+    meta.push_str("  scroll ");
+    append_usize_shell(&mut meta, state.prompt_scroll);
+    hermes_ui_push_fixed(&mut ctx.serial, meta.as_str(), HERMES_UI_LEFT_WIDTH - 4);
+}
+
+fn hermes_ui_draw_prompt(ctx: &mut ShellContext, state: &HermesUiState) {
+    hermes_ui_move(ctx, HERMES_UI_PROMPT_ROW, HERMES_UI_PROMPT_COL);
+    ctx.serial
+        .write_str("\x1b[38;2;23;32;38m\x1b[48;2;248;250;252m");
+    let bytes = state.prompt.as_bytes();
+    for index in 0..HERMES_UI_PROMPT_WIDTH {
+        let prompt_index = state.prompt_scroll.saturating_add(index);
+        let byte = if prompt_index < bytes.len() {
+            bytes[prompt_index]
+        } else {
+            b' '
+        };
+        if prompt_index == state.prompt_cursor && state.focus == HermesUiFocus::Prompt {
+            ctx.serial
+                .write_str("\x1b[38;2;255;255;255m\x1b[48;2;11;107;203m");
+            ctx.serial
+                .write_byte(if byte == b' ' { b' ' } else { byte });
+            ctx.serial
+                .write_str("\x1b[38;2;23;32;38m\x1b[48;2;248;250;252m");
+        } else {
+            ctx.serial.write_byte(sanitize_terminal_byte(byte));
+        }
+    }
+}
+
+fn hermes_ui_draw_actions(ctx: &mut ShellContext, state: &HermesUiState) {
+    hermes_ui_draw_button(
+        ctx,
+        "Send",
+        HERMES_UI_BUTTON_ROW,
+        HERMES_UI_SEND_COL,
+        state.focus == HermesUiFocus::Send,
+    );
+    hermes_ui_draw_button(
+        ctx,
+        "Clear",
+        HERMES_UI_BUTTON_ROW,
+        HERMES_UI_CLEAR_COL,
+        state.focus == HermesUiFocus::Clear,
+    );
+    hermes_ui_draw_button(
+        ctx,
+        "Load",
+        HERMES_UI_BUTTON_ROW,
+        HERMES_UI_LOAD_COL,
+        state.focus == HermesUiFocus::Load,
+    );
+    hermes_ui_draw_button(
+        ctx,
+        "Test",
+        HERMES_UI_BUTTON_ROW,
+        HERMES_UI_TEST_COL,
+        state.focus == HermesUiFocus::Test,
+    );
+    hermes_ui_draw_button(
+        ctx,
+        "Exit",
+        HERMES_UI_BUTTON_ROW,
+        HERMES_UI_EXIT_COL,
+        state.focus == HermesUiFocus::Exit,
+    );
+}
+
+fn hermes_ui_draw_response_panel(
+    ctx: &mut ShellContext,
+    state: &HermesUiState,
+    total_response_lines: usize,
+) {
+    hermes_ui_clear_area(
+        ctx,
+        HERMES_UI_RESPONSE_BOX_ROW + 1,
+        HERMES_UI_LEFT_COL + 1,
+        HERMES_UI_LEFT_WIDTH - 2,
+        HERMES_UI_RESPONSE_BOX_HEIGHT - 2,
+        "\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m",
+    );
+    hermes_ui_move(ctx, HERMES_UI_RESPONSE_BOX_ROW + 1, HERMES_UI_LEFT_COL + 2);
+    ctx.serial
+        .write_str("\x1b[38;2;88;99;108m\x1b[48;2;255;255;255m");
+    let mut meta = String::from("line ");
+    append_usize_shell(&mut meta, state.response_scroll.saturating_add(1));
+    meta.push('/');
+    append_usize_shell(&mut meta, total_response_lines);
+    meta.push_str("  Up/Down scroll, PgUp/PgDn page");
+    hermes_ui_push_fixed(&mut ctx.serial, meta.as_str(), HERMES_UI_LEFT_WIDTH - 4);
+    hermes_ui_draw_wrapped(
+        ctx,
+        state.last_answer.as_str(),
+        HERMES_UI_RESPONSE_ROW,
+        HERMES_UI_RESPONSE_COL,
+        HERMES_UI_RESPONSE_WIDTH,
+        HERMES_UI_RESPONSE_ROWS,
+        state.response_scroll,
+    );
+}
+
+fn hermes_ui_draw_side_panel(
+    ctx: &mut ShellContext,
+    row: usize,
+    col: usize,
+    width: usize,
+    rows: usize,
+    text: &str,
+) {
+    hermes_ui_clear_area(
+        ctx,
+        row,
+        col,
+        width,
+        rows,
+        "\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m",
+    );
+    hermes_ui_draw_lines(ctx, text, row, col, width, rows);
+}
+
+fn hermes_ui_draw_presets(ctx: &mut ShellContext, state: &HermesUiState) {
+    let row = HERMES_UI_PRESET_ROW + 1;
+    let col = HERMES_UI_LEFT_COL + 2;
+    let width = HERMES_UI_WIDTH - 6;
+    hermes_ui_clear_area(
+        ctx,
+        row,
+        col,
+        width,
+        1,
+        "\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m",
+    );
+    hermes_ui_move(ctx, row, col);
+    ctx.serial
+        .write_str("\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m");
+    let mut line = String::from("Preset ");
+    append_usize_shell(&mut line, state.active_preset + 1);
+    line.push('/');
+    append_usize_shell(&mut line, HERMES_UI_PRESETS.len());
+    line.push_str(": ");
+    line.push_str(HERMES_UI_PRESETS[state.active_preset]);
+    hermes_ui_push_fixed(&mut ctx.serial, line.as_str(), width);
+}
+
+fn hermes_ui_draw_status(ctx: &mut ShellContext, state: &HermesUiState) {
+    hermes_ui_move(ctx, HERMES_UI_STATUS_ROW, 1);
+    ctx.serial
+        .write_str("\x1b[38;2;23;32;38m\x1b[48;2;248;250;252m");
+    let mut status = String::from("Status: ");
+    status.push_str(state.status.as_str());
+    status.push_str(" | Tab focus | Enter action | s/c/l/t/q on buttons | mouse enabled");
+    hermes_ui_push_fixed(&mut ctx.serial, status.as_str(), HERMES_UI_WIDTH);
+}
+
+fn hermes_ui_draw_button(
+    ctx: &mut ShellContext,
+    label: &str,
+    row: usize,
+    col: usize,
+    focused: bool,
+) {
+    hermes_ui_move(ctx, row, col);
+    if focused {
+        ctx.serial
+            .write_str("\x1b[38;2;255;255;255m\x1b[48;2;11;107;203m");
+    } else {
+        ctx.serial
+            .write_str("\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m");
+    }
+    let mut text = String::from("[ ");
+    text.push_str(label);
+    text.push_str(" ]");
+    hermes_ui_push_fixed(&mut ctx.serial, text.as_str(), HERMES_UI_BUTTON_WIDTH);
+}
+
+fn hermes_ui_draw_box(
+    ctx: &mut ShellContext,
+    row: usize,
+    col: usize,
+    width: usize,
+    height: usize,
+    title: &str,
+    focused: bool,
+) {
+    let border_color = if focused {
+        "\x1b[38;2;11;107;203m\x1b[48;2;255;255;255m"
+    } else {
+        "\x1b[38;2;208;216;224m\x1b[48;2;255;255;255m"
+    };
+    let fill_color = "\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m";
+
+    hermes_ui_move(ctx, row, col);
+    ctx.serial.write_str(border_color);
+    ctx.serial.write_byte(b'+');
+    for _ in 0..width.saturating_sub(2) {
+        ctx.serial.write_byte(b'-');
+    }
+    ctx.serial.write_byte(b'+');
+
+    if width > 4 && !title.is_empty() {
+        hermes_ui_move(ctx, row, col + 2);
+        ctx.serial
+            .write_str("\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m");
+        ctx.serial.write_byte(b' ');
+        ctx.serial.write_str(title);
+        ctx.serial.write_byte(b' ');
+    }
+
+    for y in row.saturating_add(1)..row.saturating_add(height.saturating_sub(1)) {
+        hermes_ui_move(ctx, y, col);
+        ctx.serial.write_str(border_color);
+        ctx.serial.write_byte(b'|');
+        ctx.serial.write_str(fill_color);
+        for _ in 0..width.saturating_sub(2) {
+            ctx.serial.write_byte(b' ');
+        }
+        ctx.serial.write_str(border_color);
+        ctx.serial.write_byte(b'|');
+    }
+
+    hermes_ui_move(ctx, row.saturating_add(height.saturating_sub(1)), col);
+    ctx.serial.write_str(border_color);
+    ctx.serial.write_byte(b'+');
+    for _ in 0..width.saturating_sub(2) {
+        ctx.serial.write_byte(b'-');
+    }
+    ctx.serial.write_byte(b'+');
+}
+
+fn hermes_ui_clear_area(
+    ctx: &mut ShellContext,
+    row: usize,
+    col: usize,
+    width: usize,
+    rows: usize,
+    color: &str,
+) {
+    for offset in 0..rows {
+        hermes_ui_move(ctx, row.saturating_add(offset), col);
+        ctx.serial.write_str(color);
+        for _ in 0..width {
+            ctx.serial.write_byte(b' ');
+        }
+    }
+}
+
+fn hermes_ui_draw_lines(
+    ctx: &mut ShellContext,
+    text: &str,
+    row: usize,
+    col: usize,
+    width: usize,
+    max_rows: usize,
+) {
+    let mut drawn = 0usize;
+    for line in text.lines() {
+        if drawn >= max_rows {
+            break;
+        }
+        hermes_ui_move(ctx, row.saturating_add(drawn), col);
+        ctx.serial
+            .write_str("\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m");
+        hermes_ui_push_fixed(&mut ctx.serial, line, width);
+        drawn += 1;
+    }
+}
+
+fn hermes_ui_draw_wrapped(
+    ctx: &mut ShellContext,
+    text: &str,
+    row: usize,
+    col: usize,
+    width: usize,
+    max_rows: usize,
+    skip_rows: usize,
+) {
+    let mut current = String::new();
+    let mut produced = 0usize;
+    let mut drawn = 0usize;
+    for word in text.split_whitespace() {
+        if !current.is_empty() && current.len().saturating_add(1).saturating_add(word.len()) > width
+        {
+            hermes_ui_maybe_draw_wrapped_line(
+                ctx,
+                current.as_str(),
+                row,
+                col,
+                width,
+                max_rows,
+                skip_rows,
+                &mut produced,
+                &mut drawn,
+            );
+            current.clear();
+            if drawn >= max_rows {
+                return;
+            }
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        hermes_ui_maybe_draw_wrapped_line(
+            ctx,
+            current.as_str(),
+            row,
+            col,
+            width,
+            max_rows,
+            skip_rows,
+            &mut produced,
+            &mut drawn,
+        );
+    }
+}
+
+fn hermes_ui_maybe_draw_wrapped_line(
+    ctx: &mut ShellContext,
+    line: &str,
+    row: usize,
+    col: usize,
+    width: usize,
+    max_rows: usize,
+    skip_rows: usize,
+    produced: &mut usize,
+    drawn: &mut usize,
+) {
+    if *produced >= skip_rows && *drawn < max_rows {
+        hermes_ui_move(ctx, row.saturating_add(*drawn), col);
+        ctx.serial
+            .write_str("\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m");
+        hermes_ui_push_fixed(&mut ctx.serial, line, width);
+        *drawn = drawn.saturating_add(1);
+    }
+    *produced = produced.saturating_add(1);
+}
+
+fn wrapped_line_count(text: &str, width: usize) -> usize {
+    let mut current_len = 0usize;
+    let mut count = 0usize;
+    for word in text.split_whitespace() {
+        let word_len = word.len();
+        if current_len > 0 && current_len.saturating_add(1).saturating_add(word_len) > width {
+            count = count.saturating_add(1);
+            current_len = 0;
+        }
+        if current_len > 0 {
+            current_len = current_len.saturating_add(1);
+        }
+        current_len = current_len.saturating_add(word_len);
+    }
+    if current_len > 0 {
+        count = count.saturating_add(1);
+    }
+    count
+}
+
+fn hermes_ui_move(ctx: &mut ShellContext, row: usize, col: usize) {
+    ctx.serial.write_str("\x1b[");
+    print_usize(&mut ctx.serial, row);
+    ctx.serial.write_str(";");
+    print_usize(&mut ctx.serial, col);
+    ctx.serial.write_str("H");
+}
+
+fn hermes_ui_push_fixed(serial: &mut Serial, text: &str, width: usize) {
+    let mut written = 0usize;
+    for byte in text.bytes() {
+        if written >= width {
+            break;
+        }
+        serial.write_byte(sanitize_terminal_byte(byte));
+        written += 1;
+    }
+    for _ in written..width {
+        serial.write_byte(b' ');
+    }
+}
+
+fn sanitize_terminal_byte(byte: u8) -> u8 {
+    if byte == b'\n' || user_logic::ascii_shell_input(byte) {
+        byte
+    } else {
+        b'?'
+    }
+}
+
+fn append_usize_shell(out: &mut String, mut value: usize) {
+    let mut digits = [0u8; 20];
+    let mut len = 0usize;
+    if value == 0 {
+        out.push('0');
+        return;
+    }
+    while value > 0 {
+        digits[len] = b'0' + (value % 10) as u8;
+        value /= 10;
+        len += 1;
+    }
+    while len > 0 {
+        len -= 1;
+        out.push(digits[len] as char);
+    }
+}
+
+fn trim_ascii_shell(value: &str) -> &str {
+    let bytes = value.as_bytes();
+    let mut start = 0usize;
+    let mut end = bytes.len();
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &value[start..end]
 }
 
 fn print_hermes_info(
@@ -4839,6 +6367,14 @@ fn print_hermes_info(
     print_usize(&mut ctx.serial, info.cron_jobs);
     ctx.serial.write_str(" transcripts=");
     print_usize(&mut ctx.serial, info.transcripts);
+    ctx.serial.write_str(" web=");
+    ctx.serial.write_str(info.web_ui_path);
+    ctx.serial.write_str(" bytes=");
+    print_usize(&mut ctx.serial, info.web_ui_bytes);
+    ctx.serial.write_str(" cpu_ui=");
+    ctx.serial.write_str(info.cpu_ui_path);
+    ctx.serial.write_str(" cpu_bytes=");
+    print_usize(&mut ctx.serial, info.cpu_ui_bytes);
     ctx.serial.write_str(" backend=");
     ctx.serial.write_str(info.generation_backend);
     ctx.serial.write_str("\n");
@@ -4872,6 +6408,9 @@ fn run_hermes_agent_tests(ctx: &mut ShellContext) -> bool {
             ctx.serial.write_str(" svc=");
             ctx.serial
                 .write_str(if report.svc_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" web=");
+            ctx.serial
+                .write_str(if report.web_ui_ok { "yes" } else { "no" });
             ctx.serial.write_str("\n");
             true
         }

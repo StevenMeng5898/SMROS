@@ -21,8 +21,8 @@ pub mod services;
 pub use apps::{user_process, user_test};
 pub(crate) use services::user_logic;
 pub use services::{
-    compat_apps, component, docker_compat, elf, fxfs, gemma, hermes_agent, host_share, net,
-    run_elf, svc, user_shell,
+    compat_apps, component, docker_compat, elf, fxfs, gemma, hermes_agent, host_share, html_ui,
+    net, run_elf, svc, user_shell,
 };
 
 /// Initialize user-level process subsystem

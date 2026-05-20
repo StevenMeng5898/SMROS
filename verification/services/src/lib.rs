@@ -6,7 +6,7 @@ verus! {
 
 include!("../../../src/user_level/services/user_logic_shared.rs");
 
-pub const SERVICES_FILE_COUNT: usize = 15;
+pub const SERVICES_FILE_COUNT: usize = 16;
 
 pub const USER_NAMESPACE_RIGHTS_MASK: u32 = 0x7;
 pub const USER_FXFS_MAX_NODES: usize = 8192;
@@ -36,6 +36,7 @@ pub const GEMMA_MAX_OUTPUT_TOKENS: usize = 96;
 pub const GEMMA_DEFAULT_OUTPUT_TOKENS: usize = 32;
 
 pub const HERMES_REQUIRED_TOOLS: usize = 3;
+pub const HERMES_REQUIRED_SKILLS: usize = 4;
 
 pub const MAX_COMPONENTS: usize = 16;
 pub const MAX_PENDING_COMPONENT_LAUNCHES: usize = 4;
@@ -116,8 +117,8 @@ spec fn gemma_test_passed_spec(
     manifest_ok && prompt_ok && generation_ok && log_ok
 }
 
-spec fn hermes_skill_matches_spec(skill_has_smros: bool, skill_has_fxfs: bool, prompt_len: int) -> bool {
-    skill_has_smros && skill_has_fxfs && prompt_len > 0
+spec fn hermes_skill_matches_spec(skill_hits: int, required_skills: int, prompt_len: int) -> bool {
+    skill_hits >= required_skills && required_skills > 0 && prompt_len > 0
 }
 
 spec fn hermes_delegate_allowed_spec(tools_len: int, prompt_len: int) -> bool {
@@ -135,6 +136,7 @@ spec fn hermes_report_passed_spec(
     cron_ok: bool,
     transcript_ok: bool,
     svc_ok: bool,
+    web_ui_ok: bool,
 ) -> bool {
     config_ok
         && model_route_ok
@@ -146,6 +148,7 @@ spec fn hermes_report_passed_spec(
         && cron_ok
         && transcript_ok
         && svc_ok
+        && web_ui_ok
 }
 
 spec fn compat_linux_cat_buffer_valid_spec(payload_len: int, buffer_len: int) -> bool {
@@ -456,11 +459,11 @@ fn gemma_test_passed(
     manifest_ok && prompt_ok && generation_ok && log_ok
 }
 
-fn hermes_skill_matches(skill_has_smros: bool, skill_has_fxfs: bool, prompt_len: usize) -> (out: bool)
+fn hermes_skill_matches(skill_hits: usize, required_skills: usize, prompt_len: usize) -> (out: bool)
     ensures
-        out == hermes_skill_matches_spec(skill_has_smros, skill_has_fxfs, prompt_len as int),
+        out == hermes_skill_matches_spec(skill_hits as int, required_skills as int, prompt_len as int),
 {
-    skill_has_smros && skill_has_fxfs && prompt_len > 0
+    skill_hits >= required_skills && required_skills > 0 && prompt_len > 0
 }
 
 fn hermes_delegate_allowed(tools_len: usize, prompt_len: usize) -> (out: bool)
@@ -481,6 +484,7 @@ fn hermes_report_passed(
     cron_ok: bool,
     transcript_ok: bool,
     svc_ok: bool,
+    web_ui_ok: bool,
 ) -> (out: bool)
     ensures
         out == hermes_report_passed_spec(
@@ -494,6 +498,7 @@ fn hermes_report_passed(
             cron_ok,
             transcript_ok,
             svc_ok,
+            web_ui_ok,
         ),
 {
     config_ok
@@ -506,6 +511,7 @@ fn hermes_report_passed(
         && cron_ok
         && transcript_ok
         && svc_ok
+        && web_ui_ok
 }
 
 fn compat_linux_cat_buffer_valid(payload_len: usize, buffer_len: usize) -> (out: bool)
@@ -1013,11 +1019,13 @@ proof fn gemma_rs_proof_slice() {
 }
 
 proof fn hermes_agent_rs_proof_slice() {
-    assert(hermes_skill_matches_spec(true, true, 1));
-    assert(!hermes_skill_matches_spec(true, true, 0));
+    assert(hermes_skill_matches_spec(HERMES_REQUIRED_SKILLS as int, HERMES_REQUIRED_SKILLS as int, 1));
+    assert(!hermes_skill_matches_spec((HERMES_REQUIRED_SKILLS - 1) as int, HERMES_REQUIRED_SKILLS as int, 1));
+    assert(!hermes_skill_matches_spec(HERMES_REQUIRED_SKILLS as int, HERMES_REQUIRED_SKILLS as int, 0));
     assert(hermes_delegate_allowed_spec(HERMES_REQUIRED_TOOLS as int, 1));
     assert(!hermes_delegate_allowed_spec((HERMES_REQUIRED_TOOLS - 1) as int, 1));
     assert(hermes_report_passed_spec(
+        true,
         true,
         true,
         true,
@@ -1037,9 +1045,15 @@ proof fn host_share_rs_proof_slice()
 {
 }
 
+proof fn html_ui_rs_proof_slice()
+    ensures
+        true,
+{
+}
+
 proof fn mod_rs_proof_slice()
     ensures
-        SERVICES_FILE_COUNT == 15,
+        SERVICES_FILE_COUNT == 16,
 {
 }
 
@@ -1100,7 +1114,7 @@ proof fn user_shell_rs_proof_slice() {
 
 proof fn services_folder_all_files_have_verification_slices()
     ensures
-        SERVICES_FILE_COUNT == 15,
+        SERVICES_FILE_COUNT == 16,
 {
     compat_apps_rs_proof_slice();
     component_rs_proof_slice();
@@ -1110,6 +1124,7 @@ proof fn services_folder_all_files_have_verification_slices()
     gemma_rs_proof_slice();
     hermes_agent_rs_proof_slice();
     host_share_rs_proof_slice();
+    html_ui_rs_proof_slice();
     mod_rs_proof_slice();
     net_rs_proof_slice();
     run_elf_rs_proof_slice();
