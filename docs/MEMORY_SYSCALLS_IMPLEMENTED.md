@@ -20,7 +20,7 @@ SMROS now has:
 - a global `brk` window with grow and shrink page accounting
 - a handle-backed Zircon VMO registry with real `read`, `write`, `get_size`, `set_size`, and `op_range` behavior
 - a software VMAR tree with mapping, protection, allocation, destroy, and unmap bookkeeping
-- a boot-time EL0 `svc #0` smoke test for Linux `write`, `getpid`, `mmap`, and `exit`
+- an explicit EL0 `svc #0` smoke helper for Linux `write`, `getpid`, `mmap`, and `exit`
 - shell-visible memory stats for Linux mappings, `brk`, VMO state, and VMAR state
 - shell `testsc` coverage for the broader syscall compatibility model, including Linux file/fd/poll/stat paths and Zircon time/debug/system/exception and hypervisor paths
 - a richer FxFS-shaped object store with an in-memory object table and block-image persistence when virtio-blk is present
@@ -30,16 +30,16 @@ SMROS now has:
 
 The model is still software bookkeeping layered on top of the real page allocator. It is suitable for syscall bring-up, the dynamic-loader bring-up path, and shell testing, but it is not yet a full per-process hardware page-table runtime.
 
-## Boot-Time EL0 Validation
+## Explicit EL0 Validation
 
-Before the shell starts, SMROS now drops into EL0 and issues real Linux-style syscalls through the active exception vector:
+The fast boot path skips EL0 validation before the shell. The explicit helper can still drop into EL0 and issue real Linux-style syscalls through the active exception vector:
 
 - `write`
 - `getpid`
 - `mmap`
 - `exit`
 
-The kernel records the EL0 syscall results on the EL1 side and prints the validation status before starting the shell. This validates the real `svc` path separately from the later shell `testsc` command.
+The kernel records the EL0 syscall results on the EL1 side and prints the validation status. This validates the real `svc` path separately from the shell `testsc` command.
 
 ## Linux Memory Syscalls
 

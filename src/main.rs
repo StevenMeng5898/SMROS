@@ -16,7 +16,6 @@ mod main_logic;
 mod syscall;
 mod user_level;
 
-use kernel_lowlevel::memory::process_manager;
 use kernel_lowlevel::serial::Serial;
 use kernel_lowlevel::smp::{boot_all_cpus, current_cpu_id, print_status as smp_print_status};
 use kernel_objects::scheduler::schedule_on_cpu;
@@ -782,12 +781,7 @@ pub extern "C" fn kernel_main(fdt_base: usize) -> ! {
     crate::kernel_objects::scheduler::scheduler().init();
     serial.write_str("done\n");
 
-    serial.write_str("[OK] Starting bootstrap component EL0 launchers... ");
-    if crate::user_level::component::start_boot_component_threads() {
-        serial.write_str("done\n");
-    } else {
-        serial.write_str("partial\n");
-    }
+    serial.write_str("[OK] Deferring bootstrap component EL0 launchers until requested\n");
 
     // Enable timer interrupts
     serial.write_str("[OK] Enabling timer interrupts (100Hz tick)... ");
@@ -822,28 +816,12 @@ pub extern "C" fn kernel_main(fdt_base: usize) -> ! {
     boot_all_cpus();
     smp_print_status();
 
-    serial.write_str("\n--- Multi-Process Memory Management ---\n");
-    serial.write_str("Creating sample processes for demonstration...\n\n");
-
-    // Create sample processes for shell demo
-    let pm = process_manager();
-    pm.create_process("shell");
-    pm.create_process("editor");
-    pm.create_process("compiler");
-
-    serial.write_str("[INFO] Created 3 sample processes:\n");
-    serial.write_str("  - shell (PID 2)\n");
-    serial.write_str("  - editor (PID 3)\n");
-    serial.write_str("  - compiler (PID 4)\n\n");
-
-    // Print process and memory status
-    pm.print_status(&mut serial);
-
-    serial.write_str("\n[INFO] Boot complete! Starting user test process...\n");
-
-    // Run the syscall validation by dropping into EL0. This function
-    // continues the boot flow itself after the EL0 test exits.
-    crate::user_level::user_test::run_user_test();
+    serial.write_str(
+        "\n[INFO] Fast boot complete. Starting shell; run testsc for syscall validation.\n",
+    );
+    crate::user_level::user_shell::start_user_shell();
+    serial.write_str("[KERNEL] Starting scheduler - jumping to shell thread...\n\n");
+    crate::kernel_objects::scheduler::start_first_thread();
 }
 
 /// Timer interrupt handler

@@ -136,10 +136,11 @@ It is not yet:
 
 During normal boot:
 
-- `run_user_test()` drops to EL0 and validates the active Linux `svc` path
+- the EL0 syscall smoke helper is skipped so the shell prompt appears sooner
 - the shell runs as an EL1 thread
 - the active `svc` bridge targets Linux syscall numbers below `1000` and Zircon syscall numbers at `1000 + zircon_number`
 - dynamic PIE programs launched by the shell enter EL0 through the current identity-mapped dynamic-loader handoff, then return to the shell through the Linux `exit` hook
+- `testsc` remains the normal developer entry point for broader syscall validation
 
 That means the current boot flow exercises the syscall layer mainly as an internal kernel interface, not as a fully isolated user/kernel boundary.
 

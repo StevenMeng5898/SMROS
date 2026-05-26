@@ -140,24 +140,23 @@ The live synchronous exception handler is assembled in `src/main.rs`. For `svc` 
 During a normal boot:
 
 1. `kernel_main()` calls `user_level::init()`.
-2. `user_level::init()` initializes user process state, probes user-level VirtIO drivers, mounts the FxFS-shaped store, installs the `host_shared/` snapshot under `/shared`, installs tiny ELF boot images under `/pkg/bin`, installs the minimal component boot topology, and registers `/svc` services.
-3. After `scheduler().init()`, `component::start_boot_component_threads()` creates scheduler launcher threads for bootstrap components.
-4. `kernel_main()` calls `run_user_test()`.
-5. `run_user_test()` allocates a small EL0 stack and calls `switch_to_el0()`.
-6. `user_test_process_entry()` runs at EL0 and issues Linux `svc #0` calls.
-7. `sys_exit()` redirects the return path to `el0_test_resume()` in EL1.
-8. `finish_boot_after_user_test()` calls `start_user_shell()`.
-9. `start_user_shell()` creates a normal scheduler thread.
-10. `start_first_thread()` jumps into the first ready scheduler thread. Component launcher threads can drop into EL0 and return through the component exit hook; the shell remains an EL1 thread.
+2. `user_level::init()` initializes user process state, probes user-level VirtIO drivers, mounts the FxFS-shaped store, creates the `/shared` mount point, installs tiny ELF boot images under `/pkg/bin`, installs the minimal component boot topology, and registers `/svc` services.
+3. After `scheduler().init()`, bootstrap component launcher threads are deferred.
+4. `kernel_main()` brings up logical SMP state.
+5. `kernel_main()` calls `start_user_shell()`.
+6. `start_user_shell()` creates a normal scheduler thread.
+7. `start_first_thread()` jumps into the first ready scheduler thread. The shell remains an EL1 thread.
 
 No part of the normal boot path:
 
-- creates a real EL0 process and runs it
+- creates a demo EL0 process and runs it
 - executes `user_shell_entry()` after an EL transition
-- installs a process-specific TTBR0 page table for the EL0 test
+- installs a process-specific TTBR0 page table for the EL0 smoke helper
 - maps shell-loaded ELF `PT_LOAD` bytes into a new process address space
 - enforces per-process handle ownership for the shell
 - runs component manager, FxFS, or user-init as fully isolated userspace servers with copied ELF segments
+- copies the whole `host_shared/` snapshot into FxFS before the prompt
+- runs the EL0 syscall smoke helper before the prompt
 - runs full FIDL protocols or generated bindings
 
 ## Current State By Area
@@ -168,7 +167,7 @@ No part of the normal boot path:
 | User-process data model | present | `UserProcess` exists |
 | EL0 transition helper | present | `switch_to_el0()` exists |
 | Live shell in EL0 | not active | shell runs as EL1 thread |
-| Live test process in EL0 | active | boot test drops to EL0 and returns through the active exception path |
+| Live test process in EL0 | explicit helper | normal boot skips it; the helper still drops to EL0 and returns through the active exception path |
 | Minimal ELF loader | active | parses FxFS ELF files and records entry/segment metadata |
 | Shell dynamic PIE launcher | active bring-up path | maps executable/interpreter into the Linux mmap window and enters loader at EL0 |
 | User-level VirtIO drivers | active | block and net bind under standard QEMU `virt` targets |
@@ -188,16 +187,16 @@ The shell source still contains future-facing comments about EL0. In the current
 
 So the shell is currently a kernel-resident diagnostic shell, not an isolated user process.
 
-## What The Boot-Time EL0 Test Does
+## What The Explicit EL0 Smoke Helper Does
 
-`run_user_test()` in `src/user_level/apps/user_test.rs` currently:
+`run_user_test()` in `src/user_level/apps/user_test.rs` remains available for explicit validation. It currently:
 
 - prints `[EL0]` log prefixes
 - prepares a dedicated 8 KiB EL0 stack
 - marks the EL0 test active for syscall-result recording
 - calls `switch_to_el0(user_test_process_entry, stack_top, 0)`
 - uses `svc #0` from EL0 for Linux `write`, `getpid`, `mmap`, and `exit`
-- resumes kernel boot through `prepare_el0_test_kernel_return()` and `el0_test_resume()`
+- resumes through `prepare_el0_test_kernel_return()` and `el0_test_resume()`
 
 That makes it a real exception-level transition test. It is still not a fully isolated user process because the test uses the lightweight `ttbr0 = 0` setup and does not install a process-owned address space.
 
@@ -207,7 +206,7 @@ The existing scaffolding is useful for the next step toward a real userspace:
 
 - `UserProcess` defines the shape of a future EL0 process object
 - `switch_to_el0()` captures the intended register transition
-- `linux_syscall()` is already used by the boot-time EL0 smoke test
+- `linux_syscall()` is already used by the explicit EL0 smoke helper
 - Linux `mmap` can back FxFS files into the guest memory window, which supports the current dynamic-loader bring-up path
 - `PageTableManager` already has the necessary mapping helpers
 - the component runner already reads ELF metadata from FxFS before starting bootstrap processes
@@ -229,7 +228,7 @@ To move from scaffolding to real user-mode execution, the kernel still needs to:
 
 ## Bottom Line
 
-The current tree has a working EL0 syscall smoke path, but not a fully isolated userspace runtime. The shell boundary is still:
+The current tree has an explicit EL0 syscall smoke path, but not a fully isolated userspace runtime. The shell boundary is still:
 
 ```text
 kernel code
@@ -237,7 +236,7 @@ kernel code
   -> shell and shell-level test helpers
 ```
 
-The boot-time smoke path is:
+The explicit smoke path is:
 
 ```text
 EL0 test payload

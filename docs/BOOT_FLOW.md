@@ -12,22 +12,15 @@ QEMU
   -> user-level VirtIO driver init
   -> FxFS mount or block-image load
   -> logical SMP bring-up
-  -> demo process creation
-  -> run_user_test()
-  -> switch_to_el0()
-  -> user_test_process_entry() at EL0
-  -> svc #0
-  -> exception_handler in src/main.rs
-  -> handle_syscall_simple()
-  -> sys_exit()
-  -> prepare_el0_test_kernel_return()
-  -> el0_test_resume() at EL1
   -> start_user_shell()
   -> start_first_thread()
   -> smros> prompt
 ```
 
-`run_user_test()` is no longer just a kernel-mode smoke test. The boot path now performs a real EL0 drop, issues Linux-style `svc #0` calls, returns through the active EL1 exception path, and then resumes kernel boot.
+Normal boot is intentionally short: it no longer creates demo process records,
+starts bootstrap EL0 launcher threads, or runs the boot-time EL0 syscall smoke
+test before the shell. Run `testsc` from the shell when you want the heavier
+syscall and service validation.
 
 ## 1. QEMU Handoff
 
@@ -123,17 +116,20 @@ By default, `syscall_should_advance_elr()` returns `0`, so the handler does not 
 | 5 | `kernel_lowlevel::timer::init()` | ARM generic timer setup |
 | 6 | `kernel_lowlevel::smp::init()` | SMP bookkeeping and CPU0 registration |
 | 7 | `kernel_lowlevel::memory::init()` | Process manager and page allocator setup |
-| 8 | `crate::syscall::init()` | Logged as "syscall interface" |
-| 9 | `kernel_lowlevel::mmu::init()` | MMU/page-table helper initialization |
-| 10 | `crate::syscall::init()` | Called again, logged as "syscall handler" |
-| 11 | `crate::kernel_objects::channel::init()` | Channel subsystem init log |
-| 12 | `crate::user_level::init()` | user-process state, user-level VirtIO drivers, FxFS, host-share snapshot, component framework, and `/svc` init |
-| 13 | `scheduler().init()` | Creates idle thread and resets scheduler state |
-| 14 | `component::start_boot_component_threads()` | Creates scheduler launcher threads for bootstrap components |
-| 15 | `interrupt::enable_timer_interrupt()` | Logical enable step |
-| 16 | clear `DAIF.I` | Unmasks IRQs on CPU0 |
+| 8 | `crate::kernel_objects::init()` | Installs kernel object rights config |
+| 9 | `crate::syscall::init()` | Logged as "syscall interface" |
+| 10 | `kernel_lowlevel::mmu::init()` | MMU/page-table helper initialization |
+| 11 | `crate::syscall::init()` | Called again, logged as "syscall handler" |
+| 12 | `crate::kernel_objects::channel::init()` | Channel subsystem init log |
+| 13 | `crate::user_level::init()` | user-process state, user-level VirtIO drivers, FxFS, `/shared` mount point, component topology, and `/svc` init |
+| 14 | `scheduler().init()` | Creates idle thread and resets scheduler state |
+| 15 | defer bootstrap component launchers | Keeps normal boot on the fast path |
+| 16 | `interrupt::enable_timer_interrupt()` | Logical enable step |
+| 17 | clear `DAIF.I` | Unmasks IRQs on CPU0 |
 
-After this table, `kernel_main()` brings up logical SMP state, creates demo process records, prints process status, and calls `crate::user_level::user_test::run_user_test()`. That call does not return to `kernel_main()`; the user-test module continues the boot flow after the EL0 test completes.
+After this table, `kernel_main()` brings up logical SMP state, starts the shell
+scheduler thread, and jumps into the scheduler. Demo process creation and the
+boot-time EL0 syscall test are no longer part of normal boot.
 
 ## 4. Runtime Setup After Initialization
 
@@ -141,30 +137,18 @@ After the initial subsystem bring-up, `kernel_main()` continues with:
 
 1. `boot_all_cpus()`
 2. `smp_print_status()`
-3. demo process creation through `process_manager()`:
-   - `shell`
-   - `editor`
-   - `compiler`
-4. `process_manager().print_status(...)`
-5. `run_user_test()`
+3. `start_user_shell()`
+4. `start_first_thread()`
 
-The remaining flow is owned by `src/user_level/apps/user_test.rs`:
-
-1. `run_user_test()` prepares EL0 test state.
-2. It allocates a dedicated 8 KiB EL0 stack.
-3. It records `el0_test_resume` as the EL1 resume address.
-4. It marks the EL0 test active.
-5. It calls `switch_to_el0(user_test_process_entry, stack_top, 0)`.
-6. `user_test_process_entry()` runs at EL0 and issues `write`, `getpid`, `mmap`, and `exit` syscalls.
-7. `sys_exit()` calls `prepare_el0_test_kernel_return()`.
-8. `prepare_el0_test_kernel_return()` rewrites `ELR_EL1` to `el0_test_resume` and sets `SPSR_EL1` for EL1h with interrupts masked.
-9. `eret` resumes at `el0_test_resume()`.
-10. `el0_test_resume()` prints the EL0 validation result.
-11. `finish_boot_after_user_test()` starts the shell thread and jumps into the scheduler.
+The shell reaches the prompt first. Broader syscall, component, FxFS, `/svc`,
+Gemma, Hermes, Docker, and QML cluster checks are explicit shell commands,
+primarily through `testsc` and the service-specific `test` commands.
 
 ## 5. EL0 Transition
 
-The active EL0 transition helper is `switch_to_el0()` in `src/user_level/apps/user_process.rs`.
+The active EL0 transition helper is `switch_to_el0()` in
+`src/user_level/apps/user_process.rs`. It is still used by shell-launched ELF
+programs and component launcher paths, but not by default boot.
 
 It performs:
 
@@ -175,7 +159,8 @@ It performs:
 5. `SPSR_EL1 = 0`, selecting EL0t with interrupts enabled
 6. `eret`
 
-The boot-time test currently passes `ttbr0 = 0`, so this validates the exception/syscall path and stack transition, but it does not yet run a fully isolated user address space with a process-specific page table.
+The old boot-time test passed `ttbr0 = 0`; keeping that validation out of the
+default boot avoids paying its startup cost before the shell.
 
 ## 6. User-Level Drivers, FxFS, And Bootstrap ELF Loading
 
@@ -198,40 +183,22 @@ The current boot ELFs point at the existing SMROS EL0 trampoline. Segment bytes 
 
 FxFS paths resolve through explicit directory entries backed by object ids. File and directory objects carry mode, uid/gid, size, timestamps, and link count. The shell smoke path also exercises append, truncate, seek/read, attribute lookup, and journal replay metadata.
 
-The repository-local `host_shared/` directory is embedded at build time and installed at `/shared`. It is a snapshot, not a live host mount. On each FxFS mount the snapshot is refreshed while persisted deletion tombstones in `/config/host-share-deleted` keep deleted snapshot files hidden across reboot with the same `smros-fxfs.img`.
+The repository-local `host_shared/` directory is embedded at build time and mounted under `/shared` on demand by `share`, `mount share`, and commands that resolve `/shared` dependencies. It is a snapshot, not a live host mount. Persisted deletion tombstones in `/config/host-share-deleted` keep deleted snapshot files hidden across reboot with the same `smros-fxfs.img`.
 
 The same initialization registers a minimal `/svc` directory with component-manager, ELF-runner, and FxFS services. Connections allocate Zircon channel pairs, and the first IPC layer uses fixed 32-byte request/reply structs rather than full FIDL encoding.
 
 The shell `run` command is separate from the bootstrap component loader. It reads a dynamic PIE ELF from FxFS, resolves `PT_INTERP` and `DT_NEEDED` libraries from `/shared/lib` or `/lib`, maps the main executable and dynamic loader into the Linux mmap window, builds a Linux argv/env/auxv stack, and enters the loader at EL0. This is a working bring-up path for simple external AArch64 binaries, but it still uses the identity-mapped model rather than a process-owned TTBR0 address space.
 
-## 7. Active EL0 Syscall Test
+## 7. Explicit EL0 And Syscall Tests
 
-`user_test_process_entry()` runs at EL0 and checks:
+The previous default boot path ran `user_test_process_entry()` at EL0 before
+starting the shell. That test is now kept out of normal boot for latency. The
+EL0 helper code remains in `src/user_level/apps/user_test.rs`, and the broader
+developer validation path is the shell `testsc` command.
 
-- `write(1, banner)` returns the banner length
-- `getpid()` returns `1`
-- `mmap(4096)` returns an address in `0x5000_0000..0x6000_0000`
-- the mapped address is 4 KiB aligned
-- final status writes return their expected lengths
-- `exit(0)` returns control to EL1 boot code
-
-`handle_syscall_simple()` records kernel-observed results while the EL0 test is active:
-
-- first `write()` result
-- `getpid()` result
-- `mmap()` result
-
-`el0_test_resume()` compares the EL0-observed exit code with the kernel-observed syscall results and prints either:
-
-```text
-[EL0] Real EL0 -> SVC -> EL1 validation: SUCCESS
-```
-
-or:
-
-```text
-[EL0] Real EL0 -> SVC -> EL1 validation: FAIL
-```
+`testsc` exercises Linux and Zircon syscall helpers, memory objects, IPC
+objects, component metadata, FxFS, `/svc`, compatibility apps, Docker/runc
+surfaces, Gemma, Hermes, and the QML cluster service.
 
 ## 8. SMP Behavior in the Current Tree
 
@@ -244,14 +211,12 @@ In the current boot path, `boot_all_cpus()` marks all four logical CPUs online f
 
 ## 9. Scheduler Handoff
 
-The scheduler handoff happens after the EL0 test returns to EL1:
+The scheduler handoff happens directly from `kernel_main()`:
 
-1. `finish_boot_after_user_test()` calls `start_user_shell()`.
-2. `start_user_shell()` creates a thread whose entry point is `shell_thread_wrapper`.
-3. `finish_boot_after_user_test()` calls `start_first_thread()`.
-4. `start_first_thread()` finds the first ready non-idle thread.
-5. It marks that thread as running.
-6. It jumps into the new thread with `context_switch_start`.
+1. `start_user_shell()` creates a thread whose entry point is `shell_thread_wrapper`.
+2. `start_first_thread()` finds the first ready non-idle thread.
+3. It marks that thread as running.
+4. It jumps into the new thread with `context_switch_start`.
 
 The context switch code lives in `src/kernel_lowlevel/context_switch.S`.
 
@@ -281,17 +246,15 @@ Important consequences:
 - syscall numbers below `1000` use the Linux dispatch table
 - syscall numbers from `1000` through `1000 + u32::MAX` use the Zircon dispatch table after subtracting `1000`
 - `handle_svc_exception_from_el0()` exists, but is not the handler used by the current assembly
-- `sys_exit()` has a special boot-test hook through `prepare_el0_test_kernel_return()`
+- `sys_exit()` still has an EL0 test hook through `prepare_el0_test_kernel_return()`, but normal boot does not activate it
 
 ## 12. Current User/Kernel Reality
 
-The boot-time syscall test now runs real EL0 code. The shell does not.
+Normal boot starts the shell without running the EL0 syscall test. The shell itself still does not run in EL0.
 
 Today:
 
-- `run_user_test()` drops into EL0 and validates the active `svc #0` path.
-- `user_test_process_entry()` is the active EL0 test payload.
-- `start_user_shell()` still creates a normal kernel scheduler thread.
+- `start_user_shell()` creates a normal kernel scheduler thread.
 - `UserShell` still interacts with serial and kernel data structures directly.
 - `UserProcess` records minimal ELF load metadata for bootstrap components, but mapped user text still uses the lightweight trampoline path.
 - `run_elf` can run a dynamic PIE ELF through the dynamic loader, but it is still not a fully isolated process model.
@@ -305,21 +268,17 @@ A normal QEMU boot currently prints these milestones before reaching the prompt:
 3. SMP initialization
 4. Memory, syscall, MMU, channel, user-level, and scheduler initialization
 5. VirtIO block/net probe and FxFS mount status
-6. Demo process creation
-7. EL0 test setup messages
-8. EL0 syscall-test output
-9. EL1 resume and validation summary
-10. Shell startup messages
-11. `smros>` prompt
+6. Shell startup messages
+7. `smros>` prompt
 
 After the prompt, the shell `testsc` command runs the broader developer smoke suite. Current successful runs cover Linux memory/process/time, signal, IPC, networking, misc, file, directory, fd, poll, and stat paths; Zircon VMO/VMAR, handle/object, signal/wait, port, channel, socket, FIFO, futex, process/thread, time/debug/system/exception, and hypervisor paths; and the minimal component framework, ELF loader, FxFS-shaped object-store scaffold, and `/svc` fixed-message IPC layer.
 
 ## Known Gaps
 
 - The shell is still an EL1 scheduler thread despite the "User-Mode Shell" banner.
-- The boot-time EL0 test validates syscall transition mechanics, but not a fully isolated user address space.
+- The EL0 syscall smoke helpers validate transition mechanics when run explicitly, but they are not part of the normal fast boot and do not provide a fully isolated user address space.
 - The active exception path bypasses the more elaborate `handle_svc_exception_from_el0()` helper.
 - Zircon calls are routed through the live SVC path, but process/thread ownership and handle rights are still simplified kernel-side models.
 - Linux file and directory syscalls are modeled through compatibility objects; FxFS-backed file descriptors now support open/read/write/stat and file-backed `mmap`, but this is not a complete VFS.
 - `/shared` is a build-time host snapshot, not live 9p or virtio-fs sharing.
-- The Fuchsia-inspired userspace layer parses boot component ELF images, creates scheduler launcher threads that enter EL0 for bootstrap component payloads, and has a fixed-message `/svc` IPC layer, but it is still not a full component-manager/FIDL/package-resolver/FxFS port.
+- The Fuchsia-inspired userspace layer parses boot component ELF images and can create scheduler launcher threads that enter EL0 for bootstrap component payloads when requested; it has a fixed-message `/svc` IPC layer, but it is still not a full component-manager/FIDL/package-resolver/FxFS port.

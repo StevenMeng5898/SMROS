@@ -67,6 +67,8 @@ The shell currently registers these commands:
 - `docker`
 - `gemma`
 - `hermes`
+- `hui`
+- `qmlcluster`
 - `uptime`
 - `kill`
 - `testsc`
@@ -194,9 +196,14 @@ hui
 hermes web
 hermes web text
 hermes ask test hermes on smros
+qmlcluster info
+qmlcluster render
+qmlcluster source
+qmlcluster window
+qmlcluster test
 ```
 
-`mount share` refreshes `/shared` from the snapshot compiled into the current kernel image. It does not read the host directory live while QEMU is already running. To see files added to `host_shared/` after boot, rebuild and restart with `make run`; then use `share` or `ls /shared`.
+`share`, `mount share`, and commands that resolve `/shared` dependencies populate `/shared` from the snapshot compiled into the current kernel image on demand. They do not read the host directory live while QEMU is already running. To see files added to `host_shared/` after boot, rebuild and restart with `make run`; then use `share` or `ls /shared`.
 
 The current implementation is a build-time FxFS snapshot because the guest has virtio block and net drivers, but no 9p or virtio-fs filesystem driver yet. Files larger than 64 MiB are skipped by the build script and reported in the `share` command's skipped list. Shell-created files and edits under `/shared` are FxFS-local changes. Deleting a snapshot file such as `/shared/test` records a persisted tombstone in `/config/host-share-deleted`, so the file stays deleted across reboot while the same `smros-fxfs.img` is used. Remove `smros-fxfs.img` with `make clean-fxfs` to reset those tombstones.
 
@@ -248,9 +255,37 @@ hermes web
 hermes web text
 hermes web source
 hermes ask test hermes agent on SMROS
+qmlcluster info
+qmlcluster render
+qmlcluster source
+qmlcluster window
+qmlcluster test
 ```
 
-The shell `testsc` suite includes both the Gemma and Hermes full smoke tests.
+### Qt/QML Vehicle Cluster Port
+
+`qmlcluster` ports a Qt/QML car instrument cluster into SMROS. Because SMROS
+does not host Qt yet, the service stores an embeddable component at
+`/data/qml-cluster/InstrumentCluster.qml`, a direct Qt window wrapper at
+`/data/qml-cluster/ClusterWindow.qml`, parses the dashboard properties, and
+renders the cluster with a native CPU rasterizer into
+`/data/qml-cluster/cluster.ppm`. The default cluster shows speed, rpm, gear,
+drive mode, battery, range, turn indicators, lane/vehicle visualization, and
+warning text. On a Qt host, the same component opens directly with
+`qmlscene host_shared/qml-cluster/ClusterWindow.qml`.
+
+Useful commands:
+
+```text
+qmlcluster info
+qmlcluster render
+qmlcluster source
+qmlcluster window
+qmlcluster test
+```
+
+The shell `testsc` suite includes the Gemma, Hermes, and Qt/QML cluster full
+smoke tests.
 
 The `run` command loads a dynamic PIE ELF from FxFS, parses `PT_INTERP` and `DT_NEEDED`, resolves the dynamic loader and C library from `/shared/lib` or `/lib`, builds an argv/env/auxv stack, and enters the loader from an EL0 launcher thread. For example, `run hello.elf` from `/shared` uses `hello.elf`, `/shared/lib/ld-linux-aarch64.so.1`, and `/shared/lib/libc.so.6` and returns to the shell after the program calls `exit`.
 

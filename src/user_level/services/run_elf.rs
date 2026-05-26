@@ -257,7 +257,14 @@ fn prepare_dynamic_loader(request: &RunRequest) -> Result<(u64, u64), RunElfErro
 }
 
 fn read_fxfs_file(path: &str) -> Result<Vec<u8>, RunElfError> {
-    let attrs = fxfs::attrs(path).map_err(|_| RunElfError::Storage)?;
+    let attrs = match fxfs::attrs(path) {
+        Ok(attrs) => attrs,
+        Err(_) if path_under_shared(path) => {
+            let _ = fxfs::ensure_host_share();
+            fxfs::attrs(path).map_err(|_| RunElfError::Storage)?
+        }
+        Err(_) => return Err(RunElfError::Storage),
+    };
     let mut out = Vec::new();
     out.resize(attrs.size, 0);
     let size = fxfs::read_file(path, &mut out).map_err(|_| RunElfError::Storage)?;
@@ -269,8 +276,15 @@ fn resolve_library_path(name_or_path: &str) -> Option<String> {
     if name_or_path.starts_with('/') && fxfs::attrs(name_or_path).is_ok() {
         return Some(String::from(name_or_path));
     }
+    if path_under_shared(name_or_path) {
+        let _ = fxfs::ensure_host_share();
+        if fxfs::attrs(name_or_path).is_ok() {
+            return Some(String::from(name_or_path));
+        }
+    }
 
     let name = name_or_path.rsplit('/').next().unwrap_or(name_or_path);
+    let _ = fxfs::ensure_host_share();
     let mut shared = String::from("/shared/lib/");
     shared.push_str(name);
     if fxfs::attrs(shared.as_str()).is_ok() {
@@ -284,6 +298,14 @@ fn resolve_library_path(name_or_path: &str) -> Option<String> {
     }
 
     None
+}
+
+fn path_under_shared(path: &str) -> bool {
+    path == "/shared"
+        || path
+            .strip_prefix("/shared")
+            .map(|suffix| suffix.starts_with('/'))
+            .unwrap_or(false)
 }
 
 fn map_elf_image(image: &elf::ElfImage, bytes: &[u8], base: usize) -> Result<(), RunElfError> {

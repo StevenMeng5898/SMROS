@@ -10,6 +10,7 @@ pub mod hermes_agent;
 pub mod host_share;
 pub mod html_ui;
 pub mod net;
+pub mod qml_cluster;
 pub mod run_elf;
 pub mod svc;
 pub(crate) mod user_logic;

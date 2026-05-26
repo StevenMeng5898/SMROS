@@ -1,19 +1,19 @@
 # SMROS
 
-SMROS is an experimental bare-metal AArch64 kernel written in Rust for QEMU's `virt` machine. The current tree boots to a serial diagnostic shell, initializes low-level platform code plus user-level VirtIO block/net drivers, runs an EL0 syscall smoke test, mounts a small FxFS-shaped store, and can launch a dynamic PIE ELF through the shell `run` command.
+SMROS is an experimental bare-metal AArch64 kernel written in Rust for QEMU's `virt` machine. The current tree boots to a serial diagnostic shell, initializes low-level platform code plus user-level VirtIO block/net drivers, mounts a small FxFS-shaped store, keeps heavier syscall validation behind shell commands, and can launch a dynamic PIE ELF through the shell `run` command.
 
 ## Current Status
 
 - Boots on `qemu-system-aarch64` and reaches the `smros>` shell prompt.
 - Uses inline ARM64 boot assembly in `src/main.rs` and context switch routines from `src/kernel_lowlevel/context_switch.S`.
 - Initializes PL011 UART, GICv2, ARM generic timer, MMU/page-table helpers, SMP bookkeeping, kernel objects, channels, scheduler state, and syscall dispatch.
-- Runs a boot-time EL0 `svc #0` smoke test for Linux `write`, `getpid`, `mmap`, and `exit`.
+- Skips the boot-time EL0 smoke test on the fast path; run `testsc` from the shell for syscall validation.
 - Keeps the live shell as an EL1 scheduler thread; the banner is aspirational, not proof of an isolated shell process.
 - Provides modeled Linux and Zircon syscall coverage for memory, handles, IPC, object, timer/debug, hypervisor, networking, file-descriptor, and compatibility-object paths.
 - Initializes a Fuchsia-inspired user-level scaffold with component instances, namespace entries, generated boot ELF metadata, `/svc` fixed-message IPC, an FxFS-shaped object store, and compatibility-app/Docker/runc smoke surfaces.
 - Binds QEMU VirtIO-MMIO block and net devices from user-level driver modules.
 - Uses `smros-fxfs.img` as a persistent 16 MiB block-backed FxFS image when QEMU provides the virtio-blk device.
-- Embeds repository-local `host_shared/` files into the kernel at build time and exposes them in the shell at `/shared`.
+- Embeds repository-local `host_shared/` files into the kernel at build time and mounts them under `/shared` on demand.
 - Supports `run <elf>` for dynamic PIE AArch64 ELF files stored in FxFS. The dynamic loader and C library are resolved from `/shared/lib` or `/lib`.
 - Maintains standalone Verus harnesses for syscall, kernel-object, low-level, and user-level pure helper logic.
 
@@ -142,11 +142,10 @@ The current release build is expected to:
 1. Print the kernel banner and platform initialization logs.
 2. Initialize interrupt, timer, SMP, memory, syscall, MMU, channel, user-level, and scheduler subsystems.
 3. Bind user-level VirtIO block/net drivers when QEMU provides the devices.
-4. Mount or initialize the FxFS-shaped store and install `/pkg`, `/data`, `/tmp`, `/svc`, `/config`, and `/shared`.
-5. Create three demo process records: `shell`, `editor`, and `compiler`.
-6. Run the boot-time EL0 syscall validation.
-7. Start component launcher threads and the shell scheduler thread.
-8. Reach the `smros>` prompt.
+4. Mount or initialize the FxFS-shaped store and install `/pkg`, `/data`, `/tmp`, `/svc`, `/config`, and an empty `/shared` mount point.
+5. Defer `/shared` snapshot population, bootstrap component process launch, and EL0 syscall validation until requested.
+6. Start the shell scheduler thread.
+7. Reach the `smros>` prompt.
 
 ## Shell Highlights
 
@@ -182,6 +181,11 @@ hermes test
 hermes ui
 hui
 hermes ask test hermes agent on SMROS
+qmlcluster info
+qmlcluster render
+qmlcluster source
+qmlcluster window
+qmlcluster test
 ```
 
 `docker load` accepts SMROS-loadable Docker archive tars already stored in FxFS,
@@ -216,6 +220,17 @@ config, provider/model routing, skills, memory, tool calls, delegated subagents,
 cron metadata, `/svc`, Gemma generation, and transcript persistence under
 `/data/hermes`. `gemma test`, `hermes test`, and `testsc` cover the path.
 Use `hermes ui` or `hui` for the full-screen keyboard/mouse terminal UI.
+
+`qmlcluster` ports a Qt/QML vehicle instrument cluster into SMROS. It installs
+`/data/qml-cluster/InstrumentCluster.qml` as an embeddable `Item` component and
+`/data/qml-cluster/ClusterWindow.qml` as the direct Qt window wrapper, parses
+the cluster properties (`speedKph`, `rpm`, `gear`, battery, range, turn
+indicators, and warning text), and renders the dashboard through a native CPU
+rasterizer into `/data/qml-cluster/cluster.ppm`. Use `qmlcluster render` for
+the serial preview and generated PPM path, `qmlcluster source` to inspect the
+component QML, and `qmlcluster window` to inspect the host-runnable window QML.
+On a Qt host, run `qmlscene host_shared/qml-cluster/ClusterWindow.qml` to open
+the cluster directly.
 
 For registry images today, use the host helper. It pulls the `linux/arm64`
 image with Docker, exports a single uncompressed layer, and writes the archive
@@ -345,7 +360,7 @@ The user-level harness now covers pure helper logic for `src/main.rs`, user proc
 ## Known Limitations
 
 - The shell banner says "User-Mode Shell", but the shell currently runs as an EL1 kernel thread.
-- The boot-time EL0 test uses a lightweight `TTBR0_EL1 = 0` setup, not a fully isolated process address space.
+- The explicit EL0 smoke helper uses a lightweight `TTBR0_EL1 = 0` setup when run, not a fully isolated process address space.
 - The shell `testsc` command directly calls most syscall helpers from EL1; it is a developer smoke test, not an external ABI compliance suite.
 - The dynamic PIE launcher works for the current mapped bring-up path, but it does not create a process-owned TTBR0 address space.
 - The syscall layer is broad but modeled; many paths are interface validation, object bookkeeping, or deterministic placeholders.

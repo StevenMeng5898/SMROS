@@ -429,6 +429,7 @@ fn fxfs_shared_relative_path(path: &str) -> Option<&str> {
 
 pub struct FxfsState {
     mounted: bool,
+    host_share_installed: bool,
     block_backed: bool,
     last_sync_ok: bool,
     last_storage_error: Option<FxfsError>,
@@ -447,6 +448,7 @@ impl FxfsState {
     fn new() -> Self {
         Self {
             mounted: false,
+            host_share_installed: false,
             block_backed: false,
             last_sync_ok: false,
             last_storage_error: None,
@@ -553,7 +555,7 @@ impl FxfsState {
                 Ok(()) => {
                     self.last_sync_ok = true;
                     self.last_storage_error = None;
-                    self.install_host_share()?;
+                    self.ensure_dir_tree(FXFS_SHARED_ROOT)?;
                     return Ok(());
                 }
                 Err(FxfsError::NotFound) => {}
@@ -583,19 +585,24 @@ impl FxfsState {
             0,
         );
 
-        self.create_dir("/pkg")?;
-        self.create_dir("/pkg/bin")?;
-        self.create_dir("/data")?;
-        self.create_dir("/tmp")?;
-        self.create_dir("/svc")?;
-        self.create_dir("/config")?;
-        self.create_dir("/config/build-info")?;
-        self.write_file("/pkg/bin/component_manager", b"smros component manager")?;
-        self.write_file("/pkg/bin/fxfs", b"smros fxfs service")?;
-        self.write_file("/pkg/bin/user-init", b"smros user init")?;
-        self.write_file("/config/build-info/product", b"SMROS-Fuchsia-minimal")?;
-        self.install_host_share()?;
-        Ok(())
+        self.suspend_persist();
+        let result = (|| {
+            self.create_dir("/pkg")?;
+            self.create_dir("/pkg/bin")?;
+            self.create_dir("/data")?;
+            self.create_dir("/tmp")?;
+            self.create_dir("/svc")?;
+            self.create_dir("/config")?;
+            self.create_dir("/config/build-info")?;
+            self.create_dir(FXFS_SHARED_ROOT)?;
+            self.write_file("/pkg/bin/component_manager", b"smros component manager")?;
+            self.write_file("/pkg/bin/fxfs", b"smros fxfs service")?;
+            self.write_file("/pkg/bin/user-init", b"smros user init")?;
+            self.write_file("/config/build-info/product", b"SMROS-Fuchsia-minimal")?;
+            Ok(())
+        })();
+        self.resume_persist();
+        result
     }
 
     fn serialize_image(&self) -> Result<Vec<u8>, FxfsError> {
@@ -1356,8 +1363,11 @@ impl FxfsState {
         Ok(())
     }
 
-    fn install_host_share(&mut self) -> Result<(), FxfsError> {
+    fn install_host_share(&mut self, force: bool) -> Result<(), FxfsError> {
         self.ensure_mounted()?;
+        if self.host_share_installed && !force {
+            return Ok(());
+        }
         let block_backed = self.block_backed;
         let last_sync_ok = self.last_sync_ok;
         let last_storage_error = self.last_storage_error;
@@ -1366,6 +1376,7 @@ impl FxfsState {
         let result = self.install_host_share_without_persist();
         self.block_backed = block_backed;
         if result.is_ok() {
+            self.host_share_installed = true;
             self.persist();
         } else {
             self.last_sync_ok = last_sync_ok;
@@ -1661,8 +1672,12 @@ pub fn flush_persist() {
     state().persist()
 }
 
+pub fn ensure_host_share() -> Result<(), FxfsError> {
+    state().install_host_share(false)
+}
+
 pub fn mount_host_share() -> Result<(), FxfsError> {
-    state().install_host_share()
+    state().install_host_share(true)
 }
 
 pub fn read_file(path: &str, out: &mut [u8]) -> Result<usize, FxfsError> {

@@ -209,6 +209,7 @@ impl ServiceDirectory {
         self.total_replies = 0;
         self.last_status = 0;
 
+        let _guard = fxfs::suspend_persist();
         let _ = fxfs::create_dir("/svc");
         self.add_service(SERVICE_COMPONENT_MANAGER, ServiceKind::ComponentManager)
             && self.add_service(SERVICE_ELF_RUNNER, ServiceKind::Runner)

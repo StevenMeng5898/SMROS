@@ -258,39 +258,50 @@ impl ComponentManager {
             root.loaded_segments = 1;
         }
 
-        let Some(fxfs_id) = self.add_component(
-            Some(root_id),
-            "/bootstrap/fxfs",
-            "fuchsia-boot:///#meta/fxfs.cm",
-            RunnerKind::Elf,
-            "/pkg/bin/fxfs",
-            "fxfs",
-        ) else {
+        if self
+            .add_component(
+                Some(root_id),
+                "/bootstrap/fxfs",
+                "fuchsia-boot:///#meta/fxfs.cm",
+                RunnerKind::Elf,
+                "/pkg/bin/fxfs",
+                "fxfs",
+            )
+            .is_none()
+        {
             return false;
         };
-        let Some(init_id) = self.add_component(
-            Some(root_id),
-            "/bootstrap/user-init",
-            "fuchsia-boot:///#meta/user-init.cm",
-            RunnerKind::Elf,
-            "/pkg/bin/user-init",
-            "user_init",
-        ) else {
+        if self
+            .add_component(
+                Some(root_id),
+                "/bootstrap/user-init",
+                "fuchsia-boot:///#meta/user-init.cm",
+                RunnerKind::Elf,
+                "/pkg/bin/user-init",
+                "user_init",
+            )
+            .is_none()
+        {
             return false;
         };
 
-        if !Self::install_boot_elfs() {
-            return false;
-        }
-
-        self.start_component(fxfs_id).is_some() && self.start_component(init_id).is_some()
+        Self::install_boot_elfs()
     }
 
     fn install_boot_elfs() -> bool {
+        let _guard = fxfs::suspend_persist();
         let image = elf::build_trampoline_elf(component_el0_entry as *const () as u64);
         fxfs::write_file("/pkg/bin/component_manager", &image).is_ok()
             && fxfs::write_file("/pkg/bin/fxfs", &image).is_ok()
             && fxfs::write_file("/pkg/bin/user-init", &image).is_ok()
+    }
+
+    fn start_bootstrap_components(&mut self) -> bool {
+        let fxfs_started = self.start_component_by_moniker("/bootstrap/fxfs").is_some();
+        let init_started = self
+            .start_component_by_moniker("/bootstrap/user-init")
+            .is_some();
+        fxfs_started && init_started
     }
 
     fn stats(&self) -> ComponentStats {
@@ -483,6 +494,12 @@ pub fn smoke_test() -> bool {
     if !fxfs::smoke_test() {
         return false;
     }
+    if !manager().start_bootstrap_components() {
+        return false;
+    }
+    if !start_boot_component_threads() {
+        return false;
+    }
     let stats = manager().stats();
     stats.components >= 3
         && stats.started + stats.stopped >= 3
@@ -513,17 +530,16 @@ pub fn prepare_component_return(exit_code: i32) -> bool {
             "msr spsr_el1, {spsr}",
             resume = in(reg) component_launcher_resume as *const () as u64,
             spsr = in(reg) spsr_el1,
-            options(nostack),
+            options(nostack, preserves_flags),
         );
     }
     true
 }
 
-#[no_mangle]
-pub extern "C" fn component_launcher_resume() -> ! {
+extern "C" fn component_launcher_resume() -> ! {
+    let pid = COMPONENT_RETURN_PID.load(Ordering::SeqCst);
+    let exit_code = COMPONENT_RETURN_EXIT_CODE.load(Ordering::SeqCst);
     if COMPONENT_RETURN_ACTIVE.swap(false, Ordering::SeqCst) {
-        let pid = COMPONENT_RETURN_PID.load(Ordering::SeqCst);
-        let exit_code = COMPONENT_RETURN_EXIT_CODE.load(Ordering::SeqCst);
         let _ = manager().mark_component_exited(pid, exit_code);
     }
 

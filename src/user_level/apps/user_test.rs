@@ -252,7 +252,7 @@ pub extern "C" fn el0_test_resume() -> ! {
     finish_boot_after_user_test()
 }
 
-/// Run the boot-time user test by actually dropping into EL0.
+/// Run the explicit user test by actually dropping into EL0.
 pub fn run_user_test() -> ! {
     let mut serial = crate::kernel_lowlevel::serial::Serial::new();
     serial.init();

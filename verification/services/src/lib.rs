@@ -6,7 +6,7 @@ verus! {
 
 include!("../../../src/user_level/services/user_logic_shared.rs");
 
-pub const SERVICES_FILE_COUNT: usize = 16;
+pub const SERVICES_FILE_COUNT: usize = 17;
 
 pub const USER_NAMESPACE_RIGHTS_MASK: u32 = 0x7;
 pub const USER_FXFS_MAX_NODES: usize = 8192;
@@ -37,6 +37,13 @@ pub const GEMMA_DEFAULT_OUTPUT_TOKENS: usize = 32;
 
 pub const HERMES_REQUIRED_TOOLS: usize = 3;
 pub const HERMES_REQUIRED_SKILLS: usize = 4;
+
+pub const QML_CLUSTER_RENDER_WIDTH: usize = 960;
+pub const QML_CLUSTER_RENDER_HEIGHT: usize = 540;
+pub const QML_CLUSTER_QML_WIDTH: usize = 1280;
+pub const QML_CLUSTER_QML_HEIGHT: usize = 720;
+pub const QML_CLUSTER_SPEED_MAX_KPH: usize = 240;
+pub const QML_CLUSTER_RPM_MAX: usize = 8000;
 
 pub const MAX_COMPONENTS: usize = 16;
 pub const MAX_PENDING_COMPONENT_LAUNCHES: usize = 4;
@@ -149,6 +156,27 @@ spec fn hermes_report_passed_spec(
         && transcript_ok
         && svc_ok
         && web_ui_ok
+}
+
+spec fn qml_cluster_dimensions_valid_spec(qml_width: int, qml_height: int, render_width: int, render_height: int) -> bool {
+    qml_width == QML_CLUSTER_QML_WIDTH as int
+        && qml_height == QML_CLUSTER_QML_HEIGHT as int
+        && render_width == QML_CLUSTER_RENDER_WIDTH as int
+        && render_height == QML_CLUSTER_RENDER_HEIGHT as int
+}
+
+spec fn qml_cluster_state_valid_spec(speed_kph: int, rpm: int, battery_percent: int, range_km: int) -> bool {
+    0 <= speed_kph
+        && speed_kph <= QML_CLUSTER_SPEED_MAX_KPH as int
+        && 0 <= rpm
+        && rpm <= QML_CLUSTER_RPM_MAX as int
+        && 0 <= battery_percent
+        && battery_percent <= 100
+        && 0 <= range_km
+}
+
+spec fn qml_cluster_report_passed_spec(qml_ok: bool, parse_ok: bool, render_ok: bool, fxfs_ok: bool) -> bool {
+    qml_ok && parse_ok && render_ok && fxfs_ok
 }
 
 spec fn compat_linux_cat_buffer_valid_spec(payload_len: int, buffer_len: int) -> bool {
@@ -512,6 +540,55 @@ fn hermes_report_passed(
         && transcript_ok
         && svc_ok
         && web_ui_ok
+}
+
+fn qml_cluster_dimensions_valid(
+    qml_width: usize,
+    qml_height: usize,
+    render_width: usize,
+    render_height: usize,
+) -> (out: bool)
+    ensures
+        out == qml_cluster_dimensions_valid_spec(
+            qml_width as int,
+            qml_height as int,
+            render_width as int,
+            render_height as int,
+        ),
+{
+    qml_width == QML_CLUSTER_QML_WIDTH
+        && qml_height == QML_CLUSTER_QML_HEIGHT
+        && render_width == QML_CLUSTER_RENDER_WIDTH
+        && render_height == QML_CLUSTER_RENDER_HEIGHT
+}
+
+fn qml_cluster_state_valid(
+    speed_kph: usize,
+    rpm: usize,
+    battery_percent: usize,
+    range_km: usize,
+) -> (out: bool)
+    ensures
+        out == qml_cluster_state_valid_spec(
+            speed_kph as int,
+            rpm as int,
+            battery_percent as int,
+            range_km as int,
+        ),
+{
+    speed_kph <= QML_CLUSTER_SPEED_MAX_KPH && rpm <= QML_CLUSTER_RPM_MAX && battery_percent <= 100
+}
+
+fn qml_cluster_report_passed(
+    qml_ok: bool,
+    parse_ok: bool,
+    render_ok: bool,
+    fxfs_ok: bool,
+) -> (out: bool)
+    ensures
+        out == qml_cluster_report_passed_spec(qml_ok, parse_ok, render_ok, fxfs_ok),
+{
+    qml_ok && parse_ok && render_ok && fxfs_ok
 }
 
 fn compat_linux_cat_buffer_valid(payload_len: usize, buffer_len: usize) -> (out: bool)
@@ -1053,7 +1130,7 @@ proof fn html_ui_rs_proof_slice()
 
 proof fn mod_rs_proof_slice()
     ensures
-        SERVICES_FILE_COUNT == 16,
+        SERVICES_FILE_COUNT == 17,
 {
 }
 
@@ -1065,6 +1142,27 @@ proof fn net_rs_proof_slice() {
     ));
     assert(net_dns_message_buffer_valid_spec(DNS_MAX_MESSAGE as int));
     assert(net_tcp_payload_len_valid_spec(0, ETHERNET_MTU as int));
+}
+
+proof fn qml_cluster_rs_proof_slice() {
+    assert(qml_cluster_dimensions_valid_spec(
+        QML_CLUSTER_QML_WIDTH as int,
+        QML_CLUSTER_QML_HEIGHT as int,
+        QML_CLUSTER_RENDER_WIDTH as int,
+        QML_CLUSTER_RENDER_HEIGHT as int,
+    ));
+    assert(!qml_cluster_dimensions_valid_spec(
+        QML_CLUSTER_QML_WIDTH as int,
+        QML_CLUSTER_QML_HEIGHT as int,
+        QML_CLUSTER_RENDER_WIDTH as int + 1,
+        QML_CLUSTER_RENDER_HEIGHT as int,
+    ));
+    assert(qml_cluster_state_valid_spec(88, 3200, 78, 326));
+    assert(!qml_cluster_state_valid_spec(QML_CLUSTER_SPEED_MAX_KPH as int + 1, 3200, 78, 326));
+    assert(!qml_cluster_state_valid_spec(88, QML_CLUSTER_RPM_MAX as int + 1, 78, 326));
+    assert(!qml_cluster_state_valid_spec(88, 3200, 101, 326));
+    assert(qml_cluster_report_passed_spec(true, true, true, true));
+    assert(!qml_cluster_report_passed_spec(true, true, false, true));
 }
 
 proof fn run_elf_rs_proof_slice() {
@@ -1114,7 +1212,7 @@ proof fn user_shell_rs_proof_slice() {
 
 proof fn services_folder_all_files_have_verification_slices()
     ensures
-        SERVICES_FILE_COUNT == 16,
+        SERVICES_FILE_COUNT == 17,
 {
     compat_apps_rs_proof_slice();
     component_rs_proof_slice();
@@ -1127,6 +1225,7 @@ proof fn services_folder_all_files_have_verification_slices()
     html_ui_rs_proof_slice();
     mod_rs_proof_slice();
     net_rs_proof_slice();
+    qml_cluster_rs_proof_slice();
     run_elf_rs_proof_slice();
     svc_rs_proof_slice();
     user_logic_rs_proof_slice();

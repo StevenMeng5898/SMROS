@@ -253,6 +253,11 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_hermes_ui,
     },
     ShellCommand {
+        name: "qmlcluster",
+        description: "Render the Qt/QML vehicle cluster port",
+        handler: cmd_qml_cluster,
+    },
+    ShellCommand {
         name: "uptime",
         description: "Show system uptime",
         handler: cmd_uptime,
@@ -3801,6 +3806,10 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         return;
     }
 
+    if !run_qml_cluster_tests(ctx) {
+        return;
+    }
+
     ctx.serial.write_str("[TEST] Closing VMO handle... ");
     match crate::syscall::sys_handle_close(vmo_handle) {
         Ok(_) => ctx.serial.write_str("[OK] handle closed\n"),
@@ -4786,6 +4795,138 @@ fn cmd_hermes(ctx: &mut ShellContext, args: &[&str]) {
 /// Command: hui - Open the interactive Hermes UI
 fn cmd_hermes_ui(ctx: &mut ShellContext, _args: &[&str]) {
     run_hermes_ui_entry(ctx);
+}
+
+/// Command: qmlcluster - Render the native Qt/QML vehicle cluster port
+fn cmd_qml_cluster(ctx: &mut ShellContext, args: &[&str]) {
+    if args.is_empty() {
+        match crate::user_level::qml_cluster::render_cluster() {
+            Ok(render) => print_qml_cluster_render(ctx, &render),
+            Err(err) => {
+                ctx.serial.write_str("qmlcluster: ");
+                ctx.serial.write_str(err.as_str());
+                ctx.serial.write_str("\n");
+            }
+        }
+        return;
+    }
+
+    match args[0] {
+        "info" | "status" => match crate::user_level::qml_cluster::info() {
+            Ok(info) => print_qml_cluster_info(ctx, &info),
+            Err(err) => {
+                ctx.serial.write_str("qmlcluster: ");
+                ctx.serial.write_str(err.as_str());
+                ctx.serial.write_str("\n");
+            }
+        },
+        "render" | "show" | "ui" => match crate::user_level::qml_cluster::render_cluster() {
+            Ok(render) => print_qml_cluster_render(ctx, &render),
+            Err(err) => {
+                ctx.serial.write_str("qmlcluster: ");
+                ctx.serial.write_str(err.as_str());
+                ctx.serial.write_str("\n");
+            }
+        },
+        "source" | "qml" => match crate::user_level::qml_cluster::render_qml_source() {
+            Ok(source) => {
+                ctx.serial.write_str(source.as_str());
+                ctx.serial.write_str("\n");
+            }
+            Err(err) => {
+                ctx.serial.write_str("qmlcluster: ");
+                ctx.serial.write_str(err.as_str());
+                ctx.serial.write_str("\n");
+            }
+        },
+        "window" => match crate::user_level::qml_cluster::render_window_qml_source() {
+            Ok(source) => {
+                ctx.serial.write_str(source.as_str());
+                ctx.serial.write_str("\n");
+            }
+            Err(err) => {
+                ctx.serial.write_str("qmlcluster: ");
+                ctx.serial.write_str(err.as_str());
+                ctx.serial.write_str("\n");
+            }
+        },
+        "test" | "smoke" => {
+            ctx.serial
+                .write_str("\n=== Qt/QML Vehicle Cluster Port Test ===\n\n");
+            let _ = run_qml_cluster_tests(ctx);
+            ctx.serial.write_str("\n");
+        }
+        _ => print_qml_cluster_usage(ctx),
+    }
+}
+
+fn print_qml_cluster_usage(ctx: &mut ShellContext) {
+    ctx.serial
+        .write_str("usage: qmlcluster [info|render|source|window|test]\n");
+}
+
+fn print_qml_cluster_info(
+    ctx: &mut ShellContext,
+    info: &crate::user_level::qml_cluster::QmlClusterInfo,
+) {
+    ctx.serial.write_str("Qt/QML vehicle cluster port\n");
+    ctx.serial.write_str("  title: ");
+    ctx.serial.write_str(info.title.as_str());
+    ctx.serial.write_str("\n  qml: ");
+    ctx.serial.write_str(info.qml_path);
+    ctx.serial.write_str(" bytes=");
+    print_usize(&mut ctx.serial, info.qml_bytes);
+    ctx.serial.write_str("\n  window_qml: ");
+    ctx.serial.write_str(info.window_path);
+    ctx.serial.write_str(" bytes=");
+    print_usize(&mut ctx.serial, info.window_bytes);
+    ctx.serial.write_str("\n  image: ");
+    ctx.serial.write_str(info.image_path);
+    ctx.serial.write_str(" bytes=");
+    print_usize(&mut ctx.serial, info.image_bytes);
+    ctx.serial.write_str("\n  qml_size=");
+    print_usize(&mut ctx.serial, info.qml_width);
+    ctx.serial.write_str("x");
+    print_usize(&mut ctx.serial, info.qml_height);
+    ctx.serial.write_str(" render_size=");
+    print_usize(&mut ctx.serial, info.render_width);
+    ctx.serial.write_str("x");
+    print_usize(&mut ctx.serial, info.render_height);
+    ctx.serial.write_str("\n  speed=");
+    print_usize(&mut ctx.serial, info.speed_kph);
+    ctx.serial.write_str("kph rpm=");
+    print_usize(&mut ctx.serial, info.rpm);
+    ctx.serial.write_str(" gear=");
+    ctx.serial.write_str(info.gear.as_str());
+    ctx.serial.write_str(" mode=");
+    ctx.serial.write_str(info.drive_mode.as_str());
+    ctx.serial.write_str("\n  backend: ");
+    ctx.serial.write_str(info.backend);
+    ctx.serial.write_str(" qt_runtime=");
+    ctx.serial.write_str(info.qt_runtime);
+    ctx.serial
+        .write_str("\n  host: qmlscene host_shared/qml-cluster/ClusterWindow.qml");
+    ctx.serial.write_str("\n");
+}
+
+fn print_qml_cluster_render(
+    ctx: &mut ShellContext,
+    render: &crate::user_level::qml_cluster::QmlClusterRender,
+) {
+    ctx.serial.write_str(render.preview.as_str());
+    ctx.serial.write_str("image=");
+    ctx.serial.write_str(render.image_path);
+    ctx.serial.write_str(" source=");
+    ctx.serial.write_str(render.source_path);
+    ctx.serial.write_str(" size=");
+    print_usize(&mut ctx.serial, render.width);
+    ctx.serial.write_str("x");
+    print_usize(&mut ctx.serial, render.height);
+    ctx.serial.write_str(" bytes=");
+    print_usize(&mut ctx.serial, render.image_bytes);
+    ctx.serial.write_str(" widgets=");
+    print_usize(&mut ctx.serial, render.widgets);
+    ctx.serial.write_str("\n");
 }
 
 /// Command: gemma - Run the native Gemma model service
@@ -6431,6 +6572,51 @@ fn run_hermes_agent_tests(ctx: &mut ShellContext) -> bool {
     }
 }
 
+fn run_qml_cluster_tests(ctx: &mut ShellContext) -> bool {
+    ctx.serial
+        .write_str("[TEST] Testing Qt/QML vehicle cluster port... ");
+    match crate::user_level::qml_cluster::run_full_test() {
+        Ok(report) if report.passed() => {
+            ctx.serial.write_str("[OK] qml=");
+            ctx.serial
+                .write_str(if report.qml_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" parse=");
+            ctx.serial
+                .write_str(if report.parse_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" render=");
+            ctx.serial
+                .write_str(if report.render_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" fxfs=");
+            ctx.serial
+                .write_str(if report.fxfs_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" speed=");
+            print_usize(&mut ctx.serial, report.state.speed_kph);
+            ctx.serial.write_str("kph rpm=");
+            print_usize(&mut ctx.serial, report.state.rpm);
+            ctx.serial.write_str(" image=");
+            ctx.serial.write_str(report.render.image_path);
+            ctx.serial.write_str(" bytes=");
+            print_usize(&mut ctx.serial, report.render.image_bytes);
+            ctx.serial.write_str("\n");
+            true
+        }
+        Ok(report) => {
+            ctx.serial.write_str("[FAIL] incomplete report speed=");
+            print_usize(&mut ctx.serial, report.state.speed_kph);
+            ctx.serial.write_str(" image_bytes=");
+            print_usize(&mut ctx.serial, report.render.image_bytes);
+            ctx.serial.write_str("\n");
+            false
+        }
+        Err(err) => {
+            ctx.serial.write_str("[FAIL] ");
+            ctx.serial.write_str(err.as_str());
+            ctx.serial.write_str("\n");
+            false
+        }
+    }
+}
+
 fn print_docker_usage(ctx: &mut ShellContext) {
     ctx.serial.write_str(
         "usage: docker images | docker pull <image-or-http-url> | docker load [-i|--input] <archive.tar> | docker ps [-a] | docker create <image> [command...] | docker start <container> | docker run <image> [command...] | docker inspect <container> | docker logs <container> | docker stop <container> | docker rm <container>\n\n",
@@ -6698,10 +6884,20 @@ fn docker_display_path(rootfs: &str, path: &str) -> Option<String> {
 
 fn resolve_docker_load_path(cwd: &str, target: &str) -> Option<String> {
     let direct = normalize_fxfs_path(cwd, target)?;
-    if fxfs_path_exists(direct.as_str()) || target.starts_with('/') || target.contains('/') {
+    if fxfs_path_exists(direct.as_str()) {
+        return Some(direct);
+    }
+    if path_under_shared(direct.as_str()) {
+        let _ = crate::user_level::fxfs::ensure_host_share();
+        if fxfs_path_exists(direct.as_str()) {
+            return Some(direct);
+        }
+    }
+    if target.starts_with('/') || target.contains('/') {
         return Some(direct);
     }
 
+    let _ = crate::user_level::fxfs::ensure_host_share();
     let shared = normalize_fxfs_path("/shared", target)?;
     if fxfs_path_exists(shared.as_str()) {
         return Some(shared);
@@ -7034,8 +7230,23 @@ fn host_valid(host: &str) -> bool {
     true
 }
 
+fn path_under_shared(path: &str) -> bool {
+    path == "/shared"
+        || path
+            .strip_prefix("/shared")
+            .map(|suffix| suffix.starts_with('/'))
+            .unwrap_or(false)
+}
+
 fn read_fxfs_file_to_vec(path: &str) -> Result<Vec<u8>, crate::user_level::fxfs::FxfsError> {
-    let attrs = crate::user_level::fxfs::attrs(path)?;
+    let attrs = match crate::user_level::fxfs::attrs(path) {
+        Ok(attrs) => attrs,
+        Err(crate::user_level::fxfs::FxfsError::NotFound) if path_under_shared(path) => {
+            let _ = crate::user_level::fxfs::ensure_host_share();
+            crate::user_level::fxfs::attrs(path)?
+        }
+        Err(err) => return Err(err),
+    };
     let mut out = Vec::new();
     out.resize(attrs.size, 0);
     let size = crate::user_level::fxfs::read_file(path, &mut out)?;
@@ -7057,7 +7268,13 @@ fn resolve_run_path(cwd: &str, target: &str) -> Option<String> {
         return Some(direct);
     }
 
-    if !target.contains('/') {
+    if path_under_shared(direct.as_str()) {
+        let _ = crate::user_level::fxfs::ensure_host_share();
+        if fxfs_path_exists(direct.as_str()) {
+            return Some(direct);
+        }
+    } else if !target.contains('/') {
+        let _ = crate::user_level::fxfs::ensure_host_share();
         let shared = normalize_fxfs_path("/shared", target)?;
         if fxfs_path_exists(shared.as_str()) {
             return Some(shared);
@@ -7073,6 +7290,7 @@ fn resolve_run_library_path(name_or_path: &str) -> Option<String> {
     }
 
     let name = basename(name_or_path);
+    let _ = crate::user_level::fxfs::ensure_host_share();
 
     let mut shared = String::from("/shared/lib/");
     shared.push_str(name);
@@ -7701,6 +7919,11 @@ fn cmd_share(ctx: &mut ShellContext, args: &[&str]) {
             }
         }
         target_index = 1;
+    } else if let Err(err) = crate::user_level::fxfs::ensure_host_share() {
+        ctx.serial.write_str("share: ");
+        print_fxfs_error(ctx, err);
+        ctx.serial.write_str("\n");
+        return;
     }
 
     let target = args.get(target_index).copied().unwrap_or("/shared");
