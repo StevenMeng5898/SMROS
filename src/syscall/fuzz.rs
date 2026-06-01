@@ -13,7 +13,7 @@ use super::{
 use crate::kernel_lowlevel::memory::PAGE_SIZE;
 use crate::kernel_lowlevel::timer;
 use crate::kernel_objects::port::{PortPacket, PORT_PACKET_TYPE_USER};
-use crate::kernel_objects::{ObjectType, VmOptions, RIGHT_SAME_RIGHTS};
+use crate::kernel_objects::{ObjectType, VmOptions, VmarFlags, RIGHT_SAME_RIGHTS};
 use crate::syscall::syscall_logic;
 use crate::user_level::fxfs;
 
@@ -24,6 +24,10 @@ const FUZZ_LINUX_NEW_FD_BASE: usize = 10_000;
 const FUZZ_LINUX_NEW_FD_SPAN: usize = 1_000;
 const FUZZ_LINUX_INTERFACE_MAX: u32 = 600;
 const FUZZ_ZIRCON_INTERFACE_MAX: u32 = 211;
+const FUZZ_ERROR_BUCKETS: usize = 16;
+const FUZZ_SCRATCH_FDS: usize = 16;
+const FUZZ_ZIRCON_VMAR_ALLOC_OFFSET: usize = 0x0200_0000;
+const FUZZ_ZIRCON_VMAR_MAP_OFFSET: usize = 0x0300_0000;
 const ZX_USER_SIGNAL_0: usize = 1 << 24;
 
 const LINUX_SUCCESS_SYSCALLS: &[u32] = &[
@@ -64,6 +68,9 @@ pub struct SyscallFuzzReport {
     pub linux_enosys: usize,
     pub linux_first_err_syscall: u32,
     pub linux_last_err_syscall: u32,
+    pub linux_err_syscalls: [u32; FUZZ_ERROR_BUCKETS],
+    pub linux_err_syscall_counts: [usize; FUZZ_ERROR_BUCKETS],
+    pub linux_err_syscall_count: usize,
     pub linux_first_enosys_syscall: u32,
     pub linux_last_enosys_syscall: u32,
     pub zircon_interface_syscalls: usize,
@@ -75,6 +82,9 @@ pub struct SyscallFuzzReport {
     pub zircon_unsupported: usize,
     pub zircon_first_err_syscall: u32,
     pub zircon_last_err_syscall: u32,
+    pub zircon_err_syscalls: [u32; FUZZ_ERROR_BUCKETS],
+    pub zircon_err_syscall_counts: [usize; FUZZ_ERROR_BUCKETS],
+    pub zircon_err_syscall_count: usize,
     pub zircon_first_unsupported_syscall: u32,
     pub zircon_last_unsupported_syscall: u32,
     pub skipped: usize,
@@ -399,8 +409,12 @@ struct FuzzState {
     rng: FuzzRng,
     handles: [u32; 64],
     handle_count: usize,
+    seed_handle_count: usize,
     fds: [usize; 64],
     fd_count: usize,
+    seed_fd_count: usize,
+    scratch_fds: [usize; FUZZ_SCRATCH_FDS],
+    scratch_fd_count: usize,
     mappings: [usize; 32],
     mapping_count: usize,
     zircon_mappings: [usize; 32],
@@ -423,8 +437,12 @@ impl FuzzState {
             rng: FuzzRng::new(seed),
             handles: [0; 64],
             handle_count: 0,
+            seed_handle_count: 0,
             fds: [0; 64],
             fd_count: 0,
+            seed_fd_count: 0,
+            scratch_fds: [0; FUZZ_SCRATCH_FDS],
+            scratch_fd_count: 0,
             mappings: [0; 32],
             mapping_count: 0,
             zircon_mappings: [0; 32],
@@ -446,8 +464,16 @@ impl FuzzState {
         }
     }
 
+    fn freeze_seed_objects(&mut self) {
+        self.seed_handle_count = self.handle_count;
+        self.seed_fd_count = self.fd_count;
+    }
+
     fn track_handle(&mut self, handle: u32) {
-        if handle == 0 || self.handles[..self.handle_count].contains(&handle) {
+        if handle == 0
+            || handle == memory_root_vmar_handle()
+            || self.handles[..self.handle_count].contains(&handle)
+        {
             return;
         }
         if self.handle_count < self.handles.len() {
@@ -460,7 +486,7 @@ impl FuzzState {
     }
 
     fn seed_handle(&mut self, handle: u32) {
-        if handle == 0 {
+        if handle == 0 || self.handles[..self.handle_count].contains(&handle) {
             return;
         }
         if self.handle_count < self.handles.len() {
@@ -487,6 +513,24 @@ impl FuzzState {
             self.report.created_fds += 1;
         } else {
             let _ = sys_close(fd);
+        }
+    }
+
+    fn track_scratch_fd(&mut self, fd: usize) -> usize {
+        if fd <= 2 {
+            return fd;
+        }
+        if self.scratch_fds[..self.scratch_fd_count].contains(&fd) {
+            return fd;
+        }
+        if self.scratch_fd_count < self.scratch_fds.len() {
+            self.scratch_fds[self.scratch_fd_count] = fd;
+            self.scratch_fd_count += 1;
+            self.report.created_fds += 1;
+            fd
+        } else {
+            let _ = sys_close(fd);
+            self.file_fd()
         }
     }
 
@@ -591,6 +635,48 @@ impl FuzzState {
         self.find_latest_handle_from(0, |handle| {
             dispatch_linux_syscall(109, [handle as usize, 0, 0, 0, 0, 0]).is_ok()
         }) as usize
+    }
+
+    fn linux_close_fd(&mut self) -> usize {
+        match dispatch_linux_syscall(23, [self.file_fd(), 0, 0, 0, 0, 0]) {
+            Ok(fd) => fd,
+            Err(_) => 0,
+        }
+    }
+
+    fn transient_file_fd(&mut self) -> usize {
+        match dispatch_linux_syscall(279, [self.arena.name_ptr(), 0, 0, 0, 0, 0]) {
+            Ok(fd) => self.track_scratch_fd(fd),
+            Err(_) => self.file_fd(),
+        }
+    }
+
+    fn linux_timer_delete_handle(&mut self) -> usize {
+        let out = self.arena.words_ptr();
+        if dispatch_linux_syscall(107, [1, 0, out, 0, 0, 0]).is_err() {
+            return 0;
+        }
+        unsafe { core::ptr::read(out as *const usize) }
+    }
+
+    fn zircon_handle_for_replace(&mut self) -> u32 {
+        let handle = self.latest_vmo_handle();
+        match dispatch_zircon_syscall(
+            8,
+            [
+                handle as usize,
+                RIGHT_SAME_RIGHTS as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+        ) {
+            Ok(duplicate) => duplicate as u32,
+            Err(_) => handle,
+        }
     }
 
     fn socket_fd(&self) -> usize {
@@ -780,6 +866,40 @@ impl FuzzState {
         false
     }
 
+    fn record_linux_err_syscall(&mut self, num: u32) {
+        let mut index = 0;
+        while index < self.report.linux_err_syscall_count {
+            if self.report.linux_err_syscalls[index] == num {
+                self.report.linux_err_syscall_counts[index] += 1;
+                return;
+            }
+            index += 1;
+        }
+        if self.report.linux_err_syscall_count < FUZZ_ERROR_BUCKETS {
+            let bucket = self.report.linux_err_syscall_count;
+            self.report.linux_err_syscalls[bucket] = num;
+            self.report.linux_err_syscall_counts[bucket] = 1;
+            self.report.linux_err_syscall_count += 1;
+        }
+    }
+
+    fn record_zircon_err_syscall(&mut self, num: u32) {
+        let mut index = 0;
+        while index < self.report.zircon_err_syscall_count {
+            if self.report.zircon_err_syscalls[index] == num {
+                self.report.zircon_err_syscall_counts[index] += 1;
+                return;
+            }
+            index += 1;
+        }
+        if self.report.zircon_err_syscall_count < FUZZ_ERROR_BUCKETS {
+            let bucket = self.report.zircon_err_syscall_count;
+            self.report.zircon_err_syscalls[bucket] = num;
+            self.report.zircon_err_syscall_counts[bucket] = 1;
+            self.report.zircon_err_syscall_count += 1;
+        }
+    }
+
     fn call_linux(&mut self, num: u32, args: [usize; 6]) {
         self.report.linux_calls += 1;
         match dispatch_linux_syscall(num, args) {
@@ -795,6 +915,7 @@ impl FuzzState {
                 self.report.linux_enosys += 1;
             }
             Err(_) => {
+                self.record_linux_err_syscall(num);
                 if self.report.linux_err == 0 {
                     self.report.linux_first_err_syscall = num;
                 }
@@ -810,6 +931,7 @@ impl FuzzState {
             Ok(value) => {
                 self.report.zircon_ok += 1;
                 self.capture_zircon_result(num, value, &args);
+                self.finish_zircon_call(num, &args);
             }
             Err(ZxError::ErrNotSupported) => {
                 if self.report.zircon_unsupported == 0 {
@@ -819,6 +941,8 @@ impl FuzzState {
                 self.report.zircon_unsupported += 1;
             }
             Err(_) => {
+                self.drain_after_zircon_error(num, &args);
+                self.record_zircon_err_syscall(num);
                 if self.report.zircon_err == 0 {
                     self.report.zircon_first_err_syscall = num;
                 }
@@ -828,13 +952,29 @@ impl FuzzState {
         }
     }
 
+    fn drain_after_zircon_error(&mut self, num: u32, args: &[usize; 8]) {
+        if num == 62 {
+            let _ =
+                dispatch_zircon_syscall(63, [args[0], 0, self.arena.packet_ptr(), 0, 0, 0, 0, 0]);
+        }
+    }
+
     fn capture_linux_result(&mut self, num: u32, value: usize, args: &[usize; 6]) {
         match num {
-            19 | 20 | 26 | 56 | 85 | 198 | 279 => self.track_fd(value),
-            23 | 24 | 25 | 242 => self.track_fd(value),
-            59 | 199 => {
+            19 | 20 | 26 | 56 | 74 | 85 | 198 | 279 | 437 => self.track_fd(value),
+            23 | 24 | 25 | 202 | 242 => self.track_fd(value),
+            59 => {
                 if args[0] != 0 {
                     let ptr = args[0] as *const i32;
+                    unsafe {
+                        self.track_fd(core::ptr::read(ptr) as usize);
+                        self.track_fd(core::ptr::read(ptr.add(1)) as usize);
+                    }
+                }
+            }
+            199 => {
+                if args[3] != 0 {
+                    let ptr = args[3] as *const i32;
                     unsafe {
                         self.track_fd(core::ptr::read(ptr) as usize);
                         self.track_fd(core::ptr::read(ptr.add(1)) as usize);
@@ -857,9 +997,9 @@ impl FuzzState {
 
     fn capture_zircon_result(&mut self, num: u32, value: usize, _args: &[usize; 8]) {
         match num {
-            5 | 8 | 9 | 18 | 34 | 43 | 47 | 49 | 51 | 52 | 53 | 61 | 65 | 68 | 74 | 77 | 87
-            | 88 | 98 | 106 | 107 | 108 | 109 | 115 | 121 | 122 | 129 | 132 | 140 | 141 | 187
-            | 197 | 202 | 203 | 209 | 210 => self.track_handle(value as u32),
+            5 | 8 | 9 | 18 | 34 | 43 | 47 | 49 | 51 | 52 | 53 | 61 | 65 | 68 | 72 | 74 | 77
+            | 87 | 88 | 98 | 106 | 107 | 108 | 109 | 115 | 121 | 122 | 129 | 132 | 140 | 141
+            | 187 | 197 | 202 | 203 | 209 | 210 => self.track_handle(value as u32),
             20 | 54 | 84 | 130 => self.track_handle_pair(value),
             27 => {
                 let _ = sys_handle_close((value >> 32) as u32);
@@ -870,6 +1010,24 @@ impl FuzzState {
                 self.track_handle(unsafe { core::ptr::read(self.arena.handles.as_ptr().add(1)) });
             }
             79 => self.track_zircon_mapping(value),
+            _ => {}
+        }
+    }
+
+    fn finish_zircon_call(&mut self, num: u32, args: &[usize; 8]) {
+        match num {
+            12 => {
+                let _ = dispatch_zircon_syscall(
+                    63,
+                    [args[1], 0, self.arena.packet_ptr(), 0, 0, 0, 0, 0],
+                );
+            }
+            62 => {
+                let _ = dispatch_zircon_syscall(
+                    63,
+                    [args[0], 0, self.arena.packet_ptr(), 0, 0, 0, 0, 0],
+                );
+            }
             _ => {}
         }
     }
@@ -900,9 +1058,32 @@ impl FuzzState {
         self.zircon_mapping_count = 0;
     }
 
+    fn cleanup_transient_fds(&mut self) {
+        for index in 0..self.scratch_fd_count {
+            let _ = sys_close(self.scratch_fds[index]);
+        }
+        self.scratch_fd_count = 0;
+        for index in self.seed_fd_count..self.fd_count {
+            let _ = sys_close(self.fds[index]);
+        }
+        self.fd_count = self.seed_fd_count;
+    }
+
+    fn cleanup_transient_handles(&mut self) {
+        for index in self.seed_handle_count..self.handle_count {
+            let _ = sys_handle_close(self.handles[index]);
+        }
+        self.handle_count = self.seed_handle_count;
+    }
+
     fn cleanup(&mut self) {
         self.cleanup_linux_mappings();
         self.cleanup_zircon_mappings();
+
+        for index in 0..self.scratch_fd_count {
+            let _ = sys_close(self.scratch_fds[index]);
+        }
+        self.scratch_fd_count = 0;
 
         for index in 0..self.fd_count {
             let _ = sys_close(self.fds[index]);
@@ -910,7 +1091,10 @@ impl FuzzState {
         self.fd_count = 0;
 
         for index in 0..self.handle_count {
-            let _ = sys_handle_close(self.handles[index]);
+            let handle = self.handles[index];
+            if handle != memory_root_vmar_handle() {
+                let _ = sys_handle_close(handle);
+            }
         }
         self.handle_count = 0;
     }
@@ -930,6 +1114,7 @@ pub fn fuzz_syscalls_with_config(config: SyscallFuzzConfig) -> SyscallFuzzReport
     let mut state = FuzzState::new(config.seed, iterations, config.time_limit_ticks, start_tick);
 
     seed_fuzz_state(&mut state);
+    state.freeze_seed_objects();
 
     for round in 0..iterations {
         if state.should_stop() {
@@ -941,10 +1126,13 @@ pub fn fuzz_syscalls_with_config(config: SyscallFuzzConfig) -> SyscallFuzzReport
             break;
         }
         state.cleanup_linux_mappings();
+        state.cleanup_transient_fds();
+        state.cleanup_transient_handles();
         if !fuzz_zircon_round(&mut state) {
             break;
         }
         state.cleanup_zircon_mappings();
+        state.cleanup_transient_handles();
         state.report.completed_iterations += 1;
     }
 
@@ -1143,9 +1331,9 @@ fn linux_variants(num: u32) -> usize {
         | 88 | 95 | 98 | 99 | 100 | 101 | 102 | 103 | 107 | 108 | 110 | 112 | 113 | 114 | 115
         | 132 | 134 | 135 | 136 | 137 | 138 | 140 | 141 | 161 | 162 | 163 | 164 | 165 | 168
         | 169 | 179 | 187 | 188 | 189 | 191 | 193 | 195 | 196 | 197 | 198 | 199 | 202 | 204
-        | 205 | 206 | 208 | 209 | 211 | 212 | 214 | 221 | 222 | 226 | 232 | 240 | 242 | 243
-        | 260 | 261 | 276 | 277 | 278 | 279 | 283 | 285 | 286 | 287 | 291 | 436 | 437 | 439
-        | 441 => 2,
+        | 205 | 206 | 207 | 208 | 209 | 211 | 212 | 214 | 221 | 222 | 226 | 232 | 240 | 242
+        | 243 | 260 | 261 | 276 | 277 | 278 | 279 | 283 | 285 | 286 | 287 | 291 | 436 | 437
+        | 439 | 441 => 2,
         _ => 1,
     }
 }
@@ -1205,7 +1393,8 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         44 => out = [file_fd, ptr, 0, 0, 0, 0],
         46 | 47 | 52 | 55 | 82 | 83 | 84 => out = [file_fd, ptr, len, variant, ptr, len],
         50 => out = [dir_fd, 0, 0, 0, 0, 0],
-        62 => out = [file_fd, 0, variant, 0, 0, 0],
+        57 => out = [state.linux_close_fd(), 0, 0, 0, 0, 0],
+        62 => out = [file_fd, 0, 0, 0, 0, 0],
         71 => out = [file_fd, file_fd, 0, FUZZ_IO_BYTES, 0, 0],
         85 => out = [1, 0, 0, 0, 0, 0],
         86 => out = [timer_fd, 0, state.arena.itimer_ptr(), ptr, 0, 0],
@@ -1222,13 +1411,13 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         }
         61 => out = [dir_fd, ptr, len, 0, 0, 0],
         63 => out = [file_fd, ptr, len, 0, 0, 0],
-        64 => out = [file_fd, ptr, len, 0, 0, 0],
+        64 => out = [state.transient_file_fd(), ptr, len, 0, 0, 0],
         65 => out = [file_fd, state.arena.iov_ptr(), 2, 0, 0, 0],
-        66 => out = [file_fd, state.arena.iov_ptr(), 2, 0, 0, 0],
+        66 => out = [state.transient_file_fd(), state.arena.iov_ptr(), 2, 0, 0, 0],
         69 | 286 => out = [file_fd, state.arena.iov_ptr(), 2, 0, 0, 0],
-        70 | 287 => out = [file_fd, state.arena.iov_ptr(), 2, 0, 0, 0],
+        70 | 287 => out = [state.transient_file_fd(), state.arena.iov_ptr(), 2, 0, 0, 0],
         67 => out = [file_fd, ptr, len, 0, 0, 0],
-        68 => out = [file_fd, ptr, len, 0, 0, 0],
+        68 => out = [state.transient_file_fd(), ptr, len, 0, 0, 0],
         72 => out = [0, 0, 0, 0, state.arena.timespec_ptr(), 0],
         73 => {
             out = [
@@ -1241,7 +1430,7 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
             ]
         }
         74 => out = [event_fd, ptr, LINUX_SIGSET_SIZE, 0, 0, 0],
-        75 => out = [file_fd, state.arena.iov_ptr(), 2, 0, 0, 0],
+        75 => out = [state.transient_file_fd(), state.arena.iov_ptr(), 2, 0, 0, 0],
         76 => {
             out = [
                 state.pipe_read_fd(),
@@ -1317,7 +1506,8 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
                 0,
             ]
         }
-        109 | 111 => out = [state.linux_timer_handle(), ptr, 0, 0, 0, 0],
+        109 => out = [state.linux_timer_handle(), ptr, 0, 0, 0, 0],
+        111 => out = [state.linux_timer_delete_handle(), 0, 0, 0, 0, 0],
         112 | 113 | 114 => out = [1, state.arena.timespec_ptr(), 0, 0, 0, 0],
         116 | 117 | 171 | 180 | 181 | 182 | 183 | 184 | 185 | 217 | 218 | 219 | 224 | 225 | 235
         | 236 | 237 | 238 | 239 | 241 | 267 | 269 | 270 | 271 | 272 | 274 | 275 | 280 | 281
@@ -1385,7 +1575,7 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         206 => out = [state.socketpair_fd(), ptr, len.max(1), 0, 0, 0],
         207 => out = [state.socket_peer_fd(), ptr, len.max(1), 0, 0, 0],
         211 | 212 | 243 => out = [socket_fd, ptr, 1, 0, state.arena.timespec_ptr(), 0],
-        213 | 223 => out = [file_fd, 0, FUZZ_IO_BYTES, variant, 0, 0],
+        213 | 223 => out = [file_fd, 0, FUZZ_IO_BYTES, 0, 0, 0],
         215 => out = [0x5000_0000, PAGE_SIZE, 0, 0, 0, 0],
         216 => out = [state.mapping(), PAGE_SIZE, PAGE_SIZE, 0, 0, 0],
         227 | 228 | 229 | 233 | 234 => out = [state.mapping(), PAGE_SIZE, variant, 0, 0, 0],
@@ -1407,7 +1597,16 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         230 | 231 | 283 => out = [variant, 0, 0, 0, 0, 0],
         260 => out = [0, ptr, 0, 0, 0, 0],
         261 => out = [0, 0, 0, ptr, 0, 0],
-        285 => out = [file_fd, 0, file_fd, 0, FUZZ_IO_BYTES, 0],
+        285 => {
+            out = [
+                state.pipe_read_fd(),
+                0,
+                state.pipe_write_fd(),
+                0,
+                FUZZ_IO_BYTES,
+                0,
+            ]
+        }
         268 => out = [file_fd, LINUX_CONTAINER_NAMESPACE_FLAGS, 0, 0, 0, 0],
         276 => out = [0, path, 0, path2, variant, 0],
         277 => {
@@ -1514,9 +1713,21 @@ fn zircon_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 8] {
         2 | 3 => out = [0, 0, 0, 0, 0, 0, 0, 0],
         4 => out = [1, 0, 0, 0, 0, 0, 0, 0],
         5 | 202 => out = [0, (variant & 0x3) as usize, 0, 0, 0, 0, 0, 0],
-        8 | 9 => {
+        8 => {
             out = [
                 latest_vmo_handle as usize,
+                RIGHT_SAME_RIGHTS as usize,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ]
+        }
+        9 => {
+            out = [
+                state.zircon_handle_for_replace() as usize,
                 RIGHT_SAME_RIGHTS as usize,
                 0,
                 0,
@@ -1628,10 +1839,11 @@ fn zircon_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 8] {
         74 => out = [latest_vmo_handle as usize, 0, 0, PAGE_SIZE, 0, 0, 0, 0],
         75 => out = [latest_vmo_handle as usize, variant, 0, 0, 0, 0, 0, 0],
         77 => {
+            let offset = FUZZ_ZIRCON_VMAR_ALLOC_OFFSET + (variant * PAGE_SIZE);
             out = [
                 memory_root_vmar_handle() as usize,
-                0,
-                0,
+                VmarFlags::SPECIFIC.bits() as usize,
+                offset,
                 PAGE_SIZE,
                 0,
                 0,
@@ -1640,10 +1852,11 @@ fn zircon_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 8] {
             ]
         }
         79 => {
+            let offset = FUZZ_ZIRCON_VMAR_MAP_OFFSET + (variant * PAGE_SIZE);
             out = [
                 memory_root_vmar_handle() as usize,
-                VmOptions::PERM_RW.bits() as usize,
-                0,
+                (VmOptions::PERM_RW | VmOptions::SPECIFIC_OVERWRITE).bits() as usize,
+                offset,
                 latest_vmo_handle as usize,
                 0,
                 PAGE_SIZE,

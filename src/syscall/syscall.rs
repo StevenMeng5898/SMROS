@@ -58,7 +58,8 @@ use crate::kernel_objects::process::{ProcessRecord, ThreadRecord};
 use crate::kernel_objects::right::{self, ProcessRightProfile};
 use crate::kernel_objects::scheduler;
 use crate::kernel_objects::socket;
-use crate::kernel_objects::vmar::Vmar;
+use crate::kernel_objects::vmar::{Vmar, VmarMapping};
+use crate::kernel_objects::{default_rights_for_object, rights_are_valid};
 use crate::syscall::syscall_logic;
 use crate::user_level::fxfs;
 
@@ -925,7 +926,7 @@ impl MemorySyscallState {
         rights: u32,
     ) -> bool {
         if syscall_logic::handle_invalid(handle, INVALID_HANDLE)
-            || !crate::kernel_objects::rights_are_valid(rights)
+            || !rights_are_valid(rights)
             || self.handles.iter().any(|record| record.handle == handle)
         {
             return false;
@@ -945,7 +946,7 @@ impl MemorySyscallState {
             handle,
             handle,
             obj_type,
-            crate::kernel_objects::default_rights_for_object(obj_type),
+            default_rights_for_object(obj_type),
         )
     }
 
@@ -962,6 +963,35 @@ impl MemorySyscallState {
         let handle = self.alloc_handle();
         let _ = self.register_object_handle(handle, obj_type);
         handle
+    }
+
+    fn ensure_root_vmar_handle(&mut self) {
+        if let Some(record) = self
+            .handles
+            .iter_mut()
+            .find(|entry| entry.handle == self.root_vmar_handle)
+        {
+            record.object_handle = self.root_vmar_handle;
+            record.obj_type = ObjectType::Vmar;
+            record.rights = default_rights_for_object(ObjectType::Vmar);
+            return;
+        }
+
+        self.handles.push(KernelHandleRecord {
+            handle: self.root_vmar_handle,
+            object_handle: self.root_vmar_handle,
+            obj_type: ObjectType::Vmar,
+            rights: default_rights_for_object(ObjectType::Vmar),
+        });
+    }
+
+    fn release_single_handle_record(&mut self, handle: u32) -> bool {
+        let Some(index) = self.handles.iter().position(|entry| entry.handle == handle) else {
+            return false;
+        };
+        self.handles.swap_remove(index);
+        self.signals.retain(|signal| signal.handle != handle);
+        true
     }
 
     fn alloc_object_handle_with_rights(
@@ -1049,12 +1079,11 @@ impl MemorySyscallState {
         if !self.register_handle(new_handle, record.object_handle, record.obj_type, rights) {
             return Err(ZxError::ErrNoMemory);
         }
-        if self.release_handle(handle) {
-            Ok(new_handle)
-        } else {
-            let _ = self.release_handle(new_handle);
-            Err(ZxError::ErrNotFound)
+        if self.release_single_handle_record(handle) {
+            return Ok(new_handle);
         }
+        let _ = self.release_handle(new_handle);
+        Err(ZxError::ErrNotFound)
     }
 
     fn stats(&self) -> MemorySyscallStats {
@@ -1128,25 +1157,43 @@ impl MemorySyscallState {
         }
 
         self.sort_linux_mappings();
-        let mut candidate = self.next_linux_addr.max(LINUX_MAPPING_BASE);
+
+        if let Some(addr) = self.find_free_linux_region_from(self.next_linux_addr, len) {
+            return Some(addr);
+        }
+        self.find_free_linux_region_from(LINUX_MAPPING_BASE, len)
+    }
+
+    fn find_free_linux_region_from(&mut self, start: usize, len: usize) -> Option<usize> {
+        let mut candidate = start.max(LINUX_MAPPING_BASE);
+        if !page_aligned(candidate) {
+            candidate = roundup_pages(candidate);
+        }
 
         for mapping in &self.linux_mappings {
+            if mapping.addr < candidate {
+                let mapping_end = checked_end(mapping.addr, mapping.len)?;
+                if mapping_end > candidate {
+                    candidate = mapping_end;
+                }
+                continue;
+            }
+
             let candidate_end = checked_end(candidate, len)?;
-            if candidate_end <= mapping.addr {
+            if candidate_end <= mapping.addr && candidate_end <= LINUX_MAPPING_LIMIT {
                 self.next_linux_addr = candidate_end;
                 return Some(candidate);
             }
 
-            candidate = candidate.max(checked_end(mapping.addr, mapping.len)?);
+            candidate = checked_end(mapping.addr, mapping.len)?;
         }
 
         let candidate_end = checked_end(candidate, len)?;
-        if candidate_end <= LINUX_MAPPING_LIMIT {
-            self.next_linux_addr = candidate_end;
-            return Some(candidate);
+        if candidate_end > LINUX_MAPPING_LIMIT {
+            return None;
         }
-
-        None
+        self.next_linux_addr = candidate_end;
+        Some(candidate)
     }
 
     fn get_vmo(&self, handle: u32) -> Option<&Vmo> {
@@ -1368,8 +1415,8 @@ impl MemorySyscallState {
 
         if handle == self.root_vmar_handle {
             self.vmars[index].vmar.destroy().ok();
-            self.handles.retain(|entry| entry.object_handle != handle);
             self.signals.retain(|signal| signal.handle != handle);
+            self.ensure_root_vmar_handle();
             return true;
         }
 
@@ -1377,6 +1424,8 @@ impl MemorySyscallState {
             .vmar
             .parent_idx
             .map(|parent| parent as u32);
+        let child_base = self.vmars[index].vmar.base_addr;
+        let child_size = self.vmars[index].vmar.size;
         let mut record = self.vmars.swap_remove(index);
         record.vmar.destroy().ok();
         self.handles.retain(|entry| entry.object_handle != handle);
@@ -1385,6 +1434,7 @@ impl MemorySyscallState {
         if let Some(parent_handle) = parent_handle {
             if let Some(parent) = self.get_vmar_mut(parent_handle) {
                 parent.children.retain(|child| *child != handle as usize);
+                parent.unmap(child_base, roundup_pages(child_size)).ok();
             }
         }
 
@@ -1400,6 +1450,13 @@ impl MemorySyscallState {
         }
 
         let object_handle = record.object_handle;
+        if object_handle == self.root_vmar_handle {
+            if handle != self.root_vmar_handle {
+                let _ = self.release_single_handle_record(handle);
+            }
+            self.ensure_root_vmar_handle();
+            return true;
+        }
         let shared = self
             .handles
             .iter()
@@ -2630,7 +2687,12 @@ pub fn sys_dup3(fd: usize, new_fd: usize, flags: usize) -> SysResult {
         return Err(SysError::EINVAL);
     }
     let record = memory_state().get_fd(fd).cloned().ok_or(SysError::EBUSY)?;
-    let _ = memory_state().close_fd(new_fd);
+    if let Some(replaced) = memory_state().close_fd_record(new_fd) {
+        if !memory_state().handle_has_fd(replaced.handle) && replaced.handle != record.handle {
+            memory_state().remove_linux_fxfs_file(replaced.handle);
+            let _ = sys_handle_close(replaced.handle);
+        }
+    }
     memory_state().linux_fds.push(LinuxFdRecord {
         fd: new_fd,
         handle: record.handle,
@@ -5128,6 +5190,14 @@ pub fn sys_vmar_allocate(
             .get_vmar_mut(parent_vmar)
             .ok_or(ZxError::ErrNotFound)?;
         let child_addr = parent.allocate(requested_offset, size, flags, PAGE_SIZE)?;
+        parent.mappings.push(VmarMapping {
+            vaddr: child_addr,
+            size,
+            vmo_handle: HandleValue(child_handle),
+            vmo_offset: 0,
+            mmu_flags: MmuFlags::empty(),
+            valid: true,
+        });
         parent.children.push(child_handle as usize);
         (child_handle, child_addr)
     };

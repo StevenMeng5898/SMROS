@@ -3900,6 +3900,13 @@ fn cmd_fuzz_syscall(ctx: &mut ShellContext, args: &[&str]) {
         print_usize(&mut ctx.serial, report.linux_first_err_syscall as usize);
         ctx.serial.write_str("..");
         print_usize(&mut ctx.serial, report.linux_last_err_syscall as usize);
+        ctx.serial.write_str(" err_list=");
+        print_fuzz_error_buckets(
+            ctx,
+            &report.linux_err_syscalls,
+            &report.linux_err_syscall_counts,
+            report.linux_err_syscall_count,
+        );
     }
     if report.linux_enosys != 0 {
         ctx.serial.write_str(" enosys_syscall=");
@@ -3922,6 +3929,13 @@ fn cmd_fuzz_syscall(ctx: &mut ShellContext, args: &[&str]) {
         print_usize(&mut ctx.serial, report.zircon_first_err_syscall as usize);
         ctx.serial.write_str("..");
         print_usize(&mut ctx.serial, report.zircon_last_err_syscall as usize);
+        ctx.serial.write_str(" err_list=");
+        print_fuzz_error_buckets(
+            ctx,
+            &report.zircon_err_syscalls,
+            &report.zircon_err_syscall_counts,
+            report.zircon_err_syscall_count,
+        );
     }
     if report.zircon_unsupported != 0 {
         ctx.serial.write_str(" unsupported_syscall=");
@@ -4172,6 +4186,24 @@ fn print_fuzz_usage(ctx: &mut ShellContext) {
         .write_str("       fuzzsc seed=<n> iterations=<n> time=<seconds>\n");
     ctx.serial
         .write_str("       fuzzsc iter <n> time <seconds> | ms=<milliseconds>\n");
+}
+
+fn print_fuzz_error_buckets(
+    ctx: &mut ShellContext,
+    syscalls: &[u32],
+    counts: &[usize],
+    count: usize,
+) {
+    let mut index = 0;
+    while index < count && index < syscalls.len() && index < counts.len() {
+        if index != 0 {
+            ctx.serial.write_str(",");
+        }
+        print_usize(&mut ctx.serial, syscalls[index] as usize);
+        ctx.serial.write_str("x");
+        print_usize(&mut ctx.serial, counts[index]);
+        index += 1;
+    }
 }
 
 /// Command: echo - Echo arguments
