@@ -209,7 +209,7 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
     },
     ShellCommand {
         name: "mount",
-        description: "Show mounts or refresh /shared from host_shared",
+        description: "Show mounts or refresh the embedded /shared snapshot",
         handler: cmd_mount,
     },
     ShellCommand {
@@ -7919,8 +7919,11 @@ fn cmd_mount(ctx: &mut ShellContext, args: &[&str]) {
         }
         ctx.serial
             .write_str("\n  host_shared on /shared type fxfs.snapshot (build-time)\n\n");
+        ctx.serial.write_str(
+            "The embedded host_shared snapshot is installed during FxFS initialization.\n",
+        );
         ctx.serial
-            .write_str("Use: mount share    refresh /shared from the embedded snapshot\n");
+            .write_str("Use: mount share    refresh /shared from that snapshot\n");
         ctx.serial
             .write_str("Live host directory sharing needs a 9p or virtio-fs guest driver.\n\n");
         return;
@@ -7930,7 +7933,7 @@ fn cmd_mount(ctx: &mut ShellContext, args: &[&str]) {
         "share" | "shared" | "/shared" | "host_shared" => {
             match crate::user_level::fxfs::mount_host_share() {
                 Ok(()) => {
-                    ctx.serial.write_str("mounted host_shared at /shared (");
+                    ctx.serial.write_str("refreshed host_shared at /shared (");
                     print_host_share_summary(ctx);
                     ctx.serial.write_str(")\n");
                     print_host_share_skipped(ctx);

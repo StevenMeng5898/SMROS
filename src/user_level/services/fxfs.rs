@@ -556,6 +556,7 @@ impl FxfsState {
                     self.last_sync_ok = true;
                     self.last_storage_error = None;
                     self.ensure_dir_tree(FXFS_SHARED_ROOT)?;
+                    self.install_host_share(false)?;
                     return Ok(());
                 }
                 Err(FxfsError::NotFound) => {}
@@ -599,6 +600,8 @@ impl FxfsState {
             self.write_file("/pkg/bin/fxfs", b"smros fxfs service")?;
             self.write_file("/pkg/bin/user-init", b"smros user init")?;
             self.write_file("/config/build-info/product", b"SMROS-Fuchsia-minimal")?;
+            self.install_host_share_without_persist()?;
+            self.host_share_installed = true;
             Ok(())
         })();
         self.resume_persist();

@@ -140,7 +140,7 @@ The live synchronous exception handler is assembled in `src/main.rs`. For `svc` 
 During a normal boot:
 
 1. `kernel_main()` calls `user_level::init()`.
-2. `user_level::init()` initializes user process state, probes user-level VirtIO drivers, mounts the FxFS-shaped store, creates the `/shared` mount point, installs tiny ELF boot images under `/pkg/bin`, installs the minimal component boot topology, and registers `/svc` services.
+2. `user_level::init()` initializes user process state, probes user-level VirtIO drivers, mounts the FxFS-shaped store, installs tiny ELF boot images under `/pkg/bin`, installs the build-time `host_shared/` snapshot under `/shared`, installs the minimal component boot topology, and registers `/svc` services.
 3. After `scheduler().init()`, bootstrap component launcher threads are deferred.
 4. `kernel_main()` brings up logical SMP state.
 5. `kernel_main()` calls `start_user_shell()`.

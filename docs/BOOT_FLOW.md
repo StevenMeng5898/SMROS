@@ -121,7 +121,7 @@ By default, `syscall_should_advance_elr()` returns `0`, so the handler does not 
 | 10 | `kernel_lowlevel::mmu::init()` | MMU/page-table helper initialization |
 | 11 | `crate::syscall::init()` | Called again, logged as "syscall handler" |
 | 12 | `crate::kernel_objects::channel::init()` | Channel subsystem init log |
-| 13 | `crate::user_level::init()` | user-process state, user-level VirtIO drivers, FxFS, `/shared` mount point, component topology, and `/svc` init |
+| 13 | `crate::user_level::init()` | user-process state, user-level VirtIO drivers, FxFS, build-time `/shared` snapshot, component topology, and `/svc` init |
 | 14 | `scheduler().init()` | Creates idle thread and resets scheduler state |
 | 15 | defer bootstrap component launchers | Keeps normal boot on the fast path |
 | 16 | `interrupt::enable_timer_interrupt()` | Logical enable step |
@@ -183,7 +183,7 @@ The current boot ELFs point at the existing SMROS EL0 trampoline. Segment bytes 
 
 FxFS paths resolve through explicit directory entries backed by object ids. File and directory objects carry mode, uid/gid, size, timestamps, and link count. The shell smoke path also exercises append, truncate, seek/read, attribute lookup, and journal replay metadata.
 
-The repository-local `host_shared/` directory is embedded at build time and mounted under `/shared` on demand by `share`, `mount share`, and commands that resolve `/shared` dependencies. It is a snapshot, not a live host mount. Persisted deletion tombstones in `/config/host-share-deleted` keep deleted snapshot files hidden across reboot with the same `smros-fxfs.img`.
+The repository-local `host_shared/` directory is embedded at build time and installed under `/shared` during FxFS initialization. `share` lists that snapshot, and `mount share` refreshes it from the embedded data; neither command uses a live host mount. Persisted deletion tombstones in `/config/host-share-deleted` keep deleted snapshot files hidden across reboot with the same `smros-fxfs.img`.
 
 The same initialization registers a minimal `/svc` directory with component-manager, ELF-runner, and FxFS services. Connections allocate Zircon channel pairs, and the first IPC layer uses fixed 32-byte request/reply structs rather than full FIDL encoding.
 

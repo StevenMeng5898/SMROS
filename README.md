@@ -13,7 +13,7 @@ SMROS is an experimental bare-metal AArch64 kernel written in Rust for QEMU's `v
 - Initializes a Fuchsia-inspired user-level scaffold with component instances, namespace entries, generated boot ELF metadata, `/svc` fixed-message IPC, an FxFS-shaped object store, and compatibility-app/Docker/runc smoke surfaces.
 - Binds QEMU VirtIO-MMIO block and net devices from user-level driver modules.
 - Uses `smros-fxfs.img` as a persistent 16 MiB block-backed FxFS image when QEMU provides the virtio-blk device.
-- Embeds repository-local `host_shared/` files into the kernel at build time and mounts them under `/shared` on demand.
+- Embeds repository-local `host_shared/` files into the kernel at build time and installs them under `/shared` during FxFS initialization.
 - Supports `run <elf>` for dynamic PIE AArch64 ELF files stored in FxFS. The dynamic loader and C library are resolved from `/shared/lib` or `/lib`.
 - Maintains standalone Verus harnesses for syscall, kernel-object, low-level, and user-level pure helper logic.
 
@@ -142,8 +142,8 @@ The current release build is expected to:
 1. Print the kernel banner and platform initialization logs.
 2. Initialize interrupt, timer, SMP, memory, syscall, MMU, channel, user-level, and scheduler subsystems.
 3. Bind user-level VirtIO block/net drivers when QEMU provides the devices.
-4. Mount or initialize the FxFS-shaped store and install `/pkg`, `/data`, `/tmp`, `/svc`, `/config`, and an empty `/shared` mount point.
-5. Defer `/shared` snapshot population, bootstrap component process launch, and EL0 syscall validation until requested.
+4. Mount or initialize the FxFS-shaped store and install `/pkg`, `/data`, `/tmp`, `/svc`, `/config`, and the build-time `/shared` snapshot.
+5. Defer bootstrap component process launch and EL0 syscall validation until requested.
 6. Start the shell scheduler thread.
 7. Reach the `smros>` prompt.
 

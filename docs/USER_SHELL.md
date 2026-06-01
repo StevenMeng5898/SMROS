@@ -208,7 +208,7 @@ qmlcluster window
 qmlcluster test
 ```
 
-`share`, `mount share`, and commands that resolve `/shared` dependencies populate `/shared` from the snapshot compiled into the current kernel image on demand. They do not read the host directory live while QEMU is already running. To see files added to `host_shared/` after boot, rebuild and restart with `make run`; then use `share` or `ls /shared`.
+FxFS installs `/shared` from the snapshot compiled into the current kernel image during boot. `share` lists that snapshot, and `mount share` refreshes `/shared` from the same embedded snapshot. They do not read the host directory live while QEMU is already running. To see files added to `host_shared/` after boot, rebuild and restart with `make run`; then use `share` or `ls /shared`.
 
 The current implementation is a build-time FxFS snapshot because the guest has virtio block and net drivers, but no 9p or virtio-fs filesystem driver yet. Files larger than 64 MiB are skipped by the build script and reported in the `share` command's skipped list. Shell-created files and edits under `/shared` are FxFS-local changes. Deleting a snapshot file such as `/shared/test` records a persisted tombstone in `/config/host-share-deleted`, so the file stays deleted across reboot while the same `smros-fxfs.img` is used. Remove `smros-fxfs.img` with `make clean-fxfs` to reset those tombstones.
 
