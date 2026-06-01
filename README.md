@@ -200,9 +200,14 @@ pulls are still reported as unsupported until TLS and bearer-token auth exist.
 shell. It also accepts named limits such as
 `fuzzsc seed=1234 iterations=4 time=2` or `fuzzsc iter 4 ms=500`. It mutates
 structured Linux and Zircon syscall arguments against the live dispatch tables,
-prints a compact pass/error/unsupported summary, and skips non-returning or
+prints a compact success/error/unsupported summary, and only walks modeled
+success-path syscalls. Unsupported ABI entries, non-returning calls, and
 destructive calls such as process exit, kill, close-many, and clone-style task
-creation so the interactive shell stays alive.
+creation are kept out of the interactive run so `err`, `ENOSYS`, and
+unsupported counts indicate a harness or coverage gap.
+The output separately reports interface syscall coverage and per-iteration
+success-path case counts, so lower `calls` totals do not mean dispatcher
+coverage was removed.
 Explicit iteration values run exactly that many completed rounds unless a
 nonzero time budget expires first.
 

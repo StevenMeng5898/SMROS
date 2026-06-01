@@ -3871,6 +3871,22 @@ fn cmd_fuzz_syscall(ctx: &mut ShellContext, args: &[&str]) {
     print_usize(&mut ctx.serial, report.skipped);
     ctx.serial.write_str("\n");
 
+    ctx.serial.write_str("  Linux interface: syscalls=");
+    print_usize(&mut ctx.serial, report.linux_interface_syscalls);
+    ctx.serial.write_str(" success_syscalls=");
+    print_usize(&mut ctx.serial, report.linux_success_syscalls);
+    ctx.serial.write_str(" cases/iter=");
+    print_usize(&mut ctx.serial, report.linux_success_call_cases);
+    ctx.serial.write_str("\n");
+
+    ctx.serial.write_str("  Zircon interface: syscalls=");
+    print_usize(&mut ctx.serial, report.zircon_interface_syscalls);
+    ctx.serial.write_str(" success_syscalls=");
+    print_usize(&mut ctx.serial, report.zircon_success_syscalls);
+    ctx.serial.write_str(" cases/iter=");
+    print_usize(&mut ctx.serial, report.zircon_success_call_cases);
+    ctx.serial.write_str("\n");
+
     ctx.serial.write_str("  Linux: calls=");
     print_usize(&mut ctx.serial, report.linux_calls);
     ctx.serial.write_str(" ok=");
@@ -3879,6 +3895,18 @@ fn cmd_fuzz_syscall(ctx: &mut ShellContext, args: &[&str]) {
     print_usize(&mut ctx.serial, report.linux_err);
     ctx.serial.write_str(" enosys=");
     print_usize(&mut ctx.serial, report.linux_enosys);
+    if report.linux_err != 0 {
+        ctx.serial.write_str(" err_syscall=");
+        print_usize(&mut ctx.serial, report.linux_first_err_syscall as usize);
+        ctx.serial.write_str("..");
+        print_usize(&mut ctx.serial, report.linux_last_err_syscall as usize);
+    }
+    if report.linux_enosys != 0 {
+        ctx.serial.write_str(" enosys_syscall=");
+        print_usize(&mut ctx.serial, report.linux_first_enosys_syscall as usize);
+        ctx.serial.write_str("..");
+        print_usize(&mut ctx.serial, report.linux_last_enosys_syscall as usize);
+    }
     ctx.serial.write_str("\n");
 
     ctx.serial.write_str("  Zircon: calls=");
@@ -3889,6 +3917,24 @@ fn cmd_fuzz_syscall(ctx: &mut ShellContext, args: &[&str]) {
     print_usize(&mut ctx.serial, report.zircon_err);
     ctx.serial.write_str(" unsupported=");
     print_usize(&mut ctx.serial, report.zircon_unsupported);
+    if report.zircon_err != 0 {
+        ctx.serial.write_str(" err_syscall=");
+        print_usize(&mut ctx.serial, report.zircon_first_err_syscall as usize);
+        ctx.serial.write_str("..");
+        print_usize(&mut ctx.serial, report.zircon_last_err_syscall as usize);
+    }
+    if report.zircon_unsupported != 0 {
+        ctx.serial.write_str(" unsupported_syscall=");
+        print_usize(
+            &mut ctx.serial,
+            report.zircon_first_unsupported_syscall as usize,
+        );
+        ctx.serial.write_str("..");
+        print_usize(
+            &mut ctx.serial,
+            report.zircon_last_unsupported_syscall as usize,
+        );
+    }
     ctx.serial.write_str("\n");
 
     ctx.serial.write_str("  Objects: handles=");
@@ -8688,12 +8734,28 @@ fn cmd_kill(ctx: &mut ShellContext, args: &[&str]) {
     }
 }
 
-/// Parse a decimal number from a string
+/// Parse a decimal or 0x-prefixed hexadecimal number from a string.
 fn parse_number(s: &str) -> Option<usize> {
     let mut result: usize = 0;
-    for byte in s.bytes() {
-        let digit = user_logic::decimal_digit_value(byte)?;
-        result = user_logic::parse_digit_step(result, digit)?;
+    let (digits, radix) = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        (hex, 16usize)
+    } else {
+        (s, 10usize)
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    for byte in digits.bytes() {
+        let digit = match byte {
+            b'0'..=b'9' => (byte - b'0') as usize,
+            b'a'..=b'f' if radix == 16 => 10 + (byte - b'a') as usize,
+            b'A'..=b'F' if radix == 16 => 10 + (byte - b'A') as usize,
+            _ => return None,
+        };
+        if digit >= radix {
+            return None;
+        }
+        result = result.checked_mul(radix)?.checked_add(digit)?;
     }
     Some(result)
 }

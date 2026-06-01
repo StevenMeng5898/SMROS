@@ -155,9 +155,9 @@ fuzzsc seed=<n> iterations=<n> time=<seconds>
 fuzzsc iter <n> ms=<milliseconds>
 ```
 
-The fuzzer walks the Linux ARM64 dispatcher range and the Zircon dispatcher
-range with deterministic mutations derived from the seed. Arguments are shaped
-from valid scratch buffers, C strings, handles, fds, mappings, iovecs, wait
+The fuzzer walks curated Linux ARM64 and Zircon success-path syscall sets with
+deterministic mutations derived from the seed. Arguments are shaped from valid
+scratch buffers, C strings, typed handles, typed fds, mappings, iovecs, wait
 items, and small boundary values so the run stresses syscall validation and
 object bookkeeping without relying on arbitrary invalid kernel pointers.
 When `time` or `ms` is supplied, the fuzzer checks the deadline during the
@@ -168,7 +168,12 @@ Safe interactive runs skip non-returning or state-destroying calls including
 exit, kill, close-many, VMAR destroy/unmap, interrupt destroy, and clone-style
 task creation. The command reports Linux successes/errors/`ENOSYS`, Zircon
 successes/errors/unsupported calls, skipped calls, and tracked object counts.
-It is not yet a full syzkaller executor with coverage feedback.
+Unsupported ABI entries and intentionally invalid negative-test cases are not
+part of the success-path sweep, so nonzero error, `ENOSYS`, or unsupported
+counters identify a fuzzer argument bug or missing modeled syscall. It is not
+yet a full syzkaller executor with coverage feedback. The command also prints
+known interface syscall counts and success-path cases per iteration so the
+interactive call total is not mistaken for the full dispatcher surface.
 
 ## Known Limitations
 

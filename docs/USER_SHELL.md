@@ -139,12 +139,17 @@ It is deliberately a safe interactive fuzzer:
 - clone-style process creation is skipped in the default round
 - each run closes tracked handles, fds, and mappings before returning
 
-The command prints call, success, error, `ENOSYS`, unsupported, and object-count
-totals, including completed/configured iterations and timeout status when a time
-limit is used. Explicit iteration values are not clamped; the time limit, when
-present, is the early-stop condition. It is not a full external syzkaller
-executor with coverage feedback yet; it is the in-kernel fuzzing entry point for
-broad syscall-dispatch coverage.
+The command prints call, success, `ENOSYS`, unsupported, error, and object-count
+totals, including completed/configured iterations and timeout status when a
+time limit is used. The default sweep uses supported success-path syscalls; a
+nonzero error, `ENOSYS`, or unsupported counter means the harness selected a bad
+argument shape or walked a syscall that is not modeled yet. It also prints the
+known Linux and Zircon interface syscall counts plus success-path cases per
+iteration, so the interactive `calls` total is not treated as the full
+compatibility surface. Explicit iteration values are not clamped; the time
+limit, when present, is the early-stop condition. It is not a full external
+syzkaller executor with coverage feedback yet; it is the in-kernel fuzzing entry
+point for broad syscall-dispatch coverage.
 
 Successful current runs include markers such as:
 
