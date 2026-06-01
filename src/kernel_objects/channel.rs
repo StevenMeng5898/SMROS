@@ -26,6 +26,8 @@ pub const MAX_CHANNEL_MSG_SIZE: usize = 65536;
 /// Maximum number of handles that can be sent in a message
 pub const MAX_CHANNEL_MSG_HANDLES: usize = 64;
 
+const CHANNEL_HANDLE_START: u32 = 0x9300_0000;
+
 /// Channel message
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -277,7 +279,7 @@ impl ChannelTable {
     pub const fn new() -> Self {
         Self {
             channels: Vec::new(),
-            next_id: AtomicU32::new(1),
+            next_id: AtomicU32::new(CHANNEL_HANDLE_START),
         }
     }
 

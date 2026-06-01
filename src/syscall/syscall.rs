@@ -994,6 +994,10 @@ impl MemorySyscallState {
         true
     }
 
+    fn clear_external_handle_state(&mut self, handle: u32) {
+        self.signals.retain(|signal| signal.handle != handle);
+    }
+
     fn alloc_object_handle_with_rights(
         &mut self,
         obj_type: ObjectType,
@@ -6329,17 +6333,21 @@ pub fn sys_handle_close(handle: u32) -> ZxResult {
         return Err(ZxError::ErrInvalidArgs);
     }
 
-    if memory_state().release_handle(handle)
-        || channel::channel_table().remove_channel(HandleValue(handle))
+    if memory_state().release_handle(handle) {
+        return Ok(());
+    }
+
+    if channel::channel_table().remove_channel(HandleValue(handle))
         || fifo::fifo_table().close(HandleValue(handle))
         || port::port_table().close(HandleValue(handle))
         || socket::socket_table().close(HandleValue(handle))
         || compat::close_handle(HandleValue(handle))
     {
-        Ok(())
-    } else {
-        Err(ZxError::ErrNotFound)
+        memory_state().clear_external_handle_state(handle);
+        return Ok(());
     }
+
+    Err(ZxError::ErrNotFound)
 }
 
 /// Zircon sys_handle_close_many implementation

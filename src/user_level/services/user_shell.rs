@@ -3960,6 +3960,7 @@ fn cmd_fuzz_syscall(ctx: &mut ShellContext, args: &[&str]) {
 
 const FUZZ_SHELL_DEFAULT_SEED: u64 = 1_511_431_206;
 const FUZZ_SHELL_DEFAULT_ITERATIONS: usize = 2;
+const FUZZ_SHELL_MAX_UNTIMED_ITERATIONS: usize = 1_000_000;
 const FUZZ_TICKS_PER_SECOND: u64 = 100;
 const FUZZ_MILLIS_PER_TICK: u64 = 10;
 
@@ -4078,6 +4079,11 @@ fn parse_fuzz_command_options(ctx: &mut ShellContext, args: &[&str]) -> Option<F
     if time_set && time_limit_ticks != 0 && !iterations_set {
         iterations = usize::MAX;
     }
+    if time_limit_ticks == 0 && iterations > FUZZ_SHELL_MAX_UNTIMED_ITERATIONS {
+        ctx.serial
+            .write_str("Iteration count too large without a time limit; use time=<seconds> or ms=<milliseconds>\n");
+        return None;
+    }
 
     Some(FuzzCommandOptions {
         seed,
@@ -4186,6 +4192,8 @@ fn print_fuzz_usage(ctx: &mut ShellContext) {
         .write_str("       fuzzsc seed=<n> iterations=<n> time=<seconds>\n");
     ctx.serial
         .write_str("       fuzzsc iter <n> time <seconds> | ms=<milliseconds>\n");
+    ctx.serial
+        .write_str("       more than 1000000 iterations requires a time limit\n");
 }
 
 fn print_fuzz_error_buckets(
