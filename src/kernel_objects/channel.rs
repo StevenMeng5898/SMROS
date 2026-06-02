@@ -27,6 +27,8 @@ pub const MAX_CHANNEL_MSG_SIZE: usize = 65536;
 pub const MAX_CHANNEL_MSG_HANDLES: usize = 64;
 
 const CHANNEL_HANDLE_START: u32 = 0x9300_0000;
+const MAX_CHANNEL_OBJECTS: usize = 256;
+const MAX_CHANNEL_QUEUE_MESSAGES: usize = 32;
 
 /// Channel message
 #[repr(C)]
@@ -164,16 +166,21 @@ impl Channel {
             return Err(ZxError::ErrInvalidArgs);
         }
 
-        let msg = ChannelMessage::new(data.to_vec(), handles.to_vec());
-
         // Deliver to the opposite endpoint's queue
-        if endpoint == self.handle0 {
-            self.queue1.push_back(msg);
+        let queue = if endpoint == self.handle0 {
+            &mut self.queue1
         } else if endpoint == self.handle1 {
-            self.queue0.push_back(msg);
+            &mut self.queue0
         } else {
             return Err(ZxError::ErrInvalidArgs);
+        };
+
+        if queue.len() >= MAX_CHANNEL_QUEUE_MESSAGES {
+            return Err(ZxError::ErrShouldWait);
         }
+
+        let msg = ChannelMessage::new(data.to_vec(), handles.to_vec());
+        queue.push_back(msg);
 
         Ok(())
     }
@@ -285,6 +292,10 @@ impl ChannelTable {
 
     /// Create a new channel
     pub fn create_channel(&mut self) -> Option<(HandleValue, HandleValue)> {
+        if self.channels.len() >= MAX_CHANNEL_OBJECTS {
+            return None;
+        }
+
         let h0 = HandleValue(self.next_id.fetch_add(1, Ordering::Relaxed));
         let h1 = HandleValue(self.next_id.fetch_add(1, Ordering::Relaxed));
 

@@ -1016,6 +1016,9 @@ impl FuzzState {
 
     fn finish_zircon_call(&mut self, num: u32, args: &[usize; 8]) {
         match num {
+            23 | 24 => {
+                self.drain_channel(self.channel_peer_handle());
+            }
             12 => {
                 let _ = dispatch_zircon_syscall(
                     63,
@@ -1029,6 +1032,28 @@ impl FuzzState {
                 );
             }
             _ => {}
+        }
+    }
+
+    fn drain_channel(&mut self, handle: u32) {
+        loop {
+            if dispatch_zircon_syscall(
+                21,
+                [
+                    handle as usize,
+                    0,
+                    self.arena.scratch_ptr(),
+                    FUZZ_SCRATCH_BYTES,
+                    self.arena.handles_ptr(),
+                    0,
+                    0,
+                    0,
+                ],
+            )
+            .is_err()
+            {
+                break;
+            }
         }
     }
 
