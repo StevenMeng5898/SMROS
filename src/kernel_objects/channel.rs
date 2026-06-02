@@ -319,7 +319,10 @@ impl ChannelTable {
             .iter()
             .position(|c| c.handle0 == handle || c.handle1 == handle)
         {
-            self.channels.remove(pos);
+            let _ = self.channels[pos].close_endpoint(handle);
+            if self.channels[pos].state == ChannelState::Closed {
+                self.channels.remove(pos);
+            }
             true
         } else {
             false

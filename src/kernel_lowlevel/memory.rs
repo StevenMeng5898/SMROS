@@ -636,7 +636,9 @@ impl ProcessManager {
     pub fn create_process(&mut self, name: &'static str) -> Option<usize> {
         // Find an empty slot
         for i in 0..MAX_PROCESSES {
-            if self.processes[i].state == ProcessState::Empty {
+            if self.processes[i].state == ProcessState::Empty
+                || self.processes[i].state == ProcessState::Terminated
+            {
                 let pid = self.next_pid.load(Ordering::Relaxed) as usize;
                 let parent_pid = 1; // Init is parent
 
@@ -692,6 +694,12 @@ impl ProcessManager {
     /// Terminate a process
     pub fn terminate_process(&mut self, pid: usize) -> bool {
         if let Some(pcb) = self.get_process_by_pid_mut(pid) {
+            if pcb.state == ProcessState::Terminated {
+                return true;
+            }
+            if pcb.state == ProcessState::Empty {
+                return false;
+            }
             // Free all pages
             for i in 0..pcb.address_space.valid_page_count {
                 if pcb.address_space.pages[i].valid {
@@ -701,7 +709,7 @@ impl ProcessManager {
             }
 
             pcb.state = ProcessState::Terminated;
-            self.active_processes -= 1;
+            self.active_processes = self.active_processes.saturating_sub(1);
             true
         } else {
             false

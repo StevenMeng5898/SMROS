@@ -256,7 +256,11 @@ pub const DEFAULT_RESOURCE_RIGHTS: u32 = Rights::Duplicate as u32
 
 pub const DEFAULT_INTERRUPT_RIGHTS: u32 = RIGHTS_BASIC | RIGHTS_IO | Rights::Signal as u32;
 
-pub const DEFAULT_STREAM_RIGHTS: u32 = RIGHTS_BASIC | RIGHTS_PROPERTY | Rights::Signal as u32;
+pub const DEFAULT_STREAM_RIGHTS: u32 = RIGHTS_BASIC
+    | RIGHTS_PROPERTY
+    | Rights::Read as u32
+    | Rights::Write as u32
+    | Rights::Signal as u32;
 
 pub const DEFAULT_CLOCK_RIGHTS: u32 = RIGHTS_BASIC | RIGHTS_IO;
 

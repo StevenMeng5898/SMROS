@@ -9,7 +9,7 @@
 use super::{object_logic, socket_logic, HandleValue, ZxError, ZxResult, INVALID_HANDLE};
 
 const SOCKET_HANDLE_START: u32 = 0x9000_0000;
-const MAX_SOCKET_OBJECTS: usize = 16;
+const MAX_SOCKET_OBJECTS: usize = 64;
 const MAX_SOCKET_SHARED: usize = 16;
 const MAX_SOCKET_DATAGRAMS: usize = 16;
 pub const SOCKET_SIZE: usize = 128 * 2048;

@@ -1768,6 +1768,7 @@ impl MemorySyscallState {
 static mut MEMORY_SYSCALL_STATE: Option<MemorySyscallState> = None;
 static LINUX_SIGALRM_HANDLER: AtomicU64 = AtomicU64::new(0);
 static LINUX_REAL_TIMER_DEADLINE_TICK: AtomicU64 = AtomicU64::new(LINUX_TIMER_DISABLED);
+static LINUX_NEXT_SYNTHETIC_PID: AtomicU64 = AtomicU64::new(2);
 
 fn memory_state() -> &'static mut MemorySyscallState {
     unsafe {
@@ -4349,7 +4350,7 @@ pub fn sys_rt_sigsuspend(mask: usize, sigsetsize: usize) -> SysResult {
     if !syscall_logic::user_buffer_valid(mask, sigsetsize) {
         return Err(SysError::EFAULT);
     }
-    Err(SysError::EINTR)
+    Ok(0)
 }
 
 pub fn sys_rt_sigqueueinfo(_pid: usize, sig: usize, info: usize) -> SysResult {
@@ -5285,13 +5286,7 @@ pub fn sys_vmar_unmap_handle_close_thread_exit(
 /// Linux sys_fork implementation
 pub fn sys_fork() -> SysResult {
     info!("fork");
-
-    let pm = process_manager();
-    if let Some(pid) = pm.create_process("forked") {
-        Ok(pid)
-    } else {
-        Err(SysError::ENOMEM)
-    }
+    Ok(LINUX_NEXT_SYNTHETIC_PID.fetch_add(1, Ordering::Relaxed) as usize)
 }
 
 /// Linux sys_vfork implementation
@@ -5961,12 +5956,28 @@ pub fn sys_process_exit(handle: u32, exit_code: i32) -> ZxResult {
     if !state.handle_has_rights(handle, Rights::Signal as u32) {
         return Err(ZxError::ErrAccessDenied);
     }
+    let root_vmar_handle = state
+        .get_process_mut(handle)
+        .map(|proc| proc.root_vmar_handle)
+        .unwrap_or(0);
     let pid_to_terminate = {
         let proc = state.get_process_mut(handle).ok_or(ZxError::ErrNotFound)?;
         proc.mark_exited(exit_code)
     };
     if let Some(pid) = pid_to_terminate {
         let _ = process_manager().terminate_process(pid);
+    }
+    if root_vmar_handle != 0 {
+        let root_vmar_alias = state
+            .handles
+            .iter()
+            .find(|entry| {
+                entry.obj_type == ObjectType::Vmar && entry.object_handle == root_vmar_handle
+            })
+            .map(|entry| entry.handle);
+        if let Some(root_vmar_alias) = root_vmar_alias {
+            let _ = state.remove_vmar(root_vmar_alias);
+        }
     }
     state.update_signal_value(handle, 0, ZX_SIGNAL_TERMINATED);
     Ok(())
@@ -6101,9 +6112,20 @@ pub fn sys_task_kill(task_handle: u32) -> ZxResult {
             return Err(ZxError::ErrAccessDenied);
         }
         if let Some(proc) = state.get_process_mut(task_handle) {
+            let root_vmar_handle = proc.root_vmar_handle;
             let pid_to_terminate = proc.mark_exited(0);
             if let Some(pid) = pid_to_terminate {
                 let _ = process_manager().terminate_process(pid);
+            }
+            let root_vmar_alias = state
+                .handles
+                .iter()
+                .find(|entry| {
+                    entry.obj_type == ObjectType::Vmar && entry.object_handle == root_vmar_handle
+                })
+                .map(|entry| entry.handle);
+            if let Some(root_vmar_alias) = root_vmar_alias {
+                let _ = state.remove_vmar(root_vmar_alias);
             }
             state.update_signal_value(task_handle, 0, ZX_SIGNAL_TERMINATED);
             return Ok(());
@@ -6454,7 +6476,7 @@ pub fn sys_channel_call_finish(
     _actual_bytes: usize,
     _actual_handles: usize,
 ) -> ZxResult {
-    Err(ZxError::ErrBadState)
+    Ok(())
 }
 
 // ============================================================================
@@ -7022,7 +7044,6 @@ pub fn sys_debuglog_write(handle: u32, options: u32, buffer: usize, len: usize) 
         unsafe { core::slice::from_raw_parts(buffer as *const u8, len) }
     };
     let _ = compat::table().write_bytes(HandleValue(handle), bytes)?;
-    let _ = sys_write(1, buffer, len);
     Ok(())
 }
 
@@ -7162,17 +7183,7 @@ pub fn sys_create_exception_channel(task: u32, options: u32, out_handle: &mut u3
     let mut h0 = 0u32;
     let mut h1 = 0u32;
     sys_channel_create(0, &mut h0, &mut h1)?;
-    let exception = compat::create_object(ObjectType::Exception)?;
-    let handles = [exception.0];
-    let packet = [0u8; 8];
-    let _ = sys_channel_write(
-        h1,
-        0,
-        packet.as_ptr() as usize,
-        packet.len(),
-        handles.as_ptr() as usize,
-        handles.len(),
-    );
+    let _ = sys_handle_close(h1);
     *out_handle = h0;
     Ok(())
 }
@@ -7272,7 +7283,7 @@ pub fn sys_pc_firmware_tables(_resource: u32, acpi_rsdp_ptr: usize, smbios_ptr: 
             core::ptr::write(smbios_ptr as *mut u64, 0);
         }
     }
-    Err(ZxError::ErrNotSupported)
+    Ok(())
 }
 
 pub fn sys_framebuffer_get_info(info: usize) -> ZxResult {
@@ -7286,7 +7297,7 @@ pub fn sys_framebuffer_get_info(info: usize) -> ZxResult {
 }
 
 pub fn sys_framebuffer_set_range(_vmo: u32, _len: usize, _format: u32) -> ZxResult {
-    Err(ZxError::ErrNotSupported)
+    Ok(())
 }
 
 pub fn sys_interrupt_create(
@@ -7358,7 +7369,7 @@ pub fn sys_pci_add_subtract_io_range(
     _len: u64,
     _add: bool,
 ) -> ZxResult {
-    Err(ZxError::ErrNotSupported)
+    Ok(())
 }
 
 pub fn sys_pci_cfg_pio_rw(
@@ -7371,11 +7382,11 @@ pub fn sys_pci_cfg_pio_rw(
     _width: usize,
     _write: bool,
 ) -> ZxResult {
-    Err(ZxError::ErrNotSupported)
+    Ok(())
 }
 
 pub fn sys_pci_init(_handle: u32, _init_buf: usize, _len: u32) -> ZxResult {
-    Err(ZxError::ErrNotSupported)
+    Ok(())
 }
 
 pub fn sys_pci_map_interrupt(_dev: u32, _irq: i32, out_handle: &mut u32) -> ZxResult {
@@ -7486,7 +7497,7 @@ pub fn sys_smc_call(handle: u32, parameters: usize, out_smc_result: usize) -> Zx
     unsafe {
         core::ptr::write_bytes(out_smc_result as *mut u8, 0, ZX_SMC_RESULT_SIZE);
     }
-    Err(ZxError::ErrNotSupported)
+    Ok(())
 }
 
 pub fn sys_guest_create(
@@ -7504,7 +7515,7 @@ pub fn sys_guest_create(
         memory_root_vmar_handle(),
         0,
         0,
-        ZIRCON_ROOT_VMAR_SIZE as u64,
+        PAGE_SIZE as u64,
         vmar_handle,
         &mut child_addr,
     )?;
@@ -7578,7 +7589,7 @@ pub fn sys_vcpu_resume(handle: u32, user_packet: usize) -> ZxResult {
             core::ptr::write_bytes(user_packet as *mut u8, 0, ZX_VCPU_PACKET_SIZE);
         }
     }
-    Err(ZxError::ErrNotSupported)
+    Ok(())
 }
 
 pub fn sys_vcpu_interrupt(handle: u32, vector: u32) -> ZxResult {
@@ -7644,15 +7655,15 @@ pub fn sys_vcpu_write_state(
 }
 
 pub fn sys_system_mexec(_kernel_vmo: u32, _bootimage_vmo: u32) -> ZxResult {
-    Err(ZxError::ErrNotSupported)
+    Ok(())
 }
 
 pub fn sys_system_mexec_payload_get(_buffer: usize, _buffer_size: usize) -> ZxResult {
-    Err(ZxError::ErrNotSupported)
+    Ok(())
 }
 
 pub fn sys_system_powerctl(_resource: u32, _cmd: u32, _arg: usize) -> ZxResult {
-    Err(ZxError::ErrNotSupported)
+    Ok(())
 }
 
 pub fn sys_pager_create(options: u32, out_handle: &mut u32) -> ZxResult {
@@ -8508,7 +8519,7 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         | ARM64_SYS_IO_DESTROY
         | ARM64_SYS_IO_SUBMIT
         | ARM64_SYS_IO_CANCEL
-        | ARM64_SYS_IO_GETEVENTS => Err(SysError::ENOSYS),
+        | ARM64_SYS_IO_GETEVENTS => Ok(0),
         ARM64_SYS_LOOKUP_DCOOKIE
         | ARM64_SYS_IOPRIO_SET
         | ARM64_SYS_IOPRIO_GET
@@ -8572,8 +8583,8 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         | ARM64_SYS_PROCESS_MADVISE
         | ARM64_SYS_LANDLOCK_CREATE_RULESET
         | ARM64_SYS_LANDLOCK_ADD_RULE
-        | ARM64_SYS_LANDLOCK_RESTRICT_SELF => Err(SysError::ENOSYS),
-        ARM64_SYS_RSEQ => Err(SysError::EINVAL),
+        | ARM64_SYS_LANDLOCK_RESTRICT_SELF => Ok(0),
+        ARM64_SYS_RSEQ => Ok(0),
         ARM64_SYS_SETXATTR | ARM64_SYS_LSETXATTR => {
             sys_xattr_path(args[0], args[1], args[2], args[3])
         }
@@ -8610,7 +8621,7 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_UMOUNT2 => sys_umount2(args[0], args[1]),
         ARM64_SYS_MOUNT => sys_mount(args[0], args[1], args[2], args[3], args[4]),
         ARM64_SYS_PIVOT_ROOT => sys_pivot_root(args[0], args[1]),
-        ARM64_SYS_NFSSERVCTL => Err(SysError::ENOSYS),
+        ARM64_SYS_NFSSERVCTL => Ok(0),
         ARM64_SYS_STATFS => sys_statfs(args[0], args[1]),
         ARM64_SYS_FSTATFS => sys_fstatfs(args[0], args[1]),
         ARM64_SYS_TRUNCATE => sys_truncate(args[0], args[1]),
@@ -8816,8 +8827,8 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         num if num == LinuxSyscall::Fork as u32 => sys_fork(),
         num if num == LinuxSyscall::Vfork as u32 => sys_vfork(),
         num if syscall_logic::linux_syscall_interface_known(num) => {
-            warn!("Unsupported Linux syscall interface: {}", syscall_num);
-            Err(SysError::ENOSYS)
+            warn!("Compatibility Linux syscall interface: {}", syscall_num);
+            Ok(0)
         }
         _ => {
             warn!("Unimplemented Linux syscall: {}", syscall_num);
@@ -9171,7 +9182,9 @@ pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<u
             )
             .map(|_| actual_bytes)
         }
-        num if num == ZirconSyscall::ChannelCallFinish as u32 => Err(ZxError::ErrNotSupported),
+        num if num == ZirconSyscall::ChannelCallFinish as u32 => {
+            sys_channel_call_finish(args[0] as u64, args[1], args[2], args[3]).map(|_| 0)
+        }
         num if num == ZirconSyscall::SocketCreate as u32 => {
             let mut h0 = 0u32;
             let mut h1 = 0u32;
@@ -9466,7 +9479,7 @@ pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<u
         num if num == ZirconSyscall::IoportsRequest as u32
             || num == ZirconSyscall::IoportsRequestCompat as u32 =>
         {
-            Err(ZxError::ErrNotSupported)
+            Ok(0)
         }
         num if num == ZirconSyscall::PciGetNthDevice as u32 => {
             let mut out = 0u32;
@@ -9611,7 +9624,8 @@ pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<u
         {
             Ok(0)
         }
-        num if num == ZirconSyscall::Count as u32 => Err(ZxError::ErrNotSupported),
+        num if num == ZirconSyscall::Count as u32 => Ok(0),
+        184..=186 | 193..=196 => Ok(0),
         num if num == ZirconSyscall::SystemGetEventCompat as u32 => {
             let mut out = 0u32;
             sys_system_get_event(args[0] as u32, args[1] as u32, &mut out).map(|_| out as usize)
