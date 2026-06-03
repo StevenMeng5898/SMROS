@@ -263,6 +263,11 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_uptime,
     },
     ShellCommand {
+        name: "loglevel",
+        description: "Show or set kernel object log level",
+        handler: cmd_loglevel,
+    },
+    ShellCommand {
         name: "kill",
         description: "Terminate a process by PID",
         handler: cmd_kill,
@@ -741,6 +746,29 @@ fn cmd_version(ctx: &mut ShellContext, _args: &[&str]) {
     ctx.serial.write_str("Architecture: ARM64 (AArch64)\n");
     ctx.serial
         .write_str("Features: Multi-process, Syscalls, Preemptive Scheduler\n\n");
+}
+
+/// Command: loglevel - Show or configure kernel object log verbosity
+fn cmd_loglevel(ctx: &mut ShellContext, args: &[&str]) {
+    let current = crate::kernel_objects::log::level();
+    if args.is_empty() {
+        ctx.serial.write_str("kernel object log level: ");
+        ctx.serial.write_str(current.as_str());
+        ctx.serial.write_str("\n");
+        return;
+    }
+
+    let Some(level) = crate::kernel_objects::log::level_from_str(args[0]) else {
+        ctx.serial
+            .write_str("usage: loglevel [debug|info|warning|err|fatal]\n");
+        return;
+    };
+
+    crate::kernel_objects::log::set_level(level);
+    ctx.serial.write_str("kernel object log level set to ");
+    ctx.serial.write_str(level.as_str());
+    ctx.serial.write_str("\n");
+    crate::kobj_info!("log", "runtime log level changed to {}", level.as_str());
 }
 
 /// Command: testsc - Test syscall interface

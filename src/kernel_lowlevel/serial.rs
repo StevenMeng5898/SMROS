@@ -45,6 +45,13 @@ impl Serial {
         Serial { base: UART_BASE }
     }
 
+    /// Create a serial writer for the already-initialized active UART.
+    pub fn active() -> Self {
+        Serial {
+            base: drivers::uart_base(),
+        }
+    }
+
     /// Initialize the UART
     pub fn init(&mut self) {
         self.base = drivers::uart_base();

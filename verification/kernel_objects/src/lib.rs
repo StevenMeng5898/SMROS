@@ -7,6 +7,7 @@ include!("../../../src/kernel_objects/fifo_logic_shared.rs");
 include!("../../../src/kernel_objects/futex_logic_shared.rs");
 include!("../../../src/kernel_objects/port_logic_shared.rs");
 include!("../../../src/kernel_objects/socket_logic_shared.rs");
+include!("../../../src/kernel_objects/log_logic_shared.rs");
 
 pub const PAGE_SIZE: usize = 4096;
 pub const MAX_HANDLES_PER_PROCESS: usize = 1024;
@@ -164,6 +165,11 @@ pub const SANDBOX_JOB_RIGHTS: u32 = DEFAULT_JOB_RIGHTS & !SANDBOX_JOB_DENIED_RIG
 pub const SANDBOX_THREAD_RIGHTS: u32 = DEFAULT_THREAD_RIGHTS & !SANDBOX_THREAD_DENIED_RIGHTS;
 pub const MAX_PROCESS_RIGHT_CONFIG_ENTRIES: usize = 24;
 pub const PROCESS_RIGHT_CONFIG_JSON_ENTRY_COUNT: usize = 19;
+pub const LOG_LEVEL_DEBUG: usize = 0;
+pub const LOG_LEVEL_INFO: usize = 1;
+pub const LOG_LEVEL_WARNING: usize = 2;
+pub const LOG_LEVEL_ERR: usize = 3;
+pub const LOG_LEVEL_FATAL: usize = 4;
 
 #[derive(Copy, Clone)]
 struct HandleEntryModel {
@@ -608,6 +614,56 @@ spec fn socket_refresh_write_signals_spec(
         writable_updated | threshold_signal
     } else {
         writable_updated & !threshold_signal
+    }
+}
+
+spec fn log_level_valid_spec(level: int) -> bool {
+    level == LOG_LEVEL_DEBUG as int
+        || level == LOG_LEVEL_INFO as int
+        || level == LOG_LEVEL_WARNING as int
+        || level == LOG_LEVEL_ERR as int
+        || level == LOG_LEVEL_FATAL as int
+}
+
+spec fn log_level_from_raw_spec(raw: int) -> int {
+    if raw == LOG_LEVEL_DEBUG as int {
+        LOG_LEVEL_DEBUG as int
+    } else if raw == LOG_LEVEL_WARNING as int {
+        LOG_LEVEL_WARNING as int
+    } else if raw == LOG_LEVEL_ERR as int {
+        LOG_LEVEL_ERR as int
+    } else if raw == LOG_LEVEL_FATAL as int {
+        LOG_LEVEL_FATAL as int
+    } else {
+        LOG_LEVEL_INFO as int
+    }
+}
+
+spec fn log_should_log_spec(level: int, threshold: int) -> bool {
+    level >= threshold
+}
+
+spec fn log_level_from_match_flags_spec(
+    debug_match: bool,
+    info_match: bool,
+    warning_match: bool,
+    warn_match: bool,
+    err_match: bool,
+    error_match: bool,
+    fatal_match: bool,
+) -> Option<int> {
+    if debug_match {
+        Some(LOG_LEVEL_DEBUG as int)
+    } else if info_match {
+        Some(LOG_LEVEL_INFO as int)
+    } else if warning_match || warn_match {
+        Some(LOG_LEVEL_WARNING as int)
+    } else if err_match || error_match {
+        Some(LOG_LEVEL_ERR as int)
+    } else if fatal_match {
+        Some(LOG_LEVEL_FATAL as int)
+    } else {
+        Option::<int>::None
     }
 }
 
@@ -1079,6 +1135,88 @@ fn socket_refresh_write_signals(
         threshold,
         writable_signal,
         threshold_signal
+    )
+}
+
+fn log_level_from_raw(raw: usize) -> (out: usize)
+    ensures
+        out as int == log_level_from_raw_spec(raw as int),
+        log_level_valid_spec(out as int),
+{
+    smros_log_level_from_raw_body!(
+        raw,
+        LOG_LEVEL_DEBUG,
+        LOG_LEVEL_DEBUG,
+        LOG_LEVEL_WARNING,
+        LOG_LEVEL_WARNING,
+        LOG_LEVEL_ERR,
+        LOG_LEVEL_ERR,
+        LOG_LEVEL_FATAL,
+        LOG_LEVEL_FATAL,
+        LOG_LEVEL_INFO
+    )
+}
+
+fn log_should_log(level: usize, threshold: usize) -> (out: bool)
+    requires
+        log_level_valid_spec(level as int),
+        log_level_valid_spec(threshold as int),
+    ensures
+        out == log_should_log_spec(level as int, threshold as int),
+        level < threshold ==> !out,
+        level >= threshold ==> out,
+{
+    smros_log_should_log_body!(level, threshold)
+}
+
+fn log_level_from_match_flags(
+    debug_match: bool,
+    info_match: bool,
+    warning_match: bool,
+    warn_match: bool,
+    err_match: bool,
+    error_match: bool,
+    fatal_match: bool,
+) -> (out: Option<usize>)
+    ensures
+        match out {
+            Some(level) => log_level_valid_spec(level as int),
+            None => true,
+        },
+        match out {
+            Some(level) => log_level_from_match_flags_spec(
+                debug_match,
+                info_match,
+                warning_match,
+                warn_match,
+                err_match,
+                error_match,
+                fatal_match,
+            ) == Some(level as int),
+            None => log_level_from_match_flags_spec(
+                debug_match,
+                info_match,
+                warning_match,
+                warn_match,
+                err_match,
+                error_match,
+                fatal_match,
+            ) == Option::<int>::None,
+        },
+{
+    smros_log_level_from_match_flags_body!(
+        debug_match,
+        info_match,
+        warning_match,
+        warn_match,
+        err_match,
+        error_match,
+        fatal_match,
+        LOG_LEVEL_DEBUG,
+        LOG_LEVEL_INFO,
+        LOG_LEVEL_WARNING,
+        LOG_LEVEL_ERR,
+        LOG_LEVEL_FATAL
     )
 }
 
@@ -2083,6 +2221,61 @@ fn boot_process_right_config_smoke() {
     assert(sandbox_valid);
     assert(sandbox_restricted);
     assert(install_allowed);
+}
+
+fn log_level_smoke() {
+    let raw_debug = log_level_from_raw(LOG_LEVEL_DEBUG);
+    let raw_info = log_level_from_raw(LOG_LEVEL_INFO);
+    let raw_warning = log_level_from_raw(LOG_LEVEL_WARNING);
+    let raw_err = log_level_from_raw(LOG_LEVEL_ERR);
+    let raw_fatal = log_level_from_raw(LOG_LEVEL_FATAL);
+    let raw_unknown = log_level_from_raw(usize::MAX);
+
+    assert(raw_debug == LOG_LEVEL_DEBUG);
+    assert(raw_info == LOG_LEVEL_INFO);
+    assert(raw_warning == LOG_LEVEL_WARNING);
+    assert(raw_err == LOG_LEVEL_ERR);
+    assert(raw_fatal == LOG_LEVEL_FATAL);
+    assert(raw_unknown == LOG_LEVEL_INFO);
+
+    let debug_at_info = log_should_log(LOG_LEVEL_DEBUG, LOG_LEVEL_INFO);
+    let info_at_info = log_should_log(LOG_LEVEL_INFO, LOG_LEVEL_INFO);
+    let fatal_at_info = log_should_log(LOG_LEVEL_FATAL, LOG_LEVEL_INFO);
+    let warning_at_err = log_should_log(LOG_LEVEL_WARNING, LOG_LEVEL_ERR);
+    let err_at_warning = log_should_log(LOG_LEVEL_ERR, LOG_LEVEL_WARNING);
+
+    assert(!debug_at_info);
+    assert(info_at_info);
+    assert(fatal_at_info);
+    assert(!warning_at_err);
+    assert(err_at_warning);
+
+    let parsed_debug = log_level_from_match_flags(true, false, false, false, false, false, false);
+    let parsed_info = log_level_from_match_flags(false, true, false, false, false, false, false);
+    let parsed_warning =
+        log_level_from_match_flags(false, false, true, false, false, false, false);
+    let parsed_warn = log_level_from_match_flags(false, false, false, true, false, false, false);
+    let parsed_err = log_level_from_match_flags(false, false, false, false, true, false, false);
+    let parsed_error = log_level_from_match_flags(false, false, false, false, false, true, false);
+    let parsed_fatal = log_level_from_match_flags(false, false, false, false, false, false, true);
+    let parsed_none = log_level_from_match_flags(false, false, false, false, false, false, false);
+
+    assert(parsed_debug == Option::<usize>::Some(LOG_LEVEL_DEBUG));
+    assert(parsed_info == Option::<usize>::Some(LOG_LEVEL_INFO));
+    assert(parsed_warning == Option::<usize>::Some(LOG_LEVEL_WARNING));
+    assert(parsed_warn == Option::<usize>::Some(LOG_LEVEL_WARNING));
+    assert(parsed_err == Option::<usize>::Some(LOG_LEVEL_ERR));
+    assert(parsed_error == Option::<usize>::Some(LOG_LEVEL_ERR));
+    assert(parsed_fatal == Option::<usize>::Some(LOG_LEVEL_FATAL));
+    assert(parsed_none == Option::<usize>::None);
+
+    let debug_precedes_fatal =
+        log_level_from_match_flags(true, false, false, false, false, false, true);
+    let info_precedes_warning =
+        log_level_from_match_flags(false, true, true, false, false, false, false);
+
+    assert(debug_precedes_fatal == Option::<usize>::Some(LOG_LEVEL_DEBUG));
+    assert(info_precedes_warning == Option::<usize>::Some(LOG_LEVEL_INFO));
 }
 
 proof fn kernel_object_mod_has_no_pure_runtime_obligation() {
