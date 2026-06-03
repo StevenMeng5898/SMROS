@@ -263,6 +263,11 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_uptime,
     },
     ShellCommand {
+        name: "sched",
+        description: "Show, set, and test scheduler policy",
+        handler: cmd_sched,
+    },
+    ShellCommand {
         name: "loglevel",
         description: "Show or set kernel object log level",
         handler: cmd_loglevel,
@@ -8772,6 +8777,70 @@ fn cmd_uptime(ctx: &mut ShellContext, _args: &[&str]) {
     let remaining_seconds = seconds % 60;
     print_number(&mut ctx.serial, remaining_seconds as u32);
     ctx.serial.write_str(" second(s)\n\n");
+}
+
+/// Command: sched - Show or configure scheduler policy
+fn cmd_sched(ctx: &mut ShellContext, args: &[&str]) {
+    let s = scheduler::scheduler();
+    if args.is_empty() || args[0] == "status" {
+        ctx.serial.write_str("scheduler policy: ");
+        ctx.serial.write_str(s.policy().as_str());
+        ctx.serial.write_str("\nactive threads: ");
+        print_number(&mut ctx.serial, s.active_threads() as u32);
+        ctx.serial.write_str("\ntick count: ");
+        print_number(&mut ctx.serial, s.get_tick_count() as u32);
+        ctx.serial.write_str("\ntime slice: ");
+        print_number(&mut ctx.serial, s.time_slice_ticks());
+        ctx.serial.write_str(" ticks\n");
+        return;
+    }
+
+    if args[0] == "set" {
+        if args.len() < 2 {
+            ctx.serial.write_str("usage: sched set <rr|edf|credit>\n");
+            return;
+        }
+        let Some(policy) = scheduler::SchedulePolicy::from_str(args[1]) else {
+            ctx.serial.write_str("usage: sched set <rr|edf|credit>\n");
+            return;
+        };
+        s.set_policy(policy);
+        ctx.serial.write_str("scheduler policy set to ");
+        ctx.serial.write_str(policy.as_str());
+        ctx.serial.write_str("\n");
+        return;
+    }
+
+    if args[0] == "test" {
+        let result = s.run_policy_self_test();
+        ctx.serial.write_str("scheduler policy self-test:\n");
+        ctx.serial.write_str("  round-robin selected T");
+        print_number(&mut ctx.serial, result.round_robin as u32);
+        ctx.serial.write_str(" (expected T2)\n");
+        ctx.serial.write_str("  edf selected T");
+        print_number(&mut ctx.serial, result.edf as u32);
+        ctx.serial.write_str(" (expected T2)\n");
+        ctx.serial.write_str("  credit selected T");
+        print_number(&mut ctx.serial, result.credit as u32);
+        ctx.serial.write_str(" (expected T3)\n");
+        ctx.serial.write_str("  edf cpu0 selected T");
+        print_number(&mut ctx.serial, result.cpu_filtered as u32);
+        ctx.serial.write_str(" (expected T3)\n");
+        if result.round_robin == 2
+            && result.edf == 2
+            && result.credit == 3
+            && result.cpu_filtered == 3
+        {
+            ctx.serial.write_str("[OK] scheduler policy test passed\n");
+        } else {
+            ctx.serial
+                .write_str("[FAIL] scheduler policy test failed\n");
+        }
+        return;
+    }
+
+    ctx.serial
+        .write_str("usage: sched [status|set <rr|edf|credit>|test]\n");
 }
 
 /// Command: kill - Terminate a process by PID

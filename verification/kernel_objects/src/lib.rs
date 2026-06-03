@@ -8,6 +8,7 @@ include!("../../../src/kernel_objects/futex_logic_shared.rs");
 include!("../../../src/kernel_objects/port_logic_shared.rs");
 include!("../../../src/kernel_objects/socket_logic_shared.rs");
 include!("../../../src/kernel_objects/log_logic_shared.rs");
+include!("../../../src/kernel_objects/scheduler_logic_shared.rs");
 
 pub const PAGE_SIZE: usize = 4096;
 pub const MAX_HANDLES_PER_PROCESS: usize = 1024;
@@ -170,6 +171,11 @@ pub const LOG_LEVEL_INFO: usize = 1;
 pub const LOG_LEVEL_WARNING: usize = 2;
 pub const LOG_LEVEL_ERR: usize = 3;
 pub const LOG_LEVEL_FATAL: usize = 4;
+pub const SCHED_POLICY_RR: usize = 0;
+pub const SCHED_POLICY_EDF: usize = 1;
+pub const SCHED_POLICY_CREDIT: usize = 2;
+pub const SCHED_DEFAULT_CREDIT: i32 = 100;
+pub const SCHED_MAX_CREDIT_WEIGHT: u32 = (i32::MAX as u32) / (SCHED_DEFAULT_CREDIT as u32);
 
 #[derive(Copy, Clone)]
 struct HandleEntryModel {
@@ -308,6 +314,118 @@ spec fn scheduler_can_run_spec(idx: int, current: int, ready: bool) -> bool {
 
 spec fn scheduler_cpu_allowed_spec(has_affinity: bool, affinity: int, cpu_id: int) -> bool {
     !has_affinity || affinity == cpu_id
+}
+
+spec fn sched_policy_from_match_flags_spec(
+    rr_match: bool,
+    round_robin_match: bool,
+    edf_match: bool,
+    credit_match: bool,
+) -> Option<int> {
+    if rr_match || round_robin_match {
+        Some(SCHED_POLICY_RR as int)
+    } else if edf_match {
+        Some(SCHED_POLICY_EDF as int)
+    } else if credit_match {
+        Some(SCHED_POLICY_CREDIT as int)
+    } else {
+        Option::<int>::None
+    }
+}
+
+spec fn sched_task_allowed_on_cpu_spec(
+    has_affinity: bool,
+    affinity: int,
+    has_cpu_filter: bool,
+    cpu_id: int,
+) -> bool {
+    !has_cpu_filter || !has_affinity || affinity == cpu_id
+}
+
+spec fn sched_edf_better_spec(
+    candidate_deadline: int,
+    best_present: bool,
+    best_deadline: int,
+) -> bool {
+    !best_present || candidate_deadline < best_deadline
+}
+
+spec fn sched_credit_better_spec(
+    candidate_credit: int,
+    best_present: bool,
+    best_credit: int,
+) -> bool {
+    !best_present || candidate_credit > best_credit
+}
+
+spec fn sched_time_slice_after_tick_spec(time_slice: int) -> int {
+    if time_slice > 0 {
+        time_slice - 1
+    } else {
+        0
+    }
+}
+
+spec fn sched_credit_after_tick_spec(credit: int) -> int {
+    if credit > 0 {
+        credit - 1
+    } else {
+        credit
+    }
+}
+
+spec fn sched_deadline_due_spec(time_slice: int, tick_count: int, deadline_tick: int) -> bool {
+    time_slice == 0 || tick_count >= deadline_tick
+}
+
+spec fn sched_advance_deadline_spec(deadline_tick: int, tick_count: int, period_ticks: int) -> int {
+    let period = if period_ticks == 0 { 1 } else { period_ticks };
+    let base = if deadline_tick > tick_count {
+        deadline_tick
+    } else {
+        tick_count
+    };
+    if base + period > u64::MAX as int {
+        u64::MAX as int
+    } else {
+        base + period
+    }
+}
+
+spec fn sched_refill_credit_spec(credit_cap: int, weight: int, default_credit: int) -> int {
+    let refill = if weight > SCHED_MAX_CREDIT_WEIGHT as int {
+        i32::MAX as int
+    } else {
+        weight * default_credit
+    };
+    if credit_cap >= refill && credit_cap >= 1 {
+        credit_cap
+    } else if refill >= 1 {
+        refill
+    } else {
+        1
+    }
+}
+
+spec fn sched_should_preempt_policy_spec(
+    policy: int,
+    time_slice: int,
+    active_threads: int,
+    deadline_tick: int,
+    tick_count: int,
+    credit: int,
+) -> bool {
+    if active_threads <= 1 {
+        false
+    } else if policy == SCHED_POLICY_RR as int {
+        time_slice == 0
+    } else if policy == SCHED_POLICY_EDF as int {
+        time_slice == 0 || deadline_tick <= tick_count
+    } else if policy == SCHED_POLICY_CREDIT as int {
+        time_slice == 0 || credit <= 0
+    } else {
+        false
+    }
 }
 
 spec fn ready_state(state: u8) -> bool {
@@ -1482,6 +1600,176 @@ fn ko_scheduler_cpu_allowed(has_affinity: bool, affinity: usize, cpu_id: usize) 
     smros_ko_scheduler_cpu_allowed_body!(has_affinity, affinity, cpu_id)
 }
 
+fn sched_policy_from_match_flags(
+    rr_match: bool,
+    round_robin_match: bool,
+    edf_match: bool,
+    credit_match: bool,
+) -> (out: Option<usize>)
+    ensures
+        match out {
+            Some(policy) => sched_policy_from_match_flags_spec(
+                rr_match,
+                round_robin_match,
+                edf_match,
+                credit_match,
+            ) == Some(policy as int),
+            None => sched_policy_from_match_flags_spec(
+                rr_match,
+                round_robin_match,
+                edf_match,
+                credit_match,
+            ) == Option::<int>::None,
+        },
+{
+    smros_sched_policy_from_match_flags_body!(
+        rr_match,
+        round_robin_match,
+        edf_match,
+        credit_match,
+        SCHED_POLICY_RR,
+        SCHED_POLICY_EDF,
+        SCHED_POLICY_CREDIT
+    )
+}
+
+fn sched_task_allowed_on_cpu(
+    has_affinity: bool,
+    affinity: usize,
+    has_cpu_filter: bool,
+    cpu_id: usize,
+) -> (out: bool)
+    ensures
+        out == sched_task_allowed_on_cpu_spec(
+            has_affinity,
+            affinity as int,
+            has_cpu_filter,
+            cpu_id as int,
+        ),
+{
+    smros_sched_task_allowed_on_cpu_body!(has_affinity, affinity, has_cpu_filter, cpu_id)
+}
+
+fn sched_edf_better(
+    candidate_deadline: u64,
+    best_present: bool,
+    best_deadline: u64,
+) -> (out: bool)
+    ensures
+        out == sched_edf_better_spec(
+            candidate_deadline as int,
+            best_present,
+            best_deadline as int,
+        ),
+{
+    smros_sched_edf_better_body!(candidate_deadline, best_present, best_deadline)
+}
+
+fn sched_credit_better(candidate_credit: i32, best_present: bool, best_credit: i32) -> (out: bool)
+    ensures
+        out == sched_credit_better_spec(
+            candidate_credit as int,
+            best_present,
+            best_credit as int,
+        ),
+{
+    smros_sched_credit_better_body!(candidate_credit, best_present, best_credit)
+}
+
+fn sched_time_slice_after_tick(time_slice: u32) -> (out: u32)
+    ensures
+        out as int == sched_time_slice_after_tick_spec(time_slice as int),
+        out <= time_slice,
+{
+    smros_sched_time_slice_after_tick_body!(time_slice)
+}
+
+fn sched_credit_after_tick(credit: i32) -> (out: i32)
+    requires
+        credit > i32::MIN,
+    ensures
+        out as int == sched_credit_after_tick_spec(credit as int),
+        credit > 0 ==> out == credit - 1,
+        credit <= 0 ==> out == credit,
+{
+    smros_sched_credit_after_tick_body!(credit)
+}
+
+fn sched_deadline_due(time_slice: u32, tick_count: u64, deadline_tick: u64) -> (out: bool)
+    ensures
+        out == sched_deadline_due_spec(
+            time_slice as int,
+            tick_count as int,
+            deadline_tick as int,
+        ),
+{
+    smros_sched_deadline_due_body!(time_slice, tick_count, deadline_tick)
+}
+
+fn sched_advance_deadline(deadline_tick: u64, tick_count: u64, period_ticks: u32) -> (out: u64)
+    ensures
+        out as int == sched_advance_deadline_spec(
+            deadline_tick as int,
+            tick_count as int,
+            period_ticks as int,
+        ),
+        out >= deadline_tick || out == u64::MAX,
+        out >= tick_count || out == u64::MAX,
+{
+    smros_sched_advance_deadline_body!(deadline_tick, tick_count, period_ticks)
+}
+
+fn sched_refill_credit(credit_cap: i32, weight: u32) -> (out: i32)
+    requires
+        credit_cap >= 0,
+    ensures
+        out as int == sched_refill_credit_spec(
+            credit_cap as int,
+            weight as int,
+            SCHED_DEFAULT_CREDIT as int,
+        ),
+        out >= 1,
+{
+    smros_sched_refill_credit_body!(
+        credit_cap,
+        weight,
+        SCHED_DEFAULT_CREDIT,
+        SCHED_MAX_CREDIT_WEIGHT
+    )
+}
+
+fn sched_should_preempt_policy(
+    policy: usize,
+    time_slice: u32,
+    active_threads: usize,
+    deadline_tick: u64,
+    tick_count: u64,
+    credit: i32,
+) -> (out: bool)
+    ensures
+        out == sched_should_preempt_policy_spec(
+            policy as int,
+            time_slice as int,
+            active_threads as int,
+            deadline_tick as int,
+            tick_count as int,
+            credit as int,
+        ),
+        active_threads <= 1 ==> !out,
+{
+    smros_sched_should_preempt_body!(
+        policy,
+        SCHED_POLICY_RR,
+        SCHED_POLICY_EDF,
+        SCHED_POLICY_CREDIT,
+        time_slice,
+        active_threads,
+        deadline_tick,
+        tick_count,
+        credit
+    )
+}
+
 fn scheduler_pick_next_model(
     threads: &Vec<ThreadModel>,
     current: usize,
@@ -2276,6 +2564,112 @@ fn log_level_smoke() {
 
     assert(debug_precedes_fatal == Option::<usize>::Some(LOG_LEVEL_DEBUG));
     assert(info_precedes_warning == Option::<usize>::Some(LOG_LEVEL_INFO));
+}
+
+fn scheduler_policy_smoke() {
+    let parsed_rr = sched_policy_from_match_flags(true, false, false, false);
+    let parsed_round_robin = sched_policy_from_match_flags(false, true, false, false);
+    let parsed_edf = sched_policy_from_match_flags(false, false, true, false);
+    let parsed_credit = sched_policy_from_match_flags(false, false, false, true);
+    let parsed_none = sched_policy_from_match_flags(false, false, false, false);
+    let rr_precedes_edf = sched_policy_from_match_flags(true, false, true, false);
+    let edf_precedes_credit = sched_policy_from_match_flags(false, false, true, true);
+
+    assert(parsed_rr == Option::<usize>::Some(SCHED_POLICY_RR));
+    assert(parsed_round_robin == Option::<usize>::Some(SCHED_POLICY_RR));
+    assert(parsed_edf == Option::<usize>::Some(SCHED_POLICY_EDF));
+    assert(parsed_credit == Option::<usize>::Some(SCHED_POLICY_CREDIT));
+    assert(parsed_none == Option::<usize>::None);
+    assert(rr_precedes_edf == Option::<usize>::Some(SCHED_POLICY_RR));
+    assert(edf_precedes_credit == Option::<usize>::Some(SCHED_POLICY_EDF));
+
+    let any_cpu = sched_task_allowed_on_cpu(true, 1, false, 0);
+    let matching_cpu = sched_task_allowed_on_cpu(true, 1, true, 1);
+    let wrong_cpu = sched_task_allowed_on_cpu(true, 1, true, 0);
+    let no_affinity = sched_task_allowed_on_cpu(false, 0, true, 3);
+
+    assert(any_cpu);
+    assert(matching_cpu);
+    assert(!wrong_cpu);
+    assert(no_affinity);
+
+    let first_edf = sched_edf_better(40, false, u64::MAX);
+    let earlier_edf = sched_edf_better(30, true, 40);
+    let later_edf = sched_edf_better(50, true, 40);
+    let first_credit = sched_credit_better(10, false, i32::MIN);
+    let higher_credit = sched_credit_better(80, true, 10);
+    let lower_credit = sched_credit_better(5, true, 10);
+
+    assert(first_edf);
+    assert(earlier_edf);
+    assert(!later_edf);
+    assert(first_credit);
+    assert(higher_credit);
+    assert(!lower_credit);
+}
+
+fn scheduler_tick_accounting_smoke() {
+    let slice_zero = sched_time_slice_after_tick(0);
+    let slice_next = sched_time_slice_after_tick(7);
+    let credit_zero = sched_credit_after_tick(0);
+    let credit_negative = sched_credit_after_tick(-3);
+    let credit_next = sched_credit_after_tick(5);
+
+    assert(slice_zero == 0);
+    assert(slice_next == 6);
+    assert(credit_zero == 0);
+    assert(credit_negative == -3);
+    assert(credit_next == 4);
+
+    let due_by_slice = sched_deadline_due(0, 10, 20);
+    let due_by_deadline = sched_deadline_due(3, 20, 20);
+    let not_due = sched_deadline_due(3, 19, 20);
+
+    assert(due_by_slice);
+    assert(due_by_deadline);
+    assert(!not_due);
+
+    let advanced_from_deadline = sched_advance_deadline(50, 10, 5);
+    let advanced_from_tick = sched_advance_deadline(10, 50, 5);
+    let advanced_zero_period = sched_advance_deadline(10, 50, 0);
+    let saturated = sched_advance_deadline(u64::MAX, 10, 5);
+
+    assert(advanced_from_deadline == 55);
+    assert(advanced_from_tick == 55);
+    assert(advanced_zero_period == 51);
+    assert(saturated == u64::MAX);
+
+    let refill_cap = sched_refill_credit(250, 1);
+    let refill_weight = sched_refill_credit(50, 3);
+    let refill_min = sched_refill_credit(0, 0);
+    let refill_saturated = sched_refill_credit(0, u32::MAX);
+
+    assert(refill_cap == 250);
+    assert(refill_weight == 300);
+    assert(refill_min == 1);
+    assert(refill_saturated == i32::MAX);
+}
+
+fn scheduler_preemption_policy_smoke() {
+    let rr_slice_left = sched_should_preempt_policy(SCHED_POLICY_RR, 1, 2, 0, 0, 0);
+    let rr_slice_done = sched_should_preempt_policy(SCHED_POLICY_RR, 0, 2, 0, 0, 0);
+    let rr_single = sched_should_preempt_policy(SCHED_POLICY_RR, 0, 1, 0, 0, 0);
+    let edf_due = sched_should_preempt_policy(SCHED_POLICY_EDF, 3, 2, 10, 10, 1);
+    let edf_slice_done = sched_should_preempt_policy(SCHED_POLICY_EDF, 0, 2, 99, 10, 1);
+    let edf_not_due = sched_should_preempt_policy(SCHED_POLICY_EDF, 3, 2, 11, 10, 1);
+    let credit_empty = sched_should_preempt_policy(SCHED_POLICY_CREDIT, 3, 2, 0, 0, 0);
+    let credit_slice_done = sched_should_preempt_policy(SCHED_POLICY_CREDIT, 0, 2, 0, 0, 3);
+    let credit_ready = sched_should_preempt_policy(SCHED_POLICY_CREDIT, 3, 2, 0, 0, 3);
+
+    assert(!rr_slice_left);
+    assert(rr_slice_done);
+    assert(!rr_single);
+    assert(edf_due);
+    assert(edf_slice_done);
+    assert(!edf_not_due);
+    assert(credit_empty);
+    assert(credit_slice_done);
+    assert(!credit_ready);
 }
 
 proof fn kernel_object_mod_has_no_pure_runtime_obligation() {

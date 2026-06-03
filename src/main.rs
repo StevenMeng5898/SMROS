@@ -830,6 +830,8 @@ extern "C" fn timer_interrupt_handler() {
     // Clear the timer interrupt
     kernel_lowlevel::timer::clear_interrupt();
 
+    crate::kernel_objects::scheduler::scheduler().on_timer_tick();
+
     // Acknowledge the interrupt at GIC
     let interrupt_id = kernel_lowlevel::interrupt::acknowledge_interrupt();
 

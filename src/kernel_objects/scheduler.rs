@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-//! Preemptive Round-Robin Scheduler
+//! Preemptive scheduler
 //!
-//! This module implements a preemptive Round-Robin scheduler for SMROS.
+//! This module implements Round-Robin, EDF, and credit scheduling for SMROS.
 //! It manages multiple threads and performs context switching on timer ticks.
 
 use crate::kernel_lowlevel::thread::{
@@ -12,6 +12,8 @@ use crate::kernel_lowlevel::thread::{
 use crate::kernel_objects::object_logic;
 use core::cell::UnsafeCell;
 use core::ptr;
+
+include!("scheduler_logic_shared.rs");
 
 /// A Sync wrapper around UnsafeCell that is safe to use as a static.
 /// SAFETY: This is safe because the scheduler ensures only one thread accesses
@@ -29,6 +31,87 @@ impl<T> SyncUnsafeCell<T> {
 
 /// Maximum number of CPUs for thread binding
 pub const MAX_CPUS: usize = 4;
+const DEFAULT_TIME_SLICE_TICKS: u32 = 10;
+const DEFAULT_EDF_PERIOD_TICKS: u32 = 50;
+const DEFAULT_CREDIT: i32 = 100;
+const MAX_CREDIT_WEIGHT: u32 = (i32::MAX as u32) / (DEFAULT_CREDIT as u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchedulePolicy {
+    RoundRobin,
+    Edf,
+    Credit,
+}
+
+impl SchedulePolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            SchedulePolicy::RoundRobin => "round-robin",
+            SchedulePolicy::Edf => "edf",
+            SchedulePolicy::Credit => "credit",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        smros_sched_policy_from_match_flags_body!(
+            value.eq_ignore_ascii_case("rr"),
+            value.eq_ignore_ascii_case("round-robin"),
+            value.eq_ignore_ascii_case("edf"),
+            value.eq_ignore_ascii_case("credit"),
+            SchedulePolicy::RoundRobin,
+            SchedulePolicy::Edf,
+            SchedulePolicy::Credit
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ThreadScheduleInfo {
+    pub deadline_tick: u64,
+    pub period_ticks: u32,
+    pub credit: i32,
+    pub credit_cap: i32,
+    pub weight: u32,
+}
+
+impl ThreadScheduleInfo {
+    pub const fn empty() -> Self {
+        Self {
+            deadline_tick: u64::MAX,
+            period_ticks: DEFAULT_EDF_PERIOD_TICKS,
+            credit: 0,
+            credit_cap: DEFAULT_CREDIT,
+            weight: 1,
+        }
+    }
+
+    pub const fn idle() -> Self {
+        Self {
+            deadline_tick: u64::MAX,
+            period_ticks: DEFAULT_EDF_PERIOD_TICKS,
+            credit: 0,
+            credit_cap: 0,
+            weight: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ScheduleTestTask {
+    id: usize,
+    ready: bool,
+    deadline_tick: u64,
+    credit: i32,
+    cpu_affinity: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SchedulerPolicyTestResult {
+    pub round_robin: usize,
+    pub edf: usize,
+    pub credit: usize,
+    pub cpu_filtered: usize,
+}
 
 /// Scheduler structure
 pub struct Scheduler {
@@ -49,6 +132,12 @@ pub struct Scheduler {
 
     /// Time slice per thread (in ticks)
     time_slice_ticks: u32,
+
+    /// Active scheduling policy
+    policy: SchedulePolicy,
+
+    /// Per-thread policy metadata
+    schedule_info: [ThreadScheduleInfo; MAX_THREADS],
 
     /// Static stack for idle thread
     idle_stack: SendPtr,
@@ -79,6 +168,72 @@ pub fn scheduler() -> &'static mut Scheduler {
     unsafe { &mut *SCHEDULER.0.get() }
 }
 
+fn task_allowed_on_cpu(task: ScheduleTestTask, cpu_id: Option<usize>) -> bool {
+    match cpu_id {
+        Some(cpu) => smros_sched_task_allowed_on_cpu_body!(
+            task.cpu_affinity.is_some(),
+            task.cpu_affinity.unwrap_or(0),
+            true,
+            cpu
+        ),
+        None => true,
+    }
+}
+
+fn pick_round_robin_from_tasks(
+    tasks: &[ScheduleTestTask],
+    start_id: usize,
+    cpu_id: Option<usize>,
+) -> Option<usize> {
+    if tasks.is_empty() {
+        return None;
+    }
+    for offset in 0..tasks.len() {
+        let wanted_id = start_id.saturating_add(offset);
+        for task in tasks {
+            if task.id == wanted_id && task.ready && task_allowed_on_cpu(*task, cpu_id) {
+                return Some(task.id);
+            }
+        }
+    }
+    for task in tasks {
+        if task.ready && task_allowed_on_cpu(*task, cpu_id) {
+            return Some(task.id);
+        }
+    }
+    None
+}
+
+fn pick_edf_from_tasks(tasks: &[ScheduleTestTask], cpu_id: Option<usize>) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_deadline = u64::MAX;
+    for task in tasks {
+        if task.ready
+            && task_allowed_on_cpu(*task, cpu_id)
+            && smros_sched_edf_better_body!(task.deadline_tick, best.is_some(), best_deadline)
+        {
+            best = Some(task.id);
+            best_deadline = task.deadline_tick;
+        }
+    }
+    best
+}
+
+fn pick_credit_from_tasks(tasks: &[ScheduleTestTask], cpu_id: Option<usize>) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_credit = i32::MIN;
+    for task in tasks {
+        if task.ready
+            && task_allowed_on_cpu(*task, cpu_id)
+            && smros_sched_credit_better_body!(task.credit, best.is_some(), best_credit)
+        {
+            best = Some(task.id);
+            best_credit = task.credit;
+        }
+    }
+    best
+}
+
 impl Scheduler {
     /// Create a new scheduler instance
     pub const fn new() -> Self {
@@ -88,7 +243,9 @@ impl Scheduler {
             next_thread: 0,
             active_threads: 0,
             tick_count: 0,
-            time_slice_ticks: 10, // 10 ticks per time slice (100ms at 100Hz)
+            time_slice_ticks: DEFAULT_TIME_SLICE_TICKS,
+            policy: SchedulePolicy::RoundRobin,
+            schedule_info: [const { ThreadScheduleInfo::empty() }; MAX_THREADS],
             idle_stack: SendPtr(ptr::null_mut()),
         }
     }
@@ -99,6 +256,7 @@ impl Scheduler {
         for i in 0..MAX_THREADS {
             self.threads[i].id = ThreadId(i);
             self.threads[i].state = ThreadState::Empty;
+            self.schedule_info[i] = ThreadScheduleInfo::empty();
         }
 
         // Allocate idle thread stack using a Sync wrapper around UnsafeCell
@@ -115,12 +273,14 @@ impl Scheduler {
         self.next_thread = 1;
         self.active_threads = 1;
         self.tick_count = 0;
+        self.policy = SchedulePolicy::RoundRobin;
     }
 
     /// Create the idle thread
     fn create_idle_thread(&mut self) {
         let tcb = &mut self.threads[0];
         tcb.init_idle(idle_thread_entry, self.idle_stack.0, DEFAULT_STACK_SIZE);
+        self.schedule_info[0] = ThreadScheduleInfo::idle();
     }
 
     /// Create a new thread
@@ -155,6 +315,7 @@ impl Scheduler {
                     self.time_slice_ticks,
                     cpu_affinity,
                 );
+                self.init_thread_schedule_info(i);
 
                 // Leak the stack (it will be freed when thread terminates)
                 core::mem::forget(stack);
@@ -166,6 +327,78 @@ impl Scheduler {
         }
 
         None // No available slots
+    }
+
+    fn init_thread_schedule_info(&mut self, index: usize) {
+        let phase = (index as u64).saturating_mul(5);
+        let period = DEFAULT_EDF_PERIOD_TICKS;
+        self.schedule_info[index] = ThreadScheduleInfo {
+            deadline_tick: self
+                .tick_count
+                .saturating_add(period as u64)
+                .saturating_add(phase),
+            period_ticks: period,
+            credit: DEFAULT_CREDIT,
+            credit_cap: DEFAULT_CREDIT,
+            weight: 1,
+        };
+    }
+
+    /// Get the active scheduling policy.
+    pub fn policy(&self) -> SchedulePolicy {
+        self.policy
+    }
+
+    /// Set the active scheduling policy.
+    pub fn set_policy(&mut self, policy: SchedulePolicy) {
+        self.policy = policy;
+        if policy == SchedulePolicy::Credit {
+            self.refill_credits();
+        }
+        crate::kobj_info!("scheduler", "policy set to {}", policy.as_str());
+    }
+
+    /// Set EDF timing metadata for a thread.
+    pub fn set_thread_deadline(
+        &mut self,
+        id: ThreadId,
+        deadline_tick: u64,
+        period_ticks: u32,
+    ) -> bool {
+        if id.0 == 0 || id.0 >= MAX_THREADS || period_ticks == 0 {
+            return false;
+        }
+        self.schedule_info[id.0].deadline_tick = deadline_tick;
+        self.schedule_info[id.0].period_ticks = period_ticks;
+        true
+    }
+
+    /// Set credit scheduler metadata for a thread.
+    pub fn set_thread_credit(&mut self, id: ThreadId, credit: i32, cap: i32, weight: u32) -> bool {
+        if id.0 == 0 || id.0 >= MAX_THREADS || cap < 0 || credit < 0 || credit > cap || weight == 0
+        {
+            return false;
+        }
+        self.schedule_info[id.0].credit = credit;
+        self.schedule_info[id.0].credit_cap = cap;
+        self.schedule_info[id.0].weight = weight;
+        true
+    }
+
+    pub fn thread_schedule_info(&self, id: ThreadId) -> Option<ThreadScheduleInfo> {
+        if id.0 < MAX_THREADS {
+            Some(self.schedule_info[id.0])
+        } else {
+            None
+        }
+    }
+
+    pub fn time_slice_ticks(&self) -> u32 {
+        self.time_slice_ticks
+    }
+
+    pub fn active_threads(&self) -> usize {
+        self.active_threads
     }
 
     /// Get the current thread ID
@@ -191,12 +424,51 @@ impl Scheduler {
         }
     }
 
-    /// Schedule the next thread (Round-Robin)
+    /// Schedule the next thread using the active policy.
     pub fn schedule_next(&mut self) -> Option<ThreadId> {
+        self.schedule_next_filtered(None)
+    }
+
+    /// Schedule the next thread for a specific CPU using the active policy.
+    pub fn schedule_next_for_cpu(&mut self, cpu_id: usize) -> Option<ThreadId> {
+        self.schedule_next_filtered(Some(cpu_id))
+    }
+
+    fn schedule_next_filtered(&mut self, cpu_id: Option<usize>) -> Option<ThreadId> {
         if self.active_threads <= 1 {
             return Some(ThreadId::IDLE);
         }
 
+        let selected = match self.policy {
+            SchedulePolicy::RoundRobin => self.pick_round_robin(cpu_id),
+            SchedulePolicy::Edf => self.pick_edf(cpu_id),
+            SchedulePolicy::Credit => self.pick_credit(cpu_id),
+        };
+
+        selected.map(ThreadId).or(Some(ThreadId::IDLE))
+    }
+
+    fn thread_allowed_on_cpu(&self, idx: usize, cpu_id: Option<usize>) -> bool {
+        match cpu_id {
+            Some(cpu) => {
+                let thread_cpu = self.threads[idx].cpu_affinity;
+                smros_sched_task_allowed_on_cpu_body!(
+                    thread_cpu.is_some(),
+                    thread_cpu.unwrap_or(0),
+                    true,
+                    cpu
+                )
+            }
+            None => true,
+        }
+    }
+
+    fn candidate_can_run(&self, idx: usize, current: usize, cpu_id: Option<usize>) -> bool {
+        object_logic::scheduler_can_run(idx, current, self.threads[idx].state == ThreadState::Ready)
+            && self.thread_allowed_on_cpu(idx, cpu_id)
+    }
+
+    fn pick_round_robin(&mut self, cpu_id: Option<usize>) -> Option<usize> {
         let start = self.next_thread;
         let mut attempts = 0;
         let current = self.current_thread.0;
@@ -205,58 +477,147 @@ impl Scheduler {
             let idx = object_logic::scheduler_candidate_index(start, attempts, MAX_THREADS);
 
             // Skip the current thread and idle thread (unless it's the only option)
-            if object_logic::scheduler_can_run(
-                idx,
-                current,
-                self.threads[idx].state == ThreadState::Ready,
-            ) {
+            if self.candidate_can_run(idx, current, cpu_id) {
                 self.next_thread = (idx + 1) % MAX_THREADS;
-                return Some(ThreadId(idx));
+                return Some(idx);
             }
 
             attempts += 1;
         }
 
-        // No ready worker thread found, run idle
-        Some(ThreadId::IDLE)
+        None
     }
 
-    /// Schedule the next thread for a specific CPU (CPU-aware scheduling)
-    pub fn schedule_next_for_cpu(&mut self, cpu_id: usize) -> Option<ThreadId> {
-        if self.active_threads <= 1 {
-            return Some(ThreadId::IDLE);
+    fn pick_edf(&mut self, cpu_id: Option<usize>) -> Option<usize> {
+        let start = self.next_thread;
+        let mut attempts = 0;
+        let current = self.current_thread.0;
+        let mut best: Option<usize> = None;
+        let mut best_deadline = u64::MAX;
+
+        while attempts < MAX_THREADS {
+            let idx = object_logic::scheduler_candidate_index(start, attempts, MAX_THREADS);
+            if self.candidate_can_run(idx, current, cpu_id) {
+                let deadline = self.schedule_info[idx].deadline_tick;
+                if smros_sched_edf_better_body!(deadline, best.is_some(), best_deadline) {
+                    best = Some(idx);
+                    best_deadline = deadline;
+                }
+            }
+            attempts += 1;
+        }
+
+        if let Some(idx) = best {
+            self.next_thread = (idx + 1) % MAX_THREADS;
+        }
+        best
+    }
+
+    fn pick_credit(&mut self, cpu_id: Option<usize>) -> Option<usize> {
+        if !self.any_ready_credit(cpu_id) {
+            self.refill_credits();
         }
 
         let start = self.next_thread;
         let mut attempts = 0;
         let current = self.current_thread.0;
+        let mut best: Option<usize> = None;
+        let mut best_credit = i32::MIN;
 
-        // Find a thread that is bound to this CPU (or unbound)
         while attempts < MAX_THREADS {
             let idx = object_logic::scheduler_candidate_index(start, attempts, MAX_THREADS);
-
-            if object_logic::scheduler_can_run(
-                idx,
-                current,
-                self.threads[idx].state == ThreadState::Ready,
-            ) {
-                let thread_cpu = self.threads[idx].cpu_affinity;
-                // Only schedule if thread is bound to this CPU or unbound
-                if object_logic::scheduler_cpu_allowed(
-                    thread_cpu.is_some(),
-                    thread_cpu.unwrap_or(0),
-                    cpu_id,
-                ) {
-                    self.next_thread = (idx + 1) % MAX_THREADS;
-                    return Some(ThreadId(idx));
+            if self.candidate_can_run(idx, current, cpu_id) {
+                let credit = self.schedule_info[idx].credit;
+                if smros_sched_credit_better_body!(credit, best.is_some(), best_credit) {
+                    best = Some(idx);
+                    best_credit = credit;
                 }
             }
-
             attempts += 1;
         }
 
-        // No ready thread for this CPU found, run idle
-        Some(ThreadId::IDLE)
+        if let Some(idx) = best {
+            self.next_thread = (idx + 1) % MAX_THREADS;
+        }
+        best
+    }
+
+    fn any_ready_credit(&self, cpu_id: Option<usize>) -> bool {
+        let current = self.current_thread.0;
+        for idx in 1..MAX_THREADS {
+            if self.candidate_can_run(idx, current, cpu_id) && self.schedule_info[idx].credit > 0 {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn refill_credits(&mut self) {
+        for idx in 1..MAX_THREADS {
+            if self.threads[idx].state == ThreadState::Ready
+                || self.threads[idx].state == ThreadState::Running
+            {
+                let info = &mut self.schedule_info[idx];
+                info.credit = smros_sched_refill_credit_body!(
+                    info.credit_cap,
+                    info.weight,
+                    DEFAULT_CREDIT,
+                    MAX_CREDIT_WEIGHT
+                );
+            }
+        }
+    }
+
+    fn advance_deadline(&mut self, idx: usize) {
+        if idx == 0 || idx >= MAX_THREADS {
+            return;
+        }
+        let info = &mut self.schedule_info[idx];
+        info.deadline_tick = smros_sched_advance_deadline_body!(
+            info.deadline_tick,
+            self.tick_count,
+            info.period_ticks
+        );
+    }
+
+    pub fn run_policy_self_test(&self) -> SchedulerPolicyTestResult {
+        let tasks = [
+            ScheduleTestTask {
+                id: 1,
+                ready: true,
+                deadline_tick: 90,
+                credit: 30,
+                cpu_affinity: None,
+            },
+            ScheduleTestTask {
+                id: 2,
+                ready: true,
+                deadline_tick: 40,
+                credit: 10,
+                cpu_affinity: Some(1),
+            },
+            ScheduleTestTask {
+                id: 3,
+                ready: true,
+                deadline_tick: 70,
+                credit: 80,
+                cpu_affinity: None,
+            },
+            ScheduleTestTask {
+                id: 4,
+                ready: false,
+                deadline_tick: 10,
+                credit: 200,
+                cpu_affinity: None,
+            },
+        ];
+
+        SchedulerPolicyTestResult {
+            round_robin: pick_round_robin_from_tasks(&tasks, 2, None).unwrap_or(0),
+            edf: pick_edf_from_tasks(&tasks, None).unwrap_or(0),
+            credit: pick_credit_from_tasks(&tasks, None).unwrap_or(0),
+            cpu_filtered: pick_edf_from_tasks(&tasks, Some(0)).unwrap_or(0),
+        }
     }
 
     /// Handle timer tick (called from interrupt handler)
@@ -264,19 +625,71 @@ impl Scheduler {
         self.tick_count += 1;
 
         // Decrement current thread's time slice
-        if let Some(tcb) = self.get_thread_mut(self.current_thread) {
+        let current = self.current_thread;
+        let policy = self.policy;
+        let tick_count = self.tick_count;
+        let mut advance_deadline = false;
+        let mut force_preempt = false;
+        if let Some(tcb) = self.get_thread_mut(current) {
             if tcb.time_slice > 0 {
-                tcb.time_slice -= 1;
+                tcb.time_slice = smros_sched_time_slice_after_tick_body!(tcb.time_slice);
             }
 
             tcb.total_ticks += 1;
+            if current.0 != 0 && policy == SchedulePolicy::Edf && tcb.time_slice == 0 {
+                force_preempt = true;
+            }
+        }
+
+        if current.0 != 0 {
+            match policy {
+                SchedulePolicy::Edf => {
+                    if force_preempt || tick_count >= self.schedule_info[current.0].deadline_tick {
+                        if let Some(tcb) = self.get_thread_mut(current) {
+                            tcb.time_slice = 0;
+                        }
+                        advance_deadline = true;
+                    }
+                }
+                SchedulePolicy::Credit => {
+                    let exhausted = {
+                        let info = &mut self.schedule_info[current.0];
+                        info.credit = smros_sched_credit_after_tick_body!(info.credit);
+                        info.credit <= 0
+                    };
+                    if exhausted {
+                        if let Some(tcb) = self.get_thread_mut(current) {
+                            tcb.time_slice = 0;
+                        }
+                    }
+                }
+                SchedulePolicy::RoundRobin => {}
+            }
+        }
+
+        if advance_deadline {
+            self.advance_deadline(current.0);
         }
     }
 
     /// Check if preemption is needed
     pub fn should_preempt(&self) -> bool {
         if let Some(tcb) = self.get_thread(self.current_thread) {
-            object_logic::scheduler_should_preempt(tcb.time_slice, self.active_threads)
+            if self.active_threads <= 1 {
+                return false;
+            }
+            let info = self.schedule_info[self.current_thread.0];
+            smros_sched_should_preempt_body!(
+                self.policy,
+                SchedulePolicy::RoundRobin,
+                SchedulePolicy::Edf,
+                SchedulePolicy::Credit,
+                tcb.time_slice,
+                self.active_threads,
+                info.deadline_tick,
+                self.tick_count,
+                info.credit
+            )
         } else {
             false
         }
@@ -356,13 +769,28 @@ impl Scheduler {
         serial.write_str("Tick count: ");
         print_number(serial, self.tick_count as u32);
         serial.write_str("\n");
+        serial.write_str("Policy: ");
+        serial.write_str(self.policy.as_str());
+        serial.write_str("\n");
         serial.write_str("\nThread Table:\n");
-        serial.write_str("ID  State      Name        CPU  TimeSlice  TotalTicks\n");
+        serial
+            .write_str("ID  State      Name        CPU  TimeSlice  TotalTicks  Deadline  Credit\n");
 
         for i in 0..MAX_THREADS {
             let tcb = &self.threads[i];
             if tcb.state != ThreadState::Empty {
                 tcb.print_info(serial);
+                serial.write_str("    sched deadline=");
+                print_number_u64(serial, self.schedule_info[i].deadline_tick);
+                serial.write_str(" period=");
+                print_number(serial, self.schedule_info[i].period_ticks);
+                serial.write_str(" credit=");
+                print_i32(serial, self.schedule_info[i].credit);
+                serial.write_str("/");
+                print_i32(serial, self.schedule_info[i].credit_cap);
+                serial.write_str(" weight=");
+                print_number(serial, self.schedule_info[i].weight);
+                serial.write_str("\n");
             }
         }
 
@@ -483,6 +911,35 @@ fn print_number(serial: &mut crate::kernel_lowlevel::serial::Serial, mut num: u3
     // Print in reverse order
     for j in 0..i {
         serial.write_byte(buf[i - 1 - j]);
+    }
+}
+
+fn print_number_u64(serial: &mut crate::kernel_lowlevel::serial::Serial, mut num: u64) {
+    if num == 0 {
+        serial.write_byte(b'0');
+        return;
+    }
+
+    let mut buf = [0u8; 20];
+    let mut i = 0;
+
+    while num > 0 && i < 20 {
+        buf[i] = b'0' + (num % 10) as u8;
+        num /= 10;
+        i += 1;
+    }
+
+    for j in 0..i {
+        serial.write_byte(buf[i - 1 - j]);
+    }
+}
+
+fn print_i32(serial: &mut crate::kernel_lowlevel::serial::Serial, value: i32) {
+    if value < 0 {
+        serial.write_byte(b'-');
+        print_number(serial, value.saturating_abs() as u32);
+    } else {
+        print_number(serial, value as u32);
     }
 }
 
