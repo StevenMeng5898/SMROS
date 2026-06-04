@@ -263,6 +263,11 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_uptime,
     },
     ShellCommand {
+        name: "dhrystone",
+        description: "Run Dhrystone logical multi-core benchmark",
+        handler: cmd_dhrystone,
+    },
+    ShellCommand {
         name: "sched",
         description: "Show, set, and test scheduler policy",
         handler: cmd_sched,
@@ -8779,6 +8784,493 @@ fn cmd_uptime(ctx: &mut ShellContext, _args: &[&str]) {
     ctx.serial.write_str(" second(s)\n\n");
 }
 
+const DHRYSTONE_DEFAULT_RUNS_PER_CORE: u64 = 50_000;
+const DHRYSTONE_MAX_RUNS_PER_CORE: u64 = 5_000_000;
+const DHRYSTONE_DMIPS_DIVISOR: u128 = 1757;
+const DHRYSTONE_SOME_STRING: &[u8] = b"DHRYSTONE PROGRAM, SOME STRING";
+const DHRYSTONE_1ST_STRING: &[u8] = b"DHRYSTONE PROGRAM, 1'ST STRING";
+const DHRYSTONE_2ND_STRING: &[u8] = b"DHRYSTONE PROGRAM, 2'ND STRING";
+const DHRYSTONE_3RD_STRING: &[u8] = b"DHRYSTONE PROGRAM, 3'RD STRING";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum DhryIdent {
+    Ident1 = 0,
+    Ident2 = 1,
+    Ident3 = 2,
+    Ident4 = 3,
+    Ident5 = 4,
+}
+
+#[derive(Clone, Copy)]
+struct DhryRecord {
+    ptr_comp: usize,
+    discr: DhryIdent,
+    enum_comp: DhryIdent,
+    int_comp: i32,
+    str_comp: [u8; 31],
+}
+
+impl DhryRecord {
+    const fn empty() -> Self {
+        Self {
+            ptr_comp: 0,
+            discr: DhryIdent::Ident1,
+            enum_comp: DhryIdent::Ident1,
+            int_comp: 0,
+            str_comp: [0; 31],
+        }
+    }
+}
+
+struct DhryState {
+    ptr_glob: usize,
+    next_ptr_glob: usize,
+    records: [DhryRecord; 2],
+    int_glob: i32,
+    bool_glob: bool,
+    ch_1_glob: u8,
+    ch_2_glob: u8,
+    arr_1_glob: [i32; 50],
+    arr_2_glob: [[i32; 50]; 50],
+    last_int_1_loc: i32,
+    last_int_2_loc: i32,
+    last_int_3_loc: i32,
+    last_enum_loc: DhryIdent,
+    last_str_1_loc: [u8; 31],
+    last_str_2_loc: [u8; 31],
+}
+
+impl DhryState {
+    fn new() -> Self {
+        Self {
+            ptr_glob: 0,
+            next_ptr_glob: 1,
+            records: [DhryRecord::empty(); 2],
+            int_glob: 0,
+            bool_glob: false,
+            ch_1_glob: 0,
+            ch_2_glob: 0,
+            arr_1_glob: [0; 50],
+            arr_2_glob: [[0; 50]; 50],
+            last_int_1_loc: 0,
+            last_int_2_loc: 0,
+            last_int_3_loc: 0,
+            last_enum_loc: DhryIdent::Ident1,
+            last_str_1_loc: [0; 31],
+            last_str_2_loc: [0; 31],
+        }
+    }
+
+    fn initialize(&mut self) {
+        self.records = [DhryRecord::empty(); 2];
+        self.arr_1_glob = [0; 50];
+        self.arr_2_glob = [[0; 50]; 50];
+        self.ptr_glob = 0;
+        self.next_ptr_glob = 1;
+
+        self.records[self.ptr_glob].ptr_comp = self.next_ptr_glob;
+        self.records[self.ptr_glob].discr = DhryIdent::Ident1;
+        self.records[self.ptr_glob].enum_comp = DhryIdent::Ident3;
+        self.records[self.ptr_glob].int_comp = 40;
+        dhry_strcpy(
+            &mut self.records[self.ptr_glob].str_comp,
+            DHRYSTONE_SOME_STRING,
+        );
+
+        self.arr_2_glob[8][7] = 10;
+    }
+
+    #[inline(never)]
+    fn run(&mut self, number_of_runs: u64) -> u64 {
+        let mut int_1_loc = 0i32;
+        let mut int_2_loc = 0i32;
+        let mut int_3_loc = 0i32;
+        let mut enum_loc = DhryIdent::Ident1;
+        let mut str_1_loc = [0u8; 31];
+        let mut str_2_loc = [0u8; 31];
+
+        self.initialize();
+        dhry_strcpy(&mut str_1_loc, DHRYSTONE_1ST_STRING);
+
+        for run_index in 1..=number_of_runs {
+            let run_index = core::hint::black_box(run_index);
+            self.proc_5();
+            self.proc_4();
+
+            int_1_loc = 2;
+            int_2_loc = 3;
+            dhry_strcpy(&mut str_2_loc, DHRYSTONE_2ND_STRING);
+            enum_loc = DhryIdent::Ident2;
+            self.bool_glob = !self.func_2(&str_1_loc, &str_2_loc);
+
+            while int_1_loc < int_2_loc {
+                int_3_loc = 5 * int_1_loc - int_2_loc;
+                core::hint::black_box(int_3_loc);
+                int_3_loc = dhry_proc_7(int_1_loc, int_2_loc);
+                int_1_loc += 1;
+            }
+
+            self.proc_8(int_1_loc, int_3_loc);
+            self.proc_1(self.ptr_glob);
+
+            let mut ch_index = b'A';
+            while ch_index <= self.ch_2_glob {
+                if enum_loc == self.func_1(core::hint::black_box(ch_index), b'C') {
+                    enum_loc = self.proc_6(DhryIdent::Ident1);
+                    dhry_strcpy(&mut str_2_loc, DHRYSTONE_3RD_STRING);
+                    int_2_loc = run_index as i32;
+                    self.int_glob = run_index as i32;
+                }
+                ch_index += 1;
+            }
+
+            int_2_loc *= int_1_loc;
+            int_1_loc = int_2_loc / int_3_loc;
+            int_2_loc = 7 * (int_2_loc - int_3_loc) - int_1_loc;
+            self.proc_2(&mut int_1_loc);
+        }
+
+        self.last_int_1_loc = int_1_loc;
+        self.last_int_2_loc = int_2_loc;
+        self.last_int_3_loc = int_3_loc;
+        self.last_enum_loc = enum_loc;
+        self.last_str_1_loc = str_1_loc;
+        self.last_str_2_loc = str_2_loc;
+
+        number_of_runs
+    }
+
+    fn verify(&self, number_of_runs: u64) -> i32 {
+        let mut failures = 0;
+
+        failures += (self.int_glob != 5) as i32;
+        failures += (self.bool_glob != true) as i32;
+        failures += (self.ch_1_glob != b'A') as i32;
+        failures += (self.ch_2_glob != b'B') as i32;
+        failures += (self.arr_1_glob[8] != 7) as i32;
+        failures += (self.arr_2_glob[8][7] != (number_of_runs as i32 + 10)) as i32;
+        failures += (self.records[self.ptr_glob].ptr_comp != self.next_ptr_glob) as i32;
+        failures += (self.records[self.ptr_glob].discr != DhryIdent::Ident1) as i32;
+        failures += (self.records[self.ptr_glob].enum_comp != DhryIdent::Ident3) as i32;
+        failures += (self.records[self.ptr_glob].int_comp != 17) as i32;
+        failures +=
+            (!dhry_streq(&self.records[self.ptr_glob].str_comp, DHRYSTONE_SOME_STRING)) as i32;
+        failures += (self.records[self.next_ptr_glob].ptr_comp != self.next_ptr_glob) as i32;
+        failures += (self.records[self.next_ptr_glob].discr != DhryIdent::Ident1) as i32;
+        failures += (self.records[self.next_ptr_glob].enum_comp != DhryIdent::Ident2) as i32;
+        failures += (self.records[self.next_ptr_glob].int_comp != 18) as i32;
+        failures += (!dhry_streq(
+            &self.records[self.next_ptr_glob].str_comp,
+            DHRYSTONE_SOME_STRING,
+        )) as i32;
+        failures += (self.last_int_1_loc != 5) as i32;
+        failures += (self.last_int_2_loc != 13) as i32;
+        failures += (self.last_int_3_loc != 7) as i32;
+        failures += (self.last_enum_loc != DhryIdent::Ident2) as i32;
+        failures += (!dhry_streq(&self.last_str_1_loc, DHRYSTONE_1ST_STRING)) as i32;
+        failures += (!dhry_streq(&self.last_str_2_loc, DHRYSTONE_2ND_STRING)) as i32;
+
+        failures
+    }
+
+    #[inline(never)]
+    fn proc_1(&mut self, ptr_val_par: usize) {
+        let next_record = self.records[ptr_val_par].ptr_comp;
+
+        self.records[next_record] = self.records[self.ptr_glob];
+        self.records[ptr_val_par].int_comp = 5;
+        self.records[next_record].int_comp = self.records[ptr_val_par].int_comp;
+        self.records[next_record].ptr_comp = self.records[ptr_val_par].ptr_comp;
+        self.records[next_record].ptr_comp = self.proc_3();
+
+        if self.records[next_record].discr == DhryIdent::Ident1 {
+            self.records[next_record].int_comp = 6;
+            self.records[next_record].enum_comp = self.proc_6(self.records[ptr_val_par].enum_comp);
+            self.records[next_record].ptr_comp = self.records[self.ptr_glob].ptr_comp;
+            self.records[next_record].int_comp =
+                dhry_proc_7(self.records[next_record].int_comp, 10);
+        } else {
+            self.records[ptr_val_par] = self.records[self.records[ptr_val_par].ptr_comp];
+        }
+    }
+
+    #[inline(never)]
+    fn proc_2(&mut self, int_par_ref: &mut i32) {
+        let mut int_loc = *int_par_ref + 10;
+        let mut enum_loc;
+
+        loop {
+            enum_loc = DhryIdent::Ident1;
+            if self.ch_1_glob == b'A' {
+                int_loc -= 1;
+                *int_par_ref = int_loc - self.int_glob;
+                enum_loc = DhryIdent::Ident1;
+            }
+            if enum_loc == DhryIdent::Ident1 {
+                break;
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn proc_3(&mut self) -> usize {
+        let ptr_ref_par = self.records[self.ptr_glob].ptr_comp;
+        self.records[self.ptr_glob].int_comp = dhry_proc_7(10, self.int_glob);
+        ptr_ref_par
+    }
+
+    #[inline(never)]
+    fn proc_4(&mut self) {
+        let bool_loc = self.ch_1_glob == b'A';
+        self.bool_glob = bool_loc | self.bool_glob;
+        self.ch_2_glob = b'B';
+    }
+
+    #[inline(never)]
+    fn proc_5(&mut self) {
+        self.ch_1_glob = b'A';
+        self.bool_glob = false;
+    }
+
+    #[inline(never)]
+    fn proc_6(&self, enum_val_par: DhryIdent) -> DhryIdent {
+        let mut enum_ref_par = enum_val_par;
+        if !dhry_func_3(enum_val_par) {
+            enum_ref_par = DhryIdent::Ident4;
+        }
+
+        match enum_val_par {
+            DhryIdent::Ident1 => DhryIdent::Ident1,
+            DhryIdent::Ident2 => {
+                if self.int_glob > 100 {
+                    DhryIdent::Ident1
+                } else {
+                    DhryIdent::Ident4
+                }
+            }
+            DhryIdent::Ident3 => DhryIdent::Ident2,
+            DhryIdent::Ident4 => enum_ref_par,
+            DhryIdent::Ident5 => DhryIdent::Ident3,
+        }
+    }
+
+    #[inline(never)]
+    fn proc_8(&mut self, int_1_par_val: i32, int_2_par_val: i32) {
+        let int_loc = (int_1_par_val + 5) as usize;
+        self.arr_1_glob[int_loc] = int_2_par_val;
+        self.arr_1_glob[int_loc + 1] = self.arr_1_glob[int_loc];
+        self.arr_1_glob[int_loc + 30] = int_loc as i32;
+        for int_index in int_loc..=int_loc + 1 {
+            self.arr_2_glob[int_loc][int_index] = int_loc as i32;
+        }
+        self.arr_2_glob[int_loc][int_loc - 1] += 1;
+        self.arr_2_glob[int_loc + 20][int_loc] = self.arr_1_glob[int_loc];
+        self.int_glob = 5;
+    }
+
+    #[inline(never)]
+    fn func_1(&mut self, ch_1_par_val: u8, ch_2_par_val: u8) -> DhryIdent {
+        let ch_1_loc = ch_1_par_val;
+        let ch_2_loc = ch_1_loc;
+        if ch_2_loc != ch_2_par_val {
+            DhryIdent::Ident1
+        } else {
+            self.ch_1_glob = ch_1_loc;
+            DhryIdent::Ident2
+        }
+    }
+
+    #[inline(never)]
+    fn func_2(&mut self, str_1_par_ref: &[u8; 31], str_2_par_ref: &[u8; 31]) -> bool {
+        let mut ch_loc = b'A';
+        let mut int_loc = 2usize;
+
+        while int_loc <= 2 {
+            if self.func_1(str_1_par_ref[int_loc], str_2_par_ref[int_loc + 1]) == DhryIdent::Ident1
+            {
+                ch_loc = b'A';
+                int_loc += 1;
+            }
+        }
+
+        if ch_loc >= b'W' && ch_loc < b'Z' {
+            int_loc = 7;
+        }
+
+        if ch_loc == b'R' {
+            true
+        } else if dhry_strcmp(str_1_par_ref, str_2_par_ref) > 0 {
+            int_loc += 7;
+            self.int_glob = int_loc as i32;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[inline(never)]
+fn dhry_proc_7(int_1_par_val: i32, int_2_par_val: i32) -> i32 {
+    let int_loc = int_1_par_val + 2;
+    int_2_par_val + int_loc
+}
+
+fn dhry_func_3(enum_par_val: DhryIdent) -> bool {
+    let enum_loc = enum_par_val;
+    enum_loc == DhryIdent::Ident3
+}
+
+fn dhry_strcpy(dst: &mut [u8; 31], src: &[u8]) {
+    dst.fill(0);
+    let len = core::cmp::min(src.len(), dst.len().saturating_sub(1));
+    dst[..len].copy_from_slice(&src[..len]);
+}
+
+fn dhry_streq(lhs: &[u8; 31], rhs: &[u8]) -> bool {
+    let len = core::cmp::min(rhs.len(), lhs.len());
+    lhs[..len] == rhs[..len] && len < lhs.len() && lhs[len] == 0
+}
+
+fn dhry_strcmp(lhs: &[u8; 31], rhs: &[u8; 31]) -> i32 {
+    let mut index = 0usize;
+    while index < lhs.len() {
+        let left = lhs[index];
+        let right = rhs[index];
+        if left != right || left == 0 || right == 0 {
+            return left as i32 - right as i32;
+        }
+        index += 1;
+    }
+    0
+}
+
+fn read_shell_counter() -> u64 {
+    let val: u64;
+    unsafe {
+        core::arch::asm!(
+            "mrs {val}, cntpct_el0",
+            val = out(reg) val,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    val
+}
+
+fn counter_delta_ns(delta: u64, frequency: u64) -> u64 {
+    if frequency == 0 {
+        0
+    } else {
+        ((delta as u128).saturating_mul(1_000_000_000u128) / frequency as u128) as u64
+    }
+}
+
+/// Command: dhrystone - Run Dhrystone logical multi-core benchmark
+fn cmd_dhrystone(ctx: &mut ShellContext, args: &[&str]) {
+    if args.len() > 1 {
+        ctx.serial.write_str("usage: dhrystone [runs-per-core]\n");
+        return;
+    }
+
+    let runs_per_core = if args.is_empty() {
+        DHRYSTONE_DEFAULT_RUNS_PER_CORE
+    } else {
+        let Some(parsed) = parse_number(args[0]) else {
+            ctx.serial.write_str("usage: dhrystone [runs-per-core]\n");
+            return;
+        };
+        parsed as u64
+    };
+
+    if runs_per_core == 0 || runs_per_core > DHRYSTONE_MAX_RUNS_PER_CORE {
+        ctx.serial
+            .write_str("usage: dhrystone [runs-per-core <= 5000000]\n");
+        return;
+    }
+
+    let timer_frequency = crate::kernel_lowlevel::timer::get_frequency();
+    if timer_frequency == 0 {
+        ctx.serial
+            .write_str("dhrystone: timer frequency is not initialized\n");
+        return;
+    }
+
+    let logical_cpus = core::cmp::max(crate::kernel_lowlevel::smp::online_cpu_count() as u64, 1);
+    let configured_cpus = crate::kernel_lowlevel::smp::MAX_CPUS as u64;
+
+    ctx.serial
+        .write_str("\nDhrystone 2.1 SMROS shell benchmark\n");
+    ctx.serial
+        .write_str("source: Rust port of BYTE UnixBench dhry_1.c/dhry_2.c/dhry.h\n");
+    ctx.serial
+        .write_str("mode: logical multi-core projection from one measured worker\n");
+    ctx.serial.write_str("configured_cores=");
+    print_u64(&mut ctx.serial, configured_cpus);
+    ctx.serial.write_str("\n");
+    ctx.serial.write_str("online_cores=");
+    print_u64(&mut ctx.serial, logical_cpus);
+    ctx.serial.write_str("\n");
+    ctx.serial.write_str("runs_per_core=");
+    print_u64(&mut ctx.serial, runs_per_core);
+    ctx.serial.write_str("\n");
+    ctx.serial.write_str("total_logical_runs=");
+    print_u128(
+        &mut ctx.serial,
+        (runs_per_core as u128).saturating_mul(logical_cpus as u128),
+    );
+    ctx.serial.write_str("\n");
+
+    let mut state = DhryState::new();
+    let start = read_shell_counter();
+    let count = state.run(core::hint::black_box(runs_per_core));
+    let elapsed_counts = read_shell_counter().saturating_sub(start);
+    let elapsed_ns = counter_delta_ns(elapsed_counts, timer_frequency);
+    let failures = state.verify(count);
+    core::hint::black_box(&state);
+
+    ctx.serial.write_str("elapsed_ns_per_core=");
+    print_u64(&mut ctx.serial, elapsed_ns);
+    ctx.serial.write_str("\n");
+
+    if failures != 0 {
+        ctx.serial.write_str("verify: FAIL ");
+        print_number(&mut ctx.serial, failures as u32);
+        ctx.serial.write_str("\n");
+        ctx.serial.write_str("dhrystone: FAIL\n");
+        return;
+    }
+
+    ctx.serial.write_str("verify: PASS\n");
+    if elapsed_ns == 0 {
+        ctx.serial
+            .write_str("dhrystone: elapsed_ns=0, increase runs-per-core\n");
+        return;
+    }
+
+    let single_core_dps = (count as u128).saturating_mul(1_000_000_000u128) / elapsed_ns as u128;
+    let aggregate_dps = single_core_dps.saturating_mul(logical_cpus as u128);
+    let dmips_per_core_x100 = single_core_dps.saturating_mul(100) / DHRYSTONE_DMIPS_DIVISOR;
+    let dmips_total_x100 = aggregate_dps.saturating_mul(100) / DHRYSTONE_DMIPS_DIVISOR;
+
+    ctx.serial.write_str("dhrystones_per_second_per_core=");
+    print_u128(&mut ctx.serial, single_core_dps);
+    ctx.serial.write_str("\n");
+    ctx.serial.write_str("dhrystones_per_second_");
+    print_u64(&mut ctx.serial, logical_cpus);
+    ctx.serial.write_str("_core=");
+    print_u128(&mut ctx.serial, aggregate_dps);
+    ctx.serial.write_str("\n");
+    ctx.serial.write_str("dmips_per_core=");
+    print_fixed_x100(&mut ctx.serial, dmips_per_core_x100);
+    ctx.serial.write_str("\n");
+    ctx.serial.write_str("dmips_");
+    print_u64(&mut ctx.serial, logical_cpus);
+    ctx.serial.write_str("_core=");
+    print_fixed_x100(&mut ctx.serial, dmips_total_x100);
+    ctx.serial.write_str("\n");
+    ctx.serial.write_str("dhrystone: PASS\n");
+}
+
 /// Command: sched - Show or configure scheduler policy
 fn cmd_sched(ctx: &mut ShellContext, args: &[&str]) {
     let s = scheduler::scheduler();
@@ -8980,6 +9472,54 @@ fn print_usize(serial: &mut Serial, mut num: usize) {
     for j in 0..i {
         serial.write_byte(buf[i - 1 - j]);
     }
+}
+
+fn print_u64(serial: &mut Serial, mut num: u64) {
+    if num == 0 {
+        serial.write_byte(b'0');
+        return;
+    }
+
+    let mut buf = [0u8; 20];
+    let mut i = 0;
+
+    while num > 0 && i < buf.len() {
+        buf[i] = b'0' + (num % 10) as u8;
+        num /= 10;
+        i += 1;
+    }
+
+    for j in 0..i {
+        serial.write_byte(buf[i - 1 - j]);
+    }
+}
+
+fn print_u128(serial: &mut Serial, mut num: u128) {
+    if num == 0 {
+        serial.write_byte(b'0');
+        return;
+    }
+
+    let mut buf = [0u8; 39];
+    let mut i = 0;
+
+    while num > 0 && i < buf.len() {
+        buf[i] = b'0' + (num % 10) as u8;
+        num /= 10;
+        i += 1;
+    }
+
+    for j in 0..i {
+        serial.write_byte(buf[i - 1 - j]);
+    }
+}
+
+fn print_fixed_x100(serial: &mut Serial, value_x100: u128) {
+    print_u128(serial, value_x100 / 100);
+    serial.write_byte(b'.');
+    let frac = (value_x100 % 100) as u8;
+    serial.write_byte(b'0' + (frac / 10));
+    serial.write_byte(b'0' + (frac % 10));
 }
 
 fn print_hex(serial: &mut Serial, num: u64) {

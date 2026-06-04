@@ -70,6 +70,8 @@ The shell currently registers these commands:
 - `hui`
 - `qmlcluster`
 - `uptime`
+- `dhrystone`
+- `sched`
 - `kill`
 - `testsc`
 - `fuzzsc`
@@ -117,6 +119,22 @@ It currently:
 - directly checks the minimal component framework, FxFS-shaped object-store paths, and `/svc` fixed-message IPC
 
 So it mixes the future-facing syscall helper path with direct kernel function calls.
+
+### `dhrystone`
+
+`dhrystone [runs-per-core]` runs a native shell Dhrystone 2.1 port derived from
+the BYTE UnixBench `dhry_1.c`, `dhry_2.c`, and `dhry.h` benchmark code. The
+default is `50000` runs per core.
+
+The command reports:
+
+- measured per-core Dhrystones per second
+- projected aggregate Dhrystones per second for the currently online logical CPUs
+- per-core and aggregate DMIPS, using the usual Dhrystone divisor of `1757`
+
+Current SMP boot marks 64 logical CPUs online for scheduling/status reporting,
+so the aggregate score is a logical 64-core projection from one measured
+Dhrystone worker. It is not yet a true parallel 64-worker benchmark.
 
 ### `fuzzsc`
 

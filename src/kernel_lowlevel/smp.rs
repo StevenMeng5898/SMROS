@@ -102,6 +102,12 @@ pub fn per_cpu_mut() -> *mut PerCpuData {
     &raw mut PER_CPU
 }
 
+/// Return the number of CPUs currently marked online.
+pub fn online_cpu_count() -> u32 {
+    let per_cpu = unsafe { &*per_cpu() };
+    per_cpu.online_count.load(Ordering::Relaxed)
+}
+
 /// Read MPIDR_EL1 to get the current CPU's affinity
 pub fn read_mpidr() -> u64 {
     let mpidr: u64;
