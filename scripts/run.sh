@@ -9,6 +9,8 @@ cd "$SCRIPT_DIR/.."
 KERNEL_IMAGE="${1:-kernel8.img}"
 FXFS_DISK="${FXFS_DISK:-smros-fxfs.img}"
 FXFS_DISK_SIZE="${FXFS_DISK_SIZE:-128M}"
+QEMU_MACHINE="${QEMU_MACHINE:-virt,gic-version=4,virtualization=on}"
+QEMU_CPU="${QEMU_CPU:-cortex-a710}"
 
 if [ ! -f "$KERNEL_IMAGE" ]; then
     echo "Kernel image not found: $KERNEL_IMAGE"
@@ -31,8 +33,8 @@ echo "  - Press Ctrl+A, then X"
 echo ""
 
 qemu-system-aarch64 \
-    -M virt \
-    -cpu cortex-a57 \
+    -M "$QEMU_MACHINE" \
+    -cpu "$QEMU_CPU" \
     -smp 4 \
     -m 512M \
     -nographic \

@@ -63,8 +63,8 @@ pub const QEMU_VIRT_UART_SIZE: usize = 0x1000;
 pub const QEMU_VIRT_UART_IRQ: u32 = 33;
 pub const QEMU_VIRT_GICD_BASE: usize = 0x0800_0000;
 pub const QEMU_VIRT_GICD_SIZE: usize = 0x10000;
-pub const QEMU_VIRT_GICC_BASE: usize = 0x0801_0000;
-pub const QEMU_VIRT_GICC_SIZE: usize = 0x10000;
+pub const QEMU_VIRT_GICR_BASE: usize = 0x080a_0000;
+pub const QEMU_VIRT_GICR_SIZE: usize = 0x00f6_0000;
 
 pub const PSCI_RET_SUCCESS: i64 = 0;
 pub const PSCI_RET_ON_PENDING: i64 = -1;
@@ -939,7 +939,7 @@ proof fn driver_platform_table_smoke() {
     assert(DEFAULT_PLATFORM_INDEX < PLATFORM_COUNT);
     assert(dt_reg_valid_spec(QEMU_VIRT_UART_BASE as int, QEMU_VIRT_UART_SIZE as int));
     assert(dt_reg_valid_spec(QEMU_VIRT_GICD_BASE as int, QEMU_VIRT_GICD_SIZE as int));
-    assert(dt_reg_valid_spec(QEMU_VIRT_GICC_BASE as int, QEMU_VIRT_GICC_SIZE as int));
+    assert(dt_reg_valid_spec(QEMU_VIRT_GICR_BASE as int, QEMU_VIRT_GICR_SIZE as int));
     assert(dt_reg_contains_spec(
         QEMU_VIRT_UART_BASE as int,
         QEMU_VIRT_UART_SIZE as int,

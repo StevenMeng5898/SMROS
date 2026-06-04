@@ -3,6 +3,7 @@ target = "aarch64-unknown-none"
 
 [target.aarch64-unknown-none]
 rustflags = [
+    "-C", "target-cpu=cortex-a710",
     "-C", "link-arg=-Tlinker/kernel.ld",
 ]
 

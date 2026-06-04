@@ -32,8 +32,8 @@ SMROS is normally started with:
 
 ```bash
 qemu-system-aarch64 \
-  -M virt \
-  -cpu cortex-a57 \
+  -M virt,gic-version=4,virtualization=on \
+  -cpu cortex-a710 \
   -smp 4 \
   -m 512M \
   -nographic \
@@ -112,7 +112,7 @@ By default, `syscall_should_advance_elr()` returns `0`, so the handler does not 
 | 1 | `Serial::new().init()` | Enables the PL011 console |
 | 2 | banner + version print | Kernel version is `0.2.0` |
 | 3 | `print_system_info()` | Prints `MPIDR_EL1` and `SCTLR_EL1` |
-| 4 | `kernel_lowlevel::interrupt::init()` | GICv2 setup |
+| 4 | `kernel_lowlevel::interrupt::init()` | GICv3/v4 setup on QEMU virt |
 | 5 | `kernel_lowlevel::timer::init()` | ARM generic timer setup |
 | 6 | `kernel_lowlevel::smp::init()` | SMP bookkeeping and CPU0 registration |
 | 7 | `kernel_lowlevel::memory::init()` | Process manager and page allocator setup |

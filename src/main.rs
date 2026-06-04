@@ -318,6 +318,28 @@ _start:
     // Secondary CPU: jump to secondary entry point
     // Set up stack from x3 (passed from PSCI CPU_ON call)
     mov     sp, x3
+
+    // If QEMU entered us at EL2, drop to EL1h before using EL1 state.
+    mrs     x1, CurrentEL
+    cmp     x1, #(2 << 2)
+    b.ne    7f
+    mov     x1, #(1 << 31)
+    msr     hcr_el2, x1
+    mov     x1, #3
+    msr     cnthctl_el2, x1
+    msr     cntvoff_el2, xzr
+    msr     cptr_el2, xzr
+    mrs     x1, ICC_SRE_EL2
+    orr     x1, x1, #0xf
+    msr     ICC_SRE_EL2, x1
+    isb
+    msr     sp_el1, x3
+    ldr     x1, =7f
+    msr     elr_el2, x1
+    mov     x1, #0x3c5
+    msr     spsr_el2, x1
+    eret
+7:
     
     // Clear BSS for secondary CPU (shared with CPU0)
     // BSS is already cleared by CPU0, so skip this
@@ -325,6 +347,12 @@ _start:
     // Set exception vector base address
     ldr     x1, =exception_vectors
     msr     vbar_el1, x1
+
+    // Enable the GICv3/v4 system-register CPU interface at EL1.
+    mrs     x1, ICC_SRE_EL1
+    orr     x1, x1, #0x7
+    msr     ICC_SRE_EL1, x1
+    isb
     
     // Branch to secondary CPU entry point
     bl      secondary_cpu_entry
@@ -347,6 +375,29 @@ _start:
     ldr     x1, =__stack_top
     mov     sp, x1
 
+    // QEMU `virt,virtualization=on` can enter the image at EL2. Configure the
+    // minimal EL2 state needed by EL1 and return into the normal EL1 boot path.
+    mrs     x2, CurrentEL
+    cmp     x2, #(2 << 2)
+    b.ne    8f
+    mov     x2, #(1 << 31)
+    msr     hcr_el2, x2
+    mov     x2, #3
+    msr     cnthctl_el2, x2
+    msr     cntvoff_el2, xzr
+    msr     cptr_el2, xzr
+    mrs     x2, ICC_SRE_EL2
+    orr     x2, x2, #0xf
+    msr     ICC_SRE_EL2, x2
+    isb
+    msr     sp_el1, x1
+    ldr     x2, =8f
+    msr     elr_el2, x2
+    mov     x2, #0x3c5
+    msr     spsr_el2, x2
+    eret
+8:
+
     // Clear BSS section
     ldr     x1, =__bss_start
     ldr     x2, =__bss_end
@@ -361,6 +412,12 @@ _start:
     // Set exception vector base address
     ldr     x1, =exception_vectors
     msr     vbar_el1, x1
+
+    // Enable the GICv3/v4 system-register CPU interface at EL1.
+    mrs     x1, ICC_SRE_EL1
+    orr     x1, x1, #0x7
+    msr     ICC_SRE_EL1, x1
+    isb
 
     // Enable FP/SIMD before Rust code can emit vector instructions.
     mrs     x1, cpacr_el1
@@ -396,6 +453,12 @@ secondary_entry:
     mrs     x1, cpacr_el1
     orr     x1, x1, #(0x3 << 20)
     msr     cpacr_el1, x1
+    isb
+
+    // Enable the GICv3/v4 system-register CPU interface at EL1.
+    mrs     x1, ICC_SRE_EL1
+    orr     x1, x1, #0x7
+    msr     ICC_SRE_EL1, x1
     isb
     
     // Jump to Rust entry point
@@ -827,13 +890,14 @@ pub extern "C" fn kernel_main(fdt_base: usize) -> ! {
 /// Timer interrupt handler
 #[no_mangle]
 extern "C" fn timer_interrupt_handler() {
+    // Acknowledge the interrupt first so the CPU interface has an active IRQ
+    // to complete after the timer is serviced.
+    let interrupt_id = kernel_lowlevel::interrupt::acknowledge_interrupt();
+
     // Clear the timer interrupt
     kernel_lowlevel::timer::clear_interrupt();
 
     crate::kernel_objects::scheduler::scheduler().on_timer_tick();
-
-    // Acknowledge the interrupt at GIC
-    let interrupt_id = kernel_lowlevel::interrupt::acknowledge_interrupt();
 
     // End of interrupt
     kernel_lowlevel::interrupt::end_of_interrupt(interrupt_id);

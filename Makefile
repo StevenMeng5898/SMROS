@@ -6,6 +6,8 @@ KERNEL = kernel8.img
 FXFS_DISK = smros-fxfs.img
 FXFS_DISK_SIZE = 128M
 BUILD_DIR = target/$(TARGET)/release
+QEMU_MACHINE ?= virt,gic-version=4,virtualization=on
+QEMU_CPU ?= cortex-a710
 
 .PHONY: all build run clean clean-fxfs debug gdb qemu-icmp help verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
 
@@ -29,8 +31,8 @@ qemu-icmp:
 run: build $(FXFS_DISK) qemu-icmp
 	@echo "Starting QEMU..."
 	@qemu-system-aarch64 \
-		-M virt \
-		-cpu cortex-a57 \
+		-M $(QEMU_MACHINE) \
+		-cpu $(QEMU_CPU) \
 		-smp 4 \
 		-m 512M \
 		-nographic \
@@ -44,8 +46,8 @@ run: build $(FXFS_DISK) qemu-icmp
 debug: build $(FXFS_DISK) qemu-icmp
 	@echo "Starting QEMU in debug mode..."
 	@qemu-system-aarch64 \
-		-M virt \
-		-cpu cortex-a57 \
+		-M $(QEMU_MACHINE) \
+		-cpu $(QEMU_CPU) \
 		-smp 4 \
 		-m 512M \
 		-nographic \
@@ -62,8 +64,8 @@ debug: build $(FXFS_DISK) qemu-icmp
 gdb: build $(FXFS_DISK) qemu-icmp
 	@echo "Starting QEMU with GDB server on port 1234..."
 	@qemu-system-aarch64 \
-		-M virt \
-		-cpu cortex-a57 \
+		-M $(QEMU_MACHINE) \
+		-cpu $(QEMU_CPU) \
 		-smp 4 \
 		-m 512M \
 		-nographic \

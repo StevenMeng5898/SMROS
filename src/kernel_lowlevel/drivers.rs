@@ -33,8 +33,8 @@ pub const QEMU_VIRT_UART_SIZE: usize = 0x1000;
 pub const QEMU_VIRT_UART_IRQ: u32 = 33;
 pub const QEMU_VIRT_GICD_BASE: usize = 0x0800_0000;
 pub const QEMU_VIRT_GICD_SIZE: usize = 0x10000;
-pub const QEMU_VIRT_GICC_BASE: usize = 0x0801_0000;
-pub const QEMU_VIRT_GICC_SIZE: usize = 0x10000;
+pub const QEMU_VIRT_GICR_BASE: usize = 0x080a_0000;
+pub const QEMU_VIRT_GICR_SIZE: usize = 0x00f6_0000;
 pub const QEMU_VIRT_TIMER_IRQ: u32 = 30;
 pub const QEMU_VIRT_MEMORY_BASE: usize = 0x4000_0000;
 pub const QEMU_VIRT_MEMORY_SIZE: usize = 0x2000_0000;
@@ -49,6 +49,22 @@ pub const RPI4_GICC_SIZE: usize = 0x2000;
 pub const RPI4_TIMER_IRQ: u32 = 30;
 pub const RPI4_MEMORY_BASE: usize = 0x0000_0000;
 pub const RPI4_MEMORY_SIZE: usize = 0x3c00_0000;
+
+#[repr(usize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GicVersion {
+    GicV2,
+    GicV3V4,
+}
+
+impl GicVersion {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            GicVersion::GicV2 => "gicv2",
+            GicVersion::GicV3V4 => "gicv3/gicv4",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DriverError {
@@ -140,6 +156,7 @@ impl DeviceNode {
 pub struct PlatformDescriptor {
     pub machine: &'static str,
     pub root_compatible: &'static [&'static str],
+    pub gic_version: GicVersion,
     pub nodes: &'static [DeviceNode],
 }
 
@@ -150,10 +167,11 @@ pub struct PlatformResources {
     pub uart_base: usize,
     pub uart_size: usize,
     pub uart_irq: u32,
+    pub gic_version: GicVersion,
     pub gicd_base: usize,
     pub gicd_size: usize,
-    pub gicc_base: usize,
-    pub gicc_size: usize,
+    pub gicr_base: usize,
+    pub gicr_size: usize,
     pub timer_irq: u32,
 }
 
@@ -184,8 +202,9 @@ pub struct DriverStats {
     pub nodes: usize,
     pub uart_base: usize,
     pub uart_irq: u32,
+    pub gic_version: GicVersion,
     pub gicd_base: usize,
-    pub gicc_base: usize,
+    pub gicr_base: usize,
     pub timer_irq: u32,
 }
 
@@ -193,7 +212,7 @@ const QEMU_VIRT_NODES: &[DeviceNode] = &[
     DeviceNode {
         path: "/cpus/cpu@0",
         name: "cpu@0",
-        compatible: "arm,cortex-a57",
+        compatible: "arm,cortex-a710",
         status: "okay",
         kind: DeviceKind::Cpu,
         reg: Some(DeviceReg { base: 0, size: 1 }),
@@ -229,7 +248,7 @@ const QEMU_VIRT_NODES: &[DeviceNode] = &[
     DeviceNode {
         path: "/intc@8000000",
         name: "intc@8000000",
-        compatible: "arm,cortex-a15-gic",
+        compatible: "arm,gic-v3",
         status: "okay",
         kind: DeviceKind::InterruptController,
         reg: Some(DeviceReg {
@@ -237,8 +256,8 @@ const QEMU_VIRT_NODES: &[DeviceNode] = &[
             size: QEMU_VIRT_GICD_SIZE,
         }),
         reg2: Some(DeviceReg {
-            base: QEMU_VIRT_GICC_BASE,
-            size: QEMU_VIRT_GICC_SIZE,
+            base: QEMU_VIRT_GICR_BASE,
+            size: QEMU_VIRT_GICR_SIZE,
         }),
         irq: None,
     },
@@ -323,11 +342,13 @@ const PLATFORMS: &[PlatformDescriptor] = &[
     PlatformDescriptor {
         machine: "linux,dummy-virt",
         root_compatible: &["linux,dummy-virt", "qemu,virt"],
+        gic_version: GicVersion::GicV3V4,
         nodes: QEMU_VIRT_NODES,
     },
     PlatformDescriptor {
         machine: "raspberrypi,4-model-b",
         root_compatible: &["raspberrypi,4-model-b", "brcm,bcm2711"],
+        gic_version: GicVersion::GicV2,
         nodes: RPI4_NODES,
     },
 ];
@@ -337,10 +358,11 @@ static INIT_STATE: AtomicUsize = AtomicUsize::new(0);
 static UART_BASE: AtomicUsize = AtomicUsize::new(QEMU_VIRT_UART_BASE);
 static UART_SIZE: AtomicUsize = AtomicUsize::new(QEMU_VIRT_UART_SIZE);
 static UART_IRQ: AtomicUsize = AtomicUsize::new(QEMU_VIRT_UART_IRQ as usize);
+static GIC_VERSION: AtomicUsize = AtomicUsize::new(GicVersion::GicV3V4 as usize);
 static GICD_BASE: AtomicUsize = AtomicUsize::new(QEMU_VIRT_GICD_BASE);
 static GICD_SIZE: AtomicUsize = AtomicUsize::new(QEMU_VIRT_GICD_SIZE);
-static GICC_BASE: AtomicUsize = AtomicUsize::new(QEMU_VIRT_GICC_BASE);
-static GICC_SIZE: AtomicUsize = AtomicUsize::new(QEMU_VIRT_GICC_SIZE);
+static GICR_BASE: AtomicUsize = AtomicUsize::new(QEMU_VIRT_GICR_BASE);
+static GICR_SIZE: AtomicUsize = AtomicUsize::new(QEMU_VIRT_GICR_SIZE);
 static TIMER_IRQ: AtomicUsize = AtomicUsize::new(QEMU_VIRT_TIMER_IRQ as usize);
 static RESOURCE_SOURCE: AtomicUsize = AtomicUsize::new(ResourceSource::Uninitialized as usize);
 
@@ -442,14 +464,27 @@ pub fn gicd_size() -> usize {
     GICD_SIZE.load(Ordering::Acquire)
 }
 
-pub fn gicc_base() -> usize {
+pub fn gic_version() -> GicVersion {
     ensure_initialized();
-    GICC_BASE.load(Ordering::Acquire)
+    gic_version_from_usize(GIC_VERSION.load(Ordering::Acquire))
+}
+
+pub fn gicr_base() -> usize {
+    ensure_initialized();
+    GICR_BASE.load(Ordering::Acquire)
+}
+
+pub fn gicr_size() -> usize {
+    ensure_initialized();
+    GICR_SIZE.load(Ordering::Acquire)
+}
+
+pub fn gicc_base() -> usize {
+    gicr_base()
 }
 
 pub fn gicc_size() -> usize {
-    ensure_initialized();
-    GICC_SIZE.load(Ordering::Acquire)
+    gicr_size()
 }
 
 pub fn timer_irq() -> u32 {
@@ -470,8 +505,9 @@ pub fn stats() -> DriverStats {
         nodes: platform.nodes.len(),
         uart_base: UART_BASE.load(Ordering::Acquire),
         uart_irq: UART_IRQ.load(Ordering::Acquire) as u32,
+        gic_version: gic_version_from_usize(GIC_VERSION.load(Ordering::Acquire)),
         gicd_base: GICD_BASE.load(Ordering::Acquire),
-        gicc_base: GICC_BASE.load(Ordering::Acquire),
+        gicr_base: GICR_BASE.load(Ordering::Acquire),
         timer_irq: TIMER_IRQ.load(Ordering::Acquire) as u32,
     }
 }
@@ -486,10 +522,12 @@ pub fn describe(serial: &mut crate::kernel_lowlevel::serial::Serial) {
     print_number(serial, snapshot.nodes as u32);
     serial.write_str(" uart=0x");
     serial.write_hex(snapshot.uart_base as u64);
+    serial.write_str(" gic=");
+    serial.write_str(snapshot.gic_version.as_str());
     serial.write_str(" gicd=0x");
     serial.write_hex(snapshot.gicd_base as u64);
-    serial.write_str(" gicc=0x");
-    serial.write_hex(snapshot.gicc_base as u64);
+    serial.write_str(" gicr/gicc=0x");
+    serial.write_hex(snapshot.gicr_base as u64);
     serial.write_str(" timer_irq=");
     print_number(serial, snapshot.timer_irq);
     serial.write_str("\n");
@@ -505,10 +543,11 @@ fn cache_resources(index: usize, resources: PlatformResources) {
     UART_BASE.store(resources.uart_base, Ordering::Release);
     UART_SIZE.store(resources.uart_size, Ordering::Release);
     UART_IRQ.store(resources.uart_irq as usize, Ordering::Release);
+    GIC_VERSION.store(resources.gic_version as usize, Ordering::Release);
     GICD_BASE.store(resources.gicd_base, Ordering::Release);
     GICD_SIZE.store(resources.gicd_size, Ordering::Release);
-    GICC_BASE.store(resources.gicc_base, Ordering::Release);
-    GICC_SIZE.store(resources.gicc_size, Ordering::Release);
+    GICR_BASE.store(resources.gicr_base, Ordering::Release);
+    GICR_SIZE.store(resources.gicr_size, Ordering::Release);
     TIMER_IRQ.store(resources.timer_irq as usize, Ordering::Release);
     ACTIVE_PLATFORM_INDEX.store(index, Ordering::Release);
     RESOURCE_SOURCE.store(resources.source as usize, Ordering::Release);
@@ -535,19 +574,28 @@ fn platform_resources(index: usize) -> Result<PlatformResources, DriverError> {
     let timer = find_node_in_platform(platform, DeviceKind::Timer)?;
     let uart_reg = uart.primary_reg()?;
     let gicd_reg = gic.primary_reg()?;
-    let gicc_reg = gic.secondary_reg()?;
+    let gicr_reg = gic.secondary_reg()?;
     Ok(PlatformResources {
         machine: platform.machine,
         source: ResourceSource::StaticFallback,
         uart_base: uart_reg.base,
         uart_size: uart_reg.size,
         uart_irq: uart.irq()?,
+        gic_version: platform.gic_version,
         gicd_base: gicd_reg.base,
         gicd_size: gicd_reg.size,
-        gicc_base: gicc_reg.base,
-        gicc_size: gicc_reg.size,
+        gicr_base: gicr_reg.base,
+        gicr_size: gicr_reg.size,
         timer_irq: timer.irq()?,
     })
+}
+
+fn gic_version_from_usize(value: usize) -> GicVersion {
+    if value == GicVersion::GicV2 as usize {
+        GicVersion::GicV2
+    } else {
+        GicVersion::GicV3V4
+    }
 }
 
 fn resource_source() -> ResourceSource {
@@ -637,7 +685,8 @@ impl FdtNodeScratch {
 enum DeviceKindMatch {
     None,
     Serial,
-    InterruptController,
+    InterruptControllerV2,
+    InterruptControllerV3V4,
     Timer,
 }
 
@@ -647,10 +696,11 @@ struct FdtParsedResources {
     uart_base: Option<usize>,
     uart_size: Option<usize>,
     uart_irq: Option<u32>,
+    gic_version: Option<GicVersion>,
     gicd_base: Option<usize>,
     gicd_size: Option<usize>,
-    gicc_base: Option<usize>,
-    gicc_size: Option<usize>,
+    gicr_base: Option<usize>,
+    gicr_size: Option<usize>,
     timer_irq: Option<u32>,
 }
 
@@ -661,10 +711,11 @@ impl FdtParsedResources {
             uart_base: None,
             uart_size: None,
             uart_irq: None,
+            gic_version: None,
             gicd_base: None,
             gicd_size: None,
-            gicc_base: None,
-            gicc_size: None,
+            gicr_base: None,
+            gicr_size: None,
             timer_irq: None,
         }
     }
@@ -694,7 +745,7 @@ impl FdtParsedResources {
                     self.uart_irq = Some(irq);
                 }
             }
-            DeviceKindMatch::InterruptController => {
+            DeviceKindMatch::InterruptControllerV2 | DeviceKindMatch::InterruptControllerV3V4 => {
                 if node.reg.is_none() && node.reg_addr != 0 {
                     node.reg = fdt_read_reg_tuple(
                         node.reg_addr,
@@ -711,11 +762,16 @@ impl FdtParsedResources {
                         node.parent_size_cells,
                     );
                 }
-                if let (Some(gicd), Some(gicc)) = (node.reg, node.reg2) {
+                if let (Some(gicd), Some(gicr)) = (node.reg, node.reg2) {
+                    self.gic_version = Some(match node.matched {
+                        DeviceKindMatch::InterruptControllerV2 => GicVersion::GicV2,
+                        DeviceKindMatch::InterruptControllerV3V4 => GicVersion::GicV3V4,
+                        _ => GicVersion::GicV3V4,
+                    });
                     self.gicd_base = Some(gicd.base);
                     self.gicd_size = Some(gicd.size);
-                    self.gicc_base = Some(gicc.base);
-                    self.gicc_size = Some(gicc.size);
+                    self.gicr_base = Some(gicr.base);
+                    self.gicr_size = Some(gicr.size);
                 }
             }
             DeviceKindMatch::Timer => {
@@ -750,10 +806,11 @@ impl FdtParsedResources {
             uart_base: self.uart_base?,
             uart_size: self.uart_size?,
             uart_irq: self.uart_irq?,
+            gic_version: self.gic_version?,
             gicd_base: self.gicd_base?,
             gicd_size: self.gicd_size?,
-            gicc_base: self.gicc_base?,
-            gicc_size: self.gicc_size?,
+            gicr_base: self.gicr_base?,
+            gicr_size: self.gicr_size?,
             timer_irq: self.timer_irq?,
         })
     }
@@ -992,10 +1049,12 @@ fn handle_fdt_property(
 fn fdt_device_match(value_addr: usize, len: usize) -> DeviceKindMatch {
     if fdt_compatible_list_has(value_addr, len, "arm,pl011") {
         DeviceKindMatch::Serial
+    } else if fdt_compatible_list_has(value_addr, len, "arm,gic-v3") {
+        DeviceKindMatch::InterruptControllerV3V4
     } else if fdt_compatible_list_has(value_addr, len, "arm,cortex-a15-gic")
         || fdt_compatible_list_has(value_addr, len, "arm,gic-400")
     {
-        DeviceKindMatch::InterruptController
+        DeviceKindMatch::InterruptControllerV2
     } else if fdt_compatible_list_has(value_addr, len, "arm,armv8-timer") {
         DeviceKindMatch::Timer
     } else {

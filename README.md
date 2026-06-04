@@ -6,7 +6,7 @@ SMROS is an experimental bare-metal AArch64 kernel written in Rust for QEMU's `v
 
 - Boots on `qemu-system-aarch64` and reaches the `smros>` shell prompt.
 - Uses inline ARM64 boot assembly in `src/main.rs` and context switch routines from `src/kernel_lowlevel/context_switch.S`.
-- Initializes PL011 UART, GICv2, ARM generic timer, MMU/page-table helpers, SMP bookkeeping, kernel objects, channels, scheduler state, and syscall dispatch.
+- Initializes PL011 UART, GICv3/v4 on QEMU virt, ARM generic timer, MMU/page-table helpers, SMP bookkeeping, kernel objects, channels, scheduler state, and syscall dispatch.
 - Skips the boot-time EL0 smoke test on the fast path; run `testsc` from the shell for syscall validation.
 - Keeps the live shell as an EL1 scheduler thread; the banner is aspirational, not proof of an isolated shell process.
 - Provides modeled Linux and Zircon syscall coverage for memory, handles, IPC, object, timer/debug, hypervisor, networking, file-descriptor, and compatibility-object paths.
@@ -121,8 +121,8 @@ On Linux, run the host ICMP setup once before launching QEMU manually:
 
 ```bash
 qemu-system-aarch64 \
-  -M virt \
-  -cpu cortex-a57 \
+  -M virt,gic-version=4,virtualization=on \
+  -cpu cortex-a710 \
   -smp 4 \
   -m 512M \
   -nographic \
@@ -299,7 +299,7 @@ SMROS/
 ### Low-Level Platform
 
 - PL011 serial console
-- GICv2 interrupt controller
+- GICv3/v4 interrupt controller on QEMU virt
 - ARM generic timer
 - ARM64 exception vectors
 - ARM64 context switch assembly

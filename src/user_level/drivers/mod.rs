@@ -147,7 +147,7 @@ impl UserDriverFramework {
         self.nodes.push(UserDeviceNode {
             path: "/cpus/cpu@0",
             name: "cpu@0",
-            compatible: "arm,cortex-a57",
+            compatible: "arm,cortex-a710",
             status: "okay",
             kind: UserDeviceKind::Cpu,
             reg: Some(UserDeviceReg { base: 0, size: 1 }),
@@ -180,7 +180,7 @@ impl UserDriverFramework {
         self.nodes.push(UserDeviceNode {
             path: "/intc@8000000",
             name: "intc@8000000",
-            compatible: "arm,cortex-a15-gic",
+            compatible: "arm,gic-v3",
             status: "okay",
             kind: UserDeviceKind::InterruptController,
             reg: Some(UserDeviceReg {

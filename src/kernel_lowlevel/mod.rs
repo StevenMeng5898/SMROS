@@ -5,7 +5,7 @@
 //! - MMU and Page Table Management
 //! - Serial Driver (PL011 UART)
 //! - Timer Driver (ARM Generic Timer)
-//! - Interrupt Controller (GICv2)
+//! - Interrupt Controller (GICv3/v4 on QEMU virt, GICv2 fallback)
 //! - SMP Support (Symmetric Multi-Processing)
 //! - ARM64 Thread Context Switching
 //! - Hardware Drivers
