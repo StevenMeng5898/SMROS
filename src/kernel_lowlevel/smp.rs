@@ -9,8 +9,8 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use super::lowlevel_logic;
 
-/// Maximum number of CPUs supported
-pub const MAX_CPUS: usize = 4;
+/// Maximum number of logical CPUs supported.
+pub const MAX_CPUS: usize = 64;
 
 /// PSCI (Power State Coordination Interface) function IDs
 /// QEMU virt machine uses PSCI 0.2+ to boot secondary CPUs
@@ -177,7 +177,7 @@ pub fn system_reset() -> ! {
 /// Boot a secondary CPU
 ///
 /// # Arguments
-/// * `cpu_id` - CPU ID (0-3 for QEMU virt)
+/// * `cpu_id` - CPU ID (0-63 for the default QEMU virt configuration)
 /// * `stack_ptr` - Stack pointer for the new CPU
 pub fn boot_secondary_cpu(cpu_id: u32, stack_ptr: u64) -> Result<(), &'static str> {
     if !lowlevel_logic::valid_cpu_id(cpu_id, MAX_CPUS) {
@@ -303,14 +303,16 @@ pub fn init() {
     serial.write_str("[SMP] Booting secondary CPUs...\n");
 }
 
-/// Boot all secondary CPUs (CPU1, CPU2, CPU3)
+/// Initialize all logical CPUs.
 pub fn boot_all_cpus() {
     let mut serial = Serial::new();
     serial.init();
 
     serial.write_str("[SMP] Multi-core initialization...\n");
     serial.write_str("[SMP] Note: Using logical CPU affinity model\n");
-    serial.write_str("[SMP] Scheduler will distribute threads across 4 logical CPUs\n");
+    serial.write_str("[SMP] Scheduler will distribute threads across ");
+    print_number(&mut serial, MAX_CPUS as u32);
+    serial.write_str(" logical CPUs\n");
 
     // Initialize all CPUs as online for scheduling purposes
     let per_cpu = unsafe { &mut *per_cpu_mut() };
@@ -323,7 +325,9 @@ pub fn boot_all_cpus() {
         .online_count
         .store(MAX_CPUS as u32, Ordering::Relaxed);
 
-    serial.write_str("[SMP] All 4 logical CPUs initialized\n");
+    serial.write_str("[SMP] All ");
+    print_number(&mut serial, MAX_CPUS as u32);
+    serial.write_str(" logical CPUs initialized\n");
 }
 
 /// Mark the current CPU as online (called from secondary CPU entry)

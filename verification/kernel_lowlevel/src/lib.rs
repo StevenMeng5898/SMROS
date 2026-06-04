@@ -11,7 +11,7 @@ pub const MAX_SEGMENTS: usize = 4;
 pub const TOTAL_PHYSICAL_PAGES: usize = 4096;
 pub const PT_ENTRIES: usize = 512;
 pub const TIMER_IRQ: u32 = 30;
-pub const MAX_CPUS: usize = 4;
+pub const MAX_CPUS: usize = 64;
 
 pub const SEGMENT_CODE: u8 = 0;
 pub const SEGMENT_DATA: u8 = 1;

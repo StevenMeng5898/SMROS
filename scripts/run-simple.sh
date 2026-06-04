@@ -11,6 +11,8 @@ FXFS_DISK="${FXFS_DISK:-smros-fxfs.img}"
 FXFS_DISK_SIZE="${FXFS_DISK_SIZE:-128M}"
 QEMU_MACHINE="${QEMU_MACHINE:-virt,gic-version=4,virtualization=on}"
 QEMU_CPU="${QEMU_CPU:-cortex-a710}"
+QEMU_SMP="${QEMU_SMP:-64}"
+QEMU_MEMORY="${QEMU_MEMORY:-2G}"
 
 if [ ! -f "$KERNEL_IMAGE" ]; then
     echo "Kernel image not found: $KERNEL_IMAGE"
@@ -32,8 +34,8 @@ echo ""
 qemu-system-aarch64 \
     -M "$QEMU_MACHINE" \
     -cpu "$QEMU_CPU" \
-    -smp 4 \
-    -m 512M \
+    -smp "$QEMU_SMP" \
+    -m "$QEMU_MEMORY" \
     -nographic \
     -kernel "$KERNEL_IMAGE" \
     -drive file="$FXFS_DISK",if=none,format=raw,id=fxfs,cache=writethrough \

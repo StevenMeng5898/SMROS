@@ -123,8 +123,8 @@ On Linux, run the host ICMP setup once before launching QEMU manually:
 qemu-system-aarch64 \
   -M virt,gic-version=4,virtualization=on \
   -cpu cortex-a710 \
-  -smp 4 \
-  -m 512M \
+  -smp 64 \
+  -m 2G \
   -nographic \
   -kernel kernel8.img \
   -drive file=smros-fxfs.img,if=none,format=raw,id=fxfs,cache=writethrough \

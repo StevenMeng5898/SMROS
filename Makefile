@@ -8,6 +8,8 @@ FXFS_DISK_SIZE = 128M
 BUILD_DIR = target/$(TARGET)/release
 QEMU_MACHINE ?= virt,gic-version=4,virtualization=on
 QEMU_CPU ?= cortex-a710
+QEMU_SMP ?= 64
+QEMU_MEMORY ?= 2G
 
 .PHONY: all build run clean clean-fxfs debug gdb qemu-icmp help verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
 
@@ -33,8 +35,8 @@ run: build $(FXFS_DISK) qemu-icmp
 	@qemu-system-aarch64 \
 		-M $(QEMU_MACHINE) \
 		-cpu $(QEMU_CPU) \
-		-smp 4 \
-		-m 512M \
+		-smp $(QEMU_SMP) \
+		-m $(QEMU_MEMORY) \
 		-nographic \
 		-kernel $(KERNEL) \
 		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs,cache=writethrough \
@@ -48,8 +50,8 @@ debug: build $(FXFS_DISK) qemu-icmp
 	@qemu-system-aarch64 \
 		-M $(QEMU_MACHINE) \
 		-cpu $(QEMU_CPU) \
-		-smp 4 \
-		-m 512M \
+		-smp $(QEMU_SMP) \
+		-m $(QEMU_MEMORY) \
 		-nographic \
 		-kernel $(KERNEL) \
 		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs,cache=writethrough \
@@ -66,8 +68,8 @@ gdb: build $(FXFS_DISK) qemu-icmp
 	@qemu-system-aarch64 \
 		-M $(QEMU_MACHINE) \
 		-cpu $(QEMU_CPU) \
-		-smp 4 \
-		-m 512M \
+		-smp $(QEMU_SMP) \
+		-m $(QEMU_MEMORY) \
 		-nographic \
 		-kernel $(KERNEL) \
 		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs,cache=writethrough \

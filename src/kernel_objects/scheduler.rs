@@ -29,8 +29,8 @@ impl<T> SyncUnsafeCell<T> {
     }
 }
 
-/// Maximum number of CPUs for thread binding
-pub const MAX_CPUS: usize = 4;
+/// Maximum number of CPUs for thread binding.
+pub const MAX_CPUS: usize = crate::kernel_lowlevel::smp::MAX_CPUS;
 const DEFAULT_TIME_SLICE_TICKS: u32 = 10;
 const DEFAULT_EDF_PERIOD_TICKS: u32 = 50;
 const DEFAULT_CREDIT: i32 = 100;

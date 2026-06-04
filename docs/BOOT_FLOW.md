@@ -34,8 +34,8 @@ SMROS is normally started with:
 qemu-system-aarch64 \
   -M virt,gic-version=4,virtualization=on \
   -cpu cortex-a710 \
-  -smp 4 \
-  -m 512M \
+  -smp 64 \
+  -m 2G \
   -nographic \
   -kernel kernel8.img \
   -drive file=smros-fxfs.img,if=none,format=raw,id=fxfs,cache=writethrough \
@@ -205,9 +205,9 @@ surfaces, Gemma, Hermes, and the QML cluster service.
 The current SMP code supports two layers:
 
 - PSCI and secondary CPU entry scaffolding in `src/kernel_lowlevel/smp.rs`
-- a logical 4-CPU scheduling model used by `boot_all_cpus()`
+- a logical 64-CPU scheduling model used by `boot_all_cpus()`
 
-In the current boot path, `boot_all_cpus()` marks all four logical CPUs online for scheduling and status reporting. That is enough for the current demo flow.
+In the current boot path, `boot_all_cpus()` marks all 64 logical CPUs online for scheduling and status reporting. That is enough for the current demo flow.
 
 ## 9. Scheduler Handoff
 
