@@ -10,6 +10,7 @@ src/kernel_objects/
 ├── channel.rs
 ├── compat.rs
 ├── handle.rs
+├── hypervisor.rs
 ├── scheduler.rs
 ├── thread.rs
 ├── types.rs
@@ -26,6 +27,7 @@ src/kernel_objects/
 | `scheduler.rs` | global scheduler, idle thread, context-switch entry points, tick accounting | live scheduling path used to start the shell |
 | `types.rs` | shared handle/object enums, rights, VM flags, Zircon-style errors, page helpers | shared definitions for the syscall and object layers |
 | `handle.rs` | fixed-size handle table and handle duplication/removal helpers | currently a simple in-kernel table, not a full per-process capability system |
+| `hypervisor.rs` | modeled hypervisor object and VM lifecycle/resource metadata | backs shell `vm` commands with guest/VCPU handles, fixed memory, CPU slice, restart, kill, and monitoring state |
 | `compat.rs` | lightweight compatibility objects with handle lifetime, peer links, signals, properties, and byte queues | backs Zircon object interfaces that do not yet have full subsystems |
 | `vmo.rs` | VMO constructors and operations | backing object model for memory syscalls |
 | `vmar.rs` | VMAR bookkeeping and mapping/protection helpers | bookkeeping layer for Zircon-style VM regions |
@@ -95,7 +97,7 @@ This is one of the most active modules in the current kernel: the shell reaches 
 
 These definitions are used both by the object layer and by `src/syscall/syscall.rs`.
 
-`ObjectType` now includes the sample Zircon object families (`EventPair`, `Fifo`, `Stream`, `DebugLog`, `Clock`, `Job`, `SuspendToken`, `Exception`, `Iommu`, `Bti`, `Pmt`, `PciDevice`, `Guest`, `Vcpu`, `Profile`, `Pager`, framebuffer/trace objects) and the Linux object families needed by the sample tree (`LinuxFile`, `LinuxDir`, `LinuxPipe`, TCP/UDP/raw/netlink sockets, `EventFd`, `SignalFd`, `TimerFd`, `Inotify`, `MemFd`, `PidFd`, `Futex`, Linux process/thread/signal/event/device categories, IPC/semaphore/shared-memory/message-queue categories).
+`ObjectType` now includes the sample Zircon object families (`EventPair`, `Fifo`, `Stream`, `DebugLog`, `Clock`, `Job`, `SuspendToken`, `Exception`, `Iommu`, `Bti`, `Pmt`, `PciDevice`, `Guest`, `Vcpu`, `Profile`, `Pager`, framebuffer/trace objects), the modeled `Hypervisor` object, and the Linux object families needed by the sample tree (`LinuxFile`, `LinuxDir`, `LinuxPipe`, TCP/UDP/raw/netlink sockets, `EventFd`, `SignalFd`, `TimerFd`, `Inotify`, `MemFd`, `PidFd`, `Futex`, Linux process/thread/signal/event/device categories, IPC/semaphore/shared-memory/message-queue categories).
 
 `Rights` follows the Zircon handle-right bit layout, including policy, destroy, inspect, task-management, VMAR child-operation, VMO resize, and VMO-management bits. The syscall model keeps object identity separate from handle rights for memory/task objects. Duplication is a capability operation that requires `Duplicate` and a valid subset or `RIGHT_SAME_RIGHTS`; replacement consumes the source handle and only requires the requested rights to be valid and non-escalating.
 

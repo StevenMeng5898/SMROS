@@ -9,6 +9,7 @@ include!("../../../src/kernel_objects/port_logic_shared.rs");
 include!("../../../src/kernel_objects/socket_logic_shared.rs");
 include!("../../../src/kernel_objects/log_logic_shared.rs");
 include!("../../../src/kernel_objects/scheduler_logic_shared.rs");
+include!("../../../src/kernel_objects/hypervisor_logic_shared.rs");
 
 pub const PAGE_SIZE: usize = 4096;
 pub const MAX_HANDLES_PER_PROCESS: usize = 1024;
@@ -176,6 +177,10 @@ pub const SCHED_POLICY_EDF: usize = 1;
 pub const SCHED_POLICY_CREDIT: usize = 2;
 pub const SCHED_DEFAULT_CREDIT: i32 = 100;
 pub const SCHED_MAX_CREDIT_WEIGHT: u32 = (i32::MAX as u32) / (SCHED_DEFAULT_CREDIT as u32);
+pub const HYPERVISOR_STATE_RUNNING: u8 = 1;
+pub const HYPERVISOR_STATE_STOPPED: u8 = 2;
+pub const HYPERVISOR_STATE_CRASHED: u8 = 3;
+pub const HYPERVISOR_VM_NAME_MAX: usize = 32;
 
 #[derive(Copy, Clone)]
 struct HandleEntryModel {
@@ -425,6 +430,112 @@ spec fn sched_should_preempt_policy_spec(
         time_slice == 0 || credit <= 0
     } else {
         false
+    }
+}
+
+spec fn hypervisor_name_len_valid_spec(len: int, max_len: int) -> bool {
+    len != 0 && len <= max_len
+}
+
+spec fn hypervisor_name_byte_valid_spec(byte: int) -> bool {
+    (97 <= byte && byte <= 122)
+        || (65 <= byte && byte <= 90)
+        || (48 <= byte && byte <= 57)
+        || byte == 95
+        || byte == 45
+        || byte == 46
+}
+
+spec fn hypervisor_uptime_ticks_spec(
+    state: int,
+    running_state: int,
+    start_tick: int,
+    last_event_tick: int,
+    now_tick: int,
+) -> int {
+    let end_tick = if state == running_state { now_tick } else { last_event_tick };
+    if end_tick >= start_tick {
+        end_tick - start_tick
+    } else {
+        0
+    }
+}
+
+spec fn hypervisor_cpu_usage_percent_spec(
+    uptime: int,
+    cpu_time_slice_us: int,
+    realtime_priority: int,
+) -> int {
+    if uptime == 0 {
+        0
+    } else {
+        let quota = if cpu_time_slice_us < 10000 { cpu_time_slice_us } else { 10000 };
+        let priority_boost = if realtime_priority < 99 { realtime_priority } else { 99 };
+        let factor = if 100 + priority_boost > u64::MAX as int {
+            u64::MAX as int
+        } else {
+            100 + priority_boost
+        };
+        let scaled = if quota * factor > u64::MAX as int {
+            u64::MAX as int
+        } else {
+            quota * factor / 10000
+        };
+        if scaled < 100 { scaled } else { 100 }
+    }
+}
+
+spec fn hypervisor_state_count_delta_spec(
+    state: int,
+    running_state: int,
+    stopped_state: int,
+    crashed_state: int,
+) -> (int, int, int) {
+    if state == running_state {
+        (1, 0, 0)
+    } else if state == stopped_state {
+        (0, 1, 0)
+    } else if state == crashed_state {
+        (0, 0, 1)
+    } else {
+        (0, 0, 0)
+    }
+}
+
+spec fn hypervisor_crash_transition_spec(
+    restart_on_crash: bool,
+    restart_count: int,
+    restart_limit: int,
+    start_tick: int,
+    tick: int,
+    running_state: int,
+    crashed_state: int,
+) -> (int, int, int, bool) {
+    if restart_on_crash && restart_count < restart_limit {
+        (
+            running_state,
+            if restart_count < u32::MAX as int {
+                restart_count + 1
+            } else {
+                u32::MAX as int
+            },
+            tick,
+            true,
+        )
+    } else {
+        (crashed_state, restart_count, start_tick, false)
+    }
+}
+
+spec fn hypervisor_kill_transition_spec(tick: int, stopped_state: int) -> (int, int, bool) {
+    (stopped_state, tick, true)
+}
+
+spec fn hypervisor_saturating_inc_u32_spec(value: int) -> int {
+    if value < u32::MAX as int {
+        value + 1
+    } else {
+        u32::MAX as int
     }
 }
 
@@ -1770,6 +1881,190 @@ fn sched_should_preempt_policy(
     )
 }
 
+fn hypervisor_name_len_valid(len: usize, max_len: usize) -> (out: bool)
+    ensures
+        out == hypervisor_name_len_valid_spec(len as int, max_len as int),
+        out ==> len > 0,
+        out ==> len <= max_len,
+{
+    smros_hypervisor_name_len_valid_body!(len, max_len)
+}
+
+fn hypervisor_name_byte_valid(byte: u8) -> (out: bool)
+    ensures
+        out == hypervisor_name_byte_valid_spec(byte as int),
+{
+    smros_hypervisor_name_byte_valid_body!(byte)
+}
+
+fn hypervisor_uptime_ticks(
+    state: u8,
+    start_tick: u64,
+    last_event_tick: u64,
+    now_tick: u64,
+) -> (out: u64)
+    ensures
+        out as int == hypervisor_uptime_ticks_spec(
+            state as int,
+            HYPERVISOR_STATE_RUNNING as int,
+            start_tick as int,
+            last_event_tick as int,
+            now_tick as int,
+        ),
+        state == HYPERVISOR_STATE_RUNNING && now_tick >= start_tick
+            ==> out == now_tick - start_tick,
+        state != HYPERVISOR_STATE_RUNNING && last_event_tick >= start_tick
+            ==> out == last_event_tick - start_tick,
+{
+    smros_hypervisor_uptime_ticks_body!(
+        state,
+        HYPERVISOR_STATE_RUNNING,
+        start_tick,
+        last_event_tick,
+        now_tick
+    )
+}
+
+fn hypervisor_cpu_usage_percent(
+    uptime: u64,
+    cpu_time_slice_us: u32,
+    realtime_priority: u32,
+) -> (out: u32)
+    requires
+        realtime_priority <= 99,
+    ensures
+        out as int == hypervisor_cpu_usage_percent_spec(
+            uptime as int,
+            cpu_time_slice_us as int,
+            realtime_priority as int,
+        ),
+        out <= 100,
+        uptime == 0 ==> out == 0,
+{
+    smros_hypervisor_cpu_usage_percent_body!(uptime, cpu_time_slice_us, realtime_priority)
+}
+
+fn hypervisor_state_count_delta(state: u8) -> (out: (usize, usize, usize))
+    ensures
+        out.0 as int + out.1 as int + out.2 as int <= 1,
+        out.0 as int == hypervisor_state_count_delta_spec(
+            state as int,
+            HYPERVISOR_STATE_RUNNING as int,
+            HYPERVISOR_STATE_STOPPED as int,
+            HYPERVISOR_STATE_CRASHED as int,
+        ).0,
+        out.1 as int == hypervisor_state_count_delta_spec(
+            state as int,
+            HYPERVISOR_STATE_RUNNING as int,
+            HYPERVISOR_STATE_STOPPED as int,
+            HYPERVISOR_STATE_CRASHED as int,
+        ).1,
+        out.2 as int == hypervisor_state_count_delta_spec(
+            state as int,
+            HYPERVISOR_STATE_RUNNING as int,
+            HYPERVISOR_STATE_STOPPED as int,
+            HYPERVISOR_STATE_CRASHED as int,
+        ).2,
+{
+    smros_hypervisor_state_count_delta_body!(
+        state,
+        HYPERVISOR_STATE_RUNNING,
+        HYPERVISOR_STATE_STOPPED,
+        HYPERVISOR_STATE_CRASHED
+    )
+}
+
+fn hypervisor_crash_transition(
+    restart_on_crash: bool,
+    restart_count: u32,
+    restart_limit: u32,
+    start_tick: u64,
+    tick: u64,
+) -> (out: (u8, u32, u64, bool))
+    ensures
+        out.0 as int == hypervisor_crash_transition_spec(
+            restart_on_crash,
+            restart_count as int,
+            restart_limit as int,
+            start_tick as int,
+            tick as int,
+            HYPERVISOR_STATE_RUNNING as int,
+            HYPERVISOR_STATE_CRASHED as int,
+        ).0,
+        out.1 as int == hypervisor_crash_transition_spec(
+            restart_on_crash,
+            restart_count as int,
+            restart_limit as int,
+            start_tick as int,
+            tick as int,
+            HYPERVISOR_STATE_RUNNING as int,
+            HYPERVISOR_STATE_CRASHED as int,
+        ).1,
+        out.2 as int == hypervisor_crash_transition_spec(
+            restart_on_crash,
+            restart_count as int,
+            restart_limit as int,
+            start_tick as int,
+            tick as int,
+            HYPERVISOR_STATE_RUNNING as int,
+            HYPERVISOR_STATE_CRASHED as int,
+        ).2,
+        out.3 == hypervisor_crash_transition_spec(
+            restart_on_crash,
+            restart_count as int,
+            restart_limit as int,
+            start_tick as int,
+            tick as int,
+            HYPERVISOR_STATE_RUNNING as int,
+            HYPERVISOR_STATE_CRASHED as int,
+        ).3,
+        out.3 ==> out.0 == HYPERVISOR_STATE_RUNNING,
+        !out.3 ==> out.0 == HYPERVISOR_STATE_CRASHED,
+        out.3 ==> out.2 == tick,
+        !out.3 ==> out.2 == start_tick,
+{
+    smros_hypervisor_crash_transition_body!(
+        restart_on_crash,
+        restart_count,
+        restart_limit,
+        start_tick,
+        tick,
+        HYPERVISOR_STATE_RUNNING,
+        HYPERVISOR_STATE_CRASHED
+    )
+}
+
+fn hypervisor_kill_transition(tick: u64) -> (out: (u8, u64, bool))
+    ensures
+        out.0 as int == hypervisor_kill_transition_spec(
+            tick as int,
+            HYPERVISOR_STATE_STOPPED as int,
+        ).0,
+        out.1 as int == hypervisor_kill_transition_spec(
+            tick as int,
+            HYPERVISOR_STATE_STOPPED as int,
+        ).1,
+        out.2 == hypervisor_kill_transition_spec(
+            tick as int,
+            HYPERVISOR_STATE_STOPPED as int,
+        ).2,
+        out.0 == HYPERVISOR_STATE_STOPPED,
+        out.1 == tick,
+        out.2,
+{
+    smros_hypervisor_kill_transition_body!(tick, HYPERVISOR_STATE_STOPPED)
+}
+
+fn hypervisor_saturating_inc_u32(value: u32) -> (out: u32)
+    ensures
+        out as int == hypervisor_saturating_inc_u32_spec(value as int),
+        out >= value,
+        value < u32::MAX ==> out == value + 1,
+        value == u32::MAX ==> out == u32::MAX,
+{
+    smros_hypervisor_saturating_inc_u32_body!(value)
+}
+
 fn scheduler_pick_next_model(
     threads: &Vec<ThreadModel>,
     current: usize,
@@ -2670,6 +2965,69 @@ fn scheduler_preemption_policy_smoke() {
     assert(credit_empty);
     assert(credit_slice_done);
     assert(!credit_ready);
+}
+
+fn hypervisor_name_policy_smoke() {
+    let empty = hypervisor_name_len_valid(0, HYPERVISOR_VM_NAME_MAX);
+    let max_ok = hypervisor_name_len_valid(HYPERVISOR_VM_NAME_MAX, HYPERVISOR_VM_NAME_MAX);
+    let too_long = hypervisor_name_len_valid(
+        HYPERVISOR_VM_NAME_MAX + 1,
+        HYPERVISOR_VM_NAME_MAX,
+    );
+    let lower = hypervisor_name_byte_valid(97);
+    let upper = hypervisor_name_byte_valid(90);
+    let digit = hypervisor_name_byte_valid(57);
+    let dash = hypervisor_name_byte_valid(45);
+    let slash = hypervisor_name_byte_valid(47);
+
+    assert(!empty);
+    assert(max_ok);
+    assert(!too_long);
+    assert(lower);
+    assert(upper);
+    assert(digit);
+    assert(dash);
+    assert(!slash);
+}
+
+fn hypervisor_accounting_smoke() {
+    let running_uptime = hypervisor_uptime_ticks(HYPERVISOR_STATE_RUNNING, 10, 99, 40);
+    let stopped_uptime = hypervisor_uptime_ticks(HYPERVISOR_STATE_STOPPED, 10, 25, 40);
+    let backward_running = hypervisor_uptime_ticks(HYPERVISOR_STATE_RUNNING, 40, 99, 10);
+    let idle_cpu = hypervisor_cpu_usage_percent(0, 1000, 80);
+    let normal_cpu = hypervisor_cpu_usage_percent(50, 1000, 80);
+    let capped_cpu = hypervisor_cpu_usage_percent(50, 10_000, 99);
+    let running_delta = hypervisor_state_count_delta(HYPERVISOR_STATE_RUNNING);
+    let stopped_delta = hypervisor_state_count_delta(HYPERVISOR_STATE_STOPPED);
+    let crashed_delta = hypervisor_state_count_delta(HYPERVISOR_STATE_CRASHED);
+    let unknown_delta = hypervisor_state_count_delta(0);
+
+    assert(running_uptime == 30);
+    assert(stopped_uptime == 15);
+    assert(backward_running == 0);
+    assert(idle_cpu == 0);
+    assert(normal_cpu == 18);
+    assert(capped_cpu == 100);
+    assert(running_delta == (1usize, 0usize, 0usize));
+    assert(stopped_delta == (0usize, 1usize, 0usize));
+    assert(crashed_delta == (0usize, 0usize, 1usize));
+    assert(unknown_delta == (0usize, 0usize, 0usize));
+}
+
+fn hypervisor_lifecycle_smoke() {
+    let restarted = hypervisor_crash_transition(true, 0, 3, 100, 200);
+    let restart_limit_hit = hypervisor_crash_transition(true, 3, 3, 100, 200);
+    let restart_disabled = hypervisor_crash_transition(false, 0, 3, 100, 200);
+    let killed = hypervisor_kill_transition(333);
+    let inc = hypervisor_saturating_inc_u32(7);
+    let inc_saturated = hypervisor_saturating_inc_u32(u32::MAX);
+
+    assert(restarted == (HYPERVISOR_STATE_RUNNING, 1u32, 200u64, true));
+    assert(restart_limit_hit == (HYPERVISOR_STATE_CRASHED, 3u32, 100u64, false));
+    assert(restart_disabled == (HYPERVISOR_STATE_CRASHED, 0u32, 100u64, false));
+    assert(killed == (HYPERVISOR_STATE_STOPPED, 333u64, true));
+    assert(inc == 8);
+    assert(inc_saturated == u32::MAX);
 }
 
 proof fn kernel_object_mod_has_no_pure_runtime_obligation() {

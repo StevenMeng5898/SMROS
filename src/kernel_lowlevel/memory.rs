@@ -67,6 +67,8 @@ pub const PAGE_MASK: usize = !(PAGE_SIZE - 1);
 
 /// Maximum number of processes supported
 pub const MAX_PROCESSES: usize = 16;
+const MAX_DYNAMIC_PROCESS_NAMES: usize = 16;
+const DYNAMIC_PROCESS_NAME_LEN: usize = 32;
 
 /// Maximum number of pages per process
 pub const MAX_PAGES_PER_PROCESS: usize = 64;
@@ -605,6 +607,8 @@ static ALLOCATOR: AllocatorCell =
 pub struct ProcessManager {
     /// Process control blocks
     processes: [ProcessControlBlock; MAX_PROCESSES],
+    dynamic_names: [[u8; DYNAMIC_PROCESS_NAME_LEN]; MAX_DYNAMIC_PROCESS_NAMES],
+    dynamic_name_used: [bool; MAX_DYNAMIC_PROCESS_NAMES],
     /// Number of active processes
     active_processes: usize,
     /// Next PID to allocate
@@ -616,6 +620,8 @@ impl ProcessManager {
     pub const fn new() -> Self {
         ProcessManager {
             processes: [const { ProcessControlBlock::new() }; MAX_PROCESSES],
+            dynamic_names: [[0; DYNAMIC_PROCESS_NAME_LEN]; MAX_DYNAMIC_PROCESS_NAMES],
+            dynamic_name_used: [false; MAX_DYNAMIC_PROCESS_NAMES],
             active_processes: 0,
             next_pid: AtomicU64::new(1),
         }
@@ -639,6 +645,9 @@ impl ProcessManager {
             if self.processes[i].state == ProcessState::Empty
                 || self.processes[i].state == ProcessState::Terminated
             {
+                if self.processes[i].state == ProcessState::Terminated {
+                    self.release_dynamic_name(self.processes[i].name);
+                }
                 let pid = self.next_pid.load(Ordering::Relaxed) as usize;
                 let parent_pid = 1; // Init is parent
 
@@ -651,6 +660,24 @@ impl ProcessManager {
         }
 
         None // No available slots
+    }
+
+    /// Create a VM process with a stable dynamic name visible to ps/top.
+    pub fn create_vm_process(&mut self, vm_name: &str) -> Option<usize> {
+        let name = self.alloc_vm_process_name(vm_name)?;
+        match self.create_process(name) {
+            Some(pid) => {
+                if let Some(pcb) = self.get_process_by_pid_mut(pid) {
+                    pcb.state = ProcessState::Running;
+                    pcb.thread_count = 1;
+                }
+                Some(pid)
+            }
+            None => {
+                self.release_dynamic_name(name);
+                None
+            }
+        }
     }
 
     /// Get a process by index
@@ -713,6 +740,59 @@ impl ProcessManager {
             true
         } else {
             false
+        }
+    }
+
+    fn alloc_vm_process_name(&mut self, vm_name: &str) -> Option<&'static str> {
+        let slot = self.dynamic_name_used.iter().position(|used| !*used)?;
+        let out = &mut self.dynamic_names[slot];
+        out.fill(0);
+
+        let prefix = b"vm:";
+        out[..prefix.len()].copy_from_slice(prefix);
+        let max_name_len = DYNAMIC_PROCESS_NAME_LEN.saturating_sub(prefix.len() + 1);
+        let mut written = 0usize;
+        for byte in vm_name.bytes() {
+            if written >= max_name_len {
+                break;
+            }
+            out[prefix.len() + written] = if matches!(
+                byte,
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b'.'
+            ) {
+                byte
+            } else {
+                b'_'
+            };
+            written += 1;
+        }
+        if written == 0 {
+            return None;
+        }
+
+        self.dynamic_name_used[slot] = true;
+        let len = prefix.len() + written;
+        if core::str::from_utf8(&out[..len]).is_err() {
+            self.dynamic_name_used[slot] = false;
+            return None;
+        }
+        let ptr = out.as_ptr();
+        let name: &'static str = unsafe {
+            core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr, len))
+        };
+        Some(name)
+    }
+
+    fn release_dynamic_name(&mut self, name: &'static str) {
+        let ptr = name.as_ptr() as usize;
+        for index in 0..MAX_DYNAMIC_PROCESS_NAMES {
+            let start = self.dynamic_names[index].as_ptr() as usize;
+            let end = start + DYNAMIC_PROCESS_NAME_LEN;
+            if ptr >= start && ptr < end {
+                self.dynamic_name_used[index] = false;
+                self.dynamic_names[index].fill(0);
+                return;
+            }
         }
     }
 

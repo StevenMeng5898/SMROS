@@ -92,6 +92,7 @@ pub enum ObjectType {
     LinuxEventBus = 51,
     LinuxDevice = 52,
     LinuxDir = 53,
+    Hypervisor = 54,
 }
 
 /// Handle rights bitmask
@@ -300,6 +301,7 @@ pub fn default_rights_for_object(obj_type: ObjectType) -> u32 {
         ObjectType::Stream => DEFAULT_STREAM_RIGHTS,
         ObjectType::DebugLog => DEFAULT_SOCKET_RIGHTS,
         ObjectType::Clock => DEFAULT_CLOCK_RIGHTS,
+        ObjectType::Hypervisor => DEFAULT_RESOURCE_RIGHTS | RIGHTS_TASK | RIGHTS_MEMORY,
         ObjectType::SuspendToken => DEFAULT_SUSPEND_TOKEN_RIGHTS,
         ObjectType::Exception => DEFAULT_EXCEPTION_RIGHTS,
         ObjectType::Iommu

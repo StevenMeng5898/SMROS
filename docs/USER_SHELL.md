@@ -72,6 +72,7 @@ The shell currently registers these commands:
 - `uptime`
 - `dhrystone`
 - `sched`
+- `vm`
 - `kill`
 - `testsc`
 - `fuzzsc`
@@ -135,6 +136,42 @@ The command reports:
 Current SMP boot marks 64 logical CPUs online for scheduling/status reporting,
 so the aggregate score is a logical 64-core projection from one measured
 Dhrystone worker. It is not yet a true parallel 64-worker benchmark.
+
+### `vm`
+
+`vm -c <config.xml>` starts or refreshes a modeled VM from an FxFS XML config.
+The parser recognizes `<name>`, `<cpu>`, `<memory>`, `<priority>` or
+`<realtime_priority>`, and `<restart>` tags, plus simple attributes such as
+`<vm name="plc-a">`, `<cpu time_slice_us="1000" priority="80">`,
+`<memory bytes="67108864">`, and `<restart policy="on-crash" limit="3">`.
+FxFS installs a boot-time sample at `/config/vm-demo.xml`:
+
+```xml
+<vm name="plc-demo">
+  <cpu time_slice_us="1000" priority="80"></cpu>
+  <memory bytes="67108864"></memory>
+  <restart policy="on-crash" limit="3"></restart>
+</vm>
+```
+
+Start it with:
+
+```text
+vm -c /config/vm-demo.xml
+```
+
+`vm -k <VM-name>` force-stops the named VM and closes its modeled guest/VCPU
+handles. This is a hard stop intended to keep a failing VM from consuming
+critical real-time scheduler budget.
+
+Each started VM also creates a process-manager entry named `vm:<VM-name>`, so
+`ps` and `top` show it alongside `init` and other user-space process records.
+Force-stopping the VM terminates that visible process entry.
+
+`vm -s` prints the hypervisor daemon monitor snapshot: VM states, fixed
+memory allocation, CPU time-slice budget, real-time priority, restart policy,
+fault-domain count, forced kill count, auto-restart count, and the modeled
+monitoring latency target of less than 100 microseconds.
 
 ### `fuzzsc`
 

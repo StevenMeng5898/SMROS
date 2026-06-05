@@ -23,6 +23,7 @@ pub(crate) mod fifo_logic;
 pub mod futex;
 pub(crate) mod futex_logic;
 pub mod handle;
+pub mod hypervisor;
 pub mod job;
 pub mod log;
 pub(crate) mod object_logic;
@@ -79,5 +80,6 @@ pub fn kernel_object_manager() -> &'static mut KernelObjectManager {
 /// Initialize kernel objects
 pub fn init() {
     right::init_boot_right_config().expect("kernel object right config failed");
+    hypervisor::init();
     log::info("init", "kernel object subsystem initialized");
 }

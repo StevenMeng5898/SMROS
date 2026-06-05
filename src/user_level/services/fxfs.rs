@@ -600,6 +600,10 @@ impl FxfsState {
             self.write_file("/pkg/bin/fxfs", b"smros fxfs service")?;
             self.write_file("/pkg/bin/user-init", b"smros user init")?;
             self.write_file("/config/build-info/product", b"SMROS-Fuchsia-minimal")?;
+            self.write_file(
+                "/config/vm-demo.xml",
+                b"<vm name=\"plc-demo\"><cpu time_slice_us=\"1000\" priority=\"80\"></cpu><memory bytes=\"67108864\"></memory><restart policy=\"on-crash\" limit=\"3\"></restart></vm>",
+            )?;
             self.install_host_share_without_persist()?;
             self.host_share_installed = true;
             Ok(())

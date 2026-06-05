@@ -52,6 +52,7 @@ use crate::kernel_objects::compat;
 use crate::kernel_objects::fifo;
 use crate::kernel_objects::fifo_logic;
 use crate::kernel_objects::futex;
+use crate::kernel_objects::hypervisor;
 use crate::kernel_objects::job::JobRecord;
 use crate::kernel_objects::port;
 use crate::kernel_objects::process::{ProcessRecord, ThreadRecord};
@@ -1947,6 +1948,9 @@ fn handle_known_type(handle: u32) -> Option<ObjectType> {
     if socket::socket_table().contains(HandleValue(handle)) {
         return Some(ObjectType::Socket);
     }
+    if hypervisor::hypervisor().contains_handle(HandleValue(handle)) {
+        return Some(ObjectType::Hypervisor);
+    }
     compat::table().object_type(HandleValue(handle))
 }
 
@@ -1967,6 +1971,11 @@ fn handle_known_rights(handle: u32) -> Option<u32> {
     }
     if let Some(rights) = socket::socket_table().rights(HandleValue(handle)) {
         return Some(rights);
+    }
+    if hypervisor::hypervisor().contains_handle(HandleValue(handle)) {
+        return Some(crate::kernel_objects::default_rights_for_object(
+            ObjectType::Hypervisor,
+        ));
     }
     compat::table().rights(HandleValue(handle)).or(Some(
         crate::kernel_objects::default_rights_for_object(obj_type),

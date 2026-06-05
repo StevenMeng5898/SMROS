@@ -165,19 +165,88 @@ pub fn system_reset() -> ! {
     serial.init();
     serial.write_str("[PSCI] System reset requested\n");
 
-    unsafe {
-        core::arch::asm!(
-            "hvc #0",
-            in("w0") PSCI_0_2_FN_SYSTEM_RESET,
-            lateout("x0") _,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
+    let smc_result = psci_system_reset_smc();
+    serial.write_str("[PSCI] SMC reset returned: 0x");
+    serial.write_hex(smc_result as u64);
+    serial.write_str("; trying HVC\n");
+
+    let hvc_result = psci_system_reset_hvc();
+    serial.write_str("[PSCI] HVC reset returned: 0x");
+    serial.write_hex(hvc_result as u64);
+    serial.write_str("\n");
 
     serial.write_str("[PSCI] System reset returned; halting\n");
     loop {
         cortex_a::asm::wfe();
     }
+}
+
+fn psci_system_reset_hvc() -> i64 {
+    let mut x0 = PSCI_0_2_FN_SYSTEM_RESET as u64;
+    // SAFETY: PSCI SYSTEM_RESET is a firmware call. If the platform accepts HVC
+    // as its PSCI conduit this call does not return; otherwise x0 contains the
+    // PSCI error value and the caller can try the alternate conduit.
+    unsafe {
+        core::arch::asm!(
+            "dsb sy",
+            "isb",
+            "hvc #0",
+            inlateout("x0") x0,
+            lateout("x1") _,
+            lateout("x2") _,
+            lateout("x3") _,
+            lateout("x4") _,
+            lateout("x5") _,
+            lateout("x6") _,
+            lateout("x7") _,
+            lateout("x8") _,
+            lateout("x9") _,
+            lateout("x10") _,
+            lateout("x11") _,
+            lateout("x12") _,
+            lateout("x13") _,
+            lateout("x14") _,
+            lateout("x15") _,
+            lateout("x16") _,
+            lateout("x17") _,
+            options(nostack),
+        );
+    }
+    x0 as i64
+}
+
+fn psci_system_reset_smc() -> i64 {
+    let mut x0 = PSCI_0_2_FN_SYSTEM_RESET as u64;
+    // SAFETY: PSCI SYSTEM_RESET is a firmware call. If the platform accepts SMC
+    // as its PSCI conduit this call does not return; otherwise x0 contains the
+    // PSCI error value and the caller halts after reporting it.
+    unsafe {
+        core::arch::asm!(
+            "dsb sy",
+            "isb",
+            "smc #0",
+            inlateout("x0") x0,
+            lateout("x1") _,
+            lateout("x2") _,
+            lateout("x3") _,
+            lateout("x4") _,
+            lateout("x5") _,
+            lateout("x6") _,
+            lateout("x7") _,
+            lateout("x8") _,
+            lateout("x9") _,
+            lateout("x10") _,
+            lateout("x11") _,
+            lateout("x12") _,
+            lateout("x13") _,
+            lateout("x14") _,
+            lateout("x15") _,
+            lateout("x16") _,
+            lateout("x17") _,
+            options(nostack),
+        );
+    }
+    x0 as i64
 }
 
 /// Boot a secondary CPU

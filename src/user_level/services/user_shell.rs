@@ -273,6 +273,11 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_sched,
     },
     ShellCommand {
+        name: "vm",
+        description: "Create, stop, and monitor modeled VMs",
+        handler: cmd_vm,
+    },
+    ShellCommand {
         name: "loglevel",
         description: "Show or set kernel object log level",
         handler: cmd_loglevel,
@@ -9333,6 +9338,175 @@ fn cmd_sched(ctx: &mut ShellContext, args: &[&str]) {
 
     ctx.serial
         .write_str("usage: sched [status|set <rr|edf|credit>|test]\n");
+}
+
+/// Command: vm - Create, start, or force-stop modeled VMs
+fn cmd_vm(ctx: &mut ShellContext, args: &[&str]) {
+    if args.is_empty() {
+        print_vm_usage(ctx);
+        return;
+    }
+
+    match args[0] {
+        "-c" => {
+            if args.len() != 2 {
+                print_vm_usage(ctx);
+                return;
+            }
+            let Some(path) = normalize_fxfs_path(ctx.cwd.as_str(), args[1]) else {
+                ctx.serial.write_str("vm: invalid config path\n");
+                return;
+            };
+            let data = match read_fxfs_file_to_vec(path.as_str()) {
+                Ok(data) => data,
+                Err(err) => {
+                    ctx.serial.write_str("vm: config ");
+                    print_fxfs_error(ctx, err);
+                    ctx.serial.write_str("\n");
+                    return;
+                }
+            };
+            let Ok(config_xml) = core::str::from_utf8(data.as_slice()) else {
+                ctx.serial.write_str("vm: config is not UTF-8 XML\n");
+                return;
+            };
+            let tick = scheduler::scheduler().get_tick_count();
+            match crate::kernel_objects::hypervisor::hypervisor().start_vm(
+                path.as_str(),
+                config_xml,
+                tick,
+            ) {
+                Ok(vm) => {
+                    ctx.serial.write_str("vm: started ");
+                    ctx.serial.write_str(vm.name.as_str());
+                    ctx.serial.write_str(" pid=");
+                    print_usize(&mut ctx.serial, vm.process_pid);
+                    ctx.serial.write_str(" guest=0x");
+                    print_hex(&mut ctx.serial, vm.guest_handle as u64);
+                    ctx.serial.write_str(" vcpu=0x");
+                    print_hex(&mut ctx.serial, vm.vcpu_handle as u64);
+                    ctx.serial.write_str("\n  cpu_slice_us=");
+                    print_number(&mut ctx.serial, vm.cpu_time_slice_us);
+                    ctx.serial.write_str(" rt_priority=");
+                    print_number(&mut ctx.serial, vm.realtime_priority as u32);
+                    ctx.serial.write_str(" memory_kb=");
+                    print_usize(&mut ctx.serial, vm.memory_bytes / 1024);
+                    ctx.serial.write_str(" swap=disabled restart=");
+                    ctx.serial.write_str(if vm.restart_on_crash {
+                        "on-crash"
+                    } else {
+                        "never"
+                    });
+                    ctx.serial.write_str("\n");
+                }
+                Err(err) => {
+                    ctx.serial.write_str("vm: config ");
+                    ctx.serial.write_str(err.as_str());
+                    ctx.serial.write_str("\n");
+                }
+            }
+        }
+        "-k" => {
+            if args.len() != 2 {
+                print_vm_usage(ctx);
+                return;
+            }
+            let name = args[1];
+            let tick = scheduler::scheduler().get_tick_count();
+            match crate::kernel_objects::hypervisor::hypervisor().kill_vm(name, tick) {
+                Ok(vm) => {
+                    ctx.serial.write_str("vm: force-stopped ");
+                    ctx.serial.write_str(vm.name.as_str());
+                    ctx.serial
+                        .write_str(" without rescheduling critical realtime tasks\n");
+                }
+                Err(_) => {
+                    ctx.serial.write_str("vm: not found: ");
+                    ctx.serial.write_str(name);
+                    ctx.serial.write_str("\n");
+                }
+            }
+        }
+        "-s" => {
+            if args.len() != 1 {
+                print_vm_usage(ctx);
+                return;
+            }
+            print_vm_status(ctx);
+        }
+        _ => print_vm_usage(ctx),
+    }
+}
+
+fn print_vm_usage(ctx: &mut ShellContext) {
+    ctx.serial
+        .write_str("usage: vm -c <config.xml> | vm -k <VM-name> | vm -s\n");
+}
+
+fn print_vm_status(ctx: &mut ShellContext) {
+    let tick = scheduler::scheduler().get_tick_count();
+    let status = crate::kernel_objects::hypervisor::hypervisor().status(tick);
+
+    ctx.serial.write_str("\nHypervisor daemon status\n");
+    ctx.serial.write_str("  VMs: ");
+    print_usize(&mut ctx.serial, status.stats.vm_count);
+    ctx.serial.write_str(" running=");
+    print_usize(&mut ctx.serial, status.stats.running_vms);
+    ctx.serial.write_str(" stopped=");
+    print_usize(&mut ctx.serial, status.stats.stopped_vms);
+    ctx.serial.write_str(" crashed=");
+    print_usize(&mut ctx.serial, status.stats.crashed_vms);
+    ctx.serial.write_str("\n  total_memory_kb=");
+    print_usize(&mut ctx.serial, status.stats.total_memory_bytes / 1024);
+    ctx.serial.write_str(" cpu_slice_us=");
+    print_number(&mut ctx.serial, status.stats.total_cpu_time_slice_us);
+    ctx.serial.write_str(" monitor_latency_us<");
+    print_number(&mut ctx.serial, status.stats.monitor_latency_us + 1);
+    ctx.serial.write_str("\n  fault_domains=");
+    print_usize(&mut ctx.serial, status.stats.fault_domains);
+    ctx.serial.write_str(" forced_kills=");
+    print_number(&mut ctx.serial, status.stats.forced_kills);
+    ctx.serial.write_str(" auto_restarts=");
+    print_number(&mut ctx.serial, status.stats.auto_restarts);
+    ctx.serial.write_str("\n");
+
+    if status.vms.is_empty() {
+        ctx.serial.write_str("  no VMs\n");
+        return;
+    }
+
+    ctx.serial.write_str(
+        "  Name              PID  State    CPU%  Slice(us)  RT  Mem(KB)  Restart  Uptime(ticks)\n",
+    );
+    for vm in &status.vms {
+        ctx.serial.write_str("  ");
+        ctx.serial.write_str(vm.name.as_str());
+        for _ in 0..(18usize.saturating_sub(vm.name.len())) {
+            ctx.serial.write_byte(b' ');
+        }
+        print_padded_number(&mut ctx.serial, vm.process_pid as u32, 3);
+        ctx.serial.write_str("  ");
+        ctx.serial.write_str(vm.state.as_str());
+        for _ in 0..(9usize.saturating_sub(vm.state.as_str().len())) {
+            ctx.serial.write_byte(b' ');
+        }
+        print_padded_number(&mut ctx.serial, vm.cpu_usage_percent(status.tick), 3);
+        ctx.serial.write_str("   ");
+        print_padded_number(&mut ctx.serial, vm.cpu_time_slice_us, 9);
+        ctx.serial.write_str("  ");
+        print_padded_number(&mut ctx.serial, vm.realtime_priority as u32, 2);
+        ctx.serial.write_str("  ");
+        print_usize(&mut ctx.serial, vm.memory_bytes / 1024);
+        ctx.serial.write_str("     ");
+        ctx.serial.write_str(if vm.restart_on_crash {
+            "on-crash"
+        } else {
+            "never"
+        });
+        ctx.serial.write_str("  ");
+        print_u64(&mut ctx.serial, vm.uptime_ticks(status.tick));
+        ctx.serial.write_str("\n");
+    }
 }
 
 /// Command: kill - Terminate a process by PID
