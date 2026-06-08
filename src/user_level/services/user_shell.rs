@@ -7501,6 +7501,63 @@ fn print_net_error(ctx: &mut ShellContext, err: crate::user_level::net::NetError
     ctx.serial.write_str(label);
 }
 
+fn print_vm_host_error(ctx: &mut ShellContext, err: crate::user_level::vm_host::VmHostError) {
+    match err {
+        crate::user_level::vm_host::VmHostError::Connect(net_err) => {
+            ctx.serial.write_str("connect ");
+            print_net_error(ctx, net_err);
+        }
+        crate::user_level::vm_host::VmHostError::Write(net_err) => {
+            ctx.serial.write_str("write ");
+            print_net_error(ctx, net_err);
+        }
+        crate::user_level::vm_host::VmHostError::Read(net_err) => {
+            ctx.serial.write_str("read ");
+            print_net_error(ctx, net_err);
+        }
+        crate::user_level::vm_host::VmHostError::NoHostConfig => {
+            ctx.serial.write_str("no host config")
+        }
+        crate::user_level::vm_host::VmHostError::InvalidConfig => {
+            ctx.serial.write_str("invalid launch config")
+        }
+        crate::user_level::vm_host::VmHostError::RequestTooLarge => {
+            ctx.serial.write_str("request too large")
+        }
+        crate::user_level::vm_host::VmHostError::ResponseInvalid => {
+            ctx.serial.write_str("invalid launcher response")
+        }
+        crate::user_level::vm_host::VmHostError::LaunchDenied => {
+            ctx.serial.write_str("launcher denied request")
+        }
+    }
+}
+
+fn print_vm_host_hint(ctx: &mut ShellContext, err: crate::user_level::vm_host::VmHostError) {
+    match err {
+        crate::user_level::vm_host::VmHostError::Connect(_) => {
+            ctx.serial
+                .write_str("\n  host launcher unreachable; run: scripts/smros-vm-launcher.py\n");
+        }
+        crate::user_level::vm_host::VmHostError::Write(_)
+        | crate::user_level::vm_host::VmHostError::Read(_) => {
+            ctx.serial.write_str(
+                "\n  host launcher connection failed mid-request; restart scripts/smros-vm-launcher.py\n",
+            );
+        }
+        crate::user_level::vm_host::VmHostError::LaunchDenied => {
+            ctx.serial.write_str(
+                "\n  host launcher replied; check smros-vm-launcher.log or its terminal for missing kernel/initrd/disk paths\n",
+            );
+        }
+        crate::user_level::vm_host::VmHostError::ResponseInvalid => {
+            ctx.serial
+                .write_str("\n  host launcher response was malformed; check smros-vm-launcher.log\n");
+        }
+        _ => ctx.serial.write_str("\n"),
+    }
+}
+
 fn print_fxfs_entry(ctx: &mut ShellContext, entry: &crate::user_level::fxfs::FxfsDirEntry) {
     ctx.serial.write_str("  ");
     ctx.serial.write_str(entry.kind.as_str());
@@ -9376,7 +9433,28 @@ fn cmd_vm(ctx: &mut ShellContext, args: &[&str]) {
                 config_xml,
                 tick,
             ) {
-                Ok(vm) => {
+                Ok(mut vm) => {
+                    let host_launch_configured = vm.host.is_some();
+                    if host_launch_configured {
+                        match crate::user_level::vm_host::launch(&vm) {
+                            Ok(launch) => {
+                                vm.host_qemu_pid = launch.qemu_pid;
+                                let _ = crate::kernel_objects::hypervisor::hypervisor()
+                                    .set_host_qemu_pid(vm.name.as_str(), launch.qemu_pid);
+                            }
+                            Err(err) => {
+                                let _ = crate::kernel_objects::hypervisor::hypervisor()
+                                    .kill_vm(vm.name.as_str(), tick);
+                                ctx.serial.write_str("vm: host launch failed for ");
+                                ctx.serial.write_str(vm.name.as_str());
+                                ctx.serial.write_str(": ");
+                                print_vm_host_error(ctx, err);
+                                print_vm_host_hint(ctx, err);
+                                return;
+                            }
+                        }
+                    }
+
                     ctx.serial.write_str("vm: started ");
                     ctx.serial.write_str(vm.name.as_str());
                     ctx.serial.write_str(" pid=");
@@ -9398,6 +9476,14 @@ fn cmd_vm(ctx: &mut ShellContext, args: &[&str]) {
                         "never"
                     });
                     ctx.serial.write_str("\n");
+                    if host_launch_configured {
+                        ctx.serial.write_str("  host_qemu_pid=");
+                        print_number(&mut ctx.serial, vm.host_qemu_pid);
+                        ctx.serial.write_str(" window=requested\n");
+                    } else {
+                        ctx.serial
+                            .write_str("  host launch=not configured (no <linux kernel=...>)\n");
+                    }
                 }
                 Err(err) => {
                     ctx.serial.write_str("vm: config ");
@@ -9415,10 +9501,21 @@ fn cmd_vm(ctx: &mut ShellContext, args: &[&str]) {
             let tick = scheduler::scheduler().get_tick_count();
             match crate::kernel_objects::hypervisor::hypervisor().kill_vm(name, tick) {
                 Ok(vm) => {
+                    let host_stop = crate::user_level::vm_host::stop(&vm);
                     ctx.serial.write_str("vm: force-stopped ");
                     ctx.serial.write_str(vm.name.as_str());
                     ctx.serial
                         .write_str(" without rescheduling critical realtime tasks\n");
+                    if vm.host.is_some() {
+                        match host_stop {
+                            Ok(()) => ctx.serial.write_str("  host qemu stop requested\n"),
+                            Err(err) => {
+                                ctx.serial.write_str("  host qemu stop failed: ");
+                                print_vm_host_error(ctx, err);
+                                ctx.serial.write_str("\n");
+                            }
+                        }
+                    }
                 }
                 Err(_) => {
                     ctx.serial.write_str("vm: not found: ");
@@ -9476,7 +9573,7 @@ fn print_vm_status(ctx: &mut ShellContext) {
     }
 
     ctx.serial.write_str(
-        "  Name              PID  State    CPU%  Slice(us)  RT  Mem(KB)  Restart  Uptime(ticks)\n",
+        "  Name              PID  HostPID  State    CPU%  Slice(us)  RT  Mem(KB)  Restart  Uptime(ticks)\n",
     );
     for vm in &status.vms {
         ctx.serial.write_str("  ");
@@ -9485,6 +9582,8 @@ fn print_vm_status(ctx: &mut ShellContext) {
             ctx.serial.write_byte(b' ');
         }
         print_padded_number(&mut ctx.serial, vm.process_pid as u32, 3);
+        ctx.serial.write_str("  ");
+        print_padded_number(&mut ctx.serial, vm.host_qemu_pid, 7);
         ctx.serial.write_str("  ");
         ctx.serial.write_str(vm.state.as_str());
         for _ in 0..(9usize.saturating_sub(vm.state.as_str().len())) {

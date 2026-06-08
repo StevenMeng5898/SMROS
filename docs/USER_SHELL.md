@@ -144,6 +144,22 @@ The parser recognizes `<name>`, `<cpu>`, `<memory>`, `<priority>` or
 `<realtime_priority>`, and `<restart>` tags, plus simple attributes such as
 `<vm name="plc-a">`, `<cpu time_slice_us="1000" priority="80">`,
 `<memory bytes="67108864">`, and `<restart policy="on-crash" limit="3">`.
+If the config also includes a `<linux kernel="...">` tag, `vm -c` asks the
+host-side launcher daemon to open a separate QEMU window and boot that Linux
+kernel. `make run`, `make debug`, `make gdb`, `scripts/run.sh`, and
+`scripts/run-simple.sh` start the host daemon automatically. For a manual QEMU
+boot, start it yourself first:
+
+```text
+scripts/smros-vm-launcher.py
+```
+
+The daemon listens on TCP port `7070` and resolves relative kernel/initrd/disk
+paths from the repository root. The guest reaches it through QEMU user
+networking at `10.0.2.2`. The autostart wrapper writes
+`smros-vm-launcher.log`; if `vm -c` reports `launcher denied request`, check
+that log for the missing kernel, initrd, or disk path.
+
 FxFS installs a boot-time sample at `/config/vm-demo.xml`:
 
 ```xml
@@ -151,6 +167,12 @@ FxFS installs a boot-time sample at `/config/vm-demo.xml`:
   <cpu time_slice_us="1000" priority="80"></cpu>
   <memory bytes="67108864"></memory>
   <restart policy="on-crash" limit="3"></restart>
+  <linux kernel="host_shared/linux/Image"
+         initrd="host_shared/linux/initrd.img"
+         append="console=ttyAMA0 root=/dev/ram0 rw rdinit=/init"></linux>
+  <qemu machine="virt" cpu="cortex-a57" smp="1"
+        memory="512M" display="gtk" serial="vc"></qemu>
+  <launcher port="7070"></launcher>
 </vm>
 ```
 
@@ -162,7 +184,8 @@ vm -c /config/vm-demo.xml
 
 `vm -k <VM-name>` force-stops the named VM and closes its modeled guest/VCPU
 handles. This is a hard stop intended to keep a failing VM from consuming
-critical real-time scheduler budget.
+critical real-time scheduler budget. If the VM was launched through the host
+daemon, `vm -k` also asks that daemon to terminate the nested QEMU process.
 
 Each started VM also creates a process-manager entry named `vm:<VM-name>`, so
 `ps` and `top` show it alongside `init` and other user-space process records.
@@ -171,7 +194,9 @@ Force-stopping the VM terminates that visible process entry.
 `vm -s` prints the hypervisor daemon monitor snapshot: VM states, fixed
 memory allocation, CPU time-slice budget, real-time priority, restart policy,
 fault-domain count, forced kill count, auto-restart count, and the modeled
-monitoring latency target of less than 100 microseconds.
+monitoring latency target of less than 100 microseconds. The table includes
+the SMROS process PID and the host QEMU PID when a real nested QEMU launch is
+active.
 
 ### `fuzzsc`
 

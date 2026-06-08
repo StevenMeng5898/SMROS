@@ -15,3 +15,4 @@ pub mod run_elf;
 pub mod svc;
 pub(crate) mod user_logic;
 pub mod user_shell;
+pub mod vm_host;

@@ -1,5 +1,8 @@
 /target/
 /kernel8.img
 /smros-fxfs.img
+/qemu.log
+/smros-vm-launcher.log
+/smros-vm-launcher.pid
 /.tools/
 /verification/*/target/

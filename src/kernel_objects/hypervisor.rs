@@ -47,6 +47,24 @@ pub struct VmConfig {
     pub memory_bytes: usize,
     pub restart_on_crash: bool,
     pub restart_limit: u32,
+    pub host: Option<VmHostConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VmHostConfig {
+    pub kernel_path: String,
+    pub initrd_path: Option<String>,
+    pub dtb_path: Option<String>,
+    pub disk_path: Option<String>,
+    pub disk_format: String,
+    pub append: String,
+    pub qemu_machine: String,
+    pub qemu_cpu: String,
+    pub qemu_smp: u32,
+    pub qemu_memory: String,
+    pub qemu_display: String,
+    pub qemu_serial: String,
+    pub launcher_port: u16,
 }
 
 impl VmConfig {
@@ -58,6 +76,7 @@ impl VmConfig {
             memory_bytes: DEFAULT_MEMORY_BYTES,
             restart_on_crash: false,
             restart_limit: DEFAULT_RESTART_LIMIT,
+            host: None,
         }
     }
 }
@@ -82,6 +101,8 @@ pub struct VmRecord {
     pub last_event_tick: u64,
     pub forced_kill: bool,
     pub monitor_latency_us: u32,
+    pub host: Option<VmHostConfig>,
+    pub host_qemu_pid: u32,
 }
 
 impl VmRecord {
@@ -114,6 +135,8 @@ impl VmRecord {
             last_event_tick: tick,
             forced_kill: false,
             monitor_latency_us: DEFAULT_MONITOR_LATENCY_US,
+            host: config.host,
+            host_qemu_pid: 0,
         }
     }
 
@@ -242,6 +265,8 @@ impl HypervisorObject {
             existing.memory_bytes = config.memory_bytes;
             existing.restart_on_crash = config.restart_on_crash;
             existing.restart_limit = config.restart_limit;
+            existing.host = config.host;
+            existing.host_qemu_pid = 0;
             existing.restart_count = 0;
             existing.guest_handle = guest_handle;
             existing.vmar_handle = vmar_handle;
@@ -298,6 +323,14 @@ impl HypervisorObject {
 
         close_vm_resources(&out);
         Ok(out)
+    }
+
+    pub fn set_host_qemu_pid(&mut self, name: &str, pid: u32) -> ZxResult<VmRecord> {
+        let Some(record) = self.vm_by_name_mut(name) else {
+            return Err(ZxError::ErrNotFound);
+        };
+        record.host_qemu_pid = pid;
+        Ok(record.clone())
     }
 
     pub fn record_crash(&mut self, name: &str, tick: u64) -> ZxResult<VmRecord> {
@@ -478,8 +511,113 @@ pub fn parse_vm_config(config_xml: &str) -> Result<VmConfig, HypervisorConfigErr
         config.restart_limit =
             parse_u32_with_units(limit.as_str()).ok_or(HypervisorConfigError::InvalidRestart)?;
     }
+    config.host = parse_host_config(config_xml)?;
 
     Ok(config)
+}
+
+fn parse_host_config(config_xml: &str) -> Result<Option<VmHostConfig>, HypervisorConfigError> {
+    let Some(kernel_path) = attribute_value(config_xml, "linux", "kernel")
+        .or_else(|| tag_value_non_empty(config_xml, "kernel"))
+    else {
+        return Ok(None);
+    };
+    if !host_value_valid(kernel_path.as_str()) {
+        return Err(HypervisorConfigError::InvalidRestart);
+    }
+
+    let initrd_path = optional_host_value(attribute_value(config_xml, "linux", "initrd")
+        .or_else(|| tag_value_non_empty(config_xml, "initrd")))?;
+    let dtb_path = optional_host_value(attribute_value(config_xml, "linux", "dtb")
+        .or_else(|| tag_value_non_empty(config_xml, "dtb")))?;
+    let disk_path = optional_host_value(
+        attribute_value(config_xml, "linux", "disk")
+            .or_else(|| attribute_value(config_xml, "linux", "rootfs"))
+            .or_else(|| attribute_value(config_xml, "qemu", "disk"))
+            .or_else(|| tag_value_non_empty(config_xml, "disk")),
+    )?;
+    let append = host_value_or_default(
+        attribute_value(config_xml, "linux", "append")
+            .or_else(|| tag_value_non_empty(config_xml, "append")),
+        "console=ttyAMA0",
+    )?;
+    let qemu_machine =
+        host_value_or_default(attribute_value(config_xml, "qemu", "machine"), "virt")?;
+    let qemu_cpu =
+        host_value_or_default(attribute_value(config_xml, "qemu", "cpu"), "cortex-a57")?;
+    let qemu_memory =
+        host_value_or_default(attribute_value(config_xml, "qemu", "memory"), "512M")?;
+    let qemu_display =
+        host_value_or_default(attribute_value(config_xml, "qemu", "display"), "gtk")?;
+    let qemu_serial =
+        host_value_or_default(attribute_value(config_xml, "qemu", "serial"), "vc:1024x768")?;
+    let disk_format =
+        host_value_or_default(attribute_value(config_xml, "qemu", "disk_format"), "raw")?;
+    let qemu_smp = match attribute_value(config_xml, "qemu", "smp") {
+        Some(value) => parse_u32_with_units(value.as_str())
+            .filter(|value| *value > 0 && *value <= 64)
+            .ok_or(HypervisorConfigError::InvalidRestart)?,
+        None => 1,
+    };
+    let launcher_port = match attribute_value(config_xml, "launcher", "port") {
+        Some(value) => parse_u32_with_units(value.as_str())
+            .filter(|value| *value > 0 && *value <= u16::MAX as u32)
+            .ok_or(HypervisorConfigError::InvalidRestart)? as u16,
+        None => 7070,
+    };
+
+    Ok(Some(VmHostConfig {
+        kernel_path,
+        initrd_path,
+        dtb_path,
+        disk_path,
+        disk_format,
+        append,
+        qemu_machine,
+        qemu_cpu,
+        qemu_smp,
+        qemu_memory,
+        qemu_display,
+        qemu_serial,
+        launcher_port,
+    }))
+}
+
+fn optional_host_value(value: Option<String>) -> Result<Option<String>, HypervisorConfigError> {
+    match value {
+        Some(value) => {
+            if host_value_valid(value.as_str()) {
+                Ok(Some(value))
+            } else {
+                Err(HypervisorConfigError::InvalidRestart)
+            }
+        }
+        None => Ok(None),
+    }
+}
+
+fn host_value_or_default(
+    value: Option<String>,
+    default: &str,
+) -> Result<String, HypervisorConfigError> {
+    let value = value.unwrap_or_else(|| String::from(default));
+    if host_value_valid(value.as_str()) {
+        Ok(value)
+    } else {
+        Err(HypervisorConfigError::InvalidRestart)
+    }
+}
+
+fn host_value_valid(value: &str) -> bool {
+    if value.is_empty() || value.len() > 512 {
+        return false;
+    }
+    for byte in value.bytes() {
+        if byte == b'\n' || byte == b'\r' || byte == 0 {
+            return false;
+        }
+    }
+    true
 }
 
 fn vm_name_valid(name: &str) -> bool {

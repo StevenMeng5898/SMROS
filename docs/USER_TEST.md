@@ -103,6 +103,21 @@ Current successful shell runs include these group completion markers:
 
 The exact command output can also include compatibility-app and Docker/runc group messages depending on the current smoke path.
 
+## VM Launch Smoke Path
+
+The shell `vm -c <config.xml>` path creates a modeled SMROS VM process and,
+when the XML includes `<linux kernel="...">`, asks the host-side
+`scripts/smros-vm-launcher.py` daemon to open a separate QEMU process/window
+for that Linux kernel. This validates the guest-to-host launch bridge and the
+SMROS hypervisor monitor bookkeeping. It does not prove that SMROS itself is
+executing a hardware-virtualized guest kernel inside EL1.
+
+The normal Makefile and run-script QEMU paths auto-start the launcher through
+`scripts/start-smros-vm-launcher.sh`. If `vm -c` reports a timeout, the guest
+cannot reach TCP port `7070` on the host. If it reports `launcher denied
+request`, check `smros-vm-launcher.log` for the missing Linux kernel/initrd/disk
+path.
+
 ## Why The Logs Still Say `[EL0]`
 
 The prefixes in `run_user_test()` reflect the intended direction of the project, not the current execution mode.

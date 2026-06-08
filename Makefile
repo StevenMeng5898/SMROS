@@ -11,7 +11,7 @@ QEMU_CPU ?= cortex-a710
 QEMU_SMP ?= 64
 QEMU_MEMORY ?= 2G
 
-.PHONY: all build run clean clean-fxfs debug gdb qemu-icmp help verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
+.PHONY: all build run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
 
 all: build
 
@@ -29,8 +29,11 @@ $(FXFS_DISK):
 qemu-icmp:
 	@./scripts/setup-qemu-icmp.sh --ensure
 
+vm-launcher:
+	@./scripts/start-smros-vm-launcher.sh
+
 # Run with QEMU (simple mode)
-run: build $(FXFS_DISK) qemu-icmp
+run: build $(FXFS_DISK) qemu-icmp vm-launcher
 	@echo "Starting QEMU..."
 	@qemu-system-aarch64 \
 		-M $(QEMU_MACHINE) \
@@ -45,7 +48,7 @@ run: build $(FXFS_DISK) qemu-icmp
 		-device virtio-net-device,netdev=smrosnet
 
 # Run with QEMU (debug mode with logging)
-debug: build $(FXFS_DISK) qemu-icmp
+debug: build $(FXFS_DISK) qemu-icmp vm-launcher
 	@echo "Starting QEMU in debug mode..."
 	@qemu-system-aarch64 \
 		-M $(QEMU_MACHINE) \
@@ -63,7 +66,7 @@ debug: build $(FXFS_DISK) qemu-icmp
 		-D qemu.log
 
 # Run with GDB server
-gdb: build $(FXFS_DISK) qemu-icmp
+gdb: build $(FXFS_DISK) qemu-icmp vm-launcher
 	@echo "Starting QEMU with GDB server on port 1234..."
 	@qemu-system-aarch64 \
 		-M $(QEMU_MACHINE) \
@@ -131,6 +134,7 @@ help:
 	@echo "  debug     - Run with QEMU in debug mode"
 	@echo "  gdb       - Run with QEMU GDB server"
 	@echo "  qemu-icmp - Persist/apply Linux host ICMP setup for QEMU user networking"
+	@echo "  vm-launcher - Start the host daemon used by shell vm -c Linux launches"
 	@echo "  clean     - Clean build artifacts, keeping $(FXFS_DISK)"
 	@echo "  clean-fxfs - Remove the persistent FxFS disk image"
 	@echo "  verus-setup   - Install the pinned Verus toolchain locally"

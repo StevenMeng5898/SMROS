@@ -26,6 +26,7 @@ if [ ! -f "$FXFS_DISK" ]; then
 fi
 
 ./scripts/setup-qemu-icmp.sh --ensure
+./scripts/start-smros-vm-launcher.sh
 
 echo "Starting QEMU with SMROS ARM64 Kernel..."
 echo "========================================="

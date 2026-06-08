@@ -602,7 +602,7 @@ impl FxfsState {
             self.write_file("/config/build-info/product", b"SMROS-Fuchsia-minimal")?;
             self.write_file(
                 "/config/vm-demo.xml",
-                b"<vm name=\"plc-demo\"><cpu time_slice_us=\"1000\" priority=\"80\"></cpu><memory bytes=\"67108864\"></memory><restart policy=\"on-crash\" limit=\"3\"></restart></vm>",
+                b"<vm name=\"plc-demo\"><cpu time_slice_us=\"1000\" priority=\"80\"></cpu><memory bytes=\"67108864\"></memory><restart policy=\"on-crash\" limit=\"3\"></restart><linux kernel=\"host_shared/linux/Image\" initrd=\"host_shared/linux/initrd.img\" append=\"console=ttyAMA0 root=/dev/ram0 rw rdinit=/init\"></linux><qemu machine=\"virt\" cpu=\"cortex-a57\" smp=\"1\" memory=\"512M\" display=\"gtk\" serial=\"vc\"></qemu><launcher port=\"7070\"></launcher></vm>",
             )?;
             self.install_host_share_without_persist()?;
             self.host_share_installed = true;
