@@ -15,13 +15,26 @@ The current verified syscall slice is the standalone proof file at `verification
 Commands:
 
 - `make verus-setup`
+- `make verus-coverage`
 - `make verus-syscall`
 - `make verus-kernel-objects`
 - `make verus-kernel-lowlevel`
 - `make verus-user-level`
 - `make verus-services`
+- `make verus`
 
 The setup script downloads the pinned Verus release into `.tools/verus/current` and installs the Rust toolchain requested by that Verus release.
+
+`make verus-coverage` is the guardrail for the phrase "all src code". It checks
+that every `src/*.rs` and `src/*.S` file is classified in
+`docs/VERUS_COVERAGE.md`, that every `src/**/*_logic_shared.rs` file is included
+by a Verus harness, and that every shared macro is exercised by verification
+code except the explicitly documented unsupported `usize::is_power_of_two`
+case. The full kernel crate is not directly fed to Verus because it contains
+inline assembly, MMIO, interrupt state, global mutable kernel state, target-only
+`no_std` runtime code, and generated build output. Those files are covered by
+shared pure helper proofs, modeled state-machine proofs, host unit tests, build
+checks, and QEMU smoke tests according to the coverage map.
 
 Recent verification smoke coverage includes:
 

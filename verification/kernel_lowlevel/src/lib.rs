@@ -300,6 +300,18 @@ fn ll_checked_end(addr: usize, len: usize) -> (out: Option<usize>)
     smros_ll_checked_end_body!(addr, len)
 }
 
+fn ll_align_up(size: usize, align: usize) -> (out: Option<usize>)
+    requires
+        align > 0,
+{
+    smros_ll_align_up_body!(size, align)
+}
+
+fn ll_segment_size(page_count: usize, page_size: usize) -> (out: Option<usize>)
+{
+    smros_ll_segment_size_body!(page_count, page_size)
+}
+
 fn ll_segment_end(valid: bool, base: usize, page_count: usize, page_size: usize) -> (out: Option<usize>)
     requires
         valid ==> page_size > 0,

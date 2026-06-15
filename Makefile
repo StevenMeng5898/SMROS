@@ -14,7 +14,7 @@ QEMU_MEMORY ?= 2G
 SMOKE_QEMU_SMP ?= 4
 SMOKE_QEMU_MEMORY ?= 512M
 
-.PHONY: all build build-test host-fmt-check script-check ut st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
+.PHONY: all build build-test host-fmt-check script-check ut st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
 
 all: build
 
@@ -148,8 +148,12 @@ verus-user-level:
 verus-services:
 	@./scripts/verify-services-verus.sh
 
+# Audit src-to-Verus coverage classification and shared logic wiring
+verus-coverage:
+	@./scripts/audit-verus-coverage.sh
+
 # Verify all currently wired Verus proof harnesses
-verus: verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
+verus: verus-coverage verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
 
 # Full local confidence suite, including QEMU smoke and Verus
 verify: test st verus
@@ -181,6 +185,7 @@ help:
 	@echo "  verus-kernel-lowlevel - Verify the kernel low-level proof harness with Verus"
 	@echo "  verus-user-level - Verify main.rs and user-level proof harness with Verus"
 	@echo "  verus-services - Verify src/user_level/services proof slices with Verus"
+	@echo "  verus-coverage - Audit src-to-Verus coverage classification"
 	@echo "  verus     - Run all currently wired Verus proof harnesses"
 	@echo "  help      - Show this help message"
 	@echo ""

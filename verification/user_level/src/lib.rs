@@ -804,6 +804,17 @@ fn driver_mmio_slot_base(base: usize, slot: usize, stride: usize) -> (out: Optio
     }
 }
 
+fn driver_mmio_slot_base_direct(base: usize, slot: usize, stride: usize) -> (out: Option<usize>)
+    requires
+        stride > 0,
+        slot <= usize::MAX / stride,
+        base <= usize::MAX - (slot * stride),
+    ensures
+        out.is_some(),
+{
+    smros_driver_mmio_slot_base_body!(base, slot, stride)
+}
+
 fn driver_virtio_identity_valid(
     magic: u32,
     device_id: u32,
@@ -902,6 +913,14 @@ fn driver_block_capacity_bytes(blocks: usize, block_size: usize) -> (out: usize)
     }
 }
 
+fn driver_block_capacity_bytes_direct(blocks: usize, block_size: usize) -> (out: usize)
+    requires
+        block_size > 0,
+        blocks <= usize::MAX / block_size,
+{
+    smros_driver_block_capacity_bytes_body!(blocks, block_size)
+}
+
 fn driver_block_range_valid(
     offset: usize,
     len: usize,
@@ -923,6 +942,20 @@ fn driver_block_range_valid(
         },
         None => false,
     }
+}
+
+fn driver_block_range_valid_direct(
+    offset: usize,
+    len: usize,
+    blocks: usize,
+    block_size: usize,
+) -> (out: bool)
+    requires
+        block_size > 0,
+        blocks <= usize::MAX / block_size,
+        offset <= usize::MAX - len,
+{
+    smros_driver_block_range_valid_body!(offset, len, blocks, block_size)
 }
 
 fn driver_block_len_valid(len: usize, block_size: usize) -> (out: bool)
