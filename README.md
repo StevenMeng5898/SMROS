@@ -67,6 +67,27 @@ That produces:
 
 `build.rs` snapshots files under `host_shared/` into the kernel image. Rebuild after adding files there.
 
+## Test
+
+Fast local checks:
+
+```bash
+make test
+```
+
+This runs scoped formatting checks, shell script syntax checks, host-side unit
+tests for pure shared logic, and the production kernel build.
+
+Boot-level smoke test:
+
+```bash
+make st
+```
+
+This starts QEMU non-interactively and passes when the serial log reaches the
+`smros:/>` shell prompt. See `docs/TESTING.md` for the full test-layer map,
+including `make ut`, `make verus`, and `make verify`.
+
 ## Run
 
 ### Normal Boot

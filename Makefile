@@ -6,12 +6,15 @@ KERNEL = kernel8.img
 FXFS_DISK = smros-fxfs.img
 FXFS_DISK_SIZE = 128M
 BUILD_DIR = target/$(TARGET)/release
+SHELL_SCRIPTS = $(sort $(wildcard scripts/*.sh))
 QEMU_MACHINE ?= virt,gic-version=4,virtualization=on
 QEMU_CPU ?= cortex-a710
 QEMU_SMP ?= 64
 QEMU_MEMORY ?= 2G
+SMOKE_QEMU_SMP ?= 4
+SMOKE_QEMU_MEMORY ?= 512M
 
-.PHONY: all build run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
+.PHONY: all build build-test host-fmt-check script-check ut st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
 
 all: build
 
@@ -21,6 +24,28 @@ build:
 	@cargo build --release
 	@aarch64-linux-gnu-objcopy -O binary $(BUILD_DIR)/smros $(KERNEL)
 	@echo "Build complete: $(KERNEL)"
+
+# Production build check used by the local test suite
+build-test: build
+
+# Formatting check for the host-side unit-test crate
+host-fmt-check:
+	@cargo fmt --manifest-path tests/host/Cargo.toml --check
+
+# Shell syntax check for project scripts
+script-check:
+	@bash -n $(SHELL_SCRIPTS)
+
+# Host-side unit tests for pure helper logic
+ut:
+	@./scripts/run-host-unit-tests.sh
+
+# QEMU system smoke test: boot until the shell prompt appears
+st: build $(FXFS_DISK)
+	@QEMU_MACHINE='$(QEMU_MACHINE)' QEMU_CPU='$(QEMU_CPU)' QEMU_SMP='$(SMOKE_QEMU_SMP)' QEMU_MEMORY='$(SMOKE_QEMU_MEMORY)' ./scripts/smoke-qemu.sh
+
+# Fast local confidence suite; intentionally does not boot QEMU
+test: host-fmt-check script-check ut build-test
 
 $(FXFS_DISK):
 	@echo "Creating persistent FxFS disk image: $(FXFS_DISK)"
@@ -123,6 +148,12 @@ verus-user-level:
 verus-services:
 	@./scripts/verify-services-verus.sh
 
+# Verify all currently wired Verus proof harnesses
+verus: verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
+
+# Full local confidence suite, including QEMU smoke and Verus
+verify: test st verus
+
 # Show help
 help:
 	@echo "SMROS ARM64 Kernel Makefile"
@@ -130,6 +161,13 @@ help:
 	@echo "Targets:"
 	@echo "  all       - Build the kernel (default)"
 	@echo "  build     - Build the kernel"
+	@echo "  build-test - Build the production kernel image as a test"
+	@echo "  host-fmt-check - Check formatting for the host unit-test crate"
+	@echo "  script-check - Check shell script syntax"
+	@echo "  ut        - Run host-side unit tests for pure shared logic"
+	@echo "  st        - Build and boot QEMU until the smros:/> prompt appears"
+	@echo "  test      - Run fast local tests (format + scripts + ut + build-test)"
+	@echo "  verify    - Run test + st + all Verus proof harnesses"
 	@echo "  run       - Build and run with QEMU"
 	@echo "  debug     - Run with QEMU in debug mode"
 	@echo "  gdb       - Run with QEMU GDB server"
@@ -143,10 +181,14 @@ help:
 	@echo "  verus-kernel-lowlevel - Verify the kernel low-level proof harness with Verus"
 	@echo "  verus-user-level - Verify main.rs and user-level proof harness with Verus"
 	@echo "  verus-services - Verify src/user_level/services proof slices with Verus"
+	@echo "  verus     - Run all currently wired Verus proof harnesses"
 	@echo "  help      - Show this help message"
 	@echo ""
 	@echo "Usage:"
 	@echo "  make          - Build the kernel"
+	@echo "  make test     - Run unit tests and production build test"
+	@echo "  make st       - Run QEMU boot smoke test"
+	@echo "  make verify   - Run unit, build, QEMU smoke, and Verus checks"
 	@echo "  make run      - Build and run in QEMU"
 	@echo "  make debug    - Run with debug logging"
 	@echo "  make gdb      - Run with GDB server"
