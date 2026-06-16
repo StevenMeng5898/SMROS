@@ -9,6 +9,7 @@ pub mod gemma;
 pub mod hermes_agent;
 pub mod host_share;
 pub mod html_ui;
+pub mod lvgl;
 pub mod net;
 pub mod qml_cluster;
 pub mod run_elf;

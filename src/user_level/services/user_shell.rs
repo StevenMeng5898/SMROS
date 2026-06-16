@@ -248,13 +248,18 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_hermes,
     },
     ShellCommand {
+        name: "lvgl",
+        description: "Render the SMROS LVGL UI port",
+        handler: cmd_lvgl,
+    },
+    ShellCommand {
         name: "hui",
-        description: "Open the interactive Hermes UI",
+        description: "Open the LVGL-styled Hermes UI",
         handler: cmd_hermes_ui,
     },
     ShellCommand {
         name: "qmlcluster",
-        description: "Render the Qt/QML vehicle cluster port",
+        description: "Render the Qt/QML LVGL vehicle cluster port",
         handler: cmd_qml_cluster,
     },
     ShellCommand {
@@ -3849,6 +3854,10 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         return;
     }
 
+    if !run_lvgl_tests(ctx) {
+        return;
+    }
+
     if !run_qml_cluster_tests(ctx) {
         return;
     }
@@ -4926,6 +4935,39 @@ fn cmd_hermes_ui(ctx: &mut ShellContext, _args: &[&str]) {
     run_hermes_ui_entry(ctx);
 }
 
+/// Command: lvgl - Render the SMROS LVGL compatibility UI
+fn cmd_lvgl(ctx: &mut ShellContext, args: &[&str]) {
+    if args.is_empty() {
+        match crate::user_level::lvgl::render_demo() {
+            Ok(render) => print_lvgl_render(ctx, &render),
+            Err(err) => {
+                ctx.serial.write_str("lvgl: ");
+                ctx.serial.write_str(err.as_str());
+                ctx.serial.write_str("\n");
+            }
+        }
+        return;
+    }
+
+    match args[0] {
+        "info" | "status" => print_lvgl_info(ctx, &crate::user_level::lvgl::info()),
+        "render" | "show" | "demo" => match crate::user_level::lvgl::render_demo() {
+            Ok(render) => print_lvgl_render(ctx, &render),
+            Err(err) => {
+                ctx.serial.write_str("lvgl: ");
+                ctx.serial.write_str(err.as_str());
+                ctx.serial.write_str("\n");
+            }
+        },
+        "test" | "smoke" => {
+            ctx.serial.write_str("\n=== SMROS LVGL Port Test ===\n\n");
+            let _ = run_lvgl_tests(ctx);
+            ctx.serial.write_str("\n");
+        }
+        _ => print_lvgl_usage(ctx),
+    }
+}
+
 /// Command: qmlcluster - Render the native Qt/QML vehicle cluster port
 fn cmd_qml_cluster(ctx: &mut ShellContext, args: &[&str]) {
     if args.is_empty() {
@@ -5033,6 +5075,10 @@ fn print_qml_cluster_info(
     ctx.serial.write_str(info.backend);
     ctx.serial.write_str(" qt_runtime=");
     ctx.serial.write_str(info.qt_runtime);
+    ctx.serial.write_str("\n  lvgl: ");
+    ctx.serial.write_str(info.lvgl_port);
+    ctx.serial.write_str(" display=");
+    ctx.serial.write_str(info.display_backend);
     ctx.serial
         .write_str("\n  host: qmlscene host_shared/qml-cluster/ClusterWindow.qml");
     ctx.serial.write_str("\n");
@@ -5055,6 +5101,8 @@ fn print_qml_cluster_render(
     print_usize(&mut ctx.serial, render.image_bytes);
     ctx.serial.write_str(" widgets=");
     print_usize(&mut ctx.serial, render.widgets);
+    ctx.serial.write_str(" renderer=");
+    ctx.serial.write_str(render.renderer);
     ctx.serial.write_str("\n");
 }
 
@@ -5112,6 +5160,47 @@ fn cmd_gemma(ctx: &mut ShellContext, args: &[&str]) {
 fn print_gemma_usage(ctx: &mut ShellContext) {
     ctx.serial.write_str("usage: gemma <info|test|ask>\n");
     ctx.serial.write_str("       gemma ask <prompt>\n");
+}
+
+fn print_lvgl_usage(ctx: &mut ShellContext) {
+    ctx.serial.write_str("usage: lvgl [info|render|test]\n");
+}
+
+fn print_lvgl_info(ctx: &mut ShellContext, info: &crate::user_level::lvgl::LvglPortInfo) {
+    ctx.serial.write_str("SMROS LVGL port\n");
+    ctx.serial.write_str("  port: ");
+    ctx.serial.write_str(info.name);
+    ctx.serial.write_str(" ");
+    ctx.serial.write_str(info.compat_version);
+    ctx.serial.write_str("\n  display: ");
+    ctx.serial.write_str(info.display_backend);
+    ctx.serial.write_str(" input=");
+    ctx.serial.write_str(info.input_backend);
+    ctx.serial.write_str(" tick=");
+    ctx.serial.write_str(info.tick_backend);
+    ctx.serial.write_str("\n  draw_buffer=");
+    print_usize(&mut ctx.serial, info.draw_buffer_bytes);
+    ctx.serial.write_str("B widgets=");
+    print_usize(&mut ctx.serial, info.widgets);
+    ctx.serial.write_str(" demo=");
+    ctx.serial
+        .write_str(crate::user_level::lvgl::LVGL_DEMO_PPM_PATH);
+    ctx.serial.write_str("\n");
+}
+
+fn print_lvgl_render(ctx: &mut ShellContext, render: &crate::user_level::lvgl::LvglDemoRender) {
+    ctx.serial.write_str(render.preview.as_str());
+    ctx.serial.write_str("\nimage=");
+    ctx.serial.write_str(render.image_path);
+    ctx.serial.write_str(" size=");
+    print_usize(&mut ctx.serial, render.width);
+    ctx.serial.write_str("x");
+    print_usize(&mut ctx.serial, render.height);
+    ctx.serial.write_str(" bytes=");
+    print_usize(&mut ctx.serial, render.image_bytes);
+    ctx.serial.write_str(" widgets=");
+    print_usize(&mut ctx.serial, render.widgets);
+    ctx.serial.write_str("\n");
 }
 
 fn print_gemma_info(ctx: &mut ShellContext, info: &crate::user_level::gemma::GemmaModelInfo) {
@@ -5176,7 +5265,7 @@ fn print_hermes_usage(ctx: &mut ShellContext) {
         .write_str("usage: hermes <info|test|skills|web|ui|ask>\n");
     ctx.serial.write_str("       hermes ask <prompt>\n");
     ctx.serial
-        .write_str("       hermes ui  # full-screen keyboard/mouse UI\n");
+        .write_str("       hermes ui  # LVGL-styled keyboard/mouse UI\n");
     ctx.serial.write_str("       hermes web [text|source]\n");
 }
 
@@ -5276,24 +5365,24 @@ const HERMES_UI_WIDTH: usize = 80;
 const HERMES_UI_HEIGHT: usize = 30;
 const HERMES_UI_PROMPT_MAX: usize = 320;
 const HERMES_UI_LEFT_COL: usize = 2;
-const HERMES_UI_LEFT_WIDTH: usize = 52;
-const HERMES_UI_RIGHT_COL: usize = 55;
-const HERMES_UI_RIGHT_WIDTH: usize = 24;
+const HERMES_UI_LEFT_WIDTH: usize = 53;
+const HERMES_UI_RIGHT_COL: usize = 56;
+const HERMES_UI_RIGHT_WIDTH: usize = 23;
 const HERMES_UI_PROMPT_BOX_ROW: usize = 4;
-const HERMES_UI_PROMPT_BOX_HEIGHT: usize = 6;
+const HERMES_UI_PROMPT_BOX_HEIGHT: usize = 7;
 const HERMES_UI_PROMPT_COL: usize = 4;
-const HERMES_UI_PROMPT_ROW: usize = 6;
-const HERMES_UI_PROMPT_WIDTH: usize = 48;
+const HERMES_UI_PROMPT_ROW: usize = 7;
+const HERMES_UI_PROMPT_WIDTH: usize = 49;
 const HERMES_UI_RUNTIME_ROW: usize = 4;
-const HERMES_UI_RUNTIME_HEIGHT: usize = 7;
-const HERMES_UI_RESPONSE_BOX_ROW: usize = 12;
-const HERMES_UI_RESPONSE_BOX_HEIGHT: usize = 13;
+const HERMES_UI_RUNTIME_HEIGHT: usize = 8;
+const HERMES_UI_RESPONSE_BOX_ROW: usize = 13;
+const HERMES_UI_RESPONSE_BOX_HEIGHT: usize = 12;
 const HERMES_UI_RESPONSE_COL: usize = 4;
-const HERMES_UI_RESPONSE_ROW: usize = 14;
-const HERMES_UI_RESPONSE_WIDTH: usize = 48;
-const HERMES_UI_RESPONSE_ROWS: usize = 10;
-const HERMES_UI_ACTIVITY_ROW: usize = 12;
-const HERMES_UI_ACTIVITY_HEIGHT: usize = 13;
+const HERMES_UI_RESPONSE_ROW: usize = 15;
+const HERMES_UI_RESPONSE_WIDTH: usize = 49;
+const HERMES_UI_RESPONSE_ROWS: usize = 9;
+const HERMES_UI_ACTIVITY_ROW: usize = 13;
+const HERMES_UI_ACTIVITY_HEIGHT: usize = 12;
 const HERMES_UI_PRESET_ROW: usize = 26;
 const HERMES_UI_PRESET_HEIGHT: usize = 3;
 const HERMES_UI_SEND_COL: usize = 4;
@@ -5301,7 +5390,7 @@ const HERMES_UI_CLEAR_COL: usize = 14;
 const HERMES_UI_LOAD_COL: usize = 24;
 const HERMES_UI_TEST_COL: usize = 34;
 const HERMES_UI_EXIT_COL: usize = 44;
-const HERMES_UI_BUTTON_ROW: usize = 10;
+const HERMES_UI_BUTTON_ROW: usize = 11;
 const HERMES_UI_BUTTON_WIDTH: usize = 9;
 const HERMES_UI_STATUS_ROW: usize = 30;
 const HERMES_UI_PRESETS: &[&str] = &[
@@ -5399,6 +5488,13 @@ impl HermesUiState {
                 append_usize_shell(&mut self.runtime, info.transcripts);
                 self.runtime.push_str("\nui: ");
                 self.runtime.push_str(info.web_ui_path);
+                let lvgl = crate::user_level::lvgl::info();
+                self.runtime.push_str("\nlvgl: ");
+                self.runtime.push_str(lvgl.name);
+                self.runtime.push_str("\ndisplay: ");
+                self.runtime.push_str(lvgl.display_backend);
+                self.runtime.push_str("\ninput: ");
+                self.runtime.push_str(lvgl.input_backend);
             }
             Err(err) => {
                 self.metrics.push_str("Hermes status unavailable: ");
@@ -6112,13 +6208,30 @@ fn hermes_ui_render(ctx: &mut ShellContext, state: &mut HermesUiState) {
     if state.dirty.header {
         hermes_ui_move(ctx, 1, 1);
         ctx.serial
-            .write_str("\x1b[38;2;255;255;255m\x1b[48;2;7;72;137m");
-        hermes_ui_push_fixed(&mut ctx.serial, " Hermes Agent for SMROS", HERMES_UI_WIDTH);
+            .write_str("\x1b[38;2;238;244;248m\x1b[48;2;37;138;255m");
+        hermes_ui_push_fixed(
+            &mut ctx.serial,
+            " SMROS LVGL Hermes Workbench",
+            HERMES_UI_WIDTH,
+        );
 
         hermes_ui_move(ctx, 2, 1);
         ctx.serial
-            .write_str("\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m");
-        hermes_ui_push_fixed(&mut ctx.serial, state.metrics.as_str(), HERMES_UI_WIDTH);
+            .write_str("\x1b[38;2;238;244;248m\x1b[48;2;34;40;46m");
+        let mut status = String::from(" ");
+        status.push_str(state.metrics.as_str());
+        status.push_str(" | LVGL ");
+        status.push_str(crate::user_level::lvgl::LVGL_COMPAT_VERSION);
+        hermes_ui_push_fixed(&mut ctx.serial, status.as_str(), HERMES_UI_WIDTH);
+
+        hermes_ui_move(ctx, 3, 1);
+        ctx.serial
+            .write_str("\x1b[38;2;154;166;176m\x1b[48;2;20;24;28m");
+        hermes_ui_push_fixed(
+            &mut ctx.serial,
+            "  Prompt composer     Response stream        Runtime          Activity",
+            HERMES_UI_WIDTH,
+        );
     }
 
     if state.dirty.prompt {
@@ -6178,16 +6291,16 @@ fn hermes_ui_draw_prompt_panel(ctx: &mut ShellContext, state: &HermesUiState) {
     );
     hermes_ui_move(ctx, HERMES_UI_PROMPT_BOX_ROW + 1, HERMES_UI_LEFT_COL + 2);
     ctx.serial
-        .write_str("\x1b[38;2;88;99;108m\x1b[48;2;255;255;255m");
+        .write_str("\x1b[38;2;154;166;176m\x1b[48;2;34;40;46m");
     hermes_ui_push_fixed(
         &mut ctx.serial,
-        "Enter sends. Ctrl-N preset, Ctrl-U clear, Ctrl-L redraw.",
+        " LVGL textarea  Enter sends  Ctrl-N preset  Ctrl-U clear",
         HERMES_UI_LEFT_WIDTH - 4,
     );
     hermes_ui_draw_prompt(ctx, state);
     hermes_ui_move(ctx, HERMES_UI_PROMPT_BOX_ROW + 4, HERMES_UI_LEFT_COL + 2);
     ctx.serial
-        .write_str("\x1b[38;2;88;99;108m\x1b[48;2;255;255;255m");
+        .write_str("\x1b[38;2;154;166;176m\x1b[48;2;34;40;46m");
     let mut meta = String::from("chars ");
     append_usize_shell(&mut meta, state.prompt.len());
     meta.push('/');
@@ -6195,12 +6308,19 @@ fn hermes_ui_draw_prompt_panel(ctx: &mut ShellContext, state: &HermesUiState) {
     meta.push_str("  scroll ");
     append_usize_shell(&mut meta, state.prompt_scroll);
     hermes_ui_push_fixed(&mut ctx.serial, meta.as_str(), HERMES_UI_LEFT_WIDTH - 4);
+    hermes_ui_move(ctx, HERMES_UI_PROMPT_BOX_ROW + 5, HERMES_UI_LEFT_COL + 2);
+    ctx.serial
+        .write_str("\x1b[38;2;72;190;123m\x1b[48;2;34;40;46m");
+    let fill = state.prompt.len().min(HERMES_UI_PROMPT_MAX);
+    let mut meter = String::from("buffer ");
+    hermes_ui_push_meter(&mut meter, fill, HERMES_UI_PROMPT_MAX, 22);
+    hermes_ui_push_fixed(&mut ctx.serial, meter.as_str(), HERMES_UI_LEFT_WIDTH - 4);
 }
 
 fn hermes_ui_draw_prompt(ctx: &mut ShellContext, state: &HermesUiState) {
     hermes_ui_move(ctx, HERMES_UI_PROMPT_ROW, HERMES_UI_PROMPT_COL);
     ctx.serial
-        .write_str("\x1b[38;2;23;32;38m\x1b[48;2;248;250;252m");
+        .write_str("\x1b[38;2;238;244;248m\x1b[48;2;45;52;60m");
     let bytes = state.prompt.as_bytes();
     for index in 0..HERMES_UI_PROMPT_WIDTH {
         let prompt_index = state.prompt_scroll.saturating_add(index);
@@ -6211,11 +6331,11 @@ fn hermes_ui_draw_prompt(ctx: &mut ShellContext, state: &HermesUiState) {
         };
         if prompt_index == state.prompt_cursor && state.focus == HermesUiFocus::Prompt {
             ctx.serial
-                .write_str("\x1b[38;2;255;255;255m\x1b[48;2;11;107;203m");
+                .write_str("\x1b[38;2;255;255;255m\x1b[48;2;37;138;255m");
             ctx.serial
                 .write_byte(if byte == b' ' { b' ' } else { byte });
             ctx.serial
-                .write_str("\x1b[38;2;23;32;38m\x1b[48;2;248;250;252m");
+                .write_str("\x1b[38;2;238;244;248m\x1b[48;2;45;52;60m");
         } else {
             ctx.serial.write_byte(sanitize_terminal_byte(byte));
         }
@@ -6271,16 +6391,16 @@ fn hermes_ui_draw_response_panel(
         HERMES_UI_LEFT_COL + 1,
         HERMES_UI_LEFT_WIDTH - 2,
         HERMES_UI_RESPONSE_BOX_HEIGHT - 2,
-        "\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m",
+        "\x1b[38;2;238;244;248m\x1b[48;2;34;40;46m",
     );
     hermes_ui_move(ctx, HERMES_UI_RESPONSE_BOX_ROW + 1, HERMES_UI_LEFT_COL + 2);
     ctx.serial
-        .write_str("\x1b[38;2;88;99;108m\x1b[48;2;255;255;255m");
+        .write_str("\x1b[38;2;154;166;176m\x1b[48;2;34;40;46m");
     let mut meta = String::from("line ");
     append_usize_shell(&mut meta, state.response_scroll.saturating_add(1));
     meta.push('/');
     append_usize_shell(&mut meta, total_response_lines);
-    meta.push_str("  Up/Down scroll, PgUp/PgDn page");
+    meta.push_str("  Up/Down scroll  PgUp/PgDn page");
     hermes_ui_push_fixed(&mut ctx.serial, meta.as_str(), HERMES_UI_LEFT_WIDTH - 4);
     hermes_ui_draw_wrapped(
         ctx,
@@ -6307,7 +6427,7 @@ fn hermes_ui_draw_side_panel(
         col,
         width,
         rows,
-        "\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m",
+        "\x1b[38;2;238;244;248m\x1b[48;2;34;40;46m",
     );
     hermes_ui_draw_lines(ctx, text, row, col, width, rows);
 }
@@ -6322,11 +6442,11 @@ fn hermes_ui_draw_presets(ctx: &mut ShellContext, state: &HermesUiState) {
         col,
         width,
         1,
-        "\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m",
+        "\x1b[38;2;238;244;248m\x1b[48;2;34;40;46m",
     );
     hermes_ui_move(ctx, row, col);
     ctx.serial
-        .write_str("\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m");
+        .write_str("\x1b[38;2;238;244;248m\x1b[48;2;34;40;46m");
     let mut line = String::from("Preset ");
     append_usize_shell(&mut line, state.active_preset + 1);
     line.push('/');
@@ -6339,10 +6459,10 @@ fn hermes_ui_draw_presets(ctx: &mut ShellContext, state: &HermesUiState) {
 fn hermes_ui_draw_status(ctx: &mut ShellContext, state: &HermesUiState) {
     hermes_ui_move(ctx, HERMES_UI_STATUS_ROW, 1);
     ctx.serial
-        .write_str("\x1b[38;2;23;32;38m\x1b[48;2;248;250;252m");
+        .write_str("\x1b[38;2;238;244;248m\x1b[48;2;45;52;60m");
     let mut status = String::from("Status: ");
     status.push_str(state.status.as_str());
-    status.push_str(" | Tab focus | Enter action | s/c/l/t/q on buttons | mouse enabled");
+    status.push_str(" | Tab focus | Enter action | s/c/l/t/q | mouse enabled");
     hermes_ui_push_fixed(&mut ctx.serial, status.as_str(), HERMES_UI_WIDTH);
 }
 
@@ -6356,14 +6476,14 @@ fn hermes_ui_draw_button(
     hermes_ui_move(ctx, row, col);
     if focused {
         ctx.serial
-            .write_str("\x1b[38;2;255;255;255m\x1b[48;2;11;107;203m");
+            .write_str("\x1b[38;2;255;255;255m\x1b[48;2;37;138;255m");
     } else {
         ctx.serial
-            .write_str("\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m");
+            .write_str("\x1b[38;2;238;244;248m\x1b[48;2;45;52;60m");
     }
-    let mut text = String::from("[ ");
+    let mut text = String::from(" ");
     text.push_str(label);
-    text.push_str(" ]");
+    text.push_str(" ");
     hermes_ui_push_fixed(&mut ctx.serial, text.as_str(), HERMES_UI_BUTTON_WIDTH);
 }
 
@@ -6377,24 +6497,24 @@ fn hermes_ui_draw_box(
     focused: bool,
 ) {
     let border_color = if focused {
-        "\x1b[38;2;11;107;203m\x1b[48;2;255;255;255m"
+        "\x1b[38;2;37;138;255m\x1b[48;2;20;24;28m"
     } else {
-        "\x1b[38;2;208;216;224m\x1b[48;2;255;255;255m"
+        "\x1b[38;2;76;88;101m\x1b[48;2;20;24;28m"
     };
-    let fill_color = "\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m";
+    let fill_color = "\x1b[38;2;238;244;248m\x1b[48;2;34;40;46m";
 
     hermes_ui_move(ctx, row, col);
     ctx.serial.write_str(border_color);
-    ctx.serial.write_byte(b'+');
+    ctx.serial.write_byte(b'/');
     for _ in 0..width.saturating_sub(2) {
-        ctx.serial.write_byte(b'-');
+        ctx.serial.write_byte(b'=');
     }
-    ctx.serial.write_byte(b'+');
+    ctx.serial.write_byte(b'\\');
 
     if width > 4 && !title.is_empty() {
         hermes_ui_move(ctx, row, col + 2);
         ctx.serial
-            .write_str("\x1b[38;2;23;32;38m\x1b[48;2;255;255;255m");
+            .write_str("\x1b[38;2;238;244;248m\x1b[48;2;20;24;28m");
         ctx.serial.write_byte(b' ');
         ctx.serial.write_str(title);
         ctx.serial.write_byte(b' ');
@@ -6414,11 +6534,11 @@ fn hermes_ui_draw_box(
 
     hermes_ui_move(ctx, row.saturating_add(height.saturating_sub(1)), col);
     ctx.serial.write_str(border_color);
-    ctx.serial.write_byte(b'+');
+    ctx.serial.write_byte(b'\\');
     for _ in 0..width.saturating_sub(2) {
-        ctx.serial.write_byte(b'-');
+        ctx.serial.write_byte(b'=');
     }
-    ctx.serial.write_byte(b'+');
+    ctx.serial.write_byte(b'/');
 }
 
 fn hermes_ui_clear_area(
@@ -6573,6 +6693,21 @@ fn hermes_ui_push_fixed(serial: &mut Serial, text: &str, width: usize) {
     }
 }
 
+fn hermes_ui_push_meter(out: &mut String, value: usize, max: usize, width: usize) {
+    out.push('[');
+    let filled = if max == 0 {
+        0
+    } else {
+        value.min(max).saturating_mul(width) / max
+    };
+    let mut index = 0usize;
+    while index < width {
+        out.push(if index < filled { '#' } else { '-' });
+        index += 1;
+    }
+    out.push(']');
+}
+
 fn sanitize_terminal_byte(byte: u8) -> u8 {
     if byte == b'\n' || user_logic::ascii_shell_input(byte) {
         byte
@@ -6701,9 +6836,51 @@ fn run_hermes_agent_tests(ctx: &mut ShellContext) -> bool {
     }
 }
 
+fn run_lvgl_tests(ctx: &mut ShellContext) -> bool {
+    ctx.serial
+        .write_str("[TEST] Testing SMROS LVGL UI port... ");
+    match crate::user_level::lvgl::run_full_test() {
+        Ok(report) if report.passed() => {
+            ctx.serial.write_str("[OK] port=");
+            ctx.serial
+                .write_str(if report.port_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" display=");
+            ctx.serial
+                .write_str(if report.display_flush_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" input=");
+            ctx.serial
+                .write_str(if report.input_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" widgets=");
+            ctx.serial
+                .write_str(if report.widgets_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" fxfs=");
+            ctx.serial
+                .write_str(if report.fxfs_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" image=");
+            ctx.serial.write_str(report.render.image_path);
+            ctx.serial.write_str(" bytes=");
+            print_usize(&mut ctx.serial, report.render.image_bytes);
+            ctx.serial.write_str("\n");
+            true
+        }
+        Ok(report) => {
+            ctx.serial.write_str("[FAIL] incomplete report widgets=");
+            print_usize(&mut ctx.serial, report.render.widgets);
+            ctx.serial.write_str("\n");
+            false
+        }
+        Err(err) => {
+            ctx.serial.write_str("[FAIL] ");
+            ctx.serial.write_str(err.as_str());
+            ctx.serial.write_str("\n");
+            false
+        }
+    }
+}
+
 fn run_qml_cluster_tests(ctx: &mut ShellContext) -> bool {
     ctx.serial
-        .write_str("[TEST] Testing Qt/QML vehicle cluster port... ");
+        .write_str("[TEST] Testing Qt/QML LVGL vehicle cluster port... ");
     match crate::user_level::qml_cluster::run_full_test() {
         Ok(report) if report.passed() => {
             ctx.serial.write_str("[OK] qml=");
@@ -6718,6 +6895,9 @@ fn run_qml_cluster_tests(ctx: &mut ShellContext) -> bool {
             ctx.serial.write_str(" fxfs=");
             ctx.serial
                 .write_str(if report.fxfs_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" lvgl=");
+            ctx.serial
+                .write_str(if report.lvgl_ok { "yes" } else { "no" });
             ctx.serial.write_str(" speed=");
             print_usize(&mut ctx.serial, report.state.speed_kph);
             ctx.serial.write_str("kph rpm=");
@@ -7551,8 +7731,9 @@ fn print_vm_host_hint(ctx: &mut ShellContext, err: crate::user_level::vm_host::V
             );
         }
         crate::user_level::vm_host::VmHostError::ResponseInvalid => {
-            ctx.serial
-                .write_str("\n  host launcher response was malformed; check smros-vm-launcher.log\n");
+            ctx.serial.write_str(
+                "\n  host launcher response was malformed; check smros-vm-launcher.log\n",
+            );
         }
         _ => ctx.serial.write_str("\n"),
     }

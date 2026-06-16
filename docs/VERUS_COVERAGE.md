@@ -101,6 +101,7 @@ unsupported case.
 - `src/user_level/services/hermes_agent.rs`
 - `src/user_level/services/host_share.rs`
 - `src/user_level/services/html_ui.rs`
+- `src/user_level/services/lvgl.rs`
 - `src/user_level/services/mod.rs`
 - `src/user_level/services/net.rs`
 - `src/user_level/services/qml_cluster.rs`

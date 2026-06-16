@@ -202,6 +202,9 @@ hermes test
 hermes ui
 hui
 hermes ask test hermes agent on SMROS
+lvgl info
+lvgl render
+lvgl test
 qmlcluster info
 qmlcluster render
 qmlcluster source
@@ -245,16 +248,24 @@ SMROS does not execute the original package directly yet. Hermes now routes
 config, provider/model routing, skills, memory, tool calls, delegated subagents,
 cron metadata, `/svc`, Gemma generation, and transcript persistence under
 `/data/hermes`. `gemma test`, `hermes test`, and `testsc` cover the path.
-Use `hermes ui` or `hui` for the full-screen keyboard/mouse terminal UI.
+Use `hermes ui` or `hui` for the LVGL-styled full-screen keyboard/mouse
+terminal UI.
+
+`lvgl` exposes the SMROS-native LVGL-style porting layer. It models the LVGL
+display, input, tick, and widget seams with a CPU renderer, serial
+pointer/keypad input mapping, scheduler ticks, and an FxFS-backed PPM display
+flush at `/data/lvgl/workbench.ppm`. Use `lvgl render` for the ANSI preview
+and generated bounded preview image, and `lvgl test` to validate the port.
 
 `qmlcluster` ports a Qt/QML vehicle instrument cluster into SMROS. It installs
 `/data/qml-cluster/InstrumentCluster.qml` as an embeddable `Item` component and
 `/data/qml-cluster/ClusterWindow.qml` as the direct Qt window wrapper, parses
 the cluster properties (`speedKph`, `rpm`, `gear`, battery, range, turn
-indicators, and warning text), and renders the dashboard through a native CPU
-rasterizer into `/data/qml-cluster/cluster.ppm`. Use `qmlcluster render` for
-the serial preview and generated PPM path, `qmlcluster source` to inspect the
-component QML, and `qmlcluster window` to inspect the host-runnable window QML.
+indicators, and warning text), and renders the dashboard through the SMROS LVGL
+widget layer into a bounded `/data/qml-cluster/cluster.ppm` preview sized for
+the current kernel heap. Use `qmlcluster render` for the serial preview and
+generated PPM path, `qmlcluster source` to inspect the component QML, and
+`qmlcluster window` to inspect the host-runnable window QML.
 On a Qt host, run `qmlscene host_shared/qml-cluster/ClusterWindow.qml` to open
 the cluster directly.
 

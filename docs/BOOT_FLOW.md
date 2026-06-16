@@ -141,8 +141,8 @@ After the initial subsystem bring-up, `kernel_main()` continues with:
 4. `start_first_thread()`
 
 The shell reaches the prompt first. Broader syscall, component, FxFS, `/svc`,
-Gemma, Hermes, Docker, and QML cluster checks are explicit shell commands,
-primarily through `testsc` and the service-specific `test` commands.
+Gemma, Hermes, Docker, LVGL UI, and QML cluster checks are explicit shell
+commands, primarily through `testsc` and the service-specific `test` commands.
 
 ## 5. EL0 Transition
 
@@ -198,7 +198,7 @@ developer validation path is the shell `testsc` command.
 
 `testsc` exercises Linux and Zircon syscall helpers, memory objects, IPC
 objects, component metadata, FxFS, `/svc`, compatibility apps, Docker/runc
-surfaces, Gemma, Hermes, and the QML cluster service.
+surfaces, Gemma, Hermes, the SMROS LVGL UI port, and the QML cluster service.
 
 ## 8. SMP Behavior in the Current Tree
 

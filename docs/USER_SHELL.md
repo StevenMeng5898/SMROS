@@ -67,6 +67,7 @@ The shell currently registers these commands:
 - `docker`
 - `gemma`
 - `hermes`
+- `lvgl`
 - `hui`
 - `qmlcluster`
 - `uptime`
@@ -281,6 +282,9 @@ hui
 hermes web
 hermes web text
 hermes ask test hermes on smros
+lvgl info
+lvgl render
+lvgl test
 qmlcluster info
 qmlcluster render
 qmlcluster source
@@ -318,12 +322,24 @@ panels, status tiles, buttons, text, and skill rows are rasterized into
 serial shell. Use `hermes web text` for the older text-only shell view, and
 `hermes web source` only when you explicitly want to inspect the HTML source.
 For interaction, use `hermes ui` or the shorter `hui` entry. That opens a
-full-screen Hermes UI on the serial terminal with a focused prompt field,
-buttons, response panel, keyboard navigation, and xterm mouse tracking. Type in
-the prompt field, press Enter or click Send to submit, Tab between controls,
-use arrow keys or the mouse wheel to move through the response panel, click
-Clear to reset the prompt, and press Esc or click Exit to return to the normal
-`smros>` shell.
+LVGL-styled full-screen Hermes UI on the serial terminal with a focused prompt
+textarea, action buttons, response panel, keyboard navigation, xterm mouse
+tracking, runtime status chips, and buffer meters. Type in the prompt field,
+press Enter or click Send to submit, Tab between controls, use arrow keys or
+the mouse wheel to move through the response panel, click Clear to reset the
+prompt, and press Esc or click Exit to return to the normal `smros>` shell.
+
+### LVGL UI Port
+
+`lvgl` exposes the SMROS-native LVGL-style porting layer. Upstream LVGL expects
+an OS port to provide a tick source, display flush callback, input callbacks,
+and periodic handler execution. SMROS maps those seams to scheduler ticks,
+serial pointer/keypad input, CPU widget rendering, and FxFS-backed PPM display
+flushes until a framebuffer device is available. `lvgl render` writes
+`/data/lvgl/workbench.ppm` and prints an ANSI preview of the same widget scene.
+The generated image is a bounded preview sized for the current kernel heap.
+`lvgl test` validates the port, display flush, input mapping, widget scene, and
+FxFS output.
 
 Useful commands:
 
@@ -340,6 +356,9 @@ hermes web
 hermes web text
 hermes web source
 hermes ask test hermes agent on SMROS
+lvgl info
+lvgl render
+lvgl test
 qmlcluster info
 qmlcluster render
 qmlcluster source
@@ -353,10 +372,12 @@ qmlcluster test
 does not host Qt yet, the service stores an embeddable component at
 `/data/qml-cluster/InstrumentCluster.qml`, a direct Qt window wrapper at
 `/data/qml-cluster/ClusterWindow.qml`, parses the dashboard properties, and
-renders the cluster with a native CPU rasterizer into
-`/data/qml-cluster/cluster.ppm`. The default cluster shows speed, rpm, gear,
-drive mode, battery, range, turn indicators, lane/vehicle visualization, and
-warning text. On a Qt host, the same component opens directly with
+renders the cluster through the SMROS LVGL widget layer into
+`/data/qml-cluster/cluster.ppm`. The generated image is a bounded preview sized
+for the current kernel heap. The default cluster shows speed, rpm, gear, drive
+mode, battery, range, turn indicators, lane/vehicle visualization, and warning
+text with LVGL-style arc meters, panels, and progress bars. On a Qt host, the
+same component opens directly with
 `qmlscene host_shared/qml-cluster/ClusterWindow.qml`.
 
 Useful commands:
