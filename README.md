@@ -12,7 +12,7 @@ SMROS is an experimental bare-metal AArch64 kernel written in Rust for QEMU's `v
 - Provides modeled Linux and Zircon syscall coverage for memory, handles, IPC, object, timer/debug, hypervisor, networking, file-descriptor, and compatibility-object paths.
 - Initializes a Fuchsia-inspired user-level scaffold with component instances, namespace entries, generated boot ELF metadata, `/svc` fixed-message IPC, an FxFS-shaped object store, and compatibility-app/Docker/runc smoke surfaces.
 - Binds QEMU VirtIO-MMIO block and net devices from user-level driver modules.
-- Uses `smros-fxfs.img` as a persistent 16 MiB block-backed FxFS image when QEMU provides the virtio-blk device.
+- Uses `smros-fxfs.img` as a persistent 128 MiB block-backed FxFS image when QEMU provides the virtio-blk device.
 - Embeds repository-local `host_shared/` files into the kernel at build time and installs them under `/shared` during FxFS initialization.
 - Supports `run <elf>` for dynamic PIE AArch64 ELF files stored in FxFS. The dynamic loader and C library are resolved from `/shared/lib` or `/lib`.
 - Maintains standalone Verus harnesses for syscall, kernel-object, low-level, and user-level pure helper logic.
@@ -392,7 +392,7 @@ make verus-user-level
 make verus-services
 ```
 
-The user-level harness now covers pure helper logic for `src/main.rs`, user process layout, shell parsing, FxFS, `/svc`, ELF parsing, dynamic ELF launch arithmetic, DNS/IPv4 validation, and user-level VirtIO driver checks. The services harness covers proof slices for every file under `src/user_level/services`, including Gemma/Hermes prompt-routing predicates, Docker/path/archive validation, network sizing checks, FxFS/ELF/service predicates, and shell command input checks.
+The user-level harness now covers pure helper logic for `src/main.rs`, user process layout, shell parsing, FxFS, `/svc`, ELF parsing, dynamic ELF launch arithmetic, DNS/IPv4 validation, and user-level VirtIO driver checks. The services harness covers the current service proof slices under `src/user_level/services`, including Gemma/Hermes prompt-routing predicates, LVGL/QML UI sizing checks, Docker/path/archive validation, network sizing checks, FxFS/ELF/service predicates, and shell command input checks.
 
 ## Known Limitations
 

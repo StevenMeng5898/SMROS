@@ -10,7 +10,7 @@ The current verified syscall slice is the standalone proof file at `verification
 
 `verification/user_level/src/lib.rs` verifies pure helper logic for `src/main.rs` and the user-level Rust modules: the kernel bump allocator alignment/end computation, EL0 process memory-layout arithmetic, user process lookup predicates, shell input/decimal parsing/time and memory summaries, DNS/IPv4 parsing predicates, minimal ELF header/program-header/segment bounds checks, dynamic ELF mapping-range arithmetic, `/svc` fixed-message protocol predicates, FxFS bounds predicates, user-level VirtIO driver helper predicates, and the explicit EL0 syscall-test decision rules.
 
-`verification/services/src/lib.rs` verifies pure proof slices for every file in `src/user_level/services/`: compatibility app buffer/protocol preconditions, component capacity and launch predicates, Docker command/path/archive/reference bounds, ELF loader bounds, FxFS append/write/seek/replay predicates, Gemma prompt/token/model predicates, Hermes routing/delegate/report predicates, host-share and module wiring, network DNS/DHCP/TCP sizing predicates, dynamic ELF stack-table arithmetic, `/svc` fixed-message protocol predicates, user logic wrappers, and shell command/input predicates.
+`verification/services/src/lib.rs` verifies the current pure proof slices for `src/user_level/services/`: compatibility app buffer/protocol preconditions, component capacity and launch predicates, Docker command/path/archive/reference bounds, ELF loader bounds, FxFS append/write/seek/replay predicates, Gemma prompt/token/model predicates, Hermes routing/delegate/report predicates, LVGL/QML render sizing predicates, host-share and module wiring, network DNS/DHCP/TCP sizing predicates, dynamic ELF stack-table arithmetic, `/svc` fixed-message protocol predicates, user logic wrappers, and shell command/input predicates.
 
 Commands:
 
@@ -46,6 +46,6 @@ Recent verification smoke coverage includes:
 - Zircon clock, timer, debuglog, system event, and exception option predicates
 - Zircon guest trap, VCPU entry, interrupt vector, and VCPU state buffer predicates
 - user-level component/FxFS predicates, including FxFS append/write-end/seek/replay-count checks, `/svc` service/protocol predicates, minimal ELF loader bounds predicates, dynamic-loader segment mapping checks, DNS/IPv4 validation, and user-level VirtIO block/net driver range/feature/queue predicates
-- service-folder proof slices for all 15 files under `src/user_level/services`, including Gemma/Hermes prompt-routing predicates and Docker/network/parser bounds
+- 17 wired service-folder proof slices under `src/user_level/services`, with the full service tree classified in `docs/VERUS_COVERAGE.md`; current slices include Gemma/Hermes prompt-routing predicates, LVGL/QML UI sizing predicates, and Docker/network/parser bounds
 
 Recent `make verus-user-level` runs verify 169 user-level proof obligations with zero errors.

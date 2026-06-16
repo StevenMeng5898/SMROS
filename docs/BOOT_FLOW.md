@@ -198,7 +198,9 @@ developer validation path is the shell `testsc` command.
 
 `testsc` exercises Linux and Zircon syscall helpers, memory objects, IPC
 objects, component metadata, FxFS, `/svc`, compatibility apps, Docker/runc
-surfaces, Gemma, Hermes, the SMROS LVGL UI port, and the QML cluster service.
+surfaces, Gemma, Hermes, the SMROS LVGL UI port, and the Qt/QML vehicle cluster
+service. The UI checks render bounded PPM previews sized for the current QEMU
+heap profile rather than full-size host GUI surfaces.
 
 ## 8. SMP Behavior in the Current Tree
 
@@ -271,7 +273,7 @@ A normal QEMU boot currently prints these milestones before reaching the prompt:
 6. Shell startup messages
 7. `smros>` prompt
 
-After the prompt, the shell `testsc` command runs the broader developer smoke suite. Current successful runs cover Linux memory/process/time, signal, IPC, networking, misc, file, directory, fd, poll, and stat paths; Zircon VMO/VMAR, handle/object, signal/wait, port, channel, socket, FIFO, futex, process/thread, time/debug/system/exception, and hypervisor paths; and the minimal component framework, ELF loader, FxFS-shaped object-store scaffold, and `/svc` fixed-message IPC layer. The shell also exposes `vm -c <config.xml>`, `vm -k <VM-name>`, and `vm -s` for the modeled hypervisor object, fixed-memory VM records, CPU time-slice metadata, restart policy, process-monitor visibility, low-overhead status reporting, and optional host-assisted nested QEMU Linux launches through `scripts/smros-vm-launcher.py`.
+After the prompt, the shell `testsc` command runs the broader developer smoke suite. Current successful runs cover Linux memory/process/time, signal, IPC, networking, misc, file, directory, fd, poll, and stat paths; Zircon VMO/VMAR, handle/object, signal/wait, port, channel, socket, FIFO, futex, process/thread, time/debug/system/exception, and hypervisor paths; the minimal component framework, ELF loader, FxFS-shaped object-store scaffold, and `/svc` fixed-message IPC layer; and the Docker, Gemma, Hermes, LVGL, and Qt/QML cluster service ports. The shell also exposes `vm -c <config.xml>`, `vm -k <VM-name>`, and `vm -s` for the modeled hypervisor object, fixed-memory VM records, CPU time-slice metadata, restart policy, process-monitor visibility, low-overhead status reporting, and optional host-assisted nested QEMU Linux launches through `scripts/smros-vm-launcher.py`.
 
 ## Known Gaps
 

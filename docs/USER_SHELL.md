@@ -119,6 +119,7 @@ It currently:
 - directly exercises Zircon VMO/VMAR, handle/object, signal/wait, port, channel, socket, FIFO, futex, process/thread, time/debug/system/exception, and hypervisor helpers
 - directly exercises Linux signal, IPC, networking, misc, file, directory, fd, poll, and stat helpers
 - directly checks the minimal component framework, FxFS-shaped object-store paths, and `/svc` fixed-message IPC
+- runs compatibility-app, Docker/runc, Gemma, Hermes, LVGL, and Qt/QML cluster smoke checks
 
 So it mixes the future-facing syscall helper path with direct kernel function calls.
 
@@ -390,8 +391,8 @@ qmlcluster window
 qmlcluster test
 ```
 
-The shell `testsc` suite includes the Gemma, Hermes, and Qt/QML cluster full
-smoke tests.
+The shell `testsc` suite includes the Gemma, Hermes, LVGL, and Qt/QML cluster
+full smoke tests.
 
 The `run` command loads a dynamic PIE ELF from FxFS, parses `PT_INTERP` and `DT_NEEDED`, resolves the dynamic loader and C library from `/shared/lib` or `/lib`, builds an argv/env/auxv stack, and enters the loader from an EL0 launcher thread. For example, `run hello.elf` from `/shared` uses `hello.elf`, `/shared/lib/ld-linux-aarch64.so.1`, and `/shared/lib/libc.so.6` and returns to the shell after the program calls `exit`.
 

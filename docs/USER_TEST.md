@@ -83,6 +83,7 @@ It currently:
 - directly checks the minimal component framework, ELF loader metadata, FxFS-shaped object store, and `/svc` fixed-message IPC
 - runs ported compatibility smoke targets for a Linux `cat`-style FxFS reader and a Fuchsia `/svc` client
 - checks Docker/runc compatibility surfaces for OCI-style config parsing, namespace/mount/seccomp/cgroup syscall modeling, and built-in image metadata
+- checks the Gemma, Hermes, LVGL workbench, and Qt/QML cluster service ports
 
 Treat it as a developer smoke test, not as a full syscall compliance suite.
 
@@ -101,7 +102,10 @@ Current successful shell runs include these group completion markers:
 [OK] component framework, FxFS, and /svc IPC returned
 ```
 
-The exact command output can also include compatibility-app and Docker/runc group messages depending on the current smoke path.
+The exact command output can also include compatibility-app, Docker/runc, Gemma,
+Hermes, LVGL, and Qt/QML cluster group messages depending on the current smoke
+path. The UI service groups render bounded PPM previews so they fit the default
+QEMU heap profile.
 
 ## VM Launch Smoke Path
 
@@ -125,7 +129,7 @@ The prefixes in `run_user_test()` reflect the intended direction of the project,
 As the code stands today:
 
 - the kernel initializes user-process scaffolding
-- the boot-time syscall test executes in EL0
+- the boot-time syscall test is available as an explicit EL0 helper
 - the shell remains in EL1
 
 ## What Is Needed For A Full EL0 Process
@@ -143,9 +147,11 @@ To convert the current smoke test into a fully isolated user process, the kernel
 
 The current user test code is useful, but it should be described accurately:
 
-- active boot path: real EL0 syscall smoke test with lightweight address-space setup
+- active boot path: fast shell startup without the EL0 syscall smoke helper
+- explicit EL0 helper: real EL0 syscall smoke test with lightweight address-space setup
 - shell `testsc`: broader EL1 developer smoke test for syscall helper behavior
 - shell `components`/`fxfs`/`svc`: visibility into boot ELF load metadata, FxFS object attributes, directory entries, journal replay state, and fixed-message service IPC counters
 - shell `run`: dynamic PIE launch smoke path for FxFS-hosted AArch64 binaries with `/shared/lib` dependencies
+- shell `lvgl`/`qmlcluster`/`hui`: native LVGL-style workbench, Qt/QML cluster preview, and Hermes terminal UI surfaces
 
 That distinction matters when evaluating boot logs or shell output.

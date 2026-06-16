@@ -13,7 +13,7 @@ The short version is:
 - user-level VirtIO-MMIO block and net drivers initialize under QEMU `virt`
 - FxFS is block-backed by `smros-fxfs.img` when virtio-blk is present
 - the shell can launch a dynamic PIE ELF through `src/user_level/services/run_elf.rs`
-- the boot path runs a real EL0 syscall smoke test
+- the real EL0 syscall smoke test remains available as an explicit helper
 - the live shell still runs from EL1
 
 ## Relevant Files

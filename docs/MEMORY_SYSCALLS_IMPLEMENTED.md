@@ -121,13 +121,9 @@ virtio-net device, and verify the memory syscall paths:
 make run
 ```
 
-During boot, expect a line like:
-
-```text
-[EL0] Real EL0 -> SVC -> EL1 validation: SUCCESS
-```
-
-Then use these commands from the SMROS shell:
+Normal boot now skips the EL0 validation helper so the shell prompt appears
+sooner. Use these commands from the SMROS shell for the current interactive
+validation path:
 
 ```sh
 help
@@ -140,10 +136,10 @@ top
 
 What they cover:
 
-- boot log EL0 validation: exercises real EL0 `svc` handling for Linux `write`, `getpid`, `mmap`, and `exit`
+- explicit EL0 helper, when run from code: exercises real EL0 `svc` handling for Linux `write`, `getpid`, `mmap`, and `exit`
 - `help`: confirms the command is exposed in the live shell
 - `meminfo`: prints allocator state plus Linux mapping, `brk`, VMO, and VMAR counters
-- `testsc`: runs the Linux and Zircon syscall smoke suite, including memory/object/channel paths
+- `testsc`: runs the Linux and Zircon syscall smoke suite, including memory/object/channel paths plus component, FxFS, `/svc`, Docker, Gemma, Hermes, LVGL, and Qt/QML cluster checks
 - `ps` and `top`: provide supporting process and page usage context around the memory test
 
 ## `testsc` Coverage
@@ -176,6 +172,10 @@ The shell's `testsc` command now exercises:
 - minimal ELF loader metadata for bootstrap component binaries
 - FxFS-shaped `/pkg/bin` lookup plus `/data` file write, append, truncate, seek/read, attribute, and replay checks
 - `/svc` service connection and fixed request/reply checks over Zircon channels
+- ported compatibility app smoke tests
+- Docker/runc compatibility checks
+- Gemma and Hermes service checks
+- bounded LVGL workbench and Qt/QML cluster render checks
 - Linux `brk`
 - Linux `mmap`
 - Linux `mprotect`
