@@ -116,6 +116,8 @@ pub enum SysError {
     EBUSY = 16,
     EEXIST = 17,
     ENODEV = 19,
+    ENOTDIR = 20,
+    EISDIR = 21,
     EINVAL = 22,
     ENOSYS = 38,
     ENOTSOCK = 88,
@@ -1812,39 +1814,56 @@ fn linux_path_visible(path: &str) -> bool {
             .unwrap_or(false)
 }
 
+fn linux_fxfs_error(err: fxfs::FxfsError) -> SysError {
+    match err {
+        fxfs::FxfsError::NotMounted => SysError::ENODEV,
+        fxfs::FxfsError::InvalidPath => SysError::EINVAL,
+        fxfs::FxfsError::NotFound => SysError::ENOENT,
+        fxfs::FxfsError::AlreadyExists => SysError::EEXIST,
+        fxfs::FxfsError::NoSpace => SysError::ENOMEM,
+        fxfs::FxfsError::NotDirectory => SysError::ENOTDIR,
+        fxfs::FxfsError::IsDirectory => SysError::EISDIR,
+        fxfs::FxfsError::NotFile => SysError::EISDIR,
+        fxfs::FxfsError::InvalidOffset => SysError::EINVAL,
+        fxfs::FxfsError::StorageUnavailable | fxfs::FxfsError::StorageCorrupt => SysError::EIO,
+    }
+}
+
 fn linux_prepare_fxfs_cursor(
     path: &str,
     object_type: ObjectType,
     flags: usize,
-    access_mode: usize,
-) -> Option<fxfs::FxfsCursor> {
+    _access_mode: usize,
+) -> Result<Option<fxfs::FxfsCursor>, SysError> {
     if object_type != ObjectType::LinuxFile {
-        return None;
+        return Ok(None);
     }
 
-    let readonly_existing = access_mode == LINUX_O_RDONLY
-        && flags & (LINUX_O_CREAT | LINUX_O_TRUNC | LINUX_O_APPEND) == 0;
-    let container_pseudo = linux_path_is_container_pseudo_file(path);
-    if !readonly_existing && !container_pseudo {
-        return None;
+    let exists_in_fxfs = fxfs::attrs(path).is_ok();
+    let create = flags & LINUX_O_CREAT != 0;
+    let exclusive = flags & LINUX_O_EXCL != 0;
+    if exists_in_fxfs && create && exclusive {
+        return Err(SysError::EEXIST);
     }
 
-    if container_pseudo {
-        if flags & LINUX_O_CREAT != 0 && !fxfs::exists(path) && fxfs::write_file(path, &[]).is_err()
-        {
-            return None;
+    if !exists_in_fxfs {
+        if create {
+            fxfs::write_file(path, &[]).map_err(linux_fxfs_error)?;
+        } else if linux_path_visible(path) {
+            return Ok(None);
+        } else {
+            return Err(SysError::ENOENT);
         }
-        if flags & LINUX_O_TRUNC != 0 && fxfs::write_file(path, &[]).is_err() {
-            return None;
-        }
+    } else if flags & LINUX_O_TRUNC != 0 {
+        fxfs::write_file(path, &[]).map_err(linux_fxfs_error)?;
     }
 
-    let mut cursor = fxfs::open_cursor(path).ok()?;
+    let mut cursor = fxfs::open_cursor(path).map_err(linux_fxfs_error)?;
     if flags & LINUX_O_APPEND != 0 {
-        let attrs = fxfs::attrs(path).ok()?;
-        let _ = fxfs::seek_cursor(&mut cursor, attrs.size).ok()?;
+        let attrs = fxfs::attrs(path).map_err(linux_fxfs_error)?;
+        fxfs::seek_cursor(&mut cursor, attrs.size).map_err(linux_fxfs_error)?;
     }
-    Some(cursor)
+    Ok(Some(cursor))
 }
 
 pub fn linux_container_stats() -> LinuxContainerStats {
@@ -3077,7 +3096,7 @@ pub fn sys_openat(dirfd: usize, path: usize, flags: usize, _mode: usize) -> SysR
     {
         return Err(SysError::ENOENT);
     }
-    let fxfs_cursor = linux_prepare_fxfs_cursor(path_str, object_type, flags, access_mode);
+    let fxfs_cursor = linux_prepare_fxfs_cursor(path_str, object_type, flags, access_mode)?;
     let handle = compat::create_object(object_type).map_err(|_| SysError::ENOMEM)?;
     let readable = access_mode != LINUX_O_WRONLY;
     let writable = access_mode != LINUX_O_RDONLY;

@@ -339,21 +339,35 @@ mod scheduler_logic {
     ));
 
     #[test]
-    fn policy_match_prefers_round_robin_then_edf_then_credit() {
+    fn policy_match_prefers_round_robin_then_edf_credit_then_fair() {
         assert_eq!(
-            smros_sched_policy_from_match_flags_body!(true, false, true, true, 1u8, 2u8, 3u8),
+            smros_sched_policy_from_match_flags_body!(
+                true, false, true, true, true, 1u8, 2u8, 3u8, 4u8
+            ),
             Some(1)
         );
         assert_eq!(
-            smros_sched_policy_from_match_flags_body!(false, false, true, true, 1u8, 2u8, 3u8),
+            smros_sched_policy_from_match_flags_body!(
+                false, false, true, true, true, 1u8, 2u8, 3u8, 4u8
+            ),
             Some(2)
         );
         assert_eq!(
-            smros_sched_policy_from_match_flags_body!(false, false, false, true, 1u8, 2u8, 3u8),
+            smros_sched_policy_from_match_flags_body!(
+                false, false, false, true, true, 1u8, 2u8, 3u8, 4u8
+            ),
             Some(3)
         );
         assert_eq!(
-            smros_sched_policy_from_match_flags_body!(false, false, false, false, 1u8, 2u8, 3u8),
+            smros_sched_policy_from_match_flags_body!(
+                false, false, false, false, true, 1u8, 2u8, 3u8, 4u8
+            ),
+            Some(4)
+        );
+        assert_eq!(
+            smros_sched_policy_from_match_flags_body!(
+                false, false, false, false, false, 1u8, 2u8, 3u8, 4u8
+            ),
             None
         );
     }
@@ -363,18 +377,38 @@ mod scheduler_logic {
         let rr = 1u8;
         let edf = 2u8;
         let credit = 3u8;
+        let fair = 4u8;
 
         assert!(!smros_sched_should_preempt_body!(
-            rr, rr, edf, credit, 0u32, 1usize, 0u64, 0u64, 0i32
+            rr, rr, edf, credit, fair, 0u32, 1usize, 0u64, 0u64, 0i32
         ));
         assert!(smros_sched_should_preempt_body!(
-            rr, rr, edf, credit, 0u32, 2usize, 10u64, 1u64, 1i32
+            rr, rr, edf, credit, fair, 0u32, 2usize, 10u64, 1u64, 1i32
         ));
         assert!(smros_sched_should_preempt_body!(
-            edf, rr, edf, credit, 5u32, 2usize, 10u64, 10u64, 1i32
+            edf, rr, edf, credit, fair, 5u32, 2usize, 10u64, 10u64, 1i32
         ));
         assert!(smros_sched_should_preempt_body!(
-            credit, rr, edf, credit, 5u32, 2usize, 10u64, 1u64, 0i32
+            credit, rr, edf, credit, fair, 5u32, 2usize, 10u64, 1u64, 0i32
+        ));
+        assert!(smros_sched_should_preempt_body!(
+            fair, rr, edf, credit, fair, 0u32, 2usize, 10u64, 1u64, 1i32
+        ));
+        assert!(!smros_sched_should_preempt_body!(
+            fair, rr, edf, credit, fair, 3u32, 2usize, 10u64, 1u64, 1i32
+        ));
+    }
+
+    #[test]
+    fn fair_better_uses_weighted_cpu_ticks() {
+        assert!(smros_sched_fair_better_body!(
+            20u32, 5u32, true, 12u32, 1u32
+        ));
+        assert!(!smros_sched_fair_better_body!(
+            18u32, 1u32, true, 20u32, 5u32
+        ));
+        assert!(smros_sched_fair_better_body!(
+            0u32, 0u32, false, 20u32, 5u32
         ));
     }
 }

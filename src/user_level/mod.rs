@@ -22,7 +22,7 @@ pub use apps::{user_process, user_test};
 pub(crate) use services::user_logic;
 pub use services::{
     compat_apps, component, docker_compat, elf, fxfs, gemma, hermes_agent, host_share, html_ui,
-    lvgl, net, qml_cluster, run_elf, svc, user_shell, vm_host,
+    lvgl, net, perfetto, qml_cluster, run_elf, svc, user_shell, vm_host,
 };
 
 /// Initialize user-level process subsystem

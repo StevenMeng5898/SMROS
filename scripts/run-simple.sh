@@ -13,6 +13,7 @@ QEMU_MACHINE="${QEMU_MACHINE:-virt,gic-version=4,virtualization=on}"
 QEMU_CPU="${QEMU_CPU:-cortex-a710}"
 QEMU_SMP="${QEMU_SMP:-64}"
 QEMU_MEMORY="${QEMU_MEMORY:-2G}"
+SMROS_SYNC_HOST_SHARED="${SMROS_SYNC_HOST_SHARED:-1}"
 
 if [ ! -f "$KERNEL_IMAGE" ]; then
     echo "Kernel image not found: $KERNEL_IMAGE"
@@ -43,3 +44,7 @@ qemu-system-aarch64 \
     -device virtio-blk-device,drive=fxfs \
     -netdev user,id=smrosnet \
     -device virtio-net-device,netdev=smrosnet
+
+if [ "$SMROS_SYNC_HOST_SHARED" != "0" ]; then
+    ./scripts/sync-host-shared.py "$FXFS_DISK" host_shared || true
+fi

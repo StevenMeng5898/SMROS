@@ -209,12 +209,12 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
     },
     ShellCommand {
         name: "mount",
-        description: "Show mounts or refresh the embedded /shared snapshot",
+        description: "Show mounts or refresh the embedded /shared seed",
         handler: cmd_mount,
     },
     ShellCommand {
         name: "share",
-        description: "List the host_shared snapshot at /shared",
+        description: "List the live /shared FxFS view",
         handler: cmd_share,
     },
     ShellCommand {
@@ -253,6 +253,11 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_lvgl,
     },
     ShellCommand {
+        name: "perfetto",
+        description: "Export Perfetto-compatible trace files",
+        handler: cmd_perfetto,
+    },
+    ShellCommand {
         name: "hui",
         description: "Open the LVGL-styled Hermes UI",
         handler: cmd_hermes_ui,
@@ -274,7 +279,7 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
     },
     ShellCommand {
         name: "sched",
-        description: "Show, set, and test scheduler policy",
+        description: "Show, set, test, and trace scheduler policy",
         handler: cmd_sched,
     },
     ShellCommand {
@@ -3493,6 +3498,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         revents: i16,
     }
     let file_path = b"/tmp/smros-file\0";
+    let copy_path = b"/tmp/smros-copy-dst\0";
     let dir_path = b"/tmp\0";
     if crate::user_level::fxfs::write_file("/tmp/smros-file", b"").is_err() {
         ctx.serial
@@ -3550,6 +3556,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     let mut file_readback = [0u8; 7];
     if crate::syscall::sys_write(file_fd, file_payload.as_ptr() as usize, file_payload.len())
         .is_err()
+        || crate::syscall::sys_lseek(file_fd, 0, 0).is_err()
         || crate::syscall::sys_read(
             file_fd,
             file_readback.as_mut_ptr() as usize,
@@ -3564,6 +3571,51 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         return;
     }
     print_linux_ok(ctx, "file read/write");
+
+    let _ = crate::user_level::fxfs::delete_file("/tmp/smros-copy-dst");
+    let copy_fd = match crate::syscall::sys_openat(
+        usize::MAX - 99,
+        copy_path.as_ptr() as usize,
+        0o1 | 0o100 | 0o1000,
+        0,
+    ) {
+        Ok(fd) => fd,
+        Err(e) => {
+            print_linux_error(ctx, "open creat/trunc copy destination", e);
+            let _ = crate::syscall::sys_close(file_fd);
+            let _ = crate::syscall::sys_close(dir_fd);
+            return;
+        }
+    };
+    let copy_payload = b"linux-copy";
+    if crate::syscall::sys_write(copy_fd, copy_payload.as_ptr() as usize, copy_payload.len()).ok()
+        != Some(copy_payload.len())
+    {
+        ctx.serial
+            .write_str("  [FAIL] write creat/trunc copy destination failed\n");
+        let _ = crate::syscall::sys_close(copy_fd);
+        let _ = crate::syscall::sys_close(file_fd);
+        let _ = crate::syscall::sys_close(dir_fd);
+        return;
+    }
+    if let Err(e) = crate::syscall::sys_close(copy_fd) {
+        print_linux_error(ctx, "close creat/trunc copy destination", e);
+        let _ = crate::syscall::sys_close(file_fd);
+        let _ = crate::syscall::sys_close(dir_fd);
+        return;
+    }
+    let mut copy_readback = [0u8; 10];
+    if crate::user_level::fxfs::read_file("/tmp/smros-copy-dst", &mut copy_readback).ok()
+        != Some(copy_payload.len())
+        || copy_readback != *copy_payload
+    {
+        ctx.serial
+            .write_str("  [FAIL] creat/trunc copy destination did not persist in FxFS\n");
+        let _ = crate::syscall::sys_close(file_fd);
+        let _ = crate::syscall::sys_close(dir_fd);
+        return;
+    }
+    print_linux_ok(ctx, "creat/trunc copy persists");
 
     let dup_fd = match crate::syscall::sys_dup(file_fd) {
         Ok(fd) => {
@@ -4959,12 +5011,77 @@ fn cmd_lvgl(ctx: &mut ShellContext, args: &[&str]) {
                 ctx.serial.write_str("\n");
             }
         },
+        "sched" | "schedule" | "trace" => {
+            match crate::user_level::lvgl::render_scheduler_trace(96) {
+                Ok(render) => print_lvgl_sched_trace(ctx, &render),
+                Err(err) => {
+                    ctx.serial.write_str("lvgl sched: ");
+                    ctx.serial.write_str(err.as_str());
+                    ctx.serial.write_str("\n");
+                }
+            }
+        }
         "test" | "smoke" => {
             ctx.serial.write_str("\n=== SMROS LVGL Port Test ===\n\n");
             let _ = run_lvgl_tests(ctx);
             ctx.serial.write_str("\n");
         }
         _ => print_lvgl_usage(ctx),
+    }
+}
+
+/// Command: perfetto - Export SMROS traces in a Perfetto-compatible format
+fn cmd_perfetto(ctx: &mut ShellContext, args: &[&str]) {
+    if args.is_empty() || args[0] == "info" || args[0] == "status" {
+        ctx.serial.write_str("SMROS Perfetto bridge\n");
+        ctx.serial.write_str("  native service: yes\n");
+        ctx.serial.write_str("  export format: ");
+        ctx.serial
+            .write_str(crate::user_level::perfetto::PERFETTO_COMPAT_FORMAT);
+        ctx.serial.write_str("\n  trace path: ");
+        ctx.serial
+            .write_str(crate::user_level::perfetto::PERFETTO_TRACE_PATH);
+        ctx.serial.write_str("\n  tick_us: ");
+        print_usize(
+            &mut ctx.serial,
+            crate::user_level::perfetto::PERFETTO_TICK_US as usize,
+        );
+        ctx.serial.write_str("\n");
+        return;
+    }
+
+    match args[0] {
+        "sched" | "schedule" | "trace" => {
+            if args.len() > 2 {
+                ctx.serial.write_str("usage: perfetto sched [samples]\n");
+                return;
+            }
+            let requested = if let Some(value) = args.get(1) {
+                let Some(parsed) = parse_number(value) else {
+                    ctx.serial.write_str("usage: perfetto sched [samples]\n");
+                    return;
+                };
+                parsed
+            } else {
+                96usize
+            };
+            if requested == 0 {
+                ctx.serial
+                    .write_str("usage: perfetto sched [samples > 0]\n");
+                return;
+            }
+            match crate::user_level::perfetto::export_scheduler_trace(requested) {
+                Ok(export) => print_perfetto_sched_trace(ctx, &export),
+                Err(err) => {
+                    ctx.serial.write_str("perfetto sched: ");
+                    ctx.serial.write_str(err.as_str());
+                    ctx.serial.write_str("\n");
+                }
+            }
+        }
+        _ => ctx
+            .serial
+            .write_str("usage: perfetto [info|sched [samples]]\n"),
     }
 }
 
@@ -5163,7 +5280,8 @@ fn print_gemma_usage(ctx: &mut ShellContext) {
 }
 
 fn print_lvgl_usage(ctx: &mut ShellContext) {
-    ctx.serial.write_str("usage: lvgl [info|render|test]\n");
+    ctx.serial
+        .write_str("usage: lvgl [info|render|sched|test]\n");
 }
 
 fn print_lvgl_info(ctx: &mut ShellContext, info: &crate::user_level::lvgl::LvglPortInfo) {
@@ -5201,6 +5319,61 @@ fn print_lvgl_render(ctx: &mut ShellContext, render: &crate::user_level::lvgl::L
     ctx.serial.write_str(" widgets=");
     print_usize(&mut ctx.serial, render.widgets);
     ctx.serial.write_str("\n");
+}
+
+fn print_lvgl_sched_trace(
+    ctx: &mut ShellContext,
+    render: &crate::user_level::lvgl::LvglSchedulerTraceRender,
+) {
+    ctx.serial.write_str(render.preview.as_str());
+    ctx.serial.write_str("\nimage=");
+    ctx.serial.write_str(render.image_path);
+    ctx.serial.write_str(" size=");
+    print_usize(&mut ctx.serial, render.width);
+    ctx.serial.write_str("x");
+    print_usize(&mut ctx.serial, render.height);
+    ctx.serial.write_str(" bytes=");
+    print_usize(&mut ctx.serial, render.image_bytes);
+    ctx.serial.write_str(" samples=");
+    print_usize(&mut ctx.serial, render.samples);
+    ctx.serial.write_str(" cpus=");
+    print_usize(&mut ctx.serial, render.cpu_rows);
+    ctx.serial.write_str(" threads=");
+    print_usize(&mut ctx.serial, render.thread_count);
+    ctx.serial.write_str("\n");
+}
+
+fn print_perfetto_sched_trace(
+    ctx: &mut ShellContext,
+    export: &crate::user_level::perfetto::PerfettoSchedulerTraceExport,
+) {
+    ctx.serial
+        .write_str("scheduler trace exported for Perfetto\n");
+    ctx.serial.write_str("  file: ");
+    ctx.serial.write_str(export.path);
+    ctx.serial.write_str("\n  format: ");
+    ctx.serial.write_str(export.format);
+    ctx.serial.write_str("\n  policy: ");
+    ctx.serial.write_str(export.policy);
+    ctx.serial.write_str("  samples=");
+    print_usize(&mut ctx.serial, export.samples);
+    ctx.serial.write_str("  slices=");
+    print_usize(&mut ctx.serial, export.slices);
+    ctx.serial.write_str("\n  cpu tracks=");
+    print_usize(&mut ctx.serial, export.cpu_tracks);
+    ctx.serial.write_str("  threads=");
+    print_usize(&mut ctx.serial, export.thread_count);
+    ctx.serial.write_str("  tick_us=");
+    print_usize(&mut ctx.serial, export.tick_us as usize);
+    ctx.serial.write_str("\n  tick range: ");
+    print_usize(&mut ctx.serial, export.start_tick as usize);
+    ctx.serial.write_str("..");
+    print_usize(&mut ctx.serial, export.end_tick as usize);
+    ctx.serial.write_str("  bytes=");
+    print_usize(&mut ctx.serial, export.bytes);
+    ctx.serial
+        .write_str("\nopen the JSON in https://ui.perfetto.dev or Chrome tracing\n");
+    print_sched_trace_summary(ctx, export.samples);
 }
 
 fn print_gemma_info(ctx: &mut ShellContext, info: &crate::user_level::gemma::GemmaModelInfo) {
@@ -7571,6 +7744,36 @@ fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+fn fxfs_child_path(parent: &str, name: &str) -> Option<String> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+        return None;
+    }
+    let mut out = String::from(parent.trim_end_matches('/'));
+    if out.is_empty() {
+        out.push('/');
+    }
+    if out != "/" {
+        out.push('/');
+    }
+    out.push_str(name);
+    Some(out)
+}
+
+fn resolve_copy_destination(
+    src: &str,
+    dst: &str,
+) -> Result<String, crate::user_level::fxfs::FxfsError> {
+    match crate::user_level::fxfs::entries(dst) {
+        Ok(_) => {
+            let name = basename(src);
+            fxfs_child_path(dst, name).ok_or(crate::user_level::fxfs::FxfsError::InvalidPath)
+        }
+        Err(crate::user_level::fxfs::FxfsError::NotDirectory)
+        | Err(crate::user_level::fxfs::FxfsError::NotFound) => Ok(String::from(dst)),
+        Err(err) => Err(err),
+    }
+}
+
 fn resolve_run_path(cwd: &str, target: &str) -> Option<String> {
     let direct = normalize_fxfs_path(cwd, target)?;
     if fxfs_path_exists(direct.as_str()) {
@@ -7929,11 +8132,22 @@ fn cmd_cp(ctx: &mut ShellContext, args: &[&str]) {
             return;
         }
     };
+    let dst = match resolve_copy_destination(src.as_str(), dst.as_str()) {
+        Ok(dst) => dst,
+        Err(err) => {
+            ctx.serial.write_str("cp: destination ");
+            print_fxfs_error(ctx, err);
+            ctx.serial.write_str("\n");
+            return;
+        }
+    };
     match crate::user_level::fxfs::write_file(dst.as_str(), &data) {
         Ok(size) => {
             ctx.serial.write_str("copied ");
             print_number(&mut ctx.serial, size as u32);
-            ctx.serial.write_str(" bytes\n");
+            ctx.serial.write_str(" bytes to ");
+            ctx.serial.write_str(dst.as_str());
+            ctx.serial.write_str("\n");
         }
         Err(err) => {
             ctx.serial.write_str("cp: destination ");
@@ -8186,8 +8400,54 @@ fn cmd_vi(ctx: &mut ShellContext, args: &[&str]) {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct FxfsTreeCounts {
+    files: usize,
+    dirs: usize,
+    entries: usize,
+}
+
+fn count_fxfs_tree(path: &str, counts: &mut FxfsTreeCounts) {
+    match crate::user_level::fxfs::entries(path) {
+        Ok(entries) => {
+            for entry in entries {
+                counts.entries = counts.entries.saturating_add(1);
+                match entry.kind {
+                    crate::user_level::fxfs::FxfsNodeKind::Directory => {
+                        counts.dirs = counts.dirs.saturating_add(1);
+                        if let Some(child) = fxfs_child_path(path, entry.name.as_str()) {
+                            count_fxfs_tree(child.as_str(), counts);
+                        }
+                    }
+                    crate::user_level::fxfs::FxfsNodeKind::File => {
+                        counts.files = counts.files.saturating_add(1);
+                    }
+                }
+            }
+        }
+        Err(crate::user_level::fxfs::FxfsError::NotDirectory) => {
+            counts.files = counts.files.saturating_add(1);
+            counts.entries = counts.entries.saturating_add(1);
+        }
+        Err(_) => {}
+    }
+}
+
+fn shared_live_tree_counts() -> FxfsTreeCounts {
+    let mut counts = FxfsTreeCounts::default();
+    count_fxfs_tree("/shared", &mut counts);
+    counts
+}
+
 fn print_host_share_summary(ctx: &mut ShellContext) {
-    ctx.serial.write_str("host_shared files=");
+    let live = shared_live_tree_counts();
+    ctx.serial.write_str("live files=");
+    print_usize(&mut ctx.serial, live.files);
+    ctx.serial.write_str(" dirs=");
+    print_usize(&mut ctx.serial, live.dirs);
+    ctx.serial.write_str(" entries=");
+    print_usize(&mut ctx.serial, live.entries);
+    ctx.serial.write_str("; embedded files=");
     print_usize(
         &mut ctx.serial,
         crate::user_level::host_share::HOST_SHARE_FILES.len(),
@@ -8221,7 +8481,7 @@ fn print_host_share_skipped(ctx: &mut ShellContext) {
     }
 }
 
-/// Command: mount - Show mounts or refresh the host_shared snapshot
+/// Command: mount - Show mounts or refresh the embedded host_shared seed
 fn cmd_mount(ctx: &mut ShellContext, args: &[&str]) {
     if args.is_empty() {
         let stats = crate::user_level::fxfs::stats();
@@ -8239,12 +8499,14 @@ fn cmd_mount(ctx: &mut ShellContext, args: &[&str]) {
             ctx.serial.write_str(" (memory)");
         }
         ctx.serial
-            .write_str("\n  host_shared on /shared type fxfs.snapshot (build-time)\n\n");
-        ctx.serial.write_str(
-            "The embedded host_shared snapshot is installed during FxFS initialization.\n",
-        );
+            .write_str("\n  host_shared on /shared type fxfs.snapshot+overlay (FxFS-local)\n\n");
         ctx.serial
-            .write_str("Use: mount share    refresh /shared from that snapshot\n");
+            .write_str("The embedded host_shared seed is installed during FxFS initialization.\n");
+        ctx.serial
+            .write_str("Local copies and edits under /shared are stored in the FxFS overlay.\n");
+        ctx.serial.write_str(
+            "Use: mount share    refresh missing embedded files while preserving the overlay\n",
+        );
         ctx.serial
             .write_str("Live host directory sharing needs a 9p or virtio-fs guest driver.\n\n");
         return;
@@ -8254,7 +8516,7 @@ fn cmd_mount(ctx: &mut ShellContext, args: &[&str]) {
         "share" | "shared" | "/shared" | "host_shared" => {
             match crate::user_level::fxfs::mount_host_share() {
                 Ok(()) => {
-                    ctx.serial.write_str("refreshed host_shared at /shared (");
+                    ctx.serial.write_str("refreshed /shared embedded seed (");
                     print_host_share_summary(ctx);
                     ctx.serial.write_str(")\n");
                     print_host_share_skipped(ctx);
@@ -8273,13 +8535,14 @@ fn cmd_mount(ctx: &mut ShellContext, args: &[&str]) {
     }
 }
 
-/// Command: share - List the host_shared snapshot exposed under /shared
+/// Command: share - List the host_shared seed plus FxFS overlay under /shared
 fn cmd_share(ctx: &mut ShellContext, args: &[&str]) {
     let mut target_index = 0usize;
     if args.first().copied() == Some("refresh") {
         match crate::user_level::fxfs::mount_host_share() {
             Ok(()) => {
-                ctx.serial.write_str("refreshed /shared from host_shared\n");
+                ctx.serial
+                    .write_str("refreshed /shared embedded seed, preserving local overlay\n");
             }
             Err(err) => {
                 ctx.serial.write_str("share: refresh ");
@@ -8307,7 +8570,7 @@ fn cmd_share(ctx: &mut ShellContext, args: &[&str]) {
         return;
     };
 
-    ctx.serial.write_str("\n/shared snapshot (");
+    ctx.serial.write_str("\n/shared FxFS view (");
     print_host_share_summary(ctx);
     ctx.serial.write_str(")\n");
 
@@ -9527,16 +9790,26 @@ fn cmd_sched(ctx: &mut ShellContext, args: &[&str]) {
         ctx.serial.write_str("\ntime slice: ");
         print_number(&mut ctx.serial, s.time_slice_ticks());
         ctx.serial.write_str(" ticks\n");
+        ctx.serial.write_str("trace samples: ");
+        print_usize(&mut ctx.serial, s.trace_len());
+        ctx.serial.write_str("/");
+        print_usize(
+            &mut ctx.serial,
+            crate::kernel_objects::scheduler::SCHED_TRACE_CAPACITY,
+        );
+        ctx.serial.write_str("\n");
         return;
     }
 
     if args[0] == "set" {
         if args.len() < 2 {
-            ctx.serial.write_str("usage: sched set <rr|edf|credit>\n");
+            ctx.serial
+                .write_str("usage: sched set <rr|edf|credit|fair>\n");
             return;
         }
         let Some(policy) = scheduler::SchedulePolicy::from_str(args[1]) else {
-            ctx.serial.write_str("usage: sched set <rr|edf|credit>\n");
+            ctx.serial
+                .write_str("usage: sched set <rr|edf|credit|fair>\n");
             return;
         };
         s.set_policy(policy);
@@ -9558,12 +9831,16 @@ fn cmd_sched(ctx: &mut ShellContext, args: &[&str]) {
         ctx.serial.write_str("  credit selected T");
         print_number(&mut ctx.serial, result.credit as u32);
         ctx.serial.write_str(" (expected T3)\n");
+        ctx.serial.write_str("  fair selected T");
+        print_number(&mut ctx.serial, result.fair as u32);
+        ctx.serial.write_str(" (expected T2)\n");
         ctx.serial.write_str("  edf cpu0 selected T");
         print_number(&mut ctx.serial, result.cpu_filtered as u32);
         ctx.serial.write_str(" (expected T3)\n");
         if result.round_robin == 2
             && result.edf == 2
             && result.credit == 3
+            && result.fair == 2
             && result.cpu_filtered == 3
         {
             ctx.serial.write_str("[OK] scheduler policy test passed\n");
@@ -9574,8 +9851,422 @@ fn cmd_sched(ctx: &mut ShellContext, args: &[&str]) {
         return;
     }
 
+    if args[0] == "trace" {
+        cmd_sched_trace(ctx, &args[1..]);
+        return;
+    }
+
+    if args[0] == "sample" {
+        cmd_sched_sample(ctx, &args[1..]);
+        return;
+    }
+
+    ctx.serial.write_str(
+        "usage: sched [status|set <rr|edf|credit|fair>|test|sample [workers]|trace [perfetto|ui|text] [samples]]\n",
+    );
+}
+
+fn cmd_sched_trace(ctx: &mut ShellContext, args: &[&str]) {
+    if args.len() > 2 {
+        ctx.serial
+            .write_str("usage: sched trace [perfetto|ui|text] [samples]\n");
+        return;
+    }
+
+    let mut mode = "perfetto";
+    let mut sample_arg: Option<&str> = None;
+    if let Some(first) = args.first() {
+        match *first {
+            "perfetto" | "json" | "chrome" => {
+                mode = "perfetto";
+                sample_arg = args.get(1).copied();
+            }
+            "ui" | "lvgl" | "render" => {
+                mode = "ui";
+                sample_arg = args.get(1).copied();
+            }
+            "text" | "serial" | "ascii" => {
+                mode = "text";
+                sample_arg = args.get(1).copied();
+            }
+            value => sample_arg = Some(value),
+        }
+    }
+
+    let requested = if let Some(value) = sample_arg {
+        let Some(parsed) = parse_number(value) else {
+            ctx.serial
+                .write_str("usage: sched trace [perfetto|ui|text] [samples]\n");
+            return;
+        };
+        parsed
+    } else if mode == "text" {
+        48usize
+    } else {
+        96usize
+    };
+
+    if requested == 0 {
+        ctx.serial
+            .write_str("usage: sched trace [perfetto|ui|text] [samples > 0]\n");
+        return;
+    }
+
+    if mode == "perfetto" {
+        match crate::user_level::perfetto::export_scheduler_trace(requested) {
+            Ok(export) => print_perfetto_sched_trace(ctx, &export),
+            Err(err) => {
+                ctx.serial.write_str("sched trace: perfetto ");
+                ctx.serial.write_str(err.as_str());
+                ctx.serial.write_str("; falling back to serial summary\n");
+                print_sched_trace_summary(ctx, requested);
+            }
+        }
+        return;
+    }
+
+    if mode == "ui" {
+        match crate::user_level::lvgl::render_scheduler_trace(requested) {
+            Ok(render) => print_lvgl_sched_trace(ctx, &render),
+            Err(err) => {
+                ctx.serial.write_str("sched trace: lvgl ");
+                ctx.serial.write_str(err.as_str());
+                ctx.serial.write_str("; falling back to serial trace\n");
+                print_sched_trace_text(ctx, requested);
+            }
+        }
+        return;
+    }
+
+    print_sched_trace_text(ctx, requested);
+}
+
+fn print_sched_trace_summary(ctx: &mut ShellContext, requested: usize) {
+    let s = scheduler::scheduler();
+    let trace_len = s.trace_len();
+    if trace_len == 0 {
+        ctx.serial.write_str("scheduler trace: no samples yet\n");
+        return;
+    }
+
+    let samples = core::cmp::min(core::cmp::min(requested, trace_len), 96);
+    let start = trace_len.saturating_sub(samples);
+    let mut rows = [usize::MAX; 8];
+    let mut row_count = 0usize;
+    let mut thread_ids = [usize::MAX; 16];
+    let mut thread_count = 0usize;
+    let mut counts = [[0usize; 16]; 8];
+
+    for i in 0..samples {
+        if let Some(entry) = s.trace_entry(start + i) {
+            let row_index = find_or_insert_usize(&mut rows, &mut row_count, entry.cpu_id);
+            let thread_index =
+                find_or_insert_usize(&mut thread_ids, &mut thread_count, entry.thread_id);
+            if let (Some(row), Some(thread)) = (row_index, thread_index) {
+                counts[row][thread] = counts[row][thread].saturating_add(1);
+            }
+        }
+    }
+    sort_trace_summary(
+        &mut rows,
+        row_count,
+        &mut thread_ids,
+        thread_count,
+        &mut counts,
+    );
+
+    ctx.serial.write_str("\nreadable scheduler summary\n");
+    ctx.serial.write_str("policy=");
+    ctx.serial.write_str(s.policy().as_str());
+    ctx.serial.write_str(" samples=");
+    print_usize(&mut ctx.serial, samples);
+    ctx.serial.write_str(" newest=right\n");
+
+    for row in 0..row_count {
+        ctx.serial.write_str("cpu");
+        print_padded_number(&mut ctx.serial, rows[row] as u32, 2);
+        ctx.serial.write_str(" ");
+        let mut printed = 0usize;
+        for thread in 0..thread_count {
+            if counts[row][thread] == 0 {
+                continue;
+            }
+            if printed != 0 {
+                ctx.serial.write_str(", ");
+            }
+            print_thread_label(ctx, s, thread_ids[thread]);
+            ctx.serial.write_str(":");
+            print_usize(&mut ctx.serial, counts[row][thread]);
+            printed += 1;
+        }
+        if printed == 0 {
+            ctx.serial.write_str("idle/no samples");
+        }
+        ctx.serial.write_str("\n");
+    }
+}
+
+fn print_sched_trace_text(ctx: &mut ShellContext, requested: usize) {
+    let s = scheduler::scheduler();
+    let trace_len = s.trace_len();
+    if trace_len == 0 {
+        ctx.serial.write_str("scheduler trace: no samples yet\n");
+        return;
+    }
+
+    let samples = core::cmp::min(core::cmp::min(requested, trace_len), 64);
+    let start = trace_len.saturating_sub(samples);
+    let mut rows = [0usize; 8];
+    let mut row_count = 0usize;
+    let mut thread_ids = [usize::MAX; 16];
+    let mut thread_count = 0usize;
+
+    for i in 0..samples {
+        if let Some(entry) = s.trace_entry(start + i) {
+            if !contains_usize(&rows[..row_count], entry.cpu_id) && row_count < rows.len() {
+                rows[row_count] = entry.cpu_id;
+                row_count += 1;
+            }
+            if !contains_usize(&thread_ids[..thread_count], entry.thread_id)
+                && thread_count < thread_ids.len()
+            {
+                thread_ids[thread_count] = entry.thread_id;
+                thread_count += 1;
+            }
+        }
+    }
+    sort_usize_prefix(&mut rows, row_count);
+    sort_usize_prefix(&mut thread_ids, thread_count);
+
+    ctx.serial.write_str("\nscheduler CPU time-slice trace\n");
+    ctx.serial.write_str("policy=");
+    ctx.serial.write_str(s.policy().as_str());
+    ctx.serial.write_str(" samples=");
+    print_usize(&mut ctx.serial, samples);
+    ctx.serial.write_str(" newest=right\n");
+
+    ctx.serial.write_str("ticks ");
+    print_trace_tick_axis(ctx, s, start, samples);
+    ctx.serial.write_str("\n");
+
+    for row in 0..row_count {
+        ctx.serial.write_str("cpu");
+        print_padded_number(&mut ctx.serial, rows[row] as u32, 2);
+        ctx.serial.write_str(" ");
+        for i in 0..samples {
+            let mut symbol = b'.';
+            if let Some(entry) = s.trace_entry(start + i) {
+                if entry.cpu_id == rows[row] {
+                    symbol = trace_thread_symbol(entry.thread_id);
+                }
+            }
+            ctx.serial.write_byte(symbol);
+        }
+        ctx.serial.write_str("\n");
+    }
+
+    ctx.serial.write_str("legend ");
+    for i in 0..thread_count {
+        let thread_id = thread_ids[i];
+        ctx.serial.write_byte(trace_thread_symbol(thread_id));
+        ctx.serial.write_str("=T");
+        print_usize(&mut ctx.serial, thread_id);
+        if i + 1 < thread_count {
+            ctx.serial.write_byte(b' ');
+        }
+    }
+    ctx.serial.write_str("\n");
+}
+
+fn print_thread_label(ctx: &mut ShellContext, s: &scheduler::Scheduler, thread_id: usize) {
+    ctx.serial.write_str("T");
+    print_usize(&mut ctx.serial, thread_id);
+    if let Some(thread) = s.get_thread(crate::kernel_lowlevel::thread::ThreadId(thread_id)) {
+        if !thread.name.is_empty() {
+            ctx.serial.write_str("(");
+            ctx.serial.write_str(thread.name);
+            ctx.serial.write_str(")");
+        }
+    }
+}
+
+fn cmd_sched_sample(ctx: &mut ShellContext, args: &[&str]) {
+    if args.len() > 1 {
+        ctx.serial.write_str("usage: sched sample [workers]\n");
+        return;
+    }
+    let workers = if let Some(value) = args.first() {
+        let Some(parsed) = parse_number(value) else {
+            ctx.serial.write_str("usage: sched sample [workers]\n");
+            return;
+        };
+        parsed
+    } else {
+        crate::kernel_objects::scheduler::SCHED_SAMPLE_MAX_WORKERS
+    };
+
+    if workers == 0 {
+        ctx.serial.write_str("usage: sched sample [workers > 0]\n");
+        return;
+    }
+
+    let result = scheduler::scheduler().start_sample_workers(workers);
+    ctx.serial.write_str("scheduler sample: created ");
+    print_usize(&mut ctx.serial, result.created);
+    ctx.serial.write_str("/");
+    print_usize(&mut ctx.serial, result.requested);
+    ctx.serial.write_str(" workers across ");
+    print_usize(&mut ctx.serial, result.online_cpus);
+    ctx.serial.write_str(" logical CPUs");
+    if result.failed != 0 {
+        ctx.serial.write_str(" failed=");
+        print_usize(&mut ctx.serial, result.failed);
+    }
+    ctx.serial.write_str("\n");
     ctx.serial
-        .write_str("usage: sched [status|set <rr|edf|credit>|test]\n");
+        .write_str("run `sched trace` after a few ticks for the LVGL view\n");
+    scheduler::yield_now();
+}
+
+fn print_trace_tick_axis(
+    ctx: &mut ShellContext,
+    s: &scheduler::Scheduler,
+    start: usize,
+    samples: usize,
+) {
+    for i in 0..samples {
+        let marker = if let Some(entry) = s.trace_entry(start + i) {
+            if entry.tick % 10 == 0 {
+                b'|'
+            } else if entry.tick % 5 == 0 {
+                b'+'
+            } else {
+                b'-'
+            }
+        } else {
+            b' '
+        };
+        ctx.serial.write_byte(marker);
+    }
+}
+
+fn trace_thread_symbol(thread_id: usize) -> u8 {
+    const SYMBOLS: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    if thread_id < SYMBOLS.len() {
+        SYMBOLS[thread_id]
+    } else {
+        b'*'
+    }
+}
+
+fn contains_usize(values: &[usize], needle: usize) -> bool {
+    for value in values {
+        if *value == needle {
+            return true;
+        }
+    }
+    false
+}
+
+fn find_or_insert_usize(values: &mut [usize], len: &mut usize, needle: usize) -> Option<usize> {
+    let mut index = 0usize;
+    while index < *len {
+        if values[index] == needle {
+            return Some(index);
+        }
+        index += 1;
+    }
+    if *len >= values.len() {
+        return None;
+    }
+    values[*len] = needle;
+    *len += 1;
+    Some(*len - 1)
+}
+
+fn sort_usize_prefix(values: &mut [usize], len: usize) {
+    let len = core::cmp::min(len, values.len());
+    let mut i = 1usize;
+    while i < len {
+        let value = values[i];
+        let mut j = i;
+        while j > 0 && values[j - 1] > value {
+            values[j] = values[j - 1];
+            j -= 1;
+        }
+        values[j] = value;
+        i += 1;
+    }
+}
+
+fn sort_trace_summary(
+    rows: &mut [usize; 8],
+    row_count: usize,
+    threads: &mut [usize; 16],
+    thread_count: usize,
+    counts: &mut [[usize; 16]; 8],
+) {
+    let mut row_order = [0usize; 8];
+    let mut row = 0usize;
+    while row < row_order.len() {
+        row_order[row] = row;
+        row += 1;
+    }
+    let mut i = 1usize;
+    while i < row_count {
+        let order = row_order[i];
+        let value = rows[order];
+        let mut j = i;
+        while j > 0 && rows[row_order[j - 1]] > value {
+            row_order[j] = row_order[j - 1];
+            j -= 1;
+        }
+        row_order[j] = order;
+        i += 1;
+    }
+
+    let old_rows = *rows;
+    let old_counts = *counts;
+    row = 0;
+    while row < row_count {
+        let old = row_order[row];
+        rows[row] = old_rows[old];
+        counts[row] = old_counts[old];
+        row += 1;
+    }
+
+    let mut thread_order = [0usize; 16];
+    let mut thread = 0usize;
+    while thread < thread_order.len() {
+        thread_order[thread] = thread;
+        thread += 1;
+    }
+    i = 1;
+    while i < thread_count {
+        let order = thread_order[i];
+        let value = threads[order];
+        let mut j = i;
+        while j > 0 && threads[thread_order[j - 1]] > value {
+            thread_order[j] = thread_order[j - 1];
+            j -= 1;
+        }
+        thread_order[j] = order;
+        i += 1;
+    }
+
+    let old_threads = *threads;
+    let old_counts = *counts;
+    thread = 0;
+    while thread < thread_count {
+        let old = thread_order[thread];
+        threads[thread] = old_threads[old];
+        row = 0;
+        while row < row_count {
+            counts[row][thread] = old_counts[row][old];
+            row += 1;
+        }
+        thread += 1;
+    }
 }
 
 /// Command: vm - Create, start, or force-stop modeled VMs

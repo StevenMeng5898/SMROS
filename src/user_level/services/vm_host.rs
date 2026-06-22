@@ -95,8 +95,16 @@ fn build_launch_request(vm: &VmRecord, host: &VmHostConfig) -> Result<String, Vm
 fn build_stop_request(vm: &VmRecord, host: &VmHostConfig) -> Result<String, VmHostError> {
     let mut request = String::from("SMROS_VM_STOP 1\n");
     push_kv(&mut request, "name", vm.name.as_str())?;
-    push_kv(&mut request, "pid", u32_to_string(vm.host_qemu_pid).as_str())?;
-    push_kv(&mut request, "port", u32_to_string(host.launcher_port as u32).as_str())?;
+    push_kv(
+        &mut request,
+        "pid",
+        u32_to_string(vm.host_qemu_pid).as_str(),
+    )?;
+    push_kv(
+        &mut request,
+        "port",
+        u32_to_string(host.launcher_port as u32).as_str(),
+    )?;
     request.push_str("end\n");
     if request.len() > MAX_REQUEST_BYTES {
         return Err(VmHostError::RequestTooLarge);
@@ -167,9 +175,7 @@ fn find_response_number(text: &str, key: &str) -> Option<u32> {
         if !byte.is_ascii_digit() {
             break;
         }
-        value = value
-            .checked_mul(10)?
-            .checked_add((byte - b'0') as u32)?;
+        value = value.checked_mul(10)?.checked_add((byte - b'0') as u32)?;
         saw_digit = true;
         index += 1;
     }

@@ -188,6 +188,11 @@ rm /shared/test
 run hello.elf
 testsc
 fuzzsc
+sched set fair
+sched sample 8
+sched trace
+sched trace ui
+perfetto sched
 dockertest
 docker images
 docker pull smros/hello
@@ -256,6 +261,11 @@ display, input, tick, and widget seams with a CPU renderer, serial
 pointer/keypad input mapping, scheduler ticks, and an FxFS-backed PPM display
 flush at `/data/lvgl/workbench.ppm`. Use `lvgl render` for the ANSI preview
 and generated bounded preview image, and `lvgl test` to validate the port.
+
+`perfetto` exposes a SMROS-native Perfetto bridge. `sched trace` and
+`perfetto sched` export the scheduler ring to
+`/shared/trace.pftrace` as a native Perfetto protobuf trace file
+with one CPU track per scheduler row and slices named after SMROS threads.
 
 `qmlcluster` ports a Qt/QML vehicle instrument cluster into SMROS. It installs
 `/data/qml-cluster/InstrumentCluster.qml` as an embeddable `Item` component and
@@ -340,7 +350,9 @@ SMROS/
 
 - Fixed maximum of 16 threads
 - Idle thread plus scheduled worker threads
-- Round-robin scheduler with per-thread time-slice bookkeeping
+- Round-robin, EDF, credit, and weighted fair scheduler policies
+- Multi-thread logical SMP scheduler sample workers
+- Per-thread time-slice bookkeeping with an LVGL-rendered CPU trace view
 - CPU affinity support in the scheduler data model
 
 ### Process and Memory Model

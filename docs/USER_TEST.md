@@ -122,6 +122,9 @@ cannot reach TCP port `7070` on the host. If it reports `launcher denied
 request`, check `smros-vm-launcher.log` for the missing Linux kernel/initrd/disk
 path.
 
+To run two host-assisted demo VMs at once, use configs with different VM names,
+for example `vm -c /config/vm-demo.xml` and `vm -c /config/vm-demo2.xml`.
+
 ## Why The Logs Still Say `[EL0]`
 
 The prefixes in `run_user_test()` reflect the intended direction of the project, not the current execution mode.

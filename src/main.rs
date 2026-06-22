@@ -897,7 +897,9 @@ extern "C" fn timer_interrupt_handler() {
     // Clear the timer interrupt
     kernel_lowlevel::timer::clear_interrupt();
 
-    crate::kernel_objects::scheduler::scheduler().on_timer_tick();
+    let scheduler = crate::kernel_objects::scheduler::scheduler();
+    scheduler.on_timer_tick();
+    scheduler.record_trace_sample(current_cpu_id() as usize);
 
     // End of interrupt
     kernel_lowlevel::interrupt::end_of_interrupt(interrupt_id);

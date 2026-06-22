@@ -71,7 +71,10 @@ Main responsibilities:
 - create the idle thread
 - create worker threads
 - track the current thread and next runnable thread
+- select round-robin, EDF, credit, or weighted fair scheduling policy
+- create bounded CPU-affined sample worker threads for scheduler demos
 - account for scheduler ticks
+- keep a fixed-size CPU time-slice trace ring for Perfetto export, LVGL, and shell diagnostics
 - perform `context_switch()` and `context_switch_start()`
 - expose CPU-aware helpers such as `schedule_on_cpu()`
 

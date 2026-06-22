@@ -11,6 +11,7 @@ pub mod host_share;
 pub mod html_ui;
 pub mod lvgl;
 pub mod net;
+pub mod perfetto;
 pub mod qml_cluster;
 pub mod run_elf;
 pub mod svc;

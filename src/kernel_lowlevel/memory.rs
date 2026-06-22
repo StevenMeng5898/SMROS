@@ -777,9 +777,8 @@ impl ProcessManager {
             return None;
         }
         let ptr = out.as_ptr();
-        let name: &'static str = unsafe {
-            core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr, len))
-        };
+        let name: &'static str =
+            unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr, len)) };
         Some(name)
     }
 

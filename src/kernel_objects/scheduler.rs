@@ -2,7 +2,7 @@
 
 //! Preemptive scheduler
 //!
-//! This module implements Round-Robin, EDF, and credit scheduling for SMROS.
+//! This module implements round-robin, EDF, credit, and fair scheduling for SMROS.
 //! It manages multiple threads and performs context switching on timer ticks.
 
 use crate::kernel_lowlevel::thread::{
@@ -35,12 +35,16 @@ const DEFAULT_TIME_SLICE_TICKS: u32 = 10;
 const DEFAULT_EDF_PERIOD_TICKS: u32 = 50;
 const DEFAULT_CREDIT: i32 = 100;
 const MAX_CREDIT_WEIGHT: u32 = (i32::MAX as u32) / (DEFAULT_CREDIT as u32);
+pub const SCHED_TRACE_CAPACITY: usize = 128;
+pub const SCHED_SAMPLE_MAX_WORKERS: usize = 8;
+const SCHED_SAMPLE_WORK_UNITS: u32 = 240;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedulePolicy {
     RoundRobin,
     Edf,
     Credit,
+    Fair,
 }
 
 impl SchedulePolicy {
@@ -49,6 +53,7 @@ impl SchedulePolicy {
             SchedulePolicy::RoundRobin => "round-robin",
             SchedulePolicy::Edf => "edf",
             SchedulePolicy::Credit => "credit",
+            SchedulePolicy::Fair => "fair",
         }
     }
 
@@ -58,9 +63,11 @@ impl SchedulePolicy {
             value.eq_ignore_ascii_case("round-robin"),
             value.eq_ignore_ascii_case("edf"),
             value.eq_ignore_ascii_case("credit"),
+            value.eq_ignore_ascii_case("fair"),
             SchedulePolicy::RoundRobin,
             SchedulePolicy::Edf,
-            SchedulePolicy::Credit
+            SchedulePolicy::Credit,
+            SchedulePolicy::Fair
         )
     }
 }
@@ -102,6 +109,8 @@ struct ScheduleTestTask {
     ready: bool,
     deadline_tick: u64,
     credit: i32,
+    total_ticks: u32,
+    weight: u32,
     cpu_affinity: Option<usize>,
 }
 
@@ -110,7 +119,33 @@ pub struct SchedulerPolicyTestResult {
     pub round_robin: usize,
     pub edf: usize,
     pub credit: usize,
+    pub fair: usize,
     pub cpu_filtered: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SchedulerTraceEntry {
+    pub tick: u64,
+    pub cpu_id: usize,
+    pub thread_id: usize,
+}
+
+impl SchedulerTraceEntry {
+    pub const fn empty() -> Self {
+        Self {
+            tick: 0,
+            cpu_id: 0,
+            thread_id: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SchedulerSampleResult {
+    pub requested: usize,
+    pub created: usize,
+    pub failed: usize,
+    pub online_cpus: usize,
 }
 
 /// Scheduler structure
@@ -138,6 +173,15 @@ pub struct Scheduler {
 
     /// Per-thread policy metadata
     schedule_info: [ThreadScheduleInfo; MAX_THREADS],
+
+    /// Recent timer samples for shell-visible CPU time-slice tracing.
+    trace_entries: [SchedulerTraceEntry; SCHED_TRACE_CAPACITY],
+
+    /// Next trace entry slot.
+    trace_next: usize,
+
+    /// Number of valid trace entries.
+    trace_len: usize,
 
     /// Static stack for idle thread
     idle_stack: SendPtr,
@@ -234,6 +278,104 @@ fn pick_credit_from_tasks(tasks: &[ScheduleTestTask], cpu_id: Option<usize>) -> 
     best
 }
 
+fn pick_fair_from_tasks(tasks: &[ScheduleTestTask], cpu_id: Option<usize>) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_ticks = 0u32;
+    let mut best_weight = 1u32;
+    for task in tasks {
+        if task.ready
+            && task_allowed_on_cpu(*task, cpu_id)
+            && smros_sched_fair_better_body!(
+                task.total_ticks,
+                task.weight,
+                best.is_some(),
+                best_ticks,
+                best_weight
+            )
+        {
+            best = Some(task.id);
+            best_ticks = task.total_ticks;
+            best_weight = task.weight;
+        }
+    }
+    best
+}
+
+extern "C" fn sched_sample_worker0() -> ! {
+    sched_sample_worker_body(0)
+}
+
+extern "C" fn sched_sample_worker1() -> ! {
+    sched_sample_worker_body(1)
+}
+
+extern "C" fn sched_sample_worker2() -> ! {
+    sched_sample_worker_body(2)
+}
+
+extern "C" fn sched_sample_worker3() -> ! {
+    sched_sample_worker_body(3)
+}
+
+extern "C" fn sched_sample_worker4() -> ! {
+    sched_sample_worker_body(4)
+}
+
+extern "C" fn sched_sample_worker5() -> ! {
+    sched_sample_worker_body(5)
+}
+
+extern "C" fn sched_sample_worker6() -> ! {
+    sched_sample_worker_body(6)
+}
+
+extern "C" fn sched_sample_worker7() -> ! {
+    sched_sample_worker_body(7)
+}
+
+fn sched_sample_entry(slot: usize) -> extern "C" fn() -> ! {
+    match slot {
+        0 => sched_sample_worker0,
+        1 => sched_sample_worker1,
+        2 => sched_sample_worker2,
+        3 => sched_sample_worker3,
+        4 => sched_sample_worker4,
+        5 => sched_sample_worker5,
+        6 => sched_sample_worker6,
+        _ => sched_sample_worker7,
+    }
+}
+
+fn sched_sample_worker_body(slot: usize) -> ! {
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+    serial.write_str("[sched-sample] worker ");
+    print_number(&mut serial, slot as u32);
+    serial.write_str(" start\n");
+
+    let mut burst = 0u32;
+    while burst < SCHED_SAMPLE_WORK_UNITS {
+        let mut spin = 0u32;
+        while spin < 20_000 {
+            core::hint::spin_loop();
+            spin += 1;
+        }
+        let online_cpus =
+            core::cmp::max(crate::kernel_lowlevel::smp::online_cpu_count() as usize, 1);
+        let next_cpu = (slot + 1) % core::cmp::min(online_cpus, SCHED_SAMPLE_MAX_WORKERS);
+        yield_now_on_cpu(next_cpu);
+        burst += 1;
+    }
+
+    serial.write_str("[sched-sample] worker ");
+    print_number(&mut serial, slot as u32);
+    serial.write_str(" done\n");
+    scheduler().finish_current_without_stack_free();
+    schedule();
+    loop {
+        thread::wait_for_interrupt();
+    }
+}
+
 impl Scheduler {
     /// Create a new scheduler instance
     pub const fn new() -> Self {
@@ -246,6 +388,9 @@ impl Scheduler {
             time_slice_ticks: DEFAULT_TIME_SLICE_TICKS,
             policy: SchedulePolicy::RoundRobin,
             schedule_info: [const { ThreadScheduleInfo::empty() }; MAX_THREADS],
+            trace_entries: [SchedulerTraceEntry::empty(); SCHED_TRACE_CAPACITY],
+            trace_next: 0,
+            trace_len: 0,
             idle_stack: SendPtr(ptr::null_mut()),
         }
     }
@@ -274,6 +419,9 @@ impl Scheduler {
         self.active_threads = 1;
         self.tick_count = 0;
         self.policy = SchedulePolicy::RoundRobin;
+        self.trace_entries = [SchedulerTraceEntry::empty(); SCHED_TRACE_CAPACITY];
+        self.trace_next = 0;
+        self.trace_len = 0;
     }
 
     /// Create the idle thread
@@ -393,6 +541,93 @@ impl Scheduler {
         }
     }
 
+    pub fn start_sample_workers(&mut self, requested: usize) -> SchedulerSampleResult {
+        let online_cpus =
+            core::cmp::max(crate::kernel_lowlevel::smp::online_cpu_count() as usize, 1);
+        let wanted = requested.clamp(1, SCHED_SAMPLE_MAX_WORKERS);
+        let mut created = 0usize;
+
+        for slot in 0..wanted {
+            let cpu = slot % online_cpus;
+            if let Some(id) =
+                self.create_thread_on_cpu(sched_sample_entry(slot), "sched_sample", Some(cpu))
+            {
+                let weight = 1 + (slot as u32 % 4);
+                let cap = DEFAULT_CREDIT.saturating_mul(weight as i32);
+                let _ = self.set_thread_credit(id, cap, cap, weight);
+                let deadline = self
+                    .tick_count
+                    .saturating_add(DEFAULT_EDF_PERIOD_TICKS as u64)
+                    .saturating_add(slot as u64);
+                let _ = self.set_thread_deadline(id, deadline, DEFAULT_EDF_PERIOD_TICKS);
+                created += 1;
+            }
+        }
+
+        SchedulerSampleResult {
+            requested: wanted,
+            created,
+            failed: wanted.saturating_sub(created),
+            online_cpus,
+        }
+    }
+
+    fn push_trace_sample(&mut self, cpu_id: usize) {
+        if SCHED_TRACE_CAPACITY == 0 {
+            return;
+        }
+        self.trace_entries[self.trace_next] = SchedulerTraceEntry {
+            tick: self.tick_count,
+            cpu_id,
+            thread_id: self.current_thread.0,
+        };
+        self.trace_next = (self.trace_next + 1) % SCHED_TRACE_CAPACITY;
+        if self.trace_len < SCHED_TRACE_CAPACITY {
+            self.trace_len += 1;
+        }
+    }
+
+    pub fn record_trace_sample(&mut self, cpu_id: usize) {
+        if self.trace_len != 0 {
+            let last_idx = if self.trace_next == 0 {
+                SCHED_TRACE_CAPACITY - 1
+            } else {
+                self.trace_next - 1
+            };
+            let last = self.trace_entries[last_idx];
+            let min_tick_delta = core::cmp::max(self.time_slice_ticks as u64, 1);
+            if last.cpu_id == cpu_id
+                && last.thread_id == self.current_thread.0
+                && self.tick_count.saturating_sub(last.tick) < min_tick_delta
+            {
+                return;
+            }
+        }
+
+        self.push_trace_sample(cpu_id);
+    }
+
+    pub fn record_trace_switch(&mut self, cpu_id: usize) {
+        self.push_trace_sample(cpu_id);
+    }
+
+    pub fn trace_len(&self) -> usize {
+        self.trace_len
+    }
+
+    pub fn trace_entry(&self, age_index: usize) -> Option<SchedulerTraceEntry> {
+        if age_index >= self.trace_len || SCHED_TRACE_CAPACITY == 0 {
+            return None;
+        }
+        let oldest = if self.trace_len == SCHED_TRACE_CAPACITY {
+            self.trace_next
+        } else {
+            0
+        };
+        let idx = (oldest + age_index) % SCHED_TRACE_CAPACITY;
+        Some(self.trace_entries[idx])
+    }
+
     pub fn time_slice_ticks(&self) -> u32 {
         self.time_slice_ticks
     }
@@ -443,6 +678,7 @@ impl Scheduler {
             SchedulePolicy::RoundRobin => self.pick_round_robin(cpu_id),
             SchedulePolicy::Edf => self.pick_edf(cpu_id),
             SchedulePolicy::Credit => self.pick_credit(cpu_id),
+            SchedulePolicy::Fair => self.pick_fair(cpu_id),
         };
 
         selected.map(ThreadId).or(Some(ThreadId::IDLE))
@@ -542,6 +778,40 @@ impl Scheduler {
         best
     }
 
+    fn pick_fair(&mut self, cpu_id: Option<usize>) -> Option<usize> {
+        let start = self.next_thread;
+        let mut attempts = 0;
+        let current = self.current_thread.0;
+        let mut best: Option<usize> = None;
+        let mut best_ticks = 0u32;
+        let mut best_weight = 1u32;
+
+        while attempts < MAX_THREADS {
+            let idx = object_logic::scheduler_candidate_index(start, attempts, MAX_THREADS);
+            if self.candidate_can_run(idx, current, cpu_id) {
+                let ticks = self.threads[idx].total_ticks;
+                let weight = self.schedule_info[idx].weight;
+                if smros_sched_fair_better_body!(
+                    ticks,
+                    weight,
+                    best.is_some(),
+                    best_ticks,
+                    best_weight
+                ) {
+                    best = Some(idx);
+                    best_ticks = ticks;
+                    best_weight = weight;
+                }
+            }
+            attempts += 1;
+        }
+
+        if let Some(idx) = best {
+            self.next_thread = (idx + 1) % MAX_THREADS;
+        }
+        best
+    }
+
     fn any_ready_credit(&self, cpu_id: Option<usize>) -> bool {
         let current = self.current_thread.0;
         for idx in 1..MAX_THREADS {
@@ -587,6 +857,8 @@ impl Scheduler {
                 ready: true,
                 deadline_tick: 90,
                 credit: 30,
+                total_ticks: 18,
+                weight: 1,
                 cpu_affinity: None,
             },
             ScheduleTestTask {
@@ -594,6 +866,8 @@ impl Scheduler {
                 ready: true,
                 deadline_tick: 40,
                 credit: 10,
+                total_ticks: 20,
+                weight: 5,
                 cpu_affinity: Some(1),
             },
             ScheduleTestTask {
@@ -601,6 +875,8 @@ impl Scheduler {
                 ready: true,
                 deadline_tick: 70,
                 credit: 80,
+                total_ticks: 12,
+                weight: 1,
                 cpu_affinity: None,
             },
             ScheduleTestTask {
@@ -608,6 +884,8 @@ impl Scheduler {
                 ready: false,
                 deadline_tick: 10,
                 credit: 200,
+                total_ticks: 0,
+                weight: 1,
                 cpu_affinity: None,
             },
         ];
@@ -616,6 +894,7 @@ impl Scheduler {
             round_robin: pick_round_robin_from_tasks(&tasks, 2, None).unwrap_or(0),
             edf: pick_edf_from_tasks(&tasks, None).unwrap_or(0),
             credit: pick_credit_from_tasks(&tasks, None).unwrap_or(0),
+            fair: pick_fair_from_tasks(&tasks, None).unwrap_or(0),
             cpu_filtered: pick_edf_from_tasks(&tasks, Some(0)).unwrap_or(0),
         }
     }
@@ -664,6 +943,7 @@ impl Scheduler {
                     }
                 }
                 SchedulePolicy::RoundRobin => {}
+                SchedulePolicy::Fair => {}
             }
         }
 
@@ -684,6 +964,7 @@ impl Scheduler {
                 SchedulePolicy::RoundRobin,
                 SchedulePolicy::Edf,
                 SchedulePolicy::Credit,
+                SchedulePolicy::Fair,
                 tcb.time_slice,
                 self.active_threads,
                 info.deadline_tick,
@@ -836,9 +1117,11 @@ pub fn schedule() {
             }
             (*next_tcb_ptr).state = ThreadState::Running;
             (*next_tcb_ptr).time_slice = s.time_slice_ticks;
+            (*next_tcb_ptr).current_cpu = Some(0);
         }
 
         s.current_thread = next_id;
+        s.record_trace_switch(0);
 
         // Perform context switch
         // SAFETY: These pointers are valid TCB references
@@ -875,9 +1158,11 @@ pub fn start_first_thread() -> ! {
             (*current_tcb_ptr).state = ThreadState::Ready;
             (*next_tcb_ptr).state = ThreadState::Running;
             (*next_tcb_ptr).time_slice = s.time_slice_ticks;
+            (*next_tcb_ptr).current_cpu = Some(0);
         }
 
         s.current_thread = next_id;
+        s.record_trace_switch(0);
 
         // Jump to the first thread (don't save current context)
         // SAFETY: This is safe - we're jumping to a valid thread entry point
@@ -991,6 +1276,7 @@ pub fn schedule_on_cpu(cpu_id: usize) {
         }
 
         s.current_thread = next_id;
+        s.record_trace_switch(cpu_id);
 
         // Perform context switch
         // SAFETY: These pointers are valid TCB references
@@ -1034,9 +1320,11 @@ pub fn start_first_thread_for_cpu(cpu_id: usize) -> ! {
             (*current_tcb_ptr).state = ThreadState::Ready;
             (*next_tcb_ptr).state = ThreadState::Running;
             (*next_tcb_ptr).time_slice = s.time_slice_ticks;
+            (*next_tcb_ptr).current_cpu = Some(cpu_id);
         }
 
         s.current_thread = next_id;
+        s.record_trace_switch(cpu_id);
 
         // Jump to the first thread (don't save current context)
         // SAFETY: This is safe - we're jumping to a valid thread entry point

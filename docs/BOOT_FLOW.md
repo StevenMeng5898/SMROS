@@ -183,7 +183,7 @@ The current boot ELFs point at the existing SMROS EL0 trampoline. Segment bytes 
 
 FxFS paths resolve through explicit directory entries backed by object ids. File and directory objects carry mode, uid/gid, size, timestamps, and link count. The shell smoke path also exercises append, truncate, seek/read, attribute lookup, and journal replay metadata.
 
-The repository-local `host_shared/` directory is embedded at build time and installed under `/shared` during FxFS initialization. `share` lists that snapshot, and `mount share` refreshes it from the embedded data; neither command uses a live host mount. Persisted deletion tombstones in `/config/host-share-deleted` keep deleted snapshot files hidden across reboot with the same `smros-fxfs.img`.
+The repository-local `host_shared/` directory is embedded at build time and installed under `/shared` during FxFS initialization. `share` lists the live `/shared` FxFS view, including both embedded seed files and user-created or modified overlay paths, and `mount share` refreshes missing embedded files while preserving the overlay. Neither command uses a live host mount. Persisted deletion tombstones in `/config/host-share-deleted` keep deleted seed files hidden across reboot with the same `smros-fxfs.img`.
 
 The same initialization registers a minimal `/svc` directory with component-manager, ELF-runner, and FxFS services. Connections allocate Zircon channel pairs, and the first IPC layer uses fixed 32-byte request/reply structs rather than full FIDL encoding.
 
@@ -228,6 +228,7 @@ The current timer IRQ path calls:
 
 - `timer_interrupt_handler()`
 - `scheduler().on_timer_tick()`
+- `scheduler().record_trace_sample(current_cpu_id())`
 - `check_preemption()`
 
 `check_preemption()` asks the scheduler whether the current thread should yield and then uses `schedule_on_cpu()` when needed.

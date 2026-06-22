@@ -175,6 +175,7 @@ pub const LOG_LEVEL_FATAL: usize = 4;
 pub const SCHED_POLICY_RR: usize = 0;
 pub const SCHED_POLICY_EDF: usize = 1;
 pub const SCHED_POLICY_CREDIT: usize = 2;
+pub const SCHED_POLICY_FAIR: usize = 3;
 pub const SCHED_DEFAULT_CREDIT: i32 = 100;
 pub const SCHED_MAX_CREDIT_WEIGHT: u32 = (i32::MAX as u32) / (SCHED_DEFAULT_CREDIT as u32);
 pub const HYPERVISOR_STATE_RUNNING: u8 = 1;
@@ -326,6 +327,7 @@ spec fn sched_policy_from_match_flags_spec(
     round_robin_match: bool,
     edf_match: bool,
     credit_match: bool,
+    fair_match: bool,
 ) -> Option<int> {
     if rr_match || round_robin_match {
         Some(SCHED_POLICY_RR as int)
@@ -333,6 +335,8 @@ spec fn sched_policy_from_match_flags_spec(
         Some(SCHED_POLICY_EDF as int)
     } else if credit_match {
         Some(SCHED_POLICY_CREDIT as int)
+    } else if fair_match {
+        Some(SCHED_POLICY_FAIR as int)
     } else {
         Option::<int>::None
     }
@@ -361,6 +365,30 @@ spec fn sched_credit_better_spec(
     best_credit: int,
 ) -> bool {
     !best_present || candidate_credit > best_credit
+}
+
+spec fn sched_fair_better_spec(
+    candidate_ticks: int,
+    candidate_weight: int,
+    best_present: bool,
+    best_ticks: int,
+    best_weight: int,
+) -> bool {
+    let candidate_weight_norm = if candidate_weight == 0 { 1 } else { candidate_weight };
+    let best_weight_norm = if best_weight == 0 { 1 } else { best_weight };
+    let candidate_raw = candidate_ticks * best_weight_norm;
+    let best_raw = best_ticks * candidate_weight_norm;
+    let candidate_score = if candidate_raw > u128::MAX as int {
+        u128::MAX as int
+    } else {
+        candidate_raw
+    };
+    let best_score = if best_raw > u128::MAX as int {
+        u128::MAX as int
+    } else {
+        best_raw
+    };
+    !best_present || candidate_score < best_score
 }
 
 spec fn sched_time_slice_after_tick_spec(time_slice: int) -> int {
@@ -398,10 +426,14 @@ spec fn sched_advance_deadline_spec(deadline_tick: int, tick_count: int, period_
 }
 
 spec fn sched_refill_credit_spec(credit_cap: int, weight: int, default_credit: int) -> int {
-    let refill = if weight > SCHED_MAX_CREDIT_WEIGHT as int {
+    let default_credit_norm = if default_credit > 0 { default_credit } else { 1 };
+    let raw_refill = weight * default_credit_norm;
+    let refill = if weight > SCHED_MAX_CREDIT_WEIGHT as int
+        || raw_refill > i32::MAX as int
+    {
         i32::MAX as int
     } else {
-        weight * default_credit
+        raw_refill
     };
     if credit_cap >= refill && credit_cap >= 1 {
         credit_cap
@@ -428,6 +460,8 @@ spec fn sched_should_preempt_policy_spec(
         time_slice == 0 || deadline_tick <= tick_count
     } else if policy == SCHED_POLICY_CREDIT as int {
         time_slice == 0 || credit <= 0
+    } else if policy == SCHED_POLICY_FAIR as int {
+        time_slice == 0
     } else {
         false
     }
@@ -1716,6 +1750,7 @@ fn sched_policy_from_match_flags(
     round_robin_match: bool,
     edf_match: bool,
     credit_match: bool,
+    fair_match: bool,
 ) -> (out: Option<usize>)
     ensures
         match out {
@@ -1724,12 +1759,14 @@ fn sched_policy_from_match_flags(
                 round_robin_match,
                 edf_match,
                 credit_match,
+                fair_match,
             ) == Some(policy as int),
             None => sched_policy_from_match_flags_spec(
                 rr_match,
                 round_robin_match,
                 edf_match,
                 credit_match,
+                fair_match,
             ) == Option::<int>::None,
         },
 {
@@ -1738,9 +1775,11 @@ fn sched_policy_from_match_flags(
         round_robin_match,
         edf_match,
         credit_match,
+        fair_match,
         SCHED_POLICY_RR,
         SCHED_POLICY_EDF,
-        SCHED_POLICY_CREDIT
+        SCHED_POLICY_CREDIT,
+        SCHED_POLICY_FAIR
     )
 }
 
@@ -1785,6 +1824,31 @@ fn sched_credit_better(candidate_credit: i32, best_present: bool, best_credit: i
         ),
 {
     smros_sched_credit_better_body!(candidate_credit, best_present, best_credit)
+}
+
+fn sched_fair_better(
+    candidate_ticks: u32,
+    candidate_weight: u32,
+    best_present: bool,
+    best_ticks: u32,
+    best_weight: u32,
+) -> (out: bool)
+    ensures
+        out == sched_fair_better_spec(
+            candidate_ticks as int,
+            candidate_weight as int,
+            best_present,
+            best_ticks as int,
+            best_weight as int,
+        ),
+{
+    smros_sched_fair_better_body!(
+        candidate_ticks,
+        candidate_weight,
+        best_present,
+        best_ticks,
+        best_weight
+    )
 }
 
 fn sched_time_slice_after_tick(time_slice: u32) -> (out: u32)
@@ -1873,6 +1937,7 @@ fn sched_should_preempt_policy(
         SCHED_POLICY_RR,
         SCHED_POLICY_EDF,
         SCHED_POLICY_CREDIT,
+        SCHED_POLICY_FAIR,
         time_slice,
         active_threads,
         deadline_tick,
@@ -2862,21 +2927,25 @@ fn log_level_smoke() {
 }
 
 fn scheduler_policy_smoke() {
-    let parsed_rr = sched_policy_from_match_flags(true, false, false, false);
-    let parsed_round_robin = sched_policy_from_match_flags(false, true, false, false);
-    let parsed_edf = sched_policy_from_match_flags(false, false, true, false);
-    let parsed_credit = sched_policy_from_match_flags(false, false, false, true);
-    let parsed_none = sched_policy_from_match_flags(false, false, false, false);
-    let rr_precedes_edf = sched_policy_from_match_flags(true, false, true, false);
-    let edf_precedes_credit = sched_policy_from_match_flags(false, false, true, true);
+    let parsed_rr = sched_policy_from_match_flags(true, false, false, false, false);
+    let parsed_round_robin = sched_policy_from_match_flags(false, true, false, false, false);
+    let parsed_edf = sched_policy_from_match_flags(false, false, true, false, false);
+    let parsed_credit = sched_policy_from_match_flags(false, false, false, true, false);
+    let parsed_fair = sched_policy_from_match_flags(false, false, false, false, true);
+    let parsed_none = sched_policy_from_match_flags(false, false, false, false, false);
+    let rr_precedes_edf = sched_policy_from_match_flags(true, false, true, false, false);
+    let edf_precedes_credit = sched_policy_from_match_flags(false, false, true, true, false);
+    let credit_precedes_fair = sched_policy_from_match_flags(false, false, false, true, true);
 
     assert(parsed_rr == Option::<usize>::Some(SCHED_POLICY_RR));
     assert(parsed_round_robin == Option::<usize>::Some(SCHED_POLICY_RR));
     assert(parsed_edf == Option::<usize>::Some(SCHED_POLICY_EDF));
     assert(parsed_credit == Option::<usize>::Some(SCHED_POLICY_CREDIT));
+    assert(parsed_fair == Option::<usize>::Some(SCHED_POLICY_FAIR));
     assert(parsed_none == Option::<usize>::None);
     assert(rr_precedes_edf == Option::<usize>::Some(SCHED_POLICY_RR));
     assert(edf_precedes_credit == Option::<usize>::Some(SCHED_POLICY_EDF));
+    assert(credit_precedes_fair == Option::<usize>::Some(SCHED_POLICY_CREDIT));
 
     let any_cpu = sched_task_allowed_on_cpu(true, 1, false, 0);
     let matching_cpu = sched_task_allowed_on_cpu(true, 1, true, 1);
@@ -2894,6 +2963,9 @@ fn scheduler_policy_smoke() {
     let first_credit = sched_credit_better(10, false, i32::MIN);
     let higher_credit = sched_credit_better(80, true, 10);
     let lower_credit = sched_credit_better(5, true, 10);
+    let first_fair = sched_fair_better(100, 1, false, 0, 1);
+    let weighted_fair = sched_fair_better(20, 5, true, 12, 1);
+    let unfair = sched_fair_better(18, 1, true, 20, 5);
 
     assert(first_edf);
     assert(earlier_edf);
@@ -2901,6 +2973,9 @@ fn scheduler_policy_smoke() {
     assert(first_credit);
     assert(higher_credit);
     assert(!lower_credit);
+    assert(first_fair);
+    assert(weighted_fair);
+    assert(!unfair);
 }
 
 fn scheduler_tick_accounting_smoke() {
@@ -2939,6 +3014,10 @@ fn scheduler_tick_accounting_smoke() {
     let refill_min = sched_refill_credit(0, 0);
     let refill_saturated = sched_refill_credit(0, u32::MAX);
 
+    assert(sched_refill_credit_spec(250, 1, SCHED_DEFAULT_CREDIT as int) == 250) by(nonlinear_arith);
+    assert(sched_refill_credit_spec(50, 3, SCHED_DEFAULT_CREDIT as int) == 300) by(nonlinear_arith);
+    assert(sched_refill_credit_spec(0, 0, SCHED_DEFAULT_CREDIT as int) == 1) by(nonlinear_arith);
+    assert(sched_refill_credit_spec(0, u32::MAX as int, SCHED_DEFAULT_CREDIT as int) == i32::MAX as int) by(nonlinear_arith);
     assert(refill_cap == 250);
     assert(refill_weight == 300);
     assert(refill_min == 1);
@@ -2955,6 +3034,8 @@ fn scheduler_preemption_policy_smoke() {
     let credit_empty = sched_should_preempt_policy(SCHED_POLICY_CREDIT, 3, 2, 0, 0, 0);
     let credit_slice_done = sched_should_preempt_policy(SCHED_POLICY_CREDIT, 0, 2, 0, 0, 3);
     let credit_ready = sched_should_preempt_policy(SCHED_POLICY_CREDIT, 3, 2, 0, 0, 3);
+    let fair_slice_done = sched_should_preempt_policy(SCHED_POLICY_FAIR, 0, 2, 0, 0, 3);
+    let fair_slice_left = sched_should_preempt_policy(SCHED_POLICY_FAIR, 3, 2, 0, 0, 3);
 
     assert(!rr_slice_left);
     assert(rr_slice_done);
@@ -2965,6 +3046,8 @@ fn scheduler_preemption_policy_smoke() {
     assert(credit_empty);
     assert(credit_slice_done);
     assert(!credit_ready);
+    assert(fair_slice_done);
+    assert(!fair_slice_left);
 }
 
 fn hypervisor_name_policy_smoke() {

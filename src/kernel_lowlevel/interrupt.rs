@@ -184,7 +184,12 @@ pub fn end_of_interrupt(interrupt_id: u32) {
 
     match drivers::gic_version() {
         drivers::GicVersion::GicV2 => {
-            write_reg(drivers::gicc_base(), drivers::gicc_size(), GICC_EOIR, interrupt_id);
+            write_reg(
+                drivers::gicc_base(),
+                drivers::gicc_size(),
+                GICC_EOIR,
+                interrupt_id,
+            );
         }
         drivers::GicVersion::GicV3V4 => write_icc_eoir1_el1(interrupt_id),
     }

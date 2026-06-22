@@ -139,6 +139,20 @@ Current SMP boot marks 64 logical CPUs online for scheduling/status reporting,
 so the aggregate score is a logical 64-core projection from one measured
 Dhrystone worker. It is not yet a true parallel 64-worker benchmark.
 
+### `sched`
+
+`sched` shows the active scheduler policy, active thread count, tick count, time
+slice, and trace-buffer fill level. `sched set <rr|edf|credit|fair>` switches
+between round-robin, earliest-deadline-first, credit, and weighted fair
+scheduling. `sched test` runs the scheduler policy self-test.
+
+`sched sample [workers]` creates a bounded multi-thread scheduler workload with
+CPU affinity spread across online logical CPUs. `sched trace [perfetto|ui|text]
+[samples]` exports recent time-slice samples. The default `perfetto` mode writes
+`/shared/trace.pftrace`, a native Perfetto protobuf trace file that
+opens as CPU tracks in Perfetto UI. Use `ui` for the SMROS LVGL preview at
+`/data/lvgl/sched-trace.ppm`, or `text` for the compact serial-only timeline.
+
 ### `vm`
 
 `vm -c <config.xml>` starts or refreshes a modeled VM from an FxFS XML config.
@@ -162,7 +176,10 @@ networking at `10.0.2.2`. The autostart wrapper writes
 `smros-vm-launcher.log`; if `vm -c` reports `launcher denied request`, check
 that log for the missing kernel, initrd, or disk path.
 
-FxFS installs a boot-time sample at `/config/vm-demo.xml`:
+FxFS installs boot-time samples at `/config/vm-demo.xml` and
+`/config/vm-demo2.xml`. VM names must be unique while running because the guest
+model and host launcher use the `<vm name="...">` value as the lifecycle key.
+The first sample is:
 
 ```xml
 <vm name="plc-demo">
@@ -182,6 +199,14 @@ Start it with:
 
 ```text
 vm -c /config/vm-demo.xml
+```
+
+Start both samples with:
+
+```text
+vm -c /config/vm-demo.xml
+vm -c /config/vm-demo2.xml
+vm -s
 ```
 
 `vm -k <VM-name>` force-stops the named VM and closes its modeled guest/VCPU
@@ -285,6 +310,7 @@ hermes web text
 hermes ask test hermes on smros
 lvgl info
 lvgl render
+lvgl sched
 lvgl test
 qmlcluster info
 qmlcluster render
@@ -293,9 +319,9 @@ qmlcluster window
 qmlcluster test
 ```
 
-FxFS installs `/shared` from the snapshot compiled into the current kernel image during boot. `share` lists that snapshot, and `mount share` refreshes `/shared` from the same embedded snapshot. They do not read the host directory live while QEMU is already running. To see files added to `host_shared/` after boot, rebuild and restart with `make run`; then use `share` or `ls /shared`.
+FxFS installs `/shared` from the snapshot compiled into the current kernel image during boot, then layers persistent local `/shared` changes from `smros-fxfs.img` on top. `share` lists the live FxFS view, so copied or edited `/shared` files appear there even when they were not part of the embedded `host_shared/` seed. `mount share` refreshes missing embedded seed files while preserving that local overlay. These commands do not read or write the host directory live while QEMU is already running. To see files added to the host `host_shared/` directory after boot, rebuild and restart with `make run`; then use `share` or `ls /shared`.
 
-The current implementation is a build-time FxFS snapshot because the guest has virtio block and net drivers, but no 9p or virtio-fs filesystem driver yet. Files larger than 64 MiB are skipped by the build script and reported in the `share` command's skipped list. Shell-created files and edits under `/shared` are FxFS-local changes. Deleting a snapshot file such as `/shared/test` records a persisted tombstone in `/config/host-share-deleted`, so the file stays deleted across reboot while the same `smros-fxfs.img` is used. Remove `smros-fxfs.img` with `make clean-fxfs` to reset those tombstones.
+The current implementation is a build-time FxFS snapshot because the guest has virtio block and net drivers, but no 9p or virtio-fs filesystem driver yet. Files larger than 64 MiB are skipped by the build script and reported in the `share` command's skipped list. Shell-created files and edits under `/shared` are persisted as an FxFS overlay, so copied or edited files remain visible across reboot while the same `smros-fxfs.img` is used. Deleting a snapshot file such as `/shared/test` records a persisted tombstone in `/config/host-share-deleted`, so the file stays deleted across reboot too. Remove `smros-fxfs.img` with `make clean-fxfs` to reset those tombstones and local `/shared` overlay files.
 
 ### Hermes Agent Port
 
@@ -338,9 +364,19 @@ and periodic handler execution. SMROS maps those seams to scheduler ticks,
 serial pointer/keypad input, CPU widget rendering, and FxFS-backed PPM display
 flushes until a framebuffer device is available. `lvgl render` writes
 `/data/lvgl/workbench.ppm` and prints an ANSI preview of the same widget scene.
-The generated image is a bounded preview sized for the current kernel heap.
-`lvgl test` validates the port, display flush, input mapping, widget scene, and
-FxFS output.
+`lvgl sched` renders the scheduler CPU time-slice trace to
+`/data/lvgl/sched-trace.ppm`. The generated images are bounded previews sized
+for the current kernel heap. `lvgl test` validates the port, display flush,
+input mapping, widget scene, and FxFS output.
+
+### Perfetto Trace Export
+
+`perfetto` exposes a SMROS-native bridge to Perfetto-compatible trace files.
+`perfetto sched [samples]` and the default `sched trace` command write
+`/shared/trace.pftrace` in native Perfetto protobuf format.
+The export models SMROS scheduling as one process named `SMROS Scheduler`, one
+track per CPU, and duration slices named after the scheduled SMROS thread. Open
+the `.pftrace` file in `https://ui.perfetto.dev` to inspect the timeline.
 
 Useful commands:
 
@@ -360,6 +396,9 @@ hermes ask test hermes agent on SMROS
 lvgl info
 lvgl render
 lvgl test
+perfetto info
+perfetto sched
+sched trace ui
 qmlcluster info
 qmlcluster render
 qmlcluster source
@@ -428,7 +467,7 @@ fallback path `/shared/alpine.tar`.
 
 ### Block-Backed FxFS
 
-The default QEMU targets attach `smros-fxfs.img` through virtio-blk. FxFS loads from that image when it exists and writes metadata/data changes back to it after mutating non-`/shared` paths. `make clean` keeps the image; use `make clean-fxfs` to reset it.
+The default QEMU targets attach `smros-fxfs.img` through virtio-blk. FxFS loads from that image when it exists and writes metadata/data changes back to it after mutating persistent paths, including local `/shared` overlay entries. `make clean` keeps the image; use `make clean-fxfs` to reset it.
 
 The `mount` command shows whether FxFS is block-backed and whether the last sync succeeded.
 
@@ -462,7 +501,7 @@ It should not yet be treated as:
 
 - Shell execution is still EL1-only.
 - Shell input/output bypasses any future user-space I/O abstraction.
-- `/shared` is a build-time snapshot of `host_shared/`, not a live two-way host mount.
+- `/shared` combines the build-time `host_shared/` seed with a persistent FxFS overlay; it is not a live two-way host mount.
 - FxFS is persistent only when the virtio-blk-backed `smros-fxfs.img` is present.
 - `clear` and `exit` are placeholders.
 - The "user-mode" label reflects the intended direction, not the current runtime mode.

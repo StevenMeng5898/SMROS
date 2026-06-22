@@ -17,8 +17,11 @@ pub const LVGL_PORT_NAME: &str = "smros-lvgl-native";
 pub const LVGL_COMPAT_VERSION: &str = "lvgl-9-style";
 pub const LVGL_ROOT: &str = "/data/lvgl";
 pub const LVGL_DEMO_PPM_PATH: &str = "/data/lvgl/workbench.ppm";
+pub const LVGL_SCHED_TRACE_PPM_PATH: &str = "/data/lvgl/sched-trace.ppm";
 pub const LVGL_DEMO_WIDTH: usize = 480;
 pub const LVGL_DEMO_HEIGHT: usize = 288;
+pub const LVGL_SCHED_TRACE_WIDTH: usize = 360;
+pub const LVGL_SCHED_TRACE_HEIGHT: usize = 216;
 
 const ARC_POINTS: &[(isize, isize)] = &[
     (-707, 707),
@@ -420,6 +423,19 @@ pub struct LvglDemoRender {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LvglSchedulerTraceRender {
+    pub image_path: &'static str,
+    pub preview: String,
+    pub width: usize,
+    pub height: usize,
+    pub image_bytes: usize,
+    pub pixel_bytes: usize,
+    pub samples: usize,
+    pub cpu_rows: usize,
+    pub thread_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LvglTestReport {
     pub port_ok: bool,
     pub display_flush_ok: bool,
@@ -483,6 +499,81 @@ pub fn render_demo() -> Result<LvglDemoRender, LvglError> {
         image_bytes: ppm.len(),
         pixel_bytes: canvas.pixels.len(),
         widgets: 9,
+    })
+}
+
+pub fn render_scheduler_trace(samples: usize) -> Result<LvglSchedulerTraceRender, LvglError> {
+    prepare_storage()?;
+    let scheduler = crate::kernel_objects::scheduler::scheduler();
+    let trace_len = scheduler.trace_len();
+    if trace_len == 0 {
+        return Err(LvglError::Render);
+    }
+
+    let samples = samples.clamp(1, 96).min(trace_len);
+    let start = trace_len.saturating_sub(samples);
+    let mut entries = [crate::kernel_objects::scheduler::SchedulerTraceEntry::empty(); 96];
+    let mut entry_count = 0usize;
+    let mut cpu_rows = [usize::MAX; 8];
+    let mut cpu_count = 0usize;
+    let mut threads = [usize::MAX; 16];
+    let mut thread_count = 0usize;
+
+    while entry_count < samples {
+        if let Some(entry) = scheduler.trace_entry(start + entry_count) {
+            entries[entry_count] = entry;
+            if !contains_usize(&cpu_rows[..cpu_count], entry.cpu_id) && cpu_count < cpu_rows.len() {
+                cpu_rows[cpu_count] = entry.cpu_id;
+                cpu_count += 1;
+            }
+            if !contains_usize(&threads[..thread_count], entry.thread_id)
+                && thread_count < threads.len()
+            {
+                threads[thread_count] = entry.thread_id;
+                thread_count += 1;
+            }
+        }
+        entry_count += 1;
+    }
+    sort_usize_prefix(&mut cpu_rows, cpu_count);
+    sort_usize_prefix(&mut threads, thread_count);
+
+    let mut canvas = Canvas::try_new(
+        LVGL_SCHED_TRACE_WIDTH,
+        LVGL_SCHED_TRACE_HEIGHT,
+        WORKBENCH_THEME.bg,
+    )
+    .map_err(|_| LvglError::Render)?;
+    draw_scheduler_trace_frame(
+        &mut canvas,
+        &entries[..entry_count],
+        &cpu_rows[..cpu_count],
+        &threads[..thread_count],
+        scheduler.policy().as_str(),
+        scheduler.active_threads(),
+        scheduler.time_slice_ticks(),
+    );
+    let preview = render_scheduler_trace_preview(
+        &entries[..entry_count],
+        &cpu_rows[..cpu_count],
+        &threads[..thread_count],
+        scheduler.policy().as_str(),
+    );
+    let ppm = try_encode_ppm(canvas.width, canvas.height, canvas.pixels.as_slice())
+        .map_err(|_| LvglError::Render)?;
+    fxfs::write_file(LVGL_SCHED_TRACE_PPM_PATH, ppm.as_slice())
+        .map_err(|_| LvglError::FxfsPrepare)?;
+
+    Ok(LvglSchedulerTraceRender {
+        image_path: LVGL_SCHED_TRACE_PPM_PATH,
+        preview,
+        width: canvas.width,
+        height: canvas.height,
+        image_bytes: ppm.len(),
+        pixel_bytes: canvas.pixels.len(),
+        samples: entry_count,
+        cpu_rows: cpu_count,
+        thread_count,
     })
 }
 
@@ -1091,6 +1182,327 @@ fn draw_workbench_demo(canvas: &mut Canvas) {
         theme.warn,
         theme,
     );
+}
+
+fn draw_scheduler_trace_frame(
+    canvas: &mut Canvas,
+    entries: &[crate::kernel_objects::scheduler::SchedulerTraceEntry],
+    cpu_rows: &[usize],
+    threads: &[usize],
+    policy: &str,
+    active_threads: usize,
+    time_slice_ticks: u32,
+) {
+    let theme = WORKBENCH_THEME;
+    draw_background_grid(canvas, theme, 30, 24);
+    if canvas.width < 260 || canvas.height < 170 {
+        return;
+    }
+
+    let margin = 12usize;
+    let header_h = 44usize;
+    let meta_y = margin + header_h + 10;
+    let plot_y = meta_y + 20;
+    let bottom_h = 24usize;
+    let bottom_y = canvas.height.saturating_sub(bottom_h + margin);
+    let legend_w = 78usize;
+    let gap = 8usize;
+    let plot_w = canvas
+        .width
+        .saturating_sub(margin.saturating_mul(2))
+        .saturating_sub(legend_w)
+        .saturating_sub(gap);
+    let plot_h = bottom_y.saturating_sub(plot_y + gap).max(48);
+
+    draw_header(
+        canvas,
+        Rect {
+            x: margin,
+            y: 10,
+            w: canvas.width.saturating_sub(margin.saturating_mul(2)),
+            h: header_h,
+        },
+        "Scheduler Trace",
+        "LVGL CPU slices / multi-core sample",
+        theme,
+    );
+
+    let mut meta = String::from("policy ");
+    meta.push_str(policy);
+    meta.push_str("  active T=");
+    append_usize(&mut meta, active_threads, 0);
+    meta.push_str("  slice=");
+    append_usize(&mut meta, time_slice_ticks as usize, 0);
+    meta.push_str(" ticks  samples=");
+    append_usize(&mut meta, entries.len(), 0);
+    draw_label(canvas, margin + 4, meta_y, meta.as_str(), theme.text, 1);
+
+    let plot = Rect {
+        x: margin,
+        y: plot_y,
+        w: plot_w,
+        h: plot_h,
+    };
+    canvas.fill_rounded_rect(plot, 8, theme.surface_alt);
+    canvas.stroke_rect(plot, theme.line);
+
+    let row_count = cpu_rows.len().max(1);
+    let row_h = (plot.h.saturating_sub(14) / row_count).max(14);
+    let inner_x = plot.x + 44;
+    let inner_w = plot.w.saturating_sub(56);
+    let mut row = 0usize;
+    while row < cpu_rows.len() {
+        let y = plot.y + 8 + row * row_h;
+        let mut label = String::from("CPU");
+        append_usize(&mut label, cpu_rows[row], 0);
+        draw_label(canvas, plot.x + 8, y + 2, label.as_str(), theme.muted, 1);
+        canvas.fill_rect(
+            Rect {
+                x: inner_x,
+                y: y + row_h / 2,
+                w: inner_w,
+                h: 1,
+            },
+            theme.line.mix(theme.surface_alt, 50),
+        );
+        draw_scheduler_trace_row(
+            canvas,
+            entries,
+            cpu_rows[row],
+            inner_x,
+            y + 3,
+            inner_w,
+            row_h - 6,
+        );
+        row += 1;
+    }
+
+    draw_scheduler_legend(
+        canvas,
+        Rect {
+            x: plot.x + plot.w + gap,
+            y: plot.y,
+            w: legend_w,
+            h: plot.h,
+        },
+        threads,
+        theme,
+    );
+
+    draw_panel(
+        canvas,
+        Rect {
+            x: margin,
+            y: bottom_y,
+            w: canvas.width.saturating_sub(margin.saturating_mul(2)),
+            h: bottom_h,
+        },
+        8,
+        theme,
+    );
+    draw_label(
+        canvas,
+        margin + 10,
+        bottom_y + 7,
+        "sched sample 8 -> sched trace   newest on right",
+        theme.ok,
+        1,
+    );
+}
+
+fn draw_scheduler_trace_row(
+    canvas: &mut Canvas,
+    entries: &[crate::kernel_objects::scheduler::SchedulerTraceEntry],
+    cpu_id: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) {
+    if entries.is_empty() || width == 0 || height == 0 {
+        return;
+    }
+    let step_w = (width / entries.len()).max(3);
+    let mut index = 0usize;
+    while index < entries.len() {
+        let entry = entries[index];
+        if entry.cpu_id == cpu_id {
+            let color = scheduler_thread_color(entry.thread_id);
+            let cell_x = x + index * width / entries.len();
+            let next_x = x + (index + 1) * width / entries.len();
+            canvas.fill_rounded_rect(
+                Rect {
+                    x: cell_x,
+                    y,
+                    w: next_x.saturating_sub(cell_x).max(step_w).min(width),
+                    h: height,
+                },
+                3,
+                color,
+            );
+        }
+        index += 1;
+    }
+}
+
+fn draw_scheduler_legend(canvas: &mut Canvas, rect: Rect, threads: &[usize], theme: Theme) {
+    draw_panel(canvas, rect, 8, theme);
+    draw_label(canvas, rect.x + 12, rect.y + 12, "Threads", theme.muted, 1);
+    let mut index = 0usize;
+    while index < threads.len() && index < 8 {
+        let y = rect.y + 34 + index * 17;
+        canvas.fill_rounded_rect(
+            Rect {
+                x: rect.x + 12,
+                y,
+                w: 12,
+                h: 10,
+            },
+            3,
+            scheduler_thread_color(threads[index]),
+        );
+        let mut label = String::from("T");
+        append_usize(&mut label, threads[index], 0);
+        draw_label(
+            canvas,
+            rect.x + 32,
+            y.saturating_sub(1),
+            label.as_str(),
+            theme.text,
+            1,
+        );
+        index += 1;
+    }
+}
+
+fn render_scheduler_trace_preview(
+    entries: &[crate::kernel_objects::scheduler::SchedulerTraceEntry],
+    cpu_rows: &[usize],
+    threads: &[usize],
+    policy: &str,
+) -> String {
+    let mut out = String::new();
+    let mut header = String::from(" Scheduler Trace  policy=");
+    header.push_str(policy);
+    header.push_str("  LVGL logical SMP view");
+    push_ansi_line(
+        &mut out,
+        header.as_str(),
+        WORKBENCH_THEME.text,
+        WORKBENCH_THEME.accent,
+        78,
+    );
+    let mut row = 0usize;
+    let mut printed_rows = 0usize;
+    while row < cpu_rows.len() && printed_rows < 6 {
+        if !trace_cpu_has_sample(entries, cpu_rows[row]) {
+            row += 1;
+            continue;
+        }
+        let mut line = String::new();
+        line.push_str(" CPU");
+        append_usize(&mut line, cpu_rows[row], 2);
+        line.push(' ');
+        let start = entries.len().saturating_sub(48);
+        let mut index = start;
+        while index < entries.len() {
+            let entry = entries[index];
+            if entry.cpu_id == cpu_rows[row] {
+                line.push(trace_symbol(entry.thread_id) as char);
+            } else {
+                line.push('.');
+            }
+            index += 1;
+        }
+        push_ansi_line(
+            &mut out,
+            line.as_str(),
+            WORKBENCH_THEME.text,
+            WORKBENCH_THEME.bg,
+            78,
+        );
+        printed_rows += 1;
+        row += 1;
+    }
+    let mut legend = String::from(" Legend ");
+    let mut index = 0usize;
+    while index < threads.len() && index < 10 {
+        legend.push(trace_symbol(threads[index]) as char);
+        legend.push('=');
+        legend.push('T');
+        append_usize(&mut legend, threads[index], 0);
+        legend.push(' ');
+        index += 1;
+    }
+    push_ansi_line(
+        &mut out,
+        legend.as_str(),
+        WORKBENCH_THEME.ok,
+        WORKBENCH_THEME.bg,
+        78,
+    );
+    out
+}
+
+fn scheduler_thread_color(thread_id: usize) -> Color {
+    const COLORS: &[Color; 10] = &[
+        COLOR_WORK_ACCENT,
+        COLOR_WORK_ACCENT_2,
+        COLOR_AMBER,
+        COLOR_GREEN,
+        COLOR_BLUE,
+        COLOR_RED,
+        Color::new(192, 126, 255),
+        Color::new(255, 126, 86),
+        Color::new(96, 214, 255),
+        Color::new(210, 235, 98),
+    ];
+    COLORS[thread_id % COLORS.len()]
+}
+
+fn trace_symbol(thread_id: usize) -> u8 {
+    const SYMBOLS: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    if thread_id < SYMBOLS.len() {
+        SYMBOLS[thread_id]
+    } else {
+        b'*'
+    }
+}
+
+fn trace_cpu_has_sample(
+    entries: &[crate::kernel_objects::scheduler::SchedulerTraceEntry],
+    cpu_id: usize,
+) -> bool {
+    for entry in entries {
+        if entry.cpu_id == cpu_id {
+            return true;
+        }
+    }
+    false
+}
+
+fn contains_usize(values: &[usize], needle: usize) -> bool {
+    for value in values {
+        if *value == needle {
+            return true;
+        }
+    }
+    false
+}
+
+fn sort_usize_prefix(values: &mut [usize], len: usize) {
+    let len = len.min(values.len());
+    let mut i = 1usize;
+    while i < len {
+        let value = values[i];
+        let mut j = i;
+        while j > 0 && values[j - 1] > value {
+            values[j] = values[j - 1];
+            j -= 1;
+        }
+        values[j] = value;
+        i += 1;
+    }
 }
 
 fn render_demo_preview() -> String {

@@ -338,16 +338,15 @@ impl HypervisorObject {
             return Err(ZxError::ErrNotFound);
         };
 
-        let (state, restart_count, start_tick, restarted) =
-            smros_hypervisor_crash_transition_body!(
-                record.restart_on_crash,
-                record.restart_count,
-                record.restart_limit,
-                record.start_tick,
-                tick,
-                VmState::Running,
-                VmState::Crashed
-            );
+        let (state, restart_count, start_tick, restarted) = smros_hypervisor_crash_transition_body!(
+            record.restart_on_crash,
+            record.restart_count,
+            record.restart_limit,
+            record.start_tick,
+            tick,
+            VmState::Running,
+            VmState::Crashed
+        );
         record.state = state;
         record.restart_count = restart_count;
         record.start_tick = start_tick;
@@ -367,13 +366,12 @@ impl HypervisorObject {
         let mut total_cpu_time_slice_us = 0u32;
 
         for vm in &self.vms {
-            let (running_delta, stopped_delta, crashed_delta) =
-                smros_hypervisor_state_count_delta_body!(
-                    vm.state,
-                    VmState::Running,
-                    VmState::Stopped,
-                    VmState::Crashed
-                );
+            let (running_delta, stopped_delta, crashed_delta) = smros_hypervisor_state_count_delta_body!(
+                vm.state,
+                VmState::Running,
+                VmState::Stopped,
+                VmState::Crashed
+            );
             running += running_delta;
             stopped += stopped_delta;
             crashed += crashed_delta;
@@ -432,8 +430,8 @@ fn create_vm_process(name: &str) -> Option<usize> {
 fn close_vm_resources(record: &VmRecord) {
     close_vm_handles(record);
     if record.process_pid != 0 {
-        let _ = crate::kernel_lowlevel::memory::process_manager()
-            .terminate_process(record.process_pid);
+        let _ =
+            crate::kernel_lowlevel::memory::process_manager().terminate_process(record.process_pid);
     }
 }
 
@@ -526,10 +524,14 @@ fn parse_host_config(config_xml: &str) -> Result<Option<VmHostConfig>, Hyperviso
         return Err(HypervisorConfigError::InvalidRestart);
     }
 
-    let initrd_path = optional_host_value(attribute_value(config_xml, "linux", "initrd")
-        .or_else(|| tag_value_non_empty(config_xml, "initrd")))?;
-    let dtb_path = optional_host_value(attribute_value(config_xml, "linux", "dtb")
-        .or_else(|| tag_value_non_empty(config_xml, "dtb")))?;
+    let initrd_path = optional_host_value(
+        attribute_value(config_xml, "linux", "initrd")
+            .or_else(|| tag_value_non_empty(config_xml, "initrd")),
+    )?;
+    let dtb_path = optional_host_value(
+        attribute_value(config_xml, "linux", "dtb")
+            .or_else(|| tag_value_non_empty(config_xml, "dtb")),
+    )?;
     let disk_path = optional_host_value(
         attribute_value(config_xml, "linux", "disk")
             .or_else(|| attribute_value(config_xml, "linux", "rootfs"))
@@ -543,10 +545,8 @@ fn parse_host_config(config_xml: &str) -> Result<Option<VmHostConfig>, Hyperviso
     )?;
     let qemu_machine =
         host_value_or_default(attribute_value(config_xml, "qemu", "machine"), "virt")?;
-    let qemu_cpu =
-        host_value_or_default(attribute_value(config_xml, "qemu", "cpu"), "cortex-a57")?;
-    let qemu_memory =
-        host_value_or_default(attribute_value(config_xml, "qemu", "memory"), "512M")?;
+    let qemu_cpu = host_value_or_default(attribute_value(config_xml, "qemu", "cpu"), "cortex-a57")?;
+    let qemu_memory = host_value_or_default(attribute_value(config_xml, "qemu", "memory"), "512M")?;
     let qemu_display =
         host_value_or_default(attribute_value(config_xml, "qemu", "display"), "gtk")?;
     let qemu_serial =

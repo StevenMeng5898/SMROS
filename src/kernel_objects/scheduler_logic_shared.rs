@@ -5,9 +5,11 @@ macro_rules! smros_sched_policy_from_match_flags_body {
         $round_robin_match:expr,
         $edf_match:expr,
         $credit_match:expr,
+        $fair_match:expr,
         $rr_policy:expr,
         $edf_policy:expr,
-        $credit_policy:expr
+        $credit_policy:expr,
+        $fair_policy:expr
     ) => {{
         if $rr_match || $round_robin_match {
             Some($rr_policy)
@@ -15,6 +17,8 @@ macro_rules! smros_sched_policy_from_match_flags_body {
             Some($edf_policy)
         } else if $credit_match {
             Some($credit_policy)
+        } else if $fair_match {
+            Some($fair_policy)
         } else {
             None
         }
@@ -39,6 +43,37 @@ macro_rules! smros_sched_edf_better_body {
 macro_rules! smros_sched_credit_better_body {
     ($candidate_credit:expr, $best_present:expr, $best_credit:expr) => {{
         !$best_present || $candidate_credit > $best_credit
+    }};
+}
+
+#[allow(unused_macros)]
+macro_rules! smros_sched_fair_better_body {
+    (
+        $candidate_ticks:expr,
+        $candidate_weight:expr,
+        $best_present:expr,
+        $best_ticks:expr,
+        $best_weight:expr
+    ) => {{
+        let candidate_weight = if $candidate_weight == 0 {
+            1u128
+        } else {
+            $candidate_weight as u128
+        };
+        let best_weight = if $best_weight == 0 {
+            1u128
+        } else {
+            $best_weight as u128
+        };
+        let candidate_score = match ($candidate_ticks as u128).checked_mul(best_weight) {
+            Some(score) => score,
+            None => u128::MAX,
+        };
+        let best_score = match ($best_ticks as u128).checked_mul(candidate_weight) {
+            Some(score) => score,
+            None => u128::MAX,
+        };
+        !$best_present || candidate_score < best_score
     }};
 }
 
@@ -90,7 +125,17 @@ macro_rules! smros_sched_refill_credit_body {
         let refill = if $weight > $max_credit_weight {
             i32::MAX
         } else {
-            ($weight as i32) * $default_credit
+            let default_credit = if $default_credit > 0 {
+                $default_credit as u128
+            } else {
+                1u128
+            };
+            let refill = ($weight as u128) * default_credit;
+            if refill > i32::MAX as u128 {
+                i32::MAX
+            } else {
+                refill as i32
+            }
         };
         if $credit_cap >= refill && $credit_cap >= 1 {
             $credit_cap
@@ -109,6 +154,7 @@ macro_rules! smros_sched_should_preempt_body {
         $rr_policy:expr,
         $edf_policy:expr,
         $credit_policy:expr,
+        $fair_policy:expr,
         $time_slice:expr,
         $active_threads:expr,
         $deadline_tick:expr,
@@ -123,6 +169,8 @@ macro_rules! smros_sched_should_preempt_body {
             $time_slice == 0 || $deadline_tick <= $tick_count
         } else if $policy == $credit_policy {
             $time_slice == 0 || $credit <= 0
+        } else if $policy == $fair_policy {
+            $time_slice == 0
         } else {
             false
         }

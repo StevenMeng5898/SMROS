@@ -71,6 +71,7 @@ run: build $(FXFS_DISK) qemu-icmp vm-launcher
 		-device virtio-blk-device,drive=fxfs \
 		-netdev user,id=smrosnet \
 		-device virtio-net-device,netdev=smrosnet
+	@if [ "$${SMROS_SYNC_HOST_SHARED:-1}" != "0" ]; then ./scripts/sync-host-shared.py $(FXFS_DISK) host_shared || true; fi
 
 # Run with QEMU (debug mode with logging)
 debug: build $(FXFS_DISK) qemu-icmp vm-launcher
@@ -89,6 +90,7 @@ debug: build $(FXFS_DISK) qemu-icmp vm-launcher
 		-serial mon:stdio \
 		-d int,cpu_reset \
 		-D qemu.log
+	@if [ "$${SMROS_SYNC_HOST_SHARED:-1}" != "0" ]; then ./scripts/sync-host-shared.py $(FXFS_DISK) host_shared || true; fi
 
 # Run with GDB server
 gdb: build $(FXFS_DISK) qemu-icmp vm-launcher
@@ -105,6 +107,7 @@ gdb: build $(FXFS_DISK) qemu-icmp vm-launcher
 		-netdev user,id=smrosnet \
 		-device virtio-net-device,netdev=smrosnet \
 		-S -s
+	@if [ "$${SMROS_SYNC_HOST_SHARED:-1}" != "0" ]; then ./scripts/sync-host-shared.py $(FXFS_DISK) host_shared || true; fi
 
 # Clean build artifacts
 clean:
