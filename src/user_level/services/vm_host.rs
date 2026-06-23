@@ -70,6 +70,23 @@ pub fn stop(vm: &VmRecord) -> Result<(), VmHostError> {
     parse_stop_response(&response[..bytes])
 }
 
+pub fn sync_trace(path: &str, trace: &[u8]) -> Result<(), VmHostError> {
+    let request = build_trace_sync_request(path, trace.len())?;
+    let mut socket = net::tcp_connect(NetworkSocketAddr {
+        ip: net::QEMU_USER_GATEWAY,
+        port: DEFAULT_LAUNCHER_PORT,
+    })
+    .map_err(VmHostError::Connect)?;
+    socket
+        .write(request.as_bytes())
+        .map_err(VmHostError::Write)?;
+
+    let mut response = [0u8; MAX_RESPONSE_BYTES];
+    let bytes = socket.read(&mut response).map_err(VmHostError::Read)?;
+    let _ = socket.close();
+    parse_stop_response(&response[..bytes])
+}
+
 fn build_launch_request(vm: &VmRecord, host: &VmHostConfig) -> Result<String, VmHostError> {
     let mut request = String::from("SMROS_VM_LAUNCH 1\n");
     push_kv(&mut request, "name", vm.name.as_str())?;
@@ -85,6 +102,17 @@ fn build_launch_request(vm: &VmRecord, host: &VmHostConfig) -> Result<String, Vm
     push_kv(&mut request, "memory", host.qemu_memory.as_str())?;
     push_kv(&mut request, "display", host.qemu_display.as_str())?;
     push_kv(&mut request, "serial", host.qemu_serial.as_str())?;
+    request.push_str("end\n");
+    if request.len() > MAX_REQUEST_BYTES {
+        return Err(VmHostError::RequestTooLarge);
+    }
+    Ok(request)
+}
+
+fn build_trace_sync_request(path: &str, trace_len: usize) -> Result<String, VmHostError> {
+    let mut request = String::from("SMROS_TRACE_SYNC 1\n");
+    push_kv(&mut request, "path", path)?;
+    push_kv(&mut request, "bytes", usize_to_string(trace_len).as_str())?;
     request.push_str("end\n");
     if request.len() > MAX_REQUEST_BYTES {
         return Err(VmHostError::RequestTooLarge);
@@ -187,5 +215,9 @@ fn find_response_number(text: &str, key: &str) -> Option<u32> {
 }
 
 fn u32_to_string(value: u32) -> String {
+    value.to_string()
+}
+
+fn usize_to_string(value: usize) -> String {
     value.to_string()
 }

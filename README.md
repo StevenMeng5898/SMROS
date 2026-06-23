@@ -265,7 +265,10 @@ and generated bounded preview image, and `lvgl test` to validate the port.
 `perfetto` exposes a SMROS-native Perfetto bridge. `sched trace` and
 `perfetto sched` export the scheduler ring to
 `/shared/trace.pftrace` as a native Perfetto protobuf trace file
-with one CPU track per scheduler row and slices named after SMROS threads.
+with one track per online logical CPU, idle coverage for unsampled logical
+CPUs, and slices named after SMROS threads. Use `perfetto compare` to export
+RR, EDF, credit, and fair scheduler projections across all logical CPUs in one
+trace for side-by-side policy comparison.
 
 `qmlcluster` ports a Qt/QML vehicle instrument cluster into SMROS. It installs
 `/data/qml-cluster/InstrumentCluster.qml` as an embeddable `Item` component and

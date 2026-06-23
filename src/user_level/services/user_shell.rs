@@ -5079,9 +5079,37 @@ fn cmd_perfetto(ctx: &mut ShellContext, args: &[&str]) {
                 }
             }
         }
+        "compare" | "policy" | "policies" => {
+            if args.len() > 2 {
+                ctx.serial.write_str("usage: perfetto compare [steps]\n");
+                return;
+            }
+            let requested = if let Some(value) = args.get(1) {
+                let Some(parsed) = parse_number(value) else {
+                    ctx.serial.write_str("usage: perfetto compare [steps]\n");
+                    return;
+                };
+                parsed
+            } else {
+                crate::user_level::perfetto::PERFETTO_POLICY_COMPARE_DEFAULT_STEPS
+            };
+            if requested == 0 {
+                ctx.serial
+                    .write_str("usage: perfetto compare [steps > 0]\n");
+                return;
+            }
+            match crate::user_level::perfetto::export_scheduler_policy_comparison(requested) {
+                Ok(export) => print_perfetto_sched_trace(ctx, &export),
+                Err(err) => {
+                    ctx.serial.write_str("perfetto compare: ");
+                    ctx.serial.write_str(err.as_str());
+                    ctx.serial.write_str("\n");
+                }
+            }
+        }
         _ => ctx
             .serial
-            .write_str("usage: perfetto [info|sched [samples]]\n"),
+            .write_str("usage: perfetto [info|sched [samples]|compare [steps]]\n"),
     }
 }
 
@@ -5363,6 +5391,8 @@ fn print_perfetto_sched_trace(
     print_usize(&mut ctx.serial, export.cpu_tracks);
     ctx.serial.write_str("  threads=");
     print_usize(&mut ctx.serial, export.thread_count);
+    ctx.serial.write_str("  vm tracks=");
+    print_usize(&mut ctx.serial, export.vm_tracks);
     ctx.serial.write_str("  tick_us=");
     print_usize(&mut ctx.serial, export.tick_us as usize);
     ctx.serial.write_str("\n  tick range: ");
@@ -5371,8 +5401,11 @@ fn print_perfetto_sched_trace(
     print_usize(&mut ctx.serial, export.end_tick as usize);
     ctx.serial.write_str("  bytes=");
     print_usize(&mut ctx.serial, export.bytes);
+    ctx.serial.write_str("\n  host_shared sync: ");
     ctx.serial
-        .write_str("\nopen the JSON in https://ui.perfetto.dev or Chrome tracing\n");
+        .write_str(if export.host_synced { "ok" } else { "pending" });
+    ctx.serial
+        .write_str("\nopen host_shared/trace.pftrace in https://ui.perfetto.dev\n");
     print_sched_trace_summary(ctx, export.samples);
 }
 
@@ -9862,14 +9895,14 @@ fn cmd_sched(ctx: &mut ShellContext, args: &[&str]) {
     }
 
     ctx.serial.write_str(
-        "usage: sched [status|set <rr|edf|credit|fair>|test|sample [workers]|trace [perfetto|ui|text] [samples]]\n",
+        "usage: sched [status|set <rr|edf|credit|fair>|test|sample [workers]|trace [perfetto|compare|ui|text] [samples]]\n",
     );
 }
 
 fn cmd_sched_trace(ctx: &mut ShellContext, args: &[&str]) {
     if args.len() > 2 {
         ctx.serial
-            .write_str("usage: sched trace [perfetto|ui|text] [samples]\n");
+            .write_str("usage: sched trace [perfetto|compare|ui|text] [samples]\n");
         return;
     }
 
@@ -9879,6 +9912,10 @@ fn cmd_sched_trace(ctx: &mut ShellContext, args: &[&str]) {
         match *first {
             "perfetto" | "json" | "chrome" => {
                 mode = "perfetto";
+                sample_arg = args.get(1).copied();
+            }
+            "compare" | "policy" | "policies" => {
+                mode = "compare";
                 sample_arg = args.get(1).copied();
             }
             "ui" | "lvgl" | "render" => {
@@ -9896,10 +9933,12 @@ fn cmd_sched_trace(ctx: &mut ShellContext, args: &[&str]) {
     let requested = if let Some(value) = sample_arg {
         let Some(parsed) = parse_number(value) else {
             ctx.serial
-                .write_str("usage: sched trace [perfetto|ui|text] [samples]\n");
+                .write_str("usage: sched trace [perfetto|compare|ui|text] [samples]\n");
             return;
         };
         parsed
+    } else if mode == "compare" {
+        crate::user_level::perfetto::PERFETTO_POLICY_COMPARE_DEFAULT_STEPS
     } else if mode == "text" {
         48usize
     } else {
@@ -9908,7 +9947,7 @@ fn cmd_sched_trace(ctx: &mut ShellContext, args: &[&str]) {
 
     if requested == 0 {
         ctx.serial
-            .write_str("usage: sched trace [perfetto|ui|text] [samples > 0]\n");
+            .write_str("usage: sched trace [perfetto|compare|ui|text] [samples > 0]\n");
         return;
     }
 
@@ -9917,6 +9956,19 @@ fn cmd_sched_trace(ctx: &mut ShellContext, args: &[&str]) {
             Ok(export) => print_perfetto_sched_trace(ctx, &export),
             Err(err) => {
                 ctx.serial.write_str("sched trace: perfetto ");
+                ctx.serial.write_str(err.as_str());
+                ctx.serial.write_str("; falling back to serial summary\n");
+                print_sched_trace_summary(ctx, requested);
+            }
+        }
+        return;
+    }
+
+    if mode == "compare" {
+        match crate::user_level::perfetto::export_scheduler_policy_comparison(requested) {
+            Ok(export) => print_perfetto_sched_trace(ctx, &export),
+            Err(err) => {
+                ctx.serial.write_str("sched trace: perfetto compare ");
                 ctx.serial.write_str(err.as_str());
                 ctx.serial.write_str("; falling back to serial summary\n");
                 print_sched_trace_summary(ctx, requested);

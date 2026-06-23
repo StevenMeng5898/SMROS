@@ -26,7 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 7070
 MAX_REQUEST = 4096
-LAUNCHER_VERSION = 2
+LAUNCHER_VERSION = 3
 
 LOCK = threading.Lock()
 PROCS: dict[str, subprocess.Popen[bytes]] = {}
@@ -38,7 +38,12 @@ def parse_request(data: bytes) -> tuple[str, dict[str, str]]:
     if not lines:
         raise ValueError("empty request")
     header = lines[0]
-    if header not in {"SMROS_VM_LAUNCH 1", "SMROS_VM_STOP 1", "SMROS_VM_PING 1"}:
+    if header not in {
+        "SMROS_VM_LAUNCH 1",
+        "SMROS_VM_STOP 1",
+        "SMROS_VM_PING 1",
+        "SMROS_TRACE_SYNC 1",
+    }:
         raise ValueError("bad header")
     values: dict[str, str] = {}
     for line in lines[1:]:
@@ -159,7 +164,30 @@ def stop_qemu(values: dict[str, str]) -> str:
 
 
 def launcher_status() -> str:
-    return f"OK version={LAUNCHER_VERSION} monitor_none=1 stale_qemu_cleanup=1\n"
+    return f"OK version={LAUNCHER_VERSION} monitor_none=1 stale_qemu_cleanup=1 trace_sync=1\n"
+
+
+def sync_trace(values: dict[str, str]) -> str:
+    path = values.get("path", "")
+    if path != "/shared/trace.pftrace":
+        raise ValueError(f"unsupported trace path: {path}")
+    disk = Path(os.environ.get("FXFS_DISK", "smros-fxfs.img"))
+    if not disk.is_absolute():
+        disk = ROOT / disk
+    if not disk.exists():
+        raise FileNotFoundError(str(disk))
+    cmd = [sys.executable, "scripts/sync-host-shared.py", str(disk), "host_shared"]
+    result = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, check=False)
+    if result.stdout.strip():
+        print("smros-vm-launcher: " + result.stdout.strip(), flush=True)
+    if result.stderr.strip():
+        print("smros-vm-launcher: " + result.stderr.strip(), flush=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"sync-host-shared exited {result.returncode}")
+    target = ROOT / "host_shared" / "trace.pftrace"
+    if not target.exists():
+        raise FileNotFoundError(str(target))
+    return f"OK synced=1 path=host_shared/trace.pftrace bytes={target.stat().st_size}\n"
 
 
 def qemu_environment() -> dict[str, str]:
@@ -232,6 +260,8 @@ class Handler(socketserver.BaseRequestHandler):
                 action = "launch"
             elif header == "SMROS_VM_STOP 1":
                 action = "stop"
+            elif header == "SMROS_TRACE_SYNC 1":
+                action = "trace-sync"
             else:
                 action = "ping"
             print(
@@ -242,6 +272,8 @@ class Handler(socketserver.BaseRequestHandler):
                 response = launch_qemu(values)
             elif header == "SMROS_VM_STOP 1":
                 response = stop_qemu(values)
+            elif header == "SMROS_TRACE_SYNC 1":
+                response = sync_trace(values)
             else:
                 response = launcher_status()
         except Exception as exc:  # Keep daemon alive; report concise cause.

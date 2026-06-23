@@ -375,8 +375,11 @@ input mapping, widget scene, and FxFS output.
 `perfetto sched [samples]` and the default `sched trace` command write
 `/shared/trace.pftrace` in native Perfetto protobuf format.
 The export models SMROS scheduling as one process named `SMROS Scheduler`, one
-track per CPU, and duration slices named after the scheduled SMROS thread. Open
-the `.pftrace` file in `https://ui.perfetto.dev` to inspect the timeline.
+track per online logical CPU, idle coverage for logical CPUs without a recent
+sample, and duration slices named after the scheduled SMROS thread.
+`perfetto compare [steps]` and `sched trace compare [steps]` write a side-by-side
+RR, EDF, credit, and fair scheduler projection across all logical CPUs. Open the
+`.pftrace` file in `https://ui.perfetto.dev` to inspect the timeline.
 
 Useful commands:
 
@@ -398,6 +401,7 @@ lvgl render
 lvgl test
 perfetto info
 perfetto sched
+perfetto compare
 sched trace ui
 qmlcluster info
 qmlcluster render

@@ -10,7 +10,7 @@ HOST="${SMROS_VM_LAUNCHER_HOST:-0.0.0.0}"
 PROBE_HOST="${SMROS_VM_LAUNCHER_PROBE_HOST:-127.0.0.1}"
 LOG_FILE="${SMROS_VM_LAUNCHER_LOG:-$ROOT_DIR/smros-vm-launcher.log}"
 PID_FILE="${SMROS_VM_LAUNCHER_PID:-$ROOT_DIR/smros-vm-launcher.pid}"
-REQUIRED_VERSION=2
+REQUIRED_VERSION=3
 
 cd "$ROOT_DIR"
 
@@ -42,6 +42,8 @@ fields = dict(
 if int(fields.get("version", "0")) < required_version:
     raise SystemExit(2)
 if fields.get("monitor_none") != "1":
+    raise SystemExit(1)
+if fields.get("trace_sync") != "1":
     raise SystemExit(1)
 PY
 }
