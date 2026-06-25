@@ -223,24 +223,9 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_svc,
     },
     ShellCommand {
-        name: "porttest",
-        description: "Run Linux cat and Fuchsia /svc app ports",
-        handler: cmd_porttest,
-    },
-    ShellCommand {
-        name: "dockertest",
-        description: "Run Docker/runc compatibility surface tests",
-        handler: cmd_dockertest,
-    },
-    ShellCommand {
         name: "docker",
         description: "Run local Docker/OCI images",
         handler: cmd_docker,
-    },
-    ShellCommand {
-        name: "gemma",
-        description: "Run the native Gemma model service",
-        handler: cmd_gemma,
     },
     ShellCommand {
         name: "hermes",
@@ -251,21 +236,6 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         name: "lvgl",
         description: "Render the SMROS LVGL UI port",
         handler: cmd_lvgl,
-    },
-    ShellCommand {
-        name: "perfetto",
-        description: "Export Perfetto-compatible trace files",
-        handler: cmd_perfetto,
-    },
-    ShellCommand {
-        name: "hui",
-        description: "Open the LVGL-styled Hermes UI",
-        handler: cmd_hermes_ui,
-    },
-    ShellCommand {
-        name: "qmlcluster",
-        description: "Render the Qt/QML LVGL vehicle cluster port",
-        handler: cmd_qml_cluster,
     },
     ShellCommand {
         name: "uptime",
@@ -4556,14 +4526,6 @@ fn run_docker_compat_tests(ctx: &mut ShellContext) -> bool {
     }
 }
 
-/// Command: dockertest - Run Docker/runc compatibility smoke tests
-fn cmd_dockertest(ctx: &mut ShellContext, _args: &[&str]) {
-    ctx.serial
-        .write_str("\n=== Docker/runc Compatibility Test ===\n\n");
-    let _ = run_docker_compat_tests(ctx);
-    ctx.serial.write_str("\n");
-}
-
 /// Command: docker - Run local Docker/OCI images
 fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
     if args.is_empty() {
@@ -4982,11 +4944,6 @@ fn cmd_hermes(ctx: &mut ShellContext, args: &[&str]) {
     }
 }
 
-/// Command: hui - Open the interactive Hermes UI
-fn cmd_hermes_ui(ctx: &mut ShellContext, _args: &[&str]) {
-    run_hermes_ui_entry(ctx);
-}
-
 /// Command: lvgl - Render the SMROS LVGL compatibility UI
 fn cmd_lvgl(ctx: &mut ShellContext, args: &[&str]) {
     if args.is_empty() {
@@ -5028,283 +4985,6 @@ fn cmd_lvgl(ctx: &mut ShellContext, args: &[&str]) {
         }
         _ => print_lvgl_usage(ctx),
     }
-}
-
-/// Command: perfetto - Export SMROS traces in a Perfetto-compatible format
-fn cmd_perfetto(ctx: &mut ShellContext, args: &[&str]) {
-    if args.is_empty() || args[0] == "info" || args[0] == "status" {
-        ctx.serial.write_str("SMROS Perfetto bridge\n");
-        ctx.serial.write_str("  native service: yes\n");
-        ctx.serial.write_str("  export format: ");
-        ctx.serial
-            .write_str(crate::user_level::perfetto::PERFETTO_COMPAT_FORMAT);
-        ctx.serial.write_str("\n  trace path: ");
-        ctx.serial
-            .write_str(crate::user_level::perfetto::PERFETTO_TRACE_PATH);
-        ctx.serial.write_str("\n  tick_us: ");
-        print_usize(
-            &mut ctx.serial,
-            crate::user_level::perfetto::PERFETTO_TICK_US as usize,
-        );
-        ctx.serial.write_str("\n");
-        return;
-    }
-
-    match args[0] {
-        "sched" | "schedule" | "trace" => {
-            if args.len() > 2 {
-                ctx.serial.write_str("usage: perfetto sched [samples]\n");
-                return;
-            }
-            let requested = if let Some(value) = args.get(1) {
-                let Some(parsed) = parse_number(value) else {
-                    ctx.serial.write_str("usage: perfetto sched [samples]\n");
-                    return;
-                };
-                parsed
-            } else {
-                96usize
-            };
-            if requested == 0 {
-                ctx.serial
-                    .write_str("usage: perfetto sched [samples > 0]\n");
-                return;
-            }
-            match crate::user_level::perfetto::export_scheduler_trace(requested) {
-                Ok(export) => print_perfetto_sched_trace(ctx, &export),
-                Err(err) => {
-                    ctx.serial.write_str("perfetto sched: ");
-                    ctx.serial.write_str(err.as_str());
-                    ctx.serial.write_str("\n");
-                }
-            }
-        }
-        "compare" | "policy" | "policies" => {
-            if args.len() > 2 {
-                ctx.serial.write_str("usage: perfetto compare [steps]\n");
-                return;
-            }
-            let requested = if let Some(value) = args.get(1) {
-                let Some(parsed) = parse_number(value) else {
-                    ctx.serial.write_str("usage: perfetto compare [steps]\n");
-                    return;
-                };
-                parsed
-            } else {
-                crate::user_level::perfetto::PERFETTO_POLICY_COMPARE_DEFAULT_STEPS
-            };
-            if requested == 0 {
-                ctx.serial
-                    .write_str("usage: perfetto compare [steps > 0]\n");
-                return;
-            }
-            match crate::user_level::perfetto::export_scheduler_policy_comparison(requested) {
-                Ok(export) => print_perfetto_sched_trace(ctx, &export),
-                Err(err) => {
-                    ctx.serial.write_str("perfetto compare: ");
-                    ctx.serial.write_str(err.as_str());
-                    ctx.serial.write_str("\n");
-                }
-            }
-        }
-        _ => ctx
-            .serial
-            .write_str("usage: perfetto [info|sched [samples]|compare [steps]]\n"),
-    }
-}
-
-/// Command: qmlcluster - Render the native Qt/QML vehicle cluster port
-fn cmd_qml_cluster(ctx: &mut ShellContext, args: &[&str]) {
-    if args.is_empty() {
-        match crate::user_level::qml_cluster::render_cluster() {
-            Ok(render) => print_qml_cluster_render(ctx, &render),
-            Err(err) => {
-                ctx.serial.write_str("qmlcluster: ");
-                ctx.serial.write_str(err.as_str());
-                ctx.serial.write_str("\n");
-            }
-        }
-        return;
-    }
-
-    match args[0] {
-        "info" | "status" => match crate::user_level::qml_cluster::info() {
-            Ok(info) => print_qml_cluster_info(ctx, &info),
-            Err(err) => {
-                ctx.serial.write_str("qmlcluster: ");
-                ctx.serial.write_str(err.as_str());
-                ctx.serial.write_str("\n");
-            }
-        },
-        "render" | "show" | "ui" => match crate::user_level::qml_cluster::render_cluster() {
-            Ok(render) => print_qml_cluster_render(ctx, &render),
-            Err(err) => {
-                ctx.serial.write_str("qmlcluster: ");
-                ctx.serial.write_str(err.as_str());
-                ctx.serial.write_str("\n");
-            }
-        },
-        "source" | "qml" => match crate::user_level::qml_cluster::render_qml_source() {
-            Ok(source) => {
-                ctx.serial.write_str(source.as_str());
-                ctx.serial.write_str("\n");
-            }
-            Err(err) => {
-                ctx.serial.write_str("qmlcluster: ");
-                ctx.serial.write_str(err.as_str());
-                ctx.serial.write_str("\n");
-            }
-        },
-        "window" => match crate::user_level::qml_cluster::render_window_qml_source() {
-            Ok(source) => {
-                ctx.serial.write_str(source.as_str());
-                ctx.serial.write_str("\n");
-            }
-            Err(err) => {
-                ctx.serial.write_str("qmlcluster: ");
-                ctx.serial.write_str(err.as_str());
-                ctx.serial.write_str("\n");
-            }
-        },
-        "test" | "smoke" => {
-            ctx.serial
-                .write_str("\n=== Qt/QML Vehicle Cluster Port Test ===\n\n");
-            let _ = run_qml_cluster_tests(ctx);
-            ctx.serial.write_str("\n");
-        }
-        _ => print_qml_cluster_usage(ctx),
-    }
-}
-
-fn print_qml_cluster_usage(ctx: &mut ShellContext) {
-    ctx.serial
-        .write_str("usage: qmlcluster [info|render|source|window|test]\n");
-}
-
-fn print_qml_cluster_info(
-    ctx: &mut ShellContext,
-    info: &crate::user_level::qml_cluster::QmlClusterInfo,
-) {
-    ctx.serial.write_str("Qt/QML vehicle cluster port\n");
-    ctx.serial.write_str("  title: ");
-    ctx.serial.write_str(info.title.as_str());
-    ctx.serial.write_str("\n  qml: ");
-    ctx.serial.write_str(info.qml_path);
-    ctx.serial.write_str(" bytes=");
-    print_usize(&mut ctx.serial, info.qml_bytes);
-    ctx.serial.write_str("\n  window_qml: ");
-    ctx.serial.write_str(info.window_path);
-    ctx.serial.write_str(" bytes=");
-    print_usize(&mut ctx.serial, info.window_bytes);
-    ctx.serial.write_str("\n  image: ");
-    ctx.serial.write_str(info.image_path);
-    ctx.serial.write_str(" bytes=");
-    print_usize(&mut ctx.serial, info.image_bytes);
-    ctx.serial.write_str("\n  qml_size=");
-    print_usize(&mut ctx.serial, info.qml_width);
-    ctx.serial.write_str("x");
-    print_usize(&mut ctx.serial, info.qml_height);
-    ctx.serial.write_str(" render_size=");
-    print_usize(&mut ctx.serial, info.render_width);
-    ctx.serial.write_str("x");
-    print_usize(&mut ctx.serial, info.render_height);
-    ctx.serial.write_str("\n  speed=");
-    print_usize(&mut ctx.serial, info.speed_kph);
-    ctx.serial.write_str("kph rpm=");
-    print_usize(&mut ctx.serial, info.rpm);
-    ctx.serial.write_str(" gear=");
-    ctx.serial.write_str(info.gear.as_str());
-    ctx.serial.write_str(" mode=");
-    ctx.serial.write_str(info.drive_mode.as_str());
-    ctx.serial.write_str("\n  backend: ");
-    ctx.serial.write_str(info.backend);
-    ctx.serial.write_str(" qt_runtime=");
-    ctx.serial.write_str(info.qt_runtime);
-    ctx.serial.write_str("\n  lvgl: ");
-    ctx.serial.write_str(info.lvgl_port);
-    ctx.serial.write_str(" display=");
-    ctx.serial.write_str(info.display_backend);
-    ctx.serial
-        .write_str("\n  host: qmlscene host_shared/qml-cluster/ClusterWindow.qml");
-    ctx.serial.write_str("\n");
-}
-
-fn print_qml_cluster_render(
-    ctx: &mut ShellContext,
-    render: &crate::user_level::qml_cluster::QmlClusterRender,
-) {
-    ctx.serial.write_str(render.preview.as_str());
-    ctx.serial.write_str("image=");
-    ctx.serial.write_str(render.image_path);
-    ctx.serial.write_str(" source=");
-    ctx.serial.write_str(render.source_path);
-    ctx.serial.write_str(" size=");
-    print_usize(&mut ctx.serial, render.width);
-    ctx.serial.write_str("x");
-    print_usize(&mut ctx.serial, render.height);
-    ctx.serial.write_str(" bytes=");
-    print_usize(&mut ctx.serial, render.image_bytes);
-    ctx.serial.write_str(" widgets=");
-    print_usize(&mut ctx.serial, render.widgets);
-    ctx.serial.write_str(" renderer=");
-    ctx.serial.write_str(render.renderer);
-    ctx.serial.write_str("\n");
-}
-
-/// Command: gemma - Run the native Gemma model service
-fn cmd_gemma(ctx: &mut ShellContext, args: &[&str]) {
-    if args.is_empty() {
-        print_gemma_usage(ctx);
-        return;
-    }
-
-    match args[0] {
-        "info" | "status" => match crate::user_level::gemma::info() {
-            Ok(info) => print_gemma_info(ctx, &info),
-            Err(err) => {
-                ctx.serial.write_str("gemma: ");
-                ctx.serial.write_str(err.as_str());
-                ctx.serial.write_str("\n");
-            }
-        },
-        "test" | "smoke" => {
-            ctx.serial
-                .write_str("\n=== Gemma Model Service Test ===\n\n");
-            let _ = run_gemma_tests(ctx);
-            ctx.serial.write_str("\n");
-        }
-        "ask" | "run" => {
-            if args.len() < 2 {
-                ctx.serial.write_str("usage: gemma ask <prompt>\n");
-                return;
-            }
-            let prompt = join_args(args, 1);
-            match crate::user_level::gemma::generate(prompt.as_str(), "shell=gemma", 64) {
-                Ok(generation) => {
-                    ctx.serial.write_str("Gemma: ");
-                    ctx.serial.write_str(generation.text.as_str());
-                    ctx.serial.write_str("\n  backend=");
-                    ctx.serial.write_str(generation.backend);
-                    ctx.serial.write_str(" prompt_tokens=");
-                    print_usize(&mut ctx.serial, generation.prompt_tokens);
-                    ctx.serial.write_str(" generated_tokens=");
-                    print_usize(&mut ctx.serial, generation.generated_tokens);
-                    ctx.serial.write_str("\n");
-                }
-                Err(err) => {
-                    ctx.serial.write_str("gemma: ");
-                    ctx.serial.write_str(err.as_str());
-                    ctx.serial.write_str("\n");
-                }
-            }
-        }
-        _ => print_gemma_usage(ctx),
-    }
-}
-
-fn print_gemma_usage(ctx: &mut ShellContext) {
-    ctx.serial.write_str("usage: gemma <info|test|ask>\n");
-    ctx.serial.write_str("       gemma ask <prompt>\n");
 }
 
 fn print_lvgl_usage(ctx: &mut ShellContext) {
@@ -5406,28 +5086,6 @@ fn print_perfetto_sched_trace(
         .write_str(if export.host_synced { "ok" } else { "pending" });
     ctx.serial
         .write_str("\nopen host_shared/trace.pftrace in https://ui.perfetto.dev\n");
-    print_sched_trace_summary(ctx, export.samples);
-}
-
-fn print_gemma_info(ctx: &mut ShellContext, info: &crate::user_level::gemma::GemmaModelInfo) {
-    ctx.serial.write_str("Gemma model service\n");
-    ctx.serial.write_str("  provider: ");
-    ctx.serial.write_str(info.provider);
-    ctx.serial.write_str("\n  model: ");
-    ctx.serial.write_str(info.model);
-    ctx.serial.write_str("\n  family: ");
-    ctx.serial.write_str(info.family);
-    ctx.serial.write_str("\n  architecture: ");
-    ctx.serial.write_str(info.architecture);
-    ctx.serial.write_str("\n  backend: ");
-    ctx.serial.write_str(info.backend);
-    ctx.serial.write_str("\n  context_tokens=");
-    print_usize(&mut ctx.serial, info.context_tokens);
-    ctx.serial.write_str(" max_output_tokens=");
-    print_usize(&mut ctx.serial, info.max_output_tokens);
-    ctx.serial.write_str(" manifest=");
-    print_usize(&mut ctx.serial, info.manifest_bytes);
-    ctx.serial.write_str("B\n");
 }
 
 fn run_gemma_tests(ctx: &mut ShellContext) -> bool {
@@ -7516,14 +7174,6 @@ fn print_docker_container_detail(
         ctx.serial.write_str("\n  filters=");
         print_number(&mut ctx.serial, runtime.seccomp_filters as u32);
     }
-    ctx.serial.write_str("\n");
-}
-
-/// Command: porttest - Run ported app compatibility smoke tests
-fn cmd_porttest(ctx: &mut ShellContext, _args: &[&str]) {
-    ctx.serial
-        .write_str("\n=== Ported Linux/Fuchsia App Test ===\n\n");
-    let _ = run_ported_app_tests(ctx);
     ctx.serial.write_str("\n");
 }
 
@@ -9884,8 +9534,8 @@ fn cmd_sched(ctx: &mut ShellContext, args: &[&str]) {
         return;
     }
 
-    if args[0] == "trace" {
-        cmd_sched_trace(ctx, &args[1..]);
+    if args[0] == "perfetto" {
+        cmd_sched_perfetto(ctx, &args[1..]);
         return;
     }
 
@@ -9895,249 +9545,38 @@ fn cmd_sched(ctx: &mut ShellContext, args: &[&str]) {
     }
 
     ctx.serial.write_str(
-        "usage: sched [status|set <rr|edf|credit|fair>|test|sample [workers]|trace [perfetto|compare|ui|text] [samples]]\n",
+        "usage: sched [status|set <rr|edf|credit|fair>|test|sample [workers]|perfetto [samples]]\n",
     );
 }
 
-fn cmd_sched_trace(ctx: &mut ShellContext, args: &[&str]) {
-    if args.len() > 2 {
-        ctx.serial
-            .write_str("usage: sched trace [perfetto|compare|ui|text] [samples]\n");
+fn cmd_sched_perfetto(ctx: &mut ShellContext, args: &[&str]) {
+    if args.len() > 1 {
+        ctx.serial.write_str("usage: sched perfetto [samples]\n");
         return;
     }
 
-    let mut mode = "perfetto";
-    let mut sample_arg: Option<&str> = None;
-    if let Some(first) = args.first() {
-        match *first {
-            "perfetto" | "json" | "chrome" => {
-                mode = "perfetto";
-                sample_arg = args.get(1).copied();
-            }
-            "compare" | "policy" | "policies" => {
-                mode = "compare";
-                sample_arg = args.get(1).copied();
-            }
-            "ui" | "lvgl" | "render" => {
-                mode = "ui";
-                sample_arg = args.get(1).copied();
-            }
-            "text" | "serial" | "ascii" => {
-                mode = "text";
-                sample_arg = args.get(1).copied();
-            }
-            value => sample_arg = Some(value),
-        }
-    }
-
-    let requested = if let Some(value) = sample_arg {
+    let requested = if let Some(value) = args.first() {
         let Some(parsed) = parse_number(value) else {
-            ctx.serial
-                .write_str("usage: sched trace [perfetto|compare|ui|text] [samples]\n");
+            ctx.serial.write_str("usage: sched perfetto [samples]\n");
             return;
         };
         parsed
-    } else if mode == "compare" {
-        crate::user_level::perfetto::PERFETTO_POLICY_COMPARE_DEFAULT_STEPS
-    } else if mode == "text" {
-        48usize
     } else {
         96usize
     };
 
     if requested == 0 {
         ctx.serial
-            .write_str("usage: sched trace [perfetto|compare|ui|text] [samples > 0]\n");
+            .write_str("usage: sched perfetto [samples > 0]\n");
         return;
     }
 
-    if mode == "perfetto" {
-        match crate::user_level::perfetto::export_scheduler_trace(requested) {
-            Ok(export) => print_perfetto_sched_trace(ctx, &export),
-            Err(err) => {
-                ctx.serial.write_str("sched trace: perfetto ");
-                ctx.serial.write_str(err.as_str());
-                ctx.serial.write_str("; falling back to serial summary\n");
-                print_sched_trace_summary(ctx, requested);
-            }
-        }
-        return;
-    }
-
-    if mode == "compare" {
-        match crate::user_level::perfetto::export_scheduler_policy_comparison(requested) {
-            Ok(export) => print_perfetto_sched_trace(ctx, &export),
-            Err(err) => {
-                ctx.serial.write_str("sched trace: perfetto compare ");
-                ctx.serial.write_str(err.as_str());
-                ctx.serial.write_str("; falling back to serial summary\n");
-                print_sched_trace_summary(ctx, requested);
-            }
-        }
-        return;
-    }
-
-    if mode == "ui" {
-        match crate::user_level::lvgl::render_scheduler_trace(requested) {
-            Ok(render) => print_lvgl_sched_trace(ctx, &render),
-            Err(err) => {
-                ctx.serial.write_str("sched trace: lvgl ");
-                ctx.serial.write_str(err.as_str());
-                ctx.serial.write_str("; falling back to serial trace\n");
-                print_sched_trace_text(ctx, requested);
-            }
-        }
-        return;
-    }
-
-    print_sched_trace_text(ctx, requested);
-}
-
-fn print_sched_trace_summary(ctx: &mut ShellContext, requested: usize) {
-    let s = scheduler::scheduler();
-    let trace_len = s.trace_len();
-    if trace_len == 0 {
-        ctx.serial.write_str("scheduler trace: no samples yet\n");
-        return;
-    }
-
-    let samples = core::cmp::min(core::cmp::min(requested, trace_len), 96);
-    let start = trace_len.saturating_sub(samples);
-    let mut rows = [usize::MAX; 8];
-    let mut row_count = 0usize;
-    let mut thread_ids = [usize::MAX; 16];
-    let mut thread_count = 0usize;
-    let mut counts = [[0usize; 16]; 8];
-
-    for i in 0..samples {
-        if let Some(entry) = s.trace_entry(start + i) {
-            let row_index = find_or_insert_usize(&mut rows, &mut row_count, entry.cpu_id);
-            let thread_index =
-                find_or_insert_usize(&mut thread_ids, &mut thread_count, entry.thread_id);
-            if let (Some(row), Some(thread)) = (row_index, thread_index) {
-                counts[row][thread] = counts[row][thread].saturating_add(1);
-            }
-        }
-    }
-    sort_trace_summary(
-        &mut rows,
-        row_count,
-        &mut thread_ids,
-        thread_count,
-        &mut counts,
-    );
-
-    ctx.serial.write_str("\nreadable scheduler summary\n");
-    ctx.serial.write_str("policy=");
-    ctx.serial.write_str(s.policy().as_str());
-    ctx.serial.write_str(" samples=");
-    print_usize(&mut ctx.serial, samples);
-    ctx.serial.write_str(" newest=right\n");
-
-    for row in 0..row_count {
-        ctx.serial.write_str("cpu");
-        print_padded_number(&mut ctx.serial, rows[row] as u32, 2);
-        ctx.serial.write_str(" ");
-        let mut printed = 0usize;
-        for thread in 0..thread_count {
-            if counts[row][thread] == 0 {
-                continue;
-            }
-            if printed != 0 {
-                ctx.serial.write_str(", ");
-            }
-            print_thread_label(ctx, s, thread_ids[thread]);
-            ctx.serial.write_str(":");
-            print_usize(&mut ctx.serial, counts[row][thread]);
-            printed += 1;
-        }
-        if printed == 0 {
-            ctx.serial.write_str("idle/no samples");
-        }
-        ctx.serial.write_str("\n");
-    }
-}
-
-fn print_sched_trace_text(ctx: &mut ShellContext, requested: usize) {
-    let s = scheduler::scheduler();
-    let trace_len = s.trace_len();
-    if trace_len == 0 {
-        ctx.serial.write_str("scheduler trace: no samples yet\n");
-        return;
-    }
-
-    let samples = core::cmp::min(core::cmp::min(requested, trace_len), 64);
-    let start = trace_len.saturating_sub(samples);
-    let mut rows = [0usize; 8];
-    let mut row_count = 0usize;
-    let mut thread_ids = [usize::MAX; 16];
-    let mut thread_count = 0usize;
-
-    for i in 0..samples {
-        if let Some(entry) = s.trace_entry(start + i) {
-            if !contains_usize(&rows[..row_count], entry.cpu_id) && row_count < rows.len() {
-                rows[row_count] = entry.cpu_id;
-                row_count += 1;
-            }
-            if !contains_usize(&thread_ids[..thread_count], entry.thread_id)
-                && thread_count < thread_ids.len()
-            {
-                thread_ids[thread_count] = entry.thread_id;
-                thread_count += 1;
-            }
-        }
-    }
-    sort_usize_prefix(&mut rows, row_count);
-    sort_usize_prefix(&mut thread_ids, thread_count);
-
-    ctx.serial.write_str("\nscheduler CPU time-slice trace\n");
-    ctx.serial.write_str("policy=");
-    ctx.serial.write_str(s.policy().as_str());
-    ctx.serial.write_str(" samples=");
-    print_usize(&mut ctx.serial, samples);
-    ctx.serial.write_str(" newest=right\n");
-
-    ctx.serial.write_str("ticks ");
-    print_trace_tick_axis(ctx, s, start, samples);
-    ctx.serial.write_str("\n");
-
-    for row in 0..row_count {
-        ctx.serial.write_str("cpu");
-        print_padded_number(&mut ctx.serial, rows[row] as u32, 2);
-        ctx.serial.write_str(" ");
-        for i in 0..samples {
-            let mut symbol = b'.';
-            if let Some(entry) = s.trace_entry(start + i) {
-                if entry.cpu_id == rows[row] {
-                    symbol = trace_thread_symbol(entry.thread_id);
-                }
-            }
-            ctx.serial.write_byte(symbol);
-        }
-        ctx.serial.write_str("\n");
-    }
-
-    ctx.serial.write_str("legend ");
-    for i in 0..thread_count {
-        let thread_id = thread_ids[i];
-        ctx.serial.write_byte(trace_thread_symbol(thread_id));
-        ctx.serial.write_str("=T");
-        print_usize(&mut ctx.serial, thread_id);
-        if i + 1 < thread_count {
-            ctx.serial.write_byte(b' ');
-        }
-    }
-    ctx.serial.write_str("\n");
-}
-
-fn print_thread_label(ctx: &mut ShellContext, s: &scheduler::Scheduler, thread_id: usize) {
-    ctx.serial.write_str("T");
-    print_usize(&mut ctx.serial, thread_id);
-    if let Some(thread) = s.get_thread(crate::kernel_lowlevel::thread::ThreadId(thread_id)) {
-        if !thread.name.is_empty() {
-            ctx.serial.write_str("(");
-            ctx.serial.write_str(thread.name);
-            ctx.serial.write_str(")");
+    match crate::user_level::perfetto::export_scheduler_trace(requested) {
+        Ok(export) => print_perfetto_sched_trace(ctx, &export),
+        Err(err) => {
+            ctx.serial.write_str("sched perfetto: ");
+            ctx.serial.write_str(err.as_str());
+            ctx.serial.write_str("\n");
         }
     }
 }
@@ -10163,11 +9602,11 @@ fn cmd_sched_sample(ctx: &mut ShellContext, args: &[&str]) {
     }
 
     let result = scheduler::scheduler().start_sample_workers(workers);
-    ctx.serial.write_str("scheduler sample: created ");
+    ctx.serial.write_str("scheduler sample workers: created ");
     print_usize(&mut ctx.serial, result.created);
     ctx.serial.write_str("/");
     print_usize(&mut ctx.serial, result.requested);
-    ctx.serial.write_str(" workers across ");
+    ctx.serial.write_str(" across ");
     print_usize(&mut ctx.serial, result.online_cpus);
     ctx.serial.write_str(" logical CPUs");
     if result.failed != 0 {
@@ -10176,148 +9615,10 @@ fn cmd_sched_sample(ctx: &mut ShellContext, args: &[&str]) {
     }
     ctx.serial.write_str("\n");
     ctx.serial
-        .write_str("run `sched trace` after a few ticks for the LVGL view\n");
-    scheduler::yield_now();
-}
-
-fn print_trace_tick_axis(
-    ctx: &mut ShellContext,
-    s: &scheduler::Scheduler,
-    start: usize,
-    samples: usize,
-) {
-    for i in 0..samples {
-        let marker = if let Some(entry) = s.trace_entry(start + i) {
-            if entry.tick % 10 == 0 {
-                b'|'
-            } else if entry.tick % 5 == 0 {
-                b'+'
-            } else {
-                b'-'
-            }
-        } else {
-            b' '
-        };
-        ctx.serial.write_byte(marker);
-    }
-}
-
-fn trace_thread_symbol(thread_id: usize) -> u8 {
-    const SYMBOLS: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    if thread_id < SYMBOLS.len() {
-        SYMBOLS[thread_id]
-    } else {
-        b'*'
-    }
-}
-
-fn contains_usize(values: &[usize], needle: usize) -> bool {
-    for value in values {
-        if *value == needle {
-            return true;
-        }
-    }
-    false
-}
-
-fn find_or_insert_usize(values: &mut [usize], len: &mut usize, needle: usize) -> Option<usize> {
-    let mut index = 0usize;
-    while index < *len {
-        if values[index] == needle {
-            return Some(index);
-        }
-        index += 1;
-    }
-    if *len >= values.len() {
-        return None;
-    }
-    values[*len] = needle;
-    *len += 1;
-    Some(*len - 1)
-}
-
-fn sort_usize_prefix(values: &mut [usize], len: usize) {
-    let len = core::cmp::min(len, values.len());
-    let mut i = 1usize;
-    while i < len {
-        let value = values[i];
-        let mut j = i;
-        while j > 0 && values[j - 1] > value {
-            values[j] = values[j - 1];
-            j -= 1;
-        }
-        values[j] = value;
-        i += 1;
-    }
-}
-
-fn sort_trace_summary(
-    rows: &mut [usize; 8],
-    row_count: usize,
-    threads: &mut [usize; 16],
-    thread_count: usize,
-    counts: &mut [[usize; 16]; 8],
-) {
-    let mut row_order = [0usize; 8];
-    let mut row = 0usize;
-    while row < row_order.len() {
-        row_order[row] = row;
-        row += 1;
-    }
-    let mut i = 1usize;
-    while i < row_count {
-        let order = row_order[i];
-        let value = rows[order];
-        let mut j = i;
-        while j > 0 && rows[row_order[j - 1]] > value {
-            row_order[j] = row_order[j - 1];
-            j -= 1;
-        }
-        row_order[j] = order;
-        i += 1;
-    }
-
-    let old_rows = *rows;
-    let old_counts = *counts;
-    row = 0;
-    while row < row_count {
-        let old = row_order[row];
-        rows[row] = old_rows[old];
-        counts[row] = old_counts[old];
-        row += 1;
-    }
-
-    let mut thread_order = [0usize; 16];
-    let mut thread = 0usize;
-    while thread < thread_order.len() {
-        thread_order[thread] = thread;
-        thread += 1;
-    }
-    i = 1;
-    while i < thread_count {
-        let order = thread_order[i];
-        let value = threads[order];
-        let mut j = i;
-        while j > 0 && threads[thread_order[j - 1]] > value {
-            thread_order[j] = thread_order[j - 1];
-            j -= 1;
-        }
-        thread_order[j] = order;
-        i += 1;
-    }
-
-    let old_threads = *threads;
-    let old_counts = *counts;
-    thread = 0;
-    while thread < thread_count {
-        let old = thread_order[thread];
-        threads[thread] = old_threads[old];
-        row = 0;
-        while row < row_count {
-            counts[row][thread] = old_counts[row][old];
-            row += 1;
-        }
-        thread += 1;
+        .write_str("run `sched perfetto` to export /shared/trace.pftrace\n");
+    for slot in 0..result.created {
+        let cpu = slot % core::cmp::max(result.online_cpus, 1);
+        scheduler::yield_now_on_cpu(cpu);
     }
 }
 

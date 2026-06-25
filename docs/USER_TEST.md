@@ -155,6 +155,6 @@ The current user test code is useful, but it should be described accurately:
 - shell `testsc`: broader EL1 developer smoke test for syscall helper behavior
 - shell `components`/`fxfs`/`svc`: visibility into boot ELF load metadata, FxFS object attributes, directory entries, journal replay state, and fixed-message service IPC counters
 - shell `run`: dynamic PIE launch smoke path for FxFS-hosted AArch64 binaries with `/shared/lib` dependencies
-- shell `lvgl`/`qmlcluster`/`hui`: native LVGL-style workbench, Qt/QML cluster preview, and Hermes terminal UI surfaces
+- shell `lvgl`/`hermes ui`: native LVGL-style workbench and Hermes terminal UI surfaces
 
 That distinction matters when evaluating boot logs or shell output.

@@ -9,7 +9,11 @@ BUILD_DIR = target/$(TARGET)/release
 SHELL_SCRIPTS = $(sort $(wildcard scripts/*.sh))
 QEMU_MACHINE ?= virt,gic-version=4,virtualization=on
 QEMU_CPU ?= cortex-a710
-QEMU_SMP ?= 64
+# Top-level CPU knob. QEMU_SMP controls QEMU vCPUs; SMROS_LOGICAL_CPUS controls
+# the kernel's logical scheduler model. By default they move together.
+SMROS_CPUS ?= 4
+QEMU_SMP ?= $(SMROS_CPUS)
+SMROS_LOGICAL_CPUS ?= $(QEMU_SMP)
 QEMU_MEMORY ?= 2G
 SMOKE_QEMU_SMP ?= 4
 SMOKE_QEMU_MEMORY ?= 512M
@@ -21,7 +25,7 @@ all: build
 # Build the kernel
 build:
 	@echo "Building SMROS ARM64 Kernel..."
-	@cargo build --release
+	@SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' cargo build --release
 	@aarch64-linux-gnu-objcopy -O binary $(BUILD_DIR)/smros $(KERNEL)
 	@echo "Build complete: $(KERNEL)"
 
@@ -41,7 +45,8 @@ ut:
 	@./scripts/run-host-unit-tests.sh
 
 # QEMU system smoke test: boot until the shell prompt appears
-st: build $(FXFS_DISK)
+st: $(FXFS_DISK)
+	@$(MAKE) build QEMU_SMP='$(SMOKE_QEMU_SMP)'
 	@QEMU_MACHINE='$(QEMU_MACHINE)' QEMU_CPU='$(QEMU_CPU)' QEMU_SMP='$(SMOKE_QEMU_SMP)' QEMU_MEMORY='$(SMOKE_QEMU_MEMORY)' ./scripts/smoke-qemu.sh
 
 # Fast local confidence suite; intentionally does not boot QEMU

@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use super::lowlevel_logic;
 
 /// Maximum number of logical CPUs supported.
-pub const MAX_CPUS: usize = 64;
+pub const MAX_CPUS: usize = include!(concat!(env!("OUT_DIR"), "/build_config.rs"));
 
 /// PSCI (Power State Coordination Interface) function IDs
 /// QEMU virt machine uses PSCI 0.2+ to boot secondary CPUs

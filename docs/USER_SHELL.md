@@ -62,14 +62,9 @@ The shell currently registers these commands:
 - `mount`
 - `share`
 - `svc`
-- `porttest`
-- `dockertest`
 - `docker`
-- `gemma`
 - `hermes`
 - `lvgl`
-- `hui`
-- `qmlcluster`
 - `uptime`
 - `dhrystone`
 - `sched`
@@ -135,9 +130,9 @@ The command reports:
 - projected aggregate Dhrystones per second for the currently online logical CPUs
 - per-core and aggregate DMIPS, using the usual Dhrystone divisor of `1757`
 
-Current SMP boot marks 64 logical CPUs online for scheduling/status reporting,
-so the aggregate score is a logical 64-core projection from one measured
-Dhrystone worker. It is not yet a true parallel 64-worker benchmark.
+Current SMP boot marks the configured logical CPUs online for scheduling/status
+reporting, so the aggregate score is a logical multi-core projection from one
+measured Dhrystone worker. It is not yet a true parallel worker benchmark.
 
 ### `sched`
 
@@ -146,12 +141,11 @@ slice, and trace-buffer fill level. `sched set <rr|edf|credit|fair>` switches
 between round-robin, earliest-deadline-first, credit, and weighted fair
 scheduling. `sched test` runs the scheduler policy self-test.
 
-`sched sample [workers]` creates a bounded multi-thread scheduler workload with
-CPU affinity spread across online logical CPUs. `sched trace [perfetto|ui|text]
-[samples]` exports recent time-slice samples. The default `perfetto` mode writes
-`/shared/trace.pftrace`, a native Perfetto protobuf trace file that
-opens as CPU tracks in Perfetto UI. Use `ui` for the SMROS LVGL preview at
-`/data/lvgl/sched-trace.ppm`, or `text` for the compact serial-only timeline.
+`sched sample [workers]` creates that many bounded scheduler worker threads,
+capped by available thread slots. The sample workers are mapped across available
+logical CPUs, so `sched perfetto [samples]` exports CPU tracks with distinct
+worker thread slices to `/shared/trace.pftrace`, a native Perfetto protobuf
+trace file.
 
 ### `vm`
 
@@ -297,14 +291,10 @@ docker pull smros/hello
 docker pull http://10.0.2.2:8000/my-image.tar
 docker load /shared/my-image.tar
 docker run my/image:latest
-gemma info
-gemma test
-gemma ask test gemma on smros
 hermes info
 hermes test
 hermes skills
 hermes ui
-hui
 hermes web
 hermes web text
 hermes ask test hermes on smros
@@ -312,11 +302,6 @@ lvgl info
 lvgl render
 lvgl sched
 lvgl test
-qmlcluster info
-qmlcluster render
-qmlcluster source
-qmlcluster window
-qmlcluster test
 ```
 
 FxFS installs `/shared` from the snapshot compiled into the current kernel image during boot, then layers persistent local `/shared` changes from `smros-fxfs.img` on top. `share` lists the live FxFS view, so copied or edited `/shared` files appear there even when they were not part of the embedded `host_shared/` seed. `mount share` refreshes missing embedded seed files while preserving that local overlay. These commands do not read or write the host directory live while QEMU is already running. To see files added to the host `host_shared/` directory after boot, rebuild and restart with `make run`; then use `share` or `ls /shared`.
@@ -325,7 +310,7 @@ The current implementation is a build-time FxFS snapshot because the guest has v
 
 ### Hermes Agent Port
 
-`gemma` exposes the native SMROS Gemma model service. It installs model
+The native SMROS Gemma model service installs model
 metadata, prompt formatting, bounded generation, and generation logs under
 `/data/gemma`. Full Google Gemma weights are still too large for the default
 512 MiB SMROS/QEMU profile, so this is the SMROS-native backend boundary that a
@@ -348,13 +333,13 @@ panels, status tiles, buttons, text, and skill rows are rasterized into
 `/data/hermes/web/hermes-ui.ppm`, with an ANSI color preview printed in the
 serial shell. Use `hermes web text` for the older text-only shell view, and
 `hermes web source` only when you explicitly want to inspect the HTML source.
-For interaction, use `hermes ui` or the shorter `hui` entry. That opens a
-LVGL-styled full-screen Hermes UI on the serial terminal with a focused prompt
-textarea, action buttons, response panel, keyboard navigation, xterm mouse
-tracking, runtime status chips, and buffer meters. Type in the prompt field,
-press Enter or click Send to submit, Tab between controls, use arrow keys or
-the mouse wheel to move through the response panel, click Clear to reset the
-prompt, and press Esc or click Exit to return to the normal `smros>` shell.
+For interaction, use `hermes ui`. That opens a LVGL-styled full-screen Hermes UI
+on the serial terminal with a focused prompt textarea, action buttons, response
+panel, keyboard navigation, xterm mouse tracking, runtime status chips, and
+buffer meters. Type in the prompt field, press Enter or click Send to submit,
+Tab between controls, use arrow keys or the mouse wheel to move through the
+response panel, click Clear to reset the prompt, and press Esc or click Exit to
+return to the normal `smros>` shell.
 
 ### LVGL UI Port
 
@@ -371,27 +356,20 @@ input mapping, widget scene, and FxFS output.
 
 ### Perfetto Trace Export
 
-`perfetto` exposes a SMROS-native bridge to Perfetto-compatible trace files.
-`perfetto sched [samples]` and the default `sched trace` command write
-`/shared/trace.pftrace` in native Perfetto protobuf format.
+`sched perfetto [samples]` writes `/shared/trace.pftrace` in native Perfetto
+protobuf format.
 The export models SMROS scheduling as one process named `SMROS Scheduler`, one
-track per online logical CPU, idle coverage for logical CPUs without a recent
-sample, and duration slices named after the scheduled SMROS thread.
-`perfetto compare [steps]` and `sched trace compare [steps]` write a side-by-side
-RR, EDF, credit, and fair scheduler projection across all logical CPUs. Open the
-`.pftrace` file in `https://ui.perfetto.dev` to inspect the timeline.
+track per sampled logical CPU, and duration slices named after the scheduled
+SMROS thread. Open the `.pftrace` file in `https://ui.perfetto.dev` to inspect
+the timeline.
 
 Useful commands:
 
 ```text
-gemma info
-gemma test
-gemma ask test gemma agent on SMROS
 hermes info
 hermes test
 hermes skills
 hermes ui
-hui
 hermes web
 hermes web text
 hermes web source
@@ -399,40 +377,22 @@ hermes ask test hermes agent on SMROS
 lvgl info
 lvgl render
 lvgl test
-perfetto info
-perfetto sched
-perfetto compare
-sched trace ui
-qmlcluster info
-qmlcluster render
-qmlcluster source
-qmlcluster window
-qmlcluster test
+sched sample 8
+sched perfetto 128
 ```
 
 ### Qt/QML Vehicle Cluster Port
 
-`qmlcluster` ports a Qt/QML car instrument cluster into SMROS. Because SMROS
-does not host Qt yet, the service stores an embeddable component at
+The Qt/QML vehicle cluster port stores an embeddable component at
 `/data/qml-cluster/InstrumentCluster.qml`, a direct Qt window wrapper at
-`/data/qml-cluster/ClusterWindow.qml`, parses the dashboard properties, and
-renders the cluster through the SMROS LVGL widget layer into
+`/data/qml-cluster/ClusterWindow.qml`, parses dashboard properties, and renders
+the cluster through the SMROS LVGL widget layer into
 `/data/qml-cluster/cluster.ppm`. The generated image is a bounded preview sized
 for the current kernel heap. The default cluster shows speed, rpm, gear, drive
 mode, battery, range, turn indicators, lane/vehicle visualization, and warning
 text with LVGL-style arc meters, panels, and progress bars. On a Qt host, the
 same component opens directly with
 `qmlscene host_shared/qml-cluster/ClusterWindow.qml`.
-
-Useful commands:
-
-```text
-qmlcluster info
-qmlcluster render
-qmlcluster source
-qmlcluster window
-qmlcluster test
-```
 
 The shell `testsc` suite includes the Gemma, Hermes, LVGL, and Qt/QML cluster
 full smoke tests.

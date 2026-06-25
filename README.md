@@ -144,7 +144,7 @@ On Linux, run the host ICMP setup once before launching QEMU manually:
 qemu-system-aarch64 \
   -M virt,gic-version=4,virtualization=on \
   -cpu cortex-a710 \
-  -smp 64 \
+  -smp "${SMROS_CPUS:-8}" \
   -m 2G \
   -nographic \
   -kernel kernel8.img \
@@ -190,31 +190,20 @@ testsc
 fuzzsc
 sched set fair
 sched sample 8
-sched trace
-sched trace ui
-perfetto sched
-dockertest
+sched perfetto
 docker images
 docker pull smros/hello
 docker load /shared/my-image.tar
 docker run smros/hello
 docker ps -a
 docker logs smros0001
-gemma info
-gemma test
 hermes info
 hermes test
 hermes ui
-hui
 hermes ask test hermes agent on SMROS
 lvgl info
 lvgl render
 lvgl test
-qmlcluster info
-qmlcluster render
-qmlcluster source
-qmlcluster window
-qmlcluster test
 ```
 
 `docker load` accepts SMROS-loadable Docker archive tars already stored in FxFS,
@@ -240,7 +229,7 @@ coverage was removed.
 Explicit iteration values run exactly that many completed rounds unless a
 nonzero time budget expires first.
 
-`gemma` exposes the native SMROS Gemma model service. It installs model
+The native SMROS Gemma model service installs model
 metadata, prompt formatting, bounded generation, and generation logs under
 `/data/gemma`. Full Google Gemma weights are still too large for the default
 512 MiB SMROS/QEMU profile, so this is the SMROS-native backend boundary that a
@@ -252,9 +241,8 @@ SMROS does not execute the original package directly yet. Hermes now routes
 `ask` through the SMROS Gemma provider (`gemma/gemma-3n-e2b-smros`) and validates
 config, provider/model routing, skills, memory, tool calls, delegated subagents,
 cron metadata, `/svc`, Gemma generation, and transcript persistence under
-`/data/hermes`. `gemma test`, `hermes test`, and `testsc` cover the path.
-Use `hermes ui` or `hui` for the LVGL-styled full-screen keyboard/mouse
-terminal UI.
+`/data/hermes`. `hermes test` and `testsc` cover the path. Use `hermes ui` for
+the LVGL-styled full-screen keyboard/mouse terminal UI.
 
 `lvgl` exposes the SMROS-native LVGL-style porting layer. It models the LVGL
 display, input, tick, and widget seams with a CPU renderer, serial
@@ -262,23 +250,17 @@ pointer/keypad input mapping, scheduler ticks, and an FxFS-backed PPM display
 flush at `/data/lvgl/workbench.ppm`. Use `lvgl render` for the ANSI preview
 and generated bounded preview image, and `lvgl test` to validate the port.
 
-`perfetto` exposes a SMROS-native Perfetto bridge. `sched trace` and
-`perfetto sched` export the scheduler ring to
-`/shared/trace.pftrace` as a native Perfetto protobuf trace file
-with one track per online logical CPU, idle coverage for unsampled logical
-CPUs, and slices named after SMROS threads. Use `perfetto compare` to export
-RR, EDF, credit, and fair scheduler projections across all logical CPUs in one
-trace for side-by-side policy comparison.
+`sched perfetto [samples]` exports the scheduler ring to `/shared/trace.pftrace`
+as a native Perfetto protobuf trace file with CPU tracks and slices named after
+SMROS threads. Open `host_shared/trace.pftrace` in `https://ui.perfetto.dev`.
 
-`qmlcluster` ports a Qt/QML vehicle instrument cluster into SMROS. It installs
+The Qt/QML vehicle instrument cluster port installs
 `/data/qml-cluster/InstrumentCluster.qml` as an embeddable `Item` component and
 `/data/qml-cluster/ClusterWindow.qml` as the direct Qt window wrapper, parses
 the cluster properties (`speedKph`, `rpm`, `gear`, battery, range, turn
 indicators, and warning text), and renders the dashboard through the SMROS LVGL
 widget layer into a bounded `/data/qml-cluster/cluster.ppm` preview sized for
-the current kernel heap. Use `qmlcluster render` for the serial preview and
-generated PPM path, `qmlcluster source` to inspect the component QML, and
-`qmlcluster window` to inspect the host-runnable window QML.
+the current kernel heap. `testsc` exercises the renderer and stored QML assets.
 On a Qt host, run `qmlscene host_shared/qml-cluster/ClusterWindow.qml` to open
 the cluster directly.
 

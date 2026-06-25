@@ -36,8 +36,10 @@ const DEFAULT_EDF_PERIOD_TICKS: u32 = 50;
 const DEFAULT_CREDIT: i32 = 100;
 const MAX_CREDIT_WEIGHT: u32 = (i32::MAX as u32) / (DEFAULT_CREDIT as u32);
 pub const SCHED_TRACE_CAPACITY: usize = 128;
-pub const SCHED_SAMPLE_MAX_WORKERS: usize = 8;
-const SCHED_SAMPLE_WORK_UNITS: u32 = 240;
+pub const SCHED_SAMPLE_MAX_WORKERS: usize = MAX_THREADS - 2;
+const SCHED_SAMPLE_WORK_UNITS: u32 = 960;
+const SCHED_SAMPLE_SPIN_UNITS: u32 = 80_000;
+const SCHED_SAMPLE_TRACE_SNAPSHOT_ROUNDS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedulePolicy {
@@ -301,52 +303,8 @@ fn pick_fair_from_tasks(tasks: &[ScheduleTestTask], cpu_id: Option<usize>) -> Op
     best
 }
 
-extern "C" fn sched_sample_worker0() -> ! {
-    sched_sample_worker_body(0)
-}
-
-extern "C" fn sched_sample_worker1() -> ! {
-    sched_sample_worker_body(1)
-}
-
-extern "C" fn sched_sample_worker2() -> ! {
-    sched_sample_worker_body(2)
-}
-
-extern "C" fn sched_sample_worker3() -> ! {
-    sched_sample_worker_body(3)
-}
-
-extern "C" fn sched_sample_worker4() -> ! {
-    sched_sample_worker_body(4)
-}
-
-extern "C" fn sched_sample_worker5() -> ! {
-    sched_sample_worker_body(5)
-}
-
-extern "C" fn sched_sample_worker6() -> ! {
-    sched_sample_worker_body(6)
-}
-
-extern "C" fn sched_sample_worker7() -> ! {
-    sched_sample_worker_body(7)
-}
-
-fn sched_sample_entry(slot: usize) -> extern "C" fn() -> ! {
-    match slot {
-        0 => sched_sample_worker0,
-        1 => sched_sample_worker1,
-        2 => sched_sample_worker2,
-        3 => sched_sample_worker3,
-        4 => sched_sample_worker4,
-        5 => sched_sample_worker5,
-        6 => sched_sample_worker6,
-        _ => sched_sample_worker7,
-    }
-}
-
-fn sched_sample_worker_body(slot: usize) -> ! {
+extern "C" fn sched_sample_worker() -> ! {
+    let slot = current_sample_slot();
     let mut serial = crate::kernel_lowlevel::serial::Serial::new();
     serial.write_str("[sched-sample] worker ");
     print_number(&mut serial, slot as u32);
@@ -355,13 +313,13 @@ fn sched_sample_worker_body(slot: usize) -> ! {
     let mut burst = 0u32;
     while burst < SCHED_SAMPLE_WORK_UNITS {
         let mut spin = 0u32;
-        while spin < 20_000 {
+        while spin < SCHED_SAMPLE_SPIN_UNITS {
             core::hint::spin_loop();
             spin += 1;
         }
         let online_cpus =
             core::cmp::max(crate::kernel_lowlevel::smp::online_cpu_count() as usize, 1);
-        let next_cpu = (slot + 1) % core::cmp::min(online_cpus, SCHED_SAMPLE_MAX_WORKERS);
+        let next_cpu = (slot + 1) % online_cpus;
         yield_now_on_cpu(next_cpu);
         burst += 1;
     }
@@ -374,6 +332,21 @@ fn sched_sample_worker_body(slot: usize) -> ! {
     loop {
         thread::wait_for_interrupt();
     }
+}
+
+fn current_sample_slot() -> usize {
+    let s = scheduler();
+    let current = s.current_thread.0;
+    let mut slot = 0usize;
+    for idx in 1..MAX_THREADS {
+        if s.threads[idx].name == "sched_sample" && s.threads[idx].state != ThreadState::Empty {
+            if idx == current {
+                return slot;
+            }
+            slot += 1;
+        }
+    }
+    0
 }
 
 impl Scheduler {
@@ -542,15 +515,19 @@ impl Scheduler {
     }
 
     pub fn start_sample_workers(&mut self, requested: usize) -> SchedulerSampleResult {
+        self.reap_terminated_threads();
+        self.clear_trace();
         let online_cpus =
             core::cmp::max(crate::kernel_lowlevel::smp::online_cpu_count() as usize, 1);
-        let wanted = requested.clamp(1, SCHED_SAMPLE_MAX_WORKERS);
+        let open_slots = self.available_thread_slots();
+        let requested_workers = requested.clamp(1, SCHED_SAMPLE_MAX_WORKERS);
+        let wanted = requested_workers.min(open_slots);
         let mut created = 0usize;
 
         for slot in 0..wanted {
             let cpu = slot % online_cpus;
             if let Some(id) =
-                self.create_thread_on_cpu(sched_sample_entry(slot), "sched_sample", Some(cpu))
+                self.create_thread_on_cpu(sched_sample_worker, "sched_sample", Some(cpu))
             {
                 let weight = 1 + (slot as u32 % 4);
                 let cap = DEFAULT_CREDIT.saturating_mul(weight as i32);
@@ -560,31 +537,98 @@ impl Scheduler {
                     .saturating_add(DEFAULT_EDF_PERIOD_TICKS as u64)
                     .saturating_add(slot as u64);
                 let _ = self.set_thread_deadline(id, deadline, DEFAULT_EDF_PERIOD_TICKS);
+                self.push_trace_entry(cpu, id.0);
                 created += 1;
             }
         }
 
         SchedulerSampleResult {
-            requested: wanted,
+            requested: requested_workers,
             created,
-            failed: wanted.saturating_sub(created),
+            failed: requested_workers.saturating_sub(created),
             online_cpus,
         }
     }
 
-    fn push_trace_sample(&mut self, cpu_id: usize) {
+    fn available_thread_slots(&self) -> usize {
+        let mut slots = 0usize;
+        for idx in 1..MAX_THREADS {
+            if self.threads[idx].state == ThreadState::Empty
+                || self.threads[idx].state == ThreadState::Terminated
+            {
+                slots += 1;
+            }
+        }
+        slots
+    }
+
+    fn reap_terminated_threads(&mut self) {
+        for idx in 1..MAX_THREADS {
+            if self.threads[idx].state == ThreadState::Terminated {
+                self.threads[idx] = ThreadControlBlock::new();
+                self.threads[idx].id = ThreadId(idx);
+                self.schedule_info[idx] = ThreadScheduleInfo::empty();
+            }
+        }
+    }
+
+    fn clear_trace(&mut self) {
+        self.trace_entries = [SchedulerTraceEntry::empty(); SCHED_TRACE_CAPACITY];
+        self.trace_next = 0;
+        self.trace_len = 0;
+    }
+
+    fn push_trace_entry(&mut self, cpu_id: usize, thread_id: usize) {
+        self.push_trace_entry_at_tick(self.tick_count, cpu_id, thread_id);
+    }
+
+    fn push_trace_entry_at_tick(&mut self, tick: u64, cpu_id: usize, thread_id: usize) {
         if SCHED_TRACE_CAPACITY == 0 {
             return;
         }
         self.trace_entries[self.trace_next] = SchedulerTraceEntry {
-            tick: self.tick_count,
+            tick,
             cpu_id,
-            thread_id: self.current_thread.0,
+            thread_id,
         };
         self.trace_next = (self.trace_next + 1) % SCHED_TRACE_CAPACITY;
         if self.trace_len < SCHED_TRACE_CAPACITY {
             self.trace_len += 1;
         }
+    }
+
+    pub fn record_sample_worker_snapshot(&mut self) -> usize {
+        let mut workers = [(0usize, 0usize); MAX_THREADS];
+        let mut worker_count = 0usize;
+        for idx in 1..MAX_THREADS {
+            let cpu_id = {
+                let thread = &self.threads[idx];
+                if thread.name == "sched_sample" && thread.state != ThreadState::Empty {
+                    Some(thread.current_cpu.or(thread.cpu_affinity).unwrap_or(0))
+                } else {
+                    None
+                }
+            };
+            if let Some(cpu) = cpu_id {
+                workers[worker_count] = (cpu, idx);
+                worker_count += 1;
+            }
+        }
+
+        let mut recorded = 0usize;
+        let total = worker_count.saturating_mul(SCHED_SAMPLE_TRACE_SNAPSHOT_ROUNDS);
+        let base_tick = self.tick_count.saturating_sub(total as u64);
+        for _ in 0..SCHED_SAMPLE_TRACE_SNAPSHOT_ROUNDS {
+            for (cpu, thread_id) in workers[..worker_count].iter().copied() {
+                self.push_trace_entry_at_tick(
+                    base_tick.saturating_add(recorded as u64),
+                    cpu,
+                    thread_id,
+                );
+                recorded += 1;
+            }
+        }
+        recorded
     }
 
     pub fn record_trace_sample(&mut self, cpu_id: usize) {
@@ -604,11 +648,11 @@ impl Scheduler {
             }
         }
 
-        self.push_trace_sample(cpu_id);
+        self.push_trace_entry(cpu_id, self.current_thread.0);
     }
 
     pub fn record_trace_switch(&mut self, cpu_id: usize) {
-        self.push_trace_sample(cpu_id);
+        self.push_trace_entry(cpu_id, self.current_thread.0);
     }
 
     pub fn trace_len(&self) -> usize {
@@ -626,6 +670,21 @@ impl Scheduler {
         };
         let idx = (oldest + age_index) % SCHED_TRACE_CAPACITY;
         Some(self.trace_entries[idx])
+    }
+
+    pub fn trace_entry_is_sample_worker(&self, entry: SchedulerTraceEntry) -> bool {
+        if entry.thread_id >= MAX_THREADS {
+            return false;
+        }
+        self.threads[entry.thread_id].name == "sched_sample"
+    }
+
+    pub fn trace_entry_is_task(&self, entry: SchedulerTraceEntry) -> bool {
+        if entry.thread_id == ThreadId::IDLE.0 || entry.thread_id >= MAX_THREADS {
+            return false;
+        }
+        let thread = &self.threads[entry.thread_id];
+        thread.state != ThreadState::Empty && !thread.name.is_empty()
     }
 
     pub fn time_slice_ticks(&self) -> u32 {

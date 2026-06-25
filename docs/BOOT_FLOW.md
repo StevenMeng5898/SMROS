@@ -34,7 +34,7 @@ SMROS is normally started with:
 qemu-system-aarch64 \
   -M virt,gic-version=4,virtualization=on \
   -cpu cortex-a710 \
-  -smp 64 \
+  -smp "${SMROS_CPUS:-8}" \
   -m 2G \
   -nographic \
   -kernel kernel8.img \
@@ -207,9 +207,9 @@ heap profile rather than full-size host GUI surfaces.
 The current SMP code supports two layers:
 
 - PSCI and secondary CPU entry scaffolding in `src/kernel_lowlevel/smp.rs`
-- a logical 64-CPU scheduling model used by `boot_all_cpus()`
+- a configurable logical CPU scheduling model used by `boot_all_cpus()`
 
-In the current boot path, `boot_all_cpus()` marks all 64 logical CPUs online for scheduling and status reporting. That is enough for the current demo flow.
+In the current boot path, `boot_all_cpus()` marks the build-configured logical CPU count online for scheduling and status reporting. `make run SMROS_CPUS=8` builds and launches with 8 logical CPUs by default.
 
 ## 9. Scheduler Handoff
 

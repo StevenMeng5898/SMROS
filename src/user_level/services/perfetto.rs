@@ -54,6 +54,7 @@ const PERFETTO_EVENT_TYPE_FIELD: u32 = 9;
 const PERFETTO_EVENT_TRACK_UUID_FIELD: u32 = 11;
 const PERFETTO_EVENT_CATEGORIES_FIELD: u32 = 22;
 const PERFETTO_EVENT_NAME_FIELD: u32 = 23;
+const PERFETTO_EVENT_CORRELATION_ID_FIELD: u32 = 52;
 const PERFETTO_EVENT_TYPE_SLICE_BEGIN: u64 = 1;
 const PERFETTO_EVENT_TYPE_SLICE_END: u64 = 2;
 const PERFETTO_DEBUG_UINT_VALUE_FIELD: u32 = 3;
@@ -66,6 +67,21 @@ const SMROS_TRUSTED_PACKET_SEQUENCE_ID: u64 = 8_008;
 const PERFETTO_SEQ_INCREMENTAL_STATE_CLEARED: u64 = 1;
 const PERFETTO_POLICY_COUNT: usize = 4;
 const PERFETTO_POLICY_TASK_COUNT: usize = 8;
+const SMROS_TASK_CORRELATION_ID_BASE: u64 = 1_000;
+const PERFETTO_TASK_COLORS: &[(&str, u32); 12] = &[
+    ("#1f77b4", 0x1f77b4),
+    ("#ff7f0e", 0xff7f0e),
+    ("#2ca02c", 0x2ca02c),
+    ("#d62728", 0xd62728),
+    ("#9467bd", 0x9467bd),
+    ("#8c564b", 0x8c564b),
+    ("#e377c2", 0xe377c2),
+    ("#7f7f7f", 0x7f7f7f),
+    ("#bcbd22", 0xbcbd22),
+    ("#17becf", 0x17becf),
+    ("#aec7e8", 0xaec7e8),
+    ("#ffbb78", 0xffbb78),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PerfettoError {
@@ -109,22 +125,27 @@ pub fn export_scheduler_trace(
     prepare_storage()?;
 
     let scheduler = scheduler::scheduler();
+    scheduler.record_sample_worker_snapshot();
     let trace_len = scheduler.trace_len();
     if trace_len == 0 {
         return Err(PerfettoError::NoSamples);
     }
 
-    let samples = samples.clamp(1, SCHED_TRACE_CAPACITY).min(trace_len);
-    let start = trace_len.saturating_sub(samples);
+    let requested_samples = samples.clamp(1, SCHED_TRACE_CAPACITY).min(trace_len);
+    let start = trace_len.saturating_sub(requested_samples);
+    let filter_sample_workers = trace_window_has_sample_worker(scheduler, start, requested_samples);
     let mut entries = [SchedulerTraceEntry::empty(); SCHED_TRACE_CAPACITY];
     let mut entry_count = 0usize;
     let mut cpu_rows = [usize::MAX; scheduler::MAX_CPUS];
-    let mut cpu_count = fill_logical_cpu_rows(&mut cpu_rows);
+    let mut cpu_count = 0usize;
     let mut threads = [usize::MAX; 32];
     let mut thread_count = 0usize;
 
-    while entry_count < samples {
-        if let Some(entry) = scheduler.trace_entry(start + entry_count) {
+    for index in 0..requested_samples {
+        if let Some(entry) = scheduler.trace_entry(start + index) {
+            if !trace_entry_should_export(scheduler, entry, filter_sample_workers) {
+                continue;
+            }
             entries[entry_count] = entry;
             if !contains_usize(&cpu_rows[..cpu_count], entry.cpu_id) && cpu_count < cpu_rows.len() {
                 cpu_rows[cpu_count] = entry.cpu_id;
@@ -136,18 +157,14 @@ pub fn export_scheduler_trace(
                 threads[thread_count] = entry.thread_id;
                 thread_count += 1;
             }
+            entry_count += 1;
         }
-        entry_count += 1;
     }
+    if entry_count == 0 {
+        return Err(PerfettoError::NoSamples);
+    }
+    let (start_tick, end_tick) = trace_tick_bounds(&entries[..entry_count]);
 
-    let idle_cpu_tracks = count_idle_cpu_rows(&entries[..entry_count], &cpu_rows[..cpu_count]);
-    if idle_cpu_tracks != 0
-        && !contains_usize(&threads[..thread_count], ThreadId::IDLE.0)
-        && thread_count < threads.len()
-    {
-        threads[thread_count] = ThreadId::IDLE.0;
-        thread_count += 1;
-    }
     sort_usize_prefix(&mut cpu_rows, cpu_count);
     sort_usize_prefix(&mut threads, thread_count);
 
@@ -160,8 +177,8 @@ pub fn export_scheduler_trace(
         &threads[..thread_count],
         &vm_status.vms,
         policy,
-        entries[0].tick,
-        entries[entry_count - 1].tick,
+        start_tick,
+        end_tick,
     )?;
     write_trace_outputs(trace.as_slice())?;
     let host_synced = vm_host::sync_trace(PERFETTO_TRACE_PATH, trace.as_slice()).is_ok();
@@ -172,15 +189,13 @@ pub fn export_scheduler_trace(
         policy,
         bytes: trace.len(),
         samples: entry_count,
-        slices: entry_count
-            .saturating_add(idle_cpu_tracks)
-            .saturating_add(vm_status.vms.len()),
+        slices: entry_count.saturating_add(vm_status.vms.len()),
         cpu_tracks: cpu_count,
         thread_count,
         vm_tracks: vm_status.vms.len(),
         host_synced,
-        start_tick: entries[0].tick,
-        end_tick: entries[entry_count - 1].tick,
+        start_tick,
+        end_tick,
         tick_us: PERFETTO_TICK_US,
     })
 }
@@ -372,11 +387,6 @@ fn encode_scheduler_trace_pftrace(
     }
 
     let mut events = collect_native_trace_events(entries, base_tick)?;
-    let idle_events = collect_idle_trace_events(entries, cpu_rows, base_tick, end_tick)?;
-    events
-        .try_reserve_exact(idle_events.len())
-        .map_err(|_| PerfettoError::Encode)?;
-    events.extend_from_slice(idle_events.as_slice());
     sort_native_trace_events(events.as_mut_slice());
     for event in events {
         push_track_event_packet(&mut trace, event, policy)?;
@@ -1237,13 +1247,21 @@ fn push_track_event_packet(
         PERFETTO_EVENT_TRACK_UUID_FIELD,
         event.track_uuid,
     );
+    push_u64_field(
+        &mut track_event,
+        PERFETTO_EVENT_CORRELATION_ID_FIELD,
+        task_correlation_id(event.thread_id),
+    );
 
     if event.event_type == PERFETTO_EVENT_TYPE_SLICE_BEGIN {
         let label = thread_label(event.thread_id)?;
+        let (color_name, color_rgb) = task_color(event.thread_id);
         push_string_field(&mut track_event, PERFETTO_EVENT_CATEGORIES_FIELD, "sched");
         push_string_field(&mut track_event, PERFETTO_EVENT_NAME_FIELD, label.as_str());
         push_debug_uint(&mut track_event, "cpu", event.cpu_id as u64)?;
         push_debug_uint(&mut track_event, "thread", event.thread_id as u64)?;
+        push_debug_uint(&mut track_event, "task_color_rgb", color_rgb as u64)?;
+        push_debug_string(&mut track_event, "task_color", color_name)?;
         if let Some(name) = thread_name(event.thread_id) {
             if !name.is_empty() {
                 push_debug_string(&mut track_event, "thread_name", name)?;
@@ -1373,6 +1391,47 @@ fn trace_ts_ns(ts_us: u64) -> u64 {
     ts_us.saturating_mul(PERFETTO_NS_PER_US)
 }
 
+fn trace_tick_bounds(entries: &[SchedulerTraceEntry]) -> (u64, u64) {
+    let mut start_tick = u64::MAX;
+    let mut end_tick = 0u64;
+    for entry in entries {
+        start_tick = core::cmp::min(start_tick, entry.tick);
+        end_tick = core::cmp::max(end_tick, entry.tick);
+    }
+    if start_tick == u64::MAX {
+        (0, 0)
+    } else {
+        (start_tick, end_tick)
+    }
+}
+
+fn trace_window_has_sample_worker(
+    scheduler: &scheduler::Scheduler,
+    start: usize,
+    samples: usize,
+) -> bool {
+    for index in 0..samples {
+        if let Some(entry) = scheduler.trace_entry(start + index) {
+            if scheduler.trace_entry_is_sample_worker(entry) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn trace_entry_should_export(
+    scheduler: &scheduler::Scheduler,
+    entry: SchedulerTraceEntry,
+    filter_sample_workers: bool,
+) -> bool {
+    if filter_sample_workers {
+        scheduler.trace_entry_is_sample_worker(entry)
+    } else {
+        scheduler.trace_entry_is_task(entry)
+    }
+}
+
 fn logical_cpu_count() -> usize {
     core::cmp::max(
         1,
@@ -1476,6 +1535,14 @@ fn trace_symbol(thread_id: usize) -> u8 {
     } else {
         b'*'
     }
+}
+
+fn task_correlation_id(thread_id: usize) -> u64 {
+    SMROS_TASK_CORRELATION_ID_BASE.saturating_add(thread_id as u64)
+}
+
+fn task_color(thread_id: usize) -> (&'static str, u32) {
+    PERFETTO_TASK_COLORS[thread_id % PERFETTO_TASK_COLORS.len()]
 }
 
 fn append_usize(out: &mut String, value: usize) {

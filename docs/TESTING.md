@@ -92,7 +92,7 @@ for quick local and CI checks. Use `make st` for the boot-level smoke test, or
 - Verus: proof harnesses for selected syscall, kernel-object, low-level,
   user-level, and service logic.
 
-Future higher-value additions are a serial command runner that sends `testsc`,
-`lvgl test`, and `qmlcluster test` inside QEMU, fixture-based ELF loader tests,
-and a small CI workflow that runs `make test` on every change and `make verify`
-on scheduled or protected-branch runs.
+Future higher-value additions are a serial command runner that sends `testsc`
+and `lvgl test` inside QEMU, fixture-based ELF loader tests, and a small CI
+workflow that runs `make test` on every change and `make verify` on scheduled
+or protected-branch runs.
