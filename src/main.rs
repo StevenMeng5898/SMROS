@@ -912,11 +912,6 @@ extern "C" fn check_preemption() {
     let s = crate::kernel_objects::scheduler::scheduler();
 
     if s.should_preempt() {
-        // Reset time slice for the next thread
-        if let Some(next_id) = s.schedule_next_for_cpu(cpu_id as usize) {
-            s.reset_time_slice(next_id);
-        }
-
         // Perform context switch on this CPU
         schedule_on_cpu(cpu_id as usize);
     }

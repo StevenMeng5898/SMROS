@@ -139,7 +139,12 @@ measured Dhrystone worker. It is not yet a true parallel worker benchmark.
 `sched` shows the active scheduler policy, active thread count, tick count, time
 slice, and trace-buffer fill level. `sched set <rr|edf|credit|fair>` switches
 between round-robin, earliest-deadline-first, credit, and weighted fair
-scheduling. `sched test` runs the scheduler policy self-test.
+scheduling. `sched slice <thread_id> <ms>` sets the configured time slice in
+milliseconds for one scheduler thread. Values are rounded up to the scheduler
+tick, currently 10 ms. `sched credit <thread_id> <credit>` sets a thread's
+credit scheduler budget. `sched cpu <thread_id> <cpu|any>` pins a thread to one
+logical CPU or clears the pin. `sched priority <thread_id> <priority>` sets one
+thread's scheduler priority. `sched test` runs the scheduler policy self-test.
 
 `sched sample [workers]` creates that many bounded scheduler worker threads,
 capped by available thread slots. The sample workers are mapped across available

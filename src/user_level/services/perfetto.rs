@@ -257,6 +257,8 @@ struct PerfettoNativeEvent {
     cpu_id: usize,
     thread_id: usize,
     tick: u64,
+    duration_us: u64,
+    configured_slice_us: u64,
     sequence: usize,
 }
 
@@ -492,7 +494,15 @@ fn collect_native_trace_events(
     while index < entries.len() {
         let entry = entries[index];
         let ts_us = trace_ts_us(entry.tick, base_tick, index);
-        let dur_us = trace_duration_us(entries, index, entry.cpu_id, base_tick, ts_us);
+        let configured_slice_us = thread_configured_slice_us(entry.thread_id);
+        let dur_us = trace_duration_us(
+            entries,
+            index,
+            entry.cpu_id,
+            entry.thread_id,
+            base_tick,
+            ts_us,
+        );
         let track_uuid = cpu_track_uuid(entry.cpu_id);
         events.push(PerfettoNativeEvent {
             timestamp_ns: trace_ts_ns(ts_us),
@@ -501,6 +511,8 @@ fn collect_native_trace_events(
             cpu_id: entry.cpu_id,
             thread_id: entry.thread_id,
             tick: entry.tick,
+            duration_us: dur_us,
+            configured_slice_us,
             sequence: index.saturating_mul(2),
         });
         events.push(PerfettoNativeEvent {
@@ -510,6 +522,8 @@ fn collect_native_trace_events(
             cpu_id: entry.cpu_id,
             thread_id: entry.thread_id,
             tick: entry.tick,
+            duration_us: dur_us,
+            configured_slice_us,
             sequence: index.saturating_mul(2).saturating_add(1),
         });
         index += 1;
@@ -544,6 +558,8 @@ fn collect_idle_trace_events(
             cpu_id: *cpu_id,
             thread_id: ThreadId::IDLE.0,
             tick: base_tick,
+            duration_us,
+            configured_slice_us: duration_us,
             sequence,
         });
         sequence = sequence.saturating_add(1);
@@ -554,6 +570,8 @@ fn collect_idle_trace_events(
             cpu_id: *cpu_id,
             thread_id: ThreadId::IDLE.0,
             tick: end_tick,
+            duration_us,
+            configured_slice_us: duration_us,
             sequence,
         });
         sequence = sequence.saturating_add(1);
@@ -1269,6 +1287,12 @@ fn push_track_event_packet(
         }
         push_debug_string(&mut track_event, "policy", policy)?;
         push_debug_uint(&mut track_event, "tick", event.tick)?;
+        push_debug_uint(&mut track_event, "duration_us", event.duration_us)?;
+        push_debug_uint(
+            &mut track_event,
+            "configured_slice_us",
+            event.configured_slice_us,
+        )?;
         if event.thread_id == ThreadId::IDLE.0 {
             push_debug_string(&mut track_event, "coverage", "logical-cpu-idle")?;
         }
@@ -1367,18 +1391,28 @@ fn trace_duration_us(
     entries: &[SchedulerTraceEntry],
     index: usize,
     cpu_id: usize,
+    thread_id: usize,
     base_tick: u64,
     ts: u64,
 ) -> u64 {
+    let max_duration = thread_configured_slice_us(thread_id).max(1);
     let mut next = index + 1;
     while next < entries.len() {
         if entries[next].cpu_id == cpu_id {
             let next_ts = trace_ts_us(entries[next].tick, base_tick, next);
-            return next_ts.saturating_sub(ts).max(1);
+            return next_ts.saturating_sub(ts).clamp(1, max_duration);
         }
         next += 1;
     }
-    PERFETTO_TICK_US
+    max_duration
+}
+
+fn thread_configured_slice_us(thread_id: usize) -> u64 {
+    scheduler::scheduler()
+        .thread_schedule_info(ThreadId(thread_id))
+        .map(|info| u64::from(info.time_slice_ticks).saturating_mul(PERFETTO_TICK_US))
+        .unwrap_or(PERFETTO_TICK_US)
+        .max(1)
 }
 
 fn trace_ts_us(tick: u64, base_tick: u64, index: usize) -> u64 {

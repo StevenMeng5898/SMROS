@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 
 const SHELL_INPUT_CAPACITY: usize = 255;
 const SHELL_HISTORY_CAPACITY: usize = 16;
+const SCHED_TICK_MS: u32 = (crate::user_level::perfetto::PERFETTO_TICK_US / 1_000) as u32;
 
 /// Shell command handlers
 struct ShellCommand {
@@ -5084,8 +5085,14 @@ fn print_perfetto_sched_trace(
     ctx.serial.write_str("\n  host_shared sync: ");
     ctx.serial
         .write_str(if export.host_synced { "ok" } else { "pending" });
-    ctx.serial
-        .write_str("\nopen host_shared/trace.pftrace in https://ui.perfetto.dev\n");
+    if export.host_synced {
+        ctx.serial
+            .write_str("\nopen host_shared/trace.pftrace in https://ui.perfetto.dev\n");
+    } else {
+        ctx.serial.write_str(
+            "\ntrace is written inside /shared; run scripts/sync-host-shared.py smros-fxfs.img host_shared after QEMU exits before opening host_shared/trace.pftrace\n",
+        );
+    }
 }
 
 fn run_gemma_tests(ctx: &mut ShellContext) -> bool {
@@ -8749,6 +8756,7 @@ fn cmd_reboot(ctx: &mut ShellContext, _args: &[&str]) {
 /// Command: ps - List all processes
 fn cmd_ps(ctx: &mut ShellContext, _args: &[&str]) {
     let pm = process_manager();
+    let sched = scheduler::scheduler();
 
     ctx.serial
         .write_str("\n  PID  State      Name         Threads  Parent\n");
@@ -8767,7 +8775,8 @@ fn cmd_ps(ctx: &mut ShellContext, _args: &[&str]) {
                 for _ in 0..(12usize.saturating_sub(pcb.name.len())) {
                     ctx.serial.write_byte(b' ');
                 }
-                print_number(&mut ctx.serial, pcb.thread_count as u32);
+                let live_threads = sched.live_thread_count_for_process(pcb.pid);
+                print_number(&mut ctx.serial, live_threads as u32);
                 ctx.serial.write_str("         ");
                 print_number(&mut ctx.serial, pcb.parent_pid as u32);
                 ctx.serial.write_str("\n");
@@ -8781,6 +8790,76 @@ fn cmd_ps(ctx: &mut ShellContext, _args: &[&str]) {
     ctx.serial.write_str("  Total: ");
     print_number(&mut ctx.serial, count as u32);
     ctx.serial.write_str(" process(es)\n");
+
+    ctx.serial.write_str(
+        "\n  TID  PID  State       Name          CPU  Bind  Left(ms)  Slice(ms)  Prio  Ticks  Weight  Credit\n",
+    );
+    ctx.serial.write_str(
+        "  ───────────────────────────────────────────────────────────────────────────────────────────\n",
+    );
+    let mut thread_count = 0usize;
+    for tid in 0..crate::kernel_lowlevel::thread::MAX_THREADS {
+        let Some(thread) = sched.get_thread(crate::kernel_lowlevel::thread::ThreadId(tid)) else {
+            continue;
+        };
+        if thread.state == crate::kernel_lowlevel::thread::ThreadState::Empty {
+            continue;
+        }
+        let info = sched
+            .thread_schedule_info(crate::kernel_lowlevel::thread::ThreadId(tid))
+            .unwrap_or(crate::kernel_objects::scheduler::ThreadScheduleInfo::empty());
+
+        ctx.serial.write_str("  ");
+        print_padded_number(&mut ctx.serial, tid as u32, 3);
+        ctx.serial.write_str("  ");
+        print_padded_number(&mut ctx.serial, info.process_id as u32, 3);
+        ctx.serial.write_str("  ");
+        let state = thread.state.as_str().trim();
+        ctx.serial.write_str(state);
+        for _ in 0..(10usize.saturating_sub(state.len())) {
+            ctx.serial.write_byte(b' ');
+        }
+        ctx.serial.write_str("  ");
+        ctx.serial.write_str(thread.name);
+        for _ in 0..(12usize.saturating_sub(thread.name.len())) {
+            ctx.serial.write_byte(b' ');
+        }
+        match thread.current_cpu {
+            Some(cpu) => print_padded_number(&mut ctx.serial, cpu as u32, 3),
+            None => ctx.serial.write_str("  *"),
+        }
+        ctx.serial.write_str("  ");
+        match thread.cpu_affinity {
+            Some(cpu) => print_padded_number(&mut ctx.serial, cpu as u32, 4),
+            None => ctx.serial.write_str(" any"),
+        }
+        ctx.serial.write_str("  ");
+        print_padded_number(&mut ctx.serial, scheduler_ticks_to_ms(thread.time_slice), 8);
+        ctx.serial.write_str("  ");
+        print_padded_number(
+            &mut ctx.serial,
+            scheduler_ticks_to_ms(info.time_slice_ticks),
+            9,
+        );
+        ctx.serial.write_str("  ");
+        print_padded_number(&mut ctx.serial, info.priority as u32, 4);
+        ctx.serial.write_str("  ");
+        print_padded_number(&mut ctx.serial, thread.total_ticks, 5);
+        ctx.serial.write_str("  ");
+        print_padded_number(&mut ctx.serial, info.weight, 6);
+        ctx.serial.write_str("  ");
+        print_i32_shell(&mut ctx.serial, info.credit);
+        ctx.serial.write_str("/");
+        print_i32_shell(&mut ctx.serial, info.credit_cap);
+        ctx.serial.write_str("\n");
+        thread_count += 1;
+    }
+    ctx.serial.write_str(
+        "  ───────────────────────────────────────────────────────────────────────────────────────────\n",
+    );
+    ctx.serial.write_str("  Total: ");
+    print_usize(&mut ctx.serial, thread_count);
+    ctx.serial.write_str(" thread(s)\n");
 }
 
 /// Command: top - Show process status (interactive-like display)
@@ -9471,8 +9550,8 @@ fn cmd_sched(ctx: &mut ShellContext, args: &[&str]) {
         ctx.serial.write_str("\ntick count: ");
         print_number(&mut ctx.serial, s.get_tick_count() as u32);
         ctx.serial.write_str("\ntime slice: ");
-        print_number(&mut ctx.serial, s.time_slice_ticks());
-        ctx.serial.write_str(" ticks\n");
+        print_number(&mut ctx.serial, scheduler_ticks_to_ms(s.time_slice_ticks()));
+        ctx.serial.write_str(" ms\n");
         ctx.serial.write_str("trace samples: ");
         print_usize(&mut ctx.serial, s.trace_len());
         ctx.serial.write_str("/");
@@ -9499,6 +9578,26 @@ fn cmd_sched(ctx: &mut ShellContext, args: &[&str]) {
         ctx.serial.write_str("scheduler policy set to ");
         ctx.serial.write_str(policy.as_str());
         ctx.serial.write_str("\n");
+        return;
+    }
+
+    if args[0] == "slice" {
+        cmd_sched_slice(ctx, &args[1..]);
+        return;
+    }
+
+    if args[0] == "credit" {
+        cmd_sched_credit(ctx, &args[1..]);
+        return;
+    }
+
+    if args[0] == "cpu" {
+        cmd_sched_cpu(ctx, &args[1..]);
+        return;
+    }
+
+    if args[0] == "priority" || args[0] == "prio" {
+        cmd_sched_priority(ctx, &args[1..]);
         return;
     }
 
@@ -9545,8 +9644,168 @@ fn cmd_sched(ctx: &mut ShellContext, args: &[&str]) {
     }
 
     ctx.serial.write_str(
-        "usage: sched [status|set <rr|edf|credit|fair>|test|sample [workers]|perfetto [samples]]\n",
+        "usage: sched [status|set <rr|edf|credit|fair>|slice <thread_id> <ms>|credit <thread_id> <credit>|cpu <thread_id> <cpu|any>|priority <thread_id> <priority>|test|sample [workers]|perfetto [samples]]\n",
     );
+}
+
+fn cmd_sched_slice(ctx: &mut ShellContext, args: &[&str]) {
+    if args.len() != 2 {
+        ctx.serial
+            .write_str("usage: sched slice <thread_id> <ms>\n");
+        return;
+    }
+    let Some(thread_id) = parse_number(args[0]) else {
+        ctx.serial
+            .write_str("usage: sched slice <thread_id> <ms>\n");
+        return;
+    };
+    let Some(slice_ms) = parse_number(args[1]) else {
+        ctx.serial
+            .write_str("usage: sched slice <thread_id> <ms>\n");
+        return;
+    };
+    if slice_ms == 0 || slice_ms > u32::MAX as usize {
+        ctx.serial
+            .write_str("usage: sched slice <thread_id> <ms > 0>\n");
+        return;
+    }
+    let Some(ticks) = scheduler_ms_to_ticks(slice_ms as u32) else {
+        ctx.serial.write_str("sched slice: invalid duration\n");
+        return;
+    };
+
+    let id = crate::kernel_lowlevel::thread::ThreadId(thread_id);
+    if !scheduler::scheduler().set_thread_time_slice(id, ticks) {
+        ctx.serial.write_str("sched slice: invalid thread id\n");
+        return;
+    }
+
+    ctx.serial.write_str("scheduler thread T");
+    print_usize(&mut ctx.serial, thread_id);
+    ctx.serial.write_str(" time slice set to ");
+    print_usize(&mut ctx.serial, slice_ms);
+    ctx.serial.write_str(" ms");
+    let actual_ms = scheduler_ticks_to_ms(ticks);
+    if actual_ms != slice_ms as u32 {
+        ctx.serial.write_str(" (rounded to ");
+        print_number(&mut ctx.serial, actual_ms);
+        ctx.serial.write_str(" ms)");
+    }
+    ctx.serial.write_str("\n");
+}
+
+fn cmd_sched_credit(ctx: &mut ShellContext, args: &[&str]) {
+    if args.len() != 2 {
+        ctx.serial
+            .write_str("usage: sched credit <thread_id> <credit>\n");
+        return;
+    }
+    let Some(thread_id) = parse_number(args[0]) else {
+        ctx.serial
+            .write_str("usage: sched credit <thread_id> <credit>\n");
+        return;
+    };
+    let Some(credit) = parse_number(args[1]) else {
+        ctx.serial
+            .write_str("usage: sched credit <thread_id> <credit>\n");
+        return;
+    };
+    if credit > i32::MAX as usize {
+        ctx.serial
+            .write_str("usage: sched credit <thread_id> <0..2147483647>\n");
+        return;
+    }
+
+    let id = crate::kernel_lowlevel::thread::ThreadId(thread_id);
+    if !scheduler::scheduler().set_thread_credit_value(id, credit as i32) {
+        ctx.serial.write_str("sched credit: invalid thread id\n");
+        return;
+    }
+
+    ctx.serial.write_str("scheduler thread T");
+    print_usize(&mut ctx.serial, thread_id);
+    ctx.serial.write_str(" credit set to ");
+    print_usize(&mut ctx.serial, credit);
+    ctx.serial.write_str("\n");
+}
+
+fn cmd_sched_cpu(ctx: &mut ShellContext, args: &[&str]) {
+    if args.len() != 2 {
+        ctx.serial
+            .write_str("usage: sched cpu <thread_id> <cpu|any>\n");
+        return;
+    }
+    let Some(thread_id) = parse_number(args[0]) else {
+        ctx.serial
+            .write_str("usage: sched cpu <thread_id> <cpu|any>\n");
+        return;
+    };
+
+    let cpu_affinity = if args[1].eq_ignore_ascii_case("any")
+        || args[1].eq_ignore_ascii_case("none")
+        || args[1] == "*"
+    {
+        None
+    } else {
+        let Some(cpu) = parse_number(args[1]) else {
+            ctx.serial
+                .write_str("usage: sched cpu <thread_id> <cpu|any>\n");
+            return;
+        };
+        Some(cpu)
+    };
+
+    let id = crate::kernel_lowlevel::thread::ThreadId(thread_id);
+    if !scheduler::scheduler().set_thread_cpu_affinity(id, cpu_affinity) {
+        ctx.serial
+            .write_str("sched cpu: invalid thread id or cpu\n");
+        return;
+    }
+
+    ctx.serial.write_str("scheduler thread T");
+    print_usize(&mut ctx.serial, thread_id);
+    ctx.serial.write_str(" cpu affinity set to ");
+    if let Some(cpu) = cpu_affinity {
+        print_usize(&mut ctx.serial, cpu);
+    } else {
+        ctx.serial.write_str("any");
+    }
+    ctx.serial.write_str("\n");
+}
+
+fn cmd_sched_priority(ctx: &mut ShellContext, args: &[&str]) {
+    if args.len() != 2 {
+        ctx.serial
+            .write_str("usage: sched priority <thread_id> <priority>\n");
+        return;
+    }
+    let Some(thread_id) = parse_number(args[0]) else {
+        ctx.serial
+            .write_str("usage: sched priority <thread_id> <priority>\n");
+        return;
+    };
+    let Some(priority) = parse_number(args[1]) else {
+        ctx.serial
+            .write_str("usage: sched priority <thread_id> <priority>\n");
+        return;
+    };
+    if priority == 0 || priority > u8::MAX as usize {
+        ctx.serial
+            .write_str("usage: sched priority <thread_id> <1..255>\n");
+        return;
+    }
+
+    let id = crate::kernel_lowlevel::thread::ThreadId(thread_id);
+    if !scheduler::scheduler().set_thread_priority(id, priority as u8) {
+        ctx.serial.write_str("sched priority: invalid thread id\n");
+        return;
+    }
+
+    ctx.serial.write_str("scheduler thread T");
+    print_usize(&mut ctx.serial, thread_id);
+    ctx.serial.write_str(" priority set to ");
+    print_usize(&mut ctx.serial, priority);
+    ctx.serial.write_str("\n");
 }
 
 fn cmd_sched_perfetto(ctx: &mut ShellContext, args: &[&str]) {
@@ -9890,6 +10149,17 @@ fn parse_number(s: &str) -> Option<usize> {
     Some(result)
 }
 
+fn scheduler_ticks_to_ms(ticks: u32) -> u32 {
+    ticks.saturating_mul(SCHED_TICK_MS)
+}
+
+fn scheduler_ms_to_ticks(ms: u32) -> Option<u32> {
+    if ms == 0 || SCHED_TICK_MS == 0 {
+        return None;
+    }
+    Some(ms.saturating_add(SCHED_TICK_MS - 1) / SCHED_TICK_MS)
+}
+
 /// Print a number with padding (right-aligned)
 fn print_padded_number(serial: &mut Serial, num: u32, width: usize) {
     let mut buf = [0u8; 10];
@@ -10096,6 +10366,15 @@ fn print_zx_status_i32(serial: &mut Serial, code: i32) {
         print_number(serial, (-code) as u32);
     } else {
         print_number(serial, code as u32);
+    }
+}
+
+fn print_i32_shell(serial: &mut Serial, value: i32) {
+    if value < 0 {
+        serial.write_str("-");
+        print_number(serial, value.saturating_abs() as u32);
+    } else {
+        print_number(serial, value as u32);
     }
 }
 
@@ -10323,6 +10602,7 @@ pub fn start_user_shell() {
 
     match thread_id {
         Some(id) => {
+            let _ = scheduler().bind_thread_process(id, 1);
             serial.write_str("[SHELL] Shell thread created (ID: ");
             print_number(&mut serial, id.0 as u32);
             serial.write_str(")\n");

@@ -32,6 +32,7 @@ impl<T> SyncUnsafeCell<T> {
 /// Maximum number of CPUs for thread binding.
 pub const MAX_CPUS: usize = crate::kernel_lowlevel::smp::MAX_CPUS;
 const DEFAULT_TIME_SLICE_TICKS: u32 = 10;
+const DEFAULT_THREAD_PRIORITY: u8 = 16;
 const DEFAULT_EDF_PERIOD_TICKS: u32 = 50;
 const DEFAULT_CREDIT: i32 = 100;
 const MAX_CREDIT_WEIGHT: u32 = (i32::MAX as u32) / (DEFAULT_CREDIT as u32);
@@ -39,7 +40,7 @@ pub const SCHED_TRACE_CAPACITY: usize = 128;
 pub const SCHED_SAMPLE_MAX_WORKERS: usize = MAX_THREADS - 2;
 const SCHED_SAMPLE_WORK_UNITS: u32 = 960;
 const SCHED_SAMPLE_SPIN_UNITS: u32 = 80_000;
-const SCHED_SAMPLE_TRACE_SNAPSHOT_ROUNDS: usize = 4;
+const SCHED_SAMPLE_TRACE_SNAPSHOT_ROUNDS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedulePolicy {
@@ -81,6 +82,9 @@ pub struct ThreadScheduleInfo {
     pub credit: i32,
     pub credit_cap: i32,
     pub weight: u32,
+    pub time_slice_ticks: u32,
+    pub priority: u8,
+    pub process_id: usize,
 }
 
 impl ThreadScheduleInfo {
@@ -91,6 +95,9 @@ impl ThreadScheduleInfo {
             credit: 0,
             credit_cap: DEFAULT_CREDIT,
             weight: 1,
+            time_slice_ticks: DEFAULT_TIME_SLICE_TICKS,
+            priority: DEFAULT_THREAD_PRIORITY,
+            process_id: 1,
         }
     }
 
@@ -101,6 +108,9 @@ impl ThreadScheduleInfo {
             credit: 0,
             credit_cap: 0,
             weight: 0,
+            time_slice_ticks: DEFAULT_TIME_SLICE_TICKS,
+            priority: 0,
+            process_id: 0,
         }
     }
 }
@@ -114,6 +124,25 @@ struct ScheduleTestTask {
     total_ticks: u32,
     weight: u32,
     cpu_affinity: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct SchedulerSampleTraceWorker {
+    cpu_id: usize,
+    thread_id: usize,
+    total_ticks: u32,
+    schedule_info: ThreadScheduleInfo,
+}
+
+impl SchedulerSampleTraceWorker {
+    const fn empty() -> Self {
+        Self {
+            cpu_id: 0,
+            thread_id: 0,
+            total_ticks: 0,
+            schedule_info: ThreadScheduleInfo::empty(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -349,6 +378,236 @@ fn current_sample_slot() -> usize {
     0
 }
 
+fn priority_from_weight(weight: u32) -> u8 {
+    if weight == 0 {
+        1
+    } else if weight > u8::MAX as u32 {
+        u8::MAX
+    } else {
+        weight as u8
+    }
+}
+
+fn contains_usize(values: &[usize], value: usize) -> bool {
+    for item in values {
+        if *item == value {
+            return true;
+        }
+    }
+    false
+}
+
+fn sort_usize_prefix(values: &mut [usize], len: usize) {
+    let capped_len = core::cmp::min(len, values.len());
+    let mut index = 1usize;
+    while index < capped_len {
+        let value = values[index];
+        let mut insert = index;
+        while insert > 0 && values[insert - 1] > value {
+            values[insert] = values[insert - 1];
+            insert -= 1;
+        }
+        values[insert] = value;
+        index += 1;
+    }
+}
+
+fn count_workers_on_cpu(workers: &[SchedulerSampleTraceWorker], cpu_id: usize) -> usize {
+    let mut count = 0usize;
+    for worker in workers {
+        if worker.cpu_id == cpu_id {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn sample_trace_worker_slice_ticks(worker: SchedulerSampleTraceWorker) -> u64 {
+    u64::from(core::cmp::max(worker.schedule_info.time_slice_ticks, 1))
+}
+
+fn sample_trace_snapshot_rounds(worker_count: usize) -> usize {
+    let worker_count = core::cmp::max(worker_count, 1);
+    let rounds_that_fit = SCHED_TRACE_CAPACITY
+        .saturating_div(worker_count)
+        .saturating_sub(1);
+    core::cmp::max(
+        1,
+        core::cmp::min(SCHED_SAMPLE_TRACE_SNAPSHOT_ROUNDS, rounds_that_fit),
+    )
+}
+
+fn pick_sample_trace_worker(
+    workers: &mut [SchedulerSampleTraceWorker],
+    policy: SchedulePolicy,
+    cpu_id: usize,
+    rr_cursor_by_cpu: &mut [usize; MAX_CPUS],
+) -> Option<usize> {
+    let selected = match policy {
+        SchedulePolicy::RoundRobin => {
+            pick_sample_trace_round_robin(workers, cpu_id, rr_cursor_by_cpu)
+        }
+        SchedulePolicy::Edf => pick_sample_trace_edf(workers, cpu_id),
+        SchedulePolicy::Credit => pick_sample_trace_credit(workers, cpu_id),
+        SchedulePolicy::Fair => pick_sample_trace_fair(workers, cpu_id),
+    };
+
+    if let Some(index) = selected {
+        let run_ticks = sample_trace_worker_slice_ticks(workers[index]);
+        update_sample_trace_worker_after_pick(&mut workers[index], policy, run_ticks);
+    }
+    selected
+}
+
+fn pick_sample_trace_round_robin(
+    workers: &[SchedulerSampleTraceWorker],
+    cpu_id: usize,
+    rr_cursor_by_cpu: &mut [usize; MAX_CPUS],
+) -> Option<usize> {
+    if workers.is_empty() {
+        return None;
+    }
+    let cursor_slot = core::cmp::min(cpu_id, MAX_CPUS.saturating_sub(1));
+    let start = rr_cursor_by_cpu[cursor_slot] % workers.len();
+    let mut offset = 0usize;
+    while offset < workers.len() {
+        let index = (start + offset) % workers.len();
+        if workers[index].cpu_id == cpu_id {
+            rr_cursor_by_cpu[cursor_slot] = (index + 1) % workers.len();
+            return Some(index);
+        }
+        offset += 1;
+    }
+    None
+}
+
+fn pick_sample_trace_edf(workers: &[SchedulerSampleTraceWorker], cpu_id: usize) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_deadline = u64::MAX;
+    let mut index = 0usize;
+    while index < workers.len() {
+        let worker = workers[index];
+        if worker.cpu_id == cpu_id
+            && smros_sched_edf_better_body!(
+                worker.schedule_info.deadline_tick,
+                best.is_some(),
+                best_deadline
+            )
+        {
+            best = Some(index);
+            best_deadline = worker.schedule_info.deadline_tick;
+        }
+        index += 1;
+    }
+    best
+}
+
+fn pick_sample_trace_credit(
+    workers: &mut [SchedulerSampleTraceWorker],
+    cpu_id: usize,
+) -> Option<usize> {
+    if !sample_trace_has_credit(workers, cpu_id) {
+        refill_sample_trace_credits(workers, cpu_id);
+    }
+
+    let mut best: Option<usize> = None;
+    let mut best_credit = i32::MIN;
+    let mut index = 0usize;
+    while index < workers.len() {
+        let worker = workers[index];
+        if worker.cpu_id == cpu_id
+            && smros_sched_credit_better_body!(
+                worker.schedule_info.credit,
+                best.is_some(),
+                best_credit
+            )
+        {
+            best = Some(index);
+            best_credit = worker.schedule_info.credit;
+        }
+        index += 1;
+    }
+    best
+}
+
+fn pick_sample_trace_fair(workers: &[SchedulerSampleTraceWorker], cpu_id: usize) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_ticks = 0u32;
+    let mut best_weight = 1u32;
+    let mut index = 0usize;
+    while index < workers.len() {
+        let worker = workers[index];
+        if worker.cpu_id == cpu_id
+            && smros_sched_fair_better_body!(
+                worker.total_ticks,
+                worker.schedule_info.weight,
+                best.is_some(),
+                best_ticks,
+                best_weight
+            )
+        {
+            best = Some(index);
+            best_ticks = worker.total_ticks;
+            best_weight = worker.schedule_info.weight;
+        }
+        index += 1;
+    }
+    best
+}
+
+fn sample_trace_has_credit(workers: &[SchedulerSampleTraceWorker], cpu_id: usize) -> bool {
+    for worker in workers {
+        if worker.cpu_id == cpu_id && worker.schedule_info.credit > 0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn refill_sample_trace_credits(workers: &mut [SchedulerSampleTraceWorker], cpu_id: usize) {
+    for worker in workers {
+        if worker.cpu_id == cpu_id {
+            worker.schedule_info.credit = smros_sched_refill_credit_body!(
+                worker.schedule_info.credit_cap,
+                worker.schedule_info.weight,
+                DEFAULT_CREDIT,
+                MAX_CREDIT_WEIGHT
+            );
+        }
+    }
+}
+
+fn update_sample_trace_worker_after_pick(
+    worker: &mut SchedulerSampleTraceWorker,
+    policy: SchedulePolicy,
+    run_ticks: u64,
+) {
+    let charged_ticks = if run_ticks > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        run_ticks as u32
+    };
+    worker.total_ticks = worker.total_ticks.saturating_add(charged_ticks);
+    match policy {
+        SchedulePolicy::Edf => {
+            worker.schedule_info.deadline_tick = smros_sched_advance_deadline_body!(
+                worker.schedule_info.deadline_tick,
+                worker.schedule_info.deadline_tick,
+                worker.schedule_info.period_ticks
+            );
+        }
+        SchedulePolicy::Credit => {
+            let mut ticks = charged_ticks;
+            while ticks > 0 {
+                worker.schedule_info.credit =
+                    smros_sched_credit_after_tick_body!(worker.schedule_info.credit);
+                ticks -= 1;
+            }
+        }
+        SchedulePolicy::RoundRobin | SchedulePolicy::Fair => {}
+    }
+}
+
 impl Scheduler {
     /// Create a new scheduler instance
     pub const fn new() -> Self {
@@ -462,6 +721,9 @@ impl Scheduler {
             credit: DEFAULT_CREDIT,
             credit_cap: DEFAULT_CREDIT,
             weight: 1,
+            time_slice_ticks: self.time_slice_ticks,
+            priority: DEFAULT_THREAD_PRIORITY,
+            process_id: 1,
         };
     }
 
@@ -503,12 +765,118 @@ impl Scheduler {
         self.schedule_info[id.0].credit = credit;
         self.schedule_info[id.0].credit_cap = cap;
         self.schedule_info[id.0].weight = weight;
+        self.schedule_info[id.0].priority = priority_from_weight(weight);
+        true
+    }
+
+    pub fn set_thread_credit_value(&mut self, id: ThreadId, credit: i32) -> bool {
+        if id.0 == 0 || id.0 >= MAX_THREADS || credit < 0 {
+            return false;
+        }
+        if self.threads[id.0].state == ThreadState::Empty {
+            return false;
+        }
+        self.schedule_info[id.0].credit = credit;
+        self.schedule_info[id.0].credit_cap = credit;
         true
     }
 
     pub fn thread_schedule_info(&self, id: ThreadId) -> Option<ThreadScheduleInfo> {
         if id.0 < MAX_THREADS {
             Some(self.schedule_info[id.0])
+        } else {
+            None
+        }
+    }
+
+    pub fn set_thread_priority(&mut self, id: ThreadId, priority: u8) -> bool {
+        if id.0 == 0 || id.0 >= MAX_THREADS || priority == 0 {
+            return false;
+        }
+        if self.threads[id.0].state == ThreadState::Empty {
+            return false;
+        }
+        self.schedule_info[id.0].priority = priority;
+        self.schedule_info[id.0].weight = u32::from(priority);
+        let cap = DEFAULT_CREDIT.saturating_mul(i32::from(priority));
+        self.schedule_info[id.0].credit_cap = cap;
+        if self.schedule_info[id.0].credit > cap {
+            self.schedule_info[id.0].credit = cap;
+        }
+        true
+    }
+
+    pub fn set_thread_cpu_affinity(&mut self, id: ThreadId, cpu_id: Option<usize>) -> bool {
+        if id.0 == 0 || id.0 >= MAX_THREADS {
+            return false;
+        }
+        if self.threads[id.0].state == ThreadState::Empty {
+            return false;
+        }
+        if let Some(cpu) = cpu_id {
+            let online_cpus =
+                core::cmp::max(crate::kernel_lowlevel::smp::online_cpu_count() as usize, 1);
+            if cpu >= online_cpus || cpu >= MAX_CPUS {
+                return false;
+            }
+        }
+
+        let thread = &mut self.threads[id.0];
+        thread.cpu_affinity = cpu_id;
+        if thread.state != ThreadState::Running {
+            thread.current_cpu = cpu_id;
+        } else if let Some(cpu) = cpu_id {
+            if thread.current_cpu != Some(cpu) {
+                thread.time_slice = 0;
+            }
+        }
+        true
+    }
+
+    pub fn bind_thread_process(&mut self, id: ThreadId, process_id: usize) -> bool {
+        if id.0 >= MAX_THREADS || self.threads[id.0].state == ThreadState::Empty {
+            return false;
+        }
+        self.schedule_info[id.0].process_id = process_id;
+        true
+    }
+
+    pub fn live_thread_count_for_process(&self, process_id: usize) -> usize {
+        let mut count = 0usize;
+        for idx in 1..MAX_THREADS {
+            let thread = &self.threads[idx];
+            if thread.state != ThreadState::Empty
+                && thread.state != ThreadState::Terminated
+                && self.schedule_info[idx].process_id == process_id
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    pub fn set_thread_time_slice(&mut self, id: ThreadId, ticks: u32) -> bool {
+        if id.0 == 0 || id.0 >= MAX_THREADS || ticks == 0 {
+            return false;
+        }
+        if self.threads[id.0].state == ThreadState::Empty {
+            return false;
+        }
+        self.schedule_info[id.0].time_slice_ticks = ticks;
+        if id == self.current_thread {
+            if let Some(tcb) = self.get_thread_mut(id) {
+                tcb.time_slice = core::cmp::min(tcb.time_slice, ticks);
+                if tcb.time_slice == 0 {
+                    tcb.time_slice = ticks;
+                }
+            }
+        }
+        true
+    }
+
+    pub fn thread_time_slice_ticks(&self, id: ThreadId) -> Option<u32> {
+        if id.0 < MAX_THREADS && self.threads[id.0].state != ThreadState::Empty {
+            Some(self.schedule_info[id.0].time_slice_ticks)
         } else {
             None
         }
@@ -529,9 +897,10 @@ impl Scheduler {
             if let Some(id) =
                 self.create_thread_on_cpu(sched_sample_worker, "sched_sample", Some(cpu))
             {
-                let weight = 1 + (slot as u32 % 4);
+                let weight = 1 + ((slot / online_cpus) as u32 % 4);
                 let cap = DEFAULT_CREDIT.saturating_mul(weight as i32);
                 let _ = self.set_thread_credit(id, cap, cap, weight);
+                let _ = self.set_thread_priority(id, priority_from_weight(weight));
                 let deadline = self
                     .tick_count
                     .saturating_add(DEFAULT_EDF_PERIOD_TICKS as u64)
@@ -598,34 +967,114 @@ impl Scheduler {
     }
 
     pub fn record_sample_worker_snapshot(&mut self) -> usize {
-        let mut workers = [(0usize, 0usize); MAX_THREADS];
+        let mut workers = [SchedulerSampleTraceWorker::empty(); MAX_THREADS];
         let mut worker_count = 0usize;
         for idx in 1..MAX_THREADS {
-            let cpu_id = {
+            let worker = {
                 let thread = &self.threads[idx];
                 if thread.name == "sched_sample" && thread.state != ThreadState::Empty {
-                    Some(thread.current_cpu.or(thread.cpu_affinity).unwrap_or(0))
+                    Some(SchedulerSampleTraceWorker {
+                        cpu_id: thread.current_cpu.or(thread.cpu_affinity).unwrap_or(0),
+                        thread_id: idx,
+                        total_ticks: thread.total_ticks,
+                        schedule_info: self.schedule_info[idx],
+                    })
                 } else {
                     None
                 }
             };
-            if let Some(cpu) = cpu_id {
-                workers[worker_count] = (cpu, idx);
+            if let Some(worker) = worker {
+                workers[worker_count] = worker;
                 worker_count += 1;
             }
         }
+        if worker_count == 0 {
+            return 0;
+        }
+
+        let mut cpu_rows = [usize::MAX; MAX_CPUS];
+        let mut cpu_count = 0usize;
+        for worker in workers[..worker_count].iter().copied() {
+            if !contains_usize(&cpu_rows[..cpu_count], worker.cpu_id) && cpu_count < cpu_rows.len()
+            {
+                cpu_rows[cpu_count] = worker.cpu_id;
+                cpu_count += 1;
+            }
+        }
+        sort_usize_prefix(&mut cpu_rows, cpu_count);
+
+        let mut preview_workers = workers;
+        let mut preview_offsets = [0u64; MAX_CPUS];
+        let mut preview_rr_cursor_by_cpu = [0usize; MAX_CPUS];
+        let snapshot_rounds = sample_trace_snapshot_rounds(worker_count);
+        for worker in preview_workers[..worker_count].iter().copied() {
+            let cpu_slot = core::cmp::min(worker.cpu_id, MAX_CPUS.saturating_sub(1));
+            preview_offsets[cpu_slot] =
+                preview_offsets[cpu_slot].saturating_add(sample_trace_worker_slice_ticks(worker));
+        }
+        for _round in 0..snapshot_rounds {
+            for cpu in cpu_rows[..cpu_count].iter().copied() {
+                let cpu_slot = core::cmp::min(cpu, MAX_CPUS.saturating_sub(1));
+                let workers_on_cpu = count_workers_on_cpu(&preview_workers[..worker_count], cpu);
+                for _ in 0..workers_on_cpu {
+                    if let Some(worker_index) = pick_sample_trace_worker(
+                        &mut preview_workers[..worker_count],
+                        self.policy,
+                        cpu,
+                        &mut preview_rr_cursor_by_cpu,
+                    ) {
+                        let worker = preview_workers[worker_index];
+                        preview_offsets[cpu_slot] = preview_offsets[cpu_slot]
+                            .saturating_add(sample_trace_worker_slice_ticks(worker));
+                    }
+                }
+            }
+        }
+
+        let mut total_ticks = 1u64;
+        for offset in preview_offsets {
+            total_ticks = core::cmp::max(total_ticks, offset);
+        }
+        let base_tick = self.tick_count.saturating_sub(total_ticks);
+        self.clear_trace();
 
         let mut recorded = 0usize;
-        let total = worker_count.saturating_mul(SCHED_SAMPLE_TRACE_SNAPSHOT_ROUNDS);
-        let base_tick = self.tick_count.saturating_sub(total as u64);
-        for _ in 0..SCHED_SAMPLE_TRACE_SNAPSHOT_ROUNDS {
-            for (cpu, thread_id) in workers[..worker_count].iter().copied() {
-                self.push_trace_entry_at_tick(
-                    base_tick.saturating_add(recorded as u64),
-                    cpu,
-                    thread_id,
-                );
-                recorded += 1;
+        let mut cpu_trace_offsets = [0u64; MAX_CPUS];
+        for worker in workers[..worker_count].iter().copied() {
+            let cpu_slot = core::cmp::min(worker.cpu_id, MAX_CPUS.saturating_sub(1));
+            self.push_trace_entry_at_tick(
+                base_tick.saturating_add(cpu_trace_offsets[cpu_slot]),
+                worker.cpu_id,
+                worker.thread_id,
+            );
+            cpu_trace_offsets[cpu_slot] =
+                cpu_trace_offsets[cpu_slot].saturating_add(sample_trace_worker_slice_ticks(worker));
+            recorded += 1;
+        }
+
+        let mut rr_cursor_by_cpu = [0usize; MAX_CPUS];
+        for _round in 0..snapshot_rounds {
+            for cpu in cpu_rows[..cpu_count].iter().copied() {
+                let cpu_slot = core::cmp::min(cpu, MAX_CPUS.saturating_sub(1));
+                let workers_on_cpu = count_workers_on_cpu(&workers[..worker_count], cpu);
+                for _ in 0..workers_on_cpu {
+                    if let Some(worker_index) = pick_sample_trace_worker(
+                        &mut workers[..worker_count],
+                        self.policy,
+                        cpu,
+                        &mut rr_cursor_by_cpu,
+                    ) {
+                        let worker = workers[worker_index];
+                        self.push_trace_entry_at_tick(
+                            base_tick.saturating_add(cpu_trace_offsets[cpu_slot]),
+                            cpu,
+                            worker.thread_id,
+                        );
+                        cpu_trace_offsets[cpu_slot] = cpu_trace_offsets[cpu_slot]
+                            .saturating_add(sample_trace_worker_slice_ticks(worker));
+                        recorded += 1;
+                    }
+                }
             }
         }
         recorded
@@ -639,7 +1088,10 @@ impl Scheduler {
                 self.trace_next - 1
             };
             let last = self.trace_entries[last_idx];
-            let min_tick_delta = core::cmp::max(self.time_slice_ticks as u64, 1);
+            let min_tick_delta = self
+                .thread_time_slice_ticks(self.current_thread)
+                .unwrap_or(self.time_slice_ticks)
+                .max(1) as u64;
             if last.cpu_id == cpu_id
                 && last.thread_id == self.current_thread.0
                 && self.tick_count.saturating_sub(last.tick) < min_tick_delta
@@ -973,7 +1425,7 @@ impl Scheduler {
                 tcb.time_slice = smros_sched_time_slice_after_tick_body!(tcb.time_slice);
             }
 
-            tcb.total_ticks += 1;
+            tcb.total_ticks = tcb.total_ticks.saturating_add(1);
             if current.0 != 0 && policy == SchedulePolicy::Edf && tcb.time_slice == 0 {
                 force_preempt = true;
             }
@@ -1037,9 +1489,20 @@ impl Scheduler {
 
     /// Reset time slice for a thread
     pub fn reset_time_slice(&mut self, id: ThreadId) {
-        let time_slice = self.time_slice_ticks;
+        let time_slice = self
+            .thread_time_slice_ticks(id)
+            .unwrap_or(self.time_slice_ticks);
         if let Some(tcb) = self.get_thread_mut(id) {
             tcb.time_slice = time_slice;
+        }
+    }
+
+    fn charge_current_runtime(&mut self, units: u32) {
+        if self.current_thread.0 == ThreadId::IDLE.0 {
+            return;
+        }
+        if let Some(tcb) = self.get_thread_mut(self.current_thread) {
+            tcb.total_ticks = tcb.total_ticks.saturating_add(units);
         }
     }
 
@@ -1130,6 +1593,8 @@ impl Scheduler {
                 print_i32(serial, self.schedule_info[i].credit_cap);
                 serial.write_str(" weight=");
                 print_number(serial, self.schedule_info[i].weight);
+                serial.write_str(" slice=");
+                print_number(serial, self.schedule_info[i].time_slice_ticks);
                 serial.write_str("\n");
             }
         }
@@ -1169,13 +1634,17 @@ pub fn schedule() {
         let current_tcb_ptr = s.get_thread_mut(current_id).unwrap() as *mut ThreadControlBlock;
         let next_tcb_ptr = s.get_thread_mut(next_id).unwrap() as *mut ThreadControlBlock;
 
+        let next_time_slice = s
+            .thread_time_slice_ticks(next_id)
+            .unwrap_or(s.time_slice_ticks);
+
         // Update states through raw pointers
         unsafe {
             if (*current_tcb_ptr).state == ThreadState::Running {
                 (*current_tcb_ptr).state = ThreadState::Ready;
             }
             (*next_tcb_ptr).state = ThreadState::Running;
-            (*next_tcb_ptr).time_slice = s.time_slice_ticks;
+            (*next_tcb_ptr).time_slice = next_time_slice;
             (*next_tcb_ptr).current_cpu = Some(0);
         }
 
@@ -1212,11 +1681,15 @@ pub fn start_first_thread() -> ! {
         let current_tcb_ptr = s.get_thread_mut(current_id).unwrap() as *mut ThreadControlBlock;
         let next_tcb_ptr = s.get_thread_mut(next_id).unwrap() as *mut ThreadControlBlock;
 
+        let next_time_slice = s
+            .thread_time_slice_ticks(next_id)
+            .unwrap_or(s.time_slice_ticks);
+
         // Update states through raw pointers
         unsafe {
             (*current_tcb_ptr).state = ThreadState::Ready;
             (*next_tcb_ptr).state = ThreadState::Running;
-            (*next_tcb_ptr).time_slice = s.time_slice_ticks;
+            (*next_tcb_ptr).time_slice = next_time_slice;
             (*next_tcb_ptr).current_cpu = Some(0);
         }
 
@@ -1291,6 +1764,7 @@ fn print_i32(serial: &mut crate::kernel_lowlevel::serial::Serial, value: i32) {
 pub fn yield_now() {
     // Reset time slice to force preemption
     let s = scheduler();
+    s.charge_current_runtime(1);
     if let Some(tcb) = s.get_thread_mut(s.current_thread) {
         tcb.time_slice = 0;
     }
@@ -1300,6 +1774,7 @@ pub fn yield_now() {
 /// Yield the current thread's time slice on a specific CPU
 pub fn yield_now_on_cpu(cpu_id: usize) {
     let s = scheduler();
+    s.charge_current_runtime(1);
     if let Some(tcb) = s.get_thread_mut(s.current_thread) {
         tcb.time_slice = 0;
     }
@@ -1323,13 +1798,17 @@ pub fn schedule_on_cpu(cpu_id: usize) {
         let current_tcb_ptr = s.get_thread_mut(current_id).unwrap() as *mut ThreadControlBlock;
         let next_tcb_ptr = s.get_thread_mut(next_id).unwrap() as *mut ThreadControlBlock;
 
+        let next_time_slice = s
+            .thread_time_slice_ticks(next_id)
+            .unwrap_or(s.time_slice_ticks);
+
         // Update states through raw pointers
         unsafe {
             if (*current_tcb_ptr).state == ThreadState::Running {
                 (*current_tcb_ptr).state = ThreadState::Ready;
             }
             (*next_tcb_ptr).state = ThreadState::Running;
-            (*next_tcb_ptr).time_slice = s.time_slice_ticks;
+            (*next_tcb_ptr).time_slice = next_time_slice;
             // Mark which logical CPU this thread is running on
             (*next_tcb_ptr).current_cpu = Some(cpu_id);
         }
@@ -1374,11 +1853,15 @@ pub fn start_first_thread_for_cpu(cpu_id: usize) -> ! {
         let current_tcb_ptr = s.get_thread_mut(current_id).unwrap() as *mut ThreadControlBlock;
         let next_tcb_ptr = s.get_thread_mut(next_id).unwrap() as *mut ThreadControlBlock;
 
+        let next_time_slice = s
+            .thread_time_slice_ticks(next_id)
+            .unwrap_or(s.time_slice_ticks);
+
         // Update states through raw pointers
         unsafe {
             (*current_tcb_ptr).state = ThreadState::Ready;
             (*next_tcb_ptr).state = ThreadState::Running;
-            (*next_tcb_ptr).time_slice = s.time_slice_ticks;
+            (*next_tcb_ptr).time_slice = next_time_slice;
             (*next_tcb_ptr).current_cpu = Some(cpu_id);
         }
 

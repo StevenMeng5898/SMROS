@@ -335,6 +335,7 @@ pub fn bind_primary_thread(pid: usize, thread_id: ThreadId) -> bool {
         return false;
     };
     process.primary_thread_id = Some(thread_id.as_usize());
+    let _ = crate::kernel_objects::scheduler::scheduler().bind_thread_process(thread_id, pid);
     if let Some(pcb) = process_manager().get_process_by_pid_mut(pid) {
         pcb.thread_count = pcb.thread_count.saturating_add(1);
     }
