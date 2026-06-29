@@ -85,7 +85,7 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
     },
     ShellCommand {
         name: "ps",
-        description: "List all processes",
+        description: "List processes; ps -a shows memory maps",
         handler: cmd_ps,
     },
     ShellCommand {
@@ -8753,8 +8753,17 @@ fn cmd_reboot(ctx: &mut ShellContext, _args: &[&str]) {
     crate::kernel_lowlevel::smp::system_reset();
 }
 
-/// Command: ps - List all processes
-fn cmd_ps(ctx: &mut ShellContext, _args: &[&str]) {
+/// Command: ps - List processes; ps -a also shows memory maps
+fn cmd_ps(ctx: &mut ShellContext, args: &[&str]) {
+    let show_memory_maps = if args.is_empty() {
+        false
+    } else if args.len() == 1 && (args[0] == "-a" || args[0] == "--all") {
+        true
+    } else {
+        ctx.serial.write_str("usage: ps [-a]\n");
+        return;
+    };
+
     let pm = process_manager();
     let sched = scheduler::scheduler();
     let tick = sched.get_tick_count();
@@ -8870,6 +8879,273 @@ fn cmd_ps(ctx: &mut ShellContext, _args: &[&str]) {
     ctx.serial.write_str("  Total: ");
     print_usize(&mut ctx.serial, thread_count);
     ctx.serial.write_str(" thread(s)\n");
+
+    if show_memory_maps {
+        print_ps_memory_maps(ctx, pm, &vm_status);
+    }
+}
+
+fn print_ps_memory_maps(
+    ctx: &mut ShellContext,
+    pm: &crate::kernel_lowlevel::memory::ProcessManager,
+    vm_status: &crate::kernel_objects::hypervisor::HypervisorStatus,
+) {
+    let snapshot = crate::syscall::memory_map_snapshot();
+
+    ctx.serial
+        .write_str("\n  Process Memory Map / segments, pages, page tables (-a)\n");
+    ctx.serial.write_str(
+        "  Notes: PCB segments/pages are per process; Linux mmap and Zircon VMAR tables are compat-global models.\n",
+    );
+    ctx.serial.write_str(
+        "         PCB page rows model normal process VA->PA; VM rows model guest stage-2 IPA->PA metadata only.\n",
+    );
+    ctx.serial.write_str(
+        "         ARM64 4KB granule, TTBR0/TTBR1 roots; PageTableManager currently stores indexed entries, not a live walked 4-level tree.\n",
+    );
+    ctx.serial.write_str(
+        "         Page rows show PGD/PUD/PMD indexes when used; PTE# is the PCB PageEntry slot, and PFN is its content.\n",
+    );
+
+    print_ps_process_memory_table(ctx, pm);
+    print_ps_segment_table(ctx, pm);
+    print_ps_page_table(ctx, pm);
+    print_ps_vm_stage2_table(ctx, vm_status);
+    print_ps_linux_mappings(ctx, &snapshot);
+    print_ps_shared_memory(ctx, &snapshot);
+    print_ps_zircon_mappings(ctx, &snapshot);
+}
+
+fn print_ps_process_memory_table(
+    ctx: &mut ShellContext,
+    pm: &crate::kernel_lowlevel::memory::ProcessManager,
+) {
+    ctx.serial.write_str("\n  Process address spaces\n");
+    ctx.serial.write_str(
+        "  PID  State       Parent  Name                  Heap(cur/max)       Stack(cur/top)      Pages\n",
+    );
+    ctx.serial.write_str(
+        "  ---  ----------  ------  --------------------  ------------------  ------------------  -----\n",
+    );
+
+    for i in 0..crate::kernel_lowlevel::memory::MAX_PROCESSES {
+        let Some(pcb) = pm.get_process(i) else {
+            continue;
+        };
+        if pcb.state == ProcessState::Empty {
+            continue;
+        }
+
+        ctx.serial.write_str("  ");
+        print_padded_usize(&mut ctx.serial, pcb.pid, 3);
+        ctx.serial.write_str("  ");
+        print_padded_str(&mut ctx.serial, pcb.state.as_str().trim(), 10);
+        ctx.serial.write_str("  ");
+        print_padded_usize(&mut ctx.serial, pcb.parent_pid, 6);
+        ctx.serial.write_str("  ");
+        print_padded_str(&mut ctx.serial, pcb.name, 20);
+        ctx.serial.write_str("  0x");
+        print_hex(&mut ctx.serial, pcb.address_space.heap_current as u64);
+        ctx.serial.write_str("/0x");
+        print_hex(&mut ctx.serial, pcb.address_space.heap_max as u64);
+        pad_to_width(
+            &mut ctx.serial,
+            hex_pair_width(
+                pcb.address_space.heap_current as u64,
+                pcb.address_space.heap_max as u64,
+            ),
+            18,
+        );
+        ctx.serial.write_str("  0x");
+        print_hex(&mut ctx.serial, pcb.address_space.stack_current as u64);
+        ctx.serial.write_str("/0x");
+        print_hex(&mut ctx.serial, pcb.address_space.stack_top as u64);
+        pad_to_width(
+            &mut ctx.serial,
+            hex_pair_width(
+                pcb.address_space.stack_current as u64,
+                pcb.address_space.stack_top as u64,
+            ),
+            18,
+        );
+        ctx.serial.write_str("  ");
+        print_usize(&mut ctx.serial, pcb.address_space.valid_page_count);
+        ctx.serial.write_str("/");
+        print_usize(
+            &mut ctx.serial,
+            crate::kernel_lowlevel::memory::MAX_PAGES_PER_PROCESS,
+        );
+        ctx.serial.write_str("\n");
+    }
+}
+
+fn print_ps_segment_table(
+    ctx: &mut ShellContext,
+    pm: &crate::kernel_lowlevel::memory::ProcessManager,
+) {
+    ctx.serial.write_str("\n  Segments\n");
+    ctx.serial
+        .write_str("  PID  Segment   Range                  Perm  Pages  Shared  Dirty\n");
+    ctx.serial
+        .write_str("  ---  --------  ---------------------  ----  -----  ------  -----------\n");
+
+    for i in 0..crate::kernel_lowlevel::memory::MAX_PROCESSES {
+        let Some(pcb) = pm.get_process(i) else {
+            continue;
+        };
+        if pcb.state == ProcessState::Empty {
+            continue;
+        }
+
+        let address_space = &pcb.address_space;
+        for seg_idx in 0..address_space.valid_segment_count {
+            let segment = &address_space.segments[seg_idx];
+            if !segment.valid {
+                continue;
+            }
+
+            ctx.serial.write_str("  ");
+            print_padded_usize(&mut ctx.serial, pcb.pid, 3);
+            ctx.serial.write_str("  ");
+            print_padded_str(&mut ctx.serial, segment.seg_type.as_str(), 8);
+            ctx.serial.write_str("  0x");
+            print_hex(&mut ctx.serial, segment.base_vaddr as u64);
+            ctx.serial.write_str("-0x");
+            print_hex(&mut ctx.serial, segment.end_vaddr() as u64);
+            pad_to_width(
+                &mut ctx.serial,
+                hex_range_width(segment.base_vaddr as u64, segment.end_vaddr() as u64),
+                21,
+            );
+            ctx.serial.write_str("  ");
+            print_padded_str(&mut ctx.serial, segment.permissions.as_str(), 4);
+            ctx.serial.write_str("  ");
+            print_padded_usize(&mut ctx.serial, segment.page_count, 5);
+            ctx.serial.write_str("  no      not-tracked\n");
+        }
+    }
+}
+
+fn print_ps_page_table(
+    ctx: &mut ShellContext,
+    pm: &crate::kernel_lowlevel::memory::ProcessManager,
+) {
+    ctx.serial.write_str("\n  Pages / process VA->PA\n");
+    ctx.serial.write_str(
+        "  PID  Segment   VA          PGD  PUD  PMD  PTE#  PA          PFN     Flags  Dirty\n",
+    );
+    ctx.serial.write_str(
+        "  ---  --------  ----------  ---  ---  ---  ----  ----------  ------  -----  -----------\n",
+    );
+
+    for i in 0..crate::kernel_lowlevel::memory::MAX_PROCESSES {
+        let Some(pcb) = pm.get_process(i) else {
+            continue;
+        };
+        if pcb.state == ProcessState::Empty {
+            continue;
+        }
+
+        let mut page_index = 0usize;
+        for seg_idx in 0..pcb.address_space.valid_segment_count {
+            let segment = &pcb.address_space.segments[seg_idx];
+            if !segment.valid {
+                continue;
+            }
+
+            for page_offset in 0..segment.page_count {
+                let page_slot = page_index.saturating_add(page_offset);
+                if page_slot >= pcb.address_space.valid_page_count {
+                    break;
+                }
+                let page = pcb.address_space.pages[page_slot];
+                if !page.valid {
+                    continue;
+                }
+                let vaddr = segment
+                    .base_vaddr
+                    .saturating_add(page_offset.saturating_mul(PAGE_SIZE));
+                let pgd = ps_arm64_pgd_index(vaddr);
+                let pmd = ps_smros_indexed_pmd(vaddr);
+                let paddr = page.pfn.saturating_mul(PAGE_SIZE as u64);
+                ctx.serial.write_str("  ");
+                print_padded_usize(&mut ctx.serial, pcb.pid, 3);
+                ctx.serial.write_str("  ");
+                print_padded_str(&mut ctx.serial, segment.seg_type.as_str(), 8);
+                ctx.serial.write_str("  ");
+                ctx.serial.write_str("0x");
+                print_hex(&mut ctx.serial, vaddr as u64);
+                pad_to_width(&mut ctx.serial, hex_value_width(vaddr as u64), 10);
+                ctx.serial.write_str("  ");
+                print_padded_usize(&mut ctx.serial, pgd, 3);
+                ctx.serial.write_str("  ");
+                print_padded_str(&mut ctx.serial, "--", 3);
+                ctx.serial.write_str("  ");
+                print_padded_usize(&mut ctx.serial, pmd, 3);
+                ctx.serial.write_str("  ");
+                print_padded_usize(&mut ctx.serial, page_slot, 4);
+                ctx.serial.write_str("  0x");
+                print_hex(&mut ctx.serial, paddr);
+                pad_to_width(&mut ctx.serial, hex_value_width(paddr), 10);
+                ctx.serial.write_str("  ");
+                print_padded_u64(&mut ctx.serial, page.pfn, 6);
+                ctx.serial.write_str("  ");
+                print_page_entry_flags(ctx, page);
+                ctx.serial.write_str("   not-tracked\n");
+            }
+            page_index = page_index.saturating_add(segment.page_count);
+        }
+    }
+}
+
+fn print_ps_vm_stage2_table(
+    ctx: &mut ShellContext,
+    status: &crate::kernel_objects::hypervisor::HypervisorStatus,
+) {
+    ctx.serial
+        .write_str("\n  Stage-2 IPA->PA / hypervisor metadata\n");
+    ctx.serial.write_str(
+        "  PID  VM                    State     IPA Range             PA          Guest       VMAR        VCPU        Memory(bytes)  Stage2\n",
+    );
+    ctx.serial.write_str(
+        "  ---  --------------------  --------  ---------------------  ----------  ----------  ----------  ----------  -------------  ----------\n",
+    );
+
+    let mut count = 0usize;
+    for vm in &status.vms {
+        ctx.serial.write_str("  ");
+        print_padded_usize(&mut ctx.serial, vm.process_pid, 3);
+        ctx.serial.write_str("  ");
+        print_padded_str(&mut ctx.serial, vm.name.as_str(), 20);
+        ctx.serial.write_str("  ");
+        print_padded_str(&mut ctx.serial, vm.state.as_str(), 8);
+        ctx.serial.write_str("  0x0-0x");
+        print_hex(&mut ctx.serial, vm.memory_bytes as u64);
+        pad_to_width(
+            &mut ctx.serial,
+            hex_range_width(0, vm.memory_bytes as u64),
+            21,
+        );
+        ctx.serial.write_str("  ");
+        print_padded_str(&mut ctx.serial, "model-only", 10);
+        ctx.serial.write_str("  0x");
+        print_hex(&mut ctx.serial, vm.guest_handle as u64);
+        pad_to_width(&mut ctx.serial, hex_value_width(vm.guest_handle as u64), 10);
+        ctx.serial.write_str("  0x");
+        print_hex(&mut ctx.serial, vm.vmar_handle as u64);
+        pad_to_width(&mut ctx.serial, hex_value_width(vm.vmar_handle as u64), 10);
+        ctx.serial.write_str("  0x");
+        print_hex(&mut ctx.serial, vm.vcpu_handle as u64);
+        pad_to_width(&mut ctx.serial, hex_value_width(vm.vcpu_handle as u64), 10);
+        ctx.serial.write_str("  ");
+        print_padded_usize(&mut ctx.serial, vm.memory_bytes, 13);
+        ctx.serial.write_str("  IPA->PA\n");
+        count += 1;
+    }
+
+    if count == 0 {
+        ctx.serial.write_str("  (no stage-2 VM metadata)\n");
+    }
 }
 
 fn ps_vm_thread_count(
@@ -8937,6 +9213,429 @@ fn print_ps_vm_threads(
         count += 1;
     }
     count
+}
+
+fn print_page_entry_flags(ctx: &mut ShellContext, page: crate::kernel_lowlevel::memory::PageEntry) {
+    ctx.serial
+        .write_byte(if page.user_accessible { b'u' } else { b'k' });
+    ctx.serial.write_byte(b'r');
+    ctx.serial
+        .write_byte(if page.writable { b'w' } else { b'-' });
+    ctx.serial
+        .write_byte(if page.executable { b'x' } else { b'-' });
+}
+
+fn print_ps_linux_mappings(ctx: &mut ShellContext, snapshot: &crate::syscall::MemoryMapSnapshot) {
+    ctx.serial.write_str("\n  Linux compat mmap registry\n");
+    ctx.serial
+        .write_str("  Maps  Bytes       Pages  BrkStart    BrkCurrent  BrkLimit    BrkPages\n");
+    ctx.serial
+        .write_str("  ----  ----------  -----  ----------  ----------  ----------  --------\n");
+    ctx.serial.write_str("  ");
+    print_padded_usize(&mut ctx.serial, snapshot.stats.linux_mapping_count, 4);
+    ctx.serial.write_str("  ");
+    print_padded_usize(&mut ctx.serial, snapshot.stats.linux_mapped_bytes, 10);
+    ctx.serial.write_str("  ");
+    print_padded_usize(&mut ctx.serial, snapshot.stats.linux_committed_pages, 5);
+    ctx.serial.write_str("  0x");
+    print_hex(&mut ctx.serial, snapshot.stats.brk_start as u64);
+    pad_to_width(
+        &mut ctx.serial,
+        hex_value_width(snapshot.stats.brk_start as u64),
+        10,
+    );
+    ctx.serial.write_str("  0x");
+    print_hex(&mut ctx.serial, snapshot.stats.brk_current as u64);
+    pad_to_width(
+        &mut ctx.serial,
+        hex_value_width(snapshot.stats.brk_current as u64),
+        10,
+    );
+    ctx.serial.write_str("  0x");
+    print_hex(&mut ctx.serial, snapshot.stats.brk_limit as u64);
+    pad_to_width(
+        &mut ctx.serial,
+        hex_value_width(snapshot.stats.brk_limit as u64),
+        10,
+    );
+    ctx.serial.write_str("  ");
+    print_usize(&mut ctx.serial, snapshot.stats.brk_committed_pages);
+    ctx.serial.write_str("\n");
+
+    ctx.serial.write_str(
+        "  Range                  Prot  Share    Pages  PFNs             Dirty        Source\n",
+    );
+    ctx.serial.write_str(
+        "  ---------------------  ----  -------  -----  ---------------  -----------  ------\n",
+    );
+
+    if snapshot.linux_mappings.is_empty() {
+        ctx.serial.write_str("  (no linux mmap records)\n");
+        return;
+    }
+
+    for mapping in &snapshot.linux_mappings {
+        let end = mapping.addr.saturating_add(mapping.len);
+        ctx.serial.write_str("  0x");
+        print_hex(&mut ctx.serial, mapping.addr as u64);
+        ctx.serial.write_str("-0x");
+        print_hex(&mut ctx.serial, end as u64);
+        pad_to_width(
+            &mut ctx.serial,
+            hex_range_width(mapping.addr as u64, end as u64),
+            21,
+        );
+        ctx.serial.write_str("  ");
+        print_mmap_prot(ctx, mapping.prot);
+        ctx.serial.write_str("   ");
+        print_mmap_share_padded(ctx, mapping, 7);
+        ctx.serial.write_str("  ");
+        print_padded_usize(&mut ctx.serial, mapping.committed_pages, 5);
+        ctx.serial.write_str("  ");
+        print_linux_pfn_range(ctx, mapping);
+        ctx.serial.write_str("  ");
+        if mapping.dirty_tracked {
+            print_padded_usize(&mut ctx.serial, mapping.dirty_pages, 11);
+        } else {
+            print_padded_str(&mut ctx.serial, "not-tracked", 11);
+        }
+        ctx.serial.write_str("  ");
+        print_linux_mapping_source(ctx, &mapping.source);
+        ctx.serial.write_str("\n");
+    }
+}
+
+fn print_ps_shared_memory(ctx: &mut ShellContext, snapshot: &crate::syscall::MemoryMapSnapshot) {
+    ctx.serial.write_str("\n  Shared memory\n");
+    ctx.serial
+        .write_str("  ID          Size        Attach  Mapped      Dirty\n");
+    ctx.serial
+        .write_str("  ----------  ----------  ------  ----------  -----------\n");
+    if snapshot.shared_memory.is_empty() {
+        ctx.serial.write_str("  (no SysV shared-memory objects)\n");
+        return;
+    }
+
+    let mut attachment_rows = 0usize;
+    for shm in &snapshot.shared_memory {
+        ctx.serial.write_str("  0x");
+        print_hex(&mut ctx.serial, shm.id as u64);
+        pad_to_width(&mut ctx.serial, hex_value_width(shm.id as u64), 10);
+        ctx.serial.write_str("  ");
+        print_padded_usize(&mut ctx.serial, shm.size, 10);
+        ctx.serial.write_str("  ");
+        print_padded_usize(&mut ctx.serial, shm.attach_count, 6);
+        ctx.serial.write_str("  ");
+        print_padded_usize(&mut ctx.serial, shm.mapped_bytes, 10);
+        ctx.serial.write_str("  not-tracked\n");
+        attachment_rows = attachment_rows.saturating_add(shm.attachments.len());
+    }
+
+    if attachment_rows == 0 {
+        return;
+    }
+
+    ctx.serial.write_str("\n  Shared memory attachments\n");
+    ctx.serial
+        .write_str("  ID          Range                  Bytes\n");
+    ctx.serial
+        .write_str("  ----------  ---------------------  ----------\n");
+    for shm in &snapshot.shared_memory {
+        for attachment in &shm.attachments {
+            let end = attachment.addr.saturating_add(attachment.len);
+            ctx.serial.write_str("  0x");
+            print_hex(&mut ctx.serial, shm.id as u64);
+            pad_to_width(&mut ctx.serial, hex_value_width(shm.id as u64), 10);
+            ctx.serial.write_str("  0x");
+            print_hex(&mut ctx.serial, attachment.addr as u64);
+            ctx.serial.write_str("-0x");
+            print_hex(&mut ctx.serial, end as u64);
+            pad_to_width(
+                &mut ctx.serial,
+                hex_range_width(attachment.addr as u64, end as u64),
+                21,
+            );
+            ctx.serial.write_str("  ");
+            print_usize(&mut ctx.serial, attachment.len);
+            ctx.serial.write_str("\n");
+        }
+    }
+}
+
+fn print_ps_zircon_mappings(ctx: &mut ShellContext, snapshot: &crate::syscall::MemoryMapSnapshot) {
+    ctx.serial.write_str("\n  Zircon VMO/VMAR bookkeeping\n");
+    ctx.serial
+        .write_str("  VMOs  VMOBytes    VMOPages  VMARs  Maps  RootVMAR\n");
+    ctx.serial
+        .write_str("  ----  ----------  --------  -----  ----  ----------\n");
+    ctx.serial.write_str("  ");
+    print_padded_usize(&mut ctx.serial, snapshot.stats.zircon_vmo_count, 4);
+    ctx.serial.write_str("  ");
+    print_padded_usize(&mut ctx.serial, snapshot.stats.zircon_vmo_bytes, 10);
+    ctx.serial.write_str("  ");
+    print_padded_usize(
+        &mut ctx.serial,
+        snapshot.stats.zircon_vmo_committed_pages,
+        8,
+    );
+    ctx.serial.write_str("  ");
+    print_padded_usize(&mut ctx.serial, snapshot.stats.zircon_vmar_count, 5);
+    ctx.serial.write_str("  ");
+    print_padded_usize(&mut ctx.serial, snapshot.stats.zircon_mapping_count, 4);
+    ctx.serial.write_str("  0x");
+    print_hex(
+        &mut ctx.serial,
+        snapshot.stats.zircon_root_vmar_handle as u64,
+    );
+    ctx.serial.write_str("\n");
+
+    ctx.serial.write_str("\n  Zircon VMOs\n");
+    ctx.serial
+        .write_str("  Handle      Type        Size        Pages     Resizable  Dirty\n");
+    ctx.serial
+        .write_str("  ----------  ----------  ----------  --------  ---------  -----------\n");
+    if snapshot.vmos.is_empty() {
+        ctx.serial.write_str("  (no VMO records)\n");
+    } else {
+        for vmo in &snapshot.vmos {
+            ctx.serial.write_str("  0x");
+            print_hex(&mut ctx.serial, vmo.handle as u64);
+            pad_to_width(&mut ctx.serial, hex_value_width(vmo.handle as u64), 10);
+            ctx.serial.write_str("  ");
+            print_vmo_type_padded(ctx, vmo.vmo_type, 10);
+            ctx.serial.write_str("  ");
+            print_padded_usize(&mut ctx.serial, vmo.size, 10);
+            ctx.serial.write_str("  ");
+            print_pages_pair(&mut ctx.serial, vmo.committed_pages, vmo.page_count, 8);
+            ctx.serial.write_str("  ");
+            print_padded_str(&mut ctx.serial, if vmo.resizable { "yes" } else { "no" }, 9);
+            ctx.serial.write_str("  not-tracked\n");
+        }
+    }
+
+    ctx.serial.write_str("\n  Zircon VMARs\n");
+    ctx.serial
+        .write_str("  Handle      Range                  Maps   Child  Parent\n");
+    ctx.serial
+        .write_str("  ----------  ---------------------  -----  -----  ----------\n");
+    if snapshot.vmars.is_empty() {
+        ctx.serial.write_str("  (no VMAR records)\n");
+    } else {
+        for vmar in &snapshot.vmars {
+            let end = vmar.base_addr.saturating_add(vmar.size);
+            ctx.serial.write_str("  0x");
+            print_hex(&mut ctx.serial, vmar.handle as u64);
+            pad_to_width(&mut ctx.serial, hex_value_width(vmar.handle as u64), 10);
+            ctx.serial.write_str("  0x");
+            print_hex(&mut ctx.serial, vmar.base_addr as u64);
+            ctx.serial.write_str("-0x");
+            print_hex(&mut ctx.serial, end as u64);
+            pad_to_width(
+                &mut ctx.serial,
+                hex_range_width(vmar.base_addr as u64, end as u64),
+                21,
+            );
+            ctx.serial.write_str("  ");
+            print_padded_usize(&mut ctx.serial, vmar.mapping_count, 5);
+            ctx.serial.write_str("  ");
+            print_padded_usize(&mut ctx.serial, vmar.child_count, 5);
+            ctx.serial.write_str("  ");
+            match vmar.parent_idx {
+                Some(parent) => print_padded_usize(&mut ctx.serial, parent, 10),
+                None => print_padded_str(&mut ctx.serial, "none", 10),
+            }
+            ctx.serial.write_str("\n");
+        }
+    }
+
+    ctx.serial.write_str("\n  Zircon VMAR mappings\n");
+    ctx.serial.write_str(
+        "  VMAR        Range                  VMO         Offset      Flags  VMOPages  Valid\n",
+    );
+    ctx.serial.write_str(
+        "  ----------  ---------------------  ----------  ----------  -----  --------  -----\n",
+    );
+
+    if snapshot.vmar_mappings.is_empty() {
+        ctx.serial.write_str("  (no VMAR mapping records)\n");
+        return;
+    }
+
+    for mapping in &snapshot.vmar_mappings {
+        let end = mapping.vaddr.saturating_add(mapping.size);
+        ctx.serial.write_str("  0x");
+        print_hex(&mut ctx.serial, mapping.vmar_handle as u64);
+        pad_to_width(
+            &mut ctx.serial,
+            hex_value_width(mapping.vmar_handle as u64),
+            10,
+        );
+        ctx.serial.write_str("  0x");
+        print_hex(&mut ctx.serial, mapping.vaddr as u64);
+        ctx.serial.write_str("-0x");
+        print_hex(&mut ctx.serial, end as u64);
+        pad_to_width(
+            &mut ctx.serial,
+            hex_range_width(mapping.vaddr as u64, end as u64),
+            21,
+        );
+        ctx.serial.write_str("  0x");
+        print_hex(&mut ctx.serial, mapping.vmo_handle as u64);
+        pad_to_width(
+            &mut ctx.serial,
+            hex_value_width(mapping.vmo_handle as u64),
+            10,
+        );
+        ctx.serial.write_str("  0x");
+        print_hex(&mut ctx.serial, mapping.vmo_offset as u64);
+        pad_to_width(
+            &mut ctx.serial,
+            hex_value_width(mapping.vmo_offset as u64),
+            10,
+        );
+        ctx.serial.write_str("  ");
+        print_mmu_flags(ctx, mapping.mmu_flags);
+        ctx.serial.write_str("  ");
+        print_padded_usize(&mut ctx.serial, mapping.vmo_committed_pages, 8);
+        ctx.serial.write_str("  ");
+        ctx.serial
+            .write_str(if mapping.valid { "yes" } else { "no" });
+        ctx.serial.write_str("\n");
+    }
+}
+
+fn print_mmap_prot(ctx: &mut ShellContext, prot: usize) {
+    ctx.serial
+        .write_byte(if prot & 0x1 != 0 { b'r' } else { b'-' });
+    ctx.serial
+        .write_byte(if prot & 0x2 != 0 { b'w' } else { b'-' });
+    ctx.serial
+        .write_byte(if prot & 0x4 != 0 { b'x' } else { b'-' });
+}
+
+fn print_mmap_share_padded(
+    ctx: &mut ShellContext,
+    mapping: &crate::syscall::LinuxMappingSnapshot,
+    width: usize,
+) {
+    if mapping.shared {
+        print_padded_str(&mut ctx.serial, "shared", width);
+    } else if mapping.private {
+        print_padded_str(&mut ctx.serial, "private", width);
+    } else {
+        print_padded_str(&mut ctx.serial, "unknown", width);
+    }
+}
+
+fn print_linux_pfn_range(ctx: &mut ShellContext, mapping: &crate::syscall::LinuxMappingSnapshot) {
+    match (mapping.first_pfn, mapping.last_pfn) {
+        (Some(first), Some(last)) => {
+            let mut buf = [0u8; 20];
+            let first_len = decimal_u64_digits(first, &mut buf);
+            print_u64(&mut ctx.serial, first);
+            ctx.serial.write_str("..");
+            print_u64(&mut ctx.serial, last);
+            let used = first_len
+                .saturating_add(2)
+                .saturating_add(decimal_u64_len(last));
+            pad_to_width(&mut ctx.serial, used, 15);
+        }
+        _ => print_padded_str(&mut ctx.serial, "none", 15),
+    }
+}
+
+fn print_linux_mapping_source(
+    ctx: &mut ShellContext,
+    source: &crate::syscall::LinuxMappingSourceSnapshot,
+) {
+    match source {
+        crate::syscall::LinuxMappingSourceSnapshot::Anonymous => ctx.serial.write_str("anonymous"),
+        crate::syscall::LinuxMappingSourceSnapshot::File { fd, offset, path } => {
+            ctx.serial.write_str("file(fd=");
+            print_usize(&mut ctx.serial, *fd);
+            ctx.serial.write_str(",off=0x");
+            print_hex(&mut ctx.serial, *offset);
+            ctx.serial.write_str(",path=");
+            ctx.serial.write_str(path.as_str());
+            ctx.serial.write_str(")");
+        }
+        crate::syscall::LinuxMappingSourceSnapshot::SharedMemory { id } => {
+            ctx.serial.write_str("shm(0x");
+            print_hex(&mut ctx.serial, *id as u64);
+            ctx.serial.write_str(")");
+        }
+    }
+}
+
+fn print_vmo_type_padded(
+    ctx: &mut ShellContext,
+    vmo_type: crate::kernel_objects::VmoType,
+    width: usize,
+) {
+    match vmo_type {
+        crate::kernel_objects::VmoType::Paged => print_padded_str(&mut ctx.serial, "paged", width),
+        crate::kernel_objects::VmoType::Physical => {
+            print_padded_str(&mut ctx.serial, "physical", width)
+        }
+        crate::kernel_objects::VmoType::Contiguous => {
+            print_padded_str(&mut ctx.serial, "contiguous", width)
+        }
+        crate::kernel_objects::VmoType::Resizable => {
+            print_padded_str(&mut ctx.serial, "resizable", width)
+        }
+    }
+}
+
+fn print_pages_pair(serial: &mut Serial, committed: usize, total: usize, width: usize) {
+    let mut buf = [0u8; 20];
+    let used = decimal_usize_digits(committed, &mut buf)
+        .saturating_add(1)
+        .saturating_add(decimal_usize_len(total));
+    print_usize(serial, committed);
+    serial.write_str("/");
+    print_usize(serial, total);
+    pad_to_width(serial, used, width);
+}
+
+fn decimal_usize_len(value: usize) -> usize {
+    let mut buf = [0u8; 20];
+    decimal_usize_digits(value, &mut buf)
+}
+
+fn decimal_u64_len(value: u64) -> usize {
+    let mut buf = [0u8; 20];
+    decimal_u64_digits(value, &mut buf)
+}
+
+fn print_mmu_flags(ctx: &mut ShellContext, flags: u32) {
+    ctx.serial.write_byte(
+        if flags & crate::kernel_objects::MmuFlags::USER.bits() != 0 {
+            b'u'
+        } else {
+            b'k'
+        },
+    );
+    ctx.serial.write_byte(
+        if flags & crate::kernel_objects::MmuFlags::READ.bits() != 0 {
+            b'r'
+        } else {
+            b'-'
+        },
+    );
+    ctx.serial.write_byte(
+        if flags & crate::kernel_objects::MmuFlags::WRITE.bits() != 0 {
+            b'w'
+        } else {
+            b'-'
+        },
+    );
+    ctx.serial.write_byte(
+        if flags & crate::kernel_objects::MmuFlags::EXECUTE.bits() != 0 {
+            b'x'
+        } else {
+            b'-'
+        },
+    );
 }
 
 /// Command: top - Show process status (interactive-like display)
@@ -10273,6 +10972,108 @@ fn print_padded_number(serial: &mut Serial, num: u32, width: usize) {
     for j in (0..i).rev() {
         serial.write_byte(buf[j]);
     }
+}
+
+fn print_padded_usize(serial: &mut Serial, num: usize, width: usize) {
+    let mut buf = [0u8; 20];
+    let len = decimal_usize_digits(num, &mut buf);
+    for _ in 0..width.saturating_sub(len) {
+        serial.write_byte(b' ');
+    }
+    for j in (0..len).rev() {
+        serial.write_byte(buf[j]);
+    }
+}
+
+fn print_padded_u64(serial: &mut Serial, num: u64, width: usize) {
+    let mut buf = [0u8; 20];
+    let len = decimal_u64_digits(num, &mut buf);
+    for _ in 0..width.saturating_sub(len) {
+        serial.write_byte(b' ');
+    }
+    for j in (0..len).rev() {
+        serial.write_byte(buf[j]);
+    }
+}
+
+fn print_padded_str(serial: &mut Serial, value: &str, width: usize) {
+    serial.write_str(value);
+    for _ in 0..width.saturating_sub(value.len()) {
+        serial.write_byte(b' ');
+    }
+}
+
+fn pad_to_width(serial: &mut Serial, used: usize, width: usize) {
+    for _ in 0..width.saturating_sub(used) {
+        serial.write_byte(b' ');
+    }
+}
+
+fn hex_digit_count(mut value: u64) -> usize {
+    if value == 0 {
+        return 1;
+    }
+
+    let mut count = 0usize;
+    while value > 0 {
+        count += 1;
+        value >>= 4;
+    }
+    count
+}
+
+fn hex_value_width(value: u64) -> usize {
+    2usize.saturating_add(hex_digit_count(value))
+}
+
+fn hex_range_width(start: u64, end: u64) -> usize {
+    hex_value_width(start)
+        .saturating_add(1)
+        .saturating_add(hex_value_width(end))
+}
+
+fn hex_pair_width(first: u64, second: u64) -> usize {
+    hex_value_width(first)
+        .saturating_add(1)
+        .saturating_add(hex_value_width(second))
+}
+
+fn ps_arm64_pgd_index(vaddr: usize) -> usize {
+    (vaddr >> 39) & 0x1ff
+}
+
+fn ps_smros_indexed_pmd(vaddr: usize) -> usize {
+    (vaddr >> 21) & 0x1ff
+}
+
+fn decimal_usize_digits(mut num: usize, buf: &mut [u8]) -> usize {
+    if num == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+
+    let mut len = 0usize;
+    while num > 0 && len < buf.len() {
+        buf[len] = b'0' + (num % 10) as u8;
+        num /= 10;
+        len += 1;
+    }
+    len
+}
+
+fn decimal_u64_digits(mut num: u64, buf: &mut [u8]) -> usize {
+    if num == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+
+    let mut len = 0usize;
+    while num > 0 && len < buf.len() {
+        buf[len] = b'0' + (num % 10) as u8;
+        num /= 10;
+        len += 1;
+    }
+    len
 }
 
 /// Command: exit - Exit shell

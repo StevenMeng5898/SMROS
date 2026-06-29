@@ -601,12 +601,54 @@ const LINUX_MAX_MOUNTS: usize = 16;
 const LINUX_UTS_NAME_MAX: usize = 64;
 
 #[derive(Clone)]
+enum LinuxMappingSource {
+    Anonymous,
+    File {
+        fd: usize,
+        offset: u64,
+        path: String,
+    },
+    SharedMemory {
+        id: u32,
+    },
+}
+
+impl LinuxMappingSource {
+    fn slice(&self, delta: usize) -> Self {
+        match self {
+            LinuxMappingSource::Anonymous => LinuxMappingSource::Anonymous,
+            LinuxMappingSource::File { fd, offset, path } => LinuxMappingSource::File {
+                fd: *fd,
+                offset: offset.saturating_add(delta as u64),
+                path: path.clone(),
+            },
+            LinuxMappingSource::SharedMemory { id } => LinuxMappingSource::SharedMemory { id: *id },
+        }
+    }
+
+    fn snapshot(&self) -> LinuxMappingSourceSnapshot {
+        match self {
+            LinuxMappingSource::Anonymous => LinuxMappingSourceSnapshot::Anonymous,
+            LinuxMappingSource::File { fd, offset, path } => LinuxMappingSourceSnapshot::File {
+                fd: *fd,
+                offset: *offset,
+                path: path.clone(),
+            },
+            LinuxMappingSource::SharedMemory { id } => {
+                LinuxMappingSourceSnapshot::SharedMemory { id: *id }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
 struct LinuxMappingRecord {
     addr: usize,
     len: usize,
     prot: usize,
     flags: usize,
     pfns: Vec<u64>,
+    source: LinuxMappingSource,
 }
 
 #[derive(Default)]
@@ -640,6 +682,19 @@ struct VmoRecord {
 struct VmarRecord {
     handle: u32,
     vmar: Vmar,
+}
+
+#[derive(Clone, Copy)]
+struct LinuxSharedMemoryAttachment {
+    addr: usize,
+    len: usize,
+}
+
+#[derive(Clone)]
+struct LinuxSharedMemoryRecord {
+    id: u32,
+    size: usize,
+    attachments: Vec<LinuxSharedMemoryAttachment>,
 }
 
 #[derive(Clone, Copy)]
@@ -816,6 +871,91 @@ pub struct MemorySyscallStats {
     pub zircon_root_vmar_handle: u32,
 }
 
+#[derive(Clone)]
+pub enum LinuxMappingSourceSnapshot {
+    Anonymous,
+    File {
+        fd: usize,
+        offset: u64,
+        path: String,
+    },
+    SharedMemory {
+        id: u32,
+    },
+}
+
+#[derive(Clone)]
+pub struct LinuxMappingSnapshot {
+    pub addr: usize,
+    pub len: usize,
+    pub prot: usize,
+    pub flags: usize,
+    pub committed_pages: usize,
+    pub first_pfn: Option<u64>,
+    pub last_pfn: Option<u64>,
+    pub shared: bool,
+    pub private: bool,
+    pub dirty_pages: usize,
+    pub dirty_tracked: bool,
+    pub source: LinuxMappingSourceSnapshot,
+}
+
+#[derive(Clone, Copy)]
+pub struct SharedMemoryAttachmentSnapshot {
+    pub addr: usize,
+    pub len: usize,
+}
+
+#[derive(Clone)]
+pub struct SharedMemorySnapshot {
+    pub id: u32,
+    pub size: usize,
+    pub attach_count: usize,
+    pub mapped_bytes: usize,
+    pub attachments: Vec<SharedMemoryAttachmentSnapshot>,
+}
+
+#[derive(Clone, Copy)]
+pub struct VmoSnapshot {
+    pub handle: u32,
+    pub size: usize,
+    pub page_count: usize,
+    pub committed_pages: usize,
+    pub vmo_type: VmoType,
+    pub resizable: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct VmarSnapshot {
+    pub handle: u32,
+    pub base_addr: usize,
+    pub size: usize,
+    pub mapping_count: usize,
+    pub child_count: usize,
+    pub parent_idx: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+pub struct VmarMappingSnapshot {
+    pub vmar_handle: u32,
+    pub vaddr: usize,
+    pub size: usize,
+    pub vmo_handle: u32,
+    pub vmo_offset: usize,
+    pub mmu_flags: u32,
+    pub valid: bool,
+    pub vmo_committed_pages: usize,
+}
+
+pub struct MemoryMapSnapshot {
+    pub stats: MemorySyscallStats,
+    pub linux_mappings: Vec<LinuxMappingSnapshot>,
+    pub shared_memory: Vec<SharedMemorySnapshot>,
+    pub vmos: Vec<VmoSnapshot>,
+    pub vmars: Vec<VmarSnapshot>,
+    pub vmar_mappings: Vec<VmarMappingSnapshot>,
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct LinuxContainerStats {
     pub namespace_flags: usize,
@@ -847,6 +987,7 @@ struct MemorySyscallState {
     signals: Vec<SignalRecord>,
     linux_fds: Vec<LinuxFdRecord>,
     linux_fxfs_files: Vec<LinuxFxfsFileRecord>,
+    linux_shared_memory: Vec<LinuxSharedMemoryRecord>,
     linux_mounts: Vec<LinuxMountRecord>,
     linux_namespace_flags: usize,
     linux_setns_count: usize,
@@ -896,6 +1037,7 @@ impl MemorySyscallState {
             signals: Vec::new(),
             linux_fds: Vec::new(),
             linux_fxfs_files: Vec::new(),
+            linux_shared_memory: Vec::new(),
             linux_mounts: Vec::new(),
             linux_namespace_flags: 0,
             linux_setns_count: 0,
@@ -1121,6 +1263,155 @@ impl MemorySyscallState {
                 .sum(),
             zircon_root_vmar_handle: self.root_vmar_handle,
         }
+    }
+
+    fn memory_map_snapshot(&self) -> MemoryMapSnapshot {
+        let linux_mappings = self
+            .linux_mappings
+            .iter()
+            .map(|mapping| LinuxMappingSnapshot {
+                addr: mapping.addr,
+                len: mapping.len,
+                prot: mapping.prot,
+                flags: mapping.flags,
+                committed_pages: mapping.pfns.len(),
+                first_pfn: mapping.pfns.first().copied(),
+                last_pfn: mapping.pfns.last().copied(),
+                shared: mapping.flags & MmapFlags::SHARED.bits() != 0,
+                private: mapping.flags & MmapFlags::PRIVATE.bits() != 0,
+                dirty_pages: 0,
+                dirty_tracked: false,
+                source: mapping.source.snapshot(),
+            })
+            .collect();
+        let shared_memory = self
+            .linux_shared_memory
+            .iter()
+            .map(|record| {
+                let attachments: Vec<SharedMemoryAttachmentSnapshot> = record
+                    .attachments
+                    .iter()
+                    .map(|attachment| SharedMemoryAttachmentSnapshot {
+                        addr: attachment.addr,
+                        len: attachment.len,
+                    })
+                    .collect();
+                SharedMemorySnapshot {
+                    id: record.id,
+                    size: record.size,
+                    attach_count: record.attachments.len(),
+                    mapped_bytes: record
+                        .attachments
+                        .iter()
+                        .map(|attachment| attachment.len)
+                        .sum(),
+                    attachments,
+                }
+            })
+            .collect();
+        let vmos = self
+            .vmos
+            .iter()
+            .map(|record| VmoSnapshot {
+                handle: record.handle,
+                size: record.vmo.len(),
+                page_count: record.vmo.page_count,
+                committed_pages: record.vmo.committed_pages(),
+                vmo_type: record.vmo.get_type(),
+                resizable: record.vmo.is_resizable(),
+            })
+            .collect();
+        let vmars = self
+            .vmars
+            .iter()
+            .map(|record| VmarSnapshot {
+                handle: record.handle,
+                base_addr: record.vmar.base_addr,
+                size: record.vmar.size,
+                mapping_count: record.vmar.mappings.len(),
+                child_count: record.vmar.children.len(),
+                parent_idx: record.vmar.parent_idx,
+            })
+            .collect();
+        let mut vmar_mappings = Vec::new();
+        for record in &self.vmars {
+            for mapping in &record.vmar.mappings {
+                let vmo_committed_pages = self
+                    .vmos
+                    .iter()
+                    .find(|vmo| vmo.handle == mapping.vmo_handle.0)
+                    .map(|vmo| vmo.vmo.committed_pages())
+                    .unwrap_or(0);
+                vmar_mappings.push(VmarMappingSnapshot {
+                    vmar_handle: record.handle,
+                    vaddr: mapping.vaddr,
+                    size: mapping.size,
+                    vmo_handle: mapping.vmo_handle.0,
+                    vmo_offset: mapping.vmo_offset,
+                    mmu_flags: mapping.mmu_flags.bits(),
+                    valid: mapping.valid,
+                    vmo_committed_pages,
+                });
+            }
+        }
+        MemoryMapSnapshot {
+            stats: self.stats(),
+            linux_mappings,
+            shared_memory,
+            vmos,
+            vmars,
+            vmar_mappings,
+        }
+    }
+
+    fn register_shared_memory(&mut self, id: u32, size: usize) {
+        if self
+            .linux_shared_memory
+            .iter()
+            .any(|record| record.id == id)
+        {
+            return;
+        }
+        self.linux_shared_memory.push(LinuxSharedMemoryRecord {
+            id,
+            size,
+            attachments: Vec::new(),
+        });
+    }
+
+    fn attach_shared_memory(&mut self, id: u32, addr: usize, len: usize) {
+        if let Some(record) = self
+            .linux_shared_memory
+            .iter_mut()
+            .find(|record| record.id == id)
+        {
+            record
+                .attachments
+                .push(LinuxSharedMemoryAttachment { addr, len });
+        }
+    }
+
+    fn detach_shared_memory(&mut self, id: Option<u32>, addr: usize) -> bool {
+        let mut removed = false;
+        for record in &mut self.linux_shared_memory {
+            if let Some(id) = id {
+                if record.id != id {
+                    continue;
+                }
+            }
+            let before = record.attachments.len();
+            record
+                .attachments
+                .retain(|attachment| attachment.addr != addr);
+            if record.attachments.len() != before {
+                removed = true;
+            }
+        }
+        removed
+    }
+
+    fn remove_shared_memory(&mut self, id: u32) {
+        self.linux_shared_memory.retain(|record| record.id != id);
     }
 
     fn free_linux_pages(pfns: &[u64]) {
@@ -1607,6 +1898,11 @@ impl MemorySyscallState {
             || self.remove_thread(handle)
     }
 
+    fn release_compat_handle(&mut self, handle: u32) {
+        self.remove_shared_memory(handle);
+        self.detach_shared_memory(Some(handle), 0);
+    }
+
     fn alloc_fd(&mut self, handle: u32, readable: bool, writable: bool) -> usize {
         let fd = self.next_fd;
         self.next_fd = self.next_fd.saturating_add(1);
@@ -1915,6 +2211,7 @@ fn split_linux_mapping(
             prot: mapping.prot,
             flags: mapping.flags,
             pfns: mapping.pfns[..left_pages].to_vec(),
+            source: mapping.source.slice(0),
         });
     }
 
@@ -1926,6 +2223,7 @@ fn split_linux_mapping(
             prot: mapping.prot,
             flags: mapping.flags,
             pfns: mapping.pfns[right_start_page..].to_vec(),
+            source: mapping.source.slice(end - mapping.addr),
         });
     }
 
@@ -1934,6 +2232,10 @@ fn split_linux_mapping(
 
 pub fn memory_syscall_stats() -> MemorySyscallStats {
     memory_state().stats()
+}
+
+pub fn memory_map_snapshot() -> MemoryMapSnapshot {
+    memory_state().memory_map_snapshot()
 }
 
 pub fn memory_root_vmar_handle() -> u32 {
@@ -2254,6 +2556,7 @@ fn update_linux_protection(
             prot: prot_bits,
             flags: mapping.flags,
             pfns: mapping.pfns[start_page..end_page].to_vec(),
+            source: mapping.source.slice(overlap_start - mapping.addr),
         });
     }
 
@@ -2283,8 +2586,18 @@ fn unmap_linux_range(state: &mut MemorySyscallState, addr: usize, len: usize) ->
         let start_page = (overlap_start - mapping.addr) / PAGE_SIZE;
         let end_page = (overlap_end - mapping.addr) / PAGE_SIZE;
         MemorySyscallState::free_linux_pages(&mapping.pfns[start_page..end_page]);
+        let shared_id = match &mapping.source {
+            LinuxMappingSource::SharedMemory { id } => Some(*id),
+            _ => None,
+        };
+        if let Some(id) = shared_id {
+            state.detach_shared_memory(Some(id), mapping.addr);
+        }
 
         for piece in split_linux_mapping(mapping, overlap_start, overlap_end - overlap_start) {
+            if let Some(id) = shared_id {
+                state.attach_shared_memory(id, piece.addr, piece.len);
+            }
             state.linux_mappings.push(piece);
         }
     }
@@ -2325,16 +2638,20 @@ pub fn sys_mmap(
     }
 
     let anonymous = flags.contains(MmapFlags::ANONYMOUS);
-    let file_path = if anonymous {
+    let source = if anonymous {
         if offset != 0 {
             return Err(SysError::EINVAL);
         }
-        None
+        LinuxMappingSource::Anonymous
     } else {
         if !page_aligned(offset as usize) {
             return Err(SysError::EINVAL);
         }
-        Some(linux_fxfs_path_for_fd(fd, true)?)
+        LinuxMappingSource::File {
+            fd,
+            offset,
+            path: linux_fxfs_path_for_fd(fd, true)?,
+        }
     };
 
     if checked_end(addr, len).is_none() {
@@ -2366,13 +2683,14 @@ pub fn sys_mmap(
         prot: prot.bits(),
         flags: flags.bits(),
         pfns,
+        source: source.clone(),
     });
     state.sort_linux_mappings();
 
     linux_zero_user(vaddr, len)?;
-    if let Some(path) = file_path {
+    if let LinuxMappingSource::File { offset, path, .. } = &source {
         let attrs = fxfs::attrs(path.as_str()).map_err(|_| SysError::EIO)?;
-        let offset = offset as usize;
+        let offset = *offset as usize;
         if offset < attrs.size {
             let read_len = core::cmp::min(len, attrs.size - offset);
             let out = unsafe { core::slice::from_raw_parts_mut(vaddr as *mut u8, read_len) };
@@ -2534,6 +2852,7 @@ pub fn sys_mremap(
             prot: mapping.prot,
             flags: mapping.flags,
             pfns: keep_pfns,
+            source: mapping.source,
         });
         state.sort_linux_mappings();
         return Ok(old_address);
@@ -2571,6 +2890,7 @@ pub fn sys_mremap(
         MemorySyscallState::alloc_linux_pages(new_len / PAGE_SIZE).ok_or(SysError::ENOMEM)?;
     let prot = state.linux_mappings[index].prot;
     let flags_bits = state.linux_mappings[index].flags;
+    let source = state.linux_mappings[index].source.clone();
 
     if flags & MREMAP_DONTUNMAP == 0 {
         let old_mapping = state.linux_mappings.swap_remove(index);
@@ -2583,6 +2903,7 @@ pub fn sys_mremap(
         prot,
         flags: flags_bits,
         pfns: new_pfns,
+        source,
     });
     state.sort_linux_mappings();
     Ok(new_addr)
@@ -4254,6 +4575,7 @@ pub fn sys_shmget(_key: usize, size: usize, _shmflg: usize) -> SysResult {
     }
     let handle = compat::create_object(ObjectType::SharedMemory).map_err(|_| SysError::ENOMEM)?;
     let _ = compat::table().set_property(handle, size as u64);
+    memory_state().register_shared_memory(handle.0, roundup_pages(size.max(PAGE_SIZE)));
     Ok(handle.0 as usize)
 }
 
@@ -4267,8 +4589,9 @@ pub fn sys_shmat(id: usize, addr: usize, _shmflg: usize) -> SysResult {
         .map(|value| value as usize)
         .unwrap_or(PAGE_SIZE)
         .max(PAGE_SIZE);
-    let flags = MmapFlags::PRIVATE.bits() | MmapFlags::ANONYMOUS.bits();
-    sys_mmap(
+    let size = roundup_pages(size);
+    let flags = MmapFlags::SHARED.bits() | MmapFlags::ANONYMOUS.bits();
+    let mapped = sys_mmap(
         addr,
         size,
         MmapProt::READ.bits() | MmapProt::WRITE.bits(),
@@ -4285,23 +4608,41 @@ pub fn sys_shmat(id: usize, addr: usize, _shmflg: usize) -> SysResult {
             0,
             0,
         )
-    })
-}
-
-pub fn sys_shmdt(_id: usize, addr: usize, _shmflg: usize) -> SysResult {
-    if addr == 0 {
-        Err(SysError::EINVAL)
-    } else {
-        Ok(0)
+    })?;
+    let state = memory_state();
+    if let Some(mapping) = state.linux_mappings.iter_mut().find(|mapping| {
+        mapping.addr == mapped
+            && mapping.len == size
+            && matches!(mapping.source, LinuxMappingSource::Anonymous)
+    }) {
+        mapping.source = LinuxMappingSource::SharedMemory { id: id as u32 };
     }
+    state.attach_shared_memory(id as u32, mapped, size);
+    Ok(mapped)
 }
 
-pub fn sys_shmctl(id: usize, _cmd: usize, buffer: usize) -> SysResult {
+pub fn sys_shmdt(id: usize, addr: usize, _shmflg: usize) -> SysResult {
+    if addr == 0 {
+        return Err(SysError::EINVAL);
+    }
+    let detach_id = if id == 0 { None } else { Some(id as u32) };
+    let removed = memory_state().detach_shared_memory(detach_id, addr);
+    if !removed {
+        return Err(SysError::EINVAL);
+    }
+    Ok(0)
+}
+
+pub fn sys_shmctl(id: usize, cmd: usize, buffer: usize) -> SysResult {
     if !linux_compat_handle_is_type(id as u32, ObjectType::SharedMemory) {
         return Err(SysError::EINVAL);
     }
     if buffer != 0 {
         let _ = linux_zero_user(buffer, 128)?;
+    }
+    const IPC_RMID: usize = 0;
+    if cmd == IPC_RMID {
+        memory_state().remove_shared_memory(id as u32);
     }
     Ok(0)
 }
@@ -6391,8 +6732,13 @@ pub fn sys_handle_close(handle: u32) -> ZxResult {
         || fifo::fifo_table().close(HandleValue(handle))
         || port::port_table().close(HandleValue(handle))
         || socket::socket_table().close(HandleValue(handle))
-        || compat::close_handle(HandleValue(handle))
     {
+        memory_state().clear_external_handle_state(handle);
+        return Ok(());
+    }
+
+    if compat::close_handle(HandleValue(handle)) {
+        memory_state().release_compat_handle(handle);
         memory_state().clear_external_handle_state(handle);
         return Ok(());
     }
