@@ -123,6 +123,7 @@ struct ScheduleTestTask {
     credit: i32,
     total_ticks: u32,
     weight: u32,
+    priority: u8,
     cpu_affinity: Option<usize>,
 }
 
@@ -263,28 +264,50 @@ fn pick_round_robin_from_tasks(
     if tasks.is_empty() {
         return None;
     }
+    let best_priority = highest_ready_priority_from_tasks(tasks, cpu_id);
     for offset in 0..tasks.len() {
         let wanted_id = start_id.saturating_add(offset);
         for task in tasks {
-            if task.id == wanted_id && task.ready && task_allowed_on_cpu(*task, cpu_id) {
+            if task.id == wanted_id
+                && task.ready
+                && task.priority == best_priority
+                && task_allowed_on_cpu(*task, cpu_id)
+            {
                 return Some(task.id);
             }
         }
     }
     for task in tasks {
-        if task.ready && task_allowed_on_cpu(*task, cpu_id) {
+        if task.ready && task.priority == best_priority && task_allowed_on_cpu(*task, cpu_id) {
             return Some(task.id);
         }
     }
     None
 }
 
-fn pick_edf_from_tasks(tasks: &[ScheduleTestTask], cpu_id: Option<usize>) -> Option<usize> {
-    let mut best: Option<usize> = None;
-    let mut best_deadline = u64::MAX;
+fn highest_ready_priority_from_tasks(tasks: &[ScheduleTestTask], cpu_id: Option<usize>) -> u8 {
+    let mut best_priority = 0u8;
+    let mut found = false;
     for task in tasks {
         if task.ready
             && task_allowed_on_cpu(*task, cpu_id)
+            && smros_sched_priority_better_body!(task.priority, found, best_priority)
+        {
+            best_priority = task.priority;
+            found = true;
+        }
+    }
+    best_priority
+}
+
+fn pick_edf_from_tasks(tasks: &[ScheduleTestTask], cpu_id: Option<usize>) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_deadline = u64::MAX;
+    let best_priority = highest_ready_priority_from_tasks(tasks, cpu_id);
+    for task in tasks {
+        if task.ready
+            && task_allowed_on_cpu(*task, cpu_id)
+            && task.priority == best_priority
             && smros_sched_edf_better_body!(task.deadline_tick, best.is_some(), best_deadline)
         {
             best = Some(task.id);
@@ -297,9 +320,11 @@ fn pick_edf_from_tasks(tasks: &[ScheduleTestTask], cpu_id: Option<usize>) -> Opt
 fn pick_credit_from_tasks(tasks: &[ScheduleTestTask], cpu_id: Option<usize>) -> Option<usize> {
     let mut best: Option<usize> = None;
     let mut best_credit = i32::MIN;
+    let best_priority = highest_ready_priority_from_tasks(tasks, cpu_id);
     for task in tasks {
         if task.ready
             && task_allowed_on_cpu(*task, cpu_id)
+            && task.priority == best_priority
             && smros_sched_credit_better_body!(task.credit, best.is_some(), best_credit)
         {
             best = Some(task.id);
@@ -313,9 +338,11 @@ fn pick_fair_from_tasks(tasks: &[ScheduleTestTask], cpu_id: Option<usize>) -> Op
     let mut best: Option<usize> = None;
     let mut best_ticks = 0u32;
     let mut best_weight = 1u32;
+    let best_priority = highest_ready_priority_from_tasks(tasks, cpu_id);
     for task in tasks {
         if task.ready
             && task_allowed_on_cpu(*task, cpu_id)
+            && task.priority == best_priority
             && smros_sched_fair_better_body!(
                 task.total_ticks,
                 task.weight,
@@ -388,6 +415,10 @@ fn priority_from_weight(weight: u32) -> u8 {
     }
 }
 
+fn sample_priority_from_weight(weight: u32) -> u8 {
+    DEFAULT_THREAD_PRIORITY.saturating_add(priority_from_weight(weight))
+}
+
 fn contains_usize(values: &[usize], value: usize) -> bool {
     for item in values {
         if *item == value {
@@ -422,8 +453,59 @@ fn count_workers_on_cpu(workers: &[SchedulerSampleTraceWorker], cpu_id: usize) -
     count
 }
 
+fn sample_trace_worker_after(
+    lhs: SchedulerSampleTraceWorker,
+    rhs: SchedulerSampleTraceWorker,
+) -> bool {
+    if lhs.cpu_id != rhs.cpu_id {
+        return lhs.cpu_id > rhs.cpu_id;
+    }
+    if lhs.schedule_info.priority != rhs.schedule_info.priority {
+        return lhs.schedule_info.priority < rhs.schedule_info.priority;
+    }
+    lhs.thread_id > rhs.thread_id
+}
+
+fn sort_sample_trace_workers(workers: &mut [SchedulerSampleTraceWorker; MAX_THREADS], len: usize) {
+    let capped_len = core::cmp::min(len, workers.len());
+    let mut index = 1usize;
+    while index < capped_len {
+        let value = workers[index];
+        let mut insert = index;
+        while insert > 0 && sample_trace_worker_after(workers[insert - 1], value) {
+            workers[insert] = workers[insert - 1];
+            insert -= 1;
+        }
+        workers[insert] = value;
+        index += 1;
+    }
+}
+
 fn sample_trace_worker_slice_ticks(worker: SchedulerSampleTraceWorker) -> u64 {
     u64::from(core::cmp::max(worker.schedule_info.time_slice_ticks, 1))
+}
+
+fn highest_sample_trace_priority(
+    workers: &[SchedulerSampleTraceWorker],
+    cpu_id: usize,
+    excluded: &[bool; MAX_THREADS],
+) -> u8 {
+    let mut best_priority = 0u8;
+    let mut found = false;
+    for (index, worker) in workers.iter().enumerate() {
+        if !excluded[index]
+            && worker.cpu_id == cpu_id
+            && smros_sched_priority_better_body!(
+                worker.schedule_info.priority,
+                found,
+                best_priority
+            )
+        {
+            best_priority = worker.schedule_info.priority;
+            found = true;
+        }
+    }
+    best_priority
 }
 
 fn sample_trace_snapshot_rounds(worker_count: usize) -> usize {
@@ -442,14 +524,15 @@ fn pick_sample_trace_worker(
     policy: SchedulePolicy,
     cpu_id: usize,
     rr_cursor_by_cpu: &mut [usize; MAX_CPUS],
+    excluded: &[bool; MAX_THREADS],
 ) -> Option<usize> {
     let selected = match policy {
         SchedulePolicy::RoundRobin => {
-            pick_sample_trace_round_robin(workers, cpu_id, rr_cursor_by_cpu)
+            pick_sample_trace_round_robin(workers, cpu_id, rr_cursor_by_cpu, excluded)
         }
-        SchedulePolicy::Edf => pick_sample_trace_edf(workers, cpu_id),
-        SchedulePolicy::Credit => pick_sample_trace_credit(workers, cpu_id),
-        SchedulePolicy::Fair => pick_sample_trace_fair(workers, cpu_id),
+        SchedulePolicy::Edf => pick_sample_trace_edf(workers, cpu_id, excluded),
+        SchedulePolicy::Credit => pick_sample_trace_credit(workers, cpu_id, excluded),
+        SchedulePolicy::Fair => pick_sample_trace_fair(workers, cpu_id, excluded),
     };
 
     if let Some(index) = selected {
@@ -463,16 +546,21 @@ fn pick_sample_trace_round_robin(
     workers: &[SchedulerSampleTraceWorker],
     cpu_id: usize,
     rr_cursor_by_cpu: &mut [usize; MAX_CPUS],
+    excluded: &[bool; MAX_THREADS],
 ) -> Option<usize> {
     if workers.is_empty() {
         return None;
     }
     let cursor_slot = core::cmp::min(cpu_id, MAX_CPUS.saturating_sub(1));
     let start = rr_cursor_by_cpu[cursor_slot] % workers.len();
+    let best_priority = highest_sample_trace_priority(workers, cpu_id, excluded);
     let mut offset = 0usize;
     while offset < workers.len() {
         let index = (start + offset) % workers.len();
-        if workers[index].cpu_id == cpu_id {
+        if !excluded[index]
+            && workers[index].cpu_id == cpu_id
+            && workers[index].schedule_info.priority == best_priority
+        {
             rr_cursor_by_cpu[cursor_slot] = (index + 1) % workers.len();
             return Some(index);
         }
@@ -481,13 +569,20 @@ fn pick_sample_trace_round_robin(
     None
 }
 
-fn pick_sample_trace_edf(workers: &[SchedulerSampleTraceWorker], cpu_id: usize) -> Option<usize> {
+fn pick_sample_trace_edf(
+    workers: &[SchedulerSampleTraceWorker],
+    cpu_id: usize,
+    excluded: &[bool; MAX_THREADS],
+) -> Option<usize> {
     let mut best: Option<usize> = None;
     let mut best_deadline = u64::MAX;
+    let best_priority = highest_sample_trace_priority(workers, cpu_id, excluded);
     let mut index = 0usize;
     while index < workers.len() {
         let worker = workers[index];
-        if worker.cpu_id == cpu_id
+        if !excluded[index]
+            && worker.cpu_id == cpu_id
+            && worker.schedule_info.priority == best_priority
             && smros_sched_edf_better_body!(
                 worker.schedule_info.deadline_tick,
                 best.is_some(),
@@ -505,6 +600,7 @@ fn pick_sample_trace_edf(workers: &[SchedulerSampleTraceWorker], cpu_id: usize) 
 fn pick_sample_trace_credit(
     workers: &mut [SchedulerSampleTraceWorker],
     cpu_id: usize,
+    excluded: &[bool; MAX_THREADS],
 ) -> Option<usize> {
     if !sample_trace_has_credit(workers, cpu_id) {
         refill_sample_trace_credits(workers, cpu_id);
@@ -512,10 +608,13 @@ fn pick_sample_trace_credit(
 
     let mut best: Option<usize> = None;
     let mut best_credit = i32::MIN;
+    let best_priority = highest_sample_trace_priority(workers, cpu_id, excluded);
     let mut index = 0usize;
     while index < workers.len() {
         let worker = workers[index];
-        if worker.cpu_id == cpu_id
+        if !excluded[index]
+            && worker.cpu_id == cpu_id
+            && worker.schedule_info.priority == best_priority
             && smros_sched_credit_better_body!(
                 worker.schedule_info.credit,
                 best.is_some(),
@@ -530,14 +629,21 @@ fn pick_sample_trace_credit(
     best
 }
 
-fn pick_sample_trace_fair(workers: &[SchedulerSampleTraceWorker], cpu_id: usize) -> Option<usize> {
+fn pick_sample_trace_fair(
+    workers: &[SchedulerSampleTraceWorker],
+    cpu_id: usize,
+    excluded: &[bool; MAX_THREADS],
+) -> Option<usize> {
     let mut best: Option<usize> = None;
     let mut best_ticks = 0u32;
     let mut best_weight = 1u32;
+    let best_priority = highest_sample_trace_priority(workers, cpu_id, excluded);
     let mut index = 0usize;
     while index < workers.len() {
         let worker = workers[index];
-        if worker.cpu_id == cpu_id
+        if !excluded[index]
+            && worker.cpu_id == cpu_id
+            && worker.schedule_info.priority == best_priority
             && smros_sched_fair_better_body!(
                 worker.total_ticks,
                 worker.schedule_info.weight,
@@ -765,7 +871,6 @@ impl Scheduler {
         self.schedule_info[id.0].credit = credit;
         self.schedule_info[id.0].credit_cap = cap;
         self.schedule_info[id.0].weight = weight;
-        self.schedule_info[id.0].priority = priority_from_weight(weight);
         true
     }
 
@@ -797,11 +902,8 @@ impl Scheduler {
             return false;
         }
         self.schedule_info[id.0].priority = priority;
-        self.schedule_info[id.0].weight = u32::from(priority);
-        let cap = DEFAULT_CREDIT.saturating_mul(i32::from(priority));
-        self.schedule_info[id.0].credit_cap = cap;
-        if self.schedule_info[id.0].credit > cap {
-            self.schedule_info[id.0].credit = cap;
+        if self.threads[id.0].state == ThreadState::Running {
+            self.threads[id.0].time_slice = 0;
         }
         true
     }
@@ -898,12 +1000,14 @@ impl Scheduler {
                 self.create_thread_on_cpu(sched_sample_worker, "sched_sample", Some(cpu))
             {
                 let weight = 1 + ((slot / online_cpus) as u32 % 4);
+                let priority = sample_priority_from_weight(weight);
                 let cap = DEFAULT_CREDIT.saturating_mul(weight as i32);
                 let _ = self.set_thread_credit(id, cap, cap, weight);
-                let _ = self.set_thread_priority(id, priority_from_weight(weight));
+                let _ = self.set_thread_priority(id, priority);
                 let deadline = self
                     .tick_count
                     .saturating_add(DEFAULT_EDF_PERIOD_TICKS as u64)
+                    .saturating_sub(u64::from(priority))
                     .saturating_add(slot as u64);
                 let _ = self.set_thread_deadline(id, deadline, DEFAULT_EDF_PERIOD_TICKS);
                 self.push_trace_entry(cpu, id.0);
@@ -991,6 +1095,7 @@ impl Scheduler {
         if worker_count == 0 {
             return 0;
         }
+        sort_sample_trace_workers(&mut workers, worker_count);
 
         let mut cpu_rows = [usize::MAX; MAX_CPUS];
         let mut cpu_count = 0usize;
@@ -1016,13 +1121,16 @@ impl Scheduler {
             for cpu in cpu_rows[..cpu_count].iter().copied() {
                 let cpu_slot = core::cmp::min(cpu, MAX_CPUS.saturating_sub(1));
                 let workers_on_cpu = count_workers_on_cpu(&preview_workers[..worker_count], cpu);
+                let mut picked_in_round = [false; MAX_THREADS];
                 for _ in 0..workers_on_cpu {
                     if let Some(worker_index) = pick_sample_trace_worker(
                         &mut preview_workers[..worker_count],
                         self.policy,
                         cpu,
                         &mut preview_rr_cursor_by_cpu,
+                        &picked_in_round,
                     ) {
+                        picked_in_round[worker_index] = true;
                         let worker = preview_workers[worker_index];
                         preview_offsets[cpu_slot] = preview_offsets[cpu_slot]
                             .saturating_add(sample_trace_worker_slice_ticks(worker));
@@ -1057,13 +1165,16 @@ impl Scheduler {
             for cpu in cpu_rows[..cpu_count].iter().copied() {
                 let cpu_slot = core::cmp::min(cpu, MAX_CPUS.saturating_sub(1));
                 let workers_on_cpu = count_workers_on_cpu(&workers[..worker_count], cpu);
+                let mut picked_in_round = [false; MAX_THREADS];
                 for _ in 0..workers_on_cpu {
                     if let Some(worker_index) = pick_sample_trace_worker(
                         &mut workers[..worker_count],
                         self.policy,
                         cpu,
                         &mut rr_cursor_by_cpu,
+                        &picked_in_round,
                     ) {
+                        picked_in_round[worker_index] = true;
                         let worker = workers[worker_index];
                         self.push_trace_entry_at_tick(
                             base_tick.saturating_add(cpu_trace_offsets[cpu_slot]),
@@ -1215,16 +1326,53 @@ impl Scheduler {
             && self.thread_allowed_on_cpu(idx, cpu_id)
     }
 
+    fn highest_ready_priority(&self, cpu_id: Option<usize>) -> Option<u8> {
+        let current = self.current_thread.0;
+        let mut best_priority = 0u8;
+        let mut found = false;
+        for idx in 1..MAX_THREADS {
+            if self.candidate_can_run(idx, current, cpu_id)
+                && smros_sched_priority_better_body!(
+                    self.schedule_info[idx].priority,
+                    found,
+                    best_priority
+                )
+            {
+                best_priority = self.schedule_info[idx].priority;
+                found = true;
+            }
+        }
+        if found {
+            Some(best_priority)
+        } else {
+            None
+        }
+    }
+
+    fn ready_higher_priority_exists(&self, cpu_id: Option<usize>) -> bool {
+        if self.current_thread.0 == ThreadId::IDLE.0 {
+            return false;
+        }
+        let Some(best_ready_priority) = self.highest_ready_priority(cpu_id) else {
+            return false;
+        };
+        let current_priority = self.schedule_info[self.current_thread.0].priority;
+        smros_sched_priority_should_preempt_body!(current_priority, true, best_ready_priority)
+    }
+
     fn pick_round_robin(&mut self, cpu_id: Option<usize>) -> Option<usize> {
         let start = self.next_thread;
         let mut attempts = 0;
         let current = self.current_thread.0;
+        let best_priority = self.highest_ready_priority(cpu_id)?;
 
         while attempts < MAX_THREADS {
             let idx = object_logic::scheduler_candidate_index(start, attempts, MAX_THREADS);
 
             // Skip the current thread and idle thread (unless it's the only option)
-            if self.candidate_can_run(idx, current, cpu_id) {
+            if self.candidate_can_run(idx, current, cpu_id)
+                && self.schedule_info[idx].priority == best_priority
+            {
                 self.next_thread = (idx + 1) % MAX_THREADS;
                 return Some(idx);
             }
@@ -1241,10 +1389,13 @@ impl Scheduler {
         let current = self.current_thread.0;
         let mut best: Option<usize> = None;
         let mut best_deadline = u64::MAX;
+        let best_priority = self.highest_ready_priority(cpu_id)?;
 
         while attempts < MAX_THREADS {
             let idx = object_logic::scheduler_candidate_index(start, attempts, MAX_THREADS);
-            if self.candidate_can_run(idx, current, cpu_id) {
+            if self.candidate_can_run(idx, current, cpu_id)
+                && self.schedule_info[idx].priority == best_priority
+            {
                 let deadline = self.schedule_info[idx].deadline_tick;
                 if smros_sched_edf_better_body!(deadline, best.is_some(), best_deadline) {
                     best = Some(idx);
@@ -1261,7 +1412,8 @@ impl Scheduler {
     }
 
     fn pick_credit(&mut self, cpu_id: Option<usize>) -> Option<usize> {
-        if !self.any_ready_credit(cpu_id) {
+        let best_priority = self.highest_ready_priority(cpu_id)?;
+        if !self.any_ready_credit(cpu_id, best_priority) {
             self.refill_credits();
         }
 
@@ -1273,7 +1425,9 @@ impl Scheduler {
 
         while attempts < MAX_THREADS {
             let idx = object_logic::scheduler_candidate_index(start, attempts, MAX_THREADS);
-            if self.candidate_can_run(idx, current, cpu_id) {
+            if self.candidate_can_run(idx, current, cpu_id)
+                && self.schedule_info[idx].priority == best_priority
+            {
                 let credit = self.schedule_info[idx].credit;
                 if smros_sched_credit_better_body!(credit, best.is_some(), best_credit) {
                     best = Some(idx);
@@ -1296,10 +1450,13 @@ impl Scheduler {
         let mut best: Option<usize> = None;
         let mut best_ticks = 0u32;
         let mut best_weight = 1u32;
+        let best_priority = self.highest_ready_priority(cpu_id)?;
 
         while attempts < MAX_THREADS {
             let idx = object_logic::scheduler_candidate_index(start, attempts, MAX_THREADS);
-            if self.candidate_can_run(idx, current, cpu_id) {
+            if self.candidate_can_run(idx, current, cpu_id)
+                && self.schedule_info[idx].priority == best_priority
+            {
                 let ticks = self.threads[idx].total_ticks;
                 let weight = self.schedule_info[idx].weight;
                 if smros_sched_fair_better_body!(
@@ -1323,10 +1480,13 @@ impl Scheduler {
         best
     }
 
-    fn any_ready_credit(&self, cpu_id: Option<usize>) -> bool {
+    fn any_ready_credit(&self, cpu_id: Option<usize>, priority: u8) -> bool {
         let current = self.current_thread.0;
         for idx in 1..MAX_THREADS {
-            if self.candidate_can_run(idx, current, cpu_id) && self.schedule_info[idx].credit > 0 {
+            if self.candidate_can_run(idx, current, cpu_id)
+                && self.schedule_info[idx].priority == priority
+                && self.schedule_info[idx].credit > 0
+            {
                 return true;
             }
         }
@@ -1370,6 +1530,7 @@ impl Scheduler {
                 credit: 30,
                 total_ticks: 18,
                 weight: 1,
+                priority: 1,
                 cpu_affinity: None,
             },
             ScheduleTestTask {
@@ -1379,6 +1540,7 @@ impl Scheduler {
                 credit: 10,
                 total_ticks: 20,
                 weight: 5,
+                priority: 2,
                 cpu_affinity: Some(1),
             },
             ScheduleTestTask {
@@ -1388,6 +1550,7 @@ impl Scheduler {
                 credit: 80,
                 total_ticks: 12,
                 weight: 1,
+                priority: 2,
                 cpu_affinity: None,
             },
             ScheduleTestTask {
@@ -1397,6 +1560,7 @@ impl Scheduler {
                 credit: 200,
                 total_ticks: 0,
                 weight: 1,
+                priority: 3,
                 cpu_affinity: None,
             },
         ];
@@ -1467,6 +1631,15 @@ impl Scheduler {
     pub fn should_preempt(&self) -> bool {
         if let Some(tcb) = self.get_thread(self.current_thread) {
             if self.active_threads <= 1 {
+                return false;
+            }
+            if self.ready_higher_priority_exists(tcb.current_cpu) {
+                return true;
+            }
+            if tcb.time_slice == 0
+                && self.schedule_info[self.current_thread.0].priority
+                    > self.highest_ready_priority(tcb.current_cpu).unwrap_or(0)
+            {
                 return false;
             }
             let info = self.schedule_info[self.current_thread.0];
@@ -1620,9 +1793,10 @@ extern "C" fn idle_thread_entry() -> ! {
 /// Perform a context switch to the next thread
 pub fn schedule() {
     let s = scheduler();
+    let cpu_id = current_logical_cpu(s);
 
     // Find next thread to run
-    if let Some(next_id) = s.schedule_next() {
+    if let Some(next_id) = s.schedule_next_for_cpu(cpu_id) {
         let current_id = s.current_thread;
 
         if next_id == current_id {
@@ -1645,11 +1819,11 @@ pub fn schedule() {
             }
             (*next_tcb_ptr).state = ThreadState::Running;
             (*next_tcb_ptr).time_slice = next_time_slice;
-            (*next_tcb_ptr).current_cpu = Some(0);
+            (*next_tcb_ptr).current_cpu = Some(cpu_id);
         }
 
         s.current_thread = next_id;
-        s.record_trace_switch(0);
+        s.record_trace_switch(cpu_id);
 
         // Perform context switch
         // SAFETY: These pointers are valid TCB references
@@ -1657,6 +1831,16 @@ pub fn schedule() {
             thread::switch_context(current_tcb_ptr, next_tcb_ptr);
         }
     }
+}
+
+fn current_logical_cpu(s: &Scheduler) -> usize {
+    let current_cpu = s
+        .get_thread(s.current_thread)
+        .and_then(|thread| thread.current_cpu)
+        .unwrap_or_else(|| crate::kernel_lowlevel::smp::current_cpu_id() as usize);
+    let online_cpus = core::cmp::max(crate::kernel_lowlevel::smp::online_cpu_count() as usize, 1);
+    let max_cpu = core::cmp::min(online_cpus, MAX_CPUS).saturating_sub(1);
+    core::cmp::min(current_cpu, max_cpu)
 }
 
 /// Start the first user thread (called from kernel_main)

@@ -33,6 +33,20 @@ macro_rules! smros_sched_task_allowed_on_cpu_body {
 }
 
 #[allow(unused_macros)]
+macro_rules! smros_sched_priority_better_body {
+    ($candidate_priority:expr, $best_present:expr, $best_priority:expr) => {{
+        !$best_present || $candidate_priority > $best_priority
+    }};
+}
+
+#[allow(unused_macros)]
+macro_rules! smros_sched_priority_should_preempt_body {
+    ($current_priority:expr, $best_ready_present:expr, $best_ready_priority:expr) => {{
+        $best_ready_present && $best_ready_priority > $current_priority
+    }};
+}
+
+#[allow(unused_macros)]
 macro_rules! smros_sched_edf_better_body {
     ($candidate_deadline:expr, $best_present:expr, $best_deadline:expr) => {{
         !$best_present || $candidate_deadline < $best_deadline

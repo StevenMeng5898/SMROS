@@ -144,7 +144,9 @@ milliseconds for one scheduler thread. Values are rounded up to the scheduler
 tick, currently 10 ms. `sched credit <thread_id> <credit>` sets a thread's
 credit scheduler budget. `sched cpu <thread_id> <cpu|any>` pins a thread to one
 logical CPU or clears the pin. `sched priority <thread_id> <priority>` sets one
-thread's scheduler priority. `sched test` runs the scheduler policy self-test.
+thread's scheduler priority; higher numeric priority preempts lower-priority
+running work, while the selected scheduling policy orders threads within the
+same priority class. `sched test` runs the scheduler policy self-test.
 
 `sched sample [workers]` creates that many bounded scheduler worker threads,
 capped by available thread slots. The sample workers are mapped across available

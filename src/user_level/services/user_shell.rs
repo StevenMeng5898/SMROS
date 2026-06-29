@@ -8757,11 +8757,13 @@ fn cmd_reboot(ctx: &mut ShellContext, _args: &[&str]) {
 fn cmd_ps(ctx: &mut ShellContext, _args: &[&str]) {
     let pm = process_manager();
     let sched = scheduler::scheduler();
+    let tick = sched.get_tick_count();
+    let vm_status = crate::kernel_objects::hypervisor::hypervisor().status(tick);
 
     ctx.serial
-        .write_str("\n  PID  State      Name         Threads  Parent\n");
+        .write_str("\n  PID  State      Name                  Threads  Parent\n");
     ctx.serial
-        .write_str("  ─────────────────────────────────────────────\n");
+        .write_str("  ─────────────────────────────────────────────────────\n");
 
     let mut count = 0;
     for i in 0..crate::kernel_lowlevel::memory::MAX_PROCESSES {
@@ -8772,11 +8774,18 @@ fn cmd_ps(ctx: &mut ShellContext, _args: &[&str]) {
                 ctx.serial.write_str(pcb.state.as_str());
                 ctx.serial.write_str("  ");
                 ctx.serial.write_str(pcb.name);
-                for _ in 0..(12usize.saturating_sub(pcb.name.len())) {
+                for _ in 0..(22usize.saturating_sub(pcb.name.len())) {
                     ctx.serial.write_byte(b' ');
                 }
                 let live_threads = sched.live_thread_count_for_process(pcb.pid);
-                print_number(&mut ctx.serial, live_threads as u32);
+                let modeled_threads = ps_vm_thread_count(&vm_status, pcb.pid);
+                let visible_threads = live_threads.saturating_add(modeled_threads);
+                let visible_threads = if pcb.state == ProcessState::Terminated {
+                    visible_threads
+                } else {
+                    core::cmp::max(visible_threads, pcb.thread_count)
+                };
+                print_number(&mut ctx.serial, visible_threads as u32);
                 ctx.serial.write_str("         ");
                 print_number(&mut ctx.serial, pcb.parent_pid as u32);
                 ctx.serial.write_str("\n");
@@ -8786,16 +8795,16 @@ fn cmd_ps(ctx: &mut ShellContext, _args: &[&str]) {
     }
 
     ctx.serial
-        .write_str("  ─────────────────────────────────────────────\n");
+        .write_str("  ─────────────────────────────────────────────────────\n");
     ctx.serial.write_str("  Total: ");
     print_number(&mut ctx.serial, count as u32);
     ctx.serial.write_str(" process(es)\n");
 
     ctx.serial.write_str(
-        "\n  TID  PID  State       Name          CPU  Bind  Left(ms)  Slice(ms)  Prio  Ticks  Weight  Credit\n",
+        "\n  TID  PID  State       Name                CPU  Bind  Left(ms)  Slice(ms)  Prio  Ticks  Weight  Credit\n",
     );
     ctx.serial.write_str(
-        "  ───────────────────────────────────────────────────────────────────────────────────────────\n",
+        "  ─────────────────────────────────────────────────────────────────────────────────────────────────\n",
     );
     let mut thread_count = 0usize;
     for tid in 0..crate::kernel_lowlevel::thread::MAX_THREADS {
@@ -8821,7 +8830,7 @@ fn cmd_ps(ctx: &mut ShellContext, _args: &[&str]) {
         }
         ctx.serial.write_str("  ");
         ctx.serial.write_str(thread.name);
-        for _ in 0..(12usize.saturating_sub(thread.name.len())) {
+        for _ in 0..(18usize.saturating_sub(thread.name.len())) {
             ctx.serial.write_byte(b' ');
         }
         match thread.current_cpu {
@@ -8854,12 +8863,80 @@ fn cmd_ps(ctx: &mut ShellContext, _args: &[&str]) {
         ctx.serial.write_str("\n");
         thread_count += 1;
     }
+    thread_count += print_ps_vm_threads(ctx, &vm_status);
     ctx.serial.write_str(
-        "  ───────────────────────────────────────────────────────────────────────────────────────────\n",
+        "  ─────────────────────────────────────────────────────────────────────────────────────────────────\n",
     );
     ctx.serial.write_str("  Total: ");
     print_usize(&mut ctx.serial, thread_count);
     ctx.serial.write_str(" thread(s)\n");
+}
+
+fn ps_vm_thread_count(
+    status: &crate::kernel_objects::hypervisor::HypervisorStatus,
+    process_pid: usize,
+) -> usize {
+    let mut count = 0usize;
+    for vm in &status.vms {
+        if vm.process_pid == process_pid
+            && vm.state == crate::kernel_objects::hypervisor::VmState::Running
+        {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn print_ps_vm_threads(
+    ctx: &mut ShellContext,
+    status: &crate::kernel_objects::hypervisor::HypervisorStatus,
+) -> usize {
+    let mut count = 0usize;
+    for vm in &status.vms {
+        if vm.state != crate::kernel_objects::hypervisor::VmState::Running {
+            continue;
+        }
+
+        let tid = 1000u32.saturating_add(vm.id);
+        let slice_ms = vm.cpu_time_slice_us.saturating_add(999) / 1000;
+
+        ctx.serial.write_str("  ");
+        print_padded_number(&mut ctx.serial, tid, 3);
+        ctx.serial.write_str("  ");
+        print_padded_number(&mut ctx.serial, vm.process_pid as u32, 3);
+        ctx.serial.write_str("  ");
+        ctx.serial.write_str("Running");
+        for _ in 0..(10usize.saturating_sub("Running".len())) {
+            ctx.serial.write_byte(b' ');
+        }
+        ctx.serial.write_str("  ");
+        ctx.serial.write_str("vcpu:");
+        ctx.serial.write_str(vm.name.as_str());
+        let vm_thread_name_len = 5usize.saturating_add(vm.name.len());
+        for _ in 0..(18usize.saturating_sub(vm_thread_name_len)) {
+            ctx.serial.write_byte(b' ');
+        }
+        ctx.serial.write_str("  *");
+        ctx.serial.write_str("   any");
+        ctx.serial.write_str("  ");
+        print_padded_number(&mut ctx.serial, slice_ms, 8);
+        ctx.serial.write_str("  ");
+        print_padded_number(&mut ctx.serial, slice_ms, 9);
+        ctx.serial.write_str("  ");
+        print_padded_number(&mut ctx.serial, vm.realtime_priority as u32, 4);
+        ctx.serial.write_str("  ");
+        print_padded_number(
+            &mut ctx.serial,
+            saturating_u64_to_u32(vm.uptime_ticks(status.tick)),
+            5,
+        );
+        ctx.serial.write_str("  ");
+        print_padded_number(&mut ctx.serial, 0, 6);
+        ctx.serial.write_str("  0/0\n");
+
+        count += 1;
+    }
+    count
 }
 
 /// Command: top - Show process status (interactive-like display)
@@ -9644,7 +9721,7 @@ fn cmd_sched(ctx: &mut ShellContext, args: &[&str]) {
     }
 
     ctx.serial.write_str(
-        "usage: sched [status|set <rr|edf|credit|fair>|slice <thread_id> <ms>|credit <thread_id> <credit>|cpu <thread_id> <cpu|any>|priority <thread_id> <priority>|test|sample [workers]|perfetto [samples]]\n",
+        "usage: sched [status|set <rr|edf|credit|fair>|slice <thread_id> <ms>|credit <thread_id> <credit>|cpu <thread_id> <cpu|any>|priority <thread_id> <1..255 higher=wins>|test|sample [workers]|perfetto [samples]]\n",
     );
 }
 
@@ -9805,6 +9882,7 @@ fn cmd_sched_priority(ctx: &mut ShellContext, args: &[&str]) {
     print_usize(&mut ctx.serial, thread_id);
     ctx.serial.write_str(" priority set to ");
     print_usize(&mut ctx.serial, priority);
+    ctx.serial.write_str(" (higher value preempts lower)");
     ctx.serial.write_str("\n");
 }
 
@@ -10158,6 +10236,14 @@ fn scheduler_ms_to_ticks(ms: u32) -> Option<u32> {
         return None;
     }
     Some(ms.saturating_add(SCHED_TICK_MS - 1) / SCHED_TICK_MS)
+}
+
+fn saturating_u64_to_u32(value: u64) -> u32 {
+    if value > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        value as u32
+    }
 }
 
 /// Print a number with padding (right-aligned)
