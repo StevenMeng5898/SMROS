@@ -155,6 +155,48 @@ struct FxfsDirectoryEntry {
     object_id: u64,
 }
 
+fn fxfs_relative_path_from_shared(
+    object_id: u64,
+    shared_id: u64,
+    dirents: &[FxfsDirectoryEntry],
+) -> Option<String> {
+    if object_id == shared_id {
+        return Some(String::new());
+    }
+
+    let mut parts: Vec<&str> = Vec::new();
+    let mut current = object_id;
+    for _ in 0..dirents.len() {
+        let dirent = dirents.iter().find(|entry| entry.object_id == current)?;
+        if dirent.parent_id == shared_id {
+            parts.push(dirent.name.as_str());
+            let mut relative = String::new();
+            for part in parts.iter().rev() {
+                if !relative.is_empty() {
+                    relative.push('/');
+                }
+                relative.push_str(part);
+            }
+            return Some(relative);
+        }
+        if dirent.parent_id == FXFS_ROOT_OBJECT_ID {
+            return None;
+        }
+        parts.push(dirent.name.as_str());
+        current = dirent.parent_id;
+    }
+    None
+}
+
+fn fxfs_object_matches_snapshot(object: &FxfsObject, snapshot: &[u8]) -> bool {
+    object.data.as_slice() == snapshot
+        || (object.data.is_empty() && object.attrs.size == snapshot.len())
+}
+
+fn fxfs_object_is_snapshot_placeholder(object: &FxfsObject, snapshot: &[u8]) -> bool {
+    object.data.is_empty() && object.attrs.size == snapshot.len()
+}
+
 struct LoadedFxfsImage {
     active_slot: usize,
     next_object_id: u64,
@@ -477,6 +519,16 @@ fn fxfs_shared_relative_path(path: &str) -> Option<&str> {
     path.strip_prefix(FXFS_SHARED_ROOT)
         .and_then(|suffix| suffix.strip_prefix('/'))
         .filter(|relative| !relative.is_empty())
+}
+
+fn fxfs_copy_from_data(data: &[u8], offset: usize, out: &mut [u8]) -> Result<usize, FxfsError> {
+    if offset > data.len() {
+        return Err(FxfsError::InvalidOffset);
+    }
+    let available = data.len() - offset;
+    let len = core::cmp::min(out.len(), available);
+    out[..len].copy_from_slice(&data[offset..offset + len]);
+    Ok(len)
 }
 
 pub struct FxfsState {
@@ -856,7 +908,7 @@ impl FxfsState {
         let object = &self.objects[index];
         let should_persist = match object.kind {
             FxfsNodeKind::File => match fxfs_host_share_file_data(relative) {
-                Some(snapshot) => object.data.as_slice() != snapshot,
+                Some(snapshot) => !fxfs_object_matches_snapshot(object, snapshot),
                 None => true,
             },
             FxfsNodeKind::Directory => {
@@ -981,7 +1033,11 @@ impl FxfsState {
             let accessed_at = read_u64(&body, &mut body_pos)?;
             let link_count = read_u32(&body, &mut body_pos)?;
             let data_len = read_u32(&body, &mut body_pos)? as usize;
-            if !user_logic::fxfs_file_size_valid(data_len) || size != data_len {
+            if !user_logic::fxfs_file_size_valid(size)
+                || !user_logic::fxfs_file_size_valid(data_len)
+                || data_len > size
+                || (data_len != size && data_len != 0)
+            {
                 return Err(FxfsError::StorageCorrupt);
             }
             let data = read_bytes(&body, &mut body_pos, data_len)?.to_vec();
@@ -1015,6 +1071,33 @@ impl FxfsState {
                 name,
                 object_id,
             });
+        }
+
+        let shared_id = dirents
+            .iter()
+            .find(|entry| entry.parent_id == FXFS_ROOT_OBJECT_ID && entry.name == "shared")
+            .map(|entry| entry.object_id);
+        for object in &objects {
+            if object.attrs.size == object.data.len() {
+                continue;
+            }
+            if object.kind != FxfsNodeKind::File || !object.data.is_empty() {
+                return Err(FxfsError::StorageCorrupt);
+            }
+            let Some(shared_id) = shared_id else {
+                return Err(FxfsError::StorageCorrupt);
+            };
+            let Some(relative) =
+                fxfs_relative_path_from_shared(object.object_id, shared_id, &dirents)
+            else {
+                return Err(FxfsError::StorageCorrupt);
+            };
+            let Some(snapshot) = fxfs_host_share_file_data(relative.as_str()) else {
+                return Err(FxfsError::StorageCorrupt);
+            };
+            if snapshot.len() != object.attrs.size {
+                return Err(FxfsError::StorageCorrupt);
+            }
         }
 
         let mut journal = Vec::new();
@@ -1112,6 +1195,19 @@ impl FxfsState {
         self.dirents
             .iter()
             .position(|entry| entry.parent_id == parent_id && entry.name == name)
+    }
+
+    fn object_relative_path(&self, object_id: u64) -> Option<String> {
+        let shared_id = self.child_object_id(FXFS_ROOT_OBJECT_ID, "shared")?;
+        fxfs_relative_path_from_shared(object_id, shared_id, &self.dirents)
+    }
+
+    fn host_share_snapshot_for_object(&self, object_id: u64) -> Option<&'static [u8]> {
+        let relative = self.object_relative_path(object_id)?;
+        if self.host_share_deleted_contains(relative.as_str()) {
+            return None;
+        }
+        fxfs_host_share_file_data(relative.as_str())
     }
 
     fn child_object_id(&self, parent_id: u64, name: &str) -> Option<u64> {
@@ -1291,7 +1387,26 @@ impl FxfsState {
                 if self.objects[index].kind == FxfsNodeKind::Directory {
                     return Err(FxfsError::IsDirectory);
                 }
-                if self.objects[index].data.as_slice() == data {
+                if let Some(snapshot) =
+                    self.host_share_snapshot_for_object(self.objects[index].object_id)
+                {
+                    if snapshot == data {
+                        let sequence = self.next_sequence();
+                        self.objects[index].data.clear();
+                        self.objects[index].attrs.size = snapshot.len();
+                        self.objects[index].attrs.modified_at = sequence;
+                        self.objects[index].attrs.accessed_at = sequence;
+                        return Ok(data.len());
+                    }
+                }
+                let matches_existing_data = self.objects[index].data.as_slice() == data;
+                let is_snapshot_placeholder = self
+                    .host_share_snapshot_for_object(self.objects[index].object_id)
+                    .map(|snapshot| {
+                        fxfs_object_is_snapshot_placeholder(&self.objects[index], snapshot)
+                    })
+                    .unwrap_or(false);
+                if matches_existing_data && !is_snapshot_placeholder {
                     return Ok(data.len());
                 }
                 let current_len = self.objects[index].data.len();
@@ -1323,6 +1438,14 @@ impl FxfsState {
         if self.objects[index].kind != FxfsNodeKind::File {
             return Err(FxfsError::NotFile);
         }
+        if self.objects[index].data.is_empty() {
+            if let Some(snapshot) =
+                self.host_share_snapshot_for_object(self.objects[index].object_id)
+            {
+                try_reserve_vec(&mut self.objects[index].data, snapshot.len())?;
+                self.objects[index].data.extend_from_slice(snapshot);
+            }
+        }
         let new_size =
             match user_logic::fxfs_append_size(self.objects[index].data.len(), data.len()) {
                 Some(size) if user_logic::fxfs_file_size_valid(size) => size,
@@ -1350,6 +1473,14 @@ impl FxfsState {
         let index = self.resolve_path(path)?;
         if self.objects[index].kind != FxfsNodeKind::File {
             return Err(FxfsError::NotFile);
+        }
+        if self.objects[index].data.is_empty() {
+            if let Some(snapshot) =
+                self.host_share_snapshot_for_object(self.objects[index].object_id)
+            {
+                try_reserve_vec(&mut self.objects[index].data, snapshot.len())?;
+                self.objects[index].data.extend_from_slice(snapshot);
+            }
         }
         let old_size = self.objects[index].data.len();
         if size > old_size {
@@ -1517,7 +1648,17 @@ impl FxfsState {
             if self.exists(path.as_str()) {
                 continue;
             }
-            self.write_file(path.as_str(), file.data)?;
+            let (parent_id, name) = self.parent_and_name(path.as_str())?;
+            let object_id = self.create_object(parent_id, name, FxfsNodeKind::File, &[])?;
+            if let Some(index) = self.find_object_index(object_id) {
+                self.objects[index].attrs.size = file.data.len();
+            }
+            self.record(
+                FxfsJournalOp::CreateFile,
+                object_id,
+                parent_id,
+                file.data.len(),
+            );
         }
         Ok(())
     }
@@ -1581,12 +1722,18 @@ impl FxfsState {
         if self.objects[index].kind != FxfsNodeKind::File {
             return Ok(());
         }
-        if self.objects[index].data.as_slice() == replacement {
+        let data = if self.objects[index].data.is_empty() {
+            self.host_share_snapshot_for_object(self.objects[index].object_id)
+                .unwrap_or(self.objects[index].data.as_slice())
+        } else {
+            self.objects[index].data.as_slice()
+        };
+        if data == replacement {
             return Ok(());
         }
         let should_replace = needles
             .iter()
-            .any(|needle| fxfs_bytes_contains(self.objects[index].data.as_slice(), needle));
+            .any(|needle| fxfs_bytes_contains(data, needle));
         if should_replace {
             self.write_file(path, replacement)?;
         }
@@ -1625,13 +1772,15 @@ impl FxfsState {
         if self.objects[index].kind != FxfsNodeKind::File {
             return Err(FxfsError::NotFile);
         }
-        let file_len = self.objects[index].data.len();
-        if cursor.offset > file_len {
-            return Err(FxfsError::InvalidOffset);
-        }
-        let available = file_len - cursor.offset;
-        let len = core::cmp::min(out.len(), available);
-        out[..len].copy_from_slice(&self.objects[index].data[cursor.offset..cursor.offset + len]);
+        let len = if self.objects[index].data.is_empty() {
+            if let Some(snapshot) = self.host_share_snapshot_for_object(cursor.object_id) {
+                fxfs_copy_from_data(snapshot, cursor.offset, out)?
+            } else {
+                fxfs_copy_from_data(self.objects[index].data.as_slice(), cursor.offset, out)?
+            }
+        } else {
+            fxfs_copy_from_data(self.objects[index].data.as_slice(), cursor.offset, out)?
+        };
         cursor.offset = cursor.offset.saturating_add(len);
         Ok(len)
     }
@@ -1642,6 +1791,14 @@ impl FxfsState {
             .ok_or(FxfsError::NotFound)?;
         if self.objects[index].kind != FxfsNodeKind::File {
             return Err(FxfsError::NotFile);
+        }
+        if self.objects[index].data.is_empty() {
+            if let Some(snapshot) =
+                self.host_share_snapshot_for_object(self.objects[index].object_id)
+            {
+                try_reserve_vec(&mut self.objects[index].data, snapshot.len())?;
+                self.objects[index].data.extend_from_slice(snapshot);
+            }
         }
         let new_size = match user_logic::fxfs_write_end(cursor.offset, data.len()) {
             Some(end) if user_logic::fxfs_file_size_valid(end) => end,

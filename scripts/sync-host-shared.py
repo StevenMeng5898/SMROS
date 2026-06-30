@@ -39,6 +39,7 @@ DIRENT = struct.Struct("<QQH")
 class FxfsObject:
     object_id: int
     kind: int
+    size: int
     data: bytes
 
 
@@ -136,16 +137,17 @@ def read_slot(disk: bytes, offset: int, slot_size: int) -> LoadedImage | None:
         pos += OBJECT.size
         if kind not in {FXFS_NODE_DIR, FXFS_NODE_FILE}:
             raise ValueError("bad FxFS node kind")
-        if size != data_len or pos + data_len > len(body):
+        if data_len > size or (data_len != size and data_len != 0) or pos + data_len > len(body):
             raise ValueError("bad FxFS file length")
         data = body[pos : pos + data_len]
         pos += data_len
-        objects[object_id] = FxfsObject(object_id, kind, data)
+        objects[object_id] = FxfsObject(object_id, kind, size, data)
 
     if FXFS_ROOT_OBJECT_ID not in objects:
         raise ValueError("FxFS root object missing")
 
     children: dict[int, list[tuple[str, int]]] = {}
+    parents: dict[int, int] = {}
     for _ in range(dirent_count):
         if pos + DIRENT.size > len(body):
             raise ValueError("truncated FxFS directory table")
@@ -156,6 +158,20 @@ def read_slot(disk: bytes, offset: int, slot_size: int) -> LoadedImage | None:
         name = body[pos : pos + name_len].decode("utf-8")
         pos += name_len
         children.setdefault(parent_id, []).append((name, object_id))
+        parents[object_id] = parent_id
+
+    shared_id = None
+    for name, object_id in children.get(FXFS_ROOT_OBJECT_ID, []):
+        if name == "shared":
+            shared_id = object_id
+            break
+    for obj in objects.values():
+        if obj.size == len(obj.data):
+            continue
+        if obj.kind != FXFS_NODE_FILE or obj.data or shared_id is None:
+            raise ValueError("bad FxFS file length")
+        if not object_under_parent(obj.object_id, shared_id, parents):
+            raise ValueError("bad FxFS file length")
 
     journal_len = journal_count * FXFS_JOURNAL_RECORD_BYTES
     if pos + journal_len != len(body):
@@ -181,6 +197,19 @@ def load_latest_image(disk_path: Path) -> LoadedImage:
         detail = "; ".join(errors) if errors else "no initialized FxFS slots"
         raise ValueError(detail)
     return max(candidates, key=lambda image: image.sequence)
+
+
+def object_under_parent(object_id: int, parent_id: int, parents: dict[int, int]) -> bool:
+    current = object_id
+    visited: set[int] = set()
+    while current not in visited:
+        if current == parent_id:
+            return True
+        visited.add(current)
+        current = parents.get(current)
+        if current is None:
+            return False
+    return False
 
 
 def safe_child(root: Path, relative: str) -> Path:
@@ -221,6 +250,8 @@ def sync_shared_tree(image: LoadedImage, host_root: Path, quiet: bool) -> int:
             raise ValueError("FxFS directory entry points to missing object")
 
         if obj.kind == FXFS_NODE_FILE:
+            if obj.size != len(obj.data):
+                return
             if relative in LEGACY_SHARED_FILES:
                 remove_host_file(host_root, relative, quiet)
                 if not quiet:

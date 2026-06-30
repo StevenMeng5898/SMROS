@@ -8769,10 +8769,17 @@ fn cmd_ps(ctx: &mut ShellContext, args: &[&str]) {
     let tick = sched.get_tick_count();
     let vm_status = crate::kernel_objects::hypervisor::hypervisor().status(tick);
 
-    ctx.serial
-        .write_str("\n  PID  State      Name                  Threads  Parent\n");
-    ctx.serial
-        .write_str("  ─────────────────────────────────────────────────────\n");
+    if show_memory_maps {
+        ctx.serial
+            .write_str("\n  PID  State      Name                  Threads  Parent  VCPU\n");
+        ctx.serial
+            .write_str("  ───────────────────────────────────────────────────────────────\n");
+    } else {
+        ctx.serial
+            .write_str("\n  PID  State      Name                  Threads  Parent\n");
+        ctx.serial
+            .write_str("  ─────────────────────────────────────────────────────\n");
+    }
 
     let mut count = 0;
     for i in 0..crate::kernel_lowlevel::memory::MAX_PROCESSES {
@@ -8797,14 +8804,23 @@ fn cmd_ps(ctx: &mut ShellContext, args: &[&str]) {
                 print_number(&mut ctx.serial, visible_threads as u32);
                 ctx.serial.write_str("         ");
                 print_number(&mut ctx.serial, pcb.parent_pid as u32);
+                if show_memory_maps {
+                    ctx.serial.write_str("       ");
+                    print_ps_process_vcpu(&mut ctx.serial, &vm_status, pcb.pid);
+                }
                 ctx.serial.write_str("\n");
                 count += 1;
             }
         }
     }
 
-    ctx.serial
-        .write_str("  ─────────────────────────────────────────────────────\n");
+    if show_memory_maps {
+        ctx.serial
+            .write_str("  ───────────────────────────────────────────────────────────────\n");
+    } else {
+        ctx.serial
+            .write_str("  ─────────────────────────────────────────────────────\n");
+    }
     ctx.serial.write_str("  Total: ");
     print_number(&mut ctx.serial, count as u32);
     ctx.serial.write_str(" process(es)\n");
@@ -8872,7 +8888,7 @@ fn cmd_ps(ctx: &mut ShellContext, args: &[&str]) {
         ctx.serial.write_str("\n");
         thread_count += 1;
     }
-    thread_count += print_ps_vm_threads(ctx, &vm_status);
+    thread_count += print_ps_vm_threads(ctx, &vm_status, show_memory_maps);
     ctx.serial.write_str(
         "  ─────────────────────────────────────────────────────────────────────────────────────────────────\n",
     );
@@ -9163,9 +9179,34 @@ fn ps_vm_thread_count(
     count
 }
 
+fn print_ps_process_vcpu(
+    serial: &mut Serial,
+    status: &crate::kernel_objects::hypervisor::HypervisorStatus,
+    process_pid: usize,
+) {
+    let mut printed = false;
+    for vm in &status.vms {
+        if vm.process_pid != process_pid {
+            continue;
+        }
+
+        if printed {
+            serial.write_str(",");
+        }
+        serial.write_str("0x");
+        print_hex(serial, vm.vcpu_handle as u64);
+        printed = true;
+    }
+
+    if !printed {
+        serial.write_str("-");
+    }
+}
+
 fn print_ps_vm_threads(
     ctx: &mut ShellContext,
     status: &crate::kernel_objects::hypervisor::HypervisorStatus,
+    show_vcpu_handles: bool,
 ) -> usize {
     let mut count = 0usize;
     for vm in &status.vms {
@@ -9187,8 +9228,14 @@ fn print_ps_vm_threads(
         }
         ctx.serial.write_str("  ");
         ctx.serial.write_str("vcpu:");
-        ctx.serial.write_str(vm.name.as_str());
-        let vm_thread_name_len = 5usize.saturating_add(vm.name.len());
+        let vm_thread_name_len = if show_vcpu_handles {
+            ctx.serial.write_str("0x");
+            print_hex(&mut ctx.serial, vm.vcpu_handle as u64);
+            7usize.saturating_add(hex_digit_count(vm.vcpu_handle as u64))
+        } else {
+            ctx.serial.write_str(vm.name.as_str());
+            5usize.saturating_add(vm.name.len())
+        };
         for _ in 0..(18usize.saturating_sub(vm_thread_name_len)) {
             ctx.serial.write_byte(b' ');
         }
