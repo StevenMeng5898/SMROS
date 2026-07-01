@@ -114,7 +114,7 @@ impl Vmar {
                 if !page_aligned(offset) {
                     return Err(ZxError::ErrInvalidArgs);
                 }
-                self.base_addr + offset
+                object_logic::checked_end(self.base_addr, offset).ok_or(ZxError::ErrOutOfRange)?
             }
             None => self.find_free_region(len)?,
         };

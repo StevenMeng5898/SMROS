@@ -108,6 +108,23 @@ impl Vmo {
         })
     }
 
+    /// Create a sparse paged VMO whose pages are committed on demand.
+    pub fn new_sparse(size: usize) -> Option<Self> {
+        let page_count = pages(size);
+        let rounded_size = page_count * crate::kernel_lowlevel::memory::PAGE_SIZE;
+        Some(Self {
+            handle: HandleValue(INVALID_HANDLE),
+            vmo_type: VmoType::Paged,
+            size: rounded_size,
+            page_count,
+            pfns: Some(vec![None; page_count]),
+            data: Vec::new(),
+            cache_policy: CachePolicy::Cached,
+            ref_count: AtomicU32::new(1),
+            resizable: false,
+        })
+    }
+
     /// Create a resizable VMO
     pub fn new_paged_with_resizable(resizable: bool, page_count: usize) -> Option<Self> {
         let mut vmo = Self::new_paged(page_count)?;
@@ -233,7 +250,12 @@ impl Vmo {
     /// Read from VMO
     pub fn read(&self, offset: usize, buf: &mut [u8]) -> ZxResult {
         let end = self.checked_end(offset, buf.len())?;
-        buf.copy_from_slice(&self.data[offset..end]);
+        buf.fill(0);
+        if offset < self.data.len() {
+            let data_end = core::cmp::min(end, self.data.len());
+            let copied = data_end.saturating_sub(offset);
+            buf[..copied].copy_from_slice(&self.data[offset..data_end]);
+        }
 
         Ok(())
     }
@@ -242,6 +264,9 @@ impl Vmo {
     pub fn write(&mut self, offset: usize, buf: &[u8]) -> ZxResult {
         let end = self.checked_end(offset, buf.len())?;
         self.ensure_range_committed(offset, buf.len())?;
+        if self.data.len() < end {
+            self.data.resize(end, 0);
+        }
         self.data[offset..end].copy_from_slice(buf);
 
         Ok(())
@@ -267,8 +292,11 @@ impl Vmo {
             }
         }
 
-        for byte in &mut self.data[offset..offset + len] {
-            *byte = 0;
+        if offset < self.data.len() {
+            let end = core::cmp::min(offset + len, self.data.len());
+            for byte in &mut self.data[offset..end] {
+                *byte = 0;
+            }
         }
 
         Ok(())
@@ -278,8 +306,11 @@ impl Vmo {
     pub fn zero(&mut self, offset: usize, len: usize) -> ZxResult {
         self.checked_end(offset, len)?;
 
-        for byte in &mut self.data[offset..offset + len] {
-            *byte = 0;
+        if offset < self.data.len() {
+            let end = core::cmp::min(offset + len, self.data.len());
+            for byte in &mut self.data[offset..end] {
+                *byte = 0;
+            }
         }
 
         Ok(())

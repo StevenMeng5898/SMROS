@@ -1259,7 +1259,17 @@ impl MemorySyscallState {
             zircon_mapping_count: self
                 .vmars
                 .iter()
-                .map(|record| record.vmar.mappings.len())
+                .map(|record| {
+                    record
+                        .vmar
+                        .mappings
+                        .iter()
+                        .filter(|mapping| {
+                            self.resolve_handle(mapping.vmo_handle.0, ObjectType::Vmo)
+                                .is_some()
+                        })
+                        .count()
+                })
                 .sum(),
             zircon_root_vmar_handle: self.root_vmar_handle,
         }
@@ -1328,7 +1338,15 @@ impl MemorySyscallState {
                 handle: record.handle,
                 base_addr: record.vmar.base_addr,
                 size: record.vmar.size,
-                mapping_count: record.vmar.mappings.len(),
+                mapping_count: record
+                    .vmar
+                    .mappings
+                    .iter()
+                    .filter(|mapping| {
+                        self.resolve_handle(mapping.vmo_handle.0, ObjectType::Vmo)
+                            .is_some()
+                    })
+                    .count(),
                 child_count: record.vmar.children.len(),
                 parent_idx: record.vmar.parent_idx,
             })
@@ -1336,17 +1354,21 @@ impl MemorySyscallState {
         let mut vmar_mappings = Vec::new();
         for record in &self.vmars {
             for mapping in &record.vmar.mappings {
+                let Some(vmo_handle) = self.resolve_handle(mapping.vmo_handle.0, ObjectType::Vmo)
+                else {
+                    continue;
+                };
                 let vmo_committed_pages = self
                     .vmos
                     .iter()
-                    .find(|vmo| vmo.handle == mapping.vmo_handle.0)
+                    .find(|vmo| vmo.handle == vmo_handle)
                     .map(|vmo| vmo.vmo.committed_pages())
                     .unwrap_or(0);
                 vmar_mappings.push(VmarMappingSnapshot {
                     vmar_handle: record.handle,
                     vaddr: mapping.vaddr,
                     size: mapping.size,
-                    vmo_handle: mapping.vmo_handle.0,
+                    vmo_handle,
                     vmo_offset: mapping.vmo_offset,
                     mmu_flags: mapping.mmu_flags.bits(),
                     valid: mapping.valid,
@@ -5138,6 +5160,19 @@ pub fn sys_vmo_create(size: u64, options: u32, out_handle: &mut u32) -> ZxResult
     Ok(())
 }
 
+pub fn sys_vmo_create_sparse(size: usize, out_handle: &mut u32) -> ZxResult {
+    if size == 0 {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    let mut vmo = Vmo::new_sparse(size).ok_or(ZxError::ErrNoMemory)?;
+    let state = memory_state();
+    let handle = state.alloc_object_handle(ObjectType::Vmo);
+    vmo.handle = HandleValue(handle);
+    state.vmos.push(VmoRecord { handle, vmo });
+    *out_handle = handle;
+    Ok(())
+}
+
 /// Zircon sys_vmo_read implementation
 pub fn sys_vmo_read(handle: u32, buf: &mut [u8], offset: u64) -> ZxResult<usize> {
     info!("vmo.read: handle={:#x?}, offset={:#x?}", handle, offset);
@@ -7884,15 +7919,15 @@ pub fn sys_guest_create(
         return Err(ZxError::ErrInvalidArgs);
     }
     *guest_handle = compat::create_object_with_options(ObjectType::Guest, options)?.0;
-    let mut child_addr = 0usize;
-    sys_vmar_allocate(
-        memory_root_vmar_handle(),
-        0,
-        0,
-        PAGE_SIZE as u64,
-        vmar_handle,
-        &mut child_addr,
-    )?;
+    let state = memory_state();
+    let handle = state.alloc_object_handle(ObjectType::Vmar);
+    let mut guest_vmar = Vmar::new(0, ZX_GUEST_PHYS_LIMIT as usize);
+    guest_vmar.handle = HandleValue(handle);
+    state.vmars.push(VmarRecord {
+        handle,
+        vmar: guest_vmar,
+    });
+    *vmar_handle = handle;
     Ok(())
 }
 

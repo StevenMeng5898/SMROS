@@ -9121,10 +9121,10 @@ fn print_ps_vm_stage2_table(
     ctx.serial
         .write_str("\n  Stage-2 IPA->PA / hypervisor metadata\n");
     ctx.serial.write_str(
-        "  PID  VM                    State     IPA Range             PA          Guest       VMAR        VCPU        Memory(bytes)  Stage2\n",
+        "  PID  VM                    State     IPA Range             PA          Guest       VMAR        VMO         VCPU        Memory(bytes)  Stage2\n",
     );
     ctx.serial.write_str(
-        "  ---  --------------------  --------  ---------------------  ----------  ----------  ----------  ----------  -------------  ----------\n",
+        "  ---  --------------------  --------  ---------------------  ----------  ----------  ----------  ----------  ----------  -------------  ----------\n",
     );
 
     let mut count = 0usize;
@@ -9142,14 +9142,22 @@ fn print_ps_vm_stage2_table(
             hex_range_width(0, vm.memory_bytes as u64),
             21,
         );
-        ctx.serial.write_str("  ");
-        print_padded_str(&mut ctx.serial, "model-only", 10);
+        ctx.serial.write_str("  0x");
+        print_hex(&mut ctx.serial, vm.memory_base as u64);
+        pad_to_width(&mut ctx.serial, hex_value_width(vm.memory_base as u64), 10);
         ctx.serial.write_str("  0x");
         print_hex(&mut ctx.serial, vm.guest_handle as u64);
         pad_to_width(&mut ctx.serial, hex_value_width(vm.guest_handle as u64), 10);
         ctx.serial.write_str("  0x");
         print_hex(&mut ctx.serial, vm.vmar_handle as u64);
         pad_to_width(&mut ctx.serial, hex_value_width(vm.vmar_handle as u64), 10);
+        ctx.serial.write_str("  0x");
+        print_hex(&mut ctx.serial, vm.memory_vmo_handle as u64);
+        pad_to_width(
+            &mut ctx.serial,
+            hex_value_width(vm.memory_vmo_handle as u64),
+            10,
+        );
         ctx.serial.write_str("  0x");
         print_hex(&mut ctx.serial, vm.vcpu_handle as u64);
         pad_to_width(&mut ctx.serial, hex_value_width(vm.vcpu_handle as u64), 10);

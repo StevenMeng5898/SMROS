@@ -95,6 +95,8 @@ pub struct VmRecord {
     pub state: VmState,
     pub guest_handle: u32,
     pub vmar_handle: u32,
+    pub memory_vmo_handle: u32,
+    pub memory_base: usize,
     pub vcpu_handle: u32,
     pub process_pid: usize,
     pub start_tick: u64,
@@ -112,6 +114,8 @@ impl VmRecord {
         config: VmConfig,
         guest_handle: u32,
         vmar_handle: u32,
+        memory_vmo_handle: u32,
+        memory_base: usize,
         vcpu_handle: u32,
         process_pid: usize,
         tick: u64,
@@ -129,6 +133,8 @@ impl VmRecord {
             state: VmState::Running,
             guest_handle,
             vmar_handle,
+            memory_vmo_handle,
+            memory_base,
             vcpu_handle,
             process_pid,
             start_tick: tick,
@@ -248,14 +254,15 @@ impl HypervisorObject {
 
             let process_pid = create_vm_process(config.name.as_str())
                 .ok_or(HypervisorConfigError::InvalidRestart)?;
-            let (guest_handle, vmar_handle, vcpu_handle) = match create_guest_vcpu_handles() {
-                Ok(handles) => handles,
-                Err(err) => {
-                    let _ = crate::kernel_lowlevel::memory::process_manager()
-                        .terminate_process(process_pid);
-                    return Err(err);
-                }
-            };
+            let (guest_handle, vmar_handle, memory_vmo_handle, memory_base, vcpu_handle) =
+                match create_guest_resources(config.memory_bytes) {
+                    Ok(handles) => handles,
+                    Err(err) => {
+                        let _ = crate::kernel_lowlevel::memory::process_manager()
+                            .terminate_process(process_pid);
+                        return Err(err);
+                    }
+                };
 
             let existing = &mut self.vms[existing_index];
             existing.state = VmState::Running;
@@ -270,6 +277,8 @@ impl HypervisorObject {
             existing.restart_count = 0;
             existing.guest_handle = guest_handle;
             existing.vmar_handle = vmar_handle;
+            existing.memory_vmo_handle = memory_vmo_handle;
+            existing.memory_base = memory_base;
             existing.vcpu_handle = vcpu_handle;
             existing.process_pid = process_pid;
             existing.start_tick = tick;
@@ -284,14 +293,15 @@ impl HypervisorObject {
 
         let process_pid =
             create_vm_process(config.name.as_str()).ok_or(HypervisorConfigError::InvalidRestart)?;
-        let (guest_handle, vmar_handle, vcpu_handle) = match create_guest_vcpu_handles() {
-            Ok(handles) => handles,
-            Err(err) => {
-                let _ = crate::kernel_lowlevel::memory::process_manager()
-                    .terminate_process(process_pid);
-                return Err(err);
-            }
-        };
+        let (guest_handle, vmar_handle, memory_vmo_handle, memory_base, vcpu_handle) =
+            match create_guest_resources(config.memory_bytes) {
+                Ok(handles) => handles,
+                Err(err) => {
+                    let _ = crate::kernel_lowlevel::memory::process_manager()
+                        .terminate_process(process_pid);
+                    return Err(err);
+                }
+            };
 
         let record = VmRecord::from_config(
             self.next_vm_id,
@@ -299,6 +309,8 @@ impl HypervisorObject {
             config,
             guest_handle,
             vmar_handle,
+            memory_vmo_handle,
+            memory_base,
             vcpu_handle,
             process_pid,
             tick,
@@ -402,23 +414,56 @@ impl HypervisorObject {
     }
 }
 
-fn create_guest_vcpu_handles() -> Result<(u32, u32, u32), HypervisorConfigError> {
+fn create_guest_resources(
+    memory_bytes: usize,
+) -> Result<(u32, u32, u32, usize, u32), HypervisorConfigError> {
     let mut guest_handle = 0u32;
     let mut vmar_handle = 0u32;
+    let mut memory_vmo_handle = 0u32;
+    let mut memory_base = 0usize;
     let mut vcpu_handle = 0u32;
     if crate::syscall::sys_guest_create(0, 0, &mut guest_handle, &mut vmar_handle).is_err() {
         return Err(HypervisorConfigError::InvalidRestart);
     }
-    if crate::syscall::sys_vcpu_create(guest_handle, 0, 0, &mut vcpu_handle).is_err() {
+    if crate::syscall::sys_vmo_create_sparse(memory_bytes, &mut memory_vmo_handle).is_err() {
         let _ = crate::syscall::sys_handle_close(guest_handle);
         let _ = crate::syscall::sys_handle_close(vmar_handle);
         return Err(HypervisorConfigError::InvalidRestart);
     }
-    Ok((guest_handle, vmar_handle, vcpu_handle))
+    if crate::syscall::sys_vmar_map(
+        vmar_handle,
+        crate::syscall::VmOptions::PERM_RW.bits(),
+        0,
+        memory_vmo_handle,
+        0,
+        memory_bytes,
+        &mut memory_base,
+    )
+    .is_err()
+    {
+        let _ = crate::syscall::sys_handle_close(memory_vmo_handle);
+        let _ = crate::syscall::sys_handle_close(guest_handle);
+        let _ = crate::syscall::sys_handle_close(vmar_handle);
+        return Err(HypervisorConfigError::InvalidRestart);
+    }
+    if crate::syscall::sys_vcpu_create(guest_handle, 0, 0, &mut vcpu_handle).is_err() {
+        let _ = crate::syscall::sys_handle_close(memory_vmo_handle);
+        let _ = crate::syscall::sys_handle_close(guest_handle);
+        let _ = crate::syscall::sys_handle_close(vmar_handle);
+        return Err(HypervisorConfigError::InvalidRestart);
+    }
+    Ok((
+        guest_handle,
+        vmar_handle,
+        memory_vmo_handle,
+        memory_base,
+        vcpu_handle,
+    ))
 }
 
 fn close_vm_handles(record: &VmRecord) {
     let _ = crate::syscall::sys_handle_close(record.vcpu_handle);
+    let _ = crate::syscall::sys_handle_close(record.memory_vmo_handle);
     let _ = crate::syscall::sys_handle_close(record.guest_handle);
     let _ = crate::syscall::sys_handle_close(record.vmar_handle);
 }
