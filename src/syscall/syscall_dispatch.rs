@@ -36,14 +36,6 @@ pub unsafe extern "C" fn handle_syscall() -> u64 {
     // Since we're in a function, sp points to our stack frame
     // The saved registers are at a known offset from the current sp
 
-    // Use inline assembly to read from the exception stack frame
-    let _saved_sp: u64;
-    core::arch::asm!(
-        "mov {sp}, sp",
-        sp = out(reg) _saved_sp,
-        options(nomem, nostack),
-    );
-
     // The assembly exception handler saved registers 256 bytes below the current stack
     // But we're now in a function call, so there's additional stack usage
     // We need to find the saved registers

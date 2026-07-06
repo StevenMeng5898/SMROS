@@ -1,6 +1,6 @@
 # SMROS Syscall Compatibility Status
 
-This document describes the syscall layer as it exists in the current source tree. It is intentionally conservative: the goal is to document what is actually wired up today, not the full Linux or Zircon target architecture.
+This document describes the syscall layer as it exists in the current source tree. It is intentionally conservative: the goal is to document what is actually wired up today, not the full Linux or Zircon target architecture. The kernel itself now boots on ARM64 and RISC-V64, while the Linux compatibility table is still the ARM64-numbered model.
 
 ## Relevant Files
 
@@ -10,7 +10,8 @@ This document describes the syscall layer as it exists in the current source tre
 - `src/syscall/syscall_handler.rs`
 - `src/kernel_objects/channel.rs`
 - `src/kernel_objects/compat.rs`
-- `src/main.rs`
+- `src/kernel_lowlevel/ARM64/boot.rs`
+- `src/kernel_lowlevel/RISCV64/boot.rs`
 
 ## Current Architecture
 
@@ -26,12 +27,12 @@ Kernel code can directly call:
 
 This is how much of the current boot-time testing works.
 
-### 2. Active `svc` Path
+### 2. Active Exception/Trap Path
 
-The live exception vector path in `src/main.rs` uses:
+The live architecture vector path uses:
 
 ```text
-exception_handler
+ARM64 svc or RISC-V64 ecall
   -> handle_syscall_simple()
   -> dispatch_linux_syscall() or dispatch_zircon_syscall()
 ```
@@ -41,11 +42,15 @@ Important detail:
 - if `syscall_num < 1000`, the active bridge treats it as a Linux syscall
 - if `1000 <= syscall_num <= 1000 + u32::MAX`, the bridge treats it as a Zircon syscall and subtracts `1000` before dispatch
 
-So the active `svc` path now exposes both the Linux dispatcher and the Zircon dispatcher.
+So the active architecture syscall path now exposes both the Linux dispatcher and the Zircon dispatcher.
+
+ARM64 takes the syscall number from `x8`. RISC-V64 takes the syscall number
+from `a7`. In both cases, Linux numbers below `1000` currently feed the same
+ARM64-numbered compatibility dispatcher.
 
 ### 3. Alternative EL0 Handler Scaffolding
 
-`src/syscall/syscall_handler.rs` contains `handle_svc_exception_from_el0()` and result helpers, and `src/syscall/syscall_dispatch.rs` contains another bridge layer. Those files are real scaffolding, but they are not the code path used by the current assembly exception handler in `src/main.rs`.
+`src/syscall/syscall_handler.rs` contains `handle_svc_exception_from_el0()` and result helpers, and `src/syscall/syscall_dispatch.rs` contains another bridge layer. Those files are real scaffolding, but they are not the code path used by the current architecture vectors.
 
 ## Linux Side
 
@@ -100,7 +105,7 @@ Implemented groups:
 
 Unsupported but recognized calls remain explicit for operations that cannot be meaningfully modeled yet, such as `ioports_request`, privileged power-control details, and hardware effects behind PCI/interrupt/hypervisor calls.
 
-These are reachable through direct Rust calls to `dispatch_zircon_syscall()` and through the active `svc` bridge by using raw syscall numbers starting at `1000`.
+These are reachable through direct Rust calls to `dispatch_zircon_syscall()` and through the active architecture syscall bridge by using raw syscall numbers starting at `1000`.
 
 ## Channel Syscalls
 
@@ -117,7 +122,7 @@ The channel object layer is present, initialized during boot, and routed through
 
 The current syscall layer is best understood as:
 
-- a Linux ARM64 dispatch path with explicit interface coverage and modeled behavior for common bring-up calls
+- a Linux ARM64-numbered dispatch path with explicit interface coverage and modeled behavior for common bring-up calls
 - a Zircon dispatch path aligned to the sample syscall numbers
 - a Linux fd table where fd records point to compatibility object handles
 - a lightweight compatibility object table for object types that do not yet have full subsystems
@@ -131,6 +136,7 @@ It is not yet:
 - a complete Linux userspace implementation
 - a complete Zircon security model; the modeled kernel-object path now does enforce handle rights for the core job/process/thread, VMO/VMAR, signal/wait/property, and handle duplicate/replace operations
 - a stable compatibility contract for external binaries
+- a RISC-V Linux userspace ABI or RISC-V64 external dynamic PIE loader
 
 ## Live Boot Reality
 
@@ -138,7 +144,7 @@ During normal boot:
 
 - the EL0 syscall smoke helper is skipped so the shell prompt appears sooner
 - the shell runs as an EL1 thread
-- the active `svc` bridge targets Linux syscall numbers below `1000` and Zircon syscall numbers at `1000 + zircon_number`
+- the active architecture syscall bridge targets Linux syscall numbers below `1000` and Zircon syscall numbers at `1000 + zircon_number`
 - dynamic PIE programs launched by the shell enter EL0 through the current identity-mapped dynamic-loader handoff, then return to the shell through the Linux `exit` hook
 - `testsc` remains the normal developer entry point for broader syscall validation
 
@@ -155,7 +161,7 @@ fuzzsc seed=<n> iterations=<n> time=<seconds>
 fuzzsc iter <n> ms=<milliseconds>
 ```
 
-The fuzzer walks curated Linux ARM64 and Zircon success-path syscall sets with
+The fuzzer walks curated Linux ARM64-numbered and Zircon success-path syscall sets with
 deterministic mutations derived from the seed. Arguments are shaped from valid
 scratch buffers, C strings, typed handles, typed fds, mappings, iovecs, wait
 items, and small boundary values so the run stresses syscall validation and
@@ -182,5 +188,6 @@ interactive call total is not mistaken for the full dispatcher surface.
 - File-descriptor style Linux syscalls are modeled for files, directories, pipes, sockets, event-like objects, IPC objects, and memfd. FxFS-backed Linux file fds now exist, but this is still not a complete VFS.
 - The component/FxFS/`/svc` scaffold is internal kernel-side state today. It parses boot ELF metadata from FxFS, models object metadata plus journal replay, persists to `smros-fxfs.img` when available, and exchanges fixed service messages over Zircon channels, but it is not yet a userspace component manager, full FIDL runtime, package resolver, or full FxFS server.
 - External dynamic PIE execution is a bring-up path, not a stable Linux ABI promise or isolated process model.
+- RISC-V64 kernel boot support is present, but RISC-V Linux syscall numbering and RISC-V64 external user ELF execution are not implemented yet.
 - Handle ownership and lifetime tracking are still simplified.
 - Platform/hardware-heavy Zircon calls are interface-covered but intentionally return `ERR_NOT_SUPPORTED`.

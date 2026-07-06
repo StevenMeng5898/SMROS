@@ -13,8 +13,6 @@ pub mod block;
 pub(crate) mod driver_logic;
 pub mod net;
 
-const QEMU_VIRT_MACHINE: &str = "linux,dummy-virt";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserDriverError {
     NotInitialized,
@@ -147,7 +145,11 @@ impl UserDriverFramework {
         self.nodes.push(UserDeviceNode {
             path: "/cpus/cpu@0",
             name: "cpu@0",
-            compatible: "arm,cortex-a710",
+            compatible: if cfg!(target_arch = "riscv64") {
+                "riscv"
+            } else {
+                "arm,cortex-a710"
+            },
             status: "okay",
             kind: UserDeviceKind::Cpu,
             reg: Some(UserDeviceReg { base: 0, size: 1 }),
@@ -166,61 +168,79 @@ impl UserDriverFramework {
             irq: None,
         });
         self.nodes.push(UserDeviceNode {
-            path: "/pl011@9000000",
-            name: "pl011@9000000",
-            compatible: "arm,pl011",
+            path: "/serial",
+            name: "serial",
+            compatible: if cfg!(target_arch = "riscv64") {
+                "ns16550a"
+            } else {
+                "arm,pl011"
+            },
             status: "okay",
             kind: UserDeviceKind::Serial,
             reg: Some(UserDeviceReg {
-                base: 0x0900_0000,
-                size: 0x1000,
+                base: crate::kernel_lowlevel::drivers::uart_base() as u64,
+                size: crate::kernel_lowlevel::drivers::uart_size() as u64,
             }),
-            irq: Some(33),
+            irq: None,
         });
         self.nodes.push(UserDeviceNode {
-            path: "/intc@8000000",
-            name: "intc@8000000",
-            compatible: "arm,gic-v3",
+            path: "/interrupt-controller",
+            name: "interrupt-controller",
+            compatible: if cfg!(target_arch = "riscv64") {
+                "riscv,plic0"
+            } else {
+                "arm,gic"
+            },
             status: "okay",
             kind: UserDeviceKind::InterruptController,
-            reg: Some(UserDeviceReg {
-                base: 0x0800_0000,
-                size: 0x10000,
-            }),
+            reg: None,
             irq: None,
         });
         self.nodes.push(UserDeviceNode {
             path: "/timer",
             name: "timer",
-            compatible: "arm,armv8-timer",
+            compatible: if cfg!(target_arch = "riscv64") {
+                "riscv,timer"
+            } else {
+                "arm,armv8-timer"
+            },
             status: "okay",
             kind: UserDeviceKind::Timer,
             reg: None,
-            irq: Some(27),
+            irq: None,
         });
-        self.nodes.push(UserDeviceNode {
-            path: "/virtio_mmio@a000000",
-            name: "virtio_mmio@a000000..a003e00",
-            compatible: "virtio,mmio",
-            status: "okay",
-            kind: UserDeviceKind::VirtioMmio,
-            reg: Some(UserDeviceReg {
-                base: block::MMIO_BASE as u64,
-                size: (block::MMIO_STRIDE * block::MMIO_SLOT_COUNT) as u64,
-            }),
-            irq: Some(48),
-        });
+        for index in 0..crate::kernel_lowlevel::drivers::virtio_mmio_count() {
+            let Some(reg) = crate::kernel_lowlevel::drivers::virtio_mmio_reg(index) else {
+                continue;
+            };
+            self.nodes.push(UserDeviceNode {
+                path: "/virtio_mmio",
+                name: "virtio_mmio",
+                compatible: "virtio,mmio",
+                status: "okay",
+                kind: UserDeviceKind::VirtioMmio,
+                reg: Some(UserDeviceReg {
+                    base: reg.base as u64,
+                    size: reg.size as u64,
+                }),
+                irq: None,
+            });
+        }
     }
 
     fn probe(&mut self) {
         let mut block_bound = false;
         let mut net_bound = false;
         for node in &self.nodes {
+            let Some(reg) = node.reg else {
+                continue;
+            };
+            let base = reg.base as usize;
             if node.compatible == "virtio,mmio"
                 && node.status == "okay"
                 && node.kind == UserDeviceKind::VirtioMmio
                 && !block_bound
-                && block::bind().is_ok()
+                && block::bind_at(base).is_ok()
             {
                 block_bound = true;
                 self.bindings.push(UserDriverBinding {
@@ -239,7 +259,7 @@ impl UserDriverFramework {
                 && node.status == "okay"
                 && node.kind == UserDeviceKind::VirtioMmio
                 && !net_bound
-                && net::bind().is_ok()
+                && net::bind_at(base).is_ok()
             {
                 net_bound = true;
                 self.bindings.push(UserDriverBinding {
@@ -260,7 +280,7 @@ impl UserDriverFramework {
         let block_count = block::capacity_blocks();
         UserDriverStats {
             initialized: self.initialized,
-            machine: QEMU_VIRT_MACHINE,
+            machine: crate::kernel_lowlevel::drivers::architecture_name(),
             nodes: self.nodes.len(),
             bindings: self.bindings.len(),
             block_ready: block::ready(),

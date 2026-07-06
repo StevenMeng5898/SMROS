@@ -27,18 +27,31 @@ unsupported case.
 
 ## Classified Source Files
 
-- `src/kernel_lowlevel/context_switch.S`
-- `src/kernel_lowlevel/drivers.rs`
-- `src/kernel_lowlevel/interrupt.rs`
+- `src/kernel_lowlevel/ARM64/boot.rs`
+- `src/kernel_lowlevel/ARM64/context_switch.S`
+- `src/kernel_lowlevel/ARM64/cpu.rs`
+- `src/kernel_lowlevel/ARM64/drivers.rs`
+- `src/kernel_lowlevel/ARM64/interrupt.rs`
+- `src/kernel_lowlevel/ARM64/mod.rs`
+- `src/kernel_lowlevel/ARM64/serial.rs`
+- `src/kernel_lowlevel/ARM64/smp.rs`
+- `src/kernel_lowlevel/ARM64/thread.rs`
+- `src/kernel_lowlevel/ARM64/timer.rs`
+- `src/kernel_lowlevel/RISCV64/boot.rs`
+- `src/kernel_lowlevel/RISCV64/context_switch.S`
+- `src/kernel_lowlevel/RISCV64/cpu.rs`
+- `src/kernel_lowlevel/RISCV64/drivers.rs`
+- `src/kernel_lowlevel/RISCV64/interrupt.rs`
+- `src/kernel_lowlevel/RISCV64/mod.rs`
+- `src/kernel_lowlevel/RISCV64/serial.rs`
+- `src/kernel_lowlevel/RISCV64/smp.rs`
+- `src/kernel_lowlevel/RISCV64/thread.rs`
+- `src/kernel_lowlevel/RISCV64/timer.rs`
 - `src/kernel_lowlevel/lowlevel_logic.rs`
 - `src/kernel_lowlevel/lowlevel_logic_shared.rs`
 - `src/kernel_lowlevel/memory.rs`
 - `src/kernel_lowlevel/mmu.rs`
 - `src/kernel_lowlevel/mod.rs`
-- `src/kernel_lowlevel/serial.rs`
-- `src/kernel_lowlevel/smp.rs`
-- `src/kernel_lowlevel/thread.rs`
-- `src/kernel_lowlevel/timer.rs`
 - `src/kernel_objects/channel.rs`
 - `src/kernel_objects/compat.rs`
 - `src/kernel_objects/fifo.rs`
@@ -104,6 +117,7 @@ unsupported case.
 - `src/user_level/services/lvgl.rs`
 - `src/user_level/services/mod.rs`
 - `src/user_level/services/net.rs`
+- `src/user_level/services/perfetto.rs`
 - `src/user_level/services/qml_cluster.rs`
 - `src/user_level/services/run_elf.rs`
 - `src/user_level/services/svc.rs`

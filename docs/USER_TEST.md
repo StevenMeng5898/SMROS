@@ -8,6 +8,8 @@ This document explains what the current user test code actually validates.
 - `src/user_level/apps/user_process.rs`
 - `src/user_level/services/user_shell.rs`
 - `src/main.rs`
+- `src/kernel_lowlevel/ARM64/boot.rs`
+- `src/kernel_lowlevel/RISCV64/boot.rs`
 
 ## Two Different Test Layers Exist
 
@@ -32,10 +34,13 @@ That keeps the shell prompt on the fast path. `run_user_test()` remains availabl
 - prepares a small EL0 stack
 - drops into EL0 with `switch_to_el0()`
 - runs `user_test_process_entry()`
-- issues Linux-style `svc #0` calls for `write`, `getpid`, `mmap`, and `exit`
+- issues Linux-style syscall instructions for `write`, `getpid`, `mmap`, and `exit`
 - resumes at `el0_test_resume()` and validates the EL0-observed and EL1-observed syscall results
 
 This validates the real EL0-to-EL1 syscall trap path when the helper is run. It still uses a lightweight `ttbr0 = 0` setup, so it is not yet a fully isolated userspace process.
+On ARM64 this path uses `svc #0`; on RISC-V64 the low-level syscall helper uses
+`ecall`. The modeled Linux syscall numbers in this smoke helper are still the
+ARM64 Linux numbers.
 
 ## EL0 Helpers
 
@@ -55,7 +60,7 @@ These helpers back the explicit EL0 smoke path and remain useful for expanding t
 
 When run, the EL0 helper proves:
 
-- the active exception vector can enter EL1 from EL0 via `svc #0`
+- the active exception/trap vector can enter privileged kernel code from user mode via the architecture syscall instruction
 - Linux syscall numbers for `write`, `getpid`, `mmap`, and `exit` route through `handle_syscall_simple()`
 - syscall results are observed consistently by the EL0 code and the EL1 validation hook
 - control can return to EL1 through the validation hook
@@ -141,8 +146,8 @@ To convert the current smoke test into a fully isolated user process, the kernel
 
 1. build or place executable user code into a user mapping
 2. create a real `UserProcess`
-3. install TTBR0 page tables for that process
-4. set up `SP_EL0`, `ELR_EL1`, and `SPSR_EL1`
+3. install architecture-backed user page tables for that process
+4. set up the architecture user stack, user entry point, and return status
 5. call `switch_to_el0()`
 6. return syscall results through a fully correct EL0 register-frame path
 
@@ -154,7 +159,7 @@ The current user test code is useful, but it should be described accurately:
 - explicit EL0 helper: real EL0 syscall smoke test with lightweight address-space setup
 - shell `testsc`: broader EL1 developer smoke test for syscall helper behavior
 - shell `components`/`fxfs`/`svc`: visibility into boot ELF load metadata, FxFS object attributes, directory entries, journal replay state, and fixed-message service IPC counters
-- shell `run`: dynamic PIE launch smoke path for FxFS-hosted AArch64 binaries with `/shared/lib` dependencies
+- shell `run`: dynamic PIE launch smoke path for FxFS-hosted AArch64 binaries with `/shared/lib` dependencies; RISC-V64 external user ELF loading is not implemented yet
 - shell `lvgl`/`hermes ui`: native LVGL-style workbench and Hermes terminal UI surfaces
 
 That distinction matters when evaluating boot logs or shell output.

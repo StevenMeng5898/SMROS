@@ -1,0 +1,414 @@
+#![allow(dead_code)]
+
+//! RISC-V64 Thread Context Module
+//!
+//! This module provides the low-level thread context and context-switch ABI used
+//! by the SMROS scheduler. It owns the RISC-V64 register layout that must match
+//! `context_switch.S`.
+
+use core::ptr;
+
+use super::lowlevel_logic;
+
+/// Maximum number of concurrent threads
+pub const MAX_THREADS: usize = 32;
+
+/// Default thread stack size (32KB)
+pub const DEFAULT_STACK_SIZE: usize = 0x8000;
+
+/// Thread states
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ThreadState {
+    Empty = 0,
+    Ready = 1,
+    Running = 2,
+    Blocked = 3,
+    Terminated = 4,
+}
+
+impl ThreadState {
+    /// Get string representation of thread state
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ThreadState::Empty => "Empty     ",
+            ThreadState::Ready => "Ready     ",
+            ThreadState::Running => "Running   ",
+            ThreadState::Blocked => "Blocked   ",
+            ThreadState::Terminated => "Terminated",
+        }
+    }
+}
+
+/// Thread ID type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(C)]
+pub struct ThreadId(pub usize);
+
+impl ThreadId {
+    pub const INVALID: ThreadId = ThreadId(usize::MAX);
+    pub const IDLE: ThreadId = ThreadId(0);
+
+    /// Get the numeric value of the thread ID
+    pub fn as_usize(&self) -> usize {
+        self.0
+    }
+}
+
+/// RISC-V64 CPU context (registers saved during context switch)
+/// This structure must match the layout expected by context_switch assembly
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CpuContext {
+    pub s0: u64,
+    pub s1: u64,
+    pub s2: u64,
+    pub s3: u64,
+    pub s4: u64,
+    pub s5: u64,
+    pub s6: u64,
+    pub s7: u64,
+    pub s8: u64,
+    pub s9: u64,
+    pub s10: u64,
+    pub s11: u64,
+    pub ra: u64,
+    pub sp: u64,
+    pub pc: u64,
+    pub sstatus: u64,
+}
+
+impl CpuContext {
+    /// Create a new CPU context for a thread
+    pub fn new(entry: extern "C" fn() -> !, stack_top: u64) -> Self {
+        CpuContext {
+            s0: 0,
+            s1: 0,
+            s2: 0,
+            s3: 0,
+            s4: 0,
+            s5: 0,
+            s6: 0,
+            s7: 0,
+            s8: 0,
+            s9: 0,
+            s10: 0,
+            s11: 0,
+            ra: thread_exit_wrapper as *const () as u64,
+            sp: stack_top,
+            pc: entry as *const () as u64,
+            sstatus: 0,
+        }
+    }
+
+    pub fn set_entry_stack(&mut self, entry: u64, stack_top: u64) {
+        self.pc = entry;
+        self.sp = stack_top;
+    }
+
+    pub fn set_user_state(&mut self, state: u64) {
+        self.sstatus = state;
+    }
+
+    /// Create a default CPU context (for idle thread)
+    pub const fn default_context() -> Self {
+        CpuContext {
+            s0: 0,
+            s1: 0,
+            s2: 0,
+            s3: 0,
+            s4: 0,
+            s5: 0,
+            s6: 0,
+            s7: 0,
+            s8: 0,
+            s9: 0,
+            s10: 0,
+            s11: 0,
+            ra: 0,
+            sp: 0,
+            pc: 0,
+            sstatus: 0,
+        }
+    }
+}
+
+/// Wrapper for raw pointers to implement Send/Sync.
+///
+/// SAFETY: `SendPtr` wraps a raw pointer but is only used within `ThreadControlBlock`
+/// fields (`stack`) that are exclusively owned by the scheduler. The scheduler ensures
+/// no concurrent access occurs.
+#[repr(transparent)]
+pub struct SendPtr(pub *mut u8);
+
+// SAFETY: SendPtr is a transparent wrapper around *mut u8. The scheduler owns
+// all pointers exclusively and ensures no concurrent access.
+unsafe impl Send for SendPtr {}
+
+// SAFETY: See Send impl above. Sync is safe because the scheduler serializes access.
+unsafe impl Sync for SendPtr {}
+
+/// Thread Control Block (TCB) - represents a thread object
+#[repr(C)]
+pub struct ThreadControlBlock {
+    /// Thread ID
+    pub id: ThreadId,
+
+    /// Thread state
+    pub state: ThreadState,
+
+    /// CPU context for context switching
+    pub context: CpuContext,
+
+    /// Thread stack pointer
+    pub stack: SendPtr,
+
+    /// Stack size
+    pub stack_size: usize,
+
+    /// Thread entry point
+    pub entry: Option<extern "C" fn() -> !>,
+
+    /// Time slice remaining (in ticks)
+    pub time_slice: u32,
+
+    /// Total ticks run
+    pub total_ticks: u32,
+
+    /// Thread name (for debugging)
+    pub name: &'static str,
+
+    /// CPU affinity (which CPU this thread should run on)
+    /// None = any CPU, Some(n) = specific CPU
+    pub cpu_affinity: Option<usize>,
+
+    /// Which CPU this thread is currently executing on
+    pub current_cpu: Option<usize>,
+}
+
+impl ThreadControlBlock {
+    /// Create a new TCB with default values
+    pub const fn new() -> Self {
+        ThreadControlBlock {
+            id: ThreadId::INVALID,
+            state: ThreadState::Empty,
+            context: CpuContext::default_context(),
+            stack: SendPtr(ptr::null_mut()),
+            stack_size: 0,
+            entry: None,
+            time_slice: 0,
+            total_ticks: 0,
+            name: "",
+            cpu_affinity: None,
+            current_cpu: None,
+        }
+    }
+
+    /// Initialize a thread with entry point and name
+    pub fn init(
+        &mut self,
+        id: ThreadId,
+        entry: extern "C" fn() -> !,
+        name: &'static str,
+        stack: *mut u8,
+        stack_size: usize,
+        time_slice: u32,
+        cpu_affinity: Option<usize>,
+    ) {
+        self.id = id;
+        self.state = ThreadState::Ready;
+        self.entry = Some(entry);
+        self.name = name;
+        self.stack = SendPtr(stack);
+        self.stack_size = stack_size;
+        self.time_slice = time_slice;
+        self.total_ticks = 0;
+        self.cpu_affinity = cpu_affinity;
+        self.current_cpu = cpu_affinity; // Initially scheduled on affinity CPU
+
+        // Set up initial context
+        let stack_top = (stack as u64) + (stack_size as u64);
+        self.context = CpuContext::new(entry, stack_top);
+    }
+
+    /// Initialize the idle thread
+    pub fn init_idle(
+        &mut self,
+        idle_entry: extern "C" fn() -> !,
+        stack: *mut u8,
+        stack_size: usize,
+    ) {
+        self.id = ThreadId::IDLE;
+        self.state = ThreadState::Ready;
+        self.entry = Some(idle_entry);
+        self.name = "idle";
+        self.stack = SendPtr(stack);
+        self.stack_size = stack_size;
+        self.time_slice = 10;
+        self.total_ticks = 0;
+        self.cpu_affinity = None;
+
+        let stack_top = (stack as u64) + (stack_size as u64);
+        self.context = CpuContext::new(idle_entry, stack_top);
+    }
+
+    /// Check if thread is in a runnable state
+    pub fn is_runnable(&self) -> bool {
+        thread_state_is_runnable(self.state)
+    }
+
+    /// Check if thread is the idle thread
+    pub fn is_idle(&self) -> bool {
+        thread_id_is_idle(self.id)
+    }
+
+    /// Print thread information to serial
+    pub fn print_info(&self, serial: &mut crate::kernel_lowlevel::serial::Serial) {
+        print_number(serial, self.id.0 as u32);
+        serial.write_str("   ");
+        serial.write_str(self.state.as_str());
+        serial.write_str("  ");
+        serial.write_str(self.name);
+        // Pad name to 12 characters
+        for _ in 0..(12usize.saturating_sub(self.name.len())) {
+            serial.write_byte(b' ');
+        }
+
+        // Print current CPU (where it's actually running)
+        match self.current_cpu {
+            Some(cpu) => {
+                print_number(serial, cpu as u32);
+            }
+            None => {
+                serial.write_str("*");
+            }
+        }
+        serial.write_str("    ");
+
+        print_number(serial, self.time_slice);
+        serial.write_str("         ");
+        print_number(serial, self.total_ticks);
+        serial.write_str("\n");
+    }
+}
+
+/// Thread exit wrapper - called when a thread returns
+extern "C" fn thread_exit_wrapper() -> ! {
+    loop {
+        wait_for_interrupt();
+    }
+}
+
+/// Return true when a thread state can be selected by the scheduler.
+pub fn thread_state_is_runnable(state: ThreadState) -> bool {
+    lowlevel_logic::thread_state_runnable(state, ThreadState::Ready, ThreadState::Running)
+}
+
+/// Return true when a thread ID denotes the architecture idle thread.
+pub fn thread_id_is_idle(id: ThreadId) -> bool {
+    lowlevel_logic::thread_id_idle(id.0, ThreadId::IDLE.0)
+}
+
+/// Wait until the next interrupt.
+#[inline(always)]
+pub fn wait_for_interrupt() {
+    crate::kernel_lowlevel::cpu::wait_for_interrupt();
+}
+
+// External assembly functions for RISC-V64 context switching.
+//
+// SAFETY: ThreadControlBlock is #[repr(C)] and SendPtr is #[repr(transparent)],
+// so the layout is compatible with the assembly offsets in context_switch.S.
+#[allow(improper_ctypes)]
+extern "C" {
+    fn context_switch(current: *mut ThreadControlBlock, next: *mut ThreadControlBlock);
+    fn context_switch_start(next: *mut ThreadControlBlock) -> !;
+}
+
+/// Save the current thread context and restore the next one.
+///
+/// # Safety
+/// `current` and `next` must be valid, uniquely borrowed TCB pointers, and
+/// their layout must match `context_switch.S`.
+pub unsafe fn switch_context(current: *mut ThreadControlBlock, next: *mut ThreadControlBlock) {
+    unsafe {
+        context_switch(current, next);
+    }
+}
+
+/// Start executing the first scheduled thread without saving the current context.
+///
+/// # Safety
+/// `next` must point to a valid initialized TCB whose context can be restored by
+/// `context_switch.S`.
+pub unsafe fn start_context(next: *mut ThreadControlBlock) -> ! {
+    unsafe { context_switch_start(next) }
+}
+
+/// Print a number to serial (helper function)
+fn print_number(serial: &mut crate::kernel_lowlevel::serial::Serial, mut num: u32) {
+    if num == 0 {
+        serial.write_byte(b'0');
+        return;
+    }
+
+    let mut buf = [0u8; 10];
+    let mut i = 0;
+
+    while num > 0 && i < 10 {
+        buf[i] = b'0' + (num % 10) as u8;
+        num /= 10;
+        i += 1;
+    }
+
+    // Print in reverse order
+    for j in 0..i {
+        serial.write_byte(buf[i - 1 - j]);
+    }
+}
+
+/// Thread stack allocator - safe wrapper around raw allocation
+pub struct ThreadStack {
+    ptr: *mut u8,
+    size: usize,
+}
+
+impl ThreadStack {
+    /// Allocate a new thread stack
+    pub fn alloc(size: usize) -> Option<Self> {
+        let layout = alloc::alloc::Layout::from_size_align(size, 16).ok()?;
+
+        // SAFETY: `size` is DEFAULT_STACK_SIZE (32KB) which is valid and 16-byte aligned.
+        // The global allocator is our KernelAllocator bump allocator, which is safe to use.
+        let ptr = unsafe { alloc::alloc::alloc(layout) };
+
+        if ptr.is_null() {
+            return None;
+        }
+
+        Some(ThreadStack { ptr, size })
+    }
+
+    /// Get the stack pointer
+    pub fn as_ptr(&self) -> *mut u8 {
+        self.ptr
+    }
+
+    /// Get the stack size
+    pub fn size(&self) -> usize {
+        self.size
+    }
+}
+
+impl Drop for ThreadStack {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            // SAFETY: ptr was allocated with the same layout in alloc()
+            if let Ok(layout) = alloc::alloc::Layout::from_size_align(self.size, 16) {
+                unsafe {
+                    alloc::alloc::dealloc(self.ptr, layout);
+                }
+            }
+        }
+    }
+}

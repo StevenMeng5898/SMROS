@@ -4,7 +4,7 @@
 //! - 4K page-based memory management
 //! - Segment management (code, data, heap, stack)
 //! - Process address spaces with isolated memory
-//! - Safe, stable Rust implementation for bare-metal ARM64
+//! - Safe, stable Rust implementation for bare-metal targets
 //!
 //! # Syscall Compatibility
 //!
@@ -59,11 +59,15 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::lowlevel_logic;
 
-/// Page size: 4KB (standard ARM64 granule)
+/// Page size: 4 KiB, matching the currently supported ARM64 granule and
+/// RISC-V Sv39/Sv48 page size.
 pub const PAGE_SIZE: usize = 0x1000;
 
-/// Page size mask (4KB aligned)
+/// Page size mask (4 KiB aligned)
 pub const PAGE_MASK: usize = !(PAGE_SIZE - 1);
+const PAGE_FRAME_BITMAP_WORDS: usize = 64;
+const PAGE_FRAME_BITS_PER_WORD: usize = 64;
+const PAGE_FRAME_COUNT: usize = PAGE_FRAME_BITMAP_WORDS * PAGE_FRAME_BITS_PER_WORD;
 
 /// Maximum number of processes supported
 pub const MAX_PROCESSES: usize = 16;
@@ -507,8 +511,8 @@ impl ProcessState {
 /// Uses a simple bitmap allocator for physical pages.
 /// In a real kernel, you'd use a more sophisticated allocator (buddy, slab).
 pub struct PageFrameAllocator {
-    /// Bitmap of allocated pages (each bit represents one 4K page)
-    bitmap: [u64; 64], // Manages 64 * 64 = 4096 pages = 16MB
+    /// Bitmap of allocated pages; each bit represents one 4 KiB frame.
+    bitmap: [u64; PAGE_FRAME_BITMAP_WORDS],
     /// Total number of available pages
     total_pages: usize,
     /// Number of allocated pages
@@ -519,8 +523,8 @@ impl PageFrameAllocator {
     /// Create a new page frame allocator
     const fn new() -> Self {
         PageFrameAllocator {
-            bitmap: [0; 64],
-            total_pages: 4096,
+            bitmap: [0; PAGE_FRAME_BITMAP_WORDS],
+            total_pages: PAGE_FRAME_COUNT,
             allocated_pages: 0,
         }
     }
@@ -532,13 +536,13 @@ impl PageFrameAllocator {
         // In a single-threaded kernel context, this is safe.
         let allocator = unsafe { &mut *ALLOCATOR.get() };
 
-        for i in 0..64 {
+        for i in 0..PAGE_FRAME_BITMAP_WORDS {
             if allocator.bitmap[i] == u64::MAX {
                 continue;
             }
 
-            for bit in 0..64 {
-                let page_idx = i * 64 + bit;
+            for bit in 0..PAGE_FRAME_BITS_PER_WORD {
+                let page_idx = i * PAGE_FRAME_BITS_PER_WORD + bit;
                 if page_idx >= allocator.total_pages {
                     return None;
                 }
@@ -557,11 +561,11 @@ impl PageFrameAllocator {
 
     /// Free a page frame
     pub fn free(pfn: u64) {
-        if !lowlevel_logic::pfn_valid(pfn, 4096) {
+        let allocator = unsafe { &mut *ALLOCATOR.get() };
+        if !lowlevel_logic::pfn_valid(pfn, allocator.total_pages) {
             return;
         }
 
-        let allocator = unsafe { &mut *ALLOCATOR.get() };
         let i = lowlevel_logic::bitmap_word_index(pfn);
         let bit = lowlevel_logic::bitmap_bit_index(pfn);
         let mask = lowlevel_logic::bitmap_mask(bit);
@@ -1522,7 +1526,9 @@ fn cmd_uptime(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str
 
 /// Command: version - Show kernel version
 fn cmd_version(serial: &mut crate::kernel_lowlevel::serial::Serial, _args: &[&str]) {
-    serial.write_str("SMROS ARM64 Kernel v0.3.0\n");
+    serial.write_str("SMROS ");
+    serial.write_str(crate::kernel_lowlevel::drivers::architecture_name());
+    serial.write_str(" Kernel v0.3.0\n");
     serial.write_str("Features:\n");
     serial.write_str("  - Preemptive Round-Robin Scheduler\n");
     serial.write_str("  - SMP Multi-Core Support (4 CPUs)\n");

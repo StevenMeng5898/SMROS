@@ -57,12 +57,7 @@ pub unsafe extern "C" fn handle_svc_exception_from_el0(
     // This is complex, so let's use a simpler approach with global
     SYSCALL_RESULT.store(result, core::sync::atomic::Ordering::Relaxed);
 
-    // Advance ELR past the SVC instruction
-    core::arch::asm!(
-        "msr elr_el1, {elr}",
-        elr = in(reg) elr_el1 + 4,
-        options(nostack),
-    );
+    crate::kernel_lowlevel::cpu::set_exception_return_pc(elr_el1 + 4);
 }
 
 /// Global to store syscall result temporarily

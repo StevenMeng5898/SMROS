@@ -3,21 +3,23 @@
 //! This module contains all low-level kernel implementations:
 //! - Memory Management (page frames, segments, process address spaces)
 //! - MMU and Page Table Management
-//! - Serial Driver (PL011 UART)
-//! - Timer Driver (ARM Generic Timer)
-//! - Interrupt Controller (GICv3/v4 on QEMU virt, GICv2 fallback)
+//! - Architecture-selected serial, timer, interrupt, SMP, and context code
 //! - SMP Support (Symmetric Multi-Processing)
-//! - ARM64 Thread Context Switching
+//! - Thread Context Switching
 //! - Hardware Drivers
 //!
 //! These modules handle low-level operations that form the foundation of the kernel.
 
-pub mod drivers;
-pub mod interrupt;
+#[cfg(target_arch = "aarch64")]
+#[path = "ARM64/mod.rs"]
+mod arch;
+
+#[cfg(target_arch = "riscv64")]
+#[path = "RISCV64/mod.rs"]
+mod arch;
+
 pub(crate) mod lowlevel_logic;
 pub mod memory;
 pub mod mmu;
-pub mod serial;
-pub mod smp;
-pub mod thread;
-pub mod timer;
+
+pub use arch::{cpu, drivers, interrupt, serial, smp, thread, timer};

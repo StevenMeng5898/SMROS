@@ -246,13 +246,9 @@ impl UserProcess {
             None,                               // no CPU affinity
         );
 
-        // Modify context for EL0 execution
-        tcb.context.sp = stack_top;
-        tcb.context.pc = self.entry_point as u64;
-
-        // Set PSTATE for EL0 with interrupts enabled
-        // M[1:0] = 0b00 (EL0t), D=1, A=1, I=1, F=1
-        tcb.context.pstate = user_logic::el0_thread_pstate(); // EL0t, all interrupts masked
+        tcb.context
+            .set_entry_stack(self.entry_point as u64, stack_top);
+        tcb.context.set_user_state(user_logic::el0_thread_state());
 
         Some(tcb)
     }
@@ -397,47 +393,8 @@ pub fn process_rights(pid: usize) -> Option<u32> {
 /// from kernel code with proper setup.
 #[no_mangle]
 pub unsafe extern "C" fn switch_to_el0(entry_point: u64, user_stack: u64, ttbr0: u64) -> ! {
-    // Set TTBR0 for user space page tables
-    core::arch::asm!(
-        "msr ttbr0_el1, {ttbr0}",
-        "tlbi vmalle1is",
-        "dsb ish",
-        "isb",
-        ttbr0 = in(reg) ttbr0,
-        options(nostack),
-    );
-
-    // Setup SP_EL0 for user stack
-    core::arch::asm!(
-        "msr sp_el0, {sp}",
-        sp = in(reg) user_stack,
-        options(nostack),
-    );
-
-    // Setup ELR_EL1 for return address (user entry point)
-    core::arch::asm!(
-        "msr elr_el1, {entry}",
-        entry = in(reg) entry_point,
-        options(nostack),
-    );
-
-    // Setup SPSR_EL1 for EL0t mode with interrupts enabled
-    // M[1:0] = 0b00 (EL0t), D=0, A=0, I=0, F=0 (enable interrupts)
     let spsr: u64 = user_logic::el0_spsr(); // EL0t, all interrupts enabled
-
-    core::arch::asm!(
-        "msr spsr_el1, {spsr}",
-        spsr = in(reg) spsr,
-        options(nostack),
-    );
-
-    // Setup HCR_EL2 to enable EL1 and EL0 (if running at EL2)
-    // HCR_RW = 1 (AArch64 at EL1)
-    // HCR_VM = 1 (Enable stage 2 translation)
-    // These would be set by EL2 code before dropping to EL1
-
-    // Return to EL0 using ERET
-    core::arch::asm!("eret", options(noreturn),);
+    crate::kernel_lowlevel::cpu::switch_to_user(entry_point, user_stack, ttbr0, spsr);
 }
 
 /// Initialize EL0 process management

@@ -6,7 +6,7 @@ This document describes the boot path implemented in the current source tree.
 
 ```text
 QEMU
-  -> _start in src/main.rs
+  -> _start in src/kernel_lowlevel/{ARM64,RISCV64}/boot.rs
   -> kernel_main()
   -> subsystem initialization
   -> user-level VirtIO driver init
@@ -14,13 +14,23 @@ QEMU
   -> logical SMP bring-up
   -> start_user_shell()
   -> start_first_thread()
-  -> smros> prompt
+  -> smros:/> prompt
 ```
 
 Normal boot is intentionally short: it no longer creates demo process records,
 starts bootstrap EL0 launcher threads, or runs the boot-time EL0 syscall smoke
 test before the shell. Run `testsc` from the shell when you want the heavier
 syscall and service validation.
+
+## Architecture Selection
+
+The Rust target selects the low-level backend in `src/kernel_lowlevel/mod.rs`:
+
+- `aarch64-unknown-none` uses `src/kernel_lowlevel/ARM64/`
+- `riscv64gc-unknown-none-elf` uses `src/kernel_lowlevel/RISCV64/`
+
+The shared kernel entry, allocator setup, user-level initialization, scheduler,
+syscall model, FxFS, and shell live above that architecture split.
 
 ## 1. QEMU Handoff
 
@@ -29,6 +39,13 @@ SMROS is normally started with:
 ```bash
 ./scripts/setup-qemu-icmp.sh --ensure
 ```
+
+```bash
+make run
+make run ARCH=riscv64gc-unknown-none-elf
+```
+
+The equivalent manual ARM64 command is:
 
 ```bash
 qemu-system-aarch64 \
@@ -44,17 +61,38 @@ qemu-system-aarch64 \
   -device virtio-net-device,netdev=smrosnet
 ```
 
-The `make run`, `make debug`, `make gdb`, `scripts/run.sh`, and
-`scripts/run-simple.sh` launch paths run that setup step automatically on Linux
-hosts so QEMU user networking can pass external ICMP echo traffic.
+The equivalent manual RISC-V64 command is:
 
-QEMU enters the kernel at `_start`, which is emitted by the `global_asm!` block in `src/main.rs`.
+```bash
+qemu-system-riscv64 \
+  -M virt \
+  -cpu rv64 \
+  -smp "${SMROS_CPUS:-4}" \
+  -m 2G \
+  -nographic \
+  -kernel target/riscv64gc-unknown-none-elf/release/smros \
+  -drive file=smros-fxfs.img,if=none,format=raw,id=fxfs,cache=writethrough \
+  -device virtio-blk-device,drive=fxfs \
+  -netdev user,id=smrosnet \
+  -device virtio-net-device,netdev=smrosnet
+```
+
+The `make run`, `make debug`, and `make gdb` launch paths run the host ICMP
+setup step automatically on Linux hosts so QEMU user networking can pass
+external ICMP echo traffic. The legacy `scripts/run.sh` and
+`scripts/run-simple.sh` helpers are still ARM64-only.
+
+QEMU or firmware enters the kernel at `_start` in the selected architecture's
+`boot.rs`. ARM64 uses the Linux Image header/raw `kernel8.img` path. RISC-V64
+is loaded as an ELF payload and normally enters through OpenSBI in S-mode with
+`a0=hartid` and `a1=FDT`.
 
 ## 2. Early Assembly Path
 
-The boot assembly in `src/main.rs` performs two different paths.
+The boot assembly in the selected architecture backend performs the early CPU
+setup and then branches into the shared Rust `kernel_main()`.
 
-### CPU0 Path
+### ARM64 CPU0 Path
 
 CPU0:
 
@@ -63,9 +101,9 @@ CPU0:
 3. Sets `SP` to `__stack_top`.
 4. Clears the `.bss` range.
 5. Loads `VBAR_EL1` with `exception_vectors`.
-6. Branches to `kernel_main()`.
+6. Branches to `kernel_main(fdt_pointer)`.
 
-### Secondary CPU Path
+### ARM64 Secondary CPU Path
 
 Non-zero CPUs:
 
@@ -74,9 +112,23 @@ Non-zero CPUs:
 3. Load `VBAR_EL1`.
 4. Branch to `secondary_cpu_entry`.
 
-### Exception Vectors
+### RISC-V64 Boot Hart Path
 
-The same `global_asm!` block defines:
+The RISC-V64 `_start` path:
+
+1. Receives the boot hart id in `a0` and the FDT pointer in `a1`.
+2. Builds a per-hart stack from `__stack_top`.
+3. Clears `.bss`.
+4. Installs `trap_vector` in `stvec`.
+5. Enables supervisor timer interrupts.
+6. Records the boot hart id and calls `kernel_main(fdt_pointer)`.
+
+Secondary RISC-V harts have a `secondary_entry` stub and logical scheduler
+bookkeeping. Full SBI HSM hart startup is not wired yet.
+
+### Exception and Trap Vectors
+
+The ARM64 backend defines:
 
 - `exception_vectors`
 - IRQ handlers for current EL and lower EL
@@ -89,7 +141,7 @@ The IRQ handlers save caller-saved registers, call:
 
 and then return with `eret`.
 
-The synchronous exception handler:
+The ARM64 synchronous exception handler:
 
 1. Saves general-purpose registers.
 2. Reads `ESR_EL1`.
@@ -103,17 +155,22 @@ The synchronous exception handler:
 
 By default, `syscall_should_advance_elr()` returns `0`, so the handler does not add 4 to `ELR_EL1`. AArch64 already reports `ELR_EL1` after the `svc` instruction for this path. The hook remains so tests can opt into manual advancement if needed.
 
+The RISC-V64 trap vector handles supervisor timer interrupts and user or
+supervisor `ecall`. It reads the syscall number from `a7`, arguments from
+`a0..a5`, calls `handle_syscall_simple()`, writes the result back to `a0`,
+advances `sepc` by one instruction, and returns with `sret`.
+
 ## 3. `kernel_main()` Initialization Order
 
 `kernel_main()` in `src/main.rs` currently performs initialization in this order:
 
 | Order | Call | Notes |
 |------:|------|-------|
-| 1 | `Serial::new().init()` | Enables the PL011 console |
+| 1 | `Serial::new().init()` | Enables the selected console: PL011 on ARM64 or FDT-discovered NS16550-compatible UART on RISC-V64 |
 | 2 | banner + version print | Kernel version is `0.2.0` |
-| 3 | `print_system_info()` | Prints `MPIDR_EL1` and `SCTLR_EL1` |
-| 4 | `kernel_lowlevel::interrupt::init()` | GICv3/v4 setup on QEMU virt |
-| 5 | `kernel_lowlevel::timer::init()` | ARM generic timer setup |
+| 3 | `print_system_info()` | Prints architecture-specific CPU/status registers |
+| 4 | `kernel_lowlevel::interrupt::init()` | ARM64 GICv3/v4 setup or RISC-V64 supervisor timer-interrupt enable |
+| 5 | `kernel_lowlevel::timer::init()` | ARM generic timer or RISC-V64 SBI timer setup |
 | 6 | `kernel_lowlevel::smp::init()` | SMP bookkeeping and CPU0 registration |
 | 7 | `kernel_lowlevel::memory::init()` | Process manager and page allocator setup |
 | 8 | `crate::kernel_objects::init()` | Installs kernel object rights config |
@@ -150,7 +207,7 @@ The active EL0 transition helper is `switch_to_el0()` in
 `src/user_level/apps/user_process.rs`. It is still used by shell-launched ELF
 programs and component launcher paths, but not by default boot.
 
-It performs:
+On ARM64, it performs:
 
 1. `TTBR0_EL1 = ttbr0`
 2. TLB invalidation and barriers
@@ -158,6 +215,11 @@ It performs:
 4. `ELR_EL1 = entry_point`
 5. `SPSR_EL1 = 0`, selecting EL0t with interrupts enabled
 6. `eret`
+
+On RISC-V64, the same helper delegates to the RISC-V64 CPU backend, which writes
+`satp` when a user page-table root is provided, fences address translation,
+sets `sepc` and supervisor status for user return, moves to the user stack, and
+returns with `sret`.
 
 The old boot-time test passed `ttbr0 = 0`; keeping that validation out of the
 default boot avoids paying its startup cost before the shell.
@@ -177,7 +239,7 @@ During `user_level::init()`, the FxFS-shaped store is mounted and the component 
 - `/pkg/bin/fxfs`
 - `/pkg/bin/user-init`
 
-Those files are tiny ELF64 little-endian AArch64 images generated by `src/user_level/services/elf.rs`. The parser validates ELF magic, class/data/version, `ET_EXEC`/`ET_DYN`, `EM_AARCH64`, header size, program-header table bounds, entry address, and PT_LOAD segment bounds. Component start reads the ELF from FxFS, records the parsed entry and segment metadata in `UserProcess`, and exposes that metadata through the `components` shell command.
+Those files are tiny ELF64 little-endian AArch64 images generated by `src/user_level/services/elf.rs`. The parser validates ELF magic, class/data/version, `ET_EXEC`/`ET_DYN`, `EM_AARCH64`, header size, program-header table bounds, entry address, and PT_LOAD segment bounds. Component start reads the ELF from FxFS, records the parsed entry and segment metadata in `UserProcess`, and exposes that metadata through the `components` shell command. This bootstrap ELF metadata path is still AArch64-specific even when the RISC-V64 kernel itself boots.
 
 The current boot ELFs point at the existing SMROS EL0 trampoline. Segment bytes are not yet copied into process-owned TTBR0 mappings, so this is a minimal loader and launch-record stage rather than full external binary execution.
 
@@ -187,7 +249,7 @@ The repository-local `host_shared/` directory is embedded at build time and inst
 
 The same initialization registers a minimal `/svc` directory with component-manager, ELF-runner, and FxFS services. Connections allocate Zircon channel pairs, and the first IPC layer uses fixed 32-byte request/reply structs rather than full FIDL encoding.
 
-The shell `run` command is separate from the bootstrap component loader. It reads a dynamic PIE ELF from FxFS, resolves `PT_INTERP` and `DT_NEEDED` libraries from `/shared/lib` or `/lib`, maps the main executable and dynamic loader into the Linux mmap window, builds a Linux argv/env/auxv stack, and enters the loader at EL0. This is a working bring-up path for simple external AArch64 binaries, but it still uses the identity-mapped model rather than a process-owned TTBR0 address space.
+The shell `run` command is separate from the bootstrap component loader. It reads a dynamic PIE ELF from FxFS, resolves `PT_INTERP` and `DT_NEEDED` libraries from `/shared/lib` or `/lib`, maps the main executable and dynamic loader into the Linux mmap window, builds a Linux argv/env/auxv stack, and enters the loader at EL0. This is a working bring-up path for simple external AArch64 binaries, but it still uses the identity-mapped model rather than a process-owned address space. RISC-V64 external user ELF loading is not complete yet.
 
 ## 7. Explicit EL0 And Syscall Tests
 
@@ -206,7 +268,7 @@ heap profile rather than full-size host GUI surfaces.
 
 The current SMP code supports two layers:
 
-- PSCI and secondary CPU entry scaffolding in `src/kernel_lowlevel/smp.rs`
+- ARM64 PSCI scaffolding or RISC-V64 hart bookkeeping in the selected architecture `smp.rs`
 - a configurable logical CPU scheduling model used by `boot_all_cpus()`
 
 In the current boot path, `boot_all_cpus()` marks the build-configured logical CPU count online for scheduling and status reporting. `make run SMROS_CPUS=8` builds and launches with 8 logical CPUs by default.
@@ -220,7 +282,9 @@ The scheduler handoff happens directly from `kernel_main()`:
 3. It marks that thread as running.
 4. It jumps into the new thread with `context_switch_start`.
 
-The context switch code lives in `src/kernel_lowlevel/context_switch.S`.
+The context switch code lives in the selected architecture backend:
+`src/kernel_lowlevel/ARM64/context_switch.S` or
+`src/kernel_lowlevel/RISCV64/context_switch.S`.
 
 ## 10. Timer and Preemption Hooks
 
@@ -238,7 +302,7 @@ The current timer IRQ path calls:
 There are multiple syscall helper files under `src/syscall/`, but the path used by the live exception vectors is:
 
 ```text
-exception_handler in src/main.rs
+architecture exception/trap vector
   -> handle_syscall_simple()
   -> dispatch_linux_syscall() or dispatch_zircon_syscall()
   -> concrete sys_* implementation
@@ -267,12 +331,12 @@ Today:
 A normal QEMU boot currently prints these milestones before reaching the prompt:
 
 1. Kernel banner
-2. GIC and timer initialization
+2. Architecture interrupt and timer initialization
 3. SMP initialization
 4. Memory, syscall, MMU, channel, user-level, and scheduler initialization
 5. VirtIO block/net probe and FxFS mount status
 6. Shell startup messages
-7. `smros>` prompt
+7. `smros:/>` prompt
 
 After the prompt, the shell `testsc` command runs the broader developer smoke suite. Current successful runs cover Linux memory/process/time, signal, IPC, networking, misc, file, directory, fd, poll, and stat paths; Zircon VMO/VMAR, handle/object, signal/wait, port, channel, socket, FIFO, futex, process/thread, time/debug/system/exception, and hypervisor paths; the minimal component framework, ELF loader, FxFS-shaped object-store scaffold, and `/svc` fixed-message IPC layer; and the Docker, Gemma, Hermes, LVGL, and Qt/QML cluster service ports. The shell also exposes `vm -c <config.xml>`, `vm -k <VM-name>`, and `vm -s` for the modeled hypervisor object, fixed-memory VM records, CPU time-slice metadata, restart policy, process-monitor visibility, low-overhead status reporting, and optional host-assisted nested QEMU Linux launches through `scripts/smros-vm-launcher.py`.
 
@@ -285,3 +349,4 @@ After the prompt, the shell `testsc` command runs the broader developer smoke su
 - Linux file and directory syscalls are modeled through compatibility objects; FxFS-backed file descriptors now support open/read/write/stat and file-backed `mmap`, but this is not a complete VFS.
 - `/shared` is a build-time host snapshot, not live 9p or virtio-fs sharing.
 - The Fuchsia-inspired userspace layer parses boot component ELF images and can create scheduler launcher threads that enter EL0 for bootstrap component payloads when requested; it has a fixed-message `/svc` IPC layer, but it is still not a full component-manager/FIDL/package-resolver/FxFS port.
+- RISC-V64 boots the kernel and shell, but external RISC-V64 user ELF loading, RISC-V Linux syscall numbering, and SBI HSM secondary-hart startup are still incomplete.

@@ -52,7 +52,7 @@ macro_rules! smros_user_stack_top_u64_body {
     }};
 }
 
-macro_rules! smros_user_el0_thread_pstate_body {
+macro_rules! smros_user_el0_thread_state_body {
     () => {
         0x3C0u64
     };

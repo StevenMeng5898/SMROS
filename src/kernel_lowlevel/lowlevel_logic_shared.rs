@@ -149,52 +149,6 @@ macro_rules! smros_ll_thread_id_idle_body {
     }};
 }
 
-macro_rules! smros_ll_pte_set_flag_body {
-    ($value:expr, $flag:expr, $enabled:expr) => {{
-        if $enabled {
-            $value | $flag
-        } else {
-            $value & !$flag
-        }
-    }};
-}
-
-macro_rules! smros_ll_pte_output_address_body {
-    ($paddr:expr) => {{
-        $paddr & 0x0000_FFFF_FFFF_F000u64
-    }};
-}
-
-macro_rules! smros_ll_pte_set_output_address_body {
-    ($value:expr, $paddr:expr) => {{
-        ($value & 0xFFFu64) | smros_ll_pte_output_address_body!($paddr)
-    }};
-}
-
-macro_rules! smros_ll_pte_attr_idx_body {
-    ($value:expr, $idx:expr) => {{
-        ($value & !0x1Cu64) | (($idx << 2) & 0x1Cu64)
-    }};
-}
-
-macro_rules! smros_ll_pte_sh_body {
-    ($value:expr, $sharability:expr) => {{
-        ($value & !0x300u64) | (($sharability << 8) & 0x300u64)
-    }};
-}
-
-macro_rules! smros_ll_pte_table_body {
-    ($value:expr) => {{
-        ($value & 1u64) != 0 && ($value & (1u64 << 1)) == 0
-    }};
-}
-
-macro_rules! smros_ll_pt_index_body {
-    ($vaddr:expr, $entries:expr) => {{
-        ($vaddr >> 21) & ($entries - 1)
-    }};
-}
-
 macro_rules! smros_ll_vma_size_body {
     ($start:expr, $end:expr) => {{
         if $end >= $start {

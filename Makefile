@@ -1,14 +1,28 @@
-# SMROS ARM64 Kernel Makefile
+# SMROS multi-architecture kernel Makefile
 
-ARCH = aarch64-unknown-none
+ARCH ?= aarch64-unknown-none
 TARGET = $(ARCH)
-KERNEL = kernel8.img
+KERNEL_AARCH64 = kernel8.img
+KERNEL_RISCV64_ELF = $(BUILD_DIR)/smros
+KERNEL_RISCV64_IMG = kernel-riscv64.img
+KERNEL_RISCV64 = $(KERNEL_RISCV64_ELF)
+KERNEL = $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),$(KERNEL_RISCV64),$(KERNEL_AARCH64))
 FXFS_DISK = smros-fxfs.img
 FXFS_DISK_SIZE = 128M
 BUILD_DIR = target/$(TARGET)/release
 SHELL_SCRIPTS = $(sort $(wildcard scripts/*.sh))
-QEMU_MACHINE ?= virt,gic-version=4,virtualization=on
-QEMU_CPU ?= cortex-a710
+QEMU_SYSTEM_AARCH64 ?= qemu-system-aarch64
+QEMU_SYSTEM_RISCV64 ?= qemu-system-riscv64
+QEMU_SYSTEM = $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),$(QEMU_SYSTEM_RISCV64),$(QEMU_SYSTEM_AARCH64))
+QEMU_MACHINE_AARCH64 ?= virt,gic-version=4,virtualization=on
+QEMU_MACHINE_RISCV64 ?= virt
+QEMU_MACHINE ?= $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),$(QEMU_MACHINE_RISCV64),$(QEMU_MACHINE_AARCH64))
+QEMU_CPU_AARCH64 ?= cortex-a710
+QEMU_CPU_RISCV64 ?= rv64
+QEMU_CPU ?= $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),$(QEMU_CPU_RISCV64),$(QEMU_CPU_AARCH64))
+OBJCOPY_AARCH64 ?= aarch64-linux-gnu-objcopy
+OBJCOPY_RISCV64 ?= riscv64-linux-gnu-objcopy
+OBJCOPY = $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),$(OBJCOPY_RISCV64),$(OBJCOPY_AARCH64))
 # Top-level CPU knob. QEMU_SMP controls QEMU vCPUs; SMROS_LOGICAL_CPUS controls
 # the kernel's logical scheduler model. By default they move together.
 SMROS_CPUS ?= 4
@@ -24,9 +38,13 @@ all: build
 
 # Build the kernel
 build:
-	@echo "Building SMROS ARM64 Kernel..."
-	@SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' cargo build --release
-	@aarch64-linux-gnu-objcopy -O binary $(BUILD_DIR)/smros $(KERNEL)
+	@echo "Building SMROS kernel for $(TARGET)..."
+	@SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' cargo build --release --target $(TARGET)
+	@if [ "$(TARGET)" = "riscv64gc-unknown-none-elf" ]; then \
+		echo "Using RISC-V ELF payload directly for QEMU: $(KERNEL)"; \
+	else \
+		$(OBJCOPY) -O binary $(BUILD_DIR)/smros $(KERNEL); \
+	fi
 	@echo "Build complete: $(KERNEL)"
 
 # Production build check used by the local test suite
@@ -46,8 +64,8 @@ ut:
 
 # QEMU system smoke test: boot until the shell prompt appears
 st: $(FXFS_DISK)
-	@$(MAKE) build QEMU_SMP='$(SMOKE_QEMU_SMP)'
-	@QEMU_MACHINE='$(QEMU_MACHINE)' QEMU_CPU='$(QEMU_CPU)' QEMU_SMP='$(SMOKE_QEMU_SMP)' QEMU_MEMORY='$(SMOKE_QEMU_MEMORY)' ./scripts/smoke-qemu.sh
+	@$(MAKE) build ARCH='$(TARGET)' QEMU_SMP='$(SMOKE_QEMU_SMP)'
+	@ARCH='$(TARGET)' QEMU_SYSTEM='$(QEMU_SYSTEM)' KERNEL_IMAGE='$(KERNEL)' QEMU_MACHINE='$(QEMU_MACHINE)' QEMU_CPU='$(QEMU_CPU)' QEMU_SMP='$(SMOKE_QEMU_SMP)' QEMU_MEMORY='$(SMOKE_QEMU_MEMORY)' ./scripts/smoke-qemu.sh
 
 # Fast local confidence suite; intentionally does not boot QEMU
 test: host-fmt-check script-check ut build-test
@@ -65,7 +83,7 @@ vm-launcher:
 # Run with QEMU (simple mode)
 run: build $(FXFS_DISK) qemu-icmp vm-launcher
 	@echo "Starting QEMU..."
-	@qemu-system-aarch64 \
+	@$(QEMU_SYSTEM) \
 		-M $(QEMU_MACHINE) \
 		-cpu $(QEMU_CPU) \
 		-smp $(QEMU_SMP) \
@@ -81,7 +99,7 @@ run: build $(FXFS_DISK) qemu-icmp vm-launcher
 # Run with QEMU (debug mode with logging)
 debug: build $(FXFS_DISK) qemu-icmp vm-launcher
 	@echo "Starting QEMU in debug mode..."
-	@qemu-system-aarch64 \
+	@$(QEMU_SYSTEM) \
 		-M $(QEMU_MACHINE) \
 		-cpu $(QEMU_CPU) \
 		-smp $(QEMU_SMP) \
@@ -100,7 +118,7 @@ debug: build $(FXFS_DISK) qemu-icmp vm-launcher
 # Run with GDB server
 gdb: build $(FXFS_DISK) qemu-icmp vm-launcher
 	@echo "Starting QEMU with GDB server on port 1234..."
-	@qemu-system-aarch64 \
+	@$(QEMU_SYSTEM) \
 		-M $(QEMU_MACHINE) \
 		-cpu $(QEMU_CPU) \
 		-smp $(QEMU_SMP) \
@@ -118,7 +136,7 @@ gdb: build $(FXFS_DISK) qemu-icmp vm-launcher
 clean:
 	@echo "Cleaning..."
 	@cargo clean
-	@rm -f $(KERNEL)
+	@rm -f $(KERNEL_AARCH64) $(KERNEL_RISCV64_IMG)
 	@rm -f qemu.log
 	@echo "Clean complete (kept $(FXFS_DISK))"
 
@@ -127,9 +145,8 @@ clean-fxfs:
 	@echo "Removing persistent FxFS disk image: $(FXFS_DISK)"
 	@rm -f $(FXFS_DISK)
 
-# Install ARM64 target
 install-target:
-	@echo "Installing ARM64 target..."
+	@echo "Installing Rust target $(TARGET)..."
 	@rustup target add $(TARGET)
 
 # Install local Verus toolchain used by the verification harness
@@ -168,7 +185,7 @@ verify: test st verus
 
 # Show help
 help:
-	@echo "SMROS ARM64 Kernel Makefile"
+	@echo "SMROS multi-architecture Kernel Makefile"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all       - Build the kernel (default)"

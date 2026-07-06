@@ -7,10 +7,11 @@ The short version is:
 - EL0 scaffolding exists
 - MMU and page-table helpers exist
 - an `svc` bridge exists
+- the kernel low-level layer selects ARM64 or RISC-V64 backends at build time
 - a minimal component framework and FxFS-shaped object store now initialize during user-level setup
 - a minimal ELF64/AArch64 loader parses boot component binaries from FxFS
 - a minimal `/svc` service directory uses Zircon channels and fixed message structs for component-manager, runner, and filesystem requests
-- user-level VirtIO-MMIO block and net drivers initialize under QEMU `virt`
+- user-level VirtIO-MMIO block and net drivers initialize under QEMU `virt` on both ARM64 and RISC-V64
 - FxFS is block-backed by `smros-fxfs.img` when virtio-blk is present
 - the shell can launch a dynamic PIE ELF through `src/user_level/services/run_elf.rs`
 - the real EL0 syscall smoke test remains available as an explicit helper
@@ -19,6 +20,8 @@ The short version is:
 ## Relevant Files
 
 - `src/kernel_lowlevel/mmu.rs`
+- `src/kernel_lowlevel/ARM64/`
+- `src/kernel_lowlevel/RISCV64/`
 - `src/syscall/syscall_handler.rs`
 - `src/syscall/syscall_dispatch.rs`
 - `src/user_level/apps/user_process.rs`
@@ -38,10 +41,11 @@ The short version is:
 
 ### MMU and Page-Table Helpers
 
-`src/kernel_lowlevel/mmu.rs` provides:
+`src/kernel_lowlevel/mmu.rs` provides shared page-table scaffolding with
+architecture-selected page-table-entry encoding for ARM64 and RISC-V64:
 
 - page-table entry definitions
-- TTBR0 and TTBR1 root allocation
+- user and kernel page-table root allocation
 - `PageTableManager`
 - user-region mapping helpers
 - kernel-region mapping helpers
@@ -85,9 +89,13 @@ The same file also provides:
 - records parsed entry and segment metadata on `UserProcess`
 - provides tiny boot ELF images for the current component trampoline
 
+That loader is intentionally documented as AArch64-specific today. RISC-V64
+kernel boot support does not yet include a RISC-V64 external user ELF loader or
+RISC-V Linux syscall-number compatibility path.
+
 `src/user_level/services/run_elf.rs` is the current shell launcher for dynamic PIE binaries. It copies PT_LOAD bytes for the main executable and interpreter into the Linux mmap window, builds a Linux argv/env/auxv stack, enters the dynamic loader at EL0, and returns to the shell through the `exit` hook. Libraries are resolved from `/shared/lib` or `/lib`.
 
-This is still an identity-mapped bring-up path, not a fully isolated process model. It does not yet copy segments into process-owned TTBR0-backed user mappings.
+This is still an identity-mapped bring-up path, not a fully isolated process model. It does not yet copy segments into process-owned hardware user mappings.
 
 `src/user_level/services/fxfs.rs` provides the current storage backing for that scaffold:
 
@@ -117,7 +125,7 @@ Connecting to a service creates a Zircon channel pair from the kernel channel ta
 
 `src/user_level/apps/user_test.rs` contains:
 
-- `linux_syscall()` using `svc #0`
+- `linux_syscall()` using the selected architecture syscall instruction
 - `user_test_process_entry()`
 - `user_busy_loop_entry()`
 
@@ -129,9 +137,11 @@ Connecting to a service creates a Zircon channel pair from the kernel channel ta
 
 These files are the current staging area for user-mode work.
 
-### Exception Handling
+### Exception and Trap Handling
 
-The live synchronous exception handler is assembled in `src/main.rs`. For `svc` exceptions it currently calls `handle_syscall_simple()`.
+The live exception or trap handler is assembled by the selected architecture
+backend. ARM64 handles `svc`; RISC-V64 handles `ecall`. Both active paths call
+`handle_syscall_simple()` for modeled syscall dispatch.
 
 `src/syscall/syscall_handler.rs` also contains `handle_svc_exception_from_el0()`, but that is not the handler the current assembly vectors use.
 
@@ -151,7 +161,7 @@ No part of the normal boot path:
 
 - creates a demo EL0 process and runs it
 - executes `user_shell_entry()` after an EL transition
-- installs a process-specific TTBR0 page table for the EL0 smoke helper
+- installs a process-specific hardware user page-table root for the EL0 smoke helper
 - maps shell-loaded ELF `PT_LOAD` bytes into a new process address space
 - enforces per-process handle ownership for the shell
 - runs component manager, FxFS, or user-init as fully isolated userspace servers with copied ELF segments
@@ -163,14 +173,14 @@ No part of the normal boot path:
 
 | Area | Current State | Notes |
 |------|---------------|-------|
-| Page-table manager | present | real scaffolding in `mmu.rs` |
+| Page-table manager | present | shared scaffolding in `mmu.rs` with ARM64 and RISC-V64 PTE encodings |
 | User-process data model | present | `UserProcess` exists |
 | EL0 transition helper | present | `switch_to_el0()` exists |
 | Live shell in EL0 | not active | shell runs as EL1 thread |
 | Live test process in EL0 | explicit helper | normal boot skips it; the helper still drops to EL0 and returns through the active exception path |
 | Minimal ELF loader | active | parses FxFS ELF files and records entry/segment metadata |
 | Shell dynamic PIE launcher | active bring-up path | maps executable/interpreter into the Linux mmap window and enters loader at EL0 |
-| User-level VirtIO drivers | active | block and net bind under standard QEMU `virt` targets |
+| User-level VirtIO drivers | active | block and net bind under standard ARM64 and RISC-V64 QEMU `virt` targets |
 | Block-backed FxFS | active when virtio-blk is present | `make clean` keeps `smros-fxfs.img`; `make clean-fxfs` resets it |
 | `/svc` fixed-message IPC | active | service connections use Zircon channels and fixed request/reply structs |
 | Full register-frame EL0 syscall handler | not active | current vectors use `handle_syscall_simple()` |
@@ -183,7 +193,7 @@ The shell source still contains future-facing comments about EL0. In the current
 - `start_user_shell()` uses `scheduler().create_thread(...)`
 - the shell thread executes with normal kernel thread context
 - shell commands call kernel services directly
-- serial input is polled directly from PL011 registers
+- serial input is polled directly from the selected architecture console driver
 
 So the shell is currently a kernel-resident diagnostic shell, not an isolated user process.
 
@@ -195,10 +205,10 @@ So the shell is currently a kernel-resident diagnostic shell, not an isolated us
 - prepares a dedicated 8 KiB EL0 stack
 - marks the EL0 test active for syscall-result recording
 - calls `switch_to_el0(user_test_process_entry, stack_top, 0)`
-- uses `svc #0` from EL0 for Linux `write`, `getpid`, `mmap`, and `exit`
+- uses the selected architecture syscall instruction from user mode for Linux `write`, `getpid`, `mmap`, and `exit`
 - resumes through `prepare_el0_test_kernel_return()` and `el0_test_resume()`
 
-That makes it a real exception-level transition test. It is still not a fully isolated user process because the test uses the lightweight `ttbr0 = 0` setup and does not install a process-owned address space.
+That makes it a real exception-level transition test. It is still not a fully isolated user process because the test uses a lightweight address-space setup and does not install a process-owned address space.
 
 ## What Is Already Useful
 
@@ -218,7 +228,7 @@ The existing scaffolding is useful for the next step toward a real userspace:
 To move from scaffolding to real user-mode execution, the kernel still needs to:
 
 1. create an actual user process during boot
-2. map user code/data/heap/stack into TTBR0-backed tables
+2. map user code/data/heap/stack into architecture-backed user page tables
 3. load a real EL0 entry point and stack
 4. call `switch_to_el0()`
 5. route `svc` exceptions through a fully correct EL0 handler

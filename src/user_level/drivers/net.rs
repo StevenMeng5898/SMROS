@@ -510,6 +510,19 @@ pub fn bind() -> Result<(), UserDriverError> {
     driver().bind()
 }
 
+pub fn bind_at(base: usize) -> Result<(), UserDriverError> {
+    match driver().bind_at(base) {
+        Ok(()) => {
+            driver().last_error = None;
+            Ok(())
+        }
+        Err(err) => {
+            driver().last_error = Some(err);
+            Err(err)
+        }
+    }
+}
+
 pub fn ready() -> bool {
     driver().ready
 }
@@ -603,7 +616,5 @@ fn config_read_u8(offset: usize) -> u8 {
 }
 
 fn memory_barrier() {
-    unsafe {
-        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
-    }
+    crate::kernel_lowlevel::cpu::mmio_barrier();
 }

@@ -38,6 +38,10 @@ pub const QEMU_VIRT_GICR_SIZE: usize = 0x00f6_0000;
 pub const QEMU_VIRT_TIMER_IRQ: u32 = 30;
 pub const QEMU_VIRT_MEMORY_BASE: usize = 0x4000_0000;
 pub const QEMU_VIRT_MEMORY_SIZE: usize = 0x2000_0000;
+pub const QEMU_VIRTIO_MMIO_BASE: usize = 0x0a00_0000;
+pub const QEMU_VIRTIO_MMIO_STRIDE: usize = 0x200;
+pub const QEMU_VIRTIO_MMIO_SLOT_COUNT: usize = 32;
+pub const QEMU_VIRTIO_MMIO_SIZE: usize = QEMU_VIRTIO_MMIO_STRIDE * QEMU_VIRTIO_MMIO_SLOT_COUNT;
 
 pub const RPI4_UART_BASE: usize = 0xfe20_1000;
 pub const RPI4_UART_SIZE: usize = 0x1000;
@@ -370,6 +374,10 @@ pub fn init() -> bool {
     init_for_compatible("linux,dummy-virt")
 }
 
+pub fn architecture_name() -> &'static str {
+    "ARM64"
+}
+
 pub fn init_from_fdt(fdt_base: usize) -> bool {
     if let Some(resources) = fdt_platform_resources(fdt_base) {
         cache_resources(select_platform_index(resources.machine), resources);
@@ -430,6 +438,28 @@ pub fn platforms() -> &'static [PlatformDescriptor] {
 
 pub fn device_nodes() -> &'static [DeviceNode] {
     active_platform().nodes
+}
+
+pub fn virtio_mmio_count() -> usize {
+    if active_platform().machine == "linux,dummy-virt" {
+        QEMU_VIRTIO_MMIO_SLOT_COUNT
+    } else {
+        0
+    }
+}
+
+pub fn virtio_mmio_reg(index: usize) -> Option<DeviceReg> {
+    if index >= virtio_mmio_count() {
+        return None;
+    }
+    let base = lowlevel_logic::mmio_addr(
+        QEMU_VIRTIO_MMIO_BASE,
+        index.checked_mul(QEMU_VIRTIO_MMIO_STRIDE)?,
+    )?;
+    Some(DeviceReg {
+        base,
+        size: QEMU_VIRTIO_MMIO_STRIDE,
+    })
 }
 
 pub fn find_node(kind: DeviceKind) -> Option<&'static DeviceNode> {

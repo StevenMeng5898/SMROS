@@ -104,34 +104,6 @@ pub(crate) fn thread_id_idle<T: Copy + PartialEq>(id: T, idle: T) -> bool {
     smros_ll_thread_id_idle_body!(id, idle)
 }
 
-pub(crate) fn pte_set_flag(value: u64, flag: u64, enabled: bool) -> u64 {
-    smros_ll_pte_set_flag_body!(value, flag, enabled)
-}
-
-pub(crate) fn pte_output_address(paddr: u64) -> u64 {
-    smros_ll_pte_output_address_body!(paddr)
-}
-
-pub(crate) fn pte_set_output_address(value: u64, paddr: u64) -> u64 {
-    smros_ll_pte_set_output_address_body!(value, paddr)
-}
-
-pub(crate) fn pte_attr_idx(value: u64, idx: u64) -> u64 {
-    smros_ll_pte_attr_idx_body!(value, idx)
-}
-
-pub(crate) fn pte_sh(value: u64, sharability: u64) -> u64 {
-    smros_ll_pte_sh_body!(value, sharability)
-}
-
-pub(crate) fn pte_table(value: u64) -> bool {
-    smros_ll_pte_table_body!(value)
-}
-
-pub(crate) fn pt_index(vaddr: usize, entries: usize) -> usize {
-    smros_ll_pt_index_body!(vaddr, entries)
-}
-
 pub(crate) fn vma_size(start: usize, end: usize) -> usize {
     smros_ll_vma_size_body!(start, end)
 }

@@ -1,20 +1,20 @@
 # SMROS
 
-SMROS is an experimental bare-metal AArch64 kernel written in Rust for QEMU's `virt` machine. The current tree boots to a serial diagnostic shell, initializes low-level platform code plus user-level VirtIO block/net drivers, mounts a small FxFS-shaped store, keeps heavier syscall validation behind shell commands, and can launch a dynamic PIE ELF through the shell `run` command.
+SMROS is an experimental bare-metal multi-architecture kernel written in Rust for QEMU `virt`-style machines. The current tree boots on ARM64/AArch64 and RISC-V64 to a serial diagnostic shell, initializes architecture-selected low-level platform code plus user-level VirtIO block/net drivers, mounts a small FxFS-shaped store, keeps heavier syscall validation behind shell commands, and can launch a dynamic PIE ELF through the shell `run` command on the current AArch64 user-binary path.
 
 ## Current Status
 
-- Boots on `qemu-system-aarch64` and reaches the `smros>` shell prompt.
-- Uses inline ARM64 boot assembly in `src/main.rs` and context switch routines from `src/kernel_lowlevel/context_switch.S`.
-- Initializes PL011 UART, GICv3/v4 on QEMU virt, ARM generic timer, MMU/page-table helpers, SMP bookkeeping, kernel objects, channels, scheduler state, and syscall dispatch.
+- Boots on `qemu-system-aarch64` and `qemu-system-riscv64` and reaches the `smros:/>` shell prompt.
+- Selects low-level code by Rust target architecture through `src/kernel_lowlevel/mod.rs`: ARM64 code lives under `src/kernel_lowlevel/ARM64/`, and RISC-V64 code lives under `src/kernel_lowlevel/RISCV64/`.
+- Initializes ARM64 PL011/GIC/generic-timer code or RISC-V64 FDT-discovered NS16550/SBI-timer/supervisor-trap code, then shares the common MMU/page-table scaffolding, SMP bookkeeping, kernel objects, channels, scheduler state, and syscall dispatch.
 - Skips the boot-time EL0 smoke test on the fast path; run `testsc` from the shell for syscall validation.
 - Keeps the live shell as an EL1 scheduler thread; the banner is aspirational, not proof of an isolated shell process.
 - Provides modeled Linux and Zircon syscall coverage for memory, handles, IPC, object, timer/debug, hypervisor, networking, file-descriptor, and compatibility-object paths.
 - Initializes a Fuchsia-inspired user-level scaffold with component instances, namespace entries, generated boot ELF metadata, `/svc` fixed-message IPC, an FxFS-shaped object store, and compatibility-app/Docker/runc smoke surfaces.
-- Binds QEMU VirtIO-MMIO block and net devices from user-level driver modules.
+- Binds QEMU VirtIO-MMIO block and net devices from user-level driver modules. On RISC-V64, UART, hart, timer, and VirtIO-MMIO resources are discovered from the firmware-provided FDT instead of hard-coded board addresses.
 - Uses `smros-fxfs.img` as a persistent 128 MiB block-backed FxFS image when QEMU provides the virtio-blk device.
 - Embeds repository-local `host_shared/` files into the kernel at build time and installs them under `/shared` during FxFS initialization.
-- Supports `run <elf>` for dynamic PIE AArch64 ELF files stored in FxFS. The dynamic loader and C library are resolved from `/shared/lib` or `/lib`.
+- Supports `run <elf>` for dynamic PIE AArch64 ELF files stored in FxFS. The dynamic loader and C library are resolved from `/shared/lib` or `/lib`. RISC-V64 kernel boot support is present, but RISC-V64 external user ELF loading is still future work.
 - Maintains standalone Verus harnesses for syscall, kernel-object, low-level, and user-level pure helper logic.
 
 ## Toolchain
@@ -26,8 +26,9 @@ SMROS currently requires nightly Rust because `.cargo/config.toml` enables `buil
 - `rustup`
 - `rust-src`
 - `qemu-system-aarch64`
+- `qemu-system-riscv64`
 - `qemu-img`
-- `aarch64-linux-gnu-objcopy` from GNU binutils
+- `aarch64-linux-gnu-objcopy` from GNU binutils for the ARM64 raw `kernel8.img` path
 - `make` for the documented build/run flow
 
 ### Recommended Setup
@@ -36,6 +37,7 @@ SMROS currently requires nightly Rust because `.cargo/config.toml` enables `buil
 rustup toolchain install nightly
 rustup override set nightly
 rustup target add aarch64-unknown-none
+rustup target add riscv64gc-unknown-none-elf
 rustup component add rust-src
 ```
 
@@ -43,7 +45,7 @@ rustup component add rust-src
 
 ```bash
 # Ubuntu / Debian
-sudo apt-get install qemu-system-arm qemu-utils
+sudo apt-get install qemu-system-arm qemu-system-misc qemu-utils binutils-aarch64-linux-gnu
 
 # Arch Linux
 sudo pacman -S qemu-full
@@ -54,7 +56,8 @@ brew install qemu
 
 ## Build
 
-The preferred build entry point is the `Makefile`:
+The preferred build entry point is the `Makefile`. The default `ARCH` remains
+`aarch64-unknown-none` so existing ARM64 workflows keep working:
 
 ```bash
 make build
@@ -64,6 +67,15 @@ That produces:
 
 - `target/aarch64-unknown-none/release/smros`
 - `kernel8.img`
+
+Build the RISC-V64 kernel with:
+
+```bash
+make build ARCH=riscv64gc-unknown-none-elf
+```
+
+That produces `target/riscv64gc-unknown-none-elf/release/smros`, which QEMU
+loads directly as an ELF payload.
 
 `build.rs` snapshots files under `host_shared/` into the kernel image. Rebuild after adding files there.
 
@@ -82,6 +94,8 @@ Boot-level smoke test:
 
 ```bash
 make st
+make st ARCH=riscv64gc-unknown-none-elf
+make st ARCH=aarch64-unknown-none QEMU_CPU_AARCH64=cortex-a57
 ```
 
 This starts QEMU non-interactively and passes when the serial log reaches the
@@ -96,13 +110,37 @@ including `make ut`, `make verus`, and `make verify`.
 make run
 ```
 
+Run RISC-V64:
+
+```bash
+make run ARCH=riscv64gc-unknown-none-elf
+```
+
+Run ARM64 on an older QEMU CPU model:
+
+```bash
+make run ARCH=aarch64-unknown-none QEMU_CPU_AARCH64=cortex-a57
+```
+
 `make run` builds the kernel, creates `smros-fxfs.img` if missing, and starts QEMU with:
 
 - `virtio-blk-device` backed by `smros-fxfs.img`
 - QEMU user networking through `virtio-net-device`
 
-On Linux hosts, `make run`, `make debug`, `make gdb`, and the run scripts
-first run `scripts/setup-qemu-icmp.sh --ensure`. This persists and applies
+The RISC-V64 default is `-M virt -cpu rv64`, which is the portable QEMU path.
+For a QEMU build that exposes a Kunminghu/XiangShan-compatible machine or CPU
+model, override the RISC-V knobs instead of editing source:
+
+```bash
+make run ARCH=riscv64gc-unknown-none-elf \
+  QEMU_MACHINE_RISCV64=<machine> \
+  QEMU_CPU_RISCV64=<cpu>
+```
+
+On Linux hosts, `make run`, `make debug`, and `make gdb` first run
+`scripts/setup-qemu-icmp.sh --ensure`. The legacy `scripts/run.sh` and
+`scripts/run-simple.sh` paths are still ARM64-only helpers. The ICMP setup
+persists and applies
 `net.ipv4.ping_group_range = 0 2147483647` under `/etc/sysctl.d/` so QEMU user
 networking can create unprivileged ICMP echo sockets. Without this host setting,
 external `ping` can resolve DNS and still fall back to TCP with an `icmp blocked`
@@ -132,6 +170,14 @@ gdb
 (gdb) symbol-file target/aarch64-unknown-none/release/smros
 ```
 
+For RISC-V64, use:
+
+```bash
+gdb
+(gdb) target remote :1234
+(gdb) symbol-file target/riscv64gc-unknown-none-elf/release/smros
+```
+
 ### Manual QEMU Command
 
 On Linux, run the host ICMP setup once before launching QEMU manually:
@@ -154,6 +200,22 @@ qemu-system-aarch64 \
   -device virtio-net-device,netdev=smrosnet
 ```
 
+RISC-V64:
+
+```bash
+qemu-system-riscv64 \
+  -M virt \
+  -cpu rv64 \
+  -smp "${SMROS_CPUS:-4}" \
+  -m 2G \
+  -nographic \
+  -kernel target/riscv64gc-unknown-none-elf/release/smros \
+  -drive file=smros-fxfs.img,if=none,format=raw,id=fxfs,cache=writethrough \
+  -device virtio-blk-device,drive=fxfs \
+  -netdev user,id=smrosnet \
+  -device virtio-net-device,netdev=smrosnet
+```
+
 Exit QEMU with `Ctrl+A`, then `X`.
 
 ## Expected Boot Sequence
@@ -166,7 +228,7 @@ The current release build is expected to:
 4. Mount or initialize the FxFS-shaped store and install `/pkg`, `/data`, `/tmp`, `/svc`, `/config`, and the build-time `/shared` snapshot.
 5. Defer bootstrap component process launch and EL0 syscall validation until requested.
 6. Start the shell scheduler thread.
-7. Reach the `smros>` prompt.
+7. Reach the `smros:/>` prompt.
 
 ## Shell Highlights
 
@@ -264,8 +326,9 @@ the current kernel heap. `testsc` exercises the renderer and stored QML assets.
 On a Qt host, run `qmlscene host_shared/qml-cluster/ClusterWindow.qml` to open
 the cluster directly.
 
-For registry images today, use the host helper. It pulls the `linux/arm64`
-image with Docker, exports a single uncompressed layer, and writes the archive
+For registry images today, use the host helper. It currently defaults to a
+`linux/arm64` image because the external compatibility payloads are still
+AArch64-oriented, exports a single uncompressed layer, and writes the archive
 shape SMROS can load:
 
 ```bash
@@ -303,12 +366,13 @@ SMROS/
 ├── Cargo.toml                  # Package metadata
 ├── Makefile                    # Build, run, clean, and Verus entry points
 ├── build.rs                    # Embeds host_shared/ into the kernel image
-├── linker/kernel.ld            # AArch64 linker script
+├── linker/kernel.ld            # ARM64 linker script
+├── linker/kernel-riscv64.ld    # RISC-V64 linker script
 ├── src/
-│   ├── main.rs                 # Boot assembly, exception vectors, kernel entry
+│   ├── main.rs                 # Shared kernel entry and architecture-neutral init
 │   ├── main_logic.rs           # Pure runtime wrappers shared with Verus
 │   ├── main_logic_shared.rs    # Macro bodies shared by runtime and Verus
-│   ├── kernel_lowlevel/        # Platform and low-level kernel code
+│   ├── kernel_lowlevel/        # Shared low-level code plus ARM64/ and RISCV64/ backends
 │   ├── kernel_objects/         # Threads, scheduler, handles, VMO, VMAR, channels, compat objects
 │   ├── syscall/                # Syscall definitions, dispatch, and handler helpers
 │   └── user_level/
@@ -325,11 +389,9 @@ SMROS/
 
 ### Low-Level Platform
 
-- PL011 serial console
-- GICv3/v4 interrupt controller on QEMU virt
-- ARM generic timer
-- ARM64 exception vectors
-- ARM64 context switch assembly
+- ARM64 backend: PL011 serial console, GICv3/v4 interrupt controller on QEMU `virt`, ARM generic timer, exception vectors, and context-switch assembly.
+- RISC-V64 backend: FDT-discovered NS16550-compatible serial console, SBI timer, supervisor trap/interrupt path, hart bookkeeping, and context-switch assembly.
+- Shared low-level modules: page-frame allocator, architecture-aware page-table entries in `mmu.rs`, process-address-space scaffolding, and pure helper logic used by tests and Verus.
 
 ### Scheduling and Threads
 
@@ -360,7 +422,7 @@ SMROS/
 
 - Handle table with rights checks for core modeled operations
 - VMO, VMAR, channel, thread, scheduler, and compatibility-object tables
-- Linux ARM64 dispatch coverage with modeled behavior for common bring-up calls
+- Linux ARM64-numbered dispatch coverage with modeled behavior for common bring-up calls
 - Zircon dispatch path reachable as `1000 + zircon_syscall_number`
 - `/svc` services for component manager, ELF runner, and FxFS using fixed 32-byte messages over Zircon channels
 
@@ -394,9 +456,10 @@ The user-level harness now covers pure helper logic for `src/main.rs`, user proc
 ## Known Limitations
 
 - The shell banner says "User-Mode Shell", but the shell currently runs as an EL1 kernel thread.
-- The explicit EL0 smoke helper uses a lightweight `TTBR0_EL1 = 0` setup when run, not a fully isolated process address space.
+- The explicit EL0 smoke helper uses a lightweight architecture-specific user-address-space setup when run, not a fully isolated process address space.
 - The shell `testsc` command directly calls most syscall helpers from EL1; it is a developer smoke test, not an external ABI compliance suite.
-- The dynamic PIE launcher works for the current mapped bring-up path, but it does not create a process-owned TTBR0 address space.
+- The dynamic PIE launcher works for the current mapped bring-up path, but it does not create a process-owned hardware user address space.
+- RISC-V64 boots the kernel and shell, but external RISC-V64 user ELF loading, RISC-V Linux syscall numbering, and full SBI HSM secondary-hart startup are not complete yet.
 - The syscall layer is broad but modeled; many paths are interface validation, object bookkeeping, or deterministic placeholders.
 - Linux fd objects can bind to FxFS files for open/read/write/stat and file-backed `mmap`, but this is not a complete VFS.
 - `/shared` is a build-time snapshot of `host_shared/`, not a live host directory mount. Live sharing still needs a 9p or virtio-fs guest driver.

@@ -459,7 +459,7 @@ pub extern "C" fn component_el0_entry() -> ! {
     }
 
     loop {
-        cortex_a::asm::wfe();
+        crate::kernel_lowlevel::cpu::wait_for_event();
     }
 }
 
@@ -525,12 +525,9 @@ pub fn prepare_component_return(exit_code: i32) -> bool {
 
     let spsr_el1: u64 = user_logic::el1h_spsr_masked();
     unsafe {
-        core::arch::asm!(
-            "msr elr_el1, {resume}",
-            "msr spsr_el1, {spsr}",
-            resume = in(reg) component_launcher_resume as *const () as u64,
-            spsr = in(reg) spsr_el1,
-            options(nostack, preserves_flags),
+        crate::kernel_lowlevel::cpu::set_kernel_resume_preserve_flags(
+            component_launcher_resume as *const () as u64,
+            spsr_el1,
         );
     }
     true
@@ -547,6 +544,6 @@ extern "C" fn component_launcher_resume() -> ! {
     crate::kernel_objects::scheduler::schedule();
 
     loop {
-        cortex_a::asm::wfe();
+        crate::kernel_lowlevel::cpu::wait_for_event();
     }
 }

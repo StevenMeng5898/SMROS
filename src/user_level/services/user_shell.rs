@@ -38,18 +38,7 @@ impl ShellContext {
         let mut input_len = 0usize;
 
         loop {
-            const UART_BASE: usize = 0x9000000;
-            const UART_FR: usize = 0x18;
-            const UART_DR: usize = 0x00;
-            const FR_RXFE: u32 = 1 << 4;
-
-            let fr = unsafe { core::ptr::read_volatile((UART_BASE + UART_FR) as *const u32) };
-            if fr & FR_RXFE != 0 {
-                cortex_a::asm::wfe();
-                continue;
-            }
-
-            let c = unsafe { core::ptr::read_volatile((UART_BASE + UART_DR) as *const u8) };
+            let c = self.serial.read_byte();
             if c == b'\r' || c == b'\n' {
                 self.serial.write_str("\n");
                 break;
@@ -471,16 +460,11 @@ impl UserShell {
     }
 
     fn try_read_uart_byte() -> Option<u8> {
-        const UART_BASE: usize = 0x9000000;
-        const UART_FR: usize = 0x18;
-        const UART_DR: usize = 0x00;
-        const FR_RXFE: u32 = 1 << 4;
-
-        let fr = unsafe { core::ptr::read_volatile((UART_BASE + UART_FR) as *const u32) };
-        if fr & FR_RXFE != 0 {
-            None
+        let mut serial = Serial::active();
+        if serial.has_byte() {
+            Some(serial.read_byte())
         } else {
-            Some(unsafe { core::ptr::read_volatile((UART_BASE + UART_DR) as *const u8) })
+            None
         }
     }
 
@@ -489,7 +473,7 @@ impl UserShell {
             if let Some(c) = Self::try_read_uart_byte() {
                 return c;
             }
-            cortex_a::asm::wfe();
+            crate::kernel_lowlevel::cpu::wait_for_event();
         }
     }
 
@@ -498,7 +482,7 @@ impl UserShell {
             if let Some(c) = Self::try_read_uart_byte() {
                 return Some(c);
             }
-            cortex_a::asm::wfe();
+            crate::kernel_lowlevel::cpu::wait_for_event();
         }
         None
     }
@@ -739,7 +723,10 @@ fn cmd_help(ctx: &mut ShellContext, _args: &[&str]) {
 fn cmd_version(ctx: &mut ShellContext, _args: &[&str]) {
     ctx.serial
         .write_str("\nSMROS v0.5.0 - Simple Operating System\n");
-    ctx.serial.write_str("Architecture: ARM64 (AArch64)\n");
+    ctx.serial.write_str("Architecture: ");
+    ctx.serial
+        .write_str(crate::kernel_lowlevel::drivers::architecture_name());
+    ctx.serial.write_str("\n");
     ctx.serial
         .write_str("Features: Multi-process, Syscalls, Preemptive Scheduler\n\n");
 }
@@ -8917,7 +8904,7 @@ fn print_ps_memory_maps(
         "         PCB page rows model normal process VA->PA; VM rows model guest stage-2 IPA->PA metadata only.\n",
     );
     ctx.serial.write_str(
-        "         ARM64 4KB granule, TTBR0/TTBR1 roots; PageTableManager currently stores indexed entries, not a live walked 4-level tree.\n",
+        "         4KB pages; PageTableManager currently stores indexed entries, not a live walked architecture page tree.\n",
     );
     ctx.serial.write_str(
         "         Page rows show PGD/PUD/PMD indexes when used; PTE# is the PCB PageEntry slot, and PFN is its content.\n",
@@ -10245,15 +10232,7 @@ fn dhry_strcmp(lhs: &[u8; 31], rhs: &[u8; 31]) -> i32 {
 }
 
 fn read_shell_counter() -> u64 {
-    let val: u64;
-    unsafe {
-        core::arch::asm!(
-            "mrs {val}, cntpct_el0",
-            val = out(reg) val,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    val
+    crate::kernel_lowlevel::cpu::read_cycle_counter()
 }
 
 fn counter_delta_ns(delta: u64, frequency: u64) -> u64 {
@@ -11136,7 +11115,7 @@ fn cmd_exit(_ctx: &mut ShellContext, _args: &[&str]) {
     // This should never return - would call exit syscall
     // For now, just hang
     loop {
-        cortex_a::asm::wfi();
+        crate::kernel_lowlevel::cpu::wait_for_interrupt();
     }
 }
 

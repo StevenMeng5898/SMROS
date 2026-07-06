@@ -2469,21 +2469,12 @@ pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) {
 
     LINUX_REAL_TIMER_DEADLINE_TICK.store(LINUX_TIMER_DISABLED, Ordering::SeqCst);
 
-    let return_pc: u64;
+    let return_pc = crate::kernel_lowlevel::cpu::read_exception_return_pc();
     unsafe {
-        core::arch::asm!(
-            "mrs {return_pc}, elr_el1",
-            return_pc = out(reg) return_pc,
-            options(nomem, nostack, preserves_flags),
-        );
         core::ptr::write(saved_regs as *mut u64, LINUX_SIGALRM as u64);
         core::ptr::write((saved_regs + 240) as *mut u64, return_pc);
-        core::arch::asm!(
-            "msr elr_el1, {handler}",
-            handler = in(reg) handler,
-            options(nomem, nostack, preserves_flags),
-        );
     }
+    crate::kernel_lowlevel::cpu::set_exception_return_pc(handler);
 }
 
 // ============================================================================

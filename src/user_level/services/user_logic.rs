@@ -53,8 +53,8 @@ pub(crate) fn stack_top_u64(stack_base: u64, stack_size: usize) -> Option<u64> {
     smros_user_stack_top_u64_body!(stack_base, stack_size)
 }
 
-pub(crate) fn el0_thread_pstate() -> u64 {
-    smros_user_el0_thread_pstate_body!()
+pub(crate) fn el0_thread_state() -> u64 {
+    smros_user_el0_thread_state_body!()
 }
 
 pub(crate) fn el0_spsr() -> u64 {

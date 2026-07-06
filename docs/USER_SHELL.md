@@ -163,8 +163,10 @@ The parser recognizes `<name>`, `<cpu>`, `<memory>`, `<priority>` or
 `<memory bytes="67108864">`, and `<restart policy="on-crash" limit="3">`.
 If the config also includes a `<linux kernel="...">` tag, `vm -c` asks the
 host-side launcher daemon to open a separate QEMU window and boot that Linux
-kernel. `make run`, `make debug`, `make gdb`, `scripts/run.sh`, and
-`scripts/run-simple.sh` start the host daemon automatically. For a manual QEMU
+kernel. `make run`, `make debug`, and `make gdb` start the host daemon
+automatically for both supported kernel architectures. The legacy
+`scripts/run.sh` and `scripts/run-simple.sh` helpers also start it, but those
+helpers are ARM64-only. For a manual QEMU
 boot, start it yourself first:
 
 ```text
@@ -346,7 +348,7 @@ panel, keyboard navigation, xterm mouse tracking, runtime status chips, and
 buffer meters. Type in the prompt field, press Enter or click Send to submit,
 Tab between controls, use arrow keys or the mouse wheel to move through the
 response panel, click Clear to reset the prompt, and press Esc or click Exit to
-return to the normal `smros>` shell.
+return to the normal `smros:/>` shell.
 
 ### LVGL UI Port
 
@@ -406,6 +408,10 @@ full smoke tests.
 
 The `run` command loads a dynamic PIE ELF from FxFS, parses `PT_INTERP` and `DT_NEEDED`, resolves the dynamic loader and C library from `/shared/lib` or `/lib`, builds an argv/env/auxv stack, and enters the loader from an EL0 launcher thread. For example, `run hello.elf` from `/shared` uses `hello.elf`, `/shared/lib/ld-linux-aarch64.so.1`, and `/shared/lib/libc.so.6` and returns to the shell after the program calls `exit`.
 
+This shell command is still an AArch64 external-user-binary path. The RISC-V64
+kernel can boot to the shell, but RISC-V64 dynamic PIE loading and RISC-V Linux
+syscall numbering are not complete yet.
+
 The launcher currently supports dynamic PIE binaries (`ET_DYN`) with a dynamic interpreter. Static `ET_EXEC` execution is still reported as unsupported. The implementation maps PT_LOAD bytes for the main executable and interpreter into the Linux mmap window and uses the current identity-mapped EL0 bring-up model, not a process-owned TTBR0 address space.
 
 ### Docker Image Pull And Load
@@ -429,16 +435,18 @@ this kernel stack does not yet implement TLS or registry bearer-token auth.
 
 Use `scripts/pull-docker-image.sh <image> host_shared/<name>.tar` on the host
 for HTTPS registries such as `docker.1ms.run`. The helper defaults to
-`DOCKER_PLATFORM=linux/arm64`, matching the QEMU guest. Rebuild afterward so the
-new host_shared snapshot is embedded, and run `make clean-fxfs` once if an older
-small `smros-fxfs.img` already exists. Then run `docker load /shared/<name>.tar`
-inside SMROS.
+`DOCKER_PLATFORM=linux/arm64`, matching the current AArch64 compatibility
+payloads. Rebuild afterward so the new host_shared snapshot is embedded, and
+run `make clean-fxfs` once if an older small `smros-fxfs.img` already exists.
+Then run `docker load /shared/<name>.tar` inside SMROS. Override
+`DOCKER_PLATFORM` on the host only when the guest-side loader for that payload
+architecture exists.
 For `docker.1ms.run/library/alpine:latest`, `docker pull` also checks the staged
 fallback path `/shared/alpine.tar`.
 
 ### Block-Backed FxFS
 
-The default QEMU targets attach `smros-fxfs.img` through virtio-blk. FxFS loads from that image when it exists and writes metadata/data changes back to it after mutating persistent paths, including local `/shared` overlay entries. `make clean` keeps the image; use `make clean-fxfs` to reset it.
+The default ARM64 and RISC-V64 QEMU targets attach `smros-fxfs.img` through virtio-blk. FxFS loads from that image when it exists and writes metadata/data changes back to it after mutating persistent paths, including local `/shared` overlay entries. `make clean` keeps the image; use `make clean-fxfs` to reset it.
 
 The `mount` command shows whether FxFS is block-backed and whether the last sync succeeded.
 

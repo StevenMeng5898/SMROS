@@ -139,12 +139,9 @@ pub fn prepare_run_elf_return(exit_code: i32) -> bool {
 
     let spsr_el1 = user_logic::el1h_spsr_masked();
     unsafe {
-        core::arch::asm!(
-            "msr elr_el1, {resume}",
-            "msr spsr_el1, {spsr}",
-            resume = in(reg) run_elf_launcher_resume as *const () as u64,
-            spsr = in(reg) spsr_el1,
-            options(nostack),
+        crate::kernel_lowlevel::cpu::set_kernel_resume(
+            run_elf_launcher_resume as *const () as u64,
+            spsr_el1,
         );
     }
     true
@@ -222,7 +219,7 @@ fn finish_launcher_thread() -> ! {
     scheduler::scheduler().finish_current_without_stack_free();
     scheduler::schedule();
     loop {
-        cortex_a::asm::wfe();
+        crate::kernel_lowlevel::cpu::wait_for_event();
     }
 }
 
@@ -363,9 +360,7 @@ fn elf_mapping_span(image: &elf::ElfImage) -> Option<(usize, usize)> {
 }
 
 fn sync_instruction_cache() {
-    unsafe {
-        core::arch::asm!("dsb ishst", "ic iallu", "dsb ish", "isb", options(nostack),);
-    }
+    crate::kernel_lowlevel::cpu::sync_instruction_cache();
 }
 
 struct StackBuilder {
@@ -432,7 +427,7 @@ fn build_initial_stack(request: &RunRequest, main: &elf::ElfImage) -> Result<u64
         0x41, 0x52, 0x4d, 0x36, 0x34, 0x2d, 0x53, 0x4d, 0x52, 0x4f, 0x53, 0x2d, 0x45, 0x4c, 0x46,
         0x21,
     ])?;
-    let platform_ptr = stack.push_cstr("aarch64")?;
+    let platform_ptr = stack.push_cstr(elf_platform_name())?;
     let env_ld_path = stack.push_cstr("LD_LIBRARY_PATH=/shared/lib:/lib")?;
 
     let mut argv_ptrs = Vec::new();
@@ -499,6 +494,16 @@ fn build_initial_stack(request: &RunRequest, main: &elf::ElfImage) -> Result<u64
         return Err(RunElfError::Stack);
     }
     Ok(stack.sp as u64)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn elf_platform_name() -> &'static str {
+    "aarch64"
+}
+
+#[cfg(target_arch = "riscv64")]
+fn elf_platform_name() -> &'static str {
+    "riscv64"
 }
 
 fn print_i32(serial: &mut crate::kernel_lowlevel::serial::Serial, value: i32) {

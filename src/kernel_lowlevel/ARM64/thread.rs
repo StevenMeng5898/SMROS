@@ -148,6 +148,15 @@ impl CpuContext {
         }
     }
 
+    pub fn set_entry_stack(&mut self, entry: u64, stack_top: u64) {
+        self.pc = entry;
+        self.sp = stack_top;
+    }
+
+    pub fn set_user_state(&mut self, state: u64) {
+        self.pstate = state;
+    }
+
     /// Create a default CPU context (for idle thread)
     pub const fn default_context() -> Self {
         CpuContext {
@@ -368,7 +377,7 @@ pub fn thread_id_is_idle(id: ThreadId) -> bool {
 /// Wait until the next interrupt.
 #[inline(always)]
 pub fn wait_for_interrupt() {
-    cortex_a::asm::wfi();
+    crate::kernel_lowlevel::cpu::wait_for_interrupt();
 }
 
 // External assembly functions for ARM64 context switching.

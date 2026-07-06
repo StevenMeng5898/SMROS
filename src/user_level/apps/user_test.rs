@@ -43,19 +43,7 @@ static EL0_TEST_KERNEL_MMAP_ADDR: AtomicU64 = AtomicU64::new(0);
 /// Make a Linux syscall from EL0.
 #[inline(always)]
 pub unsafe fn linux_syscall(syscall_num: u32, args: [u64; 6]) -> u64 {
-    let mut ret = args[0];
-    core::arch::asm!(
-        "svc #0",
-        in("x8") syscall_num,
-        inlateout("x0") ret,
-        in("x1") args[1],
-        in("x2") args[2],
-        in("x3") args[3],
-        in("x4") args[4],
-        in("x5") args[5],
-        options(nostack),
-    );
-    ret
+    crate::kernel_lowlevel::cpu::linux_syscall(syscall_num, args)
 }
 
 pub fn test_getpid() -> u64 {
@@ -78,7 +66,7 @@ pub fn test_exit(exit_code: i32) -> ! {
     }
 
     loop {
-        cortex_a::asm::wfe();
+        crate::kernel_lowlevel::cpu::wait_for_event();
     }
 }
 
@@ -163,15 +151,7 @@ pub fn prepare_el0_test_kernel_return(exit_code: i32) -> bool {
 
     // Return to EL1h with interrupts masked, matching the kernel thread model.
     let spsr_el1: u64 = user_logic::el1h_spsr_masked();
-    unsafe {
-        core::arch::asm!(
-            "msr elr_el1, {resume}",
-            "msr spsr_el1, {spsr}",
-            resume = in(reg) resume_addr,
-            spsr = in(reg) spsr_el1,
-            options(nostack),
-        );
-    }
+    unsafe { crate::kernel_lowlevel::cpu::set_kernel_resume(resume_addr, spsr_el1) }
 
     true
 }

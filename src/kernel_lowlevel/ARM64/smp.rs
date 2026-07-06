@@ -177,7 +177,7 @@ pub fn system_reset() -> ! {
 
     serial.write_str("[PSCI] System reset returned; halting\n");
     loop {
-        cortex_a::asm::wfe();
+        crate::kernel_lowlevel::cpu::wait_for_event();
     }
 }
 

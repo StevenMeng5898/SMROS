@@ -6,19 +6,36 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-KERNEL_IMAGE="${KERNEL_IMAGE:-$REPO_ROOT/kernel8.img}"
+ARCH="${ARCH:-aarch64-unknown-none}"
+case "$ARCH" in
+    riscv64gc-unknown-none-elf|riscv64*)
+        DEFAULT_QEMU_SYSTEM="qemu-system-riscv64"
+        DEFAULT_KERNEL_IMAGE="$REPO_ROOT/target/riscv64gc-unknown-none-elf/release/smros"
+        DEFAULT_QEMU_MACHINE="virt"
+        DEFAULT_QEMU_CPU="rv64"
+        ;;
+    *)
+        DEFAULT_QEMU_SYSTEM="qemu-system-aarch64"
+        DEFAULT_KERNEL_IMAGE="$REPO_ROOT/kernel8.img"
+        DEFAULT_QEMU_MACHINE="virt,gic-version=4,virtualization=on"
+        DEFAULT_QEMU_CPU="cortex-a710"
+        ;;
+esac
+
+QEMU_SYSTEM="${QEMU_SYSTEM:-$DEFAULT_QEMU_SYSTEM}"
+KERNEL_IMAGE="${KERNEL_IMAGE:-$DEFAULT_KERNEL_IMAGE}"
 FXFS_DISK="${FXFS_DISK:-$REPO_ROOT/smros-fxfs.img}"
 FXFS_DISK_SIZE="${FXFS_DISK_SIZE:-128M}"
-QEMU_MACHINE="${QEMU_MACHINE:-virt,gic-version=4,virtualization=on}"
-QEMU_CPU="${QEMU_CPU:-cortex-a710}"
+QEMU_MACHINE="${QEMU_MACHINE:-$DEFAULT_QEMU_MACHINE}"
+QEMU_CPU="${QEMU_CPU:-$DEFAULT_QEMU_CPU}"
 QEMU_SMP="${QEMU_SMP:-4}"
 QEMU_MEMORY="${QEMU_MEMORY:-512M}"
 SMROS_ST_TIMEOUT="${SMROS_ST_TIMEOUT:-45}"
 SMROS_ST_LOG="${SMROS_ST_LOG:-$REPO_ROOT/target/smros-smoke-qemu.log}"
 SMROS_ST_PROMPT="${SMROS_ST_PROMPT:-smros:/>}"
 
-if ! command -v qemu-system-aarch64 >/dev/null 2>&1; then
-    echo "error: qemu-system-aarch64 not found" >&2
+if ! command -v "$QEMU_SYSTEM" >/dev/null 2>&1; then
+    echo "error: $QEMU_SYSTEM not found" >&2
     exit 1
 fi
 
@@ -52,7 +69,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-qemu-system-aarch64 \
+"$QEMU_SYSTEM" \
     -M "$QEMU_MACHINE" \
     -cpu "$QEMU_CPU" \
     -smp "$QEMU_SMP" \

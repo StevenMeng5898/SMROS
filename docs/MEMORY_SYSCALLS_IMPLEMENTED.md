@@ -20,7 +20,7 @@ SMROS now has:
 - a global `brk` window with grow and shrink page accounting
 - a handle-backed Zircon VMO registry with real `read`, `write`, `get_size`, `set_size`, and `op_range` behavior
 - a software VMAR tree with mapping, protection, allocation, destroy, and unmap bookkeeping
-- an explicit EL0 `svc #0` smoke helper for Linux `write`, `getpid`, `mmap`, and `exit`
+- an explicit EL0 syscall smoke helper for Linux `write`, `getpid`, `mmap`, and `exit`
 - shell-visible memory stats for Linux mappings, `brk`, VMO state, and VMAR state
 - shell `testsc` coverage for the broader syscall compatibility model, including Linux file/fd/poll/stat paths and Zircon time/debug/system/exception and hypervisor paths
 - a richer FxFS-shaped object store with an in-memory object table and block-image persistence when virtio-blk is present
@@ -39,7 +39,7 @@ The fast boot path skips EL0 validation before the shell. The explicit helper ca
 - `mmap`
 - `exit`
 
-The kernel records the EL0 syscall results on the EL1 side and prints the validation status. This validates the real `svc` path separately from the shell `testsc` command.
+The kernel records the EL0 syscall results on the privileged side and prints the validation status. This validates the real architecture syscall path separately from the shell `testsc` command.
 
 ## Linux Memory Syscalls
 
@@ -114,12 +114,17 @@ The kernel records the EL0 syscall results on the EL1 side and prints the valida
 
 ## Shell Test Commands
 
-Use the default run target to build, boot, attach the virtio-blk image and
+Use the Makefile run target to build, boot, attach the virtio-blk image and
 virtio-net device, and verify the memory syscall paths:
 
 ```sh
 make run
+make run ARCH=riscv64gc-unknown-none-elf
 ```
+
+The default command is ARM64. The RISC-V64 command boots the same shared
+memory/syscall model through the RISC-V64 low-level backend, while the Linux
+syscall compatibility numbers are still the ARM64-numbered model.
 
 Normal boot now skips the EL0 validation helper so the shell prompt appears
 sooner. Use these commands from the SMROS shell for the current interactive
@@ -136,7 +141,7 @@ top
 
 What they cover:
 
-- explicit EL0 helper, when run from code: exercises real EL0 `svc` handling for Linux `write`, `getpid`, `mmap`, and `exit`
+- explicit EL0 helper, when run from code: exercises real user-to-kernel syscall handling for Linux `write`, `getpid`, `mmap`, and `exit`
 - `help`: confirms the command is exposed in the live shell
 - `meminfo`: prints allocator state plus Linux mapping, `brk`, VMO, and VMAR counters
 - `testsc`: runs the Linux and Zircon syscall smoke suite, including memory/object/channel paths plus component, FxFS, `/svc`, Docker, Gemma, Hermes, LVGL, and Qt/QML cluster checks

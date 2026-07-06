@@ -1,6 +1,8 @@
 # SMROS Networking
 
-SMROS now has user-level VirtIO-MMIO block and network drivers for QEMU `virt`. This document focuses on networking; the block driver backs the persistent FxFS image used by the shell and `/shared` tombstones.
+SMROS now has user-level VirtIO-MMIO block and network drivers for QEMU `virt`
+on ARM64 and RISC-V64. This document focuses on networking; the block driver
+backs the persistent FxFS image used by the shell and `/shared` tombstones.
 
 The default `make run`, `make debug`, and `make gdb` targets attach:
 
@@ -8,6 +10,10 @@ The default `make run`, `make debug`, and `make gdb` targets attach:
 -netdev user,id=smrosnet
 -device virtio-net-device,netdev=smrosnet
 ```
+
+Use `ARCH=riscv64gc-unknown-none-elf` with those Makefile targets for the
+RISC-V64 QEMU path. On RISC-V64, the low-level resource discovery code reads
+the firmware FDT so UART and VirtIO-MMIO addresses are not hard-coded.
 
 The driver binds the QEMU VirtIO net device as `eth0`, reads the device MAC,
 posts receive buffers, and exposes raw Ethernet send/receive through

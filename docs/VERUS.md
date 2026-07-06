@@ -1,12 +1,18 @@
 # Verus
 
-Verus verification is kept separate from the `smros` kernel crate so the ARM64 `no_std` build stays unchanged.
+Verus verification is kept separate from the `smros` kernel crate so the
+bare-metal `no_std` ARM64 and RISC-V64 builds stay unchanged.
 
 The current verified syscall slice is the standalone proof file at `verification/syscall/src/lib.rs`. It models the overflow-safe address-range helpers and multi-mapping availability predicates used by `src/syscall/syscall.rs`, the pure syscall bridge rules shared by `src/syscall/syscall_handler.rs` and `src/syscall/syscall_dispatch.rs`, and the shared syscall helper logic for Zircon routing, handle/buffer validation, signal updates, wait satisfaction, supported Linux clock IDs, Linux signal/IPC/socket/misc validation, Linux file/dir/fd/poll/stat validation, Zircon time/debug/system/exception validation, and Zircon hypervisor argument validation.
 
 `verification/kernel_objects/src/lib.rs` verifies pure helper logic and modeled state transitions for every `src/kernel_objects/` file: shared types/page rounding, handle lookup/rights masking, capability subset/no-escalation rules, VMO range checks, VMAR range availability, channel limits/signals, thread state predicates, scheduler selection, compatibility-object table predicates, and the no-algorithm module wiring in `mod.rs`.
 
-`verification/kernel_lowlevel/src/lib.rs` verifies pure helper logic for every `src/kernel_lowlevel/` Rust file: memory segment/page arithmetic, process lookup predicates, bitmap allocator indexing, page-table-entry bit updates, UART/GIC/timer register computations, SMP CPU-id/PSCI predicates, and the no-algorithm driver/module wiring.
+`verification/kernel_lowlevel/src/lib.rs` verifies pure helper logic for the
+shared `src/kernel_lowlevel/` code and the architecture backends: memory
+segment/page arithmetic, process lookup predicates, bitmap allocator indexing,
+page-table-entry bit updates, ARM64 UART/GIC/timer and RISC-V64 FDT/UART/timer
+register computations, SMP CPU-id/PSCI/hart predicates, and the no-algorithm
+driver/module wiring.
 
 `verification/user_level/src/lib.rs` verifies pure helper logic for `src/main.rs` and the user-level Rust modules: the kernel bump allocator alignment/end computation, EL0 process memory-layout arithmetic, user process lookup predicates, shell input/decimal parsing/time and memory summaries, DNS/IPv4 parsing predicates, minimal ELF header/program-header/segment bounds checks, dynamic ELF mapping-range arithmetic, `/svc` fixed-message protocol predicates, FxFS bounds predicates, user-level VirtIO driver helper predicates, and the explicit EL0 syscall-test decision rules.
 

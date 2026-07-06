@@ -1,10 +1,10 @@
 //! MMU and Page Table Management
 //!
 //! This module provides:
-//! - Page table management (4-level ARM64 page tables)
+//! - Architecture-aware page table entry management
 //! - Virtual to physical address translation
 //! - Memory protection and permissions
-//! - EL0/EL1 memory isolation
+//! - User/kernel memory isolation model
 
 #![allow(dead_code)]
 #![allow(static_mut_refs)]
@@ -14,53 +14,162 @@ use alloc::vec::Vec;
 
 use super::lowlevel_logic;
 
-// Page table entry flags
-bitflags::bitflags! {
-    pub struct PageAttr: u64 {
-        const VALID = 1 << 0;
-        const BLOCK = 1 << 1; // Block mapping (larger pages)
-        const ATTR_INDX_0 = 0 << 2;
-        const ATTR_INDX_1 = 1 << 2;
-        const ATTR_INDX_2 = 2 << 2;
-        const NS = 1 << 5; // Non-secure
-        const AP_EL0 = 1 << 6; // Accessible from EL0
-        const AP_READ_ONLY = 1 << 7; // Read-only
-        const SH_INNER = 3 << 8; // Inner shareable
-        const AF = 1 << 10; // Access flag
-        const N_G = 1 << 11; // Not global
-        const UXN = 1 << 54; // Unprivileged execute-never
-        const PXN = 1 << 53; // Privileged execute-never
+const PTE_VALID: u64 = 1 << 0;
+
+#[cfg(target_arch = "aarch64")]
+mod arch_pte {
+    pub const TABLE_OR_PAGE: u64 = 1 << 1;
+    pub const ATTR_INDEX_SHIFT: u64 = 2;
+    pub const ATTR_INDEX_MASK: u64 = 0x7 << ATTR_INDEX_SHIFT;
+    pub const AP_EL0: u64 = 1 << 6;
+    pub const AP_READ_ONLY: u64 = 1 << 7;
+    pub const SH_SHIFT: u64 = 8;
+    pub const SH_MASK: u64 = 0x3 << SH_SHIFT;
+    pub const AF: u64 = 1 << 10;
+    pub const UXN: u64 = 1 << 54;
+    pub const PXN: u64 = 1 << 53;
+    pub const OUTPUT_ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
+
+    pub fn set_leaf(value: u64) -> u64 {
+        value | TABLE_OR_PAGE
+    }
+
+    pub fn set_user(value: u64, allow: bool) -> u64 {
+        set_flag(value, AP_EL0, allow)
+    }
+
+    pub fn set_read_only(value: u64, read_only: bool) -> u64 {
+        set_flag(value, AP_READ_ONLY, read_only)
+    }
+
+    pub fn set_execute_never(value: u64, execute_never: bool) -> u64 {
+        set_flag(value, UXN, execute_never)
+    }
+
+    pub fn set_privileged_execute_never(value: u64, execute_never: bool) -> u64 {
+        set_flag(value, PXN, execute_never)
+    }
+
+    pub fn set_accessed(value: u64) -> u64 {
+        value | AF
+    }
+
+    pub fn set_attr_idx(value: u64, idx: u64) -> u64 {
+        (value & !ATTR_INDEX_MASK) | ((idx << ATTR_INDEX_SHIFT) & ATTR_INDEX_MASK)
+    }
+
+    pub fn set_sh(value: u64, sharability: u64) -> u64 {
+        (value & !SH_MASK) | ((sharability << SH_SHIFT) & SH_MASK)
+    }
+
+    pub fn set_output_address(value: u64, paddr: u64) -> u64 {
+        (value & !OUTPUT_ADDR_MASK) | (paddr & OUTPUT_ADDR_MASK)
+    }
+
+    pub fn output_address(value: u64) -> u64 {
+        value & OUTPUT_ADDR_MASK
+    }
+
+    pub fn is_table(value: u64) -> bool {
+        value & super::PTE_VALID != 0 && value & TABLE_OR_PAGE == 0
+    }
+
+    pub fn is_leaf(value: u64) -> bool {
+        value & TABLE_OR_PAGE != 0
+    }
+
+    fn set_flag(value: u64, flag: u64, enabled: bool) -> u64 {
+        if enabled {
+            value | flag
+        } else {
+            value & !flag
+        }
     }
 }
 
-// Memory attributes for MAIR_EL1
-pub const ATTR_NORMAL_CACHED: u8 = 0xFF; // Normal memory, write-back
-pub const ATTR_NORMAL_UNCACHED: u8 = 0x44; // Device memory
-pub const ATTR_DEVICE: u8 = 0x00; // Device memory
+#[cfg(target_arch = "riscv64")]
+mod arch_pte {
+    pub const READ: u64 = 1 << 1;
+    pub const WRITE: u64 = 1 << 2;
+    pub const EXECUTE: u64 = 1 << 3;
+    pub const USER: u64 = 1 << 4;
+    pub const GLOBAL: u64 = 1 << 5;
+    pub const ACCESSED: u64 = 1 << 6;
+    pub const DIRTY: u64 = 1 << 7;
+    pub const PPN_SHIFT: u64 = 10;
+    pub const PPN_MASK: u64 = 0x003F_FFFF_FFFF_FC00;
 
-// Translation Control Register flags
-pub const TCR_T0SZ: u64 = 16; // TTBR0 region size (2^(64-16) = 2^48)
-pub const TCR_T1SZ: u64 = 16 << 16; // TTBR1 region size
-pub const TCR_TG0_4K: u64 = 0 << 14; // TTBR0 4KB granule
-pub const TCR_TG1_4K: u64 = 2 << 30; // TTBR1 4KB granule
-pub const TCR_SH0_INNER: u64 = 3 << 12; // TTBR0 inner shareable
-pub const TCR_SH1_INNER: u64 = 3 << 28; // TTBR1 inner shareable
-pub const TCR_ORGN0_WB: u64 = 1 << 10; // TTBR0 outer write-back
-pub const TCR_IRGN0_WB: u64 = 1 << 8; // TTBR0 inner write-back
-pub const TCR_ORGN1_WB: u64 = 1 << 26; // TTBR1 outer write-back
-pub const TCR_IRGN1_WB: u64 = 1 << 24; // TTBR1 inner write-back
-pub const TCR_IPS_4GB: u64 = 0 << 32; // 4GB physical address space
+    pub fn set_leaf(value: u64) -> u64 {
+        value | READ
+    }
 
-// System Control Register flags
-pub const SCTLR_M: u64 = 1 << 0; // MMU enable
-pub const SCTLR_A: u64 = 1 << 1; // Alignment check
-pub const SCTLR_C: u64 = 1 << 2; // Data cache enable
-pub const SCTLR_I: u64 = 1 << 12; // Instruction cache enable
+    pub fn set_user(value: u64, allow: bool) -> u64 {
+        set_flag(value, USER, allow)
+    }
 
-/// Page table levels for ARM64 (4KB granule, 4 levels)
-const PT_LEVEL_COUNT: usize = 4;
+    pub fn set_read_only(value: u64, read_only: bool) -> u64 {
+        set_flag(value, WRITE | DIRTY, !read_only)
+    }
+
+    pub fn set_execute_never(value: u64, exeFDTcute_never: bool) -> u64 {
+        set_flag(value, EXECUTE, !execute_never)
+    }
+
+    pub fn set_privileged_execute_never(value: u64, _execute_never: bool) -> u64 {
+        value
+    }
+
+    pub fn set_accessed(value: u64) -> u64 {
+        value | ACCESSED
+    }
+
+    pub fn set_attr_idx(value: u64, _idx: u64) -> u64 {
+        value
+    }
+
+    pub fn set_sh(value: u64, _sharability: u64) -> u64 {
+        value
+    }
+
+    pub fn set_output_address(value: u64, paddr: u64) -> u64 {
+        (value & !PPN_MASK) | (((paddr >> 12) << PPN_SHIFT) & PPN_MASK)
+    }
+
+    pub fn output_address(value: u64) -> u64 {
+        ((value & PPN_MASK) >> PPN_SHIFT) << 12
+    }
+
+    pub fn is_table(value: u64) -> bool {
+        value & super::PTE_VALID != 0 && value & (READ | WRITE | EXECUTE) == 0
+    }
+
+    pub fn is_leaf(value: u64) -> bool {
+        value & (READ | WRITE | EXECUTE) != 0
+    }
+
+    fn set_flag(value: u64, flag: u64, enabled: bool) -> u64 {
+        if enabled {
+            value | flag
+        } else {
+            value & !flag
+        }
+    }
+}
+
+bitflags::bitflags! {
+    pub struct PageAttr: u64 {
+        const VALID = 1 << 0;
+        const USER = 1 << 1;
+        const READ = 1 << 2;
+        const WRITE = 1 << 3;
+        const EXECUTE = 1 << 4;
+        const READ_ONLY = 1 << 5;
+        const EXECUTE_NEVER = 1 << 6;
+    }
+}
+
+/// Page table slot count for one 4 KiB table page.
 const PT_ENTRIES: usize = 512; // 2^9 entries per table
-const PT_ENTRY_SIZE: usize = 8; // 64-bit entries
 const MAX_PAGE_TABLE_PAGES: usize = 32;
 
 /// Page table entry
@@ -76,60 +185,69 @@ impl PageTableEntry {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.value & 1 != 0
+        self.value & PTE_VALID != 0
     }
 
     pub fn set_valid(&mut self, valid: bool) {
-        self.value = lowlevel_logic::pte_set_flag(self.value, 1, valid);
+        self.value = set_flag(self.value, PTE_VALID, valid);
     }
 
-    pub fn set_block(&mut self, block: bool) {
-        self.value = lowlevel_logic::pte_set_flag(self.value, 1 << 1, block);
+    pub fn set_leaf(&mut self, leaf: bool) {
+        if leaf {
+            self.value = arch_pte::set_leaf(self.value);
+        }
     }
 
-    pub fn set_ap_el0(&mut self, allow: bool) {
-        self.value = lowlevel_logic::pte_set_flag(self.value, 1 << 6, allow);
+    pub fn set_user_accessible(&mut self, allow: bool) {
+        self.value = arch_pte::set_user(self.value, allow);
     }
 
-    pub fn set_ap_read_only(&mut self, read_only: bool) {
-        self.value = lowlevel_logic::pte_set_flag(self.value, 1 << 7, read_only);
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.value = arch_pte::set_read_only(self.value, read_only);
     }
 
     pub fn set_xn(&mut self, execute_never: bool) {
-        self.value = lowlevel_logic::pte_set_flag(self.value, 1 << 54, execute_never);
+        self.value = arch_pte::set_execute_never(self.value, execute_never);
     }
 
     pub fn set_pxn(&mut self, privileged_execute_never: bool) {
-        self.value = lowlevel_logic::pte_set_flag(self.value, 1 << 53, privileged_execute_never);
+        self.value = arch_pte::set_privileged_execute_never(self.value, privileged_execute_never);
     }
 
     pub fn set_output_address(&mut self, paddr: u64) {
-        // Output address is bits [47:12] for level 3
-        self.value = lowlevel_logic::pte_set_output_address(self.value, paddr);
+        self.value = arch_pte::set_output_address(self.value, paddr);
     }
 
     pub fn get_output_address(&self) -> u64 {
-        lowlevel_logic::pte_output_address(self.value)
+        arch_pte::output_address(self.value)
     }
 
     pub fn is_table(&self) -> bool {
-        lowlevel_logic::pte_table(self.value)
+        arch_pte::is_table(self.value)
     }
 
-    pub fn is_block(&self) -> bool {
-        self.value & (1 << 1) != 0
+    pub fn is_leaf(&self) -> bool {
+        arch_pte::is_leaf(self.value)
     }
 
     pub fn set_attr_idx(&mut self, idx: u64) {
-        self.value = lowlevel_logic::pte_attr_idx(self.value, idx);
+        self.value = arch_pte::set_attr_idx(self.value, idx);
     }
 
     pub fn set_af(&mut self) {
-        self.value |= 1 << 10;
+        self.value = arch_pte::set_accessed(self.value);
     }
 
     pub fn set_sh(&mut self, sharability: u64) {
-        self.value = lowlevel_logic::pte_sh(self.value, sharability);
+        self.value = arch_pte::set_sh(self.value, sharability);
+    }
+}
+
+fn set_flag(value: u64, flag: u64, enabled: bool) -> u64 {
+    if enabled {
+        value | flag
+    } else {
+        value & !flag
     }
 }
 
@@ -180,10 +298,10 @@ impl Vma {
 
 /// Page table manager
 pub struct PageTableManager {
-    /// Root page table (TTBR0)
-    pub root_ttbr0: *mut PageTableEntry,
-    /// Root page table (TTBR1 - kernel space)
-    pub root_ttbr1: *mut PageTableEntry,
+    /// User address-space root table.
+    pub user_root: *mut PageTableEntry,
+    /// Kernel address-space root table.
+    pub kernel_root: *mut PageTableEntry,
     /// Current ASID (Address Space ID)
     pub asid: u16,
     /// VMAs for this address space
@@ -193,31 +311,27 @@ pub struct PageTableManager {
 impl PageTableManager {
     /// Create a new page table manager
     pub fn new() -> Option<Self> {
-        // Allocate page for root TTBR0 (user space)
-        let ttbr0_pfn = PageFrameAllocator::alloc()?;
-        let ttbr0_vaddr = map_page_table(ttbr0_pfn)?;
-        // Zero out the page table
+        let user_root_pfn = PageFrameAllocator::alloc()?;
+        let user_root_vaddr = map_page_table(user_root_pfn)?;
         unsafe {
-            core::ptr::write_bytes(ttbr0_vaddr, 0, PT_ENTRIES);
+            core::ptr::write_bytes(user_root_vaddr, 0, PT_ENTRIES);
         }
 
-        // Allocate page for root TTBR1 (kernel space)
-        let ttbr1_pfn = PageFrameAllocator::alloc()?;
-        let ttbr1_vaddr = map_page_table(ttbr1_pfn)?;
-        // Zero out the page table
+        let kernel_root_pfn = PageFrameAllocator::alloc()?;
+        let kernel_root_vaddr = map_page_table(kernel_root_pfn)?;
         unsafe {
-            core::ptr::write_bytes(ttbr1_vaddr, 0, PT_ENTRIES);
+            core::ptr::write_bytes(kernel_root_vaddr, 0, PT_ENTRIES);
         }
 
         Some(Self {
-            root_ttbr0: ttbr0_vaddr,
-            root_ttbr1: ttbr1_vaddr,
+            user_root: user_root_vaddr,
+            kernel_root: kernel_root_vaddr,
             asid: 0,
             vmas: Vec::new(),
         })
     }
 
-    /// Map a region in user space (TTBR0)
+    /// Map a region in user space.
     pub fn map_user_region(
         &mut self,
         vaddr: usize,
@@ -232,27 +346,22 @@ impl PageTableManager {
         let end = vaddr + size;
 
         while addr < end {
-            let pte = self.walk_page_tables_ttbr0(addr);
+            let pte = self.walk_user_page_table(addr);
             if pte.is_null() {
                 return false;
             }
 
             unsafe {
                 (*pte).set_valid(true);
-                (*pte).set_block(true); // Use block mapping for simplicity
+                (*pte).set_leaf(true);
                 (*pte).set_output_address(paddr);
-                (*pte).set_ap_el0(true); // Allow EL0 access
-                (*pte).set_af(); // Set access flag
+                (*pte).set_user_accessible(true);
+                (*pte).set_af();
                 (*pte).set_sh(3); // Inner shareable
-                (*pte).set_attr_idx(0); // Use cached attribute
+                (*pte).set_attr_idx(0);
 
-                // Set permissions
-                if !writable {
-                    (*pte).set_ap_read_only(true);
-                }
-                if !executable {
-                    (*pte).set_xn(true);
-                }
+                (*pte).set_read_only(!writable);
+                (*pte).set_xn(!executable);
             }
 
             // Add VMA
@@ -266,7 +375,7 @@ impl PageTableManager {
         true
     }
 
-    /// Map a region in kernel space (TTBR1)
+    /// Map a region in kernel space.
     pub fn map_kernel_region(
         &mut self,
         vaddr: usize,
@@ -282,28 +391,24 @@ impl PageTableManager {
         let end = vaddr + size;
 
         while addr < end {
-            let pte = self.walk_page_tables_ttbr1(addr);
+            let pte = self.walk_kernel_page_table(addr);
             if pte.is_null() {
                 return false;
             }
 
             unsafe {
                 (*pte).set_valid(true);
-                (*pte).set_block(true);
+                (*pte).set_leaf(true);
                 (*pte).set_output_address(paddr);
                 if user_accessible {
-                    (*pte).set_ap_el0(true);
+                    (*pte).set_user_accessible(true);
                 }
                 (*pte).set_af();
                 (*pte).set_sh(3);
                 (*pte).set_attr_idx(0);
 
-                if !writable {
-                    (*pte).set_ap_read_only(true);
-                }
-                if !executable {
-                    (*pte).set_xn(true);
-                }
+                (*pte).set_read_only(!writable);
+                (*pte).set_xn(!executable);
                 if !user_accessible && executable {
                     (*pte).set_pxn(false); // Allow privileged execution
                 }
@@ -316,52 +421,57 @@ impl PageTableManager {
         true
     }
 
-    /// Walk page tables for TTBR0 (user space)
-    fn walk_page_tables_ttbr0(&mut self, vaddr: usize) -> *mut PageTableEntry {
-        // For simplicity, we use a single-level table with 1MB block mappings
-        // In a real kernel, you'd walk all 4 levels
-        let idx = lowlevel_logic::pt_index(vaddr, PT_ENTRIES); // 2MB blocks
+    /// Select the user-space page-table slot for this virtual address.
+    fn walk_user_page_table(&mut self, vaddr: usize) -> *mut PageTableEntry {
+        let idx = page_table_slot(vaddr);
 
         if idx >= PT_ENTRIES {
             return core::ptr::null_mut();
         }
 
-        unsafe { self.root_ttbr0.add(idx) }
+        unsafe { self.user_root.add(idx) }
     }
 
-    /// Walk page tables for TTBR1 (kernel space)
-    fn walk_page_tables_ttbr1(&mut self, vaddr: usize) -> *mut PageTableEntry {
-        let idx = lowlevel_logic::pt_index(vaddr, PT_ENTRIES);
+    /// Select the kernel-space page-table slot for this virtual address.
+    fn walk_kernel_page_table(&mut self, vaddr: usize) -> *mut PageTableEntry {
+        let idx = page_table_slot(vaddr);
 
         if idx >= PT_ENTRIES {
             return core::ptr::null_mut();
         }
 
-        unsafe { self.root_ttbr1.add(idx) }
+        unsafe { self.kernel_root.add(idx) }
     }
 
     /// Switch to this address space
     pub fn switch_to(&self) {
-        unsafe {
-            // Set TTBR0
-            let ttbr0 = self.root_ttbr0 as u64;
-            core::arch::asm!(
-                "msr ttbr0_el1, {ttbr0}",
-                ttbr0 = in(reg) ttbr0,
-                options(nostack),
-            );
+        arch_switch_to(self.user_root as u64, self.kernel_root as u64);
+    }
+}
 
-            // Set TTBR1
-            let ttbr1 = self.root_ttbr1 as u64;
-            core::arch::asm!(
-                "msr ttbr1_el1, {ttbr1}",
-                ttbr1 = in(reg) ttbr1,
-                options(nostack),
-            );
+fn page_table_slot(vaddr: usize) -> usize {
+    (vaddr >> 21) & (PT_ENTRIES - 1)
+}
 
-            // TLB invalidate
-            core::arch::asm!("tlbi vmalle1is", "dsb ish", "isb", options(nostack),);
-        }
+#[cfg(target_arch = "aarch64")]
+fn arch_switch_to(ttbr0: u64, ttbr1: u64) {
+    unsafe {
+        core::arch::asm!("msr ttbr0_el1, {ttbr0}", ttbr0 = in(reg) ttbr0, options(nostack));
+        core::arch::asm!("msr ttbr1_el1, {ttbr1}", ttbr1 = in(reg) ttbr1, options(nostack));
+        core::arch::asm!("tlbi vmalle1is", "dsb ish", "isb", options(nostack));
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+fn arch_switch_to(root: u64, _kernel_root: u64) {
+    let satp = (8usize << 60) | ((root as usize) >> 12);
+    unsafe {
+        core::arch::asm!(
+            "csrw satp, {satp}",
+            "sfence.vma",
+            satp = in(reg) satp,
+            options(nostack),
+        );
     }
 }
 
