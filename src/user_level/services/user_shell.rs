@@ -340,7 +340,7 @@ impl UserShell {
         self.print("\n");
         self.print("╔═══════════════════════════════════════════════════════════╗\n");
         self.print("║                                                           ║\n");
-        self.print("║     SMROS User-Mode Shell v0.5.0                         ║\n");
+        self.print("║     SMROS Shell v1.2.0                                    ║\n");
         self.print("║                                                           ║\n");
         self.print("╚═══════════════════════════════════════════════════════════╝\n");
         self.print("\n");

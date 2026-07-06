@@ -752,15 +752,15 @@ exception_handler:
 core::arch::global_asm!(include_str!("kernel_lowlevel/context_switch.S"));
 
 /// Kernel version
-const KERNEL_VERSION: &str = "0.2.0";
+const KERNEL_VERSION: &str = "1.2.0";
 
 /// Kernel banner
 const KERNEL_BANNER: &str = r#"
-*********************************************
+**************************************************
 
-  SMROS ARM64 Kernel with Preemptive RR Scheduler
+  SMROS-A Distributed AI-Native Operating System
 
-*********************************************
+**************************************************
   v"#;
 
 /// Main kernel entry point
