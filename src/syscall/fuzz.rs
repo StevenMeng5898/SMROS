@@ -4,7 +4,7 @@ use super::{
     sys_event_create, sys_eventfd2, sys_fifo_create, sys_handle_close, sys_interrupt_create,
     sys_iommu_create, sys_job_create, sys_mmap, sys_msgget, sys_munmap, sys_openat,
     sys_pager_create, sys_pager_create_vmo, sys_pci_get_nth_device, sys_pipe2, sys_port_create,
-    sys_process_create, sys_profile_create, sys_resource_create, sys_semget, sys_shmget,
+    sys_process_create, sys_profile_create, sys_resource_create, sys_semget, sys_shmat, sys_shmget,
     sys_socket, sys_socket_create, sys_socketpair, sys_stream_create, sys_thread_create,
     sys_timer_create, sys_timerfd_create, sys_vcpu_create, sys_vmo_create, LinuxCapUserData,
     LinuxCapUserHeader, LinuxIovec, LinuxItimerval, LinuxPollFd, LinuxTimespec, LinuxTimeval,
@@ -430,6 +430,7 @@ struct FuzzState {
     scratch_fd_count: usize,
     mappings: [usize; 32],
     mapping_count: usize,
+    active_shm_mapping: usize,
     zircon_mappings: [usize; 32],
     zircon_mapping_count: usize,
     start_tick: u64,
@@ -458,6 +459,7 @@ impl FuzzState {
             scratch_fd_count: 0,
             mappings: [0; 32],
             mapping_count: 0,
+            active_shm_mapping: 0,
             zircon_mappings: [0; 32],
             zircon_mapping_count: 0,
             start_tick,
@@ -560,15 +562,17 @@ impl FuzzState {
         }
     }
 
-    fn track_mapping(&mut self, addr: usize) {
+    fn track_mapping(&mut self, addr: usize) -> bool {
         if addr == 0 || self.mappings[..self.mapping_count].contains(&addr) {
-            return;
+            return addr != 0;
         }
         if self.mapping_count < self.mappings.len() {
             self.mappings[self.mapping_count] = addr;
             self.mapping_count += 1;
+            true
         } else {
             let _ = sys_munmap(addr, PAGE_SIZE);
+            false
         }
     }
 
@@ -1050,6 +1054,25 @@ impl FuzzState {
         }
     }
 
+    fn attached_shm_mapping(&mut self) -> usize {
+        if self.active_shm_mapping != 0 {
+            return self.active_shm_mapping;
+        }
+        match sys_shmat(self.shm_handle() as usize, 0, 0) {
+            Ok(addr) if self.track_mapping(addr) => {
+                self.active_shm_mapping = addr;
+                addr
+            }
+            Ok(_) | Err(_) => 0,
+        }
+    }
+
+    fn clear_active_shm_mapping(&mut self, addr: usize) {
+        if self.active_shm_mapping == addr {
+            self.active_shm_mapping = 0;
+        }
+    }
+
     fn zircon_mapping(&mut self) -> usize {
         if self.zircon_mapping_count == 0 {
             0x7000_0000
@@ -1218,7 +1241,15 @@ impl FuzzState {
                     self.track_handle(args[0] as u32);
                 }
             }
-            196 | 222 => self.track_mapping(value),
+            196 => {
+                if self.track_mapping(value) {
+                    self.active_shm_mapping = value;
+                }
+            }
+            197 => self.clear_active_shm_mapping(args[1]),
+            222 => {
+                self.track_mapping(value);
+            }
             _ => {}
         }
     }
@@ -1353,6 +1384,7 @@ impl FuzzState {
             let _ = sys_munmap(self.mappings[index], PAGE_SIZE * 2);
         }
         self.mapping_count = 0;
+        self.active_shm_mapping = 0;
     }
 
     fn cleanup_zircon_mappings(&mut self) {
@@ -1973,8 +2005,18 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         192 => out = [state.sem_handle() as usize, ptr, 0, 0, 0, 0],
         193 => out = [state.sem_handle() as usize, ptr, variant, 0, 0, 0],
         194 => out = [1, PAGE_SIZE, 0, 0, 0, 0],
-        195 => out = [state.shm_handle() as usize, variant, ptr, 0, 0, 0],
-        196 | 197 => out = [state.shm_handle() as usize, state.mapping(), 0, 0, 0, 0],
+        195 => out = [state.shm_handle() as usize, variant + 1, ptr, 0, 0, 0],
+        196 => out = [state.shm_handle() as usize, 0, variant, 0, 0, 0],
+        197 => {
+            out = [
+                state.shm_handle() as usize,
+                state.attached_shm_mapping(),
+                0,
+                0,
+                0,
+                0,
+            ]
+        }
         198 => out = [LINUX_AF_UNIX, LINUX_SOCK_STREAM, 0, 0, 0, 0],
         199 => {
             out = [
@@ -1997,7 +2039,7 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         211 | 212 | 243 => out = [socket_fd, ptr, 1, 0, state.arena.timespec_ptr(), 0],
         213 | 223 => out = [file_fd, 0, FUZZ_IO_BYTES, 0, 0, 0],
         215 => out = [state.transient_mapping(), PAGE_SIZE, 0, 0, 0, 0],
-        216 => out = [state.mapping(), PAGE_SIZE, PAGE_SIZE, 0, 0, 0],
+        216 => out = [state.attached_shm_mapping(), PAGE_SIZE, PAGE_SIZE, 0, 0, 0],
         227 | 228 | 229 | 233 | 234 => out = [state.mapping(), PAGE_SIZE, variant, 0, 0, 0],
         232 => out = [state.mapping(), PAGE_SIZE, ptr, 0, 0, 0],
         214 => out = [if variant == 0 { 0 } else { 0x4000_1000 }, 0, 0, 0, 0, 0],
@@ -2080,7 +2122,7 @@ fn linux_path_args(
         48 | 439 => [fd, visible_path, 0, 0, 0, 0],
         56 => [
             usize::MAX - 99,
-            path,
+            visible_path,
             if variant == 0 {
                 LINUX_O_CREAT | LINUX_O_RDWR
             } else {

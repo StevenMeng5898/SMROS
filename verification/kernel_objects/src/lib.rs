@@ -351,6 +351,22 @@ spec fn sched_task_allowed_on_cpu_spec(
     !has_cpu_filter || !has_affinity || affinity == cpu_id
 }
 
+spec fn sched_priority_better_spec(
+    candidate_priority: int,
+    best_present: bool,
+    best_priority: int,
+) -> bool {
+    !best_present || candidate_priority > best_priority
+}
+
+spec fn sched_priority_should_preempt_spec(
+    current_priority: int,
+    best_ready_present: bool,
+    best_ready_priority: int,
+) -> bool {
+    best_ready_present && best_ready_priority > current_priority
+}
+
 spec fn sched_edf_better_spec(
     candidate_deadline: int,
     best_present: bool,
@@ -1800,6 +1816,40 @@ fn sched_task_allowed_on_cpu(
     smros_sched_task_allowed_on_cpu_body!(has_affinity, affinity, has_cpu_filter, cpu_id)
 }
 
+fn sched_priority_better(
+    candidate_priority: u8,
+    best_present: bool,
+    best_priority: u8,
+) -> (out: bool)
+    ensures
+        out == sched_priority_better_spec(
+            candidate_priority as int,
+            best_present,
+            best_priority as int,
+        ),
+{
+    smros_sched_priority_better_body!(candidate_priority, best_present, best_priority)
+}
+
+fn sched_priority_should_preempt(
+    current_priority: u8,
+    best_ready_present: bool,
+    best_ready_priority: u8,
+) -> (out: bool)
+    ensures
+        out == sched_priority_should_preempt_spec(
+            current_priority as int,
+            best_ready_present,
+            best_ready_priority as int,
+        ),
+{
+    smros_sched_priority_should_preempt_body!(
+        current_priority,
+        best_ready_present,
+        best_ready_priority
+    )
+}
+
 fn sched_edf_better(
     candidate_deadline: u64,
     best_present: bool,
@@ -2956,6 +3006,22 @@ fn scheduler_policy_smoke() {
     assert(matching_cpu);
     assert(!wrong_cpu);
     assert(no_affinity);
+
+    let first_priority = sched_priority_better(1, false, 0);
+    let higher_priority = sched_priority_better(5, true, 3);
+    let equal_priority = sched_priority_better(3, true, 3);
+    let lower_priority = sched_priority_better(2, true, 3);
+    let priority_preempts = sched_priority_should_preempt(3, true, 5);
+    let equal_priority_does_not_preempt = sched_priority_should_preempt(5, true, 5);
+    let no_ready_priority_does_not_preempt = sched_priority_should_preempt(3, false, 9);
+
+    assert(first_priority);
+    assert(higher_priority);
+    assert(!equal_priority);
+    assert(!lower_priority);
+    assert(priority_preempts);
+    assert(!equal_priority_does_not_preempt);
+    assert(!no_ready_priority_does_not_preempt);
 
     let first_edf = sched_edf_better(40, false, u64::MAX);
     let earlier_edf = sched_edf_better(30, true, 40);

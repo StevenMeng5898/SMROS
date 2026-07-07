@@ -580,7 +580,8 @@ fn ll_pte_output_address(paddr: u64) -> (out: u64)
 
 fn ll_pte_set_output_address(value: u64, paddr: u64) -> (out: u64)
     ensures
-        out == ((value & 0xFFFu64) | (paddr & 0x0000_FFFF_FFFF_F000u64)),
+        out == ((value & !0x0000_FFFF_FFFF_F000u64)
+            | (paddr & 0x0000_FFFF_FFFF_F000u64)),
 {
     smros_ll_pte_set_output_address_body!(value, paddr)
 }

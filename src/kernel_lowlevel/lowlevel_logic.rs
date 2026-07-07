@@ -112,18 +112,22 @@ pub(crate) fn mmio_addr(base: usize, offset: usize) -> Option<usize> {
     smros_ll_mmio_addr_body!(base, offset)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn uart_control(uarten: u32, txe: u32, rxe: u32) -> u32 {
     smros_ll_uart_control_body!(uarten, txe, rxe)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn uart_lcrh(word_len_8: u32, fifo_enable: u32) -> u32 {
     smros_ll_uart_lcrh_body!(word_len_8, fifo_enable)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn uart_has_byte(flags: u32, rx_empty_flag: u32) -> bool {
     smros_ll_uart_has_byte_body!(flags, rx_empty_flag)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn uart_tx_ready(flags: u32, tx_full_flag: u32) -> bool {
     smros_ll_uart_tx_ready_body!(flags, tx_full_flag)
 }
@@ -132,6 +136,7 @@ pub(crate) fn ascii_printable(byte: u8) -> bool {
     smros_ll_ascii_printable_body!(byte)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn hex_digit(nibble: u8) -> u8 {
     smros_ll_hex_digit_body!(nibble)
 }
@@ -148,26 +153,32 @@ pub(crate) fn timer_tick_count(counter: u64, period: u64) -> u64 {
     smros_ll_timer_tick_count_body!(counter, period)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn timer_ctl(enable: u64, imask: u64) -> u64 {
     smros_ll_timer_ctl_body!(enable, imask)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn gic_reg_offset(base_offset: usize, irq: u32, field_width: usize) -> usize {
     smros_ll_gic_reg_offset_body!(base_offset, irq, field_width)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn gic_byte_shift(irq: u32) -> usize {
     smros_ll_gic_byte_shift_body!(irq)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn gic_set_byte_field(value: u32, byte_shift: usize, field: u8) -> u32 {
     smros_ll_gic_set_byte_field_body!(value, byte_shift, field)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn gic_enable_bit(irq: u32) -> u32 {
     smros_ll_gic_enable_bit_body!(irq)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn gic_interrupt_id(iar: u32) -> u32 {
     smros_ll_gic_interrupt_id_body!(iar)
 }
@@ -180,10 +191,12 @@ pub(crate) fn dt_reg_contains(base: usize, size: usize, addr: usize) -> bool {
     smros_ll_dt_reg_contains_body!(base, size, addr)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn dt_irq_valid(irq: u32, max_irqs: u32) -> bool {
     smros_ll_dt_irq_valid_body!(irq, max_irqs)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn dt_platform_index(candidate: usize, platform_count: usize, fallback: usize) -> usize {
     smros_ll_dt_platform_index_body!(candidate, platform_count, fallback)
 }
@@ -212,14 +225,17 @@ pub(crate) fn fdt_reg_tuple_offset(
     smros_ll_fdt_reg_tuple_offset_body!(index, address_cells, size_cells)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn dt_gic_irq(kind: u32, hwirq: u32, max_irqs: u32) -> Option<u32> {
     smros_ll_dt_gic_irq_body!(kind, hwirq, max_irqs)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn dt_timer_irq_index(entry_count: usize) -> usize {
     smros_ll_dt_timer_irq_index_body!(entry_count)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn cpu_id_from_mpidr(mpidr: u64) -> u32 {
     smros_ll_cpu_id_from_mpidr_body!(mpidr)
 }
@@ -228,10 +244,12 @@ pub(crate) fn valid_cpu_id(cpu_id: u32, max_cpus: usize) -> bool {
     smros_ll_valid_cpu_id_body!(cpu_id, max_cpus)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn display_mpidr(cpu_id: u32) -> u64 {
     smros_ll_display_mpidr_body!(cpu_id)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn psci_success(result: i64, success: i64, on_pending: i64) -> bool {
     smros_ll_psci_success_body!(result, success, on_pending)
 }

@@ -1023,11 +1023,11 @@ fn driver_net_rx_output_len_valid(frame_len: usize, out_len: usize) -> (out: boo
     smros_driver_net_rx_output_len_valid_body!(frame_len, out_len)
 }
 
-fn user_el0_thread_pstate() -> (out: u64)
+fn user_el0_thread_state() -> (out: u64)
     ensures
         out == 0x3C0u64,
 {
-    smros_user_el0_thread_pstate_body!()
+    smros_user_el0_thread_state_body!()
 }
 
 fn user_el0_spsr() -> (out: u64)
@@ -1631,7 +1631,7 @@ proof fn user_process_layout_smoke() {
     assert(page_offset_spec(USER_STACK_VADDR as int, USER_STACK_PAGES as int, PAGE_SIZE as int)
         == Some((USER_STACK_VADDR + USER_STACK_PAGES * PAGE_SIZE) as int));
     assert(USER_THREAD_TIME_SLICE == 10);
-    assert(0x3C0u64 == smros_user_el0_thread_pstate_body!());
+    assert(0x3C0u64 == smros_user_el0_thread_state_body!());
     assert(0u64 == smros_user_el0_spsr_body!());
 }
 

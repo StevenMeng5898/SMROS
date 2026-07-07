@@ -21,5 +21,6 @@ trap cleanup EXIT
     verus \
         "$ROOT_DIR/verification/syscall/src/lib.rs" \
         --crate-type=lib \
+        --triggers-mode=silent \
         --no-report-long-running
 )

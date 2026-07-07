@@ -149,6 +149,59 @@ macro_rules! smros_ll_thread_id_idle_body {
     }};
 }
 
+#[allow(unused_macros)]
+macro_rules! smros_ll_pte_set_flag_body {
+    ($value:expr, $flag:expr, $enabled:expr) => {{
+        if $enabled {
+            $value | $flag
+        } else {
+            $value & !$flag
+        }
+    }};
+}
+
+#[allow(unused_macros)]
+macro_rules! smros_ll_pte_output_address_body {
+    ($value:expr) => {{
+        $value & 0x0000_FFFF_FFFF_F000u64
+    }};
+}
+
+#[allow(unused_macros)]
+macro_rules! smros_ll_pte_set_output_address_body {
+    ($value:expr, $paddr:expr) => {{
+        ($value & !0x0000_FFFF_FFFF_F000u64) | ($paddr & 0x0000_FFFF_FFFF_F000u64)
+    }};
+}
+
+#[allow(unused_macros)]
+macro_rules! smros_ll_pte_attr_idx_body {
+    ($value:expr, $idx:expr) => {{
+        ($value & !0x1Cu64) | (($idx << 2) & 0x1Cu64)
+    }};
+}
+
+#[allow(unused_macros)]
+macro_rules! smros_ll_pte_sh_body {
+    ($value:expr, $sharability:expr) => {{
+        ($value & !0x300u64) | (($sharability << 8) & 0x300u64)
+    }};
+}
+
+#[allow(unused_macros)]
+macro_rules! smros_ll_pte_table_body {
+    ($value:expr) => {{
+        ($value & 1u64) != 0 && ($value & (1u64 << 1)) == 0
+    }};
+}
+
+#[allow(unused_macros)]
+macro_rules! smros_ll_pt_index_body {
+    ($vaddr:expr, $entries:expr) => {{
+        ($vaddr >> 21) & ($entries - 1)
+    }};
+}
+
 macro_rules! smros_ll_vma_size_body {
     ($start:expr, $end:expr) => {{
         if $end >= $start {
@@ -165,24 +218,28 @@ macro_rules! smros_ll_mmio_addr_body {
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_uart_control_body {
     ($uarten:expr, $txe:expr, $rxe:expr) => {{
         $uarten | $txe | $rxe
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_uart_lcrh_body {
     ($word_len_8:expr, $fifo_enable:expr) => {{
         $word_len_8 | $fifo_enable
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_uart_has_byte_body {
     ($flags:expr, $rx_empty_flag:expr) => {{
         ($flags & $rx_empty_flag) == 0
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_uart_tx_ready_body {
     ($flags:expr, $tx_full_flag:expr) => {{
         ($flags & $tx_full_flag) == 0
@@ -195,6 +252,7 @@ macro_rules! smros_ll_ascii_printable_body {
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_hex_digit_body {
     ($nibble:expr) => {{
         if $nibble < 10 {
@@ -227,36 +285,42 @@ macro_rules! smros_ll_timer_tick_count_body {
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_timer_ctl_body {
     ($enable:expr, $imask:expr) => {{
         $enable & !$imask
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_gic_reg_offset_body {
     ($base_offset:expr, $irq:expr, $field_width:expr) => {{
         $base_offset + (($irq as usize / $field_width) * 4)
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_gic_byte_shift_body {
     ($irq:expr) => {{
         (($irq % 4) as usize) * 8
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_gic_set_byte_field_body {
     ($value:expr, $byte_shift:expr, $field:expr) => {{
         ($value & !(0xFFu32 << $byte_shift)) | (($field as u32) << $byte_shift)
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_gic_enable_bit_body {
     ($irq:expr) => {{
         1u32 << ($irq % 32)
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_gic_interrupt_id_body {
     ($iar:expr) => {{
         $iar & 0x3FFu32
@@ -289,12 +353,14 @@ macro_rules! smros_ll_dt_reg_contains_body {
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_dt_irq_valid_body {
     ($irq:expr, $max_irqs:expr) => {{
         $max_irqs != 0 && $irq < $max_irqs
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_dt_platform_index_body {
     ($candidate:expr, $platform_count:expr, $fallback:expr) => {{
         if $candidate < $platform_count {
@@ -343,6 +409,7 @@ macro_rules! smros_ll_fdt_reg_tuple_offset_body {
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_dt_gic_irq_body {
     ($kind:expr, $hwirq:expr, $max_irqs:expr) => {{
         let translated = if $kind == 0 {
@@ -359,6 +426,7 @@ macro_rules! smros_ll_dt_gic_irq_body {
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_dt_timer_irq_index_body {
     ($entry_count:expr) => {{
         if $entry_count >= 4 {
@@ -369,6 +437,7 @@ macro_rules! smros_ll_dt_timer_irq_index_body {
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_cpu_id_from_mpidr_body {
     ($mpidr:expr) => {{
         ($mpidr & 0xFFu64) as u32
@@ -381,12 +450,14 @@ macro_rules! smros_ll_valid_cpu_id_body {
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_display_mpidr_body {
     ($cpu_id:expr) => {{
         0x8000_0000u64 | ($cpu_id as u64)
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_psci_success_body {
     ($result:expr, $success:expr, $on_pending:expr) => {{
         $result == $success || $result == $on_pending

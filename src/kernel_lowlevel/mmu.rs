@@ -111,7 +111,7 @@ mod arch_pte {
         set_flag(value, WRITE | DIRTY, !read_only)
     }
 
-    pub fn set_execute_never(value: u64, exeFDTcute_never: bool) -> u64 {
+    pub fn set_execute_never(value: u64, execute_never: bool) -> u64 {
         set_flag(value, EXECUTE, !execute_never)
     }
 
