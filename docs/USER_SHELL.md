@@ -164,7 +164,7 @@ The parser recognizes `<name>`, `<cpu>`, `<memory>`, `<priority>` or
 If the config also includes a `<linux kernel="...">` tag, `vm -c` asks the
 host-side launcher daemon to open a separate QEMU window and boot that Linux
 kernel. `make run`, `make debug`, and `make gdb` start the host daemon
-automatically for both supported kernel architectures. The legacy
+automatically for the Makefile architecture targets. The legacy
 `scripts/run.sh` and `scripts/run-simple.sh` helpers also start it, but those
 helpers are ARM64-only. For a manual QEMU
 boot, start it yourself first:
@@ -177,7 +177,17 @@ The daemon listens on TCP port `7070` and resolves relative kernel/initrd/disk
 paths from the repository root. The guest reaches it through QEMU user
 networking at `10.0.2.2`. The autostart wrapper writes
 `smros-vm-launcher.log`; if `vm -c` reports `launcher denied request`, check
-that log for the missing kernel, initrd, or disk path.
+that log for the missing kernel, initrd, disk path, or early nested-QEMU exit.
+Successful launches also print a per-VM log such as
+`target/vm-launcher/linux-demo.log`; the launcher waits through a short startup
+stability window before returning `host_qemu_pid=...`, so immediate QEMU
+startup failures are reported instead of being mistaken for a booted VM.
+
+If the guest network transport is not ready, `vm -c` still starts the modeled
+VM and reports `host launch=unavailable`. The normal ARM64/RISC-V64 QEMU paths
+use VirtIO-MMIO networking, and the x86_64 QEMU path uses VirtIO-PCI networking,
+so that fallback should only appear when the selected NIC transport failed to
+bind.
 
 FxFS installs boot-time samples at `/config/vm-demo.xml` and
 `/config/vm-demo2.xml`. VM names must be unique while running because the guest
@@ -446,7 +456,7 @@ fallback path `/shared/alpine.tar`.
 
 ### Block-Backed FxFS
 
-The default ARM64 and RISC-V64 QEMU targets attach `smros-fxfs.img` through virtio-blk. FxFS loads from that image when it exists and writes metadata/data changes back to it after mutating persistent paths, including local `/shared` overlay entries. `make clean` keeps the image; use `make clean-fxfs` to reset it.
+The default ARM64, RISC-V64, and x86_64 QEMU targets attach `smros-fxfs.img` through virtio-blk. ARM64/RISC-V64 use VirtIO-MMIO block, and x86_64 uses VirtIO-PCI block. FxFS loads from that image when it exists and writes metadata/data changes back to it after mutating persistent paths, including local `/shared` overlay entries. `make clean` keeps the image; use `make clean-fxfs` to reset it.
 
 The `mount` command shows whether FxFS is block-backed and whether the last sync succeeded.
 

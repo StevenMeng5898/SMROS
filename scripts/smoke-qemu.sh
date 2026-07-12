@@ -8,17 +8,29 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 ARCH="${ARCH:-aarch64-unknown-none}"
 case "$ARCH" in
+    x86_64-unknown-none|x86_64*)
+        DEFAULT_QEMU_SYSTEM="qemu-system-x86_64"
+        DEFAULT_KERNEL_IMAGE="$REPO_ROOT/target/x86_64-unknown-none/release/smros"
+        DEFAULT_QEMU_MACHINE="q35"
+        DEFAULT_QEMU_CPU="max"
+        DEFAULT_QEMU_BLOCK_DEVICE="virtio-blk-pci,drive=fxfs"
+        DEFAULT_QEMU_NET_DEVICE="virtio-net-pci,netdev=smrosnet"
+        ;;
     riscv64gc-unknown-none-elf|riscv64*)
         DEFAULT_QEMU_SYSTEM="qemu-system-riscv64"
         DEFAULT_KERNEL_IMAGE="$REPO_ROOT/target/riscv64gc-unknown-none-elf/release/smros"
         DEFAULT_QEMU_MACHINE="virt"
         DEFAULT_QEMU_CPU="rv64"
+        DEFAULT_QEMU_BLOCK_DEVICE="virtio-blk-device,drive=fxfs"
+        DEFAULT_QEMU_NET_DEVICE="virtio-net-device,netdev=smrosnet"
         ;;
     *)
         DEFAULT_QEMU_SYSTEM="qemu-system-aarch64"
         DEFAULT_KERNEL_IMAGE="$REPO_ROOT/kernel8.img"
         DEFAULT_QEMU_MACHINE="virt,gic-version=4,virtualization=on"
         DEFAULT_QEMU_CPU="cortex-a710"
+        DEFAULT_QEMU_BLOCK_DEVICE="virtio-blk-device,drive=fxfs"
+        DEFAULT_QEMU_NET_DEVICE="virtio-net-device,netdev=smrosnet"
         ;;
 esac
 
@@ -28,6 +40,8 @@ FXFS_DISK="${FXFS_DISK:-$REPO_ROOT/smros-fxfs.img}"
 FXFS_DISK_SIZE="${FXFS_DISK_SIZE:-128M}"
 QEMU_MACHINE="${QEMU_MACHINE:-$DEFAULT_QEMU_MACHINE}"
 QEMU_CPU="${QEMU_CPU:-$DEFAULT_QEMU_CPU}"
+QEMU_BLOCK_DEVICE="${QEMU_BLOCK_DEVICE:-$DEFAULT_QEMU_BLOCK_DEVICE}"
+QEMU_NET_DEVICE="${QEMU_NET_DEVICE:-$DEFAULT_QEMU_NET_DEVICE}"
 QEMU_SMP="${QEMU_SMP:-4}"
 QEMU_MEMORY="${QEMU_MEMORY:-512M}"
 SMROS_ST_TIMEOUT="${SMROS_ST_TIMEOUT:-45}"
@@ -77,9 +91,9 @@ trap cleanup EXIT INT TERM
     -nographic \
     -kernel "$KERNEL_IMAGE" \
     -drive file="$FXFS_DISK",if=none,format=raw,id=fxfs,cache=writethrough \
-    -device virtio-blk-device,drive=fxfs \
+    -device "$QEMU_BLOCK_DEVICE" \
     -netdev user,id=smrosnet \
-    -device virtio-net-device,netdev=smrosnet \
+    -device "$QEMU_NET_DEVICE" \
     >"$SMROS_ST_LOG" 2>&1 &
 qemu_pid=$!
 

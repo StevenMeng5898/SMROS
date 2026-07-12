@@ -1,7 +1,7 @@
 # Verus
 
 Verus verification is kept separate from the `smros` kernel crate so the
-bare-metal `no_std` ARM64 and RISC-V64 builds stay unchanged.
+bare-metal `no_std` ARM64, RISC-V64, and x86_64 builds stay unchanged.
 
 The current verified syscall slice is the standalone proof file at `verification/syscall/src/lib.rs`. It models the overflow-safe address-range helpers and multi-mapping availability predicates used by `src/syscall/syscall.rs`, the pure syscall bridge rules shared by `src/syscall/syscall_handler.rs` and `src/syscall/syscall_dispatch.rs`, and the shared syscall helper logic for Zircon routing, handle/buffer validation, signal updates, wait satisfaction, supported Linux clock IDs, Linux signal/IPC/socket/misc validation, Linux file/dir/fd/poll/stat validation, Zircon time/debug/system/exception validation, and Zircon hypervisor argument validation.
 

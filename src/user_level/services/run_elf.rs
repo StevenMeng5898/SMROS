@@ -506,6 +506,11 @@ fn elf_platform_name() -> &'static str {
     "riscv64"
 }
 
+#[cfg(target_arch = "x86_64")]
+fn elf_platform_name() -> &'static str {
+    "x86_64"
+}
+
 fn print_i32(serial: &mut crate::kernel_lowlevel::serial::Serial, value: i32) {
     if value < 0 {
         serial.write_byte(b'-');

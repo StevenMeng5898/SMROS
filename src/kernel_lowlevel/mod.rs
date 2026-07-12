@@ -18,6 +18,10 @@ mod arch;
 #[path = "RISCV64/mod.rs"]
 mod arch;
 
+#[cfg(target_arch = "x86_64")]
+#[path = "X86_64/mod.rs"]
+mod arch;
+
 pub(crate) mod lowlevel_logic;
 pub mod memory;
 pub mod mmu;

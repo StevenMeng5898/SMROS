@@ -12,6 +12,10 @@ const LEGACY_SBI_SET_TIMER: usize = 0;
 static TIMER_FREQUENCY: AtomicU64 = AtomicU64::new(0);
 static TICK_PERIOD: AtomicU64 = AtomicU64::new(0);
 
+pub fn driver_name() -> &'static str {
+    "RISC-V SBI timer"
+}
+
 pub fn init() {
     let freq = drivers::timebase_frequency();
     TIMER_FREQUENCY.store(freq, Ordering::Relaxed);

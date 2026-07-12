@@ -152,6 +152,13 @@ fn wake_redistributor(gicr_base: usize, gicr_size: usize) {
 }
 
 /// Initialize the platform interrupt controller.
+pub fn controller_name() -> &'static str {
+    match drivers::gic_version() {
+        drivers::GicVersion::GicV2 => "ARM GICv2 interrupt controller",
+        drivers::GicVersion::GicV3V4 => "ARM GICv3/v4 interrupt controller",
+    }
+}
+
 pub fn init() {
     match drivers::gic_version() {
         drivers::GicVersion::GicV2 => init_gicv2(),

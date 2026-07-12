@@ -1,18 +1,18 @@
-//! VirtIO-MMIO block driver for QEMU `virt`.
+//! VirtIO block driver for QEMU VirtIO-MMIO and VirtIO-PCI transports.
 
 #![allow(dead_code)]
 #![allow(static_mut_refs)]
 
 use core::mem::size_of;
 
-use super::{driver_logic, UserDriverError};
+use super::{driver_logic, pci, UserDriverError};
 
 pub const MMIO_BASE: usize = 0x0a00_0000;
 pub const MMIO_STRIDE: usize = 0x200;
 pub const MMIO_SLOT_COUNT: usize = 32;
 pub const BLOCK_SIZE: usize = 512;
 
-const QEMU_VIRTIO_F_VERSION_1: u64 = 1 << 32;
+const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 const VIRTIO_BLK_F_FLUSH: u64 = 1 << 9;
 const VIRTIO_BLK_F_CONFIG_WCE: u64 = 1 << 11;
 const VIRTIO_STATUS_ACKNOWLEDGE: u32 = 1;
@@ -61,6 +61,21 @@ const REG_QUEUE_DEVICE_LOW: usize = 0x0a0;
 const REG_QUEUE_DEVICE_HIGH: usize = 0x0a4;
 const REG_CONFIG_GENERATION: usize = 0x0fc;
 const REG_CONFIG_CAPACITY: usize = 0x100;
+const PCI_COMMON_DEVICE_FEATURE_SELECT: usize = 0x00;
+const PCI_COMMON_DEVICE_FEATURE: usize = 0x04;
+const PCI_COMMON_DRIVER_FEATURE_SELECT: usize = 0x08;
+const PCI_COMMON_DRIVER_FEATURE: usize = 0x0c;
+const PCI_COMMON_DEVICE_STATUS: usize = 0x14;
+const PCI_COMMON_CONFIG_GENERATION: usize = 0x15;
+const PCI_COMMON_QUEUE_SELECT: usize = 0x16;
+const PCI_COMMON_QUEUE_SIZE: usize = 0x18;
+const PCI_COMMON_QUEUE_MSIX_VECTOR: usize = 0x1a;
+const PCI_COMMON_QUEUE_ENABLE: usize = 0x1c;
+const PCI_COMMON_QUEUE_NOTIFY_OFF: usize = 0x1e;
+const PCI_COMMON_QUEUE_DESC: usize = 0x20;
+const PCI_COMMON_QUEUE_DRIVER: usize = 0x28;
+const PCI_COMMON_QUEUE_DEVICE: usize = 0x30;
+const VIRTIO_MSI_NO_VECTOR: u16 = 0xffff;
 
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
@@ -142,12 +157,26 @@ impl VirtioBlockQueue {
 }
 
 #[derive(Clone, Copy)]
+enum VirtioBlockTransport {
+    Mmio,
+    PciModern {
+        common_base: usize,
+        notify_base: usize,
+        notify_multiplier: u32,
+        isr_base: usize,
+        device_config_base: usize,
+    },
+}
+
+#[derive(Clone, Copy)]
 struct QemuVirtBlockDriver {
     ready: bool,
     modern: bool,
     mmio_base: usize,
+    transport: VirtioBlockTransport,
     flush_supported: bool,
     capacity_blocks: usize,
+    notify_offset: u16,
     last_used_idx: u16,
     reads: u64,
     writes: u64,
@@ -163,8 +192,10 @@ impl QemuVirtBlockDriver {
             ready: false,
             modern: false,
             mmio_base: MMIO_BASE,
+            transport: VirtioBlockTransport::Mmio,
             flush_supported: false,
             capacity_blocks: 0,
+            notify_offset: 0,
             last_used_idx: 0,
             reads: 0,
             writes: 0,
@@ -194,6 +225,7 @@ impl QemuVirtBlockDriver {
             return Ok(());
         }
         self.mmio_base = base;
+        self.transport = VirtioBlockTransport::Mmio;
         set_active_mmio_base(base);
 
         if !driver_logic::virtio_identity_valid(
@@ -216,9 +248,34 @@ impl QemuVirtBlockDriver {
         }
         self.modern = driver_logic::virtio_version_is_modern(version, VIRTIO_MMIO_VERSION_MODERN);
 
-        mmio_write(REG_STATUS, 0);
-        mmio_write(REG_STATUS, VIRTIO_STATUS_ACKNOWLEDGE);
-        mmio_write(REG_STATUS, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
+        self.finish_bind()
+    }
+
+    fn bind_pci(&mut self) -> Result<(), UserDriverError> {
+        if self.ready {
+            return Ok(());
+        }
+        let Some(transport) = pci::find_virtio_block_transport() else {
+            self.last_error = Some(UserDriverError::NotFound);
+            return Err(UserDriverError::NotFound);
+        };
+        self.mmio_base = transport.common_base;
+        self.transport = VirtioBlockTransport::PciModern {
+            common_base: transport.common_base,
+            notify_base: transport.notify_base,
+            notify_multiplier: transport.notify_multiplier,
+            isr_base: transport.isr_base,
+            device_config_base: transport.device_config_base,
+        };
+        self.modern = true;
+
+        self.finish_bind()
+    }
+
+    fn finish_bind(&mut self) -> Result<(), UserDriverError> {
+        self.write_status(0);
+        self.write_status(VIRTIO_STATUS_ACKNOWLEDGE);
+        self.write_status(VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
 
         let features = self.read_device_features();
         let accepted = driver_logic::virtio_block_accepted_features(
@@ -229,23 +286,16 @@ impl QemuVirtBlockDriver {
         self.flush_supported = driver_logic::virtio_feature_present(accepted, VIRTIO_BLK_F_FLUSH);
         self.write_driver_features(driver_logic::virtio_driver_features(
             accepted,
-            QEMU_VIRTIO_F_VERSION_1,
+            VIRTIO_F_VERSION_1,
             self.modern,
         ));
 
         if self.modern {
             self.add_status(VIRTIO_STATUS_FEATURES_OK);
-            if mmio_read(REG_STATUS) & VIRTIO_STATUS_FEATURES_OK == 0 {
+            if self.read_status() & VIRTIO_STATUS_FEATURES_OK == 0 {
                 self.fail();
                 return Err(UserDriverError::Unsupported);
             }
-        }
-
-        mmio_write(REG_QUEUE_SEL, 0);
-        let max_queue = mmio_read(REG_QUEUE_NUM_MAX);
-        if !driver_logic::virtio_queue_size_valid(max_queue, VIRTIO_QUEUE_SIZE) {
-            self.fail();
-            return Err(UserDriverError::Unsupported);
         }
 
         unsafe {
@@ -254,21 +304,7 @@ impl QemuVirtBlockDriver {
             let avail = (&raw const VIRTIO_QUEUE.avail) as *const _ as u64;
             let used = (&raw const VIRTIO_QUEUE.used) as *const _ as u64;
 
-            mmio_write(REG_QUEUE_NUM, VIRTIO_QUEUE_SIZE as u32);
-            if self.modern {
-                mmio_write(REG_QUEUE_DESC_LOW, desc as u32);
-                mmio_write(REG_QUEUE_DESC_HIGH, (desc >> 32) as u32);
-                mmio_write(REG_QUEUE_DRIVER_LOW, avail as u32);
-                mmio_write(REG_QUEUE_DRIVER_HIGH, (avail >> 32) as u32);
-                mmio_write(REG_QUEUE_DEVICE_LOW, used as u32);
-                mmio_write(REG_QUEUE_DEVICE_HIGH, (used >> 32) as u32);
-                mmio_write(REG_QUEUE_READY, 1);
-            } else {
-                let page = (desc / 4096) as u32;
-                mmio_write(REG_GUEST_PAGE_SIZE, 4096);
-                mmio_write(REG_QUEUE_ALIGN, 4096);
-                mmio_write(REG_QUEUE_PFN, page);
-            }
+            self.setup_queue(0, desc, avail, used)?;
         }
 
         self.capacity_blocks = self.read_capacity_blocks();
@@ -281,41 +317,207 @@ impl QemuVirtBlockDriver {
         Ok(())
     }
 
+    fn setup_queue(
+        &mut self,
+        queue: u32,
+        desc: u64,
+        avail: u64,
+        used: u64,
+    ) -> Result<(), UserDriverError> {
+        self.select_queue(queue);
+        let max_queue = self.queue_size_max();
+        if !driver_logic::virtio_queue_size_valid(max_queue, VIRTIO_QUEUE_SIZE) {
+            self.fail();
+            return Err(UserDriverError::Unsupported);
+        }
+
+        self.write_queue_size(VIRTIO_QUEUE_SIZE);
+        if self.modern {
+            self.write_queue_modern(queue, desc, avail, used);
+        } else {
+            mmio_write(REG_GUEST_PAGE_SIZE, 4096);
+            mmio_write(REG_QUEUE_ALIGN, 4096);
+            mmio_write(REG_QUEUE_PFN, (desc / 4096) as u32);
+        }
+        Ok(())
+    }
+
     fn read_device_features(&self) -> u64 {
-        mmio_write(REG_DEVICE_FEATURES_SEL, 0);
-        let low = mmio_read(REG_DEVICE_FEATURES) as u64;
-        mmio_write(REG_DEVICE_FEATURES_SEL, 1);
-        let high = mmio_read(REG_DEVICE_FEATURES) as u64;
-        low | (high << 32)
+        match self.transport {
+            VirtioBlockTransport::Mmio => {
+                mmio_write(REG_DEVICE_FEATURES_SEL, 0);
+                let low = mmio_read(REG_DEVICE_FEATURES) as u64;
+                mmio_write(REG_DEVICE_FEATURES_SEL, 1);
+                let high = mmio_read(REG_DEVICE_FEATURES) as u64;
+                low | (high << 32)
+            }
+            VirtioBlockTransport::PciModern { common_base, .. } => {
+                pci_write_u32(common_base + PCI_COMMON_DEVICE_FEATURE_SELECT, 0);
+                let low = pci_read_u32(common_base + PCI_COMMON_DEVICE_FEATURE) as u64;
+                pci_write_u32(common_base + PCI_COMMON_DEVICE_FEATURE_SELECT, 1);
+                let high = pci_read_u32(common_base + PCI_COMMON_DEVICE_FEATURE) as u64;
+                low | (high << 32)
+            }
+        }
     }
 
     fn write_driver_features(&self, features: u64) {
-        mmio_write(REG_DRIVER_FEATURES_SEL, 0);
-        mmio_write(REG_DRIVER_FEATURES, features as u32);
-        mmio_write(REG_DRIVER_FEATURES_SEL, 1);
-        mmio_write(REG_DRIVER_FEATURES, (features >> 32) as u32);
+        match self.transport {
+            VirtioBlockTransport::Mmio => {
+                mmio_write(REG_DRIVER_FEATURES_SEL, 0);
+                mmio_write(REG_DRIVER_FEATURES, features as u32);
+                mmio_write(REG_DRIVER_FEATURES_SEL, 1);
+                mmio_write(REG_DRIVER_FEATURES, (features >> 32) as u32);
+            }
+            VirtioBlockTransport::PciModern { common_base, .. } => {
+                pci_write_u32(common_base + PCI_COMMON_DRIVER_FEATURE_SELECT, 0);
+                pci_write_u32(common_base + PCI_COMMON_DRIVER_FEATURE, features as u32);
+                pci_write_u32(common_base + PCI_COMMON_DRIVER_FEATURE_SELECT, 1);
+                pci_write_u32(
+                    common_base + PCI_COMMON_DRIVER_FEATURE,
+                    (features >> 32) as u32,
+                );
+            }
+        }
     }
 
     fn add_status(&self, status: u32) {
-        let current = mmio_read(REG_STATUS);
-        mmio_write(REG_STATUS, current | status);
+        let current = self.read_status();
+        self.write_status(current | status);
     }
 
     fn fail(&self) {
-        let current = mmio_read(REG_STATUS);
-        mmio_write(REG_STATUS, current | VIRTIO_STATUS_FAILED);
+        let current = self.read_status();
+        self.write_status(current | VIRTIO_STATUS_FAILED);
+    }
+
+    fn read_status(&self) -> u32 {
+        match self.transport {
+            VirtioBlockTransport::Mmio => mmio_read(REG_STATUS),
+            VirtioBlockTransport::PciModern { common_base, .. } => {
+                pci_read_u8(common_base + PCI_COMMON_DEVICE_STATUS) as u32
+            }
+        }
+    }
+
+    fn write_status(&self, status: u32) {
+        match self.transport {
+            VirtioBlockTransport::Mmio => mmio_write(REG_STATUS, status),
+            VirtioBlockTransport::PciModern { common_base, .. } => {
+                pci_write_u8(common_base + PCI_COMMON_DEVICE_STATUS, status as u8)
+            }
+        }
+    }
+
+    fn select_queue(&self, queue: u32) {
+        match self.transport {
+            VirtioBlockTransport::Mmio => mmio_write(REG_QUEUE_SEL, queue),
+            VirtioBlockTransport::PciModern { common_base, .. } => {
+                pci_write_u16(common_base + PCI_COMMON_QUEUE_SELECT, queue as u16)
+            }
+        }
+    }
+
+    fn queue_size_max(&self) -> u32 {
+        match self.transport {
+            VirtioBlockTransport::Mmio => mmio_read(REG_QUEUE_NUM_MAX),
+            VirtioBlockTransport::PciModern { common_base, .. } => {
+                pci_read_u16(common_base + PCI_COMMON_QUEUE_SIZE) as u32
+            }
+        }
+    }
+
+    fn write_queue_size(&self, size: u16) {
+        match self.transport {
+            VirtioBlockTransport::Mmio => mmio_write(REG_QUEUE_NUM, size as u32),
+            VirtioBlockTransport::PciModern { common_base, .. } => {
+                pci_write_u16(common_base + PCI_COMMON_QUEUE_SIZE, size)
+            }
+        }
+    }
+
+    fn write_queue_modern(&mut self, _queue: u32, desc: u64, avail: u64, used: u64) {
+        match self.transport {
+            VirtioBlockTransport::Mmio => {
+                mmio_write(REG_QUEUE_DESC_LOW, desc as u32);
+                mmio_write(REG_QUEUE_DESC_HIGH, (desc >> 32) as u32);
+                mmio_write(REG_QUEUE_DRIVER_LOW, avail as u32);
+                mmio_write(REG_QUEUE_DRIVER_HIGH, (avail >> 32) as u32);
+                mmio_write(REG_QUEUE_DEVICE_LOW, used as u32);
+                mmio_write(REG_QUEUE_DEVICE_HIGH, (used >> 32) as u32);
+                mmio_write(REG_QUEUE_READY, 1);
+            }
+            VirtioBlockTransport::PciModern { common_base, .. } => {
+                pci_write_u16(
+                    common_base + PCI_COMMON_QUEUE_MSIX_VECTOR,
+                    VIRTIO_MSI_NO_VECTOR,
+                );
+                self.notify_offset = pci_read_u16(common_base + PCI_COMMON_QUEUE_NOTIFY_OFF);
+                pci_write_u64(common_base + PCI_COMMON_QUEUE_DESC, desc);
+                pci_write_u64(common_base + PCI_COMMON_QUEUE_DRIVER, avail);
+                pci_write_u64(common_base + PCI_COMMON_QUEUE_DEVICE, used);
+                pci_write_u16(common_base + PCI_COMMON_QUEUE_ENABLE, 1);
+            }
+        }
+    }
+
+    fn notify_queue(&self, queue: u32) {
+        match self.transport {
+            VirtioBlockTransport::Mmio => mmio_write(REG_QUEUE_NOTIFY, queue),
+            VirtioBlockTransport::PciModern {
+                notify_base,
+                notify_multiplier,
+                ..
+            } => {
+                let notify_addr = notify_base.saturating_add(
+                    (self.notify_offset as usize).saturating_mul(notify_multiplier as usize),
+                );
+                pci_write_u16(notify_addr, queue as u16);
+            }
+        }
+    }
+
+    fn ack_interrupt(&self) {
+        match self.transport {
+            VirtioBlockTransport::Mmio => {
+                mmio_write(REG_INTERRUPT_ACK, mmio_read(REG_INTERRUPT_STATUS))
+            }
+            VirtioBlockTransport::PciModern { isr_base, .. } => {
+                let _ = pci_read_u8(isr_base);
+            }
+        }
     }
 
     fn read_capacity_blocks(&self) -> usize {
-        let before = mmio_read(REG_CONFIG_GENERATION);
-        let low = mmio_read(REG_CONFIG_CAPACITY) as u64;
-        let high = mmio_read(REG_CONFIG_CAPACITY + 4) as u64;
-        let after = mmio_read(REG_CONFIG_GENERATION);
-        let capacity = if before == after {
-            low | (high << 32)
-        } else {
-            mmio_read(REG_CONFIG_CAPACITY) as u64
-                | ((mmio_read(REG_CONFIG_CAPACITY + 4) as u64) << 32)
+        let capacity = match self.transport {
+            VirtioBlockTransport::Mmio => {
+                let before = mmio_read(REG_CONFIG_GENERATION);
+                let low = mmio_read(REG_CONFIG_CAPACITY) as u64;
+                let high = mmio_read(REG_CONFIG_CAPACITY + 4) as u64;
+                let after = mmio_read(REG_CONFIG_GENERATION);
+                if before == after {
+                    low | (high << 32)
+                } else {
+                    mmio_read(REG_CONFIG_CAPACITY) as u64
+                        | ((mmio_read(REG_CONFIG_CAPACITY + 4) as u64) << 32)
+                }
+            }
+            VirtioBlockTransport::PciModern {
+                common_base,
+                device_config_base,
+                ..
+            } => {
+                let before = pci_read_u8(common_base + PCI_COMMON_CONFIG_GENERATION);
+                let low = pci_read_u32(device_config_base) as u64;
+                let high = pci_read_u32(device_config_base + 4) as u64;
+                let after = pci_read_u8(common_base + PCI_COMMON_CONFIG_GENERATION);
+                if before == after {
+                    low | (high << 32)
+                } else {
+                    pci_read_u32(device_config_base) as u64
+                        | ((pci_read_u32(device_config_base + 4) as u64) << 32)
+                }
+            }
         };
         core::cmp::min(capacity, usize::MAX as u64) as usize
     }
@@ -518,14 +720,14 @@ impl QemuVirtBlockDriver {
             memory_barrier();
             VIRTIO_QUEUE.avail.idx = VIRTIO_QUEUE.avail.idx.wrapping_add(1);
             memory_barrier();
-            mmio_write(REG_QUEUE_NOTIFY, 0);
+            self.notify_queue(0);
 
             let target = self.last_used_idx.wrapping_add(1);
             for _ in 0..VIRTIO_TIMEOUT_SPINS {
                 memory_barrier();
                 if core::ptr::read_volatile(&raw const VIRTIO_QUEUE.used.idx) == target {
                     self.last_used_idx = target;
-                    mmio_write(REG_INTERRUPT_ACK, mmio_read(REG_INTERRUPT_STATUS));
+                    self.ack_interrupt();
                     return if core::ptr::read_volatile(&raw const VIRTIO_QUEUE.status)
                         == VIRTIO_BLK_S_OK
                     {
@@ -573,6 +775,19 @@ pub fn bind_at(base: usize) -> Result<(), UserDriverError> {
     }
 }
 
+pub fn bind_pci() -> Result<(), UserDriverError> {
+    match driver().bind_pci() {
+        Ok(()) => {
+            driver().last_error = None;
+            Ok(())
+        }
+        Err(err) => {
+            driver().last_error = Some(err);
+            Err(err)
+        }
+    }
+}
+
 pub fn ready() -> bool {
     driver().ready
 }
@@ -584,8 +799,7 @@ pub fn mmio_base() -> usize {
 pub fn device_status() -> u32 {
     let driver = driver();
     if driver.ready {
-        set_active_mmio_base(driver.mmio_base);
-        mmio_read(REG_STATUS)
+        driver.read_status()
     } else {
         0
     }
@@ -663,6 +877,34 @@ fn mmio_read(offset: usize) -> u32 {
 
 fn mmio_write(offset: usize, value: u32) {
     unsafe { core::ptr::write_volatile((active_mmio_base() + offset) as *mut u32, value) }
+}
+
+fn pci_read_u8(addr: usize) -> u8 {
+    unsafe { core::ptr::read_volatile(addr as *const u8) }
+}
+
+fn pci_read_u16(addr: usize) -> u16 {
+    unsafe { core::ptr::read_volatile(addr as *const u16) }
+}
+
+fn pci_read_u32(addr: usize) -> u32 {
+    unsafe { core::ptr::read_volatile(addr as *const u32) }
+}
+
+fn pci_write_u8(addr: usize, value: u8) {
+    unsafe { core::ptr::write_volatile(addr as *mut u8, value) }
+}
+
+fn pci_write_u16(addr: usize, value: u16) {
+    unsafe { core::ptr::write_volatile(addr as *mut u16, value) }
+}
+
+fn pci_write_u32(addr: usize, value: u32) {
+    unsafe { core::ptr::write_volatile(addr as *mut u32, value) }
+}
+
+fn pci_write_u64(addr: usize, value: u64) {
+    unsafe { core::ptr::write_volatile(addr as *mut u64, value) }
 }
 
 fn memory_barrier() {

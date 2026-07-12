@@ -3,7 +3,7 @@
 SMROS uses layered tests because the kernel is a bare-metal multi-architecture
 binary while much of its policy logic is pure Rust. The default production
 target is ARM64/AArch64, and the same Makefile flow also builds and smokes the
-RISC-V64 target.
+RISC-V64 and x86_64 targets.
 
 ## Fast Unit Tests
 
@@ -43,15 +43,18 @@ make build-test
 ```
 
 This checks that the production kernel still builds and emits `kernel8.img`.
-By default that means `ARCH=aarch64-unknown-none`. To check the RISC-V64 kernel
-build instead, run:
+By default that means `ARCH=aarch64-unknown-none`. To check the RISC-V64 or
+x86_64 kernel build instead, run:
 
 ```bash
 make build-test ARCH=riscv64gc-unknown-none-elf
+make build-test ARCH=x86_64-unknown-none
 ```
 
 The RISC-V64 build emits `target/riscv64gc-unknown-none-elf/release/smros`,
 which QEMU loads directly as an ELF payload.
+The x86_64 build emits `target/x86_64-unknown-none/release/smros`, which QEMU
+loads as a PVH ELF payload.
 
 ## System Smoke Test
 
@@ -72,12 +75,13 @@ SMROS_ST_TIMEOUT=90 make st
 SMOKE_QEMU_SMP=1 SMOKE_QEMU_MEMORY=256M make st
 SMROS_ST_LOG=/tmp/smros.log make st
 make st ARCH=riscv64gc-unknown-none-elf
+make st ARCH=x86_64-unknown-none
 make st ARCH=aarch64-unknown-none QEMU_CPU_AARCH64=cortex-a57
 ```
 
 `make st` requires `qemu-img` plus the QEMU system binary for the selected
 architecture: `qemu-system-aarch64` for ARM64 or `qemu-system-riscv64` for
-RISC-V64.
+RISC-V64, or `qemu-system-x86_64` for x86_64.
 
 ## Verification Harnesses
 
@@ -103,7 +107,8 @@ for quick local and CI checks. Use `make st` for the boot-level smoke test, or
 - Hygiene: host-test formatting and shell syntax checks.
 - UT: host unit tests for deterministic pure logic.
 - Build test: production `aarch64-unknown-none` release build plus raw image by
-  default; use `ARCH=riscv64gc-unknown-none-elf` for the RISC-V64 ELF payload.
+  default; use `ARCH=riscv64gc-unknown-none-elf` for the RISC-V64 ELF payload or
+  `ARCH=x86_64-unknown-none` for the x86_64 PVH ELF payload.
 - ST: QEMU boot smoke test that validates the selected architecture's serial
   boot path reaches the shell.
 - Verus: proof harnesses for selected syscall, kernel-object, low-level,

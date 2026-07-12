@@ -1,3 +1,5 @@
+#![cfg_attr(target_arch = "x86_64", allow(unused_macros))]
+
 include!("lowlevel_logic_shared.rs");
 
 pub(crate) fn segment_size(page_count: usize, page_size: usize) -> Option<usize> {
@@ -108,6 +110,7 @@ pub(crate) fn vma_size(start: usize, end: usize) -> usize {
     smros_ll_vma_size_body!(start, end)
 }
 
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub(crate) fn mmio_addr(base: usize, offset: usize) -> Option<usize> {
     smros_ll_mmio_addr_body!(base, offset)
 }
@@ -145,6 +148,7 @@ pub(crate) fn timer_period(frequency: u64) -> u64 {
     smros_ll_timer_period_body!(frequency)
 }
 
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub(crate) fn timer_compare(current: u64, period: u64) -> u64 {
     smros_ll_timer_compare_body!(current, period)
 }
@@ -183,10 +187,12 @@ pub(crate) fn gic_interrupt_id(iar: u32) -> u32 {
     smros_ll_gic_interrupt_id_body!(iar)
 }
 
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub(crate) fn dt_reg_valid(base: usize, size: usize) -> bool {
     smros_ll_dt_reg_valid_body!(base, size)
 }
 
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub(crate) fn dt_reg_contains(base: usize, size: usize, addr: usize) -> bool {
     smros_ll_dt_reg_contains_body!(base, size, addr)
 }
@@ -201,22 +207,27 @@ pub(crate) fn dt_platform_index(candidate: usize, platform_count: usize, fallbac
     smros_ll_dt_platform_index_body!(candidate, platform_count, fallback)
 }
 
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub(crate) fn fdt_range_valid(offset: usize, len: usize, total: usize) -> bool {
     smros_ll_fdt_range_valid_body!(offset, len, total)
 }
 
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub(crate) fn fdt_align4(offset: usize) -> Option<usize> {
     smros_ll_fdt_align4_body!(offset)
 }
 
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub(crate) fn fdt_cells_to_bytes(cells: usize) -> Option<usize> {
     smros_ll_fdt_cells_to_bytes_body!(cells)
 }
 
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub(crate) fn fdt_reg_tuple_bytes(address_cells: usize, size_cells: usize) -> Option<usize> {
     smros_ll_fdt_reg_tuple_bytes_body!(address_cells, size_cells)
 }
 
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub(crate) fn fdt_reg_tuple_offset(
     index: usize,
     address_cells: usize,

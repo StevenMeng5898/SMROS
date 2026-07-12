@@ -26,7 +26,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 7070
 MAX_REQUEST = 4096
-LAUNCHER_VERSION = 3
+LAUNCHER_VERSION = 4
+DEFAULT_LAUNCH_STABLE_SECONDS = 2.0
+DEFAULT_TERMINATE_TIMEOUT_SECONDS = 3.0
 
 LOCK = threading.Lock()
 PROCS: dict[str, subprocess.Popen[bytes]] = {}
@@ -118,25 +120,36 @@ def launch_qemu(values: dict[str, str]) -> str:
             ]
         )
 
+    log_path = vm_log_path(name)
     print("smros-vm-launcher: qemu " + shlex.join(cmd[1:]), flush=True)
+    print(f"smros-vm-launcher: vm log {log_path.relative_to(ROOT)}", flush=True)
     with LOCK:
         old = PROCS.get(name)
         if old is not None and old.poll() is None:
             print(f"smros-vm-launcher: replacing running VM {name} pid={old.pid}", flush=True)
-            old.terminate()
+            terminate_process(old)
         for pid in terminate_qemu_by_name(name):
             print(f"smros-vm-launcher: terminated stale VM {name} pid={pid}", flush=True)
-        proc = subprocess.Popen(cmd, cwd=str(ROOT), env=qemu_environment())
+        log_file = log_path.open("ab", buffering=0)
+        log_file.write(f"\n--- launch {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode())
+        log_file.write(("qemu " + shlex.join(cmd[1:]) + "\n").encode())
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(ROOT),
+                env=qemu_environment(),
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                close_fds=True,
+            )
+        except Exception:
+            log_file.close()
+            raise
+        log_file.close()
         PROCS[name] = proc
-    time.sleep(0.2)
-    return_code = proc.poll()
-    if return_code is not None:
-        with LOCK:
-            if PROCS.get(name) is proc:
-                PROCS.pop(name, None)
-        raise RuntimeError(f"qemu exited immediately status={return_code}")
+    wait_for_stable_launch(name, proc, log_path)
     print(f"smros-vm-launcher: launched {name} pid={proc.pid}", flush=True)
-    return f"OK pid={proc.pid}\n"
+    return f"OK pid={proc.pid} log={log_path.relative_to(ROOT)}\n"
 
 
 def stop_qemu(values: dict[str, str]) -> str:
@@ -145,7 +158,7 @@ def stop_qemu(values: dict[str, str]) -> str:
     with LOCK:
         proc = PROCS.pop(name, None)
     if proc is not None and proc.poll() is None:
-        proc.terminate()
+        terminate_process(proc)
         return "OK stopped=tracked\n"
     killed = terminate_qemu_by_name(name)
     if killed:
@@ -157,6 +170,7 @@ def stop_qemu(values: dict[str, str]) -> str:
     if pid > 0:
         try:
             os.kill(pid, signal.SIGTERM)
+            wait_pid_exit(pid, terminate_timeout_seconds())
             return "OK stopped=pid\n"
         except ProcessLookupError:
             return "OK stopped=already-exited\n"
@@ -164,7 +178,10 @@ def stop_qemu(values: dict[str, str]) -> str:
 
 
 def launcher_status() -> str:
-    return f"OK version={LAUNCHER_VERSION} monitor_none=1 stale_qemu_cleanup=1 trace_sync=1\n"
+    return (
+        f"OK version={LAUNCHER_VERSION} monitor_none=1 stale_qemu_cleanup=1 "
+        "trace_sync=1 stable_launch=1 vm_log=1\n"
+    )
 
 
 def sync_trace(values: dict[str, str]) -> str:
@@ -204,6 +221,7 @@ def qemu_environment() -> dict[str, str]:
         "LC_ALL",
         "TERM",
     }
+    drop_prefixes = ("LD_", "SNAP", "GTK_", "GDK_", "QT_")
     env: dict[str, str] = {
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     }
@@ -211,7 +229,80 @@ def qemu_environment() -> dict[str, str]:
         value = os.environ.get(key)
         if value:
             env[key] = value
+    for key in list(env):
+        if key.startswith(drop_prefixes):
+            env.pop(key, None)
     return env
+
+
+def vm_log_path(name: str) -> Path:
+    log_dir = ROOT / "target" / "vm-launcher"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in name)
+    if not safe:
+        safe = "vm"
+    return log_dir / f"{safe}.log"
+
+
+def launch_stable_seconds() -> float:
+    return env_float("SMROS_VM_LAUNCH_STABLE_SECONDS", DEFAULT_LAUNCH_STABLE_SECONDS)
+
+
+def terminate_timeout_seconds() -> float:
+    return env_float("SMROS_VM_TERMINATE_TIMEOUT_SECONDS", DEFAULT_TERMINATE_TIMEOUT_SECONDS)
+
+
+def env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if value < 0.1:
+        return 0.1
+    if value > 30.0:
+        return 30.0
+    return value
+
+
+def wait_for_stable_launch(name: str, proc: subprocess.Popen[bytes], log_path: Path) -> None:
+    deadline = time.monotonic() + launch_stable_seconds()
+    while time.monotonic() < deadline:
+        return_code = proc.poll()
+        if return_code is not None:
+            with LOCK:
+                if PROCS.get(name) is proc:
+                    PROCS.pop(name, None)
+            raise RuntimeError(
+                f"qemu exited during startup status={return_code} "
+                f"log={log_path.relative_to(ROOT)} tail={log_tail(log_path)}"
+            )
+        time.sleep(0.1)
+
+
+def log_tail(path: Path, limit: int = 600) -> str:
+    try:
+        data = path.read_bytes()[-limit:]
+    except OSError:
+        return "<unavailable>"
+    text = data.decode("utf-8", errors="replace").replace("\n", " | ")
+    return text.strip() or "<empty>"
+
+
+def terminate_process(proc: subprocess.Popen[bytes]) -> None:
+    proc.terminate()
+    deadline = time.monotonic() + terminate_timeout_seconds()
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return
+        time.sleep(0.05)
+    proc.kill()
+    try:
+        proc.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def terminate_qemu_by_name(name: str) -> list[int]:
@@ -237,10 +328,25 @@ def terminate_qemu_by_name(name: str) -> list[int]:
             continue
         try:
             os.kill(pid, signal.SIGTERM)
+            wait_pid_exit(pid, terminate_timeout_seconds())
             killed.append(pid)
         except ProcessLookupError:
             continue
     return killed
+
+
+def wait_pid_exit(pid: int, timeout_seconds: float) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
 
 
 def qemu_args_match_name(args: list[str], expected: str) -> bool:

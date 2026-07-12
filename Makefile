@@ -1,25 +1,32 @@
 # SMROS multi-architecture kernel Makefile
 
+comma := ,
 ARCH ?= aarch64-unknown-none
 TARGET = $(ARCH)
 KERNEL_AARCH64 = kernel8.img
 KERNEL_RISCV64_ELF = $(BUILD_DIR)/smros
 KERNEL_RISCV64_IMG = kernel-riscv64.img
 KERNEL_RISCV64 = $(KERNEL_RISCV64_ELF)
-KERNEL = $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),$(KERNEL_RISCV64),$(KERNEL_AARCH64))
+KERNEL_X86_64 = $(BUILD_DIR)/smros
+KERNEL = $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),$(KERNEL_RISCV64),$(if $(filter x86_64-unknown-none,$(TARGET)),$(KERNEL_X86_64),$(KERNEL_AARCH64)))
 FXFS_DISK = smros-fxfs.img
 FXFS_DISK_SIZE = 128M
 BUILD_DIR = target/$(TARGET)/release
 SHELL_SCRIPTS = $(sort $(wildcard scripts/*.sh))
 QEMU_SYSTEM_AARCH64 ?= qemu-system-aarch64
 QEMU_SYSTEM_RISCV64 ?= qemu-system-riscv64
-QEMU_SYSTEM = $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),$(QEMU_SYSTEM_RISCV64),$(QEMU_SYSTEM_AARCH64))
+QEMU_SYSTEM_X86_64 ?= qemu-system-x86_64
+QEMU_SYSTEM = $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),$(QEMU_SYSTEM_RISCV64),$(if $(filter x86_64-unknown-none,$(TARGET)),$(QEMU_SYSTEM_X86_64),$(QEMU_SYSTEM_AARCH64)))
 QEMU_MACHINE_AARCH64 ?= virt,gic-version=4,virtualization=on
 QEMU_MACHINE_RISCV64 ?= virt
-QEMU_MACHINE ?= $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),$(QEMU_MACHINE_RISCV64),$(QEMU_MACHINE_AARCH64))
+QEMU_MACHINE_X86_64 ?= q35
+QEMU_MACHINE ?= $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),$(QEMU_MACHINE_RISCV64),$(if $(filter x86_64-unknown-none,$(TARGET)),$(QEMU_MACHINE_X86_64),$(QEMU_MACHINE_AARCH64)))
 QEMU_CPU_AARCH64 ?= cortex-a710
 QEMU_CPU_RISCV64 ?= rv64
-QEMU_CPU ?= $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),$(QEMU_CPU_RISCV64),$(QEMU_CPU_AARCH64))
+QEMU_CPU_X86_64 ?= max
+QEMU_CPU ?= $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),$(QEMU_CPU_RISCV64),$(if $(filter x86_64-unknown-none,$(TARGET)),$(QEMU_CPU_X86_64),$(QEMU_CPU_AARCH64)))
+QEMU_BLOCK_DEVICE ?= $(if $(filter x86_64-unknown-none,$(TARGET)),virtio-blk-pci$(comma)drive=fxfs,virtio-blk-device$(comma)drive=fxfs)
+QEMU_NET_DEVICE ?= $(if $(filter x86_64-unknown-none,$(TARGET)),virtio-net-pci$(comma)netdev=smrosnet,virtio-net-device$(comma)netdev=smrosnet)
 OBJCOPY_AARCH64 ?= aarch64-linux-gnu-objcopy
 OBJCOPY_RISCV64 ?= riscv64-linux-gnu-objcopy
 OBJCOPY = $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),$(OBJCOPY_RISCV64),$(OBJCOPY_AARCH64))
@@ -42,6 +49,8 @@ build:
 	@SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' cargo build --release --target $(TARGET)
 	@if [ "$(TARGET)" = "riscv64gc-unknown-none-elf" ]; then \
 		echo "Using RISC-V ELF payload directly for QEMU: $(KERNEL)"; \
+	elif [ "$(TARGET)" = "x86_64-unknown-none" ]; then \
+		echo "Using x86_64 PVH ELF payload directly for QEMU: $(KERNEL)"; \
 	else \
 		$(OBJCOPY) -O binary $(BUILD_DIR)/smros $(KERNEL); \
 	fi
@@ -65,7 +74,7 @@ ut:
 # QEMU system smoke test: boot until the shell prompt appears
 st: $(FXFS_DISK)
 	@$(MAKE) build ARCH='$(TARGET)' QEMU_SMP='$(SMOKE_QEMU_SMP)'
-	@ARCH='$(TARGET)' QEMU_SYSTEM='$(QEMU_SYSTEM)' KERNEL_IMAGE='$(KERNEL)' QEMU_MACHINE='$(QEMU_MACHINE)' QEMU_CPU='$(QEMU_CPU)' QEMU_SMP='$(SMOKE_QEMU_SMP)' QEMU_MEMORY='$(SMOKE_QEMU_MEMORY)' ./scripts/smoke-qemu.sh
+	@ARCH='$(TARGET)' QEMU_SYSTEM='$(QEMU_SYSTEM)' KERNEL_IMAGE='$(KERNEL)' QEMU_MACHINE='$(QEMU_MACHINE)' QEMU_CPU='$(QEMU_CPU)' QEMU_SMP='$(SMOKE_QEMU_SMP)' QEMU_MEMORY='$(SMOKE_QEMU_MEMORY)' QEMU_BLOCK_DEVICE='$(QEMU_BLOCK_DEVICE)' QEMU_NET_DEVICE='$(QEMU_NET_DEVICE)' ./scripts/smoke-qemu.sh
 
 # Fast local confidence suite; intentionally does not boot QEMU
 test: host-fmt-check script-check ut build-test
@@ -91,9 +100,9 @@ run: build $(FXFS_DISK) qemu-icmp vm-launcher
 		-nographic \
 		-kernel $(KERNEL) \
 		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs,cache=writethrough \
-		-device virtio-blk-device,drive=fxfs \
+		-device $(QEMU_BLOCK_DEVICE) \
 		-netdev user,id=smrosnet \
-		-device virtio-net-device,netdev=smrosnet
+		-device $(QEMU_NET_DEVICE)
 	@if [ "$${SMROS_SYNC_HOST_SHARED:-1}" != "0" ]; then ./scripts/sync-host-shared.py $(FXFS_DISK) host_shared || true; fi
 
 # Run with QEMU (debug mode with logging)
@@ -107,9 +116,9 @@ debug: build $(FXFS_DISK) qemu-icmp vm-launcher
 		-nographic \
 		-kernel $(KERNEL) \
 		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs,cache=writethrough \
-		-device virtio-blk-device,drive=fxfs \
+		-device $(QEMU_BLOCK_DEVICE) \
 		-netdev user,id=smrosnet \
-		-device virtio-net-device,netdev=smrosnet \
+		-device $(QEMU_NET_DEVICE) \
 		-serial mon:stdio \
 		-d int,cpu_reset \
 		-D qemu.log
@@ -126,9 +135,9 @@ gdb: build $(FXFS_DISK) qemu-icmp vm-launcher
 		-nographic \
 		-kernel $(KERNEL) \
 		-drive file=$(FXFS_DISK),if=none,format=raw,id=fxfs,cache=writethrough \
-		-device virtio-blk-device,drive=fxfs \
+		-device $(QEMU_BLOCK_DEVICE) \
 		-netdev user,id=smrosnet \
-		-device virtio-net-device,netdev=smrosnet \
+		-device $(QEMU_NET_DEVICE) \
 		-S -s
 	@if [ "$${SMROS_SYNC_HOST_SHARED:-1}" != "0" ]; then ./scripts/sync-host-shared.py $(FXFS_DISK) host_shared || true; fi
 
@@ -220,6 +229,8 @@ help:
 	@echo "  make st       - Run QEMU boot smoke test"
 	@echo "  make verify   - Run unit, build, QEMU smoke, and Verus checks"
 	@echo "  make run      - Build and run in QEMU"
+	@echo "  make run ARCH=riscv64gc-unknown-none-elf - Run RISC-V64"
+	@echo "  make run ARCH=x86_64-unknown-none - Run x86_64"
 	@echo "  make debug    - Run with debug logging"
 	@echo "  make gdb      - Run with GDB server"
 	@echo "  make clean    - Clean build outputs, keeping $(FXFS_DISK)"

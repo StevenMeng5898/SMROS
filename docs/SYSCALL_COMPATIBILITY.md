@@ -1,6 +1,6 @@
 # SMROS Syscall Compatibility Status
 
-This document describes the syscall layer as it exists in the current source tree. It is intentionally conservative: the goal is to document what is actually wired up today, not the full Linux or Zircon target architecture. The kernel itself now boots on ARM64 and RISC-V64, while the Linux compatibility table is still the ARM64-numbered model.
+This document describes the syscall layer as it exists in the current source tree. It is intentionally conservative: the goal is to document what is actually wired up today, not the full Linux or Zircon target architecture. The kernel itself now boots on ARM64, RISC-V64, and x86_64, while the Linux compatibility table is still the ARM64-numbered model.
 
 ## Relevant Files
 
@@ -12,6 +12,7 @@ This document describes the syscall layer as it exists in the current source tre
 - `src/kernel_objects/compat.rs`
 - `src/kernel_lowlevel/ARM64/boot.rs`
 - `src/kernel_lowlevel/RISCV64/boot.rs`
+- `src/kernel_lowlevel/X86_64/boot.rs`
 
 ## Current Architecture
 
@@ -47,6 +48,9 @@ So the active architecture syscall path now exposes both the Linux dispatcher an
 ARM64 takes the syscall number from `x8`. RISC-V64 takes the syscall number
 from `a7`. In both cases, Linux numbers below `1000` currently feed the same
 ARM64-numbered compatibility dispatcher.
+
+x86_64 currently boots the shell path, but native userspace `syscall`
+entry/numbering is not complete and is not part of the active compatibility ABI.
 
 ### 3. Alternative EL0 Handler Scaffolding
 
@@ -136,7 +140,7 @@ It is not yet:
 - a complete Linux userspace implementation
 - a complete Zircon security model; the modeled kernel-object path now does enforce handle rights for the core job/process/thread, VMO/VMAR, signal/wait/property, and handle duplicate/replace operations
 - a stable compatibility contract for external binaries
-- a RISC-V Linux userspace ABI or RISC-V64 external dynamic PIE loader
+- a RISC-V or x86_64 Linux userspace ABI, or RISC-V64/x86_64 external dynamic PIE loader
 
 ## Live Boot Reality
 
@@ -188,6 +192,6 @@ interactive call total is not mistaken for the full dispatcher surface.
 - File-descriptor style Linux syscalls are modeled for files, directories, pipes, sockets, event-like objects, IPC objects, and memfd. FxFS-backed Linux file fds now exist, but this is still not a complete VFS.
 - The component/FxFS/`/svc` scaffold is internal kernel-side state today. It parses boot ELF metadata from FxFS, models object metadata plus journal replay, persists to `smros-fxfs.img` when available, and exchanges fixed service messages over Zircon channels, but it is not yet a userspace component manager, full FIDL runtime, package resolver, or full FxFS server.
 - External dynamic PIE execution is a bring-up path, not a stable Linux ABI promise or isolated process model.
-- RISC-V64 kernel boot support is present, but RISC-V Linux syscall numbering and RISC-V64 external user ELF execution are not implemented yet.
+- RISC-V64 and x86_64 kernel boot support is present, but native Linux syscall numbering and external user ELF execution for those ABIs are not implemented yet.
 - Handle ownership and lifetime tracking are still simplified.
 - Platform/hardware-heavy Zircon calls are interface-covered but intentionally return `ERR_NOT_SUPPORTED`.

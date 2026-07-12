@@ -8,10 +8,14 @@
 #![allow(static_mut_refs)]
 
 use alloc::vec::Vec;
+use core::sync::atomic::AtomicBool;
+#[cfg(target_arch = "x86_64")]
+use core::sync::atomic::Ordering;
 
 pub mod block;
 pub(crate) mod driver_logic;
 pub mod net;
+pub mod pci;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserDriverError {
@@ -128,6 +132,7 @@ impl UserDriverFramework {
         }
     }
 
+    #[inline(never)]
     fn init(&mut self) -> bool {
         if self.initialized {
             return true;
@@ -137,15 +142,24 @@ impl UserDriverFramework {
         self.bindings.clear();
         self.install_qemu_virt_tree();
         self.probe();
-        self.initialized = block::ready() || net::ready();
-        self.initialized
+        let ready = block::ready() || net::ready();
+        self.initialized = ready;
+        #[cfg(target_arch = "x86_64")]
+        if ready && !DRIVER_INIT_LOGGED.swap(true, Ordering::AcqRel) {
+            let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+            serial.init();
+            serial.write_str("[USER][DRV] x86_64 VirtIO-PCI drivers initialized\n");
+        }
+        ready
     }
 
     fn install_qemu_virt_tree(&mut self) {
         self.nodes.push(UserDeviceNode {
             path: "/cpus/cpu@0",
             name: "cpu@0",
-            compatible: if cfg!(target_arch = "riscv64") {
+            compatible: if cfg!(target_arch = "x86_64") {
+                "intel,x86_64"
+            } else if cfg!(target_arch = "riscv64") {
                 "riscv"
             } else {
                 "arm,cortex-a710"
@@ -170,7 +184,9 @@ impl UserDriverFramework {
         self.nodes.push(UserDeviceNode {
             path: "/serial",
             name: "serial",
-            compatible: if cfg!(target_arch = "riscv64") {
+            compatible: if cfg!(target_arch = "x86_64") {
+                "ns16550a"
+            } else if cfg!(target_arch = "riscv64") {
                 "ns16550a"
             } else {
                 "arm,pl011"
@@ -186,7 +202,9 @@ impl UserDriverFramework {
         self.nodes.push(UserDeviceNode {
             path: "/interrupt-controller",
             name: "interrupt-controller",
-            compatible: if cfg!(target_arch = "riscv64") {
+            compatible: if cfg!(target_arch = "x86_64") {
+                "intel,local-apic"
+            } else if cfg!(target_arch = "riscv64") {
                 "riscv,plic0"
             } else {
                 "arm,gic"
@@ -199,7 +217,9 @@ impl UserDriverFramework {
         self.nodes.push(UserDeviceNode {
             path: "/timer",
             name: "timer",
-            compatible: if cfg!(target_arch = "riscv64") {
+            compatible: if cfg!(target_arch = "x86_64") {
+                "intel,invariant-tsc"
+            } else if cfg!(target_arch = "riscv64") {
                 "riscv,timer"
             } else {
                 "arm,armv8-timer"
@@ -229,23 +249,12 @@ impl UserDriverFramework {
     }
 
     fn probe(&mut self) {
-        let mut block_bound = false;
-        let mut net_bound = false;
-        for node in &self.nodes {
-            let Some(reg) = node.reg else {
-                continue;
-            };
-            let base = reg.base as usize;
-            if node.compatible == "virtio,mmio"
-                && node.status == "okay"
-                && node.kind == UserDeviceKind::VirtioMmio
-                && !block_bound
-                && block::bind_at(base).is_ok()
-            {
-                block_bound = true;
+        #[cfg(target_arch = "x86_64")]
+        {
+            if block::bind_pci().is_ok() {
                 self.bindings.push(UserDriverBinding {
-                    node_path: node.path,
-                    driver: "qemu-virtio-mmio-block",
+                    node_path: "/pci/virtio-block",
+                    driver: "qemu-virtio-pci-block",
                     device_name: "vblk0",
                     kind: UserDeviceKind::Block,
                     block_size: block::BLOCK_SIZE,
@@ -254,17 +263,10 @@ impl UserDriverFramework {
                     mac: [0; 6],
                 });
             }
-
-            if node.compatible == "virtio,mmio"
-                && node.status == "okay"
-                && node.kind == UserDeviceKind::VirtioMmio
-                && !net_bound
-                && net::bind_at(base).is_ok()
-            {
-                net_bound = true;
+            if net::bind_pci().is_ok() {
                 self.bindings.push(UserDriverBinding {
-                    node_path: node.path,
-                    driver: "qemu-virtio-mmio-net",
+                    node_path: "/pci/virtio-net",
+                    driver: "qemu-virtio-pci-net",
                     device_name: "eth0",
                     kind: UserDeviceKind::Network,
                     block_size: 0,
@@ -272,6 +274,56 @@ impl UserDriverFramework {
                     mtu: net::ETHERNET_MTU,
                     mac: net::mac(),
                 });
+            }
+            return;
+        }
+
+        #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+        {
+            let mut block_bound = false;
+            let mut net_bound = false;
+            for node in &self.nodes {
+                let Some(reg) = node.reg else {
+                    continue;
+                };
+                let base = reg.base as usize;
+                if node.compatible == "virtio,mmio"
+                    && node.status == "okay"
+                    && node.kind == UserDeviceKind::VirtioMmio
+                    && !block_bound
+                    && block::bind_at(base).is_ok()
+                {
+                    block_bound = true;
+                    self.bindings.push(UserDriverBinding {
+                        node_path: node.path,
+                        driver: "qemu-virtio-mmio-block",
+                        device_name: "vblk0",
+                        kind: UserDeviceKind::Block,
+                        block_size: block::BLOCK_SIZE,
+                        block_count: block::capacity_blocks(),
+                        mtu: 0,
+                        mac: [0; 6],
+                    });
+                }
+
+                if node.compatible == "virtio,mmio"
+                    && node.status == "okay"
+                    && node.kind == UserDeviceKind::VirtioMmio
+                    && !net_bound
+                    && net::bind_at(base).is_ok()
+                {
+                    net_bound = true;
+                    self.bindings.push(UserDriverBinding {
+                        node_path: node.path,
+                        driver: "qemu-virtio-mmio-net",
+                        device_name: "eth0",
+                        kind: UserDeviceKind::Network,
+                        block_size: 0,
+                        block_count: 0,
+                        mtu: net::ETHERNET_MTU,
+                        mac: net::mac(),
+                    });
+                }
             }
         }
     }
@@ -312,6 +364,7 @@ impl UserDriverFramework {
 }
 
 static mut DRIVER_FRAMEWORK: Option<UserDriverFramework> = None;
+static DRIVER_INIT_LOGGED: AtomicBool = AtomicBool::new(false);
 
 fn framework() -> &'static mut UserDriverFramework {
     unsafe {
@@ -322,8 +375,11 @@ fn framework() -> &'static mut UserDriverFramework {
     }
 }
 
+#[inline(never)]
 pub fn init() -> bool {
-    framework().init()
+    let ready = framework().init();
+    crate::kernel_lowlevel::cpu::mmio_barrier();
+    ready
 }
 
 pub fn stats() -> UserDriverStats {

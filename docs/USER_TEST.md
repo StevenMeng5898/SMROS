@@ -10,6 +10,7 @@ This document explains what the current user test code actually validates.
 - `src/main.rs`
 - `src/kernel_lowlevel/ARM64/boot.rs`
 - `src/kernel_lowlevel/RISCV64/boot.rs`
+- `src/kernel_lowlevel/X86_64/boot.rs`
 
 ## Two Different Test Layers Exist
 
@@ -41,6 +42,8 @@ This validates the real EL0-to-EL1 syscall trap path when the helper is run. It 
 On ARM64 this path uses `svc #0`; on RISC-V64 the low-level syscall helper uses
 `ecall`. The modeled Linux syscall numbers in this smoke helper are still the
 ARM64 Linux numbers.
+x86_64 boots the shell path, but the native userspace `syscall` ABI is not
+complete yet.
 
 ## EL0 Helpers
 
@@ -125,7 +128,9 @@ The normal Makefile and run-script QEMU paths auto-start the launcher through
 `scripts/start-smros-vm-launcher.sh`. If `vm -c` reports a timeout, the guest
 cannot reach TCP port `7070` on the host. If it reports `launcher denied
 request`, check `smros-vm-launcher.log` for the missing Linux kernel/initrd/disk
-path.
+path or an early nested-QEMU exit. Successful launches also report a per-VM log
+under `target/vm-launcher/`, and the launcher waits through a short startup
+stability window before returning `host_qemu_pid=...`.
 
 To run two host-assisted demo VMs at once, use configs with different VM names,
 for example `vm -c /config/vm-demo.xml` and `vm -c /config/vm-demo2.xml`.
@@ -159,7 +164,7 @@ The current user test code is useful, but it should be described accurately:
 - explicit EL0 helper: real EL0 syscall smoke test with lightweight address-space setup
 - shell `testsc`: broader EL1 developer smoke test for syscall helper behavior
 - shell `components`/`fxfs`/`svc`: visibility into boot ELF load metadata, FxFS object attributes, directory entries, journal replay state, and fixed-message service IPC counters
-- shell `run`: dynamic PIE launch smoke path for FxFS-hosted AArch64 binaries with `/shared/lib` dependencies; RISC-V64 external user ELF loading is not implemented yet
+- shell `run`: dynamic PIE launch smoke path for FxFS-hosted AArch64 binaries with `/shared/lib` dependencies; RISC-V64 and x86_64 external user ELF loading is not implemented yet
 - shell `lvgl`/`hermes ui`: native LVGL-style workbench and Hermes terminal UI surfaces
 
 That distinction matters when evaluating boot logs or shell output.

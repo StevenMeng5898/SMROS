@@ -7,12 +7,13 @@ The short version is:
 - EL0 scaffolding exists
 - MMU and page-table helpers exist
 - an `svc` bridge exists
-- the kernel low-level layer selects ARM64 or RISC-V64 backends at build time
+- the kernel low-level layer selects ARM64, RISC-V64, or x86_64 backends at build time
 - a minimal component framework and FxFS-shaped object store now initialize during user-level setup
 - a minimal ELF64/AArch64 loader parses boot component binaries from FxFS
 - a minimal `/svc` service directory uses Zircon channels and fixed message structs for component-manager, runner, and filesystem requests
 - user-level VirtIO-MMIO block and net drivers initialize under QEMU `virt` on both ARM64 and RISC-V64
-- FxFS is block-backed by `smros-fxfs.img` when virtio-blk is present
+- x86_64 boots on QEMU `q35` through PVH and binds VirtIO-PCI block and networking
+- FxFS is block-backed by `smros-fxfs.img` when a supported virtio-blk transport is present, including the default x86_64 PCI path
 - the shell can launch a dynamic PIE ELF through `src/user_level/services/run_elf.rs`
 - the real EL0 syscall smoke test remains available as an explicit helper
 - the live shell still runs from EL1
@@ -22,6 +23,7 @@ The short version is:
 - `src/kernel_lowlevel/mmu.rs`
 - `src/kernel_lowlevel/ARM64/`
 - `src/kernel_lowlevel/RISCV64/`
+- `src/kernel_lowlevel/X86_64/`
 - `src/syscall/syscall_handler.rs`
 - `src/syscall/syscall_dispatch.rs`
 - `src/user_level/apps/user_process.rs`
@@ -42,7 +44,7 @@ The short version is:
 ### MMU and Page-Table Helpers
 
 `src/kernel_lowlevel/mmu.rs` provides shared page-table scaffolding with
-architecture-selected page-table-entry encoding for ARM64 and RISC-V64:
+architecture-selected page-table-entry encoding for ARM64, RISC-V64, and x86_64:
 
 - page-table entry definitions
 - user and kernel page-table root allocation
@@ -90,8 +92,8 @@ The same file also provides:
 - provides tiny boot ELF images for the current component trampoline
 
 That loader is intentionally documented as AArch64-specific today. RISC-V64
-kernel boot support does not yet include a RISC-V64 external user ELF loader or
-RISC-V Linux syscall-number compatibility path.
+and x86_64 kernel boot support does not yet include external user ELF loaders or
+native Linux syscall-number compatibility paths for those ABIs.
 
 `src/user_level/services/run_elf.rs` is the current shell launcher for dynamic PIE binaries. It copies PT_LOAD bytes for the main executable and interpreter into the Linux mmap window, builds a Linux argv/env/auxv stack, enters the dynamic loader at EL0, and returns to the shell through the `exit` hook. Libraries are resolved from `/shared/lib` or `/lib`.
 
@@ -141,7 +143,8 @@ These files are the current staging area for user-mode work.
 
 The live exception or trap handler is assembled by the selected architecture
 backend. ARM64 handles `svc`; RISC-V64 handles `ecall`. Both active paths call
-`handle_syscall_simple()` for modeled syscall dispatch.
+`handle_syscall_simple()` for modeled syscall dispatch. x86_64 currently boots
+the shell path, but native userspace `syscall` entry/numbering is not complete.
 
 `src/syscall/syscall_handler.rs` also contains `handle_svc_exception_from_el0()`, but that is not the handler the current assembly vectors use.
 
@@ -173,15 +176,15 @@ No part of the normal boot path:
 
 | Area | Current State | Notes |
 |------|---------------|-------|
-| Page-table manager | present | shared scaffolding in `mmu.rs` with ARM64 and RISC-V64 PTE encodings |
+| Page-table manager | present | shared scaffolding in `mmu.rs` with ARM64, RISC-V64, and x86_64 PTE encodings |
 | User-process data model | present | `UserProcess` exists |
 | EL0 transition helper | present | `switch_to_el0()` exists |
 | Live shell in EL0 | not active | shell runs as EL1 thread |
 | Live test process in EL0 | explicit helper | normal boot skips it; the helper still drops to EL0 and returns through the active exception path |
 | Minimal ELF loader | active | parses FxFS ELF files and records entry/segment metadata |
 | Shell dynamic PIE launcher | active bring-up path | maps executable/interpreter into the Linux mmap window and enters loader at EL0 |
-| User-level VirtIO drivers | active | block and net bind under standard ARM64 and RISC-V64 QEMU `virt` targets |
-| Block-backed FxFS | active when virtio-blk is present | `make clean` keeps `smros-fxfs.img`; `make clean-fxfs` resets it |
+| User-level VirtIO drivers | active on all kernel architectures | block and net bind under standard ARM64/RISC-V64 VirtIO-MMIO targets and under the x86_64 VirtIO-PCI target |
+| Block-backed FxFS | active when supported virtio-blk is present | `make clean` keeps `smros-fxfs.img`; `make clean-fxfs` resets it; the default ARM64, RISC-V64, and x86_64 QEMU targets all attach a supported virtio-blk device |
 | `/svc` fixed-message IPC | active | service connections use Zircon channels and fixed request/reply structs |
 | Full register-frame EL0 syscall handler | not active | current vectors use `handle_syscall_simple()` |
 | Zircon-on-SVC path | active | raw syscall numbers `1000 + zircon_number` route through `dispatch_zircon_syscall()` |

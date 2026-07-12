@@ -81,6 +81,10 @@ fn write_cntp_ctl_el0(value: u64) {
 }
 
 /// Initialize the ARM Generic Timer
+pub fn driver_name() -> &'static str {
+    "ARM Generic Timer"
+}
+
 pub fn init() {
     let _platform_irq = interrupt_id();
     let freq = read_cntfrq_el0();

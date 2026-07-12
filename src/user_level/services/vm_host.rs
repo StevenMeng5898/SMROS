@@ -14,10 +14,12 @@ use crate::user_level::net::{self, NetError, NetworkSocketAddr};
 pub const DEFAULT_LAUNCHER_PORT: u16 = 7070;
 const MAX_REQUEST_BYTES: usize = 2048;
 const MAX_RESPONSE_BYTES: usize = 512;
+const RESPONSE_READ_ATTEMPTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmHostError {
     NoHostConfig,
+    HostUnavailable,
     InvalidConfig,
     RequestTooLarge,
     Connect(NetError),
@@ -27,9 +29,10 @@ pub enum VmHostError {
     LaunchDenied,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VmHostLaunch {
     pub qemu_pid: u32,
+    pub log_path: String,
 }
 
 pub fn launch(vm: &VmRecord) -> Result<VmHostLaunch, VmHostError> {
@@ -39,13 +42,13 @@ pub fn launch(vm: &VmRecord) -> Result<VmHostLaunch, VmHostError> {
         ip: net::QEMU_USER_GATEWAY,
         port: host.launcher_port,
     })
-    .map_err(VmHostError::Connect)?;
+    .map_err(map_connect_error)?;
     socket
         .write(request.as_bytes())
         .map_err(VmHostError::Write)?;
 
     let mut response = [0u8; MAX_RESPONSE_BYTES];
-    let bytes = socket.read(&mut response).map_err(VmHostError::Read)?;
+    let bytes = read_response(&mut socket, &mut response, RESPONSE_READ_ATTEMPTS)?;
     let _ = socket.close();
     parse_launch_response(&response[..bytes])
 }
@@ -54,18 +57,21 @@ pub fn stop(vm: &VmRecord) -> Result<(), VmHostError> {
     let Some(host) = vm.host.as_ref() else {
         return Ok(());
     };
+    if vm.host_qemu_pid == 0 {
+        return Ok(());
+    }
     let request = build_stop_request(vm, host)?;
     let mut socket = net::tcp_connect(NetworkSocketAddr {
         ip: net::QEMU_USER_GATEWAY,
         port: host.launcher_port,
     })
-    .map_err(VmHostError::Connect)?;
+    .map_err(map_connect_error)?;
     socket
         .write(request.as_bytes())
         .map_err(VmHostError::Write)?;
 
     let mut response = [0u8; MAX_RESPONSE_BYTES];
-    let bytes = socket.read(&mut response).map_err(VmHostError::Read)?;
+    let bytes = read_response(&mut socket, &mut response, RESPONSE_READ_ATTEMPTS)?;
     let _ = socket.close();
     parse_stop_response(&response[..bytes])
 }
@@ -76,15 +82,45 @@ pub fn sync_trace(path: &str, trace: &[u8]) -> Result<(), VmHostError> {
         ip: net::QEMU_USER_GATEWAY,
         port: DEFAULT_LAUNCHER_PORT,
     })
-    .map_err(VmHostError::Connect)?;
+    .map_err(map_connect_error)?;
     socket
         .write(request.as_bytes())
         .map_err(VmHostError::Write)?;
 
     let mut response = [0u8; MAX_RESPONSE_BYTES];
-    let bytes = socket.read(&mut response).map_err(VmHostError::Read)?;
+    let bytes = read_response(&mut socket, &mut response, RESPONSE_READ_ATTEMPTS)?;
     let _ = socket.close();
     parse_stop_response(&response[..bytes])
+}
+
+fn map_connect_error(err: NetError) -> VmHostError {
+    match err {
+        NetError::NotReady => VmHostError::HostUnavailable,
+        other => VmHostError::Connect(other),
+    }
+}
+
+fn read_response(
+    socket: &mut net::TcpSocket,
+    response: &mut [u8],
+    attempts: usize,
+) -> Result<usize, VmHostError> {
+    let mut last_timeout = false;
+    for _ in 0..attempts {
+        match socket.read(response) {
+            Ok(0) => return Err(VmHostError::ResponseInvalid),
+            Ok(bytes) => return Ok(bytes),
+            Err(NetError::Timeout) => {
+                last_timeout = true;
+            }
+            Err(err) => return Err(VmHostError::Read(err)),
+        }
+    }
+    if last_timeout {
+        Err(VmHostError::Read(NetError::Timeout))
+    } else {
+        Err(VmHostError::ResponseInvalid)
+    }
 }
 
 fn build_launch_request(vm: &VmRecord, host: &VmHostConfig) -> Result<String, VmHostError> {
@@ -180,7 +216,16 @@ fn parse_launch_response(response: &[u8]) -> Result<VmHostLaunch, VmHostError> {
         return Err(VmHostError::LaunchDenied);
     }
     let pid = find_response_number(text, "pid=").ok_or(VmHostError::ResponseInvalid)?;
-    Ok(VmHostLaunch { qemu_pid: pid })
+    if pid == 0 {
+        return Err(VmHostError::ResponseInvalid);
+    }
+    let log_path = find_response_value(text, "log=")
+        .map(String::from)
+        .unwrap_or_else(String::new);
+    Ok(VmHostLaunch {
+        qemu_pid: pid,
+        log_path,
+    })
 }
 
 fn parse_stop_response(response: &[u8]) -> Result<(), VmHostError> {
@@ -209,6 +254,20 @@ fn find_response_number(text: &str, key: &str) -> Option<u32> {
     }
     if saw_digit {
         Some(value)
+    } else {
+        None
+    }
+}
+
+fn find_response_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let start = text.find(key)? + key.len();
+    let bytes = text.as_bytes();
+    let mut end = start;
+    while end < bytes.len() && !bytes[end].is_ascii_whitespace() {
+        end += 1;
+    }
+    if end > start {
+        Some(&text[start..end])
     } else {
         None
     }

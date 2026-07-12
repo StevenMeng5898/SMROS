@@ -7563,6 +7563,9 @@ fn print_net_error(ctx: &mut ShellContext, err: crate::user_level::net::NetError
 
 fn print_vm_host_error(ctx: &mut ShellContext, err: crate::user_level::vm_host::VmHostError) {
     match err {
+        crate::user_level::vm_host::VmHostError::HostUnavailable => {
+            ctx.serial.write_str("host transport unavailable")
+        }
         crate::user_level::vm_host::VmHostError::Connect(net_err) => {
             ctx.serial.write_str("connect ");
             print_net_error(ctx, net_err);
@@ -7595,6 +7598,10 @@ fn print_vm_host_error(ctx: &mut ShellContext, err: crate::user_level::vm_host::
 
 fn print_vm_host_hint(ctx: &mut ShellContext, err: crate::user_level::vm_host::VmHostError) {
     match err {
+        crate::user_level::vm_host::VmHostError::HostUnavailable => {
+            ctx.serial
+                .write_str("\n  host launch skipped because guest networking is not ready\n");
+        }
         crate::user_level::vm_host::VmHostError::Connect(_) => {
             ctx.serial
                 .write_str("\n  host launcher unreachable; run: scripts/smros-vm-launcher.py\n");
@@ -7607,7 +7614,7 @@ fn print_vm_host_hint(ctx: &mut ShellContext, err: crate::user_level::vm_host::V
         }
         crate::user_level::vm_host::VmHostError::LaunchDenied => {
             ctx.serial.write_str(
-                "\n  host launcher replied; check smros-vm-launcher.log or its terminal for missing kernel/initrd/disk paths\n",
+                "\n  host launcher replied; check smros-vm-launcher.log and target/vm-launcher/<name>.log for missing paths or early QEMU exit\n",
             );
         }
         crate::user_level::vm_host::VmHostError::ResponseInvalid => {
@@ -10730,12 +10737,18 @@ fn cmd_vm(ctx: &mut ShellContext, args: &[&str]) {
             ) {
                 Ok(mut vm) => {
                     let host_launch_configured = vm.host.is_some();
+                    let mut host_launch_unavailable = false;
+                    let mut host_launch_log = alloc::string::String::new();
                     if host_launch_configured {
                         match crate::user_level::vm_host::launch(&vm) {
                             Ok(launch) => {
                                 vm.host_qemu_pid = launch.qemu_pid;
+                                host_launch_log = launch.log_path;
                                 let _ = crate::kernel_objects::hypervisor::hypervisor()
                                     .set_host_qemu_pid(vm.name.as_str(), launch.qemu_pid);
+                            }
+                            Err(crate::user_level::vm_host::VmHostError::HostUnavailable) => {
+                                host_launch_unavailable = true;
                             }
                             Err(err) => {
                                 let _ = crate::kernel_objects::hypervisor::hypervisor()
@@ -10772,9 +10785,20 @@ fn cmd_vm(ctx: &mut ShellContext, args: &[&str]) {
                     });
                     ctx.serial.write_str("\n");
                     if host_launch_configured {
-                        ctx.serial.write_str("  host_qemu_pid=");
-                        print_number(&mut ctx.serial, vm.host_qemu_pid);
-                        ctx.serial.write_str(" window=requested\n");
+                        if host_launch_unavailable {
+                            ctx.serial.write_str(
+                                "  host launch=unavailable (guest networking not ready)\n",
+                            );
+                        } else {
+                            ctx.serial.write_str("  host_qemu_pid=");
+                            print_number(&mut ctx.serial, vm.host_qemu_pid);
+                            ctx.serial.write_str(" window=requested");
+                            if !host_launch_log.is_empty() {
+                                ctx.serial.write_str(" log=");
+                                ctx.serial.write_str(host_launch_log.as_str());
+                            }
+                            ctx.serial.write_str("\n");
+                        }
                     } else {
                         ctx.serial
                             .write_str("  host launch=not configured (no <linux kernel=...>)\n");
@@ -10802,12 +10826,17 @@ fn cmd_vm(ctx: &mut ShellContext, args: &[&str]) {
                     ctx.serial
                         .write_str(" without rescheduling critical realtime tasks\n");
                     if vm.host.is_some() {
-                        match host_stop {
-                            Ok(()) => ctx.serial.write_str("  host qemu stop requested\n"),
-                            Err(err) => {
-                                ctx.serial.write_str("  host qemu stop failed: ");
-                                print_vm_host_error(ctx, err);
-                                ctx.serial.write_str("\n");
+                        if vm.host_qemu_pid == 0 {
+                            ctx.serial
+                                .write_str("  host qemu stop skipped (not launched)\n");
+                        } else {
+                            match host_stop {
+                                Ok(()) => ctx.serial.write_str("  host qemu stop requested\n"),
+                                Err(err) => {
+                                    ctx.serial.write_str("  host qemu stop failed: ");
+                                    print_vm_host_error(ctx, err);
+                                    ctx.serial.write_str("\n");
+                                }
                             }
                         }
                     }

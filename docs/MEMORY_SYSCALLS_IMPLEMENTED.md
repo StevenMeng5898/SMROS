@@ -120,11 +120,12 @@ virtio-net device, and verify the memory syscall paths:
 ```sh
 make run
 make run ARCH=riscv64gc-unknown-none-elf
+make run ARCH=x86_64-unknown-none
 ```
 
-The default command is ARM64. The RISC-V64 command boots the same shared
-memory/syscall model through the RISC-V64 low-level backend, while the Linux
-syscall compatibility numbers are still the ARM64-numbered model.
+The default command is ARM64. The RISC-V64 and x86_64 commands boot the same
+shared memory/syscall model through their selected low-level backends, while the
+Linux syscall compatibility numbers are still the ARM64-numbered model.
 
 Normal boot now skips the EL0 validation helper so the shell prompt appears
 sooner. Use these commands from the SMROS shell for the current interactive

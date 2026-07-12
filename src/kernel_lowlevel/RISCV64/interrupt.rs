@@ -2,6 +2,10 @@
 
 const SIE_STIE: usize = 1 << 5;
 
+pub fn controller_name() -> &'static str {
+    "RISC-V supervisor interrupt controller"
+}
+
 pub fn init() {
     unsafe {
         core::arch::asm!(

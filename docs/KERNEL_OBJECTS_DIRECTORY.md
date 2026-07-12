@@ -62,7 +62,8 @@ It defines:
 
 `CpuContext` and `ThreadControlBlock` must stay layout-compatible with the selected architecture's context-switch assembly:
 `src/kernel_lowlevel/ARM64/context_switch.S` or
-`src/kernel_lowlevel/RISCV64/context_switch.S`. Those files save and restore
+`src/kernel_lowlevel/RISCV64/context_switch.S` or
+`src/kernel_lowlevel/X86_64/context_switch.S`. Those files save and restore
 fields based on fixed offsets.
 
 ## `scheduler.rs`

@@ -156,6 +156,72 @@ mod arch_pte {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+mod arch_pte {
+    pub const WRITE: u64 = 1 << 1;
+    pub const USER: u64 = 1 << 2;
+    pub const ACCESSED: u64 = 1 << 5;
+    pub const DIRTY: u64 = 1 << 6;
+    pub const EXECUTE_DISABLE: u64 = 1 << 63;
+    pub const OUTPUT_ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
+
+    pub fn set_leaf(value: u64) -> u64 {
+        value
+    }
+
+    pub fn set_user(value: u64, allow: bool) -> u64 {
+        set_flag(value, USER, allow)
+    }
+
+    pub fn set_read_only(value: u64, read_only: bool) -> u64 {
+        set_flag(value, WRITE | DIRTY, !read_only)
+    }
+
+    pub fn set_execute_never(value: u64, execute_never: bool) -> u64 {
+        set_flag(value, EXECUTE_DISABLE, execute_never)
+    }
+
+    pub fn set_privileged_execute_never(value: u64, execute_never: bool) -> u64 {
+        set_execute_never(value, execute_never)
+    }
+
+    pub fn set_accessed(value: u64) -> u64 {
+        value | ACCESSED
+    }
+
+    pub fn set_attr_idx(value: u64, _idx: u64) -> u64 {
+        value
+    }
+
+    pub fn set_sh(value: u64, _sharability: u64) -> u64 {
+        value
+    }
+
+    pub fn set_output_address(value: u64, paddr: u64) -> u64 {
+        (value & !OUTPUT_ADDR_MASK) | (paddr & OUTPUT_ADDR_MASK)
+    }
+
+    pub fn output_address(value: u64) -> u64 {
+        value & OUTPUT_ADDR_MASK
+    }
+
+    pub fn is_table(value: u64) -> bool {
+        value & super::PTE_VALID != 0 && value & DIRTY == 0
+    }
+
+    pub fn is_leaf(value: u64) -> bool {
+        value & super::PTE_VALID != 0
+    }
+
+    fn set_flag(value: u64, flag: u64, enabled: bool) -> u64 {
+        if enabled {
+            value | flag
+        } else {
+            value & !flag
+        }
+    }
+}
+
 bitflags::bitflags! {
     pub struct PageAttr: u64 {
         const VALID = 1 << 0;
@@ -472,6 +538,15 @@ fn arch_switch_to(root: u64, _kernel_root: u64) {
             satp = in(reg) satp,
             options(nostack),
         );
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn arch_switch_to(root: u64, _kernel_root: u64) {
+    if root != 0 {
+        unsafe {
+            core::arch::asm!("mov cr3, {root}", root = in(reg) root, options(nostack));
+        }
     }
 }
 

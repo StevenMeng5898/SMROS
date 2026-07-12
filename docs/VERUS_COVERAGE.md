@@ -47,6 +47,16 @@ unsupported case.
 - `src/kernel_lowlevel/RISCV64/smp.rs`
 - `src/kernel_lowlevel/RISCV64/thread.rs`
 - `src/kernel_lowlevel/RISCV64/timer.rs`
+- `src/kernel_lowlevel/X86_64/boot.rs`
+- `src/kernel_lowlevel/X86_64/context_switch.S`
+- `src/kernel_lowlevel/X86_64/cpu.rs`
+- `src/kernel_lowlevel/X86_64/drivers.rs`
+- `src/kernel_lowlevel/X86_64/interrupt.rs`
+- `src/kernel_lowlevel/X86_64/mod.rs`
+- `src/kernel_lowlevel/X86_64/serial.rs`
+- `src/kernel_lowlevel/X86_64/smp.rs`
+- `src/kernel_lowlevel/X86_64/thread.rs`
+- `src/kernel_lowlevel/X86_64/timer.rs`
 - `src/kernel_lowlevel/lowlevel_logic.rs`
 - `src/kernel_lowlevel/lowlevel_logic_shared.rs`
 - `src/kernel_lowlevel/memory.rs`

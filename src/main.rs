@@ -316,12 +316,16 @@ pub extern "C" fn kernel_main(fdt_base: usize) -> ! {
     print_system_info(&mut serial);
 
     // Initialize interrupt controller
-    serial.write_str("[OK] Initializing GIC interrupt controller... ");
+    serial.write_str("[OK] Initializing ");
+    serial.write_str(kernel_lowlevel::interrupt::controller_name());
+    serial.write_str("... ");
     kernel_lowlevel::interrupt::init();
     serial.write_str("done\n");
 
     // Initialize timer
-    serial.write_str("[OK] Initializing ARM Generic Timer... ");
+    serial.write_str("[OK] Initializing ");
+    serial.write_str(kernel_lowlevel::timer::driver_name());
+    serial.write_str("... ");
     kernel_lowlevel::timer::init();
     serial.write_str("done\n");
 
