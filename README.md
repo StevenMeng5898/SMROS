@@ -99,7 +99,24 @@ make test
 ```
 
 This runs scoped formatting checks, shell script syntax checks, host-side unit
-tests for pure shared logic, and the production kernel build.
+tests for pure shared logic, host-side integration contract tests, and the
+production kernel build.
+
+Host-side HTML coverage:
+
+```bash
+cargo install --locked cargo-tarpaulin
+make coverage-host
+```
+
+This wraps `cargo tarpaulin --out Html --fail-under 100 --include-tests` for the
+host UT/IT crate and writes the source-highlighted heatmap to
+`target/coverage/host/tarpaulin-report.html`. Use `make coverage-ut` or
+`make coverage-it` for narrower 100% gated reports, or `make coverage` to
+generate host coverage and then run the QEMU system smoke test. `make
+coverage-st` writes `target/coverage/st/index.html` and the raw serial log. The
+QEMU `st` layer is reported as required serial milestone coverage; it is not
+Tarpaulin guest line coverage.
 
 Boot-level smoke test:
 
@@ -111,8 +128,9 @@ make st ARCH=aarch64-unknown-none QEMU_CPU_AARCH64=cortex-a57
 ```
 
 This starts QEMU non-interactively and passes when the serial log reaches the
-`smros:/>` shell prompt. See `docs/TESTING.md` for the full test-layer map,
-including `make ut`, `make verus`, and `make verify`.
+required boot milestones and the `smros:/>` shell prompt. See `docs/TESTING.md`
+for the full test-layer map, including `make ut`, `make it`, `make verus`, and
+`make verify`.
 
 ## Run
 

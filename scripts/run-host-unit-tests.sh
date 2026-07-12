@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run host-side unit tests for pure SMROS helper logic.
+# Run host-side Rust tests for pure SMROS helper logic and contracts.
 
 set -euo pipefail
 
@@ -14,7 +14,7 @@ fi
 
 cd "$REPO_ROOT"
 
-echo "Running SMROS host unit tests on $HOST_TARGET..."
+echo "Running SMROS host tests on $HOST_TARGET..."
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target/host-tests}"
 export CARGO_TARGET_DIR
 

@@ -15,12 +15,74 @@ make ut
 
 This executes the host-side crate in `tests/host`. It tests pure shared logic
 from the `*_logic_shared.rs` files on the Rust host target, including address
-range validation, syscall guard logic, kernel-object helpers, FIFO arithmetic,
-scheduler policy helpers, low-level page-table helpers, and user-service/ELF
-metadata checks.
+range validation, syscall guard logic, syscall bridge register/errno helpers,
+kernel-object helpers, FIFO/socket/port/futex arithmetic, scheduler policy
+helpers, low-level page-table helpers, hypervisor state helpers, log-level
+helpers, and user-service/ELF metadata checks.
 
 The host target is selected explicitly so the root `.cargo/config.toml` can keep
 pointing normal builds at the bare-metal default target.
+
+## Integration Tests
+
+Run:
+
+```bash
+make it
+```
+
+This executes the Cargo integration tests in `tests/host/tests`. These tests
+lock cross-module contracts that should agree across subsystems, such as
+overflow-safe range arithmetic, FIFO/socket ring-buffer math, shared signal
+updates, Linux/Zircon syscall-number routing boundaries, ELF mapping ranges
+feeding fixed mmap checks, and Makefile/docs wiring for the test layers.
+
+## Coverage Reports
+
+Run:
+
+```bash
+make coverage-host
+```
+
+This runs `cargo tarpaulin --out Html --fail-under 100 --include-tests` for the
+host-side test crate and writes the source-highlighted HTML coverage report to:
+
+```text
+target/coverage/host/tarpaulin-report.html
+```
+
+Use narrower reports when you want to inspect only one host layer:
+
+```bash
+make coverage-ut
+make coverage-it
+make coverage-st
+```
+
+Those write to `target/coverage/ut/tarpaulin-report.html` and
+`target/coverage/it/tarpaulin-report.html`. `make coverage-st` writes the QEMU
+serial smoke report to `target/coverage/st/index.html` and the raw serial log to
+`target/coverage/st/smros-smoke-qemu.log`.
+
+Run the full coverage/smoke view with:
+
+```bash
+make coverage
+```
+
+`make coverage` generates the combined host UT/IT Tarpaulin HTML report and the
+QEMU `st` smoke HTML/log report. The host reports are hard-gated at 100%.
+Tarpaulin measures the Rust host tests; the QEMU `st` layer is reported as
+100% required-serial-milestone coverage when every boot milestone is found, not
+guest line coverage. To get bare-metal guest line coverage, SMROS would need a
+separate kernel/QEMU instrumentation path.
+
+If `cargo-tarpaulin` is missing, install it with:
+
+```bash
+cargo install --locked cargo-tarpaulin
+```
 
 ## Hygiene Checks
 
@@ -65,8 +127,8 @@ make st
 ```
 
 This builds the kernel, starts QEMU in non-interactive mode, captures serial
-output in `target/smros-smoke-qemu.log`, and passes when the `smros:/>` prompt is
-seen.
+output in `target/smros-smoke-qemu.log`, and passes when the `smros:/>` prompt
+and required boot milestones are seen.
 
 Useful overrides:
 
@@ -74,6 +136,7 @@ Useful overrides:
 SMROS_ST_TIMEOUT=90 make st
 SMOKE_QEMU_SMP=1 SMOKE_QEMU_MEMORY=256M make st
 SMROS_ST_LOG=/tmp/smros.log make st
+SMROS_ST_REQUIRED_PATTERNS='[OK] Kernel initialized successfully!|smros:/>' make st
 make st ARCH=riscv64gc-unknown-none-elf
 make st ARCH=x86_64-unknown-none
 make st ARCH=aarch64-unknown-none QEMU_CPU_AARCH64=cortex-a57
@@ -98,19 +161,23 @@ make test
 ```
 
 `make test` runs scoped formatting checks, script syntax checks, unit tests, and
-the kernel build test. It intentionally does not boot QEMU, so it stays suitable
-for quick local and CI checks. Use `make st` for the boot-level smoke test, or
-`make verify` for unit tests, build, system smoke, and Verus verification.
+integration tests, and the kernel build test. It intentionally does not boot
+QEMU, so it stays suitable for quick local and CI checks. Use `make st` for the
+boot-level smoke test, or `make verify` for unit tests, integration tests,
+build, system smoke, and Verus verification.
 
 ## Test Layers
 
 - Hygiene: host-test formatting and shell syntax checks.
 - UT: host unit tests for deterministic pure logic.
+- IT: host integration tests for cross-module contracts and test-layer wiring.
+- Coverage: `cargo-tarpaulin` HTML heatmaps for host UT/IT coverage plus an
+  optional QEMU smoke run through `make coverage`.
 - Build test: production `aarch64-unknown-none` release build plus raw image by
   default; use `ARCH=riscv64gc-unknown-none-elf` for the RISC-V64 ELF payload or
   `ARCH=x86_64-unknown-none` for the x86_64 PVH ELF payload.
 - ST: QEMU boot smoke test that validates the selected architecture's serial
-  boot path reaches the shell.
+  boot path reaches required milestones and the shell.
 - Verus: proof harnesses for selected syscall, kernel-object, low-level,
   user-level, and service logic.
 

@@ -5,5 +5,5 @@
 /smros-vm-launcher.log
 /smros-vm-launcher.pid
 /.tools/
-/tests/
+/tests/host/target/
 /verification/*/target/

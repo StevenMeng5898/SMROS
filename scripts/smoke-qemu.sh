@@ -47,6 +47,8 @@ QEMU_MEMORY="${QEMU_MEMORY:-512M}"
 SMROS_ST_TIMEOUT="${SMROS_ST_TIMEOUT:-45}"
 SMROS_ST_LOG="${SMROS_ST_LOG:-$REPO_ROOT/target/smros-smoke-qemu.log}"
 SMROS_ST_PROMPT="${SMROS_ST_PROMPT:-smros:/>}"
+DEFAULT_SMROS_ST_REQUIRED_PATTERNS="SMROS-A Distributed AI-Native Operating System|[OK] Kernel initialized successfully!|[OK] Serial console initialized|[SYSCALL] Syscall handler initialized|[CHANNEL] Channel subsystem initialized|[INFO] Fast boot complete. Starting shell|[SHELL] Starting shell as scheduled thread...|$SMROS_ST_PROMPT"
+SMROS_ST_REQUIRED_PATTERNS="${SMROS_ST_REQUIRED_PATTERNS:-$DEFAULT_SMROS_ST_REQUIRED_PATTERNS}"
 
 if ! command -v "$QEMU_SYSTEM" >/dev/null 2>&1; then
     echo "error: $QEMU_SYSTEM not found" >&2
@@ -83,6 +85,43 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+required_patterns_present() {
+    local missing=0
+    local pattern
+    local required_patterns=()
+
+    IFS='|' read -r -a required_patterns <<< "$SMROS_ST_REQUIRED_PATTERNS"
+    for pattern in "${required_patterns[@]}"; do
+        if [ -z "$pattern" ]; then
+            continue
+        fi
+
+        if ! grep -Fq "$pattern" "$SMROS_ST_LOG"; then
+            echo "missing required serial pattern: $pattern" >&2
+            missing=1
+        fi
+    done
+
+    return "$missing"
+}
+
+pass_if_smoke_complete() {
+    if ! grep -Fq "$SMROS_ST_PROMPT" "$SMROS_ST_LOG"; then
+        return
+    fi
+
+    if required_patterns_present; then
+        echo "SMROS QEMU smoke test passed: found '$SMROS_ST_PROMPT' and required boot milestones."
+        echo "Log: $SMROS_ST_LOG"
+        exit 0
+    fi
+
+    echo "SMROS QEMU smoke test failed: prompt appeared but required boot milestones were missing." >&2
+    echo "Log tail:" >&2
+    tail -n 80 "$SMROS_ST_LOG" >&2 || true
+    exit 1
+}
+
 "$QEMU_SYSTEM" \
     -M "$QEMU_MACHINE" \
     -cpu "$QEMU_CPU" \
@@ -100,11 +139,7 @@ qemu_pid=$!
 deadline=$((SECONDS + SMROS_ST_TIMEOUT))
 status=0
 while [ "$SECONDS" -lt "$deadline" ]; do
-    if grep -Fq "$SMROS_ST_PROMPT" "$SMROS_ST_LOG"; then
-        echo "SMROS QEMU smoke test passed: found '$SMROS_ST_PROMPT'."
-        echo "Log: $SMROS_ST_LOG"
-        exit 0
-    fi
+    pass_if_smoke_complete
 
     if ! kill -0 "$qemu_pid" >/dev/null 2>&1; then
         wait "$qemu_pid" || status=$?
@@ -114,14 +149,11 @@ while [ "$SECONDS" -lt "$deadline" ]; do
     sleep 1
 done
 
-if grep -Fq "$SMROS_ST_PROMPT" "$SMROS_ST_LOG"; then
-    echo "SMROS QEMU smoke test passed: found '$SMROS_ST_PROMPT'."
-    echo "Log: $SMROS_ST_LOG"
-    exit 0
-fi
+pass_if_smoke_complete
 
 echo "SMROS QEMU smoke test failed: did not find '$SMROS_ST_PROMPT'." >&2
 echo "QEMU exit status: $status" >&2
+required_patterns_present || true
 echo "Log tail:" >&2
 tail -n 80 "$SMROS_ST_LOG" >&2 || true
 exit 1
