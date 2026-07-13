@@ -26,7 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 7070
 MAX_REQUEST = 4096
-LAUNCHER_VERSION = 5
+LAUNCHER_VERSION = 6
 DEFAULT_LAUNCH_STABLE_SECONDS = 2.0
 DEFAULT_TERMINATE_TIMEOUT_SECONDS = 3.0
 DEFAULT_TEST_TIMEOUT_SECONDS = 300.0
@@ -199,6 +199,13 @@ def parse_test_job(values: dict[str, str]) -> tuple[str, str]:
 def run_test_job(values: dict[str, str]) -> str:
     cmd = parse_test_job(values)
     job = values["job"]
+    test_dir = ROOT / "target" / "hermes-tests"
+    test_dir.mkdir(parents=True, exist_ok=True)
+    if job == "st":
+        cmd += (
+            "FXFS_DISK=target/hermes-tests/st-fxfs.img",
+            "SMROS_ST_LOG=target/hermes-tests/st-smoke.log",
+        )
     timeout = float(os.environ.get("SMROS_HERMES_TEST_TIMEOUT", DEFAULT_TEST_TIMEOUT_SECONDS))
     if timeout <= 0 or timeout > 1800:
         timeout = DEFAULT_TEST_TIMEOUT_SECONDS
