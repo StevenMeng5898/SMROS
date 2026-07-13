@@ -330,6 +330,9 @@ docker ps -a
 docker logs smros0001
 hermes info
 hermes test
+hermes exec meminfo
+hermes random seed=1234 iterations=8
+hermes test-all seed=1234 iterations=8
 hermes ui
 hermes ask test hermes agent on SMROS
 lvgl info
@@ -374,6 +377,15 @@ config, provider/model routing, skills, memory, tool calls, delegated subagents,
 cron metadata, `/svc`, Gemma generation, and transcript persistence under
 `/data/hermes`. `hermes test` and `testsc` cover the path. Use `hermes ui` for
 the LVGL-styled full-screen keyboard/mouse terminal UI.
+
+Hermes can execute explicitly allowlisted guest commands with `hermes exec`,
+or run a deterministic safe campaign with `hermes random`. Each campaign
+prints a replay seed and writes its bounded report to
+`/data/hermes/tests/latest.log`. `hermes test-all` combines the native Hermes
+test, a guest campaign, and fixed host-assisted `make ut`, `make it`, and
+`make st` jobs. The host jobs require `scripts/smros-vm-launcher.py`; the guest
+can request only those three jobs and cannot supply host command text.
+Destructive commands remain unavailable to Hermes.
 
 `lvgl` exposes the SMROS-native LVGL-style porting layer. It models the LVGL
 display, input, tick, and widget seams with a CPU renderer, serial

@@ -4857,6 +4857,7 @@ fn cmd_hermes(ctx: &mut ShellContext, args: &[&str]) {
             let _ = execute_hermes_command(ctx, args[1], &args[2..]);
         }
         "random" => run_hermes_random_campaign(ctx, &args[1..]),
+        "test-all" => run_hermes_test_all(ctx, &args[1..]),
         "info" | "status" => match crate::user_level::hermes_agent::info() {
             Ok(info) => print_hermes_info(ctx, &info),
             Err(err) => {
@@ -5173,15 +5174,85 @@ fn run_gemma_tests(ctx: &mut ShellContext) -> bool {
 
 fn print_hermes_usage(ctx: &mut ShellContext) {
     ctx.serial
-        .write_str("usage: hermes <info|test|skills|web|ui|ask|exec|random>\n");
+        .write_str("usage: hermes <info|test|skills|web|ui|ask|exec|random|test-all>\n");
     ctx.serial
         .write_str("       hermes exec <safe-command> [args...]\n");
     ctx.serial
         .write_str("       hermes random [seed=<n>] [iterations=<1..64>]\n");
+    ctx.serial
+        .write_str("       hermes test-all [seed=<n>] [iterations=<1..64>]\n");
     ctx.serial.write_str("       hermes ask <prompt>\n");
     ctx.serial
         .write_str("       hermes ui  # LVGL-styled keyboard/mouse UI\n");
     ctx.serial.write_str("       hermes web [text|source]\n");
+}
+
+fn run_hermes_test_all(ctx: &mut ShellContext, args: &[&str]) {
+    use crate::user_level::services::vm_host::{HermesHostTestJob, HermesHostTestResult};
+
+    let Some(options) =
+        crate::user_level::services::hermes_shell_logic_shared::parse_campaign_options(args)
+    else {
+        ctx.serial
+            .write_str("usage: hermes test-all [seed=<n>] [iterations=<1..64>]\n");
+        return;
+    };
+    let seed = options.seed.unwrap_or(1);
+    ctx.serial.write_str("\n=== Hermes Full Test Orchestration ===\n");
+    let native_ok = run_hermes_agent_tests(ctx);
+
+    let mut random_seed = String::from("seed=");
+    append_usize_shell(&mut random_seed, seed as usize);
+    let mut random_iterations = String::from("iterations=");
+    append_usize_shell(&mut random_iterations, options.iterations);
+    run_hermes_random_campaign(ctx, &[random_seed.as_str(), random_iterations.as_str()]);
+
+    let mut report = String::from("Hermes test-all\nnative=");
+    report.push_str(if native_ok { "pass\n" } else { "fail\n" });
+    let mut host_passes = 0usize;
+    for job in [
+        HermesHostTestJob::Ut,
+        HermesHostTestJob::It,
+        HermesHostTestJob::St,
+    ] {
+        ctx.serial.write_str("Host test ");
+        ctx.serial.write_str(job.as_str());
+        ctx.serial.write_str(": ");
+        report.push_str("host-");
+        report.push_str(job.as_str());
+        report.push('=');
+        match crate::user_level::services::vm_host::run_hermes_test(job) {
+            Ok(HermesHostTestResult {
+                passed: true,
+                summary,
+                ..
+            }) => {
+                host_passes += 1;
+                ctx.serial.write_str("PASS ");
+                ctx.serial.write_str(summary.as_str());
+                report.push_str("pass ");
+                report.push_str(summary.as_str());
+            }
+            Ok(result) => {
+                ctx.serial.write_str("FAIL ");
+                ctx.serial.write_str(result.summary.as_str());
+                report.push_str("fail ");
+                report.push_str(result.summary.as_str());
+            }
+            Err(_) => {
+                ctx.serial.write_str("UNAVAILABLE");
+                report.push_str("unavailable");
+            }
+        }
+        ctx.serial.write_str("\n");
+        report.push('\n');
+    }
+    let overall = native_ok && host_passes == 3;
+    report.push_str("overall=");
+    report.push_str(if overall { "pass\n" } else { "fail\n" });
+    let _ = crate::user_level::hermes_agent::persist_campaign_report(report.as_str());
+    ctx.serial.write_str("Hermes test-all result: ");
+    ctx.serial.write_str(if overall { "PASS\n" } else { "FAIL\n" });
 }
 
 fn run_hermes_random_campaign(ctx: &mut ShellContext, args: &[&str]) {

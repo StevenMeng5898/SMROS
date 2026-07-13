@@ -312,6 +312,9 @@ docker load /shared/my-image.tar
 docker run my/image:latest
 hermes info
 hermes test
+hermes exec meminfo
+hermes random seed=1234 iterations=8
+hermes test-all seed=1234 iterations=8
 hermes skills
 hermes ui
 hermes web
@@ -399,6 +402,22 @@ lvgl test
 sched sample 8
 sched perfetto 128
 ```
+
+`hermes exec <command> [args...]` passes a structured request through a strict
+positive allowlist before invoking the existing shell handler. Unknown forms
+default to denial. These commands are permanently forbidden to Hermes: `rm`,
+`kill`, `reboot`, `exit`, `clear`, `vi`,
+`run`, `write`, `mkdir`, `mv`, `cp`, and `mount`, plus `vm -k`, `docker rm`,
+`docker stop`, and equivalent destructive lifecycle operations. Gemma-generated
+text is never executed directly.
+
+`hermes random [seed=<n>] [iterations=<1..64>]` selects bounded safe test and
+status operations deterministically. It prints the effective seed for replay
+and persists a bounded report at `/data/hermes/tests/latest.log`.
+`hermes test-all` adds native Hermes checks and requests host `ut`, `it`, and
+`st` jobs through `scripts/smros-vm-launcher.py`. The launcher maps those three
+identifiers to fixed Make argv, runs one job at a time with a timeout, and does
+not accept arbitrary command strings.
 
 ### Qt/QML Vehicle Cluster Port
 

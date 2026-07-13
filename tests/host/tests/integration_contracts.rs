@@ -320,7 +320,7 @@ fn test_layer_commands_and_docs_are_wired() {
     assert!(
         makefile.contains("it:\n\t@./scripts/run-host-unit-tests.sh --test integration_contracts")
     );
-    assert!(makefile.contains("test: host-fmt-check script-check ut it build-test"));
+    assert!(makefile.contains("test: host-fmt-check script-check launcher-test ut it build-test"));
 
     assert!(docs.contains("make ut"));
     assert!(docs.contains("make it"));
@@ -371,4 +371,31 @@ fn hermes_host_tests_use_fixed_enum_jobs_and_protocol() {
     assert!(client.contains("SMROS_TEST_RUN 1\\njob="));
     assert!(launcher.contains("if job not in {\"ut\", \"it\", \"st\"}"));
     assert!(!launcher.contains("shell=True"));
+}
+
+#[test]
+fn hermes_test_orchestration_is_documented_and_smoke_wired() {
+    let shell = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/user_shell.rs"
+    ));
+    let readme = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md"));
+    let docs = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/USER_SHELL.md"
+    ));
+    let smoke = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/smoke-qemu.sh"
+    ));
+
+    assert!(shell.contains("\"test-all\" => run_hermes_test_all"));
+    for command in ["hermes exec", "hermes random", "hermes test-all"] {
+        assert!(readme.contains(command));
+        assert!(docs.contains(command));
+    }
+    assert!(docs.contains("permanently forbidden"));
+    assert!(smoke.contains("hermes random seed=1 iterations=1"));
+    assert!(smoke.contains("hermes exec reboot"));
+    assert!(smoke.contains("Hermes denied forbidden command: reboot"));
 }

@@ -529,6 +529,7 @@ mod user_logic {
 }
 
 mod hermes_shell_logic {
+    #![allow(dead_code)]
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/user_level/services/hermes_shell_logic_shared.rs"
@@ -581,9 +582,15 @@ fn hermes_shell_policy_allows_only_bounded_safe_forms() {
     }
 
     let oversized = "x".repeat(HERMES_MAX_ARG_LEN + 1);
-    assert_eq!(classify("echo", &[oversized.as_str()]), HermesShellPolicy::Invalid);
+    assert_eq!(
+        classify("echo", &[oversized.as_str()]),
+        HermesShellPolicy::Invalid
+    );
     assert_eq!(classify("unknown", &[]), HermesShellPolicy::Forbidden);
-    assert_eq!(classify("fuzzsc", &["iterations=999"]), HermesShellPolicy::Invalid);
+    assert_eq!(
+        classify("fuzzsc", &["iterations=999"]),
+        HermesShellPolicy::Invalid
+    );
 }
 
 #[test]
@@ -593,8 +600,12 @@ fn hermes_campaign_selection_is_reproducible_and_bounded() {
         HermesCampaignOptions, HERMES_CAMPAIGN_CASES,
     };
 
-    let first: Vec<_> = (0..8).map(|round| campaign_case_index(1234, round)).collect();
-    let second: Vec<_> = (0..8).map(|round| campaign_case_index(1234, round)).collect();
+    let first: Vec<_> = (0..8)
+        .map(|round| campaign_case_index(1234, round))
+        .collect();
+    let second: Vec<_> = (0..8)
+        .map(|round| campaign_case_index(1234, round))
+        .collect();
     assert_eq!(first, second);
     assert!(first.iter().all(|index| *index < HERMES_CAMPAIGN_CASES));
     assert!(!campaign_iterations_valid(0));
