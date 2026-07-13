@@ -87,10 +87,28 @@ pub fn boot_secondary_cpu(cpu_id: u32, _stack_ptr: u64) -> Result<(), &'static s
 pub fn system_reset() -> ! {
     let mut serial = Serial::new();
     serial.init();
-    serial.write_str("[X86] System reset requested; halting\n");
+    serial.write_str("[X86] System reset requested\n");
+
+    // QEMU q35 exposes the ACPI reset control at 0xcf9. The 8042 command is a
+    // fallback for older PC-compatible machines if the first write returns.
+    unsafe {
+        outb(0xcf9, 0x06);
+        outb(0x64, 0xfe);
+    }
+
+    serial.write_str("[X86] System reset returned; halting\n");
     loop {
         crate::kernel_lowlevel::cpu::wait_for_event();
     }
+}
+
+unsafe fn outb(port: u16, value: u8) {
+    core::arch::asm!(
+        "out dx, al",
+        in("dx") port,
+        in("al") value,
+        options(nomem, nostack, preserves_flags),
+    );
 }
 
 pub fn init() {

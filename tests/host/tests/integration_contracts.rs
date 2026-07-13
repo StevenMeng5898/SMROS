@@ -330,3 +330,15 @@ fn test_layer_commands_and_docs_are_wired() {
     assert!(smoke.contains("[INFO] Fast boot complete. Starting shell"));
     assert!(smoke.contains("smros:/>"));
 }
+
+#[test]
+fn x86_system_reset_uses_hardware_reset_ports_before_halting() {
+    let smp = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/kernel_lowlevel/X86_64/smp.rs"
+    ));
+
+    assert!(smp.contains("outb(0xcf9, 0x06)"));
+    assert!(smp.contains("outb(0x64, 0xfe)"));
+    assert!(smp.contains("System reset returned; halting"));
+}
