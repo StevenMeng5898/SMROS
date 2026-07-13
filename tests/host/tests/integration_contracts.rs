@@ -375,6 +375,10 @@ fn hermes_host_tests_use_fixed_enum_jobs_and_protocol() {
         env!("CARGO_MANIFEST_DIR"),
         "/../../scripts/smros-vm-launcher.py"
     ));
+    let starter = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/start-smros-vm-launcher.sh"
+    ));
 
     assert!(client.contains("enum HermesHostTestJob"));
     assert!(client.contains("Self::Ut => \"ut\""));
@@ -383,6 +387,8 @@ fn hermes_host_tests_use_fixed_enum_jobs_and_protocol() {
     assert!(client.contains("SMROS_TEST_RUN 1\\njob="));
     assert!(launcher.contains("if job not in {\"ut\", \"it\", \"st\"}"));
     assert!(!launcher.contains("shell=True"));
+    assert!(starter.contains("REQUIRED_VERSION=5"));
+    assert!(starter.contains("fields.get(\"hermes_test_jobs\") != \"1\""));
 }
 
 #[test]
