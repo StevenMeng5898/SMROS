@@ -528,6 +528,108 @@ mod user_logic {
     }
 }
 
+mod hermes_shell_logic {
+    #![allow(dead_code)]
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/hermes_shell_logic_shared.rs"
+    ));
+}
+
+#[test]
+fn hermes_shell_policy_permanently_denies_dangerous_commands() {
+    use hermes_shell_logic::{classify, HermesShellPolicy};
+
+    for (command, args) in [
+        ("rm", &[][..]),
+        ("kill", &["1"][..]),
+        ("reboot", &[][..]),
+        ("exit", &[][..]),
+        ("clear", &[][..]),
+        ("vi", &["/tmp/a"][..]),
+        ("run", &["app.elf"][..]),
+        ("write", &["a", "b"][..]),
+        ("mkdir", &["a"][..]),
+        ("mv", &["a", "b"][..]),
+        ("cp", &["a", "b"][..]),
+        ("mount", &[][..]),
+        ("vm", &["-k", "demo"][..]),
+        ("docker", &["rm", "smros0001"][..]),
+        ("docker", &["stop", "smros0001"][..]),
+    ] {
+        assert_eq!(classify(command, args), HermesShellPolicy::Forbidden);
+    }
+}
+
+#[test]
+fn hermes_shell_policy_allows_only_bounded_safe_forms() {
+    use hermes_shell_logic::{classify, HermesShellPolicy, HERMES_MAX_ARG_LEN};
+
+    for (command, args) in [
+        ("help", &[][..]),
+        ("version", &[][..]),
+        ("ps", &["-a"][..]),
+        ("meminfo", &[][..]),
+        ("testsc", &[][..]),
+        ("fuzzsc", &["seed=7", "iterations=4"][..]),
+        ("vm", &["-s"][..]),
+        ("docker", &["images"][..]),
+        ("docker", &["ps", "-a"][..]),
+        ("docker", &["inspect", "smros0001"][..]),
+        ("docker", &["logs", "smros0001"][..]),
+    ] {
+        assert_eq!(classify(command, args), HermesShellPolicy::Allowed);
+    }
+
+    let oversized = "x".repeat(HERMES_MAX_ARG_LEN + 1);
+    assert_eq!(
+        classify("echo", &[oversized.as_str()]),
+        HermesShellPolicy::Invalid
+    );
+    assert_eq!(classify("unknown", &[]), HermesShellPolicy::Forbidden);
+    assert_eq!(
+        classify("fuzzsc", &["iterations=999"]),
+        HermesShellPolicy::Invalid
+    );
+}
+
+#[test]
+fn hermes_campaign_selection_is_reproducible_and_bounded() {
+    use hermes_shell_logic::{
+        campaign_case, campaign_case_index, campaign_iterations_valid, parse_campaign_options,
+        HermesCampaignOptions, HERMES_CAMPAIGN_CASES,
+    };
+
+    let first: Vec<_> = (0..8)
+        .map(|round| campaign_case_index(1234, round))
+        .collect();
+    let second: Vec<_> = (0..8)
+        .map(|round| campaign_case_index(1234, round))
+        .collect();
+    assert_eq!(first, second);
+    assert!(first.iter().all(|index| *index < HERMES_CAMPAIGN_CASES));
+    assert!(!campaign_iterations_valid(0));
+    assert!(campaign_iterations_valid(64));
+    assert!(!campaign_iterations_valid(65));
+    assert_eq!(
+        parse_campaign_options(&["seed=1234", "iterations=8"]),
+        Some(HermesCampaignOptions {
+            seed: Some(1234),
+            iterations: 8,
+        })
+    );
+    assert_eq!(parse_campaign_options(&["iterations=0"]), None);
+    assert_eq!(parse_campaign_options(&["seed=1", "seed=2"]), None);
+
+    for index in 0..HERMES_CAMPAIGN_CASES {
+        let case = campaign_case(index, 1234, index).expect("catalog index");
+        assert_eq!(
+            hermes_shell_logic::classify(case.command, &case.args[..case.arg_count]),
+            hermes_shell_logic::HermesShellPolicy::Allowed
+        );
+    }
+}
+
 mod syscall_bridge_logic {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

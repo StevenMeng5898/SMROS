@@ -47,8 +47,10 @@ QEMU_MEMORY="${QEMU_MEMORY:-512M}"
 SMROS_ST_TIMEOUT="${SMROS_ST_TIMEOUT:-45}"
 SMROS_ST_LOG="${SMROS_ST_LOG:-$REPO_ROOT/target/smros-smoke-qemu.log}"
 SMROS_ST_PROMPT="${SMROS_ST_PROMPT:-smros:/>}"
-DEFAULT_SMROS_ST_REQUIRED_PATTERNS="SMROS-A Distributed AI-Native Operating System|[OK] Kernel initialized successfully!|[OK] Serial console initialized|[SYSCALL] Syscall handler initialized|[CHANNEL] Channel subsystem initialized|[INFO] Fast boot complete. Starting shell|[SHELL] Starting shell as scheduled thread...|$SMROS_ST_PROMPT"
+DEFAULT_SMROS_ST_REQUIRED_PATTERNS="SMROS-A Distributed AI-Native Operating System|[OK] Kernel initialized successfully!|[OK] Serial console initialized|[SYSCALL] Syscall handler initialized|[CHANNEL] Channel subsystem initialized|[INFO] Fast boot complete. Starting shell|[SHELL] Starting shell as scheduled thread...|Hermes random campaign complete seed=1 iterations=1|Hermes denied forbidden command: reboot|$SMROS_ST_PROMPT"
 SMROS_ST_REQUIRED_PATTERNS="${SMROS_ST_REQUIRED_PATTERNS:-$DEFAULT_SMROS_ST_REQUIRED_PATTERNS}"
+SMROS_ST_COMMANDS="${SMROS_ST_COMMANDS:-hermes random seed=1 iterations=1
+hermes exec reboot}"
 
 if ! command -v "$QEMU_SYSTEM" >/dev/null 2>&1; then
     echo "error: $QEMU_SYSTEM not found" >&2
@@ -73,15 +75,21 @@ if [ ! -f "$FXFS_DISK" ]; then
     qemu-img create -f raw "$FXFS_DISK" "$FXFS_DISK_SIZE" >/dev/null
 fi
 
-rm -f "$SMROS_ST_LOG"
+input_fifo="${SMROS_ST_LOG}.stdin"
+rm -f "$SMROS_ST_LOG" "$input_fifo"
+mkfifo "$input_fifo"
+exec 3<>"$input_fifo"
 echo "Booting SMROS smoke test for up to ${SMROS_ST_TIMEOUT}s..."
 
 qemu_pid=""
+commands_sent=0
 cleanup() {
     if [ -n "$qemu_pid" ] && kill -0 "$qemu_pid" >/dev/null 2>&1; then
         kill "$qemu_pid" >/dev/null 2>&1 || true
         wait "$qemu_pid" >/dev/null 2>&1 || true
     fi
+    exec 3>&- || true
+    rm -f "$input_fifo"
 }
 trap cleanup EXIT INT TERM
 
@@ -110,16 +118,17 @@ pass_if_smoke_complete() {
         return
     fi
 
+    if [ "$commands_sent" -eq 0 ]; then
+        printf '%s\n' "$SMROS_ST_COMMANDS" >&3
+        commands_sent=1
+        return
+    fi
+
     if required_patterns_present; then
         echo "SMROS QEMU smoke test passed: found '$SMROS_ST_PROMPT' and required boot milestones."
         echo "Log: $SMROS_ST_LOG"
         exit 0
     fi
-
-    echo "SMROS QEMU smoke test failed: prompt appeared but required boot milestones were missing." >&2
-    echo "Log tail:" >&2
-    tail -n 80 "$SMROS_ST_LOG" >&2 || true
-    exit 1
 }
 
 "$QEMU_SYSTEM" \
@@ -133,6 +142,7 @@ pass_if_smoke_complete() {
     -device "$QEMU_BLOCK_DEVICE" \
     -netdev user,id=smrosnet \
     -device "$QEMU_NET_DEVICE" \
+    <"$input_fifo" \
     >"$SMROS_ST_LOG" 2>&1 &
 qemu_pid=$!
 

@@ -7,6 +7,7 @@ pub mod elf;
 pub mod fxfs;
 pub mod gemma;
 pub mod hermes_agent;
+pub(crate) mod hermes_shell_logic_shared;
 pub mod host_share;
 pub mod html_ui;
 pub mod lvgl;

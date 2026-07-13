@@ -6,7 +6,7 @@ verus! {
 
 include!("../../../src/user_level/services/user_logic_shared.rs");
 
-pub const SERVICES_FILE_COUNT: usize = 17;
+pub const SERVICES_FILE_COUNT: usize = 18;
 
 pub const USER_NAMESPACE_RIGHTS_MASK: u32 = 0x7;
 pub const USER_FXFS_MAX_NODES: usize = 8192;
@@ -37,6 +37,7 @@ pub const GEMMA_DEFAULT_OUTPUT_TOKENS: usize = 32;
 
 pub const HERMES_REQUIRED_TOOLS: usize = 3;
 pub const HERMES_REQUIRED_SKILLS: usize = 4;
+pub const HERMES_MAX_ITERATIONS: usize = 64;
 
 pub const QML_CLUSTER_RENDER_WIDTH: usize = 960;
 pub const QML_CLUSTER_RENDER_HEIGHT: usize = 540;
@@ -87,6 +88,14 @@ spec fn checked_mul_spec(lhs: int, rhs: int) -> Option<int> {
     } else {
         Option::<int>::None
     }
+}
+
+spec fn hermes_campaign_iterations_valid_spec(iterations: int) -> bool {
+    0 < iterations && iterations <= HERMES_MAX_ITERATIONS
+}
+
+spec fn hermes_command_class_allowed_spec(command_class: int) -> bool {
+    command_class == 1
 }
 
 spec fn gemma_prompt_len_valid_spec(len: int) -> bool {
@@ -1116,6 +1125,16 @@ proof fn hermes_agent_rs_proof_slice() {
     ));
 }
 
+proof fn hermes_shell_logic_shared_rs_proof_slice() {
+    assert(hermes_campaign_iterations_valid_spec(1));
+    assert(hermes_campaign_iterations_valid_spec(64));
+    assert(!hermes_campaign_iterations_valid_spec(0));
+    assert(!hermes_campaign_iterations_valid_spec(65));
+    assert(hermes_command_class_allowed_spec(1));
+    assert(!hermes_command_class_allowed_spec(0));
+    assert(!hermes_command_class_allowed_spec(2));
+}
+
 proof fn host_share_rs_proof_slice()
     ensures
         true,
@@ -1130,7 +1149,7 @@ proof fn html_ui_rs_proof_slice()
 
 proof fn mod_rs_proof_slice()
     ensures
-        SERVICES_FILE_COUNT == 17,
+        SERVICES_FILE_COUNT == 18,
 {
 }
 
@@ -1212,7 +1231,7 @@ proof fn user_shell_rs_proof_slice() {
 
 proof fn services_folder_all_files_have_verification_slices()
     ensures
-        SERVICES_FILE_COUNT == 17,
+        SERVICES_FILE_COUNT == 18,
 {
     compat_apps_rs_proof_slice();
     component_rs_proof_slice();
@@ -1221,6 +1240,7 @@ proof fn services_folder_all_files_have_verification_slices()
     fxfs_rs_proof_slice();
     gemma_rs_proof_slice();
     hermes_agent_rs_proof_slice();
+    hermes_shell_logic_shared_rs_proof_slice();
     host_share_rs_proof_slice();
     html_ui_rs_proof_slice();
     mod_rs_proof_slice();

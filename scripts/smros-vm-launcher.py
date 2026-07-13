@@ -26,9 +26,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 7070
 MAX_REQUEST = 4096
-LAUNCHER_VERSION = 4
+LAUNCHER_VERSION = 5
 DEFAULT_LAUNCH_STABLE_SECONDS = 2.0
 DEFAULT_TERMINATE_TIMEOUT_SECONDS = 3.0
+DEFAULT_TEST_TIMEOUT_SECONDS = 300.0
+MAX_TEST_LOG_BYTES = 64 * 1024
 
 LOCK = threading.Lock()
 PROCS: dict[str, subprocess.Popen[bytes]] = {}
@@ -45,6 +47,7 @@ def parse_request(data: bytes) -> tuple[str, dict[str, str]]:
         "SMROS_VM_STOP 1",
         "SMROS_VM_PING 1",
         "SMROS_TRACE_SYNC 1",
+        "SMROS_TEST_RUN 1",
     }:
         raise ValueError("bad header")
     values: dict[str, str] = {}
@@ -180,8 +183,58 @@ def stop_qemu(values: dict[str, str]) -> str:
 def launcher_status() -> str:
     return (
         f"OK version={LAUNCHER_VERSION} monitor_none=1 stale_qemu_cleanup=1 "
-        "trace_sync=1 stable_launch=1 vm_log=1\n"
+        "trace_sync=1 stable_launch=1 vm_log=1 hermes_test_jobs=1\n"
     )
+
+
+def parse_test_job(values: dict[str, str]) -> tuple[str, str]:
+    if set(values) != {"job"}:
+        raise ValueError("test request requires exactly one job field")
+    job = values["job"]
+    if job not in {"ut", "it", "st"}:
+        raise ValueError(f"unsupported test job: {job}")
+    return ("make", job)
+
+
+def run_test_job(values: dict[str, str]) -> str:
+    cmd = parse_test_job(values)
+    job = values["job"]
+    timeout = float(os.environ.get("SMROS_HERMES_TEST_TIMEOUT", DEFAULT_TEST_TIMEOUT_SECONDS))
+    if timeout <= 0 or timeout > 1800:
+        timeout = DEFAULT_TEST_TIMEOUT_SECONDS
+    with LOCK:
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            write_test_log(job, (exc.stdout or "") + (exc.stderr or ""))
+            return f"ERR job={job} status=timeout\n"
+
+    output = (result.stdout or "") + (result.stderr or "")
+    write_test_log(job, output)
+    summary = bounded_test_summary(output)
+    prefix = "OK" if result.returncode == 0 else "ERR"
+    return f"{prefix} job={job} status={result.returncode} summary={summary}\n"
+
+
+def write_test_log(job: str, output: str) -> None:
+    log_dir = ROOT / "target" / "hermes-tests"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    encoded = output.encode("utf-8", errors="replace")[-MAX_TEST_LOG_BYTES:]
+    (log_dir / f"{job}.log").write_bytes(encoded)
+
+
+def bounded_test_summary(output: str) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    summary = lines[-1] if lines else "no-output"
+    safe = "".join(char if char.isalnum() or char in ".:_-" else "_" for char in summary)
+    return safe[:160] or "no-output"
 
 
 def sync_trace(values: dict[str, str]) -> str:
@@ -368,6 +421,8 @@ class Handler(socketserver.BaseRequestHandler):
                 action = "stop"
             elif header == "SMROS_TRACE_SYNC 1":
                 action = "trace-sync"
+            elif header == "SMROS_TEST_RUN 1":
+                action = "test-run"
             else:
                 action = "ping"
             print(
@@ -380,6 +435,8 @@ class Handler(socketserver.BaseRequestHandler):
                 response = stop_qemu(values)
             elif header == "SMROS_TRACE_SYNC 1":
                 response = sync_trace(values)
+            elif header == "SMROS_TEST_RUN 1":
+                response = run_test_job(values)
             else:
                 response = launcher_status()
         except Exception as exc:  # Keep daemon alive; report concise cause.

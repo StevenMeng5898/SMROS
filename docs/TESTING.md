@@ -127,8 +127,18 @@ make st
 ```
 
 This builds the kernel, starts QEMU in non-interactive mode, captures serial
-output in `target/smros-smoke-qemu.log`, and passes when the `smros:/>` prompt
-and required boot milestones are seen.
+output in `target/smros-smoke-qemu.log`, sends `hermes random seed=1
+iterations=1` and `hermes exec reboot`, and passes when the safe campaign
+completes, reboot is denied, and the required boot milestones are seen.
+
+Run the constrained host-launcher protocol tests separately with:
+
+```bash
+make launcher-test
+```
+
+The protocol accepts only named `ut`, `it`, and `st` jobs. `hermes test-all`
+uses this path and writes bounded host logs under `target/hermes-tests/`.
 
 Useful overrides:
 
