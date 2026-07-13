@@ -330,3 +330,25 @@ fn test_layer_commands_and_docs_are_wired() {
     assert!(smoke.contains("[INFO] Fast boot complete. Starting shell"));
     assert!(smoke.contains("smros:/>"));
 }
+
+#[test]
+fn hermes_safe_gateway_authorizes_before_shell_dispatch() {
+    let shell = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/user_shell.rs"
+    ));
+
+    let gateway = shell
+        .find("fn execute_hermes_command(")
+        .expect("Hermes gateway must exist");
+    let policy = shell[gateway..]
+        .find("hermes_shell_logic_shared::classify")
+        .expect("gateway must consult the shared policy");
+    let dispatch = shell[gateway..]
+        .find("for shell_command in SHELL_COMMANDS")
+        .expect("gateway must use the existing command registry");
+
+    assert!(policy < dispatch);
+    assert!(shell.contains("\"exec\" =>"));
+    assert!(shell.contains("Hermes denied forbidden command: "));
+}

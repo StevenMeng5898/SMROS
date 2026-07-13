@@ -32,6 +32,51 @@ struct ShellContext {
     cwd: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HermesCommandStatus {
+    Completed,
+    Denied,
+    Invalid,
+    Unknown,
+}
+
+fn execute_hermes_command(
+    ctx: &mut ShellContext,
+    command: &str,
+    args: &[&str],
+) -> HermesCommandStatus {
+    use crate::user_level::services::hermes_shell_logic_shared::HermesShellPolicy;
+
+    match crate::user_level::services::hermes_shell_logic_shared::classify(command, args) {
+        HermesShellPolicy::Forbidden => {
+            ctx.serial.write_str("Hermes denied forbidden command: ");
+            ctx.serial.write_str(command);
+            ctx.serial.write_str("\n");
+            return HermesCommandStatus::Denied;
+        }
+        HermesShellPolicy::Invalid => {
+            ctx.serial.write_str("Hermes rejected invalid command arguments: ");
+            ctx.serial.write_str(command);
+            ctx.serial.write_str("\n");
+            return HermesCommandStatus::Invalid;
+        }
+        HermesShellPolicy::Allowed => {}
+    }
+
+    for shell_command in SHELL_COMMANDS {
+        if shell_command.name == command {
+            ctx.command_count = ctx.command_count.saturating_add(1);
+            (shell_command.handler)(ctx, args);
+            return HermesCommandStatus::Completed;
+        }
+    }
+
+    ctx.serial.write_str("Hermes command is not registered: ");
+    ctx.serial.write_str(command);
+    ctx.serial.write_str("\n");
+    HermesCommandStatus::Unknown
+}
+
 impl ShellContext {
     fn read_line(&mut self) -> String {
         let mut input_buf = [0u8; 256];
@@ -4804,6 +4849,13 @@ fn cmd_hermes(ctx: &mut ShellContext, args: &[&str]) {
     }
 
     match args[0] {
+        "exec" => {
+            if args.len() < 2 {
+                ctx.serial.write_str("usage: hermes exec <safe-command> [args...]\n");
+                return;
+            }
+            let _ = execute_hermes_command(ctx, args[1], &args[2..]);
+        }
         "info" | "status" => match crate::user_level::hermes_agent::info() {
             Ok(info) => print_hermes_info(ctx, &info),
             Err(err) => {
@@ -5120,7 +5172,9 @@ fn run_gemma_tests(ctx: &mut ShellContext) -> bool {
 
 fn print_hermes_usage(ctx: &mut ShellContext) {
     ctx.serial
-        .write_str("usage: hermes <info|test|skills|web|ui|ask>\n");
+        .write_str("usage: hermes <info|test|skills|web|ui|ask|exec>\n");
+    ctx.serial
+        .write_str("       hermes exec <safe-command> [args...]\n");
     ctx.serial.write_str("       hermes ask <prompt>\n");
     ctx.serial
         .write_str("       hermes ui  # LVGL-styled keyboard/mouse UI\n");
