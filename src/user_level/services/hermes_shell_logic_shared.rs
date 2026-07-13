@@ -10,6 +10,47 @@ pub enum HermesShellPolicy {
     Invalid,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HermesCampaignOptions {
+    pub seed: Option<u64>,
+    pub iterations: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HermesCampaignCase {
+    pub command: &'static str,
+    pub args: [&'static str; 2],
+    pub arg_count: usize,
+}
+
+const CAMPAIGN_CATALOG: [HermesCampaignCase; HERMES_CAMPAIGN_CASES] = [
+    campaign_case_const("version", "", "", 0),
+    campaign_case_const("ps", "-a", "", 1),
+    campaign_case_const("meminfo", "", "", 0),
+    campaign_case_const("components", "", "", 0),
+    campaign_case_const("fxfs", "", "", 0),
+    campaign_case_const("drivers", "", "", 0),
+    campaign_case_const("ifconfig", "", "", 0),
+    campaign_case_const("svc", "", "", 0),
+    campaign_case_const("sched", "status", "", 1),
+    campaign_case_const("vm", "-s", "", 1),
+    campaign_case_const("docker", "images", "", 1),
+    campaign_case_const("fuzzsc", "seed=1", "iterations=1", 2),
+];
+
+const fn campaign_case_const(
+    command: &'static str,
+    first: &'static str,
+    second: &'static str,
+    arg_count: usize,
+) -> HermesCampaignCase {
+    HermesCampaignCase {
+        command,
+        args: [first, second],
+        arg_count,
+    }
+}
+
 pub fn classify(command: &str, args: &[&str]) -> HermesShellPolicy {
     if command.is_empty()
         || command.len() > HERMES_MAX_ARG_LEN
@@ -144,6 +185,35 @@ pub fn campaign_iterations_valid(iterations: usize) -> bool {
 pub fn campaign_case_index(seed: u64, round: usize) -> usize {
     let mut state = seed ^ (round as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
     next_random(&mut state) as usize % HERMES_CAMPAIGN_CASES
+}
+
+pub fn campaign_case(index: usize, _seed: u64, _round: usize) -> Option<HermesCampaignCase> {
+    CAMPAIGN_CATALOG.get(index).copied()
+}
+
+pub fn parse_campaign_options(args: &[&str]) -> Option<HermesCampaignOptions> {
+    let mut seed = None;
+    let mut iterations = 8usize;
+    let mut iterations_seen = false;
+
+    for arg in args {
+        let (key, value) = arg.split_once('=')?;
+        let number = parse_decimal(value)?;
+        match key {
+            "seed" if seed.is_none() => seed = Some(number),
+            "iterations" if !iterations_seen && number <= usize::MAX as u64 => {
+                iterations = number as usize;
+                iterations_seen = true;
+            }
+            _ => return None,
+        }
+    }
+
+    if campaign_iterations_valid(iterations) {
+        Some(HermesCampaignOptions { seed, iterations })
+    } else {
+        None
+    }
 }
 
 pub fn next_random(state: &mut u64) -> u64 {

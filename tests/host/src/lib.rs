@@ -588,7 +588,10 @@ fn hermes_shell_policy_allows_only_bounded_safe_forms() {
 
 #[test]
 fn hermes_campaign_selection_is_reproducible_and_bounded() {
-    use hermes_shell_logic::{campaign_case_index, campaign_iterations_valid, HERMES_CAMPAIGN_CASES};
+    use hermes_shell_logic::{
+        campaign_case, campaign_case_index, campaign_iterations_valid, parse_campaign_options,
+        HermesCampaignOptions, HERMES_CAMPAIGN_CASES,
+    };
 
     let first: Vec<_> = (0..8).map(|round| campaign_case_index(1234, round)).collect();
     let second: Vec<_> = (0..8).map(|round| campaign_case_index(1234, round)).collect();
@@ -597,6 +600,23 @@ fn hermes_campaign_selection_is_reproducible_and_bounded() {
     assert!(!campaign_iterations_valid(0));
     assert!(campaign_iterations_valid(64));
     assert!(!campaign_iterations_valid(65));
+    assert_eq!(
+        parse_campaign_options(&["seed=1234", "iterations=8"]),
+        Some(HermesCampaignOptions {
+            seed: Some(1234),
+            iterations: 8,
+        })
+    );
+    assert_eq!(parse_campaign_options(&["iterations=0"]), None);
+    assert_eq!(parse_campaign_options(&["seed=1", "seed=2"]), None);
+
+    for index in 0..HERMES_CAMPAIGN_CASES {
+        let case = campaign_case(index, 1234, index).expect("catalog index");
+        assert_eq!(
+            hermes_shell_logic::classify(case.command, &case.args[..case.arg_count]),
+            hermes_shell_logic::HermesShellPolicy::Allowed
+        );
+    }
 }
 
 mod syscall_bridge_logic {

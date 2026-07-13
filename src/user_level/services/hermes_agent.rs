@@ -19,6 +19,7 @@ const HERMES_SESSION_DIR: &str = "/data/hermes/sessions";
 const HERMES_TOOL_DIR: &str = "/data/hermes/tools";
 const HERMES_CRON_DIR: &str = "/data/hermes/cron";
 const HERMES_WEB_DIR: &str = "/data/hermes/web";
+const HERMES_TEST_DIR: &str = "/data/hermes/tests";
 const HERMES_CONFIG_PATH: &str = "/data/hermes/config.yaml";
 const HERMES_MEMORY_PATH: &str = "/data/hermes/memory/MEMORY.md";
 const HERMES_USER_PATH: &str = "/data/hermes/memory/USER.md";
@@ -27,6 +28,7 @@ const HERMES_TOOL_AUDIT_PATH: &str = "/data/hermes/tools/audit.log";
 const HERMES_CRON_PATH: &str = "/data/hermes/cron/nightly-smoke.yaml";
 const HERMES_WEB_INDEX_PATH: &str = "/data/hermes/web/index.html";
 const HERMES_WEB_PPM_PATH: &str = "/data/hermes/web/hermes-ui.ppm";
+pub const HERMES_LATEST_TEST_PATH: &str = "/data/hermes/tests/latest.log";
 
 const HERMES_PROVIDER_GEMMA: &str = gemma::GEMMA_PROVIDER;
 const HERMES_MODEL_DEFAULT: &str = gemma::GEMMA_MODEL;
@@ -257,6 +259,15 @@ pub struct HermesSkillInfo {
 
 pub fn init() -> bool {
     prepare_storage().is_ok()
+}
+
+pub fn persist_campaign_report(report: &str) -> Result<usize, HermesAgentError> {
+    prepare_storage()?;
+    if report.len() > 16 * 1024 {
+        return Err(HermesAgentError::Tool);
+    }
+    fxfs::write_file(HERMES_LATEST_TEST_PATH, report.as_bytes())
+        .map_err(|_| HermesAgentError::Tool)
 }
 
 pub fn info() -> Result<HermesAgentInfo, HermesAgentError> {
@@ -533,6 +544,7 @@ fn prepare_storage() -> Result<(), HermesAgentError> {
     create_dir(HERMES_TOOL_DIR)?;
     create_dir(HERMES_CRON_DIR)?;
     create_dir(HERMES_WEB_DIR)?;
+    create_dir(HERMES_TEST_DIR)?;
     ensure_exact_file(HERMES_CONFIG_PATH, HERMES_CONFIG)?;
     ensure_file(HERMES_MEMORY_PATH, HERMES_MEMORY)?;
     ensure_file(HERMES_USER_PATH, HERMES_USER)?;
