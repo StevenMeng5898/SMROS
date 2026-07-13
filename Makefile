@@ -41,7 +41,7 @@ SMOKE_QEMU_MEMORY ?= 512M
 SMROS_ST_LOG ?= target/smros-smoke-qemu.log
 ST_COVERAGE_DIR ?= target/coverage/st
 
-.PHONY: all build build-test host-fmt-check script-check ut it coverage-ut coverage-it coverage-host coverage-st coverage st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
+.PHONY: all build build-test host-fmt-check script-check launcher-test ut it coverage-ut coverage-it coverage-host coverage-st coverage st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
 
 all: build
 
@@ -68,6 +68,10 @@ host-fmt-check:
 # Shell syntax check for project scripts
 script-check:
 	@bash -n $(SHELL_SCRIPTS)
+
+# Fixed-protocol host launcher tests
+launcher-test:
+	@python3 scripts/test-smros-vm-launcher.py
 
 # Host-side unit tests for pure helper logic
 ut:
@@ -105,7 +109,7 @@ st: $(FXFS_DISK)
 	@ARCH='$(TARGET)' QEMU_SYSTEM='$(QEMU_SYSTEM)' KERNEL_IMAGE='$(KERNEL)' QEMU_MACHINE='$(QEMU_MACHINE)' QEMU_CPU='$(QEMU_CPU)' QEMU_SMP='$(SMOKE_QEMU_SMP)' QEMU_MEMORY='$(SMOKE_QEMU_MEMORY)' QEMU_BLOCK_DEVICE='$(QEMU_BLOCK_DEVICE)' QEMU_NET_DEVICE='$(QEMU_NET_DEVICE)' SMROS_ST_LOG='$(SMROS_ST_LOG)' ./scripts/smoke-qemu.sh
 
 # Fast local confidence suite; intentionally does not boot QEMU
-test: host-fmt-check script-check ut it build-test
+test: host-fmt-check script-check launcher-test ut it build-test
 
 $(FXFS_DISK):
 	@echo "Creating persistent FxFS disk image: $(FXFS_DISK)"

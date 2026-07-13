@@ -35,6 +35,73 @@ pub struct VmHostLaunch {
     pub log_path: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HermesHostTestJob {
+    Ut,
+    It,
+    St,
+}
+
+impl HermesHostTestJob {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ut => "ut",
+            Self::It => "it",
+            Self::St => "st",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HermesHostTestResult {
+    pub job: HermesHostTestJob,
+    pub passed: bool,
+    pub summary: String,
+}
+
+pub fn run_hermes_test(job: HermesHostTestJob) -> Result<HermesHostTestResult, VmHostError> {
+    let request = build_hermes_test_request(job);
+    let mut socket = net::tcp_connect(NetworkSocketAddr {
+        ip: net::QEMU_USER_GATEWAY,
+        port: DEFAULT_LAUNCHER_PORT,
+    })
+    .map_err(map_connect_error)?;
+    socket
+        .write(request.as_bytes())
+        .map_err(VmHostError::Write)?;
+    let mut response = [0u8; MAX_RESPONSE_BYTES];
+    let bytes = read_response(&mut socket, &mut response, RESPONSE_READ_ATTEMPTS)?;
+    let _ = socket.close();
+    parse_hermes_test_response(job, &response[..bytes])
+}
+
+fn build_hermes_test_request(job: HermesHostTestJob) -> String {
+    let mut request = String::from("SMROS_TEST_RUN 1\njob=");
+    request.push_str(job.as_str());
+    request.push_str("\nend\n");
+    request
+}
+
+fn parse_hermes_test_response(
+    job: HermesHostTestJob,
+    response: &[u8],
+) -> Result<HermesHostTestResult, VmHostError> {
+    let text = core::str::from_utf8(response).map_err(|_| VmHostError::ResponseInvalid)?;
+    let passed = text.starts_with("OK ") && text.contains("status=0");
+    if !passed && !text.starts_with("ERR ") {
+        return Err(VmHostError::ResponseInvalid);
+    }
+    let summary = text
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("summary="))
+        .unwrap_or(if passed { "passed" } else { "failed" });
+    Ok(HermesHostTestResult {
+        job,
+        passed,
+        summary: summary.to_string(),
+    })
+}
+
 pub fn launch(vm: &VmRecord) -> Result<VmHostLaunch, VmHostError> {
     let host = vm.host.as_ref().ok_or(VmHostError::NoHostConfig)?;
     let request = build_launch_request(vm, host)?;

@@ -352,3 +352,23 @@ fn hermes_safe_gateway_authorizes_before_shell_dispatch() {
     assert!(shell.contains("\"exec\" =>"));
     assert!(shell.contains("Hermes denied forbidden command: "));
 }
+
+#[test]
+fn hermes_host_tests_use_fixed_enum_jobs_and_protocol() {
+    let client = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/vm_host.rs"
+    ));
+    let launcher = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/smros-vm-launcher.py"
+    ));
+
+    assert!(client.contains("enum HermesHostTestJob"));
+    assert!(client.contains("Self::Ut => \"ut\""));
+    assert!(client.contains("Self::It => \"it\""));
+    assert!(client.contains("Self::St => \"st\""));
+    assert!(client.contains("SMROS_TEST_RUN 1\\njob="));
+    assert!(launcher.contains("if job not in {\"ut\", \"it\", \"st\"}"));
+    assert!(!launcher.contains("shell=True"));
+}
