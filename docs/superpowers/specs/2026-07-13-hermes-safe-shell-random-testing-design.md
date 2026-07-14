@@ -8,7 +8,7 @@ Give the native SMROS Hermes agent access to safe shell capabilities and reprodu
 
 - `hermes exec <command> [args...]` executes one allowed guest shell command.
 - `hermes random [seed=<u64>] [iterations=<positive usize>]` selects and executes guest test operations from a safe catalog. The iteration count has no policy maximum; the report includes the effective seed so a finite campaign can be replayed.
-- `hermes test-all [seed=<u64>] [iterations=<positive usize>]` runs the deterministic Hermes checks once, a randomized guest campaign for the requested iterations, and the named host jobs `ut`, `it`, and `st` once each.
+- `hermes test-all [seed=<u64>] [iterations=<positive usize>]` runs the deterministic Hermes checks once, then runs one randomized guest operation followed by the named host jobs `ut`, `it`, and `st` during every requested iteration. For example, `iterations=1000` requests each host job 1000 times.
 - Existing `hermes info`, `hermes test`, `hermes skills`, `hermes ask`, `hermes ui`, and `hermes web` behavior remains compatible.
 
 ## Safety Model
@@ -29,7 +29,7 @@ The gateway returns structured status metadata. Serial output remains visible no
 
 ### Random Campaign Runner
 
-Hermes owns a deterministic PRNG seeded by the user-provided seed or a generated runtime seed. Each catalog entry contains a safe structured command template, weight, and resource class. Selection produces concrete bounded arguments, including small `fuzzsc` seeds and iteration counts. The campaign parser rejects zero, malformed, duplicate, unknown, and platform-overflowing values, while accepting every positive iteration count representable as `usize`. A campaign report contains seed, requested and completed iterations, pass/fail/denied counts, selected commands, and failure summaries.
+Hermes owns a deterministic PRNG seeded by the user-provided seed or a generated runtime seed. Each catalog entry contains a safe structured command template, weight, and resource class. Selection produces concrete bounded arguments, including small `fuzzsc` seeds and iteration counts. The campaign parser rejects zero, malformed, duplicate, unknown, and platform-overflowing values, while accepting every positive iteration count representable as `usize`. A campaign report contains seed, requested and completed iterations, pass/fail/denied counts, selected commands, and failure summaries. Per-iteration detail is recorded for at most the first 64 rounds, followed by an omitted-detail count, so report memory and persistence size do not grow without bound.
 
 Reports are persisted below `/data/hermes/tests/` with a latest report plus bounded history. The existing Hermes audit/session facilities record tool use without storing unbounded command output.
 
@@ -41,19 +41,20 @@ The launcher validates the request before starting a subprocess. Host job suppor
 
 ## Data Flow
 
-For `hermes exec`, the shell parses the Hermes subcommand, the gateway validates the structured guest request, and the existing shell handler runs only after authorization. For `hermes random`, Hermes chooses a catalog entry from the seeded PRNG and sends the structured request through the same gateway. For `hermes test-all`, the native guest check runs once, the random campaign alone follows the requested iteration count, and then each of the three fixed host jobs is requested exactly once; results are combined and persisted.
+For `hermes exec`, the shell parses the Hermes subcommand, the gateway validates the structured guest request, and the existing shell handler runs only after authorization. For `hermes random`, Hermes chooses a catalog entry from the seeded PRNG and sends the structured request through the same gateway. For `hermes test-all`, the native guest check runs once before the iteration loop. Each iteration then selects and executes its deterministic random catalog case and sequentially requests `ut`, `it`, and `st` once. The next iteration starts only after all three host requests finish. Results are aggregated by random status and host job, bounded details are persisted, and overall success requires the native check, every random operation, and every host request to pass.
 
 No Gemma-generated text is executed directly. Natural-language `hermes ask` may recommend commands, but execution requires an explicit `hermes exec`, `hermes random`, or `hermes test-all` invocation and always passes through policy validation.
 
 ## Error Handling
 
-Denials identify the rejected command class without echoing unsafe or oversized input. Guest handler failures, host transport failures, host nonzero exits, timeouts, and persistence failures have distinct report statuses. A partial campaign remains reproducible and records how many iterations completed.
+Denials identify the rejected command class without echoing unsafe or oversized input. Guest handler failures, host transport failures, host nonzero exits, timeouts, and persistence failures have distinct report statuses. A failed random operation or host job is counted and does not prevent the remaining jobs or iterations from running. A partial campaign remains reproducible and records how many iterations completed. Standalone random and combined test reports remain below the existing 16 KiB persistence limit by retaining aggregate totals and no more than 64 round details.
 
 ## Testing
 
 - Pure host unit tests cover allowlisted commands, permanent denials, nested `vm`/`docker` restrictions, argument bounds, acceptance above the former 64-iteration ceiling, rejection of zero and overflow, deterministic PRNG selection, and report accounting.
 - Integration contract tests verify the shell gateway and Hermes subcommands are wired to the shared policy rather than an unrestricted parser.
-- Integration contract tests also verify that `test-all` applies `iterations` only to the random campaign and invokes `ut`, `it`, and `st` once each.
+- Integration contract tests verify that `test-all` places the random operation and one `ut`/`it`/`st` sequence inside the requested iteration loop while leaving the native check outside it.
+- Report tests verify that campaigns above 64 iterations record aggregate totals, mark omitted details, and remain below the 16 KiB persistence limit.
 - Python launcher tests cover accepted named jobs, rejection of arbitrary command text and extra fields, timeout behavior, bounded logs, and response parsing.
 - Guest system tests run a short fixed-seed campaign and verify a forbidden-command probe is denied.
 - Existing `ut`, `it`, `st`, architecture builds, and Hermes/testsc coverage remain regression gates.
