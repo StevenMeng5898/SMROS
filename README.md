@@ -380,12 +380,13 @@ the LVGL-styled full-screen keyboard/mouse terminal UI.
 
 Hermes can execute explicitly allowlisted guest commands with `hermes exec`,
 or run a deterministic safe campaign with `hermes random`. Each campaign
-prints a replay seed and writes its bounded report to
-`/data/hermes/tests/latest.log`. `hermes test-all` combines the native Hermes
-test, a guest campaign, and fixed host-assisted `make ut`, `make it`, and
-`make st` jobs. The host jobs require `scripts/smros-vm-launcher.py`; the guest
-can request only those three jobs and cannot supply host command text.
-Destructive commands remain unavailable to Hermes.
+accepts any positive, platform-representable `iterations=<n>`, prints a replay
+seed, and writes its bounded report to `/data/hermes/tests/latest.log`.
+`hermes test-all` runs the native Hermes test once, the guest campaign for the
+requested iterations, and fixed host-assisted `make ut`, `make it`, and
+`make st` jobs once each. The host jobs require `scripts/smros-vm-launcher.py`;
+the guest can request only those three jobs and cannot supply host command
+text. Destructive commands remain unavailable to Hermes.
 
 `lvgl` exposes the SMROS-native LVGL-style porting layer. It models the LVGL
 display, input, tick, and widget seams with a CPU renderer, serial

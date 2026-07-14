@@ -610,15 +610,28 @@ fn hermes_campaign_selection_is_reproducible_and_bounded() {
     assert!(first.iter().all(|index| *index < HERMES_CAMPAIGN_CASES));
     assert!(!campaign_iterations_valid(0));
     assert!(campaign_iterations_valid(64));
-    assert!(!campaign_iterations_valid(65));
+    assert!(campaign_iterations_valid(65));
+    assert!(campaign_iterations_valid(usize::MAX));
     assert_eq!(
-        parse_campaign_options(&["seed=1234", "iterations=8"]),
+        parse_campaign_options(&["seed=9393", "iterations=65"]),
         Some(HermesCampaignOptions {
-            seed: Some(1234),
-            iterations: 8,
+            seed: Some(9393),
+            iterations: 65,
+        })
+    );
+    let maximum = format!("iterations={}", usize::MAX);
+    assert_eq!(
+        parse_campaign_options(&[maximum.as_str()]),
+        Some(HermesCampaignOptions {
+            seed: None,
+            iterations: usize::MAX,
         })
     );
     assert_eq!(parse_campaign_options(&["iterations=0"]), None);
+    assert_eq!(
+        parse_campaign_options(&["iterations=18446744073709551616"]),
+        None
+    );
     assert_eq!(parse_campaign_options(&["seed=1", "seed=2"]), None);
 
     for index in 0..HERMES_CAMPAIGN_CASES {

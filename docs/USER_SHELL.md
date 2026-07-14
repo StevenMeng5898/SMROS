@@ -411,13 +411,15 @@ default to denial. These commands are permanently forbidden to Hermes: `rm`,
 `docker stop`, and equivalent destructive lifecycle operations. Gemma-generated
 text is never executed directly.
 
-`hermes random [seed=<n>] [iterations=<1..64>]` selects bounded safe test and
-status operations deterministically. It prints the effective seed for replay
-and persists a bounded report at `/data/hermes/tests/latest.log`.
-`hermes test-all` adds native Hermes checks and requests host `ut`, `it`, and
-`st` jobs through `scripts/smros-vm-launcher.py`. The launcher maps those three
-identifiers to fixed Make argv, runs one job at a time with a timeout, and does
-not accept arbitrary command strings.
+`hermes random [seed=<n>] [iterations=<positive-n>]` selects bounded safe test
+and status operations deterministically. The finite iteration count has no
+policy maximum but must fit the platform `usize`. The command prints the
+effective seed for replay and persists a bounded report at
+`/data/hermes/tests/latest.log`. `hermes test-all` runs the native Hermes check
+once, applies `iterations` only to the random campaign, and then requests host
+`ut`, `it`, and `st` jobs once each through `scripts/smros-vm-launcher.py`. The
+launcher maps those three identifiers to fixed Make argv, runs one job at a
+time with a timeout, and does not accept arbitrary command strings.
 
 ### Qt/QML Vehicle Cluster Port
 

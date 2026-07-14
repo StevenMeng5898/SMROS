@@ -1,6 +1,5 @@
 pub const HERMES_MAX_ARGS: usize = 8;
 pub const HERMES_MAX_ARG_LEN: usize = 96;
-pub const HERMES_MAX_ITERATIONS: usize = 64;
 pub const HERMES_CAMPAIGN_CASES: usize = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,7 +178,7 @@ fn parse_decimal(value: &str) -> Option<u64> {
 }
 
 pub fn campaign_iterations_valid(iterations: usize) -> bool {
-    iterations > 0 && iterations <= HERMES_MAX_ITERATIONS
+    iterations > 0
 }
 
 pub fn campaign_case_index(seed: u64, round: usize) -> usize {

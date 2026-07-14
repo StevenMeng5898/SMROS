@@ -5178,9 +5178,9 @@ fn print_hermes_usage(ctx: &mut ShellContext) {
     ctx.serial
         .write_str("       hermes exec <safe-command> [args...]\n");
     ctx.serial
-        .write_str("       hermes random [seed=<n>] [iterations=<1..64>]\n");
+        .write_str("       hermes random [seed=<n>] [iterations=<positive-n>]\n");
     ctx.serial
-        .write_str("       hermes test-all [seed=<n>] [iterations=<1..64>]\n");
+        .write_str("       hermes test-all [seed=<n>] [iterations=<positive-n>]\n");
     ctx.serial.write_str("       hermes ask <prompt>\n");
     ctx.serial
         .write_str("       hermes ui  # LVGL-styled keyboard/mouse UI\n");
@@ -5194,7 +5194,7 @@ fn run_hermes_test_all(ctx: &mut ShellContext, args: &[&str]) {
         crate::user_level::services::hermes_shell_logic_shared::parse_campaign_options(args)
     else {
         ctx.serial
-            .write_str("usage: hermes test-all [seed=<n>] [iterations=<1..64>]\n");
+            .write_str("usage: hermes test-all [seed=<n>] [iterations=<positive-n>]\n");
         return;
     };
     let seed = options.seed.unwrap_or(1);
@@ -5262,7 +5262,7 @@ fn run_hermes_random_campaign(ctx: &mut ShellContext, args: &[&str]) {
 
     let Some(options) = parse_campaign_options(args) else {
         ctx.serial
-            .write_str("usage: hermes random [seed=<n>] [iterations=<1..64>]\n");
+            .write_str("usage: hermes random [seed=<n>] [iterations=<positive-n>]\n");
         return;
     };
     let seed = options.seed.unwrap_or_else(|| {

@@ -408,10 +408,34 @@ fn hermes_test_orchestration_is_documented_and_smoke_wired() {
     ));
 
     assert!(shell.contains("\"test-all\" => run_hermes_test_all"));
+    let test_all_start = shell
+        .find("fn run_hermes_test_all(")
+        .expect("test-all function");
+    let test_all_end = shell[test_all_start..]
+        .find("fn run_hermes_random_campaign(")
+        .map(|offset| test_all_start + offset)
+        .expect("random campaign function");
+    let test_all = &shell[test_all_start..test_all_end];
+    let random_pos = test_all
+        .find("run_hermes_random_campaign")
+        .expect("random campaign call");
+    let jobs_pos = test_all.find("for job in [").expect("single host job loop");
+    assert!(random_pos < jobs_pos);
+    assert_eq!(test_all.matches("options.iterations").count(), 1);
+    assert_eq!(test_all.matches("for job in [").count(), 1);
+    for job in [
+        "HermesHostTestJob::Ut",
+        "HermesHostTestJob::It",
+        "HermesHostTestJob::St",
+    ] {
+        assert_eq!(test_all.matches(job).count(), 1);
+    }
     for command in ["hermes exec", "hermes random", "hermes test-all"] {
         assert!(readme.contains(command));
         assert!(docs.contains(command));
     }
+    assert!(!shell.contains("iterations=<1..64>"));
+    assert!(!docs.contains("iterations=<1..64>"));
     assert!(docs.contains("permanently forbidden"));
     assert!(smoke.contains("hermes random seed=1 iterations=1"));
     assert!(smoke.contains("hermes exec reboot"));

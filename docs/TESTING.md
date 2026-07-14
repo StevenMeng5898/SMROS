@@ -138,7 +138,9 @@ make launcher-test
 ```
 
 The protocol accepts only named `ut`, `it`, and `st` jobs. `hermes test-all`
-uses this path and writes bounded host logs under `target/hermes-tests/`.
+runs each host job once; its positive `iterations=<n>` value controls only the
+preceding random guest campaign. Host logs are bounded under
+`target/hermes-tests/`.
 
 Useful overrides:
 
