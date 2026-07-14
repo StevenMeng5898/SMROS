@@ -150,6 +150,24 @@ mod user_logic {
     }
 }
 
+fn braced_body(source: &str) -> &str {
+    let open = source.find('{').expect("opening brace");
+    let mut depth = 0usize;
+    for (offset, byte) in source.as_bytes()[open..].iter().copied().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[open + 1..open + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("closing brace");
+}
+
 #[test]
 fn checked_end_helpers_share_boundary_semantics() {
     let cases = [
@@ -416,13 +434,17 @@ fn hermes_test_orchestration_is_documented_and_smoke_wired() {
         .map(|offset| test_all_start + offset)
         .expect("random campaign function");
     let test_all = &shell[test_all_start..test_all_end];
-    let random_pos = test_all
-        .find("run_hermes_random_campaign")
-        .expect("random campaign call");
-    let jobs_pos = test_all.find("for job in [").expect("single host job loop");
-    assert!(random_pos < jobs_pos);
-    assert_eq!(test_all.matches("options.iterations").count(), 1);
-    assert_eq!(test_all.matches("for job in [").count(), 1);
+    let round_loop = "for round in 0..options.iterations {";
+    let round_pos = test_all.find(round_loop).expect("test-all iteration loop");
+    let round_body = braced_body(&test_all[round_pos..]);
+    assert!(test_all[..round_pos].contains("run_hermes_agent_tests(ctx)"));
+    assert!(round_body.contains("execute_hermes_campaign_round"));
+    assert_eq!(
+        round_body
+            .matches("for (job_index, job) in jobs.iter().copied().enumerate()")
+            .count(),
+        1
+    );
     for job in [
         "HermesHostTestJob::Ut",
         "HermesHostTestJob::It",
@@ -430,6 +452,7 @@ fn hermes_test_orchestration_is_documented_and_smoke_wired() {
     ] {
         assert_eq!(test_all.matches(job).count(), 1);
     }
+    assert!(test_all.contains("campaign_report_omitted_rounds(options.iterations)"));
     for command in ["hermes exec", "hermes random", "hermes test-all"] {
         assert!(readme.contains(command));
         assert!(docs.contains(command));
