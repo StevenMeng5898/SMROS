@@ -1,6 +1,7 @@
 pub const HERMES_MAX_ARGS: usize = 8;
 pub const HERMES_MAX_ARG_LEN: usize = 96;
 pub const HERMES_CAMPAIGN_CASES: usize = 12;
+pub const HERMES_REPORT_DETAIL_LIMIT: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HermesShellPolicy {
@@ -179,6 +180,14 @@ fn parse_decimal(value: &str) -> Option<u64> {
 
 pub fn campaign_iterations_valid(iterations: usize) -> bool {
     iterations > 0
+}
+
+pub fn campaign_report_includes_round(round: usize) -> bool {
+    round < HERMES_REPORT_DETAIL_LIMIT
+}
+
+pub fn campaign_report_omitted_rounds(iterations: usize) -> usize {
+    iterations.saturating_sub(HERMES_REPORT_DETAIL_LIMIT)
 }
 
 pub fn campaign_case_index(seed: u64, round: usize) -> usize {

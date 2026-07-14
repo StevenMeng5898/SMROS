@@ -596,7 +596,8 @@ fn hermes_shell_policy_allows_only_bounded_safe_forms() {
 #[test]
 fn hermes_campaign_selection_is_reproducible_and_bounded() {
     use hermes_shell_logic::{
-        campaign_case, campaign_case_index, campaign_iterations_valid, parse_campaign_options,
+        campaign_case, campaign_case_index, campaign_iterations_valid,
+        campaign_report_includes_round, campaign_report_omitted_rounds, parse_campaign_options,
         HermesCampaignOptions, HERMES_CAMPAIGN_CASES,
     };
 
@@ -633,6 +634,11 @@ fn hermes_campaign_selection_is_reproducible_and_bounded() {
         None
     );
     assert_eq!(parse_campaign_options(&["seed=1", "seed=2"]), None);
+    assert!(campaign_report_includes_round(0));
+    assert!(campaign_report_includes_round(63));
+    assert!(!campaign_report_includes_round(64));
+    assert_eq!(campaign_report_omitted_rounds(64), 0);
+    assert_eq!(campaign_report_omitted_rounds(1000), 936);
 
     for index in 0..HERMES_CAMPAIGN_CASES {
         let case = campaign_case(index, 1234, index).expect("catalog index");
