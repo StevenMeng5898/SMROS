@@ -457,6 +457,9 @@ fn hermes_test_orchestration_is_documented_and_smoke_wired() {
         assert!(readme.contains(command));
         assert!(docs.contains(command));
     }
+    assert!(readme.contains("each host job once per iteration"));
+    assert!(docs.contains("each host job once per iteration"));
+    assert!(shell.contains("details_omitted="));
     assert!(!shell.contains("iterations=<1..64>"));
     assert!(!docs.contains("iterations=<1..64>"));
     assert!(docs.contains("permanently forbidden"));

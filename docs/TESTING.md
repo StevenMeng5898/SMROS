@@ -138,9 +138,11 @@ make launcher-test
 ```
 
 The protocol accepts only named `ut`, `it`, and `st` jobs. `hermes test-all`
-runs each host job once; its positive `iterations=<n>` value controls only the
-preceding random guest campaign. Host logs are bounded under
-`target/hermes-tests/`.
+runs its native check once. It then runs one random operation and all three host
+jobs in every iteration. Its positive `iterations=<n>` value therefore controls
+both the guest operations and the number of `ut`, `it`, and `st` requests.
+Reports keep aggregate totals and no more than 64 round details. Host logs are
+bounded under `target/hermes-tests/`.
 
 Useful overrides:
 

@@ -382,11 +382,13 @@ Hermes can execute explicitly allowlisted guest commands with `hermes exec`,
 or run a deterministic safe campaign with `hermes random`. Each campaign
 accepts any positive, platform-representable `iterations=<n>`, prints a replay
 seed, and writes its bounded report to `/data/hermes/tests/latest.log`.
-`hermes test-all` runs the native Hermes test once, the guest campaign for the
-requested iterations, and fixed host-assisted `make ut`, `make it`, and
-`make st` jobs once each. The host jobs require `scripts/smros-vm-launcher.py`;
-the guest can request only those three jobs and cannot supply host command
-text. Destructive commands remain unavailable to Hermes.
+`hermes test-all` runs the native Hermes test once and then runs one random
+guest operation plus each host job once per iteration: `make ut`, `make it`,
+and `make st`. Reports keep aggregate totals and at most 64 round details, so
+large iteration counts remain persistable. The host jobs require
+`scripts/smros-vm-launcher.py`; the guest can request only those three jobs and
+cannot supply host command text. Destructive commands remain unavailable to
+Hermes.
 
 `lvgl` exposes the SMROS-native LVGL-style porting layer. It models the LVGL
 display, input, tick, and widget seams with a CPU renderer, serial
