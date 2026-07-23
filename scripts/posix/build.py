@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import fcntl
 import hashlib
 import json
 import os
 import re
-import secrets
 import selectors
 import signal
 import shutil
@@ -50,6 +50,7 @@ CHECKSUM_DEFINITION = (
     "64 ASCII zeroes)"
 )
 _STAGE_QUARANTINE_NAME = ".smros-posix-stage-quarantine"
+_STAGE_WORK_ROOT_NAME = "stage"
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 _REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
 _NEEDED_RE = re.compile(r"\(NEEDED\).*Shared library: \[([^\]]+)\]")
@@ -962,19 +963,26 @@ def _entry_exists_at(parent_descriptor: int, name: str) -> bool:
     return True
 
 
-def _create_owned_temporary_directory(
-    parent_descriptor: int, prefix: str
-) -> tuple[str, int]:
-    for _ in range(128):
-        name = f".{prefix}.tmp-{secrets.token_hex(8)}"
-        try:
-            os.mkdir(name, 0o700, dir_fd=parent_descriptor)
-        except FileExistsError:
-            continue
-        return name, _open_directory_at(
-            parent_descriptor, name, "owned temporary stage"
-        )
-    raise FileExistsError("could not allocate a unique temporary stage directory")
+def _open_or_create_private_directory(
+    parent_descriptor: int,
+    name: str,
+    label: str,
+) -> int:
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_descriptor)
+    except FileExistsError:
+        pass
+    descriptor = _open_directory_at(parent_descriptor, name, label)
+    info = os.fstat(descriptor)
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        os.close(descriptor)
+        raise ValueError(f"{label} ownership or mode is unsafe")
+    return descriptor
+
+
+def _stage_work_slot_name(destination_name: str) -> str:
+    digest = hashlib.sha256(os.fsencode(destination_name)).hexdigest()
+    return f"stage-{digest}"
 
 
 def _clear_directory(directory_descriptor: int) -> None:
@@ -997,78 +1005,69 @@ def _clear_directory(directory_descriptor: int) -> None:
             os.unlink(entry.name, dir_fd=directory_descriptor)
 
 
-def _remove_held_directory(
+def _clear_stage_work_root(directory_descriptor: int) -> None:
+    _clear_directory(directory_descriptor)
+    os.fchmod(directory_descriptor, 0o700)
+
+
+def _require_empty_stage_work_root(directory_descriptor: int) -> None:
+    info = os.fstat(directory_descriptor)
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise ValueError("stage work root ownership or mode is unsafe")
+    with os.scandir(directory_descriptor) as entries:
+        if next(entries, None) is not None:
+            raise ValueError("stage work root must be empty before reuse")
+
+
+def _open_stage_work_slot(
     parent_descriptor: int,
-    name: str,
-    directory_descriptor: int,
-) -> None:
-    entry_stat = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
-    held_stat = os.fstat(directory_descriptor)
-    if not stat.S_ISDIR(entry_stat.st_mode) or (
-        entry_stat.st_dev,
-        entry_stat.st_ino,
-    ) != (held_stat.st_dev, held_stat.st_ino):
-        raise ValueError("held stage directory changed before cleanup")
-    try:
-        os.mkdir(_STAGE_QUARANTINE_NAME, 0o700, dir_fd=parent_descriptor)
-    except FileExistsError:
-        pass
-    cleanup_descriptor = _open_directory_at(
+    destination_name: str,
+) -> tuple[int, int]:
+    quarantine_descriptor = _open_or_create_private_directory(
         parent_descriptor,
         _STAGE_QUARANTINE_NAME,
         "stage quarantine",
     )
     try:
-        cleanup_stat = os.fstat(cleanup_descriptor)
-        if (
-            cleanup_stat.st_uid != os.geteuid()
-            or stat.S_IMODE(cleanup_stat.st_mode) != 0o700
-        ):
-            raise ValueError("stage quarantine ownership or mode is unsafe")
-        moved_name: str | None = None
-        for _ in range(128):
-            candidate = f"held-{secrets.token_hex(16)}"
-            try:
-                _rename_between_at(
-                    parent_descriptor,
-                    name,
-                    cleanup_descriptor,
-                    candidate,
-                    1,
-                )
-            except FileExistsError:
-                continue
-            except OSError as error:
-                raise ValueError(
-                    "held stage directory changed during cleanup"
-                ) from error
-            moved_name = candidate
-            break
-        if moved_name is None:
-            raise FileExistsError("could not allocate a unique quarantine entry")
-        try:
-            _validate_held_entry(
-                cleanup_descriptor,
-                moved_name,
-                directory_descriptor,
-                "held stage directory",
-            )
-        except ValueError as error:
-            try:
-                if not _entry_exists_at(parent_descriptor, name):
-                    _rename_between_at(
-                        cleanup_descriptor,
-                        moved_name,
-                        parent_descriptor,
-                        name,
-                        1,
-                    )
-            except BaseException:
-                pass
-            raise ValueError("held stage directory changed during cleanup") from error
-        _clear_directory(directory_descriptor)
+        slot_descriptor = _open_or_create_private_directory(
+            quarantine_descriptor,
+            _stage_work_slot_name(destination_name),
+            "stage work slot",
+        )
     finally:
-        os.close(cleanup_descriptor)
+        os.close(quarantine_descriptor)
+    try:
+        try:
+            os.mkdir(_STAGE_WORK_ROOT_NAME, 0o700, dir_fd=slot_descriptor)
+        except FileExistsError:
+            pass
+        work_descriptor = _open_directory_at(
+            slot_descriptor,
+            _STAGE_WORK_ROOT_NAME,
+            "stage work root",
+        )
+        try:
+            _require_empty_stage_work_root(work_descriptor)
+        except BaseException:
+            os.close(work_descriptor)
+            raise
+        return slot_descriptor, work_descriptor
+    except BaseException:
+        os.close(slot_descriptor)
+        raise
+
+
+def _recreate_empty_stage_work_root(slot_descriptor: int) -> None:
+    try:
+        os.mkdir(_STAGE_WORK_ROOT_NAME, 0o700, dir_fd=slot_descriptor)
+    except FileExistsError as error:
+        raise ValueError("stage work root was replaced after publication") from error
+    descriptor = _open_directory_at(
+        slot_descriptor,
+        _STAGE_WORK_ROOT_NAME,
+        "stage work root",
+    )
+    os.close(descriptor)
 
 
 def _validate_held_entry(
@@ -1123,37 +1122,29 @@ def _rename_between_at(
         )
 
 
-def _rename_at(
-    parent_descriptor: int,
-    source_name: str,
-    destination_name: str,
-    flags: int,
-) -> None:
-    _rename_between_at(
-        parent_descriptor,
-        source_name,
-        parent_descriptor,
-        destination_name,
-        flags,
-    )
-
-
 def _publish_stage(
-    parent_descriptor: int,
+    source_parent_descriptor: int,
     temporary_name: str,
     temporary_descriptor: int,
+    destination_parent_descriptor: int,
     destination_name: str,
 ) -> int | None:
     _validate_held_entry(
-        parent_descriptor,
+        source_parent_descriptor,
         temporary_name,
         temporary_descriptor,
         "owned temporary stage",
     )
-    if not _entry_exists_at(parent_descriptor, destination_name):
-        _rename_at(parent_descriptor, temporary_name, destination_name, 1)
+    if not _entry_exists_at(destination_parent_descriptor, destination_name):
+        _rename_between_at(
+            source_parent_descriptor,
+            temporary_name,
+            destination_parent_descriptor,
+            destination_name,
+            1,
+        )
         _validate_held_entry(
-            parent_descriptor,
+            destination_parent_descriptor,
             destination_name,
             temporary_descriptor,
             "published stage",
@@ -1161,18 +1152,26 @@ def _publish_stage(
         return None
 
     destination_descriptor = _open_directory_at(
-        parent_descriptor, destination_name, "stage destination"
+        destination_parent_descriptor,
+        destination_name,
+        "stage destination",
     )
     try:
-        _rename_at(parent_descriptor, temporary_name, destination_name, 2)
+        _rename_between_at(
+            source_parent_descriptor,
+            temporary_name,
+            destination_parent_descriptor,
+            destination_name,
+            2,
+        )
         _validate_held_entry(
-            parent_descriptor,
+            destination_parent_descriptor,
             destination_name,
             temporary_descriptor,
             "published stage",
         )
         _validate_held_entry(
-            parent_descriptor,
+            source_parent_descriptor,
             temporary_name,
             destination_descriptor,
             "replaced stage",
@@ -1242,17 +1241,15 @@ def build_campaign(
 ) -> BuildSummary:
     ordered_tests = tuple(sorted(tests, key=lambda test: test.test_id))
     ordered_shells = tuple(sorted(shell_tests))
-    _prepare_safe_work_directory(work)
     object_root = work / "obj"
     artifact_root = work / "bin"
-    _reset_generated_directory(object_root)
-    _reset_generated_directory(artifact_root)
     stage = Path(os.path.abspath(stage))
     if not stage.name:
         raise ValueError("stage destination must have a directory name")
     stage_parent_descriptor = _open_directory_chain(
         stage.parent, "stage parent", create=True
     )
+    work_slot_descriptor: int | None = None
     temporary_name: str | None = None
     temporary_descriptor: int | None = None
     replaced_stage_descriptor: int | None = None
@@ -1263,9 +1260,15 @@ def build_campaign(
     staged_executables: list[Path] = []
     compile_pass = compile_fail = link_pass = link_fail = 0
     try:
-        temporary_name, temporary_descriptor = _create_owned_temporary_directory(
-            stage_parent_descriptor, stage.name
+        fcntl.flock(stage_parent_descriptor, fcntl.LOCK_EX)
+        _prepare_safe_work_directory(work)
+        _reset_generated_directory(object_root)
+        _reset_generated_directory(artifact_root)
+        work_slot_descriptor, temporary_descriptor = _open_stage_work_slot(
+            stage_parent_descriptor,
+            stage.name,
         )
+        temporary_name = _STAGE_WORK_ROOT_NAME
         temporary_stage = Path(f"/proc/self/fd/{temporary_descriptor}")
         include_directory = checkout / "include"
         for test in ordered_tests:
@@ -1402,9 +1405,10 @@ def build_campaign(
             expected_shell_tests=ordered_shells,
         )
         replaced_stage_descriptor = _publish_stage(
-            stage_parent_descriptor,
+            work_slot_descriptor,
             temporary_name,
             temporary_descriptor,
+            stage_parent_descriptor,
             stage.name,
         )
         published = True
@@ -1424,24 +1428,18 @@ def build_campaign(
         cleanup_error: BaseException | None = None
         try:
             if published:
-                if temporary_name is not None and replaced_stage_descriptor is not None:
-                    _remove_held_directory(
-                        stage_parent_descriptor,
-                        temporary_name,
-                        replaced_stage_descriptor,
-                    )
-            elif temporary_name is not None and temporary_descriptor is not None:
-                if _entry_exists_at(stage_parent_descriptor, temporary_name):
-                    _remove_held_directory(
-                        stage_parent_descriptor,
-                        temporary_name,
-                        temporary_descriptor,
-                    )
+                if replaced_stage_descriptor is not None:
+                    _clear_stage_work_root(replaced_stage_descriptor)
+                elif work_slot_descriptor is not None:
+                    _recreate_empty_stage_work_root(work_slot_descriptor)
+            elif temporary_descriptor is not None:
+                _clear_stage_work_root(temporary_descriptor)
         except BaseException as error:
             cleanup_error = error
         for descriptor in (
             replaced_stage_descriptor,
             temporary_descriptor,
+            work_slot_descriptor,
             stage_parent_descriptor,
         ):
             if descriptor is not None:
@@ -1951,7 +1949,7 @@ def _load_build_results(
 
 def _manifest_inventory(
     tests: Sequence[SuiteTest],
-) -> frozenset[tuple[str, str, str, str, str]]:
+) -> frozenset[tuple[str, str, str, str, str, int]]:
     return frozenset(
         (
             test.test_id,
@@ -1959,6 +1957,7 @@ def _manifest_inventory(
             test.api,
             test.kind,
             test.disposition,
+            test.timeout_ms,
         )
         for test in tests
     )
@@ -1968,7 +1967,7 @@ def _expected_manifest_inventory(
     tests: Sequence[SuiteTest],
     shell_tests: Sequence[str],
     build_results: Sequence[BuildResult],
-) -> frozenset[tuple[str, str, str, str, str]]:
+) -> frozenset[tuple[str, str, str, str, str, int]]:
     results = {
         (result.test_id, result.stage): result for result in build_results
     }

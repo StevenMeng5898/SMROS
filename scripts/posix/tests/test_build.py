@@ -545,6 +545,101 @@ class CommandTests(unittest.TestCase):
 
 
 class CampaignTests(unittest.TestCase):
+    def test_repeated_failures_reuse_one_empty_stage_work_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / "checkout"
+            test = suite_test()
+            source = checkout / test.source
+            source.parent.mkdir(parents=True)
+            source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+
+            for _ in range(3):
+                with self.assertRaisesRegex(ValueError, "toolchain"):
+                    build_campaign(
+                        checkout,
+                        (test,),
+                        (),
+                        metadata(),
+                        root / "stage",
+                        root / "work",
+                        command_runner=mock.Mock(
+                            side_effect=FileNotFoundError("compiler disappeared")
+                        ),
+                        dependency_stager=mock.Mock(return_value=()),
+                    )
+
+            work_root = root / build_module._STAGE_QUARANTINE_NAME
+            stage_slots = tuple(work_root.iterdir())
+            self.assertEqual(len(stage_slots), 1)
+            reusable_roots = tuple(stage_slots[0].iterdir())
+            self.assertEqual(len(reusable_roots), 1)
+            self.assertEqual(tuple(reusable_roots[0].iterdir()), ())
+
+    def test_repeated_replacements_reuse_one_empty_stage_work_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = root / "stage"
+
+            for _ in range(3):
+                run_fake_campaign(root, stage)
+
+            work_root = root / build_module._STAGE_QUARANTINE_NAME
+            stage_slots = tuple(work_root.iterdir())
+            self.assertEqual(len(stage_slots), 1)
+            reusable_roots = tuple(stage_slots[0].iterdir())
+            self.assertEqual(len(reusable_roots), 1)
+            self.assertEqual(tuple(reusable_roots[0].iterdir()), ())
+
+    def test_same_stage_campaigns_are_serialized_by_the_work_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = root / "stage"
+            first_entered = threading.Event()
+            second_entered = threading.Event()
+            release = threading.Event()
+            write_lock = threading.Lock()
+            errors: list[BaseException] = []
+            write_count = 0
+            write_manifests = build_module._write_manifests
+
+            def blocking_write(*args: object, **kwargs: object) -> str:
+                nonlocal write_count
+                with write_lock:
+                    write_count += 1
+                    current = write_count
+                (first_entered if current == 1 else second_entered).set()
+                if not release.wait(5.0):
+                    raise AssertionError("timed out waiting to release manifest write")
+                return write_manifests(*args, **kwargs)
+
+            def campaign(campaign_root: Path) -> None:
+                try:
+                    run_fake_campaign(campaign_root, stage)
+                except BaseException as error:
+                    errors.append(error)
+
+            first = threading.Thread(target=campaign, args=(root / "first",))
+            second = threading.Thread(target=campaign, args=(root / "second",))
+            with mock.patch(
+                "scripts.posix.build._write_manifests",
+                side_effect=blocking_write,
+            ):
+                try:
+                    first.start()
+                    self.assertTrue(first_entered.wait(2.0))
+                    second.start()
+                    self.assertFalse(second_entered.wait(0.2))
+                finally:
+                    release.set()
+                    first.join(5.0)
+                    second.join(5.0)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(errors, [])
+            self.assertTrue(second_entered.is_set())
+
     def test_build_rejects_symlinked_stage_grandparent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1065,57 +1160,60 @@ class ManifestTests(unittest.TestCase):
 
 
 class StagingTests(unittest.TestCase):
-    def test_cleanup_does_not_delete_directory_swapped_after_validation(self) -> None:
+    def test_cleanup_and_reuse_do_not_delete_replacement_for_held_work_root(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            owned = root / "owned"
-            owned.mkdir()
-            (owned / "artifact").write_bytes(b"artifact")
-            moved = root / "validated-held-moved"
             parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-            owned_descriptor = os.open(owned, os.O_RDONLY | os.O_DIRECTORY)
-            validate = build_module._validate_held_entry
-            replacement: Path | None = None
-
-            def validate_and_swap(
-                directory_descriptor: int,
-                name: str,
-                held_descriptor: int,
-                label: str,
-            ) -> None:
-                nonlocal replacement
-                validate(
-                    directory_descriptor,
-                    name,
-                    held_descriptor,
-                    label,
-                )
-                if label == "held stage directory":
-                    quarantine = Path(
-                        os.readlink(f"/proc/self/fd/{directory_descriptor}")
-                    )
-                    replacement = quarantine / name
-                    replacement.rename(moved)
-                    replacement.mkdir()
-
+            slot_descriptor: int | None = None
+            work_descriptor: int | None = None
+            reopened_slot_descriptor: int | None = None
+            reopened_work_descriptor: int | None = None
             try:
-                with mock.patch(
-                    "scripts.posix.build._validate_held_entry",
-                    side_effect=validate_and_swap,
-                ):
-                    build_module._remove_held_directory(
+                slot_descriptor, work_descriptor = (
+                    build_module._open_stage_work_slot(
                         parent_descriptor,
-                        owned.name,
-                        owned_descriptor,
+                        "stage",
+                    )
+                )
+                held_path = Path(
+                    os.readlink(f"/proc/self/fd/{work_descriptor}")
+                )
+                (held_path / "artifact").write_bytes(b"artifact")
+                moved = root / "held-work-root-moved"
+                held_path.rename(moved)
+                held_path.mkdir(mode=0o700)
+                replacement = held_path / "replacement"
+                replacement.write_bytes(b"replacement")
+
+                build_module._clear_stage_work_root(work_descriptor)
+                os.close(work_descriptor)
+                work_descriptor = None
+                os.close(slot_descriptor)
+                slot_descriptor = None
+                with self.assertRaisesRegex(ValueError, "work root.*empty"):
+                    (
+                        reopened_slot_descriptor,
+                        reopened_work_descriptor,
+                    ) = build_module._open_stage_work_slot(
+                        parent_descriptor,
+                        "stage",
                     )
             finally:
-                os.close(owned_descriptor)
+                if reopened_work_descriptor is not None:
+                    os.close(reopened_work_descriptor)
+                if reopened_slot_descriptor is not None:
+                    os.close(reopened_slot_descriptor)
+                if work_descriptor is not None:
+                    os.close(work_descriptor)
+                if slot_descriptor is not None:
+                    os.close(slot_descriptor)
                 os.close(parent_descriptor)
 
-            self.assertIsNotNone(replacement)
-            assert replacement is not None
-            self.assertTrue(replacement.is_dir())
+            self.assertEqual(replacement.read_bytes(), b"replacement")
             self.assertTrue(moved.is_dir())
+            self.assertEqual(tuple(moved.iterdir()), ())
 
     def test_verify_rejects_symlinked_stage_grandparent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1819,6 +1917,29 @@ class StagingTests(unittest.TestCase):
                     expected_shell_tests=(),
                 )
 
+    def test_verify_rejects_changed_expected_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            binary = stage / "bin/conformance/interfaces/getpid/1-1.c.test"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"elf")
+            staged_test = replace(
+                suite_test(),
+                binary="bin/conformance/interfaces/getpid/1-1.c.test",
+                sha256=hashlib.sha256(b"elf").hexdigest(),
+                timeout_ms=45_000,
+            )
+            write_stage_fixture(stage, staged_test)
+
+            with self.assertRaisesRegex(ValueError, "expected inventory"):
+                verify_stage(
+                    stage,
+                    verify_architecture=False,
+                    expected_metadata=metadata(),
+                    expected_tests=(suite_test(),),
+                    expected_shell_tests=(),
+                )
+
     def test_verify_rejects_unmanifested_stage_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             stage = Path(temporary)
@@ -1921,26 +2042,35 @@ class StagingTests(unittest.TestCase):
             root = Path(temporary)
             old_stage = root / "stage"
             old_stage.mkdir()
-            new_stage = root / ".stage.tmp"
+            work_slot = root / "work-slot"
+            work_slot.mkdir()
+            new_stage = work_slot / "stage"
             new_stage.mkdir()
-            parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            source_parent_descriptor = os.open(
+                work_slot, os.O_RDONLY | os.O_DIRECTORY
+            )
+            destination_parent_descriptor = os.open(
+                root, os.O_RDONLY | os.O_DIRECTORY
+            )
             new_descriptor = os.open(new_stage, os.O_RDONLY | os.O_DIRECTORY)
-            rename = build_module._rename_at
+            rename = build_module._rename_between_at
             old_descriptor: int | None = None
             try:
                 with mock.patch.object(
-                    build_module, "_rename_at", wraps=rename
+                    build_module, "_rename_between_at", wraps=rename
                 ) as exchange:
                     old_descriptor = build_module._publish_stage(
-                        parent_descriptor,
+                        source_parent_descriptor,
                         new_stage.name,
                         new_descriptor,
+                        destination_parent_descriptor,
                         old_stage.name,
                     )
 
                 exchange.assert_called_once_with(
-                    parent_descriptor,
+                    source_parent_descriptor,
                     new_stage.name,
+                    destination_parent_descriptor,
                     old_stage.name,
                     2,
                 )
@@ -1949,7 +2079,8 @@ class StagingTests(unittest.TestCase):
                 if old_descriptor is not None:
                     os.close(old_descriptor)
                 os.close(new_descriptor)
-                os.close(parent_descriptor)
+                os.close(destination_parent_descriptor)
+                os.close(source_parent_descriptor)
 
 
 class CliTests(unittest.TestCase):
