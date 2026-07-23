@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "url": "https://github.com/emscripten-core/posixtestsuite.git",
+  "revision": "85555325079ea362fa680bd2209c843cfe47e670",
+  "license": "GPL-2.0-only",
+  "standard": "IEEE Std 1003.1-2001 System Interfaces"
+}
