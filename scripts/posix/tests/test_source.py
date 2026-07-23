@@ -909,6 +909,7 @@ class SharedModelTests(unittest.TestCase):
                     "patch_sha256",
                     "smros_commit",
                     "binary_sha256",
+                    "runtime_snapshot_sha256",
                     "run_id",
                 ),
                 model.RuntimeAttempt(

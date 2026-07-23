@@ -81,6 +81,7 @@ class RuntimeAttempt:
     patch_sha256: str = ""
     smros_commit: str = ""
     binary_sha256: str = ""
+    runtime_snapshot_sha256: str = ""
     run_id: str = ""
 
     def to_dict(self) -> dict[str, object]:
@@ -96,6 +97,7 @@ class RuntimeAttempt:
             "patch_sha256": self.patch_sha256,
             "platform": self.platform,
             "revision": self.revision,
+            "runtime_snapshot_sha256": self.runtime_snapshot_sha256,
             "run_id": self.run_id,
             "signal": self.signal,
             "smros_commit": self.smros_commit,

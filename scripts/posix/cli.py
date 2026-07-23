@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 import sys
 
-from .baseline import run_baseline
+from .baseline import BaselinePrerequisiteError, run_baseline
 from .build import (
     ManifestMetadata,
     build_campaign,
@@ -19,7 +19,7 @@ from .build import (
     verify_stage,
 )
 from .discovery import audit_reviews
-from .model import SuiteTest
+from .model import BuildSummary, SuiteTest
 from .source import fetch_checkout, load_source_lock
 
 
@@ -318,18 +318,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 qemu=qemu,
                 verifier=strict_verifier,
             )
+        except BaselinePrerequisiteError as error:
+            print(f"baseline failed: {error}", file=sys.stderr)
+            print(BASELINE_PREREQUISITE, file=sys.stderr)
+            return 1
         except (OSError, ValueError) as error:
             print(f"baseline failed: {error}", file=sys.stderr)
-            prerequisite_terms = (
-                "unavailable",
-                "sysroot",
-                "interpreter",
-                "runtime file",
-                "required AArch64 tool",
-                "libc.so.6",
-            )
-            if any(term in str(error) for term in prerequisite_terms):
-                print(BASELINE_PREREQUISITE, file=sys.stderr)
             return 1
         print(
             f"selected={len(result.attempts)} "
