@@ -51,6 +51,12 @@ BASELINE_PREREQUISITE = (
 )
 
 
+def _print_exception_notes(error: BaseException) -> None:
+    for note in getattr(error, "__notes__", ()):
+        if isinstance(note, str):
+            print(note, file=sys.stderr)
+
+
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="smros-posixtest")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -320,10 +326,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except BaselinePrerequisiteError as error:
             print(f"baseline failed: {error}", file=sys.stderr)
+            _print_exception_notes(error)
             print(BASELINE_PREREQUISITE, file=sys.stderr)
             return 1
         except (OSError, ValueError) as error:
             print(f"baseline failed: {error}", file=sys.stderr)
+            _print_exception_notes(error)
             return 1
         print(
             f"selected={len(result.attempts)} "

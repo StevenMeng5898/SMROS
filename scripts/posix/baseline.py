@@ -461,20 +461,69 @@ def _force_process_tree_cleanup(
         raise failure from errors[0]
 
 
+def _rescue_known_process(process: subprocess.Popen[bytes]) -> None:
+    descriptor: int | None = None
+    try:
+        if process.poll() is not None:
+            return
+        try:
+            descriptor = os.pidfd_open(process.pid, 0)
+        except (AttributeError, OSError):
+            descriptor = None
+
+        def send(sig: int) -> None:
+            if process.poll() is not None:
+                return
+            try:
+                if descriptor is not None:
+                    signal.pidfd_send_signal(descriptor, sig)
+                else:
+                    os.kill(process.pid, sig)
+            except ProcessLookupError:
+                pass
+
+        send(signal.SIGCONT)
+        send(signal.SIGTERM)
+        try:
+            process.wait(timeout=_SUPERVISOR_SHUTDOWN_SECONDS)
+        except subprocess.TimeoutExpired:
+            send(signal.SIGKILL)
+            try:
+                process.wait(timeout=_KILL_REAP_SECONDS)
+            except subprocess.TimeoutExpired as error:
+                raise ValueError(
+                    "runtime broker could not be reaped after SIGKILL"
+                ) from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def _attach_process_tree(
     process: subprocess.Popen[bytes], process_tree: _LinuxProcessTree
 ) -> None:
     try:
         process_tree.attach(process.pid)
     except BaseException as original:
-        cleanup_error: BaseException | None = None
+        cleanup_errors: list[BaseException] = []
         try:
-            _force_process_tree_cleanup(process, process_tree)
+            _rescue_known_process(process)
         except BaseException as error:
-            cleanup_error = error
+            cleanup_errors.append(error)
+        try:
+            process_tree.cleanup()
+        except BaseException as error:
+            cleanup_errors.append(error)
         _close_process_streams(process)
         process_tree.close()
-        if cleanup_error is not None:
+        if cleanup_errors:
+            cleanup_error = ValueError(
+                "runtime process cleanup failed: "
+                + "; ".join(
+                    f"{type(error).__name__}: {error}"
+                    for error in cleanup_errors
+                )
+            )
             raise cleanup_error from original
         raise
 
@@ -507,9 +556,57 @@ def _require_pidfd_support() -> None:
 def _write_supervisor_control(
     descriptor: int, payload: Mapping[str, object]
 ) -> None:
-    data = (
-        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
-    ).encode("ascii")
+    def encoded(value: Mapping[str, object]) -> bytes:
+        return (
+            json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("ascii")
+
+    bounded = dict(payload)
+    data = encoded(bounded)
+    if len(data) > _SUPERVISOR_CONTROL_MAX_BYTES:
+        marker = "\n...[truncated]"
+        scalable: dict[str, str] = {}
+        candidate = dict(bounded)
+        for field in ("message", "strerror"):
+            value = bounded.get(field)
+            if not isinstance(value, str):
+                continue
+            serialized_length = len(json.dumps(value).encode("ascii"))
+            if serialized_length <= 512:
+                continue
+            source = _bounded_detail(
+                value, _SUPERVISOR_CONTROL_MAX_BYTES
+            )
+            if source.endswith(marker):
+                source = source[: -len(marker)]
+            scalable[field] = source
+            candidate[field] = marker
+        if scalable and len(encoded(candidate)) <= _SUPERVISOR_CONTROL_MAX_BYTES:
+            low = 0
+            high = 1_000_000
+            while low < high:
+                middle = (low + high + 1) // 2
+                candidate = dict(bounded)
+                for field, source in scalable.items():
+                    length = len(source) * middle // 1_000_000
+                    candidate[field] = source[:length] + marker
+                if len(encoded(candidate)) <= _SUPERVISOR_CONTROL_MAX_BYTES:
+                    low = middle
+                else:
+                    high = middle - 1
+            candidate = dict(bounded)
+            for field, source in scalable.items():
+                length = len(source) * low // 1_000_000
+                candidate[field] = source[:length] + marker
+            bounded = candidate
+            data = encoded(bounded)
+    if len(data) > _SUPERVISOR_CONTROL_MAX_BYTES:
+        data = encoded(
+            {
+                "kind": "infrastructure_error",
+                "message": "runtime supervisor control data exceeded its size limit",
+            }
+        )
     try:
         view = memoryview(data)
         while view:
@@ -561,6 +658,8 @@ def _read_launcher_control(descriptor: int) -> dict[str, object] | None:
         data.extend(chunk)
         if len(data) > _SUPERVISOR_CONTROL_MAX_BYTES:
             raise ValueError("runtime launcher control message exceeds its size limit")
+    if not data:
+        return None
     return _parse_supervisor_control(bytes(data))
 
 
@@ -572,6 +671,19 @@ def supervise_runtime(argv: Sequence[str], control_descriptor: int) -> int:
     def interrupted(signum: int, _frame: object) -> None:
         raise _SupervisorInterrupted(signum)
 
+    def infrastructure_payload(error: BaseException) -> dict[str, object]:
+        result: dict[str, object] = {
+            "kind": "infrastructure_error",
+            "message": f"{type(error).__name__}: {error}",
+        }
+        if launcher_payload is not None:
+            if launcher_payload["kind"] == "result":
+                result["returncode"] = launcher_payload["returncode"]
+            elif launcher_payload["kind"] == "launch_error":
+                result["errno"] = launcher_payload["errno"]
+                result["strerror"] = launcher_payload["strerror"]
+        return result
+
     for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
         previous_handlers[signum] = signal.signal(signum, interrupted)
 
@@ -581,6 +693,7 @@ def supervise_runtime(argv: Sequence[str], control_descriptor: int) -> int:
     process: subprocess.Popen[bytes] | None = None
     launcher_read: int | None = None
     launcher_write: int | None = None
+    launcher_payload: dict[str, object] | None = None
     try:
         with _child_subreaper():
             _require_pidfd_support()
@@ -595,32 +708,22 @@ def supervise_runtime(argv: Sequence[str], control_descriptor: int) -> int:
                     start_new_session=True,
                 )
             except OSError as error:
-                payload = {
-                    "errno": error.errno,
-                    "kind": "launch_error",
-                    "strerror": error.strerror or str(error),
-                }
+                payload = infrastructure_payload(error)
             else:
                 os.close(launcher_write)
                 launcher_write = None
                 try:
                     _attach_process_tree(process, process_tree)
                     returncode = process.wait()
-                    process_tree.cleanup()
                     launcher_payload = _read_launcher_control(launcher_read)
                     os.close(launcher_read)
                     launcher_read = None
+                    process_tree.cleanup()
                 except _SupervisorInterrupted as error:
                     try:
                         _force_process_tree_cleanup(process, process_tree)
                     except BaseException as cleanup_error:
-                        payload = {
-                            "kind": "infrastructure_error",
-                            "message": (
-                                f"{type(cleanup_error).__name__}: "
-                                f"{cleanup_error}"
-                            ),
-                        }
+                        payload = infrastructure_payload(cleanup_error)
                         returncode = 125
                     else:
                         returncode = -error.signum
@@ -633,14 +736,16 @@ def supervise_runtime(argv: Sequence[str], control_descriptor: int) -> int:
                             f"while handling {type(error).__name__}: {error}"
                         )
                         error = cleanup_error
-                    payload = {
-                        "kind": "infrastructure_error",
-                        "message": f"{type(error).__name__}: {error}",
-                    }
+                    payload = infrastructure_payload(error)
                     returncode = 125
                 else:
                     if launcher_payload is None:
-                        payload = {"kind": "result", "returncode": returncode}
+                        payload = infrastructure_payload(
+                            ValueError(
+                                "runtime launcher returned invalid control data"
+                            )
+                        )
+                        returncode = 125
                     elif launcher_payload["kind"] == "launch_error":
                         payload = launcher_payload
                         returncode = 125
@@ -661,10 +766,7 @@ def supervise_runtime(argv: Sequence[str], control_descriptor: int) -> int:
             try:
                 _force_process_tree_cleanup(process, process_tree)
             except BaseException as cleanup_error:
-                payload = {
-                    "kind": "infrastructure_error",
-                    "message": f"{type(cleanup_error).__name__}: {cleanup_error}",
-                }
+                payload = infrastructure_payload(cleanup_error)
                 returncode = 125
             else:
                 returncode = -error.signum
@@ -681,10 +783,7 @@ def supervise_runtime(argv: Sequence[str], control_descriptor: int) -> int:
                     f"while handling {type(error).__name__}: {error}"
                 )
                 error = cleanup_error
-        payload = {
-            "kind": "infrastructure_error",
-            "message": f"{type(error).__name__}: {error}",
-        }
+        payload = infrastructure_payload(error)
         returncode = 125
     finally:
         for descriptor in (launcher_read, launcher_write):
@@ -734,17 +833,57 @@ def _request_supervisor_shutdown(process_tree: _LinuxProcessTree) -> None:
     process_tree.signal(signal.SIGTERM)
 
 
-def _parse_supervisor_control(data: bytes) -> dict[str, object] | None:
+def _parse_supervisor_control(data: bytes) -> dict[str, object]:
     if not data:
-        return None
+        raise ValueError("runtime supervisor returned invalid control data")
     if len(data) > _SUPERVISOR_CONTROL_MAX_BYTES:
         raise ValueError("runtime supervisor control message exceeds its size limit")
     try:
         text = data.decode("ascii")
         payload = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
-    except (UnicodeError, json.JSONDecodeError) as error:
+    except (UnicodeError, json.JSONDecodeError, ValueError) as error:
         raise ValueError("runtime supervisor returned invalid control data") from error
-    if not isinstance(payload, dict) or not isinstance(payload.get("kind"), str):
+    if not isinstance(payload, dict):
+        raise ValueError("runtime supervisor returned invalid control data")
+    kind = payload.get("kind")
+    if kind == "result":
+        returncode = payload.get("returncode")
+        valid = (
+            set(payload) == {"kind", "returncode"}
+            and isinstance(returncode, int)
+            and not isinstance(returncode, bool)
+        )
+    elif kind == "launch_error":
+        error_number = payload.get("errno")
+        valid = (
+            set(payload) == {"errno", "kind", "strerror"}
+            and isinstance(error_number, int)
+            and not isinstance(error_number, bool)
+            and isinstance(payload.get("strerror"), str)
+        )
+    elif kind == "infrastructure_error":
+        keys = set(payload)
+        valid = isinstance(payload.get("message"), str)
+        if keys == {"kind", "message", "returncode"}:
+            returncode = payload["returncode"]
+            valid = (
+                valid
+                and isinstance(returncode, int)
+                and not isinstance(returncode, bool)
+            )
+        elif keys == {"errno", "kind", "message", "strerror"}:
+            error_number = payload["errno"]
+            valid = (
+                valid
+                and isinstance(error_number, int)
+                and not isinstance(error_number, bool)
+                and isinstance(payload["strerror"], str)
+            )
+        elif keys != {"kind", "message"}:
+            valid = False
+    else:
+        valid = False
+    if not valid:
         raise ValueError("runtime supervisor returned invalid control data")
     return payload
 
@@ -763,9 +902,13 @@ def _runtime_observation(
     try:
         control = _parse_supervisor_control(bytes(control_data))
     except ValueError:
-        return None
-    if control is None:
-        return None
+        return _RuntimeObservation(
+            returncode=None,
+            timed_out=timed_out,
+            stdout=_captured(buffers["stdout"], counts["stdout"]),
+            stderr=_captured(buffers["stderr"], counts["stderr"]),
+            launch_status="interrupted",
+        )
     if control["kind"] == "launch_error":
         error_number = control.get("errno")
         if not isinstance(error_number, int):
@@ -776,6 +919,7 @@ def _runtime_observation(
         returncode = None
         launch_status = "launch-error"
         launch_error = _bounded_detail(f"{message}: {qemu}")
+        infrastructure_error = None
     elif control["kind"] == "result":
         value = control.get("returncode")
         if not isinstance(value, int):
@@ -783,6 +927,29 @@ def _runtime_observation(
         returncode = value
         launch_status = "launched"
         launch_error = None
+        infrastructure_error = None
+    elif control["kind"] == "infrastructure_error":
+        if "returncode" in control:
+            value = control["returncode"]
+            assert isinstance(value, int)
+            returncode = value
+            launch_status = "launched"
+            launch_error = None
+        elif "errno" in control:
+            error_number = control["errno"]
+            strerror = control["strerror"]
+            assert isinstance(error_number, int)
+            assert isinstance(strerror, str)
+            returncode = None
+            launch_status = "launch-error"
+            launch_error = _bounded_detail(f"{strerror}: {qemu}")
+        else:
+            returncode = None
+            launch_status = "interrupted"
+            launch_error = None
+        message = control["message"]
+        assert isinstance(message, str)
+        infrastructure_error = _bounded_detail(message)
     else:
         return None
     return _RuntimeObservation(
@@ -792,6 +959,7 @@ def _runtime_observation(
         stderr=_captured(buffers["stderr"], counts["stderr"]),
         launch_status=launch_status,
         launch_error=launch_error,
+        infrastructure_error=infrastructure_error,
     )
 
 
@@ -816,20 +984,17 @@ def _run_captured(
     control_data = bytearray()
     timed_out = False
     try:
-        try:
-            process = subprocess.Popen(
-                _supervisor_command(argv, control_write),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=cwd,
-                env=dict(env),
-                start_new_session=True,
-                pass_fds=(control_write,),
-            )
-        except OSError as error:
-            raise _ProcessLaunchError(error) from error
-        process_tree.attach(process.pid)
+        process = subprocess.Popen(
+            _supervisor_command(argv, control_write),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=cwd,
+            env=dict(env),
+            start_new_session=True,
+            pass_fds=(control_write,),
+        )
+        _attach_process_tree(process, process_tree)
         os.close(control_write)
         control_write = None
         control_stream = os.fdopen(control_read, "rb", buffering=0)
@@ -847,7 +1012,6 @@ def _run_captured(
         streams[control_descriptor] = control_stream
         deadline = time.monotonic() + timeout_seconds
         terminate_deadline: float | None = None
-        kill_deadline: float | None = None
         drain_deadline: float | None = None
 
         def close_stream(descriptor: int) -> None:
@@ -872,16 +1036,10 @@ def _run_captured(
                 and terminate_deadline is not None
                 and now >= terminate_deadline
             ):
-                process_tree.signal(signal.SIGKILL)
+                _rescue_known_process(process)
+                process_tree.cleanup()
                 terminate_deadline = None
-                kill_deadline = now + _KILL_REAP_SECONDS
-            if (
-                returncode is None
-                and kill_deadline is not None
-                and now >= kill_deadline
-            ):
-                _reap(process)
-                returncode = process.poll()
+                continue
             if returncode is not None and drain_deadline is None:
                 drain_deadline = now + _DRAIN_GRACE_SECONDS
                 if timed_out:
@@ -898,8 +1056,6 @@ def _run_captured(
                 active_deadlines.append(terminate_deadline)
             if drain_deadline is not None:
                 active_deadlines.append(drain_deadline)
-            if kill_deadline is not None:
-                active_deadlines.append(kill_deadline)
             assert active_deadlines
             wait = max(0.0, min(0.05, min(active_deadlines) - now))
             for key, _mask in selector.select(wait):
@@ -927,7 +1083,7 @@ def _run_captured(
         _reap(process)
         process_tree.cleanup()
         control = _parse_supervisor_control(bytes(control_data))
-        if control is not None and control["kind"] == "launch_error":
+        if control["kind"] == "launch_error":
             error_number = control.get("errno")
             if not isinstance(error_number, int):
                 error_number = errno.ENOENT
@@ -935,13 +1091,13 @@ def _run_captured(
             if not isinstance(message, str):
                 message = os.strerror(error_number)
             raise _ProcessLaunchError(OSError(error_number, message))
-        if control is not None and control["kind"] == "infrastructure_error":
+        if control["kind"] == "infrastructure_error":
             message = control.get("message")
             raise ValueError(
                 message if isinstance(message, str) else "runtime supervisor failed"
             )
         supervised_returncode = process.returncode
-        if control is not None and control["kind"] == "result":
+        if control["kind"] == "result":
             value = control.get("returncode")
             if not isinstance(value, int):
                 raise ValueError("runtime supervisor returned invalid control data")
@@ -2132,6 +2288,17 @@ def _publish_report(
     _atomic_write(result_path, _canonical_report(rows))
 
 
+def _note_incomplete_publication_failure(
+    primary: BaseException, publication_error: BaseException
+) -> None:
+    primary.add_note(
+        _bounded_detail(
+            "incomplete report publication failed: "
+            f"{type(publication_error).__name__}: {publication_error}"
+        )
+    )
+
+
 def run_baseline(
     stage: Path,
     sysroot: Path,
@@ -2257,8 +2424,10 @@ def run_baseline(
                         run_id,
                         complete=False,
                     )
-                except BaseException:
-                    pass
+                except BaseException as publication_error:
+                    _note_incomplete_publication_failure(
+                        error, publication_error
+                    )
                 raise
             campaign_succeeded = True
     except BaseException as error:
@@ -2281,8 +2450,10 @@ def run_baseline(
                     run_id,
                     complete=False,
                 )
-            except BaseException:
-                pass
+            except BaseException as publication_error:
+                _note_incomplete_publication_failure(
+                    error, publication_error
+                )
         elif pending_error is not None and error is not pending_error:
             attempts[-1] = replace(
                 attempts[-1],
@@ -2301,8 +2472,10 @@ def run_baseline(
                     run_id,
                     complete=False,
                 )
-            except BaseException:
-                pass
+            except BaseException as publication_error:
+                _note_incomplete_publication_failure(
+                    pending_error, publication_error
+                )
             raise pending_error from error
         raise
     _publish_report(

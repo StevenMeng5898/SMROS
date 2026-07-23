@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import redirect_stderr
+from contextlib import ExitStack, redirect_stderr
 from dataclasses import asdict, replace
 import errno
 import io
@@ -570,6 +570,56 @@ class RuntimeAttemptTests(BaselineFixture, unittest.TestCase):
         self.assertEqual(attempt.status, "pass")
         self.assertEqual((attempt.stdout, attempt.stderr), ("pass-out\n", "pass-err\n"))
 
+    def test_empty_supervisor_control_is_infrastructure_failure(self) -> None:
+        with mock.patch(
+            "scripts.posix.baseline._supervisor_command",
+            return_value=["/usr/bin/python3", "-c", "pass"],
+        ):
+            with self.assertRaisesRegex(ValueError, "invalid control data"):
+                baseline_module._run_captured(
+                    ["fake-qemu"],
+                    cwd=self.root,
+                    env={},
+                    timeout_seconds=1.0,
+                )
+
+    def test_unknown_supervisor_control_is_infrastructure_failure(self) -> None:
+        def command(_argv: object, descriptor: int) -> list[str]:
+            code = f"import os; os.write({descriptor}, b'{{\"kind\":\"unknown\"}}\\n')"
+            return ["/usr/bin/python3", "-c", code]
+
+        with mock.patch(
+            "scripts.posix.baseline._supervisor_command", side_effect=command
+        ):
+            with self.assertRaisesRegex(ValueError, "invalid control data"):
+                baseline_module._run_captured(
+                    ["fake-qemu"],
+                    cwd=self.root,
+                    env={},
+                    timeout_seconds=1.0,
+                )
+
+    def test_supervisor_control_rejects_invalid_records(self) -> None:
+        invalid_records = (
+            b"not-json\n",
+            b'{"kind":"result","kind":"result","returncode":0}\n',
+            b'{"kind":"result","returncode":0}\n'
+            b'{"kind":"result","returncode":1}\n',
+            b'{"kind":"result","returncode":true}\n',
+            b'{"extra":0,"kind":"result","returncode":0}\n',
+            b'{"errno":true,"kind":"launch_error","strerror":"failed"}\n',
+            b'{"kind":"infrastructure_error","message":1}\n',
+            b'{"kind":"infrastructure_error","message":"failed",'
+            b'"returncode":false}\n',
+            b'{"kind":"infrastructure_error","message":"failed",'
+            b'"returncode":null}\n',
+        )
+
+        for record in invalid_records:
+            with self.subTest(record=record):
+                with self.assertRaisesRegex(ValueError, "invalid control data"):
+                    baseline_module._parse_supervisor_control(record)
+
     def test_signal_and_launch_error_are_recorded(self) -> None:
         signaled = self.attempt(self.make_test("signal-case"))
         self.assertEqual(signaled.status, "crash")
@@ -749,15 +799,32 @@ class RuntimeAttemptTests(BaselineFixture, unittest.TestCase):
                 "scripts.posix.baseline.subprocess.Popen",
                 side_effect=launch_with_unrelated,
             ):
-                attempt = self.attempt(
-                    self.make_test("kill-launcher", timeout_ms=2_000)
-                )
+                test = self.make_test("kill-launcher", timeout_ms=2_000)
+                self.write_manifest((test,))
+                with self.assertRaises(ValueError):
+                    run_baseline(
+                        self.stage,
+                        self.sysroot,
+                        self.results,
+                        qemu=self.qemu,
+                        verifier=lambda _stage: None,
+                    )
             observation = json.loads(
                 self.observation.read_text(encoding="utf-8")
             )
             descendant_pid = int(self.child_pid.read_text(encoding="ascii"))
-            self.assertEqual(attempt.status, "crash")
-            self.assertEqual(attempt.signal, signal.SIGKILL)
+            rows = [
+                json.loads(line)
+                for line in self.results.read_text(encoding="utf-8").splitlines()
+            ]
+            attempt = rows[0]
+            self.assertEqual(attempt["status"], "interrupted")
+            self.assertEqual(attempt["launch_status"], "interrupted")
+            self.assertIsNone(attempt["pts_status"])
+            self.assertIsNone(attempt["exit_code"])
+            self.assertIsNone(attempt["signal"])
+            self.assertIn("launcher", attempt["infrastructure_error"])
+            self.assertFalse(rows[-1]["complete"])
             self.assert_processes_reaped(
                 (int(observation["pid"]), descendant_pid)
             )
@@ -792,15 +859,32 @@ class RuntimeAttemptTests(BaselineFixture, unittest.TestCase):
                 "scripts.posix.baseline.subprocess.Popen",
                 side_effect=launch_with_unrelated,
             ):
-                attempt = self.attempt(
-                    self.make_test("kill-process-group", timeout_ms=2_000)
-                )
+                test = self.make_test("kill-process-group", timeout_ms=2_000)
+                self.write_manifest((test,))
+                with self.assertRaises(ValueError):
+                    run_baseline(
+                        self.stage,
+                        self.sysroot,
+                        self.results,
+                        qemu=self.qemu,
+                        verifier=lambda _stage: None,
+                    )
             observation = json.loads(
                 self.observation.read_text(encoding="utf-8")
             )
             descendant_pid = int(self.child_pid.read_text(encoding="ascii"))
-            self.assertEqual(attempt.status, "crash")
-            self.assertEqual(attempt.signal, signal.SIGKILL)
+            rows = [
+                json.loads(line)
+                for line in self.results.read_text(encoding="utf-8").splitlines()
+            ]
+            attempt = rows[0]
+            self.assertEqual(attempt["status"], "interrupted")
+            self.assertEqual(attempt["launch_status"], "interrupted")
+            self.assertIsNone(attempt["pts_status"])
+            self.assertIsNone(attempt["exit_code"])
+            self.assertIsNone(attempt["signal"])
+            self.assertIn("launcher", attempt["infrastructure_error"])
+            self.assertFalse(rows[-1]["complete"])
             self.assert_processes_reaped(
                 (int(observation["pid"]), descendant_pid)
             )
@@ -852,6 +936,31 @@ class RuntimeAttemptTests(BaselineFixture, unittest.TestCase):
             with self.assertRaises(OSError) as raised:
                 self.attempt(self.make_test("timeout-capture", timeout_ms=2_000))
         self.assertIs(raised.exception, original)
+
+    def test_launcher_spawn_failure_is_supervisor_infrastructure_error(self) -> None:
+        control_read, control_write = os.pipe()
+        original = OSError(errno.EAGAIN, "launcher spawn failed")
+        try:
+            with (
+                mock.patch("scripts.posix.baseline._require_pidfd_support"),
+                mock.patch(
+                    "scripts.posix.baseline.subprocess.Popen",
+                    side_effect=original,
+                ),
+            ):
+                returncode = baseline_module.supervise_runtime(
+                    ["/fake/qemu-aarch64"], control_write
+                )
+            control_write = -1
+            payload = json.loads(os.read(control_read, 4096))
+        finally:
+            os.close(control_read)
+            if control_write >= 0:
+                os.close(control_write)
+
+        self.assertEqual(returncode, 125)
+        self.assertEqual(payload["kind"], "infrastructure_error")
+        self.assertIn("launcher spawn failed", payload["message"])
 
     def test_interruption_reaps_process_and_preserves_original_exception(self) -> None:
         original = MemoryError("selector interrupted")
@@ -950,6 +1059,97 @@ class RuntimeAttemptTests(BaselineFixture, unittest.TestCase):
         self.assertEqual(payload["kind"], "infrastructure_error")
         self.assertIn("cleanup failed", payload["message"])
 
+    def test_supervisor_cleanup_failure_retains_known_runtime_result(self) -> None:
+        control_read, control_write = os.pipe()
+        process = mock.Mock(
+            pid=999_997,
+            returncode=0,
+            stdin=None,
+            stdout=None,
+            stderr=None,
+        )
+        process.wait.return_value = 0
+        process_tree = mock.Mock()
+        process_tree.cleanup.side_effect = ValueError("cleanup failed")
+        try:
+            with (
+                mock.patch(
+                    "scripts.posix.baseline._LinuxProcessTree",
+                    return_value=process_tree,
+                ),
+                mock.patch("scripts.posix.baseline._require_pidfd_support"),
+                mock.patch(
+                    "scripts.posix.baseline.subprocess.Popen",
+                    return_value=process,
+                ),
+                mock.patch(
+                    "scripts.posix.baseline._read_launcher_control",
+                    return_value={"kind": "result", "returncode": 0},
+                ),
+            ):
+                returncode = baseline_module.supervise_runtime(
+                    ["/fake/qemu-aarch64"], control_write
+                )
+            control_write = -1
+            payload = json.loads(os.read(control_read, 4096))
+        finally:
+            os.close(control_read)
+            if control_write >= 0:
+                os.close(control_write)
+
+        self.assertEqual(returncode, 125)
+        self.assertEqual(payload["kind"], "infrastructure_error")
+        self.assertEqual(payload.get("returncode"), 0)
+        self.assertIn("cleanup failed", payload["message"])
+
+    def test_supervisor_cleanup_failure_retains_known_launch_error(self) -> None:
+        control_read, control_write = os.pipe()
+        process = mock.Mock(
+            pid=999_996,
+            returncode=125,
+            stdin=None,
+            stdout=None,
+            stderr=None,
+        )
+        process.wait.return_value = 125
+        process_tree = mock.Mock()
+        process_tree.cleanup.side_effect = ValueError("cleanup failed")
+        try:
+            with (
+                mock.patch(
+                    "scripts.posix.baseline._LinuxProcessTree",
+                    return_value=process_tree,
+                ),
+                mock.patch("scripts.posix.baseline._require_pidfd_support"),
+                mock.patch(
+                    "scripts.posix.baseline.subprocess.Popen",
+                    return_value=process,
+                ),
+                mock.patch(
+                    "scripts.posix.baseline._read_launcher_control",
+                    return_value={
+                        "errno": errno.ENOEXEC,
+                        "kind": "launch_error",
+                        "strerror": "Exec format error",
+                    },
+                ),
+            ):
+                returncode = baseline_module.supervise_runtime(
+                    ["/fake/qemu-aarch64"], control_write
+                )
+            control_write = -1
+            payload = json.loads(os.read(control_read, 4096))
+        finally:
+            os.close(control_read)
+            if control_write >= 0:
+                os.close(control_write)
+
+        self.assertEqual(returncode, 125)
+        self.assertEqual(payload["kind"], "infrastructure_error")
+        self.assertEqual(payload.get("errno"), errno.ENOEXEC)
+        self.assertEqual(payload.get("strerror"), "Exec format error")
+        self.assertIn("cleanup failed", payload["message"])
+
     def test_parent_cleanup_failure_is_chained_from_capture_error(self) -> None:
         original = MemoryError("capture interrupted")
         cleanup = ValueError("parent cleanup failed")
@@ -1011,6 +1211,87 @@ class RuntimeAttemptTests(BaselineFixture, unittest.TestCase):
                     baseline_module._attach_process_tree(process, process_tree)
         self.assertIs(raised.exception, original)
         self.assert_descendant_reaped()
+
+    def _assert_runner_attach_failure_reaps_broker_tree(
+        self, *, pidfd_fallback: bool
+    ) -> None:
+        original = MemoryError("runner pidfd attach interrupted")
+        synchronized = self.synchronized_popen()
+        real_popen = subprocess.Popen
+        broker: subprocess.Popen[bytes] | None = None
+        unrelated: subprocess.Popen[bytes] | None = None
+
+        def launch_with_unrelated(
+            *args: object, **kwargs: object
+        ) -> subprocess.Popen[bytes]:
+            nonlocal broker, unrelated
+            broker = synchronized(*args, **kwargs)
+            unrelated = real_popen(
+                ["/usr/bin/python3", "-c", "import time; time.sleep(60)"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return broker
+
+        try:
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch(
+                    "scripts.posix.baseline.subprocess.Popen",
+                    side_effect=launch_with_unrelated,
+                ))
+                stack.enter_context(mock.patch.object(
+                    baseline_module._LinuxProcessTree,
+                    "attach",
+                    side_effect=original,
+                ))
+                if pidfd_fallback:
+                    stack.enter_context(
+                        mock.patch(
+                            "scripts.posix.baseline._require_pidfd_support"
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch(
+                            "scripts.posix.baseline.os.pidfd_open",
+                            side_effect=OSError(
+                                errno.ENOSYS, "pidfd unavailable"
+                            ),
+                        )
+                    )
+                with self.assertRaises(MemoryError) as raised:
+                    self.attempt(
+                        self.make_test("escape-runner-attach", timeout_ms=2_000)
+                    )
+
+            self.assertIs(raised.exception, original)
+            observation = json.loads(
+                self.observation.read_text(encoding="utf-8")
+            )
+            descendant_pid = int(self.child_pid.read_text(encoding="ascii"))
+            self.assert_processes_reaped(
+                (int(observation["pid"]), descendant_pid)
+            )
+            assert broker is not None and unrelated is not None
+            self.assertIsNotNone(broker.poll())
+            self.assertIsNone(unrelated.poll())
+        finally:
+            if unrelated is not None and unrelated.poll() is None:
+                os.killpg(unrelated.pid, signal.SIGKILL)
+                unrelated.wait(timeout=1.0)
+
+    def test_runner_attach_failure_reaps_broker_tree_but_not_unrelated_child(
+        self,
+    ) -> None:
+        self._assert_runner_attach_failure_reaps_broker_tree(
+            pidfd_fallback=False
+        )
+
+    def test_runner_attach_failure_uses_direct_child_pid_fallback(self) -> None:
+        self._assert_runner_attach_failure_reaps_broker_tree(
+            pidfd_fallback=True
+        )
 
     def test_process_tree_does_not_claim_unrelated_concurrent_child(self) -> None:
         real_popen = subprocess.Popen
@@ -1191,6 +1472,263 @@ class RuntimeAttemptTests(BaselineFixture, unittest.TestCase):
 
 
 class CampaignTests(BaselineFixture, unittest.TestCase):
+    def _run_with_raw_supervisor_control(
+        self, test: SuiteTest, control: bytes
+    ) -> BaseException:
+        self.write_manifest((test,))
+
+        def command(_argv: object, descriptor: int) -> list[str]:
+            code = (
+                "import os;"
+                "os.write(1,b'observed-out\\n');"
+                "os.write(2,b'observed-err\\n');"
+                f"os.write({descriptor},{control!r})"
+            )
+            return ["/usr/bin/python3", "-B", "-c", code]
+
+        with mock.patch(
+            "scripts.posix.baseline._supervisor_command", side_effect=command
+        ):
+            with self.assertRaises(BaseException) as raised:
+                run_baseline(
+                    self.stage,
+                    self.sysroot,
+                    self.results,
+                    qemu=self.qemu,
+                    verifier=lambda _stage: None,
+                )
+        return raised.exception
+
+    def _run_with_supervisor_control(
+        self, test: SuiteTest, payload: dict[str, object]
+    ) -> BaseException:
+        self.write_manifest((test,))
+
+        def command(_argv: object, descriptor: int) -> list[str]:
+            repository = str(Path(baseline_module.__file__).resolve().parents[2])
+            code = (
+                "import os,sys;"
+                f"sys.path.insert(0,{repository!r});"
+                "from scripts.posix.baseline import _write_supervisor_control;"
+                "os.write(1,b'observed-out\\n');"
+                "os.write(2,b'observed-err\\n');"
+                f"_write_supervisor_control({descriptor},{payload!r})"
+            )
+            return ["/usr/bin/python3", "-B", "-c", code]
+
+        with mock.patch(
+            "scripts.posix.baseline._supervisor_command", side_effect=command
+        ):
+            with self.assertRaises(BaseException) as raised:
+                run_baseline(
+                    self.stage,
+                    self.sysroot,
+                    self.results,
+                    qemu=self.qemu,
+                    verifier=lambda _stage: None,
+                )
+        return raised.exception
+
+    def test_supervisor_infrastructure_error_retains_capture_and_result(self) -> None:
+        original = self._run_with_supervisor_control(
+            self.make_test("pass-case"),
+            {
+                "kind": "infrastructure_error",
+                "message": "broker cleanup failed",
+                "returncode": 0,
+            },
+        )
+
+        self.assertIsInstance(original, ValueError)
+        rows = [
+            json.loads(line)
+            for line in self.results.read_text(encoding="utf-8").splitlines()
+        ]
+        attempt = rows[0]
+        self.assertEqual(attempt["status"], "interrupted")
+        self.assertEqual(attempt["launch_status"], "launched")
+        self.assertEqual(attempt["pts_status"], "pass")
+        self.assertEqual(attempt["exit_code"], 0)
+        self.assertEqual(attempt["stdout"], "observed-out\n")
+        self.assertEqual(attempt["stderr"], "observed-err\n")
+        self.assertIn("broker cleanup failed", attempt["infrastructure_error"])
+        self.assertFalse(rows[-1]["complete"])
+
+    def test_invalid_supervisor_control_retains_capture_without_dimensions(
+        self,
+    ) -> None:
+        records = (
+            b"",
+            b'{"kind":"unknown"}\n',
+            b'{"kind":"result","returncode":0}\n'
+            b'{"kind":"result","returncode":1}\n',
+        )
+
+        for record in records:
+            with self.subTest(record=record):
+                original = self._run_with_raw_supervisor_control(
+                    self.make_test("pass-case"), record
+                )
+                self.assertIsInstance(original, ValueError)
+                rows = [
+                    json.loads(line)
+                    for line in self.results.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                ]
+                attempt = rows[0]
+                self.assertEqual(attempt["status"], "interrupted")
+                self.assertEqual(attempt["launch_status"], "interrupted")
+                self.assertIsNone(attempt["pts_status"])
+                self.assertIsNone(attempt["exit_code"])
+                self.assertIsNone(attempt["signal"])
+                self.assertEqual(attempt["stdout"], "observed-out\n")
+                self.assertEqual(attempt["stderr"], "observed-err\n")
+                self.assertFalse(rows[-1]["complete"])
+
+    def test_supervisor_infrastructure_error_does_not_invent_runtime_result(
+        self,
+    ) -> None:
+        original = self._run_with_supervisor_control(
+            self.make_test("pass-case"),
+            {
+                "kind": "infrastructure_error",
+                "message": "broker setup failed",
+            },
+        )
+
+        self.assertIsInstance(original, ValueError)
+        rows = [
+            json.loads(line)
+            for line in self.results.read_text(encoding="utf-8").splitlines()
+        ]
+        attempt = rows[0]
+        self.assertEqual(attempt["status"], "interrupted")
+        self.assertEqual(attempt["launch_status"], "interrupted")
+        self.assertIsNone(attempt["pts_status"])
+        self.assertIsNone(attempt["exit_code"])
+        self.assertIsNone(attempt["signal"])
+        self.assertEqual(attempt["stdout"], "observed-out\n")
+        self.assertEqual(attempt["stderr"], "observed-err\n")
+        self.assertIn("broker setup failed", attempt["infrastructure_error"])
+        self.assertFalse(rows[-1]["complete"])
+
+    def test_supervisor_infrastructure_error_retains_known_launch_failure(
+        self,
+    ) -> None:
+        original = self._run_with_supervisor_control(
+            self.make_test("pass-case"),
+            {
+                "errno": errno.ENOEXEC,
+                "kind": "infrastructure_error",
+                "message": "broker cleanup failed",
+                "strerror": "Exec format error",
+            },
+        )
+
+        self.assertIsInstance(original, BaselinePrerequisiteError)
+        rows = [
+            json.loads(line)
+            for line in self.results.read_text(encoding="utf-8").splitlines()
+        ]
+        attempt = rows[0]
+        self.assertEqual(attempt["status"], "launch-error")
+        self.assertEqual(attempt["launch_status"], "launch-error")
+        self.assertIsNone(attempt["pts_status"])
+        self.assertIsNone(attempt["exit_code"])
+        self.assertIn("Exec format error", attempt["launch_error"])
+        self.assertEqual(attempt["stdout"], "observed-out\n")
+        self.assertEqual(attempt["stderr"], "observed-err\n")
+        self.assertIn("broker cleanup failed", attempt["infrastructure_error"])
+        self.assertFalse(rows[-1]["complete"])
+
+    def test_oversized_infrastructure_control_retains_capture_and_result(
+        self,
+    ) -> None:
+        original = self._run_with_supervisor_control(
+            self.make_test("pass-case"),
+            {
+                "kind": "infrastructure_error",
+                "message": "broker cleanup failed " + "\x01" * 5_000,
+                "returncode": 0,
+            },
+        )
+
+        self.assertIsInstance(original, ValueError)
+        rows = [
+            json.loads(line)
+            for line in self.results.read_text(encoding="utf-8").splitlines()
+        ]
+        attempt = rows[0]
+        self.assertEqual(attempt["status"], "interrupted")
+        self.assertEqual(attempt["launch_status"], "launched")
+        self.assertEqual(attempt["pts_status"], "pass")
+        self.assertEqual(attempt["exit_code"], 0)
+        self.assertEqual(attempt["stdout"], "observed-out\n")
+        self.assertEqual(attempt["stderr"], "observed-err\n")
+        self.assertIn("broker cleanup failed", attempt["infrastructure_error"])
+        self.assertTrue(
+            attempt["infrastructure_error"].endswith("\n...[truncated]")
+        )
+        self.assertFalse(rows[-1]["complete"])
+
+    def test_oversized_infrastructure_control_retains_launch_failure(
+        self,
+    ) -> None:
+        original = self._run_with_supervisor_control(
+            self.make_test("pass-case"),
+            {
+                "errno": errno.ENOEXEC,
+                "kind": "infrastructure_error",
+                "message": "broker cleanup failed " + "\x01" * 5_000,
+                "strerror": "Exec format error " + "\x02" * 5_000,
+            },
+        )
+
+        self.assertIsInstance(original, BaselinePrerequisiteError)
+        rows = [
+            json.loads(line)
+            for line in self.results.read_text(encoding="utf-8").splitlines()
+        ]
+        attempt = rows[0]
+        self.assertEqual(attempt["status"], "launch-error")
+        self.assertEqual(attempt["launch_status"], "launch-error")
+        self.assertIsNone(attempt["pts_status"])
+        self.assertIn("Exec format error", attempt["launch_error"])
+        self.assertEqual(attempt["stdout"], "observed-out\n")
+        self.assertEqual(attempt["stderr"], "observed-err\n")
+        self.assertIn("broker cleanup failed", attempt["infrastructure_error"])
+        self.assertFalse(rows[-1]["complete"])
+
+    def test_broker_spawn_failure_is_campaign_infrastructure_error(self) -> None:
+        test = self.make_test("pass-case")
+        self.write_manifest((test,))
+        original = OSError(errno.EAGAIN, "broker spawn failed")
+
+        with mock.patch(
+            "scripts.posix.baseline.subprocess.Popen", side_effect=original
+        ):
+            with self.assertRaises(BaseException) as raised:
+                run_baseline(
+                    self.stage,
+                    self.sysroot,
+                    self.results,
+                    qemu=self.qemu,
+                    verifier=lambda _stage: None,
+                )
+
+        self.assertIs(raised.exception, original)
+        rows = [
+            json.loads(line)
+            for line in self.results.read_text(encoding="utf-8").splitlines()
+        ]
+        attempt = rows[0]
+        self.assertEqual(attempt["status"], "interrupted")
+        self.assertEqual(attempt["launch_status"], "interrupted")
+        self.assertIsNone(attempt["launch_error"])
+        self.assertIn("broker spawn failed", attempt["infrastructure_error"])
+        self.assertFalse(rows[-1]["complete"])
+
     def test_sysroot_cleanup_failure_publishes_incomplete_attempt(self) -> None:
         test = self.make_test("pass-case")
         self.write_manifest((test,))
@@ -1921,6 +2459,48 @@ class CampaignTests(BaselineFixture, unittest.TestCase):
         self.assertEqual(rows[-1]["selected_count"], 2)
         self.assertEqual(rows[-1]["completed_count"], 2)
 
+    def test_incomplete_publication_failure_is_not_hidden(self) -> None:
+        test = self.make_test("pass-case")
+        self.write_manifest((test,))
+        self.results.parent.mkdir(parents=True)
+        self.results.write_text("known-good\n", encoding="utf-8")
+        original = OSError(errno.EIO, "runtime capture failed")
+        publication = OSError(
+            errno.ENOSPC, "report publication failed " + "x" * 5_000
+        )
+
+        with (
+            mock.patch(
+                "scripts.posix.baseline.run_runtime_attempt",
+                side_effect=original,
+            ),
+            mock.patch(
+                "scripts.posix.baseline._publish_report",
+                side_effect=publication,
+            ),
+        ):
+            with self.assertRaises(OSError) as raised:
+                run_baseline(
+                    self.stage,
+                    self.sysroot,
+                    self.results,
+                    qemu=self.qemu,
+                    verifier=lambda _stage: None,
+                )
+
+        self.assertIs(raised.exception, original)
+        self.assertEqual(self.results.read_text(encoding="utf-8"), "known-good\n")
+        notes = getattr(raised.exception, "__notes__", ())
+        self.assertTrue(all(len(note.encode("utf-8")) <= 4_096 for note in notes))
+        self.assertTrue(
+            any(
+                "incomplete report publication failed" in note
+                and "report publication failed" in note
+                for note in notes
+            )
+        )
+        self.assertTrue(notes[-1].endswith("\n...[truncated]"))
+
     def test_post_execution_cleanup_retains_raw_pts_status(self) -> None:
         test = self.make_test("pass-case")
         self.write_manifest((test,))
@@ -2208,6 +2788,41 @@ class CliTests(unittest.TestCase):
         self.assertNotEqual(returncode, 0)
         self.assertIn(diagnostic + "\n", stderr.getvalue())
         self.assertFalse(results.exists())
+
+    @mock.patch("scripts.posix.cli._current_build_inputs")
+    @mock.patch("scripts.posix.cli.run_baseline")
+    @mock.patch("scripts.posix.cli.shutil.which", return_value="/fake/qemu-aarch64")
+    def test_cli_prints_incomplete_publication_failure_note(
+        self,
+        _which: mock.Mock,
+        run: mock.Mock,
+        current_inputs: mock.Mock,
+    ) -> None:
+        current_inputs.return_value = (_metadata(), Path("checkout"), (), ())
+        failure = OSError(errno.EIO, "runtime capture failed")
+        failure.add_note(
+            "incomplete report publication failed: "
+            "OSError: report publication failed"
+        )
+        run.side_effect = failure
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            returncode = cli.main(
+                ["baseline", "--api", "getpid", "--sysroot", "/sysroot"]
+            )
+
+        self.assertEqual(returncode, 1)
+        self.assertIn(
+            "baseline failed: [Errno 5] runtime capture failed\n",
+            stderr.getvalue(),
+        )
+        self.assertIn(
+            "incomplete report publication failed: "
+            "OSError: report publication failed\n",
+            stderr.getvalue(),
+        )
+        self.assertNotIn(cli.BASELINE_PREREQUISITE, stderr.getvalue())
 
     @mock.patch("scripts.posix.cli._current_build_inputs")
     @mock.patch("scripts.posix.cli.run_baseline")
