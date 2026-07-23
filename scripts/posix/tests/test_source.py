@@ -918,6 +918,7 @@ class SharedModelTests(unittest.TestCase):
                     "binary_sha256",
                     "runtime_snapshot_sha256",
                     "run_id",
+                    "resource_deltas",
                 ),
                 model.RuntimeAttempt(
                     "unistd/close/1-1",

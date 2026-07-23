@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import asdict, replace
 import csv
 import hashlib
@@ -24,12 +24,55 @@ from scripts.posix.build import (
     nm_command,
     render_manifest,
 )
-from scripts.posix.model import BuildResult, RuntimeAttempt, SuiteTest
+from scripts.posix.model import (
+    BuildResult,
+    ResourceDeltas,
+    RuntimeAttempt,
+    SuiteTest,
+)
 from scripts.posix.report import OUTPUT_NAMES, generate_report
 
 
 class _StrictHTMLParser(HTMLParser):
     pass
+
+
+class ResourceModelTests(unittest.TestCase):
+    def test_resource_deltas_are_immutable_canonical_and_bounded(self) -> None:
+        deltas = ResourceDeltas.from_mapping(
+            {
+                "aio_requests": 3,
+                "ipc_objects": 4,
+                "linux_fds": 2,
+                "scheduler_threads": -1,
+                "timers": 5,
+            }
+        )
+
+        self.assertEqual(
+            deltas.to_dict(),
+            {
+                "aio_requests": 3,
+                "ipc_objects": 4,
+                "kernel_handles": 0,
+                "linux_fds": 2,
+                "linux_mappings": 0,
+                "linux_shared_memory": 0,
+                "processes": 0,
+                "scheduler_threads": -1,
+                "timers": 5,
+            },
+        )
+        self.assertIsInstance(hash(deltas), int)
+        for invalid in (
+            {"unknown": 1},
+            {"linux_fds": True},
+            {"linux_fds": 2**63},
+            {"linux_fds": -(2**63) - 1},
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    ResourceDeltas.from_mapping(invalid)
 
 
 class ReportFixture:
@@ -205,6 +248,7 @@ class ReportFixture:
         stdout: str = "",
         stderr: str = "",
         exit_code: int | None = 0,
+        run_id: str = "run-smros",
     ) -> RuntimeAttempt:
         return RuntimeAttempt(
             test_id=test.test_id,
@@ -233,7 +277,7 @@ class ReportFixture:
             smros_commit=self.metadata.smros_commit,
             binary_sha256=test.sha256 or EMPTY_SHA256,
             runtime_snapshot_sha256="6" * 64,
-            run_id="run-smros",
+            run_id=run_id,
         )
 
     def _write_runtime(
@@ -247,6 +291,9 @@ class ReportFixture:
             {"record_type": "attempt", **attempt.to_dict()}
             for attempt in attempts
         ]
+        run_id = attempts[0].run_id if attempts else "run-smros"
+        platform = attempts[0].platform if attempts else "smros-aarch64"
+        source = attempts[0].source if attempts else "smros-qemu"
         rows.append(
             {
                 "build_id": "5" * 64,
@@ -255,13 +302,13 @@ class ReportFixture:
                 "completed_count": len(attempts),
                 "manifest_sha256": self.metadata.manifest_sha256,
                 "patch_sha256": self.metadata.patch_sha256,
-                "platform": "smros-aarch64",
+                "platform": platform,
                 "record_type": "run",
                 "revision": self.metadata.revision,
-                "run_id": "run-smros",
+                "run_id": run_id,
                 "selected_count": len(attempts),
                 "smros_commit": self.metadata.smros_commit,
-                "source": "smros-qemu",
+                "source": source,
                 "status_counts": {
                     status: sum(attempt.status == status for attempt in attempts)
                     for status in sorted({attempt.status for attempt in attempts})
@@ -278,6 +325,24 @@ class ReportFixture:
 
 
 class AggregationTests(ReportFixture, unittest.TestCase):
+    def _rewrite_runtime_identity(
+        self, path: Path, *, platform: str, source: str
+    ) -> None:
+        rows = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+        ]
+        for row in rows:
+            row["platform"] = platform
+            row["source"] = source
+        path.write_text(
+            "".join(
+                json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                for row in rows
+            ),
+            encoding="utf-8",
+        )
+
     def test_coverage_denominators_and_exclusions_are_exact(self) -> None:
         summary = generate_report(
             self.stage / "manifest.json",
@@ -311,16 +376,26 @@ class AggregationTests(ReportFixture, unittest.TestCase):
         )
 
     def test_repeated_different_outcomes_are_flaky_and_retained(self) -> None:
-        attempts = (
-            self._attempt(self.tests[0], "pass"),
-            self._attempt(self.tests[0], "fail", exit_code=1),
+        first = self.root / "first-run.ndjson"
+        second = self.root / "second-run.ndjson"
+        self._write_runtime(
+            first,
+            (self._attempt(self.tests[0], "pass", run_id="run-first"),),
+            complete=True,
         )
-        repeated = self.root / "repeated.ndjson"
-        self._write_runtime(repeated, attempts, complete=True)
+        self._write_runtime(
+            second,
+            (
+                self._attempt(
+                    self.tests[0], "fail", exit_code=1, run_id="run-second"
+                ),
+            ),
+            complete=True,
+        )
 
         summary = generate_report(
             self.stage / "manifest.json",
-            smros_results=(repeated,),
+            smros_results=(first, second),
             output_directory=self.output,
         )
 
@@ -393,8 +468,449 @@ class AggregationTests(ReportFixture, unittest.TestCase):
                 output_directory=self.output,
             )
 
+    def test_complete_runtime_requires_every_selected_attempt(self) -> None:
+        rows = [
+            json.loads(line)
+            for line in self.smros_results.read_text(encoding="utf-8").splitlines()
+        ]
+        rows[-1]["selected_count"] = 4
+        incomplete = self.root / "false-complete.ndjson"
+        incomplete.write_text(
+            "".join(
+                json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                for row in rows
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "complete.*selected"):
+            generate_report(
+                self.stage / "manifest.json",
+                smros_results=(incomplete,),
+                output_directory=self.output,
+            )
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result = cli.main(
+                [
+                    "report",
+                    "--manifest",
+                    str(self.stage / "manifest.json"),
+                    "--smros-results",
+                    str(incomplete),
+                    "--out",
+                    str(self.output),
+                ]
+            )
+        self.assertEqual(result, 1)
+        self.assertFalse(self.output.exists())
+
+    def test_complete_runtime_requires_unique_selected_attempts(self) -> None:
+        rows = [
+            json.loads(line)
+            for line in self.smros_results.read_text(encoding="utf-8").splitlines()
+        ]
+        rows[1]["test_id"] = rows[0]["test_id"]
+        duplicated = self.root / "duplicate-completion.ndjson"
+        duplicated.write_text(
+            "".join(
+                json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                for row in rows
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "unique selected"):
+            generate_report(
+                self.stage / "manifest.json",
+                smros_results=(duplicated,),
+                output_directory=self.output,
+            )
+
+    def test_runtime_attempts_reject_aggregate_only_statuses(self) -> None:
+        for status in ("flaky", "build-fail", "not-built"):
+            with self.subTest(status=status):
+                rows = [
+                    json.loads(line)
+                    for line in self.smros_results.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                ]
+                rows[0]["status"] = status
+                rows[-1]["status_counts"] = {
+                    "pass": 1,
+                    "fail": 1,
+                    status: 1,
+                }
+                invalid = self.root / f"aggregate-{status}.ndjson"
+                invalid.write_text(
+                    "".join(
+                        json.dumps(row, sort_keys=True, separators=(",", ":"))
+                        + "\n"
+                        for row in rows
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, "raw runtime status"):
+                    generate_report(
+                        self.stage / "manifest.json",
+                        smros_results=(invalid,),
+                        output_directory=self.output,
+                    )
+
+    def test_runtime_inputs_must_match_their_platform_role(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Linux-reference platform"):
+            generate_report(
+                self.stage / "manifest.json",
+                linux_results=(self.smros_results,),
+                output_directory=self.output,
+            )
+
+        linux = self.root / "linux-results.ndjson"
+        linux.write_bytes(self.smros_results.read_bytes())
+        self._rewrite_runtime_identity(
+            linux, platform="aarch64-linux-reference", source="qemu-user"
+        )
+        with self.assertRaisesRegex(ValueError, "SMROS platform"):
+            generate_report(
+                self.stage / "manifest.json",
+                smros_results=(linux,),
+                output_directory=self.output,
+            )
+
+    def test_linux_rows_without_resource_field_default_to_zero(self) -> None:
+        rows = [
+            json.loads(line)
+            for line in self.smros_results.read_text(encoding="utf-8").splitlines()
+        ]
+        for row in rows:
+            row["platform"] = "aarch64-linux-reference"
+            row["source"] = "qemu-user"
+            if row["record_type"] == "attempt":
+                row.pop("resource_deltas")
+        linux = self.root / "legacy-linux.ndjson"
+        linux.write_text(
+            "".join(
+                json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                for row in rows
+            ),
+            encoding="utf-8",
+        )
+
+        summary = generate_report(
+            self.stage / "manifest.json",
+            linux_results=(linux,),
+            output_directory=self.output,
+        )
+
+        self.assertEqual(
+            summary["resource_deltas"], ResourceDeltas().to_dict()
+        )
+        self.assertEqual(summary["counts"]["leaked_resources"], 0)
+
 
 class RendererTests(ReportFixture, unittest.TestCase):
+    def test_raw_serial_log_flows_through_cli_and_report(self) -> None:
+        test = self.tests[0]
+
+        def event(seq: int, name: str, **values: object) -> str:
+            return "SMROS_POSIX_EVENT " + json.dumps(
+                {
+                    "architecture": "aarch64",
+                    "event": name,
+                    "manifest_sha256": self.metadata.manifest_sha256,
+                    "run_id": "serial-run",
+                    "schema": 1,
+                    "seq": seq,
+                    **values,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+
+        serial = self.root / "serial.log"
+        serial.write_text(
+            "\n".join(
+                (
+                    "kernel: ordinary boot output",
+                    event(
+                        1,
+                        "suite_start",
+                        selected_count=1,
+                        build_id="5" * 64,
+                        build_results_sha256=self.metadata.build_results_sha256,
+                        revision=self.metadata.revision,
+                        patch_sha256=self.metadata.patch_sha256,
+                        smros_commit=self.metadata.smros_commit,
+                    ),
+                    event(
+                        2,
+                        "test_start",
+                        test_id=test.test_id,
+                        group=test.group,
+                        api=test.api,
+                    ),
+                    "serial program output",
+                    event(
+                        3,
+                        "test_end",
+                        test_id=test.test_id,
+                        group=test.group,
+                        api=test.api,
+                        status="pass",
+                        pts_status="pass",
+                        launch_status="launched",
+                        exit_code=0,
+                        signal=None,
+                        timed_out=False,
+                        duration_ms=9,
+                        resource_deltas={"linux_fds": 2, "timers": 1},
+                    ),
+                    event(
+                        4,
+                        "suite_end",
+                        complete=True,
+                        selected_count=1,
+                        completed_count=1,
+                        status_counts={"pass": 1},
+                    ),
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        summary = generate_report(
+            self.stage / "manifest.json",
+            smros_results=(serial,),
+            output_directory=self.output,
+        )
+
+        result = next(
+            row for row in summary["tests"] if row["test_id"] == test.test_id
+        )
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["attempts"][0]["stdout"], "serial program output\n")
+        self.assertEqual(result["resource_deltas"]["linux_fds"], 2)
+        self.assertEqual(summary["resource_deltas"]["timers"], 1)
+        events = [
+            json.loads(line)
+            for line in (self.output / "events.ndjson").read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual([row["event"] for row in events], [
+            "suite_start", "test_start", "test_end", "suite_end"
+        ])
+        cli_output = self.root / "cli-serial-report"
+        with redirect_stdout(io.StringIO()):
+            cli_result = cli.main(
+                [
+                    "report",
+                    "--manifest",
+                    str(self.stage / "manifest.json"),
+                    "--smros-results",
+                    str(serial),
+                    "--out",
+                    str(cli_output),
+                ]
+            )
+        self.assertEqual(cli_result, 0)
+        self.assertTrue((cli_output / "summary.json").is_file())
+
+    def test_junit_replaces_xml_forbidden_controls(self) -> None:
+        output = "allowed\tline\nforbidden:\x01:end\r"
+        rows = [
+            json.loads(line)
+            for line in self.smros_results.read_text(encoding="utf-8").splitlines()
+        ]
+        rows[2]["stdout"] = output
+        rows[2]["stdout_bytes"] = len(output.encode("utf-8"))
+        controls = self.root / "control-results.ndjson"
+        controls.write_text(
+            "".join(
+                json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                for row in rows
+            ),
+            encoding="utf-8",
+        )
+
+        generate_report(
+            self.stage / "manifest.json",
+            smros_results=(controls,),
+            output_directory=self.output,
+        )
+
+        junit = ET.parse(self.output / "junit.xml")
+        system_output = "".join(
+            node.text or "" for node in junit.findall(".//system-out")
+        )
+        self.assertIn("allowed\tline\n", system_output)
+        self.assertIn("forbidden:\ufffd:end", system_output)
+        self.assertNotIn("\x01", system_output)
+
+    def test_markdown_escapes_links_emphasis_code_and_tables(self) -> None:
+        unsafe = "[click](javascript:alert(1)) *bold* `code` | table\n"
+        rows = [
+            json.loads(line)
+            for line in self.smros_results.read_text(encoding="utf-8").splitlines()
+        ]
+        rows[2]["stdout"] = unsafe
+        rows[2]["stdout_bytes"] = len(unsafe.encode("utf-8"))
+        markdown_input = self.root / "markdown-results.ndjson"
+        markdown_input.write_text(
+            "".join(
+                json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                for row in rows
+            ),
+            encoding="utf-8",
+        )
+
+        generate_report(
+            self.stage / "manifest.json",
+            smros_results=(markdown_input,),
+            output_directory=self.output,
+        )
+
+        markdown = (self.output / "report.md").read_text(encoding="utf-8")
+        escaped = (
+            r"\[click\]\(javascript:alert\(1\)\) "
+            r"\*bold\* \`code\` \| table"
+        )
+        self.assertIn(escaped, markdown)
+        self.assertNotIn(unsafe.strip(), markdown)
+
+    def test_resource_deltas_survive_every_report_layer(self) -> None:
+        rows = [
+            json.loads(line)
+            for line in self.smros_results.read_text(encoding="utf-8").splitlines()
+        ]
+        rows[0]["resource_deltas"] = {
+            "aio_requests": 3,
+            "ipc_objects": 4,
+            "kernel_handles": 0,
+            "linux_fds": 2,
+            "linux_mappings": 0,
+            "linux_shared_memory": 0,
+            "processes": 0,
+            "scheduler_threads": 1,
+            "timers": 5,
+        }
+        resources = self.root / "resource-results.ndjson"
+        resources.write_text(
+            "".join(
+                json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                for row in rows
+            ),
+            encoding="utf-8",
+        )
+
+        summary = generate_report(
+            self.stage / "manifest.json",
+            smros_results=(resources,),
+            output_directory=self.output,
+        )
+
+        test = next(
+            row for row in summary["tests"] if row["test_id"] == self.tests[0].test_id
+        )
+        self.assertEqual(test["resource_deltas"]["linux_fds"], 2)
+        self.assertEqual(test["attempts"][0]["resource_deltas"]["scheduler_threads"], 1)
+        self.assertEqual(summary["resource_deltas"]["linux_fds"], 2)
+        self.assertEqual(summary["resource_deltas"]["timers"], 5)
+        self.assertEqual(summary["resource_deltas"]["aio_requests"], 3)
+        self.assertEqual(summary["resource_deltas"]["ipc_objects"], 4)
+        self.assertEqual(summary["resource_leaks"]["timers"], 1)
+        self.assertEqual(summary["resource_leaks"]["aio_requests"], 1)
+        self.assertEqual(summary["resource_leaks"]["ipc_objects"], 1)
+        self.assertEqual(summary["groups"]["base"]["resource_deltas"]["scheduler_threads"], 1)
+        self.assertEqual(summary["groups"]["base"]["resource_leaks"]["timers"], 1)
+        self.assertEqual(summary["apis"]["getpid"]["counts"]["leaked_resources"], 1)
+        events = [
+            json.loads(line)
+            for line in (self.output / "events.ndjson").read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(events[0]["resource_deltas"]["linux_fds"], 2)
+        with (self.output / "groups.csv").open(encoding="utf-8", newline="") as stream:
+            group = next(row for row in csv.DictReader(stream) if row["group"] == "base")
+        self.assertEqual(group["resource_delta_linux_fds"], "2")
+        self.assertEqual(group["resource_delta_timers"], "5")
+        self.assertEqual(group["resource_delta_aio_requests"], "3")
+        self.assertEqual(group["resource_delta_ipc_objects"], "4")
+        junit = ET.parse(self.output / "junit.xml")
+        properties = {
+            item.attrib["name"]: item.attrib["value"]
+            for item in junit.findall(".//property")
+        }
+        self.assertEqual(properties["resource_delta.linux_fds"], "2")
+        self.assertEqual(properties["resource_delta.timers"], "5")
+        self.assertEqual(properties["resource_delta.aio_requests"], "3")
+        self.assertEqual(properties["resource_delta.ipc_objects"], "4")
+        markdown = (self.output / "report.md").read_text(encoding="utf-8")
+        html_text = (self.output / "index.html").read_text(encoding="utf-8")
+        self.assertIn(r"linux\_fds=2", markdown)
+        self.assertIn("linux_fds=2", html_text)
+
+    def test_negative_cleanup_delta_is_visible_but_not_a_leak(self) -> None:
+        rows = [
+            json.loads(line)
+            for line in self.smros_results.read_text(encoding="utf-8").splitlines()
+        ]
+        rows[0]["resource_deltas"]["linux_fds"] = -2
+        cleanup = self.root / "cleanup-results.ndjson"
+        cleanup.write_text(
+            "".join(
+                json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                for row in rows
+            ),
+            encoding="utf-8",
+        )
+
+        summary = generate_report(
+            self.stage / "manifest.json",
+            smros_results=(cleanup,),
+            output_directory=self.output,
+        )
+
+        self.assertEqual(summary["resource_deltas"]["linux_fds"], -2)
+        self.assertEqual(summary["counts"]["leaked_resources"], 0)
+        self.assertEqual(summary["resource_leaks"]["linux_fds"], 0)
+
+    def test_positive_residual_is_not_canceled_by_later_cleanup(self) -> None:
+        paths: list[Path] = []
+        for name, run_id, delta in (
+            ("leak", "run-leak", 2),
+            ("cleanup", "run-cleanup", -2),
+        ):
+            path = self.root / f"{name}.ndjson"
+            self._write_runtime(
+                path,
+                (self._attempt(self.tests[0], "pass", run_id=run_id),),
+                complete=True,
+            )
+            rows = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            rows[0]["resource_deltas"]["linux_fds"] = delta
+            path.write_text(
+                "".join(
+                    json.dumps(row, sort_keys=True, separators=(",", ":"))
+                    + "\n"
+                    for row in rows
+                ),
+                encoding="utf-8",
+            )
+            paths.append(path)
+
+        summary = generate_report(
+            self.stage / "manifest.json",
+            smros_results=tuple(paths),
+            output_directory=self.output,
+        )
+
+        self.assertEqual(summary["resource_deltas"]["linux_fds"], 0)
+        self.assertEqual(summary["resource_leaks"]["linux_fds"], 1)
+        self.assertEqual(summary["counts"]["leaked_resources"], 1)
+
     def test_all_outputs_parse_and_escape_untrusted_output(self) -> None:
         summary = generate_report(
             self.stage / "manifest.json",
@@ -481,6 +997,24 @@ class CliTests(ReportFixture, unittest.TestCase):
             )
         self.assertEqual(result, 1)
         self.assertIn("at least one runtime-result input", stderr.getvalue())
+
+    def test_report_cli_rejects_cross_wired_runtime_role(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result = cli.main(
+                [
+                    "report",
+                    "--manifest",
+                    str(self.stage / "manifest.json"),
+                    "--linux-results",
+                    str(self.smros_results),
+                    "--out",
+                    str(self.output),
+                ]
+            )
+        self.assertEqual(result, 1)
+        self.assertIn("Linux-reference platform", stderr.getvalue())
+        self.assertFalse(self.output.exists())
 
 
 if __name__ == "__main__":

@@ -10,8 +10,11 @@ from typing import Mapping
 from .model import (
     OVERALL_STATUSES,
     ParsedEventRun,
+    RAW_RUNTIME_STATUSES,
+    ResourceDeltas,
     SerialAttempt,
     SerialEvent,
+    validate_raw_attempt_semantics,
 )
 
 
@@ -154,14 +157,11 @@ def _serial_event(value: dict[str, object]) -> SerialEvent:
     )
 
 
-def _resource_deltas(value: Mapping[str, object]) -> dict[str, int]:
+def _resource_deltas(value: Mapping[str, object]) -> ResourceDeltas:
     raw = value.get("resource_deltas", {})
-    if not isinstance(raw, dict) or not all(
-        isinstance(key, str) and key and type(item) is int
-        for key, item in raw.items()
-    ):
+    if not isinstance(raw, dict):
         raise ValueError("event resource deltas are invalid")
-    result = {key: int(item) for key, item in raw.items()}
+    result: dict[str, object] = dict(raw)
     for key in (
         "processes_delta",
         "scheduler_threads_delta",
@@ -173,8 +173,14 @@ def _resource_deltas(value: Mapping[str, object]) -> dict[str, int]:
         if key in value:
             if type(value[key]) is not int:
                 raise ValueError("event resource deltas are invalid")
-            result[key.removesuffix("_delta")] = int(value[key])
-    return dict(sorted(result.items()))
+            normalized = key.removesuffix("_delta")
+            if normalized in result:
+                raise ValueError(f"duplicate event resource delta: {normalized}")
+            result[normalized] = value[key]
+    try:
+        return ResourceDeltas.from_mapping(result)
+    except ValueError as error:
+        raise ValueError("event resource deltas are invalid") from error
 
 
 def _attempt_from_end(
@@ -189,7 +195,7 @@ def _attempt_from_end(
             label = "test ID" if key == "test_id" else key
             raise ValueError(f"event {label} mismatch")
     status = _require_string(value, "status")
-    if status not in OVERALL_STATUSES:
+    if status not in RAW_RUNTIME_STATUSES:
         raise ValueError(f"event status is invalid: {status}")
     pts_status = value.get("pts_status")
     if pts_status is not None and (
@@ -223,6 +229,17 @@ def _attempt_from_end(
         infrastructure_error, str
     ):
         raise ValueError("event infrastructure error is invalid")
+    validate_raw_attempt_semantics(
+        status=status,
+        pts_status=pts_status,
+        launch_status=str(launch_status),
+        exit_code=exit_code,
+        signal=signal,
+        timed_out=timed_out,
+        launch_error=launch_error,
+        infrastructure_error=infrastructure_error,
+        label="event attempt",
+    )
     return SerialAttempt(
         test_id=str(value["test_id"]),
         group=str(value["group"]),
@@ -260,7 +277,7 @@ def _interrupted_attempt(start: SerialEvent, output: list[str]) -> SerialAttempt
         duration_ms=0,
         stdout="".join(output),
         stderr="",
-        resource_deltas={},
+        resource_deltas=ResourceDeltas(),
         run_id=start.run_id,
         manifest_sha256=start.manifest_sha256,
         architecture=start.architecture,
@@ -343,6 +360,16 @@ def parse_serial_log(log: str) -> ParsedEventRun:
                 raise ValueError("event selected count mismatch")
             if completed != len(attempts) or completed > selected:
                 raise ValueError("event completed count mismatch")
+            if value["complete"] is True and completed != selected:
+                raise ValueError(
+                    "complete event does not cover every selected attempt"
+                )
+            if value["complete"] is True and len(
+                {attempt.test_id for attempt in attempts}
+            ) != selected:
+                raise ValueError(
+                    "complete event does not contain unique selected attempts"
+                )
             raw_counts = value.get("status_counts")
             expected_counts = dict(
                 sorted(Counter(attempt.status for attempt in attempts).items())

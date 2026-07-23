@@ -26,6 +26,48 @@ def _event(seq: int, event: str, **values: object) -> str:
 
 
 class SerialEventTests(unittest.TestCase):
+    def _one_attempt_log(self, **end_values: object) -> str:
+        test_id = "conformance/interfaces/getpid/1-1.c"
+        status = str(end_values.get("status", "pass"))
+        end_payload: dict[str, object] = {
+            "status": status,
+            "pts_status": "pass",
+            "launch_status": "launched",
+            "exit_code": 0,
+            "signal": None,
+            "timed_out": False,
+            "duration_ms": 1,
+        }
+        end_payload.update(end_values)
+        return "\n".join(
+            (
+                _event(1, "suite_start", selected_count=1),
+                _event(
+                    2,
+                    "test_start",
+                    test_id=test_id,
+                    group="base",
+                    api="getpid",
+                ),
+                _event(
+                    3,
+                    "test_end",
+                    test_id=test_id,
+                    group="base",
+                    api="getpid",
+                    **end_payload,
+                ),
+                _event(
+                    4,
+                    "suite_end",
+                    complete=True,
+                    selected_count=1,
+                    completed_count=1,
+                    status_counts={status: 1},
+                ),
+            )
+        )
+
     def test_parses_interleaved_output_and_complete_run(self) -> None:
         test_id = "conformance/interfaces/getpid/1-1.c"
         log = "\n".join(
@@ -80,7 +122,8 @@ class SerialEventTests(unittest.TestCase):
             "program says <unsafe> & keeps running\n"
             "kernel: diagnostic interleaved with output\n"
         ))
-        self.assertEqual(attempt.resource_deltas, {"linux_fds": 0, "processes": 0})
+        self.assertEqual(attempt.resource_deltas.linux_fds, 0)
+        self.assertEqual(attempt.resource_deltas.processes, 0)
 
     def test_rejects_duplicate_terminal_event(self) -> None:
         log = "\n".join(
@@ -194,6 +237,114 @@ class SerialEventTests(unittest.TestCase):
         self.assertEqual(len(parsed.attempts), 1)
         self.assertEqual(parsed.attempts[0].status, "interrupted")
         self.assertEqual(parsed.attempts[0].stdout, "partial output\n")
+
+    def test_complete_suite_requires_every_selected_attempt(self) -> None:
+        log = "\n".join(
+            (
+                _event(1, "suite_start", selected_count=1),
+                _event(
+                    2,
+                    "suite_end",
+                    complete=True,
+                    selected_count=1,
+                    completed_count=0,
+                    status_counts={},
+                ),
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "complete.*selected"):
+            parse_serial_log(log)
+
+    def test_complete_suite_requires_unique_selected_attempts(self) -> None:
+        test_id = "conformance/interfaces/getpid/1-1.c"
+        lines = [_event(1, "suite_start", selected_count=2)]
+        for seq in (2, 4):
+            lines.extend(
+                (
+                    _event(
+                        seq,
+                        "test_start",
+                        test_id=test_id,
+                        group="base",
+                        api="getpid",
+                    ),
+                    _event(
+                        seq + 1,
+                        "test_end",
+                        test_id=test_id,
+                        group="base",
+                        api="getpid",
+                        status="pass",
+                        pts_status="pass",
+                        launch_status="launched",
+                        exit_code=0,
+                        signal=None,
+                        timed_out=False,
+                        duration_ms=1,
+                    ),
+                )
+            )
+        lines.append(
+            _event(
+                6,
+                "suite_end",
+                complete=True,
+                selected_count=2,
+                completed_count=2,
+                status_counts={"pass": 2},
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "unique selected"):
+            parse_serial_log("\n".join(lines))
+
+    def test_rejects_contradictory_pass_dimensions(self) -> None:
+        with self.assertRaisesRegex(ValueError, "pass dimensions"):
+            parse_serial_log(
+                self._one_attempt_log(launch_status="interrupted")
+            )
+
+    def test_rejects_contradictory_raw_status_dimensions(self) -> None:
+        cases = {
+            "fail": {
+                "status": "fail",
+                "pts_status": "fail",
+                "exit_code": -1,
+            },
+            "PTS": {
+                "status": "unsupported",
+                "pts_status": "fail",
+                "exit_code": 4,
+            },
+            "timeout": {
+                "status": "timeout",
+                "pts_status": None,
+                "exit_code": None,
+                "timed_out": False,
+            },
+            "crash": {
+                "status": "crash",
+                "pts_status": None,
+                "exit_code": None,
+                "signal": None,
+            },
+            "launch": {
+                "status": "launch-error",
+                "pts_status": None,
+                "exit_code": None,
+                "launch_status": "launched",
+                "launch_error": None,
+            },
+            "interrupted": {
+                "status": "interrupted",
+                "infrastructure_error": None,
+            },
+        }
+        for label, values in cases.items():
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(ValueError, "dimensions"):
+                    parse_serial_log(self._one_attempt_log(**values))
 
 
 if __name__ == "__main__":

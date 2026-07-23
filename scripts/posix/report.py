@@ -17,6 +17,7 @@ import stat
 from typing import Iterable, Mapping, Sequence
 import xml.etree.ElementTree as ET
 
+from .events import EVENT_PREFIX, parse_serial_log
 from .build import (
     CHECKSUM_DEFINITION,
     MAX_BUILD_RESULTS_BYTES,
@@ -31,8 +32,12 @@ from .model import (
     OVERALL_STATUSES,
     BuildResult,
     CoverageMetric,
+    RAW_RUNTIME_STATUSES,
+    RESOURCE_DELTA_NAMES,
+    ResourceDeltas,
     RuntimeAttempt,
     SuiteTest,
+    validate_raw_attempt_semantics,
 )
 
 
@@ -45,6 +50,11 @@ OUTPUT_NAMES = (
     "report.md",
     "index.html",
 )
+LINUX_REFERENCE_PLATFORM = "aarch64-linux-reference"
+LINUX_REFERENCE_SOURCE = "qemu-user"
+SMROS_PLATFORM = "smros-aarch64"
+SMROS_SOURCES = frozenset({"host-watchdog", "smros-qemu", "smros-serial"})
+SMROS_SERIAL_SOURCE = "smros-serial"
 _MAX_RUNTIME_RESULTS_BYTES = 128 * 1024 * 1024
 _MAX_RUNTIME_RESULT_LINE_BYTES = 512 * 1024
 _MAX_RUNTIME_ROWS = 32_768
@@ -361,7 +371,10 @@ def _validate_attempt(
     line_number: int,
 ) -> RuntimeAttempt:
     expected = {field.name for field in fields(RuntimeAttempt)} | {"record_type"}
-    if set(value) != expected or value.get("record_type") != "attempt":
+    compatible = expected - {"resource_deltas"}
+    if set(value) not in {frozenset(expected), frozenset(compatible)} or value.get(
+        "record_type"
+    ) != "attempt":
         raise ValueError(f"invalid runtime attempt schema at line {line_number}")
     test_id = value["test_id"]
     if not isinstance(test_id, str) or test_id not in tests_by_id:
@@ -384,8 +397,10 @@ def _validate_attempt(
         if not isinstance(value[key], str) or not value[key]:
             if key not in {"stdout", "stderr"} or value[key] != "":
                 raise ValueError(f"runtime attempt {key} is invalid at line {line_number}")
-    if value["status"] not in OVERALL_STATUSES:
-        raise ValueError(f"runtime attempt status is invalid at line {line_number}")
+    if value["status"] not in RAW_RUNTIME_STATUSES:
+        raise ValueError(
+            f"runtime attempt raw runtime status is invalid at line {line_number}"
+        )
     if value["build_status"] not in {"passed", "failed", "not-built"}:
         raise ValueError(f"runtime attempt build status is invalid at line {line_number}")
     if value["link_status"] not in {"passed", "failed", "not-linked", "not-built"}:
@@ -410,18 +425,17 @@ def _validate_attempt(
             raise ValueError(f"runtime attempt {key} is invalid at line {line_number}")
     for key in ("launch_error", "infrastructure_error"):
         _require_optional_text(value[key], key)
-    if value["status"] == "pass" and (
-        value["launch_status"] != "launched"
-        or value["pts_status"] != "pass"
-        or value["exit_code"] != 0
-        or value["signal"] is not None
-        or value["timed_out"] is not False
-        or value["launch_error"] is not None
-        or value["infrastructure_error"] is not None
-    ):
-        raise ValueError(
-            f"runtime attempt pass dimensions are invalid at line {line_number}"
-        )
+    validate_raw_attempt_semantics(
+        status=str(value["status"]),
+        pts_status=pts_status,
+        launch_status=str(value["launch_status"]),
+        exit_code=value["exit_code"],  # type: ignore[arg-type]
+        signal=value["signal"],  # type: ignore[arg-type]
+        timed_out=bool(value["timed_out"]),
+        launch_error=value["launch_error"],  # type: ignore[arg-type]
+        infrastructure_error=value["infrastructure_error"],  # type: ignore[arg-type]
+        label="runtime attempt",
+    )
     for key in (
         "manifest_sha256",
         "build_results_sha256",
@@ -443,7 +457,17 @@ def _validate_attempt(
         or value["smros_commit"] != metadata.smros_commit
     ):
         raise ValueError(f"runtime attempt provenance mismatch at line {line_number}")
+    raw_resources = value.get("resource_deltas", {})
+    if not isinstance(raw_resources, dict):
+        raise ValueError(f"runtime attempt resource deltas are invalid at line {line_number}")
+    try:
+        resource_deltas = ResourceDeltas.from_mapping(raw_resources)
+    except ValueError as error:
+        raise ValueError(
+            f"runtime attempt resource deltas are invalid at line {line_number}"
+        ) from error
     payload = {key: value[key] for key in value if key != "record_type"}
+    payload["resource_deltas"] = resource_deltas
     return RuntimeAttempt(**payload)  # type: ignore[arg-type]
 
 
@@ -474,6 +498,21 @@ def _validate_terminal(
         raise ValueError(f"runtime terminal completed count mismatch at line {line_number}")
     if value["completed_count"] > value["selected_count"]:
         raise ValueError(f"runtime terminal selected count mismatch at line {line_number}")
+    if (
+        value["complete"] is True
+        and value["completed_count"] != value["selected_count"]
+    ):
+        raise ValueError(
+            "runtime complete record does not cover every selected attempt "
+            f"at line {line_number}"
+        )
+    if value["complete"] is True and len(
+        {attempt.test_id for attempt in attempts}
+    ) != value["selected_count"]:
+        raise ValueError(
+            "runtime complete record does not contain unique selected attempts "
+            f"at line {line_number}"
+        )
     expected_counts = dict(sorted(Counter(item.status for item in attempts).items()))
     if value["status_counts"] != expected_counts:
         raise ValueError(f"runtime terminal status counts mismatch at line {line_number}")
@@ -515,6 +554,8 @@ def _load_runtime_results(
     path: Path,
     tests: Sequence[SuiteTest],
     metadata: ManifestMetadata,
+    *,
+    role: str,
 ) -> _RuntimeInput:
     data = _read_regular(path, "runtime results", _MAX_RUNTIME_RESULTS_BYTES)
     if not data or not data.endswith(b"\n") or b"\r" in data:
@@ -547,11 +588,150 @@ def _load_runtime_results(
         rows.append(value)
     if terminal is None:
         raise ValueError("runtime results lack a terminal run record")
+    if role == "linux":
+        if (
+            terminal["platform"] != LINUX_REFERENCE_PLATFORM
+            or terminal["source"] != LINUX_REFERENCE_SOURCE
+        ):
+            raise ValueError(
+                "Linux-reference platform/source does not match its input role"
+            )
+    elif role == "smros":
+        if (
+            terminal["platform"] != SMROS_PLATFORM
+            or terminal["source"] not in SMROS_SOURCES
+        ):
+            raise ValueError("SMROS platform/source does not match its input role")
+    else:
+        raise AssertionError(f"unknown runtime input role: {role}")
     return _RuntimeInput(
         path=str(Path(os.path.abspath(path))),
         attempts=tuple(attempts),
         terminal=dict(terminal),
         rows=tuple(dict(row) for row in rows),
+    )
+
+
+def _load_serial_results(
+    path: Path,
+    text: str,
+    manifest: _ManifestInput,
+) -> _RuntimeInput:
+    parsed = parse_serial_log(text)
+    if parsed.manifest_sha256 != manifest.metadata.manifest_sha256:
+        raise ValueError("serial event manifest provenance mismatch")
+    suite_start = parsed.events[0].values
+    required_provenance = {
+        "build_id": _is_digest,
+        "build_results_sha256": _is_digest,
+        "revision": _is_commit,
+        "patch_sha256": _is_digest,
+        "smros_commit": _is_commit,
+    }
+    for key, validator in required_provenance.items():
+        if not validator(suite_start.get(key)):
+            raise ValueError(f"serial suite_start {key} is invalid")
+    metadata = manifest.metadata
+    if (
+        suite_start["build_results_sha256"] != metadata.build_results_sha256
+        or suite_start["revision"] != metadata.revision
+        or suite_start["patch_sha256"] != metadata.patch_sha256
+        or suite_start["smros_commit"] != metadata.smros_commit
+    ):
+        raise ValueError("serial suite_start provenance mismatch")
+    tests_by_id = {test.test_id: test for test in manifest.tests}
+    build_by_identity = {
+        (result.test_id, result.stage): result for result in manifest.build_results
+    }
+    attempts: list[RuntimeAttempt] = []
+    for serial_attempt in parsed.attempts:
+        test = tests_by_id.get(serial_attempt.test_id)
+        if test is None:
+            raise ValueError(f"unknown serial event test ID: {serial_attempt.test_id}")
+        if serial_attempt.group != test.group or serial_attempt.api != test.api:
+            raise ValueError(f"serial event dimensions mismatch: {test.test_id}")
+        compile_result = build_by_identity.get((test.test_id, "compile"))
+        link_result = build_by_identity.get((test.test_id, "link"))
+        attempts.append(
+            RuntimeAttempt(
+                test_id=test.test_id,
+                group=test.group,
+                api=test.api,
+                platform=SMROS_PLATFORM,
+                build_status=(
+                    compile_result.status if compile_result is not None else "not-built"
+                ),
+                link_status=(
+                    link_result.status if link_result is not None else "not-linked"
+                ),
+                launch_status=serial_attempt.launch_status,
+                pts_status=serial_attempt.pts_status,
+                status=serial_attempt.status,
+                exit_code=serial_attempt.exit_code,
+                signal=serial_attempt.signal,
+                timed_out=serial_attempt.timed_out,
+                duration_ms=serial_attempt.duration_ms,
+                stdout=serial_attempt.stdout,
+                stderr=serial_attempt.stderr,
+                source=SMROS_SERIAL_SOURCE,
+                launch_error=serial_attempt.launch_error,
+                infrastructure_error=serial_attempt.infrastructure_error,
+                stdout_bytes=len(serial_attempt.stdout.encode("utf-8")),
+                stderr_bytes=len(serial_attempt.stderr.encode("utf-8")),
+                manifest_sha256=metadata.manifest_sha256,
+                build_results_sha256=metadata.build_results_sha256,
+                build_id=str(suite_start["build_id"]),
+                revision=metadata.revision,
+                patch_sha256=metadata.patch_sha256,
+                smros_commit=metadata.smros_commit,
+                binary_sha256=test.sha256 or "0" * 64,
+                runtime_snapshot_sha256="0" * 64,
+                run_id=parsed.run_id,
+                resource_deltas=serial_attempt.resource_deltas,
+            )
+        )
+    selected_count = suite_start["selected_count"]
+    assert type(selected_count) is int
+    terminal: dict[str, object] = {
+        "build_id": suite_start["build_id"],
+        "build_results_sha256": metadata.build_results_sha256,
+        "complete": parsed.complete,
+        "completed_count": len(attempts),
+        "manifest_sha256": metadata.manifest_sha256,
+        "patch_sha256": metadata.patch_sha256,
+        "platform": SMROS_PLATFORM,
+        "record_type": "run",
+        "revision": metadata.revision,
+        "run_id": parsed.run_id,
+        "selected_count": selected_count,
+        "smros_commit": metadata.smros_commit,
+        "source": SMROS_SERIAL_SOURCE,
+        "status_counts": dict(
+            sorted(Counter(attempt.status for attempt in attempts).items())
+        ),
+    }
+    _validate_terminal(terminal, metadata, attempts, len(parsed.events) + 1)
+    return _RuntimeInput(
+        path=str(Path(os.path.abspath(path))),
+        attempts=tuple(attempts),
+        terminal=terminal,
+        rows=tuple(event.to_dict() for event in parsed.events),
+    )
+
+
+def _load_smros_results(
+    path: Path,
+    manifest: _ManifestInput,
+) -> _RuntimeInput:
+    data = _read_regular(path, "SMROS results", _MAX_RUNTIME_RESULTS_BYTES)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeError as error:
+        raise ValueError("SMROS results are not UTF-8") from error
+    if any(line.startswith(EVENT_PREFIX) for line in text.splitlines()):
+        return _load_serial_results(path, text, manifest)
+    return _load_runtime_results(
+        path, manifest.tests, manifest.metadata, role="smros"
     )
 
 
@@ -649,13 +829,27 @@ def _scope_summary(
         _test_status(test, build_by_identity, primary_attempts.get(test.test_id, ()))
         for test in tests
     )
+    resource_leaks = {
+        name: sum(
+            any(
+                getattr(attempt.resource_deltas, name) > 0
+                for attempt in primary_attempts.get(test.test_id, ())
+            )
+            for test in tests
+        )
+        for name in RESOURCE_DELTA_NAMES
+    }
     leaked = sum(
         any(
-            bool(getattr(attempt, "resource_deltas", {}))
-            and any(getattr(attempt, "resource_deltas", {}).values())
+            attempt.resource_deltas.has_positive()
             for attempt in primary_attempts.get(test.test_id, ())
         )
         for test in tests
+    )
+    resource_deltas = _sum_resource_deltas(
+        attempt.resource_deltas
+        for test in tests
+        for attempt in primary_attempts.get(test.test_id, ())
     )
     counts: dict[str, int] = {
         "build_attempted": sum(
@@ -692,7 +886,29 @@ def _scope_summary(
             (test.test_id for test in passed),
         ),
     }
-    return {"counts": counts, "metrics": metrics}
+    return {
+        "counts": counts,
+        "metrics": metrics,
+        "resource_deltas": resource_deltas.to_dict(),
+        "resource_leaks": resource_leaks,
+    }
+
+
+def _sum_resource_deltas(values: Iterable[ResourceDeltas]) -> ResourceDeltas:
+    totals = {name: 0 for name in RESOURCE_DELTA_NAMES}
+    for value in values:
+        for name in RESOURCE_DELTA_NAMES:
+            totals[name] += getattr(value, name)
+    return ResourceDeltas.from_mapping(totals)
+
+
+def _resource_text(value: Mapping[str, object]) -> str:
+    parts = [
+        f"{name}={value[name]}"
+        for name in RESOURCE_DELTA_NAMES
+        if value.get(name) != 0
+    ]
+    return ", ".join(parts) if parts else "none"
 
 
 def _bounded_failure_output(parts: Iterable[str]) -> str:
@@ -752,6 +968,9 @@ def _aggregate(
         smros_attempts = tuple(smros_by_test.get(test.test_id, ()))
         status = _test_status(test, build_by_identity, primary_attempts)
         reference_status = _overall_attempt_status(linux_attempts)
+        primary_resources = _sum_resource_deltas(
+            attempt.resource_deltas for attempt in primary_attempts
+        )
         build_rows = [
             asdict(result)
             for result in manifest.build_results
@@ -799,7 +1018,7 @@ def _aggregate(
                     status, reference_status, bool(smros_inputs)
                 ),
                 "linux_reference_status": reference_status,
-                "resource_deltas": {},
+                "resource_deltas": primary_resources.to_dict(),
                 "smros_attempts": [_attempt_dict(attempt) for attempt in smros_attempts],
                 "source": test.source,
                 "status": status,
@@ -840,6 +1059,8 @@ def _aggregate(
         "metrics": global_summary["metrics"],
         "primary_runtime": "smros" if smros_inputs else "linux-reference",
         "provenance": provenance,
+        "resource_deltas": global_summary["resource_deltas"],
+        "resource_leaks": global_summary["resource_leaks"],
         "run_status": "complete" if complete else "incomplete",
         "schema": 1,
         "statuses": list(OVERALL_STATUSES),
@@ -857,6 +1078,22 @@ def _events_bytes(inputs: Sequence[_RuntimeInput]) -> bytes:
 
 def _summary_bytes(summary: Mapping[str, object]) -> bytes:
     return (_canonical_json(summary) + "\n").encode("ascii")
+
+
+def _xml_text(value: object) -> str:
+    result: list[str] = []
+    for character in str(value):
+        codepoint = ord(character)
+        if (
+            codepoint in {0x09, 0x0A, 0x0D}
+            or 0x20 <= codepoint <= 0xD7FF
+            or 0xE000 <= codepoint <= 0xFFFD
+            or 0x10000 <= codepoint <= 0x10FFFF
+        ):
+            result.append(character)
+        else:
+            result.append("\ufffd")
+    return "".join(result)
 
 
 def _junit_bytes(summary: Mapping[str, object]) -> bytes:
@@ -891,8 +1128,8 @@ def _junit_bytes(summary: Mapping[str, object]) -> bytes:
             suite,
             "testcase",
             {
-                "classname": f"{row['group']}.{row['api']}",
-                "name": str(row["test_id"]),
+                "classname": _xml_text(f"{row['group']}.{row['api']}"),
+                "name": _xml_text(row["test_id"]),
                 "time": f"{int(durations['runtime']) / 1000:.3f}",
             },
         )
@@ -900,17 +1137,35 @@ def _junit_bytes(summary: Mapping[str, object]) -> bytes:
             ET.SubElement(case, "skipped", {"message": "audited upstream stub"})
         elif row["status"] != "pass":
             failure = ET.SubElement(
-                case, "failure", {"message": str(row["status"])}
+                case, "failure", {"message": _xml_text(row["status"])}
             )
-            failure.text = str(row["failure_output"])
+            failure.text = _xml_text(row["failure_output"])
         attempts = row["attempts"]
         assert isinstance(attempts, list)
         output = "".join(str(attempt.get("stdout", "")) for attempt in attempts)
         if output:
-            ET.SubElement(case, "system-out").text = output
+            ET.SubElement(case, "system-out").text = _xml_text(output)
         errors = "".join(str(attempt.get("stderr", "")) for attempt in attempts)
         if errors:
-            ET.SubElement(case, "system-err").text = errors
+            ET.SubElement(case, "system-err").text = _xml_text(errors)
+        resource_deltas = row["resource_deltas"]
+        assert isinstance(resource_deltas, dict)
+        nonzero = {
+            name: resource_deltas[name]
+            for name in RESOURCE_DELTA_NAMES
+            if resource_deltas.get(name) != 0
+        }
+        if nonzero:
+            properties = ET.SubElement(case, "properties")
+            for name, value in nonzero.items():
+                ET.SubElement(
+                    properties,
+                    "property",
+                    {
+                        "name": _xml_text(f"resource_delta.{name}"),
+                        "value": _xml_text(value),
+                    },
+                )
     tree = ET.ElementTree(suite)
     ET.indent(tree, space="  ")
     stream = io.BytesIO()
@@ -934,6 +1189,8 @@ def _csv_bytes(scopes: Mapping[str, object], label: str) -> bytes:
         "execution_coverage",
         "pass_coverage",
         "program_completion",
+        *(f"resource_delta_{name}" for name in RESOURCE_DELTA_NAMES),
+        *(f"resource_leak_{name}" for name in RESOURCE_DELTA_NAMES),
     ]
     stream = io.StringIO(newline="")
     writer = csv.DictWriter(stream, fieldnames=columns, lineterminator="\n")
@@ -942,13 +1199,24 @@ def _csv_bytes(scopes: Mapping[str, object], label: str) -> bytes:
         assert isinstance(scope, dict)
         counts = scope["counts"]
         metrics = scope["metrics"]
-        assert isinstance(counts, dict) and isinstance(metrics, dict)
+        resources = scope["resource_deltas"]
+        resource_leaks = scope["resource_leaks"]
+        assert (
+            isinstance(counts, dict)
+            and isinstance(metrics, dict)
+            and isinstance(resources, dict)
+            and isinstance(resource_leaks, dict)
+        )
         row: dict[str, object] = {label: name}
         for column in columns[1:]:
             if column in metrics:
                 metric = metrics[column]
                 assert isinstance(metric, dict)
                 row[column] = metric["fraction"]
+            elif column.startswith("resource_delta_"):
+                row[column] = resources[column.removeprefix("resource_delta_")]
+            elif column.startswith("resource_leak_"):
+                row[column] = resource_leaks[column.removeprefix("resource_leak_")]
             else:
                 row[column] = counts.get(column, 0)
         writer.writerow(row)
@@ -956,13 +1224,11 @@ def _csv_bytes(scopes: Mapping[str, object], label: str) -> bytes:
 
 
 def _markdown_escape(value: object) -> str:
-    return (
-        html.escape(str(value), quote=True)
-        .replace("\\", "\\\\")
-        .replace("|", "\\|")
-        .replace("\r", "")
-        .replace("\n", "<br>")
-    )
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\\", "\\\\")
+    for character in "`*{}_[]()#+-.!|":
+        text = text.replace(character, "\\" + character)
+    return html.escape(text, quote=True).replace("\n", "<br>")
 
 
 def _markdown_bytes(summary: Mapping[str, object]) -> bytes:
@@ -996,8 +1262,8 @@ def _markdown_bytes(summary: Mapping[str, object]) -> bytes:
             "",
             "## Tests",
             "",
-            "| Test ID | Group | API | Disposition | Status | Linux delta | Failure output |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
+            "| Test ID | Group | API | Disposition | Status | Linux delta | Resource deltas | Failure output |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
         )
     )
     for row in tests:
@@ -1013,9 +1279,12 @@ def _markdown_bytes(summary: Mapping[str, object]) -> bytes:
                     "disposition",
                     "status",
                     "linux_reference_delta",
-                    "failure_output",
                 )
             )
+            + " | "
+            + _markdown_escape(_resource_text(row["resource_deltas"]))
+            + " | "
+            + _markdown_escape(row["failure_output"])
             + " |"
         )
     return ("\n".join(lines) + "\n").encode("utf-8")
@@ -1083,6 +1352,7 @@ def _html_bytes(summary: Mapping[str, object]) -> bytes:
         "Disposition",
         "Status",
         "Linux delta",
+        "Resource deltas",
         "Failure output",
     ):
         _append_text(header, "th", column)
@@ -1101,6 +1371,7 @@ def _html_bytes(summary: Mapping[str, object]) -> bytes:
             "linux_reference_delta",
         ):
             _append_text(tr, "td", row[key])
+        _append_text(tr, "td", _resource_text(row["resource_deltas"]))
         cell = ET.SubElement(tr, "td")
         _append_text(cell, "pre", row["failure_output"])
     _append_text(
@@ -1276,11 +1547,13 @@ def generate_report(
         raise ValueError("at least one runtime-result input is required")
     manifest = _load_manifest(Path(manifest_path))
     linux_inputs = tuple(
-        _load_runtime_results(path, manifest.tests, manifest.metadata)
+        _load_runtime_results(
+            path, manifest.tests, manifest.metadata, role="linux"
+        )
         for path in linux_paths
     )
     smros_inputs = tuple(
-        _load_runtime_results(path, manifest.tests, manifest.metadata)
+        _load_smros_results(path, manifest)
         for path in smros_paths
     )
     summary = _aggregate(manifest, linux_inputs, smros_inputs)

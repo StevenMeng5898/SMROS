@@ -26,6 +26,84 @@ OVERALL_STATUSES = (
     "not-built",
     "flaky",
 )
+RAW_RUNTIME_STATUSES = OVERALL_STATUSES[:9]
+
+
+def validate_raw_attempt_semantics(
+    *,
+    status: str,
+    pts_status: str | None,
+    launch_status: str,
+    exit_code: int | None,
+    signal: int | None,
+    timed_out: bool,
+    launch_error: str | None,
+    infrastructure_error: str | None,
+    label: str,
+) -> None:
+    """Reject cross-field contradictions in one observed runtime attempt."""
+    if status not in RAW_RUNTIME_STATUSES:
+        raise ValueError(f"{label} raw runtime status is invalid: {status}")
+    if status == "interrupted":
+        if not infrastructure_error:
+            raise ValueError(f"{label} interrupted dimensions are invalid")
+        return
+    if status == "launch-error":
+        coherent = (
+            launch_status == "launch-error"
+            and pts_status is None
+            and exit_code is None
+            and signal is None
+            and timed_out is False
+            and bool(launch_error)
+        )
+    elif status == "timeout":
+        coherent = (
+            launch_status == "launched"
+            and pts_status is None
+            and exit_code is None
+            and timed_out is True
+            and launch_error is None
+            and infrastructure_error is None
+        )
+    elif status == "crash":
+        coherent = (
+            launch_status == "launched"
+            and pts_status is None
+            and exit_code is None
+            and signal is not None
+            and signal > 0
+            and timed_out is False
+            and launch_error is None
+            and infrastructure_error is None
+        )
+    else:
+        expected_exit = {
+            "pass": 0,
+            "unresolved": 2,
+            "unsupported": 4,
+            "untested": 5,
+        }.get(status)
+        exit_matches = (
+            exit_code == expected_exit
+            if expected_exit is not None
+            else (
+                exit_code is not None
+                and exit_code >= 0
+                and exit_code not in {0, 2, 4, 5}
+            )
+        )
+        coherent = (
+            launch_status == "launched"
+            and pts_status == status
+            and exit_matches
+            and signal is None
+            and timed_out is False
+            and launch_error is None
+            and infrastructure_error is None
+        )
+    if not coherent:
+        raise ValueError(f"{label} {status} dimensions are invalid")
 
 
 @dataclass(frozen=True)
@@ -73,6 +151,55 @@ class BuildSummary:
         )
 
 
+RESOURCE_DELTA_NAMES = (
+    "aio_requests",
+    "ipc_objects",
+    "kernel_handles",
+    "linux_fds",
+    "linux_mappings",
+    "linux_shared_memory",
+    "processes",
+    "scheduler_threads",
+    "timers",
+)
+
+
+@dataclass(frozen=True)
+class ResourceDeltas:
+    aio_requests: int = 0
+    ipc_objects: int = 0
+    kernel_handles: int = 0
+    linux_fds: int = 0
+    linux_mappings: int = 0
+    linux_shared_memory: int = 0
+    processes: int = 0
+    scheduler_threads: int = 0
+    timers: int = 0
+
+    def __post_init__(self) -> None:
+        for name in RESOURCE_DELTA_NAMES:
+            value = getattr(self, name)
+            if type(value) is not int or not -(2**63) <= value < 2**63:
+                raise ValueError(f"resource delta {name} is outside signed 64-bit range")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> ResourceDeltas:
+        unknown = set(value) - set(RESOURCE_DELTA_NAMES)
+        if unknown:
+            raise ValueError(f"unknown resource delta: {sorted(unknown)[0]}")
+        arguments = {name: value.get(name, 0) for name in RESOURCE_DELTA_NAMES}
+        return cls(**arguments)  # type: ignore[arg-type]
+
+    def to_dict(self) -> dict[str, int]:
+        return {name: getattr(self, name) for name in RESOURCE_DELTA_NAMES}
+
+    def has_nonzero(self) -> bool:
+        return any(getattr(self, name) != 0 for name in RESOURCE_DELTA_NAMES)
+
+    def has_positive(self) -> bool:
+        return any(getattr(self, name) > 0 for name in RESOURCE_DELTA_NAMES)
+
+
 @dataclass(frozen=True)
 class RuntimeAttempt:
     test_id: str
@@ -106,6 +233,7 @@ class RuntimeAttempt:
     binary_sha256: str = ""
     runtime_snapshot_sha256: str = ""
     run_id: str = ""
+    resource_deltas: ResourceDeltas = ResourceDeltas()
 
     def to_dict(self) -> dict[str, object]:
         """Return every core and finalized runtime field for persistence."""
@@ -127,6 +255,7 @@ class RuntimeAttempt:
             "platform": self.platform,
             "pts_status": self.pts_status,
             "revision": self.revision,
+            "resource_deltas": self.resource_deltas.to_dict(),
             "runtime_snapshot_sha256": self.runtime_snapshot_sha256,
             "run_id": self.run_id,
             "signal": self.signal,
@@ -181,7 +310,7 @@ class SerialAttempt:
     duration_ms: int
     stdout: str
     stderr: str
-    resource_deltas: Mapping[str, int]
+    resource_deltas: ResourceDeltas
     run_id: str
     manifest_sha256: str
     architecture: str
