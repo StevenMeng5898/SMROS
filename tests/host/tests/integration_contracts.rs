@@ -459,7 +459,12 @@ fn test_layer_commands_and_docs_are_wired() {
     assert!(
         makefile.contains("it:\n\t@./scripts/run-host-unit-tests.sh --test integration_contracts")
     );
-    assert!(makefile.contains("test: host-fmt-check script-check launcher-test ut it build-test"));
+    assert!(makefile
+        .contains("linker-layout-test:\n\t@python3 scripts/test-check-aarch64-link-layout.py"));
+    assert!(makefile.contains("python3 scripts/check-aarch64-link-layout.py '$(BUILD_DIR)/smros'"));
+    assert!(makefile.contains(
+        "test: host-fmt-check script-check launcher-test linker-layout-test ut it build-test"
+    ));
 
     assert!(docs.contains("make ut"));
     assert!(docs.contains("make it"));

@@ -41,7 +41,7 @@ SMOKE_QEMU_MEMORY ?= 512M
 SMROS_ST_LOG ?= target/smros-smoke-qemu.log
 ST_COVERAGE_DIR ?= target/coverage/st
 
-.PHONY: all build build-test host-fmt-check script-check launcher-test ut it coverage-ut coverage-it coverage-host coverage-st coverage st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
+.PHONY: all build build-test host-fmt-check script-check launcher-test linker-layout-test ut it coverage-ut coverage-it coverage-host coverage-st coverage st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
 
 all: build
 
@@ -60,6 +60,9 @@ build:
 
 # Production build check used by the local test suite
 build-test: build
+	@if [ "$(TARGET)" = "aarch64-unknown-none" ]; then \
+		python3 scripts/check-aarch64-link-layout.py '$(BUILD_DIR)/smros'; \
+	fi
 
 # Formatting check for the host-side unit-test crate
 host-fmt-check:
@@ -72,6 +75,10 @@ script-check:
 # Fixed-protocol host launcher tests
 launcher-test:
 	@python3 scripts/test-smros-vm-launcher.py
+
+# Structured AArch64 ELF layout checker tests
+linker-layout-test:
+	@python3 scripts/test-check-aarch64-link-layout.py
 
 # Host-side unit tests for pure helper logic
 ut:
@@ -109,7 +116,7 @@ st: $(FXFS_DISK)
 	@ARCH='$(TARGET)' QEMU_SYSTEM='$(QEMU_SYSTEM)' KERNEL_IMAGE='$(KERNEL)' QEMU_MACHINE='$(QEMU_MACHINE)' QEMU_CPU='$(QEMU_CPU)' QEMU_SMP='$(SMOKE_QEMU_SMP)' QEMU_MEMORY='$(SMOKE_QEMU_MEMORY)' QEMU_BLOCK_DEVICE='$(QEMU_BLOCK_DEVICE)' QEMU_NET_DEVICE='$(QEMU_NET_DEVICE)' SMROS_ST_LOG='$(SMROS_ST_LOG)' ./scripts/smoke-qemu.sh
 
 # Fast local confidence suite; intentionally does not boot QEMU
-test: host-fmt-check script-check launcher-test ut it build-test
+test: host-fmt-check script-check launcher-test linker-layout-test ut it build-test
 
 $(FXFS_DISK):
 	@echo "Creating persistent FxFS disk image: $(FXFS_DISK)"
