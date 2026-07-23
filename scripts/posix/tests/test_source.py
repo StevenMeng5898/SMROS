@@ -153,9 +153,14 @@ class LocalCheckoutTests(unittest.TestCase):
         self.temporary_root = Path(self.temporary_directory.name)
         self.origin = self.temporary_root / "origin"
         run_git("init", "--quiet", str(self.origin))
+        (self.origin / ".gitignore").write_text(
+            "ignored-local.txt\n", encoding="ascii"
+        )
         (self.origin / "COPYING").write_text("GPL version 2\n", encoding="ascii")
         (self.origin / "value.txt").write_text("before\n", encoding="ascii")
-        run_git("-C", str(self.origin), "add", "COPYING", "value.txt")
+        run_git(
+            "-C", str(self.origin), "add", ".gitignore", "COPYING", "value.txt"
+        )
         run_git(
             "-C",
             str(self.origin),
@@ -256,6 +261,38 @@ class LocalCheckoutTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "tree"):
             validate_checkout(self.checkout, self.revision)
+
+    def test_gitignored_untracked_file_is_rejected_on_reuse(self) -> None:
+        self.fetch()
+        (self.checkout / "ignored-local.txt").write_text(
+            "ignored\n", encoding="ascii"
+        )
+
+        with self.assertRaisesRegex(ValueError, "tree"):
+            fetch_checkout(self.lock, self.checkout, self.series)
+
+    def test_globally_ignored_untracked_file_is_rejected_on_reuse(self) -> None:
+        excludes = self.temporary_root / "global-excludes"
+        excludes.write_text("global-ignored.txt\n", encoding="ascii")
+        config = self.temporary_root / "global.gitconfig"
+        config.write_text(
+            f"[core]\n\texcludesfile = {excludes}\n", encoding="utf-8"
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GIT_CONFIG_GLOBAL": str(config),
+                "GIT_CONFIG_NOSYSTEM": "1",
+            },
+        ):
+            self.fetch()
+            (self.checkout / "global-ignored.txt").write_text(
+                "ignored\n", encoding="ascii"
+            )
+
+            with self.assertRaisesRegex(ValueError, "tree"):
+                fetch_checkout(self.lock, self.checkout, self.series)
 
     def test_modified_tree_with_forged_metadata_is_rejected(self) -> None:
         self.fetch()

@@ -339,6 +339,7 @@ def _derive_tree_oids(
             actual_index,
             [
                 "add",
+                "--force",
                 "-A",
                 "--",
                 ".",
@@ -370,6 +371,7 @@ def _derive_actual_tree_oid(root_descriptor: int, revision: str) -> str:
             actual_index,
             [
                 "add",
+                "--force",
                 "-A",
                 "--",
                 ".",
