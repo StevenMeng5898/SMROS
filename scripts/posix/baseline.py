@@ -1137,6 +1137,7 @@ def run_runtime_attempt(
     stdout = _Capture("", 0, False)
     stderr = _Capture("", 0, False)
     attempt_observed = False
+    pending_error: BaseException | None = None
     try:
         with tempfile.TemporaryDirectory(
             prefix="smros-posix-baseline-"
@@ -1162,8 +1163,49 @@ def run_runtime_attempt(
                 launch_error = _bounded_detail(
                     f"{error.strerror or str(error)}: {qemu}"
                 )
+            except BaseException as error:
+                pending_error = error
+                raise
             attempt_observed = True
     except BaseException as cleanup_error:
+        if pending_error is not None:
+            if cleanup_error is pending_error:
+                raise
+            observation = getattr(
+                pending_error,
+                "_smros_posix_runtime_observation",
+                None,
+            )
+            if isinstance(observation, _RuntimeObservation):
+                inner_detail = (
+                    observation.infrastructure_error
+                    or _bounded_infrastructure_error(pending_error)
+                )
+                observation = replace(
+                    observation,
+                    infrastructure_error=_combined_infrastructure_error(
+                        inner_detail, cleanup_error
+                    ),
+                )
+                setattr(
+                    pending_error,
+                    "_smros_posix_runtime_observation",
+                    observation,
+                )
+            else:
+                detail = _combined_infrastructure_error(
+                    _bounded_infrastructure_error(pending_error),
+                    cleanup_error,
+                )
+                try:
+                    setattr(
+                        pending_error,
+                        "_smros_posix_infrastructure_error",
+                        detail,
+                    )
+                except BaseException:
+                    pass
+            raise pending_error from cleanup_error
         if not attempt_observed:
             raise
         launch_status = (
@@ -1303,7 +1345,17 @@ def _interrupted_attempt(
         observation.infrastructure_error
         if observation is not None
         else None
-    ) or _bounded_infrastructure_error(error)
+    )
+    transferred_error = getattr(
+        error, "_smros_posix_infrastructure_error", None
+    )
+    if not isinstance(transferred_error, str):
+        transferred_error = None
+    infrastructure_error = (
+        infrastructure_error
+        or transferred_error
+        or _bounded_infrastructure_error(error)
+    )
     return RuntimeAttempt(
         test_id=test.test_id,
         group=test.group,

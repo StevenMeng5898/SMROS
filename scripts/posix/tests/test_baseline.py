@@ -1253,6 +1253,107 @@ class CampaignTests(BaselineFixture, unittest.TestCase):
         self.assertIn("attempt cleanup failed", rows[0]["infrastructure_error"])
         self.assertFalse(rows[-1]["complete"])
 
+    def test_observed_runtime_error_survives_attempt_temp_cleanup(self) -> None:
+        test = self.make_test("pass-case")
+        self.write_manifest((test,))
+        inner = OSError(errno.EIO, "inner-capture-failure")
+        observation = baseline_module._RuntimeObservation(
+            returncode=0,
+            timed_out=False,
+            stdout=baseline_module._Capture("observed-out\n", 13, False),
+            stderr=baseline_module._Capture(
+                "observed-err\n...[truncated]", MAX_CAPTURE_BYTES + 7, True
+            ),
+            launch_status="launched",
+        )
+        setattr(inner, "_smros_posix_runtime_observation", observation)
+        cleanup = OSError(errno.ENOSPC, "attempt-temp-cleanup")
+
+        with (
+            self.failing_temporary_directory(
+                "smros-posix-baseline-", cleanup
+            ),
+            mock.patch(
+                "scripts.posix.baseline._run_captured",
+                side_effect=inner,
+            ),
+        ):
+            with self.assertRaises(OSError) as raised:
+                run_baseline(
+                    self.stage,
+                    self.sysroot,
+                    self.results,
+                    qemu=self.qemu,
+                    verifier=lambda _stage: None,
+                )
+
+        self.assertIs(raised.exception, inner)
+        self.assertIs(raised.exception.__cause__, cleanup)
+        rows = [
+            json.loads(line)
+            for line in self.results.read_text(encoding="utf-8").splitlines()
+        ]
+        attempt = rows[0]
+        self.assertEqual(attempt["status"], "interrupted")
+        self.assertEqual(attempt["launch_status"], "launched")
+        self.assertEqual(attempt["pts_status"], "pass")
+        self.assertEqual(attempt["exit_code"], 0)
+        self.assertIsNone(attempt["signal"])
+        self.assertEqual(attempt["stdout"], "observed-out\n")
+        self.assertEqual(attempt["stderr"], "observed-err\n...[truncated]")
+        self.assertEqual(attempt["stdout_bytes"], 13)
+        self.assertEqual(attempt["stderr_bytes"], MAX_CAPTURE_BYTES + 7)
+        self.assertFalse(attempt["stdout_truncated"])
+        self.assertTrue(attempt["stderr_truncated"])
+        detail = attempt["infrastructure_error"]
+        self.assertLessEqual(len(detail.encode("utf-8")), 4_096)
+        self.assertIn("inner-capture-failure", detail)
+        self.assertIn("attempt-temp-cleanup", detail)
+        self.assertFalse(rows[-1]["complete"])
+
+    def test_unobserved_runtime_error_retains_attempt_cleanup_detail(self) -> None:
+        test = self.make_test("pass-case")
+        self.write_manifest((test,))
+        inner = OSError(errno.EIO, "inner-before-observation")
+        cleanup = OSError(errno.ENOSPC, "attempt-temp-cleanup")
+
+        with (
+            self.failing_temporary_directory(
+                "smros-posix-baseline-", cleanup
+            ),
+            mock.patch(
+                "scripts.posix.baseline._run_captured",
+                side_effect=inner,
+            ),
+        ):
+            with self.assertRaises(OSError) as raised:
+                run_baseline(
+                    self.stage,
+                    self.sysroot,
+                    self.results,
+                    qemu=self.qemu,
+                    verifier=lambda _stage: None,
+                )
+
+        self.assertIs(raised.exception, inner)
+        self.assertIs(raised.exception.__cause__, cleanup)
+        rows = [
+            json.loads(line)
+            for line in self.results.read_text(encoding="utf-8").splitlines()
+        ]
+        attempt = rows[0]
+        self.assertEqual(attempt["status"], "interrupted")
+        self.assertEqual(attempt["launch_status"], "interrupted")
+        self.assertIsNone(attempt["pts_status"])
+        self.assertIsNone(attempt["exit_code"])
+        self.assertIsNone(attempt["signal"])
+        self.assertEqual((attempt["stdout"], attempt["stderr"]), ("", ""))
+        detail = attempt["infrastructure_error"]
+        self.assertLessEqual(len(detail.encode("utf-8")), 4_096)
+        self.assertIn("inner-before-observation", detail)
+        self.assertIn("attempt-temp-cleanup", detail)
+        self.assertFalse(rows[-1]["complete"])
+
     def test_launch_and_temp_cleanup_failure_retains_both_details(self) -> None:
         test = self.make_test("pass-case")
         self.write_manifest((test,))
