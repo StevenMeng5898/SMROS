@@ -359,8 +359,38 @@ def _derive_tree_oids(
                 raise
 
 
+def _derive_actual_tree_oid(root_descriptor: int, revision: str) -> str:
+    temporary_root = Path(tempfile.mkdtemp(prefix="smros-posix-index."))
+    operation_error: BaseException | None = None
+    try:
+        actual_index = temporary_root / "actual.index"
+        _run_index_git(root_descriptor, actual_index, ["read-tree", revision])
+        _run_index_git(
+            root_descriptor,
+            actual_index,
+            [
+                "add",
+                "-A",
+                "--",
+                ".",
+                f":(exclude){_REVISION_NAME}",
+                f":(exclude){_METADATA_NAME}",
+            ],
+        )
+        return _write_index_tree(root_descriptor, actual_index)
+    except BaseException as error:
+        operation_error = error
+        raise
+    finally:
+        try:
+            shutil.rmtree(temporary_root)
+        except BaseException:
+            if operation_error is None:
+                raise
+
+
 def _validate_checkout(
-    root: Path, revision: str, patches: tuple[_Patch, ...]
+    root: Path, revision: str, patches: tuple[_Patch, ...] | None
 ) -> None:
     root_descriptor = _open_directory(root, "checkout root")
     try:
@@ -373,7 +403,7 @@ def _validate_checkout_descriptor(
     root_descriptor: int,
     root_display: Path,
     revision: str,
-    patches: tuple[_Patch, ...],
+    patches: tuple[_Patch, ...] | None,
 ) -> None:
     _read_regular_file_at(root_descriptor, "COPYING", "checkout COPYING")
 
@@ -389,9 +419,10 @@ def _validate_checkout_descriptor(
         raise ValueError(f"checkout revision marker does not match {revision}")
 
     metadata = _load_source_metadata(root_display, root_descriptor)
-    patch_sha256 = _patch_sha256(patches)
-    if metadata.patch_sha256 != patch_sha256:
-        raise ValueError("checkout patch digest does not match current patch series")
+    if patches is not None:
+        patch_sha256 = _patch_sha256(patches)
+        if metadata.patch_sha256 != patch_sha256:
+            raise ValueError("checkout patch digest does not match current patch series")
 
     try:
         git_stat = os.stat(".git", dir_fd=root_descriptor, follow_symlinks=False)
@@ -415,20 +446,29 @@ def _validate_checkout_descriptor(
         raise ValueError(f"checkout Git top level does not match root: {root_display}")
 
     try:
-        expected_tree, actual_tree = _derive_tree_oids(
-            root_descriptor, revision, patches
-        )
+        if patches is None:
+            actual_tree = _derive_actual_tree_oid(root_descriptor, revision)
+            if actual_tree != metadata.tree_oid:
+                raise ValueError("checkout Git tree does not match recorded tree")
+        else:
+            expected_tree, actual_tree = _derive_tree_oids(
+                root_descriptor, revision, patches
+            )
+            if metadata.tree_oid != expected_tree:
+                raise ValueError("checkout metadata tree OID does not match expected tree")
+            if actual_tree != expected_tree:
+                raise ValueError("checkout Git tree does not match expected patched tree")
     except subprocess.CalledProcessError as error:
         raise ValueError("checkout Git tree could not be derived") from error
-    if metadata.tree_oid != expected_tree:
-        raise ValueError("checkout metadata tree OID does not match expected tree")
-    if actual_tree != expected_tree:
-        raise ValueError("checkout Git tree does not match expected patched tree")
 
 
 def validate_checkout(root: Path, revision: str) -> None:
-    """Validate the pinned Git revision and generated source-tree metadata."""
-    _validate_checkout(root, revision, patches=())
+    """Diagnose HEAD and recorded-tree integrity for a generated checkout.
+
+    Callers needing provenance against the current patch series must use
+    fetch_checkout, which independently derives the expected patched tree.
+    """
+    _validate_checkout(root, revision, patches=None)
 
 
 def _load_patches(patch_series: Path) -> tuple[_Patch, ...]:

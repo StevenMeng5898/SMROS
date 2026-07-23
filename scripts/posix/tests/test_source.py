@@ -266,18 +266,27 @@ class LocalCheckoutTests(unittest.TestCase):
         metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
 
         with self.assertRaisesRegex(ValueError, "tree"):
-            validate_checkout(self.checkout, self.revision)
+            fetch_checkout(self.lock, self.checkout, self.series)
 
     def test_patch_created_and_deleted_files_are_bound_on_reuse(self) -> None:
         self.write_add_delete_patch()
 
         self.fetch()
+        validate_checkout(self.checkout, self.revision)
         fetch_checkout(self.lock, self.checkout, self.series)
 
         self.assertEqual(
             (self.checkout / "added.txt").read_text(encoding="ascii"), "added\n"
         )
         self.assertFalse((self.checkout / "value.txt").exists())
+
+    def test_direct_validation_rejects_modified_patched_tree(self) -> None:
+        self.write_add_delete_patch()
+        self.fetch()
+        (self.checkout / "added.txt").write_text("modified\n", encoding="ascii")
+
+        with self.assertRaisesRegex(ValueError, "tree"):
+            validate_checkout(self.checkout, self.revision)
 
     def test_file_mode_change_is_rejected(self) -> None:
         self.fetch()
@@ -730,6 +739,12 @@ class CommandLineTests(unittest.TestCase):
             work_directory / "src" / PINNED_REVISION,
             REPOSITORY_ROOT / "third_party" / "posixtest" / "patches" / "series",
         )
+
+
+class PublicApiTests(unittest.TestCase):
+    def test_validate_checkout_docstring_points_to_strong_fetch_validation(self) -> None:
+        self.assertIn("fetch_checkout", validate_checkout.__doc__)
+        self.assertIn("current patch series", validate_checkout.__doc__)
 
 
 class SharedModelTests(unittest.TestCase):
