@@ -51,6 +51,14 @@ CHECKSUM_DEFINITION = (
 )
 _STAGE_QUARANTINE_NAME = ".smros-posix-stage-quarantine"
 _STAGE_WORK_ROOT_NAME = "stage"
+_STAGE_JOURNAL_NAME = "journal.bin"
+_STAGE_JOURNAL_RECORD_BYTES = 512
+_STAGE_JOURNAL_RECORD_COUNT = 2
+_STAGE_JOURNAL_BYTES = (
+    _STAGE_JOURNAL_RECORD_BYTES * _STAGE_JOURNAL_RECORD_COUNT
+)
+_STAGE_JOURNAL_MAGIC = "SMROSJ1"
+_STAGE_JOURNAL_HEADER_BYTES = 95
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 _REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
 _NEEDED_RE = re.compile(r"\(NEEDED\).*Shared library: \[([^\]]+)\]")
@@ -621,6 +629,33 @@ def run_bounded_command(
                 pass
 
 
+def _logical_command_diagnostic(
+    value: object,
+    logical_argv: Sequence[str],
+    execution_argv: Sequence[str],
+    path_replacements: Sequence[tuple[str, str]],
+) -> str:
+    if value is None:
+        text = ""
+    elif isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        text = str(value)
+    replacements = dict(path_replacements)
+    replacements.update({
+        execution: logical
+        for logical, execution in zip(logical_argv, execution_argv)
+        if execution != logical
+    })
+    for execution, logical in sorted(
+        replacements.items(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        text = text.replace(execution, logical)
+    return _bounded_text(text)
+
+
 def _run_command(
     test_id: str,
     stage: str,
@@ -628,27 +663,45 @@ def _run_command(
     runner: CommandRunner,
     artifact: Path | None,
     *,
+    execution_argv: Sequence[str] | None = None,
+    diagnostic_path_replacements: Sequence[tuple[str, str]] = (),
     pass_fds: Sequence[int] = (),
 ) -> BuildResult:
+    command = list(execution_argv) if execution_argv is not None else argv
     started = time.monotonic_ns()
     try:
         if runner is _SUBPROCESS_RUN:
-            completed = run_bounded_command(argv, pass_fds=pass_fds)
+            completed = run_bounded_command(command, pass_fds=pass_fds)
         else:
             completed = runner(
-                argv,
+                command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 check=False,
             )
         returncode = int(getattr(completed, "returncode"))
-        stdout = _bounded_text(getattr(completed, "stdout", ""))
-        stderr = _bounded_text(getattr(completed, "stderr", ""))
+        stdout = _logical_command_diagnostic(
+            getattr(completed, "stdout", ""),
+            argv,
+            command,
+            diagnostic_path_replacements,
+        )
+        stderr = _logical_command_diagnostic(
+            getattr(completed, "stderr", ""),
+            argv,
+            command,
+            diagnostic_path_replacements,
+        )
     except OSError as error:
         returncode = None
         stdout = ""
-        stderr = _bounded_text(error)
+        stderr = _logical_command_diagnostic(
+            error,
+            argv,
+            command,
+            diagnostic_path_replacements,
+        )
     duration_ms = max(0, (time.monotonic_ns() - started) // 1_000_000)
     artifact_sha256 = (
         sha256_file(artifact)
@@ -859,30 +912,6 @@ def _stage_size(root: Path) -> int:
     return total
 
 
-def _reset_generated_directory(path: Path) -> None:
-    if path.exists() or path.is_symlink():
-        info = path.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise ValueError(f"generated output root is unsafe: {path}")
-        shutil.rmtree(path)
-    path.mkdir(parents=True)
-
-
-def _prepare_safe_work_directory(path: Path) -> None:
-    absolute = Path(os.path.abspath(path))
-    current = Path(absolute.anchor)
-    for part in absolute.parts[1:]:
-        current /= part
-        if current.exists() or current.is_symlink():
-            info = current.lstat()
-            if stat.S_ISLNK(info.st_mode):
-                raise ValueError(f"work directory contains a symlink: {current}")
-            if not stat.S_ISDIR(info.st_mode):
-                raise ValueError(f"work path component is not a directory: {current}")
-        else:
-            current.mkdir()
-
-
 def _directory_open_flags() -> int:
     flags = os.O_RDONLY
     if hasattr(os, "O_CLOEXEC"):
@@ -955,6 +984,99 @@ def _open_directory_chain(path: Path, label: str, *, create: bool) -> int:
         raise
 
 
+def _open_campaign_lock_directories(
+    stage_parent: Path,
+    work_parent: Path,
+    destination_name: str,
+) -> tuple[int, int, int, tuple[int, ...]]:
+    roles = (
+        (stage_parent, "stage parent"),
+        (work_parent, "work parent"),
+    )
+    unique: dict[tuple[int, int], tuple[str, int]] = {}
+    role_descriptors: list[int] = []
+    quarantine_descriptor: int | None = None
+
+    def add_role(path: Path, descriptor: int) -> int:
+        info = os.fstat(descriptor)
+        identity = (info.st_dev, info.st_ino)
+        existing = unique.get(identity)
+        if existing is not None:
+            os.close(descriptor)
+            return existing[1]
+        unique[identity] = (os.path.abspath(path), descriptor)
+        return descriptor
+
+    try:
+        for path, label in roles:
+            descriptor = _open_directory_chain(path, label, create=True)
+            role_descriptors.append(add_role(path, descriptor))
+        quarantine_descriptor = _open_or_create_directory_unchecked(
+            role_descriptors[0],
+            _STAGE_QUARANTINE_NAME,
+            "stage quarantine",
+        )
+        slot_name = _stage_work_slot_name(destination_name)
+        slot_candidate = _open_or_create_directory_unchecked(
+            quarantine_descriptor,
+            slot_name,
+            "stage work slot",
+        )
+        slot_path = stage_parent / _STAGE_QUARANTINE_NAME / slot_name
+        slot_descriptor = add_role(slot_path, slot_candidate)
+        ordered = tuple(
+            descriptor
+            for (_device, _inode), (_path, descriptor) in sorted(
+                unique.items(),
+                key=lambda item: (item[0][0], item[0][1], item[1][0]),
+            )
+        )
+        for descriptor in ordered:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        _require_private_directory_descriptor(
+            quarantine_descriptor,
+            "stage quarantine",
+        )
+        _require_private_directory_descriptor(
+            slot_descriptor,
+            "stage work slot",
+        )
+        _validate_held_entry(
+            role_descriptors[0],
+            _STAGE_QUARANTINE_NAME,
+            quarantine_descriptor,
+            "stage quarantine",
+        )
+        _validate_held_entry(
+            quarantine_descriptor,
+            slot_name,
+            slot_descriptor,
+            "stage work slot",
+        )
+        os.fsync(role_descriptors[0])
+        os.fsync(quarantine_descriptor)
+        os.close(quarantine_descriptor)
+        quarantine_descriptor = None
+        return (
+            role_descriptors[0],
+            role_descriptors[1],
+            slot_descriptor,
+            ordered,
+        )
+    except BaseException:
+        if quarantine_descriptor is not None:
+            try:
+                os.close(quarantine_descriptor)
+            except BaseException:
+                pass
+        for _path, descriptor in unique.values():
+            try:
+                os.close(descriptor)
+            except BaseException:
+                pass
+        raise
+
+
 def _entry_exists_at(parent_descriptor: int, name: str) -> bool:
     try:
         os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
@@ -968,16 +1090,38 @@ def _open_or_create_private_directory(
     name: str,
     label: str,
 ) -> int:
+    descriptor = _open_or_create_directory_unchecked(
+        parent_descriptor,
+        name,
+        label,
+    )
+    try:
+        _require_private_directory_descriptor(descriptor, label)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _open_or_create_directory_unchecked(
+    parent_descriptor: int,
+    name: str,
+    label: str,
+) -> int:
     try:
         os.mkdir(name, 0o700, dir_fd=parent_descriptor)
     except FileExistsError:
         pass
-    descriptor = _open_directory_at(parent_descriptor, name, label)
+    return _open_directory_at(parent_descriptor, name, label)
+
+
+def _require_private_directory_descriptor(
+    descriptor: int,
+    label: str,
+) -> None:
     info = os.fstat(descriptor)
     if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
-        os.close(descriptor)
         raise ValueError(f"{label} ownership or mode is unsafe")
-    return descriptor
 
 
 def _stage_work_slot_name(destination_name: str) -> str:
@@ -1005,9 +1149,29 @@ def _clear_directory(directory_descriptor: int) -> None:
             os.unlink(entry.name, dir_fd=directory_descriptor)
 
 
+def _open_and_reset_generated_directory(
+    parent_descriptor: int,
+    name: str,
+    label: str,
+) -> int:
+    descriptor = _open_or_create_directory_unchecked(
+        parent_descriptor,
+        name,
+        label,
+    )
+    try:
+        _validate_held_entry(parent_descriptor, name, descriptor, label)
+        _clear_directory(descriptor)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
 def _clear_stage_work_root(directory_descriptor: int) -> None:
     _clear_directory(directory_descriptor)
     os.fchmod(directory_descriptor, 0o700)
+    os.fsync(directory_descriptor)
 
 
 def _require_empty_stage_work_root(directory_descriptor: int) -> None:
@@ -1019,10 +1183,602 @@ def _require_empty_stage_work_root(directory_descriptor: int) -> None:
             raise ValueError("stage work root must be empty before reuse")
 
 
+def _descriptor_identity(descriptor: int) -> tuple[int, int]:
+    info = os.fstat(descriptor)
+    return info.st_dev, info.st_ino
+
+
+def _validate_stage_journal_value(
+    value: Mapping[str, int | str],
+) -> None:
+    state = value.get("state")
+    expected_fields = {
+        "idle": {"schema", "state"},
+        "building": {"schema", "state", "work_dev", "work_ino"},
+        "initial": {"schema", "state", "work_dev", "work_ino"},
+        "exchange": {
+            "schema",
+            "state",
+            "work_dev",
+            "work_ino",
+            "destination_dev",
+            "destination_ino",
+        },
+    }
+    if (
+        state not in expected_fields
+        or value.get("schema") != 1
+        or set(value) != expected_fields[state]
+    ):
+        raise ValueError("stage journal schema is invalid")
+    for key in set(value) - {"schema", "state"}:
+        if type(value[key]) is not int or int(value[key]) < 0:
+            raise ValueError("stage journal inode identity is invalid")
+
+
+def _stage_journal_payload(value: Mapping[str, int | str]) -> bytes:
+    _validate_stage_journal_value(value)
+    return (
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    ).encode("ascii")
+
+
+def _encode_stage_journal_record(
+    generation: int,
+    value: Mapping[str, int | str],
+) -> bytes:
+    if generation < 0 or generation > 0xFFFFFFFFFFFFFFFF:
+        raise ValueError("stage journal generation is invalid")
+    payload = _stage_journal_payload(value)
+    payload_limit = (
+        _STAGE_JOURNAL_RECORD_BYTES - _STAGE_JOURNAL_HEADER_BYTES
+    )
+    if len(payload) > payload_limit:
+        raise ValueError("stage journal state exceeds its fixed record")
+    checksum = hashlib.sha256(
+        generation.to_bytes(8, "big") + payload
+    ).hexdigest()
+    header = (
+        f"{_STAGE_JOURNAL_MAGIC} {generation:016x} "
+        f"{len(payload):04x} {checksum}\n"
+    ).encode("ascii")
+    if len(header) != _STAGE_JOURNAL_HEADER_BYTES:
+        raise AssertionError("stage journal header size changed")
+    return header + payload + bytes(payload_limit - len(payload))
+
+
+def _decode_stage_journal_record(
+    record: bytes,
+) -> tuple[int, dict[str, int | str]] | None:
+    if len(record) != _STAGE_JOURNAL_RECORD_BYTES:
+        return None
+    try:
+        header = record[:_STAGE_JOURNAL_HEADER_BYTES].decode("ascii")
+        magic, generation_text, length_text, checksum = header[:-1].split(" ")
+        if (
+            not header.endswith("\n")
+            or magic != _STAGE_JOURNAL_MAGIC
+            or len(generation_text) != 16
+            or len(length_text) != 4
+            or _DIGEST_RE.fullmatch(checksum) is None
+        ):
+            return None
+        generation = int(generation_text, 16)
+        payload_length = int(length_text, 16)
+        if generation_text != f"{generation:016x}":
+            return None
+        payload_limit = (
+            _STAGE_JOURNAL_RECORD_BYTES - _STAGE_JOURNAL_HEADER_BYTES
+        )
+        if payload_length > payload_limit:
+            return None
+        payload_region = record[_STAGE_JOURNAL_HEADER_BYTES:]
+        payload = payload_region[:payload_length]
+        if any(payload_region[payload_length:]):
+            return None
+        if hashlib.sha256(
+            generation.to_bytes(8, "big") + payload
+        ).hexdigest() != checksum:
+            return None
+        text = payload.decode("ascii")
+        value = json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
+        if not isinstance(value, dict):
+            return None
+        _validate_stage_journal_value(value)
+        if payload != _stage_journal_payload(value):
+            return None
+    except (UnicodeError, ValueError, json.JSONDecodeError):
+        return None
+    return generation, value
+
+
+def _require_safe_stage_journal_descriptor(
+    descriptor: int,
+    *,
+    expected_size: int | tuple[int, ...],
+) -> os.stat_result:
+    info = os.fstat(descriptor)
+    sizes = (expected_size,) if isinstance(expected_size, int) else expected_size
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+        or info.st_size not in sizes
+    ):
+        raise ValueError("stage journal is not a safe fixed-size regular file")
+    return info
+
+
+def _validate_held_stage_journal(
+    slot_descriptor: int,
+    journal_descriptor: int,
+) -> None:
+    try:
+        entry_info = os.stat(
+            _STAGE_JOURNAL_NAME,
+            dir_fd=slot_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as error:
+        raise ValueError("held stage journal is missing") from error
+    held_info = os.fstat(journal_descriptor)
+    if (
+        not stat.S_ISREG(entry_info.st_mode)
+        or (entry_info.st_dev, entry_info.st_ino)
+        != (held_info.st_dev, held_info.st_ino)
+    ):
+        raise ValueError("held stage journal changed")
+
+
+def _pwrite_all(descriptor: int, data: bytes, offset: int) -> None:
+    written = 0
+    while written < len(data):
+        count = os.pwrite(descriptor, data[written:], offset + written)
+        if count <= 0:
+            raise OSError("stage journal write made no progress")
+        written += count
+
+
+def _commit_stage_journal_record(
+    journal_descriptor: int,
+    record: bytes,
+    offset: int,
+) -> None:
+    body = record[_STAGE_JOURNAL_HEADER_BYTES:]
+    _pwrite_all(
+        journal_descriptor,
+        body,
+        offset + _STAGE_JOURNAL_HEADER_BYTES,
+    )
+    os.fsync(journal_descriptor)
+    _pwrite_all(
+        journal_descriptor,
+        record[:_STAGE_JOURNAL_HEADER_BYTES],
+        offset,
+    )
+    os.fsync(journal_descriptor)
+
+
+def _stage_work_root_is_empty_or_missing(slot_descriptor: int) -> bool:
+    work_descriptor = _open_optional_directory_at(
+        slot_descriptor,
+        _STAGE_WORK_ROOT_NAME,
+        "stage work root",
+    )
+    if work_descriptor is None:
+        return True
+    try:
+        _require_empty_stage_work_root(work_descriptor)
+        return True
+    except ValueError:
+        return False
+    finally:
+        os.close(work_descriptor)
+
+
+def _initialize_stage_journal(
+    slot_descriptor: int,
+    journal_descriptor: int,
+) -> None:
+    if not _stage_work_root_is_empty_or_missing(slot_descriptor):
+        raise ValueError(
+            "uninitialized stage journal has a nonempty work root"
+        )
+    _validate_held_stage_journal(slot_descriptor, journal_descriptor)
+    _require_safe_stage_journal_descriptor(
+        journal_descriptor,
+        expected_size=(0, _STAGE_JOURNAL_BYTES),
+    )
+    os.ftruncate(journal_descriptor, 0)
+    os.ftruncate(journal_descriptor, _STAGE_JOURNAL_BYTES)
+    _commit_stage_journal_record(
+        journal_descriptor,
+        _encode_stage_journal_record(
+            0,
+            {"schema": 1, "state": "idle"},
+        ),
+        0,
+    )
+    _require_safe_stage_journal_descriptor(
+        journal_descriptor,
+        expected_size=_STAGE_JOURNAL_BYTES,
+    )
+    _validate_held_stage_journal(slot_descriptor, journal_descriptor)
+    os.fsync(slot_descriptor)
+
+
+def _open_stage_journal(slot_descriptor: int) -> int:
+    flags = os.O_RDWR
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    created = False
+    try:
+        descriptor = os.open(
+            _STAGE_JOURNAL_NAME,
+            flags | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=slot_descriptor,
+        )
+        created = True
+    except FileExistsError:
+        try:
+            descriptor = os.open(
+                _STAGE_JOURNAL_NAME,
+                flags,
+                dir_fd=slot_descriptor,
+            )
+        except OSError as error:
+            raise ValueError("stage journal could not be opened safely") from error
+    except OSError as error:
+        raise ValueError("stage journal could not be created safely") from error
+    try:
+        _require_safe_stage_journal_descriptor(
+            descriptor,
+            expected_size=(0, _STAGE_JOURNAL_BYTES),
+        )
+        _validate_held_stage_journal(slot_descriptor, descriptor)
+        needs_initialization = created or os.fstat(descriptor).st_size == 0
+        if not needs_initialization:
+            try:
+                _read_stage_journal(descriptor)
+            except ValueError as error:
+                if str(error) != "stage journal has no valid record":
+                    raise
+                needs_initialization = True
+        if needs_initialization:
+            _initialize_stage_journal(slot_descriptor, descriptor)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _read_stage_journal(
+    journal_descriptor: int,
+) -> tuple[int, int, dict[str, int | str]]:
+    _require_safe_stage_journal_descriptor(
+        journal_descriptor,
+        expected_size=_STAGE_JOURNAL_BYTES,
+    )
+    chunks: list[bytes] = []
+    offset = 0
+    while offset < _STAGE_JOURNAL_BYTES:
+        chunk = os.pread(
+            journal_descriptor,
+            _STAGE_JOURNAL_BYTES - offset,
+            offset,
+        )
+        if not chunk:
+            break
+        chunks.append(chunk)
+        offset += len(chunk)
+    data = b"".join(chunks)
+    if len(data) != _STAGE_JOURNAL_BYTES:
+        raise ValueError("stage journal could not be read completely")
+    valid: list[tuple[int, int, dict[str, int | str]]] = []
+    for index in range(_STAGE_JOURNAL_RECORD_COUNT):
+        start = index * _STAGE_JOURNAL_RECORD_BYTES
+        decoded = _decode_stage_journal_record(
+            data[start : start + _STAGE_JOURNAL_RECORD_BYTES]
+        )
+        if decoded is not None:
+            generation, value = decoded
+            valid.append((generation, index, value))
+    if not valid:
+        raise ValueError("stage journal has no valid record")
+    valid.sort(key=lambda item: item[0], reverse=True)
+    if len(valid) > 1 and valid[0][0] == valid[1][0]:
+        raise ValueError("stage journal generation is ambiguous")
+    return valid[0]
+
+
+def _load_stage_journal(
+    slot_descriptor: int,
+    *,
+    journal_descriptor: int | None = None,
+) -> dict[str, int | str]:
+    owned_descriptor = journal_descriptor is None
+    if journal_descriptor is None:
+        journal_descriptor = _open_stage_journal(slot_descriptor)
+    try:
+        _validate_held_stage_journal(slot_descriptor, journal_descriptor)
+        _generation, _index, value = _read_stage_journal(journal_descriptor)
+        return value
+    finally:
+        if owned_descriptor:
+            os.close(journal_descriptor)
+
+
+def _write_stage_journal(
+    slot_descriptor: int,
+    value: Mapping[str, int | str],
+    *,
+    journal_descriptor: int,
+) -> None:
+    generation, active_index, _current = _read_stage_journal(
+        journal_descriptor
+    )
+    if generation == 0xFFFFFFFFFFFFFFFF:
+        raise ValueError("stage journal generation is exhausted")
+    _require_safe_stage_journal_descriptor(
+        journal_descriptor,
+        expected_size=_STAGE_JOURNAL_BYTES,
+    )
+    _validate_held_stage_journal(slot_descriptor, journal_descriptor)
+    next_index = (active_index + 1) % _STAGE_JOURNAL_RECORD_COUNT
+    _commit_stage_journal_record(
+        journal_descriptor,
+        _encode_stage_journal_record(generation + 1, value),
+        next_index * _STAGE_JOURNAL_RECORD_BYTES,
+    )
+    _require_safe_stage_journal_descriptor(
+        journal_descriptor,
+        expected_size=_STAGE_JOURNAL_BYTES,
+    )
+    _validate_held_stage_journal(slot_descriptor, journal_descriptor)
+
+
+def _record_stage_transaction(
+    slot_descriptor: int,
+    state: str,
+    work_descriptor: int | None = None,
+    destination_descriptor: int | None = None,
+    *,
+    journal_descriptor: int | None = None,
+) -> None:
+    owned_descriptor = journal_descriptor is None
+    if journal_descriptor is None:
+        journal_descriptor = _open_stage_journal(slot_descriptor)
+    try:
+        if state == "idle":
+            _write_stage_journal(
+                slot_descriptor,
+                {"schema": 1, "state": "idle"},
+                journal_descriptor=journal_descriptor,
+            )
+            return
+        if work_descriptor is None:
+            raise ValueError("active stage journal requires a work root")
+        current = _load_stage_journal(
+            slot_descriptor,
+            journal_descriptor=journal_descriptor,
+        )
+        work_device, work_inode = _descriptor_identity(work_descriptor)
+        if state == "building":
+            if current.get("state") != "idle":
+                raise ValueError("stage journal is not idle before build")
+            _require_empty_stage_work_root(work_descriptor)
+        elif state in {"initial", "exchange"}:
+            if (
+                current.get("state") != "building"
+                or (current.get("work_dev"), current.get("work_ino"))
+                != (work_device, work_inode)
+            ):
+                raise ValueError(
+                    "stage journal does not match the active build inode"
+                )
+        else:
+            raise ValueError(f"unknown stage journal state: {state}")
+        value: dict[str, int | str] = {
+            "schema": 1,
+            "state": state,
+            "work_dev": work_device,
+            "work_ino": work_inode,
+        }
+        if state == "exchange":
+            if destination_descriptor is None:
+                raise ValueError(
+                    "exchange journal requires a destination inode"
+                )
+            destination_device, destination_inode = _descriptor_identity(
+                destination_descriptor
+            )
+            value.update(
+                destination_dev=destination_device,
+                destination_ino=destination_inode,
+            )
+        _write_stage_journal(
+            slot_descriptor,
+            value,
+            journal_descriptor=journal_descriptor,
+        )
+    finally:
+        if owned_descriptor:
+            os.close(journal_descriptor)
+
+
+def _journal_matches_descriptor(
+    journal: Mapping[str, int | str],
+    prefix: str,
+    descriptor: int | None,
+) -> bool:
+    if descriptor is None:
+        return False
+    return _descriptor_identity(descriptor) == (
+        journal[f"{prefix}_dev"],
+        journal[f"{prefix}_ino"],
+    )
+
+
+def _open_optional_directory_at(
+    parent_descriptor: int,
+    name: str,
+    label: str,
+) -> int | None:
+    try:
+        os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    return _open_directory_at(parent_descriptor, name, label)
+
+
+def _recover_stage_transaction(
+    slot_descriptor: int,
+    destination_parent_descriptor: int,
+    destination_name: str,
+    *,
+    journal_descriptor: int | None = None,
+) -> None:
+    owned_journal_descriptor = journal_descriptor is None
+    if journal_descriptor is None:
+        journal_descriptor = _open_stage_journal(slot_descriptor)
+    work_descriptor: int | None = None
+    destination_descriptor: int | None = None
+    work_root_created = False
+    try:
+        journal = _load_stage_journal(
+            slot_descriptor,
+            journal_descriptor=journal_descriptor,
+        )
+        work_descriptor = _open_optional_directory_at(
+            slot_descriptor,
+            _STAGE_WORK_ROOT_NAME,
+            "stage work root",
+        )
+        state = journal["state"]
+        if state == "idle":
+            if work_descriptor is None:
+                os.mkdir(
+                    _STAGE_WORK_ROOT_NAME,
+                    0o700,
+                    dir_fd=slot_descriptor,
+                )
+                work_descriptor = _open_directory_at(
+                    slot_descriptor,
+                    _STAGE_WORK_ROOT_NAME,
+                    "stage work root",
+                )
+                work_root_created = True
+            _require_empty_stage_work_root(work_descriptor)
+            _validate_held_entry(
+                slot_descriptor,
+                _STAGE_WORK_ROOT_NAME,
+                work_descriptor,
+                "stage work root",
+            )
+            if work_root_created:
+                os.fsync(slot_descriptor)
+            return
+        destination_descriptor = _open_optional_directory_at(
+            destination_parent_descriptor,
+            destination_name,
+            "journal stage destination",
+        )
+        if work_descriptor is None and state == "initial" and (
+            _journal_matches_descriptor(journal, "work", destination_descriptor)
+        ):
+            os.mkdir(
+                _STAGE_WORK_ROOT_NAME,
+                0o700,
+                dir_fd=slot_descriptor,
+            )
+            work_descriptor = _open_directory_at(
+                slot_descriptor,
+                _STAGE_WORK_ROOT_NAME,
+                "stage work root",
+            )
+            work_root_created = True
+        if work_descriptor is None:
+            raise ValueError("stage journal work inode is missing")
+        work_is_new = _journal_matches_descriptor(
+            journal, "work", work_descriptor
+        )
+        destination_is_new = _journal_matches_descriptor(
+            journal, "work", destination_descriptor
+        )
+        if state == "building":
+            if not work_is_new:
+                raise ValueError("stage journal work inode mismatch")
+            _clear_stage_work_root(work_descriptor)
+        elif state == "initial":
+            if work_is_new:
+                _clear_stage_work_root(work_descriptor)
+            elif destination_is_new:
+                _require_empty_stage_work_root(work_descriptor)
+            else:
+                raise ValueError("stage journal publication inode mismatch")
+        elif state == "exchange":
+            work_is_old_destination = _journal_matches_descriptor(
+                journal, "destination", work_descriptor
+            )
+            destination_is_old = _journal_matches_descriptor(
+                journal, "destination", destination_descriptor
+            )
+            if work_is_new and destination_is_old:
+                _clear_stage_work_root(work_descriptor)
+            elif work_is_old_destination and destination_is_new:
+                _clear_stage_work_root(work_descriptor)
+            else:
+                raise ValueError("stage journal exchange inode mismatch")
+        else:
+            raise ValueError("stage journal state is invalid")
+        _validate_held_entry(
+            slot_descriptor,
+            _STAGE_WORK_ROOT_NAME,
+            work_descriptor,
+            "journal stage work root",
+        )
+        if destination_descriptor is not None and state == "exchange":
+            _validate_held_entry(
+                destination_parent_descriptor,
+                destination_name,
+                destination_descriptor,
+                "journal stage destination",
+            )
+        elif destination_descriptor is not None and destination_is_new:
+            _validate_held_entry(
+                destination_parent_descriptor,
+                destination_name,
+                destination_descriptor,
+                "journal stage destination",
+            )
+        if work_root_created:
+            os.fsync(slot_descriptor)
+        _record_stage_transaction(
+            slot_descriptor,
+            "idle",
+            journal_descriptor=journal_descriptor,
+        )
+    finally:
+        if destination_descriptor is not None:
+            os.close(destination_descriptor)
+        if work_descriptor is not None:
+            os.close(work_descriptor)
+        if owned_journal_descriptor:
+            os.close(journal_descriptor)
+
+
 def _open_stage_work_slot(
     parent_descriptor: int,
     destination_name: str,
 ) -> tuple[int, int]:
+    slot_name = _stage_work_slot_name(destination_name)
     quarantine_descriptor = _open_or_create_private_directory(
         parent_descriptor,
         _STAGE_QUARANTINE_NAME,
@@ -1031,43 +1787,62 @@ def _open_stage_work_slot(
     try:
         slot_descriptor = _open_or_create_private_directory(
             quarantine_descriptor,
-            _stage_work_slot_name(destination_name),
+            slot_name,
             "stage work slot",
         )
+        _validate_held_entry(
+            parent_descriptor,
+            _STAGE_QUARANTINE_NAME,
+            quarantine_descriptor,
+            "stage quarantine",
+        )
+        _validate_held_entry(
+            quarantine_descriptor,
+            slot_name,
+            slot_descriptor,
+            "stage work slot",
+        )
+        os.fsync(parent_descriptor)
+        os.fsync(quarantine_descriptor)
     finally:
         os.close(quarantine_descriptor)
     try:
-        try:
-            os.mkdir(_STAGE_WORK_ROOT_NAME, 0o700, dir_fd=slot_descriptor)
-        except FileExistsError:
-            pass
-        work_descriptor = _open_directory_at(
+        fcntl.flock(slot_descriptor, fcntl.LOCK_EX)
+        work_descriptor = _activate_stage_work_slot(
             slot_descriptor,
-            _STAGE_WORK_ROOT_NAME,
-            "stage work root",
+            parent_descriptor,
+            destination_name,
         )
-        try:
-            _require_empty_stage_work_root(work_descriptor)
-        except BaseException:
-            os.close(work_descriptor)
-            raise
         return slot_descriptor, work_descriptor
     except BaseException:
         os.close(slot_descriptor)
         raise
 
 
-def _recreate_empty_stage_work_root(slot_descriptor: int) -> None:
-    try:
-        os.mkdir(_STAGE_WORK_ROOT_NAME, 0o700, dir_fd=slot_descriptor)
-    except FileExistsError as error:
-        raise ValueError("stage work root was replaced after publication") from error
-    descriptor = _open_directory_at(
+def _activate_stage_work_slot(
+    slot_descriptor: int,
+    destination_parent_descriptor: int,
+    destination_name: str,
+    *,
+    journal_descriptor: int | None = None,
+) -> int:
+    _recover_stage_transaction(
+        slot_descriptor,
+        destination_parent_descriptor,
+        destination_name,
+        journal_descriptor=journal_descriptor,
+    )
+    work_descriptor = _open_directory_at(
         slot_descriptor,
         _STAGE_WORK_ROOT_NAME,
         "stage work root",
     )
-    os.close(descriptor)
+    try:
+        _require_empty_stage_work_root(work_descriptor)
+    except BaseException:
+        os.close(work_descriptor)
+        raise
+    return work_descriptor
 
 
 def _validate_held_entry(
@@ -1122,12 +1897,24 @@ def _rename_between_at(
         )
 
 
+def _fsync_directory_descriptors(*descriptors: int) -> None:
+    seen: set[tuple[int, int]] = set()
+    for descriptor in descriptors:
+        identity = _descriptor_identity(descriptor)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        os.fsync(descriptor)
+
+
 def _publish_stage(
     source_parent_descriptor: int,
     temporary_name: str,
     temporary_descriptor: int,
     destination_parent_descriptor: int,
     destination_name: str,
+    *,
+    journal_descriptor: int | None = None,
 ) -> int | None:
     _validate_held_entry(
         source_parent_descriptor,
@@ -1136,12 +1923,22 @@ def _publish_stage(
         "owned temporary stage",
     )
     if not _entry_exists_at(destination_parent_descriptor, destination_name):
+        _record_stage_transaction(
+            source_parent_descriptor,
+            "initial",
+            temporary_descriptor,
+            journal_descriptor=journal_descriptor,
+        )
         _rename_between_at(
             source_parent_descriptor,
             temporary_name,
             destination_parent_descriptor,
             destination_name,
             1,
+        )
+        _fsync_directory_descriptors(
+            source_parent_descriptor,
+            destination_parent_descriptor,
         )
         _validate_held_entry(
             destination_parent_descriptor,
@@ -1157,12 +1954,23 @@ def _publish_stage(
         "stage destination",
     )
     try:
+        _record_stage_transaction(
+            source_parent_descriptor,
+            "exchange",
+            temporary_descriptor,
+            destination_descriptor,
+            journal_descriptor=journal_descriptor,
+        )
         _rename_between_at(
             source_parent_descriptor,
             temporary_name,
             destination_parent_descriptor,
             destination_name,
             2,
+        )
+        _fsync_directory_descriptors(
+            source_parent_descriptor,
+            destination_parent_descriptor,
         )
         _validate_held_entry(
             destination_parent_descriptor,
@@ -1244,37 +2052,90 @@ def build_campaign(
     object_root = work / "obj"
     artifact_root = work / "bin"
     stage = Path(os.path.abspath(stage))
+    absolute_work = Path(os.path.abspath(work))
     if not stage.name:
         raise ValueError("stage destination must have a directory name")
-    stage_parent_descriptor = _open_directory_chain(
-        stage.parent, "stage parent", create=True
+    if not absolute_work.name:
+        raise ValueError("work root must have a directory name")
+    checkout_descriptor = _open_directory_chain(
+        checkout,
+        "checkout root",
+        create=False,
     )
-    work_slot_descriptor: int | None = None
+    try:
+        (
+            stage_parent_descriptor,
+            work_parent_descriptor,
+            work_slot_descriptor,
+            campaign_lock_descriptors,
+        ) = _open_campaign_lock_directories(
+            stage.parent,
+            absolute_work.parent,
+            stage.name,
+        )
+    except BaseException:
+        os.close(checkout_descriptor)
+        raise
+    work_descriptor: int | None = None
+    object_descriptor: int | None = None
+    artifact_descriptor: int | None = None
+    journal_descriptor: int | None = None
     temporary_name: str | None = None
     temporary_descriptor: int | None = None
     replaced_stage_descriptor: int | None = None
-    published = False
     operation_error: BaseException | None = None
     results: list[BuildResult] = []
     manifested: list[SuiteTest] = []
     staged_executables: list[Path] = []
     compile_pass = compile_fail = link_pass = link_fail = 0
     try:
-        fcntl.flock(stage_parent_descriptor, fcntl.LOCK_EX)
-        _prepare_safe_work_directory(work)
-        _reset_generated_directory(object_root)
-        _reset_generated_directory(artifact_root)
-        work_slot_descriptor, temporary_descriptor = _open_stage_work_slot(
+        journal_descriptor = _open_stage_journal(work_slot_descriptor)
+        work_descriptor = _open_or_create_directory_unchecked(
+            work_parent_descriptor,
+            absolute_work.name,
+            "work root",
+        )
+        object_descriptor = _open_and_reset_generated_directory(
+            work_descriptor,
+            "obj",
+            "object root",
+        )
+        artifact_descriptor = _open_and_reset_generated_directory(
+            work_descriptor,
+            "bin",
+            "artifact root",
+        )
+        temporary_descriptor = _activate_stage_work_slot(
+            work_slot_descriptor,
             stage_parent_descriptor,
             stage.name,
+            journal_descriptor=journal_descriptor,
         )
         temporary_name = _STAGE_WORK_ROOT_NAME
+        _record_stage_transaction(
+            work_slot_descriptor,
+            "building",
+            temporary_descriptor,
+            journal_descriptor=journal_descriptor,
+        )
         temporary_stage = Path(f"/proc/self/fd/{temporary_descriptor}")
+        checkout_execution_root = Path(f"/proc/self/fd/{checkout_descriptor}")
+        object_execution_root = Path(f"/proc/self/fd/{object_descriptor}")
+        artifact_execution_root = Path(f"/proc/self/fd/{artifact_descriptor}")
         include_directory = checkout / "include"
+        execution_include_directory = checkout_execution_root / "include"
         for test in ordered_tests:
             source = safe_stage_path(checkout, test.source)
+            execution_source = safe_stage_path(
+                checkout_execution_root,
+                test.source,
+            )
             object_path = safe_stage_path(object_root, f"{test.test_id}.o")
-            object_path.parent.mkdir(parents=True, exist_ok=True)
+            execution_object_path = safe_stage_path(
+                object_execution_root,
+                f"{test.test_id}.o",
+            )
+            execution_object_path.parent.mkdir(parents=True, exist_ok=True)
             compile_result = _run_command(
                 test.test_id,
                 "compile",
@@ -1282,7 +2143,18 @@ def build_campaign(
                     "aarch64-linux-gnu-gcc", source, object_path, include_directory
                 ),
                 command_runner,
-                object_path,
+                execution_object_path,
+                execution_argv=compile_command(
+                    "aarch64-linux-gnu-gcc",
+                    execution_source,
+                    execution_object_path,
+                    execution_include_directory,
+                ),
+                diagnostic_path_replacements=(
+                    (str(checkout_execution_root), str(checkout)),
+                    (str(object_execution_root), str(object_root)),
+                ),
+                pass_fds=(checkout_descriptor, object_descriptor),
             )
             results.append(compile_result)
             if compile_result.returncode is None:
@@ -1316,6 +2188,14 @@ def build_campaign(
                 nm_command("aarch64-linux-gnu-nm", object_path),
                 command_runner,
                 None,
+                execution_argv=nm_command(
+                    "aarch64-linux-gnu-nm",
+                    execution_object_path,
+                ),
+                diagnostic_path_replacements=(
+                    (str(object_execution_root), str(object_root)),
+                ),
+                pass_fds=(object_descriptor,),
             )
             results.append(nm_result)
             if nm_result.returncode != 0:
@@ -1343,13 +2223,27 @@ def build_campaign(
                 manifested.append(replace(test, disposition=disposition, binary="-", sha256=EMPTY_SHA256))
                 continue
             executable = safe_stage_path(artifact_root, f"{test.test_id}.test")
-            executable.parent.mkdir(parents=True, exist_ok=True)
+            execution_executable = safe_stage_path(
+                artifact_execution_root,
+                f"{test.test_id}.test",
+            )
+            execution_executable.parent.mkdir(parents=True, exist_ok=True)
             link_result = _run_command(
                 test.test_id,
                 "link",
                 link_command("aarch64-linux-gnu-gcc", object_path, executable),
                 command_runner,
-                executable,
+                execution_executable,
+                execution_argv=link_command(
+                    "aarch64-linux-gnu-gcc",
+                    execution_object_path,
+                    execution_executable,
+                ),
+                diagnostic_path_replacements=(
+                    (str(object_execution_root), str(object_root)),
+                    (str(artifact_execution_root), str(artifact_root)),
+                ),
+                pass_fds=(object_descriptor, artifact_descriptor),
             )
             results.append(link_result)
             if link_result.returncode is None:
@@ -1370,7 +2264,7 @@ def build_campaign(
             staged_relative = f"bin/{test.test_id}.test"
             staged_executable = safe_stage_path(temporary_stage, staged_relative)
             staged_executable.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(executable, staged_executable)
+            shutil.copyfile(execution_executable, staged_executable)
             os.chmod(staged_executable, 0o755)
             staged_executables.append(staged_executable)
             if test.disposition == "excluded-upstream-stub":
@@ -1410,8 +2304,8 @@ def build_campaign(
             temporary_descriptor,
             stage_parent_descriptor,
             stage.name,
+            journal_descriptor=journal_descriptor,
         )
-        published = True
         return BuildSummary(
             discovered=len(ordered_tests),
             compile_pass=compile_pass,
@@ -1427,20 +2321,23 @@ def build_campaign(
     finally:
         cleanup_error: BaseException | None = None
         try:
-            if published:
-                if replaced_stage_descriptor is not None:
-                    _clear_stage_work_root(replaced_stage_descriptor)
-                elif work_slot_descriptor is not None:
-                    _recreate_empty_stage_work_root(work_slot_descriptor)
-            elif temporary_descriptor is not None:
-                _clear_stage_work_root(temporary_descriptor)
+            if journal_descriptor is not None:
+                _recover_stage_transaction(
+                    work_slot_descriptor,
+                    stage_parent_descriptor,
+                    stage.name,
+                    journal_descriptor=journal_descriptor,
+                )
         except BaseException as error:
             cleanup_error = error
         for descriptor in (
             replaced_stage_descriptor,
             temporary_descriptor,
-            work_slot_descriptor,
-            stage_parent_descriptor,
+            artifact_descriptor,
+            object_descriptor,
+            work_descriptor,
+            journal_descriptor,
+            checkout_descriptor,
         ):
             if descriptor is not None:
                 try:
@@ -1448,6 +2345,12 @@ def build_campaign(
                 except BaseException as error:
                     if cleanup_error is None:
                         cleanup_error = error
+        for descriptor in reversed(campaign_lock_descriptors):
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
         if operation_error is None and cleanup_error is not None:
             raise cleanup_error
 

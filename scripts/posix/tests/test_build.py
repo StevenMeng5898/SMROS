@@ -149,7 +149,12 @@ def write_stage_fixture(stage: Path, test: SuiteTest) -> None:
         (stage / test.binary).chmod(0o755)
 
 
-def run_fake_campaign(root: Path, stage: Path) -> BuildSummary:
+def run_fake_campaign(
+    root: Path,
+    stage: Path,
+    *,
+    work: Path | None = None,
+) -> BuildSummary:
     checkout = root / "checkout"
     source = checkout / "conformance/interfaces/getpid/1-1.c"
     source.parent.mkdir(parents=True, exist_ok=True)
@@ -169,10 +174,34 @@ def run_fake_campaign(root: Path, stage: Path) -> BuildSummary:
         (),
         metadata(),
         stage,
-        root / "work",
+        work if work is not None else root / "work",
         command_runner=fake_run,
         dependency_stager=mock.Mock(return_value=()),
     )
+
+
+def assert_idle_reusable_stage_slot(test: unittest.TestCase, parent: Path) -> None:
+    work_root = parent / build_module._STAGE_QUARANTINE_NAME
+    stage_slots = tuple(work_root.iterdir())
+    test.assertEqual(len(stage_slots), 1)
+    entries = {entry.name: entry for entry in stage_slots[0].iterdir()}
+    test.assertEqual(
+        set(entries),
+        {
+            build_module._STAGE_WORK_ROOT_NAME,
+            build_module._STAGE_JOURNAL_NAME,
+        },
+    )
+    test.assertEqual(
+        tuple(entries[build_module._STAGE_WORK_ROOT_NAME].iterdir()),
+        (),
+    )
+    slot_descriptor = os.open(stage_slots[0], os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        journal = build_module._load_stage_journal(slot_descriptor)
+    finally:
+        os.close(slot_descriptor)
+    test.assertEqual(journal, {"schema": 1, "state": "idle"})
 
 
 class CommandTests(unittest.TestCase):
@@ -545,6 +574,187 @@ class CommandTests(unittest.TestCase):
 
 
 class CampaignTests(unittest.TestCase):
+    def test_work_reset_uses_held_parent_after_ancestor_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            work_parent = root / "work-parent"
+            work_parent.mkdir()
+            work = work_parent / "work"
+            moved_parent = root / "work-parent-moved"
+            stage = root / "stage-parent/stage"
+            open_locks = build_module._open_campaign_lock_directories
+
+            def swap_after_lock(*args: object, **kwargs: object) -> object:
+                result = open_locks(*args, **kwargs)
+                work_parent.rename(moved_parent)
+                work_parent.mkdir()
+                victim = work_parent / "work/obj/victim"
+                victim.parent.mkdir(parents=True)
+                victim.write_bytes(b"replacement")
+                return result
+
+            with mock.patch(
+                "scripts.posix.build._open_campaign_lock_directories",
+                side_effect=swap_after_lock,
+            ):
+                run_fake_campaign(root / "campaign", stage, work=work)
+
+            self.assertEqual(
+                (work_parent / "work/obj/victim").read_bytes(),
+                b"replacement",
+            )
+            self.assertTrue(stage.is_dir())
+
+    def test_compile_uses_held_checkout_after_checkout_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / "checkout"
+            test = suite_test()
+            source = checkout / test.source
+            source.parent.mkdir(parents=True)
+            source.write_text("original source\n", encoding="utf-8")
+            moved_checkout = root / "checkout-moved"
+            observed_sources: list[str] = []
+            swapped = False
+
+            def fake_run(argv: list[str], **_kwargs: object) -> object:
+                nonlocal swapped
+                command = list(argv)
+                if "-c" in command:
+                    if not swapped:
+                        checkout.rename(moved_checkout)
+                        replacement = checkout / test.source
+                        replacement.parent.mkdir(parents=True)
+                        replacement.write_text(
+                            "replacement source\n",
+                            encoding="utf-8",
+                        )
+                        swapped = True
+                    observed_sources.append(
+                        Path(command[command.index("-c") + 1]).read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                if command[0].endswith("gcc"):
+                    output = Path(command[command.index("-o") + 1])
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    output.write_bytes(b"artifact")
+                stdout = "00000000 T main\n" if command[0].endswith("nm") else ""
+                return mock.Mock(returncode=0, stdout=stdout, stderr="")
+
+            build_campaign(
+                checkout,
+                (test,),
+                (),
+                metadata(),
+                root / "stage",
+                root / "work",
+                command_runner=fake_run,
+                dependency_stager=mock.Mock(return_value=()),
+            )
+            rows = [
+                json.loads(line)
+                for line in (root / "stage/build-results.ndjson")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+            self.assertEqual(observed_sources, ["original source\n"])
+            self.assertEqual(
+                (checkout / test.source).read_text(encoding="utf-8"),
+                "replacement source\n",
+            )
+            compile_row = next(row for row in rows if row["stage"] == "compile")
+            self.assertEqual(compile_row["argv"][8], str(source))
+
+    def test_execution_descriptor_diagnostics_are_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def run(index: int, padding_count: int) -> tuple[str, str]:
+                campaign_root = root / f"campaign-{index}"
+                campaign_root.mkdir()
+                checkout = campaign_root / "checkout"
+                test = suite_test()
+                source = checkout / test.source
+                source.parent.mkdir(parents=True)
+                source.write_text(
+                    "int main(void) { return 0; }\n",
+                    encoding="utf-8",
+                )
+                padding = [
+                    os.open("/dev/null", os.O_RDONLY)
+                    for _ in range(padding_count)
+                ]
+
+                def fake_run(argv: list[str], **_kwargs: object) -> object:
+                    command = list(argv)
+                    nested_diagnostic = ""
+                    if command[0].endswith("gcc"):
+                        output = Path(command[command.index("-o") + 1])
+                        output.parent.mkdir(parents=True, exist_ok=True)
+                        output.write_bytes(b"artifact")
+                    if "-c" in command:
+                        execution_source = command[command.index("-c") + 1]
+                        checkout_root = re.match(
+                            r"(/proc/self/fd/[0-9]+)/",
+                            execution_source,
+                        )
+                        assert checkout_root is not None
+                        nested_diagnostic = (
+                            "\n"
+                            + checkout_root.group(1)
+                            + "/conformance/shared-header.c"
+                        )
+                    stdout = (
+                        "00000000 T main\n"
+                        if command[0].endswith("nm")
+                        else ""
+                    )
+                    return mock.Mock(
+                        returncode=0,
+                        stdout=stdout,
+                        stderr=(
+                            "command: "
+                            + " ".join(command)
+                            + nested_diagnostic
+                        ),
+                    )
+
+                previous = Path.cwd()
+                try:
+                    os.chdir(campaign_root)
+                    build_campaign(
+                        Path("checkout"),
+                        (test,),
+                        (),
+                        metadata(),
+                        Path("stage"),
+                        Path("work"),
+                        command_runner=fake_run,
+                        dependency_stager=mock.Mock(return_value=()),
+                    )
+                finally:
+                    os.chdir(previous)
+                    for descriptor in padding:
+                        os.close(descriptor)
+                manifest = json.loads(
+                    (campaign_root / "stage/manifest.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                results = (campaign_root / "stage/build-results.ndjson").read_text(
+                    encoding="utf-8"
+                )
+                return manifest["metadata"]["build_results_sha256"], results
+
+            first_digest, first_results = run(1, 0)
+            second_digest, second_results = run(2, 20)
+
+            self.assertEqual(first_digest, second_digest)
+            self.assertNotIn("/proc/self/fd/", first_results)
+            self.assertNotIn("/proc/self/fd/", second_results)
+
     def test_repeated_failures_reuse_one_empty_stage_work_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -569,12 +779,7 @@ class CampaignTests(unittest.TestCase):
                         dependency_stager=mock.Mock(return_value=()),
                     )
 
-            work_root = root / build_module._STAGE_QUARANTINE_NAME
-            stage_slots = tuple(work_root.iterdir())
-            self.assertEqual(len(stage_slots), 1)
-            reusable_roots = tuple(stage_slots[0].iterdir())
-            self.assertEqual(len(reusable_roots), 1)
-            self.assertEqual(tuple(reusable_roots[0].iterdir()), ())
+            assert_idle_reusable_stage_slot(self, root)
 
     def test_repeated_replacements_reuse_one_empty_stage_work_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -584,12 +789,7 @@ class CampaignTests(unittest.TestCase):
             for _ in range(3):
                 run_fake_campaign(root, stage)
 
-            work_root = root / build_module._STAGE_QUARANTINE_NAME
-            stage_slots = tuple(work_root.iterdir())
-            self.assertEqual(len(stage_slots), 1)
-            reusable_roots = tuple(stage_slots[0].iterdir())
-            self.assertEqual(len(reusable_roots), 1)
-            self.assertEqual(tuple(reusable_roots[0].iterdir()), ())
+            assert_idle_reusable_stage_slot(self, root)
 
     def test_same_stage_campaigns_are_serialized_by_the_work_slot(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -640,6 +840,205 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertTrue(second_entered.is_set())
 
+    def test_different_stage_parents_with_same_work_are_serialized(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stages = (root / "stages-one/stage", root / "stages-two/stage")
+            shared_work = root / "shared-work"
+            first_entered = threading.Event()
+            second_entered = threading.Event()
+            release = threading.Event()
+            write_lock = threading.Lock()
+            errors: list[BaseException] = []
+            write_count = 0
+            write_manifests = build_module._write_manifests
+
+            def blocking_write(*args: object, **kwargs: object) -> str:
+                nonlocal write_count
+                with write_lock:
+                    write_count += 1
+                    current = write_count
+                (first_entered if current == 1 else second_entered).set()
+                if not release.wait(5.0):
+                    raise AssertionError("timed out waiting to release manifest write")
+                return write_manifests(*args, **kwargs)
+
+            def campaign(index: int) -> None:
+                try:
+                    run_fake_campaign(
+                        root / f"campaign-{index}",
+                        stages[index],
+                        work=shared_work,
+                    )
+                except BaseException as error:
+                    errors.append(error)
+
+            first = threading.Thread(target=campaign, args=(0,))
+            second = threading.Thread(target=campaign, args=(1,))
+            with mock.patch(
+                "scripts.posix.build._write_manifests",
+                side_effect=blocking_write,
+            ):
+                try:
+                    first.start()
+                    self.assertTrue(first_entered.wait(2.0))
+                    second.start()
+                    self.assertFalse(second_entered.wait(0.2))
+                finally:
+                    release.set()
+                    first.join(5.0)
+                    second.join(5.0)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(errors, [])
+            self.assertTrue(second_entered.is_set())
+            for stage in stages:
+                summary = verify_stage(
+                    stage,
+                    verify_architecture=False,
+                    expected_metadata=metadata(),
+                )
+                self.assertEqual(summary.compile_pass, 1)
+
+    def test_campaign_locks_each_directory_inode_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            locked_inodes: list[tuple[int, int]] = []
+            quarantine = root / build_module._STAGE_QUARANTINE_NAME
+            quarantine.mkdir(mode=0o700)
+            slot = quarantine / build_module._stage_work_slot_name("stage")
+            slot.mkdir(mode=0o700)
+
+            def record_lock(descriptor: int, operation: int) -> None:
+                info = os.fstat(descriptor)
+                identity = (info.st_dev, info.st_ino)
+                if identity in locked_inodes:
+                    raise AssertionError("directory inode was locked twice")
+                locked_inodes.append(identity)
+
+            with mock.patch(
+                "scripts.posix.build.fcntl.flock",
+                side_effect=record_lock,
+            ):
+                run_fake_campaign(
+                    root,
+                    root / "stage",
+                    work=slot / "work",
+                )
+
+            self.assertEqual(len(locked_inodes), 2)
+            self.assertEqual(len(set(locked_inodes)), 2)
+
+    def test_campaign_fsyncs_new_quarantine_and_slot_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage_parent = root / "stage-parent"
+            work_parent = root / "work-parent"
+            fsynced: list[tuple[int, int]] = []
+
+            def record_fsync(descriptor: int) -> None:
+                info = os.fstat(descriptor)
+                fsynced.append((info.st_dev, info.st_ino))
+
+            with mock.patch(
+                "scripts.posix.build.os.fsync",
+                side_effect=record_fsync,
+            ):
+                (
+                    stage_parent_descriptor,
+                    _work_parent_descriptor,
+                    _slot_descriptor,
+                    lock_descriptors,
+                ) = build_module._open_campaign_lock_directories(
+                    stage_parent,
+                    work_parent,
+                    "stage",
+                )
+            try:
+                stage_parent_identity = build_module._descriptor_identity(
+                    stage_parent_descriptor
+                )
+                quarantine_info = (
+                    stage_parent / build_module._STAGE_QUARANTINE_NAME
+                ).stat()
+                quarantine_identity = (
+                    quarantine_info.st_dev,
+                    quarantine_info.st_ino,
+                )
+            finally:
+                for descriptor in reversed(lock_descriptors):
+                    os.close(descriptor)
+
+            self.assertIn(stage_parent_identity, fsynced)
+            self.assertIn(quarantine_identity, fsynced)
+            self.assertLess(
+                fsynced.index(stage_parent_identity),
+                fsynced.index(quarantine_identity),
+            )
+
+    def test_campaigns_with_opposing_slot_and_work_roles_do_not_deadlock(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first_stage = root / "stage-a"
+            second_stage = root / "stage-b"
+            quarantine = root / build_module._STAGE_QUARANTINE_NAME
+            quarantine.mkdir(mode=0o700)
+            first_slot = quarantine / build_module._stage_work_slot_name(
+                first_stage.name
+            )
+            first_slot.mkdir(mode=0o700)
+            entered = threading.Event()
+            release = threading.Event()
+            errors: list[BaseException] = []
+            activate = build_module._activate_stage_work_slot
+
+            def blocking_activate(*args: object, **kwargs: object) -> int:
+                descriptor = activate(*args, **kwargs)
+                if args[2] == first_stage.name:
+                    entered.set()
+                    if not release.wait(5.0):
+                        os.close(descriptor)
+                        raise AssertionError("timed out waiting to release first slot")
+                return descriptor
+
+            def campaign(
+                campaign_root: Path,
+                stage: Path,
+                work: Path,
+            ) -> None:
+                try:
+                    run_fake_campaign(campaign_root, stage, work=work)
+                except BaseException as error:
+                    errors.append(error)
+
+            first = threading.Thread(
+                target=campaign,
+                args=(root / "campaign-a", first_stage, root / "work-a"),
+            )
+            second = threading.Thread(
+                target=campaign,
+                args=(root / "campaign-b", second_stage, first_slot / "work"),
+            )
+            with mock.patch(
+                "scripts.posix.build._activate_stage_work_slot",
+                side_effect=blocking_activate,
+            ):
+                try:
+                    first.start()
+                    self.assertTrue(entered.wait(2.0))
+                    second.start()
+                finally:
+                    release.set()
+                    first.join(5.0)
+                    second.join(5.0)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(errors, [])
+
     def test_build_rejects_symlinked_stage_grandparent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -663,10 +1062,13 @@ class CampaignTests(unittest.TestCase):
             outside.mkdir()
             publish = build_module._publish_stage
 
-            def swap_and_publish(*args: object) -> object:
+            def swap_and_publish(
+                *args: object,
+                **kwargs: object,
+            ) -> object:
                 parent.rename(moved_parent)
                 parent.symlink_to(outside, target_is_directory=True)
-                return publish(*args)
+                return publish(*args, **kwargs)
 
             with mock.patch(
                 "scripts.posix.build._publish_stage",
@@ -1160,6 +1562,326 @@ class ManifestTests(unittest.TestCase):
 
 
 class StagingTests(unittest.TestCase):
+    def test_stage_journal_hardlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            victim = root / "victim"
+            original = bytes(build_module._STAGE_JOURNAL_BYTES)
+            victim.write_bytes(original)
+            victim.chmod(0o600)
+            os.link(victim, root / build_module._STAGE_JOURNAL_NAME)
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with self.assertRaisesRegex(ValueError, "journal.*safe"):
+                    build_module._load_stage_journal(descriptor)
+            finally:
+                os.close(descriptor)
+
+            self.assertEqual(victim.read_bytes(), original)
+
+    def test_stage_journal_update_hardlink_preserves_external_victim(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            victim = root / "victim"
+            original = b"external victim\n"
+            victim.write_bytes(original)
+            victim.chmod(0o600)
+            os.link(victim, root / build_module._STAGE_JOURNAL_NAME)
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with self.assertRaisesRegex(ValueError, "journal.*safe"):
+                    build_module._record_stage_transaction(descriptor, "idle")
+            finally:
+                os.close(descriptor)
+
+            self.assertEqual(victim.read_bytes(), original)
+
+    def test_stage_journal_fifo_is_rejected_without_blocking(self) -> None:
+        script = """
+import os
+import tempfile
+from pathlib import Path
+from scripts.posix import build
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    os.mkfifo(root / build._STAGE_JOURNAL_NAME, 0o600)
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            build._load_stage_journal(descriptor)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("journal FIFO was accepted")
+    finally:
+        os.close(descriptor)
+"""
+        subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            timeout=2.0,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+
+    def test_stage_journal_update_fifo_is_rejected_without_blocking(self) -> None:
+        script = """
+import os
+import tempfile
+from pathlib import Path
+from scripts.posix import build
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    os.mkfifo(root / build._STAGE_JOURNAL_NAME, 0o600)
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            build._record_stage_transaction(descriptor, "idle")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("journal update FIFO was accepted")
+    finally:
+        os.close(descriptor)
+"""
+        subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            timeout=2.0,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+
+    def test_stage_journal_initialization_recovers_prebuild_interruptions(
+        self,
+    ) -> None:
+        partial = build_module._encode_stage_journal_record(
+            0,
+            {"schema": 1, "state": "idle"},
+        )[:100]
+        interrupted = {
+            "after-create": b"",
+            "after-truncate": bytes(build_module._STAGE_JOURNAL_BYTES),
+            "after-partial-write": partial
+            + bytes(build_module._STAGE_JOURNAL_BYTES - len(partial)),
+        }
+        for point, data in interrupted.items():
+            with self.subTest(point=point), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                journal = root / build_module._STAGE_JOURNAL_NAME
+                journal.write_bytes(data)
+                journal.chmod(0o600)
+                descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+                journal_descriptor = build_module._open_stage_journal(descriptor)
+                try:
+                    self.assertEqual(
+                        build_module._load_stage_journal(
+                            descriptor,
+                            journal_descriptor=journal_descriptor,
+                        ),
+                        {"schema": 1, "state": "idle"},
+                    )
+                finally:
+                    os.close(journal_descriptor)
+                    os.close(descriptor)
+
+    def test_uninitialized_journal_with_nonempty_work_root_fails_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            journal = root / build_module._STAGE_JOURNAL_NAME
+            journal.write_bytes(b"")
+            journal.chmod(0o600)
+            work = root / build_module._STAGE_WORK_ROOT_NAME
+            work.mkdir(mode=0o700)
+            artifact = work / "artifact"
+            artifact.write_bytes(b"preserve")
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with self.assertRaisesRegex(ValueError, "nonempty work root"):
+                    build_module._open_stage_journal(descriptor)
+            finally:
+                os.close(descriptor)
+
+            self.assertEqual(artifact.read_bytes(), b"preserve")
+
+    def test_torn_journal_update_retains_previous_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            journal_descriptor = build_module._open_stage_journal(descriptor)
+            os.mkdir(
+                build_module._STAGE_WORK_ROOT_NAME,
+                0o700,
+                dir_fd=descriptor,
+            )
+            work_descriptor = build_module._open_directory_at(
+                descriptor,
+                build_module._STAGE_WORK_ROOT_NAME,
+                "stage work root",
+            )
+            build_module._record_stage_transaction(
+                descriptor,
+                "building",
+                work_descriptor,
+                journal_descriptor=journal_descriptor,
+            )
+            work_device, work_inode = build_module._descriptor_identity(
+                work_descriptor
+            )
+            pwrite = os.pwrite
+
+            def partial_write(
+                target: int,
+                data: bytes,
+                offset: int,
+            ) -> int:
+                pwrite(target, data[:100], offset)
+                raise OSError("simulated interrupted journal write")
+
+            try:
+                with mock.patch(
+                    "scripts.posix.build.os.pwrite",
+                    side_effect=partial_write,
+                ), self.assertRaisesRegex(OSError, "interrupted"):
+                    build_module._record_stage_transaction(
+                        descriptor,
+                        "initial",
+                        work_descriptor,
+                        journal_descriptor=journal_descriptor,
+                    )
+                self.assertEqual(
+                    build_module._load_stage_journal(
+                        descriptor,
+                        journal_descriptor=journal_descriptor,
+                    ),
+                    {
+                        "schema": 1,
+                        "state": "building",
+                        "work_dev": work_device,
+                        "work_ino": work_inode,
+                    },
+                )
+            finally:
+                os.close(work_descriptor)
+                os.close(journal_descriptor)
+                os.close(descriptor)
+
+    def test_torn_journal_commit_header_retains_previous_generation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            journal_descriptor = build_module._open_stage_journal(descriptor)
+            os.mkdir(
+                build_module._STAGE_WORK_ROOT_NAME,
+                0o700,
+                dir_fd=descriptor,
+            )
+            work_descriptor = build_module._open_directory_at(
+                descriptor,
+                build_module._STAGE_WORK_ROOT_NAME,
+                "stage work root",
+            )
+            build_module._record_stage_transaction(
+                descriptor,
+                "building",
+                work_descriptor,
+                journal_descriptor=journal_descriptor,
+            )
+            work_device, work_inode = build_module._descriptor_identity(
+                work_descriptor
+            )
+            pwrite = os.pwrite
+            write_count = 0
+
+            def partial_header_write(
+                target: int,
+                data: bytes,
+                offset: int,
+            ) -> int:
+                nonlocal write_count
+                write_count += 1
+                if write_count == 1:
+                    return pwrite(target, data, offset)
+                pwrite(target, data[:10], offset)
+                raise OSError("simulated interrupted journal header")
+
+            try:
+                with mock.patch(
+                    "scripts.posix.build.os.pwrite",
+                    side_effect=partial_header_write,
+                ), self.assertRaisesRegex(OSError, "header"):
+                    build_module._record_stage_transaction(
+                        descriptor,
+                        "initial",
+                        work_descriptor,
+                        journal_descriptor=journal_descriptor,
+                    )
+                self.assertEqual(
+                    build_module._load_stage_journal(
+                        descriptor,
+                        journal_descriptor=journal_descriptor,
+                    ),
+                    {
+                        "schema": 1,
+                        "state": "building",
+                        "work_dev": work_device,
+                        "work_ino": work_inode,
+                    },
+                )
+            finally:
+                os.close(work_descriptor)
+                os.close(journal_descriptor)
+                os.close(descriptor)
+
+    def test_journal_update_does_not_overwrite_path_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            journal_descriptor = build_module._open_stage_journal(descriptor)
+            journal_path = root / build_module._STAGE_JOURNAL_NAME
+            moved = root / "journal-moved"
+            replacement_source = root / "replacement-source"
+            replacement = b"replacement journal path\n"
+            replacement_source.write_bytes(replacement)
+            replacement_source.chmod(0o600)
+            stat_call = os.stat
+            swapped = False
+
+            def swap_after_validation(
+                path: object,
+                *args: object,
+                **kwargs: object,
+            ) -> os.stat_result:
+                nonlocal swapped
+                result = stat_call(path, *args, **kwargs)
+                if path == build_module._STAGE_JOURNAL_NAME and not swapped:
+                    journal_path.rename(moved)
+                    replacement_source.rename(journal_path)
+                    swapped = True
+                return result
+
+            try:
+                with mock.patch(
+                    "scripts.posix.build.os.stat",
+                    side_effect=swap_after_validation,
+                ), self.assertRaisesRegex(ValueError, "journal changed"):
+                    build_module._record_stage_transaction(
+                        descriptor,
+                        "idle",
+                        journal_descriptor=journal_descriptor,
+                    )
+            finally:
+                os.close(journal_descriptor)
+                os.close(descriptor)
+
+            self.assertEqual(journal_path.read_bytes(), replacement)
+
     def test_cleanup_and_reuse_do_not_delete_replacement_for_held_work_root(
         self,
     ) -> None:
@@ -1214,6 +1936,213 @@ class StagingTests(unittest.TestCase):
             self.assertEqual(replacement.read_bytes(), b"replacement")
             self.assertTrue(moved.is_dir())
             self.assertEqual(tuple(moved.iterdir()), ())
+
+    def test_recovers_interrupted_partial_build_from_inode_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            slot_descriptor, work_descriptor = build_module._open_stage_work_slot(
+                parent_descriptor,
+                "stage",
+            )
+            build_module._record_stage_transaction(
+                slot_descriptor,
+                "building",
+                work_descriptor,
+            )
+            work_path = Path(os.readlink(f"/proc/self/fd/{work_descriptor}"))
+            (work_path / "partial-artifact").write_bytes(b"partial")
+            os.close(work_descriptor)
+            os.close(slot_descriptor)
+            os.close(parent_descriptor)
+
+            parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            slot_descriptor, work_descriptor = build_module._open_stage_work_slot(
+                parent_descriptor,
+                "stage",
+            )
+            try:
+                self.assertEqual(tuple(Path(os.readlink(f"/proc/self/fd/{work_descriptor}")).iterdir()), ())
+                assert_idle_reusable_stage_slot(self, root)
+            finally:
+                os.close(work_descriptor)
+                os.close(slot_descriptor)
+                os.close(parent_descriptor)
+
+    def test_recovers_interruption_after_initial_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            slot_descriptor, work_descriptor = build_module._open_stage_work_slot(
+                parent_descriptor,
+                "stage",
+            )
+            build_module._record_stage_transaction(
+                slot_descriptor,
+                "building",
+                work_descriptor,
+            )
+            work_path = Path(os.readlink(f"/proc/self/fd/{work_descriptor}"))
+            (work_path / "published-artifact").write_bytes(b"published")
+            replaced = build_module._publish_stage(
+                slot_descriptor,
+                build_module._STAGE_WORK_ROOT_NAME,
+                work_descriptor,
+                parent_descriptor,
+                "stage",
+            )
+            self.assertIsNone(replaced)
+            os.close(work_descriptor)
+            os.close(slot_descriptor)
+            os.close(parent_descriptor)
+
+            parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            slot_descriptor, work_descriptor = build_module._open_stage_work_slot(
+                parent_descriptor,
+                "stage",
+            )
+            try:
+                self.assertEqual(
+                    (root / "stage/published-artifact").read_bytes(),
+                    b"published",
+                )
+                self.assertEqual(tuple(Path(os.readlink(f"/proc/self/fd/{work_descriptor}")).iterdir()), ())
+                assert_idle_reusable_stage_slot(self, root)
+            finally:
+                os.close(work_descriptor)
+                os.close(slot_descriptor)
+                os.close(parent_descriptor)
+
+    def test_recovers_interruption_after_existing_stage_exchange(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "stage"
+            destination.mkdir()
+            (destination / "old-artifact").write_bytes(b"old")
+            parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            slot_descriptor, work_descriptor = build_module._open_stage_work_slot(
+                parent_descriptor,
+                destination.name,
+            )
+            build_module._record_stage_transaction(
+                slot_descriptor,
+                "building",
+                work_descriptor,
+            )
+            work_path = Path(os.readlink(f"/proc/self/fd/{work_descriptor}"))
+            (work_path / "new-artifact").write_bytes(b"new")
+            replaced_descriptor = build_module._publish_stage(
+                slot_descriptor,
+                build_module._STAGE_WORK_ROOT_NAME,
+                work_descriptor,
+                parent_descriptor,
+                destination.name,
+            )
+            self.assertIsNotNone(replaced_descriptor)
+            assert replaced_descriptor is not None
+            os.close(replaced_descriptor)
+            os.close(work_descriptor)
+            os.close(slot_descriptor)
+            os.close(parent_descriptor)
+
+            parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            slot_descriptor, work_descriptor = build_module._open_stage_work_slot(
+                parent_descriptor,
+                destination.name,
+            )
+            try:
+                self.assertEqual(
+                    (destination / "new-artifact").read_bytes(),
+                    b"new",
+                )
+                self.assertFalse((destination / "old-artifact").exists())
+                self.assertEqual(tuple(Path(os.readlink(f"/proc/self/fd/{work_descriptor}")).iterdir()), ())
+                assert_idle_reusable_stage_slot(self, root)
+            finally:
+                os.close(work_descriptor)
+                os.close(slot_descriptor)
+                os.close(parent_descriptor)
+
+    def test_recovery_preserves_replacement_on_journal_inode_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            slot_descriptor, work_descriptor = build_module._open_stage_work_slot(
+                parent_descriptor,
+                "stage",
+            )
+            build_module._record_stage_transaction(
+                slot_descriptor,
+                "building",
+                work_descriptor,
+            )
+            slot_path = Path(os.readlink(f"/proc/self/fd/{slot_descriptor}"))
+            work_path = slot_path / build_module._STAGE_WORK_ROOT_NAME
+            (work_path / "partial-artifact").write_bytes(b"partial")
+            moved = root / "journal-work-root-moved"
+            work_path.rename(moved)
+            work_path.mkdir(mode=0o700)
+            replacement = work_path / "replacement"
+            replacement.write_bytes(b"replacement")
+            os.close(work_descriptor)
+            os.close(slot_descriptor)
+            os.close(parent_descriptor)
+
+            parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with self.assertRaisesRegex(ValueError, "journal.*inode"):
+                    slot_descriptor, work_descriptor = (
+                        build_module._open_stage_work_slot(
+                            parent_descriptor,
+                            "stage",
+                        )
+                    )
+            finally:
+                os.close(parent_descriptor)
+
+            self.assertEqual(replacement.read_bytes(), b"replacement")
+            self.assertEqual(
+                (moved / "partial-artifact").read_bytes(),
+                b"partial",
+            )
+
+    def test_repeated_crash_recovery_reuses_journal_and_work_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            for index in range(3):
+                parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+                slot_descriptor, work_descriptor = (
+                    build_module._open_stage_work_slot(
+                        parent_descriptor,
+                        "stage",
+                    )
+                )
+                build_module._record_stage_transaction(
+                    slot_descriptor,
+                    "building",
+                    work_descriptor,
+                )
+                work_path = Path(
+                    os.readlink(f"/proc/self/fd/{work_descriptor}")
+                )
+                (work_path / f"partial-{index}").write_bytes(b"partial")
+                os.close(work_descriptor)
+                os.close(slot_descriptor)
+                os.close(parent_descriptor)
+
+            parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            slot_descriptor, work_descriptor = build_module._open_stage_work_slot(
+                parent_descriptor,
+                "stage",
+            )
+            try:
+                self.assertEqual(tuple(Path(os.readlink(f"/proc/self/fd/{work_descriptor}")).iterdir()), ())
+                assert_idle_reusable_stage_slot(self, root)
+            finally:
+                os.close(work_descriptor)
+                os.close(slot_descriptor)
+                os.close(parent_descriptor)
 
     def test_verify_rejects_symlinked_stage_grandparent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2037,6 +2966,65 @@ class StagingTests(unittest.TestCase):
                 verify_stage(stage, expected_metadata=metadata())
             self.assertGreaterEqual(run.call_count, 2)
 
+    def test_initial_stage_publication_fsyncs_source_then_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            work_slot = root / "work-slot"
+            work_slot.mkdir(mode=0o700)
+            new_stage = work_slot / build_module._STAGE_WORK_ROOT_NAME
+            new_stage.mkdir(mode=0o700)
+            source_parent_descriptor = os.open(
+                work_slot, os.O_RDONLY | os.O_DIRECTORY
+            )
+            destination_parent_descriptor = os.open(
+                root, os.O_RDONLY | os.O_DIRECTORY
+            )
+            new_descriptor = os.open(new_stage, os.O_RDONLY | os.O_DIRECTORY)
+            journal_descriptor = build_module._open_stage_journal(
+                source_parent_descriptor
+            )
+            build_module._record_stage_transaction(
+                source_parent_descriptor,
+                "building",
+                new_descriptor,
+                journal_descriptor=journal_descriptor,
+            )
+            fsynced: list[tuple[int, int]] = []
+
+            def record_fsync(descriptor: int) -> None:
+                fsynced.append(build_module._descriptor_identity(descriptor))
+
+            try:
+                with mock.patch(
+                    "scripts.posix.build.os.fsync",
+                    side_effect=record_fsync,
+                ):
+                    old_descriptor = build_module._publish_stage(
+                        source_parent_descriptor,
+                        new_stage.name,
+                        new_descriptor,
+                        destination_parent_descriptor,
+                        "stage",
+                        journal_descriptor=journal_descriptor,
+                    )
+                self.assertIsNone(old_descriptor)
+                self.assertEqual(
+                    fsynced[-2:],
+                    [
+                        build_module._descriptor_identity(
+                            source_parent_descriptor
+                        ),
+                        build_module._descriptor_identity(
+                            destination_parent_descriptor
+                        ),
+                    ],
+                )
+            finally:
+                os.close(journal_descriptor)
+                os.close(new_descriptor)
+                os.close(destination_parent_descriptor)
+                os.close(source_parent_descriptor)
+
     def test_existing_stage_publication_uses_atomic_directory_exchange(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -2045,7 +3033,7 @@ class StagingTests(unittest.TestCase):
             work_slot = root / "work-slot"
             work_slot.mkdir()
             new_stage = work_slot / "stage"
-            new_stage.mkdir()
+            new_stage.mkdir(mode=0o700)
             source_parent_descriptor = os.open(
                 work_slot, os.O_RDONLY | os.O_DIRECTORY
             )
@@ -2055,10 +3043,27 @@ class StagingTests(unittest.TestCase):
             new_descriptor = os.open(new_stage, os.O_RDONLY | os.O_DIRECTORY)
             rename = build_module._rename_between_at
             old_descriptor: int | None = None
+            fsynced: list[tuple[int, int]] = []
+
+            def record_fsync(descriptor: int) -> None:
+                fsynced.append(build_module._descriptor_identity(descriptor))
+
             try:
+                build_module._record_stage_transaction(
+                    source_parent_descriptor,
+                    "idle",
+                )
+                build_module._record_stage_transaction(
+                    source_parent_descriptor,
+                    "building",
+                    new_descriptor,
+                )
                 with mock.patch.object(
                     build_module, "_rename_between_at", wraps=rename
-                ) as exchange:
+                ) as exchange, mock.patch(
+                    "scripts.posix.build.os.fsync",
+                    side_effect=record_fsync,
+                ):
                     old_descriptor = build_module._publish_stage(
                         source_parent_descriptor,
                         new_stage.name,
@@ -2075,6 +3080,17 @@ class StagingTests(unittest.TestCase):
                     2,
                 )
                 self.assertIsNotNone(old_descriptor)
+                self.assertEqual(
+                    fsynced[-2:],
+                    [
+                        build_module._descriptor_identity(
+                            source_parent_descriptor
+                        ),
+                        build_module._descriptor_identity(
+                            destination_parent_descriptor
+                        ),
+                    ],
+                )
             finally:
                 if old_descriptor is not None:
                     os.close(old_descriptor)
