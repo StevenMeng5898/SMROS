@@ -3,6 +3,7 @@
 /host_shared/posixtest/
 /host_shared/.posixtest.tmp-*/
 /host_shared/.posixtest.old-*/
+/host_shared/.smros-posix-stage-quarantine/
 /kernel8.img
 /smros-fxfs.img
 /qemu.log

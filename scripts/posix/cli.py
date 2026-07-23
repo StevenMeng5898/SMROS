@@ -18,6 +18,7 @@ from .build import (
     verify_stage,
 )
 from .discovery import audit_reviews
+from .model import SuiteTest
 from .source import fetch_checkout, load_source_lock
 
 
@@ -150,14 +151,34 @@ def _validate_review_ledgers(stub_path: Path, shell_path: Path) -> None:
         )
 
 
-def _current_manifest_metadata() -> ManifestMetadata:
+def _current_build_inputs() -> tuple[
+    ManifestMetadata,
+    Path,
+    tuple[SuiteTest, ...],
+    tuple[str, ...],
+]:
     lock = load_source_lock(SOURCE_LOCK_PATH)
     checkout = Path("target/posix") / "src" / lock.revision
     expected_patch = validate_build_checkout(
         checkout, lock.revision, PATCH_SERIES_PATH
     )
     _validate_review_ledgers(STUB_REVIEW_PATH, SHELL_REVIEW_PATH)
-    return ManifestMetadata(
+    audit = audit_reviews(checkout, STUB_REVIEW_PATH, SHELL_REVIEW_PATH)
+    shell_tests = tuple(
+        path
+        for path, review in audit.shell_reviews.items()
+        if review.disposition == "test"
+    )
+    _validate_build_inventory(
+        audit.c_sources,
+        audit.shell_files,
+        sum(
+            test.disposition == "excluded-upstream-stub"
+            for test in audit.tests
+        ),
+        len(shell_tests),
+    )
+    metadata = ManifestMetadata(
         source=lock.url,
         revision=lock.revision,
         architecture="aarch64",
@@ -166,6 +187,7 @@ def _current_manifest_metadata() -> ManifestMetadata:
         patch_sha256=expected_patch,
         smros_commit=_smros_commit(),
     )
+    return metadata, checkout, audit.tests, shell_tests
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -213,35 +235,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             _required_tool("aarch64-linux-gnu-nm")
             _required_tool("aarch64-linux-gnu-readelf")
             if arguments.verify_only:
-                expected_metadata = _current_manifest_metadata()
+                (
+                    expected_metadata,
+                    _checkout,
+                    expected_tests,
+                    expected_shell_tests,
+                ) = _current_build_inputs()
                 summary = verify_stage(
                     arguments.stage,
                     expected_metadata=expected_metadata,
+                    expected_tests=expected_tests,
+                    expected_shell_tests=expected_shell_tests,
                     strict_command_paths=True,
                 )
             else:
-                metadata = _current_manifest_metadata()
-                checkout = Path("target/posix") / "src" / metadata.revision
-                audit = audit_reviews(
-                    checkout, STUB_REVIEW_PATH, SHELL_REVIEW_PATH
-                )
-                shell_tests = tuple(
-                    path
-                    for path, review in audit.shell_reviews.items()
-                    if review.disposition == "test"
-                )
-                _validate_build_inventory(
-                    audit.c_sources,
-                    audit.shell_files,
-                    sum(
-                        test.disposition == "excluded-upstream-stub"
-                        for test in audit.tests
-                    ),
-                    len(shell_tests),
-                )
+                metadata, checkout, tests, shell_tests = _current_build_inputs()
                 summary = build_campaign(
                     checkout,
-                    audit.tests,
+                    tests,
                     shell_tests,
                     metadata,
                     arguments.stage,

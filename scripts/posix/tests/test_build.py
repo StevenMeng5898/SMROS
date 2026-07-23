@@ -1,7 +1,14 @@
 import hashlib
+import io
 import json
+import os
+import re
+import signal
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -142,6 +149,32 @@ def write_stage_fixture(stage: Path, test: SuiteTest) -> None:
         (stage / test.binary).chmod(0o755)
 
 
+def run_fake_campaign(root: Path, stage: Path) -> BuildSummary:
+    checkout = root / "checkout"
+    source = checkout / "conformance/interfaces/getpid/1-1.c"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+
+    def fake_run(argv: list[str], **_kwargs: object) -> object:
+        if argv[0].endswith("gcc"):
+            output = Path(argv[argv.index("-o") + 1])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"artifact")
+        stdout = "00000000 T main\n" if argv[0].endswith("nm") else ""
+        return mock.Mock(returncode=0, stdout=stdout, stderr="")
+
+    return build_campaign(
+        checkout,
+        (suite_test(),),
+        (),
+        metadata(),
+        stage,
+        root / "work",
+        command_runner=fake_run,
+        dependency_stager=mock.Mock(return_value=()),
+    )
+
+
 class CommandTests(unittest.TestCase):
     def test_nm_uses_target_tool_and_definition_only_flags(self) -> None:
         self.assertEqual(
@@ -260,6 +293,248 @@ class CommandTests(unittest.TestCase):
         )
         self.assertEqual(inherited_pipe.returncode, 124)
 
+    def test_interruption_kills_process_group_and_reaps_child(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_file = Path(temporary) / "pids"
+            program = (
+                "import os,pathlib,subprocess,sys,time;"
+                "child=subprocess.Popen([sys.executable,'-c',"
+                "'import time;time.sleep(30)']);"
+                "pathlib.Path(sys.argv[1]).write_text("
+                "f'{os.getpid()} {child.pid}',encoding='ascii');"
+                "time.sleep(30)"
+            )
+            real_popen = subprocess.Popen
+            real_wait = real_popen.wait
+            real_poll = real_popen.poll
+            processes: list[subprocess.Popen[bytes]] = []
+            interrupted = [False]
+            original_error = KeyboardInterrupt("interrupted")
+
+            def tracked_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+                process = real_popen(*args, **kwargs)
+                processes.append(process)
+                return process
+
+            def interrupt_once(process: subprocess.Popen[bytes]) -> int | None:
+                if not interrupted[0]:
+                    deadline = time.monotonic() + 2.0
+                    while not pid_file.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    interrupted[0] = True
+                    raise original_error
+                return real_poll(process)
+
+            def survives(pid: int) -> bool:
+                try:
+                    state = Path(f"/proc/{pid}/stat").read_text(
+                        encoding="ascii"
+                    ).split()[2]
+                except (FileNotFoundError, ProcessLookupError):
+                    return False
+                return state not in {"X", "Z"}
+
+            pids: tuple[int, ...] = ()
+            try:
+                with mock.patch(
+                    "scripts.posix.build.subprocess.Popen",
+                    side_effect=tracked_popen,
+                ), mock.patch.object(real_popen, "poll", new=interrupt_once):
+                    with self.assertRaises(KeyboardInterrupt) as raised:
+                        build_module.run_bounded_command(
+                            [sys.executable, "-c", program, str(pid_file)]
+                        )
+                self.assertIs(raised.exception, original_error)
+                pids = tuple(
+                    int(value)
+                    for value in pid_file.read_text(encoding="ascii").split()
+                )
+                self.assertEqual(len(pids), 2)
+                deadline = time.monotonic() + 2.0
+                while any(survives(pid) for pid in pids) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertFalse(any(survives(pid) for pid in pids))
+                self.assertIsNotNone(processes[0].returncode)
+            finally:
+                for pid in pids:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                for process in processes:
+                    if process.returncode is None:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        real_wait(process)
+
+    def test_selector_registration_interruption_reaps_child_and_preserves_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_file = Path(temporary) / "pid"
+            program = (
+                "import os,pathlib,sys,time;"
+                "pathlib.Path(sys.argv[1]).write_text("
+                "str(os.getpid()),encoding='ascii');"
+                "time.sleep(30)"
+            )
+            real_popen = subprocess.Popen
+            real_wait = real_popen.wait
+            process: subprocess.Popen[bytes] | None = None
+            original_error = KeyboardInterrupt("reader startup interrupted")
+
+            def tracked_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+                nonlocal process
+                process = real_popen(*args, **kwargs)
+                return process
+
+            def interrupt_registration(
+                _selector: object,
+                _fileobj: object,
+                _events: int,
+                _data: object = None,
+            ) -> None:
+                deadline = time.monotonic() + 2.0
+                while not pid_file.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                raise original_error
+
+            try:
+                with mock.patch(
+                    "scripts.posix.build.subprocess.Popen",
+                    side_effect=tracked_popen,
+                ), mock.patch(
+                    "scripts.posix.build.selectors.DefaultSelector.register",
+                    new=interrupt_registration,
+                ):
+                    with self.assertRaises(KeyboardInterrupt) as raised:
+                        build_module.run_bounded_command(
+                            [sys.executable, "-c", program, str(pid_file)]
+                        )
+                self.assertIs(raised.exception, original_error)
+                self.assertIsNotNone(process)
+                assert process is not None
+                self.assertIsNotNone(process.returncode)
+            finally:
+                if process is not None and process.returncode is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    real_wait(process)
+
+    def test_cleanup_failure_preserves_interruption_and_uses_bounded_wait(self) -> None:
+        original_error = KeyboardInterrupt("original interruption")
+        stdout_read, stdout_write = os.pipe()
+        stderr_read, stderr_write = os.pipe()
+        os.close(stdout_write)
+        os.close(stderr_write)
+        process = mock.Mock(
+            pid=12345,
+            stdin=None,
+            stdout=os.fdopen(stdout_read, "rb"),
+            stderr=os.fdopen(stderr_read, "rb"),
+            returncode=None,
+        )
+        process.poll.side_effect = original_error
+        process.wait.return_value = 0
+
+        with mock.patch(
+            "scripts.posix.build.subprocess.Popen",
+            return_value=process,
+        ), mock.patch(
+            "scripts.posix.build.os.killpg",
+            side_effect=PermissionError("cleanup denied"),
+        ):
+            with self.assertRaises(KeyboardInterrupt) as raised:
+                build_module.run_bounded_command(["fake-command"])
+
+        self.assertIs(raised.exception, original_error)
+        self.assertGreaterEqual(process.wait.call_count, 1)
+        for call in process.wait.call_args_list:
+            self.assertIn("timeout", call.kwargs)
+            self.assertLessEqual(call.kwargs["timeout"], 1.0)
+
+    def test_selector_setup_interruption_uses_process_cleanup_boundary(self) -> None:
+        original_error = MemoryError("selector setup interrupted")
+        process = mock.Mock(
+            pid=12345,
+            stdin=None,
+            stdout=io.BytesIO(),
+            stderr=io.BytesIO(),
+            returncode=None,
+        )
+        process.wait.return_value = 0
+
+        with mock.patch(
+            "scripts.posix.build.subprocess.Popen",
+            return_value=process,
+        ), mock.patch(
+            "scripts.posix.build.selectors.DefaultSelector",
+            side_effect=original_error,
+        ), mock.patch("scripts.posix.build.os.killpg") as kill:
+            with self.assertRaises(MemoryError) as raised:
+                build_module.run_bounded_command(["fake-command"])
+
+        self.assertIs(raised.exception, original_error)
+        kill.assert_called_once_with(process.pid, signal.SIGKILL)
+        process.wait.assert_called_once()
+        self.assertIn("timeout", process.wait.call_args.kwargs)
+
+    def test_exception_cleanup_does_not_block_on_buffered_pipe_close(self) -> None:
+        stdout_read, stdout_write = os.pipe()
+        stderr_read, stderr_write = os.pipe()
+        stdout = os.fdopen(stdout_read, "rb")
+        stderr = os.fdopen(stderr_read, "rb")
+        original_error = KeyboardInterrupt("interrupted with inherited pipes")
+        process = mock.Mock(
+            pid=12345,
+            stdin=None,
+            stdout=stdout,
+            stderr=stderr,
+            returncode=None,
+        )
+        process.poll.side_effect = original_error
+        process.wait.return_value = 0
+        observed: list[BaseException] = []
+
+        def invoke() -> None:
+            try:
+                build_module.run_bounded_command(["fake-command"])
+            except BaseException as error:
+                observed.append(error)
+
+        runner = threading.Thread(target=invoke, daemon=True)
+        replacement_descriptor: int | None = None
+        replacement_survived = False
+        try:
+            with mock.patch(
+                "scripts.posix.build.subprocess.Popen",
+                return_value=process,
+            ), mock.patch("scripts.posix.build.os.killpg"):
+                runner.start()
+                runner.join(2.5)
+                completed_boundedly = not runner.is_alive()
+                if completed_boundedly:
+                    replacement_descriptor = os.open("/dev/null", os.O_RDONLY)
+        finally:
+            os.close(stdout_write)
+            os.close(stderr_write)
+            runner.join(2.0)
+            if replacement_descriptor is not None:
+                time.sleep(0.05)
+                try:
+                    os.fstat(replacement_descriptor)
+                except OSError:
+                    replacement_survived = False
+                else:
+                    replacement_survived = True
+                    os.close(replacement_descriptor)
+
+        self.assertTrue(completed_boundedly)
+        self.assertTrue(replacement_survived)
+        self.assertEqual(observed, [original_error])
+
     def test_compiler_query_uses_bounded_runner(self) -> None:
         completed = mock.Mock(returncode=0, stdout="/sysroot\n", stderr="")
         with mock.patch(
@@ -270,6 +545,47 @@ class CommandTests(unittest.TestCase):
 
 
 class CampaignTests(unittest.TestCase):
+    def test_build_rejects_symlinked_stage_grandparent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real_parent = root / "real-parent"
+            (real_parent / "nested").mkdir(parents=True)
+            alias = root / "alias"
+            alias.symlink_to(real_parent, target_is_directory=True)
+
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                run_fake_campaign(root, alias / "nested/stage")
+
+            self.assertFalse((real_parent / "nested/stage").exists())
+
+    def test_build_publication_uses_held_parent_after_ancestor_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parent = root / "publish-parent"
+            parent.mkdir()
+            moved_parent = root / "publish-parent-moved"
+            outside = root / "outside"
+            outside.mkdir()
+            publish = build_module._publish_stage
+
+            def swap_and_publish(*args: object) -> object:
+                parent.rename(moved_parent)
+                parent.symlink_to(outside, target_is_directory=True)
+                return publish(*args)
+
+            with mock.patch(
+                "scripts.posix.build._publish_stage",
+                side_effect=swap_and_publish,
+            ):
+                run_fake_campaign(root, parent / "stage")
+
+            self.assertTrue((moved_parent / "stage").is_dir())
+            self.assertFalse((outside / "stage").exists())
+            self.assertEqual(
+                tuple(moved_parent.glob(".stage.tmp-*")),
+                (),
+            )
+
     def test_compile_failure_is_recorded_and_remaining_sources_continue(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -749,6 +1065,269 @@ class ManifestTests(unittest.TestCase):
 
 
 class StagingTests(unittest.TestCase):
+    def test_cleanup_does_not_delete_directory_swapped_after_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            owned = root / "owned"
+            owned.mkdir()
+            (owned / "artifact").write_bytes(b"artifact")
+            moved = root / "validated-held-moved"
+            parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            owned_descriptor = os.open(owned, os.O_RDONLY | os.O_DIRECTORY)
+            validate = build_module._validate_held_entry
+            replacement: Path | None = None
+
+            def validate_and_swap(
+                directory_descriptor: int,
+                name: str,
+                held_descriptor: int,
+                label: str,
+            ) -> None:
+                nonlocal replacement
+                validate(
+                    directory_descriptor,
+                    name,
+                    held_descriptor,
+                    label,
+                )
+                if label == "held stage directory":
+                    quarantine = Path(
+                        os.readlink(f"/proc/self/fd/{directory_descriptor}")
+                    )
+                    replacement = quarantine / name
+                    replacement.rename(moved)
+                    replacement.mkdir()
+
+            try:
+                with mock.patch(
+                    "scripts.posix.build._validate_held_entry",
+                    side_effect=validate_and_swap,
+                ):
+                    build_module._remove_held_directory(
+                        parent_descriptor,
+                        owned.name,
+                        owned_descriptor,
+                    )
+            finally:
+                os.close(owned_descriptor)
+                os.close(parent_descriptor)
+
+            self.assertIsNotNone(replacement)
+            assert replacement is not None
+            self.assertTrue(replacement.is_dir())
+            self.assertTrue(moved.is_dir())
+
+    def test_verify_rejects_symlinked_stage_grandparent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real_parent = root / "real-parent"
+            stage = real_parent / "nested/stage"
+            binary = stage / "bin/conformance/interfaces/getpid/1-1.c.test"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"elf")
+            test = replace(
+                suite_test(),
+                binary="bin/conformance/interfaces/getpid/1-1.c.test",
+                sha256=hashlib.sha256(b"elf").hexdigest(),
+            )
+            write_stage_fixture(stage, test)
+            alias = root / "alias"
+            alias.symlink_to(real_parent, target_is_directory=True)
+
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                verify_stage(
+                    alias / "nested/stage",
+                    verify_architecture=False,
+                    expected_metadata=metadata(),
+                )
+
+    def test_verify_uses_held_stage_after_ancestor_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parent = root / "parent"
+            stage = parent / "stage"
+            binary = stage / "bin/conformance/interfaces/getpid/1-1.c.test"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"elf")
+            test = replace(
+                suite_test(),
+                binary="bin/conformance/interfaces/getpid/1-1.c.test",
+                sha256=hashlib.sha256(b"elf").hexdigest(),
+            )
+            write_stage_fixture(stage, test)
+            moved_parent = root / "parent-moved"
+            outside = root / "outside"
+            (outside / "stage").mkdir(parents=True)
+            validate_tree = build_module._validate_stage_tree
+
+            def swap_and_validate(opened_stage: Path) -> None:
+                parent.rename(moved_parent)
+                parent.symlink_to(outside, target_is_directory=True)
+                validate_tree(opened_stage)
+
+            with mock.patch(
+                "scripts.posix.build._validate_stage_tree",
+                side_effect=swap_and_validate,
+            ):
+                summary = verify_stage(
+                    stage,
+                    verify_architecture=False,
+                    expected_metadata=metadata(),
+                )
+
+            self.assertEqual(summary.discovered, 1)
+
+    def test_verify_uses_held_stage_after_leaf_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = root / "stage"
+            binary = stage / "bin/conformance/interfaces/getpid/1-1.c.test"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"elf")
+            test = replace(
+                suite_test(),
+                binary="bin/conformance/interfaces/getpid/1-1.c.test",
+                sha256=hashlib.sha256(b"elf").hexdigest(),
+            )
+            write_stage_fixture(stage, test)
+            moved_stage = root / "stage-moved"
+            outside = root / "outside"
+            outside.mkdir()
+            validate_tree = build_module._validate_stage_tree
+
+            def swap_and_validate(opened_stage: Path) -> None:
+                stage.rename(moved_stage)
+                stage.symlink_to(outside, target_is_directory=True)
+                validate_tree(opened_stage)
+
+            with mock.patch(
+                "scripts.posix.build._validate_stage_tree",
+                side_effect=swap_and_validate,
+            ):
+                summary = verify_stage(
+                    stage,
+                    verify_architecture=False,
+                    expected_metadata=metadata(),
+                )
+
+            self.assertEqual(summary.discovered, 1)
+
+    def test_verify_preflights_oversized_metadata_before_parsing(self) -> None:
+        limits = {
+            "manifest.tsv": MAX_MANIFEST_BYTES,
+            "manifest.json": 8 * 1024 * 1024,
+            "build-results.ndjson": 64 * 1024 * 1024,
+        }
+        for name, limit in limits.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                stage = Path(temporary)
+                binary = stage / "bin/conformance/interfaces/getpid/1-1.c.test"
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(b"elf")
+                test = replace(
+                    suite_test(),
+                    binary="bin/conformance/interfaces/getpid/1-1.c.test",
+                    sha256=hashlib.sha256(b"elf").hexdigest(),
+                )
+                write_stage_fixture(stage, test)
+                with (stage / name).open("r+b") as output:
+                    output.truncate(limit + 1)
+
+                with mock.patch(
+                    "scripts.posix.build.parse_manifest",
+                    wraps=build_module.parse_manifest,
+                ) as parse:
+                    with self.assertRaisesRegex(ValueError, f"{re.escape(name)}.*size"):
+                        verify_stage(
+                            stage,
+                            verify_architecture=False,
+                            expected_metadata=metadata(),
+                        )
+                    parse.assert_not_called()
+
+    def test_verify_preflights_stage_size_before_parsing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            stage.mkdir(exist_ok=True)
+            with (stage / "oversized").open("wb") as output:
+                output.truncate(build_module.MAX_STAGE_BYTES + 1)
+
+            with mock.patch(
+                "scripts.posix.build.parse_manifest",
+                wraps=build_module.parse_manifest,
+            ) as parse:
+                with self.assertRaisesRegex(ValueError, "stage.*256 MiB"):
+                    verify_stage(stage, verify_architecture=False)
+                parse.assert_not_called()
+
+    def test_build_results_preflights_line_length_before_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "build-results.ndjson"
+            path.write_bytes(b"x" * (256 * 1024 + 1) + b"\n")
+
+            with mock.patch(
+                "scripts.posix.build.json.loads",
+                wraps=json.loads,
+            ) as loads:
+                with self.assertRaisesRegex(ValueError, "line.*length"):
+                    build_module._load_build_results(path, ())
+                loads.assert_not_called()
+
+    def test_build_results_preflights_row_count_before_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "build-results.ndjson"
+            path.write_bytes(b"{}\n" * (MAX_TESTS * 3 + 1))
+
+            with mock.patch(
+                "scripts.posix.build.json.loads",
+                wraps=json.loads,
+            ) as loads:
+                with self.assertRaisesRegex(ValueError, "row count"):
+                    build_module._load_build_results(path, ())
+                loads.assert_not_called()
+
+    def test_build_results_rejects_in_place_change_after_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            binary = stage / "bin/conformance/interfaces/getpid/1-1.c.test"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"elf")
+            test = replace(
+                suite_test(),
+                binary="bin/conformance/interfaces/getpid/1-1.c.test",
+                sha256=hashlib.sha256(b"elf").hexdigest(),
+            )
+            write_stage_fixture(stage, test)
+            path = stage / "build-results.ndjson"
+            build_result_lines = build_module._build_result_lines
+
+            def mutate_after_preflight(source: object) -> object:
+                path.write_bytes(b"x" * (256 * 1024 + 1) + b"\n")
+                return build_result_lines(source)
+
+            with mock.patch(
+                "scripts.posix.build._build_result_lines",
+                side_effect=mutate_after_preflight,
+            ), mock.patch(
+                "scripts.posix.build.json.loads",
+                wraps=json.loads,
+            ) as loads:
+                with self.assertRaisesRegex(ValueError, "changed while being verified"):
+                    verify_stage(
+                        stage,
+                        verify_architecture=False,
+                        expected_metadata=metadata(),
+                    )
+
+            self.assertTrue(loads.call_args_list)
+            self.assertTrue(
+                all(
+                    len(call.args[0].encode("utf-8"))
+                    <= build_module.MAX_BUILD_RESULT_LINE_BYTES
+                    for call in loads.call_args_list
+                )
+            )
+
     def test_verify_accepts_changed_build_duration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             stage = Path(temporary)
@@ -850,6 +1429,46 @@ class StagingTests(unittest.TestCase):
 
             self.assertEqual((stage / "lib/libsample.so.1").read_bytes(), b"library")
             self.assertFalse((stage / "lib/libsample.so.1.2").exists())
+
+    def test_runtime_staging_passes_held_stage_descriptor_to_readelf(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            executable = stage / "bin/test.test"
+            executable.parent.mkdir()
+            executable.write_bytes(b"elf")
+            stage_descriptor = os.open(stage, os.O_RDONLY | os.O_DIRECTORY)
+            opened_executable = Path(
+                f"/proc/self/fd/{stage_descriptor}/bin/test.test"
+            )
+            readelf_result = BuildResult(
+                test_id="runtime",
+                stage="readelf",
+                status="passed",
+                argv=("aarch64-linux-gnu-readelf",),
+                returncode=0,
+                stdout="",
+                stderr="",
+                duration_ms=1,
+                artifact_sha256=None,
+            )
+            try:
+                with mock.patch(
+                    "scripts.posix.build.compiler_query",
+                    side_effect=("/", "aarch64-linux-gnu", "libc.so.6"),
+                ), mock.patch(
+                    "scripts.posix.build._run_command",
+                    return_value=readelf_result,
+                ) as run:
+                    stage_runtime_dependencies(
+                        (opened_executable,),
+                        Path(f"/proc/self/fd/{stage_descriptor}"),
+                        stage_descriptor=stage_descriptor,
+                    )
+            finally:
+                os.close(stage_descriptor)
+
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.kwargs["pass_fds"], (stage_descriptor,))
 
     def test_verify_rejects_missing_or_changed_binary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1174,6 +1793,32 @@ class StagingTests(unittest.TestCase):
                     expected_metadata=replace(metadata(), revision="9" * 40),
                 )
 
+    def test_verify_rejects_substituted_manifest_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            binary = stage / "bin/conformance/interfaces/getpid/1-1.c.test"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"elf")
+            staged_test = replace(
+                suite_test(),
+                binary="bin/conformance/interfaces/getpid/1-1.c.test",
+                sha256=hashlib.sha256(b"elf").hexdigest(),
+            )
+            expected_tests = (
+                suite_test(),
+                suite_test("conformance/interfaces/getpid/2-1.c"),
+            )
+            write_stage_fixture(stage, staged_test)
+
+            with self.assertRaisesRegex(ValueError, "expected inventory"):
+                verify_stage(
+                    stage,
+                    verify_architecture=False,
+                    expected_metadata=metadata(),
+                    expected_tests=expected_tests,
+                    expected_shell_tests=(),
+                )
+
     def test_verify_rejects_unmanifested_stage_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             stage = Path(temporary)
@@ -1278,13 +1923,33 @@ class StagingTests(unittest.TestCase):
             old_stage.mkdir()
             new_stage = root / ".stage.tmp"
             new_stage.mkdir()
+            parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            new_descriptor = os.open(new_stage, os.O_RDONLY | os.O_DIRECTORY)
+            rename = build_module._rename_at
+            old_descriptor: int | None = None
+            try:
+                with mock.patch.object(
+                    build_module, "_rename_at", wraps=rename
+                ) as exchange:
+                    old_descriptor = build_module._publish_stage(
+                        parent_descriptor,
+                        new_stage.name,
+                        new_descriptor,
+                        old_stage.name,
+                    )
 
-            with mock.patch.object(
-                build_module, "_rename_exchange", create=True
-            ) as exchange:
-                build_module._publish_stage(new_stage, old_stage)
-
-            exchange.assert_called_once_with(new_stage, old_stage)
+                exchange.assert_called_once_with(
+                    parent_descriptor,
+                    new_stage.name,
+                    old_stage.name,
+                    2,
+                )
+                self.assertIsNotNone(old_descriptor)
+            finally:
+                if old_descriptor is not None:
+                    os.close(old_descriptor)
+                os.close(new_descriptor)
+                os.close(parent_descriptor)
 
 
 class CliTests(unittest.TestCase):
@@ -1303,13 +1968,21 @@ class CliTests(unittest.TestCase):
             result = cli.main(["build", "--arch", "x86_64", "--stage", "stage"])
         self.assertEqual(result, 1)
 
-    def test_verify_only_supplies_current_expected_metadata(self) -> None:
+    def test_verify_only_supplies_current_expected_inventory(self) -> None:
         expected = metadata()
+        checkout = Path("target/posix/src") / expected.revision
+        expected_tests = (suite_test(),)
+        expected_shell_tests = ("conformance/interfaces/getpid/test.sh",)
         summary = BuildSummary(1, 1, 0, 1, 0, 169, 123)
         with mock.patch(
-            "scripts.posix.cli._current_manifest_metadata",
+            "scripts.posix.cli._current_build_inputs",
             create=True,
-            return_value=expected,
+            return_value=(
+                expected,
+                checkout,
+                expected_tests,
+                expected_shell_tests,
+            ),
         ) as current, mock.patch(
             "scripts.posix.cli.verify_stage", return_value=summary
         ) as verify:
@@ -1322,6 +1995,8 @@ class CliTests(unittest.TestCase):
         verify.assert_called_once_with(
             Path("custom-stage"),
             expected_metadata=expected,
+            expected_tests=expected_tests,
+            expected_shell_tests=expected_shell_tests,
             strict_command_paths=True,
         )
 
@@ -1385,6 +2060,7 @@ class CliTests(unittest.TestCase):
         ignore = (cli.REPOSITORY_ROOT / ".gitignore").read_text(encoding="utf-8")
         self.assertIn("/host_shared/.posixtest.tmp-*/\n", ignore)
         self.assertIn("/host_shared/.posixtest.old-*/\n", ignore)
+        self.assertIn("/host_shared/.smros-posix-stage-quarantine/\n", ignore)
 
 
 class ModelTests(unittest.TestCase):

@@ -18,23 +18,28 @@ import hashlib
 import json
 import os
 import re
+import secrets
+import selectors
 import signal
 import shutil
 import stat
 import subprocess
 import tempfile
-import threading
 import time
 import unicodedata
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import BinaryIO, Callable, Iterable, Mapping, Sequence
 
 from .model import BuildResult, BuildSummary, SuiteTest
 
 
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+MAX_HOST_MANIFEST_BYTES = 8 * 1024 * 1024
+MAX_BUILD_RESULTS_BYTES = 64 * 1024 * 1024
+MAX_BUILD_RESULT_LINE_BYTES = 256 * 1024
 MAX_TESTS = 4_096
+MAX_BUILD_RESULTS_ROWS = MAX_TESTS * 3
 MAX_STAGE_BYTES = 256 * 1024 * 1024
 MAX_DIAGNOSTIC_BYTES = 16_384
 MAX_TIMEOUT_MS = 2**31 - 1
@@ -44,6 +49,7 @@ CHECKSUM_DEFINITION = (
     "sha256(manifest.tsv with meta manifest_sha256 value replaced by "
     "64 ASCII zeroes)"
 )
+_STAGE_QUARANTINE_NAME = ".smros-posix-stage-quarantine"
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 _REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
 _NEEDED_RE = re.compile(r"\(NEEDED\).*Shared library: \[([^\]]+)\]")
@@ -386,31 +392,16 @@ def _fit_utf8(value: str, maximum_bytes: int) -> str:
     return value[:low]
 
 
-def _drain_pipe(
-    pipe: object, output: bytearray, truncated: list[bool]
+def _append_captured(
+    output: bytearray,
+    truncated: list[bool],
+    chunk: bytes,
 ) -> None:
-    try:
-        while True:
-            chunk = pipe.read(8192)
-            if not chunk:
-                return
-            remaining = MAX_DIAGNOSTIC_BYTES - len(output)
-            if remaining > 0:
-                output.extend(chunk[:remaining])
-            if len(chunk) > remaining:
-                truncated[0] = True
-    finally:
-        pipe.close()
-
-
-def _write_pipe(pipe: object, data: bytes) -> None:
-    try:
-        pipe.write(data)
-        pipe.flush()
-    except BrokenPipeError:
-        pass
-    finally:
-        pipe.close()
+    remaining = MAX_DIAGNOSTIC_BYTES - len(output)
+    if remaining > 0:
+        output.extend(chunk[:remaining])
+    if len(chunk) > remaining:
+        truncated[0] = True
 
 
 def _captured_output(data: bytearray, truncated: bool) -> str:
@@ -449,79 +440,184 @@ def run_bounded_command(
         env=env,
         pass_fds=tuple(pass_fds),
     )
-    assert process.stdout is not None and process.stderr is not None
-    stdout = bytearray()
-    stderr = bytearray()
-    stdout_truncated = [False]
-    stderr_truncated = [False]
-    threads: list[threading.Thread] = [
-        threading.Thread(
-            target=_drain_pipe,
-            args=(process.stdout, stdout, stdout_truncated),
-            daemon=True,
-        ),
-        threading.Thread(
-            target=_drain_pipe,
-            args=(process.stderr, stderr, stderr_truncated),
-            daemon=True,
-        ),
-    ]
-    if input_data is not None:
-        assert process.stdin is not None
-        threads.append(
-            threading.Thread(
-                target=_write_pipe,
-                args=(process.stdin, input_data),
-                daemon=True,
-            )
+    selector: selectors.BaseSelector | None = None
+    try:
+        assert process.stdout is not None and process.stderr is not None
+        stdout = bytearray()
+        stderr = bytearray()
+        stdout_truncated = [False]
+        stderr_truncated = [False]
+        selector = selectors.DefaultSelector()
+        stdout_descriptor = process.stdout.fileno()
+        stderr_descriptor = process.stderr.fileno()
+        os.set_blocking(stdout_descriptor, False)
+        os.set_blocking(stderr_descriptor, False)
+        selector.register(
+            stdout_descriptor,
+            selectors.EVENT_READ,
+            (process.stdout, stdout, stdout_truncated),
         )
-    for thread in threads:
-        thread.start()
-    timed_out = False
-    deadline = time.monotonic() + timeout_seconds
+        selector.register(
+            stderr_descriptor,
+            selectors.EVENT_READ,
+            (process.stderr, stderr, stderr_truncated),
+        )
+        open_readers = {stdout_descriptor, stderr_descriptor}
+        stdin_descriptor: int | None = None
+        input_offset = 0
+        if input_data is not None:
+            assert process.stdin is not None
+            stdin_descriptor = process.stdin.fileno()
+            os.set_blocking(stdin_descriptor, False)
+            selector.register(
+                stdin_descriptor,
+                selectors.EVENT_WRITE,
+                process.stdin,
+            )
+        timed_out = False
+        deadline = time.monotonic() + timeout_seconds
+        drain_deadline: float | None = None
 
-    def kill_process_group() -> None:
+        def kill_process_group() -> None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        def reap_after_kill() -> None:
+            for _ in range(2):
+                if process.returncode is not None:
+                    return
+                try:
+                    process.wait(timeout=1.0)
+                    return
+                except subprocess.TimeoutExpired:
+                    kill_process_group()
+            raise ValueError("command could not be reaped after termination")
+
+        def close_stream(descriptor: int, stream: object) -> None:
+            nonlocal stdin_descriptor
+            try:
+                selector.unregister(descriptor)
+            except (KeyError, ValueError):
+                pass
+            stream.close()
+            open_readers.discard(descriptor)
+            if descriptor == stdin_descriptor:
+                stdin_descriptor = None
+
+        while True:
+            process.poll()
+            now = time.monotonic()
+            if process.returncode is not None and stdin_descriptor is not None:
+                assert process.stdin is not None
+                close_stream(stdin_descriptor, process.stdin)
+            if process.returncode is not None and not open_readers:
+                break
+            if not timed_out and now >= deadline:
+                timed_out = True
+                kill_process_group()
+                reap_after_kill()
+                drain_deadline = time.monotonic() + 1.0
+            if timed_out and drain_deadline is not None and now >= drain_deadline:
+                break
+            active_deadline = drain_deadline if timed_out else deadline
+            assert active_deadline is not None
+            events = selector.select(
+                max(0.0, min(0.05, active_deadline - time.monotonic()))
+            )
+            for key, mask in events:
+                descriptor = int(key.fd)
+                if mask & selectors.EVENT_READ:
+                    stream, output, truncated = key.data
+                    try:
+                        chunk = os.read(descriptor, 8192)
+                    except BlockingIOError:
+                        continue
+                    if chunk:
+                        _append_captured(output, truncated, chunk)
+                    else:
+                        close_stream(descriptor, stream)
+                elif mask & selectors.EVENT_WRITE:
+                    stream = key.data
+                    assert input_data is not None
+                    try:
+                        written = os.write(
+                            descriptor,
+                            input_data[input_offset : input_offset + 65_536],
+                        )
+                    except BlockingIOError:
+                        written = 0
+                    except BrokenPipeError:
+                        written = 0
+                        close_stream(descriptor, stream)
+                    input_offset += written
+                    if stdin_descriptor is not None and input_offset >= len(input_data):
+                        close_stream(descriptor, stream)
+
+        for key in tuple(selector.get_map().values()):
+            close_stream(int(key.fd), key.data[0] if isinstance(key.data, tuple) else key.data)
+        if process.returncode is None:
+            kill_process_group()
+            reap_after_kill()
+        stdout_text = _captured_output(stdout, stdout_truncated[0])
+        stderr_text = _captured_output(stderr, stderr_truncated[0])
+        if timed_out:
+            timeout_marker = f"\ncommand timed out after {timeout_seconds:g} seconds"
+            stderr_text = _bounded_text(stderr_text + timeout_marker)
+        stdout_value: str | bytes = stdout_text if text else stdout_text.encode("utf-8")
+        stderr_value: str | bytes = stderr_text if text else stderr_text.encode("utf-8")
+        completed = subprocess.CompletedProcess(
+            list(argv),
+            124 if timed_out else int(process.returncode),
+            stdout_value,
+            stderr_value,
+        )
+        if check and completed.returncode != 0:
+            raise subprocess.CalledProcessError(
+                completed.returncode,
+                list(argv),
+                output=completed.stdout,
+                stderr=completed.stderr,
+            )
+        return completed
+    except BaseException:
         try:
             os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except BaseException:
             pass
-
-    try:
-        process.wait(timeout=max(0.0, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        kill_process_group()
-        process.wait()
-    for thread in threads:
-        thread.join(max(0.0, deadline - time.monotonic()))
-    if any(thread.is_alive() for thread in threads):
-        timed_out = True
-        kill_process_group()
-        for thread in threads:
-            thread.join(1.0)
-        if any(thread.is_alive() for thread in threads):
-            raise ValueError("timed-out command pipes could not be closed")
-    stdout_text = _captured_output(stdout, stdout_truncated[0])
-    stderr_text = _captured_output(stderr, stderr_truncated[0])
-    if timed_out:
-        timeout_marker = f"\ncommand timed out after {timeout_seconds:g} seconds"
-        stderr_text = _bounded_text(stderr_text + timeout_marker)
-    stdout_value: str | bytes = stdout_text if text else stdout_text.encode("utf-8")
-    stderr_value: str | bytes = stderr_text if text else stderr_text.encode("utf-8")
-    completed = subprocess.CompletedProcess(
-        list(argv),
-        124 if timed_out else int(process.returncode),
-        stdout_value,
-        stderr_value,
-    )
-    if check and completed.returncode != 0:
-        raise subprocess.CalledProcessError(
-            completed.returncode,
-            list(argv),
-            output=completed.stdout,
-            stderr=completed.stderr,
-        )
-    return completed
+        if process.returncode is None:
+            try:
+                process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except BaseException:
+                    pass
+                try:
+                    process.wait(timeout=1.0)
+                except BaseException:
+                    pass
+            except BaseException:
+                pass
+        if selector is not None:
+            try:
+                selector.close()
+            except BaseException:
+                pass
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except BaseException:
+                    pass
+        raise
+    finally:
+        if selector is not None:
+            try:
+                selector.close()
+            except BaseException:
+                pass
 
 
 def _run_command(
@@ -530,11 +626,13 @@ def _run_command(
     argv: list[str],
     runner: CommandRunner,
     artifact: Path | None,
+    *,
+    pass_fds: Sequence[int] = (),
 ) -> BuildResult:
     started = time.monotonic_ns()
     try:
         if runner is _SUBPROCESS_RUN:
-            completed = run_bounded_command(argv)
+            completed = run_bounded_command(argv, pass_fds=pass_fds)
         else:
             completed = runner(
                 argv,
@@ -661,6 +759,7 @@ def stage_runtime_dependencies(
     *,
     compiler: str = "aarch64-linux-gnu-gcc",
     readelf: str = "aarch64-linux-gnu-readelf",
+    stage_descriptor: int | None = None,
 ) -> tuple[Path, ...]:
     sysroot_text = compiler_query(compiler, "-print-sysroot")
     multiarch = compiler_query(compiler, "-print-multiarch")
@@ -684,6 +783,7 @@ def stage_runtime_dependencies(
             readelf_command(readelf, elf),
             _SUBPROCESS_RUN,
             None,
+            pass_fds=(stage_descriptor,) if stage_descriptor is not None else (),
         )
         if result.returncode != 0:
             raise ValueError(f"AArch64 readelf failed for {elf}: {result.stderr}")
@@ -782,25 +882,220 @@ def _prepare_safe_work_directory(path: Path) -> None:
             current.mkdir()
 
 
-def _publish_stage(temporary_stage: Path, destination: Path) -> None:
-    destination_parent = destination.parent
-    destination_parent.mkdir(parents=True, exist_ok=True)
-    parent_stat = destination_parent.lstat()
-    if not stat.S_ISDIR(parent_stat.st_mode) or stat.S_ISLNK(parent_stat.st_mode):
-        raise ValueError(f"stage parent is not a safe directory: {destination_parent}")
-    if destination.exists() or destination.is_symlink():
-        info = destination.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise ValueError(f"stage destination is not a safe directory: {destination}")
-        _rename_exchange(temporary_stage, destination)
-    else:
-        os.replace(temporary_stage, destination)
+def _directory_open_flags() -> int:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return flags
 
 
-def _rename_exchange(first: Path, second: Path) -> None:
+def _open_directory_at(parent_descriptor: int, name: str, label: str) -> int:
+    try:
+        path_stat = os.stat(
+            name, dir_fd=parent_descriptor, follow_symlinks=False
+        )
+    except OSError as error:
+        raise ValueError(f"{label} is missing: {name}") from error
+    if stat.S_ISLNK(path_stat.st_mode):
+        raise ValueError(f"{label} must not be a symlink: {name}")
+    if not stat.S_ISDIR(path_stat.st_mode):
+        raise ValueError(f"{label} must be a directory: {name}")
+    try:
+        descriptor = os.open(
+            name, _directory_open_flags(), dir_fd=parent_descriptor
+        )
+    except OSError as error:
+        raise ValueError(f"{label} could not be opened safely: {name}") from error
+    opened_stat = os.fstat(descriptor)
+    if not stat.S_ISDIR(opened_stat.st_mode) or (
+        opened_stat.st_dev,
+        opened_stat.st_ino,
+    ) != (path_stat.st_dev, path_stat.st_ino):
+        os.close(descriptor)
+        raise ValueError(f"{label} changed while being opened: {name}")
+    return descriptor
+
+
+def _open_directory_chain(path: Path, label: str, *, create: bool) -> int:
+    absolute = Path(os.path.abspath(path))
+    descriptor = os.open(absolute.anchor, _directory_open_flags())
+    current = Path(absolute.anchor)
+    try:
+        for part in absolute.parts[1:]:
+            current /= part
+            try:
+                child_descriptor = _open_directory_at(
+                    descriptor, part, f"{label} component {current}"
+                )
+            except ValueError as error:
+                try:
+                    os.stat(part, dir_fd=descriptor, follow_symlinks=False)
+                except FileNotFoundError:
+                    if not create:
+                        raise error
+                    try:
+                        os.mkdir(part, 0o755, dir_fd=descriptor)
+                    except FileExistsError:
+                        pass
+                    child_descriptor = _open_directory_at(
+                        descriptor, part, f"{label} component {current}"
+                    )
+                else:
+                    raise
+            os.close(descriptor)
+            descriptor = child_descriptor
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _entry_exists_at(parent_descriptor: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _create_owned_temporary_directory(
+    parent_descriptor: int, prefix: str
+) -> tuple[str, int]:
+    for _ in range(128):
+        name = f".{prefix}.tmp-{secrets.token_hex(8)}"
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_descriptor)
+        except FileExistsError:
+            continue
+        return name, _open_directory_at(
+            parent_descriptor, name, "owned temporary stage"
+        )
+    raise FileExistsError("could not allocate a unique temporary stage directory")
+
+
+def _clear_directory(directory_descriptor: int) -> None:
+    with os.scandir(directory_descriptor) as iterator:
+        entries = list(iterator)
+    for entry in entries:
+        entry_stat = os.stat(
+            entry.name, dir_fd=directory_descriptor, follow_symlinks=False
+        )
+        if stat.S_ISDIR(entry_stat.st_mode):
+            child_descriptor = _open_directory_at(
+                directory_descriptor, entry.name, "temporary stage directory"
+            )
+            try:
+                _clear_directory(child_descriptor)
+            finally:
+                os.close(child_descriptor)
+            os.rmdir(entry.name, dir_fd=directory_descriptor)
+        else:
+            os.unlink(entry.name, dir_fd=directory_descriptor)
+
+
+def _remove_held_directory(
+    parent_descriptor: int,
+    name: str,
+    directory_descriptor: int,
+) -> None:
+    entry_stat = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    held_stat = os.fstat(directory_descriptor)
+    if not stat.S_ISDIR(entry_stat.st_mode) or (
+        entry_stat.st_dev,
+        entry_stat.st_ino,
+    ) != (held_stat.st_dev, held_stat.st_ino):
+        raise ValueError("held stage directory changed before cleanup")
+    try:
+        os.mkdir(_STAGE_QUARANTINE_NAME, 0o700, dir_fd=parent_descriptor)
+    except FileExistsError:
+        pass
+    cleanup_descriptor = _open_directory_at(
+        parent_descriptor,
+        _STAGE_QUARANTINE_NAME,
+        "stage quarantine",
+    )
+    try:
+        cleanup_stat = os.fstat(cleanup_descriptor)
+        if (
+            cleanup_stat.st_uid != os.geteuid()
+            or stat.S_IMODE(cleanup_stat.st_mode) != 0o700
+        ):
+            raise ValueError("stage quarantine ownership or mode is unsafe")
+        moved_name: str | None = None
+        for _ in range(128):
+            candidate = f"held-{secrets.token_hex(16)}"
+            try:
+                _rename_between_at(
+                    parent_descriptor,
+                    name,
+                    cleanup_descriptor,
+                    candidate,
+                    1,
+                )
+            except FileExistsError:
+                continue
+            except OSError as error:
+                raise ValueError(
+                    "held stage directory changed during cleanup"
+                ) from error
+            moved_name = candidate
+            break
+        if moved_name is None:
+            raise FileExistsError("could not allocate a unique quarantine entry")
+        try:
+            _validate_held_entry(
+                cleanup_descriptor,
+                moved_name,
+                directory_descriptor,
+                "held stage directory",
+            )
+        except ValueError as error:
+            try:
+                if not _entry_exists_at(parent_descriptor, name):
+                    _rename_between_at(
+                        cleanup_descriptor,
+                        moved_name,
+                        parent_descriptor,
+                        name,
+                        1,
+                    )
+            except BaseException:
+                pass
+            raise ValueError("held stage directory changed during cleanup") from error
+        _clear_directory(directory_descriptor)
+    finally:
+        os.close(cleanup_descriptor)
+
+
+def _validate_held_entry(
+    parent_descriptor: int,
+    name: str,
+    directory_descriptor: int,
+    label: str,
+) -> None:
+    entry_stat = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    held_stat = os.fstat(directory_descriptor)
+    if not stat.S_ISDIR(entry_stat.st_mode) or (
+        entry_stat.st_dev,
+        entry_stat.st_ino,
+    ) != (held_stat.st_dev, held_stat.st_ino):
+        raise ValueError(f"{label} changed before publication")
+
+
+def _rename_between_at(
+    source_parent_descriptor: int,
+    source_name: str,
+    destination_parent_descriptor: int,
+    destination_name: str,
+    flags: int,
+) -> None:
     renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
     if renameat2 is None:
-        raise ValueError("atomic stage exchange is not supported by this host")
+        raise ValueError("atomic stage rename is not supported by this host")
     renameat2.argtypes = (
         ctypes.c_int,
         ctypes.c_char_p,
@@ -810,22 +1105,82 @@ def _rename_exchange(first: Path, second: Path) -> None:
     )
     renameat2.restype = ctypes.c_int
     if renameat2(
-        -100,
-        os.fsencode(first),
-        -100,
-        os.fsencode(second),
-        2,
+        source_parent_descriptor,
+        os.fsencode(source_name),
+        destination_parent_descriptor,
+        os.fsencode(destination_name),
+        flags,
     ) != 0:
         error_number = ctypes.get_errno()
         if error_number in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP}:
             raise ValueError(
-                "atomic stage exchange is not supported by this filesystem"
+                "atomic stage rename is not supported by this filesystem"
             )
         raise OSError(
             error_number,
             os.strerror(error_number),
-            f"{first} <-> {second}",
+            destination_name,
         )
+
+
+def _rename_at(
+    parent_descriptor: int,
+    source_name: str,
+    destination_name: str,
+    flags: int,
+) -> None:
+    _rename_between_at(
+        parent_descriptor,
+        source_name,
+        parent_descriptor,
+        destination_name,
+        flags,
+    )
+
+
+def _publish_stage(
+    parent_descriptor: int,
+    temporary_name: str,
+    temporary_descriptor: int,
+    destination_name: str,
+) -> int | None:
+    _validate_held_entry(
+        parent_descriptor,
+        temporary_name,
+        temporary_descriptor,
+        "owned temporary stage",
+    )
+    if not _entry_exists_at(parent_descriptor, destination_name):
+        _rename_at(parent_descriptor, temporary_name, destination_name, 1)
+        _validate_held_entry(
+            parent_descriptor,
+            destination_name,
+            temporary_descriptor,
+            "published stage",
+        )
+        return None
+
+    destination_descriptor = _open_directory_at(
+        parent_descriptor, destination_name, "stage destination"
+    )
+    try:
+        _rename_at(parent_descriptor, temporary_name, destination_name, 2)
+        _validate_held_entry(
+            parent_descriptor,
+            destination_name,
+            temporary_descriptor,
+            "published stage",
+        )
+        _validate_held_entry(
+            parent_descriptor,
+            temporary_name,
+            destination_descriptor,
+            "replaced stage",
+        )
+        return destination_descriptor
+    except BaseException:
+        os.close(destination_descriptor)
+        raise
 
 
 def _write_manifests(
@@ -892,15 +1247,26 @@ def build_campaign(
     artifact_root = work / "bin"
     _reset_generated_directory(object_root)
     _reset_generated_directory(artifact_root)
-    stage.parent.mkdir(parents=True, exist_ok=True)
-    temporary_stage = Path(
-        tempfile.mkdtemp(prefix=f".{stage.name}.tmp-", dir=stage.parent)
+    stage = Path(os.path.abspath(stage))
+    if not stage.name:
+        raise ValueError("stage destination must have a directory name")
+    stage_parent_descriptor = _open_directory_chain(
+        stage.parent, "stage parent", create=True
     )
+    temporary_name: str | None = None
+    temporary_descriptor: int | None = None
+    replaced_stage_descriptor: int | None = None
+    published = False
+    operation_error: BaseException | None = None
     results: list[BuildResult] = []
     manifested: list[SuiteTest] = []
     staged_executables: list[Path] = []
     compile_pass = compile_fail = link_pass = link_fail = 0
     try:
+        temporary_name, temporary_descriptor = _create_owned_temporary_directory(
+            stage_parent_descriptor, stage.name
+        )
+        temporary_stage = Path(f"/proc/self/fd/{temporary_descriptor}")
         include_directory = checkout / "include"
         for test in ordered_tests:
             source = safe_stage_path(checkout, test.source)
@@ -1017,16 +1383,31 @@ def build_campaign(
                     )
                 )
         manifested.extend(_shell_test(path) for path in ordered_shells)
-        stager = dependency_stager or stage_runtime_dependencies
-        stager(tuple(staged_executables), temporary_stage)
+        if dependency_stager is None:
+            stage_runtime_dependencies(
+                tuple(staged_executables),
+                temporary_stage,
+                stage_descriptor=temporary_descriptor,
+            )
+        else:
+            dependency_stager(tuple(staged_executables), temporary_stage)
         _write_manifests(temporary_stage, metadata, manifested, results)
         staged_bytes = _stage_size(temporary_stage)
-        verify_stage(
+        _verify_open_stage(
             temporary_stage,
+            temporary_descriptor,
             verify_architecture=dependency_stager is None,
             expected_metadata=metadata,
+            expected_tests=ordered_tests,
+            expected_shell_tests=ordered_shells,
         )
-        _publish_stage(temporary_stage, stage)
+        replaced_stage_descriptor = _publish_stage(
+            stage_parent_descriptor,
+            temporary_name,
+            temporary_descriptor,
+            stage.name,
+        )
+        published = True
         return BuildSummary(
             discovered=len(ordered_tests),
             compile_pass=compile_pass,
@@ -1036,9 +1417,41 @@ def build_campaign(
             shell_unported=len(ordered_shells),
             staged_bytes=staged_bytes,
         )
+    except BaseException as error:
+        operation_error = error
+        raise
     finally:
-        if temporary_stage.exists():
-            shutil.rmtree(temporary_stage)
+        cleanup_error: BaseException | None = None
+        try:
+            if published:
+                if temporary_name is not None and replaced_stage_descriptor is not None:
+                    _remove_held_directory(
+                        stage_parent_descriptor,
+                        temporary_name,
+                        replaced_stage_descriptor,
+                    )
+            elif temporary_name is not None and temporary_descriptor is not None:
+                if _entry_exists_at(stage_parent_descriptor, temporary_name):
+                    _remove_held_directory(
+                        stage_parent_descriptor,
+                        temporary_name,
+                        temporary_descriptor,
+                    )
+        except BaseException as error:
+            cleanup_error = error
+        for descriptor in (
+            replaced_stage_descriptor,
+            temporary_descriptor,
+            stage_parent_descriptor,
+        ):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except BaseException as error:
+                    if cleanup_error is None:
+                        cleanup_error = error
+        if operation_error is None and cleanup_error is not None:
+            raise cleanup_error
 
 
 def _require_regular_file(path: Path, label: str) -> os.stat_result:
@@ -1049,6 +1462,98 @@ def _require_regular_file(path: Path, label: str) -> os.stat_result:
     if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
         raise ValueError(f"{label} is not a regular file: {path}")
     return info
+
+
+def _regular_file_open_flags() -> int:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return flags
+
+
+def _require_regular_file_at(
+    parent_descriptor: int,
+    name: str,
+    label: str,
+) -> os.stat_result:
+    try:
+        info = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except OSError as error:
+        raise ValueError(f"missing {label}: {name}") from error
+    if stat.S_ISLNK(info.st_mode):
+        raise ValueError(f"{label} must not be a symlink: {name}")
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError(f"{label} is not a regular file: {name}")
+    return info
+
+
+def _open_regular_file_at(
+    parent_descriptor: int,
+    name: str,
+    label: str,
+    maximum_bytes: int,
+) -> int:
+    path_stat = _require_regular_file_at(parent_descriptor, name, label)
+    if path_stat.st_size > maximum_bytes:
+        raise ValueError(f"{label} size exceeds its limit")
+    try:
+        descriptor = os.open(
+            name,
+            _regular_file_open_flags(),
+            dir_fd=parent_descriptor,
+        )
+    except OSError as error:
+        raise ValueError(f"{label} could not be opened safely: {name}") from error
+    opened_stat = os.fstat(descriptor)
+    if not stat.S_ISREG(opened_stat.st_mode) or (
+        opened_stat.st_dev,
+        opened_stat.st_ino,
+    ) != (path_stat.st_dev, path_stat.st_ino):
+        os.close(descriptor)
+        raise ValueError(f"{label} changed while being opened: {name}")
+    if opened_stat.st_size > maximum_bytes:
+        os.close(descriptor)
+        raise ValueError(f"{label} size exceeds its limit")
+    return descriptor
+
+
+def _read_open_regular_file(
+    descriptor: int,
+    label: str,
+    maximum_bytes: int,
+) -> bytes:
+    opened_stat = os.fstat(descriptor)
+    if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_size > maximum_bytes:
+        raise ValueError(f"{label} size exceeds its limit")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(descriptor, min(1024 * 1024, maximum_bytes + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > maximum_bytes:
+            raise ValueError(f"{label} size exceeds its limit")
+    final_stat = os.fstat(descriptor)
+    if (
+        final_stat.st_dev,
+        final_stat.st_ino,
+        final_stat.st_mode,
+        final_stat.st_size,
+        final_stat.st_mtime_ns,
+    ) != (
+        opened_stat.st_dev,
+        opened_stat.st_ino,
+        opened_stat.st_mode,
+        opened_stat.st_size,
+        opened_stat.st_mtime_ns,
+    ):
+        raise ValueError(f"{label} changed while being read")
+    return b"".join(chunks)
 
 
 def _validate_stage_tree(stage: Path) -> None:
@@ -1072,11 +1577,14 @@ def _validate_stage_tree(stage: Path) -> None:
 
 
 def _run_readelf(
-    readelf_runner: CommandRunner, argv: list[str], label: str
+    readelf_runner: CommandRunner,
+    argv: list[str],
+    label: str,
+    pass_fds: Sequence[int] = (),
 ) -> str:
     try:
         if readelf_runner is _SUBPROCESS_RUN:
-            result = run_bounded_command(argv)
+            result = run_bounded_command(argv, pass_fds=pass_fds)
         else:
             result = readelf_runner(
                 argv,
@@ -1084,6 +1592,7 @@ def _run_readelf(
                 stderr=subprocess.PIPE,
                 text=True,
                 check=False,
+                pass_fds=tuple(pass_fds),
             )
     except OSError as error:
         raise ValueError(f"AArch64 readelf unavailable while checking {label}: {error}") from error
@@ -1183,19 +1692,81 @@ def _validate_build_argv(
         raise ValueError(f"invalid production linker path for {test.test_id}")
 
 
-def _load_build_results(
-    path: Path,
+def _open_build_results_source(source: Path | int) -> BinaryIO:
+    if isinstance(source, int):
+        descriptor = os.dup(source)
+        info = os.fstat(descriptor)
+    else:
+        path_stat = _require_regular_file(source, "build-results.ndjson")
+        descriptor = os.open(source, _regular_file_open_flags())
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+            os.close(descriptor)
+            raise ValueError("build-results.ndjson changed while being opened")
+    if not stat.S_ISREG(info.st_mode):
+        os.close(descriptor)
+        raise ValueError("build-results.ndjson is not a regular file")
+    if info.st_size > MAX_BUILD_RESULTS_BYTES:
+        os.close(descriptor)
+        raise ValueError("build-results.ndjson size exceeds the 64 MiB limit")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return os.fdopen(descriptor, "rb")
+
+
+def _build_results_fingerprint(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _copy_build_results_snapshot(
+    source: BinaryIO,
+    snapshot: BinaryIO,
+) -> None:
+    row_count = 0
+    byte_count = 0
+    while True:
+        line = source.readline(MAX_BUILD_RESULT_LINE_BYTES + 1)
+        if not line:
+            break
+        byte_count += len(line)
+        if byte_count > MAX_BUILD_RESULTS_BYTES:
+            raise ValueError("build-results.ndjson size exceeds the 64 MiB limit")
+        if len(line) > MAX_BUILD_RESULT_LINE_BYTES:
+            raise ValueError("build result line length exceeds the 256 KiB limit")
+        if not line.endswith(b"\n") or b"\r" in line:
+            raise ValueError("build results must use LF line endings")
+        row_count += 1
+        if row_count > MAX_BUILD_RESULTS_ROWS:
+            raise ValueError("build result row count exceeds the 12,288 limit")
+        snapshot.write(line)
+    snapshot.flush()
+    snapshot.seek(0)
+
+
+def _build_result_lines(source: Path | int) -> Iterable[str]:
+    with _open_build_results_source(source) as input_file:
+        for line_number, line in enumerate(input_file, start=1):
+            try:
+                yield line[:-1].decode("utf-8")
+            except UnicodeError as error:
+                raise ValueError(
+                    f"build result is not UTF-8 at line {line_number}"
+                ) from error
+
+
+def _parse_build_results(
+    source: Path | int,
     tests: Sequence[SuiteTest],
     *,
     strict_paths: bool = False,
     revision: str | None = None,
 ) -> tuple[BuildResult, ...]:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except UnicodeError as error:
-        raise ValueError("build results are not UTF-8") from error
-    if "\r" in text or (text and not text.endswith("\n")):
-        raise ValueError("build results must use LF line endings")
     expected_fields = {
         "test_id",
         "stage",
@@ -1213,7 +1784,7 @@ def _load_build_results(
     }
     results: list[BuildResult] = []
     seen: set[tuple[str, str]] = set()
-    for line_number, line in enumerate(text.splitlines(), start=1):
+    for line_number, line in enumerate(_build_result_lines(source), start=1):
         try:
             value = json.loads(
                 line, object_pairs_hook=_reject_duplicate_json_keys
@@ -1353,24 +1924,115 @@ def _load_build_results(
     return tuple(results)
 
 
-def verify_stage(
+def _load_build_results(
+    source: Path | int,
+    tests: Sequence[SuiteTest],
+    *,
+    strict_paths: bool = False,
+    revision: str | None = None,
+) -> tuple[BuildResult, ...]:
+    with _open_build_results_source(source) as source_file, tempfile.TemporaryFile(
+        "w+b"
+    ) as snapshot:
+        fingerprint = _build_results_fingerprint(os.fstat(source_file.fileno()))
+        _copy_build_results_snapshot(source_file, snapshot)
+        if _build_results_fingerprint(os.fstat(source_file.fileno())) != fingerprint:
+            raise ValueError("build-results.ndjson changed while being verified")
+        results = _parse_build_results(
+            snapshot.fileno(),
+            tests,
+            strict_paths=strict_paths,
+            revision=revision,
+        )
+        if _build_results_fingerprint(os.fstat(source_file.fileno())) != fingerprint:
+            raise ValueError("build-results.ndjson changed while being verified")
+        return results
+
+
+def _manifest_inventory(
+    tests: Sequence[SuiteTest],
+) -> frozenset[tuple[str, str, str, str, str]]:
+    return frozenset(
+        (
+            test.test_id,
+            test.group,
+            test.api,
+            test.kind,
+            test.disposition,
+        )
+        for test in tests
+    )
+
+
+def _expected_manifest_inventory(
+    tests: Sequence[SuiteTest],
+    shell_tests: Sequence[str],
+    build_results: Sequence[BuildResult],
+) -> frozenset[tuple[str, str, str, str, str]]:
+    results = {
+        (result.test_id, result.stage): result for result in build_results
+    }
+    expected: list[SuiteTest] = []
+    for test in tests:
+        disposition = test.disposition
+        compile_result = results.get((test.test_id, "compile"))
+        if disposition != "excluded-upstream-stub":
+            if compile_result is not None and compile_result.status == "failed":
+                disposition = "compile-failed"
+            elif test.kind == "definition":
+                disposition = "definition-only"
+            elif test.kind == "runnable":
+                link_result = results.get((test.test_id, "link"))
+                disposition = (
+                    "link-failed"
+                    if link_result is not None and link_result.status == "failed"
+                    else "complete"
+                )
+        expected.append(replace(test, disposition=disposition))
+    expected.extend(_shell_test(path) for path in shell_tests)
+    inventory = _manifest_inventory(expected)
+    if len(inventory) != len(expected):
+        raise ValueError("duplicate test in expected inventory")
+    return inventory
+
+
+def _verify_open_stage(
     stage: Path,
+    stage_descriptor: int,
     *,
     readelf_runner: CommandRunner = subprocess.run,
     verify_architecture: bool = True,
     expected_metadata: ManifestMetadata | None = None,
+    expected_tests: Sequence[SuiteTest] | None = None,
+    expected_shell_tests: Sequence[str] | None = None,
     strict_command_paths: bool = False,
 ) -> BuildSummary:
-    try:
-        stage_info = stage.lstat()
-    except FileNotFoundError as error:
-        raise ValueError(f"stage is missing: {stage}") from error
-    if not stat.S_ISDIR(stage_info.st_mode) or stat.S_ISLNK(stage_info.st_mode):
-        raise ValueError(f"stage is not a safe directory: {stage}")
     _validate_stage_tree(stage)
-    for name in ("manifest.tsv", "manifest.json", "build-results.ndjson"):
-        _require_regular_file(stage / name, name)
-    metadata, tests = parse_manifest((stage / "manifest.tsv").read_bytes())
+    _stage_size(stage)
+    metadata_limits = (
+        ("manifest.tsv", MAX_MANIFEST_BYTES, "2 MiB"),
+        ("manifest.json", MAX_HOST_MANIFEST_BYTES, "8 MiB"),
+        ("build-results.ndjson", MAX_BUILD_RESULTS_BYTES, "64 MiB"),
+    )
+    for name, maximum, display_limit in metadata_limits:
+        info = _require_regular_file_at(stage_descriptor, name, name)
+        if info.st_size > maximum:
+            raise ValueError(f"{name} size exceeds the {display_limit} limit")
+    manifest_descriptor = _open_regular_file_at(
+        stage_descriptor,
+        "manifest.tsv",
+        "manifest.tsv",
+        MAX_MANIFEST_BYTES,
+    )
+    try:
+        manifest_data = _read_open_regular_file(
+            manifest_descriptor,
+            "manifest.tsv",
+            MAX_MANIFEST_BYTES,
+        )
+    finally:
+        os.close(manifest_descriptor)
+    metadata, tests = parse_manifest(manifest_data)
     if expected_metadata is not None:
         expected_provenance = replace(
             expected_metadata,
@@ -1385,16 +2047,50 @@ def verify_stage(
         _validate_metadata(expected_provenance)
         if actual_provenance != expected_provenance:
             raise ValueError("manifest metadata does not match current build inputs")
-    build_results = _load_build_results(
-        stage / "build-results.ndjson",
-        tests,
-        strict_paths=strict_command_paths,
-        revision=metadata.revision,
+    build_results_descriptor = _open_regular_file_at(
+        stage_descriptor,
+        "build-results.ndjson",
+        "build-results.ndjson",
+        MAX_BUILD_RESULTS_BYTES,
     )
+    try:
+        build_results = _load_build_results(
+            build_results_descriptor,
+            tests,
+            strict_paths=strict_command_paths,
+            revision=metadata.revision,
+        )
+    finally:
+        os.close(build_results_descriptor)
     if _build_results_digest(build_results) != metadata.build_results_sha256:
         raise ValueError("build results checksum mismatch")
+    if (expected_tests is None) != (expected_shell_tests is None):
+        raise ValueError("complete expected inventory is required")
+    if expected_tests is not None and expected_shell_tests is not None:
+        expected_inventory = _expected_manifest_inventory(
+            expected_tests,
+            expected_shell_tests,
+            build_results,
+        )
+        actual_inventory = _manifest_inventory(tests)
+        if len(actual_inventory) != len(tests) or actual_inventory != expected_inventory:
+            raise ValueError("manifest does not match current expected inventory")
+    host_descriptor = _open_regular_file_at(
+        stage_descriptor,
+        "manifest.json",
+        "manifest.json",
+        MAX_HOST_MANIFEST_BYTES,
+    )
     try:
-        host_text = (stage / "manifest.json").read_text(encoding="utf-8")
+        host_data = _read_open_regular_file(
+            host_descriptor,
+            "manifest.json",
+            MAX_HOST_MANIFEST_BYTES,
+        )
+    finally:
+        os.close(host_descriptor)
+    try:
+        host_text = host_data.decode("utf-8")
         host_manifest = json.loads(
             host_text, object_pairs_hook=_reject_duplicate_json_keys
         )
@@ -1466,6 +2162,7 @@ def verify_stage(
                 readelf_runner,
                 ["aarch64-linux-gnu-readelf", "-h", str(executable)],
                 test.binary,
+                (stage_descriptor,),
             )
             if "AArch64" not in header:
                 raise ValueError(f"staged binary is not AArch64 ELF: {test.binary}")
@@ -1492,6 +2189,7 @@ def verify_stage(
                 readelf_runner,
                 ["aarch64-linux-gnu-readelf", "-h", str(library)],
                 library.name,
+                (stage_descriptor,),
             )
             if "AArch64" not in header:
                 raise ValueError(f"staged runtime is not AArch64 ELF: {library.name}")
@@ -1530,6 +2228,7 @@ def verify_stage(
                 readelf_runner,
                 readelf_command("aarch64-linux-gnu-readelf", elf_file),
                 elf_file.name,
+                (stage_descriptor,),
             )
             interpreter, needed = parse_elf_dependencies(dependencies)
             required = set(needed)
@@ -1573,3 +2272,40 @@ def verify_stage(
         shell_unported=sum(test.disposition == "not-built-shell-test" for test in tests),
         staged_bytes=staged_bytes,
     )
+
+
+def verify_stage(
+    stage: Path,
+    *,
+    readelf_runner: CommandRunner = subprocess.run,
+    verify_architecture: bool = True,
+    expected_metadata: ManifestMetadata | None = None,
+    expected_tests: Sequence[SuiteTest] | None = None,
+    expected_shell_tests: Sequence[str] | None = None,
+    strict_command_paths: bool = False,
+) -> BuildSummary:
+    stage = Path(os.path.abspath(stage))
+    if not stage.name:
+        raise ValueError("stage must have a directory name")
+    parent_descriptor = _open_directory_chain(
+        stage.parent, "stage parent", create=False
+    )
+    stage_descriptor: int | None = None
+    try:
+        stage_descriptor = _open_directory_at(
+            parent_descriptor, stage.name, "stage"
+        )
+        return _verify_open_stage(
+            Path(f"/proc/self/fd/{stage_descriptor}"),
+            stage_descriptor,
+            readelf_runner=readelf_runner,
+            verify_architecture=verify_architecture,
+            expected_metadata=expected_metadata,
+            expected_tests=expected_tests,
+            expected_shell_tests=expected_shell_tests,
+            strict_command_paths=strict_command_paths,
+        )
+    finally:
+        if stage_descriptor is not None:
+            os.close(stage_descriptor)
+        os.close(parent_descriptor)
