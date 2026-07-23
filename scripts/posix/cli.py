@@ -20,6 +20,7 @@ from .build import (
 )
 from .discovery import audit_reviews
 from .model import BuildSummary, SuiteTest
+from .report import generate_report
 from .source import fetch_checkout, load_source_lock
 
 
@@ -87,6 +88,17 @@ def create_parser() -> argparse.ArgumentParser:
     filters.add_argument("--group")
     filters.add_argument("--test")
     baseline_parser.add_argument("--sysroot", required=True, type=Path)
+    report_parser = subparsers.add_parser(
+        "report", help="aggregate POSIX runtime results and render coverage"
+    )
+    report_parser.add_argument("--manifest", required=True, type=Path)
+    report_parser.add_argument(
+        "--linux-results", action="append", type=Path, default=[]
+    )
+    report_parser.add_argument(
+        "--smros-results", action="append", type=Path, default=[]
+    )
+    report_parser.add_argument("--out", required=True, type=Path)
     return parser
 
 
@@ -339,6 +351,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"results={result.result_path}"
         )
         return 0 if result.all_passed else 1
+    if arguments.command == "report":
+        if not arguments.linux_results and not arguments.smros_results:
+            print(
+                "report failed: at least one runtime-result input is required",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            summary = generate_report(
+                arguments.manifest,
+                linux_results=arguments.linux_results,
+                smros_results=arguments.smros_results,
+                output_directory=arguments.out,
+            )
+        except (OSError, ValueError) as error:
+            print(f"report failed: {error}", file=sys.stderr)
+            return 1
+        completion = summary["metrics"]["program_completion"]
+        print(
+            f"complete={summary['complete']} "
+            f"program-completion={completion['fraction']} "
+            f"output={arguments.out}"
+        )
+        return 0 if summary["complete"] else 1
     raise AssertionError(f"unhandled command: {arguments.command}")
 
 

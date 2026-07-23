@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping
 
 
 PTS_PASS = 0
@@ -10,6 +11,21 @@ PTS_FAIL = 1
 PTS_UNRESOLVED = 2
 PTS_UNSUPPORTED = 4
 PTS_UNTESTED = 5
+
+OVERALL_STATUSES = (
+    "pass",
+    "fail",
+    "unresolved",
+    "unsupported",
+    "untested",
+    "interrupted",
+    "timeout",
+    "crash",
+    "launch-error",
+    "build-fail",
+    "not-built",
+    "flaky",
+)
 
 
 @dataclass(frozen=True)
@@ -135,3 +151,69 @@ class RunMetadata:
     manifest_sha256: str
     build_id: str
     complete: bool
+
+
+@dataclass(frozen=True)
+class SerialEvent:
+    schema: int
+    seq: int
+    event: str
+    run_id: str
+    manifest_sha256: str
+    architecture: str
+    values: Mapping[str, object]
+
+    def to_dict(self) -> dict[str, object]:
+        return dict(self.values)
+
+
+@dataclass(frozen=True)
+class SerialAttempt:
+    test_id: str
+    group: str
+    api: str
+    status: str
+    pts_status: str | None
+    launch_status: str
+    exit_code: int | None
+    signal: int | None
+    timed_out: bool
+    duration_ms: int
+    stdout: str
+    stderr: str
+    resource_deltas: Mapping[str, int]
+    run_id: str
+    manifest_sha256: str
+    architecture: str
+    launch_error: str | None = None
+    infrastructure_error: str | None = None
+
+
+@dataclass(frozen=True)
+class ParsedEventRun:
+    events: tuple[SerialEvent, ...]
+    attempts: tuple[SerialAttempt, ...]
+    run_id: str
+    manifest_sha256: str
+    architecture: str
+    complete: bool
+    status: str
+    terminal_event: SerialEvent | None
+    infrastructure_error: str | None = None
+
+
+@dataclass(frozen=True)
+class CoverageMetric:
+    numerator: int
+    denominator: int
+    test_ids: tuple[str, ...]
+    numerator_test_ids: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "denominator": self.denominator,
+            "fraction": f"{self.numerator}/{self.denominator}",
+            "numerator": self.numerator,
+            "numerator_test_ids": list(self.numerator_test_ids),
+            "test_ids": list(self.test_ids),
+        }
