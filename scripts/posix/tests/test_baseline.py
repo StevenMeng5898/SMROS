@@ -341,7 +341,59 @@ class RuntimeAttemptTests(BaselineFixture, unittest.TestCase):
         self.assertNotIn("O", attempt.stderr)
 
     def test_timeout_terminates_the_whole_process_group(self) -> None:
-        attempt = self.attempt(self.make_test("timeout-case", timeout_ms=120))
+        real_popen = subprocess.Popen
+
+        def synchronized_popen(
+            *args: object, **kwargs: object
+        ) -> subprocess.Popen[bytes]:
+            process = real_popen(*args, **kwargs)
+            setup_deadline = time.monotonic() + 5.0
+            try:
+                while True:
+                    try:
+                        child_pid = int(
+                            self.child_pid.read_text(encoding="ascii")
+                        )
+                    except (FileNotFoundError, ValueError):
+                        child_pid = 0
+                    if child_pid > 0:
+                        return process
+                    if process.poll() is not None:
+                        raise AssertionError(
+                            "fake qemu exited before creating its descendant"
+                        )
+                    if time.monotonic() >= setup_deadline:
+                        raise AssertionError(
+                            "fake qemu did not create its descendant before "
+                            "the setup deadline"
+                        )
+                    time.sleep(0.005)
+            except BaseException:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                if process.returncode is None:
+                    try:
+                        process.wait(timeout=1.0)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        try:
+                            process.wait(timeout=1.0)
+                        except subprocess.TimeoutExpired:
+                            pass
+                raise
+
+        with mock.patch(
+            "scripts.posix.baseline.subprocess.Popen",
+            side_effect=synchronized_popen,
+        ):
+            attempt = self.attempt(
+                self.make_test("timeout-case", timeout_ms=120)
+            )
         self.assertEqual(attempt.status, "timeout")
         self.assertTrue(attempt.timed_out)
         pid = int(self.child_pid.read_text(encoding="ascii"))
