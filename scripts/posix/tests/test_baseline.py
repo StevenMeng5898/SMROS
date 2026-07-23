@@ -31,10 +31,15 @@ from scripts.posix.baseline import (
 from scripts.posix.build import (
     CHECKSUM_DEFINITION,
     ManifestMetadata,
+    _build_results_digest,
+    _json_build_result,
+    compile_command,
+    link_command,
+    nm_command,
     render_manifest,
     sha256_file,
 )
-from scripts.posix.model import BuildSummary, SuiteTest
+from scripts.posix.model import BuildResult, BuildSummary, SuiteTest
 
 
 def _metadata() -> ManifestMetadata:
@@ -246,10 +251,78 @@ class BaselineFixture:
         )
 
     def write_manifest(self, tests: tuple[SuiteTest, ...]) -> ManifestMetadata:
-        manifest, _ = render_manifest(_metadata(), tests)
+        build_results: list[BuildResult] = []
+        checkout = Path("target/posix/src") / _metadata().revision
+        for test in sorted(tests, key=lambda item: item.test_id):
+            if test.kind == "shell":
+                continue
+            object_path = Path("target/posix/aarch64/obj") / f"{test.test_id}.o"
+            executable = (
+                Path("target/posix/aarch64/bin") / f"{test.test_id}.test"
+            )
+            build_results.append(
+                BuildResult(
+                    test_id=test.test_id,
+                    stage="compile",
+                    status="passed",
+                    argv=tuple(
+                        compile_command(
+                            "aarch64-linux-gnu-gcc",
+                            checkout / test.source,
+                            object_path,
+                            checkout / "include",
+                        )
+                    ),
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                    duration_ms=1,
+                    artifact_sha256="a" * 64,
+                )
+            )
+            if test.kind != "runnable":
+                continue
+            build_results.extend(
+                (
+                    BuildResult(
+                        test_id=test.test_id,
+                        stage="nm",
+                        status="passed",
+                        argv=tuple(
+                            nm_command("aarch64-linux-gnu-nm", object_path)
+                        ),
+                        returncode=0,
+                        stdout="0000000000000000 T main\n",
+                        stderr="",
+                        duration_ms=1,
+                        artifact_sha256=None,
+                    ),
+                    BuildResult(
+                        test_id=test.test_id,
+                        stage="link",
+                        status="passed",
+                        argv=tuple(
+                            link_command(
+                                "aarch64-linux-gnu-gcc",
+                                object_path,
+                                executable,
+                            )
+                        ),
+                        returncode=0,
+                        stdout="",
+                        stderr="",
+                        duration_ms=1,
+                        artifact_sha256=test.sha256,
+                    ),
+                )
+            )
+        metadata = replace(
+            _metadata(),
+            build_results_sha256=_build_results_digest(build_results),
+        )
+        manifest, _ = render_manifest(metadata, tests)
         self.stage.mkdir(parents=True, exist_ok=True)
         (self.stage / "manifest.tsv").write_text(manifest, encoding="utf-8")
-        metadata = _metadata()
         _, manifest_digest = render_manifest(metadata, tests)
         metadata = ManifestMetadata(
             **{
@@ -274,6 +347,10 @@ class BaselineFixture:
         }
         (self.stage / "manifest.json").write_text(
             json.dumps(host, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        (self.stage / "build-results.ndjson").write_text(
+            "".join(_json_build_result(result) + "\n" for result in build_results),
             encoding="utf-8",
         )
         return metadata
@@ -357,6 +434,33 @@ class BaselineFixture:
         pid = int(self.child_pid.read_text(encoding="ascii"))
         self.assert_processes_reaped((pid,))
 
+    def failing_temporary_directory(
+        self, prefix: str, failure: BaseException
+    ) -> mock._patch:
+        real_temporary_directory = tempfile.TemporaryDirectory
+
+        class FailingExit:
+            def __init__(self, directory: tempfile.TemporaryDirectory[str]) -> None:
+                self.directory = directory
+
+            def __enter__(self) -> str:
+                return self.directory.__enter__()
+
+            def __exit__(self, *arguments: object) -> None:
+                self.directory.__exit__(*arguments)
+                raise failure
+
+        def create(*arguments: object, **keywords: object):
+            directory = real_temporary_directory(*arguments, **keywords)
+            if keywords.get("prefix") == prefix:
+                return FailingExit(directory)
+            return directory
+
+        return mock.patch(
+            "scripts.posix.baseline.tempfile.TemporaryDirectory",
+            side_effect=create,
+        )
+
 
 class StatusTests(unittest.TestCase):
     def test_exit_codes_have_exact_open_posix_classification(self) -> None:
@@ -434,6 +538,8 @@ class RuntimeAttemptTests(BaselineFixture, unittest.TestCase):
             qemu=self.qemu,
             metadata=metadata,
             build_id="build-test",
+            build_status="passed",
+            link_status="passed",
         )
 
     def test_qemu_uses_exact_argv_private_cwd_and_minimal_environment(self) -> None:
@@ -478,6 +584,8 @@ class RuntimeAttemptTests(BaselineFixture, unittest.TestCase):
             qemu=missing,
             metadata=_metadata(),
             build_id="build-test",
+            build_status="passed",
+            link_status="passed",
         )
         self.assertEqual(launch.status, "launch-error")
         self.assertIsNone(launch.exit_code)
@@ -1083,6 +1191,173 @@ class RuntimeAttemptTests(BaselineFixture, unittest.TestCase):
 
 
 class CampaignTests(BaselineFixture, unittest.TestCase):
+    def test_sysroot_cleanup_failure_publishes_incomplete_attempt(self) -> None:
+        test = self.make_test("pass-case")
+        self.write_manifest((test,))
+        original = OSError(errno.EIO, "sysroot cleanup failed")
+
+        with self.failing_temporary_directory(
+            "smros-posix-sysroot-", original
+        ):
+            with self.assertRaises(OSError) as raised:
+                run_baseline(
+                    self.stage,
+                    self.sysroot,
+                    self.results,
+                    qemu=self.qemu,
+                    verifier=lambda _stage: None,
+                )
+
+        self.assertIs(raised.exception, original)
+        rows = [
+            json.loads(line)
+            for line in self.results.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(
+            [row["record_type"] for row in rows], ["attempt", "run"]
+        )
+        self.assertEqual(rows[0]["status"], "interrupted")
+        self.assertEqual(rows[0]["launch_status"], "launched")
+        self.assertEqual(rows[0]["pts_status"], "pass")
+        self.assertIn("sysroot cleanup failed", rows[0]["infrastructure_error"])
+        self.assertFalse(rows[-1]["complete"])
+
+    def test_attempt_temp_cleanup_retains_observed_result_and_capture(self) -> None:
+        test = self.make_test("pass-case")
+        self.write_manifest((test,))
+        original = OSError(errno.EIO, "attempt cleanup failed")
+
+        with self.failing_temporary_directory(
+            "smros-posix-baseline-", original
+        ):
+            with self.assertRaises(OSError) as raised:
+                run_baseline(
+                    self.stage,
+                    self.sysroot,
+                    self.results,
+                    qemu=self.qemu,
+                    verifier=lambda _stage: None,
+                )
+
+        self.assertIs(raised.exception, original)
+        rows = [
+            json.loads(line)
+            for line in self.results.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(rows[0]["status"], "interrupted")
+        self.assertEqual(rows[0]["launch_status"], "launched")
+        self.assertEqual(rows[0]["pts_status"], "pass")
+        self.assertEqual((rows[0]["stdout"], rows[0]["stderr"]), (
+            "pass-out\n", "pass-err\n"
+        ))
+        self.assertIn("attempt cleanup failed", rows[0]["infrastructure_error"])
+        self.assertFalse(rows[-1]["complete"])
+
+    def test_launch_and_temp_cleanup_failure_retains_both_details(self) -> None:
+        test = self.make_test("pass-case")
+        self.write_manifest((test,))
+        invalid_qemu = self.root / "invalid-qemu"
+        invalid_qemu.write_bytes(b"not an executable image")
+        invalid_qemu.chmod(0o755)
+        cleanup = OSError(errno.EIO, "attempt cleanup failed")
+
+        with self.failing_temporary_directory(
+            "smros-posix-baseline-", cleanup
+        ):
+            with self.assertRaises(BaselinePrerequisiteError) as raised:
+                run_baseline(
+                    self.stage,
+                    self.sysroot,
+                    self.results,
+                    qemu=invalid_qemu,
+                    verifier=lambda _stage: None,
+                )
+
+        self.assertIs(raised.exception.__cause__, cleanup)
+        self.assertIn("Exec format error", str(raised.exception))
+        rows = [
+            json.loads(line)
+            for line in self.results.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(rows[0]["status"], "launch-error")
+        self.assertEqual(rows[0]["launch_status"], "launch-error")
+        self.assertIn("Exec format error", rows[0]["launch_error"])
+        self.assertIn(str(invalid_qemu), rows[0]["launch_error"])
+        self.assertIn("attempt cleanup failed", rows[0]["infrastructure_error"])
+        self.assertIsNone(rows[0]["pts_status"])
+        self.assertFalse(rows[-1]["complete"])
+
+    def test_launch_and_sysroot_cleanup_preserves_typed_failure(self) -> None:
+        test = self.make_test("pass-case")
+        self.write_manifest((test,))
+        invalid_qemu = self.root / "invalid-qemu"
+        invalid_qemu.write_bytes(b"not an executable image")
+        invalid_qemu.chmod(0o755)
+        cleanup = OSError(errno.EIO, "sysroot cleanup failed")
+
+        with self.failing_temporary_directory(
+            "smros-posix-sysroot-", cleanup
+        ):
+            with self.assertRaises(BaselinePrerequisiteError) as raised:
+                run_baseline(
+                    self.stage,
+                    self.sysroot,
+                    self.results,
+                    qemu=invalid_qemu,
+                    verifier=lambda _stage: None,
+                )
+
+        self.assertIs(raised.exception.__cause__, cleanup)
+        self.assertIn("Exec format error", str(raised.exception))
+        rows = [
+            json.loads(line)
+            for line in self.results.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(rows[0]["status"], "launch-error")
+        self.assertEqual(rows[0]["launch_status"], "launch-error")
+        self.assertIn("Exec format error", rows[0]["launch_error"])
+        self.assertIn("sysroot cleanup failed", rows[0]["infrastructure_error"])
+        self.assertFalse(rows[-1]["complete"])
+
+    def test_combined_infrastructure_details_retain_both_failures(self) -> None:
+        test = self.make_test("pass-case")
+        self.write_manifest((test,))
+        inner = OSError(
+            errno.EIO, "inner-capture-failure " + "x" * 5_000
+        )
+        cleanup = OSError(errno.ENOSPC, "outer-sysroot-cleanup")
+
+        with (
+            self.failing_temporary_directory(
+                "smros-posix-sysroot-", cleanup
+            ),
+            mock.patch(
+                "scripts.posix.baseline.run_runtime_attempt",
+                side_effect=inner,
+            ),
+        ):
+            with self.assertRaises(OSError) as raised:
+                run_baseline(
+                    self.stage,
+                    self.sysroot,
+                    self.results,
+                    qemu=self.qemu,
+                    verifier=lambda _stage: None,
+                )
+
+        self.assertIs(raised.exception, inner)
+        self.assertIs(raised.exception.__cause__, cleanup)
+        rows = [
+            json.loads(line)
+            for line in self.results.read_text(encoding="utf-8").splitlines()
+        ]
+        detail = rows[0]["infrastructure_error"]
+        self.assertLessEqual(len(detail.encode("utf-8")), 4_096)
+        self.assertIn("inner-capture-failure", detail)
+        self.assertIn("outer-sysroot-cleanup", detail)
+        self.assertEqual(rows[0]["status"], "interrupted")
+        self.assertFalse(rows[-1]["complete"])
+
     def test_sysroot_snapshot_failure_remains_a_typed_prerequisite(self) -> None:
         test = self.make_test("pass-case")
         self.write_manifest((test,))
@@ -1143,6 +1418,19 @@ class CampaignTests(BaselineFixture, unittest.TestCase):
                 verifier=lambda _stage: None,
             )
 
+        rows = [
+            json.loads(line)
+            for line in self.results.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(
+            [row["record_type"] for row in rows], ["attempt", "run"]
+        )
+        self.assertEqual(rows[0]["status"], "launch-error")
+        self.assertEqual(rows[0]["launch_status"], "launch-error")
+        self.assertIsNone(rows[0]["pts_status"])
+        self.assertIsNone(rows[0]["infrastructure_error"])
+        self.assertFalse(rows[-1]["complete"])
+
     def test_private_sysroot_mutation_marks_campaign_incomplete(self) -> None:
         test = self.make_test("mutate-snapshot")
         self.write_manifest((test,))
@@ -1160,7 +1448,15 @@ class CampaignTests(BaselineFixture, unittest.TestCase):
             json.loads(line)
             for line in self.results.read_text(encoding="utf-8").splitlines()
         ]
+        self.assertEqual(
+            [row["record_type"] for row in rows], ["attempt", "run"]
+        )
+        self.assertEqual(rows[0]["status"], "interrupted")
+        self.assertEqual(rows[0]["launch_status"], "launched")
+        self.assertEqual(rows[0]["pts_status"], "pass")
+        self.assertIn("checksum mismatch", rows[0]["infrastructure_error"])
         self.assertFalse(rows[-1]["complete"])
+        self.assertEqual(rows[-1]["status_counts"], {"interrupted": 1})
 
     def test_private_sysroot_file_mode_mutation_marks_campaign_incomplete(self) -> None:
         test = self.make_test("chmod-snapshot-file")
@@ -1404,6 +1700,13 @@ class CampaignTests(BaselineFixture, unittest.TestCase):
         self.assertEqual(rows[-1]["status_counts"], {"fail": 1, "pass": 1, "unsupported": 1})
         self.assertEqual(rows[0]["platform"], PLATFORM)
         self.assertEqual(rows[0]["source"], "qemu-user")
+        self.assertEqual(rows[0]["group"], "unistd")
+        self.assertEqual(rows[0]["api"], "getpid")
+        self.assertEqual(rows[0]["build_status"], "passed")
+        self.assertEqual(rows[0]["link_status"], "passed")
+        self.assertEqual(rows[0]["launch_status"], "launched")
+        self.assertEqual(rows[0]["pts_status"], "fail")
+        self.assertIsNone(rows[0]["infrastructure_error"])
         self.assertEqual(rows[0]["manifest_sha256"], rows[-1]["manifest_sha256"])
         self.assertFalse(
             any(
@@ -1414,6 +1717,35 @@ class CampaignTests(BaselineFixture, unittest.TestCase):
         for line in self.results.read_text(encoding="utf-8").splitlines(keepends=True):
             value = json.loads(line)
             self.assertEqual(line, json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+
+    def test_build_statuses_are_checksum_bound_to_staged_results(self) -> None:
+        test = self.make_test("pass-case")
+        self.write_manifest((test,))
+        build_results = self.stage / "build-results.ndjson"
+        rows = [
+            json.loads(line)
+            for line in build_results.read_text(encoding="utf-8").splitlines()
+        ]
+        rows[0]["stdout"] = "tampered build diagnostic"
+        build_results.write_text(
+            "".join(
+                json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                for row in rows
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "build results checksum mismatch"):
+            run_baseline(
+                self.stage,
+                self.sysroot,
+                self.results,
+                qemu=self.qemu,
+                verifier=lambda _stage: None,
+            )
+
+        self.assertFalse(self.observation.exists())
+        self.assertFalse(self.results.exists())
 
     def test_failed_verification_runs_nothing_and_preserves_existing_report(self) -> None:
         test = self.make_test("pass-case")
@@ -1439,7 +1771,9 @@ class CampaignTests(BaselineFixture, unittest.TestCase):
             self.make_test("pass-two"),
         )
         self.write_manifest(tests)
-        original = OSError(errno.EIO, "runtime capture failed")
+        original = OSError(
+            errno.EIO, "runtime capture failed " + "x" * 5_000
+        )
         real_run_attempt = baseline_module.run_runtime_attempt
         calls = 0
 
@@ -1467,10 +1801,57 @@ class CampaignTests(BaselineFixture, unittest.TestCase):
             json.loads(line)
             for line in self.results.read_text(encoding="utf-8").splitlines()
         ]
-        self.assertEqual([row["record_type"] for row in rows], ["attempt", "run"])
+        self.assertEqual(
+            [row["record_type"] for row in rows],
+            ["attempt", "attempt", "run"],
+        )
+        self.assertEqual(rows[1]["test_id"], tests[1].test_id)
+        self.assertEqual(rows[1]["status"], "interrupted")
+        self.assertEqual(rows[1]["launch_status"], "interrupted")
+        self.assertIsNone(rows[1]["pts_status"])
+        self.assertIn("runtime capture failed", rows[1]["infrastructure_error"])
+        self.assertLessEqual(
+            len(rows[1]["infrastructure_error"].encode("utf-8")), 4_096
+        )
+        self.assertTrue(
+            rows[1]["infrastructure_error"].endswith("\n...[truncated]")
+        )
         self.assertFalse(rows[-1]["complete"])
         self.assertEqual(rows[-1]["selected_count"], 2)
-        self.assertEqual(rows[-1]["completed_count"], 1)
+        self.assertEqual(rows[-1]["completed_count"], 2)
+
+    def test_post_execution_cleanup_retains_raw_pts_status(self) -> None:
+        test = self.make_test("pass-case")
+        self.write_manifest((test,))
+        original = ValueError("post-execution cleanup failed")
+
+        with mock.patch.object(
+            baseline_module._LinuxProcessTree,
+            "cleanup",
+            side_effect=original,
+        ):
+            with self.assertRaises(ValueError) as raised:
+                run_baseline(
+                    self.stage,
+                    self.sysroot,
+                    self.results,
+                    qemu=self.qemu,
+                    verifier=lambda _stage: None,
+                )
+
+        self.assertIs(raised.exception, original)
+        rows = [
+            json.loads(line)
+            for line in self.results.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(
+            [row["record_type"] for row in rows], ["attempt", "run"]
+        )
+        self.assertEqual(rows[0]["status"], "interrupted")
+        self.assertEqual(rows[0]["launch_status"], "launched")
+        self.assertEqual(rows[0]["pts_status"], "pass")
+        self.assertIn("cleanup failed", rows[0]["infrastructure_error"])
+        self.assertFalse(rows[-1]["complete"])
 
     def test_missing_runtime_prerequisite_fails_before_verification_or_output(self) -> None:
         test = self.make_test("pass-case")
@@ -1622,7 +2003,13 @@ class RuntimeAttemptModelTests(BaselineFixture, unittest.TestCase):
     def test_extended_metadata_participates_in_equality_hash_and_serialization(self) -> None:
         arguments = {
             "test_id": "a/test.c",
+            "group": "base",
+            "api": "test",
             "platform": PLATFORM,
+            "build_status": "passed",
+            "link_status": "passed",
+            "launch_status": "launch-error",
+            "pts_status": None,
             "status": "launch-error",
             "exit_code": None,
             "signal": None,

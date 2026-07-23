@@ -60,7 +60,13 @@ class BuildSummary:
 @dataclass(frozen=True)
 class RuntimeAttempt:
     test_id: str
+    group: str
+    api: str
     platform: str
+    build_status: str
+    link_status: str
+    launch_status: str
+    pts_status: str | None
     status: str
     exit_code: int | None
     signal: int | None
@@ -70,6 +76,7 @@ class RuntimeAttempt:
     stderr: str
     source: str
     launch_error: str | None = None
+    infrastructure_error: str | None = None
     stdout_bytes: int = 0
     stderr_bytes: int = 0
     stdout_truncated: bool = False
@@ -87,15 +94,22 @@ class RuntimeAttempt:
     def to_dict(self) -> dict[str, object]:
         """Return every core and finalized runtime field for persistence."""
         return {
+            "api": self.api,
             "binary_sha256": self.binary_sha256,
             "build_id": self.build_id,
             "build_results_sha256": self.build_results_sha256,
+            "build_status": self.build_status,
             "duration_ms": self.duration_ms,
             "exit_code": self.exit_code,
+            "group": self.group,
+            "infrastructure_error": self.infrastructure_error,
             "launch_error": self.launch_error,
+            "launch_status": self.launch_status,
+            "link_status": self.link_status,
             "manifest_sha256": self.manifest_sha256,
             "patch_sha256": self.patch_sha256,
             "platform": self.platform,
+            "pts_status": self.pts_status,
             "revision": self.revision,
             "runtime_snapshot_sha256": self.runtime_snapshot_sha256,
             "run_id": self.run_id,

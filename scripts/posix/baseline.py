@@ -27,11 +27,14 @@ from .build import (
     MAX_HOST_MANIFEST_BYTES,
     MAX_MANIFEST_BYTES,
     ManifestMetadata,
+    _build_results_digest,
+    _load_build_results,
     parse_manifest,
     sha256_file,
     verify_stage,
 )
 from .model import (
+    BuildResult,
     PTS_FAIL,
     PTS_PASS,
     PTS_UNRESOLVED,
@@ -52,6 +55,7 @@ _KILL_REAP_SECONDS = 1.0
 _SUPERVISOR_SHUTDOWN_SECONDS = 2.7
 _DIGEST_LENGTH = 64
 _SUPERVISOR_CONTROL_MAX_BYTES = 4096
+_INFRASTRUCTURE_ERROR_MAX_BYTES = 4096
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
 
@@ -71,10 +75,22 @@ class _Capture:
 
 
 @dataclass(frozen=True)
+class _RuntimeObservation:
+    returncode: int | None
+    timed_out: bool
+    stdout: _Capture
+    stderr: _Capture
+    launch_status: str
+    launch_error: str | None = None
+    infrastructure_error: str | None = None
+
+
+@dataclass(frozen=True)
 class _StageIdentity:
     metadata: ManifestMetadata
     tests: tuple[SuiteTest, ...]
     runtime: tuple[tuple[str, str], ...]
+    build_results: tuple[BuildResult, ...]
     manifest_data: bytes
     host_data: bytes
     build_id: str
@@ -316,6 +332,22 @@ def classify_status(
     }.get(returncode, "fail")
 
 
+def _pts_status(
+    returncode: int | None,
+    *,
+    timed_out: bool,
+    launch_error: str | None,
+) -> str | None:
+    if (
+        returncode is None
+        or returncode < 0
+        or timed_out
+        or launch_error is not None
+    ):
+        return None
+    return classify_status(returncode)
+
+
 def filter_runnable_tests(
     tests: Sequence[SuiteTest],
     *,
@@ -342,6 +374,20 @@ def _fit_utf8(data: bytes, maximum: int) -> str:
     while len(text.encode("utf-8")) > maximum:
         text = text[:-1]
     return text
+
+
+def _bounded_detail(
+    value: str, maximum: int = _INFRASTRUCTURE_ERROR_MAX_BYTES
+) -> str:
+    marker = b"\n...[truncated]"
+    data = value.encode("utf-8", errors="replace")
+    if len(data) <= maximum:
+        return data.decode("utf-8")
+    prefix_bytes = maximum - len(marker)
+    return (
+        _fit_utf8(data[:prefix_bytes], prefix_bytes)
+        + marker.decode("ascii")
+    )
 
 
 def _captured(data: bytearray, byte_count: int) -> _Capture:
@@ -703,6 +749,52 @@ def _parse_supervisor_control(data: bytes) -> dict[str, object] | None:
     return payload
 
 
+def _runtime_observation(
+    process: subprocess.Popen[bytes] | None,
+    qemu: str,
+    control_data: bytearray,
+    buffers: Mapping[str, bytearray],
+    counts: Mapping[str, int],
+    *,
+    timed_out: bool,
+) -> _RuntimeObservation | None:
+    if process is None or process.returncode is None:
+        return None
+    try:
+        control = _parse_supervisor_control(bytes(control_data))
+    except ValueError:
+        return None
+    if control is None:
+        return None
+    if control["kind"] == "launch_error":
+        error_number = control.get("errno")
+        if not isinstance(error_number, int):
+            error_number = errno.ENOENT
+        message = control.get("strerror")
+        if not isinstance(message, str):
+            message = os.strerror(error_number)
+        returncode = None
+        launch_status = "launch-error"
+        launch_error = _bounded_detail(f"{message}: {qemu}")
+    elif control["kind"] == "result":
+        value = control.get("returncode")
+        if not isinstance(value, int):
+            return None
+        returncode = value
+        launch_status = "launched"
+        launch_error = None
+    else:
+        return None
+    return _RuntimeObservation(
+        returncode=returncode,
+        timed_out=timed_out,
+        stdout=_captured(buffers["stdout"], counts["stdout"]),
+        stderr=_captured(buffers["stderr"], counts["stderr"]),
+        launch_status=launch_status,
+        launch_error=launch_error,
+    )
+
+
 def _run_captured(
     argv: Sequence[str],
     *,
@@ -719,6 +811,10 @@ def _run_captured(
     process: subprocess.Popen[bytes] | None = None
     control_stream: object | None = None
     selector: selectors.BaseSelector | None = None
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    counts = {"stdout": 0, "stderr": 0}
+    control_data = bytearray()
+    timed_out = False
     try:
         try:
             process = subprocess.Popen(
@@ -741,8 +837,6 @@ def _run_captured(
         assert process.stdout is not None and process.stderr is not None
         selector = selectors.DefaultSelector()
         streams: dict[int, object] = {}
-        buffers = {"stdout": bytearray(), "stderr": bytearray()}
-        counts = {"stdout": 0, "stderr": 0}
         for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
             descriptor = stream.fileno()
             os.set_blocking(descriptor, False)
@@ -751,12 +845,10 @@ def _run_captured(
         control_descriptor = control_stream.fileno()  # type: ignore[attr-defined]
         selector.register(control_descriptor, selectors.EVENT_READ, "control")
         streams[control_descriptor] = control_stream
-        control_data = bytearray()
         deadline = time.monotonic() + timeout_seconds
         terminate_deadline: float | None = None
         kill_deadline: float | None = None
         drain_deadline: float | None = None
-        timed_out = False
 
         def close_stream(descriptor: int) -> None:
             try:
@@ -884,6 +976,42 @@ def _run_captured(
                     process_tree.cleanup()
                 except BaseException as error:
                     cleanup_error = error
+        failure = cleanup_error if cleanup_error is not None else original
+        observation = _runtime_observation(
+            process,
+            str(argv[0]),
+            control_data,
+            buffers,
+            counts,
+            timed_out=timed_out,
+        )
+        if observation is not None and observation.launch_error is not None and (
+            cleanup_error is not None
+            or not isinstance(original, _ProcessLaunchError)
+        ):
+            cleanup_failure = (
+                cleanup_error if cleanup_error is not None else original
+            )
+            observation = replace(
+                observation,
+                infrastructure_error=_bounded_infrastructure_error(
+                    cleanup_failure
+                ),
+            )
+            prerequisite = BaselinePrerequisiteError(
+                observation.launch_error
+            )
+            setattr(
+                prerequisite,
+                "_smros_posix_runtime_observation",
+                observation,
+            )
+            raise prerequisite from cleanup_failure
+        if observation is not None:
+            try:
+                setattr(failure, "_smros_posix_runtime_observation", observation)
+            except BaseException:
+                pass
         if cleanup_error is not None:
             raise cleanup_error from original
         raise
@@ -997,6 +1125,8 @@ def run_runtime_attempt(
     qemu: Path,
     metadata: ManifestMetadata,
     build_id: str,
+    build_status: str,
+    link_status: str,
     run_id: str = "",
     runtime_snapshot_sha256: str = "",
 ) -> RuntimeAttempt:
@@ -1006,32 +1136,83 @@ def run_runtime_attempt(
     timed_out = False
     stdout = _Capture("", 0, False)
     stderr = _Capture("", 0, False)
-    with tempfile.TemporaryDirectory(prefix="smros-posix-baseline-") as temporary:
-        cwd = Path(temporary)
-        binary = _snapshot_binary(test, stage, cwd)
-        environment = {
-            "PATH": os.defpath,
-            "LANG": "C",
-            "LC_ALL": "C",
-            "TMPDIR": str(cwd),
-            "LD_LIBRARY_PATH": "/lib:/usr/lib",
-        }
-        try:
-            returncode, timed_out, stdout, stderr = _run_captured(
-                [str(qemu), "-L", str(sysroot.resolve()), str(binary)],
-                cwd=cwd,
-                env=environment,
-                timeout_seconds=test.timeout_ms / 1000.0,
+    attempt_observed = False
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="smros-posix-baseline-"
+        ) as temporary:
+            cwd = Path(temporary)
+            binary = _snapshot_binary(test, stage, cwd)
+            environment = {
+                "PATH": os.defpath,
+                "LANG": "C",
+                "LC_ALL": "C",
+                "TMPDIR": str(cwd),
+                "LD_LIBRARY_PATH": "/lib:/usr/lib",
+            }
+            try:
+                returncode, timed_out, stdout, stderr = _run_captured(
+                    [str(qemu), "-L", str(sysroot.resolve()), str(binary)],
+                    cwd=cwd,
+                    env=environment,
+                    timeout_seconds=test.timeout_ms / 1000.0,
+                )
+            except _ProcessLaunchError as failure:
+                error = failure.error
+                launch_error = _bounded_detail(
+                    f"{error.strerror or str(error)}: {qemu}"
+                )
+            attempt_observed = True
+    except BaseException as cleanup_error:
+        if not attempt_observed:
+            raise
+        launch_status = (
+            "launch-error" if launch_error is not None else "launched"
+        )
+        observation = _RuntimeObservation(
+            returncode=returncode,
+            timed_out=timed_out,
+            stdout=stdout,
+            stderr=stderr,
+            launch_status=launch_status,
+            launch_error=launch_error,
+            infrastructure_error=_bounded_infrastructure_error(
+                cleanup_error
+            ),
+        )
+        if launch_error is not None:
+            prerequisite = BaselinePrerequisiteError(launch_error)
+            setattr(
+                prerequisite,
+                "_smros_posix_runtime_observation",
+                observation,
             )
-        except _ProcessLaunchError as failure:
-            error = failure.error
-            launch_error = f"{error.strerror or str(error)}: {qemu}"
+            raise prerequisite from cleanup_error
+        try:
+            setattr(
+                cleanup_error,
+                "_smros_posix_runtime_observation",
+                observation,
+            )
+        except BaseException:
+            pass
+        raise
     duration_ms = max(0, int((time.monotonic() - started) * 1000))
     signum = -returncode if returncode is not None and returncode < 0 else None
     exit_code = returncode if returncode is not None and returncode >= 0 else None
     return RuntimeAttempt(
         test_id=test.test_id,
+        group=test.group,
+        api=test.api,
         platform=PLATFORM,
+        build_status=build_status,
+        link_status=link_status,
+        launch_status="launch-error" if launch_error is not None else "launched",
+        pts_status=_pts_status(
+            returncode,
+            timed_out=timed_out,
+            launch_error=launch_error,
+        ),
         status=classify_status(
             returncode, timed_out=timed_out, launch_error=launch_error
         ),
@@ -1043,6 +1224,109 @@ def run_runtime_attempt(
         stderr=stderr.text,
         source=SOURCE,
         launch_error=launch_error,
+        stdout_bytes=stdout.byte_count,
+        stderr_bytes=stderr.byte_count,
+        stdout_truncated=stdout.truncated,
+        stderr_truncated=stderr.truncated,
+        manifest_sha256=metadata.manifest_sha256,
+        build_results_sha256=metadata.build_results_sha256,
+        build_id=build_id,
+        revision=metadata.revision,
+        patch_sha256=metadata.patch_sha256,
+        smros_commit=metadata.smros_commit,
+        binary_sha256=test.sha256,
+        runtime_snapshot_sha256=runtime_snapshot_sha256,
+        run_id=run_id,
+    )
+
+
+def _bounded_infrastructure_error(error: BaseException) -> str:
+    return _bounded_detail(f"{type(error).__name__}: {error}")
+
+
+def _combined_infrastructure_error(
+    current: str | None, error: BaseException
+) -> str:
+    detail = _bounded_infrastructure_error(error)
+    if current is None:
+        return detail
+    content_bytes = _INFRASTRUCTURE_ERROR_MAX_BYTES - 1
+    current_bytes = content_bytes // 2
+    detail_bytes = content_bytes - current_bytes
+    return (
+        _bounded_detail(current, current_bytes)
+        + "\n"
+        + _bounded_detail(detail, detail_bytes)
+    )
+
+
+def _interrupted_attempt(
+    test: SuiteTest,
+    *,
+    metadata: ManifestMetadata,
+    build_id: str,
+    build_status: str,
+    link_status: str,
+    run_id: str,
+    runtime_snapshot_sha256: str,
+    started: float,
+    error: BaseException,
+) -> RuntimeAttempt:
+    observation = getattr(
+        error, "_smros_posix_runtime_observation", None
+    )
+    if not isinstance(observation, _RuntimeObservation):
+        observation = None
+    returncode = observation.returncode if observation is not None else None
+    launch_status = (
+        observation.launch_status if observation is not None else "interrupted"
+    )
+    launch_error = (
+        observation.launch_error if observation is not None else None
+    )
+    signum = -returncode if returncode is not None and returncode < 0 else None
+    exit_code = (
+        returncode if returncode is not None and returncode >= 0 else None
+    )
+    timed_out = observation.timed_out if observation is not None else False
+    stdout = (
+        observation.stdout
+        if observation is not None
+        else _Capture("", 0, False)
+    )
+    stderr = (
+        observation.stderr
+        if observation is not None
+        else _Capture("", 0, False)
+    )
+    infrastructure_error = (
+        observation.infrastructure_error
+        if observation is not None
+        else None
+    ) or _bounded_infrastructure_error(error)
+    return RuntimeAttempt(
+        test_id=test.test_id,
+        group=test.group,
+        api=test.api,
+        platform=PLATFORM,
+        build_status=build_status,
+        link_status=link_status,
+        launch_status=launch_status,
+        pts_status=_pts_status(
+            returncode,
+            timed_out=timed_out,
+            launch_error=launch_error,
+        ),
+        status="launch-error" if launch_error is not None else "interrupted",
+        exit_code=exit_code,
+        signal=signum,
+        timed_out=timed_out,
+        duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+        stdout=stdout.text,
+        stderr=stderr.text,
+        source=SOURCE,
+        launch_error=launch_error,
+        infrastructure_error=infrastructure_error,
         stdout_bytes=stdout.byte_count,
         stderr_bytes=stderr.byte_count,
         stdout_truncated=stdout.truncated,
@@ -1177,6 +1461,11 @@ def _load_stage_identity(stage: Path) -> _StageIdentity:
             raise ValueError(f"invalid runtime entry: {relative}")
         seen.add(relative)
         runtime.append((relative, digest))
+    build_results = _load_build_results(
+        stage / "build-results.ndjson", tests
+    )
+    if _build_results_digest(build_results) != metadata.build_results_sha256:
+        raise ValueError("build results checksum mismatch")
     provenance = {
         "build_results_sha256": metadata.build_results_sha256,
         "manifest_sha256": metadata.manifest_sha256,
@@ -1191,6 +1480,7 @@ def _load_stage_identity(stage: Path) -> _StageIdentity:
         metadata=metadata,
         tests=tests,
         runtime=tuple(runtime),
+        build_results=build_results,
         manifest_data=manifest_data,
         host_data=host_data,
         build_id=build_id,
@@ -1812,6 +2102,7 @@ def run_baseline(
     if (
         verified_identity.manifest_data != identity.manifest_data
         or verified_identity.host_data != identity.host_data
+        or verified_identity.build_results != identity.build_results
     ):
         raise ValueError("stage provenance changed during verification")
     _validate_prerequisites(stage, sysroot, verified_identity)
@@ -1819,38 +2110,114 @@ def run_baseline(
         verified_identity.tests, api=api, group=group, test_id=test_id
     )
     _validate_selected(stage, selected)
-    with tempfile.TemporaryDirectory(
-        prefix="smros-posix-sysroot-"
-    ) as sysroot_temporary:
-        execution_sysroot = Path(sysroot_temporary)
-        runtime_snapshot_sha256 = _snapshot_prerequisites(
-            sysroot, execution_sysroot, verified_identity
-        )
-        _verify_sysroot_snapshot(execution_sysroot, verified_identity)
-        verified_identity = _bind_runtime_snapshot(
-            verified_identity, runtime_snapshot_sha256
-        )
-        run_id = secrets.token_hex(16)
-        attempts: list[RuntimeAttempt] = []
-        try:
-            for test in selected:
-                _validate_selected(stage, (test,))
-                _verify_sysroot_snapshot(execution_sysroot, verified_identity)
-                attempt = run_runtime_attempt(
-                    test,
-                    stage=stage,
-                    sysroot=execution_sysroot,
-                    qemu=qemu_path,
-                    metadata=verified_identity.metadata,
-                    build_id=verified_identity.build_id,
-                    run_id=run_id,
-                    runtime_snapshot_sha256=runtime_snapshot_sha256,
-                )
-                if attempt.launch_error is not None:
-                    raise BaselinePrerequisiteError(attempt.launch_error)
-                attempts.append(attempt)
-                _verify_sysroot_snapshot(execution_sysroot, verified_identity)
-        except BaseException:
+    attempts: list[RuntimeAttempt] = []
+    run_id = ""
+    runtime_snapshot_sha256 = ""
+    campaign_succeeded = False
+    pending_error: BaseException | None = None
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="smros-posix-sysroot-"
+        ) as sysroot_temporary:
+            execution_sysroot = Path(sysroot_temporary)
+            runtime_snapshot_sha256 = _snapshot_prerequisites(
+                sysroot, execution_sysroot, verified_identity
+            )
+            _verify_sysroot_snapshot(execution_sysroot, verified_identity)
+            verified_identity = _bind_runtime_snapshot(
+                verified_identity, runtime_snapshot_sha256
+            )
+            run_id = secrets.token_hex(16)
+            build_statuses = {
+                (result.test_id, result.stage): result.status
+                for result in verified_identity.build_results
+            }
+            try:
+                for test in selected:
+                    started = time.monotonic()
+                    build_status = build_statuses[(test.test_id, "compile")]
+                    link_status = build_statuses[(test.test_id, "link")]
+                    active_index: int | None = None
+                    try:
+                        _validate_selected(stage, (test,))
+                        _verify_sysroot_snapshot(
+                            execution_sysroot, verified_identity
+                        )
+                        attempt = run_runtime_attempt(
+                            test,
+                            stage=stage,
+                            sysroot=execution_sysroot,
+                            qemu=qemu_path,
+                            metadata=verified_identity.metadata,
+                            build_id=verified_identity.build_id,
+                            build_status=build_status,
+                            link_status=link_status,
+                            run_id=run_id,
+                            runtime_snapshot_sha256=(
+                                runtime_snapshot_sha256
+                            ),
+                        )
+                        attempts.append(attempt)
+                        active_index = len(attempts) - 1
+                        if attempt.launch_error is not None:
+                            raise BaselinePrerequisiteError(
+                                attempt.launch_error
+                            )
+                        _verify_sysroot_snapshot(
+                            execution_sysroot, verified_identity
+                        )
+                    except BaseException as error:
+                        if active_index is None:
+                            attempts.append(
+                                _interrupted_attempt(
+                                    test,
+                                    metadata=verified_identity.metadata,
+                                    build_id=verified_identity.build_id,
+                                    build_status=build_status,
+                                    link_status=link_status,
+                                    run_id=run_id,
+                                    runtime_snapshot_sha256=(
+                                        runtime_snapshot_sha256
+                                    ),
+                                    started=started,
+                                    error=error,
+                                )
+                            )
+                        elif attempts[active_index].launch_error is None:
+                            attempts[active_index] = replace(
+                                attempts[active_index],
+                                status="interrupted",
+                                infrastructure_error=(
+                                    _bounded_infrastructure_error(error)
+                                ),
+                            )
+                        raise
+            except BaseException as error:
+                pending_error = error
+                try:
+                    _publish_report(
+                        result_path,
+                        verified_identity,
+                        selected,
+                        attempts,
+                        qemu_path,
+                        sysroot,
+                        run_id,
+                        complete=False,
+                    )
+                except BaseException:
+                    pass
+                raise
+            campaign_succeeded = True
+    except BaseException as error:
+        if campaign_succeeded:
+            attempts[-1] = replace(
+                attempts[-1],
+                status="interrupted",
+                infrastructure_error=_combined_infrastructure_error(
+                    attempts[-1].infrastructure_error, error
+                ),
+            )
             try:
                 _publish_report(
                     result_path,
@@ -1864,22 +2231,43 @@ def run_baseline(
                 )
             except BaseException:
                 pass
-            raise
-        _publish_report(
-            result_path,
-            verified_identity,
-            selected,
-            attempts,
-            qemu_path,
-            sysroot,
-            run_id,
-            complete=True,
-        )
-        frozen_attempts = tuple(attempts)
-        return BaselineResult(
-            attempts=frozen_attempts,
-            all_passed=all(
-                attempt.status == "pass" for attempt in frozen_attempts
-            ),
-            result_path=result_path,
-        )
+        elif pending_error is not None and error is not pending_error:
+            attempts[-1] = replace(
+                attempts[-1],
+                infrastructure_error=_combined_infrastructure_error(
+                    attempts[-1].infrastructure_error, error
+                ),
+            )
+            try:
+                _publish_report(
+                    result_path,
+                    verified_identity,
+                    selected,
+                    attempts,
+                    qemu_path,
+                    sysroot,
+                    run_id,
+                    complete=False,
+                )
+            except BaseException:
+                pass
+            raise pending_error from error
+        raise
+    _publish_report(
+        result_path,
+        verified_identity,
+        selected,
+        attempts,
+        qemu_path,
+        sysroot,
+        run_id,
+        complete=True,
+    )
+    frozen_attempts = tuple(attempts)
+    return BaselineResult(
+        attempts=frozen_attempts,
+        all_passed=all(
+            attempt.status == "pass" for attempt in frozen_attempts
+        ),
+        result_path=result_path,
+    )
