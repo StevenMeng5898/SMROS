@@ -8,8 +8,9 @@ suite and targets IEEE Std 1003.1-2001 System Interfaces.
 licensed under GPLv2 (`GPL-2.0-only`), and a checkout is valid only when its
 `COPYING` file is present.
 
-The generated checkout lives below `target/posix` and is not vendored into
-this repository.
+By default, the generated checkout lives below `target/posix`; `--work-dir`
+may select another generated location. The checkout is not vendored into this
+repository.
 
 ## Patches
 
