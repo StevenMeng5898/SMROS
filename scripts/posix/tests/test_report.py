@@ -1021,7 +1021,9 @@ class RendererTests(ReportFixture, unittest.TestCase):
             output_directory=self.output,
         )
 
-        self.assertEqual(set(path.name for path in self.output.iterdir()), set(OUTPUT_NAMES))
+        self.assertEqual(
+            set(path.name for path in self.output.iterdir()), set(OUTPUT_NAMES)
+        )
         persisted = json.loads((self.output / "summary.json").read_text(encoding="utf-8"))
         self.assertEqual(persisted, summary)
         events = [
@@ -1052,7 +1054,9 @@ class RendererTests(ReportFixture, unittest.TestCase):
             smros_results=(self.smros_results,),
             output_directory=self.output,
         )
-        self.assertEqual(set(path.name for path in self.output.iterdir()), set(OUTPUT_NAMES))
+        self.assertEqual(
+            set(path.name for path in self.output.iterdir()), set(OUTPUT_NAMES)
+        )
 
         outside = self.root / "outside"
         outside.mkdir()
@@ -1066,6 +1070,174 @@ class RendererTests(ReportFixture, unittest.TestCase):
             )
         self.assertEqual(list(outside.iterdir()), [])
 
+    def test_initial_publication_rejects_a_concurrently_created_destination(
+        self,
+    ) -> None:
+        stat_call = report_module.os.stat
+        replacement_identity: tuple[int, int] | None = None
+
+        def create_destination_after_missing(
+            path: object,
+            *args: object,
+            **kwargs: object,
+        ) -> os.stat_result:
+            nonlocal replacement_identity
+            try:
+                return stat_call(path, *args, **kwargs)
+            except FileNotFoundError:
+                parent = kwargs.get("dir_fd")
+                if (
+                    path == self.output.name
+                    and isinstance(parent, int)
+                    and replacement_identity is None
+                ):
+                    os.mkdir(self.output.name, 0o700, dir_fd=parent)
+                    descriptor = os.open(
+                        self.output.name,
+                        os.O_RDONLY | os.O_DIRECTORY,
+                        dir_fd=parent,
+                    )
+                    try:
+                        info = os.fstat(descriptor)
+                        replacement_identity = (info.st_dev, info.st_ino)
+                    finally:
+                        os.close(descriptor)
+                raise
+
+        with mock.patch.object(
+            report_module.os,
+            "stat",
+            side_effect=create_destination_after_missing,
+        ):
+            with self.assertRaisesRegex(ValueError, "concurrent destination"):
+                generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(self.smros_results,),
+                    output_directory=self.output,
+                )
+
+        output_info = self.output.stat()
+        self.assertEqual(
+            (output_info.st_dev, output_info.st_ino), replacement_identity
+        )
+        self.assertEqual(list(self.output.iterdir()), [])
+
+        generate_report(
+            self.stage / "manifest.json",
+            smros_results=(self.smros_results,),
+            output_directory=self.output,
+        )
+        self.assertEqual(
+            set(path.name for path in self.output.iterdir()), set(OUTPUT_NAMES)
+        )
+
+    def test_completed_initial_rename_is_not_cleared_when_wrapper_raises(
+        self,
+    ) -> None:
+        rename_noreplace = report_module._rename_noreplace
+
+        def rename_then_raise(
+            source_parent: int,
+            source_name: str,
+            destination_parent: int,
+            destination_name: str,
+        ) -> None:
+            rename_noreplace(
+                source_parent,
+                source_name,
+                destination_parent,
+                destination_name,
+            )
+            raise OSError("failure after completed rename")
+
+        with mock.patch.object(
+            report_module,
+            "_rename_noreplace",
+            side_effect=rename_then_raise,
+        ):
+            with self.assertRaisesRegex(OSError, "after completed rename"):
+                generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(self.smros_results,),
+                    output_directory=self.output,
+                )
+
+        self.assertEqual(
+            set(path.name for path in self.output.iterdir()), set(OUTPUT_NAMES)
+        )
+
+    def test_publication_does_not_unlink_a_post_validation_replacement(
+        self,
+    ) -> None:
+        self.output.mkdir()
+        (self.output / "prior.txt").write_text("prior", encoding="utf-8")
+        entry_matches = report_module._directory_entry_matches
+        published = False
+        replacement_identity: tuple[int, int] | None = None
+        replacement_path: Path | None = None
+
+        def replace_after_empty_identity_check(
+            parent: int,
+            name: str,
+            descriptor: int,
+        ) -> bool:
+            nonlocal published, replacement_identity, replacement_path
+            result = entry_matches(parent, name, descriptor)
+            if (
+                result
+                and name == self.output.name
+                and set(os.listdir(descriptor)) == set(OUTPUT_NAMES)
+            ):
+                published = True
+            elif (
+                result
+                and published
+                and replacement_identity is None
+                and not os.listdir(descriptor)
+            ):
+                parent_path = Path(os.readlink(f"/proc/self/fd/{parent}"))
+                os.rename(
+                    name,
+                    "owned-report-moved",
+                    src_dir_fd=parent,
+                    dst_dir_fd=parent,
+                )
+                os.mkdir(name, 0o700, dir_fd=parent)
+                replacement = os.open(
+                    name,
+                    os.O_RDONLY | os.O_DIRECTORY,
+                    dir_fd=parent,
+                )
+                try:
+                    info = os.fstat(replacement)
+                    replacement_identity = (info.st_dev, info.st_ino)
+                finally:
+                    os.close(replacement)
+                replacement_path = parent_path / name
+            return result
+
+        with mock.patch.object(
+            report_module,
+            "_directory_entry_matches",
+            side_effect=replace_after_empty_identity_check,
+        ):
+            with self.assertRaisesRegex(ValueError, "work root changed during cleanup"):
+                generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(self.smros_results,),
+                    output_directory=self.output,
+                )
+
+        self.assertIsNotNone(replacement_path)
+        assert replacement_path is not None
+        replacement_info = replacement_path.stat()
+        self.assertEqual(
+            (replacement_info.st_dev, replacement_info.st_ino),
+            replacement_identity,
+        )
+        self.assertEqual(list(replacement_path.iterdir()), [])
+        self.assertEqual(set(path.name for path in self.output.iterdir()), set(OUTPUT_NAMES))
+
     def test_publication_rolls_back_raced_destination_without_deleting_it(self) -> None:
         self.output.mkdir()
         (self.output / "prior.txt").write_text("prior", encoding="utf-8")
@@ -1074,17 +1246,22 @@ class RendererTests(ReportFixture, unittest.TestCase):
         replacement_identity: tuple[int, int] | None = None
         exchange_count = 0
 
-        def race_then_exchange(parent: int, first: str, second: str) -> None:
+        def race_then_exchange(
+            source_parent: int,
+            first: str,
+            destination_parent: int,
+            second: str,
+        ) -> None:
             nonlocal exchange_count, replacement_identity
             exchange_count += 1
             if exchange_count == 1:
                 os.rename(
                     second,
                     prior_name,
-                    src_dir_fd=parent,
-                    dst_dir_fd=parent,
+                    src_dir_fd=destination_parent,
+                    dst_dir_fd=destination_parent,
                 )
-                os.mkdir(second, 0o700, dir_fd=parent)
+                os.mkdir(second, 0o700, dir_fd=destination_parent)
                 replacement = self.output / "nested"
                 replacement.mkdir()
                 (replacement / "keep.txt").write_text(
@@ -1092,7 +1269,7 @@ class RendererTests(ReportFixture, unittest.TestCase):
                 )
                 info = self.output.stat()
                 replacement_identity = (info.st_dev, info.st_ino)
-            real_exchange(parent, first, second)
+            real_exchange(source_parent, first, destination_parent, second)
 
         with mock.patch.object(
             report_module, "_rename_exchange", side_effect=race_then_exchange
@@ -1119,6 +1296,13 @@ class RendererTests(ReportFixture, unittest.TestCase):
         self.assertEqual(exchange_count, 2)
         self.assertEqual(list(self.root.glob(".report.*.tmp")), [])
 
+        generate_report(
+            self.stage / "manifest.json",
+            smros_results=(self.smros_results,),
+            output_directory=self.output,
+        )
+        self.assertEqual(set(path.name for path in self.output.iterdir()), set(OUTPUT_NAMES))
+
     def test_publication_reports_rollback_failure_without_deleting_replacement(
         self,
     ) -> None:
@@ -1129,17 +1313,22 @@ class RendererTests(ReportFixture, unittest.TestCase):
         replacement_identity: tuple[int, int] | None = None
         exchange_count = 0
 
-        def race_then_fail_rollback(parent: int, first: str, second: str) -> None:
+        def race_then_fail_rollback(
+            source_parent: int,
+            first: str,
+            destination_parent: int,
+            second: str,
+        ) -> None:
             nonlocal exchange_count, replacement_identity
             exchange_count += 1
             if exchange_count == 1:
                 os.rename(
                     second,
                     prior_name,
-                    src_dir_fd=parent,
-                    dst_dir_fd=parent,
+                    src_dir_fd=destination_parent,
+                    dst_dir_fd=destination_parent,
                 )
-                os.mkdir(second, 0o700, dir_fd=parent)
+                os.mkdir(second, 0o700, dir_fd=destination_parent)
                 replacement = self.output / "nested"
                 replacement.mkdir()
                 (replacement / "keep.txt").write_text(
@@ -1147,7 +1336,7 @@ class RendererTests(ReportFixture, unittest.TestCase):
                 )
                 info = self.output.stat()
                 replacement_identity = (info.st_dev, info.st_ino)
-                real_exchange(parent, first, second)
+                real_exchange(source_parent, first, destination_parent, second)
                 return
             raise OSError("rollback refused")
 
@@ -1168,14 +1357,18 @@ class RendererTests(ReportFixture, unittest.TestCase):
         self.assertRegex(str(failures[0]), "changed during publication")
         self.assertRegex(str(failures[1]), "rollback refused")
         self.assertEqual(exchange_count, 2)
-        temporary_paths = list(self.root.glob(".report.*.tmp"))
-        self.assertEqual(len(temporary_paths), 1)
-        temporary_info = temporary_paths[0].stat()
+        work_root = (
+            self.root
+            / report_module._REPORT_QUARANTINE_NAME
+            / report_module._report_work_slot_name(self.output.name)
+            / report_module._REPORT_WORK_ROOT_NAME
+        )
+        temporary_info = work_root.stat()
         self.assertEqual(
             (temporary_info.st_dev, temporary_info.st_ino), replacement_identity
         )
         self.assertEqual(
-            (temporary_paths[0] / "nested/keep.txt").read_text(encoding="utf-8"),
+            (work_root / "nested/keep.txt").read_text(encoding="utf-8"),
             "replacement",
         )
         self.assertEqual(

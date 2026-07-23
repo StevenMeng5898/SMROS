@@ -7,12 +7,13 @@ import csv
 import ctypes
 from dataclasses import asdict, dataclass, fields
 import errno
+import fcntl
+import hashlib
 import html
 import io
 import json
 import os
 from pathlib import Path, PurePosixPath
-import secrets
 import stat
 from typing import Iterable, Mapping, Sequence
 import xml.etree.ElementTree as ET
@@ -55,6 +56,8 @@ LINUX_REFERENCE_SOURCE = "qemu-user"
 SMROS_PLATFORM = "smros-aarch64"
 SMROS_SOURCES = frozenset({"host-watchdog", "smros-qemu", "smros-serial"})
 SMROS_SERIAL_SOURCE = "smros-serial"
+_REPORT_QUARANTINE_NAME = ".smros-posix-report-quarantine"
+_REPORT_WORK_ROOT_NAME = "generation"
 _MAX_RUNTIME_RESULTS_BYTES = 128 * 1024 * 1024
 _MAX_RUNTIME_RESULT_LINE_BYTES = 512 * 1024
 _MAX_RUNTIME_ROWS = 32_768
@@ -1526,7 +1529,121 @@ def _directory_entry_matches(
     )
 
 
-def _rename_exchange(parent: int, first: str, second: str) -> None:
+def _require_private_directory(descriptor: int, label: str) -> None:
+    info = os.fstat(descriptor)
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise ValueError(f"{label} ownership or mode is unsafe")
+
+
+def _open_or_create_private_directory(
+    parent: int,
+    name: str,
+    label: str,
+) -> int:
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent)
+    except FileExistsError:
+        pass
+    descriptor = _open_directory_at(parent, name, label)
+    try:
+        _require_private_directory(descriptor, label)
+        if not _directory_entry_matches(parent, name, descriptor):
+            raise ValueError(f"{label} changed while being opened")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _require_empty_directory(descriptor: int, label: str) -> None:
+    with os.scandir(descriptor) as entries:
+        if next(entries, None) is not None:
+            raise ValueError(f"{label} must be empty before reuse")
+
+
+def _report_work_slot_name(destination_name: str) -> str:
+    digest = hashlib.sha256(os.fsencode(destination_name)).hexdigest()
+    return f"report-{digest}"
+
+
+def _open_report_work_slot(parent: int, destination_name: str) -> tuple[int, int]:
+    quarantine = _open_or_create_private_directory(
+        parent,
+        _REPORT_QUARANTINE_NAME,
+        "report quarantine",
+    )
+    slot: int | None = None
+    work: int | None = None
+    try:
+        slot_name = _report_work_slot_name(destination_name)
+        slot = _open_or_create_private_directory(
+            quarantine,
+            slot_name,
+            "report work slot",
+        )
+        fcntl.flock(slot, fcntl.LOCK_EX)
+        if not _directory_entry_matches(
+            parent, _REPORT_QUARANTINE_NAME, quarantine
+        ):
+            raise ValueError("report quarantine changed while locking work slot")
+        if not _directory_entry_matches(quarantine, slot_name, slot):
+            raise ValueError("report work slot changed while being locked")
+        work = _open_or_create_private_directory(
+            slot,
+            _REPORT_WORK_ROOT_NAME,
+            "report work root",
+        )
+        _require_empty_directory(work, "report work root")
+        os.fsync(parent)
+        os.fsync(quarantine)
+        os.fsync(slot)
+        return slot, work
+    except BaseException:
+        if work is not None:
+            os.close(work)
+        if slot is not None:
+            os.close(slot)
+        raise
+    finally:
+        os.close(quarantine)
+
+
+def _create_report_work_root(slot: int) -> int:
+    try:
+        os.mkdir(_REPORT_WORK_ROOT_NAME, 0o700, dir_fd=slot)
+    except FileExistsError as error:
+        raise ValueError("concurrent report work root appeared") from error
+    work = _open_directory_at(slot, _REPORT_WORK_ROOT_NAME, "report work root")
+    try:
+        _require_private_directory(work, "report work root")
+        _require_empty_directory(work, "report work root")
+        if not _directory_entry_matches(slot, _REPORT_WORK_ROOT_NAME, work):
+            raise ValueError("report work root changed while being created")
+        os.fsync(slot)
+        return work
+    except BaseException:
+        os.close(work)
+        raise
+
+
+def _reset_report_work_root(slot: int, work: int) -> None:
+    _clear_directory(work)
+    os.fchmod(work, 0o700)
+    os.fsync(work)
+    if not _directory_entry_matches(slot, _REPORT_WORK_ROOT_NAME, work):
+        raise ValueError("report work root changed during cleanup")
+    os.fsync(slot)
+    if not _directory_entry_matches(slot, _REPORT_WORK_ROOT_NAME, work):
+        raise ValueError("report work root changed during cleanup")
+
+
+def _rename_between(
+    source_parent: int,
+    source_name: str,
+    destination_parent: int,
+    destination_name: str,
+    flags: int,
+) -> None:
     renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
     if renameat2 is None:
         raise ValueError("atomic report directory replacement is unavailable")
@@ -1538,13 +1655,49 @@ def _rename_exchange(parent: int, first: str, second: str) -> None:
         ctypes.c_uint,
     )
     renameat2.restype = ctypes.c_int
-    if renameat2(parent, os.fsencode(first), parent, os.fsencode(second), 2) != 0:
+    if renameat2(
+        source_parent,
+        os.fsencode(source_name),
+        destination_parent,
+        os.fsencode(destination_name),
+        flags,
+    ) != 0:
         error_number = ctypes.get_errno()
         if error_number in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP}:
             raise ValueError(
                 "atomic report directory replacement is unavailable"
             )
-        raise OSError(error_number, os.strerror(error_number), second)
+        raise OSError(error_number, os.strerror(error_number), destination_name)
+
+
+def _rename_noreplace(
+    source_parent: int,
+    source_name: str,
+    destination_parent: int,
+    destination_name: str,
+) -> None:
+    _rename_between(
+        source_parent,
+        source_name,
+        destination_parent,
+        destination_name,
+        1,
+    )
+
+
+def _rename_exchange(
+    source_parent: int,
+    source_name: str,
+    destination_parent: int,
+    destination_name: str,
+) -> None:
+    _rename_between(
+        source_parent,
+        source_name,
+        destination_parent,
+        destination_name,
+        2,
+    )
 
 
 def _publish_generation(output_directory: Path, outputs: Mapping[str, bytes]) -> None:
@@ -1555,13 +1708,13 @@ def _publish_generation(output_directory: Path, outputs: Mapping[str, bytes]) ->
     parent = _open_directory_chain(
         output_directory.parent, "report output parent", create=True
     )
-    temporary_name = f".{output_directory.name}.{secrets.token_hex(8)}.tmp"
-    temporary: int | None = None
-    temporary_exists = False
+    slot: int | None = None
+    work: int | None = None
+    generated_in_slot = False
+    operation_error: BaseException | None = None
     try:
-        os.mkdir(temporary_name, 0o700, dir_fd=parent)
-        temporary_exists = True
-        temporary = _open_directory_at(parent, temporary_name, "temporary report")
+        slot, work = _open_report_work_slot(parent, output_directory.name)
+        generated_in_slot = True
         for name in OUTPUT_NAMES:
             descriptor = os.open(
                 name,
@@ -1571,14 +1724,14 @@ def _publish_generation(output_directory: Path, outputs: Mapping[str, bytes]) ->
                 | getattr(os, "O_CLOEXEC", 0)
                 | getattr(os, "O_NOFOLLOW", 0),
                 0o644,
-                dir_fd=temporary,
+                dir_fd=work,
             )
             try:
                 _write_all(descriptor, outputs[name])
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
-        os.fsync(temporary)
+        os.fsync(work)
         try:
             destination = os.stat(
                 output_directory.name, dir_fd=parent, follow_symlinks=False
@@ -1586,13 +1739,28 @@ def _publish_generation(output_directory: Path, outputs: Mapping[str, bytes]) ->
         except FileNotFoundError:
             destination = None
         if destination is None:
-            os.rename(
-                temporary_name,
-                output_directory.name,
-                src_dir_fd=parent,
-                dst_dir_fd=parent,
-            )
-            temporary_exists = False
+            try:
+                _rename_noreplace(
+                    slot,
+                    _REPORT_WORK_ROOT_NAME,
+                    parent,
+                    output_directory.name,
+                )
+            except FileExistsError as error:
+                raise ValueError(
+                    "concurrent destination appeared during report publication"
+                ) from error
+            except BaseException:
+                if _directory_entry_matches(parent, output_directory.name, work):
+                    generated_in_slot = False
+                raise
+            generated_in_slot = False
+            os.fsync(slot)
+            os.fsync(parent)
+            if not _directory_entry_matches(parent, output_directory.name, work):
+                raise ValueError("report output directory changed during publication")
+            replacement_work = _create_report_work_root(slot)
+            os.close(replacement_work)
         else:
             if stat.S_ISLNK(destination.st_mode):
                 raise ValueError("report output directory must not be a symlink")
@@ -1606,37 +1774,55 @@ def _publish_generation(output_directory: Path, outputs: Mapping[str, bytes]) ->
                     parent, output_directory.name, held_destination
                 ):
                     raise ValueError("report output directory changed before publication")
-                _rename_exchange(parent, temporary_name, output_directory.name)
+                try:
+                    _rename_exchange(
+                        slot,
+                        _REPORT_WORK_ROOT_NAME,
+                        parent,
+                        output_directory.name,
+                    )
+                except BaseException:
+                    if _directory_entry_matches(
+                        parent, output_directory.name, work
+                    ):
+                        generated_in_slot = False
+                    raise
+                generated_in_slot = False
+                os.fsync(slot)
                 os.fsync(parent)
                 if not _directory_entry_matches(
-                    parent, output_directory.name, temporary
+                    parent, output_directory.name, work
                 ):
                     raise ValueError("report output directory changed during publication")
                 if not _directory_entry_matches(
-                    parent, temporary_name, held_destination
+                    slot, _REPORT_WORK_ROOT_NAME, held_destination
                 ):
                     publication_error = ValueError(
                         "report output directory changed during publication"
                     )
                     displaced = os.stat(
-                        temporary_name,
-                        dir_fd=parent,
+                        _REPORT_WORK_ROOT_NAME,
+                        dir_fd=slot,
                         follow_symlinks=False,
                     )
                     displaced_identity = (displaced.st_dev, displaced.st_ino)
                     try:
                         if not _directory_entry_matches(
-                            parent, output_directory.name, temporary
+                            parent, output_directory.name, work
                         ):
                             raise ValueError(
                                 "generated report changed before publication rollback"
                             )
                         _rename_exchange(
-                            parent, temporary_name, output_directory.name
+                            slot,
+                            _REPORT_WORK_ROOT_NAME,
+                            parent,
+                            output_directory.name,
                         )
+                        os.fsync(slot)
                         os.fsync(parent)
                         if not _directory_entry_matches(
-                            parent, temporary_name, temporary
+                            slot, _REPORT_WORK_ROOT_NAME, work
                         ):
                             raise ValueError(
                                 "publication rollback did not restore the generated report"
@@ -1650,37 +1836,41 @@ def _publish_generation(output_directory: Path, outputs: Mapping[str, bytes]) ->
                             raise ValueError(
                                 "publication rollback did not restore the raced destination"
                             )
+                        generated_in_slot = True
                     except BaseException as rollback_error:
-                        raise ExceptionGroup(
+                        raise BaseExceptionGroup(
                             "report publication and rollback both failed",
                             [publication_error, rollback_error],
                         )
                     raise publication_error
-                _clear_directory(held_destination)
-                if not _directory_entry_matches(
-                    parent, temporary_name, held_destination
-                ):
-                    raise ValueError(
-                        "previous report changed during publication cleanup"
-                    )
-                os.rmdir(temporary_name, dir_fd=parent)
-                temporary_exists = False
+                _reset_report_work_root(slot, held_destination)
             finally:
                 os.close(held_destination)
         os.fsync(parent)
-    finally:
-        if temporary is not None:
-            if temporary_exists and _directory_entry_matches(
-                parent, temporary_name, temporary
-            ):
-                _clear_directory(temporary)
-                if _directory_entry_matches(parent, temporary_name, temporary):
-                    try:
-                        os.rmdir(temporary_name, dir_fd=parent)
-                    except FileNotFoundError:
-                        pass
-            os.close(temporary)
-        os.close(parent)
+    except BaseException as error:
+        operation_error = error
+    cleanup_error: BaseException | None = None
+    if work is not None and slot is not None and generated_in_slot:
+        try:
+            _reset_report_work_root(slot, work)
+        except BaseException as error:
+            cleanup_error = error
+    for descriptor in (work, slot, parent):
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+    if operation_error is not None:
+        if cleanup_error is not None:
+            raise BaseExceptionGroup(
+                "report publication and cleanup both failed",
+                [operation_error, cleanup_error],
+            )
+        raise operation_error
+    if cleanup_error is not None:
+        raise cleanup_error
 
 
 def _paths(value: Sequence[Path] | Path | None) -> tuple[Path, ...]:
