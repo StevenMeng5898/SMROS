@@ -1,0 +1,177 @@
+path	disposition	reason
+conformance/interfaces/clock/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/clock_getres/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/clock_getres/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/clock_gettime/6-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/clock_nanosleep/1-2.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/clock_nanosleep/15-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/clock_nanosleep/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/clock_nanosleep/5-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/clock_nanosleep/6-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/clock_nanosleep/8-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/clock_settime/15-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/clock_settime/16-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/clock_settime/18-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/clock_settime/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/difftime/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mlock/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mlock/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mlock/7-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mlockall/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mlockall/7-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mlockall/9-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mmap/16-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mmap/17-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mmap/20-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mq_getattr/1-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mq_getattr/5-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mq_getattr/6-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mq_notify/6-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mq_notify/7-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mq_receive/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mq_receive/9-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mq_setattr/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mq_setattr/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mq_timedreceive/12-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mq_timedreceive/16-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mq_timedreceive/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mq_unlink/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/mq_unlink/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/munlock/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/munlock/9-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/munlockall/6-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/munmap/10-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/munmap/7-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/nanosleep/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_atfork/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_attr_getdetachstate/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_attr_getinheritsched/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_attr_getschedparam/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_attr_getschedpolicy/1-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_attr_getschedpolicy/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_attr_getscope/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_attr_getstack/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_attr_getstacksize/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_attr_setdetachstate/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_attr_setinheritsched/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_attr_setschedparam/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_attr_setschedpolicy/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_attr_setscope/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_attr_setstack/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_attr_setstack/5-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_attr_setstacksize/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_barrier_destroy/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_barrier_init/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_barrier_wait/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_barrier_wait/5-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_barrierattr_destroy/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_barrierattr_getpshared/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_barrierattr_init/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_barrierattr_setpshared/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_cleanup_pop/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_cleanup_push/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_condattr_getclock/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_condattr_getpshared/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_create/13.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_getcpuclockid/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_key_delete/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_mutexattr_getprioceiling/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_mutexattr_getpshared/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_mutexattr_gettype/2.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_mutexattr_setprioceiling/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_mutexattr_setprotocol/2-2.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_mutexattr_settype/6-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_rwlock_destroy/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_rwlock_init/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_rwlock_rdlock/6-2.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_rwlock_timedrdlock/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_rwlock_timedrdlock/7-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_rwlock_timedwrlock/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_rwlock_timedwrlock/7-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_rwlock_tryrdlock/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_rwlock_tryrdlock/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_rwlock_trywrlock/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_rwlockattr_destroy/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_rwlockattr_getpshared/5-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_rwlockattr_init/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_rwlockattr_setpshared/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_setspecific/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_spin_destroy/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_spin_init/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_spin_lock/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_spin_trylock/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_spin_trylock/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/pthread_spin_unlock/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/sched_get_priority_max/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/sched_get_priority_min/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/sched_getparam/5-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/sched_getscheduler/6-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/sched_rr_get_interval/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/sched_setparam/11-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/sched_setparam/24-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/sched_setparam/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/sched_setscheduler/18-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/sched_setscheduler/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/sched_setscheduler/8-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/sched_yield/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/sem_close/cln.sh	helper	cleanup-only script removes semaphore artifacts and has no assertion
+conformance/interfaces/sem_destroy/cln.sh	helper	cleanup-only script removes semaphore artifacts and has no assertion
+conformance/interfaces/sem_getvalue/cln.sh	helper	cleanup-only script removes semaphore artifacts and has no assertion
+conformance/interfaces/sem_open/cln.sh	helper	cleanup-only script removes semaphore artifacts and has no assertion
+conformance/interfaces/sem_post/cln.sh	helper	cleanup-only script removes semaphore artifacts and has no assertion
+conformance/interfaces/sem_unlink/cln.sh	helper	cleanup-only script removes semaphore artifacts and has no assertion
+conformance/interfaces/sem_wait/cln.sh	helper	cleanup-only script removes semaphore artifacts and has no assertion
+conformance/interfaces/shm_open/13-2.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/shm_open/14-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/shm_open/30-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/shm_open/31-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/shm_open/35-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/shm_open/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/shm_unlink/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/shm_unlink/7-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/sigaddset/1-1.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigaddset/1-2.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigaddset/4-1.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigaddset/4-2.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigaddset/4-3.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigaddset/4-4.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigdelset/1-1.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigdelset/1-2.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigdelset/4-1.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigdelset/4-2.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigdelset/4-3.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigdelset/4-4.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sighold/3-1.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sighold/3-2.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sighold/3-3.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sighold/3-4.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigignore/5-1.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigignore/5-2.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigignore/5-3.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigignore/5-4.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigismember/5-1.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigismember/5-2.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigismember/5-3.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigismember/5-4.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigprocmask/17-1.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigprocmask/17-2.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigprocmask/17-3.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigprocmask/17-4.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigrelse/3-1.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigrelse/3-2.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigrelse/3-3.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigrelse/3-4.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/timer_create/13-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/timer_create/14-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/timer_create/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/timer_create/6-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/timer_delete/2-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/timer_delete/3-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/timer_delete/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/timer_getoverrun/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/timer_getoverrun/5-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/timer_gettime/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/timer_gettime/5-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/timer_settime/10-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/timer_settime/11-1.sh	test	script directly records the assertion as tested implicitly and exits success
+conformance/interfaces/timer_settime/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
