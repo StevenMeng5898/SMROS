@@ -62,7 +62,64 @@ def metadata() -> ManifestMetadata:
 
 
 def write_stage_fixture(stage: Path, test: SuiteTest) -> None:
-    manifest_text, _ = render_manifest(metadata(), (test,))
+    checkout = Path("target/posix/src") / ("8" * 40)
+    object_path = Path("target/posix/aarch64/obj") / f"{test.test_id}.o"
+    executable = Path("target/posix/aarch64/bin") / f"{test.test_id}.test"
+    build_results = (
+        BuildResult(
+            test_id=test.test_id,
+            stage="compile",
+            status="passed",
+            argv=tuple(
+                compile_command(
+                    "aarch64-linux-gnu-gcc",
+                    checkout / test.source,
+                    object_path,
+                    checkout / "include",
+                )
+            ),
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration_ms=1,
+            artifact_sha256="a" * 64,
+        ),
+        BuildResult(
+            test_id=test.test_id,
+            stage="nm",
+            status="passed",
+            argv=tuple(nm_command("aarch64-linux-gnu-nm", object_path)),
+            returncode=0,
+            stdout="00000000 T main\n",
+            stderr="",
+            duration_ms=1,
+            artifact_sha256=None,
+        ),
+        BuildResult(
+            test_id=test.test_id,
+            stage="link",
+            status="passed",
+            argv=tuple(
+                link_command("aarch64-linux-gnu-gcc", object_path, executable)
+            ),
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration_ms=1,
+            artifact_sha256=test.sha256,
+        ),
+    )
+    build_results_text = "".join(
+        json.dumps(asdict(result), sort_keys=True, separators=(",", ":")) + "\n"
+        for result in build_results
+    )
+    bound_metadata = replace(
+        metadata(),
+        build_results_sha256=hashlib.sha256(
+            build_results_text.encode("utf-8")
+        ).hexdigest(),
+    )
+    manifest_text, _ = render_manifest(bound_metadata, (test,))
     parsed_metadata, _ = parse_manifest(manifest_text.encode())
     host_manifest = {
         "schema": 1,
@@ -74,51 +131,13 @@ def write_stage_fixture(stage: Path, test: SuiteTest) -> None:
         "runtime": [],
         "tests": [asdict(test)],
     }
-    build_results = (
-        BuildResult(
-            test_id=test.test_id,
-            stage="compile",
-            status="passed",
-            argv=("aarch64-linux-gnu-gcc", "-c", test.source),
-            returncode=0,
-            stdout="",
-            stderr="",
-            duration_ms=1,
-            artifact_sha256="a" * 64,
-        ),
-        BuildResult(
-            test_id=test.test_id,
-            stage="nm",
-            status="passed",
-            argv=("aarch64-linux-gnu-nm", test.source),
-            returncode=0,
-            stdout="00000000 T main\n",
-            stderr="",
-            duration_ms=1,
-            artifact_sha256=None,
-        ),
-        BuildResult(
-            test_id=test.test_id,
-            stage="link",
-            status="passed",
-            argv=("aarch64-linux-gnu-gcc", "-o", test.binary or ""),
-            returncode=0,
-            stdout="",
-            stderr="",
-            duration_ms=1,
-            artifact_sha256=test.sha256,
-        ),
-    )
     (stage / "manifest.tsv").write_text(manifest_text, encoding="utf-8")
     (stage / "manifest.json").write_text(
         json.dumps(host_manifest, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
     (stage / "build-results.ndjson").write_text(
-        "".join(
-            json.dumps(asdict(result), sort_keys=True, separators=(",", ":")) + "\n"
-            for result in build_results
-        ),
+        build_results_text,
         encoding="utf-8",
     )
     if test.binary not in {None, "-"}:
@@ -343,6 +362,99 @@ class CampaignTests(unittest.TestCase):
         parsed_shell = next(test for test in parsed_tests if test.kind == "shell")
         self.assertEqual((parsed_shell.api, parsed_shell.group), ("getpid", "base"))
 
+    def test_definition_source_is_compile_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / "checkout"
+            definition = suite_test(
+                "conformance/definitions/unistd_h/1-1.c",
+                kind="definition",
+                disposition="definition-only",
+            )
+            source = checkout / definition.source
+            source.parent.mkdir(parents=True)
+            source.write_text("int declaration;\n", encoding="utf-8")
+            commands: list[list[str]] = []
+
+            def fake_run(argv: list[str], **_kwargs: object) -> object:
+                commands.append(list(argv))
+                output = Path(argv[argv.index("-o") + 1])
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"object")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            build_campaign(
+                checkout,
+                (definition,),
+                (),
+                metadata(),
+                root / "stage",
+                root / "work",
+                command_runner=fake_run,
+                dependency_stager=mock.Mock(return_value=()),
+            )
+            records = [
+                json.loads(line)
+                for line in (root / "stage/build-results.ndjson")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+        self.assertEqual(len(commands), 1)
+        self.assertEqual([record["stage"] for record in records], ["compile"])
+
+    def test_definition_verification_rejects_nm_record(self) -> None:
+        definition = replace(
+            suite_test(
+                "conformance/definitions/unistd_h/1-1.c",
+                kind="definition",
+                disposition="definition-only",
+            ),
+            binary="-",
+            sha256=EMPTY_SHA256,
+        )
+        compile_result = BuildResult(
+            test_id=definition.test_id,
+            stage="compile",
+            status="passed",
+            argv=tuple(
+                compile_command(
+                    "aarch64-linux-gnu-gcc",
+                    Path("checkout") / definition.source,
+                    Path("work") / f"{definition.test_id}.o",
+                    Path("checkout/include"),
+                )
+            ),
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration_ms=1,
+            artifact_sha256="a" * 64,
+        )
+        nm_result = replace(
+            compile_result,
+            stage="nm",
+            argv=tuple(
+                nm_command(
+                    "aarch64-linux-gnu-nm",
+                    Path("work") / f"{definition.test_id}.o",
+                )
+            ),
+            artifact_sha256=None,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "results.ndjson"
+            path.write_text(
+                "".join(
+                    json.dumps(asdict(result), sort_keys=True, separators=(",", ":"))
+                    + "\n"
+                    for result in (compile_result, nm_result)
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "definition.*nm"):
+                build_module._load_build_results(path, (definition,))
+
     def test_excluded_stub_keeps_disposition_when_compilation_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -367,7 +479,11 @@ class CampaignTests(unittest.TestCase):
             _metadata, tests = parse_manifest(
                 (root / "stage/manifest.tsv").read_bytes()
             )
-            verified = verify_stage(root / "stage", verify_architecture=False)
+            verified = verify_stage(
+                root / "stage",
+                verify_architecture=False,
+                expected_metadata=metadata(),
+            )
 
         self.assertEqual(summary.compile_fail, 1)
         self.assertEqual(tests[0].disposition, "excluded-upstream-stub")
@@ -508,6 +624,7 @@ class ManifestTests(unittest.TestCase):
             "compiler",
             "libc",
             "patch_sha256",
+            "build_results_sha256",
             "manifest_sha256",
             "smros_commit",
         ):
@@ -654,10 +771,14 @@ class StagingTests(unittest.TestCase):
             write_stage_fixture(stage, test)
 
             readelf = lambda _argv, **_kwargs: mock.Mock(returncode=0, stdout="Machine: AArch64", stderr="")
-            verify_stage(stage, readelf_runner=readelf)
+            verify_stage(
+                stage, readelf_runner=readelf, expected_metadata=metadata()
+            )
             binary.write_bytes(b"changed")
             with self.assertRaisesRegex(ValueError, "checksum"):
-                verify_stage(stage, readelf_runner=readelf)
+                verify_stage(
+                    stage, readelf_runner=readelf, expected_metadata=metadata()
+                )
 
     def test_verify_rejects_missing_runtime_dependency(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -685,7 +806,9 @@ class StagingTests(unittest.TestCase):
                 )
 
             with self.assertRaisesRegex(ValueError, "missing runtime"):
-                verify_stage(stage, readelf_runner=readelf)
+                verify_stage(
+                    stage, readelf_runner=readelf, expected_metadata=metadata()
+                )
 
     def test_verify_rejects_symlinked_binary_parent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -705,7 +828,11 @@ class StagingTests(unittest.TestCase):
             write_stage_fixture(stage, test)
 
             with self.assertRaisesRegex(ValueError, "symlink"):
-                verify_stage(stage, verify_architecture=False)
+                verify_stage(
+                    stage,
+                    verify_architecture=False,
+                    expected_metadata=metadata(),
+                )
 
     def test_verify_rejects_changed_runtime_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -743,7 +870,11 @@ class StagingTests(unittest.TestCase):
             (root / "stage/lib/libc.so.6").write_bytes(b"changed")
 
             with self.assertRaisesRegex(ValueError, "runtime checksum"):
-                verify_stage(root / "stage", verify_architecture=False)
+                verify_stage(
+                    root / "stage",
+                    verify_architecture=False,
+                    expected_metadata=metadata(),
+                )
 
     def test_verify_rejects_tampered_host_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -765,7 +896,11 @@ class StagingTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "host manifest"):
-                verify_stage(stage, verify_architecture=False)
+                verify_stage(
+                    stage,
+                    verify_architecture=False,
+                    expected_metadata=metadata(),
+                )
 
     def test_verify_rejects_nonexecutable_runnable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -782,7 +917,11 @@ class StagingTests(unittest.TestCase):
             binary.chmod(0o644)
 
             with self.assertRaisesRegex(ValueError, "mode"):
-                verify_stage(stage, verify_architecture=False)
+                verify_stage(
+                    stage,
+                    verify_architecture=False,
+                    expected_metadata=metadata(),
+                )
 
     def test_verify_rejects_incomplete_build_results(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -799,7 +938,151 @@ class StagingTests(unittest.TestCase):
             (stage / "build-results.ndjson").write_text("", encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "build result"):
-                verify_stage(stage, verify_architecture=False)
+                verify_stage(
+                    stage,
+                    verify_architecture=False,
+                    expected_metadata=metadata(),
+                )
+
+    def test_verify_rejects_build_result_checksum_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            binary = stage / "bin/conformance/interfaces/getpid/1-1.c.test"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"elf")
+            test = replace(
+                suite_test(),
+                binary="bin/conformance/interfaces/getpid/1-1.c.test",
+                sha256=hashlib.sha256(b"elf").hexdigest(),
+            )
+            write_stage_fixture(stage, test)
+            rows = [
+                json.loads(line)
+                for line in (stage / "build-results.ndjson")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            rows[0]["stdout"] = "tampered"
+            (stage / "build-results.ndjson").write_text(
+                "".join(
+                    json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                    for row in rows
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "build results checksum"):
+                verify_stage(
+                    stage,
+                    verify_architecture=False,
+                    expected_metadata=metadata(),
+                )
+
+    def test_build_result_validation_rejects_host_nm(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            binary = stage / "bin/conformance/interfaces/getpid/1-1.c.test"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"elf")
+            test = replace(
+                suite_test(),
+                binary="bin/conformance/interfaces/getpid/1-1.c.test",
+                sha256=hashlib.sha256(b"elf").hexdigest(),
+            )
+            write_stage_fixture(stage, test)
+            path = stage / "build-results.ndjson"
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            nm_row = next(row for row in rows if row["stage"] == "nm")
+            nm_row["argv"][0] = "nm"
+            path.write_text(
+                "".join(
+                    json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                    for row in rows
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "target nm"):
+                build_module._load_build_results(path, (test,))
+
+    def test_build_result_validation_rejects_missing_compile_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            binary = stage / "bin/conformance/interfaces/getpid/1-1.c.test"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"elf")
+            test = replace(
+                suite_test(),
+                binary="bin/conformance/interfaces/getpid/1-1.c.test",
+                sha256=hashlib.sha256(b"elf").hexdigest(),
+            )
+            write_stage_fixture(stage, test)
+            path = stage / "build-results.ndjson"
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            compile_row = next(row for row in rows if row["stage"] == "compile")
+            compile_row["argv"].remove("-std=gnu99")
+            path.write_text(
+                "".join(
+                    json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                    for row in rows
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "target compiler"):
+                build_module._load_build_results(path, (test,))
+
+    def test_strict_build_result_validation_rejects_wrong_source_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            binary = stage / "bin/conformance/interfaces/getpid/1-1.c.test"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"elf")
+            test = replace(
+                suite_test(),
+                binary="bin/conformance/interfaces/getpid/1-1.c.test",
+                sha256=hashlib.sha256(b"elf").hexdigest(),
+            )
+            write_stage_fixture(stage, test)
+            path = stage / "build-results.ndjson"
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            compile_row = next(row for row in rows if row["stage"] == "compile")
+            compile_row["argv"][8] = f"/tmp/untrusted/{test.source}"
+            path.write_text(
+                "".join(
+                    json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                    for row in rows
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "production compiler path"):
+                build_module._load_build_results(
+                    path,
+                    (test,),
+                    strict_paths=True,
+                    revision="8" * 40,
+                )
+
+    def test_verify_rejects_stale_expected_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            binary = stage / "bin/conformance/interfaces/getpid/1-1.c.test"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"elf")
+            test = replace(
+                suite_test(),
+                binary="bin/conformance/interfaces/getpid/1-1.c.test",
+                sha256=hashlib.sha256(b"elf").hexdigest(),
+            )
+            write_stage_fixture(stage, test)
+
+            with self.assertRaisesRegex(ValueError, "metadata.*current"):
+                verify_stage(
+                    stage,
+                    verify_architecture=False,
+                    expected_metadata=replace(metadata(), revision="9" * 40),
+                )
 
     def test_verify_rejects_unmanifested_stage_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -816,7 +1099,11 @@ class StagingTests(unittest.TestCase):
             (stage / "bin/extra.test").write_bytes(b"extra")
 
             with self.assertRaisesRegex(ValueError, "binary inventory"):
-                verify_stage(stage, verify_architecture=False)
+                verify_stage(
+                    stage,
+                    verify_architecture=False,
+                    expected_metadata=metadata(),
+                )
 
     def test_verify_rejects_unmanifested_root_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -833,7 +1120,11 @@ class StagingTests(unittest.TestCase):
             (stage / "extra.txt").write_text("extra\n", encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "stage file inventory"):
-                verify_stage(stage, verify_architecture=False)
+                verify_stage(
+                    stage,
+                    verify_architecture=False,
+                    expected_metadata=metadata(),
+                )
 
     def test_verify_rejects_link_result_that_contradicts_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -863,7 +1154,9 @@ class StagingTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "contradict"):
-                verify_stage(stage, verify_architecture=False)
+                build_module._load_build_results(
+                    stage / "build-results.ndjson", (test,)
+                )
 
     def test_default_stage_readelf_uses_bounded_runner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -885,7 +1178,7 @@ class StagingTests(unittest.TestCase):
             with mock.patch(
                 "scripts.posix.build.run_bounded_command", side_effect=readelf
             ) as run:
-                verify_stage(stage)
+                verify_stage(stage, expected_metadata=metadata())
             self.assertGreaterEqual(run.call_count, 2)
 
     def test_existing_stage_publication_uses_atomic_directory_exchange(self) -> None:
@@ -919,6 +1212,28 @@ class CliTests(unittest.TestCase):
         with mock.patch("sys.stderr", stderr):
             result = cli.main(["build", "--arch", "x86_64", "--stage", "stage"])
         self.assertEqual(result, 1)
+
+    def test_verify_only_supplies_current_expected_metadata(self) -> None:
+        expected = metadata()
+        summary = BuildSummary(1, 1, 0, 1, 0, 169, 123)
+        with mock.patch(
+            "scripts.posix.cli._current_manifest_metadata",
+            create=True,
+            return_value=expected,
+        ) as current, mock.patch(
+            "scripts.posix.cli.verify_stage", return_value=summary
+        ) as verify:
+            result = cli.main(
+                ["build", "--arch", "aarch64", "--stage", "custom-stage", "--verify-only"]
+            )
+
+        self.assertEqual(result, 0)
+        current.assert_called_once_with()
+        verify.assert_called_once_with(
+            Path("custom-stage"),
+            expected_metadata=expected,
+            strict_command_paths=True,
+        )
 
     def test_build_inventory_requires_all_pinned_reviewed_cases(self) -> None:
         cli._validate_build_inventory(1_979, 176, 94, 169)
@@ -996,7 +1311,7 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(
             summary.format_counts(),
             "discovered=1 build-pass=1 build-fail=0 "
-            "link-pass=1 link-fail=0 shell-unported=169",
+            "link-pass=1 link-fail=0 shell-unported=169 staged-bytes=1024",
         )
         with self.assertRaises(Exception):
             summary.discovered = 2

@@ -52,7 +52,8 @@ class BuildSummary:
         return (
             f"discovered={self.discovered} build-pass={self.compile_pass} "
             f"build-fail={self.compile_fail} link-pass={self.link_pass} "
-            f"link-fail={self.link_fail} shell-unported={self.shell_unported}"
+            f"link-fail={self.link_fail} shell-unported={self.shell_unported} "
+            f"staged-bytes={self.staged_bytes}"
         )
 
 

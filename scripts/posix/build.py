@@ -2,7 +2,8 @@
 
 The guest manifest checksum is SHA-256 over its complete UTF-8 TSV bytes after
 replacing the ``manifest_sha256`` metadata value with 64 ASCII zeroes.  This is
-a canonical, non-self-referential definition and covers every other byte.
+a canonical, non-self-referential definition and covers every other byte. The
+``build_results_sha256`` value is the SHA-256 of the exact canonical NDJSON.
 """
 
 from __future__ import annotations
@@ -61,6 +62,7 @@ _METADATA_KEYS = (
     "compiler",
     "libc",
     "patch_sha256",
+    "build_results_sha256",
     "manifest_sha256",
     "smros_commit",
 )
@@ -75,6 +77,7 @@ class ManifestMetadata:
     libc: str
     patch_sha256: str
     smros_commit: str
+    build_results_sha256: str = EMPTY_SHA256
     manifest_sha256: str = EMPTY_SHA256
 
 
@@ -168,6 +171,8 @@ def _validate_metadata(metadata: ManifestMetadata) -> None:
         raise ValueError("SMROS commit is not a lowercase 40-hex commit")
     if _DIGEST_RE.fullmatch(metadata.patch_sha256) is None:
         raise ValueError("patch checksum is invalid")
+    if _DIGEST_RE.fullmatch(metadata.build_results_sha256) is None:
+        raise ValueError("build results checksum is invalid")
     if _DIGEST_RE.fullmatch(metadata.manifest_sha256) is None:
         raise ValueError("manifest checksum is invalid")
 
@@ -323,6 +328,7 @@ def parse_manifest(data: bytes) -> tuple[ManifestMetadata, tuple[SuiteTest, ...]
         libc=values["libc"],
         patch_sha256=values["patch_sha256"],
         smros_commit=values["smros_commit"],
+        build_results_sha256=values["build_results_sha256"],
         manifest_sha256=values["manifest_sha256"],
     )
     _validate_metadata(metadata)
@@ -816,8 +822,17 @@ def _write_manifests(
     tests: Sequence[SuiteTest],
     results: Sequence[BuildResult],
 ) -> str:
-    manifest_text, manifest_digest = render_manifest(metadata, tests)
-    final_metadata = replace(metadata, manifest_sha256=manifest_digest)
+    build_results_text = "".join(
+        _json_build_result(result) + "\n" for result in results
+    )
+    build_results_digest = hashlib.sha256(
+        build_results_text.encode("utf-8")
+    ).hexdigest()
+    bound_metadata = replace(
+        metadata, build_results_sha256=build_results_digest
+    )
+    manifest_text, manifest_digest = render_manifest(bound_metadata, tests)
+    final_metadata = replace(bound_metadata, manifest_sha256=manifest_digest)
     runtime = [
         {
             "path": f"lib/{path.name}",
@@ -842,7 +857,7 @@ def _write_manifests(
         newline="\n",
     )
     (stage / "build-results.ndjson").write_text(
-        "".join(_json_build_result(result) + "\n" for result in results),
+        build_results_text,
         encoding="utf-8",
         newline="\n",
     )
@@ -913,6 +928,9 @@ def build_campaign(
                 )
                 continue
             compile_pass += 1
+            if test.kind != "runnable":
+                manifested.append(replace(test, binary="-", sha256=EMPTY_SHA256))
+                continue
             nm_result = _run_command(
                 test.test_id,
                 "nm",
@@ -923,9 +941,6 @@ def build_campaign(
             results.append(nm_result)
             if nm_result.returncode != 0:
                 raise ValueError(f"target nm failed for {test.test_id}: {nm_result.stderr}")
-            if test.kind != "runnable":
-                manifested.append(replace(test, binary="-", sha256=EMPTY_SHA256))
-                continue
             if not _has_main(nm_result.stdout):
                 link_fail += 1
                 results.append(
@@ -996,7 +1011,11 @@ def build_campaign(
         stager(tuple(staged_executables), temporary_stage)
         _write_manifests(temporary_stage, metadata, manifested, results)
         staged_bytes = _stage_size(temporary_stage)
-        verify_stage(temporary_stage, verify_architecture=dependency_stager is None)
+        verify_stage(
+            temporary_stage,
+            verify_architecture=dependency_stager is None,
+            expected_metadata=metadata,
+        )
         _publish_stage(temporary_stage, stage)
         return BuildSummary(
             discovered=len(ordered_tests),
@@ -1066,8 +1085,100 @@ def _run_readelf(
     return str(getattr(result, "stdout", ""))
 
 
+def _path_ends_with(value: str, suffix: str) -> bool:
+    normalized = Path(value).as_posix()
+    return normalized == suffix or normalized.endswith(f"/{suffix}")
+
+
+def _validate_build_argv(
+    test: SuiteTest,
+    stage_name: str,
+    status_name: str,
+    argv: list[str],
+    returncode: int | None,
+    stderr: str,
+    *,
+    strict_paths: bool,
+    revision: str | None,
+) -> None:
+    if any(_has_forbidden_character(argument) for argument in argv):
+        raise ValueError(f"invalid control character in build argv for {test.test_id}")
+    object_suffix = f"{test.test_id}.o"
+    executable_suffix = f"{test.test_id}.test"
+    if stage_name == "compile":
+        valid = (
+            len(argv) == 11
+            and argv[:5]
+            == [
+                "aarch64-linux-gnu-gcc",
+                "-std=gnu99",
+                "-D_POSIX_C_SOURCE=200112L",
+                "-D_XOPEN_SOURCE=600",
+                "-pthread",
+            ]
+            and argv[5] == "-I"
+            and Path(argv[6]).name == "include"
+            and argv[7] == "-c"
+            and _path_ends_with(argv[8], test.source)
+            and argv[9] == "-o"
+            and _path_ends_with(argv[10], object_suffix)
+        )
+        if not valid:
+            raise ValueError(f"invalid target compiler argv for {test.test_id}")
+        if strict_paths:
+            expected_source = f"target/posix/src/{revision}/{test.source}"
+            expected_object = f"target/posix/aarch64/obj/{object_suffix}"
+            expected_include = f"target/posix/src/{revision}/include"
+            if [argv[6], argv[8], argv[10]] != [
+                expected_include,
+                expected_source,
+                expected_object,
+            ]:
+                raise ValueError(f"invalid production compiler path for {test.test_id}")
+        return
+    if stage_name == "nm":
+        if not (
+            len(argv) == 4
+            and argv[:3]
+            == ["aarch64-linux-gnu-nm", "-g", "--defined-only"]
+            and _path_ends_with(argv[3], object_suffix)
+        ):
+            raise ValueError(f"invalid target nm argv for {test.test_id}")
+        if strict_paths and argv[3] != f"target/posix/aarch64/obj/{object_suffix}":
+            raise ValueError(f"invalid production nm path for {test.test_id}")
+        return
+    if not argv:
+        if not (
+            status_name == "failed"
+            and returncode is None
+            and stderr == "target object does not define main"
+        ):
+            raise ValueError(f"invalid synthetic link result for {test.test_id}")
+        return
+    valid = (
+        len(argv) == 7
+        and argv[0] == "aarch64-linux-gnu-gcc"
+        and argv[1] == "-pthread"
+        and _path_ends_with(argv[2], object_suffix)
+        and argv[3] == "-o"
+        and _path_ends_with(argv[4], executable_suffix)
+        and argv[5:] == ["-lrt", "-lm"]
+    )
+    if not valid:
+        raise ValueError(f"invalid target linker argv for {test.test_id}")
+    if strict_paths and [argv[2], argv[4]] != [
+        f"target/posix/aarch64/obj/{object_suffix}",
+        f"target/posix/aarch64/bin/{executable_suffix}",
+    ]:
+        raise ValueError(f"invalid production linker path for {test.test_id}")
+
+
 def _load_build_results(
-    path: Path, tests: Sequence[SuiteTest]
+    path: Path,
+    tests: Sequence[SuiteTest],
+    *,
+    strict_paths: bool = False,
+    revision: str | None = None,
 ) -> tuple[BuildResult, ...]:
     try:
         text = path.read_text(encoding="utf-8")
@@ -1147,6 +1258,16 @@ def _load_build_results(
                 raise ValueError(f"failed build result has checksum at line {line_number}")
         elif artifact_sha256 is not None:
             raise ValueError(f"nm build result has artifact checksum at line {line_number}")
+        _validate_build_argv(
+            tests_by_id[test_id],
+            stage_name,
+            status_name,
+            argv,
+            returncode,
+            stderr,
+            strict_paths=strict_paths,
+            revision=revision,
+        )
         identity = (test_id, stage_name)
         if identity in seen:
             raise ValueError(
@@ -1187,6 +1308,19 @@ def _load_build_results(
             if nm_result is not None or link_result is not None:
                 raise ValueError(f"unexpected post-compile build result for {test_id}")
             continue
+        if test.kind == "definition":
+            if nm_result is not None or link_result is not None:
+                raise ValueError(
+                    f"definition test has unexpected nm or link result: {test_id}"
+                )
+            if test.disposition not in {
+                "definition-only",
+                "excluded-upstream-stub",
+            }:
+                raise ValueError(
+                    f"build result contradicts manifest for {test_id}: definition"
+                )
+            continue
         if nm_result is None or nm_result.status != "passed":
             raise ValueError(f"missing passed build result for {test_id} stage nm")
         if test.kind == "runnable":
@@ -1206,15 +1340,6 @@ def _load_build_results(
                     raise ValueError(
                         f"build result contradicts manifest for {test_id}: link"
                     )
-        elif link_result is not None:
-            raise ValueError(f"unexpected link build result for {test_id}")
-        elif test.disposition not in {
-            "definition-only",
-            "excluded-upstream-stub",
-        }:
-            raise ValueError(
-                f"build result contradicts manifest for {test_id}: definition"
-            )
     return tuple(results)
 
 
@@ -1223,6 +1348,8 @@ def verify_stage(
     *,
     readelf_runner: CommandRunner = subprocess.run,
     verify_architecture: bool = True,
+    expected_metadata: ManifestMetadata | None = None,
+    strict_command_paths: bool = False,
 ) -> BuildSummary:
     try:
         stage_info = stage.lstat()
@@ -1234,7 +1361,29 @@ def verify_stage(
     for name in ("manifest.tsv", "manifest.json", "build-results.ndjson"):
         _require_regular_file(stage / name, name)
     metadata, tests = parse_manifest((stage / "manifest.tsv").read_bytes())
-    build_results = _load_build_results(stage / "build-results.ndjson", tests)
+    if expected_metadata is not None:
+        expected_provenance = replace(
+            expected_metadata,
+            build_results_sha256=EMPTY_SHA256,
+            manifest_sha256=EMPTY_SHA256,
+        )
+        actual_provenance = replace(
+            metadata,
+            build_results_sha256=EMPTY_SHA256,
+            manifest_sha256=EMPTY_SHA256,
+        )
+        _validate_metadata(expected_provenance)
+        if actual_provenance != expected_provenance:
+            raise ValueError("manifest metadata does not match current build inputs")
+    build_results_data = (stage / "build-results.ndjson").read_bytes()
+    if hashlib.sha256(build_results_data).hexdigest() != metadata.build_results_sha256:
+        raise ValueError("build results checksum mismatch")
+    build_results = _load_build_results(
+        stage / "build-results.ndjson",
+        tests,
+        strict_paths=strict_command_paths,
+        revision=metadata.revision,
+    )
     try:
         host_text = (stage / "manifest.json").read_text(encoding="utf-8")
         host_manifest = json.loads(

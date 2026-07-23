@@ -150,6 +150,24 @@ def _validate_review_ledgers(stub_path: Path, shell_path: Path) -> None:
         )
 
 
+def _current_manifest_metadata() -> ManifestMetadata:
+    lock = load_source_lock(SOURCE_LOCK_PATH)
+    checkout = Path("target/posix") / "src" / lock.revision
+    expected_patch = validate_build_checkout(
+        checkout, lock.revision, PATCH_SERIES_PATH
+    )
+    _validate_review_ledgers(STUB_REVIEW_PATH, SHELL_REVIEW_PATH)
+    return ManifestMetadata(
+        source=lock.url,
+        revision=lock.revision,
+        architecture="aarch64",
+        compiler=_compiler_identity("aarch64-linux-gnu-gcc"),
+        libc=_libc_identity("aarch64-linux-gnu-gcc"),
+        patch_sha256=expected_patch,
+        smros_commit=_smros_commit(),
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = create_parser().parse_args(argv)
     if arguments.command == "fetch":
@@ -195,14 +213,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             _required_tool("aarch64-linux-gnu-nm")
             _required_tool("aarch64-linux-gnu-readelf")
             if arguments.verify_only:
-                summary = verify_stage(arguments.stage)
-            else:
-                lock = load_source_lock(SOURCE_LOCK_PATH)
-                checkout = Path("target/posix") / "src" / lock.revision
-                expected_patch = validate_build_checkout(
-                    checkout, lock.revision, PATCH_SERIES_PATH
+                expected_metadata = _current_manifest_metadata()
+                summary = verify_stage(
+                    arguments.stage,
+                    expected_metadata=expected_metadata,
+                    strict_command_paths=True,
                 )
-                _validate_review_ledgers(STUB_REVIEW_PATH, SHELL_REVIEW_PATH)
+            else:
+                metadata = _current_manifest_metadata()
+                checkout = Path("target/posix") / "src" / metadata.revision
                 audit = audit_reviews(
                     checkout, STUB_REVIEW_PATH, SHELL_REVIEW_PATH
                 )
@@ -219,15 +238,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                         for test in audit.tests
                     ),
                     len(shell_tests),
-                )
-                metadata = ManifestMetadata(
-                    source=lock.url,
-                    revision=lock.revision,
-                    architecture="aarch64",
-                    compiler=_compiler_identity("aarch64-linux-gnu-gcc"),
-                    libc=_libc_identity("aarch64-linux-gnu-gcc"),
-                    patch_sha256=expected_patch,
-                    smros_commit=_smros_commit(),
                 )
                 summary = build_campaign(
                     checkout,
