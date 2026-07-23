@@ -111,6 +111,50 @@ fn linker_script_for_target(target: &str) -> Option<&'static str> {
     }
 }
 
+fn linker_arg_selects_script(argument: &str) -> bool {
+    if argument == "-T" || argument == "--script" {
+        return true;
+    }
+    if argument
+        .strip_prefix("-T")
+        .is_some_and(|path| !path.is_empty())
+        || argument
+            .strip_prefix("--script=")
+            .is_some_and(|path| !path.is_empty())
+    {
+        return true;
+    }
+
+    argument
+        .strip_prefix("-Wl,")
+        .is_some_and(|arguments| arguments.split(',').any(linker_arg_selects_script))
+}
+
+fn rustflags_select_linker_script(encoded_rustflags: &str) -> bool {
+    let mut rustflags = encoded_rustflags.split('\x1f');
+    while let Some(flag) = rustflags.next() {
+        let codegen_option = if flag == "-C" {
+            rustflags.next()
+        } else {
+            flag.strip_prefix("-C")
+        };
+        let Some(codegen_option) = codegen_option else {
+            continue;
+        };
+
+        if let Some(argument) = codegen_option.strip_prefix("link-arg=") {
+            if linker_arg_selects_script(argument) {
+                return true;
+            }
+        } else if let Some(arguments) = codegen_option.strip_prefix("link-args=") {
+            if arguments.split_whitespace().any(linker_arg_selects_script) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn configure_linker() {
     println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
 
@@ -121,10 +165,7 @@ fn configure_linker() {
     println!("cargo:rerun-if-changed={script}");
 
     let rustflags = env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
-    if !rustflags
-        .split('\x1f')
-        .any(|flag| flag.contains("link-arg=-T"))
-    {
+    if !rustflags_select_linker_script(&rustflags) {
         println!("cargo:rustc-link-arg=-T{script}");
     }
 }

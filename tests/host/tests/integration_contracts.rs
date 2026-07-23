@@ -168,6 +168,66 @@ fn braced_body(source: &str) -> &str {
     panic!("closing brace");
 }
 
+struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> Self {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("smros-{name}-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&path).expect("create temporary directory");
+        Self(path)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn compile_build_script() -> (TempDir, std::path::PathBuf) {
+    let temp = TempDir::new("build-script-contract");
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let binary = temp.0.join("build-script");
+    let output = std::process::Command::new("rustc")
+        .arg(repository.join("build.rs"))
+        .arg("--edition=2021")
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("compile build.rs");
+    assert!(
+        output.status.success(),
+        "build.rs compilation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (temp, binary)
+}
+
+fn run_build_script(binary: &std::path::Path, root: &std::path::Path, flags: &str) -> String {
+    let manifest = root.join("manifest");
+    let out_dir = root.join("out");
+    std::fs::create_dir_all(&manifest).expect("create manifest directory");
+    std::fs::create_dir_all(&out_dir).expect("create output directory");
+    let output = std::process::Command::new(binary)
+        .env("TARGET", "aarch64-unknown-none")
+        .env("CARGO_ENCODED_RUSTFLAGS", flags)
+        .env("CARGO_MANIFEST_DIR", manifest)
+        .env("OUT_DIR", out_dir)
+        .output()
+        .expect("run build.rs");
+    assert!(
+        output.status.success(),
+        "build.rs failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("build.rs output is UTF-8")
+}
+
 #[test]
 fn checked_end_helpers_share_boundary_semantics() {
     let cases = [
@@ -347,6 +407,40 @@ fn linker_script_selection_is_single_source_for_nested_worktrees() {
         );
     }
     assert!(build_script.contains("CARGO_ENCODED_RUSTFLAGS"));
+}
+
+#[test]
+fn build_script_recognizes_supported_linker_script_flag_forms() {
+    let (temp, binary) = compile_build_script();
+    let custom_script_flags = [
+        "-C\x1flink-arg=-Tcustom.ld",
+        "-Clink-arg=-Tcustom.ld",
+        "-C\x1flink-args=-T custom.ld",
+        "-Clink-args=-Tcustom.ld",
+        "-C\x1flink-args=--script custom.ld",
+        "-Clink-arg=--script=custom.ld",
+        "-C\x1flink-arg=-Wl,-T,custom.ld",
+        "-Clink-arg=-Wl,--script,custom.ld",
+    ];
+    for flags in custom_script_flags {
+        let stdout = run_build_script(&binary, &temp.0, flags);
+        assert!(
+            !stdout.contains("cargo:rustc-link-arg=-Tlinker/kernel.ld"),
+            "default script emitted for {flags:?}"
+        );
+    }
+
+    for flags in [
+        "-C\x1flink-arg=--defsym=NOT-TARGET=1",
+        "-C\x1flink-args=-z notext --trace",
+        "-Ctarget-feature=+neon",
+    ] {
+        let stdout = run_build_script(&binary, &temp.0, flags);
+        assert!(
+            stdout.contains("cargo:rustc-link-arg=-Tlinker/kernel.ld"),
+            "default script suppressed for unrelated flags {flags:?}"
+        );
+    }
 }
 
 #[test]
