@@ -12,6 +12,14 @@ By default, the generated checkout lives below `target/posix`; `--work-dir`
 may select another generated location. The checkout is not vendored into this
 repository.
 
+Checkout identity uses Git tree semantics. Validation independently derives
+the expected tree from the pinned commit and captured patch bytes, then
+compares it with a temporary Git index of the actual checkout.
+`.smros-source.json` records the patch SHA-256 and expected Git tree OID for
+diagnostics; it is not the source of truth. Git trees cover file paths and
+contents, symlink targets, and the executable bit. They do not represent
+empty directories or directory modes, so those are outside source identity.
+
 ## Patches
 
 Patch filenames in `patches/series` are applied in listed order. Patches must

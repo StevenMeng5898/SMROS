@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -19,8 +20,9 @@ from urllib.parse import urlparse
 
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_TREE_OID_RE = re.compile(r"^[0-9a-f]{40}$")
 _LOCK_FIELDS = frozenset({"schema", "url", "revision", "license", "standard"})
-_METADATA_FIELDS = frozenset({"schema", "patch_sha256", "tree_sha256"})
+_METADATA_FIELDS = frozenset({"schema", "patch_sha256", "tree_oid"})
 _METADATA_NAME = ".smros-source.json"
 _REVISION_NAME = ".smros-revision"
 
@@ -70,19 +72,19 @@ class _Patch:
 class _SourceMetadata:
     schema: int
     patch_sha256: str
-    tree_sha256: str
+    tree_oid: str
 
     def __post_init__(self) -> None:
-        if type(self.schema) is not int or self.schema != 1:
-            raise ValueError("source metadata schema must be 1")
+        if type(self.schema) is not int or self.schema != 2:
+            raise ValueError("source metadata schema must be 2")
         if not isinstance(self.patch_sha256, str) or _DIGEST_RE.fullmatch(
             self.patch_sha256
         ) is None:
             raise ValueError("source metadata patch digest is invalid")
-        if not isinstance(self.tree_sha256, str) or _DIGEST_RE.fullmatch(
-            self.tree_sha256
+        if not isinstance(self.tree_oid, str) or _TREE_OID_RE.fullmatch(
+            self.tree_oid
         ) is None:
-            raise ValueError("source metadata tree digest is invalid")
+            raise ValueError("source metadata tree OID is invalid")
 
 
 def load_source_lock(path: Path) -> SourceLock:
@@ -111,68 +113,6 @@ def _patch_sha256(patches: tuple[_Patch, ...]) -> str:
         _update_hash(digest, patch.name.encode("utf-8"))
         _update_hash(digest, patch.data)
     return digest.hexdigest()
-
-
-def _tree_sha256(root: Path) -> str:
-    root_descriptor = _open_directory(root, "checkout root")
-    try:
-        return _tree_sha256_from_descriptor(root_descriptor)
-    finally:
-        os.close(root_descriptor)
-
-
-def _tree_sha256_from_descriptor(root_descriptor: int) -> str:
-    digest = hashlib.sha256()
-    _hash_tree_directory(digest, root_descriptor, ())
-    return digest.hexdigest()
-
-
-def _hash_tree_directory(
-    digest: object, directory_descriptor: int, relative_parts: tuple[str, ...]
-) -> None:
-    try:
-        with os.scandir(directory_descriptor) as iterator:
-            entries = sorted(iterator, key=lambda entry: entry.name)
-    except OSError as error:
-        relative = "/".join(relative_parts) or "."
-        raise ValueError(f"checkout tree cannot be traversed: {relative}") from error
-
-    for entry in entries:
-        entry_parts = (*relative_parts, entry.name)
-        relative = "/".join(entry_parts)
-        if not relative_parts and entry.name in {
-            ".git",
-            _METADATA_NAME,
-            _REVISION_NAME,
-        }:
-            continue
-        try:
-            entry_stat = os.stat(
-                entry.name, dir_fd=directory_descriptor, follow_symlinks=False
-            )
-        except OSError as error:
-            raise ValueError(f"checkout tree entry cannot be inspected: {relative}") from error
-        if stat.S_ISLNK(entry_stat.st_mode):
-            raise ValueError(f"checkout tree symlink is not allowed: {relative}")
-        if stat.S_ISDIR(entry_stat.st_mode):
-            child_descriptor = _open_directory_at(
-                directory_descriptor,
-                entry.name,
-                f"checkout tree directory {relative}",
-            )
-            try:
-                _hash_tree_directory(digest, child_descriptor, entry_parts)
-            finally:
-                os.close(child_descriptor)
-            continue
-        data, file_stat = _read_regular_file_at(
-            directory_descriptor,
-            entry.name,
-            f"checkout tree entry {relative}",
-        )
-        _update_hash(digest, relative.encode("utf-8"))
-        _update_hash(digest, stat.S_IMODE(file_stat.st_mode).to_bytes(4, "big"))
-        _update_hash(digest, data)
 
 
 def _require_directory(path: Path, label: str) -> os.stat_result:
@@ -334,79 +274,161 @@ def _load_source_metadata(
     return _SourceMetadata(**values)
 
 
+def _run_index_git(
+    root_descriptor: int,
+    index_path: Path,
+    arguments: list[str],
+    input_data: bytes | None = None,
+) -> bytes:
+    environment = os.environ.copy()
+    environment["GIT_INDEX_FILE"] = str(index_path)
+    return _run_git_at(
+        root_descriptor, arguments, environment=environment, input_data=input_data
+    )
+
+
+def _run_git_at(
+    root_descriptor: int,
+    arguments: list[str],
+    environment: dict[str, str] | None = None,
+    input_data: bytes | None = None,
+) -> bytes:
+    return subprocess.run(
+        ["git", "-C", f"/proc/self/fd/{root_descriptor}", *arguments],
+        check=True,
+        env=environment,
+        input=input_data,
+        pass_fds=(root_descriptor,),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout
+
+
+def _write_index_tree(root_descriptor: int, index_path: Path) -> str:
+    tree_oid = (
+        _run_index_git(root_descriptor, index_path, ["write-tree"])
+        .decode("ascii")
+        .strip()
+    )
+    if _TREE_OID_RE.fullmatch(tree_oid) is None:
+        raise ValueError(f"Git returned an invalid tree OID: {tree_oid!r}")
+    return tree_oid
+
+
+def _derive_tree_oids(
+    root_descriptor: int, revision: str, patches: tuple[_Patch, ...]
+) -> tuple[str, str]:
+    temporary_root = Path(tempfile.mkdtemp(prefix="smros-posix-index."))
+    operation_error: BaseException | None = None
+    try:
+        expected_index = temporary_root / "expected.index"
+        _run_index_git(root_descriptor, expected_index, ["read-tree", revision])
+        for patch in patches:
+            _run_index_git(
+                root_descriptor,
+                expected_index,
+                ["apply", "--cached", "--"],
+                input_data=patch.data,
+            )
+        expected_tree = _write_index_tree(root_descriptor, expected_index)
+
+        actual_index = temporary_root / "actual.index"
+        _run_index_git(root_descriptor, actual_index, ["read-tree", revision])
+        _run_index_git(
+            root_descriptor,
+            actual_index,
+            [
+                "add",
+                "-A",
+                "--",
+                ".",
+                f":(exclude){_REVISION_NAME}",
+                f":(exclude){_METADATA_NAME}",
+            ],
+        )
+        actual_tree = _write_index_tree(root_descriptor, actual_index)
+        return expected_tree, actual_tree
+    except BaseException as error:
+        operation_error = error
+        raise
+    finally:
+        try:
+            shutil.rmtree(temporary_root)
+        except BaseException:
+            if operation_error is None:
+                raise
+
+
 def _validate_checkout(
-    root: Path, revision: str, expected_patch_sha256: str | None
+    root: Path, revision: str, patches: tuple[_Patch, ...]
 ) -> None:
     root_descriptor = _open_directory(root, "checkout root")
     try:
-        _read_regular_file_at(root_descriptor, "COPYING", "checkout COPYING")
-
-        marker = root / _REVISION_NAME
-        marker_bytes, _ = _read_regular_file_at(
-            root_descriptor, _REVISION_NAME, "checkout revision marker"
-        )
-        try:
-            marker_revision = marker_bytes.decode("ascii")
-        except UnicodeError as error:
-            raise ValueError(
-                f"checkout revision marker is not ASCII: {marker}"
-            ) from error
-        if marker_revision != f"{revision}\n":
-            raise ValueError(f"checkout revision marker does not match {revision}")
-
-        metadata = _load_source_metadata(root, root_descriptor)
-        if (
-            expected_patch_sha256 is not None
-            and metadata.patch_sha256 != expected_patch_sha256
-        ):
-            raise ValueError("checkout patch digest does not match current patch series")
-
-        try:
-            git_stat = os.stat(
-                ".git", dir_fd=root_descriptor, follow_symlinks=False
-            )
-        except OSError as error:
-            raise ValueError(f"checkout is not a Git checkout: {root}") from error
-        if stat.S_ISLNK(git_stat.st_mode) or not (
-            stat.S_ISDIR(git_stat.st_mode) or stat.S_ISREG(git_stat.st_mode)
-        ):
-            raise ValueError(f"checkout has invalid Git metadata: {root / '.git'}")
-
-        try:
-            completed = subprocess.run(
-                ["git", "-C", str(root), "rev-parse", "HEAD"],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-        except subprocess.CalledProcessError as error:
-            raise ValueError(f"checkout is not a Git checkout: {root}") from error
-        if completed.stdout.strip() != revision:
-            raise ValueError(f"checkout Git HEAD does not match {revision}")
-
-        try:
-            top_level = subprocess.run(
-                ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            ).stdout.strip()
-        except subprocess.CalledProcessError as error:
-            raise ValueError(f"checkout is not a Git checkout: {root}") from error
-        if Path(top_level).resolve() != root.resolve():
-            raise ValueError(f"checkout Git top level does not match root: {root}")
-
-        if _tree_sha256_from_descriptor(root_descriptor) != metadata.tree_sha256:
-            raise ValueError("checkout tree digest does not match source metadata")
+        _validate_checkout_descriptor(root_descriptor, root, revision, patches)
     finally:
         os.close(root_descriptor)
 
 
+def _validate_checkout_descriptor(
+    root_descriptor: int,
+    root_display: Path,
+    revision: str,
+    patches: tuple[_Patch, ...],
+) -> None:
+    _read_regular_file_at(root_descriptor, "COPYING", "checkout COPYING")
+
+    marker = root_display / _REVISION_NAME
+    marker_bytes, _ = _read_regular_file_at(
+        root_descriptor, _REVISION_NAME, "checkout revision marker"
+    )
+    try:
+        marker_revision = marker_bytes.decode("ascii")
+    except UnicodeError as error:
+        raise ValueError(f"checkout revision marker is not ASCII: {marker}") from error
+    if marker_revision != f"{revision}\n":
+        raise ValueError(f"checkout revision marker does not match {revision}")
+
+    metadata = _load_source_metadata(root_display, root_descriptor)
+    patch_sha256 = _patch_sha256(patches)
+    if metadata.patch_sha256 != patch_sha256:
+        raise ValueError("checkout patch digest does not match current patch series")
+
+    try:
+        git_stat = os.stat(".git", dir_fd=root_descriptor, follow_symlinks=False)
+    except OSError as error:
+        raise ValueError(f"checkout is not a Git checkout: {root_display}") from error
+    if stat.S_ISLNK(git_stat.st_mode) or not (
+        stat.S_ISDIR(git_stat.st_mode) or stat.S_ISREG(git_stat.st_mode)
+    ):
+        raise ValueError(
+            f"checkout has invalid Git metadata: {root_display / '.git'}"
+        )
+
+    try:
+        head = _run_git_at(root_descriptor, ["rev-parse", "HEAD"])
+        prefix = _run_git_at(root_descriptor, ["rev-parse", "--show-prefix"])
+    except subprocess.CalledProcessError as error:
+        raise ValueError(f"checkout is not a Git checkout: {root_display}") from error
+    if head.decode("ascii").strip() != revision:
+        raise ValueError(f"checkout Git HEAD does not match {revision}")
+    if prefix.strip():
+        raise ValueError(f"checkout Git top level does not match root: {root_display}")
+
+    try:
+        expected_tree, actual_tree = _derive_tree_oids(
+            root_descriptor, revision, patches
+        )
+    except subprocess.CalledProcessError as error:
+        raise ValueError("checkout Git tree could not be derived") from error
+    if metadata.tree_oid != expected_tree:
+        raise ValueError("checkout metadata tree OID does not match expected tree")
+    if actual_tree != expected_tree:
+        raise ValueError("checkout Git tree does not match expected patched tree")
+
+
 def validate_checkout(root: Path, revision: str) -> None:
     """Validate the pinned Git revision and generated source-tree metadata."""
-    _validate_checkout(root, revision, expected_patch_sha256=None)
+    _validate_checkout(root, revision, patches=())
 
 
 def _load_patches(patch_series: Path) -> tuple[_Patch, ...]:
@@ -452,52 +474,75 @@ def _load_patches(patch_series: Path) -> tuple[_Patch, ...]:
         os.close(patch_directory_descriptor)
 
 
-def _write_regular_file_exclusively(path: Path, data: bytes) -> None:
+def _write_regular_file_exclusively_at(
+    parent_descriptor: int, name: str, data: bytes
+) -> None:
     try:
-        path.unlink(missing_ok=True)
+        os.unlink(name, dir_fd=parent_descriptor)
+    except FileNotFoundError:
+        pass
     except OSError as error:
-        raise ValueError(f"generated metadata path cannot be replaced: {path}") from error
+        raise ValueError(f"generated metadata path cannot be replaced: {name}") from error
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    descriptor = os.open(path, flags, 0o644)
+    descriptor = os.open(name, flags, 0o644, dir_fd=parent_descriptor)
     with os.fdopen(descriptor, "wb") as output:
         output.write(data)
 
 
-def _write_revision_marker(root: Path, revision: str) -> None:
-    _write_regular_file_exclusively(
-        root / _REVISION_NAME, f"{revision}\n".encode("ascii")
+def _write_revision_marker(root_descriptor: int, revision: str) -> None:
+    _write_regular_file_exclusively_at(
+        root_descriptor, _REVISION_NAME, f"{revision}\n".encode("ascii")
     )
 
 
 def _write_source_metadata(
-    root: Path, patch_sha256: str, tree_sha256: str
+    root_descriptor: int, patch_sha256: str, tree_oid: str
 ) -> None:
-    metadata_path = root / _METADATA_NAME
     values = {
-        "schema": 1,
+        "schema": 2,
         "patch_sha256": patch_sha256,
-        "tree_sha256": tree_sha256,
+        "tree_oid": tree_oid,
     }
-    _write_regular_file_exclusively(
-        metadata_path,
+    _write_regular_file_exclusively_at(
+        root_descriptor,
+        _METADATA_NAME,
         (json.dumps(values, indent=2, sort_keys=True) + "\n").encode("utf-8"),
     )
 
 
-def _path_exists(path: Path) -> bool:
-    return os.path.lexists(path)
+def _rename_no_replace(
+    source_parent_descriptor: int,
+    source_name: str,
+    source_descriptor: int,
+    destination_parent_descriptor: int,
+    destination_name: str,
+) -> None:
+    try:
+        source_stat = os.stat(
+            source_name,
+            dir_fd=source_parent_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as error:
+        raise ValueError("owned checkout source entry disappeared before publish") from error
+    held_stat = os.fstat(source_descriptor)
+    if not stat.S_ISDIR(source_stat.st_mode) or (
+        source_stat.st_dev,
+        source_stat.st_ino,
+    ) != (held_stat.st_dev, held_stat.st_ino):
+        raise ValueError("owned checkout source entry changed before publish")
 
-
-def _rename_no_replace(source: Path, destination: Path) -> None:
     try:
         renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
     except AttributeError as error:
         raise OSError(
-            errno.ENOSYS, "atomic no-replace rename is unavailable", destination
+            errno.ENOSYS,
+            "atomic no-replace rename is unavailable",
+            destination_name,
         ) from error
     renameat2.argtypes = (
         ctypes.c_int,
@@ -508,10 +553,10 @@ def _rename_no_replace(source: Path, destination: Path) -> None:
     )
     renameat2.restype = ctypes.c_int
     result = renameat2(
-        -100,
-        os.fsencode(source),
-        -100,
-        os.fsencode(destination),
+        source_parent_descriptor,
+        os.fsencode(source_name),
+        destination_parent_descriptor,
+        os.fsencode(destination_name),
         1,
     )
     if result != 0:
@@ -519,18 +564,87 @@ def _rename_no_replace(source: Path, destination: Path) -> None:
         raise OSError(
             error_number,
             os.strerror(error_number),
-            str(destination),
+            destination_name,
         )
 
 
+def _entry_exists_at(parent_descriptor: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _create_owned_temporary_directory(
+    parent_descriptor: int, prefix: str
+) -> tuple[str, int]:
+    for _ in range(128):
+        name = f".{prefix}.{secrets.token_hex(8)}"
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_descriptor)
+        except FileExistsError:
+            continue
+        return name, _open_directory_at(
+            parent_descriptor, name, "owned temporary directory"
+        )
+    raise FileExistsError("could not allocate a unique temporary checkout directory")
+
+
+def _clear_directory(directory_descriptor: int) -> None:
+    with os.scandir(directory_descriptor) as iterator:
+        entries = list(iterator)
+    for entry in entries:
+        entry_stat = os.stat(
+            entry.name, dir_fd=directory_descriptor, follow_symlinks=False
+        )
+        if stat.S_ISDIR(entry_stat.st_mode):
+            child_descriptor = _open_directory_at(
+                directory_descriptor, entry.name, "temporary checkout directory"
+            )
+            try:
+                _clear_directory(child_descriptor)
+            finally:
+                os.close(child_descriptor)
+            os.rmdir(entry.name, dir_fd=directory_descriptor)
+        else:
+            os.unlink(entry.name, dir_fd=directory_descriptor)
+
+
+def _remove_owned_temporary_directory(
+    parent_descriptor: int, name: str, directory_descriptor: int
+) -> None:
+    entry_stat = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    held_stat = os.fstat(directory_descriptor)
+    if not stat.S_ISDIR(entry_stat.st_mode) or (
+        entry_stat.st_dev,
+        entry_stat.st_ino,
+    ) != (held_stat.st_dev, held_stat.st_ino):
+        raise ValueError("owned temporary directory changed before cleanup")
+    _clear_directory(directory_descriptor)
+    os.rmdir(name, dir_fd=parent_descriptor)
+
+
 def _validate_competing_checkout(
-    root: Path, revision: str, patch_sha256: str
+    parent_descriptor: int,
+    name: str,
+    root_display: Path,
+    revision: str,
+    patches: tuple[_Patch, ...],
 ) -> None:
     try:
-        _validate_checkout(root, revision, patch_sha256)
+        checkout_descriptor = _open_directory_at(
+            parent_descriptor, name, "competing checkout"
+        )
+        try:
+            _validate_checkout_descriptor(
+                checkout_descriptor, root_display, revision, patches
+            )
+        finally:
+            os.close(checkout_descriptor)
     except (OSError, ValueError) as error:
         raise ValueError(
-            f"checkout destination appeared during fetch and is invalid: {root}"
+            f"checkout destination appeared during fetch and is invalid: {root_display}"
         ) from error
 
 
@@ -539,17 +653,31 @@ def fetch_checkout(lock: SourceLock, root: Path, patch_series: Path) -> None:
     patches = _load_patches(patch_series)
     patch_sha256 = _patch_sha256(patches)
     root = Path(os.path.abspath(root))
-    if _path_exists(root):
-        _validate_checkout(root, lock.revision, patch_sha256)
-        return
-
     root.parent.mkdir(parents=True, exist_ok=True)
-    temporary_root = Path(
-        tempfile.mkdtemp(prefix=f".{root.name}.", dir=root.parent)
+    destination_parent_descriptor = _open_directory(
+        root.parent, "checkout destination parent"
     )
-    owned_checkout = temporary_root / "checkout"
+    temporary_name: str | None = None
+    temporary_descriptor: int | None = None
+    checkout_descriptor: int | None = None
     operation_error: BaseException | None = None
     try:
+        if _entry_exists_at(destination_parent_descriptor, root.name):
+            checkout_descriptor = _open_directory_at(
+                destination_parent_descriptor, root.name, "checkout root"
+            )
+            try:
+                _validate_checkout_descriptor(
+                    checkout_descriptor, root, lock.revision, patches
+                )
+            finally:
+                os.close(checkout_descriptor)
+                checkout_descriptor = None
+            return
+
+        temporary_name, temporary_descriptor = _create_owned_temporary_directory(
+            destination_parent_descriptor, root.name
+        )
         subprocess.run(
             [
                 "git",
@@ -557,60 +685,92 @@ def fetch_checkout(lock: SourceLock, root: Path, patch_series: Path) -> None:
                 "--no-checkout",
                 "--",
                 lock.url,
-                str(owned_checkout),
+                f"/proc/self/fd/{temporary_descriptor}/checkout",
             ],
             check=True,
+            pass_fds=(temporary_descriptor,),
         )
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(owned_checkout),
-                "fetch",
-                "--depth",
-                "1",
-                "origin",
-                lock.revision,
-            ],
-            check=True,
+        checkout_descriptor = _open_directory_at(
+            temporary_descriptor, "checkout", "owned checkout"
         )
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(owned_checkout),
-                "checkout",
-                "--detach",
-                lock.revision,
-            ],
-            check=True,
+        _run_git_at(
+            checkout_descriptor,
+            ["fetch", "--depth", "1", "origin", lock.revision],
+        )
+        _run_git_at(
+            checkout_descriptor, ["checkout", "--detach", lock.revision]
         )
         for patch in patches:
-            subprocess.run(
-                ["git", "-C", str(owned_checkout), "apply", "--"],
-                check=True,
-                input=patch.data,
+            _run_git_at(
+                checkout_descriptor, ["apply", "--"], input_data=patch.data
             )
 
-        _write_revision_marker(owned_checkout, lock.revision)
-        _write_source_metadata(
-            owned_checkout, patch_sha256, _tree_sha256(owned_checkout)
+        _write_revision_marker(checkout_descriptor, lock.revision)
+        expected_tree, actual_tree = _derive_tree_oids(
+            checkout_descriptor, lock.revision, patches
         )
-        _validate_checkout(owned_checkout, lock.revision, patch_sha256)
+        if actual_tree != expected_tree:
+            raise ValueError("new checkout Git tree does not match expected patched tree")
+        _write_source_metadata(checkout_descriptor, patch_sha256, expected_tree)
+        _validate_checkout_descriptor(
+            checkout_descriptor, root, lock.revision, patches
+        )
 
-        if _path_exists(root):
-            _validate_competing_checkout(root, lock.revision, patch_sha256)
+        if _entry_exists_at(destination_parent_descriptor, root.name):
+            _validate_competing_checkout(
+                destination_parent_descriptor,
+                root.name,
+                root,
+                lock.revision,
+                patches,
+            )
             return
         try:
-            _rename_no_replace(owned_checkout, root)
+            _rename_no_replace(
+                temporary_descriptor,
+                "checkout",
+                checkout_descriptor,
+                destination_parent_descriptor,
+                root.name,
+            )
         except FileExistsError:
-            _validate_competing_checkout(root, lock.revision, patch_sha256)
+            _validate_competing_checkout(
+                destination_parent_descriptor,
+                root.name,
+                root,
+                lock.revision,
+                patches,
+            )
     except BaseException as error:
         operation_error = error
         raise
     finally:
+        cleanup_error: BaseException | None = None
         try:
-            shutil.rmtree(temporary_root)
-        except BaseException:
-            if operation_error is None:
-                raise
+            if checkout_descriptor is not None:
+                os.close(checkout_descriptor)
+        except BaseException as error:
+            cleanup_error = error
+        try:
+            if temporary_name is not None and temporary_descriptor is not None:
+                _remove_owned_temporary_directory(
+                    destination_parent_descriptor,
+                    temporary_name,
+                    temporary_descriptor,
+                )
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        try:
+            if temporary_descriptor is not None:
+                os.close(temporary_descriptor)
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        try:
+            os.close(destination_parent_descriptor)
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        if operation_error is None and cleanup_error is not None:
+            raise cleanup_error

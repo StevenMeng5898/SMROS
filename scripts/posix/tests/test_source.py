@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -41,6 +42,40 @@ def run_git(*arguments: str, cwd: Path | None = None) -> str:
         text=True,
     )
     return completed.stdout.strip()
+
+
+def worktree_oid(root: Path) -> str:
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        environment = os.environ.copy()
+        environment["GIT_INDEX_FILE"] = str(
+            Path(temporary_directory) / "actual.index"
+        )
+        for arguments in (
+            ("read-tree", "HEAD"),
+            (
+                "add",
+                "-A",
+                "--",
+                ".",
+                ":(exclude).smros-revision",
+                ":(exclude).smros-source.json",
+            ),
+        ):
+            subprocess.run(
+                ["git", "-C", str(root), *arguments],
+                check=True,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        return subprocess.run(
+            ["git", "-C", str(root), "write-tree"],
+            check=True,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
 
 
 class SourceLockTests(unittest.TestCase):
@@ -177,6 +212,21 @@ class LocalCheckoutTests(unittest.TestCase):
         self.series.write_text(f"{name}\n", encoding="utf-8")
         return patch
 
+    def write_add_delete_patch(self) -> None:
+        patch = self.patches / "add-delete.patch"
+        patch.write_text(
+            "--- /dev/null\n"
+            "+++ b/added.txt\n"
+            "@@ -0,0 +1 @@\n"
+            "+added\n"
+            "--- a/value.txt\n"
+            "+++ /dev/null\n"
+            "@@ -1 +0,0 @@\n"
+            "-before\n",
+            encoding="ascii",
+        )
+        self.series.write_text(f"{patch.name}\n", encoding="utf-8")
+
     def test_correct_git_head_and_generated_metadata_are_accepted(self) -> None:
         self.fetch()
 
@@ -206,6 +256,28 @@ class LocalCheckoutTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "tree"):
             validate_checkout(self.checkout, self.revision)
+
+    def test_modified_tree_with_forged_metadata_is_rejected(self) -> None:
+        self.fetch()
+        (self.checkout / "value.txt").write_text("forged\n", encoding="ascii")
+        metadata_path = self.checkout / ".smros-source.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["tree_oid"] = worktree_oid(self.checkout)
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "tree"):
+            validate_checkout(self.checkout, self.revision)
+
+    def test_patch_created_and_deleted_files_are_bound_on_reuse(self) -> None:
+        self.write_add_delete_patch()
+
+        self.fetch()
+        fetch_checkout(self.lock, self.checkout, self.series)
+
+        self.assertEqual(
+            (self.checkout / "added.txt").read_text(encoding="ascii"), "added\n"
+        )
+        self.assertFalse((self.checkout / "value.txt").exists())
 
     def test_file_mode_change_is_rejected(self) -> None:
         self.fetch()
@@ -277,9 +349,9 @@ class LocalCheckoutTests(unittest.TestCase):
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         metadata_path.write_text(
             "{"
-            '"schema": 1, "schema": 1, '
+            '"schema": 2, "schema": 2, '
             f'"patch_sha256": "{metadata["patch_sha256"]}", '
-            f'"tree_sha256": "{metadata["tree_sha256"]}"'
+            f'"tree_oid": "{metadata["tree_oid"]}"'
             "}\n",
             encoding="utf-8",
         )
@@ -291,10 +363,10 @@ class LocalCheckoutTests(unittest.TestCase):
         self.fetch()
         metadata_path = self.checkout / ".smros-source.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata["tree_sha256"] = 7
+        metadata["tree_oid"] = 7
         metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
 
-        with self.assertRaisesRegex(ValueError, "tree digest"):
+        with self.assertRaisesRegex(ValueError, "tree"):
             validate_checkout(self.checkout, self.revision)
 
     def test_source_tree_symlink_is_rejected(self) -> None:
@@ -304,7 +376,7 @@ class LocalCheckoutTests(unittest.TestCase):
         source.rename(outside)
         source.symlink_to(outside)
 
-        with self.assertRaisesRegex(ValueError, "tree.*symlink"):
+        with self.assertRaisesRegex(ValueError, "tree"):
             validate_checkout(self.checkout, self.revision)
 
     def test_patch_symlink_is_rejected_before_clone(self) -> None:
@@ -352,14 +424,154 @@ class LocalCheckoutTests(unittest.TestCase):
         self.assertTrue(apply_call.kwargs["check"])
         self.assertNotIn("shell", apply_call.kwargs)
 
+        index_calls = [
+            call
+            for call in run.call_args_list
+            if "GIT_INDEX_FILE" in (call.kwargs.get("env") or {})
+        ]
+        self.assertGreater(len(index_calls), 0)
+        for call in index_calls:
+            self.assertTrue(call.args[0][2].startswith("/proc/self/fd/"))
+            self.assertGreater(len(call.kwargs["pass_fds"]), 0)
+
+    def test_marker_write_stays_on_held_checkout_after_ancestor_swap(self) -> None:
+        write_marker = source_module._write_revision_marker
+        outside = self.temporary_root / "outside-marker-write"
+        outside.mkdir()
+
+        def redirect(target: object, revision: str) -> None:
+            if isinstance(target, int):
+                checkout = Path(os.readlink(f"/proc/self/fd/{target}"))
+            else:
+                checkout = Path(target)
+            moved = checkout.with_name(f"{checkout.name}-moved")
+            checkout.rename(moved)
+            checkout.symlink_to(outside, target_is_directory=True)
+            write_marker(target, revision)
+
+        with mock.patch(
+            "scripts.posix.source._write_revision_marker", side_effect=redirect
+        ):
+            with self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                self.fetch()
+
+        self.assertFalse((outside / ".smros-revision").exists())
+
+    def test_metadata_write_stays_on_held_checkout_after_ancestor_swap(self) -> None:
+        write_metadata = source_module._write_source_metadata
+        outside = self.temporary_root / "outside-metadata-write"
+        outside.mkdir()
+
+        def redirect(
+            target: object, patch_sha256: str, tree_oid: str
+        ) -> None:
+            if isinstance(target, int):
+                checkout = Path(os.readlink(f"/proc/self/fd/{target}"))
+            else:
+                checkout = Path(target)
+            moved = checkout.with_name(f"{checkout.name}-moved")
+            checkout.rename(moved)
+            checkout.symlink_to(outside, target_is_directory=True)
+            write_metadata(target, patch_sha256, tree_oid)
+
+        with mock.patch(
+            "scripts.posix.source._write_source_metadata", side_effect=redirect
+        ):
+            with self.assertRaises(ValueError):
+                self.fetch()
+
+        self.assertFalse((outside / ".smros-source.json").exists())
+
+    def test_git_validation_uses_held_checkout_after_ancestor_swap(self) -> None:
+        observed_directory: str | None = None
+        moved_checkout: Path | None = None
+
+        def redirect(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            nonlocal observed_directory, moved_checkout
+            if argv[-2:] == ["rev-parse", "HEAD"] and observed_directory is None:
+                observed_directory = argv[2]
+                if observed_directory.startswith("/proc/self/fd/"):
+                    descriptor = kwargs["pass_fds"][0]
+                    checkout = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+                else:
+                    checkout = Path(observed_directory)
+                moved_checkout = checkout.with_name(f"{checkout.name}-moved")
+                checkout.rename(moved_checkout)
+                checkout.symlink_to(self.origin, target_is_directory=True)
+            return REAL_SUBPROCESS_RUN(argv, **kwargs)
+
+        with mock.patch(
+            "scripts.posix.source.subprocess.run", side_effect=redirect
+        ):
+            with self.assertRaises(ValueError):
+                self.fetch()
+
+        self.assertIsNotNone(moved_checkout)
+        self.assertIsNotNone(observed_directory)
+        self.assertTrue(observed_directory.startswith("/proc/self/fd/"))
+
+    def test_publish_uses_held_parent_directories_after_ancestor_swap(self) -> None:
+        rename_no_replace = source_module._rename_no_replace
+        moved_parent: Path | None = None
+        outside = self.temporary_root / "outside-publish"
+        outside.mkdir()
+
+        def redirect(*arguments: object) -> None:
+            nonlocal moved_parent
+            if len(arguments) == 2:
+                destination_parent = Path(arguments[1]).parent
+            else:
+                destination_parent = Path(
+                    os.readlink(f"/proc/self/fd/{arguments[3]}")
+                )
+            moved_parent = destination_parent.with_name(
+                f"{destination_parent.name}-moved"
+            )
+            destination_parent.rename(moved_parent)
+            destination_parent.symlink_to(outside, target_is_directory=True)
+            rename_no_replace(*arguments)
+
+        with mock.patch(
+            "scripts.posix.source._rename_no_replace", side_effect=redirect
+        ):
+            self.fetch()
+
+        self.assertIsNotNone(moved_parent)
+        self.assertTrue((moved_parent / self.revision).is_dir())
+        self.assertFalse((outside / self.revision).exists())
+
     def test_checkout_appearing_during_publish_is_not_overwritten(self) -> None:
         competitor = self.checkout / "owned-by-other"
         rename_no_replace = source_module._rename_no_replace
 
-        def create_competitor(source: Path, destination: Path) -> None:
-            destination.mkdir(parents=True)
-            competitor.write_text("keep\n", encoding="ascii")
-            rename_no_replace(source, destination)
+        def create_competitor(*arguments: object) -> None:
+            if len(arguments) == 2:
+                destination = Path(arguments[1])
+                destination.mkdir(parents=True)
+                competitor.write_text("keep\n", encoding="ascii")
+            else:
+                destination_parent = int(arguments[3])
+                destination_name = str(arguments[4])
+                os.mkdir(destination_name, dir_fd=destination_parent)
+                checkout_descriptor = os.open(
+                    destination_name,
+                    os.O_RDONLY | os.O_DIRECTORY,
+                    dir_fd=destination_parent,
+                )
+                try:
+                    descriptor = os.open(
+                        "owned-by-other",
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o644,
+                        dir_fd=checkout_descriptor,
+                    )
+                    try:
+                        os.write(descriptor, b"keep\n")
+                    finally:
+                        os.close(descriptor)
+                finally:
+                    os.close(checkout_descriptor)
+            rename_no_replace(*arguments)
 
         with mock.patch(
             "scripts.posix.source._rename_no_replace",
@@ -411,10 +623,10 @@ class FetchInputTests(unittest.TestCase):
                 (root / "owned-by-other").read_text(encoding="ascii"), "keep\n"
             )
 
-    @mock.patch("scripts.posix.source.shutil.rmtree")
+    @mock.patch("scripts.posix.source._remove_owned_temporary_directory")
     @mock.patch("scripts.posix.source.subprocess.run")
     def test_cleanup_failure_does_not_mask_clone_error(
-        self, run: mock.Mock, rmtree: mock.Mock
+        self, run: mock.Mock, remove_temporary: mock.Mock
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
@@ -428,74 +640,12 @@ class FetchInputTests(unittest.TestCase):
                 raise original_error
 
             run.side_effect = fail_clone
-            rmtree.side_effect = RuntimeError("cleanup failed")
+            remove_temporary.side_effect = RuntimeError("cleanup failed")
 
             with self.assertRaises(subprocess.CalledProcessError) as raised:
                 fetch_checkout(pinned_lock(), root, series)
 
             self.assertIs(raised.exception, original_error)
-
-
-class TreeDigestTests(unittest.TestCase):
-    def test_git_control_file_is_excluded_from_source_tree_digest(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            (root / "source.c").write_text("int main(void) {}\n", encoding="ascii")
-            git_control = root / ".git"
-            git_control.write_text("gitdir: /first\n", encoding="ascii")
-            first_digest = source_module._tree_sha256(root)
-
-            git_control.write_text("gitdir: /second\n", encoding="ascii")
-            second_digest = source_module._tree_sha256(root)
-
-            self.assertEqual(first_digest, second_digest)
-
-    def test_tree_hash_uses_held_directory_when_ancestor_is_replaced(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory) / "root"
-            nested = root / "nested"
-            nested.mkdir(parents=True)
-            source = nested / "source.c"
-            source.write_text("safe\n", encoding="ascii")
-            expected_digest = source_module._tree_sha256(root)
-
-            moved_nested = root / "moved-nested"
-            outside = Path(temporary_directory) / "outside"
-            outside.mkdir()
-            (outside / "source.c").write_text("outside\n", encoding="ascii")
-            real_lstat = Path.lstat
-            real_open = source_module.os.open
-            replaced = False
-
-            def replace_ancestor() -> None:
-                nonlocal replaced
-                if not replaced:
-                    nested.rename(moved_nested)
-                    nested.symlink_to(outside, target_is_directory=True)
-                    replaced = True
-
-            def racing_lstat(path: Path) -> object:
-                if path == source:
-                    replace_ancestor()
-                return real_lstat(path)
-
-            def racing_open(
-                path: object,
-                flags: int,
-                mode: int = 0o777,
-                *,
-                dir_fd: int | None = None,
-            ) -> int:
-                if dir_fd is not None and path == "source.c":
-                    replace_ancestor()
-                return real_open(path, flags, mode, dir_fd=dir_fd)
-
-            with mock.patch.object(Path, "lstat", new=racing_lstat), mock.patch(
-                "scripts.posix.source.os.open", side_effect=racing_open
-            ):
-                actual_digest = source_module._tree_sha256(root)
-
-            self.assertEqual(actual_digest, expected_digest)
 
 
 class PatchContainmentTests(unittest.TestCase):
@@ -698,6 +848,11 @@ class DocumentationTests(unittest.TestCase):
 
         self.assertIn("By default", readme)
         self.assertIn("--work-dir", readme)
+        self.assertIn("Git tree", readme)
+        self.assertIn("symlink", readme)
+        self.assertIn("executable", readme)
+        self.assertIn("empty directories", readme)
+        self.assertIn("directory modes", readme)
 
 
 if __name__ == "__main__":
