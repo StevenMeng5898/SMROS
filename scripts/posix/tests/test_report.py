@@ -1165,6 +1165,98 @@ class RendererTests(ReportFixture, unittest.TestCase):
         self.assertEqual(
             set(path.name for path in self.output.iterdir()), set(OUTPUT_NAMES)
         )
+        work_root = (
+            self.root
+            / report_module._REPORT_QUARANTINE_NAME
+            / report_module._report_work_slot_name(self.output.name)
+            / report_module._REPORT_WORK_ROOT_NAME
+        )
+        self.assertEqual(list(work_root.iterdir()), [])
+
+        generate_report(
+            self.stage / "manifest.json",
+            smros_results=(self.smros_results,),
+            output_directory=self.output,
+        )
+        self.assertEqual(
+            set(path.name for path in self.output.iterdir()), set(OUTPUT_NAMES)
+        )
+
+    def test_completed_exchange_finalizes_slot_and_preserves_interruption(
+        self,
+    ) -> None:
+        generate_report(
+            self.stage / "manifest.json",
+            smros_results=(self.smros_results,),
+            output_directory=self.output,
+        )
+        prior_info = self.output.stat()
+        prior_identity = (prior_info.st_dev, prior_info.st_ino)
+        interruption = KeyboardInterrupt("failure after completed exchange")
+        rename_exchange = report_module._rename_exchange
+        reset_work_root = report_module._reset_report_work_root
+        reset_identities: list[tuple[int, int]] = []
+
+        def exchange_then_interrupt(
+            source_parent: int,
+            source_name: str,
+            destination_parent: int,
+            destination_name: str,
+        ) -> None:
+            rename_exchange(
+                source_parent,
+                source_name,
+                destination_parent,
+                destination_name,
+            )
+            raise interruption
+
+        def record_reset(slot: int, work: int) -> None:
+            info = os.fstat(work)
+            reset_identities.append((info.st_dev, info.st_ino))
+            reset_work_root(slot, work)
+
+        with mock.patch.object(
+            report_module,
+            "_rename_exchange",
+            side_effect=exchange_then_interrupt,
+        ), mock.patch.object(
+            report_module,
+            "_reset_report_work_root",
+            side_effect=record_reset,
+        ):
+            with self.assertRaises(KeyboardInterrupt) as raised:
+                generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(self.smros_results,),
+                    output_directory=self.output,
+                )
+
+        self.assertIs(raised.exception, interruption)
+        self.assertEqual(
+            set(path.name for path in self.output.iterdir()), set(OUTPUT_NAMES)
+        )
+        json.loads((self.output / "summary.json").read_text(encoding="utf-8"))
+        ET.parse(self.output / "junit.xml")
+        work_root = (
+            self.root
+            / report_module._REPORT_QUARANTINE_NAME
+            / report_module._report_work_slot_name(self.output.name)
+            / report_module._REPORT_WORK_ROOT_NAME
+        )
+        work_info = work_root.stat()
+        self.assertEqual((work_info.st_dev, work_info.st_ino), prior_identity)
+        self.assertEqual(reset_identities, [prior_identity])
+        self.assertEqual(list(work_root.iterdir()), [])
+
+        generate_report(
+            self.stage / "manifest.json",
+            smros_results=(self.smros_results,),
+            output_directory=self.output,
+        )
+        self.assertEqual(
+            set(path.name for path in self.output.iterdir()), set(OUTPUT_NAMES)
+        )
 
     def test_publication_does_not_unlink_a_post_validation_replacement(
         self,

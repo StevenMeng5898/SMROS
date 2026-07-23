@@ -1750,9 +1750,19 @@ def _publish_generation(output_directory: Path, outputs: Mapping[str, bytes]) ->
                 raise ValueError(
                     "concurrent destination appeared during report publication"
                 ) from error
-            except BaseException:
+            except BaseException as publication_error:
                 if _directory_entry_matches(parent, output_directory.name, work):
                     generated_in_slot = False
+                    try:
+                        os.fsync(slot)
+                        os.fsync(parent)
+                        replacement_work = _create_report_work_root(slot)
+                        os.close(replacement_work)
+                    except BaseException as cleanup_error:
+                        raise BaseExceptionGroup(
+                            "report publication and cleanup both failed",
+                            [publication_error, cleanup_error],
+                        )
                 raise
             generated_in_slot = False
             os.fsync(slot)
@@ -1781,11 +1791,27 @@ def _publish_generation(output_directory: Path, outputs: Mapping[str, bytes]) ->
                         parent,
                         output_directory.name,
                     )
-                except BaseException:
+                except BaseException as publication_error:
                     if _directory_entry_matches(
                         parent, output_directory.name, work
                     ):
                         generated_in_slot = False
+                        if _directory_entry_matches(
+                            slot,
+                            _REPORT_WORK_ROOT_NAME,
+                            held_destination,
+                        ):
+                            try:
+                                os.fsync(slot)
+                                os.fsync(parent)
+                                _reset_report_work_root(
+                                    slot, held_destination
+                                )
+                            except BaseException as cleanup_error:
+                                raise BaseExceptionGroup(
+                                    "report publication and cleanup both failed",
+                                    [publication_error, cleanup_error],
+                                )
                     raise
                 generated_in_slot = False
                 os.fsync(slot)
