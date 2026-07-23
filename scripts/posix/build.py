@@ -2,8 +2,12 @@
 
 The guest manifest checksum is SHA-256 over its complete UTF-8 TSV bytes after
 replacing the ``manifest_sha256`` metadata value with 64 ASCII zeroes.  This is
-a canonical, non-self-referential definition and covers every other byte. The
-``build_results_sha256`` value is the SHA-256 of the exact canonical NDJSON.
+a canonical, non-self-referential definition and covers every other byte.
+
+The ``build_results_sha256`` value is SHA-256 over canonical UTF-8 NDJSON in
+file order, using sorted JSON keys, compact separators, ASCII escaping, and LF
+terminators, after replacing every ``duration_ms`` value with integer zero.
+Every other field is preserved. The raw NDJSON retains the measured durations.
 """
 
 from __future__ import annotations
@@ -712,6 +716,14 @@ def _json_build_result(result: BuildResult) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
+def _build_results_digest(results: Sequence[BuildResult]) -> str:
+    canonical = "".join(
+        _json_build_result(replace(result, duration_ms=0)) + "\n"
+        for result in results
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _shell_test(path: str) -> SuiteTest:
     from .discovery import api_group
 
@@ -825,9 +837,7 @@ def _write_manifests(
     build_results_text = "".join(
         _json_build_result(result) + "\n" for result in results
     )
-    build_results_digest = hashlib.sha256(
-        build_results_text.encode("utf-8")
-    ).hexdigest()
+    build_results_digest = _build_results_digest(results)
     bound_metadata = replace(
         metadata, build_results_sha256=build_results_digest
     )
@@ -1375,15 +1385,14 @@ def verify_stage(
         _validate_metadata(expected_provenance)
         if actual_provenance != expected_provenance:
             raise ValueError("manifest metadata does not match current build inputs")
-    build_results_data = (stage / "build-results.ndjson").read_bytes()
-    if hashlib.sha256(build_results_data).hexdigest() != metadata.build_results_sha256:
-        raise ValueError("build results checksum mismatch")
     build_results = _load_build_results(
         stage / "build-results.ndjson",
         tests,
         strict_paths=strict_command_paths,
         revision=metadata.revision,
     )
+    if _build_results_digest(build_results) != metadata.build_results_sha256:
+        raise ValueError("build results checksum mismatch")
     try:
         host_text = (stage / "manifest.json").read_text(encoding="utf-8")
         host_manifest = json.loads(

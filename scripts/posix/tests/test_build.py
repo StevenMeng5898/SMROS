@@ -115,9 +115,7 @@ def write_stage_fixture(stage: Path, test: SuiteTest) -> None:
     )
     bound_metadata = replace(
         metadata(),
-        build_results_sha256=hashlib.sha256(
-            build_results_text.encode("utf-8")
-        ).hexdigest(),
+        build_results_sha256=build_module._build_results_digest(build_results),
     )
     manifest_text, _ = render_manifest(bound_metadata, (test,))
     parsed_metadata, _ = parse_manifest(manifest_text.encode())
@@ -585,6 +583,67 @@ class CampaignTests(unittest.TestCase):
 
 
 class ManifestTests(unittest.TestCase):
+    def test_build_results_digest_normalizes_only_duration(self) -> None:
+        test = replace(
+            suite_test(),
+            binary="bin/conformance/interfaces/getpid/1-1.c.test",
+            sha256="a" * 64,
+        )
+        result = BuildResult(
+            test_id=test.test_id,
+            stage="compile",
+            status="passed",
+            argv=("aarch64-linux-gnu-gcc", "-c", test.source),
+            returncode=0,
+            stdout="stdout",
+            stderr="stderr",
+            duration_ms=1,
+            artifact_sha256="a" * 64,
+        )
+
+        def write(results: tuple[BuildResult, ...]) -> tuple[str, str, bytes]:
+            stage = root / str(len(list(root.iterdir())))
+            stage.mkdir()
+            manifest_digest = build_module._write_manifests(
+                stage, metadata(), (test,), results
+            )
+            manifest_metadata, _tests = parse_manifest(
+                (stage / "manifest.tsv").read_bytes()
+            )
+            return (
+                manifest_metadata.build_results_sha256,
+                manifest_digest,
+                (stage / "build-results.ndjson").read_bytes(),
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base_digest, base_manifest_digest, base_raw = write((result,))
+            duration_digest, duration_manifest_digest, duration_raw = write(
+                (replace(result, duration_ms=999),)
+            )
+            stable_mutations = {
+                "test_id": replace(result, test_id="other/test.c"),
+                "stage": replace(result, stage="link"),
+                "status": replace(result, status="failed"),
+                "argv": replace(result, argv=("other-compiler",)),
+                "returncode": replace(result, returncode=1),
+                "stdout": replace(result, stdout="changed stdout"),
+                "stderr": replace(result, stderr="changed stderr"),
+                "artifact_sha256": replace(result, artifact_sha256="b" * 64),
+            }
+            mutated_digests = {
+                name: write((mutated,))[0]
+                for name, mutated in stable_mutations.items()
+            }
+
+        self.assertNotEqual(base_raw, duration_raw)
+        self.assertEqual(base_digest, duration_digest)
+        self.assertEqual(base_manifest_digest, duration_manifest_digest)
+        for name, digest in mutated_digests.items():
+            with self.subTest(field=name):
+                self.assertNotEqual(base_digest, digest)
+
     def test_manifest_is_sorted_and_checksum_is_deterministic(self) -> None:
         first = replace(suite_test("conformance/interfaces/write/2-1.c"), binary="bin/conformance/interfaces/write/2-1.c.test", sha256="a" * 64)
         second = replace(suite_test("conformance/interfaces/write/1-1.c"), binary="bin/conformance/interfaces/write/1-1.c.test", sha256="b" * 64)
@@ -690,6 +749,37 @@ class ManifestTests(unittest.TestCase):
 
 
 class StagingTests(unittest.TestCase):
+    def test_verify_accepts_changed_build_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            binary = stage / "bin/conformance/interfaces/getpid/1-1.c.test"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"elf")
+            test = replace(
+                suite_test(),
+                binary="bin/conformance/interfaces/getpid/1-1.c.test",
+                sha256=hashlib.sha256(b"elf").hexdigest(),
+            )
+            write_stage_fixture(stage, test)
+            path = stage / "build-results.ndjson"
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            rows[0]["duration_ms"] = 999
+            path.write_text(
+                "".join(
+                    json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                    for row in rows
+                ),
+                encoding="utf-8",
+            )
+
+            summary = verify_stage(
+                stage,
+                verify_architecture=False,
+                expected_metadata=metadata(),
+            )
+
+        self.assertEqual(summary.compile_pass, 1)
+
     def test_safe_stage_path_rejects_escape_and_dot_components(self) -> None:
         for relative in ("../libc.so.6", "lib/../libc.so.6", "./libc.so.6", "/libc.so.6"):
             with self.subTest(relative=relative):
