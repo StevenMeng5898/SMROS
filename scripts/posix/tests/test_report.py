@@ -7,12 +7,14 @@ import hashlib
 from html.parser import HTMLParser
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 import xml.etree.ElementTree as ET
 
-from scripts.posix import cli
+from scripts.posix import cli, report as report_module
 from scripts.posix.build import (
     CHECKSUM_DEFINITION,
     EMPTY_SHA256,
@@ -278,6 +280,7 @@ class ReportFixture:
             binary_sha256=test.sha256 or EMPTY_SHA256,
             runtime_snapshot_sha256="6" * 64,
             run_id=run_id,
+            resource_evidence="measured",
         )
 
     def _write_runtime(
@@ -510,7 +513,8 @@ class AggregationTests(ReportFixture, unittest.TestCase):
             json.loads(line)
             for line in self.smros_results.read_text(encoding="utf-8").splitlines()
         ]
-        rows[1]["test_id"] = rows[0]["test_id"]
+        for key in ("test_id", "group", "api", "binary_sha256"):
+            rows[1][key] = rows[0][key]
         duplicated = self.root / "duplicate-completion.ndjson"
         duplicated.write_text(
             "".join(
@@ -588,6 +592,7 @@ class AggregationTests(ReportFixture, unittest.TestCase):
             row["source"] = "qemu-user"
             if row["record_type"] == "attempt":
                 row.pop("resource_deltas")
+                row.pop("resource_evidence")
         linux = self.root / "legacy-linux.ndjson"
         linux.write_text(
             "".join(
@@ -607,6 +612,101 @@ class AggregationTests(ReportFixture, unittest.TestCase):
             summary["resource_deltas"], ResourceDeltas().to_dict()
         )
         self.assertEqual(summary["counts"]["leaked_resources"], 0)
+        pass_result = next(
+            row for row in summary["tests"] if row["test_id"] == self.tests[0].test_id
+        )
+        self.assertEqual(pass_result["resource_evidence"], "unavailable")
+
+    def test_smros_rows_require_complete_resource_evidence(self) -> None:
+        for label in ("missing", "partial"):
+            with self.subTest(label=label):
+                rows = [
+                    json.loads(line)
+                    for line in self.smros_results.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                ]
+                if label == "missing":
+                    rows[0].pop("resource_deltas")
+                else:
+                    rows[0]["resource_deltas"].pop("timers")
+                invalid = self.root / f"resource-{label}.ndjson"
+                invalid.write_text(
+                    "".join(
+                        json.dumps(row, sort_keys=True, separators=(",", ":"))
+                        + "\n"
+                        for row in rows
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "complete resource evidence"
+                ):
+                    generate_report(
+                        self.stage / "manifest.json",
+                        smros_results=(invalid,),
+                        output_directory=self.output,
+                    )
+
+    def test_smros_rows_require_explicit_measured_resource_evidence(self) -> None:
+        for label, evidence in (("missing", None), ("unavailable", "unavailable")):
+            with self.subTest(label=label):
+                rows = [
+                    json.loads(line)
+                    for line in self.smros_results.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                ]
+                if evidence is None:
+                    rows[0].pop("resource_evidence")
+                else:
+                    rows[0]["resource_evidence"] = evidence
+                invalid = self.root / f"resource-evidence-{label}.ndjson"
+                invalid.write_text(
+                    "".join(
+                        json.dumps(row, sort_keys=True, separators=(",", ":"))
+                        + "\n"
+                        for row in rows
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, "resource evidence"):
+                    generate_report(
+                        self.stage / "manifest.json",
+                        smros_results=(invalid,),
+                        output_directory=self.output,
+                    )
+
+    def test_attempt_dimensions_are_bound_to_manifest_and_build_results(self) -> None:
+        cases = {
+            "binary checksum": ("binary_sha256", "9" * 64),
+            "build status": ("build_status", "failed"),
+            "link status": ("link_status", "not-linked"),
+        }
+        for label, (field, replacement) in cases.items():
+            with self.subTest(label=label):
+                rows = [
+                    json.loads(line)
+                    for line in self.smros_results.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                ]
+                rows[0][field] = replacement
+                invalid = self.root / f"attempt-{field}.ndjson"
+                invalid.write_text(
+                    "".join(
+                        json.dumps(row, sort_keys=True, separators=(",", ":"))
+                        + "\n"
+                        for row in rows
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, label):
+                    generate_report(
+                        self.stage / "manifest.json",
+                        smros_results=(invalid,),
+                        output_directory=self.output,
+                    )
 
 
 class RendererTests(ReportFixture, unittest.TestCase):
@@ -664,7 +764,9 @@ class RendererTests(ReportFixture, unittest.TestCase):
                         signal=None,
                         timed_out=False,
                         duration_ms=9,
-                        resource_deltas={"linux_fds": 2, "timers": 1},
+                        resource_deltas=ResourceDeltas.from_mapping(
+                            {"linux_fds": 2, "timers": 1}
+                        ).to_dict(),
                     ),
                     event(
                         4,
@@ -813,6 +915,7 @@ class RendererTests(ReportFixture, unittest.TestCase):
             row for row in summary["tests"] if row["test_id"] == self.tests[0].test_id
         )
         self.assertEqual(test["resource_deltas"]["linux_fds"], 2)
+        self.assertEqual(test["resource_evidence"], "measured")
         self.assertEqual(test["attempts"][0]["resource_deltas"]["scheduler_threads"], 1)
         self.assertEqual(summary["resource_deltas"]["linux_fds"], 2)
         self.assertEqual(summary["resource_deltas"]["timers"], 5)
@@ -962,6 +1065,123 @@ class RendererTests(ReportFixture, unittest.TestCase):
                 output_directory=linked,
             )
         self.assertEqual(list(outside.iterdir()), [])
+
+    def test_publication_rolls_back_raced_destination_without_deleting_it(self) -> None:
+        self.output.mkdir()
+        (self.output / "prior.txt").write_text("prior", encoding="utf-8")
+        prior_name = "validated-prior-report"
+        real_exchange = report_module._rename_exchange
+        replacement_identity: tuple[int, int] | None = None
+        exchange_count = 0
+
+        def race_then_exchange(parent: int, first: str, second: str) -> None:
+            nonlocal exchange_count, replacement_identity
+            exchange_count += 1
+            if exchange_count == 1:
+                os.rename(
+                    second,
+                    prior_name,
+                    src_dir_fd=parent,
+                    dst_dir_fd=parent,
+                )
+                os.mkdir(second, 0o700, dir_fd=parent)
+                replacement = self.output / "nested"
+                replacement.mkdir()
+                (replacement / "keep.txt").write_text(
+                    "replacement", encoding="utf-8"
+                )
+                info = self.output.stat()
+                replacement_identity = (info.st_dev, info.st_ino)
+            real_exchange(parent, first, second)
+
+        with mock.patch.object(
+            report_module, "_rename_exchange", side_effect=race_then_exchange
+        ):
+            with self.assertRaisesRegex(ValueError, "changed during publication"):
+                generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(self.smros_results,),
+                    output_directory=self.output,
+                )
+
+        output_info = self.output.stat()
+        self.assertEqual(
+            (output_info.st_dev, output_info.st_ino), replacement_identity
+        )
+        self.assertEqual(
+            (self.output / "nested/keep.txt").read_text(encoding="utf-8"),
+            "replacement",
+        )
+        self.assertEqual(
+            (self.root / prior_name / "prior.txt").read_text(encoding="utf-8"),
+            "prior",
+        )
+        self.assertEqual(exchange_count, 2)
+        self.assertEqual(list(self.root.glob(".report.*.tmp")), [])
+
+    def test_publication_reports_rollback_failure_without_deleting_replacement(
+        self,
+    ) -> None:
+        self.output.mkdir()
+        (self.output / "prior.txt").write_text("prior", encoding="utf-8")
+        prior_name = "validated-prior-report"
+        real_exchange = report_module._rename_exchange
+        replacement_identity: tuple[int, int] | None = None
+        exchange_count = 0
+
+        def race_then_fail_rollback(parent: int, first: str, second: str) -> None:
+            nonlocal exchange_count, replacement_identity
+            exchange_count += 1
+            if exchange_count == 1:
+                os.rename(
+                    second,
+                    prior_name,
+                    src_dir_fd=parent,
+                    dst_dir_fd=parent,
+                )
+                os.mkdir(second, 0o700, dir_fd=parent)
+                replacement = self.output / "nested"
+                replacement.mkdir()
+                (replacement / "keep.txt").write_text(
+                    "replacement", encoding="utf-8"
+                )
+                info = self.output.stat()
+                replacement_identity = (info.st_dev, info.st_ino)
+                real_exchange(parent, first, second)
+                return
+            raise OSError("rollback refused")
+
+        with mock.patch.object(
+            report_module,
+            "_rename_exchange",
+            side_effect=race_then_fail_rollback,
+        ):
+            with self.assertRaises(ExceptionGroup) as raised:
+                generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(self.smros_results,),
+                    output_directory=self.output,
+                )
+
+        failures = raised.exception.exceptions
+        self.assertEqual(len(failures), 2)
+        self.assertRegex(str(failures[0]), "changed during publication")
+        self.assertRegex(str(failures[1]), "rollback refused")
+        self.assertEqual(exchange_count, 2)
+        temporary_paths = list(self.root.glob(".report.*.tmp"))
+        self.assertEqual(len(temporary_paths), 1)
+        temporary_info = temporary_paths[0].stat()
+        self.assertEqual(
+            (temporary_info.st_dev, temporary_info.st_ino), replacement_identity
+        )
+        self.assertEqual(
+            (temporary_paths[0] / "nested/keep.txt").read_text(encoding="utf-8"),
+            "replacement",
+        )
+        self.assertEqual(
+            (self.root / prior_name / "prior.txt").read_text(encoding="utf-8"),
+            "prior",
+        )
 
 
 class CliTests(ReportFixture, unittest.TestCase):

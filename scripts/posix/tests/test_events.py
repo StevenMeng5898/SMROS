@@ -4,10 +4,17 @@ import json
 import unittest
 
 from scripts.posix.events import EVENT_PREFIX, parse_serial_log
+from scripts.posix.model import RESOURCE_DELTA_NAMES
 
 
 RUN_ID = "run-123"
 MANIFEST_SHA256 = "a" * 64
+
+
+def _resources(**values: int) -> dict[str, int]:
+    result = {name: 0 for name in RESOURCE_DELTA_NAMES}
+    result.update(values)
+    return result
 
 
 def _event(seq: int, event: str, **values: object) -> str:
@@ -26,7 +33,9 @@ def _event(seq: int, event: str, **values: object) -> str:
 
 
 class SerialEventTests(unittest.TestCase):
-    def _one_attempt_log(self, **end_values: object) -> str:
+    def _one_attempt_log(
+        self, *, include_resources: bool = True, **end_values: object
+    ) -> str:
         test_id = "conformance/interfaces/getpid/1-1.c"
         status = str(end_values.get("status", "pass"))
         end_payload: dict[str, object] = {
@@ -38,6 +47,8 @@ class SerialEventTests(unittest.TestCase):
             "timed_out": False,
             "duration_ms": 1,
         }
+        if include_resources:
+            end_payload["resource_deltas"] = _resources()
         end_payload.update(end_values)
         return "\n".join(
             (
@@ -96,7 +107,7 @@ class SerialEventTests(unittest.TestCase):
                     signal=None,
                     timed_out=False,
                     duration_ms=7,
-                    resource_deltas={"linux_fds": 0, "processes": 0},
+                    resource_deltas=_resources(),
                 ),
                 _event(
                     4,
@@ -124,6 +135,7 @@ class SerialEventTests(unittest.TestCase):
         ))
         self.assertEqual(attempt.resource_deltas.linux_fds, 0)
         self.assertEqual(attempt.resource_deltas.processes, 0)
+        self.assertEqual(attempt.resource_evidence, "measured")
 
     def test_rejects_duplicate_terminal_event(self) -> None:
         log = "\n".join(
@@ -237,6 +249,19 @@ class SerialEventTests(unittest.TestCase):
         self.assertEqual(len(parsed.attempts), 1)
         self.assertEqual(parsed.attempts[0].status, "interrupted")
         self.assertEqual(parsed.attempts[0].stdout, "partial output\n")
+        self.assertEqual(parsed.attempts[0].resource_evidence, "unavailable")
+
+    def test_explicit_test_end_requires_complete_resource_evidence(self) -> None:
+        cases = {
+            "missing": {"include_resources": False},
+            "partial": {"resource_deltas": {"linux_fds": 0}},
+        }
+        for label, values in cases.items():
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValueError, "complete resource evidence"
+                ):
+                    parse_serial_log(self._one_attempt_log(**values))
 
     def test_complete_suite_requires_every_selected_attempt(self) -> None:
         log = "\n".join(
@@ -282,6 +307,7 @@ class SerialEventTests(unittest.TestCase):
                         signal=None,
                         timed_out=False,
                         duration_ms=1,
+                        resource_deltas=_resources(),
                     ),
                 )
             )

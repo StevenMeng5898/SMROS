@@ -190,6 +190,12 @@ class ResourceDeltas:
         arguments = {name: value.get(name, 0) for name in RESOURCE_DELTA_NAMES}
         return cls(**arguments)  # type: ignore[arg-type]
 
+    @classmethod
+    def from_complete_mapping(cls, value: Mapping[str, object]) -> ResourceDeltas:
+        if set(value) != set(RESOURCE_DELTA_NAMES):
+            raise ValueError("resource evidence does not contain every resource class")
+        return cls.from_mapping(value)
+
     def to_dict(self) -> dict[str, int]:
         return {name: getattr(self, name) for name in RESOURCE_DELTA_NAMES}
 
@@ -234,6 +240,7 @@ class RuntimeAttempt:
     runtime_snapshot_sha256: str = ""
     run_id: str = ""
     resource_deltas: ResourceDeltas = ResourceDeltas()
+    resource_evidence: str = "unavailable"
 
     def to_dict(self) -> dict[str, object]:
         """Return every core and finalized runtime field for persistence."""
@@ -256,6 +263,7 @@ class RuntimeAttempt:
             "pts_status": self.pts_status,
             "revision": self.revision,
             "resource_deltas": self.resource_deltas.to_dict(),
+            "resource_evidence": self.resource_evidence,
             "runtime_snapshot_sha256": self.runtime_snapshot_sha256,
             "run_id": self.run_id,
             "signal": self.signal,
@@ -311,6 +319,7 @@ class SerialAttempt:
     stdout: str
     stderr: str
     resource_deltas: ResourceDeltas
+    resource_evidence: str
     run_id: str
     manifest_sha256: str
     architecture: str

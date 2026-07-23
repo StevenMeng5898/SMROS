@@ -158,29 +158,13 @@ def _serial_event(value: dict[str, object]) -> SerialEvent:
 
 
 def _resource_deltas(value: Mapping[str, object]) -> ResourceDeltas:
-    raw = value.get("resource_deltas", {})
+    raw = value.get("resource_deltas")
     if not isinstance(raw, dict):
-        raise ValueError("event resource deltas are invalid")
-    result: dict[str, object] = dict(raw)
-    for key in (
-        "processes_delta",
-        "scheduler_threads_delta",
-        "linux_mappings_delta",
-        "linux_fds_delta",
-        "linux_shared_memory_delta",
-        "kernel_handles_delta",
-    ):
-        if key in value:
-            if type(value[key]) is not int:
-                raise ValueError("event resource deltas are invalid")
-            normalized = key.removesuffix("_delta")
-            if normalized in result:
-                raise ValueError(f"duplicate event resource delta: {normalized}")
-            result[normalized] = value[key]
+        raise ValueError("event lacks complete resource evidence")
     try:
-        return ResourceDeltas.from_mapping(result)
+        return ResourceDeltas.from_complete_mapping(raw)
     except ValueError as error:
-        raise ValueError("event resource deltas are invalid") from error
+        raise ValueError("event lacks complete resource evidence") from error
 
 
 def _attempt_from_end(
@@ -254,6 +238,7 @@ def _attempt_from_end(
         stdout=stdout,
         stderr=stderr,
         resource_deltas=_resource_deltas(value),
+        resource_evidence="measured",
         run_id=end.run_id,
         manifest_sha256=end.manifest_sha256,
         architecture=end.architecture,
@@ -278,6 +263,7 @@ def _interrupted_attempt(start: SerialEvent, output: list[str]) -> SerialAttempt
         stdout="".join(output),
         stderr="",
         resource_deltas=ResourceDeltas(),
+        resource_evidence="unavailable",
         run_id=start.run_id,
         manifest_sha256=start.manifest_sha256,
         architecture=start.architecture,

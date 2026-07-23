@@ -367,14 +367,24 @@ def _require_optional_text(value: object, label: str) -> str | None:
 def _validate_attempt(
     value: Mapping[str, object],
     tests_by_id: Mapping[str, SuiteTest],
+    build_by_identity: Mapping[tuple[str, str], BuildResult],
     metadata: ManifestMetadata,
     line_number: int,
+    *,
+    role: str,
 ) -> RuntimeAttempt:
     expected = {field.name for field in fields(RuntimeAttempt)} | {"record_type"}
-    compatible = expected - {"resource_deltas"}
-    if set(value) not in {frozenset(expected), frozenset(compatible)} or value.get(
-        "record_type"
-    ) != "attempt":
+    without_evidence = expected - {"resource_evidence"}
+    without_deltas = expected - {"resource_deltas"}
+    legacy = without_evidence - {"resource_deltas"}
+    allowed_schemas = {
+        frozenset(expected),
+        frozenset(without_evidence),
+        frozenset(without_deltas),
+    }
+    if role == "linux":
+        allowed_schemas.add(frozenset(legacy))
+    if set(value) not in allowed_schemas or value.get("record_type") != "attempt":
         raise ValueError(f"invalid runtime attempt schema at line {line_number}")
     test_id = value["test_id"]
     if not isinstance(test_id, str) or test_id not in tests_by_id:
@@ -383,6 +393,22 @@ def _validate_attempt(
     for key, expected_value in (("group", test.group), ("api", test.api)):
         if value[key] != expected_value:
             raise ValueError(f"runtime attempt {key} mismatch at line {line_number}")
+    if value["binary_sha256"] != test.sha256:
+        raise ValueError(
+            f"runtime attempt binary checksum mismatch at line {line_number}"
+        )
+    compile_result = build_by_identity.get((test_id, "compile"))
+    expected_build_status = (
+        compile_result.status if compile_result is not None else "not-built"
+    )
+    if value["build_status"] != expected_build_status:
+        raise ValueError(f"runtime attempt build status mismatch at line {line_number}")
+    link_result = build_by_identity.get((test_id, "link"))
+    expected_link_status = (
+        link_result.status if link_result is not None else "not-linked"
+    )
+    if value["link_status"] != expected_link_status:
+        raise ValueError(f"runtime attempt link status mismatch at line {line_number}")
     for key in (
         "platform",
         "build_status",
@@ -397,6 +423,19 @@ def _validate_attempt(
         if not isinstance(value[key], str) or not value[key]:
             if key not in {"stdout", "stderr"} or value[key] != "":
                 raise ValueError(f"runtime attempt {key} is invalid at line {line_number}")
+    if role == "linux":
+        if (
+            value["platform"] != LINUX_REFERENCE_PLATFORM
+            or value["source"] != LINUX_REFERENCE_SOURCE
+        ):
+            raise ValueError(
+                "Linux-reference platform/source does not match its input role"
+            )
+    elif role == "smros":
+        if value["platform"] != SMROS_PLATFORM or value["source"] not in SMROS_SOURCES:
+            raise ValueError("SMROS platform/source does not match its input role")
+    else:
+        raise AssertionError(f"unknown runtime input role: {role}")
     if value["status"] not in RAW_RUNTIME_STATUSES:
         raise ValueError(
             f"runtime attempt raw runtime status is invalid at line {line_number}"
@@ -457,17 +496,48 @@ def _validate_attempt(
         or value["smros_commit"] != metadata.smros_commit
     ):
         raise ValueError(f"runtime attempt provenance mismatch at line {line_number}")
-    raw_resources = value.get("resource_deltas", {})
-    if not isinstance(raw_resources, dict):
-        raise ValueError(f"runtime attempt resource deltas are invalid at line {line_number}")
-    try:
-        resource_deltas = ResourceDeltas.from_mapping(raw_resources)
-    except ValueError as error:
-        raise ValueError(
-            f"runtime attempt resource deltas are invalid at line {line_number}"
-        ) from error
+    raw_resources = value.get("resource_deltas")
+    raw_evidence = value.get("resource_evidence")
+    if role == "smros":
+        if not isinstance(raw_resources, dict):
+            raise ValueError(
+                f"SMROS attempt lacks complete resource evidence at line {line_number}"
+            )
+        try:
+            resource_deltas = ResourceDeltas.from_complete_mapping(raw_resources)
+        except ValueError as error:
+            raise ValueError(
+                f"SMROS attempt lacks complete resource evidence at line {line_number}"
+            ) from error
+        resource_evidence = raw_evidence
+        if resource_evidence != "measured":
+            raise ValueError(
+                f"SMROS attempt resource evidence is invalid at line {line_number}"
+            )
+    elif role == "linux":
+        if raw_resources is None:
+            resource_deltas = ResourceDeltas()
+        elif isinstance(raw_resources, dict):
+            try:
+                resource_deltas = ResourceDeltas.from_complete_mapping(raw_resources)
+            except ValueError as error:
+                raise ValueError(
+                    f"Linux attempt resource evidence is invalid at line {line_number}"
+                ) from error
+        else:
+            raise ValueError(
+                f"Linux attempt resource evidence is invalid at line {line_number}"
+            )
+        resource_evidence = raw_evidence or "unavailable"
+        if resource_evidence != "unavailable":
+            raise ValueError(
+                f"Linux attempt resource evidence is invalid at line {line_number}"
+            )
+    else:
+        raise AssertionError(f"unknown runtime input role: {role}")
     payload = {key: value[key] for key in value if key != "record_type"}
     payload["resource_deltas"] = resource_deltas
+    payload["resource_evidence"] = resource_evidence
     return RuntimeAttempt(**payload)  # type: ignore[arg-type]
 
 
@@ -553,6 +623,7 @@ def _validate_terminal(
 def _load_runtime_results(
     path: Path,
     tests: Sequence[SuiteTest],
+    build_results: Sequence[BuildResult],
     metadata: ManifestMetadata,
     *,
     role: str,
@@ -561,6 +632,9 @@ def _load_runtime_results(
     if not data or not data.endswith(b"\n") or b"\r" in data:
         raise ValueError("runtime results must be nonempty canonical LF NDJSON")
     tests_by_id = {test.test_id: test for test in tests}
+    build_by_identity = {
+        (result.test_id, result.stage): result for result in build_results
+    }
     attempts: list[RuntimeAttempt] = []
     rows: list[Mapping[str, object]] = []
     terminal: Mapping[str, object] | None = None
@@ -579,7 +653,16 @@ def _load_runtime_results(
         if terminal is not None:
             raise ValueError("runtime result row appears after terminal record")
         if value.get("record_type") == "attempt":
-            attempts.append(_validate_attempt(value, tests_by_id, metadata, line_number))
+            attempts.append(
+                _validate_attempt(
+                    value,
+                    tests_by_id,
+                    build_by_identity,
+                    metadata,
+                    line_number,
+                    role=role,
+                )
+            )
         elif value.get("record_type") == "run":
             _validate_terminal(value, metadata, attempts, line_number)
             terminal = value
@@ -688,6 +771,7 @@ def _load_serial_results(
                 runtime_snapshot_sha256="0" * 64,
                 run_id=parsed.run_id,
                 resource_deltas=serial_attempt.resource_deltas,
+                resource_evidence=serial_attempt.resource_evidence,
             )
         )
     selected_count = suite_start["selected_count"]
@@ -731,7 +815,11 @@ def _load_smros_results(
     if any(line.startswith(EVENT_PREFIX) for line in text.splitlines()):
         return _load_serial_results(path, text, manifest)
     return _load_runtime_results(
-        path, manifest.tests, manifest.metadata, role="smros"
+        path,
+        manifest.tests,
+        manifest.build_results,
+        manifest.metadata,
+        role="smros",
     )
 
 
@@ -971,6 +1059,15 @@ def _aggregate(
         primary_resources = _sum_resource_deltas(
             attempt.resource_deltas for attempt in primary_attempts
         )
+        evidence_values = {
+            attempt.resource_evidence for attempt in primary_attempts
+        }
+        if evidence_values == {"measured"}:
+            resource_evidence = "measured"
+        elif not evidence_values or evidence_values == {"unavailable"}:
+            resource_evidence = "unavailable"
+        else:
+            resource_evidence = "mixed"
         build_rows = [
             asdict(result)
             for result in manifest.build_results
@@ -1019,6 +1116,7 @@ def _aggregate(
                 ),
                 "linux_reference_status": reference_status,
                 "resource_deltas": primary_resources.to_dict(),
+                "resource_evidence": resource_evidence,
                 "smros_attempts": [_attempt_dict(attempt) for attempt in smros_attempts],
                 "source": test.source,
                 "status": status,
@@ -1262,8 +1360,8 @@ def _markdown_bytes(summary: Mapping[str, object]) -> bytes:
             "",
             "## Tests",
             "",
-            "| Test ID | Group | API | Disposition | Status | Linux delta | Resource deltas | Failure output |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| Test ID | Group | API | Disposition | Status | Linux delta | Resource evidence | Resource deltas | Failure output |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         )
     )
     for row in tests:
@@ -1279,6 +1377,7 @@ def _markdown_bytes(summary: Mapping[str, object]) -> bytes:
                     "disposition",
                     "status",
                     "linux_reference_delta",
+                    "resource_evidence",
                 )
             )
             + " | "
@@ -1352,6 +1451,7 @@ def _html_bytes(summary: Mapping[str, object]) -> bytes:
         "Disposition",
         "Status",
         "Linux delta",
+        "Resource evidence",
         "Resource deltas",
         "Failure output",
     ):
@@ -1369,6 +1469,7 @@ def _html_bytes(summary: Mapping[str, object]) -> bytes:
             "disposition",
             "status",
             "linux_reference_delta",
+            "resource_evidence",
         ):
             _append_text(tr, "td", row[key])
         _append_text(tr, "td", _resource_text(row["resource_deltas"]))
@@ -1407,6 +1508,22 @@ def _clear_directory(descriptor: int) -> None:
             os.rmdir(entry.name, dir_fd=descriptor)
         else:
             os.unlink(entry.name, dir_fd=descriptor)
+
+
+def _directory_entry_matches(
+    parent: int,
+    name: str,
+    descriptor: int,
+) -> bool:
+    try:
+        entry = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    held = os.fstat(descriptor)
+    return stat.S_ISDIR(entry.st_mode) and (entry.st_dev, entry.st_ino) == (
+        held.st_dev,
+        held.st_ino,
+    )
 
 
 def _rename_exchange(parent: int, first: str, second: str) -> None:
@@ -1485,43 +1602,84 @@ def _publish_generation(output_directory: Path, outputs: Mapping[str, bytes]) ->
                 parent, output_directory.name, "report output directory"
             )
             try:
-                held = os.fstat(held_destination)
-                current = os.stat(
-                    output_directory.name,
-                    dir_fd=parent,
-                    follow_symlinks=False,
-                )
-                if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+                if not _directory_entry_matches(
+                    parent, output_directory.name, held_destination
+                ):
                     raise ValueError("report output directory changed before publication")
                 _rename_exchange(parent, temporary_name, output_directory.name)
                 os.fsync(parent)
+                if not _directory_entry_matches(
+                    parent, output_directory.name, temporary
+                ):
+                    raise ValueError("report output directory changed during publication")
+                if not _directory_entry_matches(
+                    parent, temporary_name, held_destination
+                ):
+                    publication_error = ValueError(
+                        "report output directory changed during publication"
+                    )
+                    displaced = os.stat(
+                        temporary_name,
+                        dir_fd=parent,
+                        follow_symlinks=False,
+                    )
+                    displaced_identity = (displaced.st_dev, displaced.st_ino)
+                    try:
+                        if not _directory_entry_matches(
+                            parent, output_directory.name, temporary
+                        ):
+                            raise ValueError(
+                                "generated report changed before publication rollback"
+                            )
+                        _rename_exchange(
+                            parent, temporary_name, output_directory.name
+                        )
+                        os.fsync(parent)
+                        if not _directory_entry_matches(
+                            parent, temporary_name, temporary
+                        ):
+                            raise ValueError(
+                                "publication rollback did not restore the generated report"
+                            )
+                        restored = os.stat(
+                            output_directory.name,
+                            dir_fd=parent,
+                            follow_symlinks=False,
+                        )
+                        if (restored.st_dev, restored.st_ino) != displaced_identity:
+                            raise ValueError(
+                                "publication rollback did not restore the raced destination"
+                            )
+                    except BaseException as rollback_error:
+                        raise ExceptionGroup(
+                            "report publication and rollback both failed",
+                            [publication_error, rollback_error],
+                        )
+                    raise publication_error
+                _clear_directory(held_destination)
+                if not _directory_entry_matches(
+                    parent, temporary_name, held_destination
+                ):
+                    raise ValueError(
+                        "previous report changed during publication cleanup"
+                    )
+                os.rmdir(temporary_name, dir_fd=parent)
+                temporary_exists = False
             finally:
                 os.close(held_destination)
-            old = _open_directory_at(parent, temporary_name, "previous report")
-            try:
-                _clear_directory(old)
-            finally:
-                os.close(old)
-            os.rmdir(temporary_name, dir_fd=parent)
-            temporary_exists = False
         os.fsync(parent)
     finally:
         if temporary is not None:
+            if temporary_exists and _directory_entry_matches(
+                parent, temporary_name, temporary
+            ):
+                _clear_directory(temporary)
+                if _directory_entry_matches(parent, temporary_name, temporary):
+                    try:
+                        os.rmdir(temporary_name, dir_fd=parent)
+                    except FileNotFoundError:
+                        pass
             os.close(temporary)
-        if temporary_exists:
-            try:
-                leftover = _open_directory_at(parent, temporary_name, "temporary report")
-            except ValueError:
-                leftover = None
-            if leftover is not None:
-                try:
-                    _clear_directory(leftover)
-                finally:
-                    os.close(leftover)
-                try:
-                    os.rmdir(temporary_name, dir_fd=parent)
-                except FileNotFoundError:
-                    pass
         os.close(parent)
 
 
@@ -1548,7 +1706,11 @@ def generate_report(
     manifest = _load_manifest(Path(manifest_path))
     linux_inputs = tuple(
         _load_runtime_results(
-            path, manifest.tests, manifest.metadata, role="linux"
+            path,
+            manifest.tests,
+            manifest.build_results,
+            manifest.metadata,
+            role="linux",
         )
         for path in linux_paths
     )
