@@ -431,6 +431,14 @@ fn build_script_recognizes_supported_linker_script_flag_forms() {
     }
 
     for flags in [
+        "-C\x1flink-arg=-Ttext=0x40200000",
+        "-Clink-args=-Ttext-segment 0x40200000",
+        "-C\x1flink-arg=-Tdata=0x44000000",
+        "-Clink-args=-Tbss 0x48000000",
+        "-C\x1flink-arg=-Wl,-Ttext,0x40200000",
+        "-Clink-arg=-Wl,-Ttext-segment,0x40200000",
+        "-C\x1flink-arg=-Wl,-Tdata,0x44000000",
+        "-Clink-arg=-Wl,-Tbss=0x48000000",
         "-C\x1flink-arg=--defsym=NOT-TARGET=1",
         "-C\x1flink-args=-z notext --trace",
         "-Ctarget-feature=+neon",
