@@ -1,7 +1,9 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
@@ -14,6 +16,7 @@ from scripts.posix.source import (
     validate_checkout,
 )
 from scripts.posix import cli, model, source as source_module
+from scripts.posix import build as build_module
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -107,7 +110,6 @@ class SourceLockTests(unittest.TestCase):
                 {key: value for key, value in valid.items() if key != "standard"},
                 {**valid, "branch": "main"},
             )
-
             for values in invalid_values:
                 with self.subTest(fields=sorted(values)):
                     path.write_text(json.dumps(values), encoding="utf-8")
@@ -145,6 +147,39 @@ class SourceLockTests(unittest.TestCase):
 
     def _write_lock(self, path: Path, **overrides: object) -> None:
         path.write_text(json.dumps(self._lock_values(**overrides)), encoding="utf-8")
+
+
+class BoundedGitProcessTests(unittest.TestCase):
+    def test_git_process_capture_is_bounded(self) -> None:
+        completed = source_module._run_git_process(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('x' * 100000)",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout_seconds=1.0,
+        )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertLessEqual(
+            len(completed.stderr), build_module.MAX_DIAGNOSTIC_BYTES
+        )
+
+    def test_git_process_timeout_is_bounded(self) -> None:
+        started = time.monotonic()
+        with self.assertRaises(subprocess.CalledProcessError) as raised:
+            source_module._run_git_process(
+                [sys.executable, "-c", "import time; time.sleep(5)"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout_seconds=0.05,
+            )
+
+        self.assertEqual(raised.exception.returncode, 124)
+        self.assertLess(time.monotonic() - started, 1.0)
 
 
 class LocalCheckoutTests(unittest.TestCase):

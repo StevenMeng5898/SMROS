@@ -1,4 +1,8 @@
 /target/
+/target/posix/
+/host_shared/posixtest/
+/host_shared/.posixtest.tmp-*/
+/host_shared/.posixtest.old-*/
 /kernel8.img
 /smros-fxfs.img
 /qemu.log

@@ -5,8 +5,18 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 from pathlib import Path
+import shutil
 import sys
 
+from .build import (
+    ManifestMetadata,
+    build_campaign,
+    compiler_query,
+    run_bounded_command,
+    sha256_file,
+    validate_build_checkout,
+    verify_stage,
+)
 from .discovery import audit_reviews
 from .source import fetch_checkout, load_source_lock
 
@@ -18,6 +28,12 @@ STUB_REVIEW_PATH = REPOSITORY_ROOT / "third_party" / "posixtest" / "stub-review.
 SHELL_REVIEW_PATH = REPOSITORY_ROOT / "third_party" / "posixtest" / "shell-review.tsv"
 PINNED_C_SOURCE_COUNT = 1_979
 PINNED_SHELL_SOURCE_COUNT = 176
+PINNED_STUB_REVIEW_SHA256 = (
+    "d0cab4333fcb6f0dfc3238485e61b086ed4863bf7a1eebc8e7a756947ba82f7e"
+)
+PINNED_SHELL_REVIEW_SHA256 = (
+    "be5f388dbf4768769a503a6ce58e5642ac8fbf9ed705c03093338b25c0afe7b5"
+)
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -36,7 +52,102 @@ def create_parser() -> argparse.ArgumentParser:
     actions = audit_parser.add_mutually_exclusive_group(required=True)
     actions.add_argument("--write-candidates", type=Path)
     actions.add_argument("--check", action="store_true")
+    build_parser = subparsers.add_parser(
+        "build", help="cross-build and stage the reviewed POSIX suite"
+    )
+    build_parser.add_argument("--arch", required=True)
+    build_parser.add_argument("--stage", required=True, type=Path)
+    build_parser.add_argument("--verify-only", action="store_true")
     return parser
+
+
+def _required_tool(name: str) -> str:
+    path = shutil.which(name)
+    if path is None:
+        raise ValueError(f"required AArch64 tool is unavailable: {name}")
+    return name
+
+
+def _compiler_identity(compiler: str) -> str:
+    try:
+        completed = run_bounded_command([compiler, "--version"])
+    except OSError as error:
+        raise ValueError(f"required tool is unavailable: {compiler}: {error}") from error
+    if completed.returncode != 0 or not completed.stdout.strip():
+        raise ValueError(f"compiler version query failed: {compiler}")
+    return completed.stdout.strip().splitlines()[0]
+
+
+def _smros_commit() -> str:
+    try:
+        completed = run_bounded_command(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPOSITORY_ROOT,
+        )
+    except OSError as error:
+        raise ValueError(f"cannot identify the SMROS commit: {error}") from error
+    commit = completed.stdout.strip()
+    if completed.returncode != 0 or len(commit) != 40 or any(
+        character not in "0123456789abcdef" for character in commit
+    ):
+        raise ValueError("cannot identify the SMROS commit")
+    status = run_bounded_command(
+        [
+            "git",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            ".",
+            ":(exclude,glob)**/__pycache__/**",
+            ":(exclude,glob)**/*.pyc",
+        ],
+        cwd=REPOSITORY_ROOT,
+    )
+    if status.returncode != 0:
+        raise ValueError("cannot inspect the SMROS worktree")
+    if status.stdout.strip():
+        raise ValueError("SMROS worktree is dirty; commit relevant sources first")
+    return commit
+
+
+def _libc_identity(compiler: str) -> str:
+    value = compiler_query(compiler, "-print-file-name=libc.so.6")
+    path = Path(value)
+    if value == "libc.so.6" or not path.is_file():
+        raise ValueError("AArch64 libc.so.6 could not be resolved by the compiler")
+    return f"libc.so.6:{sha256_file(path.resolve())}"
+
+
+def _validate_build_inventory(
+    c_sources: int,
+    shell_files: int,
+    excluded_stubs: int,
+    shell_tests: int,
+) -> None:
+    actual = (c_sources, shell_files, excluded_stubs, shell_tests)
+    expected = (
+        PINNED_C_SOURCE_COUNT,
+        PINNED_SHELL_SOURCE_COUNT,
+        94,
+        169,
+    )
+    if actual != expected:
+        raise ValueError(
+            "pinned build inventory mismatch: "
+            f"C={c_sources}, shell={shell_files}, "
+            f"excluded={excluded_stubs}, shell-tests={shell_tests}"
+        )
+
+
+def _validate_review_ledgers(stub_path: Path, shell_path: Path) -> None:
+    actual = (sha256_file(stub_path), sha256_file(shell_path))
+    expected = (PINNED_STUB_REVIEW_SHA256, PINNED_SHELL_REVIEW_SHA256)
+    if actual != expected:
+        raise ValueError(
+            "review ledger checksum mismatch; review identity pins must be "
+            "updated deliberately with the reviewed path dispositions"
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -71,6 +182,65 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"audit failed: {error}", file=sys.stderr)
             return 1
         print(result.format_counts())
+        return 0
+    if arguments.command == "build":
+        if arguments.arch != "aarch64":
+            print(
+                f"build failed: unsupported architecture: {arguments.arch}",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            _required_tool("aarch64-linux-gnu-gcc")
+            _required_tool("aarch64-linux-gnu-nm")
+            _required_tool("aarch64-linux-gnu-readelf")
+            if arguments.verify_only:
+                summary = verify_stage(arguments.stage)
+            else:
+                lock = load_source_lock(SOURCE_LOCK_PATH)
+                checkout = Path("target/posix") / "src" / lock.revision
+                expected_patch = validate_build_checkout(
+                    checkout, lock.revision, PATCH_SERIES_PATH
+                )
+                _validate_review_ledgers(STUB_REVIEW_PATH, SHELL_REVIEW_PATH)
+                audit = audit_reviews(
+                    checkout, STUB_REVIEW_PATH, SHELL_REVIEW_PATH
+                )
+                shell_tests = tuple(
+                    path
+                    for path, review in audit.shell_reviews.items()
+                    if review.disposition == "test"
+                )
+                _validate_build_inventory(
+                    audit.c_sources,
+                    audit.shell_files,
+                    sum(
+                        test.disposition == "excluded-upstream-stub"
+                        for test in audit.tests
+                    ),
+                    len(shell_tests),
+                )
+                metadata = ManifestMetadata(
+                    source=lock.url,
+                    revision=lock.revision,
+                    architecture="aarch64",
+                    compiler=_compiler_identity("aarch64-linux-gnu-gcc"),
+                    libc=_libc_identity("aarch64-linux-gnu-gcc"),
+                    patch_sha256=expected_patch,
+                    smros_commit=_smros_commit(),
+                )
+                summary = build_campaign(
+                    checkout,
+                    audit.tests,
+                    shell_tests,
+                    metadata,
+                    arguments.stage,
+                    Path("target/posix/aarch64"),
+                )
+        except (OSError, ValueError) as error:
+            print(f"build failed: {error}", file=sys.stderr)
+            return 1
+        print(summary.format_counts())
         return 0
     raise AssertionError(f"unhandled command: {arguments.command}")
 

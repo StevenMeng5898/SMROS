@@ -39,6 +39,24 @@ class BuildResult:
 
 
 @dataclass(frozen=True)
+class BuildSummary:
+    discovered: int
+    compile_pass: int
+    compile_fail: int
+    link_pass: int
+    link_fail: int
+    shell_unported: int
+    staged_bytes: int
+
+    def format_counts(self) -> str:
+        return (
+            f"discovered={self.discovered} build-pass={self.compile_pass} "
+            f"build-fail={self.compile_fail} link-pass={self.link_pass} "
+            f"link-fail={self.link_fail} shell-unported={self.shell_unported}"
+        )
+
+
+@dataclass(frozen=True)
 class RuntimeAttempt:
     test_id: str
     platform: str

@@ -1,0 +1,1417 @@
+"""Cross-build and deterministic staging for the Open POSIX Test Suite.
+
+The guest manifest checksum is SHA-256 over its complete UTF-8 TSV bytes after
+replacing the ``manifest_sha256`` metadata value with 64 ASCII zeroes.  This is
+a canonical, non-self-referential definition and covers every other byte.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import errno
+import hashlib
+import json
+import os
+import re
+import signal
+import shutil
+import stat
+import subprocess
+import tempfile
+import threading
+import time
+import unicodedata
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path, PurePosixPath
+from typing import Callable, Iterable, Mapping, Sequence
+
+from .model import BuildResult, BuildSummary, SuiteTest
+
+
+MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+MAX_TESTS = 4_096
+MAX_STAGE_BYTES = 256 * 1024 * 1024
+MAX_DIAGNOSTIC_BYTES = 16_384
+MAX_TIMEOUT_MS = 2**31 - 1
+COMMAND_TIMEOUT_SECONDS = 120.0
+EMPTY_SHA256 = "0" * 64
+CHECKSUM_DEFINITION = (
+    "sha256(manifest.tsv with meta manifest_sha256 value replaced by "
+    "64 ASCII zeroes)"
+)
+_DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
+_REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
+_NEEDED_RE = re.compile(r"\(NEEDED\).*Shared library: \[([^\]]+)\]")
+_INTERPRETER_RE = re.compile(r"Requesting program interpreter: ([^\]]+)\]")
+_ALLOWED_KINDS = frozenset({"runnable", "definition", "shell"})
+_ALLOWED_DISPOSITIONS = frozenset(
+    {
+        "complete",
+        "definition-only",
+        "excluded-upstream-stub",
+        "compile-failed",
+        "link-failed",
+        "not-built-shell-test",
+    }
+)
+_METADATA_KEYS = (
+    "source",
+    "revision",
+    "architecture",
+    "compiler",
+    "libc",
+    "patch_sha256",
+    "manifest_sha256",
+    "smros_commit",
+)
+
+
+@dataclass(frozen=True)
+class ManifestMetadata:
+    source: str
+    revision: str
+    architecture: str
+    compiler: str
+    libc: str
+    patch_sha256: str
+    smros_commit: str
+    manifest_sha256: str = EMPTY_SHA256
+
+
+CommandRunner = Callable[..., object]
+DependencyStager = Callable[[Sequence[Path], Path], Sequence[Path]]
+_SUBPROCESS_RUN = subprocess.run
+
+
+def nm_command(tool: str, object_path: Path) -> list[str]:
+    return [tool, "-g", "--defined-only", str(object_path)]
+
+
+def compile_command(
+    compiler: str,
+    source: Path,
+    object_path: Path,
+    include_directory: Path,
+) -> list[str]:
+    return [
+        compiler,
+        "-std=gnu99",
+        "-D_POSIX_C_SOURCE=200112L",
+        "-D_XOPEN_SOURCE=600",
+        "-pthread",
+        "-I",
+        str(include_directory),
+        "-c",
+        str(source),
+        "-o",
+        str(object_path),
+    ]
+
+
+def link_command(compiler: str, object_path: Path, executable: Path) -> list[str]:
+    return [
+        compiler,
+        "-pthread",
+        str(object_path),
+        "-o",
+        str(executable),
+        "-lrt",
+        "-lm",
+    ]
+
+
+def readelf_command(tool: str, executable: Path) -> list[str]:
+    return [tool, "-l", "-d", str(executable)]
+
+
+def _has_forbidden_character(value: str) -> bool:
+    return any(
+        character == "\t"
+        or unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        for character in value
+    )
+
+
+def _validate_atom(value: str, label: str) -> None:
+    if not value or _has_forbidden_character(value):
+        raise ValueError(f"invalid {label}: {value!r}")
+
+
+def _validate_relative_path(value: str, label: str) -> PurePosixPath:
+    _validate_atom(value, label)
+    path = PurePosixPath(value)
+    raw_parts = value.split("/")
+    if (
+        "\\" in value
+        or path.is_absolute()
+        or path.as_posix() != value
+        or any(part in {"", ".", ".."} for part in raw_parts)
+    ):
+        raise ValueError(f"unsafe {label}: {value!r}")
+    return path
+
+
+def safe_stage_path(root: Path, relative: str) -> Path:
+    path = _validate_relative_path(relative, "staged path")
+    return root.joinpath(*path.parts)
+
+
+def _validate_metadata(metadata: ManifestMetadata) -> None:
+    for key in _METADATA_KEYS:
+        value = getattr(metadata, key)
+        _validate_atom(value, f"metadata {key}")
+    if metadata.architecture != "aarch64":
+        raise ValueError(f"unsupported architecture: {metadata.architecture}")
+    if _REVISION_RE.fullmatch(metadata.revision) is None:
+        raise ValueError("manifest revision is not a lowercase 40-hex commit")
+    if _REVISION_RE.fullmatch(metadata.smros_commit) is None:
+        raise ValueError("SMROS commit is not a lowercase 40-hex commit")
+    if _DIGEST_RE.fullmatch(metadata.patch_sha256) is None:
+        raise ValueError("patch checksum is invalid")
+    if _DIGEST_RE.fullmatch(metadata.manifest_sha256) is None:
+        raise ValueError("manifest checksum is invalid")
+
+
+def _reject_duplicate_json_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+
+
+def _validate_test(test: SuiteTest) -> None:
+    for label, value in (
+        ("test ID", test.test_id),
+        ("group", test.group),
+        ("API", test.api),
+        ("kind", test.kind),
+        ("disposition", test.disposition),
+    ):
+        _validate_atom(value, label)
+    _validate_relative_path(test.test_id, "test ID")
+    if test.kind not in _ALLOWED_KINDS:
+        raise ValueError(f"unknown kind: {test.kind}")
+    if test.disposition not in _ALLOWED_DISPOSITIONS:
+        raise ValueError(f"unknown disposition: {test.disposition}")
+    if type(test.timeout_ms) is not int or not 0 < test.timeout_ms <= MAX_TIMEOUT_MS:
+        raise ValueError(f"invalid timeout for {test.test_id}: {test.timeout_ms!r}")
+    if test.binary is None or test.sha256 is None:
+        raise ValueError(f"missing staged path or checksum for {test.test_id}")
+    _validate_relative_path(test.binary, "staged path")
+    if _DIGEST_RE.fullmatch(test.sha256) is None:
+        raise ValueError(f"invalid checksum for {test.test_id}")
+    runnable = test.disposition == "complete"
+    if runnable and (test.binary == "-" or test.sha256 == EMPTY_SHA256):
+        raise ValueError(f"runnable test has no artifact: {test.test_id}")
+    if not runnable and (test.binary != "-" or test.sha256 != EMPTY_SHA256):
+        raise ValueError(f"non-runnable test has an artifact: {test.test_id}")
+
+
+def _manifest_text(metadata: ManifestMetadata, tests: Sequence[SuiteTest]) -> str:
+    lines = ["SMROS_POSIX_MANIFEST\t1"]
+    for key in _METADATA_KEYS:
+        lines.append(f"meta\t{key}\t{getattr(metadata, key)}")
+    for test in tests:
+        lines.append(
+            "\t".join(
+                (
+                    "test",
+                    test.test_id,
+                    test.group,
+                    test.api,
+                    test.kind,
+                    test.disposition,
+                    test.binary or "",
+                    str(test.timeout_ms),
+                    test.sha256 or "",
+                )
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def render_manifest(
+    metadata: ManifestMetadata, tests: Iterable[SuiteTest]
+) -> tuple[str, str]:
+    canonical_metadata = replace(metadata, manifest_sha256=EMPTY_SHA256)
+    _validate_metadata(canonical_metadata)
+    ordered = tuple(sorted(tests, key=lambda test: test.test_id))
+    if len(ordered) > MAX_TESTS:
+        raise ValueError("manifest exceeds the 4,096 test limit")
+    ids: set[str] = set()
+    paths: set[str] = set()
+    for test in ordered:
+        _validate_test(test)
+        if test.test_id in ids:
+            raise ValueError(f"duplicate test ID: {test.test_id}")
+        ids.add(test.test_id)
+        if test.binary != "-":
+            if test.binary in paths:
+                raise ValueError(f"duplicate staged path: {test.binary}")
+            paths.add(test.binary)
+    canonical = _manifest_text(canonical_metadata, ordered)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    text = _manifest_text(replace(canonical_metadata, manifest_sha256=digest), ordered)
+    if len(text.encode("utf-8")) > MAX_MANIFEST_BYTES:
+        raise ValueError("manifest exceeds the 2 MiB limit")
+    return text, digest
+
+
+def _parse_timeout(value: str, test_id: str) -> int:
+    if not value.isascii() or not value.isdecimal() or str(int(value)) != value:
+        raise ValueError(f"invalid nondecimal timeout for {test_id}: {value!r}")
+    timeout = int(value)
+    if not 0 < timeout <= MAX_TIMEOUT_MS:
+        raise ValueError(f"invalid timeout for {test_id}: {value!r}")
+    return timeout
+
+
+def parse_manifest(data: bytes) -> tuple[ManifestMetadata, tuple[SuiteTest, ...]]:
+    if len(data) > MAX_MANIFEST_BYTES:
+        raise ValueError("manifest exceeds the 2 MiB limit")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeError as error:
+        raise ValueError("manifest is not UTF-8") from error
+    if "\r" in text or not text.endswith("\n"):
+        raise ValueError("manifest must use LF line endings")
+    lines = text[:-1].split("\n")
+    if not lines or lines[0] != "SMROS_POSIX_MANIFEST\t1":
+        raise ValueError("invalid manifest header")
+    values: dict[str, str] = {}
+    tests: list[SuiteTest] = []
+    saw_test = False
+    for line_number, line in enumerate(lines[1:], start=2):
+        fields = line.split("\t")
+        if fields[0] == "meta":
+            if saw_test or len(fields) != 3 or fields[1] not in _METADATA_KEYS:
+                raise ValueError(f"invalid metadata row {line_number}")
+            if fields[1] in values:
+                raise ValueError(f"duplicate metadata key: {fields[1]}")
+            values[fields[1]] = fields[2]
+        elif fields[0] == "test":
+            saw_test = True
+            if len(fields) != 9:
+                raise ValueError(f"test row {line_number} must have exactly 9 fields")
+            _, test_id, group, api, kind, disposition, path, timeout, digest = fields
+            tests.append(
+                SuiteTest(
+                    test_id=test_id,
+                    group=group,
+                    api=api,
+                    kind=kind,
+                    disposition=disposition,
+                    source=test_id,
+                    binary=path,
+                    sha256=digest,
+                    timeout_ms=_parse_timeout(timeout, test_id),
+                )
+            )
+        else:
+            raise ValueError(f"unknown manifest row type at line {line_number}")
+    if tuple(values) != _METADATA_KEYS:
+        raise ValueError("manifest metadata fields or order are invalid")
+    metadata = ManifestMetadata(
+        source=values["source"],
+        revision=values["revision"],
+        architecture=values["architecture"],
+        compiler=values["compiler"],
+        libc=values["libc"],
+        patch_sha256=values["patch_sha256"],
+        smros_commit=values["smros_commit"],
+        manifest_sha256=values["manifest_sha256"],
+    )
+    _validate_metadata(metadata)
+    canonical = text.replace(
+        f"meta\tmanifest_sha256\t{metadata.manifest_sha256}\n",
+        f"meta\tmanifest_sha256\t{EMPTY_SHA256}\n",
+        1,
+    )
+    if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != metadata.manifest_sha256:
+        raise ValueError("manifest checksum mismatch")
+    rendered, digest = render_manifest(metadata, tests)
+    if rendered != text or digest != metadata.manifest_sha256:
+        raise ValueError("manifest is not canonical")
+    return metadata, tuple(tests)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as input_file:
+        while chunk := input_file.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _bounded_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        data = value
+    else:
+        data = str(value).encode("utf-8", errors="replace")
+    suffix = b"\n...[truncated]"
+    truncated = len(data) > MAX_DIAGNOSTIC_BYTES
+    limit = MAX_DIAGNOSTIC_BYTES - (len(suffix) if truncated else 0)
+    text = data[:limit].decode("utf-8", errors="replace")
+    text = _fit_utf8(text, limit)
+    return text + (suffix.decode("ascii") if truncated else "")
+
+
+def _fit_utf8(value: str, maximum_bytes: int) -> str:
+    if len(value.encode("utf-8")) <= maximum_bytes:
+        return value
+    low = 0
+    high = len(value)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(value[:middle].encode("utf-8")) <= maximum_bytes:
+            low = middle
+        else:
+            high = middle - 1
+    return value[:low]
+
+
+def _drain_pipe(
+    pipe: object, output: bytearray, truncated: list[bool]
+) -> None:
+    try:
+        while True:
+            chunk = pipe.read(8192)
+            if not chunk:
+                return
+            remaining = MAX_DIAGNOSTIC_BYTES - len(output)
+            if remaining > 0:
+                output.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                truncated[0] = True
+    finally:
+        pipe.close()
+
+
+def _write_pipe(pipe: object, data: bytes) -> None:
+    try:
+        pipe.write(data)
+        pipe.flush()
+    except BrokenPipeError:
+        pass
+    finally:
+        pipe.close()
+
+
+def _captured_output(data: bytearray, truncated: bool) -> str:
+    marker = b"\n...[truncated]"
+    if truncated:
+        prefix = bytes(data[: MAX_DIAGNOSTIC_BYTES - len(marker)]).decode(
+            "utf-8", errors="replace"
+        )
+        return _fit_utf8(
+            prefix, MAX_DIAGNOSTIC_BYTES - len(marker)
+        ) + marker.decode("ascii")
+    return _fit_utf8(
+        bytes(data).decode("utf-8", errors="replace"), MAX_DIAGNOSTIC_BYTES
+    )
+
+
+def run_bounded_command(
+    argv: Sequence[str],
+    *,
+    timeout_seconds: float = COMMAND_TIMEOUT_SECONDS,
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    input_data: bytes | None = None,
+    pass_fds: Sequence[int] = (),
+    text: bool = True,
+    check: bool = False,
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    """Run a host tool with bounded capture and a process-group deadline."""
+    process = subprocess.Popen(
+        list(argv),
+        stdin=subprocess.PIPE if input_data is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        cwd=cwd,
+        env=env,
+        pass_fds=tuple(pass_fds),
+    )
+    assert process.stdout is not None and process.stderr is not None
+    stdout = bytearray()
+    stderr = bytearray()
+    stdout_truncated = [False]
+    stderr_truncated = [False]
+    threads: list[threading.Thread] = [
+        threading.Thread(
+            target=_drain_pipe,
+            args=(process.stdout, stdout, stdout_truncated),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_drain_pipe,
+            args=(process.stderr, stderr, stderr_truncated),
+            daemon=True,
+        ),
+    ]
+    if input_data is not None:
+        assert process.stdin is not None
+        threads.append(
+            threading.Thread(
+                target=_write_pipe,
+                args=(process.stdin, input_data),
+                daemon=True,
+            )
+        )
+    for thread in threads:
+        thread.start()
+    timed_out = False
+    deadline = time.monotonic() + timeout_seconds
+
+    def kill_process_group() -> None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    try:
+        process.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        kill_process_group()
+        process.wait()
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    if any(thread.is_alive() for thread in threads):
+        timed_out = True
+        kill_process_group()
+        for thread in threads:
+            thread.join(1.0)
+        if any(thread.is_alive() for thread in threads):
+            raise ValueError("timed-out command pipes could not be closed")
+    stdout_text = _captured_output(stdout, stdout_truncated[0])
+    stderr_text = _captured_output(stderr, stderr_truncated[0])
+    if timed_out:
+        timeout_marker = f"\ncommand timed out after {timeout_seconds:g} seconds"
+        stderr_text = _bounded_text(stderr_text + timeout_marker)
+    stdout_value: str | bytes = stdout_text if text else stdout_text.encode("utf-8")
+    stderr_value: str | bytes = stderr_text if text else stderr_text.encode("utf-8")
+    completed = subprocess.CompletedProcess(
+        list(argv),
+        124 if timed_out else int(process.returncode),
+        stdout_value,
+        stderr_value,
+    )
+    if check and completed.returncode != 0:
+        raise subprocess.CalledProcessError(
+            completed.returncode,
+            list(argv),
+            output=completed.stdout,
+            stderr=completed.stderr,
+        )
+    return completed
+
+
+def _run_command(
+    test_id: str,
+    stage: str,
+    argv: list[str],
+    runner: CommandRunner,
+    artifact: Path | None,
+) -> BuildResult:
+    started = time.monotonic_ns()
+    try:
+        if runner is _SUBPROCESS_RUN:
+            completed = run_bounded_command(argv)
+        else:
+            completed = runner(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+        returncode = int(getattr(completed, "returncode"))
+        stdout = _bounded_text(getattr(completed, "stdout", ""))
+        stderr = _bounded_text(getattr(completed, "stderr", ""))
+    except OSError as error:
+        returncode = None
+        stdout = ""
+        stderr = _bounded_text(error)
+    duration_ms = max(0, (time.monotonic_ns() - started) // 1_000_000)
+    artifact_sha256 = (
+        sha256_file(artifact)
+        if returncode == 0 and artifact is not None and artifact.is_file()
+        else None
+    )
+    status = "passed" if returncode == 0 and (artifact is None or artifact_sha256) else "failed"
+    return BuildResult(
+        test_id=test_id,
+        stage=stage,
+        status=status,
+        argv=tuple(argv),
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+        duration_ms=duration_ms,
+        artifact_sha256=artifact_sha256,
+    )
+
+
+def _has_main(output: str) -> bool:
+    return any(line.split()[-1:] == ["main"] for line in output.splitlines())
+
+
+def parse_elf_dependencies(output: str) -> tuple[str | None, tuple[str, ...]]:
+    interpreter: str | None = None
+    needed: set[str] = set()
+    for line in output.splitlines():
+        interpreter_match = _INTERPRETER_RE.search(line)
+        if interpreter_match is not None:
+            interpreter = interpreter_match.group(1)
+        needed_match = _NEEDED_RE.search(line)
+        if needed_match is not None:
+            needed.add(needed_match.group(1))
+    return interpreter, tuple(sorted(needed))
+
+
+def _runtime_search_roots(
+    sysroot: Path, multiarch: str, extra_roots: Sequence[Path]
+) -> tuple[Path, ...]:
+    candidates = (
+        *extra_roots,
+        sysroot / "lib",
+        sysroot / "usr/lib",
+        sysroot / "lib" / multiarch,
+        sysroot / "usr/lib" / multiarch,
+        sysroot / "usr" / multiarch / "lib",
+        sysroot / multiarch / "lib",
+    )
+    unique: list[Path] = []
+    for candidate in candidates:
+        if candidate not in unique:
+            unique.append(candidate)
+    return tuple(unique)
+
+
+def resolve_runtime_file(
+    name: str, sysroot: Path, multiarch: str, extra_roots: Sequence[Path]
+) -> Path:
+    if "/" in name:
+        relative = name.lstrip("/")
+        _validate_relative_path(relative, "ELF interpreter")
+        direct = sysroot / relative
+        if direct.is_file():
+            return direct
+        name = PurePosixPath(name).name
+    _validate_atom(name, "runtime library name")
+    if PurePosixPath(name).name != name:
+        raise ValueError(f"invalid runtime library name: {name!r}")
+    matches: list[Path] = []
+    for root in _runtime_search_roots(sysroot, multiarch, extra_roots):
+        candidate = root / name
+        if candidate.is_file():
+            resolved = candidate.resolve(strict=True)
+            if resolved not in matches:
+                matches.append(resolved)
+    if not matches:
+        raise ValueError(f"unresolved AArch64 runtime file: {name}")
+    fingerprints = {(path.stat().st_dev, path.stat().st_ino) for path in matches}
+    if len(fingerprints) > 1:
+        raise ValueError(f"basename-colliding runtime libraries: {name}")
+    return matches[0]
+
+
+def compiler_query(compiler: str, argument: str) -> str:
+    try:
+        completed = run_bounded_command([compiler, argument])
+    except OSError as error:
+        raise ValueError(f"required tool is unavailable: {compiler}: {error}") from error
+    if completed.returncode != 0 or not completed.stdout.strip():
+        raise ValueError(f"compiler query failed: {compiler} {argument}: {_bounded_text(completed.stderr)}")
+    return completed.stdout.strip().splitlines()[0]
+
+
+def validate_build_checkout(
+    checkout: Path, revision: str, patch_series: Path
+) -> str:
+    """Validate pinned provenance against current patches without fetching."""
+    from .source import _load_patches, _patch_sha256, _validate_checkout
+
+    patches = _load_patches(patch_series)
+    _validate_checkout(checkout, revision, patches)
+    return _patch_sha256(patches)
+
+
+def stage_runtime_dependencies(
+    executables: Sequence[Path],
+    stage_root: Path,
+    *,
+    compiler: str = "aarch64-linux-gnu-gcc",
+    readelf: str = "aarch64-linux-gnu-readelf",
+) -> tuple[Path, ...]:
+    sysroot_text = compiler_query(compiler, "-print-sysroot")
+    multiarch = compiler_query(compiler, "-print-multiarch")
+    sysroot = Path(sysroot_text)
+    extra_roots: list[Path] = []
+    libc_path = compiler_query(compiler, "-print-file-name=libc.so.6")
+    if libc_path != "libc.so.6":
+        extra_roots.append(Path(libc_path).resolve().parent)
+    pending = list(sorted(executables, key=lambda path: path.as_posix()))
+    inspected: set[Path] = set()
+    runtime_by_name: dict[str, Path] = {}
+    while pending:
+        elf = pending.pop(0)
+        resolved_elf = elf.resolve(strict=True)
+        if resolved_elf in inspected:
+            continue
+        inspected.add(resolved_elf)
+        result = _run_command(
+            "runtime",
+            "readelf",
+            readelf_command(readelf, elf),
+            _SUBPROCESS_RUN,
+            None,
+        )
+        if result.returncode != 0:
+            raise ValueError(f"AArch64 readelf failed for {elf}: {result.stderr}")
+        interpreter, needed = parse_elf_dependencies(result.stdout)
+        names = list(needed)
+        if interpreter is not None:
+            names.append(interpreter)
+        for name in names:
+            source = resolve_runtime_file(name, sysroot, multiarch, extra_roots)
+            basename = PurePosixPath(name).name
+            previous = runtime_by_name.get(basename)
+            if previous is not None and previous != source:
+                raise ValueError(f"basename-colliding runtime libraries: {basename}")
+            if previous is None:
+                runtime_by_name[basename] = source
+                pending.append(source)
+    staged: list[Path] = []
+    for basename, source in sorted(runtime_by_name.items()):
+        destination = safe_stage_path(stage_root, f"lib/{basename}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination, follow_symlinks=True)
+        os.chmod(destination, 0o755)
+        staged.append(destination)
+    return tuple(staged)
+
+
+def _json_build_result(result: BuildResult) -> str:
+    value = asdict(result)
+    value["argv"] = list(result.argv)
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _shell_test(path: str) -> SuiteTest:
+    from .discovery import api_group
+
+    parts = PurePosixPath(path).parts
+    api = parts[-2] if len(parts) > 1 else "shell"
+    return SuiteTest(
+        test_id=path,
+        group=api_group(api),
+        api=api,
+        kind="shell",
+        disposition="not-built-shell-test",
+        source=path,
+        binary="-",
+        sha256=EMPTY_SHA256,
+        timeout_ms=30_000,
+    )
+
+
+def _stage_size(root: Path) -> int:
+    total = 0
+    for directory, directory_names, file_names in os.walk(root, followlinks=False):
+        directory_names.sort()
+        file_names.sort()
+        for name in file_names:
+            path = Path(directory) / name
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError(f"staged artifact is not a regular file: {path}")
+            total += info.st_size
+            if total > MAX_STAGE_BYTES:
+                raise ValueError("POSIX stage exceeds the 256 MiB limit")
+    return total
+
+
+def _reset_generated_directory(path: Path) -> None:
+    if path.exists() or path.is_symlink():
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise ValueError(f"generated output root is unsafe: {path}")
+        shutil.rmtree(path)
+    path.mkdir(parents=True)
+
+
+def _prepare_safe_work_directory(path: Path) -> None:
+    absolute = Path(os.path.abspath(path))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if current.exists() or current.is_symlink():
+            info = current.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                raise ValueError(f"work directory contains a symlink: {current}")
+            if not stat.S_ISDIR(info.st_mode):
+                raise ValueError(f"work path component is not a directory: {current}")
+        else:
+            current.mkdir()
+
+
+def _publish_stage(temporary_stage: Path, destination: Path) -> None:
+    destination_parent = destination.parent
+    destination_parent.mkdir(parents=True, exist_ok=True)
+    parent_stat = destination_parent.lstat()
+    if not stat.S_ISDIR(parent_stat.st_mode) or stat.S_ISLNK(parent_stat.st_mode):
+        raise ValueError(f"stage parent is not a safe directory: {destination_parent}")
+    if destination.exists() or destination.is_symlink():
+        info = destination.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise ValueError(f"stage destination is not a safe directory: {destination}")
+        _rename_exchange(temporary_stage, destination)
+    else:
+        os.replace(temporary_stage, destination)
+
+
+def _rename_exchange(first: Path, second: Path) -> None:
+    renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+    if renameat2 is None:
+        raise ValueError("atomic stage exchange is not supported by this host")
+    renameat2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    if renameat2(
+        -100,
+        os.fsencode(first),
+        -100,
+        os.fsencode(second),
+        2,
+    ) != 0:
+        error_number = ctypes.get_errno()
+        if error_number in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP}:
+            raise ValueError(
+                "atomic stage exchange is not supported by this filesystem"
+            )
+        raise OSError(
+            error_number,
+            os.strerror(error_number),
+            f"{first} <-> {second}",
+        )
+
+
+def _write_manifests(
+    stage: Path,
+    metadata: ManifestMetadata,
+    tests: Sequence[SuiteTest],
+    results: Sequence[BuildResult],
+) -> str:
+    manifest_text, manifest_digest = render_manifest(metadata, tests)
+    final_metadata = replace(metadata, manifest_sha256=manifest_digest)
+    runtime = [
+        {
+            "path": f"lib/{path.name}",
+            "sha256": sha256_file(path),
+        }
+        for path in sorted(
+            (stage / "lib").iterdir() if (stage / "lib").is_dir() else (),
+            key=lambda item: item.name,
+        )
+    ]
+    manifest_json = {
+        "schema": 1,
+        "checksum_definition": CHECKSUM_DEFINITION,
+        "metadata": asdict(final_metadata),
+        "runtime": runtime,
+        "tests": [asdict(test) for test in sorted(tests, key=lambda item: item.test_id)],
+    }
+    (stage / "manifest.tsv").write_text(manifest_text, encoding="utf-8", newline="\n")
+    (stage / "manifest.json").write_text(
+        json.dumps(manifest_json, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    (stage / "build-results.ndjson").write_text(
+        "".join(_json_build_result(result) + "\n" for result in results),
+        encoding="utf-8",
+        newline="\n",
+    )
+    return manifest_digest
+
+
+def build_campaign(
+    checkout: Path,
+    tests: Iterable[SuiteTest],
+    shell_tests: Iterable[str],
+    metadata: ManifestMetadata,
+    stage: Path,
+    work: Path,
+    *,
+    command_runner: CommandRunner = subprocess.run,
+    dependency_stager: DependencyStager | None = None,
+) -> BuildSummary:
+    ordered_tests = tuple(sorted(tests, key=lambda test: test.test_id))
+    ordered_shells = tuple(sorted(shell_tests))
+    _prepare_safe_work_directory(work)
+    object_root = work / "obj"
+    artifact_root = work / "bin"
+    _reset_generated_directory(object_root)
+    _reset_generated_directory(artifact_root)
+    stage.parent.mkdir(parents=True, exist_ok=True)
+    temporary_stage = Path(
+        tempfile.mkdtemp(prefix=f".{stage.name}.tmp-", dir=stage.parent)
+    )
+    results: list[BuildResult] = []
+    manifested: list[SuiteTest] = []
+    staged_executables: list[Path] = []
+    compile_pass = compile_fail = link_pass = link_fail = 0
+    try:
+        include_directory = checkout / "include"
+        for test in ordered_tests:
+            source = safe_stage_path(checkout, test.source)
+            object_path = safe_stage_path(object_root, f"{test.test_id}.o")
+            object_path.parent.mkdir(parents=True, exist_ok=True)
+            compile_result = _run_command(
+                test.test_id,
+                "compile",
+                compile_command(
+                    "aarch64-linux-gnu-gcc", source, object_path, include_directory
+                ),
+                command_runner,
+                object_path,
+            )
+            results.append(compile_result)
+            if compile_result.returncode is None:
+                raise ValueError(
+                    "AArch64 compiler toolchain failed during compilation: "
+                    f"{compile_result.stderr}"
+                )
+            if compile_result.status != "passed":
+                compile_fail += 1
+                disposition = (
+                    test.disposition
+                    if test.disposition == "excluded-upstream-stub"
+                    else "compile-failed"
+                )
+                manifested.append(
+                    replace(
+                        test,
+                        disposition=disposition,
+                        binary="-",
+                        sha256=EMPTY_SHA256,
+                    )
+                )
+                continue
+            compile_pass += 1
+            nm_result = _run_command(
+                test.test_id,
+                "nm",
+                nm_command("aarch64-linux-gnu-nm", object_path),
+                command_runner,
+                None,
+            )
+            results.append(nm_result)
+            if nm_result.returncode != 0:
+                raise ValueError(f"target nm failed for {test.test_id}: {nm_result.stderr}")
+            if test.kind != "runnable":
+                manifested.append(replace(test, binary="-", sha256=EMPTY_SHA256))
+                continue
+            if not _has_main(nm_result.stdout):
+                link_fail += 1
+                results.append(
+                    BuildResult(
+                        test_id=test.test_id,
+                        stage="link",
+                        status="failed",
+                        argv=(),
+                        returncode=None,
+                        stdout="",
+                        stderr="target object does not define main",
+                        duration_ms=0,
+                        artifact_sha256=None,
+                    )
+                )
+                disposition = (
+                    test.disposition
+                    if test.disposition == "excluded-upstream-stub"
+                    else "link-failed"
+                )
+                manifested.append(replace(test, disposition=disposition, binary="-", sha256=EMPTY_SHA256))
+                continue
+            executable = safe_stage_path(artifact_root, f"{test.test_id}.test")
+            executable.parent.mkdir(parents=True, exist_ok=True)
+            link_result = _run_command(
+                test.test_id,
+                "link",
+                link_command("aarch64-linux-gnu-gcc", object_path, executable),
+                command_runner,
+                executable,
+            )
+            results.append(link_result)
+            if link_result.returncode is None:
+                raise ValueError(
+                    "AArch64 compiler toolchain failed during linking: "
+                    f"{link_result.stderr}"
+                )
+            if link_result.status != "passed":
+                link_fail += 1
+                disposition = (
+                    test.disposition
+                    if test.disposition == "excluded-upstream-stub"
+                    else "link-failed"
+                )
+                manifested.append(replace(test, disposition=disposition, binary="-", sha256=EMPTY_SHA256))
+                continue
+            link_pass += 1
+            staged_relative = f"bin/{test.test_id}.test"
+            staged_executable = safe_stage_path(temporary_stage, staged_relative)
+            staged_executable.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(executable, staged_executable)
+            os.chmod(staged_executable, 0o755)
+            staged_executables.append(staged_executable)
+            if test.disposition == "excluded-upstream-stub":
+                staged_executable.unlink()
+                staged_executables.pop()
+                manifested.append(replace(test, binary="-", sha256=EMPTY_SHA256))
+            else:
+                manifested.append(
+                    replace(
+                        test,
+                        binary=staged_relative,
+                        sha256=sha256_file(staged_executable),
+                    )
+                )
+        manifested.extend(_shell_test(path) for path in ordered_shells)
+        stager = dependency_stager or stage_runtime_dependencies
+        stager(tuple(staged_executables), temporary_stage)
+        _write_manifests(temporary_stage, metadata, manifested, results)
+        staged_bytes = _stage_size(temporary_stage)
+        verify_stage(temporary_stage, verify_architecture=dependency_stager is None)
+        _publish_stage(temporary_stage, stage)
+        return BuildSummary(
+            discovered=len(ordered_tests),
+            compile_pass=compile_pass,
+            compile_fail=compile_fail,
+            link_pass=link_pass,
+            link_fail=link_fail,
+            shell_unported=len(ordered_shells),
+            staged_bytes=staged_bytes,
+        )
+    finally:
+        if temporary_stage.exists():
+            shutil.rmtree(temporary_stage)
+
+
+def _require_regular_file(path: Path, label: str) -> os.stat_result:
+    try:
+        info = path.lstat()
+    except FileNotFoundError as error:
+        raise ValueError(f"missing {label}: {path}") from error
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise ValueError(f"{label} is not a regular file: {path}")
+    return info
+
+
+def _validate_stage_tree(stage: Path) -> None:
+    for directory, directory_names, file_names in os.walk(stage, followlinks=False):
+        directory_names.sort()
+        file_names.sort()
+        for name in directory_names:
+            path = Path(directory) / name
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                raise ValueError(f"staged directory must not be a symlink: {path}")
+            if not stat.S_ISDIR(info.st_mode):
+                raise ValueError(f"invalid staged directory: {path}")
+        for name in file_names:
+            path = Path(directory) / name
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                raise ValueError(f"staged file must not be a symlink: {path}")
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError(f"invalid staged file: {path}")
+
+
+def _run_readelf(
+    readelf_runner: CommandRunner, argv: list[str], label: str
+) -> str:
+    try:
+        if readelf_runner is _SUBPROCESS_RUN:
+            result = run_bounded_command(argv)
+        else:
+            result = readelf_runner(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+    except OSError as error:
+        raise ValueError(f"AArch64 readelf unavailable while checking {label}: {error}") from error
+    if int(getattr(result, "returncode")) != 0:
+        raise ValueError(
+            f"AArch64 readelf failed for {label}: "
+            f"{_bounded_text(getattr(result, 'stderr', ''))}"
+        )
+    return str(getattr(result, "stdout", ""))
+
+
+def _load_build_results(
+    path: Path, tests: Sequence[SuiteTest]
+) -> tuple[BuildResult, ...]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeError as error:
+        raise ValueError("build results are not UTF-8") from error
+    if "\r" in text or (text and not text.endswith("\n")):
+        raise ValueError("build results must use LF line endings")
+    expected_fields = {
+        "test_id",
+        "stage",
+        "status",
+        "argv",
+        "returncode",
+        "stdout",
+        "stderr",
+        "duration_ms",
+        "artifact_sha256",
+    }
+    tests_by_id = {test.test_id: test for test in tests}
+    buildable_ids = {
+        test.test_id for test in tests if test.kind != "shell"
+    }
+    results: list[BuildResult] = []
+    seen: set[tuple[str, str]] = set()
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        try:
+            value = json.loads(
+                line, object_pairs_hook=_reject_duplicate_json_keys
+            )
+        except json.JSONDecodeError as error:
+            raise ValueError(f"invalid build result JSON at line {line_number}") from error
+        if not isinstance(value, dict) or set(value) != expected_fields:
+            raise ValueError(f"invalid build result schema at line {line_number}")
+        if line != json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ):
+            raise ValueError(f"noncanonical build result JSON at line {line_number}")
+        test_id = value["test_id"]
+        stage_name = value["stage"]
+        status_name = value["status"]
+        argv = value["argv"]
+        returncode = value["returncode"]
+        stdout = value["stdout"]
+        stderr = value["stderr"]
+        duration_ms = value["duration_ms"]
+        artifact_sha256 = value["artifact_sha256"]
+        if not isinstance(test_id, str) or test_id not in buildable_ids:
+            raise ValueError(f"unknown build result test ID at line {line_number}")
+        if stage_name not in {"compile", "nm", "link"}:
+            raise ValueError(f"invalid build stage at line {line_number}")
+        if status_name not in {"passed", "failed"}:
+            raise ValueError(f"invalid build status at line {line_number}")
+        if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
+            raise ValueError(f"invalid build argv at line {line_number}")
+        if returncode is not None and type(returncode) is not int:
+            raise ValueError(f"invalid build return code at line {line_number}")
+        if not isinstance(stdout, str) or not isinstance(stderr, str):
+            raise ValueError(f"invalid build diagnostics at line {line_number}")
+        if (
+            len(stdout.encode("utf-8")) > MAX_DIAGNOSTIC_BYTES
+            or len(stderr.encode("utf-8")) > MAX_DIAGNOSTIC_BYTES
+        ):
+            raise ValueError(f"oversized build diagnostics at line {line_number}")
+        if type(duration_ms) is not int or duration_ms < 0:
+            raise ValueError(f"invalid build duration at line {line_number}")
+        if artifact_sha256 is not None and (
+            not isinstance(artifact_sha256, str)
+            or _DIGEST_RE.fullmatch(artifact_sha256) is None
+        ):
+            raise ValueError(f"invalid build artifact checksum at line {line_number}")
+        if status_name == "passed" and returncode != 0:
+            raise ValueError(f"passed build result has nonzero status at line {line_number}")
+        if stage_name in {"compile", "link"}:
+            if status_name == "passed" and artifact_sha256 is None:
+                raise ValueError(f"passed build result lacks checksum at line {line_number}")
+            if status_name == "failed" and artifact_sha256 is not None:
+                raise ValueError(f"failed build result has checksum at line {line_number}")
+        elif artifact_sha256 is not None:
+            raise ValueError(f"nm build result has artifact checksum at line {line_number}")
+        identity = (test_id, stage_name)
+        if identity in seen:
+            raise ValueError(
+                f"duplicate build result for {test_id} stage {stage_name}"
+            )
+        seen.add(identity)
+        results.append(
+            BuildResult(
+                test_id=test_id,
+                stage=stage_name,
+                status=status_name,
+                argv=tuple(argv),
+                returncode=returncode,
+                stdout=stdout,
+                stderr=stderr,
+                duration_ms=duration_ms,
+                artifact_sha256=artifact_sha256,
+            )
+        )
+    results_by_identity = {
+        (result.test_id, result.stage): result for result in results
+    }
+    for test_id in sorted(buildable_ids):
+        test = tests_by_id[test_id]
+        compile_result = results_by_identity.get((test_id, "compile"))
+        if compile_result is None:
+            raise ValueError(f"missing build result for {test_id} stage compile")
+        nm_result = results_by_identity.get((test_id, "nm"))
+        link_result = results_by_identity.get((test_id, "link"))
+        if compile_result.status == "failed":
+            if test.disposition not in {
+                "compile-failed",
+                "excluded-upstream-stub",
+            }:
+                raise ValueError(
+                    f"build result contradicts manifest for {test_id}: compile"
+                )
+            if nm_result is not None or link_result is not None:
+                raise ValueError(f"unexpected post-compile build result for {test_id}")
+            continue
+        if nm_result is None or nm_result.status != "passed":
+            raise ValueError(f"missing passed build result for {test_id} stage nm")
+        if test.kind == "runnable":
+            if link_result is None:
+                raise ValueError(f"missing build result for {test_id} stage link")
+            if test.disposition != "excluded-upstream-stub":
+                if link_result.status == "passed":
+                    if (
+                        test.disposition != "complete"
+                        or link_result.returncode != 0
+                        or link_result.artifact_sha256 != test.sha256
+                    ):
+                        raise ValueError(
+                            f"build result contradicts manifest for {test_id}: link"
+                        )
+                elif test.disposition != "link-failed":
+                    raise ValueError(
+                        f"build result contradicts manifest for {test_id}: link"
+                    )
+        elif link_result is not None:
+            raise ValueError(f"unexpected link build result for {test_id}")
+        elif test.disposition not in {
+            "definition-only",
+            "excluded-upstream-stub",
+        }:
+            raise ValueError(
+                f"build result contradicts manifest for {test_id}: definition"
+            )
+    return tuple(results)
+
+
+def verify_stage(
+    stage: Path,
+    *,
+    readelf_runner: CommandRunner = subprocess.run,
+    verify_architecture: bool = True,
+) -> BuildSummary:
+    try:
+        stage_info = stage.lstat()
+    except FileNotFoundError as error:
+        raise ValueError(f"stage is missing: {stage}") from error
+    if not stat.S_ISDIR(stage_info.st_mode) or stat.S_ISLNK(stage_info.st_mode):
+        raise ValueError(f"stage is not a safe directory: {stage}")
+    _validate_stage_tree(stage)
+    for name in ("manifest.tsv", "manifest.json", "build-results.ndjson"):
+        _require_regular_file(stage / name, name)
+    metadata, tests = parse_manifest((stage / "manifest.tsv").read_bytes())
+    build_results = _load_build_results(stage / "build-results.ndjson", tests)
+    try:
+        host_text = (stage / "manifest.json").read_text(encoding="utf-8")
+        host_manifest = json.loads(
+            host_text, object_pairs_hook=_reject_duplicate_json_keys
+        )
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("host manifest is invalid JSON") from error
+    if (
+        not isinstance(host_manifest, Mapping)
+        or set(host_manifest)
+        != {"schema", "checksum_definition", "metadata", "runtime", "tests"}
+        or host_manifest.get("schema") != 1
+    ):
+        raise ValueError("host manifest schema is invalid")
+    canonical_host = (
+        json.dumps(
+            host_manifest,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        + "\n"
+    )
+    if host_text != canonical_host:
+        raise ValueError("host manifest is not canonical JSON")
+    if host_manifest.get("checksum_definition") != CHECKSUM_DEFINITION:
+        raise ValueError("host manifest checksum definition is invalid")
+    host_metadata = host_manifest.get("metadata")
+    if host_metadata != asdict(metadata):
+        raise ValueError("host manifest metadata differs from guest manifest")
+    if host_manifest.get("tests") != [asdict(test) for test in tests]:
+        raise ValueError("host manifest tests differ from guest manifest")
+    runtime_manifest = host_manifest.get("runtime")
+    if not isinstance(runtime_manifest, list):
+        raise ValueError("host runtime manifest is invalid")
+    expected_runtime: dict[str, str] = {}
+    for entry in runtime_manifest:
+        if not isinstance(entry, Mapping) or set(entry) != {"path", "sha256"}:
+            raise ValueError("host runtime manifest entry is invalid")
+        relative = entry.get("path")
+        digest = entry.get("sha256")
+        if not isinstance(relative, str) or not isinstance(digest, str):
+            raise ValueError("host runtime manifest entry is invalid")
+        path = _validate_relative_path(relative, "runtime path")
+        if len(path.parts) != 2 or path.parts[0] != "lib":
+            raise ValueError(f"unsafe runtime path: {relative!r}")
+        if relative in expected_runtime:
+            raise ValueError(f"duplicate runtime path: {relative}")
+        if _DIGEST_RE.fullmatch(digest) is None:
+            raise ValueError(f"invalid runtime checksum: {relative}")
+        expected_runtime[relative] = digest
+    executable_count = 0
+    elf_files: list[Path] = []
+    expected_binaries: set[str] = set()
+    for test in tests:
+        if test.disposition != "complete":
+            continue
+        executable_count += 1
+        assert test.binary is not None and test.sha256 is not None
+        executable = safe_stage_path(stage, test.binary)
+        expected_binaries.add(test.binary)
+        executable_info = _require_regular_file(
+            executable, f"binary for {test.test_id}"
+        )
+        if stat.S_IMODE(executable_info.st_mode) != 0o755:
+            raise ValueError(f"invalid executable mode for {test.test_id}")
+        if sha256_file(executable) != test.sha256:
+            raise ValueError(f"binary checksum mismatch for {test.test_id}")
+        if verify_architecture:
+            header = _run_readelf(
+                readelf_runner,
+                ["aarch64-linux-gnu-readelf", "-h", str(executable)],
+                test.binary,
+            )
+            if "AArch64" not in header:
+                raise ValueError(f"staged binary is not AArch64 ELF: {test.binary}")
+            elf_files.append(executable)
+    actual_binaries = {
+        path.relative_to(stage).as_posix()
+        for path in (stage / "bin").rglob("*")
+        if path.is_file()
+    } if (stage / "bin").is_dir() else set()
+    if actual_binaries != expected_binaries:
+        missing = sorted(expected_binaries - actual_binaries)
+        extra = sorted(actual_binaries - expected_binaries)
+        raise ValueError(
+            f"binary inventory mismatch (missing={missing}, extra={extra})"
+        )
+    runtime_files: dict[str, Path] = {}
+    for library in sorted((stage / "lib").glob("*") if (stage / "lib").is_dir() else ()):
+        library_info = _require_regular_file(library, "runtime library")
+        if stat.S_IMODE(library_info.st_mode) != 0o755:
+            raise ValueError(f"invalid runtime mode: {library.name}")
+        runtime_files[library.name] = library
+        if verify_architecture:
+            header = _run_readelf(
+                readelf_runner,
+                ["aarch64-linux-gnu-readelf", "-h", str(library)],
+                library.name,
+            )
+            if "AArch64" not in header:
+                raise ValueError(f"staged runtime is not AArch64 ELF: {library.name}")
+            elf_files.append(library)
+    actual_runtime = {f"lib/{name}" for name in runtime_files}
+    if actual_runtime != set(expected_runtime):
+        missing = sorted(set(expected_runtime) - actual_runtime)
+        extra = sorted(actual_runtime - set(expected_runtime))
+        raise ValueError(
+            f"runtime inventory mismatch (missing={missing}, extra={extra})"
+        )
+    for relative, digest in sorted(expected_runtime.items()):
+        if sha256_file(safe_stage_path(stage, relative)) != digest:
+            raise ValueError(f"runtime checksum mismatch: {relative}")
+    expected_files = {
+        "manifest.tsv",
+        "manifest.json",
+        "build-results.ndjson",
+        *expected_binaries,
+        *expected_runtime,
+    }
+    actual_files = {
+        path.relative_to(stage).as_posix()
+        for path in stage.rglob("*")
+        if path.is_file()
+    }
+    if actual_files != expected_files:
+        missing = sorted(expected_files - actual_files)
+        extra = sorted(actual_files - expected_files)
+        raise ValueError(
+            f"stage file inventory mismatch (missing={missing}, extra={extra})"
+        )
+    if verify_architecture:
+        for elf_file in elf_files:
+            dependencies = _run_readelf(
+                readelf_runner,
+                readelf_command("aarch64-linux-gnu-readelf", elf_file),
+                elf_file.name,
+            )
+            interpreter, needed = parse_elf_dependencies(dependencies)
+            required = set(needed)
+            if interpreter is not None:
+                required.add(PurePosixPath(interpreter).name)
+            missing = sorted(required - set(runtime_files))
+            if missing:
+                raise ValueError(
+                    f"missing runtime dependency for {elf_file.name}: {missing[0]}"
+                )
+    staged_bytes = _stage_size(stage)
+    compile_results = tuple(
+        result for result in build_results if result.stage == "compile"
+    )
+    link_results = tuple(result for result in build_results if result.stage == "link")
+    return BuildSummary(
+        discovered=sum(test.kind != "shell" for test in tests),
+        compile_pass=(
+            sum(result.status == "passed" for result in compile_results)
+            if compile_results
+            else sum(
+                test.kind != "shell" and test.disposition != "compile-failed"
+                for test in tests
+            )
+        ),
+        compile_fail=(
+            sum(result.status == "failed" for result in compile_results)
+            if compile_results
+            else sum(test.disposition == "compile-failed" for test in tests)
+        ),
+        link_pass=(
+            sum(result.status == "passed" for result in link_results)
+            if link_results
+            else executable_count
+        ),
+        link_fail=(
+            sum(result.status == "failed" for result in link_results)
+            if link_results
+            else sum(test.disposition == "link-failed" for test in tests)
+        ),
+        shell_unported=sum(test.disposition == "not-built-shell-test" for test in tests),
+        staged_bytes=staged_bytes,
+    )

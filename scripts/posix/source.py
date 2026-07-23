@@ -25,6 +25,7 @@ _LOCK_FIELDS = frozenset({"schema", "url", "revision", "license", "standard"})
 _METADATA_FIELDS = frozenset({"schema", "patch_sha256", "tree_oid"})
 _METADATA_NAME = ".smros-source.json"
 _REVISION_NAME = ".smros-revision"
+_SUBPROCESS_RUN = subprocess.run
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -293,7 +294,7 @@ def _run_git_at(
     environment: dict[str, str] | None = None,
     input_data: bytes | None = None,
 ) -> bytes:
-    return subprocess.run(
+    return _run_git_process(
         ["git", "-C", f"/proc/self/fd/{root_descriptor}", *arguments],
         check=True,
         env=environment,
@@ -302,6 +303,29 @@ def _run_git_at(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     ).stdout
+
+
+def _run_git_process(
+    argv: list[str],
+    *,
+    timeout_seconds: float = 120.0,
+    **kwargs: object,
+) -> subprocess.CompletedProcess:
+    """Run Git with bounded I/O while retaining the existing test seam."""
+    if subprocess.run is not _SUBPROCESS_RUN:
+        return subprocess.run(argv, **kwargs)
+    from .build import run_bounded_command
+
+    return run_bounded_command(
+        argv,
+        timeout_seconds=timeout_seconds,
+        cwd=kwargs.get("cwd"),
+        env=kwargs.get("env"),
+        input_data=kwargs.get("input"),
+        pass_fds=kwargs.get("pass_fds", ()),
+        text=bool(kwargs.get("text", False)),
+        check=bool(kwargs.get("check", False)),
+    )
 
 
 def _write_index_tree(root_descriptor: int, index_path: Path) -> str:
@@ -720,7 +744,7 @@ def fetch_checkout(lock: SourceLock, root: Path, patch_series: Path) -> None:
         temporary_name, temporary_descriptor = _create_owned_temporary_directory(
             destination_parent_descriptor, root.name
         )
-        subprocess.run(
+        _run_git_process(
             [
                 "git",
                 "clone",
