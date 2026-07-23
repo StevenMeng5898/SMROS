@@ -88,13 +88,15 @@ def classify_status(
         return "launch-error"
     if timed_out:
         return "timeout"
+    if returncode is not None and returncode < 0:
+        return "crash"
     return {
         PTS_PASS: "pass",
         PTS_FAIL: "fail",
         PTS_UNRESOLVED: "unresolved",
         PTS_UNSUPPORTED: "unsupported",
         PTS_UNTESTED: "untested",
-    }.get(returncode, "crash")
+    }.get(returncode, "fail")
 
 
 def filter_runnable_tests(

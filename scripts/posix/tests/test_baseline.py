@@ -210,8 +210,8 @@ class StatusTests(unittest.TestCase):
             2: "unresolved",
             4: "unsupported",
             5: "untested",
-            6: "crash",
-            127: "crash",
+            6: "fail",
+            127: "fail",
         }
         self.assertEqual(
             {code: classify_status(code) for code in expected}, expected
@@ -451,6 +451,30 @@ class RuntimeAttemptTests(BaselineFixture, unittest.TestCase):
 
 
 class CampaignTests(BaselineFixture, unittest.TestCase):
+    def test_nonstandard_exit_and_signal_have_distinct_terminal_counts(self) -> None:
+        tests = (
+            self.make_test("other-exit"),
+            self.make_test("signal-exit"),
+        )
+        self.write_manifest(tests)
+
+        result = run_baseline(
+            self.stage,
+            self.sysroot,
+            self.results,
+            qemu=self.qemu,
+            verifier=lambda _stage: None,
+        )
+
+        self.assertEqual(
+            [attempt.status for attempt in result.attempts], ["fail", "crash"]
+        )
+        rows = [
+            json.loads(line)
+            for line in self.results.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(rows[-1]["status_counts"], {"crash": 1, "fail": 1})
+
     def test_campaign_writes_attempts_and_terminal_record_atomically(self) -> None:
         tests = (
             self.make_test("pass-one", api="getpid"),
