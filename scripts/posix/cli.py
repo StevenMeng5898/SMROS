@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import sys
 
+from .baseline import run_baseline
 from .build import (
     ManifestMetadata,
     build_campaign,
@@ -35,6 +36,19 @@ PINNED_STUB_REVIEW_SHA256 = (
 PINNED_SHELL_REVIEW_SHA256 = (
     "be5f388dbf4768769a503a6ce58e5642ac8fbf9ed705c03093338b25c0afe7b5"
 )
+BASELINE_STAGE_PATH = REPOSITORY_ROOT / "host_shared" / "posixtest"
+BASELINE_RESULTS_PATH = (
+    REPOSITORY_ROOT
+    / "target"
+    / "posix"
+    / "aarch64"
+    / "linux-reference"
+    / "results.ndjson"
+)
+BASELINE_PREREQUISITE = (
+    "sudo apt-get install qemu-user gcc-aarch64-linux-gnu "
+    "libc6-dev-arm64-cross"
+)
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -59,6 +73,14 @@ def create_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--arch", required=True)
     build_parser.add_argument("--stage", required=True, type=Path)
     build_parser.add_argument("--verify-only", action="store_true")
+    baseline_parser = subparsers.add_parser(
+        "baseline", help="run the staged suite under qemu-user"
+    )
+    filters = baseline_parser.add_mutually_exclusive_group()
+    filters.add_argument("--api")
+    filters.add_argument("--group")
+    filters.add_argument("--test")
+    baseline_parser.add_argument("--sysroot", required=True, type=Path)
     return parser
 
 
@@ -263,6 +285,58 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         print(summary.format_counts())
         return 0
+    if arguments.command == "baseline":
+        qemu = shutil.which("qemu-aarch64")
+        if qemu is None:
+            print("baseline failed: qemu-aarch64 is unavailable", file=sys.stderr)
+            print(BASELINE_PREREQUISITE, file=sys.stderr)
+            return 1
+        try:
+            (
+                expected_metadata,
+                _checkout,
+                expected_tests,
+                expected_shell_tests,
+            ) = _current_build_inputs()
+
+            def strict_verifier(stage: Path) -> BuildSummary:
+                return verify_stage(
+                    stage,
+                    expected_metadata=expected_metadata,
+                    expected_tests=expected_tests,
+                    expected_shell_tests=expected_shell_tests,
+                    strict_command_paths=True,
+                )
+
+            result = run_baseline(
+                BASELINE_STAGE_PATH,
+                arguments.sysroot,
+                BASELINE_RESULTS_PATH,
+                api=arguments.api,
+                group=arguments.group,
+                test_id=arguments.test,
+                qemu=qemu,
+                verifier=strict_verifier,
+            )
+        except (OSError, ValueError) as error:
+            print(f"baseline failed: {error}", file=sys.stderr)
+            prerequisite_terms = (
+                "unavailable",
+                "sysroot",
+                "interpreter",
+                "runtime file",
+                "required AArch64 tool",
+                "libc.so.6",
+            )
+            if any(term in str(error) for term in prerequisite_terms):
+                print(BASELINE_PREREQUISITE, file=sys.stderr)
+            return 1
+        print(
+            f"selected={len(result.attempts)} "
+            f"passed={sum(attempt.status == 'pass' for attempt in result.attempts)} "
+            f"results={result.result_path}"
+        )
+        return 0 if result.all_passed else 1
     raise AssertionError(f"unhandled command: {arguments.command}")
 
 

@@ -69,6 +69,47 @@ class RuntimeAttempt:
     stdout: str
     stderr: str
     source: str
+    launch_error: str | None = None
+    stdout_bytes: int = 0
+    stderr_bytes: int = 0
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    manifest_sha256: str = ""
+    build_results_sha256: str = ""
+    build_id: str = ""
+    revision: str = ""
+    patch_sha256: str = ""
+    smros_commit: str = ""
+    binary_sha256: str = ""
+    run_id: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        """Return every core and finalized runtime field for persistence."""
+        return {
+            "binary_sha256": self.binary_sha256,
+            "build_id": self.build_id,
+            "build_results_sha256": self.build_results_sha256,
+            "duration_ms": self.duration_ms,
+            "exit_code": self.exit_code,
+            "launch_error": self.launch_error,
+            "manifest_sha256": self.manifest_sha256,
+            "patch_sha256": self.patch_sha256,
+            "platform": self.platform,
+            "revision": self.revision,
+            "run_id": self.run_id,
+            "signal": self.signal,
+            "smros_commit": self.smros_commit,
+            "source": self.source,
+            "status": self.status,
+            "stderr": self.stderr,
+            "stderr_bytes": self.stderr_bytes,
+            "stderr_truncated": self.stderr_truncated,
+            "stdout": self.stdout,
+            "stdout_bytes": self.stdout_bytes,
+            "stdout_truncated": self.stdout_truncated,
+            "test_id": self.test_id,
+            "timed_out": self.timed_out,
+        }
 
 
 @dataclass(frozen=True)
