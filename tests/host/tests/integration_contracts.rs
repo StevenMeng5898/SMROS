@@ -323,6 +323,33 @@ fn elf_mapping_ranges_feed_fixed_mmap_window_checks() {
 }
 
 #[test]
+fn linker_script_selection_is_single_source_for_nested_worktrees() {
+    let cargo_config = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../.cargo/config.toml"
+    ));
+    let build_script = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../build.rs"));
+
+    assert!(
+        !cargo_config.contains("link-arg=-Tlinker/"),
+        "Cargo rustflag arrays concatenate when a linked worktree is nested under another checkout"
+    );
+    for (target, script) in [
+        ("aarch64-unknown-none", "linker/kernel.ld"),
+        ("riscv64gc-unknown-none-elf", "linker/kernel-riscv64.ld"),
+        ("x86_64-unknown-none", "linker/kernel-x86_64.ld"),
+    ] {
+        let mapping = format!("\"{target}\" => Some(\"{script}\")");
+        assert_eq!(
+            build_script.matches(&mapping).count(),
+            1,
+            "{target} must select exactly one linker script"
+        );
+    }
+    assert!(build_script.contains("CARGO_ENCODED_RUSTFLAGS"));
+}
+
+#[test]
 fn test_layer_commands_and_docs_are_wired() {
     let makefile = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Makefile"));
     let docs = include_str!(concat!(

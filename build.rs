@@ -102,7 +102,36 @@ fn collect_snapshot(
     }
 }
 
+fn linker_script_for_target(target: &str) -> Option<&'static str> {
+    match target {
+        "aarch64-unknown-none" => Some("linker/kernel.ld"),
+        "riscv64gc-unknown-none-elf" => Some("linker/kernel-riscv64.ld"),
+        "x86_64-unknown-none" => Some("linker/kernel-x86_64.ld"),
+        _ => None,
+    }
+}
+
+fn configure_linker() {
+    println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
+
+    let target = env::var("TARGET").unwrap();
+    let Some(script) = linker_script_for_target(&target) else {
+        return;
+    };
+    println!("cargo:rerun-if-changed={script}");
+
+    let rustflags = env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
+    if !rustflags
+        .split('\x1f')
+        .any(|flag| flag.contains("link-arg=-T"))
+    {
+        println!("cargo:rustc-link-arg=-T{script}");
+    }
+}
+
 fn main() {
+    configure_linker();
+
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let host_share_root = manifest_dir.join(HOST_SHARE_DIR);
