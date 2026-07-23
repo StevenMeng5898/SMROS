@@ -11,8 +11,9 @@ EXPECTED_ENTRY = 0x40200000
 EM_AARCH64 = 183
 ET_EXEC = 2
 SHF_ALLOC = 0x2
+SHT_STRTAB = 3
 SHT_NOBITS = 8
-SHN_XINDEX = 0xFFFF
+SHN_LORESERVE = 0xFF00
 REQUIRED_SECTIONS = (".text", ".rodata", ".data", ".bss", ".stack")
 
 ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
@@ -97,7 +98,13 @@ def parse_elf(data: bytes) -> ElfLayout:
         raise LayoutError(f"unexpected section header size {section_header_size}")
     if section_count == 0:
         raise LayoutError("extended section counts are not supported")
-    if string_table_index == SHN_XINDEX or string_table_index >= section_count:
+    if section_count >= SHN_LORESERVE:
+        raise LayoutError(f"reserved section count 0x{section_count:x} is not supported")
+    if string_table_index >= SHN_LORESERVE:
+        raise LayoutError(
+            f"reserved string-table index 0x{string_table_index:x} is not supported"
+        )
+    if string_table_index >= section_count:
         raise LayoutError("invalid section-name string-table index")
 
     table_size = section_count * section_header_size
@@ -110,6 +117,8 @@ def parse_elf(data: bytes) -> ElfLayout:
     ]
 
     string_header = raw_sections[string_table_index]
+    if string_header[1] != SHT_STRTAB:
+        raise LayoutError("section-name table must have type SHT_STRTAB")
     string_table = checked_slice(
         data, string_header[4], string_header[5], "section-name string table"
     )
@@ -119,7 +128,7 @@ def parse_elf(data: bytes) -> ElfLayout:
         name_offset, section_type, flags, address, offset, size = raw[:6]
         if section_type != SHT_NOBITS and size:
             checked_slice(data, offset, size, f"section {index} contents")
-        if address + size > (1 << 64):
+        if address + size >= (1 << 64):
             raise LayoutError(f"section {index} address range overflows u64")
         sections.append(
             Section(
@@ -160,11 +169,14 @@ def validate_elf(data: bytes) -> ElfLayout:
     if not text.address <= layout.entry < text.end:
         raise LayoutError("entry is outside .text")
 
-    allocatable = [
-        section
-        for section in layout.sections
-        if section.flags & SHF_ALLOC and section.size > 0
-    ]
+    allocatable = sorted(
+        (
+            section
+            for section in layout.sections
+            if section.flags & SHF_ALLOC and section.size > 0
+        ),
+        key=lambda section: (section.address, section.index),
+    )
     for previous, current in zip(allocatable, allocatable[1:]):
         if current.address < previous.end:
             raise LayoutError(

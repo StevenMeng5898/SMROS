@@ -112,9 +112,16 @@ fn linker_script_for_target(target: &str) -> Option<&'static str> {
 }
 
 fn linker_arg_is_placement_option(argument: &str) -> bool {
-    ["-Ttext", "-Ttext-segment", "-Tdata", "-Tbss"]
-        .iter()
-        .any(|option| argument == *option || argument.starts_with(&format!("{option}=")))
+    [
+        "-Ttext",
+        "-Ttext-segment",
+        "-Trodata-segment",
+        "-Tldata-segment",
+        "-Tdata",
+        "-Tbss",
+    ]
+    .iter()
+    .any(|option| argument == *option || argument.starts_with(&format!("{option}=")))
 }
 
 fn linker_arg_selects_script(argument: &str) -> bool {
