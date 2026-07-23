@@ -45,6 +45,14 @@ class DiscoveryFixture(unittest.TestCase):
             "conformance/definitions/sys/mman_h/2-1.c",
             "int declaration;\n",
         )
+        for relative_path in (
+            "conformance/behavior/WIFEXITED/1-1.c",
+            "conformance/behavior/WIFEXITED/1-2.c",
+            "conformance/behavior/WIFEXITED/1-3.c",
+            "conformance/behavior/timers/1-1.c",
+            "conformance/behavior/timers/2-1.c",
+        ):
+            self.write_source(relative_path, "int main(void) { return 0; }\n")
         self.write_source(
             "conformance/interfaces/mq_open/2-1.c",
             "int main(void) {\n"
@@ -140,6 +148,11 @@ class TestDiscovery(DiscoveryFixture):
             [test.test_id for test in tests],
             sorted(
                 [
+                    "conformance/behavior/WIFEXITED/1-1.c",
+                    "conformance/behavior/WIFEXITED/1-2.c",
+                    "conformance/behavior/WIFEXITED/1-3.c",
+                    "conformance/behavior/timers/1-1.c",
+                    "conformance/behavior/timers/2-1.c",
                     "conformance/definitions/aio_h/1-1.c",
                     "conformance/definitions/sys/mman_h/2-1.c",
                     "conformance/interfaces/mmap/1-1.c",
@@ -167,6 +180,21 @@ class TestDiscovery(DiscoveryFixture):
         self.assertEqual((nested.api, nested.group), ("sys/mman_h", "base"))
         buildonly = tests["conformance/interfaces/sigaction/4-1-buildonly.c"]
         self.assertEqual((buildonly.api, buildonly.group, buildonly.kind), ("sigaction", "signals", "definition"))
+
+    def test_behavior_sources_use_their_parent_directory_as_api(self) -> None:
+        tests = {test.test_id: test for test in discover_tests(self.root)}
+        expected = {
+            "conformance/behavior/WIFEXITED/1-1.c": "WIFEXITED",
+            "conformance/behavior/WIFEXITED/1-2.c": "WIFEXITED",
+            "conformance/behavior/WIFEXITED/1-3.c": "WIFEXITED",
+            "conformance/behavior/timers/1-1.c": "timers",
+            "conformance/behavior/timers/2-1.c": "timers",
+        }
+
+        for test_id, api in expected.items():
+            with self.subTest(test_id=test_id):
+                test = tests[test_id]
+                self.assertEqual((test.api, test.group, test.kind), (api, "base", "runnable"))
 
     def test_api_group_uses_the_approved_mapping(self) -> None:
         expected = {
@@ -227,6 +255,33 @@ class TestDiscovery(DiscoveryFixture):
             "conformance/interfaces/mmap/6-1.c",
             [candidate.path for candidate in candidates],
         )
+
+    def test_rejects_unsafe_non_stub_source_paths(self) -> None:
+        relative_paths = (
+            "conformance/interfaces/mmap/6-1\\spoof.c",
+            "conformance/interfaces/mmap/7-1\x01.c",
+            "conformance/interfaces/mmap/8-1\u202e.c",
+            "conformance/interfaces/bad\u202e/9-1.c",
+        )
+
+        for relative_path in relative_paths:
+            with self.subTest(relative_path=relative_path):
+                path = self.write_source(
+                    relative_path, "int main(void) { return 0; }\n"
+                )
+                try:
+                    with self.assertRaisesRegex(ValueError, "invalid.*path"):
+                        discover_tests(self.root)
+                finally:
+                    path.unlink()
+
+    def test_allows_ordinary_non_ascii_source_paths(self) -> None:
+        relative_path = "conformance/interfaces/mmap/10-\u00e9.c"
+        self.write_source(relative_path, "int main(void) { return 0; }\n")
+
+        tests = discover_tests(self.root)
+
+        self.assertIn(relative_path, [test.test_id for test in tests])
 
     def test_inventories_every_shell_file_deterministically(self) -> None:
         expected = [
@@ -355,6 +410,21 @@ class TestReviewParsing(DiscoveryFixture):
             with self.subTest(index=index):
                 path = self.root / f"invalid-{index}.tsv"
                 path.write_bytes(data)
+                with self.assertRaises(ValueError):
+                    load_review(path, STUB_DISPOSITIONS)
+
+    def test_rejects_unicode_format_controls_in_review_paths_and_reasons(self) -> None:
+        invalid_rows = (
+            "conformance/interfaces/mmap/1-1\u202e.c\truntime-path\treason",
+            "conformance/interfaces/mmap/1-1.c\truntime-path\tspoof\u202e reason",
+        )
+
+        for index, row in enumerate(invalid_rows):
+            with self.subTest(index=index):
+                path = self.root / f"format-control-{index}.tsv"
+                path.write_bytes(
+                    ("path\tdisposition\treason\n" + row + "\n").encode("utf-8")
+                )
                 with self.assertRaises(ValueError):
                     load_review(path, STUB_DISPOSITIONS)
 

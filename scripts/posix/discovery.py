@@ -158,7 +158,7 @@ def _classify_source(relative_path: PurePosixPath) -> tuple[str, str]:
         if not api_parts:
             raise ValueError(f"definition source has no API directory: {relative_path}")
         return PurePosixPath(*api_parts).as_posix(), "definition"
-    api = parts[1]
+    api = parts[-2]
     kind = "definition" if "-buildonly" in parts[-1] else "runnable"
     return api, kind
 
@@ -173,6 +173,7 @@ def discover_tests(checkout: Path) -> tuple[SuiteTest, ...]:
     tests = []
     for path in paths:
         source = _source_identity(checkout, path)
+        _validate_safe_relative_path(source)
         api, kind = _classify_source(PurePosixPath(source))
         tests.append(
             SuiteTest(
@@ -372,12 +373,12 @@ def discover_shell_candidates(checkout: Path) -> tuple[ReviewCandidate, ...]:
 
 def _has_control(value: str) -> bool:
     return any(
-        unicodedata.category(character) in {"Cc", "Zl", "Zp"}
+        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
         for character in value
     )
 
 
-def _validate_review_path(path: str) -> None:
+def _validate_safe_relative_path(path: str) -> None:
     candidate = PurePosixPath(path)
     raw_parts = path.split("/")
     if (
@@ -390,7 +391,7 @@ def _validate_review_path(path: str) -> None:
         or candidate.parts[0] != "conformance"
         or _has_control(path)
     ):
-        raise ValueError(f"invalid review path: {path!r}")
+        raise ValueError(f"invalid relative path: {path!r}")
 
 
 def load_review(
@@ -419,7 +420,7 @@ def load_review(
         if len(fields) != 3:
             raise ValueError(f"review row {line_number} must have exactly three fields")
         review_path, disposition, reason = fields
-        _validate_review_path(review_path)
+        _validate_safe_relative_path(review_path)
         if review_path in reviews:
             raise ValueError(f"duplicate review path: {review_path}")
         if disposition not in allowed:
@@ -441,7 +442,7 @@ def _candidate_paths(
     if len(set(paths)) != len(paths):
         raise ValueError(f"duplicate {label} candidate path")
     for path in paths:
-        _validate_review_path(path)
+        _validate_safe_relative_path(path)
     return tuple(sorted(paths))
 
 
@@ -507,7 +508,7 @@ def _write_candidate_file(path: Path, candidates: Iterable[ReviewCandidate]) -> 
         raise ValueError(f"duplicate candidate path for {path.name}")
     lines = [_CANDIDATE_HEADER]
     for candidate in ordered:
-        _validate_review_path(candidate.path)
+        _validate_safe_relative_path(candidate.path)
         if not candidate.evidence or "\t" in candidate.evidence or _has_control(
             candidate.evidence
         ):
