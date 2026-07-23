@@ -329,7 +329,10 @@ class CommandTests(unittest.TestCase):
                 "import os,pathlib,subprocess,sys,time;"
                 "child=subprocess.Popen([sys.executable,'-c',"
                 "'import time;time.sleep(30)']);"
-                "pathlib.Path(sys.argv[1]).write_text("
+                "pid_path=pathlib.Path(sys.argv[1]);"
+                "pid_path.write_text('',encoding='ascii');"
+                "time.sleep(1);"
+                "pid_path.write_text("
                 "f'{os.getpid()} {child.pid}',encoding='ascii');"
                 "time.sleep(30)"
             )
@@ -347,8 +350,26 @@ class CommandTests(unittest.TestCase):
 
             def interrupt_once(process: subprocess.Popen[bytes]) -> int | None:
                 if not interrupted[0]:
-                    deadline = time.monotonic() + 2.0
-                    while not pid_file.exists() and time.monotonic() < deadline:
+                    deadline = time.monotonic() + 5.0
+                    while True:
+                        try:
+                            ready_pids = tuple(
+                                int(value)
+                                for value in pid_file.read_text(
+                                    encoding="ascii"
+                                ).split()
+                            )
+                        except (FileNotFoundError, ValueError):
+                            ready_pids = ()
+                        if len(ready_pids) == 2 and all(
+                            pid > 0 for pid in ready_pids
+                        ):
+                            break
+                        if time.monotonic() >= deadline:
+                            self.fail(
+                                "helper did not publish two positive PIDs before "
+                                "the startup deadline"
+                            )
                         time.sleep(0.01)
                     interrupted[0] = True
                     raise original_error
