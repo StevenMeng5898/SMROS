@@ -2,6 +2,7 @@ import contextlib
 import io
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 from unittest import mock
 
@@ -19,6 +20,12 @@ from scripts.posix.discovery import (
     discover_tests,
     load_review,
     write_candidates,
+)
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+SHELL_REVIEW_PATH = (
+    REPOSITORY_ROOT / "third_party" / "posixtest" / "shell-review.tsv"
 )
 
 
@@ -157,7 +164,7 @@ class TestDiscovery(DiscoveryFixture):
         aio = tests["conformance/definitions/aio_h/1-1.c"]
         self.assertEqual((aio.api, aio.group, aio.kind), ("aio_h", "aio", "definition"))
         nested = tests["conformance/definitions/sys/mman_h/2-1.c"]
-        self.assertEqual((nested.api, nested.group), ("sys/mman_h", "memory"))
+        self.assertEqual((nested.api, nested.group), ("sys/mman_h", "base"))
         buildonly = tests["conformance/interfaces/sigaction/4-1-buildonly.c"]
         self.assertEqual((buildonly.api, buildonly.group, buildonly.kind), ("sigaction", "signals", "definition"))
 
@@ -179,13 +186,13 @@ class TestDiscovery(DiscoveryFixture):
             "close": "base",
             "aio_h": "aio",
             "pthread_h": "threads",
-            "mqueue_h": "message-queues",
-            "semaphore_h": "semaphores",
+            "mqueue_h": "base",
+            "semaphore_h": "base",
             "sched_h": "scheduling",
             "signal_h": "signals",
-            "time_h": "time",
-            "sys/mman_h": "memory",
-            "sys/shm_h": "memory",
+            "time_h": "base",
+            "sys/mman_h": "base",
+            "sys/shm_h": "base",
             "unistd_h": "base",
         }
 
@@ -271,6 +278,68 @@ class TestReviewParsing(DiscoveryFixture):
                 )
                 with self.assertRaises(ValueError):
                     load_review(path, STUB_DISPOSITIONS)
+
+    def test_shell_review_classifies_assertion_drivers_as_tests(self) -> None:
+        reviews = load_review(SHELL_REVIEW_PATH, SHELL_DISPOSITIONS)
+        assertion_drivers = {
+            "conformance/interfaces/sigaddset/1-1.sh",
+            "conformance/interfaces/sigaddset/1-2.sh",
+            "conformance/interfaces/sigaddset/4-1.sh",
+            "conformance/interfaces/sigaddset/4-2.sh",
+            "conformance/interfaces/sigaddset/4-3.sh",
+            "conformance/interfaces/sigaddset/4-4.sh",
+            "conformance/interfaces/sigdelset/1-1.sh",
+            "conformance/interfaces/sigdelset/1-2.sh",
+            "conformance/interfaces/sigdelset/4-1.sh",
+            "conformance/interfaces/sigdelset/4-2.sh",
+            "conformance/interfaces/sigdelset/4-3.sh",
+            "conformance/interfaces/sigdelset/4-4.sh",
+            "conformance/interfaces/sighold/3-1.sh",
+            "conformance/interfaces/sighold/3-2.sh",
+            "conformance/interfaces/sighold/3-3.sh",
+            "conformance/interfaces/sighold/3-4.sh",
+            "conformance/interfaces/sigignore/5-1.sh",
+            "conformance/interfaces/sigignore/5-2.sh",
+            "conformance/interfaces/sigignore/5-3.sh",
+            "conformance/interfaces/sigignore/5-4.sh",
+            "conformance/interfaces/sigismember/5-1.sh",
+            "conformance/interfaces/sigismember/5-2.sh",
+            "conformance/interfaces/sigismember/5-3.sh",
+            "conformance/interfaces/sigismember/5-4.sh",
+            "conformance/interfaces/sigprocmask/17-1.sh",
+            "conformance/interfaces/sigprocmask/17-2.sh",
+            "conformance/interfaces/sigprocmask/17-3.sh",
+            "conformance/interfaces/sigprocmask/17-4.sh",
+            "conformance/interfaces/sigrelse/3-1.sh",
+            "conformance/interfaces/sigrelse/3-2.sh",
+            "conformance/interfaces/sigrelse/3-3.sh",
+            "conformance/interfaces/sigrelse/3-4.sh",
+        }
+        cleanup_helpers = {
+            "conformance/interfaces/sem_close/cln.sh",
+            "conformance/interfaces/sem_destroy/cln.sh",
+            "conformance/interfaces/sem_getvalue/cln.sh",
+            "conformance/interfaces/sem_open/cln.sh",
+            "conformance/interfaces/sem_post/cln.sh",
+            "conformance/interfaces/sem_unlink/cln.sh",
+            "conformance/interfaces/sem_wait/cln.sh",
+        }
+
+        self.assertEqual(
+            Counter(review.disposition for review in reviews.values()),
+            Counter({"test": 169, "helper": 7}),
+        )
+        for path in assertion_drivers:
+            with self.subTest(driver=path):
+                self.assertEqual(reviews[path].disposition, "test")
+                self.assertEqual(
+                    reviews[path].reason,
+                    "shell driver executes a build-only C assertion case and "
+                    "forwards its result",
+                )
+        for path in cleanup_helpers:
+            with self.subTest(helper=path):
+                self.assertEqual(reviews[path].disposition, "helper")
 
     def test_rejects_invalid_paths_and_non_lf_or_control_data(self) -> None:
         invalid_data = (

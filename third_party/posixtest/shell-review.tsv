@@ -129,38 +129,38 @@ conformance/interfaces/shm_open/35-1.sh	test	script directly records the asserti
 conformance/interfaces/shm_open/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
 conformance/interfaces/shm_unlink/4-1.sh	test	script directly records the assertion as tested implicitly and exits success
 conformance/interfaces/shm_unlink/7-1.sh	test	script directly records the assertion as tested implicitly and exits success
-conformance/interfaces/sigaddset/1-1.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigaddset/1-2.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigaddset/4-1.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigaddset/4-2.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigaddset/4-3.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigaddset/4-4.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigdelset/1-1.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigdelset/1-2.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigdelset/4-1.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigdelset/4-2.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigdelset/4-3.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigdelset/4-4.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sighold/3-1.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sighold/3-2.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sighold/3-3.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sighold/3-4.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigignore/5-1.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigignore/5-2.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigignore/5-3.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigignore/5-4.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigismember/5-1.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigismember/5-2.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigismember/5-3.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigismember/5-4.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigprocmask/17-1.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigprocmask/17-2.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigprocmask/17-3.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigprocmask/17-4.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigrelse/3-1.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigrelse/3-2.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigrelse/3-3.sh	generator	script orchestrates a generated build-only target program for the assertion
-conformance/interfaces/sigrelse/3-4.sh	generator	script orchestrates a generated build-only target program for the assertion
+conformance/interfaces/sigaddset/1-1.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigaddset/1-2.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigaddset/4-1.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigaddset/4-2.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigaddset/4-3.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigaddset/4-4.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigdelset/1-1.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigdelset/1-2.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigdelset/4-1.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigdelset/4-2.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigdelset/4-3.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigdelset/4-4.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sighold/3-1.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sighold/3-2.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sighold/3-3.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sighold/3-4.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigignore/5-1.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigignore/5-2.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigignore/5-3.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigignore/5-4.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigismember/5-1.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigismember/5-2.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigismember/5-3.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigismember/5-4.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigprocmask/17-1.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigprocmask/17-2.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigprocmask/17-3.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigprocmask/17-4.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigrelse/3-1.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigrelse/3-2.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigrelse/3-3.sh	test	shell driver executes a build-only C assertion case and forwards its result
+conformance/interfaces/sigrelse/3-4.sh	test	shell driver executes a build-only C assertion case and forwards its result
 conformance/interfaces/timer_create/13-1.sh	test	script directly records the assertion as tested implicitly and exits success
 conformance/interfaces/timer_create/14-1.sh	test	script directly records the assertion as tested implicitly and exits success
 conformance/interfaces/timer_create/4-1.sh	test	script directly records the assertion as tested implicitly and exits success

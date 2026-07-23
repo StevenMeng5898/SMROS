@@ -30,19 +30,6 @@ _MEMORY_APIS = frozenset(
         "shm_unlink",
     }
 )
-_DEFINITION_GROUPS = {
-    "aio_h": "aio",
-    "pthread_h": "threads",
-    "mqueue_h": "message-queues",
-    "semaphore_h": "semaphores",
-    "sched_h": "scheduling",
-    "signal_h": "signals",
-    "time_h": "time",
-    "sys/mman_h": "memory",
-    "sys/shm_h": "memory",
-}
-
-
 @dataclass(frozen=True)
 class ReviewCandidate:
     path: str
@@ -114,8 +101,6 @@ class AuditResult:
 
 def api_group(api: str) -> str:
     """Map a normalized API name to the approved feature group."""
-    if api in _DEFINITION_GROUPS:
-        return _DEFINITION_GROUPS[api]
     if api.startswith("pthread_"):
         return "threads"
     if api.startswith("mq_"):
