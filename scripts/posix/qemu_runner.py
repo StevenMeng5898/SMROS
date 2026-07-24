@@ -377,16 +377,16 @@ def _persisted_attempt_field_limits(selected_count: int) -> _AttemptFieldLimits:
     # Keep all attempt rows within 120 MiB, leaving 8 MiB under the report cap
     # for progress inventory and the terminal row. Each attempt reserves its
     # LF before assigning the remaining variable bytes across two streams and
-    # the one optional error allowed by the attempt semantics.
+    # both errors allowed on a launch-error attempt.
     attempt_budget = _PERSISTED_ATTEMPTS_BUDGET // selected_count
     line_budget = min(_MAX_RESULT_LINE_BYTES, attempt_budget - 1)
     variable_budget = (line_budget - _ATTEMPT_FIXED_BUDGET) // (
         _JSON_ESCAPE_EXPANSION
     )
-    error_bytes = min(_MAX_PERSISTED_ERROR_BYTES, variable_budget // 3)
+    error_bytes = min(_MAX_PERSISTED_ERROR_BYTES, variable_budget // 4)
     stream_bytes = min(
         _MAX_PERSISTED_STREAM_BYTES,
-        (variable_budget - error_bytes) // 2,
+        (variable_budget - 2 * error_bytes) // 2,
     )
     return _AttemptFieldLimits(
         stream_bytes=stream_bytes,
@@ -403,11 +403,18 @@ def _bounded_stream(value: str, maximum: int) -> tuple[str, int, bool]:
     return prefix + _TRUNCATION_MARKER.decode("ascii"), len(data), True
 
 
+def _strict_utf8_size(value: str) -> int | None:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None
+
+
 def _persisted_stream_is_valid(
     value: str, byte_count: int, truncated: bool, maximum: int
 ) -> bool:
-    stored_bytes = len(value.encode("utf-8"))
-    return stored_bytes <= maximum and (
+    stored_bytes = _strict_utf8_size(value)
+    return stored_bytes is not None and stored_bytes <= maximum and (
         (
             truncated
             and byte_count > stored_bytes
@@ -423,11 +430,12 @@ def _persisted_errors_are_valid(
     maximum: int,
 ) -> bool:
     values = (launch_error, infrastructure_error)
-    return sum(value is not None for value in values) <= 1 and all(
+    return all(
         value is None
         or (
             isinstance(value, str)
-            and len(value.encode("utf-8", errors="replace")) <= maximum
+            and (size := _strict_utf8_size(value)) is not None
+            and size <= maximum
         )
         for value in values
     )
@@ -1087,12 +1095,18 @@ class QemuController:
                 )
                 return attempt, False, True
 
+    def _complete(self) -> bool:
+        return not any(
+            attempt.infrastructure_error and attempt.source != WATCHDOG_SOURCE
+            for attempt in self._attempts
+        )
+
     def _terminal(self) -> dict[str, object]:
         return {
             "boot_count": self._boot_count,
             "build_id": self.identity.build_id,
             "build_results_sha256": self.identity.metadata.build_results_sha256,
-            "complete": True,
+            "complete": self._complete(),
             "completed_count": len(self._attempts),
             "manifest_sha256": self.identity.metadata.manifest_sha256,
             "patch_sha256": self.identity.metadata.patch_sha256,
@@ -1166,7 +1180,7 @@ class QemuController:
             os.close(output_descriptor)
         return ControllerResult(
             attempts=tuple(self._attempts),
-            complete=True,
+            complete=self._complete(),
             restart_count=self._restart_count,
             result_path=self._result_path,
             raw_log_path=self._raw_log_path,

@@ -12,7 +12,13 @@ import tempfile
 import unittest
 from unittest import mock
 
-from scripts.posix.build import MAX_TESTS, ManifestMetadata
+from scripts.posix.build import (
+    MAX_MANIFEST_API_BYTES,
+    MAX_MANIFEST_GROUP_BYTES,
+    MAX_MANIFEST_TEST_ID_BYTES,
+    MAX_TESTS,
+    ManifestMetadata,
+)
 from scripts.posix import cli as cli_module
 from scripts.posix import qemu_runner as qemu_runner_module
 from scripts.posix import report as report_module
@@ -128,6 +134,21 @@ def _test(name: str, *, timeout_ms: int = 1_000) -> SuiteTest:
         binary=f"bin/conformance/interfaces/getpid/{name}.c.test",
         sha256=("1" if name == "one" else "2") * 64,
         timeout_ms=timeout_ms,
+    )
+
+
+def _maximum_identity_test(index: int) -> SuiteTest:
+    suffix = f"{index:04d}.c"
+    prefix = "conformance/"
+    return replace(
+        _test(f"budget-{index:04d}"),
+        test_id=(
+            prefix
+            + "i" * (MAX_MANIFEST_TEST_ID_BYTES - len(prefix) - len(suffix))
+            + suffix
+        ),
+        group="g" * MAX_MANIFEST_GROUP_BYTES,
+        api="a" * MAX_MANIFEST_API_BYTES,
     )
 
 
@@ -748,9 +769,7 @@ class QemuControllerTests(unittest.TestCase):
         self.assertTrue(summary["complete"])
 
     def test_maximum_campaign_escaping_stays_within_runtime_caps(self) -> None:
-        tests = tuple(
-            _test(f"budget-{index:04d}") for index in range(MAX_TESTS)
-        )
+        tests = tuple(_maximum_identity_test(index) for index in range(MAX_TESTS))
         baseline_identity = _identity((tests[0],))
         identity = CampaignIdentity(
             metadata=baseline_identity.metadata,
@@ -786,6 +805,7 @@ class QemuControllerTests(unittest.TestCase):
             manifest_sha256=identity.metadata.manifest_sha256,
             architecture="aarch64",
             launch_error="\0" * (600 * 1024),
+            infrastructure_error="\0" * (600 * 1024),
         )
         prototype = controller._guest_attempt(
             guest,
@@ -797,15 +817,18 @@ class QemuControllerTests(unittest.TestCase):
             qemu_runner_module._attempt_record(prototype)
         )
         projected_attempt_bytes = len(prototype_line) * MAX_TESTS
-        self.assertLessEqual(
-            projected_attempt_bytes,
-            qemu_runner_module._PERSISTED_ATTEMPTS_BUDGET,
-        )
+        with self.subTest(check="projected attempt budget"):
+            self.assertLessEqual(
+                projected_attempt_bytes,
+                qemu_runner_module._PERSISTED_ATTEMPTS_BUDGET,
+            )
 
         controller._attempts = [
             replace(
                 prototype,
                 test_id=test.test_id,
+                group=test.group,
+                api=test.api,
                 binary_sha256=test.sha256 or "0" * 64,
             )
             for test in tests
@@ -921,11 +944,13 @@ class QemuControllerTests(unittest.TestCase):
                 MAX_TESTS
             ).error_bytes
             invalid_attempts = {
-                "over-limit": replace(attempt, launch_error="x" * 4096),
-                "two-errors": replace(
+                "launch-error": replace(
                     attempt,
-                    launch_error="x" * error_limit,
-                    infrastructure_error="y" * error_limit,
+                    launch_error="x" * (error_limit + 1),
+                ),
+                "infrastructure-error": replace(
+                    attempt,
+                    infrastructure_error="y" * (error_limit + 1),
                 ),
             }
             for label, invalid_attempt in invalid_attempts.items():
@@ -939,6 +964,22 @@ class QemuControllerTests(unittest.TestCase):
                         resumed._load_progress(output_descriptor, raw.stat())
         finally:
             os.close(output_descriptor)
+
+    def test_persisted_error_validation_rejects_lone_surrogates(self) -> None:
+        error_limit = qemu_runner_module._persisted_attempt_field_limits(
+            MAX_TESTS
+        ).error_bytes
+        for label, errors in {
+            "launch_error": ("\ud800", None),
+            "infrastructure_error": (None, "\ud800"),
+        }.items():
+            with self.subTest(field=label):
+                self.assertFalse(
+                    qemu_runner_module._persisted_errors_are_valid(
+                        *errors,
+                        error_limit,
+                    )
+                )
 
     def test_maximum_campaign_watchdog_uses_guest_error_budget(self) -> None:
         tests = tuple(
@@ -1390,6 +1431,73 @@ class QemuControllerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "size limit"):
                 controller.run(resume=True)
 
+    def test_resume_rejects_canonical_lone_surrogates_in_attempt_text(self) -> None:
+        output = self.root / "resume-progress-surrogates"
+        _clock, progress_bytes, _raw_bytes = self._create_resumable_campaign(output)
+        progress_path = output / "progress.json"
+        raw_path = output / "qemu-serial.log"
+        launch_error_dimensions = {
+            "status": "launch-error",
+            "launch_status": "launch-error",
+            "pts_status": None,
+            "exit_code": None,
+            "signal": None,
+            "timed_out": False,
+        }
+        corruptions = {
+            "stdout": {"stdout": "\ud800", "stdout_bytes": 1},
+            "stderr": {"stderr": "\ud800", "stderr_bytes": 1},
+            "launch_error": {
+                **launch_error_dimensions,
+                "launch_error": "\ud800",
+                "infrastructure_error": None,
+            },
+            "infrastructure_error": {
+                **launch_error_dimensions,
+                "launch_error": "launch failed",
+                "infrastructure_error": "\ud800",
+            },
+        }
+        output_descriptor = os.open(
+            output,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            for label, changes in corruptions.items():
+                with self.subTest(field=label):
+                    tampered = json.loads(progress_bytes)
+                    tampered["completed_attempts"][0].update(changes)
+                    progress_path.write_bytes(
+                        (
+                            json.dumps(
+                                tampered,
+                                ensure_ascii=True,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                        ).encode("ascii")
+                    )
+                    controller = QemuController(
+                        identity=_identity(self.tests),
+                        selected=self.tests,
+                        config=ControllerConfig(
+                            output_directory=output,
+                            qemu_argv=self.config.qemu_argv,
+                        ),
+                    )
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "resume completed attempt",
+                    ) as raised:
+                        controller._load_progress(
+                            output_descriptor,
+                            raw_path.stat(),
+                        )
+                    self.assertIs(type(raised.exception), ValueError)
+        finally:
+            os.close(output_descriptor)
+
     def test_resume_progress_fifo_is_rejected_promptly(self) -> None:
         output = self.root / "resume-progress-fifo"
         output.mkdir()
@@ -1557,6 +1665,83 @@ class QemuControllerTests(unittest.TestCase):
         self.assertFalse((self.root / "progress.json").exists())
         self.assertTrue(result.raw_log_path.is_file())
         self.assertFalse(tuple(self.root.glob(".*.tmp")))
+
+    def test_guest_infrastructure_error_marks_only_guest_run_incomplete(
+        self,
+    ) -> None:
+        for label, watchdog, expected_complete in (
+            ("guest", False, False),
+            ("host-watchdog", True, True),
+        ):
+            with self.subTest(source=label):
+                clock = FakeClock()
+                output = self.root / f"terminal-{label}"
+                run_id = f"controller-{label}"
+                controller = QemuController(
+                    identity=_identity((self.one,)),
+                    selected=(self.one,),
+                    config=ControllerConfig(
+                        output_directory=output,
+                        qemu_argv=self.config.qemu_argv,
+                    ),
+                    transport_factory=TransportFactory(
+                        [FakeTransport(clock, [PROMPT])]
+                    ),
+                    monotonic=clock.monotonic,
+                    run_id_factory=lambda run_id=run_id: run_id,
+                )
+                controller._run_id = run_id
+                if watchdog:
+                    attempt = controller._watchdog_attempt(
+                        self.one,
+                        status="crash",
+                        started=True,
+                        timed_out=False,
+                        reason="host watchdog observed a crash",
+                        duration_ms=1,
+                        raw_log_start=0,
+                        raw_log_end=0,
+                    )
+                else:
+                    guest = SerialAttempt(
+                        test_id=self.one.test_id,
+                        group=self.one.group,
+                        api=self.one.api,
+                        status="launch-error",
+                        pts_status=None,
+                        launch_status="launch-error",
+                        exit_code=None,
+                        signal=None,
+                        timed_out=False,
+                        duration_ms=1,
+                        stdout="",
+                        stderr="",
+                        resource_deltas=ResourceDeltas(),
+                        resource_evidence="measured",
+                        run_id="guest-run",
+                        manifest_sha256=MANIFEST_SHA256,
+                        architecture="aarch64",
+                        launch_error="launch failed",
+                        infrastructure_error="cleanup failed",
+                    )
+                    attempt = controller._guest_attempt(
+                        guest,
+                        self.one,
+                        raw_log_start=0,
+                        raw_log_end=0,
+                    )
+                with mock.patch.object(
+                    controller,
+                    "_run_test",
+                    return_value=(attempt, True, False),
+                ):
+                    result = controller.run()
+
+                terminal = json.loads(
+                    result.result_path.read_text(encoding="utf-8").splitlines()[-1]
+                )
+                self.assertIs(result.complete, expected_complete)
+                self.assertIs(terminal["complete"], expected_complete)
 
 
 class QemuIntegrationSurfaceTests(unittest.TestCase):
