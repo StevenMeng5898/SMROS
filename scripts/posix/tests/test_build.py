@@ -1529,6 +1529,8 @@ class ManifestTests(unittest.TestCase):
             replace(base, test_id="bad\tid"),
             replace(base, test_id="bad\x01id"),
             replace(base, test_id="bad\u202eid"),
+            replace(base, test_id="conformance/interfaces/getpid/1-\u00e9.c"),
+            replace(base, binary="bin/conformance/interfaces/getpid/1-\u00e9.c.test"),
             replace(base, binary="bin/../escape.test"),
             replace(base, timeout_ms=0),
             replace(base, timeout_ms=2**32),

@@ -275,13 +275,12 @@ class TestDiscovery(DiscoveryFixture):
                 finally:
                     path.unlink()
 
-    def test_allows_ordinary_non_ascii_source_paths(self) -> None:
+    def test_rejects_ordinary_non_ascii_source_paths(self) -> None:
         relative_path = "conformance/interfaces/mmap/10-\u00e9.c"
         self.write_source(relative_path, "int main(void) { return 0; }\n")
 
-        tests = discover_tests(self.root)
-
-        self.assertIn(relative_path, [test.test_id for test in tests])
+        with self.assertRaisesRegex(ValueError, "invalid.*path"):
+            discover_tests(self.root)
 
     def test_inventories_every_shell_file_deterministically(self) -> None:
         expected = [

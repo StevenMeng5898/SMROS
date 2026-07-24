@@ -26,7 +26,6 @@ import stat
 import subprocess
 import tempfile
 import time
-import unicodedata
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Callable, Iterable, Mapping, Sequence
@@ -147,11 +146,7 @@ def readelf_command(tool: str, executable: Path) -> list[str]:
 
 
 def _has_forbidden_character(value: str) -> bool:
-    return any(
-        character == "\t"
-        or unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
-        for character in value
-    )
+    return any(not 0x20 <= ord(character) <= 0x7e for character in value)
 
 
 def _validate_atom(value: str, label: str) -> None:

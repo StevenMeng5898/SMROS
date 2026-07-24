@@ -751,7 +751,7 @@ assert!(posix_test_logic::manifest_atom_valid("conformance/interfaces/mmap/1-1")
 assert!(!posix_test_logic::manifest_atom_valid("../mmap"));
 assert_eq!(posix_test_logic::pts_status(0), 0);
 assert_eq!(posix_test_logic::pts_status(5), 4);
-assert_eq!(posix_test_logic::pts_status(9), 5);
+assert_eq!(posix_test_logic::pts_status(9), 1);
 assert_eq!(posix_test_logic::resource_delta(4, 7), 3);
 ```
 
@@ -767,6 +767,8 @@ Define numeric PTS categories `0=pass`, `1=fail`, `2=unresolved`,
 `3=unsupported`, `4=untested`, `5=interrupted`. Reject empty atoms, tabs,
 control bytes, backslashes, `//`, and `.`/`..` path segments. Filters match
 exact IDs/APIs/groups; `all` matches all runnable complete tests.
+Unrecognized normal process exits are failures; interrupted is reserved for
+runner infrastructure failures.
 
 - [ ] **Step 4: Run unit and format checks**
 

@@ -1113,7 +1113,21 @@ mod posix_test_logic {
         assert_eq!(pts_status(2), POSIX_STATUS_UNRESOLVED);
         assert_eq!(pts_status(4), POSIX_STATUS_UNSUPPORTED);
         assert_eq!(pts_status(5), POSIX_STATUS_UNTESTED);
-        assert_eq!(pts_status(9), POSIX_STATUS_INTERRUPTED);
+        assert_eq!(POSIX_STATUS_INTERRUPTED, 5);
+    }
+
+    #[test]
+    fn unknown_positive_pts_exits_are_failures() {
+        for exit_code in [3, 6, 9, 127, i32::MAX] {
+            assert_eq!(pts_status(exit_code), POSIX_STATUS_FAIL);
+        }
+    }
+
+    #[test]
+    fn negative_exit_codes_are_failures_not_interruptions() {
+        for exit_code in [-1, i32::MIN] {
+            assert_eq!(pts_status(exit_code), POSIX_STATUS_FAIL);
+        }
     }
 
     #[test]

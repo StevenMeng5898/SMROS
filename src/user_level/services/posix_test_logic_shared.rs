@@ -66,7 +66,7 @@ macro_rules! smros_posix_pts_status_body {
             2 => POSIX_STATUS_UNRESOLVED,
             4 => POSIX_STATUS_UNSUPPORTED,
             5 => POSIX_STATUS_UNTESTED,
-            _ => POSIX_STATUS_INTERRUPTED,
+            _ => POSIX_STATUS_FAIL,
         }
     }};
 }

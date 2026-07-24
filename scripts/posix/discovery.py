@@ -378,6 +378,10 @@ def _has_control(value: str) -> bool:
     )
 
 
+def _has_non_printable_ascii(value: str) -> bool:
+    return any(not 0x20 <= ord(character) <= 0x7e for character in value)
+
+
 def _validate_safe_relative_path(path: str) -> None:
     candidate = PurePosixPath(path)
     raw_parts = path.split("/")
@@ -389,7 +393,7 @@ def _validate_safe_relative_path(path: str) -> None:
         or any(part in {"", ".", ".."} for part in raw_parts)
         or not candidate.parts
         or candidate.parts[0] != "conformance"
-        or _has_control(path)
+        or _has_non_printable_ascii(path)
     ):
         raise ValueError(f"invalid relative path: {path!r}")
 
