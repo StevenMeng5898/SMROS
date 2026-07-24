@@ -166,6 +166,18 @@ class SerialEventTests(unittest.TestCase):
                 self.assertEqual(parsed.terminal_event.event, "infrastructure_error")
                 self.assertEqual(parsed.infrastructure_error, "manifest-read")
 
+    def test_rejects_boolean_event_schema(self) -> None:
+        log = _event(
+            1,
+            "infrastructure_error",
+            run_id="error-123",
+            manifest_sha256=EMPTY_SHA256,
+            message="manifest-read",
+        ).replace('"schema":1', '"schema":true')
+
+        with self.assertRaisesRegex(ValueError, "schema"):
+            parse_serial_log(log)
+
     def test_rejects_noncanonical_standalone_preflight_error(self) -> None:
         valid = _event(
             1,

@@ -21,10 +21,11 @@ from .baseline import (
     _atomic_write,
     _canonical_report,
     _load_stage_identity,
+    _open_parent,
     _validate_selected,
     filter_runnable_tests,
 )
-from .build import ManifestMetadata
+from .build import MAX_TESTS, ManifestMetadata
 from .events import EVENT_PREFIX, parse_serial_log
 from .model import (
     BuildResult,
@@ -50,6 +51,13 @@ _STREAM_TOKEN_BYTES = max(len(PROMPT), *(len(item) for item in _FATAL_PATTERNS))
 _READ_INTERVAL_SECONDS = 0.1
 _SHUTDOWN_SECONDS = 1.0
 _EMPTY_SHA256 = "0" * 64
+_TRUNCATION_MARKER = b"\n...[truncated]"
+_MAX_PERSISTED_STREAM_BYTES = 16 * 1024
+_MAX_PROGRESS_BYTES = 128 * 1024 * 1024
+_MAX_RESULT_LINE_BYTES = 512 * 1024
+_PERSISTED_ATTEMPTS_BUDGET = 120 * 1024 * 1024
+_ATTEMPT_FIXED_BUDGET = 8 * 1024
+_JSON_ESCAPE_EXPANSION = 6
 
 
 class ControllerError(RuntimeError):
@@ -276,28 +284,12 @@ def _event_common_is_valid(value: dict[str, object], event: str, seq: int) -> bo
     )
 
 
-def _matching_start_seen(
-    data: bytes,
+def _start_pair_is_valid(
+    suite_start: dict[str, object],
+    test_start: dict[str, object],
     test: SuiteTest,
     identity: CampaignIdentity,
 ) -> bool:
-    rows = _event_rows(data)
-    for value, _offset in rows:
-        if value.get("event") != "test_start":
-            continue
-        if any(
-            value.get(key) != expected
-            for key, expected in (
-                ("test_id", test.test_id),
-                ("group", test.group),
-                ("api", test.api),
-                ("binary_sha256", test.sha256),
-            )
-        ):
-            raise ControllerError("guest test identity does not match the command")
-    if len(rows) != 2:
-        return False
-    suite_start, test_start = (value for value, _offset in rows)
     suite_is_valid = (
         set(suite_start) <= _SUITE_START_FIELDS
         and _event_common_is_valid(suite_start, "suite_start", 1)
@@ -322,11 +314,40 @@ def _matching_start_seen(
         and test_start.get("run_id") == suite_start.get("run_id")
         and test_start.get("manifest_sha256")
         == identity.metadata.manifest_sha256
+        and test_start.get("test_id") == test.test_id
+        and test_start.get("group") == test.group
+        and test_start.get("api") == test.api
+        and test_start.get("binary_sha256") == test.sha256
         and test_start.get("source") == "smros-serial"
         and type(test_start.get("started_ticks")) is int
         and int(test_start["started_ticks"]) >= 0
     )
     return suite_is_valid and test_is_valid
+
+
+def _matching_start_seen(
+    data: bytes,
+    test: SuiteTest,
+    identity: CampaignIdentity,
+) -> bool:
+    rows = _event_rows(data)
+    for value, _offset in rows:
+        if value.get("event") != "test_start":
+            continue
+        if any(
+            value.get(key) != expected
+            for key, expected in (
+                ("test_id", test.test_id),
+                ("group", test.group),
+                ("api", test.api),
+                ("binary_sha256", test.sha256),
+            )
+        ):
+            raise ControllerError("guest test identity does not match the command")
+    if len(rows) != 2:
+        return False
+    suite_start, test_start = (value for value, _offset in rows)
+    return _start_pair_is_valid(suite_start, test_start, test, identity)
 
 
 def _suite_end_offset(data: bytes) -> int | None:
@@ -345,6 +366,51 @@ def _bounded_reason(value: str, maximum: int = 4096) -> str:
     return prefix.decode("utf-8", errors="ignore") + marker.decode("ascii")
 
 
+def _persisted_stream_limit(selected_count: int) -> int:
+    # 120 MiB / selected_count leaves 8 MiB for progress inventory and the
+    # terminal row. JSON can expand one input byte to six escaped ASCII bytes.
+    attempt_budget = _PERSISTED_ATTEMPTS_BUDGET // selected_count
+    line_budget = min(_MAX_RESULT_LINE_BYTES - 1, attempt_budget)
+    stream_budget = (line_budget - _ATTEMPT_FIXED_BUDGET) // (
+        2 * _JSON_ESCAPE_EXPANSION
+    )
+    return min(_MAX_PERSISTED_STREAM_BYTES, stream_budget)
+
+
+def _bounded_stream(value: str, maximum: int) -> tuple[str, int, bool]:
+    data = value.encode("utf-8")
+    if len(data) <= maximum:
+        return value, len(data), False
+    prefix_bytes = maximum - len(_TRUNCATION_MARKER)
+    prefix = data[:prefix_bytes].decode("utf-8", errors="ignore")
+    return prefix + _TRUNCATION_MARKER.decode("ascii"), len(data), True
+
+
+def _persisted_stream_is_valid(
+    value: str, byte_count: int, truncated: bool, maximum: int
+) -> bool:
+    stored_bytes = len(value.encode("utf-8"))
+    return stored_bytes <= maximum and (
+        (
+            truncated
+            and byte_count > stored_bytes
+            and value.endswith(_TRUNCATION_MARKER.decode("ascii"))
+        )
+        or (not truncated and byte_count == stored_bytes)
+    )
+
+
+def _reject_progress_duplicate_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate progress JSON key: {key}")
+        value[key] = item
+    return value
+
+
 class QemuController:
     def __init__(
         self,
@@ -360,6 +426,8 @@ class QemuController:
     ) -> None:
         if not selected:
             raise ValueError("QEMU campaign selected no tests")
+        if len(selected) > MAX_TESTS:
+            raise ValueError("QEMU campaign selected too many tests")
         if config.boot_timeout_seconds <= 0:
             raise ValueError("QEMU boot timeout must be positive")
         if (
@@ -400,13 +468,67 @@ class QemuController:
     def _persist_progress(self) -> None:
         _atomic_write(self._progress_path, _json_bytes(self._progress()))
 
-    def _load_progress(self) -> None:
+    def _read_progress(self, output_descriptor: int) -> bytes:
+        descriptor: int | None = None
         try:
-            value = json.loads(self._progress_path.read_text(encoding="utf-8"))
-        except OSError as error:
-            raise ValueError("resume progress is unavailable") from error
-        except (UnicodeError, json.JSONDecodeError) as error:
+            try:
+                descriptor = os.open(
+                    self._progress_path.name,
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=output_descriptor,
+                )
+            except OSError as error:
+                raise ValueError("resume progress is unavailable") from error
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                raise ValueError("resume progress is not a regular single-link file")
+            if opened.st_size > _MAX_PROGRESS_BYTES:
+                raise ValueError("resume progress exceeds its size limit")
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(
+                    descriptor,
+                    min(65_536, _MAX_PROGRESS_BYTES + 1 - total),
+                )
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > _MAX_PROGRESS_BYTES:
+                    raise ValueError("resume progress exceeds its size limit")
+            after = os.fstat(descriptor)
+            fingerprint = lambda info: (
+                info.st_dev,
+                info.st_ino,
+                info.st_mode,
+                info.st_nlink,
+                info.st_size,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+            )
+            if fingerprint(opened) != fingerprint(after):
+                raise ValueError("resume progress changed while being read")
+            return b"".join(chunks)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def _load_progress(
+        self, output_descriptor: int, raw_info: os.stat_result
+    ) -> None:
+        data = self._read_progress(output_descriptor)
+        try:
+            value = json.loads(
+                data.decode("utf-8"),
+                object_pairs_hook=_reject_progress_duplicate_keys,
+            )
+        except (UnicodeError, json.JSONDecodeError, ValueError) as error:
             raise ValueError("resume progress is invalid") from error
+        if data != _json_bytes(value):
+            raise ValueError("resume progress is not canonical LF JSON")
         if not isinstance(value, dict):
             raise ValueError("resume progress is invalid")
         if set(value) != {
@@ -464,12 +586,6 @@ class QemuController:
             self._validate_resumed_attempt(
                 attempt, tests_by_id[attempt.test_id], run_id
             )
-        try:
-            raw_info = self._raw_log_path.lstat()
-        except OSError as error:
-            raise ValueError("resume raw log is unavailable") from error
-        if stat.S_ISLNK(raw_info.st_mode) or not stat.S_ISREG(raw_info.st_mode):
-            raise ValueError("resume raw log is not a regular file")
         required_size = max(
             (attempt.raw_log_end or 0 for attempt in attempts), default=0
         )
@@ -521,6 +637,18 @@ class QemuController:
             and attempt.stderr_bytes >= 0
             and type(attempt.stdout_truncated) is bool
             and type(attempt.stderr_truncated) is bool
+            and _persisted_stream_is_valid(
+                attempt.stdout,
+                attempt.stdout_bytes,
+                attempt.stdout_truncated,
+                _persisted_stream_limit(len(self.selected)),
+            )
+            and _persisted_stream_is_valid(
+                attempt.stderr,
+                attempt.stderr_bytes,
+                attempt.stderr_truncated,
+                _persisted_stream_limit(len(self.selected)),
+            )
         )
         try:
             if attempt.source == WATCHDOG_SOURCE:
@@ -571,6 +699,46 @@ class QemuController:
             return
         stream.write(data)
         stream.flush()
+
+    def _open_raw_log(self, output_descriptor: int, *, resume: bool):
+        descriptor: int | None = None
+        flags = (
+            os.O_WRONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        if resume:
+            flags |= os.O_APPEND
+        else:
+            flags |= os.O_CREAT
+        try:
+            try:
+                descriptor = os.open(
+                    self._raw_log_path.name,
+                    flags,
+                    0o644,
+                    dir_fd=output_descriptor,
+                )
+            except OSError as error:
+                raise ControllerError(
+                    "QEMU raw log could not be opened safely"
+                ) from error
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ControllerError(
+                    "QEMU raw log is not a regular single-link file"
+                )
+            if resume:
+                os.lseek(descriptor, 0, os.SEEK_END)
+            else:
+                os.ftruncate(descriptor, 0)
+            stream = os.fdopen(descriptor, "ab" if resume else "wb")
+            descriptor = None
+            return stream
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
     def _wait_for_prompt(self, transport: _Transport, raw) -> bool:
         deadline = self._monotonic() + self.config.boot_timeout_seconds
@@ -638,27 +806,15 @@ class QemuController:
             or attempt.api != test.api
         ):
             raise ControllerError("guest test identity does not match the command")
-        start = parsed.events[0].values
-        expected_start = {
-            "selected_count": 1,
-            "build_id": self.identity.build_id,
-            "build_results_sha256": self.identity.metadata.build_results_sha256,
-            "smros_commit": self.identity.metadata.smros_commit,
-            "revision": self.identity.metadata.revision,
-            "patch_sha256": self.identity.metadata.patch_sha256,
-            "filter": f"test={test.test_id}",
-        }
-        if any(start.get(key) != value for key, value in expected_start.items()):
-            raise ControllerError("guest suite identity or provenance does not match")
-        if parsed.manifest_sha256 != self.identity.metadata.manifest_sha256:
-            raise ControllerError("guest manifest checksum does not match")
-        test_starts = [
-            event.values for event in parsed.events if event.event == "test_start"
+        starts = [
+            event.values
+            for event in parsed.events
+            if event.event in {"suite_start", "test_start"}
         ]
-        if len(test_starts) != 1 or test_starts[0].get("binary_sha256") != test.sha256:
-            raise ControllerError(
-                "guest test identity or binary checksum does not match"
-            )
+        if len(starts) != 2 or not _start_pair_is_valid(
+            starts[0], starts[1], test, self.identity
+        ):
+            raise ControllerError("guest start events do not match the command")
         post_terminal = data[end_offset:]
         prompt_after = PROMPT in post_terminal
         self._prompt_tail = (
@@ -685,6 +841,13 @@ class QemuController:
         raw_log_end: int,
     ) -> RuntimeAttempt:
         build_status, link_status = self._build_statuses(test)
+        stream_limit = _persisted_stream_limit(len(self.selected))
+        stdout, stdout_bytes, stdout_truncated = _bounded_stream(
+            guest.stdout, stream_limit
+        )
+        stderr, stderr_bytes, stderr_truncated = _bounded_stream(
+            guest.stderr, stream_limit
+        )
         return RuntimeAttempt(
             test_id=test.test_id,
             group=test.group,
@@ -699,13 +862,23 @@ class QemuController:
             signal=guest.signal,
             timed_out=guest.timed_out,
             duration_ms=guest.duration_ms,
-            stdout=guest.stdout,
-            stderr=guest.stderr,
+            stdout=stdout,
+            stderr=stderr,
             source=SOURCE,
-            launch_error=guest.launch_error,
-            infrastructure_error=guest.infrastructure_error,
-            stdout_bytes=len(guest.stdout.encode("utf-8")),
-            stderr_bytes=len(guest.stderr.encode("utf-8")),
+            launch_error=(
+                _bounded_reason(guest.launch_error)
+                if guest.launch_error is not None
+                else None
+            ),
+            infrastructure_error=(
+                _bounded_reason(guest.infrastructure_error)
+                if guest.infrastructure_error is not None
+                else None
+            ),
+            stdout_bytes=stdout_bytes,
+            stderr_bytes=stderr_bytes,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
             manifest_sha256=self.identity.metadata.manifest_sha256,
             build_results_sha256=self.identity.metadata.build_results_sha256,
             build_id=self.identity.build_id,
@@ -878,7 +1051,7 @@ class QemuController:
             "manifest_sha256": self.identity.metadata.manifest_sha256,
             "patch_sha256": self.identity.metadata.patch_sha256,
             "platform": PLATFORM,
-            "qemu": " ".join(self.config.qemu_argv),
+            "qemu": _bounded_reason(" ".join(self.config.qemu_argv)),
             "raw_log": str(self._raw_log_path),
             "record_type": "run",
             "restart_count": self._restart_count,
@@ -898,52 +1071,53 @@ class QemuController:
         _atomic_write(self._result_path, _canonical_report(rows))
 
     def run(self, resume: bool = False) -> ControllerResult:
-        self._output.mkdir(parents=True, exist_ok=True)
-        if resume:
-            self._load_progress()
-            raw_mode = "ab"
-        else:
-            self._run_id = self._run_id_factory()
-            self._attempts = []
-            self._restart_count = 0
-            self._boot_count = 0
-            raw_mode = "wb"
-        transport: _Transport | None = None
-        prompt_ready = False
-        completed_ids = {attempt.test_id for attempt in self._attempts}
-        with self._raw_log_path.open(raw_mode) as raw:
-            self._persist_progress()
-            try:
-                for test in self.selected:
-                    if test.test_id in completed_ids:
-                        continue
-                    while transport is None or not prompt_ready:
-                        if transport is None:
-                            transport = self._launch_ready(raw)
-                            prompt_ready = True
-                        elif self._wait_for_prompt(transport, raw):
-                            prompt_ready = True
-                        else:
+        output_descriptor = _open_parent(self._output)
+        try:
+            with self._open_raw_log(output_descriptor, resume=resume) as raw:
+                if resume:
+                    self._load_progress(output_descriptor, os.fstat(raw.fileno()))
+                else:
+                    self._run_id = self._run_id_factory()
+                    self._attempts = []
+                    self._restart_count = 0
+                    self._boot_count = 0
+                transport: _Transport | None = None
+                prompt_ready = False
+                completed_ids = {attempt.test_id for attempt in self._attempts}
+                self._persist_progress()
+                try:
+                    for test in self.selected:
+                        if test.test_id in completed_ids:
+                            continue
+                        while transport is None or not prompt_ready:
+                            if transport is None:
+                                transport = self._launch_ready(raw)
+                                prompt_ready = True
+                            elif self._wait_for_prompt(transport, raw):
+                                prompt_ready = True
+                            else:
+                                self._stop(transport)
+                                transport = None
+                        self._current_test = test.test_id
+                        self._persist_progress()
+                        attempt, prompt_ready, restart = self._run_test(
+                            transport, raw, test
+                        )
+                        self._attempts.append(attempt)
+                        completed_ids.add(test.test_id)
+                        self._current_test = None
+                        self._persist_progress()
+                        if restart:
                             self._stop(transport)
                             transport = None
-                    self._current_test = test.test_id
-                    self._persist_progress()
-                    attempt, prompt_ready, restart = self._run_test(
-                        transport, raw, test
-                    )
-                    self._attempts.append(attempt)
-                    completed_ids.add(test.test_id)
-                    self._current_test = None
-                    self._persist_progress()
-                    if restart:
+                            prompt_ready = False
+                    self._publish()
+                    os.unlink(self._progress_path.name, dir_fd=output_descriptor)
+                finally:
+                    if transport is not None:
                         self._stop(transport)
-                        transport = None
-                        prompt_ready = False
-                self._publish()
-                self._progress_path.unlink()
-            finally:
-                if transport is not None:
-                    self._stop(transport)
+        finally:
+            os.close(output_descriptor)
         return ControllerResult(
             attempts=tuple(self._attempts),
             complete=True,

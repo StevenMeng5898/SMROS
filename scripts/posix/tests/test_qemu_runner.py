@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -11,6 +12,7 @@ from unittest import mock
 
 from scripts.posix.build import ManifestMetadata
 from scripts.posix import cli as cli_module
+from scripts.posix import report as report_module
 from scripts.posix.cli import create_parser
 from scripts.posix.model import BuildResult, ResourceDeltas, SuiteTest
 from scripts.posix.qemu_runner import (
@@ -199,20 +201,24 @@ def _start_events(test: SuiteTest) -> bytes:
     )
 
 
-def _end_events(test: SuiteTest) -> bytes:
+def _end_events(test: SuiteTest, **overrides: object) -> bytes:
+    end_values: dict[str, object] = {
+        "status": "pass",
+        "pts_status": "pass",
+        "launch_status": "launched",
+        "exit_code": 0,
+        "timed_out": False,
+        "elapsed_ticks": 3,
+        "resource_deltas": ResourceDeltas().to_dict(),
+    }
+    end_values.update(overrides)
     return _event(
         3,
         "test_end",
         test_id=test.test_id,
         group=test.group,
         api=test.api,
-        status="pass",
-        pts_status="pass",
-        launch_status="launched",
-        exit_code=0,
-        timed_out=False,
-        elapsed_ticks=3,
-        resource_deltas=ResourceDeltas().to_dict(),
+        **end_values,
     ) + _event(
         4,
         "suite_end",
@@ -222,6 +228,32 @@ def _end_events(test: SuiteTest) -> bytes:
         status_counts={"pass": 1},
         elapsed_ticks=4,
     )
+
+
+def _replace_event_values(
+    data: bytes,
+    event: str,
+    *,
+    remove: tuple[str, ...] = (),
+    **updates: object,
+) -> bytes:
+    result = bytearray()
+    prefix = b"SMROS_POSIX_EVENT "
+    for line in data.splitlines(keepends=True):
+        if not line.startswith(prefix):
+            result.extend(line)
+            continue
+        value = json.loads(line[len(prefix) :])
+        if value.get("event") == event:
+            for key in remove:
+                value.pop(key, None)
+            value.update(updates)
+        result.extend(prefix)
+        result.extend(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+        result.extend(b"\n")
+    return bytes(result)
 
 
 class QemuControllerTests(unittest.TestCase):
@@ -257,6 +289,38 @@ class QemuControllerTests(unittest.TestCase):
             run_id_factory=lambda: "controller-run",
         )
         return controller, factory
+
+    def _create_resumable_campaign(
+        self, output: Path
+    ) -> tuple[FakeClock, bytes, bytes]:
+        clock = FakeClock()
+        transport = FakeTransport(
+            clock,
+            [
+                PROMPT,
+                _start_events(self.one),
+                _end_events(self.one),
+                KeyboardInterrupt(),
+            ],
+        )
+        controller = QemuController(
+            identity=_identity(self.tests),
+            selected=self.tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory([transport]),
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "controller-resume-fixture",
+        )
+        with self.assertRaises(KeyboardInterrupt):
+            controller.run()
+        return (
+            clock,
+            (output / "progress.json").read_bytes(),
+            (output / "qemu-serial.log").read_bytes(),
+        )
 
     def test_exact_prompt_and_matching_events_serialize_commands(self) -> None:
         transport = FakeTransport(
@@ -520,6 +584,48 @@ class QemuControllerTests(unittest.TestCase):
                 with self.assertRaisesRegex(ControllerError, "terminal"):
                     controller.run()
 
+    def test_complete_guest_requires_strict_start_event_fields(self) -> None:
+        starts = _start_events(self.one)
+        cases = {
+            "boolean-schema": _replace_event_values(
+                starts, "suite_start", schema=True
+            ),
+            "suite-source": _replace_event_values(
+                starts, "suite_start", remove=("source",)
+            ),
+            "suite-timestamp": _replace_event_values(
+                starts, "suite_start", remove=("started_ticks",)
+            ),
+            "test-source": _replace_event_values(
+                starts, "test_start", remove=("source",)
+            ),
+            "test-timestamp": _replace_event_values(
+                starts, "test_start", remove=("started_ticks",)
+            ),
+        }
+        for label, malformed in cases.items():
+            with self.subTest(label=label):
+                clock = FakeClock()
+                output = self.root / f"complete-start-{label}"
+                transport = FakeTransport(
+                    clock,
+                    [PROMPT, malformed + _end_events(self.one), PROMPT],
+                )
+                controller = QemuController(
+                    identity=_identity((self.one,)),
+                    selected=(self.one,),
+                    config=ControllerConfig(
+                        output_directory=output,
+                        qemu_argv=self.config.qemu_argv,
+                    ),
+                    transport_factory=TransportFactory([transport]),
+                    monotonic=clock.monotonic,
+                    run_id_factory=lambda: f"controller-{label}",
+                )
+
+                with self.assertRaisesRegex(ControllerError, "event|start"):
+                    controller.run()
+
     def test_fatal_pattern_and_qemu_exit_record_crash_then_restart(self) -> None:
         for label, failure in (
             ("fatal", [_start_events(self.one), b"[PANIC] kernel stopped\n"]),
@@ -580,6 +686,130 @@ class QemuControllerTests(unittest.TestCase):
 
         self.assertEqual(result.attempts[0].status, "pass")
         self.assertIn("[FATAL]", result.attempts[0].stdout)
+
+    def test_persisted_guest_output_remains_report_compatible(self) -> None:
+        stdout = b"x" * (600 * 1024) + b"\n"
+        stderr = "y" * (600 * 1024)
+        transport = FakeTransport(
+            self.clock,
+            [
+                PROMPT,
+                _start_events(self.one),
+                stdout,
+                _end_events(self.one, stderr=stderr),
+                PROMPT,
+            ],
+        )
+        identity = _identity((self.one,))
+        controller = QemuController(
+            identity=identity,
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory([transport]),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-large-output",
+        )
+
+        result = controller.run()
+
+        manifest = report_module._ManifestInput(
+            identity.metadata,
+            (self.one,),
+            identity.build_results,
+            (),
+        )
+        with mock.patch.object(report_module, "_load_manifest", return_value=manifest):
+            summary = report_module.generate_report(
+                Path("manifest.json"),
+                smros_results=(result.result_path,),
+                output_directory=self.root / "large-output-report",
+            )
+        attempt = result.attempts[0]
+        self.assertEqual(attempt.stdout_bytes, len(stdout))
+        self.assertEqual(attempt.stderr_bytes, len(stderr.encode("utf-8")))
+        self.assertTrue(attempt.stdout_truncated)
+        self.assertTrue(attempt.stderr_truncated)
+        self.assertTrue(attempt.stdout.endswith("\n...[truncated]"))
+        self.assertTrue(attempt.stderr.endswith("\n...[truncated]"))
+        raw = result.raw_log_path.read_bytes()
+        self.assertIn(stdout, raw)
+        self.assertIn(stderr.encode("utf-8"), raw)
+        self.assertLess(
+            len(result.result_path.read_bytes().splitlines()[0]), 512 * 1024
+        )
+        self.assertTrue(summary["complete"])
+
+    def test_fresh_raw_log_links_do_not_clobber_outside_files(self) -> None:
+        for label in ("symlink", "hardlink"):
+            with self.subTest(label=label):
+                output = self.root / f"fresh-raw-{label}"
+                output.mkdir()
+                sentinel = self.root / f"outside-{label}.log"
+                sentinel.write_bytes(b"outside sentinel\n")
+                raw = output / "qemu-serial.log"
+                if label == "symlink":
+                    raw.symlink_to(sentinel)
+                else:
+                    os.link(sentinel, raw)
+                transport = FakeTransport(
+                    self.clock,
+                    [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+                )
+                controller = QemuController(
+                    identity=_identity((self.one,)),
+                    selected=(self.one,),
+                    config=ControllerConfig(
+                        output_directory=output,
+                        qemu_argv=self.config.qemu_argv,
+                    ),
+                    transport_factory=TransportFactory([transport]),
+                    monotonic=self.clock.monotonic,
+                    run_id_factory=lambda: f"controller-{label}",
+                )
+
+                error: ControllerError | None = None
+                try:
+                    controller.run()
+                except ControllerError as observed:
+                    error = observed
+                self.assertEqual(sentinel.read_bytes(), b"outside sentinel\n")
+                self.assertIsNotNone(error)
+                self.assertRegex(str(error), "raw log")
+
+    def test_raw_log_open_cannot_block_on_a_fifo(self) -> None:
+        output = self.root / "raw-fifo"
+        output.mkdir()
+        os.mkfifo(output / "qemu-serial.log")
+        output_descriptor = os.open(
+            output,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+        )
+        real_open = os.open
+        observed_flags: list[int] = []
+
+        def guarded_open(path, flags, *args, **kwargs):
+            observed_flags.append(flags)
+            if not flags & os.O_NONBLOCK:
+                raise BlockingIOError("raw FIFO open would block")
+            return real_open(path, flags, *args, **kwargs)
+
+        try:
+            with mock.patch(
+                "scripts.posix.qemu_runner.os.open", side_effect=guarded_open
+            ):
+                with self.assertRaisesRegex(ControllerError, "raw log"):
+                    controller._open_raw_log(output_descriptor, resume=False)
+        finally:
+            os.close(output_descriptor)
+        self.assertTrue(observed_flags[0] & os.O_NONBLOCK)
 
     def test_command_write_race_records_pre_start_crash_and_continues(self) -> None:
         first = FakeTransport(self.clock, [PROMPT])
@@ -796,6 +1026,139 @@ class QemuControllerTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "build identity"):
             changed.run(resume=True)
+
+    def test_resume_raw_log_swap_cannot_append_outside(self) -> None:
+        output = self.root / "resume-raw-swap"
+        clock, _progress, raw_bytes = self._create_resumable_campaign(output)
+        raw = output / "qemu-serial.log"
+        regular_info = raw.stat()
+        raw.unlink()
+        sentinel = self.root / "outside-resume.log"
+        sentinel.write_bytes(b"outside sentinel\n")
+        raw.symlink_to(sentinel)
+        transport = FakeTransport(
+            clock,
+            [PROMPT, _start_events(self.two), _end_events(self.two), PROMPT],
+        )
+        controller = QemuController(
+            identity=_identity(self.tests),
+            selected=self.tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory([transport]),
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "unused-resume-run-id",
+        )
+
+        error: ControllerError | None = None
+        with mock.patch.object(Path, "lstat", return_value=regular_info):
+            try:
+                controller.run(resume=True)
+            except ControllerError as observed:
+                error = observed
+
+        self.assertEqual(sentinel.read_bytes(), b"outside sentinel\n")
+        self.assertTrue(raw.is_symlink())
+        self.assertTrue(raw_bytes)
+        self.assertIsNotNone(error)
+        self.assertRegex(str(error), "raw log")
+
+    def test_resume_progress_is_bounded_and_canonical(self) -> None:
+        output = self.root / "resume-progress-safety"
+        clock, progress_bytes, raw_bytes = self._create_resumable_campaign(output)
+        progress = output / "progress.json"
+        raw = output / "qemu-serial.log"
+        parsed = json.loads(progress_bytes)
+        corruptions = {
+            "duplicate": progress_bytes.replace(
+                b'"boot_count":1', b'"boot_count":1,"boot_count":1', 1
+            ),
+            "noncanonical": (
+                json.dumps(parsed, indent=2, sort_keys=True) + "\n"
+            ).encode("utf-8"),
+            "non-lf": progress_bytes.rstrip(b"\n"),
+        }
+        for label, data in corruptions.items():
+            with self.subTest(label=label):
+                raw.write_bytes(raw_bytes)
+                progress.write_bytes(data)
+                transport = FakeTransport(
+                    clock,
+                    [PROMPT, _start_events(self.two), _end_events(self.two), PROMPT],
+                )
+                controller = QemuController(
+                    identity=_identity(self.tests),
+                    selected=self.tests,
+                    config=ControllerConfig(
+                        output_directory=output,
+                        qemu_argv=self.config.qemu_argv,
+                    ),
+                    transport_factory=TransportFactory([transport]),
+                    monotonic=clock.monotonic,
+                    run_id_factory=lambda: "unused-corrupt-progress",
+                )
+                with self.assertRaisesRegex(ValueError, "progress"):
+                    controller.run(resume=True)
+
+        raw.write_bytes(raw_bytes)
+        progress.write_bytes(progress_bytes)
+        transport = FakeTransport(
+            clock,
+            [PROMPT, _start_events(self.two), _end_events(self.two), PROMPT],
+        )
+        controller = QemuController(
+            identity=_identity(self.tests),
+            selected=self.tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory([transport]),
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "unused-oversized-progress",
+        )
+        with mock.patch(
+            "scripts.posix.qemu_runner._MAX_PROGRESS_BYTES",
+            len(progress_bytes) - 1,
+            create=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "size limit"):
+                controller.run(resume=True)
+
+    def test_resume_progress_symlink_is_not_followed(self) -> None:
+        output = self.root / "resume-progress-symlink"
+        clock, progress_bytes, raw_bytes = self._create_resumable_campaign(output)
+        progress = output / "progress.json"
+        raw = output / "qemu-serial.log"
+        raw.write_bytes(raw_bytes)
+        sentinel = self.root / "outside-progress.json"
+        sentinel.write_bytes(progress_bytes)
+        try:
+            progress.unlink()
+        except FileNotFoundError:
+            pass
+        progress.symlink_to(sentinel)
+        transport = FakeTransport(
+            clock,
+            [PROMPT, _start_events(self.two), _end_events(self.two), PROMPT],
+        )
+        controller = QemuController(
+            identity=_identity(self.tests),
+            selected=self.tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory([transport]),
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "unused-symlink-progress",
+        )
+        with mock.patch.object(controller, "_persist_progress"):
+            with self.assertRaisesRegex(ValueError, "progress"):
+                controller.run(resume=True)
+        self.assertEqual(sentinel.read_bytes(), progress_bytes)
 
     def test_terminal_record_and_progress_are_crash_safe_and_bounded(self) -> None:
         transport = FakeTransport(

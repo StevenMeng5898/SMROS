@@ -142,7 +142,7 @@ def _validate_common(value: object, line_number: int) -> dict[str, object]:
         raise ValueError(f"unknown event at line {line_number}")
     if set(value) - _ALLOWED_FIELDS[str(event_name)]:
         raise ValueError(f"event schema has unknown fields at line {line_number}")
-    if value.get("schema") != 1:
+    if type(value.get("schema")) is not int or value.get("schema") != 1:
         raise ValueError(f"event schema is not 1 at line {line_number}")
     _require_nonnegative_int(value.get("seq"), "sequence")
     _require_string(value, "run_id")
