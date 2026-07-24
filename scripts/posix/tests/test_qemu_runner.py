@@ -33,6 +33,7 @@ from scripts.posix.qemu_runner import (
     CampaignIdentity,
     ControllerConfig,
     ControllerError,
+    ControllerResult,
     QemuController,
     _PopenTransport,
     build_qemu_argv,
@@ -785,7 +786,7 @@ class QemuControllerTests(unittest.TestCase):
                 qemu_argv=self.config.qemu_argv,
             ),
         )
-        controller._run_id = "controller-maximum-campaign"
+        controller._run_id = "\0" * 256
         guest = SerialAttempt(
             test_id=tests[0].test_id,
             group=tests[0].group,
@@ -1498,6 +1499,52 @@ class QemuControllerTests(unittest.TestCase):
         finally:
             os.close(output_descriptor)
 
+    def test_resume_rejects_invalid_matching_run_ids(self) -> None:
+        output = self.root / "resume-progress-run-ids"
+        _clock, progress_bytes, _raw_bytes = self._create_resumable_campaign(output)
+        progress_path = output / "progress.json"
+        raw_path = output / "qemu-serial.log"
+        output_descriptor = os.open(
+            output,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            for label, run_id in (
+                ("lone-surrogate", "\ud800"),
+                ("over-limit", "r" * 257),
+            ):
+                with self.subTest(case=label):
+                    tampered = json.loads(progress_bytes)
+                    tampered["run_id"] = run_id
+                    tampered["completed_attempts"][0]["run_id"] = run_id
+                    progress_path.write_bytes(
+                        (
+                            json.dumps(
+                                tampered,
+                                ensure_ascii=True,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                        ).encode("ascii")
+                    )
+                    controller = QemuController(
+                        identity=_identity(self.tests),
+                        selected=self.tests,
+                        config=ControllerConfig(
+                            output_directory=output,
+                            qemu_argv=self.config.qemu_argv,
+                        ),
+                    )
+                    with self.assertRaisesRegex(ValueError, "resume progress") as raised:
+                        controller._load_progress(
+                            output_descriptor,
+                            raw_path.stat(),
+                        )
+                    self.assertIs(type(raised.exception), ValueError)
+        finally:
+            os.close(output_descriptor)
+
     def test_resume_progress_fifo_is_rejected_promptly(self) -> None:
         output = self.root / "resume-progress-fifo"
         output.mkdir()
@@ -1666,6 +1713,58 @@ class QemuControllerTests(unittest.TestCase):
         self.assertTrue(result.raw_log_path.is_file())
         self.assertFalse(tuple(self.root.glob(".*.tmp")))
 
+    def test_generated_run_ids_are_strict_utf8_nonempty_and_bounded(self) -> None:
+        invalid_ids = (
+            ("empty", ""),
+            ("lone-surrogate", "\ud800"),
+            ("over-limit", "r" * 257),
+            ("not-text", None),
+        )
+        for label, run_id in invalid_ids:
+            with self.subTest(case=label):
+                clock = FakeClock()
+                transport = FakeTransport(
+                    clock,
+                    [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+                )
+                controller = QemuController(
+                    identity=_identity((self.one,)),
+                    selected=(self.one,),
+                    config=ControllerConfig(
+                        output_directory=self.root / f"invalid-run-id-{label}",
+                        qemu_argv=self.config.qemu_argv,
+                    ),
+                    transport_factory=TransportFactory([transport]),
+                    monotonic=clock.monotonic,
+                    run_id_factory=lambda run_id=run_id: run_id,  # type: ignore[return-value]
+                )
+                with self.assertRaisesRegex(ValueError, "run ID"):
+                    controller.run()
+
+        unicode_run_id = "\u8fd0\u884c-\u03c0"
+        clock = FakeClock()
+        transport = FakeTransport(
+            clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+        )
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=self.root / "unicode-run-id",
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory([transport]),
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: unicode_run_id,
+        )
+        result = controller.run()
+        terminal = json.loads(
+            result.result_path.read_text(encoding="utf-8").splitlines()[-1]
+        )
+        self.assertEqual(result.attempts[0].run_id, unicode_run_id)
+        self.assertEqual(terminal["run_id"], unicode_run_id)
+
     def test_guest_infrastructure_error_marks_only_guest_run_incomplete(
         self,
     ) -> None:
@@ -1791,6 +1890,7 @@ class QemuIntegrationSurfaceTests(unittest.TestCase):
     ) -> None:
         runner.return_value = mock.Mock(
             attempts=(mock.Mock(status="pass"),),
+            complete=True,
             restart_count=2,
             result_path=Path("results.ndjson"),
         )
@@ -1811,6 +1911,39 @@ class QemuIntegrationSurfaceTests(unittest.TestCase):
             result = cli_module.main(["run-smros"])
         self.assertEqual(result, 1)
         self.assertIn("run-smros failed: QEMU failed", stderr.getvalue())
+
+    @mock.patch("scripts.posix.cli.run_smros")
+    def test_cli_run_smros_exit_tracks_collection_completeness(
+        self,
+        runner: mock.Mock,
+    ) -> None:
+        cases = (
+            (
+                "guest-infrastructure",
+                mock.Mock(
+                    status="launch-error",
+                    source="smros-qemu",
+                    infrastructure_error="guest cleanup failed",
+                ),
+                False,
+                1,
+            ),
+            ("posix-fail", mock.Mock(status="fail"), True, 0),
+            ("posix-timeout", mock.Mock(status="timeout"), True, 0),
+            ("posix-crash", mock.Mock(status="crash"), True, 0),
+        )
+        for label, attempt, complete, expected in cases:
+            with self.subTest(case=label):
+                runner.return_value = ControllerResult(
+                    attempts=(attempt,),
+                    complete=complete,
+                    restart_count=0,
+                    result_path=Path("results.ndjson"),
+                    raw_log_path=Path("qemu-serial.log"),
+                )
+                with redirect_stdout(io.StringIO()):
+                    observed = cli_module.main(["run-smros"])
+                self.assertEqual(observed, expected)
 
 
 if __name__ == "__main__":

@@ -297,6 +297,7 @@ class ReportFixture:
         complete: bool,
         metadata: ManifestMetadata | None = None,
         infrastructure_error: str | None = None,
+        terminal_fields: dict[str, object] | None = None,
     ) -> None:
         metadata = self.metadata if metadata is None else metadata
         rows: list[dict[str, object]] = [
@@ -327,6 +328,8 @@ class ReportFixture:
         }
         if infrastructure_error is not None:
             terminal["infrastructure_error"] = infrastructure_error
+        if terminal_fields is not None:
+            terminal.update(terminal_fields)
         rows.append(terminal)
         path.write_text(
             "".join(
@@ -355,6 +358,273 @@ class AggregationTests(ReportFixture, unittest.TestCase):
             ),
             encoding="utf-8",
         )
+
+    def _write_serial_runtime(
+        self,
+        path: Path,
+        *,
+        run_id: str,
+        stdout: str = "",
+        stderr: str = "",
+        launch_error: str | None = None,
+        infrastructure_error: str | None = None,
+    ) -> None:
+        test = self.tests[0]
+
+        def event(seq: int, name: str, **values: object) -> str:
+            return "SMROS_POSIX_EVENT " + json.dumps(
+                {
+                    "architecture": "aarch64",
+                    "event": name,
+                    "manifest_sha256": self.metadata.manifest_sha256,
+                    "run_id": run_id,
+                    "schema": 1,
+                    "seq": seq,
+                    **values,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+
+        launch_failed = launch_error is not None
+        status = "launch-error" if launch_failed else "pass"
+        path.write_bytes(
+            (
+                "\n".join(
+                    (
+                        event(
+                            1,
+                            "suite_start",
+                            selected_count=1,
+                            build_id="5" * 64,
+                            build_results_sha256=self.metadata.build_results_sha256,
+                            revision=self.metadata.revision,
+                            patch_sha256=self.metadata.patch_sha256,
+                            smros_commit=self.metadata.smros_commit,
+                        ),
+                        event(
+                            2,
+                            "test_start",
+                            test_id=test.test_id,
+                            group=test.group,
+                            api=test.api,
+                        ),
+                        event(
+                            3,
+                            "test_end",
+                            test_id=test.test_id,
+                            group=test.group,
+                            api=test.api,
+                            status=status,
+                            pts_status=None if launch_failed else "pass",
+                            launch_status=(
+                                "launch-error" if launch_failed else "launched"
+                            ),
+                            exit_code=None if launch_failed else 0,
+                            signal=None,
+                            timed_out=False,
+                            duration_ms=1,
+                            stdout=stdout,
+                            stderr=stderr,
+                            launch_error=launch_error,
+                            infrastructure_error=infrastructure_error,
+                            resource_deltas=ResourceDeltas().to_dict(),
+                        ),
+                        event(
+                            4,
+                            "suite_end",
+                            complete=infrastructure_error is None,
+                            selected_count=1,
+                            completed_count=1,
+                            status_counts={status: 1},
+                        ),
+                    )
+                )
+                + "\n"
+            ).encode("ascii")
+        )
+
+    def test_runtime_attempt_rejects_canonical_lone_surrogate_text(self) -> None:
+        surrogate = "\ud800"
+        passed = self._attempt(self.tests[0], "pass")
+        launch_error = replace(
+            passed,
+            status="launch-error",
+            pts_status=None,
+            launch_status="launch-error",
+            exit_code=None,
+            launch_error="launch failed",
+        )
+        cases = {
+            "stdout": (replace(passed, stdout=surrogate, stdout_bytes=1), True),
+            "stderr": (replace(passed, stderr=surrogate, stderr_bytes=1), True),
+            "run_id": (replace(passed, run_id=surrogate), True),
+            "launch_error": (
+                replace(launch_error, launch_error=surrogate),
+                True,
+            ),
+            "infrastructure_error": (
+                replace(launch_error, infrastructure_error=surrogate),
+                False,
+            ),
+        }
+        for field, (attempt, complete) in cases.items():
+            with self.subTest(field=field):
+                path = self.root / f"surrogate-attempt-{field}.ndjson"
+                self._write_runtime(path, (attempt,), complete=complete)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "runtime attempt",
+                ) as raised:
+                    report_module._load_runtime_results(
+                        path,
+                        self.tests,
+                        self.build_results,
+                        self.metadata,
+                        role="smros",
+                    )
+                self.assertIs(type(raised.exception), ValueError)
+
+    def test_runtime_attempt_accepts_strict_utf8_unicode_text(self) -> None:
+        text = "\u96ea-\u03c0"
+        passed = self._attempt(self.tests[0], "pass")
+        launch_error = replace(
+            passed,
+            status="launch-error",
+            pts_status=None,
+            launch_status="launch-error",
+            exit_code=None,
+            launch_error="launch failed",
+        )
+        cases = {
+            "stdout": (
+                replace(passed, stdout=text, stdout_bytes=len(text.encode("utf-8"))),
+                True,
+            ),
+            "stderr": (
+                replace(passed, stderr=text, stderr_bytes=len(text.encode("utf-8"))),
+                True,
+            ),
+            "run_id": (replace(passed, run_id=text), True),
+            "launch_error": (replace(launch_error, launch_error=text), True),
+            "infrastructure_error": (
+                replace(launch_error, infrastructure_error=text),
+                False,
+            ),
+        }
+        for field, (attempt, complete) in cases.items():
+            with self.subTest(field=field):
+                path = self.root / f"unicode-attempt-{field}.ndjson"
+                self._write_runtime(path, (attempt,), complete=complete)
+                loaded = report_module._load_runtime_results(
+                    path,
+                    self.tests,
+                    self.build_results,
+                    self.metadata,
+                    role="smros",
+                )
+                self.assertEqual(getattr(loaded.attempts[0], field), text)
+
+    def test_runtime_terminal_rejects_canonical_lone_surrogate_text(self) -> None:
+        for field, complete in (
+            ("run_id", True),
+            ("infrastructure_error", False),
+            ("qemu", True),
+            ("raw_log", True),
+            ("sysroot", True),
+        ):
+            with self.subTest(field=field):
+                path = self.root / f"surrogate-terminal-{field}.ndjson"
+                self._write_runtime(
+                    path,
+                    (),
+                    complete=complete,
+                    terminal_fields={field: "\ud800"},
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "runtime terminal",
+                ) as raised:
+                    report_module._load_runtime_results(
+                        path,
+                        self.tests,
+                        self.build_results,
+                        self.metadata,
+                        role="smros",
+                    )
+                self.assertIs(type(raised.exception), ValueError)
+
+    def test_runtime_terminal_accepts_strict_utf8_unicode_text(self) -> None:
+        text = "\u96ea-\u03c0"
+        for field, complete in (
+            ("run_id", True),
+            ("infrastructure_error", False),
+            ("qemu", True),
+            ("raw_log", True),
+            ("sysroot", True),
+        ):
+            with self.subTest(field=field):
+                path = self.root / f"unicode-terminal-{field}.ndjson"
+                self._write_runtime(
+                    path,
+                    (),
+                    complete=complete,
+                    terminal_fields={field: text},
+                )
+                loaded = report_module._load_runtime_results(
+                    path,
+                    self.tests,
+                    self.build_results,
+                    self.metadata,
+                    role="smros",
+                )
+                self.assertEqual(loaded.terminal[field], text)
+
+    def test_serial_runtime_rejects_canonical_lone_surrogate_text(self) -> None:
+        surrogate = "\ud800"
+        cases = {
+            "stdout": {"run_id": "serial-run", "stdout": surrogate},
+            "stderr": {"run_id": "serial-run", "stderr": surrogate},
+            "run_id": {"run_id": surrogate},
+            "launch_error": {
+                "run_id": "serial-run",
+                "launch_error": surrogate,
+            },
+            "infrastructure_error": {
+                "run_id": "serial-run",
+                "launch_error": "launch failed",
+                "infrastructure_error": surrogate,
+            },
+        }
+        manifest = report_module._load_manifest(self.stage / "manifest.json")
+        for field, values in cases.items():
+            with self.subTest(field=field):
+                path = self.root / f"surrogate-serial-{field}.log"
+                self._write_serial_runtime(path, **values)
+                with self.assertRaisesRegex(ValueError, "serial.*invalid") as raised:
+                    report_module._load_smros_results(path, manifest)
+                self.assertIs(type(raised.exception), ValueError)
+
+    def test_serial_runtime_accepts_strict_utf8_unicode_text(self) -> None:
+        text = "\u96ea-\u03c0"
+        path = self.root / "unicode-serial.log"
+        self._write_serial_runtime(
+            path,
+            run_id=text,
+            stdout=text,
+            stderr=text,
+            launch_error=text,
+            infrastructure_error=text,
+        )
+        manifest = report_module._load_manifest(self.stage / "manifest.json")
+        loaded = report_module._load_smros_results(path, manifest)
+        attempt = loaded.attempts[0]
+        self.assertEqual(attempt.run_id, text)
+        self.assertEqual(attempt.stdout, text)
+        self.assertEqual(attempt.stderr, text)
+        self.assertEqual(attempt.launch_error, text)
+        self.assertEqual(attempt.infrastructure_error, text)
 
     def test_coverage_denominators_and_exclusions_are_exact(self) -> None:
         summary = generate_report(

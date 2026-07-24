@@ -388,7 +388,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"passed={sum(attempt.status == 'pass' for attempt in result.attempts)} "
             f"restarts={result.restart_count} results={result.result_path}"
         )
-        return 0
+        return 0 if result.complete else 1
     if arguments.command == "report":
         if not arguments.linux_results and not arguments.smros_results:
             print(

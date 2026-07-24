@@ -362,8 +362,18 @@ def _is_commit(value: object) -> bool:
     )
 
 
+def _is_strict_utf8_text(value: object, *, nonempty: bool = False) -> bool:
+    if not isinstance(value, str) or (nonempty and not value):
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _require_optional_text(value: object, label: str) -> str | None:
-    if value is not None and not isinstance(value, str):
+    if value is not None and not _is_strict_utf8_text(value):
         raise ValueError(f"runtime attempt {label} is invalid")
     return value
 
@@ -428,9 +438,11 @@ def _validate_attempt(
         "source",
         "run_id",
     ):
-        if not isinstance(value[key], str) or not value[key]:
-            if key not in {"stdout", "stderr"} or value[key] != "":
-                raise ValueError(f"runtime attempt {key} is invalid at line {line_number}")
+        if not _is_strict_utf8_text(
+            value[key],
+            nonempty=key not in {"stdout", "stderr"},
+        ):
+            raise ValueError(f"runtime attempt {key} is invalid at line {line_number}")
     if role == "linux":
         if (
             value["platform"] != LINUX_REFERENCE_PLATFORM
@@ -603,7 +615,7 @@ def _validate_terminal(
     ):
         raise ValueError(f"invalid runtime terminal schema at line {line_number}")
     for key in ("platform", "run_id", "source"):
-        if not isinstance(value[key], str) or not value[key]:
+        if not _is_strict_utf8_text(value[key], nonempty=True):
             raise ValueError(f"runtime terminal {key} is invalid at line {line_number}")
     if type(value["complete"]) is not bool:
         raise ValueError(f"runtime terminal completion is invalid at line {line_number}")
@@ -686,7 +698,7 @@ def _validate_terminal(
         if key in {"boot_count", "restart_count"}:
             if type(item) is not int or item < 0:
                 raise ValueError(f"runtime terminal {key} is invalid at line {line_number}")
-        elif item is not None and not isinstance(item, str):
+        elif item is not None and not _is_strict_utf8_text(item):
             raise ValueError(f"runtime terminal {key} is invalid at line {line_number}")
 
 
@@ -771,6 +783,8 @@ def _load_serial_results(
     manifest: _ManifestInput,
 ) -> _RuntimeInput:
     parsed = parse_serial_log(text)
+    if not _is_strict_utf8_text(parsed.run_id, nonempty=True):
+        raise ValueError("serial run ID is invalid")
     if parsed.manifest_sha256 != manifest.metadata.manifest_sha256:
         raise ValueError("serial event manifest provenance mismatch")
     suite_start = parsed.events[0].values
@@ -798,6 +812,13 @@ def _load_serial_results(
     }
     attempts: list[RuntimeAttempt] = []
     for serial_attempt in parsed.attempts:
+        for key in ("stdout", "stderr"):
+            if not _is_strict_utf8_text(getattr(serial_attempt, key)):
+                raise ValueError(f"serial attempt {key} is invalid")
+        for key in ("launch_error", "infrastructure_error"):
+            item = getattr(serial_attempt, key)
+            if item is not None and not _is_strict_utf8_text(item):
+                raise ValueError(f"serial attempt {key} is invalid")
         test = tests_by_id.get(serial_attempt.test_id)
         if test is None:
             raise ValueError(f"unknown serial event test ID: {serial_attempt.test_id}")

@@ -54,6 +54,7 @@ _EMPTY_SHA256 = "0" * 64
 _TRUNCATION_MARKER = b"\n...[truncated]"
 _MAX_PERSISTED_STREAM_BYTES = 16 * 1024
 _MAX_PERSISTED_ERROR_BYTES = 4 * 1024
+_MAX_RUN_ID_BYTES = 256
 _MAX_PROGRESS_BYTES = 128 * 1024 * 1024
 _MAX_RESULT_LINE_BYTES = 512 * 1024
 _PERSISTED_ATTEMPTS_BUDGET = 120 * 1024 * 1024
@@ -410,6 +411,15 @@ def _strict_utf8_size(value: str) -> int | None:
         return None
 
 
+def _run_id_is_valid(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and (size := _strict_utf8_size(value)) is not None
+        and size <= _MAX_RUN_ID_BYTES
+    )
+
+
 def _persisted_stream_is_valid(
     value: str, byte_count: int, truncated: bool, maximum: int
 ) -> bool:
@@ -600,8 +610,7 @@ class QemuController:
         completed = value.get("completed_attempts")
         current_test = value.get("current_test")
         if (
-            not isinstance(run_id, str)
-            or not run_id
+            not _run_id_is_valid(run_id)
             or type(boot_count) is not int
             or boot_count < 0
             or type(restart_count) is not int
@@ -1137,7 +1146,10 @@ class QemuController:
                 if resume:
                     self._load_progress(output_descriptor, os.fstat(raw.fileno()))
                 else:
-                    self._run_id = self._run_id_factory()
+                    run_id = self._run_id_factory()
+                    if not _run_id_is_valid(run_id):
+                        raise ValueError("QEMU run ID is invalid")
+                    self._run_id = run_id
                     self._attempts = []
                     self._restart_count = 0
                     self._boot_count = 0
