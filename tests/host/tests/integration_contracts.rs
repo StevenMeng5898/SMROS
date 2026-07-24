@@ -1007,6 +1007,64 @@ fn posix_guest_events_match_the_versioned_host_schema() {
 }
 
 #[test]
+fn posix_test_shell_command_is_strictly_wired_to_the_runner() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let shell = std::fs::read_to_string(repository.join("src/user_level/services/user_shell.rs"))
+        .expect("read shell service");
+    let runner = std::fs::read_to_string(repository.join("src/user_level/services/posix_test.rs"))
+        .expect("read POSIX runner");
+
+    assert!(shell.contains(
+        "name: \"posixtest\",\n        description: \"Run Open POSIX Test Suite manifest cases\",\n        handler: cmd_posix_test,"
+    ));
+
+    let handler_start = shell
+        .find("fn cmd_posix_test(")
+        .expect("posixtest handler must exist");
+    let handler = braced_body(&shell[handler_start..]);
+    assert!(handler.contains("[\"status\"]"));
+    assert!(handler.contains("posix_test::status_snapshot()"));
+    assert!(handler.contains("posix_test::parse_filter(args)"));
+    assert!(handler.contains("posix_test::start(filter)"));
+    assert!(handler.contains("scheduler::yield_now()"));
+    assert_eq!(
+        handler
+            .matches(
+                "usage: posixtest all | group <group> | api <api> | test <test-id> | status\\n"
+            )
+            .count(),
+        1,
+        "invalid forms must converge on one usage line"
+    );
+    for output in [
+        "posixtest: busy",
+        "posixtest: manifest unavailable",
+        "posixtest: manifest checksum/schema invalid",
+        "posixtest: empty selection",
+        "launch_errors=",
+    ] {
+        assert!(handler.contains(output), "missing distinct output {output}");
+    }
+
+    let parser_start = runner
+        .find("pub fn parse_filter(")
+        .expect("runner filter parser");
+    let parser = braced_body(&runner[parser_start..]);
+    for exact_form in [
+        "[\"all\"]",
+        "[\"group\", value]",
+        "[\"api\", value]",
+        "[\"test\", value]",
+    ] {
+        assert!(
+            parser.contains(exact_form),
+            "missing exact form {exact_form}"
+        );
+    }
+    assert!(parser.contains("_ => Err(PosixTestError::InvalidFilter)"));
+}
+
+#[test]
 fn run_elf_launch_identity_is_bound_and_carried_through_aarch64_resume() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let launcher = std::fs::read_to_string(repository.join("src/user_level/services/run_elf.rs"))

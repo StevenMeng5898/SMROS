@@ -238,6 +238,11 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_run,
     },
     ShellCommand {
+        name: "posixtest",
+        description: "Run Open POSIX Test Suite manifest cases",
+        handler: cmd_posix_test,
+    },
+    ShellCommand {
         name: "vi",
         description: "Edit an FxFS file",
         handler: cmd_vi,
@@ -8322,6 +8327,91 @@ fn cmd_run(ctx: &mut ShellContext, args: &[&str]) {
         }
     }
     scheduler::yield_now();
+}
+
+fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
+    use crate::user_level::services::posix_test::{self, PosixTestError};
+
+    let usage = |ctx: &mut ShellContext| {
+        ctx.serial.write_str(
+            "usage: posixtest all | group <group> | api <api> | test <test-id> | status\n",
+        );
+    };
+
+    if let ["status"] = args {
+        let status = posix_test::status_snapshot();
+        ctx.serial.write_str("posixtest: status running=");
+        ctx.serial
+            .write_str(if status.running { "yes" } else { "no" });
+        ctx.serial.write_str(" run_id=");
+        ctx.serial
+            .write_str(status.run_id.as_deref().unwrap_or("none"));
+        ctx.serial.write_str(" filter=");
+        match status.filter.as_ref() {
+            Some(posix_test::PosixFilter::All) => ctx.serial.write_str("all"),
+            Some(posix_test::PosixFilter::Group(value)) => {
+                ctx.serial.write_str("group:");
+                ctx.serial.write_str(value.as_str());
+            }
+            Some(posix_test::PosixFilter::Api(value)) => {
+                ctx.serial.write_str("api:");
+                ctx.serial.write_str(value.as_str());
+            }
+            Some(posix_test::PosixFilter::Test(value)) => {
+                ctx.serial.write_str("test:");
+                ctx.serial.write_str(value.as_str());
+            }
+            None => ctx.serial.write_str("none"),
+        }
+        ctx.serial.write_str(" current=");
+        ctx.serial
+            .write_str(status.current_test.as_deref().unwrap_or("none"));
+        ctx.serial.write_str(" completed=");
+        print_usize(&mut ctx.serial, status.completed);
+        ctx.serial.write_str(" selected=");
+        print_usize(&mut ctx.serial, status.selected);
+        ctx.serial.write_str(" passed=");
+        print_usize(&mut ctx.serial, status.status_counts.passed);
+        ctx.serial.write_str(" failed=");
+        print_usize(&mut ctx.serial, status.status_counts.failed);
+        ctx.serial.write_str(" unresolved=");
+        print_usize(&mut ctx.serial, status.status_counts.unresolved);
+        ctx.serial.write_str(" unsupported=");
+        print_usize(&mut ctx.serial, status.status_counts.unsupported);
+        ctx.serial.write_str(" untested=");
+        print_usize(&mut ctx.serial, status.status_counts.untested);
+        ctx.serial.write_str(" launch_errors=");
+        print_usize(&mut ctx.serial, status.status_counts.launch_errors);
+        ctx.serial.write_str("\n");
+        return;
+    }
+
+    let filter = match posix_test::parse_filter(args) {
+        Ok(filter) => filter,
+        Err(_) => {
+            usage(ctx);
+            return;
+        }
+    };
+
+    match posix_test::start(filter) {
+        Ok(()) => {
+            ctx.serial.write_str("posixtest: started\n");
+            scheduler::yield_now();
+        }
+        Err(PosixTestError::AlreadyRunning) => ctx.serial.write_str("posixtest: busy\n"),
+        Err(PosixTestError::FxfsPrepare | PosixTestError::FxfsRead) => {
+            ctx.serial.write_str("posixtest: manifest unavailable\n");
+        }
+        Err(PosixTestError::EmptySelection) => {
+            ctx.serial.write_str("posixtest: empty selection\n");
+        }
+        Err(PosixTestError::InvalidFilter) => usage(ctx),
+        Err(_) => {
+            ctx.serial
+                .write_str("posixtest: manifest checksum/schema invalid\n");
+        }
+    }
 }
 
 fn cmd_vi(ctx: &mut ShellContext, args: &[&str]) {
