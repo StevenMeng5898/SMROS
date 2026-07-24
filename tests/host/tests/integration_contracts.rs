@@ -660,6 +660,9 @@ fn run_elf_observer_api_is_typed_environment_aware_and_compatible() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let launcher = std::fs::read_to_string(repository.join("src/user_level/services/run_elf.rs"))
         .expect("read ELF launcher");
+    let shared =
+        std::fs::read_to_string(repository.join("src/user_level/services/user_logic_shared.rs"))
+            .expect("read shared user logic");
     let shell = std::fs::read_to_string(repository.join("src/user_level/services/user_shell.rs"))
         .expect("read shell service");
 
@@ -688,8 +691,7 @@ fn run_elf_observer_api_is_typed_environment_aware_and_compatible() {
     assert!(!shell.contains("RunObserver::PosixTest"));
 
     assert!(launcher.contains("LD_LIBRARY_PATH=/shared/posixtest/lib:/shared/lib:/lib"));
-    assert!(launcher.contains("run_elf_environment_entry_has_key"));
-    assert!(launcher.contains("run_elf_environment_keys_equal"));
+    assert!(launcher.contains("run_elf_environment_valid"));
     assert!(launcher.contains("run_elf_environment_effective_totals"));
     assert!(launcher.contains("run_elf_environment_source_at"));
     for limit in [
@@ -702,7 +704,8 @@ fn run_elf_observer_api_is_typed_environment_aware_and_compatible() {
             "missing environment limit {limit}"
         );
     }
-    assert!(launcher.contains("env[..index].iter().any"));
+    assert!(shared.contains("pub(crate) fn run_elf_environment_valid"));
+    assert!(shared.contains("env[..index]"));
 
     let resolver_start = launcher
         .find("fn resolve_library_path(name_or_path: &str)")
@@ -736,6 +739,9 @@ fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
 
     assert!(launcher.contains("RunElfStateCell"));
     assert!(launcher.contains("RunElfLifecycleState"));
+    assert!(launcher.contains("RunElfActiveRequest"));
+    assert!(launcher.contains("RunElfOwnedResource"));
+    assert!(launcher.contains("run_elf_attach_resource_transition"));
     assert!(launcher.contains("fn with_run_state"));
     assert!(!launcher.contains("static RUN_ACTIVE"));
     assert!(!launcher.contains("static ACTIVE_RUN"));
@@ -744,7 +750,10 @@ fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
     assert!(launcher.contains("fn take_active_request("));
     assert!(launcher.contains("fn dispatch_outcome("));
     assert!(!launcher.contains("run_elf_completion_state_action"));
-    assert!(launcher.contains("state.take_completion()"));
+    assert!(launcher.contains("run_elf_start_transition"));
+    assert!(launcher.contains("run_elf_prepare_return_transition"));
+    assert!(launcher.contains("run_elf_take_completion_transition"));
+    assert!(launcher.contains("run_elf_clear_transition"));
     assert!(launcher.contains("RunTermination::LaunchError(err)"));
     assert!(launcher.contains("RunTermination::Exit(exit_code)"));
     assert!(launcher.contains("RunTermination::InfrastructureError("));
@@ -757,7 +766,7 @@ fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
         .find("if validate_environment(&env).is_err()")
         .expect("environment is validated");
     let publication = launcher
-        .find("state.try_start(request)")
+        .find("run_elf_start_transition(state, request")
         .expect("validated request is published");
     assert!(validation < publication);
 

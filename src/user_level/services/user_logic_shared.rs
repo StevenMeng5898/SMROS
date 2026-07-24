@@ -484,6 +484,54 @@ pub(crate) fn run_elf_environment_keys_equal(left: &str, right: &str) -> bool {
     left.as_bytes()[..left_separator] == right.as_bytes()[..right_separator]
 }
 
+pub(crate) fn run_elf_environment_valid<T: AsRef<str>>(
+    env: &[T],
+    library_path_key: &str,
+    default_entry_bytes: usize,
+    max_entries: usize,
+    max_entry_bytes: usize,
+    max_total_bytes: usize,
+) -> bool {
+    let mut total_bytes = 0usize;
+    let mut has_library_path = false;
+
+    for (index, entry) in env.iter().enumerate() {
+        let entry = entry.as_ref();
+        if !run_elf_environment_entry_valid(entry, max_entry_bytes) {
+            return false;
+        }
+        let Some(entry_bytes) = entry.len().checked_add(1) else {
+            return false;
+        };
+        let Some(next_total) = total_bytes.checked_add(entry_bytes) else {
+            return false;
+        };
+        total_bytes = next_total;
+        has_library_path |= run_elf_environment_entry_has_key(entry, library_path_key);
+        if env[..index]
+            .iter()
+            .any(|previous| run_elf_environment_keys_equal(previous.as_ref(), entry))
+        {
+            return false;
+        }
+    }
+
+    let Some(effective) = run_elf_environment_effective_totals(
+        env.len(),
+        total_bytes,
+        has_library_path,
+        default_entry_bytes,
+    ) else {
+        return false;
+    };
+    run_elf_environment_totals_valid(
+        effective.entry_count,
+        effective.total_bytes,
+        max_entries,
+        max_total_bytes,
+    )
+}
+
 pub(crate) struct RunElfStateCell<T> {
     locked: core::sync::atomic::AtomicBool,
     value: core::cell::UnsafeCell<T>,
@@ -559,6 +607,63 @@ pub(crate) enum RunElfCompletion<T> {
     MissingRequest,
 }
 
+pub(crate) struct RunElfTaken<T> {
+    pub(crate) completion: RunElfCompletion<T>,
+    pub(crate) exit_code: i32,
+}
+
+pub(crate) struct RunElfOwnedResource<T> {
+    resource: Option<T>,
+    release: fn(T),
+}
+
+impl<T> RunElfOwnedResource<T> {
+    pub(crate) fn new(resource: T, release: fn(T)) -> Self {
+        Self {
+            resource: Some(resource),
+            release,
+        }
+    }
+}
+
+impl<T> Drop for RunElfOwnedResource<T> {
+    fn drop(&mut self) {
+        if let Some(resource) = self.resource.take() {
+            (self.release)(resource);
+        }
+    }
+}
+
+pub(crate) struct RunElfActiveRequest<T, R> {
+    launch: T,
+    resource: Option<R>,
+}
+
+impl<T, R> RunElfActiveRequest<T, R> {
+    pub(crate) const fn new(launch: T) -> Self {
+        Self {
+            launch,
+            resource: None,
+        }
+    }
+
+    pub(crate) fn launch(&self) -> &T {
+        &self.launch
+    }
+
+    pub(crate) fn attach_resource(&mut self, resource: R) -> Result<(), R> {
+        if self.resource.is_some() {
+            return Err(resource);
+        }
+        self.resource = Some(resource);
+        Ok(())
+    }
+
+    pub(crate) fn into_parts(self) -> (T, Option<R>) {
+        (self.launch, self.resource)
+    }
+}
+
 impl<T> RunElfLifecycleState<T> {
     pub(crate) const fn new() -> Self {
         Self {
@@ -571,6 +676,10 @@ impl<T> RunElfLifecycleState<T> {
 
     pub(crate) fn request(&self) -> Option<&T> {
         self.request.as_ref()
+    }
+
+    pub(crate) fn request_mut(&mut self) -> Option<&mut T> {
+        self.request.as_mut()
     }
 
     pub(crate) fn try_start(&mut self, request: T) -> Result<(), T> {
@@ -616,6 +725,62 @@ impl<T> RunElfLifecycleState<T> {
             self.completion_seen = true;
             RunElfCompletion::MissingRequest
         }
+    }
+}
+
+pub(crate) fn run_elf_start_transition<T>(
+    state: &mut RunElfLifecycleState<T>,
+    request: T,
+    reset: impl FnOnce(),
+) -> Result<(), T> {
+    let result = state.try_start(request);
+    if result.is_ok() {
+        reset();
+    }
+    result
+}
+
+pub(crate) fn run_elf_prepare_return_transition<T>(
+    state: &mut RunElfLifecycleState<T>,
+    exit_code: i32,
+    reset: impl FnOnce(),
+) -> bool {
+    let prepared = state.prepare_return(exit_code);
+    if prepared {
+        reset();
+    }
+    prepared
+}
+
+pub(crate) fn run_elf_take_completion_transition<T>(
+    state: &mut RunElfLifecycleState<T>,
+    reset: impl FnOnce(),
+) -> RunElfTaken<T> {
+    let exit_code = state.exit_code();
+    let completion = state.take_completion();
+    reset();
+    RunElfTaken {
+        completion,
+        exit_code,
+    }
+}
+
+pub(crate) fn run_elf_clear_transition<T>(
+    state: &mut RunElfLifecycleState<T>,
+    reset: impl FnOnce(),
+) -> Option<T> {
+    let request = state.clear_without_completion();
+    reset();
+    request
+}
+
+pub(crate) fn run_elf_attach_resource_transition<T, R>(
+    state: &mut RunElfLifecycleState<RunElfActiveRequest<T, R>>,
+    resource: R,
+) -> Result<(), R> {
+    match state.request_mut() {
+        Some(request) => request.attach_resource(resource),
+        None => Err(resource),
     }
 }
 

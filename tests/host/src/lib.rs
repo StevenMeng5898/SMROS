@@ -868,6 +868,29 @@ mod user_logic {
                 .iter()
                 .any(|previous| run_elf_environment_keys_equal(previous, entry))
         }));
+
+        assert!(run_elf_environment_valid(
+            &["LANG=C", "PATH=/bin"],
+            "LD_LIBRARY_PATH",
+            60,
+            64,
+            4 * 1024,
+            32 * 1024,
+        ));
+        for invalid in [
+            &["BROKEN"][..],
+            &["=empty-key"][..],
+            &["LANG=C", "LANG=en_US"][..],
+        ] {
+            assert!(!run_elf_environment_valid(
+                invalid,
+                "LD_LIBRARY_PATH",
+                60,
+                64,
+                4 * 1024,
+                32 * 1024,
+            ));
+        }
     }
 
     #[test]
@@ -918,40 +941,163 @@ mod user_logic {
     #[test]
     fn run_elf_lifecycle_uses_the_request_as_its_single_activity_source() {
         let state = RunElfStateCell::new(RunElfLifecycleState::new());
+        let mut reset_count = 0usize;
 
-        assert!(state.lock().try_start(11usize).is_ok());
-        assert_eq!(state.lock().try_start(12usize), Err(12));
-        assert!(state.lock().prepare_return(37));
-        assert!(!state.lock().prepare_return(38));
+        assert!(run_elf_start_transition(&mut state.lock(), 11usize, || reset_count += 1).is_ok());
+        assert_eq!(
+            run_elf_start_transition(&mut state.lock(), 12usize, || reset_count += 1),
+            Err(12)
+        );
+        assert_eq!(reset_count, 1, "busy rejection must not reset active state");
+        assert!(run_elf_prepare_return_transition(
+            &mut state.lock(),
+            37,
+            || reset_count += 1
+        ));
+        assert!(!run_elf_prepare_return_transition(
+            &mut state.lock(),
+            38,
+            || reset_count += 1
+        ));
 
         let mut callback_count = 0usize;
-        let (completion, exit_code) = {
+        let taken = {
             let mut locked = state.lock();
-            let exit_code = locked.exit_code();
-            (locked.take_completion(), exit_code)
+            run_elf_take_completion_transition(&mut locked, || reset_count += 1)
         };
-        match completion {
+        match taken.completion {
             RunElfCompletion::Requested(request) => {
                 assert_eq!(request, 11);
-                assert_eq!(exit_code, 37);
+                assert_eq!(taken.exit_code, 37);
                 assert!(state.lock().request().is_none());
                 callback_count += 1;
             }
             _ => panic!("accepted request must produce its requested outcome"),
         }
         assert_eq!(callback_count, 1);
+        assert_eq!(reset_count, 3);
 
-        assert_eq!(state.lock().take_completion(), RunElfCompletion::Repeated);
+        assert_eq!(
+            run_elf_take_completion_transition(&mut state.lock(), || reset_count += 1).completion,
+            RunElfCompletion::Repeated
+        );
         assert_eq!(callback_count, 1);
+        assert_eq!(reset_count, 4);
 
-        assert!(state.lock().try_start(13usize).is_ok());
-        assert_eq!(state.lock().clear_without_completion(), Some(13));
+        assert!(run_elf_start_transition(&mut state.lock(), 13usize, || reset_count += 1).is_ok());
+        assert_eq!(
+            run_elf_clear_transition(&mut state.lock(), || reset_count += 1),
+            Some(13)
+        );
         assert!(state.lock().request().is_none());
         assert_eq!(
-            state.lock().take_completion(),
+            run_elf_take_completion_transition(&mut state.lock(), || reset_count += 1).completion,
             RunElfCompletion::MissingRequest
         );
-        assert_eq!(state.lock().take_completion(), RunElfCompletion::Repeated);
+        assert_eq!(
+            run_elf_take_completion_transition(&mut state.lock(), || reset_count += 1).completion,
+            RunElfCompletion::Repeated
+        );
+        assert_eq!(reset_count, 8);
+    }
+
+    #[test]
+    fn run_elf_successful_start_cannot_publish_before_reset_finishes() {
+        use std::sync::{mpsc, Arc};
+        use std::time::Duration;
+
+        let state = Arc::new(RunElfStateCell::new(RunElfLifecycleState::new()));
+        let (reset_entered_tx, reset_entered_rx) = mpsc::channel();
+        let (release_reset_tx, release_reset_rx) = mpsc::channel();
+        let (observer_attempt_tx, observer_attempt_rx) = mpsc::channel();
+        let (observer_acquired_tx, observer_acquired_rx) = mpsc::channel();
+
+        let publisher_state = Arc::clone(&state);
+        let publisher = std::thread::spawn(move || {
+            let mut locked = publisher_state.lock();
+            run_elf_start_transition(&mut locked, 1usize, || {
+                reset_entered_tx.send(()).expect("signal reset entry");
+                release_reset_rx.recv().expect("release reset")
+            })
+        });
+        reset_entered_rx.recv().expect("publisher entered reset");
+
+        let observer_state = Arc::clone(&state);
+        let observer = std::thread::spawn(move || {
+            observer_attempt_tx.send(()).expect("signal lock attempt");
+            let locked = observer_state.lock();
+            observer_acquired_tx.send(()).expect("signal lock acquired");
+            locked.request().copied()
+        });
+        observer_attempt_rx.recv().expect("observer attempted lock");
+        assert!(matches!(
+            observer_acquired_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        release_reset_tx.send(()).expect("release publisher reset");
+        assert_eq!(publisher.join().expect("publisher"), Ok(()));
+        assert_eq!(observer.join().expect("observer"), Some(1));
+        observer_acquired_rx
+            .recv()
+            .expect("observer acquired after reset");
+    }
+
+    #[test]
+    fn run_elf_old_completion_reset_precedes_reentrant_start() {
+        use std::sync::{mpsc, Arc, Mutex};
+        use std::time::Duration;
+
+        let mut lifecycle = RunElfLifecycleState::new();
+        assert!(run_elf_start_transition(&mut lifecycle, 1usize, || {}).is_ok());
+        let state = Arc::new(RunElfStateCell::new(lifecycle));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (reset_entered_tx, reset_entered_rx) = mpsc::channel();
+        let (release_reset_tx, release_reset_rx) = mpsc::channel();
+        let (reentrant_attempt_tx, reentrant_attempt_rx) = mpsc::channel();
+        let (reentrant_acquired_tx, reentrant_acquired_rx) = mpsc::channel();
+
+        let completion_state = Arc::clone(&state);
+        let completion_events = Arc::clone(&events);
+        let completion = std::thread::spawn(move || {
+            let mut locked = completion_state.lock();
+            run_elf_take_completion_transition(&mut locked, || {
+                completion_events.lock().unwrap().push("old-reset");
+                reset_entered_tx.send(()).expect("signal old reset");
+                release_reset_rx.recv().expect("release old reset")
+            })
+        });
+        reset_entered_rx.recv().expect("completion entered reset");
+
+        let reentrant_state = Arc::clone(&state);
+        let reentrant_events = Arc::clone(&events);
+        let reentrant = std::thread::spawn(move || {
+            reentrant_attempt_tx.send(()).expect("signal lock attempt");
+            let mut locked = reentrant_state.lock();
+            reentrant_acquired_tx
+                .send(())
+                .expect("signal lock acquired");
+            run_elf_start_transition(&mut locked, 2usize, || {
+                reentrant_events.lock().unwrap().push("new-reset");
+            })
+        });
+        reentrant_attempt_rx
+            .recv()
+            .expect("reentrant start attempted lock");
+        assert!(matches!(
+            reentrant_acquired_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        release_reset_tx.send(()).expect("release old reset");
+        let taken = completion.join().expect("completion");
+        assert_eq!(taken.completion, RunElfCompletion::Requested(1));
+        assert_eq!(reentrant.join().expect("reentrant"), Ok(()));
+        reentrant_acquired_rx
+            .recv()
+            .expect("reentrant start acquired after old reset");
+        assert_eq!(*events.lock().unwrap(), ["old-reset", "new-reset"]);
+        assert_eq!(state.lock().request().copied(), Some(2));
     }
 
     #[test]
@@ -1008,14 +1154,159 @@ mod user_logic {
     }
 
     #[test]
-    fn run_elf_synchronous_failures_do_not_dispatch_outcomes() {
-        let invalid_environment = RunElfLifecycleState::<usize>::new();
-        assert!(invalid_environment.request().is_none());
+    fn run_elf_shared_flow_covers_synchronous_and_terminal_failures() {
+        type Request = RunElfActiveRequest<usize, String>;
 
-        let mut thread_failure = RunElfLifecycleState::new();
-        assert!(thread_failure.try_start(7usize).is_ok());
-        assert_eq!(thread_failure.clear_without_completion(), Some(7));
-        assert!(thread_failure.request().is_none());
+        let mut state = RunElfLifecycleState::<Request>::new();
+        let mut resets = 0usize;
+        let mut callbacks = 0usize;
+
+        assert!(!run_elf_environment_valid(
+            &["INVALID"],
+            "LD_LIBRARY_PATH",
+            60,
+            64,
+            4 * 1024,
+            32 * 1024,
+        ));
+        assert!(state.request().is_none());
+        assert_eq!((resets, callbacks), (0, 0));
+
+        assert!(run_elf_start_transition(&mut state, Request::new(1), || resets += 1).is_ok());
+        let thread_failure = run_elf_clear_transition(&mut state, || resets += 1)
+            .expect("thread failure clears the accepted request");
+        drop(thread_failure);
+        assert!(state.request().is_none());
+        assert_eq!((resets, callbacks), (2, 0));
+
+        assert!(run_elf_start_transition(&mut state, Request::new(2), || resets += 1).is_ok());
+        assert!(run_elf_start_transition(&mut state, Request::new(3), || resets += 1).is_err());
+        assert_eq!((resets, callbacks), (3, 0));
+
+        let loader_failure = run_elf_take_completion_transition(&mut state, || resets += 1);
+        let completed = match loader_failure.completion {
+            RunElfCompletion::Requested(request) => request,
+            _ => panic!("loader failure must retain its accepted request"),
+        };
+        assert!(state.request().is_none());
+        let (_, stack) = completed.into_parts();
+        assert!(stack.is_none());
+        drop(stack);
+        callbacks += 1;
+        assert_eq!((resets, callbacks), (4, 1));
+
+        assert!(matches!(
+            run_elf_take_completion_transition(&mut state, || resets += 1).completion,
+            RunElfCompletion::Repeated
+        ));
+        assert_eq!((resets, callbacks), (5, 1));
+
+        assert!(run_elf_start_transition(&mut state, Request::new(4), || resets += 1).is_ok());
+        assert_eq!(state.request().map(|request| *request.launch()), Some(4));
+        assert_eq!((resets, callbacks), (6, 1));
+    }
+
+    struct TestAllocation {
+        releases: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    fn release_test_allocation(allocation: TestAllocation) {
+        allocation
+            .releases
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn test_allocation(
+        allocations: &std::sync::atomic::AtomicUsize,
+        releases: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> RunElfOwnedResource<TestAllocation> {
+        allocations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        RunElfOwnedResource::new(
+            TestAllocation {
+                releases: std::sync::Arc::clone(releases),
+            },
+            release_test_allocation,
+        )
+    }
+
+    #[test]
+    fn run_elf_owned_resource_releases_on_post_allocation_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        fn fail_after_allocation(
+            allocations: &AtomicUsize,
+            releases: &Arc<AtomicUsize>,
+        ) -> Result<(), ()> {
+            let _stack = test_allocation(allocations, releases);
+            Err(())
+        }
+
+        let allocations = AtomicUsize::new(0);
+        let releases = Arc::new(AtomicUsize::new(0));
+        assert_eq!(fail_after_allocation(&allocations, &releases), Err(()));
+        assert_eq!(allocations.load(Ordering::SeqCst), 1);
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+
+        let mut no_request = RunElfLifecycleState::<
+            RunElfActiveRequest<usize, RunElfOwnedResource<TestAllocation>>,
+        >::new();
+        let unattached = run_elf_attach_resource_transition(
+            &mut no_request,
+            test_allocation(&allocations, &releases),
+        )
+        .expect_err("a resource cannot attach without an active request");
+        drop(unattached);
+        assert_eq!(allocations.load(Ordering::SeqCst), 2);
+        assert_eq!(releases.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn run_elf_stack_ownership_balances_long_reentrant_campaign_before_callbacks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        const LAUNCHES: usize = 10_000;
+        let allocations = AtomicUsize::new(0);
+        let releases = Arc::new(AtomicUsize::new(0));
+        let mut callbacks = 0usize;
+        let mut state = RunElfLifecycleState::new();
+
+        for launch in 0..LAUNCHES {
+            let request = RunElfActiveRequest::new(launch);
+            assert!(run_elf_start_transition(&mut state, request, || {}).is_ok());
+            assert!(run_elf_attach_resource_transition(
+                &mut state,
+                test_allocation(&allocations, &releases),
+            )
+            .is_ok());
+            assert!(run_elf_prepare_return_transition(
+                &mut state,
+                launch as i32,
+                || {}
+            ));
+
+            let taken = run_elf_take_completion_transition(&mut state, || {});
+            assert_eq!(taken.exit_code, launch as i32);
+            let request = match taken.completion {
+                RunElfCompletion::Requested(request) => request,
+                _ => panic!("accepted request must complete"),
+            };
+            let (token, stack) = request.into_parts();
+            assert_eq!(token, launch);
+            drop(stack);
+            assert_eq!(
+                releases.load(Ordering::SeqCst),
+                launch + 1,
+                "the old EL0 stack must be released before its observer callback"
+            );
+            callbacks += 1;
+        }
+
+        assert_eq!(callbacks, LAUNCHES);
+        assert_eq!(allocations.load(Ordering::SeqCst), LAUNCHES);
+        assert_eq!(releases.load(Ordering::SeqCst), LAUNCHES);
+        assert!(state.request().is_none());
     }
 
     #[test]

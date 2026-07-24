@@ -112,7 +112,7 @@ pub struct RunOutcome {
 }
 
 #[derive(Clone)]
-struct RunRequest {
+struct RunLaunchInputs {
     path: String,
     argv: Vec<String>,
     env: Vec<String>,
@@ -120,7 +120,8 @@ struct RunRequest {
     start_tick: u64,
 }
 
-type RunState = user_logic::RunElfLifecycleState<RunRequest>;
+type ActiveRun = user_logic::RunElfActiveRequest<RunLaunchInputs, StackBuilder>;
+type RunState = user_logic::RunElfLifecycleState<ActiveRun>;
 
 static RUN_STATE: user_logic::RunElfStateCell<RunState> =
     user_logic::RunElfStateCell::new(RunState::new());
@@ -148,17 +149,21 @@ pub fn spawn_observed(
         return Err(RunElfError::InvalidEnvironment);
     }
 
-    let request = RunRequest {
+    let request = user_logic::RunElfActiveRequest::new(RunLaunchInputs {
         path,
         argv,
         env,
         observer,
         start_tick: timer::get_tick_count(),
-    };
-    if with_run_state(|state| state.try_start(request).is_err()) {
+    });
+    if with_run_state(|state| {
+        user_logic::run_elf_start_transition(state, request, || {
+            syscall::reset_linux_signal_timer_state()
+        })
+        .is_err()
+    }) {
         return Err(RunElfError::Busy);
     }
-    syscall::reset_linux_signal_timer_state();
 
     scheduler::scheduler()
         .create_thread(run_elf_launcher_entry, "run_elf")
@@ -170,15 +175,17 @@ pub fn spawn_observed(
 }
 
 pub fn active_exec_path() -> Option<String> {
-    with_run_state(|state| state.request().map(|request| request.path.clone()))
+    with_run_state(|state| state.request().map(|request| request.launch().path.clone()))
 }
 
 pub fn prepare_run_elf_return(exit_code: i32) -> bool {
-    if !with_run_state(|state| state.prepare_return(exit_code)) {
+    if !with_run_state(|state| {
+        user_logic::run_elf_prepare_return_transition(state, exit_code, || {
+            syscall::reset_linux_signal_timer_state()
+        })
+    }) {
         return false;
     }
-
-    syscall::reset_linux_signal_timer_state();
 
     let spsr_el1 = user_logic::el1h_spsr_masked();
     unsafe {
@@ -191,7 +198,7 @@ pub fn prepare_run_elf_return(exit_code: i32) -> bool {
 }
 
 extern "C" fn run_elf_launcher_entry() -> ! {
-    let request = with_run_state(|state| state.request().cloned());
+    let request = with_run_state(|state| state.request().map(|request| request.launch().clone()));
     let preparation = request.as_ref().map(prepare_dynamic_loader);
     let Some(preparation) = preparation else {
         complete_active_run(|_| {
@@ -201,9 +208,22 @@ extern "C" fn run_elf_launcher_entry() -> ! {
     };
 
     match preparation {
-        Ok((entry, stack_top)) => unsafe {
-            user_process::switch_to_el0(entry, stack_top, 0);
-        },
+        Ok(prepared) => {
+            let entry = prepared.entry;
+            let stack_top = prepared.stack.stack_top();
+            if let Err(stack) = with_run_state(|state| {
+                user_logic::run_elf_attach_resource_transition(state, prepared.stack)
+            }) {
+                drop(stack);
+                complete_active_run(|_| {
+                    RunTermination::InfrastructureError(RunInfrastructureError::MissingRequest)
+                });
+                finish_launcher_thread();
+            }
+            unsafe {
+                user_process::switch_to_el0(entry, stack_top, 0);
+            }
+        }
         Err(err) => {
             complete_active_run(|_| RunTermination::LaunchError(err));
             finish_launcher_thread();
@@ -218,39 +238,12 @@ pub extern "C" fn run_elf_launcher_resume() -> ! {
 }
 
 fn validate_environment(env: &[String]) -> Result<(), RunElfError> {
-    let mut total_bytes = 0usize;
-    let mut has_ld_library_path = false;
-
-    for (index, entry) in env.iter().enumerate() {
-        if !user_logic::run_elf_environment_entry_valid(entry.as_str(), RUN_ELF_MAX_ENV_ENTRY_BYTES)
-        {
-            return Err(RunElfError::InvalidEnvironment);
-        }
-        total_bytes = total_bytes
-            .checked_add(entry.len().saturating_add(1))
-            .ok_or(RunElfError::InvalidEnvironment)?;
-        has_ld_library_path |= user_logic::run_elf_environment_entry_has_key(
-            entry.as_str(),
-            RUN_ELF_LD_LIBRARY_PATH_KEY,
-        );
-        if env[..index].iter().any(|previous| {
-            user_logic::run_elf_environment_keys_equal(previous.as_str(), entry.as_str())
-        }) {
-            return Err(RunElfError::InvalidEnvironment);
-        }
-    }
-
-    let effective = user_logic::run_elf_environment_effective_totals(
-        env.len(),
-        total_bytes,
-        has_ld_library_path,
+    if !user_logic::run_elf_environment_valid(
+        env,
+        RUN_ELF_LD_LIBRARY_PATH_KEY,
         RUN_ELF_DEFAULT_LD_LIBRARY_PATH.len().saturating_add(1),
-    )
-    .ok_or(RunElfError::InvalidEnvironment)?;
-    if !user_logic::run_elf_environment_totals_valid(
-        effective.entry_count,
-        effective.total_bytes,
         RUN_ELF_MAX_ENV_ENTRIES,
+        RUN_ELF_MAX_ENV_ENTRY_BYTES,
         RUN_ELF_MAX_ENV_TOTAL_BYTES,
     ) {
         return Err(RunElfError::InvalidEnvironment);
@@ -258,23 +251,24 @@ fn validate_environment(env: &[String]) -> Result<(), RunElfError> {
     Ok(())
 }
 
-fn take_active_request() -> (user_logic::RunElfCompletion<RunRequest>, i32) {
-    let result = with_run_state(|state| {
-        let exit_code = state.exit_code();
-        (state.take_completion(), exit_code)
+fn take_active_request() -> (user_logic::RunElfCompletion<ActiveRun>, i32) {
+    let taken = with_run_state(|state| {
+        user_logic::run_elf_take_completion_transition(state, || {
+            syscall::reset_linux_signal_timer_state()
+        })
     });
-    syscall::reset_linux_signal_timer_state();
-    result
+    (taken.completion, taken.exit_code)
 }
 
 fn clear_launch_state_without_outcome() {
-    let _ = with_run_state(|state| state.clear_without_completion());
-    syscall::reset_linux_signal_timer_state();
+    let _ = with_run_state(|state| {
+        user_logic::run_elf_clear_transition(state, || syscall::reset_linux_signal_timer_state())
+    });
 }
 
 fn complete_active_run(termination: impl FnOnce(i32) -> RunTermination) {
     let (completion, exit_code) = take_active_request();
-    let request = match completion {
+    let active_request = match completion {
         user_logic::RunElfCompletion::Requested(request) => request,
         user_logic::RunElfCompletion::Repeated => return,
         user_logic::RunElfCompletion::MissingRequest => {
@@ -282,6 +276,8 @@ fn complete_active_run(termination: impl FnOnce(i32) -> RunTermination) {
             return;
         }
     };
+    let (request, stack) = active_request.into_parts();
+    drop(stack);
     let end_tick = timer::get_tick_count();
     let outcome = RunOutcome {
         path: request.path,
@@ -351,7 +347,12 @@ fn finish_launcher_thread() -> ! {
     }
 }
 
-fn prepare_dynamic_loader(request: &RunRequest) -> Result<(u64, u64), RunElfError> {
+struct PreparedRun {
+    entry: u64,
+    stack: StackBuilder,
+}
+
+fn prepare_dynamic_loader(request: &RunLaunchInputs) -> Result<PreparedRun, RunElfError> {
     let main_bytes = read_fxfs_file(request.path.as_str())?;
     let main = elf::parse(&main_bytes).map_err(|_| RunElfError::BadElf)?;
     if main.elf_type != elf::ELF_TYPE_DYN {
@@ -374,11 +375,11 @@ fn prepare_dynamic_loader(request: &RunRequest) -> Result<(u64, u64), RunElfErro
     map_elf_image(&interp, &interp_bytes, RUN_ELF_INTERP_BASE)?;
     sync_instruction_cache();
 
-    let stack_top = build_initial_stack(request, &main)?;
-    Ok((
-        (RUN_ELF_INTERP_BASE as u64).saturating_add(interp.entry),
-        stack_top,
-    ))
+    let stack = build_initial_stack(request, &main)?;
+    Ok(PreparedRun {
+        entry: (RUN_ELF_INTERP_BASE as u64).saturating_add(interp.entry),
+        stack,
+    })
 }
 
 fn read_fxfs_file(path: &str) -> Result<Vec<u8>, RunElfError> {
@@ -503,8 +504,22 @@ fn sync_instruction_cache() {
 }
 
 struct StackBuilder {
+    _allocation: user_logic::RunElfOwnedResource<StackAllocation>,
     base: usize,
     sp: usize,
+}
+
+struct StackAllocation {
+    base: usize,
+    size: usize,
+}
+
+fn release_stack_allocation(allocation: StackAllocation) {
+    if let Ok(layout) = Layout::from_size_align(allocation.size, 16) {
+        unsafe {
+            alloc::alloc::dealloc(allocation.base as *mut u8, layout);
+        }
+    }
 }
 
 impl StackBuilder {
@@ -515,10 +530,19 @@ impl StackBuilder {
             return Err(RunElfError::Stack);
         }
         let base = ptr as usize;
+        let allocation = user_logic::RunElfOwnedResource::new(
+            StackAllocation { base, size },
+            release_stack_allocation,
+        );
         Ok(Self {
+            _allocation: allocation,
             base,
             sp: base.checked_add(size).ok_or(RunElfError::Stack)?,
         })
+    }
+
+    fn stack_top(&self) -> u64 {
+        self.sp as u64
     }
 
     fn align_down(&mut self, align: usize) {
@@ -559,7 +583,10 @@ impl StackBuilder {
     }
 }
 
-fn build_initial_stack(request: &RunRequest, main: &elf::ElfImage) -> Result<u64, RunElfError> {
+fn build_initial_stack(
+    request: &RunLaunchInputs,
+    main: &elf::ElfImage,
+) -> Result<StackBuilder, RunElfError> {
     let mut stack = StackBuilder::new(RUN_ELF_STACK_SIZE)?;
 
     let random_ptr = stack.push_bytes(&[
@@ -654,7 +681,7 @@ fn build_initial_stack(request: &RunRequest, main: &elf::ElfImage) -> Result<u64
     if stack.sp & 0xf != 0 {
         return Err(RunElfError::Stack);
     }
-    Ok(stack.sp as u64)
+    Ok(stack)
 }
 
 #[cfg(target_arch = "aarch64")]
