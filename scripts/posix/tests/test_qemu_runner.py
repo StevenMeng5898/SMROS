@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 import io
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
-from scripts.posix.build import ManifestMetadata
+from scripts.posix.build import MAX_TESTS, ManifestMetadata
 from scripts.posix import cli as cli_module
+from scripts.posix import qemu_runner as qemu_runner_module
 from scripts.posix import report as report_module
 from scripts.posix.cli import create_parser
-from scripts.posix.model import BuildResult, ResourceDeltas, SuiteTest
+from scripts.posix.model import (
+    BuildResult,
+    ResourceDeltas,
+    SerialAttempt,
+    SuiteTest,
+)
 from scripts.posix.qemu_runner import (
     CampaignIdentity,
     ControllerConfig,
@@ -739,6 +747,261 @@ class QemuControllerTests(unittest.TestCase):
         )
         self.assertTrue(summary["complete"])
 
+    def test_maximum_campaign_escaping_stays_within_runtime_caps(self) -> None:
+        tests = tuple(
+            _test(f"budget-{index:04d}") for index in range(MAX_TESTS)
+        )
+        baseline_identity = _identity((tests[0],))
+        identity = CampaignIdentity(
+            metadata=baseline_identity.metadata,
+            build_id=baseline_identity.build_id,
+            build_results=(),
+        )
+        output = self.root / "maximum-campaign-budget"
+        controller = QemuController(
+            identity=identity,
+            selected=tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+        )
+        controller._run_id = "controller-maximum-campaign"
+        guest = SerialAttempt(
+            test_id=tests[0].test_id,
+            group=tests[0].group,
+            api=tests[0].api,
+            status="launch-error",
+            pts_status=None,
+            launch_status="launch-error",
+            exit_code=None,
+            signal=None,
+            timed_out=False,
+            duration_ms=1,
+            stdout="\0" * (600 * 1024),
+            stderr="\0" * (600 * 1024),
+            resource_deltas=ResourceDeltas(),
+            resource_evidence="measured",
+            run_id="guest-run",
+            manifest_sha256=identity.metadata.manifest_sha256,
+            architecture="aarch64",
+            launch_error="\0" * (600 * 1024),
+        )
+        prototype = controller._guest_attempt(
+            guest,
+            tests[0],
+            raw_log_start=0,
+            raw_log_end=0,
+        )
+        prototype_line = qemu_runner_module._json_bytes(
+            qemu_runner_module._attempt_record(prototype)
+        )
+        projected_attempt_bytes = len(prototype_line) * MAX_TESTS
+        self.assertLessEqual(
+            projected_attempt_bytes,
+            qemu_runner_module._PERSISTED_ATTEMPTS_BUDGET,
+        )
+
+        controller._attempts = [
+            replace(
+                prototype,
+                test_id=test.test_id,
+                binary_sha256=test.sha256 or "0" * 64,
+            )
+            for test in tests
+        ]
+        output.mkdir()
+        (output / "qemu-serial.log").write_bytes(b"")
+        controller._persist_progress()
+        controller._publish()
+        progress_size = (output / "progress.json").stat().st_size
+        results_size = (output / "results.ndjson").stat().st_size
+        self.assertLessEqual(
+            progress_size,
+            qemu_runner_module._MAX_PROGRESS_BYTES,
+        )
+        self.assertLessEqual(
+            results_size,
+            report_module._MAX_RUNTIME_RESULTS_BYTES,
+        )
+
+        resumed = QemuController(
+            identity=identity,
+            selected=tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+        )
+        output_descriptor = os.open(
+            output,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            resumed._load_progress(
+                output_descriptor,
+                (output / "qemu-serial.log").stat(),
+            )
+        finally:
+            os.close(output_descriptor)
+        self.assertEqual(len(resumed._attempts), MAX_TESTS)
+
+        runtime = report_module._load_runtime_results(
+            output / "results.ndjson",
+            tests,
+            (),
+            identity.metadata,
+            role="smros",
+        )
+        self.assertEqual(len(runtime.attempts), MAX_TESTS)
+
+    def test_resume_rejects_errors_outside_maximum_campaign_budget(self) -> None:
+        tests = tuple(
+            _test(f"resume-budget-{index:04d}") for index in range(MAX_TESTS)
+        )
+        baseline_identity = _identity((tests[0],))
+        identity = CampaignIdentity(
+            metadata=baseline_identity.metadata,
+            build_id=baseline_identity.build_id,
+            build_results=(),
+        )
+        output = self.root / "resume-maximum-budget"
+        output.mkdir()
+        raw = output / "qemu-serial.log"
+        raw.write_bytes(b"")
+        controller = QemuController(
+            identity=identity,
+            selected=tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+        )
+        controller._run_id = "controller-resume-maximum-budget"
+        guest = SerialAttempt(
+            test_id=tests[0].test_id,
+            group=tests[0].group,
+            api=tests[0].api,
+            status="launch-error",
+            pts_status=None,
+            launch_status="launch-error",
+            exit_code=None,
+            signal=None,
+            timed_out=False,
+            duration_ms=1,
+            stdout="",
+            stderr="",
+            resource_deltas=ResourceDeltas(),
+            resource_evidence="measured",
+            run_id="guest-run",
+            manifest_sha256=identity.metadata.manifest_sha256,
+            architecture="aarch64",
+            launch_error="failure",
+        )
+        attempt = controller._guest_attempt(
+            guest,
+            tests[0],
+            raw_log_start=0,
+            raw_log_end=0,
+        )
+        output_descriptor = os.open(
+            output,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        resumed = QemuController(
+            identity=identity,
+            selected=tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+        )
+        try:
+            error_limit = qemu_runner_module._persisted_attempt_field_limits(
+                MAX_TESTS
+            ).error_bytes
+            invalid_attempts = {
+                "over-limit": replace(attempt, launch_error="x" * 4096),
+                "two-errors": replace(
+                    attempt,
+                    launch_error="x" * error_limit,
+                    infrastructure_error="y" * error_limit,
+                ),
+            }
+            for label, invalid_attempt in invalid_attempts.items():
+                with self.subTest(label=label):
+                    controller._attempts = [invalid_attempt]
+                    controller._persist_progress()
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "resume completed attempt identity",
+                    ):
+                        resumed._load_progress(output_descriptor, raw.stat())
+        finally:
+            os.close(output_descriptor)
+
+    def test_maximum_campaign_watchdog_uses_guest_error_budget(self) -> None:
+        tests = tuple(
+            _test(f"watchdog-budget-{index:04d}") for index in range(MAX_TESTS)
+        )
+        baseline_identity = _identity((tests[0],))
+        identity = CampaignIdentity(
+            metadata=baseline_identity.metadata,
+            build_id=baseline_identity.build_id,
+            build_results=(),
+        )
+        controller = QemuController(
+            identity=identity,
+            selected=tests,
+            config=ControllerConfig(
+                output_directory=self.root / "watchdog-maximum-budget",
+                qemu_argv=self.config.qemu_argv,
+            ),
+        )
+        controller._run_id = "controller-watchdog-maximum-budget"
+        reason = "\0" * (600 * 1024)
+        guest = SerialAttempt(
+            test_id=tests[0].test_id,
+            group=tests[0].group,
+            api=tests[0].api,
+            status="launch-error",
+            pts_status=None,
+            launch_status="launch-error",
+            exit_code=None,
+            signal=None,
+            timed_out=False,
+            duration_ms=1,
+            stdout="",
+            stderr="",
+            resource_deltas=ResourceDeltas(),
+            resource_evidence="measured",
+            run_id="guest-run",
+            manifest_sha256=identity.metadata.manifest_sha256,
+            architecture="aarch64",
+            launch_error=reason,
+        )
+        guest_attempt = controller._guest_attempt(
+            guest,
+            tests[0],
+            raw_log_start=0,
+            raw_log_end=0,
+        )
+        watchdog_attempt = controller._watchdog_attempt(
+            tests[0],
+            status="crash",
+            started=True,
+            timed_out=False,
+            reason=reason,
+            duration_ms=1,
+            raw_log_start=0,
+            raw_log_end=0,
+        )
+
+        self.assertEqual(
+            len((watchdog_attempt.infrastructure_error or "").encode("utf-8")),
+            len((guest_attempt.launch_error or "").encode("utf-8")),
+        )
+
     def test_fresh_raw_log_links_do_not_clobber_outside_files(self) -> None:
         for label in ("symlink", "hardlink"):
             with self.subTest(label=label):
@@ -1126,6 +1389,108 @@ class QemuControllerTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "size limit"):
                 controller.run(resume=True)
+
+    def test_resume_progress_fifo_is_rejected_promptly(self) -> None:
+        output = self.root / "resume-progress-fifo"
+        output.mkdir()
+        os.mkfifo(output / "progress.json")
+        output_descriptor = os.open(
+            output,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+        )
+        real_open = os.open
+        observed_flags: list[int] = []
+
+        def guarded_open(path, flags, *args, **kwargs):
+            observed_flags.append(flags)
+            if not flags & os.O_NONBLOCK:
+                raise BlockingIOError("progress FIFO open would block")
+            return real_open(path, flags, *args, **kwargs)
+
+        try:
+            with mock.patch(
+                "scripts.posix.qemu_runner.os.open",
+                side_effect=guarded_open,
+            ):
+                with self.assertRaisesRegex(ValueError, "progress"):
+                    controller._read_progress(output_descriptor)
+        finally:
+            os.close(output_descriptor)
+        self.assertTrue(observed_flags[0] & os.O_NONBLOCK)
+
+    def test_resume_progress_rejects_device_and_socket_files(self) -> None:
+        output = self.root / "resume-progress-special"
+        output.mkdir()
+        output_descriptor = os.open(
+            output,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+        )
+
+        device_descriptor = os.open("/dev/null", os.O_RDONLY)
+        with mock.patch(
+            "scripts.posix.qemu_runner.os.open",
+            return_value=device_descriptor,
+        ):
+            with self.assertRaisesRegex(ValueError, "regular single-link"):
+                controller._read_progress(output_descriptor)
+
+        progress = output / "progress.json"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            listener.bind(str(progress))
+            with self.assertRaisesRegex(ValueError, "progress"):
+                controller._read_progress(output_descriptor)
+        finally:
+            listener.close()
+            os.close(output_descriptor)
+
+    def test_resume_progress_normalizes_open_and_read_errors(self) -> None:
+        output = self.root / "resume-progress-errors"
+        output.mkdir()
+        (output / "progress.json").write_bytes(b"{}\n")
+        output_descriptor = os.open(
+            output,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+        )
+
+        try:
+            for operation in ("open", "read"):
+                with self.subTest(operation=operation):
+                    target = f"scripts.posix.qemu_runner.os.{operation}"
+                    with mock.patch(target, side_effect=OSError(f"{operation} failed")):
+                        observed: BaseException | None = None
+                        try:
+                            controller._read_progress(output_descriptor)
+                        except Exception as error:
+                            observed = error
+                    self.assertIs(type(observed), ValueError)
+                    self.assertRegex(str(observed), "resume progress is unavailable")
+        finally:
+            os.close(output_descriptor)
 
     def test_resume_progress_symlink_is_not_followed(self) -> None:
         output = self.root / "resume-progress-symlink"

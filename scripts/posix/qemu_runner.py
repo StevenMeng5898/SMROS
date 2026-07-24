@@ -53,6 +53,7 @@ _SHUTDOWN_SECONDS = 1.0
 _EMPTY_SHA256 = "0" * 64
 _TRUNCATION_MARKER = b"\n...[truncated]"
 _MAX_PERSISTED_STREAM_BYTES = 16 * 1024
+_MAX_PERSISTED_ERROR_BYTES = 4 * 1024
 _MAX_PROGRESS_BYTES = 128 * 1024 * 1024
 _MAX_RESULT_LINE_BYTES = 512 * 1024
 _PERSISTED_ATTEMPTS_BUDGET = 120 * 1024 * 1024
@@ -96,6 +97,12 @@ class ControllerResult:
     restart_count: int
     result_path: Path
     raw_log_path: Path
+
+
+@dataclass(frozen=True)
+class _AttemptFieldLimits:
+    stream_bytes: int
+    error_bytes: int
 
 
 class _PopenTransport:
@@ -366,15 +373,25 @@ def _bounded_reason(value: str, maximum: int = 4096) -> str:
     return prefix.decode("utf-8", errors="ignore") + marker.decode("ascii")
 
 
-def _persisted_stream_limit(selected_count: int) -> int:
-    # 120 MiB / selected_count leaves 8 MiB for progress inventory and the
-    # terminal row. JSON can expand one input byte to six escaped ASCII bytes.
+def _persisted_attempt_field_limits(selected_count: int) -> _AttemptFieldLimits:
+    # Keep all attempt rows within 120 MiB, leaving 8 MiB under the report cap
+    # for progress inventory and the terminal row. Each attempt reserves its
+    # LF before assigning the remaining variable bytes across two streams and
+    # the one optional error allowed by the attempt semantics.
     attempt_budget = _PERSISTED_ATTEMPTS_BUDGET // selected_count
-    line_budget = min(_MAX_RESULT_LINE_BYTES - 1, attempt_budget)
-    stream_budget = (line_budget - _ATTEMPT_FIXED_BUDGET) // (
-        2 * _JSON_ESCAPE_EXPANSION
+    line_budget = min(_MAX_RESULT_LINE_BYTES, attempt_budget - 1)
+    variable_budget = (line_budget - _ATTEMPT_FIXED_BUDGET) // (
+        _JSON_ESCAPE_EXPANSION
     )
-    return min(_MAX_PERSISTED_STREAM_BYTES, stream_budget)
+    error_bytes = min(_MAX_PERSISTED_ERROR_BYTES, variable_budget // 3)
+    stream_bytes = min(
+        _MAX_PERSISTED_STREAM_BYTES,
+        (variable_budget - error_bytes) // 2,
+    )
+    return _AttemptFieldLimits(
+        stream_bytes=stream_bytes,
+        error_bytes=error_bytes,
+    )
 
 
 def _bounded_stream(value: str, maximum: int) -> tuple[str, int, bool]:
@@ -397,6 +414,22 @@ def _persisted_stream_is_valid(
             and value.endswith(_TRUNCATION_MARKER.decode("ascii"))
         )
         or (not truncated and byte_count == stored_bytes)
+    )
+
+
+def _persisted_errors_are_valid(
+    launch_error: object,
+    infrastructure_error: object,
+    maximum: int,
+) -> bool:
+    values = (launch_error, infrastructure_error)
+    return sum(value is not None for value in values) <= 1 and all(
+        value is None
+        or (
+            isinstance(value, str)
+            and len(value.encode("utf-8", errors="replace")) <= maximum
+        )
+        for value in values
     )
 
 
@@ -471,16 +504,14 @@ class QemuController:
     def _read_progress(self, output_descriptor: int) -> bytes:
         descriptor: int | None = None
         try:
-            try:
-                descriptor = os.open(
-                    self._progress_path.name,
-                    os.O_RDONLY
-                    | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_NOFOLLOW", 0),
-                    dir_fd=output_descriptor,
-                )
-            except OSError as error:
-                raise ValueError("resume progress is unavailable") from error
+            descriptor = os.open(
+                self._progress_path.name,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=output_descriptor,
+            )
             opened = os.fstat(descriptor)
             if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
                 raise ValueError("resume progress is not a regular single-link file")
@@ -512,6 +543,8 @@ class QemuController:
             if fingerprint(opened) != fingerprint(after):
                 raise ValueError("resume progress changed while being read")
             return b"".join(chunks)
+        except OSError as error:
+            raise ValueError("resume progress is unavailable") from error
         finally:
             if descriptor is not None:
                 os.close(descriptor)
@@ -601,6 +634,7 @@ class QemuController:
         self, attempt: RuntimeAttempt, test: SuiteTest, run_id: str
     ) -> None:
         build_status, link_status = self._build_statuses(test)
+        field_limits = _persisted_attempt_field_limits(len(self.selected))
         identity_matches = (
             attempt.test_id == test.test_id
             and attempt.group == test.group
@@ -641,13 +675,18 @@ class QemuController:
                 attempt.stdout,
                 attempt.stdout_bytes,
                 attempt.stdout_truncated,
-                _persisted_stream_limit(len(self.selected)),
+                field_limits.stream_bytes,
             )
             and _persisted_stream_is_valid(
                 attempt.stderr,
                 attempt.stderr_bytes,
                 attempt.stderr_truncated,
-                _persisted_stream_limit(len(self.selected)),
+                field_limits.stream_bytes,
+            )
+            and _persisted_errors_are_valid(
+                attempt.launch_error,
+                attempt.infrastructure_error,
+                field_limits.error_bytes,
             )
         )
         try:
@@ -841,12 +880,12 @@ class QemuController:
         raw_log_end: int,
     ) -> RuntimeAttempt:
         build_status, link_status = self._build_statuses(test)
-        stream_limit = _persisted_stream_limit(len(self.selected))
+        field_limits = _persisted_attempt_field_limits(len(self.selected))
         stdout, stdout_bytes, stdout_truncated = _bounded_stream(
-            guest.stdout, stream_limit
+            guest.stdout, field_limits.stream_bytes
         )
         stderr, stderr_bytes, stderr_truncated = _bounded_stream(
-            guest.stderr, stream_limit
+            guest.stderr, field_limits.stream_bytes
         )
         return RuntimeAttempt(
             test_id=test.test_id,
@@ -866,12 +905,15 @@ class QemuController:
             stderr=stderr,
             source=SOURCE,
             launch_error=(
-                _bounded_reason(guest.launch_error)
+                _bounded_reason(guest.launch_error, field_limits.error_bytes)
                 if guest.launch_error is not None
                 else None
             ),
             infrastructure_error=(
-                _bounded_reason(guest.infrastructure_error)
+                _bounded_reason(
+                    guest.infrastructure_error,
+                    field_limits.error_bytes,
+                )
                 if guest.infrastructure_error is not None
                 else None
             ),
@@ -907,6 +949,7 @@ class QemuController:
         raw_log_end: int,
     ) -> RuntimeAttempt:
         build_status, link_status = self._build_statuses(test)
+        field_limits = _persisted_attempt_field_limits(len(self.selected))
         return RuntimeAttempt(
             test_id=test.test_id,
             group=test.group,
@@ -924,7 +967,10 @@ class QemuController:
             stdout="",
             stderr="",
             source=WATCHDOG_SOURCE,
-            infrastructure_error=_bounded_reason(reason),
+            infrastructure_error=_bounded_reason(
+                reason,
+                field_limits.error_bytes,
+            ),
             manifest_sha256=self.identity.metadata.manifest_sha256,
             build_results_sha256=self.identity.metadata.build_results_sha256,
             build_id=self.identity.build_id,
