@@ -1791,6 +1791,67 @@ def _publish_generation(output_directory: Path, outputs: Mapping[str, bytes]) ->
                         parent,
                         output_directory.name,
                     )
+                    os.fsync(slot)
+                    os.fsync(parent)
+                    if not _directory_entry_matches(
+                        parent, output_directory.name, work
+                    ):
+                        raise ValueError(
+                            "report output directory changed during publication"
+                        )
+                    if not _directory_entry_matches(
+                        slot, _REPORT_WORK_ROOT_NAME, held_destination
+                    ):
+                        publication_error = ValueError(
+                            "report output directory changed during publication"
+                        )
+                        displaced = os.stat(
+                            _REPORT_WORK_ROOT_NAME,
+                            dir_fd=slot,
+                            follow_symlinks=False,
+                        )
+                        displaced_identity = (displaced.st_dev, displaced.st_ino)
+                        try:
+                            if not _directory_entry_matches(
+                                parent, output_directory.name, work
+                            ):
+                                raise ValueError(
+                                    "generated report changed before publication rollback"
+                                )
+                            _rename_exchange(
+                                slot,
+                                _REPORT_WORK_ROOT_NAME,
+                                parent,
+                                output_directory.name,
+                            )
+                            os.fsync(slot)
+                            os.fsync(parent)
+                            if not _directory_entry_matches(
+                                slot, _REPORT_WORK_ROOT_NAME, work
+                            ):
+                                raise ValueError(
+                                    "publication rollback did not restore the generated report"
+                                )
+                            restored = os.stat(
+                                output_directory.name,
+                                dir_fd=parent,
+                                follow_symlinks=False,
+                            )
+                            if (
+                                restored.st_dev,
+                                restored.st_ino,
+                            ) != displaced_identity:
+                                raise ValueError(
+                                    "publication rollback did not restore the raced destination"
+                                )
+                            generated_in_slot = True
+                        except BaseException as rollback_error:
+                            raise BaseExceptionGroup(
+                                "report publication and rollback both failed",
+                                [publication_error, rollback_error],
+                            )
+                        raise publication_error
+                    _reset_report_work_root(slot, held_destination)
                 except BaseException as publication_error:
                     if _directory_entry_matches(
                         parent, output_directory.name, work
@@ -1804,6 +1865,20 @@ def _publish_generation(output_directory: Path, outputs: Mapping[str, bytes]) ->
                             try:
                                 os.fsync(slot)
                                 os.fsync(parent)
+                                if not _directory_entry_matches(
+                                    parent, output_directory.name, work
+                                ):
+                                    raise ValueError(
+                                        "generated report changed during publication recovery"
+                                    )
+                                if not _directory_entry_matches(
+                                    slot,
+                                    _REPORT_WORK_ROOT_NAME,
+                                    held_destination,
+                                ):
+                                    raise ValueError(
+                                        "prior report changed during publication recovery"
+                                    )
                                 _reset_report_work_root(
                                     slot, held_destination
                                 )
@@ -1814,62 +1889,6 @@ def _publish_generation(output_directory: Path, outputs: Mapping[str, bytes]) ->
                                 )
                     raise
                 generated_in_slot = False
-                os.fsync(slot)
-                os.fsync(parent)
-                if not _directory_entry_matches(
-                    parent, output_directory.name, work
-                ):
-                    raise ValueError("report output directory changed during publication")
-                if not _directory_entry_matches(
-                    slot, _REPORT_WORK_ROOT_NAME, held_destination
-                ):
-                    publication_error = ValueError(
-                        "report output directory changed during publication"
-                    )
-                    displaced = os.stat(
-                        _REPORT_WORK_ROOT_NAME,
-                        dir_fd=slot,
-                        follow_symlinks=False,
-                    )
-                    displaced_identity = (displaced.st_dev, displaced.st_ino)
-                    try:
-                        if not _directory_entry_matches(
-                            parent, output_directory.name, work
-                        ):
-                            raise ValueError(
-                                "generated report changed before publication rollback"
-                            )
-                        _rename_exchange(
-                            slot,
-                            _REPORT_WORK_ROOT_NAME,
-                            parent,
-                            output_directory.name,
-                        )
-                        os.fsync(slot)
-                        os.fsync(parent)
-                        if not _directory_entry_matches(
-                            slot, _REPORT_WORK_ROOT_NAME, work
-                        ):
-                            raise ValueError(
-                                "publication rollback did not restore the generated report"
-                            )
-                        restored = os.stat(
-                            output_directory.name,
-                            dir_fd=parent,
-                            follow_symlinks=False,
-                        )
-                        if (restored.st_dev, restored.st_ino) != displaced_identity:
-                            raise ValueError(
-                                "publication rollback did not restore the raced destination"
-                            )
-                        generated_in_slot = True
-                    except BaseException as rollback_error:
-                        raise BaseExceptionGroup(
-                            "report publication and rollback both failed",
-                            [publication_error, rollback_error],
-                        )
-                    raise publication_error
-                _reset_report_work_root(slot, held_destination)
             finally:
                 os.close(held_destination)
         os.fsync(parent)

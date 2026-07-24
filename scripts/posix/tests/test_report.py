@@ -1258,6 +1258,113 @@ class RendererTests(ReportFixture, unittest.TestCase):
             set(path.name for path in self.output.iterdir()), set(OUTPUT_NAMES)
         )
 
+    def test_completed_exchange_recovers_post_commit_fsync_interruptions(
+        self,
+    ) -> None:
+        for failure_point in ("slot", "parent"):
+            with self.subTest(failure_point=failure_point):
+                output = self.root / f"report-{failure_point}"
+                generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(self.smros_results,),
+                    output_directory=output,
+                )
+                prior_info = output.stat()
+                prior_identity = (prior_info.st_dev, prior_info.st_ino)
+                interruption = KeyboardInterrupt(
+                    f"{failure_point} fsync after completed exchange"
+                )
+                rename_exchange = report_module._rename_exchange
+                fsync = report_module.os.fsync
+                reset_work_root = report_module._reset_report_work_root
+                exchange_completed = False
+                interrupted = False
+                reset_identities: list[tuple[int, int]] = []
+                slot_path = (
+                    self.root
+                    / report_module._REPORT_QUARANTINE_NAME
+                    / report_module._report_work_slot_name(output.name)
+                )
+
+                def exchange_then_mark(
+                    source_parent: int,
+                    source_name: str,
+                    destination_parent: int,
+                    destination_name: str,
+                ) -> None:
+                    nonlocal exchange_completed
+                    rename_exchange(
+                        source_parent,
+                        source_name,
+                        destination_parent,
+                        destination_name,
+                    )
+                    exchange_completed = True
+
+                def interrupt_target_fsync(descriptor: int) -> None:
+                    nonlocal interrupted
+                    descriptor_path = Path(
+                        os.readlink(f"/proc/self/fd/{descriptor}")
+                    )
+                    target = slot_path if failure_point == "slot" else self.root
+                    if (
+                        exchange_completed
+                        and not interrupted
+                        and descriptor_path == target
+                    ):
+                        interrupted = True
+                        raise interruption
+                    fsync(descriptor)
+
+                def record_reset(slot: int, work: int) -> None:
+                    info = os.fstat(work)
+                    reset_identities.append((info.st_dev, info.st_ino))
+                    reset_work_root(slot, work)
+
+                with mock.patch.object(
+                    report_module,
+                    "_rename_exchange",
+                    side_effect=exchange_then_mark,
+                ), mock.patch.object(
+                    report_module.os,
+                    "fsync",
+                    side_effect=interrupt_target_fsync,
+                ), mock.patch.object(
+                    report_module,
+                    "_reset_report_work_root",
+                    side_effect=record_reset,
+                ):
+                    with self.assertRaises(KeyboardInterrupt) as raised:
+                        generate_report(
+                            self.stage / "manifest.json",
+                            smros_results=(self.smros_results,),
+                            output_directory=output,
+                        )
+
+                self.assertIs(raised.exception, interruption)
+                self.assertTrue(interrupted)
+                self.assertEqual(
+                    set(path.name for path in output.iterdir()), set(OUTPUT_NAMES)
+                )
+                json.loads((output / "summary.json").read_text(encoding="utf-8"))
+                ET.parse(output / "junit.xml")
+                work_root = slot_path / report_module._REPORT_WORK_ROOT_NAME
+                work_info = work_root.stat()
+                self.assertEqual(
+                    (work_info.st_dev, work_info.st_ino), prior_identity
+                )
+                self.assertEqual(reset_identities, [prior_identity])
+                self.assertEqual(list(work_root.iterdir()), [])
+
+                generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(self.smros_results,),
+                    output_directory=output,
+                )
+                self.assertEqual(
+                    set(path.name for path in output.iterdir()), set(OUTPUT_NAMES)
+                )
+
     def test_publication_does_not_unlink_a_post_validation_replacement(
         self,
     ) -> None:
