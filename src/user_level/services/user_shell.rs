@@ -8419,6 +8419,9 @@ fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
         Err(PosixTestError::LaunchError) => {
             ctx.serial.write_str("posixtest: launch-error\n");
         }
+        Err(PosixTestError::InfrastructureError) => {
+            ctx.serial.write_str("posixtest: infrastructure-error\n");
+        }
         Err(PosixTestError::InvalidFilter) => usage(ctx),
         Err(_) => {
             ctx.serial

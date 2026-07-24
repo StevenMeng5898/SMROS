@@ -1041,6 +1041,7 @@ fn posix_test_shell_command_is_strictly_wired_to_the_runner() {
         "posixtest: manifest checksum/schema invalid",
         "posixtest: empty selection",
         "posixtest: launch-error",
+        "posixtest: infrastructure-error",
         "posixtest: completed",
         "launch_errors=",
     ] {
@@ -1065,24 +1066,42 @@ fn posix_test_shell_command_is_strictly_wired_to_the_runner() {
     assert!(parser.contains("_ => Err(PosixTestError::InvalidFilter)"));
 
     assert!(runner.contains("LaunchError,"));
+    assert!(runner.contains("InfrastructureError,"));
     assert!(runner.contains("PosixTestError::LaunchError => \"launch-error\""));
+    assert!(runner.contains("PosixTestError::InfrastructureError => \"infrastructure-error\""));
+    assert!(runner.contains("enum PosixLaunchLoopResult"));
+    for variant in [
+        "Running(usize)",
+        "Completed(usize)",
+        "InfrastructureError(usize)",
+    ] {
+        assert!(runner.contains(variant), "missing launch result {variant}");
+    }
     let launch_start = runner
         .find("fn launch_current_test(")
         .expect("runner launch loop");
     let launch = braced_body(&runner[launch_start..]);
     assert!(
         runner[launch_start..launch_start + runner[launch_start..].find('{').unwrap()]
-            .contains("-> usize")
+            .contains("-> PosixLaunchLoopResult")
     );
     assert!(launch.contains("synchronous_launch_errors"));
     assert!(launch.contains("saturating_add(1)"));
+    assert!(launch.contains("runner-state-missing"));
+    assert_eq!(
+        launch
+            .matches("return PosixLaunchLoopResult::InfrastructureError(")
+            .count(),
+        4,
+        "every launch-loop invariant exit must stay distinct from completion"
+    );
 
     let start_start = runner
         .find("pub fn start(filter: PosixFilter)")
         .expect("runner start");
     let start = braced_body(&runner[start_start..]);
-    assert!(start.contains("let synchronous_launch_errors = launch_current_test(false)"));
-    assert!(start.contains("start_result_after_launch("));
+    assert!(start.contains("let launch_result = launch_current_test(false)"));
+    assert!(start.contains("start_result_after_launch(launch_result)"));
 
     let ok_start = handler.find("Ok(()) =>").expect("successful start branch");
     let ok = braced_body(&handler[ok_start..]);
@@ -1094,6 +1113,7 @@ fn posix_test_shell_command_is_strictly_wired_to_the_runner() {
         .find("scheduler::yield_now()")
         .expect("active runner yields");
     assert!(running_guard < yield_now);
+    assert!(handler.contains("Err(PosixTestError::InfrastructureError)"));
 }
 
 #[test]

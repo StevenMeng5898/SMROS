@@ -82,6 +82,7 @@ pub enum PosixTestError {
     AlreadyRunning,
     EmptySelection,
     LaunchError,
+    InfrastructureError,
 }
 
 impl PosixTestError {
@@ -117,18 +118,23 @@ impl PosixTestError {
             PosixTestError::AlreadyRunning => "already-running",
             PosixTestError::EmptySelection => "empty-selection",
             PosixTestError::LaunchError => "launch-error",
+            PosixTestError::InfrastructureError => "infrastructure-error",
         }
     }
 }
 
-fn start_result_after_launch(
-    synchronous_launch_errors: usize,
-    running: bool,
-) -> Result<(), PosixTestError> {
-    if synchronous_launch_errors > 0 && !running {
-        Err(PosixTestError::LaunchError)
-    } else {
-        Ok(())
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PosixLaunchLoopResult {
+    Running(usize),
+    Completed(usize),
+    InfrastructureError(usize),
+}
+
+fn start_result_after_launch(result: PosixLaunchLoopResult) -> Result<(), PosixTestError> {
+    match result {
+        PosixLaunchLoopResult::Running(_) | PosixLaunchLoopResult::Completed(0) => Ok(()),
+        PosixLaunchLoopResult::Completed(_) => Err(PosixTestError::LaunchError),
+        PosixLaunchLoopResult::InfrastructureError(_) => Err(PosixTestError::InfrastructureError),
     }
 }
 
@@ -529,22 +535,30 @@ pub fn start(filter: PosixFilter) -> Result<(), PosixTestError> {
         infrastructure_error(PosixTestError::EmptySelection.as_str());
         return Err(PosixTestError::EmptySelection);
     }
-    let synchronous_launch_errors = launch_current_test(false);
-    let running = with_runner_state(|slot| slot.is_some());
-    start_result_after_launch(synchronous_launch_errors, running)
+    let launch_result = launch_current_test(false);
+    start_result_after_launch(launch_result)
 }
 
 #[cfg(not(test))]
-fn launch_current_test(harness_launcher_active: bool) -> usize {
+fn launch_current_test(harness_launcher_active: bool) -> PosixLaunchLoopResult {
+    enum NextLaunch {
+        Running,
+        Completed,
+        MissingState,
+        Selected(PosixManifestTest, SelectedTestAction),
+    }
+
     let mut synchronous_launch_errors = 0usize;
     loop {
         let current = with_runner_state(|slot| {
-            let state = slot.as_mut()?;
+            let Some(state) = slot.as_mut() else {
+                return NextLaunch::MissingState;
+            };
             if state.current_index.is_some() {
-                return None;
+                return NextLaunch::Running;
             }
             if state.next_index >= state.selected.len() {
-                return Some(None);
+                return NextLaunch::Completed;
             }
             let index = state.next_index;
             state.next_index += 1;
@@ -553,31 +567,38 @@ fn launch_current_test(harness_launcher_active: bool) -> usize {
             state.resource_before = resource_snapshot(harness_launcher_active);
             let test = state.selected[index].clone();
             emit_test_start(state, &test);
-            Some(Some((test.clone(), selected_test_action(&test))))
+            NextLaunch::Selected(test.clone(), selected_test_action(&test))
         });
 
-        let Some(current) = current else {
-            return synchronous_launch_errors;
-        };
-        let Some((test, action)) = current else {
-            finish_suite();
-            return synchronous_launch_errors;
+        let (test, action) = match current {
+            NextLaunch::Running => {
+                return PosixLaunchLoopResult::Running(synchronous_launch_errors);
+            }
+            NextLaunch::Completed => {
+                finish_suite();
+                return PosixLaunchLoopResult::Completed(synchronous_launch_errors);
+            }
+            NextLaunch::MissingState => {
+                infrastructure_error("runner-state-missing");
+                return PosixLaunchLoopResult::InfrastructureError(synchronous_launch_errors);
+            }
+            NextLaunch::Selected(test, action) => (test, action),
         };
         if action == SelectedTestAction::EmitWithoutLaunch {
             if !record_unlaunched_test(harness_launcher_active) {
                 infrastructure_error("runner-outcome-invariant");
-                return synchronous_launch_errors;
+                return PosixLaunchLoopResult::InfrastructureError(synchronous_launch_errors);
             }
             continue;
         }
         let Some(path) = test.binary_path.as_ref().cloned() else {
             infrastructure_error("selected-test-missing-binary");
-            return synchronous_launch_errors;
+            return PosixLaunchLoopResult::InfrastructureError(synchronous_launch_errors);
         };
         let mut argv = Vec::new();
         argv.push(path.clone());
         match run_elf::spawn_observed(path.clone(), argv, Vec::new(), RunObserver::PosixTest) {
-            Ok(()) => return synchronous_launch_errors,
+            Ok(()) => return PosixLaunchLoopResult::Running(synchronous_launch_errors),
             Err(err) => {
                 synchronous_launch_errors = synchronous_launch_errors.saturating_add(1);
                 let outcome = RunOutcome {
@@ -587,7 +608,7 @@ fn launch_current_test(harness_launcher_active: bool) -> usize {
                 };
                 if !record_run_outcome(&outcome, harness_launcher_active) {
                     infrastructure_error("runner-outcome-invariant");
-                    return synchronous_launch_errors;
+                    return PosixLaunchLoopResult::InfrastructureError(synchronous_launch_errors);
                 }
             }
         }
@@ -1930,15 +1951,36 @@ mod tests {
     }
 
     #[test]
-    fn start_outcome_distinguishes_terminal_launch_errors_from_active_runs() {
-        assert_eq!(start_result_after_launch(0, false), Ok(()));
+    fn start_outcome_distinguishes_completion_launch_and_infrastructure_results() {
         assert_eq!(
-            start_result_after_launch(1, false),
+            start_result_after_launch(PosixLaunchLoopResult::Running(0)),
+            Ok(())
+        );
+        assert_eq!(
+            start_result_after_launch(PosixLaunchLoopResult::Running(1)),
+            Ok(())
+        );
+        assert_eq!(
+            start_result_after_launch(PosixLaunchLoopResult::Completed(0)),
+            Ok(())
+        );
+        assert_eq!(
+            start_result_after_launch(PosixLaunchLoopResult::Completed(1)),
             Err(PosixTestError::LaunchError)
         );
-        assert_eq!(start_result_after_launch(1, true), Ok(()));
-        assert_eq!(start_result_after_launch(0, true), Ok(()));
+        assert_eq!(
+            start_result_after_launch(PosixLaunchLoopResult::InfrastructureError(0)),
+            Err(PosixTestError::InfrastructureError)
+        );
+        assert_eq!(
+            start_result_after_launch(PosixLaunchLoopResult::InfrastructureError(1)),
+            Err(PosixTestError::InfrastructureError)
+        );
         assert_eq!(PosixTestError::LaunchError.as_str(), "launch-error");
+        assert_eq!(
+            PosixTestError::InfrastructureError.as_str(),
+            "infrastructure-error"
+        );
     }
 
     #[test]
