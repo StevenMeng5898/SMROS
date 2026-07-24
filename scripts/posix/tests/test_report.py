@@ -414,6 +414,39 @@ class AggregationTests(ReportFixture, unittest.TestCase):
             summary["metrics"]["execution_coverage"]["numerator_test_ids"],
         )
 
+    def test_not_launched_attempt_rejects_execution_or_error_evidence(self) -> None:
+        coherent = replace(
+            self._attempt(self.tests[0], "untested", exit_code=None),
+            launch_status="not-launched",
+            pts_status=None,
+        )
+        cases = (
+            ("exit code", {"exit_code": 5}),
+            ("PTS result", {"pts_status": "untested"}),
+            ("signal", {"signal": 9}),
+            ("timeout", {"timed_out": True}),
+            ("launch error", {"launch_error": "not executed"}),
+            (
+                "infrastructure error",
+                {"infrastructure_error": "not executed"},
+            ),
+        )
+
+        for index, (label, values) in enumerate(cases):
+            with self.subTest(label=label):
+                runtime = self.root / f"contradictory-not-launched-{index}.ndjson"
+                self._write_runtime(
+                    runtime,
+                    (replace(coherent, **values),),
+                    complete=True,
+                )
+                with self.assertRaisesRegex(ValueError, "untested dimensions"):
+                    generate_report(
+                        self.stage / "manifest.json",
+                        smros_results=(runtime,),
+                        output_directory=self.output,
+                    )
+
     def test_passing_definition_contributes_to_program_completion_in_every_scope(
         self,
     ) -> None:
