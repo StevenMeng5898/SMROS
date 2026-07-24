@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use crate::alloc::collections::BTreeSet;
 use crate::alloc::string::String;
 use crate::alloc::vec::Vec;
 
@@ -177,6 +178,18 @@ pub fn status_snapshot() -> PosixRunnerStatus {
     }
 }
 
+fn parse_fixed_fields<const N: usize>(line: &str) -> Option<[&str; N]> {
+    let mut fields = [""; N];
+    let mut parts = line.split('\t');
+    for field in &mut fields {
+        *field = parts.next()?;
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(fields)
+}
+
 fn parse_manifest(data: &[u8]) -> Result<PosixManifest, PosixTestError> {
     if data.len() > POSIX_MANIFEST_MAX_BYTES {
         return Err(PosixTestError::ManifestTooLarge);
@@ -196,8 +209,7 @@ fn parse_manifest(data: &[u8]) -> Result<PosixManifest, PosixTestError> {
     let mut metadata_count = 0usize;
     let mut checksum_offset = None;
     let mut tests = Vec::new();
-    let mut test_ids: Vec<String> = Vec::new();
-    let mut test_paths: Vec<String> = Vec::new();
+    let mut test_paths: BTreeSet<String> = BTreeSet::new();
     let mut previous_test_id: Option<String> = None;
     let mut saw_test = false;
     let mut line_offset = header.len() + 1;
@@ -205,62 +217,58 @@ fn parse_manifest(data: &[u8]) -> Result<PosixManifest, PosixTestError> {
     for line in lines {
         let current_offset = line_offset;
         line_offset = line_offset.saturating_add(line.len()).saturating_add(1);
-        let fields: Vec<&str> = line.split('\t').collect();
-        match fields.first().copied() {
-            Some("meta") => {
-                if saw_test || fields.len() != 3 {
-                    return Err(PosixTestError::InvalidMetadataRow);
-                }
-                let key = fields[1];
-                let value = fields[2];
-                let Some(key_index) = METADATA_KEYS.iter().position(|expected| *expected == key)
-                else {
-                    return Err(PosixTestError::UnknownMetadata);
-                };
-                if metadata[key_index].is_some() {
-                    return Err(PosixTestError::DuplicateMetadata);
-                }
-                if key_index != metadata_count {
-                    return Err(PosixTestError::MetadataOutOfOrder);
-                }
-                validate_metadata_atom(value)?;
-                if key == "manifest_sha256" {
-                    checksum_offset = Some(current_offset + "meta\tmanifest_sha256\t".len());
-                }
-                metadata[key_index] = Some(String::from(value));
-                metadata_count += 1;
+        if line == "meta" || line.starts_with("meta\t") {
+            let fields = parse_fixed_fields::<3>(line).ok_or(PosixTestError::InvalidMetadataRow)?;
+            if saw_test {
+                return Err(PosixTestError::InvalidMetadataRow);
             }
-            Some("test") => {
-                saw_test = true;
-                if fields.len() != 9 {
-                    return Err(PosixTestError::InvalidTestRow);
-                }
-                if tests.len() >= POSIX_MANIFEST_MAX_TESTS {
-                    return Err(PosixTestError::TooManyTests);
-                }
-                let test = parse_test_row(&fields)?;
-                if test_ids.iter().any(|value| value == &test.test_id) {
-                    return Err(PosixTestError::DuplicateTestId);
-                }
-                if let Some(path) = test.binary_path.as_ref() {
-                    if test_paths.iter().any(|value| value == path) {
-                        return Err(PosixTestError::DuplicateTestPath);
-                    }
-                    test_paths.push(path.clone());
-                }
-                if previous_test_id
-                    .as_ref()
-                    .map(|previous| previous.as_str() >= test.test_id.as_str())
-                    .unwrap_or(false)
-                {
-                    return Err(PosixTestError::NonCanonicalManifest);
-                }
-                previous_test_id = Some(test.test_id.clone());
-                test_ids.push(test.test_id.clone());
-                tests.push(test);
+            let key = fields[1];
+            let value = fields[2];
+            let Some(key_index) = METADATA_KEYS.iter().position(|expected| *expected == key) else {
+                return Err(PosixTestError::UnknownMetadata);
+            };
+            if metadata[key_index].is_some() {
+                return Err(PosixTestError::DuplicateMetadata);
             }
-            _ => return Err(PosixTestError::UnknownRowType),
+            if key_index != metadata_count {
+                return Err(PosixTestError::MetadataOutOfOrder);
+            }
+            validate_metadata_atom(value)?;
+            if key == "manifest_sha256" {
+                checksum_offset = Some(current_offset + "meta\tmanifest_sha256\t".len());
+            }
+            metadata[key_index] = Some(String::from(value));
+            metadata_count += 1;
+            continue;
         }
+
+        if line == "test" || line.starts_with("test\t") {
+            saw_test = true;
+            let fields = parse_fixed_fields::<9>(line).ok_or(PosixTestError::InvalidTestRow)?;
+            if tests.len() >= POSIX_MANIFEST_MAX_TESTS {
+                return Err(PosixTestError::TooManyTests);
+            }
+            let test = parse_test_row(&fields)?;
+            let previous_order = previous_test_id
+                .as_ref()
+                .map(|previous| previous.as_str().cmp(test.test_id.as_str()));
+            if previous_order == Some(core_compat::cmp::Ordering::Equal) {
+                return Err(PosixTestError::DuplicateTestId);
+            }
+            if let Some(path) = test.binary_path.as_ref() {
+                if !test_paths.insert(path.clone()) {
+                    return Err(PosixTestError::DuplicateTestPath);
+                }
+            }
+            if previous_order == Some(core_compat::cmp::Ordering::Greater) {
+                return Err(PosixTestError::NonCanonicalManifest);
+            }
+            previous_test_id = Some(test.test_id.clone());
+            tests.push(test);
+            continue;
+        }
+
+        return Err(PosixTestError::UnknownRowType);
     }
 
     if metadata_count != METADATA_KEYS.len() {
@@ -844,6 +852,57 @@ mod tests {
             "meta\tlibc\tlibc\nmeta\tcompiler\tcc\n",
         );
         assert!(parse_manifest(metadata_out_of_order.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn rejects_near_limit_tab_row_with_fixed_field_extraction() {
+        let row_len = POSIX_MANIFEST_MAX_BYTES - MANIFEST_HEADER.len() - 2;
+        let mut row = String::from("test");
+        row.push_str(&"\t".repeat(row_len - row.len()));
+        assert!(parse_fixed_fields::<9>(&row).is_none());
+
+        let mut data = String::from(MANIFEST_HEADER);
+        data.push('\n');
+        data.push_str(&row);
+        data.push('\n');
+        assert_eq!(data.len(), POSIX_MANIFEST_MAX_BYTES);
+        assert_eq!(
+            parse_manifest(data.as_bytes()),
+            Err(PosixTestError::InvalidTestRow)
+        );
+    }
+
+    #[test]
+    fn parses_maximum_long_prefix_rows_and_rejects_duplicate_path() {
+        let id_prefix = "i".repeat(190);
+        let path_prefix = "p".repeat(180);
+        let mut rows = Vec::new();
+        for index in 0..POSIX_MANIFEST_MAX_TESTS {
+            rows.push(runnable_row(
+                &format!("{id_prefix}{index:04}"),
+                &format!("bin/{path_prefix}{index:04}.test"),
+            ));
+        }
+
+        let bytes = manifest(&rows);
+        assert!(bytes.len() <= POSIX_MANIFEST_MAX_BYTES);
+        assert_eq!(
+            parse_manifest(&bytes)
+                .expect("maximum canonical manifest")
+                .tests
+                .len(),
+            POSIX_MANIFEST_MAX_TESTS
+        );
+
+        let duplicate_index = POSIX_MANIFEST_MAX_TESTS - 1;
+        rows[duplicate_index] = runnable_row(
+            &format!("{id_prefix}{duplicate_index:04}"),
+            &format!("bin/{path_prefix}{:04}.test", duplicate_index - 1),
+        );
+        assert_eq!(
+            parse_manifest(&manifest(&rows)),
+            Err(PosixTestError::DuplicateTestPath)
+        );
     }
 
     #[test]

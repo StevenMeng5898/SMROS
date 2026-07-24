@@ -271,6 +271,10 @@ def _validate_test(test: SuiteTest) -> None:
     if _DIGEST_RE.fullmatch(test.sha256) is None:
         raise ValueError(f"invalid checksum for {test.test_id}")
     runnable = test.disposition == "complete"
+    if runnable and not test.binary.startswith("bin/"):
+        raise ValueError(
+            f"runnable staged path is outside the bin/ subtree: {test.binary!r}"
+        )
     if runnable and (test.binary == "-" or test.sha256 == EMPTY_SHA256):
         raise ValueError(f"runnable test has no artifact: {test.test_id}")
     if not runnable and (test.binary != "-" or test.sha256 != EMPTY_SHA256):

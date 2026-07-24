@@ -2,6 +2,10 @@
 
 #[cfg(test)]
 mod alloc {
+    pub mod collections {
+        pub use std::collections::BTreeSet;
+    }
+
     pub mod string {
         pub use std::string::String;
     }
@@ -199,6 +203,16 @@ mod syscall_logic {
             2usize,
             usize::MAX
         ));
+    }
+
+    #[test]
+    fn absent_memory_state_matches_initialized_permanent_handle_baseline() {
+        let absent = logical_memory_handle_count(None);
+        let initialized = logical_memory_handle_count(Some(MEMORY_PERMANENT_HANDLE_COUNT));
+
+        assert_eq!(absent, MEMORY_PERMANENT_HANDLE_COUNT);
+        assert_eq!(initialized, MEMORY_PERMANENT_HANDLE_COUNT);
+        assert_eq!(initialized - absent, 0);
     }
 }
 

@@ -1016,13 +1016,14 @@ impl MemorySyscallState {
             handle: root_vmar_handle,
             vmar: root_vmar,
         });
-        let mut handles = Vec::new();
+        let mut handles = Vec::with_capacity(syscall_logic::MEMORY_PERMANENT_HANDLE_COUNT);
         handles.push(KernelHandleRecord {
             handle: root_vmar_handle,
             object_handle: root_vmar_handle,
             obj_type: ObjectType::Vmar,
             rights: crate::kernel_objects::default_rights_for_object(ObjectType::Vmar),
         });
+        debug_assert_eq!(handles.len(), syscall_logic::MEMORY_PERMANENT_HANDLE_COUNT);
 
         Self {
             linux_mappings: Vec::new(),
@@ -2283,15 +2284,20 @@ struct MemoryResourceCounts {
 
 fn memory_resource_counts() -> MemoryResourceCounts {
     unsafe {
-        MEMORY_SYSCALL_STATE
-            .as_ref()
-            .map(|state| MemoryResourceCounts {
+        match MEMORY_SYSCALL_STATE.as_ref() {
+            Some(state) => MemoryResourceCounts {
                 linux_mappings: state.linux_mappings.len(),
                 linux_fds: state.linux_fds.len(),
                 linux_shared_memory: state.linux_shared_memory.len(),
-                kernel_handles: state.handles.len(),
-            })
-            .unwrap_or_default()
+                kernel_handles: syscall_logic::logical_memory_handle_count(Some(
+                    state.handles.len(),
+                )),
+            },
+            None => MemoryResourceCounts {
+                kernel_handles: syscall_logic::logical_memory_handle_count(None),
+                ..MemoryResourceCounts::default()
+            },
+        }
     }
 }
 

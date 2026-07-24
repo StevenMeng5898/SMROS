@@ -1634,6 +1634,34 @@ class ManifestTests(unittest.TestCase):
                             else:
                                 parse_manifest(checksummed_manifest_without_validation(test))
 
+    def test_runnable_paths_stay_in_guest_bin_subtree(self) -> None:
+        base = replace(
+            suite_test(),
+            binary="bin/case.test",
+            sha256="a" * 64,
+        )
+        render_manifest(metadata(), (base,))
+        parse_manifest(checksummed_manifest_without_validation(base))
+
+        for path in ("lib/not-bin.test", "bin-other/not-bin.test", "bin"):
+            test = replace(base, binary=path)
+            for operation in ("render", "parse"):
+                with self.subTest(path=path, operation=operation):
+                    with self.assertRaisesRegex(ValueError, "bin/ subtree"):
+                        if operation == "render":
+                            render_manifest(metadata(), (test,))
+                        else:
+                            parse_manifest(checksummed_manifest_without_validation(test))
+
+        noncomplete = replace(
+            base,
+            disposition="compile-failed",
+            binary="-",
+            sha256=EMPTY_SHA256,
+        )
+        render_manifest(metadata(), (noncomplete,))
+        parse_manifest(checksummed_manifest_without_validation(noncomplete))
+
     def test_manifest_field_limits_match_guest_consumer(self) -> None:
         exact = replace(
             suite_test("i" * 256),

@@ -1,3 +1,9 @@
+pub const MEMORY_PERMANENT_HANDLE_COUNT: usize = 1;
+
+pub fn logical_memory_handle_count(observed: Option<usize>) -> usize {
+    observed.unwrap_or(MEMORY_PERMANENT_HANDLE_COUNT)
+}
+
 macro_rules! smros_zircon_syscall_from_raw_body {
     ($syscall_num:expr, $threshold:expr) => {{
         if smros_is_zircon_syscall_number_body!($syscall_num, $threshold) {
@@ -423,7 +429,6 @@ macro_rules! smros_linux_syscall_interface_known_body {
 
 macro_rules! smros_zircon_syscall_interface_known_body {
     ($syscall_num:expr) => {{
-        $syscall_num <= 154
-            || (183 <= $syscall_num && $syscall_num <= 211)
+        $syscall_num <= 154 || (183 <= $syscall_num && $syscall_num <= 211)
     }};
 }

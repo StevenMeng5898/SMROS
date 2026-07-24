@@ -525,7 +525,14 @@ fn posix_guest_manifest_parser_is_exported_bounded_and_canonical() {
     assert!(parser.contains("fxfs::ensure_host_share()"));
     assert!(parser.contains("fxfs::read_file(POSIX_MANIFEST_PATH"));
     assert!(parser.contains("str::from_utf8"));
-    assert!(parser.contains("fields.len() != 9"));
+    assert!(parser.contains("parse_fixed_fields::<9>(line)"));
+    assert!(parser.contains("fn parse_fixed_fields<const N: usize>"));
+    assert!(!parser.contains("collect::<Vec<&str>>()"));
+    assert!(parser.contains("BTreeSet"));
+    assert!(!parser.contains("test_ids: Vec"));
+    assert!(!parser.contains("test_ids.iter()"));
+    assert!(!parser.contains("test_paths: Vec"));
+    assert!(parser.contains("previous.as_str().cmp(test.test_id.as_str())"));
     assert!(parser.contains("manifest_sha256"));
     assert!(parser.contains("64 ASCII zeroes"));
     assert!(parser.contains("sha256("));
@@ -581,6 +588,10 @@ fn posix_resource_snapshot_uses_authoritative_state_without_resetting_it() {
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/kernel_objects/compat.rs"
     ));
+    let syscall_logic = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/syscall_logic_shared.rs"
+    ));
     let start = syscall
         .find("pub fn posix_resource_snapshot()")
         .expect("POSIX resource snapshot must exist");
@@ -589,6 +600,15 @@ fn posix_resource_snapshot_uses_authoritative_state_without_resetting_it() {
         .find("fn memory_resource_counts()")
         .expect("non-initializing memory resource helper must exist");
     let memory_body = braced_body(&syscall[memory_start..]);
+    let state_new_start = syscall
+        .find("impl MemorySyscallState")
+        .and_then(|start| {
+            syscall[start..]
+                .find("fn new() -> Self")
+                .map(|inner| start + inner)
+        })
+        .expect("memory syscall state initializer must exist");
+    let state_new_body = braced_body(&syscall[state_new_start..]);
 
     for field in [
         "processes",
@@ -616,6 +636,11 @@ fn posix_resource_snapshot_uses_authoritative_state_without_resetting_it() {
     assert!(memory_body.contains("state.linux_fds.len()"));
     assert!(memory_body.contains("state.linux_shared_memory.len()"));
     assert!(memory_body.contains("state.handles.len()"));
+    assert!(memory_body.contains("logical_memory_handle_count"));
+    assert!(memory_body.contains("logical_memory_handle_count(None)"));
+    assert!(state_new_body.contains("MEMORY_PERMANENT_HANDLE_COUNT"));
+    assert!(syscall_logic.contains("pub const MEMORY_PERMANENT_HANDLE_COUNT: usize = 1;"));
+    assert!(syscall_logic.contains("pub fn logical_memory_handle_count"));
     assert!(body.contains("compat::posix_resource_counts()"));
     assert!(body.contains("memory_resource_counts()"));
     assert!(!body.contains("memory_state()"));
