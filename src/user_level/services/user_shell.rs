@@ -8396,8 +8396,18 @@ fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
 
     match posix_test::start(filter) {
         Ok(()) => {
-            ctx.serial.write_str("posixtest: started\n");
-            scheduler::yield_now();
+            let status = posix_test::status_snapshot();
+            if status.status_counts.launch_errors > 0 {
+                ctx.serial.write_str("posixtest: launch-error count=");
+                print_usize(&mut ctx.serial, status.status_counts.launch_errors);
+                ctx.serial.write_str("\n");
+            }
+            if status.running {
+                ctx.serial.write_str("posixtest: started\n");
+                scheduler::yield_now();
+            } else {
+                ctx.serial.write_str("posixtest: completed\n");
+            }
         }
         Err(PosixTestError::AlreadyRunning) => ctx.serial.write_str("posixtest: busy\n"),
         Err(PosixTestError::FxfsPrepare | PosixTestError::FxfsRead) => {
@@ -8405,6 +8415,9 @@ fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
         }
         Err(PosixTestError::EmptySelection) => {
             ctx.serial.write_str("posixtest: empty selection\n");
+        }
+        Err(PosixTestError::LaunchError) => {
+            ctx.serial.write_str("posixtest: launch-error\n");
         }
         Err(PosixTestError::InvalidFilter) => usage(ctx),
         Err(_) => {

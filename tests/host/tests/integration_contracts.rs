@@ -1026,7 +1026,6 @@ fn posix_test_shell_command_is_strictly_wired_to_the_runner() {
     assert!(handler.contains("posix_test::status_snapshot()"));
     assert!(handler.contains("posix_test::parse_filter(args)"));
     assert!(handler.contains("posix_test::start(filter)"));
-    assert!(handler.contains("scheduler::yield_now()"));
     assert_eq!(
         handler
             .matches(
@@ -1041,6 +1040,8 @@ fn posix_test_shell_command_is_strictly_wired_to_the_runner() {
         "posixtest: manifest unavailable",
         "posixtest: manifest checksum/schema invalid",
         "posixtest: empty selection",
+        "posixtest: launch-error",
+        "posixtest: completed",
         "launch_errors=",
     ] {
         assert!(handler.contains(output), "missing distinct output {output}");
@@ -1062,6 +1063,37 @@ fn posix_test_shell_command_is_strictly_wired_to_the_runner() {
         );
     }
     assert!(parser.contains("_ => Err(PosixTestError::InvalidFilter)"));
+
+    assert!(runner.contains("LaunchError,"));
+    assert!(runner.contains("PosixTestError::LaunchError => \"launch-error\""));
+    let launch_start = runner
+        .find("fn launch_current_test(")
+        .expect("runner launch loop");
+    let launch = braced_body(&runner[launch_start..]);
+    assert!(
+        runner[launch_start..launch_start + runner[launch_start..].find('{').unwrap()]
+            .contains("-> usize")
+    );
+    assert!(launch.contains("synchronous_launch_errors"));
+    assert!(launch.contains("saturating_add(1)"));
+
+    let start_start = runner
+        .find("pub fn start(filter: PosixFilter)")
+        .expect("runner start");
+    let start = braced_body(&runner[start_start..]);
+    assert!(start.contains("let synchronous_launch_errors = launch_current_test(false)"));
+    assert!(start.contains("start_result_after_launch("));
+
+    let ok_start = handler.find("Ok(()) =>").expect("successful start branch");
+    let ok = braced_body(&handler[ok_start..]);
+    assert!(ok.contains("let status = posix_test::status_snapshot()"));
+    assert!(ok.contains("status.status_counts.launch_errors > 0"));
+    assert!(ok.contains("posixtest: launch-error count="));
+    let running_guard = ok.find("if status.running").expect("active runner guard");
+    let yield_now = ok
+        .find("scheduler::yield_now()")
+        .expect("active runner yields");
+    assert!(running_guard < yield_now);
 }
 
 #[test]

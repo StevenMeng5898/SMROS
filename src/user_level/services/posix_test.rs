@@ -81,6 +81,7 @@ pub enum PosixTestError {
     InvalidFilter,
     AlreadyRunning,
     EmptySelection,
+    LaunchError,
 }
 
 impl PosixTestError {
@@ -115,7 +116,19 @@ impl PosixTestError {
             PosixTestError::InvalidFilter => "invalid-filter",
             PosixTestError::AlreadyRunning => "already-running",
             PosixTestError::EmptySelection => "empty-selection",
+            PosixTestError::LaunchError => "launch-error",
         }
+    }
+}
+
+fn start_result_after_launch(
+    synchronous_launch_errors: usize,
+    running: bool,
+) -> Result<(), PosixTestError> {
+    if synchronous_launch_errors > 0 && !running {
+        Err(PosixTestError::LaunchError)
+    } else {
+        Ok(())
     }
 }
 
@@ -516,12 +529,14 @@ pub fn start(filter: PosixFilter) -> Result<(), PosixTestError> {
         infrastructure_error(PosixTestError::EmptySelection.as_str());
         return Err(PosixTestError::EmptySelection);
     }
-    launch_current_test(false);
-    Ok(())
+    let synchronous_launch_errors = launch_current_test(false);
+    let running = with_runner_state(|slot| slot.is_some());
+    start_result_after_launch(synchronous_launch_errors, running)
 }
 
 #[cfg(not(test))]
-fn launch_current_test(harness_launcher_active: bool) {
+fn launch_current_test(harness_launcher_active: bool) -> usize {
+    let mut synchronous_launch_errors = 0usize;
     loop {
         let current = with_runner_state(|slot| {
             let state = slot.as_mut()?;
@@ -542,28 +557,29 @@ fn launch_current_test(harness_launcher_active: bool) {
         });
 
         let Some(current) = current else {
-            return;
+            return synchronous_launch_errors;
         };
         let Some((test, action)) = current else {
             finish_suite();
-            return;
+            return synchronous_launch_errors;
         };
         if action == SelectedTestAction::EmitWithoutLaunch {
             if !record_unlaunched_test(harness_launcher_active) {
                 infrastructure_error("runner-outcome-invariant");
-                return;
+                return synchronous_launch_errors;
             }
             continue;
         }
         let Some(path) = test.binary_path.as_ref().cloned() else {
             infrastructure_error("selected-test-missing-binary");
-            return;
+            return synchronous_launch_errors;
         };
         let mut argv = Vec::new();
         argv.push(path.clone());
         match run_elf::spawn_observed(path.clone(), argv, Vec::new(), RunObserver::PosixTest) {
-            Ok(()) => return,
+            Ok(()) => return synchronous_launch_errors,
             Err(err) => {
+                synchronous_launch_errors = synchronous_launch_errors.saturating_add(1);
                 let outcome = RunOutcome {
                     path,
                     termination: RunTermination::LaunchError(err),
@@ -571,7 +587,7 @@ fn launch_current_test(harness_launcher_active: bool) {
                 };
                 if !record_run_outcome(&outcome, harness_launcher_active) {
                     infrastructure_error("runner-outcome-invariant");
-                    return;
+                    return synchronous_launch_errors;
                 }
             }
         }
@@ -1911,6 +1927,18 @@ mod tests {
         assert!(parse_filter(&["group", "../unsafe"]).is_err());
         let oversized = "x".repeat(POSIX_FILTER_MAX_BYTES + 1);
         assert!(parse_filter(&["test", &oversized]).is_err());
+    }
+
+    #[test]
+    fn start_outcome_distinguishes_terminal_launch_errors_from_active_runs() {
+        assert_eq!(start_result_after_launch(0, false), Ok(()));
+        assert_eq!(
+            start_result_after_launch(1, false),
+            Err(PosixTestError::LaunchError)
+        );
+        assert_eq!(start_result_after_launch(1, true), Ok(()));
+        assert_eq!(start_result_after_launch(0, true), Ok(()));
+        assert_eq!(PosixTestError::LaunchError.as_str(), "launch-error");
     }
 
     #[test]
