@@ -962,3 +962,155 @@ mod hypervisor_logic {
         );
     }
 }
+
+mod posix_test_logic {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/posix_test_logic_shared.rs"
+    ));
+
+    #[test]
+    fn manifest_atoms_reject_unsafe_path_syntax() {
+        assert!(manifest_atom_valid("conformance/interfaces/mmap/1-1"));
+        assert!(manifest_atom_valid("pthread_mutex/2-1"));
+
+        for atom in [
+            "",
+            "/mmap",
+            "mmap/",
+            "../mmap",
+            "mmap/../1-1",
+            "./mmap",
+            "mmap//1-1",
+            "mmap\\1-1",
+            "mmap\t1-1",
+            "mmap\n1-1",
+            "mmap\u{001f}1-1",
+            "mmap\u{007f}1-1",
+        ] {
+            assert!(!manifest_atom_valid(atom), "unexpectedly accepted {atom:?}");
+        }
+    }
+
+    #[test]
+    fn staged_binaries_stay_below_the_approved_boundary() {
+        assert!(staged_binary_path_valid(
+            "/shared/posixtest/bin/conformance/interfaces/mmap/1-1"
+        ));
+        assert!(!staged_binary_path_valid("/shared/posixtest/bin"));
+        assert!(!staged_binary_path_valid("/shared/posixtest/bin/../mmap"));
+        assert!(!staged_binary_path_valid("/shared/posixtest/bin/mmap//1-1"));
+        assert!(!staged_binary_path_valid(
+            "/shared/posixtest/bin-other/mmap"
+        ));
+        assert!(!staged_binary_path_valid("/shared/lib/mmap"));
+    }
+
+    #[test]
+    fn filters_match_only_their_exact_manifest_field() {
+        let test_id = "conformance/interfaces/mmap/1-1";
+        let group = "memory";
+        let api = "mmap";
+
+        assert!(filter_matches(
+            PosixFilterKind::All,
+            "",
+            test_id,
+            group,
+            api,
+            true,
+            true
+        ));
+        assert!(!filter_matches(
+            PosixFilterKind::All,
+            "",
+            test_id,
+            group,
+            api,
+            false,
+            true
+        ));
+        assert!(!filter_matches(
+            PosixFilterKind::All,
+            "",
+            test_id,
+            group,
+            api,
+            true,
+            false
+        ));
+
+        assert!(filter_matches(
+            PosixFilterKind::Test,
+            test_id,
+            test_id,
+            group,
+            api,
+            false,
+            false
+        ));
+        assert!(!filter_matches(
+            PosixFilterKind::Test,
+            "conformance/interfaces/mmap/1-2",
+            test_id,
+            group,
+            api,
+            true,
+            true
+        ));
+        assert!(filter_matches(
+            PosixFilterKind::Group,
+            group,
+            test_id,
+            group,
+            api,
+            true,
+            true
+        ));
+        assert!(!filter_matches(
+            PosixFilterKind::Group,
+            "mmap",
+            test_id,
+            group,
+            api,
+            true,
+            true
+        ));
+        assert!(filter_matches(
+            PosixFilterKind::Api,
+            api,
+            test_id,
+            group,
+            api,
+            true,
+            true
+        ));
+        assert!(!filter_matches(
+            PosixFilterKind::Api,
+            "memory",
+            test_id,
+            group,
+            api,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn pts_exits_map_to_the_guest_status_categories() {
+        assert_eq!(pts_status(0), POSIX_STATUS_PASS);
+        assert_eq!(pts_status(1), POSIX_STATUS_FAIL);
+        assert_eq!(pts_status(2), POSIX_STATUS_UNRESOLVED);
+        assert_eq!(pts_status(4), POSIX_STATUS_UNSUPPORTED);
+        assert_eq!(pts_status(5), POSIX_STATUS_UNTESTED);
+        assert_eq!(pts_status(9), POSIX_STATUS_INTERRUPTED);
+    }
+
+    #[test]
+    fn resource_deltas_are_signed_across_the_usize_range() {
+        assert_eq!(resource_delta(4, 7), 3);
+        assert_eq!(resource_delta(7, 4), -3);
+        assert_eq!(resource_delta(0, usize::MAX), usize::MAX as i128);
+        assert_eq!(resource_delta(usize::MAX, 0), -(usize::MAX as i128));
+    }
+}
