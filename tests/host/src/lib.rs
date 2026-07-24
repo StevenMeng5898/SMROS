@@ -2185,6 +2185,13 @@ mod posix_test_logic_shared {
         assert_eq!(resource_delta(0, usize::MAX), usize::MAX as i128);
         assert_eq!(resource_delta(usize::MAX, 0), -(usize::MAX as i128));
     }
+
+    #[test]
+    fn harness_launcher_normalization_is_exact_and_saturating() {
+        assert_eq!(normalize_scheduler_threads(7, false), 7);
+        assert_eq!(normalize_scheduler_threads(7, true), 6);
+        assert_eq!(normalize_scheduler_threads(0, true), 0);
+    }
 }
 
 #[cfg(test)]

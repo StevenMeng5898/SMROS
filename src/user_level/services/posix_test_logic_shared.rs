@@ -21,9 +21,7 @@ macro_rules! smros_posix_manifest_atom_valid_body {
         !atom.is_empty()
             && !atom.contains('\\')
             && !atom.contains("//")
-            && atom
-                .bytes()
-                .all(|byte| (0x20..=0x7e).contains(&byte))
+            && atom.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
             && atom
                 .split('/')
                 .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
@@ -104,4 +102,15 @@ pub fn pts_status(exit_code: i32) -> u8 {
 
 pub fn resource_delta(before: usize, after: usize) -> i128 {
     smros_posix_resource_delta_body!(before, after)
+}
+
+pub fn normalize_scheduler_threads(
+    scheduler_threads: usize,
+    harness_launcher_active: bool,
+) -> usize {
+    if harness_launcher_active {
+        scheduler_threads.saturating_sub(1)
+    } else {
+        scheduler_threads
+    }
 }

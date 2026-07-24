@@ -388,6 +388,32 @@ class AggregationTests(ReportFixture, unittest.TestCase):
             "excluded-upstream-stub",
         )
 
+    def test_not_launched_untested_attempt_is_accepted_but_not_executed(self) -> None:
+        attempt = replace(
+            self._attempt(self.tests[0], "untested", exit_code=None),
+            launch_status="not-launched",
+            pts_status=None,
+        )
+        self.assertFalse(report_module._attempt_executed(attempt))
+        runtime = self.root / "not-launched.ndjson"
+        self._write_runtime(runtime, (attempt,), complete=True)
+
+        summary = generate_report(
+            self.stage / "manifest.json",
+            smros_results=(runtime,),
+            output_directory=self.output,
+        )
+
+        test = next(
+            item for item in summary["tests"] if item["test_id"] == attempt.test_id
+        )
+        self.assertEqual(test["status"], "untested")
+        self.assertEqual(test["smros_attempts"][0]["launch_status"], "not-launched")
+        self.assertNotIn(
+            attempt.test_id,
+            summary["metrics"]["execution_coverage"]["numerator_test_ids"],
+        )
+
     def test_passing_definition_contributes_to_program_completion_in_every_scope(
         self,
     ) -> None:

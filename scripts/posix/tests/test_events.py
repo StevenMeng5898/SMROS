@@ -480,6 +480,51 @@ class SerialEventTests(unittest.TestCase):
                 self._one_attempt_log(launch_status="interrupted")
             )
 
+    def test_parses_coherent_not_launched_untested_attempt(self) -> None:
+        parsed = parse_serial_log(
+            self._one_attempt_log(
+                status="untested",
+                pts_status=None,
+                launch_status="not-launched",
+                exit_code=None,
+                signal=None,
+                timed_out=False,
+            )
+        )
+
+        attempt = parsed.attempts[0]
+        self.assertEqual(attempt.status, "untested")
+        self.assertEqual(attempt.launch_status, "not-launched")
+        self.assertIsNone(attempt.pts_status)
+        self.assertIsNone(attempt.exit_code)
+        self.assertIsNone(attempt.signal)
+        self.assertFalse(attempt.timed_out)
+        self.assertIsNone(attempt.launch_error)
+        self.assertIsNone(attempt.infrastructure_error)
+
+    def test_rejects_contradictory_not_launched_dimensions(self) -> None:
+        cases = {
+            "exit code": {"exit_code": 5},
+            "PTS result": {"pts_status": "untested"},
+            "signal": {"signal": 9},
+            "timeout": {"timed_out": True},
+            "launch error": {"launch_error": "not executed"},
+            "infrastructure error": {"infrastructure_error": "not executed"},
+        }
+        for label, values in cases.items():
+            with self.subTest(label=label):
+                dimensions: dict[str, object] = {
+                    "status": "untested",
+                    "pts_status": None,
+                    "launch_status": "not-launched",
+                    "exit_code": None,
+                    "signal": None,
+                    "timed_out": False,
+                }
+                dimensions.update(values)
+                with self.assertRaisesRegex(ValueError, "untested dimensions"):
+                    parse_serial_log(self._one_attempt_log(**dimensions))
+
     def test_rejects_contradictory_raw_status_dimensions(self) -> None:
         cases = {
             "fail": {

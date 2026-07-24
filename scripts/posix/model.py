@@ -44,11 +44,21 @@ def validate_raw_attempt_semantics(
     """Reject cross-field contradictions in one observed runtime attempt."""
     if status not in RAW_RUNTIME_STATUSES:
         raise ValueError(f"{label} raw runtime status is invalid: {status}")
-    if status == "interrupted":
+    if launch_status == "not-launched":
+        coherent = (
+            status == "untested"
+            and pts_status is None
+            and exit_code is None
+            and signal is None
+            and timed_out is False
+            and launch_error is None
+            and infrastructure_error is None
+        )
+    elif status == "interrupted":
         if not infrastructure_error:
             raise ValueError(f"{label} interrupted dimensions are invalid")
         return
-    if status == "launch-error":
+    elif status == "launch-error":
         coherent = (
             launch_status == "launch-error"
             and pts_status is None

@@ -447,7 +447,12 @@ def _validate_attempt(
         raise ValueError(f"runtime attempt build status is invalid at line {line_number}")
     if value["link_status"] not in {"passed", "failed", "not-linked", "not-built"}:
         raise ValueError(f"runtime attempt link status is invalid at line {line_number}")
-    if value["launch_status"] not in {"launched", "launch-error", "interrupted"}:
+    if value["launch_status"] not in {
+        "launched",
+        "launch-error",
+        "interrupted",
+        "not-launched",
+    }:
         raise ValueError(f"runtime attempt launch status is invalid at line {line_number}")
     pts_status = value["pts_status"]
     if pts_status is not None and pts_status not in OVERALL_STATUSES[:5]:

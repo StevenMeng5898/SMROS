@@ -197,7 +197,12 @@ def _attempt_from_end(
     ):
         raise ValueError("event PTS status is invalid")
     launch_status = value.get("launch_status", "launched")
-    if launch_status not in {"launched", "launch-error", "interrupted"}:
+    if launch_status not in {
+        "launched",
+        "launch-error",
+        "interrupted",
+        "not-launched",
+    }:
         raise ValueError("event launch status is invalid")
     exit_code = value.get("exit_code")
     signal = value.get("signal")

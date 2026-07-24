@@ -856,7 +856,7 @@ fn posix_guest_runner_is_serialized_bounded_and_fail_closed() {
     assert!(!action_body.contains("spawn_observed"));
 
     let launch_start = runner
-        .find("fn launch_current_test(")
+        .find("fn launch_current_test(harness_launcher_active: bool)")
         .expect("runner launch helper");
     let launch_body = braced_body(&runner[launch_start..]);
     assert!(launch_body.contains("run_elf::spawn_observed("));
@@ -867,10 +867,50 @@ fn posix_guest_runner_is_serialized_bounded_and_fail_closed() {
     assert!(!launch_body.contains("on_run_outcome("));
     assert!(launch_body.contains("binary_path.as_ref()"));
     assert!(launch_body.contains("infrastructure_error"));
+    assert!(launch_body.contains("resource_snapshot(harness_launcher_active)"));
+    assert!(launch_body.contains("record_unlaunched_test(harness_launcher_active)"));
+    assert!(launch_body.contains("record_run_outcome(&outcome, harness_launcher_active)"));
+    assert!(!launch_body.contains("RunTermination::Exit(5)"));
     assert!(
         !launch_body.contains("status: \"pass\"") && !launch_body.contains("\"pass\""),
         "a missing binary or launch failure must never become a pass"
     );
+
+    assert!(runner.contains("launch_current_test(false);"));
+    let callback_start = runner
+        .find("pub fn on_run_outcome(outcome: RunOutcome)")
+        .expect("POSIX completion callback");
+    let callback_body = braced_body(&runner[callback_start..]);
+    let record = callback_body
+        .find("record_run_outcome(&outcome, true)")
+        .expect("callback normalizes the active harness launcher");
+    let next = callback_body
+        .find("launch_current_test(true)")
+        .expect("callback carries the active launcher into the next test");
+    assert!(record < next);
+
+    for recorder in ["fn record_unlaunched_test(", "fn record_run_outcome("] {
+        let start = runner.find(recorder).expect("result recorder");
+        let body = braced_body(&runner[start..]);
+        assert!(body.contains("resource_snapshot(harness_launcher_active)"));
+    }
+    assert!(runner.contains("\"pts_status\":null,\"launch_status\":\"not-launched\""));
+    let unlaunched_start = runner
+        .find("fn emit_unlaunched_test_end(")
+        .expect("unlaunched event emitter");
+    let unlaunched_body = braced_body(&runner[unlaunched_start..]);
+    for execution_or_error_field in [
+        "exit_code",
+        "signal",
+        "timed_out",
+        "launch_error",
+        "infrastructure_error",
+        "RunOutcome",
+        "RunTermination",
+    ] {
+        assert!(!unlaunched_body.contains(execution_or_error_field));
+    }
+    assert!(shared.contains("pub fn normalize_scheduler_threads("));
 }
 
 #[test]

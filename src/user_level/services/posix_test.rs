@@ -490,7 +490,7 @@ pub fn start(filter: PosixFilter) -> Result<(), PosixTestError> {
         next_index: 0,
         current_index: None,
         current_started_tick: 0,
-        resource_before: crate::syscall::posix_resource_snapshot(),
+        resource_before: resource_snapshot(false),
         completed: 0,
         status_counts: PosixStatusCounts::default(),
     };
@@ -516,12 +516,12 @@ pub fn start(filter: PosixFilter) -> Result<(), PosixTestError> {
         infrastructure_error(PosixTestError::EmptySelection.as_str());
         return Err(PosixTestError::EmptySelection);
     }
-    launch_current_test();
+    launch_current_test(false);
     Ok(())
 }
 
 #[cfg(not(test))]
-fn launch_current_test() {
+fn launch_current_test(harness_launcher_active: bool) {
     loop {
         let current = with_runner_state(|slot| {
             let state = slot.as_mut()?;
@@ -535,7 +535,7 @@ fn launch_current_test() {
             state.next_index += 1;
             state.current_index = Some(index);
             state.current_started_tick = crate::kernel_lowlevel::timer::get_tick_count();
-            state.resource_before = crate::syscall::posix_resource_snapshot();
+            state.resource_before = resource_snapshot(harness_launcher_active);
             let test = state.selected[index].clone();
             emit_test_start(state, &test);
             Some(Some((test.clone(), selected_test_action(&test))))
@@ -549,12 +549,7 @@ fn launch_current_test() {
             return;
         };
         if action == SelectedTestAction::EmitWithoutLaunch {
-            let outcome = RunOutcome {
-                path: test.test_id,
-                termination: RunTermination::Exit(5),
-                elapsed_ticks: 0,
-            };
-            if !record_run_outcome(&outcome) {
+            if !record_unlaunched_test(harness_launcher_active) {
                 infrastructure_error("runner-outcome-invariant");
                 return;
             }
@@ -574,7 +569,7 @@ fn launch_current_test() {
                     termination: RunTermination::LaunchError(err),
                     elapsed_ticks: 0,
                 };
-                if !record_run_outcome(&outcome) {
+                if !record_run_outcome(&outcome, harness_launcher_active) {
                     infrastructure_error("runner-outcome-invariant");
                     return;
                 }
@@ -589,16 +584,38 @@ pub fn on_run_outcome(outcome: RunOutcome) {
         infrastructure_error(error.as_str());
         return;
     }
-    if !record_run_outcome(&outcome) {
+    if !record_run_outcome(&outcome, true) {
         infrastructure_error("runner-outcome-invariant");
         return;
     }
-    launch_current_test();
+    launch_current_test(true);
 }
 
 #[cfg(not(test))]
-fn record_run_outcome(outcome: &RunOutcome) -> bool {
-    let after = crate::syscall::posix_resource_snapshot();
+fn record_unlaunched_test(harness_launcher_active: bool) -> bool {
+    let after = resource_snapshot(harness_launcher_active);
+    with_runner_state(|slot| {
+        let Some(state) = slot.as_mut() else {
+            return false;
+        };
+        let Some(index) = state.current_index else {
+            return false;
+        };
+        let test = state.selected[index].clone();
+        if selected_test_action(&test) != SelectedTestAction::EmitWithoutLaunch {
+            return false;
+        }
+        emit_unlaunched_test_end(state, &test, after);
+        state.status_counts.record(PosixRuntimeStatus::Untested);
+        state.completed = state.completed.saturating_add(1);
+        state.current_index = None;
+        true
+    })
+}
+
+#[cfg(not(test))]
+fn record_run_outcome(outcome: &RunOutcome, harness_launcher_active: bool) -> bool {
+    let after = resource_snapshot(harness_launcher_active);
     with_runner_state(|slot| {
         let Some(state) = slot.as_mut() else {
             return false;
@@ -623,6 +640,16 @@ fn record_run_outcome(outcome: &RunOutcome) -> bool {
         state.current_index = None;
         true
     })
+}
+
+#[cfg(not(test))]
+fn resource_snapshot(harness_launcher_active: bool) -> PosixResourceSnapshot {
+    let mut snapshot = crate::syscall::posix_resource_snapshot();
+    snapshot.scheduler_threads = posix_test_logic_shared::normalize_scheduler_threads(
+        snapshot.scheduler_threads,
+        harness_launcher_active,
+    );
+    snapshot
 }
 
 #[cfg(not(test))]
@@ -719,6 +746,23 @@ fn emit_test_end(
     serial.write_str(",\"timed_out\":false,\"elapsed_ticks\":");
     write_u64(&mut serial, outcome.elapsed_ticks);
     serial.write_str(",\"resource_deltas\":{");
+    write_resource_deltas(&mut serial, state.resource_before, after);
+    serial.write_str("}}");
+    serial.write_byte(b'\n');
+}
+
+#[cfg(not(test))]
+fn emit_unlaunched_test_end(
+    state: &mut RunnerState,
+    test: &PosixManifestTest,
+    after: PosixResourceSnapshot,
+) {
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+    serial.init();
+    begin_event(&mut serial, state, "test_end");
+    write_test_identity(&mut serial, test);
+    serial.write_str(r#","status":"untested","pts_status":null,"launch_status":"not-launched""#);
+    serial.write_str(",\"elapsed_ticks\":0,\"resource_deltas\":{");
     write_resource_deltas(&mut serial, state.resource_before, after);
     serial.write_str("}}");
     serial.write_byte(b'\n');
