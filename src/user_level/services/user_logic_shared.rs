@@ -389,3 +389,85 @@ macro_rules! smros_user_elf_segment_mapping_range_body {
         }
     }};
 }
+
+pub(crate) fn run_elf_environment_entry_valid(entry: &str, max_entry_bytes: usize) -> bool {
+    if entry.is_empty() || entry.len() > max_entry_bytes || entry.as_bytes().contains(&0) {
+        return false;
+    }
+    let Some(separator) = entry.as_bytes().iter().position(|byte| *byte == b'=') else {
+        return false;
+    };
+    let key = &entry.as_bytes()[..separator];
+    let Some(first) = key.first() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() && *first != b'_' {
+        return false;
+    }
+    key[1..]
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+}
+
+pub(crate) fn run_elf_environment_totals_valid(
+    entry_count: usize,
+    total_bytes: usize,
+    max_entries: usize,
+    max_total_bytes: usize,
+) -> bool {
+    entry_count <= max_entries && total_bytes <= max_total_bytes
+}
+
+pub(crate) fn run_elf_environment_entry_has_key(entry: &str, key: &str) -> bool {
+    entry
+        .as_bytes()
+        .iter()
+        .position(|byte| *byte == b'=')
+        .map(|separator| &entry.as_bytes()[..separator] == key.as_bytes())
+        .unwrap_or(false)
+}
+
+pub(crate) fn run_elf_environment_keys_equal(left: &str, right: &str) -> bool {
+    let Some(left_separator) = left.as_bytes().iter().position(|byte| *byte == b'=') else {
+        return false;
+    };
+    let Some(right_separator) = right.as_bytes().iter().position(|byte| *byte == b'=') else {
+        return false;
+    };
+    left.as_bytes()[..left_separator] == right.as_bytes()[..right_separator]
+}
+
+pub(crate) fn run_elf_exit_succeeded(exit_code: i32) -> bool {
+    exit_code == 0
+}
+
+pub(crate) fn run_elf_elapsed_ticks(start_tick: u64, end_tick: u64) -> u64 {
+    end_tick.saturating_sub(start_tick)
+}
+
+pub(crate) fn run_elf_library_name_valid(name_or_path: &str) -> bool {
+    if name_or_path.is_empty() || name_or_path.as_bytes().contains(&0) {
+        return false;
+    }
+
+    let absolute = name_or_path.starts_with('/');
+    let mut components = name_or_path.split('/');
+    if absolute && components.next() != Some("") {
+        return false;
+    }
+
+    let mut saw_component = false;
+    for component in components {
+        if component.is_empty() || component == "." || component == ".." {
+            return false;
+        }
+        if !component
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-+".contains(&byte))
+        {
+            return false;
+        }
+        saw_component = true;
+    }
+    saw_component
+}

@@ -9,12 +9,14 @@ use alloc::alloc::{alloc, Layout};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use crate::kernel_lowlevel::{memory::PAGE_SIZE, timer};
 use crate::kernel_objects::scheduler;
 use crate::syscall;
 use crate::user_level::{elf, fxfs, user_logic, user_process};
+
+use super::posix_test;
 
 const RUN_ELF_MAIN_BASE: usize = 0x5000_0000;
 const RUN_ELF_INTERP_BASE: usize = 0x5100_0000;
@@ -22,6 +24,12 @@ const RUN_ELF_STACK_SIZE: usize = 0x20_000;
 const RUN_ELF_MAP_PROT: usize = 0x1 | 0x2 | 0x4; // PROT_READ | PROT_WRITE | PROT_EXEC
 const RUN_ELF_MAP_FIXED_ANON_PRIVATE: usize = (1 << 4) | (1 << 5) | (1 << 1);
 const RUN_ELF_TIMER_HZ: u64 = 100;
+const RUN_ELF_MAX_ENV_ENTRIES: usize = 64;
+const RUN_ELF_MAX_ENV_ENTRY_BYTES: usize = 4 * 1024;
+const RUN_ELF_MAX_ENV_TOTAL_BYTES: usize = 32 * 1024;
+const RUN_ELF_LD_LIBRARY_PATH_KEY: &str = "LD_LIBRARY_PATH";
+const RUN_ELF_DEFAULT_LD_LIBRARY_PATH: &str =
+    "LD_LIBRARY_PATH=/shared/posixtest/lib:/shared/lib:/lib";
 
 const AT_NULL: u64 = 0;
 const AT_PHDR: u64 = 3;
@@ -46,6 +54,7 @@ const AT_EXECFN: u64 = 31;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunElfError {
     Busy,
+    InvalidEnvironment,
     Storage,
     BadElf,
     Unsupported,
@@ -59,6 +68,7 @@ impl RunElfError {
     pub fn as_str(self) -> &'static str {
         match self {
             RunElfError::Busy => "busy",
+            RunElfError::InvalidEnvironment => "invalid-environment",
             RunElfError::Storage => "storage",
             RunElfError::BadElf => "bad-elf",
             RunElfError::Unsupported => "unsupported-elf",
@@ -70,9 +80,31 @@ impl RunElfError {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunObserver {
+    Shell,
+    PosixTest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunTermination {
+    Exit(i32),
+    LaunchError(RunElfError),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunOutcome {
+    pub path: String,
+    pub termination: RunTermination,
+    pub elapsed_ticks: u64,
+}
+
 struct RunRequest {
     path: String,
     argv: Vec<String>,
+    env: Vec<String>,
+    observer: RunObserver,
+    start_tick: u64,
 }
 
 struct RunSlot<T>(UnsafeCell<T>);
@@ -90,47 +122,70 @@ impl<T> RunSlot<T> {
 }
 
 static RUN_ACTIVE: AtomicBool = AtomicBool::new(false);
+static RUN_RETURN_PENDING: AtomicBool = AtomicBool::new(false);
 static RUN_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
-static RUN_START_TICK: AtomicU64 = AtomicU64::new(0);
-static PENDING_RUN: RunSlot<Option<RunRequest>> = RunSlot::new(None);
-static ACTIVE_PATH: RunSlot<Option<String>> = RunSlot::new(None);
+static ACTIVE_RUN: RunSlot<Option<RunRequest>> = RunSlot::new(None);
 
 pub fn spawn(path: String, argv: Vec<String>) -> Result<(), RunElfError> {
+    spawn_observed(path, argv, Vec::new(), RunObserver::Shell)
+}
+
+pub fn spawn_observed(
+    path: String,
+    argv: Vec<String>,
+    env: Vec<String>,
+    observer: RunObserver,
+) -> Result<(), RunElfError> {
     if RUN_ACTIVE.swap(true, Ordering::SeqCst) {
         return Err(RunElfError::Busy);
     }
     syscall::reset_linux_signal_timer_state();
 
-    unsafe {
-        let pending = &mut *PENDING_RUN.get();
-        if pending.is_some() {
-            RUN_ACTIVE.store(false, Ordering::SeqCst);
-            return Err(RunElfError::Busy);
-        }
-        *pending = Some(RunRequest { path, argv });
+    if validate_environment(&env).is_err() {
+        clear_launch_state_without_outcome();
+        return Err(RunElfError::InvalidEnvironment);
     }
-    RUN_START_TICK.store(timer::get_tick_count(), Ordering::SeqCst);
+
+    if unsafe { (&*ACTIVE_RUN.get()).is_some() } {
+        clear_launch_state_without_outcome();
+        return Err(RunElfError::Busy);
+    }
+    unsafe {
+        *ACTIVE_RUN.get() = Some(RunRequest {
+            path,
+            argv,
+            env,
+            observer,
+            start_tick: timer::get_tick_count(),
+        });
+    }
 
     scheduler::scheduler()
         .create_thread(run_elf_launcher_entry, "run_elf")
         .map(|_| ())
         .ok_or_else(|| {
-            unsafe {
-                *PENDING_RUN.get() = None;
-            }
-            RUN_START_TICK.store(0, Ordering::SeqCst);
-            RUN_ACTIVE.store(false, Ordering::SeqCst);
-            syscall::reset_linux_signal_timer_state();
+            clear_launch_state_without_outcome();
             RunElfError::Thread
         })
 }
 
 pub fn active_exec_path() -> Option<String> {
-    unsafe { (&*ACTIVE_PATH.get()).clone() }
+    unsafe {
+        (&*ACTIVE_RUN.get())
+            .as_ref()
+            .map(|request| request.path.clone())
+    }
 }
 
 pub fn prepare_run_elf_return(exit_code: i32) -> bool {
-    if !RUN_ACTIVE.swap(false, Ordering::SeqCst) {
+    if RUN_RETURN_PENDING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return false;
+    }
+    if !RUN_ACTIVE.load(Ordering::SeqCst) {
+        RUN_RETURN_PENDING.store(false, Ordering::SeqCst);
         return false;
     }
 
@@ -148,31 +203,18 @@ pub fn prepare_run_elf_return(exit_code: i32) -> bool {
 }
 
 extern "C" fn run_elf_launcher_entry() -> ! {
-    let request = unsafe { (&mut *PENDING_RUN.get()).take() };
-    let Some(request) = request else {
-        RUN_ACTIVE.store(false, Ordering::SeqCst);
+    let preparation = unsafe { (&*ACTIVE_RUN.get()).as_ref().map(prepare_dynamic_loader) };
+    let Some(preparation) = preparation else {
+        clear_launch_state_without_outcome();
         finish_launcher_thread();
     };
 
-    unsafe {
-        *ACTIVE_PATH.get() = Some(request.path.clone());
-    }
-
-    match prepare_dynamic_loader(&request) {
+    match preparation {
         Ok((entry, stack_top)) => unsafe {
             user_process::switch_to_el0(entry, stack_top, 0);
         },
         Err(err) => {
-            RUN_ACTIVE.store(false, Ordering::SeqCst);
-            syscall::reset_linux_signal_timer_state();
-            unsafe {
-                *ACTIVE_PATH.get() = None;
-            }
-            let mut serial = crate::kernel_lowlevel::serial::Serial::new();
-            serial.init();
-            serial.write_str("run: ELF launch-failed: ");
-            serial.write_str(err.as_str());
-            serial.write_str("\n");
+            complete_active_run(RunTermination::LaunchError(err));
             finish_launcher_thread();
         }
     }
@@ -180,39 +222,115 @@ extern "C" fn run_elf_launcher_entry() -> ! {
 
 #[no_mangle]
 pub extern "C" fn run_elf_launcher_resume() -> ! {
+    let exit_code = RUN_EXIT_CODE.load(Ordering::SeqCst);
+    complete_active_run(RunTermination::Exit(exit_code));
+    finish_launcher_thread();
+}
+
+fn validate_environment(env: &[String]) -> Result<(), RunElfError> {
+    let mut total_bytes = 0usize;
+    let mut has_ld_library_path = false;
+
+    for (index, entry) in env.iter().enumerate() {
+        if !user_logic::run_elf_environment_entry_valid(entry.as_str(), RUN_ELF_MAX_ENV_ENTRY_BYTES)
+        {
+            return Err(RunElfError::InvalidEnvironment);
+        }
+        total_bytes = total_bytes
+            .checked_add(entry.len().saturating_add(1))
+            .ok_or(RunElfError::InvalidEnvironment)?;
+        has_ld_library_path |= user_logic::run_elf_environment_entry_has_key(
+            entry.as_str(),
+            RUN_ELF_LD_LIBRARY_PATH_KEY,
+        );
+        if env[..index].iter().any(|previous| {
+            user_logic::run_elf_environment_keys_equal(previous.as_str(), entry.as_str())
+        }) {
+            return Err(RunElfError::InvalidEnvironment);
+        }
+    }
+
+    let effective_count = env
+        .len()
+        .checked_add(usize::from(!has_ld_library_path))
+        .ok_or(RunElfError::InvalidEnvironment)?;
+    if !has_ld_library_path {
+        total_bytes = total_bytes
+            .checked_add(RUN_ELF_DEFAULT_LD_LIBRARY_PATH.len().saturating_add(1))
+            .ok_or(RunElfError::InvalidEnvironment)?;
+    }
+    if !user_logic::run_elf_environment_totals_valid(
+        effective_count,
+        total_bytes,
+        RUN_ELF_MAX_ENV_ENTRIES,
+        RUN_ELF_MAX_ENV_TOTAL_BYTES,
+    ) {
+        return Err(RunElfError::InvalidEnvironment);
+    }
+    Ok(())
+}
+
+fn take_active_request() -> Option<RunRequest> {
+    let request = unsafe { (&mut *ACTIVE_RUN.get()).take() };
+    RUN_EXIT_CODE.store(0, Ordering::SeqCst);
+    RUN_RETURN_PENDING.store(false, Ordering::SeqCst);
+    RUN_ACTIVE.store(false, Ordering::SeqCst);
+    syscall::reset_linux_signal_timer_state();
+    request
+}
+
+fn clear_launch_state_without_outcome() {
+    let _ = take_active_request();
+}
+
+fn complete_active_run(termination: RunTermination) {
+    let Some(request) = take_active_request() else {
+        return;
+    };
+    let end_tick = timer::get_tick_count();
+    let outcome = RunOutcome {
+        path: request.path,
+        termination,
+        elapsed_ticks: user_logic::run_elf_elapsed_ticks(request.start_tick, end_tick),
+    };
+    dispatch_outcome(request.observer, outcome);
+}
+
+fn dispatch_outcome(observer: RunObserver, outcome: RunOutcome) {
+    match observer {
+        RunObserver::Shell => print_shell_outcome(&outcome),
+        RunObserver::PosixTest => posix_test::on_run_outcome(outcome),
+    }
+}
+
+fn print_shell_outcome(outcome: &RunOutcome) {
     let mut serial = crate::kernel_lowlevel::serial::Serial::new();
     serial.init();
-    let exit_code = RUN_EXIT_CODE.load(Ordering::SeqCst);
-    let start_tick = RUN_START_TICK.load(Ordering::SeqCst);
-    let elapsed_ticks = timer::get_tick_count().saturating_sub(start_tick);
-    let active_path = unsafe { (&*ACTIVE_PATH.get()).clone() };
-
-    serial.write_str("\nrun: program output ended\n");
-    serial.write_str("run: process finished\n");
-    serial.write_str("  path: ");
-    match active_path.as_ref() {
-        Some(path) => serial.write_str(path.as_str()),
-        None => serial.write_str("<unknown>"),
+    match outcome.termination {
+        RunTermination::LaunchError(err) => {
+            serial.write_str("run: ELF launch-failed: ");
+            serial.write_str(err.as_str());
+            serial.write_str("\n");
+        }
+        RunTermination::Exit(exit_code) => {
+            serial.write_str("\nrun: program output ended\n");
+            serial.write_str("run: process finished\n");
+            serial.write_str("  path: ");
+            serial.write_str(outcome.path.as_str());
+            serial.write_str("\n  exit code: ");
+            print_i32(&mut serial, exit_code);
+            if user_logic::run_elf_exit_succeeded(exit_code) {
+                serial.write_str(" (success)");
+            } else {
+                serial.write_str(" (failure)");
+            }
+            serial.write_str("\n  elapsed: ");
+            print_elapsed_ticks(&mut serial, outcome.elapsed_ticks);
+            serial.write_str(" (");
+            print_u64(&mut serial, outcome.elapsed_ticks);
+            serial.write_str(" timer ticks)\n");
+        }
     }
-    serial.write_str("\n  exit code: ");
-    print_i32(&mut serial, exit_code);
-    if exit_code == 0 {
-        serial.write_str(" (success)");
-    } else {
-        serial.write_str(" (failure)");
-    }
-    serial.write_str("\n  elapsed: ");
-    print_elapsed_ticks(&mut serial, elapsed_ticks);
-    serial.write_str(" (");
-    print_u64(&mut serial, elapsed_ticks);
-    serial.write_str(" timer ticks)");
-    serial.write_str("\n");
-
-    RUN_START_TICK.store(0, Ordering::SeqCst);
-    unsafe {
-        *ACTIVE_PATH.get() = None;
-    }
-    finish_launcher_thread();
 }
 
 fn finish_launcher_thread() -> ! {
@@ -270,18 +388,18 @@ fn read_fxfs_file(path: &str) -> Result<Vec<u8>, RunElfError> {
 }
 
 fn resolve_library_path(name_or_path: &str) -> Option<String> {
-    if name_or_path.starts_with('/') && fxfs::attrs(name_or_path).is_ok() {
-        return Some(String::from(name_or_path));
-    }
-    if path_under_shared(name_or_path) {
-        let _ = fxfs::ensure_host_share();
-        if fxfs::attrs(name_or_path).is_ok() {
-            return Some(String::from(name_or_path));
-        }
+    if !user_logic::run_elf_library_name_valid(name_or_path) {
+        return None;
     }
 
     let name = name_or_path.rsplit('/').next().unwrap_or(name_or_path);
     let _ = fxfs::ensure_host_share();
+    let mut posix = String::from("/shared/posixtest/lib/");
+    posix.push_str(name);
+    if fxfs::attrs(posix.as_str()).is_ok() {
+        return Some(posix);
+    }
+
     let mut shared = String::from("/shared/lib/");
     shared.push_str(name);
     if fxfs::attrs(shared.as_str()).is_ok() {
@@ -292,6 +410,16 @@ fn resolve_library_path(name_or_path: &str) -> Option<String> {
     lib.push_str(name);
     if fxfs::attrs(lib.as_str()).is_ok() {
         return Some(lib);
+    }
+
+    if name_or_path.starts_with('/') && fxfs::attrs(name_or_path).is_ok() {
+        return Some(String::from(name_or_path));
+    }
+    if path_under_shared(name_or_path) {
+        let _ = fxfs::ensure_host_share();
+        if fxfs::attrs(name_or_path).is_ok() {
+            return Some(String::from(name_or_path));
+        }
     }
 
     None
@@ -428,7 +556,6 @@ fn build_initial_stack(request: &RunRequest, main: &elf::ElfImage) -> Result<u64
         0x21,
     ])?;
     let platform_ptr = stack.push_cstr(elf_platform_name())?;
-    let env_ld_path = stack.push_cstr("LD_LIBRARY_PATH=/shared/lib:/lib")?;
 
     let mut argv_ptrs = Vec::new();
     for arg in request.argv.iter().rev() {
@@ -439,7 +566,16 @@ fn build_initial_stack(request: &RunRequest, main: &elf::ElfImage) -> Result<u64
         argv_ptrs.push(stack.push_cstr(request.path.as_str())? as u64);
     }
 
-    let env_ptrs = [env_ld_path as u64];
+    let mut env_ptrs = Vec::new();
+    for entry in request.env.iter().rev() {
+        env_ptrs.push(stack.push_cstr(entry.as_str())? as u64);
+    }
+    env_ptrs.reverse();
+    if !request.env.iter().any(|entry| {
+        user_logic::run_elf_environment_entry_has_key(entry.as_str(), RUN_ELF_LD_LIBRARY_PATH_KEY)
+    }) {
+        env_ptrs.push(stack.push_cstr(RUN_ELF_DEFAULT_LD_LIBRARY_PATH)? as u64);
+    }
     let auxv = [
         (
             AT_PHDR,

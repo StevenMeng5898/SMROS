@@ -656,6 +656,128 @@ fn posix_resource_snapshot_uses_authoritative_state_without_resetting_it() {
 }
 
 #[test]
+fn run_elf_observer_api_is_typed_environment_aware_and_compatible() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let launcher = std::fs::read_to_string(repository.join("src/user_level/services/run_elf.rs"))
+        .expect("read ELF launcher");
+    let shell = std::fs::read_to_string(repository.join("src/user_level/services/user_shell.rs"))
+        .expect("read shell service");
+
+    for declaration in [
+        "pub enum RunObserver",
+        "Shell,",
+        "PosixTest,",
+        "pub enum RunTermination",
+        "Exit(i32)",
+        "LaunchError(RunElfError)",
+        "pub struct RunOutcome",
+        "pub path: String",
+        "pub termination: RunTermination",
+        "pub elapsed_ticks: u64",
+        "pub fn spawn_observed(",
+    ] {
+        assert!(launcher.contains(declaration), "missing {declaration}");
+    }
+    assert!(launcher.contains("env: Vec<String>"));
+    assert!(launcher.contains("observer: RunObserver"));
+    assert!(launcher.contains("spawn_observed(path, argv, Vec::new(), RunObserver::Shell)"));
+    assert!(shell.contains("crate::user_level::run_elf::spawn(path.clone(), argv)"));
+    assert!(!shell.contains("RunObserver::PosixTest"));
+
+    assert!(launcher.contains("LD_LIBRARY_PATH=/shared/posixtest/lib:/shared/lib:/lib"));
+    assert!(launcher.contains("run_elf_environment_entry_has_key"));
+    assert!(launcher.contains("run_elf_environment_keys_equal"));
+    for limit in [
+        "const RUN_ELF_MAX_ENV_ENTRIES: usize = 64;",
+        "const RUN_ELF_MAX_ENV_ENTRY_BYTES: usize = 4 * 1024;",
+        "const RUN_ELF_MAX_ENV_TOTAL_BYTES: usize = 32 * 1024;",
+    ] {
+        assert!(
+            launcher.contains(limit),
+            "missing environment limit {limit}"
+        );
+    }
+    assert!(launcher.contains("env[..index].iter().any"));
+
+    let resolver_start = launcher
+        .find("fn resolve_library_path(name_or_path: &str)")
+        .expect("library resolver must exist");
+    let resolver = braced_body(&launcher[resolver_start..]);
+    let posix_lib = resolver
+        .find("/shared/posixtest/lib/")
+        .expect("POSIX library directory must be searched");
+    let shared_lib = resolver[posix_lib + 1..]
+        .find("/shared/lib/")
+        .map(|offset| posix_lib + 1 + offset)
+        .expect("shared library directory must be searched");
+    let system_lib = resolver[shared_lib + 1..]
+        .find("/lib/")
+        .map(|offset| shared_lib + 1 + offset)
+        .expect("system library directory must be searched");
+    assert!(posix_lib < shared_lib && shared_lib < system_lib);
+    assert!(launcher.contains("run_elf_library_name_valid"));
+}
+
+#[test]
+fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let launcher = std::fs::read_to_string(repository.join("src/user_level/services/run_elf.rs"))
+        .expect("read ELF launcher");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let posix = std::fs::read_to_string(repository.join("src/user_level/services/posix_test.rs"))
+        .expect("read POSIX service");
+
+    assert!(launcher.contains("RUN_RETURN_PENDING"));
+    assert!(launcher.contains(".compare_exchange(false, true"));
+    assert!(launcher.contains("fn take_active_request("));
+    assert!(launcher.contains("fn dispatch_outcome("));
+    assert!(launcher.contains("RunTermination::LaunchError(err)"));
+    assert!(launcher.contains("RunTermination::Exit(exit_code)"));
+    assert!(launcher.contains("run_elf_elapsed_ticks(request.start_tick, end_tick)"));
+    assert!(launcher.contains("syscall::reset_linux_signal_timer_state()"));
+    assert!(launcher.contains("posix_test::on_run_outcome(outcome)"));
+
+    let take = launcher
+        .find("let Some(request) = take_active_request()")
+        .expect("terminal path takes the active request");
+    let dispatch = launcher[take..]
+        .find("dispatch_outcome(")
+        .map(|offset| take + offset)
+        .expect("terminal path dispatches an outcome");
+    assert!(
+        take < dispatch,
+        "active state must be cleared before callback"
+    );
+
+    assert_eq!(
+        syscall
+            .matches("crate::user_level::run_elf::prepare_run_elf_return(exit_code)")
+            .count(),
+        1,
+        "exit and exit_group must converge on one launcher completion hook"
+    );
+    assert!(syscall.contains("pub fn sys_exit_group(exit_code: i32)"));
+    assert!(syscall.contains("sys_exit(exit_code)"));
+
+    assert!(posix.contains("pub fn on_run_outcome(outcome: RunOutcome)"));
+    assert!(posix.contains("Task 9 replaces this fail-closed bridge"));
+    assert!(posix.contains("POSIX infrastructure failure: unhandled ELF outcome"));
+    for premature_runner_event in [
+        "suite_start",
+        "test_start",
+        "test_end",
+        "suite_end",
+        "SMROS_POSIX_EVENT",
+    ] {
+        assert!(
+            !posix.contains(premature_runner_event),
+            "Task 8 must not implement runner event {premature_runner_event}"
+        );
+    }
+}
+
+#[test]
 fn x86_system_reset_uses_hardware_reset_ports_before_halting() {
     let smp = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

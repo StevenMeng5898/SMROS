@@ -567,6 +567,113 @@ mod user_logic {
             16usize, 32usize, 16usize, 64usize
         ));
     }
+
+    #[test]
+    fn run_elf_environment_entries_are_strict_and_bounded() {
+        assert!(run_elf_environment_entry_valid("PATH=/bin", 4 * 1024));
+        assert!(run_elf_environment_entry_valid(
+            "LD_LIBRARY_PATH=/shared/lib:/lib",
+            4 * 1024
+        ));
+        assert!(run_elf_environment_entry_valid("TOKEN=a=b", 4 * 1024));
+
+        for invalid in [
+            "",
+            "PATH",
+            "=value",
+            "BAD-KEY=value",
+            "1BAD=value",
+            "BAD KEY=value",
+            "BAD\0KEY=value",
+            "KEY=bad\0value",
+        ] {
+            assert!(
+                !run_elf_environment_entry_valid(invalid, 4 * 1024),
+                "accepted malformed environment entry {invalid:?}"
+            );
+        }
+
+        assert!(run_elf_environment_entry_valid(
+            &format!("KEY={}", "x".repeat(4 * 1024 - 4)),
+            4 * 1024
+        ));
+        assert!(!run_elf_environment_entry_valid(
+            &format!("KEY={}", "x".repeat(4 * 1024 - 3)),
+            4 * 1024
+        ));
+    }
+
+    #[test]
+    fn run_elf_environment_limits_and_exact_keys_are_unambiguous() {
+        assert!(run_elf_environment_totals_valid(
+            64,
+            32 * 1024,
+            64,
+            32 * 1024
+        ));
+        assert!(!run_elf_environment_totals_valid(
+            65,
+            32 * 1024,
+            64,
+            32 * 1024
+        ));
+        assert!(!run_elf_environment_totals_valid(
+            64,
+            32 * 1024 + 1,
+            64,
+            32 * 1024
+        ));
+
+        assert!(run_elf_environment_entry_has_key(
+            "LD_LIBRARY_PATH=/caller/lib",
+            "LD_LIBRARY_PATH"
+        ));
+        assert!(!run_elf_environment_entry_has_key(
+            "LD_LIBRARY_PATH_EXTRA=/caller/lib",
+            "LD_LIBRARY_PATH"
+        ));
+        assert!(!run_elf_environment_entry_has_key(
+            "XLD_LIBRARY_PATH=/caller/lib",
+            "LD_LIBRARY_PATH"
+        ));
+        assert!(run_elf_environment_keys_equal("LANG=C", "LANG=en_US"));
+        assert!(!run_elf_environment_keys_equal("LANGUAGE=C", "LANG=C"));
+    }
+
+    #[test]
+    fn run_elf_completion_helpers_classify_and_saturate() {
+        assert!(run_elf_exit_succeeded(0));
+        assert!(!run_elf_exit_succeeded(1));
+        assert!(!run_elf_exit_succeeded(-1));
+        assert_eq!(run_elf_elapsed_ticks(10, 25), 15);
+        assert_eq!(run_elf_elapsed_ticks(25, 10), 0);
+    }
+
+    #[test]
+    fn run_elf_library_names_reject_traversal_and_malformed_paths() {
+        for valid in [
+            "ld-linux-aarch64.so.1",
+            "libc.so.6",
+            "/lib/ld-linux-aarch64.so.1",
+            "/shared/posixtest/lib/libpthread.so.0",
+        ] {
+            assert!(run_elf_library_name_valid(valid), "rejected {valid:?}");
+        }
+
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "../libc.so.6",
+            "lib/../../libc.so.6",
+            "/lib/../evil.so",
+            "/lib//evil.so",
+            "/lib/./evil.so",
+            "libc\0.so.6",
+        ] {
+            assert!(!run_elf_library_name_valid(invalid), "accepted {invalid:?}");
+        }
+    }
 }
 
 mod hermes_shell_logic {

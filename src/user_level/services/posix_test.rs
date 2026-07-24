@@ -13,6 +13,9 @@ use std as core_compat;
 
 use super::{fxfs, posix_test_logic_shared};
 
+#[cfg(not(test))]
+use super::run_elf::{RunOutcome, RunTermination};
+
 pub const POSIX_MANIFEST_PATH: &str = "/shared/posixtest/manifest.tsv";
 pub const POSIX_MANIFEST_SCHEMA: u32 = 1;
 pub const POSIX_MANIFEST_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -176,6 +179,22 @@ pub fn status_snapshot() -> PosixRunnerStatus {
         completed: 0,
         selected: 0,
     }
+}
+
+/// Task 9 replaces this fail-closed bridge with the POSIX runner state machine.
+#[cfg(not(test))]
+pub fn on_run_outcome(outcome: RunOutcome) {
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+    serial.init();
+    serial.write_str("POSIX infrastructure failure: unhandled ELF outcome");
+    serial.write_str(" path=");
+    serial.write_str(outcome.path.as_str());
+    serial.write_str(" termination=");
+    match outcome.termination {
+        RunTermination::Exit(_) => serial.write_str("exit"),
+        RunTermination::LaunchError(err) => serial.write_str(err.as_str()),
+    }
+    serial.write_str("\n");
 }
 
 fn parse_fixed_fields<const N: usize>(line: &str) -> Option<[&str; N]> {
