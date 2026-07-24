@@ -2260,6 +2260,42 @@ pub fn memory_map_snapshot() -> MemoryMapSnapshot {
     memory_state().memory_map_snapshot()
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PosixResourceSnapshot {
+    pub processes: usize,
+    pub scheduler_threads: usize,
+    pub linux_mappings: usize,
+    pub linux_fds: usize,
+    pub linux_shared_memory: usize,
+    pub kernel_handles: usize,
+    pub timers: usize,
+    pub aio_requests: usize,
+    pub ipc_objects: usize,
+}
+
+fn linux_aio_request_count() -> usize {
+    // The AIO entry points do not allocate request state; active requests are invariantly zero.
+    0
+}
+
+pub fn posix_resource_snapshot() -> PosixResourceSnapshot {
+    let state = memory_state();
+    let compat_counts = compat::posix_resource_counts();
+    let real_timer =
+        usize::from(LINUX_REAL_TIMER_DEADLINE_TICK.load(Ordering::SeqCst) != LINUX_TIMER_DISABLED);
+    PosixResourceSnapshot {
+        processes: crate::kernel_lowlevel::memory::process_manager().active_processes(),
+        scheduler_threads: crate::kernel_objects::scheduler::scheduler().active_threads(),
+        linux_mappings: state.linux_mappings.len(),
+        linux_fds: state.linux_fds.len(),
+        linux_shared_memory: state.linux_shared_memory.len(),
+        kernel_handles: state.handles.len(),
+        timers: compat_counts.timers + real_timer,
+        aio_requests: linux_aio_request_count(),
+        ipc_objects: compat_counts.ipc_objects,
+    }
+}
+
 pub fn memory_root_vmar_handle() -> u32 {
     memory_state().root_vmar_handle
 }

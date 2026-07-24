@@ -13,6 +13,8 @@ pub mod html_ui;
 pub mod lvgl;
 pub mod net;
 pub mod perfetto;
+pub mod posix_test;
+pub(crate) mod posix_test_logic_shared;
 pub mod qml_cluster;
 pub mod run_elf;
 pub mod svc;

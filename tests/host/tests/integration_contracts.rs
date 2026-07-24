@@ -490,6 +490,122 @@ fn test_layer_commands_and_docs_are_wired() {
 }
 
 #[test]
+fn posix_guest_manifest_parser_is_exported_bounded_and_canonical() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let services = std::fs::read_to_string(repository.join("src/user_level/services/mod.rs"))
+        .expect("read user service exports");
+    let parser = std::fs::read_to_string(repository.join("src/user_level/services/posix_test.rs"))
+        .expect("POSIX guest manifest parser must exist");
+
+    assert!(services.contains("pub mod posix_test;"));
+    assert!(services.contains("pub(crate) mod posix_test_logic_shared;"));
+    assert!(parser
+        .contains("pub const POSIX_MANIFEST_PATH: &str = \"/shared/posixtest/manifest.tsv\";"));
+    assert!(parser.contains("pub const POSIX_MANIFEST_SCHEMA: u32 = 1;"));
+    assert!(parser.contains("pub const POSIX_MANIFEST_MAX_BYTES: usize = 2 * 1024 * 1024;"));
+    assert!(parser.contains("pub const POSIX_MANIFEST_MAX_TESTS: usize = 4_096;"));
+    assert!(parser.contains("SMROS_POSIX_MANIFEST\\t1"));
+    assert!(parser.contains("fxfs::ensure_host_share()"));
+    assert!(parser.contains("fxfs::read_file(POSIX_MANIFEST_PATH"));
+    assert!(parser.contains("core::str::from_utf8"));
+    assert!(parser.contains("fields.len() != 9"));
+    assert!(parser.contains("manifest_sha256"));
+    assert!(parser.contains("64 ASCII zeroes"));
+    assert!(parser.contains("sha256("));
+
+    for metadata in [
+        "source",
+        "revision",
+        "architecture",
+        "compiler",
+        "libc",
+        "patch_sha256",
+        "build_results_sha256",
+        "manifest_sha256",
+        "smros_commit",
+    ] {
+        assert!(
+            parser.contains(metadata),
+            "missing metadata contract {metadata}"
+        );
+    }
+    for rejection in [
+        "InvalidUtf8",
+        "UnknownRowType",
+        "UnknownKind",
+        "UnknownDisposition",
+        "MissingMetadata",
+        "DuplicateMetadata",
+        "DuplicateTestId",
+        "DuplicateTestPath",
+        "InvalidAtom",
+        "InvalidPath",
+        "InvalidChecksum",
+        "InvalidTimeout",
+        "ManifestChecksumMismatch",
+    ] {
+        assert!(parser.contains(rejection), "missing rejection {rejection}");
+    }
+
+    assert!(parser.contains("pub enum PosixFilter"));
+    assert!(parser
+        .contains("pub fn parse_filter(args: &[&str]) -> Result<PosixFilter, PosixTestError>"));
+    assert!(parser.contains("pub fn load_manifest() -> Result<PosixManifest, PosixTestError>"));
+    assert!(parser.contains("pub fn status_snapshot() -> PosixRunnerStatus"));
+}
+
+#[test]
+fn posix_resource_snapshot_uses_authoritative_state_without_resetting_it() {
+    let syscall = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/syscall.rs"
+    ));
+    let compat = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/kernel_objects/compat.rs"
+    ));
+    let start = syscall
+        .find("pub fn posix_resource_snapshot()")
+        .expect("POSIX resource snapshot must exist");
+    let body = braced_body(&syscall[start..]);
+
+    for field in [
+        "processes",
+        "scheduler_threads",
+        "linux_mappings",
+        "linux_fds",
+        "linux_shared_memory",
+        "kernel_handles",
+        "timers",
+        "ipc_objects",
+        "aio_requests",
+    ] {
+        assert!(
+            syscall.contains(&format!("pub {field}:")),
+            "missing {field}"
+        );
+        assert!(body.contains(field), "snapshot does not populate {field}");
+    }
+
+    assert!(body.contains("process_manager().active_processes()"));
+    assert!(body.contains("scheduler().active_threads()"));
+    assert!(body.contains("state.linux_mappings.len()"));
+    assert!(body.contains("state.linux_fds.len()"));
+    assert!(body.contains("state.linux_shared_memory.len()"));
+    assert!(body.contains("state.handles.len()"));
+    assert!(body.contains("compat::posix_resource_counts()"));
+    assert!(body.contains("aio_requests: linux_aio_request_count()"));
+    assert!(syscall.contains("fn linux_aio_request_count() -> usize"));
+    assert!(syscall.contains("AIO entry points do not allocate request state"));
+    assert!(!body.contains("reset"));
+    assert!(compat.contains("pub fn posix_resource_counts()"));
+    assert!(compat.contains("ObjectType::Timer"));
+    assert!(compat.contains("ObjectType::TimerFd"));
+    assert!(compat.contains("ObjectType::Semaphore"));
+    assert!(compat.contains("ObjectType::MessageQueue"));
+}
+
+#[test]
 fn x86_system_reset_uses_hardware_reset_ports_before_halting() {
     let smp = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

@@ -378,6 +378,24 @@ pub fn table() -> &'static mut CompatObjectTable {
     unsafe { &mut COMPAT_OBJECT_TABLE }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PosixCompatResourceCounts {
+    pub timers: usize,
+    pub ipc_objects: usize,
+}
+
+pub fn posix_resource_counts() -> PosixCompatResourceCounts {
+    let mut counts = PosixCompatResourceCounts::default();
+    for object in &table().objects {
+        match object.obj_type {
+            ObjectType::Timer | ObjectType::TimerFd => counts.timers += 1,
+            ObjectType::Semaphore | ObjectType::MessageQueue => counts.ipc_objects += 1,
+            _ => {}
+        }
+    }
+    counts
+}
+
 pub fn create_object(obj_type: ObjectType) -> ZxResult<HandleValue> {
     table().create(obj_type)
 }
