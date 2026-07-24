@@ -217,6 +217,9 @@ pub struct Scheduler {
 
     /// Static stack for idle thread
     idle_stack: SendPtr,
+
+    /// Per-CPU slots whose stacks become reclaimable after a context switch.
+    deferred_retirements: DeferredThreadRetirements<MAX_CPUS>,
 }
 
 // SAFETY: The scheduler is only accessed from one thread at a time.
@@ -730,6 +733,7 @@ impl Scheduler {
             trace_next: 0,
             trace_len: 0,
             idle_stack: SendPtr(ptr::null_mut()),
+            deferred_retirements: DeferredThreadRetirements::new(),
         }
     }
 
@@ -760,6 +764,7 @@ impl Scheduler {
         self.trace_entries = [SchedulerTraceEntry::empty(); SCHED_TRACE_CAPACITY];
         self.trace_next = 0;
         self.trace_len = 0;
+        self.deferred_retirements = DeferredThreadRetirements::new();
     }
 
     /// Create the idle thread
@@ -785,6 +790,9 @@ impl Scheduler {
         name: &'static str,
         cpu_affinity: Option<usize>,
     ) -> Option<ThreadId> {
+        let current_cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
+        self.reap_deferred_thread_for_cpu(current_cpu);
+
         // Find an empty slot
         for i in 1..MAX_THREADS {
             if self.threads[i].state == ThreadState::Empty {
@@ -985,7 +993,8 @@ impl Scheduler {
     }
 
     pub fn start_sample_workers(&mut self, requested: usize) -> SchedulerSampleResult {
-        self.reap_terminated_threads();
+        let current_cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
+        self.reap_deferred_thread_for_cpu(current_cpu);
         self.clear_trace();
         let online_cpus =
             core::cmp::max(crate::kernel_lowlevel::smp::online_cpu_count() as usize, 1);
@@ -1026,23 +1035,60 @@ impl Scheduler {
     fn available_thread_slots(&self) -> usize {
         let mut slots = 0usize;
         for idx in 1..MAX_THREADS {
-            if self.threads[idx].state == ThreadState::Empty
-                || self.threads[idx].state == ThreadState::Terminated
-            {
+            if self.threads[idx].state == ThreadState::Empty {
                 slots += 1;
             }
         }
         slots
     }
 
-    fn reap_terminated_threads(&mut self) {
-        for idx in 1..MAX_THREADS {
-            if self.threads[idx].state == ThreadState::Terminated {
-                self.threads[idx] = ThreadControlBlock::new();
-                self.threads[idx].id = ThreadId(idx);
-                self.schedule_info[idx] = ThreadScheduleInfo::empty();
+    fn defer_terminated_thread_before_switch(&mut self, cpu_id: usize, id: ThreadId) -> bool {
+        if id.0 < MAX_THREADS && self.threads[id.0].state == ThreadState::Terminated {
+            self.deferred_retirements.record_before_switch(cpu_id, id.0)
+        } else {
+            true
+        }
+    }
+
+    fn reap_deferred_thread_for_cpu(&mut self, cpu_id: usize) {
+        let _ = self
+            .deferred_retirements
+            .confirm_after_switch(cpu_id, self.current_thread.0);
+        let Some(idx) = self.deferred_retirements.take_reclaimable(cpu_id) else {
+            return;
+        };
+        if idx >= MAX_THREADS {
+            return;
+        }
+
+        let thread = &self.threads[idx];
+        let action = scheduler_retired_slot_reuse_action(
+            thread.state == ThreadState::Terminated,
+            idx,
+            self.current_thread.0,
+            Some(idx),
+            !thread.stack.0.is_null(),
+            thread.stack_size != 0,
+        );
+        match action {
+            SchedulerSlotReuse::Unavailable => return,
+            SchedulerSlotReuse::ResetOnly => {}
+            SchedulerSlotReuse::DeallocateAndReuse => {
+                if let Ok(layout) = alloc::alloc::Layout::from_size_align(thread.stack_size, 16) {
+                    // SAFETY: deferred stacks come from ThreadStack::alloc with this layout,
+                    // and the originating CPU confirmed that it switched to another stack.
+                    unsafe {
+                        alloc::alloc::dealloc(thread.stack.0, layout);
+                    }
+                } else {
+                    return;
+                }
             }
         }
+
+        self.threads[idx] = ThreadControlBlock::new();
+        self.threads[idx].id = ThreadId(idx);
+        self.schedule_info[idx] = ThreadScheduleInfo::empty();
     }
 
     fn clear_trace(&mut self) {
@@ -1576,6 +1622,8 @@ impl Scheduler {
 
     /// Handle timer tick (called from interrupt handler)
     pub fn on_timer_tick(&mut self) {
+        let current_cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
+        self.reap_deferred_thread_for_cpu(current_cpu);
         self.tick_count += 1;
 
         // Decrement current thread's time slice
@@ -1693,7 +1741,10 @@ impl Scheduler {
         let stack_info = if let Some(tcb) = self.get_thread_mut(current_id) {
             tcb.state = ThreadState::Terminated;
             tcb.time_slice = 0;
-            (tcb.stack.0, tcb.stack_size, tcb.id.0)
+            let stack_info = (tcb.stack.0, tcb.stack_size, tcb.id.0);
+            tcb.stack = SendPtr(ptr::null_mut());
+            tcb.stack_size = 0;
+            stack_info
         } else {
             (ptr::null_mut(), 0, 0)
         };
@@ -1793,7 +1844,9 @@ extern "C" fn idle_thread_entry() -> ! {
 /// Perform a context switch to the next thread
 pub fn schedule() {
     let s = scheduler();
+    let executing_cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
     let cpu_id = current_logical_cpu(s);
+    s.reap_deferred_thread_for_cpu(executing_cpu);
 
     // Find next thread to run
     if let Some(next_id) = s.schedule_next_for_cpu(cpu_id) {
@@ -1801,6 +1854,12 @@ pub fn schedule() {
 
         if next_id == current_id {
             // No need to switch
+            return;
+        }
+
+        let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+        if !s.defer_terminated_thread_before_switch(executing_cpu, current_id) {
+            crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
             return;
         }
 
@@ -1968,6 +2027,8 @@ pub fn yield_now_on_cpu(cpu_id: usize) {
 /// Perform a context switch to the next thread on a specific CPU
 pub fn schedule_on_cpu(cpu_id: usize) {
     let s = scheduler();
+    let executing_cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
+    s.reap_deferred_thread_for_cpu(executing_cpu);
 
     // Find next thread to run for this CPU
     if let Some(next_id) = s.schedule_next_for_cpu(cpu_id) {
@@ -1975,6 +2036,12 @@ pub fn schedule_on_cpu(cpu_id: usize) {
 
         if next_id == current_id {
             // No need to switch
+            return;
+        }
+
+        let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+        if !s.defer_terminated_thread_before_switch(executing_cpu, current_id) {
+            crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
             return;
         }
 

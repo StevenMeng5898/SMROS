@@ -193,6 +193,7 @@ pub fn on_run_outcome(outcome: RunOutcome) {
     match outcome.termination {
         RunTermination::Exit(_) => serial.write_str("exit"),
         RunTermination::LaunchError(err) => serial.write_str(err.as_str()),
+        RunTermination::InfrastructureError(err) => serial.write_str(err.as_str()),
     }
     serial.write_str("\n");
 }

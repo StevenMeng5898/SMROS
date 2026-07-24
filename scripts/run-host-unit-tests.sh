@@ -12,15 +12,17 @@ if [ -z "$HOST_TARGET" ]; then
     exit 1
 fi
 
-cd "$REPO_ROOT"
+# Cargo discovers configuration from the invocation directory rather than the
+# manifest directory. Run outside the repository so the kernel-only build-std
+# configuration is not merged into this host build.
+cd /
 
 echo "Running SMROS host tests on $HOST_TARGET..."
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target/host-tests}"
 export CARGO_TARGET_DIR
 
 cargo test \
-    --manifest-path tests/host/Cargo.toml \
+    --manifest-path "$REPO_ROOT/tests/host/Cargo.toml" \
     --target "$HOST_TARGET" \
     --target-dir "$CARGO_TARGET_DIR" \
-    --config 'unstable.build-std=[]' \
     "$@"

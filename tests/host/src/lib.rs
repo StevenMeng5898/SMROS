@@ -439,6 +439,229 @@ mod scheduler_logic {
             0u32, 0u32, false, 20u32, 5u32
         ));
     }
+
+    #[derive(Clone, Copy)]
+    enum TestSlotState {
+        Empty,
+        Running,
+        Terminated,
+    }
+
+    #[derive(Clone, Copy)]
+    struct TestSlot {
+        state: TestSlotState,
+        has_stack_pointer: bool,
+        has_stack_size: bool,
+    }
+
+    impl TestSlot {
+        const fn empty() -> Self {
+            Self {
+                state: TestSlotState::Empty,
+                has_stack_pointer: false,
+                has_stack_size: false,
+            }
+        }
+
+        fn retired_action(
+            self,
+            slot: usize,
+            current_thread: usize,
+            retired_thread: Option<usize>,
+        ) -> SchedulerSlotReuse {
+            scheduler_retired_slot_reuse_action(
+                matches!(self.state, TestSlotState::Terminated),
+                slot,
+                current_thread,
+                retired_thread,
+                self.has_stack_pointer,
+                self.has_stack_size,
+            )
+        }
+    }
+
+    fn confirm_retired_slot(
+        slots: &mut [TestSlot],
+        current_thread: usize,
+        retired_thread: Option<usize>,
+    ) -> SchedulerSlotReuse {
+        let Some(slot) = retired_thread else {
+            return SchedulerSlotReuse::Unavailable;
+        };
+        let action = slots[slot].retired_action(slot, current_thread, retired_thread);
+        if matches!(
+            action,
+            SchedulerSlotReuse::ResetOnly | SchedulerSlotReuse::DeallocateAndReuse
+        ) {
+            slots[slot] = TestSlot::empty();
+        }
+        action
+    }
+
+    #[test]
+    fn terminated_slot_reuse_distinguishes_stack_ownership() {
+        let already_freed = TestSlot {
+            state: TestSlotState::Terminated,
+            has_stack_pointer: false,
+            has_stack_size: false,
+        };
+        let deferred_stack = TestSlot {
+            state: TestSlotState::Terminated,
+            has_stack_pointer: true,
+            has_stack_size: true,
+        };
+
+        assert_eq!(
+            already_freed.retired_action(1, 2, Some(1)),
+            SchedulerSlotReuse::ResetOnly
+        );
+        assert_eq!(
+            deferred_stack.retired_action(1, 2, Some(1)),
+            SchedulerSlotReuse::DeallocateAndReuse
+        );
+    }
+
+    #[test]
+    fn terminated_slot_reuse_requires_post_switch_confirmation() {
+        let deferred_stack = TestSlot {
+            state: TestSlotState::Terminated,
+            has_stack_pointer: true,
+            has_stack_size: true,
+        };
+
+        assert_eq!(
+            deferred_stack.retired_action(3, 3, Some(3)),
+            SchedulerSlotReuse::Unavailable,
+            "the current thread may still be executing on its terminated stack"
+        );
+        assert_eq!(
+            deferred_stack.retired_action(3, 4, None),
+            SchedulerSlotReuse::Unavailable,
+            "termination alone does not prove that the stack switch completed"
+        );
+        assert_eq!(
+            deferred_stack.retired_action(3, 4, Some(3)),
+            SchedulerSlotReuse::DeallocateAndReuse
+        );
+
+        let retirements = DeferredThreadRetirements::<2>::new();
+        assert!(retirements.record_before_switch(1, 3));
+        assert_eq!(
+            retirements.take_reclaimable(1),
+            None,
+            "publishing retirement is not proof that the stack switch completed"
+        );
+        assert!(!retirements.confirm_after_switch(1, 3));
+        assert_eq!(
+            retirements.take_reclaimable(1),
+            None,
+            "the outgoing thread cannot confirm its own stack switch"
+        );
+        assert!(!retirements.confirm_after_switch(0, 4));
+        assert!(retirements.confirm_after_switch(1, 4));
+        assert_eq!(retirements.take_reclaimable(1), Some(3));
+        assert_eq!(retirements.take_reclaimable(1), None);
+    }
+
+    #[test]
+    fn terminated_slot_reuse_rejects_inconsistent_stack_metadata() {
+        for (has_stack_pointer, has_stack_size) in [(true, false), (false, true)] {
+            let malformed = TestSlot {
+                state: TestSlotState::Terminated,
+                has_stack_pointer,
+                has_stack_size,
+            };
+            assert_eq!(
+                malformed.retired_action(1, 2, Some(1)),
+                SchedulerSlotReuse::Unavailable
+            );
+        }
+    }
+
+    #[test]
+    fn reentrant_launches_remain_sustainable_without_reclaiming_current_stack() {
+        const MAX_THREADS: usize = 32;
+        let mut slots = [TestSlot::empty(); MAX_THREADS];
+        let mut current_thread = 1usize;
+        slots[current_thread] = TestSlot {
+            state: TestSlotState::Running,
+            has_stack_pointer: true,
+            has_stack_size: true,
+        };
+        let retirements = DeferredThreadRetirements::<1>::new();
+        let mut deallocations = 0usize;
+
+        for _ in 0..10_000 {
+            let _ = retirements.confirm_after_switch(0, current_thread);
+            let retired_thread = retirements.take_reclaimable(0);
+            if confirm_retired_slot(&mut slots, current_thread, retired_thread)
+                == SchedulerSlotReuse::DeallocateAndReuse
+            {
+                deallocations += 1;
+            }
+            let next_thread = (1..MAX_THREADS)
+                .find(|slot| matches!(slots[*slot].state, TestSlotState::Empty))
+                .expect("a sequential launcher slot remains available");
+
+            assert_ne!(next_thread, current_thread);
+            slots[next_thread] = TestSlot {
+                state: TestSlotState::Running,
+                has_stack_pointer: true,
+                has_stack_size: true,
+            };
+
+            slots[current_thread].state = TestSlotState::Terminated;
+            assert!(retirements.record_before_switch(0, current_thread));
+            current_thread = next_thread;
+        }
+
+        assert_eq!(deallocations, 9_999);
+    }
+
+    #[test]
+    fn post_switch_confirmation_supports_cross_cpu_and_alternating_creators() {
+        const MAX_THREADS: usize = 32;
+        let mut slots = [TestSlot::empty(); MAX_THREADS];
+        let retirements = DeferredThreadRetirements::<2>::new();
+        let mut running_by_cpu = [1usize, 2usize];
+        for slot in running_by_cpu.iter().copied() {
+            slots[slot] = TestSlot {
+                state: TestSlotState::Running,
+                has_stack_pointer: true,
+                has_stack_size: true,
+            };
+        }
+
+        for launch in 0..10_000 {
+            let creator_cpu = launch % 2;
+            let retired_cpu = 1 - creator_cpu;
+            let retiring_slot = running_by_cpu[retired_cpu];
+            slots[retiring_slot].state = TestSlotState::Terminated;
+            assert!(retirements.record_before_switch(retired_cpu, retiring_slot));
+
+            assert_eq!(
+                retirements.take_reclaimable(creator_cpu),
+                None,
+                "the creator cannot confirm another CPU's pre-switch retirement"
+            );
+
+            assert!(retirements.confirm_after_switch(retired_cpu, running_by_cpu[creator_cpu]));
+            let retired_thread = retirements.take_reclaimable(retired_cpu);
+            assert_eq!(
+                confirm_retired_slot(&mut slots, running_by_cpu[creator_cpu], retired_thread),
+                SchedulerSlotReuse::DeallocateAndReuse
+            );
+            let next = (1..MAX_THREADS)
+                .find(|slot| matches!(slots[*slot].state, TestSlotState::Empty))
+                .expect("confirmed retired slots remain globally reusable");
+            slots[next] = TestSlot {
+                state: TestSlotState::Running,
+                has_stack_pointer: true,
+                has_stack_size: true,
+            };
+            running_by_cpu[retired_cpu] = next;
+        }
+    }
 }
 
 mod lowlevel_logic {
@@ -638,6 +861,49 @@ mod user_logic {
         ));
         assert!(run_elf_environment_keys_equal("LANG=C", "LANG=en_US"));
         assert!(!run_elf_environment_keys_equal("LANGUAGE=C", "LANG=C"));
+
+        let entries = ["LANG=C", "PATH=/bin", "LANG=en_US"];
+        assert!(entries.iter().enumerate().any(|(index, entry)| {
+            entries[..index]
+                .iter()
+                .any(|previous| run_elf_environment_keys_equal(previous, entry))
+        }));
+    }
+
+    #[test]
+    fn run_elf_effective_environment_includes_or_suppresses_default() {
+        let with_default =
+            run_elf_environment_effective_totals(63, 100, false, 60).expect("bounded totals");
+        assert_eq!(with_default.entry_count, 64);
+        assert_eq!(with_default.total_bytes, 160);
+        assert!(with_default.append_default);
+
+        let caller_override =
+            run_elf_environment_effective_totals(63, 100, true, 60).expect("bounded totals");
+        assert_eq!(caller_override.entry_count, 63);
+        assert_eq!(caller_override.total_bytes, 100);
+        assert!(!caller_override.append_default);
+
+        assert!(run_elf_environment_effective_totals(usize::MAX, 0, false, 1).is_none());
+        assert!(run_elf_environment_effective_totals(0, usize::MAX, false, 1).is_none());
+    }
+
+    #[test]
+    fn run_elf_environment_sources_preserve_caller_order_and_default_position() {
+        assert_eq!(
+            run_elf_environment_source_at(0, 2, false),
+            Some(RunElfEnvironmentSource::Caller(0))
+        );
+        assert_eq!(
+            run_elf_environment_source_at(1, 2, false),
+            Some(RunElfEnvironmentSource::Caller(1))
+        );
+        assert_eq!(
+            run_elf_environment_source_at(2, 2, false),
+            Some(RunElfEnvironmentSource::Default)
+        );
+        assert_eq!(run_elf_environment_source_at(3, 2, false), None);
+        assert_eq!(run_elf_environment_source_at(2, 2, true), None);
     }
 
     #[test]
@@ -647,6 +913,109 @@ mod user_logic {
         assert!(!run_elf_exit_succeeded(-1));
         assert_eq!(run_elf_elapsed_ticks(10, 25), 15);
         assert_eq!(run_elf_elapsed_ticks(25, 10), 0);
+    }
+
+    #[test]
+    fn run_elf_lifecycle_uses_the_request_as_its_single_activity_source() {
+        let state = RunElfStateCell::new(RunElfLifecycleState::new());
+
+        assert!(state.lock().try_start(11usize).is_ok());
+        assert_eq!(state.lock().try_start(12usize), Err(12));
+        assert!(state.lock().prepare_return(37));
+        assert!(!state.lock().prepare_return(38));
+
+        let mut callback_count = 0usize;
+        let (completion, exit_code) = {
+            let mut locked = state.lock();
+            let exit_code = locked.exit_code();
+            (locked.take_completion(), exit_code)
+        };
+        match completion {
+            RunElfCompletion::Requested(request) => {
+                assert_eq!(request, 11);
+                assert_eq!(exit_code, 37);
+                assert!(state.lock().request().is_none());
+                callback_count += 1;
+            }
+            _ => panic!("accepted request must produce its requested outcome"),
+        }
+        assert_eq!(callback_count, 1);
+
+        assert_eq!(state.lock().take_completion(), RunElfCompletion::Repeated);
+        assert_eq!(callback_count, 1);
+
+        assert!(state.lock().try_start(13usize).is_ok());
+        assert_eq!(state.lock().clear_without_completion(), Some(13));
+        assert!(state.lock().request().is_none());
+        assert_eq!(
+            state.lock().take_completion(),
+            RunElfCompletion::MissingRequest
+        );
+        assert_eq!(state.lock().take_completion(), RunElfCompletion::Repeated);
+    }
+
+    #[test]
+    fn run_elf_state_cell_serializes_concurrent_request_publication_and_take() {
+        use std::sync::Arc;
+
+        struct State {
+            lifecycle: RunElfLifecycleState<usize>,
+            completed: usize,
+        }
+
+        let state = Arc::new(RunElfStateCell::new(State {
+            lifecycle: RunElfLifecycleState::new(),
+            completed: 0,
+        }));
+        let mut workers = Vec::new();
+        for worker in 0..8usize {
+            let state = Arc::clone(&state);
+            workers.push(std::thread::spawn(move || {
+                for launch in 0..1_000usize {
+                    let token = worker * 1_000 + launch;
+                    loop {
+                        let mut locked = state.lock();
+                        if locked.lifecycle.try_start(token).is_ok() {
+                            break;
+                        }
+                        drop(locked);
+                        std::thread::yield_now();
+                    }
+
+                    loop {
+                        let mut locked = state.lock();
+                        if locked.lifecycle.request().copied() == Some(token) {
+                            assert_eq!(
+                                locked.lifecycle.take_completion(),
+                                RunElfCompletion::Requested(token)
+                            );
+                            locked.completed += 1;
+                            break;
+                        }
+                        drop(locked);
+                        std::thread::yield_now();
+                    }
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("state worker");
+        }
+
+        let locked = state.lock();
+        assert!(locked.lifecycle.request().is_none());
+        assert_eq!(locked.completed, 8_000);
+    }
+
+    #[test]
+    fn run_elf_synchronous_failures_do_not_dispatch_outcomes() {
+        let invalid_environment = RunElfLifecycleState::<usize>::new();
+        assert!(invalid_environment.request().is_none());
+
+        let mut thread_failure = RunElfLifecycleState::new();
+        assert!(thread_failure.try_start(7usize).is_ok());
+        assert_eq!(thread_failure.clear_without_completion(), Some(7));
+        assert!(thread_failure.request().is_none());
     }
 
     #[test]
@@ -673,6 +1042,27 @@ mod user_logic {
         ] {
             assert!(!run_elf_library_name_valid(invalid), "accepted {invalid:?}");
         }
+    }
+
+    #[test]
+    fn run_elf_library_resolver_stages_are_stable() {
+        assert_eq!(
+            run_elf_library_search_stage(0),
+            Some(RunElfLibrarySearchStage::Posix)
+        );
+        assert_eq!(
+            run_elf_library_search_stage(1),
+            Some(RunElfLibrarySearchStage::Shared)
+        );
+        assert_eq!(
+            run_elf_library_search_stage(2),
+            Some(RunElfLibrarySearchStage::System)
+        );
+        assert_eq!(
+            run_elf_library_search_stage(3),
+            Some(RunElfLibrarySearchStage::Direct)
+        );
+        assert_eq!(run_elf_library_search_stage(4), None);
     }
 }
 

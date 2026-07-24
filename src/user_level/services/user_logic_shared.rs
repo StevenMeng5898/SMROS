@@ -418,6 +418,53 @@ pub(crate) fn run_elf_environment_totals_valid(
     entry_count <= max_entries && total_bytes <= max_total_bytes
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RunElfEnvironmentTotals {
+    pub(crate) entry_count: usize,
+    pub(crate) total_bytes: usize,
+    pub(crate) append_default: bool,
+}
+
+pub(crate) fn run_elf_environment_effective_totals(
+    caller_count: usize,
+    caller_total_bytes: usize,
+    has_caller_library_path: bool,
+    default_entry_bytes: usize,
+) -> Option<RunElfEnvironmentTotals> {
+    let append_default = !has_caller_library_path;
+    let entry_count = caller_count.checked_add(usize::from(append_default))?;
+    let total_bytes = if append_default {
+        caller_total_bytes.checked_add(default_entry_bytes)?
+    } else {
+        caller_total_bytes
+    };
+    Some(RunElfEnvironmentTotals {
+        entry_count,
+        total_bytes,
+        append_default,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RunElfEnvironmentSource {
+    Caller(usize),
+    Default,
+}
+
+pub(crate) fn run_elf_environment_source_at(
+    output_index: usize,
+    caller_count: usize,
+    has_caller_library_path: bool,
+) -> Option<RunElfEnvironmentSource> {
+    if output_index < caller_count {
+        Some(RunElfEnvironmentSource::Caller(output_index))
+    } else if output_index == caller_count && !has_caller_library_path {
+        Some(RunElfEnvironmentSource::Default)
+    } else {
+        None
+    }
+}
+
 pub(crate) fn run_elf_environment_entry_has_key(entry: &str, key: &str) -> bool {
     entry
         .as_bytes()
@@ -435,6 +482,141 @@ pub(crate) fn run_elf_environment_keys_equal(left: &str, right: &str) -> bool {
         return false;
     };
     left.as_bytes()[..left_separator] == right.as_bytes()[..right_separator]
+}
+
+pub(crate) struct RunElfStateCell<T> {
+    locked: core::sync::atomic::AtomicBool,
+    value: core::cell::UnsafeCell<T>,
+}
+
+// SAFETY: Access to the contained value is serialized by `lock`.
+unsafe impl<T: Send> Sync for RunElfStateCell<T> {}
+
+impl<T> RunElfStateCell<T> {
+    pub(crate) const fn new(value: T) -> Self {
+        Self {
+            locked: core::sync::atomic::AtomicBool::new(false),
+            value: core::cell::UnsafeCell::new(value),
+        }
+    }
+
+    pub(crate) fn lock(&self) -> RunElfStateGuard<'_, T> {
+        while self
+            .locked
+            .compare_exchange_weak(
+                false,
+                true,
+                core::sync::atomic::Ordering::Acquire,
+                core::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        RunElfStateGuard { cell: self }
+    }
+}
+
+pub(crate) struct RunElfStateGuard<'a, T> {
+    cell: &'a RunElfStateCell<T>,
+}
+
+impl<T> core::ops::Deref for RunElfStateGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: The guard owns the state cell's lock for its lifetime.
+        unsafe { &*self.cell.value.get() }
+    }
+}
+
+impl<T> core::ops::DerefMut for RunElfStateGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: The guard owns the state cell's lock for its lifetime.
+        unsafe { &mut *self.cell.value.get() }
+    }
+}
+
+impl<T> Drop for RunElfStateGuard<'_, T> {
+    fn drop(&mut self) {
+        self.cell
+            .locked
+            .store(false, core::sync::atomic::Ordering::Release);
+    }
+}
+
+pub(crate) struct RunElfLifecycleState<T> {
+    request: Option<T>,
+    return_pending: bool,
+    exit_code: i32,
+    completion_seen: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RunElfCompletion<T> {
+    Requested(T),
+    Repeated,
+    MissingRequest,
+}
+
+impl<T> RunElfLifecycleState<T> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            request: None,
+            return_pending: false,
+            exit_code: 0,
+            completion_seen: false,
+        }
+    }
+
+    pub(crate) fn request(&self) -> Option<&T> {
+        self.request.as_ref()
+    }
+
+    pub(crate) fn try_start(&mut self, request: T) -> Result<(), T> {
+        if self.request.is_some() {
+            return Err(request);
+        }
+        self.request = Some(request);
+        self.return_pending = false;
+        self.exit_code = 0;
+        self.completion_seen = false;
+        Ok(())
+    }
+
+    pub(crate) fn clear_without_completion(&mut self) -> Option<T> {
+        self.return_pending = false;
+        self.exit_code = 0;
+        self.completion_seen = false;
+        self.request.take()
+    }
+
+    pub(crate) fn prepare_return(&mut self, exit_code: i32) -> bool {
+        if self.request.is_none() || self.return_pending {
+            return false;
+        }
+        self.return_pending = true;
+        self.exit_code = exit_code;
+        true
+    }
+
+    pub(crate) fn exit_code(&self) -> i32 {
+        self.exit_code
+    }
+
+    pub(crate) fn take_completion(&mut self) -> RunElfCompletion<T> {
+        self.return_pending = false;
+        self.exit_code = 0;
+        if let Some(request) = self.request.take() {
+            self.completion_seen = true;
+            RunElfCompletion::Requested(request)
+        } else if self.completion_seen {
+            RunElfCompletion::Repeated
+        } else {
+            self.completion_seen = true;
+            RunElfCompletion::MissingRequest
+        }
+    }
 }
 
 pub(crate) fn run_elf_exit_succeeded(exit_code: i32) -> bool {
@@ -470,4 +652,22 @@ pub(crate) fn run_elf_library_name_valid(name_or_path: &str) -> bool {
         saw_component = true;
     }
     saw_component
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RunElfLibrarySearchStage {
+    Posix,
+    Shared,
+    System,
+    Direct,
+}
+
+pub(crate) fn run_elf_library_search_stage(index: usize) -> Option<RunElfLibrarySearchStage> {
+    match index {
+        0 => Some(RunElfLibrarySearchStage::Posix),
+        1 => Some(RunElfLibrarySearchStage::Shared),
+        2 => Some(RunElfLibrarySearchStage::System),
+        3 => Some(RunElfLibrarySearchStage::Direct),
+        _ => None,
+    }
 }

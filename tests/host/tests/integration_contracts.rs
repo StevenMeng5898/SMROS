@@ -670,6 +670,9 @@ fn run_elf_observer_api_is_typed_environment_aware_and_compatible() {
         "pub enum RunTermination",
         "Exit(i32)",
         "LaunchError(RunElfError)",
+        "InfrastructureError(RunInfrastructureError)",
+        "pub enum RunInfrastructureError",
+        "MissingRequest",
         "pub struct RunOutcome",
         "pub path: String",
         "pub termination: RunTermination",
@@ -687,6 +690,8 @@ fn run_elf_observer_api_is_typed_environment_aware_and_compatible() {
     assert!(launcher.contains("LD_LIBRARY_PATH=/shared/posixtest/lib:/shared/lib:/lib"));
     assert!(launcher.contains("run_elf_environment_entry_has_key"));
     assert!(launcher.contains("run_elf_environment_keys_equal"));
+    assert!(launcher.contains("run_elf_environment_effective_totals"));
+    assert!(launcher.contains("run_elf_environment_source_at"));
     for limit in [
         "const RUN_ELF_MAX_ENV_ENTRIES: usize = 64;",
         "const RUN_ELF_MAX_ENV_ENTRY_BYTES: usize = 4 * 1024;",
@@ -716,6 +721,7 @@ fn run_elf_observer_api_is_typed_environment_aware_and_compatible() {
         .expect("system library directory must be searched");
     assert!(posix_lib < shared_lib && shared_lib < system_lib);
     assert!(launcher.contains("run_elf_library_name_valid"));
+    assert!(launcher.contains("run_elf_library_search_stage"));
 }
 
 #[test]
@@ -728,18 +734,35 @@ fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
     let posix = std::fs::read_to_string(repository.join("src/user_level/services/posix_test.rs"))
         .expect("read POSIX service");
 
-    assert!(launcher.contains("RUN_RETURN_PENDING"));
-    assert!(launcher.contains(".compare_exchange(false, true"));
+    assert!(launcher.contains("RunElfStateCell"));
+    assert!(launcher.contains("RunElfLifecycleState"));
+    assert!(launcher.contains("fn with_run_state"));
+    assert!(!launcher.contains("static RUN_ACTIVE"));
+    assert!(!launcher.contains("static ACTIVE_RUN"));
+    assert!(!launcher.contains("static RUN_RETURN_PENDING"));
+    assert!(!launcher.contains("static RUN_EXIT_CODE"));
     assert!(launcher.contains("fn take_active_request("));
     assert!(launcher.contains("fn dispatch_outcome("));
+    assert!(!launcher.contains("run_elf_completion_state_action"));
+    assert!(launcher.contains("state.take_completion()"));
     assert!(launcher.contains("RunTermination::LaunchError(err)"));
     assert!(launcher.contains("RunTermination::Exit(exit_code)"));
+    assert!(launcher.contains("RunTermination::InfrastructureError("));
+    assert!(launcher.contains("print_infrastructure_diagnostic("));
     assert!(launcher.contains("run_elf_elapsed_ticks(request.start_tick, end_tick)"));
     assert!(launcher.contains("syscall::reset_linux_signal_timer_state()"));
     assert!(launcher.contains("posix_test::on_run_outcome(outcome)"));
 
+    let validation = launcher
+        .find("if validate_environment(&env).is_err()")
+        .expect("environment is validated");
+    let publication = launcher
+        .find("state.try_start(request)")
+        .expect("validated request is published");
+    assert!(validation < publication);
+
     let take = launcher
-        .find("let Some(request) = take_active_request()")
+        .find("let (completion, exit_code) = take_active_request()")
         .expect("terminal path takes the active request");
     let dispatch = launcher[take..]
         .find("dispatch_outcome(")
@@ -775,6 +798,47 @@ fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
             "Task 8 must not implement runner event {premature_runner_event}"
         );
     }
+}
+
+#[test]
+fn scheduler_reclaims_thread_stacks_only_after_a_confirmed_context_switch() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let scheduler = std::fs::read_to_string(repository.join("src/kernel_objects/scheduler.rs"))
+        .expect("read scheduler");
+    let shared =
+        std::fs::read_to_string(repository.join("src/kernel_objects/scheduler_logic_shared.rs"))
+            .expect("read shared scheduler lifecycle logic");
+
+    assert!(shared.contains("struct DeferredThreadRetirements"));
+    assert!(shared.contains("record_before_switch"));
+    assert!(shared.contains("confirm_after_switch"));
+    assert!(shared.contains("take_reclaimable"));
+    assert!(shared.contains("DeallocateAndReuse"));
+    assert!(shared.contains("has_stack_pointer != has_stack_size"));
+
+    for function in ["pub fn schedule()", "pub fn schedule_on_cpu(cpu_id: usize)"] {
+        let start = scheduler.find(function).expect("context switch function");
+        let body = braced_body(&scheduler[start..]);
+        assert!(body.contains(
+            "let executing_cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;"
+        ));
+        assert!(body.contains("reap_deferred_thread_for_cpu(executing_cpu)"));
+        let masked = body
+            .find("crate::kernel_lowlevel::cpu::mask_interrupts()")
+            .expect("local interrupts are masked before retirement publication");
+        let deferred = body
+            .find("defer_terminated_thread_before_switch(executing_cpu, current_id)")
+            .expect("outgoing terminated thread is deferred");
+        let switched = body
+            .find("thread::switch_context")
+            .expect("context switch occurs");
+        assert!(masked < deferred && deferred < switched);
+    }
+
+    assert!(scheduler.contains("self.reap_deferred_thread_for_cpu(current_cpu);"));
+    assert!(scheduler.contains("tcb.stack = SendPtr(ptr::null_mut());"));
+    assert!(scheduler.contains("tcb.stack_size = 0;"));
+    assert!(!scheduler.contains("fn reap_terminated_threads("));
 }
 
 #[test]

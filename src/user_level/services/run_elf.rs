@@ -8,8 +8,6 @@
 use alloc::alloc::{alloc, Layout};
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use crate::kernel_lowlevel::{memory::PAGE_SIZE, timer};
 use crate::kernel_objects::scheduler;
@@ -87,9 +85,23 @@ pub enum RunObserver {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunInfrastructureError {
+    MissingRequest,
+}
+
+impl RunInfrastructureError {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunInfrastructureError::MissingRequest => "missing-request",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunTermination {
     Exit(i32),
     LaunchError(RunElfError),
+    InfrastructureError(RunInfrastructureError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,6 +111,7 @@ pub struct RunOutcome {
     pub elapsed_ticks: u64,
 }
 
+#[derive(Clone)]
 struct RunRequest {
     path: String,
     argv: Vec<String>,
@@ -107,24 +120,19 @@ struct RunRequest {
     start_tick: u64,
 }
 
-struct RunSlot<T>(UnsafeCell<T>);
+type RunState = user_logic::RunElfLifecycleState<RunRequest>;
 
-unsafe impl<T> Sync for RunSlot<T> {}
+static RUN_STATE: user_logic::RunElfStateCell<RunState> =
+    user_logic::RunElfStateCell::new(RunState::new());
 
-impl<T> RunSlot<T> {
-    const fn new(value: T) -> Self {
-        Self(UnsafeCell::new(value))
-    }
-
-    fn get(&self) -> *mut T {
-        self.0.get()
-    }
+fn with_run_state<R>(operation: impl FnOnce(&mut RunState) -> R) -> R {
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let mut state = RUN_STATE.lock();
+    let result = operation(&mut state);
+    drop(state);
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    result
 }
-
-static RUN_ACTIVE: AtomicBool = AtomicBool::new(false);
-static RUN_RETURN_PENDING: AtomicBool = AtomicBool::new(false);
-static RUN_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
-static ACTIVE_RUN: RunSlot<Option<RunRequest>> = RunSlot::new(None);
 
 pub fn spawn(path: String, argv: Vec<String>) -> Result<(), RunElfError> {
     spawn_observed(path, argv, Vec::new(), RunObserver::Shell)
@@ -136,29 +144,21 @@ pub fn spawn_observed(
     env: Vec<String>,
     observer: RunObserver,
 ) -> Result<(), RunElfError> {
-    if RUN_ACTIVE.swap(true, Ordering::SeqCst) {
-        return Err(RunElfError::Busy);
-    }
-    syscall::reset_linux_signal_timer_state();
-
     if validate_environment(&env).is_err() {
-        clear_launch_state_without_outcome();
         return Err(RunElfError::InvalidEnvironment);
     }
 
-    if unsafe { (&*ACTIVE_RUN.get()).is_some() } {
-        clear_launch_state_without_outcome();
+    let request = RunRequest {
+        path,
+        argv,
+        env,
+        observer,
+        start_tick: timer::get_tick_count(),
+    };
+    if with_run_state(|state| state.try_start(request).is_err()) {
         return Err(RunElfError::Busy);
     }
-    unsafe {
-        *ACTIVE_RUN.get() = Some(RunRequest {
-            path,
-            argv,
-            env,
-            observer,
-            start_tick: timer::get_tick_count(),
-        });
-    }
+    syscall::reset_linux_signal_timer_state();
 
     scheduler::scheduler()
         .create_thread(run_elf_launcher_entry, "run_elf")
@@ -170,27 +170,15 @@ pub fn spawn_observed(
 }
 
 pub fn active_exec_path() -> Option<String> {
-    unsafe {
-        (&*ACTIVE_RUN.get())
-            .as_ref()
-            .map(|request| request.path.clone())
-    }
+    with_run_state(|state| state.request().map(|request| request.path.clone()))
 }
 
 pub fn prepare_run_elf_return(exit_code: i32) -> bool {
-    if RUN_RETURN_PENDING
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return false;
-    }
-    if !RUN_ACTIVE.load(Ordering::SeqCst) {
-        RUN_RETURN_PENDING.store(false, Ordering::SeqCst);
+    if !with_run_state(|state| state.prepare_return(exit_code)) {
         return false;
     }
 
     syscall::reset_linux_signal_timer_state();
-    RUN_EXIT_CODE.store(exit_code, Ordering::SeqCst);
 
     let spsr_el1 = user_logic::el1h_spsr_masked();
     unsafe {
@@ -203,9 +191,12 @@ pub fn prepare_run_elf_return(exit_code: i32) -> bool {
 }
 
 extern "C" fn run_elf_launcher_entry() -> ! {
-    let preparation = unsafe { (&*ACTIVE_RUN.get()).as_ref().map(prepare_dynamic_loader) };
+    let request = with_run_state(|state| state.request().cloned());
+    let preparation = request.as_ref().map(prepare_dynamic_loader);
     let Some(preparation) = preparation else {
-        clear_launch_state_without_outcome();
+        complete_active_run(|_| {
+            RunTermination::InfrastructureError(RunInfrastructureError::MissingRequest)
+        });
         finish_launcher_thread();
     };
 
@@ -214,7 +205,7 @@ extern "C" fn run_elf_launcher_entry() -> ! {
             user_process::switch_to_el0(entry, stack_top, 0);
         },
         Err(err) => {
-            complete_active_run(RunTermination::LaunchError(err));
+            complete_active_run(|_| RunTermination::LaunchError(err));
             finish_launcher_thread();
         }
     }
@@ -222,8 +213,7 @@ extern "C" fn run_elf_launcher_entry() -> ! {
 
 #[no_mangle]
 pub extern "C" fn run_elf_launcher_resume() -> ! {
-    let exit_code = RUN_EXIT_CODE.load(Ordering::SeqCst);
-    complete_active_run(RunTermination::Exit(exit_code));
+    complete_active_run(RunTermination::Exit);
     finish_launcher_thread();
 }
 
@@ -250,18 +240,16 @@ fn validate_environment(env: &[String]) -> Result<(), RunElfError> {
         }
     }
 
-    let effective_count = env
-        .len()
-        .checked_add(usize::from(!has_ld_library_path))
-        .ok_or(RunElfError::InvalidEnvironment)?;
-    if !has_ld_library_path {
-        total_bytes = total_bytes
-            .checked_add(RUN_ELF_DEFAULT_LD_LIBRARY_PATH.len().saturating_add(1))
-            .ok_or(RunElfError::InvalidEnvironment)?;
-    }
-    if !user_logic::run_elf_environment_totals_valid(
-        effective_count,
+    let effective = user_logic::run_elf_environment_effective_totals(
+        env.len(),
         total_bytes,
+        has_ld_library_path,
+        RUN_ELF_DEFAULT_LD_LIBRARY_PATH.len().saturating_add(1),
+    )
+    .ok_or(RunElfError::InvalidEnvironment)?;
+    if !user_logic::run_elf_environment_totals_valid(
+        effective.entry_count,
+        effective.total_bytes,
         RUN_ELF_MAX_ENV_ENTRIES,
         RUN_ELF_MAX_ENV_TOTAL_BYTES,
     ) {
@@ -270,27 +258,34 @@ fn validate_environment(env: &[String]) -> Result<(), RunElfError> {
     Ok(())
 }
 
-fn take_active_request() -> Option<RunRequest> {
-    let request = unsafe { (&mut *ACTIVE_RUN.get()).take() };
-    RUN_EXIT_CODE.store(0, Ordering::SeqCst);
-    RUN_RETURN_PENDING.store(false, Ordering::SeqCst);
-    RUN_ACTIVE.store(false, Ordering::SeqCst);
+fn take_active_request() -> (user_logic::RunElfCompletion<RunRequest>, i32) {
+    let result = with_run_state(|state| {
+        let exit_code = state.exit_code();
+        (state.take_completion(), exit_code)
+    });
     syscall::reset_linux_signal_timer_state();
-    request
+    result
 }
 
 fn clear_launch_state_without_outcome() {
-    let _ = take_active_request();
+    let _ = with_run_state(|state| state.clear_without_completion());
+    syscall::reset_linux_signal_timer_state();
 }
 
-fn complete_active_run(termination: RunTermination) {
-    let Some(request) = take_active_request() else {
-        return;
+fn complete_active_run(termination: impl FnOnce(i32) -> RunTermination) {
+    let (completion, exit_code) = take_active_request();
+    let request = match completion {
+        user_logic::RunElfCompletion::Requested(request) => request,
+        user_logic::RunElfCompletion::Repeated => return,
+        user_logic::RunElfCompletion::MissingRequest => {
+            print_infrastructure_diagnostic(RunInfrastructureError::MissingRequest);
+            return;
+        }
     };
     let end_tick = timer::get_tick_count();
     let outcome = RunOutcome {
         path: request.path,
-        termination,
+        termination: termination(exit_code),
         elapsed_ticks: user_logic::run_elf_elapsed_ticks(request.start_tick, end_tick),
     };
     dispatch_outcome(request.observer, outcome);
@@ -303,10 +298,25 @@ fn dispatch_outcome(observer: RunObserver, outcome: RunOutcome) {
     }
 }
 
+fn print_infrastructure_diagnostic(error: RunInfrastructureError) {
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+    serial.init();
+    serial.write_str("run: infrastructure-failure: ");
+    serial.write_str(error.as_str());
+    serial.write_str("\n");
+}
+
 fn print_shell_outcome(outcome: &RunOutcome) {
     let mut serial = crate::kernel_lowlevel::serial::Serial::new();
     serial.init();
     match outcome.termination {
+        RunTermination::InfrastructureError(error) => {
+            serial.write_str("run: infrastructure-failure: ");
+            serial.write_str(error.as_str());
+            serial.write_str(" path=");
+            serial.write_str(outcome.path.as_str());
+            serial.write_str("\n");
+        }
         RunTermination::LaunchError(err) => {
             serial.write_str("run: ELF launch-failed: ");
             serial.write_str(err.as_str());
@@ -394,32 +404,33 @@ fn resolve_library_path(name_or_path: &str) -> Option<String> {
 
     let name = name_or_path.rsplit('/').next().unwrap_or(name_or_path);
     let _ = fxfs::ensure_host_share();
-    let mut posix = String::from("/shared/posixtest/lib/");
-    posix.push_str(name);
-    if fxfs::attrs(posix.as_str()).is_ok() {
-        return Some(posix);
-    }
-
-    let mut shared = String::from("/shared/lib/");
-    shared.push_str(name);
-    if fxfs::attrs(shared.as_str()).is_ok() {
-        return Some(shared);
-    }
-
-    let mut lib = String::from("/lib/");
-    lib.push_str(name);
-    if fxfs::attrs(lib.as_str()).is_ok() {
-        return Some(lib);
-    }
-
-    if name_or_path.starts_with('/') && fxfs::attrs(name_or_path).is_ok() {
-        return Some(String::from(name_or_path));
-    }
-    if path_under_shared(name_or_path) {
-        let _ = fxfs::ensure_host_share();
-        if fxfs::attrs(name_or_path).is_ok() {
-            return Some(String::from(name_or_path));
+    let mut stage_index = 0usize;
+    while let Some(stage) = user_logic::run_elf_library_search_stage(stage_index) {
+        match stage {
+            user_logic::RunElfLibrarySearchStage::Posix
+            | user_logic::RunElfLibrarySearchStage::Shared
+            | user_logic::RunElfLibrarySearchStage::System => {
+                let prefix = match stage {
+                    user_logic::RunElfLibrarySearchStage::Posix => "/shared/posixtest/lib/",
+                    user_logic::RunElfLibrarySearchStage::Shared => "/shared/lib/",
+                    user_logic::RunElfLibrarySearchStage::System => "/lib/",
+                    user_logic::RunElfLibrarySearchStage::Direct => unreachable!(),
+                };
+                let mut candidate = String::from(prefix);
+                candidate.push_str(name);
+                if fxfs::attrs(candidate.as_str()).is_ok() {
+                    return Some(candidate);
+                }
+            }
+            user_logic::RunElfLibrarySearchStage::Direct => {
+                if (name_or_path.starts_with('/') || path_under_shared(name_or_path))
+                    && fxfs::attrs(name_or_path).is_ok()
+                {
+                    return Some(String::from(name_or_path));
+                }
+            }
         }
+        stage_index += 1;
     }
 
     None
@@ -566,16 +577,30 @@ fn build_initial_stack(request: &RunRequest, main: &elf::ElfImage) -> Result<u64
         argv_ptrs.push(stack.push_cstr(request.path.as_str())? as u64);
     }
 
+    let has_caller_library_path = request.env.iter().any(|entry| {
+        user_logic::run_elf_environment_entry_has_key(entry.as_str(), RUN_ELF_LD_LIBRARY_PATH_KEY)
+    });
+    let effective = user_logic::run_elf_environment_effective_totals(
+        request.env.len(),
+        0,
+        has_caller_library_path,
+        0,
+    )
+    .ok_or(RunElfError::Stack)?;
     let mut env_ptrs = Vec::new();
-    for entry in request.env.iter().rev() {
-        env_ptrs.push(stack.push_cstr(entry.as_str())? as u64);
+    for output_index in (0..effective.entry_count).rev() {
+        let value = match user_logic::run_elf_environment_source_at(
+            output_index,
+            request.env.len(),
+            has_caller_library_path,
+        ) {
+            Some(user_logic::RunElfEnvironmentSource::Caller(index)) => request.env[index].as_str(),
+            Some(user_logic::RunElfEnvironmentSource::Default) => RUN_ELF_DEFAULT_LD_LIBRARY_PATH,
+            None => return Err(RunElfError::Stack),
+        };
+        env_ptrs.push(stack.push_cstr(value)? as u64);
     }
     env_ptrs.reverse();
-    if !request.env.iter().any(|entry| {
-        user_logic::run_elf_environment_entry_has_key(entry.as_str(), RUN_ELF_LD_LIBRARY_PATH_KEY)
-    }) {
-        env_ptrs.push(stack.push_cstr(RUN_ELF_DEFAULT_LD_LIBRARY_PATH)? as u64);
-    }
     let auxv = [
         (
             AT_PHDR,
