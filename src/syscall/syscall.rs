@@ -5815,8 +5815,8 @@ pub fn sys_exit(exit_code: i32) -> SysResult {
         return Ok(0);
     }
 
-    if crate::user_level::run_elf::prepare_run_elf_return(exit_code) {
-        return Ok(0);
+    if let Some(launch_id) = crate::user_level::run_elf::prepare_run_elf_return(exit_code) {
+        return Ok(launch_id);
     }
 
     // No current-process binding is modeled yet; EL0 exits through the hooks above.

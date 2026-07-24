@@ -593,17 +593,65 @@ impl<T> Drop for RunElfStateGuard<'_, T> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RunElfLaunchId(core::num::NonZeroU64);
+
+impl RunElfLaunchId {
+    pub(crate) const fn from_raw(raw: u64) -> Option<Self> {
+        match core::num::NonZeroU64::new(raw) {
+            Some(raw) => Some(Self(raw)),
+            None => None,
+        }
+    }
+
+    pub(crate) const fn raw(self) -> u64 {
+        self.0.get()
+    }
+
+    pub(crate) fn from_usize(raw: usize) -> Option<Self> {
+        if usize::BITS != 64 {
+            return None;
+        }
+        Self::from_raw(u64::try_from(raw).ok()?)
+    }
+
+    pub(crate) fn to_usize(self) -> Option<usize> {
+        if usize::BITS != 64 {
+            return None;
+        }
+        usize::try_from(self.raw()).ok()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RunElfStart<T> {
+    Started(RunElfLaunchId),
+    Busy(T),
+    Exhausted(T),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RunElfTransition {
+    Matched,
+    Repeated,
+    Stale,
+    Missing,
+}
+
 pub(crate) struct RunElfLifecycleState<T> {
     request: Option<T>,
+    active_id: Option<RunElfLaunchId>,
+    next_launch_id: Option<RunElfLaunchId>,
+    last_terminal_id: Option<RunElfLaunchId>,
     return_pending: bool,
     exit_code: i32,
-    completion_seen: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RunElfCompletion<T> {
     Requested(T),
     Repeated,
+    Stale,
     MissingRequest,
 }
 
@@ -664,13 +712,100 @@ impl<T, R> RunElfActiveRequest<T, R> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RunElfAttachError<R> {
+    Stale(R),
+    Missing(R),
+    Occupied(R),
+}
+
+impl<R> RunElfAttachError<R> {
+    pub(crate) fn into_resource(self) -> R {
+        match self {
+            Self::Stale(resource) | Self::Missing(resource) | Self::Occupied(resource) => resource,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RunElfBindingError {
+    OutOfRange,
+    Occupied,
+}
+
+pub(crate) struct RunElfCpuBindings<const N: usize> {
+    slots: [core::sync::atomic::AtomicU64; N],
+}
+
+impl<const N: usize> RunElfCpuBindings<N> {
+    const EMPTY: u64 = 0;
+
+    pub(crate) const fn new() -> Self {
+        Self {
+            slots: [const { core::sync::atomic::AtomicU64::new(0) }; N],
+        }
+    }
+
+    pub(crate) fn bind(
+        &self,
+        cpu: usize,
+        launch_id: RunElfLaunchId,
+    ) -> Result<(), RunElfBindingError> {
+        let Some(slot) = self.slots.get(cpu) else {
+            return Err(RunElfBindingError::OutOfRange);
+        };
+        slot.compare_exchange(
+            Self::EMPTY,
+            launch_id.raw(),
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+        )
+        .map(|_| ())
+        .map_err(|_| RunElfBindingError::Occupied)
+    }
+
+    pub(crate) fn get(&self, cpu: usize) -> Option<RunElfLaunchId> {
+        let raw = self
+            .slots
+            .get(cpu)?
+            .load(core::sync::atomic::Ordering::Acquire);
+        RunElfLaunchId::from_raw(raw)
+    }
+
+    pub(crate) fn clear(&self, cpu: usize, expected: RunElfLaunchId) -> bool {
+        let Some(slot) = self.slots.get(cpu) else {
+            return false;
+        };
+        slot.compare_exchange(
+            expected.raw(),
+            Self::EMPTY,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+        )
+        .is_ok()
+    }
+}
+
 impl<T> RunElfLifecycleState<T> {
     pub(crate) const fn new() -> Self {
         Self {
             request: None,
+            active_id: None,
+            next_launch_id: RunElfLaunchId::from_raw(1),
+            last_terminal_id: None,
             return_pending: false,
             exit_code: 0,
-            completion_seen: false,
+        }
+    }
+
+    pub(crate) const fn with_next_launch_id(next_launch_id: RunElfLaunchId) -> Self {
+        Self {
+            request: None,
+            active_id: None,
+            next_launch_id: Some(next_launch_id),
+            last_terminal_id: None,
+            return_pending: false,
+            exit_code: 0,
         }
     }
 
@@ -678,52 +813,128 @@ impl<T> RunElfLifecycleState<T> {
         self.request.as_ref()
     }
 
-    pub(crate) fn request_mut(&mut self) -> Option<&mut T> {
-        self.request.as_mut()
+    pub(crate) const fn active_id(&self) -> Option<RunElfLaunchId> {
+        self.active_id
     }
 
-    pub(crate) fn try_start(&mut self, request: T) -> Result<(), T> {
-        if self.request.is_some() {
-            return Err(request);
+    pub(crate) fn request_for(&self, expected: RunElfLaunchId) -> Option<&T> {
+        if self.active_id == Some(expected) {
+            self.request.as_ref()
+        } else {
+            None
         }
+    }
+
+    fn request_mut_for(&mut self, expected: RunElfLaunchId) -> Option<&mut T> {
+        if self.active_id == Some(expected) {
+            self.request.as_mut()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn try_start(&mut self, request: T) -> RunElfStart<T> {
+        if self.request.is_some() {
+            return RunElfStart::Busy(request);
+        }
+        let Some(launch_id) = self.next_launch_id else {
+            return RunElfStart::Exhausted(request);
+        };
+        self.next_launch_id = launch_id
+            .raw()
+            .checked_add(1)
+            .and_then(RunElfLaunchId::from_raw);
         self.request = Some(request);
+        self.active_id = Some(launch_id);
         self.return_pending = false;
         self.exit_code = 0;
-        self.completion_seen = false;
-        Ok(())
+        RunElfStart::Started(launch_id)
     }
 
-    pub(crate) fn clear_without_completion(&mut self) -> Option<T> {
-        self.return_pending = false;
-        self.exit_code = 0;
-        self.completion_seen = false;
-        self.request.take()
+    fn classify(&self, expected: RunElfLaunchId) -> RunElfTransition {
+        match self.active_id {
+            Some(active) if active == expected => RunElfTransition::Matched,
+            Some(active) if expected.raw() < active.raw() => RunElfTransition::Stale,
+            Some(_) => RunElfTransition::Missing,
+            None if self.last_terminal_id == Some(expected) => RunElfTransition::Repeated,
+            None if self
+                .last_terminal_id
+                .map(|terminal| expected.raw() < terminal.raw())
+                .unwrap_or(false) =>
+            {
+                RunElfTransition::Stale
+            }
+            None => RunElfTransition::Missing,
+        }
     }
 
-    pub(crate) fn prepare_return(&mut self, exit_code: i32) -> bool {
-        if self.request.is_none() || self.return_pending {
-            return false;
+    pub(crate) fn clear_without_completion(
+        &mut self,
+        expected: RunElfLaunchId,
+    ) -> RunElfCompletion<T> {
+        match self.classify(expected) {
+            RunElfTransition::Matched => {
+                self.return_pending = false;
+                self.exit_code = 0;
+                self.active_id = None;
+                self.last_terminal_id = Some(expected);
+                match self.request.take() {
+                    Some(request) => RunElfCompletion::Requested(request),
+                    None => RunElfCompletion::MissingRequest,
+                }
+            }
+            RunElfTransition::Repeated => RunElfCompletion::Repeated,
+            RunElfTransition::Stale => RunElfCompletion::Stale,
+            RunElfTransition::Missing => RunElfCompletion::MissingRequest,
+        }
+    }
+
+    pub(crate) fn prepare_return(
+        &mut self,
+        expected: RunElfLaunchId,
+        exit_code: i32,
+    ) -> RunElfTransition {
+        let transition = self.classify(expected);
+        if transition != RunElfTransition::Matched {
+            return transition;
+        }
+        if self.return_pending {
+            return RunElfTransition::Repeated;
         }
         self.return_pending = true;
         self.exit_code = exit_code;
-        true
+        RunElfTransition::Matched
     }
 
-    pub(crate) fn exit_code(&self) -> i32 {
-        self.exit_code
-    }
-
-    pub(crate) fn take_completion(&mut self) -> RunElfCompletion<T> {
-        self.return_pending = false;
-        self.exit_code = 0;
-        if let Some(request) = self.request.take() {
-            self.completion_seen = true;
-            RunElfCompletion::Requested(request)
-        } else if self.completion_seen {
-            RunElfCompletion::Repeated
-        } else {
-            self.completion_seen = true;
-            RunElfCompletion::MissingRequest
+    pub(crate) fn take_completion(&mut self, expected: RunElfLaunchId) -> RunElfTaken<T> {
+        match self.classify(expected) {
+            RunElfTransition::Matched => {
+                let exit_code = self.exit_code;
+                self.return_pending = false;
+                self.exit_code = 0;
+                self.active_id = None;
+                self.last_terminal_id = Some(expected);
+                let completion = match self.request.take() {
+                    Some(request) => RunElfCompletion::Requested(request),
+                    None => RunElfCompletion::MissingRequest,
+                };
+                RunElfTaken {
+                    completion,
+                    exit_code,
+                }
+            }
+            RunElfTransition::Repeated => RunElfTaken {
+                completion: RunElfCompletion::Repeated,
+                exit_code: 0,
+            },
+            RunElfTransition::Stale => RunElfTaken {
+                completion: RunElfCompletion::Stale,
+                exit_code: 0,
+            },
+            RunElfTransition::Missing => RunElfTaken {
+                completion: RunElfCompletion::MissingRequest,
+                exit_code: 0,
+            },
         }
     }
 }
@@ -732,9 +943,9 @@ pub(crate) fn run_elf_start_transition<T>(
     state: &mut RunElfLifecycleState<T>,
     request: T,
     reset: impl FnOnce(),
-) -> Result<(), T> {
+) -> RunElfStart<T> {
     let result = state.try_start(request);
-    if result.is_ok() {
+    if matches!(&result, RunElfStart::Started(_)) {
         reset();
     }
     result
@@ -742,45 +953,57 @@ pub(crate) fn run_elf_start_transition<T>(
 
 pub(crate) fn run_elf_prepare_return_transition<T>(
     state: &mut RunElfLifecycleState<T>,
+    expected: RunElfLaunchId,
     exit_code: i32,
     reset: impl FnOnce(),
-) -> bool {
-    let prepared = state.prepare_return(exit_code);
-    if prepared {
+) -> RunElfTransition {
+    let transition = state.prepare_return(expected, exit_code);
+    if transition == RunElfTransition::Matched {
         reset();
     }
-    prepared
+    transition
 }
 
 pub(crate) fn run_elf_take_completion_transition<T>(
     state: &mut RunElfLifecycleState<T>,
+    expected: RunElfLaunchId,
     reset: impl FnOnce(),
 ) -> RunElfTaken<T> {
-    let exit_code = state.exit_code();
-    let completion = state.take_completion();
-    reset();
-    RunElfTaken {
-        completion,
-        exit_code,
+    let taken = state.take_completion(expected);
+    if matches!(&taken.completion, RunElfCompletion::Requested(_)) {
+        reset();
     }
+    taken
 }
 
 pub(crate) fn run_elf_clear_transition<T>(
     state: &mut RunElfLifecycleState<T>,
+    expected: RunElfLaunchId,
     reset: impl FnOnce(),
-) -> Option<T> {
-    let request = state.clear_without_completion();
-    reset();
-    request
+) -> RunElfCompletion<T> {
+    let completion = state.clear_without_completion(expected);
+    if matches!(&completion, RunElfCompletion::Requested(_)) {
+        reset();
+    }
+    completion
 }
 
 pub(crate) fn run_elf_attach_resource_transition<T, R>(
     state: &mut RunElfLifecycleState<RunElfActiveRequest<T, R>>,
+    expected: RunElfLaunchId,
     resource: R,
-) -> Result<(), R> {
-    match state.request_mut() {
-        Some(request) => request.attach_resource(resource),
-        None => Err(resource),
+) -> Result<(), RunElfAttachError<R>> {
+    match state.classify(expected) {
+        RunElfTransition::Matched => match state.request_mut_for(expected) {
+            Some(request) => request
+                .attach_resource(resource)
+                .map_err(RunElfAttachError::Occupied),
+            None => Err(RunElfAttachError::Missing(resource)),
+        },
+        RunElfTransition::Stale | RunElfTransition::Repeated => {
+            Err(RunElfAttachError::Stale(resource))
+        }
+        RunElfTransition::Missing => Err(RunElfAttachError::Missing(resource)),
     }
 }
 

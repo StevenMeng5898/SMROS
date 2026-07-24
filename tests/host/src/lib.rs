@@ -943,27 +943,29 @@ mod user_logic {
         let state = RunElfStateCell::new(RunElfLifecycleState::new());
         let mut reset_count = 0usize;
 
-        assert!(run_elf_start_transition(&mut state.lock(), 11usize, || reset_count += 1).is_ok());
-        assert_eq!(
+        let first_id =
+            match run_elf_start_transition(&mut state.lock(), 11usize, || reset_count += 1) {
+                RunElfStart::Started(id) => id,
+                _ => panic!("first request must start"),
+            };
+        assert!(matches!(
             run_elf_start_transition(&mut state.lock(), 12usize, || reset_count += 1),
-            Err(12)
-        );
+            RunElfStart::Busy(12)
+        ));
         assert_eq!(reset_count, 1, "busy rejection must not reset active state");
-        assert!(run_elf_prepare_return_transition(
-            &mut state.lock(),
-            37,
-            || reset_count += 1
-        ));
-        assert!(!run_elf_prepare_return_transition(
-            &mut state.lock(),
-            38,
-            || reset_count += 1
-        ));
+        assert_eq!(
+            run_elf_prepare_return_transition(&mut state.lock(), first_id, 37, || reset_count += 1),
+            RunElfTransition::Matched
+        );
+        assert_eq!(
+            run_elf_prepare_return_transition(&mut state.lock(), first_id, 38, || reset_count += 1),
+            RunElfTransition::Repeated
+        );
 
         let mut callback_count = 0usize;
         let taken = {
             let mut locked = state.lock();
-            run_elf_take_completion_transition(&mut locked, || reset_count += 1)
+            run_elf_take_completion_transition(&mut locked, first_id, || reset_count += 1)
         };
         match taken.completion {
             RunElfCompletion::Requested(request) => {
@@ -978,27 +980,93 @@ mod user_logic {
         assert_eq!(reset_count, 3);
 
         assert_eq!(
-            run_elf_take_completion_transition(&mut state.lock(), || reset_count += 1).completion,
+            run_elf_take_completion_transition(&mut state.lock(), first_id, || reset_count += 1)
+                .completion,
             RunElfCompletion::Repeated
         );
         assert_eq!(callback_count, 1);
-        assert_eq!(reset_count, 4);
+        assert_eq!(reset_count, 3, "repeated completion must not reset state");
 
-        assert!(run_elf_start_transition(&mut state.lock(), 13usize, || reset_count += 1).is_ok());
+        let second_id =
+            match run_elf_start_transition(&mut state.lock(), 13usize, || reset_count += 1) {
+                RunElfStart::Started(id) => id,
+                _ => panic!("second request must start"),
+            };
+        assert_ne!(first_id, second_id);
         assert_eq!(
-            run_elf_clear_transition(&mut state.lock(), || reset_count += 1),
-            Some(13)
+            run_elf_clear_transition(&mut state.lock(), second_id, || reset_count += 1),
+            RunElfCompletion::Requested(13)
         );
         assert!(state.lock().request().is_none());
         assert_eq!(
-            run_elf_take_completion_transition(&mut state.lock(), || reset_count += 1).completion,
-            RunElfCompletion::MissingRequest
-        );
-        assert_eq!(
-            run_elf_take_completion_transition(&mut state.lock(), || reset_count += 1).completion,
+            run_elf_take_completion_transition(&mut state.lock(), second_id, || reset_count += 1)
+                .completion,
             RunElfCompletion::Repeated
         );
-        assert_eq!(reset_count, 8);
+        assert_eq!(
+            run_elf_take_completion_transition(&mut state.lock(), first_id, || reset_count += 1)
+                .completion,
+            RunElfCompletion::Stale
+        );
+        let unknown = RunElfLaunchId::from_raw(99).expect("nonzero launch ID");
+        assert_eq!(
+            run_elf_take_completion_transition(&mut state.lock(), unknown, || reset_count += 1)
+                .completion,
+            RunElfCompletion::MissingRequest
+        );
+        assert_eq!(reset_count, 5);
+    }
+
+    #[test]
+    fn run_elf_launch_identity_exhaustion_is_fail_closed() {
+        let maximum = RunElfLaunchId::from_raw(u64::MAX).expect("maximum is nonzero");
+        let mut state = RunElfLifecycleState::with_next_launch_id(maximum);
+        let mut resets = 0usize;
+
+        assert_eq!(RunElfLaunchId::from_raw(0), None);
+        assert_eq!(RunElfLaunchId::from_usize(0), None);
+        assert_eq!(maximum.raw(), u64::MAX);
+        assert_eq!(maximum.to_usize(), Some(usize::MAX));
+        assert_eq!(RunElfLaunchId::from_usize(usize::MAX), Some(maximum));
+
+        let issued = match run_elf_start_transition(&mut state, 1usize, || resets += 1) {
+            RunElfStart::Started(id) => id,
+            _ => panic!("last launch ID must be issued once"),
+        };
+        assert_eq!(issued, maximum);
+        assert!(matches!(
+            run_elf_take_completion_transition(&mut state, issued, || resets += 1).completion,
+            RunElfCompletion::Requested(1)
+        ));
+        assert!(matches!(
+            run_elf_start_transition(&mut state, 2usize, || resets += 1),
+            RunElfStart::Exhausted(2)
+        ));
+        assert!(matches!(
+            run_elf_start_transition(&mut state, 3usize, || resets += 1),
+            RunElfStart::Exhausted(3)
+        ));
+        assert!(state.request().is_none());
+        assert_eq!(resets, 2, "exhaustion must not reset or reuse state");
+    }
+
+    #[test]
+    fn run_elf_cpu_bindings_reject_bounds_occupancy_and_stale_clear() {
+        let bindings = RunElfCpuBindings::<2>::new();
+        let first = RunElfLaunchId::from_raw(1).expect("first ID");
+        let second = RunElfLaunchId::from_raw(2).expect("second ID");
+
+        assert_eq!(bindings.bind(2, first), Err(RunElfBindingError::OutOfRange));
+        assert_eq!(bindings.get(2), None);
+        assert_eq!(bindings.bind(0, first), Ok(()));
+        assert_eq!(bindings.get(0), Some(first));
+        assert_eq!(bindings.bind(0, second), Err(RunElfBindingError::Occupied));
+        assert!(!bindings.clear(0, second));
+        assert_eq!(bindings.get(0), Some(first));
+        assert!(bindings.clear(0, first));
+        assert_eq!(bindings.get(0), None);
+        assert_eq!(bindings.bind(0, second), Ok(()));
+        assert_eq!(bindings.get(0), Some(second));
     }
 
     #[test]
@@ -1036,7 +1104,10 @@ mod user_logic {
         ));
 
         release_reset_tx.send(()).expect("release publisher reset");
-        assert_eq!(publisher.join().expect("publisher"), Ok(()));
+        assert!(matches!(
+            publisher.join().expect("publisher"),
+            RunElfStart::Started(_)
+        ));
         assert_eq!(observer.join().expect("observer"), Some(1));
         observer_acquired_rx
             .recv()
@@ -1049,7 +1120,10 @@ mod user_logic {
         use std::time::Duration;
 
         let mut lifecycle = RunElfLifecycleState::new();
-        assert!(run_elf_start_transition(&mut lifecycle, 1usize, || {}).is_ok());
+        let first_id = match run_elf_start_transition(&mut lifecycle, 1usize, || {}) {
+            RunElfStart::Started(id) => id,
+            _ => panic!("first request must start"),
+        };
         let state = Arc::new(RunElfStateCell::new(lifecycle));
         let events = Arc::new(Mutex::new(Vec::new()));
         let (reset_entered_tx, reset_entered_rx) = mpsc::channel();
@@ -1061,7 +1135,7 @@ mod user_logic {
         let completion_events = Arc::clone(&events);
         let completion = std::thread::spawn(move || {
             let mut locked = completion_state.lock();
-            run_elf_take_completion_transition(&mut locked, || {
+            run_elf_take_completion_transition(&mut locked, first_id, || {
                 completion_events.lock().unwrap().push("old-reset");
                 reset_entered_tx.send(()).expect("signal old reset");
                 release_reset_rx.recv().expect("release old reset")
@@ -1092,12 +1166,17 @@ mod user_logic {
         release_reset_tx.send(()).expect("release old reset");
         let taken = completion.join().expect("completion");
         assert_eq!(taken.completion, RunElfCompletion::Requested(1));
-        assert_eq!(reentrant.join().expect("reentrant"), Ok(()));
+        let second_id = match reentrant.join().expect("reentrant") {
+            RunElfStart::Started(id) => id,
+            _ => panic!("reentrant request must start"),
+        };
+        assert_ne!(first_id, second_id);
         reentrant_acquired_rx
             .recv()
             .expect("reentrant start acquired after old reset");
         assert_eq!(*events.lock().unwrap(), ["old-reset", "new-reset"]);
         assert_eq!(state.lock().request().copied(), Some(2));
+        assert_eq!(state.lock().active_id(), Some(second_id));
     }
 
     #[test]
@@ -1119,20 +1198,22 @@ mod user_logic {
             workers.push(std::thread::spawn(move || {
                 for launch in 0..1_000usize {
                     let token = worker * 1_000 + launch;
-                    loop {
+                    let launch_id = loop {
                         let mut locked = state.lock();
-                        if locked.lifecycle.try_start(token).is_ok() {
-                            break;
+                        match locked.lifecycle.try_start(token) {
+                            RunElfStart::Started(id) => break id,
+                            RunElfStart::Busy(_) => {}
+                            RunElfStart::Exhausted(_) => panic!("launch IDs exhausted"),
                         }
                         drop(locked);
                         std::thread::yield_now();
-                    }
+                    };
 
                     loop {
                         let mut locked = state.lock();
-                        if locked.lifecycle.request().copied() == Some(token) {
+                        if locked.lifecycle.request_for(launch_id).copied() == Some(token) {
                             assert_eq!(
-                                locked.lifecycle.take_completion(),
+                                locked.lifecycle.take_completion(launch_id).completion,
                                 RunElfCompletion::Requested(token)
                             );
                             locked.completed += 1;
@@ -1172,18 +1253,33 @@ mod user_logic {
         assert!(state.request().is_none());
         assert_eq!((resets, callbacks), (0, 0));
 
-        assert!(run_elf_start_transition(&mut state, Request::new(1), || resets += 1).is_ok());
-        let thread_failure = run_elf_clear_transition(&mut state, || resets += 1)
-            .expect("thread failure clears the accepted request");
+        let thread_failure_id =
+            match run_elf_start_transition(&mut state, Request::new(1), || resets += 1) {
+                RunElfStart::Started(id) => id,
+                _ => panic!("thread-failure request must start"),
+            };
+        let thread_failure =
+            match run_elf_clear_transition(&mut state, thread_failure_id, || resets += 1) {
+                RunElfCompletion::Requested(request) => request,
+                _ => panic!("thread failure must clear its accepted request"),
+            };
         drop(thread_failure);
         assert!(state.request().is_none());
         assert_eq!((resets, callbacks), (2, 0));
 
-        assert!(run_elf_start_transition(&mut state, Request::new(2), || resets += 1).is_ok());
-        assert!(run_elf_start_transition(&mut state, Request::new(3), || resets += 1).is_err());
+        let loader_failure_id =
+            match run_elf_start_transition(&mut state, Request::new(2), || resets += 1) {
+                RunElfStart::Started(id) => id,
+                _ => panic!("loader-failure request must start"),
+            };
+        assert!(matches!(
+            run_elf_start_transition(&mut state, Request::new(3), || resets += 1),
+            RunElfStart::Busy(_)
+        ));
         assert_eq!((resets, callbacks), (3, 0));
 
-        let loader_failure = run_elf_take_completion_transition(&mut state, || resets += 1);
+        let loader_failure =
+            run_elf_take_completion_transition(&mut state, loader_failure_id, || resets += 1);
         let completed = match loader_failure.completion {
             RunElfCompletion::Requested(request) => request,
             _ => panic!("loader failure must retain its accepted request"),
@@ -1196,14 +1292,18 @@ mod user_logic {
         assert_eq!((resets, callbacks), (4, 1));
 
         assert!(matches!(
-            run_elf_take_completion_transition(&mut state, || resets += 1).completion,
+            run_elf_take_completion_transition(&mut state, loader_failure_id, || resets += 1)
+                .completion,
             RunElfCompletion::Repeated
         ));
-        assert_eq!((resets, callbacks), (5, 1));
+        assert_eq!((resets, callbacks), (4, 1));
 
-        assert!(run_elf_start_transition(&mut state, Request::new(4), || resets += 1).is_ok());
+        assert!(matches!(
+            run_elf_start_transition(&mut state, Request::new(4), || resets += 1),
+            RunElfStart::Started(_)
+        ));
         assert_eq!(state.request().map(|request| *request.launch()), Some(4));
-        assert_eq!((resets, callbacks), (6, 1));
+        assert_eq!((resets, callbacks), (5, 1));
     }
 
     struct TestAllocation {
@@ -1251,14 +1351,130 @@ mod user_logic {
         let mut no_request = RunElfLifecycleState::<
             RunElfActiveRequest<usize, RunElfOwnedResource<TestAllocation>>,
         >::new();
+        let missing_id = RunElfLaunchId::from_raw(1).expect("nonzero launch ID");
         let unattached = run_elf_attach_resource_transition(
             &mut no_request,
+            missing_id,
             test_allocation(&allocations, &releases),
         )
-        .expect_err("a resource cannot attach without an active request");
+        .expect_err("a resource cannot attach without an active request")
+        .into_resource();
         drop(unattached);
         assert_eq!(allocations.load(Ordering::SeqCst), 2);
         assert_eq!(releases.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn run_elf_stale_launch_work_cannot_mutate_reentrant_successor() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        type Request = RunElfActiveRequest<usize, RunElfOwnedResource<TestAllocation>>;
+
+        let allocations = AtomicUsize::new(0);
+        let releases = Arc::new(AtomicUsize::new(0));
+        let mut state = RunElfLifecycleState::<Request>::new();
+        let mut resets = 0usize;
+        let mut callbacks = 0usize;
+
+        let first_id = match run_elf_start_transition(&mut state, Request::new(1), || resets += 1) {
+            RunElfStart::Started(id) => id,
+            _ => panic!("first request must start"),
+        };
+        assert!(run_elf_attach_resource_transition(
+            &mut state,
+            first_id,
+            test_allocation(&allocations, &releases),
+        )
+        .is_ok());
+
+        let first = run_elf_take_completion_transition(&mut state, first_id, || resets += 1);
+        let first = match first.completion {
+            RunElfCompletion::Requested(request) => request,
+            _ => panic!("first request must complete"),
+        };
+        assert!(state.request().is_none());
+        let (first_token, first_resource) = first.into_parts();
+        assert_eq!(first_token, 1);
+        assert_eq!(releases.load(Ordering::SeqCst), 0);
+        drop(first_resource);
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+        callbacks += 1;
+
+        let second_id = match run_elf_start_transition(&mut state, Request::new(2), || resets += 1)
+        {
+            RunElfStart::Started(id) => id,
+            _ => panic!("reentrant request must start"),
+        };
+        assert_ne!(first_id, second_id);
+        assert!(run_elf_attach_resource_transition(
+            &mut state,
+            second_id,
+            test_allocation(&allocations, &releases),
+        )
+        .is_ok());
+        assert_eq!((resets, callbacks), (3, 1));
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+
+        let stale_completion =
+            run_elf_take_completion_transition(&mut state, first_id, || resets += 1);
+        assert!(matches!(
+            stale_completion.completion,
+            RunElfCompletion::Stale
+        ));
+
+        let stale_attachment = run_elf_attach_resource_transition(
+            &mut state,
+            first_id,
+            test_allocation(&allocations, &releases),
+        )
+        .expect_err("the old launch cannot attach to its successor");
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+        drop(stale_attachment.into_resource());
+        assert_eq!(releases.load(Ordering::SeqCst), 2);
+
+        let stale_loader_failure =
+            run_elf_take_completion_transition(&mut state, first_id, || resets += 1);
+        assert!(matches!(
+            stale_loader_failure.completion,
+            RunElfCompletion::Stale
+        ));
+        assert!(matches!(
+            run_elf_clear_transition(&mut state, first_id, || resets += 1),
+            RunElfCompletion::Stale
+        ));
+        assert_eq!(
+            run_elf_prepare_return_transition(&mut state, first_id, 99, || resets += 1),
+            RunElfTransition::Stale
+        );
+
+        assert_eq!(state.active_id(), Some(second_id));
+        assert_eq!(state.request().map(|request| *request.launch()), Some(2));
+        assert_eq!((resets, callbacks), (3, 1));
+        assert_eq!(allocations.load(Ordering::SeqCst), 3);
+        assert_eq!(releases.load(Ordering::SeqCst), 2);
+
+        assert_eq!(
+            run_elf_prepare_return_transition(&mut state, second_id, 7, || resets += 1),
+            RunElfTransition::Matched
+        );
+        let second = run_elf_take_completion_transition(&mut state, second_id, || resets += 1);
+        assert_eq!(second.exit_code, 7);
+        let second = match second.completion {
+            RunElfCompletion::Requested(request) => request,
+            _ => panic!("second request must complete"),
+        };
+        assert!(state.request().is_none());
+        let (second_token, second_resource) = second.into_parts();
+        assert_eq!(second_token, 2);
+        assert_eq!(releases.load(Ordering::SeqCst), 2);
+        drop(second_resource);
+        assert_eq!(releases.load(Ordering::SeqCst), 3);
+        callbacks += 1;
+
+        assert_eq!((resets, callbacks), (5, 2));
+        assert_eq!(allocations.load(Ordering::SeqCst), 3);
+        assert_eq!(releases.load(Ordering::SeqCst), 3);
     }
 
     #[test]
@@ -1274,19 +1490,22 @@ mod user_logic {
 
         for launch in 0..LAUNCHES {
             let request = RunElfActiveRequest::new(launch);
-            assert!(run_elf_start_transition(&mut state, request, || {}).is_ok());
+            let launch_id = match run_elf_start_transition(&mut state, request, || {}) {
+                RunElfStart::Started(id) => id,
+                _ => panic!("campaign request must start"),
+            };
             assert!(run_elf_attach_resource_transition(
                 &mut state,
+                launch_id,
                 test_allocation(&allocations, &releases),
             )
             .is_ok());
-            assert!(run_elf_prepare_return_transition(
-                &mut state,
-                launch as i32,
-                || {}
-            ));
+            assert_eq!(
+                run_elf_prepare_return_transition(&mut state, launch_id, launch as i32, || {}),
+                RunElfTransition::Matched
+            );
 
-            let taken = run_elf_take_completion_transition(&mut state, || {});
+            let taken = run_elf_take_completion_transition(&mut state, launch_id, || {});
             assert_eq!(taken.exit_code, launch as i32);
             let request = match taken.completion {
                 RunElfCompletion::Requested(request) => request,

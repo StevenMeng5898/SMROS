@@ -771,7 +771,7 @@ fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
     assert!(validation < publication);
 
     let take = launcher
-        .find("let (completion, exit_code) = take_active_request()")
+        .find("let (completion, exit_code) = take_active_request(launch_id)")
         .expect("terminal path takes the active request");
     let dispatch = launcher[take..]
         .find("dispatch_outcome(")
@@ -807,6 +807,123 @@ fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
             "Task 8 must not implement runner event {premature_runner_event}"
         );
     }
+}
+
+#[test]
+fn run_elf_launch_identity_is_bound_and_carried_through_aarch64_resume() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let launcher = std::fs::read_to_string(repository.join("src/user_level/services/run_elf.rs"))
+        .expect("read ELF launcher");
+    let shared =
+        std::fs::read_to_string(repository.join("src/user_level/services/user_logic_shared.rs"))
+            .expect("read shared user logic");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let aarch64 = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/boot.rs"))
+        .expect("read AArch64 exception entry");
+
+    assert!(shared.contains("struct RunElfLaunchId"));
+    assert!(shared.contains("enum RunElfStart"));
+    assert!(shared.contains("enum RunElfTransition"));
+    assert!(shared.contains("struct RunElfCpuBindings"));
+
+    let from_raw_start = shared
+        .find("fn from_raw(raw: u64)")
+        .expect("launch IDs expose checked raw conversion");
+    let from_raw = braced_body(&shared[from_raw_start..]);
+    assert!(
+        from_raw.contains("NonZeroU64::new(raw)")
+            || (from_raw.contains("raw == 0") && from_raw.contains("None")),
+        "raw launch-ID conversion must reject zero"
+    );
+
+    let from_usize_start = shared
+        .find("fn from_usize(raw: usize)")
+        .expect("launch IDs expose checked usize conversion");
+    let from_usize = braced_body(&shared[from_usize_start..]);
+    assert!(from_usize.contains("usize::BITS"));
+    assert!(from_usize.contains("64"));
+    assert!(
+        from_usize.contains("None"),
+        "non-64-bit usize conversion must fail closed"
+    );
+
+    for transition in [
+        "fn request_for(",
+        "fn run_elf_prepare_return_transition",
+        "fn run_elf_take_completion_transition",
+        "fn run_elf_clear_transition",
+        "fn run_elf_attach_resource_transition",
+    ] {
+        let start = shared.find(transition).expect("ID-aware transition exists");
+        let signature_end = shared[start..]
+            .find('{')
+            .map(|offset| start + offset)
+            .expect("transition signature ends");
+        assert!(
+            shared[start..signature_end].contains("RunElfLaunchId"),
+            "{transition} must require an expected launch ID"
+        );
+    }
+
+    let create = launcher
+        .find("create_thread_on_cpu(")
+        .expect("ELF launcher uses pinned thread creation");
+    let bind = launcher[..create]
+        .rfind(".bind(")
+        .expect("launch ID is bound before thread creation");
+    assert!(bind < create);
+    let create_call = &launcher[create..launcher.len().min(create + 400)];
+    assert!(create_call.contains("run_elf_launcher_entry"));
+    assert!(create_call.contains("Some(cpu)"));
+
+    for expected_id_call in [
+        "request_for(launch_id)",
+        "run_elf_prepare_return_transition(state, launch_id,",
+        "run_elf_take_completion_transition(state, launch_id,",
+        "run_elf_clear_transition(state, launch_id,",
+        "run_elf_attach_resource_transition(state, launch_id,",
+    ] {
+        assert!(
+            launcher.contains(expected_id_call),
+            "launcher is missing expected-ID call {expected_id_call}"
+        );
+    }
+
+    let resume_start = launcher
+        .find("pub extern \"C\" fn run_elf_launcher_resume(id_raw: usize) -> !")
+        .expect("resume ABI carries the raw launch ID in x0");
+    let resume = braced_body(&launcher[resume_start..]);
+    assert!(resume.contains("RunElfLaunchId::from_usize(id_raw)"));
+
+    let sys_exit_start = syscall
+        .find("pub fn sys_exit(exit_code: i32)")
+        .expect("sys_exit");
+    let sys_exit = braced_body(&syscall[sys_exit_start..]);
+    assert!(sys_exit.contains("if let Some(launch_id)"));
+    assert!(sys_exit.contains("prepare_run_elf_return(exit_code)"));
+    assert!(sys_exit.contains("return Ok(launch_id)"));
+
+    let exception_start = aarch64
+        .find("exception_handler:")
+        .expect("AArch64 synchronous exception handler");
+    let exception = &aarch64[exception_start..];
+    let dispatch = exception
+        .find("bl      handle_syscall_simple")
+        .expect("AArch64 syscall dispatch");
+    let save_result = exception[dispatch..]
+        .find("str     x0, [sp, #0]")
+        .map(|offset| dispatch + offset)
+        .expect("syscall result is saved as resume x0");
+    let restore_result = exception[save_result..]
+        .find("ldp     x0, x1, [sp, #0]")
+        .map(|offset| save_result + offset)
+        .expect("saved resume x0 is restored");
+    let eret = exception[restore_result..]
+        .find("eret")
+        .map(|offset| restore_result + offset)
+        .expect("exception return resumes launcher");
+    assert!(dispatch < save_result && save_result < restore_result && restore_result < eret);
 }
 
 #[test]

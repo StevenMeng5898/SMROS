@@ -125,6 +125,8 @@ type RunState = user_logic::RunElfLifecycleState<ActiveRun>;
 
 static RUN_STATE: user_logic::RunElfStateCell<RunState> =
     user_logic::RunElfStateCell::new(RunState::new());
+static RUN_CPU_BINDINGS: user_logic::RunElfCpuBindings<{ scheduler::MAX_CPUS }> =
+    user_logic::RunElfCpuBindings::new();
 
 fn with_run_state<R>(operation: impl FnOnce(&mut RunState) -> R) -> R {
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
@@ -156,20 +158,28 @@ pub fn spawn_observed(
         observer,
         start_tick: timer::get_tick_count(),
     });
-    if with_run_state(|state| {
+    let launch_id = match with_run_state(|state| {
         user_logic::run_elf_start_transition(state, request, || {
             syscall::reset_linux_signal_timer_state()
         })
-        .is_err()
     }) {
-        return Err(RunElfError::Busy);
+        user_logic::RunElfStart::Started(launch_id) => launch_id,
+        user_logic::RunElfStart::Busy(_) | user_logic::RunElfStart::Exhausted(_) => {
+            return Err(RunElfError::Busy);
+        }
+    };
+
+    let cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
+    if RUN_CPU_BINDINGS.bind(cpu, launch_id).is_err() {
+        clear_launch_state_without_outcome(cpu, launch_id);
+        return Err(RunElfError::Thread);
     }
 
     scheduler::scheduler()
-        .create_thread(run_elf_launcher_entry, "run_elf")
+        .create_thread_on_cpu(run_elf_launcher_entry, "run_elf", Some(cpu))
         .map(|_| ())
         .ok_or_else(|| {
-            clear_launch_state_without_outcome();
+            clear_launch_state_without_outcome(cpu, launch_id);
             RunElfError::Thread
         })
 }
@@ -178,13 +188,17 @@ pub fn active_exec_path() -> Option<String> {
     with_run_state(|state| state.request().map(|request| request.launch().path.clone()))
 }
 
-pub fn prepare_run_elf_return(exit_code: i32) -> bool {
-    if !with_run_state(|state| {
-        user_logic::run_elf_prepare_return_transition(state, exit_code, || {
+pub fn prepare_run_elf_return(exit_code: i32) -> Option<usize> {
+    let cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
+    let launch_id = RUN_CPU_BINDINGS.get(cpu)?;
+    let id_raw = launch_id.to_usize()?;
+    if with_run_state(|state| {
+        user_logic::run_elf_prepare_return_transition(state, launch_id, exit_code, || {
             syscall::reset_linux_signal_timer_state()
         })
-    }) {
-        return false;
+    }) != user_logic::RunElfTransition::Matched
+    {
+        return None;
     }
 
     let spsr_el1 = user_logic::el1h_spsr_masked();
@@ -194,14 +208,23 @@ pub fn prepare_run_elf_return(exit_code: i32) -> bool {
             spsr_el1,
         );
     }
-    true
+    Some(id_raw)
 }
 
 extern "C" fn run_elf_launcher_entry() -> ! {
-    let request = with_run_state(|state| state.request().map(|request| request.launch().clone()));
+    let cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
+    let Some(launch_id) = RUN_CPU_BINDINGS.get(cpu) else {
+        print_infrastructure_diagnostic(RunInfrastructureError::MissingRequest);
+        finish_launcher_thread();
+    };
+    let request = with_run_state(|state| {
+        state
+            .request_for(launch_id)
+            .map(|request| request.launch().clone())
+    });
     let preparation = request.as_ref().map(prepare_dynamic_loader);
     let Some(preparation) = preparation else {
-        complete_active_run(|_| {
+        complete_active_run(cpu, launch_id, |_| {
             RunTermination::InfrastructureError(RunInfrastructureError::MissingRequest)
         });
         finish_launcher_thread();
@@ -211,11 +234,11 @@ extern "C" fn run_elf_launcher_entry() -> ! {
         Ok(prepared) => {
             let entry = prepared.entry;
             let stack_top = prepared.stack.stack_top();
-            if let Err(stack) = with_run_state(|state| {
-                user_logic::run_elf_attach_resource_transition(state, prepared.stack)
+            if let Err(error) = with_run_state(|state| {
+                user_logic::run_elf_attach_resource_transition(state, launch_id, prepared.stack)
             }) {
-                drop(stack);
-                complete_active_run(|_| {
+                drop(error.into_resource());
+                complete_active_run(cpu, launch_id, |_| {
                     RunTermination::InfrastructureError(RunInfrastructureError::MissingRequest)
                 });
                 finish_launcher_thread();
@@ -225,15 +248,20 @@ extern "C" fn run_elf_launcher_entry() -> ! {
             }
         }
         Err(err) => {
-            complete_active_run(|_| RunTermination::LaunchError(err));
+            complete_active_run(cpu, launch_id, |_| RunTermination::LaunchError(err));
             finish_launcher_thread();
         }
     }
 }
 
 #[no_mangle]
-pub extern "C" fn run_elf_launcher_resume() -> ! {
-    complete_active_run(RunTermination::Exit);
+pub extern "C" fn run_elf_launcher_resume(id_raw: usize) -> ! {
+    let Some(launch_id) = user_logic::RunElfLaunchId::from_usize(id_raw) else {
+        print_infrastructure_diagnostic(RunInfrastructureError::MissingRequest);
+        finish_launcher_thread();
+    };
+    let cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
+    complete_active_run(cpu, launch_id, RunTermination::Exit);
     finish_launcher_thread();
 }
 
@@ -251,26 +279,38 @@ fn validate_environment(env: &[String]) -> Result<(), RunElfError> {
     Ok(())
 }
 
-fn take_active_request() -> (user_logic::RunElfCompletion<ActiveRun>, i32) {
+fn take_active_request(
+    launch_id: user_logic::RunElfLaunchId,
+) -> (user_logic::RunElfCompletion<ActiveRun>, i32) {
     let taken = with_run_state(|state| {
-        user_logic::run_elf_take_completion_transition(state, || {
+        user_logic::run_elf_take_completion_transition(state, launch_id, || {
             syscall::reset_linux_signal_timer_state()
         })
     });
     (taken.completion, taken.exit_code)
 }
 
-fn clear_launch_state_without_outcome() {
+fn clear_launch_state_without_outcome(cpu: usize, launch_id: user_logic::RunElfLaunchId) {
+    let _ = RUN_CPU_BINDINGS.clear(cpu, launch_id);
     let _ = with_run_state(|state| {
-        user_logic::run_elf_clear_transition(state, || syscall::reset_linux_signal_timer_state())
+        user_logic::run_elf_clear_transition(state, launch_id, || {
+            syscall::reset_linux_signal_timer_state()
+        })
     });
 }
 
-fn complete_active_run(termination: impl FnOnce(i32) -> RunTermination) {
-    let (completion, exit_code) = take_active_request();
+fn complete_active_run(
+    cpu: usize,
+    launch_id: user_logic::RunElfLaunchId,
+    termination: impl FnOnce(i32) -> RunTermination,
+) {
+    if !RUN_CPU_BINDINGS.clear(cpu, launch_id) {
+        return;
+    }
+    let (completion, exit_code) = take_active_request(launch_id);
     let active_request = match completion {
         user_logic::RunElfCompletion::Requested(request) => request,
-        user_logic::RunElfCompletion::Repeated => return,
+        user_logic::RunElfCompletion::Repeated | user_logic::RunElfCompletion::Stale => return,
         user_logic::RunElfCompletion::MissingRequest => {
             print_infrastructure_diagnostic(RunInfrastructureError::MissingRequest);
             return;
