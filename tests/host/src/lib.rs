@@ -993,6 +993,16 @@ mod posix_test_logic {
     }
 
     #[test]
+    fn manifest_atoms_reject_non_ascii_unicode() {
+        assert!(!manifest_atom_valid("mmap\u{00e9}/1-1"));
+    }
+
+    #[test]
+    fn manifest_atoms_reject_bidi_control_unicode() {
+        assert!(!manifest_atom_valid("mmap\u{202e}/1-1"));
+    }
+
+    #[test]
     fn staged_binaries_stay_below_the_approved_boundary() {
         assert!(staged_binary_path_valid(
             "/shared/posixtest/bin/conformance/interfaces/mmap/1-1"

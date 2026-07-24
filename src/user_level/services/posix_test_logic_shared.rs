@@ -23,7 +23,7 @@ macro_rules! smros_posix_manifest_atom_valid_body {
             && !atom.contains("//")
             && atom
                 .bytes()
-                .all(|byte| byte >= 0x20 && byte != 0x7f)
+                .all(|byte| (0x20..=0x7e).contains(&byte))
             && atom
                 .split('/')
                 .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
