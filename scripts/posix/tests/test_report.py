@@ -450,8 +450,7 @@ class AggregationTests(ReportFixture, unittest.TestCase):
         path: Path,
         *,
         run_id: str,
-        field: str,
-        detail: str,
+        error_fields: dict[str, object],
     ) -> None:
         def event(seq: int, name: str, **values: object) -> str:
             return "SMROS_POSIX_EVENT " + json.dumps(
@@ -483,7 +482,7 @@ class AggregationTests(ReportFixture, unittest.TestCase):
                             patch_sha256=self.metadata.patch_sha256,
                             smros_commit=self.metadata.smros_commit,
                         ),
-                        event(2, "infrastructure_error", **{field: detail}),
+                        event(2, "infrastructure_error", **error_fields),
                     )
                 )
                 + "\n"
@@ -679,12 +678,11 @@ class AggregationTests(ReportFixture, unittest.TestCase):
                 self._write_serial_terminal_error(
                     path,
                     run_id="serial-run",
-                    field=field,
-                    detail="\ud800",
+                    error_fields={field: "\ud800"},
                 )
                 with self.assertRaisesRegex(
                     ValueError,
-                    "serial.*infrastructure.*invalid",
+                    "infrastructure.*invalid",
                 ) as raised:
                     report_module._load_smros_results(path, manifest)
                 self.assertIs(type(raised.exception), ValueError)
@@ -700,8 +698,7 @@ class AggregationTests(ReportFixture, unittest.TestCase):
                 self._write_serial_terminal_error(
                     path,
                     run_id="serial-run",
-                    field=field,
-                    detail=text,
+                    error_fields={field: text},
                 )
                 loaded = report_module._load_smros_results(path, manifest)
                 summary = generate_report(
@@ -718,6 +715,35 @@ class AggregationTests(ReportFixture, unittest.TestCase):
                     ),
                     (text, text),
                 )
+
+    def test_serial_terminal_error_preserves_detail_alias_precedence(self) -> None:
+        detail = "\u8be6\u60c5-\u03c0"
+        path = self.root / "unicode-serial-terminal-aliases.log"
+        self._write_serial_terminal_error(
+            path,
+            run_id="serial-run",
+            error_fields={
+                "message": "\u6d88\u606f-\u03b1",
+                "detail": detail,
+            },
+        )
+        manifest = report_module._load_manifest(self.stage / "manifest.json")
+        loaded = report_module._load_smros_results(path, manifest)
+        summary = generate_report(
+            self.stage / "manifest.json",
+            smros_results=(path,),
+            output_directory=self.root / "unicode-report-aliases",
+        )
+
+        self.assertEqual(
+            (
+                loaded.terminal.get("infrastructure_error"),
+                summary["provenance"]["smros_runs"][0].get(
+                    "infrastructure_error"
+                ),
+            ),
+            (detail, detail),
+        )
 
     def test_coverage_denominators_and_exclusions_are_exact(self) -> None:
         summary = generate_report(

@@ -128,10 +128,21 @@ def _require_nonnegative_int(value: object, label: str) -> int:
 
 
 def _infrastructure_error_detail(value: Mapping[str, object]) -> str:
-    detail = value.get("detail", value.get("message"))
-    if not isinstance(detail, str) or not detail:
+    selected: str | None = None
+    for key in ("message", "detail"):
+        if key not in value:
+            continue
+        detail = value[key]
+        if not isinstance(detail, str) or not detail:
+            raise ValueError("infrastructure error detail is invalid")
+        try:
+            detail.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError("infrastructure error detail is invalid") from error
+        selected = detail
+    if selected is None:
         raise ValueError("infrastructure error detail is invalid")
-    return detail
+    return selected
 
 
 def _validate_common(value: object, line_number: int) -> dict[str, object]:

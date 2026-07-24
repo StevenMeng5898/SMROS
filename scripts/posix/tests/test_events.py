@@ -166,6 +166,50 @@ class SerialEventTests(unittest.TestCase):
                 self.assertEqual(parsed.terminal_event.event, "infrastructure_error")
                 self.assertEqual(parsed.infrastructure_error, "manifest-read")
 
+    def test_rejects_invalid_present_infrastructure_error_alias(self) -> None:
+        for field in ("message", "detail"):
+            for label, invalid in (
+                ("empty", ""),
+                ("non-string", 17),
+                ("lone-surrogate", "\ud800"),
+            ):
+                with self.subTest(field=field, case=label):
+                    aliases: dict[str, object] = {
+                        "message": "valid-message",
+                        "detail": "valid-detail",
+                    }
+                    aliases[field] = invalid
+                    log = "\n".join(
+                        (
+                            _event(1, "suite_start", selected_count=0),
+                            _event(2, "infrastructure_error", **aliases),
+                        )
+                    )
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "infrastructure error detail is invalid",
+                    ) as raised:
+                        parse_serial_log(log)
+                    self.assertIs(type(raised.exception), ValueError)
+
+    def test_infrastructure_error_detail_precedes_valid_message(self) -> None:
+        log = "\n".join(
+            (
+                _event(1, "suite_start", selected_count=0),
+                _event(
+                    2,
+                    "infrastructure_error",
+                    message="\u6d88\u606f-\u03b1",
+                    detail="\u8be6\u60c5-\u03c0",
+                ),
+            )
+        )
+
+        parsed = parse_serial_log(log)
+
+        self.assertFalse(parsed.complete)
+        self.assertEqual(parsed.infrastructure_error, "\u8be6\u60c5-\u03c0")
+
     def test_rejects_boolean_event_schema(self) -> None:
         log = _event(
             1,
