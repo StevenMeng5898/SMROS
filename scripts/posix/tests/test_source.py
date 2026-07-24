@@ -920,6 +920,8 @@ class SharedModelTests(unittest.TestCase):
                     "run_id",
                     "resource_deltas",
                     "resource_evidence",
+                    "raw_log_start",
+                    "raw_log_end",
                 ),
                 model.RuntimeAttempt(
                     "unistd/close/1-1",

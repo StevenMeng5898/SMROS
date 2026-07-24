@@ -27,6 +27,7 @@ OVERALL_STATUSES = (
     "flaky",
 )
 RAW_RUNTIME_STATUSES = OVERALL_STATUSES[:9]
+HOST_WATCHDOG_ERROR_MAX_BYTES = 4096
 
 
 def validate_raw_attempt_semantics(
@@ -114,6 +115,39 @@ def validate_raw_attempt_semantics(
         )
     if not coherent:
         raise ValueError(f"{label} {status} dimensions are invalid")
+
+
+def validate_host_watchdog_attempt_semantics(
+    *,
+    status: str,
+    pts_status: str | None,
+    launch_status: str,
+    exit_code: int | None,
+    signal: int | None,
+    timed_out: bool,
+    launch_error: str | None,
+    infrastructure_error: str | None,
+    label: str,
+) -> None:
+    """Reject guest-derived dimensions on a host watchdog result."""
+    bounded_error = (
+        isinstance(infrastructure_error, str)
+        and bool(infrastructure_error)
+        and len(infrastructure_error.encode("utf-8", errors="replace"))
+        <= HOST_WATCHDOG_ERROR_MAX_BYTES
+    )
+    coherent = (
+        status in {"timeout", "crash"}
+        and launch_status in {"launched", "interrupted"}
+        and pts_status is None
+        and exit_code is None
+        and signal is None
+        and timed_out is (status == "timeout")
+        and launch_error is None
+        and bounded_error
+    )
+    if not coherent:
+        raise ValueError(f"{label} host-watchdog dimensions are invalid")
 
 
 @dataclass(frozen=True)
@@ -251,6 +285,8 @@ class RuntimeAttempt:
     run_id: str = ""
     resource_deltas: ResourceDeltas = ResourceDeltas()
     resource_evidence: str = "unavailable"
+    raw_log_start: int | None = None
+    raw_log_end: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return every core and finalized runtime field for persistence."""
@@ -271,6 +307,8 @@ class RuntimeAttempt:
             "patch_sha256": self.patch_sha256,
             "platform": self.platform,
             "pts_status": self.pts_status,
+            "raw_log_end": self.raw_log_end,
+            "raw_log_start": self.raw_log_start,
             "revision": self.revision,
             "resource_deltas": self.resource_deltas.to_dict(),
             "resource_evidence": self.resource_evidence,

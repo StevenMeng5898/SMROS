@@ -447,6 +447,108 @@ class AggregationTests(ReportFixture, unittest.TestCase):
                         output_directory=self.output,
                     )
 
+    def test_host_watchdog_attempts_have_unavailable_nonleak_evidence(self) -> None:
+        for status, timed_out in (("timeout", True), ("crash", False)):
+            with self.subTest(status=status):
+                attempt = replace(
+                    self._attempt(self.tests[0], status, exit_code=None),
+                    source="host-watchdog",
+                    pts_status=None,
+                    signal=None,
+                    timed_out=timed_out,
+                    infrastructure_error=f"host watchdog observed {status}",
+                    resource_deltas=ResourceDeltas(),
+                    resource_evidence="unavailable",
+                    raw_log_start=10,
+                    raw_log_end=20,
+                )
+                runtime = self.root / f"watchdog-{status}.ndjson"
+                self._write_runtime(runtime, (attempt,), complete=True)
+
+                summary = generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(runtime,),
+                    output_directory=self.output,
+                )
+
+                test = next(
+                    item for item in summary["tests"]
+                    if item["test_id"] == attempt.test_id
+                )
+                self.assertEqual(test["status"], status)
+                self.assertEqual(test["resource_evidence"], "unavailable")
+                self.assertFalse(any(test["resource_deltas"].values()))
+                self.assertIsNone(test["smros_attempts"][0]["pts_status"])
+                self.assertTrue(summary["complete"])
+
+    def test_host_watchdog_source_rejects_guest_or_measured_results(self) -> None:
+        base = replace(
+            self._attempt(self.tests[0], "timeout", exit_code=None),
+            source="host-watchdog",
+            pts_status=None,
+            timed_out=True,
+            infrastructure_error="host watchdog deadline exceeded",
+            resource_evidence="unavailable",
+            raw_log_start=10,
+            raw_log_end=20,
+        )
+        cases = (
+            replace(base, status="pass", pts_status="pass", timed_out=False, exit_code=0),
+            replace(base, resource_evidence="measured"),
+            replace(base, resource_deltas=ResourceDeltas(processes=1)),
+            replace(base, infrastructure_error=None),
+            replace(base, infrastructure_error=""),
+            replace(base, infrastructure_error="x" * 4097),
+            replace(base, raw_log_start=None, raw_log_end=None),
+            replace(base, raw_log_end=None),
+        )
+        for index, attempt in enumerate(cases):
+            with self.subTest(index=index):
+                runtime = self.root / f"invalid-watchdog-{index}.ndjson"
+                self._write_runtime(runtime, (attempt,), complete=True)
+                with self.assertRaisesRegex(ValueError, "host-watchdog"):
+                    generate_report(
+                        self.stage / "manifest.json",
+                        smros_results=(runtime,),
+                        output_directory=self.output,
+                    )
+
+    def test_host_watchdog_execution_coverage_requires_matching_test_start(self) -> None:
+        base = replace(
+            self._attempt(self.tests[0], "crash", exit_code=None),
+            source="host-watchdog",
+            pts_status=None,
+            signal=None,
+            infrastructure_error="QEMU exited with status 17",
+            resource_evidence="unavailable",
+            raw_log_start=10,
+            raw_log_end=20,
+        )
+        pre_start = replace(base, launch_status="interrupted")
+        post_start = replace(base, launch_status="launched")
+        self.assertFalse(report_module._attempt_executed(pre_start))
+        self.assertTrue(report_module._attempt_executed(post_start))
+
+        for label, attempt, expected in (
+            ("pre-start", pre_start, ()),
+            ("post-start", post_start, (base.test_id,)),
+        ):
+            with self.subTest(label=label):
+                runtime = self.root / f"watchdog-{label}.ndjson"
+                self._write_runtime(runtime, (attempt,), complete=True)
+                summary = generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(runtime,),
+                    output_directory=self.output / label,
+                )
+                self.assertEqual(
+                    tuple(
+                        summary["metrics"]["execution_coverage"]
+                        ["numerator_test_ids"]
+                    ),
+                    expected,
+                )
+
     def test_passing_definition_contributes_to_program_completion_in_every_scope(
         self,
     ) -> None:
@@ -857,6 +959,8 @@ class AggregationTests(ReportFixture, unittest.TestCase):
             if row["record_type"] == "attempt":
                 row.pop("resource_deltas")
                 row.pop("resource_evidence")
+                row.pop("raw_log_start")
+                row.pop("raw_log_end")
         linux = self.root / "legacy-linux.ndjson"
         linux.write_text(
             "".join(

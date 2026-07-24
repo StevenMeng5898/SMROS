@@ -20,6 +20,7 @@ from .build import (
 )
 from .discovery import audit_reviews
 from .model import BuildSummary, SuiteTest
+from .qemu_runner import ControllerError, run_smros
 from .report import generate_report
 from .source import fetch_checkout, load_source_lock
 
@@ -50,6 +51,11 @@ BASELINE_PREREQUISITE = (
     "sudo apt-get install qemu-user gcc-aarch64-linux-gnu "
     "libc6-dev-arm64-cross"
 )
+SMROS_RESULTS_DIRECTORY = (
+    REPOSITORY_ROOT / "target" / "posix" / "aarch64" / "smros-run"
+)
+SMROS_KERNEL_PATH = REPOSITORY_ROOT / "kernel8.img"
+SMROS_DISK_PATH = REPOSITORY_ROOT / "smros-fxfs.img"
 
 
 def _print_exception_notes(error: BaseException) -> None:
@@ -88,6 +94,15 @@ def create_parser() -> argparse.ArgumentParser:
     filters.add_argument("--group")
     filters.add_argument("--test")
     baseline_parser.add_argument("--sysroot", required=True, type=Path)
+    smros_parser = subparsers.add_parser(
+        "run-smros", help="collect staged POSIX results from SMROS under QEMU"
+    )
+    smros_filters = smros_parser.add_mutually_exclusive_group()
+    smros_filters.add_argument("--api")
+    smros_filters.add_argument("--group")
+    smros_filters.add_argument("--test")
+    smros_parser.add_argument("--qemu-memory", default="1024M")
+    smros_parser.add_argument("--resume", action="store_true")
     report_parser = subparsers.add_parser(
         "report", help="aggregate POSIX runtime results and render coverage"
     )
@@ -351,6 +366,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"results={result.result_path}"
         )
         return 0 if result.all_passed else 1
+    if arguments.command == "run-smros":
+        try:
+            result = run_smros(
+                BASELINE_STAGE_PATH,
+                SMROS_RESULTS_DIRECTORY,
+                kernel=SMROS_KERNEL_PATH,
+                disk=SMROS_DISK_PATH,
+                memory=arguments.qemu_memory,
+                api=arguments.api,
+                group=arguments.group,
+                test_id=arguments.test,
+                resume=arguments.resume,
+            )
+        except (OSError, ValueError, ControllerError) as error:
+            print(f"run-smros failed: {error}", file=sys.stderr)
+            _print_exception_notes(error)
+            return 1
+        print(
+            f"selected={len(result.attempts)} "
+            f"passed={sum(attempt.status == 'pass' for attempt in result.attempts)} "
+            f"restarts={result.restart_count} results={result.result_path}"
+        )
+        return 0
     if arguments.command == "report":
         if not arguments.linux_results and not arguments.smros_results:
             print(

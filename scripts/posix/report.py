@@ -38,6 +38,7 @@ from .model import (
     ResourceDeltas,
     RuntimeAttempt,
     SuiteTest,
+    validate_host_watchdog_attempt_semantics,
     validate_raw_attempt_semantics,
 )
 
@@ -380,13 +381,17 @@ def _validate_attempt(
     without_evidence = expected - {"resource_evidence"}
     without_deltas = expected - {"resource_deltas"}
     legacy = without_evidence - {"resource_deltas"}
-    allowed_schemas = {
+    schema_variants = {
         frozenset(expected),
         frozenset(without_evidence),
         frozenset(without_deltas),
     }
     if role == "linux":
-        allowed_schemas.add(frozenset(legacy))
+        schema_variants.add(frozenset(legacy))
+    allowed_schemas = schema_variants | {
+        schema - {"raw_log_start", "raw_log_end"}
+        for schema in schema_variants
+    }
     if set(value) not in allowed_schemas or value.get("record_type") != "attempt":
         raise ValueError(f"invalid runtime attempt schema at line {line_number}")
     test_id = value["test_id"]
@@ -472,7 +477,12 @@ def _validate_attempt(
             raise ValueError(f"runtime attempt {key} is invalid at line {line_number}")
     for key in ("launch_error", "infrastructure_error"):
         _require_optional_text(value[key], key)
-    validate_raw_attempt_semantics(
+    semantics = (
+        validate_host_watchdog_attempt_semantics
+        if role == "smros" and value["source"] == "host-watchdog"
+        else validate_raw_attempt_semantics
+    )
+    semantics(
         status=str(value["status"]),
         pts_status=pts_status,
         launch_status=str(value["launch_status"]),
@@ -483,6 +493,27 @@ def _validate_attempt(
         infrastructure_error=value["infrastructure_error"],  # type: ignore[arg-type]
         label="runtime attempt",
     )
+    raw_log_start = value.get("raw_log_start")
+    raw_log_end = value.get("raw_log_end")
+    offset_label = (
+        "host-watchdog raw log offsets"
+        if value["source"] == "host-watchdog"
+        else "runtime attempt raw log offsets"
+    )
+    if (raw_log_start is None) != (raw_log_end is None) or (
+        raw_log_start is not None
+        and (
+            type(raw_log_start) is not int
+            or type(raw_log_end) is not int
+            or raw_log_start < 0
+            or raw_log_end < raw_log_start
+        )
+    ):
+        raise ValueError(f"{offset_label} are invalid at line {line_number}")
+    if value["source"] == "host-watchdog" and raw_log_start is None:
+        raise ValueError(
+            f"host-watchdog raw log offsets are required at line {line_number}"
+        )
     for key in (
         "manifest_sha256",
         "build_results_sha256",
@@ -518,7 +549,12 @@ def _validate_attempt(
                 f"SMROS attempt lacks complete resource evidence at line {line_number}"
             ) from error
         resource_evidence = raw_evidence
-        if resource_evidence != "measured":
+        if value["source"] == "host-watchdog":
+            if resource_evidence != "unavailable" or resource_deltas.has_nonzero():
+                raise ValueError(
+                    f"host-watchdog resource evidence is invalid at line {line_number}"
+                )
+        elif resource_evidence != "measured":
             raise ValueError(
                 f"SMROS attempt resource evidence is invalid at line {line_number}"
             )
@@ -544,6 +580,8 @@ def _validate_attempt(
     else:
         raise AssertionError(f"unknown runtime input role: {role}")
     payload = {key: value[key] for key in value if key != "record_type"}
+    payload.setdefault("raw_log_start", None)
+    payload.setdefault("raw_log_end", None)
     payload["resource_deltas"] = resource_deltas
     payload["resource_evidence"] = resource_evidence
     return RuntimeAttempt(**payload)  # type: ignore[arg-type]
@@ -600,7 +638,10 @@ def _validate_terminal(
         )
     if value["complete"] is True and (
         value.get("infrastructure_error")
-        or any(attempt.infrastructure_error for attempt in attempts)
+        or any(
+            attempt.infrastructure_error and attempt.source != "host-watchdog"
+            for attempt in attempts
+        )
     ):
         raise ValueError(
             "runtime complete record contains an infrastructure error "
@@ -612,7 +653,13 @@ def _validate_terminal(
     if any(
         attempt.run_id != value["run_id"]
         or attempt.platform != value["platform"]
-        or attempt.source != value["source"]
+        or (
+            attempt.source != value["source"]
+            and not (
+                value["source"] == "smros-qemu"
+                and attempt.source == "host-watchdog"
+            )
+        )
         for attempt in attempts
     ):
         raise ValueError(f"runtime terminal run identity mismatch at line {line_number}")
@@ -1179,7 +1226,11 @@ def _aggregate(
         source.terminal["complete"] is True
         and not source.terminal.get("infrastructure_error")
         and not any(
-            attempt.status == "interrupted" or attempt.infrastructure_error
+            attempt.status == "interrupted"
+            or (
+                attempt.infrastructure_error
+                and attempt.source != "host-watchdog"
+            )
             for attempt in source.attempts
         )
         for source in runtime_inputs
