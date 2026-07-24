@@ -551,6 +551,8 @@ class QemuController:
                     infrastructure_error=attempt.infrastructure_error,
                     label="resume completed attempt",
                 )
+                if attempt.status == "interrupted":
+                    raise ValueError("completed guest attempt is interrupted")
                 evidence_matches = attempt.resource_evidence == "measured"
             else:
                 evidence_matches = False

@@ -729,16 +729,32 @@ class QemuControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "resume completed attempt"):
             rejected.run(resume=True)
 
-        contradictory = json.loads(json.dumps(progress))
-        completed = contradictory["completed_attempts"][0]
-        completed["status"] = "interrupted"
-        completed["launch_status"] = "interrupted"
-        completed["infrastructure_error"] = "runtime capture interrupted"
+        coherent_interrupted = json.loads(json.dumps(progress))
+        completed = coherent_interrupted["completed_attempts"][0]
+        completed.update(
+            {
+                "status": "interrupted",
+                "launch_status": "interrupted",
+                "pts_status": None,
+                "exit_code": None,
+                "signal": None,
+                "timed_out": False,
+                "launch_error": None,
+                "infrastructure_error": "runtime capture interrupted",
+            }
+        )
         (self.root / "progress.json").write_text(
-            json.dumps(contradictory, sort_keys=True, separators=(",", ":")) + "\n",
+            json.dumps(
+                coherent_interrupted, sort_keys=True, separators=(",", ":")
+            )
+            + "\n",
             encoding="utf-8",
         )
-        rejected, _factory = self._controller([])
+        unexpected_resume = FakeTransport(
+            self.clock,
+            [PROMPT, _start_events(self.two), _end_events(self.two), PROMPT],
+        )
+        rejected, _factory = self._controller([unexpected_resume])
         with self.assertRaisesRegex(ValueError, "resume completed attempt"):
             rejected.run(resume=True)
 
