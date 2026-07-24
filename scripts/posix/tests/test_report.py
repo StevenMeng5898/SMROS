@@ -706,6 +706,23 @@ class AggregationTests(ReportFixture, unittest.TestCase):
                 output_directory=self.output,
             )
 
+    def test_interrupted_runtime_rejects_stale_guest_result_dimensions(self) -> None:
+        interrupted = replace(
+            self._attempt(self.tests[0], "pass"),
+            launch_status="interrupted",
+            status="interrupted",
+            infrastructure_error="runtime capture interrupted",
+        )
+        contradictory = self.root / "contradictory-interrupted.ndjson"
+        self._write_runtime(contradictory, (interrupted,), complete=False)
+
+        with self.assertRaisesRegex(ValueError, "interrupted dimensions"):
+            generate_report(
+                self.stage / "manifest.json",
+                smros_results=(contradictory,),
+                output_directory=self.output,
+            )
+
     def test_complete_runtime_rejects_explicit_infrastructure_error(self) -> None:
         contradictory = self.root / "complete-infrastructure-error.ndjson"
         self._write_runtime(

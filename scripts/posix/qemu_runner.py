@@ -45,9 +45,6 @@ _EVENT_PREFIX_BYTES = EVENT_PREFIX.encode("ascii")
 _FATAL_PATTERNS = (
     b"!!! KERNEL PANIC !!!",
     b"[PANIC]",
-    b"[FATAL]",
-    b"kernel panic",
-    b"Kernel panic",
 )
 _STREAM_TOKEN_BYTES = max(len(PROMPT), *(len(item) for item in _FATAL_PATTERNS))
 _READ_INTERVAL_SECONDS = 0.1
@@ -284,11 +281,8 @@ def _matching_start_seen(
     test: SuiteTest,
     identity: CampaignIdentity,
 ) -> bool:
-    suite_start: dict[str, object] | None = None
-    for value, _offset in _event_rows(data):
-        if value.get("event") == "suite_start" and suite_start is None:
-            suite_start = value
-            continue
+    rows = _event_rows(data)
+    for value, _offset in rows:
         if value.get("event") != "test_start":
             continue
         if any(
@@ -301,38 +295,38 @@ def _matching_start_seen(
             )
         ):
             raise ControllerError("guest test identity does not match the command")
-        if suite_start is None:
-            continue
-        suite_is_valid = (
-            set(suite_start) <= _SUITE_START_FIELDS
-            and _event_common_is_valid(suite_start, "suite_start", 1)
-            and suite_start.get("manifest_sha256")
-            == identity.metadata.manifest_sha256
-            and suite_start.get("selected_count") == 1
-            and suite_start.get("build_id") == identity.build_id
-            and suite_start.get("build_results_sha256")
-            == identity.metadata.build_results_sha256
-            and suite_start.get("smros_commit") == identity.metadata.smros_commit
-            and suite_start.get("revision") == identity.metadata.revision
-            and suite_start.get("patch_sha256") == identity.metadata.patch_sha256
-            and suite_start.get("filter") == f"test={test.test_id}"
-            and suite_start.get("source") == "smros-serial"
-            and type(suite_start.get("started_ticks")) is int
-            and int(suite_start["started_ticks"]) >= 0
-        )
-        test_is_valid = (
-            set(value) <= _TEST_START_FIELDS
-            and _event_common_is_valid(value, "test_start", 2)
-            and value.get("run_id") == suite_start.get("run_id")
-            and value.get("manifest_sha256")
-            == identity.metadata.manifest_sha256
-            and value.get("source") == "smros-serial"
-            and type(value.get("started_ticks")) is int
-            and int(value["started_ticks"]) >= 0
-        )
-        if suite_is_valid and test_is_valid:
-            return True
-    return False
+    if len(rows) != 2:
+        return False
+    suite_start, test_start = (value for value, _offset in rows)
+    suite_is_valid = (
+        set(suite_start) <= _SUITE_START_FIELDS
+        and _event_common_is_valid(suite_start, "suite_start", 1)
+        and suite_start.get("manifest_sha256")
+        == identity.metadata.manifest_sha256
+        and type(suite_start.get("selected_count")) is int
+        and suite_start.get("selected_count") == 1
+        and suite_start.get("build_id") == identity.build_id
+        and suite_start.get("build_results_sha256")
+        == identity.metadata.build_results_sha256
+        and suite_start.get("smros_commit") == identity.metadata.smros_commit
+        and suite_start.get("revision") == identity.metadata.revision
+        and suite_start.get("patch_sha256") == identity.metadata.patch_sha256
+        and suite_start.get("filter") == f"test={test.test_id}"
+        and suite_start.get("source") == "smros-serial"
+        and type(suite_start.get("started_ticks")) is int
+        and int(suite_start["started_ticks"]) >= 0
+    )
+    test_is_valid = (
+        set(test_start) <= _TEST_START_FIELDS
+        and _event_common_is_valid(test_start, "test_start", 2)
+        and test_start.get("run_id") == suite_start.get("run_id")
+        and test_start.get("manifest_sha256")
+        == identity.metadata.manifest_sha256
+        and test_start.get("source") == "smros-serial"
+        and type(test_start.get("started_ticks")) is int
+        and int(test_start["started_ticks"]) >= 0
+    )
+    return suite_is_valid and test_is_valid
 
 
 def _suite_end_offset(data: bytes) -> int | None:
@@ -388,6 +382,7 @@ class QemuController:
         self._restart_count = 0
         self._boot_count = 0
         self._run_id = ""
+        self._prompt_tail = b""
 
     def _progress(self) -> dict[str, object]:
         return {
@@ -577,7 +572,8 @@ class QemuController:
 
     def _wait_for_prompt(self, transport: _Transport, raw) -> bool:
         deadline = self._monotonic() + self.config.boot_timeout_seconds
-        tail = b""
+        tail = self._prompt_tail
+        self._prompt_tail = b""
         while self._monotonic() < deadline:
             remaining = deadline - self._monotonic()
             data = transport.read(min(_READ_INTERVAL_SECONDS, remaining))
@@ -602,6 +598,7 @@ class QemuController:
             transport.wait(_SHUTDOWN_SECONDS)
 
     def _launch_ready(self, raw) -> _Transport:
+        self._prompt_tail = b""
         transport = self._transport_factory(self.config.qemu_argv)
         self._boot_count += 1
         if self._boot_count > 1:
@@ -625,9 +622,7 @@ class QemuController:
         if end_offset is None:
             raise ControllerError("guest POSIX suite has no terminal event")
         try:
-            parsed = parse_serial_log(
-                data[:end_offset].decode("utf-8", errors="replace")
-            )
+            parsed = parse_serial_log(data.decode("utf-8", errors="replace"))
         except ValueError as error:
             raise ControllerError(
                 f"invalid guest POSIX event stream: {error}"
@@ -662,7 +657,11 @@ class QemuController:
             raise ControllerError(
                 "guest test identity or binary checksum does not match"
             )
-        prompt_after = PROMPT in data[end_offset:]
+        post_terminal = data[end_offset:]
+        prompt_after = PROMPT in post_terminal
+        self._prompt_tail = (
+            b"" if prompt_after else post_terminal[-(_STREAM_TOKEN_BYTES - 1) :]
+        )
         return attempt, end_offset, prompt_after
 
     def _build_statuses(self, test: SuiteTest) -> tuple[str, str]:
@@ -807,16 +806,14 @@ class QemuController:
                 return attempt, False, True
             chunk = transport.read(min(_READ_INTERVAL_SECONDS, remaining))
             self._append_raw(raw, chunk)
-            remaining_capacity = self.config.max_test_serial_bytes + 1 - len(data)
+            remaining_capacity = self.config.max_test_serial_bytes - len(data)
+            overflow = len(chunk) > max(0, remaining_capacity)
             if remaining_capacity > 0:
                 data.extend(chunk[:remaining_capacity])
             matching_start = matching_start or _matching_start_seen(
                 bytes(data), test, self.identity
             )
-            if (
-                len(data) > self.config.max_test_serial_bytes
-                or len(chunk) > remaining_capacity
-            ):
+            if overflow:
                 attempt = self._watchdog_attempt(
                     test,
                     status="crash",

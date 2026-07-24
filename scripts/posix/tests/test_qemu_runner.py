@@ -348,6 +348,49 @@ class QemuControllerTests(unittest.TestCase):
                 self.assertEqual(result.attempts[0].launch_status, "interrupted")
                 self.assertEqual(result.attempts[1].status, "pass")
 
+    def test_malformed_event_prefix_never_proves_guest_execution(self) -> None:
+        suite_start, test_start = _start_events(self.one).splitlines(keepends=True)
+        terminal = _event(
+            2,
+            "infrastructure_error",
+            message="guest infrastructure failed",
+        )
+        unknown = _event(2, "unknown_event")
+        bool_count = suite_start.replace(
+            b'"selected_count":1', b'"selected_count":true'
+        )
+        cases = (
+            ("duplicate-suite", suite_start + suite_start + test_start),
+            ("terminal-before-start", suite_start + terminal + test_start),
+            ("unknown-before-start", suite_start + unknown + test_start),
+            ("bool-selected-count", bool_count + test_start),
+        )
+        for label, prefix in cases:
+            with self.subTest(label=label):
+                clock = FakeClock()
+                first = FakeTransport(clock, [PROMPT, prefix, b"[PANIC]\n"])
+                second = FakeTransport(
+                    clock,
+                    [PROMPT, _start_events(self.two), _end_events(self.two), PROMPT],
+                )
+                controller = QemuController(
+                    identity=_identity(self.tests),
+                    selected=self.tests,
+                    config=ControllerConfig(
+                        output_directory=self.root / f"malformed-{label}",
+                        qemu_argv=self.config.qemu_argv,
+                    ),
+                    transport_factory=TransportFactory([first, second]),
+                    monotonic=clock.monotonic,
+                    run_id_factory=lambda: f"controller-{label}",
+                )
+
+                result = controller.run()
+
+                self.assertEqual(result.attempts[0].status, "crash")
+                self.assertEqual(result.attempts[0].launch_status, "interrupted")
+                self.assertEqual(result.attempts[1].status, "pass")
+
     def test_duplicate_event_keys_are_rejected(self) -> None:
         duplicate = _start_events(self.one).replace(
             b'"schema":1,', b'"schema":1,"schema":1,', 1
@@ -429,9 +472,57 @@ class QemuControllerTests(unittest.TestCase):
         self.assertEqual(result.restart_count, 1)
         self.assertEqual(result.attempts[1].test_id, self.two.test_id)
 
+    def test_complete_guest_rejects_duplicate_or_trailing_terminal_events(self) -> None:
+        trailing_start = _event(
+            5,
+            "test_start",
+            test_id=self.one.test_id,
+            group=self.one.group,
+            api=self.one.api,
+            binary_sha256=self.one.sha256,
+            source="smros-serial",
+            started_ticks=5,
+        )
+        duplicate_end = _event(
+            5,
+            "suite_end",
+            complete=True,
+            selected_count=1,
+            completed_count=1,
+            status_counts={"pass": 1},
+            elapsed_ticks=5,
+        )
+        for label, trailing in (
+            ("trailing-event", trailing_start),
+            ("duplicate-terminal", duplicate_end),
+        ):
+            with self.subTest(label=label):
+                clock = FakeClock()
+                transport = FakeTransport(
+                    clock,
+                    [
+                        PROMPT,
+                        _start_events(self.one) + _end_events(self.one) + trailing,
+                    ],
+                )
+                controller = QemuController(
+                    identity=_identity((self.one,)),
+                    selected=(self.one,),
+                    config=ControllerConfig(
+                        output_directory=self.root / label,
+                        qemu_argv=self.config.qemu_argv,
+                    ),
+                    transport_factory=TransportFactory([transport]),
+                    monotonic=clock.monotonic,
+                    run_id_factory=lambda: f"controller-{label}",
+                )
+
+                with self.assertRaisesRegex(ControllerError, "terminal"):
+                    controller.run()
+
     def test_fatal_pattern_and_qemu_exit_record_crash_then_restart(self) -> None:
         for label, failure in (
-            ("fatal", [_start_events(self.one), b"[FATAL] kernel stopped\n"]),
+            ("fatal", [_start_events(self.one), b"[PANIC] kernel stopped\n"]),
             ("exit", [("exit", 17)]),
         ):
             with self.subTest(label=label):
@@ -469,6 +560,26 @@ class QemuControllerTests(unittest.TestCase):
                 )
                 self.assertEqual(result.restart_count, 1)
                 self.assertEqual(result.attempts[1].test_id, self.two.test_id)
+
+    def test_generic_fatal_words_are_benign_guest_output(self) -> None:
+        output = b"diagnostic [FATAL], Kernel panic, and kernel panic are text\n"
+        transport = FakeTransport(
+            self.clock,
+            [PROMPT, _start_events(self.one), output, _end_events(self.one), PROMPT],
+        )
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory([transport]),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-benign-output",
+        )
+
+        result = controller.run()
+
+        self.assertEqual(result.attempts[0].status, "pass")
+        self.assertIn("[FATAL]", result.attempts[0].stdout)
 
     def test_command_write_race_records_pre_start_crash_and_continues(self) -> None:
         first = FakeTransport(self.clock, [PROMPT])
@@ -525,6 +636,59 @@ class QemuControllerTests(unittest.TestCase):
         self.assertIn(start_events + spam, result.raw_log_path.read_bytes())
         self.assertEqual(result.attempts[1].status, "pass")
 
+    def test_serial_capture_never_retains_more_than_configured_cap(self) -> None:
+        retained_sizes: list[int] = []
+
+        def observe(data: bytes, *_args: object) -> bool:
+            retained_sizes.append(len(data))
+            return False
+
+        cap = 32
+        transport = FakeTransport(self.clock, [PROMPT, b"x" * 128])
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=self.root / "exact-cap",
+                qemu_argv=self.config.qemu_argv,
+                max_test_serial_bytes=cap,
+            ),
+            transport_factory=TransportFactory([transport]),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-exact-cap",
+        )
+
+        with mock.patch(
+            "scripts.posix.qemu_runner._matching_start_seen",
+            side_effect=observe,
+        ):
+            result = controller.run()
+
+        self.assertEqual(result.attempts[0].status, "crash")
+        self.assertEqual(max(retained_sizes), cap)
+
+    def test_split_post_suite_prompt_allows_next_command(self) -> None:
+        transport = FakeTransport(
+            self.clock,
+            [
+                PROMPT,
+                _start_events(self.one),
+                _end_events(self.one) + b"smros:/",
+                b"> ",
+                _start_events(self.two),
+                _end_events(self.two),
+                PROMPT,
+            ],
+        )
+        controller, _factory = self._controller([transport])
+
+        result = controller.run()
+
+        self.assertEqual(
+            [attempt.status for attempt in result.attempts], ["pass", "pass"]
+        )
+        self.assertEqual(len(transport.writes), 2)
+
     def test_resume_skips_completed_ids_and_rejects_changed_provenance(self) -> None:
         interrupted = FakeTransport(
             self.clock,
@@ -559,6 +723,19 @@ class QemuControllerTests(unittest.TestCase):
         tampered_run["completed_attempts"][0]["run_id"] = "different-run"
         (self.root / "progress.json").write_text(
             json.dumps(tampered_run, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        rejected, _factory = self._controller([])
+        with self.assertRaisesRegex(ValueError, "resume completed attempt"):
+            rejected.run(resume=True)
+
+        contradictory = json.loads(json.dumps(progress))
+        completed = contradictory["completed_attempts"][0]
+        completed["status"] = "interrupted"
+        completed["launch_status"] = "interrupted"
+        completed["infrastructure_error"] = "runtime capture interrupted"
+        (self.root / "progress.json").write_text(
+            json.dumps(contradictory, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
         rejected, _factory = self._controller([])

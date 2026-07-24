@@ -427,6 +427,17 @@ class SerialEventTests(unittest.TestCase):
                 )
             )
 
+    def test_interrupted_event_rejects_stale_guest_result_dimensions(self) -> None:
+        with self.assertRaisesRegex(ValueError, "interrupted dimensions"):
+            parse_serial_log(
+                self._one_attempt_log(
+                    status="interrupted",
+                    launch_status="interrupted",
+                    infrastructure_error="runtime capture interrupted",
+                    terminal_complete=False,
+                )
+            )
+
     def test_complete_suite_rejects_explicit_infrastructure_error(self) -> None:
         with self.assertRaisesRegex(ValueError, "complete.*infrastructure error"):
             parse_serial_log(

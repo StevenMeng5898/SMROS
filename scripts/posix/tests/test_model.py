@@ -45,6 +45,36 @@ class RuntimeAttemptSemanticsTests(unittest.TestCase):
                 infrastructure_error="suite interrupted",
             )
 
+    def test_interrupted_requires_only_infrastructure_evidence(self) -> None:
+        values: dict[str, object] = {
+            "status": "interrupted",
+            "pts_status": None,
+            "launch_status": "interrupted",
+            "exit_code": None,
+            "signal": None,
+            "timed_out": False,
+            "launch_error": None,
+            "infrastructure_error": "runtime capture interrupted",
+            "label": "test attempt",
+        }
+        validate_raw_attempt_semantics(**values)  # type: ignore[arg-type]
+        cases = (
+            {"launch_status": "launched"},
+            {"pts_status": "pass"},
+            {"exit_code": 0},
+            {"signal": 9},
+            {"timed_out": True},
+            {"launch_error": "launcher failed"},
+            {"infrastructure_error": None},
+        )
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                contradictory = {**values, **overrides}
+                with self.assertRaisesRegex(ValueError, "interrupted dimensions"):
+                    validate_raw_attempt_semantics(  # type: ignore[arg-type]
+                        **contradictory
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()
