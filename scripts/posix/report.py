@@ -1895,9 +1895,32 @@ def _publish_generation(output_directory: Path, outputs: Mapping[str, bytes]) ->
     except BaseException as error:
         operation_error = error
     cleanup_error: BaseException | None = None
-    if work is not None and slot is not None and generated_in_slot:
+    if work is not None and slot is not None:
         try:
-            _reset_report_work_root(slot, work)
+            if _directory_entry_matches(slot, _REPORT_WORK_ROOT_NAME, work):
+                _reset_report_work_root(slot, work)
+            elif _directory_entry_matches(parent, output_directory.name, work):
+                os.fsync(slot)
+                os.fsync(parent)
+                if not _directory_entry_matches(
+                    parent, output_directory.name, work
+                ):
+                    raise ValueError(
+                        "published report changed during cleanup reconciliation"
+                    )
+                try:
+                    os.stat(
+                        _REPORT_WORK_ROOT_NAME,
+                        dir_fd=slot,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    replacement_work = _create_report_work_root(slot)
+                    os.close(replacement_work)
+            else:
+                raise ValueError(
+                    "held generated report inode is not at output or work slot"
+                )
         except BaseException as error:
             cleanup_error = error
     for descriptor in (work, slot, parent):

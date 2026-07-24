@@ -5,10 +5,12 @@ from dataclasses import asdict, replace
 import csv
 import hashlib
 from html.parser import HTMLParser
+import inspect
 import io
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -1354,6 +1356,117 @@ class RendererTests(ReportFixture, unittest.TestCase):
                     (work_info.st_dev, work_info.st_ino), prior_identity
                 )
                 self.assertEqual(reset_identities, [prior_identity])
+                self.assertEqual(list(work_root.iterdir()), [])
+
+                generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(self.smros_results,),
+                    output_directory=output,
+                )
+                self.assertEqual(
+                    set(path.name for path in output.iterdir()), set(OUTPUT_NAMES)
+                )
+
+    def test_post_commit_assignment_interruptions_use_inode_location(
+        self,
+    ) -> None:
+        source, first_line = inspect.getsourcelines(
+            report_module._publish_generation
+        )
+        target_lines = {
+            "noreplace": next(
+                first_line + index
+                for index, line in enumerate(source)
+                if line == "            generated_in_slot = False\n"
+            ),
+            "exchange": next(
+                first_line + index
+                for index, line in enumerate(source)
+                if line == "                generated_in_slot = False\n"
+            ),
+        }
+
+        for operation in ("noreplace", "exchange"):
+            with self.subTest(operation=operation):
+                output = self.root / f"assignment-{operation}"
+                if operation == "exchange":
+                    generate_report(
+                        self.stage / "manifest.json",
+                        smros_results=(self.smros_results,),
+                        output_directory=output,
+                    )
+                rename = getattr(report_module, f"_rename_{operation}")
+                interruption = KeyboardInterrupt(
+                    f"{operation} normal-return assignment"
+                )
+                armed = False
+                triggered = False
+
+                def rename_then_arm(
+                    source_parent: int,
+                    source_name: str,
+                    destination_parent: int,
+                    destination_name: str,
+                ) -> None:
+                    nonlocal armed
+                    rename(
+                        source_parent,
+                        source_name,
+                        destination_parent,
+                        destination_name,
+                    )
+                    armed = True
+
+                def interrupt_assignment(
+                    frame: object,
+                    event: str,
+                    argument: object,
+                ) -> object:
+                    del argument
+                    nonlocal triggered
+                    if (
+                        event == "line"
+                        and armed
+                        and getattr(frame, "f_code", None)
+                        is report_module._publish_generation.__code__
+                        and getattr(frame, "f_lineno", None)
+                        == target_lines[operation]
+                    ):
+                        triggered = True
+                        sys.settrace(None)
+                        raise interruption
+                    return interrupt_assignment
+
+                previous_trace = sys.gettrace()
+                with mock.patch.object(
+                    report_module,
+                    f"_rename_{operation}",
+                    side_effect=rename_then_arm,
+                ):
+                    try:
+                        sys.settrace(interrupt_assignment)
+                        with self.assertRaises(KeyboardInterrupt) as raised:
+                            generate_report(
+                                self.stage / "manifest.json",
+                                smros_results=(self.smros_results,),
+                                output_directory=output,
+                            )
+                    finally:
+                        sys.settrace(previous_trace)
+
+                self.assertTrue(triggered)
+                self.assertIs(raised.exception, interruption)
+                self.assertEqual(
+                    set(path.name for path in output.iterdir()), set(OUTPUT_NAMES)
+                )
+                json.loads((output / "summary.json").read_text(encoding="utf-8"))
+                ET.parse(output / "junit.xml")
+                work_root = (
+                    self.root
+                    / report_module._REPORT_QUARANTINE_NAME
+                    / report_module._report_work_slot_name(output.name)
+                    / report_module._REPORT_WORK_ROOT_NAME
+                )
                 self.assertEqual(list(work_root.iterdir()), [])
 
                 generate_report(
