@@ -20,6 +20,8 @@ from .model import (
 
 EVENT_PREFIX = "SMROS_POSIX_EVENT "
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
+_PREFLIGHT_RUN_ID_RE = re.compile(r"error-[0-9]+\Z")
+_EMPTY_SHA256 = "0" * 64
 _EVENT_NAMES = frozenset(
     {
         "suite_start",
@@ -123,6 +125,13 @@ def _require_nonnegative_int(value: object, label: str) -> int:
     if type(value) is not int or value < 0:
         raise ValueError(f"event {label} is invalid")
     return value
+
+
+def _infrastructure_error_detail(value: Mapping[str, object]) -> str:
+    detail = value.get("detail", value.get("message"))
+    if not isinstance(detail, str) or not detail:
+        raise ValueError("infrastructure error detail is invalid")
+    return detail
 
 
 def _validate_common(value: object, line_number: int) -> dict[str, object]:
@@ -317,7 +326,16 @@ def parse_serial_log(log: str) -> ParsedEventRun:
             _require_nonnegative_int(value.get("selected_count"), "selected count")
             suite_start = event
         elif suite_start is None:
-            raise ValueError("event stream does not start with suite_start")
+            if (
+                event.event != "infrastructure_error"
+                or events
+                or event.seq != 1
+                or _PREFLIGHT_RUN_ID_RE.fullmatch(event.run_id) is None
+                or event.manifest_sha256 != _EMPTY_SHA256
+            ):
+                raise ValueError("event stream does not start with suite_start")
+            infrastructure_error = _infrastructure_error_detail(value)
+            terminal = event
         elif event.event == "test_start":
             if active is not None:
                 raise ValueError("test_start appears while another test is active")
@@ -376,15 +394,24 @@ def parse_serial_log(log: str) -> ParsedEventRun:
                 attempts.append(_interrupted_attempt(active, active_output))
                 active = None
                 active_output = []
-            detail = value.get("detail", value.get("message"))
-            if not isinstance(detail, str) or not detail:
-                raise ValueError("infrastructure error detail is invalid")
-            infrastructure_error = detail
+            infrastructure_error = _infrastructure_error_detail(value)
             terminal = event
         events.append(event)
 
     if suite_start is None:
-        raise ValueError("serial log contains no POSIX suite_start event")
+        if terminal is None:
+            raise ValueError("serial log contains no POSIX suite_start event")
+        return ParsedEventRun(
+            events=tuple(events),
+            attempts=(),
+            run_id=terminal.run_id,
+            manifest_sha256=terminal.manifest_sha256,
+            architecture=terminal.architecture,
+            complete=False,
+            status="incomplete",
+            terminal_event=terminal,
+            infrastructure_error=infrastructure_error,
+        )
     if active is not None:
         attempts.append(_interrupted_attempt(active, active_output))
     complete = bool(

@@ -9,6 +9,7 @@ from scripts.posix.model import RESOURCE_DELTA_NAMES
 
 RUN_ID = "run-123"
 MANIFEST_SHA256 = "a" * 64
+EMPTY_SHA256 = "0" * 64
 
 
 def _resources(**values: int) -> dict[str, int]:
@@ -140,6 +141,91 @@ class SerialEventTests(unittest.TestCase):
         self.assertEqual(attempt.resource_deltas.linux_fds, 0)
         self.assertEqual(attempt.resource_deltas.processes, 0)
         self.assertEqual(attempt.resource_evidence, "measured")
+
+    def test_parses_standalone_preflight_infrastructure_error(self) -> None:
+        for detail_field in ("message", "detail"):
+            with self.subTest(detail_field=detail_field):
+                log = _event(
+                    1,
+                    "infrastructure_error",
+                    run_id="error-123",
+                    manifest_sha256=EMPTY_SHA256,
+                    **{detail_field: "manifest-read"},
+                )
+
+                parsed = parse_serial_log(log)
+
+                self.assertFalse(parsed.complete)
+                self.assertEqual(parsed.status, "incomplete")
+                self.assertEqual(parsed.attempts, ())
+                self.assertEqual(parsed.run_id, "error-123")
+                self.assertEqual(parsed.manifest_sha256, EMPTY_SHA256)
+                self.assertEqual(parsed.architecture, "aarch64")
+                self.assertEqual(len(parsed.events), 1)
+                self.assertIs(parsed.terminal_event, parsed.events[0])
+                self.assertEqual(parsed.terminal_event.event, "infrastructure_error")
+                self.assertEqual(parsed.infrastructure_error, "manifest-read")
+
+    def test_rejects_noncanonical_standalone_preflight_error(self) -> None:
+        valid = _event(
+            1,
+            "infrastructure_error",
+            run_id="error-123",
+            manifest_sha256=EMPTY_SHA256,
+            message="manifest-read",
+        )
+        cases = {
+            "nonzero digest": _event(
+                1,
+                "infrastructure_error",
+                run_id="error-123",
+                message="manifest-read",
+            ),
+            "wrong sequence": _event(
+                2,
+                "infrastructure_error",
+                run_id="error-123",
+                manifest_sha256=EMPTY_SHA256,
+                message="manifest-read",
+            ),
+            "wrong run ID": _event(
+                1,
+                "infrastructure_error",
+                run_id="run-123",
+                manifest_sha256=EMPTY_SHA256,
+                message="manifest-read",
+            ),
+            "wrong schema": valid.replace('"schema":1', '"schema":2'),
+            "wrong architecture": valid.replace("aarch64", "x86_64"),
+            "missing detail": _event(
+                1,
+                "infrastructure_error",
+                run_id="error-123",
+                manifest_sha256=EMPTY_SHA256,
+            ),
+            "preceding event": "\n".join(
+                (
+                    _event(0, "test_start", test_id="unexpected"),
+                    valid,
+                )
+            ),
+            "following event": "\n".join(
+                (
+                    valid,
+                    _event(
+                        2,
+                        "suite_start",
+                        run_id="error-123",
+                        manifest_sha256=EMPTY_SHA256,
+                        selected_count=0,
+                    ),
+                )
+            ),
+        }
+        for label, log in cases.items():
+            with self.subTest(label=label):
+                with self.assertRaises(ValueError):
+                    parse_serial_log(log)
 
     def test_rejects_duplicate_terminal_event(self) -> None:
         log = "\n".join(
