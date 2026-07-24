@@ -356,6 +356,14 @@ def parse_serial_log(log: str) -> ParsedEventRun:
                 raise ValueError(
                     "complete event does not contain unique selected attempts"
                 )
+            if value["complete"] is True and any(
+                attempt.status == "interrupted" for attempt in attempts
+            ):
+                raise ValueError("complete event contains an interrupted attempt")
+            if value["complete"] is True and any(
+                attempt.infrastructure_error for attempt in attempts
+            ):
+                raise ValueError("complete event contains an infrastructure error")
             raw_counts = value.get("status_counts")
             expected_counts = dict(
                 sorted(Counter(attempt.status for attempt in attempts).items())

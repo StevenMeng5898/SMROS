@@ -34,7 +34,11 @@ def _event(seq: int, event: str, **values: object) -> str:
 
 class SerialEventTests(unittest.TestCase):
     def _one_attempt_log(
-        self, *, include_resources: bool = True, **end_values: object
+        self,
+        *,
+        include_resources: bool = True,
+        terminal_complete: bool = True,
+        **end_values: object,
     ) -> str:
         test_id = "conformance/interfaces/getpid/1-1.c"
         status = str(end_values.get("status", "pass"))
@@ -71,7 +75,7 @@ class SerialEventTests(unittest.TestCase):
                 _event(
                     4,
                     "suite_end",
-                    complete=True,
+                    complete=terminal_complete,
                     selected_count=1,
                     completed_count=1,
                     status_counts={status: 1},
@@ -324,6 +328,65 @@ class SerialEventTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "unique selected"):
             parse_serial_log("\n".join(lines))
+
+    def test_complete_suite_rejects_interrupted_attempt(self) -> None:
+        with self.assertRaisesRegex(ValueError, "complete.*interrupted"):
+            parse_serial_log(
+                self._one_attempt_log(
+                    status="interrupted",
+                    pts_status=None,
+                    launch_status="interrupted",
+                    exit_code=None,
+                    infrastructure_error="runtime capture interrupted",
+                )
+            )
+
+    def test_complete_suite_rejects_explicit_infrastructure_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "complete.*infrastructure error"):
+            parse_serial_log(
+                self._one_attempt_log(
+                    status="launch-error",
+                    pts_status=None,
+                    launch_status="launch-error",
+                    exit_code=None,
+                    launch_error="launcher failed",
+                    infrastructure_error="launcher cleanup failed",
+                )
+            )
+
+    def test_incomplete_suite_preserves_attempt_infrastructure_evidence(self) -> None:
+        cases = {
+            "interrupted": {
+                "pts_status": None,
+                "launch_status": "interrupted",
+                "exit_code": None,
+                "infrastructure_error": "runtime capture interrupted",
+            },
+            "launch-error": {
+                "pts_status": None,
+                "launch_status": "launch-error",
+                "exit_code": None,
+                "launch_error": "launcher failed",
+                "infrastructure_error": "launcher cleanup failed",
+            },
+        }
+        for status, values in cases.items():
+            with self.subTest(status=status):
+                parsed = parse_serial_log(
+                    self._one_attempt_log(
+                        status=status,
+                        terminal_complete=False,
+                        **values,
+                    )
+                )
+
+                self.assertFalse(parsed.complete)
+                self.assertEqual(parsed.status, "incomplete")
+                self.assertEqual(parsed.attempts[0].status, status)
+                self.assertEqual(
+                    parsed.attempts[0].infrastructure_error,
+                    values["infrastructure_error"],
+                )
 
     def test_rejects_contradictory_pass_dimensions(self) -> None:
         with self.assertRaisesRegex(ValueError, "pass dimensions"):
