@@ -496,6 +496,8 @@ fn posix_guest_manifest_parser_is_exported_bounded_and_canonical() {
         .expect("read user service exports");
     let parser = std::fs::read_to_string(repository.join("src/user_level/services/posix_test.rs"))
         .expect("POSIX guest manifest parser must exist");
+    let producer = std::fs::read_to_string(repository.join("scripts/posix/build.py"))
+        .expect("read POSIX manifest producer");
 
     assert!(services.contains("pub mod posix_test;"));
     assert!(services.contains("pub(crate) mod posix_test_logic_shared;"));
@@ -504,10 +506,25 @@ fn posix_guest_manifest_parser_is_exported_bounded_and_canonical() {
     assert!(parser.contains("pub const POSIX_MANIFEST_SCHEMA: u32 = 1;"));
     assert!(parser.contains("pub const POSIX_MANIFEST_MAX_BYTES: usize = 2 * 1024 * 1024;"));
     assert!(parser.contains("pub const POSIX_MANIFEST_MAX_TESTS: usize = 4_096;"));
+    for (name, value) in [
+        ("METADATA_VALUE", "1_024"),
+        ("TEST_ID", "256"),
+        ("GROUP", "96"),
+        ("API", "96"),
+        ("STAGED_PATH", "512"),
+    ] {
+        assert!(parser.contains(&format!(
+            "pub const POSIX_MANIFEST_MAX_{name}_BYTES: usize = {value};"
+        )));
+        assert!(producer.contains(&format!(
+            "MAX_MANIFEST_{name}_BYTES = {}",
+            value.replace('_', "")
+        )));
+    }
     assert!(parser.contains("SMROS_POSIX_MANIFEST\\t1"));
     assert!(parser.contains("fxfs::ensure_host_share()"));
     assert!(parser.contains("fxfs::read_file(POSIX_MANIFEST_PATH"));
-    assert!(parser.contains("core::str::from_utf8"));
+    assert!(parser.contains("str::from_utf8"));
     assert!(parser.contains("fields.len() != 9"));
     assert!(parser.contains("manifest_sha256"));
     assert!(parser.contains("64 ASCII zeroes"));
@@ -568,6 +585,10 @@ fn posix_resource_snapshot_uses_authoritative_state_without_resetting_it() {
         .find("pub fn posix_resource_snapshot()")
         .expect("POSIX resource snapshot must exist");
     let body = braced_body(&syscall[start..]);
+    let memory_start = syscall
+        .find("fn memory_resource_counts()")
+        .expect("non-initializing memory resource helper must exist");
+    let memory_body = braced_body(&syscall[memory_start..]);
 
     for field in [
         "processes",
@@ -589,11 +610,15 @@ fn posix_resource_snapshot_uses_authoritative_state_without_resetting_it() {
 
     assert!(body.contains("process_manager().active_processes()"));
     assert!(body.contains("scheduler().active_threads()"));
-    assert!(body.contains("state.linux_mappings.len()"));
-    assert!(body.contains("state.linux_fds.len()"));
-    assert!(body.contains("state.linux_shared_memory.len()"));
-    assert!(body.contains("state.handles.len()"));
+    assert!(memory_body.contains("MEMORY_SYSCALL_STATE"));
+    assert!(memory_body.contains(".as_ref()"));
+    assert!(memory_body.contains("state.linux_mappings.len()"));
+    assert!(memory_body.contains("state.linux_fds.len()"));
+    assert!(memory_body.contains("state.linux_shared_memory.len()"));
+    assert!(memory_body.contains("state.handles.len()"));
     assert!(body.contains("compat::posix_resource_counts()"));
+    assert!(body.contains("memory_resource_counts()"));
+    assert!(!body.contains("memory_state()"));
     assert!(body.contains("aio_requests: linux_aio_request_count()"));
     assert!(syscall.contains("fn linux_aio_request_count() -> usize"));
     assert!(syscall.contains("AIO entry points do not allocate request state"));

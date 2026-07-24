@@ -1545,6 +1545,38 @@ class ManifestTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     render_manifest(metadata(), (test,))
 
+    def test_manifest_field_limits_match_guest_consumer(self) -> None:
+        exact = replace(
+            suite_test("i" * 256),
+            group="g" * 96,
+            api="a" * 96,
+            binary="bin/" + "p" * (512 - len("bin/")),
+            sha256="a" * 64,
+        )
+        render_manifest(replace(metadata(), source="s" * 1024), (exact,))
+
+        invalid = (
+            ("metadata", replace(metadata(), source="s" * 1025), exact),
+            ("test ID", metadata(), replace(exact, test_id="i" * 257)),
+            ("group", metadata(), replace(exact, group="g" * 97)),
+            ("API", metadata(), replace(exact, api="a" * 97)),
+            (
+                "staged path",
+                metadata(),
+                replace(exact, binary="bin/" + "p" * (513 - len("bin/"))),
+            ),
+        )
+        for label, manifest_metadata, test in invalid:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(ValueError, "limit"):
+                    render_manifest(manifest_metadata, (test,))
+
+        self.assertEqual(build_module.MAX_MANIFEST_METADATA_VALUE_BYTES, 1024)
+        self.assertEqual(build_module.MAX_MANIFEST_TEST_ID_BYTES, 256)
+        self.assertEqual(build_module.MAX_MANIFEST_GROUP_BYTES, 96)
+        self.assertEqual(build_module.MAX_MANIFEST_API_BYTES, 96)
+        self.assertEqual(build_module.MAX_MANIFEST_STAGED_PATH_BYTES, 512)
+
     def test_rejects_duplicate_ids_and_duplicate_staged_paths(self) -> None:
         base = replace(suite_test(), binary="bin/case.test", sha256="a" * 64)
         duplicate_id = replace(base, binary="bin/other.test")
@@ -1567,9 +1599,18 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "4,096"):
             render_manifest(metadata(), too_many)
 
-        oversized = replace(base, test_id="conformance/" + "x" * MAX_MANIFEST_BYTES)
+        oversized = tuple(
+            replace(
+                suite_test("i" * 250 + f"{index:04}"),
+                group="g" * 96,
+                api="a" * 96,
+                binary="bin/" + "p" * 500 + f"{index:04}.bin",
+                sha256="a" * 64,
+            )
+            for index in range(MAX_TESTS)
+        )
         with self.assertRaisesRegex(ValueError, "2 MiB"):
-            render_manifest(metadata(), (oversized,))
+            render_manifest(metadata(), oversized)
 
     def test_parse_rejects_nondecimal_timeout_and_tampering(self) -> None:
         test = replace(suite_test(), binary="bin/conformance/interfaces/getpid/1-1.c.test", sha256="a" * 64)

@@ -2,9 +2,13 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
-use alloc::vec;
-use alloc::vec::Vec;
+use crate::alloc::string::String;
+use crate::alloc::vec::Vec;
+
+#[cfg(not(test))]
+use core as core_compat;
+#[cfg(test)]
+use std as core_compat;
 
 use super::{fxfs, posix_test_logic_shared};
 
@@ -12,13 +16,13 @@ pub const POSIX_MANIFEST_PATH: &str = "/shared/posixtest/manifest.tsv";
 pub const POSIX_MANIFEST_SCHEMA: u32 = 1;
 pub const POSIX_MANIFEST_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const POSIX_MANIFEST_MAX_TESTS: usize = 4_096;
+pub const POSIX_MANIFEST_MAX_METADATA_VALUE_BYTES: usize = 1_024;
+pub const POSIX_MANIFEST_MAX_TEST_ID_BYTES: usize = 256;
+pub const POSIX_MANIFEST_MAX_GROUP_BYTES: usize = 96;
+pub const POSIX_MANIFEST_MAX_API_BYTES: usize = 96;
+pub const POSIX_MANIFEST_MAX_STAGED_PATH_BYTES: usize = 512;
 pub const POSIX_FILTER_MAX_BYTES: usize = 256;
 
-const MAX_METADATA_VALUE_BYTES: usize = 1_024;
-const MAX_TEST_ID_BYTES: usize = 256;
-const MAX_GROUP_BYTES: usize = 96;
-const MAX_API_BYTES: usize = 96;
-const MAX_STAGED_PATH_BYTES: usize = 512;
 const MAX_TIMEOUT_MS: u32 = i32::MAX as u32;
 const EMPTY_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const MANIFEST_HEADER: &str = "SMROS_POSIX_MANIFEST\t1";
@@ -56,6 +60,7 @@ pub enum PosixTestError {
     InvalidPath,
     UnknownKind,
     UnknownDisposition,
+    InvalidKindDisposition,
     InvalidChecksum,
     InvalidTimeout,
     InvalidProvenance,
@@ -150,7 +155,8 @@ fn parse_filter_value(value: &str) -> Result<String, PosixTestError> {
 
 pub fn load_manifest() -> Result<PosixManifest, PosixTestError> {
     fxfs::ensure_host_share().map_err(|_| PosixTestError::FxfsPrepare)?;
-    let mut bytes = vec![0u8; POSIX_MANIFEST_MAX_BYTES + 1];
+    let mut bytes = Vec::new();
+    bytes.resize(POSIX_MANIFEST_MAX_BYTES + 1, 0u8);
     let read =
         fxfs::read_file(POSIX_MANIFEST_PATH, &mut bytes).map_err(|_| PosixTestError::FxfsRead)?;
     if read > POSIX_MANIFEST_MAX_BYTES {
@@ -175,7 +181,7 @@ fn parse_manifest(data: &[u8]) -> Result<PosixManifest, PosixTestError> {
     if data.len() > POSIX_MANIFEST_MAX_BYTES {
         return Err(PosixTestError::ManifestTooLarge);
     }
-    let text = core::str::from_utf8(data).map_err(|_| PosixTestError::InvalidUtf8)?;
+    let text = core_compat::str::from_utf8(data).map_err(|_| PosixTestError::InvalidUtf8)?;
     if text.as_bytes().contains(&b'\r') || !text.ends_with('\n') {
         return Err(PosixTestError::InvalidLineEndings);
     }
@@ -186,7 +192,7 @@ fn parse_manifest(data: &[u8]) -> Result<PosixManifest, PosixTestError> {
         return Err(PosixTestError::InvalidHeader);
     }
 
-    let mut metadata: [Option<String>; METADATA_KEYS.len()] = core::array::from_fn(|_| None);
+    let mut metadata: [Option<String>; METADATA_KEYS.len()] = core_compat::array::from_fn(|_| None);
     let mut metadata_count = 0usize;
     let mut checksum_offset = None;
     let mut tests = Vec::new();
@@ -274,9 +280,9 @@ fn parse_test_row(fields: &[&str]) -> Result<PosixManifestTest, PosixTestError> 
     let test_id = fields[1];
     let group = fields[2];
     let api = fields[3];
-    validate_manifest_atom(test_id, MAX_TEST_ID_BYTES)?;
-    validate_manifest_atom(group, MAX_GROUP_BYTES)?;
-    validate_manifest_atom(api, MAX_API_BYTES)?;
+    validate_manifest_atom(test_id, POSIX_MANIFEST_MAX_TEST_ID_BYTES)?;
+    validate_manifest_atom(group, POSIX_MANIFEST_MAX_GROUP_BYTES)?;
+    validate_manifest_atom(api, POSIX_MANIFEST_MAX_API_BYTES)?;
 
     let kind = match fields[4] {
         "runnable" => PosixTestKind::Runnable,
@@ -293,6 +299,24 @@ fn parse_test_row(fields: &[&str]) -> Result<PosixManifestTest, PosixTestError> 
         "not-built-shell-test" => PosixDisposition::NotBuiltShellTest,
         _ => return Err(PosixTestError::UnknownDisposition),
     };
+    let valid_kind_disposition = matches!(
+        (kind, disposition),
+        (
+            PosixTestKind::Runnable,
+            PosixDisposition::Complete
+                | PosixDisposition::ExcludedUpstreamStub
+                | PosixDisposition::CompileFailed
+                | PosixDisposition::LinkFailed
+        ) | (
+            PosixTestKind::Definition,
+            PosixDisposition::DefinitionOnly
+                | PosixDisposition::ExcludedUpstreamStub
+                | PosixDisposition::CompileFailed
+        ) | (PosixTestKind::Shell, PosixDisposition::NotBuiltShellTest)
+    );
+    if !valid_kind_disposition {
+        return Err(PosixTestError::InvalidKindDisposition);
+    }
     let timeout_ms = parse_timeout(fields[7])?;
     if !lower_hex(fields[8], 64) {
         return Err(PosixTestError::InvalidChecksum);
@@ -300,7 +324,7 @@ fn parse_test_row(fields: &[&str]) -> Result<PosixManifestTest, PosixTestError> 
 
     let binary_path = if disposition == PosixDisposition::Complete {
         let relative = fields[6];
-        if relative.len() > MAX_STAGED_PATH_BYTES
+        if relative.len() > POSIX_MANIFEST_MAX_STAGED_PATH_BYTES
             || !posix_test_logic_shared::manifest_atom_valid(relative)
         {
             return Err(PosixTestError::InvalidPath);
@@ -342,7 +366,7 @@ fn validate_manifest_atom(value: &str, maximum: usize) -> Result<(), PosixTestEr
 
 fn validate_metadata_atom(value: &str) -> Result<(), PosixTestError> {
     if value.is_empty()
-        || value.len() > MAX_METADATA_VALUE_BYTES
+        || value.len() > POSIX_MANIFEST_MAX_METADATA_VALUE_BYTES
         || !value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
     {
         Err(PosixTestError::InvalidAtom)
@@ -454,7 +478,7 @@ impl Sha256 {
     fn update(&mut self, mut input: &[u8]) {
         self.bytes = self.bytes.saturating_add(input.len() as u64);
         if self.block_len != 0 {
-            let take = core::cmp::min(64 - self.block_len, input.len());
+            let take = core_compat::cmp::min(64 - self.block_len, input.len());
             self.block[self.block_len..self.block_len + take].copy_from_slice(&input[..take]);
             self.block_len += take;
             input = &input[take..];
@@ -558,5 +582,383 @@ impl Sha256 {
         self.state[5] = self.state[5].wrapping_add(f);
         self.state[6] = self.state[6].wrapping_add(g);
         self.state[7] = self.state[7].wrapping_add(h);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const KNOWN_TASK3_MANIFEST: &str = concat!(
+        "SMROS_POSIX_MANIFEST\t1\n",
+        "meta\tsource\thttps://example.test/suite.git\n",
+        "meta\trevision\t1111111111111111111111111111111111111111\n",
+        "meta\tarchitecture\taarch64\n",
+        "meta\tcompiler\tcc\n",
+        "meta\tlibc\tlibc\n",
+        "meta\tpatch_sha256\t2222222222222222222222222222222222222222222222222222222222222222\n",
+        "meta\tbuild_results_sha256\t3333333333333333333333333333333333333333333333333333333333333333\n",
+        "meta\tmanifest_sha256\t0fa18bad8c314f3633f768f2115c63e1a6ed7b2fe6d4ebca89ab000f25c8758b\n",
+        "meta\tsmros_commit\t4444444444444444444444444444444444444444\n",
+        "test\tconformance/interfaces/getpid/1-1.c\tbase\tgetpid\trunnable\tcomplete\tbin/getpid.test\t30000\t5555555555555555555555555555555555555555555555555555555555555555\n",
+    );
+
+    fn hex_digest(data: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let mut output = String::new();
+        let hex = b"0123456789abcdef";
+        for byte in hasher.finish() {
+            output.push(hex[(byte >> 4) as usize] as char);
+            output.push(hex[(byte & 0x0f) as usize] as char);
+        }
+        output
+    }
+
+    fn manifest(rows: &[String]) -> Vec<u8> {
+        manifest_with_source("https://example.test/suite.git", rows)
+    }
+
+    fn manifest_with_source(source: &str, rows: &[String]) -> Vec<u8> {
+        let mut text = format!(
+            concat!(
+                "SMROS_POSIX_MANIFEST\t1\n",
+                "meta\tsource\t{}\n",
+                "meta\trevision\t1111111111111111111111111111111111111111\n",
+                "meta\tarchitecture\taarch64\n",
+                "meta\tcompiler\tcc\n",
+                "meta\tlibc\tlibc\n",
+                "meta\tpatch_sha256\t2222222222222222222222222222222222222222222222222222222222222222\n",
+                "meta\tbuild_results_sha256\t3333333333333333333333333333333333333333333333333333333333333333\n",
+                "meta\tmanifest_sha256\t{}\n",
+                "meta\tsmros_commit\t4444444444444444444444444444444444444444\n",
+            ),
+            source,
+            EMPTY_SHA256
+        );
+        for row in rows {
+            text.push_str(row);
+            text.push('\n');
+        }
+        let digest = hex_digest(text.as_bytes());
+        text = text.replacen(EMPTY_SHA256, &digest, 1);
+        text.into_bytes()
+    }
+
+    fn row(
+        id: &str,
+        group: &str,
+        api: &str,
+        kind: &str,
+        disposition: &str,
+        path: &str,
+        timeout: &str,
+        checksum: &str,
+    ) -> String {
+        format!("test\t{id}\t{group}\t{api}\t{kind}\t{disposition}\t{path}\t{timeout}\t{checksum}")
+    }
+
+    fn runnable_row(id: &str, path: &str) -> String {
+        row(
+            id,
+            "base",
+            "getpid",
+            "runnable",
+            "complete",
+            path,
+            "30000",
+            &"5".repeat(64),
+        )
+    }
+
+    #[test]
+    fn accepts_task3_manifest_and_sha256_interoperates() {
+        let parsed = parse_manifest(KNOWN_TASK3_MANIFEST.as_bytes()).expect("canonical manifest");
+        assert_eq!(parsed.tests.len(), 1);
+        assert_eq!(
+            parsed.tests[0].binary_path.as_deref(),
+            Some("/shared/posixtest/bin/getpid.test")
+        );
+        assert_eq!(
+            hex_digest(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+
+        let tampered = KNOWN_TASK3_MANIFEST.replace("\tbase\t", "\ttime\t");
+        assert_eq!(
+            parse_manifest(tampered.as_bytes()),
+            Err(PosixTestError::ManifestChecksumMismatch)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_kind_disposition_combinations_with_valid_checksums() {
+        let kinds = ["runnable", "definition", "shell"];
+        let dispositions = [
+            "complete",
+            "definition-only",
+            "excluded-upstream-stub",
+            "compile-failed",
+            "link-failed",
+            "not-built-shell-test",
+        ];
+        for kind in kinds {
+            for disposition in dispositions {
+                let allowed = matches!(
+                    (kind, disposition),
+                    (
+                        "runnable",
+                        "complete" | "excluded-upstream-stub" | "compile-failed" | "link-failed"
+                    ) | (
+                        "definition",
+                        "definition-only" | "excluded-upstream-stub" | "compile-failed"
+                    ) | ("shell", "not-built-shell-test")
+                );
+                let (path, checksum) = if disposition == "complete" {
+                    ("bin/case.test", "6".repeat(64))
+                } else {
+                    ("-", String::from(EMPTY_SHA256))
+                };
+                let bytes = manifest(&[row(
+                    "case",
+                    "base",
+                    "api",
+                    kind,
+                    disposition,
+                    path,
+                    "30000",
+                    &checksum,
+                )]);
+                assert_eq!(
+                    parse_manifest(&bytes).is_ok(),
+                    allowed,
+                    "kind/disposition decision differs for {kind}/{disposition}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_rows_duplicates_and_unsafe_values() {
+        let valid = runnable_row("case-a", "bin/a.test");
+        let cases = [
+            manifest(&[String::from("bogus\tvalue")]),
+            manifest(&[row(
+                "case",
+                "base",
+                "api",
+                "bogus",
+                "complete",
+                "bin/a",
+                "1",
+                &"5".repeat(64),
+            )]),
+            manifest(&[row(
+                "case",
+                "base",
+                "api",
+                "runnable",
+                "bogus",
+                "-",
+                "1",
+                EMPTY_SHA256,
+            )]),
+            manifest(&[row(
+                "case",
+                "base",
+                "api",
+                "runnable",
+                "complete",
+                "../a",
+                "1",
+                &"5".repeat(64),
+            )]),
+            manifest(&[row(
+                "case",
+                "base",
+                "api",
+                "runnable",
+                "complete",
+                "bin/a",
+                "0",
+                &"5".repeat(64),
+            )]),
+            manifest(&[row(
+                "case",
+                "base",
+                "api",
+                "runnable",
+                "complete",
+                "bin/a",
+                "1",
+                &"A".repeat(64),
+            )]),
+            manifest(&[row(
+                "case",
+                "base",
+                "api",
+                "runnable",
+                "complete",
+                "-",
+                "1",
+                EMPTY_SHA256,
+            )]),
+            manifest(&[row(
+                "case",
+                "base",
+                "api",
+                "runnable",
+                "compile-failed",
+                "bin/a",
+                "1",
+                &"5".repeat(64),
+            )]),
+            manifest(&[valid.clone(), valid.clone()]),
+            manifest(&[
+                runnable_row("case-a", "bin/same.test"),
+                runnable_row("case-b", "bin/same.test"),
+            ]),
+            manifest(&[
+                runnable_row("case-b", "bin/b.test"),
+                runnable_row("case-a", "bin/a.test"),
+            ]),
+        ];
+        for bytes in cases {
+            assert!(parse_manifest(&bytes).is_err());
+        }
+
+        assert_eq!(parse_manifest(&[0xff]), Err(PosixTestError::InvalidUtf8));
+        assert!(parse_manifest(KNOWN_TASK3_MANIFEST.replace('\n', "\r\n").as_bytes()).is_err());
+        assert!(parse_manifest(KNOWN_TASK3_MANIFEST.trim_end().as_bytes()).is_err());
+
+        let unknown_metadata = KNOWN_TASK3_MANIFEST.replace("meta\tsource\t", "meta\tunknown\t");
+        assert!(parse_manifest(unknown_metadata.as_bytes()).is_err());
+        let duplicate_metadata = KNOWN_TASK3_MANIFEST.replace(
+            "meta\trevision\t1111111111111111111111111111111111111111\n",
+            "meta\tsource\tduplicate\n",
+        );
+        assert!(parse_manifest(duplicate_metadata.as_bytes()).is_err());
+        let missing_metadata = KNOWN_TASK3_MANIFEST.replace("meta\tcompiler\tcc\n", "");
+        assert!(parse_manifest(missing_metadata.as_bytes()).is_err());
+        let metadata_out_of_order = KNOWN_TASK3_MANIFEST.replace(
+            "meta\tcompiler\tcc\nmeta\tlibc\tlibc\n",
+            "meta\tlibc\tlibc\nmeta\tcompiler\tcc\n",
+        );
+        assert!(parse_manifest(metadata_out_of_order.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn manifest_and_filter_bounds_are_exact() {
+        assert!(parse_manifest(&manifest_with_source(
+            &"s".repeat(POSIX_MANIFEST_MAX_METADATA_VALUE_BYTES),
+            &[]
+        ))
+        .is_ok());
+        assert!(parse_manifest(&manifest_with_source(
+            &"s".repeat(POSIX_MANIFEST_MAX_METADATA_VALUE_BYTES + 1),
+            &[]
+        ))
+        .is_err());
+
+        let exact_id = "i".repeat(POSIX_MANIFEST_MAX_TEST_ID_BYTES);
+        let exact_group = "g".repeat(POSIX_MANIFEST_MAX_GROUP_BYTES);
+        let exact_api = "a".repeat(POSIX_MANIFEST_MAX_API_BYTES);
+        let exact_path = format!(
+            "bin/{}",
+            "p".repeat(POSIX_MANIFEST_MAX_STAGED_PATH_BYTES - 4)
+        );
+        let bytes = manifest(&[row(
+            &exact_id,
+            &exact_group,
+            &exact_api,
+            "runnable",
+            "complete",
+            &exact_path,
+            "1",
+            &"5".repeat(64),
+        )]);
+        assert!(parse_manifest(&bytes).is_ok());
+
+        for invalid in [
+            row(
+                &"i".repeat(POSIX_MANIFEST_MAX_TEST_ID_BYTES + 1),
+                "g",
+                "a",
+                "runnable",
+                "complete",
+                "bin/a",
+                "1",
+                &"5".repeat(64),
+            ),
+            row(
+                "i",
+                &"g".repeat(POSIX_MANIFEST_MAX_GROUP_BYTES + 1),
+                "a",
+                "runnable",
+                "complete",
+                "bin/a",
+                "1",
+                &"5".repeat(64),
+            ),
+            row(
+                "i",
+                "g",
+                &"a".repeat(POSIX_MANIFEST_MAX_API_BYTES + 1),
+                "runnable",
+                "complete",
+                "bin/a",
+                "1",
+                &"5".repeat(64),
+            ),
+            row(
+                "i",
+                "g",
+                "a",
+                "runnable",
+                "complete",
+                &format!(
+                    "bin/{}",
+                    "p".repeat(POSIX_MANIFEST_MAX_STAGED_PATH_BYTES - 3)
+                ),
+                "1",
+                &"5".repeat(64),
+            ),
+        ] {
+            assert!(parse_manifest(&manifest(&[invalid])).is_err());
+        }
+
+        let mut maximum_rows = Vec::new();
+        for index in 0..POSIX_MANIFEST_MAX_TESTS {
+            maximum_rows.push(runnable_row(
+                &format!("case-{index:04}"),
+                &format!("bin/case-{index:04}.test"),
+            ));
+        }
+        assert!(parse_manifest(&manifest(&maximum_rows)).is_ok());
+        maximum_rows.push(runnable_row("case-4096", "bin/case-4096.test"));
+        assert_eq!(
+            parse_manifest(&manifest(&maximum_rows)),
+            Err(PosixTestError::TooManyTests)
+        );
+        let mut oversized = Vec::new();
+        oversized.resize(POSIX_MANIFEST_MAX_BYTES + 1, b'x');
+        assert_eq!(
+            parse_manifest(&oversized),
+            Err(PosixTestError::ManifestTooLarge)
+        );
+
+        assert_eq!(parse_filter(&["all"]), Ok(PosixFilter::All));
+        assert_eq!(
+            parse_filter(&["api", "getpid"]),
+            Ok(PosixFilter::Api(String::from("getpid")))
+        );
+        assert!(parse_filter(&[]).is_err());
+        assert!(parse_filter(&["all", "extra"]).is_err());
+        assert_eq!(
+            parse_filter(&["api", "get"]),
+            Ok(PosixFilter::Api(String::from("get")))
+        );
+        assert!(parse_filter(&["group", "../unsafe"]).is_err());
+        let oversized = "x".repeat(POSIX_FILTER_MAX_BYTES + 1);
+        assert!(parse_filter(&["test", &oversized]).is_err());
     }
 }

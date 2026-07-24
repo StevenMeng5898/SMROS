@@ -2273,23 +2273,45 @@ pub struct PosixResourceSnapshot {
     pub ipc_objects: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MemoryResourceCounts {
+    linux_mappings: usize,
+    linux_fds: usize,
+    linux_shared_memory: usize,
+    kernel_handles: usize,
+}
+
+fn memory_resource_counts() -> MemoryResourceCounts {
+    unsafe {
+        MEMORY_SYSCALL_STATE
+            .as_ref()
+            .map(|state| MemoryResourceCounts {
+                linux_mappings: state.linux_mappings.len(),
+                linux_fds: state.linux_fds.len(),
+                linux_shared_memory: state.linux_shared_memory.len(),
+                kernel_handles: state.handles.len(),
+            })
+            .unwrap_or_default()
+    }
+}
+
 fn linux_aio_request_count() -> usize {
     // The AIO entry points do not allocate request state; active requests are invariantly zero.
     0
 }
 
 pub fn posix_resource_snapshot() -> PosixResourceSnapshot {
-    let state = memory_state();
+    let memory_counts = memory_resource_counts();
     let compat_counts = compat::posix_resource_counts();
     let real_timer =
         usize::from(LINUX_REAL_TIMER_DEADLINE_TICK.load(Ordering::SeqCst) != LINUX_TIMER_DISABLED);
     PosixResourceSnapshot {
         processes: crate::kernel_lowlevel::memory::process_manager().active_processes(),
         scheduler_threads: crate::kernel_objects::scheduler::scheduler().active_threads(),
-        linux_mappings: state.linux_mappings.len(),
-        linux_fds: state.linux_fds.len(),
-        linux_shared_memory: state.linux_shared_memory.len(),
-        kernel_handles: state.handles.len(),
+        linux_mappings: memory_counts.linux_mappings,
+        linux_fds: memory_counts.linux_fds,
+        linux_shared_memory: memory_counts.linux_shared_memory,
+        kernel_handles: memory_counts.kernel_handles,
         timers: compat_counts.timers + real_timer,
         aio_requests: linux_aio_request_count(),
         ipc_objects: compat_counts.ipc_objects,

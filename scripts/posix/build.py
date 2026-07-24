@@ -34,6 +34,11 @@ from .model import BuildResult, BuildSummary, SuiteTest
 
 
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+MAX_MANIFEST_METADATA_VALUE_BYTES = 1024
+MAX_MANIFEST_TEST_ID_BYTES = 256
+MAX_MANIFEST_GROUP_BYTES = 96
+MAX_MANIFEST_API_BYTES = 96
+MAX_MANIFEST_STAGED_PATH_BYTES = 512
 MAX_HOST_MANIFEST_BYTES = 8 * 1024 * 1024
 MAX_BUILD_RESULTS_BYTES = 64 * 1024 * 1024
 MAX_BUILD_RESULT_LINE_BYTES = 256 * 1024
@@ -154,6 +159,11 @@ def _validate_atom(value: str, label: str) -> None:
         raise ValueError(f"invalid {label}: {value!r}")
 
 
+def _validate_field_limit(value: str, label: str, maximum: int) -> None:
+    if len(value.encode("utf-8")) > maximum:
+        raise ValueError(f"{label} exceeds the {maximum}-byte manifest field limit")
+
+
 def _validate_relative_path(value: str, label: str) -> PurePosixPath:
     _validate_atom(value, label)
     path = PurePosixPath(value)
@@ -177,6 +187,9 @@ def _validate_metadata(metadata: ManifestMetadata) -> None:
     for key in _METADATA_KEYS:
         value = getattr(metadata, key)
         _validate_atom(value, f"metadata {key}")
+        _validate_field_limit(
+            value, f"metadata {key}", MAX_MANIFEST_METADATA_VALUE_BYTES
+        )
     if metadata.architecture != "aarch64":
         raise ValueError(f"unsupported architecture: {metadata.architecture}")
     if _REVISION_RE.fullmatch(metadata.revision) is None:
@@ -212,6 +225,9 @@ def _validate_test(test: SuiteTest) -> None:
     ):
         _validate_atom(value, label)
     _validate_relative_path(test.test_id, "test ID")
+    _validate_field_limit(test.test_id, "test ID", MAX_MANIFEST_TEST_ID_BYTES)
+    _validate_field_limit(test.group, "group", MAX_MANIFEST_GROUP_BYTES)
+    _validate_field_limit(test.api, "API", MAX_MANIFEST_API_BYTES)
     if test.kind not in _ALLOWED_KINDS:
         raise ValueError(f"unknown kind: {test.kind}")
     if test.disposition not in _ALLOWED_DISPOSITIONS:
@@ -221,6 +237,9 @@ def _validate_test(test: SuiteTest) -> None:
     if test.binary is None or test.sha256 is None:
         raise ValueError(f"missing staged path or checksum for {test.test_id}")
     _validate_relative_path(test.binary, "staged path")
+    _validate_field_limit(
+        test.binary, "staged path", MAX_MANIFEST_STAGED_PATH_BYTES
+    )
     if _DIGEST_RE.fullmatch(test.sha256) is None:
         raise ValueError(f"invalid checksum for {test.test_id}")
     runnable = test.disposition == "complete"

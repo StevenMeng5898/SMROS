@@ -1,5 +1,32 @@
 #![allow(unused_comparisons, unused_macros)]
 
+#[cfg(test)]
+mod alloc {
+    pub mod string {
+        pub use std::string::String;
+    }
+
+    pub mod vec {
+        pub use std::vec::Vec;
+    }
+}
+
+#[cfg(test)]
+mod fxfs {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum FxfsError {
+        Unavailable,
+    }
+
+    pub fn ensure_host_share() -> Result<(), FxfsError> {
+        Err(FxfsError::Unavailable)
+    }
+
+    pub fn read_file(_path: &str, _out: &mut [u8]) -> Result<usize, FxfsError> {
+        Err(FxfsError::Unavailable)
+    }
+}
+
 mod main_logic {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -963,7 +990,7 @@ mod hypervisor_logic {
     }
 }
 
-mod posix_test_logic {
+mod posix_test_logic_shared {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/user_level/services/posix_test_logic_shared.rs"
@@ -1138,3 +1165,7 @@ mod posix_test_logic {
         assert_eq!(resource_delta(usize::MAX, 0), -(usize::MAX as i128));
     }
 }
+
+#[cfg(test)]
+#[path = "../../../src/user_level/services/posix_test.rs"]
+mod posix_test_guest;
