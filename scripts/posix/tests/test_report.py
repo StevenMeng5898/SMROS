@@ -445,6 +445,51 @@ class AggregationTests(ReportFixture, unittest.TestCase):
             ).encode("ascii")
         )
 
+    def _write_serial_terminal_error(
+        self,
+        path: Path,
+        *,
+        run_id: str,
+        field: str,
+        detail: str,
+    ) -> None:
+        def event(seq: int, name: str, **values: object) -> str:
+            return "SMROS_POSIX_EVENT " + json.dumps(
+                {
+                    "architecture": "aarch64",
+                    "event": name,
+                    "manifest_sha256": self.metadata.manifest_sha256,
+                    "run_id": run_id,
+                    "schema": 1,
+                    "seq": seq,
+                    **values,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+
+        path.write_bytes(
+            (
+                "\n".join(
+                    (
+                        event(
+                            1,
+                            "suite_start",
+                            selected_count=1,
+                            build_id="5" * 64,
+                            build_results_sha256=self.metadata.build_results_sha256,
+                            revision=self.metadata.revision,
+                            patch_sha256=self.metadata.patch_sha256,
+                            smros_commit=self.metadata.smros_commit,
+                        ),
+                        event(2, "infrastructure_error", **{field: detail}),
+                    )
+                )
+                + "\n"
+            ).encode("ascii")
+        )
+
     def test_runtime_attempt_rejects_canonical_lone_surrogate_text(self) -> None:
         surrogate = "\ud800"
         passed = self._attempt(self.tests[0], "pass")
@@ -625,6 +670,54 @@ class AggregationTests(ReportFixture, unittest.TestCase):
         self.assertEqual(attempt.stderr, text)
         self.assertEqual(attempt.launch_error, text)
         self.assertEqual(attempt.infrastructure_error, text)
+
+    def test_serial_terminal_error_rejects_lone_surrogate_detail(self) -> None:
+        manifest = report_module._load_manifest(self.stage / "manifest.json")
+        for field in ("message", "detail"):
+            with self.subTest(field=field):
+                path = self.root / f"surrogate-serial-terminal-{field}.log"
+                self._write_serial_terminal_error(
+                    path,
+                    run_id="serial-run",
+                    field=field,
+                    detail="\ud800",
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "serial.*infrastructure.*invalid",
+                ) as raised:
+                    report_module._load_smros_results(path, manifest)
+                self.assertIs(type(raised.exception), ValueError)
+
+    def test_serial_terminal_error_preserves_unicode_detail_in_provenance(
+        self,
+    ) -> None:
+        text = "\u96ea-\u03c0"
+        manifest = report_module._load_manifest(self.stage / "manifest.json")
+        for field in ("message", "detail"):
+            with self.subTest(field=field):
+                path = self.root / f"unicode-serial-terminal-{field}.log"
+                self._write_serial_terminal_error(
+                    path,
+                    run_id="serial-run",
+                    field=field,
+                    detail=text,
+                )
+                loaded = report_module._load_smros_results(path, manifest)
+                summary = generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(path,),
+                    output_directory=self.root / f"unicode-report-{field}",
+                )
+                self.assertEqual(
+                    (
+                        loaded.terminal.get("infrastructure_error"),
+                        summary["provenance"]["smros_runs"][0].get(
+                            "infrastructure_error"
+                        ),
+                    ),
+                    (text, text),
+                )
 
     def test_coverage_denominators_and_exclusions_are_exact(self) -> None:
         summary = generate_report(

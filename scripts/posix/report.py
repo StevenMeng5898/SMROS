@@ -785,6 +785,11 @@ def _load_serial_results(
     parsed = parse_serial_log(text)
     if not _is_strict_utf8_text(parsed.run_id, nonempty=True):
         raise ValueError("serial run ID is invalid")
+    if parsed.infrastructure_error is not None and not _is_strict_utf8_text(
+        parsed.infrastructure_error,
+        nonempty=True,
+    ):
+        raise ValueError("serial terminal infrastructure error is invalid")
     if parsed.manifest_sha256 != manifest.metadata.manifest_sha256:
         raise ValueError("serial event manifest provenance mismatch")
     suite_start = parsed.events[0].values
@@ -885,6 +890,8 @@ def _load_serial_results(
             sorted(Counter(attempt.status for attempt in attempts).items())
         ),
     }
+    if parsed.infrastructure_error is not None:
+        terminal["infrastructure_error"] = parsed.infrastructure_error
     _validate_terminal(terminal, metadata, attempts, len(parsed.events) + 1)
     return _RuntimeInput(
         path=str(Path(os.path.abspath(path))),
