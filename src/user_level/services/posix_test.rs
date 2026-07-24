@@ -8,13 +8,18 @@ use crate::alloc::vec::Vec;
 
 #[cfg(not(test))]
 use core as core_compat;
+#[cfg(not(test))]
+use core::cell::UnsafeCell;
 #[cfg(test)]
 use std as core_compat;
 
 use super::{fxfs, posix_test_logic_shared};
 
 #[cfg(not(test))]
-use super::run_elf::{RunOutcome, RunTermination};
+use super::run_elf::{self, RunObserver, RunOutcome, RunTermination};
+
+#[cfg(not(test))]
+use crate::syscall::PosixResourceSnapshot;
 
 pub const POSIX_MANIFEST_PATH: &str = "/shared/posixtest/manifest.tsv";
 pub const POSIX_MANIFEST_SCHEMA: u32 = 1;
@@ -26,10 +31,13 @@ pub const POSIX_MANIFEST_MAX_GROUP_BYTES: usize = 96;
 pub const POSIX_MANIFEST_MAX_API_BYTES: usize = 96;
 pub const POSIX_MANIFEST_MAX_STAGED_PATH_BYTES: usize = 512;
 pub const POSIX_FILTER_MAX_BYTES: usize = 256;
+pub const POSIX_EVENT_PREFIX: &str = "SMROS_POSIX_EVENT ";
+pub const POSIX_EVENT_SCHEMA: u32 = 1;
 
 const MAX_TIMEOUT_MS: u32 = i32::MAX as u32;
 const EMPTY_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const MANIFEST_HEADER: &str = "SMROS_POSIX_MANIFEST\t1";
+const POSIX_EVENT_ARCHITECTURE: &str = "aarch64";
 const METADATA_KEYS: [&str; 9] = [
     "source",
     "revision",
@@ -71,6 +79,44 @@ pub enum PosixTestError {
     NonCanonicalManifest,
     ManifestChecksumMismatch,
     InvalidFilter,
+    AlreadyRunning,
+    EmptySelection,
+}
+
+impl PosixTestError {
+    fn as_str(self) -> &'static str {
+        match self {
+            PosixTestError::FxfsPrepare => "host-share-prepare",
+            PosixTestError::FxfsRead => "manifest-read",
+            PosixTestError::ManifestTooLarge => "manifest-too-large",
+            PosixTestError::InvalidUtf8 => "invalid-utf8",
+            PosixTestError::InvalidLineEndings => "invalid-line-endings",
+            PosixTestError::InvalidHeader => "invalid-header",
+            PosixTestError::UnknownRowType => "unknown-row-type",
+            PosixTestError::InvalidMetadataRow => "invalid-metadata-row",
+            PosixTestError::UnknownMetadata => "unknown-metadata",
+            PosixTestError::MissingMetadata => "missing-metadata",
+            PosixTestError::DuplicateMetadata => "duplicate-metadata",
+            PosixTestError::MetadataOutOfOrder => "metadata-out-of-order",
+            PosixTestError::InvalidTestRow => "invalid-test-row",
+            PosixTestError::TooManyTests => "too-many-tests",
+            PosixTestError::DuplicateTestId => "duplicate-test-id",
+            PosixTestError::DuplicateTestPath => "duplicate-test-path",
+            PosixTestError::InvalidAtom => "invalid-atom",
+            PosixTestError::InvalidPath => "invalid-path",
+            PosixTestError::UnknownKind => "unknown-kind",
+            PosixTestError::UnknownDisposition => "unknown-disposition",
+            PosixTestError::InvalidKindDisposition => "invalid-kind-disposition",
+            PosixTestError::InvalidChecksum => "invalid-checksum",
+            PosixTestError::InvalidTimeout => "invalid-timeout",
+            PosixTestError::InvalidProvenance => "invalid-provenance",
+            PosixTestError::NonCanonicalManifest => "non-canonical-manifest",
+            PosixTestError::ManifestChecksumMismatch => "manifest-checksum-mismatch",
+            PosixTestError::InvalidFilter => "invalid-filter",
+            PosixTestError::AlreadyRunning => "already-running",
+            PosixTestError::EmptySelection => "empty-selection",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,6 +183,146 @@ pub struct PosixRunnerStatus {
     pub current_test: Option<String>,
     pub completed: usize,
     pub selected: usize,
+    pub status_counts: PosixStatusCounts,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PosixStatusCounts {
+    pub passed: usize,
+    pub failed: usize,
+    pub unresolved: usize,
+    pub unsupported: usize,
+    pub untested: usize,
+    pub launch_errors: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PosixRuntimeStatus {
+    Pass,
+    Fail,
+    Unresolved,
+    Unsupported,
+    Untested,
+    LaunchError,
+}
+
+impl PosixRuntimeStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            PosixRuntimeStatus::Pass => "pass",
+            PosixRuntimeStatus::Fail => "fail",
+            PosixRuntimeStatus::Unresolved => "unresolved",
+            PosixRuntimeStatus::Unsupported => "unsupported",
+            PosixRuntimeStatus::Untested => "untested",
+            PosixRuntimeStatus::LaunchError => "launch-error",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectedTestAction {
+    Launch,
+    EmitWithoutLaunch,
+    Ignore,
+}
+
+fn test_matches_filter(test: &PosixManifestTest, filter: &PosixFilter) -> bool {
+    let (kind, value) = match filter {
+        PosixFilter::All => (posix_test_logic_shared::PosixFilterKind::All, ""),
+        PosixFilter::Group(value) => (
+            posix_test_logic_shared::PosixFilterKind::Group,
+            value.as_str(),
+        ),
+        PosixFilter::Api(value) => (
+            posix_test_logic_shared::PosixFilterKind::Api,
+            value.as_str(),
+        ),
+        PosixFilter::Test(value) => (
+            posix_test_logic_shared::PosixFilterKind::Test,
+            value.as_str(),
+        ),
+    };
+    posix_test_logic_shared::filter_matches(
+        kind,
+        value,
+        test.test_id.as_str(),
+        test.group.as_str(),
+        test.api.as_str(),
+        test.kind == PosixTestKind::Runnable,
+        test.disposition == PosixDisposition::Complete,
+    )
+}
+
+fn selected_test_action(test: &PosixManifestTest) -> SelectedTestAction {
+    if test.disposition == PosixDisposition::ExcludedUpstreamStub {
+        return SelectedTestAction::EmitWithoutLaunch;
+    }
+    match (test.kind, test.disposition) {
+        (PosixTestKind::Runnable, PosixDisposition::Complete) => SelectedTestAction::Launch,
+        (PosixTestKind::Definition, _) => SelectedTestAction::Ignore,
+        _ => SelectedTestAction::Ignore,
+    }
+}
+
+fn pts_status(exit_code: i32) -> PosixRuntimeStatus {
+    match posix_test_logic_shared::pts_status(exit_code) {
+        posix_test_logic_shared::POSIX_STATUS_PASS => PosixRuntimeStatus::Pass,
+        posix_test_logic_shared::POSIX_STATUS_FAIL => PosixRuntimeStatus::Fail,
+        posix_test_logic_shared::POSIX_STATUS_UNRESOLVED => PosixRuntimeStatus::Unresolved,
+        posix_test_logic_shared::POSIX_STATUS_UNSUPPORTED => PosixRuntimeStatus::Unsupported,
+        posix_test_logic_shared::POSIX_STATUS_UNTESTED => PosixRuntimeStatus::Untested,
+        _ => PosixRuntimeStatus::Fail,
+    }
+}
+
+impl PosixStatusCounts {
+    fn record(&mut self, status: PosixRuntimeStatus) {
+        match status {
+            PosixRuntimeStatus::Pass => self.passed = self.passed.saturating_add(1),
+            PosixRuntimeStatus::Fail => self.failed = self.failed.saturating_add(1),
+            PosixRuntimeStatus::Unresolved => self.unresolved = self.unresolved.saturating_add(1),
+            PosixRuntimeStatus::Unsupported => {
+                self.unsupported = self.unsupported.saturating_add(1)
+            }
+            PosixRuntimeStatus::Untested => self.untested = self.untested.saturating_add(1),
+            PosixRuntimeStatus::LaunchError => {
+                self.launch_errors = self.launch_errors.saturating_add(1)
+            }
+        }
+    }
+}
+
+#[cfg(not(test))]
+struct RunnerState {
+    filter: PosixFilter,
+    metadata: PosixManifestMetadata,
+    selected: Vec<PosixManifestTest>,
+    run_id: String,
+    build_id: String,
+    seq: u64,
+    started_tick: u64,
+    next_index: usize,
+    current_index: Option<usize>,
+    current_started_tick: u64,
+    resource_before: PosixResourceSnapshot,
+    completed: usize,
+    status_counts: PosixStatusCounts,
+}
+
+#[cfg(not(test))]
+struct RunnerStateCell(UnsafeCell<Option<RunnerState>>);
+
+#[cfg(not(test))]
+// SAFETY: Runner entry points run under the repository's serialized scheduler rule.
+unsafe impl Sync for RunnerStateCell {}
+
+#[cfg(not(test))]
+static RUNNER_STATE: RunnerStateCell = RunnerStateCell(UnsafeCell::new(None));
+
+#[cfg(not(test))]
+fn with_runner_state<R>(operation: impl FnOnce(&mut Option<RunnerState>) -> R) -> R {
+    // SAFETY: `start` and the pinned ELF completion callback are scheduler-serialized.
+    unsafe { operation(&mut *RUNNER_STATE.0.get()) }
 }
 
 pub fn parse_filter(args: &[&str]) -> Result<PosixFilter, PosixTestError> {
@@ -170,6 +356,7 @@ pub fn load_manifest() -> Result<PosixManifest, PosixTestError> {
     parse_manifest(&bytes)
 }
 
+#[cfg(test)]
 pub fn status_snapshot() -> PosixRunnerStatus {
     PosixRunnerStatus {
         running: false,
@@ -178,24 +365,665 @@ pub fn status_snapshot() -> PosixRunnerStatus {
         current_test: None,
         completed: 0,
         selected: 0,
+        status_counts: PosixStatusCounts::default(),
     }
 }
 
-/// Task 9 replaces this fail-closed bridge with the POSIX runner state machine.
+#[cfg(not(test))]
+pub fn status_snapshot() -> PosixRunnerStatus {
+    with_runner_state(|slot| match slot.as_ref() {
+        Some(state) => PosixRunnerStatus {
+            running: true,
+            run_id: Some(state.run_id.clone()),
+            filter: Some(state.filter.clone()),
+            current_test: state
+                .current_index
+                .and_then(|index| state.selected.get(index))
+                .map(|test| test.test_id.clone()),
+            completed: state.completed,
+            selected: state.selected.len(),
+            status_counts: state.status_counts,
+        },
+        None => PosixRunnerStatus {
+            running: false,
+            run_id: None,
+            filter: None,
+            current_test: None,
+            completed: 0,
+            selected: 0,
+            status_counts: PosixStatusCounts::default(),
+        },
+    })
+}
+
+fn derive_build_id(metadata: &PosixManifestMetadata) -> String {
+    let mut canonical = String::new();
+    canonical.push_str("{\"build_results_sha256\":\"");
+    canonical.push_str(metadata.build_results_sha256.as_str());
+    canonical.push_str("\",\"manifest_sha256\":\"");
+    canonical.push_str(metadata.manifest_sha256.as_str());
+    canonical.push_str("\",\"patch_sha256\":\"");
+    canonical.push_str(metadata.patch_sha256.as_str());
+    canonical.push_str("\",\"revision\":\"");
+    canonical.push_str(metadata.revision.as_str());
+    canonical.push_str("\",\"smros_commit\":\"");
+    canonical.push_str(metadata.smros_commit.as_str());
+    canonical.push_str("\"}");
+
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    digest_hex(&hasher.finish())
+}
+
+fn digest_hex(digest: &[u8; 32]) -> String {
+    let alphabet = b"0123456789abcdef";
+    let mut output = String::new();
+    for byte in digest {
+        output.push(alphabet[(byte >> 4) as usize] as char);
+        output.push(alphabet[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+#[cfg(not(test))]
+fn decimal_string(mut value: u64) -> String {
+    if value == 0 {
+        return String::from("0");
+    }
+    let mut reversed = [0u8; 20];
+    let mut len = 0usize;
+    while value != 0 {
+        reversed[len] = b'0' + (value % 10) as u8;
+        value /= 10;
+        len += 1;
+    }
+    let mut output = String::new();
+    while len != 0 {
+        len -= 1;
+        output.push(reversed[len] as char);
+    }
+    output
+}
+
+#[cfg(not(test))]
+fn make_run_id(build_id: &str, tick: u64) -> String {
+    let mut run_id = String::from(build_id);
+    run_id.push('-');
+    run_id.push_str(decimal_string(tick).as_str());
+    run_id
+}
+
+#[cfg(not(test))]
+pub fn start(filter: PosixFilter) -> Result<(), PosixTestError> {
+    if with_runner_state(|slot| slot.is_some()) {
+        return Err(PosixTestError::AlreadyRunning);
+    }
+
+    let manifest = match load_manifest() {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            emit_unbound_infrastructure_error(error.as_str());
+            return Err(error);
+        }
+    };
+    let mut selected = Vec::new();
+    for test in manifest.tests {
+        if test_matches_filter(&test, &filter)
+            && selected_test_action(&test) != SelectedTestAction::Ignore
+        {
+            selected.push(test);
+        }
+    }
+
+    let started_tick = crate::kernel_lowlevel::timer::get_tick_count();
+    let build_id = derive_build_id(&manifest.metadata);
+    let run_id = make_run_id(build_id.as_str(), started_tick);
+    let empty = selected.is_empty();
+    let state = RunnerState {
+        filter,
+        metadata: manifest.metadata,
+        selected,
+        run_id,
+        build_id,
+        seq: 0,
+        started_tick,
+        next_index: 0,
+        current_index: None,
+        current_started_tick: 0,
+        resource_before: crate::syscall::posix_resource_snapshot(),
+        completed: 0,
+        status_counts: PosixStatusCounts::default(),
+    };
+
+    if with_runner_state(|slot| {
+        if slot.is_some() {
+            false
+        } else {
+            *slot = Some(state);
+            true
+        }
+    }) {
+        with_runner_state(|slot| {
+            if let Some(state) = slot.as_mut() {
+                emit_suite_start(state);
+            }
+        });
+    } else {
+        return Err(PosixTestError::AlreadyRunning);
+    }
+
+    if empty {
+        infrastructure_error(PosixTestError::EmptySelection.as_str());
+        return Err(PosixTestError::EmptySelection);
+    }
+    launch_current_test();
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn launch_current_test() {
+    loop {
+        let current = with_runner_state(|slot| {
+            let state = slot.as_mut()?;
+            if state.current_index.is_some() {
+                return None;
+            }
+            if state.next_index >= state.selected.len() {
+                return Some(None);
+            }
+            let index = state.next_index;
+            state.next_index += 1;
+            state.current_index = Some(index);
+            state.current_started_tick = crate::kernel_lowlevel::timer::get_tick_count();
+            state.resource_before = crate::syscall::posix_resource_snapshot();
+            let test = state.selected[index].clone();
+            emit_test_start(state, &test);
+            Some(Some((test.clone(), selected_test_action(&test))))
+        });
+
+        let Some(current) = current else {
+            return;
+        };
+        let Some((test, action)) = current else {
+            finish_suite();
+            return;
+        };
+        if action == SelectedTestAction::EmitWithoutLaunch {
+            let outcome = RunOutcome {
+                path: test.test_id,
+                termination: RunTermination::Exit(5),
+                elapsed_ticks: 0,
+            };
+            if !record_run_outcome(&outcome) {
+                infrastructure_error("runner-outcome-invariant");
+                return;
+            }
+            continue;
+        }
+        let Some(path) = test.binary_path.as_ref().cloned() else {
+            infrastructure_error("selected-test-missing-binary");
+            return;
+        };
+        let mut argv = Vec::new();
+        argv.push(path.clone());
+        match run_elf::spawn_observed(path.clone(), argv, Vec::new(), RunObserver::PosixTest) {
+            Ok(()) => return,
+            Err(err) => {
+                let outcome = RunOutcome {
+                    path,
+                    termination: RunTermination::LaunchError(err),
+                    elapsed_ticks: 0,
+                };
+                if !record_run_outcome(&outcome) {
+                    infrastructure_error("runner-outcome-invariant");
+                    return;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(not(test))]
 pub fn on_run_outcome(outcome: RunOutcome) {
+    if let RunTermination::InfrastructureError(error) = outcome.termination {
+        infrastructure_error(error.as_str());
+        return;
+    }
+    if !record_run_outcome(&outcome) {
+        infrastructure_error("runner-outcome-invariant");
+        return;
+    }
+    launch_current_test();
+}
+
+#[cfg(not(test))]
+fn record_run_outcome(outcome: &RunOutcome) -> bool {
+    let after = crate::syscall::posix_resource_snapshot();
+    with_runner_state(|slot| {
+        let Some(state) = slot.as_mut() else {
+            return false;
+        };
+        let Some(index) = state.current_index else {
+            return false;
+        };
+        let test = state.selected[index].clone();
+        if selected_test_action(&test) == SelectedTestAction::Launch
+            && test.binary_path.as_deref() != Some(outcome.path.as_str())
+        {
+            return false;
+        }
+        let status = match outcome.termination {
+            RunTermination::Exit(exit_code) => pts_status(exit_code),
+            RunTermination::LaunchError(_) => PosixRuntimeStatus::LaunchError,
+            RunTermination::InfrastructureError(_) => return false,
+        };
+        emit_test_end(state, &test, &outcome, status, after);
+        state.status_counts.record(status);
+        state.completed = state.completed.saturating_add(1);
+        state.current_index = None;
+        true
+    })
+}
+
+#[cfg(not(test))]
+fn finish_suite() {
+    with_runner_state(|slot| {
+        if let Some(state) = slot.as_mut() {
+            emit_suite_end(state);
+        }
+        *slot = None;
+    });
+}
+
+#[cfg(not(test))]
+fn infrastructure_error(message: &str) {
+    let emitted = with_runner_state(|slot| {
+        let Some(state) = slot.as_mut() else {
+            return false;
+        };
+        emit_infrastructure_error(state, message);
+        *slot = None;
+        true
+    });
+    if !emitted {
+        emit_unbound_infrastructure_error(message);
+    }
+}
+
+#[cfg(not(test))]
+fn emit_suite_start(state: &mut RunnerState) {
     let mut serial = crate::kernel_lowlevel::serial::Serial::new();
     serial.init();
-    serial.write_str("POSIX infrastructure failure: unhandled ELF outcome");
-    serial.write_str(" path=");
-    serial.write_str(outcome.path.as_str());
-    serial.write_str(" termination=");
+    begin_event(&mut serial, state, "suite_start");
+    serial.write_str(",\"selected_count\":");
+    write_u64(&mut serial, state.selected.len() as u64);
+    serial.write_str(",\"build_id\":");
+    write_json_string(&mut serial, state.build_id.as_str());
+    serial.write_str(",\"build_results_sha256\":");
+    write_json_string(&mut serial, state.metadata.build_results_sha256.as_str());
+    serial.write_str(",\"smros_commit\":");
+    write_json_string(&mut serial, state.metadata.smros_commit.as_str());
+    serial.write_str(",\"revision\":");
+    write_json_string(&mut serial, state.metadata.revision.as_str());
+    serial.write_str(",\"patch_sha256\":");
+    write_json_string(&mut serial, state.metadata.patch_sha256.as_str());
+    serial.write_str(",\"filter\":");
+    write_filter(&mut serial, &state.filter);
+    serial.write_str(",\"started_ticks\":");
+    write_u64(&mut serial, state.started_tick);
+    serial.write_str(",\"source\":\"smros-serial\"}");
+    serial.write_byte(b'\n');
+}
+
+#[cfg(not(test))]
+fn emit_test_start(state: &mut RunnerState, test: &PosixManifestTest) {
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+    serial.init();
+    begin_event(&mut serial, state, "test_start");
+    write_test_identity(&mut serial, test);
+    serial.write_str(",\"binary_sha256\":");
+    write_json_string(&mut serial, test.sha256.as_str());
+    serial.write_str(",\"source\":\"smros-serial\",\"started_ticks\":");
+    write_u64(&mut serial, state.current_started_tick);
+    serial.write_byte(b'}');
+    serial.write_byte(b'\n');
+}
+
+#[cfg(not(test))]
+fn emit_test_end(
+    state: &mut RunnerState,
+    test: &PosixManifestTest,
+    outcome: &RunOutcome,
+    status: PosixRuntimeStatus,
+    after: PosixResourceSnapshot,
+) {
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+    serial.init();
+    begin_event(&mut serial, state, "test_end");
+    write_test_identity(&mut serial, test);
+    serial.write_str(",\"status\":");
+    write_json_string(&mut serial, status.as_str());
     match outcome.termination {
-        RunTermination::Exit(_) => serial.write_str("exit"),
-        RunTermination::LaunchError(err) => serial.write_str(err.as_str()),
-        RunTermination::InfrastructureError(err) => serial.write_str(err.as_str()),
+        RunTermination::Exit(exit_code) => {
+            serial.write_str(",\"pts_status\":");
+            write_json_string(&mut serial, status.as_str());
+            serial.write_str(",\"launch_status\":\"launched\",\"exit_code\":");
+            write_i64(&mut serial, exit_code as i64);
+        }
+        RunTermination::LaunchError(error) => {
+            serial.write_str(",\"launch_status\":\"launch-error\",\"launch_error\":");
+            write_json_string(&mut serial, error.as_str());
+        }
+        RunTermination::InfrastructureError(_) => return,
     }
-    serial.write_str("\n");
+    serial.write_str(",\"timed_out\":false,\"elapsed_ticks\":");
+    write_u64(&mut serial, outcome.elapsed_ticks);
+    serial.write_str(",\"resource_deltas\":{");
+    write_resource_deltas(&mut serial, state.resource_before, after);
+    serial.write_str("}}");
+    serial.write_byte(b'\n');
+}
+
+#[cfg(not(test))]
+fn emit_suite_end(state: &mut RunnerState) {
+    let elapsed =
+        crate::kernel_lowlevel::timer::get_tick_count().saturating_sub(state.started_tick);
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+    serial.init();
+    begin_event(&mut serial, state, "suite_end");
+    serial.write_str(",\"complete\":true,\"selected_count\":");
+    write_u64(&mut serial, state.selected.len() as u64);
+    serial.write_str(",\"completed_count\":");
+    write_u64(&mut serial, state.completed as u64);
+    serial.write_str(",\"status_counts\":{");
+    write_status_counts(&mut serial, state.status_counts);
+    serial.write_str("},\"elapsed_ticks\":");
+    write_u64(&mut serial, elapsed);
+    serial.write_byte(b'}');
+    serial.write_byte(b'\n');
+}
+
+#[cfg(not(test))]
+fn emit_infrastructure_error(state: &mut RunnerState, message: &str) {
+    let current = state
+        .current_index
+        .and_then(|index| state.selected.get(index))
+        .cloned();
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+    serial.init();
+    begin_event(&mut serial, state, "infrastructure_error");
+    serial.write_str(",\"message\":");
+    write_json_string(&mut serial, message);
+    if let Some(test) = current.as_ref() {
+        write_test_identity(&mut serial, test);
+    }
+    serial.write_byte(b'}');
+    serial.write_byte(b'\n');
+}
+
+#[cfg(not(test))]
+fn emit_unbound_infrastructure_error(message: &str) {
+    let tick = crate::kernel_lowlevel::timer::get_tick_count();
+    let mut run_id = String::from("error-");
+    run_id.push_str(decimal_string(tick).as_str());
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+    serial.init();
+    serial.write_str(POSIX_EVENT_PREFIX);
+    serial.write_str("{\"schema\":");
+    write_u64(&mut serial, POSIX_EVENT_SCHEMA as u64);
+    serial.write_str(",\"seq\":1,\"event\":\"infrastructure_error\",\"run_id\":");
+    write_json_string(&mut serial, run_id.as_str());
+    serial.write_str(",\"manifest_sha256\":");
+    write_json_string(&mut serial, EMPTY_SHA256);
+    serial.write_str(",\"architecture\":\"");
+    serial.write_str(POSIX_EVENT_ARCHITECTURE);
+    serial.write_str("\",\"message\":");
+    write_json_string(&mut serial, message);
+    serial.write_byte(b'}');
+    serial.write_byte(b'\n');
+}
+
+#[cfg(not(test))]
+fn begin_event(
+    serial: &mut crate::kernel_lowlevel::serial::Serial,
+    state: &mut RunnerState,
+    event: &str,
+) {
+    state.seq = state.seq.saturating_add(1);
+    serial.write_str(POSIX_EVENT_PREFIX);
+    serial.write_str("{\"schema\":");
+    write_u64(serial, POSIX_EVENT_SCHEMA as u64);
+    serial.write_str(",\"seq\":");
+    write_u64(serial, state.seq);
+    serial.write_str(",\"event\":");
+    write_json_string(serial, event);
+    serial.write_str(",\"run_id\":");
+    write_json_string(serial, state.run_id.as_str());
+    serial.write_str(",\"manifest_sha256\":");
+    write_json_string(serial, state.metadata.manifest_sha256.as_str());
+    serial.write_str(",\"architecture\":\"");
+    serial.write_str(POSIX_EVENT_ARCHITECTURE);
+    serial.write_byte(b'\"');
+}
+
+#[cfg(not(test))]
+fn write_test_identity(
+    serial: &mut crate::kernel_lowlevel::serial::Serial,
+    test: &PosixManifestTest,
+) {
+    serial.write_str(",\"test_id\":");
+    write_json_string(serial, test.test_id.as_str());
+    serial.write_str(",\"group\":");
+    write_json_string(serial, test.group.as_str());
+    serial.write_str(",\"api\":");
+    write_json_string(serial, test.api.as_str());
+}
+
+#[cfg(not(test))]
+fn write_filter(serial: &mut crate::kernel_lowlevel::serial::Serial, filter: &PosixFilter) {
+    let mut encoded = String::new();
+    match filter {
+        PosixFilter::All => encoded.push_str("all"),
+        PosixFilter::Group(value) => {
+            encoded.push_str("group=");
+            encoded.push_str(value.as_str());
+        }
+        PosixFilter::Api(value) => {
+            encoded.push_str("api=");
+            encoded.push_str(value.as_str());
+        }
+        PosixFilter::Test(value) => {
+            encoded.push_str("test=");
+            encoded.push_str(value.as_str());
+        }
+    }
+    write_json_string(serial, encoded.as_str());
+}
+
+#[cfg(not(test))]
+fn write_json_string(serial: &mut crate::kernel_lowlevel::serial::Serial, value: &str) {
+    serial.write_byte(b'\"');
+    for byte in value.bytes() {
+        write_json_byte(serial, byte);
+    }
+    serial.write_byte(b'\"');
+}
+
+#[cfg(not(test))]
+fn write_json_byte(serial: &mut crate::kernel_lowlevel::serial::Serial, byte: u8) {
+    match byte {
+        b'\"' | b'\\' => {
+            serial.write_byte(b'\\');
+            serial.write_byte(byte);
+        }
+        0x20..=0x7e => serial.write_byte(byte),
+        _ => serial.write_byte(b'?'),
+    }
+}
+
+#[cfg(not(test))]
+fn write_resource_deltas(
+    serial: &mut crate::kernel_lowlevel::serial::Serial,
+    before: PosixResourceSnapshot,
+    after: PosixResourceSnapshot,
+) {
+    write_delta_field(
+        serial,
+        "aio_requests",
+        before.aio_requests,
+        after.aio_requests,
+        true,
+    );
+    write_delta_field(
+        serial,
+        "ipc_objects",
+        before.ipc_objects,
+        after.ipc_objects,
+        false,
+    );
+    write_delta_field(
+        serial,
+        "kernel_handles",
+        before.kernel_handles,
+        after.kernel_handles,
+        false,
+    );
+    write_delta_field(
+        serial,
+        "linux_fds",
+        before.linux_fds,
+        after.linux_fds,
+        false,
+    );
+    write_delta_field(
+        serial,
+        "linux_mappings",
+        before.linux_mappings,
+        after.linux_mappings,
+        false,
+    );
+    write_delta_field(
+        serial,
+        "linux_shared_memory",
+        before.linux_shared_memory,
+        after.linux_shared_memory,
+        false,
+    );
+    write_delta_field(
+        serial,
+        "processes",
+        before.processes,
+        after.processes,
+        false,
+    );
+    write_delta_field(
+        serial,
+        "scheduler_threads",
+        before.scheduler_threads,
+        after.scheduler_threads,
+        false,
+    );
+    write_delta_field(serial, "timers", before.timers, after.timers, false);
+}
+
+#[cfg(not(test))]
+fn write_delta_field(
+    serial: &mut crate::kernel_lowlevel::serial::Serial,
+    name: &str,
+    before: usize,
+    after: usize,
+    first: bool,
+) {
+    if !first {
+        serial.write_byte(b',');
+    }
+    write_json_string(serial, name);
+    serial.write_byte(b':');
+    write_i128(
+        serial,
+        posix_test_logic_shared::resource_delta(before, after),
+    );
+}
+
+#[cfg(not(test))]
+fn write_status_counts(
+    serial: &mut crate::kernel_lowlevel::serial::Serial,
+    counts: PosixStatusCounts,
+) {
+    let entries = [
+        ("fail", counts.failed),
+        ("launch-error", counts.launch_errors),
+        ("pass", counts.passed),
+        ("unresolved", counts.unresolved),
+        ("unsupported", counts.unsupported),
+        ("untested", counts.untested),
+    ];
+    let mut first = true;
+    for (name, count) in entries {
+        if count == 0 {
+            continue;
+        }
+        if !first {
+            serial.write_byte(b',');
+        }
+        first = false;
+        write_json_string(serial, name);
+        serial.write_byte(b':');
+        write_u64(serial, count as u64);
+    }
+}
+
+#[cfg(not(test))]
+fn write_i64(serial: &mut crate::kernel_lowlevel::serial::Serial, value: i64) {
+    write_i128(serial, value as i128);
+}
+
+#[cfg(not(test))]
+fn write_i128(serial: &mut crate::kernel_lowlevel::serial::Serial, value: i128) {
+    if value < 0 {
+        serial.write_byte(b'-');
+        write_u128(serial, value.wrapping_neg() as u128);
+    } else {
+        write_u128(serial, value as u128);
+    }
+}
+
+#[cfg(not(test))]
+fn write_u128(serial: &mut crate::kernel_lowlevel::serial::Serial, mut value: u128) {
+    if value == 0 {
+        serial.write_byte(b'0');
+        return;
+    }
+    let mut reversed = [0u8; 39];
+    let mut len = 0usize;
+    while value != 0 {
+        reversed[len] = b'0' + (value % 10) as u8;
+        value /= 10;
+        len += 1;
+    }
+    while len != 0 {
+        len -= 1;
+        serial.write_byte(reversed[len]);
+    }
+}
+
+#[cfg(not(test))]
+fn write_u64(serial: &mut crate::kernel_lowlevel::serial::Serial, mut value: u64) {
+    if value == 0 {
+        serial.write_byte(b'0');
+        return;
+    }
+    let mut reversed = [0u8; 20];
+    let mut len = 0usize;
+    while value != 0 {
+        reversed[len] = b'0' + (value % 10) as u8;
+        value /= 10;
+        len += 1;
+    }
+    while len != 0 {
+        len -= 1;
+        serial.write_byte(reversed[len]);
+    }
 }
 
 fn parse_fixed_fields<const N: usize>(line: &str) -> Option<[&str; N]> {
@@ -1039,5 +1867,73 @@ mod tests {
         assert!(parse_filter(&["group", "../unsafe"]).is_err());
         let oversized = "x".repeat(POSIX_FILTER_MAX_BYTES + 1);
         assert!(parse_filter(&["test", &oversized]).is_err());
+    }
+
+    #[test]
+    fn runner_filters_dispositions_and_pts_statuses_are_exact() {
+        let parsed = parse_manifest(KNOWN_TASK3_MANIFEST.as_bytes()).expect("canonical manifest");
+        let runnable = &parsed.tests[0];
+        assert!(test_matches_filter(runnable, &PosixFilter::All));
+        assert!(test_matches_filter(
+            runnable,
+            &PosixFilter::Group(String::from("base"))
+        ));
+        assert!(!test_matches_filter(
+            runnable,
+            &PosixFilter::Group(String::from("bas"))
+        ));
+        assert!(test_matches_filter(
+            runnable,
+            &PosixFilter::Api(String::from("getpid"))
+        ));
+        assert!(!test_matches_filter(
+            runnable,
+            &PosixFilter::Api(String::from("get"))
+        ));
+        assert_eq!(selected_test_action(runnable), SelectedTestAction::Launch);
+
+        let mut definition = runnable.clone();
+        definition.kind = PosixTestKind::Definition;
+        definition.disposition = PosixDisposition::DefinitionOnly;
+        definition.binary_path = None;
+        assert_eq!(
+            selected_test_action(&definition),
+            SelectedTestAction::Ignore
+        );
+        definition.disposition = PosixDisposition::ExcludedUpstreamStub;
+        assert_eq!(
+            selected_test_action(&definition),
+            SelectedTestAction::EmitWithoutLaunch
+        );
+        assert!(!test_matches_filter(&definition, &PosixFilter::All));
+        assert!(test_matches_filter(
+            &definition,
+            &PosixFilter::Group(String::from("base"))
+        ));
+
+        for (exit_code, expected) in [
+            (0, PosixRuntimeStatus::Pass),
+            (1, PosixRuntimeStatus::Fail),
+            (2, PosixRuntimeStatus::Unresolved),
+            (4, PosixRuntimeStatus::Unsupported),
+            (5, PosixRuntimeStatus::Untested),
+            (127, PosixRuntimeStatus::Fail),
+        ] {
+            assert_eq!(pts_status(exit_code), expected);
+        }
+        let mut counts = PosixStatusCounts::default();
+        counts.record(PosixRuntimeStatus::Pass);
+        counts.record(PosixRuntimeStatus::LaunchError);
+        assert_eq!(counts.passed, 1);
+        assert_eq!(counts.launch_errors, 1);
+    }
+
+    #[test]
+    fn guest_build_id_matches_host_canonical_json_digest() {
+        let parsed = parse_manifest(KNOWN_TASK3_MANIFEST.as_bytes()).expect("canonical manifest");
+        assert_eq!(
+            derive_build_id(&parsed.metadata),
+            "a6b4a96d5075473a42b6d07ea883139013f65bd45487afaf118bde38f0086e9a"
+        );
     }
 }

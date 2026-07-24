@@ -793,20 +793,177 @@ fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
     assert!(syscall.contains("sys_exit(exit_code)"));
 
     assert!(posix.contains("pub fn on_run_outcome(outcome: RunOutcome)"));
-    assert!(posix.contains("Task 9 replaces this fail-closed bridge"));
-    assert!(posix.contains("POSIX infrastructure failure: unhandled ELF outcome"));
-    for premature_runner_event in [
+}
+
+#[test]
+fn posix_guest_runner_is_serialized_bounded_and_fail_closed() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let runner = std::fs::read_to_string(repository.join("src/user_level/services/posix_test.rs"))
+        .expect("read POSIX guest runner");
+    let shared = std::fs::read_to_string(
+        repository.join("src/user_level/services/posix_test_logic_shared.rs"),
+    )
+    .expect("read shared POSIX decisions");
+
+    for declaration in [
+        "pub const POSIX_EVENT_PREFIX: &str = \"SMROS_POSIX_EVENT \";",
+        "pub const POSIX_EVENT_SCHEMA: u32 = 1;",
+        "struct RunnerStateCell(UnsafeCell<Option<RunnerState>>);",
+        "static RUNNER_STATE: RunnerStateCell",
+        "pub fn start(filter: PosixFilter) -> Result<(), PosixTestError>",
+        "AlreadyRunning",
+        "EmptySelection",
+        "pub status_counts: PosixStatusCounts",
+    ] {
+        assert!(
+            runner.contains(declaration),
+            "missing runner contract {declaration}"
+        );
+    }
+    assert_eq!(
+        runner
+            .matches("static RUNNER_STATE: RunnerStateCell")
+            .count(),
+        1,
+        "only one POSIX run state may exist"
+    );
+
+    let filter_start = runner
+        .find("fn test_matches_filter(")
+        .expect("exact manifest filter helper");
+    let filter_body = braced_body(&runner[filter_start..]);
+    assert!(filter_body.contains("posix_test_logic_shared::filter_matches("));
+    assert!(filter_body.contains("PosixFilterKind::All"));
+    assert!(filter_body.contains("PosixFilterKind::Group"));
+    assert!(filter_body.contains("PosixFilterKind::Api"));
+    assert!(filter_body.contains("PosixFilterKind::Test"));
+    assert!(!filter_body.contains("contains("));
+    assert!(!filter_body.contains("starts_with("));
+    assert!(shared.contains("PosixFilterKind::All => $runnable && $complete"));
+    assert!(shared.contains("PosixFilterKind::Group => $value == $group"));
+    assert!(shared.contains("PosixFilterKind::Api => $value == $api"));
+    assert!(shared.contains("PosixFilterKind::Test => $value == $test_id"));
+
+    let action_start = runner
+        .find("fn selected_test_action(")
+        .expect("selected-test disposition helper");
+    let action_body = braced_body(&runner[action_start..]);
+    assert!(action_body.contains("PosixTestKind::Definition"));
+    assert!(action_body.contains("PosixDisposition::ExcludedUpstreamStub"));
+    assert!(action_body.contains("SelectedTestAction::EmitWithoutLaunch"));
+    assert!(action_body.contains("SelectedTestAction::Launch"));
+    assert!(action_body.contains("PosixDisposition::Complete"));
+    assert!(!action_body.contains("spawn_observed"));
+
+    let launch_start = runner
+        .find("fn launch_current_test(")
+        .expect("runner launch helper");
+    let launch_body = braced_body(&runner[launch_start..]);
+    assert!(launch_body.contains("run_elf::spawn_observed("));
+    assert!(launch_body.contains("RunObserver::PosixTest"));
+    assert!(launch_body.contains("RunTermination::LaunchError(err)"));
+    assert!(launch_body.contains("loop {"));
+    assert!(launch_body.contains("record_run_outcome("));
+    assert!(!launch_body.contains("on_run_outcome("));
+    assert!(launch_body.contains("binary_path.as_ref()"));
+    assert!(launch_body.contains("infrastructure_error"));
+    assert!(
+        !launch_body.contains("status: \"pass\"") && !launch_body.contains("\"pass\""),
+        "a missing binary or launch failure must never become a pass"
+    );
+}
+
+#[test]
+fn posix_guest_events_match_the_versioned_host_schema() {
+    let runner = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/posix_test.rs"
+    ));
+    let events = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/posix/events.py"
+    ));
+
+    for event in [
         "suite_start",
         "test_start",
         "test_end",
         "suite_end",
-        "SMROS_POSIX_EVENT",
+        "infrastructure_error",
+    ] {
+        assert!(runner.contains(event), "guest does not emit {event}");
+        assert!(events.contains(&format!("\"{event}\"")));
+    }
+    for common in [
+        "schema",
+        "seq",
+        "event",
+        "run_id",
+        "manifest_sha256",
+        "architecture",
     ] {
         assert!(
-            !posix.contains(premature_runner_event),
-            "Task 8 must not implement runner event {premature_runner_event}"
+            runner.contains(&format!("\\\"{common}\\\"")),
+            "missing {common}"
         );
     }
+    for test_field in [
+        "test_id",
+        "group",
+        "api",
+        "status",
+        "exit_code",
+        "launch_error",
+        "elapsed_ticks",
+        "resource_deltas",
+    ] {
+        assert!(
+            runner.contains(&format!("\\\"{test_field}\\\"")),
+            "missing test event field {test_field}"
+        );
+    }
+    for resource in [
+        "aio_requests",
+        "ipc_objects",
+        "kernel_handles",
+        "linux_fds",
+        "linux_mappings",
+        "linux_shared_memory",
+        "processes",
+        "scheduler_threads",
+        "timers",
+    ] {
+        assert!(runner.contains(&format!("\"{resource}\"")));
+    }
+
+    assert!(runner.contains("fn write_json_string("));
+    assert!(!runner.contains("fn write_filter_value("));
+    assert!(runner.contains("b'\\\"' | b'\\\\'"));
+    assert!(runner.contains("fn derive_build_id("));
+    for provenance in [
+        "build_results_sha256",
+        "manifest_sha256",
+        "patch_sha256",
+        "revision",
+        "smros_commit",
+    ] {
+        assert!(runner.contains(provenance));
+    }
+    for pts in [
+        "POSIX_STATUS_PASS => PosixRuntimeStatus::Pass",
+        "POSIX_STATUS_FAIL => PosixRuntimeStatus::Fail",
+        "POSIX_STATUS_UNRESOLVED => PosixRuntimeStatus::Unresolved",
+        "POSIX_STATUS_UNSUPPORTED => PosixRuntimeStatus::Unsupported",
+        "POSIX_STATUS_UNTESTED => PosixRuntimeStatus::Untested",
+    ] {
+        assert!(runner.contains(pts), "missing PTS status mapping {pts}");
+    }
+    assert!(runner.contains("posix_test_logic_shared::pts_status(exit_code)"));
+    assert!(runner.contains("posix_resource_snapshot()"));
+    assert!(runner.contains("posix_test_logic_shared::resource_delta("));
+    assert!(runner.contains("fn write_i128("));
+    assert!(!runner.contains("fn signed_delta("));
+    assert!(runner.contains("status_counts"));
 }
 
 #[test]
