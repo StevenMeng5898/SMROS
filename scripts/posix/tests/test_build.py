@@ -68,6 +68,17 @@ def metadata() -> ManifestMetadata:
     )
 
 
+def checksummed_manifest_without_validation(test: SuiteTest) -> bytes:
+    canonical_metadata = replace(metadata(), manifest_sha256=EMPTY_SHA256)
+    canonical = build_module._manifest_text(canonical_metadata, (test,))
+    checksum = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    text = build_module._manifest_text(
+        replace(canonical_metadata, manifest_sha256=checksum),
+        (test,),
+    )
+    return text.encode("utf-8")
+
+
 def write_stage_fixture(stage: Path, test: SuiteTest) -> None:
     checkout = Path("target/posix/src") / ("8" * 40)
     object_path = Path("target/posix/aarch64/obj") / f"{test.test_id}.o"
@@ -1544,6 +1555,84 @@ class ManifestTests(unittest.TestCase):
             with self.subTest(test=test):
                 with self.assertRaises(ValueError):
                     render_manifest(metadata(), (test,))
+
+    def test_kind_disposition_matrix_matches_guest_consumer(self) -> None:
+        allowed = {
+            ("runnable", "complete"),
+            ("runnable", "excluded-upstream-stub"),
+            ("runnable", "compile-failed"),
+            ("runnable", "link-failed"),
+            ("definition", "definition-only"),
+            ("definition", "excluded-upstream-stub"),
+            ("definition", "compile-failed"),
+            ("shell", "not-built-shell-test"),
+        }
+        kinds = ("runnable", "definition", "shell")
+        dispositions = (
+            "complete",
+            "definition-only",
+            "excluded-upstream-stub",
+            "compile-failed",
+            "link-failed",
+            "not-built-shell-test",
+        )
+
+        for kind in kinds:
+            for disposition in dispositions:
+                test = replace(
+                    suite_test(kind=kind, disposition=disposition),
+                    binary=("bin/case.test" if disposition == "complete" else "-"),
+                    sha256=("a" * 64 if disposition == "complete" else EMPTY_SHA256),
+                )
+                pair = (kind, disposition)
+                if pair in allowed:
+                    render_manifest(metadata(), (test,))
+                    parse_manifest(checksummed_manifest_without_validation(test))
+                    continue
+                for operation in ("render", "parse"):
+                    with self.subTest(
+                        kind=kind,
+                        disposition=disposition,
+                        operation=operation,
+                    ):
+                        with self.assertRaisesRegex(ValueError, "kind/disposition"):
+                            if operation == "render":
+                                render_manifest(metadata(), (test,))
+                            else:
+                                parse_manifest(checksummed_manifest_without_validation(test))
+
+    def test_group_and_api_atoms_match_guest_consumer(self) -> None:
+        unsafe_atoms = (
+            "bad\\atom",
+            "bad//atom",
+            ".",
+            "..",
+            "./atom",
+            "../atom",
+            "atom/.",
+            "atom/..",
+            "/atom",
+            "atom/",
+        )
+        base = replace(
+            suite_test(),
+            binary="bin/case.test",
+            sha256="a" * 64,
+        )
+        slash_api = replace(base, api="sys/mman_h")
+        render_manifest(metadata(), (slash_api,))
+        parse_manifest(checksummed_manifest_without_validation(slash_api))
+
+        for field in ("group", "api"):
+            for atom in unsafe_atoms:
+                test = replace(base, **{field: atom})
+                for operation in ("render", "parse"):
+                    with self.subTest(field=field, atom=atom, operation=operation):
+                        with self.assertRaisesRegex(ValueError, f"unsafe {field}"):
+                            if operation == "render":
+                                render_manifest(metadata(), (test,))
+                            else:
+                                parse_manifest(checksummed_manifest_without_validation(test))
 
     def test_manifest_field_limits_match_guest_consumer(self) -> None:
         exact = replace(

@@ -78,6 +78,18 @@ _ALLOWED_DISPOSITIONS = frozenset(
         "not-built-shell-test",
     }
 )
+_ALLOWED_KIND_DISPOSITIONS = frozenset(
+    {
+        ("runnable", "complete"),
+        ("runnable", "excluded-upstream-stub"),
+        ("runnable", "compile-failed"),
+        ("runnable", "link-failed"),
+        ("definition", "definition-only"),
+        ("definition", "excluded-upstream-stub"),
+        ("definition", "compile-failed"),
+        ("shell", "not-built-shell-test"),
+    }
+)
 _METADATA_KEYS = (
     "source",
     "revision",
@@ -159,6 +171,16 @@ def _validate_atom(value: str, label: str) -> None:
         raise ValueError(f"invalid {label}: {value!r}")
 
 
+def _validate_manifest_atom(value: str, label: str) -> None:
+    _validate_atom(value, label)
+    if (
+        "\\" in value
+        or "//" in value
+        or any(segment in {"", ".", ".."} for segment in value.split("/"))
+    ):
+        raise ValueError(f"unsafe {label}: {value!r}")
+
+
 def _validate_field_limit(value: str, label: str, maximum: int) -> None:
     if len(value.encode("utf-8")) > maximum:
         raise ValueError(f"{label} exceeds the {maximum}-byte manifest field limit")
@@ -225,6 +247,8 @@ def _validate_test(test: SuiteTest) -> None:
     ):
         _validate_atom(value, label)
     _validate_relative_path(test.test_id, "test ID")
+    _validate_manifest_atom(test.group, "group")
+    _validate_manifest_atom(test.api, "api")
     _validate_field_limit(test.test_id, "test ID", MAX_MANIFEST_TEST_ID_BYTES)
     _validate_field_limit(test.group, "group", MAX_MANIFEST_GROUP_BYTES)
     _validate_field_limit(test.api, "API", MAX_MANIFEST_API_BYTES)
@@ -232,6 +256,10 @@ def _validate_test(test: SuiteTest) -> None:
         raise ValueError(f"unknown kind: {test.kind}")
     if test.disposition not in _ALLOWED_DISPOSITIONS:
         raise ValueError(f"unknown disposition: {test.disposition}")
+    if (test.kind, test.disposition) not in _ALLOWED_KIND_DISPOSITIONS:
+        raise ValueError(
+            f"invalid kind/disposition: {test.kind}/{test.disposition}"
+        )
     if type(test.timeout_ms) is not int or not 0 < test.timeout_ms <= MAX_TIMEOUT_MS:
         raise ValueError(f"invalid timeout for {test.test_id}: {test.timeout_ms!r}")
     if test.binary is None or test.sha256 is None:
