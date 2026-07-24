@@ -150,8 +150,12 @@ class ReportFixture:
         )
 
     def _write_manifest(
-        self, tests: tuple[SuiteTest, ...]
+        self,
+        tests: tuple[SuiteTest, ...],
+        *,
+        stage: Path | None = None,
     ) -> tuple[ManifestMetadata, tuple[BuildResult, ...]]:
+        stage = self.stage if stage is None else stage
         revision = "1" * 40
         checkout = Path("target/posix/src") / revision
         results: list[BuildResult] = []
@@ -225,9 +229,9 @@ class ReportFixture:
         )
         manifest_text, manifest_digest = render_manifest(metadata, tests)
         metadata = replace(metadata, manifest_sha256=manifest_digest)
-        self.stage.mkdir()
-        (self.stage / "manifest.tsv").write_text(manifest_text, encoding="utf-8")
-        (self.stage / "build-results.ndjson").write_text(
+        stage.mkdir()
+        (stage / "manifest.tsv").write_text(manifest_text, encoding="utf-8")
+        (stage / "build-results.ndjson").write_text(
             "".join(_json_build_result(result) + "\n" for result in results),
             encoding="utf-8",
         )
@@ -238,7 +242,7 @@ class ReportFixture:
             "schema": 1,
             "tests": [asdict(test) for test in sorted(tests, key=lambda item: item.test_id)],
         }
-        (self.stage / "manifest.json").write_text(
+        (stage / "manifest.json").write_text(
             json.dumps(host, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
@@ -291,7 +295,10 @@ class ReportFixture:
         attempts: tuple[RuntimeAttempt, ...],
         *,
         complete: bool,
+        metadata: ManifestMetadata | None = None,
+        infrastructure_error: str | None = None,
     ) -> None:
+        metadata = self.metadata if metadata is None else metadata
         rows: list[dict[str, object]] = [
             {"record_type": "attempt", **attempt.to_dict()}
             for attempt in attempts
@@ -299,27 +306,28 @@ class ReportFixture:
         run_id = attempts[0].run_id if attempts else "run-smros"
         platform = attempts[0].platform if attempts else "smros-aarch64"
         source = attempts[0].source if attempts else "smros-qemu"
-        rows.append(
-            {
-                "build_id": "5" * 64,
-                "build_results_sha256": self.metadata.build_results_sha256,
-                "complete": complete,
-                "completed_count": len(attempts),
-                "manifest_sha256": self.metadata.manifest_sha256,
-                "patch_sha256": self.metadata.patch_sha256,
-                "platform": platform,
-                "record_type": "run",
-                "revision": self.metadata.revision,
-                "run_id": run_id,
-                "selected_count": len(attempts),
-                "smros_commit": self.metadata.smros_commit,
-                "source": source,
-                "status_counts": {
-                    status: sum(attempt.status == status for attempt in attempts)
-                    for status in sorted({attempt.status for attempt in attempts})
-                },
-            }
-        )
+        terminal: dict[str, object] = {
+            "build_id": "5" * 64,
+            "build_results_sha256": metadata.build_results_sha256,
+            "complete": complete,
+            "completed_count": len(attempts),
+            "manifest_sha256": metadata.manifest_sha256,
+            "patch_sha256": metadata.patch_sha256,
+            "platform": platform,
+            "record_type": "run",
+            "revision": metadata.revision,
+            "run_id": run_id,
+            "selected_count": len(attempts),
+            "smros_commit": metadata.smros_commit,
+            "source": source,
+            "status_counts": {
+                status: sum(attempt.status == status for attempt in attempts)
+                for status in sorted({attempt.status for attempt in attempts})
+            },
+        }
+        if infrastructure_error is not None:
+            terminal["infrastructure_error"] = infrastructure_error
+        rows.append(terminal)
         path.write_text(
             "".join(
                 json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
@@ -362,7 +370,7 @@ class AggregationTests(ReportFixture, unittest.TestCase):
         self.assertEqual((build["numerator"], build["denominator"]), (3, 4))
         self.assertEqual((execution["numerator"], execution["denominator"]), (3, 3))
         self.assertEqual((passing["numerator"], passing["denominator"]), (2, 3))
-        self.assertEqual((completion["numerator"], completion["denominator"]), (2, 4))
+        self.assertEqual((completion["numerator"], completion["denominator"]), (3, 5))
         self.assertNotIn(
             "conformance/interfaces/aio_read/stub-case.c",
             completion["test_ids"],
@@ -379,6 +387,61 @@ class AggregationTests(ReportFixture, unittest.TestCase):
             tests["conformance/interfaces/aio_read/stub-case.c"]["exclusion_evidence"]["disposition"],
             "excluded-upstream-stub",
         )
+
+    def test_passing_definition_contributes_to_program_completion_in_every_scope(
+        self,
+    ) -> None:
+        summary = generate_report(
+            self.stage / "manifest.json",
+            smros_results=(self.smros_results,),
+            output_directory=self.output,
+        )
+        definition_id = self.tests[4].test_id
+
+        for completion in (
+            summary["metrics"]["program_completion"],
+            summary["groups"]["base"]["metrics"]["program_completion"],
+            summary["apis"]["unistd_h"]["metrics"]["program_completion"],
+        ):
+            self.assertIn(definition_id, completion["test_ids"])
+            self.assertIn(definition_id, completion["numerator_test_ids"])
+
+    def test_failed_definition_blocks_full_program_completion_in_every_scope(
+        self,
+    ) -> None:
+        passing = self._test(
+            "definition-pass",
+            "definition-only",
+            kind="definition",
+            api="definitions_h",
+        )
+        failed = self._test(
+            "definition-fail",
+            "compile-failed",
+            kind="definition",
+            api="definitions_h",
+        )
+        stage = self.root / "definition-stage"
+        metadata, _ = self._write_manifest((passing, failed), stage=stage)
+        runtime = self.root / "definition-results.ndjson"
+        self._write_runtime(runtime, (), complete=True, metadata=metadata)
+
+        summary = generate_report(
+            stage / "manifest.json",
+            smros_results=(runtime,),
+            output_directory=self.output,
+        )
+
+        for completion in (
+            summary["metrics"]["program_completion"],
+            summary["groups"]["base"]["metrics"]["program_completion"],
+            summary["apis"]["definitions_h"]["metrics"]["program_completion"],
+        ):
+            self.assertEqual(
+                (completion["numerator"], completion["denominator"]),
+                (1, 2),
+            )
+            self.assertEqual(completion["numerator_test_ids"], [passing.test_id])
 
     def test_repeated_different_outcomes_are_flaky_and_retained(self) -> None:
         first = self.root / "first-run.ndjson"
@@ -409,7 +472,41 @@ class AggregationTests(ReportFixture, unittest.TestCase):
         )
         self.assertEqual(result["status"], "flaky")
         self.assertEqual([attempt["status"] for attempt in result["attempts"]], ["pass", "fail"])
+        self.assertEqual(result["duration_ms"]["runtime"], 10)
+        self.assertEqual(
+            [run["run_id"] for run in summary["provenance"]["smros_runs"]],
+            ["run-first", "run-second"],
+        )
         self.assertNotIn(self.tests[0].test_id, summary["metrics"]["program_completion"]["numerator_test_ids"])
+
+    def test_rejects_identical_duplicate_runtime_run_identity(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "duplicate runtime run identity.*smros-aarch64.*run-smros",
+        ):
+            generate_report(
+                self.stage / "manifest.json",
+                smros_results=(self.smros_results, self.smros_results),
+                output_directory=self.output,
+            )
+
+    def test_rejects_conflicting_duplicate_runtime_run_identity(self) -> None:
+        conflicting = self.root / "conflicting-copy.ndjson"
+        self._write_runtime(
+            conflicting,
+            (self._attempt(self.tests[0], "fail", exit_code=1),),
+            complete=True,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "duplicate runtime run identity.*smros-aarch64.*run-smros",
+        ):
+            generate_report(
+                self.stage / "manifest.json",
+                smros_results=(self.smros_results, conflicting),
+                output_directory=self.output,
+            )
 
     def test_incomplete_runtime_input_is_never_reported_complete(self) -> None:
         incomplete = self.root / "incomplete.ndjson"
@@ -427,7 +524,113 @@ class AggregationTests(ReportFixture, unittest.TestCase):
 
         self.assertFalse(summary["complete"])
         self.assertEqual(summary["run_status"], "incomplete")
-        self.assertEqual(summary["metrics"]["program_completion"]["numerator"], 1)
+        self.assertEqual(summary["metrics"]["program_completion"]["numerator"], 2)
+
+    def test_complete_runtime_rejects_interrupted_attempt(self) -> None:
+        interrupted = replace(
+            self._attempt(self.tests[0], "pass"),
+            launch_status="interrupted",
+            pts_status=None,
+            status="interrupted",
+            exit_code=None,
+            infrastructure_error="runtime capture interrupted",
+        )
+        contradictory = self.root / "complete-interrupted.ndjson"
+        self._write_runtime(contradictory, (interrupted,), complete=True)
+
+        with self.assertRaisesRegex(ValueError, "complete.*interrupted"):
+            generate_report(
+                self.stage / "manifest.json",
+                smros_results=(contradictory,),
+                output_directory=self.output,
+            )
+
+    def test_complete_runtime_rejects_explicit_infrastructure_error(self) -> None:
+        contradictory = self.root / "complete-infrastructure-error.ndjson"
+        self._write_runtime(
+            contradictory,
+            (self._attempt(self.tests[0], "pass"),),
+            complete=True,
+            infrastructure_error="report cleanup failed",
+        )
+
+        with self.assertRaisesRegex(ValueError, "complete.*infrastructure error"):
+            generate_report(
+                self.stage / "manifest.json",
+                smros_results=(contradictory,),
+                output_directory=self.output,
+            )
+
+    def test_incomplete_runtime_preserves_infrastructure_failure_evidence(
+        self,
+    ) -> None:
+        interrupted = replace(
+            self._attempt(self.tests[0], "pass"),
+            launch_status="interrupted",
+            pts_status=None,
+            status="interrupted",
+            exit_code=None,
+            infrastructure_error="runtime capture interrupted",
+        )
+        incomplete = self.root / "honest-infrastructure-error.ndjson"
+        self._write_runtime(
+            incomplete,
+            (interrupted,),
+            complete=False,
+            infrastructure_error="report cleanup failed",
+        )
+
+        summary = generate_report(
+            self.stage / "manifest.json",
+            smros_results=(incomplete,),
+            output_directory=self.output,
+        )
+
+        self.assertFalse(summary["complete"])
+        self.assertEqual(
+            summary["provenance"]["smros_runs"][0]["infrastructure_error"],
+            "report cleanup failed",
+        )
+        attempt = next(
+            test["smros_attempts"][0]
+            for test in summary["tests"]
+            if test["test_id"] == interrupted.test_id
+        )
+        self.assertEqual(attempt["status"], "interrupted")
+        self.assertEqual(
+            attempt["infrastructure_error"], "runtime capture interrupted"
+        )
+
+    def test_aggregation_does_not_trust_a_contradictory_complete_terminal(
+        self,
+    ) -> None:
+        interrupted = replace(
+            self._attempt(self.tests[0], "pass"),
+            launch_status="interrupted",
+            pts_status=None,
+            status="interrupted",
+            exit_code=None,
+            infrastructure_error="runtime capture interrupted",
+        )
+        incomplete = self.root / "internal-incomplete.ndjson"
+        self._write_runtime(incomplete, (interrupted,), complete=False)
+        manifest = report_module._load_manifest(self.stage / "manifest.json")
+        source = report_module._load_runtime_results(
+            incomplete,
+            manifest.tests,
+            manifest.build_results,
+            manifest.metadata,
+            role="smros",
+        )
+        contradictory = replace(
+            source,
+            terminal={**source.terminal, "complete": True},
+        )
+
+        summary = report_module._aggregate(manifest, (), (contradictory,))
+
+        self.assertFalse(summary["complete"])
+        self.assertEqual(summary["run_status"], "incomplete")
 
     def test_terminal_build_identity_must_match_attempts(self) -> None:
         rows = [

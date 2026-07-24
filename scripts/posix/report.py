@@ -586,6 +586,21 @@ def _validate_terminal(
             "runtime complete record does not contain unique selected attempts "
             f"at line {line_number}"
         )
+    if value["complete"] is True and any(
+        attempt.status == "interrupted" for attempt in attempts
+    ):
+        raise ValueError(
+            "runtime complete record contains an interrupted attempt "
+            f"at line {line_number}"
+        )
+    if value["complete"] is True and (
+        value.get("infrastructure_error")
+        or any(attempt.infrastructure_error for attempt in attempts)
+    ):
+        raise ValueError(
+            "runtime complete record contains an infrastructure error "
+            f"at line {line_number}"
+        )
     expected_counts = dict(sorted(Counter(item.status for item in attempts).items()))
     if value["status_counts"] != expected_counts:
         raise ValueError(f"runtime terminal status counts mismatch at line {line_number}")
@@ -900,6 +915,11 @@ def _scope_summary(
     primary_attempts: Mapping[str, Sequence[RuntimeAttempt]],
 ) -> dict[str, object]:
     complete = [test for test in tests if _complete_test(test)]
+    program = [
+        test
+        for test in tests
+        if _complete_test(test) or test.disposition == "definition-only"
+    ]
     buildable = [test for test in complete if _buildable_complete_test(test)]
     built = [test for test in buildable if _successful_build(test, build_by_identity)]
     attempted = [test for test in complete if primary_attempts.get(test.test_id)]
@@ -910,7 +930,7 @@ def _scope_summary(
     ]
     passed = [
         test
-        for test in complete
+        for test in program
         if _test_status(
             test, build_by_identity, primary_attempts.get(test.test_id, ())
         )
@@ -973,7 +993,7 @@ def _scope_summary(
             (test.test_id for test in passed if test in executed),
         ),
         "program_completion": _metric(
-            (test.test_id for test in complete),
+            (test.test_id for test in program),
             (test.test_id for test in passed),
         ),
     }
@@ -1039,6 +1059,19 @@ def _aggregate(
     linux_inputs: Sequence[_RuntimeInput],
     smros_inputs: Sequence[_RuntimeInput],
 ) -> dict[str, object]:
+    runtime_inputs = (*linux_inputs, *smros_inputs)
+    run_identities: set[tuple[str, str]] = set()
+    for source in runtime_inputs:
+        platform = source.terminal["platform"]
+        run_id = source.terminal["run_id"]
+        assert isinstance(platform, str) and isinstance(run_id, str)
+        identity = (platform, run_id)
+        if identity in run_identities:
+            raise ValueError(
+                "duplicate runtime run identity: "
+                f"platform={identity[0]} run_id={identity[1]}"
+            )
+        run_identities.add(identity)
     build_by_identity = {
         (result.test_id, result.stage): result for result in manifest.build_results
     }
@@ -1137,9 +1170,14 @@ def _aggregate(
     for api in sorted({test.api for test in manifest.tests}):
         scoped = tuple(test for test in manifest.tests if test.api == api)
         apis[api] = _scope_summary(scoped, build_by_identity, primary_by_test)
-    runtime_inputs = (*linux_inputs, *smros_inputs)
     complete = bool(runtime_inputs) and all(
-        source.terminal["complete"] is True for source in runtime_inputs
+        source.terminal["complete"] is True
+        and not source.terminal.get("infrastructure_error")
+        and not any(
+            attempt.status == "interrupted" or attempt.infrastructure_error
+            for attempt in source.attempts
+        )
+        for source in runtime_inputs
     )
     provenance = {
         "build_results_sha256": manifest.metadata.build_results_sha256,
