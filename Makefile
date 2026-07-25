@@ -43,7 +43,12 @@ ST_COVERAGE_DIR ?= target/coverage/st
 POSIX_QEMU_MEMORY ?= 1024M
 AARCH64_SYSROOT ?= /usr/aarch64-linux-gnu
 POSIX_QUALITY_EVIDENCE ?=
-POSIX_QUALITY_EVIDENCE_ARG = $(if $(strip $(POSIX_QUALITY_EVIDENCE)),--quality-evidence '$(POSIX_QUALITY_EVIDENCE)',)
+override POSIX_QEMU_MEMORY := $(value POSIX_QEMU_MEMORY)
+override AARCH64_SYSROOT := $(value AARCH64_SYSROOT)
+override POSIX_QUALITY_EVIDENCE := $(value POSIX_QUALITY_EVIDENCE)
+export POSIX_QEMU_MEMORY
+export AARCH64_SYSROOT
+export POSIX_QUALITY_EVIDENCE
 
 .PHONY: all build build-test host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report coverage-ut coverage-it coverage-host coverage-st coverage st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
 
@@ -114,16 +119,23 @@ posix-stage: posix-build
 
 # Run the staged AArch64 Linux reference under qemu-user
 posix-baseline: posix-stage
-	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli baseline --sysroot '$(AARCH64_SYSROOT)'
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli baseline --sysroot "$${AARCH64_SYSROOT}"
 
 # Run the staged suite in SMROS under QEMU system emulation
 posix-run: posix-stage $(FXFS_DISK)
 	@$(MAKE) build ARCH=aarch64-unknown-none
-	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli run-smros --qemu-memory '$(POSIX_QEMU_MEMORY)'
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli run-smros --qemu-memory "$${POSIX_QEMU_MEMORY}"
 
 # Publish all seven report artifacts; quality evidence is optional and separate
 posix-report:
-	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli report --manifest host_shared/posixtest/manifest.json --smros-results target/posix/aarch64/smros-run/results.ndjson --linux-results target/posix/aarch64/linux-reference/results.ndjson $(POSIX_QUALITY_EVIDENCE_ARG) --out target/posix/aarch64/report
+	@set -- --manifest host_shared/posixtest/manifest.json \
+		--smros-results target/posix/aarch64/smros-run/results.ndjson \
+		--linux-results target/posix/aarch64/linux-reference/results.ndjson; \
+	if [ -n "$${POSIX_QUALITY_EVIDENCE}" ]; then \
+		set -- "$${@}" --quality-evidence "$${POSIX_QUALITY_EVIDENCE}"; \
+	fi; \
+	set -- "$${@}" --out target/posix/aarch64/report; \
+	PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli report "$${@}"
 
 # cargo-tarpaulin HTML coverage for host unit tests
 coverage-ut:

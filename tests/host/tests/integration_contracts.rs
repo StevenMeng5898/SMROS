@@ -189,6 +189,100 @@ impl Drop for TempDir {
     }
 }
 
+fn assert_posix_make_value_is_shell_safe(target: &str, variable: &str, flag: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new("posix-make-shell-safety");
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let bin = temp.0.join("bin");
+    std::fs::create_dir(&bin).expect("create fake executable directory");
+    let python = bin.join("python3");
+    std::fs::write(
+        &python,
+        "#!/bin/sh\nprintf '%s\\0' \"$@\" > \"$ARGV_CAPTURE\"\n",
+    )
+    .expect("write argv recorder");
+    std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o700))
+        .expect("make argv recorder executable");
+
+    let injected = temp.0.join("injected");
+    let substituted = temp.0.join("substituted");
+    let make_value = format!(
+        "value with spaces'; touch {}; $(shell touch {}); # apostrophe' semicolon; wildcard*",
+        injected.display(),
+        substituted.display(),
+    );
+    let expected_value = &make_value;
+    let capture = temp.0.join(format!("{target}.argv"));
+    let original_path = std::env::var_os("PATH").expect("PATH");
+    let path = std::env::join_paths(
+        std::iter::once(bin.clone()).chain(std::env::split_paths(&original_path)),
+    )
+    .expect("compose PATH");
+
+    let disk = temp.0.join("fxfs.img");
+    std::fs::write(&disk, []).expect("create existing fake disk");
+    let mut command = std::process::Command::new("make");
+    command
+        .current_dir(&repository)
+        .arg("--no-print-directory")
+        .arg("--old-file=posix-stage")
+        .arg(target)
+        .arg(format!("{variable}={make_value}"))
+        .env("ARGV_CAPTURE", &capture)
+        .env("PATH", &path);
+    if target == "posix-run" {
+        command
+            .arg(format!("FXFS_DISK={}", disk.display()))
+            .arg("MAKE=true");
+    }
+    let output = command.output().expect("execute POSIX Make target");
+    assert!(
+        output.status.success(),
+        "{target} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let captured = std::fs::read(&capture).expect("read captured Python argv");
+    let arguments = captured
+        .split(|byte| *byte == 0)
+        .filter(|argument| !argument.is_empty())
+        .map(|argument| String::from_utf8(argument.to_vec()).expect("UTF-8 argv"))
+        .collect::<Vec<_>>();
+    let flag_index = arguments
+        .iter()
+        .position(|argument| argument == flag)
+        .expect("captured expected flag");
+
+    let mut dry_run = std::process::Command::new("make");
+    dry_run
+        .current_dir(&repository)
+        .arg("--no-print-directory")
+        .arg("--dry-run")
+        .arg("--old-file=posix-stage")
+        .arg(target)
+        .arg(format!("{variable}={make_value}"));
+    if target == "posix-run" {
+        dry_run
+            .arg(format!("FXFS_DISK={}", disk.display()))
+            .arg("MAKE=true");
+    }
+    let dry_output = dry_run.output().expect("dry-run POSIX Make target");
+    assert!(dry_output.status.success(), "{target} dry-run failed");
+    let dry_stdout = String::from_utf8(dry_output.stdout).expect("UTF-8 dry-run output");
+
+    assert!(
+        !injected.exists()
+            && !substituted.exists()
+            && arguments.get(flag_index + 1) == Some(expected_value)
+            && arguments.iter().filter(|argument| *argument == flag).count() == 1
+            && !dry_stdout.contains(&injected.to_string_lossy().to_string())
+            && !dry_stdout.contains(&substituted.to_string_lossy().to_string()),
+        "unsafe {target} value handling: injected={} substituted={} argv={arguments:?} dry-run={dry_stdout:?}",
+        injected.exists(),
+        substituted.exists(),
+    );
+}
+
 fn compile_build_script() -> (TempDir, std::path::PathBuf) {
     let temp = TempDir::new("build-script-contract");
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -531,9 +625,9 @@ fn posix_make_targets_are_explicit_and_keep_the_default_suite_offline() {
     assert!(makefile.contains("posix-build: posix-audit"));
     assert!(makefile.contains("posix-stage: posix-build"));
     assert!(makefile.contains("posix-baseline: posix-stage"));
-    assert!(makefile.contains("--sysroot '$(AARCH64_SYSROOT)'"));
+    assert!(makefile.contains("--sysroot \"$${AARCH64_SYSROOT}\""));
     assert!(makefile.contains("posix-run: posix-stage $(FXFS_DISK)"));
-    assert!(makefile.contains("--qemu-memory '$(POSIX_QEMU_MEMORY)'"));
+    assert!(makefile.contains("--qemu-memory \"$${POSIX_QEMU_MEMORY}\""));
     assert!(makefile.contains("POSIX_QUALITY_EVIDENCE"));
     assert!(makefile.contains("--quality-evidence"));
 
@@ -555,6 +649,25 @@ fn posix_make_targets_are_explicit_and_keep_the_default_suite_offline() {
             "default test target must not depend on {excluded}"
         );
     }
+}
+
+#[test]
+fn posix_baseline_make_value_is_shell_safe() {
+    assert_posix_make_value_is_shell_safe("posix-baseline", "AARCH64_SYSROOT", "--sysroot");
+}
+
+#[test]
+fn posix_run_make_value_is_shell_safe() {
+    assert_posix_make_value_is_shell_safe("posix-run", "POSIX_QEMU_MEMORY", "--qemu-memory");
+}
+
+#[test]
+fn posix_report_make_value_is_shell_safe() {
+    assert_posix_make_value_is_shell_safe(
+        "posix-report",
+        "POSIX_QUALITY_EVIDENCE",
+        "--quality-evidence",
+    );
 }
 
 #[test]

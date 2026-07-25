@@ -269,9 +269,10 @@ def _parse_canonical_json(data: bytes, label: str) -> object:
     try:
         text = data.decode("utf-8")
         value = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
-    except (UnicodeError, json.JSONDecodeError, ValueError) as error:
+        canonical = _canonical_json(value)
+    except (UnicodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
         raise ValueError(f"{label} is invalid JSON") from error
-    if text != _canonical_json(value) + "\n":
+    if text != canonical + "\n":
         raise ValueError(f"{label} is not canonical JSON")
     return value
 
@@ -283,12 +284,15 @@ def _quality_text(
     maximum: int = MAX_QUALITY_EVIDENCE_TEXT_BYTES,
     nonempty: bool = False,
 ) -> str:
-    if (
-        not _is_strict_utf8_text(value, nonempty=nonempty)
-        or len(str(value).encode("utf-8")) > maximum
+    if not _is_strict_utf8_text(value, nonempty=nonempty):
+        raise ValueError(f"quality evidence {label} is invalid")
+    text = str(value)
+    if len(text.encode("utf-8")) > maximum or any(
+        ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F
+        for character in text
     ):
         raise ValueError(f"quality evidence {label} is invalid")
-    return str(value)
+    return text
 
 
 def _quality_optional_text(value: object, label: str) -> str | None:

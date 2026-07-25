@@ -3146,6 +3146,42 @@ class QualityEvidenceTests(ReportFixture, unittest.TestCase):
                         output_directory=self.output,
                     )
 
+    def test_evidence_rejects_c0_and_c1_control_characters(self) -> None:
+        controls = (
+            "\x00",
+            "\x07",
+            "\x09",
+            "\x0a",
+            "\x0b",
+            "\x0d",
+            "\x1b",
+            "\x7f",
+            "\x9b",
+        )
+        for index, control in enumerate(controls):
+            with self.subTest(codepoint=f"U+{ord(control):04X}"):
+                quality = self._write_quality(
+                    self._quality_payload(
+                        [
+                            self._quality_check(
+                                f"control-{index}",
+                                "passed",
+                                summary=f"before{control}after",
+                            )
+                        ]
+                    ),
+                    path=self.root / f"control-{index}.json",
+                )
+                output = self.root / f"control-report-{index}"
+                with self.assertRaisesRegex(ValueError, "quality evidence"):
+                    generate_report(
+                        self.stage / "manifest.json",
+                        smros_results=(self.smros_results,),
+                        quality_evidence=quality,
+                        output_directory=output,
+                    )
+                self.assertFalse(output.exists())
+
     def test_evidence_check_count_and_names_are_bounded_and_unique(self) -> None:
         duplicate = [
             self._quality_check("coverity", "passed"),
@@ -3282,6 +3318,33 @@ class CliTests(ReportFixture, unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertIn("report failed: quality evidence", stderr.getvalue())
+        self.assertFalse(self.output.exists())
+
+    def test_report_cli_translates_deep_quality_json_recursion(self) -> None:
+        quality = self.root / "deep-quality.json"
+        quality.write_bytes(b"[" * 10_000 + b"0" + b"]" * 10_000 + b"\n")
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            try:
+                result = cli.main(
+                    [
+                        "report",
+                        "--manifest",
+                        str(self.stage / "manifest.json"),
+                        "--smros-results",
+                        str(self.smros_results),
+                        "--quality-evidence",
+                        str(quality),
+                        "--out",
+                        str(self.output),
+                    ]
+                )
+            except RecursionError as error:
+                self.fail(f"quality JSON recursion escaped the CLI: {error}")
+
+        self.assertEqual(result, 1)
+        self.assertIn("report failed: quality evidence is invalid JSON", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
         self.assertFalse(self.output.exists())
 
     def test_report_requires_at_least_one_runtime_input(self) -> None:
