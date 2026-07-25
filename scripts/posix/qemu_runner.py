@@ -78,6 +78,68 @@ class _ResumeCheckpointState(Enum):
     TERMINAL = "terminal"
 
 
+class _ResumeResultState(Enum):
+    ABSENT = "absent"
+    MARKER = "marker"
+    EXACT = "exact"
+
+
+@dataclass
+class _ResumeCheckpoint:
+    state: _ResumeCheckpointState
+    progress_descriptor: int | None
+    progress_fingerprint: tuple[int, ...]
+    result_state: _ResumeResultState = _ResumeResultState.ABSENT
+    result_descriptor: int | None = None
+    result_fingerprint: tuple[int, ...] | None = None
+
+    def take_progress_descriptor(self) -> int:
+        if self.progress_descriptor is None:
+            raise RuntimeError("resume progress descriptor was already transferred")
+        descriptor = self.progress_descriptor
+        self.progress_descriptor = None
+        return descriptor
+
+    def take_result_descriptor(self) -> int:
+        if self.result_descriptor is None:
+            raise RuntimeError("resume result descriptor was already transferred")
+        descriptor = self.result_descriptor
+        self.result_descriptor = None
+        return descriptor
+
+    def close(self) -> None:
+        errors: list[BaseException] = []
+        for field_name in ("result_descriptor", "progress_descriptor"):
+            descriptor = getattr(self, field_name)
+            setattr(self, field_name, None)
+            if descriptor is None:
+                continue
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                errors.append(error)
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise BaseExceptionGroup(
+                "resume checkpoint descriptor cleanup failed",
+                errors,
+            )
+
+    def __enter__(self) -> _ResumeCheckpoint:
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        del exc_type, traceback
+        try:
+            self.close()
+        except BaseException as cleanup_error:
+            if exc is not None:
+                raise cleanup_error from exc
+            raise
+        return False
+
+
 class _Transport(Protocol):
     def read(self, timeout: float) -> bytes: ...
     def write(self, data: bytes) -> None: ...
@@ -547,6 +609,18 @@ def _entry_matches(parent: int, name: str, descriptor: int) -> bool:
     return (entry.st_dev, entry.st_ino) == (held.st_dev, held.st_ino)
 
 
+def _stat_fingerprint(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
 def _open_result_entry(parent: int, name: str) -> int:
     return os.open(
         name,
@@ -747,6 +821,9 @@ class QemuController:
         self._run_id = ""
         self._infrastructure_error: str | None = None
         self._prompt_tail = b""
+        self._resume_output_descriptor: int | None = None
+        self._resume_progress_descriptor: int | None = None
+        self._resume_progress_fingerprint: tuple[int, ...] | None = None
 
     def _progress(self) -> dict[str, object]:
         return {
@@ -763,9 +840,222 @@ class QemuController:
         }
 
     def _persist_progress(self) -> None:
-        _atomic_write(self._progress_path, _json_bytes(self._progress()))
+        data = _json_bytes(self._progress())
+        if (
+            self._resume_output_descriptor is None
+            or self._resume_progress_descriptor is None
+            or self._resume_progress_fingerprint is None
+        ):
+            _atomic_write(self._progress_path, data)
+            return
+        previous = self._resume_progress_descriptor
+        replacement, replacement_fingerprint = self._replace_progress(
+            self._resume_output_descriptor,
+            previous,
+            self._resume_progress_fingerprint,
+            data,
+        )
+        self._resume_progress_descriptor = replacement
+        self._resume_progress_fingerprint = replacement_fingerprint
+        os.close(previous)
 
-    def _retire_progress(self, output_descriptor: int) -> None:
+    def _replace_progress(
+        self,
+        output_descriptor: int,
+        expected_descriptor: int,
+        expected_fingerprint: tuple[int, ...],
+        data: bytes,
+    ) -> tuple[int, tuple[int, ...]]:
+        temporary_name = (
+            f".{self._progress_path.name}.{secrets.token_hex(8)}.resume"
+        )
+        generated_descriptor: int | None = None
+        keep_generated = False
+        try:
+            generated_descriptor = os.open(
+                temporary_name,
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=output_descriptor,
+            )
+            _write_all(generated_descriptor, data)
+            os.fsync(generated_descriptor)
+            if (
+                _stat_fingerprint(os.fstat(expected_descriptor))
+                != expected_fingerprint
+                or not _entry_matches(
+                    output_descriptor,
+                    self._progress_path.name,
+                    expected_descriptor,
+                )
+            ):
+                raise ControllerError(
+                    "resume QEMU progress changed before checkpoint rewrite"
+                )
+            _rename_exchange(
+                output_descriptor,
+                self._progress_path.name,
+                temporary_name,
+            )
+            os.fsync(output_descriptor)
+            if not _entry_matches(
+                output_descriptor,
+                self._progress_path.name,
+                generated_descriptor,
+            ):
+                raise ControllerError(
+                    "resume QEMU progress changed during checkpoint rewrite"
+                )
+            if not _entry_matches(
+                output_descriptor,
+                temporary_name,
+                expected_descriptor,
+            ):
+                displaced = os.stat(
+                    temporary_name,
+                    dir_fd=output_descriptor,
+                    follow_symlinks=False,
+                )
+                displaced_identity = (displaced.st_dev, displaced.st_ino)
+                try:
+                    _rename_exchange(
+                        output_descriptor,
+                        self._progress_path.name,
+                        temporary_name,
+                    )
+                    os.fsync(output_descriptor)
+                except BaseException as rollback_error:
+                    raise ControllerError(
+                        "resume QEMU progress changed and rollback failed"
+                    ) from rollback_error
+                restored = os.stat(
+                    self._progress_path.name,
+                    dir_fd=output_descriptor,
+                    follow_symlinks=False,
+                )
+                if (
+                    (restored.st_dev, restored.st_ino) != displaced_identity
+                    or not _entry_matches(
+                        output_descriptor,
+                        temporary_name,
+                        generated_descriptor,
+                    )
+                ):
+                    raise ControllerError(
+                        "resume QEMU progress rewrite rollback is inconsistent"
+                    )
+                _remove_owned_result_entry(
+                    output_descriptor,
+                    temporary_name,
+                    generated_descriptor,
+                )
+                temporary_name = ""
+                raise ControllerError(
+                    "resume QEMU progress changed during checkpoint rewrite"
+                )
+            _remove_owned_result_entry(
+                output_descriptor,
+                temporary_name,
+                expected_descriptor,
+            )
+            temporary_name = ""
+            if not _entry_matches(
+                output_descriptor,
+                self._progress_path.name,
+                generated_descriptor,
+            ):
+                raise ControllerError(
+                    "resume QEMU progress changed after checkpoint rewrite"
+                )
+            keep_generated = True
+            return (
+                generated_descriptor,
+                _stat_fingerprint(os.fstat(generated_descriptor)),
+            )
+        except ControllerError:
+            raise
+        except OSError as error:
+            raise ControllerError(
+                "resume QEMU progress could not be rewritten safely"
+            ) from error
+        finally:
+            cleanup_error: ControllerError | None = None
+            if temporary_name and generated_descriptor is not None:
+                try:
+                    owned_descriptor: int | None = None
+                    if _entry_matches(
+                        output_descriptor,
+                        temporary_name,
+                        generated_descriptor,
+                    ):
+                        owned_descriptor = generated_descriptor
+                    elif _entry_matches(
+                        output_descriptor,
+                        temporary_name,
+                        expected_descriptor,
+                    ):
+                        owned_descriptor = expected_descriptor
+                    if owned_descriptor is not None:
+                        _remove_owned_result_entry(
+                            output_descriptor,
+                            temporary_name,
+                            owned_descriptor,
+                        )
+                except ControllerError as error:
+                    cleanup_error = error
+                except OSError:
+                    pass
+            if generated_descriptor is not None and not keep_generated:
+                os.close(generated_descriptor)
+            if cleanup_error is not None:
+                raise cleanup_error
+
+    def _retire_progress(
+        self,
+        output_descriptor: int,
+        expected_descriptor: int | None = None,
+        expected_fingerprint: tuple[int, ...] | None = None,
+        *,
+        result_descriptor: int | None = None,
+        result_fingerprint: tuple[int, ...] | None = None,
+    ) -> None:
+        if result_descriptor is not None and (
+            result_fingerprint is None
+            or _stat_fingerprint(os.fstat(result_descriptor))
+            != result_fingerprint
+            or not _entry_matches(
+                output_descriptor,
+                self._result_path.name,
+                result_descriptor,
+            )
+        ):
+            raise ControllerError(
+                "resume QEMU results changed before progress retirement"
+            )
+        if expected_descriptor is not None:
+            if (
+                expected_fingerprint is None
+                or _stat_fingerprint(os.fstat(expected_descriptor))
+                != expected_fingerprint
+                or not _entry_matches(
+                    output_descriptor,
+                    self._progress_path.name,
+                    expected_descriptor,
+                )
+            ):
+                raise ControllerError(
+                    "resume QEMU progress changed before retirement"
+                )
+            _remove_owned_result_entry(
+                output_descriptor,
+                self._progress_path.name,
+                expected_descriptor,
+            )
+            return
         os.unlink(self._progress_path.name, dir_fd=output_descriptor)
         try:
             os.fsync(output_descriptor)
@@ -774,8 +1064,12 @@ class QemuController:
                 "QEMU progress removal could not be synchronized"
             ) from error
 
-    def _invalidate_results(self, output_descriptor: int) -> int:
-        prior_descriptor: int | None = None
+    def _invalidate_results(
+        self,
+        output_descriptor: int,
+        validated_prior_descriptor: int | None = None,
+    ) -> int:
+        prior_descriptor = validated_prior_descriptor
         marker_descriptor: int | None = None
         keep_marker = False
         marker_name = (
@@ -793,38 +1087,39 @@ class QemuController:
                 dir_fd=output_descriptor,
             )
             os.fsync(marker_descriptor)
-            try:
-                prior_descriptor = _open_result_entry(
-                    output_descriptor,
-                    self._result_path.name,
-                )
-            except FileNotFoundError:
+            if prior_descriptor is None:
                 try:
-                    _rename_noreplace(
+                    prior_descriptor = _open_result_entry(
                         output_descriptor,
-                        marker_name,
                         self._result_path.name,
                     )
-                except FileExistsError as error:
+                except FileNotFoundError:
+                    try:
+                        _rename_noreplace(
+                            output_descriptor,
+                            marker_name,
+                            self._result_path.name,
+                        )
+                    except FileExistsError as error:
+                        raise ControllerError(
+                            "QEMU results changed during invalidation"
+                        ) from error
+                    marker_name = ""
+                    os.fsync(output_descriptor)
+                    if not _entry_matches(
+                        output_descriptor,
+                        self._result_path.name,
+                        marker_descriptor,
+                    ):
+                        raise ControllerError(
+                            "QEMU results changed during invalidation"
+                        )
+                    keep_marker = True
+                    return marker_descriptor
+                except OSError as error:
                     raise ControllerError(
-                        "QEMU results changed during invalidation"
+                        "existing QEMU results could not be opened safely"
                     ) from error
-                marker_name = ""
-                os.fsync(output_descriptor)
-                if not _entry_matches(
-                    output_descriptor,
-                    self._result_path.name,
-                    marker_descriptor,
-                ):
-                    raise ControllerError(
-                        "QEMU results changed during invalidation"
-                    )
-                keep_marker = True
-                return marker_descriptor
-            except OSError as error:
-                raise ControllerError(
-                    "existing QEMU results could not be opened safely"
-                ) from error
             prior_info = os.fstat(prior_descriptor)
             if not stat.S_ISREG(prior_info.st_mode) or prior_info.st_nlink != 1:
                 raise ControllerError(
@@ -967,16 +1262,17 @@ class QemuController:
             if cleanup_error is not None:
                 raise cleanup_error
 
-    def _bind_result_marker(self, output_descriptor: int) -> int:
-        descriptor: int | None = None
+    def _bind_result_marker(
+        self,
+        output_descriptor: int,
+        validated_descriptor: int | None = None,
+        *,
+        expect_missing: bool = False,
+    ) -> int:
+        descriptor = validated_descriptor
         keep_descriptor = False
         try:
-            try:
-                descriptor = _open_result_entry(
-                    output_descriptor,
-                    self._result_path.name,
-                )
-            except FileNotFoundError:
+            if descriptor is None and expect_missing:
                 try:
                     descriptor = os.open(
                         self._result_path.name,
@@ -994,6 +1290,30 @@ class QemuController:
                     ) from error
                 os.fsync(descriptor)
                 os.fsync(output_descriptor)
+            elif descriptor is None:
+                try:
+                    descriptor = _open_result_entry(
+                        output_descriptor,
+                        self._result_path.name,
+                    )
+                except FileNotFoundError:
+                    try:
+                        descriptor = os.open(
+                            self._result_path.name,
+                            os.O_RDWR
+                            | os.O_CREAT
+                            | os.O_EXCL
+                            | getattr(os, "O_CLOEXEC", 0)
+                            | getattr(os, "O_NOFOLLOW", 0),
+                            0o600,
+                            dir_fd=output_descriptor,
+                        )
+                    except FileExistsError as error:
+                        raise ControllerError(
+                            "QEMU results changed while binding the resume marker"
+                        ) from error
+                    os.fsync(descriptor)
+                    os.fsync(output_descriptor)
             info = os.fstat(descriptor)
             if (
                 not stat.S_ISREG(info.st_mode)
@@ -1024,7 +1344,7 @@ class QemuController:
         self,
         output_descriptor: int,
         *,
-        checkpoint_state: _ResumeCheckpointState,
+        checkpoint: _ResumeCheckpoint,
     ) -> bool:
         descriptor: int | None = None
         try:
@@ -1047,8 +1367,12 @@ class QemuController:
             ):
                 raise ControllerError("resume QEMU results changed while being opened")
             if opened.st_size == 0:
+                checkpoint.result_state = _ResumeResultState.MARKER
+                checkpoint.result_descriptor = descriptor
+                checkpoint.result_fingerprint = _stat_fingerprint(opened)
+                descriptor = None
                 return False
-            if checkpoint_state is _ResumeCheckpointState.ACTIVE:
+            if checkpoint.state is _ResumeCheckpointState.ACTIVE:
                 raise ControllerError(
                     "resume QEMU results conflict with an active test checkpoint"
                 )
@@ -1066,17 +1390,8 @@ class QemuController:
                 chunks.append(chunk)
                 remaining -= len(chunk)
             after = os.fstat(descriptor)
-            fingerprint = lambda info: (
-                info.st_dev,
-                info.st_ino,
-                info.st_mode,
-                info.st_nlink,
-                info.st_size,
-                info.st_mtime_ns,
-                info.st_ctime_ns,
-            )
             if (
-                fingerprint(opened) != fingerprint(after)
+                _stat_fingerprint(opened) != _stat_fingerprint(after)
                 or not _entry_matches(
                     output_descriptor,
                     self._result_path.name,
@@ -1088,7 +1403,11 @@ class QemuController:
                 raise ControllerError(
                     "resume QEMU results do not match committed progress"
                 )
-            return checkpoint_state is _ResumeCheckpointState.TERMINAL
+            checkpoint.result_state = _ResumeResultState.EXACT
+            checkpoint.result_descriptor = descriptor
+            checkpoint.result_fingerprint = _stat_fingerprint(after)
+            descriptor = None
+            return checkpoint.state is _ResumeCheckpointState.TERMINAL
         except ControllerError:
             raise
         except OSError as error:
@@ -1099,8 +1418,65 @@ class QemuController:
             if descriptor is not None:
                 os.close(descriptor)
 
-    def _read_progress(self, output_descriptor: int) -> bytes:
+    def _validate_resume_checkpoint(
+        self,
+        output_descriptor: int,
+        checkpoint: _ResumeCheckpoint,
+    ) -> None:
+        try:
+            progress_descriptor = checkpoint.progress_descriptor
+            if (
+                progress_descriptor is None
+                or _stat_fingerprint(os.fstat(progress_descriptor))
+                != checkpoint.progress_fingerprint
+                or not _entry_matches(
+                    output_descriptor,
+                    self._progress_path.name,
+                    progress_descriptor,
+                )
+            ):
+                raise ControllerError(
+                    "resume QEMU progress changed after validation"
+                )
+            if checkpoint.result_state is _ResumeResultState.ABSENT:
+                try:
+                    os.stat(
+                        self._result_path.name,
+                        dir_fd=output_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    return
+                raise ControllerError(
+                    "resume QEMU results appeared after validation"
+                )
+            result_descriptor = checkpoint.result_descriptor
+            if (
+                result_descriptor is None
+                or checkpoint.result_fingerprint is None
+                or _stat_fingerprint(os.fstat(result_descriptor))
+                != checkpoint.result_fingerprint
+                or not _entry_matches(
+                    output_descriptor,
+                    self._result_path.name,
+                    result_descriptor,
+                )
+            ):
+                raise ControllerError(
+                    "resume QEMU results changed after validation"
+                )
+        except ControllerError:
+            raise
+        except OSError as error:
+            raise ControllerError(
+                "resume QEMU checkpoint could not be revalidated safely"
+            ) from error
+
+    def _read_progress(
+        self, output_descriptor: int
+    ) -> tuple[bytes, int, tuple[int, ...]]:
         descriptor: int | None = None
+        keep_descriptor = False
         try:
             descriptor = os.open(
                 self._progress_path.name,
@@ -1129,28 +1505,36 @@ class QemuController:
                 if total > _MAX_PROGRESS_BYTES:
                     raise ValueError("resume progress exceeds its size limit")
             after = os.fstat(descriptor)
-            fingerprint = lambda info: (
-                info.st_dev,
-                info.st_ino,
-                info.st_mode,
-                info.st_nlink,
-                info.st_size,
-                info.st_mtime_ns,
-                info.st_ctime_ns,
-            )
-            if fingerprint(opened) != fingerprint(after):
+            if _stat_fingerprint(opened) != _stat_fingerprint(after):
                 raise ValueError("resume progress changed while being read")
-            return b"".join(chunks)
+            keep_descriptor = True
+            return b"".join(chunks), descriptor, _stat_fingerprint(after)
         except OSError as error:
             raise ValueError("resume progress is unavailable") from error
         finally:
-            if descriptor is not None:
+            if descriptor is not None and not keep_descriptor:
                 os.close(descriptor)
 
     def _load_progress(
         self, output_descriptor: int, raw_info: os.stat_result
+    ) -> _ResumeCheckpoint:
+        data, progress_descriptor, progress_fingerprint = self._read_progress(
+            output_descriptor
+        )
+        try:
+            state = self._apply_progress(data, raw_info)
+        except BaseException:
+            os.close(progress_descriptor)
+            raise
+        return _ResumeCheckpoint(
+            state=state,
+            progress_descriptor=progress_descriptor,
+            progress_fingerprint=progress_fingerprint,
+        )
+
+    def _apply_progress(
+        self, data: bytes, raw_info: os.stat_result
     ) -> _ResumeCheckpointState:
-        data = self._read_progress(output_descriptor)
         try:
             value = json.loads(
                 data.decode("utf-8"),
@@ -2014,6 +2398,7 @@ class QemuController:
     def run(self, resume: bool = False) -> ControllerResult:
         output_descriptor = _open_parent(self._output)
         marker_descriptor: int | None = None
+        checkpoint: _ResumeCheckpoint | None = None
         published = False
         operation_error: BaseException | None = None
         try:
@@ -2030,25 +2415,59 @@ class QemuController:
             with self._open_raw_log(output_descriptor, resume=resume) as raw:
                 recovered_result = False
                 if resume:
-                    checkpoint_state = self._load_progress(
+                    checkpoint = self._load_progress(
                         output_descriptor,
                         os.fstat(raw.fileno()),
                     )
                     recovered_result = self._resume_result_is_committed(
                         output_descriptor,
-                        checkpoint_state=checkpoint_state,
+                        checkpoint=checkpoint,
+                    )
+                    self._validate_resume_checkpoint(
+                        output_descriptor,
+                        checkpoint,
                     )
                     if recovered_result:
+                        self._retire_progress(
+                            output_descriptor,
+                            checkpoint.progress_descriptor,
+                            checkpoint.progress_fingerprint,
+                            result_descriptor=checkpoint.result_descriptor,
+                            result_fingerprint=checkpoint.result_fingerprint,
+                        )
                         published = True
-                        self._retire_progress(output_descriptor)
-                    elif checkpoint_state is _ResumeCheckpointState.INCOMPLETE:
-                        marker_descriptor = self._invalidate_results(
-                            output_descriptor
-                        )
                     else:
-                        marker_descriptor = self._bind_result_marker(
-                            output_descriptor
+                        self._resume_output_descriptor = output_descriptor
+                        self._resume_progress_descriptor = (
+                            checkpoint.take_progress_descriptor()
                         )
+                        self._resume_progress_fingerprint = (
+                            checkpoint.progress_fingerprint
+                        )
+                        self._persist_progress()
+                        if (
+                            checkpoint.state
+                            is _ResumeCheckpointState.INCOMPLETE
+                            and checkpoint.result_state
+                            is _ResumeResultState.EXACT
+                        ):
+                            marker_descriptor = self._invalidate_results(
+                                output_descriptor,
+                                checkpoint.take_result_descriptor(),
+                            )
+                        elif (
+                            checkpoint.result_state
+                            is _ResumeResultState.MARKER
+                        ):
+                            marker_descriptor = self._bind_result_marker(
+                                output_descriptor,
+                                checkpoint.take_result_descriptor(),
+                            )
+                        else:
+                            marker_descriptor = self._bind_result_marker(
+                                output_descriptor,
+                                expect_missing=True,
+                            )
                 if not recovered_result:
                     transport: _Transport | None = None
                     prompt_ready = False
@@ -2088,13 +2507,17 @@ class QemuController:
                         assert marker_descriptor is not None
                         self._publish(output_descriptor, marker_descriptor)
                         published = True
-                        self._retire_progress(output_descriptor)
+                        self._retire_progress(
+                            output_descriptor,
+                            self._resume_progress_descriptor,
+                            self._resume_progress_fingerprint,
+                        )
                     finally:
                         if transport is not None:
                             self._stop(transport)
         except BaseException as error:
             operation_error = error
-        cleanup_error: BaseException | None = None
+        cleanup_errors: list[BaseException] = []
         if marker_descriptor is not None:
             if not published:
                 try:
@@ -2103,28 +2526,50 @@ class QemuController:
                         self._result_path.name,
                         marker_descriptor,
                     ):
-                        cleanup_error = ControllerError(
+                        cleanup_errors.append(ControllerError(
                             "QEMU results changed during campaign cleanup"
-                        )
+                        ))
                 except OSError as error:
                     cleanup_error = ControllerError(
                         "QEMU results could not be validated during campaign cleanup"
                     )
                     cleanup_error.__cause__ = error
+                    cleanup_errors.append(cleanup_error)
             try:
                 os.close(marker_descriptor)
             except OSError as error:
-                if cleanup_error is None:
-                    cleanup_error = ControllerError(
-                        "QEMU result marker could not be closed safely"
-                    )
-                    cleanup_error.__cause__ = error
+                cleanup_error = ControllerError(
+                    "QEMU result marker could not be closed safely"
+                )
+                cleanup_error.__cause__ = error
+                cleanup_errors.append(cleanup_error)
+        if checkpoint is not None:
+            try:
+                checkpoint.close()
+            except BaseException as error:
+                cleanup_errors.append(error)
+        resume_progress_descriptor = self._resume_progress_descriptor
+        self._resume_output_descriptor = None
+        self._resume_progress_descriptor = None
+        self._resume_progress_fingerprint = None
+        if resume_progress_descriptor is not None:
+            try:
+                os.close(resume_progress_descriptor)
+            except BaseException as error:
+                cleanup_errors.append(error)
         try:
             os.close(output_descriptor)
         except OSError as error:
-            if cleanup_error is None:
-                cleanup_error = error
-        if cleanup_error is not None:
+            cleanup_errors.append(error)
+        if cleanup_errors:
+            cleanup_error: BaseException
+            if len(cleanup_errors) == 1:
+                cleanup_error = cleanup_errors[0]
+            else:
+                cleanup_error = BaseExceptionGroup(
+                    "QEMU campaign cleanup failed",
+                    cleanup_errors,
+                )
             if operation_error is not None:
                 raise cleanup_error from operation_error
             raise cleanup_error

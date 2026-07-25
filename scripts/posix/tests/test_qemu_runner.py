@@ -423,16 +423,29 @@ class QemuControllerTests(unittest.TestCase):
             dir_fd=output_descriptor,
         )
         try:
-            controller._load_progress(
+            with controller._load_progress(
                 output_descriptor,
                 os.fstat(raw_descriptor),
-            )
+            ):
+                pass
         finally:
             os.close(raw_descriptor)
             os.close(output_descriptor)
         partial_bytes = controller._result_bytes()
         (output / "results.ndjson").write_bytes(partial_bytes)
         return clock, partial_bytes, controller
+
+    def _replace_and_hold(
+        self,
+        path: Path,
+        replacement_name: str,
+        replacement: bytes,
+    ) -> int:
+        replacement_path = path.parent / replacement_name
+        replacement_path.write_bytes(replacement)
+        descriptor = os.open(replacement_path, os.O_RDONLY)
+        os.replace(replacement_path, path)
+        return descriptor
 
     def test_exact_prompt_and_matching_events_serialize_commands(self) -> None:
         transport = FakeTransport(
@@ -1025,10 +1038,11 @@ class QemuControllerTests(unittest.TestCase):
             os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
         )
         try:
-            resumed._load_progress(
+            with resumed._load_progress(
                 output_descriptor,
                 (output / "qemu-serial.log").stat(),
-            )
+            ):
+                pass
         finally:
             os.close(output_descriptor)
         self.assertEqual(len(resumed._attempts), MAX_TESTS)
@@ -1575,7 +1589,8 @@ class QemuControllerTests(unittest.TestCase):
                     qemu_argv=self.config.qemu_argv,
                 ),
             )
-            accepted._load_progress(output_descriptor, raw_path.stat())
+            with accepted._load_progress(output_descriptor, raw_path.stat()):
+                pass
             self.assertEqual(accepted._boot_count, 0)
             self.assertEqual(accepted._restart_count, 0)
             self.assertEqual(accepted._attempts, [])
@@ -1639,7 +1654,8 @@ class QemuControllerTests(unittest.TestCase):
                     qemu_argv=self.config.qemu_argv,
                 ),
             )
-            accepted._load_progress(output_descriptor, raw_path.stat())
+            with accepted._load_progress(output_descriptor, raw_path.stat()):
+                pass
             self.assertEqual(
                 [attempt.test_id for attempt in accepted._attempts],
                 [self.one.test_id],
@@ -2266,6 +2282,349 @@ class QemuControllerTests(unittest.TestCase):
         self.assertEqual(terminal["selected_count"], 2)
         self.assertFalse((output / "progress.json").exists())
 
+    def test_terminal_resume_rejects_result_replacement_after_validation(
+        self,
+    ) -> None:
+        output = self.root / "resume-terminal-result-race"
+        clock, result_bytes, progress_bytes = self._create_postcommit_campaign(
+            output
+        )
+        replacement = b"terminal result replacement\n"
+        replacement_descriptor: int | None = None
+        factory = TransportFactory([])
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+            monotonic=clock.monotonic,
+        )
+        real_validation = controller._resume_result_is_committed
+
+        def replace_after_validation(*args, **kwargs):
+            nonlocal replacement_descriptor
+            committed = real_validation(*args, **kwargs)
+            replacement_descriptor = self._replace_and_hold(
+                output / "results.ndjson",
+                "terminal-result-replacement",
+                replacement,
+            )
+            return committed
+
+        errors: list[BaseException] = []
+        try:
+            with mock.patch.object(
+                controller,
+                "_resume_result_is_committed",
+                side_effect=replace_after_validation,
+            ):
+                try:
+                    controller.run(resume=True)
+                except BaseException as error:
+                    errors.append(error)
+
+            self.assertIsNotNone(replacement_descriptor)
+            assert replacement_descriptor is not None
+            self.assertEqual(os.fstat(replacement_descriptor).st_nlink, 1)
+            self.assertEqual(
+                os.pread(replacement_descriptor, len(replacement), 0),
+                replacement,
+            )
+            self.assertEqual(
+                (output / "results.ndjson").read_bytes(), replacement
+            )
+            self.assertTrue((output / "progress.json").is_file())
+            self.assertEqual(
+                (output / "progress.json").read_bytes(), progress_bytes
+            )
+            self.assertEqual(factory.argv, [])
+            self.assertEqual(len(errors), 1)
+            self.assertIs(type(errors[0]), ControllerError)
+            self.assertNotEqual(replacement, result_bytes)
+        finally:
+            if replacement_descriptor is not None:
+                os.close(replacement_descriptor)
+
+    def test_partial_resume_rejects_result_replacement_after_validation(
+        self,
+    ) -> None:
+        output = self.root / "resume-partial-result-race"
+        clock, partial_bytes, _controller = self._create_exact_partial_result(
+            output
+        )
+        progress_bytes = (output / "progress.json").read_bytes()
+        replacement = b"partial result replacement\n"
+        replacement_descriptor: int | None = None
+        transport = FakeTransport(
+            clock,
+            [PROMPT, _start_events(self.two), _end_events(self.two), PROMPT],
+        )
+        factory = TransportFactory([transport])
+        controller = QemuController(
+            identity=_identity(self.tests),
+            selected=self.tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+            monotonic=clock.monotonic,
+        )
+        real_validation = controller._resume_result_is_committed
+
+        def replace_after_validation(*args, **kwargs):
+            nonlocal replacement_descriptor
+            committed = real_validation(*args, **kwargs)
+            replacement_descriptor = self._replace_and_hold(
+                output / "results.ndjson",
+                "partial-result-replacement",
+                replacement,
+            )
+            return committed
+
+        errors: list[BaseException] = []
+        try:
+            with mock.patch.object(
+                controller,
+                "_resume_result_is_committed",
+                side_effect=replace_after_validation,
+            ):
+                try:
+                    controller.run(resume=True)
+                except BaseException as error:
+                    errors.append(error)
+
+            self.assertIsNotNone(replacement_descriptor)
+            assert replacement_descriptor is not None
+            self.assertEqual(os.fstat(replacement_descriptor).st_nlink, 1)
+            self.assertEqual(
+                os.pread(replacement_descriptor, len(replacement), 0),
+                replacement,
+            )
+            self.assertEqual(
+                (output / "results.ndjson").read_bytes(), replacement
+            )
+            self.assertEqual(
+                (output / "progress.json").read_bytes(), progress_bytes
+            )
+            self.assertEqual(factory.argv, [])
+            self.assertEqual(transport.writes, [])
+            self.assertEqual(len(errors), 1)
+            self.assertIs(type(errors[0]), ControllerError)
+            self.assertNotEqual(replacement, partial_bytes)
+        finally:
+            if replacement_descriptor is not None:
+                os.close(replacement_descriptor)
+
+    def test_terminal_resume_rejects_progress_replacement_after_validation(
+        self,
+    ) -> None:
+        output = self.root / "resume-terminal-progress-race"
+        clock, result_bytes, progress_bytes = self._create_postcommit_campaign(
+            output
+        )
+        replacement = b"terminal progress replacement\n"
+        replacement_descriptor: int | None = None
+        factory = TransportFactory([])
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+            monotonic=clock.monotonic,
+        )
+        real_load = controller._load_progress
+
+        def replace_after_validation(*args, **kwargs):
+            nonlocal replacement_descriptor
+            checkpoint = real_load(*args, **kwargs)
+            replacement_descriptor = self._replace_and_hold(
+                output / "progress.json",
+                "terminal-progress-replacement",
+                replacement,
+            )
+            return checkpoint
+
+        errors: list[BaseException] = []
+        try:
+            with mock.patch.object(
+                controller,
+                "_load_progress",
+                side_effect=replace_after_validation,
+            ):
+                try:
+                    controller.run(resume=True)
+                except BaseException as error:
+                    errors.append(error)
+
+            self.assertIsNotNone(replacement_descriptor)
+            assert replacement_descriptor is not None
+            self.assertEqual(os.fstat(replacement_descriptor).st_nlink, 1)
+            self.assertEqual(
+                os.pread(replacement_descriptor, len(replacement), 0),
+                replacement,
+            )
+            self.assertEqual(
+                (output / "progress.json").read_bytes(), replacement
+            )
+            self.assertEqual(
+                (output / "results.ndjson").read_bytes(), result_bytes
+            )
+            self.assertEqual(factory.argv, [])
+            self.assertEqual(len(errors), 1)
+            self.assertIs(type(errors[0]), ControllerError)
+            self.assertNotEqual(replacement, progress_bytes)
+        finally:
+            if replacement_descriptor is not None:
+                os.close(replacement_descriptor)
+
+    def test_incomplete_resume_rejects_progress_replacement_before_rewrite(
+        self,
+    ) -> None:
+        output = self.root / "resume-partial-progress-race"
+        clock, partial_bytes, _controller = self._create_exact_partial_result(
+            output
+        )
+        replacement = b"partial progress replacement\n"
+        replacement_descriptor: int | None = None
+        transport = FakeTransport(
+            clock,
+            [PROMPT, _start_events(self.two), _end_events(self.two), PROMPT],
+        )
+        factory = TransportFactory([transport])
+        controller = QemuController(
+            identity=_identity(self.tests),
+            selected=self.tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+            monotonic=clock.monotonic,
+        )
+        real_load = controller._load_progress
+
+        def replace_after_validation(*args, **kwargs):
+            nonlocal replacement_descriptor
+            checkpoint = real_load(*args, **kwargs)
+            replacement_descriptor = self._replace_and_hold(
+                output / "progress.json",
+                "partial-progress-replacement",
+                replacement,
+            )
+            return checkpoint
+
+        errors: list[BaseException] = []
+        try:
+            with mock.patch.object(
+                controller,
+                "_load_progress",
+                side_effect=replace_after_validation,
+            ):
+                try:
+                    controller.run(resume=True)
+                except BaseException as error:
+                    errors.append(error)
+
+            self.assertIsNotNone(replacement_descriptor)
+            assert replacement_descriptor is not None
+            self.assertEqual(os.fstat(replacement_descriptor).st_nlink, 1)
+            self.assertEqual(
+                os.pread(replacement_descriptor, len(replacement), 0),
+                replacement,
+            )
+            self.assertEqual(
+                (output / "progress.json").read_bytes(), replacement
+            )
+            self.assertEqual(
+                (output / "results.ndjson").read_bytes(), partial_bytes
+            )
+            self.assertEqual(factory.argv, [])
+            self.assertEqual(transport.writes, [])
+            self.assertEqual(len(errors), 1)
+            self.assertIs(type(errors[0]), ControllerError)
+        finally:
+            if replacement_descriptor is not None:
+                os.close(replacement_descriptor)
+
+    def test_resume_progress_replacement_after_exchange_cleans_owned_temporary_entry(
+        self,
+    ) -> None:
+        output = self.root / "resume-progress-post-exchange-race"
+        output.mkdir()
+        progress_path = output / "progress.json"
+        original = b"validated progress\n"
+        progress_path.write_bytes(original)
+        replacement_path = output / "progress-replacement"
+        replacement = b"raced progress replacement\n"
+        replacement_path.write_bytes(replacement)
+        output_descriptor = os.open(
+            output,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        expected_descriptor = os.open(
+            progress_path.name,
+            os.O_RDONLY,
+            dir_fd=output_descriptor,
+        )
+        replacement_descriptor = os.open(replacement_path, os.O_RDONLY)
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory([]),
+            monotonic=self.clock.monotonic,
+        )
+        real_exchange = qemu_runner_module._rename_exchange
+        exchange_count = 0
+
+        def exchange_then_replace(parent: int, first: str, second: str) -> None:
+            nonlocal exchange_count
+            exchange_count += 1
+            real_exchange(parent, first, second)
+            if exchange_count == 1:
+                os.replace(
+                    replacement_path.name,
+                    first,
+                    src_dir_fd=parent,
+                    dst_dir_fd=parent,
+                )
+
+        try:
+            with mock.patch.object(
+                qemu_runner_module,
+                "_rename_exchange",
+                side_effect=exchange_then_replace,
+            ):
+                with self.assertRaisesRegex(ControllerError, "progress changed"):
+                    controller._replace_progress(
+                        output_descriptor,
+                        expected_descriptor,
+                        qemu_runner_module._stat_fingerprint(
+                            os.fstat(expected_descriptor)
+                        ),
+                        b"new progress\n",
+                    )
+
+            self.assertEqual(progress_path.read_bytes(), replacement)
+            self.assertEqual(os.fstat(replacement_descriptor).st_nlink, 1)
+            self.assertEqual(os.fstat(expected_descriptor).st_nlink, 0)
+            self.assertEqual(list(output.glob(".progress.json.*.resume")), [])
+            self.assertEqual(exchange_count, 1)
+        finally:
+            os.close(replacement_descriptor)
+            os.close(expected_descriptor)
+            os.close(output_descriptor)
+
     def test_postcommit_progress_fsync_failure_preserves_truthful_state(
         self,
     ) -> None:
@@ -2277,13 +2636,23 @@ class QemuControllerTests(unittest.TestCase):
         output_identity = (output_info.st_dev, output_info.st_ino)
         progress_unlinked = False
         injected = OSError(errno.EIO, "postcommit progress fsync failed")
-        real_unlink = qemu_runner_module.os.unlink
+        real_rename = qemu_runner_module._rename_noreplace_between
         real_fsync = qemu_runner_module.os.fsync
 
-        def tracked_unlink(path, *args, **kwargs) -> None:
+        def tracked_rename(
+            source_parent: int,
+            source_name: str,
+            destination_parent: int,
+            destination_name: str,
+        ) -> None:
             nonlocal progress_unlinked
-            real_unlink(path, *args, **kwargs)
-            if os.fspath(path) == "progress.json":
+            real_rename(
+                source_parent,
+                source_name,
+                destination_parent,
+                destination_name,
+            )
+            if source_name == "progress.json":
                 progress_unlinked = True
 
         def fail_progress_fsync(descriptor: int) -> None:
@@ -2306,9 +2675,9 @@ class QemuControllerTests(unittest.TestCase):
         )
         with (
             mock.patch.object(
-                qemu_runner_module.os,
-                "unlink",
-                side_effect=tracked_unlink,
+                qemu_runner_module,
+                "_rename_noreplace_between",
+                side_effect=tracked_rename,
             ),
             mock.patch.object(
                 qemu_runner_module.os,
