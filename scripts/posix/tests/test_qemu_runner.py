@@ -1403,6 +1403,118 @@ class QemuControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "build identity"):
             changed.run(resume=True)
 
+    def test_resume_rejects_inconsistent_boot_and_restart_counts(self) -> None:
+        output = self.root / "resume-counter-consistency"
+        _clock, progress_bytes, _raw_bytes = self._create_resumable_campaign(output)
+        progress_path = output / "progress.json"
+        raw_path = output / "qemu-serial.log"
+        output_descriptor = os.open(
+            output,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            for boot_count, restart_count in ((0, 1), (1, 1), (3, 1)):
+                with self.subTest(
+                    boot_count=boot_count,
+                    restart_count=restart_count,
+                ):
+                    progress = json.loads(progress_bytes)
+                    progress["boot_count"] = boot_count
+                    progress["restart_count"] = restart_count
+                    progress_path.write_text(
+                        json.dumps(
+                            progress,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    controller = QemuController(
+                        identity=_identity(self.tests),
+                        selected=self.tests,
+                        config=ControllerConfig(
+                            output_directory=output,
+                            qemu_argv=self.config.qemu_argv,
+                        ),
+                    )
+                    with self.assertRaisesRegex(ValueError, "resume progress"):
+                        controller._load_progress(
+                            output_descriptor,
+                            raw_path.stat(),
+                        )
+        finally:
+            os.close(output_descriptor)
+
+    def test_resume_current_test_matches_first_incomplete_selection(self) -> None:
+        output = self.root / "resume-current-test-consistency"
+        _clock, progress_bytes, _raw_bytes = self._create_resumable_campaign(output)
+        progress_path = output / "progress.json"
+        raw_path = output / "qemu-serial.log"
+        output_descriptor = os.open(
+            output,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            valid = json.loads(progress_bytes)
+            valid["current_test"] = self.two.test_id
+            progress_path.write_text(
+                json.dumps(valid, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            accepted = QemuController(
+                identity=_identity(self.tests),
+                selected=self.tests,
+                config=ControllerConfig(
+                    output_directory=output,
+                    qemu_argv=self.config.qemu_argv,
+                ),
+            )
+            accepted._load_progress(output_descriptor, raw_path.stat())
+            self.assertEqual(
+                [attempt.test_id for attempt in accepted._attempts],
+                [self.one.test_id],
+            )
+            self.assertIsNone(accepted._current_test)
+
+            corruptions = {
+                "already-completed": {
+                    **json.loads(progress_bytes),
+                    "current_test": self.one.test_id,
+                },
+                "skips-first-pending": {
+                    **json.loads(progress_bytes),
+                    "completed_attempts": [],
+                    "current_test": self.two.test_id,
+                },
+            }
+            for label, progress in corruptions.items():
+                with self.subTest(case=label):
+                    progress_path.write_text(
+                        json.dumps(
+                            progress,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    rejected = QemuController(
+                        identity=_identity(self.tests),
+                        selected=self.tests,
+                        config=ControllerConfig(
+                            output_directory=output,
+                            qemu_argv=self.config.qemu_argv,
+                        ),
+                    )
+                    with self.assertRaisesRegex(ValueError, "resume progress"):
+                        rejected._load_progress(
+                            output_descriptor,
+                            raw_path.stat(),
+                        )
+        finally:
+            os.close(output_descriptor)
+
     def test_resume_raw_log_swap_cannot_append_outside(self) -> None:
         output = self.root / "resume-raw-swap"
         clock, _progress, raw_bytes = self._create_resumable_campaign(output)
@@ -1783,6 +1895,135 @@ class QemuControllerTests(unittest.TestCase):
         self.assertFalse((self.root / "progress.json").exists())
         self.assertTrue(result.raw_log_path.is_file())
         self.assertFalse(tuple(self.root.glob(".*.tmp")))
+
+    def test_fresh_run_invalidates_stale_results_before_progress(self) -> None:
+        prior_transport = FakeTransport(
+            self.clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+        )
+        prior = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory([prior_transport]),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-prior-result",
+        ).run()
+        prior_bytes = prior.result_path.read_bytes()
+
+        interrupted_transport = FakeTransport(
+            self.clock,
+            [PROMPT, KeyboardInterrupt()],
+        )
+        fresh = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory([interrupted_transport]),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-fresh-progress",
+        )
+
+        with self.assertRaises(KeyboardInterrupt):
+            fresh.run()
+
+        if prior.result_path.exists():
+            self.assertNotEqual(prior.result_path.read_bytes(), prior_bytes)
+        with self.assertRaises(ValueError):
+            report_module._load_runtime_results(
+                prior.result_path,
+                (self.one,),
+                _identity((self.one,)).build_results,
+                _identity((self.one,)).metadata,
+                role="smros",
+            )
+        progress = json.loads(
+            (self.root / "progress.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(progress["run_id"], "controller-fresh-progress")
+        self.assertNotEqual(
+            progress["run_id"],
+            json.loads(prior_bytes.splitlines()[-1])["run_id"],
+        )
+
+    def test_result_invalidation_preserves_a_raced_replacement(self) -> None:
+        prior_transport = FakeTransport(
+            self.clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+        )
+        prior = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory([prior_transport]),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-prior-race",
+        ).run()
+        moved = self.root / "validated-prior-results.ndjson"
+        replacement = b"unrelated raced replacement\n"
+        real_exchange = getattr(qemu_runner_module, "_rename_exchange", None)
+        raced = False
+
+        def race_then_exchange(parent: int, first: str, second: str) -> None:
+            nonlocal raced
+            self.assertIsNotNone(real_exchange)
+            if raced:
+                assert real_exchange is not None
+                real_exchange(parent, first, second)
+                return
+            raced = True
+            os.rename(
+                first,
+                moved.name,
+                src_dir_fd=parent,
+                dst_dir_fd=parent,
+            )
+            descriptor = os.open(
+                first,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o644,
+                dir_fd=parent,
+            )
+            try:
+                os.write(descriptor, replacement)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            assert real_exchange is not None
+            real_exchange(parent, first, second)
+
+        fresh = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory(
+                [
+                    FakeTransport(
+                        self.clock,
+                        [
+                            PROMPT,
+                            _start_events(self.one),
+                            _end_events(self.one),
+                            PROMPT,
+                        ],
+                    )
+                ]
+            ),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-raced-invalidation",
+        )
+        with mock.patch.object(
+            qemu_runner_module,
+            "_rename_exchange",
+            side_effect=race_then_exchange,
+            create=True,
+        ):
+            with self.assertRaisesRegex(ControllerError, "results changed"):
+                fresh.run()
+
+        self.assertEqual(prior.result_path.read_bytes(), replacement)
+        self.assertTrue(moved.is_file())
+        self.assertFalse((self.root / "progress.json").exists())
 
     def test_generated_run_ids_are_strict_utf8_nonempty_and_bounded(self) -> None:
         invalid_ids = (

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Sequence
+import ctypes
 from dataclasses import dataclass, fields
+import errno
 import json
 import os
 from pathlib import Path
@@ -461,6 +463,42 @@ def _reject_progress_duplicate_keys(
     return value
 
 
+def _rename_exchange(parent: int, first: str, second: str) -> None:
+    renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+    if renameat2 is None:
+        raise ControllerError("atomic QEMU results invalidation is unavailable")
+    renameat2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    if renameat2(
+        parent,
+        os.fsencode(first),
+        parent,
+        os.fsencode(second),
+        2,
+    ) != 0:
+        error_number = ctypes.get_errno()
+        if error_number in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP}:
+            raise ControllerError(
+                "atomic QEMU results invalidation is unavailable"
+            )
+        raise OSError(error_number, os.strerror(error_number), first)
+
+
+def _entry_matches(parent: int, name: str, descriptor: int) -> bool:
+    try:
+        entry = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    held = os.fstat(descriptor)
+    return (entry.st_dev, entry.st_ino) == (held.st_dev, held.st_ino)
+
+
 class QemuController:
     def __init__(
         self,
@@ -519,6 +557,110 @@ class QemuController:
 
     def _persist_progress(self) -> None:
         _atomic_write(self._progress_path, _json_bytes(self._progress()))
+
+    def _invalidate_results(self, output_descriptor: int) -> None:
+        result_descriptor: int | None = None
+        tombstone_descriptor: int | None = None
+        tombstone_name = (
+            f".{self._result_path.name}.{secrets.token_hex(8)}.invalid"
+        )
+        try:
+            try:
+                result_descriptor = os.open(
+                    self._result_path.name,
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NONBLOCK", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=output_descriptor,
+                )
+            except FileNotFoundError:
+                return
+            except OSError as error:
+                raise ControllerError(
+                    "existing QEMU results could not be opened safely"
+                ) from error
+            result_info = os.fstat(result_descriptor)
+            if not stat.S_ISREG(result_info.st_mode) or result_info.st_nlink != 1:
+                raise ControllerError(
+                    "existing QEMU results are not a regular single-link file"
+                )
+            if not _entry_matches(
+                output_descriptor,
+                self._result_path.name,
+                result_descriptor,
+            ):
+                raise ControllerError(
+                    "existing QEMU results changed while being opened"
+                )
+            tombstone_descriptor = os.open(
+                tombstone_name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=output_descriptor,
+            )
+            os.fsync(tombstone_descriptor)
+            _rename_exchange(
+                output_descriptor,
+                self._result_path.name,
+                tombstone_name,
+            )
+            if not _entry_matches(
+                output_descriptor,
+                tombstone_name,
+                result_descriptor,
+            ):
+                try:
+                    _rename_exchange(
+                        output_descriptor,
+                        self._result_path.name,
+                        tombstone_name,
+                    )
+                except BaseException as rollback_error:
+                    raise ControllerError(
+                        "QEMU results changed and rollback failed during invalidation"
+                    ) from rollback_error
+                if not _entry_matches(
+                    output_descriptor,
+                    tombstone_name,
+                    tombstone_descriptor,
+                ):
+                    raise ControllerError(
+                        "QEMU results invalidation rollback lost its tombstone"
+                    )
+                os.unlink(tombstone_name, dir_fd=output_descriptor)
+                os.fsync(output_descriptor)
+                tombstone_name = ""
+                raise ControllerError("QEMU results changed during invalidation")
+            os.unlink(tombstone_name, dir_fd=output_descriptor)
+            tombstone_name = ""
+            os.fsync(output_descriptor)
+        except ControllerError:
+            raise
+        except OSError as error:
+            raise ControllerError(
+                "QEMU results could not be invalidated safely"
+            ) from error
+        finally:
+            if tombstone_name and tombstone_descriptor is not None:
+                try:
+                    if _entry_matches(
+                        output_descriptor,
+                        tombstone_name,
+                        tombstone_descriptor,
+                    ):
+                        os.unlink(tombstone_name, dir_fd=output_descriptor)
+                        os.fsync(output_descriptor)
+                except OSError:
+                    pass
+            if tombstone_descriptor is not None:
+                os.close(tombstone_descriptor)
+            if result_descriptor is not None:
+                os.close(result_descriptor)
 
     def _read_progress(self, output_descriptor: int) -> bytes:
         descriptor: int | None = None
@@ -638,6 +780,8 @@ class QemuController:
             or (infrastructure_error is not None and current_test is not None)
         ):
             raise ValueError("resume progress is invalid")
+        if restart_count != max(boot_count - 1, 0):
+            raise ValueError("resume progress is invalid")
         attempts = [_decode_attempt(item) for item in completed]
         selected_ids = set(expected_ids)
         completed_ids = [attempt.test_id for attempt in attempts]
@@ -647,6 +791,13 @@ class QemuController:
             or completed_ids != expected_ids[: len(completed_ids)]
         ):
             raise ValueError("resume progress contains invalid completed tests")
+        first_incomplete = (
+            expected_ids[len(completed_ids)]
+            if len(completed_ids) < len(expected_ids)
+            else None
+        )
+        if current_test is not None and current_test != first_incomplete:
+            raise ValueError("resume progress is invalid")
         tests_by_id = {test.test_id: test for test in self.selected}
         for attempt in attempts:
             self._validate_resumed_attempt(
@@ -1269,18 +1420,19 @@ class QemuController:
     def run(self, resume: bool = False) -> ControllerResult:
         output_descriptor = _open_parent(self._output)
         try:
+            if not resume:
+                run_id = self._run_id_factory()
+                if not is_valid_run_id(run_id):
+                    raise ValueError("QEMU run ID is invalid")
+                self._run_id = run_id
+                self._attempts = []
+                self._infrastructure_error = None
+                self._restart_count = 0
+                self._boot_count = 0
+                self._invalidate_results(output_descriptor)
             with self._open_raw_log(output_descriptor, resume=resume) as raw:
                 if resume:
                     self._load_progress(output_descriptor, os.fstat(raw.fileno()))
-                else:
-                    run_id = self._run_id_factory()
-                    if not is_valid_run_id(run_id):
-                        raise ValueError("QEMU run ID is invalid")
-                    self._run_id = run_id
-                    self._attempts = []
-                    self._infrastructure_error = None
-                    self._restart_count = 0
-                    self._boot_count = 0
                 transport: _Transport | None = None
                 prompt_ready = False
                 completed_ids = {attempt.test_id for attempt in self._attempts}

@@ -20,6 +20,7 @@ from scripts.posix import cli, report as report_module
 from scripts.posix.build import (
     CHECKSUM_DEFINITION,
     EMPTY_SHA256,
+    MAX_TESTS,
     ManifestMetadata,
     _build_results_digest,
     _json_build_result,
@@ -1184,13 +1185,15 @@ class AggregationTests(ReportFixture, unittest.TestCase):
         self.assertNotIn(self.tests[0].test_id, summary["metrics"]["program_completion"]["numerator_test_ids"])
 
     def test_rejects_identical_duplicate_runtime_run_identity(self) -> None:
+        duplicate = self.root / "identical-copy.ndjson"
+        duplicate.write_bytes(self.smros_results.read_bytes())
         with self.assertRaisesRegex(
             ValueError,
             "duplicate runtime run identity.*smros-aarch64.*run-smros",
         ):
             generate_report(
                 self.stage / "manifest.json",
-                smros_results=(self.smros_results, self.smros_results),
+                smros_results=(self.smros_results, duplicate),
                 output_directory=self.output,
             )
 
@@ -1211,6 +1214,137 @@ class AggregationTests(ReportFixture, unittest.TestCase):
                 smros_results=(self.smros_results, conflicting),
                 output_directory=self.output,
             )
+
+    def test_duplicate_runtime_paths_are_rejected_before_loading(self) -> None:
+        with mock.patch.object(
+            report_module,
+            "_load_smros_results",
+            wraps=report_module._load_smros_results,
+        ) as loader:
+            with self.assertRaisesRegex(ValueError, "duplicate runtime result path"):
+                generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(self.smros_results, self.smros_results),
+                    output_directory=self.output,
+                )
+
+        self.assertEqual(loader.call_count, 0)
+
+    def test_duplicate_run_identity_is_rejected_before_later_input(self) -> None:
+        conflicting = self.root / "duplicate-identity.ndjson"
+        self._write_runtime(
+            conflicting,
+            (self._attempt(self.tests[0], "fail", exit_code=1),),
+            complete=True,
+        )
+        missing = self.root / "must-not-be-read.ndjson"
+        with mock.patch.object(
+            report_module,
+            "_load_smros_results",
+            wraps=report_module._load_smros_results,
+        ) as loader:
+            with self.assertRaisesRegex(
+                ValueError,
+                "duplicate runtime run identity.*smros-aarch64.*run-smros",
+            ):
+                generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(self.smros_results, conflicting, missing),
+                    output_directory=self.output,
+                )
+
+        self.assertEqual(loader.call_count, 2)
+
+    def test_runtime_input_count_boundary_is_checked_before_loading(self) -> None:
+        second = self.root / "count-boundary-second.ndjson"
+        self._write_runtime(
+            second,
+            (self._attempt(self.tests[0], "pass", run_id="run-count-second"),),
+            complete=True,
+        )
+        with mock.patch.object(
+            report_module,
+            "_MAX_RUNTIME_INPUTS",
+            2,
+            create=True,
+        ):
+            summary = generate_report(
+                self.stage / "manifest.json",
+                smros_results=(self.smros_results, second),
+                output_directory=self.root / "count-boundary-accepted",
+            )
+        self.assertEqual(len(summary["provenance"]["smros_runs"]), 2)
+
+        with mock.patch.object(
+            report_module,
+            "_MAX_RUNTIME_INPUTS",
+            1,
+            create=True,
+        ), mock.patch.object(
+            report_module,
+            "_load_smros_results",
+            wraps=report_module._load_smros_results,
+        ) as loader:
+            with self.assertRaisesRegex(ValueError, "runtime result input count"):
+                generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(self.smros_results, second),
+                    output_directory=self.root / "count-boundary-rejected",
+                )
+        self.assertEqual(loader.call_count, 0)
+        self.assertEqual(
+            getattr(report_module, "_MAX_RUNTIME_INPUTS", 0),
+            4 * MAX_TESTS,
+        )
+
+    def test_runtime_input_cumulative_byte_boundary_accepts_max_run_ids(
+        self,
+    ) -> None:
+        paths: list[Path] = []
+        for label, suffix in (("first", "a"), ("second", "b")):
+            path = self.root / f"cumulative-{label}.ndjson"
+            run_id = "\0" * 255 + suffix
+            self._write_runtime(
+                path,
+                (self._attempt(self.tests[0], "pass", run_id=run_id),),
+                complete=True,
+            )
+            self.assertEqual(len(run_id.encode("utf-8")), 256)
+            paths.append(path)
+        exact_bytes = sum(path.stat().st_size for path in paths)
+        with mock.patch.object(
+            report_module,
+            "_MAX_RUNTIME_INPUT_BYTES",
+            exact_bytes,
+            create=True,
+        ):
+            summary = generate_report(
+                self.stage / "manifest.json",
+                smros_results=tuple(paths),
+                output_directory=self.root / "cumulative-boundary-accepted",
+            )
+        self.assertEqual(len(summary["provenance"]["smros_runs"]), 2)
+
+        with mock.patch.object(
+            report_module,
+            "_MAX_RUNTIME_INPUT_BYTES",
+            exact_bytes - 1,
+            create=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "cumulative byte limit"):
+                generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=tuple(paths),
+                    output_directory=self.root / "cumulative-boundary-rejected",
+                )
+        self.assertEqual(
+            getattr(report_module, "_MAX_RUNTIME_INPUT_BYTES", 0),
+            4 * report_module._MAX_RUNTIME_RESULTS_BYTES,
+        )
+        self.assertGreaterEqual(
+            getattr(report_module, "_MAX_RUNTIME_INPUT_BYTES", 0),
+            2 * report_module._MAX_RUNTIME_RESULTS_BYTES,
+        )
 
     def test_incomplete_runtime_input_is_never_reported_complete(self) -> None:
         incomplete = self.root / "incomplete.ndjson"

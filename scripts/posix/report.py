@@ -24,6 +24,7 @@ from .build import (
     MAX_BUILD_RESULTS_BYTES,
     MAX_HOST_MANIFEST_BYTES,
     MAX_MANIFEST_BYTES,
+    MAX_TESTS,
     ManifestMetadata,
     _build_results_digest,
     _load_build_results,
@@ -63,6 +64,8 @@ _REPORT_WORK_ROOT_NAME = "generation"
 _MAX_RUNTIME_RESULTS_BYTES = 128 * 1024 * 1024
 _MAX_RUNTIME_RESULT_LINE_BYTES = 512 * 1024
 _MAX_RUNTIME_ROWS = 32_768
+_MAX_RUNTIME_INPUTS = 4 * MAX_TESTS
+_MAX_RUNTIME_INPUT_BYTES = 4 * _MAX_RUNTIME_RESULTS_BYTES
 _MAX_FAILURE_OUTPUT_BYTES = 16_384
 _DIGEST_LENGTH = 64
 _COMMIT_LENGTH = 40
@@ -107,6 +110,7 @@ class _ManifestInput:
 @dataclass(frozen=True)
 class _RuntimeInput:
     path: str
+    byte_count: int
     attempts: tuple[RuntimeAttempt, ...]
     terminal: Mapping[str, object]
     rows: tuple[Mapping[str, object], ...]
@@ -739,8 +743,14 @@ def _load_runtime_results(
     metadata: ManifestMetadata,
     *,
     role: str,
+    maximum_bytes: int = _MAX_RUNTIME_RESULTS_BYTES,
+    data: bytes | None = None,
 ) -> _RuntimeInput:
-    data = _read_regular(path, "runtime results", _MAX_RUNTIME_RESULTS_BYTES)
+    maximum = min(_MAX_RUNTIME_RESULTS_BYTES, maximum_bytes)
+    if data is None:
+        data = _read_regular(path, "runtime results", maximum)
+    elif len(data) > maximum:
+        raise ValueError("runtime results exceeds its size limit")
     if not data or not data.endswith(b"\n") or b"\r" in data:
         raise ValueError("runtime results must be nonempty canonical LF NDJSON")
     tests_by_id = {test.test_id: test for test in tests}
@@ -801,6 +811,7 @@ def _load_runtime_results(
         raise AssertionError(f"unknown runtime input role: {role}")
     return _RuntimeInput(
         path=str(Path(os.path.abspath(path))),
+        byte_count=len(data),
         attempts=tuple(attempts),
         terminal=dict(terminal),
         rows=tuple(dict(row) for row in rows),
@@ -811,6 +822,8 @@ def _load_serial_results(
     path: Path,
     text: str,
     manifest: _ManifestInput,
+    *,
+    byte_count: int,
 ) -> _RuntimeInput:
     parsed = parse_serial_log(text)
     if not is_valid_run_id(parsed.run_id):
@@ -951,6 +964,7 @@ def _load_serial_results(
     )
     return _RuntimeInput(
         path=str(Path(os.path.abspath(path))),
+        byte_count=byte_count,
         attempts=tuple(attempts),
         terminal=terminal,
         rows=tuple(event.to_dict() for event in parsed.events),
@@ -960,20 +974,30 @@ def _load_serial_results(
 def _load_smros_results(
     path: Path,
     manifest: _ManifestInput,
+    *,
+    maximum_bytes: int = _MAX_RUNTIME_RESULTS_BYTES,
 ) -> _RuntimeInput:
-    data = _read_regular(path, "SMROS results", _MAX_RUNTIME_RESULTS_BYTES)
+    maximum = min(_MAX_RUNTIME_RESULTS_BYTES, maximum_bytes)
+    data = _read_regular(path, "SMROS results", maximum)
     try:
         text = data.decode("utf-8")
     except UnicodeError as error:
         raise ValueError("SMROS results are not UTF-8") from error
     if any(line.startswith(EVENT_PREFIX) for line in text.splitlines()):
-        return _load_serial_results(path, text, manifest)
+        return _load_serial_results(
+            path,
+            text,
+            manifest,
+            byte_count=len(data),
+        )
     return _load_runtime_results(
         path,
         manifest.tests,
         manifest.build_results,
         manifest.metadata,
         role="smros",
+        maximum_bytes=maximum,
+        data=data,
     )
 
 
@@ -2119,12 +2143,28 @@ def _publish_generation(output_directory: Path, outputs: Mapping[str, bytes]) ->
         raise cleanup_error
 
 
-def _paths(value: Sequence[Path] | Path | None) -> tuple[Path, ...]:
-    if value is None:
-        return ()
-    if isinstance(value, Path):
-        return (value,)
-    return tuple(Path(path) for path in value)
+def _runtime_paths(
+    linux_results: Sequence[Path] | Path | None,
+    smros_results: Sequence[Path] | Path | None,
+) -> tuple[tuple[str, Path], ...]:
+    entries: list[tuple[str, Path]] = []
+    seen: set[Path] = set()
+    for role, value in (
+        ("linux", linux_results),
+        ("smros", smros_results),
+    ):
+        if value is None:
+            continue
+        paths: Iterable[Path] = (value,) if isinstance(value, Path) else value
+        for item in paths:
+            if len(entries) >= _MAX_RUNTIME_INPUTS:
+                raise ValueError("runtime result input count exceeds its limit")
+            path = Path(os.path.abspath(Path(item)))
+            if path in seen:
+                raise ValueError(f"duplicate runtime result path: {path}")
+            seen.add(path)
+            entries.append((role, path))
+    return tuple(entries)
 
 
 def generate_report(
@@ -2135,25 +2175,54 @@ def generate_report(
     output_directory: Path,
 ) -> dict[str, object]:
     """Validate all inputs, aggregate them, and publish one report generation."""
-    linux_paths = _paths(linux_results)
-    smros_paths = _paths(smros_results)
-    if not linux_paths and not smros_paths:
+    runtime_paths = _runtime_paths(linux_results, smros_results)
+    if not runtime_paths:
         raise ValueError("at least one runtime-result input is required")
     manifest = _load_manifest(Path(manifest_path))
-    linux_inputs = tuple(
-        _load_runtime_results(
-            path,
-            manifest.tests,
-            manifest.build_results,
-            manifest.metadata,
-            role="linux",
-        )
-        for path in linux_paths
-    )
-    smros_inputs = tuple(
-        _load_smros_results(path, manifest)
-        for path in smros_paths
-    )
+    inputs: dict[str, list[_RuntimeInput]] = {"linux": [], "smros": []}
+    run_identities: set[tuple[object, object]] = set()
+    total_bytes = 0
+    for role, path in runtime_paths:
+        remaining = _MAX_RUNTIME_INPUT_BYTES - total_bytes
+        if remaining <= 0:
+            raise ValueError("runtime result inputs exceed cumulative byte limit")
+        maximum = min(_MAX_RUNTIME_RESULTS_BYTES, remaining)
+        try:
+            if role == "linux":
+                source = _load_runtime_results(
+                    path,
+                    manifest.tests,
+                    manifest.build_results,
+                    manifest.metadata,
+                    role=role,
+                    maximum_bytes=maximum,
+                )
+            else:
+                source = _load_smros_results(
+                    path,
+                    manifest,
+                    maximum_bytes=maximum,
+                )
+        except ValueError as error:
+            if remaining < _MAX_RUNTIME_RESULTS_BYTES and str(error) in {
+                "runtime results exceeds its size limit",
+                "SMROS results exceeds its size limit",
+            }:
+                raise ValueError(
+                    "runtime result inputs exceed cumulative byte limit"
+                ) from error
+            raise
+        total_bytes += source.byte_count
+        identity = (source.terminal["platform"], source.terminal["run_id"])
+        if identity in run_identities:
+            raise ValueError(
+                "duplicate runtime run identity: "
+                f"platform={identity[0]} run_id={identity[1]}"
+            )
+        run_identities.add(identity)
+        inputs[role].append(source)
+    linux_inputs = tuple(inputs["linux"])
+    smros_inputs = tuple(inputs["smros"])
     summary = _aggregate(manifest, linux_inputs, smros_inputs)
     outputs = {
         "events.ndjson": _events_bytes((*linux_inputs, *smros_inputs)),
