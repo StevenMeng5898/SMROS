@@ -490,6 +490,72 @@ class QemuControllerTests(unittest.TestCase):
                 self.assertEqual(result.attempts[0].launch_status, "interrupted")
                 self.assertEqual(result.attempts[1].status, "pass")
 
+    def test_invalid_run_ids_never_prove_execution_on_watchdog_paths(self) -> None:
+        cases = (
+            ("panic-surrogate", "\ud800", "panic"),
+            ("timeout-oversized", "x" * 257, "timeout"),
+            ("exit-surrogate", "\ud800", "exit"),
+            ("overflow-oversized", "x" * 257, "overflow"),
+        )
+        for label, run_id, failure in cases:
+            with self.subTest(label=label):
+                clock = FakeClock()
+                malformed = _replace_event_values(
+                    _replace_event_values(
+                        _start_events(self.one),
+                        "suite_start",
+                        run_id=run_id,
+                    ),
+                    "test_start",
+                    run_id=run_id,
+                )
+                failure_script: list[object]
+                maximum = self.config.max_test_serial_bytes
+                if failure == "panic":
+                    failure_script = [malformed, b"[PANIC] kernel stopped\n"]
+                elif failure == "timeout":
+                    failure_script = [malformed, ("advance", 1.1)]
+                elif failure == "exit":
+                    failure_script = [malformed, ("exit", 17)]
+                else:
+                    successful = (
+                        _start_events(self.two) + _end_events(self.two) + PROMPT
+                    )
+                    maximum = max(len(malformed) + 8, len(successful))
+                    failure_script = [
+                        malformed,
+                        b"x" * (maximum - len(malformed) + 1),
+                    ]
+                first = FakeTransport(clock, [PROMPT, *failure_script])
+                second = FakeTransport(
+                    clock,
+                    [PROMPT, _start_events(self.two), _end_events(self.two), PROMPT],
+                )
+                controller = QemuController(
+                    identity=_identity(self.tests),
+                    selected=self.tests,
+                    config=ControllerConfig(
+                        output_directory=self.root / label,
+                        qemu_argv=self.config.qemu_argv,
+                        max_test_serial_bytes=maximum,
+                    ),
+                    transport_factory=TransportFactory([first, second]),
+                    monotonic=clock.monotonic,
+                    run_id_factory=lambda label=label: f"controller-{label}",
+                )
+
+                result = controller.run()
+
+                failure_attempt = result.attempts[0]
+                expected_status = "timeout" if failure == "timeout" else "crash"
+                self.assertEqual(failure_attempt.status, expected_status)
+                self.assertEqual(failure_attempt.source, "host-watchdog")
+                self.assertEqual(failure_attempt.launch_status, "interrupted")
+                self.assertIs(failure_attempt.timed_out, failure == "timeout")
+                self.assertTrue(failure_attempt.infrastructure_error)
+                self.assertEqual(result.restart_count, 1)
+                self.assertEqual(result.attempts[1].status, "pass")
+
     def test_duplicate_event_keys_are_rejected(self) -> None:
         duplicate = _start_events(self.one).replace(
             b'"schema":1,', b'"schema":1,"schema":1,', 1

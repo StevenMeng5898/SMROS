@@ -286,8 +286,7 @@ def _event_common_is_valid(value: dict[str, object], event: str, seq: int) -> bo
         and type(value.get("seq")) is int
         and value.get("seq") == seq
         and value.get("event") == event
-        and isinstance(value.get("run_id"), str)
-        and bool(value.get("run_id"))
+        and is_valid_run_id(value.get("run_id"))
         and value.get("architecture") == "aarch64"
     )
 
