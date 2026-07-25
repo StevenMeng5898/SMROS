@@ -6,6 +6,7 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 import ctypes
 from dataclasses import dataclass, fields
+from enum import Enum
 import errno
 import fcntl
 import json
@@ -69,6 +70,12 @@ _RESULT_QUARANTINE_SLOT = "cleanup"
 
 class ControllerError(RuntimeError):
     """The QEMU controller could not safely continue the campaign."""
+
+
+class _ResumeCheckpointState(Enum):
+    ACTIVE = "active"
+    INCOMPLETE = "incomplete"
+    TERMINAL = "terminal"
 
 
 class _Transport(Protocol):
@@ -1017,7 +1024,7 @@ class QemuController:
         self,
         output_descriptor: int,
         *,
-        active_checkpoint: bool,
+        checkpoint_state: _ResumeCheckpointState,
     ) -> bool:
         descriptor: int | None = None
         try:
@@ -1041,7 +1048,7 @@ class QemuController:
                 raise ControllerError("resume QEMU results changed while being opened")
             if opened.st_size == 0:
                 return False
-            if active_checkpoint:
+            if checkpoint_state is _ResumeCheckpointState.ACTIVE:
                 raise ControllerError(
                     "resume QEMU results conflict with an active test checkpoint"
                 )
@@ -1081,7 +1088,7 @@ class QemuController:
                 raise ControllerError(
                     "resume QEMU results do not match committed progress"
                 )
-            return True
+            return checkpoint_state is _ResumeCheckpointState.TERMINAL
         except ControllerError:
             raise
         except OSError as error:
@@ -1142,7 +1149,7 @@ class QemuController:
 
     def _load_progress(
         self, output_descriptor: int, raw_info: os.stat_result
-    ) -> bool:
+    ) -> _ResumeCheckpointState:
         data = self._read_progress(output_descriptor)
         try:
             value = json.loads(
@@ -1253,7 +1260,11 @@ class QemuController:
         self._run_id = run_id
         self._infrastructure_error = infrastructure_error
         self._current_test = None
-        return current_test is not None
+        if current_test is not None:
+            return _ResumeCheckpointState.ACTIVE
+        if infrastructure_error is not None or completed_ids == expected_ids:
+            return _ResumeCheckpointState.TERMINAL
+        return _ResumeCheckpointState.INCOMPLETE
 
     def _validate_resumed_attempt(
         self,
@@ -1817,9 +1828,16 @@ class QemuController:
                 return attempt, False, True
 
     def _complete(self) -> bool:
-        return self._infrastructure_error is None and not any(
-            attempt.infrastructure_error and attempt.source != WATCHDOG_SOURCE
-            for attempt in self._attempts
+        attempt_ids = [attempt.test_id for attempt in self._attempts]
+        selected_ids = [test.test_id for test in self.selected]
+        return (
+            attempt_ids == selected_ids
+            and self._infrastructure_error is None
+            and not any(
+                attempt.infrastructure_error
+                and attempt.source != WATCHDOG_SOURCE
+                for attempt in self._attempts
+            )
         )
 
     def _terminal(self) -> dict[str, object]:
@@ -2012,17 +2030,21 @@ class QemuController:
             with self._open_raw_log(output_descriptor, resume=resume) as raw:
                 recovered_result = False
                 if resume:
-                    active_checkpoint = self._load_progress(
+                    checkpoint_state = self._load_progress(
                         output_descriptor,
                         os.fstat(raw.fileno()),
                     )
                     recovered_result = self._resume_result_is_committed(
                         output_descriptor,
-                        active_checkpoint=active_checkpoint,
+                        checkpoint_state=checkpoint_state,
                     )
                     if recovered_result:
                         published = True
                         self._retire_progress(output_descriptor)
+                    elif checkpoint_state is _ResumeCheckpointState.INCOMPLETE:
+                        marker_descriptor = self._invalidate_results(
+                            output_descriptor
+                        )
                     else:
                         marker_descriptor = self._bind_result_marker(
                             output_descriptor

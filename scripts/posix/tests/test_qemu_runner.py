@@ -398,6 +398,42 @@ class QemuControllerTests(unittest.TestCase):
             (output / "progress.json").read_bytes(),
         )
 
+    def _create_exact_partial_result(
+        self, output: Path
+    ) -> tuple[FakeClock, bytes, QemuController]:
+        clock, _progress_bytes, _raw_bytes = self._create_resumable_campaign(
+            output
+        )
+        controller = QemuController(
+            identity=_identity(self.tests),
+            selected=self.tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            monotonic=clock.monotonic,
+        )
+        output_descriptor = os.open(
+            output,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        raw_descriptor = os.open(
+            "qemu-serial.log",
+            os.O_RDONLY,
+            dir_fd=output_descriptor,
+        )
+        try:
+            controller._load_progress(
+                output_descriptor,
+                os.fstat(raw_descriptor),
+            )
+        finally:
+            os.close(raw_descriptor)
+            os.close(output_descriptor)
+        partial_bytes = controller._result_bytes()
+        (output / "results.ndjson").write_bytes(partial_bytes)
+        return clock, partial_bytes, controller
+
     def test_exact_prompt_and_matching_events_serialize_commands(self) -> None:
         transport = FakeTransport(
             self.clock,
@@ -2178,6 +2214,58 @@ class QemuControllerTests(unittest.TestCase):
         self.assertFalse((output / "progress.json").exists())
         self.assertEqual(factory.argv, [])
 
+    def test_partial_no_infrastructure_checkpoint_is_not_complete(self) -> None:
+        output = self.root / "resume-partial-completion"
+        _clock, _partial_bytes, controller = self._create_exact_partial_result(
+            output
+        )
+
+        self.assertFalse(controller._complete())
+        self.assertFalse(controller._terminal()["complete"])
+
+    def test_exact_inactive_partial_result_resumes_remaining_test(self) -> None:
+        output = self.root / "resume-partial-result"
+        clock, partial_bytes, _controller = self._create_exact_partial_result(
+            output
+        )
+        transport = FakeTransport(
+            clock,
+            [PROMPT, _start_events(self.two), _end_events(self.two), PROMPT],
+        )
+        factory = TransportFactory([transport])
+        controller = QemuController(
+            identity=_identity(self.tests),
+            selected=self.tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "unused-partial-resume",
+        )
+
+        result = controller.run(resume=True)
+
+        self.assertNotEqual(result.result_path.read_bytes(), partial_bytes)
+        self.assertTrue(result.complete)
+        self.assertEqual(
+            [attempt.test_id for attempt in result.attempts],
+            [self.one.test_id, self.two.test_id],
+        )
+        self.assertEqual(
+            transport.writes,
+            [f"posixtest test {self.two.test_id}\n".encode()],
+        )
+        self.assertEqual(len(factory.argv), 1)
+        terminal = json.loads(
+            result.result_path.read_text(encoding="utf-8").splitlines()[-1]
+        )
+        self.assertTrue(terminal["complete"])
+        self.assertEqual(terminal["completed_count"], 2)
+        self.assertEqual(terminal["selected_count"], 2)
+        self.assertFalse((output / "progress.json").exists())
+
     def test_postcommit_progress_fsync_failure_preserves_truthful_state(
         self,
     ) -> None:
@@ -3740,6 +3828,45 @@ class QemuControllerTests(unittest.TestCase):
             terminal["infrastructure_error"],
             "guest collection failed",
         )
+
+    def test_exact_guest_infrastructure_result_resumes_without_launch(
+        self,
+    ) -> None:
+        output = self.root / "resume-exact-guest-terminal"
+        output.mkdir()
+        (output / "qemu-serial.log").write_bytes(b"guest terminal evidence\n")
+        controller = QemuController(
+            identity=_identity(self.tests),
+            selected=self.tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+        )
+        controller._run_id = "controller-exact-resume-terminal"
+        controller._boot_count = 1
+        controller._infrastructure_error = "guest collection failed"
+        controller._persist_progress()
+        result_bytes = controller._result_bytes()
+        (output / "results.ndjson").write_bytes(result_bytes)
+        factory = TransportFactory([])
+        resumed = QemuController(
+            identity=_identity(self.tests),
+            selected=self.tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+        )
+
+        result = resumed.run(resume=True)
+
+        self.assertFalse(result.complete)
+        self.assertEqual(result.attempts, ())
+        self.assertEqual(factory.argv, [])
+        self.assertEqual(result.result_path.read_bytes(), result_bytes)
+        self.assertFalse((output / "progress.json").exists())
 
     def test_guest_infrastructure_terminal_rejects_invalid_context(self) -> None:
         valid_active = _start_events(self.one) + _event(
