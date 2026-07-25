@@ -67,6 +67,7 @@ _JSON_ESCAPE_EXPANSION = 6
 _RESULT_QUARANTINE_NAME = ".smros-posix-qemu-quarantine"
 _RESULT_QUARANTINE_SLOT = "cleanup"
 _PROGRESS_RETIREMENT_NAME = ".progress.json.retiring"
+_CAMPAIGN_LOCK_NAME = ".smros-posix-qemu.lock"
 
 
 class ControllerError(RuntimeError):
@@ -632,6 +633,79 @@ def _open_result_entry(parent: int, name: str) -> int:
         | getattr(os, "O_NOFOLLOW", 0),
         dir_fd=parent,
     )
+
+
+def _validate_campaign_lock(
+    output_descriptor: int,
+    lock_descriptor: int,
+) -> None:
+    info = os.fstat(lock_descriptor)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+    ):
+        raise ControllerError("QEMU campaign lock is unsafe")
+    if not _entry_matches(
+        output_descriptor,
+        _CAMPAIGN_LOCK_NAME,
+        lock_descriptor,
+    ):
+        raise ControllerError("QEMU campaign lock changed while being opened")
+
+
+def _open_campaign_lock(output_descriptor: int) -> int:
+    flags = (
+        os.O_RDWR
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor: int | None = None
+    created = False
+    try:
+        try:
+            descriptor = os.open(
+                _CAMPAIGN_LOCK_NAME,
+                flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=output_descriptor,
+            )
+            created = True
+        except FileExistsError:
+            descriptor = os.open(
+                _CAMPAIGN_LOCK_NAME,
+                flags,
+                dir_fd=output_descriptor,
+            )
+        if created:
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+            os.fsync(output_descriptor)
+        _validate_campaign_lock(output_descriptor, descriptor)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ControllerError(
+                "QEMU campaign is already active for this output directory"
+            ) from error
+        _validate_campaign_lock(output_descriptor, descriptor)
+        return descriptor
+    except ControllerError:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+    except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise ControllerError(
+            "QEMU campaign lock could not be opened safely"
+        ) from error
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
 
 
 def _write_all(descriptor: int, data: bytes) -> None:
@@ -2765,11 +2839,13 @@ class QemuController:
 
     def run(self, resume: bool = False) -> ControllerResult:
         output_descriptor = _open_parent(self._output)
+        campaign_lock_descriptor: int | None = None
         marker_descriptor: int | None = None
         checkpoint: _ResumeCheckpoint | None = None
         published = False
         operation_error: BaseException | None = None
         try:
+            campaign_lock_descriptor = _open_campaign_lock(output_descriptor)
             self._recover_interrupted_progress_retirement(output_descriptor)
             if not resume:
                 run_id = self._run_id_factory()
@@ -2931,6 +3007,11 @@ class QemuController:
             os.close(output_descriptor)
         except OSError as error:
             cleanup_errors.append(error)
+        if campaign_lock_descriptor is not None:
+            try:
+                os.close(campaign_lock_descriptor)
+            except OSError as error:
+                cleanup_errors.append(error)
         if cleanup_errors:
             cleanup_error: BaseException
             if len(cleanup_errors) == 1:

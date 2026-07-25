@@ -11,6 +11,7 @@ import socket
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -112,6 +113,29 @@ class FakeTransport:
     def kill(self) -> None:
         self.killed = True
         self.returncode = -9
+
+
+class PausingTransport(FakeTransport):
+    def __init__(
+        self,
+        clock: FakeClock,
+        script: list[object],
+        entered: threading.Event,
+        release: threading.Event,
+        *,
+        pause_before_read: int,
+    ) -> None:
+        super().__init__(clock, script)
+        self.entered = entered
+        self.release = release
+        self.pause_before_read = pause_before_read
+
+    def read(self, timeout: float) -> bytes:
+        if self.reads == self.pause_before_read:
+            self.entered.set()
+            if not self.release.wait(5.0):
+                raise AssertionError("timed out waiting to resume fake QEMU")
+        return super().read(timeout)
 
 
 class TransportFactory:
@@ -3682,6 +3706,297 @@ class QemuControllerTests(unittest.TestCase):
             progress["run_id"],
             json.loads(prior_bytes.splitlines()[-1])["run_id"],
         )
+
+    def test_concurrent_fresh_campaign_fails_before_mutating_active_outputs(
+        self,
+    ) -> None:
+        output = self.root / "concurrent-fresh-campaigns"
+        entered = threading.Event()
+        release = threading.Event()
+        first_clock = FakeClock()
+        first_transport = PausingTransport(
+            first_clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+            entered,
+            release,
+            pause_before_read=1,
+        )
+        first = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory([first_transport]),
+            monotonic=first_clock.monotonic,
+            run_id_factory=lambda: "controller-concurrent-first",
+        )
+        first_results: list[ControllerResult] = []
+        first_errors: list[BaseException] = []
+
+        def run_first() -> None:
+            try:
+                first_results.append(first.run())
+            except BaseException as error:
+                first_errors.append(error)
+
+        runner = threading.Thread(target=run_first, daemon=True)
+        runner.start()
+        self.assertTrue(entered.wait(2.0))
+        paths = (
+            output / "results.ndjson",
+            output / "progress.json",
+            output / "qemu-serial.log",
+        )
+        before = tuple(path.read_bytes() for path in paths)
+        second_clock = FakeClock()
+        second_transport = FakeTransport(
+            second_clock,
+            [PROMPT, _start_events(self.two), _end_events(self.two), PROMPT],
+        )
+        second_factory = TransportFactory([second_transport])
+        second = QemuController(
+            identity=_identity((self.two,)),
+            selected=(self.two,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=second_factory,
+            monotonic=second_clock.monotonic,
+            run_id_factory=lambda: "controller-concurrent-second",
+        )
+        second_error: BaseException | None = None
+        try:
+            second.run()
+        except BaseException as error:
+            second_error = error
+        after_second = tuple(
+            path.read_bytes() if path.exists() else None for path in paths
+        )
+        release.set()
+        runner.join(5.0)
+
+        self.assertFalse(runner.is_alive())
+        self.assertIs(type(second_error), ControllerError)
+        self.assertRegex(str(second_error), "campaign.*active")
+        self.assertEqual(second_factory.argv, [])
+        self.assertEqual(second_transport.writes, [])
+        self.assertEqual(after_second, before)
+        self.assertEqual(first_errors, [])
+        self.assertEqual(len(first_results), 1)
+        terminal = json.loads(paths[0].read_bytes().splitlines()[-1])
+        self.assertEqual(terminal["selected_count"], 1)
+        self.assertEqual(first_results[0].attempts[0].test_id, self.one.test_id)
+        raw = paths[2].read_bytes()
+        self.assertIn(self.one.test_id.encode("ascii"), raw)
+        self.assertNotIn(self.two.test_id.encode("ascii"), raw)
+
+    def test_campaign_lock_is_reused_across_fresh_and_resume_without_fd_leaks(
+        self,
+    ) -> None:
+        output = self.root / "reusable-campaign-lock"
+        clock, _progress_bytes, initial_raw = self._create_resumable_campaign(
+            output
+        )
+        lock = output / qemu_runner_module._CAMPAIGN_LOCK_NAME
+
+        def open_lock_descriptors() -> tuple[int, ...]:
+            descriptors: list[int] = []
+            for entry in Path("/proc/self/fd").iterdir():
+                try:
+                    target = Path(os.readlink(entry))
+                except (FileNotFoundError, OSError):
+                    continue
+                if target == lock:
+                    descriptors.append(int(entry.name))
+            return tuple(sorted(descriptors))
+
+        self.assertEqual(open_lock_descriptors(), ())
+        resumed_transport = FakeTransport(
+            clock,
+            [PROMPT, _start_events(self.two), _end_events(self.two), PROMPT],
+        )
+        resumed = QemuController(
+            identity=_identity(self.tests),
+            selected=self.tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory([resumed_transport]),
+            monotonic=clock.monotonic,
+        ).run(resume=True)
+
+        self.assertTrue(resumed.complete)
+        self.assertEqual(
+            [attempt.test_id for attempt in resumed.attempts],
+            [self.one.test_id, self.two.test_id],
+        )
+        self.assertTrue((output / "qemu-serial.log").read_bytes().startswith(initial_raw))
+        self.assertEqual(open_lock_descriptors(), ())
+        for index in range(3):
+            fresh_clock = FakeClock()
+            fresh_transport = FakeTransport(
+                fresh_clock,
+                [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+            )
+            fresh = QemuController(
+                identity=_identity((self.one,)),
+                selected=(self.one,),
+                config=ControllerConfig(
+                    output_directory=output,
+                    qemu_argv=self.config.qemu_argv,
+                ),
+                transport_factory=TransportFactory([fresh_transport]),
+                monotonic=fresh_clock.monotonic,
+                run_id_factory=lambda index=index: (
+                    f"controller-reused-lock-{index}"
+                ),
+            ).run()
+            self.assertTrue(fresh.complete)
+            self.assertEqual(open_lock_descriptors(), ())
+        info = lock.stat(follow_symlinks=False)
+        self.assertTrue(stat.S_ISREG(info.st_mode))
+        self.assertEqual(info.st_uid, os.geteuid())
+        self.assertEqual(stat.S_IMODE(info.st_mode), 0o600)
+        self.assertEqual(info.st_nlink, 1)
+
+    def test_campaign_lock_rejects_unsafe_entries_before_output_mutation(
+        self,
+    ) -> None:
+        for label in ("symlink", "hardlink", "fifo", "directory", "mode"):
+            with self.subTest(case=label):
+                output = self.root / f"unsafe-campaign-lock-{label}"
+                output.mkdir()
+                artifacts = {
+                    "results.ndjson": b"prior result bytes\n",
+                    "progress.json": b"prior progress bytes\n",
+                    "qemu-serial.log": b"prior raw bytes\n",
+                }
+                for name, data in artifacts.items():
+                    (output / name).write_bytes(data)
+                lock = output / qemu_runner_module._CAMPAIGN_LOCK_NAME
+                sentinel = self.root / f"campaign-lock-sentinel-{label}"
+                sentinel_bytes = f"sentinel {label}\n".encode("ascii")
+                sentinel.write_bytes(sentinel_bytes)
+                if label == "symlink":
+                    lock.symlink_to(sentinel)
+                elif label == "hardlink":
+                    os.link(sentinel, lock)
+                elif label == "fifo":
+                    os.mkfifo(lock)
+                elif label == "directory":
+                    lock.mkdir()
+                else:
+                    lock.write_bytes(b"")
+                    lock.chmod(0o644)
+                transport = FakeTransport(
+                    self.clock,
+                    [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+                )
+                factory = TransportFactory([transport])
+                controller = QemuController(
+                    identity=_identity((self.one,)),
+                    selected=(self.one,),
+                    config=ControllerConfig(
+                        output_directory=output,
+                        qemu_argv=self.config.qemu_argv,
+                    ),
+                    transport_factory=factory,
+                    monotonic=self.clock.monotonic,
+                    run_id_factory=lambda label=label: (
+                        f"controller-unsafe-lock-{label}"
+                    ),
+                )
+
+                with self.assertRaisesRegex(ControllerError, "campaign lock"):
+                    controller.run()
+
+                self.assertEqual(
+                    {
+                        name: (output / name).read_bytes()
+                        for name in artifacts
+                    },
+                    artifacts,
+                )
+                self.assertEqual(sentinel.read_bytes(), sentinel_bytes)
+                self.assertEqual(factory.argv, [])
+                self.assertEqual(transport.writes, [])
+
+    def test_campaign_lock_replacement_during_acquisition_fails_closed(
+        self,
+    ) -> None:
+        output = self.root / "replaced-campaign-lock"
+        output.mkdir()
+        artifacts = {
+            "results.ndjson": b"prior result bytes\n",
+            "progress.json": b"prior progress bytes\n",
+            "qemu-serial.log": b"prior raw bytes\n",
+        }
+        for name, data in artifacts.items():
+            (output / name).write_bytes(data)
+        lock = output / qemu_runner_module._CAMPAIGN_LOCK_NAME
+        lock.write_bytes(b"")
+        lock.chmod(0o600)
+        replacement = self.root / "campaign-lock-replacement"
+        replacement.write_bytes(b"")
+        replacement.chmod(0o600)
+        replacement_descriptor = os.open(replacement, os.O_RDONLY)
+        real_flock = qemu_runner_module.fcntl.flock
+        replaced = False
+
+        def replace_while_locking(descriptor: int, operation: int) -> None:
+            nonlocal replaced
+            if not replaced:
+                os.replace(replacement, lock)
+                replaced = True
+            real_flock(descriptor, operation)
+
+        transport = FakeTransport(
+            self.clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+        )
+        factory = TransportFactory([transport])
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-replaced-campaign-lock",
+        )
+        try:
+            with mock.patch.object(
+                qemu_runner_module.fcntl,
+                "flock",
+                side_effect=replace_while_locking,
+            ):
+                with self.assertRaisesRegex(ControllerError, "campaign lock"):
+                    controller.run()
+
+            self.assertTrue(replaced)
+            self.assertEqual(
+                {
+                    name: (output / name).read_bytes()
+                    for name in artifacts
+                },
+                artifacts,
+            )
+            lock_info = lock.stat(follow_symlinks=False)
+            held_info = os.fstat(replacement_descriptor)
+            self.assertEqual(
+                (lock_info.st_dev, lock_info.st_ino),
+                (held_info.st_dev, held_info.st_ino),
+            )
+            self.assertEqual(factory.argv, [])
+            self.assertEqual(transport.writes, [])
+        finally:
+            os.close(replacement_descriptor)
 
     def test_no_prior_interruption_leaves_an_empty_result_marker(self) -> None:
         output = self.root / "no-prior-interrupted-marker"
