@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -351,6 +352,50 @@ class QemuControllerTests(unittest.TestCase):
             clock,
             (output / "progress.json").read_bytes(),
             (output / "qemu-serial.log").read_bytes(),
+        )
+
+    def _create_postcommit_campaign(
+        self,
+        output: Path,
+        selected: tuple[SuiteTest, ...] | None = None,
+    ) -> tuple[FakeClock, bytes, bytes]:
+        tests = selected or (self.one,)
+        clock = FakeClock()
+        script: list[object] = [PROMPT]
+        for test in tests:
+            script.extend((_start_events(test), _end_events(test), PROMPT))
+        controller = QemuController(
+            identity=_identity(tests),
+            selected=tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory([FakeTransport(clock, script)]),
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "controller-postcommit-fixture",
+        )
+        real_publish = controller._publish
+
+        def publish_then_interrupt(
+            output_descriptor: int,
+            marker_descriptor: int,
+        ) -> None:
+            real_publish(output_descriptor, marker_descriptor)
+            raise KeyboardInterrupt()
+
+        with mock.patch.object(
+            controller,
+            "_publish",
+            side_effect=publish_then_interrupt,
+        ):
+            with self.assertRaises(ControllerError) as raised:
+                controller.run()
+        self.assertIsInstance(raised.exception.__cause__, KeyboardInterrupt)
+        return (
+            clock,
+            (output / "results.ndjson").read_bytes(),
+            (output / "progress.json").read_bytes(),
         )
 
     def test_exact_prompt_and_matching_events_serialize_commands(self) -> None:
@@ -2097,6 +2142,243 @@ class QemuControllerTests(unittest.TestCase):
         self.assertTrue((self.root / "results.ndjson").is_file())
         self.assertFalse((self.root / "progress.json").exists())
 
+    def test_resume_finalizes_exact_postcommit_result_without_launch(self) -> None:
+        output = self.root / "resume-postcommit-result"
+        clock, result_bytes, progress_bytes = self._create_postcommit_campaign(
+            output
+        )
+        self.assertTrue(result_bytes)
+        self.assertTrue(progress_bytes)
+        factory = TransportFactory([])
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "unused-postcommit-resume",
+        )
+        results: list[ControllerResult] = []
+        errors: list[BaseException] = []
+
+        try:
+            results.append(controller.run(resume=True))
+        except BaseException as error:
+            errors.append(error)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].complete)
+        self.assertEqual(len(results[0].attempts), 1)
+        self.assertEqual(results[0].attempts[0].test_id, self.one.test_id)
+        self.assertEqual((output / "results.ndjson").read_bytes(), result_bytes)
+        self.assertFalse((output / "progress.json").exists())
+        self.assertEqual(factory.argv, [])
+
+    def test_postcommit_progress_fsync_failure_preserves_truthful_state(
+        self,
+    ) -> None:
+        output = self.root / "resume-postcommit-fsync-failure"
+        clock, result_bytes, _progress_bytes = self._create_postcommit_campaign(
+            output
+        )
+        output_info = output.stat()
+        output_identity = (output_info.st_dev, output_info.st_ino)
+        progress_unlinked = False
+        injected = OSError(errno.EIO, "postcommit progress fsync failed")
+        real_unlink = qemu_runner_module.os.unlink
+        real_fsync = qemu_runner_module.os.fsync
+
+        def tracked_unlink(path, *args, **kwargs) -> None:
+            nonlocal progress_unlinked
+            real_unlink(path, *args, **kwargs)
+            if os.fspath(path) == "progress.json":
+                progress_unlinked = True
+
+        def fail_progress_fsync(descriptor: int) -> None:
+            info = os.fstat(descriptor)
+            if progress_unlinked and (info.st_dev, info.st_ino) == output_identity:
+                raise injected
+            real_fsync(descriptor)
+
+        factory = TransportFactory([])
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "unused-postcommit-fsync-failure",
+        )
+        with (
+            mock.patch.object(
+                qemu_runner_module.os,
+                "unlink",
+                side_effect=tracked_unlink,
+            ),
+            mock.patch.object(
+                qemu_runner_module.os,
+                "fsync",
+                side_effect=fail_progress_fsync,
+            ),
+        ):
+            with self.assertRaises(ControllerError) as raised:
+                controller.run(resume=True)
+
+        self.assertIs(type(raised.exception), ControllerError)
+        self.assertIs(raised.exception.__cause__, injected)
+        self.assertEqual((output / "results.ndjson").read_bytes(), result_bytes)
+        self.assertFalse((output / "progress.json").exists())
+        self.assertEqual(factory.argv, [])
+
+    def test_resume_rejects_unsafe_or_inexact_postcommit_results(self) -> None:
+        for label in (
+            "mismatched",
+            "noncanonical",
+            "truncated",
+            "symlink",
+            "fifo",
+            "multi-link",
+        ):
+            with self.subTest(case=label):
+                output = self.root / f"resume-postcommit-{label}"
+                clock, result_bytes, progress_bytes = (
+                    self._create_postcommit_campaign(output)
+                )
+                result_path = output / "results.ndjson"
+                sentinel = self.root / f"postcommit-sentinel-{label}"
+                if label == "mismatched":
+                    rows = [
+                        json.loads(line)
+                        for line in result_bytes.splitlines()
+                    ]
+                    rows[-1]["run_id"] = "mismatched-postcommit-value-x"
+                    altered = (
+                        "".join(
+                            json.dumps(
+                                row,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                            for row in rows
+                        )
+                    ).encode("ascii")
+                    self.assertEqual(len(altered), len(result_bytes))
+                    result_path.write_bytes(altered)
+                elif label == "noncanonical":
+                    rows = [
+                        json.loads(line)
+                        for line in result_bytes.splitlines()
+                    ]
+                    altered = (
+                        "".join(
+                            json.dumps(
+                                {
+                                    key: row[key]
+                                    for key in reversed(tuple(row))
+                                },
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                            for row in rows
+                        )
+                    ).encode("ascii")
+                    self.assertEqual(len(altered), len(result_bytes))
+                    result_path.write_bytes(altered)
+                elif label == "truncated":
+                    altered = result_bytes[:-1]
+                    result_path.write_bytes(altered)
+                elif label == "symlink":
+                    sentinel.write_bytes(result_bytes)
+                    result_path.unlink()
+                    result_path.symlink_to(sentinel)
+                    altered = result_bytes
+                elif label == "fifo":
+                    result_path.unlink()
+                    os.mkfifo(result_path)
+                    altered = b""
+                else:
+                    sentinel.hardlink_to(result_path)
+                    altered = result_bytes
+
+                factory = TransportFactory([])
+                controller = QemuController(
+                    identity=_identity((self.one,)),
+                    selected=(self.one,),
+                    config=ControllerConfig(
+                        output_directory=output,
+                        qemu_argv=self.config.qemu_argv,
+                    ),
+                    transport_factory=factory,
+                    monotonic=clock.monotonic,
+                    run_id_factory=lambda label=label: (
+                        f"unused-postcommit-{label}"
+                    ),
+                )
+                with self.assertRaises(ControllerError) as raised:
+                    controller.run(resume=True)
+
+                self.assertIs(type(raised.exception), ControllerError)
+                self.assertEqual(
+                    (output / "progress.json").read_bytes(),
+                    progress_bytes,
+                )
+                self.assertEqual(factory.argv, [])
+                if label in {"mismatched", "noncanonical", "truncated"}:
+                    self.assertEqual(result_path.read_bytes(), altered)
+                elif label == "symlink":
+                    self.assertTrue(result_path.is_symlink())
+                    self.assertEqual(sentinel.read_bytes(), result_bytes)
+                elif label == "fifo":
+                    self.assertTrue(stat.S_ISFIFO(result_path.lstat().st_mode))
+                else:
+                    self.assertEqual(result_path.stat().st_nlink, 2)
+                    self.assertEqual(sentinel.read_bytes(), result_bytes)
+
+    def test_resume_rejects_postcommit_result_with_active_checkpoint(self) -> None:
+        output = self.root / "resume-postcommit-active-test"
+        clock, result_bytes, _progress_bytes = self._create_postcommit_campaign(
+            output,
+            self.tests,
+        )
+        progress_path = output / "progress.json"
+        progress = json.loads(progress_path.read_bytes())
+        progress["completed_attempts"] = progress["completed_attempts"][:1]
+        progress["current_test"] = self.two.test_id
+        progress_path.write_bytes(
+            (
+                json.dumps(progress, sort_keys=True, separators=(",", ":"))
+                + "\n"
+            ).encode("ascii")
+        )
+        progress_bytes = progress_path.read_bytes()
+        factory = TransportFactory([])
+        controller = QemuController(
+            identity=_identity(self.tests),
+            selected=self.tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "unused-postcommit-active-test",
+        )
+
+        with self.assertRaisesRegex(ControllerError, "active test"):
+            controller.run(resume=True)
+
+        self.assertEqual((output / "results.ndjson").read_bytes(), result_bytes)
+        self.assertEqual(progress_path.read_bytes(), progress_bytes)
+        self.assertEqual(factory.argv, [])
+
     def test_first_run_fsyncs_each_new_output_parent_before_descent(self) -> None:
         output = self.root / "durable-qemu-output" / "nested"
         transport = FakeTransport(
@@ -2257,6 +2539,178 @@ class QemuControllerTests(unittest.TestCase):
         self.assertTrue(marker.is_file())
         self.assertEqual(marker.read_bytes(), b"")
         self.assertEqual(marker.stat().st_nlink, 1)
+
+    def test_orphaned_cleanup_slot_recovers_across_two_fresh_runs(self) -> None:
+        prior = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory(
+                [
+                    FakeTransport(
+                        self.clock,
+                        [
+                            PROMPT,
+                            _start_events(self.one),
+                            _end_events(self.one),
+                            PROMPT,
+                        ],
+                    )
+                ]
+            ),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-orphan-prior",
+        ).run()
+        prior_bytes = prior.result_path.read_bytes()
+        sentinel = self.root / "unrelated-public-file"
+        sentinel_bytes = b"unrelated public bytes\n"
+        sentinel.write_bytes(sentinel_bytes)
+        real_unlink = qemu_runner_module.os.unlink
+        interrupted = False
+
+        def interrupt_cleanup_unlink(path, *args, **kwargs) -> None:
+            nonlocal interrupted
+            if os.fspath(path) == "cleanup" and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt()
+            real_unlink(path, *args, **kwargs)
+
+        interrupted_controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory([]),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-orphan-interrupted",
+        )
+        with mock.patch.object(
+            qemu_runner_module.os,
+            "unlink",
+            side_effect=interrupt_cleanup_unlink,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                interrupted_controller.run()
+
+        quarantine = self.root / ".smros-posix-qemu-quarantine"
+        slot = quarantine / "cleanup"
+        slot_info = slot.stat(follow_symlinks=False)
+        self.assertTrue(stat.S_ISREG(slot_info.st_mode))
+        self.assertEqual(slot_info.st_nlink, 1)
+        self.assertEqual(slot.read_bytes(), prior_bytes)
+        self.assertEqual(sentinel.read_bytes(), sentinel_bytes)
+        quarantine_info = quarantine.stat()
+        quarantine_identity = (quarantine_info.st_dev, quarantine_info.st_ino)
+        recovery_events: list[str] = []
+        real_fsync = qemu_runner_module.os.fsync
+
+        def trace_recovery_unlink(path, *args, **kwargs) -> None:
+            real_unlink(path, *args, **kwargs)
+            if os.fspath(path) == "cleanup":
+                recovery_events.append("cleanup-unlinked")
+
+        def trace_recovery_fsync(descriptor: int) -> None:
+            real_fsync(descriptor)
+            info = os.fstat(descriptor)
+            if (info.st_dev, info.st_ino) == quarantine_identity:
+                recovery_events.append("quarantine-fsynced")
+
+        errors: list[BaseException] = []
+        results: list[ControllerResult] = []
+        with (
+            mock.patch.object(
+                qemu_runner_module.os,
+                "unlink",
+                side_effect=trace_recovery_unlink,
+            ),
+            mock.patch.object(
+                qemu_runner_module.os,
+                "fsync",
+                side_effect=trace_recovery_fsync,
+            ),
+        ):
+            for attempt in range(2):
+                transport = FakeTransport(
+                    self.clock,
+                    [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+                )
+                controller = QemuController(
+                    identity=_identity((self.one,)),
+                    selected=(self.one,),
+                    config=self.config,
+                    transport_factory=TransportFactory([transport]),
+                    monotonic=self.clock.monotonic,
+                    run_id_factory=lambda attempt=attempt: (
+                        f"controller-orphan-recovery-{attempt}"
+                    ),
+                )
+                try:
+                    results.append(controller.run())
+                except BaseException as error:
+                    errors.append(error)
+                    break
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(result.complete for result in results))
+        self.assertEqual(
+            recovery_events[:2],
+            ["cleanup-unlinked", "quarantine-fsynced"],
+        )
+        self.assertFalse(slot.exists())
+        self.assertEqual(tuple(quarantine.iterdir()), ())
+        self.assertEqual(sentinel.read_bytes(), sentinel_bytes)
+
+    def test_orphan_cleanup_rejects_unsafe_private_slot_states(self) -> None:
+        for label in (
+            "symlink",
+            "hardlink",
+            "fifo",
+            "directory",
+            "extra-entry",
+        ):
+            with self.subTest(case=label):
+                output = self.root / f"unsafe-orphan-{label}"
+                output.mkdir()
+                (output / "results.ndjson").write_bytes(b"prior result\n")
+                quarantine = output / ".smros-posix-qemu-quarantine"
+                quarantine.mkdir(mode=0o700)
+                quarantine.chmod(0o700)
+                slot = quarantine / "cleanup"
+                sentinel = self.root / f"unsafe-orphan-sentinel-{label}"
+                sentinel_bytes = f"sentinel {label}\n".encode("ascii")
+                sentinel.write_bytes(sentinel_bytes)
+                if label == "symlink":
+                    slot.symlink_to(sentinel)
+                elif label == "hardlink":
+                    os.link(sentinel, slot)
+                elif label == "fifo":
+                    os.mkfifo(slot)
+                elif label == "directory":
+                    slot.mkdir()
+                else:
+                    slot.write_bytes(b"owned cleanup candidate\n")
+                    (quarantine / "unexpected").write_bytes(b"unexpected\n")
+
+                controller = QemuController(
+                    identity=_identity((self.one,)),
+                    selected=(self.one,),
+                    config=ControllerConfig(
+                        output_directory=output,
+                        qemu_argv=self.config.qemu_argv,
+                    ),
+                    transport_factory=TransportFactory([]),
+                    monotonic=self.clock.monotonic,
+                    run_id_factory=lambda label=label: (
+                        f"controller-unsafe-orphan-{label}"
+                    ),
+                )
+                with self.assertRaises(ControllerError) as raised:
+                    controller.run()
+
+                self.assertIs(type(raised.exception), ControllerError)
+                self.assertRegex(str(raised.exception), "quarantine")
+                self.assertEqual(sentinel.read_bytes(), sentinel_bytes)
+                self.assertTrue(os.path.lexists(slot))
 
     def test_result_invalidation_preserves_a_raced_replacement(self) -> None:
         prior_transport = FakeTransport(

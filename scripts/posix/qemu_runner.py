@@ -560,6 +560,37 @@ def _write_all(descriptor: int, data: bytes) -> None:
         view = view[written:]
 
 
+def _recover_result_quarantine_slot(quarantine_descriptor: int) -> None:
+    slot_descriptor: int | None = None
+    try:
+        slot_descriptor = _open_result_entry(
+            quarantine_descriptor,
+            _RESULT_QUARANTINE_SLOT,
+        )
+        info = os.fstat(slot_descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or not _entry_matches(
+                quarantine_descriptor,
+                _RESULT_QUARANTINE_SLOT,
+                slot_descriptor,
+            )
+        ):
+            raise ControllerError("QEMU result quarantine cleanup slot is unsafe")
+        os.unlink(_RESULT_QUARANTINE_SLOT, dir_fd=quarantine_descriptor)
+        os.fsync(quarantine_descriptor)
+    except ControllerError:
+        raise
+    except OSError as error:
+        raise ControllerError(
+            "QEMU result quarantine cleanup slot could not be recovered safely"
+        ) from error
+    finally:
+        if slot_descriptor is not None:
+            os.close(slot_descriptor)
+
+
 def _open_result_quarantine(output_descriptor: int) -> int:
     descriptor: int | None = None
     try:
@@ -595,8 +626,12 @@ def _open_result_quarantine(output_descriptor: int) -> int:
         ):
             raise ControllerError("QEMU result quarantine changed while locking")
         with os.scandir(descriptor) as entries:
-            if next(entries, None) is not None:
-                raise ControllerError("QEMU result quarantine is not empty")
+            first = next(entries, None)
+            second = next(entries, None)
+        if first is not None:
+            if first.name != _RESULT_QUARANTINE_SLOT or second is not None:
+                raise ControllerError("QEMU result quarantine content is unsafe")
+            _recover_result_quarantine_slot(descriptor)
         os.fsync(output_descriptor)
         return descriptor
     except ControllerError:
@@ -722,6 +757,15 @@ class QemuController:
 
     def _persist_progress(self) -> None:
         _atomic_write(self._progress_path, _json_bytes(self._progress()))
+
+    def _retire_progress(self, output_descriptor: int) -> None:
+        os.unlink(self._progress_path.name, dir_fd=output_descriptor)
+        try:
+            os.fsync(output_descriptor)
+        except OSError as error:
+            raise ControllerError(
+                "QEMU progress removal could not be synchronized"
+            ) from error
 
     def _invalidate_results(self, output_descriptor: int) -> int:
         prior_descriptor: int | None = None
@@ -969,6 +1013,85 @@ class QemuController:
             if descriptor is not None and not keep_descriptor:
                 os.close(descriptor)
 
+    def _resume_result_is_committed(
+        self,
+        output_descriptor: int,
+        *,
+        active_checkpoint: bool,
+    ) -> bool:
+        descriptor: int | None = None
+        try:
+            try:
+                descriptor = _open_result_entry(
+                    output_descriptor,
+                    self._result_path.name,
+                )
+            except FileNotFoundError:
+                return False
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                raise ControllerError(
+                    "resume QEMU results are not a regular single-link file"
+                )
+            if not _entry_matches(
+                output_descriptor,
+                self._result_path.name,
+                descriptor,
+            ):
+                raise ControllerError("resume QEMU results changed while being opened")
+            if opened.st_size == 0:
+                return False
+            if active_checkpoint:
+                raise ControllerError(
+                    "resume QEMU results conflict with an active test checkpoint"
+                )
+            expected = self._result_bytes()
+            if opened.st_size != len(expected):
+                raise ControllerError(
+                    "resume QEMU results do not match committed progress"
+                )
+            chunks: list[bytes] = []
+            remaining = len(expected)
+            while remaining:
+                chunk = os.read(descriptor, min(65_536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            after = os.fstat(descriptor)
+            fingerprint = lambda info: (
+                info.st_dev,
+                info.st_ino,
+                info.st_mode,
+                info.st_nlink,
+                info.st_size,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+            )
+            if (
+                fingerprint(opened) != fingerprint(after)
+                or not _entry_matches(
+                    output_descriptor,
+                    self._result_path.name,
+                    descriptor,
+                )
+            ):
+                raise ControllerError("resume QEMU results changed while being read")
+            if b"".join(chunks) != expected:
+                raise ControllerError(
+                    "resume QEMU results do not match committed progress"
+                )
+            return True
+        except ControllerError:
+            raise
+        except OSError as error:
+            raise ControllerError(
+                "resume QEMU results could not be validated safely"
+            ) from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
     def _read_progress(self, output_descriptor: int) -> bytes:
         descriptor: int | None = None
         try:
@@ -1019,7 +1142,7 @@ class QemuController:
 
     def _load_progress(
         self, output_descriptor: int, raw_info: os.stat_result
-    ) -> None:
+    ) -> bool:
         data = self._read_progress(output_descriptor)
         try:
             value = json.loads(
@@ -1130,6 +1253,7 @@ class QemuController:
         self._run_id = run_id
         self._infrastructure_error = infrastructure_error
         self._current_test = None
+        return current_test is not None
 
     def _validate_resumed_attempt(
         self,
@@ -1725,14 +1849,17 @@ class QemuController:
             terminal["infrastructure_error"] = self._infrastructure_error
         return terminal
 
+    def _result_bytes(self) -> bytes:
+        rows = [_attempt_record(attempt) for attempt in self._attempts]
+        rows.append(self._terminal())
+        return _canonical_report(rows)
+
     def _publish(
         self,
         output_descriptor: int,
         marker_descriptor: int,
     ) -> None:
-        rows = [_attempt_record(attempt) for attempt in self._attempts]
-        rows.append(self._terminal())
-        data = _canonical_report(rows)
+        data = self._result_bytes()
         temporary_name = (
             f".{self._result_path.name}.{secrets.token_hex(8)}.publish"
         )
@@ -1883,59 +2010,66 @@ class QemuController:
                 self._boot_count = 0
                 marker_descriptor = self._invalidate_results(output_descriptor)
             with self._open_raw_log(output_descriptor, resume=resume) as raw:
+                recovered_result = False
                 if resume:
-                    self._load_progress(output_descriptor, os.fstat(raw.fileno()))
-                    marker_descriptor = self._bind_result_marker(
-                        output_descriptor
+                    active_checkpoint = self._load_progress(
+                        output_descriptor,
+                        os.fstat(raw.fileno()),
                     )
-                transport: _Transport | None = None
-                prompt_ready = False
-                completed_ids = {attempt.test_id for attempt in self._attempts}
-                self._persist_progress()
-                try:
-                    for test in self.selected:
-                        if self._infrastructure_error is not None:
-                            break
-                        if test.test_id in completed_ids:
-                            continue
-                        while transport is None or not prompt_ready:
-                            if transport is None:
-                                transport = self._launch_ready(raw)
-                                prompt_ready = True
-                            elif self._wait_for_prompt(transport, raw):
-                                prompt_ready = True
-                            else:
+                    recovered_result = self._resume_result_is_committed(
+                        output_descriptor,
+                        active_checkpoint=active_checkpoint,
+                    )
+                    if recovered_result:
+                        published = True
+                        self._retire_progress(output_descriptor)
+                    else:
+                        marker_descriptor = self._bind_result_marker(
+                            output_descriptor
+                        )
+                if not recovered_result:
+                    transport: _Transport | None = None
+                    prompt_ready = False
+                    completed_ids = {attempt.test_id for attempt in self._attempts}
+                    self._persist_progress()
+                    try:
+                        for test in self.selected:
+                            if self._infrastructure_error is not None:
+                                break
+                            if test.test_id in completed_ids:
+                                continue
+                            while transport is None or not prompt_ready:
+                                if transport is None:
+                                    transport = self._launch_ready(raw)
+                                    prompt_ready = True
+                                elif self._wait_for_prompt(transport, raw):
+                                    prompt_ready = True
+                                else:
+                                    self._stop(transport)
+                                    transport = None
+                            self._current_test = test.test_id
+                            self._persist_progress()
+                            attempt, prompt_ready, restart = self._run_test(
+                                transport, raw, test
+                            )
+                            if attempt is not None:
+                                self._attempts.append(attempt)
+                                completed_ids.add(test.test_id)
+                            self._current_test = None
+                            self._persist_progress()
+                            if self._infrastructure_error is not None:
+                                break
+                            if restart:
                                 self._stop(transport)
                                 transport = None
-                        self._current_test = test.test_id
-                        self._persist_progress()
-                        attempt, prompt_ready, restart = self._run_test(
-                            transport, raw, test
-                        )
-                        if attempt is not None:
-                            self._attempts.append(attempt)
-                            completed_ids.add(test.test_id)
-                        self._current_test = None
-                        self._persist_progress()
-                        if self._infrastructure_error is not None:
-                            break
-                        if restart:
+                                prompt_ready = False
+                        assert marker_descriptor is not None
+                        self._publish(output_descriptor, marker_descriptor)
+                        published = True
+                        self._retire_progress(output_descriptor)
+                    finally:
+                        if transport is not None:
                             self._stop(transport)
-                            transport = None
-                            prompt_ready = False
-                    assert marker_descriptor is not None
-                    self._publish(output_descriptor, marker_descriptor)
-                    published = True
-                    os.unlink(self._progress_path.name, dir_fd=output_descriptor)
-                    try:
-                        os.fsync(output_descriptor)
-                    except OSError as error:
-                        raise ControllerError(
-                            "QEMU progress removal could not be synchronized"
-                        ) from error
-                finally:
-                    if transport is not None:
-                        self._stop(transport)
         except BaseException as error:
             operation_error = error
         cleanup_error: BaseException | None = None
