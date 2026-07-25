@@ -113,6 +113,7 @@ def create_parser() -> argparse.ArgumentParser:
     report_parser.add_argument(
         "--smros-results", action="append", type=Path, default=[]
     )
+    report_parser.add_argument("--quality-evidence", type=Path)
     report_parser.add_argument("--out", required=True, type=Path)
     return parser
 
@@ -401,6 +402,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.manifest,
                 linux_results=arguments.linux_results,
                 smros_results=arguments.smros_results,
+                quality_evidence=arguments.quality_evidence,
                 output_directory=arguments.out,
             )
         except (OSError, ValueError) as error:

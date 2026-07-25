@@ -5,6 +5,22 @@ binary while much of its policy logic is pure Rust. The default production
 target is ARM64/AArch64, and the same Makefile flow also builds and smokes the
 RISC-V64 and x86_64 targets.
 
+## POSIX Harness
+
+The Open POSIX Test Suite workflow is documented in
+`docs/POSIX_CONFORMANCE.md`. Its current milestone is infrastructure and a
+failure baseline, not a POSIX certification or a claim of conformance
+completion. Run the offline host-tool checks with:
+
+```bash
+make posix-tool-test
+```
+
+The network fetch, AArch64 cross-build, qemu-user reference, QEMU/SMROS run,
+and seven-artifact report are explicit `make posix-*` targets and are not
+pulled into ordinary offline testing. The architecture order is AArch64, then
+x86_64, then RISC-V64.
+
 ## Fast Unit Tests
 
 Run:
@@ -174,17 +190,20 @@ Run the fast local confidence suite:
 make test
 ```
 
-`make test` runs scoped formatting checks, script syntax checks, unit tests, and
-integration tests, and the kernel build test. It intentionally does not boot
-QEMU, so it stays suitable for quick local and CI checks. Use `make st` for the
-boot-level smoke test, or `make verify` for unit tests, integration tests,
-build, system smoke, and Verus verification.
+`make test` runs scoped formatting checks, script syntax checks, unit tests,
+integration tests, the offline `posix-tool-test`, and the kernel build test. It
+intentionally does not fetch sources, cross-build the POSIX suite, run
+qemu-user, or boot QEMU, so it stays suitable for quick local and CI checks.
+Use `make st` for the boot-level smoke test, or `make verify` for unit tests,
+integration tests, build, system smoke, and Verus verification.
 
 ## Test Layers
 
 - Hygiene: host-test formatting and shell syntax checks.
 - UT: host unit tests for deterministic pure logic.
 - IT: host integration tests for cross-module contracts and test-layer wiring.
+- POSIX tool tests: offline Python tests for source, audit, build, runner, and
+  report contracts. See `docs/POSIX_CONFORMANCE.md` for the full workflow.
 - Coverage: `cargo-tarpaulin` HTML heatmaps for host UT/IT coverage plus an
   optional QEMU smoke run through `make coverage`.
 - Build test: production `aarch64-unknown-none` release build plus raw image by

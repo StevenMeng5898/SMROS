@@ -340,6 +340,60 @@ class ReportFixture:
             encoding="utf-8",
         )
 
+    def _quality_check(
+        self,
+        name: str,
+        status: str,
+        **changes: object,
+    ) -> dict[str, object]:
+        check: dict[str, object] = {
+            "artifact": None,
+            "command": None,
+            "coverage_percent": None,
+            "findings": None,
+            "kind": "static-analysis",
+            "name": name,
+            "status": status,
+            "summary": f"{name} is {status}",
+            "version": None,
+        }
+        check.update(changes)
+        return check
+
+    def _quality_payload(
+        self,
+        checks: list[dict[str, object]] | None = None,
+        **changes: object,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "architecture": self.metadata.architecture,
+            "checks": checks
+            if checks is not None
+            else [self._quality_check("coverity", "passed")],
+            "schema": 1,
+            "smros_commit": self.metadata.smros_commit,
+        }
+        payload.update(changes)
+        return payload
+
+    def _write_quality(
+        self,
+        payload: dict[str, object] | None = None,
+        *,
+        path: Path | None = None,
+    ) -> Path:
+        quality = self.root / "quality.json" if path is None else path
+        quality.write_text(
+            json.dumps(
+                self._quality_payload() if payload is None else payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return quality
+
 
 class AggregationTests(ReportFixture, unittest.TestCase):
     def _rewrite_runtime_identity(
@@ -2752,6 +2806,409 @@ class RendererTests(ReportFixture, unittest.TestCase):
         )
 
 
+class QualityEvidenceTests(ReportFixture, unittest.TestCase):
+    def test_valid_evidence_is_normalized_rendered_and_separate_from_completion(
+        self,
+    ) -> None:
+        unsafe = "<scan> & [details](javascript:bad) | row"
+        quality = self._write_quality(
+            self._quality_payload(
+                [
+                    self._quality_check(
+                        "coverity",
+                        "passed",
+                        summary=unsafe,
+                        version="2026.7",
+                        command="cov-analyze --dir output; never-executed",
+                        findings=0,
+                        coverage_percent=87.5,
+                        artifact="target/coverity/results.json",
+                    ),
+                    self._quality_check("clang-tidy", "failed", findings=3),
+                    self._quality_check(
+                        "sanitizers",
+                        "unavailable",
+                        summary="cross runtime unavailable",
+                    ),
+                    self._quality_check("manual-review", "not-run"),
+                ]
+            )
+        )
+
+        summary = generate_report(
+            self.stage / "manifest.json",
+            smros_results=(self.smros_results,),
+            quality_evidence=quality,
+            output_directory=self.output,
+        )
+
+        evidence = summary["quality_evidence"]
+        self.assertEqual(evidence["architecture"], "aarch64")
+        self.assertEqual(evidence["smros_commit"], "4" * 40)
+        self.assertEqual(evidence["overall_status"], "failed")
+        self.assertEqual(
+            evidence["status_counts"],
+            {"failed": 1, "not-run": 1, "passed": 1, "unavailable": 1},
+        )
+        self.assertTrue(summary["complete"])
+        self.assertEqual(
+            OUTPUT_NAMES,
+            (
+                "events.ndjson",
+                "summary.json",
+                "junit.xml",
+                "groups.csv",
+                "apis.csv",
+                "report.md",
+                "index.html",
+            ),
+        )
+        self.assertEqual(set(path.name for path in self.output.iterdir()), set(OUTPUT_NAMES))
+        persisted = json.loads(
+            (self.output / "summary.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(persisted, summary)
+        self.assertTrue(
+            [
+                json.loads(line)
+                for line in (self.output / "events.ndjson")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+        )
+        for name in ("groups.csv", "apis.csv"):
+            with (self.output / name).open(encoding="utf-8", newline="") as stream:
+                self.assertTrue(list(csv.DictReader(stream)))
+
+        suite = ET.parse(self.output / "junit.xml").getroot()
+        properties = {
+            node.attrib["name"]: node.attrib["value"]
+            for node in suite.findall("./properties/property")
+        }
+        self.assertEqual(properties["quality.architecture"], "aarch64")
+        self.assertEqual(properties["quality.smros_commit"], "4" * 40)
+        self.assertEqual(properties["quality.overall_status"], "failed")
+        self.assertEqual(properties["quality.status_count.unavailable"], "1")
+        self.assertEqual(properties["quality.check.0.kind"], "static-analysis")
+        self.assertEqual(properties["quality.check.0.status"], "passed")
+        self.assertEqual(properties["quality.check.0.summary"], unsafe)
+        self.assertEqual(properties["quality.check.0.findings"], "0")
+        self.assertEqual(properties["quality.check.0.coverage_percent"], "87.5")
+        self.assertNotIn("quality.check.2.findings", properties)
+        self.assertNotIn("quality.check.2.coverage_percent", properties)
+        self.assertNotIn("quality.check.3.findings", properties)
+        self.assertNotIn("quality.check.3.coverage_percent", properties)
+
+        markdown = (self.output / "report.md").read_text(encoding="utf-8")
+        rendered_html = (self.output / "index.html").read_text(encoding="utf-8")
+        self.assertIn("## Quality Evidence", markdown)
+        self.assertIn("Quality Evidence", rendered_html)
+        self.assertIn("unavailable", markdown)
+        self.assertIn("not-run", rendered_html)
+        self.assertIn("&lt;scan&gt;", markdown)
+        self.assertIn("&lt;scan&gt;", rendered_html)
+        self.assertNotIn(unsafe, markdown)
+        self.assertNotIn(unsafe, rendered_html)
+        _StrictHTMLParser().feed(rendered_html)
+
+    def test_omission_is_null_and_evidence_cannot_change_conformance_artifacts(
+        self,
+    ) -> None:
+        without_output = self.root / "without-quality"
+        without = generate_report(
+            self.stage / "manifest.json",
+            smros_results=(self.smros_results,),
+            output_directory=without_output,
+        )
+        self.assertIsNone(without["quality_evidence"])
+        conformance_snapshot = {
+            name: (without_output / name).read_bytes()
+            for name in ("events.ndjson", "groups.csv", "apis.csv")
+        }
+        quality = self._write_quality(
+            self._quality_payload(
+                [self._quality_check("coverity", "failed", findings=9)]
+            )
+        )
+
+        with_evidence = generate_report(
+            self.stage / "manifest.json",
+            smros_results=(self.smros_results,),
+            quality_evidence=quality,
+            output_directory=self.output,
+        )
+
+        self.assertEqual(with_evidence["metrics"], without["metrics"])
+        self.assertEqual(with_evidence["counts"], without["counts"])
+        self.assertEqual(with_evidence["complete"], without["complete"])
+        for name, expected in conformance_snapshot.items():
+            self.assertEqual((self.output / name).read_bytes(), expected, name)
+        without_suite = ET.parse(without_output / "junit.xml").getroot()
+        with_suite = ET.parse(self.output / "junit.xml").getroot()
+        self.assertEqual(with_suite.attrib, without_suite.attrib)
+        self.assertEqual(
+            len(with_suite.findall("testcase")), len(without_suite.findall("testcase"))
+        )
+
+    def test_all_passed_or_incomplete_evidence_has_truthful_overall_status(self) -> None:
+        cases = (
+            ([self._quality_check("coverity", "passed")], "passed"),
+            (
+                [
+                    self._quality_check("coverity", "passed"),
+                    self._quality_check("sanitizers", "unavailable"),
+                ],
+                "incomplete",
+            ),
+            ([self._quality_check("manual", "not-run")], "incomplete"),
+        )
+        for index, (checks, expected) in enumerate(cases):
+            with self.subTest(expected=expected):
+                quality = self._write_quality(
+                    self._quality_payload(checks),
+                    path=self.root / f"quality-{index}.json",
+                )
+                summary = generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(self.smros_results,),
+                    quality_evidence=quality,
+                    output_directory=self.root / f"report-{index}",
+                )
+                self.assertEqual(summary["quality_evidence"]["overall_status"], expected)
+
+    def test_evidence_identity_must_match_manifest(self) -> None:
+        for field, value in (
+            ("architecture", "x86_64"),
+            ("smros_commit", "5" * 40),
+        ):
+            with self.subTest(field=field):
+                quality = self._write_quality(self._quality_payload(**{field: value}))
+                with self.assertRaisesRegex(ValueError, f"quality evidence {field} mismatch"):
+                    generate_report(
+                        self.stage / "manifest.json",
+                        smros_results=(self.smros_results,),
+                        quality_evidence=quality,
+                        output_directory=self.output,
+                    )
+
+    def test_evidence_rejects_duplicate_keys_and_noncanonical_json(self) -> None:
+        quality = self.root / "quality.json"
+        quality.write_text(
+            '{"architecture":"aarch64","architecture":"aarch64",'
+            '"checks":[],"schema":1,"smros_commit":"' + "4" * 40 + '"}\n',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "quality evidence is invalid JSON"):
+            generate_report(
+                self.stage / "manifest.json",
+                smros_results=(self.smros_results,),
+                quality_evidence=quality,
+                output_directory=self.output,
+            )
+
+        quality.write_text(json.dumps(self._quality_payload(), indent=2) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "quality evidence is not canonical JSON"):
+            generate_report(
+                self.stage / "manifest.json",
+                smros_results=(self.smros_results,),
+                quality_evidence=quality,
+                output_directory=self.output,
+            )
+
+    def test_evidence_input_must_be_bounded_regular_nonsymlink_and_stable(self) -> None:
+        quality = self._write_quality()
+        original = quality.read_bytes()
+
+        oversized = self.root / "oversized-quality.json"
+        oversized.write_bytes(b" " * (1024 * 1024 + 1))
+        with self.assertRaisesRegex(ValueError, "quality evidence exceeds its size limit"):
+            generate_report(
+                self.stage / "manifest.json",
+                smros_results=(self.smros_results,),
+                quality_evidence=oversized,
+                output_directory=self.output,
+            )
+
+        symlink = self.root / "quality-link.json"
+        symlink.symlink_to(quality)
+        with self.assertRaisesRegex(ValueError, "quality evidence must not be a symlink"):
+            generate_report(
+                self.stage / "manifest.json",
+                smros_results=(self.smros_results,),
+                quality_evidence=symlink,
+                output_directory=self.output,
+            )
+
+        directory = self.root / "quality-directory.json"
+        directory.mkdir()
+        with self.assertRaisesRegex(ValueError, "quality evidence is not a regular file"):
+            generate_report(
+                self.stage / "manifest.json",
+                smros_results=(self.smros_results,),
+                quality_evidence=directory,
+                output_directory=self.output,
+            )
+
+        real_read = report_module.os.read
+        mutated = False
+
+        def mutate_during_read(descriptor: int, size: int) -> bytes:
+            nonlocal mutated
+            chunk = real_read(descriptor, size)
+            if (
+                not mutated
+                and Path(os.readlink(f"/proc/self/fd/{descriptor}")) == quality
+            ):
+                mutated = True
+                quality.write_bytes(original + b" ")
+            return chunk
+
+        with mock.patch.object(report_module.os, "read", side_effect=mutate_during_read):
+            with self.assertRaisesRegex(ValueError, "quality evidence changed while being read"):
+                generate_report(
+                    self.stage / "manifest.json",
+                    smros_results=(self.smros_results,),
+                    quality_evidence=quality,
+                    output_directory=self.output,
+                )
+        self.assertTrue(mutated)
+
+    def test_evidence_schema_field_sets_and_types_are_exact(self) -> None:
+        valid = self._quality_payload()
+        invalid_payloads: list[tuple[str, dict[str, object]]] = [
+            ("schema", {**valid, "schema": 2}),
+            ("schema", {**valid, "schema": True}),
+            ("schema", {key: value for key, value in valid.items() if key != "schema"}),
+            ("schema", {**valid, "extra": None}),
+            ("architecture", {**valid, "architecture": 1}),
+            ("smros_commit", {**valid, "smros_commit": 4}),
+            ("checks", {**valid, "checks": "coverity"}),
+            ("checks", {**valid, "checks": []}),
+            ("check", {**valid, "checks": ["coverity"]}),
+        ]
+        base_check = self._quality_check("coverity", "passed")
+        invalid_checks: list[tuple[str, dict[str, object]]] = [
+            ("field set", {key: value for key, value in base_check.items() if key != "summary"}),
+            ("field set", {**base_check, "extra": None}),
+            ("name", {**base_check, "name": 1}),
+            ("kind", {**base_check, "kind": 1}),
+            ("status", {**base_check, "status": 1}),
+            ("summary", {**base_check, "summary": None}),
+            ("version", {**base_check, "version": 1}),
+            ("command", {**base_check, "command": []}),
+            ("artifact", {**base_check, "artifact": {}}),
+            ("findings", {**base_check, "findings": "0"}),
+            ("coverage_percent", {**base_check, "coverage_percent": "100"}),
+        ]
+        invalid_payloads.extend(
+            (label, {**valid, "checks": [check]}) for label, check in invalid_checks
+        )
+
+        for index, (label, payload) in enumerate(invalid_payloads):
+            with self.subTest(index=index, label=label):
+                quality = self._write_quality(
+                    payload, path=self.root / f"invalid-schema-{index}.json"
+                )
+                with self.assertRaisesRegex(ValueError, "quality evidence"):
+                    generate_report(
+                        self.stage / "manifest.json",
+                        smros_results=(self.smros_results,),
+                        quality_evidence=quality,
+                        output_directory=self.output,
+                    )
+
+    def test_evidence_status_names_and_text_bounds_are_strict(self) -> None:
+        base = self._quality_check("coverity", "passed")
+        invalid = [
+            {**base, "status": "PASS"},
+            {**base, "name": ""},
+            {**base, "name": "n" * 129},
+            {**base, "kind": ""},
+            {**base, "kind": "k" * 4097},
+            {**base, "summary": "s" * 4097},
+            {**base, "version": "v" * 4097},
+            {**base, "command": "c" * 4097},
+            {**base, "artifact": "a" * 4097},
+        ]
+        for field in ("name", "kind", "summary", "version", "command", "artifact"):
+            invalid.append({**base, field: "\ud800"})
+        for index, check in enumerate(invalid):
+            with self.subTest(index=index):
+                quality = self._write_quality(
+                    self._quality_payload([check]),
+                    path=self.root / f"invalid-text-{index}.json",
+                )
+                with self.assertRaisesRegex(ValueError, "quality evidence"):
+                    generate_report(
+                        self.stage / "manifest.json",
+                        smros_results=(self.smros_results,),
+                        quality_evidence=quality,
+                        output_directory=self.output,
+                    )
+
+    def test_evidence_check_count_and_names_are_bounded_and_unique(self) -> None:
+        duplicate = [
+            self._quality_check("coverity", "passed"),
+            self._quality_check("coverity", "failed"),
+        ]
+        too_many = [
+            self._quality_check(f"check-{index}", "passed") for index in range(129)
+        ]
+        for label, checks in (("duplicate check name", duplicate), ("count", too_many)):
+            with self.subTest(label=label):
+                quality = self._write_quality(self._quality_payload(checks))
+                with self.assertRaisesRegex(ValueError, label):
+                    generate_report(
+                        self.stage / "manifest.json",
+                        smros_results=(self.smros_results,),
+                        quality_evidence=quality,
+                        output_directory=self.output,
+                    )
+
+    def test_evidence_findings_and_coverage_are_exact_finite_numbers(self) -> None:
+        base = self._quality_check("coverity", "passed")
+        invalid = (
+            ("findings", {**base, "findings": True}),
+            ("findings", {**base, "findings": -1}),
+            ("coverage", {**base, "coverage_percent": True}),
+            ("coverage", {**base, "coverage_percent": float("nan")}),
+            ("coverage", {**base, "coverage_percent": float("inf")}),
+            ("coverage", {**base, "coverage_percent": float("-inf")}),
+            ("coverage", {**base, "coverage_percent": -0.01}),
+            ("coverage", {**base, "coverage_percent": 100.01}),
+        )
+        for index, (label, check) in enumerate(invalid):
+            with self.subTest(index=index, label=label):
+                quality = self._write_quality(
+                    self._quality_payload([check]),
+                    path=self.root / f"invalid-number-{index}.json",
+                )
+                with self.assertRaisesRegex(ValueError, label):
+                    generate_report(
+                        self.stage / "manifest.json",
+                        smros_results=(self.smros_results,),
+                        quality_evidence=quality,
+                        output_directory=self.output,
+                    )
+
+    def test_unavailable_and_not_run_cannot_claim_numeric_results(self) -> None:
+        for index, status in enumerate(("unavailable", "not-run")):
+            for field, value in (("findings", 0), ("coverage_percent", 0)):
+                with self.subTest(status=status, field=field):
+                    check = self._quality_check(status, status, **{field: value})
+                    quality = self._write_quality(
+                        self._quality_payload([check]),
+                        path=self.root / f"invalid-state-{index}-{field}.json",
+                    )
+                    with self.assertRaisesRegex(ValueError, f"{status}.*{field}"):
+                        generate_report(
+                            self.stage / "manifest.json",
+                            smros_results=(self.smros_results,),
+                            quality_evidence=quality,
+                            output_directory=self.output,
+                        )
+
+
 class CliTests(ReportFixture, unittest.TestCase):
     def test_report_parser_registers_all_inputs(self) -> None:
         arguments = cli.create_parser().parse_args(
@@ -2763,6 +3220,8 @@ class CliTests(ReportFixture, unittest.TestCase):
                 "linux.ndjson",
                 "--smros-results",
                 "smros.ndjson",
+                "--quality-evidence",
+                "quality.json",
                 "--out",
                 "report",
             ]
@@ -2770,6 +3229,60 @@ class CliTests(ReportFixture, unittest.TestCase):
         self.assertEqual(arguments.command, "report")
         self.assertEqual(arguments.linux_results, [Path("linux.ndjson")])
         self.assertEqual(arguments.smros_results, [Path("smros.ndjson")])
+        self.assertEqual(arguments.quality_evidence, Path("quality.json"))
+
+    @mock.patch("scripts.posix.cli.generate_report")
+    def test_report_cli_passes_quality_evidence_to_generator(self, generate: mock.Mock) -> None:
+        generate.return_value = {
+            "complete": True,
+            "metrics": {"program_completion": {"fraction": "1/1"}},
+        }
+        quality = self.root / "quality.json"
+
+        result = cli.main(
+            [
+                "report",
+                "--manifest",
+                str(self.stage / "manifest.json"),
+                "--smros-results",
+                str(self.smros_results),
+                "--quality-evidence",
+                str(quality),
+                "--out",
+                str(self.output),
+            ]
+        )
+
+        self.assertEqual(result, 0)
+        generate.assert_called_once_with(
+            self.stage / "manifest.json",
+            linux_results=[],
+            smros_results=[self.smros_results],
+            quality_evidence=quality,
+            output_directory=self.output,
+        )
+
+    def test_report_cli_prefixes_quality_evidence_errors(self) -> None:
+        quality = self._write_quality(self._quality_payload(schema=2))
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result = cli.main(
+                [
+                    "report",
+                    "--manifest",
+                    str(self.stage / "manifest.json"),
+                    "--smros-results",
+                    str(self.smros_results),
+                    "--quality-evidence",
+                    str(quality),
+                    "--out",
+                    str(self.output),
+                ]
+            )
+
+        self.assertEqual(result, 1)
+        self.assertIn("report failed: quality evidence", stderr.getvalue())
+        self.assertFalse(self.output.exists())
 
     def test_report_requires_at_least_one_runtime_input(self) -> None:
         stderr = io.StringIO()

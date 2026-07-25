@@ -16,6 +16,10 @@ SMROS is an experimental bare-metal multi-architecture kernel written in Rust fo
 - Embeds repository-local `host_shared/` files into the kernel at build time and installs them under `/shared` during FxFS initialization.
 - Supports `run <elf>` for dynamic PIE AArch64 ELF files stored in FxFS. The dynamic loader and C library are resolved from `/shared/lib` or `/lib`. RISC-V64 and x86_64 kernel boot support is present, but external user ELF loading for those ABIs is still future work.
 - Maintains standalone Verus harnesses for syscall, kernel-object, low-level, and user-level pure helper logic.
+- Provides a pinned AArch64 Open POSIX Test Suite harness whose current
+  milestone is infrastructure and a failure baseline, not a POSIX
+  certification. See `docs/POSIX_CONFORMANCE.md` for the evidence boundary and
+  architecture order.
 
 ## Toolchain
 
@@ -99,8 +103,22 @@ make test
 ```
 
 This runs scoped formatting checks, shell script syntax checks, host-side unit
-tests for pure shared logic, host-side integration contract tests, and the
-production kernel build.
+tests for pure shared logic, host-side integration contract tests, the offline
+POSIX host-tool tests, and the production kernel build. Network fetches,
+cross-builds, qemu-user, and QEMU POSIX campaigns remain explicit targets.
+
+The complete pinned POSIX workflow starts with:
+
+```bash
+make posix-tool-test
+make posix-fetch posix-audit posix-stage
+make posix-baseline posix-run posix-report
+```
+
+See `docs/POSIX_CONFORMANCE.md` before interpreting the seven generated
+artifacts. Individual passes are evidence for the current implementation; this
+infrastructure and failure baseline is not a POSIX certification or completion
+claim.
 
 Host-side HTML coverage:
 
@@ -518,6 +536,7 @@ SMROS/
 - `docs/KERNEL_OBJECTS_DIRECTORY.md`: current `src/kernel_objects/` layout
 - `docs/MEMORY_SYSCALLS_IMPLEMENTED.md`: status of memory-related syscalls
 - `docs/NETWORKING.md`: VirtIO net driver and user-level network service status
+- `docs/POSIX_CONFORMANCE.md`: pinned suite workflow, metrics, evidence, and limitations
 - `docs/SYSCALL_COMPATIBILITY.md`: syscall entry points and dispatch reality
 - `docs/USER_KERNEL_IMP.md`: current EL0 and user/kernel boundary status
 - `docs/USER_SHELL.md`: shell integration and command behavior

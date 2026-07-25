@@ -477,7 +477,7 @@ fn test_layer_commands_and_docs_are_wired() {
         .contains("linker-layout-test:\n\t@python3 scripts/test-check-aarch64-link-layout.py"));
     assert!(makefile.contains("python3 scripts/check-aarch64-link-layout.py '$(BUILD_DIR)/smros'"));
     assert!(makefile.contains(
-        "test: host-fmt-check script-check launcher-test linker-layout-test ut it build-test"
+        "test: host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test build-test"
     ));
 
     assert!(docs.contains("make ut"));
@@ -487,6 +487,164 @@ fn test_layer_commands_and_docs_are_wired() {
     assert!(smoke.contains("SMROS_ST_REQUIRED_PATTERNS"));
     assert!(smoke.contains("[INFO] Fast boot complete. Starting shell"));
     assert!(smoke.contains("smros:/>"));
+}
+
+#[test]
+fn posix_make_targets_are_explicit_and_keep_the_default_suite_offline() {
+    let makefile = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Makefile"));
+    let targets = [
+        "posix-tool-test",
+        "posix-fetch",
+        "posix-audit",
+        "posix-build",
+        "posix-stage",
+        "posix-baseline",
+        "posix-run",
+        "posix-report",
+    ];
+
+    let phony = makefile
+        .lines()
+        .find(|line| line.starts_with(".PHONY:"))
+        .expect("Makefile .PHONY declaration");
+    for target in targets {
+        assert!(phony.split_whitespace().any(|word| word == target));
+        assert!(
+            makefile.lines().any(|line| {
+                line.strip_suffix(':') == Some(target)
+                    || line
+                        .strip_prefix(&format!("{target}: "))
+                        .is_some_and(|dependencies| !dependencies.is_empty())
+            }),
+            "missing recipe target {target}"
+        );
+    }
+
+    assert!(makefile.contains("POSIX_QEMU_MEMORY ?= 1024M"));
+    assert!(makefile.contains("AARCH64_SYSROOT ?= /usr/aarch64-linux-gnu"));
+    assert!(makefile.contains(
+        "posix-tool-test:\n\t@PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/posix/tests -v"
+    ));
+    assert!(makefile
+        .contains("posix-fetch:\n\t@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli fetch"));
+    assert!(makefile.contains("posix-audit: posix-fetch"));
+    assert!(makefile.contains("posix-build: posix-audit"));
+    assert!(makefile.contains("posix-stage: posix-build"));
+    assert!(makefile.contains("posix-baseline: posix-stage"));
+    assert!(makefile.contains("--sysroot '$(AARCH64_SYSROOT)'"));
+    assert!(makefile.contains("posix-run: posix-stage $(FXFS_DISK)"));
+    assert!(makefile.contains("--qemu-memory '$(POSIX_QEMU_MEMORY)'"));
+    assert!(makefile.contains("POSIX_QUALITY_EVIDENCE"));
+    assert!(makefile.contains("--quality-evidence"));
+
+    let test_dependencies = makefile
+        .lines()
+        .find_map(|line| line.strip_prefix("test: "))
+        .expect("test target dependencies");
+    assert!(test_dependencies
+        .split_whitespace()
+        .any(|word| word == "posix-tool-test"));
+    for excluded in targets
+        .into_iter()
+        .filter(|target| *target != "posix-tool-test")
+    {
+        assert!(
+            !test_dependencies
+                .split_whitespace()
+                .any(|word| word == excluded),
+            "default test target must not depend on {excluded}"
+        );
+    }
+}
+
+#[test]
+fn posix_conformance_workflow_and_limitations_are_documented() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let guide = std::fs::read_to_string(repository.join("docs/POSIX_CONFORMANCE.md"))
+        .expect("read POSIX conformance guide");
+    let testing =
+        std::fs::read_to_string(repository.join("docs/TESTING.md")).expect("read testing guide");
+    let shell =
+        std::fs::read_to_string(repository.join("docs/USER_SHELL.md")).expect("read shell guide");
+    let readme = std::fs::read_to_string(repository.join("README.md")).expect("read README");
+
+    for text in [&guide, &testing, &shell, &readme] {
+        assert!(
+            text.contains("docs/POSIX_CONFORMANCE.md") || text.contains("POSIX_CONFORMANCE.md")
+        );
+        assert!(text.contains("infrastructure") && text.contains("failure baseline"));
+        assert!(
+            text.contains("not POSIX certification") || text.contains("not a POSIX certification")
+        );
+    }
+
+    for required in [
+        "IEEE 1003.1-2001 System Interfaces",
+        "AArch64, then x86_64, then RISC-V64",
+        "Every optional group is required",
+        "256 MiB",
+        "identity-mapped execution",
+        "modeled process state",
+        "incomplete VFS, signals, and threads",
+        "Open POSIX Test Suite evidence is not IEEE or Open Group certification",
+        "Direct Rust and model tests never count as POSIX passes",
+        "quality evidence never changes POSIX denominators",
+    ] {
+        assert!(
+            guide.contains(required),
+            "missing POSIX guide statement: {required}"
+        );
+    }
+    for command in [
+        "make posix-tool-test",
+        "make posix-fetch",
+        "make posix-audit",
+        "make posix-build",
+        "make posix-stage",
+        "make posix-baseline",
+        "make posix-run",
+        "make posix-report",
+    ] {
+        assert!(
+            guide.contains(command),
+            "missing documented command {command}"
+        );
+    }
+    for artifact in [
+        "events.ndjson",
+        "summary.json",
+        "junit.xml",
+        "groups.csv",
+        "apis.csv",
+        "report.md",
+        "index.html",
+    ] {
+        assert!(
+            guide.contains(artifact),
+            "missing report artifact {artifact}"
+        );
+    }
+    for concept in [
+        "audited upstream stub",
+        "reviewed file allowlist",
+        "build coverage",
+        "execution coverage",
+        "pass coverage",
+        "program completion",
+        "resource evidence",
+        "raw input",
+        "provenance",
+        "watchdog",
+        "resume",
+        "PTS_UNRESOLVED",
+        "PTS_UNSUPPORTED",
+        "PTS_UNTESTED",
+    ] {
+        assert!(
+            guide.contains(concept),
+            "missing POSIX guide concept: {concept}"
+        );
+    }
 }
 
 #[test]

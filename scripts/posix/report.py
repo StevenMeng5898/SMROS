@@ -12,6 +12,7 @@ import hashlib
 import html
 import io
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import stat
@@ -67,8 +68,24 @@ _MAX_RUNTIME_ROWS = 32_768
 _MAX_RUNTIME_INPUTS = 4 * MAX_TESTS
 _MAX_RUNTIME_INPUT_BYTES = 4 * _MAX_RUNTIME_RESULTS_BYTES
 _MAX_FAILURE_OUTPUT_BYTES = 16_384
+MAX_QUALITY_EVIDENCE_BYTES = 1024 * 1024
+MAX_QUALITY_EVIDENCE_CHECKS = 128
+MAX_QUALITY_EVIDENCE_NAME_BYTES = 128
+MAX_QUALITY_EVIDENCE_TEXT_BYTES = 4_096
 _DIGEST_LENGTH = 64
 _COMMIT_LENGTH = 40
+_QUALITY_STATUSES = ("failed", "not-run", "passed", "unavailable")
+_QUALITY_CHECK_FIELDS = {
+    "artifact",
+    "command",
+    "coverage_percent",
+    "findings",
+    "kind",
+    "name",
+    "status",
+    "summary",
+    "version",
+}
 _COMPLETE_DISPOSITIONS = frozenset(
     {"complete", "compile-failed", "link-failed", "not-built-shell-test"}
 )
@@ -257,6 +274,134 @@ def _parse_canonical_json(data: bytes, label: str) -> object:
     if text != _canonical_json(value) + "\n":
         raise ValueError(f"{label} is not canonical JSON")
     return value
+
+
+def _quality_text(
+    value: object,
+    label: str,
+    *,
+    maximum: int = MAX_QUALITY_EVIDENCE_TEXT_BYTES,
+    nonempty: bool = False,
+) -> str:
+    if (
+        not _is_strict_utf8_text(value, nonempty=nonempty)
+        or len(str(value).encode("utf-8")) > maximum
+    ):
+        raise ValueError(f"quality evidence {label} is invalid")
+    return str(value)
+
+
+def _quality_optional_text(value: object, label: str) -> str | None:
+    if value is None:
+        return None
+    return _quality_text(value, label)
+
+
+def _load_quality_evidence(
+    path: Path, metadata: ManifestMetadata
+) -> dict[str, object]:
+    value = _parse_canonical_json(
+        _read_regular(path, "quality evidence", MAX_QUALITY_EVIDENCE_BYTES),
+        "quality evidence",
+    )
+    if not isinstance(value, dict) or set(value) != {
+        "architecture",
+        "checks",
+        "schema",
+        "smros_commit",
+    }:
+        raise ValueError("quality evidence schema is invalid")
+    if type(value["schema"]) is not int or value["schema"] != 1:
+        raise ValueError("quality evidence schema is invalid")
+    architecture = _quality_text(value["architecture"], "architecture", nonempty=True)
+    if architecture != metadata.architecture:
+        raise ValueError("quality evidence architecture mismatch")
+    smros_commit = value["smros_commit"]
+    if not _is_commit(smros_commit):
+        raise ValueError("quality evidence smros_commit is invalid")
+    if smros_commit != metadata.smros_commit:
+        raise ValueError("quality evidence smros_commit mismatch")
+    checks_value = value["checks"]
+    if not isinstance(checks_value, list):
+        raise ValueError("quality evidence checks are invalid")
+    if not checks_value:
+        raise ValueError("quality evidence checks must not be empty")
+    if len(checks_value) > MAX_QUALITY_EVIDENCE_CHECKS:
+        raise ValueError("quality evidence check count exceeds its limit")
+
+    checks: list[dict[str, object]] = []
+    seen_names: set[str] = set()
+    counts = Counter({status: 0 for status in _QUALITY_STATUSES})
+    for index, entry in enumerate(checks_value):
+        label = f"check {index}"
+        if not isinstance(entry, dict):
+            raise ValueError(f"quality evidence {label} is invalid")
+        if set(entry) != _QUALITY_CHECK_FIELDS:
+            raise ValueError(f"quality evidence {label} field set is invalid")
+        name = _quality_text(
+            entry["name"],
+            f"{label} name",
+            maximum=MAX_QUALITY_EVIDENCE_NAME_BYTES,
+            nonempty=True,
+        )
+        if name in seen_names:
+            raise ValueError(f"quality evidence duplicate check name: {name}")
+        seen_names.add(name)
+        kind = _quality_text(entry["kind"], f"{label} kind", nonempty=True)
+        status = entry["status"]
+        if type(status) is not str or status not in _QUALITY_STATUSES:
+            raise ValueError(f"quality evidence {label} status is invalid")
+        summary = _quality_text(entry["summary"], f"{label} summary")
+        version = _quality_optional_text(entry["version"], f"{label} version")
+        command = _quality_optional_text(entry["command"], f"{label} command")
+        artifact = _quality_optional_text(entry["artifact"], f"{label} artifact")
+        findings = entry["findings"]
+        if findings is not None and (type(findings) is not int or findings < 0):
+            raise ValueError(f"quality evidence {label} findings are invalid")
+        coverage = entry["coverage_percent"]
+        if coverage is not None and (
+            type(coverage) not in {int, float}
+            or (type(coverage) is float and not math.isfinite(coverage))
+            or coverage < 0
+            or coverage > 100
+        ):
+            raise ValueError(f"quality evidence {label} coverage is invalid")
+        if status in {"unavailable", "not-run"}:
+            for field, result in (("findings", findings), ("coverage_percent", coverage)):
+                if result is not None:
+                    raise ValueError(
+                        f"quality evidence {status} check {field} must be null"
+                    )
+        checks.append(
+            {
+                "artifact": artifact,
+                "command": command,
+                "coverage_percent": coverage,
+                "findings": findings,
+                "kind": kind,
+                "name": name,
+                "status": status,
+                "summary": summary,
+                "version": version,
+            }
+        )
+        counts[status] += 1
+
+    overall = (
+        "failed"
+        if counts["failed"]
+        else "incomplete"
+        if counts["unavailable"] or counts["not-run"]
+        else "passed"
+    )
+    return {
+        "architecture": architecture,
+        "checks": checks,
+        "overall_status": overall,
+        "schema": 1,
+        "smros_commit": smros_commit,
+        "status_counts": {status: counts[status] for status in _QUALITY_STATUSES},
+    }
 
 
 def _validate_runtime_inventory(value: object) -> tuple[tuple[str, str], ...]:
@@ -1423,6 +1568,42 @@ def _junit_bytes(summary: Mapping[str, object]) -> bytes:
             "tests": str(len(tests)),
         },
     )
+    quality = summary["quality_evidence"]
+    if quality is not None:
+        assert isinstance(quality, dict)
+        properties = ET.SubElement(suite, "properties")
+
+        def add_property(name: str, value: object) -> None:
+            ET.SubElement(
+                properties,
+                "property",
+                {"name": _xml_text(name), "value": _xml_text(value)},
+            )
+
+        add_property("quality.architecture", quality["architecture"])
+        add_property("quality.smros_commit", quality["smros_commit"])
+        add_property("quality.overall_status", quality["overall_status"])
+        status_counts = quality["status_counts"]
+        assert isinstance(status_counts, dict)
+        for status in _QUALITY_STATUSES:
+            add_property(f"quality.status_count.{status}", status_counts[status])
+        quality_checks = quality["checks"]
+        assert isinstance(quality_checks, list)
+        for index, check in enumerate(quality_checks):
+            assert isinstance(check, dict)
+            for field in (
+                "name",
+                "kind",
+                "status",
+                "summary",
+                "version",
+                "command",
+                "findings",
+                "coverage_percent",
+                "artifact",
+            ):
+                if check[field] is not None:
+                    add_property(f"quality.check.{index}.{field}", check[field])
     for row in tests:
         assert isinstance(row, dict)
         durations = row["duration_ms"]
@@ -1560,6 +1741,45 @@ def _markdown_bytes(summary: Mapping[str, object]) -> bytes:
             f"| {_markdown_escape(name.replace('_', ' ').title())} | "
             f"{_markdown_escape(metric['fraction'])} |"
         )
+    quality = summary["quality_evidence"]
+    if quality is not None:
+        assert isinstance(quality, dict)
+        lines.extend(
+            (
+                "",
+                "## Quality Evidence",
+                "",
+                f"Overall status: **{_markdown_escape(quality['overall_status'])}**",
+                "",
+                f"Architecture: `{_markdown_escape(quality['architecture'])}`  ",
+                f"SMROS commit: `{_markdown_escape(quality['smros_commit'])}`",
+                "",
+                "| Name | Kind | Status | Summary | Version | Command | Findings | Coverage percent | Artifact |",
+                "| --- | --- | --- | --- | --- | --- | ---: | ---: | --- |",
+            )
+        )
+        quality_checks = quality["checks"]
+        assert isinstance(quality_checks, list)
+        for check in quality_checks:
+            assert isinstance(check, dict)
+            lines.append(
+                "| "
+                + " | ".join(
+                    _markdown_escape("" if check[field] is None else check[field])
+                    for field in (
+                        "name",
+                        "kind",
+                        "status",
+                        "summary",
+                        "version",
+                        "command",
+                        "findings",
+                        "coverage_percent",
+                        "artifact",
+                    )
+                )
+                + " |"
+            )
     lines.extend(
         (
             "",
@@ -1637,6 +1857,38 @@ def _html_bytes(summary: Mapping[str, object]) -> bytes:
         block = ET.SubElement(metrics_node, "div", {"class": "metric"})
         _append_text(block, "strong", name.replace("_", " ").title())
         _append_text(block, "div", metric["fraction"])
+    quality = summary["quality_evidence"]
+    if quality is not None:
+        assert isinstance(quality, dict)
+        _append_text(body, "h2", "Quality Evidence")
+        _append_text(body, "p", f"Overall status: {quality['overall_status']}")
+        _append_text(body, "p", f"Architecture: {quality['architecture']}")
+        _append_text(body, "p", f"SMROS commit: {quality['smros_commit']}")
+        quality_table = ET.SubElement(body, "table", {"id": "quality-evidence"})
+        quality_header = ET.SubElement(
+            ET.SubElement(quality_table, "thead"), "tr"
+        )
+        quality_fields = (
+            "name",
+            "kind",
+            "status",
+            "summary",
+            "version",
+            "command",
+            "findings",
+            "coverage_percent",
+            "artifact",
+        )
+        for field in quality_fields:
+            _append_text(quality_header, "th", field.replace("_", " ").title())
+        quality_body = ET.SubElement(quality_table, "tbody")
+        quality_checks = quality["checks"]
+        assert isinstance(quality_checks, list)
+        for check in quality_checks:
+            assert isinstance(check, dict)
+            row = ET.SubElement(quality_body, "tr")
+            for field in quality_fields:
+                _append_text(row, "td", "" if check[field] is None else check[field])
     label = ET.SubElement(body, "label", {"for": "status-filter"})
     label.text = "Status"
     select = ET.SubElement(
@@ -2172,6 +2424,7 @@ def generate_report(
     *,
     linux_results: Sequence[Path] | Path | None = None,
     smros_results: Sequence[Path] | Path | None = None,
+    quality_evidence: Path | None = None,
     output_directory: Path,
 ) -> dict[str, object]:
     """Validate all inputs, aggregate them, and publish one report generation."""
@@ -2179,6 +2432,11 @@ def generate_report(
     if not runtime_paths:
         raise ValueError("at least one runtime-result input is required")
     manifest = _load_manifest(Path(manifest_path))
+    quality = (
+        None
+        if quality_evidence is None
+        else _load_quality_evidence(Path(quality_evidence), manifest.metadata)
+    )
     inputs: dict[str, list[_RuntimeInput]] = {"linux": [], "smros": []}
     run_identities: set[tuple[object, object]] = set()
     total_bytes = 0
@@ -2224,6 +2482,7 @@ def generate_report(
     linux_inputs = tuple(inputs["linux"])
     smros_inputs = tuple(inputs["smros"])
     summary = _aggregate(manifest, linux_inputs, smros_inputs)
+    summary["quality_evidence"] = quality
     outputs = {
         "events.ndjson": _events_bytes((*linux_inputs, *smros_inputs)),
         "summary.json": _summary_bytes(summary),

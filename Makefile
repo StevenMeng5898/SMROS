@@ -40,8 +40,12 @@ SMOKE_QEMU_SMP ?= 4
 SMOKE_QEMU_MEMORY ?= 512M
 SMROS_ST_LOG ?= target/smros-smoke-qemu.log
 ST_COVERAGE_DIR ?= target/coverage/st
+POSIX_QEMU_MEMORY ?= 1024M
+AARCH64_SYSROOT ?= /usr/aarch64-linux-gnu
+POSIX_QUALITY_EVIDENCE ?=
+POSIX_QUALITY_EVIDENCE_ARG = $(if $(strip $(POSIX_QUALITY_EVIDENCE)),--quality-evidence '$(POSIX_QUALITY_EVIDENCE)',)
 
-.PHONY: all build build-test host-fmt-check script-check launcher-test linker-layout-test ut it coverage-ut coverage-it coverage-host coverage-st coverage st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
+.PHONY: all build build-test host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report coverage-ut coverage-it coverage-host coverage-st coverage st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
 
 all: build
 
@@ -88,6 +92,39 @@ ut:
 it:
 	@./scripts/run-host-unit-tests.sh --test integration_contracts
 
+# Offline unit tests for the POSIX host tooling
+posix-tool-test:
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/posix/tests -v
+
+# Fetch and validate the pinned Open POSIX Test Suite checkout
+posix-fetch:
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli fetch
+
+# Audit the pinned source inventory and reviewed exclusions
+posix-audit: posix-fetch
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli audit --check
+
+# Cross-build the reviewed AArch64 test inventory and publish its stage
+posix-build: posix-audit
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli build --arch aarch64 --stage host_shared/posixtest
+
+# Verify the published guest stage against current pinned inputs
+posix-stage: posix-build
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli build --arch aarch64 --stage host_shared/posixtest --verify-only
+
+# Run the staged AArch64 Linux reference under qemu-user
+posix-baseline: posix-stage
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli baseline --sysroot '$(AARCH64_SYSROOT)'
+
+# Run the staged suite in SMROS under QEMU system emulation
+posix-run: posix-stage $(FXFS_DISK)
+	@$(MAKE) build ARCH=aarch64-unknown-none
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli run-smros --qemu-memory '$(POSIX_QEMU_MEMORY)'
+
+# Publish all seven report artifacts; quality evidence is optional and separate
+posix-report:
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli report --manifest host_shared/posixtest/manifest.json --smros-results target/posix/aarch64/smros-run/results.ndjson --linux-results target/posix/aarch64/linux-reference/results.ndjson $(POSIX_QUALITY_EVIDENCE_ARG) --out target/posix/aarch64/report
+
 # cargo-tarpaulin HTML coverage for host unit tests
 coverage-ut:
 	@./scripts/run-host-coverage.sh ut
@@ -116,7 +153,7 @@ st: $(FXFS_DISK)
 	@ARCH='$(TARGET)' QEMU_SYSTEM='$(QEMU_SYSTEM)' KERNEL_IMAGE='$(KERNEL)' QEMU_MACHINE='$(QEMU_MACHINE)' QEMU_CPU='$(QEMU_CPU)' QEMU_SMP='$(SMOKE_QEMU_SMP)' QEMU_MEMORY='$(SMOKE_QEMU_MEMORY)' QEMU_BLOCK_DEVICE='$(QEMU_BLOCK_DEVICE)' QEMU_NET_DEVICE='$(QEMU_NET_DEVICE)' SMROS_ST_LOG='$(SMROS_ST_LOG)' ./scripts/smoke-qemu.sh
 
 # Fast local confidence suite; intentionally does not boot QEMU
-test: host-fmt-check script-check launcher-test linker-layout-test ut it build-test
+test: host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test build-test
 
 $(FXFS_DISK):
 	@echo "Creating persistent FxFS disk image: $(FXFS_DISK)"
@@ -243,13 +280,21 @@ help:
 	@echo "  script-check - Check shell script syntax"
 	@echo "  ut        - Run host-side unit tests for pure shared logic"
 	@echo "  it        - Run host-side integration contract tests"
+	@echo "  posix-tool-test - Run offline POSIX host-tool unit tests"
+	@echo "  posix-fetch - Fetch and validate the pinned POSIX source (network)"
+	@echo "  posix-audit - Audit pinned POSIX inventory and review ledgers"
+	@echo "  posix-build - Cross-build and publish the AArch64 POSIX stage"
+	@echo "  posix-stage - Build and verify the generated AArch64 POSIX stage"
+	@echo "  posix-baseline - Run the AArch64 Linux reference under qemu-user"
+	@echo "  posix-run - Run the staged POSIX suite under QEMU/SMROS"
+	@echo "  posix-report - Render seven POSIX report artifacts (optional POSIX_QUALITY_EVIDENCE=path)"
 	@echo "  coverage-ut - Generate cargo-tarpaulin HTML for unit tests"
 	@echo "  coverage-it - Generate cargo-tarpaulin HTML for integration tests"
 	@echo "  coverage-host - Generate cargo-tarpaulin HTML for all host tests"
 	@echo "  coverage-st - Generate QEMU smoke HTML/log report"
 	@echo "  coverage  - Generate host HTML coverage and run QEMU smoke"
 	@echo "  st        - Build and boot QEMU until required milestones and the smros:/> prompt appear"
-	@echo "  test      - Run fast local tests (format + scripts + ut + it + build-test)"
+	@echo "  test      - Run fast local tests (format + scripts + ut + it + offline POSIX tools + build-test)"
 	@echo "  verify    - Run test + st + all Verus proof harnesses"
 	@echo "  run       - Build and run with QEMU"
 	@echo "  debug     - Run with QEMU in debug mode"

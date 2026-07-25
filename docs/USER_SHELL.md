@@ -14,6 +14,11 @@ Important reality:
 - the live shell currently runs as an EL1 scheduler thread
 - it is not yet an isolated EL0 process
 
+The `posixtest` command is the guest endpoint for the staged Open POSIX Test
+Suite harness. The current milestone is infrastructure and a failure baseline,
+not a POSIX certification. Host preparation, exact commands, evidence rules,
+and limitations are in `docs/POSIX_CONFORMANCE.md`.
+
 ## Shell Startup Path
 
 The current startup path is:
@@ -71,6 +76,7 @@ The shell currently registers these commands:
 - `vm`
 - `kill`
 - `testsc`
+- `posixtest`
 - `fuzzsc`
 - `echo`
 - `clear`
@@ -101,6 +107,27 @@ The shell:
 This is another reason it should be considered a kernel shell in the current tree.
 
 ## Command Behavior Notes
+
+### `posixtest`
+
+The current shell forms are:
+
+```text
+posixtest all
+posixtest group <group>
+posixtest api <api>
+posixtest test <test-id>
+posixtest status
+```
+
+The command reads the checksummed manifest staged at
+`/shared/posixtest/manifest.tsv`, permits only one serialized run, launches
+reviewed staged AArch64 binaries, and emits versioned serial events for the host
+controller. `status` reports the active/completed counts without starting a
+campaign. A missing/invalid manifest, empty selection, launch error, or
+infrastructure error is reported explicitly. Direct `testsc`, Rust, and model
+tests never count as POSIX passes; see `docs/POSIX_CONFORMANCE.md` for the
+denominators and current execution limitations.
 
 ### `testsc`
 
