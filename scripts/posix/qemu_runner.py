@@ -66,6 +66,7 @@ _ATTEMPT_FIXED_BUDGET = 8 * 1024
 _JSON_ESCAPE_EXPANSION = 6
 _RESULT_QUARANTINE_NAME = ".smros-posix-qemu-quarantine"
 _RESULT_QUARANTINE_SLOT = "cleanup"
+_PROGRESS_RETIREMENT_NAME = ".progress.json.retiring"
 
 
 class ControllerError(RuntimeError):
@@ -1023,19 +1024,91 @@ class QemuController:
         result_descriptor: int | None = None,
         result_fingerprint: tuple[int, ...] | None = None,
     ) -> None:
-        if result_descriptor is not None and (
-            result_fingerprint is None
-            or _stat_fingerprint(os.fstat(result_descriptor))
-            != result_fingerprint
-            or not _entry_matches(
+        if result_descriptor is not None:
+            if expected_descriptor is None or expected_fingerprint is None:
+                raise ControllerError(
+                    "resume QEMU progress retirement lacks a validated checkpoint"
+                )
+            self._validate_retirement_result(
                 output_descriptor,
-                self._result_path.name,
                 result_descriptor,
+                result_fingerprint,
+                "before progress retirement",
             )
-        ):
-            raise ControllerError(
-                "resume QEMU results changed before progress retirement"
+            self._stage_progress_retirement(
+                output_descriptor,
+                expected_descriptor,
+                expected_fingerprint,
             )
+            try:
+                try:
+                    os.stat(
+                        self._progress_path.name,
+                        dir_fd=output_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise ControllerError(
+                        "resume QEMU progress appeared during retirement"
+                    )
+                self._validate_retirement_result(
+                    output_descriptor,
+                    result_descriptor,
+                    result_fingerprint,
+                    "after progress staging",
+                )
+                self._validate_retirement_result(
+                    output_descriptor,
+                    result_descriptor,
+                    result_fingerprint,
+                    "before progress retirement commit",
+                )
+            except BaseException as operation_error:
+                try:
+                    self._restore_staged_progress(
+                        output_descriptor,
+                        expected_descriptor,
+                    )
+                except BaseException as restore_error:
+                    raise restore_error from operation_error
+                raise
+            try:
+                _remove_owned_result_entry(
+                    output_descriptor,
+                    _PROGRESS_RETIREMENT_NAME,
+                    expected_descriptor,
+                )
+            except BaseException as operation_error:
+                try:
+                    staged_entry_remains = _entry_matches(
+                        output_descriptor,
+                        _PROGRESS_RETIREMENT_NAME,
+                        expected_descriptor,
+                    )
+                except FileNotFoundError:
+                    staged_entry_remains = False
+                except OSError as inspection_error:
+                    raise ControllerError(
+                        "resume QEMU progress retirement failure could not be inspected"
+                    ) from inspection_error
+                if staged_entry_remains:
+                    try:
+                        self._restore_staged_progress(
+                            output_descriptor,
+                            expected_descriptor,
+                        )
+                    except BaseException as restore_error:
+                        raise restore_error from operation_error
+                raise
+            self._validate_retirement_result(
+                output_descriptor,
+                result_descriptor,
+                result_fingerprint,
+                "after progress retirement commit",
+            )
+            return
         if expected_descriptor is not None:
             if (
                 expected_fingerprint is None
@@ -1063,6 +1136,170 @@ class QemuController:
             raise ControllerError(
                 "QEMU progress removal could not be synchronized"
             ) from error
+
+    def _validate_retirement_result(
+        self,
+        output_descriptor: int,
+        result_descriptor: int,
+        result_fingerprint: tuple[int, ...] | None,
+        phase: str,
+    ) -> None:
+        try:
+            if (
+                result_fingerprint is None
+                or _stat_fingerprint(os.fstat(result_descriptor))
+                != result_fingerprint
+                or not _entry_matches(
+                    output_descriptor,
+                    self._result_path.name,
+                    result_descriptor,
+                )
+            ):
+                raise ControllerError(f"resume QEMU results changed {phase}")
+        except ControllerError:
+            raise
+        except OSError as error:
+            raise ControllerError(
+                f"resume QEMU results could not be revalidated {phase}"
+            ) from error
+
+    def _stage_progress_retirement(
+        self,
+        output_descriptor: int,
+        expected_descriptor: int,
+        expected_fingerprint: tuple[int, ...],
+    ) -> None:
+        try:
+            if (
+                _stat_fingerprint(os.fstat(expected_descriptor))
+                != expected_fingerprint
+                or not _entry_matches(
+                    output_descriptor,
+                    self._progress_path.name,
+                    expected_descriptor,
+                )
+            ):
+                raise ControllerError(
+                    "resume QEMU progress changed before retirement staging"
+                )
+            try:
+                _rename_noreplace_between(
+                    output_descriptor,
+                    self._progress_path.name,
+                    output_descriptor,
+                    _PROGRESS_RETIREMENT_NAME,
+                )
+            except FileExistsError as error:
+                raise ControllerError(
+                    "resume QEMU progress retirement slot is already occupied"
+                ) from error
+            os.fsync(output_descriptor)
+            if not _entry_matches(
+                output_descriptor,
+                _PROGRESS_RETIREMENT_NAME,
+                expected_descriptor,
+            ):
+                raise ControllerError(
+                    "resume QEMU progress changed during retirement staging"
+                )
+        except ControllerError:
+            raise
+        except OSError as error:
+            raise ControllerError(
+                "resume QEMU progress could not be staged for retirement"
+            ) from error
+
+    def _restore_staged_progress(
+        self,
+        output_descriptor: int,
+        expected_descriptor: int,
+    ) -> None:
+        try:
+            try:
+                if _entry_matches(
+                    output_descriptor,
+                    self._progress_path.name,
+                    expected_descriptor,
+                ):
+                    return
+            except FileNotFoundError:
+                pass
+            if not _entry_matches(
+                output_descriptor,
+                _PROGRESS_RETIREMENT_NAME,
+                expected_descriptor,
+            ):
+                raise ControllerError(
+                    "resume QEMU staged progress changed before restoration"
+                )
+            try:
+                _rename_noreplace_between(
+                    output_descriptor,
+                    _PROGRESS_RETIREMENT_NAME,
+                    output_descriptor,
+                    self._progress_path.name,
+                )
+            except FileExistsError as error:
+                raise ControllerError(
+                    "resume QEMU progress restoration is blocked; "
+                    f"checkpoint retained at {_PROGRESS_RETIREMENT_NAME}"
+                ) from error
+            os.fsync(output_descriptor)
+            if not _entry_matches(
+                output_descriptor,
+                self._progress_path.name,
+                expected_descriptor,
+            ):
+                raise ControllerError(
+                    "resume QEMU progress restoration is inconsistent"
+                )
+        except ControllerError:
+            raise
+        except OSError as error:
+            raise ControllerError(
+                "resume QEMU staged progress could not be restored safely"
+            ) from error
+
+    def _recover_interrupted_progress_retirement(
+        self,
+        output_descriptor: int,
+    ) -> None:
+        descriptor: int | None = None
+        try:
+            try:
+                descriptor = os.open(
+                    _PROGRESS_RETIREMENT_NAME,
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NONBLOCK", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=output_descriptor,
+                )
+            except FileNotFoundError:
+                return
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or not _entry_matches(
+                    output_descriptor,
+                    _PROGRESS_RETIREMENT_NAME,
+                    descriptor,
+                )
+            ):
+                raise ControllerError(
+                    "resume QEMU interrupted progress retirement is unsafe"
+                )
+            self._restore_staged_progress(output_descriptor, descriptor)
+        except ControllerError:
+            raise
+        except OSError as error:
+            raise ControllerError(
+                "resume QEMU interrupted progress retirement could not be recovered"
+            ) from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
     def _invalidate_results(
         self,
@@ -2412,6 +2649,8 @@ class QemuController:
                 self._restart_count = 0
                 self._boot_count = 0
                 marker_descriptor = self._invalidate_results(output_descriptor)
+            else:
+                self._recover_interrupted_progress_retirement(output_descriptor)
             with self._open_raw_log(output_descriptor, resume=resume) as raw:
                 recovered_result = False
                 if resume:
