@@ -3793,6 +3793,112 @@ class QemuControllerTests(unittest.TestCase):
         self.assertIn(self.one.test_id.encode("ascii"), raw)
         self.assertNotIn(self.two.test_id.encode("ascii"), raw)
 
+    def test_post_acquisition_lock_replacement_cannot_admit_second_campaign(
+        self,
+    ) -> None:
+        output = self.root / "post-acquisition-lock-replacement"
+        entered = threading.Event()
+        release = threading.Event()
+        first_clock = FakeClock()
+        first_transport = PausingTransport(
+            first_clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+            entered,
+            release,
+            pause_before_read=1,
+        )
+        first = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory([first_transport]),
+            monotonic=first_clock.monotonic,
+            run_id_factory=lambda: "controller-replaced-active-lock-first",
+        )
+        first_results: list[ControllerResult] = []
+        first_errors: list[BaseException] = []
+
+        def run_first() -> None:
+            try:
+                first_results.append(first.run())
+            except BaseException as error:
+                first_errors.append(error)
+
+        runner = threading.Thread(target=run_first, daemon=True)
+        runner.start()
+        self.assertTrue(entered.wait(2.0))
+        paths = (
+            output / "results.ndjson",
+            output / "progress.json",
+            output / "qemu-serial.log",
+        )
+        before = tuple(path.read_bytes() for path in paths)
+        lock = output / qemu_runner_module._CAMPAIGN_LOCK_NAME
+        campaign_descriptors: dict[int, Path] = {}
+        for entry in Path("/proc/self/fd").iterdir():
+            try:
+                target = Path(os.readlink(entry))
+            except (FileNotFoundError, OSError):
+                continue
+            if target in {output, lock}:
+                campaign_descriptors[int(entry.name)] = target
+        self.assertEqual(set(campaign_descriptors.values()), {output, lock})
+        self.assertTrue(
+            all(
+                not os.get_inheritable(descriptor)
+                for descriptor in campaign_descriptors
+            )
+        )
+        replacement = self.root / "replacement-active-campaign-lock"
+        replacement.write_bytes(b"")
+        replacement.chmod(0o600)
+        os.replace(replacement, lock)
+        second_clock = FakeClock()
+        second_transport = FakeTransport(
+            second_clock,
+            [PROMPT, _start_events(self.two), _end_events(self.two), PROMPT],
+        )
+        second_factory = TransportFactory([second_transport])
+        second = QemuController(
+            identity=_identity((self.two,)),
+            selected=(self.two,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=second_factory,
+            monotonic=second_clock.monotonic,
+            run_id_factory=lambda: "controller-replaced-active-lock-second",
+        )
+        second_error: BaseException | None = None
+        try:
+            second.run()
+        except BaseException as error:
+            second_error = error
+        after_second = tuple(
+            path.read_bytes() if path.exists() else None for path in paths
+        )
+        release.set()
+        runner.join(5.0)
+
+        self.assertFalse(runner.is_alive())
+        self.assertIs(type(second_error), ControllerError)
+        self.assertRegex(str(second_error), "campaign.*active")
+        self.assertEqual(second_factory.argv, [])
+        self.assertEqual(second_transport.writes, [])
+        self.assertEqual(after_second, before)
+        self.assertEqual(first_errors, [])
+        self.assertEqual(len(first_results), 1)
+        terminal = json.loads(paths[0].read_bytes().splitlines()[-1])
+        self.assertEqual(terminal["selected_count"], 1)
+        self.assertEqual(first_results[0].attempts[0].test_id, self.one.test_id)
+        raw = paths[2].read_bytes()
+        self.assertIn(self.one.test_id.encode("ascii"), raw)
+        self.assertNotIn(self.two.test_id.encode("ascii"), raw)
+
     def test_campaign_lock_is_reused_across_fresh_and_resume_without_fd_leaks(
         self,
     ) -> None:
@@ -3802,18 +3908,18 @@ class QemuControllerTests(unittest.TestCase):
         )
         lock = output / qemu_runner_module._CAMPAIGN_LOCK_NAME
 
-        def open_lock_descriptors() -> tuple[int, ...]:
+        def open_campaign_descriptors() -> tuple[int, ...]:
             descriptors: list[int] = []
             for entry in Path("/proc/self/fd").iterdir():
                 try:
                     target = Path(os.readlink(entry))
                 except (FileNotFoundError, OSError):
                     continue
-                if target == lock:
+                if target in {output, lock}:
                     descriptors.append(int(entry.name))
             return tuple(sorted(descriptors))
 
-        self.assertEqual(open_lock_descriptors(), ())
+        self.assertEqual(open_campaign_descriptors(), ())
         resumed_transport = FakeTransport(
             clock,
             [PROMPT, _start_events(self.two), _end_events(self.two), PROMPT],
@@ -3835,7 +3941,7 @@ class QemuControllerTests(unittest.TestCase):
             [self.one.test_id, self.two.test_id],
         )
         self.assertTrue((output / "qemu-serial.log").read_bytes().startswith(initial_raw))
-        self.assertEqual(open_lock_descriptors(), ())
+        self.assertEqual(open_campaign_descriptors(), ())
         for index in range(3):
             fresh_clock = FakeClock()
             fresh_transport = FakeTransport(
@@ -3856,7 +3962,7 @@ class QemuControllerTests(unittest.TestCase):
                 ),
             ).run()
             self.assertTrue(fresh.complete)
-            self.assertEqual(open_lock_descriptors(), ())
+            self.assertEqual(open_campaign_descriptors(), ())
         info = lock.stat(follow_symlinks=False)
         self.assertTrue(stat.S_ISREG(info.st_mode))
         self.assertEqual(info.st_uid, os.geteuid())
@@ -3925,6 +4031,60 @@ class QemuControllerTests(unittest.TestCase):
                 self.assertEqual(factory.argv, [])
                 self.assertEqual(transport.writes, [])
 
+    def test_campaign_directory_lock_error_is_normalized_before_mutation(
+        self,
+    ) -> None:
+        output = self.root / "campaign-directory-lock-error"
+        output.mkdir()
+        artifacts = {
+            "results.ndjson": b"prior result bytes\n",
+            "progress.json": b"prior progress bytes\n",
+            "qemu-serial.log": b"prior raw bytes\n",
+        }
+        for name, data in artifacts.items():
+            (output / name).write_bytes(data)
+        real_flock = qemu_runner_module.fcntl.flock
+
+        def fail_directory_lock(descriptor: int, operation: int) -> None:
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise OSError(errno.EIO, "injected directory flock failure")
+            real_flock(descriptor, operation)
+
+        transport = FakeTransport(
+            self.clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+        )
+        factory = TransportFactory([transport])
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-directory-lock-error",
+        )
+
+        with mock.patch.object(
+            qemu_runner_module.fcntl,
+            "flock",
+            side_effect=fail_directory_lock,
+        ):
+            with self.assertRaisesRegex(
+                ControllerError,
+                "campaign directory lock could not be acquired safely",
+            ):
+                controller.run()
+
+        self.assertEqual(
+            {name: (output / name).read_bytes() for name in artifacts},
+            artifacts,
+        )
+        self.assertEqual(factory.argv, [])
+        self.assertEqual(transport.writes, [])
+
     def test_campaign_lock_replacement_during_acquisition_fails_closed(
         self,
     ) -> None:
@@ -3949,7 +4109,7 @@ class QemuControllerTests(unittest.TestCase):
 
         def replace_while_locking(descriptor: int, operation: int) -> None:
             nonlocal replaced
-            if not replaced:
+            if not replaced and stat.S_ISREG(os.fstat(descriptor).st_mode):
                 os.replace(replacement, lock)
                 replaced = True
             real_flock(descriptor, operation)

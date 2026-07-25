@@ -655,6 +655,19 @@ def _validate_campaign_lock(
         raise ControllerError("QEMU campaign lock changed while being opened")
 
 
+def _acquire_campaign_directory_lock(output_descriptor: int) -> None:
+    try:
+        fcntl.flock(output_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        if error.errno in {errno.EACCES, errno.EAGAIN}:
+            raise ControllerError(
+                "QEMU campaign is already active for this output directory"
+            ) from error
+        raise ControllerError(
+            "QEMU campaign directory lock could not be acquired safely"
+        ) from error
+
+
 def _open_campaign_lock(output_descriptor: int) -> int:
     flags = (
         os.O_RDWR
@@ -2845,6 +2858,7 @@ class QemuController:
         published = False
         operation_error: BaseException | None = None
         try:
+            _acquire_campaign_directory_lock(output_descriptor)
             campaign_lock_descriptor = _open_campaign_lock(output_descriptor)
             self._recover_interrupted_progress_retirement(output_descriptor)
             if not resume:
@@ -3003,15 +3017,15 @@ class QemuController:
                 os.close(resume_progress_descriptor)
             except BaseException as error:
                 cleanup_errors.append(error)
-        try:
-            os.close(output_descriptor)
-        except OSError as error:
-            cleanup_errors.append(error)
         if campaign_lock_descriptor is not None:
             try:
                 os.close(campaign_lock_descriptor)
             except OSError as error:
                 cleanup_errors.append(error)
+        try:
+            os.close(output_descriptor)
+        except OSError as error:
+            cleanup_errors.append(error)
         if cleanup_errors:
             cleanup_error: BaseException
             if len(cleanup_errors) == 1:
