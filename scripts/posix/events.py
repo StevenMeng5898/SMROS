@@ -14,6 +14,7 @@ from .model import (
     ResourceDeltas,
     SerialAttempt,
     SerialEvent,
+    is_valid_run_id,
     validate_raw_attempt_semantics,
 )
 
@@ -121,6 +122,23 @@ def _require_string(value: Mapping[str, object], key: str) -> str:
     return item
 
 
+def _require_recursive_strict_utf8(value: object, line_number: int) -> None:
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError(
+                f"serial event contains invalid strict UTF-8 text at line {line_number}"
+            ) from error
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            _require_recursive_strict_utf8(key, line_number)
+            _require_recursive_strict_utf8(item, line_number)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _require_recursive_strict_utf8(item, line_number)
+
+
 def _require_nonnegative_int(value: object, label: str) -> int:
     if type(value) is not int or value < 0:
         raise ValueError(f"event {label} is invalid")
@@ -156,7 +174,8 @@ def _validate_common(value: object, line_number: int) -> dict[str, object]:
     if type(value.get("schema")) is not int or value.get("schema") != 1:
         raise ValueError(f"event schema is not 1 at line {line_number}")
     _require_nonnegative_int(value.get("seq"), "sequence")
-    _require_string(value, "run_id")
+    if not is_valid_run_id(value.get("run_id")):
+        raise ValueError(f"serial event run ID is invalid at line {line_number}")
     digest = _require_string(value, "manifest_sha256")
     if _DIGEST_RE.fullmatch(digest) is None:
         raise ValueError(f"event manifest checksum is invalid at line {line_number}")
@@ -272,7 +291,11 @@ def _attempt_from_end(
     )
 
 
-def _interrupted_attempt(start: SerialEvent, output: list[str]) -> SerialAttempt:
+def _interrupted_attempt(
+    start: SerialEvent,
+    output: list[str],
+    infrastructure_error: str = "serial event stream ended before test_end",
+) -> SerialAttempt:
     value = start.values
     return SerialAttempt(
         test_id=_require_string(value, "test_id"),
@@ -292,8 +315,24 @@ def _interrupted_attempt(start: SerialEvent, output: list[str]) -> SerialAttempt
         run_id=start.run_id,
         manifest_sha256=start.manifest_sha256,
         architecture=start.architecture,
-        infrastructure_error="serial event stream ended before test_end",
+        infrastructure_error=infrastructure_error,
     )
+
+
+def _validate_infrastructure_error_identity(
+    value: Mapping[str, object], active: SerialEvent | None
+) -> None:
+    identity_fields = tuple(
+        key for key in ("test_id", "group", "api") if key in value
+    )
+    if not identity_fields:
+        return
+    if active is None:
+        raise ValueError(
+            "infrastructure error identity appears without an active test"
+        )
+    if any(value[key] != active.values.get(key) for key in identity_fields):
+        raise ValueError("infrastructure error identity mismatch")
 
 
 def parse_serial_log(log: str) -> ParsedEventRun:
@@ -321,6 +360,14 @@ def parse_serial_log(log: str) -> ParsedEventRun:
             )
         except (json.JSONDecodeError, ValueError) as error:
             raise ValueError(f"invalid event JSON at line {line_number}") from error
+        if isinstance(value, dict):
+            if "run_id" in value and not is_valid_run_id(value["run_id"]):
+                raise ValueError(
+                    f"serial event run ID is invalid at line {line_number}"
+                )
+            if value.get("event") == "infrastructure_error":
+                _infrastructure_error_detail(value)
+        _require_recursive_strict_utf8(value, line_number)
         value = _validate_common(value, line_number)
         event = _serial_event(value)
         if previous_seq is not None and event.seq <= previous_seq:
@@ -350,6 +397,7 @@ def parse_serial_log(log: str) -> ParsedEventRun:
                 or event.manifest_sha256 != _EMPTY_SHA256
             ):
                 raise ValueError("event stream does not start with suite_start")
+            _validate_infrastructure_error_identity(value, active)
             infrastructure_error = _infrastructure_error_detail(value)
             terminal = event
         elif event.event == "test_start":
@@ -406,11 +454,18 @@ def parse_serial_log(log: str) -> ParsedEventRun:
                 raise ValueError("event status counts mismatch")
             terminal = event
         elif event.event == "infrastructure_error":
+            _validate_infrastructure_error_identity(value, active)
+            infrastructure_error = _infrastructure_error_detail(value)
             if active is not None:
-                attempts.append(_interrupted_attempt(active, active_output))
+                attempts.append(
+                    _interrupted_attempt(
+                        active,
+                        active_output,
+                        infrastructure_error,
+                    )
+                )
                 active = None
                 active_output = []
-            infrastructure_error = _infrastructure_error_detail(value)
             terminal = event
         events.append(event)
 

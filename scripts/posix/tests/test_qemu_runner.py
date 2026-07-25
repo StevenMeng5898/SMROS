@@ -479,6 +479,11 @@ class QemuControllerTests(unittest.TestCase):
                     run_id_factory=lambda: f"controller-{label}",
                 )
 
+                if label == "terminal-before-start":
+                    with self.assertRaisesRegex(ControllerError, "guest POSIX"):
+                        controller.run()
+                    continue
+
                 result = controller.run()
 
                 self.assertEqual(result.attempts[0].status, "crash")
@@ -1764,6 +1769,249 @@ class QemuControllerTests(unittest.TestCase):
         )
         self.assertEqual(result.attempts[0].run_id, unicode_run_id)
         self.assertEqual(terminal["run_id"], unicode_run_id)
+
+        boundary_run_id = "\u96ea" * 85 + "a"
+        boundary_clock = FakeClock()
+        boundary_transport = FakeTransport(
+            boundary_clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+        )
+        boundary_controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=self.root / "boundary-run-id",
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory([boundary_transport]),
+            monotonic=boundary_clock.monotonic,
+            run_id_factory=lambda: boundary_run_id,
+        )
+        boundary_result = boundary_controller.run()
+        self.assertEqual(len(boundary_run_id.encode("utf-8")), 256)
+        self.assertEqual(boundary_result.attempts[0].run_id, boundary_run_id)
+
+    def test_guest_infrastructure_terminals_stop_campaign_immediately(self) -> None:
+        suite_start = _start_events(self.one).splitlines(keepends=True)[0]
+        cases = {
+            "active": (
+                _start_events(self.one)
+                + _event(
+                    3,
+                    "infrastructure_error",
+                    detail="guest active collection failed",
+                    test_id=self.one.test_id,
+                    group=self.one.group,
+                    api=self.one.api,
+                ),
+                "guest active collection failed",
+                1,
+            ),
+            "post-suite-start": (
+                suite_start
+                + _event(
+                    2,
+                    "infrastructure_error",
+                    message="guest setup failed",
+                ),
+                "guest setup failed",
+                0,
+            ),
+            "standalone-preflight": (
+                _event(
+                    1,
+                    "infrastructure_error",
+                    run_id="error-17",
+                    manifest_sha256="0" * 64,
+                    message="guest manifest read failed",
+                ),
+                "guest manifest read failed",
+                0,
+            ),
+        }
+        for label, (terminal_bytes, detail, attempt_count) in cases.items():
+            with self.subTest(case=label):
+                clock = FakeClock()
+                output = self.root / f"guest-terminal-{label}"
+                transport = FakeTransport(clock, [PROMPT, terminal_bytes])
+                controller = QemuController(
+                    identity=_identity(self.tests),
+                    selected=self.tests,
+                    config=ControllerConfig(
+                        output_directory=output,
+                        qemu_argv=self.config.qemu_argv,
+                    ),
+                    transport_factory=TransportFactory([transport]),
+                    monotonic=clock.monotonic,
+                    run_id_factory=lambda: f"controller-{label}",
+                )
+
+                result = controller.run()
+
+                self.assertFalse(result.complete)
+                self.assertEqual(len(result.attempts), attempt_count)
+                self.assertEqual(
+                    transport.writes,
+                    [f"posixtest test {self.one.test_id}\n".encode()],
+                )
+                self.assertEqual(result.restart_count, 0)
+                self.assertIn(terminal_bytes, result.raw_log_path.read_bytes())
+                rows = [
+                    json.loads(line)
+                    for line in result.result_path.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                ]
+                terminal = rows[-1]
+                self.assertFalse(terminal["complete"])
+                self.assertEqual(terminal["infrastructure_error"], detail)
+                self.assertEqual(terminal["completed_count"], attempt_count)
+                if attempt_count:
+                    attempt = result.attempts[0]
+                    self.assertEqual(attempt.source, "smros-qemu")
+                    self.assertEqual(attempt.status, "interrupted")
+                    self.assertEqual(attempt.launch_status, "interrupted")
+                    self.assertIsNone(attempt.pts_status)
+                    self.assertIsNone(attempt.exit_code)
+                    self.assertIsNone(attempt.signal)
+                    self.assertFalse(attempt.timed_out)
+                    self.assertEqual(attempt.resource_evidence, "unavailable")
+                    self.assertFalse(attempt.resource_deltas.has_nonzero())
+                    self.assertEqual(attempt.infrastructure_error, detail)
+                    loaded = report_module._load_runtime_results(
+                        result.result_path,
+                        self.tests,
+                        _identity(self.tests).build_results,
+                        _identity(self.tests).metadata,
+                        role="smros",
+                    )
+                    self.assertEqual(
+                        loaded.attempts[0].resource_evidence,
+                        "unavailable",
+                    )
+
+    def test_guest_infrastructure_terminal_resume_publishes_without_restart(
+        self,
+    ) -> None:
+        output = self.root / "resume-guest-terminal"
+        output.mkdir()
+        (output / "qemu-serial.log").write_bytes(b"guest terminal evidence\n")
+        controller = QemuController(
+            identity=_identity(self.tests),
+            selected=self.tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+        )
+        controller._run_id = "controller-resume-terminal"
+        controller._infrastructure_error = "guest collection failed"
+        guest = SerialAttempt(
+            test_id=self.one.test_id,
+            group=self.one.group,
+            api=self.one.api,
+            status="interrupted",
+            pts_status=None,
+            launch_status="interrupted",
+            exit_code=None,
+            signal=None,
+            timed_out=False,
+            duration_ms=0,
+            stdout="",
+            stderr="",
+            resource_deltas=ResourceDeltas(),
+            resource_evidence="unavailable",
+            run_id="guest-run",
+            manifest_sha256=MANIFEST_SHA256,
+            architecture="aarch64",
+            infrastructure_error="guest collection failed",
+        )
+        controller._attempts = [
+            controller._guest_attempt(
+                guest,
+                self.one,
+                raw_log_start=0,
+                raw_log_end=0,
+            )
+        ]
+        controller._persist_progress()
+        factory = TransportFactory([])
+        resumed = QemuController(
+            identity=_identity(self.tests),
+            selected=self.tests,
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+        )
+
+        result = resumed.run(resume=True)
+
+        self.assertFalse(result.complete)
+        self.assertEqual(result.restart_count, 0)
+        self.assertEqual(factory.argv, [])
+        self.assertFalse((output / "progress.json").exists())
+        terminal = json.loads(
+            result.result_path.read_text(encoding="utf-8").splitlines()[-1]
+        )
+        self.assertEqual(
+            terminal["infrastructure_error"],
+            "guest collection failed",
+        )
+
+    def test_guest_infrastructure_terminal_rejects_invalid_context(self) -> None:
+        valid_active = _start_events(self.one) + _event(
+            3,
+            "infrastructure_error",
+            detail="guest collection failed",
+            test_id=self.one.test_id,
+            group=self.one.group,
+            api=self.one.api,
+        )
+        suite_start = _start_events(self.one).splitlines(keepends=True)[0]
+        cases = {
+            "active-identity": _replace_event_values(
+                valid_active,
+                "infrastructure_error",
+                test_id=self.two.test_id,
+            ),
+            "suite-provenance": _replace_event_values(
+                suite_start
+                + _event(2, "infrastructure_error", detail="guest collection failed"),
+                "suite_start",
+                build_id="0" * 64,
+            ),
+            "identity-without-active-test": suite_start
+            + _event(
+                2,
+                "infrastructure_error",
+                detail="guest collection failed",
+                test_id=self.one.test_id,
+            ),
+            "escaped-surrogate-run-id": _replace_event_values(
+                valid_active,
+                "suite_start",
+                run_id="\ud800",
+            ),
+        }
+        for label, terminal_bytes in cases.items():
+            with self.subTest(case=label):
+                clock = FakeClock()
+                transport = FakeTransport(clock, [PROMPT, terminal_bytes])
+                controller = QemuController(
+                    identity=_identity((self.one,)),
+                    selected=(self.one,),
+                    config=ControllerConfig(
+                        output_directory=self.root / f"invalid-terminal-{label}",
+                        qemu_argv=self.config.qemu_argv,
+                    ),
+                    transport_factory=TransportFactory([transport]),
+                    monotonic=clock.monotonic,
+                    run_id_factory=lambda: "controller-invalid-terminal",
+                )
+                with self.assertRaisesRegex(ControllerError, "guest POSIX"):
+                    controller.run()
 
     def test_guest_infrastructure_error_marks_only_guest_run_incomplete(
         self,

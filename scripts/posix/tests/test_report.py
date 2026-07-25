@@ -489,6 +489,34 @@ class AggregationTests(ReportFixture, unittest.TestCase):
             ).encode("ascii")
         )
 
+    def _write_serial_preflight_error(
+        self,
+        path: Path,
+        *,
+        run_id: str = "error-123",
+        detail: str = "manifest read failed",
+    ) -> None:
+        path.write_bytes(
+            (
+                "SMROS_POSIX_EVENT "
+                + json.dumps(
+                    {
+                        "architecture": "aarch64",
+                        "event": "infrastructure_error",
+                        "manifest_sha256": "0" * 64,
+                        "message": detail,
+                        "run_id": run_id,
+                        "schema": 1,
+                        "seq": 1,
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("ascii")
+        )
+
     def test_runtime_attempt_rejects_canonical_lone_surrogate_text(self) -> None:
         surrogate = "\ud800"
         passed = self._attempt(self.tests[0], "pass")
@@ -624,6 +652,132 @@ class AggregationTests(ReportFixture, unittest.TestCase):
                     role="smros",
                 )
                 self.assertEqual(loaded.terminal[field], text)
+
+    def test_runtime_run_ids_are_bounded_by_utf8_bytes(self) -> None:
+        over_limit = "\u96ea" * 85 + "ab"
+        attempt_path = self.root / "over-limit-attempt-run-id.ndjson"
+        self._write_runtime(
+            attempt_path,
+            (replace(self._attempt(self.tests[0], "pass"), run_id=over_limit),),
+            complete=True,
+        )
+        terminal_path = self.root / "over-limit-terminal-run-id.ndjson"
+        self._write_runtime(
+            terminal_path,
+            (),
+            complete=False,
+            terminal_fields={"run_id": over_limit},
+        )
+        for label, path in (
+            ("attempt", attempt_path),
+            ("terminal", terminal_path),
+        ):
+            with self.subTest(record=label):
+                with self.assertRaisesRegex(ValueError, f"runtime {label} run_id"):
+                    report_module._load_runtime_results(
+                        path,
+                        self.tests,
+                        self.build_results,
+                        self.metadata,
+                        role="smros",
+                    )
+
+    def test_runtime_run_ids_accept_exact_utf8_byte_limit(self) -> None:
+        boundary = "\u96ea" * 85 + "a"
+        path = self.root / "boundary-run-id.ndjson"
+        self._write_runtime(
+            path,
+            (replace(self._attempt(self.tests[0], "pass"), run_id=boundary),),
+            complete=True,
+        )
+
+        loaded = report_module._load_runtime_results(
+            path,
+            self.tests,
+            self.build_results,
+            self.metadata,
+            role="smros",
+        )
+
+        self.assertEqual(len(boundary.encode("utf-8")), 256)
+        self.assertEqual(loaded.terminal["run_id"], boundary)
+
+    def test_serial_preflight_error_is_an_incomplete_zero_attempt_run(self) -> None:
+        path = self.root / "serial-preflight-error.log"
+        self._write_serial_preflight_error(path, detail="manifest open failed")
+        manifest = report_module._load_manifest(self.stage / "manifest.json")
+
+        loaded = report_module._load_smros_results(path, manifest)
+        summary = generate_report(
+            self.stage / "manifest.json",
+            smros_results=(path,),
+            output_directory=self.root / "serial-preflight-report",
+        )
+
+        self.assertEqual(loaded.attempts, ())
+        self.assertEqual(loaded.terminal["run_id"], "error-123")
+        self.assertFalse(loaded.terminal["complete"])
+        self.assertEqual(loaded.terminal["completed_count"], 0)
+        self.assertEqual(loaded.terminal["selected_count"], 0)
+        self.assertEqual(
+            loaded.terminal["infrastructure_error"], "manifest open failed"
+        )
+        for key in (
+            "manifest_sha256",
+            "build_results_sha256",
+            "build_id",
+            "patch_sha256",
+        ):
+            self.assertEqual(loaded.terminal[key], "0" * 64)
+        for key in ("revision", "smros_commit"):
+            self.assertEqual(loaded.terminal[key], "0" * 40)
+        self.assertEqual(loaded.rows[0]["manifest_sha256"], "0" * 64)
+        self.assertFalse(summary["complete"])
+        self.assertEqual(
+            summary["counts"]["discovered"], len(self.tests)
+        )
+        self.assertEqual(
+            summary["provenance"]["manifest_sha256"],
+            self.metadata.manifest_sha256,
+        )
+        self.assertEqual(
+            summary["provenance"]["smros_runs"][0]["manifest_sha256"],
+            "0" * 64,
+        )
+
+    def test_serial_run_ids_are_bounded_by_utf8_bytes(self) -> None:
+        path = self.root / "over-limit-serial-run-id.log"
+        self._write_serial_runtime(path, run_id="\u96ea" * 85 + "ab")
+        manifest = report_module._load_manifest(self.stage / "manifest.json")
+
+        with self.assertRaisesRegex(ValueError, "run ID"):
+            report_module._load_smros_results(path, manifest)
+
+    def test_serial_run_ids_accept_exact_utf8_byte_limit(self) -> None:
+        run_id = "\u96ea" * 85 + "a"
+        path = self.root / "boundary-serial-run-id.log"
+        self._write_serial_runtime(path, run_id=run_id)
+        manifest = report_module._load_manifest(self.stage / "manifest.json")
+
+        loaded = report_module._load_smros_results(path, manifest)
+
+        self.assertEqual(len(run_id.encode("utf-8")), 256)
+        self.assertEqual(loaded.terminal["run_id"], run_id)
+
+    def test_serial_suite_start_rejects_surrogate_in_ignored_field(self) -> None:
+        path = self.root / "surrogate-serial-suite-source.log"
+        self._write_serial_runtime(path, run_id="serial-run")
+        path.write_bytes(
+            path.read_bytes().replace(
+                b'"selected_count":1',
+                b'"selected_count":1,"source":"\\ud800"',
+                1,
+            )
+        )
+        manifest = report_module._load_manifest(self.stage / "manifest.json")
+
+        with self.assertRaisesRegex(ValueError, "serial.*invalid.*strict UTF-8"):
+            report_module._load_smros_results(path, manifest)
 
     def test_serial_runtime_rejects_canonical_lone_surrogate_text(self) -> None:
         surrogate = "\ud800"
@@ -1084,6 +1238,7 @@ class AggregationTests(ReportFixture, unittest.TestCase):
             status="interrupted",
             exit_code=None,
             infrastructure_error="runtime capture interrupted",
+            resource_evidence="unavailable",
         )
         contradictory = self.root / "complete-interrupted.ndjson"
         self._write_runtime(contradictory, (interrupted,), complete=True)
@@ -1138,6 +1293,7 @@ class AggregationTests(ReportFixture, unittest.TestCase):
             status="interrupted",
             exit_code=None,
             infrastructure_error="runtime capture interrupted",
+            resource_evidence="unavailable",
         )
         incomplete = self.root / "honest-infrastructure-error.ndjson"
         self._write_runtime(
@@ -1178,6 +1334,7 @@ class AggregationTests(ReportFixture, unittest.TestCase):
             status="interrupted",
             exit_code=None,
             infrastructure_error="runtime capture interrupted",
+            resource_evidence="unavailable",
         )
         incomplete = self.root / "internal-incomplete.ndjson"
         self._write_runtime(incomplete, (interrupted,), complete=False)

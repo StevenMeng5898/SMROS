@@ -38,6 +38,7 @@ from .model import (
     ResourceDeltas,
     RuntimeAttempt,
     SuiteTest,
+    is_valid_run_id,
     validate_host_watchdog_attempt_semantics,
     validate_raw_attempt_semantics,
 )
@@ -438,10 +439,15 @@ def _validate_attempt(
         "source",
         "run_id",
     ):
-        if not _is_strict_utf8_text(
-            value[key],
-            nonempty=key not in {"stdout", "stderr"},
-        ):
+        valid = (
+            is_valid_run_id(value[key])
+            if key == "run_id"
+            else _is_strict_utf8_text(
+                value[key],
+                nonempty=key not in {"stdout", "stderr"},
+            )
+        )
+        if not valid:
             raise ValueError(f"runtime attempt {key} is invalid at line {line_number}")
     if role == "linux":
         if (
@@ -566,6 +572,11 @@ def _validate_attempt(
                 raise ValueError(
                     f"host-watchdog resource evidence is invalid at line {line_number}"
                 )
+        elif value["status"] == "interrupted":
+            if resource_evidence != "unavailable" or resource_deltas.has_nonzero():
+                raise ValueError(
+                    f"interrupted resource evidence is invalid at line {line_number}"
+                )
         elif resource_evidence != "measured":
             raise ValueError(
                 f"SMROS attempt resource evidence is invalid at line {line_number}"
@@ -604,6 +615,8 @@ def _validate_terminal(
     metadata: ManifestMetadata,
     attempts: Sequence[RuntimeAttempt],
     line_number: int,
+    *,
+    allow_unknown_provenance: bool = False,
 ) -> None:
     fields_present = set(value)
     if (
@@ -615,7 +628,12 @@ def _validate_terminal(
     ):
         raise ValueError(f"invalid runtime terminal schema at line {line_number}")
     for key in ("platform", "run_id", "source"):
-        if not _is_strict_utf8_text(value[key], nonempty=True):
+        valid = (
+            is_valid_run_id(value[key])
+            if key == "run_id"
+            else _is_strict_utf8_text(value[key], nonempty=True)
+        )
+        if not valid:
             raise ValueError(f"runtime terminal {key} is invalid at line {line_number}")
     if type(value["complete"]) is not bool:
         raise ValueError(f"runtime terminal completion is invalid at line {line_number}")
@@ -685,12 +703,24 @@ def _validate_terminal(
     for key in ("revision", "smros_commit"):
         if not _is_commit(value[key]):
             raise ValueError(f"runtime terminal {key} is invalid at line {line_number}")
+    provenance = {
+        "manifest_sha256": metadata.manifest_sha256,
+        "build_results_sha256": metadata.build_results_sha256,
+        "revision": metadata.revision,
+        "patch_sha256": metadata.patch_sha256,
+        "smros_commit": metadata.smros_commit,
+    }
+    if allow_unknown_provenance:
+        provenance = {
+            key: "0" * (40 if key in {"revision", "smros_commit"} else 64)
+            for key in provenance
+        }
     if (
-        value["manifest_sha256"] != metadata.manifest_sha256
-        or value["build_results_sha256"] != metadata.build_results_sha256
-        or value["revision"] != metadata.revision
-        or value["patch_sha256"] != metadata.patch_sha256
-        or value["smros_commit"] != metadata.smros_commit
+        any(value[key] != expected for key, expected in provenance.items())
+        or (
+            allow_unknown_provenance
+            and value["build_id"] != "0" * 64
+        )
     ):
         raise ValueError(f"runtime terminal provenance mismatch at line {line_number}")
     for key in _RUNTIME_TERMINAL_OPTIONAL_FIELDS & fields_present:
@@ -783,16 +813,25 @@ def _load_serial_results(
     manifest: _ManifestInput,
 ) -> _RuntimeInput:
     parsed = parse_serial_log(text)
-    if not _is_strict_utf8_text(parsed.run_id, nonempty=True):
+    if not is_valid_run_id(parsed.run_id):
         raise ValueError("serial run ID is invalid")
     if parsed.infrastructure_error is not None and not _is_strict_utf8_text(
         parsed.infrastructure_error,
         nonempty=True,
     ):
         raise ValueError("serial terminal infrastructure error is invalid")
-    if parsed.manifest_sha256 != manifest.metadata.manifest_sha256:
+    preflight_error = (
+        len(parsed.events) == 1
+        and parsed.events[0].event == "infrastructure_error"
+        and parsed.manifest_sha256 == "0" * 64
+        and not parsed.attempts
+    )
+    if (
+        not preflight_error
+        and parsed.manifest_sha256 != manifest.metadata.manifest_sha256
+    ):
         raise ValueError("serial event manifest provenance mismatch")
-    suite_start = parsed.events[0].values
+    suite_start = None if preflight_error else parsed.events[0].values
     required_provenance = {
         "build_id": _is_digest,
         "build_results_sha256": _is_digest,
@@ -800,11 +839,12 @@ def _load_serial_results(
         "patch_sha256": _is_digest,
         "smros_commit": _is_commit,
     }
-    for key, validator in required_provenance.items():
-        if not validator(suite_start.get(key)):
-            raise ValueError(f"serial suite_start {key} is invalid")
+    if suite_start is not None:
+        for key, validator in required_provenance.items():
+            if not validator(suite_start.get(key)):
+                raise ValueError(f"serial suite_start {key} is invalid")
     metadata = manifest.metadata
-    if (
+    if suite_start is not None and (
         suite_start["build_results_sha256"] != metadata.build_results_sha256
         or suite_start["revision"] != metadata.revision
         or suite_start["patch_sha256"] != metadata.patch_sha256
@@ -870,21 +910,31 @@ def _load_serial_results(
                 resource_evidence=serial_attempt.resource_evidence,
             )
         )
-    selected_count = suite_start["selected_count"]
+    selected_count = 0 if suite_start is None else suite_start["selected_count"]
     assert type(selected_count) is int
+    unknown_digest = "0" * 64
+    unknown_commit = "0" * 40
     terminal: dict[str, object] = {
-        "build_id": suite_start["build_id"],
-        "build_results_sha256": metadata.build_results_sha256,
+        "build_id": unknown_digest if suite_start is None else suite_start["build_id"],
+        "build_results_sha256": (
+            unknown_digest if suite_start is None else metadata.build_results_sha256
+        ),
         "complete": parsed.complete,
         "completed_count": len(attempts),
-        "manifest_sha256": metadata.manifest_sha256,
-        "patch_sha256": metadata.patch_sha256,
+        "manifest_sha256": (
+            unknown_digest if suite_start is None else metadata.manifest_sha256
+        ),
+        "patch_sha256": (
+            unknown_digest if suite_start is None else metadata.patch_sha256
+        ),
         "platform": SMROS_PLATFORM,
         "record_type": "run",
-        "revision": metadata.revision,
+        "revision": unknown_commit if suite_start is None else metadata.revision,
         "run_id": parsed.run_id,
         "selected_count": selected_count,
-        "smros_commit": metadata.smros_commit,
+        "smros_commit": (
+            unknown_commit if suite_start is None else metadata.smros_commit
+        ),
         "source": SMROS_SERIAL_SOURCE,
         "status_counts": dict(
             sorted(Counter(attempt.status for attempt in attempts).items())
@@ -892,7 +942,13 @@ def _load_serial_results(
     }
     if parsed.infrastructure_error is not None:
         terminal["infrastructure_error"] = parsed.infrastructure_error
-    _validate_terminal(terminal, metadata, attempts, len(parsed.events) + 1)
+    _validate_terminal(
+        terminal,
+        metadata,
+        attempts,
+        len(parsed.events) + 1,
+        allow_unknown_provenance=preflight_error,
+    )
     return _RuntimeInput(
         path=str(Path(os.path.abspath(path))),
         attempts=tuple(attempts),

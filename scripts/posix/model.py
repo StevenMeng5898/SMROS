@@ -28,6 +28,17 @@ OVERALL_STATUSES = (
 )
 RAW_RUNTIME_STATUSES = OVERALL_STATUSES[:9]
 HOST_WATCHDOG_ERROR_MAX_BYTES = 4096
+MAX_RUN_ID_BYTES = 256
+
+
+def is_valid_run_id(value: object) -> bool:
+    """Return whether a run ID is nonempty strict UTF-8 within its byte cap."""
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        return len(value.encode("utf-8")) <= MAX_RUN_ID_BYTES
+    except UnicodeEncodeError:
+        return False
 
 
 def validate_raw_attempt_semantics(

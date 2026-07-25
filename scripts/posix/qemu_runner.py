@@ -33,6 +33,7 @@ from .model import (
     RuntimeAttempt,
     SerialAttempt,
     SuiteTest,
+    is_valid_run_id,
     validate_host_watchdog_attempt_semantics,
     validate_raw_attempt_semantics,
 )
@@ -54,7 +55,6 @@ _EMPTY_SHA256 = "0" * 64
 _TRUNCATION_MARKER = b"\n...[truncated]"
 _MAX_PERSISTED_STREAM_BYTES = 16 * 1024
 _MAX_PERSISTED_ERROR_BYTES = 4 * 1024
-_MAX_RUN_ID_BYTES = 256
 _MAX_PROGRESS_BYTES = 128 * 1024 * 1024
 _MAX_RESULT_LINE_BYTES = 512 * 1024
 _PERSISTED_ATTEMPTS_BUDGET = 120 * 1024 * 1024
@@ -292,13 +292,12 @@ def _event_common_is_valid(value: dict[str, object], event: str, seq: int) -> bo
     )
 
 
-def _start_pair_is_valid(
+def _suite_start_is_valid(
     suite_start: dict[str, object],
-    test_start: dict[str, object],
     test: SuiteTest,
     identity: CampaignIdentity,
 ) -> bool:
-    suite_is_valid = (
+    return (
         set(suite_start) <= _SUITE_START_FIELDS
         and _event_common_is_valid(suite_start, "suite_start", 1)
         and suite_start.get("manifest_sha256")
@@ -316,6 +315,15 @@ def _start_pair_is_valid(
         and type(suite_start.get("started_ticks")) is int
         and int(suite_start["started_ticks"]) >= 0
     )
+
+
+def _start_pair_is_valid(
+    suite_start: dict[str, object],
+    test_start: dict[str, object],
+    test: SuiteTest,
+    identity: CampaignIdentity,
+) -> bool:
+    suite_is_valid = _suite_start_is_valid(suite_start, test, identity)
     test_is_valid = (
         set(test_start) <= _TEST_START_FIELDS
         and _event_common_is_valid(test_start, "test_start", 2)
@@ -358,10 +366,11 @@ def _matching_start_seen(
     return _start_pair_is_valid(suite_start, test_start, test, identity)
 
 
-def _suite_end_offset(data: bytes) -> int | None:
+def _terminal_event_offset(data: bytes) -> tuple[str, int] | None:
     for value, offset in _event_rows(data):
-        if value.get("event") == "suite_end":
-            return offset
+        event = value.get("event")
+        if event in {"suite_end", "infrastructure_error"}:
+            return str(event), offset
     return None
 
 
@@ -409,15 +418,6 @@ def _strict_utf8_size(value: str) -> int | None:
         return len(value.encode("utf-8"))
     except UnicodeEncodeError:
         return None
-
-
-def _run_id_is_valid(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and bool(value)
-        and (size := _strict_utf8_size(value)) is not None
-        and size <= _MAX_RUN_ID_BYTES
-    )
 
 
 def _persisted_stream_is_valid(
@@ -501,6 +501,7 @@ class QemuController:
         self._restart_count = 0
         self._boot_count = 0
         self._run_id = ""
+        self._infrastructure_error: str | None = None
         self._prompt_tail = b""
 
     def _progress(self) -> dict[str, object]:
@@ -509,6 +510,7 @@ class QemuController:
             "boot_count": self._boot_count,
             "completed_attempts": [attempt.to_dict() for attempt in self._attempts],
             "current_test": self._current_test,
+            "infrastructure_error": self._infrastructure_error,
             "manifest_sha256": self.identity.metadata.manifest_sha256,
             "raw_log": str(self._raw_log_path),
             "restart_count": self._restart_count,
@@ -587,6 +589,7 @@ class QemuController:
             "build_id",
             "completed_attempts",
             "current_test",
+            "infrastructure_error",
             "manifest_sha256",
             "raw_log",
             "restart_count",
@@ -609,17 +612,31 @@ class QemuController:
         restart_count = value.get("restart_count")
         completed = value.get("completed_attempts")
         current_test = value.get("current_test")
+        infrastructure_error = value.get("infrastructure_error")
         if (
-            not _run_id_is_valid(run_id)
+            not is_valid_run_id(run_id)
             or type(boot_count) is not int
             or boot_count < 0
             or type(restart_count) is not int
             or restart_count < 0
             or not isinstance(completed, list)
             or (
+                infrastructure_error is not None
+                and (
+                    not isinstance(infrastructure_error, str)
+                    or not infrastructure_error
+                    or not _persisted_errors_are_valid(
+                        None,
+                        infrastructure_error,
+                        _MAX_PERSISTED_ERROR_BYTES,
+                    )
+                )
+            )
+            or (
                 current_test is not None
                 and current_test not in expected_ids
             )
+            or (infrastructure_error is not None and current_test is not None)
         ):
             raise ValueError("resume progress is invalid")
         attempts = [_decode_attempt(item) for item in completed]
@@ -634,7 +651,10 @@ class QemuController:
         tests_by_id = {test.test_id: test for test in self.selected}
         for attempt in attempts:
             self._validate_resumed_attempt(
-                attempt, tests_by_id[attempt.test_id], run_id
+                attempt,
+                tests_by_id[attempt.test_id],
+                run_id,
+                infrastructure_error,
             )
         required_size = max(
             (attempt.raw_log_end or 0 for attempt in attempts), default=0
@@ -645,10 +665,15 @@ class QemuController:
         self._boot_count = boot_count
         self._restart_count = restart_count
         self._run_id = run_id
+        self._infrastructure_error = infrastructure_error
         self._current_test = None
 
     def _validate_resumed_attempt(
-        self, attempt: RuntimeAttempt, test: SuiteTest, run_id: str
+        self,
+        attempt: RuntimeAttempt,
+        test: SuiteTest,
+        run_id: str,
+        terminal_infrastructure_error: str | None,
     ) -> None:
         build_status, link_status = self._build_statuses(test)
         field_limits = _persisted_attempt_field_limits(len(self.selected))
@@ -736,8 +761,15 @@ class QemuController:
                     label="resume completed attempt",
                 )
                 if attempt.status == "interrupted":
-                    raise ValueError("completed guest attempt is interrupted")
-                evidence_matches = attempt.resource_evidence == "measured"
+                    evidence_matches = (
+                        terminal_infrastructure_error is not None
+                        and attempt.infrastructure_error
+                        == terminal_infrastructure_error
+                        and attempt.resource_evidence == "unavailable"
+                        and not attempt.resource_deltas.has_nonzero()
+                    )
+                else:
+                    evidence_matches = attempt.resource_evidence == "measured"
             else:
                 evidence_matches = False
         except ValueError as error:
@@ -844,9 +876,10 @@ class QemuController:
     def _validate_guest(
         self, data: bytes, test: SuiteTest
     ) -> tuple[SerialAttempt, int, bool]:
-        end_offset = _suite_end_offset(data)
-        if end_offset is None:
+        terminal = _terminal_event_offset(data)
+        if terminal is None or terminal[0] != "suite_end":
             raise ControllerError("guest POSIX suite has no terminal event")
+        _event_name, end_offset = terminal
         try:
             parsed = parse_serial_log(data.decode("utf-8", errors="replace"))
         except ValueError as error:
@@ -877,6 +910,71 @@ class QemuController:
             b"" if prompt_after else post_terminal[-(_STREAM_TOKEN_BYTES - 1) :]
         )
         return attempt, end_offset, prompt_after
+
+    def _validate_guest_infrastructure_error(
+        self, data: bytes, test: SuiteTest
+    ) -> tuple[SerialAttempt | None, str, int, bool]:
+        terminal = _terminal_event_offset(data)
+        if terminal is None or terminal[0] != "infrastructure_error":
+            raise ControllerError("guest POSIX suite has no infrastructure terminal")
+        _event_name, end_offset = terminal
+        try:
+            parsed = parse_serial_log(data.decode("utf-8", errors="replace"))
+        except ValueError as error:
+            raise ControllerError(
+                f"invalid guest POSIX event stream: {error}"
+            ) from error
+        if (
+            parsed.complete
+            or parsed.terminal_event is None
+            or parsed.terminal_event.event != "infrastructure_error"
+            or not parsed.infrastructure_error
+            or len(parsed.attempts) > 1
+        ):
+            raise ControllerError("guest POSIX infrastructure terminal is invalid")
+        if parsed.events[0].event == "suite_start":
+            suite_start = parsed.events[0].values
+            if not _suite_start_is_valid(suite_start, test, self.identity):
+                raise ControllerError(
+                    "guest POSIX start events do not match the command"
+                )
+            test_starts = [
+                event.values
+                for event in parsed.events
+                if event.event == "test_start"
+            ]
+            if test_starts and (
+                len(test_starts) != 1
+                or not _start_pair_is_valid(
+                    suite_start,
+                    test_starts[0],
+                    test,
+                    self.identity,
+                )
+            ):
+                raise ControllerError(
+                    "guest POSIX start events do not match the command"
+                )
+        elif len(parsed.events) != 1 or parsed.attempts:
+            raise ControllerError("guest POSIX preflight terminal is invalid")
+        attempt = parsed.attempts[0] if parsed.attempts else None
+        if attempt is not None and (
+            attempt.test_id != test.test_id
+            or attempt.group != test.group
+            or attempt.api != test.api
+        ):
+            raise ControllerError("guest test identity does not match the command")
+        post_terminal = data[end_offset:]
+        prompt_after = PROMPT in post_terminal
+        self._prompt_tail = (
+            b"" if prompt_after else post_terminal[-(_STREAM_TOKEN_BYTES - 1) :]
+        )
+        return (
+            attempt,
+            parsed.infrastructure_error,
+            end_offset,
+            prompt_after,
+        )
 
     def _build_statuses(self, test: SuiteTest) -> tuple[str, str]:
         by_stage = {
@@ -1068,8 +1166,35 @@ class QemuController:
                     raw_log_end=raw.tell(),
                 )
                 return attempt, False, True
-            terminal_offset = _suite_end_offset(bytes(data))
-            if terminal_offset is not None:
+            terminal = _terminal_event_offset(bytes(data))
+            if terminal is not None:
+                if terminal[0] == "infrastructure_error":
+                    (
+                        guest,
+                        infrastructure_error,
+                        _end_offset,
+                        prompt_after,
+                    ) = self._validate_guest_infrastructure_error(
+                        bytes(data), test
+                    )
+                    field_limits = _persisted_attempt_field_limits(
+                        len(self.selected)
+                    )
+                    self._infrastructure_error = _bounded_reason(
+                        infrastructure_error,
+                        field_limits.error_bytes,
+                    )
+                    attempt = (
+                        self._guest_attempt(
+                            guest,
+                            test,
+                            raw_log_start=raw_start,
+                            raw_log_end=raw.tell(),
+                        )
+                        if guest is not None
+                        else None
+                    )
+                    return attempt, prompt_after, False
                 guest, _end_offset, prompt_after = self._validate_guest(
                     bytes(data), test
                 )
@@ -1105,13 +1230,13 @@ class QemuController:
                 return attempt, False, True
 
     def _complete(self) -> bool:
-        return not any(
+        return self._infrastructure_error is None and not any(
             attempt.infrastructure_error and attempt.source != WATCHDOG_SOURCE
             for attempt in self._attempts
         )
 
     def _terminal(self) -> dict[str, object]:
-        return {
+        terminal: dict[str, object] = {
             "boot_count": self._boot_count,
             "build_id": self.identity.build_id,
             "build_results_sha256": self.identity.metadata.build_results_sha256,
@@ -1133,6 +1258,9 @@ class QemuController:
                 sorted(Counter(attempt.status for attempt in self._attempts).items())
             ),
         }
+        if self._infrastructure_error is not None:
+            terminal["infrastructure_error"] = self._infrastructure_error
+        return terminal
 
     def _publish(self) -> None:
         rows = [_attempt_record(attempt) for attempt in self._attempts]
@@ -1147,10 +1275,11 @@ class QemuController:
                     self._load_progress(output_descriptor, os.fstat(raw.fileno()))
                 else:
                     run_id = self._run_id_factory()
-                    if not _run_id_is_valid(run_id):
+                    if not is_valid_run_id(run_id):
                         raise ValueError("QEMU run ID is invalid")
                     self._run_id = run_id
                     self._attempts = []
+                    self._infrastructure_error = None
                     self._restart_count = 0
                     self._boot_count = 0
                 transport: _Transport | None = None
@@ -1159,6 +1288,8 @@ class QemuController:
                 self._persist_progress()
                 try:
                     for test in self.selected:
+                        if self._infrastructure_error is not None:
+                            break
                         if test.test_id in completed_ids:
                             continue
                         while transport is None or not prompt_ready:
@@ -1175,10 +1306,13 @@ class QemuController:
                         attempt, prompt_ready, restart = self._run_test(
                             transport, raw, test
                         )
-                        self._attempts.append(attempt)
-                        completed_ids.add(test.test_id)
+                        if attempt is not None:
+                            self._attempts.append(attempt)
+                            completed_ids.add(test.test_id)
                         self._current_test = None
                         self._persist_progress()
+                        if self._infrastructure_error is not None:
+                            break
                         if restart:
                             self._stop(transport)
                             transport = None

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
+from scripts.posix import model
 from scripts.posix.events import EVENT_PREFIX, parse_serial_log
 from scripts.posix.model import RESOURCE_DELTA_NAMES
 
@@ -209,6 +210,131 @@ class SerialEventTests(unittest.TestCase):
 
         self.assertFalse(parsed.complete)
         self.assertEqual(parsed.infrastructure_error, "\u8be6\u60c5-\u03c0")
+
+    def test_infrastructure_error_identity_must_match_active_test(self) -> None:
+        test_id = "conformance/interfaces/getpid/1-1.c"
+        prefix = (
+            _event(1, "suite_start", selected_count=1),
+            _event(
+                2,
+                "test_start",
+                test_id=test_id,
+                group="base",
+                api="getpid",
+            ),
+        )
+        for field, invalid in (
+            ("test_id", "conformance/interfaces/getpid/other.c"),
+            ("group", "signals"),
+            ("api", "fork"),
+        ):
+            with self.subTest(field=field):
+                values = {
+                    "message": "guest collection failed",
+                    "test_id": test_id,
+                    "group": "base",
+                    "api": "getpid",
+                    field: invalid,
+                }
+                with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                    parse_serial_log(
+                        "\n".join(
+                            (*prefix, _event(3, "infrastructure_error", **values))
+                        )
+                    )
+
+    def test_infrastructure_error_identity_is_rejected_without_active_test(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "identity.*active test"):
+            parse_serial_log(
+                "\n".join(
+                    (
+                        _event(1, "suite_start", selected_count=1),
+                        _event(
+                            2,
+                            "infrastructure_error",
+                            message="guest collection failed",
+                            test_id="conformance/interfaces/getpid/1-1.c",
+                        ),
+                    )
+                )
+            )
+
+    def test_event_run_ids_are_strict_utf8_and_byte_bounded(self) -> None:
+        for label, run_id in (
+            ("lone-surrogate", "\ud800"),
+            ("over-limit", "\u96ea" * 85 + "ab"),
+        ):
+            with self.subTest(case=label):
+                log = _event(1, "suite_start", selected_count=0, run_id=run_id)
+                with self.assertRaisesRegex(ValueError, "run ID"):
+                    parse_serial_log(log)
+
+    def test_event_run_id_accepts_exact_utf8_byte_limit(self) -> None:
+        run_id = "\u96ea" * 85 + "a"
+        log = "\n".join(
+            (
+                _event(1, "suite_start", selected_count=0, run_id=run_id),
+                _event(
+                    2,
+                    "infrastructure_error",
+                    run_id=run_id,
+                    message="collection failed",
+                ),
+            )
+        )
+
+        parsed = parse_serial_log(log)
+
+        self.assertEqual(len(run_id.encode("utf-8")), 256)
+        self.assertEqual(parsed.run_id, run_id)
+
+    def test_recursively_rejects_non_utf8_event_strings(self) -> None:
+        cases = {
+            "ignored-value": _event(
+                1,
+                "suite_start",
+                selected_count=0,
+                source="\ud800",
+            ),
+            "nested-key": _event(
+                1,
+                "suite_start",
+                selected_count=0,
+            )
+            + "\n"
+            + _event(
+                2,
+                "suite_end",
+                complete=True,
+                selected_count=0,
+                completed_count=0,
+                status_counts={"\ud800": 0},
+            ),
+            "nested-value": _event(
+                1,
+                "suite_start",
+                selected_count=0,
+            )
+            + "\n"
+            + _event(
+                2,
+                "suite_end",
+                complete=True,
+                selected_count=0,
+                completed_count=0,
+                status_counts={"pass": ["\ud800"]},
+            ),
+        }
+        for label, log in cases.items():
+            with self.subTest(case=label):
+                with self.assertRaisesRegex(ValueError, "strict UTF-8") as raised:
+                    parse_serial_log(log)
+                self.assertIs(type(raised.exception), ValueError)
+
+    def test_shared_run_id_limit_is_256_bytes(self) -> None:
+        self.assertEqual(model.MAX_RUN_ID_BYTES, 256)
 
     def test_rejects_boolean_event_schema(self) -> None:
         log = _event(
