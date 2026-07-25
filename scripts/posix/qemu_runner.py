@@ -1927,6 +1927,12 @@ class QemuController:
                     self._publish(output_descriptor, marker_descriptor)
                     published = True
                     os.unlink(self._progress_path.name, dir_fd=output_descriptor)
+                    try:
+                        os.fsync(output_descriptor)
+                    except OSError as error:
+                        raise ControllerError(
+                            "QEMU progress removal could not be synchronized"
+                        ) from error
                 finally:
                     if transport is not None:
                         self._stop(transport)

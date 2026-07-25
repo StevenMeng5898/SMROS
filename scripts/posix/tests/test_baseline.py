@@ -2357,6 +2357,91 @@ class CampaignTests(BaselineFixture, unittest.TestCase):
             value = json.loads(line)
             self.assertEqual(line, json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
 
+    def test_first_report_fsyncs_each_new_parent_before_descent(self) -> None:
+        test = self.make_test("pass-case")
+        self.write_manifest((test,))
+        self.results = (
+            self.root
+            / "durable-baseline-results"
+            / "nested"
+            / "results.ndjson"
+        )
+        target_parts = {"durable-baseline-results", "nested"}
+        events: list[tuple[str, object, object]] = []
+        real_mkdir = baseline_module.os.mkdir
+        real_open = baseline_module.os.open
+        real_fsync = baseline_module.os.fsync
+
+        def traced_mkdir(path, *args, **kwargs) -> None:
+            parent = kwargs.get("dir_fd")
+            if os.fspath(path) in target_parts:
+                assert isinstance(parent, int)
+                info = os.fstat(parent)
+                parent_identity = (info.st_dev, info.st_ino)
+            else:
+                parent_identity = None
+            real_mkdir(path, *args, **kwargs)
+            if parent_identity is not None:
+                events.append(("mkdir", os.fspath(path), parent_identity))
+
+        def traced_open(path, flags, *args, **kwargs) -> int:
+            descriptor = real_open(path, flags, *args, **kwargs)
+            if os.fspath(path) in target_parts:
+                events.append(("open", os.fspath(path), None))
+            return descriptor
+
+        def traced_fsync(descriptor: int) -> None:
+            real_fsync(descriptor)
+            info = os.fstat(descriptor)
+            events.append(("fsync", None, (info.st_dev, info.st_ino)))
+
+        with (
+            mock.patch.object(
+                baseline_module.os,
+                "mkdir",
+                side_effect=traced_mkdir,
+            ),
+            mock.patch.object(
+                baseline_module.os,
+                "open",
+                side_effect=traced_open,
+            ),
+            mock.patch.object(
+                baseline_module.os,
+                "fsync",
+                side_effect=traced_fsync,
+            ),
+        ):
+            result = run_baseline(
+                self.stage,
+                self.sysroot,
+                self.results,
+                qemu=self.qemu,
+                verifier=lambda _stage: None,
+            )
+
+        for part in ("durable-baseline-results", "nested"):
+            mkdir_index = next(
+                index
+                for index, event in enumerate(events)
+                if event[0:2] == ("mkdir", part)
+            )
+            parent_identity = events[mkdir_index][2]
+            open_index = next(
+                index
+                for index, event in enumerate(events)
+                if index > mkdir_index and event[0:2] == ("open", part)
+            )
+            self.assertTrue(
+                any(
+                    event == ("fsync", None, parent_identity)
+                    for event in events[mkdir_index + 1 : open_index]
+                ),
+                f"parent of {part} was not fsynced before descent",
+            )
+        self.assertTrue(result.all_passed)
+        self.assertTrue(self.results.is_file())
+
     def test_build_statuses_are_checksum_bound_to_staged_results(self) -> None:
         test = self.make_test("pass-case")
         self.write_manifest((test,))

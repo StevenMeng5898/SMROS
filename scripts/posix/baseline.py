@@ -2156,6 +2156,7 @@ def _open_parent(path: Path) -> int:
                 child = os.open(part, flags, dir_fd=descriptor)
             except FileNotFoundError:
                 os.mkdir(part, 0o755, dir_fd=descriptor)
+                os.fsync(descriptor)
                 child = os.open(part, flags, dir_fd=descriptor)
             os.close(descriptor)
             descriptor = child

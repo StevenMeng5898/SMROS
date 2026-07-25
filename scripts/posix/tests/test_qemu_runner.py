@@ -1984,6 +1984,205 @@ class QemuControllerTests(unittest.TestCase):
         self.assertTrue(result.raw_log_path.is_file())
         self.assertFalse(tuple(self.root.glob(".*.tmp")))
 
+    def test_progress_unlink_is_durable_before_success_is_reported(self) -> None:
+        transport = FakeTransport(
+            self.clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+        )
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory([transport]),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-durable-progress-unlink",
+        )
+        output_identity = (self.root.stat().st_dev, self.root.stat().st_ino)
+        events: list[str] = []
+        real_publish = controller._publish
+        real_unlink = qemu_runner_module.os.unlink
+        real_fsync = qemu_runner_module.os.fsync
+
+        def traced_publish(output_descriptor: int, marker_descriptor: int) -> None:
+            real_publish(output_descriptor, marker_descriptor)
+            events.append("result-published")
+
+        def traced_unlink(path, *args, **kwargs) -> None:
+            real_unlink(path, *args, **kwargs)
+            if os.fspath(path) == "progress.json":
+                events.append("progress-unlinked")
+
+        def traced_fsync(descriptor: int) -> None:
+            real_fsync(descriptor)
+            info = os.fstat(descriptor)
+            if (info.st_dev, info.st_ino) == output_identity:
+                events.append("output-fsynced")
+
+        with (
+            mock.patch.object(controller, "_publish", side_effect=traced_publish),
+            mock.patch.object(
+                qemu_runner_module.os,
+                "unlink",
+                side_effect=traced_unlink,
+            ),
+            mock.patch.object(
+                qemu_runner_module.os,
+                "fsync",
+                side_effect=traced_fsync,
+            ),
+        ):
+            result = controller.run()
+            events.append("success-reported")
+
+        self.assertEqual(
+            events[-4:],
+            [
+                "result-published",
+                "progress-unlinked",
+                "output-fsynced",
+                "success-reported",
+            ],
+        )
+        self.assertTrue(result.result_path.is_file())
+        self.assertFalse((self.root / "progress.json").exists())
+
+    def test_progress_unlink_fsync_failure_preserves_truthful_state(self) -> None:
+        transport = FakeTransport(
+            self.clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+        )
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory([transport]),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-progress-unlink-fsync-failure",
+        )
+        output_identity = (self.root.stat().st_dev, self.root.stat().st_ino)
+        progress_unlinked = False
+        injected = OSError(errno.EIO, "progress unlink fsync failed")
+        real_unlink = qemu_runner_module.os.unlink
+        real_fsync = qemu_runner_module.os.fsync
+
+        def tracked_unlink(path, *args, **kwargs) -> None:
+            nonlocal progress_unlinked
+            real_unlink(path, *args, **kwargs)
+            if os.fspath(path) == "progress.json":
+                progress_unlinked = True
+
+        def fail_progress_unlink_fsync(descriptor: int) -> None:
+            info = os.fstat(descriptor)
+            if progress_unlinked and (info.st_dev, info.st_ino) == output_identity:
+                raise injected
+            real_fsync(descriptor)
+
+        with (
+            mock.patch.object(
+                qemu_runner_module.os,
+                "unlink",
+                side_effect=tracked_unlink,
+            ),
+            mock.patch.object(
+                qemu_runner_module.os,
+                "fsync",
+                side_effect=fail_progress_unlink_fsync,
+            ),
+        ):
+            with self.assertRaises(ControllerError) as raised:
+                controller.run()
+
+        self.assertIs(type(raised.exception), ControllerError)
+        self.assertIs(raised.exception.__cause__, injected)
+        self.assertTrue((self.root / "results.ndjson").is_file())
+        self.assertFalse((self.root / "progress.json").exists())
+
+    def test_first_run_fsyncs_each_new_output_parent_before_descent(self) -> None:
+        output = self.root / "durable-qemu-output" / "nested"
+        transport = FakeTransport(
+            self.clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+        )
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory([transport]),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-durable-output-chain",
+        )
+        target_parts = {"durable-qemu-output", "nested"}
+        events: list[tuple[str, object, object]] = []
+        real_mkdir = qemu_runner_module.os.mkdir
+        real_open = qemu_runner_module.os.open
+        real_fsync = qemu_runner_module.os.fsync
+
+        def traced_mkdir(path, *args, **kwargs) -> None:
+            parent = kwargs.get("dir_fd")
+            if os.fspath(path) in target_parts:
+                assert isinstance(parent, int)
+                info = os.fstat(parent)
+                parent_identity = (info.st_dev, info.st_ino)
+            else:
+                parent_identity = None
+            real_mkdir(path, *args, **kwargs)
+            if parent_identity is not None:
+                events.append(("mkdir", os.fspath(path), parent_identity))
+
+        def traced_open(path, flags, *args, **kwargs) -> int:
+            descriptor = real_open(path, flags, *args, **kwargs)
+            if os.fspath(path) in target_parts:
+                events.append(("open", os.fspath(path), None))
+            return descriptor
+
+        def traced_fsync(descriptor: int) -> None:
+            real_fsync(descriptor)
+            info = os.fstat(descriptor)
+            events.append(("fsync", None, (info.st_dev, info.st_ino)))
+
+        with (
+            mock.patch.object(
+                qemu_runner_module.os,
+                "mkdir",
+                side_effect=traced_mkdir,
+            ),
+            mock.patch.object(
+                qemu_runner_module.os,
+                "open",
+                side_effect=traced_open,
+            ),
+            mock.patch.object(
+                qemu_runner_module.os,
+                "fsync",
+                side_effect=traced_fsync,
+            ),
+        ):
+            result = controller.run()
+
+        for part in ("durable-qemu-output", "nested"):
+            mkdir_index = next(
+                index
+                for index, event in enumerate(events)
+                if event[0:2] == ("mkdir", part)
+            )
+            parent_identity = events[mkdir_index][2]
+            open_index = next(
+                index
+                for index, event in enumerate(events)
+                if index > mkdir_index and event[0:2] == ("open", part)
+            )
+            self.assertTrue(
+                any(
+                    event == ("fsync", None, parent_identity)
+                    for event in events[mkdir_index + 1 : open_index]
+                ),
+                f"parent of {part} was not fsynced before descent",
+            )
+        self.assertTrue(result.result_path.is_file())
+
     def test_fresh_run_invalidates_stale_results_before_progress(self) -> None:
         prior_transport = FakeTransport(
             self.clock,
