@@ -1071,6 +1071,18 @@ class QemuController:
                     result_fingerprint,
                     "before progress retirement commit",
                 )
+                try:
+                    os.stat(
+                        self._progress_path.name,
+                        dir_fd=output_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise ControllerError(
+                        "resume QEMU progress appeared before retirement commit"
+                    )
             except BaseException as operation_error:
                 try:
                     self._restore_staged_progress(
@@ -1115,6 +1127,18 @@ class QemuController:
                     result_fingerprint,
                     "after progress retirement commit",
                 )
+                try:
+                    os.stat(
+                        self._progress_path.name,
+                        dir_fd=output_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise ControllerError(
+                        "resume QEMU progress appeared after retirement commit"
+                    )
             except BaseException as operation_error:
                 try:
                     self._recreate_retired_progress(
@@ -2746,6 +2770,7 @@ class QemuController:
         published = False
         operation_error: BaseException | None = None
         try:
+            self._recover_interrupted_progress_retirement(output_descriptor)
             if not resume:
                 run_id = self._run_id_factory()
                 if not is_valid_run_id(run_id):
@@ -2756,8 +2781,6 @@ class QemuController:
                 self._restart_count = 0
                 self._boot_count = 0
                 marker_descriptor = self._invalidate_results(output_descriptor)
-            else:
-                self._recover_interrupted_progress_retirement(output_descriptor)
             with self._open_raw_log(output_descriptor, resume=resume) as raw:
                 recovered_result = False
                 if resume:

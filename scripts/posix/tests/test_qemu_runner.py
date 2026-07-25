@@ -2772,6 +2772,293 @@ class QemuControllerTests(unittest.TestCase):
             if result_descriptor is not None:
                 os.close(result_descriptor)
 
+    def test_terminal_resume_retains_checkpoint_when_progress_appears_before_commit(
+        self,
+    ) -> None:
+        output = self.root / "resume-terminal-progress-before-commit"
+        clock, result_bytes, progress_bytes = self._create_postcommit_campaign(
+            output
+        )
+        replacement = b"progress replacement before commit\n"
+        replacement_descriptor: int | None = None
+        transport = FakeTransport(clock, [])
+        factory = TransportFactory([transport])
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+            monotonic=clock.monotonic,
+        )
+        real_validate = controller._validate_retirement_result
+
+        def replace_after_staged_validation(*args, **kwargs) -> None:
+            nonlocal replacement_descriptor
+            real_validate(*args, **kwargs)
+            phase = args[3] if len(args) > 3 else kwargs["phase"]
+            if phase == "after progress staging":
+                replacement_descriptor = self._replace_and_hold(
+                    output / "progress.json",
+                    "progress-before-commit-replacement",
+                    replacement,
+                )
+
+        errors: list[BaseException] = []
+        try:
+            with mock.patch.object(
+                controller,
+                "_validate_retirement_result",
+                side_effect=replace_after_staged_validation,
+            ):
+                try:
+                    controller.run(resume=True)
+                except BaseException as error:
+                    errors.append(error)
+
+            self.assertIsNotNone(replacement_descriptor)
+            assert replacement_descriptor is not None
+            self.assertEqual(os.fstat(replacement_descriptor).st_nlink, 1)
+            self.assertEqual(
+                (output / "progress.json").read_bytes(), replacement
+            )
+            retained = output / ".progress.json.retiring"
+            self.assertTrue(retained.is_file())
+            self.assertEqual(retained.read_bytes(), progress_bytes)
+            self.assertEqual(retained.stat().st_nlink, 1)
+            self.assertEqual(
+                (output / "results.ndjson").read_bytes(), result_bytes
+            )
+            self.assertEqual(factory.argv, [])
+            self.assertEqual(transport.writes, [])
+            self.assertEqual(len(errors), 1)
+            self.assertIs(type(errors[0]), ControllerError)
+        finally:
+            if replacement_descriptor is not None:
+                os.close(replacement_descriptor)
+
+    def test_terminal_resume_recreates_checkpoint_when_progress_appears_during_cleanup(
+        self,
+    ) -> None:
+        output = self.root / "resume-terminal-progress-during-cleanup"
+        clock, result_bytes, progress_bytes = self._create_postcommit_campaign(
+            output
+        )
+        replacement = b"progress replacement during cleanup\n"
+        replacement_descriptor: int | None = None
+        transport = FakeTransport(clock, [])
+        factory = TransportFactory([transport])
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+            monotonic=clock.monotonic,
+        )
+        real_remove = qemu_runner_module._remove_owned_result_entry
+
+        def replace_after_retirement_cleanup(
+            output_descriptor: int,
+            name: str,
+            expected_descriptor: int,
+        ) -> None:
+            nonlocal replacement_descriptor
+            real_remove(output_descriptor, name, expected_descriptor)
+            if name == ".progress.json.retiring":
+                replacement_descriptor = self._replace_and_hold(
+                    output / "progress.json",
+                    "progress-during-cleanup-replacement",
+                    replacement,
+                )
+
+        errors: list[BaseException] = []
+        try:
+            with mock.patch.object(
+                qemu_runner_module,
+                "_remove_owned_result_entry",
+                side_effect=replace_after_retirement_cleanup,
+            ):
+                try:
+                    controller.run(resume=True)
+                except BaseException as error:
+                    errors.append(error)
+
+            self.assertIsNotNone(replacement_descriptor)
+            assert replacement_descriptor is not None
+            self.assertEqual(os.fstat(replacement_descriptor).st_nlink, 1)
+            self.assertEqual(
+                (output / "progress.json").read_bytes(), replacement
+            )
+            retained = output / ".progress.json.retiring"
+            self.assertTrue(retained.is_file())
+            self.assertEqual(retained.read_bytes(), progress_bytes)
+            self.assertEqual(retained.stat().st_nlink, 1)
+            self.assertEqual(
+                (output / "results.ndjson").read_bytes(), result_bytes
+            )
+            self.assertEqual(factory.argv, [])
+            self.assertEqual(transport.writes, [])
+            self.assertEqual(len(errors), 1)
+            self.assertIs(type(errors[0]), ControllerError)
+        finally:
+            if replacement_descriptor is not None:
+                os.close(replacement_descriptor)
+
+    def test_fresh_campaign_reconciles_staged_progress_before_superseding_it(
+        self,
+    ) -> None:
+        output = self.root / "fresh-reconciles-staged-progress"
+        clock, _result_bytes, _progress_bytes = self._create_postcommit_campaign(
+            output
+        )
+        os.replace(
+            output / "progress.json",
+            output / ".progress.json.retiring",
+        )
+        transport = FakeTransport(
+            clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+        )
+        factory = TransportFactory([transport])
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "fresh-reconciles-staged-progress",
+        )
+
+        result = controller.run()
+
+        self.assertTrue(result.complete)
+        self.assertEqual(len(factory.argv), 1)
+        self.assertFalse((output / "progress.json").exists())
+        self.assertFalse((output / ".progress.json.retiring").exists())
+
+    def test_fresh_campaign_rejects_staged_and_public_progress_before_mutation(
+        self,
+    ) -> None:
+        output = self.root / "fresh-rejects-staged-and-public-progress"
+        clock, result_bytes, progress_bytes = self._create_postcommit_campaign(
+            output
+        )
+        os.replace(
+            output / "progress.json",
+            output / ".progress.json.retiring",
+        )
+        blocker = b"fresh public progress blocker\n"
+        blocker_descriptor = self._replace_and_hold(
+            output / "progress.json",
+            "fresh-progress-blocker",
+            blocker,
+        )
+        result_descriptor = os.open(output / "results.ndjson", os.O_RDONLY)
+        transport = FakeTransport(
+            clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+        )
+        factory = TransportFactory([transport])
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "fresh-must-not-start",
+        )
+        errors: list[BaseException] = []
+        try:
+            try:
+                controller.run()
+            except BaseException as error:
+                errors.append(error)
+
+            self.assertEqual(os.fstat(blocker_descriptor).st_nlink, 1)
+            self.assertEqual(os.fstat(result_descriptor).st_nlink, 1)
+            self.assertEqual(
+                (output / "progress.json").read_bytes(), blocker
+            )
+            self.assertEqual(
+                (output / ".progress.json.retiring").read_bytes(),
+                progress_bytes,
+            )
+            self.assertEqual(
+                (output / "results.ndjson").read_bytes(), result_bytes
+            )
+            self.assertEqual(factory.argv, [])
+            self.assertEqual(transport.writes, [])
+            self.assertEqual(len(errors), 1)
+            self.assertIs(type(errors[0]), ControllerError)
+        finally:
+            os.close(result_descriptor)
+            os.close(blocker_descriptor)
+
+    def test_fresh_campaign_reconciliation_prevents_later_resume_wedge(self) -> None:
+        output = self.root / "fresh-reconciliation-prevents-resume-wedge"
+        clock, _result_bytes, _progress_bytes = self._create_postcommit_campaign(
+            output
+        )
+        os.replace(
+            output / "progress.json",
+            output / ".progress.json.retiring",
+        )
+        interrupted_transport = FakeTransport(clock, [PROMPT, KeyboardInterrupt()])
+        fresh = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory([interrupted_transport]),
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "fresh-before-resume-wedge",
+        )
+        with self.assertRaises(KeyboardInterrupt):
+            fresh.run()
+
+        resumed_transport = FakeTransport(
+            clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+        )
+        resumed_factory = TransportFactory([resumed_transport])
+        resumed = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=resumed_factory,
+            monotonic=clock.monotonic,
+        )
+        errors: list[BaseException] = []
+        result: ControllerResult | None = None
+        try:
+            result = resumed.run(resume=True)
+        except BaseException as error:
+            errors.append(error)
+
+        self.assertEqual(errors, [])
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result.complete)
+        self.assertEqual(len(resumed_factory.argv), 1)
+        self.assertFalse((output / "progress.json").exists())
+        self.assertFalse((output / ".progress.json.retiring").exists())
+
     def test_partial_resume_rejects_result_replacement_after_validation(
         self,
     ) -> None:
