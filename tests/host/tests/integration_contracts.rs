@@ -701,6 +701,8 @@ fn posix_conformance_workflow_and_limitations_are_documented() {
         "incomplete VFS, signals, and threads",
         "Open POSIX Test Suite evidence is not IEEE or Open Group certification",
         "Direct Rust and model tests never count as POSIX passes",
+        "Quality evidence text rejects all Unicode C0/C1 control characters",
+        "including tab, newline, and carriage return",
         "quality evidence never changes POSIX denominators",
     ] {
         assert!(

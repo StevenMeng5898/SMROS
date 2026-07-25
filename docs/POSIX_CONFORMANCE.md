@@ -214,7 +214,10 @@ atomically published generation.
 
 Optional quality evidence is strict canonical LF JSON, at most 1 MiB, with at
 most 128 uniquely named checks. Names are at most 128 UTF-8 bytes; other text
-fields are at most 4096 UTF-8 bytes. The exact input schema is:
+fields are at most 4096 UTF-8 bytes.
+Quality evidence text rejects all Unicode C0/C1 control characters,
+including tab, newline, and carriage return.
+The exact input schema is:
 
 ```json
 {"architecture":"aarch64","checks":[{"artifact":null,"command":null,"coverage_percent":null,"findings":null,"kind":"static-analysis","name":"coverity","status":"unavailable","summary":"Coverity tools are not installed","version":null}],"schema":1,"smros_commit":"0000000000000000000000000000000000000000"}
