@@ -7,6 +7,7 @@ from collections.abc import Callable, Sequence
 import ctypes
 from dataclasses import dataclass, fields
 import errno
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -62,6 +63,8 @@ _MAX_RESULT_LINE_BYTES = 512 * 1024
 _PERSISTED_ATTEMPTS_BUDGET = 120 * 1024 * 1024
 _ATTEMPT_FIXED_BUDGET = 8 * 1024
 _JSON_ESCAPE_EXPANSION = 6
+_RESULT_QUARANTINE_NAME = ".smros-posix-qemu-quarantine"
+_RESULT_QUARANTINE_SLOT = "cleanup"
 
 
 class ControllerError(RuntimeError):
@@ -463,10 +466,11 @@ def _reject_progress_duplicate_keys(
     return value
 
 
-def _rename_result_entry(
-    parent: int,
-    first: str,
-    second: str,
+def _rename_result_between(
+    source_parent: int,
+    source_name: str,
+    destination_parent: int,
+    destination_name: str,
     flags: int,
 ) -> None:
     renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
@@ -481,10 +485,10 @@ def _rename_result_entry(
     )
     renameat2.restype = ctypes.c_int
     if renameat2(
-        parent,
-        os.fsencode(first),
-        parent,
-        os.fsencode(second),
+        source_parent,
+        os.fsencode(source_name),
+        destination_parent,
+        os.fsencode(destination_name),
         flags,
     ) != 0:
         error_number = ctypes.get_errno()
@@ -492,11 +496,35 @@ def _rename_result_entry(
             raise ControllerError(
                 "atomic QEMU result transitions are unavailable"
             )
-        raise OSError(error_number, os.strerror(error_number), first)
+        raise OSError(error_number, os.strerror(error_number), source_name)
+
+
+def _rename_result_entry(
+    parent: int,
+    first: str,
+    second: str,
+    flags: int,
+) -> None:
+    _rename_result_between(parent, first, parent, second, flags)
 
 
 def _rename_noreplace(parent: int, first: str, second: str) -> None:
     _rename_result_entry(parent, first, second, 1)
+
+
+def _rename_noreplace_between(
+    source_parent: int,
+    source_name: str,
+    destination_parent: int,
+    destination_name: str,
+) -> None:
+    _rename_result_between(
+        source_parent,
+        source_name,
+        destination_parent,
+        destination_name,
+        1,
+    )
 
 
 def _rename_exchange(parent: int, first: str, second: str) -> None:
@@ -530,6 +558,110 @@ def _write_all(descriptor: int, data: bytes) -> None:
         if written <= 0:
             raise OSError("QEMU result write made no progress")
         view = view[written:]
+
+
+def _open_result_quarantine(output_descriptor: int) -> int:
+    descriptor: int | None = None
+    try:
+        try:
+            os.mkdir(_RESULT_QUARANTINE_NAME, 0o700, dir_fd=output_descriptor)
+        except FileExistsError:
+            pass
+        descriptor = os.open(
+            _RESULT_QUARANTINE_NAME,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=output_descriptor,
+        )
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+            or not _entry_matches(
+                output_descriptor,
+                _RESULT_QUARANTINE_NAME,
+                descriptor,
+            )
+        ):
+            raise ControllerError("QEMU result quarantine is unsafe")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if not _entry_matches(
+            output_descriptor,
+            _RESULT_QUARANTINE_NAME,
+            descriptor,
+        ):
+            raise ControllerError("QEMU result quarantine changed while locking")
+        with os.scandir(descriptor) as entries:
+            if next(entries, None) is not None:
+                raise ControllerError("QEMU result quarantine is not empty")
+        os.fsync(output_descriptor)
+        return descriptor
+    except ControllerError:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+    except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise ControllerError(
+            "QEMU result quarantine could not be opened safely"
+        ) from error
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+
+
+def _remove_owned_result_entry(
+    output_descriptor: int,
+    name: str,
+    expected_descriptor: int,
+) -> None:
+    if not _entry_matches(output_descriptor, name, expected_descriptor):
+        raise ControllerError("QEMU results changed during cleanup")
+    quarantine_descriptor = _open_result_quarantine(output_descriptor)
+    try:
+        try:
+            _rename_noreplace_between(
+                output_descriptor,
+                name,
+                quarantine_descriptor,
+                _RESULT_QUARANTINE_SLOT,
+            )
+        except FileExistsError as error:
+            raise ControllerError("QEMU result quarantine is not empty") from error
+        os.fsync(output_descriptor)
+        os.fsync(quarantine_descriptor)
+        if not _entry_matches(
+            quarantine_descriptor,
+            _RESULT_QUARANTINE_SLOT,
+            expected_descriptor,
+        ):
+            try:
+                _rename_noreplace_between(
+                    quarantine_descriptor,
+                    _RESULT_QUARANTINE_SLOT,
+                    output_descriptor,
+                    name,
+                )
+            except FileExistsError as error:
+                raise ControllerError(
+                    "QEMU results changed and cleanup restoration was blocked"
+                ) from error
+            os.fsync(quarantine_descriptor)
+            os.fsync(output_descriptor)
+            raise ControllerError("QEMU results changed during cleanup")
+        os.unlink(_RESULT_QUARANTINE_SLOT, dir_fd=quarantine_descriptor)
+        os.fsync(quarantine_descriptor)
+    except ControllerError:
+        raise
+    except OSError as error:
+        raise ControllerError("QEMU results could not be cleaned safely") from error
+    finally:
+        os.close(quarantine_descriptor)
 
 
 class QemuController:
@@ -671,9 +803,12 @@ class QemuController:
                     marker_name,
                     prior_descriptor,
                 ):
-                    os.unlink(marker_name, dir_fd=output_descriptor)
+                    _remove_owned_result_entry(
+                        output_descriptor,
+                        marker_name,
+                        prior_descriptor,
+                    )
                     marker_name = ""
-                    os.fsync(output_descriptor)
                 raise ControllerError("QEMU results changed during invalidation")
             if not _entry_matches(
                 output_descriptor,
@@ -718,13 +853,19 @@ class QemuController:
                     raise ControllerError(
                         "QEMU results invalidation rollback is inconsistent"
                     )
-                os.unlink(marker_name, dir_fd=output_descriptor)
+                _remove_owned_result_entry(
+                    output_descriptor,
+                    marker_name,
+                    marker_descriptor,
+                )
                 marker_name = ""
-                os.fsync(output_descriptor)
                 raise ControllerError("QEMU results changed during invalidation")
-            os.unlink(marker_name, dir_fd=output_descriptor)
+            _remove_owned_result_entry(
+                output_descriptor,
+                marker_name,
+                prior_descriptor,
+            )
             marker_name = ""
-            os.fsync(output_descriptor)
             if not _entry_matches(
                 output_descriptor,
                 self._result_path.name,
@@ -740,32 +881,40 @@ class QemuController:
                 "QEMU results could not be invalidated safely"
             ) from error
         finally:
+            cleanup_error: ControllerError | None = None
             if marker_name:
                 try:
-                    owned = (
-                        marker_descriptor is not None
-                        and _entry_matches(
+                    owned_descriptor: int | None = None
+                    if marker_descriptor is not None and _entry_matches(
+                        output_descriptor,
+                        marker_name,
+                        marker_descriptor,
+                    ):
+                        owned_descriptor = marker_descriptor
+                    elif prior_descriptor is not None and _entry_matches(
+                        output_descriptor,
+                        marker_name,
+                        prior_descriptor,
+                    ):
+                        owned_descriptor = prior_descriptor
+                    if owned_descriptor is not None:
+                        _remove_owned_result_entry(
                             output_descriptor,
                             marker_name,
-                            marker_descriptor,
+                            owned_descriptor,
                         )
-                    ) or (
-                        prior_descriptor is not None
-                        and _entry_matches(
-                            output_descriptor,
-                            marker_name,
-                            prior_descriptor,
-                        )
-                    )
-                    if owned:
-                        os.unlink(marker_name, dir_fd=output_descriptor)
-                        os.fsync(output_descriptor)
+                except ControllerError as error:
+                    cleanup_error = error
                 except OSError:
                     pass
-            if prior_descriptor is not None:
-                os.close(prior_descriptor)
-            if marker_descriptor is not None and not keep_marker:
-                os.close(marker_descriptor)
+            try:
+                if prior_descriptor is not None:
+                    os.close(prior_descriptor)
+            finally:
+                if marker_descriptor is not None and not keep_marker:
+                    os.close(marker_descriptor)
+            if cleanup_error is not None:
+                raise cleanup_error
 
     def _bind_result_marker(self, output_descriptor: int) -> int:
         descriptor: int | None = None
@@ -1619,9 +1768,12 @@ class QemuController:
             )
             if not generated_is_public:
                 if marker_was_displaced:
-                    os.unlink(temporary_name, dir_fd=output_descriptor)
+                    _remove_owned_result_entry(
+                        output_descriptor,
+                        temporary_name,
+                        marker_descriptor,
+                    )
                     temporary_name = ""
-                    os.fsync(output_descriptor)
                 raise ControllerError("QEMU results changed during publication")
             if not marker_was_displaced:
                 displaced = os.stat(
@@ -1657,13 +1809,19 @@ class QemuController:
                     raise ControllerError(
                         "QEMU results publication rollback is inconsistent"
                     )
-                os.unlink(temporary_name, dir_fd=output_descriptor)
+                _remove_owned_result_entry(
+                    output_descriptor,
+                    temporary_name,
+                    generated_descriptor,
+                )
                 temporary_name = ""
-                os.fsync(output_descriptor)
                 raise ControllerError("QEMU results changed during publication")
-            os.unlink(temporary_name, dir_fd=output_descriptor)
+            _remove_owned_result_entry(
+                output_descriptor,
+                temporary_name,
+                marker_descriptor,
+            )
             temporary_name = ""
-            os.fsync(output_descriptor)
             if not _entry_matches(
                 output_descriptor,
                 self._result_path.name,
@@ -1677,27 +1835,36 @@ class QemuController:
                 "QEMU results could not be published safely"
             ) from error
         finally:
+            cleanup_error: ControllerError | None = None
             if temporary_name:
                 try:
-                    owned = (
-                        generated_descriptor is not None
-                        and _entry_matches(
-                            output_descriptor,
-                            temporary_name,
-                            generated_descriptor,
-                        )
-                    ) or _entry_matches(
+                    owned_descriptor: int | None = None
+                    if generated_descriptor is not None and _entry_matches(
+                        output_descriptor,
+                        temporary_name,
+                        generated_descriptor,
+                    ):
+                        owned_descriptor = generated_descriptor
+                    elif _entry_matches(
                         output_descriptor,
                         temporary_name,
                         marker_descriptor,
-                    )
-                    if owned:
-                        os.unlink(temporary_name, dir_fd=output_descriptor)
-                        os.fsync(output_descriptor)
+                    ):
+                        owned_descriptor = marker_descriptor
+                    if owned_descriptor is not None:
+                        _remove_owned_result_entry(
+                            output_descriptor,
+                            temporary_name,
+                            owned_descriptor,
+                        )
+                except ControllerError as error:
+                    cleanup_error = error
                 except OSError:
                     pass
             if generated_descriptor is not None:
                 os.close(generated_descriptor)
+            if cleanup_error is not None:
+                raise cleanup_error
 
     def run(self, resume: bool = False) -> ControllerResult:
         output_descriptor = _open_parent(self._output)

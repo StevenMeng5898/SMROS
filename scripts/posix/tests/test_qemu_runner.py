@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
+import errno
 import io
 import json
 import os
@@ -2261,6 +2262,252 @@ class QemuControllerTests(unittest.TestCase):
         self.assertGreaterEqual(public_checks, 2)
         self.assertFalse((self.root / "progress.json").exists())
 
+    def test_result_invalidation_cleanup_preserves_a_checked_replacement(
+        self,
+    ) -> None:
+        QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory(
+                [
+                    FakeTransport(
+                        self.clock,
+                        [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+                    )
+                ]
+            ),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-prior-cleanup-check",
+        ).run()
+        replacement_path = self.root / "invalidation-cleanup-replacement"
+        replacement = b"invalidation cleanup replacement\n"
+        replacement_path.write_bytes(replacement)
+        real_matches = qemu_runner_module._entry_matches
+        injected_path: Path | None = None
+
+        def replace_after_hidden_check(
+            parent: int,
+            name: str,
+            descriptor: int,
+        ) -> bool:
+            nonlocal injected_path
+            matches = real_matches(parent, name, descriptor)
+            if (
+                injected_path is None
+                and matches
+                and name.startswith(".results.ndjson.")
+                and name.endswith(".invalid")
+            ):
+                os.replace(
+                    replacement_path.name,
+                    name,
+                    src_dir_fd=parent,
+                    dst_dir_fd=parent,
+                )
+                injected_path = self.root / name
+            return matches
+
+        fresh = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory(
+                [
+                    FakeTransport(
+                        self.clock,
+                        [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+                    )
+                ]
+            ),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-invalidation-cleanup-check",
+        )
+        with mock.patch.object(
+            qemu_runner_module,
+            "_entry_matches",
+            side_effect=replace_after_hidden_check,
+        ):
+            with self.assertRaisesRegex(ControllerError, "results changed"):
+                fresh.run()
+
+        self.assertIsNotNone(injected_path)
+        assert injected_path is not None
+        self.assertTrue(injected_path.is_file())
+        self.assertEqual(injected_path.read_bytes(), replacement)
+
+    def test_result_invalidation_rollback_preserves_a_checked_replacement(
+        self,
+    ) -> None:
+        prior = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory(
+                [
+                    FakeTransport(
+                        self.clock,
+                        [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+                    )
+                ]
+            ),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-prior-rollback-check",
+        ).run()
+        prior_bytes = prior.result_path.read_bytes()
+        public_source = self.root / "invalidation-rollback-public"
+        public_replacement = b"invalidation rollback public replacement\n"
+        public_source.write_bytes(public_replacement)
+        cleanup_source = self.root / "invalidation-rollback-cleanup"
+        cleanup_replacement = b"invalidation rollback cleanup replacement\n"
+        cleanup_source.write_bytes(cleanup_replacement)
+        real_exchange = qemu_runner_module._rename_exchange
+        real_matches = qemu_runner_module._entry_matches
+        exchanged = False
+        injected_path: Path | None = None
+
+        def replace_public_then_exchange(parent: int, first: str, second: str) -> None:
+            nonlocal exchanged
+            if not exchanged:
+                exchanged = True
+                os.replace(
+                    public_source.name,
+                    first,
+                    src_dir_fd=parent,
+                    dst_dir_fd=parent,
+                )
+            real_exchange(parent, first, second)
+
+        def replace_after_rollback_check(
+            parent: int,
+            name: str,
+            descriptor: int,
+        ) -> bool:
+            nonlocal injected_path
+            matches = real_matches(parent, name, descriptor)
+            if (
+                exchanged
+                and injected_path is None
+                and matches
+                and name.startswith(".results.ndjson.")
+                and name.endswith(".invalid")
+            ):
+                os.replace(
+                    cleanup_source.name,
+                    name,
+                    src_dir_fd=parent,
+                    dst_dir_fd=parent,
+                )
+                injected_path = self.root / name
+            return matches
+
+        fresh = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory(
+                [
+                    FakeTransport(
+                        self.clock,
+                        [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+                    )
+                ]
+            ),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-invalidation-rollback-check",
+        )
+        with mock.patch.object(
+            qemu_runner_module,
+            "_rename_exchange",
+            side_effect=replace_public_then_exchange,
+        ), mock.patch.object(
+            qemu_runner_module,
+            "_entry_matches",
+            side_effect=replace_after_rollback_check,
+        ):
+            with self.assertRaisesRegex(ControllerError, "results changed"):
+                fresh.run()
+
+        self.assertNotEqual(prior_bytes, public_replacement)
+        self.assertEqual(prior.result_path.read_bytes(), public_replacement)
+        self.assertIsNotNone(injected_path)
+        assert injected_path is not None
+        self.assertTrue(injected_path.is_file())
+        self.assertEqual(injected_path.read_bytes(), cleanup_replacement)
+
+    def test_result_invalidation_finally_preserves_a_checked_replacement(
+        self,
+    ) -> None:
+        prior = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory(
+                [
+                    FakeTransport(
+                        self.clock,
+                        [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+                    )
+                ]
+            ),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-prior-finally-check",
+        ).run()
+        prior_bytes = prior.result_path.read_bytes()
+        replacement_path = self.root / "invalidation-finally-replacement"
+        replacement = b"invalidation finally replacement\n"
+        replacement_path.write_bytes(replacement)
+        real_matches = qemu_runner_module._entry_matches
+        injected_path: Path | None = None
+
+        def replace_after_finally_check(
+            parent: int,
+            name: str,
+            descriptor: int,
+        ) -> bool:
+            nonlocal injected_path
+            matches = real_matches(parent, name, descriptor)
+            if (
+                injected_path is None
+                and matches
+                and name.startswith(".results.ndjson.")
+                and name.endswith(".invalid")
+            ):
+                os.replace(
+                    replacement_path.name,
+                    name,
+                    src_dir_fd=parent,
+                    dst_dir_fd=parent,
+                )
+                injected_path = self.root / name
+            return matches
+
+        fresh = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory([]),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-invalidation-finally-check",
+        )
+        with mock.patch.object(
+            qemu_runner_module,
+            "_rename_exchange",
+            side_effect=OSError(errno.EIO, "injected exchange failure"),
+        ), mock.patch.object(
+            qemu_runner_module,
+            "_entry_matches",
+            side_effect=replace_after_finally_check,
+        ):
+            with self.assertRaises(ControllerError):
+                fresh.run()
+
+        self.assertEqual(prior.result_path.read_bytes(), prior_bytes)
+        self.assertIsNotNone(injected_path)
+        assert injected_path is not None
+        self.assertTrue(injected_path.is_file())
+        self.assertEqual(injected_path.read_bytes(), replacement)
+
     def test_result_publication_preserves_replacements_at_exchange_boundaries(
         self,
     ) -> None:
@@ -2322,6 +2569,231 @@ class QemuControllerTests(unittest.TestCase):
                     replacement,
                 )
                 self.assertEqual(exchange_count, 2 if timing == "before" else 1)
+
+    def test_result_publication_cleanup_preserves_a_checked_replacement(
+        self,
+    ) -> None:
+        output = self.root / "publication-cleanup-check"
+        output.mkdir()
+        replacement_path = output / "publication-cleanup-replacement"
+        replacement = b"publication cleanup replacement\n"
+        replacement_path.write_bytes(replacement)
+        clock = FakeClock()
+        real_matches = qemu_runner_module._entry_matches
+        injected_path: Path | None = None
+
+        def replace_after_marker_check(
+            parent: int,
+            name: str,
+            descriptor: int,
+        ) -> bool:
+            nonlocal injected_path
+            matches = real_matches(parent, name, descriptor)
+            if (
+                injected_path is None
+                and matches
+                and name.startswith(".results.ndjson.")
+                and name.endswith(".publish")
+            ):
+                os.replace(
+                    replacement_path.name,
+                    name,
+                    src_dir_fd=parent,
+                    dst_dir_fd=parent,
+                )
+                injected_path = output / name
+            return matches
+
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory(
+                [
+                    FakeTransport(
+                        clock,
+                        [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+                    )
+                ]
+            ),
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "controller-publication-cleanup-check",
+        )
+        with mock.patch.object(
+            qemu_runner_module,
+            "_entry_matches",
+            side_effect=replace_after_marker_check,
+        ):
+            with self.assertRaisesRegex(ControllerError, "results changed"):
+                controller.run()
+
+        self.assertIsNotNone(injected_path)
+        assert injected_path is not None
+        self.assertTrue(injected_path.is_file())
+        self.assertEqual(injected_path.read_bytes(), replacement)
+
+    def test_result_publication_rollback_preserves_a_checked_replacement(
+        self,
+    ) -> None:
+        output = self.root / "publication-rollback-check"
+        output.mkdir()
+        public_source = output / "publication-rollback-public"
+        public_replacement = b"publication rollback public replacement\n"
+        public_source.write_bytes(public_replacement)
+        cleanup_source = output / "publication-rollback-cleanup"
+        cleanup_replacement = b"publication rollback cleanup replacement\n"
+        cleanup_source.write_bytes(cleanup_replacement)
+        clock = FakeClock()
+        real_exchange = qemu_runner_module._rename_exchange
+        real_matches = qemu_runner_module._entry_matches
+        exchange_count = 0
+        injected_path: Path | None = None
+
+        def replace_public_then_exchange(parent: int, first: str, second: str) -> None:
+            nonlocal exchange_count
+            exchange_count += 1
+            if exchange_count == 1:
+                os.replace(
+                    public_source.name,
+                    "results.ndjson",
+                    src_dir_fd=parent,
+                    dst_dir_fd=parent,
+                )
+            real_exchange(parent, first, second)
+
+        def replace_after_generated_check(
+            parent: int,
+            name: str,
+            descriptor: int,
+        ) -> bool:
+            nonlocal injected_path
+            matches = real_matches(parent, name, descriptor)
+            if (
+                exchange_count == 2
+                and injected_path is None
+                and matches
+                and name.startswith(".results.ndjson.")
+                and name.endswith(".publish")
+            ):
+                os.replace(
+                    cleanup_source.name,
+                    name,
+                    src_dir_fd=parent,
+                    dst_dir_fd=parent,
+                )
+                injected_path = output / name
+            return matches
+
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory(
+                [
+                    FakeTransport(
+                        clock,
+                        [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+                    )
+                ]
+            ),
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "controller-publication-rollback-check",
+        )
+        with mock.patch.object(
+            qemu_runner_module,
+            "_rename_exchange",
+            side_effect=replace_public_then_exchange,
+        ), mock.patch.object(
+            qemu_runner_module,
+            "_entry_matches",
+            side_effect=replace_after_generated_check,
+        ):
+            with self.assertRaisesRegex(ControllerError, "results changed"):
+                controller.run()
+
+        self.assertEqual(
+            (output / "results.ndjson").read_bytes(),
+            public_replacement,
+        )
+        self.assertIsNotNone(injected_path)
+        assert injected_path is not None
+        self.assertTrue(injected_path.is_file())
+        self.assertEqual(injected_path.read_bytes(), cleanup_replacement)
+
+    def test_result_publication_finally_preserves_a_checked_replacement(
+        self,
+    ) -> None:
+        output = self.root / "publication-finally-check"
+        output.mkdir()
+        replacement_path = output / "publication-finally-replacement"
+        replacement = b"publication finally replacement\n"
+        replacement_path.write_bytes(replacement)
+        clock = FakeClock()
+        real_matches = qemu_runner_module._entry_matches
+        injected_path: Path | None = None
+
+        def replace_after_finally_check(
+            parent: int,
+            name: str,
+            descriptor: int,
+        ) -> bool:
+            nonlocal injected_path
+            matches = real_matches(parent, name, descriptor)
+            if (
+                injected_path is None
+                and matches
+                and name.startswith(".results.ndjson.")
+                and name.endswith(".publish")
+            ):
+                os.replace(
+                    replacement_path.name,
+                    name,
+                    src_dir_fd=parent,
+                    dst_dir_fd=parent,
+                )
+                injected_path = output / name
+            return matches
+
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory(
+                [
+                    FakeTransport(
+                        clock,
+                        [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+                    )
+                ]
+            ),
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "controller-publication-finally-check",
+        )
+        with mock.patch.object(
+            qemu_runner_module,
+            "_rename_exchange",
+            side_effect=OSError(errno.EIO, "injected exchange failure"),
+        ), mock.patch.object(
+            qemu_runner_module,
+            "_entry_matches",
+            side_effect=replace_after_finally_check,
+        ):
+            with self.assertRaises(ControllerError):
+                controller.run()
+
+        self.assertIsNotNone(injected_path)
+        assert injected_path is not None
+        self.assertTrue(injected_path.is_file())
+        self.assertEqual(injected_path.read_bytes(), replacement)
 
     def test_interruption_cleanup_detects_and_preserves_result_replacement(
         self,
