@@ -90,6 +90,7 @@ class _ResumeCheckpoint:
     state: _ResumeCheckpointState
     progress_descriptor: int | None
     progress_fingerprint: tuple[int, ...]
+    progress_bytes: bytes
     result_state: _ResumeResultState = _ResumeResultState.ABSENT
     result_descriptor: int | None = None
     result_fingerprint: tuple[int, ...] | None = None
@@ -1021,11 +1022,16 @@ class QemuController:
         expected_descriptor: int | None = None,
         expected_fingerprint: tuple[int, ...] | None = None,
         *,
+        expected_bytes: bytes | None = None,
         result_descriptor: int | None = None,
         result_fingerprint: tuple[int, ...] | None = None,
     ) -> None:
         if result_descriptor is not None:
-            if expected_descriptor is None or expected_fingerprint is None:
+            if (
+                expected_descriptor is None
+                or expected_fingerprint is None
+                or expected_bytes is None
+            ):
                 raise ControllerError(
                     "resume QEMU progress retirement lacks a validated checkpoint"
                 )
@@ -1102,12 +1108,22 @@ class QemuController:
                     except BaseException as restore_error:
                         raise restore_error from operation_error
                 raise
-            self._validate_retirement_result(
-                output_descriptor,
-                result_descriptor,
-                result_fingerprint,
-                "after progress retirement commit",
-            )
+            try:
+                self._validate_retirement_result(
+                    output_descriptor,
+                    result_descriptor,
+                    result_fingerprint,
+                    "after progress retirement commit",
+                )
+            except BaseException as operation_error:
+                try:
+                    self._recreate_retired_progress(
+                        output_descriptor,
+                        expected_bytes,
+                    )
+                except BaseException as restoration_error:
+                    raise operation_error from restoration_error
+                raise
             return
         if expected_descriptor is not None:
             if (
@@ -1259,6 +1275,96 @@ class QemuController:
             raise ControllerError(
                 "resume QEMU staged progress could not be restored safely"
             ) from error
+
+    def _recreate_retired_progress(
+        self,
+        output_descriptor: int,
+        data: bytes,
+    ) -> None:
+        temporary_name = (
+            f".{self._progress_path.name}.{secrets.token_hex(8)}.restore"
+        )
+        descriptor: int | None = None
+        installed_name: str | None = None
+        try:
+            descriptor = os.open(
+                temporary_name,
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=output_descriptor,
+            )
+            _write_all(descriptor, data)
+            os.fsync(descriptor)
+            try:
+                _rename_noreplace_between(
+                    output_descriptor,
+                    temporary_name,
+                    output_descriptor,
+                    self._progress_path.name,
+                )
+                installed_name = self._progress_path.name
+            except FileExistsError:
+                try:
+                    _rename_noreplace_between(
+                        output_descriptor,
+                        temporary_name,
+                        output_descriptor,
+                        _PROGRESS_RETIREMENT_NAME,
+                    )
+                except FileExistsError as error:
+                    raise ControllerError(
+                        "resume QEMU progress restoration destinations are occupied"
+                    ) from error
+                installed_name = _PROGRESS_RETIREMENT_NAME
+            temporary_name = ""
+            os.fsync(output_descriptor)
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or info.st_size != len(data)
+                or installed_name is None
+                or not _entry_matches(
+                    output_descriptor,
+                    installed_name,
+                    descriptor,
+                )
+            ):
+                raise ControllerError(
+                    "resume QEMU recreated progress checkpoint is inconsistent"
+                )
+        except ControllerError:
+            raise
+        except OSError as error:
+            raise ControllerError(
+                "resume QEMU progress checkpoint could not be recreated safely"
+            ) from error
+        finally:
+            cleanup_error: ControllerError | None = None
+            if temporary_name and descriptor is not None:
+                try:
+                    if _entry_matches(
+                        output_descriptor,
+                        temporary_name,
+                        descriptor,
+                    ):
+                        _remove_owned_result_entry(
+                            output_descriptor,
+                            temporary_name,
+                            descriptor,
+                        )
+                except ControllerError as error:
+                    cleanup_error = error
+                except OSError:
+                    pass
+            if descriptor is not None:
+                os.close(descriptor)
+            if cleanup_error is not None:
+                raise cleanup_error
 
     def _recover_interrupted_progress_retirement(
         self,
@@ -1767,6 +1873,7 @@ class QemuController:
             state=state,
             progress_descriptor=progress_descriptor,
             progress_fingerprint=progress_fingerprint,
+            progress_bytes=data,
         )
 
     def _apply_progress(
@@ -2671,6 +2778,7 @@ class QemuController:
                             output_descriptor,
                             checkpoint.progress_descriptor,
                             checkpoint.progress_fingerprint,
+                            expected_bytes=checkpoint.progress_bytes,
                             result_descriptor=checkpoint.result_descriptor,
                             result_fingerprint=checkpoint.result_fingerprint,
                         )

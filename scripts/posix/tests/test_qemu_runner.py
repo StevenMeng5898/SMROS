@@ -2602,6 +2602,176 @@ class QemuControllerTests(unittest.TestCase):
         self.assertEqual(factory.argv, [])
         self.assertEqual(errors, [injected])
 
+    def test_terminal_resume_recreates_progress_when_result_changes_during_cleanup(
+        self,
+    ) -> None:
+        output = self.root / "resume-terminal-cleanup-result-race"
+        clock, _result_bytes, progress_bytes = self._create_postcommit_campaign(
+            output
+        )
+        replacement = b"cleanup result replacement\n"
+        replacement_descriptor: int | None = None
+        transport = FakeTransport(clock, [])
+        factory = TransportFactory([transport])
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+            monotonic=clock.monotonic,
+        )
+        real_remove = qemu_runner_module._remove_owned_result_entry
+
+        def replace_after_retirement_cleanup(
+            output_descriptor: int,
+            name: str,
+            expected_descriptor: int,
+        ) -> None:
+            nonlocal replacement_descriptor
+            real_remove(output_descriptor, name, expected_descriptor)
+            if name == ".progress.json.retiring":
+                replacement_descriptor = self._replace_and_hold(
+                    output / "results.ndjson",
+                    "cleanup-result-replacement",
+                    replacement,
+                )
+
+        errors: list[BaseException] = []
+        try:
+            with mock.patch.object(
+                qemu_runner_module,
+                "_remove_owned_result_entry",
+                side_effect=replace_after_retirement_cleanup,
+            ):
+                try:
+                    controller.run(resume=True)
+                except BaseException as error:
+                    errors.append(error)
+
+            self.assertIsNotNone(replacement_descriptor)
+            assert replacement_descriptor is not None
+            self.assertEqual(os.fstat(replacement_descriptor).st_nlink, 1)
+            self.assertEqual(
+                os.pread(replacement_descriptor, len(replacement), 0),
+                replacement,
+            )
+            self.assertEqual(
+                (output / "results.ndjson").read_bytes(), replacement
+            )
+            progress_path = output / "progress.json"
+            self.assertTrue(progress_path.is_file())
+            self.assertEqual(progress_path.read_bytes(), progress_bytes)
+            self.assertEqual(progress_path.stat().st_nlink, 1)
+            self.assertEqual(
+                [
+                    path.name
+                    for path in output.iterdir()
+                    if path.name.startswith(".progress.json")
+                ],
+                [],
+            )
+            self.assertEqual(factory.argv, [])
+            self.assertEqual(transport.writes, [])
+            self.assertEqual(len(errors), 1)
+            self.assertIs(type(errors[0]), ControllerError)
+        finally:
+            if replacement_descriptor is not None:
+                os.close(replacement_descriptor)
+
+    def test_terminal_resume_retains_recreated_progress_when_cleanup_restore_is_blocked(
+        self,
+    ) -> None:
+        output = self.root / "resume-terminal-cleanup-restore-blocked"
+        clock, _result_bytes, progress_bytes = self._create_postcommit_campaign(
+            output
+        )
+        result_replacement = b"cleanup blocked result replacement\n"
+        progress_blocker = b"cleanup blocked progress replacement\n"
+        result_descriptor: int | None = None
+        progress_descriptor: int | None = None
+        transport = FakeTransport(clock, [])
+        factory = TransportFactory([transport])
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=factory,
+            monotonic=clock.monotonic,
+        )
+        real_remove = qemu_runner_module._remove_owned_result_entry
+
+        def replace_after_retirement_cleanup(
+            output_descriptor: int,
+            name: str,
+            expected_descriptor: int,
+        ) -> None:
+            nonlocal result_descriptor, progress_descriptor
+            real_remove(output_descriptor, name, expected_descriptor)
+            if name == ".progress.json.retiring":
+                result_descriptor = self._replace_and_hold(
+                    output / "results.ndjson",
+                    "cleanup-blocked-result-replacement",
+                    result_replacement,
+                )
+                progress_descriptor = self._replace_and_hold(
+                    output / "progress.json",
+                    "cleanup-blocked-progress-replacement",
+                    progress_blocker,
+                )
+
+        errors: list[BaseException] = []
+        try:
+            with mock.patch.object(
+                qemu_runner_module,
+                "_remove_owned_result_entry",
+                side_effect=replace_after_retirement_cleanup,
+            ):
+                try:
+                    controller.run(resume=True)
+                except BaseException as error:
+                    errors.append(error)
+
+            self.assertIsNotNone(result_descriptor)
+            self.assertIsNotNone(progress_descriptor)
+            assert result_descriptor is not None
+            assert progress_descriptor is not None
+            self.assertEqual(os.fstat(result_descriptor).st_nlink, 1)
+            self.assertEqual(os.fstat(progress_descriptor).st_nlink, 1)
+            self.assertEqual(
+                (output / "results.ndjson").read_bytes(),
+                result_replacement,
+            )
+            self.assertEqual(
+                (output / "progress.json").read_bytes(), progress_blocker
+            )
+            retained = output / ".progress.json.retiring"
+            self.assertTrue(retained.is_file())
+            self.assertEqual(retained.read_bytes(), progress_bytes)
+            self.assertEqual(retained.stat().st_nlink, 1)
+            self.assertEqual(
+                sorted(
+                    path.name
+                    for path in output.iterdir()
+                    if path.name.startswith(".progress.json")
+                ),
+                [".progress.json.retiring"],
+            )
+            self.assertEqual(factory.argv, [])
+            self.assertEqual(transport.writes, [])
+            self.assertEqual(len(errors), 1)
+            self.assertIs(type(errors[0]), ControllerError)
+        finally:
+            if progress_descriptor is not None:
+                os.close(progress_descriptor)
+            if result_descriptor is not None:
+                os.close(result_descriptor)
+
     def test_partial_resume_rejects_result_replacement_after_validation(
         self,
     ) -> None:
