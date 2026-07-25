@@ -905,10 +905,20 @@ class QemuControllerTests(unittest.TestCase):
             )
             for test in tests
         ]
+        controller._boot_count = 1
         output.mkdir()
         (output / "qemu-serial.log").write_bytes(b"")
         controller._persist_progress()
-        controller._publish()
+        publication_parent = os.open(
+            output,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        marker = controller._bind_result_marker(publication_parent)
+        try:
+            controller._publish(publication_parent, marker)
+        finally:
+            os.close(marker)
+            os.close(publication_parent)
         progress_size = (output / "progress.json").stat().st_size
         results_size = (output / "results.ndjson").stat().st_size
         self.assertLessEqual(
@@ -973,6 +983,7 @@ class QemuControllerTests(unittest.TestCase):
             ),
         )
         controller._run_id = "controller-resume-maximum-budget"
+        controller._boot_count = 1
         guest = SerialAttempt(
             test_id=tests[0].test_id,
             group=tests[0].group,
@@ -1440,6 +1451,82 @@ class QemuControllerTests(unittest.TestCase):
                     )
                     with self.assertRaisesRegex(ValueError, "resume progress"):
                         controller._load_progress(
+                            output_descriptor,
+                            raw_path.stat(),
+                        )
+        finally:
+            os.close(output_descriptor)
+
+    def test_resume_zero_boot_allows_only_an_empty_checkpoint(self) -> None:
+        output = self.root / "resume-zero-boot-consistency"
+        _clock, progress_bytes, _raw_bytes = self._create_resumable_campaign(output)
+        progress_path = output / "progress.json"
+        raw_path = output / "qemu-serial.log"
+        output_descriptor = os.open(
+            output,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+
+        def write_progress(progress: dict[str, object]) -> None:
+            progress_path.write_text(
+                json.dumps(progress, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+
+        try:
+            empty = json.loads(progress_bytes)
+            empty.update(
+                {
+                    "boot_count": 0,
+                    "restart_count": 0,
+                    "completed_attempts": [],
+                    "current_test": None,
+                    "infrastructure_error": None,
+                }
+            )
+            write_progress(empty)
+            accepted = QemuController(
+                identity=_identity(self.tests),
+                selected=self.tests,
+                config=ControllerConfig(
+                    output_directory=output,
+                    qemu_argv=self.config.qemu_argv,
+                ),
+            )
+            accepted._load_progress(output_descriptor, raw_path.stat())
+            self.assertEqual(accepted._boot_count, 0)
+            self.assertEqual(accepted._restart_count, 0)
+            self.assertEqual(accepted._attempts, [])
+            self.assertIsNone(accepted._current_test)
+            self.assertIsNone(accepted._infrastructure_error)
+
+            completed = json.loads(progress_bytes)
+            completed["boot_count"] = 0
+            completed["restart_count"] = 0
+            corruptions = {
+                "completed-attempt": completed,
+                "current-test": {
+                    **empty,
+                    "current_test": self.one.test_id,
+                },
+                "infrastructure-error": {
+                    **empty,
+                    "infrastructure_error": "zero-boot terminal evidence",
+                },
+            }
+            for label, progress in corruptions.items():
+                with self.subTest(case=label):
+                    write_progress(progress)
+                    rejected = QemuController(
+                        identity=_identity(self.tests),
+                        selected=self.tests,
+                        config=ControllerConfig(
+                            output_directory=output,
+                            qemu_argv=self.config.qemu_argv,
+                        ),
+                    )
+                    with self.assertRaisesRegex(ValueError, "resume progress"):
+                        rejected._load_progress(
                             output_descriptor,
                             raw_path.stat(),
                         )
@@ -1946,6 +2033,31 @@ class QemuControllerTests(unittest.TestCase):
             json.loads(prior_bytes.splitlines()[-1])["run_id"],
         )
 
+    def test_no_prior_interruption_leaves_an_empty_result_marker(self) -> None:
+        output = self.root / "no-prior-interrupted-marker"
+        clock = FakeClock()
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory(
+                [FakeTransport(clock, [PROMPT, KeyboardInterrupt()])]
+            ),
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "controller-no-prior-interrupted",
+        )
+
+        with self.assertRaises(KeyboardInterrupt):
+            controller.run()
+
+        marker = output / "results.ndjson"
+        self.assertTrue(marker.is_file())
+        self.assertEqual(marker.read_bytes(), b"")
+        self.assertEqual(marker.stat().st_nlink, 1)
+
     def test_result_invalidation_preserves_a_raced_replacement(self) -> None:
         prior_transport = FakeTransport(
             self.clock,
@@ -2024,6 +2136,240 @@ class QemuControllerTests(unittest.TestCase):
         self.assertEqual(prior.result_path.read_bytes(), replacement)
         self.assertTrue(moved.is_file())
         self.assertFalse((self.root / "progress.json").exists())
+
+    def test_result_invalidation_detects_replacement_after_exchange(self) -> None:
+        prior_transport = FakeTransport(
+            self.clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+        )
+        prior = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory([prior_transport]),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-prior-post-exchange",
+        ).run()
+        replacement_path = self.root / "post-exchange-replacement"
+        replacement = b"post-exchange replacement\n"
+        replacement_path.write_bytes(replacement)
+        real_exchange = qemu_runner_module._rename_exchange
+        exchange_count = 0
+
+        def exchange_then_replace(parent: int, first: str, second: str) -> None:
+            nonlocal exchange_count
+            exchange_count += 1
+            real_exchange(parent, first, second)
+            if exchange_count == 1:
+                os.replace(
+                    replacement_path.name,
+                    first,
+                    src_dir_fd=parent,
+                    dst_dir_fd=parent,
+                )
+
+        fresh = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory(
+                [
+                    FakeTransport(
+                        self.clock,
+                        [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+                    )
+                ]
+            ),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-post-exchange-race",
+        )
+        with mock.patch.object(
+            qemu_runner_module,
+            "_rename_exchange",
+            side_effect=exchange_then_replace,
+        ):
+            with self.assertRaisesRegex(ControllerError, "results changed"):
+                fresh.run()
+
+        self.assertEqual(prior.result_path.read_bytes(), replacement)
+        self.assertEqual(exchange_count, 1)
+        self.assertFalse((self.root / "progress.json").exists())
+
+    def test_result_invalidation_rechecks_marker_after_old_result_cleanup(
+        self,
+    ) -> None:
+        prior_transport = FakeTransport(
+            self.clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+        )
+        prior = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory([prior_transport]),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-prior-post-check",
+        ).run()
+        replacement_path = self.root / "post-check-replacement"
+        replacement = b"post-check replacement\n"
+        replacement_path.write_bytes(replacement)
+        real_matches = qemu_runner_module._entry_matches
+        public_checks = 0
+
+        def replace_after_marker_check(
+            parent: int,
+            name: str,
+            descriptor: int,
+        ) -> bool:
+            nonlocal public_checks
+            matches = real_matches(parent, name, descriptor)
+            if name == "results.ndjson":
+                public_checks += 1
+                if public_checks == 2 and matches:
+                    os.replace(
+                        replacement_path.name,
+                        name,
+                        src_dir_fd=parent,
+                        dst_dir_fd=parent,
+                    )
+            return matches
+
+        fresh = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=self.config,
+            transport_factory=TransportFactory(
+                [
+                    FakeTransport(
+                        self.clock,
+                        [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+                    )
+                ]
+            ),
+            monotonic=self.clock.monotonic,
+            run_id_factory=lambda: "controller-post-check-race",
+        )
+        with mock.patch.object(
+            qemu_runner_module,
+            "_entry_matches",
+            side_effect=replace_after_marker_check,
+        ):
+            with self.assertRaisesRegex(ControllerError, "results changed"):
+                fresh.run()
+
+        self.assertEqual(prior.result_path.read_bytes(), replacement)
+        self.assertGreaterEqual(public_checks, 2)
+        self.assertFalse((self.root / "progress.json").exists())
+
+    def test_result_publication_preserves_replacements_at_exchange_boundaries(
+        self,
+    ) -> None:
+        for timing in ("before", "after"):
+            with self.subTest(timing=timing):
+                output = self.root / f"publish-race-{timing}"
+                output.mkdir()
+                clock = FakeClock()
+                replacement_path = output / f"publish-{timing}-replacement"
+                replacement = f"publish {timing} replacement\n".encode()
+                replacement_path.write_bytes(replacement)
+                real_exchange = qemu_runner_module._rename_exchange
+                exchange_count = 0
+
+                def race_at_exchange(parent: int, first: str, second: str) -> None:
+                    nonlocal exchange_count
+                    exchange_count += 1
+                    if exchange_count == 1 and timing == "before":
+                        os.replace(
+                            replacement_path.name,
+                            "results.ndjson",
+                            src_dir_fd=parent,
+                            dst_dir_fd=parent,
+                        )
+                    real_exchange(parent, first, second)
+                    if exchange_count == 1 and timing == "after":
+                        os.replace(
+                            replacement_path.name,
+                            "results.ndjson",
+                            src_dir_fd=parent,
+                            dst_dir_fd=parent,
+                        )
+
+                transport = FakeTransport(
+                    clock,
+                    [PROMPT, _start_events(self.one), _end_events(self.one), PROMPT],
+                )
+                controller = QemuController(
+                    identity=_identity((self.one,)),
+                    selected=(self.one,),
+                    config=ControllerConfig(
+                        output_directory=output,
+                        qemu_argv=self.config.qemu_argv,
+                    ),
+                    transport_factory=TransportFactory([transport]),
+                    monotonic=clock.monotonic,
+                    run_id_factory=lambda: f"controller-publish-{timing}",
+                )
+                with mock.patch.object(
+                    qemu_runner_module,
+                    "_rename_exchange",
+                    side_effect=race_at_exchange,
+                ):
+                    with self.assertRaisesRegex(ControllerError, "results changed"):
+                        controller.run()
+
+                self.assertEqual(
+                    (output / "results.ndjson").read_bytes(),
+                    replacement,
+                )
+                self.assertEqual(exchange_count, 2 if timing == "before" else 1)
+
+    def test_interruption_cleanup_detects_and_preserves_result_replacement(
+        self,
+    ) -> None:
+        output = self.root / "interrupted-result-replacement"
+        clock = FakeClock()
+        replacement_path = self.root / "interrupted-replacement"
+        replacement = b"interrupted replacement\n"
+        replacement_path.write_bytes(replacement)
+        controller = QemuController(
+            identity=_identity((self.one,)),
+            selected=(self.one,),
+            config=ControllerConfig(
+                output_directory=output,
+                qemu_argv=self.config.qemu_argv,
+            ),
+            transport_factory=TransportFactory(
+                [FakeTransport(clock, [PROMPT, KeyboardInterrupt()])]
+            ),
+            monotonic=clock.monotonic,
+            run_id_factory=lambda: "controller-interrupted-replacement",
+        )
+        real_persist = controller._persist_progress
+        replaced = False
+
+        def persist_then_replace() -> None:
+            nonlocal replaced
+            real_persist()
+            if not replaced:
+                replaced = True
+                os.replace(replacement_path, output / "results.ndjson")
+
+        with mock.patch.object(
+            controller,
+            "_persist_progress",
+            side_effect=persist_then_replace,
+        ):
+            observed: BaseException | None = None
+            try:
+                controller.run()
+            except BaseException as error:
+                observed = error
+
+        self.assertIs(type(observed), ControllerError)
+        assert observed is not None
+        self.assertRegex(str(observed), "results changed")
+        self.assertIsInstance(observed.__cause__, KeyboardInterrupt)
+        self.assertEqual((output / "results.ndjson").read_bytes(), replacement)
 
     def test_generated_run_ids_are_strict_utf8_nonempty_and_bounded(self) -> None:
         invalid_ids = (
@@ -2212,6 +2558,7 @@ class QemuControllerTests(unittest.TestCase):
             ),
         )
         controller._run_id = "controller-resume-terminal"
+        controller._boot_count = 1
         controller._infrastructure_error = "guest collection failed"
         guest = SerialAttempt(
             test_id=self.one.test_id,
@@ -2262,6 +2609,8 @@ class QemuControllerTests(unittest.TestCase):
         terminal = json.loads(
             result.result_path.read_text(encoding="utf-8").splitlines()[-1]
         )
+        self.assertEqual(terminal["boot_count"], 1)
+        self.assertEqual(terminal["restart_count"], 0)
         self.assertEqual(
             terminal["infrastructure_error"],
             "guest collection failed",

@@ -463,10 +463,15 @@ def _reject_progress_duplicate_keys(
     return value
 
 
-def _rename_exchange(parent: int, first: str, second: str) -> None:
+def _rename_result_entry(
+    parent: int,
+    first: str,
+    second: str,
+    flags: int,
+) -> None:
     renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
     if renameat2 is None:
-        raise ControllerError("atomic QEMU results invalidation is unavailable")
+        raise ControllerError("atomic QEMU result transitions are unavailable")
     renameat2.argtypes = (
         ctypes.c_int,
         ctypes.c_char_p,
@@ -480,14 +485,22 @@ def _rename_exchange(parent: int, first: str, second: str) -> None:
         os.fsencode(first),
         parent,
         os.fsencode(second),
-        2,
+        flags,
     ) != 0:
         error_number = ctypes.get_errno()
         if error_number in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP}:
             raise ControllerError(
-                "atomic QEMU results invalidation is unavailable"
+                "atomic QEMU result transitions are unavailable"
             )
         raise OSError(error_number, os.strerror(error_number), first)
+
+
+def _rename_noreplace(parent: int, first: str, second: str) -> None:
+    _rename_result_entry(parent, first, second, 1)
+
+
+def _rename_exchange(parent: int, first: str, second: str) -> None:
+    _rename_result_entry(parent, first, second, 2)
 
 
 def _entry_matches(parent: int, name: str, descriptor: int) -> bool:
@@ -497,6 +510,26 @@ def _entry_matches(parent: int, name: str, descriptor: int) -> bool:
         return False
     held = os.fstat(descriptor)
     return (entry.st_dev, entry.st_ino) == (held.st_dev, held.st_ino)
+
+
+def _open_result_entry(parent: int, name: str) -> int:
+    return os.open(
+        name,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=parent,
+    )
+
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("QEMU result write made no progress")
+        view = view[written:]
 
 
 class QemuController:
@@ -558,44 +591,17 @@ class QemuController:
     def _persist_progress(self) -> None:
         _atomic_write(self._progress_path, _json_bytes(self._progress()))
 
-    def _invalidate_results(self, output_descriptor: int) -> None:
-        result_descriptor: int | None = None
-        tombstone_descriptor: int | None = None
-        tombstone_name = (
+    def _invalidate_results(self, output_descriptor: int) -> int:
+        prior_descriptor: int | None = None
+        marker_descriptor: int | None = None
+        keep_marker = False
+        marker_name = (
             f".{self._result_path.name}.{secrets.token_hex(8)}.invalid"
         )
         try:
-            try:
-                result_descriptor = os.open(
-                    self._result_path.name,
-                    os.O_RDONLY
-                    | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_NONBLOCK", 0)
-                    | getattr(os, "O_NOFOLLOW", 0),
-                    dir_fd=output_descriptor,
-                )
-            except FileNotFoundError:
-                return
-            except OSError as error:
-                raise ControllerError(
-                    "existing QEMU results could not be opened safely"
-                ) from error
-            result_info = os.fstat(result_descriptor)
-            if not stat.S_ISREG(result_info.st_mode) or result_info.st_nlink != 1:
-                raise ControllerError(
-                    "existing QEMU results are not a regular single-link file"
-                )
-            if not _entry_matches(
-                output_descriptor,
-                self._result_path.name,
-                result_descriptor,
-            ):
-                raise ControllerError(
-                    "existing QEMU results changed while being opened"
-                )
-            tombstone_descriptor = os.open(
-                tombstone_name,
-                os.O_WRONLY
+            marker_descriptor = os.open(
+                marker_name,
+                os.O_RDWR
                 | os.O_CREAT
                 | os.O_EXCL
                 | getattr(os, "O_CLOEXEC", 0)
@@ -603,42 +609,130 @@ class QemuController:
                 0o600,
                 dir_fd=output_descriptor,
             )
-            os.fsync(tombstone_descriptor)
+            os.fsync(marker_descriptor)
+            try:
+                prior_descriptor = _open_result_entry(
+                    output_descriptor,
+                    self._result_path.name,
+                )
+            except FileNotFoundError:
+                try:
+                    _rename_noreplace(
+                        output_descriptor,
+                        marker_name,
+                        self._result_path.name,
+                    )
+                except FileExistsError as error:
+                    raise ControllerError(
+                        "QEMU results changed during invalidation"
+                    ) from error
+                marker_name = ""
+                os.fsync(output_descriptor)
+                if not _entry_matches(
+                    output_descriptor,
+                    self._result_path.name,
+                    marker_descriptor,
+                ):
+                    raise ControllerError(
+                        "QEMU results changed during invalidation"
+                    )
+                keep_marker = True
+                return marker_descriptor
+            except OSError as error:
+                raise ControllerError(
+                    "existing QEMU results could not be opened safely"
+                ) from error
+            prior_info = os.fstat(prior_descriptor)
+            if not stat.S_ISREG(prior_info.st_mode) or prior_info.st_nlink != 1:
+                raise ControllerError(
+                    "existing QEMU results are not a regular single-link file"
+                )
+            if not _entry_matches(
+                output_descriptor,
+                self._result_path.name,
+                prior_descriptor,
+            ):
+                raise ControllerError(
+                    "existing QEMU results changed while being opened"
+                )
             _rename_exchange(
                 output_descriptor,
                 self._result_path.name,
-                tombstone_name,
+                marker_name,
             )
+            os.fsync(output_descriptor)
             if not _entry_matches(
                 output_descriptor,
-                tombstone_name,
-                result_descriptor,
+                self._result_path.name,
+                marker_descriptor,
             ):
+                if _entry_matches(
+                    output_descriptor,
+                    marker_name,
+                    prior_descriptor,
+                ):
+                    os.unlink(marker_name, dir_fd=output_descriptor)
+                    marker_name = ""
+                    os.fsync(output_descriptor)
+                raise ControllerError("QEMU results changed during invalidation")
+            if not _entry_matches(
+                output_descriptor,
+                marker_name,
+                prior_descriptor,
+            ):
+                displaced = os.stat(
+                    marker_name,
+                    dir_fd=output_descriptor,
+                    follow_symlinks=False,
+                )
+                displaced_identity = (displaced.st_dev, displaced.st_ino)
                 try:
                     _rename_exchange(
                         output_descriptor,
                         self._result_path.name,
-                        tombstone_name,
+                        marker_name,
                     )
+                    os.fsync(output_descriptor)
                 except BaseException as rollback_error:
                     raise ControllerError(
                         "QEMU results changed and rollback failed during invalidation"
                     ) from rollback_error
-                if not _entry_matches(
-                    output_descriptor,
-                    tombstone_name,
-                    tombstone_descriptor,
+                try:
+                    restored = os.stat(
+                        self._result_path.name,
+                        dir_fd=output_descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as rollback_error:
+                    raise ControllerError(
+                        "QEMU results invalidation rollback lost the replacement"
+                    ) from rollback_error
+                if (
+                    (restored.st_dev, restored.st_ino) != displaced_identity
+                    or not _entry_matches(
+                        output_descriptor,
+                        marker_name,
+                        marker_descriptor,
+                    )
                 ):
                     raise ControllerError(
-                        "QEMU results invalidation rollback lost its tombstone"
+                        "QEMU results invalidation rollback is inconsistent"
                     )
-                os.unlink(tombstone_name, dir_fd=output_descriptor)
+                os.unlink(marker_name, dir_fd=output_descriptor)
+                marker_name = ""
                 os.fsync(output_descriptor)
-                tombstone_name = ""
                 raise ControllerError("QEMU results changed during invalidation")
-            os.unlink(tombstone_name, dir_fd=output_descriptor)
-            tombstone_name = ""
+            os.unlink(marker_name, dir_fd=output_descriptor)
+            marker_name = ""
             os.fsync(output_descriptor)
+            if not _entry_matches(
+                output_descriptor,
+                self._result_path.name,
+                marker_descriptor,
+            ):
+                raise ControllerError("QEMU results changed during invalidation")
+            keep_marker = True
+            return marker_descriptor
         except ControllerError:
             raise
         except OSError as error:
@@ -646,21 +740,85 @@ class QemuController:
                 "QEMU results could not be invalidated safely"
             ) from error
         finally:
-            if tombstone_name and tombstone_descriptor is not None:
+            if marker_name:
                 try:
-                    if _entry_matches(
-                        output_descriptor,
-                        tombstone_name,
-                        tombstone_descriptor,
-                    ):
-                        os.unlink(tombstone_name, dir_fd=output_descriptor)
+                    owned = (
+                        marker_descriptor is not None
+                        and _entry_matches(
+                            output_descriptor,
+                            marker_name,
+                            marker_descriptor,
+                        )
+                    ) or (
+                        prior_descriptor is not None
+                        and _entry_matches(
+                            output_descriptor,
+                            marker_name,
+                            prior_descriptor,
+                        )
+                    )
+                    if owned:
+                        os.unlink(marker_name, dir_fd=output_descriptor)
                         os.fsync(output_descriptor)
                 except OSError:
                     pass
-            if tombstone_descriptor is not None:
-                os.close(tombstone_descriptor)
-            if result_descriptor is not None:
-                os.close(result_descriptor)
+            if prior_descriptor is not None:
+                os.close(prior_descriptor)
+            if marker_descriptor is not None and not keep_marker:
+                os.close(marker_descriptor)
+
+    def _bind_result_marker(self, output_descriptor: int) -> int:
+        descriptor: int | None = None
+        keep_descriptor = False
+        try:
+            try:
+                descriptor = _open_result_entry(
+                    output_descriptor,
+                    self._result_path.name,
+                )
+            except FileNotFoundError:
+                try:
+                    descriptor = os.open(
+                        self._result_path.name,
+                        os.O_RDWR
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        0o600,
+                        dir_fd=output_descriptor,
+                    )
+                except FileExistsError as error:
+                    raise ControllerError(
+                        "QEMU results changed while binding the resume marker"
+                    ) from error
+                os.fsync(descriptor)
+                os.fsync(output_descriptor)
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or info.st_size != 0
+                or not _entry_matches(
+                    output_descriptor,
+                    self._result_path.name,
+                    descriptor,
+                )
+            ):
+                raise ControllerError(
+                    "resume QEMU results are not the expected empty marker"
+                )
+            keep_descriptor = True
+            return descriptor
+        except ControllerError:
+            raise
+        except OSError as error:
+            raise ControllerError(
+                "resume QEMU result marker could not be opened safely"
+            ) from error
+        finally:
+            if descriptor is not None and not keep_descriptor:
+                os.close(descriptor)
 
     def _read_progress(self, output_descriptor: int) -> bytes:
         descriptor: int | None = None
@@ -781,6 +939,12 @@ class QemuController:
         ):
             raise ValueError("resume progress is invalid")
         if restart_count != max(boot_count - 1, 0):
+            raise ValueError("resume progress is invalid")
+        if boot_count == 0 and (
+            completed
+            or current_test is not None
+            or infrastructure_error is not None
+        ):
             raise ValueError("resume progress is invalid")
         attempts = [_decode_attempt(item) for item in completed]
         selected_ids = set(expected_ids)
@@ -1412,13 +1576,134 @@ class QemuController:
             terminal["infrastructure_error"] = self._infrastructure_error
         return terminal
 
-    def _publish(self) -> None:
+    def _publish(
+        self,
+        output_descriptor: int,
+        marker_descriptor: int,
+    ) -> None:
         rows = [_attempt_record(attempt) for attempt in self._attempts]
         rows.append(self._terminal())
-        _atomic_write(self._result_path, _canonical_report(rows))
+        data = _canonical_report(rows)
+        temporary_name = (
+            f".{self._result_path.name}.{secrets.token_hex(8)}.publish"
+        )
+        generated_descriptor: int | None = None
+        try:
+            generated_descriptor = os.open(
+                temporary_name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o644,
+                dir_fd=output_descriptor,
+            )
+            _write_all(generated_descriptor, data)
+            os.fsync(generated_descriptor)
+            _rename_exchange(
+                output_descriptor,
+                self._result_path.name,
+                temporary_name,
+            )
+            os.fsync(output_descriptor)
+            generated_is_public = _entry_matches(
+                output_descriptor,
+                self._result_path.name,
+                generated_descriptor,
+            )
+            marker_was_displaced = _entry_matches(
+                output_descriptor,
+                temporary_name,
+                marker_descriptor,
+            )
+            if not generated_is_public:
+                if marker_was_displaced:
+                    os.unlink(temporary_name, dir_fd=output_descriptor)
+                    temporary_name = ""
+                    os.fsync(output_descriptor)
+                raise ControllerError("QEMU results changed during publication")
+            if not marker_was_displaced:
+                displaced = os.stat(
+                    temporary_name,
+                    dir_fd=output_descriptor,
+                    follow_symlinks=False,
+                )
+                displaced_identity = (displaced.st_dev, displaced.st_ino)
+                try:
+                    _rename_exchange(
+                        output_descriptor,
+                        self._result_path.name,
+                        temporary_name,
+                    )
+                    os.fsync(output_descriptor)
+                except BaseException as rollback_error:
+                    raise ControllerError(
+                        "QEMU results changed and rollback failed during publication"
+                    ) from rollback_error
+                restored = os.stat(
+                    self._result_path.name,
+                    dir_fd=output_descriptor,
+                    follow_symlinks=False,
+                )
+                if (
+                    (restored.st_dev, restored.st_ino) != displaced_identity
+                    or not _entry_matches(
+                        output_descriptor,
+                        temporary_name,
+                        generated_descriptor,
+                    )
+                ):
+                    raise ControllerError(
+                        "QEMU results publication rollback is inconsistent"
+                    )
+                os.unlink(temporary_name, dir_fd=output_descriptor)
+                temporary_name = ""
+                os.fsync(output_descriptor)
+                raise ControllerError("QEMU results changed during publication")
+            os.unlink(temporary_name, dir_fd=output_descriptor)
+            temporary_name = ""
+            os.fsync(output_descriptor)
+            if not _entry_matches(
+                output_descriptor,
+                self._result_path.name,
+                generated_descriptor,
+            ):
+                raise ControllerError("QEMU results changed during publication")
+        except ControllerError:
+            raise
+        except OSError as error:
+            raise ControllerError(
+                "QEMU results could not be published safely"
+            ) from error
+        finally:
+            if temporary_name:
+                try:
+                    owned = (
+                        generated_descriptor is not None
+                        and _entry_matches(
+                            output_descriptor,
+                            temporary_name,
+                            generated_descriptor,
+                        )
+                    ) or _entry_matches(
+                        output_descriptor,
+                        temporary_name,
+                        marker_descriptor,
+                    )
+                    if owned:
+                        os.unlink(temporary_name, dir_fd=output_descriptor)
+                        os.fsync(output_descriptor)
+                except OSError:
+                    pass
+            if generated_descriptor is not None:
+                os.close(generated_descriptor)
 
     def run(self, resume: bool = False) -> ControllerResult:
         output_descriptor = _open_parent(self._output)
+        marker_descriptor: int | None = None
+        published = False
+        operation_error: BaseException | None = None
         try:
             if not resume:
                 run_id = self._run_id_factory()
@@ -1429,10 +1714,13 @@ class QemuController:
                 self._infrastructure_error = None
                 self._restart_count = 0
                 self._boot_count = 0
-                self._invalidate_results(output_descriptor)
+                marker_descriptor = self._invalidate_results(output_descriptor)
             with self._open_raw_log(output_descriptor, resume=resume) as raw:
                 if resume:
                     self._load_progress(output_descriptor, os.fstat(raw.fileno()))
+                    marker_descriptor = self._bind_result_marker(
+                        output_descriptor
+                    )
                 transport: _Transport | None = None
                 prompt_ready = False
                 completed_ids = {attempt.test_id for attempt in self._attempts}
@@ -1468,13 +1756,51 @@ class QemuController:
                             self._stop(transport)
                             transport = None
                             prompt_ready = False
-                    self._publish()
+                    assert marker_descriptor is not None
+                    self._publish(output_descriptor, marker_descriptor)
+                    published = True
                     os.unlink(self._progress_path.name, dir_fd=output_descriptor)
                 finally:
                     if transport is not None:
                         self._stop(transport)
-        finally:
+        except BaseException as error:
+            operation_error = error
+        cleanup_error: BaseException | None = None
+        if marker_descriptor is not None:
+            if not published:
+                try:
+                    if not _entry_matches(
+                        output_descriptor,
+                        self._result_path.name,
+                        marker_descriptor,
+                    ):
+                        cleanup_error = ControllerError(
+                            "QEMU results changed during campaign cleanup"
+                        )
+                except OSError as error:
+                    cleanup_error = ControllerError(
+                        "QEMU results could not be validated during campaign cleanup"
+                    )
+                    cleanup_error.__cause__ = error
+            try:
+                os.close(marker_descriptor)
+            except OSError as error:
+                if cleanup_error is None:
+                    cleanup_error = ControllerError(
+                        "QEMU result marker could not be closed safely"
+                    )
+                    cleanup_error.__cause__ = error
+        try:
             os.close(output_descriptor)
+        except OSError as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        if cleanup_error is not None:
+            if operation_error is not None:
+                raise cleanup_error from operation_error
+            raise cleanup_error
+        if operation_error is not None:
+            raise operation_error
         return ControllerResult(
             attempts=tuple(self._attempts),
             complete=self._complete(),
