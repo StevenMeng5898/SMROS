@@ -134,8 +134,8 @@ The runner prints live selection coverage as ordinary serial text alongside
 the versioned events:
 
 ```text
-posixtest: selection tests=1598 apis=195 groups=9 interval=25 scope=selected
-posixtest: progress tests=25/1598 (1.56%) apis-complete=3/195 (1.53%) apis-pass=2/195 (1.02%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=23 fail=1 unresolved=1 unsupported=0 untested=0 launch-errors=0 scope=selected
+posixtest: selection tests=1598 apis=185 groups=9 interval=25 scope=selected
+posixtest: progress tests=25/1598 (1.56%) apis-complete=3/185 (1.62%) apis-pass=2/185 (1.08%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=23 fail=1 unresolved=1 unsupported=0 untested=0 launch-errors=0 scope=selected
 ```
 
 Progress is printed after every 25 completed tests, whenever an API completes,
