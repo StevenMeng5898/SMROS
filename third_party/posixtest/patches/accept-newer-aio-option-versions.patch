@@ -1,0 +1,1352 @@
+diff --git a/conformance/interfaces/aio_cancel/1-1.c b/conformance/interfaces/aio_cancel/1-1.c
+index 1796d10..522c73a 100644
+--- a/conformance/interfaces/aio_cancel/1-1.c
++++ b/conformance/interfaces/aio_cancel/1-1.c
+@@ -42,7 +42,7 @@ int main()
+ 	int fd;
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	return PTS_UNSUPPORTED;
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_cancel/10-1.c b/conformance/interfaces/aio_cancel/10-1.c
+index 765a5b7..9ab2408 100644
+--- a/conformance/interfaces/aio_cancel/10-1.c
++++ b/conformance/interfaces/aio_cancel/10-1.c
+@@ -34,7 +34,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	return PTS_UNSUPPORTED;
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_cancel/2-1.c b/conformance/interfaces/aio_cancel/2-1.c
+index ba0b19f..f8b26bc 100644
+--- a/conformance/interfaces/aio_cancel/2-1.c
++++ b/conformance/interfaces/aio_cancel/2-1.c
+@@ -47,7 +47,7 @@ int main()
+ 	int fd;
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	return PTS_UNSUPPORTED;
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_cancel/2-2.c b/conformance/interfaces/aio_cancel/2-2.c
+index 7af51b6..9159b19 100644
+--- a/conformance/interfaces/aio_cancel/2-2.c
++++ b/conformance/interfaces/aio_cancel/2-2.c
+@@ -41,7 +41,7 @@ int main()
+ 	char tmpfname[256];
+ 	int fd;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	return PTS_UNSUPPORTED;
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_cancel/3-1.c b/conformance/interfaces/aio_cancel/3-1.c
+index 3f7f4e1..1a7923f 100644
+--- a/conformance/interfaces/aio_cancel/3-1.c
++++ b/conformance/interfaces/aio_cancel/3-1.c
+@@ -72,7 +72,7 @@ int main()
+ 	struct sigaction action;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	return PTS_UNSUPPORTED;
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_cancel/4-1.c b/conformance/interfaces/aio_cancel/4-1.c
+index a3a3c6c..3268ce3 100644
+--- a/conformance/interfaces/aio_cancel/4-1.c
++++ b/conformance/interfaces/aio_cancel/4-1.c
+@@ -53,7 +53,7 @@ int main()
+ 	int i;
+ 	int in_progress;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	return PTS_UNSUPPORTED;
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_cancel/5-1.c b/conformance/interfaces/aio_cancel/5-1.c
+index 65531cf..91ad1d1 100644
+--- a/conformance/interfaces/aio_cancel/5-1.c
++++ b/conformance/interfaces/aio_cancel/5-1.c
+@@ -53,7 +53,7 @@ int main()
+ 	int in_progress;
+ 	static int check_one;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	return PTS_UNSUPPORTED;
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_cancel/6-1.c b/conformance/interfaces/aio_cancel/6-1.c
+index cc0b5e2..56bd75f 100644
+--- a/conformance/interfaces/aio_cancel/6-1.c
++++ b/conformance/interfaces/aio_cancel/6-1.c
+@@ -55,7 +55,7 @@ int main()
+ 	int in_progress;
+ 	int gret;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	return PTS_UNSUPPORTED;
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_cancel/7-1.c b/conformance/interfaces/aio_cancel/7-1.c
+index 8db24ab..78979dd 100644
+--- a/conformance/interfaces/aio_cancel/7-1.c
++++ b/conformance/interfaces/aio_cancel/7-1.c
+@@ -53,7 +53,7 @@ int main()
+ 	int in_progress;
+ 	int gret;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	return PTS_UNSUPPORTED;
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_cancel/8-1.c b/conformance/interfaces/aio_cancel/8-1.c
+index ff3ecc8..02b7ca7 100644
+--- a/conformance/interfaces/aio_cancel/8-1.c
++++ b/conformance/interfaces/aio_cancel/8-1.c
+@@ -44,7 +44,7 @@ int main()
+ 	int fd;
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	return PTS_UNSUPPORTED;
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_cancel/9-1.c b/conformance/interfaces/aio_cancel/9-1.c
+index cffa560..36a92a6 100644
+--- a/conformance/interfaces/aio_cancel/9-1.c
++++ b/conformance/interfaces/aio_cancel/9-1.c
+@@ -35,7 +35,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	return PTS_UNSUPPORTED;
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_error/1-1.c b/conformance/interfaces/aio_error/1-1.c
+index 1a67893..85195f6 100644
+--- a/conformance/interfaces/aio_error/1-1.c
++++ b/conformance/interfaces/aio_error/1-1.c
+@@ -42,7 +42,7 @@ int main()
+ 	int fd;
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	return PTS_UNSUPPORTED;
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_error/2-1.c b/conformance/interfaces/aio_error/2-1.c
+index 4940091..10e82a9 100644
+--- a/conformance/interfaces/aio_error/2-1.c
++++ b/conformance/interfaces/aio_error/2-1.c
+@@ -47,7 +47,7 @@ int main()
+ 	int i;
+ 	int ret;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	return PTS_UNSUPPORTED;
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_error/3-1.c b/conformance/interfaces/aio_error/3-1.c
+index 9c6024a..06502bc 100644
+--- a/conformance/interfaces/aio_error/3-1.c
++++ b/conformance/interfaces/aio_error/3-1.c
+@@ -39,7 +39,7 @@ int main()
+ 	struct aiocb bad;
+ 	int ret;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	return PTS_UNSUPPORTED;
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/1-1.c b/conformance/interfaces/aio_fsync/1-1.c
+index c079c7d..2fec465 100644
+--- a/conformance/interfaces/aio_fsync/1-1.c
++++ b/conformance/interfaces/aio_fsync/1-1.c
+@@ -15,7 +15,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/10-1.c b/conformance/interfaces/aio_fsync/10-1.c
+index a0b10cd..455bd8b 100644
+--- a/conformance/interfaces/aio_fsync/10-1.c
++++ b/conformance/interfaces/aio_fsync/10-1.c
+@@ -29,7 +29,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/11-1.c b/conformance/interfaces/aio_fsync/11-1.c
+index c079c7d..2fec465 100644
+--- a/conformance/interfaces/aio_fsync/11-1.c
++++ b/conformance/interfaces/aio_fsync/11-1.c
+@@ -15,7 +15,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/12-1.c b/conformance/interfaces/aio_fsync/12-1.c
+index b0de45a..513e4a5 100644
+--- a/conformance/interfaces/aio_fsync/12-1.c
++++ b/conformance/interfaces/aio_fsync/12-1.c
+@@ -24,7 +24,7 @@
+ int main()
+ {
+ 	struct aiocb aiocb;
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/13-1.c b/conformance/interfaces/aio_fsync/13-1.c
+index c079c7d..2fec465 100644
+--- a/conformance/interfaces/aio_fsync/13-1.c
++++ b/conformance/interfaces/aio_fsync/13-1.c
+@@ -15,7 +15,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/14-1.c b/conformance/interfaces/aio_fsync/14-1.c
+index 6eb2eb3..087c1b1 100644
+--- a/conformance/interfaces/aio_fsync/14-1.c
++++ b/conformance/interfaces/aio_fsync/14-1.c
+@@ -30,7 +30,7 @@ int main()
+ 	struct aiocb aiocb_write;
+ 	struct aiocb aiocb_fsync;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/2-1.c b/conformance/interfaces/aio_fsync/2-1.c
+index 32e6dce..6d321ac 100644
+--- a/conformance/interfaces/aio_fsync/2-1.c
++++ b/conformance/interfaces/aio_fsync/2-1.c
+@@ -31,7 +31,7 @@ int main()
+ 	struct aiocb aiocb_write;
+ 	struct aiocb aiocb_fsync;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/3-1.c b/conformance/interfaces/aio_fsync/3-1.c
+index d746423..88face0 100644
+--- a/conformance/interfaces/aio_fsync/3-1.c
++++ b/conformance/interfaces/aio_fsync/3-1.c
+@@ -31,7 +31,7 @@ int main()
+ 	struct aiocb aiocb_write;
+ 	struct aiocb aiocb_fsync;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/4-1.c b/conformance/interfaces/aio_fsync/4-1.c
+index a2f1683..a37a258 100644
+--- a/conformance/interfaces/aio_fsync/4-1.c
++++ b/conformance/interfaces/aio_fsync/4-1.c
+@@ -30,7 +30,7 @@ int main()
+ 	struct aiocb aiocb_write;
+ 	struct aiocb aiocb_fsync;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/4-2.c b/conformance/interfaces/aio_fsync/4-2.c
+index 3ae9a89..deea544 100644
+--- a/conformance/interfaces/aio_fsync/4-2.c
++++ b/conformance/interfaces/aio_fsync/4-2.c
+@@ -30,7 +30,7 @@ int main()
+ 	struct aiocb aiocb_write;
+ 	struct aiocb aiocb_fsync;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/5-1.c b/conformance/interfaces/aio_fsync/5-1.c
+index 41b2fd0..c47ea0b 100644
+--- a/conformance/interfaces/aio_fsync/5-1.c
++++ b/conformance/interfaces/aio_fsync/5-1.c
+@@ -32,7 +32,7 @@ int main()
+ 	struct aiocb aiocb_fsync;
+ 	int ret;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/6-1.c b/conformance/interfaces/aio_fsync/6-1.c
+index c079c7d..2fec465 100644
+--- a/conformance/interfaces/aio_fsync/6-1.c
++++ b/conformance/interfaces/aio_fsync/6-1.c
+@@ -15,7 +15,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/7-1.c b/conformance/interfaces/aio_fsync/7-1.c
+index c079c7d..2fec465 100644
+--- a/conformance/interfaces/aio_fsync/7-1.c
++++ b/conformance/interfaces/aio_fsync/7-1.c
+@@ -15,7 +15,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/8-1.c b/conformance/interfaces/aio_fsync/8-1.c
+index 8eef14c..1c6641e 100644
+--- a/conformance/interfaces/aio_fsync/8-1.c
++++ b/conformance/interfaces/aio_fsync/8-1.c
+@@ -30,7 +30,7 @@ int main()
+ 	struct aiocb aiocb_write;
+ 	struct aiocb aiocb_fsync;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/8-2.c b/conformance/interfaces/aio_fsync/8-2.c
+index 33ae064..dfbd2df 100644
+--- a/conformance/interfaces/aio_fsync/8-2.c
++++ b/conformance/interfaces/aio_fsync/8-2.c
+@@ -30,7 +30,7 @@ int main()
+ 	struct aiocb aiocb_write;
+ 	struct aiocb aiocb_fsync;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/8-3.c b/conformance/interfaces/aio_fsync/8-3.c
+index 86fbceb..cfc71c3 100644
+--- a/conformance/interfaces/aio_fsync/8-3.c
++++ b/conformance/interfaces/aio_fsync/8-3.c
+@@ -30,7 +30,7 @@ int main()
+ 	struct aiocb aiocb_write;
+ 	struct aiocb aiocb_fsync;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/8-4.c b/conformance/interfaces/aio_fsync/8-4.c
+index 1472ef7..4e358b5 100644
+--- a/conformance/interfaces/aio_fsync/8-4.c
++++ b/conformance/interfaces/aio_fsync/8-4.c
+@@ -30,7 +30,7 @@ int main()
+ 	struct aiocb aiocb_write;
+ 	struct aiocb aiocb_fsync;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_fsync/9-1.c b/conformance/interfaces/aio_fsync/9-1.c
+index 7a3491b..9bac1d1 100644
+--- a/conformance/interfaces/aio_fsync/9-1.c
++++ b/conformance/interfaces/aio_fsync/9-1.c
+@@ -30,7 +30,7 @@ int main()
+ 	struct aiocb aiocb_write;
+ 	struct aiocb aiocb_fsync;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/1-1.c b/conformance/interfaces/aio_read/1-1.c
+index 79e71af..234d93d 100644
+--- a/conformance/interfaces/aio_read/1-1.c
++++ b/conformance/interfaces/aio_read/1-1.c
+@@ -44,7 +44,7 @@ int main()
+ 
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/10-1.c b/conformance/interfaces/aio_read/10-1.c
+index 4c19faf..0f7afde 100644
+--- a/conformance/interfaces/aio_read/10-1.c
++++ b/conformance/interfaces/aio_read/10-1.c
+@@ -41,7 +41,7 @@ int main()
+ 	char buf[BUF_SIZE];
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/11-1.c b/conformance/interfaces/aio_read/11-1.c
+index 018460e..a962f48 100644
+--- a/conformance/interfaces/aio_read/11-1.c
++++ b/conformance/interfaces/aio_read/11-1.c
+@@ -44,7 +44,7 @@ int main()
+ 	int fd;
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/11-2.c b/conformance/interfaces/aio_read/11-2.c
+index 5e9f56f..8320ddd 100644
+--- a/conformance/interfaces/aio_read/11-2.c
++++ b/conformance/interfaces/aio_read/11-2.c
+@@ -44,7 +44,7 @@ int main()
+ 	int fd;
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/12-1.c b/conformance/interfaces/aio_read/12-1.c
+index 9a3ee2d..5de1959 100644
+--- a/conformance/interfaces/aio_read/12-1.c
++++ b/conformance/interfaces/aio_read/12-1.c
+@@ -30,7 +30,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/13-1.c b/conformance/interfaces/aio_read/13-1.c
+index 32e50f9..f9ff3c1 100644
+--- a/conformance/interfaces/aio_read/13-1.c
++++ b/conformance/interfaces/aio_read/13-1.c
+@@ -29,7 +29,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/14-1.c b/conformance/interfaces/aio_read/14-1.c
+index a6aad0c..413c728 100644
+--- a/conformance/interfaces/aio_read/14-1.c
++++ b/conformance/interfaces/aio_read/14-1.c
+@@ -30,7 +30,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/15-1.c b/conformance/interfaces/aio_read/15-1.c
+index 5c02788..abb6706 100644
+--- a/conformance/interfaces/aio_read/15-1.c
++++ b/conformance/interfaces/aio_read/15-1.c
+@@ -35,7 +35,7 @@ int main()
+ 	struct aiocb aiocb;
+ 	struct rlimit limit;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/2-1.c b/conformance/interfaces/aio_read/2-1.c
+index f707334..2c480c2 100644
+--- a/conformance/interfaces/aio_read/2-1.c
++++ b/conformance/interfaces/aio_read/2-1.c
+@@ -29,7 +29,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/3-1.c b/conformance/interfaces/aio_read/3-1.c
+index 4fb0e64..6ba10b3 100644
+--- a/conformance/interfaces/aio_read/3-1.c
++++ b/conformance/interfaces/aio_read/3-1.c
+@@ -41,7 +41,7 @@ int main()
+ 	int fd;
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/3-2.c b/conformance/interfaces/aio_read/3-2.c
+index c2f89d8..948acb4 100644
+--- a/conformance/interfaces/aio_read/3-2.c
++++ b/conformance/interfaces/aio_read/3-2.c
+@@ -41,7 +41,7 @@ int main()
+ 	int fd;
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/4-1.c b/conformance/interfaces/aio_read/4-1.c
+index c1d1517..7aae730 100644
+--- a/conformance/interfaces/aio_read/4-1.c
++++ b/conformance/interfaces/aio_read/4-1.c
+@@ -43,7 +43,7 @@ int main()
+ 	struct aiocb aiocb;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/5-1.c b/conformance/interfaces/aio_read/5-1.c
+index 378b971..5b41e02 100644
+--- a/conformance/interfaces/aio_read/5-1.c
++++ b/conformance/interfaces/aio_read/5-1.c
+@@ -44,7 +44,7 @@ int main()
+ 	struct aiocb aiocb;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/6-1.c b/conformance/interfaces/aio_read/6-1.c
+index 75e2d8a..dd664d6 100644
+--- a/conformance/interfaces/aio_read/6-1.c
++++ b/conformance/interfaces/aio_read/6-1.c
+@@ -29,7 +29,7 @@
+ int main()
+ {
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/7-1.c b/conformance/interfaces/aio_read/7-1.c
+index 5874063..4a157eb 100644
+--- a/conformance/interfaces/aio_read/7-1.c
++++ b/conformance/interfaces/aio_read/7-1.c
+@@ -42,7 +42,7 @@ int main()
+ 	int fd;
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/8-1.c b/conformance/interfaces/aio_read/8-1.c
+index fc872fa..083d694 100644
+--- a/conformance/interfaces/aio_read/8-1.c
++++ b/conformance/interfaces/aio_read/8-1.c
+@@ -38,7 +38,7 @@ int main()
+ {
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_read/9-1.c b/conformance/interfaces/aio_read/9-1.c
+index 201dddb..6ee1da7 100644
+--- a/conformance/interfaces/aio_read/9-1.c
++++ b/conformance/interfaces/aio_read/9-1.c
+@@ -49,7 +49,7 @@ int main()
+ 	int err;
+ 	int ret;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_return/1-1.c b/conformance/interfaces/aio_return/1-1.c
+index da1b87d..ebf5b1f 100644
+--- a/conformance/interfaces/aio_return/1-1.c
++++ b/conformance/interfaces/aio_return/1-1.c
+@@ -44,7 +44,7 @@ int main()
+ 	struct aiocb aiocb;
+ 	int retval;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_return/2-1.c b/conformance/interfaces/aio_return/2-1.c
+index 5b7536e..60ef641 100644
+--- a/conformance/interfaces/aio_return/2-1.c
++++ b/conformance/interfaces/aio_return/2-1.c
+@@ -41,7 +41,7 @@ int main()
+ 	struct aiocb aiocb;
+ 	int retval;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_return/3-1.c b/conformance/interfaces/aio_return/3-1.c
+index 71b8a4b..5bb6221 100644
+--- a/conformance/interfaces/aio_return/3-1.c
++++ b/conformance/interfaces/aio_return/3-1.c
+@@ -47,7 +47,7 @@ int main()
+ 	struct aiocb aiocb;
+ 	int retval;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_return/3-2.c b/conformance/interfaces/aio_return/3-2.c
+index e8f6a44..01fe55c 100644
+--- a/conformance/interfaces/aio_return/3-2.c
++++ b/conformance/interfaces/aio_return/3-2.c
+@@ -45,7 +45,7 @@ int main()
+ 	struct aiocb aiocb;
+ 	int retval;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_return/4-1.c b/conformance/interfaces/aio_return/4-1.c
+index 365521e..54e118f 100644
+--- a/conformance/interfaces/aio_return/4-1.c
++++ b/conformance/interfaces/aio_return/4-1.c
+@@ -44,7 +44,7 @@ int main()
+ 	struct aiocb aiocb2;
+ 	int retval;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_suspend/1-1.c b/conformance/interfaces/aio_suspend/1-1.c
+index 4ce3774..ee78de2 100644
+--- a/conformance/interfaces/aio_suspend/1-1.c
++++ b/conformance/interfaces/aio_suspend/1-1.c
+@@ -73,7 +73,7 @@ main ()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_suspend/2-1.c b/conformance/interfaces/aio_suspend/2-1.c
+index 9349a4f..e92eb0a 100644
+--- a/conformance/interfaces/aio_suspend/2-1.c
++++ b/conformance/interfaces/aio_suspend/2-1.c
+@@ -27,7 +27,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_suspend/3-1.c b/conformance/interfaces/aio_suspend/3-1.c
+index 3cf3507..4d40650 100644
+--- a/conformance/interfaces/aio_suspend/3-1.c
++++ b/conformance/interfaces/aio_suspend/3-1.c
+@@ -47,7 +47,7 @@ int main()
+ 	const struct aiocb *list[NENT];
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_suspend/4-1.c b/conformance/interfaces/aio_suspend/4-1.c
+index 5681e30..01ead8a 100644
+--- a/conformance/interfaces/aio_suspend/4-1.c
++++ b/conformance/interfaces/aio_suspend/4-1.c
+@@ -71,7 +71,7 @@ main ()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_suspend/5-1.c b/conformance/interfaces/aio_suspend/5-1.c
+index 7a42ef2..b1fde33 100644
+--- a/conformance/interfaces/aio_suspend/5-1.c
++++ b/conformance/interfaces/aio_suspend/5-1.c
+@@ -26,7 +26,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_suspend/6-1.c b/conformance/interfaces/aio_suspend/6-1.c
+index 1c6b8b1..87608fe 100644
+--- a/conformance/interfaces/aio_suspend/6-1.c
++++ b/conformance/interfaces/aio_suspend/6-1.c
+@@ -69,7 +69,7 @@ main ()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_suspend/7-1.c b/conformance/interfaces/aio_suspend/7-1.c
+index 1afaa0a..f27397d 100644
+--- a/conformance/interfaces/aio_suspend/7-1.c
++++ b/conformance/interfaces/aio_suspend/7-1.c
+@@ -71,7 +71,7 @@ main ()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_suspend/8-1.c b/conformance/interfaces/aio_suspend/8-1.c
+index 7ce3c8b..585097b 100644
+--- a/conformance/interfaces/aio_suspend/8-1.c
++++ b/conformance/interfaces/aio_suspend/8-1.c
+@@ -74,7 +74,7 @@ main ()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_suspend/9-1.c b/conformance/interfaces/aio_suspend/9-1.c
+index 8912a89..341cd5e 100644
+--- a/conformance/interfaces/aio_suspend/9-1.c
++++ b/conformance/interfaces/aio_suspend/9-1.c
+@@ -71,7 +71,7 @@ main ()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_write/1-1.c b/conformance/interfaces/aio_write/1-1.c
+index 98906ea..ae66721 100644
+--- a/conformance/interfaces/aio_write/1-1.c
++++ b/conformance/interfaces/aio_write/1-1.c
+@@ -47,7 +47,7 @@ int main()
+ 	int err;
+ 	int ret;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_write/1-2.c b/conformance/interfaces/aio_write/1-2.c
+index f5b5070..9983d70 100644
+--- a/conformance/interfaces/aio_write/1-2.c
++++ b/conformance/interfaces/aio_write/1-2.c
+@@ -48,7 +48,7 @@ int main()
+ 	int err;
+ 	int ret;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_write/10-1.c b/conformance/interfaces/aio_write/10-1.c
+index d83cd3c..16944b0 100644
+--- a/conformance/interfaces/aio_write/10-1.c
++++ b/conformance/interfaces/aio_write/10-1.c
+@@ -28,7 +28,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_write/11-1.c b/conformance/interfaces/aio_write/11-1.c
+index d30197d..42ca926 100644
+--- a/conformance/interfaces/aio_write/11-1.c
++++ b/conformance/interfaces/aio_write/11-1.c
+@@ -28,7 +28,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_write/12-1.c b/conformance/interfaces/aio_write/12-1.c
+index 083df51..ed1e75e 100644
+--- a/conformance/interfaces/aio_write/12-1.c
++++ b/conformance/interfaces/aio_write/12-1.c
+@@ -27,7 +27,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_write/13-1.c b/conformance/interfaces/aio_write/13-1.c
+index 3e59828..2863cc9 100644
+--- a/conformance/interfaces/aio_write/13-1.c
++++ b/conformance/interfaces/aio_write/13-1.c
+@@ -29,7 +29,7 @@
+ int main()
+ {
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_write/2-1.c b/conformance/interfaces/aio_write/2-1.c
+index 685a3ce..3be18b0 100644
+--- a/conformance/interfaces/aio_write/2-1.c
++++ b/conformance/interfaces/aio_write/2-1.c
+@@ -55,7 +55,7 @@ int main()
+ 	int err;
+ 	int ret;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_write/3-1.c b/conformance/interfaces/aio_write/3-1.c
+index 8f33131..578493e 100644
+--- a/conformance/interfaces/aio_write/3-1.c
++++ b/conformance/interfaces/aio_write/3-1.c
+@@ -47,7 +47,7 @@ int main()
+ 	int err;
+ 	int ret;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_write/4-1.c b/conformance/interfaces/aio_write/4-1.c
+index 7de7a56..fea6f05 100644
+--- a/conformance/interfaces/aio_write/4-1.c
++++ b/conformance/interfaces/aio_write/4-1.c
+@@ -29,7 +29,7 @@
+ int main()
+ {
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_write/5-1.c b/conformance/interfaces/aio_write/5-1.c
+index 39773b1..44ad195 100644
+--- a/conformance/interfaces/aio_write/5-1.c
++++ b/conformance/interfaces/aio_write/5-1.c
+@@ -45,7 +45,7 @@ int main()
+ 	int err;
+ 	int ret;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_write/6-1.c b/conformance/interfaces/aio_write/6-1.c
+index 65b5d47..f2feb00 100644
+--- a/conformance/interfaces/aio_write/6-1.c
++++ b/conformance/interfaces/aio_write/6-1.c
+@@ -39,7 +39,7 @@ int main()
+ {
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_write/7-1.c b/conformance/interfaces/aio_write/7-1.c
+index 8f13f30..f551e17 100644
+--- a/conformance/interfaces/aio_write/7-1.c
++++ b/conformance/interfaces/aio_write/7-1.c
+@@ -49,7 +49,7 @@ int main()
+ 	int err;
+ 	int ret;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_write/8-1.c b/conformance/interfaces/aio_write/8-1.c
+index 5ab8adf..548c92d 100644
+--- a/conformance/interfaces/aio_write/8-1.c
++++ b/conformance/interfaces/aio_write/8-1.c
+@@ -41,7 +41,7 @@ int main()
+ 	char buf[BUF_SIZE];
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_write/8-2.c b/conformance/interfaces/aio_write/8-2.c
+index 65ad7a1..0ed0bd9 100644
+--- a/conformance/interfaces/aio_write/8-2.c
++++ b/conformance/interfaces/aio_write/8-2.c
+@@ -43,7 +43,7 @@ int main()
+ 	int fd;
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_write/9-1.c b/conformance/interfaces/aio_write/9-1.c
+index 19bfca7..c7919ff 100644
+--- a/conformance/interfaces/aio_write/9-1.c
++++ b/conformance/interfaces/aio_write/9-1.c
+@@ -46,7 +46,7 @@ int main()
+ 	int fd;
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/aio_write/9-2.c b/conformance/interfaces/aio_write/9-2.c
+index 46c4e54..d7b2980 100644
+--- a/conformance/interfaces/aio_write/9-2.c
++++ b/conformance/interfaces/aio_write/9-2.c
+@@ -46,7 +46,7 @@ int main()
+ 	int fd;
+ 	struct aiocb aiocb;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/1-1.c b/conformance/interfaces/lio_listio/1-1.c
+index c86e318..a50aae2 100644
+--- a/conformance/interfaces/lio_listio/1-1.c
++++ b/conformance/interfaces/lio_listio/1-1.c
+@@ -65,7 +65,7 @@ int main()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/10-1.c b/conformance/interfaces/lio_listio/10-1.c
+index fbe82ec..0d98834 100644
+--- a/conformance/interfaces/lio_listio/10-1.c
++++ b/conformance/interfaces/lio_listio/10-1.c
+@@ -64,7 +64,7 @@ int main()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/11-1.c b/conformance/interfaces/lio_listio/11-1.c
+index 5938162..fffaadf 100644
+--- a/conformance/interfaces/lio_listio/11-1.c
++++ b/conformance/interfaces/lio_listio/11-1.c
+@@ -64,7 +64,7 @@ int main()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/12-1.c b/conformance/interfaces/lio_listio/12-1.c
+index 46907a6..d4cb42e 100644
+--- a/conformance/interfaces/lio_listio/12-1.c
++++ b/conformance/interfaces/lio_listio/12-1.c
+@@ -47,7 +47,7 @@ int main()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/13-1.c b/conformance/interfaces/lio_listio/13-1.c
+index b500947..578c441 100644
+--- a/conformance/interfaces/lio_listio/13-1.c
++++ b/conformance/interfaces/lio_listio/13-1.c
+@@ -47,7 +47,7 @@ int main()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/14-1.c b/conformance/interfaces/lio_listio/14-1.c
+index 8e66bd4..9ae00c8 100644
+--- a/conformance/interfaces/lio_listio/14-1.c
++++ b/conformance/interfaces/lio_listio/14-1.c
+@@ -64,7 +64,7 @@ int main()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/15-1.c b/conformance/interfaces/lio_listio/15-1.c
+index 6ae2b0d..8e6fcd8 100644
+--- a/conformance/interfaces/lio_listio/15-1.c
++++ b/conformance/interfaces/lio_listio/15-1.c
+@@ -64,7 +64,7 @@ int main()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/16-1.c b/conformance/interfaces/lio_listio/16-1.c
+index 4debb69..76a02b1 100644
+--- a/conformance/interfaces/lio_listio/16-1.c
++++ b/conformance/interfaces/lio_listio/16-1.c
+@@ -28,7 +28,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/17-1.c b/conformance/interfaces/lio_listio/17-1.c
+index c079c7d..2fec465 100644
+--- a/conformance/interfaces/lio_listio/17-1.c
++++ b/conformance/interfaces/lio_listio/17-1.c
+@@ -15,7 +15,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/18-1.c b/conformance/interfaces/lio_listio/18-1.c
+index b998000..f30570f 100644
+--- a/conformance/interfaces/lio_listio/18-1.c
++++ b/conformance/interfaces/lio_listio/18-1.c
+@@ -45,7 +45,7 @@ int main()
+ 	char *bufs;
+ 	int ret;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/19-1.c b/conformance/interfaces/lio_listio/19-1.c
+index c079c7d..2fec465 100644
+--- a/conformance/interfaces/lio_listio/19-1.c
++++ b/conformance/interfaces/lio_listio/19-1.c
+@@ -15,7 +15,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/2-1.c b/conformance/interfaces/lio_listio/2-1.c
+index 7fd1a03..ed71f36 100644
+--- a/conformance/interfaces/lio_listio/2-1.c
++++ b/conformance/interfaces/lio_listio/2-1.c
+@@ -63,7 +63,7 @@ int main()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/20-1.c b/conformance/interfaces/lio_listio/20-1.c
+index c079c7d..2fec465 100644
+--- a/conformance/interfaces/lio_listio/20-1.c
++++ b/conformance/interfaces/lio_listio/20-1.c
+@@ -15,7 +15,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/21-1.c b/conformance/interfaces/lio_listio/21-1.c
+index c079c7d..2fec465 100644
+--- a/conformance/interfaces/lio_listio/21-1.c
++++ b/conformance/interfaces/lio_listio/21-1.c
+@@ -15,7 +15,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/22-1.c b/conformance/interfaces/lio_listio/22-1.c
+index c079c7d..2fec465 100644
+--- a/conformance/interfaces/lio_listio/22-1.c
++++ b/conformance/interfaces/lio_listio/22-1.c
+@@ -15,7 +15,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/23-1.c b/conformance/interfaces/lio_listio/23-1.c
+index c079c7d..2fec465 100644
+--- a/conformance/interfaces/lio_listio/23-1.c
++++ b/conformance/interfaces/lio_listio/23-1.c
+@@ -15,7 +15,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/24-1.c b/conformance/interfaces/lio_listio/24-1.c
+index c079c7d..2fec465 100644
+--- a/conformance/interfaces/lio_listio/24-1.c
++++ b/conformance/interfaces/lio_listio/24-1.c
+@@ -15,7 +15,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/25-1.c b/conformance/interfaces/lio_listio/25-1.c
+index c079c7d..2fec465 100644
+--- a/conformance/interfaces/lio_listio/25-1.c
++++ b/conformance/interfaces/lio_listio/25-1.c
+@@ -15,7 +15,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/3-1.c b/conformance/interfaces/lio_listio/3-1.c
+index 8445364..2533628 100644
+--- a/conformance/interfaces/lio_listio/3-1.c
++++ b/conformance/interfaces/lio_listio/3-1.c
+@@ -64,7 +64,7 @@ int main()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/4-1.c b/conformance/interfaces/lio_listio/4-1.c
+index e808e8c..d9dd5b6 100644
+--- a/conformance/interfaces/lio_listio/4-1.c
++++ b/conformance/interfaces/lio_listio/4-1.c
+@@ -64,7 +64,7 @@ int main()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/5-1.c b/conformance/interfaces/lio_listio/5-1.c
+index 8367e4d..68e6cfc 100644
+--- a/conformance/interfaces/lio_listio/5-1.c
++++ b/conformance/interfaces/lio_listio/5-1.c
+@@ -53,7 +53,7 @@ int main()
+ 	int i;
+ 
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/6-1.c b/conformance/interfaces/lio_listio/6-1.c
+index d40e996..8e04f1e 100644
+--- a/conformance/interfaces/lio_listio/6-1.c
++++ b/conformance/interfaces/lio_listio/6-1.c
+@@ -34,7 +34,7 @@
+ 
+ int main()
+ {
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/7-1.c b/conformance/interfaces/lio_listio/7-1.c
+index a512f06..a2e382d 100644
+--- a/conformance/interfaces/lio_listio/7-1.c
++++ b/conformance/interfaces/lio_listio/7-1.c
+@@ -67,7 +67,7 @@ int main()
+ 	int err;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/8-1.c b/conformance/interfaces/lio_listio/8-1.c
+index cad47b4..14f8b25 100644
+--- a/conformance/interfaces/lio_listio/8-1.c
++++ b/conformance/interfaces/lio_listio/8-1.c
+@@ -48,7 +48,7 @@ int main()
+ 	int err;
+ 	int ret;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 
+diff --git a/conformance/interfaces/lio_listio/9-1.c b/conformance/interfaces/lio_listio/9-1.c
+index 668e83c..8d47054 100644
+--- a/conformance/interfaces/lio_listio/9-1.c
++++ b/conformance/interfaces/lio_listio/9-1.c
+@@ -49,7 +49,7 @@ int main()
+ 	int ret;
+ 	int i;
+ 
+-#if _POSIX_ASYNCHRONOUS_IO != 200112L
++#if _POSIX_ASYNCHRONOUS_IO < 200112L
+ 	exit(PTS_UNSUPPORTED);
+ #endif
+ 

@@ -1,2 +1,2 @@
 # Patch filenames are applied in listed order.
-# Keep this file comment-only when no local patches are required.
+accept-newer-aio-option-versions.patch

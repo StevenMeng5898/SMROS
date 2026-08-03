@@ -958,6 +958,29 @@ class SharedModelTests(unittest.TestCase):
                     setattr(instance, expected_fields[0], "changed")
 
 
+class RepositoryPatchTests(unittest.TestCase):
+    def test_aio_patch_accepts_newer_option_versions_without_weakening_tests(
+        self,
+    ) -> None:
+        patch_root = REPOSITORY_ROOT / "third_party" / "posixtest" / "patches"
+        series_entries = [
+            line.strip()
+            for line in (patch_root / "series").read_text(encoding="ascii").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        self.assertIn("accept-newer-aio-option-versions.patch", series_entries)
+
+        patch = (patch_root / series_entries[0]).read_text(encoding="ascii")
+        self.assertEqual(
+            patch.count("-#if _POSIX_ASYNCHRONOUS_IO != 200112L"), 104
+        )
+        self.assertEqual(
+            patch.count("+#if _POSIX_ASYNCHRONOUS_IO < 200112L"), 104
+        )
+        self.assertNotIn("PTS_PASS", patch)
+        self.assertNotIn("PTS_UNSUPPORTED;\n+", patch)
+
+
 class DocumentationTests(unittest.TestCase):
     def test_readme_describes_default_and_overridden_work_directories(self) -> None:
         readme = (
