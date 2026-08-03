@@ -986,6 +986,7 @@ struct MemorySyscallState {
     handles: Vec<KernelHandleRecord>,
     signals: Vec<SignalRecord>,
     linux_fds: Vec<LinuxFdRecord>,
+    linux_timer_handles: Vec<u32>,
     linux_fxfs_files: Vec<LinuxFxfsFileRecord>,
     linux_shared_memory: Vec<LinuxSharedMemoryRecord>,
     linux_mounts: Vec<LinuxMountRecord>,
@@ -1037,6 +1038,7 @@ impl MemorySyscallState {
             handles,
             signals: Vec::new(),
             linux_fds: Vec::new(),
+            linux_timer_handles: Vec::new(),
             linux_fxfs_files: Vec::new(),
             linux_shared_memory: Vec::new(),
             linux_mounts: Vec::new(),
@@ -1142,6 +1144,7 @@ impl MemorySyscallState {
 
     fn clear_external_handle_state(&mut self, handle: u32) {
         self.signals.retain(|signal| signal.handle != handle);
+        self.linux_timer_handles.retain(|timer| *timer != handle);
     }
 
     fn alloc_object_handle_with_rights(
@@ -2063,6 +2066,23 @@ impl MemorySyscallState {
         self.linux_domainname_set = false;
     }
 
+    fn reset_linux_process_state(&mut self) {
+        let mappings = core::mem::take(&mut self.linux_mappings);
+        for mapping in mappings {
+            MemorySyscallState::free_linux_pages(&mapping.pfns);
+        }
+        for record in &mut self.linux_shared_memory {
+            record.attachments.clear();
+        }
+
+        let brk = core::mem::replace(&mut self.brk, BrkState::new());
+        MemorySyscallState::free_linux_pages(&brk.pfns);
+        self.linux_fxfs_files.clear();
+        self.next_linux_addr = LINUX_MAPPING_BASE;
+        self.next_fd = COMPAT_FD_START;
+        self.reset_linux_container_state();
+    }
+
     fn linux_container_stats(&self) -> LinuxContainerStats {
         let mut mount_flags = 0usize;
         for mount in &self.linux_mounts {
@@ -2191,6 +2211,25 @@ pub fn linux_container_stats() -> LinuxContainerStats {
 
 pub fn reset_linux_container_state() {
     memory_state().reset_linux_container_state();
+}
+
+pub fn reset_linux_process_state() {
+    let fds = memory_state()
+        .linux_fds
+        .iter()
+        .map(|record| record.fd)
+        .collect::<Vec<_>>();
+    for fd in fds {
+        let _ = sys_close(fd);
+    }
+
+    let timer_handles = core::mem::take(&mut memory_state().linux_timer_handles);
+    for handle in timer_handles {
+        let _ = sys_handle_close(handle);
+    }
+
+    memory_state().reset_linux_process_state();
+    reset_linux_signal_timer_state();
 }
 
 fn mmu_flags_from_vm_options(options: VmOptions) -> MmuFlags {
@@ -5029,6 +5068,7 @@ pub fn sys_linux_timer_create(_clockid: usize, _sevp: usize, timerid: usize) -> 
         return Err(SysError::EFAULT);
     }
     let handle = compat::create_object(ObjectType::Timer).map_err(|_| SysError::ENOMEM)?;
+    memory_state().linux_timer_handles.push(handle.0);
     unsafe {
         core::ptr::write(timerid as *mut usize, handle.0 as usize);
     }
@@ -5070,6 +5110,9 @@ pub fn sys_linux_timer_getoverrun(timerid: usize) -> SysResult {
 
 pub fn sys_linux_timer_delete(timerid: usize) -> SysResult {
     if compat::close_handle(HandleValue(timerid as u32)) {
+        memory_state()
+            .linux_timer_handles
+            .retain(|handle| *handle != timerid as u32);
         Ok(0)
     } else {
         Err(SysError::EINVAL)

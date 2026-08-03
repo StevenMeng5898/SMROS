@@ -945,6 +945,44 @@ fn posix_resource_snapshot_uses_authoritative_state_without_resetting_it() {
 }
 
 #[test]
+fn linux_process_reset_reclaims_transient_state_without_reinitializing_global_state() {
+    let syscall = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/syscall.rs"
+    ));
+    let method_start = syscall
+        .find("fn reset_linux_process_state(&mut self)")
+        .expect("memory-state process reset");
+    let method = braced_body(&syscall[method_start..]);
+    let public_start = syscall
+        .find("pub fn reset_linux_process_state()")
+        .expect("public process reset");
+    let public = braced_body(&syscall[public_start..]);
+
+    for required in [
+        "core::mem::take(&mut self.linux_mappings)",
+        "MemorySyscallState::free_linux_pages(&mapping.pfns)",
+        "core::mem::replace(&mut self.brk, BrkState::new())",
+        "MemorySyscallState::free_linux_pages(&brk.pfns)",
+        "record.attachments.clear()",
+        "self.next_linux_addr = LINUX_MAPPING_BASE",
+        "self.next_fd = COMPAT_FD_START",
+        "self.reset_linux_container_state()",
+    ] {
+        assert!(
+            method.contains(required),
+            "missing reset operation: {required}"
+        );
+    }
+    assert!(public.contains("sys_close(fd)"));
+    assert!(public.contains("linux_timer_handles"));
+    assert!(public.contains("sys_handle_close(handle)"));
+    assert!(public.contains("reset_linux_signal_timer_state()"));
+    assert!(!method.contains("MemorySyscallState::new()"));
+    assert!(!public.contains("MEMORY_SYSCALL_STATE = None"));
+}
+
+#[test]
 fn run_elf_observer_api_is_typed_environment_aware_and_compatible() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let launcher = std::fs::read_to_string(repository.join("src/user_level/services/run_elf.rs"))
