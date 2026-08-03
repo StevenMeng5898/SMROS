@@ -1086,7 +1086,15 @@ fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
     assert!(launcher.contains("RunTermination::InfrastructureError("));
     assert!(launcher.contains("print_infrastructure_diagnostic("));
     assert!(launcher.contains("run_elf_elapsed_ticks(request.start_tick, end_tick)"));
-    assert!(launcher.contains("syscall::reset_linux_signal_timer_state()"));
+    assert!(launcher.contains("syscall::reset_linux_process_state()"));
+    assert_eq!(
+        launcher
+            .matches("syscall::reset_linux_process_state()")
+            .count(),
+        4,
+        "start, prepare-return, completion, and explicit clear must share cleanup",
+    );
+    assert!(!launcher.contains("syscall::reset_linux_signal_timer_state()"));
     assert!(launcher.contains("posix_test::on_run_outcome(outcome)"));
 
     let validation = launcher

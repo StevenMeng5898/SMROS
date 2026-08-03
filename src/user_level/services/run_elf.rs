@@ -160,7 +160,7 @@ pub fn spawn_observed(
     });
     let launch_id = match with_run_state(|state| {
         user_logic::run_elf_start_transition(state, request, || {
-            syscall::reset_linux_signal_timer_state()
+            syscall::reset_linux_process_state()
         })
     }) {
         user_logic::RunElfStart::Started(launch_id) => launch_id,
@@ -194,7 +194,7 @@ pub fn prepare_run_elf_return(exit_code: i32) -> Option<usize> {
     let id_raw = launch_id.to_usize()?;
     if with_run_state(|state| {
         user_logic::run_elf_prepare_return_transition(state, launch_id, exit_code, || {
-            syscall::reset_linux_signal_timer_state()
+            syscall::reset_linux_process_state()
         })
     }) != user_logic::RunElfTransition::Matched
     {
@@ -284,7 +284,7 @@ fn take_active_request(
 ) -> (user_logic::RunElfCompletion<ActiveRun>, i32) {
     let taken = with_run_state(|state| {
         user_logic::run_elf_take_completion_transition(state, launch_id, || {
-            syscall::reset_linux_signal_timer_state()
+            syscall::reset_linux_process_state()
         })
     });
     (taken.completion, taken.exit_code)
@@ -294,7 +294,7 @@ fn clear_launch_state_without_outcome(cpu: usize, launch_id: user_logic::RunElfL
     let _ = RUN_CPU_BINDINGS.clear(cpu, launch_id);
     let _ = with_run_state(|state| {
         user_logic::run_elf_clear_transition(state, launch_id, || {
-            syscall::reset_linux_signal_timer_state()
+            syscall::reset_linux_process_state()
         })
     });
 }
