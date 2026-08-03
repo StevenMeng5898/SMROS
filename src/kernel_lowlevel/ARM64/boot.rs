@@ -421,6 +421,11 @@ exception_handler:
 
     // Save result back to x0 position on stack
     str     x0, [sp, #0]
+
+    // Restore a completed Linux signal frame or deliver a pending handler
+    // before the saved EL0 register frame is reloaded.
+    mov     x0, sp
+    bl      complete_linux_signal_syscall_return
     b       3f
     
 99:

@@ -132,6 +132,30 @@ pub fn read_exception_return_pc() -> u64 {
 }
 
 #[inline(always)]
+pub fn read_user_stack_pointer() -> u64 {
+    let sp: u64;
+    unsafe {
+        core::arch::asm!(
+            "mrs {sp}, sp_el0",
+            sp = out(reg) sp,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    sp
+}
+
+#[inline(always)]
+pub fn set_user_stack_pointer(sp: u64) {
+    unsafe {
+        core::arch::asm!(
+            "msr sp_el0, {sp}",
+            sp = in(reg) sp,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+#[inline(always)]
 pub unsafe fn switch_to_user(entry_point: u64, user_stack: u64, ttbr0: u64, state: u64) -> ! {
     core::arch::asm!(
         "msr ttbr0_el1, {ttbr0}",

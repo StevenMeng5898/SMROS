@@ -104,6 +104,14 @@ pub fn read_exception_return_pc() -> u64 {
 }
 
 #[inline(always)]
+pub fn read_user_stack_pointer() -> u64 {
+    0
+}
+
+#[inline(always)]
+pub fn set_user_stack_pointer(_sp: u64) {}
+
+#[inline(always)]
 pub unsafe fn switch_to_user(entry_point: u64, user_stack: u64, ttbr0: u64, _state: u64) -> ! {
     if ttbr0 != 0 {
         let satp = (8usize << 60) | ((ttbr0 as usize) >> 12);

@@ -175,6 +175,18 @@ mod syscall_logic {
     }
 
     #[test]
+    fn linux_signal_actions_reject_sigkill_and_sigstop() {
+        let max_signal = 64usize;
+
+        assert!(smros_linux_signal_action_valid_body!(1usize, max_signal));
+        assert!(smros_linux_signal_action_valid_body!(64usize, max_signal));
+        assert!(!smros_linux_signal_action_valid_body!(0usize, max_signal));
+        assert!(!smros_linux_signal_action_valid_body!(9usize, max_signal));
+        assert!(!smros_linux_signal_action_valid_body!(19usize, max_signal));
+        assert!(!smros_linux_signal_action_valid_body!(65usize, max_signal));
+    }
+
+    #[test]
     #[rustfmt::skip]
     fn linux_socket_rules_match_domain_and_type_matrix() {
         let unix = 1u32;

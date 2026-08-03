@@ -75,6 +75,14 @@ pub fn read_exception_return_pc() -> u64 {
 }
 
 #[inline(always)]
+pub fn read_user_stack_pointer() -> u64 {
+    0
+}
+
+#[inline(always)]
+pub fn set_user_stack_pointer(_sp: u64) {}
+
+#[inline(always)]
 pub unsafe fn switch_to_user(_entry_point: u64, _user_stack: u64, _ttbr0: u64, _state: u64) -> ! {
     loop {
         wait_for_event();

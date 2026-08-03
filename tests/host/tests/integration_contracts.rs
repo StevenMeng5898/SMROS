@@ -1664,6 +1664,10 @@ fn run_elf_launch_identity_is_bound_and_carried_through_aarch64_resume() {
         .find("str     x0, [sp, #0]")
         .map(|offset| dispatch + offset)
         .expect("syscall result is saved as resume x0");
+    let complete_signal = exception[save_result..]
+        .find("bl      complete_linux_signal_syscall_return")
+        .map(|offset| save_result + offset)
+        .expect("pending Linux signals complete before register restoration");
     let restore_result = exception[save_result..]
         .find("ldp     x0, x1, [sp, #0]")
         .map(|offset| save_result + offset)
@@ -1672,7 +1676,12 @@ fn run_elf_launch_identity_is_bound_and_carried_through_aarch64_resume() {
         .find("eret")
         .map(|offset| restore_result + offset)
         .expect("exception return resumes launcher");
-    assert!(dispatch < save_result && save_result < restore_result && restore_result < eret);
+    assert!(
+        dispatch < save_result
+            && save_result < complete_signal
+            && complete_signal < restore_result
+            && restore_result < eret
+    );
 }
 
 #[test]

@@ -93,7 +93,7 @@ macro_rules! smros_linux_signal_valid_body {
 
 macro_rules! smros_linux_signal_action_valid_body {
     ($signum:expr, $max_signal:expr) => {{
-        $signum != 0 && $signum <= $max_signal
+        $signum != 0 && $signum <= $max_signal && $signum != 9 && $signum != 19
     }};
 }
 
