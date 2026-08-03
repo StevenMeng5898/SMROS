@@ -763,23 +763,37 @@ git commit -m "docs: explain POSIX selection coverage"
 Run:
 
 ```bash
-make host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test build-test
+make host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test
 git diff --check
 ```
 
-Expected: every target exits zero, `kernel8.img` is rebuilt, the AArch64 link-layout check passes, and the diff check is silent.
+Expected: every offline target exits zero and the diff check is silent.
 
-- [ ] **Step 2: Verify the staged POSIX payload identity**
+- [ ] **Step 2: Rebuild and verify the staged POSIX payload identity**
 
 Run:
 
 ```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli build --arch aarch64 --stage host_shared/posixtest
 PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli build --arch aarch64 --stage host_shared/posixtest --verify-only
 ```
 
-Expected: the existing staged manifest, binaries, runtime closure, checksums, and AArch64 ELF identity validate without rewriting the stage.
+Expected: the staged manifest is rebound to the final SMROS commit, then its
+binaries, runtime closure, checksums, and AArch64 ELF identity validate without
+a second rewrite.
 
-- [ ] **Step 3: Run the automated SMROS AArch64 canary**
+- [ ] **Step 3: Build the final AArch64 kernel**
+
+Run:
+
+```bash
+make build-test
+```
+
+Expected: `kernel8.img` embeds the refreshed stage and the AArch64 link-layout
+check passes.
+
+- [ ] **Step 4: Run the automated SMROS AArch64 canary**
 
 Run:
 
@@ -791,7 +805,7 @@ Expected: QEMU boots, each selected canary produces schema-1 start/end events,
 ordinary selection/final progress text does not break parsing, and the campaign
 writes parseable results under `target/posix/aarch64/smros-run/`.
 
-- [ ] **Step 4: Inspect a direct live run for periodic and API output**
+- [ ] **Step 5: Inspect a direct live run for periodic and API output**
 
 Run:
 
@@ -811,7 +825,7 @@ follows its `test_end` and precedes the next `test_start`; the final line shows
 `tests=1598/1598 (100.00%)` for the current staged selection and precedes
 `suite_end`. The API/group pass ratios may truthfully be below 100 percent.
 
-- [ ] **Step 5: Review repository state and final evidence**
+- [ ] **Step 6: Review repository state and final evidence**
 
 Run:
 
