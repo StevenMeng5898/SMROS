@@ -1132,6 +1132,28 @@ fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
 }
 
 #[test]
+fn posix_guest_terminal_events_are_line_framed_after_arbitrary_test_output() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let runner = std::fs::read_to_string(repository.join("src/user_level/services/posix_test.rs"))
+        .expect("read POSIX guest runner");
+
+    for emitter in ["fn emit_test_end(", "fn emit_infrastructure_error("] {
+        let start = runner.find(emitter).expect("terminal event emitter");
+        let body = braced_body(&runner[start..]);
+        let init = body.find("serial.init();").expect("serial initialization");
+        let delimiter = body
+            .find("serial.write_byte(b'\\n');")
+            .expect("serial line delimiter");
+        let event = body.find("begin_event(").expect("structured event start");
+
+        assert!(
+            init < delimiter && delimiter < event,
+            "{emitter} must write a line delimiter after serial initialization and before the event"
+        );
+    }
+}
+
+#[test]
 fn posix_guest_runner_is_serialized_bounded_and_fail_closed() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let runner = std::fs::read_to_string(repository.join("src/user_level/services/posix_test.rs"))

@@ -860,6 +860,7 @@ fn emit_test_end(
 ) {
     let mut serial = crate::kernel_lowlevel::serial::Serial::new();
     serial.init();
+    serial.write_byte(b'\n');
     begin_event(&mut serial, state, "test_end");
     write_test_identity(&mut serial, test);
     serial.write_str(",\"status\":");
@@ -930,6 +931,7 @@ fn emit_infrastructure_error(state: &mut RunnerState, message: &str) {
         .cloned();
     let mut serial = crate::kernel_lowlevel::serial::Serial::new();
     serial.init();
+    serial.write_byte(b'\n');
     begin_event(&mut serial, state, "infrastructure_error");
     serial.write_str(",\"message\":");
     write_json_string(&mut serial, message);
