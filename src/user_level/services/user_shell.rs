@@ -8329,6 +8329,22 @@ fn cmd_run(ctx: &mut ShellContext, args: &[&str]) {
     scheduler::yield_now();
 }
 
+fn print_posix_coverage_ratio(serial: &mut Serial, numerator: usize, denominator: usize) {
+    print_usize(serial, numerator);
+    serial.write_byte(b'/');
+    print_usize(serial, denominator);
+    serial.write_str(" (");
+    let percent = super::posix_test_logic_shared::coverage_percent_hundredths(
+        numerator,
+        denominator,
+    );
+    print_usize(serial, percent / 100);
+    serial.write_byte(b'.');
+    serial.write_byte(b'0' + ((percent / 10) % 10) as u8);
+    serial.write_byte(b'0' + (percent % 10) as u8);
+    serial.write_str("%)");
+}
+
 fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
     use crate::user_level::services::posix_test::{self, PosixTestError};
 
@@ -8370,6 +8386,37 @@ fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
         print_usize(&mut ctx.serial, status.completed);
         ctx.serial.write_str(" selected=");
         print_usize(&mut ctx.serial, status.selected);
+        let coverage = status.coverage;
+        ctx.serial.write_str(" tests=");
+        print_posix_coverage_ratio(
+            &mut ctx.serial,
+            coverage.tests_completed,
+            coverage.tests_selected,
+        );
+        ctx.serial.write_str(" apis-complete=");
+        print_posix_coverage_ratio(
+            &mut ctx.serial,
+            coverage.apis_complete,
+            coverage.apis_selected,
+        );
+        ctx.serial.write_str(" apis-pass=");
+        print_posix_coverage_ratio(
+            &mut ctx.serial,
+            coverage.apis_pass,
+            coverage.apis_selected,
+        );
+        ctx.serial.write_str(" groups-complete=");
+        print_posix_coverage_ratio(
+            &mut ctx.serial,
+            coverage.groups_complete,
+            coverage.groups_selected,
+        );
+        ctx.serial.write_str(" groups-pass=");
+        print_posix_coverage_ratio(
+            &mut ctx.serial,
+            coverage.groups_pass,
+            coverage.groups_selected,
+        );
         ctx.serial.write_str(" passed=");
         print_usize(&mut ctx.serial, status.status_counts.passed);
         ctx.serial.write_str(" failed=");
@@ -8382,7 +8429,7 @@ fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
         print_usize(&mut ctx.serial, status.status_counts.untested);
         ctx.serial.write_str(" launch_errors=");
         print_usize(&mut ctx.serial, status.status_counts.launch_errors);
-        ctx.serial.write_str("\n");
+        ctx.serial.write_str(" scope=selected\n");
         return;
     }
 

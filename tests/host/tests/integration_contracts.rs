@@ -1353,6 +1353,17 @@ fn posix_test_shell_command_is_strictly_wired_to_the_runner() {
     assert!(handler.contains("posix_test::status_snapshot()"));
     assert!(handler.contains("posix_test::parse_filter(args)"));
     assert!(handler.contains("posix_test::start(filter)"));
+    for field in [
+        " tests=",
+        " apis-complete=",
+        " apis-pass=",
+        " groups-complete=",
+        " groups-pass=",
+        " scope=selected",
+    ] {
+        assert!(handler.contains(field), "status omits {field}");
+    }
+    assert!(handler.contains("status.coverage"));
     assert_eq!(
         handler
             .matches(

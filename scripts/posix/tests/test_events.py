@@ -143,6 +143,34 @@ class SerialEventTests(unittest.TestCase):
         self.assertEqual(attempt.resource_deltas.processes, 0)
         self.assertEqual(attempt.resource_evidence, "measured")
 
+    def test_ignores_plain_live_coverage_lines_without_widening_events(self) -> None:
+        events = self._one_attempt_log().splitlines()
+        log = "\n".join(
+            (
+                events[0],
+                "posixtest: selection tests=1 apis=1 groups=1 interval=25 scope=selected",
+                events[1],
+                events[2],
+                (
+                    "posixtest: progress tests=1/1 (100.00%) "
+                    "apis-complete=1/1 (100.00%) apis-pass=1/1 (100.00%) "
+                    "groups-complete=1/1 (100.00%) groups-pass=1/1 (100.00%) "
+                    "pass=1 fail=0 unresolved=0 unsupported=0 untested=0 "
+                    "launch-errors=0 scope=selected"
+                ),
+                events[3],
+            )
+        )
+
+        parsed = parse_serial_log(log)
+
+        self.assertEqual(
+            [event.event for event in parsed.events],
+            ["suite_start", "test_start", "test_end", "suite_end"],
+        )
+        self.assertTrue(parsed.complete)
+        self.assertEqual(parsed.attempts[0].stdout, "")
+
     def test_parses_standalone_preflight_infrastructure_error(self) -> None:
         for detail_field in ("message", "detail"):
             with self.subTest(detail_field=detail_field):
