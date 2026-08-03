@@ -75,10 +75,7 @@ pub struct PosixCoverageTracker {
 }
 
 impl PosixCoverageStatusCounts {
-    fn with_result(
-        self,
-        result: PosixCoverageResult,
-    ) -> Result<Self, PosixCoverageError> {
+    fn with_result(self, result: PosixCoverageResult) -> Result<Self, PosixCoverageError> {
         let mut next = self;
         let counter = match result {
             PosixCoverageResult::Pass => &mut next.passed,
@@ -163,11 +160,7 @@ impl PosixCoverageTracker {
             .ok_or(PosixCoverageError::CounterOverflow)
     }
 
-    fn set_selected(
-        units: &mut BTreeMap<String, PosixCoverageUnit>,
-        name: &str,
-        selected: usize,
-    ) {
+    fn set_selected(units: &mut BTreeMap<String, PosixCoverageUnit>, name: &str, selected: usize) {
         match units.get_mut(name) {
             Some(unit) => unit.selected = selected,
             None => {
@@ -236,15 +229,9 @@ pub fn coverage_percent_hundredths(numerator: usize, denominator: usize) -> usiz
     }
 }
 
-pub fn should_emit_progress(
-    completed: usize,
-    selected: usize,
-    api_completed: bool,
-) -> bool {
+pub fn should_emit_progress(completed: usize, selected: usize, api_completed: bool) -> bool {
     completed > 0
-        && (completed % POSIX_PROGRESS_INTERVAL == 0
-            || api_completed
-            || completed == selected)
+        && (completed % POSIX_PROGRESS_INTERVAL == 0 || api_completed || completed == selected)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

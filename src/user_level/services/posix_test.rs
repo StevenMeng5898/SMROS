@@ -13,7 +13,11 @@ use core::cell::UnsafeCell;
 #[cfg(test)]
 use std as core_compat;
 
+use super::posix_test_logic_shared::{PosixCoverageResult, PosixCoverageSnapshot};
 use super::{fxfs, posix_test_logic_shared};
+
+#[cfg(not(test))]
+use super::posix_test_logic_shared::PosixCoverageTracker;
 
 #[cfg(not(test))]
 use super::run_elf::{self, RunObserver, RunOutcome, RunTermination};
@@ -203,17 +207,10 @@ pub struct PosixRunnerStatus {
     pub completed: usize,
     pub selected: usize,
     pub status_counts: PosixStatusCounts,
+    pub coverage: PosixCoverageSnapshot,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PosixStatusCounts {
-    pub passed: usize,
-    pub failed: usize,
-    pub unresolved: usize,
-    pub unsupported: usize,
-    pub untested: usize,
-    pub launch_errors: usize,
-}
+pub type PosixStatusCounts = posix_test_logic_shared::PosixCoverageStatusCounts;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PosixRuntimeStatus {
@@ -294,20 +291,14 @@ fn pts_status(exit_code: i32) -> PosixRuntimeStatus {
     }
 }
 
-impl PosixStatusCounts {
-    fn record(&mut self, status: PosixRuntimeStatus) {
-        match status {
-            PosixRuntimeStatus::Pass => self.passed = self.passed.saturating_add(1),
-            PosixRuntimeStatus::Fail => self.failed = self.failed.saturating_add(1),
-            PosixRuntimeStatus::Unresolved => self.unresolved = self.unresolved.saturating_add(1),
-            PosixRuntimeStatus::Unsupported => {
-                self.unsupported = self.unsupported.saturating_add(1)
-            }
-            PosixRuntimeStatus::Untested => self.untested = self.untested.saturating_add(1),
-            PosixRuntimeStatus::LaunchError => {
-                self.launch_errors = self.launch_errors.saturating_add(1)
-            }
-        }
+fn coverage_result(status: PosixRuntimeStatus) -> PosixCoverageResult {
+    match status {
+        PosixRuntimeStatus::Pass => PosixCoverageResult::Pass,
+        PosixRuntimeStatus::Fail => PosixCoverageResult::Fail,
+        PosixRuntimeStatus::Unresolved => PosixCoverageResult::Unresolved,
+        PosixRuntimeStatus::Unsupported => PosixCoverageResult::Unsupported,
+        PosixRuntimeStatus::Untested => PosixCoverageResult::Untested,
+        PosixRuntimeStatus::LaunchError => PosixCoverageResult::LaunchError,
     }
 }
 
@@ -324,8 +315,7 @@ struct RunnerState {
     current_index: Option<usize>,
     current_started_tick: u64,
     resource_before: PosixResourceSnapshot,
-    completed: usize,
-    status_counts: PosixStatusCounts,
+    coverage: PosixCoverageTracker,
 }
 
 #[cfg(not(test))]
@@ -377,41 +367,51 @@ pub fn load_manifest() -> Result<PosixManifest, PosixTestError> {
 
 #[cfg(test)]
 pub fn status_snapshot() -> PosixRunnerStatus {
+    let coverage = PosixCoverageSnapshot::default();
     PosixRunnerStatus {
         running: false,
         run_id: None,
         filter: None,
         current_test: None,
-        completed: 0,
-        selected: 0,
-        status_counts: PosixStatusCounts::default(),
+        completed: coverage.tests_completed,
+        selected: coverage.tests_selected,
+        status_counts: coverage.status_counts,
+        coverage,
     }
 }
 
 #[cfg(not(test))]
 pub fn status_snapshot() -> PosixRunnerStatus {
     with_runner_state(|slot| match slot.as_ref() {
-        Some(state) => PosixRunnerStatus {
-            running: true,
-            run_id: Some(state.run_id.clone()),
-            filter: Some(state.filter.clone()),
-            current_test: state
-                .current_index
-                .and_then(|index| state.selected.get(index))
-                .map(|test| test.test_id.clone()),
-            completed: state.completed,
-            selected: state.selected.len(),
-            status_counts: state.status_counts,
-        },
-        None => PosixRunnerStatus {
-            running: false,
-            run_id: None,
-            filter: None,
-            current_test: None,
-            completed: 0,
-            selected: 0,
-            status_counts: PosixStatusCounts::default(),
-        },
+        Some(state) => {
+            let coverage = state.coverage.snapshot();
+            PosixRunnerStatus {
+                running: true,
+                run_id: Some(state.run_id.clone()),
+                filter: Some(state.filter.clone()),
+                current_test: state
+                    .current_index
+                    .and_then(|index| state.selected.get(index))
+                    .map(|test| test.test_id.clone()),
+                completed: coverage.tests_completed,
+                selected: coverage.tests_selected,
+                status_counts: coverage.status_counts,
+                coverage,
+            }
+        }
+        None => {
+            let coverage = PosixCoverageSnapshot::default();
+            PosixRunnerStatus {
+                running: false,
+                run_id: None,
+                filter: None,
+                current_test: None,
+                completed: coverage.tests_completed,
+                selected: coverage.tests_selected,
+                status_counts: coverage.status_counts,
+                coverage,
+            }
+        }
     })
 }
 
@@ -493,6 +493,16 @@ pub fn start(filter: PosixFilter) -> Result<(), PosixTestError> {
             selected.push(test);
         }
     }
+    let mut coverage = PosixCoverageTracker::default();
+    for test in &selected {
+        if coverage
+            .select(test.api.as_str(), test.group.as_str())
+            .is_err()
+        {
+            emit_unbound_infrastructure_error("coverage-selection-invariant");
+            return Err(PosixTestError::InfrastructureError);
+        }
+    }
 
     let started_tick = crate::kernel_lowlevel::timer::get_tick_count();
     let build_id = derive_build_id(&manifest.metadata);
@@ -510,8 +520,7 @@ pub fn start(filter: PosixFilter) -> Result<(), PosixTestError> {
         current_index: None,
         current_started_tick: 0,
         resource_before: resource_snapshot(false),
-        completed: 0,
-        status_counts: PosixStatusCounts::default(),
+        coverage,
     };
 
     if with_runner_state(|slot| {
@@ -525,6 +534,7 @@ pub fn start(filter: PosixFilter) -> Result<(), PosixTestError> {
         with_runner_state(|slot| {
             if let Some(state) = slot.as_mut() {
                 emit_suite_start(state);
+                emit_selection_summary(state);
             }
         });
     } else {
@@ -643,9 +653,22 @@ fn record_unlaunched_test(harness_launcher_active: bool) -> bool {
             return false;
         }
         emit_unlaunched_test_end(state, &test, after);
-        state.status_counts.record(PosixRuntimeStatus::Untested);
-        state.completed = state.completed.saturating_add(1);
+        let update = match state.coverage.record(
+            test.api.as_str(),
+            test.group.as_str(),
+            PosixCoverageResult::Untested,
+        ) {
+            Ok(update) => update,
+            Err(_) => return false,
+        };
         state.current_index = None;
+        if posix_test_logic_shared::should_emit_progress(
+            update.snapshot.tests_completed,
+            update.snapshot.tests_selected,
+            update.api_completed,
+        ) {
+            emit_progress(update.snapshot);
+        }
         true
     })
 }
@@ -672,9 +695,22 @@ fn record_run_outcome(outcome: &RunOutcome, harness_launcher_active: bool) -> bo
             RunTermination::InfrastructureError(_) => return false,
         };
         emit_test_end(state, &test, &outcome, status, after);
-        state.status_counts.record(status);
-        state.completed = state.completed.saturating_add(1);
+        let update = match state.coverage.record(
+            test.api.as_str(),
+            test.group.as_str(),
+            coverage_result(status),
+        ) {
+            Ok(update) => update,
+            Err(_) => return false,
+        };
         state.current_index = None;
+        if posix_test_logic_shared::should_emit_progress(
+            update.snapshot.tests_completed,
+            update.snapshot.tests_selected,
+            update.api_completed,
+        ) {
+            emit_progress(update.snapshot);
+        }
         true
     })
 }
@@ -693,7 +729,12 @@ fn resource_snapshot(harness_launcher_active: bool) -> PosixResourceSnapshot {
 fn finish_suite() {
     with_runner_state(|slot| {
         if let Some(state) = slot.as_mut() {
-            emit_suite_end(state);
+            let snapshot = state.coverage.snapshot();
+            if snapshot.tests_completed == state.selected.len() {
+                emit_suite_end(state);
+            } else {
+                emit_infrastructure_error(state, "coverage-completion-invariant");
+            }
         }
         *slot = None;
     });
@@ -737,6 +778,62 @@ fn emit_suite_start(state: &mut RunnerState) {
     write_u64(&mut serial, state.started_tick);
     serial.write_str(",\"source\":\"smros-serial\"}");
     serial.write_byte(b'\n');
+}
+
+#[cfg(not(test))]
+fn emit_selection_summary(state: &RunnerState) {
+    let snapshot = state.coverage.snapshot();
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+    serial.init();
+    serial.write_str("posixtest: selection tests=");
+    write_u64(&mut serial, snapshot.tests_selected as u64);
+    serial.write_str(" apis=");
+    write_u64(&mut serial, snapshot.apis_selected as u64);
+    serial.write_str(" groups=");
+    write_u64(&mut serial, snapshot.groups_selected as u64);
+    serial.write_str(" interval=");
+    write_u64(
+        &mut serial,
+        posix_test_logic_shared::POSIX_PROGRESS_INTERVAL as u64,
+    );
+    serial.write_str(" scope=selected\n");
+}
+
+#[cfg(not(test))]
+fn emit_progress(snapshot: PosixCoverageSnapshot) {
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+    serial.init();
+    serial.write_str("posixtest: progress tests=");
+    write_coverage_ratio(
+        &mut serial,
+        snapshot.tests_completed,
+        snapshot.tests_selected,
+    );
+    serial.write_str(" apis-complete=");
+    write_coverage_ratio(&mut serial, snapshot.apis_complete, snapshot.apis_selected);
+    serial.write_str(" apis-pass=");
+    write_coverage_ratio(&mut serial, snapshot.apis_pass, snapshot.apis_selected);
+    serial.write_str(" groups-complete=");
+    write_coverage_ratio(
+        &mut serial,
+        snapshot.groups_complete,
+        snapshot.groups_selected,
+    );
+    serial.write_str(" groups-pass=");
+    write_coverage_ratio(&mut serial, snapshot.groups_pass, snapshot.groups_selected);
+    serial.write_str(" pass=");
+    write_u64(&mut serial, snapshot.status_counts.passed as u64);
+    serial.write_str(" fail=");
+    write_u64(&mut serial, snapshot.status_counts.failed as u64);
+    serial.write_str(" unresolved=");
+    write_u64(&mut serial, snapshot.status_counts.unresolved as u64);
+    serial.write_str(" unsupported=");
+    write_u64(&mut serial, snapshot.status_counts.unsupported as u64);
+    serial.write_str(" untested=");
+    write_u64(&mut serial, snapshot.status_counts.untested as u64);
+    serial.write_str(" launch-errors=");
+    write_u64(&mut serial, snapshot.status_counts.launch_errors as u64);
+    serial.write_str(" scope=selected\n");
 }
 
 #[cfg(not(test))]
@@ -809,15 +906,16 @@ fn emit_unlaunched_test_end(
 fn emit_suite_end(state: &mut RunnerState) {
     let elapsed =
         crate::kernel_lowlevel::timer::get_tick_count().saturating_sub(state.started_tick);
+    let snapshot = state.coverage.snapshot();
     let mut serial = crate::kernel_lowlevel::serial::Serial::new();
     serial.init();
     begin_event(&mut serial, state, "suite_end");
     serial.write_str(",\"complete\":true,\"selected_count\":");
     write_u64(&mut serial, state.selected.len() as u64);
     serial.write_str(",\"completed_count\":");
-    write_u64(&mut serial, state.completed as u64);
+    write_u64(&mut serial, snapshot.tests_completed as u64);
     serial.write_str(",\"status_counts\":{");
-    write_status_counts(&mut serial, state.status_counts);
+    write_status_counts(&mut serial, snapshot.status_counts);
     serial.write_str("},\"elapsed_ticks\":");
     write_u64(&mut serial, elapsed);
     serial.write_byte(b'}');
@@ -940,6 +1038,24 @@ fn write_json_byte(serial: &mut crate::kernel_lowlevel::serial::Serial, byte: u8
         0x20..=0x7e => serial.write_byte(byte),
         _ => serial.write_byte(b'?'),
     }
+}
+
+#[cfg(not(test))]
+fn write_coverage_ratio(
+    serial: &mut crate::kernel_lowlevel::serial::Serial,
+    numerator: usize,
+    denominator: usize,
+) {
+    write_u64(serial, numerator as u64);
+    serial.write_byte(b'/');
+    write_u64(serial, denominator as u64);
+    serial.write_str(" (");
+    let percent = posix_test_logic_shared::coverage_percent_hundredths(numerator, denominator);
+    write_u64(serial, (percent / 100) as u64);
+    serial.write_byte(b'.');
+    serial.write_byte(b'0' + ((percent / 10) % 10) as u8);
+    serial.write_byte(b'0' + (percent % 10) as u8);
+    serial.write_str("%)");
 }
 
 #[cfg(not(test))]
@@ -2035,11 +2151,14 @@ mod tests {
         ] {
             assert_eq!(pts_status(exit_code), expected);
         }
-        let mut counts = PosixStatusCounts::default();
-        counts.record(PosixRuntimeStatus::Pass);
-        counts.record(PosixRuntimeStatus::LaunchError);
-        assert_eq!(counts.passed, 1);
-        assert_eq!(counts.launch_errors, 1);
+        assert_eq!(
+            coverage_result(PosixRuntimeStatus::Pass),
+            PosixCoverageResult::Pass
+        );
+        assert_eq!(
+            coverage_result(PosixRuntimeStatus::LaunchError),
+            PosixCoverageResult::LaunchError
+        );
     }
 
     #[test]

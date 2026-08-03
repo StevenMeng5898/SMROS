@@ -1,7 +1,7 @@
 #![allow(unused_comparisons, unused_macros)]
 
-#[cfg(test)]
 mod alloc {
+    #[allow(unused_imports)]
     pub mod collections {
         pub use std::collections::{BTreeMap, BTreeSet};
     }
@@ -10,6 +10,7 @@ mod alloc {
         pub use std::string::String;
     }
 
+    #[allow(unused_imports)]
     pub mod vec {
         pub use std::vec::Vec;
     }

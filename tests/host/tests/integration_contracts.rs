@@ -1167,6 +1167,60 @@ fn posix_guest_runner_is_serialized_bounded_and_fail_closed() {
         let body = braced_body(&runner[start..]);
         assert!(body.contains("resource_snapshot(harness_launcher_active)"));
     }
+
+    for contract in [
+        "coverage: PosixCoverageTracker",
+        "emit_selection_summary(state);",
+        "fn emit_progress(",
+        "posixtest: selection tests=",
+        " apis=",
+        " groups=",
+        " interval=",
+        " scope=selected",
+        "posixtest: progress tests=",
+        " apis-complete=",
+        " apis-pass=",
+        " groups-complete=",
+        " groups-pass=",
+        " launch-errors=",
+        "should_emit_progress(",
+    ] {
+        assert!(
+            runner.contains(contract),
+            "missing live coverage contract {contract}"
+        );
+    }
+    assert_eq!(
+        runner
+            .matches("pub const POSIX_EVENT_SCHEMA: u32 = 1;")
+            .count(),
+        1
+    );
+
+    for (recorder, terminal_event) in [
+        ("fn record_unlaunched_test(", "emit_unlaunched_test_end("),
+        ("fn record_run_outcome(", "emit_test_end("),
+    ] {
+        let start = runner.find(recorder).expect("coverage result recorder");
+        let body = braced_body(&runner[start..]);
+        let event = body.find(terminal_event).expect("terminal event emission");
+        let coverage = body
+            .find("state.coverage.record(")
+            .expect("coverage result recording");
+        let progress = body.find("emit_progress(").expect("progress emission");
+        assert!(event < coverage && coverage < progress);
+    }
+
+    let finish_start = runner.find("fn finish_suite()").expect("suite finisher");
+    let finish_body = braced_body(&runner[finish_start..]);
+    let invariant = finish_body
+        .find("tests_completed == state.selected.len()")
+        .expect("suite coverage completion invariant");
+    let suite_end = finish_body
+        .find("emit_suite_end(state)")
+        .expect("suite end emission");
+    assert!(invariant < suite_end);
+
     assert!(runner.contains("\"pts_status\":null,\"launch_status\":\"not-launched\""));
     let unlaunched_start = runner
         .find("fn emit_unlaunched_test_end(")
