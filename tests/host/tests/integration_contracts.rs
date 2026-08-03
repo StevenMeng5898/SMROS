@@ -760,6 +760,22 @@ fn posix_conformance_workflow_and_limitations_are_documented() {
             "missing POSIX guide concept: {concept}"
         );
     }
+
+    let live_coverage_docs = format!("{guide}\n{shell}");
+    for phrase in [
+        "selection coverage",
+        "apis-complete",
+        "apis-pass",
+        "groups-complete",
+        "groups-pass",
+        "every 25 completed tests",
+        "does not prove POSIX compliance",
+    ] {
+        assert!(
+            live_coverage_docs.contains(phrase),
+            "missing coverage documentation: {phrase}"
+        );
+    }
 }
 
 #[test]

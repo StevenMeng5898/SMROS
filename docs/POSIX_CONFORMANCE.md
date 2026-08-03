@@ -87,6 +87,26 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli run-smros --api getpid --
 PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli run-smros --qemu-memory 1024M --resume
 ```
 
+## Guest Live Selection Coverage
+
+The guest shell reports live selection coverage without changing structured
+`SMROS_POSIX_EVENT` schema 1. It prints the selected test, API, and group totals
+after `suite_start`, then prints progress after every 25 completed tests, when
+an API completes, and at suite completion.
+
+`tests` is completed selected tests divided by all selected tests.
+`apis-complete` and `groups-complete` count units for which every selected test
+has a terminal result. `apis-pass` and `groups-pass` count only complete units
+whose selected tests all passed. Fail, unresolved, unsupported, untested, and
+launch-error results complete selection work but prevent the containing API and
+group from passing. Percentages are truncated to two decimal places.
+
+Every live line carries `scope=selected`. These values do not include source
+inventory or tests that failed to build. Live selection coverage
+does not prove POSIX compliance. The host report remains authoritative for
+build coverage, execution coverage, pass coverage, optional-group completion,
+provenance, program completion, and the final compliance decision.
+
 ## Source Audit And Updates
 
 `posix-audit` discovers every pinned C source and shell file and checks the
