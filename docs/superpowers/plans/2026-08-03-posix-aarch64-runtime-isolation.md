@@ -377,16 +377,18 @@ AArch64 link-layout check passes.
 - Generated: `target/posix/aarch64/smros-fxfs-runtime-isolation-mmap.img`
 - Generated: `target/posix/aarch64/smros-run-runtime-isolation-mmap/`
 
-- [ ] **Step 1: Create and stage a fresh private disk**
+- [ ] **Step 1: Create a fresh private disk**
 
 ```bash
 test ! -e target/posix/aarch64/smros-fxfs-runtime-isolation-mmap.img
 qemu-img create -f raw target/posix/aarch64/smros-fxfs-runtime-isolation-mmap.img 128M
-python3 scripts/sync-host-shared.py target/posix/aarch64/smros-fxfs-runtime-isolation-mmap.img host_shared
 ```
 
-Expected: the fresh image contains the current staged manifest and binaries.
-Do not access `smros-fxfs.img`.
+Expected: the image is blank. `build.rs` has already embedded the current
+`host_shared` manifest and binaries in `kernel8.img`; FxFS installs that seed
+and initializes the attached blank disk during the first QEMU boot.
+`scripts/sync-host-shared.py` is a guest-to-host export command and must not be
+used to stage a blank image. Do not access `smros-fxfs.img`.
 
 - [ ] **Step 2: Run all 33 selected `mmap` tests**
 
@@ -420,9 +422,12 @@ import json
 from pathlib import Path
 
 root = Path("target/posix/aarch64/smros-run-runtime-isolation-mmap")
-attempts = [json.loads(line) for line in (root / "results.ndjson").read_text().splitlines()]
+rows = [json.loads(line) for line in (root / "results.ndjson").read_text().splitlines()]
+attempts = [row for row in rows if row["record_type"] == "attempt"]
+runs = [row for row in rows if row["record_type"] == "run"]
 raw = (root / "qemu-serial.log").read_text(errors="replace")
 assert len(attempts) == 33
+assert len(runs) == 1 and runs[0]["complete"]
 assert "cannot create shared object descriptor" not in raw
 assert "failed to map segment" not in raw
 assert all(a["resource_deltas"]["linux_mappings"] == 0 for a in attempts)
@@ -445,8 +450,10 @@ Expected: the assertions pass.
 ```bash
 test ! -e target/posix/aarch64/smros-fxfs-runtime-isolation-all.img
 qemu-img create -f raw target/posix/aarch64/smros-fxfs-runtime-isolation-all.img 128M
-python3 scripts/sync-host-shared.py target/posix/aarch64/smros-fxfs-runtime-isolation-all.img host_shared
 ```
+
+Expected: the image is blank and is initialized from the `host_shared` seed
+embedded in the already-validated `kernel8.img` on first boot.
 
 - [ ] **Step 2: Execute the complete staged selection**
 
