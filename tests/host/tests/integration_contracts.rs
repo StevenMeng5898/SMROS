@@ -1078,6 +1078,7 @@ fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
         1,
         "exit and exit_group must converge on one launcher completion hook"
     );
+    assert!(syscall.contains("let exit_code = syscall_logic::linux_exit_status(exit_code);"));
     assert!(syscall.contains("pub fn sys_exit_group(exit_code: i32)"));
     assert!(syscall.contains("sys_exit(exit_code)"));
 

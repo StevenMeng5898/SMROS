@@ -215,6 +215,21 @@ mod syscall_logic {
         assert_eq!(initialized, MEMORY_PERMANENT_HANDLE_COUNT);
         assert_eq!(initialized - absent, 0);
     }
+
+    #[test]
+    fn linux_exit_status_uses_the_low_eight_bits() {
+        for (raw, expected) in [
+            (0, 0),
+            (1, 1),
+            (255, 255),
+            (256, 0),
+            (-1, 255),
+            (i32::MIN, 0),
+            (i32::MAX, 255),
+        ] {
+            assert_eq!(linux_exit_status(raw), expected);
+        }
+    }
 }
 
 mod kernel_object_logic {

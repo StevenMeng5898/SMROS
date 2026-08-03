@@ -4,6 +4,10 @@ pub fn logical_memory_handle_count(observed: Option<usize>) -> usize {
     observed.unwrap_or(MEMORY_PERMANENT_HANDLE_COUNT)
 }
 
+pub fn linux_exit_status(exit_code: i32) -> i32 {
+    (exit_code as u32 & 0xff) as i32
+}
+
 macro_rules! smros_zircon_syscall_from_raw_body {
     ($syscall_num:expr, $threshold:expr) => {{
         if smros_is_zircon_syscall_number_body!($syscall_num, $threshold) {

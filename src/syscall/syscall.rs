@@ -5805,6 +5805,7 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
 
 /// Linux sys_exit implementation
 pub fn sys_exit(exit_code: i32) -> SysResult {
+    let exit_code = syscall_logic::linux_exit_status(exit_code);
     info!("exit: code={}", exit_code);
 
     if crate::user_level::user_test::prepare_el0_test_kernel_return(exit_code) {
