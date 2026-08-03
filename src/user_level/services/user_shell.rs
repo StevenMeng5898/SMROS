@@ -523,6 +523,7 @@ impl UserShell {
             if let Some(c) = Self::try_read_uart_byte() {
                 return c;
             }
+            scheduler::yield_now();
             crate::kernel_lowlevel::cpu::wait_for_event();
         }
     }

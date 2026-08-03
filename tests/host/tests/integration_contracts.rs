@@ -1472,6 +1472,25 @@ fn posix_test_shell_command_is_strictly_wired_to_the_runner() {
 }
 
 #[test]
+fn shell_yields_before_waiting_for_uart_activity() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let shell = std::fs::read_to_string(repository.join("src/user_level/services/user_shell.rs"))
+        .expect("read user shell");
+    let read_start = shell
+        .find("fn read_uart_byte() -> u8")
+        .expect("UART read loop");
+    let read = braced_body(&shell[read_start..]);
+    let probe = read.find("Self::try_read_uart_byte()").expect("UART probe");
+    let yield_now = read
+        .find("scheduler::yield_now();")
+        .expect("scheduler yield");
+    let wait = read
+        .find("crate::kernel_lowlevel::cpu::wait_for_event();")
+        .expect("low-power UART wait");
+    assert!(probe < yield_now && yield_now < wait);
+}
+
+#[test]
 fn run_elf_launch_identity_is_bound_and_carried_through_aarch64_resume() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let launcher = std::fs::read_to_string(repository.join("src/user_level/services/run_elf.rs"))
