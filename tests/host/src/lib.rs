@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod alloc {
     pub mod collections {
-        pub use std::collections::BTreeSet;
+        pub use std::collections::{BTreeMap, BTreeSet};
     }
 
     pub mod string {
@@ -2191,6 +2191,106 @@ mod posix_test_logic_shared {
         assert_eq!(normalize_scheduler_threads(7, false), 7);
         assert_eq!(normalize_scheduler_threads(7, true), 6);
         assert_eq!(normalize_scheduler_threads(0, true), 0);
+    }
+
+    #[test]
+    fn coverage_tracks_noncontiguous_apis_and_groups() {
+        let mut tracker = PosixCoverageTracker::default();
+        tracker.select("read", "base").unwrap();
+        tracker.select("write", "base").unwrap();
+        tracker.select("read", "io").unwrap();
+
+        assert_eq!(
+            tracker.snapshot(),
+            PosixCoverageSnapshot {
+                tests_completed: 0,
+                tests_selected: 3,
+                apis_complete: 0,
+                apis_pass: 0,
+                apis_selected: 2,
+                groups_complete: 0,
+                groups_pass: 0,
+                groups_selected: 2,
+                status_counts: PosixCoverageStatusCounts::default(),
+            }
+        );
+
+        let first = tracker
+            .record("read", "base", PosixCoverageResult::Pass)
+            .unwrap();
+        assert!(!first.api_completed);
+        tracker
+            .record("write", "base", PosixCoverageResult::Fail)
+            .unwrap();
+        let last = tracker
+            .record("read", "io", PosixCoverageResult::Pass)
+            .unwrap();
+        assert!(last.api_completed);
+        assert_eq!(last.snapshot.tests_completed, 3);
+        assert_eq!(last.snapshot.apis_complete, 2);
+        assert_eq!(last.snapshot.apis_pass, 1);
+        assert_eq!(last.snapshot.groups_complete, 2);
+        assert_eq!(last.snapshot.groups_pass, 1);
+        assert_eq!(last.snapshot.status_counts.passed, 2);
+        assert_eq!(last.snapshot.status_counts.failed, 1);
+    }
+
+    #[test]
+    fn every_nonpass_result_completes_but_does_not_pass_a_unit() {
+        let cases = [
+            PosixCoverageResult::Fail,
+            PosixCoverageResult::Unresolved,
+            PosixCoverageResult::Unsupported,
+            PosixCoverageResult::Untested,
+            PosixCoverageResult::LaunchError,
+        ];
+        for result in cases {
+            let mut tracker = PosixCoverageTracker::default();
+            tracker.select("api", "group").unwrap();
+            let update = tracker.record("api", "group", result).unwrap();
+            assert_eq!(update.snapshot.tests_completed, 1);
+            assert_eq!(update.snapshot.apis_complete, 1);
+            assert_eq!(update.snapshot.apis_pass, 0);
+            assert_eq!(update.snapshot.groups_complete, 1);
+            assert_eq!(update.snapshot.groups_pass, 0);
+        }
+    }
+
+    #[test]
+    fn coverage_percentages_and_progress_triggers_are_exact() {
+        assert_eq!(coverage_percent_hundredths(0, 0), 0);
+        assert_eq!(coverage_percent_hundredths(25, 1598), 156);
+        assert_eq!(coverage_percent_hundredths(3, 195), 153);
+        assert_eq!(coverage_percent_hundredths(2, 195), 102);
+        assert_eq!(coverage_percent_hundredths(1598, 1598), 10_000);
+
+        assert!(!should_emit_progress(24, 1598, false));
+        assert!(should_emit_progress(25, 1598, false));
+        assert!(should_emit_progress(26, 1598, true));
+        assert!(should_emit_progress(1598, 1598, true));
+        assert!(should_emit_progress(1, 1, true));
+    }
+
+    #[test]
+    fn coverage_rejects_unknown_and_excess_completion_at_the_manifest_bound() {
+        let mut tracker = PosixCoverageTracker::default();
+        for _ in 0..4096 {
+            tracker.select("api", "group").unwrap();
+        }
+        assert_eq!(tracker.snapshot().tests_selected, 4096);
+        assert_eq!(
+            tracker.record("missing", "group", PosixCoverageResult::Pass),
+            Err(PosixCoverageError::UnknownUnit)
+        );
+        for _ in 0..4096 {
+            tracker
+                .record("api", "group", PosixCoverageResult::Pass)
+                .unwrap();
+        }
+        assert_eq!(
+            tracker.record("api", "group", PosixCoverageResult::Pass),
+            Err(PosixCoverageError::TestOverComplete)
+        );
     }
 }
 
