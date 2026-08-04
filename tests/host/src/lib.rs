@@ -244,6 +244,163 @@ mod syscall_logic {
     }
 }
 
+mod linux_task_logic {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/linux_task_logic_shared.rs"
+    ));
+
+    #[test]
+    fn root_registration_publishes_one_runnable_thread_group_leader() {
+        let mut tasks = LinuxTaskTable::<2>::new();
+
+        assert_eq!(tasks.register_root(7), Ok(LINUX_ROOT_TID));
+        assert_eq!(tasks.register_root(8), Err(LinuxTaskError::DuplicateRoot));
+        assert_eq!(
+            tasks.by_tid(LINUX_ROOT_TID),
+            Some(LinuxTaskCore {
+                tid: LINUX_ROOT_TID,
+                tgid: LINUX_ROOT_TID,
+                scheduler_thread: 7,
+                state: LinuxTaskState::Runnable,
+                block_reason: LinuxBlockReason::None,
+            })
+        );
+        assert_eq!(tasks.by_scheduler(7), tasks.by_tid(LINUX_ROOT_TID));
+    }
+
+    #[test]
+    fn root_registration_reports_zero_capacity() {
+        let mut tasks = LinuxTaskTable::<0>::new();
+
+        assert_eq!(tasks.register_root(7), Err(LinuxTaskError::Capacity));
+        assert_eq!(tasks.by_tid(LINUX_ROOT_TID), None);
+    }
+
+    #[test]
+    fn task_slots_publish_atomically_and_tid_values_do_not_reuse() {
+        let mut tasks = LinuxTaskTable::<3>::new();
+        assert_eq!(tasks.register_root(7), Ok(LINUX_ROOT_TID));
+
+        let first = tasks.reserve_child(8).expect("first child reservation");
+        assert_eq!(first.tid, 2);
+        assert_eq!(tasks.by_tid(first.tid), None);
+        assert_eq!(tasks.by_scheduler(8), None);
+        assert!(tasks.publish(first));
+        assert_eq!(tasks.by_scheduler(8).map(|task| task.tid), Some(2));
+
+        assert!(tasks.exit(first.tid, 8));
+        assert!(tasks.retire(first.tid, 8));
+        let second = tasks.reserve_child(9).expect("reused table slot");
+        assert_eq!(second.tid, 3);
+        assert_ne!(first.tid, second.tid);
+        assert!(!tasks.publish(first), "stale reservation must not publish");
+        assert!(tasks.publish(second));
+    }
+
+    #[test]
+    fn task_state_and_scheduler_identity_move_together() {
+        let mut tasks = LinuxTaskTable::<3>::new();
+        tasks.register_root(7).unwrap();
+        let child = tasks.reserve_child(8).unwrap();
+        assert!(tasks.publish(child));
+        assert!(tasks.block(child.tid, 8, LinuxBlockReason::Futex));
+        assert_eq!(
+            tasks.by_tid(child.tid).unwrap().state,
+            LinuxTaskState::Blocked
+        );
+        assert_eq!(
+            tasks.by_scheduler(8).unwrap().block_reason,
+            LinuxBlockReason::Futex
+        );
+        assert!(tasks.wake(child.tid, 8));
+        assert_eq!(
+            tasks.by_tid(child.tid).unwrap().state,
+            LinuxTaskState::Runnable
+        );
+        assert_eq!(
+            tasks.by_scheduler(8).unwrap().block_reason,
+            LinuxBlockReason::None
+        );
+        assert!(!tasks.wake(child.tid, 99));
+    }
+
+    #[test]
+    fn rollback_releases_only_the_matching_starting_reservation() {
+        let mut tasks = LinuxTaskTable::<2>::new();
+        tasks.register_root(7).unwrap();
+        let first = tasks.reserve_child(8).unwrap();
+
+        assert!(!tasks.rollback(LinuxTaskReservation {
+            scheduler_thread: 99,
+            ..first
+        }));
+        assert!(tasks.rollback(first));
+        assert!(!tasks.rollback(first));
+
+        let second = tasks.reserve_child(9).expect("rolled-back slot");
+        assert_eq!(second.slot, first.slot);
+        assert_eq!(second.tid, first.tid + 1);
+        assert!(!tasks.publish(first));
+        assert!(tasks.publish(second));
+    }
+
+    #[test]
+    fn invalid_and_stale_transitions_leave_the_live_task_unchanged() {
+        let mut tasks = LinuxTaskTable::<2>::new();
+        tasks.register_root(7).unwrap();
+        let child = tasks.reserve_child(8).unwrap();
+
+        assert!(!tasks.block(child.tid, 8, LinuxBlockReason::Futex));
+        assert!(tasks.publish(child));
+        assert!(!tasks.publish(child));
+        assert!(!tasks.block(child.tid, 99, LinuxBlockReason::SignalWait));
+        assert!(!tasks.block(child.tid, 8, LinuxBlockReason::None));
+        assert!(!tasks.wake(child.tid, 8));
+        assert!(!tasks.retire(child.tid, 8));
+        assert!(tasks.exit(child.tid, 8));
+        assert!(!tasks.block(child.tid, 8, LinuxBlockReason::SignalSuspend));
+        assert!(!tasks.wake(child.tid, 8));
+        assert!(!tasks.exit(child.tid, 8));
+        assert!(!tasks.retire(child.tid, 99));
+        assert_eq!(
+            tasks.by_tid(child.tid).unwrap().state,
+            LinuxTaskState::Exited
+        );
+    }
+
+    #[test]
+    fn capacity_does_not_consume_a_tid_and_reset_starts_a_new_launch() {
+        let mut tasks = LinuxTaskTable::<2>::new();
+        tasks.register_root(7).unwrap();
+        let child = tasks.reserve_child(8).unwrap();
+        assert_eq!(child.tid, 2);
+        assert_eq!(tasks.reserve_child(9), None);
+        assert!(tasks.rollback(child));
+        assert_eq!(tasks.reserve_child(9).unwrap().tid, 3);
+
+        tasks.reset();
+        assert_eq!(tasks.by_scheduler(7), None);
+        assert_eq!(tasks.register_root(10), Ok(LINUX_ROOT_TID));
+        assert_eq!(tasks.reserve_child(11).unwrap().tid, 2);
+    }
+
+    #[test]
+    fn allocator_exhaustion_is_permanent_until_reset() {
+        let mut tasks = LinuxTaskTable::<2>::new();
+        tasks.register_root(7).unwrap();
+        tasks.next_tid = usize::MAX;
+
+        assert_eq!(tasks.reserve_child(8), None);
+        tasks.next_tid = 2;
+        assert_eq!(tasks.reserve_child(8), None);
+
+        tasks.reset();
+        tasks.register_root(9).unwrap();
+        assert_eq!(tasks.reserve_child(10).unwrap().tid, 2);
+    }
+}
+
 mod kernel_object_logic {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

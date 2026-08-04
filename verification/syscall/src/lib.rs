@@ -3,6 +3,7 @@ use vstd::prelude::*;
 verus! {
 
 include!("../../../src/syscall/address_logic_shared.rs");
+include!("../../../src/syscall/linux_task_logic_shared.rs");
 include!("../../../src/syscall/syscall_bridge_shared.rs");
 include!("../../../src/syscall/syscall_logic_shared.rs");
 
@@ -264,7 +265,7 @@ spec fn linux_signal_valid_spec(signum: int, max_signal: int) -> bool {
 }
 
 spec fn linux_signal_action_valid_spec(signum: int, max_signal: int) -> bool {
-    0 < signum && signum <= max_signal
+    0 < signum && signum <= max_signal && signum != 9 && signum != 19
 }
 
 spec fn linux_sigset_size_valid_spec(size: int, expected: int) -> bool {
@@ -2159,6 +2160,42 @@ proof fn linux_range_availability_smoke() {
         0x4fff_f000 as int,
         PAGE_SIZE as int,
         mappings,
+    ));
+}
+
+proof fn linux_task_lifecycle_smoke() {
+    let root_tid: usize = smros_linux_root_tid_body!();
+    assert(root_tid > 0);
+
+    let child_tid: usize = 2usize;
+    assert(child_tid == root_tid + 1);
+    let following_tid = smros_linux_task_next_tid_body!(child_tid);
+    assert(child_tid > 0);
+    assert(following_tid.is_some());
+    let following = following_tid.unwrap();
+    assert(following == 3usize);
+    assert(following > child_tid);
+    assert(smros_linux_task_next_tid_body!(usize::MAX).is_none());
+
+    let empty: usize = 0usize;
+    let starting: usize = 1usize;
+    let runnable: usize = 2usize;
+    let blocked: usize = 3usize;
+    let exited: usize = 4usize;
+    assert(smros_linux_task_publish_transition_allowed_body!(
+        starting, runnable, starting, runnable
+    ));
+    assert(!smros_linux_task_publish_transition_allowed_body!(
+        empty, runnable, starting, runnable
+    ));
+    assert(!smros_linux_task_publish_transition_allowed_body!(
+        runnable, runnable, starting, runnable
+    ));
+    assert(!smros_linux_task_publish_transition_allowed_body!(
+        blocked, runnable, starting, runnable
+    ));
+    assert(!smros_linux_task_publish_transition_allowed_body!(
+        exited, runnable, starting, runnable
     ));
 }
 
