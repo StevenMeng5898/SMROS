@@ -2611,6 +2611,7 @@ with tempfile.TemporaryDirectory() as temporary:
             versioned = library_root / "libsample.so.1.2"
             versioned.write_bytes(b"library")
             (library_root / "libsample.so.1").symlink_to(versioned.name)
+            (library_root / "libgcc_s.so.1").write_bytes(b"libgcc")
             executable = root / "case.test"
             executable.write_bytes(b"executable")
             stage = root / "stage"
@@ -2620,6 +2621,9 @@ with tempfile.TemporaryDirectory() as temporary:
                     "-print-sysroot": str(sysroot),
                     "-print-multiarch": "aarch64-linux-gnu",
                     "-print-file-name=libc.so.6": str(library_root / "libc.so.6"),
+                    "-print-file-name=libgcc_s.so.1": str(
+                        library_root / "libgcc_s.so.1"
+                    ),
                 }[argument]
 
             def readelf(argv: list[str], **_kwargs: object) -> object:
@@ -2637,6 +2641,45 @@ with tempfile.TemporaryDirectory() as temporary:
 
             self.assertEqual((stage / "lib/libsample.so.1").read_bytes(), b"library")
             self.assertFalse((stage / "lib/libsample.so.1.2").exists())
+
+    def test_runtime_staging_includes_libgcc_for_pthread_exit_unwinding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sysroot = root / "sysroot"
+            library_root = sysroot / "usr/aarch64-linux-gnu/lib"
+            library_root.mkdir(parents=True)
+            (library_root / "libc.so.6").write_bytes(b"libc")
+            (library_root / "libgcc_s.so.1").write_bytes(b"libgcc")
+            executable = root / "pthread-exit.test"
+            executable.write_bytes(b"executable")
+            stage = root / "stage"
+
+            def query(_compiler: str, argument: str) -> str:
+                return {
+                    "-print-sysroot": str(sysroot),
+                    "-print-multiarch": "aarch64-linux-gnu",
+                    "-print-file-name=libc.so.6": str(library_root / "libc.so.6"),
+                    "-print-file-name=libgcc_s.so.1": str(
+                        library_root / "libgcc_s.so.1"
+                    ),
+                }[argument]
+
+            def readelf(argv: list[str], **_kwargs: object) -> object:
+                output = (
+                    "(NEEDED) Shared library: [libc.so.6]\n"
+                    if Path(argv[-1]) == executable
+                    else ""
+                )
+                return mock.Mock(returncode=0, stdout=output, stderr="")
+
+            with mock.patch(
+                "scripts.posix.build.compiler_query", side_effect=query
+            ), mock.patch(
+                "scripts.posix.build.run_bounded_command", side_effect=readelf
+            ):
+                stage_runtime_dependencies((executable,), stage)
+
+            self.assertEqual((stage / "lib/libgcc_s.so.1").read_bytes(), b"libgcc")
 
     def test_runtime_staging_passes_held_stage_descriptor_to_readelf(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2662,16 +2705,25 @@ with tempfile.TemporaryDirectory() as temporary:
             try:
                 with mock.patch(
                     "scripts.posix.build.compiler_query",
-                    side_effect=("/", "aarch64-linux-gnu", "libc.so.6"),
+                    side_effect=(
+                        "/",
+                        "aarch64-linux-gnu",
+                        "libc.so.6",
+                        "libgcc_s.so.1",
+                    ),
                 ), mock.patch(
                     "scripts.posix.build._run_command",
                     return_value=readelf_result,
                 ) as run:
-                    stage_runtime_dependencies(
-                        (opened_executable,),
-                        Path(f"/proc/self/fd/{stage_descriptor}"),
-                        stage_descriptor=stage_descriptor,
-                    )
+                    with mock.patch(
+                        "scripts.posix.build.resolve_runtime_file",
+                        return_value=opened_executable,
+                    ):
+                        stage_runtime_dependencies(
+                            (opened_executable,),
+                            Path(f"/proc/self/fd/{stage_descriptor}"),
+                            stage_descriptor=stage_descriptor,
+                        )
             finally:
                 os.close(stage_descriptor)
 

@@ -67,6 +67,7 @@ _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 _REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
 _NEEDED_RE = re.compile(r"\(NEEDED\).*Shared library: \[([^\]]+)\]")
 _INTERPRETER_RE = re.compile(r"Requesting program interpreter: ([^\]]+)\]")
+_IMPLICIT_RUNTIME_NAMES = ("libgcc_s.so.1",)
 _ALLOWED_KINDS = frozenset({"runnable", "definition", "shell"})
 _ALLOWED_DISPOSITIONS = frozenset(
     {
@@ -865,12 +866,19 @@ def stage_runtime_dependencies(
     multiarch = compiler_query(compiler, "-print-multiarch")
     sysroot = Path(sysroot_text)
     extra_roots: list[Path] = []
-    libc_path = compiler_query(compiler, "-print-file-name=libc.so.6")
-    if libc_path != "libc.so.6":
-        extra_roots.append(Path(libc_path).resolve().parent)
+    for runtime_name in ("libc.so.6", *_IMPLICIT_RUNTIME_NAMES):
+        runtime_path = compiler_query(
+            compiler, f"-print-file-name={runtime_name}"
+        )
+        if runtime_path != runtime_name:
+            extra_roots.append(Path(runtime_path).resolve().parent)
     pending = list(sorted(executables, key=lambda path: path.as_posix()))
     inspected: set[Path] = set()
     runtime_by_name: dict[str, Path] = {}
+    for name in _IMPLICIT_RUNTIME_NAMES:
+        source = resolve_runtime_file(name, sysroot, multiarch, extra_roots)
+        runtime_by_name[name] = source
+        pending.append(source)
     while pending:
         elf = pending.pop(0)
         resolved_elf = elf.resolve(strict=True)
