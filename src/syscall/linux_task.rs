@@ -210,9 +210,12 @@ pub(crate) fn peek_current_matching_signal(
 pub(crate) fn take_current_matching_signal(
     wait_mask: u64,
 ) -> Result<Option<(LinuxPendingSignal, LinuxPendingSignalReservation)>, SysError> {
-    with_current_signal_state(|signal_state| {
-        signal_state.pending.take_matching_reserved(wait_mask)
-    })
+    with_current_signal_state(|signal_state| signal_state.pending.take_matching_reserved(wait_mask))
+}
+
+pub(crate) fn take_current_unblocked_signal(
+) -> Result<Option<(LinuxPendingSignal, LinuxPendingSignalReservation)>, SysError> {
+    with_current_signal_state(|signal_state| signal_state.take_unblocked_reserved())
 }
 
 pub(crate) fn current_matching_signum(wait_mask: u64) -> Result<Option<usize>, SysError> {

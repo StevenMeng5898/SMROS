@@ -1082,11 +1082,11 @@ mod linux_task_logic {
     fn signal_wait_zero_deadlines_expire_and_report_eagain_outcomes() {
         assert_eq!(
             linux_signal_timespec_to_ticks_ceil(40, 0, 1, 10_000_000),
-            Some(41)
+            Some(42)
         );
         assert_eq!(
             linux_signal_timespec_to_ticks_ceil(40, 0, 10_000_001, 10_000_000),
-            Some(42)
+            Some(43)
         );
         assert_eq!(
             linux_signal_timespec_to_ticks_ceil(40, 0, 0, 10_000_000),
@@ -1115,6 +1115,22 @@ mod linux_task_logic {
         assert_eq!(completed.outcome, LinuxSignalWaitOutcome::TimedOut);
         assert_eq!(completed.output_address, 0x4000);
         assert!(state.signal_wait.is_none());
+    }
+
+    #[test]
+    fn positive_signal_wait_deadlines_include_the_current_tick_phase() {
+        assert_eq!(
+            linux_signal_timespec_to_ticks_ceil(40, 0, 0, 10_000_000),
+            Some(40)
+        );
+        assert_eq!(
+            linux_signal_timespec_to_ticks_ceil(40, 0, 1, 10_000_000),
+            Some(42)
+        );
+        assert_eq!(
+            linux_signal_timespec_to_ticks_ceil(40, 0, 10_000_000, 10_000_000),
+            Some(42)
+        );
     }
 
     #[test]
@@ -1279,6 +1295,54 @@ mod linux_task_logic {
         assert_eq!(pending.realtime_reserved, 0);
         assert_eq!(pending.realtime_len, LINUX_RT_QUEUE_LIMIT);
         assert_eq!(pending.take_matching(linux_signal_bit(35)), Some(original));
+    }
+
+    #[cfg(test)]
+    fn assert_realtime_reservation_rollback_preserves_fifo(rollback_first_first: bool) {
+        let mut pending = LinuxPendingSignals::new();
+        let first = signal_record(35, 0x11);
+        let second = signal_record(35, 0x22);
+        let later = signal_record(35, 0x33);
+        pending.queue(first).unwrap();
+        pending.queue(second).unwrap();
+        let (first_record, first_reservation) = pending
+            .take_matching_reserved(linux_signal_bit(35))
+            .expect("first realtime reservation");
+        let (second_record, second_reservation) = pending
+            .take_matching_reserved(linux_signal_bit(35))
+            .expect("second realtime reservation");
+        pending.queue(later).unwrap();
+
+        if rollback_first_first {
+            pending
+                .rollback_reservation(first_reservation, first_record)
+                .unwrap();
+            pending
+                .rollback_reservation(second_reservation, second_record)
+                .unwrap();
+        } else {
+            pending
+                .rollback_reservation(second_reservation, second_record)
+                .unwrap();
+            pending
+                .rollback_reservation(first_reservation, first_record)
+                .unwrap();
+        }
+
+        assert_eq!(pending.realtime_reserved, 0);
+        assert_eq!(pending.take_matching(linux_signal_bit(35)), Some(first));
+        assert_eq!(pending.take_matching(linux_signal_bit(35)), Some(second));
+        assert_eq!(pending.take_matching(linux_signal_bit(35)), Some(later));
+    }
+
+    #[test]
+    fn realtime_reservations_rollback_in_fifo_order_when_completed_in_assignment_order() {
+        assert_realtime_reservation_rollback_preserves_fifo(true);
+    }
+
+    #[test]
+    fn realtime_reservations_rollback_in_fifo_order_when_completed_in_reverse_order() {
+        assert_realtime_reservation_rollback_preserves_fifo(false);
     }
 
     #[test]
@@ -1525,6 +1589,36 @@ mod linux_task_logic {
                 .map(|block| block.timeout),
             Some(deadline)
         );
+    }
+
+    #[test]
+    fn sigreturn_stages_restart_until_the_next_handler_disposition_is_known() {
+        let restart = LinuxRestartBlock {
+            syscall_number: 98,
+            arguments: [0x10, 0x20, 0x30, 0x40, 0x50, 0x60],
+            svc_address: 0x7ffc,
+            timeout: LinuxRestartTimeout::Infinite,
+        };
+        let frame = LinuxSignalFrame {
+            regs: [0xaa; 32],
+            return_pc: 0x8000,
+            previous_mask: 0x55,
+            user_sp: 0x9000,
+            previous_stack_flags: 0,
+            restart: Some(restart),
+        };
+        let mut state = LinuxTaskSignalState::new();
+        state.push_frame(frame).unwrap();
+        assert!(state.request_sigreturn());
+
+        let restored = state
+            .take_requested_frame()
+            .expect("requested signal frame");
+        assert_eq!(restored.regs, frame.regs);
+        assert_eq!(restored.return_pc, frame.return_pc);
+        assert_eq!(state.restart_block, Some(restart));
+        assert_eq!(state.take_restart_for_signal(false), None);
+        assert!(state.restart_block.is_none());
     }
 
     #[test]

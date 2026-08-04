@@ -40,7 +40,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{compiler_fence, AtomicU64, Ordering};
 
 use super::address_logic::{
     checked_end, fixed_linux_mmap_request_ok as shared_fixed_linux_mmap_request_ok,
@@ -58,9 +58,9 @@ use super::linux_task;
 use super::linux_task::{
     select_linux_pending_signal, LinuxBlockReason, LinuxCloneRequest, LinuxCloneValidationError,
     LinuxPendingSignal, LinuxPendingSignalReservation, LinuxPendingSignalSource,
-    LinuxPendingSignals, LinuxSignalDisposition, LinuxSignalFrame, LinuxSignalStack,
-    LinuxSignalWait, LinuxSignalWaitOutcome, CLONE_THREAD, LINUX_SIGNAL_FRAME_LIMIT,
-    LINUX_SIGNAL_INFO_BYTES,
+    LinuxPendingSignals, LinuxRestartBlock, LinuxSignalDisposition, LinuxSignalFrame,
+    LinuxSignalStack, LinuxSignalWait, LinuxSignalWaitOutcome, CLONE_THREAD,
+    LINUX_SIGNAL_FRAME_LIMIT, LINUX_SIGNAL_INFO_BYTES,
 };
 use crate::kernel_lowlevel::memory::{process_manager, PageFrameAllocator, PAGE_SIZE};
 use crate::kernel_objects::channel;
@@ -2720,7 +2720,9 @@ fn linux_signal_record_from_user(
 fn with_linux_process_pending<R>(operation: impl FnOnce(&mut LinuxPendingSignals) -> R) -> R {
     assert!(crate::kernel_lowlevel::smp::is_boot_cpu());
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    compiler_fence(Ordering::SeqCst);
     let result = unsafe { operation(&mut LINUX_PROCESS_PENDING) };
+    compiler_fence(Ordering::SeqCst);
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     result
 }
@@ -2766,9 +2768,9 @@ struct LinuxDeliverableSignal {
 fn take_process_linux_signal(
     current: linux_task::LinuxTaskCore,
     mask: u64,
-) -> Option<LinuxPendingSignal> {
+) -> Option<(LinuxPendingSignal, LinuxPendingSignalReservation)> {
     with_linux_process_pending(|pending| {
-        pending.take_eligible(|signum| {
+        pending.take_eligible_reserved(|signum| {
             mask & linux_signal_bit(signum) == 0
                 && linux_task::process_signal_target(signum) == Some(current)
         })
@@ -2797,29 +2799,29 @@ fn take_selected_linux_signal(
             take_process_linux_signal_matching(linux_signal_bit(signum))
         }
     };
-    Ok(selected.map(|(record, reservation)| LinuxDeliverableSignal {
-        record,
-        source,
-        reservation: Some(reservation),
-    }))
+    Ok(
+        selected.map(|(record, reservation)| LinuxDeliverableSignal {
+            record,
+            source,
+            reservation: Some(reservation),
+        }),
+    )
 }
 
 fn take_unblocked_linux_signal() -> Option<LinuxDeliverableSignal> {
-    if let Ok(Some(record)) =
-        linux_task::with_current_signal_state(|signal_state| signal_state.take_unblocked())
-    {
+    if let Ok(Some((record, reservation))) = linux_task::take_current_unblocked_signal() {
         return Some(LinuxDeliverableSignal {
             record,
             source: LinuxPendingSignalSource::Task,
-            reservation: None,
+            reservation: Some(reservation),
         });
     }
     let current = linux_task::current_task().ok()?;
     let mask = linux_task::with_current_signal_state(|signal_state| signal_state.mask).ok()?;
-    take_process_linux_signal(current, mask).map(|record| LinuxDeliverableSignal {
+    take_process_linux_signal(current, mask).map(|(record, reservation)| LinuxDeliverableSignal {
         record,
         source: LinuxPendingSignalSource::Process,
-        reservation: None,
+        reservation: Some(reservation),
     })
 }
 
@@ -2830,7 +2832,8 @@ fn update_process_linux_signals_and_handoff(
     let result = with_linux_process_pending(|pending| {
         operation(pending)?;
         for wake in &mut wakes {
-            let Some((target, reason)) = linux_task::handoff_process_pending_signal(pending)? else {
+            let Some((target, reason)) = linux_task::handoff_process_pending_signal(pending)?
+            else {
                 break;
             };
             *wake = Some((target.tid, target.scheduler_thread, reason));
@@ -2996,9 +2999,17 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
         let signum = pending.signum;
         let action = linux_signal_action(signum);
         match linux_signal_disposition(signum) {
-            LinuxSignalDisposition::Ignore => continue,
+            LinuxSignalDisposition::Ignore => {
+                if commit_linux_signal(deliverable).is_err() {
+                    return false;
+                }
+                continue;
+            }
             LinuxSignalDisposition::Terminate => {
                 let _ = linux_task::clear_current_restart_block();
+                if commit_linux_signal(deliverable).is_err() {
+                    return false;
+                }
                 if let Ok(current) = linux_task::current_task() {
                     let _ = process_manager().terminate_process(current.tgid);
                 }
@@ -3073,6 +3084,9 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
             }
             return false;
         };
+        if commit_linux_signal(deliverable).is_err() {
+            return false;
+        }
         if action.flags & LINUX_SA_RESETHAND != 0 {
             store_linux_signal_action(signum, LinuxKernelSigaction::default());
         }
@@ -3106,33 +3120,43 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
     false
 }
 
-fn restore_linux_signal_frame(saved_regs: usize) -> bool {
+#[derive(Clone, Copy)]
+enum LinuxSignalFrameRestore {
+    Return,
+    Restart(LinuxRestartBlock),
+}
+
+fn apply_linux_restart_block(saved_regs: usize, restart: LinuxRestartBlock) {
+    let regs = unsafe { &mut *(saved_regs as *mut [u64; 32]) };
+    regs[0] = restart.arguments[0];
+    regs[1] = restart.arguments[1];
+    regs[2] = restart.arguments[2];
+    regs[3] = restart.arguments[3];
+    regs[4] = restart.arguments[4];
+    regs[5] = restart.arguments[5];
+    regs[8] = restart.syscall_number;
+    crate::kernel_lowlevel::cpu::set_exception_return_pc(restart.svc_address);
+}
+
+fn restore_linux_signal_frame(saved_regs: usize) -> Option<LinuxSignalFrameRestore> {
     let Ok(Some(frame)) = linux_task::with_current_signal_state(|signal_state| {
         let frame = signal_state.take_requested_frame()?;
         signal_state.mask = frame.previous_mask;
         signal_state.alt_stack.flags = frame.previous_stack_flags as u32;
         Some(frame)
     }) else {
-        return false;
+        return None;
     };
     let regs = unsafe { &mut *(saved_regs as *mut [u64; 32]) };
     *regs = frame.regs;
     crate::kernel_lowlevel::cpu::set_user_stack_pointer(frame.user_sp);
-    if let Some(restart) = frame.restart {
-        if linux_task::install_current_restart_block(restart).unwrap_or(false) {
-            regs[0] = restart.arguments[0];
-            regs[1] = restart.arguments[1];
-            regs[2] = restart.arguments[2];
-            regs[3] = restart.arguments[3];
-            regs[4] = restart.arguments[4];
-            regs[5] = restart.arguments[5];
-            regs[8] = restart.syscall_number;
-            crate::kernel_lowlevel::cpu::set_exception_return_pc(restart.svc_address);
-            return true;
-        }
-    }
     crate::kernel_lowlevel::cpu::set_exception_return_pc(frame.return_pc);
-    true
+    Some(
+        frame
+            .restart
+            .map(LinuxSignalFrameRestore::Restart)
+            .unwrap_or(LinuxSignalFrameRestore::Return),
+    )
 }
 
 #[no_mangle]
@@ -3143,11 +3167,27 @@ pub extern "C" fn complete_linux_signal_syscall_return(saved_regs: usize) {
     let sigreturn_requested =
         linux_task::with_current_signal_state(|signal_state| signal_state.sigreturn_requested)
             .unwrap_or(false);
-    if sigreturn_requested && !restore_linux_signal_frame(saved_regs) {
+    let restored = if sigreturn_requested {
+        let Some(restored) = restore_linux_signal_frame(saved_regs) else {
+            return;
+        };
+        Some(restored)
+    } else {
+        None
+    };
+    let return_pc = crate::kernel_lowlevel::cpu::read_exception_return_pc();
+    if deliver_next_linux_signal(saved_regs, return_pc) {
         return;
     }
-    let return_pc = crate::kernel_lowlevel::cpu::read_exception_return_pc();
-    let _ = deliver_next_linux_signal(saved_regs, return_pc);
+    if let Some(LinuxSignalFrameRestore::Restart(restart)) = restored {
+        let restart_still_pending = linux_task::with_current_signal_state(|signal_state| {
+            signal_state.restart_block == Some(restart)
+        })
+        .unwrap_or(false);
+        if restart_still_pending {
+            apply_linux_restart_block(saved_regs, restart);
+        }
+    }
 }
 
 #[no_mangle]
@@ -3977,14 +4017,16 @@ fn linux_signal_wait_deadline(timeout: usize) -> Result<Option<u64>, SysError> {
     .ok_or(SysError::EINVAL)
 }
 
-fn finish_linux_signal_wait(
-    deliverable: LinuxDeliverableSignal,
+fn copy_linux_signal_wait_info(
+    record: LinuxPendingSignal,
     output_address: usize,
-) -> SysResult {
-    let record = deliverable.record;
-    if output_address != 0 {
+) -> Result<(), SysError> {
+    if output_address == 0 {
+        return Ok(());
+    }
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let result = (|| {
         if !linux_signal_user_range_writable(output_address, LINUX_SIGNAL_INFO_BYTES) {
-            requeue_linux_signal(deliverable)?;
             return Err(SysError::EFAULT);
         }
         unsafe {
@@ -3999,6 +4041,21 @@ fn finish_linux_signal_wait(
                 core::ptr::write(output_address as *mut i32, record.signum as i32);
             }
         }
+        compiler_fence(Ordering::SeqCst);
+        Ok(())
+    })();
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    result
+}
+
+fn finish_linux_signal_wait(
+    deliverable: LinuxDeliverableSignal,
+    output_address: usize,
+) -> SysResult {
+    let record = deliverable.record;
+    if let Err(error) = copy_linux_signal_wait_info(record, output_address) {
+        requeue_linux_signal(deliverable)?;
+        return Err(error);
     }
     commit_linux_signal(deliverable)?;
     Ok(record.signum)
@@ -5589,8 +5646,7 @@ pub fn sys_rt_sigtimedwait(
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     match outcome {
         Some(wait) if wait.outcome == LinuxSignalWaitOutcome::Signal => {
-            let (Some(source), Some(reservation)) =
-                (wait.signal_source, wait.signal_reservation)
+            let (Some(source), Some(reservation)) = (wait.signal_source, wait.signal_reservation)
             else {
                 return Err(SysError::EAGAIN);
             };

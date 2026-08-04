@@ -2620,7 +2620,7 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         .expect("process signal selection");
     let process_take = braced_body(&syscall[process_take_start..]);
     let standard_selection = process_take
-        .find("pending.take_eligible(")
+        .find("pending.take_eligible_reserved(")
         .expect("shared process signal selection");
     assert!(standard_selection > 0);
     assert!(task_logic.contains("pub(crate) fn lowest_linux_pending_index("));
@@ -2826,15 +2826,38 @@ fn linux_signal_waits_block_and_restart_from_the_original_svc() {
         .find("fn restore_linux_signal_frame(")
         .expect("signal frame restoration");
     let restore = braced_body(&syscall[restore_start..]);
-    assert!(restore.contains("if let Some(restart) = frame.restart"));
+    assert!(restore.contains("set_exception_return_pc(frame.return_pc)"));
+    assert!(!restore.contains("set_exception_return_pc(restart.svc_address)"));
+    assert!(task_logic.contains("if let Some(restart) = frame.restart"));
+    assert!(task_logic.contains("self.install_restart_block(restart)"));
+
+    let replay_start = syscall
+        .find("fn apply_linux_restart_block(")
+        .expect("deferred restart replay helper");
+    let replay = braced_body(&syscall[replay_start..]);
     for register in 0..6 {
         assert!(
-            restore.contains(&format!("regs[{register}] = restart.arguments[{register}]")),
+            replay.contains(&format!("regs[{register}] = restart.arguments[{register}]")),
             "missing x{register} restart restoration"
         );
     }
-    assert!(restore.contains("regs[8] = restart.syscall_number"));
-    assert!(restore.contains("set_exception_return_pc(restart.svc_address)"));
+    assert!(replay.contains("regs[8] = restart.syscall_number"));
+    assert!(replay.contains("set_exception_return_pc(restart.svc_address)"));
+
+    let completion_start = syscall
+        .find("pub extern \"C\" fn complete_linux_signal_syscall_return(")
+        .expect("signal syscall return completion");
+    let completion = braced_body(&syscall[completion_start..]);
+    let pending_delivery = completion
+        .find("deliver_next_linux_signal(saved_regs, return_pc)")
+        .expect("nested signal delivery decision");
+    let staged_check = completion
+        .find("signal_state.restart_block == Some(restart)")
+        .expect("staged restart identity check");
+    let replay = completion
+        .find("apply_linux_restart_block(saved_regs, restart)")
+        .expect("deferred restart replay");
+    assert!(pending_delivery < staged_check && staged_check < replay);
 
     assert!(futex.contains("pub(crate) fn restartable_wait_operation("));
     assert!(futex.contains("linux_task::current_restart_timeout()"));
@@ -2912,14 +2935,14 @@ fn linux_sigtimedwait_requeues_the_original_source_when_copyout_becomes_invalid(
         .find("fn finish_linux_signal_wait(")
         .expect("signal wait completion helper");
     let finish = braced_body(&syscall[finish_start..]);
-    let validation = finish
-        .find("linux_signal_user_range_writable(")
-        .expect("copyout range validation");
+    let copyout = finish
+        .find("copy_linux_signal_wait_info(")
+        .expect("checked copyout helper");
     let requeue = finish
         .find("requeue_linux_signal(")
         .expect("source-preserving requeue");
-    let fault = finish.find("Err(SysError::EFAULT)").expect("copyout fault");
-    assert!(validation < requeue && requeue < fault);
+    let fault = finish.find("return Err(error)").expect("copyout fault");
+    assert!(copyout < requeue && requeue < fault);
 }
 
 #[test]
@@ -2977,6 +3000,116 @@ fn linux_sigtimedwait_rollback_uses_bounded_source_local_reservations() {
         let suffix = &syscall[delivery_failure.0..];
         assert!(!suffix.starts_with("requeue_linux_signal(deliverable);"));
     }
+}
+
+#[test]
+fn linux_handler_delivery_reserves_pending_capacity_until_the_frame_is_ready() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let task_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_task_logic_shared.rs"))
+            .expect("read Linux task logic");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux signal runtime");
+
+    assert!(task_logic.contains("pub(crate) fn take_eligible_reserved("));
+    assert!(task_logic.contains("pub(crate) fn take_unblocked_reserved("));
+    assert!(task.contains("pub(crate) fn take_current_unblocked_signal("));
+
+    let process_take_start = syscall
+        .find("fn take_process_linux_signal(")
+        .expect("process signal reserved take");
+    let process_take = braced_body(&syscall[process_take_start..]);
+    assert!(process_take.contains("pending.take_eligible_reserved("));
+
+    let unblocked_start = syscall
+        .find("fn take_unblocked_linux_signal(")
+        .expect("unblocked signal take");
+    let unblocked = braced_body(&syscall[unblocked_start..]);
+    assert!(unblocked.contains("linux_task::take_current_unblocked_signal("));
+    assert!(unblocked.matches("reservation: Some(reservation)").count() >= 2);
+
+    let delivery_start = syscall
+        .find("fn deliver_next_linux_signal(")
+        .expect("signal delivery helper");
+    let delivery = braced_body(&syscall[delivery_start..]);
+    let frame = delivery
+        .find("signal_state.push_frame(frame)?")
+        .expect("handler frame setup");
+    let commit = delivery
+        .rfind("commit_linux_signal(deliverable)")
+        .expect("successful handler reservation commit");
+    assert!(frame < commit);
+    assert!(delivery.contains("requeue_linux_signal(deliverable)"));
+}
+
+#[test]
+fn linux_sigtimedwait_copyout_masks_irqs_across_validation_and_write() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux signal runtime");
+
+    let copy_start = syscall
+        .find("fn copy_linux_signal_wait_info(")
+        .expect("short IRQ-masked sigtimedwait copyout helper");
+    let copy = braced_body(&syscall[copy_start..]);
+    let mask = copy.find("mask_interrupts()").expect("copyout IRQ mask");
+    let validation = copy
+        .find("linux_signal_user_range_writable(")
+        .expect("copyout range validation");
+    let write = copy
+        .find("core::ptr::copy_nonoverlapping(")
+        .expect("complete siginfo write");
+    let fence = copy
+        .find("compiler_fence(Ordering::SeqCst)")
+        .expect("copyout compiler fence");
+    let restore = copy
+        .rfind("restore_interrupts(interrupt_state)")
+        .expect("unconditional copyout IRQ restore");
+    assert!(mask < validation && validation < write && write < fence && fence < restore);
+    assert!(!copy.contains("linux_task::"));
+    assert!(!copy.contains("with_linux_process_pending("));
+
+    let finish_start = syscall
+        .find("fn finish_linux_signal_wait(")
+        .expect("signal wait completion helper");
+    let finish = braced_body(&syscall[finish_start..]);
+    let copyout = finish
+        .find("copy_linux_signal_wait_info(")
+        .expect("checked copyout call");
+    let rollback = finish
+        .find("requeue_linux_signal(deliverable)")
+        .expect("copyout failure rollback");
+    assert!(copyout < rollback);
+}
+
+#[test]
+fn linux_process_pending_static_mut_access_has_compiler_barriers() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux signal runtime");
+    let guard_start = syscall
+        .find("fn with_linux_process_pending<R>(")
+        .expect("process pending queue guard");
+    let guard = braced_body(&syscall[guard_start..]);
+    let mask = guard.find("mask_interrupts()").expect("process IRQ mask");
+    let first_fence = guard
+        .find("compiler_fence(Ordering::SeqCst)")
+        .expect("compiler fence after IRQ mask");
+    let access = guard
+        .find("operation(&mut LINUX_PROCESS_PENDING)")
+        .expect("process pending static-mut access");
+    let second_fence = guard
+        .rfind("compiler_fence(Ordering::SeqCst)")
+        .expect("compiler fence before IRQ restore");
+    let restore = guard
+        .find("restore_interrupts(interrupt_state)")
+        .expect("process IRQ restore");
+    assert!(mask < first_fence);
+    assert!(first_fence < access && access < second_fence);
+    assert!(second_fence < restore);
+    assert_ne!(first_fence, second_fence);
 }
 
 #[test]
