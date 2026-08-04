@@ -342,14 +342,16 @@ spec fn scheduler_terminate_transition_spec(
     id: int,
     current: int,
     state: int,
-) -> Option<bool> {
+    active_threads: int,
+) -> Option<(bool, int)> {
     if id == THREAD_ID_IDLE as int
         || state == THREAD_EMPTY as int
         || state == THREAD_TERMINATED as int
+        || active_threads <= 1
     {
-        Option::<bool>::None
+        Option::<(bool, int)>::None
     } else {
-        Some(id == current)
+        Some((id == current, active_threads - 1))
     }
 }
 
@@ -1818,14 +1820,30 @@ fn scheduler_terminate_transition(
     id: usize,
     current: usize,
     state: u8,
-) -> (out: Option<bool>)
+    active_threads: usize,
+) -> (out: Option<(bool, usize)>)
     ensures
-        out == scheduler_terminate_transition_spec(id as int, current as int, state as int),
+        match out {
+            Some((defer_current, next_active_threads)) =>
+                scheduler_terminate_transition_spec(
+                    id as int,
+                    current as int,
+                    state as int,
+                    active_threads as int,
+                ) == Some((defer_current, next_active_threads as int)),
+            None => scheduler_terminate_transition_spec(
+                id as int,
+                current as int,
+                state as int,
+                active_threads as int,
+            ) == Option::<(bool, int)>::None,
+        },
 {
     smros_sched_terminate_transition_body!(
         id,
         current,
         state,
+        active_threads,
         THREAD_EMPTY,
         THREAD_TERMINATED
     )
@@ -2516,11 +2534,12 @@ fn scheduler_smoke() {
     let publish_blocked = scheduler_publish_transition(THREAD_BLOCKED, true);
     let publish_not_suspended = scheduler_publish_transition(THREAD_BLOCKED, false);
     let publish_running = scheduler_publish_transition(THREAD_RUNNING, true);
-    let terminate_current = scheduler_terminate_transition(2, 2, THREAD_RUNNING);
-    let terminate_other = scheduler_terminate_transition(2, 1, THREAD_BLOCKED);
-    let terminate_idle = scheduler_terminate_transition(0, 1, THREAD_READY);
-    let terminate_empty = scheduler_terminate_transition(2, 1, THREAD_EMPTY);
-    let terminate_terminated = scheduler_terminate_transition(2, 1, THREAD_TERMINATED);
+    let terminate_current = scheduler_terminate_transition(2, 2, THREAD_RUNNING, 2);
+    let terminate_other = scheduler_terminate_transition(2, 1, THREAD_BLOCKED, 3);
+    let terminate_idle = scheduler_terminate_transition(0, 1, THREAD_READY, 2);
+    let terminate_empty = scheduler_terminate_transition(2, 1, THREAD_EMPTY, 2);
+    let terminate_terminated = scheduler_terminate_transition(2, 1, THREAD_TERMINATED, 2);
+    let terminate_last = scheduler_terminate_transition(2, 2, THREAD_RUNNING, 1);
 
     assert(wake_blocked == Some(THREAD_READY));
     assert(wake_empty == Option::<u8>::None);
@@ -2530,11 +2549,12 @@ fn scheduler_smoke() {
     assert(publish_blocked == Some(THREAD_READY));
     assert(publish_not_suspended == Option::<u8>::None);
     assert(publish_running == Option::<u8>::None);
-    assert(terminate_current == Some(true));
-    assert(terminate_other == Some(false));
-    assert(terminate_idle == Option::<bool>::None);
-    assert(terminate_empty == Option::<bool>::None);
-    assert(terminate_terminated == Option::<bool>::None);
+    assert(terminate_current == Some((true, 1usize)));
+    assert(terminate_other == Some((false, 2usize)));
+    assert(terminate_idle == Option::<(bool, usize)>::None);
+    assert(terminate_empty == Option::<(bool, usize)>::None);
+    assert(terminate_terminated == Option::<(bool, usize)>::None);
+    assert(terminate_last == Option::<(bool, usize)>::None);
 }
 
 fn fifo_option_masks_smoke() {

@@ -187,6 +187,7 @@ thread_start_trampoline:
 .globl start_linux_clone_child
 .type start_linux_clone_child, %function
 start_linux_clone_child:
+    msr     daifset, #2
     mov     x16, x0
 
     ldr     x17, [x16, #0x310]

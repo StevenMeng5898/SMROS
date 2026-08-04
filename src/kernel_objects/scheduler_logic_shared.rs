@@ -215,11 +215,11 @@ macro_rules! smros_sched_publish_transition_body {
 
 #[allow(unused_macros)]
 macro_rules! smros_sched_terminate_transition_body {
-    ($id:expr, $current:expr, $state:expr, $empty:expr, $terminated:expr) => {{
-        if $id == 0usize || $state == $empty || $state == $terminated {
+    ($id:expr, $current:expr, $state:expr, $active:expr, $empty:expr, $terminated:expr) => {{
+        if $id == 0usize || $state == $empty || $state == $terminated || $active <= 1usize {
             None
         } else {
-            Some($id == $current)
+            Some(($id == $current, $active - 1usize))
         }
     }};
 }

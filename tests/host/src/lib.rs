@@ -959,20 +959,73 @@ mod scheduler_logic {
             let expected = if state == empty || state == terminated {
                 None
             } else {
-                Some(false)
+                Some((false, 1usize))
             };
             assert_eq!(
-                smros_sched_terminate_transition_body!(2usize, 1usize, state, empty, terminated),
+                smros_sched_terminate_transition_body!(
+                    2usize, 1usize, state, 2usize, empty, terminated
+                ),
                 expected
             );
         }
         assert_eq!(
-            smros_sched_terminate_transition_body!(2usize, 2usize, running, empty, terminated),
-            Some(true)
+            smros_sched_terminate_transition_body!(
+                2usize, 2usize, running, 2usize, empty, terminated
+            ),
+            Some((true, 1usize))
         );
         assert_eq!(
-            smros_sched_terminate_transition_body!(0usize, 2usize, running, empty, terminated),
+            smros_sched_terminate_transition_body!(
+                0usize, 2usize, running, 2usize, empty, terminated
+            ),
             None
+        );
+        assert_eq!(
+            smros_sched_terminate_transition_body!(
+                2usize, 2usize, running, 0usize, empty, terminated
+            ),
+            None
+        );
+
+        let mut active_threads = 2usize;
+        if let Some((_, next_active_threads)) = smros_sched_terminate_transition_body!(
+            0usize,
+            2usize,
+            running,
+            active_threads,
+            empty,
+            terminated
+        ) {
+            active_threads = next_active_threads;
+        }
+        assert_eq!(
+            active_threads, 2,
+            "rejected termination preserves accounting"
+        );
+        if let Some((_, next_active_threads)) = smros_sched_terminate_transition_body!(
+            2usize,
+            2usize,
+            running,
+            active_threads,
+            empty,
+            terminated
+        ) {
+            active_threads = next_active_threads;
+        }
+        assert_eq!(active_threads, 1, "accepted termination decrements once");
+        if let Some((_, next_active_threads)) = smros_sched_terminate_transition_body!(
+            2usize,
+            2usize,
+            terminated,
+            active_threads,
+            empty,
+            terminated
+        ) {
+            active_threads = next_active_threads;
+        }
+        assert_eq!(
+            active_threads, 1,
+            "repeated termination preserves accounting"
         );
     }
 

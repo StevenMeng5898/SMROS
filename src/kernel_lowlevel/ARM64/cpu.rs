@@ -194,6 +194,7 @@ pub fn set_user_tls(tls: u64) {
 
 #[inline(always)]
 pub unsafe fn switch_to_user(entry_point: u64, user_stack: u64, ttbr0: u64, state: u64) -> ! {
+    let _interrupt_state = mask_interrupts();
     core::arch::asm!(
         "msr ttbr0_el1, {ttbr0}",
         "tlbi vmalle1is",

@@ -1771,9 +1771,11 @@ fn scheduler_exposes_atomic_linux_task_transitions() {
         .find("smros_sched_terminate_transition_body!")
         .expect("shared termination gate");
     let accounting = terminate
-        .find("self.active_threads = self.active_threads.saturating_sub(1);")
-        .expect("one-time active-thread accounting");
+        .find("self.active_threads = next_active_threads;")
+        .expect("proved one-time active-thread accounting");
     assert!(gate < accounting);
+    assert_eq!(terminate.matches("self.active_threads =").count(), 1);
+    assert!(!terminate.contains("saturating_sub"));
 
     let lower_start = boot
         .find("irq_handler_lower:")
@@ -2189,6 +2191,8 @@ fn aarch64_context_switch_preserves_irq_mask_until_the_resumed_owner_restores_it
         .expect("read scheduler");
     let thread = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/thread.rs"))
         .expect("read AArch64 thread context");
+    let cpu = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/cpu.rs"))
+        .expect("read AArch64 CPU helpers");
 
     let switch_start = switch
         .find("context_switch_start:")
@@ -2206,7 +2210,10 @@ fn aarch64_context_switch_preserves_irq_mask_until_the_resumed_owner_restores_it
     let trampoline = switch
         .find("thread_start_trampoline:")
         .expect("ordinary first-run thread trampoline");
-    let trampoline = &switch[trampoline..];
+    let trampoline_end = switch[trampoline..]
+        .find(".size thread_start_trampoline")
+        .expect("end of ordinary first-run thread trampoline");
+    let trampoline = &switch[trampoline..trampoline + trampoline_end];
     let irq_enable = trampoline
         .find("msr     daifclr, #2")
         .expect("first-run thread enables IRQs");
@@ -2216,6 +2223,33 @@ fn aarch64_context_switch_preserves_irq_mask_until_the_resumed_owner_restores_it
     assert!(irq_enable < entry_branch);
     assert!(thread.contains("x19: entry as *const () as u64"));
     assert!(thread.contains("pc: thread_start_trampoline as *const () as u64"));
+
+    let clone_start = switch
+        .find("start_linux_clone_child:")
+        .expect("clone-child EL0 transfer");
+    let clone_end = switch[clone_start..]
+        .find(".size start_linux_clone_child")
+        .expect("end of clone-child EL0 transfer");
+    let clone = &switch[clone_start..clone_start + clone_end];
+    let clone_mask = clone
+        .find("msr     daifset, #2")
+        .expect("clone child masks IRQs before return-state installation");
+    let clone_sp = clone
+        .find("msr     sp_el0, x17")
+        .expect("clone child installs user stack");
+    assert!(clone_mask < clone_sp);
+
+    let user_start = cpu
+        .find("pub unsafe fn switch_to_user(")
+        .expect("generic EL0 transfer");
+    let user = braced_body(&cpu[user_start..]);
+    let user_mask = user
+        .find("let _interrupt_state = mask_interrupts();")
+        .expect("generic EL0 transfer masks IRQs");
+    let user_stack = user
+        .find("msr sp_el0")
+        .expect("generic EL0 transfer installs user stack");
+    assert!(user_mask < user_stack);
 
     for (entry, next_entry) in [
         ("pub fn schedule()", "fn current_logical_cpu("),

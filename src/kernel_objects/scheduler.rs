@@ -906,10 +906,11 @@ impl Scheduler {
         if id.0 == ThreadId::IDLE.0 || id.0 >= MAX_THREADS {
             return false;
         }
-        let Some(defer_current) = smros_sched_terminate_transition_body!(
+        let Some((defer_current, next_active_threads)) = smros_sched_terminate_transition_body!(
             id.0,
             self.current_thread.0,
             self.threads[id.0].state,
+            self.active_threads,
             ThreadState::Empty,
             ThreadState::Terminated
         ) else {
@@ -917,7 +918,7 @@ impl Scheduler {
         };
 
         self.suspended_threads[id.0] = false;
-        self.active_threads = self.active_threads.saturating_sub(1);
+        self.active_threads = next_active_threads;
         if defer_current {
             self.threads[id.0].state = ThreadState::Terminated;
             self.threads[id.0].time_slice = 0;
