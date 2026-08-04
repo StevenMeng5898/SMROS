@@ -306,6 +306,12 @@ pub(crate) fn signal_wait_target(signum: usize) -> Option<LinuxTaskCore> {
     with_runtime(|runtime| runtime.tasks.signal_wait_target(signum))
 }
 
+pub(crate) fn handoff_process_pending_signal(
+    pending: &mut LinuxPendingSignals,
+) -> Result<Option<(LinuxTaskCore, LinuxBlockReason)>, LinuxSignalRouteError> {
+    with_runtime(|runtime| runtime.tasks.handoff_process_pending_signal(pending))
+}
+
 pub(crate) fn complete_process_signal_wait(
     tid: usize,
     scheduler_thread: usize,

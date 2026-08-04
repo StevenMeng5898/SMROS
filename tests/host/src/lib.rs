@@ -1305,6 +1305,164 @@ mod linux_task_logic {
     }
 
     #[test]
+    fn process_standard_commit_hands_the_later_record_to_the_next_waiter() {
+        let (mut tasks, first, second) = three_live_tasks();
+        let signum = 10;
+        let bit = linux_signal_bit(signum);
+        for (reservation, output_address) in [(first, 0x6100), (second, 0x6200)] {
+            assert!(tasks
+                .signal_state_mut(reservation.tid, reservation.scheduler_thread)
+                .unwrap()
+                .install_signal_wait(LinuxSignalWait::timed(bit, None, output_address,)));
+            assert!(tasks.block(
+                reservation.tid,
+                reservation.scheduler_thread,
+                LinuxBlockReason::SignalWait,
+            ));
+        }
+
+        let mut pending = LinuxPendingSignals::new();
+        let original = signal_record(signum, 0x31);
+        let later = signal_record(signum, 0x92);
+        let reservation = pending
+            .reserve_direct(original)
+            .unwrap()
+            .expect("first process waiter reservation");
+        assert_eq!(
+            tasks.complete_process_signal_wait(
+                first.tid,
+                first.scheduler_thread,
+                original,
+                reservation,
+            ),
+            Some(LinuxBlockReason::SignalWait)
+        );
+        assert!(tasks.wake(first.tid, first.scheduler_thread));
+        assert_eq!(pending.reserve_direct(later).unwrap(), None);
+        assert_eq!(pending.standard_records[signum], later);
+
+        let first_wait = tasks
+            .signal_state_mut(first.tid, first.scheduler_thread)
+            .unwrap()
+            .take_signal_wait_outcome()
+            .expect("first process waiter outcome");
+        assert_eq!(first_wait.signal, original);
+        assert_eq!(
+            first_wait.signal_source,
+            Some(LinuxPendingSignalSource::Process)
+        );
+        pending
+            .commit_reservation(first_wait.signal_reservation.unwrap())
+            .unwrap();
+
+        let (target, reason) = tasks
+            .handoff_process_pending_signal(&mut pending)
+            .unwrap()
+            .expect("newly visible process signal handoff");
+        assert_eq!(target.tid, second.tid);
+        assert_eq!(reason, LinuxBlockReason::SignalWait);
+        assert!(tasks.wake(target.tid, target.scheduler_thread));
+
+        let second_wait = tasks
+            .signal_state_mut(second.tid, second.scheduler_thread)
+            .unwrap()
+            .take_signal_wait_outcome()
+            .expect("second process waiter outcome");
+        assert_eq!(second_wait.signal, later);
+        assert_eq!(
+            second_wait.signal_source,
+            Some(LinuxPendingSignalSource::Process)
+        );
+        assert_eq!(pending.standard_pending, 0);
+        assert_eq!(pending.standard_reserved, bit);
+        assert_eq!(
+            tasks.handoff_process_pending_signal(&mut pending).unwrap(),
+            None,
+            "the later standard occurrence is handed off exactly once"
+        );
+        pending
+            .commit_reservation(second_wait.signal_reservation.unwrap())
+            .unwrap();
+        assert_eq!(pending.standard_reserved, 0);
+        assert_eq!(pending.take_matching(bit), None);
+    }
+
+    #[test]
+    fn process_standard_rollback_hands_the_exact_original_to_the_next_waiter() {
+        let (mut tasks, first, second) = three_live_tasks();
+        let signum = 10;
+        let bit = linux_signal_bit(signum);
+        for (reservation, output_address) in [(first, 0x6300), (second, 0x6400)] {
+            assert!(tasks
+                .signal_state_mut(reservation.tid, reservation.scheduler_thread)
+                .unwrap()
+                .install_signal_wait(LinuxSignalWait::timed(bit, None, output_address,)));
+            assert!(tasks.block(
+                reservation.tid,
+                reservation.scheduler_thread,
+                LinuxBlockReason::SignalWait,
+            ));
+        }
+
+        let mut pending = LinuxPendingSignals::new();
+        let original = signal_record(signum, 0x31);
+        let later = signal_record(signum, 0x92);
+        let reservation = pending
+            .reserve_direct(original)
+            .unwrap()
+            .expect("first process waiter reservation");
+        assert_eq!(
+            tasks.complete_process_signal_wait(
+                first.tid,
+                first.scheduler_thread,
+                original,
+                reservation,
+            ),
+            Some(LinuxBlockReason::SignalWait)
+        );
+        assert!(tasks.wake(first.tid, first.scheduler_thread));
+        assert_eq!(pending.reserve_direct(later).unwrap(), None);
+
+        let first_wait = tasks
+            .signal_state_mut(first.tid, first.scheduler_thread)
+            .unwrap()
+            .take_signal_wait_outcome()
+            .expect("first process waiter outcome");
+        pending
+            .rollback_reservation(first_wait.signal_reservation.unwrap(), first_wait.signal)
+            .unwrap();
+        assert_eq!(pending.standard_records[signum], original);
+
+        let (target, reason) = tasks
+            .handoff_process_pending_signal(&mut pending)
+            .unwrap()
+            .expect("rolled-back process signal handoff");
+        assert_eq!(target.tid, second.tid);
+        assert_eq!(reason, LinuxBlockReason::SignalWait);
+        assert!(tasks.wake(target.tid, target.scheduler_thread));
+
+        let second_wait = tasks
+            .signal_state_mut(second.tid, second.scheduler_thread)
+            .unwrap()
+            .take_signal_wait_outcome()
+            .expect("second process waiter outcome");
+        assert_eq!(second_wait.signal, original);
+        assert_eq!(second_wait.signal.info, [0x31; LINUX_SIGNAL_INFO_BYTES]);
+        assert_eq!(pending.standard_pending, 0);
+        assert_eq!(pending.standard_reserved, bit);
+        assert_eq!(
+            tasks.handoff_process_pending_signal(&mut pending).unwrap(),
+            None,
+            "rollback must not duplicate the original occurrence"
+        );
+        pending
+            .commit_reservation(second_wait.signal_reservation.unwrap())
+            .unwrap();
+        assert_eq!(pending.standard_reserved, 0);
+        assert_eq!(pending.take_matching(bit), None);
+    }
+
+    #[test]
     fn sigsuspend_keeps_the_temporary_mask_until_frame_setup_then_restores_the_old_mask() {
         let mut state = LinuxTaskSignalState::new();
         let previous_mask = linux_signal_bit(10);

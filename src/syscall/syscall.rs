@@ -2823,6 +2823,27 @@ fn take_unblocked_linux_signal() -> Option<LinuxDeliverableSignal> {
     })
 }
 
+fn update_process_linux_signals_and_handoff(
+    operation: impl FnOnce(&mut LinuxPendingSignals) -> Result<(), linux_task::LinuxSignalRouteError>,
+) -> Result<(), SysError> {
+    let mut wakes = [None; linux_task::LINUX_TASK_LIMIT];
+    let result = with_linux_process_pending(|pending| {
+        operation(pending)?;
+        for wake in &mut wakes {
+            let Some((target, reason)) = linux_task::handoff_process_pending_signal(pending)? else {
+                break;
+            };
+            *wake = Some((target.tid, target.scheduler_thread, reason));
+        }
+        Ok(())
+    });
+    for wake in wakes.into_iter().flatten() {
+        let (tid, scheduler_thread, reason) = wake;
+        let _ = linux_task::wake_blocked(tid, scheduler_thread, reason);
+    }
+    result.map_err(linux_signal_route_error)
+}
+
 fn requeue_linux_signal(deliverable: LinuxDeliverableSignal) -> Result<(), SysError> {
     match deliverable.source {
         LinuxPendingSignalSource::Task => {
@@ -2837,13 +2858,12 @@ fn requeue_linux_signal(deliverable: LinuxDeliverableSignal) -> Result<(), SysEr
             })?;
             result.map_err(linux_signal_route_error)
         }
-        LinuxPendingSignalSource::Process => with_linux_process_pending(|pending| {
+        LinuxPendingSignalSource::Process => update_process_linux_signals_and_handoff(|pending| {
             if let Some(reservation) = deliverable.reservation {
                 pending.rollback_reservation(reservation, deliverable.record)
             } else {
                 pending.requeue_front(deliverable.record)
             }
-            .map_err(linux_signal_route_error)
         }),
     }
 }
@@ -2859,10 +2879,8 @@ fn commit_linux_signal(deliverable: LinuxDeliverableSignal) -> Result<(), SysErr
             })?;
             result.map_err(linux_signal_route_error)
         }
-        LinuxPendingSignalSource::Process => with_linux_process_pending(|pending| {
-            pending
-                .commit_reservation(reservation)
-                .map_err(linux_signal_route_error)
+        LinuxPendingSignalSource::Process => update_process_linux_signals_and_handoff(|pending| {
+            pending.commit_reservation(reservation)
         }),
     }
 }

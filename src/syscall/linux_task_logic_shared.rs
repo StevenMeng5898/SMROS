@@ -1267,6 +1267,47 @@ impl<const N: usize> LinuxTaskTable<N> {
         })
     }
 
+    fn accepting_signal_wait_target(&self, signum: usize) -> Option<LinuxTaskCore> {
+        self.tasks
+            .iter()
+            .zip(self.signal_states.iter())
+            .find_map(|(task, signal_state)| {
+                (Self::is_live(*task)
+                    && task.block_reason == LinuxBlockReason::SignalWait
+                    && signal_state.signal_wait_accepts(signum))
+                .then_some(*task)
+            })
+    }
+
+    pub(crate) fn handoff_process_pending_signal(
+        &mut self,
+        pending: &mut LinuxPendingSignals,
+    ) -> Result<Option<(LinuxTaskCore, LinuxBlockReason)>, LinuxSignalRouteError> {
+        let Some(record) = pending.peek_eligible(|signum| {
+            self.accepting_signal_wait_target(signum).is_some()
+        }) else {
+            return Ok(None);
+        };
+        let Some(target) = self.accepting_signal_wait_target(record.signum) else {
+            return Ok(None);
+        };
+        let Some((record, reservation)) =
+            pending.take_matching_reserved(linux_signal_bit(record.signum))
+        else {
+            return Ok(None);
+        };
+        let Some(reason) = self.complete_process_signal_wait(
+            target.tid,
+            target.scheduler_thread,
+            record,
+            reservation,
+        ) else {
+            pending.rollback_reservation(reservation, record)?;
+            return Ok(None);
+        };
+        Ok(Some((target, reason)))
+    }
+
     pub(crate) fn complete_process_signal_wait(
         &mut self,
         tid: usize,

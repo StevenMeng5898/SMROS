@@ -2928,6 +2928,8 @@ fn linux_sigtimedwait_rollback_uses_bounded_source_local_reservations() {
     let task_logic =
         std::fs::read_to_string(repository.join("src/syscall/linux_task_logic_shared.rs"))
             .expect("read Linux task logic");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
         .expect("read Linux signal runtime");
 
@@ -2937,13 +2939,39 @@ fn linux_sigtimedwait_rollback_uses_bounded_source_local_reservations() {
     assert!(task_logic.contains("pub signal_reservation: Option<LinuxPendingSignalReservation>"));
     assert!(task_logic.contains("self.realtime_len + self.realtime_reserved"));
     assert!(task_logic.contains("pub(crate) fn rollback_reservation("));
+    assert!(task_logic.contains("pub(crate) fn handoff_process_pending_signal("));
+    assert!(task.contains("pub(crate) fn handoff_process_pending_signal("));
+
+    let handoff_start = syscall
+        .find("fn update_process_linux_signals_and_handoff(")
+        .expect("bounded process signal handoff helper");
+    let handoff = braced_body(&syscall[handoff_start..]);
+    assert!(handoff.contains("[None; linux_task::LINUX_TASK_LIMIT]"));
+    assert!(handoff.contains("for wake in &mut wakes"));
+    let pending_scope = handoff
+        .find("with_linux_process_pending(")
+        .expect("one outer process-pending critical section");
+    let completion = handoff
+        .find("linux_task::handoff_process_pending_signal(pending)")
+        .expect("source-local pending handoff");
+    let wake = handoff
+        .rfind("linux_task::wake_blocked(")
+        .expect("scheduler wake after handoff");
+    assert!(pending_scope < completion && completion < wake);
 
     let requeue_start = syscall
         .find("fn requeue_linux_signal(")
         .expect("source-aware requeue helper");
     let requeue = braced_body(&syscall[requeue_start..]);
     assert!(requeue.contains("rollback_reservation("));
+    assert!(requeue.contains("update_process_linux_signals_and_handoff("));
     assert!(!requeue.contains("let _ ="));
+
+    let commit_start = syscall
+        .find("fn commit_linux_signal(")
+        .expect("source-aware commit helper");
+    let commit = braced_body(&syscall[commit_start..]);
+    assert!(commit.contains("update_process_linux_signals_and_handoff("));
 
     for delivery_failure in syscall.match_indices("requeue_linux_signal(deliverable)") {
         let suffix = &syscall[delivery_failure.0..];
