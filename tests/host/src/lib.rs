@@ -526,6 +526,69 @@ mod linux_task_logic {
     }
 
     #[test]
+    fn linux_tid_allocation_boundaries_stop_at_positive_pid_t_ceiling() {
+        assert_eq!(LINUX_ROOT_TID, 1);
+        assert_eq!(LINUX_MAX_TID, i32::MAX as usize);
+
+        assert_eq!(linux_task_tid_allocation(0), None);
+        assert_eq!(linux_task_tid_allocation(LINUX_ROOT_TID), None);
+        assert_eq!(
+            linux_task_tid_allocation(LINUX_MAX_TID - 1),
+            Some((LINUX_MAX_TID - 1, Some(LINUX_MAX_TID)))
+        );
+        assert_eq!(
+            linux_task_tid_allocation(LINUX_MAX_TID),
+            Some((LINUX_MAX_TID, None))
+        );
+        assert_eq!(linux_task_tid_allocation(LINUX_MAX_TID + 1), None);
+    }
+
+    #[test]
+    fn linux_tid_copyout_conversion_accepts_only_positive_pid_t_values() {
+        assert_eq!(linux_tid_to_user_value(0), None);
+        assert_eq!(linux_tid_to_user_value(LINUX_ROOT_TID), Some(1));
+        assert_eq!(
+            linux_tid_to_user_value(LINUX_MAX_TID),
+            Some(i32::MAX as u32)
+        );
+        assert_eq!(linux_tid_to_user_value(LINUX_MAX_TID + 1), None);
+    }
+
+    #[test]
+    fn allocator_reserves_the_tid_ceiling_once_then_exhausts_permanently() {
+        let mut tasks = LinuxTaskTable::<2>::new();
+        tasks.register_root(7).unwrap();
+        tasks.next_tid = LINUX_MAX_TID;
+
+        let last = tasks.reserve_child(8).expect("last valid Linux TID");
+        assert_eq!(last.tid, LINUX_MAX_TID);
+        assert!(tasks.rollback(last));
+        assert_eq!(tasks.reserve_child(9), None);
+
+        tasks.next_tid = 2;
+        assert_eq!(tasks.reserve_child(9), None);
+
+        tasks.reset();
+        tasks.register_root(10).unwrap();
+        assert_eq!(tasks.reserve_child(11).unwrap().tid, 2);
+    }
+
+    #[test]
+    fn out_of_range_next_tid_does_not_mutate_a_slot_and_exhausts_permanently() {
+        let mut tasks = LinuxTaskTable::<2>::new();
+        tasks.register_root(7).unwrap();
+        tasks.next_tid = LINUX_MAX_TID + 1;
+        let slots_before = tasks.tasks;
+
+        assert_eq!(tasks.reserve_child(8), None);
+        assert_eq!(tasks.tasks, slots_before);
+
+        tasks.next_tid = 2;
+        assert_eq!(tasks.reserve_child(8), None);
+        assert_eq!(tasks.tasks, slots_before);
+    }
+
+    #[test]
     fn allocator_exhaustion_is_permanent_until_reset() {
         let mut tasks = LinuxTaskTable::<2>::new();
         tasks.register_root(7).unwrap();

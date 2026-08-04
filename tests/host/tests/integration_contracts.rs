@@ -2072,6 +2072,9 @@ fn aarch64_clone_child_is_validated_before_publication() {
         .find("pub(crate) fn restore_clone_tid_destinations(")
         .expect("end of clone TID copy");
     let copy = &task[copy..copy + copy_end];
+    let tid_conversion = copy
+        .find("linux_tid_to_user_value(reservation.tid)")
+        .expect("checked clone TID conversion");
     let copy_validation = copy
         .find("linux_clone_tid_destination_valid(")
         .expect("clone TID destination revalidation");
@@ -2079,7 +2082,9 @@ fn aarch64_clone_child_is_validated_before_publication() {
     let first_raw_read = copy
         .find("core::ptr::read(destination.address as *const u32)")
         .expect("clone TID snapshot read");
+    assert!(tid_conversion < first_raw_read);
     assert!(copy_validation < first_raw_read);
+    assert!(!copy.contains("reservation.tid as u32"));
 
     let launcher = run_elf
         .find("extern \"C\" fn run_elf_launcher_entry() -> !")

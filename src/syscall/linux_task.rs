@@ -288,6 +288,7 @@ mod aarch64_clone {
                 .get_mut(reservation.slot)
                 .filter(|slot| slot.matches(reservation) && !slot.committed)
                 .ok_or(SysError::EAGAIN)?;
+            let tid = linux_tid_to_user_value(reservation.tid).ok_or(SysError::EAGAIN)?;
 
             for destination in [&slot.parent_tid, &slot.child_tid] {
                 if destination.address != 0
@@ -307,7 +308,7 @@ mod aarch64_clone {
             for destination in [&mut slot.parent_tid, &mut slot.child_tid] {
                 if destination.address != 0 {
                     unsafe {
-                        core::ptr::write(destination.address as *mut u32, reservation.tid as u32);
+                        core::ptr::write(destination.address as *mut u32, tid);
                     }
                     destination.written = true;
                 }

@@ -5,6 +5,7 @@ macro_rules! smros_linux_root_tid_body {
 }
 
 pub(crate) const LINUX_ROOT_TID: usize = smros_linux_root_tid_body!();
+pub(crate) const LINUX_MAX_TID: usize = i32::MAX as usize;
 
 pub(crate) const CLONE_VM: usize = 0x0000_0100;
 pub(crate) const CLONE_FS: usize = 0x0000_0200;
@@ -104,10 +105,19 @@ fn valid_clone_tid_pointer(pointer: usize) -> bool {
     pointer != 0 && pointer & 0x3 == 0 && pointer.checked_add(core::mem::size_of::<u32>()).is_some()
 }
 
-macro_rules! smros_linux_task_next_tid_body {
-    ($next_tid:expr) => {{
-        $next_tid.checked_add(1)
-    }};
+pub(crate) fn linux_task_tid_allocation(next_tid: usize) -> Option<(usize, Option<usize>)> {
+    if next_tid <= LINUX_ROOT_TID || next_tid > LINUX_MAX_TID {
+        return None;
+    }
+    let following_tid = (next_tid < LINUX_MAX_TID).then_some(next_tid + 1);
+    Some((next_tid, following_tid))
+}
+
+pub(crate) fn linux_tid_to_user_value(tid: usize) -> Option<u32> {
+    if !(LINUX_ROOT_TID..=LINUX_MAX_TID).contains(&tid) {
+        return None;
+    }
+    <u32 as core::convert::TryFrom<usize>>::try_from(tid).ok()
 }
 
 macro_rules! smros_linux_task_publish_transition_allowed_body {
@@ -222,16 +232,20 @@ impl<const N: usize> LinuxTaskTable<N> {
             .tasks
             .iter()
             .position(|task| task.state == LinuxTaskState::Empty)?;
-        let Some(next_tid) = smros_linux_task_next_tid_body!(self.next_tid) else {
+        let Some((tid, following_tid)) = linux_task_tid_allocation(self.next_tid) else {
             self.exhausted = true;
             return None;
         };
         let reservation = LinuxTaskReservation {
             slot,
-            tid: self.next_tid,
+            tid,
             scheduler_thread,
         };
-        self.next_tid = next_tid;
+        if let Some(next_tid) = following_tid {
+            self.next_tid = next_tid;
+        } else {
+            self.exhausted = true;
+        }
         self.tasks[slot] = LinuxTaskCore {
             tid: reservation.tid,
             tgid: LINUX_ROOT_TID,
