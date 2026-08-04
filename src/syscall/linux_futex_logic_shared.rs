@@ -347,6 +347,19 @@ impl<const N: usize> FutexQueue<N> {
         true
     }
 
+    pub(crate) fn remove_task(&mut self, tid: usize, scheduler_thread: usize) -> usize {
+        let mut removed = 0usize;
+        for slot in &mut self.waiters {
+            if slot.is_some_and(|waiter| {
+                waiter.tid == tid && waiter.scheduler_thread == scheduler_thread
+            }) {
+                *slot = None;
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     pub(crate) fn reset(&mut self) -> usize {
         let drained = self.len();
         self.waiters.fill(None);

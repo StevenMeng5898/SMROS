@@ -10,6 +10,8 @@ use crate::kernel_lowlevel::thread::{
     MAX_THREADS,
 };
 use crate::kernel_objects::object_logic;
+#[cfg(target_arch = "aarch64")]
+use crate::syscall::linux_syscall_context;
 use core::cell::UnsafeCell;
 use core::ptr;
 
@@ -916,6 +918,9 @@ impl Scheduler {
         ) else {
             return false;
         };
+
+        #[cfg(target_arch = "aarch64")]
+        linux_syscall_context::retire_owner(id.0);
 
         self.suspended_threads[id.0] = false;
         self.active_threads = next_active_threads;

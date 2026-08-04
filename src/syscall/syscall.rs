@@ -6537,6 +6537,10 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
 
 /// Linux sys_exit implementation
 pub fn sys_exit(exit_code: i32) -> SysResult {
+    if linux_task::current_is_clone_child() {
+        linux_task::exit_current(exit_code);
+    }
+
     let exit_code = syscall_logic::linux_exit_status(exit_code);
     info!("exit: code={}", exit_code);
 
@@ -6559,6 +6563,8 @@ pub fn sys_exit(exit_code: i32) -> SysResult {
 /// Linux sys_exit_group implementation
 pub fn sys_exit_group(exit_code: i32) -> SysResult {
     info!("exit_group: code={}", exit_code);
+    linux_futex::reset();
+    linux_task::reset();
     sys_exit(exit_code)
 }
 
@@ -6671,8 +6677,16 @@ pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
     }
 }
 
-pub fn sys_set_tid_address(_tidptr: usize) -> SysResult {
-    sys_gettid()
+pub fn sys_set_tid_address(tidptr: usize) -> SysResult {
+    if tidptr != 0 {
+        #[cfg(target_arch = "aarch64")]
+        if !linux_clone_tid_destination_valid(tidptr) {
+            return Err(SysError::EFAULT);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        return Err(SysError::ENOSYS);
+    }
+    linux_task::set_current_clear_child_tid(tidptr)
 }
 
 pub fn sys_set_robust_list(head: usize, len: usize) -> SysResult {

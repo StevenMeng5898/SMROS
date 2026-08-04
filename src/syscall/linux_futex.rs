@@ -251,6 +251,15 @@ pub(crate) fn interrupt_task(tid: usize, scheduler_thread: usize) -> bool {
     false
 }
 
+pub(crate) fn remove_task_waiters(tid: usize, scheduler_thread: usize) -> usize {
+    with_queue(|queue| queue.remove_task(tid, scheduler_thread))
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn wake_address(address: usize, requested: usize, bitset: u32) -> SysResult {
+    wake(address, requested, bitset)
+}
+
 pub(crate) fn reset() {
     with_queue(|queue| {
         let _ = queue.reset();

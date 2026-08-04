@@ -1743,6 +1743,120 @@ fn scheduler_reclaims_thread_stacks_only_after_a_confirmed_context_switch() {
 }
 
 #[test]
+fn linux_child_exit_clears_tid_and_uses_deferred_stack_retirement() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+    let futex = std::fs::read_to_string(repository.join("src/syscall/linux_futex.rs"))
+        .expect("read Linux futex runtime");
+    let scheduler = std::fs::read_to_string(repository.join("src/kernel_objects/scheduler.rs"))
+        .expect("read scheduler");
+    let context = std::fs::read_to_string(repository.join("src/syscall/linux_syscall_context.rs"))
+        .expect("read Linux syscall context");
+    let context_logic = std::fs::read_to_string(
+        repository.join("src/syscall/linux_syscall_context_logic_shared.rs"),
+    )
+    .expect("read Linux syscall context ownership model");
+
+    let sys_exit_start = syscall
+        .find("pub fn sys_exit(exit_code: i32)")
+        .expect("sys_exit");
+    let sys_exit = braced_body(&syscall[sys_exit_start..]);
+    let child_check = sys_exit
+        .find("linux_task::current_is_clone_child()")
+        .expect("clone-child exit check");
+    let child_exit = sys_exit
+        .find("linux_task::exit_current(exit_code)")
+        .expect("non-returning child exit");
+    let launcher_exit = sys_exit
+        .find("prepare_run_elf_return(exit_code)")
+        .expect("root launcher completion");
+    assert!(child_check < child_exit && child_exit < launcher_exit);
+
+    let set_tid_start = syscall
+        .find("pub fn sys_set_tid_address(tidptr: usize)")
+        .expect("set_tid_address");
+    let set_tid = braced_body(&syscall[set_tid_start..]);
+    assert!(set_tid.contains("tidptr != 0"));
+    assert!(set_tid.contains("linux_clone_tid_destination_valid(tidptr)"));
+    assert!(set_tid.contains("linux_task::set_current_clear_child_tid(tidptr)"));
+
+    let group_start = syscall
+        .find("pub fn sys_exit_group(exit_code: i32)")
+        .expect("exit_group");
+    let group_exit = braced_body(&syscall[group_start..]);
+    let futex_reset = group_exit
+        .find("linux_futex::reset()")
+        .expect("futex reset");
+    let task_reset = group_exit.find("linux_task::reset()").expect("task reset");
+    let shared_exit = group_exit
+        .find("sys_exit(exit_code)")
+        .expect("shared root exit");
+    assert!(futex_reset < task_reset && task_reset < shared_exit);
+
+    let exit_current_start = task
+        .find("pub(crate) fn exit_current(exit_code: i32) -> !")
+        .expect("child exit runtime");
+    let exit_current = braced_body(&task[exit_current_start..]);
+    let mask = exit_current
+        .find("mask_interrupts()")
+        .expect("interrupt mask");
+    let transition = exit_current
+        .find("exit_with_clear_child_tid")
+        .expect("one-shot task exit");
+    let remove_waiters = exit_current
+        .find("linux_futex::remove_task_waiters")
+        .expect("task futex cleanup");
+    let restore = exit_current
+        .find("restore_interrupts(interrupt_state)")
+        .expect("interrupt restore");
+    let checked_write = exit_current
+        .find("linux_clone_tid_destination_valid(clear_child_tid)")
+        .expect("checked clear-child-TID write");
+    let zero_write = exit_current
+        .find("core::ptr::write(clear_child_tid as *mut u32, 0)")
+        .expect("clear-child-TID zero write");
+    let wake = exit_current
+        .find("linux_futex::wake_address(")
+        .expect("pthread join futex wake");
+    let finish = exit_current
+        .find("finish_current_without_stack_free()")
+        .expect("deferred current stack retirement");
+    let schedule = exit_current
+        .find("scheduler::schedule()")
+        .expect("reschedule");
+    let wait = exit_current
+        .find("wait_for_interrupt()")
+        .expect("no-runnable-thread wait");
+    assert!(mask < transition && transition < remove_waiters && remove_waiters < restore);
+    assert!(restore < checked_write && checked_write < zero_write && zero_write < wake);
+    assert!(wake < finish && finish < schedule && schedule < wait);
+    assert!(exit_current.contains("let _ = exit_code;"));
+
+    assert!(futex.contains("pub(crate) fn remove_task_waiters("));
+    assert!(futex.contains("pub(crate) fn wake_address("));
+    assert!(context_logic.contains("pub(crate) fn clear_owner("));
+    assert!(context.contains("pub(crate) fn retire_owner(owner: usize)"));
+
+    let terminate_start = scheduler
+        .find("pub fn terminate_thread(")
+        .expect("scheduler termination");
+    let terminate = braced_body(&scheduler[terminate_start..]);
+    let retire_owner = terminate
+        .find("linux_syscall_context::retire_owner(id.0)")
+        .expect("syscall-frame owner retirement");
+    let terminate_current = terminate
+        .find("self.threads[id.0].state = ThreadState::Terminated")
+        .expect("current scheduler termination");
+    let stack_capture = terminate
+        .find("let stack = self.threads[id.0].stack.0;")
+        .expect("non-current stack retirement");
+    assert!(retire_owner < terminate_current && retire_owner < stack_capture);
+}
+
+#[test]
 fn scheduler_exposes_atomic_linux_task_transitions() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let scheduler = std::fs::read_to_string(repository.join("src/kernel_objects/scheduler.rs"))

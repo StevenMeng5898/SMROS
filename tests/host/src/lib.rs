@@ -562,6 +562,29 @@ mod linux_task_logic {
     }
 
     #[test]
+    fn child_exit_takes_clear_tid_once_and_clears_pending_signal_state() {
+        let mut tasks = LinuxTaskTable::<2>::new();
+        tasks.register_root(7).unwrap();
+        let child = tasks.reserve_child(8).unwrap();
+        assert!(tasks.publish(child));
+        assert!(tasks.set_clear_child_tid(child.tid, 8, 0x3000));
+        assert!(tasks.set_clear_child_tid(child.tid, 8, 0x4000));
+
+        let signal_state = tasks.signal_state_mut(child.tid, 8).unwrap();
+        signal_state.mask = 0xaa;
+        signal_state
+            .queue(LinuxPendingSignal::standard(15))
+            .unwrap();
+
+        assert_eq!(tasks.exit_with_clear_child_tid(child.tid, 8), Some(0x4000));
+        assert_eq!(tasks.signal_states[child.slot].mask, 0);
+        assert_eq!(tasks.signal_states[child.slot].pending_mask(), 0);
+        assert_eq!(tasks.clear_child_tids[child.slot], 0);
+        assert_eq!(tasks.exit_with_clear_child_tid(child.tid, 8), None);
+        assert_eq!(tasks.exit_with_clear_child_tid(child.tid, 99), None);
+    }
+
+    #[test]
     fn capacity_does_not_consume_a_tid_and_reset_starts_a_new_launch() {
         let mut tasks = LinuxTaskTable::<2>::new();
         tasks.register_root(7).unwrap();
@@ -1213,6 +1236,18 @@ mod linux_syscall_context_logic {
         assert_eq!(owners.current(1), None);
         assert_eq!(owners.current(2), None);
     }
+
+    #[test]
+    fn syscall_frame_owner_is_retired_before_scheduler_slot_reuse() {
+        let owners = LinuxSyscallFrameOwners::<4>::new();
+        assert!(owners.install(2, 0x1000, 0xaaaa, 0x1111));
+
+        assert!(owners.clear_owner(2));
+        assert_eq!(owners.current(2), None);
+        assert!(owners.install(2, 0x2000, 0xbbbb, 0x2222));
+        assert_eq!(owners.current(2).map(|frame| frame.frame), Some(0x2000));
+        assert!(!owners.clear_owner(3), "an unused owner is already retired");
+    }
 }
 
 mod linux_runtime_lock_logic {
@@ -1373,6 +1408,28 @@ mod linux_futex_logic {
         assert_eq!(
             queue.take_outcome(2, 8),
             Some(FutexWaitOutcome::Interrupted)
+        );
+    }
+
+    #[test]
+    fn futex_task_removal_drains_every_registration_and_preserves_join_waiters() {
+        let mut queue = FutexQueue::<4>::new();
+        queue.waiters[0] = Some(waiter(2, 8, 0x1000, FUTEX_BITSET_MATCH_ANY, None));
+        queue.waiters[1] = Some(waiter(2, 8, 0x2000, FUTEX_BITSET_MATCH_ANY, None));
+        queue.waiters[2] = Some(waiter(1, 7, 0x3000, FUTEX_BITSET_MATCH_ANY, None));
+        queue.waiters[3] = Some(waiter(3, 9, 0x3000, FUTEX_BITSET_MATCH_ANY, None));
+
+        assert_eq!(queue.remove_task(2, 8), 2);
+        assert_eq!(queue.remove_task(2, 8), 0);
+        assert_eq!(queue.len(), 2);
+        assert_eq!(
+            queue.wake(0x3000, 1, FUTEX_BITSET_MATCH_ANY),
+            [Some((1, 7)), None, None, None]
+        );
+        assert_eq!(
+            queue.len(),
+            2,
+            "wake outcome remains registered for collection"
         );
     }
 

@@ -92,6 +92,35 @@ impl<const N: usize> LinuxSyscallFrameOwners<N> {
         true
     }
 
+    pub(crate) fn clear_owner(&self, owner: usize) -> bool {
+        if owner == 0 {
+            return false;
+        }
+        let Some(frame_slot) = self.frames.get(owner) else {
+            return false;
+        };
+        loop {
+            let frame = frame_slot.load(Ordering::Acquire);
+            if frame == EMPTY_FRAME {
+                return false;
+            }
+            if frame == INSTALLING_FRAME {
+                core::hint::spin_loop();
+                continue;
+            }
+            if frame_slot
+                .compare_exchange(frame, INSTALLING_FRAME, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                continue;
+            }
+            self.return_pcs[owner].store(0, Ordering::Relaxed);
+            self.pstates[owner].store(0, Ordering::Relaxed);
+            frame_slot.store(EMPTY_FRAME, Ordering::Release);
+            return true;
+        }
+    }
+
     pub(crate) fn clear_all(&self) {
         for owner in 1..N {
             let frame_slot = &self.frames[owner];

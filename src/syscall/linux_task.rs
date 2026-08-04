@@ -85,6 +85,82 @@ pub(crate) fn current_task() -> Result<LinuxTaskCore, SysError> {
     })
 }
 
+pub(crate) fn current_is_clone_child() -> bool {
+    current_task()
+        .map(|task| task.tid != task.tgid)
+        .unwrap_or(false)
+}
+
+pub(crate) fn set_current_clear_child_tid(address: usize) -> Result<usize, SysError> {
+    with_runtime(|runtime| {
+        let scheduler_thread = scheduler::scheduler().current();
+        let task = runtime
+            .tasks
+            .by_scheduler(scheduler_thread.0)
+            .ok_or(SysError::ESRCH)?;
+        if !runtime
+            .tasks
+            .set_clear_child_tid(task.tid, scheduler_thread.0, address)
+        {
+            return Err(SysError::ESRCH);
+        }
+        Ok(task.tid)
+    })
+}
+
+pub(crate) fn exit_current(exit_code: i32) -> ! {
+    let _ = exit_code;
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let scheduler_thread = scheduler::scheduler().current();
+    let exited = {
+        let mut runtime = LINUX_TASK_RUNTIME.lock();
+        let task = runtime.tasks.by_scheduler(scheduler_thread.0);
+        task.and_then(|task| {
+            let slot = runtime
+                .tasks
+                .task_slot_index(task.tid, scheduler_thread.0)?;
+            runtime
+                .tasks
+                .exit_with_clear_child_tid(task.tid, scheduler_thread.0)
+                .map(|clear_child_tid| (task, slot, clear_child_tid))
+        })
+    };
+
+    if let Some((task, _slot, _)) = exited {
+        let _ = super::linux_futex::remove_task_waiters(task.tid, scheduler_thread.0);
+        let mut runtime = LINUX_TASK_RUNTIME.lock();
+        let _ = runtime.tasks.retire(task.tid, scheduler_thread.0);
+        #[cfg(target_arch = "aarch64")]
+        if let Some(clone_slot) = runtime.clone_slots.get_mut(_slot) {
+            *clone_slot = aarch64_clone::LinuxCloneSlot::EMPTY;
+        }
+    }
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+
+    #[cfg(target_arch = "aarch64")]
+    if let Some((_, _, clear_child_tid)) = exited {
+        if clear_child_tid != 0
+            && crate::syscall::syscall::linux_clone_tid_destination_valid(clear_child_tid)
+        {
+            unsafe {
+                core::ptr::write(clear_child_tid as *mut u32, 0);
+            }
+            let _ = super::linux_futex::wake_address(
+                clear_child_tid,
+                1,
+                super::linux_futex::FUTEX_BITSET_MATCH_ANY,
+            );
+        }
+    }
+
+    scheduler::scheduler().finish_current_without_stack_free();
+    scheduler::schedule();
+    loop {
+        crate::kernel_lowlevel::cpu::wait_for_interrupt();
+        scheduler::schedule();
+    }
+}
+
 pub(crate) fn lookup_tid(tid: usize) -> Option<LinuxTaskCore> {
     with_runtime(|runtime| runtime.tasks.by_tid(tid))
 }
@@ -441,6 +517,20 @@ mod aarch64_clone {
                 .map(|thread| thread.state)
                 == Some(ThreadState::Blocked);
             if !valid_slot || !suspended || !runtime.tasks.publish(reservation) {
+                return Err(SysError::EAGAIN);
+            }
+            let clear_child_tid = runtime.clone_slots[reservation.slot].clear_child_tid;
+            if !runtime.tasks.set_clear_child_tid(
+                reservation.tid,
+                reservation.scheduler_thread,
+                clear_child_tid,
+            ) {
+                let _ = runtime
+                    .tasks
+                    .exit(reservation.tid, reservation.scheduler_thread);
+                let _ = runtime
+                    .tasks
+                    .retire(reservation.tid, reservation.scheduler_thread);
                 return Err(SysError::EAGAIN);
             }
             if !scheduler::scheduler().publish_suspended_thread(scheduler_id) {

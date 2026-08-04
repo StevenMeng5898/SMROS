@@ -470,6 +470,7 @@ pub(crate) enum LinuxSignalRouteError {
 pub(crate) struct LinuxTaskTable<const N: usize> {
     tasks: [LinuxTaskCore; N],
     signal_states: [LinuxTaskSignalState; N],
+    clear_child_tids: [usize; N],
     next_tid: usize,
     exhausted: bool,
 }
@@ -479,6 +480,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         Self {
             tasks: [LinuxTaskCore::EMPTY; N],
             signal_states: [LinuxTaskSignalState::new(); N],
+            clear_child_tids: [0; N],
             next_tid: LINUX_ROOT_TID + 1,
             exhausted: false,
         }
@@ -510,6 +512,7 @@ impl<const N: usize> LinuxTaskTable<N> {
             block_reason: LinuxBlockReason::None,
         };
         self.signal_states[slot] = LinuxTaskSignalState::new();
+        self.clear_child_tids[slot] = 0;
         Ok(LINUX_ROOT_TID)
     }
 
@@ -546,6 +549,7 @@ impl<const N: usize> LinuxTaskTable<N> {
             block_reason: LinuxBlockReason::None,
         };
         self.signal_states[slot] = LinuxTaskSignalState::new();
+        self.clear_child_tids[slot] = 0;
         Some(reservation)
     }
 
@@ -607,6 +611,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         }
         *task = LinuxTaskCore::EMPTY;
         self.signal_states[reservation.slot] = LinuxTaskSignalState::new();
+        self.clear_child_tids[reservation.slot] = 0;
         true
     }
 
@@ -734,16 +739,35 @@ impl<const N: usize> LinuxTaskTable<N> {
         true
     }
 
-    pub(crate) fn exit(&mut self, tid: usize, scheduler_thread: usize) -> bool {
-        let Some(task) = self.task_for_transition(tid, scheduler_thread) else {
+    pub(crate) fn set_clear_child_tid(
+        &mut self,
+        tid: usize,
+        scheduler_thread: usize,
+        address: usize,
+    ) -> bool {
+        let Some(slot) = self.task_slot(tid, scheduler_thread) else {
             return false;
         };
-        if task.state != LinuxTaskState::Runnable && task.state != LinuxTaskState::Blocked {
-            return false;
-        }
+        self.clear_child_tids[slot] = address;
+        true
+    }
+
+    pub(crate) fn exit_with_clear_child_tid(
+        &mut self,
+        tid: usize,
+        scheduler_thread: usize,
+    ) -> Option<usize> {
+        let slot = self.task_slot(tid, scheduler_thread)?;
+        let task = &mut self.tasks[slot];
         task.state = LinuxTaskState::Exited;
         task.block_reason = LinuxBlockReason::None;
-        true
+        self.signal_states[slot] = LinuxTaskSignalState::new();
+        Some(core::mem::replace(&mut self.clear_child_tids[slot], 0))
+    }
+
+    pub(crate) fn exit(&mut self, tid: usize, scheduler_thread: usize) -> bool {
+        self.exit_with_clear_child_tid(tid, scheduler_thread)
+            .is_some()
     }
 
     pub(crate) fn retire(&mut self, tid: usize, scheduler_thread: usize) -> bool {
@@ -755,12 +779,14 @@ impl<const N: usize> LinuxTaskTable<N> {
         }
         self.tasks[slot] = LinuxTaskCore::EMPTY;
         self.signal_states[slot] = LinuxTaskSignalState::new();
+        self.clear_child_tids[slot] = 0;
         true
     }
 
     pub(crate) fn reset(&mut self) {
         self.tasks.fill(LinuxTaskCore::EMPTY);
         self.signal_states.fill(LinuxTaskSignalState::new());
+        self.clear_child_tids.fill(0);
         self.next_tid = LINUX_ROOT_TID + 1;
         self.exhausted = false;
     }

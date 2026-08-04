@@ -57,6 +57,10 @@ pub(crate) fn current() -> Option<LinuxSyscallFrameRef> {
     })
 }
 
+pub(crate) fn retire_owner(owner: usize) {
+    let _ = FRAME_OWNERS.clear_owner(owner);
+}
+
 pub(crate) fn reset() {
     FRAME_OWNERS.clear_all();
 }
