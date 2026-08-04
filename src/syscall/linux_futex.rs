@@ -1,14 +1,14 @@
-use core::cell::UnsafeCell;
-
 use crate::kernel_lowlevel::thread;
 use crate::kernel_objects::scheduler;
 
 use super::linux_task;
 use super::linux_task::LinuxBlockReason;
+#[cfg(target_arch = "aarch64")]
+use super::syscall::linux_user_range_readable;
 use super::syscall::{SysError, SysResult};
-use super::syscall_logic;
 
 include!("linux_futex_logic_shared.rs");
+include!("linux_runtime_lock_shared.rs");
 
 const LINUX_FUTEX_LIMIT: usize = thread::MAX_THREADS;
 const LINUX_FUTEX_TICK_NANOS: u64 = 10_000_000;
@@ -20,23 +20,14 @@ struct LinuxFutexTimespec {
     nanoseconds: i64,
 }
 
-struct LinuxFutexRuntimeCell(UnsafeCell<FutexQueue<LINUX_FUTEX_LIMIT>>);
-
-// SAFETY: AArch64 Linux tasks and their futex queue are confined to CPU0.
-// Every access masks local interrupts before borrowing the queue.
-unsafe impl Sync for LinuxFutexRuntimeCell {}
-
-static LINUX_FUTEX_RUNTIME: LinuxFutexRuntimeCell =
-    LinuxFutexRuntimeCell(UnsafeCell::new(FutexQueue::new()));
-
-fn queue_mut() -> &'static mut FutexQueue<LINUX_FUTEX_LIMIT> {
-    // SAFETY: callers hold the CPU0 interrupt critical section described above.
-    unsafe { &mut *LINUX_FUTEX_RUNTIME.0.get() }
-}
+static LINUX_FUTEX_RUNTIME: LinuxRuntimeLock<FutexQueue<LINUX_FUTEX_LIMIT>> =
+    LinuxRuntimeLock::new(FutexQueue::new());
 
 fn with_queue<R>(operation: impl FnOnce(&mut FutexQueue<LINUX_FUTEX_LIMIT>) -> R) -> R {
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
-    let result = operation(queue_mut());
+    let mut queue = LINUX_FUTEX_RUNTIME.lock();
+    let result = operation(&mut queue);
+    drop(queue);
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     result
 }
@@ -61,8 +52,11 @@ pub(crate) fn sys_futex(
             return Err(SysError::EINVAL);
         }
         let decoded = decode_futex_op(op).ok_or(SysError::EINVAL)?;
+        if uaddr % core::mem::align_of::<u32>() != 0 {
+            return Err(SysError::EINVAL);
+        }
         if !futex_address_valid(uaddr)
-            || !syscall_logic::user_buffer_valid(uaddr, core::mem::size_of::<u32>())
+            || !linux_user_range_readable(uaddr, core::mem::size_of::<u32>())
         {
             return Err(SysError::EFAULT);
         }
@@ -103,21 +97,29 @@ fn wait(
     }
 
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    if !linux_user_range_readable(uaddr, core::mem::size_of::<u32>()) {
+        crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+        return Err(SysError::EFAULT);
+    }
     let observed = unsafe { core::ptr::read(uaddr as *const u32) };
     if !futex_wait_value_matches(observed, expected) {
         crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
         return Err(SysError::EAGAIN);
     }
 
-    let now = crate::kernel_lowlevel::timer::get_tick_count();
-    let deadline = match read_deadline(timeout_pointer, now, command, realtime) {
+    let now_monotonic = crate::kernel_lowlevel::timer::get_tick_count();
+    let now_realtime = now_monotonic;
+    let deadline = match read_deadline(timeout_pointer, now_monotonic, command, realtime) {
         Ok(deadline) => deadline,
         Err(error) => {
             crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
             return Err(error);
         }
     };
-    if deadline.is_some_and(|deadline| deadline.ticks <= now) {
+    if deadline.is_some_and(|deadline| match deadline.clock {
+        FutexClock::Monotonic => deadline.ticks <= now_monotonic,
+        FutexClock::Realtime => deadline.ticks <= now_realtime,
+    }) {
         crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
         return Err(SysError::ETIMEDOUT);
     }
@@ -139,23 +141,23 @@ fn wait(
         sequence: 0,
         outcome: FutexWaitOutcome::Waiting,
     };
-    if queue_mut().push(waiter).is_err() {
+    if with_queue(|queue| queue.push(waiter)).is_err() {
         crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
         return Err(SysError::EAGAIN);
     }
     match linux_task::block_current(LinuxBlockReason::Futex) {
         Ok(task) if task.tid == tid && task.scheduler_thread == scheduler_thread.0 => {}
         Ok(_) | Err(_) => {
-            let _ = queue_mut().remove(tid, scheduler_thread.0);
+            let _ = with_queue(|queue| queue.remove(tid, scheduler_thread.0));
             crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
             return Err(SysError::EAGAIN);
         }
     }
 
     scheduler::schedule();
-    let outcome = queue_mut().take_outcome(tid, scheduler_thread.0);
+    let outcome = with_queue(|queue| queue.take_outcome(tid, scheduler_thread.0));
     if outcome.is_none() {
-        let _ = queue_mut().remove(tid, scheduler_thread.0);
+        let _ = with_queue(|queue| queue.remove(tid, scheduler_thread.0));
         if linux_task::wake_blocked(tid, scheduler_thread.0, LinuxBlockReason::Futex) {
             scheduler::schedule();
         }
@@ -181,13 +183,14 @@ fn read_deadline(
     if timeout_pointer == 0 {
         return Ok(None);
     }
-    if !syscall_logic::user_buffer_valid(
-        timeout_pointer,
-        core::mem::size_of::<LinuxFutexTimespec>(),
-    ) {
+    let timeout_size = core::mem::size_of::<LinuxFutexTimespec>();
+    if timeout_pointer.checked_add(timeout_size).is_none()
+        || !linux_user_range_readable(timeout_pointer, timeout_size)
+    {
         return Err(SysError::EFAULT);
     }
-    let timeout = unsafe { core::ptr::read(timeout_pointer as *const LinuxFutexTimespec) };
+    let timeout =
+        unsafe { core::ptr::read_unaligned(timeout_pointer as *const LinuxFutexTimespec) };
     futex_deadline_from_timeout(
         command,
         realtime,
@@ -209,13 +212,14 @@ fn wake(address: usize, requested: usize, bitset: u32) -> SysResult {
     let requested = core::cmp::min(requested, LINUX_FUTEX_LIMIT);
     let mut woken = 0usize;
     while woken < requested {
-        let Some((tid, scheduler_thread)) = queue_mut().wake(address, 1, bitset)[0] else {
+        let identity = with_queue(|queue| queue.wake(address, 1, bitset)[0]);
+        let Some((tid, scheduler_thread)) = identity else {
             break;
         };
         if linux_task::wake_blocked(tid, scheduler_thread, LinuxBlockReason::Futex) {
             woken += 1;
         } else {
-            let _ = queue_mut().take_outcome(tid, scheduler_thread);
+            let _ = with_queue(|queue| queue.take_outcome(tid, scheduler_thread));
         }
     }
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
@@ -225,18 +229,13 @@ fn wake(address: usize, requested: usize, bitset: u32) -> SysResult {
 pub(crate) fn on_timer_tick(now_monotonic: u64, now_realtime: u64) {
     #[cfg(target_arch = "aarch64")]
     if crate::kernel_lowlevel::smp::current_cpu_id() == 0 {
-        with_queue(|queue| {
-            for identity in queue
-                .expire(now_monotonic, now_realtime)
-                .into_iter()
-                .flatten()
-            {
-                let (tid, scheduler_thread) = identity;
-                if !linux_task::wake_blocked(tid, scheduler_thread, LinuxBlockReason::Futex) {
-                    let _ = queue.take_outcome(tid, scheduler_thread);
-                }
+        let expired = with_queue(|queue| queue.expire(now_monotonic, now_realtime));
+        for identity in expired.into_iter().flatten() {
+            let (tid, scheduler_thread) = identity;
+            if !linux_task::wake_blocked(tid, scheduler_thread, LinuxBlockReason::Futex) {
+                let _ = with_queue(|queue| queue.take_outcome(tid, scheduler_thread));
             }
-        });
+        }
     }
 }
 

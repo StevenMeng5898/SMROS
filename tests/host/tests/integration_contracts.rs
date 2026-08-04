@@ -2142,6 +2142,8 @@ fn linux_futex_waits_block_and_wake_scheduler_tasks() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let module = std::fs::read_to_string(repository.join("src/syscall/mod.rs"))
         .expect("read syscall module declarations");
+    let address = std::fs::read_to_string(repository.join("src/syscall/address_logic_shared.rs"))
+        .expect("read shared address logic");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
         .expect("read syscall implementation");
     let futex = std::fs::read_to_string(repository.join("src/syscall/linux_futex.rs"))
@@ -2154,47 +2156,109 @@ fn linux_futex_waits_block_and_wake_scheduler_tasks() {
     assert!(module.contains("pub(crate) mod linux_futex;"));
     assert!(task.contains("pub(crate) fn block_current("));
     assert!(task.contains("pub(crate) fn wake_blocked("));
+    assert!(address.contains("macro_rules! smros_linux_user_range_readable_body"));
+    let readable_start = syscall
+        .find("pub(crate) fn linux_user_range_readable(")
+        .expect("Linux readable-range helper");
+    let readable = braced_body(&syscall[readable_start..]);
+    assert!(readable.contains("mapping.prot & MmapProt::READ.bits()"));
+    assert!(readable.contains("mapping.prot & MmapProt::WRITE.bits()"));
+    assert!(readable.contains("state.brk.current - state.brk.start"));
+    assert!(readable.contains("linux_initial_stack"));
+    assert!(readable.contains("shared_linux_user_range_readable("));
     assert!(futex.contains("FutexQueue<"));
+    assert!(futex.contains("include!(\"linux_runtime_lock_shared.rs\");"));
+    assert!(futex.contains("LinuxRuntimeLock<FutexQueue<LINUX_FUTEX_LIMIT>>"));
+    assert!(!futex.contains("LinuxFutexRuntimeCell"));
+    let with_queue_start = futex
+        .find("fn with_queue<")
+        .expect("locked futex queue helper");
+    let with_queue = braced_body(&futex[with_queue_start..]);
+    let queue_lock = with_queue
+        .find("LINUX_FUTEX_RUNTIME.lock()")
+        .expect("futex queue lock");
+    let queue_drop = with_queue.find("drop(queue)").expect("futex queue unlock");
+    let interrupt_restore = with_queue
+        .find("restore_interrupts(interrupt_state)")
+        .expect("interrupt restore");
+    assert!(queue_lock < queue_drop && queue_drop < interrupt_restore);
+    assert!(!with_queue.contains("scheduler::schedule()"));
+    assert!(!with_queue.contains("linux_task::wake_blocked("));
     assert!(futex.contains("core::ptr::read(uaddr as *const u32)"));
     assert!(futex.contains("linux_task::block_current(LinuxBlockReason::Futex)"));
     assert!(futex.contains("scheduler::schedule()"));
     assert!(futex.contains("linux_task::wake_blocked("));
 
+    let futex_entry_start = futex
+        .find("pub(crate) fn sys_futex(")
+        .expect("Linux futex entry");
+    let futex_entry = braced_body(&futex[futex_entry_start..]);
+    assert!(futex_entry.contains("linux_user_range_readable("));
+
     let wait_start = futex.find("fn wait(").expect("Linux futex wait helper");
-    let wait_end = futex[wait_start..]
-        .find("fn read_deadline(")
-        .expect("end of Linux futex wait helper");
-    let wait = &futex[wait_start..wait_start + wait_end];
+    let wait = braced_body(&futex[wait_start..]);
+    let interrupt_mask = wait.find("mask_interrupts()").expect("interrupt mask");
+    let address_revalidation = wait
+        .find("linux_user_range_readable(uaddr")
+        .expect("futex address revalidation");
+    let value_read = wait
+        .find("core::ptr::read(uaddr as *const u32)")
+        .expect("futex value read");
+    assert!(interrupt_mask < address_revalidation && address_revalidation < value_read);
     let mismatch = wait
         .find("if !futex_wait_value_matches(observed, expected)")
         .expect("futex compare mismatch branch");
-    let deadline_read = wait[mismatch..]
-        .find("let now =")
-        .expect("end of futex compare mismatch branch");
-    assert!(wait[mismatch..mismatch + deadline_read].contains("Err(SysError::EAGAIN)"));
+    let mismatch = braced_body(&wait[mismatch..]);
+    assert!(mismatch.contains("Err(SysError::EAGAIN)"));
+    assert!(!wait.contains("LINUX_FUTEX_RUNTIME.lock()"));
     let schedule = wait
         .find("scheduler::schedule();")
         .expect("wait schedules after blocking");
     let after_schedule = &wait[schedule..];
-    assert!(after_schedule.contains("queue_mut().remove(tid, scheduler_thread.0)"));
+    assert!(after_schedule.contains("with_queue(|queue|"));
+    assert!(after_schedule.contains("queue.remove(tid, scheduler_thread.0)"));
     assert!(after_schedule.contains("linux_task::wake_blocked("));
     assert!(wait.contains("Some(FutexWaitOutcome::Woken) => Ok(0)"));
     assert!(wait.contains("Some(FutexWaitOutcome::TimedOut) => Err(SysError::ETIMEDOUT)"));
     assert!(wait.contains("Some(FutexWaitOutcome::Interrupted) => Err(SysError::EINTR)"));
+    assert!(wait.contains("match deadline.clock"));
+
+    let deadline_start = futex
+        .find("fn read_deadline(")
+        .expect("Linux futex deadline reader");
+    let deadline = braced_body(&futex[deadline_start..]);
+    let timeout_revalidation = deadline
+        .find("linux_user_range_readable(timeout_pointer")
+        .expect("timeout range revalidation");
+    let timeout_read = deadline
+        .find("core::ptr::read_unaligned(")
+        .expect("unaligned timeout read");
+    assert!(timeout_revalidation < timeout_read);
+
+    for helper in ["fn wake(", "pub(crate) fn on_timer_tick("] {
+        let start = futex.find(helper).expect("futex wake helper");
+        let body = braced_body(&futex[start..]);
+        let queue_operation = body.find("with_queue(|queue|").expect("queue operation");
+        let wake_task = body
+            .find("linux_task::wake_blocked(")
+            .expect("task wake operation");
+        let queue_statement_end = body[queue_operation..]
+            .find(";\n")
+            .expect("completed queue operation")
+            + queue_operation;
+        assert!(queue_operation < queue_statement_end && queue_statement_end < wake_task);
+    }
 
     let futex_syscall = syscall
         .find("pub fn sys_futex(")
         .expect("Linux futex syscall");
-    let futex_syscall_end = syscall[futex_syscall..]
-        .find("fn linux_iov_write_compat(")
-        .expect("end of Linux futex syscall");
-    let futex_syscall = &syscall[futex_syscall..futex_syscall + futex_syscall_end];
+    let futex_syscall = braced_body(&syscall[futex_syscall..]);
     assert!(futex_syscall.contains("linux_futex::sys_futex("));
 
     let reset = syscall
         .find("pub fn reset_linux_process_state()")
         .expect("Linux process reset");
-    let reset = &syscall[reset..];
+    let reset = braced_body(&syscall[reset..]);
     let futex_reset = reset.find("linux_futex::reset()").expect("futex reset");
     let task_reset = reset.find("linux_task::reset()").expect("task reset");
     assert!(futex_reset < task_reset);
@@ -2202,13 +2266,11 @@ fn linux_futex_waits_block_and_wake_scheduler_tasks() {
     let timer_start = main
         .find("extern \"C\" fn timer_interrupt_handler()")
         .expect("timer interrupt handler");
-    let timer_end = main[timer_start..]
-        .find("extern \"C\" fn check_preemption()")
-        .expect("end of timer handler");
-    let timer = &main[timer_start..timer_start + timer_end];
+    let timer = braced_body(&main[timer_start..]);
     assert!(timer.contains("if current_cpu_id() == 0"));
+    assert!(!timer.contains("let scheduler ="));
     let scheduler_tick = timer
-        .find("scheduler.on_timer_tick()")
+        .find("scheduler().on_timer_tick()")
         .expect("scheduler tick accounting");
     let futex_tick = timer
         .find("linux_futex::on_timer_tick(")

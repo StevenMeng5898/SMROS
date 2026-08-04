@@ -118,11 +118,13 @@ pub(crate) fn futex_relative_deadline(
     nanoseconds: i64,
     tick_nanoseconds: u64,
 ) -> Option<u64> {
-    now.checked_add(futex_timespec_to_ticks_ceil(
-        seconds,
-        nanoseconds,
-        tick_nanoseconds,
-    )?)
+    let duration_ticks = futex_timespec_to_ticks_ceil(seconds, nanoseconds, tick_nanoseconds)?;
+    let phase_guard = if seconds == 0 && nanoseconds == 0 {
+        0
+    } else {
+        1
+    };
+    now.checked_add(duration_ticks)?.checked_add(phase_guard)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

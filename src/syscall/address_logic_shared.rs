@@ -68,3 +68,28 @@ macro_rules! smros_linux_user_range_writable_body {
         }
     }};
 }
+
+macro_rules! smros_linux_user_range_readable_body {
+    ($addr:expr, $len:expr, $ranges:expr) => {{
+        let address = $addr;
+        let length = $len;
+        if length == 0 {
+            false
+        } else {
+            match smros_checked_end_body!(address, length) {
+                Some(end) => {
+                    ($ranges)
+                        .into_iter()
+                        .any(|(range_start, range_len, readable, writable)| {
+                            (readable || writable)
+                                && match smros_checked_end_body!(range_start, range_len) {
+                                    Some(range_end) => address >= range_start && end <= range_end,
+                                    None => false,
+                                }
+                        })
+                }
+                None => false,
+            }
+        }
+    }};
+}

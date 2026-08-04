@@ -174,6 +174,58 @@ mod syscall_address_logic {
             active_user_ranges
         ));
     }
+
+    #[test]
+    fn readable_user_range_accepts_read_or_write_permission() {
+        let mappings = [
+            (0x1000usize, 0x1000usize, true, true),
+            (0x3000usize, 0x1000usize, true, false),
+            (0x5000usize, 0x1000usize, false, true),
+            (0x7000usize, 0x1000usize, false, false),
+        ];
+
+        assert!(smros_linux_user_range_readable_body!(
+            0x1800usize,
+            core::mem::size_of::<u32>(),
+            mappings
+        ));
+        assert!(smros_linux_user_range_readable_body!(
+            0x3800usize,
+            core::mem::size_of::<u32>(),
+            mappings
+        ));
+        assert!(smros_linux_user_range_readable_body!(
+            0x5800usize,
+            core::mem::size_of::<u32>(),
+            mappings
+        ));
+        assert!(!smros_linux_user_range_readable_body!(
+            0x7800usize,
+            core::mem::size_of::<u32>(),
+            mappings
+        ));
+    }
+
+    #[test]
+    fn readable_user_range_rejects_gaps_end_crossing_and_overflow() {
+        let mappings = [(0x1000usize, 0x1000usize, true, false)];
+
+        assert!(!smros_linux_user_range_readable_body!(
+            0x2800usize,
+            core::mem::size_of::<u32>(),
+            mappings
+        ));
+        assert!(!smros_linux_user_range_readable_body!(
+            0x1ffeusize,
+            core::mem::size_of::<u32>(),
+            mappings
+        ));
+        assert!(!smros_linux_user_range_readable_body!(
+            usize::MAX - 1,
+            core::mem::size_of::<u32>(),
+            mappings
+        ));
+    }
 }
 
 mod syscall_logic {
@@ -887,7 +939,7 @@ mod linux_futex_logic {
                 tick_nanoseconds,
             ),
             Some(FutexDeadline {
-                ticks: 102,
+                ticks: 103,
                 clock: FutexClock::Monotonic,
             })
         );

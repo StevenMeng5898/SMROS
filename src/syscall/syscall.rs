@@ -42,11 +42,14 @@ use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(target_arch = "aarch64")]
-use super::address_logic::linux_user_range_writable as shared_linux_user_range_writable;
 use super::address_logic::{
     checked_end, fixed_linux_mmap_request_ok as shared_fixed_linux_mmap_request_ok,
     page_aligned as shared_page_aligned, range_overlaps, range_within_window,
+};
+#[cfg(target_arch = "aarch64")]
+use super::address_logic::{
+    linux_user_range_readable as shared_linux_user_range_readable,
+    linux_user_range_writable as shared_linux_user_range_writable,
 };
 use super::linux_futex;
 #[cfg(target_arch = "aarch64")]
@@ -6399,6 +6402,30 @@ fn linux_user_range_writable(address: usize, len: usize) -> bool {
         .map(|(start, range_len)| (start, range_len, true));
 
     shared_linux_user_range_writable(address, len, linux_mappings.chain(brk).chain(initial_stack))
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn linux_user_range_readable(address: usize, len: usize) -> bool {
+    let state = memory_state();
+    let linux_mappings = state.linux_mappings.iter().map(|mapping| {
+        (
+            mapping.addr,
+            mapping.len,
+            mapping.prot & MmapProt::READ.bits() != 0,
+            mapping.prot & MmapProt::WRITE.bits() != 0,
+        )
+    });
+    let brk = (state.brk.current > state.brk.start).then_some((
+        state.brk.start,
+        state.brk.current - state.brk.start,
+        true,
+        true,
+    ));
+    let initial_stack = state
+        .linux_initial_stack
+        .map(|(start, range_len)| (start, range_len, true, true));
+
+    shared_linux_user_range_readable(address, len, linux_mappings.chain(brk).chain(initial_stack))
 }
 
 pub fn sys_clone3(_args: usize, _size: usize) -> SysResult {

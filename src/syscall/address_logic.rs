@@ -33,3 +33,11 @@ pub(crate) fn linux_user_range_writable(
 ) -> bool {
     smros_linux_user_range_writable_body!(addr, len, ranges)
 }
+
+pub(crate) fn linux_user_range_readable(
+    addr: usize,
+    len: usize,
+    ranges: impl IntoIterator<Item = (usize, usize, bool, bool)>,
+) -> bool {
+    smros_linux_user_range_readable_body!(addr, len, ranges)
+}
