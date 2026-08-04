@@ -960,6 +960,15 @@ mod aarch64_context_logic {
         assert_eq!(offset_of!(Aarch64ExceptionFrame, fpsr), 0x308);
         assert_eq!(size_of::<Aarch64ExceptionFrame>(), 0x310);
 
+        assert_eq!(offset_of!(CpuContext, x19), 0x098);
+        assert_eq!(offset_of!(CpuContext, x21), 0x0a8);
+        assert_eq!(offset_of!(CpuContext, x23), 0x0b8);
+        assert_eq!(offset_of!(CpuContext, x25), 0x0c8);
+        assert_eq!(offset_of!(CpuContext, x27), 0x0d8);
+        assert_eq!(offset_of!(CpuContext, fp), 0x0e8);
+        assert_eq!(offset_of!(CpuContext, lr), 0x0f0);
+        assert_eq!(offset_of!(CpuContext, sp), 0x0f8);
+        assert_eq!(offset_of!(CpuContext, pc), 0x100);
         assert_eq!(offset_of!(CpuContext, sp_el0), 0x110);
         assert_eq!(offset_of!(CpuContext, elr_el1), 0x118);
         assert_eq!(offset_of!(CpuContext, spsr_el1), 0x120);

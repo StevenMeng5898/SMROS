@@ -1793,6 +1793,10 @@ fn aarch64_el0_context_abi_is_complete() {
     let switch =
         std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/context_switch.S"))
             .expect("read AArch64 context switch");
+    let thread = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/thread.rs"))
+        .expect("read AArch64 thread layout");
+
+    assert!(thread.contains("assert!(core::mem::offset_of!(ThreadControlBlock, context) == 0x10)"));
 
     for (handler, next) in [
         ("irq_handler_sp:", "// IRQ Handler (Current EL with SP0)"),
@@ -1861,6 +1865,20 @@ fn aarch64_el0_context_abi_is_complete() {
     ] {
         assert!(switch.contains(instruction), "missing {instruction}");
     }
+    for instruction in [
+        "msr     sp_el0, x17",
+        "msr     elr_el1, x17",
+        "msr     spsr_el1, x17",
+        "msr     tpidr_el0, x17",
+        "msr     fpcr, x17",
+        "msr     fpsr, x17",
+    ] {
+        assert_eq!(
+            switch.matches(instruction).count(),
+            2,
+            "both context-switch entry paths must contain {instruction}"
+        );
+    }
 
     for pair in 0..16 {
         let first = pair * 2;
@@ -1873,6 +1891,51 @@ fn aarch64_el0_context_abi_is_complete() {
             2,
             "both context-switch entry paths must contain {restore}"
         );
+    }
+}
+
+#[test]
+fn aarch64_context_switch_preserves_irq_mask_until_the_resumed_owner_restores_it() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let switch =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/context_switch.S"))
+            .expect("read AArch64 context switch");
+    let scheduler = std::fs::read_to_string(repository.join("src/kernel_objects/scheduler.rs"))
+        .expect("read scheduler");
+
+    let switch_start = switch
+        .find("context_switch_start:")
+        .expect("first-context entry");
+    let resumed_switch = &switch[..switch_start];
+    let first_switch = &switch[switch_start..];
+    assert!(
+        !resumed_switch.contains("bic     x17, x17, #0x80"),
+        "a resumed context must retain the scheduler's IRQ mask"
+    );
+    assert!(
+        first_switch.contains("bic     x17, x17, #0x80"),
+        "the first context still needs to enable IRQs explicitly"
+    );
+
+    for (entry, next_entry) in [
+        ("pub fn schedule()", "fn current_logical_cpu("),
+        (
+            "pub fn schedule_on_cpu(",
+            "pub fn start_first_thread_for_cpu(",
+        ),
+    ] {
+        let start = scheduler.find(entry).expect("scheduler switch entry");
+        let end = scheduler[start..]
+            .find(next_entry)
+            .expect("end of scheduler switch entry");
+        let body = &scheduler[start..start + end];
+        let switch_call = body
+            .find("thread::switch_context(current_tcb_ptr, next_tcb_ptr);")
+            .expect("context-switch call");
+        let restore = body[switch_call..]
+            .find("crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);")
+            .expect("captured DAIF restore");
+        assert!(restore > 0, "{entry} restores DAIF too early");
     }
 }
 

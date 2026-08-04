@@ -1970,6 +1970,7 @@ pub fn schedule() {
         unsafe {
             thread::switch_context(current_tcb_ptr, next_tcb_ptr);
         }
+        crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     }
 }
 
@@ -2153,6 +2154,7 @@ pub fn schedule_on_cpu(cpu_id: usize) {
         unsafe {
             thread::switch_context(current_tcb_ptr, next_tcb_ptr);
         }
+        crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     }
 }
 

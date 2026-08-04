@@ -215,6 +215,8 @@ pub struct ThreadControlBlock {
     pub current_cpu: Option<usize>,
 }
 
+const _: () = assert!(core::mem::offset_of!(ThreadControlBlock, context) == 0x10);
+
 impl ThreadControlBlock {
     /// Create a new TCB with default values
     pub const fn new() -> Self {

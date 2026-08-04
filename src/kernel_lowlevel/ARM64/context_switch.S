@@ -115,11 +115,8 @@ context_switch:
     ldp     x29, x30, [x16, #0xE8]
     ldr     x16, [x16, #0x100]
 
-    // Re-enable IRQs before transferring control.
-    mrs     x17, daif
-    bic     x17, x17, #0x80
-    msr     daif, x17
-
+    // The resumed scheduler frame restores the DAIF state it captured before
+    // switching. Keeping IRQs masked here also protects exception-return state.
     br      x16
 .size context_switch, . - context_switch
 
