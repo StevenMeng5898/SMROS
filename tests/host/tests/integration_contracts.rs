@@ -1804,8 +1804,8 @@ fn linux_child_exit_clears_tid_and_uses_deferred_stack_retirement() {
         .find("mask_interrupts()")
         .expect("interrupt mask");
     let transition = exit_current
-        .find("exit_with_clear_child_tid")
-        .expect("one-shot task exit");
+        .find("begin_child_exit_by_scheduler")
+        .expect("one-shot child exit transition");
     let remove_waiters = exit_current
         .find("linux_futex::remove_task_waiters")
         .expect("task futex cleanup");

@@ -844,9 +844,9 @@ mod linux_task_logic {
         assert!(!standard.has_info);
         for signum_offset in 0..2 {
             for marker in (signum_offset..LINUX_RT_QUEUE_LIMIT).step_by(2) {
-            let record = state.take_unblocked().expect("queued realtime signal");
+                let record = state.take_unblocked().expect("queued realtime signal");
                 assert_eq!(record.signum, 34 + signum_offset);
-            assert_eq!(record.info, [marker as u8; LINUX_SIGNAL_INFO_BYTES]);
+                assert_eq!(record.info, [marker as u8; LINUX_SIGNAL_INFO_BYTES]);
             }
         }
         assert!(state.take_unblocked().is_none());
@@ -3747,6 +3747,114 @@ mod posix_test_logic_shared {
             tracker.record("api", "group", PosixCoverageResult::Pass),
             Err(PosixCoverageError::TestOverComplete)
         );
+    }
+}
+
+#[cfg(test)]
+mod linux_child_exit_lifecycle_logic {
+    use super::linux_futex_logic::{
+        FutexQueue, FutexWaitOutcome, FutexWaiter, FUTEX_BITSET_MATCH_ANY,
+    };
+    use super::linux_syscall_context_logic::LinuxSyscallFrameOwners;
+    use super::linux_task_logic::{LinuxChildExitDisposition, LinuxTaskTable, LINUX_ROOT_TID};
+    use super::scheduler_logic::{
+        scheduler_retired_slot_reuse_action, DeferredThreadRetirements, SchedulerSlotReuse,
+    };
+
+    fn waiter(tid: usize, scheduler_thread: usize, address: usize) -> FutexWaiter {
+        FutexWaiter {
+            address,
+            bitset: FUTEX_BITSET_MATCH_ANY,
+            tid,
+            scheduler_thread,
+            deadline: None,
+            sequence: 0,
+            outcome: FutexWaitOutcome::Waiting,
+        }
+    }
+
+    #[test]
+    fn child_exit_join_lifecycle_is_one_shot_and_defers_current_stack_reuse() {
+        let mut clear_word = 0xfeed_beefu32;
+        assert_ne!(clear_word, 0);
+        let clear_address = (&mut clear_word as *mut u32) as usize;
+        let mut tasks = LinuxTaskTable::<3>::new();
+        tasks.register_root(7).unwrap();
+        let exiting = tasks.reserve_child(8).unwrap();
+        let peer = tasks.reserve_child(9).unwrap();
+        assert!(tasks.publish(exiting));
+        assert!(tasks.publish(peer));
+        assert!(tasks.set_clear_child_tid(exiting.tid, 8, clear_address));
+
+        let mut futexes = FutexQueue::<4>::new();
+        futexes.push(waiter(exiting.tid, 8, 0x2000)).unwrap();
+        futexes
+            .push(waiter(LINUX_ROOT_TID, 7, clear_address))
+            .unwrap();
+        futexes.push(waiter(peer.tid, 9, clear_address)).unwrap();
+
+        let owners = LinuxSyscallFrameOwners::<10>::new();
+        assert!(owners.install(8, 0x1000, 0xaaaa, 0x1111));
+
+        let transition = tasks
+            .begin_child_exit_by_scheduler(8)
+            .expect("live child begins one exit transition");
+        assert_eq!(transition.task.tid, exiting.tid);
+        assert_eq!(transition.slot, exiting.slot);
+        assert_eq!(transition.clear_child_tid, clear_address);
+        assert_eq!(
+            transition.disposition,
+            LinuxChildExitDisposition::ScheduleWithoutEl0Return
+        );
+
+        assert_eq!(futexes.remove_task(exiting.tid, 8), 1);
+        assert!(!futexes.remove(exiting.tid, 8));
+        assert!(owners.clear_owner(8));
+        assert_eq!(owners.current(8), None);
+        assert!(tasks.retire(exiting.tid, 8));
+
+        let mut clear_writes = 0usize;
+        let mut wake_calls = 0usize;
+        clear_word = 0;
+        clear_writes += 1;
+        let woken = futexes.wake(clear_address, 1, FUTEX_BITSET_MATCH_ANY);
+        wake_calls += 1;
+        assert_eq!(clear_word, 0);
+        assert_eq!(woken[0], Some((LINUX_ROOT_TID, 7)));
+        assert!(woken[1..].iter().all(Option::is_none));
+        assert_eq!(
+            futexes.take_outcome(LINUX_ROOT_TID, 7),
+            Some(FutexWaitOutcome::Woken)
+        );
+        assert_eq!(futexes.take_outcome(peer.tid, 9), None);
+
+        let retirements = DeferredThreadRetirements::<1>::new();
+        assert!(retirements.record_before_switch(0, 8));
+        assert_eq!(retirements.take_reclaimable(0), None);
+        assert_eq!(
+            scheduler_retired_slot_reuse_action(true, 8, 8, Some(8), true, true),
+            SchedulerSlotReuse::Unavailable
+        );
+        assert!(retirements.confirm_after_switch(0, 9));
+        let retired = retirements.take_reclaimable(0);
+        assert_eq!(retired, Some(8));
+        assert_eq!(
+            scheduler_retired_slot_reuse_action(true, 8, 9, retired, true, true),
+            SchedulerSlotReuse::DeallocateAndReuse
+        );
+        assert!(owners.install(8, 0x2000, 0xbbbb, 0x2222));
+
+        if let Some(stale) = tasks.begin_child_exit_by_scheduler(8) {
+            assert_eq!(stale.clear_child_tid, clear_address);
+            clear_word = 0;
+            clear_writes += 1;
+            let _ = futexes.wake(stale.clear_child_tid, 1, FUTEX_BITSET_MATCH_ANY);
+            wake_calls += 1;
+        }
+        assert_eq!(clear_word, 0);
+        assert_eq!(clear_writes, 1);
+        assert_eq!(wake_calls, 1);
+        assert_eq!(futexes.take_outcome(peer.tid, 9), None);
     }
 }
 

@@ -114,31 +114,30 @@ pub(crate) fn exit_current(exit_code: i32) -> ! {
     let scheduler_thread = scheduler::scheduler().current();
     let exited = {
         let mut runtime = LINUX_TASK_RUNTIME.lock();
-        let task = runtime.tasks.by_scheduler(scheduler_thread.0);
-        task.and_then(|task| {
-            let slot = runtime
-                .tasks
-                .task_slot_index(task.tid, scheduler_thread.0)?;
-            runtime
-                .tasks
-                .exit_with_clear_child_tid(task.tid, scheduler_thread.0)
-                .map(|clear_child_tid| (task, slot, clear_child_tid))
-        })
+        runtime
+            .tasks
+            .begin_child_exit_by_scheduler(scheduler_thread.0)
     };
 
-    if let Some((task, _slot, _)) = exited {
-        let _ = super::linux_futex::remove_task_waiters(task.tid, scheduler_thread.0);
+    if let Some(transition) = exited {
+        let _ = super::linux_futex::remove_task_waiters(
+            transition.task.tid,
+            scheduler_thread.0,
+        );
         let mut runtime = LINUX_TASK_RUNTIME.lock();
-        let _ = runtime.tasks.retire(task.tid, scheduler_thread.0);
+        let _ = runtime
+            .tasks
+            .retire(transition.task.tid, scheduler_thread.0);
         #[cfg(target_arch = "aarch64")]
-        if let Some(clone_slot) = runtime.clone_slots.get_mut(_slot) {
+        if let Some(clone_slot) = runtime.clone_slots.get_mut(transition.slot) {
             *clone_slot = aarch64_clone::LinuxCloneSlot::EMPTY;
         }
     }
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
 
     #[cfg(target_arch = "aarch64")]
-    if let Some((_, _, clear_child_tid)) = exited {
+    if let Some(transition) = exited {
+        let clear_child_tid = transition.clear_child_tid;
         if clear_child_tid != 0
             && crate::syscall::syscall::linux_clone_tid_destination_valid(clear_child_tid)
         {
@@ -153,11 +152,18 @@ pub(crate) fn exit_current(exit_code: i32) -> ! {
         }
     }
 
-    scheduler::scheduler().finish_current_without_stack_free();
-    scheduler::schedule();
-    loop {
-        crate::kernel_lowlevel::cpu::wait_for_interrupt();
-        scheduler::schedule();
+    let disposition = exited
+        .map(|transition| transition.disposition)
+        .unwrap_or(LinuxChildExitDisposition::ScheduleWithoutEl0Return);
+    match disposition {
+        LinuxChildExitDisposition::ScheduleWithoutEl0Return => {
+            scheduler::scheduler().finish_current_without_stack_free();
+            scheduler::schedule();
+            loop {
+                crate::kernel_lowlevel::cpu::wait_for_interrupt();
+                scheduler::schedule();
+            }
+        }
     }
 }
 

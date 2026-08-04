@@ -182,6 +182,19 @@ pub(crate) struct LinuxTaskCore {
     pub block_reason: LinuxBlockReason,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxChildExitDisposition {
+    ScheduleWithoutEl0Return,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxChildExitTransition {
+    pub task: LinuxTaskCore,
+    pub slot: usize,
+    pub clear_child_tid: usize,
+    pub disposition: LinuxChildExitDisposition,
+}
+
 impl LinuxTaskCore {
     const EMPTY: Self = Self {
         tid: 0,
@@ -763,6 +776,21 @@ impl<const N: usize> LinuxTaskTable<N> {
         task.block_reason = LinuxBlockReason::None;
         self.signal_states[slot] = LinuxTaskSignalState::new();
         Some(core::mem::replace(&mut self.clear_child_tids[slot], 0))
+    }
+
+    pub(crate) fn begin_child_exit_by_scheduler(
+        &mut self,
+        scheduler_thread: usize,
+    ) -> Option<LinuxChildExitTransition> {
+        let task = self.by_scheduler(scheduler_thread)?;
+        let slot = self.task_slot_index(task.tid, scheduler_thread)?;
+        let clear_child_tid = self.exit_with_clear_child_tid(task.tid, scheduler_thread)?;
+        Some(LinuxChildExitTransition {
+            task,
+            slot,
+            clear_child_tid,
+            disposition: LinuxChildExitDisposition::ScheduleWithoutEl0Return,
+        })
     }
 
     pub(crate) fn exit(&mut self, tid: usize, scheduler_thread: usize) -> bool {
