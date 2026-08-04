@@ -288,6 +288,12 @@ impl<const N: usize> LinuxTaskTable<N> {
             .find(|task| Self::is_published(*task) && task.scheduler_thread == scheduler_thread)
     }
 
+    pub(crate) fn scheduler_thread_for_reset(&self, slot: usize) -> Option<usize> {
+        self.tasks
+            .get(slot)
+            .and_then(|task| (task.state != LinuxTaskState::Empty).then_some(task.scheduler_thread))
+    }
+
     pub(crate) fn block(
         &mut self,
         tid: usize,

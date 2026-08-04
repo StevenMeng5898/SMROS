@@ -1807,6 +1807,9 @@ fn linux_root_task_and_syscall_frame_have_bounded_owners() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let boot = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/boot.rs"))
         .expect("read AArch64 exception entry");
+    let riscv_boot =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/RISCV64/boot.rs"))
+            .expect("read RISC-V exception entry");
     let dispatch = std::fs::read_to_string(repository.join("src/syscall/syscall_dispatch.rs"))
         .expect("read syscall dispatcher");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
@@ -1840,6 +1843,32 @@ fn linux_root_task_and_syscall_frame_have_bounded_owners() {
     assert!(frame_arg < syscall_number);
     assert!(syscall_number < first_args && first_args < last_args && last_args < call);
 
+    let riscv_start = riscv_boot
+        .find("trap_user_ecall:")
+        .expect("RISC-V user syscall entry");
+    let riscv_end = riscv_boot[riscv_start..]
+        .find("trap_unknown:")
+        .expect("end of RISC-V syscall entry");
+    let riscv = &riscv_boot[riscv_start..riscv_start + riscv_end];
+    let mut previous = 0usize;
+    for instruction in [
+        "mv      a0, sp",
+        "ld      a1, 120(sp)",
+        "ld      a2, 64(sp)",
+        "ld      a3, 72(sp)",
+        "ld      a4, 80(sp)",
+        "ld      a5, 88(sp)",
+        "ld      a6, 96(sp)",
+        "ld      a7, 104(sp)",
+        "call    handle_syscall_simple",
+    ] {
+        let offset = riscv
+            .find(instruction)
+            .unwrap_or_else(|| panic!("RISC-V syscall entry is missing {instruction}"));
+        assert!(offset >= previous, "RISC-V syscall argument order");
+        previous = offset;
+    }
+
     assert!(dispatch.contains("saved_frame: usize"));
     assert!(dispatch.contains("linux_syscall_context::with_linux_syscall_frame("));
     let linux_branch = dispatch
@@ -1865,7 +1894,19 @@ fn linux_root_task_and_syscall_frame_have_bounded_owners() {
     ] {
         assert!(task.contains(api), "missing Linux task API {api}");
     }
+    let task_reset_start = task
+        .find("pub(crate) fn reset()")
+        .expect("Linux task reset");
+    let task_reset = braced_body(&task[task_reset_start..]);
+    assert!(task_reset.contains("scheduler_thread_for_reset"));
 
+    assert!(run_elf.contains("const LINUX_RUNTIME_CPU: usize = 0;"));
+    let spawn_start = run_elf
+        .find("pub fn spawn_observed(")
+        .expect("ELF spawn entry");
+    let spawn = braced_body(&run_elf[spawn_start..]);
+    assert!(spawn.contains("let cpu = LINUX_RUNTIME_CPU;"));
+    assert!(spawn.contains("create_thread_on_cpu(run_elf_launcher_entry, \"run_elf\", Some(cpu))"));
     let launcher = run_elf
         .find("extern \"C\" fn run_elf_launcher_entry()")
         .expect("ELF launcher entry");

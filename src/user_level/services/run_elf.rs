@@ -25,6 +25,7 @@ const RUN_ELF_TIMER_HZ: u64 = 100;
 const RUN_ELF_MAX_ENV_ENTRIES: usize = 64;
 const RUN_ELF_MAX_ENV_ENTRY_BYTES: usize = 4 * 1024;
 const RUN_ELF_MAX_ENV_TOTAL_BYTES: usize = 32 * 1024;
+const LINUX_RUNTIME_CPU: usize = 0;
 const RUN_ELF_LD_LIBRARY_PATH_KEY: &str = "LD_LIBRARY_PATH";
 const RUN_ELF_DEFAULT_LD_LIBRARY_PATH: &str =
     "LD_LIBRARY_PATH=/shared/posixtest/lib:/shared/lib:/lib";
@@ -169,7 +170,7 @@ pub fn spawn_observed(
         }
     };
 
-    let cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
+    let cpu = LINUX_RUNTIME_CPU;
     if RUN_CPU_BINDINGS.bind(cpu, launch_id).is_err() {
         clear_launch_state_without_outcome(cpu, launch_id);
         return Err(RunElfError::Thread);

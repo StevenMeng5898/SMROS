@@ -142,9 +142,11 @@ pub(crate) fn wake_blocked(tid: usize, scheduler_thread: usize, reason: LinuxBlo
 pub(crate) fn reset() {
     with_runtime(|runtime| {
         let current = scheduler::scheduler().current();
-        for scheduler_id in 1..thread::MAX_THREADS {
-            if scheduler_id != current.0 && runtime.tasks.by_scheduler(scheduler_id).is_some() {
-                let _ = scheduler::scheduler().terminate_thread(ThreadId(scheduler_id));
+        for slot in 0..LINUX_TASK_LIMIT {
+            if let Some(scheduler_id) = runtime.tasks.scheduler_thread_for_reset(slot) {
+                if scheduler_id != current.0 {
+                    let _ = scheduler::scheduler().terminate_thread(ThreadId(scheduler_id));
+                }
             }
         }
         #[cfg(target_arch = "aarch64")]

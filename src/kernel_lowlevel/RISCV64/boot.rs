@@ -103,13 +103,14 @@ trap_timer:
 
 trap_user_ecall:
 trap_supervisor_ecall:
-    ld      a0, 120(sp)
-    ld      a1, 64(sp)
-    ld      a2, 72(sp)
-    ld      a3, 80(sp)
-    ld      a4, 88(sp)
-    ld      a5, 96(sp)
-    ld      a6, 104(sp)
+    mv      a0, sp
+    ld      a1, 120(sp)
+    ld      a2, 64(sp)
+    ld      a3, 72(sp)
+    ld      a4, 80(sp)
+    ld      a5, 88(sp)
+    ld      a6, 96(sp)
+    ld      a7, 104(sp)
     call    handle_syscall_simple
     sd      a0, 64(sp)
     csrr    t0, sepc

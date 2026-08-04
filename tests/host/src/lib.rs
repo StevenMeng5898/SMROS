@@ -409,6 +409,9 @@ mod linux_task_logic {
         tasks.register_root(7).unwrap();
         let first = tasks.reserve_child(8).unwrap();
 
+        assert_eq!(tasks.scheduler_thread_for_reset(first.slot), Some(8));
+        assert_eq!(tasks.scheduler_thread_for_reset(usize::MAX), None);
+
         assert!(!tasks.rollback(LinuxTaskReservation {
             scheduler_thread: 99,
             ..first
