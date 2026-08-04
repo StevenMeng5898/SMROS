@@ -2194,6 +2194,17 @@ fn linux_futex_waits_block_and_wake_scheduler_tasks() {
         .expect("Linux futex entry");
     let futex_entry = braced_body(&futex[futex_entry_start..]);
     assert!(futex_entry.contains("linux_user_range_readable("));
+    let alignment_check = futex_entry
+        .find("if uaddr % core::mem::align_of::<u32>() != 0")
+        .expect("futex address alignment check");
+    let alignment_error = braced_body(&futex_entry[alignment_check..]);
+    assert!(alignment_error.contains("Err(SysError::EINVAL)"));
+    let readable_check = futex_entry
+        .find("if !futex_address_valid(uaddr)")
+        .expect("futex readable-range check");
+    let readable_error = braced_body(&futex_entry[readable_check..]);
+    assert!(readable_error.contains("Err(SysError::EFAULT)"));
+    assert!(alignment_check < readable_check);
 
     let wait_start = futex.find("fn wait(").expect("Linux futex wait helper");
     let wait = braced_body(&futex[wait_start..]);

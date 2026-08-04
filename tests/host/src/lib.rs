@@ -929,6 +929,15 @@ mod linux_futex_logic {
         let now = 100;
         let tick_nanoseconds = 10_000_000;
 
+        let zero_relative =
+            futex_deadline_from_timeout(FutexCommand::Wait, false, now, 0, 0, tick_nanoseconds);
+        assert_eq!(
+            zero_relative,
+            Some(FutexDeadline {
+                ticks: now,
+                clock: FutexClock::Monotonic,
+            })
+        );
         assert_eq!(
             futex_deadline_from_timeout(
                 FutexCommand::Wait,
