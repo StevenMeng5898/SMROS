@@ -664,6 +664,33 @@ mod linux_task_logic {
         }
     }
 
+    #[test]
+    fn signal_disposition_centralizes_ignored_and_default_actions() {
+        const SIG_DFL: u64 = 0;
+        const SIG_IGN: u64 = 1;
+
+        assert_eq!(
+            linux_signal_disposition(SIG_IGN, 15),
+            LinuxSignalDisposition::Ignore
+        );
+        for signum in [17, 23, 28] {
+            assert_eq!(
+                linux_signal_disposition(SIG_DFL, signum),
+                LinuxSignalDisposition::Ignore
+            );
+        }
+        for signum in [9, 15] {
+            assert_eq!(
+                linux_signal_disposition(SIG_DFL, signum),
+                LinuxSignalDisposition::Terminate
+            );
+        }
+        assert_eq!(
+            linux_signal_disposition(0x1000, 15),
+            LinuxSignalDisposition::Handled
+        );
+    }
+
     #[cfg(test)]
     fn three_live_tasks() -> (
         LinuxTaskTable<3>,
@@ -964,6 +991,47 @@ mod linux_task_logic {
         assert_eq!(state.take_unblocked().unwrap().signum, 10);
         assert_eq!(state.take_unblocked().unwrap().signum, blocked);
         assert!(state.take_unblocked().is_none());
+    }
+
+    #[test]
+    fn blocked_directed_sigterm_remains_on_its_target_until_unblocked() {
+        let (mut tasks, first, second) = three_live_tasks();
+        let sigterm = 15usize;
+        let bit = linux_signal_bit(sigterm);
+        tasks.signal_state_mut(first.tid, 8).unwrap().mask = bit;
+
+        let target = tasks
+            .route_signal(
+                Some(LINUX_ROOT_TID),
+                first.tid,
+                LinuxPendingSignal::standard(sigterm),
+            )
+            .expect("directed SIGTERM target");
+        assert_eq!(target.tid, first.tid);
+        assert_eq!(
+            tasks.signal_state(first.tid, 8).unwrap().standard_pending,
+            bit
+        );
+        assert_eq!(
+            tasks
+                .signal_state(second.tid, second.scheduler_thread)
+                .unwrap()
+                .standard_pending,
+            0
+        );
+        assert!(tasks
+            .signal_state_mut(first.tid, 8)
+            .unwrap()
+            .take_unblocked()
+            .is_none());
+
+        let state = tasks.signal_state_mut(first.tid, 8).unwrap();
+        state.mask = 0;
+        assert_eq!(
+            state.take_unblocked(),
+            Some(LinuxPendingSignal::standard(sigterm))
+        );
+        assert_eq!(state.standard_pending, 0);
     }
 
     #[test]

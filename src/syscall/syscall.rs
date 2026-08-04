@@ -56,9 +56,9 @@ use super::linux_futex;
 use super::linux_syscall_context;
 use super::linux_task;
 use super::linux_task::{
-    LinuxCloneRequest, LinuxCloneValidationError, LinuxPendingSignal, LinuxSignalFrame,
-    LinuxSignalStack, CLONE_THREAD, LINUX_REALTIME_SIGNAL_MIN, LINUX_RT_QUEUE_LIMIT,
-    LINUX_SIGNAL_FRAME_LIMIT, LINUX_SIGNAL_INFO_BYTES,
+    LinuxCloneRequest, LinuxCloneValidationError, LinuxPendingSignal, LinuxSignalDisposition,
+    LinuxSignalFrame, LinuxSignalStack, CLONE_THREAD, LINUX_REALTIME_SIGNAL_MIN,
+    LINUX_RT_QUEUE_LIMIT, LINUX_SIGNAL_FRAME_LIMIT, LINUX_SIGNAL_INFO_BYTES,
 };
 use crate::kernel_lowlevel::memory::{process_manager, PageFrameAllocator, PAGE_SIZE};
 use crate::kernel_objects::channel;
@@ -552,9 +552,6 @@ const LINUX_MAX_SIGNAL: usize = 64;
 const LINUX_SIGSET_SIZE: usize = core::mem::size_of::<u64>();
 const LINUX_SIG_DFL: u64 = 0;
 const LINUX_SIG_IGN: u64 = 1;
-const LINUX_SIGCHLD: usize = 17;
-const LINUX_SIGURG: usize = 23;
-const LINUX_SIGWINCH: usize = 28;
 const LINUX_SIGALRM: usize = 14;
 const LINUX_SA_SIGINFO: u64 = 0x0000_0004;
 const LINUX_SA_ONSTACK: u64 = 0x0800_0000;
@@ -2652,22 +2649,8 @@ fn linux_signal_action(signum: usize) -> LinuxKernelSigaction {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LinuxSignalDisposition {
-    Ignore,
-    Terminate,
-    Handled,
-}
-
 fn linux_signal_disposition(signum: usize) -> LinuxSignalDisposition {
-    match linux_signal_action(signum).handler {
-        LINUX_SIG_IGN => LinuxSignalDisposition::Ignore,
-        LINUX_SIG_DFL => match signum {
-            LINUX_SIGCHLD | LINUX_SIGURG | LINUX_SIGWINCH => LinuxSignalDisposition::Ignore,
-            _ => LinuxSignalDisposition::Terminate,
-        },
-        _ => LinuxSignalDisposition::Handled,
-    }
+    linux_task::linux_signal_disposition(linux_signal_action(signum).handler, signum)
 }
 
 fn store_linux_signal_action(signum: usize, action: LinuxKernelSigaction) {
@@ -2917,20 +2900,13 @@ fn queue_directed_linux_signal(
     signum: usize,
     make_record: impl FnOnce() -> Result<LinuxPendingSignal, SysError>,
 ) -> SysResult {
-    let target = linux_task::queue_task_signal(tgid, tid, LinuxPendingSignal::EMPTY)?;
+    linux_task::queue_task_signal(tgid, tid, LinuxPendingSignal::EMPTY)?;
     if signum == 0 {
         return Ok(0);
     }
     match linux_signal_disposition(signum) {
         LinuxSignalDisposition::Ignore => Ok(0),
-        LinuxSignalDisposition::Terminate => {
-            if process_manager().terminate_process(target.tgid) {
-                Ok(0)
-            } else {
-                Err(SysError::ESRCH)
-            }
-        }
-        LinuxSignalDisposition::Handled => {
+        LinuxSignalDisposition::Terminate | LinuxSignalDisposition::Handled => {
             let record = make_record()?;
             let target = linux_task::queue_task_signal(tgid, tid, record)?;
             interrupt_linux_signal_target(target);
@@ -3083,8 +3059,7 @@ pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) {
         return;
     }
 
-    let action = linux_signal_action(LINUX_SIGALRM);
-    if action.handler == LINUX_SIG_DFL || action.handler == LINUX_SIG_IGN {
+    if linux_signal_disposition(LINUX_SIGALRM) == LinuxSignalDisposition::Ignore {
         LINUX_REAL_TIMER_DEADLINE_TICK.store(LINUX_TIMER_DISABLED, Ordering::SeqCst);
         return;
     }
@@ -5403,14 +5378,7 @@ pub fn sys_rt_sigqueueinfo(pid: usize, sig: usize, info: usize) -> SysResult {
     }
     match linux_signal_disposition(sig) {
         LinuxSignalDisposition::Ignore => Ok(0),
-        LinuxSignalDisposition::Terminate => {
-            if process_manager().terminate_process(pid) {
-                Ok(0)
-            } else {
-                Err(SysError::ESRCH)
-            }
-        }
-        LinuxSignalDisposition::Handled => {
+        LinuxSignalDisposition::Terminate | LinuxSignalDisposition::Handled => {
             let record = linux_signal_record_from_user(sig, info)?;
             queue_process_linux_signal_and_wake(record)?;
             Ok(0)
@@ -6696,14 +6664,7 @@ pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
 
     match linux_signal_disposition(signum) {
         LinuxSignalDisposition::Ignore => Ok(0),
-        LinuxSignalDisposition::Terminate => {
-            if process_manager().terminate_process(pid as usize) {
-                Ok(0)
-            } else {
-                Err(SysError::ESRCH)
-            }
-        }
-        LinuxSignalDisposition::Handled => {
+        LinuxSignalDisposition::Terminate | LinuxSignalDisposition::Handled => {
             queue_process_linux_signal_and_wake(LinuxPendingSignal::standard(signum))?;
             Ok(0)
         }

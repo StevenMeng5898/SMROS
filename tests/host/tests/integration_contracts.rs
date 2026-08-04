@@ -2475,30 +2475,27 @@ fn linux_signal_state_is_owned_by_each_live_task() {
     let disposition = directed
         .find("linux_signal_disposition(signum)")
         .expect("centralized directed disposition");
-    let terminate = directed
-        .find("process_manager().terminate_process(target.tgid)")
-        .expect("directed default action");
+    let ignore = directed
+        .find("LinuxSignalDisposition::Ignore => Ok(0)")
+        .expect("ignored directed signal result");
     let build_record = directed
         .find("make_record()?")
         .expect("lazy queued record construction");
+    let queue_record = directed[build_record..]
+        .find("linux_task::queue_task_signal(tgid, tid, record)")
+        .expect("directed pending queue")
+        + build_record;
     let interrupt = directed
         .find("interrupt_linux_signal_target(")
         .expect("blocked target interruption");
-    assert!(route < disposition && disposition < terminate);
-    assert!(disposition < build_record && build_record < interrupt);
+    assert!(route < disposition && disposition < ignore && ignore < build_record);
+    assert!(build_record < queue_record && queue_record < interrupt);
+    assert!(directed.contains("LinuxSignalDisposition::Terminate"));
+    assert!(directed.contains("LinuxSignalDisposition::Handled"));
+    assert!(!directed.contains("terminate_process("));
 
-    let disposition_start = syscall
-        .find("fn linux_signal_disposition(")
-        .expect("central signal disposition helper");
-    let disposition = braced_body(&syscall[disposition_start..]);
-    for default_ignored in ["LINUX_SIGCHLD", "LINUX_SIGURG", "LINUX_SIGWINCH"] {
-        assert!(
-            disposition.contains(default_ignored),
-            "missing default-ignore disposition for {default_ignored}"
-        );
-    }
-    assert!(disposition.contains("LinuxSignalDisposition::Terminate"));
-    assert!(disposition.contains("_ => LinuxSignalDisposition::Terminate"));
+    assert!(task_logic.contains("pub(crate) enum LinuxSignalDisposition"));
+    assert!(task_logic.contains("pub(crate) fn linux_signal_disposition("));
 
     let process_take_start = syscall
         .find("fn take_process_linux_signal(")
@@ -2523,8 +2520,19 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         .find("fn deliver_next_linux_signal(")
         .expect("signal delivery helper");
     let delivery = braced_body(&syscall[delivery_start..]);
-    assert!(delivery.contains("linux_signal_disposition(signum)"));
-    assert!(delivery.contains("process_manager().terminate_process(current.tgid)"));
+    let dequeue = delivery
+        .find("take_unblocked_linux_signal()")
+        .expect("unblocked signal dequeue");
+    let disposition = delivery
+        .find("linux_signal_disposition(signum)")
+        .expect("delivery-time disposition");
+    let current = delivery
+        .find("linux_task::current_task()")
+        .expect("current delivery task identity");
+    let terminate = delivery
+        .find("process_manager().terminate_process(current.tgid)")
+        .expect("current process default action");
+    assert!(dequeue < disposition && disposition < current && current < terminate);
     assert!(delivery.contains("linux_task::with_current_signal_state_and_slot("));
     assert!(delivery.contains("linux_task::linux_signal_info_offset(task_slot"));
     assert!(delivery.contains("checked_add(LINUX_SIGNAL_INFO_OFFSET)"));
@@ -2547,8 +2555,29 @@ fn linux_signal_state_is_owned_by_each_live_task() {
     let kill = braced_body(&syscall[kill_start..]);
     assert!(kill.contains("linux_signal_disposition(signum)"));
     assert!(kill.contains("LinuxSignalDisposition::Terminate"));
-    assert!(kill.contains("process_manager().terminate_process(pid as usize)"));
     assert!(kill.contains("queue_process_linux_signal_and_wake("));
+    assert!(!kill.contains("terminate_process("));
+
+    let rt_queue_start = syscall
+        .find("pub fn sys_rt_sigqueueinfo(")
+        .expect("process queued signal syscall");
+    let rt_queue = braced_body(&syscall[rt_queue_start..]);
+    let disposition = rt_queue
+        .find("linux_signal_disposition(sig)")
+        .expect("queued signal disposition");
+    let record = rt_queue
+        .find("linux_signal_record_from_user(sig, info)")
+        .expect("queued siginfo copy");
+    assert!(disposition < record);
+    assert!(!rt_queue.contains("terminate_process("));
+
+    let timer_start = syscall
+        .find("pub extern \"C\" fn deliver_linux_timer_signal_from_irq(")
+        .expect("timer signal delivery");
+    let timer = braced_body(&syscall[timer_start..]);
+    assert!(timer.contains("linux_signal_disposition(LINUX_SIGALRM)"));
+    assert!(!timer.contains("action.handler == LINUX_SIG_DFL"));
+    assert!(timer.contains("queue_process_linux_signal_and_wake("));
 }
 
 #[test]

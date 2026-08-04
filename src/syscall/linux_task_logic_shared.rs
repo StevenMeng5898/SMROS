@@ -218,6 +218,30 @@ pub(crate) fn linux_signal_info_offset(task_slot: usize, frame_depth: usize) -> 
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxSignalDisposition {
+    Ignore,
+    Terminate,
+    Handled,
+}
+
+const LINUX_DEFAULT_SIGNAL_HANDLER: u64 = 0;
+const LINUX_IGNORE_SIGNAL_HANDLER: u64 = 1;
+
+pub(crate) fn linux_signal_disposition(
+    handler: u64,
+    signum: usize,
+) -> LinuxSignalDisposition {
+    match handler {
+        LINUX_IGNORE_SIGNAL_HANDLER => LinuxSignalDisposition::Ignore,
+        LINUX_DEFAULT_SIGNAL_HANDLER => match signum {
+            17 | 23 | 28 => LinuxSignalDisposition::Ignore,
+            _ => LinuxSignalDisposition::Terminate,
+        },
+        _ => LinuxSignalDisposition::Handled,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxPendingSignal {
     pub signum: usize,
     pub has_info: bool,
