@@ -105,12 +105,26 @@ fn valid_clone_tid_pointer(pointer: usize) -> bool {
     pointer != 0 && pointer & 0x3 == 0 && pointer.checked_add(core::mem::size_of::<u32>()).is_some()
 }
 
+macro_rules! smros_linux_task_tid_allocation_body {
+    ($next_tid:expr, $root_tid:expr, $max_tid:expr) => {{
+        let next_tid = $next_tid;
+        let root_tid = $root_tid;
+        let max_tid = $max_tid;
+        if next_tid <= root_tid || next_tid > max_tid {
+            None
+        } else {
+            let following_tid = if next_tid < max_tid {
+                Some(next_tid + 1)
+            } else {
+                None
+            };
+            Some((next_tid, following_tid))
+        }
+    }};
+}
+
 pub(crate) fn linux_task_tid_allocation(next_tid: usize) -> Option<(usize, Option<usize>)> {
-    if next_tid <= LINUX_ROOT_TID || next_tid > LINUX_MAX_TID {
-        return None;
-    }
-    let following_tid = (next_tid < LINUX_MAX_TID).then_some(next_tid + 1);
-    Some((next_tid, following_tid))
+    smros_linux_task_tid_allocation_body!(next_tid, LINUX_ROOT_TID, LINUX_MAX_TID)
 }
 
 pub(crate) fn linux_tid_to_user_value(tid: usize) -> Option<u32> {

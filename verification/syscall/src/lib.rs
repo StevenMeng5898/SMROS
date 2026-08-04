@@ -2166,17 +2166,27 @@ proof fn linux_range_availability_smoke() {
 
 proof fn linux_task_lifecycle_smoke() {
     let root_tid: usize = smros_linux_root_tid_body!();
+    let max_tid: usize = 0x7fff_ffffusize;
     assert(root_tid > 0);
 
     let child_tid: usize = 2usize;
     assert(child_tid == root_tid + 1);
-    let following_tid = smros_linux_task_next_tid_body!(child_tid);
+    let allocation = smros_linux_task_tid_allocation_body!(child_tid, root_tid, max_tid);
+    assert(allocation.is_some());
+    let (allocated_tid, following_tid) = allocation.unwrap();
+    assert(allocated_tid == child_tid);
     assert(child_tid > 0);
     assert(following_tid.is_some());
     let following = following_tid.unwrap();
     assert(following == 3usize);
     assert(following > child_tid);
-    assert(smros_linux_task_next_tid_body!(usize::MAX).is_none());
+
+    let terminal_allocation = smros_linux_task_tid_allocation_body!(max_tid, root_tid, max_tid);
+    assert(terminal_allocation.is_some());
+    let (terminal_tid, following_tid) = terminal_allocation.unwrap();
+    assert(terminal_tid == max_tid);
+    assert(following_tid.is_none());
+    assert(smros_linux_task_tid_allocation_body!(usize::MAX, root_tid, max_tid).is_none());
 
     let empty: usize = 0usize;
     let starting: usize = 1usize;
