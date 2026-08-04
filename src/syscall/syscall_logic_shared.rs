@@ -8,6 +8,14 @@ pub fn linux_exit_status(exit_code: i32) -> i32 {
     (exit_code as u32 & 0xff) as i32
 }
 
+pub fn linux_fxfs_stat_identity(object_id: u64) -> Option<(u64, u64)> {
+    if object_id == 0 {
+        None
+    } else {
+        Some((1, object_id))
+    }
+}
+
 macro_rules! smros_zircon_syscall_from_raw_body {
     ($syscall_num:expr, $threshold:expr) => {{
         if smros_is_zircon_syscall_number_body!($syscall_num, $threshold) {

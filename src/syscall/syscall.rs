@@ -4076,7 +4076,11 @@ fn linux_write_cstr(buf: usize, len: usize, value: &[u8]) -> SysResult {
     Ok(buf)
 }
 
-fn linux_write_stat_from_attrs(stat_ptr: usize, attrs: fxfs::FxfsAttributes) -> SysResult {
+fn linux_write_stat_from_attrs(
+    stat_ptr: usize,
+    object_id: u64,
+    attrs: fxfs::FxfsAttributes,
+) -> SysResult {
     const ST_DEV_OFF: usize = 0;
     const ST_INO_OFF: usize = 8;
     const ST_MODE_OFF: usize = 16;
@@ -4088,12 +4092,14 @@ fn linux_write_stat_from_attrs(stat_ptr: usize, attrs: fxfs::FxfsAttributes) -> 
     const ST_BLOCKS_OFF: usize = 64;
 
     linux_zero_user(stat_ptr, core::mem::size_of::<LinuxStat>())?;
+    let (device, inode) =
+        syscall_logic::linux_fxfs_stat_identity(object_id).ok_or(SysError::EIO)?;
 
     let size = core::cmp::min(attrs.size, i64::MAX as usize) as i64;
     let blocks = ((attrs.size.saturating_add(511)) / 512) as i64;
     unsafe {
-        core::ptr::write_unaligned((stat_ptr + ST_DEV_OFF) as *mut u64, 1);
-        core::ptr::write_unaligned((stat_ptr + ST_INO_OFF) as *mut u64, 1);
+        core::ptr::write_unaligned((stat_ptr + ST_DEV_OFF) as *mut u64, device);
+        core::ptr::write_unaligned((stat_ptr + ST_INO_OFF) as *mut u64, inode);
         core::ptr::write_unaligned((stat_ptr + ST_MODE_OFF) as *mut u32, attrs.mode);
         core::ptr::write_unaligned((stat_ptr + ST_NLINK_OFF) as *mut u32, attrs.link_count);
         core::ptr::write_unaligned((stat_ptr + ST_UID_OFF) as *mut u32, attrs.uid);
@@ -4108,6 +4114,7 @@ fn linux_write_stat_from_attrs(stat_ptr: usize, attrs: fxfs::FxfsAttributes) -> 
 fn linux_write_stat(stat_ptr: usize) -> SysResult {
     linux_write_stat_from_attrs(
         stat_ptr,
+        1,
         fxfs::FxfsAttributes {
             mode: 0o100644,
             uid: 0,
@@ -4528,8 +4535,8 @@ pub fn sys_fstat(fd: usize, stat_ptr: usize) -> SysResult {
         return Err(SysError::ENODEV);
     }
     if let Ok(path) = linux_fxfs_path_for_fd(fd, false) {
-        if let Ok(attrs) = fxfs::attrs(path.as_str()) {
-            return linux_write_stat_from_attrs(stat_ptr, attrs);
+        if let Ok((object_id, attrs)) = fxfs::attrs_with_object_id(path.as_str()) {
+            return linux_write_stat_from_attrs(stat_ptr, object_id, attrs);
         }
     }
     linux_write_stat(stat_ptr)
@@ -4543,8 +4550,8 @@ pub fn sys_fstatat(_dirfd: usize, path: usize, stat_ptr: usize, flags: usize) ->
         return Err(SysError::EINVAL);
     }
     let path_str = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
-    if let Ok(attrs) = fxfs::attrs(path_str) {
-        return linux_write_stat_from_attrs(stat_ptr, attrs);
+    if let Ok((object_id, attrs)) = fxfs::attrs_with_object_id(path_str) {
+        return linux_write_stat_from_attrs(stat_ptr, object_id, attrs);
     }
     if !linux_path_visible(path_str) {
         return Err(SysError::ENOENT);

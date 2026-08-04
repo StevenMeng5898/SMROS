@@ -1839,9 +1839,13 @@ impl FxfsState {
         self.read_file_at(path, 0, out)
     }
 
-    fn attrs(&mut self, path: &str) -> Result<FxfsAttributes, FxfsError> {
+    fn attrs_with_object_id(&mut self, path: &str) -> Result<(u64, FxfsAttributes), FxfsError> {
         let index = self.resolve_path(path)?;
-        Ok(self.objects[index].attrs)
+        Ok((self.objects[index].object_id, self.objects[index].attrs))
+    }
+
+    fn attrs(&mut self, path: &str) -> Result<FxfsAttributes, FxfsError> {
+        self.attrs_with_object_id(path).map(|(_, attrs)| attrs)
     }
 
     fn set_attrs(
@@ -2071,6 +2075,10 @@ pub fn cursor_write(cursor: &mut FxfsCursor, data: &[u8]) -> Result<usize, FxfsE
 
 pub fn attrs(path: &str) -> Result<FxfsAttributes, FxfsError> {
     state().attrs(path)
+}
+
+pub fn attrs_with_object_id(path: &str) -> Result<(u64, FxfsAttributes), FxfsError> {
+    state().attrs_with_object_id(path)
 }
 
 pub fn set_attrs(path: &str, mode: u32, uid: u32, gid: u32) -> Result<FxfsAttributes, FxfsError> {

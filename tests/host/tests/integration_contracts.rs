@@ -2926,6 +2926,20 @@ fn linux_signal_runtime_resets_large_state_in_place() {
 }
 
 #[test]
+fn linux_fxfs_stat_preserves_file_identity_for_dynamic_loader_deduplication() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS service");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux stat implementation");
+
+    assert!(fxfs.contains("pub fn attrs_with_object_id("));
+    assert!(syscall.contains("fxfs::attrs_with_object_id("));
+    assert!(syscall.contains("linux_fxfs_stat_identity(object_id)"));
+    assert!(!syscall.contains("(stat_ptr + ST_INO_OFF) as *mut u64, 1"));
+}
+
+#[test]
 fn linux_sigtimedwait_selects_the_lowest_signal_across_pending_sources() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let task_logic =

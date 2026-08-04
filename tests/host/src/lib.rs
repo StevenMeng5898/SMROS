@@ -353,6 +353,14 @@ mod syscall_logic {
             assert_eq!(linux_exit_status(raw), expected);
         }
     }
+
+    #[test]
+    fn fxfs_stat_identity_uses_distinct_nonzero_object_ids_as_inodes() {
+        assert_eq!(linux_fxfs_stat_identity(2), Some((1, 2)));
+        assert_eq!(linux_fxfs_stat_identity(3), Some((1, 3)));
+        assert_ne!(linux_fxfs_stat_identity(2), linux_fxfs_stat_identity(3));
+        assert_eq!(linux_fxfs_stat_identity(0), None);
+    }
 }
 
 mod linux_task_logic {
