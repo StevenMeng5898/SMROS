@@ -1,11 +1,10 @@
-use core::cell::UnsafeCell;
-
 use crate::kernel_lowlevel::thread::{self, ThreadId};
 use crate::kernel_objects::scheduler;
 
 use super::SysError;
 
 include!("linux_task_logic_shared.rs");
+include!("linux_runtime_lock_shared.rs");
 
 const LINUX_TASK_LIMIT: usize = thread::MAX_THREADS;
 
@@ -25,20 +24,14 @@ impl LinuxTaskRuntime {
     }
 }
 
-struct LinuxTaskRuntimeCell(UnsafeCell<LinuxTaskRuntime>);
-
-// SAFETY: every access is serialized with local interrupts masked. Linux tasks
-// are pinned to CPU0 during the AArch64 thread-runtime milestone.
-unsafe impl Sync for LinuxTaskRuntimeCell {}
-
-static LINUX_TASK_RUNTIME: LinuxTaskRuntimeCell =
-    LinuxTaskRuntimeCell(UnsafeCell::new(LinuxTaskRuntime::new()));
+static LINUX_TASK_RUNTIME: LinuxRuntimeLock<LinuxTaskRuntime> =
+    LinuxRuntimeLock::new(LinuxTaskRuntime::new());
 
 fn with_runtime<R>(operation: impl FnOnce(&mut LinuxTaskRuntime) -> R) -> R {
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
-    // SAFETY: local interrupts are masked and Linux task mutations are confined
-    // to CPU0, so no concurrent reference to the runtime can exist.
-    let result = operation(unsafe { &mut *LINUX_TASK_RUNTIME.0.get() });
+    let mut runtime = LINUX_TASK_RUNTIME.lock();
+    let result = operation(&mut runtime);
+    drop(runtime);
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     result
 }
@@ -155,6 +148,8 @@ pub(crate) fn reset() {
             .fill(aarch64_clone::LinuxCloneSlot::EMPTY);
         runtime.tasks.reset();
     });
+    #[cfg(target_arch = "aarch64")]
+    super::linux_syscall_context::reset();
 }
 
 #[cfg(target_arch = "aarch64")]

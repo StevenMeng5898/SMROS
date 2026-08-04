@@ -1,18 +1,12 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
-
-use crate::kernel_lowlevel::thread::Aarch64ExceptionFrame;
+use crate::kernel_lowlevel::thread::{self, Aarch64ExceptionFrame};
 use crate::kernel_objects::scheduler;
 
 use super::{SysError, SysResult};
 
-const INSTALLING: usize = 1;
+include!("linux_syscall_context_logic_shared.rs");
 
-static FRAMES: [AtomicUsize; scheduler::MAX_CPUS] =
-    [const { AtomicUsize::new(0) }; scheduler::MAX_CPUS];
-static RETURN_PCS: [AtomicUsize; scheduler::MAX_CPUS] =
-    [const { AtomicUsize::new(0) }; scheduler::MAX_CPUS];
-static PSTATES: [AtomicUsize; scheduler::MAX_CPUS] =
-    [const { AtomicUsize::new(0) }; scheduler::MAX_CPUS];
+static FRAME_OWNERS: LinuxSyscallFrameOwners<{ thread::MAX_THREADS }> =
+    LinuxSyscallFrameOwners::new();
 
 #[derive(Clone, Copy)]
 pub(crate) struct LinuxSyscallFrameRef {
@@ -22,14 +16,13 @@ pub(crate) struct LinuxSyscallFrameRef {
 }
 
 struct InstalledFrame {
-    cpu: usize,
+    owner: usize,
+    frame: usize,
 }
 
 impl Drop for InstalledFrame {
     fn drop(&mut self) {
-        RETURN_PCS[self.cpu].store(0, Ordering::Relaxed);
-        PSTATES[self.cpu].store(0, Ordering::Relaxed);
-        FRAMES[self.cpu].store(0, Ordering::Release);
+        let _ = FRAME_OWNERS.clear(self.owner, self.frame);
     }
 }
 
@@ -42,33 +35,28 @@ pub(crate) fn with_linux_syscall_frame(
     if frame.is_null() || (frame as usize) % core::mem::align_of::<Aarch64ExceptionFrame>() != 0 {
         return Err(SysError::EINVAL);
     }
-    let cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
-    let Some(frame_slot) = FRAMES.get(cpu) else {
-        return Err(SysError::EINVAL);
-    };
-    if frame_slot
-        .compare_exchange(0, INSTALLING, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
+    let owner = scheduler::scheduler().current().0;
+    if !FRAME_OWNERS.install(owner, frame as usize, return_pc as usize, pstate as usize) {
         return Err(SysError::EINVAL);
     }
 
-    let _installed = InstalledFrame { cpu };
-    RETURN_PCS[cpu].store(return_pc as usize, Ordering::Relaxed);
-    PSTATES[cpu].store(pstate as usize, Ordering::Relaxed);
-    frame_slot.store(frame as usize, Ordering::Release);
+    let _installed = InstalledFrame {
+        owner,
+        frame: frame as usize,
+    };
     dispatch()
 }
 
 pub(crate) fn current() -> Option<LinuxSyscallFrameRef> {
-    let cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
-    let frame = FRAMES.get(cpu)?.load(Ordering::Acquire);
-    if frame <= INSTALLING {
-        return None;
-    }
+    let owner = scheduler::scheduler().current().0;
+    let context = FRAME_OWNERS.current(owner)?;
     Some(LinuxSyscallFrameRef {
-        frame: frame as *mut Aarch64ExceptionFrame,
-        return_pc: RETURN_PCS[cpu].load(Ordering::Relaxed) as u64,
-        pstate: PSTATES[cpu].load(Ordering::Relaxed) as u64,
+        frame: context.frame as *mut Aarch64ExceptionFrame,
+        return_pc: context.return_pc as u64,
+        pstate: context.pstate as u64,
     })
+}
+
+pub(crate) fn reset() {
+    FRAME_OWNERS.clear_all();
 }

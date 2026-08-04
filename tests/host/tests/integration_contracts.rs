@@ -1820,6 +1820,13 @@ fn linux_root_task_and_syscall_frame_have_bounded_owners() {
         .expect("read Linux task runtime");
     let context = std::fs::read_to_string(repository.join("src/syscall/linux_syscall_context.rs"))
         .expect("read Linux syscall context");
+    let context_logic = std::fs::read_to_string(
+        repository.join("src/syscall/linux_syscall_context_logic_shared.rs"),
+    )
+    .expect("read Linux syscall context ownership model");
+    let runtime_lock =
+        std::fs::read_to_string(repository.join("src/syscall/linux_runtime_lock_shared.rs"))
+            .expect("read Linux runtime lock");
 
     let exception_start = boot
         .find("exception_handler:")
@@ -1882,9 +1889,60 @@ fn linux_root_task_and_syscall_frame_have_bounded_owners() {
     assert!(!dispatch[zircon_branch..].contains("with_linux_syscall_frame"));
 
     assert!(context.contains("struct LinuxSyscallFrameRef"));
-    assert!(context.contains("compare_exchange("));
     assert!(context.contains("pub(crate) fn current() -> Option<LinuxSyscallFrameRef>"));
-    assert!(task.contains("UnsafeCell<LinuxTaskRuntime>"));
+    assert!(context.contains("static FRAME_OWNERS: LinuxSyscallFrameOwners"));
+    assert!(context.contains("let owner = scheduler::scheduler().current().0;"));
+    assert!(context.contains("FRAME_OWNERS.install(owner"));
+    assert!(context.contains("FRAME_OWNERS.current(owner)"));
+    assert!(context.contains("FRAME_OWNERS.clear(self.owner, self.frame)"));
+    assert!(context.contains("FRAME_OWNERS.clear_all()"));
+    assert!(!context.contains("scheduler::MAX_CPUS"));
+    assert!(!context.contains("current_cpu_id()"));
+    for ownership_rule in [
+        "struct LinuxSyscallFrameOwners<const N: usize>",
+        "frames: [AtomicUsize; N]",
+        "pub(crate) fn install(",
+        "pub(crate) fn current(",
+        "pub(crate) fn clear(",
+        "compare_exchange(",
+    ] {
+        assert!(
+            context_logic.contains(ownership_rule),
+            "missing task-scoped frame ownership rule {ownership_rule}"
+        );
+    }
+
+    assert!(task.contains("LinuxRuntimeLock<LinuxTaskRuntime>"));
+    assert!(!task.contains("struct LinuxTaskRuntimeCell"));
+    let runtime_start = task
+        .find("fn with_runtime<R>(")
+        .expect("runtime access helper");
+    let runtime = braced_body(&task[runtime_start..]);
+    let mask = runtime.find("mask_interrupts()").expect("interrupt mask");
+    let lock = runtime
+        .find("LINUX_TASK_RUNTIME.lock()")
+        .expect("cross-CPU runtime lock");
+    let operation = runtime
+        .find("operation(&mut runtime)")
+        .expect("runtime mutation");
+    let unlock = runtime.find("drop(runtime)").expect("runtime unlock");
+    let restore = runtime
+        .find("restore_interrupts(interrupt_state)")
+        .expect("interrupt restore");
+    assert!(mask < lock && lock < operation && operation < unlock && unlock < restore);
+    for lock_rule in [
+        "locked: core::sync::atomic::AtomicBool",
+        "value: core::cell::UnsafeCell<T>",
+        "unsafe impl<T: Send> Sync for LinuxRuntimeLock<T>",
+        "compare_exchange(",
+        "core::sync::atomic::Ordering::Acquire",
+        "core::sync::atomic::Ordering::Release",
+    ] {
+        assert!(
+            runtime_lock.contains(lock_rule),
+            "missing cross-CPU runtime lock rule {lock_rule}"
+        );
+    }
     for api in [
         "pub(crate) fn register_root(",
         "pub(crate) fn current_tid(",
@@ -1899,6 +1957,7 @@ fn linux_root_task_and_syscall_frame_have_bounded_owners() {
         .expect("Linux task reset");
     let task_reset = braced_body(&task[task_reset_start..]);
     assert!(task_reset.contains("scheduler_thread_for_reset"));
+    assert!(task_reset.contains("linux_syscall_context::reset()"));
 
     assert!(run_elf.contains("const LINUX_RUNTIME_CPU: usize = 0;"));
     let spawn_start = run_elf

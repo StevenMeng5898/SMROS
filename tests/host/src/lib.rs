@@ -482,6 +482,95 @@ mod linux_task_logic {
     }
 }
 
+mod linux_syscall_context_logic {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/linux_syscall_context_logic_shared.rs"
+    ));
+
+    #[test]
+    fn syscall_frames_follow_scheduler_tasks_across_context_switches() {
+        let owners = LinuxSyscallFrameOwners::<4>::new();
+        let task_a = 1;
+        let task_b = 2;
+
+        assert!(!owners.clear(3, 0), "empty is not a valid frame identity");
+        assert!(owners.install(task_a, 0x1000, 0xaaaa, 0x1111));
+        assert_eq!(
+            owners.current(task_a),
+            Some(LinuxSyscallFrameSnapshot {
+                frame: 0x1000,
+                return_pc: 0xaaaa,
+                pstate: 0x1111,
+            })
+        );
+        assert!(
+            !owners.install(task_a, 0x3000, 0xcccc, 0x3333),
+            "nested installation for one scheduler task must fail"
+        );
+
+        assert!(owners.install(task_b, 0x2000, 0xbbbb, 0x2222));
+        assert_eq!(
+            owners.current(task_b),
+            Some(LinuxSyscallFrameSnapshot {
+                frame: 0x2000,
+                return_pc: 0xbbbb,
+                pstate: 0x2222,
+            })
+        );
+        assert!(owners.clear(task_b, 0x2000));
+        assert_eq!(owners.current(task_b), None);
+
+        assert_eq!(
+            owners.current(task_a).map(|frame| frame.frame),
+            Some(0x1000)
+        );
+        assert!(owners.clear(task_a, 0x1000));
+        assert_eq!(owners.current(task_a), None);
+    }
+
+    #[test]
+    fn syscall_frame_reset_clears_abandoned_task_contexts() {
+        let owners = LinuxSyscallFrameOwners::<4>::new();
+        assert!(owners.install(1, 0x1000, 0xaaaa, 0x1111));
+        assert!(owners.install(2, 0x2000, 0xbbbb, 0x2222));
+
+        owners.clear_all();
+
+        assert_eq!(owners.current(1), None);
+        assert_eq!(owners.current(2), None);
+    }
+}
+
+mod linux_runtime_lock_logic {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/linux_runtime_lock_shared.rs"
+    ));
+
+    #[test]
+    fn runtime_lock_prevents_mutable_aliases_across_cpus() {
+        use std::sync::Arc;
+
+        let runtime = Arc::new(LinuxRuntimeLock::new(7usize));
+        let mut cpu0 = runtime.try_lock().expect("CPU0 owns runtime");
+        *cpu0 = 11;
+
+        let cpu1_runtime = Arc::clone(&runtime);
+        let cpu1_was_excluded = std::thread::spawn(move || cpu1_runtime.try_lock().is_none())
+            .join()
+            .expect("CPU1 lock probe");
+        assert!(cpu1_was_excluded);
+
+        drop(cpu0);
+        let mut cpu1 = runtime.try_lock().expect("CPU1 acquires after release");
+        assert_eq!(*cpu1, 11);
+        *cpu1 = 13;
+        drop(cpu1);
+        assert_eq!(*runtime.lock(), 13);
+    }
+}
+
 mod linux_futex_logic {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
