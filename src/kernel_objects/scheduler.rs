@@ -194,6 +194,9 @@ pub struct Scheduler {
     /// Number of active threads
     active_threads: usize,
 
+    /// Threads created blocked but not yet published to the ready set.
+    suspended_threads: [bool; MAX_THREADS],
+
     /// Scheduler tick count
     tick_count: u64,
 
@@ -725,6 +728,7 @@ impl Scheduler {
             current_thread: ThreadId::INVALID,
             next_thread: 0,
             active_threads: 0,
+            suspended_threads: [false; MAX_THREADS],
             tick_count: 0,
             time_slice_ticks: DEFAULT_TIME_SLICE_TICKS,
             policy: SchedulePolicy::RoundRobin,
@@ -759,6 +763,7 @@ impl Scheduler {
         self.current_thread = ThreadId::IDLE;
         self.next_thread = 1;
         self.active_threads = 1;
+        self.suspended_threads = [false; MAX_THREADS];
         self.tick_count = 0;
         self.policy = SchedulePolicy::RoundRobin;
         self.trace_entries = [SchedulerTraceEntry::empty(); SCHED_TRACE_CAPACITY];
@@ -790,6 +795,25 @@ impl Scheduler {
         name: &'static str,
         cpu_affinity: Option<usize>,
     ) -> Option<ThreadId> {
+        self.create_thread_with_state(entry, name, cpu_affinity, ThreadState::Ready)
+    }
+
+    pub fn create_suspended_thread_on_cpu(
+        &mut self,
+        entry: extern "C" fn() -> !,
+        name: &'static str,
+        cpu_affinity: usize,
+    ) -> Option<ThreadId> {
+        self.create_thread_with_state(entry, name, Some(cpu_affinity), ThreadState::Blocked)
+    }
+
+    fn create_thread_with_state(
+        &mut self,
+        entry: extern "C" fn() -> !,
+        name: &'static str,
+        cpu_affinity: Option<usize>,
+        initial_state: ThreadState,
+    ) -> Option<ThreadId> {
         let current_cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
         self.reap_deferred_thread_for_cpu(current_cpu);
 
@@ -809,7 +833,9 @@ impl Scheduler {
                     self.time_slice_ticks,
                     cpu_affinity,
                 );
+                tcb.state = initial_state;
                 self.init_thread_schedule_info(i);
+                self.suspended_threads[i] = initial_state == ThreadState::Blocked;
 
                 // Leak the stack (it will be freed when thread terminates)
                 core::mem::forget(stack);
@@ -821,6 +847,91 @@ impl Scheduler {
         }
 
         None // No available slots
+    }
+
+    pub fn publish_suspended_thread(&mut self, id: ThreadId) -> bool {
+        if id.0 == ThreadId::IDLE.0 || id.0 >= MAX_THREADS {
+            return false;
+        }
+        let Some(next_state) = smros_sched_publish_transition_body!(
+            self.threads[id.0].state,
+            self.suspended_threads[id.0],
+            ThreadState::Blocked,
+            ThreadState::Ready
+        ) else {
+            return false;
+        };
+        self.threads[id.0].state = next_state;
+        self.suspended_threads[id.0] = false;
+        true
+    }
+
+    pub fn block_thread(&mut self, id: ThreadId) -> bool {
+        if id.0 == ThreadId::IDLE.0
+            || id.0 >= MAX_THREADS
+            || self.suspended_threads[id.0]
+            || !matches!(
+                self.threads[id.0].state,
+                ThreadState::Running | ThreadState::Ready
+            )
+        {
+            return false;
+        }
+        self.threads[id.0].state = ThreadState::Blocked;
+        self.threads[id.0].time_slice = 0;
+        true
+    }
+
+    pub fn wake_thread(&mut self, id: ThreadId) -> bool {
+        if id.0 == ThreadId::IDLE.0 || id.0 >= MAX_THREADS || self.suspended_threads[id.0] {
+            return false;
+        }
+        let Some(next_state) = smros_sched_wake_transition_body!(
+            self.threads[id.0].state,
+            ThreadState::Blocked,
+            ThreadState::Ready
+        ) else {
+            return false;
+        };
+        self.threads[id.0].state = next_state;
+        true
+    }
+
+    pub fn terminate_thread(&mut self, id: ThreadId) -> bool {
+        if id.0 == ThreadId::IDLE.0 || id.0 >= MAX_THREADS {
+            return false;
+        }
+        if matches!(
+            self.threads[id.0].state,
+            ThreadState::Empty | ThreadState::Terminated
+        ) {
+            return false;
+        }
+
+        self.suspended_threads[id.0] = false;
+        self.active_threads = self.active_threads.saturating_sub(1);
+        if id == self.current_thread {
+            self.threads[id.0].state = ThreadState::Terminated;
+            self.threads[id.0].time_slice = 0;
+            return true;
+        }
+
+        let stack = self.threads[id.0].stack.0;
+        let stack_size = self.threads[id.0].stack_size;
+        self.threads[id.0] = ThreadControlBlock::new();
+        self.threads[id.0].id = id;
+        self.schedule_info[id.0] = ThreadScheduleInfo::empty();
+
+        if !stack.is_null() {
+            if let Ok(layout) = alloc::alloc::Layout::from_size_align(stack_size, 16) {
+                // SAFETY: the non-current TCB is unreachable and its stack came
+                // from ThreadStack::alloc with this layout.
+                unsafe {
+                    alloc::alloc::dealloc(stack, layout);
+                }
+            }
+        }
+        true
     }
 
     fn init_thread_schedule_info(&mut self, index: usize) {
@@ -1089,6 +1200,7 @@ impl Scheduler {
         self.threads[idx] = ThreadControlBlock::new();
         self.threads[idx].id = ThreadId(idx);
         self.schedule_info[idx] = ThreadScheduleInfo::empty();
+        self.suspended_threads[idx] = false;
     }
 
     fn clear_trace(&mut self) {
@@ -1737,29 +1849,7 @@ impl Scheduler {
 
     /// Terminate the current thread
     pub fn terminate_current(&mut self) {
-        let current_id = self.current_thread;
-        let stack_info = if let Some(tcb) = self.get_thread_mut(current_id) {
-            tcb.state = ThreadState::Terminated;
-            tcb.time_slice = 0;
-            let stack_info = (tcb.stack.0, tcb.stack_size, tcb.id.0);
-            tcb.stack = SendPtr(ptr::null_mut());
-            tcb.stack_size = 0;
-            stack_info
-        } else {
-            (ptr::null_mut(), 0, 0)
-        };
-
-        self.active_threads -= 1;
-
-        // Free stack (only for non-idle threads)
-        if !stack_info.0.is_null() && stack_info.2 != 0 {
-            // SAFETY: stack was allocated with Layout::from_size_align(DEFAULT_STACK_SIZE, 16)
-            if let Ok(layout) = alloc::alloc::Layout::from_size_align(stack_info.1, 16) {
-                unsafe {
-                    alloc::alloc::dealloc(stack_info.0, layout);
-                }
-            }
-        }
+        let _ = self.terminate_thread(self.current_thread);
     }
 
     /// Mark the current thread terminated without freeing its stack.
@@ -1767,16 +1857,7 @@ impl Scheduler {
     /// This is used by EL0 launcher return paths that are still executing on
     /// the launcher stack while selecting the next runnable thread.
     pub fn finish_current_without_stack_free(&mut self) {
-        let current_id = self.current_thread;
-        if let Some(tcb) = self.get_thread_mut(current_id) {
-            if tcb.state != ThreadState::Terminated {
-                tcb.state = ThreadState::Terminated;
-                tcb.time_slice = 0;
-                if self.active_threads > 0 {
-                    self.active_threads -= 1;
-                }
-            }
-        }
+        let _ = self.terminate_thread(self.current_thread);
     }
 
     /// Get tick count

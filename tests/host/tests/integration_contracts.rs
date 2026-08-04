@@ -1720,9 +1720,69 @@ fn scheduler_reclaims_thread_stacks_only_after_a_confirmed_context_switch() {
     }
 
     assert!(scheduler.contains("self.reap_deferred_thread_for_cpu(current_cpu);"));
-    assert!(scheduler.contains("tcb.stack = SendPtr(ptr::null_mut());"));
-    assert!(scheduler.contains("tcb.stack_size = 0;"));
+    let terminate_start = scheduler
+        .find("pub fn terminate_thread(")
+        .expect("targeted termination API");
+    let terminate = braced_body(&scheduler[terminate_start..]);
+    let current = terminate
+        .find("if id == self.current_thread")
+        .expect("current-thread retirement branch");
+    let stack_capture = terminate
+        .find("let stack = self.threads[id.0].stack.0;")
+        .expect("non-current stack capture");
+    assert!(current < stack_capture);
+    assert!(!terminate[current..stack_capture].contains(".stack ="));
+    let unreachable = terminate
+        .find("self.threads[id.0] = ThreadControlBlock::new();")
+        .expect("non-current TCB reset");
+    let deallocate = terminate
+        .find("alloc::alloc::dealloc(stack, layout)")
+        .expect("non-current stack deallocation");
+    assert!(stack_capture < unreachable && unreachable < deallocate);
     assert!(!scheduler.contains("fn reap_terminated_threads("));
+}
+
+#[test]
+fn scheduler_exposes_atomic_linux_task_transitions() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let scheduler = std::fs::read_to_string(repository.join("src/kernel_objects/scheduler.rs"))
+        .expect("read scheduler");
+    let boot = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/boot.rs"))
+        .expect("read AArch64 exception entry");
+
+    for api in [
+        "pub fn create_suspended_thread_on_cpu(",
+        "pub fn publish_suspended_thread(",
+        "pub fn block_thread(",
+        "pub fn wake_thread(",
+        "pub fn terminate_thread(",
+    ] {
+        assert!(scheduler.contains(api), "missing scheduler API {api}");
+    }
+
+    let lower_start = boot
+        .find("irq_handler_lower:")
+        .expect("lower-EL timer handler");
+    let lower_end = boot[lower_start..]
+        .find("// Exception Handler")
+        .expect("end of lower-EL timer handler");
+    let lower = &boot[lower_start..lower_start + lower_end];
+    let timer = lower
+        .find("bl      timer_interrupt_handler")
+        .expect("timer accounting");
+    let signal = lower
+        .find("bl      deliver_linux_timer_signal_from_irq")
+        .expect("timer signal delivery");
+    let preempt = lower
+        .find("bl      check_preemption")
+        .expect("lower-EL preemption");
+    let restore = lower
+        .find("// Restore registers")
+        .expect("exception frame restore");
+    assert!(timer < signal && signal < preempt && preempt < restore);
+
+    let current_handlers = &boot[..lower_start];
+    assert!(!current_handlers.contains("bl      check_preemption"));
 }
 
 #[test]

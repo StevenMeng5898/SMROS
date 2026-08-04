@@ -191,6 +191,28 @@ macro_rules! smros_sched_should_preempt_body {
     }};
 }
 
+#[allow(unused_macros)]
+macro_rules! smros_sched_wake_transition_body {
+    ($state:expr, $blocked:expr, $ready:expr) => {{
+        if $state == $blocked {
+            Some($ready)
+        } else {
+            None
+        }
+    }};
+}
+
+#[allow(unused_macros)]
+macro_rules! smros_sched_publish_transition_body {
+    ($state:expr, $suspended:expr, $blocked:expr, $ready:expr) => {{
+        if $suspended && $state == $blocked {
+            Some($ready)
+        } else {
+            None
+        }
+    }};
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SchedulerSlotReuse {
     Unavailable,

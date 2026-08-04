@@ -455,6 +455,7 @@ irq_handler_lower:
     // Give the Linux compatibility layer a chance to deliver SIGALRM.
     mov     x0, sp
     bl      deliver_linux_timer_signal_from_irq
+    bl      check_preemption
 
     // Restore registers
     ldr     x16, [sp, #0x300]
