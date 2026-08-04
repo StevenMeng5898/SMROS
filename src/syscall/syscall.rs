@@ -2624,7 +2624,7 @@ pub fn reset_linux_signal_timer_state() {
         LINUX_SIGNAL_ACTION_MASKS[signum].store(0, Ordering::SeqCst);
     }
     with_linux_process_pending(|pending| {
-        *pending = LinuxPendingSignals::new();
+        pending.reset_in_place();
     });
     LINUX_SIGNAL_TRAMPOLINE.store(0, Ordering::SeqCst);
     LINUX_REAL_TIMER_DEADLINE_TICK.store(LINUX_TIMER_DISABLED, Ordering::SeqCst);

@@ -2541,7 +2541,7 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         .expect("signal process reset");
     let reset = braced_body(&syscall[reset_start..]);
     assert!(reset.contains("with_linux_process_pending("));
-    assert!(reset.contains("*pending = LinuxPendingSignals::new()"));
+    assert!(reset.contains("pending.reset_in_place()"));
 
     for syscall_name in [
         "pub fn sys_rt_sigprocmask(",
@@ -2880,8 +2880,49 @@ fn linux_standard_pending_records_are_bounded_and_shared_with_process_routing() 
         .contains("pub standard_records: [LinuxPendingSignal; LINUX_REALTIME_SIGNAL_MIN]"));
     assert!(task_logic.contains("pub(crate) fn requeue_front("));
     assert!(syscall.contains("static mut LINUX_PROCESS_PENDING: LinuxPendingSignals"));
-    assert!(syscall.contains("*pending = LinuxPendingSignals::new()"));
+    assert!(syscall.contains("pending.reset_in_place()"));
     assert!(!syscall.contains("static LINUX_PROCESS_PENDING_SIGNALS: AtomicU64"));
+}
+
+#[test]
+fn linux_signal_runtime_resets_large_state_in_place() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let task_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_task_logic_shared.rs"))
+            .expect("read Linux task logic");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux signal runtime");
+
+    assert!(task_logic.contains("pub(crate) fn reset_in_place(&mut self)"));
+    assert!(task_logic.contains("self.pending.reset_in_place()"));
+    assert!(task_logic.contains("signal_states: [LinuxTaskSignalState::new(); N]"));
+    assert_eq!(task_logic.matches("LinuxTaskSignalState::new()").count(), 1);
+    assert!(!task_logic.contains("signal_states.fill(LinuxTaskSignalState::new())"));
+    assert!(!task_logic.contains("= LinuxTaskSignalState::new()"));
+
+    for method in [
+        "pub(crate) fn register_root(",
+        "pub(crate) fn reserve_child(",
+        "pub(crate) fn inherit_signal_mask(",
+        "pub(crate) fn rollback(",
+        "pub(crate) fn exit_with_clear_child_tid(",
+        "pub(crate) fn retire(",
+        "pub(crate) fn reset(&mut self)",
+    ] {
+        let start = task_logic.find(method).expect("signal-state reset method");
+        let body = braced_body(&task_logic[start..]);
+        assert!(
+            body.contains("reset_in_place()"),
+            "{method} must reset signal state in place"
+        );
+    }
+
+    let process_reset_start = syscall
+        .find("pub fn reset_linux_signal_timer_state()")
+        .expect("process pending reset");
+    let process_reset = braced_body(&syscall[process_reset_start..]);
+    assert!(process_reset.contains("pending.reset_in_place()"));
+    assert!(!syscall.contains("*pending = LinuxPendingSignals::new()"));
 }
 
 #[test]

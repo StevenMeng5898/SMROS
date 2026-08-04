@@ -688,6 +688,138 @@ mod linux_task_logic {
     }
 
     #[test]
+    fn pending_and_task_signal_state_reset_in_place_matches_new_state() {
+        let mut pending = LinuxPendingSignals::new();
+        pending.queue(signal_record(10, 0x10)).unwrap();
+        pending.queue(signal_record(35, 0x35)).unwrap();
+        assert!(matches!(
+            pending.reserve_direct(signal_record(11, 0x11)).unwrap(),
+            Some(LinuxPendingSignalReservation::Standard(11))
+        ));
+        assert!(matches!(
+            pending.reserve_direct(signal_record(36, 0x36)).unwrap(),
+            Some(LinuxPendingSignalReservation::Realtime(_))
+        ));
+        assert_ne!(pending.standard_pending, 0);
+        assert_ne!(pending.standard_reserved, 0);
+        assert_ne!(pending.realtime_len, 0);
+        assert_ne!(pending.realtime_reserved, 0);
+
+        pending.reset_in_place();
+        let expected_pending = LinuxPendingSignals::new();
+        assert_eq!(pending.standard_pending, expected_pending.standard_pending);
+        assert_eq!(
+            pending.standard_reserved,
+            expected_pending.standard_reserved
+        );
+        assert_eq!(pending.standard_records, expected_pending.standard_records);
+        assert_eq!(pending.realtime_pending, expected_pending.realtime_pending);
+        assert_eq!(
+            pending.realtime_sequences,
+            expected_pending.realtime_sequences
+        );
+        assert_eq!(pending.realtime_len, expected_pending.realtime_len);
+        assert_eq!(
+            pending.realtime_reservations,
+            expected_pending.realtime_reservations
+        );
+        assert_eq!(
+            pending.realtime_reserved,
+            expected_pending.realtime_reserved
+        );
+        assert_eq!(
+            pending.next_realtime_sequence,
+            expected_pending.next_realtime_sequence
+        );
+
+        let mut state = LinuxTaskSignalState::new();
+        state.mask = linux_signal_bit(12);
+        state.alt_stack = LinuxSignalStack {
+            sp: 0x4000,
+            flags: LINUX_SS_ONSTACK as u32,
+            _padding: 0xfeed_beef,
+            size: 0x2000,
+        };
+        state.queue(signal_record(12, 0x12)).unwrap();
+        state.queue(signal_record(37, 0x37)).unwrap();
+        assert!(state
+            .pending
+            .reserve_direct(signal_record(13, 0x13))
+            .unwrap()
+            .is_some());
+        assert!(state
+            .pending
+            .reserve_direct(signal_record(38, 0x38))
+            .unwrap()
+            .is_some());
+        let restart = LinuxRestartBlock {
+            syscall_number: 98,
+            arguments: [1, 2, 3, 4, 5, 6],
+            svc_address: 0x8000,
+            timeout: LinuxRestartTimeout::Deadline {
+                ticks: 99,
+                realtime: true,
+            },
+        };
+        assert_eq!(
+            state.push_frame(LinuxSignalFrame {
+                regs: [0x55; 32],
+                return_pc: 0x9000,
+                previous_mask: 0xaa,
+                user_sp: 0xa000,
+                previous_stack_flags: LINUX_SS_ONSTACK,
+                restart: Some(restart),
+            }),
+            Some(0)
+        );
+        assert!(state.request_sigreturn());
+        state.signal_wait = Some(LinuxSignalWait::suspend(linux_signal_bit(14), 0xbb));
+        state.restart_block = Some(restart);
+        state.suspend_restore_mask = Some(0xcc);
+
+        state.reset_in_place();
+        let expected_state = LinuxTaskSignalState::new();
+        assert_eq!(state.mask, expected_state.mask);
+        assert_eq!(state.pending.standard_pending, 0);
+        assert_eq!(state.pending.standard_reserved, 0);
+        assert_eq!(
+            state.pending.standard_records,
+            expected_state.pending.standard_records
+        );
+        assert_eq!(
+            state.pending.realtime_pending,
+            expected_state.pending.realtime_pending
+        );
+        assert_eq!(
+            state.pending.realtime_sequences,
+            expected_state.pending.realtime_sequences
+        );
+        assert_eq!(state.pending.realtime_len, 0);
+        assert_eq!(
+            state.pending.realtime_reservations,
+            expected_state.pending.realtime_reservations
+        );
+        assert_eq!(state.pending.realtime_reserved, 0);
+        assert_eq!(
+            state.pending.next_realtime_sequence,
+            expected_state.pending.next_realtime_sequence
+        );
+        assert_eq!(state.alt_stack, expected_state.alt_stack);
+        assert_eq!(state.frames, expected_state.frames);
+        assert_eq!(state.frame_depth, expected_state.frame_depth);
+        assert_eq!(
+            state.sigreturn_requested,
+            expected_state.sigreturn_requested
+        );
+        assert_eq!(state.signal_wait, expected_state.signal_wait);
+        assert_eq!(state.restart_block, expected_state.restart_block);
+        assert_eq!(
+            state.suspend_restore_mask,
+            expected_state.suspend_restore_mask
+        );
+    }
+
+    #[test]
     fn signal_disposition_centralizes_ignored_and_default_actions() {
         const SIG_DFL: u64 = 0;
         const SIG_IGN: u64 = 1;

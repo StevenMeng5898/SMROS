@@ -334,6 +334,26 @@ impl LinuxPendingSignals {
         }
     }
 
+    pub(crate) fn reset_in_place(&mut self) {
+        self.standard_pending = 0;
+        self.standard_reserved = 0;
+        for record in &mut self.standard_records {
+            record.signum = 0;
+            record.has_info = false;
+            record.info.fill(0);
+        }
+        for record in &mut self.realtime_pending {
+            record.signum = 0;
+            record.has_info = false;
+            record.info.fill(0);
+        }
+        self.realtime_sequences.fill(0);
+        self.realtime_len = 0;
+        self.realtime_reservations.fill(0);
+        self.realtime_reserved = 0;
+        self.next_realtime_sequence = 1;
+    }
+
     fn allocate_realtime_sequence(&mut self) -> Result<u64, LinuxSignalRouteError> {
         let sequence = self.next_realtime_sequence;
         if sequence == 0 {
@@ -827,6 +847,28 @@ impl LinuxTaskSignalState {
         }
     }
 
+    pub(crate) fn reset_in_place(&mut self) {
+        self.mask = 0;
+        self.pending.reset_in_place();
+        self.alt_stack.sp = 0;
+        self.alt_stack.flags = LINUX_SS_DISABLE as u32;
+        self.alt_stack._padding = 0;
+        self.alt_stack.size = 0;
+        for frame in &mut self.frames {
+            frame.regs.fill(0);
+            frame.return_pc = 0;
+            frame.previous_mask = 0;
+            frame.user_sp = 0;
+            frame.previous_stack_flags = LINUX_SS_DISABLE;
+            frame.restart = None;
+        }
+        self.frame_depth = 0;
+        self.sigreturn_requested = false;
+        self.signal_wait = None;
+        self.restart_block = None;
+        self.suspend_restore_mask = None;
+    }
+
     pub(crate) fn peek_unblocked(&self) -> Option<LinuxPendingSignal> {
         self.pending
             .peek_eligible(|signum| self.mask & linux_signal_bit(signum) == 0)
@@ -1117,7 +1159,7 @@ impl<const N: usize> LinuxTaskTable<N> {
             state: LinuxTaskState::Runnable,
             block_reason: LinuxBlockReason::None,
         };
-        self.signal_states[slot] = LinuxTaskSignalState::new();
+        self.signal_states[slot].reset_in_place();
         self.clear_child_tids[slot] = 0;
         Ok(LINUX_ROOT_TID)
     }
@@ -1154,7 +1196,7 @@ impl<const N: usize> LinuxTaskTable<N> {
             state: LinuxTaskState::Starting,
             block_reason: LinuxBlockReason::None,
         };
-        self.signal_states[slot] = LinuxTaskSignalState::new();
+        self.signal_states[slot].reset_in_place();
         self.clear_child_tids[slot] = 0;
         Some(reservation)
     }
@@ -1180,10 +1222,9 @@ impl<const N: usize> LinuxTaskTable<N> {
             return false;
         }
 
-        self.signal_states[reservation.slot] = LinuxTaskSignalState {
-            mask: self.signal_states[parent_slot].mask,
-            ..LinuxTaskSignalState::new()
-        };
+        let parent_mask = self.signal_states[parent_slot].mask;
+        self.signal_states[reservation.slot].reset_in_place();
+        self.signal_states[reservation.slot].mask = parent_mask;
         true
     }
 
@@ -1216,7 +1257,7 @@ impl<const N: usize> LinuxTaskTable<N> {
             return false;
         }
         *task = LinuxTaskCore::EMPTY;
-        self.signal_states[reservation.slot] = LinuxTaskSignalState::new();
+        self.signal_states[reservation.slot].reset_in_place();
         self.clear_child_tids[reservation.slot] = 0;
         true
     }
@@ -1562,7 +1603,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         let task = &mut self.tasks[slot];
         task.state = LinuxTaskState::Exited;
         task.block_reason = LinuxBlockReason::None;
-        self.signal_states[slot] = LinuxTaskSignalState::new();
+        self.signal_states[slot].reset_in_place();
         Some(core::mem::replace(&mut self.clear_child_tids[slot], 0))
     }
 
@@ -1594,14 +1635,16 @@ impl<const N: usize> LinuxTaskTable<N> {
             return false;
         }
         self.tasks[slot] = LinuxTaskCore::EMPTY;
-        self.signal_states[slot] = LinuxTaskSignalState::new();
+        self.signal_states[slot].reset_in_place();
         self.clear_child_tids[slot] = 0;
         true
     }
 
     pub(crate) fn reset(&mut self) {
         self.tasks.fill(LinuxTaskCore::EMPTY);
-        self.signal_states.fill(LinuxTaskSignalState::new());
+        for signal_state in &mut self.signal_states {
+            signal_state.reset_in_place();
+        }
         self.clear_child_tids.fill(0);
         self.next_tid = LINUX_ROOT_TID + 1;
         self.exhausted = false;
