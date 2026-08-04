@@ -46,6 +46,7 @@ use super::address_logic::{
     checked_end, fixed_linux_mmap_request_ok as shared_fixed_linux_mmap_request_ok,
     page_aligned as shared_page_aligned, range_overlaps, range_within_window,
 };
+use super::linux_futex;
 #[cfg(target_arch = "aarch64")]
 use super::linux_syscall_context;
 use super::linux_task;
@@ -126,6 +127,7 @@ pub enum SysError {
     EINVAL = 22,
     ENOSYS = 38,
     ENOTSOCK = 88,
+    ETIMEDOUT = 110,
 }
 
 /// Syscall result type
@@ -2304,6 +2306,7 @@ pub fn reset_linux_container_state() {
 }
 
 pub fn reset_linux_process_state() {
+    linux_futex::reset();
     linux_task::reset();
     let fds = memory_state()
         .linux_fds
@@ -5633,17 +5636,13 @@ pub fn sys_block_in_kernel() -> SysResult {
 
 pub fn sys_futex(
     uaddr: usize,
-    _op: u32,
-    _val: u32,
-    _val2: usize,
-    _uaddr2: usize,
-    _val3: u32,
+    op: u32,
+    val: u32,
+    val2: usize,
+    uaddr2: usize,
+    val3: u32,
 ) -> SysResult {
-    if uaddr == 0 {
-        Err(SysError::EFAULT)
-    } else {
-        Ok(0)
-    }
+    linux_futex::sys_futex(uaddr, op, val, val2, uaddr2, val3)
 }
 
 fn linux_iov_write_compat(handle: u32, vector: usize, vector_size: usize) -> ZxResult<usize> {

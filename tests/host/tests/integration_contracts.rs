@@ -1970,6 +1970,88 @@ fn aarch64_clone_child_is_validated_before_publication() {
 }
 
 #[test]
+fn linux_futex_waits_block_and_wake_scheduler_tasks() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let module = std::fs::read_to_string(repository.join("src/syscall/mod.rs"))
+        .expect("read syscall module declarations");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let futex = std::fs::read_to_string(repository.join("src/syscall/linux_futex.rs"))
+        .expect("read Linux futex runtime");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+    let main = std::fs::read_to_string(repository.join("src/main.rs"))
+        .expect("read timer interrupt boundary");
+
+    assert!(module.contains("pub(crate) mod linux_futex;"));
+    assert!(task.contains("pub(crate) fn block_current("));
+    assert!(task.contains("pub(crate) fn wake_blocked("));
+    assert!(futex.contains("FutexQueue<"));
+    assert!(futex.contains("core::ptr::read(uaddr as *const u32)"));
+    assert!(futex.contains("linux_task::block_current(LinuxBlockReason::Futex)"));
+    assert!(futex.contains("scheduler::schedule()"));
+    assert!(futex.contains("linux_task::wake_blocked("));
+
+    let wait_start = futex.find("fn wait(").expect("Linux futex wait helper");
+    let wait_end = futex[wait_start..]
+        .find("fn read_deadline(")
+        .expect("end of Linux futex wait helper");
+    let wait = &futex[wait_start..wait_start + wait_end];
+    let mismatch = wait
+        .find("if !futex_wait_value_matches(observed, expected)")
+        .expect("futex compare mismatch branch");
+    let deadline_read = wait[mismatch..]
+        .find("let now =")
+        .expect("end of futex compare mismatch branch");
+    assert!(wait[mismatch..mismatch + deadline_read].contains("Err(SysError::EAGAIN)"));
+    let schedule = wait
+        .find("scheduler::schedule();")
+        .expect("wait schedules after blocking");
+    let after_schedule = &wait[schedule..];
+    assert!(after_schedule.contains("queue_mut().remove(tid, scheduler_thread.0)"));
+    assert!(after_schedule.contains("linux_task::wake_blocked("));
+    assert!(wait.contains("Some(FutexWaitOutcome::Woken) => Ok(0)"));
+    assert!(wait.contains("Some(FutexWaitOutcome::TimedOut) => Err(SysError::ETIMEDOUT)"));
+    assert!(wait.contains("Some(FutexWaitOutcome::Interrupted) => Err(SysError::EINTR)"));
+
+    let futex_syscall = syscall
+        .find("pub fn sys_futex(")
+        .expect("Linux futex syscall");
+    let futex_syscall_end = syscall[futex_syscall..]
+        .find("fn linux_iov_write_compat(")
+        .expect("end of Linux futex syscall");
+    let futex_syscall = &syscall[futex_syscall..futex_syscall + futex_syscall_end];
+    assert!(futex_syscall.contains("linux_futex::sys_futex("));
+
+    let reset = syscall
+        .find("pub fn reset_linux_process_state()")
+        .expect("Linux process reset");
+    let reset = &syscall[reset..];
+    let futex_reset = reset.find("linux_futex::reset()").expect("futex reset");
+    let task_reset = reset.find("linux_task::reset()").expect("task reset");
+    assert!(futex_reset < task_reset);
+
+    let timer_start = main
+        .find("extern \"C\" fn timer_interrupt_handler()")
+        .expect("timer interrupt handler");
+    let timer_end = main[timer_start..]
+        .find("extern \"C\" fn check_preemption()")
+        .expect("end of timer handler");
+    let timer = &main[timer_start..timer_start + timer_end];
+    assert!(timer.contains("if current_cpu_id() == 0"));
+    let scheduler_tick = timer
+        .find("scheduler.on_timer_tick()")
+        .expect("scheduler tick accounting");
+    let futex_tick = timer
+        .find("linux_futex::on_timer_tick(")
+        .expect("Linux futex deadline expiry");
+    let interrupt_end = timer
+        .find("end_of_interrupt(interrupt_id)")
+        .expect("timer interrupt completion");
+    assert!(scheduler_tick < futex_tick && futex_tick < interrupt_end);
+}
+
+#[test]
 fn aarch64_el0_context_abi_is_complete() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let boot = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/boot.rs"))

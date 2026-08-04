@@ -86,6 +86,59 @@ pub(crate) fn lookup_tid(tid: usize) -> Option<LinuxTaskCore> {
     with_runtime(|runtime| runtime.tasks.by_tid(tid))
 }
 
+pub(crate) fn block_current(reason: LinuxBlockReason) -> Result<LinuxTaskCore, SysError> {
+    if reason == LinuxBlockReason::None {
+        return Err(SysError::EINVAL);
+    }
+    with_runtime(|runtime| {
+        let scheduler_thread = scheduler::scheduler().current();
+        let task = runtime
+            .tasks
+            .by_scheduler(scheduler_thread.0)
+            .ok_or(SysError::ESRCH)?;
+        if !runtime.tasks.block(task.tid, scheduler_thread.0, reason) {
+            return Err(SysError::EAGAIN);
+        }
+        if !scheduler::scheduler().block_thread(scheduler_thread) {
+            let _ = runtime.tasks.wake(task.tid, scheduler_thread.0);
+            return Err(SysError::EAGAIN);
+        }
+        Ok(task)
+    })
+}
+
+pub(crate) fn wake_blocked(tid: usize, scheduler_thread: usize, reason: LinuxBlockReason) -> bool {
+    if reason == LinuxBlockReason::None {
+        return false;
+    }
+    with_runtime(|runtime| {
+        let Some(task) = runtime.tasks.by_tid(tid) else {
+            return false;
+        };
+        if task.scheduler_thread != scheduler_thread
+            || task.state != LinuxTaskState::Blocked
+            || task.block_reason != reason
+        {
+            return false;
+        }
+        let scheduler_id = ThreadId(scheduler_thread);
+        if scheduler::scheduler()
+            .get_thread(scheduler_id)
+            .map(|thread| thread.state)
+            != Some(thread::ThreadState::Blocked)
+            || !runtime.tasks.wake(tid, scheduler_thread)
+        {
+            return false;
+        }
+        if scheduler::scheduler().wake_thread(scheduler_id) {
+            true
+        } else {
+            let _ = runtime.tasks.block(tid, scheduler_thread, reason);
+            false
+        }
+    })
+}
+
 pub(crate) fn reset() {
     with_runtime(|runtime| {
         let current = scheduler::scheduler().current();

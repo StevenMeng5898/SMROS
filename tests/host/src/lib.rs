@@ -479,6 +479,235 @@ mod linux_task_logic {
     }
 }
 
+mod linux_futex_logic {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/linux_futex_logic_shared.rs"
+    ));
+
+    fn waiter(
+        tid: usize,
+        scheduler_thread: usize,
+        address: usize,
+        bitset: u32,
+        deadline: Option<FutexDeadline>,
+    ) -> FutexWaiter {
+        FutexWaiter {
+            address,
+            bitset,
+            tid,
+            scheduler_thread,
+            deadline,
+            sequence: 0,
+            outcome: FutexWaitOutcome::Waiting,
+        }
+    }
+
+    #[test]
+    fn futex_decoder_accepts_only_the_supported_linux_operation_matrix() {
+        assert_eq!(FUTEX_WAIT, 0);
+        assert_eq!(FUTEX_WAKE, 1);
+        assert_eq!(FUTEX_WAIT_BITSET, 9);
+        assert_eq!(FUTEX_WAKE_BITSET, 10);
+        assert_eq!(FUTEX_PRIVATE_FLAG, 128);
+        assert_eq!(FUTEX_CLOCK_REALTIME, 256);
+        assert_eq!(FUTEX_CMD_MASK, 0x7f);
+
+        assert_eq!(
+            decode_futex_op(FUTEX_WAIT | FUTEX_PRIVATE_FLAG),
+            Some(DecodedFutexOp {
+                command: FutexCommand::Wait,
+                private: true,
+                realtime: false,
+            })
+        );
+        assert_eq!(
+            decode_futex_op(FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME),
+            Some(DecodedFutexOp {
+                command: FutexCommand::WaitBitset,
+                private: true,
+                realtime: true,
+            })
+        );
+        assert_eq!(
+            decode_futex_op(FUTEX_WAKE),
+            Some(DecodedFutexOp {
+                command: FutexCommand::Wake,
+                private: false,
+                realtime: false,
+            })
+        );
+        assert_eq!(
+            decode_futex_op(FUTEX_WAKE_BITSET),
+            Some(DecodedFutexOp {
+                command: FutexCommand::WakeBitset,
+                private: false,
+                realtime: false,
+            })
+        );
+        assert_eq!(decode_futex_op(FUTEX_WAIT | FUTEX_CLOCK_REALTIME), None);
+        assert_eq!(decode_futex_op(FUTEX_WAKE | FUTEX_CLOCK_REALTIME), None);
+        assert_eq!(
+            decode_futex_op(FUTEX_WAKE_BITSET | FUTEX_CLOCK_REALTIME),
+            None
+        );
+        assert_eq!(decode_futex_op(2), None);
+        assert_eq!(decode_futex_op(FUTEX_WAIT | 0x400), None);
+    }
+
+    #[test]
+    fn futex_wait_inputs_reject_bad_addresses_bitsets_and_timespecs() {
+        assert!(futex_address_valid(0x1000));
+        assert!(!futex_address_valid(0));
+        assert!(!futex_address_valid(0x1002));
+        assert!(!futex_address_valid(usize::MAX - 1));
+        assert!(futex_bitset_valid(FUTEX_BITSET_MATCH_ANY));
+        assert!(!futex_bitset_valid(0));
+        assert!(futex_timespec_valid(0, 0));
+        assert!(futex_timespec_valid(1, 999_999_999));
+        assert!(!futex_timespec_valid(-1, 0));
+        assert!(!futex_timespec_valid(0, -1));
+        assert!(!futex_timespec_valid(0, 1_000_000_000));
+        assert!(futex_wait_value_matches(17, 17));
+        assert!(!futex_wait_value_matches(16, 17));
+    }
+
+    #[test]
+    fn futex_queue_wakes_matching_waiters_in_fifo_order() {
+        let mut queue = FutexQueue::<4>::new();
+        queue
+            .push(waiter(2, 8, 0x1000, 0x1, None))
+            .expect("first waiter");
+        queue
+            .push(waiter(3, 9, 0x1000, 0x2, None))
+            .expect("second waiter");
+        queue
+            .push(waiter(4, 10, 0x1000, 0x2, None))
+            .expect("third waiter");
+
+        assert_eq!(queue.wake(0x1000, 1, 0x2), [Some((3, 9)), None, None, None]);
+        assert_eq!(
+            queue.wake(0x1000, 2, FUTEX_BITSET_MATCH_ANY),
+            [Some((2, 8)), Some((4, 10)), None, None]
+        );
+        assert_eq!(queue.take_outcome(3, 99), None);
+        assert_eq!(queue.take_outcome(3, 9), Some(FutexWaitOutcome::Woken));
+    }
+
+    #[test]
+    fn futex_interrupt_requires_the_complete_waiter_identity() {
+        let mut queue = FutexQueue::<2>::new();
+        queue
+            .push(waiter(2, 8, 0x1000, FUTEX_BITSET_MATCH_ANY, None))
+            .expect("waiter");
+
+        assert!(!queue.interrupt(2, 99));
+        assert_eq!(queue.take_outcome(2, 99), None);
+        assert!(!queue.remove(2, 99));
+        assert!(queue.interrupt(2, 8));
+        assert_eq!(
+            queue.take_outcome(2, 8),
+            Some(FutexWaitOutcome::Interrupted)
+        );
+    }
+
+    #[test]
+    fn futex_deadlines_round_up_expire_on_the_selected_clock_and_reset_drains() {
+        assert_eq!(futex_timespec_to_ticks_ceil(0, 1, 10_000_000), Some(1));
+        assert_eq!(
+            futex_timespec_to_ticks_ceil(0, 10_000_000, 10_000_000),
+            Some(1)
+        );
+        assert_eq!(
+            futex_timespec_to_ticks_ceil(0, 10_000_001, 10_000_000),
+            Some(2)
+        );
+
+        let mut queue = FutexQueue::<4>::new();
+        queue
+            .push(waiter(
+                2,
+                8,
+                0x1000,
+                FUTEX_BITSET_MATCH_ANY,
+                Some(FutexDeadline {
+                    ticks: 5,
+                    clock: FutexClock::Monotonic,
+                }),
+            ))
+            .unwrap();
+        queue
+            .push(waiter(
+                3,
+                9,
+                0x2000,
+                FUTEX_BITSET_MATCH_ANY,
+                Some(FutexDeadline {
+                    ticks: 12,
+                    clock: FutexClock::Realtime,
+                }),
+            ))
+            .unwrap();
+
+        assert_eq!(queue.expire(4, 11), [None, None, None, None]);
+        assert_eq!(queue.expire(5, 11), [Some((2, 8)), None, None, None]);
+        assert_eq!(queue.expire(5, 12), [Some((3, 9)), None, None, None]);
+        assert_eq!(queue.take_outcome(2, 99), None);
+        assert_eq!(queue.take_outcome(2, 8), Some(FutexWaitOutcome::TimedOut));
+        assert_eq!(queue.reset(), 1);
+        assert_eq!(queue.len(), 0);
+    }
+
+    #[test]
+    fn futex_wait_timeout_modes_distinguish_relative_and_absolute_deadlines() {
+        let now = 100;
+        let tick_nanoseconds = 10_000_000;
+
+        assert_eq!(
+            futex_deadline_from_timeout(
+                FutexCommand::Wait,
+                false,
+                now,
+                0,
+                20_000_000,
+                tick_nanoseconds,
+            ),
+            Some(FutexDeadline {
+                ticks: 102,
+                clock: FutexClock::Monotonic,
+            })
+        );
+        assert_eq!(
+            futex_deadline_from_timeout(
+                FutexCommand::WaitBitset,
+                false,
+                now,
+                0,
+                20_000_000,
+                tick_nanoseconds,
+            ),
+            Some(FutexDeadline {
+                ticks: 2,
+                clock: FutexClock::Monotonic,
+            })
+        );
+        assert_eq!(
+            futex_deadline_from_timeout(
+                FutexCommand::WaitBitset,
+                true,
+                now,
+                0,
+                20_000_000,
+                tick_nanoseconds,
+            ),
+            Some(FutexDeadline {
+                ticks: 2,
+                clock: FutexClock::Realtime,
+            })
+        );
+    }
+}
+
 mod kernel_object_logic {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

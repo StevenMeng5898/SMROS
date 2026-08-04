@@ -3,6 +3,7 @@ use vstd::prelude::*;
 verus! {
 
 include!("../../../src/syscall/address_logic_shared.rs");
+include!("../../../src/syscall/linux_futex_logic_shared.rs");
 include!("../../../src/syscall/linux_task_logic_shared.rs");
 include!("../../../src/syscall/syscall_bridge_shared.rs");
 include!("../../../src/syscall/syscall_logic_shared.rs");
@@ -2197,6 +2198,23 @@ proof fn linux_task_lifecycle_smoke() {
     assert(!smros_linux_task_publish_transition_allowed_body!(
         exited, runnable, starting, runnable
     ));
+}
+
+proof fn linux_futex_rules_smoke() {
+    assert(smros_linux_futex_command_supported_body!(0u32));
+    assert(smros_linux_futex_command_supported_body!(1u32));
+    assert(smros_linux_futex_command_supported_body!(9u32));
+    assert(smros_linux_futex_command_supported_body!(10u32));
+    assert(!smros_linux_futex_command_supported_body!(2u32));
+
+    assert(smros_linux_futex_realtime_allowed_body!(0u32, false));
+    assert(!smros_linux_futex_realtime_allowed_body!(0u32, true));
+    assert(smros_linux_futex_realtime_allowed_body!(9u32, true));
+    assert(smros_linux_futex_bitset_matches_body!(0x2u32, 0x3u32)) by(bit_vector);
+    assert(!smros_linux_futex_bitset_matches_body!(0x2u32, 0x1u32)) by(bit_vector);
+    assert(!smros_linux_futex_bitset_matches_body!(0u32, u32::MAX)) by(bit_vector);
+    assert(!smros_linux_futex_deadline_expired_body!(9u64, 10u64));
+    assert(smros_linux_futex_deadline_expired_body!(10u64, 10u64));
 }
 
 } // verus!
