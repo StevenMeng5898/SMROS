@@ -175,6 +175,15 @@ context_switch_start:
     br      x16
 .size context_switch_start, . - context_switch_start
 
+// Ordinary newly created threads reach this path through context_switch, whose
+// resumed-context path intentionally leaves IRQs masked. x19 holds the entry.
+.globl thread_start_trampoline
+.type thread_start_trampoline, %function
+thread_start_trampoline:
+    msr     daifclr, #2
+    br      x19
+.size thread_start_trampoline, . - thread_start_trampoline
+
 .globl start_linux_clone_child
 .type start_linux_clone_child, %function
 start_linux_clone_child:

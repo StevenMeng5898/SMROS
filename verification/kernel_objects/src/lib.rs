@@ -322,6 +322,37 @@ spec fn scheduler_cpu_allowed_spec(has_affinity: bool, affinity: int, cpu_id: in
     !has_affinity || affinity == cpu_id
 }
 
+spec fn scheduler_wake_transition_spec(state: int) -> Option<int> {
+    if state == THREAD_BLOCKED as int {
+        Some(THREAD_READY as int)
+    } else {
+        Option::<int>::None
+    }
+}
+
+spec fn scheduler_publish_transition_spec(state: int, suspended: bool) -> Option<int> {
+    if suspended && state == THREAD_BLOCKED as int {
+        Some(THREAD_READY as int)
+    } else {
+        Option::<int>::None
+    }
+}
+
+spec fn scheduler_terminate_transition_spec(
+    id: int,
+    current: int,
+    state: int,
+) -> Option<bool> {
+    if id == THREAD_ID_IDLE as int
+        || state == THREAD_EMPTY as int
+        || state == THREAD_TERMINATED as int
+    {
+        Option::<bool>::None
+    } else {
+        Some(id == current)
+    }
+}
+
 spec fn sched_policy_from_match_flags_spec(
     rr_match: bool,
     round_robin_match: bool,
@@ -1761,6 +1792,45 @@ fn ko_scheduler_cpu_allowed(has_affinity: bool, affinity: usize, cpu_id: usize) 
     smros_ko_scheduler_cpu_allowed_body!(has_affinity, affinity, cpu_id)
 }
 
+fn scheduler_wake_transition(state: u8) -> (out: Option<u8>)
+    ensures
+        match out {
+            Some(next) => scheduler_wake_transition_spec(state as int) == Some(next as int),
+            None => scheduler_wake_transition_spec(state as int) == Option::<int>::None,
+        },
+{
+    smros_sched_wake_transition_body!(state, THREAD_BLOCKED, THREAD_READY)
+}
+
+fn scheduler_publish_transition(state: u8, suspended: bool) -> (out: Option<u8>)
+    ensures
+        match out {
+            Some(next) => scheduler_publish_transition_spec(state as int, suspended)
+                == Some(next as int),
+            None => scheduler_publish_transition_spec(state as int, suspended)
+                == Option::<int>::None,
+        },
+{
+    smros_sched_publish_transition_body!(state, suspended, THREAD_BLOCKED, THREAD_READY)
+}
+
+fn scheduler_terminate_transition(
+    id: usize,
+    current: usize,
+    state: u8,
+) -> (out: Option<bool>)
+    ensures
+        out == scheduler_terminate_transition_spec(id as int, current as int, state as int),
+{
+    smros_sched_terminate_transition_body!(
+        id,
+        current,
+        state,
+        THREAD_EMPTY,
+        THREAD_TERMINATED
+    )
+}
+
 fn sched_policy_from_match_flags(
     rr_match: bool,
     round_robin_match: bool,
@@ -2431,12 +2501,40 @@ proof fn thread_state_smoke() {
     assert(!thread_is_runnable_spec(THREAD_TERMINATED as int));
 }
 
-proof fn scheduler_smoke() {
+fn scheduler_smoke() {
     assert(scheduler_should_preempt_spec(0, 2));
     assert(!scheduler_should_preempt_spec(1, 2));
     assert(!scheduler_should_preempt_spec(0, 1));
     assert(scheduler_can_run_spec(1, 2, true));
     assert(!scheduler_can_run_spec(0, 2, true));
+
+    let wake_blocked = scheduler_wake_transition(THREAD_BLOCKED);
+    let wake_empty = scheduler_wake_transition(THREAD_EMPTY);
+    let wake_ready = scheduler_wake_transition(THREAD_READY);
+    let wake_running = scheduler_wake_transition(THREAD_RUNNING);
+    let wake_terminated = scheduler_wake_transition(THREAD_TERMINATED);
+    let publish_blocked = scheduler_publish_transition(THREAD_BLOCKED, true);
+    let publish_not_suspended = scheduler_publish_transition(THREAD_BLOCKED, false);
+    let publish_running = scheduler_publish_transition(THREAD_RUNNING, true);
+    let terminate_current = scheduler_terminate_transition(2, 2, THREAD_RUNNING);
+    let terminate_other = scheduler_terminate_transition(2, 1, THREAD_BLOCKED);
+    let terminate_idle = scheduler_terminate_transition(0, 1, THREAD_READY);
+    let terminate_empty = scheduler_terminate_transition(2, 1, THREAD_EMPTY);
+    let terminate_terminated = scheduler_terminate_transition(2, 1, THREAD_TERMINATED);
+
+    assert(wake_blocked == Some(THREAD_READY));
+    assert(wake_empty == Option::<u8>::None);
+    assert(wake_ready == Option::<u8>::None);
+    assert(wake_running == Option::<u8>::None);
+    assert(wake_terminated == Option::<u8>::None);
+    assert(publish_blocked == Some(THREAD_READY));
+    assert(publish_not_suspended == Option::<u8>::None);
+    assert(publish_running == Option::<u8>::None);
+    assert(terminate_current == Some(true));
+    assert(terminate_other == Some(false));
+    assert(terminate_idle == Option::<bool>::None);
+    assert(terminate_empty == Option::<bool>::None);
+    assert(terminate_terminated == Option::<bool>::None);
 }
 
 fn fifo_option_masks_smoke() {

@@ -1725,7 +1725,7 @@ fn scheduler_reclaims_thread_stacks_only_after_a_confirmed_context_switch() {
         .expect("targeted termination API");
     let terminate = braced_body(&scheduler[terminate_start..]);
     let current = terminate
-        .find("if id == self.current_thread")
+        .find("if defer_current")
         .expect("current-thread retirement branch");
     let stack_capture = terminate
         .find("let stack = self.threads[id.0].stack.0;")
@@ -1749,6 +1749,9 @@ fn scheduler_exposes_atomic_linux_task_transitions() {
         .expect("read scheduler");
     let boot = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/boot.rs"))
         .expect("read AArch64 exception entry");
+    let shared =
+        std::fs::read_to_string(repository.join("src/kernel_objects/scheduler_logic_shared.rs"))
+            .expect("read shared scheduler transitions");
 
     for api in [
         "pub fn create_suspended_thread_on_cpu(",
@@ -1759,6 +1762,18 @@ fn scheduler_exposes_atomic_linux_task_transitions() {
     ] {
         assert!(scheduler.contains(api), "missing scheduler API {api}");
     }
+    assert!(shared.contains("smros_sched_terminate_transition_body"));
+    let terminate_start = scheduler
+        .find("pub fn terminate_thread(")
+        .expect("targeted termination API");
+    let terminate = braced_body(&scheduler[terminate_start..]);
+    let gate = terminate
+        .find("smros_sched_terminate_transition_body!")
+        .expect("shared termination gate");
+    let accounting = terminate
+        .find("self.active_threads = self.active_threads.saturating_sub(1);")
+        .expect("one-time active-thread accounting");
+    assert!(gate < accounting);
 
     let lower_start = boot
         .find("irq_handler_lower:")
@@ -2172,6 +2187,8 @@ fn aarch64_context_switch_preserves_irq_mask_until_the_resumed_owner_restores_it
             .expect("read AArch64 context switch");
     let scheduler = std::fs::read_to_string(repository.join("src/kernel_objects/scheduler.rs"))
         .expect("read scheduler");
+    let thread = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/thread.rs"))
+        .expect("read AArch64 thread context");
 
     let switch_start = switch
         .find("context_switch_start:")
@@ -2186,6 +2203,19 @@ fn aarch64_context_switch_preserves_irq_mask_until_the_resumed_owner_restores_it
         first_switch.contains("bic     x17, x17, #0x80"),
         "the first context still needs to enable IRQs explicitly"
     );
+    let trampoline = switch
+        .find("thread_start_trampoline:")
+        .expect("ordinary first-run thread trampoline");
+    let trampoline = &switch[trampoline..];
+    let irq_enable = trampoline
+        .find("msr     daifclr, #2")
+        .expect("first-run thread enables IRQs");
+    let entry_branch = trampoline
+        .find("br      x19")
+        .expect("first-run thread transfers to its entry");
+    assert!(irq_enable < entry_branch);
+    assert!(thread.contains("x19: entry as *const () as u64"));
+    assert!(thread.contains("pc: thread_start_trampoline as *const () as u64"));
 
     for (entry, next_entry) in [
         ("pub fn schedule()", "fn current_logical_cpu("),

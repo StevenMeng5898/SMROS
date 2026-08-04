@@ -80,7 +80,7 @@ impl CpuContext {
             x16: 0,
             x17: 0,
             x18: 0,
-            x19: 0,
+            x19: entry as *const () as u64,
             x20: 0,
             x21: 0,
             x22: 0,
@@ -93,7 +93,7 @@ impl CpuContext {
             fp: 0,
             lr: thread_exit_wrapper as *const () as u64,
             sp: stack_top,
-            pc: entry as *const () as u64,
+            pc: thread_start_trampoline as *const () as u64,
             pstate: 0x3C5, // EL1, interrupts enabled
             sp_el0: 0,
             elr_el1: 0,
@@ -354,6 +354,7 @@ pub fn wait_for_interrupt() {
 extern "C" {
     fn context_switch(current: *mut ThreadControlBlock, next: *mut ThreadControlBlock);
     fn context_switch_start(next: *mut ThreadControlBlock) -> !;
+    fn thread_start_trampoline() -> !;
     #[link_name = "start_linux_clone_child"]
     fn start_linux_clone_child_asm(start: *const u8) -> !;
 }

@@ -934,32 +934,44 @@ mod scheduler_logic {
 
     #[test]
     fn linux_task_transitions_never_revive_nonblocked_or_exited_threads() {
+        let empty = 0u8;
         let ready = 1u8;
+        let running = 2u8;
         let blocked = 3u8;
         let terminated = 4u8;
 
+        for state in [empty, ready, running, blocked, terminated] {
+            assert_eq!(
+                smros_sched_wake_transition_body!(state, blocked, ready),
+                (state == blocked).then_some(ready)
+            );
+            assert_eq!(
+                smros_sched_publish_transition_body!(state, true, blocked, ready),
+                (state == blocked).then_some(ready)
+            );
+            assert_eq!(
+                smros_sched_publish_transition_body!(state, false, blocked, ready),
+                None
+            );
+        }
+
+        for state in [empty, ready, running, blocked, terminated] {
+            let expected = if state == empty || state == terminated {
+                None
+            } else {
+                Some(false)
+            };
+            assert_eq!(
+                smros_sched_terminate_transition_body!(2usize, 1usize, state, empty, terminated),
+                expected
+            );
+        }
         assert_eq!(
-            smros_sched_wake_transition_body!(blocked, blocked, ready),
-            Some(ready)
+            smros_sched_terminate_transition_body!(2usize, 2usize, running, empty, terminated),
+            Some(true)
         );
         assert_eq!(
-            smros_sched_wake_transition_body!(ready, blocked, ready),
-            None
-        );
-        assert_eq!(
-            smros_sched_wake_transition_body!(terminated, blocked, ready),
-            None
-        );
-        assert_eq!(
-            smros_sched_publish_transition_body!(blocked, true, blocked, ready),
-            Some(ready)
-        );
-        assert_eq!(
-            smros_sched_publish_transition_body!(blocked, false, blocked, ready),
-            None
-        );
-        assert_eq!(
-            smros_sched_publish_transition_body!(terminated, true, blocked, ready),
+            smros_sched_terminate_transition_body!(0usize, 2usize, running, empty, terminated),
             None
         );
     }

@@ -213,6 +213,17 @@ macro_rules! smros_sched_publish_transition_body {
     }};
 }
 
+#[allow(unused_macros)]
+macro_rules! smros_sched_terminate_transition_body {
+    ($id:expr, $current:expr, $state:expr, $empty:expr, $terminated:expr) => {{
+        if $id == 0usize || $state == $empty || $state == $terminated {
+            None
+        } else {
+            Some($id == $current)
+        }
+    }};
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SchedulerSlotReuse {
     Unavailable,

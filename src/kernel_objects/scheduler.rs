@@ -798,6 +798,7 @@ impl Scheduler {
         self.create_thread_with_state(entry, name, cpu_affinity, ThreadState::Ready)
     }
 
+    /// Allocate a CPU-bound thread that remains blocked until explicitly published.
     pub fn create_suspended_thread_on_cpu(
         &mut self,
         entry: extern "C" fn() -> !,
@@ -849,6 +850,7 @@ impl Scheduler {
         None // No available slots
     }
 
+    /// Make a newly suspended thread ready; this does not invoke the scheduler.
     pub fn publish_suspended_thread(&mut self, id: ThreadId) -> bool {
         if id.0 == ThreadId::IDLE.0 || id.0 >= MAX_THREADS {
             return false;
@@ -866,6 +868,7 @@ impl Scheduler {
         true
     }
 
+    /// Block a running or ready thread; the caller must schedule if blocking current.
     pub fn block_thread(&mut self, id: ThreadId) -> bool {
         if id.0 == ThreadId::IDLE.0
             || id.0 >= MAX_THREADS
@@ -882,6 +885,7 @@ impl Scheduler {
         true
     }
 
+    /// Make an ordinary blocked thread ready; this does not invoke the scheduler.
     pub fn wake_thread(&mut self, id: ThreadId) -> bool {
         if id.0 == ThreadId::IDLE.0 || id.0 >= MAX_THREADS || self.suspended_threads[id.0] {
             return false;
@@ -897,20 +901,24 @@ impl Scheduler {
         true
     }
 
+    /// Terminate one live non-idle thread under the caller's scheduler serialization.
     pub fn terminate_thread(&mut self, id: ThreadId) -> bool {
         if id.0 == ThreadId::IDLE.0 || id.0 >= MAX_THREADS {
             return false;
         }
-        if matches!(
+        let Some(defer_current) = smros_sched_terminate_transition_body!(
+            id.0,
+            self.current_thread.0,
             self.threads[id.0].state,
-            ThreadState::Empty | ThreadState::Terminated
-        ) {
+            ThreadState::Empty,
+            ThreadState::Terminated
+        ) else {
             return false;
-        }
+        };
 
         self.suspended_threads[id.0] = false;
         self.active_threads = self.active_threads.saturating_sub(1);
-        if id == self.current_thread {
+        if defer_current {
             self.threads[id.0].state = ThreadState::Terminated;
             self.threads[id.0].time_slice = 0;
             return true;
