@@ -42,6 +42,8 @@ use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(target_arch = "aarch64")]
+use super::address_logic::linux_user_range_writable as shared_linux_user_range_writable;
 use super::address_logic::{
     checked_end, fixed_linux_mmap_request_ok as shared_fixed_linux_mmap_request_ok,
     page_aligned as shared_page_aligned, range_overlaps, range_within_window,
@@ -1012,6 +1014,7 @@ pub struct LinuxContainerStats {
 
 struct MemorySyscallState {
     linux_mappings: Vec<LinuxMappingRecord>,
+    linux_initial_stack: Option<(usize, usize)>,
     next_linux_addr: usize,
     brk: BrkState,
     vmos: Vec<VmoRecord>,
@@ -1064,6 +1067,7 @@ impl MemorySyscallState {
 
         Self {
             linux_mappings: Vec::new(),
+            linux_initial_stack: None,
             next_linux_addr: LINUX_MAPPING_BASE,
             brk: BrkState::new(),
             vmos: Vec::new(),
@@ -2113,6 +2117,7 @@ impl MemorySyscallState {
 
         let brk = core::mem::replace(&mut self.brk, BrkState::new());
         MemorySyscallState::free_linux_pages(&brk.pfns);
+        self.linux_initial_stack = None;
         self.linux_fxfs_files.clear();
         self.next_linux_addr = LINUX_MAPPING_BASE;
         self.next_fd = COMPAT_FD_START;
@@ -2303,6 +2308,18 @@ pub fn linux_container_stats() -> LinuxContainerStats {
 
 pub fn reset_linux_container_state() {
     memory_state().reset_linux_container_state();
+}
+
+pub(crate) fn register_linux_initial_stack(address: usize, len: usize) -> bool {
+    if address == 0 || len == 0 || checked_end(address, len).is_none() {
+        return false;
+    }
+    let state = memory_state();
+    if state.linux_initial_stack.is_some() {
+        return false;
+    }
+    state.linux_initial_stack = Some((address, len));
+    true
 }
 
 pub fn reset_linux_process_state() {
@@ -6353,11 +6370,35 @@ fn linux_clone_tid_destinations_valid(request: &LinuxCloneRequest) -> bool {
         .parent_tid
         .into_iter()
         .chain(request.child_tid)
-        .all(|pointer| {
-            pointer & (core::mem::align_of::<u32>() - 1) == 0
-                && pointer.checked_add(core::mem::size_of::<u32>()).is_some()
-                && syscall_logic::user_buffer_valid(pointer, core::mem::size_of::<u32>())
-        })
+        .all(linux_clone_tid_destination_valid)
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn linux_clone_tid_destination_valid(pointer: usize) -> bool {
+    pointer & (core::mem::align_of::<u32>() - 1) == 0
+        && linux_user_range_writable(pointer, core::mem::size_of::<u32>())
+}
+
+#[cfg(target_arch = "aarch64")]
+fn linux_user_range_writable(address: usize, len: usize) -> bool {
+    let state = memory_state();
+    let linux_mappings = state.linux_mappings.iter().map(|mapping| {
+        (
+            mapping.addr,
+            mapping.len,
+            mapping.prot & MmapProt::WRITE.bits() != 0,
+        )
+    });
+    let brk = (state.brk.current > state.brk.start).then_some((
+        state.brk.start,
+        state.brk.current - state.brk.start,
+        true,
+    ));
+    let initial_stack = state
+        .linux_initial_stack
+        .map(|(start, range_len)| (start, range_len, true));
+
+    shared_linux_user_range_writable(address, len, linux_mappings.chain(brk).chain(initial_stack))
 }
 
 pub fn sys_clone3(_args: usize, _size: usize) -> SysResult {

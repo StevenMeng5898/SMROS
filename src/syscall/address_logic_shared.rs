@@ -45,3 +45,26 @@ macro_rules! smros_fixed_linux_mmap_request_ok_body {
             && smros_range_within_window_body!($addr, $len, $base, $limit)
     }};
 }
+
+macro_rules! smros_linux_user_range_writable_body {
+    ($addr:expr, $len:expr, $ranges:expr) => {{
+        let address = $addr;
+        let length = $len;
+        if length == 0 {
+            false
+        } else {
+            match smros_checked_end_body!(address, length) {
+                Some(end) => ($ranges)
+                    .into_iter()
+                    .any(|(range_start, range_len, writable)| {
+                        writable
+                            && match smros_checked_end_body!(range_start, range_len) {
+                                Some(range_end) => address >= range_start && end <= range_end,
+                                None => false,
+                            }
+                    }),
+                None => false,
+            }
+        }
+    }};
+}

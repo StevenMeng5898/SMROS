@@ -25,3 +25,11 @@ pub(crate) fn fixed_linux_mmap_request_ok(
 ) -> bool {
     smros_fixed_linux_mmap_request_ok_body!(addr, len, page_size, base, limit)
 }
+
+pub(crate) fn linux_user_range_writable(
+    addr: usize,
+    len: usize,
+    ranges: impl IntoIterator<Item = (usize, usize, bool)>,
+) -> bool {
+    smros_linux_user_range_writable_body!(addr, len, ranges)
+}

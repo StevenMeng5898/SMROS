@@ -289,6 +289,15 @@ mod aarch64_clone {
                 .filter(|slot| slot.matches(reservation) && !slot.committed)
                 .ok_or(SysError::EAGAIN)?;
 
+            for destination in [&slot.parent_tid, &slot.child_tid] {
+                if destination.address != 0
+                    && !crate::syscall::syscall::linux_clone_tid_destination_valid(
+                        destination.address,
+                    )
+                {
+                    return Err(SysError::EFAULT);
+                }
+            }
             for destination in [&mut slot.parent_tid, &mut slot.child_tid] {
                 if destination.address != 0 {
                     destination.original =

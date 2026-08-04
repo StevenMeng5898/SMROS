@@ -2003,6 +2003,8 @@ fn aarch64_clone_child_is_validated_before_publication() {
         .expect("read syscall implementation");
     let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
         .expect("read Linux task runtime");
+    let run_elf = std::fs::read_to_string(repository.join("src/user_level/services/run_elf.rs"))
+        .expect("read ELF launcher");
     let thread = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/thread.rs"))
         .expect("read AArch64 thread transfer");
     let switch =
@@ -2037,6 +2039,20 @@ fn aarch64_clone_child_is_validated_before_publication() {
     assert!(clone.contains("linux_task::rollback_clone(reservation)"));
     assert!(clone.contains("scheduler::scheduler().terminate_thread(scheduler_id)"));
 
+    let destination_validation = syscall
+        .find("fn linux_clone_tid_destination_valid(")
+        .expect("clone TID destination validation");
+    let destination_validation_end = syscall[destination_validation..]
+        .find("pub fn sys_clone3(")
+        .expect("end of clone TID destination validation");
+    let destination_validation =
+        &syscall[destination_validation..destination_validation + destination_validation_end];
+    assert!(destination_validation.contains("linux_user_range_writable("));
+    assert!(destination_validation.contains("linux_mappings"));
+    assert!(destination_validation.contains("state.brk"));
+    assert!(destination_validation.contains("linux_initial_stack"));
+    assert!(!destination_validation.contains("syscall_logic::user_buffer_valid"));
+
     let clone3_start = syscall.find("pub fn sys_clone3(").expect("clone3 syscall");
     let clone3_end = syscall[clone3_start..]
         .find("/// Linux sys_execve")
@@ -2049,6 +2065,36 @@ fn aarch64_clone_child_is_validated_before_publication() {
     assert!(task.contains("frame.regs[0] = 0"));
     assert!(task.contains("unsafe { context.frame.read() }"));
     assert!(task.contains("pub(crate) extern \"C\" fn linux_clone_child_entry() -> !"));
+    let copy = task
+        .find("pub(crate) fn copy_clone_tids(")
+        .expect("clone TID copy");
+    let copy_end = task[copy..]
+        .find("pub(crate) fn restore_clone_tid_destinations(")
+        .expect("end of clone TID copy");
+    let copy = &task[copy..copy + copy_end];
+    let copy_validation = copy
+        .find("linux_clone_tid_destination_valid(")
+        .expect("clone TID destination revalidation");
+    assert!(copy.contains("destination.address"));
+    let first_raw_read = copy
+        .find("core::ptr::read(destination.address as *const u32)")
+        .expect("clone TID snapshot read");
+    assert!(copy_validation < first_raw_read);
+
+    let launcher = run_elf
+        .find("extern \"C\" fn run_elf_launcher_entry() -> !")
+        .expect("ELF launcher entry");
+    let launcher = &run_elf[launcher..];
+    let attach_stack = launcher
+        .find("run_elf_attach_resource_transition(")
+        .expect("initial stack ownership attachment");
+    let register_stack = launcher
+        .find("register_linux_initial_stack(")
+        .expect("initial stack user-range registration");
+    let enter_el0 = launcher
+        .find("user_process::switch_to_el0(")
+        .expect("EL0 entry");
+    assert!(attach_stack < register_stack && register_stack < enter_el0);
     let commit = task
         .find("pub(crate) fn commit_clone(")
         .expect("clone commit");

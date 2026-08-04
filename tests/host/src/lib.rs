@@ -115,6 +115,65 @@ mod syscall_address_logic {
             0x5000usize
         ));
     }
+
+    #[test]
+    fn writable_user_range_requires_one_complete_writable_mapping() {
+        let mappings = [
+            (0x1000usize, 0x1000usize, true),
+            (0x3000usize, 0x1000usize, false),
+        ];
+
+        assert!(smros_linux_user_range_writable_body!(
+            0x1800usize,
+            core::mem::size_of::<u32>(),
+            mappings
+        ));
+        assert!(!smros_linux_user_range_writable_body!(
+            0x2800usize,
+            core::mem::size_of::<u32>(),
+            mappings
+        ));
+        assert!(!smros_linux_user_range_writable_body!(
+            0x3800usize,
+            core::mem::size_of::<u32>(),
+            mappings
+        ));
+    }
+
+    #[test]
+    fn writable_user_range_rejects_mapping_end_crossing_and_overflow() {
+        let mappings = [(0x1000usize, 0x1000usize, true)];
+
+        assert!(!smros_linux_user_range_writable_body!(
+            0x1ffeusize,
+            core::mem::size_of::<u32>(),
+            mappings
+        ));
+        assert!(!smros_linux_user_range_writable_body!(
+            usize::MAX - 1,
+            core::mem::size_of::<u32>(),
+            mappings
+        ));
+    }
+
+    #[test]
+    fn writable_user_range_accepts_active_brk_and_initial_stack_storage() {
+        let active_user_ranges = [
+            (0x6000_0000usize, 0x8000usize, true),
+            (0x7000_0000usize, 0x20_000usize, true),
+        ];
+
+        assert!(smros_linux_user_range_writable_body!(
+            0x6000_1000usize,
+            core::mem::size_of::<u32>(),
+            active_user_ranges
+        ));
+        assert!(smros_linux_user_range_writable_body!(
+            0x7001_fffcusize,
+            core::mem::size_of::<u32>(),
+            active_user_ranges
+        ));
+    }
 }
 
 mod syscall_logic {

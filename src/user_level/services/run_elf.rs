@@ -235,12 +235,19 @@ extern "C" fn run_elf_launcher_entry() -> ! {
         Ok(prepared) => {
             let entry = prepared.entry;
             let stack_top = prepared.stack.stack_top();
+            let (stack_base, stack_size) = prepared.stack.range();
             if let Err(error) = with_run_state(|state| {
                 user_logic::run_elf_attach_resource_transition(state, launch_id, prepared.stack)
             }) {
                 drop(error.into_resource());
                 complete_active_run(cpu, launch_id, |_| {
                     RunTermination::InfrastructureError(RunInfrastructureError::MissingRequest)
+                });
+                finish_launcher_thread();
+            }
+            if !syscall::register_linux_initial_stack(stack_base, stack_size) {
+                complete_active_run(cpu, launch_id, |_| {
+                    RunTermination::LaunchError(RunElfError::Stack)
                 });
                 finish_launcher_thread();
             }
@@ -591,6 +598,10 @@ impl StackBuilder {
 
     fn stack_top(&self) -> u64 {
         self.sp as u64
+    }
+
+    fn range(&self) -> (usize, usize) {
+        (self.base, RUN_ELF_STACK_SIZE)
     }
 
     fn align_down(&mut self, align: usize) {
