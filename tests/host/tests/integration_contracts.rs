@@ -1821,6 +1821,9 @@ fn linux_child_exit_clears_tid_and_uses_deferred_stack_retirement() {
     let zero_write = exit_current
         .find("core::ptr::write(clear_child_tid as *mut u32, 0)")
         .expect("clear-child-TID zero write");
+    let compiler_fence = exit_current
+        .find("core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst)")
+        .expect("clear-child-TID compiler fence");
     let wake = exit_current
         .find("linux_futex::wake_address(")
         .expect("pthread join futex wake");
@@ -1834,7 +1837,8 @@ fn linux_child_exit_clears_tid_and_uses_deferred_stack_retirement() {
         .find("wait_for_interrupt()")
         .expect("no-runnable-thread wait");
     assert!(mask < transition && transition < remove_waiters && remove_waiters < retire);
-    assert!(retire < checked_write && checked_write < zero_write && zero_write < restore);
+    assert!(retire < checked_write && checked_write < zero_write);
+    assert!(zero_write < compiler_fence && compiler_fence < restore);
     assert!(restore < wake && wake < finish && finish < schedule && schedule < wait);
     assert!(exit_current.contains("let _ = exit_code;"));
 

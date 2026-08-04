@@ -144,6 +144,7 @@ pub(crate) fn exit_current(exit_code: i32) -> ! {
         None
     });
 
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
 
     #[cfg(target_arch = "aarch64")]
