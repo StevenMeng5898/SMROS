@@ -132,6 +132,19 @@ pub fn read_exception_return_pc() -> u64 {
 }
 
 #[inline(always)]
+pub fn read_exception_return_state() -> u64 {
+    let state: u64;
+    unsafe {
+        core::arch::asm!(
+            "mrs {state}, spsr_el1",
+            state = out(reg) state,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    state
+}
+
+#[inline(always)]
 pub fn read_user_stack_pointer() -> u64 {
     let sp: u64;
     unsafe {
@@ -150,6 +163,30 @@ pub fn set_user_stack_pointer(sp: u64) {
         core::arch::asm!(
             "msr sp_el0, {sp}",
             sp = in(reg) sp,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+#[inline(always)]
+pub fn read_user_tls() -> u64 {
+    let tls: u64;
+    unsafe {
+        core::arch::asm!(
+            "mrs {tls}, tpidr_el0",
+            tls = out(reg) tls,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    tls
+}
+
+#[inline(always)]
+pub fn set_user_tls(tls: u64) {
+    unsafe {
+        core::arch::asm!(
+            "msr tpidr_el0, {tls}",
+            tls = in(reg) tls,
             options(nomem, nostack, preserves_flags),
         );
     }

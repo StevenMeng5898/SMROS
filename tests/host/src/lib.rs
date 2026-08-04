@@ -912,6 +912,33 @@ mod lowlevel_logic {
     }
 }
 
+mod aarch64_context_logic {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/kernel_lowlevel/ARM64/context_shared.rs"
+    ));
+
+    #[test]
+    fn aarch64_exception_and_context_layouts_are_locked() {
+        use core::mem::{offset_of, size_of};
+
+        assert_eq!(offset_of!(Aarch64ExceptionFrame, regs), 0x000);
+        assert_eq!(offset_of!(Aarch64ExceptionFrame, simd), 0x100);
+        assert_eq!(offset_of!(Aarch64ExceptionFrame, fpcr), 0x300);
+        assert_eq!(offset_of!(Aarch64ExceptionFrame, fpsr), 0x308);
+        assert_eq!(size_of::<Aarch64ExceptionFrame>(), 0x310);
+
+        assert_eq!(offset_of!(CpuContext, sp_el0), 0x110);
+        assert_eq!(offset_of!(CpuContext, elr_el1), 0x118);
+        assert_eq!(offset_of!(CpuContext, spsr_el1), 0x120);
+        assert_eq!(offset_of!(CpuContext, tpidr_el0), 0x128);
+        assert_eq!(offset_of!(CpuContext, fpcr), 0x130);
+        assert_eq!(offset_of!(CpuContext, fpsr), 0x138);
+        assert_eq!(offset_of!(CpuContext, simd), 0x140);
+        assert_eq!(size_of::<CpuContext>(), 0x340);
+    }
+}
+
 mod user_logic {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

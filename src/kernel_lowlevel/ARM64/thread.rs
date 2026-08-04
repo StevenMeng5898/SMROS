@@ -10,6 +10,8 @@ use core::ptr;
 
 use super::lowlevel_logic;
 
+include!("context_shared.rs");
+
 /// Maximum number of concurrent threads
 pub const MAX_THREADS: usize = 32;
 
@@ -55,58 +57,6 @@ impl ThreadId {
     }
 }
 
-/// ARM64 CPU context (registers saved during context switch)
-/// This structure must match the layout expected by context_switch assembly
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CpuContext {
-    // General purpose registers X0-X28
-    pub x0: u64,
-    pub x1: u64,
-    pub x2: u64,
-    pub x3: u64,
-    pub x4: u64,
-    pub x5: u64,
-    pub x6: u64,
-    pub x7: u64,
-    pub x8: u64,
-    pub x9: u64,
-    pub x10: u64,
-    pub x11: u64,
-    pub x12: u64,
-    pub x13: u64,
-    pub x14: u64,
-    pub x15: u64,
-    pub x16: u64,
-    pub x17: u64,
-    pub x18: u64,
-    pub x19: u64,
-    pub x20: u64,
-    pub x21: u64,
-    pub x22: u64,
-    pub x23: u64,
-    pub x24: u64,
-    pub x25: u64,
-    pub x26: u64,
-    pub x27: u64,
-    pub x28: u64,
-
-    // Frame Pointer (FP)
-    pub fp: u64,
-
-    // Link Register (return address)
-    pub lr: u64,
-
-    // Stack Pointer
-    pub sp: u64,
-
-    // Program Counter (entry point for new threads)
-    pub pc: u64,
-
-    // Processor State (PSTATE)
-    pub pstate: u64,
-}
-
 impl CpuContext {
     /// Create a new CPU context for a thread
     pub fn new(entry: extern "C" fn() -> !, stack_top: u64) -> Self {
@@ -145,6 +95,13 @@ impl CpuContext {
             sp: stack_top,
             pc: entry as *const () as u64,
             pstate: 0x3C5, // EL1, interrupts enabled
+            sp_el0: 0,
+            elr_el1: 0,
+            spsr_el1: 0,
+            tpidr_el0: 0,
+            fpcr: 0,
+            fpsr: 0,
+            simd: [0; 32],
         }
     }
 
@@ -194,6 +151,13 @@ impl CpuContext {
             sp: 0,
             pc: 0,
             pstate: 0,
+            sp_el0: 0,
+            elr_el1: 0,
+            spsr_el1: 0,
+            tpidr_el0: 0,
+            fpcr: 0,
+            fpsr: 0,
+            simd: [0; 32],
         }
     }
 }

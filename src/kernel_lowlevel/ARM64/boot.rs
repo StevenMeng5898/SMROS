@@ -240,7 +240,7 @@ exception_vectors:
 // IRQ Handler (Current EL with SPx)
 irq_handler_sp:
     // Save all general-purpose registers because IRQs interrupt arbitrary code.
-    sub     sp, sp, #256
+    sub     sp, sp, #0x310
     stp     x0, x1, [sp, #0]
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]
@@ -257,11 +257,51 @@ irq_handler_sp:
     stp     x26, x27, [sp, #208]
     stp     x28, x29, [sp, #224]
     stp     x30, xzr, [sp, #240]
+    stp     q0, q1, [sp, #0x100]
+    stp     q2, q3, [sp, #0x120]
+    stp     q4, q5, [sp, #0x140]
+    stp     q6, q7, [sp, #0x160]
+    stp     q8, q9, [sp, #0x180]
+    stp     q10, q11, [sp, #0x1a0]
+    stp     q12, q13, [sp, #0x1c0]
+    stp     q14, q15, [sp, #0x1e0]
+    stp     q16, q17, [sp, #0x200]
+    stp     q18, q19, [sp, #0x220]
+    stp     q20, q21, [sp, #0x240]
+    stp     q22, q23, [sp, #0x260]
+    stp     q24, q25, [sp, #0x280]
+    stp     q26, q27, [sp, #0x2a0]
+    stp     q28, q29, [sp, #0x2c0]
+    stp     q30, q31, [sp, #0x2e0]
+    mrs     x16, fpcr
+    str     x16, [sp, #0x300]
+    mrs     x16, fpsr
+    str     x16, [sp, #0x308]
 
     // Call timer interrupt handler
     bl      timer_interrupt_handler
 
     // Restore registers
+    ldr     x16, [sp, #0x300]
+    msr     fpcr, x16
+    ldr     x16, [sp, #0x308]
+    msr     fpsr, x16
+    ldp     q0, q1, [sp, #0x100]
+    ldp     q2, q3, [sp, #0x120]
+    ldp     q4, q5, [sp, #0x140]
+    ldp     q6, q7, [sp, #0x160]
+    ldp     q8, q9, [sp, #0x180]
+    ldp     q10, q11, [sp, #0x1a0]
+    ldp     q12, q13, [sp, #0x1c0]
+    ldp     q14, q15, [sp, #0x1e0]
+    ldp     q16, q17, [sp, #0x200]
+    ldp     q18, q19, [sp, #0x220]
+    ldp     q20, q21, [sp, #0x240]
+    ldp     q22, q23, [sp, #0x260]
+    ldp     q24, q25, [sp, #0x280]
+    ldp     q26, q27, [sp, #0x2a0]
+    ldp     q28, q29, [sp, #0x2c0]
+    ldp     q30, q31, [sp, #0x2e0]
     ldp     x0, x1, [sp, #0]
     ldp     x2, x3, [sp, #16]
     ldp     x4, x5, [sp, #32]
@@ -278,14 +318,14 @@ irq_handler_sp:
     ldp     x26, x27, [sp, #208]
     ldp     x28, x29, [sp, #224]
     ldp     x30, xzr, [sp, #240]
-    add     sp, sp, #256
+    add     sp, sp, #0x310
 
     eret
 
 // IRQ Handler (Current EL with SP0)
 irq_handler:
     // Save all general-purpose registers because IRQs interrupt arbitrary code.
-    sub     sp, sp, #256
+    sub     sp, sp, #0x310
     stp     x0, x1, [sp, #0]
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]
@@ -302,11 +342,51 @@ irq_handler:
     stp     x26, x27, [sp, #208]
     stp     x28, x29, [sp, #224]
     stp     x30, xzr, [sp, #240]
+    stp     q0, q1, [sp, #0x100]
+    stp     q2, q3, [sp, #0x120]
+    stp     q4, q5, [sp, #0x140]
+    stp     q6, q7, [sp, #0x160]
+    stp     q8, q9, [sp, #0x180]
+    stp     q10, q11, [sp, #0x1a0]
+    stp     q12, q13, [sp, #0x1c0]
+    stp     q14, q15, [sp, #0x1e0]
+    stp     q16, q17, [sp, #0x200]
+    stp     q18, q19, [sp, #0x220]
+    stp     q20, q21, [sp, #0x240]
+    stp     q22, q23, [sp, #0x260]
+    stp     q24, q25, [sp, #0x280]
+    stp     q26, q27, [sp, #0x2a0]
+    stp     q28, q29, [sp, #0x2c0]
+    stp     q30, q31, [sp, #0x2e0]
+    mrs     x16, fpcr
+    str     x16, [sp, #0x300]
+    mrs     x16, fpsr
+    str     x16, [sp, #0x308]
 
     // Call timer interrupt handler
     bl      timer_interrupt_handler
 
     // Restore registers
+    ldr     x16, [sp, #0x300]
+    msr     fpcr, x16
+    ldr     x16, [sp, #0x308]
+    msr     fpsr, x16
+    ldp     q0, q1, [sp, #0x100]
+    ldp     q2, q3, [sp, #0x120]
+    ldp     q4, q5, [sp, #0x140]
+    ldp     q6, q7, [sp, #0x160]
+    ldp     q8, q9, [sp, #0x180]
+    ldp     q10, q11, [sp, #0x1a0]
+    ldp     q12, q13, [sp, #0x1c0]
+    ldp     q14, q15, [sp, #0x1e0]
+    ldp     q16, q17, [sp, #0x200]
+    ldp     q18, q19, [sp, #0x220]
+    ldp     q20, q21, [sp, #0x240]
+    ldp     q22, q23, [sp, #0x260]
+    ldp     q24, q25, [sp, #0x280]
+    ldp     q26, q27, [sp, #0x2a0]
+    ldp     q28, q29, [sp, #0x2c0]
+    ldp     q30, q31, [sp, #0x2e0]
     ldp     x0, x1, [sp, #0]
     ldp     x2, x3, [sp, #16]
     ldp     x4, x5, [sp, #32]
@@ -323,7 +403,7 @@ irq_handler:
     ldp     x26, x27, [sp, #208]
     ldp     x28, x29, [sp, #224]
     ldp     x30, xzr, [sp, #240]
-    add     sp, sp, #256
+    add     sp, sp, #0x310
 
     eret
 
@@ -331,7 +411,7 @@ irq_handler:
 irq_handler_lower:
     // Save a complete EL0 register frame. Timer-based signal delivery may
     // patch x0/x30 and ELR_EL1 before returning to user code.
-    sub     sp, sp, #256
+    sub     sp, sp, #0x310
     stp     x0, x1, [sp, #0]
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]
@@ -348,6 +428,26 @@ irq_handler_lower:
     stp     x26, x27, [sp, #208]
     stp     x28, x29, [sp, #224]
     stp     x30, xzr, [sp, #240]
+    stp     q0, q1, [sp, #0x100]
+    stp     q2, q3, [sp, #0x120]
+    stp     q4, q5, [sp, #0x140]
+    stp     q6, q7, [sp, #0x160]
+    stp     q8, q9, [sp, #0x180]
+    stp     q10, q11, [sp, #0x1a0]
+    stp     q12, q13, [sp, #0x1c0]
+    stp     q14, q15, [sp, #0x1e0]
+    stp     q16, q17, [sp, #0x200]
+    stp     q18, q19, [sp, #0x220]
+    stp     q20, q21, [sp, #0x240]
+    stp     q22, q23, [sp, #0x260]
+    stp     q24, q25, [sp, #0x280]
+    stp     q26, q27, [sp, #0x2a0]
+    stp     q28, q29, [sp, #0x2c0]
+    stp     q30, q31, [sp, #0x2e0]
+    mrs     x16, fpcr
+    str     x16, [sp, #0x300]
+    mrs     x16, fpsr
+    str     x16, [sp, #0x308]
 
     // Call timer interrupt handler
     bl      timer_interrupt_handler
@@ -357,6 +457,26 @@ irq_handler_lower:
     bl      deliver_linux_timer_signal_from_irq
 
     // Restore registers
+    ldr     x16, [sp, #0x300]
+    msr     fpcr, x16
+    ldr     x16, [sp, #0x308]
+    msr     fpsr, x16
+    ldp     q0, q1, [sp, #0x100]
+    ldp     q2, q3, [sp, #0x120]
+    ldp     q4, q5, [sp, #0x140]
+    ldp     q6, q7, [sp, #0x160]
+    ldp     q8, q9, [sp, #0x180]
+    ldp     q10, q11, [sp, #0x1a0]
+    ldp     q12, q13, [sp, #0x1c0]
+    ldp     q14, q15, [sp, #0x1e0]
+    ldp     q16, q17, [sp, #0x200]
+    ldp     q18, q19, [sp, #0x220]
+    ldp     q20, q21, [sp, #0x240]
+    ldp     q22, q23, [sp, #0x260]
+    ldp     q24, q25, [sp, #0x280]
+    ldp     q26, q27, [sp, #0x2a0]
+    ldp     q28, q29, [sp, #0x2c0]
+    ldp     q30, q31, [sp, #0x2e0]
     ldp     x0, x1, [sp, #0]
     ldp     x2, x3, [sp, #16]
     ldp     x4, x5, [sp, #32]
@@ -373,14 +493,14 @@ irq_handler_lower:
     ldp     x26, x27, [sp, #208]
     ldp     x28, x29, [sp, #224]
     ldp     x30, xzr, [sp, #240]
-    add     sp, sp, #256
+    add     sp, sp, #0x310
 
     eret
 
 // Exception Handler - handles all synchronous exceptions
 exception_handler:
     // Save all general purpose registers to stack
-    sub     sp, sp, #256
+    sub     sp, sp, #0x310
     stp     x0, x1, [sp, #0]
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]
@@ -397,6 +517,26 @@ exception_handler:
     stp     x26, x27, [sp, #208]
     stp     x28, x29, [sp, #224]
     stp     x30, xzr, [sp, #240]
+    stp     q0, q1, [sp, #0x100]
+    stp     q2, q3, [sp, #0x120]
+    stp     q4, q5, [sp, #0x140]
+    stp     q6, q7, [sp, #0x160]
+    stp     q8, q9, [sp, #0x180]
+    stp     q10, q11, [sp, #0x1a0]
+    stp     q12, q13, [sp, #0x1c0]
+    stp     q14, q15, [sp, #0x1e0]
+    stp     q16, q17, [sp, #0x200]
+    stp     q18, q19, [sp, #0x220]
+    stp     q20, q21, [sp, #0x240]
+    stp     q22, q23, [sp, #0x260]
+    stp     q24, q25, [sp, #0x280]
+    stp     q26, q27, [sp, #0x2a0]
+    stp     q28, q29, [sp, #0x2c0]
+    stp     q30, q31, [sp, #0x2e0]
+    mrs     x16, fpcr
+    str     x16, [sp, #0x300]
+    mrs     x16, fpsr
+    str     x16, [sp, #0x308]
 
     // Read exception class from ESR_EL1
     mrs     x0, esr_el1
@@ -444,6 +584,26 @@ exception_handler:
     msr     elr_el1, x0
 
 5:  // Restore registers and return
+    ldr     x16, [sp, #0x300]
+    msr     fpcr, x16
+    ldr     x16, [sp, #0x308]
+    msr     fpsr, x16
+    ldp     q0, q1, [sp, #0x100]
+    ldp     q2, q3, [sp, #0x120]
+    ldp     q4, q5, [sp, #0x140]
+    ldp     q6, q7, [sp, #0x160]
+    ldp     q8, q9, [sp, #0x180]
+    ldp     q10, q11, [sp, #0x1a0]
+    ldp     q12, q13, [sp, #0x1c0]
+    ldp     q14, q15, [sp, #0x1e0]
+    ldp     q16, q17, [sp, #0x200]
+    ldp     q18, q19, [sp, #0x220]
+    ldp     q20, q21, [sp, #0x240]
+    ldp     q22, q23, [sp, #0x260]
+    ldp     q24, q25, [sp, #0x280]
+    ldp     q26, q27, [sp, #0x2a0]
+    ldp     q28, q29, [sp, #0x2c0]
+    ldp     q30, q31, [sp, #0x2e0]
     ldp     x0, x1, [sp, #0]
     ldp     x2, x3, [sp, #16]
     ldp     x4, x5, [sp, #32]
@@ -460,7 +620,7 @@ exception_handler:
     ldp     x26, x27, [sp, #208]
     ldp     x28, x29, [sp, #224]
     ldp     x30, xzr, [sp, #240]
-    add     sp, sp, #256
+    add     sp, sp, #0x310
     eret
 
 "#,

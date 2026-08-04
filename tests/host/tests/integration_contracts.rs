@@ -1726,6 +1726,97 @@ fn scheduler_reclaims_thread_stacks_only_after_a_confirmed_context_switch() {
 }
 
 #[test]
+fn aarch64_el0_context_abi_is_complete() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let boot = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/boot.rs"))
+        .expect("read AArch64 exception entry");
+    let switch =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/context_switch.S"))
+            .expect("read AArch64 context switch");
+
+    for (handler, next) in [
+        ("irq_handler_sp:", "// IRQ Handler (Current EL with SP0)"),
+        ("irq_handler:", "// IRQ Handler (Lower EL using AArch64)"),
+        ("irq_handler_lower:", "// Exception Handler"),
+        ("exception_handler:", "\n\"#,"),
+    ] {
+        let start = boot.find(handler).expect("AArch64 exception handler");
+        let relative_end = boot[start..]
+            .find(next)
+            .expect("end of AArch64 exception handler");
+        let body = &boot[start..start + relative_end];
+        assert!(body.contains("sub     sp, sp, #0x310"), "{handler}");
+        assert!(body.contains("add     sp, sp, #0x310"), "{handler}");
+        for pair in 0..16 {
+            let first = pair * 2;
+            let offset = 0x100 + pair * 0x20;
+            let save = format!("stp     q{first}, q{}, [sp, #{offset:#05x}]", first + 1);
+            let restore = format!("ldp     q{first}, q{}, [sp, #{offset:#05x}]", first + 1);
+            assert!(body.contains(&save), "{handler}: missing {save}");
+            assert!(body.contains(&restore), "{handler}: missing {restore}");
+        }
+        assert!(body.contains("mrs     x16, fpcr"), "{handler}");
+        assert!(body.contains("str     x16, [sp, #0x300]"), "{handler}");
+        assert!(body.contains("mrs     x16, fpsr"), "{handler}");
+        assert!(body.contains("str     x16, [sp, #0x308]"), "{handler}");
+        assert!(body.contains("msr     fpcr, x16"), "{handler}");
+        assert!(body.contains("msr     fpsr, x16"), "{handler}");
+
+        if let Some(call) = body.find("bl      ") {
+            for save in [
+                "stp     q30, q31, [sp, #0x2e0]",
+                "str     x16, [sp, #0x300]",
+                "str     x16, [sp, #0x308]",
+            ] {
+                assert!(body.find(save).expect("complete pre-call state") < call);
+            }
+        }
+    }
+
+    for instruction in [
+        "mrs     x17, sp_el0",
+        "str     x17, [x16, #0x110]",
+        "mrs     x17, elr_el1",
+        "str     x17, [x16, #0x118]",
+        "mrs     x17, spsr_el1",
+        "str     x17, [x16, #0x120]",
+        "mrs     x17, tpidr_el0",
+        "str     x17, [x16, #0x128]",
+        "mrs     x17, fpcr",
+        "str     x17, [x16, #0x130]",
+        "mrs     x17, fpsr",
+        "str     x17, [x16, #0x138]",
+        "ldr     x17, [x16, #0x110]",
+        "msr     sp_el0, x17",
+        "ldr     x17, [x16, #0x118]",
+        "msr     elr_el1, x17",
+        "ldr     x17, [x16, #0x120]",
+        "msr     spsr_el1, x17",
+        "ldr     x17, [x16, #0x128]",
+        "msr     tpidr_el0, x17",
+        "ldr     x17, [x16, #0x130]",
+        "msr     fpcr, x17",
+        "ldr     x17, [x16, #0x138]",
+        "msr     fpsr, x17",
+    ] {
+        assert!(switch.contains(instruction), "missing {instruction}");
+    }
+
+    for pair in 0..16 {
+        let first = pair * 2;
+        let offset = 0x140 + pair * 0x20;
+        let save = format!("stp     q{first}, q{}, [x16, #{offset:#05X}]", first + 1);
+        let restore = format!("ldp     q{first}, q{}, [x16, #{offset:#05X}]", first + 1);
+        assert!(switch.contains(&save), "missing {save}");
+        assert_eq!(
+            switch.matches(&restore).count(),
+            2,
+            "both context-switch entry paths must contain {restore}"
+        );
+    }
+}
+
+#[test]
 fn x86_system_reset_uses_hardware_reset_ports_before_halting() {
     let smp = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
