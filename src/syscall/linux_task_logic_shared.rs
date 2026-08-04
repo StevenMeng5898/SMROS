@@ -207,6 +207,16 @@ pub(crate) fn linux_signal_bit(signum: usize) -> u64 {
     1u64 << (signum - 1)
 }
 
+pub(crate) fn linux_signal_info_offset(task_slot: usize, frame_depth: usize) -> Option<usize> {
+    if frame_depth >= LINUX_SIGNAL_FRAME_LIMIT {
+        return None;
+    }
+    task_slot
+        .checked_mul(LINUX_SIGNAL_FRAME_LIMIT)?
+        .checked_add(frame_depth)?
+        .checked_mul(LINUX_SIGNAL_INFO_BYTES)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxPendingSignal {
     pub signum: usize,
@@ -594,12 +604,12 @@ impl<const N: usize> LinuxTaskTable<N> {
     pub(crate) fn signal_state_by_scheduler_mut(
         &mut self,
         scheduler_thread: usize,
-    ) -> Option<(&mut LinuxTaskSignalState, LinuxTaskCore)> {
+    ) -> Option<(usize, &mut LinuxTaskSignalState, LinuxTaskCore)> {
         let slot = self
             .tasks
             .iter()
             .position(|task| Self::is_live(*task) && task.scheduler_thread == scheduler_thread)?;
-        Some((&mut self.signal_states[slot], self.tasks[slot]))
+        Some((slot, &mut self.signal_states[slot], self.tasks[slot]))
     }
 
     pub(crate) fn route_signal(

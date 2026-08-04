@@ -58,7 +58,7 @@ use super::linux_task;
 use super::linux_task::{
     LinuxCloneRequest, LinuxCloneValidationError, LinuxPendingSignal, LinuxSignalFrame,
     LinuxSignalStack, CLONE_THREAD, LINUX_REALTIME_SIGNAL_MIN, LINUX_RT_QUEUE_LIMIT,
-    LINUX_SIGNAL_INFO_BYTES,
+    LINUX_SIGNAL_FRAME_LIMIT, LINUX_SIGNAL_INFO_BYTES,
 };
 use crate::kernel_lowlevel::memory::{process_manager, PageFrameAllocator, PAGE_SIZE};
 use crate::kernel_objects::channel;
@@ -2161,6 +2161,10 @@ static LINUX_REAL_TIMER_DEADLINE_TICK: AtomicU64 = AtomicU64::new(LINUX_TIMER_DI
 static LINUX_NEXT_SYNTHETIC_PID: AtomicU64 = AtomicU64::new(2);
 
 const LINUX_SIGNAL_INFO_OFFSET: usize = PAGE_SIZE;
+const LINUX_SIGNAL_INFO_STORAGE_BYTES: usize =
+    linux_task::LINUX_TASK_LIMIT * LINUX_SIGNAL_FRAME_LIMIT * LINUX_SIGNAL_INFO_BYTES;
+const LINUX_SIGNAL_TRAMPOLINE_BYTES: usize =
+    (LINUX_SIGNAL_INFO_OFFSET + LINUX_SIGNAL_INFO_STORAGE_BYTES + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 static mut LINUX_PROCESS_REALTIME_PENDING: [LinuxPendingSignal; LINUX_RT_QUEUE_LIMIT] =
     [LinuxPendingSignal::EMPTY; LINUX_RT_QUEUE_LIMIT];
 static LINUX_PROCESS_REALTIME_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -2667,7 +2671,7 @@ fn ensure_linux_signal_trampoline() -> Result<usize, SysError> {
 
     let mapped = sys_mmap(
         0,
-        PAGE_SIZE * 2,
+        LINUX_SIGNAL_TRAMPOLINE_BYTES,
         MmapProt::READ.bits() | MmapProt::WRITE.bits(),
         MmapFlags::PRIVATE.bits() | MmapFlags::ANONYMOUS.bits(),
         0,
@@ -2919,7 +2923,7 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
         };
         let regs = unsafe { core::ptr::read(saved_regs as *const [u64; 32]) };
         let user_sp = crate::kernel_lowlevel::cpu::read_user_stack_pointer();
-        let prepared = linux_task::with_current_signal_state(|signal_state| {
+        let prepared = linux_task::with_current_signal_state_and_slot(|task_slot, signal_state| {
             let previous_mask = signal_state.mask;
             let mut handler_mask = previous_mask | action.mask;
             const LINUX_SA_NODEFER: u64 = 0x4000_0000;
@@ -2933,7 +2937,12 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
                 user_sp,
                 previous_stack_flags: signal_state.alt_stack.flags as u64,
             };
-            let depth = signal_state.push_frame(frame)?;
+            let info_offset =
+                linux_task::linux_signal_info_offset(task_slot, signal_state.frame_depth)?;
+            let info = trampoline
+                .checked_add(LINUX_SIGNAL_INFO_OFFSET)?
+                .checked_add(info_offset)?;
+            signal_state.push_frame(frame)?;
             signal_state.mask = handler_mask & !linux_uncatchable_signal_mask();
             let stack_top = if action.flags & LINUX_SA_ONSTACK != 0
                 && signal_state.alt_stack.flags as u64 & (LINUX_SS_DISABLE | LINUX_SS_ONSTACK) == 0
@@ -2952,9 +2961,9 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
             } else {
                 None
             };
-            Some((depth, stack_top))
+            Some((stack_top, info))
         });
-        let Ok(Some((depth, stack_top))) = prepared else {
+        let Ok(Some((stack_top, info))) = prepared else {
             requeue_linux_signal(deliverable);
             return false;
         };
@@ -2971,9 +2980,6 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
         regs[2] = 0;
         regs[16] = action.handler;
         if action.flags & LINUX_SA_SIGINFO != 0 {
-            let info = trampoline
-                .saturating_add(LINUX_SIGNAL_INFO_OFFSET)
-                .saturating_add(depth * LINUX_SIGNAL_INFO_BYTES);
             unsafe {
                 if pending.has_info {
                     core::ptr::copy_nonoverlapping(

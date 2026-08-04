@@ -801,6 +801,49 @@ mod linux_task_logic {
     }
 
     #[test]
+    fn signal_info_storage_is_distinct_by_task_slot_and_frame_depth() {
+        let (tasks, first_task, second_task) = three_live_tasks();
+        assert!(tasks.signal_state(first_task.tid, 8).is_some());
+        assert!(tasks.signal_state(second_task.tid, 9).is_some());
+        assert_ne!(first_task.slot, second_task.slot);
+
+        let first = linux_signal_info_offset(first_task.slot, 0).expect("first task signal info");
+        let nested = linux_signal_info_offset(first_task.slot, 1).expect("nested signal info");
+        let second =
+            linux_signal_info_offset(second_task.slot, 0).expect("second task signal info");
+        assert_eq!(nested, first + LINUX_SIGNAL_INFO_BYTES);
+        assert_eq!(
+            second,
+            second_task.slot * LINUX_SIGNAL_FRAME_LIMIT * LINUX_SIGNAL_INFO_BYTES
+        );
+
+        let mut storage = [0u8; 3 * LINUX_SIGNAL_FRAME_LIMIT * LINUX_SIGNAL_INFO_BYTES];
+        let first_info = core::array::from_fn::<_, LINUX_SIGNAL_INFO_BYTES, _>(|index| index as u8);
+        let nested_info =
+            core::array::from_fn::<_, LINUX_SIGNAL_INFO_BYTES, _>(|index| (index as u8) ^ 0x5a);
+        let second_info =
+            core::array::from_fn::<_, LINUX_SIGNAL_INFO_BYTES, _>(|index| !(index as u8));
+        storage[first..first + LINUX_SIGNAL_INFO_BYTES].copy_from_slice(&first_info);
+        storage[nested..nested + LINUX_SIGNAL_INFO_BYTES].copy_from_slice(&nested_info);
+        storage[second..second + LINUX_SIGNAL_INFO_BYTES].copy_from_slice(&second_info);
+
+        assert_eq!(
+            &storage[first..first + LINUX_SIGNAL_INFO_BYTES],
+            &first_info
+        );
+        assert_eq!(
+            &storage[nested..nested + LINUX_SIGNAL_INFO_BYTES],
+            &nested_info
+        );
+        assert_eq!(
+            &storage[second..second + LINUX_SIGNAL_INFO_BYTES],
+            &second_info
+        );
+        assert_eq!(linux_signal_info_offset(0, LINUX_SIGNAL_FRAME_LIMIT), None);
+        assert_eq!(linux_signal_info_offset(usize::MAX, 0), None);
+    }
+
+    #[test]
     fn process_and_directed_signal_routing_select_only_the_addressed_live_task() {
         let (mut tasks, first, second) = three_live_tasks();
         let signal = 12usize;

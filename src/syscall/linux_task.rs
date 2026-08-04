@@ -6,7 +6,7 @@ use super::SysError;
 include!("linux_task_logic_shared.rs");
 include!("linux_runtime_lock_shared.rs");
 
-const LINUX_TASK_LIMIT: usize = thread::MAX_THREADS;
+pub(crate) const LINUX_TASK_LIMIT: usize = thread::MAX_THREADS;
 
 struct LinuxTaskRuntime {
     tasks: LinuxTaskTable<LINUX_TASK_LIMIT>,
@@ -94,11 +94,24 @@ pub(crate) fn with_current_signal_state<R>(
 ) -> Result<R, SysError> {
     with_runtime(|runtime| {
         let scheduler_thread = scheduler::scheduler().current();
-        let (signal_state, _) = runtime
+        let (_, signal_state, _) = runtime
             .tasks
             .signal_state_by_scheduler_mut(scheduler_thread.0)
             .ok_or(SysError::ESRCH)?;
         Ok(operation(signal_state))
+    })
+}
+
+pub(crate) fn with_current_signal_state_and_slot<R>(
+    operation: impl FnOnce(usize, &mut LinuxTaskSignalState) -> R,
+) -> Result<R, SysError> {
+    with_runtime(|runtime| {
+        let scheduler_thread = scheduler::scheduler().current();
+        let (slot, signal_state, _) = runtime
+            .tasks
+            .signal_state_by_scheduler_mut(scheduler_thread.0)
+            .ok_or(SysError::ESRCH)?;
+        Ok(operation(slot, signal_state))
     })
 }
 

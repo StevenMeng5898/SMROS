@@ -2321,11 +2321,13 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         );
     }
     assert!(task_logic.contains("signal_states: [LinuxTaskSignalState; N]"));
+    assert!(task_logic.contains("pub(crate) fn linux_signal_info_offset("));
     assert!(task_logic.contains("pub(crate) fn inherit_signal_mask("));
     assert!(task_logic.contains("pub(crate) fn route_signal("));
     assert!(task_logic.contains("pub(crate) fn process_signal_target("));
     assert!(task.contains("pub(crate) fn queue_task_signal("));
     assert!(task.contains("pub(crate) fn process_signal_target("));
+    assert!(task.contains("pub(crate) fn with_current_signal_state_and_slot<R>("));
     assert!(task.contains("LinuxSignalRouteError::QueueFull => SysError::EAGAIN"));
 
     let reserve_clone_start = task
@@ -2390,6 +2392,14 @@ fn linux_signal_state_is_owned_by_each_live_task() {
     }
     assert!(syscall.contains("static LINUX_PROCESS_PENDING_SIGNALS:"));
     assert!(syscall.contains("static mut LINUX_PROCESS_REALTIME_PENDING:"));
+    assert!(syscall.contains(
+        "linux_task::LINUX_TASK_LIMIT * LINUX_SIGNAL_FRAME_LIMIT * LINUX_SIGNAL_INFO_BYTES"
+    ));
+    let trampoline_start = syscall
+        .find("fn ensure_linux_signal_trampoline()")
+        .expect("signal trampoline allocation");
+    let trampoline = braced_body(&syscall[trampoline_start..]);
+    assert!(trampoline.contains("LINUX_SIGNAL_TRAMPOLINE_BYTES"));
     let process_queue_start = syscall
         .find("fn with_linux_process_realtime_pending<R>(")
         .expect("process realtime queue guard");
@@ -2472,7 +2482,11 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         .find("fn deliver_next_linux_signal(")
         .expect("signal delivery helper");
     let delivery = braced_body(&syscall[delivery_start..]);
-    assert!(delivery.contains("linux_task::with_current_signal_state("));
+    assert!(delivery.contains("linux_task::with_current_signal_state_and_slot("));
+    assert!(delivery.contains("linux_task::linux_signal_info_offset(task_slot"));
+    assert!(delivery.contains("checked_add(LINUX_SIGNAL_INFO_OFFSET)"));
+    assert!(delivery.contains("checked_add(info_offset)"));
+    assert!(!delivery.contains("depth * LINUX_SIGNAL_INFO_BYTES"));
     assert!(delivery.contains("signal_state.push_frame(frame)?"));
     assert!(delivery.contains("requeue_linux_signal(deliverable)"));
     assert!(delivery.contains("signal_state.alt_stack.flags = LINUX_SS_ONSTACK as u32"));
