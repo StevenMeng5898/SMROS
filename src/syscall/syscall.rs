@@ -46,6 +46,7 @@ use super::address_logic::{
     checked_end, fixed_linux_mmap_request_ok as shared_fixed_linux_mmap_request_ok,
     page_aligned as shared_page_aligned, range_overlaps, range_within_window,
 };
+use super::linux_task;
 use crate::kernel_lowlevel::memory::{process_manager, PageFrameAllocator, PAGE_SIZE};
 use crate::kernel_objects::channel;
 use crate::kernel_objects::compat;
@@ -2300,6 +2301,7 @@ pub fn reset_linux_container_state() {
 }
 
 pub fn reset_linux_process_state() {
+    linux_task::reset();
     let fds = memory_state()
         .linux_fds
         .iter()
@@ -6361,7 +6363,7 @@ pub fn sys_exit_group(exit_code: i32) -> SysResult {
 
 /// Linux sys_getpid implementation
 pub fn sys_getpid() -> SysResult {
-    Ok(1)
+    linux_task::current_tgid()
 }
 
 /// Linux sys_getppid implementation
@@ -6371,7 +6373,7 @@ pub fn sys_getppid() -> SysResult {
 
 /// Linux sys_gettid implementation
 pub fn sys_gettid() -> SysResult {
-    Ok(1)
+    linux_task::current_tid()
 }
 
 pub fn sys_getuid() -> SysResult {

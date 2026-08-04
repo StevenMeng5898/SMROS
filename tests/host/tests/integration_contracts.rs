@@ -1786,6 +1786,100 @@ fn scheduler_exposes_atomic_linux_task_transitions() {
 }
 
 #[test]
+fn linux_root_task_and_syscall_frame_have_bounded_owners() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let boot = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/boot.rs"))
+        .expect("read AArch64 exception entry");
+    let dispatch = std::fs::read_to_string(repository.join("src/syscall/syscall_dispatch.rs"))
+        .expect("read syscall dispatcher");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let run_elf = std::fs::read_to_string(repository.join("src/user_level/services/run_elf.rs"))
+        .expect("read ELF launcher");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+    let context = std::fs::read_to_string(repository.join("src/syscall/linux_syscall_context.rs"))
+        .expect("read Linux syscall context");
+
+    let exception_start = boot
+        .find("exception_handler:")
+        .expect("synchronous exception handler");
+    let exception = &boot[exception_start..];
+    let frame_arg = exception
+        .find("mov     x0, sp")
+        .expect("saved frame argument");
+    let syscall_number = exception
+        .find("ldr     x1, [sp, #64]")
+        .expect("syscall number argument");
+    let first_args = exception
+        .find("ldp     x2, x3, [sp, #0]")
+        .expect("first syscall arguments");
+    let last_args = exception
+        .find("ldp     x6, x7, [sp, #32]")
+        .expect("last syscall arguments");
+    let call = exception
+        .find("bl      handle_syscall_simple")
+        .expect("syscall dispatch call");
+    assert!(frame_arg < syscall_number);
+    assert!(syscall_number < first_args && first_args < last_args && last_args < call);
+
+    assert!(dispatch.contains("saved_frame: usize"));
+    assert!(dispatch.contains("linux_syscall_context::with_linux_syscall_frame("));
+    let linux_branch = dispatch
+        .find("if is_linux_syscall_number(syscall_num)")
+        .expect("Linux dispatch branch");
+    let zircon_branch = dispatch
+        .find("else if is_zircon_syscall_number(syscall_num)")
+        .expect("Zircon dispatch branch");
+    let linux_dispatch = &dispatch[linux_branch..zircon_branch];
+    assert!(linux_dispatch.contains("with_linux_syscall_frame"));
+    assert!(!dispatch[zircon_branch..].contains("with_linux_syscall_frame"));
+
+    assert!(context.contains("struct LinuxSyscallFrameRef"));
+    assert!(context.contains("compare_exchange("));
+    assert!(context.contains("pub(crate) fn current() -> Option<LinuxSyscallFrameRef>"));
+    assert!(task.contains("UnsafeCell<LinuxTaskRuntime>"));
+    for api in [
+        "pub(crate) fn register_root(",
+        "pub(crate) fn current_tid(",
+        "pub(crate) fn current_tgid(",
+        "pub(crate) fn lookup_tid(",
+        "pub(crate) fn reset(",
+    ] {
+        assert!(task.contains(api), "missing Linux task API {api}");
+    }
+
+    let launcher = run_elf
+        .find("extern \"C\" fn run_elf_launcher_entry()")
+        .expect("ELF launcher entry");
+    let launcher = &run_elf[launcher..];
+    let root = launcher
+        .find("linux_task::register_root(scheduler_thread)")
+        .expect("root task registration");
+    let enter = launcher
+        .find("user_process::switch_to_el0(entry, stack_top, 0)")
+        .expect("EL0 transfer");
+    assert!(root < enter);
+
+    let reset = syscall
+        .find("pub fn reset_linux_process_state()")
+        .expect("Linux process reset");
+    let reset = &syscall[reset..];
+    let tasks = reset.find("linux_task::reset()").expect("Linux task reset");
+    let descriptors = reset.find("sys_close(fd)").expect("descriptor reset");
+    let mappings = reset
+        .find("memory_state().reset_linux_process_state()")
+        .expect("mapping reset");
+    let signals = reset
+        .find("reset_linux_signal_timer_state()")
+        .expect("signal reset");
+    assert!(tasks < descriptors && tasks < mappings && tasks < signals);
+
+    assert!(syscall.contains("linux_task::current_tgid()"));
+    assert!(syscall.contains("linux_task::current_tid()"));
+}
+
+#[test]
 fn aarch64_el0_context_abi_is_complete() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let boot = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/boot.rs"))

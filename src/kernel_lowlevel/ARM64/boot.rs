@@ -548,16 +548,17 @@ exception_handler:
     b.ne    99f // Not SVC, jump to error handler
     
     // This is SVC exception - handle syscall
-    // Load syscall number from x8 (saved at sp+64)
-    ldr     x0, [sp, #64]
+    // Pass the complete saved frame, followed by x8 and x0..x5.
+    mov     x0, sp
+    ldr     x1, [sp, #64]
     
     // Load syscall arguments from saved registers
-    ldp     x1, x2, [sp, #0]    // x0, x1 -> arg0, arg1
-    ldp     x3, x4, [sp, #16]   // x2, x3 -> arg2, arg3
-    ldp     x5, x6, [sp, #32]   // x4, x5 -> arg4, arg5
+    ldp     x2, x3, [sp, #0]    // x0, x1 -> arg0, arg1
+    ldp     x4, x5, [sp, #16]   // x2, x3 -> arg2, arg3
+    ldp     x6, x7, [sp, #32]   // x4, x5 -> arg4, arg5
     
     // Call Rust syscall handler
-    // Arguments: x0=syscall_num, x1-x6=args
+    // Arguments: x0=saved_frame, x1=syscall_num, x2-x7=args
     bl      handle_syscall_simple
 
     // Save result back to x0 position on stack

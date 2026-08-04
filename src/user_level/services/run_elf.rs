@@ -243,6 +243,13 @@ extern "C" fn run_elf_launcher_entry() -> ! {
                 });
                 finish_launcher_thread();
             }
+            let scheduler_thread = scheduler::scheduler().current();
+            if syscall::linux_task::register_root(scheduler_thread).is_err() {
+                complete_active_run(cpu, launch_id, |_| {
+                    RunTermination::LaunchError(RunElfError::Thread)
+                });
+                finish_launcher_thread();
+            }
             unsafe {
                 user_process::switch_to_el0(entry, stack_top, 0);
             }

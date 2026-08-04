@@ -8,6 +8,9 @@
 //! Each aspect is in its own file for better organization.
 
 pub(crate) mod address_logic;
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod linux_syscall_context;
+pub(crate) mod linux_task;
 pub mod syscall;
 pub(crate) mod syscall_bridge;
 pub mod syscall_dispatch;

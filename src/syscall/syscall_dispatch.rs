@@ -11,6 +11,8 @@ use crate::syscall::{
     syscall_logic::{is_zircon_syscall_number, zircon_syscall_from_raw},
     SysError, ZxError,
 };
+#[cfg(target_arch = "aarch64")]
+use crate::{kernel_lowlevel::thread::Aarch64ExceptionFrame, syscall::linux_syscall_context};
 
 /// Handle syscall from assembly exception handler
 ///
@@ -50,6 +52,7 @@ pub unsafe extern "C" fn handle_syscall() -> u64 {
 /// This is easier to call from assembly
 #[no_mangle]
 pub extern "C" fn handle_syscall_simple(
+    saved_frame: usize,
     syscall_num: u64,
     arg0: u64,
     arg1: u64,
@@ -62,7 +65,22 @@ pub extern "C" fn handle_syscall_simple(
 
     let result = if is_linux_syscall_number(syscall_num) {
         // Linux syscall
-        linux_sys_result_to_u64(dispatch_linux_syscall(syscall_num as u32, args))
+        #[cfg(target_arch = "aarch64")]
+        {
+            let return_pc = crate::kernel_lowlevel::cpu::read_exception_return_pc();
+            let pstate = crate::kernel_lowlevel::cpu::read_exception_return_state();
+            linux_sys_result_to_u64(linux_syscall_context::with_linux_syscall_frame(
+                saved_frame as *mut Aarch64ExceptionFrame,
+                return_pc,
+                pstate,
+                || dispatch_linux_syscall(syscall_num as u32, args),
+            ))
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let _ = saved_frame;
+            linux_sys_result_to_u64(dispatch_linux_syscall(syscall_num as u32, args))
+        }
     } else if is_zircon_syscall_number(syscall_num) {
         let zircon_args = [args[0], args[1], args[2], args[3], args[4], args[5], 0, 0];
         match dispatch_zircon_syscall(zircon_syscall_from_raw(syscall_num), zircon_args) {
