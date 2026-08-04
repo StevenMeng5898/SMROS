@@ -285,6 +285,12 @@ pub(crate) enum LinuxPendingSignalSource {
     Process,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxPendingSignalReservation {
+    Standard(usize),
+    Realtime,
+}
+
 pub(crate) fn select_linux_pending_signal(
     task: Option<LinuxPendingSignal>,
     process: Option<LinuxPendingSignal>,
@@ -303,18 +309,22 @@ pub(crate) fn select_linux_pending_signal(
 #[derive(Clone, Copy)]
 pub(crate) struct LinuxPendingSignals {
     pub standard_pending: u64,
+    pub standard_reserved: u64,
     pub standard_records: [LinuxPendingSignal; LINUX_REALTIME_SIGNAL_MIN],
     pub realtime_pending: [LinuxPendingSignal; LINUX_RT_QUEUE_LIMIT],
     pub realtime_len: usize,
+    pub realtime_reserved: usize,
 }
 
 impl LinuxPendingSignals {
     pub(crate) const fn new() -> Self {
         Self {
             standard_pending: 0,
+            standard_reserved: 0,
             standard_records: [LinuxPendingSignal::EMPTY; LINUX_REALTIME_SIGNAL_MIN],
             realtime_pending: [LinuxPendingSignal::EMPTY; LINUX_RT_QUEUE_LIMIT],
             realtime_len: 0,
+            realtime_reserved: 0,
         }
     }
 
@@ -341,7 +351,7 @@ impl LinuxPendingSignals {
             }
             return Ok(());
         }
-        if self.realtime_len >= LINUX_RT_QUEUE_LIMIT {
+        if self.realtime_len + self.realtime_reserved >= LINUX_RT_QUEUE_LIMIT {
             return Err(LinuxSignalRouteError::QueueFull);
         }
         self.realtime_pending[self.realtime_len] = record;
@@ -356,7 +366,7 @@ impl LinuxPendingSignals {
         let mut standard = self.standard_pending;
         while standard != 0 {
             let signum = standard.trailing_zeros() as usize + 1;
-            if eligible(signum) {
+            if self.standard_reserved & linux_signal_bit(signum) == 0 && eligible(signum) {
                 return Some(self.standard_records[signum]);
             }
             standard &= !linux_signal_bit(signum);
@@ -374,7 +384,7 @@ impl LinuxPendingSignals {
         let mut standard = self.standard_pending;
         while standard != 0 {
             let signum = standard.trailing_zeros() as usize + 1;
-            if eligible(signum) {
+            if self.standard_reserved & linux_signal_bit(signum) == 0 && eligible(signum) {
                 self.standard_pending &= !linux_signal_bit(signum);
                 let record = self.standard_records[signum];
                 self.standard_records[signum] = LinuxPendingSignal::EMPTY;
@@ -401,6 +411,91 @@ impl LinuxPendingSignals {
 
     pub(crate) fn take_matching(&mut self, wait_mask: u64) -> Option<LinuxPendingSignal> {
         self.take_eligible(|signum| wait_mask & linux_signal_bit(signum) != 0)
+    }
+
+    pub(crate) fn reserve_direct(
+        &mut self,
+        record: LinuxPendingSignal,
+    ) -> Result<Option<LinuxPendingSignalReservation>, LinuxSignalRouteError> {
+        if !(1..=LINUX_MAX_SIGNAL).contains(&record.signum) {
+            return Err(LinuxSignalRouteError::InvalidSignal);
+        }
+        if record.signum < LINUX_REALTIME_SIGNAL_MIN {
+            let bit = linux_signal_bit(record.signum);
+            if self.standard_reserved & bit != 0 {
+                self.queue(record)?;
+                return Ok(None);
+            }
+            self.standard_reserved |= bit;
+            return Ok(Some(LinuxPendingSignalReservation::Standard(
+                record.signum,
+            )));
+        }
+        if self.realtime_len + self.realtime_reserved >= LINUX_RT_QUEUE_LIMIT {
+            return Err(LinuxSignalRouteError::QueueFull);
+        }
+        self.realtime_reserved += 1;
+        Ok(Some(LinuxPendingSignalReservation::Realtime))
+    }
+
+    pub(crate) fn take_matching_reserved(
+        &mut self,
+        wait_mask: u64,
+    ) -> Option<(LinuxPendingSignal, LinuxPendingSignalReservation)> {
+        let record = self.take_matching(wait_mask)?;
+        let reservation = if record.signum < LINUX_REALTIME_SIGNAL_MIN {
+            let bit = linux_signal_bit(record.signum);
+            self.standard_reserved |= bit;
+            LinuxPendingSignalReservation::Standard(record.signum)
+        } else {
+            self.realtime_reserved += 1;
+            LinuxPendingSignalReservation::Realtime
+        };
+        Some((record, reservation))
+    }
+
+    pub(crate) fn commit_reservation(
+        &mut self,
+        reservation: LinuxPendingSignalReservation,
+    ) -> Result<(), LinuxSignalRouteError> {
+        match reservation {
+            LinuxPendingSignalReservation::Standard(signum) => {
+                let bit = linux_signal_bit(signum);
+                if !(1..LINUX_REALTIME_SIGNAL_MIN).contains(&signum)
+                    || self.standard_reserved & bit == 0
+                {
+                    return Err(LinuxSignalRouteError::InvalidReservation);
+                }
+                self.standard_reserved &= !bit;
+            }
+            LinuxPendingSignalReservation::Realtime => {
+                if self.realtime_reserved == 0 {
+                    return Err(LinuxSignalRouteError::InvalidReservation);
+                }
+                self.realtime_reserved -= 1;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn rollback_reservation(
+        &mut self,
+        reservation: LinuxPendingSignalReservation,
+        record: LinuxPendingSignal,
+    ) -> Result<(), LinuxSignalRouteError> {
+        match reservation {
+            LinuxPendingSignalReservation::Standard(signum) if signum == record.signum => {
+                self.commit_reservation(reservation)?;
+                self.requeue_front(record)
+            }
+            LinuxPendingSignalReservation::Realtime
+                if record.signum >= LINUX_REALTIME_SIGNAL_MIN =>
+            {
+                self.commit_reservation(reservation)?;
+                self.requeue_front(record)
+            }
+            _ => Err(LinuxSignalRouteError::InvalidReservation),
+        }
     }
 
     pub(crate) fn requeue_front(
@@ -463,6 +558,7 @@ pub(crate) struct LinuxSignalWait {
     pub outcome: LinuxSignalWaitOutcome,
     pub signal: LinuxPendingSignal,
     pub signal_source: Option<LinuxPendingSignalSource>,
+    pub signal_reservation: Option<LinuxPendingSignalReservation>,
 }
 
 impl LinuxSignalWait {
@@ -479,6 +575,7 @@ impl LinuxSignalWait {
             outcome: LinuxSignalWaitOutcome::Waiting,
             signal: LinuxPendingSignal::EMPTY,
             signal_source: None,
+            signal_reservation: None,
         }
     }
 
@@ -491,6 +588,7 @@ impl LinuxSignalWait {
             outcome: LinuxSignalWaitOutcome::Waiting,
             signal: LinuxPendingSignal::EMPTY,
             signal_source: None,
+            signal_reservation: None,
         }
     }
 
@@ -687,6 +785,7 @@ impl LinuxTaskSignalState {
         &mut self,
         record: LinuxPendingSignal,
         source: LinuxPendingSignalSource,
+        reservation: LinuxPendingSignalReservation,
     ) -> bool {
         let Some(wait) = self.signal_wait.as_mut() else {
             return false;
@@ -696,6 +795,7 @@ impl LinuxTaskSignalState {
         }
         wait.signal = record;
         wait.signal_source = Some(source);
+        wait.signal_reservation = Some(reservation);
         wait.outcome = LinuxSignalWaitOutcome::Signal;
         true
     }
@@ -863,6 +963,7 @@ impl LinuxTaskSignalState {
 pub(crate) enum LinuxSignalRouteError {
     NoSuchTask,
     InvalidSignal,
+    InvalidReservation,
     QueueFull,
 }
 
@@ -1099,13 +1200,24 @@ impl<const N: usize> LinuxTaskTable<N> {
             return Ok((task, None));
         }
         let signal_state = &mut self.signal_states[slot];
-        match task.block_reason {
-            LinuxBlockReason::SignalWait
-                if signal_state
-                    .complete_signal_wait(record, LinuxPendingSignalSource::Task) =>
-            {
-                Ok((task, Some(LinuxBlockReason::SignalWait)))
+        if task.block_reason == LinuxBlockReason::SignalWait
+            && signal_state.signal_wait_accepts(record.signum)
+        {
+            let Some(reservation) = signal_state.pending.reserve_direct(record)? else {
+                return Ok((task, None));
+            };
+            if signal_state.complete_signal_wait(
+                record,
+                LinuxPendingSignalSource::Task,
+                reservation,
+            ) {
+                return Ok((task, Some(LinuxBlockReason::SignalWait)));
             }
+            signal_state
+                .pending
+                .rollback_reservation(reservation, record)?;
+        }
+        match task.block_reason {
             LinuxBlockReason::SignalWait => {
                 signal_state.queue(record)?;
                 if signal_state.interrupt_timed_signal_wait(record.signum) {
@@ -1160,14 +1272,18 @@ impl<const N: usize> LinuxTaskTable<N> {
         tid: usize,
         scheduler_thread: usize,
         record: LinuxPendingSignal,
+        reservation: LinuxPendingSignalReservation,
     ) -> Option<LinuxBlockReason> {
         let slot = self.task_slot(tid, scheduler_thread)?;
         let task = self.tasks[slot];
         let signal_state = &mut self.signal_states[slot];
         match task.block_reason {
             LinuxBlockReason::SignalWait
-                if signal_state
-                    .complete_signal_wait(record, LinuxPendingSignalSource::Process) =>
+                if signal_state.complete_signal_wait(
+                    record,
+                    LinuxPendingSignalSource::Process,
+                    reservation,
+                ) =>
             {
                 Some(LinuxBlockReason::SignalWait)
             }

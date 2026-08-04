@@ -1217,6 +1217,93 @@ mod linux_task_logic {
         assert_eq!(state.take_matching(linux_signal_bit(10)), None);
     }
 
+    #[cfg(test)]
+    fn assert_realtime_wait_efault_rollback_is_reserved_and_exact() {
+        let mut pending = LinuxPendingSignals::new();
+        for marker in 0..LINUX_RT_QUEUE_LIMIT - 1 {
+            pending.queue(signal_record(34, marker as u8)).unwrap();
+        }
+        let matching = signal_record(35, 0xa5);
+        let reservation = pending
+            .reserve_direct(matching)
+            .unwrap()
+            .expect("direct wait completion reservation");
+
+        assert_eq!(pending.realtime_reserved, 1);
+        assert_eq!(
+            pending.queue(signal_record(36, 0xff)),
+            Err(LinuxSignalRouteError::QueueFull)
+        );
+
+        pending
+            .rollback_reservation(reservation, matching)
+            .expect("guaranteed EFAULT rollback");
+        assert_eq!(pending.realtime_reserved, 0);
+        assert_eq!(pending.realtime_len, LINUX_RT_QUEUE_LIMIT);
+        assert_eq!(pending.take_matching(linux_signal_bit(35)), Some(matching));
+    }
+
+    #[test]
+    fn task_realtime_wait_efault_rollback_restores_the_exact_reserved_record() {
+        assert_realtime_wait_efault_rollback_is_reserved_and_exact();
+    }
+
+    #[test]
+    fn process_realtime_wait_efault_rollback_restores_the_exact_reserved_record() {
+        assert_realtime_wait_efault_rollback_is_reserved_and_exact();
+    }
+
+    #[test]
+    fn pending_realtime_wait_rollback_restores_the_reserved_record_at_capacity() {
+        let mut pending = LinuxPendingSignals::new();
+        let original = signal_record(35, 0xa5);
+        pending.queue(original).unwrap();
+        let (taken, reservation) = pending
+            .take_matching_reserved(linux_signal_bit(35))
+            .expect("reserved destructive wait take");
+        assert_eq!(taken, original);
+        assert_eq!(pending.realtime_reserved, 1);
+
+        for marker in 0..LINUX_RT_QUEUE_LIMIT - 1 {
+            pending.queue(signal_record(36, marker as u8)).unwrap();
+        }
+        assert_eq!(pending.realtime_len, LINUX_RT_QUEUE_LIMIT - 1);
+        assert_eq!(
+            pending.queue(signal_record(37, 0xff)),
+            Err(LinuxSignalRouteError::QueueFull)
+        );
+
+        pending
+            .rollback_reservation(reservation, taken)
+            .expect("guaranteed destructive-take rollback");
+        assert_eq!(pending.realtime_reserved, 0);
+        assert_eq!(pending.realtime_len, LINUX_RT_QUEUE_LIMIT);
+        assert_eq!(pending.take_matching(linux_signal_bit(35)), Some(original));
+    }
+
+    #[test]
+    fn standard_wait_rollback_restores_the_original_record_over_later_coalescing() {
+        let mut pending = LinuxPendingSignals::new();
+        let original = signal_record(10, 0x31);
+        let later = signal_record(10, 0x92);
+        let duplicate = signal_record(10, 0xb4);
+        let reservation = pending
+            .reserve_direct(original)
+            .unwrap()
+            .expect("standard wait reservation");
+
+        pending.queue(later).unwrap();
+        pending.queue(duplicate).unwrap();
+        assert_eq!(pending.standard_reserved, linux_signal_bit(10));
+        assert_eq!(pending.standard_records[10], later);
+
+        pending
+            .rollback_reservation(reservation, original)
+            .expect("standard EFAULT rollback");
+        assert_eq!(pending.standard_reserved, 0);
+        assert_eq!(pending.take_matching(linux_signal_bit(10)), Some(original));
+    }
+
     #[test]
     fn sigsuspend_keeps_the_temporary_mask_until_frame_setup_then_restores_the_old_mask() {
         let mut state = LinuxTaskSignalState::new();
@@ -1292,27 +1379,61 @@ mod linux_task_logic {
         tasks.signal_states[rolled_back.slot]
             .queue(signal_record(34, 0x34))
             .unwrap();
+        tasks.signal_states[rolled_back.slot]
+            .pending
+            .reserve_direct(signal_record(35, 0x35))
+            .unwrap()
+            .unwrap();
+        tasks.signal_states[rolled_back.slot]
+            .pending
+            .reserve_direct(signal_record(12, 0x12))
+            .unwrap()
+            .unwrap();
         assert!(tasks.rollback(rolled_back));
         assert_eq!(tasks.signal_states[rolled_back.slot].mask, 0);
         assert_eq!(tasks.signal_states[rolled_back.slot].realtime_len, 0);
+        assert_eq!(tasks.signal_states[rolled_back.slot].standard_reserved, 0);
+        assert_eq!(tasks.signal_states[rolled_back.slot].realtime_reserved, 0);
 
         let retired = tasks.reserve_child(9).unwrap();
         assert_eq!(retired.slot, rolled_back.slot);
         assert!(tasks.publish(retired));
-        tasks.signal_state_mut(retired.tid, 9).unwrap().mask = 0xaa;
+        let retired_state = tasks.signal_state_mut(retired.tid, 9).unwrap();
+        retired_state.mask = 0xaa;
+        retired_state
+            .pending
+            .reserve_direct(signal_record(35, 0x35))
+            .unwrap()
+            .unwrap();
+        retired_state
+            .pending
+            .reserve_direct(signal_record(12, 0x12))
+            .unwrap()
+            .unwrap();
         assert!(tasks.exit(retired.tid, 9));
         assert!(tasks.retire(retired.tid, 9));
         assert_eq!(tasks.signal_states[retired.slot].mask, 0);
+        assert_eq!(tasks.signal_states[retired.slot].standard_reserved, 0);
+        assert_eq!(tasks.signal_states[retired.slot].realtime_reserved, 0);
 
-        tasks
-            .signal_state_mut(LINUX_ROOT_TID, 7)
+        let root_state = tasks.signal_state_mut(LINUX_ROOT_TID, 7).unwrap();
+        root_state.queue(signal_record(12, 0x12)).unwrap();
+        root_state
+            .pending
+            .reserve_direct(signal_record(35, 0x35))
             .unwrap()
-            .queue(signal_record(12, 0x12))
+            .unwrap();
+        root_state
+            .pending
+            .reserve_direct(signal_record(13, 0x13))
+            .unwrap()
             .unwrap();
         tasks.reset();
         assert!(tasks.signal_states.iter().all(|state| {
             state.mask == 0
                 && state.pending_mask() == 0
+                && state.standard_reserved == 0
+                && state.realtime_reserved == 0
                 && state.frame_depth == 0
                 && !state.sigreturn_requested
                 && state.signal_wait.is_none()

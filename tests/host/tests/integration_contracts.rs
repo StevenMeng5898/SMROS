@@ -2923,6 +2923,35 @@ fn linux_sigtimedwait_requeues_the_original_source_when_copyout_becomes_invalid(
 }
 
 #[test]
+fn linux_sigtimedwait_rollback_uses_bounded_source_local_reservations() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let task_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_task_logic_shared.rs"))
+            .expect("read Linux task logic");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux signal runtime");
+
+    assert!(task_logic.contains("pub standard_reserved: u64"));
+    assert!(task_logic.contains("pub realtime_reserved: usize"));
+    assert!(task_logic.contains("pub(crate) enum LinuxPendingSignalReservation"));
+    assert!(task_logic.contains("pub signal_reservation: Option<LinuxPendingSignalReservation>"));
+    assert!(task_logic.contains("self.realtime_len + self.realtime_reserved"));
+    assert!(task_logic.contains("pub(crate) fn rollback_reservation("));
+
+    let requeue_start = syscall
+        .find("fn requeue_linux_signal(")
+        .expect("source-aware requeue helper");
+    let requeue = braced_body(&syscall[requeue_start..]);
+    assert!(requeue.contains("rollback_reservation("));
+    assert!(!requeue.contains("let _ ="));
+
+    for delivery_failure in syscall.match_indices("requeue_linux_signal(deliverable)") {
+        let suffix = &syscall[delivery_failure.0..];
+        assert!(!suffix.starts_with("requeue_linux_signal(deliverable);"));
+    }
+}
+
+#[test]
 fn aarch64_el0_context_abi_is_complete() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let boot = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/boot.rs"))

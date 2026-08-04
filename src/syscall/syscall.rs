@@ -57,9 +57,10 @@ use super::linux_syscall_context;
 use super::linux_task;
 use super::linux_task::{
     select_linux_pending_signal, LinuxBlockReason, LinuxCloneRequest, LinuxCloneValidationError,
-    LinuxPendingSignal, LinuxPendingSignalSource, LinuxPendingSignals, LinuxSignalDisposition,
-    LinuxSignalFrame, LinuxSignalStack, LinuxSignalWait, LinuxSignalWaitOutcome, CLONE_THREAD,
-    LINUX_SIGNAL_FRAME_LIMIT, LINUX_SIGNAL_INFO_BYTES,
+    LinuxPendingSignal, LinuxPendingSignalReservation, LinuxPendingSignalSource,
+    LinuxPendingSignals, LinuxSignalDisposition, LinuxSignalFrame, LinuxSignalStack,
+    LinuxSignalWait, LinuxSignalWaitOutcome, CLONE_THREAD, LINUX_SIGNAL_FRAME_LIMIT,
+    LINUX_SIGNAL_INFO_BYTES,
 };
 use crate::kernel_lowlevel::memory::{process_manager, PageFrameAllocator, PAGE_SIZE};
 use crate::kernel_objects::channel;
@@ -2724,13 +2725,26 @@ fn with_linux_process_pending<R>(operation: impl FnOnce(&mut LinuxPendingSignals
     result
 }
 
+fn linux_signal_route_error(error: linux_task::LinuxSignalRouteError) -> SysError {
+    match error {
+        linux_task::LinuxSignalRouteError::NoSuchTask => SysError::ESRCH,
+        linux_task::LinuxSignalRouteError::InvalidSignal
+        | linux_task::LinuxSignalRouteError::InvalidReservation => SysError::EINVAL,
+        linux_task::LinuxSignalRouteError::QueueFull => SysError::EAGAIN,
+    }
+}
+
 fn queue_process_linux_signal(record: LinuxPendingSignal) -> Result<(), SysError> {
+    with_linux_process_pending(|pending| pending.queue(record).map_err(linux_signal_route_error))
+}
+
+fn reserve_process_linux_signal(
+    record: LinuxPendingSignal,
+) -> Result<Option<LinuxPendingSignalReservation>, SysError> {
     with_linux_process_pending(|pending| {
-        pending.queue(record).map_err(|error| match error {
-            linux_task::LinuxSignalRouteError::NoSuchTask => SysError::ESRCH,
-            linux_task::LinuxSignalRouteError::InvalidSignal => SysError::EINVAL,
-            linux_task::LinuxSignalRouteError::QueueFull => SysError::EAGAIN,
-        })
+        pending
+            .reserve_direct(record)
+            .map_err(linux_signal_route_error)
     })
 }
 
@@ -2746,6 +2760,7 @@ fn process_pending_linux_signal_mask() -> u64 {
 struct LinuxDeliverableSignal {
     record: LinuxPendingSignal,
     source: LinuxPendingSignalSource,
+    reservation: Option<LinuxPendingSignalReservation>,
 }
 
 fn take_process_linux_signal(
@@ -2764,15 +2779,17 @@ fn peek_process_linux_signal_matching(wait_mask: u64) -> Option<LinuxPendingSign
     with_linux_process_pending(|pending| pending.peek_matching(wait_mask))
 }
 
-fn take_process_linux_signal_matching(wait_mask: u64) -> Option<LinuxPendingSignal> {
-    with_linux_process_pending(|pending| pending.take_matching(wait_mask))
+fn take_process_linux_signal_matching(
+    wait_mask: u64,
+) -> Option<(LinuxPendingSignal, LinuxPendingSignalReservation)> {
+    with_linux_process_pending(|pending| pending.take_matching_reserved(wait_mask))
 }
 
 fn take_selected_linux_signal(
     source: LinuxPendingSignalSource,
     signum: usize,
 ) -> Result<Option<LinuxDeliverableSignal>, SysError> {
-    let record = match source {
+    let selected = match source {
         LinuxPendingSignalSource::Task => {
             linux_task::take_current_matching_signal(linux_signal_bit(signum))?
         }
@@ -2780,7 +2797,11 @@ fn take_selected_linux_signal(
             take_process_linux_signal_matching(linux_signal_bit(signum))
         }
     };
-    Ok(record.map(|record| LinuxDeliverableSignal { record, source }))
+    Ok(selected.map(|(record, reservation)| LinuxDeliverableSignal {
+        record,
+        source,
+        reservation: Some(reservation),
+    }))
 }
 
 fn take_unblocked_linux_signal() -> Option<LinuxDeliverableSignal> {
@@ -2790,6 +2811,7 @@ fn take_unblocked_linux_signal() -> Option<LinuxDeliverableSignal> {
         return Some(LinuxDeliverableSignal {
             record,
             source: LinuxPendingSignalSource::Task,
+            reservation: None,
         });
     }
     let current = linux_task::current_task().ok()?;
@@ -2797,21 +2819,51 @@ fn take_unblocked_linux_signal() -> Option<LinuxDeliverableSignal> {
     take_process_linux_signal(current, mask).map(|record| LinuxDeliverableSignal {
         record,
         source: LinuxPendingSignalSource::Process,
+        reservation: None,
     })
 }
 
-fn requeue_linux_signal(deliverable: LinuxDeliverableSignal) {
+fn requeue_linux_signal(deliverable: LinuxDeliverableSignal) -> Result<(), SysError> {
     match deliverable.source {
         LinuxPendingSignalSource::Task => {
-            let _ = linux_task::with_current_signal_state(|signal_state| {
-                signal_state.requeue_front(deliverable.record)
-            });
+            let result = linux_task::with_current_signal_state(|signal_state| {
+                if let Some(reservation) = deliverable.reservation {
+                    signal_state
+                        .pending
+                        .rollback_reservation(reservation, deliverable.record)
+                } else {
+                    signal_state.requeue_front(deliverable.record)
+                }
+            })?;
+            result.map_err(linux_signal_route_error)
         }
-        LinuxPendingSignalSource::Process => {
-            with_linux_process_pending(|pending| {
-                let _ = pending.requeue_front(deliverable.record);
-            });
+        LinuxPendingSignalSource::Process => with_linux_process_pending(|pending| {
+            if let Some(reservation) = deliverable.reservation {
+                pending.rollback_reservation(reservation, deliverable.record)
+            } else {
+                pending.requeue_front(deliverable.record)
+            }
+            .map_err(linux_signal_route_error)
+        }),
+    }
+}
+
+fn commit_linux_signal(deliverable: LinuxDeliverableSignal) -> Result<(), SysError> {
+    let Some(reservation) = deliverable.reservation else {
+        return Ok(());
+    };
+    match deliverable.source {
+        LinuxPendingSignalSource::Task => {
+            let result = linux_task::with_current_signal_state(|signal_state| {
+                signal_state.pending.commit_reservation(reservation)
+            })?;
+            result.map_err(linux_signal_route_error)
         }
+        LinuxPendingSignalSource::Process => with_linux_process_pending(|pending| {
+            pending
+                .commit_reservation(reservation)
+                .map_err(linux_signal_route_error)
+        }),
     }
 }
 
@@ -2829,16 +2881,26 @@ fn queue_process_linux_signal_and_wake(record: LinuxPendingSignal) -> Result<(),
         if let Some(target) = linux_task::signal_wait_target(record.signum) {
             match target.block_reason {
                 LinuxBlockReason::SignalWait => {
-                    if let Some(reason) = linux_task::complete_process_signal_wait(
-                        target.tid,
-                        target.scheduler_thread,
-                        record,
-                    ) {
-                        let _ =
-                            linux_task::wake_blocked(target.tid, target.scheduler_thread, reason);
-                        return Ok(());
+                    if let Some(reservation) = reserve_process_linux_signal(record)? {
+                        if let Some(reason) = linux_task::complete_process_signal_wait(
+                            target.tid,
+                            target.scheduler_thread,
+                            record,
+                            reservation,
+                        ) {
+                            let _ = linux_task::wake_blocked(
+                                target.tid,
+                                target.scheduler_thread,
+                                reason,
+                            );
+                            return Ok(());
+                        }
+                        requeue_linux_signal(LinuxDeliverableSignal {
+                            record,
+                            source: LinuxPendingSignalSource::Process,
+                            reservation: Some(reservation),
+                        })?;
                     }
-                    queue_process_linux_signal(record)?;
                     if let Some(reason) = linux_task::interrupt_process_signal_wait(
                         target.tid,
                         target.scheduler_thread,
@@ -2927,7 +2989,9 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
             LinuxSignalDisposition::Handled => {}
         }
         let Ok(trampoline) = ensure_linux_signal_trampoline() else {
-            requeue_linux_signal(deliverable);
+            if requeue_linux_signal(deliverable).is_err() {
+                return false;
+            }
             return false;
         };
         let restart = linux_task::with_current_signal_state(|signal_state| {
@@ -2986,7 +3050,9 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
             if let Some(restart) = restart {
                 let _ = linux_task::install_current_restart_block(restart);
             }
-            requeue_linux_signal(deliverable);
+            if requeue_linux_signal(deliverable).is_err() {
+                return false;
+            }
             return false;
         };
         if action.flags & LINUX_SA_RESETHAND != 0 {
@@ -3894,13 +3960,13 @@ fn linux_signal_wait_deadline(timeout: usize) -> Result<Option<u64>, SysError> {
 }
 
 fn finish_linux_signal_wait(
-    record: LinuxPendingSignal,
-    source: LinuxPendingSignalSource,
+    deliverable: LinuxDeliverableSignal,
     output_address: usize,
 ) -> SysResult {
+    let record = deliverable.record;
     if output_address != 0 {
         if !linux_signal_user_range_writable(output_address, LINUX_SIGNAL_INFO_BYTES) {
-            requeue_linux_signal(LinuxDeliverableSignal { record, source });
+            requeue_linux_signal(deliverable)?;
             return Err(SysError::EFAULT);
         }
         unsafe {
@@ -3916,6 +3982,7 @@ fn finish_linux_signal_wait(
             }
         }
     }
+    commit_linux_signal(deliverable)?;
     Ok(record.signum)
 }
 
@@ -5468,7 +5535,7 @@ pub fn sys_rt_sigtimedwait(
     };
     if let Some(deliverable) = immediate {
         crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
-        return finish_linux_signal_wait(deliverable.record, deliverable.source, info);
+        return finish_linux_signal_wait(deliverable, info);
     }
     if deadline.is_some_and(|deadline| deadline <= crate::kernel_lowlevel::timer::get_tick_count())
     {
@@ -5504,10 +5571,19 @@ pub fn sys_rt_sigtimedwait(
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     match outcome {
         Some(wait) if wait.outcome == LinuxSignalWaitOutcome::Signal => {
-            let Some(source) = wait.signal_source else {
+            let (Some(source), Some(reservation)) =
+                (wait.signal_source, wait.signal_reservation)
+            else {
                 return Err(SysError::EAGAIN);
             };
-            finish_linux_signal_wait(wait.signal, source, wait.output_address)
+            finish_linux_signal_wait(
+                LinuxDeliverableSignal {
+                    record: wait.signal,
+                    source,
+                    reservation: Some(reservation),
+                },
+                wait.output_address,
+            )
         }
         Some(wait) if wait.outcome == LinuxSignalWaitOutcome::TimedOut => Err(SysError::EAGAIN),
         Some(wait) if wait.outcome == LinuxSignalWaitOutcome::Interrupted => Err(SysError::EINTR),

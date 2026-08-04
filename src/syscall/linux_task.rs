@@ -209,8 +209,10 @@ pub(crate) fn peek_current_matching_signal(
 
 pub(crate) fn take_current_matching_signal(
     wait_mask: u64,
-) -> Result<Option<LinuxPendingSignal>, SysError> {
-    with_current_signal_state(|signal_state| signal_state.take_matching(wait_mask))
+) -> Result<Option<(LinuxPendingSignal, LinuxPendingSignalReservation)>, SysError> {
+    with_current_signal_state(|signal_state| {
+        signal_state.pending.take_matching_reserved(wait_mask)
+    })
 }
 
 pub(crate) fn current_matching_signum(wait_mask: u64) -> Result<Option<usize>, SysError> {
@@ -276,6 +278,7 @@ pub(crate) fn queue_task_signal(
             .map_err(|error| match error {
                 LinuxSignalRouteError::NoSuchTask => SysError::ESRCH,
                 LinuxSignalRouteError::InvalidSignal => SysError::EINVAL,
+                LinuxSignalRouteError::InvalidReservation => SysError::EINVAL,
                 LinuxSignalRouteError::QueueFull => SysError::EAGAIN,
             })
     })
@@ -293,6 +296,7 @@ pub(crate) fn route_signal_and_complete_wait(
             .map_err(|error| match error {
                 LinuxSignalRouteError::NoSuchTask => SysError::ESRCH,
                 LinuxSignalRouteError::InvalidSignal => SysError::EINVAL,
+                LinuxSignalRouteError::InvalidReservation => SysError::EINVAL,
                 LinuxSignalRouteError::QueueFull => SysError::EAGAIN,
             })
     })
@@ -306,11 +310,12 @@ pub(crate) fn complete_process_signal_wait(
     tid: usize,
     scheduler_thread: usize,
     record: LinuxPendingSignal,
+    reservation: LinuxPendingSignalReservation,
 ) -> Option<LinuxBlockReason> {
     with_runtime(|runtime| {
         runtime
             .tasks
-            .complete_process_signal_wait(tid, scheduler_thread, record)
+            .complete_process_signal_wait(tid, scheduler_thread, record, reservation)
     })
 }
 
