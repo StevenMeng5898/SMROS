@@ -6,6 +6,104 @@ macro_rules! smros_linux_root_tid_body {
 
 pub(crate) const LINUX_ROOT_TID: usize = smros_linux_root_tid_body!();
 
+pub(crate) const CLONE_VM: usize = 0x0000_0100;
+pub(crate) const CLONE_FS: usize = 0x0000_0200;
+pub(crate) const CLONE_FILES: usize = 0x0000_0400;
+pub(crate) const CLONE_SIGHAND: usize = 0x0000_0800;
+pub(crate) const CLONE_THREAD: usize = 0x0001_0000;
+pub(crate) const CLONE_SYSVSEM: usize = 0x0004_0000;
+pub(crate) const CLONE_SETTLS: usize = 0x0008_0000;
+pub(crate) const CLONE_PARENT_SETTID: usize = 0x0010_0000;
+pub(crate) const CLONE_CHILD_CLEARTID: usize = 0x0020_0000;
+pub(crate) const CLONE_CHILD_SETTID: usize = 0x0100_0000;
+
+const CLONE_EXIT_SIGNAL_MASK: usize = 0xff;
+const CLONE_REQUIRED_THREAD_FLAGS: usize =
+    CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
+const CLONE_ALLOWED_THREAD_FLAGS: usize = CLONE_REQUIRED_THREAD_FLAGS
+    | CLONE_SETTLS
+    | CLONE_PARENT_SETTID
+    | CLONE_CHILD_CLEARTID
+    | CLONE_CHILD_SETTID;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxCloneValidationError {
+    Flags,
+    Stack,
+    Tls,
+    ParentTid,
+    ChildTid,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxCloneRequest {
+    pub flags: usize,
+    pub user_sp: usize,
+    pub parent_tid: Option<usize>,
+    pub tls: Option<usize>,
+    pub child_tid: Option<usize>,
+    pub clear_child_tid: bool,
+}
+
+impl LinuxCloneRequest {
+    pub(crate) fn validate(
+        flags: usize,
+        user_sp: usize,
+        parent_tid: usize,
+        tls: usize,
+        child_tid: usize,
+    ) -> Result<Self, LinuxCloneValidationError> {
+        if flags & CLONE_EXIT_SIGNAL_MASK != 0
+            || flags & !CLONE_ALLOWED_THREAD_FLAGS != 0
+            || flags & CLONE_REQUIRED_THREAD_FLAGS != CLONE_REQUIRED_THREAD_FLAGS
+            || flags & CLONE_THREAD != 0 && (flags & CLONE_VM == 0 || flags & CLONE_SIGHAND == 0)
+        {
+            return Err(LinuxCloneValidationError::Flags);
+        }
+        if user_sp == 0 || user_sp & 0xf != 0 {
+            return Err(LinuxCloneValidationError::Stack);
+        }
+        let tls = if flags & CLONE_SETTLS != 0 {
+            if tls == 0 {
+                return Err(LinuxCloneValidationError::Tls);
+            }
+            Some(tls)
+        } else {
+            None
+        };
+        let parent_tid = if flags & CLONE_PARENT_SETTID != 0 {
+            if !valid_clone_tid_pointer(parent_tid) {
+                return Err(LinuxCloneValidationError::ParentTid);
+            }
+            Some(parent_tid)
+        } else {
+            None
+        };
+        let needs_child_tid = flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID) != 0;
+        let child_tid = if needs_child_tid {
+            if !valid_clone_tid_pointer(child_tid) {
+                return Err(LinuxCloneValidationError::ChildTid);
+            }
+            Some(child_tid)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            flags,
+            user_sp,
+            parent_tid,
+            tls,
+            child_tid,
+            clear_child_tid: flags & CLONE_CHILD_CLEARTID != 0,
+        })
+    }
+}
+
+fn valid_clone_tid_pointer(pointer: usize) -> bool {
+    pointer != 0 && pointer & 0x3 == 0 && pointer.checked_add(core::mem::size_of::<u32>()).is_some()
+}
+
 macro_rules! smros_linux_task_next_tid_body {
     ($next_tid:expr) => {{
         $next_tid.checked_add(1)

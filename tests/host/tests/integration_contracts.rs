@@ -1880,6 +1880,96 @@ fn linux_root_task_and_syscall_frame_have_bounded_owners() {
 }
 
 #[test]
+fn aarch64_clone_child_is_validated_before_publication() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+    let thread = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/thread.rs"))
+        .expect("read AArch64 thread transfer");
+    let switch =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/context_switch.S"))
+            .expect("read AArch64 context switch");
+
+    let clone_start = syscall.find("pub fn sys_clone(").expect("clone syscall");
+    let clone_end = syscall[clone_start..]
+        .find("pub fn sys_clone3(")
+        .expect("end of clone syscall");
+    let clone = &syscall[clone_start..clone_start + clone_end];
+    let mut previous = 0usize;
+    for operation in [
+        "linux_syscall_context::current()",
+        "LinuxCloneRequest::validate(",
+        "linux_clone_tid_destinations_valid(&request)",
+        "create_suspended_thread_on_cpu(",
+        "linux_task::reserve_clone(",
+        "linux_task::copy_clone_tids(",
+        "linux_task::commit_clone(",
+    ] {
+        let position = clone
+            .find(operation)
+            .unwrap_or_else(|| panic!("missing {operation}"));
+        assert!(
+            position >= previous,
+            "clone operation out of order: {operation}"
+        );
+        previous = position;
+    }
+    assert!(clone.contains("linux_task::restore_clone_tid_destinations(reservation)"));
+    assert!(clone.contains("linux_task::rollback_clone(reservation)"));
+    assert!(clone.contains("scheduler::scheduler().terminate_thread(scheduler_id)"));
+
+    let clone3_start = syscall.find("pub fn sys_clone3(").expect("clone3 syscall");
+    let clone3_end = syscall[clone3_start..]
+        .find("/// Linux sys_execve")
+        .expect("end of clone3 syscall");
+    let clone3 = &syscall[clone3_start..clone3_start + clone3_end];
+    assert!(clone3.contains("Err(SysError::ENOSYS)"));
+    assert!(!clone3.contains("core::ptr::read"));
+
+    assert!(task.contains("struct Aarch64CloneStart"));
+    assert!(task.contains("frame.regs[0] = 0"));
+    assert!(task.contains("unsafe { context.frame.read() }"));
+    assert!(task.contains("pub(crate) extern \"C\" fn linux_clone_child_entry() -> !"));
+    let commit = task
+        .find("pub(crate) fn commit_clone(")
+        .expect("clone commit");
+    let commit = &task[commit..];
+    let task_publish = commit
+        .find("runtime.tasks.publish(reservation)")
+        .expect("task publication");
+    let scheduler_publish = commit
+        .find("publish_suspended_thread(scheduler_id)")
+        .expect("scheduler publication");
+    assert!(task_publish < scheduler_publish);
+
+    assert!(thread.contains("pub unsafe fn start_linux_clone_child("));
+    let child_start = switch
+        .find("start_linux_clone_child:")
+        .expect("clone child assembly entry");
+    let child = &switch[child_start..];
+    for instruction in [
+        "msr     sp_el0, x17",
+        "msr     elr_el1, x17",
+        "msr     spsr_el1, x17",
+        "msr     tpidr_el0, x17",
+        "msr     fpcr, x17",
+        "msr     fpsr, x17",
+        "ldp     q0, q1, [x16, #0x100]",
+        "ldp     q30, q31, [x16, #0x2E0]",
+        "ldr     x17, [x16, #0x88]",
+        "ldr     x16, [x16, #0x80]",
+        "eret",
+    ] {
+        assert!(
+            child.contains(instruction),
+            "missing clone transfer {instruction}"
+        );
+    }
+}
+
+#[test]
 fn aarch64_el0_context_abi_is_complete() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let boot = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/boot.rs"))
@@ -1959,6 +2049,10 @@ fn aarch64_el0_context_abi_is_complete() {
     ] {
         assert!(switch.contains(instruction), "missing {instruction}");
     }
+    let scheduler_switches_end = switch
+        .find(".globl start_linux_clone_child")
+        .unwrap_or(switch.len());
+    let scheduler_switches = &switch[..scheduler_switches_end];
     for instruction in [
         "msr     sp_el0, x17",
         "msr     elr_el1, x17",
@@ -1968,7 +2062,7 @@ fn aarch64_el0_context_abi_is_complete() {
         "msr     fpsr, x17",
     ] {
         assert_eq!(
-            switch.matches(instruction).count(),
+            scheduler_switches.matches(instruction).count(),
             2,
             "both context-switch entry paths must contain {instruction}"
         );
@@ -1981,7 +2075,7 @@ fn aarch64_el0_context_abi_is_complete() {
         let restore = format!("ldp     q{first}, q{}, [x16, #{offset:#05X}]", first + 1);
         assert!(switch.contains(&save), "missing {save}");
         assert_eq!(
-            switch.matches(&restore).count(),
+            scheduler_switches.matches(&restore).count(),
             2,
             "both context-switch entry paths must contain {restore}"
         );

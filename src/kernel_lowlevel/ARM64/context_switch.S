@@ -174,3 +174,60 @@ context_switch_start:
 
     br      x16
 .size context_switch_start, . - context_switch_start
+
+.globl start_linux_clone_child
+.type start_linux_clone_child, %function
+start_linux_clone_child:
+    mov     x16, x0
+
+    ldr     x17, [x16, #0x310]
+    msr     sp_el0, x17
+    ldr     x17, [x16, #0x318]
+    msr     elr_el1, x17
+    ldr     x17, [x16, #0x320]
+    msr     spsr_el1, x17
+    ldr     x17, [x16, #0x328]
+    msr     tpidr_el0, x17
+    ldr     x17, [x16, #0x300]
+    msr     fpcr, x17
+    ldr     x17, [x16, #0x308]
+    msr     fpsr, x17
+
+    ldp     q0, q1, [x16, #0x100]
+    ldp     q2, q3, [x16, #0x120]
+    ldp     q4, q5, [x16, #0x140]
+    ldp     q6, q7, [x16, #0x160]
+    ldp     q8, q9, [x16, #0x180]
+    ldp     q10, q11, [x16, #0x1A0]
+    ldp     q12, q13, [x16, #0x1C0]
+    ldp     q14, q15, [x16, #0x1E0]
+    ldp     q16, q17, [x16, #0x200]
+    ldp     q18, q19, [x16, #0x220]
+    ldp     q20, q21, [x16, #0x240]
+    ldp     q22, q23, [x16, #0x260]
+    ldp     q24, q25, [x16, #0x280]
+    ldp     q26, q27, [x16, #0x2A0]
+    ldp     q28, q29, [x16, #0x2C0]
+    ldp     q30, q31, [x16, #0x2E0]
+    isb
+
+    ldp     x0, x1, [x16, #0x00]
+    ldp     x2, x3, [x16, #0x10]
+    ldp     x4, x5, [x16, #0x20]
+    ldp     x6, x7, [x16, #0x30]
+    ldp     x8, x9, [x16, #0x40]
+    ldp     x10, x11, [x16, #0x50]
+    ldp     x12, x13, [x16, #0x60]
+    ldp     x14, x15, [x16, #0x70]
+    ldr     x17, [x16, #0x88]
+    ldr     x18, [x16, #0x90]
+    ldp     x19, x20, [x16, #0x98]
+    ldp     x21, x22, [x16, #0xA8]
+    ldp     x23, x24, [x16, #0xB8]
+    ldp     x25, x26, [x16, #0xC8]
+    ldp     x27, x28, [x16, #0xD8]
+    ldr     x29, [x16, #0xE8]
+    ldr     x30, [x16, #0xF0]
+    ldr     x16, [x16, #0x80]
+    eret
+.size start_linux_clone_child, . - start_linux_clone_child

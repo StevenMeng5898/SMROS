@@ -46,7 +46,10 @@ use super::address_logic::{
     checked_end, fixed_linux_mmap_request_ok as shared_fixed_linux_mmap_request_ok,
     page_aligned as shared_page_aligned, range_overlaps, range_within_window,
 };
+#[cfg(target_arch = "aarch64")]
+use super::linux_syscall_context;
 use super::linux_task;
+use super::linux_task::{LinuxCloneRequest, LinuxCloneValidationError, CLONE_THREAD};
 use crate::kernel_lowlevel::memory::{process_manager, PageFrameAllocator, PAGE_SIZE};
 use crate::kernel_objects::channel;
 use crate::kernel_objects::compat;
@@ -6289,21 +6292,77 @@ pub fn sys_vfork() -> SysResult {
 pub fn sys_clone(
     flags: usize,
     newsp: usize,
-    _parent_tid: usize,
-    _newtls: usize,
-    _child_tid: usize,
+    parent_tid: usize,
+    newtls: usize,
+    child_tid: usize,
 ) -> SysResult {
     info!("clone: flags={:#x}, newsp={:#x}", flags, newsp);
-    memory_state().apply_linux_namespace_flags(flags);
-    sys_fork()
+    if flags & CLONE_THREAD == 0 {
+        memory_state().apply_linux_namespace_flags(flags);
+        return sys_fork();
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        return Err(SysError::ENOSYS);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let context = linux_syscall_context::current().ok_or(SysError::EINVAL)?;
+        let request = LinuxCloneRequest::validate(flags, newsp, parent_tid, newtls, child_tid)
+            .map_err(|error| match error {
+                LinuxCloneValidationError::Flags
+                | LinuxCloneValidationError::Stack
+                | LinuxCloneValidationError::Tls => SysError::EINVAL,
+                LinuxCloneValidationError::ParentTid | LinuxCloneValidationError::ChildTid => {
+                    SysError::EFAULT
+                }
+            })?;
+        if !linux_clone_tid_destinations_valid(&request) {
+            return Err(SysError::EFAULT);
+        }
+
+        let scheduler_id = scheduler::scheduler()
+            .create_suspended_thread_on_cpu(linux_task::linux_clone_child_entry, "linux_thread", 0)
+            .ok_or(SysError::EAGAIN)?;
+        let reservation = match linux_task::reserve_clone(scheduler_id, request, context) {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                let _ = scheduler::scheduler().terminate_thread(scheduler_id);
+                return Err(error);
+            }
+        };
+        if let Err(error) = linux_task::copy_clone_tids(reservation) {
+            linux_task::rollback_clone(reservation);
+            let _ = scheduler::scheduler().terminate_thread(scheduler_id);
+            return Err(error);
+        }
+        if let Err(error) = linux_task::commit_clone(reservation) {
+            linux_task::restore_clone_tid_destinations(reservation);
+            linux_task::rollback_clone(reservation);
+            let _ = scheduler::scheduler().terminate_thread(scheduler_id);
+            return Err(error);
+        }
+        Ok(reservation.tid)
+    }
 }
 
-pub fn sys_clone3(args: usize, size: usize) -> SysResult {
-    if args == 0 || size < core::mem::size_of::<u64>() {
-        return Err(SysError::EFAULT);
-    }
-    let flags = unsafe { core::ptr::read(args as *const u64) as usize };
-    sys_clone(flags, 0, 0, 0, 0)
+#[cfg(target_arch = "aarch64")]
+fn linux_clone_tid_destinations_valid(request: &LinuxCloneRequest) -> bool {
+    request
+        .parent_tid
+        .into_iter()
+        .chain(request.child_tid)
+        .all(|pointer| {
+            pointer & (core::mem::align_of::<u32>() - 1) == 0
+                && pointer.checked_add(core::mem::size_of::<u32>()).is_some()
+                && syscall_logic::user_buffer_valid(pointer, core::mem::size_of::<u32>())
+        })
+}
+
+pub fn sys_clone3(_args: usize, _size: usize) -> SysResult {
+    Err(SysError::ENOSYS)
 }
 
 /// Linux sys_execve implementation
@@ -6501,6 +6560,7 @@ pub fn sys_get_robust_list(_pid: isize, head_ptr: usize, len_ptr: usize) -> SysR
 }
 
 pub fn sys_sched_yield() -> SysResult {
+    scheduler::yield_now();
     Ok(0)
 }
 

@@ -354,6 +354,8 @@ pub fn wait_for_interrupt() {
 extern "C" {
     fn context_switch(current: *mut ThreadControlBlock, next: *mut ThreadControlBlock);
     fn context_switch_start(next: *mut ThreadControlBlock) -> !;
+    #[link_name = "start_linux_clone_child"]
+    fn start_linux_clone_child_asm(start: *const u8) -> !;
 }
 
 /// Save the current thread context and restore the next one.
@@ -374,6 +376,15 @@ pub unsafe fn switch_context(current: *mut ThreadControlBlock, next: *mut Thread
 /// `context_switch.S`.
 pub unsafe fn start_context(next: *mut ThreadControlBlock) -> ! {
     unsafe { context_switch_start(next) }
+}
+
+/// Restore a task-owned clone startup image and enter its copied EL0 context.
+///
+/// # Safety
+/// `start` must point to the C-layout AArch64 clone image owned by the current
+/// Linux task. The assembly routine consumes it without returning.
+pub unsafe fn start_linux_clone_child(start: *const u8) -> ! {
+    unsafe { start_linux_clone_child_asm(start) }
 }
 
 /// Print a number to serial (helper function)

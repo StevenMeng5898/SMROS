@@ -250,6 +250,84 @@ mod linux_task_logic {
         "/../../src/syscall/linux_task_logic_shared.rs"
     ));
 
+    const PTHREAD_BASE_FLAGS: usize =
+        CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
+
+    #[test]
+    fn clone_validation_accepts_the_pthread_flag_and_pointer_matrix() {
+        let request = LinuxCloneRequest::validate(
+            PTHREAD_BASE_FLAGS
+                | CLONE_SETTLS
+                | CLONE_PARENT_SETTID
+                | CLONE_CHILD_SETTID
+                | CLONE_CHILD_CLEARTID,
+            0x8000,
+            0x1000,
+            0x2000,
+            0x3000,
+        )
+        .expect("glibc pthread clone request");
+        assert_eq!(request.user_sp, 0x8000);
+        assert_eq!(request.parent_tid, Some(0x1000));
+        assert_eq!(request.tls, Some(0x2000));
+        assert_eq!(request.child_tid, Some(0x3000));
+        assert!(request.clear_child_tid);
+
+        assert!(LinuxCloneRequest::validate(PTHREAD_BASE_FLAGS, 0x9000, 0, 0, 0).is_ok());
+    }
+
+    #[test]
+    fn clone_validation_rejects_flags_stack_tls_and_tid_pointer_errors() {
+        assert_eq!(
+            LinuxCloneRequest::validate(PTHREAD_BASE_FLAGS | 17, 0x8000, 0, 0, 0),
+            Err(LinuxCloneValidationError::Flags)
+        );
+        assert_eq!(
+            LinuxCloneRequest::validate(PTHREAD_BASE_FLAGS | 0x8000_0000, 0x8000, 0, 0, 0),
+            Err(LinuxCloneValidationError::Flags)
+        );
+        for missing in [CLONE_VM, CLONE_SIGHAND] {
+            assert_eq!(
+                LinuxCloneRequest::validate(PTHREAD_BASE_FLAGS & !missing, 0x8000, 0, 0, 0),
+                Err(LinuxCloneValidationError::Flags)
+            );
+        }
+        for stack in [0, 0x8008] {
+            assert_eq!(
+                LinuxCloneRequest::validate(PTHREAD_BASE_FLAGS, stack, 0, 0, 0),
+                Err(LinuxCloneValidationError::Stack)
+            );
+        }
+        assert_eq!(
+            LinuxCloneRequest::validate(PTHREAD_BASE_FLAGS | CLONE_SETTLS, 0x8000, 0, 0, 0,),
+            Err(LinuxCloneValidationError::Tls)
+        );
+        for parent_tid in [0, 0x1002] {
+            assert_eq!(
+                LinuxCloneRequest::validate(
+                    PTHREAD_BASE_FLAGS | CLONE_PARENT_SETTID,
+                    0x8000,
+                    parent_tid,
+                    0,
+                    0,
+                ),
+                Err(LinuxCloneValidationError::ParentTid)
+            );
+        }
+        for child_tid in [0, 0x1002] {
+            assert_eq!(
+                LinuxCloneRequest::validate(
+                    PTHREAD_BASE_FLAGS | CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID,
+                    0x8000,
+                    0,
+                    0,
+                    child_tid,
+                ),
+                Err(LinuxCloneValidationError::ChildTid)
+            );
+        }
+    }
+
     #[test]
     fn root_registration_publishes_one_runnable_thread_group_leader() {
         let mut tasks = LinuxTaskTable::<2>::new();
