@@ -201,7 +201,13 @@ pub(crate) fn with_current_signal_state_and_slot<R>(
     })
 }
 
-pub(crate) fn current_matching_signal(
+pub(crate) fn peek_current_matching_signal(
+    wait_mask: u64,
+) -> Result<Option<LinuxPendingSignal>, SysError> {
+    with_current_signal_state(|signal_state| signal_state.peek_matching(wait_mask))
+}
+
+pub(crate) fn take_current_matching_signal(
     wait_mask: u64,
 ) -> Result<Option<LinuxPendingSignal>, SysError> {
     with_current_signal_state(|signal_state| signal_state.take_matching(wait_mask))
@@ -305,6 +311,18 @@ pub(crate) fn complete_process_signal_wait(
         runtime
             .tasks
             .complete_process_signal_wait(tid, scheduler_thread, record)
+    })
+}
+
+pub(crate) fn interrupt_process_signal_wait(
+    tid: usize,
+    scheduler_thread: usize,
+    signum: usize,
+) -> Option<LinuxBlockReason> {
+    with_runtime(|runtime| {
+        runtime
+            .tasks
+            .interrupt_process_signal_wait(tid, scheduler_thread, signum)
     })
 }
 

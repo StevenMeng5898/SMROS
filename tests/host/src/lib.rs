@@ -842,8 +842,7 @@ mod linux_task_logic {
             Err(LinuxSignalRouteError::QueueFull)
         );
         let standard = state.take_unblocked().expect("coalesced standard signal");
-        assert_eq!(standard.signum, 10);
-        assert!(!standard.has_info);
+        assert_eq!(standard, signal_record(10, 0x10));
         for signum_offset in 0..2 {
             for marker in (signum_offset..LINUX_RT_QUEUE_LIMIT).step_by(2) {
                 let record = state.take_unblocked().expect("queued realtime signal");
@@ -1150,6 +1149,72 @@ mod linux_task_logic {
                 .pending_mask(),
             0
         );
+    }
+
+    #[test]
+    fn nonmatching_unblocked_signals_interrupt_timed_waits_but_blocked_signals_do_not() {
+        let (mut tasks, first, _) = three_live_tasks();
+        let blocked_signum = 12;
+        let interrupting = signal_record(11, 0x5a);
+        let state = tasks.signal_state_mut(first.tid, 8).unwrap();
+        state.mask = linux_signal_bit(blocked_signum);
+        assert!(state.install_signal_wait(LinuxSignalWait::timed(
+            linux_signal_bit(10),
+            None,
+            0x5100,
+        )));
+        assert!(tasks.block(first.tid, 8, LinuxBlockReason::SignalWait));
+
+        let (_, wake_reason) = tasks
+            .route_signal_and_complete_wait(Some(LINUX_ROOT_TID), first.tid, interrupting)
+            .expect("route nonmatching unblocked signal");
+        assert_eq!(wake_reason, Some(LinuxBlockReason::SignalWait));
+        let state = tasks.signal_state_mut(first.tid, 8).unwrap();
+        assert_eq!(
+            state.take_signal_wait_outcome().map(|wait| wait.outcome),
+            Some(LinuxSignalWaitOutcome::Interrupted)
+        );
+        assert_eq!(state.take_unblocked(), Some(interrupting));
+
+        let (mut tasks, first, _) = three_live_tasks();
+        let blocked = signal_record(blocked_signum, 0x6b);
+        let state = tasks.signal_state_mut(first.tid, 8).unwrap();
+        state.mask = linux_signal_bit(blocked_signum);
+        assert!(state.install_signal_wait(LinuxSignalWait::timed(
+            linux_signal_bit(10),
+            None,
+            0x5200,
+        )));
+        assert!(tasks.block(first.tid, 8, LinuxBlockReason::SignalWait));
+
+        let (_, wake_reason) = tasks
+            .route_signal_and_complete_wait(Some(LINUX_ROOT_TID), first.tid, blocked)
+            .expect("route nonmatching blocked signal");
+        assert_eq!(wake_reason, None);
+        let state = tasks.signal_state_mut(first.tid, 8).unwrap();
+        assert_eq!(
+            state.signal_wait.map(|wait| wait.outcome),
+            Some(LinuxSignalWaitOutcome::Waiting)
+        );
+        assert_eq!(state.pending_mask(), linux_signal_bit(blocked_signum));
+    }
+
+    #[test]
+    fn standard_signal_coalescing_preserves_the_first_complete_siginfo_record() {
+        let mut state = LinuxTaskSignalState::new();
+        let first = signal_record(10, 0x31);
+        let duplicate = signal_record(10, 0x92);
+
+        state.queue(first).unwrap();
+        state.queue(duplicate).unwrap();
+
+        assert_eq!(state.pending_mask(), linux_signal_bit(10));
+        assert_eq!(state.take_matching(linux_signal_bit(10)), Some(first));
+        assert_eq!(state.take_matching(linux_signal_bit(10)), None);
+
+        state.queue(first).unwrap();
+        state.discard(10);
+        assert_eq!(state.take_matching(linux_signal_bit(10)), None);
     }
 
     #[test]

@@ -56,9 +56,9 @@ use super::linux_futex;
 use super::linux_syscall_context;
 use super::linux_task;
 use super::linux_task::{
-    LinuxBlockReason, LinuxCloneRequest, LinuxCloneValidationError, LinuxPendingSignal,
-    LinuxSignalDisposition, LinuxSignalFrame, LinuxSignalStack, LinuxSignalWait,
-    LinuxSignalWaitOutcome, CLONE_THREAD, LINUX_REALTIME_SIGNAL_MIN, LINUX_RT_QUEUE_LIMIT,
+    select_linux_pending_signal, LinuxBlockReason, LinuxCloneRequest, LinuxCloneValidationError,
+    LinuxPendingSignal, LinuxPendingSignalSource, LinuxPendingSignals, LinuxSignalDisposition,
+    LinuxSignalFrame, LinuxSignalStack, LinuxSignalWait, LinuxSignalWaitOutcome, CLONE_THREAD,
     LINUX_SIGNAL_FRAME_LIMIT, LINUX_SIGNAL_INFO_BYTES,
 };
 use crate::kernel_lowlevel::memory::{process_manager, PageFrameAllocator, PAGE_SIZE};
@@ -2157,7 +2157,6 @@ static LINUX_SIGNAL_RESTORERS: [AtomicU64; LINUX_MAX_SIGNAL + 1] =
     [const { AtomicU64::new(0) }; LINUX_MAX_SIGNAL + 1];
 static LINUX_SIGNAL_ACTION_MASKS: [AtomicU64; LINUX_MAX_SIGNAL + 1] =
     [const { AtomicU64::new(0) }; LINUX_MAX_SIGNAL + 1];
-static LINUX_PROCESS_PENDING_SIGNALS: AtomicU64 = AtomicU64::new(0);
 static LINUX_SIGNAL_TRAMPOLINE: AtomicU64 = AtomicU64::new(0);
 static LINUX_REAL_TIMER_DEADLINE_TICK: AtomicU64 = AtomicU64::new(LINUX_TIMER_DISABLED);
 static LINUX_NEXT_SYNTHETIC_PID: AtomicU64 = AtomicU64::new(2);
@@ -2167,9 +2166,7 @@ const LINUX_SIGNAL_INFO_STORAGE_BYTES: usize =
     linux_task::LINUX_TASK_LIMIT * LINUX_SIGNAL_FRAME_LIMIT * LINUX_SIGNAL_INFO_BYTES;
 const LINUX_SIGNAL_TRAMPOLINE_BYTES: usize =
     (LINUX_SIGNAL_INFO_OFFSET + LINUX_SIGNAL_INFO_STORAGE_BYTES + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-static mut LINUX_PROCESS_REALTIME_PENDING: [LinuxPendingSignal; LINUX_RT_QUEUE_LIMIT] =
-    [LinuxPendingSignal::EMPTY; LINUX_RT_QUEUE_LIMIT];
-static LINUX_PROCESS_REALTIME_COUNT: AtomicU64 = AtomicU64::new(0);
+static mut LINUX_PROCESS_PENDING: LinuxPendingSignals = LinuxPendingSignals::new();
 
 fn memory_state() -> &'static mut MemorySyscallState {
     unsafe {
@@ -2625,10 +2622,8 @@ pub fn reset_linux_signal_timer_state() {
         LINUX_SIGNAL_RESTORERS[signum].store(0, Ordering::SeqCst);
         LINUX_SIGNAL_ACTION_MASKS[signum].store(0, Ordering::SeqCst);
     }
-    LINUX_PROCESS_PENDING_SIGNALS.store(0, Ordering::SeqCst);
-    with_linux_process_realtime_pending(|pending, count| {
-        pending.fill(LinuxPendingSignal::EMPTY);
-        *count = 0;
+    with_linux_process_pending(|pending| {
+        *pending = LinuxPendingSignals::new();
     });
     LINUX_SIGNAL_TRAMPOLINE.store(0, Ordering::SeqCst);
     LINUX_REAL_TIMER_DEADLINE_TICK.store(LINUX_TIMER_DISABLED, Ordering::SeqCst);
@@ -2721,163 +2716,71 @@ fn linux_signal_record_from_user(
     Ok(record)
 }
 
-fn with_linux_process_realtime_pending<R>(
-    operation: impl FnOnce(&mut [LinuxPendingSignal; LINUX_RT_QUEUE_LIMIT], &mut usize) -> R,
-) -> R {
+fn with_linux_process_pending<R>(operation: impl FnOnce(&mut LinuxPendingSignals) -> R) -> R {
     assert!(crate::kernel_lowlevel::smp::is_boot_cpu());
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
-    let mut count = LINUX_PROCESS_REALTIME_COUNT.load(Ordering::SeqCst) as usize;
-    let result = unsafe { operation(&mut LINUX_PROCESS_REALTIME_PENDING, &mut count) };
-    LINUX_PROCESS_REALTIME_COUNT.store(count as u64, Ordering::SeqCst);
+    let result = unsafe { operation(&mut LINUX_PROCESS_PENDING) };
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     result
 }
 
 fn queue_process_linux_signal(record: LinuxPendingSignal) -> Result<(), SysError> {
-    if !(1..=LINUX_MAX_SIGNAL).contains(&record.signum) {
-        return Err(SysError::EINVAL);
-    }
-    if record.signum < LINUX_REALTIME_SIGNAL_MIN {
-        LINUX_PROCESS_PENDING_SIGNALS.fetch_or(linux_signal_bit(record.signum), Ordering::SeqCst);
-        return Ok(());
-    }
-    with_linux_process_realtime_pending(|pending, count| {
-        if *count >= LINUX_RT_QUEUE_LIMIT {
-            return Err(SysError::EAGAIN);
-        }
-        pending[*count] = record;
-        *count += 1;
-        Ok(())
+    with_linux_process_pending(|pending| {
+        pending.queue(record).map_err(|error| match error {
+            linux_task::LinuxSignalRouteError::NoSuchTask => SysError::ESRCH,
+            linux_task::LinuxSignalRouteError::InvalidSignal => SysError::EINVAL,
+            linux_task::LinuxSignalRouteError::QueueFull => SysError::EAGAIN,
+        })
     })
 }
 
 fn discard_process_linux_signal(signum: usize) {
-    LINUX_PROCESS_PENDING_SIGNALS.fetch_and(!linux_signal_bit(signum), Ordering::SeqCst);
-    with_linux_process_realtime_pending(|pending, count| {
-        let mut write = 0usize;
-        for read in 0..*count {
-            let record = pending[read];
-            if record.signum != signum {
-                pending[write] = record;
-                write += 1;
-            }
-        }
-        for record in &mut pending[write..*count] {
-            *record = LinuxPendingSignal::EMPTY;
-        }
-        *count = write;
-    });
+    with_linux_process_pending(|pending| pending.discard(signum));
 }
 
 fn process_pending_linux_signal_mask() -> u64 {
-    let mut mask = LINUX_PROCESS_PENDING_SIGNALS.load(Ordering::SeqCst);
-    mask |= with_linux_process_realtime_pending(|pending, count| {
-        let mut realtime_mask = 0;
-        for record in &pending[..*count] {
-            realtime_mask |= linux_signal_bit(record.signum);
-        }
-        realtime_mask
-    });
-    mask
-}
-
-#[derive(Clone, Copy)]
-enum LinuxPendingOwner {
-    Task,
-    Process,
+    with_linux_process_pending(|pending| pending.pending_mask())
 }
 
 #[derive(Clone, Copy)]
 struct LinuxDeliverableSignal {
     record: LinuxPendingSignal,
-    owner: LinuxPendingOwner,
+    source: LinuxPendingSignalSource,
 }
 
 fn take_process_linux_signal(
     current: linux_task::LinuxTaskCore,
     mask: u64,
 ) -> Option<LinuxPendingSignal> {
-    loop {
-        let pending = LINUX_PROCESS_PENDING_SIGNALS.load(Ordering::SeqCst);
-        let mut candidates = pending & !mask;
-        let mut selected = None;
-        while candidates != 0 {
-            let signum = candidates.trailing_zeros() as usize + 1;
-            let bit = linux_signal_bit(signum);
-            if linux_task::process_signal_target(signum) == Some(current) {
-                selected = Some((signum, bit));
-                break;
-            }
-            candidates &= !bit;
-        }
-        let Some((signum, bit)) = selected else {
-            break;
-        };
-        let updated = pending & !bit;
-        if LINUX_PROCESS_PENDING_SIGNALS
-            .compare_exchange(pending, updated, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            return Some(LinuxPendingSignal::standard(signum));
-        }
-    }
-
-    with_linux_process_realtime_pending(|pending, count| {
-        let index = linux_task::lowest_linux_pending_index(&pending[..*count], |record| {
-            mask & linux_signal_bit(record.signum) == 0
-                && linux_task::process_signal_target(record.signum) == Some(current)
-        })?;
-        let record = pending[index];
-        for shifted in index..*count - 1 {
-            pending[shifted] = pending[shifted + 1];
-        }
-        *count -= 1;
-        pending[*count] = LinuxPendingSignal::EMPTY;
-        Some(record)
+    with_linux_process_pending(|pending| {
+        pending.take_eligible(|signum| {
+            mask & linux_signal_bit(signum) == 0
+                && linux_task::process_signal_target(signum) == Some(current)
+        })
     })
 }
 
-fn matching_process_linux_signal(wait_mask: u64) -> Option<usize> {
-    let standard = LINUX_PROCESS_PENDING_SIGNALS.load(Ordering::SeqCst) & wait_mask;
-    if standard != 0 {
-        return Some(standard.trailing_zeros() as usize + 1);
-    }
-    with_linux_process_realtime_pending(|pending, count| {
-        linux_task::lowest_linux_pending_index(&pending[..*count], |record| {
-            wait_mask & linux_signal_bit(record.signum) != 0
-        })
-        .map(|index| pending[index].signum)
-    })
+fn peek_process_linux_signal_matching(wait_mask: u64) -> Option<LinuxPendingSignal> {
+    with_linux_process_pending(|pending| pending.peek_matching(wait_mask))
 }
 
 fn take_process_linux_signal_matching(wait_mask: u64) -> Option<LinuxPendingSignal> {
-    loop {
-        let pending = LINUX_PROCESS_PENDING_SIGNALS.load(Ordering::SeqCst);
-        let candidates = pending & wait_mask;
-        if candidates == 0 {
-            break;
+    with_linux_process_pending(|pending| pending.take_matching(wait_mask))
+}
+
+fn take_selected_linux_signal(
+    source: LinuxPendingSignalSource,
+    signum: usize,
+) -> Result<Option<LinuxDeliverableSignal>, SysError> {
+    let record = match source {
+        LinuxPendingSignalSource::Task => {
+            linux_task::take_current_matching_signal(linux_signal_bit(signum))?
         }
-        let signum = candidates.trailing_zeros() as usize + 1;
-        let bit = linux_signal_bit(signum);
-        if LINUX_PROCESS_PENDING_SIGNALS
-            .compare_exchange(pending, pending & !bit, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            return Some(LinuxPendingSignal::standard(signum));
+        LinuxPendingSignalSource::Process => {
+            take_process_linux_signal_matching(linux_signal_bit(signum))
         }
-    }
-    with_linux_process_realtime_pending(|pending, count| {
-        let index = linux_task::lowest_linux_pending_index(&pending[..*count], |record| {
-            wait_mask & linux_signal_bit(record.signum) != 0
-        })?;
-        let record = pending[index];
-        for shifted in index..*count - 1 {
-            pending[shifted] = pending[shifted + 1];
-        }
-        *count -= 1;
-        pending[*count] = LinuxPendingSignal::EMPTY;
-        Some(record)
-    })
+    };
+    Ok(record.map(|record| LinuxDeliverableSignal { record, source }))
 }
 
 fn take_unblocked_linux_signal() -> Option<LinuxDeliverableSignal> {
@@ -2886,38 +2789,27 @@ fn take_unblocked_linux_signal() -> Option<LinuxDeliverableSignal> {
     {
         return Some(LinuxDeliverableSignal {
             record,
-            owner: LinuxPendingOwner::Task,
+            source: LinuxPendingSignalSource::Task,
         });
     }
     let current = linux_task::current_task().ok()?;
     let mask = linux_task::with_current_signal_state(|signal_state| signal_state.mask).ok()?;
     take_process_linux_signal(current, mask).map(|record| LinuxDeliverableSignal {
         record,
-        owner: LinuxPendingOwner::Process,
+        source: LinuxPendingSignalSource::Process,
     })
 }
 
 fn requeue_linux_signal(deliverable: LinuxDeliverableSignal) {
-    match deliverable.owner {
-        LinuxPendingOwner::Task => {
+    match deliverable.source {
+        LinuxPendingSignalSource::Task => {
             let _ = linux_task::with_current_signal_state(|signal_state| {
                 signal_state.requeue_front(deliverable.record)
             });
         }
-        LinuxPendingOwner::Process => {
-            if deliverable.record.signum < LINUX_REALTIME_SIGNAL_MIN {
-                let _ = queue_process_linux_signal(deliverable.record);
-                return;
-            }
-            with_linux_process_realtime_pending(|pending, count| {
-                if *count >= LINUX_RT_QUEUE_LIMIT {
-                    return;
-                }
-                for index in (0..*count).rev() {
-                    pending[index + 1] = pending[index];
-                }
-                pending[0] = deliverable.record;
-                *count += 1;
+        LinuxPendingSignalSource::Process => {
+            with_linux_process_pending(|pending| {
+                let _ = pending.requeue_front(deliverable.record);
             });
         }
     }
@@ -2946,13 +2838,23 @@ fn queue_process_linux_signal_and_wake(record: LinuxPendingSignal) -> Result<(),
                             linux_task::wake_blocked(target.tid, target.scheduler_thread, reason);
                         return Ok(());
                     }
+                    queue_process_linux_signal(record)?;
+                    if let Some(reason) = linux_task::interrupt_process_signal_wait(
+                        target.tid,
+                        target.scheduler_thread,
+                        record.signum,
+                    ) {
+                        let _ =
+                            linux_task::wake_blocked(target.tid, target.scheduler_thread, reason);
+                    }
+                    return Ok(());
                 }
                 LinuxBlockReason::SignalSuspend => {
                     queue_process_linux_signal(record)?;
-                    if let Some(reason) = linux_task::complete_process_signal_wait(
+                    if let Some(reason) = linux_task::interrupt_process_signal_wait(
                         target.tid,
                         target.scheduler_thread,
-                        record,
+                        record.signum,
                     ) {
                         let _ =
                             linux_task::wake_blocked(target.tid, target.scheduler_thread, reason);
@@ -3989,6 +3891,32 @@ fn linux_signal_wait_deadline(timeout: usize) -> Result<Option<u64>, SysError> {
     )
     .map(Some)
     .ok_or(SysError::EINVAL)
+}
+
+fn finish_linux_signal_wait(
+    record: LinuxPendingSignal,
+    source: LinuxPendingSignalSource,
+    output_address: usize,
+) -> SysResult {
+    if output_address != 0 {
+        if !linux_signal_user_range_writable(output_address, LINUX_SIGNAL_INFO_BYTES) {
+            requeue_linux_signal(LinuxDeliverableSignal { record, source });
+            return Err(SysError::EFAULT);
+        }
+        unsafe {
+            if record.has_info {
+                core::ptr::copy_nonoverlapping(
+                    record.info.as_ptr(),
+                    output_address as *mut u8,
+                    LINUX_SIGNAL_INFO_BYTES,
+                );
+            } else {
+                core::ptr::write_bytes(output_address as *mut u8, 0, LINUX_SIGNAL_INFO_BYTES);
+                core::ptr::write(output_address as *mut i32, record.signum as i32);
+            }
+        }
+    }
+    Ok(record.signum)
 }
 
 fn linux_write_cstr(buf: usize, len: usize, value: &[u8]) -> SysResult {
@@ -5517,38 +5445,30 @@ pub fn sys_rt_sigtimedwait(
     }
     let wait_mask = linux_read_u64_user(set)? & !linux_uncatchable_signal_mask();
     let deadline = linux_signal_wait_deadline(timeout)?;
-    let finish = |record: LinuxPendingSignal, output_address: usize| -> SysResult {
-        if output_address != 0 {
-            if !linux_signal_user_range_writable(output_address, LINUX_SIGNAL_INFO_BYTES) {
-                return Err(SysError::EFAULT);
-            }
-            unsafe {
-                if record.has_info {
-                    core::ptr::copy_nonoverlapping(
-                        record.info.as_ptr(),
-                        output_address as *mut u8,
-                        LINUX_SIGNAL_INFO_BYTES,
-                    );
-                } else {
-                    core::ptr::write_bytes(output_address as *mut u8, 0, LINUX_SIGNAL_INFO_BYTES);
-                    core::ptr::write(output_address as *mut i32, record.signum as i32);
-                }
-            }
-        }
-        Ok(record.signum)
-    };
 
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
-    let immediate = match linux_task::current_matching_signal(wait_mask) {
-        Ok(record) => record.or_else(|| take_process_linux_signal_matching(wait_mask)),
+    let task_pending = match linux_task::peek_current_matching_signal(wait_mask) {
+        Ok(record) => record,
         Err(error) => {
             crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
             return Err(error);
         }
     };
-    if let Some(record) = immediate {
+    let process_pending = peek_process_linux_signal_matching(wait_mask);
+    let selected = select_linux_pending_signal(task_pending, process_pending);
+    let immediate = match selected {
+        Some((source, record)) => match take_selected_linux_signal(source, record.signum) {
+            Ok(record) => record,
+            Err(error) => {
+                crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+                return Err(error);
+            }
+        },
+        None => None,
+    };
+    if let Some(deliverable) = immediate {
         crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
-        return finish(record, info);
+        return finish_linux_signal_wait(deliverable.record, deliverable.source, info);
     }
     if deadline.is_some_and(|deadline| deadline <= crate::kernel_lowlevel::timer::get_tick_count())
     {
@@ -5584,7 +5504,10 @@ pub fn sys_rt_sigtimedwait(
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     match outcome {
         Some(wait) if wait.outcome == LinuxSignalWaitOutcome::Signal => {
-            finish(wait.signal, wait.output_address)
+            let Some(source) = wait.signal_source else {
+                return Err(SysError::EAGAIN);
+            };
+            finish_linux_signal_wait(wait.signal, source, wait.output_address)
         }
         Some(wait) if wait.outcome == LinuxSignalWaitOutcome::TimedOut => Err(SysError::EAGAIN),
         Some(wait) if wait.outcome == LinuxSignalWaitOutcome::Interrupted => Err(SysError::EINTR),
@@ -5623,7 +5546,9 @@ pub fn sys_rt_sigsuspend(mask: usize, sigsetsize: usize) -> SysResult {
     }
 
     let pending = match linux_task::current_matching_signum(!replacement_mask) {
-        Ok(signum) => signum.or_else(|| matching_process_linux_signal(!replacement_mask)),
+        Ok(signum) => signum.or_else(|| {
+            peek_process_linux_signal_matching(!replacement_mask).map(|record| record.signum)
+        }),
         Err(error) => {
             let _ = linux_task::cancel_current_signal_wait();
             crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);

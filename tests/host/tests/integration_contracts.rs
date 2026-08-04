@@ -2511,8 +2511,7 @@ fn linux_signal_state_is_owned_by_each_live_task() {
             "task-owned signal state remains global: {removed_global}"
         );
     }
-    assert!(syscall.contains("static LINUX_PROCESS_PENDING_SIGNALS:"));
-    assert!(syscall.contains("static mut LINUX_PROCESS_REALTIME_PENDING:"));
+    assert!(syscall.contains("static mut LINUX_PROCESS_PENDING: LinuxPendingSignals"));
     assert!(syscall.contains(
         "linux_task::LINUX_TASK_LIMIT * LINUX_SIGNAL_FRAME_LIMIT * LINUX_SIGNAL_INFO_BYTES"
     ));
@@ -2522,15 +2521,15 @@ fn linux_signal_state_is_owned_by_each_live_task() {
     let trampoline = braced_body(&syscall[trampoline_start..]);
     assert!(trampoline.contains("LINUX_SIGNAL_TRAMPOLINE_BYTES"));
     let process_queue_start = syscall
-        .find("fn with_linux_process_realtime_pending<R>(")
-        .expect("process realtime queue guard");
+        .find("fn with_linux_process_pending<R>(")
+        .expect("process pending queue guard");
     let process_queue = braced_body(&syscall[process_queue_start..]);
     assert!(process_queue.contains("crate::kernel_lowlevel::smp::is_boot_cpu()"));
     let process_mask = process_queue
         .find("mask_interrupts()")
         .expect("process queue interrupt mask");
     let process_access = process_queue
-        .find("operation(&mut LINUX_PROCESS_REALTIME_PENDING, &mut count)")
+        .find("operation(&mut LINUX_PROCESS_PENDING)")
         .expect("serialized process queue access");
     let process_restore = process_queue
         .find("restore_interrupts(interrupt_state)")
@@ -2541,10 +2540,8 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         .find("pub fn reset_linux_signal_timer_state()")
         .expect("signal process reset");
     let reset = braced_body(&syscall[reset_start..]);
-    assert!(reset.contains("LINUX_PROCESS_PENDING_SIGNALS.store(0"));
-    assert!(reset.contains("with_linux_process_realtime_pending("));
-    assert!(reset.contains("pending.fill(LinuxPendingSignal::EMPTY)"));
-    assert!(reset.contains("*count = 0"));
+    assert!(reset.contains("with_linux_process_pending("));
+    assert!(reset.contains("*pending = LinuxPendingSignals::new()"));
 
     for syscall_name in [
         "pub fn sys_rt_sigprocmask(",
@@ -2623,12 +2620,9 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         .expect("process signal selection");
     let process_take = braced_body(&syscall[process_take_start..]);
     let standard_selection = process_take
-        .find("LINUX_PROCESS_PENDING_SIGNALS.load(")
-        .expect("standard process signal selection");
-    let realtime_selection = process_take
-        .find("lowest_linux_pending_index(")
-        .expect("ordered realtime process signal selection");
-    assert!(standard_selection < realtime_selection);
+        .find("pending.take_eligible(")
+        .expect("shared process signal selection");
+    assert!(standard_selection > 0);
     assert!(task_logic.contains("pub(crate) fn lowest_linux_pending_index("));
     assert!(task_logic.matches("lowest_linux_pending_index(").count() >= 2);
     let target_start = syscall
@@ -2750,10 +2744,7 @@ fn linux_signal_waits_block_and_restart_from_the_original_svc() {
     assert!(timed.contains("LinuxBlockReason::SignalWait"));
     assert!(timed.contains("scheduler::schedule();"));
     assert!(timed.contains("LinuxSignalWaitOutcome::TimedOut => Err(SysError::EAGAIN)"));
-    assert!(timed.contains("core::ptr::copy_nonoverlapping("));
-    assert!(timed.contains("record.info.as_ptr()"));
-    assert!(timed.contains("LINUX_SIGNAL_INFO_BYTES"));
-    assert!(timed.contains("Ok(record.signum)"));
+    assert!(timed.contains("finish_linux_signal_wait("));
     assert!(!timed.contains("deliver_next_linux_signal("));
 
     let suspend_start = syscall
@@ -2850,6 +2841,85 @@ fn linux_signal_waits_block_and_restart_from_the_original_svc() {
     assert!(futex.contains("linux_task::set_current_restart_timeout("));
     assert!(task.contains("pub(crate) fn install_current_signal_wait("));
     assert!(task.contains("pub(crate) fn on_timer_tick("));
+}
+
+#[test]
+fn linux_standard_pending_records_are_bounded_and_shared_with_process_routing() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let task_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_task_logic_shared.rs"))
+            .expect("read Linux task logic");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux signal runtime");
+
+    assert!(task_logic.contains("pub(crate) struct LinuxPendingSignals"));
+    assert!(task_logic
+        .contains("pub standard_records: [LinuxPendingSignal; LINUX_REALTIME_SIGNAL_MIN]"));
+    assert!(task_logic.contains("pub(crate) fn requeue_front("));
+    assert!(syscall.contains("static mut LINUX_PROCESS_PENDING: LinuxPendingSignals"));
+    assert!(syscall.contains("*pending = LinuxPendingSignals::new()"));
+    assert!(!syscall.contains("static LINUX_PROCESS_PENDING_SIGNALS: AtomicU64"));
+}
+
+#[test]
+fn linux_sigtimedwait_selects_the_lowest_signal_across_pending_sources() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let task_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_task_logic_shared.rs"))
+            .expect("read Linux task logic");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux signal runtime");
+
+    assert!(task_logic.contains("pub(crate) enum LinuxPendingSignalSource"));
+    assert!(task_logic.contains("pub(crate) fn select_linux_pending_signal("));
+    assert!(task.contains("pub(crate) fn peek_current_matching_signal("));
+    assert!(task.contains("pub(crate) fn take_current_matching_signal("));
+
+    let timed_start = syscall
+        .find("pub fn sys_rt_sigtimedwait(")
+        .expect("rt_sigtimedwait syscall");
+    let timed = braced_body(&syscall[timed_start..]);
+    let task_peek = timed
+        .find("peek_current_matching_signal(")
+        .expect("task pending peek");
+    let process_peek = timed
+        .find("peek_process_linux_signal_matching(")
+        .expect("process pending peek");
+    let selection = timed
+        .find("select_linux_pending_signal(")
+        .expect("global pending selection");
+    let take = timed
+        .find("take_selected_linux_signal(")
+        .expect("source-aware pending take");
+    assert!(task_peek < selection && process_peek < selection && selection < take);
+}
+
+#[test]
+fn linux_sigtimedwait_requeues_the_original_source_when_copyout_becomes_invalid() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let task_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_task_logic_shared.rs"))
+            .expect("read Linux task logic");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux signal runtime");
+
+    assert!(task_logic.contains("pub signal_source: Option<LinuxPendingSignalSource>"));
+    assert!(syscall.contains("fn take_selected_linux_signal("));
+    assert!(syscall.contains("fn finish_linux_signal_wait("));
+    let finish_start = syscall
+        .find("fn finish_linux_signal_wait(")
+        .expect("signal wait completion helper");
+    let finish = braced_body(&syscall[finish_start..]);
+    let validation = finish
+        .find("linux_signal_user_range_writable(")
+        .expect("copyout range validation");
+    let requeue = finish
+        .find("requeue_linux_signal(")
+        .expect("source-preserving requeue");
+    let fault = finish.find("Err(SysError::EFAULT)").expect("copyout fault");
+    assert!(validation < requeue && requeue < fault);
 }
 
 #[test]
