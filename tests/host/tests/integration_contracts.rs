@@ -1809,6 +1809,9 @@ fn linux_child_exit_clears_tid_and_uses_deferred_stack_retirement() {
     let remove_waiters = exit_current
         .find("linux_futex::remove_task_waiters")
         .expect("task futex cleanup");
+    let retire = exit_current
+        .find(".retire(transition.task.tid")
+        .expect("task retirement");
     let restore = exit_current
         .find("restore_interrupts(interrupt_state)")
         .expect("interrupt restore");
@@ -1830,9 +1833,9 @@ fn linux_child_exit_clears_tid_and_uses_deferred_stack_retirement() {
     let wait = exit_current
         .find("wait_for_interrupt()")
         .expect("no-runnable-thread wait");
-    assert!(mask < transition && transition < remove_waiters && remove_waiters < restore);
-    assert!(restore < checked_write && checked_write < zero_write && zero_write < wake);
-    assert!(wake < finish && finish < schedule && schedule < wait);
+    assert!(mask < transition && transition < remove_waiters && remove_waiters < retire);
+    assert!(retire < checked_write && checked_write < zero_write && zero_write < restore);
+    assert!(restore < wake && wake < finish && finish < schedule && schedule < wait);
     assert!(exit_current.contains("let _ = exit_code;"));
 
     assert!(futex.contains("pub(crate) fn remove_task_waiters("));

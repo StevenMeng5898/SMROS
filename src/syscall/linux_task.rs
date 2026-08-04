@@ -120,10 +120,7 @@ pub(crate) fn exit_current(exit_code: i32) -> ! {
     };
 
     if let Some(transition) = exited {
-        let _ = super::linux_futex::remove_task_waiters(
-            transition.task.tid,
-            scheduler_thread.0,
-        );
+        let _ = super::linux_futex::remove_task_waiters(transition.task.tid, scheduler_thread.0);
         let mut runtime = LINUX_TASK_RUNTIME.lock();
         let _ = runtime
             .tasks
@@ -133,10 +130,8 @@ pub(crate) fn exit_current(exit_code: i32) -> ! {
             *clone_slot = aarch64_clone::LinuxCloneSlot::EMPTY;
         }
     }
-    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
-
     #[cfg(target_arch = "aarch64")]
-    if let Some(transition) = exited {
+    let clear_child_tid_to_wake = exited.and_then(|transition| {
         let clear_child_tid = transition.clear_child_tid;
         if clear_child_tid != 0
             && crate::syscall::syscall::linux_clone_tid_destination_valid(clear_child_tid)
@@ -144,12 +139,20 @@ pub(crate) fn exit_current(exit_code: i32) -> ! {
             unsafe {
                 core::ptr::write(clear_child_tid as *mut u32, 0);
             }
-            let _ = super::linux_futex::wake_address(
-                clear_child_tid,
-                1,
-                super::linux_futex::FUTEX_BITSET_MATCH_ANY,
-            );
+            return Some(clear_child_tid);
         }
+        None
+    });
+
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+
+    #[cfg(target_arch = "aarch64")]
+    if let Some(clear_child_tid) = clear_child_tid_to_wake {
+        let _ = super::linux_futex::wake_address(
+            clear_child_tid,
+            1,
+            super::linux_futex::FUTEX_BITSET_MATCH_ANY,
+        );
     }
 
     let disposition = exited
