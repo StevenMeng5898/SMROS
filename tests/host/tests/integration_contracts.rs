@@ -2293,6 +2293,211 @@ fn linux_futex_waits_block_and_wake_scheduler_tasks() {
 }
 
 #[test]
+fn linux_signal_state_is_owned_by_each_live_task() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let task_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_task_logic_shared.rs"))
+            .expect("read Linux task logic");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+    let futex = std::fs::read_to_string(repository.join("src/syscall/linux_futex.rs"))
+        .expect("read Linux futex runtime");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux signal implementation");
+
+    for field in [
+        "pub mask: u64",
+        "pub standard_pending: u64",
+        "pub realtime_pending: [LinuxPendingSignal; LINUX_RT_QUEUE_LIMIT]",
+        "pub realtime_len: usize",
+        "pub alt_stack: LinuxSignalStack",
+        "pub frames: [LinuxSignalFrame; LINUX_SIGNAL_FRAME_LIMIT]",
+        "pub frame_depth: usize",
+        "pub sigreturn_requested: bool",
+    ] {
+        assert!(
+            task_logic.contains(field),
+            "missing per-task signal field {field}"
+        );
+    }
+    assert!(task_logic.contains("signal_states: [LinuxTaskSignalState; N]"));
+    assert!(task_logic.contains("pub(crate) fn inherit_signal_mask("));
+    assert!(task_logic.contains("pub(crate) fn route_signal("));
+    assert!(task_logic.contains("pub(crate) fn process_signal_target("));
+    assert!(task.contains("pub(crate) fn queue_task_signal("));
+    assert!(task.contains("pub(crate) fn process_signal_target("));
+    assert!(task.contains("LinuxSignalRouteError::QueueFull => SysError::EAGAIN"));
+
+    let reserve_clone_start = task
+        .find("pub(crate) fn reserve_clone(")
+        .expect("clone reservation");
+    let reserve_clone = braced_body(&task[reserve_clone_start..]);
+    let inherit = reserve_clone
+        .find("runtime.tasks.inherit_signal_mask(reservation, current.0)")
+        .expect("clone signal-mask inheritance");
+    let clone_slot = reserve_clone
+        .find("runtime.clone_slots[reservation.slot] = LinuxCloneSlot")
+        .expect("clone startup slot");
+    assert!(inherit < clone_slot);
+    assert!(reserve_clone[inherit..clone_slot].contains("runtime.tasks.rollback(reservation)"));
+
+    for (helper, scheduler_call, runtime_end) in [
+        (
+            "pub(crate) fn block_current(",
+            "scheduler::scheduler().block_thread(",
+            "})?;",
+        ),
+        (
+            "pub(crate) fn wake_blocked(",
+            "scheduler::scheduler().wake_thread(",
+            "});",
+        ),
+    ] {
+        let start = task.find(helper).expect("task scheduler transition");
+        let body = braced_body(&task[start..]);
+        let mask = body
+            .find("mask_interrupts()")
+            .expect("outer interrupt mask");
+        let runtime = body
+            .find("with_runtime(|runtime|")
+            .expect("task runtime update");
+        let runtime_end = body[runtime..]
+            .find(runtime_end)
+            .expect("task runtime lock release")
+            + runtime;
+        let scheduler = body
+            .find(scheduler_call)
+            .expect("scheduler state transition");
+        let restore = body
+            .rfind("restore_interrupts(interrupt_state)")
+            .expect("outer interrupt restore");
+        assert!(mask < runtime && runtime_end < scheduler && scheduler < restore);
+    }
+
+    for removed_global in [
+        "static LINUX_SIGNAL_MASK:",
+        "static LINUX_SIGNAL_FRAME_DEPTH:",
+        "static LINUX_SIGRETURN_REQUESTED:",
+        "static LINUX_SIGNAL_STACK_POINTER:",
+        "static LINUX_SIGNAL_STACK_SIZE:",
+        "static LINUX_SIGNAL_STACK_FLAGS:",
+        "static mut LINUX_SIGNAL_FRAMES:",
+    ] {
+        assert!(
+            !syscall.contains(removed_global),
+            "task-owned signal state remains global: {removed_global}"
+        );
+    }
+    assert!(syscall.contains("static LINUX_PROCESS_PENDING_SIGNALS:"));
+    assert!(syscall.contains("static mut LINUX_PROCESS_REALTIME_PENDING:"));
+    let process_queue_start = syscall
+        .find("fn with_linux_process_realtime_pending<R>(")
+        .expect("process realtime queue guard");
+    let process_queue = braced_body(&syscall[process_queue_start..]);
+    let process_mask = process_queue
+        .find("mask_interrupts()")
+        .expect("process queue interrupt mask");
+    let process_access = process_queue
+        .find("operation(&mut LINUX_PROCESS_REALTIME_PENDING, &mut count)")
+        .expect("serialized process queue access");
+    let process_restore = process_queue
+        .find("restore_interrupts(interrupt_state)")
+        .expect("process queue interrupt restore");
+    assert!(process_mask < process_access && process_access < process_restore);
+
+    let reset_start = syscall
+        .find("pub fn reset_linux_signal_timer_state()")
+        .expect("signal process reset");
+    let reset = braced_body(&syscall[reset_start..]);
+    assert!(reset.contains("LINUX_PROCESS_PENDING_SIGNALS.store(0"));
+    assert!(reset.contains("with_linux_process_realtime_pending("));
+    assert!(reset.contains("pending.fill(LinuxPendingSignal::EMPTY)"));
+    assert!(reset.contains("*count = 0"));
+
+    for syscall_name in [
+        "pub fn sys_rt_sigprocmask(",
+        "pub fn sys_rt_sigreturn(",
+        "pub fn sys_rt_sigpending(",
+        "pub fn sys_sigaltstack(",
+    ] {
+        let start = syscall.find(syscall_name).expect("signal syscall");
+        let body = braced_body(&syscall[start..]);
+        assert!(
+            body.contains("linux_task::"),
+            "{syscall_name} must resolve task-owned signal state"
+        );
+    }
+
+    let tgkill_start = syscall.find("pub fn sys_tgkill(").expect("tgkill syscall");
+    let tgkill = braced_body(&syscall[tgkill_start..]);
+    assert!(tgkill.contains("queue_directed_linux_signal("));
+    assert!(!tgkill.contains("sys_kill("));
+    let rt_tgqueue_start = syscall
+        .find("pub fn sys_rt_tgsigqueueinfo(")
+        .expect("rt_tgsigqueueinfo syscall");
+    let rt_tgqueue = braced_body(&syscall[rt_tgqueue_start..]);
+    assert!(rt_tgqueue.contains("queue_directed_linux_signal("));
+    assert!(!rt_tgqueue.contains("sys_rt_sigqueueinfo("));
+
+    let interrupt_start = futex
+        .find("pub(crate) fn interrupt_task(")
+        .expect("directed futex interruption");
+    let interrupt = braced_body(&futex[interrupt_start..]);
+    let queue = interrupt
+        .find("with_queue(|queue|")
+        .expect("queue interrupt");
+    let wake = interrupt
+        .find("linux_task::wake_blocked(")
+        .expect("blocked task wake");
+    assert!(queue < wake);
+
+    let directed_start = syscall
+        .find("fn queue_directed_linux_signal(")
+        .expect("directed signal routing helper");
+    let directed = braced_body(&syscall[directed_start..]);
+    let route = directed
+        .find("linux_task::queue_task_signal(")
+        .expect("task signal queue");
+    let interrupt = directed
+        .find("interrupt_linux_signal_target(")
+        .expect("blocked target interruption");
+    assert!(route < interrupt);
+    let target_start = syscall
+        .find("fn interrupt_linux_signal_target(")
+        .expect("signal target wake helper");
+    let target = braced_body(&syscall[target_start..]);
+    assert!(target.contains("linux_futex::interrupt_task("));
+
+    let delivery_start = syscall
+        .find("fn deliver_next_linux_signal(")
+        .expect("signal delivery helper");
+    let delivery = braced_body(&syscall[delivery_start..]);
+    assert!(delivery.contains("linux_task::with_current_signal_state("));
+    assert!(delivery.contains("signal_state.push_frame(frame)?"));
+    assert!(delivery.contains("requeue_linux_signal(deliverable)"));
+    assert!(delivery.contains("signal_state.alt_stack.flags = LINUX_SS_ONSTACK as u32"));
+
+    for syscall_name in [
+        "pub fn sys_tkill(",
+        "pub fn sys_tgkill(",
+        "pub fn sys_rt_tgsigqueueinfo(",
+    ] {
+        let start = syscall.find(syscall_name).expect("directed signal syscall");
+        let body = braced_body(&syscall[start..]);
+        assert!(
+            body.contains("LinuxPendingSignal::EMPTY"),
+            "{syscall_name} must validate ignored and signal-zero targets"
+        );
+    }
+
+    let kill_start = syscall.find("pub fn sys_kill(").expect("kill syscall");
+    let kill = braced_body(&syscall[kill_start..]);
+    assert!(kill.contains("if action.handler == LINUX_SIG_DFL"));
+    assert!(kill.contains("process_manager().terminate_process(pid as usize)"));
+    assert!(kill.contains("queue_process_linux_signal_and_wake("));
+}
+
+#[test]
 fn aarch64_el0_context_abi_is_complete() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let boot = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/boot.rs"))

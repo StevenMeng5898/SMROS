@@ -239,6 +239,18 @@ pub(crate) fn on_timer_tick(now_monotonic: u64, now_realtime: u64) {
     }
 }
 
+pub(crate) fn interrupt_task(tid: usize, scheduler_thread: usize) -> bool {
+    let interrupted = with_queue(|queue| queue.interrupt(tid, scheduler_thread));
+    if !interrupted {
+        return false;
+    }
+    if linux_task::wake_blocked(tid, scheduler_thread, LinuxBlockReason::Futex) {
+        return true;
+    }
+    let _ = with_queue(|queue| queue.take_outcome(tid, scheduler_thread));
+    false
+}
+
 pub(crate) fn reset() {
     with_queue(|queue| {
         let _ = queue.reset();

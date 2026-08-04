@@ -75,61 +75,122 @@ pub(crate) fn current_tgid() -> Result<usize, SysError> {
     })
 }
 
+pub(crate) fn current_task() -> Result<LinuxTaskCore, SysError> {
+    with_runtime(|runtime| {
+        let scheduler_thread = scheduler::scheduler().current();
+        runtime
+            .tasks
+            .by_scheduler(scheduler_thread.0)
+            .ok_or(SysError::ESRCH)
+    })
+}
+
 pub(crate) fn lookup_tid(tid: usize) -> Option<LinuxTaskCore> {
     with_runtime(|runtime| runtime.tasks.by_tid(tid))
+}
+
+pub(crate) fn with_current_signal_state<R>(
+    operation: impl FnOnce(&mut LinuxTaskSignalState) -> R,
+) -> Result<R, SysError> {
+    with_runtime(|runtime| {
+        let scheduler_thread = scheduler::scheduler().current();
+        let (signal_state, _) = runtime
+            .tasks
+            .signal_state_by_scheduler_mut(scheduler_thread.0)
+            .ok_or(SysError::ESRCH)?;
+        Ok(operation(signal_state))
+    })
+}
+
+pub(crate) fn queue_task_signal(
+    tgid: Option<usize>,
+    tid: usize,
+    record: LinuxPendingSignal,
+) -> Result<LinuxTaskCore, SysError> {
+    with_runtime(|runtime| {
+        runtime
+            .tasks
+            .route_signal(tgid, tid, record)
+            .map_err(|error| match error {
+                LinuxSignalRouteError::NoSuchTask => SysError::ESRCH,
+                LinuxSignalRouteError::InvalidSignal => SysError::EINVAL,
+                LinuxSignalRouteError::QueueFull => SysError::EAGAIN,
+            })
+    })
+}
+
+pub(crate) fn process_signal_target(signum: usize) -> Option<LinuxTaskCore> {
+    with_runtime(|runtime| runtime.tasks.process_signal_target(signum))
+}
+
+pub(crate) fn discard_signal(signum: usize) {
+    with_runtime(|runtime| runtime.tasks.discard_signal(signum));
 }
 
 pub(crate) fn block_current(reason: LinuxBlockReason) -> Result<LinuxTaskCore, SysError> {
     if reason == LinuxBlockReason::None {
         return Err(SysError::EINVAL);
     }
-    with_runtime(|runtime| {
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let result = (|| {
         let scheduler_thread = scheduler::scheduler().current();
-        let task = runtime
-            .tasks
-            .by_scheduler(scheduler_thread.0)
-            .ok_or(SysError::ESRCH)?;
-        if !runtime.tasks.block(task.tid, scheduler_thread.0, reason) {
-            return Err(SysError::EAGAIN);
+        let task = with_runtime(|runtime| {
+            let task = runtime
+                .tasks
+                .by_scheduler(scheduler_thread.0)
+                .ok_or(SysError::ESRCH)?;
+            if !runtime.tasks.block(task.tid, scheduler_thread.0, reason) {
+                return Err(SysError::EAGAIN);
+            }
+            Ok(task)
+        })?;
+        if scheduler::scheduler().block_thread(scheduler_thread) {
+            return Ok(task);
         }
-        if !scheduler::scheduler().block_thread(scheduler_thread) {
-            let _ = runtime.tasks.wake(task.tid, scheduler_thread.0);
-            return Err(SysError::EAGAIN);
-        }
-        Ok(task)
-    })
+        let _ = with_runtime(|runtime| runtime.tasks.wake(task.tid, scheduler_thread.0));
+        Err(SysError::EAGAIN)
+    })();
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    result
 }
 
 pub(crate) fn wake_blocked(tid: usize, scheduler_thread: usize, reason: LinuxBlockReason) -> bool {
     if reason == LinuxBlockReason::None {
         return false;
     }
-    with_runtime(|runtime| {
-        let Some(task) = runtime.tasks.by_tid(tid) else {
-            return false;
-        };
-        if task.scheduler_thread != scheduler_thread
-            || task.state != LinuxTaskState::Blocked
-            || task.block_reason != reason
-        {
-            return false;
-        }
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let result = (|| {
         let scheduler_id = ThreadId(scheduler_thread);
         if scheduler::scheduler()
             .get_thread(scheduler_id)
             .map(|thread| thread.state)
             != Some(thread::ThreadState::Blocked)
-            || !runtime.tasks.wake(tid, scheduler_thread)
         {
             return false;
         }
-        if scheduler::scheduler().wake_thread(scheduler_id) {
-            true
-        } else {
-            let _ = runtime.tasks.block(tid, scheduler_thread, reason);
-            false
+        let woken = with_runtime(|runtime| {
+            let Some(task) = runtime.tasks.by_tid(tid) else {
+                return false;
+            };
+            if task.scheduler_thread != scheduler_thread
+                || task.state != LinuxTaskState::Blocked
+                || task.block_reason != reason
+            {
+                return false;
+            }
+            runtime.tasks.wake(tid, scheduler_thread)
+        });
+        if !woken {
+            return false;
         }
-    })
+        if scheduler::scheduler().wake_thread(scheduler_id) {
+            return true;
+        }
+        let _ = with_runtime(|runtime| runtime.tasks.block(tid, scheduler_thread, reason));
+        false
+    })();
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    result
 }
 
 pub(crate) fn reset() {
@@ -243,6 +304,10 @@ mod aarch64_clone {
                 .tasks
                 .reserve_child(scheduler_id.0)
                 .ok_or(SysError::EAGAIN)?;
+            if !runtime.tasks.inherit_signal_mask(reservation, current.0) {
+                let _ = runtime.tasks.rollback(reservation);
+                return Err(SysError::EAGAIN);
+            }
             let mut frame = unsafe { context.frame.read() };
             frame.regs[0] = 0;
             let tls = request

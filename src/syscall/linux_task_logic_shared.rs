@@ -192,8 +192,233 @@ impl LinuxTaskCore {
     };
 }
 
+pub(crate) const LINUX_MAX_SIGNAL: usize = 64;
+pub(crate) const LINUX_REALTIME_SIGNAL_MIN: usize = 32;
+pub(crate) const LINUX_SIGNAL_INFO_BYTES: usize = 128;
+pub(crate) const LINUX_RT_QUEUE_LIMIT: usize = 64;
+pub(crate) const LINUX_SIGNAL_FRAME_LIMIT: usize = 16;
+pub(crate) const LINUX_SS_ONSTACK: u64 = 1;
+pub(crate) const LINUX_SS_DISABLE: u64 = 2;
+
+pub(crate) fn linux_signal_bit(signum: usize) -> u64 {
+    if !(1..=LINUX_MAX_SIGNAL).contains(&signum) {
+        return 0;
+    }
+    1u64 << (signum - 1)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxPendingSignal {
+    pub signum: usize,
+    pub has_info: bool,
+    pub info: [u8; LINUX_SIGNAL_INFO_BYTES],
+}
+
+impl LinuxPendingSignal {
+    pub(crate) const EMPTY: Self = Self {
+        signum: 0,
+        has_info: false,
+        info: [0; LINUX_SIGNAL_INFO_BYTES],
+    };
+
+    pub(crate) const fn standard(signum: usize) -> Self {
+        Self {
+            signum,
+            ..Self::EMPTY
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxSignalStack {
+    pub sp: u64,
+    pub flags: u32,
+    pub _padding: u32,
+    pub size: u64,
+}
+
+impl LinuxSignalStack {
+    pub(crate) const DISABLED: Self = Self {
+        sp: 0,
+        flags: LINUX_SS_DISABLE as u32,
+        _padding: 0,
+        size: 0,
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxSignalFrame {
+    pub regs: [u64; 32],
+    pub return_pc: u64,
+    pub previous_mask: u64,
+    pub user_sp: u64,
+    pub previous_stack_flags: u64,
+}
+
+impl LinuxSignalFrame {
+    const EMPTY: Self = Self {
+        regs: [0; 32],
+        return_pc: 0,
+        previous_mask: 0,
+        user_sp: 0,
+        previous_stack_flags: LINUX_SS_DISABLE,
+    };
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxTaskSignalState {
+    pub mask: u64,
+    pub standard_pending: u64,
+    pub realtime_pending: [LinuxPendingSignal; LINUX_RT_QUEUE_LIMIT],
+    pub realtime_len: usize,
+    pub alt_stack: LinuxSignalStack,
+    pub frames: [LinuxSignalFrame; LINUX_SIGNAL_FRAME_LIMIT],
+    pub frame_depth: usize,
+    pub sigreturn_requested: bool,
+}
+
+impl LinuxTaskSignalState {
+    pub(crate) const fn new() -> Self {
+        Self {
+            mask: 0,
+            standard_pending: 0,
+            realtime_pending: [LinuxPendingSignal::EMPTY; LINUX_RT_QUEUE_LIMIT],
+            realtime_len: 0,
+            alt_stack: LinuxSignalStack::DISABLED,
+            frames: [LinuxSignalFrame::EMPTY; LINUX_SIGNAL_FRAME_LIMIT],
+            frame_depth: 0,
+            sigreturn_requested: false,
+        }
+    }
+
+    pub(crate) fn pending_mask(&self) -> u64 {
+        let mut pending = self.standard_pending;
+        for record in &self.realtime_pending[..self.realtime_len] {
+            pending |= linux_signal_bit(record.signum);
+        }
+        pending
+    }
+
+    pub(crate) fn queue(
+        &mut self,
+        record: LinuxPendingSignal,
+    ) -> Result<(), LinuxSignalRouteError> {
+        if !(1..=LINUX_MAX_SIGNAL).contains(&record.signum) {
+            return Err(LinuxSignalRouteError::InvalidSignal);
+        }
+        if record.signum < LINUX_REALTIME_SIGNAL_MIN {
+            self.standard_pending |= linux_signal_bit(record.signum);
+            return Ok(());
+        }
+        if self.realtime_len >= LINUX_RT_QUEUE_LIMIT {
+            return Err(LinuxSignalRouteError::QueueFull);
+        }
+        self.realtime_pending[self.realtime_len] = record;
+        self.realtime_len += 1;
+        Ok(())
+    }
+
+    pub(crate) fn take_unblocked(&mut self) -> Option<LinuxPendingSignal> {
+        for index in 0..self.realtime_len {
+            let record = self.realtime_pending[index];
+            if self.mask & linux_signal_bit(record.signum) != 0 {
+                continue;
+            }
+            for shifted in index..self.realtime_len - 1 {
+                self.realtime_pending[shifted] = self.realtime_pending[shifted + 1];
+            }
+            self.realtime_len -= 1;
+            self.realtime_pending[self.realtime_len] = LinuxPendingSignal::EMPTY;
+            return Some(record);
+        }
+
+        let deliverable = self.standard_pending & !self.mask;
+        if deliverable == 0 {
+            return None;
+        }
+        let signum = deliverable.trailing_zeros() as usize + 1;
+        self.standard_pending &= !linux_signal_bit(signum);
+        Some(LinuxPendingSignal::standard(signum))
+    }
+
+    pub(crate) fn requeue_front(
+        &mut self,
+        record: LinuxPendingSignal,
+    ) -> Result<(), LinuxSignalRouteError> {
+        if record.signum < LINUX_REALTIME_SIGNAL_MIN {
+            return self.queue(record);
+        }
+        if self.realtime_len >= LINUX_RT_QUEUE_LIMIT {
+            return Err(LinuxSignalRouteError::QueueFull);
+        }
+        for index in (0..self.realtime_len).rev() {
+            self.realtime_pending[index + 1] = self.realtime_pending[index];
+        }
+        self.realtime_pending[0] = record;
+        self.realtime_len += 1;
+        Ok(())
+    }
+
+    pub(crate) fn discard(&mut self, signum: usize) {
+        self.standard_pending &= !linux_signal_bit(signum);
+        let mut write = 0usize;
+        for read in 0..self.realtime_len {
+            let record = self.realtime_pending[read];
+            if record.signum != signum {
+                self.realtime_pending[write] = record;
+                write += 1;
+            }
+        }
+        for index in write..self.realtime_len {
+            self.realtime_pending[index] = LinuxPendingSignal::EMPTY;
+        }
+        self.realtime_len = write;
+    }
+
+    pub(crate) fn push_frame(&mut self, frame: LinuxSignalFrame) -> Option<usize> {
+        if self.frame_depth >= LINUX_SIGNAL_FRAME_LIMIT {
+            return None;
+        }
+        let depth = self.frame_depth;
+        self.frames[depth] = frame;
+        self.frame_depth += 1;
+        Some(depth)
+    }
+
+    pub(crate) fn request_sigreturn(&mut self) -> bool {
+        if self.frame_depth == 0 {
+            return false;
+        }
+        self.sigreturn_requested = true;
+        true
+    }
+
+    pub(crate) fn take_requested_frame(&mut self) -> Option<LinuxSignalFrame> {
+        if !self.sigreturn_requested {
+            return None;
+        }
+        self.sigreturn_requested = false;
+        if self.frame_depth == 0 {
+            return None;
+        }
+        self.frame_depth -= 1;
+        let frame = self.frames[self.frame_depth];
+        self.frames[self.frame_depth] = LinuxSignalFrame::EMPTY;
+        Some(frame)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxSignalRouteError {
+    NoSuchTask,
+    InvalidSignal,
+    QueueFull,
+}
+
 pub(crate) struct LinuxTaskTable<const N: usize> {
     tasks: [LinuxTaskCore; N],
+    signal_states: [LinuxTaskSignalState; N],
     next_tid: usize,
     exhausted: bool,
 }
@@ -202,6 +427,7 @@ impl<const N: usize> LinuxTaskTable<N> {
     pub(crate) const fn new() -> Self {
         Self {
             tasks: [LinuxTaskCore::EMPTY; N],
+            signal_states: [LinuxTaskSignalState::new(); N],
             next_tid: LINUX_ROOT_TID + 1,
             exhausted: false,
         }
@@ -218,20 +444,21 @@ impl<const N: usize> LinuxTaskTable<N> {
         {
             return Err(LinuxTaskError::DuplicateRoot);
         }
-        let Some(task) = self
+        let Some(slot) = self
             .tasks
-            .iter_mut()
-            .find(|task| task.state == LinuxTaskState::Empty)
+            .iter()
+            .position(|task| task.state == LinuxTaskState::Empty)
         else {
             return Err(LinuxTaskError::Capacity);
         };
-        *task = LinuxTaskCore {
+        self.tasks[slot] = LinuxTaskCore {
             tid: LINUX_ROOT_TID,
             tgid: LINUX_ROOT_TID,
             scheduler_thread,
             state: LinuxTaskState::Runnable,
             block_reason: LinuxBlockReason::None,
         };
+        self.signal_states[slot] = LinuxTaskSignalState::new();
         Ok(LINUX_ROOT_TID)
     }
 
@@ -267,7 +494,36 @@ impl<const N: usize> LinuxTaskTable<N> {
             state: LinuxTaskState::Starting,
             block_reason: LinuxBlockReason::None,
         };
+        self.signal_states[slot] = LinuxTaskSignalState::new();
         Some(reservation)
+    }
+
+    pub(crate) fn inherit_signal_mask(
+        &mut self,
+        reservation: LinuxTaskReservation,
+        parent_scheduler_thread: usize,
+    ) -> bool {
+        let Some(parent_slot) = self.tasks.iter().position(|task| {
+            Self::is_live(*task) && task.scheduler_thread == parent_scheduler_thread
+        }) else {
+            return false;
+        };
+        let Some(child) = self.tasks.get(reservation.slot).copied() else {
+            return false;
+        };
+        if child.state != LinuxTaskState::Starting
+            || child.tid != reservation.tid
+            || child.scheduler_thread != reservation.scheduler_thread
+            || child.tgid != self.tasks[parent_slot].tgid
+        {
+            return false;
+        }
+
+        self.signal_states[reservation.slot] = LinuxTaskSignalState {
+            mask: self.signal_states[parent_slot].mask,
+            ..LinuxTaskSignalState::new()
+        };
+        true
     }
 
     pub(crate) fn publish(&mut self, reservation: LinuxTaskReservation) -> bool {
@@ -299,6 +555,7 @@ impl<const N: usize> LinuxTaskTable<N> {
             return false;
         }
         *task = LinuxTaskCore::EMPTY;
+        self.signal_states[reservation.slot] = LinuxTaskSignalState::new();
         true
     }
 
@@ -314,6 +571,78 @@ impl<const N: usize> LinuxTaskTable<N> {
             .iter()
             .copied()
             .find(|task| Self::is_published(*task) && task.scheduler_thread == scheduler_thread)
+    }
+
+    pub(crate) fn signal_state(
+        &self,
+        tid: usize,
+        scheduler_thread: usize,
+    ) -> Option<&LinuxTaskSignalState> {
+        let slot = self.task_slot(tid, scheduler_thread)?;
+        self.signal_states.get(slot)
+    }
+
+    pub(crate) fn signal_state_mut(
+        &mut self,
+        tid: usize,
+        scheduler_thread: usize,
+    ) -> Option<&mut LinuxTaskSignalState> {
+        let slot = self.task_slot(tid, scheduler_thread)?;
+        self.signal_states.get_mut(slot)
+    }
+
+    pub(crate) fn signal_state_by_scheduler_mut(
+        &mut self,
+        scheduler_thread: usize,
+    ) -> Option<(&mut LinuxTaskSignalState, LinuxTaskCore)> {
+        let slot = self
+            .tasks
+            .iter()
+            .position(|task| Self::is_live(*task) && task.scheduler_thread == scheduler_thread)?;
+        Some((&mut self.signal_states[slot], self.tasks[slot]))
+    }
+
+    pub(crate) fn route_signal(
+        &mut self,
+        tgid: Option<usize>,
+        tid: usize,
+        record: LinuxPendingSignal,
+    ) -> Result<LinuxTaskCore, LinuxSignalRouteError> {
+        let slot = self
+            .tasks
+            .iter()
+            .position(|task| {
+                Self::is_live(*task)
+                    && task.tid == tid
+                    && tgid.map(|expected| task.tgid == expected).unwrap_or(true)
+            })
+            .ok_or(LinuxSignalRouteError::NoSuchTask)?;
+        let task = self.tasks[slot];
+        if record.signum != 0 {
+            self.signal_states[slot].queue(record)?;
+        }
+        Ok(task)
+    }
+
+    pub(crate) fn process_signal_target(&self, signum: usize) -> Option<LinuxTaskCore> {
+        let bit = linux_signal_bit(signum);
+        if bit == 0 {
+            return None;
+        }
+        self.tasks
+            .iter()
+            .zip(self.signal_states.iter())
+            .find_map(|(task, signal_state)| {
+                (Self::is_live(*task) && signal_state.mask & bit == 0).then_some(*task)
+            })
+    }
+
+    pub(crate) fn discard_signal(&mut self, signum: usize) {
+        for (task, signal_state) in self.tasks.iter().zip(self.signal_states.iter_mut()) {
+            if Self::is_live(*task) {
+                signal_state.discard(signum);
+            }
+        }
     }
 
     pub(crate) fn scheduler_thread_for_reset(&self, slot: usize) -> Option<usize> {
@@ -367,24 +696,42 @@ impl<const N: usize> LinuxTaskTable<N> {
     }
 
     pub(crate) fn retire(&mut self, tid: usize, scheduler_thread: usize) -> bool {
-        let Some(task) = self.task_for_transition(tid, scheduler_thread) else {
+        let Some(slot) = self.task_slot_index(tid, scheduler_thread) else {
             return false;
         };
-        if task.state != LinuxTaskState::Exited {
+        if self.tasks[slot].state != LinuxTaskState::Exited {
             return false;
         }
-        *task = LinuxTaskCore::EMPTY;
+        self.tasks[slot] = LinuxTaskCore::EMPTY;
+        self.signal_states[slot] = LinuxTaskSignalState::new();
         true
     }
 
     pub(crate) fn reset(&mut self) {
         self.tasks.fill(LinuxTaskCore::EMPTY);
+        self.signal_states.fill(LinuxTaskSignalState::new());
         self.next_tid = LINUX_ROOT_TID + 1;
         self.exhausted = false;
     }
 
     fn is_published(task: LinuxTaskCore) -> bool {
         task.state != LinuxTaskState::Empty && task.state != LinuxTaskState::Starting
+    }
+
+    fn is_live(task: LinuxTaskCore) -> bool {
+        task.state == LinuxTaskState::Runnable || task.state == LinuxTaskState::Blocked
+    }
+
+    fn task_slot(&self, tid: usize, scheduler_thread: usize) -> Option<usize> {
+        self.tasks.iter().position(|task| {
+            Self::is_live(*task) && task.tid == tid && task.scheduler_thread == scheduler_thread
+        })
+    }
+
+    fn task_slot_index(&self, tid: usize, scheduler_thread: usize) -> Option<usize> {
+        self.tasks
+            .iter()
+            .position(|task| task.tid == tid && task.scheduler_thread == scheduler_thread)
     }
 
     fn task_for_transition(

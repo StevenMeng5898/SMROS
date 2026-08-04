@@ -654,6 +654,368 @@ mod linux_task_logic {
         tasks.register_root(9).unwrap();
         assert_eq!(tasks.reserve_child(10).unwrap().tid, 2);
     }
+
+    #[cfg(test)]
+    fn signal_record(signum: usize, marker: u8) -> LinuxPendingSignal {
+        LinuxPendingSignal {
+            signum,
+            has_info: true,
+            info: [marker; LINUX_SIGNAL_INFO_BYTES],
+        }
+    }
+
+    #[cfg(test)]
+    fn three_live_tasks() -> (
+        LinuxTaskTable<3>,
+        LinuxTaskReservation,
+        LinuxTaskReservation,
+    ) {
+        let mut tasks = LinuxTaskTable::<3>::new();
+        tasks.register_root(7).unwrap();
+        let first = tasks.reserve_child(8).unwrap();
+        let second = tasks.reserve_child(9).unwrap();
+        assert!(tasks.publish(first));
+        assert!(tasks.publish(second));
+        (tasks, first, second)
+    }
+
+    #[test]
+    fn signal_masks_pending_stacks_and_frames_are_isolated_by_live_task_identity() {
+        let (mut tasks, first, second) = three_live_tasks();
+        let identities = [
+            (LINUX_ROOT_TID, 7, 0x11u64, 0x1000u64, 2usize, 34usize),
+            (first.tid, 8, 0x22u64, 0x2000u64, 3usize, 35usize),
+            (second.tid, 9, 0x44u64, 0x3000u64, 4usize, 36usize),
+        ];
+
+        for (tid, scheduler_thread, mask, stack_pointer, standard, realtime) in identities {
+            let state = tasks
+                .signal_state_mut(tid, scheduler_thread)
+                .expect("live task signal state");
+            state.mask = mask;
+            state.alt_stack = LinuxSignalStack {
+                sp: stack_pointer,
+                flags: 0,
+                _padding: 0,
+                size: 0x1800,
+            };
+            state
+                .queue(signal_record(standard, standard as u8))
+                .unwrap();
+            state
+                .queue(signal_record(realtime, realtime as u8))
+                .unwrap();
+            assert_eq!(
+                state.push_frame(LinuxSignalFrame {
+                    regs: [tid as u64; 32],
+                    return_pc: 0x8000 + tid as u64,
+                    previous_mask: mask - 1,
+                    user_sp: stack_pointer + 0x800,
+                    previous_stack_flags: 0,
+                }),
+                Some(0)
+            );
+            assert_eq!(
+                state.push_frame(LinuxSignalFrame {
+                    regs: [(tid + 10) as u64; 32],
+                    return_pc: 0x9000 + tid as u64,
+                    previous_mask: mask,
+                    user_sp: stack_pointer + 0x1000,
+                    previous_stack_flags: LINUX_SS_ONSTACK,
+                }),
+                Some(1)
+            );
+        }
+
+        let first_state = tasks.signal_state_mut(first.tid, 8).unwrap();
+        first_state.mask = 0xaa;
+        assert!(first_state.request_sigreturn());
+        let popped = first_state
+            .take_requested_frame()
+            .expect("first child nested frame");
+        assert_eq!(popped.regs[0], (first.tid + 10) as u64);
+
+        let root = tasks.signal_state(LINUX_ROOT_TID, 7).unwrap();
+        assert_eq!(root.mask, 0x11);
+        assert_eq!(root.alt_stack.sp, 0x1000);
+        assert_eq!(root.standard_pending, linux_signal_bit(2));
+        assert_eq!(root.realtime_len, 1);
+        assert_eq!(root.realtime_pending[0].info, [34; LINUX_SIGNAL_INFO_BYTES]);
+        assert_eq!(root.frame_depth, 2);
+        assert!(!root.sigreturn_requested);
+
+        let first_state = tasks.signal_state(first.tid, 8).unwrap();
+        assert_eq!(first_state.mask, 0xaa);
+        assert_eq!(first_state.alt_stack.sp, 0x2000);
+        assert_eq!(first_state.standard_pending, linux_signal_bit(3));
+        assert_eq!(first_state.realtime_len, 1);
+        assert_eq!(
+            first_state.realtime_pending[0].info,
+            [35; LINUX_SIGNAL_INFO_BYTES]
+        );
+        assert_eq!(first_state.frame_depth, 1);
+        assert!(!first_state.sigreturn_requested);
+
+        let second_state = tasks.signal_state(second.tid, 9).unwrap();
+        assert_eq!(second_state.mask, 0x44);
+        assert_eq!(second_state.alt_stack.sp, 0x3000);
+        assert_eq!(second_state.standard_pending, linux_signal_bit(4));
+        assert_eq!(second_state.realtime_len, 1);
+        assert_eq!(
+            second_state.realtime_pending[0].info,
+            [36; LINUX_SIGNAL_INFO_BYTES]
+        );
+        assert_eq!(second_state.frame_depth, 2);
+        assert!(!second_state.sigreturn_requested);
+
+        assert!(tasks.signal_state(first.tid, 99).is_none());
+    }
+
+    #[test]
+    fn standard_signals_coalesce_and_realtime_signals_remain_fifo_and_bounded() {
+        let (mut tasks, first, _) = three_live_tasks();
+        let state = tasks.signal_state_mut(first.tid, 8).unwrap();
+
+        state.queue(signal_record(10, 0x10)).unwrap();
+        state.queue(signal_record(10, 0x20)).unwrap();
+        assert_eq!(state.standard_pending, linux_signal_bit(10));
+
+        for marker in 0..LINUX_RT_QUEUE_LIMIT {
+            state
+                .queue(signal_record(34 + marker % 2, marker as u8))
+                .unwrap();
+        }
+        assert_eq!(
+            state.queue(signal_record(34, 0xff)),
+            Err(LinuxSignalRouteError::QueueFull)
+        );
+        for marker in 0..LINUX_RT_QUEUE_LIMIT {
+            let record = state.take_unblocked().expect("queued realtime signal");
+            assert_eq!(record.signum, 34 + marker % 2);
+            assert_eq!(record.info, [marker as u8; LINUX_SIGNAL_INFO_BYTES]);
+        }
+        let standard = state.take_unblocked().expect("coalesced standard signal");
+        assert_eq!(standard.signum, 10);
+        assert!(!standard.has_info);
+        assert!(state.take_unblocked().is_none());
+    }
+
+    #[test]
+    fn process_and_directed_signal_routing_select_only_the_addressed_live_task() {
+        let (mut tasks, first, second) = three_live_tasks();
+        let signal = 12usize;
+        let bit = linux_signal_bit(signal);
+        tasks.signal_state_mut(LINUX_ROOT_TID, 7).unwrap().mask = bit;
+        tasks.signal_state_mut(first.tid, 8).unwrap().mask = bit;
+
+        assert_eq!(
+            tasks.process_signal_target(signal),
+            Some(LinuxTaskCore {
+                tid: second.tid,
+                tgid: LINUX_ROOT_TID,
+                scheduler_thread: 9,
+                state: LinuxTaskState::Runnable,
+                block_reason: LinuxBlockReason::None,
+            })
+        );
+
+        let target = tasks
+            .route_signal(Some(LINUX_ROOT_TID), first.tid, signal_record(signal, 0x5a))
+            .expect("tgkill target");
+        assert_eq!(target.tid, first.tid);
+        assert_eq!(
+            tasks.signal_state(first.tid, 8).unwrap().standard_pending,
+            bit
+        );
+        assert_eq!(
+            tasks
+                .signal_state(LINUX_ROOT_TID, 7)
+                .unwrap()
+                .standard_pending,
+            0,
+            "directed signal must never be queued on the caller"
+        );
+
+        let realtime = signal_record(35, 0xa5);
+        let target = tasks
+            .route_signal(Some(LINUX_ROOT_TID), second.tid, realtime)
+            .expect("rt_tgsigqueueinfo target");
+        assert_eq!(target.tid, second.tid);
+        assert_eq!(
+            tasks.signal_state(second.tid, 9).unwrap().realtime_pending[0],
+            realtime
+        );
+        assert_eq!(
+            tasks.signal_state(LINUX_ROOT_TID, 7).unwrap().realtime_len,
+            0
+        );
+
+        assert_eq!(
+            tasks.route_signal(Some(2), first.tid, signal_record(signal, 1)),
+            Err(LinuxSignalRouteError::NoSuchTask)
+        );
+        assert_eq!(
+            tasks.route_signal(None, 999, signal_record(signal, 1)),
+            Err(LinuxSignalRouteError::NoSuchTask)
+        );
+
+        let before = tasks.signal_state(first.tid, 8).unwrap().pending_mask();
+        assert_eq!(
+            tasks.route_signal(Some(LINUX_ROOT_TID), first.tid, LinuxPendingSignal::EMPTY),
+            Ok(target_for(first))
+        );
+        assert_eq!(
+            tasks.signal_state(first.tid, 8).unwrap().pending_mask(),
+            before,
+            "signal zero checks existence without queueing"
+        );
+    }
+
+    #[test]
+    fn blocked_signals_remain_pending_and_requeue_restores_the_selected_rt_record() {
+        let (mut tasks, first, _) = three_live_tasks();
+        let blocked = 34usize;
+        let selected = signal_record(35, 0x35);
+        let state = tasks.signal_state_mut(first.tid, 8).unwrap();
+        state.mask = linux_signal_bit(blocked) | linux_signal_bit(10);
+        state.queue(signal_record(blocked, 0x34)).unwrap();
+        state.queue(selected).unwrap();
+        state.queue(signal_record(10, 0x10)).unwrap();
+
+        assert_eq!(state.take_unblocked(), Some(selected));
+        state.requeue_front(selected).unwrap();
+        assert_eq!(state.take_unblocked(), Some(selected));
+        assert!(state.take_unblocked().is_none());
+        assert_eq!(
+            state.pending_mask(),
+            linux_signal_bit(blocked) | linux_signal_bit(10)
+        );
+
+        state.mask = 0;
+        assert_eq!(state.take_unblocked().unwrap().signum, blocked);
+        assert_eq!(state.take_unblocked().unwrap().signum, 10);
+        assert!(state.take_unblocked().is_none());
+    }
+
+    #[test]
+    fn signal_state_is_cleared_on_rollback_retire_and_reset() {
+        let mut tasks = LinuxTaskTable::<2>::new();
+        tasks.register_root(7).unwrap();
+
+        let rolled_back = tasks.reserve_child(8).unwrap();
+        tasks.signal_states[rolled_back.slot].mask = 0x55;
+        tasks.signal_states[rolled_back.slot]
+            .queue(signal_record(34, 0x34))
+            .unwrap();
+        assert!(tasks.rollback(rolled_back));
+        assert_eq!(tasks.signal_states[rolled_back.slot].mask, 0);
+        assert_eq!(tasks.signal_states[rolled_back.slot].realtime_len, 0);
+
+        let retired = tasks.reserve_child(9).unwrap();
+        assert_eq!(retired.slot, rolled_back.slot);
+        assert!(tasks.publish(retired));
+        tasks.signal_state_mut(retired.tid, 9).unwrap().mask = 0xaa;
+        assert!(tasks.exit(retired.tid, 9));
+        assert!(tasks.retire(retired.tid, 9));
+        assert_eq!(tasks.signal_states[retired.slot].mask, 0);
+
+        tasks
+            .signal_state_mut(LINUX_ROOT_TID, 7)
+            .unwrap()
+            .queue(signal_record(12, 0x12))
+            .unwrap();
+        tasks.reset();
+        assert!(tasks.signal_states.iter().all(|state| {
+            state.mask == 0
+                && state.pending_mask() == 0
+                && state.frame_depth == 0
+                && !state.sigreturn_requested
+                && state.alt_stack == LinuxSignalStack::DISABLED
+        }));
+    }
+
+    #[test]
+    fn clone_inherits_only_the_live_creators_signal_mask() {
+        let mut tasks = LinuxTaskTable::<3>::new();
+        tasks.register_root(7).unwrap();
+        let parent = tasks.signal_state_mut(LINUX_ROOT_TID, 7).unwrap();
+        parent.mask = 0x55aa;
+        parent.queue(signal_record(12, 0x12)).unwrap();
+        parent.queue(signal_record(34, 0x34)).unwrap();
+        parent.alt_stack = LinuxSignalStack {
+            sp: 0x4000,
+            flags: 0,
+            _padding: 0,
+            size: 0x2000,
+        };
+        parent
+            .push_frame(LinuxSignalFrame {
+                regs: [0x77; 32],
+                return_pc: 0x8000,
+                previous_mask: 0x11,
+                user_sp: 0x5000,
+                previous_stack_flags: 0,
+            })
+            .unwrap();
+        assert!(parent.request_sigreturn());
+
+        let stale = tasks.reserve_child(8).unwrap();
+        assert!(tasks.rollback(stale));
+        let child = tasks.reserve_child(9).unwrap();
+        assert_eq!(stale.slot, child.slot);
+        assert_ne!(stale.tid, child.tid);
+        assert!(!tasks.inherit_signal_mask(stale, 7));
+        assert!(!tasks.inherit_signal_mask(child, 99));
+        assert!(tasks.inherit_signal_mask(child, 7));
+
+        let inherited = &tasks.signal_states[child.slot];
+        assert_eq!(inherited.mask, 0x55aa);
+        assert_eq!(inherited.pending_mask(), 0);
+        assert_eq!(inherited.realtime_len, 0);
+        assert_eq!(inherited.alt_stack, LinuxSignalStack::DISABLED);
+        assert_eq!(inherited.frame_depth, 0);
+        assert!(!inherited.sigreturn_requested);
+
+        let parent = tasks.signal_state(LINUX_ROOT_TID, 7).unwrap();
+        assert_eq!(
+            parent.pending_mask(),
+            linux_signal_bit(12) | linux_signal_bit(34)
+        );
+        assert_eq!(parent.alt_stack.sp, 0x4000);
+        assert_eq!(parent.frame_depth, 1);
+        assert!(parent.sigreturn_requested);
+    }
+
+    #[test]
+    fn ignored_signal_discard_clears_every_live_task_queue() {
+        let (mut tasks, first, second) = three_live_tasks();
+        for (tid, scheduler_thread) in [(LINUX_ROOT_TID, 7), (first.tid, 8), (second.tid, 9)] {
+            let state = tasks.signal_state_mut(tid, scheduler_thread).unwrap();
+            state.queue(signal_record(12, 0x12)).unwrap();
+            state.queue(signal_record(34, 0x34)).unwrap();
+            state.queue(signal_record(35, 0x35)).unwrap();
+        }
+
+        tasks.discard_signal(12);
+        tasks.discard_signal(34);
+        for (tid, scheduler_thread) in [(LINUX_ROOT_TID, 7), (first.tid, 8), (second.tid, 9)] {
+            let state = tasks.signal_state(tid, scheduler_thread).unwrap();
+            assert_eq!(state.standard_pending, 0);
+            assert_eq!(state.realtime_len, 1);
+            assert_eq!(state.realtime_pending[0].signum, 35);
+        }
+    }
+
+    #[cfg(test)]
+    fn target_for(reservation: LinuxTaskReservation) -> LinuxTaskCore {
+        LinuxTaskCore {
+            tid: reservation.tid,
+            tgid: LINUX_ROOT_TID,
+            scheduler_thread: reservation.scheduler_thread,
+            state: LinuxTaskState::Runnable,
+            block_reason: LinuxBlockReason::None,
+        }
+    }
 }
 
 mod linux_syscall_context_logic {
