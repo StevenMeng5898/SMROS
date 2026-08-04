@@ -3061,13 +3061,19 @@ fn linux_sigtimedwait_copyout_masks_irqs_across_validation_and_write() {
     let write = copy
         .find("core::ptr::copy_nonoverlapping(")
         .expect("complete siginfo write");
-    let fence = copy
+    let entry_fence = copy
         .find("compiler_fence(Ordering::SeqCst)")
-        .expect("copyout compiler fence");
+        .expect("copyout entry compiler fence");
+    let exit_fence = copy
+        .rfind("compiler_fence(Ordering::SeqCst)")
+        .expect("copyout exit compiler fence");
     let restore = copy
         .rfind("restore_interrupts(interrupt_state)")
         .expect("unconditional copyout IRQ restore");
-    assert!(mask < validation && validation < write && write < fence && fence < restore);
+    assert_ne!(entry_fence, exit_fence);
+    assert!(mask < entry_fence);
+    assert!(entry_fence < validation && validation < write);
+    assert!(write < exit_fence && exit_fence < restore);
     assert!(!copy.contains("linux_task::"));
     assert!(!copy.contains("with_linux_process_pending("));
 

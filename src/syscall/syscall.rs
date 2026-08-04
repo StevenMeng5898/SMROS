@@ -4025,6 +4025,7 @@ fn copy_linux_signal_wait_info(
         return Ok(());
     }
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    compiler_fence(Ordering::SeqCst);
     let result = (|| {
         if !linux_signal_user_range_writable(output_address, LINUX_SIGNAL_INFO_BYTES) {
             return Err(SysError::EFAULT);
