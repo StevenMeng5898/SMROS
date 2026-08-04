@@ -552,6 +552,9 @@ const LINUX_MAX_SIGNAL: usize = 64;
 const LINUX_SIGSET_SIZE: usize = core::mem::size_of::<u64>();
 const LINUX_SIG_DFL: u64 = 0;
 const LINUX_SIG_IGN: u64 = 1;
+const LINUX_SIGCHLD: usize = 17;
+const LINUX_SIGURG: usize = 23;
+const LINUX_SIGWINCH: usize = 28;
 const LINUX_SIGALRM: usize = 14;
 const LINUX_SA_SIGINFO: u64 = 0x0000_0004;
 const LINUX_SA_ONSTACK: u64 = 0x0800_0000;
@@ -2649,6 +2652,24 @@ fn linux_signal_action(signum: usize) -> LinuxKernelSigaction {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinuxSignalDisposition {
+    Ignore,
+    Terminate,
+    Handled,
+}
+
+fn linux_signal_disposition(signum: usize) -> LinuxSignalDisposition {
+    match linux_signal_action(signum).handler {
+        LINUX_SIG_IGN => LinuxSignalDisposition::Ignore,
+        LINUX_SIG_DFL => match signum {
+            LINUX_SIGCHLD | LINUX_SIGURG | LINUX_SIGWINCH => LinuxSignalDisposition::Ignore,
+            _ => LinuxSignalDisposition::Terminate,
+        },
+        _ => LinuxSignalDisposition::Handled,
+    }
+}
+
 fn store_linux_signal_action(signum: usize, action: LinuxKernelSigaction) {
     LINUX_SIGNAL_HANDLERS[signum].store(action.handler, Ordering::SeqCst);
     LINUX_SIGNAL_FLAGS[signum].store(action.flags, Ordering::SeqCst);
@@ -2718,6 +2739,7 @@ fn linux_signal_record_from_user(
 fn with_linux_process_realtime_pending<R>(
     operation: impl FnOnce(&mut [LinuxPendingSignal; LINUX_RT_QUEUE_LIMIT], &mut usize) -> R,
 ) -> R {
+    assert!(crate::kernel_lowlevel::smp::is_boot_cpu());
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let mut count = LINUX_PROCESS_REALTIME_COUNT.load(Ordering::SeqCst) as usize;
     let result = unsafe { operation(&mut LINUX_PROCESS_REALTIME_PENDING, &mut count) };
@@ -2790,28 +2812,6 @@ fn take_process_linux_signal(
     current: linux_task::LinuxTaskCore,
     mask: u64,
 ) -> Option<LinuxPendingSignal> {
-    let realtime = with_linux_process_realtime_pending(|pending, count| {
-        for index in 0..*count {
-            let record = pending[index];
-            if mask & linux_signal_bit(record.signum) != 0 {
-                continue;
-            }
-            if linux_task::process_signal_target(record.signum) != Some(current) {
-                continue;
-            }
-            for shifted in index..*count - 1 {
-                pending[shifted] = pending[shifted + 1];
-            }
-            *count -= 1;
-            pending[*count] = LinuxPendingSignal::EMPTY;
-            return Some(record);
-        }
-        None
-    });
-    if realtime.is_some() {
-        return realtime;
-    }
-
     loop {
         let pending = LINUX_PROCESS_PENDING_SIGNALS.load(Ordering::SeqCst);
         let mut candidates = pending & !mask;
@@ -2826,7 +2826,7 @@ fn take_process_linux_signal(
             candidates &= !bit;
         }
         let Some((signum, bit)) = selected else {
-            return None;
+            break;
         };
         let updated = pending & !bit;
         if LINUX_PROCESS_PENDING_SIGNALS
@@ -2836,6 +2836,20 @@ fn take_process_linux_signal(
             return Some(LinuxPendingSignal::standard(signum));
         }
     }
+
+    with_linux_process_realtime_pending(|pending, count| {
+        let index = linux_task::lowest_linux_pending_index(&pending[..*count], |record| {
+            mask & linux_signal_bit(record.signum) == 0
+                && linux_task::process_signal_target(record.signum) == Some(current)
+        })?;
+        let record = pending[index];
+        for shifted in index..*count - 1 {
+            pending[shifted] = pending[shifted + 1];
+        }
+        *count -= 1;
+        pending[*count] = LinuxPendingSignal::EMPTY;
+        Some(record)
+    })
 }
 
 fn take_unblocked_linux_signal() -> Option<LinuxDeliverableSignal> {
@@ -2900,13 +2914,29 @@ fn queue_process_linux_signal_and_wake(record: LinuxPendingSignal) -> Result<(),
 fn queue_directed_linux_signal(
     tgid: Option<usize>,
     tid: usize,
-    record: LinuxPendingSignal,
+    signum: usize,
+    make_record: impl FnOnce() -> Result<LinuxPendingSignal, SysError>,
 ) -> SysResult {
-    let target = linux_task::queue_task_signal(tgid, tid, record)?;
-    if record.signum != 0 {
-        interrupt_linux_signal_target(target);
+    let target = linux_task::queue_task_signal(tgid, tid, LinuxPendingSignal::EMPTY)?;
+    if signum == 0 {
+        return Ok(0);
     }
-    Ok(0)
+    match linux_signal_disposition(signum) {
+        LinuxSignalDisposition::Ignore => Ok(0),
+        LinuxSignalDisposition::Terminate => {
+            if process_manager().terminate_process(target.tgid) {
+                Ok(0)
+            } else {
+                Err(SysError::ESRCH)
+            }
+        }
+        LinuxSignalDisposition::Handled => {
+            let record = make_record()?;
+            let target = linux_task::queue_task_signal(tgid, tid, record)?;
+            interrupt_linux_signal_target(target);
+            Ok(0)
+        }
+    }
 }
 
 fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
@@ -2914,8 +2944,15 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
         let pending = deliverable.record;
         let signum = pending.signum;
         let action = linux_signal_action(signum);
-        if action.handler == LINUX_SIG_IGN || action.handler == LINUX_SIG_DFL {
-            continue;
+        match linux_signal_disposition(signum) {
+            LinuxSignalDisposition::Ignore => continue,
+            LinuxSignalDisposition::Terminate => {
+                if let Ok(current) = linux_task::current_task() {
+                    let _ = process_manager().terminate_process(current.tgid);
+                }
+                return false;
+            }
+            LinuxSignalDisposition::Handled => {}
         }
         let Ok(trampoline) = ensure_linux_signal_trampoline() else {
             requeue_linux_signal(deliverable);
@@ -5364,27 +5401,30 @@ pub fn sys_rt_sigqueueinfo(pid: usize, sig: usize, info: usize) -> SysResult {
     if sig == 0 {
         return Ok(0);
     }
-    if linux_signal_action(sig).handler == LINUX_SIG_IGN {
-        return Ok(0);
+    match linux_signal_disposition(sig) {
+        LinuxSignalDisposition::Ignore => Ok(0),
+        LinuxSignalDisposition::Terminate => {
+            if process_manager().terminate_process(pid) {
+                Ok(0)
+            } else {
+                Err(SysError::ESRCH)
+            }
+        }
+        LinuxSignalDisposition::Handled => {
+            let record = linux_signal_record_from_user(sig, info)?;
+            queue_process_linux_signal_and_wake(record)?;
+            Ok(0)
+        }
     }
-    let record = linux_signal_record_from_user(sig, info)?;
-    queue_process_linux_signal_and_wake(record)?;
-    Ok(0)
 }
 
 pub fn sys_rt_tgsigqueueinfo(tgid: usize, tid: usize, sig: usize, info: usize) -> SysResult {
     if !syscall_logic::linux_signal_valid(sig, LINUX_MAX_SIGNAL) {
         return Err(SysError::EINVAL);
     }
-    if sig == 0 {
-        return queue_directed_linux_signal(Some(tgid), tid, LinuxPendingSignal::EMPTY);
-    }
-    if linux_signal_action(sig).handler == LINUX_SIG_IGN {
-        return linux_task::queue_task_signal(Some(tgid), tid, LinuxPendingSignal::EMPTY)
-            .map(|_| 0);
-    }
-    let record = linux_signal_record_from_user(sig, info)?;
-    queue_directed_linux_signal(Some(tgid), tid, record)
+    queue_directed_linux_signal(Some(tgid), tid, sig, || {
+        linux_signal_record_from_user(sig, info)
+    })
 }
 
 pub fn sys_sigaltstack(ss: usize, old_ss: usize) -> SysResult {
@@ -5435,27 +5475,18 @@ pub fn sys_tkill(tid: usize, signum: usize) -> SysResult {
     if !syscall_logic::linux_signal_valid(signum, LINUX_MAX_SIGNAL) {
         return Err(SysError::EINVAL);
     }
-    if signum == 0 {
-        return queue_directed_linux_signal(None, tid, LinuxPendingSignal::EMPTY);
-    }
-    if linux_signal_action(signum).handler == LINUX_SIG_IGN {
-        return linux_task::queue_task_signal(None, tid, LinuxPendingSignal::EMPTY).map(|_| 0);
-    }
-    queue_directed_linux_signal(None, tid, LinuxPendingSignal::standard(signum))
+    queue_directed_linux_signal(None, tid, signum, || {
+        Ok(LinuxPendingSignal::standard(signum))
+    })
 }
 
 pub fn sys_tgkill(tgid: usize, tid: usize, signum: usize) -> SysResult {
     if !syscall_logic::linux_signal_valid(signum, LINUX_MAX_SIGNAL) {
         return Err(SysError::EINVAL);
     }
-    if signum == 0 {
-        return queue_directed_linux_signal(Some(tgid), tid, LinuxPendingSignal::EMPTY);
-    }
-    if linux_signal_action(signum).handler == LINUX_SIG_IGN {
-        return linux_task::queue_task_signal(Some(tgid), tid, LinuxPendingSignal::EMPTY)
-            .map(|_| 0);
-    }
-    queue_directed_linux_signal(Some(tgid), tid, LinuxPendingSignal::standard(signum))
+    queue_directed_linux_signal(Some(tgid), tid, signum, || {
+        Ok(LinuxPendingSignal::standard(signum))
+    })
 }
 
 pub fn sys_set_priority(_priority: usize) -> SysResult {
@@ -6663,19 +6694,20 @@ pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
         return Ok(0);
     }
 
-    let action = linux_signal_action(signum);
-    if action.handler == LINUX_SIG_IGN {
-        return Ok(0);
-    }
-    if action.handler == LINUX_SIG_DFL {
-        return if process_manager().terminate_process(pid as usize) {
+    match linux_signal_disposition(signum) {
+        LinuxSignalDisposition::Ignore => Ok(0),
+        LinuxSignalDisposition::Terminate => {
+            if process_manager().terminate_process(pid as usize) {
+                Ok(0)
+            } else {
+                Err(SysError::ESRCH)
+            }
+        }
+        LinuxSignalDisposition::Handled => {
+            queue_process_linux_signal_and_wake(LinuxPendingSignal::standard(signum))?;
             Ok(0)
-        } else {
-            Err(SysError::ESRCH)
-        };
+        }
     }
-    queue_process_linux_signal_and_wake(LinuxPendingSignal::standard(signum))?;
-    Ok(0)
 }
 
 pub fn sys_set_tid_address(_tidptr: usize) -> SysResult {

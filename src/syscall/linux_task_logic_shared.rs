@@ -239,6 +239,25 @@ impl LinuxPendingSignal {
     }
 }
 
+pub(crate) fn lowest_linux_pending_index(
+    pending: &[LinuxPendingSignal],
+    mut eligible: impl FnMut(LinuxPendingSignal) -> bool,
+) -> Option<usize> {
+    let mut selected: Option<usize> = None;
+    for (index, record) in pending.iter().copied().enumerate() {
+        if !eligible(record) {
+            continue;
+        }
+        if selected
+            .map(|selected_index| record.signum < pending[selected_index].signum)
+            .unwrap_or(true)
+        {
+            selected = Some(index);
+        }
+    }
+    selected
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxSignalStack {
@@ -330,26 +349,24 @@ impl LinuxTaskSignalState {
     }
 
     pub(crate) fn take_unblocked(&mut self) -> Option<LinuxPendingSignal> {
-        for index in 0..self.realtime_len {
-            let record = self.realtime_pending[index];
-            if self.mask & linux_signal_bit(record.signum) != 0 {
-                continue;
-            }
-            for shifted in index..self.realtime_len - 1 {
-                self.realtime_pending[shifted] = self.realtime_pending[shifted + 1];
-            }
-            self.realtime_len -= 1;
-            self.realtime_pending[self.realtime_len] = LinuxPendingSignal::EMPTY;
-            return Some(record);
+        let deliverable = self.standard_pending & !self.mask;
+        if deliverable != 0 {
+            let signum = deliverable.trailing_zeros() as usize + 1;
+            self.standard_pending &= !linux_signal_bit(signum);
+            return Some(LinuxPendingSignal::standard(signum));
         }
 
-        let deliverable = self.standard_pending & !self.mask;
-        if deliverable == 0 {
-            return None;
+        let index = lowest_linux_pending_index(
+            &self.realtime_pending[..self.realtime_len],
+            |record| self.mask & linux_signal_bit(record.signum) == 0,
+        )?;
+        let record = self.realtime_pending[index];
+        for shifted in index..self.realtime_len - 1 {
+            self.realtime_pending[shifted] = self.realtime_pending[shifted + 1];
         }
-        let signum = deliverable.trailing_zeros() as usize + 1;
-        self.standard_pending &= !linux_signal_bit(signum);
-        Some(LinuxPendingSignal::standard(signum))
+        self.realtime_len -= 1;
+        self.realtime_pending[self.realtime_len] = LinuxPendingSignal::EMPTY;
+        Some(record)
     }
 
     pub(crate) fn requeue_front(

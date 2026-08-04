@@ -772,7 +772,7 @@ mod linux_task_logic {
     }
 
     #[test]
-    fn standard_signals_coalesce_and_realtime_signals_remain_fifo_and_bounded() {
+    fn standard_signals_coalesce_and_realtime_signals_are_ordered_and_bounded() {
         let (mut tasks, first, _) = three_live_tasks();
         let state = tasks.signal_state_mut(first.tid, 8).unwrap();
 
@@ -789,15 +789,41 @@ mod linux_task_logic {
             state.queue(signal_record(34, 0xff)),
             Err(LinuxSignalRouteError::QueueFull)
         );
-        for marker in 0..LINUX_RT_QUEUE_LIMIT {
-            let record = state.take_unblocked().expect("queued realtime signal");
-            assert_eq!(record.signum, 34 + marker % 2);
-            assert_eq!(record.info, [marker as u8; LINUX_SIGNAL_INFO_BYTES]);
-        }
         let standard = state.take_unblocked().expect("coalesced standard signal");
         assert_eq!(standard.signum, 10);
         assert!(!standard.has_info);
+        for signum_offset in 0..2 {
+            for marker in (signum_offset..LINUX_RT_QUEUE_LIMIT).step_by(2) {
+            let record = state.take_unblocked().expect("queued realtime signal");
+                assert_eq!(record.signum, 34 + signum_offset);
+            assert_eq!(record.info, [marker as u8; LINUX_SIGNAL_INFO_BYTES]);
+            }
+        }
         assert!(state.take_unblocked().is_none());
+    }
+
+    #[test]
+    fn pending_selection_prefers_standard_signals_over_realtime_signals() {
+        let (mut tasks, first, _) = three_live_tasks();
+        let state = tasks.signal_state_mut(first.tid, 8).unwrap();
+        state.queue(signal_record(34, 0x34)).unwrap();
+        state.queue(signal_record(10, 0x10)).unwrap();
+
+        assert_eq!(state.take_unblocked().unwrap().signum, 10);
+        assert_eq!(state.take_unblocked().unwrap().signum, 34);
+    }
+
+    #[test]
+    fn realtime_selection_prefers_lowest_signum_and_fifo_within_equal_signums() {
+        let (mut tasks, first, _) = three_live_tasks();
+        let state = tasks.signal_state_mut(first.tid, 8).unwrap();
+        state.queue(signal_record(36, 0x11)).unwrap();
+        state.queue(signal_record(34, 0x22)).unwrap();
+        state.queue(signal_record(36, 0x33)).unwrap();
+
+        assert_eq!(state.take_unblocked().unwrap(), signal_record(34, 0x22));
+        assert_eq!(state.take_unblocked().unwrap(), signal_record(36, 0x11));
+        assert_eq!(state.take_unblocked().unwrap(), signal_record(36, 0x33));
     }
 
     #[test]
@@ -935,8 +961,8 @@ mod linux_task_logic {
         );
 
         state.mask = 0;
-        assert_eq!(state.take_unblocked().unwrap().signum, blocked);
         assert_eq!(state.take_unblocked().unwrap().signum, 10);
+        assert_eq!(state.take_unblocked().unwrap().signum, blocked);
         assert!(state.take_unblocked().is_none());
     }
 
