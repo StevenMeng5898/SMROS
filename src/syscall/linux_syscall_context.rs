@@ -1,6 +1,7 @@
 use crate::kernel_lowlevel::thread::{self, Aarch64ExceptionFrame};
 use crate::kernel_objects::scheduler;
 
+use super::linux_task::{LinuxRestartBlock, LinuxRestartTimeout};
 use super::{SysError, SysResult};
 
 include!("linux_syscall_context_logic_shared.rs");
@@ -35,6 +36,28 @@ pub(crate) fn with_linux_syscall_frame(
     if frame.is_null() || (frame as usize) % core::mem::align_of::<Aarch64ExceptionFrame>() != 0 {
         return Err(SysError::EINVAL);
     }
+    let frame_snapshot = unsafe { &*frame };
+    let restart = if frame_snapshot.regs[8] == 98
+        && super::linux_futex::restartable_wait_operation(frame_snapshot.regs[1] as u32)
+    {
+        return_pc
+            .checked_sub(4)
+            .map(|svc_address| LinuxRestartBlock {
+                syscall_number: frame_snapshot.regs[8],
+                arguments: [
+                    frame_snapshot.regs[0],
+                    frame_snapshot.regs[1],
+                    frame_snapshot.regs[2],
+                    frame_snapshot.regs[3],
+                    frame_snapshot.regs[4],
+                    frame_snapshot.regs[5],
+                ],
+                svc_address,
+                timeout: LinuxRestartTimeout::Unset,
+            })
+    } else {
+        None
+    };
     let owner = scheduler::scheduler().current().0;
     if !FRAME_OWNERS.install(owner, frame as usize, return_pc as usize, pstate as usize) {
         return Err(SysError::EINVAL);
@@ -44,7 +67,14 @@ pub(crate) fn with_linux_syscall_frame(
         owner,
         frame: frame as usize,
     };
-    dispatch()
+    let restart_installed = restart
+        .map(|restart| super::linux_task::install_current_restart_block(restart).unwrap_or(false))
+        .unwrap_or(false);
+    let result = dispatch();
+    if restart_installed && result != Err(SysError::EINTR) {
+        let _ = super::linux_task::clear_current_restart_block();
+    }
+    result
 }
 
 pub(crate) fn current() -> Option<LinuxSyscallFrameRef> {

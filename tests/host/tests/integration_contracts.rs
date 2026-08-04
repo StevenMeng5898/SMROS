@@ -2602,15 +2602,15 @@ fn linux_signal_state_is_owned_by_each_live_task() {
     let build_record = directed
         .find("make_record()?")
         .expect("lazy queued record construction");
-    let queue_record = directed[build_record..]
-        .find("linux_task::queue_task_signal(tgid, tid, record)")
-        .expect("directed pending queue")
+    let route_record = directed[build_record..]
+        .find("linux_task::route_signal_and_complete_wait(")
+        .expect("directed pending queue or wait completion")
         + build_record;
     let interrupt = directed
         .find("interrupt_linux_signal_target(")
         .expect("blocked target interruption");
     assert!(route < disposition && disposition < ignore && ignore < build_record);
-    assert!(build_record < queue_record && queue_record < interrupt);
+    assert!(build_record < route_record && route_record < interrupt);
     assert!(directed.contains("LinuxSignalDisposition::Terminate"));
     assert!(directed.contains("LinuxSignalDisposition::Handled"));
     assert!(!directed.contains("terminate_process("));
@@ -2699,6 +2699,157 @@ fn linux_signal_state_is_owned_by_each_live_task() {
     assert!(timer.contains("linux_signal_disposition(LINUX_SIGALRM)"));
     assert!(!timer.contains("action.handler == LINUX_SIG_DFL"));
     assert!(timer.contains("queue_process_linux_signal_and_wake("));
+}
+
+#[test]
+fn linux_signal_waits_block_and_restart_from_the_original_svc() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let task_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_task_logic_shared.rs"))
+            .expect("read Linux task logic");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+    let futex = std::fs::read_to_string(repository.join("src/syscall/linux_futex.rs"))
+        .expect("read Linux futex runtime");
+    let context = std::fs::read_to_string(repository.join("src/syscall/linux_syscall_context.rs"))
+        .expect("read Linux syscall frame context");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux signal implementation");
+    let main = std::fs::read_to_string(repository.join("src/main.rs"))
+        .expect("read timer interrupt boundary");
+
+    for owned_state in [
+        "pub(crate) struct LinuxSignalWait",
+        "pub wait_mask: u64",
+        "pub deadline: Option<u64>",
+        "pub output_address: usize",
+        "pub previous_mask: Option<u64>",
+        "pub outcome: LinuxSignalWaitOutcome",
+        "pub(crate) struct LinuxRestartBlock",
+        "pub syscall_number: u64",
+        "pub arguments: [u64; 6]",
+        "pub svc_address: u64",
+        "pub timeout: LinuxRestartTimeout",
+        "pub signal_wait: Option<LinuxSignalWait>",
+        "pub restart_block: Option<LinuxRestartBlock>",
+        "pub restart: Option<LinuxRestartBlock>",
+    ] {
+        assert!(task_logic.contains(owned_state), "missing {owned_state}");
+    }
+    assert!(task_logic.contains("pub(crate) fn take_matching("));
+    assert!(task_logic.contains("pub(crate) fn expire_signal_waits("));
+    assert!(task_logic.contains("route_signal_and_complete_wait("));
+
+    let timed_start = syscall
+        .find("pub fn sys_rt_sigtimedwait(")
+        .expect("rt_sigtimedwait syscall");
+    let timed = braced_body(&syscall[timed_start..]);
+    assert!(timed.contains("linux_read_u64_user(set)?"));
+    assert!(timed.contains("LINUX_SIGNAL_INFO_BYTES"));
+    assert!(timed.contains("LinuxSignalWait::timed("));
+    assert!(timed.contains("LinuxBlockReason::SignalWait"));
+    assert!(timed.contains("scheduler::schedule();"));
+    assert!(timed.contains("LinuxSignalWaitOutcome::TimedOut => Err(SysError::EAGAIN)"));
+    assert!(timed.contains("core::ptr::copy_nonoverlapping("));
+    assert!(timed.contains("record.info.as_ptr()"));
+    assert!(timed.contains("LINUX_SIGNAL_INFO_BYTES"));
+    assert!(timed.contains("Ok(record.signum)"));
+    assert!(!timed.contains("deliver_next_linux_signal("));
+
+    let suspend_start = syscall
+        .find("pub fn sys_rt_sigsuspend(")
+        .expect("rt_sigsuspend syscall");
+    let suspend = braced_body(&syscall[suspend_start..]);
+    assert!(suspend.contains("LinuxSignalWait::suspend("));
+    assert!(suspend.contains("LinuxBlockReason::SignalSuspend"));
+    assert!(suspend.contains("scheduler::schedule();"));
+    assert!(suspend.contains("Err(SysError::EINTR)"));
+
+    for body in [timed, suspend] {
+        let mask = body.find("mask_interrupts()").expect("outer IRQ mask");
+        let install = body
+            .find("install_current_signal_wait(")
+            .expect("task wait installation");
+        let block = body
+            .find("linux_task::block_current(")
+            .expect("task block transition");
+        let scheduler_block = task
+            .find("scheduler::scheduler().block_thread(")
+            .expect("scheduler block transition");
+        let schedule = body.find("scheduler::schedule();").expect("schedule call");
+        assert!(mask < install && install < block && block < schedule);
+        assert!(scheduler_block > 0);
+    }
+
+    let directed_start = syscall
+        .find("fn queue_directed_linux_signal(")
+        .expect("directed signal routing");
+    let directed = braced_body(&syscall[directed_start..]);
+    assert!(directed.contains("mask_interrupts()"));
+    assert!(directed.contains("route_signal_and_complete_wait("));
+    assert!(directed.contains("wake_blocked("));
+    assert!(directed.contains("LinuxBlockReason::SignalWait"));
+    assert!(directed.contains("LinuxBlockReason::SignalSuspend"));
+
+    let timer_start = main
+        .find("extern \"C\" fn timer_interrupt_handler()")
+        .expect("timer interrupt handler");
+    let timer = braced_body(&main[timer_start..]);
+    let scheduler_tick = timer
+        .find("scheduler().on_timer_tick()")
+        .expect("scheduler tick");
+    let signal_tick = timer
+        .find("linux_task::on_timer_tick(")
+        .expect("signal wait expiry");
+    let futex_tick = timer
+        .find("linux_futex::on_timer_tick(")
+        .expect("futex expiry");
+    assert!(scheduler_tick < signal_tick && signal_tick < futex_tick);
+
+    let install_start = context
+        .find("pub(crate) fn with_linux_syscall_frame(")
+        .expect("syscall-frame installation");
+    let install = braced_body(&context[install_start..]);
+    assert!(install.contains("linux_futex::restartable_wait_operation("));
+    assert!(install.contains("LinuxRestartBlock"));
+    assert!(install.contains("frame_snapshot.regs[8]"));
+    for register in 0..6 {
+        assert!(
+            install.contains(&format!("frame_snapshot.regs[{register}]")),
+            "missing x{register} restart capture"
+        );
+    }
+    assert!(install.contains(".checked_sub(4)"));
+    assert!(install.contains("result != Err(SysError::EINTR)"));
+
+    let delivery_start = syscall
+        .find("fn deliver_next_linux_signal(")
+        .expect("signal delivery");
+    let delivery = braced_body(&syscall[delivery_start..]);
+    assert!(delivery.contains("const LINUX_SA_RESTART: u64 = 0x1000_0000"));
+    assert!(delivery.contains("take_restart_for_signal("));
+    assert!(delivery.contains("action.flags & LINUX_SA_RESTART != 0"));
+    assert!(delivery.contains("restart,"));
+
+    let restore_start = syscall
+        .find("fn restore_linux_signal_frame(")
+        .expect("signal frame restoration");
+    let restore = braced_body(&syscall[restore_start..]);
+    assert!(restore.contains("if let Some(restart) = frame.restart"));
+    for register in 0..6 {
+        assert!(
+            restore.contains(&format!("regs[{register}] = restart.arguments[{register}]")),
+            "missing x{register} restart restoration"
+        );
+    }
+    assert!(restore.contains("regs[8] = restart.syscall_number"));
+    assert!(restore.contains("set_exception_return_pc(restart.svc_address)"));
+
+    assert!(futex.contains("pub(crate) fn restartable_wait_operation("));
+    assert!(futex.contains("linux_task::current_restart_timeout()"));
+    assert!(futex.contains("linux_task::set_current_restart_timeout("));
+    assert!(task.contains("pub(crate) fn install_current_signal_wait("));
+    assert!(task.contains("pub(crate) fn on_timer_tick("));
 }
 
 #[test]

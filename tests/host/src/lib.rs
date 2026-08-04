@@ -762,6 +762,7 @@ mod linux_task_logic {
                     previous_mask: mask - 1,
                     user_sp: stack_pointer + 0x800,
                     previous_stack_flags: 0,
+                    restart: None,
                 }),
                 Some(0)
             );
@@ -772,6 +773,7 @@ mod linux_task_logic {
                     previous_mask: mask,
                     user_sp: stack_pointer + 0x1000,
                     previous_stack_flags: LINUX_SS_ONSTACK,
+                    restart: None,
                 }),
                 Some(1)
             );
@@ -1058,6 +1060,164 @@ mod linux_task_logic {
     }
 
     #[test]
+    fn signal_wait_dequeues_matching_pending_records_with_complete_siginfo() {
+        let (mut tasks, first, _) = three_live_tasks();
+        let state = tasks.signal_state_mut(first.tid, 8).unwrap();
+        let complete_info = LinuxPendingSignal {
+            signum: 35,
+            has_info: true,
+            info: core::array::from_fn(|index| index as u8 ^ 0x5a),
+        };
+        state.queue(signal_record(34, 0x34)).unwrap();
+        state.queue(complete_info).unwrap();
+
+        assert_eq!(
+            state.take_matching(linux_signal_bit(35)),
+            Some(complete_info)
+        );
+        assert_eq!(state.realtime_len, 1);
+        assert_eq!(state.realtime_pending[0], signal_record(34, 0x34));
+    }
+
+    #[test]
+    fn signal_wait_zero_deadlines_expire_and_report_eagain_outcomes() {
+        assert_eq!(
+            linux_signal_timespec_to_ticks_ceil(40, 0, 1, 10_000_000),
+            Some(41)
+        );
+        assert_eq!(
+            linux_signal_timespec_to_ticks_ceil(40, 0, 10_000_001, 10_000_000),
+            Some(42)
+        );
+        assert_eq!(
+            linux_signal_timespec_to_ticks_ceil(40, 0, 0, 10_000_000),
+            Some(40)
+        );
+        assert_eq!(
+            linux_signal_timespec_to_ticks_ceil(40, -1, 0, 10_000_000),
+            None
+        );
+        assert_eq!(
+            linux_signal_timespec_to_ticks_ceil(40, 0, 1_000_000_000, 10_000_000),
+            None
+        );
+        let mut state = LinuxTaskSignalState::new();
+        assert!(state.install_signal_wait(LinuxSignalWait::timed(
+            linux_signal_bit(34),
+            Some(40),
+            0x4000,
+        )));
+
+        assert!(!state.expire_signal_wait(39));
+        assert!(state.expire_signal_wait(40));
+        let completed = state
+            .take_signal_wait_outcome()
+            .expect("expired signal wait");
+        assert_eq!(completed.outcome, LinuxSignalWaitOutcome::TimedOut);
+        assert_eq!(completed.output_address, 0x4000);
+        assert!(state.signal_wait.is_none());
+    }
+
+    #[test]
+    fn directed_signals_complete_and_wake_only_matching_signal_waiters() {
+        let (mut tasks, first, second) = three_live_tasks();
+        let expected = signal_record(35, 0xa5);
+        assert!(tasks
+            .signal_state_mut(first.tid, 8)
+            .unwrap()
+            .install_signal_wait(LinuxSignalWait::timed(linux_signal_bit(35), None, 0x5000,)));
+        assert!(tasks.block(first.tid, 8, LinuxBlockReason::SignalWait));
+
+        let (target, wake_reason) = tasks
+            .route_signal_and_complete_wait(Some(LINUX_ROOT_TID), first.tid, expected)
+            .expect("directed waiter target");
+        assert_eq!(target.tid, first.tid);
+        assert_eq!(wake_reason, Some(LinuxBlockReason::SignalWait));
+        assert_eq!(
+            tasks
+                .signal_state_mut(first.tid, 8)
+                .unwrap()
+                .take_signal_wait_outcome()
+                .unwrap()
+                .signal,
+            expected
+        );
+        assert_eq!(tasks.signal_state(first.tid, 8).unwrap().pending_mask(), 0);
+        assert_eq!(
+            tasks
+                .signal_state(second.tid, second.scheduler_thread)
+                .unwrap()
+                .pending_mask(),
+            0
+        );
+    }
+
+    #[test]
+    fn sigsuspend_keeps_the_temporary_mask_until_frame_setup_then_restores_the_old_mask() {
+        let mut state = LinuxTaskSignalState::new();
+        let previous_mask = linux_signal_bit(10);
+        let temporary_mask = linux_signal_bit(12);
+        state.mask = previous_mask;
+        state.mask = temporary_mask;
+        assert!(
+            state.install_signal_wait(LinuxSignalWait::suspend(!temporary_mask, previous_mask,))
+        );
+
+        assert!(state.interrupt_signal_suspend(10));
+        let completed = state
+            .take_signal_wait_outcome()
+            .expect("interrupted sigsuspend");
+        assert_eq!(completed.outcome, LinuxSignalWaitOutcome::Interrupted);
+        assert_eq!(state.mask, temporary_mask);
+        assert_eq!(state.take_suspend_restore_mask(), Some(previous_mask));
+        assert_eq!(state.take_suspend_restore_mask(), None);
+    }
+
+    #[test]
+    fn restart_blocks_preserve_original_futex_inputs_and_attach_only_for_sa_restart() {
+        let restart = LinuxRestartBlock {
+            syscall_number: 98,
+            arguments: [0x10, 0x20, 0x30, 0x40, 0x50, 0x60],
+            svc_address: 0x7ffc,
+            timeout: LinuxRestartTimeout::Unset,
+        };
+        let mut state = LinuxTaskSignalState::new();
+
+        assert!(state.install_restart_block(restart));
+        assert_eq!(state.take_restart_for_signal(false), None);
+        assert!(state.restart_block.is_none());
+
+        assert!(state.install_restart_block(restart));
+        let deadline = LinuxRestartTimeout::Deadline {
+            ticks: 91,
+            realtime: false,
+        };
+        assert!(state.set_restart_timeout(deadline));
+        let attached = state.take_restart_for_signal(true);
+        assert_eq!(attached.map(|block| block.timeout), Some(deadline));
+        assert!(state.restart_block.is_none());
+
+        let frame = LinuxSignalFrame {
+            regs: [0xaa; 32],
+            return_pc: 0x9000,
+            previous_mask: 0x55,
+            user_sp: 0x8000,
+            previous_stack_flags: 0,
+            restart: attached,
+        };
+        state.push_frame(frame).unwrap();
+        assert!(state.request_sigreturn());
+        assert_eq!(
+            state
+                .take_requested_frame()
+                .unwrap()
+                .restart
+                .map(|block| block.timeout),
+            Some(deadline)
+        );
+    }
+
+    #[test]
     fn signal_state_is_cleared_on_rollback_retire_and_reset() {
         let mut tasks = LinuxTaskTable::<2>::new();
         tasks.register_root(7).unwrap();
@@ -1090,6 +1250,9 @@ mod linux_task_logic {
                 && state.pending_mask() == 0
                 && state.frame_depth == 0
                 && !state.sigreturn_requested
+                && state.signal_wait.is_none()
+                && state.restart_block.is_none()
+                && state.suspend_restore_mask.is_none()
                 && state.alt_stack == LinuxSignalStack::DISABLED
         }));
     }
@@ -1115,6 +1278,7 @@ mod linux_task_logic {
                 previous_mask: 0x11,
                 user_sp: 0x5000,
                 previous_stack_flags: 0,
+                restart: None,
             })
             .unwrap();
         assert!(parent.request_sigreturn());

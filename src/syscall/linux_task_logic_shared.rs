@@ -4,6 +4,12 @@ macro_rules! smros_linux_root_tid_body {
     }};
 }
 
+macro_rules! smros_linux_max_signal_body {
+    () => {{
+        64usize
+    }};
+}
+
 pub(crate) const LINUX_ROOT_TID: usize = smros_linux_root_tid_body!();
 pub(crate) const LINUX_MAX_TID: usize = i32::MAX as usize;
 
@@ -205,7 +211,7 @@ impl LinuxTaskCore {
     };
 }
 
-pub(crate) const LINUX_MAX_SIGNAL: usize = 64;
+pub(crate) const LINUX_MAX_SIGNAL: usize = smros_linux_max_signal_body!();
 pub(crate) const LINUX_REALTIME_SIGNAL_MIN: usize = 32;
 pub(crate) const LINUX_SIGNAL_INFO_BYTES: usize = 128;
 pub(crate) const LINUX_RT_QUEUE_LIMIT: usize = 64;
@@ -240,10 +246,7 @@ pub(crate) enum LinuxSignalDisposition {
 const LINUX_DEFAULT_SIGNAL_HANDLER: u64 = 0;
 const LINUX_IGNORE_SIGNAL_HANDLER: u64 = 1;
 
-pub(crate) fn linux_signal_disposition(
-    handler: u64,
-    signum: usize,
-) -> LinuxSignalDisposition {
+pub(crate) fn linux_signal_disposition(handler: u64, signum: usize) -> LinuxSignalDisposition {
     match handler {
         LINUX_IGNORE_SIGNAL_HANDLER => LinuxSignalDisposition::Ignore,
         LINUX_DEFAULT_SIGNAL_HANDLER => match signum {
@@ -274,6 +277,90 @@ impl LinuxPendingSignal {
             ..Self::EMPTY
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxSignalWaitOutcome {
+    Waiting,
+    Signal,
+    TimedOut,
+    Interrupted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxSignalWait {
+    pub wait_mask: u64,
+    pub deadline: Option<u64>,
+    pub output_address: usize,
+    pub previous_mask: Option<u64>,
+    pub outcome: LinuxSignalWaitOutcome,
+    pub signal: LinuxPendingSignal,
+}
+
+impl LinuxSignalWait {
+    pub(crate) const fn timed(
+        wait_mask: u64,
+        deadline: Option<u64>,
+        output_address: usize,
+    ) -> Self {
+        Self {
+            wait_mask,
+            deadline,
+            output_address,
+            previous_mask: None,
+            outcome: LinuxSignalWaitOutcome::Waiting,
+            signal: LinuxPendingSignal::EMPTY,
+        }
+    }
+
+    pub(crate) const fn suspend(wait_mask: u64, previous_mask: u64) -> Self {
+        Self {
+            wait_mask,
+            deadline: None,
+            output_address: 0,
+            previous_mask: Some(previous_mask),
+            outcome: LinuxSignalWaitOutcome::Waiting,
+            signal: LinuxPendingSignal::EMPTY,
+        }
+    }
+
+    pub(crate) fn accepts(&self, signum: usize) -> bool {
+        self.outcome == LinuxSignalWaitOutcome::Waiting
+            && self.wait_mask & linux_signal_bit(signum) != 0
+    }
+}
+
+pub(crate) fn linux_signal_timespec_to_ticks_ceil(
+    now: u64,
+    seconds: i64,
+    nanoseconds: i64,
+    tick_nanoseconds: u64,
+) -> Option<u64> {
+    if seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds) || tick_nanoseconds == 0 {
+        return None;
+    }
+    let total_nanoseconds = (seconds as u64)
+        .checked_mul(1_000_000_000)?
+        .checked_add(nanoseconds as u64)?;
+    let ticks = total_nanoseconds
+        .checked_add(tick_nanoseconds - 1)?
+        .checked_div(tick_nanoseconds)?;
+    now.checked_add(ticks)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxRestartTimeout {
+    Unset,
+    Infinite,
+    Deadline { ticks: u64, realtime: bool },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxRestartBlock {
+    pub syscall_number: u64,
+    pub arguments: [u64; 6],
+    pub svc_address: u64,
+    pub timeout: LinuxRestartTimeout,
 }
 
 pub(crate) fn lowest_linux_pending_index(
@@ -320,6 +407,7 @@ pub(crate) struct LinuxSignalFrame {
     pub previous_mask: u64,
     pub user_sp: u64,
     pub previous_stack_flags: u64,
+    pub restart: Option<LinuxRestartBlock>,
 }
 
 impl LinuxSignalFrame {
@@ -329,6 +417,7 @@ impl LinuxSignalFrame {
         previous_mask: 0,
         user_sp: 0,
         previous_stack_flags: LINUX_SS_DISABLE,
+        restart: None,
     };
 }
 
@@ -342,6 +431,9 @@ pub(crate) struct LinuxTaskSignalState {
     pub frames: [LinuxSignalFrame; LINUX_SIGNAL_FRAME_LIMIT],
     pub frame_depth: usize,
     pub sigreturn_requested: bool,
+    pub signal_wait: Option<LinuxSignalWait>,
+    pub restart_block: Option<LinuxRestartBlock>,
+    pub suspend_restore_mask: Option<u64>,
 }
 
 impl LinuxTaskSignalState {
@@ -355,6 +447,9 @@ impl LinuxTaskSignalState {
             frames: [LinuxSignalFrame::EMPTY; LINUX_SIGNAL_FRAME_LIMIT],
             frame_depth: 0,
             sigreturn_requested: false,
+            signal_wait: None,
+            restart_block: None,
+            suspend_restore_mask: None,
         }
     }
 
@@ -393,10 +488,10 @@ impl LinuxTaskSignalState {
             return Some(LinuxPendingSignal::standard(signum));
         }
 
-        let index = lowest_linux_pending_index(
-            &self.realtime_pending[..self.realtime_len],
-            |record| self.mask & linux_signal_bit(record.signum) == 0,
-        )?;
+        let index =
+            lowest_linux_pending_index(&self.realtime_pending[..self.realtime_len], |record| {
+                self.mask & linux_signal_bit(record.signum) == 0
+            })?;
         let record = self.realtime_pending[index];
         for shifted in index..self.realtime_len - 1 {
             self.realtime_pending[shifted] = self.realtime_pending[shifted + 1];
@@ -404,6 +499,156 @@ impl LinuxTaskSignalState {
         self.realtime_len -= 1;
         self.realtime_pending[self.realtime_len] = LinuxPendingSignal::EMPTY;
         Some(record)
+    }
+
+    pub(crate) fn matching_signum(&self, wait_mask: u64) -> Option<usize> {
+        let standard = self.standard_pending & wait_mask;
+        if standard != 0 {
+            return Some(standard.trailing_zeros() as usize + 1);
+        }
+        lowest_linux_pending_index(&self.realtime_pending[..self.realtime_len], |record| {
+            wait_mask & linux_signal_bit(record.signum) != 0
+        })
+        .map(|index| self.realtime_pending[index].signum)
+    }
+
+    pub(crate) fn take_matching(&mut self, wait_mask: u64) -> Option<LinuxPendingSignal> {
+        let standard = self.standard_pending & wait_mask;
+        if standard != 0 {
+            let signum = standard.trailing_zeros() as usize + 1;
+            self.standard_pending &= !linux_signal_bit(signum);
+            return Some(LinuxPendingSignal::standard(signum));
+        }
+        let index =
+            lowest_linux_pending_index(&self.realtime_pending[..self.realtime_len], |record| {
+                wait_mask & linux_signal_bit(record.signum) != 0
+            })?;
+        let record = self.realtime_pending[index];
+        for shifted in index..self.realtime_len - 1 {
+            self.realtime_pending[shifted] = self.realtime_pending[shifted + 1];
+        }
+        self.realtime_len -= 1;
+        self.realtime_pending[self.realtime_len] = LinuxPendingSignal::EMPTY;
+        Some(record)
+    }
+
+    pub(crate) fn install_signal_wait(&mut self, wait: LinuxSignalWait) -> bool {
+        if wait.outcome != LinuxSignalWaitOutcome::Waiting || self.signal_wait.is_some() {
+            return false;
+        }
+        self.signal_wait = Some(wait);
+        true
+    }
+
+    pub(crate) fn signal_wait_accepts(&self, signum: usize) -> bool {
+        self.signal_wait
+            .as_ref()
+            .map(|wait| wait.accepts(signum))
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn complete_signal_wait(&mut self, record: LinuxPendingSignal) -> bool {
+        let Some(wait) = self.signal_wait.as_mut() else {
+            return false;
+        };
+        if wait.previous_mask.is_some() || !wait.accepts(record.signum) {
+            return false;
+        }
+        wait.signal = record;
+        wait.outcome = LinuxSignalWaitOutcome::Signal;
+        true
+    }
+
+    pub(crate) fn interrupt_signal_suspend(&mut self, signum: usize) -> bool {
+        let Some(wait) = self.signal_wait.as_mut() else {
+            return false;
+        };
+        if wait.previous_mask.is_none() || !wait.accepts(signum) {
+            return false;
+        }
+        wait.outcome = LinuxSignalWaitOutcome::Interrupted;
+        true
+    }
+
+    pub(crate) fn expire_signal_wait(&mut self, now: u64) -> bool {
+        let Some(wait) = self.signal_wait.as_mut() else {
+            return false;
+        };
+        if wait.previous_mask.is_some()
+            || wait.outcome != LinuxSignalWaitOutcome::Waiting
+            || !wait.deadline.is_some_and(|deadline| deadline <= now)
+        {
+            return false;
+        }
+        wait.outcome = LinuxSignalWaitOutcome::TimedOut;
+        true
+    }
+
+    pub(crate) fn take_signal_wait_outcome(&mut self) -> Option<LinuxSignalWait> {
+        if self
+            .signal_wait
+            .as_ref()
+            .map(|wait| wait.outcome == LinuxSignalWaitOutcome::Waiting)
+            .unwrap_or(true)
+        {
+            return None;
+        }
+        let wait = self.signal_wait.take()?;
+        if wait.outcome == LinuxSignalWaitOutcome::Interrupted {
+            self.suspend_restore_mask = wait.previous_mask;
+        }
+        Some(wait)
+    }
+
+    pub(crate) fn cancel_signal_wait(&mut self) -> bool {
+        let Some(wait) = self.signal_wait.take() else {
+            return false;
+        };
+        if let Some(previous_mask) = wait.previous_mask {
+            self.mask = previous_mask;
+        }
+        true
+    }
+
+    pub(crate) fn take_suspend_restore_mask(&mut self) -> Option<u64> {
+        self.suspend_restore_mask.take()
+    }
+
+    pub(crate) fn install_restart_block(&mut self, restart: LinuxRestartBlock) -> bool {
+        if let Some(current) = self.restart_block {
+            if current.syscall_number == restart.syscall_number
+                && current.arguments == restart.arguments
+                && current.svc_address == restart.svc_address
+            {
+                return true;
+            }
+        }
+        self.restart_block = Some(restart);
+        true
+    }
+
+    pub(crate) fn set_restart_timeout(&mut self, timeout: LinuxRestartTimeout) -> bool {
+        let Some(restart) = self.restart_block.as_mut() else {
+            return false;
+        };
+        restart.timeout = timeout;
+        true
+    }
+
+    pub(crate) fn restart_timeout(&self) -> Option<LinuxRestartTimeout> {
+        self.restart_block.map(|restart| restart.timeout)
+    }
+
+    pub(crate) fn clear_restart_block(&mut self) -> bool {
+        self.restart_block.take().is_some()
+    }
+
+    pub(crate) fn take_restart_for_signal(
+        &mut self,
+        restart_action: bool,
+    ) -> Option<LinuxRestartBlock> {
+        let restart = self.restart_block.take();
+        restart_action.then_some(restart).flatten()
     }
 
     pub(crate) fn requeue_front(
@@ -691,6 +936,99 @@ impl<const N: usize> LinuxTaskTable<N> {
             self.signal_states[slot].queue(record)?;
         }
         Ok(task)
+    }
+
+    pub(crate) fn route_signal_and_complete_wait(
+        &mut self,
+        tgid: Option<usize>,
+        tid: usize,
+        record: LinuxPendingSignal,
+    ) -> Result<(LinuxTaskCore, Option<LinuxBlockReason>), LinuxSignalRouteError> {
+        let slot = self
+            .tasks
+            .iter()
+            .position(|task| {
+                Self::is_live(*task)
+                    && task.tid == tid
+                    && tgid.map(|expected| task.tgid == expected).unwrap_or(true)
+            })
+            .ok_or(LinuxSignalRouteError::NoSuchTask)?;
+        let task = self.tasks[slot];
+        if record.signum == 0 {
+            return Ok((task, None));
+        }
+        let signal_state = &mut self.signal_states[slot];
+        match task.block_reason {
+            LinuxBlockReason::SignalWait if signal_state.complete_signal_wait(record) => {
+                Ok((task, Some(LinuxBlockReason::SignalWait)))
+            }
+            LinuxBlockReason::SignalSuspend if signal_state.signal_wait_accepts(record.signum) => {
+                signal_state.queue(record)?;
+                if !signal_state.interrupt_signal_suspend(record.signum) {
+                    return Ok((task, None));
+                }
+                Ok((task, Some(LinuxBlockReason::SignalSuspend)))
+            }
+            _ => {
+                signal_state.queue(record)?;
+                Ok((task, None))
+            }
+        }
+    }
+
+    pub(crate) fn signal_wait_target(&self, signum: usize) -> Option<LinuxTaskCore> {
+        self.tasks
+            .iter()
+            .zip(self.signal_states.iter())
+            .find_map(|(task, signal_state)| {
+                (Self::is_live(*task)
+                    && matches!(
+                        task.block_reason,
+                        LinuxBlockReason::SignalWait | LinuxBlockReason::SignalSuspend
+                    )
+                    && signal_state.signal_wait_accepts(signum))
+                .then_some(*task)
+            })
+    }
+
+    pub(crate) fn complete_process_signal_wait(
+        &mut self,
+        tid: usize,
+        scheduler_thread: usize,
+        record: LinuxPendingSignal,
+    ) -> Option<LinuxBlockReason> {
+        let slot = self.task_slot(tid, scheduler_thread)?;
+        let task = self.tasks[slot];
+        let signal_state = &mut self.signal_states[slot];
+        match task.block_reason {
+            LinuxBlockReason::SignalWait if signal_state.complete_signal_wait(record) => {
+                Some(LinuxBlockReason::SignalWait)
+            }
+            LinuxBlockReason::SignalSuspend
+                if signal_state.interrupt_signal_suspend(record.signum) =>
+            {
+                Some(LinuxBlockReason::SignalSuspend)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn expire_signal_waits(
+        &mut self,
+        now: u64,
+    ) -> [Option<(usize, usize, LinuxBlockReason)>; N] {
+        let mut expired = [None; N];
+        let mut expired_len = 0usize;
+        for (task, signal_state) in self.tasks.iter().zip(self.signal_states.iter_mut()) {
+            if task.state == LinuxTaskState::Blocked
+                && task.block_reason == LinuxBlockReason::SignalWait
+                && signal_state.expire_signal_wait(now)
+            {
+                expired[expired_len] = Some((task.tid, task.scheduler_thread, task.block_reason));
+                expired_len += 1;
+            }
+        }
+        expired
     }
 
     pub(crate) fn process_signal_target(&self, signum: usize) -> Option<LinuxTaskCore> {

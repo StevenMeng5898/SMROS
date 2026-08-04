@@ -2,7 +2,7 @@ use crate::kernel_lowlevel::thread;
 use crate::kernel_objects::scheduler;
 
 use super::linux_task;
-use super::linux_task::LinuxBlockReason;
+use super::linux_task::{LinuxBlockReason, LinuxRestartTimeout};
 #[cfg(target_arch = "aarch64")]
 use super::syscall::linux_user_range_readable;
 use super::syscall::{SysError, SysResult};
@@ -83,6 +83,17 @@ pub(crate) fn sys_futex(
     }
 }
 
+pub(crate) fn restartable_wait_operation(op: u32) -> bool {
+    decode_futex_op(op)
+        .map(|decoded| {
+            matches!(
+                decoded.command,
+                FutexCommand::Wait | FutexCommand::WaitBitset
+            )
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(target_arch = "aarch64")]
 fn wait(
     uaddr: usize,
@@ -109,11 +120,33 @@ fn wait(
 
     let now_monotonic = crate::kernel_lowlevel::timer::get_tick_count();
     let now_realtime = now_monotonic;
-    let deadline = match read_deadline(timeout_pointer, now_monotonic, command, realtime) {
-        Ok(deadline) => deadline,
-        Err(error) => {
-            crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
-            return Err(error);
+    let restart_timeout = linux_task::current_restart_timeout();
+    let deadline = match restart_timeout {
+        Some(LinuxRestartTimeout::Infinite) => None,
+        Some(LinuxRestartTimeout::Deadline { ticks, realtime }) => Some(FutexDeadline {
+            ticks,
+            clock: if realtime {
+                FutexClock::Realtime
+            } else {
+                FutexClock::Monotonic
+            },
+        }),
+        Some(LinuxRestartTimeout::Unset) | None => {
+            let deadline = match read_deadline(timeout_pointer, now_monotonic, command, realtime) {
+                Ok(deadline) => deadline,
+                Err(error) => {
+                    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+                    return Err(error);
+                }
+            };
+            let restart_timeout = deadline
+                .map(|deadline| LinuxRestartTimeout::Deadline {
+                    ticks: deadline.ticks,
+                    realtime: deadline.clock == FutexClock::Realtime,
+                })
+                .unwrap_or(LinuxRestartTimeout::Infinite);
+            let _ = linux_task::set_current_restart_timeout(restart_timeout);
+            deadline
         }
     };
     if deadline.is_some_and(|deadline| match deadline.clock {

@@ -201,6 +201,63 @@ pub(crate) fn with_current_signal_state_and_slot<R>(
     })
 }
 
+pub(crate) fn current_matching_signal(
+    wait_mask: u64,
+) -> Result<Option<LinuxPendingSignal>, SysError> {
+    with_current_signal_state(|signal_state| signal_state.take_matching(wait_mask))
+}
+
+pub(crate) fn current_matching_signum(wait_mask: u64) -> Result<Option<usize>, SysError> {
+    with_current_signal_state(|signal_state| signal_state.matching_signum(wait_mask))
+}
+
+pub(crate) fn install_current_signal_wait(
+    wait: LinuxSignalWait,
+    replacement_mask: Option<u64>,
+) -> Result<bool, SysError> {
+    with_current_signal_state(|signal_state| {
+        let previous_mask = signal_state.mask;
+        if let Some(mask) = replacement_mask {
+            signal_state.mask = mask;
+        }
+        if signal_state.install_signal_wait(wait) {
+            return true;
+        }
+        signal_state.mask = previous_mask;
+        false
+    })
+}
+
+pub(crate) fn interrupt_current_signal_suspend(signum: usize) -> Result<bool, SysError> {
+    with_current_signal_state(|signal_state| signal_state.interrupt_signal_suspend(signum))
+}
+
+pub(crate) fn take_current_signal_wait_outcome() -> Result<Option<LinuxSignalWait>, SysError> {
+    with_current_signal_state(|signal_state| signal_state.take_signal_wait_outcome())
+}
+
+pub(crate) fn cancel_current_signal_wait() -> Result<bool, SysError> {
+    with_current_signal_state(|signal_state| signal_state.cancel_signal_wait())
+}
+
+pub(crate) fn install_current_restart_block(restart: LinuxRestartBlock) -> Result<bool, SysError> {
+    with_current_signal_state(|signal_state| signal_state.install_restart_block(restart))
+}
+
+pub(crate) fn set_current_restart_timeout(timeout: LinuxRestartTimeout) -> Result<bool, SysError> {
+    with_current_signal_state(|signal_state| signal_state.set_restart_timeout(timeout))
+}
+
+pub(crate) fn current_restart_timeout() -> Option<LinuxRestartTimeout> {
+    with_current_signal_state(|signal_state| signal_state.restart_timeout())
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn clear_current_restart_block() -> bool {
+    with_current_signal_state(|signal_state| signal_state.clear_restart_block()).unwrap_or(false)
+}
+
 pub(crate) fn queue_task_signal(
     tgid: Option<usize>,
     tid: usize,
@@ -215,6 +272,39 @@ pub(crate) fn queue_task_signal(
                 LinuxSignalRouteError::InvalidSignal => SysError::EINVAL,
                 LinuxSignalRouteError::QueueFull => SysError::EAGAIN,
             })
+    })
+}
+
+pub(crate) fn route_signal_and_complete_wait(
+    tgid: Option<usize>,
+    tid: usize,
+    record: LinuxPendingSignal,
+) -> Result<(LinuxTaskCore, Option<LinuxBlockReason>), SysError> {
+    with_runtime(|runtime| {
+        runtime
+            .tasks
+            .route_signal_and_complete_wait(tgid, tid, record)
+            .map_err(|error| match error {
+                LinuxSignalRouteError::NoSuchTask => SysError::ESRCH,
+                LinuxSignalRouteError::InvalidSignal => SysError::EINVAL,
+                LinuxSignalRouteError::QueueFull => SysError::EAGAIN,
+            })
+    })
+}
+
+pub(crate) fn signal_wait_target(signum: usize) -> Option<LinuxTaskCore> {
+    with_runtime(|runtime| runtime.tasks.signal_wait_target(signum))
+}
+
+pub(crate) fn complete_process_signal_wait(
+    tid: usize,
+    scheduler_thread: usize,
+    record: LinuxPendingSignal,
+) -> Option<LinuxBlockReason> {
+    with_runtime(|runtime| {
+        runtime
+            .tasks
+            .complete_process_signal_wait(tid, scheduler_thread, record)
     })
 }
 
@@ -290,6 +380,24 @@ pub(crate) fn wake_blocked(tid: usize, scheduler_thread: usize, reason: LinuxBlo
     })();
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     result
+}
+
+pub(crate) fn on_timer_tick(now: u64) {
+    #[cfg(target_arch = "aarch64")]
+    if crate::kernel_lowlevel::smp::current_cpu_id() == 0 {
+        let expired = with_runtime(|runtime| runtime.tasks.expire_signal_waits(now));
+        for identity in expired.into_iter().flatten() {
+            let (tid, scheduler_thread, reason) = identity;
+            if !wake_blocked(tid, scheduler_thread, reason) {
+                let _ = with_runtime(|runtime| {
+                    runtime
+                        .tasks
+                        .signal_state_mut(tid, scheduler_thread)
+                        .and_then(|state| state.take_signal_wait_outcome())
+                });
+            }
+        }
+    }
 }
 
 pub(crate) fn reset() {

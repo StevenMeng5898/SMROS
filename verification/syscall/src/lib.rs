@@ -62,7 +62,7 @@ pub const LINUX_SOCK_NONBLOCK: usize = 0x800;
 pub const LINUX_SOCK_CLOEXEC: usize = 0x80000;
 pub const LINUX_SOCK_ALLOWED_FLAGS: usize =
     LINUX_SOCK_TYPE_MASK | LINUX_SOCK_NONBLOCK | LINUX_SOCK_CLOEXEC;
-pub const LINUX_MAX_SIGNAL: usize = 64;
+pub const VERUS_LINUX_MAX_SIGNAL: usize = smros_linux_max_signal_body!();
 pub const LINUX_SIGSET_SIZE: usize = 8;
 pub const LINUX_MAX_SEMAPHORES: usize = 256;
 pub const LINUX_MAX_IPC_BYTES: usize = 65536;
@@ -1361,10 +1361,10 @@ proof fn syscall_zircon_logic_smoke() {
     assert(linux_clock_id_supported_spec(1));
     assert(!linux_clock_id_supported_spec(2));
 
-    assert(linux_signal_valid_spec(0, LINUX_MAX_SIGNAL as int));
-    assert(linux_signal_action_valid_spec(1, LINUX_MAX_SIGNAL as int));
-    assert(!linux_signal_action_valid_spec(0, LINUX_MAX_SIGNAL as int));
-    assert(!linux_signal_valid_spec(65, LINUX_MAX_SIGNAL as int));
+    assert(linux_signal_valid_spec(0, VERUS_LINUX_MAX_SIGNAL as int));
+    assert(linux_signal_action_valid_spec(1, VERUS_LINUX_MAX_SIGNAL as int));
+    assert(!linux_signal_action_valid_spec(0, VERUS_LINUX_MAX_SIGNAL as int));
+    assert(!linux_signal_valid_spec(65, VERUS_LINUX_MAX_SIGNAL as int));
     assert(linux_sigset_size_valid_spec(LINUX_SIGSET_SIZE as int, LINUX_SIGSET_SIZE as int));
     assert(!linux_sigset_size_valid_spec(16, LINUX_SIGSET_SIZE as int));
     assert(linux_ipc_count_valid_spec(1, LINUX_MAX_SEMAPHORES as int));
@@ -1628,9 +1628,9 @@ fn syscall_time_debug_system_exception_exec_smoke() {
 }
 
 fn syscall_linux_signal_ipc_misc_net_exec_smoke() {
-    let signal_zero_valid = linux_signal_valid(0, LINUX_MAX_SIGNAL);
-    let signal_zero_action = linux_signal_action_valid(0, LINUX_MAX_SIGNAL);
-    let signal_term_action = linux_signal_action_valid(15, LINUX_MAX_SIGNAL);
+    let signal_zero_valid = linux_signal_valid(0, VERUS_LINUX_MAX_SIGNAL);
+    let signal_zero_action = linux_signal_action_valid(0, VERUS_LINUX_MAX_SIGNAL);
+    let signal_term_action = linux_signal_action_valid(15, VERUS_LINUX_MAX_SIGNAL);
     let sigset_ok = linux_sigset_size_valid(LINUX_SIGSET_SIZE, LINUX_SIGSET_SIZE);
     let sigset_bad = linux_sigset_size_valid(LINUX_SIGSET_SIZE + 1, LINUX_SIGSET_SIZE);
     let sem_count_ok = linux_ipc_count_valid(2, LINUX_MAX_SEMAPHORES);
@@ -1701,9 +1701,9 @@ fn syscall_linux_signal_ipc_misc_net_exec_smoke() {
     let namespace_flags_bad =
         linux_namespace_flags_valid(0x8000_0000, LINUX_CONTAINER_NAMESPACE_FLAGS);
 
-    assert(signal_zero_valid == linux_signal_valid_spec(0, LINUX_MAX_SIGNAL as int));
-    assert(signal_zero_action == linux_signal_action_valid_spec(0, LINUX_MAX_SIGNAL as int));
-    assert(signal_term_action == linux_signal_action_valid_spec(15, LINUX_MAX_SIGNAL as int));
+    assert(signal_zero_valid == linux_signal_valid_spec(0, VERUS_LINUX_MAX_SIGNAL as int));
+    assert(signal_zero_action == linux_signal_action_valid_spec(0, VERUS_LINUX_MAX_SIGNAL as int));
+    assert(signal_term_action == linux_signal_action_valid_spec(15, VERUS_LINUX_MAX_SIGNAL as int));
     assert(sigset_ok == linux_sigset_size_valid_spec(
         LINUX_SIGSET_SIZE as int,
         LINUX_SIGSET_SIZE as int,
