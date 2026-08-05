@@ -3496,3 +3496,55 @@ fn hermes_test_orchestration_is_documented_and_smoke_wired() {
     assert!(smoke.contains("hermes exec reboot"));
     assert!(smoke.contains("Hermes denied forbidden command: reboot"));
 }
+
+#[test]
+fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let task_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_task_logic_shared.rs"))
+            .expect("read Linux task logic");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux syscall runtime");
+
+    assert!(task_logic.contains("sleep_waits: [Option<LinuxSleepWait>; N]"));
+    assert!(task_logic.contains("pub(crate) fn expire_sleeps("));
+    assert!(task_logic.contains("pub(crate) fn interrupt_sleep("));
+    assert!(task_logic.contains("self.signal_states[slot].mask & bit != 0"));
+    assert!(task.contains("pub(crate) fn install_current_sleep("));
+    assert!(task.contains("pub(crate) fn take_current_sleep_outcome("));
+    assert!(task.contains("pub(crate) fn cancel_current_sleep("));
+
+    let timer_start = task
+        .find("pub(crate) fn on_timer_tick(")
+        .expect("Linux task timer hook");
+    let timer = braced_body(&task[timer_start..]);
+    let expire = timer.find("expire_sleeps(now)").expect("sleep expiry");
+    let wake = timer
+        .find("wake_blocked(tid, scheduler_thread, reason)")
+        .expect("exact scheduler wake");
+    let cancel = timer
+        .find("cancel_sleep(tid, scheduler_thread)")
+        .expect("failed wake cleanup");
+    assert!(expire < wake && wake < cancel);
+
+    let interrupt_start = syscall
+        .find("fn interrupt_linux_signal_target(")
+        .expect("signal interruption helper");
+    let interrupt = braced_body(&syscall[interrupt_start..]);
+    assert!(interrupt.contains("LinuxBlockReason::Sleep"));
+    assert!(interrupt.contains("linux_task::interrupt_sleep("));
+    assert!(interrupt.contains("linux_task::wake_blocked("));
+    assert!(interrupt.contains("linux_task::cancel_sleep("));
+
+    for caller in [
+        "fn queue_process_linux_signal_and_wake(",
+        "fn queue_directed_linux_signal(",
+    ] {
+        let start = syscall.find(caller).expect("signal routing caller");
+        let body = braced_body(&syscall[start..]);
+        assert!(body.contains("interrupt_linux_signal_target("));
+        assert!(body.contains("record.signum"));
+    }
+}

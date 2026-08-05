@@ -251,6 +251,51 @@ pub(crate) fn cancel_current_signal_wait() -> Result<bool, SysError> {
     with_current_signal_state(|signal_state| signal_state.cancel_signal_wait())
 }
 
+pub(crate) fn install_current_sleep(wait: LinuxSleepWait) -> Result<bool, SysError> {
+    with_runtime(|runtime| {
+        let scheduler_thread = scheduler::scheduler().current();
+        let task = runtime
+            .tasks
+            .by_scheduler(scheduler_thread.0)
+            .ok_or(SysError::ESRCH)?;
+        Ok(runtime
+            .tasks
+            .install_sleep(task.tid, scheduler_thread.0, wait))
+    })
+}
+
+pub(crate) fn take_current_sleep_outcome() -> Result<Option<LinuxSleepWait>, SysError> {
+    with_runtime(|runtime| {
+        let scheduler_thread = scheduler::scheduler().current();
+        let task = runtime
+            .tasks
+            .by_scheduler(scheduler_thread.0)
+            .ok_or(SysError::ESRCH)?;
+        Ok(runtime
+            .tasks
+            .take_sleep_outcome(task.tid, scheduler_thread.0))
+    })
+}
+
+pub(crate) fn cancel_current_sleep() -> Result<bool, SysError> {
+    with_runtime(|runtime| {
+        let scheduler_thread = scheduler::scheduler().current();
+        let task = runtime
+            .tasks
+            .by_scheduler(scheduler_thread.0)
+            .ok_or(SysError::ESRCH)?;
+        Ok(runtime.tasks.cancel_sleep(task.tid, scheduler_thread.0))
+    })
+}
+
+pub(crate) fn cancel_sleep(tid: usize, scheduler_thread: usize) -> bool {
+    with_runtime(|runtime| runtime.tasks.cancel_sleep(tid, scheduler_thread))
+}
+
+pub(crate) fn interrupt_sleep(tid: usize, scheduler_thread: usize, signum: usize) -> bool {
+    with_runtime(|runtime| runtime.tasks.interrupt_sleep(tid, scheduler_thread, signum))
+}
+
 pub(crate) fn install_current_restart_block(restart: LinuxRestartBlock) -> Result<bool, SysError> {
     with_current_signal_state(|signal_state| signal_state.install_restart_block(restart))
 }
@@ -419,14 +464,22 @@ pub(crate) fn on_timer_tick(now: u64) {
     if crate::kernel_lowlevel::smp::current_cpu_id() == 0 {
         let expired = with_runtime(|runtime| runtime.tasks.expire_signal_waits(now));
         for identity in expired.into_iter().flatten() {
-            let (tid, scheduler_thread, reason) = identity;
-            if !wake_blocked(tid, scheduler_thread, reason) {
+            let (signal_tid, signal_scheduler_thread, signal_reason) = identity;
+            if !wake_blocked(signal_tid, signal_scheduler_thread, signal_reason) {
                 let _ = with_runtime(|runtime| {
                     runtime
                         .tasks
-                        .signal_state_mut(tid, scheduler_thread)
+                        .signal_state_mut(signal_tid, signal_scheduler_thread)
                         .and_then(|state| state.take_signal_wait_outcome())
                 });
+            }
+        }
+
+        let expired_sleeps = with_runtime(|runtime| runtime.tasks.expire_sleeps(now));
+        for identity in expired_sleeps.into_iter().flatten() {
+            let (tid, scheduler_thread, reason) = identity;
+            if !wake_blocked(tid, scheduler_thread, reason) {
+                let _ = cancel_sleep(tid, scheduler_thread);
             }
         }
     }

@@ -2888,11 +2888,26 @@ fn commit_linux_signal(deliverable: LinuxDeliverableSignal) -> Result<(), SysErr
     }
 }
 
-fn interrupt_linux_signal_target(target: linux_task::LinuxTaskCore) {
-    if target.state == linux_task::LinuxTaskState::Blocked
-        && target.block_reason == linux_task::LinuxBlockReason::Futex
-    {
-        let _ = linux_futex::interrupt_task(target.tid, target.scheduler_thread);
+fn interrupt_linux_signal_target(target: linux_task::LinuxTaskCore, signum: usize) {
+    if target.state != linux_task::LinuxTaskState::Blocked {
+        return;
+    }
+    match target.block_reason {
+        linux_task::LinuxBlockReason::Futex => {
+            let _ = linux_futex::interrupt_task(target.tid, target.scheduler_thread);
+        }
+        linux_task::LinuxBlockReason::Sleep => {
+            if linux_task::interrupt_sleep(target.tid, target.scheduler_thread, signum)
+                && !linux_task::wake_blocked(
+                    target.tid,
+                    target.scheduler_thread,
+                    LinuxBlockReason::Sleep,
+                )
+            {
+                let _ = linux_task::cancel_sleep(target.tid, target.scheduler_thread);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2950,7 +2965,7 @@ fn queue_process_linux_signal_and_wake(record: LinuxPendingSignal) -> Result<(),
 
         queue_process_linux_signal(record)?;
         if let Some(target) = linux_task::process_signal_target(record.signum) {
-            interrupt_linux_signal_target(target);
+            interrupt_linux_signal_target(target, record.signum);
         }
         Ok(())
     })();
@@ -2982,7 +2997,7 @@ fn queue_directed_linux_signal(
                 {
                     let _ = linux_task::wake_blocked(target.tid, target.scheduler_thread, reason);
                 } else {
-                    interrupt_linux_signal_target(target);
+                    interrupt_linux_signal_target(target, record.signum);
                 }
                 Ok(0)
             }
