@@ -3580,10 +3580,14 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
     assert!(syscall.contains("const LINUX_TIMER_ABSTIME: usize = 1"));
     assert!(syscall.contains("pub fn sys_nanosleep_linux(req: usize)"));
     assert!(syscall.contains("fn sys_nanosleep_linux_with_rem(req: usize, rem: usize)"));
+    let dispatch_start = syscall
+        .find("pub fn dispatch_linux_syscall(")
+        .expect("Linux syscall dispatcher");
+    let dispatch = braced_body(&syscall[dispatch_start..]);
     assert!(
-        syscall.contains("ARM64_SYS_NANOSLEEP => sys_nanosleep_linux_with_rem(args[0], args[1])")
+        dispatch.contains("ARM64_SYS_NANOSLEEP => sys_nanosleep_linux_with_rem(args[0], args[1])")
     );
-    assert!(syscall.contains(
+    assert!(dispatch.contains(
         "ARM64_SYS_CLOCK_NANOSLEEP => sys_clock_nanosleep(args[0], args[1], args[2], args[3])"
     ));
 
