@@ -3505,6 +3505,8 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
             .expect("read Linux task logic");
     let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
         .expect("read Linux task runtime");
+    let syscall_logic = std::fs::read_to_string(repository.join("src/syscall/syscall_logic.rs"))
+        .expect("read Linux syscall logic");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
         .expect("read Linux syscall runtime");
 
@@ -3578,16 +3580,18 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
     assert!(syscall.contains("const LINUX_TIMER_ABSTIME: usize = 1"));
     assert!(syscall.contains("pub fn sys_nanosleep_linux(req: usize)"));
     assert!(syscall.contains("fn sys_nanosleep_linux_with_rem(req: usize, rem: usize)"));
-    assert!(syscall.contains("linux_task::install_current_sleep("));
-    assert!(syscall.contains("linux_task::block_current(LinuxBlockReason::Sleep)"));
-    assert!(syscall.contains("scheduler::schedule();"));
-    assert!(syscall.contains("LinuxSleepOutcome::Completed => Ok(0)"));
-    assert!(syscall.contains("LinuxSleepOutcome::Interrupted"));
-    assert!(syscall.contains("Err(SysError::EINTR)"));
-    assert!(syscall.contains("linux_sleep_remaining_timespec("));
     assert!(
         syscall.contains("ARM64_SYS_NANOSLEEP => sys_nanosleep_linux_with_rem(args[0], args[1])")
     );
+    assert!(syscall.contains(
+        "ARM64_SYS_CLOCK_NANOSLEEP => sys_clock_nanosleep(args[0], args[1], args[2], args[3])"
+    ));
+
+    let flags_start = syscall_logic
+        .find("fn linux_clock_nanosleep_flags_valid(")
+        .expect("clock nanosleep flag wrapper");
+    let flags = braced_body(&syscall_logic[flags_start..]);
+    assert!(flags.contains("smros_linux_clock_nanosleep_flags_valid_body!"));
 
     let sleep_until_start = syscall
         .find("fn linux_sleep_until(")
@@ -3607,7 +3611,30 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
         .find("scheduler::schedule();")
         .expect("schedule");
     assert!(validate < mask && mask < install && install < block && block < schedule);
+    assert!(sleep_until.contains("LinuxSleepOutcome::Completed => Ok(0)"));
+    assert!(sleep_until.contains("LinuxSleepOutcome::Interrupted"));
+    assert!(sleep_until.contains("linux_write_sleep_remaining(rem, wait)?"));
+    assert!(sleep_until.contains("Err(SysError::EINTR)"));
     assert!(sleep_until.contains("let _ = linux_task::cancel_current_sleep();"));
+
+    let write_remaining_start = syscall
+        .find("fn linux_write_sleep_remaining(")
+        .expect("remaining time copyout helper");
+    let write_remaining = braced_body(&syscall[write_remaining_start..]);
+    assert!(write_remaining.contains("linux_sleep_remaining_timespec("));
+
+    let clock_nanosleep_start = syscall
+        .find("pub fn sys_clock_nanosleep(")
+        .expect("Linux clock nanosleep syscall");
+    let clock_nanosleep = braced_body(&syscall[clock_nanosleep_start..]);
+    assert!(clock_nanosleep.contains("syscall_logic::linux_clock_id_supported(clockid)"));
+    assert!(
+        clock_nanosleep.contains("linux_clock_nanosleep_flags_valid(flags, LINUX_TIMER_ABSTIME)")
+    );
+    assert!(clock_nanosleep.contains("let absolute = flags & LINUX_TIMER_ABSTIME != 0"));
+    assert!(clock_nanosleep.contains("linux_sleep_absolute_deadline_ticks("));
+    assert!(clock_nanosleep.contains("linux_sleep_relative_deadline_ticks("));
+    assert!(clock_nanosleep.contains("linux_sleep_until(deadline, rem, absolute)"));
 
     let nanosleep_start = syscall
         .find("pub fn sys_nanosleep_linux(")

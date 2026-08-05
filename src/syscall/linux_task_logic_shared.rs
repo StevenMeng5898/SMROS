@@ -786,9 +786,10 @@ pub(crate) fn linux_sleep_remaining_timespec(
     if tick_nanoseconds == 0 {
         return None;
     }
-    let remaining_nanoseconds = deadline.saturating_sub(now).checked_mul(tick_nanoseconds)?;
-    let seconds = i64::try_from(remaining_nanoseconds / 1_000_000_000).ok()?;
-    let nanoseconds = i64::try_from(remaining_nanoseconds % 1_000_000_000).ok()?;
+    let remaining_nanoseconds =
+        u128::from(deadline.saturating_sub(now)) * u128::from(tick_nanoseconds);
+    let seconds = i64::try_from(remaining_nanoseconds / 1_000_000_000u128).ok()?;
+    let nanoseconds = i64::try_from(remaining_nanoseconds % 1_000_000_000u128).ok()?;
     Some((seconds, nanoseconds))
 }
 

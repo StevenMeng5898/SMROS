@@ -1276,6 +1276,10 @@ mod linux_task_logic {
             Some((1, 0))
         );
         assert_eq!(
+            linux_sleep_remaining_timespec(1_844_674_407_372, 0, TICK_NANOS),
+            Some((18_446_744_073, 720_000_000))
+        );
+        assert_eq!(
             linux_sleep_remaining_timespec(41, 141, TICK_NANOS),
             Some((0, 0))
         );
