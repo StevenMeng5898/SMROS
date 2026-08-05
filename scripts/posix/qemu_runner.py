@@ -2423,6 +2423,13 @@ class QemuController:
             "link", "not-linked"
         )
 
+    def _prepare_next_prompt(self, transport: _Transport, raw) -> bool:
+        try:
+            transport.write(b"\n")
+        except OSError:
+            return False
+        return self._wait_for_prompt(transport, raw)
+
     def _guest_attempt(
         self,
         guest: SerialAttempt,
@@ -2943,7 +2950,7 @@ class QemuController:
                                 if transport is None:
                                     transport = self._launch_ready(raw)
                                     prompt_ready = True
-                                elif self._wait_for_prompt(transport, raw):
+                                elif self._prepare_next_prompt(transport, raw):
                                     prompt_ready = True
                                 else:
                                     self._stop(transport)

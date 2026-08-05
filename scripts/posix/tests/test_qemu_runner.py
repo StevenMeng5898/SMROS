@@ -493,10 +493,11 @@ class QemuControllerTests(unittest.TestCase):
             transport.writes,
             [
                 f"posixtest test {self.one.test_id}\n".encode(),
+                b"\n",
                 f"posixtest test {self.two.test_id}\n".encode(),
             ],
         )
-        self.assertEqual(transport.reads_at_write, [2, 5])
+        self.assertEqual(transport.reads_at_write, [2, 4, 5])
         self.assertEqual(
             [attempt.status for attempt in result.attempts], ["pass", "pass"]
         )
@@ -1424,7 +1425,173 @@ class QemuControllerTests(unittest.TestCase):
         self.assertEqual(
             [attempt.status for attempt in result.attempts], ["pass", "pass"]
         )
-        self.assertEqual(len(transport.writes), 2)
+        self.assertEqual(
+            transport.writes,
+            [
+                f"posixtest test {self.one.test_id}\n".encode(),
+                b"\n",
+                f"posixtest test {self.two.test_id}\n".encode(),
+            ],
+        )
+
+    def test_prompt_before_suite_end_requires_fresh_probe_prompt(self) -> None:
+        transport = FakeTransport(
+            self.clock,
+            [
+                PROMPT,
+                _start_events(self.one),
+                b"smros:/",
+                b"> Test PASSED\n\n",
+                _end_events(self.one),
+                PROMPT + b"\n",
+                _start_events(self.two),
+                _end_events(self.two),
+            ],
+        )
+        controller, _factory = self._controller([transport])
+
+        result = controller.run()
+
+        self.assertEqual(
+            [attempt.status for attempt in result.attempts], ["pass", "pass"]
+        )
+        self.assertEqual(
+            transport.writes,
+            [
+                f"posixtest test {self.one.test_id}\n".encode(),
+                b"\n",
+                f"posixtest test {self.two.test_id}\n".encode(),
+            ],
+        )
+
+    def test_prompt_before_test_start_requires_fresh_probe_prompt(self) -> None:
+        suite_start, test_start = _start_events(self.one).splitlines(keepends=True)
+        transport = FakeTransport(
+            self.clock,
+            [
+                PROMPT,
+                suite_start + PROMPT + b"\n" + test_start,
+                _end_events(self.one),
+                PROMPT + b"\n",
+                _start_events(self.two),
+                _end_events(self.two),
+            ],
+        )
+        controller, _factory = self._controller([transport])
+
+        result = controller.run()
+
+        self.assertEqual(
+            [attempt.status for attempt in result.attempts], ["pass", "pass"]
+        )
+        self.assertEqual(
+            transport.writes,
+            [
+                f"posixtest test {self.one.test_id}\n".encode(),
+                b"\n",
+                f"posixtest test {self.two.test_id}\n".encode(),
+            ],
+        )
+
+    def test_prompt_like_test_output_requires_fresh_probe_prompt(self) -> None:
+        transport = FakeTransport(
+            self.clock,
+            [
+                PROMPT,
+                _start_events(self.one),
+                b"test output contains smros:/> but is not a shell prompt\n",
+                _end_events(self.one),
+                PROMPT + b"\n",
+                _start_events(self.two),
+                _end_events(self.two),
+            ],
+        )
+        controller, _factory = self._controller([transport])
+
+        result = controller.run()
+
+        self.assertEqual(
+            [attempt.status for attempt in result.attempts], ["pass", "pass"]
+        )
+        self.assertEqual(
+            transport.writes,
+            [
+                f"posixtest test {self.one.test_id}\n".encode(),
+                b"\n",
+                f"posixtest test {self.two.test_id}\n".encode(),
+            ],
+        )
+
+    def test_post_terminal_prompt_prefix_still_requires_probe(self) -> None:
+        transport = FakeTransport(
+            self.clock,
+            [
+                PROMPT,
+                _start_events(self.one),
+                PROMPT + b"Test PASSED\n\n",
+                _end_events(self.one) + b"s",
+            ],
+        )
+        after_probe = [
+            PROMPT + b"\n",
+            _start_events(self.two),
+            _end_events(self.two),
+        ]
+        original_read = transport.read
+
+        def release_after_probe(timeout: float) -> bytes:
+            if not transport.script and b"\n" in transport.writes and after_probe:
+                transport.script.extend(after_probe)
+                after_probe.clear()
+            return original_read(timeout)
+
+        controller, _factory = self._controller([transport])
+        with mock.patch.object(transport, "read", side_effect=release_after_probe):
+            result = controller.run()
+
+        self.assertEqual(
+            [attempt.status for attempt in result.attempts], ["pass", "pass"]
+        )
+        self.assertEqual(
+            transport.writes,
+            [
+                f"posixtest test {self.one.test_id}\n".encode(),
+                b"\n",
+                f"posixtest test {self.two.test_id}\n".encode(),
+            ],
+        )
+
+    def test_prompt_probe_write_failure_restarts_without_attempt(self) -> None:
+        first = FakeTransport(
+            self.clock,
+            [PROMPT, _start_events(self.one), _end_events(self.one)],
+        )
+        second = FakeTransport(
+            self.clock,
+            [PROMPT, _start_events(self.two), _end_events(self.two)],
+        )
+        original_write = first.write
+
+        def fail_probe(data: bytes) -> None:
+            if data == b"\n":
+                raise OSError("probe write failed")
+            original_write(data)
+
+        controller, _factory = self._controller([first, second])
+        with mock.patch.object(first, "write", side_effect=fail_probe):
+            result = controller.run()
+
+        self.assertEqual(
+            [attempt.test_id for attempt in result.attempts],
+            [self.one.test_id, self.two.test_id],
+        )
+        self.assertEqual(result.restart_count, 1)
+        self.assertEqual(
+            first.writes, [f"posixtest test {self.one.test_id}\n".encode()]
+        )
+        self.assertEqual(
+            second.writes, [f"posixtest test {self.two.test_id}\n".encode()]
+        )
 
     def test_resume_skips_completed_ids_and_rejects_changed_provenance(self) -> None:
         interrupted = FakeTransport(
