@@ -168,8 +168,31 @@ pub(crate) enum LinuxTaskState {
 pub(crate) enum LinuxBlockReason {
     None,
     Futex,
+    Sleep,
     SignalWait,
     SignalSuspend,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxSleepOutcome {
+    Waiting,
+    Completed,
+    Interrupted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxSleepWait {
+    pub deadline: u64,
+    pub outcome: LinuxSleepOutcome,
+}
+
+impl LinuxSleepWait {
+    pub(crate) const fn waiting(deadline: u64) -> Self {
+        Self {
+            deadline,
+            outcome: LinuxSleepOutcome::Waiting,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -732,6 +755,45 @@ pub(crate) fn linux_signal_timespec_to_ticks_ceil(
     now.checked_add(ticks)?.checked_add(phase_guard)
 }
 
+pub(crate) fn linux_sleep_relative_deadline_ticks(
+    now: u64,
+    seconds: i64,
+    nanoseconds: i64,
+    tick_nanoseconds: u64,
+) -> Option<u64> {
+    linux_signal_timespec_to_ticks_ceil(now, seconds, nanoseconds, tick_nanoseconds)
+}
+
+pub(crate) fn linux_sleep_absolute_deadline_ticks(
+    seconds: i64,
+    nanoseconds: i64,
+    tick_nanoseconds: u64,
+) -> Option<u64> {
+    if seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds) || tick_nanoseconds == 0 {
+        return None;
+    }
+    let total_nanoseconds = (seconds as u64)
+        .checked_mul(1_000_000_000)?
+        .checked_add(nanoseconds as u64)?;
+    total_nanoseconds
+        .checked_add(tick_nanoseconds - 1)?
+        .checked_div(tick_nanoseconds)
+}
+
+pub(crate) fn linux_sleep_remaining_timespec(
+    deadline: u64,
+    now: u64,
+    tick_nanoseconds: u64,
+) -> Option<(i64, i64)> {
+    if tick_nanoseconds == 0 {
+        return None;
+    }
+    let remaining_nanoseconds = deadline.saturating_sub(now).checked_mul(tick_nanoseconds)?;
+    let seconds = i64::try_from(remaining_nanoseconds / 1_000_000_000).ok()?;
+    let nanoseconds = i64::try_from(remaining_nanoseconds % 1_000_000_000).ok()?;
+    Some((seconds, nanoseconds))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxRestartTimeout {
     Unset,
@@ -1118,6 +1180,7 @@ pub(crate) enum LinuxSignalRouteError {
 pub(crate) struct LinuxTaskTable<const N: usize> {
     tasks: [LinuxTaskCore; N],
     signal_states: [LinuxTaskSignalState; N],
+    sleep_waits: [Option<LinuxSleepWait>; N],
     clear_child_tids: [usize; N],
     next_tid: usize,
     exhausted: bool,
@@ -1128,6 +1191,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         Self {
             tasks: [LinuxTaskCore::EMPTY; N],
             signal_states: [LinuxTaskSignalState::new(); N],
+            sleep_waits: [None; N],
             clear_child_tids: [0; N],
             next_tid: LINUX_ROOT_TID + 1,
             exhausted: false,
@@ -1160,6 +1224,7 @@ impl<const N: usize> LinuxTaskTable<N> {
             block_reason: LinuxBlockReason::None,
         };
         self.signal_states[slot].reset_in_place();
+        self.sleep_waits[slot] = None;
         self.clear_child_tids[slot] = 0;
         Ok(LINUX_ROOT_TID)
     }
@@ -1197,6 +1262,7 @@ impl<const N: usize> LinuxTaskTable<N> {
             block_reason: LinuxBlockReason::None,
         };
         self.signal_states[slot].reset_in_place();
+        self.sleep_waits[slot] = None;
         self.clear_child_tids[slot] = 0;
         Some(reservation)
     }
@@ -1258,6 +1324,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         }
         *task = LinuxTaskCore::EMPTY;
         self.signal_states[reservation.slot].reset_in_place();
+        self.sleep_waits[reservation.slot] = None;
         self.clear_child_tids[reservation.slot] = 0;
         true
     }
@@ -1522,6 +1589,95 @@ impl<const N: usize> LinuxTaskTable<N> {
         expired
     }
 
+    pub(crate) fn install_sleep(
+        &mut self,
+        tid: usize,
+        scheduler_thread: usize,
+        wait: LinuxSleepWait,
+    ) -> bool {
+        let Some(slot) = self.task_slot(tid, scheduler_thread) else {
+            return false;
+        };
+        if self.sleep_waits[slot].is_some() {
+            return false;
+        }
+        self.sleep_waits[slot] = Some(wait);
+        true
+    }
+
+    pub(crate) fn take_sleep_outcome(
+        &mut self,
+        tid: usize,
+        scheduler_thread: usize,
+    ) -> Option<LinuxSleepWait> {
+        let slot = self.task_slot(tid, scheduler_thread)?;
+        match self.sleep_waits[slot] {
+            Some(wait) if wait.outcome != LinuxSleepOutcome::Waiting => {
+                self.sleep_waits[slot].take()
+            }
+            Some(_) | None => None,
+        }
+    }
+
+    pub(crate) fn cancel_sleep(&mut self, tid: usize, scheduler_thread: usize) -> bool {
+        let Some(slot) = self.task_slot(tid, scheduler_thread) else {
+            return false;
+        };
+        self.sleep_waits[slot].take().is_some()
+    }
+
+    pub(crate) fn interrupt_sleep(
+        &mut self,
+        tid: usize,
+        scheduler_thread: usize,
+        signum: usize,
+    ) -> bool {
+        let Some(slot) = self.task_slot(tid, scheduler_thread) else {
+            return false;
+        };
+        let task = self.tasks[slot];
+        let bit = linux_signal_bit(signum);
+        if task.state != LinuxTaskState::Blocked
+            || task.block_reason != LinuxBlockReason::Sleep
+            || bit == 0
+            || self.signal_states[slot].mask & bit != 0
+        {
+            return false;
+        }
+        let Some(wait) = self.sleep_waits[slot].as_mut() else {
+            return false;
+        };
+        if wait.outcome != LinuxSleepOutcome::Waiting {
+            return false;
+        }
+        wait.outcome = LinuxSleepOutcome::Interrupted;
+        true
+    }
+
+    pub(crate) fn expire_sleeps(
+        &mut self,
+        now: u64,
+    ) -> [Option<(usize, usize, LinuxBlockReason)>; N] {
+        let mut expired = [None; N];
+        let mut expired_len = 0usize;
+        for index in 0..N {
+            let task = self.tasks[index];
+            let Some(wait) = self.sleep_waits[index].as_mut() else {
+                continue;
+            };
+            if task.state == LinuxTaskState::Blocked
+                && task.block_reason == LinuxBlockReason::Sleep
+                && wait.outcome == LinuxSleepOutcome::Waiting
+                && wait.deadline <= now
+            {
+                wait.outcome = LinuxSleepOutcome::Completed;
+                expired[expired_len] = Some((task.tid, task.scheduler_thread, task.block_reason));
+                expired_len += 1;
+            }
+        }
+        expired
+    }
+
     pub(crate) fn process_signal_target(&self, signum: usize) -> Option<LinuxTaskCore> {
         let bit = linux_signal_bit(signum);
         if bit == 0 {
@@ -1604,6 +1760,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         task.state = LinuxTaskState::Exited;
         task.block_reason = LinuxBlockReason::None;
         self.signal_states[slot].reset_in_place();
+        self.sleep_waits[slot] = None;
         Some(core::mem::replace(&mut self.clear_child_tids[slot], 0))
     }
 
@@ -1636,6 +1793,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         }
         self.tasks[slot] = LinuxTaskCore::EMPTY;
         self.signal_states[slot].reset_in_place();
+        self.sleep_waits[slot] = None;
         self.clear_child_tids[slot] = 0;
         true
     }
@@ -1645,6 +1803,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         for signal_state in &mut self.signal_states {
             signal_state.reset_in_place();
         }
+        self.sleep_waits.fill(None);
         self.clear_child_tids.fill(0);
         self.next_tid = LINUX_ROOT_TID + 1;
         self.exhausted = false;

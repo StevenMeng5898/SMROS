@@ -1219,6 +1219,107 @@ mod linux_task_logic {
     }
 
     #[test]
+    fn linux_sleep_deadlines_round_up_and_remaining_time_never_goes_negative() {
+        const TICK_NANOS: u64 = 10_000_000;
+
+        assert_eq!(
+            linux_sleep_relative_deadline_ticks(40, 0, 0, TICK_NANOS),
+            Some(40)
+        );
+        assert_eq!(
+            linux_sleep_relative_deadline_ticks(40, 0, 1, TICK_NANOS),
+            Some(42)
+        );
+        assert_eq!(
+            linux_sleep_relative_deadline_ticks(40, 1, 0, TICK_NANOS),
+            Some(141)
+        );
+        assert_eq!(
+            linux_sleep_absolute_deadline_ticks(0, 1, TICK_NANOS),
+            Some(1)
+        );
+        assert_eq!(
+            linux_sleep_absolute_deadline_ticks(1, 0, TICK_NANOS),
+            Some(100)
+        );
+        assert_eq!(
+            linux_sleep_remaining_timespec(141, 41, TICK_NANOS),
+            Some((1, 0))
+        );
+        assert_eq!(
+            linux_sleep_remaining_timespec(41, 141, TICK_NANOS),
+            Some((0, 0))
+        );
+        assert_eq!(
+            linux_sleep_relative_deadline_ticks(0, -1, 0, TICK_NANOS),
+            None
+        );
+        assert_eq!(
+            linux_sleep_absolute_deadline_ticks(0, 1_000_000_000, TICK_NANOS),
+            None
+        );
+        assert_eq!(linux_sleep_remaining_timespec(1, 0, 0), None);
+    }
+
+    #[test]
+    fn linux_sleep_waits_expire_or_interrupt_once_and_reset_with_their_task() {
+        let mut tasks = LinuxTaskTable::<3>::new();
+        tasks.register_root(7).unwrap();
+        let child = tasks.reserve_child(8).unwrap();
+        assert!(tasks.publish(child));
+
+        assert!(tasks.install_sleep(child.tid, 8, LinuxSleepWait::waiting(50)));
+        assert!(!tasks.install_sleep(child.tid, 8, LinuxSleepWait::waiting(60)));
+        assert!(tasks.block(child.tid, 8, LinuxBlockReason::Sleep));
+        assert_eq!(tasks.expire_sleeps(49), [None, None, None]);
+        let expired = tasks.expire_sleeps(50);
+        assert_eq!(expired[0], Some((child.tid, 8, LinuxBlockReason::Sleep)));
+        assert!(expired[1..].iter().all(Option::is_none));
+        assert_eq!(tasks.expire_sleeps(51), [None, None, None]);
+        assert!(tasks.wake(child.tid, 8));
+        assert_eq!(
+            tasks.take_sleep_outcome(child.tid, 8),
+            Some(LinuxSleepWait {
+                deadline: 50,
+                outcome: LinuxSleepOutcome::Completed,
+            })
+        );
+        assert_eq!(tasks.take_sleep_outcome(child.tid, 8), None);
+
+        assert!(tasks.install_sleep(child.tid, 8, LinuxSleepWait::waiting(80)));
+        assert!(tasks.block(child.tid, 8, LinuxBlockReason::Sleep));
+        tasks.signal_state_mut(child.tid, 8).unwrap().mask = linux_signal_bit(6);
+        assert!(!tasks.interrupt_sleep(child.tid, 8, 6));
+        tasks.signal_state_mut(child.tid, 8).unwrap().mask = 0;
+        assert!(tasks.interrupt_sleep(child.tid, 8, 6));
+        assert!(!tasks.interrupt_sleep(child.tid, 8, 6));
+        assert!(tasks.wake(child.tid, 8));
+        assert_eq!(
+            tasks
+                .take_sleep_outcome(child.tid, 8)
+                .map(|wait| wait.outcome),
+            Some(LinuxSleepOutcome::Interrupted)
+        );
+
+        assert!(tasks.install_sleep(child.tid, 8, LinuxSleepWait::waiting(90)));
+        assert!(tasks.exit(child.tid, 8));
+        assert!(tasks.retire(child.tid, 8));
+        assert_eq!(tasks.take_sleep_outcome(child.tid, 8), None);
+        let replacement = tasks.reserve_child(9).unwrap();
+        assert!(tasks.publish(replacement));
+        assert!(!tasks.interrupt_sleep(child.tid, 8, 6));
+        assert_eq!(tasks.expire_sleeps(90), [None, None, None]);
+
+        let rollback = tasks.reserve_child(10).unwrap();
+        tasks.sleep_waits[rollback.slot] = Some(LinuxSleepWait::waiting(95));
+        assert!(tasks.rollback(rollback));
+        assert_eq!(tasks.sleep_waits[rollback.slot], None);
+
+        tasks.reset();
+        assert_eq!(tasks.expire_sleeps(u64::MAX), [None, None, None]);
+    }
+
+    #[test]
     fn signal_wait_zero_deadlines_expire_and_report_eagain_outcomes() {
         assert_eq!(
             linux_signal_timespec_to_ticks_ceil(40, 0, 1, 10_000_000),
