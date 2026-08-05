@@ -3521,13 +3521,14 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
         .expect("Linux task timer hook");
     let timer = braced_body(&task[timer_start..]);
     let expire = timer.find("expire_sleeps(now)").expect("sleep expiry");
-    let wake = timer
+    let sleep_expiry = &timer[expire..];
+    let wake = sleep_expiry
         .find("wake_blocked(tid, scheduler_thread, reason)")
         .expect("exact scheduler wake");
-    let cancel = timer
+    let cancel = sleep_expiry
         .find("cancel_sleep(tid, scheduler_thread)")
         .expect("failed wake cleanup");
-    assert!(expire < wake && wake < cancel);
+    assert!(wake < cancel);
 
     let interrupt_start = syscall
         .find("fn interrupt_linux_signal_target(")
@@ -3544,7 +3545,6 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
     ] {
         let start = syscall.find(caller).expect("signal routing caller");
         let body = braced_body(&syscall[start..]);
-        assert!(body.contains("interrupt_linux_signal_target("));
-        assert!(body.contains("record.signum"));
+        assert!(body.contains("interrupt_linux_signal_target(target, record.signum)"));
     }
 }

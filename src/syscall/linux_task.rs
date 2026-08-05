@@ -464,12 +464,12 @@ pub(crate) fn on_timer_tick(now: u64) {
     if crate::kernel_lowlevel::smp::current_cpu_id() == 0 {
         let expired = with_runtime(|runtime| runtime.tasks.expire_signal_waits(now));
         for identity in expired.into_iter().flatten() {
-            let (signal_tid, signal_scheduler_thread, signal_reason) = identity;
-            if !wake_blocked(signal_tid, signal_scheduler_thread, signal_reason) {
+            let (tid, scheduler_thread, reason) = identity;
+            if !wake_blocked(tid, scheduler_thread, reason) {
                 let _ = with_runtime(|runtime| {
                     runtime
                         .tasks
-                        .signal_state_mut(signal_tid, signal_scheduler_thread)
+                        .signal_state_mut(tid, scheduler_thread)
                         .and_then(|state| state.take_signal_wait_outcome())
                 });
             }
