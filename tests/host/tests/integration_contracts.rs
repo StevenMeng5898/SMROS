@@ -584,6 +584,25 @@ fn test_layer_commands_and_docs_are_wired() {
 }
 
 #[test]
+fn host_coverage_runs_outside_repository_cargo_configuration() {
+    let coverage = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/run-host-coverage.sh"
+    ));
+
+    let change_directory = coverage
+        .find("\ncd /\n")
+        .expect("coverage wrapper changes outside the repository");
+    let run_tarpaulin = coverage
+        .find("\ncargo tarpaulin \\\n")
+        .expect("coverage wrapper invokes Tarpaulin");
+    assert!(
+        change_directory < run_tarpaulin,
+        "coverage wrapper must leave the repository before invoking Tarpaulin"
+    );
+}
+
+#[test]
 fn posix_make_targets_are_explicit_and_keep_the_default_suite_offline() {
     let makefile = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Makefile"));
     let targets = [

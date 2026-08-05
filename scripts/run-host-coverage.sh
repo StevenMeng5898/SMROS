@@ -13,6 +13,11 @@ if [ -z "$HOST_TARGET" ]; then
     exit 1
 fi
 
+# Cargo discovers configuration from the invocation directory rather than the
+# manifest directory. Run outside the repository so the kernel-only build-std
+# configuration is not merged into this host build.
+cd /
+
 if ! cargo tarpaulin --version >/dev/null 2>&1; then
     echo "error: cargo-tarpaulin is not installed" >&2
     echo "hint: cargo install --locked cargo-tarpaulin" >&2
