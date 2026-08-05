@@ -1,2 +1,3 @@
 # Patch filenames are applied in listed order.
 accept-newer-aio-option-versions.patch
+fix-sched-setparam-pid-array-allocation.patch

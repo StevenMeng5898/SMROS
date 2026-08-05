@@ -980,6 +980,40 @@ class RepositoryPatchTests(unittest.TestCase):
         self.assertNotIn("PTS_PASS", patch)
         self.assertNotIn("PTS_UNSUPPORTED;\n+", patch)
 
+    def test_sched_setparam_patch_allocates_complete_pid_arrays_without_weakening_tests(
+        self,
+    ) -> None:
+        patch_root = REPOSITORY_ROOT / "third_party" / "posixtest" / "patches"
+        series_entries = [
+            line.strip()
+            for line in (patch_root / "series").read_text(encoding="ascii").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        patch_name = "fix-sched-setparam-pid-array-allocation.patch"
+        self.assertIn(patch_name, series_entries)
+
+        patch = (patch_root / patch_name).read_text(encoding="ascii")
+        removed = [
+            line[1:]
+            for line in patch.splitlines()
+            if line.startswith("-") and not line.startswith("---")
+        ]
+        added = [
+            line[1:]
+            for line in patch.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        ]
+        self.assertCountEqual(
+            removed,
+            ["\tchild_pid = malloc(nb_child);"] * 2
+            + ["\tchild_pid = malloc(nb_cpu);"] * 2,
+        )
+        self.assertCountEqual(
+            added,
+            ["\tchild_pid = malloc(nb_child * sizeof(*child_pid));"] * 2
+            + ["\tchild_pid = malloc(nb_cpu * sizeof(*child_pid));"] * 2,
+        )
+
 
 class DocumentationTests(unittest.TestCase):
     def test_readme_describes_default_and_overridden_work_directories(self) -> None:

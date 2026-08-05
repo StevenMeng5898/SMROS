@@ -1,0 +1,48 @@
+diff --git a/conformance/interfaces/sched_setparam/2-1.c b/conformance/interfaces/sched_setparam/2-1.c
+--- a/conformance/interfaces/sched_setparam/2-1.c
++++ b/conformance/interfaces/sched_setparam/2-1.c
+@@ -125,7 +125,7 @@ int main(){
+ 		printf("Can not get the number of CPUs of your machine.\n");
+ 		return PTS_UNRESOLVED;
+ 	}
+-	child_pid = malloc(nb_child);
++	child_pid = malloc(nb_child * sizeof(*child_pid));
+ 
+ 	param.sched_priority = ( sched_get_priority_min(SCHED_FIFO) +
+ 				 sched_get_priority_max(SCHED_FIFO) ) / 2;
+diff --git a/conformance/interfaces/sched_setparam/2-2.c b/conformance/interfaces/sched_setparam/2-2.c
+--- a/conformance/interfaces/sched_setparam/2-2.c
++++ b/conformance/interfaces/sched_setparam/2-2.c
+@@ -125,7 +125,7 @@ int main(){
+ 		printf("Can not get the number of CPUs of your machine.\n");
+ 		return PTS_UNRESOLVED;
+ 	}
+-	child_pid = malloc(nb_child);
++	child_pid = malloc(nb_child * sizeof(*child_pid));
+ 
+ 	param.sched_priority = ( sched_get_priority_min(SCHED_RR) +
+ 				 sched_get_priority_max(SCHED_RR) ) / 2;
+diff --git a/conformance/interfaces/sched_setparam/9-1.c b/conformance/interfaces/sched_setparam/9-1.c
+--- a/conformance/interfaces/sched_setparam/9-1.c
++++ b/conformance/interfaces/sched_setparam/9-1.c
+@@ -131,7 +131,7 @@ int main(){
+ 		return PTS_UNRESOLVED;
+ 	}
+ 
+-	child_pid = malloc(nb_cpu);
++	child_pid = malloc(nb_cpu * sizeof(*child_pid));
+ 
+ 
+ 	key = ftok("conformance/interfaces/sched_setparam/9-1.c",1234);
+diff --git a/conformance/interfaces/sched_setparam/10-1.c b/conformance/interfaces/sched_setparam/10-1.c
+--- a/conformance/interfaces/sched_setparam/10-1.c
++++ b/conformance/interfaces/sched_setparam/10-1.c
+@@ -111,7 +111,7 @@ int main(){
+ 		return PTS_UNRESOLVED;
+ 	}
+ 
+-	child_pid = malloc(nb_cpu);
++	child_pid = malloc(nb_cpu * sizeof(*child_pid));
+ 
+ 	key = ftok("conformance/interfaces/sched_setparam/10-1.c",1234);
+ 	shm_id = shmget(key, sizeof(int), IPC_CREAT|0600);
