@@ -964,9 +964,11 @@ fn linux_process_reset_reclaims_transient_state_without_reinitializing_global_st
         "MemorySyscallState::free_linux_pages(&mapping.pfns)",
         "core::mem::replace(&mut self.brk, BrkState::new())",
         "MemorySyscallState::free_linux_pages(&brk.pfns)",
-        "record.attachments.clear()",
+        "core::mem::take(&mut self.linux_shared_memory)",
+        "compat::close_handle(HandleValue(record.handle))",
         "self.next_linux_addr = LINUX_MAPPING_BASE",
         "self.next_fd = COMPAT_FD_START",
+        "self.next_shared_memory_id = LINUX_SHM_ID_START",
         "self.reset_linux_container_state()",
     ] {
         assert!(
@@ -980,6 +982,59 @@ fn linux_process_reset_reclaims_transient_state_without_reinitializing_global_st
     assert!(public.contains("reset_linux_signal_timer_state()"));
     assert!(!method.contains("MemorySyscallState::new()"));
     assert!(!public.contains("MEMORY_SYSCALL_STATE = None"));
+
+    let close_start = syscall
+        .find("pub fn sys_close(fd: usize)")
+        .expect("Linux close");
+    let close = braced_body(&syscall[close_start..]);
+    let tracked_close = close
+        .find("close_fd_record(fd)")
+        .expect("tracked descriptor close");
+    let stdio_noop = close.find("fd <= 2").expect("untracked stdio no-op");
+    assert!(
+        tracked_close < stdio_noop,
+        "tracked descriptors installed on stdin/stdout/stderr must be reclaimed"
+    );
+}
+
+#[test]
+fn linux_shared_memory_uses_nonnegative_process_ids_separate_from_compat_handles() {
+    let syscall = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/syscall.rs"
+    ));
+
+    assert!(syscall.contains("const LINUX_SHM_ID_START: u32 = 1;"));
+
+    let record_start = syscall
+        .find("struct LinuxSharedMemoryRecord")
+        .expect("shared-memory record");
+    let record = braced_body(&syscall[record_start..]);
+    assert!(record.contains("id: u32"));
+    assert!(record.contains("handle: u32"));
+
+    let register_start = syscall
+        .find("fn register_shared_memory(")
+        .expect("shared-memory registration");
+    let register = braced_body(&syscall[register_start..]);
+    assert!(register.contains("self.next_shared_memory_id"));
+    assert!(register.contains("handle"));
+    assert!(register.contains("Some(id)"));
+
+    let get_start = syscall.find("pub fn sys_shmget(").expect("shmget");
+    let get = braced_body(&syscall[get_start..]);
+    assert!(get.contains("register_shared_memory(handle.0"));
+    assert!(get.contains("Ok(id as usize)"));
+    assert!(!get.contains("Ok(handle.0 as usize)"));
+
+    let attach_start = syscall.find("pub fn sys_shmat(").expect("shmat");
+    let attach = braced_body(&syscall[attach_start..]);
+    assert!(attach.contains("shared_memory_handle(id as u32)"));
+
+    let control_start = syscall.find("pub fn sys_shmctl(").expect("shmctl");
+    let control = braced_body(&syscall[control_start..]);
+    assert!(control.contains("remove_shared_memory(id as u32)"));
+    assert!(control.contains("compat::close_handle(HandleValue(record.handle))"));
 }
 
 #[test]

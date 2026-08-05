@@ -492,6 +492,7 @@ const ZX_VCPU_PACKET_SIZE: usize = 48;
 const ZX_SMC_PARAMETERS_SIZE: usize = 64;
 const ZX_SMC_RESULT_SIZE: usize = 64;
 const COMPAT_FD_START: usize = 3;
+const LINUX_SHM_ID_START: u32 = 1;
 const LINUX_STDIO_FD_MAX: usize = 2;
 const LINUX_O_ACCMODE: usize = 0o3;
 const LINUX_O_RDONLY: usize = 0;
@@ -724,6 +725,7 @@ struct LinuxSharedMemoryAttachment {
 #[derive(Clone)]
 struct LinuxSharedMemoryRecord {
     id: u32,
+    handle: u32,
     size: usize,
     attachments: Vec<LinuxSharedMemoryAttachment>,
 }
@@ -1030,6 +1032,7 @@ struct MemorySyscallState {
     linux_timer_handles: Vec<u32>,
     linux_fxfs_files: Vec<LinuxFxfsFileRecord>,
     linux_shared_memory: Vec<LinuxSharedMemoryRecord>,
+    next_shared_memory_id: u32,
     linux_mounts: Vec<LinuxMountRecord>,
     linux_namespace_flags: usize,
     linux_setns_count: usize,
@@ -1083,6 +1086,7 @@ impl MemorySyscallState {
             linux_timer_handles: Vec::new(),
             linux_fxfs_files: Vec::new(),
             linux_shared_memory: Vec::new(),
+            next_shared_memory_id: LINUX_SHM_ID_START,
             linux_mounts: Vec::new(),
             linux_namespace_flags: 0,
             linux_setns_count: 0,
@@ -1432,19 +1436,26 @@ impl MemorySyscallState {
         }
     }
 
-    fn register_shared_memory(&mut self, id: u32, size: usize) {
-        if self
-            .linux_shared_memory
-            .iter()
-            .any(|record| record.id == id)
-        {
-            return;
+    fn register_shared_memory(&mut self, handle: u32, size: usize) -> Option<u32> {
+        let id = self.next_shared_memory_id;
+        if id == 0 || id > i32::MAX as u32 {
+            return None;
         }
+        self.next_shared_memory_id = id.checked_add(1)?;
         self.linux_shared_memory.push(LinuxSharedMemoryRecord {
             id,
+            handle,
             size,
             attachments: Vec::new(),
         });
+        Some(id)
+    }
+
+    fn shared_memory_handle(&self, id: u32) -> Option<u32> {
+        self.linux_shared_memory
+            .iter()
+            .find(|record| record.id == id)
+            .map(|record| record.handle)
     }
 
     fn attach_shared_memory(&mut self, id: u32, addr: usize, len: usize) {
@@ -1478,8 +1489,17 @@ impl MemorySyscallState {
         removed
     }
 
-    fn remove_shared_memory(&mut self, id: u32) {
-        self.linux_shared_memory.retain(|record| record.id != id);
+    fn remove_shared_memory(&mut self, id: u32) -> Option<LinuxSharedMemoryRecord> {
+        let index = self
+            .linux_shared_memory
+            .iter()
+            .position(|record| record.id == id)?;
+        Some(self.linux_shared_memory.swap_remove(index))
+    }
+
+    fn remove_shared_memory_by_handle(&mut self, handle: u32) {
+        self.linux_shared_memory
+            .retain(|record| record.handle != handle);
     }
 
     fn free_linux_pages(pfns: &[u64]) {
@@ -1967,8 +1987,7 @@ impl MemorySyscallState {
     }
 
     fn release_compat_handle(&mut self, handle: u32) {
-        self.remove_shared_memory(handle);
-        self.detach_shared_memory(Some(handle), 0);
+        self.remove_shared_memory_by_handle(handle);
     }
 
     fn alloc_fd(&mut self, handle: u32, readable: bool, writable: bool) -> usize {
@@ -2113,8 +2132,9 @@ impl MemorySyscallState {
         for mapping in mappings {
             MemorySyscallState::free_linux_pages(&mapping.pfns);
         }
-        for record in &mut self.linux_shared_memory {
-            record.attachments.clear();
+        let shared_memory = core::mem::take(&mut self.linux_shared_memory);
+        for record in shared_memory {
+            let _ = compat::close_handle(HandleValue(record.handle));
         }
 
         let brk = core::mem::replace(&mut self.brk, BrkState::new());
@@ -2123,6 +2143,7 @@ impl MemorySyscallState {
         self.linux_fxfs_files.clear();
         self.next_linux_addr = LINUX_MAPPING_BASE;
         self.next_fd = COMPAT_FD_START;
+        self.next_shared_memory_id = LINUX_SHM_ID_START;
         self.reset_linux_container_state();
     }
 
@@ -3758,11 +3779,9 @@ pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
 
 /// Linux sys_close implementation.
 pub fn sys_close(fd: usize) -> SysResult {
-    if fd <= 2 {
-        return Ok(0);
-    }
-
-    let record = memory_state().close_fd_record(fd).ok_or(SysError::EBUSY)?;
+    let Some(record) = memory_state().close_fd_record(fd) else {
+        return if fd <= 2 { Ok(0) } else { Err(SysError::EBUSY) };
+    };
     let handle_still_open = memory_state().handle_has_fd(record.handle);
     if !handle_still_open {
         memory_state().remove_linux_fxfs_file(record.handle);
@@ -5585,12 +5604,20 @@ pub fn sys_shmget(_key: usize, size: usize, _shmflg: usize) -> SysResult {
     }
     let handle = compat::create_object(ObjectType::SharedMemory).map_err(|_| SysError::ENOMEM)?;
     let _ = compat::table().set_property(handle, size as u64);
-    memory_state().register_shared_memory(handle.0, roundup_pages(size.max(PAGE_SIZE)));
-    Ok(handle.0 as usize)
+    let Some(id) =
+        memory_state().register_shared_memory(handle.0, roundup_pages(size.max(PAGE_SIZE)))
+    else {
+        let _ = compat::close_handle(handle);
+        return Err(SysError::ENOMEM);
+    };
+    Ok(id as usize)
 }
 
 pub fn sys_shmat(id: usize, addr: usize, _shmflg: usize) -> SysResult {
-    let handle = HandleValue(id as u32);
+    let handle = memory_state()
+        .shared_memory_handle(id as u32)
+        .map(HandleValue)
+        .ok_or(SysError::EINVAL)?;
     if !compat::table().is_type(handle, ObjectType::SharedMemory) {
         return Err(SysError::EINVAL);
     }
@@ -5644,7 +5671,11 @@ pub fn sys_shmdt(id: usize, addr: usize, _shmflg: usize) -> SysResult {
 }
 
 pub fn sys_shmctl(id: usize, cmd: usize, buffer: usize) -> SysResult {
-    if !linux_compat_handle_is_type(id as u32, ObjectType::SharedMemory) {
+    let handle = memory_state()
+        .shared_memory_handle(id as u32)
+        .map(HandleValue)
+        .ok_or(SysError::EINVAL)?;
+    if !compat::table().is_type(handle, ObjectType::SharedMemory) {
         return Err(SysError::EINVAL);
     }
     if buffer != 0 {
@@ -5652,7 +5683,10 @@ pub fn sys_shmctl(id: usize, cmd: usize, buffer: usize) -> SysResult {
     }
     const IPC_RMID: usize = 0;
     if cmd == IPC_RMID {
-        memory_state().remove_shared_memory(id as u32);
+        let record = memory_state()
+            .remove_shared_memory(id as u32)
+            .ok_or(SysError::EINVAL)?;
+        let _ = compat::close_handle(HandleValue(record.handle));
     }
     Ok(0)
 }
