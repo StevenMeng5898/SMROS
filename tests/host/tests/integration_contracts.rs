@@ -3520,7 +3520,9 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
         .find("pub(crate) fn on_timer_tick(")
         .expect("Linux task timer hook");
     let timer = braced_body(&task[timer_start..]);
+    let cpu0 = timer.find("current_cpu_id() == 0").expect("CPU0 guard");
     let expire = timer.find("expire_sleeps(now)").expect("sleep expiry");
+    assert!(cpu0 < expire);
     let sleep_expiry = &timer[expire..];
     let wake = sleep_expiry
         .find("wake_blocked(tid, scheduler_thread, reason)")
@@ -3538,13 +3540,89 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
     assert!(interrupt.contains("linux_task::interrupt_sleep("));
     assert!(interrupt.contains("linux_task::wake_blocked("));
     assert!(interrupt.contains("linux_task::cancel_sleep("));
+    let interrupt_sleep = interrupt
+        .find("linux_task::interrupt_sleep(")
+        .expect("sleep interruption publication");
+    let wake_blocked = interrupt
+        .find("linux_task::wake_blocked(")
+        .expect("sleep wake");
+    let cancel_sleep = interrupt
+        .find("linux_task::cancel_sleep(")
+        .expect("failed wake cleanup");
+    assert!(interrupt_sleep < wake_blocked && wake_blocked < cancel_sleep);
 
-    for caller in [
-        "fn queue_process_linux_signal_and_wake(",
-        "fn queue_directed_linux_signal(",
-    ] {
-        let start = syscall.find(caller).expect("signal routing caller");
-        let body = braced_body(&syscall[start..]);
-        assert!(body.contains("interrupt_linux_signal_target(target, record.signum)"));
-    }
+    let process_start = syscall
+        .find("fn queue_process_linux_signal_and_wake(")
+        .expect("process signal routing caller");
+    let process = braced_body(&syscall[process_start..]);
+    let queue_process = process
+        .find("queue_process_linux_signal(record)?")
+        .expect("process signal queue");
+    let interrupt_process = process
+        .find("interrupt_linux_signal_target(target, record.signum)")
+        .expect("process sleep interruption");
+    assert!(queue_process < interrupt_process);
+
+    let directed_start = syscall
+        .find("fn queue_directed_linux_signal(")
+        .expect("directed signal routing caller");
+    let directed = braced_body(&syscall[directed_start..]);
+    let route = directed
+        .find("route_signal_and_complete_wait")
+        .expect("directed signal routing");
+    let interrupt_directed = directed
+        .find("interrupt_linux_signal_target(target, record.signum)")
+        .expect("directed sleep interruption");
+    assert!(route < interrupt_directed);
+
+    assert!(syscall.contains("const LINUX_TIMER_ABSTIME: usize = 1"));
+    assert!(syscall.contains("pub fn sys_nanosleep_linux(req: usize)"));
+    assert!(syscall.contains("fn sys_nanosleep_linux_with_rem(req: usize, rem: usize)"));
+    assert!(syscall.contains("linux_task::install_current_sleep("));
+    assert!(syscall.contains("linux_task::block_current(LinuxBlockReason::Sleep)"));
+    assert!(syscall.contains("scheduler::schedule();"));
+    assert!(syscall.contains("LinuxSleepOutcome::Completed => Ok(0)"));
+    assert!(syscall.contains("LinuxSleepOutcome::Interrupted"));
+    assert!(syscall.contains("Err(SysError::EINTR)"));
+    assert!(syscall.contains("linux_sleep_remaining_timespec("));
+    assert!(
+        syscall.contains("ARM64_SYS_NANOSLEEP => sys_nanosleep_linux_with_rem(args[0], args[1])")
+    );
+
+    let sleep_until_start = syscall
+        .find("fn linux_sleep_until(")
+        .expect("blocking Linux sleep helper");
+    let sleep_until = braced_body(&syscall[sleep_until_start..]);
+    let validate = sleep_until
+        .find("linux_sleep_user_range_writable(")
+        .expect("remaining buffer validation");
+    let mask = sleep_until.find("mask_interrupts()").expect("IRQ mask");
+    let install = sleep_until
+        .find("install_current_sleep(")
+        .expect("sleep publication");
+    let block = sleep_until
+        .find("block_current(LinuxBlockReason::Sleep)")
+        .expect("task block");
+    let schedule = sleep_until
+        .find("scheduler::schedule();")
+        .expect("schedule");
+    assert!(validate < mask && mask < install && install < block && block < schedule);
+    assert!(sleep_until.contains("let _ = linux_task::cancel_current_sleep();"));
+
+    let nanosleep_start = syscall
+        .find("pub fn sys_nanosleep_linux(")
+        .expect("Linux nanosleep compatibility wrapper");
+    let nanosleep = braced_body(&syscall[nanosleep_start..]);
+    assert!(nanosleep.contains("sys_nanosleep_linux_with_rem(req, 0)"));
+    assert!(!nanosleep.contains("if req == 0"));
+    assert!(!nanosleep.contains("Ok(0)"));
+
+    let nanosleep_with_rem_start = syscall
+        .find("fn sys_nanosleep_linux_with_rem(")
+        .expect("Linux nanosleep syscall helper");
+    let nanosleep_with_rem = braced_body(&syscall[nanosleep_with_rem_start..]);
+    assert!(nanosleep_with_rem.contains("linux_sleep_relative_deadline_ticks("));
+    assert!(nanosleep_with_rem.contains("linux_sleep_until(deadline, rem, false)"));
+    assert!(!nanosleep_with_rem.contains("if req == 0"));
+    assert!(!nanosleep_with_rem.contains("Ok(0)"));
 }

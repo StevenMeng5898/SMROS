@@ -55,6 +55,10 @@ pub(crate) fn linux_clock_id_supported(clock_id: usize) -> bool {
     smros_linux_clock_id_supported_body!(clock_id)
 }
 
+pub(crate) fn linux_clock_nanosleep_flags_valid(flags: usize, timer_abstime: usize) -> bool {
+    smros_linux_clock_nanosleep_flags_valid_body!(flags, timer_abstime)
+}
+
 pub(crate) fn linux_signal_valid(signum: usize, max_signal: usize) -> bool {
     smros_linux_signal_valid_body!(signum, max_signal)
 }

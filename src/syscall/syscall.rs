@@ -59,8 +59,8 @@ use super::linux_task::{
     select_linux_pending_signal, LinuxBlockReason, LinuxCloneRequest, LinuxCloneValidationError,
     LinuxPendingSignal, LinuxPendingSignalReservation, LinuxPendingSignalSource,
     LinuxPendingSignals, LinuxRestartBlock, LinuxSignalDisposition, LinuxSignalFrame,
-    LinuxSignalStack, LinuxSignalWait, LinuxSignalWaitOutcome, CLONE_THREAD,
-    LINUX_SIGNAL_FRAME_LIMIT, LINUX_SIGNAL_INFO_BYTES,
+    LinuxSignalStack, LinuxSignalWait, LinuxSignalWaitOutcome, LinuxSleepOutcome, LinuxSleepWait,
+    CLONE_THREAD, LINUX_SIGNAL_FRAME_LIMIT, LINUX_SIGNAL_INFO_BYTES,
 };
 use crate::kernel_lowlevel::memory::{process_manager, PageFrameAllocator, PAGE_SIZE};
 use crate::kernel_objects::channel;
@@ -464,6 +464,7 @@ const ZX_USER_SIGNAL_0: u32 = 1 << 24;
 const ZX_TIMER_SIGNALED: u32 = 1 << 7;
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
+const LINUX_TIMER_ABSTIME: usize = 1;
 const ZX_CLOCK_OPT_AUTO_START: u32 = 1 << 0;
 const ZX_CLOCK_UPDATE_OPTION_SYNTHETIC_VALUE_VALID: u64 = 1 << 0;
 const ZX_CLOCK_UPDATE_OPTION_REFERENCE_VALUE_VALID: u64 = 1 << 1;
@@ -4013,6 +4014,121 @@ fn linux_signal_user_range_writable(address: usize, len: usize) -> bool {
     true
 }
 
+fn linux_sleep_user_range_readable(address: usize, len: usize) -> bool {
+    if !syscall_logic::user_buffer_valid(address, len) {
+        return false;
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        return linux_user_range_readable(address, len);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    true
+}
+
+fn linux_sleep_user_range_writable(address: usize, len: usize) -> bool {
+    if !syscall_logic::user_buffer_valid(address, len) {
+        return false;
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        return linux_user_range_writable(address, len);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    true
+}
+
+fn linux_read_sleep_timespec(address: usize) -> Result<LinuxTimespec, SysError> {
+    let size = core::mem::size_of::<LinuxTimespec>();
+    if !linux_sleep_user_range_readable(address, size) {
+        return Err(SysError::EFAULT);
+    }
+    Ok(unsafe { core::ptr::read_unaligned(address as *const LinuxTimespec) })
+}
+
+fn linux_write_sleep_remaining(address: usize, wait: LinuxSleepWait) -> SysResult {
+    if address == 0 {
+        return Ok(0);
+    }
+    let size = core::mem::size_of::<LinuxTimespec>();
+    if !linux_sleep_user_range_writable(address, size) {
+        return Err(SysError::EFAULT);
+    }
+    let now = crate::kernel_lowlevel::timer::get_tick_count();
+    let (tv_sec, tv_nsec) =
+        linux_task::linux_sleep_remaining_timespec(wait.deadline, now, LINUX_SIGNAL_TICK_NANOS)
+            .ok_or(SysError::EINVAL)?;
+    unsafe {
+        core::ptr::write_unaligned(
+            address as *mut LinuxTimespec,
+            LinuxTimespec { tv_sec, tv_nsec },
+        );
+    }
+    Ok(0)
+}
+
+fn linux_sleep_until(deadline: u64, rem: usize, absolute: bool) -> SysResult {
+    let now = crate::kernel_lowlevel::timer::get_tick_count();
+    if deadline <= now {
+        return Ok(0);
+    }
+    if !absolute
+        && rem != 0
+        && !linux_sleep_user_range_writable(rem, core::mem::size_of::<LinuxTimespec>())
+    {
+        return Err(SysError::EFAULT);
+    }
+
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let wait = LinuxSleepWait::waiting(deadline);
+    let installed = match linux_task::install_current_sleep(wait) {
+        Ok(installed) => installed,
+        Err(error) => {
+            crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+            return Err(error);
+        }
+    };
+    if !installed {
+        crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+        return Err(SysError::EAGAIN);
+    }
+    if linux_task::block_current(LinuxBlockReason::Sleep).is_err() {
+        let _ = linux_task::cancel_current_sleep();
+        crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+        return Err(SysError::EAGAIN);
+    }
+
+    scheduler::schedule();
+    let outcome = match linux_task::take_current_sleep_outcome() {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ = linux_task::cancel_current_sleep();
+            crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+            return Err(error);
+        }
+    };
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    match outcome {
+        Some(wait) => match wait.outcome {
+            LinuxSleepOutcome::Completed => Ok(0),
+            LinuxSleepOutcome::Interrupted => {
+                if !absolute {
+                    linux_write_sleep_remaining(rem, wait)?;
+                }
+                Err(SysError::EINTR)
+            }
+            LinuxSleepOutcome::Waiting => {
+                let _ = linux_task::cancel_current_sleep();
+                Err(SysError::EAGAIN)
+            }
+        },
+        None => {
+            let _ = linux_task::cancel_current_sleep();
+            Err(SysError::EAGAIN)
+        }
+    }
+}
+
 fn linux_signal_wait_deadline(timeout: usize) -> Result<Option<u64>, SysError> {
     if timeout == 0 {
         return Ok(None);
@@ -6115,11 +6231,31 @@ pub fn sys_clock_settime(clockid: usize, tp: usize) -> SysResult {
     Ok(0)
 }
 
-pub fn sys_clock_nanosleep(clockid: usize, _flags: usize, req: usize, _rem: usize) -> SysResult {
-    if !syscall_logic::linux_clock_id_supported(clockid) {
+pub fn sys_clock_nanosleep(clockid: usize, flags: usize, req: usize, rem: usize) -> SysResult {
+    if !syscall_logic::linux_clock_id_supported(clockid)
+        || !syscall_logic::linux_clock_nanosleep_flags_valid(flags, LINUX_TIMER_ABSTIME)
+    {
         return Err(SysError::EINVAL);
     }
-    sys_nanosleep_linux(req)
+    let requested = linux_read_sleep_timespec(req)?;
+    let absolute = flags & LINUX_TIMER_ABSTIME != 0;
+    let now = crate::kernel_lowlevel::timer::get_tick_count();
+    let deadline = if absolute {
+        linux_task::linux_sleep_absolute_deadline_ticks(
+            requested.tv_sec,
+            requested.tv_nsec,
+            LINUX_SIGNAL_TICK_NANOS,
+        )
+    } else {
+        linux_task::linux_sleep_relative_deadline_ticks(
+            now,
+            requested.tv_sec,
+            requested.tv_nsec,
+            LINUX_SIGNAL_TICK_NANOS,
+        )
+    }
+    .ok_or(SysError::EINVAL)?;
+    linux_sleep_until(deadline, rem, absolute)
 }
 
 pub fn sys_block_in_kernel() -> SysResult {
@@ -9686,12 +9822,20 @@ pub fn sys_sysinfo(info: usize) -> SysResult {
 
 /// Linux sys_nanosleep implementation
 pub fn sys_nanosleep_linux(req: usize) -> SysResult {
-    info!("nanosleep (linux)");
+    sys_nanosleep_linux_with_rem(req, 0)
+}
 
-    if req == 0 {
-        return Err(SysError::EFAULT);
-    }
-    Ok(0)
+fn sys_nanosleep_linux_with_rem(req: usize, rem: usize) -> SysResult {
+    let requested = linux_read_sleep_timespec(req)?;
+    let now = crate::kernel_lowlevel::timer::get_tick_count();
+    let deadline = linux_task::linux_sleep_relative_deadline_ticks(
+        now,
+        requested.tv_sec,
+        requested.tv_nsec,
+        LINUX_SIGNAL_TICK_NANOS,
+    )
+    .ok_or(SysError::EINVAL)?;
+    linux_sleep_until(deadline, rem, false)
 }
 
 // ============================================================================
@@ -10278,7 +10422,7 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_EXIT => sys_exit(args[0] as i32),
         ARM64_SYS_EXIT_GROUP => sys_exit_group(args[0] as i32),
         ARM64_SYS_WAITID => sys_waitid(args[0], args[1], args[2], args[3], args[4]),
-        ARM64_SYS_NANOSLEEP => sys_nanosleep_linux(args[0]),
+        ARM64_SYS_NANOSLEEP => sys_nanosleep_linux_with_rem(args[0], args[1]),
         ARM64_SYS_GETITIMER => sys_getitimer(args[0], args[1]),
         ARM64_SYS_SETITIMER => sys_setitimer(args[0], args[1], args[2]),
         ARM64_SYS_TIMER_CREATE => sys_linux_timer_create(args[0], args[1], args[2]),

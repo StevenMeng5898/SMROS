@@ -235,6 +235,27 @@ mod syscall_logic {
     ));
 
     #[test]
+    fn clock_nanosleep_accepts_only_relative_or_timer_abstime_flags() {
+        const TIMER_ABSTIME: usize = 1;
+        assert!(smros_linux_clock_nanosleep_flags_valid_body!(
+            0,
+            TIMER_ABSTIME
+        ));
+        assert!(smros_linux_clock_nanosleep_flags_valid_body!(
+            TIMER_ABSTIME,
+            TIMER_ABSTIME
+        ));
+        assert!(!smros_linux_clock_nanosleep_flags_valid_body!(
+            2,
+            TIMER_ABSTIME
+        ));
+        assert!(!smros_linux_clock_nanosleep_flags_valid_body!(
+            usize::MAX,
+            TIMER_ABSTIME
+        ));
+    }
+
+    #[test]
     fn zircon_syscall_numbers_round_trip_from_raw_threshold() {
         fn from_raw(syscall_num: u64, threshold: u64) -> u32 {
             smros_zircon_syscall_from_raw_body!(syscall_num, threshold)

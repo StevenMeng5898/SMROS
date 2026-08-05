@@ -93,6 +93,12 @@ macro_rules! smros_linux_clock_id_supported_body {
     }};
 }
 
+macro_rules! smros_linux_clock_nanosleep_flags_valid_body {
+    ($flags:expr, $timer_abstime:expr) => {{
+        ($flags & !$timer_abstime) == 0
+    }};
+}
+
 macro_rules! smros_linux_signal_valid_body {
     ($signum:expr, $max_signal:expr) => {{
         $signum <= $max_signal
