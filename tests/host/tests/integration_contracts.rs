@@ -3511,12 +3511,36 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
         .expect("read Linux syscall runtime");
 
     assert!(task_logic.contains("sleep_waits: [Option<LinuxSleepWait>; N]"));
+    assert!(task_logic.contains("pub(crate) struct LinuxSleepRelative"));
+    assert!(task_logic.contains("relative: Option<LinuxSleepRelative>"));
+    assert!(task_logic.contains("pub(crate) const fn relative_waiting("));
     assert!(task_logic.contains("pub(crate) fn expire_sleeps("));
     assert!(task_logic.contains("pub(crate) fn interrupt_sleep("));
     assert!(task_logic.contains("self.signal_states[slot].mask & bit != 0"));
     assert!(task.contains("pub(crate) fn install_current_sleep("));
     assert!(task.contains("pub(crate) fn take_current_sleep_outcome("));
     assert!(task.contains("pub(crate) fn cancel_current_sleep("));
+
+    let remaining_start = task_logic
+        .find("pub(crate) fn linux_sleep_remaining_timespec(")
+        .expect("relative remaining-time helper");
+    let remaining = braced_body(&task_logic[remaining_start..]);
+    assert!(remaining.contains("now.saturating_sub(started_at)"));
+    assert!(remaining.contains("requested_nanoseconds"));
+
+    let pending_start = syscall
+        .find("fn linux_sleep_has_deliverable_pending_signal(")
+        .expect("pending signal sleep check");
+    let pending = braced_body(&syscall[pending_start..]);
+    assert!(pending.contains("linux_task::current_task()?"));
+    assert!(pending.contains("linux_task::with_current_signal_state("));
+    assert!(pending.contains("peek_unblocked().is_some()"));
+    assert!(pending.contains("with_linux_process_pending("));
+    assert!(pending.contains("peek_eligible("));
+    assert!(pending.contains("linux_task::process_signal_target(signum) == Some(current)"));
+    assert!(!pending.contains("take_"));
+    assert!(!pending.contains("reserve"));
+    assert!(!pending.contains("commit"));
 
     let timer_start = task
         .find("pub(crate) fn on_timer_tick(")
@@ -3605,6 +3629,9 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
         .find("linux_sleep_user_range_writable(")
         .expect("remaining buffer validation");
     let mask = sleep_until.find("mask_interrupts()").expect("IRQ mask");
+    let pending_check = sleep_until
+        .find("linux_sleep_has_deliverable_pending_signal()")
+        .expect("pending signal check");
     let install = sleep_until
         .find("install_current_sleep(")
         .expect("sleep publication");
@@ -3614,7 +3641,19 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
     let schedule = sleep_until
         .find("scheduler::schedule();")
         .expect("schedule");
-    assert!(validate < mask && mask < install && install < block && block < schedule);
+    assert!(
+        validate < mask
+            && mask < pending_check
+            && pending_check < install
+            && install < block
+            && block < schedule
+    );
+    let pending_path = &sleep_until[pending_check..install];
+    assert!(pending_path.contains("linux_write_sleep_remaining(rem, wait)"));
+    assert!(pending_path.contains("Err(SysError::EINTR)"));
+    assert!(!pending_path.contains("take_"));
+    assert!(!pending_path.contains("reserve"));
+    assert!(!pending_path.contains("commit"));
     assert!(sleep_until.contains("LinuxSleepOutcome::Completed => Ok(0)"));
     assert!(sleep_until.contains("LinuxSleepOutcome::Interrupted"));
     assert!(sleep_until.contains("linux_write_sleep_remaining(rem, wait)?"));
@@ -3625,6 +3664,7 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
         .find("fn linux_write_sleep_remaining(")
         .expect("remaining time copyout helper");
     let write_remaining = braced_body(&syscall[write_remaining_start..]);
+    assert!(write_remaining.contains("wait.relative.ok_or(SysError::EINVAL)?"));
     assert!(write_remaining.contains("linux_sleep_remaining_timespec("));
 
     let clock_nanosleep_start = syscall
@@ -3638,7 +3678,11 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
     assert!(clock_nanosleep.contains("let absolute = flags & LINUX_TIMER_ABSTIME != 0"));
     assert!(clock_nanosleep.contains("linux_sleep_absolute_deadline_ticks("));
     assert!(clock_nanosleep.contains("linux_sleep_relative_deadline_ticks("));
-    assert!(clock_nanosleep.contains("linux_sleep_until(deadline, rem, absolute)"));
+    assert!(clock_nanosleep.contains("linux_sleep_timespec_nanoseconds("));
+    assert!(clock_nanosleep
+        .contains("LinuxSleepWait::relative_waiting(deadline, now, requested_nanoseconds)"));
+    assert!(clock_nanosleep.contains("LinuxSleepWait::waiting(deadline)"));
+    assert!(clock_nanosleep.contains("linux_sleep_until(wait, rem)"));
 
     let nanosleep_start = syscall
         .find("pub fn sys_nanosleep_linux(")
@@ -3653,7 +3697,10 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
         .expect("Linux nanosleep syscall helper");
     let nanosleep_with_rem = braced_body(&syscall[nanosleep_with_rem_start..]);
     assert!(nanosleep_with_rem.contains("linux_sleep_relative_deadline_ticks("));
-    assert!(nanosleep_with_rem.contains("linux_sleep_until(deadline, rem, false)"));
+    assert!(nanosleep_with_rem.contains("linux_sleep_timespec_nanoseconds("));
+    assert!(nanosleep_with_rem
+        .contains("LinuxSleepWait::relative_waiting(deadline, now, requested_nanoseconds)"));
+    assert!(nanosleep_with_rem.contains("linux_sleep_until(wait, rem)"));
     assert!(!nanosleep_with_rem.contains("if req == 0"));
     assert!(!nanosleep_with_rem.contains("Ok(0)"));
 }

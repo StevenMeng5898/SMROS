@@ -181,9 +181,16 @@ pub(crate) enum LinuxSleepOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxSleepRelative {
+    pub started_at: u64,
+    pub requested_nanoseconds: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxSleepWait {
     pub deadline: u64,
     pub outcome: LinuxSleepOutcome,
+    pub relative: Option<LinuxSleepRelative>,
 }
 
 impl LinuxSleepWait {
@@ -191,6 +198,22 @@ impl LinuxSleepWait {
         Self {
             deadline,
             outcome: LinuxSleepOutcome::Waiting,
+            relative: None,
+        }
+    }
+
+    pub(crate) const fn relative_waiting(
+        deadline: u64,
+        started_at: u64,
+        requested_nanoseconds: u64,
+    ) -> Self {
+        Self {
+            deadline,
+            outcome: LinuxSleepOutcome::Waiting,
+            relative: Some(LinuxSleepRelative {
+                started_at,
+                requested_nanoseconds,
+            }),
         }
     }
 }
@@ -742,12 +765,10 @@ pub(crate) fn linux_signal_timespec_to_ticks_ceil(
     nanoseconds: i64,
     tick_nanoseconds: u64,
 ) -> Option<u64> {
-    if seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds) || tick_nanoseconds == 0 {
+    if tick_nanoseconds == 0 {
         return None;
     }
-    let total_nanoseconds = (seconds as u64)
-        .checked_mul(1_000_000_000)?
-        .checked_add(nanoseconds as u64)?;
+    let total_nanoseconds = linux_sleep_timespec_nanoseconds(seconds, nanoseconds)?;
     let ticks = total_nanoseconds / tick_nanoseconds;
     let ticks = ticks.checked_add(u64::from(total_nanoseconds % tick_nanoseconds != 0))?;
     let phase_guard = if total_nanoseconds == 0 { 0 } else { 1 };
@@ -768,26 +789,36 @@ pub(crate) fn linux_sleep_absolute_deadline_ticks(
     nanoseconds: i64,
     tick_nanoseconds: u64,
 ) -> Option<u64> {
-    if seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds) || tick_nanoseconds == 0 {
+    if tick_nanoseconds == 0 {
         return None;
     }
-    let total_nanoseconds = (seconds as u64)
-        .checked_mul(1_000_000_000)?
-        .checked_add(nanoseconds as u64)?;
+    let total_nanoseconds = linux_sleep_timespec_nanoseconds(seconds, nanoseconds)?;
     let ticks = total_nanoseconds / tick_nanoseconds;
     ticks.checked_add(u64::from(total_nanoseconds % tick_nanoseconds != 0))
 }
 
+pub(crate) fn linux_sleep_timespec_nanoseconds(seconds: i64, nanoseconds: i64) -> Option<u64> {
+    if seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds) {
+        return None;
+    }
+    (seconds as u64)
+        .checked_mul(1_000_000_000)?
+        .checked_add(nanoseconds as u64)
+}
+
 pub(crate) fn linux_sleep_remaining_timespec(
-    deadline: u64,
+    started_at: u64,
+    requested_nanoseconds: u64,
     now: u64,
     tick_nanoseconds: u64,
 ) -> Option<(i64, i64)> {
     if tick_nanoseconds == 0 {
         return None;
     }
+    let elapsed_ticks = now.saturating_sub(started_at);
+    let elapsed_nanoseconds = u128::from(elapsed_ticks) * u128::from(tick_nanoseconds);
     let remaining_nanoseconds =
-        u128::from(deadline.saturating_sub(now)) * u128::from(tick_nanoseconds);
+        u128::from(requested_nanoseconds).saturating_sub(elapsed_nanoseconds);
     let seconds = i64::try_from(remaining_nanoseconds / 1_000_000_000u128).ok()?;
     let nanoseconds = i64::try_from(remaining_nanoseconds % 1_000_000_000u128).ok()?;
     Some((seconds, nanoseconds))

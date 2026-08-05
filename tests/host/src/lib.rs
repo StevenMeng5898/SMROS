@@ -1099,6 +1099,12 @@ mod linux_task_logic {
                 block_reason: LinuxBlockReason::None,
             })
         );
+        tasks.signal_state_mut(second.tid, 9).unwrap().mask = bit;
+        assert_eq!(tasks.process_signal_target(signal), None);
+        tasks.signal_state_mut(first.tid, 8).unwrap().mask = 0;
+        assert_eq!(tasks.process_signal_target(signal), Some(target_for(first)));
+        tasks.signal_state_mut(first.tid, 8).unwrap().mask = bit;
+        tasks.signal_state_mut(second.tid, 9).unwrap().mask = 0;
 
         let target = tasks
             .route_signal(Some(LINUX_ROOT_TID), first.tid, signal_record(signal, 0x5a))
@@ -1150,6 +1156,23 @@ mod linux_task_logic {
             before,
             "signal zero checks existence without queueing"
         );
+    }
+
+    #[test]
+    fn task_pending_peek_preserves_masked_and_unmasked_records() {
+        let mut state = LinuxTaskSignalState::new();
+        let record = signal_record(6, 0x5a);
+        let bit = linux_signal_bit(record.signum);
+        state.queue(record).unwrap();
+
+        state.mask = bit;
+        assert_eq!(state.peek_unblocked(), None);
+        assert_eq!(state.pending_mask(), bit);
+
+        state.mask = 0;
+        assert_eq!(state.peek_unblocked(), Some(record));
+        assert_eq!(state.peek_unblocked(), Some(record));
+        assert_eq!(state.pending_mask(), bit);
     }
 
     #[test]
@@ -1272,16 +1295,32 @@ mod linux_task_logic {
             Some(1_844_674_407_371)
         );
         assert_eq!(
-            linux_sleep_remaining_timespec(141, 41, TICK_NANOS),
-            Some((1, 0))
+            linux_sleep_timespec_nanoseconds(18_446_744_073, 709_551_615),
+            Some(u64::MAX)
         );
         assert_eq!(
-            linux_sleep_remaining_timespec(1_844_674_407_372, 0, TICK_NANOS),
-            Some((18_446_744_073, 720_000_000))
+            linux_sleep_remaining_timespec(40, 1, 40, TICK_NANOS),
+            Some((0, 1))
         );
         assert_eq!(
-            linux_sleep_remaining_timespec(41, 141, TICK_NANOS),
+            linux_sleep_remaining_timespec(40, 1, 41, TICK_NANOS),
             Some((0, 0))
+        );
+        assert_eq!(
+            linux_sleep_remaining_timespec(40, TICK_NANOS, 40, TICK_NANOS),
+            Some((0, 10_000_000))
+        );
+        assert_eq!(
+            linux_sleep_remaining_timespec(40, TICK_NANOS, 41, TICK_NANOS),
+            Some((0, 0))
+        );
+        assert_eq!(
+            linux_sleep_remaining_timespec(0, 1_000_000_000, 40, TICK_NANOS),
+            Some((0, 600_000_000))
+        );
+        assert_eq!(
+            linux_sleep_remaining_timespec(0, u64::MAX, 0, TICK_NANOS),
+            Some((18_446_744_073, 709_551_615))
         );
         assert_eq!(
             linux_sleep_relative_deadline_ticks(0, -1, 0, TICK_NANOS),
@@ -1291,7 +1330,8 @@ mod linux_task_logic {
             linux_sleep_absolute_deadline_ticks(0, 1_000_000_000, TICK_NANOS),
             None
         );
-        assert_eq!(linux_sleep_remaining_timespec(1, 0, 0), None);
+        assert_eq!(linux_sleep_timespec_nanoseconds(0, 1_000_000_000), None);
+        assert_eq!(linux_sleep_remaining_timespec(0, 1, 0, 0), None);
     }
 
     #[test]
@@ -1307,6 +1347,7 @@ mod linux_task_logic {
             LinuxSleepWait {
                 deadline: 40,
                 outcome: LinuxSleepOutcome::Completed,
+                relative: None,
             },
         ));
         assert!(!tasks.install_sleep(
@@ -1315,9 +1356,19 @@ mod linux_task_logic {
             LinuxSleepWait {
                 deadline: 40,
                 outcome: LinuxSleepOutcome::Interrupted,
+                relative: None,
             },
         ));
-        assert!(tasks.install_sleep(child.tid, 8, LinuxSleepWait::waiting(50)));
+        assert_eq!(LinuxSleepWait::waiting(45).relative, None);
+        let completed_wait = LinuxSleepWait::relative_waiting(50, 40, 1);
+        assert_eq!(
+            completed_wait.relative,
+            Some(LinuxSleepRelative {
+                started_at: 40,
+                requested_nanoseconds: 1,
+            })
+        );
+        assert!(tasks.install_sleep(child.tid, 8, completed_wait));
         assert!(!tasks.install_sleep(child.tid, 8, LinuxSleepWait::waiting(60)));
         assert!(tasks.block(child.tid, 8, LinuxBlockReason::Sleep));
         assert_eq!(tasks.expire_sleeps(49), [None, None, None]);
@@ -1331,6 +1382,7 @@ mod linux_task_logic {
             Some(LinuxSleepWait {
                 deadline: 50,
                 outcome: LinuxSleepOutcome::Completed,
+                relative: completed_wait.relative,
             })
         );
         assert_eq!(tasks.take_sleep_outcome(child.tid, 8), None);
@@ -1352,7 +1404,8 @@ mod linux_task_logic {
         assert!(!tasks.cancel_sleep(child.tid, 8));
         assert_eq!(tasks.take_sleep_outcome(child.tid, 8), None);
 
-        assert!(tasks.install_sleep(child.tid, 8, LinuxSleepWait::waiting(80)));
+        let interrupted_wait = LinuxSleepWait::relative_waiting(80, 70, 10_000_000);
+        assert!(tasks.install_sleep(child.tid, 8, interrupted_wait));
         assert!(tasks.block(child.tid, 8, LinuxBlockReason::Sleep));
         tasks.signal_state_mut(child.tid, 8).unwrap().mask = linux_signal_bit(6);
         assert!(!tasks.interrupt_sleep(child.tid, 8, 6));
@@ -1361,10 +1414,12 @@ mod linux_task_logic {
         assert!(!tasks.interrupt_sleep(child.tid, 8, 6));
         assert!(tasks.wake(child.tid, 8));
         assert_eq!(
-            tasks
-                .take_sleep_outcome(child.tid, 8)
-                .map(|wait| wait.outcome),
-            Some(LinuxSleepOutcome::Interrupted)
+            tasks.take_sleep_outcome(child.tid, 8),
+            Some(LinuxSleepWait {
+                deadline: 80,
+                outcome: LinuxSleepOutcome::Interrupted,
+                relative: interrupted_wait.relative,
+            })
         );
 
         assert!(tasks.install_sleep(child.tid, 8, LinuxSleepWait::waiting(90)));
