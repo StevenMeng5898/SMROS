@@ -748,9 +748,8 @@ pub(crate) fn linux_signal_timespec_to_ticks_ceil(
     let total_nanoseconds = (seconds as u64)
         .checked_mul(1_000_000_000)?
         .checked_add(nanoseconds as u64)?;
-    let ticks = total_nanoseconds
-        .checked_add(tick_nanoseconds - 1)?
-        .checked_div(tick_nanoseconds)?;
+    let ticks = total_nanoseconds / tick_nanoseconds;
+    let ticks = ticks.checked_add(u64::from(total_nanoseconds % tick_nanoseconds != 0))?;
     let phase_guard = if total_nanoseconds == 0 { 0 } else { 1 };
     now.checked_add(ticks)?.checked_add(phase_guard)
 }
@@ -775,9 +774,8 @@ pub(crate) fn linux_sleep_absolute_deadline_ticks(
     let total_nanoseconds = (seconds as u64)
         .checked_mul(1_000_000_000)?
         .checked_add(nanoseconds as u64)?;
-    total_nanoseconds
-        .checked_add(tick_nanoseconds - 1)?
-        .checked_div(tick_nanoseconds)
+    let ticks = total_nanoseconds / tick_nanoseconds;
+    ticks.checked_add(u64::from(total_nanoseconds % tick_nanoseconds != 0))
 }
 
 pub(crate) fn linux_sleep_remaining_timespec(
@@ -1598,7 +1596,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         let Some(slot) = self.task_slot(tid, scheduler_thread) else {
             return false;
         };
-        if self.sleep_waits[slot].is_some() {
+        if wait.outcome != LinuxSleepOutcome::Waiting || self.sleep_waits[slot].is_some() {
             return false;
         }
         self.sleep_waits[slot] = Some(wait);

@@ -1243,6 +1243,14 @@ mod linux_task_logic {
             Some(100)
         );
         assert_eq!(
+            linux_sleep_relative_deadline_ticks(0, 18_446_744_073, 709_551_615, TICK_NANOS,),
+            Some(1_844_674_407_372)
+        );
+        assert_eq!(
+            linux_sleep_absolute_deadline_ticks(18_446_744_073, 709_551_615, TICK_NANOS,),
+            Some(1_844_674_407_371)
+        );
+        assert_eq!(
             linux_sleep_remaining_timespec(141, 41, TICK_NANOS),
             Some((1, 0))
         );
@@ -1268,6 +1276,22 @@ mod linux_task_logic {
         let child = tasks.reserve_child(8).unwrap();
         assert!(tasks.publish(child));
 
+        assert!(!tasks.install_sleep(
+            child.tid,
+            8,
+            LinuxSleepWait {
+                deadline: 40,
+                outcome: LinuxSleepOutcome::Completed,
+            },
+        ));
+        assert!(!tasks.install_sleep(
+            child.tid,
+            8,
+            LinuxSleepWait {
+                deadline: 40,
+                outcome: LinuxSleepOutcome::Interrupted,
+            },
+        ));
         assert!(tasks.install_sleep(child.tid, 8, LinuxSleepWait::waiting(50)));
         assert!(!tasks.install_sleep(child.tid, 8, LinuxSleepWait::waiting(60)));
         assert!(tasks.block(child.tid, 8, LinuxBlockReason::Sleep));
@@ -1284,6 +1308,23 @@ mod linux_task_logic {
                 outcome: LinuxSleepOutcome::Completed,
             })
         );
+        assert_eq!(tasks.take_sleep_outcome(child.tid, 8), None);
+
+        assert!(tasks.install_sleep(child.tid, 8, LinuxSleepWait::waiting(70)));
+        assert!(!tasks.cancel_sleep(child.tid + 1, 8));
+        assert!(!tasks.cancel_sleep(child.tid, 9));
+        assert!(tasks.cancel_sleep(child.tid, 8));
+        assert!(!tasks.cancel_sleep(child.tid, 8));
+
+        assert!(tasks.install_sleep(child.tid, 8, LinuxSleepWait::waiting(75)));
+        assert!(tasks.block(child.tid, 8, LinuxBlockReason::Sleep));
+        assert_eq!(
+            tasks.expire_sleeps(75)[0],
+            Some((child.tid, 8, LinuxBlockReason::Sleep))
+        );
+        assert!(tasks.wake(child.tid, 8));
+        assert!(tasks.cancel_sleep(child.tid, 8));
+        assert!(!tasks.cancel_sleep(child.tid, 8));
         assert_eq!(tasks.take_sleep_outcome(child.tid, 8), None);
 
         assert!(tasks.install_sleep(child.tid, 8, LinuxSleepWait::waiting(80)));
