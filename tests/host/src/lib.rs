@@ -3111,6 +3111,41 @@ mod lowlevel_logic {
     }
 }
 
+mod aarch64_vm_logic {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/kernel_lowlevel/aarch64_vm_logic_shared.rs"
+    ));
+
+    #[test]
+    fn three_level_indices_distinguish_adjacent_user_pages() {
+        assert_eq!(aarch64_table_indices(0x1000_0000), Some([0, 128, 0]));
+        assert_eq!(aarch64_table_indices(0x1000_1000), Some([0, 128, 1]));
+        assert_eq!(aarch64_table_indices(0x4000_0000), Some([1, 0, 0]));
+        assert_eq!(aarch64_table_indices(1usize << 39), None);
+    }
+
+    #[test]
+    fn physical_allocator_range_excludes_kernel_and_partial_pages() {
+        assert_eq!(
+            aarch64_frame_range(0x4fb0_7001, 0x4000_0000, 0x4000_0000),
+            None
+        );
+        assert_eq!(
+            aarch64_frame_range(0x4fb0_7001, 0x4000_0000, 0x6000_0000),
+            Some((0x4fb0_8000, 0x6000_0000))
+        );
+    }
+
+    #[test]
+    fn user_window_is_below_qemu_ram_and_page_aligned() {
+        assert!(aarch64_user_range_valid(0x1000_0000, 0x1000));
+        assert!(aarch64_user_range_valid(0x1fff_e000, 0x2000));
+        assert!(!aarch64_user_range_valid(0x0fff_f000, 0x2000));
+        assert!(!aarch64_user_range_valid(0x1fff_f000, 0x2000));
+    }
+}
+
 mod aarch64_context_logic {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

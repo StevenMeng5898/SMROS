@@ -3,6 +3,7 @@ use vstd::prelude::*;
 verus! {
 
 include!("../../../src/kernel_lowlevel/lowlevel_logic_shared.rs");
+include!("../../../src/kernel_lowlevel/aarch64_vm_logic_shared.rs");
 
 pub const PAGE_SIZE: usize = 4096;
 pub const MAX_PROCESSES: usize = 16;
