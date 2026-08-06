@@ -52,6 +52,7 @@ use super::address_logic::{
     linux_user_range_writable as shared_linux_user_range_writable,
 };
 use super::linux_futex;
+use super::linux_process;
 #[cfg(target_arch = "aarch64")]
 use super::linux_syscall_context;
 use super::linux_task;
@@ -7178,12 +7179,12 @@ pub fn sys_exit_group(exit_code: i32) -> SysResult {
 
 /// Linux sys_getpid implementation
 pub fn sys_getpid() -> SysResult {
-    linux_task::current_tgid()
+    linux_process::current_pid()
 }
 
 /// Linux sys_getppid implementation
 pub fn sys_getppid() -> SysResult {
-    Ok(0)
+    linux_process::current_parent_pid()
 }
 
 /// Linux sys_gettid implementation

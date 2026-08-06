@@ -9,6 +9,7 @@
 
 pub(crate) mod address_logic;
 pub(crate) mod linux_futex;
+pub(crate) mod linux_process;
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod linux_syscall_context;
 pub(crate) mod linux_task;

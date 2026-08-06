@@ -1261,6 +1261,7 @@ impl<const N: usize> LinuxTaskTable<N> {
 
     pub(crate) fn reserve_child(
         &mut self,
+        tgid: usize,
         scheduler_thread: usize,
     ) -> Option<LinuxTaskReservation> {
         if self.exhausted {
@@ -1286,7 +1287,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         }
         self.tasks[slot] = LinuxTaskCore {
             tid: reservation.tid,
-            tgid: LINUX_ROOT_TID,
+            tgid,
             scheduler_thread,
             state: LinuxTaskState::Starting,
             block_reason: LinuxBlockReason::None,

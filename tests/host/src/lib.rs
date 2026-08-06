@@ -500,7 +500,9 @@ mod linux_task_logic {
         let mut tasks = LinuxTaskTable::<3>::new();
         assert_eq!(tasks.register_root(7), Ok(LINUX_ROOT_TID));
 
-        let first = tasks.reserve_child(8).expect("first child reservation");
+        let first = tasks
+            .reserve_child(LINUX_ROOT_TID, 8)
+            .expect("first child reservation");
         assert_eq!(first.tid, 2);
         assert_eq!(tasks.by_tid(first.tid), None);
         assert_eq!(tasks.by_scheduler(8), None);
@@ -509,7 +511,9 @@ mod linux_task_logic {
 
         assert!(tasks.exit(first.tid, 8));
         assert!(tasks.retire(first.tid, 8));
-        let second = tasks.reserve_child(9).expect("reused table slot");
+        let second = tasks
+            .reserve_child(LINUX_ROOT_TID, 9)
+            .expect("reused table slot");
         assert_eq!(second.tid, 3);
         assert_ne!(first.tid, second.tid);
         assert!(!tasks.publish(first), "stale reservation must not publish");
@@ -520,7 +524,7 @@ mod linux_task_logic {
     fn task_state_and_scheduler_identity_move_together() {
         let mut tasks = LinuxTaskTable::<3>::new();
         tasks.register_root(7).unwrap();
-        let child = tasks.reserve_child(8).unwrap();
+        let child = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
         assert!(tasks.publish(child));
         assert!(tasks.block(child.tid, 8, LinuxBlockReason::Futex));
         assert_eq!(
@@ -547,7 +551,7 @@ mod linux_task_logic {
     fn rollback_releases_only_the_matching_starting_reservation() {
         let mut tasks = LinuxTaskTable::<2>::new();
         tasks.register_root(7).unwrap();
-        let first = tasks.reserve_child(8).unwrap();
+        let first = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
 
         assert_eq!(tasks.scheduler_thread_for_reset(first.slot), Some(8));
         assert_eq!(tasks.scheduler_thread_for_reset(usize::MAX), None);
@@ -559,7 +563,9 @@ mod linux_task_logic {
         assert!(tasks.rollback(first));
         assert!(!tasks.rollback(first));
 
-        let second = tasks.reserve_child(9).expect("rolled-back slot");
+        let second = tasks
+            .reserve_child(LINUX_ROOT_TID, 9)
+            .expect("rolled-back slot");
         assert_eq!(second.slot, first.slot);
         assert_eq!(second.tid, first.tid + 1);
         assert!(!tasks.publish(first));
@@ -570,7 +576,7 @@ mod linux_task_logic {
     fn invalid_and_stale_transitions_leave_the_live_task_unchanged() {
         let mut tasks = LinuxTaskTable::<2>::new();
         tasks.register_root(7).unwrap();
-        let child = tasks.reserve_child(8).unwrap();
+        let child = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
 
         assert!(!tasks.block(child.tid, 8, LinuxBlockReason::Futex));
         assert!(tasks.publish(child));
@@ -594,7 +600,7 @@ mod linux_task_logic {
     fn child_exit_takes_clear_tid_once_and_clears_pending_signal_state() {
         let mut tasks = LinuxTaskTable::<2>::new();
         tasks.register_root(7).unwrap();
-        let child = tasks.reserve_child(8).unwrap();
+        let child = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
         assert!(tasks.publish(child));
         assert!(tasks.set_clear_child_tid(child.tid, 8, 0x3000));
         assert!(tasks.set_clear_child_tid(child.tid, 8, 0x4000));
@@ -617,16 +623,16 @@ mod linux_task_logic {
     fn capacity_does_not_consume_a_tid_and_reset_starts_a_new_launch() {
         let mut tasks = LinuxTaskTable::<2>::new();
         tasks.register_root(7).unwrap();
-        let child = tasks.reserve_child(8).unwrap();
+        let child = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
         assert_eq!(child.tid, 2);
-        assert_eq!(tasks.reserve_child(9), None);
+        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 9), None);
         assert!(tasks.rollback(child));
-        assert_eq!(tasks.reserve_child(9).unwrap().tid, 3);
+        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 9).unwrap().tid, 3);
 
         tasks.reset();
         assert_eq!(tasks.by_scheduler(7), None);
         assert_eq!(tasks.register_root(10), Ok(LINUX_ROOT_TID));
-        assert_eq!(tasks.reserve_child(11).unwrap().tid, 2);
+        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 11).unwrap().tid, 2);
     }
 
     #[test]
@@ -664,17 +670,19 @@ mod linux_task_logic {
         tasks.register_root(7).unwrap();
         tasks.next_tid = LINUX_MAX_TID;
 
-        let last = tasks.reserve_child(8).expect("last valid Linux TID");
+        let last = tasks
+            .reserve_child(LINUX_ROOT_TID, 8)
+            .expect("last valid Linux TID");
         assert_eq!(last.tid, LINUX_MAX_TID);
         assert!(tasks.rollback(last));
-        assert_eq!(tasks.reserve_child(9), None);
+        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 9), None);
 
         tasks.next_tid = 2;
-        assert_eq!(tasks.reserve_child(9), None);
+        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 9), None);
 
         tasks.reset();
         tasks.register_root(10).unwrap();
-        assert_eq!(tasks.reserve_child(11).unwrap().tid, 2);
+        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 11).unwrap().tid, 2);
     }
 
     #[test]
@@ -684,11 +692,11 @@ mod linux_task_logic {
         tasks.next_tid = LINUX_MAX_TID + 1;
         let slots_before = tasks.tasks;
 
-        assert_eq!(tasks.reserve_child(8), None);
+        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 8), None);
         assert_eq!(tasks.tasks, slots_before);
 
         tasks.next_tid = 2;
-        assert_eq!(tasks.reserve_child(8), None);
+        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 8), None);
         assert_eq!(tasks.tasks, slots_before);
     }
 
@@ -698,13 +706,13 @@ mod linux_task_logic {
         tasks.register_root(7).unwrap();
         tasks.next_tid = usize::MAX;
 
-        assert_eq!(tasks.reserve_child(8), None);
+        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 8), None);
         tasks.next_tid = 2;
-        assert_eq!(tasks.reserve_child(8), None);
+        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 8), None);
 
         tasks.reset();
         tasks.register_root(9).unwrap();
-        assert_eq!(tasks.reserve_child(10).unwrap().tid, 2);
+        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 10).unwrap().tid, 2);
     }
 
     #[cfg(test)]
@@ -883,8 +891,8 @@ mod linux_task_logic {
     ) {
         let mut tasks = LinuxTaskTable::<3>::new();
         tasks.register_root(7).unwrap();
-        let first = tasks.reserve_child(8).unwrap();
-        let second = tasks.reserve_child(9).unwrap();
+        let first = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
+        let second = tasks.reserve_child(LINUX_ROOT_TID, 9).unwrap();
         assert!(tasks.publish(first));
         assert!(tasks.publish(second));
         (tasks, first, second)
@@ -1338,7 +1346,7 @@ mod linux_task_logic {
     fn linux_sleep_waits_expire_or_interrupt_once_and_reset_with_their_task() {
         let mut tasks = LinuxTaskTable::<3>::new();
         tasks.register_root(7).unwrap();
-        let child = tasks.reserve_child(8).unwrap();
+        let child = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
         assert!(tasks.publish(child));
 
         assert!(!tasks.install_sleep(
@@ -1426,12 +1434,12 @@ mod linux_task_logic {
         assert!(tasks.exit(child.tid, 8));
         assert!(tasks.retire(child.tid, 8));
         assert_eq!(tasks.take_sleep_outcome(child.tid, 8), None);
-        let replacement = tasks.reserve_child(9).unwrap();
+        let replacement = tasks.reserve_child(LINUX_ROOT_TID, 9).unwrap();
         assert!(tasks.publish(replacement));
         assert!(!tasks.interrupt_sleep(child.tid, 8, 6));
         assert_eq!(tasks.expire_sleeps(90), [None, None, None]);
 
-        let rollback = tasks.reserve_child(10).unwrap();
+        let rollback = tasks.reserve_child(LINUX_ROOT_TID, 10).unwrap();
         tasks.sleep_waits[rollback.slot] = Some(LinuxSleepWait::waiting(95));
         assert!(tasks.rollback(rollback));
         assert_eq!(tasks.sleep_waits[rollback.slot], None);
@@ -1988,7 +1996,7 @@ mod linux_task_logic {
         let mut tasks = LinuxTaskTable::<2>::new();
         tasks.register_root(7).unwrap();
 
-        let rolled_back = tasks.reserve_child(8).unwrap();
+        let rolled_back = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
         tasks.signal_states[rolled_back.slot].mask = 0x55;
         tasks.signal_states[rolled_back.slot]
             .queue(signal_record(34, 0x34))
@@ -2009,7 +2017,7 @@ mod linux_task_logic {
         assert_eq!(tasks.signal_states[rolled_back.slot].standard_reserved, 0);
         assert_eq!(tasks.signal_states[rolled_back.slot].realtime_reserved, 0);
 
-        let retired = tasks.reserve_child(9).unwrap();
+        let retired = tasks.reserve_child(LINUX_ROOT_TID, 9).unwrap();
         assert_eq!(retired.slot, rolled_back.slot);
         assert!(tasks.publish(retired));
         let retired_state = tasks.signal_state_mut(retired.tid, 9).unwrap();
@@ -2083,9 +2091,9 @@ mod linux_task_logic {
             .unwrap();
         assert!(parent.request_sigreturn());
 
-        let stale = tasks.reserve_child(8).unwrap();
+        let stale = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
         assert!(tasks.rollback(stale));
-        let child = tasks.reserve_child(9).unwrap();
+        let child = tasks.reserve_child(LINUX_ROOT_TID, 9).unwrap();
         assert_eq!(stale.slot, child.slot);
         assert_ne!(stale.tid, child.tid);
         assert!(!tasks.inherit_signal_mask(stale, 7));
@@ -2130,6 +2138,16 @@ mod linux_task_logic {
         }
     }
 
+    #[test]
+    fn thread_reservation_retains_the_current_process_tgid() {
+        let mut tasks = LinuxTaskTable::<2>::new();
+        tasks.register_root(7).unwrap();
+
+        let child = tasks.reserve_child(42, 8).unwrap();
+        assert!(tasks.publish(child));
+        assert_eq!(tasks.by_tid(child.tid).map(|task| task.tgid), Some(42));
+    }
+
     #[cfg(test)]
     fn target_for(reservation: LinuxTaskReservation) -> LinuxTaskCore {
         LinuxTaskCore {
@@ -2139,6 +2157,234 @@ mod linux_task_logic {
             state: LinuxTaskState::Runnable,
             block_reason: LinuxBlockReason::None,
         }
+    }
+}
+
+mod linux_process_logic {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/linux_process_logic_shared.rs"
+    ));
+
+    #[test]
+    fn root_registration_is_unique_and_published_by_pid_and_scheduler() {
+        let mut processes = LinuxProcessTable::<2>::new();
+
+        assert_eq!(processes.register_root(7), Ok(LINUX_ROOT_PID));
+        assert_eq!(
+            processes.register_root(8),
+            Err(LinuxProcessError::DuplicateRoot)
+        );
+        assert_eq!(
+            processes.by_pid(LINUX_ROOT_PID),
+            Some(LinuxProcessCore {
+                pid: LINUX_ROOT_PID,
+                parent_pid: 0,
+                process_group: LINUX_ROOT_PID,
+                root_scheduler_thread: 7,
+                state: LinuxProcessState::Running,
+                wait_status: 0,
+            })
+        );
+        assert_eq!(processes.by_scheduler(7), processes.by_pid(LINUX_ROOT_PID));
+
+        let mut empty = LinuxProcessTable::<0>::new();
+        assert_eq!(empty.register_root(7), Err(LinuxProcessError::Capacity));
+    }
+
+    #[test]
+    fn reservations_are_hidden_and_publish_or_rollback_atomically() {
+        let mut processes = LinuxProcessTable::<3>::new();
+        processes.register_root(7).unwrap();
+
+        let first = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert_eq!(first.pid, 2);
+        assert_eq!(first.parent_pid, LINUX_ROOT_PID);
+        assert_eq!(processes.by_pid(first.pid), None);
+        assert_eq!(processes.by_scheduler(8), None);
+        assert!(!processes.has_matching_child(LINUX_ROOT_PID, LinuxWaitSelector::Pid(first.pid)));
+        assert!(processes.publish(first));
+        assert_eq!(
+            processes.by_scheduler(8).map(|process| process.pid),
+            Some(2)
+        );
+
+        let rolled_back = processes.reserve_child(LINUX_ROOT_PID, 9).unwrap();
+        assert_eq!(rolled_back.pid, 3);
+        assert!(processes.rollback(rolled_back));
+        assert!(!processes.publish(rolled_back));
+        let replacement = processes.reserve_child(LINUX_ROOT_PID, 10).unwrap();
+        assert_eq!(replacement.slot, rolled_back.slot);
+        assert_eq!(replacement.pid, 4, "rolled-back PIDs must not be reused");
+    }
+
+    #[test]
+    fn children_inherit_parent_and_process_group_relationships() {
+        let mut processes = LinuxProcessTable::<4>::new();
+        processes.register_root(7).unwrap();
+        let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert!(processes.publish(child));
+        let grandchild = processes.reserve_child(child.pid, 9).unwrap();
+        assert!(processes.publish(grandchild));
+
+        assert_eq!(
+            processes
+                .by_pid(child.pid)
+                .map(|process| (process.parent_pid, process.process_group,)),
+            Some((LINUX_ROOT_PID, LINUX_ROOT_PID))
+        );
+        assert_eq!(
+            processes.by_scheduler(9).map(|process| (
+                process.pid,
+                process.parent_pid,
+                process.process_group,
+            )),
+            Some((grandchild.pid, child.pid, LINUX_ROOT_PID))
+        );
+        assert_eq!(
+            processes.reserve_child(999, 10),
+            Err(LinuxProcessError::NoSuchParent)
+        );
+    }
+
+    #[test]
+    fn wait_status_encoding_matches_posix_layout() {
+        for (code, expected) in [(0, 0), (1, 0x100), (255, 0xff00), (256, 0), (-1, 0xff00)] {
+            assert_eq!(linux_wait_status_exit(code), expected);
+        }
+        assert_eq!(linux_wait_status_signal(1, false), Some(1));
+        assert_eq!(linux_wait_status_signal(127, true), Some(0xff));
+        assert_eq!(linux_wait_status_signal(0, false), None);
+        assert_eq!(linux_wait_status_signal(128, false), None);
+    }
+
+    #[test]
+    fn wait_selection_covers_exact_any_group_and_wnohang_states() {
+        let mut processes = LinuxProcessTable::<4>::new();
+        processes.register_root(7).unwrap();
+        let first = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        let second = processes.reserve_child(LINUX_ROOT_PID, 9).unwrap();
+        assert!(processes.publish(first));
+        assert!(processes.publish(second));
+
+        assert_eq!(
+            processes.select_waitable(LINUX_ROOT_PID, LinuxWaitSelector::Any),
+            None
+        );
+        assert!(
+            processes.has_matching_child(LINUX_ROOT_PID, LinuxWaitSelector::Any),
+            "WNOHANG returns zero only while a matching live child exists"
+        );
+        assert!(!processes.has_matching_child(LINUX_ROOT_PID, LinuxWaitSelector::Pid(999)));
+
+        let second_status = linux_wait_status_exit(23);
+        assert!(processes.exit(second.pid, second_status));
+        assert_eq!(
+            processes
+                .select_waitable(LINUX_ROOT_PID, LinuxWaitSelector::Pid(second.pid))
+                .map(|process| (process.pid, process.wait_status)),
+            Some((second.pid, second_status))
+        );
+        assert_eq!(
+            processes
+                .select_waitable(LINUX_ROOT_PID, LinuxWaitSelector::Any)
+                .map(|process| process.pid),
+            Some(second.pid)
+        );
+        assert_eq!(
+            processes
+                .select_waitable(
+                    LINUX_ROOT_PID,
+                    LinuxWaitSelector::ProcessGroup(LINUX_ROOT_PID),
+                )
+                .map(|process| process.pid),
+            Some(second.pid)
+        );
+        assert_eq!(
+            processes.select_waitable(LINUX_ROOT_PID, LinuxWaitSelector::ProcessGroup(99)),
+            None
+        );
+    }
+
+    #[test]
+    fn zombies_are_reaped_once_without_reusing_their_pid() {
+        let mut processes = LinuxProcessTable::<2>::new();
+        processes.register_root(7).unwrap();
+        let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert!(processes.publish(child));
+        let status = linux_wait_status_exit(9);
+        assert!(processes.exit(child.pid, status));
+        assert!(!processes.exit(child.pid, status));
+
+        assert_eq!(
+            processes
+                .reap(LINUX_ROOT_PID, child.pid)
+                .map(|process| process.wait_status),
+            Some(status)
+        );
+        assert_eq!(processes.reap(LINUX_ROOT_PID, child.pid), None);
+        assert_eq!(processes.by_pid(child.pid), None);
+        let next = processes.reserve_child(LINUX_ROOT_PID, 9).unwrap();
+        assert_eq!(next.pid, child.pid + 1);
+    }
+
+    #[test]
+    fn published_descendants_reparent_to_the_launch_reaper() {
+        let mut processes = LinuxProcessTable::<5>::new();
+        processes.register_root(7).unwrap();
+        let parent = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert!(processes.publish(parent));
+        let running = processes.reserve_child(parent.pid, 9).unwrap();
+        assert!(processes.publish(running));
+        let zombie = processes.reserve_child(parent.pid, 10).unwrap();
+        assert!(processes.publish(zombie));
+        assert!(processes.exit(zombie.pid, linux_wait_status_exit(4)));
+        let reserved = processes.reserve_child(parent.pid, 11).unwrap();
+
+        assert_eq!(processes.reparent_children(parent.pid, LINUX_ROOT_PID), 2);
+        assert_eq!(
+            processes
+                .by_pid(running.pid)
+                .map(|process| process.parent_pid),
+            Some(LINUX_ROOT_PID)
+        );
+        assert_eq!(
+            processes
+                .by_pid(zombie.pid)
+                .map(|process| process.parent_pid),
+            Some(LINUX_ROOT_PID)
+        );
+        assert_eq!(processes.by_pid(reserved.pid), None);
+        assert!(processes.rollback(reserved));
+    }
+
+    #[test]
+    fn pid_exhaustion_is_monotonic_even_after_rollback() {
+        let max_pid = i32::MAX as usize;
+        let mut processes = LinuxProcessTable::<3>::with_next_pid(max_pid);
+        processes.register_root(7).unwrap();
+        let final_pid = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert_eq!(final_pid.pid, max_pid);
+        assert!(processes.rollback(final_pid));
+        assert_eq!(
+            processes.reserve_child(LINUX_ROOT_PID, 9),
+            Err(LinuxProcessError::Exhausted)
+        );
+    }
+
+    #[test]
+    fn reset_clears_every_record_and_starts_a_new_launch_identity_space() {
+        let mut processes = LinuxProcessTable::<3>::new();
+        processes.register_root(7).unwrap();
+        let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert!(processes.publish(child));
+        assert!(processes.exit(child.pid, linux_wait_status_exit(2)));
+
+        processes.reset();
+        assert_eq!(processes.by_pid(LINUX_ROOT_PID), None);
+        assert_eq!(processes.by_pid(child.pid), None);
+        assert_eq!(processes.register_root(17), Ok(LINUX_ROOT_PID));
+        assert_eq!(processes.reserve_child(LINUX_ROOT_PID, 18).unwrap().pid, 2);
     }
 }
 
@@ -5589,8 +5835,8 @@ mod linux_child_exit_lifecycle_logic {
         let clear_address = (&mut clear_word as *mut u32) as usize;
         let mut tasks = LinuxTaskTable::<3>::new();
         tasks.register_root(7).unwrap();
-        let exiting = tasks.reserve_child(8).unwrap();
-        let peer = tasks.reserve_child(9).unwrap();
+        let exiting = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
+        let peer = tasks.reserve_child(LINUX_ROOT_TID, 9).unwrap();
         assert!(tasks.publish(exiting));
         assert!(tasks.publish(peer));
         assert!(tasks.set_clear_child_tid(exiting.tid, 8, clear_address));

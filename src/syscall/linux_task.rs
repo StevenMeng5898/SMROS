@@ -37,11 +37,12 @@ fn with_runtime<R>(operation: impl FnOnce(&mut LinuxTaskRuntime) -> R) -> R {
 }
 
 pub(crate) fn register_root(scheduler_thread: ThreadId) -> Result<usize, SysError> {
-    with_runtime(|runtime| {
-        let current = scheduler::scheduler().current();
-        if scheduler_thread == ThreadId::IDLE || scheduler_thread != current {
-            return Err(SysError::ESRCH);
-        }
+    let current = scheduler::scheduler().current();
+    if scheduler_thread == ThreadId::IDLE || scheduler_thread != current {
+        return Err(SysError::ESRCH);
+    }
+    let process_pid = super::linux_process::register_root(scheduler_thread)?;
+    let task = with_runtime(|runtime| {
         runtime
             .tasks
             .register_root(scheduler_thread.0)
@@ -50,7 +51,18 @@ pub(crate) fn register_root(scheduler_thread: ThreadId) -> Result<usize, SysErro
                 LinuxTaskError::Capacity | LinuxTaskError::Exhausted => SysError::EAGAIN,
                 LinuxTaskError::InvalidTransition => SysError::EINVAL,
             })
-    })
+    });
+    match task {
+        Ok(tid) if tid == process_pid => Ok(tid),
+        Ok(_) => {
+            super::linux_process::reset_launch();
+            Err(SysError::EINVAL)
+        }
+        Err(error) => {
+            super::linux_process::reset_launch();
+            Err(error)
+        }
+    }
 }
 
 pub(crate) fn current_tid() -> Result<usize, SysError> {
@@ -501,6 +513,7 @@ pub(crate) fn reset() {
             .fill(aarch64_clone::LinuxCloneSlot::EMPTY);
         runtime.tasks.reset();
     });
+    super::linux_process::reset_launch();
     #[cfg(target_arch = "aarch64")]
     super::linux_syscall_context::reset();
 }
@@ -581,8 +594,10 @@ mod aarch64_clone {
     ) -> Result<LinuxTaskReservation, SysError> {
         with_runtime(|runtime| {
             let current = scheduler::scheduler().current();
-            if runtime.tasks.by_scheduler(current.0).is_none()
-                || scheduler_id == ThreadId::IDLE
+            let Some(parent) = runtime.tasks.by_scheduler(current.0) else {
+                return Err(SysError::EAGAIN);
+            };
+            if scheduler_id == ThreadId::IDLE
                 || scheduler_id == current
                 || scheduler::scheduler()
                     .get_thread(scheduler_id)
@@ -594,7 +609,7 @@ mod aarch64_clone {
 
             let reservation = runtime
                 .tasks
-                .reserve_child(scheduler_id.0)
+                .reserve_child(parent.tgid, scheduler_id.0)
                 .ok_or(SysError::EAGAIN)?;
             if !runtime.tasks.inherit_signal_mask(reservation, current.0) {
                 let _ = runtime.tasks.rollback(reservation);
