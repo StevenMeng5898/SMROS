@@ -78,6 +78,9 @@ fn aarch64_bootstrap_mmu_maps_ram_mmio_and_secondary_cpus() {
     let address_space =
         std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/user_address_space.rs"))
             .expect("read AArch64 address-space owner");
+    let shared =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/aarch64_vm_logic_shared.rs"))
+            .expect("read shared AArch64 VM logic");
     let cpu = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/cpu.rs"))
         .expect("read AArch64 CPU module");
     let smp = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/smp.rs"))
@@ -86,29 +89,102 @@ fn aarch64_bootstrap_mmu_maps_ram_mmio_and_secondary_cpus() {
     assert!(mmu.contains("static BOOTSTRAP_ROOT: AtomicU64"));
     assert!(mmu.contains("pub fn bootstrap_root() -> u64"));
     assert!(mmu.contains("pub fn activate_bootstrap_on_current_cpu() -> bool"));
-    assert!(address_space.contains("drivers::memory_reg()"));
-    assert!(address_space.contains("drivers::uart_base()"));
-    assert!(address_space.contains("drivers::gicd_base()"));
-    assert!(address_space.contains("drivers::gicr_base()"));
-    assert!(address_space.contains("drivers::virtio_mmio_reg(index)"));
-    assert!(address_space.contains("map_supervisor_range"));
-    assert!(mmu.contains("install_stage1_translation(root)"));
+    let kernel_map = address_space
+        .find("pub fn new_with_kernel_map()")
+        .map(|start| braced_body(&address_space[start..]))
+        .expect("bootstrap address-space constructor");
+    let kernel_map: String = kernel_map
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    assert!(kernel_map
+        .contains("address_space.map_supervisor_range(memory.base,memory.size,false,true)?;"));
+    for device_mapping in [
+        "address_space.map_supervisor_range(drivers::uart_base(),drivers::uart_size(),true,false,)?;",
+        "address_space.map_supervisor_range(drivers::gicd_base(),drivers::gicd_size(),true,false,)?;",
+        "address_space.map_supervisor_range(drivers::gicr_base(),drivers::gicr_size(),true,false,)?;",
+        "address_space.map_supervisor_range(reg.base,reg.size,true,false)?;",
+    ] {
+        assert!(
+            kernel_map.contains(device_mapping),
+            "missing exact supervisor device mapping: {device_mapping}"
+        );
+    }
+    let supervisor_descriptor = shared
+        .find("pub(crate) fn aarch64_supervisor_block_descriptor(")
+        .map(|start| braced_body(&shared[start..]))
+        .expect("supervisor descriptor constructor");
+    assert!(!supervisor_descriptor.contains("AARCH64_DESC_AP_USER"));
 
     let install = cpu
         .find("pub unsafe fn install_stage1_translation")
         .expect("stage-one installation helper");
     let install_body = braced_body(&cpu[install..]);
-    assert!(install_body.contains("0xff"));
-    assert!(install_body.contains("0x04"));
-    assert!(install_body.contains("25"));
-    assert!(install_body.contains("1 << 23"));
-    assert!(install_body.contains("msr mair_el1"));
-    assert!(install_body.contains("msr tcr_el1"));
-    assert!(install_body.contains("msr ttbr0_el1"));
-    assert!(install_body.contains("dsb ish"));
-    assert!(install_body.contains("tlbi vmalle1is"));
-    assert!(install_body.contains("isb"));
-    assert!(install_body.contains("msr sctlr_el1"));
+    let compact_install: String = install_body
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    assert!(compact_install.contains("letmair=0xffu64|(0x04u64<<8);"));
+    assert!(compact_install.contains("lettcr=25u64|(1<<8)|(1<<10)|(3<<12)|(1<<23)|(2u64<<32);"));
+    assert!(compact_install.contains("sctlr|=(1<<0)|(1<<2)|(1<<12);"));
+
+    let mair = install_body.find("msr mair_el1").expect("install MAIR");
+    let tcr = install_body.find("msr tcr_el1").expect("install TCR");
+    let ttbr = install_body.find("msr ttbr0_el1").expect("install TTBR0");
+    let first_dsb = install_body[ttbr..]
+        .find("dsb ish")
+        .map(|offset| ttbr + offset)
+        .expect("barrier before TLB invalidation");
+    let tlbi = install_body[first_dsb..]
+        .find("tlbi vmalle1is")
+        .map(|offset| first_dsb + offset)
+        .expect("invalidate EL1 TLB");
+    let second_dsb = install_body[tlbi..]
+        .find("dsb ish")
+        .map(|offset| tlbi + offset)
+        .expect("barrier after TLB invalidation");
+    let first_isb = install_body[second_dsb..]
+        .find("isb")
+        .map(|offset| second_dsb + offset)
+        .expect("instruction barrier before enabling translation");
+    let sctlr = install_body[first_isb..]
+        .find("msr sctlr_el1")
+        .map(|offset| first_isb + offset)
+        .expect("enable stage-one translation and caches");
+    assert!(mair < tcr && tcr < ttbr && ttbr < first_dsb);
+    assert!(first_dsb < tlbi && tlbi < second_dsb && second_dsb < first_isb);
+    assert!(first_isb < sctlr);
+
+    let bootstrap_root = mmu
+        .find("pub fn bootstrap_root() -> u64")
+        .map(|start| braced_body(&mmu[start..]))
+        .expect("bootstrap-root accessor");
+    assert!(bootstrap_root.contains("BOOTSTRAP_ROOT.load(Ordering::Acquire)"));
+
+    let activate = mmu
+        .find("pub fn activate_bootstrap_on_current_cpu() -> bool")
+        .map(|start| braced_body(&mmu[start..]))
+        .expect("bootstrap activation helper");
+    let reject_zero = activate.find("if root == 0").expect("reject a zero root");
+    let install_root = activate
+        .find("install_stage1_translation(root)")
+        .expect("install the published root");
+    assert!(reject_zero < install_root);
+
+    let init = mmu
+        .find("pub fn init()")
+        .map(|start| braced_body(&mmu[start..]))
+        .expect("MMU initialization");
+    let publish = init
+        .find("BOOTSTRAP_ROOT.store(manager.user_address_space.root_paddr(), Ordering::Release)")
+        .expect("publish bootstrap root");
+    let retain_owner = init
+        .find("KERNEL_PAGETABLE_MANAGER = manager")
+        .expect("retain bootstrap address-space owner");
+    let activate_cpu0 = init
+        .find("activate_bootstrap_on_current_cpu()")
+        .expect("activate bootstrap root on CPU0");
+    assert!(publish < retain_owner && retain_owner < activate_cpu0);
 
     let secondary = smp
         .find("pub extern \"C\" fn secondary_cpu_entry()")
