@@ -125,6 +125,115 @@ macro_rules! smros_ll_memory_reg_body {
     }};
 }
 
+pub(crate) fn memory_reg(
+    detected: Option<(usize, usize)>,
+    fallback_base: usize,
+    fallback_size: usize,
+) -> Option<(usize, usize)> {
+    smros_ll_memory_reg_body!(detected, fallback_base, fallback_size)
+}
+
+pub(crate) struct PageFrameAllocatorCore<const WORDS: usize> {
+    bitmap: [u64; WORDS],
+    base_pfn: u64,
+    total_pages: usize,
+    allocated_pages: usize,
+}
+
+impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
+    pub(crate) const fn new(total_pages: usize) -> Self {
+        Self {
+            bitmap: [0; WORDS],
+            base_pfn: 0,
+            total_pages,
+            allocated_pages: 0,
+        }
+    }
+
+    pub(crate) fn init_range(&mut self, start: usize, end: usize, page_size: usize) -> bool {
+        if page_size == 0 || start % page_size != 0 || end % page_size != 0 || start >= end {
+            return false;
+        }
+
+        let pages = (end - start) / page_size;
+        let Some(capacity) = WORDS.checked_mul(64) else {
+            return false;
+        };
+        if pages > capacity {
+            return false;
+        }
+
+        self.bitmap.fill(0);
+        self.base_pfn = (start / page_size) as u64;
+        self.total_pages = pages;
+        self.allocated_pages = 0;
+        true
+    }
+
+    pub(crate) fn alloc(&mut self) -> Option<u64> {
+        for word_index in 0..WORDS {
+            if self.bitmap[word_index] == u64::MAX {
+                continue;
+            }
+
+            for bit_index in 0..64 {
+                let page_index = word_index * 64 + bit_index;
+                if page_index >= self.total_pages {
+                    return None;
+                }
+
+                let mask = 1u64 << bit_index;
+                if self.bitmap[word_index] & mask == 0 {
+                    self.bitmap[word_index] |= mask;
+                    self.allocated_pages += 1;
+                    return self.base_pfn.checked_add(page_index as u64);
+                }
+            }
+        }
+
+        None
+    }
+
+    pub(crate) fn free(&mut self, pfn: u64) -> bool {
+        let Some(page_index) = pfn
+            .checked_sub(self.base_pfn)
+            .filter(|index| *index < self.total_pages as u64)
+            .map(|index| index as usize)
+        else {
+            return false;
+        };
+        let word_index = page_index / 64;
+        let mask = 1u64 << (page_index % 64);
+        if self.bitmap[word_index] & mask == 0 {
+            return false;
+        }
+
+        self.bitmap[word_index] &= !mask;
+        self.allocated_pages -= 1;
+        true
+    }
+
+    pub(crate) fn pfn_address(&self, pfn: u64, page_size: usize) -> Option<usize> {
+        let index = pfn.checked_sub(self.base_pfn)?;
+        if index >= self.total_pages as u64 || pfn > usize::MAX as u64 {
+            return None;
+        }
+        (pfn as usize).checked_mul(page_size)
+    }
+
+    pub(crate) const fn total_pages(&self) -> usize {
+        self.total_pages
+    }
+
+    pub(crate) const fn allocated_pages(&self) -> usize {
+        self.allocated_pages
+    }
+
+    pub(crate) const fn free_pages(&self) -> usize {
+        self.total_pages - self.allocated_pages
+    }
+}
+
 #[allow(unused_macros)]
 macro_rules! smros_ll_pfn_from_index_body {
     ($index:expr, $base_pfn:expr) => {{

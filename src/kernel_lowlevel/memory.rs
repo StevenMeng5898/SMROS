@@ -515,41 +515,20 @@ impl ProcessState {
 /// Uses a simple bitmap allocator for physical pages.
 /// In a real kernel, you'd use a more sophisticated allocator (buddy, slab).
 pub struct PageFrameAllocator {
-    /// Bitmap of allocated pages; each bit represents one 4 KiB frame.
-    bitmap: [u64; PAGE_FRAME_BITMAP_WORDS],
-    /// Physical page frame corresponding to bitmap index zero.
-    base_pfn: u64,
-    /// Total number of available pages
-    total_pages: usize,
-    /// Number of allocated pages
-    allocated_pages: usize,
+    core: lowlevel_logic::PageFrameAllocatorCore<PAGE_FRAME_BITMAP_WORDS>,
 }
 
 impl PageFrameAllocator {
     /// Create a new page frame allocator
     const fn new() -> Self {
         PageFrameAllocator {
-            bitmap: [0; PAGE_FRAME_BITMAP_WORDS],
-            base_pfn: 0,
-            total_pages: DEFAULT_PAGE_FRAME_COUNT,
-            allocated_pages: 0,
+            core: lowlevel_logic::PageFrameAllocatorCore::new(DEFAULT_PAGE_FRAME_COUNT),
         }
     }
 
     pub fn init_range(start: usize, end: usize) -> bool {
-        if start & (PAGE_SIZE - 1) != 0 || end & (PAGE_SIZE - 1) != 0 || start >= end {
-            return false;
-        }
-        let pages = (end - start) / PAGE_SIZE;
         let allocator = unsafe { &mut *ALLOCATOR.get() };
-        if pages > allocator.bitmap.len() * 64 {
-            return false;
-        }
-        allocator.bitmap.fill(0);
-        allocator.base_pfn = (start / PAGE_SIZE) as u64;
-        allocator.total_pages = pages;
-        allocator.allocated_pages = 0;
-        true
+        allocator.core.init_range(start, end, PAGE_SIZE)
     }
 
     /// Allocate a single page frame
@@ -559,71 +538,36 @@ impl PageFrameAllocator {
         // In a single-threaded kernel context, this is safe.
         let allocator = unsafe { &mut *ALLOCATOR.get() };
 
-        for i in 0..PAGE_FRAME_BITMAP_WORDS {
-            if allocator.bitmap[i] == u64::MAX {
-                continue;
-            }
-
-            for bit in 0..PAGE_FRAME_BITS_PER_WORD {
-                let page_idx = i * PAGE_FRAME_BITS_PER_WORD + bit;
-                if page_idx >= allocator.total_pages {
-                    return None;
-                }
-
-                let mask = 1u64 << bit;
-                if allocator.bitmap[i] & mask == 0 {
-                    allocator.bitmap[i] |= mask;
-                    allocator.allocated_pages += 1;
-                    return allocator.base_pfn.checked_add(page_idx as u64);
-                }
-            }
-        }
-
-        None // No free pages
+        allocator.core.alloc()
     }
 
     /// Free a page frame
     pub fn free(pfn: u64) {
         let allocator = unsafe { &mut *ALLOCATOR.get() };
-        let Some(page_idx) = pfn
-            .checked_sub(allocator.base_pfn)
-            .filter(|index| *index < allocator.total_pages as u64)
-        else {
-            return;
-        };
-
-        let i = lowlevel_logic::bitmap_word_index(page_idx);
-        let bit = lowlevel_logic::bitmap_bit_index(page_idx);
-        let mask = lowlevel_logic::bitmap_mask(bit);
-
-        if allocator.bitmap[i] & mask != 0 {
-            allocator.bitmap[i] &= !mask;
-            allocator.allocated_pages -= 1;
-        }
+        let _ = allocator.core.free(pfn);
     }
 
     pub fn pfn_address(pfn: u64) -> Option<usize> {
         let allocator = unsafe { &*ALLOCATOR.get() };
-        let index = pfn.checked_sub(allocator.base_pfn)?;
-        (index < allocator.total_pages as u64).then(|| (pfn as usize) * PAGE_SIZE)
+        allocator.core.pfn_address(pfn, PAGE_SIZE)
     }
 
     /// Get total number of pages
     pub fn total_pages() -> usize {
         let allocator = unsafe { &*ALLOCATOR.get() };
-        allocator.total_pages
+        allocator.core.total_pages()
     }
 
     /// Get number of allocated pages
     pub fn allocated_pages() -> usize {
         let allocator = unsafe { &*ALLOCATOR.get() };
-        allocator.allocated_pages
+        allocator.core.allocated_pages()
     }
 
     /// Get number of free pages
     pub fn free_pages() -> usize {
         let allocator = unsafe { &*ALLOCATOR.get() };
-        allocator.total_pages - allocator.allocated_pages
+        allocator.core.free_pages()
     }
 }
 

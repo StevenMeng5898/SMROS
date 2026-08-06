@@ -7,13 +7,19 @@ fn aarch64_page_allocator_uses_detected_ram_after_kernel_end() {
         .expect("read memory module");
     let drivers = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/drivers.rs"))
         .expect("read AArch64 drivers");
+    let shared =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/lowlevel_logic_shared.rs"))
+            .expect("read shared low-level logic");
     let main = std::fs::read_to_string(repository.join("src/main.rs")).expect("read kernel main");
 
     assert!(drivers.contains("pub memory_base: usize"));
     assert!(drivers.contains("pub memory_size: usize"));
     assert!(drivers.contains("pub fn memory_reg() -> Option<DeviceReg>"));
+    assert!(drivers.contains("lowlevel_logic::memory_reg("));
     assert!(memory.contains("static __kernel_end"));
     assert!(memory.contains("aarch64_frame_range("));
+    assert!(shared.contains("struct PageFrameAllocatorCore"));
+    assert!(memory.contains("PageFrameAllocatorCore<PAGE_FRAME_BITMAP_WORDS>"));
     assert!(memory.contains("PageFrameAllocator::init_range(frame_start, frame_end)"));
 
     let init_start = memory

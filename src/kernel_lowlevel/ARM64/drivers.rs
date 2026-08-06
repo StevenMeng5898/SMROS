@@ -482,9 +482,18 @@ pub fn uart_base() -> usize {
 
 pub fn memory_reg() -> Option<DeviceReg> {
     ensure_initialized();
-    let base = MEMORY_BASE.load(Ordering::Acquire);
-    let size = MEMORY_SIZE.load(Ordering::Acquire);
-    (base != 0 && size != 0).then_some(DeviceReg { base, size })
+    let memory = lowlevel_logic::memory_reg(
+        Some((
+            MEMORY_BASE.load(Ordering::Acquire),
+            MEMORY_SIZE.load(Ordering::Acquire),
+        )),
+        QEMU_VIRT_MEMORY_BASE,
+        QEMU_VIRT_MEMORY_SIZE,
+    )?;
+    Some(DeviceReg {
+        base: memory.0,
+        size: memory.1,
+    })
 }
 
 pub fn uart_size() -> usize {
@@ -862,11 +871,16 @@ impl FdtParsedResources {
     }
 
     fn finish(self) -> Option<PlatformResources> {
+        let memory = lowlevel_logic::memory_reg(
+            Some((self.memory_base?, self.memory_size?)),
+            QEMU_VIRT_MEMORY_BASE,
+            QEMU_VIRT_MEMORY_SIZE,
+        )?;
         Some(PlatformResources {
             machine: self.machine,
             source: ResourceSource::Fdt,
-            memory_base: self.memory_base?,
-            memory_size: self.memory_size?,
+            memory_base: memory.0,
+            memory_size: memory.1,
             uart_base: self.uart_base?,
             uart_size: self.uart_size?,
             uart_irq: self.uart_irq?,

@@ -3054,6 +3054,58 @@ mod lowlevel_logic {
         "/../../src/kernel_lowlevel/lowlevel_logic_shared.rs"
     ));
 
+    pub(crate) fn mmio_addr(base: usize, offset: usize) -> Option<usize> {
+        smros_ll_mmio_addr_body!(base, offset)
+    }
+
+    pub(crate) fn dt_reg_valid(base: usize, size: usize) -> bool {
+        smros_ll_dt_reg_valid_body!(base, size)
+    }
+
+    pub(crate) fn dt_irq_valid(irq: u32, max_irqs: u32) -> bool {
+        smros_ll_dt_irq_valid_body!(irq, max_irqs)
+    }
+
+    pub(crate) fn dt_platform_index(
+        candidate: usize,
+        platform_count: usize,
+        fallback: usize,
+    ) -> usize {
+        smros_ll_dt_platform_index_body!(candidate, platform_count, fallback)
+    }
+
+    pub(crate) fn fdt_range_valid(offset: usize, len: usize, total: usize) -> bool {
+        smros_ll_fdt_range_valid_body!(offset, len, total)
+    }
+
+    pub(crate) fn fdt_align4(offset: usize) -> Option<usize> {
+        smros_ll_fdt_align4_body!(offset)
+    }
+
+    pub(crate) fn fdt_cells_to_bytes(cells: usize) -> Option<usize> {
+        smros_ll_fdt_cells_to_bytes_body!(cells)
+    }
+
+    pub(crate) fn fdt_reg_tuple_bytes(address_cells: usize, size_cells: usize) -> Option<usize> {
+        smros_ll_fdt_reg_tuple_bytes_body!(address_cells, size_cells)
+    }
+
+    pub(crate) fn fdt_reg_tuple_offset(
+        index: usize,
+        address_cells: usize,
+        size_cells: usize,
+    ) -> Option<usize> {
+        smros_ll_fdt_reg_tuple_offset_body!(index, address_cells, size_cells)
+    }
+
+    pub(crate) fn dt_gic_irq(kind: u32, hwirq: u32, max_irqs: u32) -> Option<u32> {
+        smros_ll_dt_gic_irq_body!(kind, hwirq, max_irqs)
+    }
+
+    pub(crate) fn dt_timer_irq_index(entry_count: usize) -> usize {
+        smros_ll_dt_timer_irq_index_body!(entry_count)
+    }
+
     #[test]
     fn lowlevel_alignment_and_segments_reject_overflow() {
         assert_eq!(smros_ll_align_up_body!(5usize, 4usize), Some(8));
@@ -3111,9 +3163,9 @@ mod lowlevel_logic {
     }
 
     #[test]
-    fn detected_ram_overrides_fallback_and_rejects_invalid_ranges() {
+    fn kernel_lowlevel_logic_detected_ram_overrides_fallback_and_rejects_invalid_ranges() {
         assert_eq!(
-            smros_ll_memory_reg_body!(
+            memory_reg(
                 Some((0x8000_0000usize, 0x4000_0000usize)),
                 0x4000_0000usize,
                 0x2000_0000usize
@@ -3121,11 +3173,11 @@ mod lowlevel_logic {
             Some((0x8000_0000, 0x4000_0000))
         );
         assert_eq!(
-            smros_ll_memory_reg_body!(None, 0x4000_0000usize, 0x2000_0000usize),
+            memory_reg(None, 0x4000_0000usize, 0x2000_0000usize),
             Some((0x4000_0000, 0x2000_0000))
         );
         assert_eq!(
-            smros_ll_memory_reg_body!(
+            memory_reg(
                 Some((0x8000_0000usize, 0usize)),
                 0x4000_0000usize,
                 0x2000_0000usize
@@ -3133,13 +3185,79 @@ mod lowlevel_logic {
             None
         );
         assert_eq!(
-            smros_ll_memory_reg_body!(
+            memory_reg(
                 Some((usize::MAX - 0xfff, 0x2000usize)),
                 0x4000_0000usize,
                 0x2000_0000usize
             ),
             None
         );
+    }
+
+    #[test]
+    fn kernel_lowlevel_logic_allocator_init_range_checks_alignment_capacity_and_reset() {
+        const PAGE_SIZE: usize = 4096;
+        const MAX_RAM_BYTES: usize = 2 * 1024 * 1024 * 1024;
+        const MAX_BITMAP_WORDS: usize = (MAX_RAM_BYTES / PAGE_SIZE) / 64;
+
+        let mut allocator = PageFrameAllocatorCore::<2>::new(4);
+        assert!(!allocator.init_range(0x8001, 0xc000, PAGE_SIZE));
+        assert!(!allocator.init_range(0x8000, 0xc001, PAGE_SIZE));
+        assert!(!allocator.init_range(0x8000, 0x8000, PAGE_SIZE));
+        assert!(allocator.init_range(0x8000, 0xc000, PAGE_SIZE));
+        assert_eq!(allocator.total_pages(), 4);
+        assert_eq!(allocator.alloc(), Some(8));
+        assert_eq!(allocator.allocated_pages(), 1);
+
+        assert!(allocator.init_range(0x1_0000, 0x1_2000, PAGE_SIZE));
+        assert_eq!(allocator.total_pages(), 2);
+        assert_eq!(allocator.allocated_pages(), 0);
+        assert_eq!(allocator.free_pages(), 2);
+        assert_eq!(allocator.alloc(), Some((0x1_0000 / PAGE_SIZE) as u64));
+
+        let mut maximum = PageFrameAllocatorCore::<MAX_BITMAP_WORDS>::new(0);
+        assert!(maximum.init_range(0x4000_0000, 0xc000_0000, PAGE_SIZE));
+        assert_eq!(maximum.total_pages(), MAX_RAM_BYTES / PAGE_SIZE);
+        assert!(!maximum.init_range(0x4000_0000, 0xc000_1000, PAGE_SIZE));
+        assert_eq!(maximum.total_pages(), MAX_RAM_BYTES / PAGE_SIZE);
+    }
+
+    #[test]
+    fn kernel_lowlevel_logic_allocator_stays_inside_its_physical_range() {
+        const PAGE_SIZE: usize = 4096;
+        let start = 0x4fb0_8000usize;
+        let end = start + 3 * PAGE_SIZE;
+        let first_pfn = (start / PAGE_SIZE) as u64;
+        let mut allocator = PageFrameAllocatorCore::<1>::new(0);
+
+        assert!(allocator.init_range(start, end, PAGE_SIZE));
+        assert_eq!(allocator.pfn_address(first_pfn - 1, PAGE_SIZE), None);
+        assert_eq!(allocator.pfn_address(first_pfn, PAGE_SIZE), Some(start));
+        assert_eq!(
+            allocator.pfn_address(first_pfn + 2, PAGE_SIZE),
+            Some(end - PAGE_SIZE)
+        );
+        assert_eq!(allocator.pfn_address(first_pfn + 3, PAGE_SIZE), None);
+
+        assert_eq!(allocator.alloc(), Some(first_pfn));
+        assert_eq!(allocator.alloc(), Some(first_pfn + 1));
+        assert_eq!(allocator.alloc(), Some(first_pfn + 2));
+        assert_eq!(allocator.alloc(), None);
+    }
+
+    #[test]
+    fn kernel_lowlevel_logic_allocator_reuses_the_first_freed_pfn() {
+        const PAGE_SIZE: usize = 4096;
+        let start = 0x5000_0000usize;
+        let first_pfn = (start / PAGE_SIZE) as u64;
+        let mut allocator = PageFrameAllocatorCore::<1>::new(0);
+
+        assert!(allocator.init_range(start, start + 2 * PAGE_SIZE, PAGE_SIZE));
+        assert_eq!(allocator.alloc(), Some(first_pfn));
+        assert_eq!(allocator.alloc(), Some(first_pfn + 1));
+        assert!(allocator.free(first_pfn));
+        assert_eq!(allocator.alloc(), Some(first_pfn));
+        assert_eq!(allocator.allocated_pages(), 2);
     }
 
     #[test]
@@ -3173,6 +3291,216 @@ mod lowlevel_logic {
             None
         );
     }
+}
+
+#[cfg(test)]
+mod kernel_lowlevel {
+    pub(crate) mod serial {
+        pub(crate) struct Serial;
+
+        impl Serial {
+            pub(crate) fn write_str(&mut self, _value: &str) {}
+
+            pub(crate) fn write_hex(&mut self, _value: u64) {}
+
+            pub(crate) fn write_byte(&mut self, _value: u8) {}
+        }
+    }
+}
+
+#[path = "../../../src/kernel_lowlevel/ARM64/drivers.rs"]
+#[cfg(test)]
+mod aarch64_drivers;
+
+#[cfg(test)]
+fn fdt_push_u32(bytes: &mut Vec<u8>, value: u32) {
+    bytes.extend_from_slice(&value.to_be_bytes());
+}
+
+#[cfg(test)]
+fn fdt_pad(bytes: &mut Vec<u8>) {
+    while bytes.len() % 4 != 0 {
+        bytes.push(0);
+    }
+}
+
+#[cfg(test)]
+fn fdt_begin_node(structure: &mut Vec<u8>, name: &str) {
+    fdt_push_u32(structure, 1);
+    structure.extend_from_slice(name.as_bytes());
+    structure.push(0);
+    fdt_pad(structure);
+}
+
+#[cfg(test)]
+fn fdt_string_offset(strings: &[u8], wanted: &str) -> u32 {
+    let mut offset = 0usize;
+    while offset < strings.len() {
+        let end = strings[offset..]
+            .iter()
+            .position(|byte| *byte == 0)
+            .map(|len| offset + len)
+            .expect("terminated FDT property name");
+        if &strings[offset..end] == wanted.as_bytes() {
+            return offset as u32;
+        }
+        offset = end + 1;
+    }
+    panic!("missing FDT property name: {wanted}");
+}
+
+#[cfg(test)]
+fn fdt_property(structure: &mut Vec<u8>, strings: &[u8], name: &str, value: &[u8]) {
+    fdt_push_u32(structure, 3);
+    fdt_push_u32(structure, value.len() as u32);
+    fdt_push_u32(structure, fdt_string_offset(strings, name));
+    structure.extend_from_slice(value);
+    fdt_pad(structure);
+}
+
+#[cfg(test)]
+fn fdt_cells(values: &[u32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    for value in values {
+        fdt_push_u32(&mut bytes, *value);
+    }
+    bytes
+}
+
+#[cfg(test)]
+fn fdt_reg_cells(base: u64, size: u64) -> [u32; 4] {
+    [
+        (base >> 32) as u32,
+        base as u32,
+        (size >> 32) as u32,
+        size as u32,
+    ]
+}
+
+#[cfg(test)]
+fn test_qemu_fdt(memory_base: u64, memory_size: u64) -> Vec<u32> {
+    const HEADER_SIZE: usize = 40;
+    const RESERVE_MAP_SIZE: usize = 16;
+    let strings = b"compatible\0#address-cells\0#size-cells\0device_type\0reg\0interrupts\0";
+    let mut structure = Vec::new();
+
+    fdt_begin_node(&mut structure, "");
+    fdt_property(&mut structure, strings, "compatible", b"linux,dummy-virt\0");
+    fdt_property(&mut structure, strings, "#address-cells", &fdt_cells(&[2]));
+    fdt_property(&mut structure, strings, "#size-cells", &fdt_cells(&[2]));
+
+    fdt_begin_node(&mut structure, "memory@80000000");
+    fdt_property(&mut structure, strings, "device_type", b"memory\0");
+    fdt_property(
+        &mut structure,
+        strings,
+        "reg",
+        &fdt_cells(&fdt_reg_cells(memory_base, memory_size)),
+    );
+    fdt_push_u32(&mut structure, 2);
+
+    fdt_begin_node(&mut structure, "pl011@9000000");
+    fdt_property(&mut structure, strings, "compatible", b"arm,pl011\0");
+    fdt_property(
+        &mut structure,
+        strings,
+        "reg",
+        &fdt_cells(&fdt_reg_cells(0x0900_0000, 0x1000)),
+    );
+    fdt_property(
+        &mut structure,
+        strings,
+        "interrupts",
+        &fdt_cells(&[0, 1, 4]),
+    );
+    fdt_push_u32(&mut structure, 2);
+
+    fdt_begin_node(&mut structure, "intc@8000000");
+    fdt_property(&mut structure, strings, "compatible", b"arm,gic-v3\0");
+    let mut gic_reg = Vec::new();
+    gic_reg.extend_from_slice(&fdt_reg_cells(0x0800_0000, 0x1_0000));
+    gic_reg.extend_from_slice(&fdt_reg_cells(0x080a_0000, 0x00f6_0000));
+    fdt_property(&mut structure, strings, "reg", &fdt_cells(&gic_reg));
+    fdt_push_u32(&mut structure, 2);
+
+    fdt_begin_node(&mut structure, "timer");
+    fdt_property(&mut structure, strings, "compatible", b"arm,armv8-timer\0");
+    fdt_property(
+        &mut structure,
+        strings,
+        "interrupts",
+        &fdt_cells(&[0, 14, 4]),
+    );
+    fdt_push_u32(&mut structure, 2);
+
+    fdt_push_u32(&mut structure, 2);
+    fdt_push_u32(&mut structure, 9);
+
+    let structure_offset = HEADER_SIZE + RESERVE_MAP_SIZE;
+    let strings_offset = structure_offset + structure.len();
+    let mut bytes = vec![0; structure_offset];
+    bytes.extend_from_slice(&structure);
+    bytes.extend_from_slice(strings);
+    fdt_pad(&mut bytes);
+
+    let header = [
+        0xd00d_feed,
+        bytes.len() as u32,
+        structure_offset as u32,
+        strings_offset as u32,
+        HEADER_SIZE as u32,
+        17,
+        16,
+        0,
+        strings.len() as u32,
+        structure.len() as u32,
+    ];
+    for (index, value) in header.iter().enumerate() {
+        bytes[index * 4..index * 4 + 4].copy_from_slice(&value.to_be_bytes());
+    }
+
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| u32::from_ne_bytes(chunk.try_into().expect("four-byte FDT word")))
+        .collect()
+}
+
+#[test]
+fn kernel_lowlevel_logic_real_fdt_memory_overrides_fallback_and_rejects_invalid_ranges() {
+    use aarch64_drivers::{ResourceSource, QEMU_VIRT_MEMORY_BASE, QEMU_VIRT_MEMORY_SIZE};
+
+    let detected_base = 0x8000_0000usize;
+    let detected_size = 0x4000_0000usize;
+    let detected = test_qemu_fdt(detected_base as u64, detected_size as u64);
+    assert!(aarch64_drivers::init_from_fdt(detected.as_ptr() as usize));
+    let stats = aarch64_drivers::stats();
+    assert_eq!(stats.source, ResourceSource::Fdt);
+    assert_eq!(stats.memory_base, detected_base);
+    assert_eq!(stats.memory_size, detected_size);
+    assert_ne!(stats.memory_size, QEMU_VIRT_MEMORY_SIZE);
+
+    let zero_size = test_qemu_fdt(detected_base as u64, 0);
+    assert!(aarch64_drivers::init_from_fdt(zero_size.as_ptr() as usize));
+    let stats = aarch64_drivers::stats();
+    assert_eq!(stats.source, ResourceSource::StaticFallback);
+    assert_eq!(stats.memory_base, QEMU_VIRT_MEMORY_BASE);
+    assert_eq!(stats.memory_size, QEMU_VIRT_MEMORY_SIZE);
+
+    let overflowing = test_qemu_fdt((usize::MAX - 0xfff) as u64, 0x2000);
+    assert!(aarch64_drivers::init_from_fdt(overflowing.as_ptr() as usize));
+    let stats = aarch64_drivers::stats();
+    assert_eq!(stats.source, ResourceSource::StaticFallback);
+    assert_eq!(stats.memory_base, QEMU_VIRT_MEMORY_BASE);
+    assert_eq!(stats.memory_size, QEMU_VIRT_MEMORY_SIZE);
+
+    assert!(aarch64_drivers::init_for_platform(1));
+    assert_eq!(
+        aarch64_drivers::memory_reg(),
+        Some(aarch64_drivers::DeviceReg {
+            base: aarch64_drivers::RPI4_MEMORY_BASE,
+            size: aarch64_drivers::RPI4_MEMORY_SIZE,
+        })
+    );
 }
 
 mod aarch64_vm_logic {
