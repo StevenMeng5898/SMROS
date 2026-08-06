@@ -3493,14 +3493,13 @@ fn kernel_lowlevel_logic_real_fdt_memory_overrides_fallback_and_rejects_invalid_
     assert_eq!(stats.memory_base, QEMU_VIRT_MEMORY_BASE);
     assert_eq!(stats.memory_size, QEMU_VIRT_MEMORY_SIZE);
 
-    assert!(aarch64_drivers::init_for_platform(1));
-    assert_eq!(
-        aarch64_drivers::memory_reg(),
-        Some(aarch64_drivers::DeviceReg {
-            base: aarch64_drivers::RPI4_MEMORY_BASE,
-            size: aarch64_drivers::RPI4_MEMORY_SIZE,
-        })
-    );
+    let base_zero_size = aarch64_drivers::RPI4_MEMORY_SIZE;
+    let base_zero = test_qemu_fdt(0, base_zero_size as u64);
+    assert!(aarch64_drivers::init_from_fdt(base_zero.as_ptr() as usize));
+    assert_eq!(aarch64_drivers::stats().source, ResourceSource::Fdt);
+    let memory = aarch64_drivers::memory_reg().expect("base-zero FDT RAM remains valid");
+    assert_eq!(memory.base, 0);
+    assert_eq!(memory.size, base_zero_size);
 }
 
 mod aarch64_vm_logic {
