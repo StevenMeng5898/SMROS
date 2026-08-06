@@ -230,19 +230,52 @@ fn aarch64_context_switch_preserves_process_ttbr0() {
     assert!(thread.contains("ttbr0_el1: crate::kernel_lowlevel::mmu::bootstrap_root()"));
     assert!(thread.contains("ttbr0_el1: 0"));
 
-    let scheduler_end = switch
-        .find(".globl start_linux_clone_child")
-        .expect("scheduler context-switch boundary");
-    let scheduler = &switch[..scheduler_end];
-    assert_eq!(scheduler.matches("mrs     x17, ttbr0_el1").count(), 1);
-    assert_eq!(scheduler.matches("str     x17, [x16, #0x130]").count(), 1);
-    assert_eq!(scheduler.matches("ldr     x17, [x16, #0x130]").count(), 2);
-    assert_eq!(scheduler.matches("msr     ttbr0_el1, x17").count(), 2);
-    assert_eq!(scheduler.matches("dsb     ish").count(), 4);
-    assert_eq!(scheduler.matches("tlbi    vmalle1is").count(), 2);
-    assert!(scheduler.contains("0x138 = fpcr"));
-    assert!(scheduler.contains("0x140 = fpsr"));
-    assert!(scheduler.contains("0x150 = q0-q31"));
+    let context_switch = assembly_routine(&switch, "context_switch");
+    let context_switch_start = assembly_routine(&switch, "context_switch_start");
+    assert_eq!(context_switch.matches("mrs     x17, ttbr0_el1").count(), 1);
+    assert_eq!(
+        context_switch
+            .matches("str     x17, [x16, #0x130]")
+            .count(),
+        1
+    );
+
+    for (name, body) in [
+        ("context_switch", context_switch),
+        ("context_switch_start", context_switch_start),
+    ] {
+        let load = body
+            .find("ldr     x17, [x16, #0x130]")
+            .unwrap_or_else(|| panic!("{name} must load its own TTBR0"));
+        let restore_sequence = concat!(
+            "msr     ttbr0_el1, x17\n",
+            "    dsb     ish\n",
+            "    tlbi    vmalle1is\n",
+            "    dsb     ish\n",
+            "    isb",
+        );
+        let restore = body
+            .find(restore_sequence)
+            .unwrap_or_else(|| panic!("{name} missing ordered TTBR0 restore sequence"));
+        let restore_end = restore + restore_sequence.len();
+        let simd = body
+            .find("ldp     q0, q1, [x16, #0x150]")
+            .expect("restore SIMD state");
+        let return_branch = body.find("br      x16").expect("return to restored context");
+        assert!(load < restore, "{name} must load TTBR0 before restoring it");
+        assert!(
+            restore_end < simd,
+            "{name} must synchronize before SIMD restore"
+        );
+        assert!(
+            simd < return_branch,
+            "{name} must restore SIMD state before returning"
+        );
+    }
+
+    assert!(switch.contains("0x138 = fpcr"));
+    assert!(switch.contains("0x140 = fpsr"));
+    assert!(switch.contains("0x150 = q0-q31"));
 }
 
 mod syscall_address_logic {
@@ -411,6 +444,16 @@ fn braced_body(source: &str) -> &str {
         }
     }
     panic!("closing brace");
+}
+
+fn assembly_routine<'a>(source: &'a str, name: &str) -> &'a str {
+    let label = format!("{name}:");
+    let start = source.find(&label).expect("assembly routine label");
+    let end_marker = format!(".size {name},");
+    let end = source[start..]
+        .find(&end_marker)
+        .expect("assembly routine end");
+    &source[start..start + end]
 }
 
 struct TempDir(std::path::PathBuf);
