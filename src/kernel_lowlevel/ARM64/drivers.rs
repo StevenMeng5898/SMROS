@@ -168,6 +168,8 @@ pub struct PlatformDescriptor {
 pub struct PlatformResources {
     pub machine: &'static str,
     pub source: ResourceSource,
+    pub memory_base: usize,
+    pub memory_size: usize,
     pub uart_base: usize,
     pub uart_size: usize,
     pub uart_irq: u32,
@@ -204,6 +206,8 @@ pub struct DriverStats {
     pub machine: &'static str,
     pub source: ResourceSource,
     pub nodes: usize,
+    pub memory_base: usize,
+    pub memory_size: usize,
     pub uart_base: usize,
     pub uart_irq: u32,
     pub gic_version: GicVersion,
@@ -359,6 +363,8 @@ const PLATFORMS: &[PlatformDescriptor] = &[
 
 static ACTIVE_PLATFORM_INDEX: AtomicUsize = AtomicUsize::new(DEFAULT_PLATFORM_INDEX);
 static INIT_STATE: AtomicUsize = AtomicUsize::new(0);
+static MEMORY_BASE: AtomicUsize = AtomicUsize::new(QEMU_VIRT_MEMORY_BASE);
+static MEMORY_SIZE: AtomicUsize = AtomicUsize::new(QEMU_VIRT_MEMORY_SIZE);
 static UART_BASE: AtomicUsize = AtomicUsize::new(QEMU_VIRT_UART_BASE);
 static UART_SIZE: AtomicUsize = AtomicUsize::new(QEMU_VIRT_UART_SIZE);
 static UART_IRQ: AtomicUsize = AtomicUsize::new(QEMU_VIRT_UART_IRQ as usize);
@@ -474,6 +480,13 @@ pub fn uart_base() -> usize {
     UART_BASE.load(Ordering::Acquire)
 }
 
+pub fn memory_reg() -> Option<DeviceReg> {
+    ensure_initialized();
+    let base = MEMORY_BASE.load(Ordering::Acquire);
+    let size = MEMORY_SIZE.load(Ordering::Acquire);
+    (base != 0 && size != 0).then_some(DeviceReg { base, size })
+}
+
 pub fn uart_size() -> usize {
     ensure_initialized();
     UART_SIZE.load(Ordering::Acquire)
@@ -533,6 +546,8 @@ pub fn stats() -> DriverStats {
         machine: platform.machine,
         source: resource_source(),
         nodes: platform.nodes.len(),
+        memory_base: MEMORY_BASE.load(Ordering::Acquire),
+        memory_size: MEMORY_SIZE.load(Ordering::Acquire),
         uart_base: UART_BASE.load(Ordering::Acquire),
         uart_irq: UART_IRQ.load(Ordering::Acquire) as u32,
         gic_version: gic_version_from_usize(GIC_VERSION.load(Ordering::Acquire)),
@@ -570,6 +585,8 @@ fn ensure_initialized() {
 }
 
 fn cache_resources(index: usize, resources: PlatformResources) {
+    MEMORY_BASE.store(resources.memory_base, Ordering::Release);
+    MEMORY_SIZE.store(resources.memory_size, Ordering::Release);
     UART_BASE.store(resources.uart_base, Ordering::Release);
     UART_SIZE.store(resources.uart_size, Ordering::Release);
     UART_IRQ.store(resources.uart_irq as usize, Ordering::Release);
@@ -600,14 +617,18 @@ fn platform_resources(index: usize) -> Result<PlatformResources, DriverError> {
         return Err(DriverError::InvalidPlatform);
     };
     let uart = find_node_in_platform(platform, DeviceKind::Serial)?;
+    let memory = find_node_in_platform(platform, DeviceKind::Memory)?;
     let gic = find_node_in_platform(platform, DeviceKind::InterruptController)?;
     let timer = find_node_in_platform(platform, DeviceKind::Timer)?;
     let uart_reg = uart.primary_reg()?;
+    let memory_reg = memory.primary_reg()?;
     let gicd_reg = gic.primary_reg()?;
     let gicr_reg = gic.secondary_reg()?;
     Ok(PlatformResources {
         machine: platform.machine,
         source: ResourceSource::StaticFallback,
+        memory_base: memory_reg.base,
+        memory_size: memory_reg.size,
         uart_base: uart_reg.base,
         uart_size: uart_reg.size,
         uart_irq: uart.irq()?,
@@ -714,6 +735,7 @@ impl FdtNodeScratch {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DeviceKindMatch {
     None,
+    Memory,
     Serial,
     InterruptControllerV2,
     InterruptControllerV3V4,
@@ -723,6 +745,8 @@ enum DeviceKindMatch {
 #[derive(Clone, Copy)]
 struct FdtParsedResources {
     machine: &'static str,
+    memory_base: Option<usize>,
+    memory_size: Option<usize>,
     uart_base: Option<usize>,
     uart_size: Option<usize>,
     uart_irq: Option<u32>,
@@ -738,6 +762,8 @@ impl FdtParsedResources {
     fn new(machine: &'static str) -> Self {
         Self {
             machine,
+            memory_base: None,
+            memory_size: None,
             uart_base: None,
             uart_size: None,
             uart_irq: None,
@@ -756,6 +782,12 @@ impl FdtParsedResources {
         }
 
         match node.matched {
+            DeviceKindMatch::Memory => {
+                if let Some(reg) = node.reg {
+                    self.memory_base = Some(reg.base);
+                    self.memory_size = Some(reg.size);
+                }
+            }
             DeviceKindMatch::Serial => {
                 if node.reg.is_none() && node.reg_addr != 0 {
                     node.reg = fdt_read_reg_tuple(
@@ -833,6 +865,8 @@ impl FdtParsedResources {
         Some(PlatformResources {
             machine: self.machine,
             source: ResourceSource::Fdt,
+            memory_base: self.memory_base?,
+            memory_size: self.memory_size?,
             uart_base: self.uart_base?,
             uart_size: self.uart_size?,
             uart_irq: self.uart_irq?,
@@ -1011,6 +1045,13 @@ fn handle_fdt_property(
 
     if fdt_string_eq(info.strings_base, info.strings_size, nameoff, "status") {
         node.enabled = !fdt_bytes_eq(value_addr, len, "disabled");
+        return Some(());
+    }
+
+    if fdt_string_eq(info.strings_base, info.strings_size, nameoff, "device_type") {
+        if fdt_bytes_eq(value_addr, len, "memory") {
+            node.matched = DeviceKindMatch::Memory;
+        }
         return Some(());
     }
 

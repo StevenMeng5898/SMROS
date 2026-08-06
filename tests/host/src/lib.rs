@@ -3109,6 +3109,70 @@ mod lowlevel_logic {
         assert_eq!(smros_ll_dt_gic_irq_body!(1u32, 1u32, 64u32), Some(17));
         assert_eq!(smros_ll_dt_gic_irq_body!(2u32, 1u32, 64u32), None);
     }
+
+    #[test]
+    fn detected_ram_overrides_fallback_and_rejects_invalid_ranges() {
+        assert_eq!(
+            smros_ll_memory_reg_body!(
+                Some((0x8000_0000usize, 0x4000_0000usize)),
+                0x4000_0000usize,
+                0x2000_0000usize
+            ),
+            Some((0x8000_0000, 0x4000_0000))
+        );
+        assert_eq!(
+            smros_ll_memory_reg_body!(None, 0x4000_0000usize, 0x2000_0000usize),
+            Some((0x4000_0000, 0x2000_0000))
+        );
+        assert_eq!(
+            smros_ll_memory_reg_body!(
+                Some((0x8000_0000usize, 0usize)),
+                0x4000_0000usize,
+                0x2000_0000usize
+            ),
+            None
+        );
+        assert_eq!(
+            smros_ll_memory_reg_body!(
+                Some((usize::MAX - 0xfff, 0x2000usize)),
+                0x4000_0000usize,
+                0x2000_0000usize
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn physical_pfn_offsets_round_trip_within_ram_range() {
+        const PAGE_SIZE: usize = 4096;
+        let start = 0x4fb0_8000usize;
+        let end = 0x6000_0000usize;
+        let base_pfn = (start / PAGE_SIZE) as u64;
+        let total_pages = (end - start) / PAGE_SIZE;
+
+        assert_eq!(smros_ll_pfn_from_index_body!(0usize, base_pfn), Some(base_pfn));
+        assert_eq!(
+            smros_ll_pfn_index_body!(base_pfn, base_pfn, total_pages),
+            Some(0)
+        );
+        assert_eq!(
+            smros_ll_pfn_address_body!(base_pfn, base_pfn, total_pages, PAGE_SIZE),
+            Some(start)
+        );
+        assert_eq!(
+            smros_ll_pfn_index_body!(base_pfn - 1, base_pfn, total_pages),
+            None
+        );
+        assert_eq!(
+            smros_ll_pfn_address_body!(
+                base_pfn + total_pages as u64,
+                base_pfn,
+                total_pages,
+                PAGE_SIZE
+            ),
+            None
+        );
+    }
 }
 
 mod aarch64_vm_logic {

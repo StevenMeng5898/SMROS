@@ -113,6 +113,43 @@ macro_rules! smros_ll_pfn_valid_body {
     }};
 }
 
+#[allow(unused_macros)]
+macro_rules! smros_ll_memory_reg_body {
+    ($detected:expr, $fallback_base:expr, $fallback_size:expr) => {{
+        let (base, size) = $detected.unwrap_or(($fallback_base, $fallback_size));
+        if size != 0 && base.checked_add(size).is_some() {
+            Some((base, size))
+        } else {
+            None
+        }
+    }};
+}
+
+#[allow(unused_macros)]
+macro_rules! smros_ll_pfn_from_index_body {
+    ($index:expr, $base_pfn:expr) => {{
+        ($base_pfn).checked_add($index as u64)
+    }};
+}
+
+#[allow(unused_macros)]
+macro_rules! smros_ll_pfn_index_body {
+    ($pfn:expr, $base_pfn:expr, $total_pages:expr) => {{
+        ($pfn)
+            .checked_sub($base_pfn)
+            .filter(|index| *index < $total_pages as u64)
+            .map(|index| index as usize)
+    }};
+}
+
+#[allow(unused_macros)]
+macro_rules! smros_ll_pfn_address_body {
+    ($pfn:expr, $base_pfn:expr, $total_pages:expr, $page_size:expr) => {{
+        smros_ll_pfn_index_body!($pfn, $base_pfn, $total_pages)
+            .and_then(|_| ($pfn as usize).checked_mul($page_size))
+    }};
+}
+
 macro_rules! smros_ll_bitmap_word_index_body {
     ($pfn:expr) => {{
         ($pfn as usize) / 64

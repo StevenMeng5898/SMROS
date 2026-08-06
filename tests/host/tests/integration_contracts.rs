@@ -1,5 +1,42 @@
 #![allow(unused_comparisons, unused_macros)]
 
+#[test]
+fn aarch64_page_allocator_uses_detected_ram_after_kernel_end() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let memory = std::fs::read_to_string(repository.join("src/kernel_lowlevel/memory.rs"))
+        .expect("read memory module");
+    let drivers = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/drivers.rs"))
+        .expect("read AArch64 drivers");
+    let main = std::fs::read_to_string(repository.join("src/main.rs")).expect("read kernel main");
+
+    assert!(drivers.contains("pub memory_base: usize"));
+    assert!(drivers.contains("pub memory_size: usize"));
+    assert!(drivers.contains("pub fn memory_reg() -> Option<DeviceReg>"));
+    assert!(memory.contains("static __kernel_end"));
+    assert!(memory.contains("aarch64_frame_range("));
+    assert!(memory.contains("PageFrameAllocator::init_range(frame_start, frame_end)"));
+
+    let init_start = memory
+        .find("pub fn init()")
+        .expect("memory initialization entry point");
+    let init_body = braced_body(&memory[init_start..]);
+    let range = init_body
+        .find("aarch64_frame_range(")
+        .expect("derive allocator range");
+    let allocator = init_body
+        .find("PageFrameAllocator::init_range(frame_start, frame_end)")
+        .expect("initialize physical page allocator");
+    assert!(range < allocator);
+
+    let memory_init = main
+        .find("kernel_lowlevel::memory::init()")
+        .expect("initialize memory");
+    let mmu_init = main
+        .find("kernel_lowlevel::mmu::init()")
+        .expect("initialize MMU");
+    assert!(memory_init < mmu_init);
+}
+
 mod syscall_address_logic {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

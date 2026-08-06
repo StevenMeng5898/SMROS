@@ -59,15 +59,19 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::lowlevel_logic;
 
+#[cfg(target_arch = "aarch64")]
+#[path = "aarch64_vm_logic_shared.rs"]
+mod aarch64_vm_logic;
+
 /// Page size: 4 KiB, matching the currently supported ARM64 granule and
 /// RISC-V Sv39/Sv48 page size.
 pub const PAGE_SIZE: usize = 0x1000;
 
 /// Page size mask (4 KiB aligned)
 pub const PAGE_MASK: usize = !(PAGE_SIZE - 1);
-const PAGE_FRAME_BITMAP_WORDS: usize = 64;
+const PAGE_FRAME_BITMAP_WORDS: usize = (2 * 1024 * 1024 * 1024 / PAGE_SIZE) / 64;
 const PAGE_FRAME_BITS_PER_WORD: usize = 64;
-const PAGE_FRAME_COUNT: usize = PAGE_FRAME_BITMAP_WORDS * PAGE_FRAME_BITS_PER_WORD;
+const DEFAULT_PAGE_FRAME_COUNT: usize = 64 * PAGE_FRAME_BITS_PER_WORD;
 
 /// Maximum number of processes supported
 pub const MAX_PROCESSES: usize = 16;
@@ -513,6 +517,8 @@ impl ProcessState {
 pub struct PageFrameAllocator {
     /// Bitmap of allocated pages; each bit represents one 4 KiB frame.
     bitmap: [u64; PAGE_FRAME_BITMAP_WORDS],
+    /// Physical page frame corresponding to bitmap index zero.
+    base_pfn: u64,
     /// Total number of available pages
     total_pages: usize,
     /// Number of allocated pages
@@ -524,9 +530,26 @@ impl PageFrameAllocator {
     const fn new() -> Self {
         PageFrameAllocator {
             bitmap: [0; PAGE_FRAME_BITMAP_WORDS],
-            total_pages: PAGE_FRAME_COUNT,
+            base_pfn: 0,
+            total_pages: DEFAULT_PAGE_FRAME_COUNT,
             allocated_pages: 0,
         }
+    }
+
+    pub fn init_range(start: usize, end: usize) -> bool {
+        if start & (PAGE_SIZE - 1) != 0 || end & (PAGE_SIZE - 1) != 0 || start >= end {
+            return false;
+        }
+        let pages = (end - start) / PAGE_SIZE;
+        let allocator = unsafe { &mut *ALLOCATOR.get() };
+        if pages > allocator.bitmap.len() * 64 {
+            return false;
+        }
+        allocator.bitmap.fill(0);
+        allocator.base_pfn = (start / PAGE_SIZE) as u64;
+        allocator.total_pages = pages;
+        allocator.allocated_pages = 0;
+        true
     }
 
     /// Allocate a single page frame
@@ -551,7 +574,7 @@ impl PageFrameAllocator {
                 if allocator.bitmap[i] & mask == 0 {
                     allocator.bitmap[i] |= mask;
                     allocator.allocated_pages += 1;
-                    return Some(page_idx as u64);
+                    return allocator.base_pfn.checked_add(page_idx as u64);
                 }
             }
         }
@@ -562,18 +585,27 @@ impl PageFrameAllocator {
     /// Free a page frame
     pub fn free(pfn: u64) {
         let allocator = unsafe { &mut *ALLOCATOR.get() };
-        if !lowlevel_logic::pfn_valid(pfn, allocator.total_pages) {
+        let Some(page_idx) = pfn
+            .checked_sub(allocator.base_pfn)
+            .filter(|index| *index < allocator.total_pages as u64)
+        else {
             return;
-        }
+        };
 
-        let i = lowlevel_logic::bitmap_word_index(pfn);
-        let bit = lowlevel_logic::bitmap_bit_index(pfn);
+        let i = lowlevel_logic::bitmap_word_index(page_idx);
+        let bit = lowlevel_logic::bitmap_bit_index(page_idx);
         let mask = lowlevel_logic::bitmap_mask(bit);
 
         if allocator.bitmap[i] & mask != 0 {
             allocator.bitmap[i] &= !mask;
             allocator.allocated_pages -= 1;
         }
+    }
+
+    pub fn pfn_address(pfn: u64) -> Option<usize> {
+        let allocator = unsafe { &*ALLOCATOR.get() };
+        let index = pfn.checked_sub(allocator.base_pfn)?;
+        (index < allocator.total_pages as u64).then(|| (pfn as usize) * PAGE_SIZE)
     }
 
     /// Get total number of pages
@@ -923,6 +955,25 @@ pub fn init() {
     serial.init();
 
     serial.write_str("[MEM] Initializing memory management...\n");
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe extern "C" {
+            static __kernel_end: u8;
+        }
+
+        let memory = crate::kernel_lowlevel::drivers::memory_reg()
+            .expect("AArch64 RAM range must be available");
+        let ram_end = memory
+            .base
+            .checked_add(memory.size)
+            .expect("AArch64 RAM range must not overflow");
+        let kernel_end = core::ptr::addr_of!(__kernel_end) as usize;
+        let (frame_start, frame_end) =
+            aarch64_vm_logic::aarch64_frame_range(kernel_end, memory.base, ram_end)
+                .expect("AArch64 RAM must contain frames after the kernel");
+        assert!(PageFrameAllocator::init_range(frame_start, frame_end));
+    }
 
     // Initialize process manager
     process_manager().init();
