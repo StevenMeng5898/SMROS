@@ -36,3 +36,17 @@ pub(crate) fn aarch64_frame_range(
     let end = ram_end & !(AARCH64_PAGE_SIZE - 1);
     (start < end).then_some((start, end))
 }
+
+pub(crate) fn aarch64_frame_range_cap(
+    start: usize,
+    end: usize,
+    capacity_bytes: usize,
+) -> Option<(usize, usize)> {
+    let capped_end = core::cmp::min(
+        end,
+        start
+            .checked_add(capacity_bytes)
+            .unwrap_or(usize::MAX),
+    );
+    (start < capped_end).then_some((start, capped_end))
+}

@@ -3268,7 +3268,10 @@ mod lowlevel_logic {
         let base_pfn = (start / PAGE_SIZE) as u64;
         let total_pages = (end - start) / PAGE_SIZE;
 
-        assert_eq!(smros_ll_pfn_from_index_body!(0usize, base_pfn), Some(base_pfn));
+        assert_eq!(
+            smros_ll_pfn_from_index_body!(0usize, base_pfn),
+            Some(base_pfn)
+        );
         assert_eq!(
             smros_ll_pfn_index_body!(base_pfn, base_pfn, total_pages),
             Some(0)
@@ -3525,6 +3528,41 @@ mod aarch64_vm_logic {
         assert_eq!(
             aarch64_frame_range(0x4fb0_7001, 0x4000_0000, 0x6000_0000),
             Some((0x4fb0_8000, 0x6000_0000))
+        );
+    }
+
+    #[test]
+    fn oversized_physical_allocator_range_is_capped_without_leaking_frames() {
+        const PAGE_SIZE: usize = AARCH64_PAGE_SIZE;
+        const BITMAP_CAPACITY_BYTES: usize = 2 * 1024 * 1024 * 1024;
+        const BITMAP_WORDS: usize = (BITMAP_CAPACITY_BYTES / PAGE_SIZE) / 64;
+        let detected_range = aarch64_frame_range(0x4fb0_7001, 0x4000_0000, 0x1_4000_0000)
+            .expect("oversized valid RAM remains detectable");
+        let range =
+            aarch64_frame_range_cap(detected_range.0, detected_range.1, BITMAP_CAPACITY_BYTES)
+                .expect("oversized valid RAM remains usable");
+
+        assert_eq!(range, (0x4fb0_8000, 0x4fb0_8000 + BITMAP_CAPACITY_BYTES));
+        let mut allocator = crate::lowlevel_logic::PageFrameAllocatorCore::<BITMAP_WORDS>::new(0);
+        assert!(allocator.init_range(range.0, range.1, PAGE_SIZE));
+        assert_eq!(
+            allocator.pfn_address((range.1 / PAGE_SIZE) as u64 - 1, PAGE_SIZE),
+            Some(range.1 - PAGE_SIZE)
+        );
+        assert_eq!(
+            allocator.pfn_address((range.1 / PAGE_SIZE) as u64, PAGE_SIZE),
+            None
+        );
+        assert_eq!(allocator.alloc(), Some((range.0 / PAGE_SIZE) as u64));
+    }
+
+    #[test]
+    fn supported_high_physical_allocator_range_is_unchanged() {
+        let start = usize::MAX - 0x2fff;
+        let end = usize::MAX - 0xfff;
+        assert_eq!(
+            aarch64_frame_range_cap(start, end, 2 * 1024 * 1024 * 1024),
+            Some((start, end))
         );
     }
 

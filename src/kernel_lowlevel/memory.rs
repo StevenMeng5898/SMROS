@@ -913,9 +913,15 @@ pub fn init() {
             .checked_add(memory.size)
             .expect("AArch64 RAM range must not overflow");
         let kernel_end = core::ptr::addr_of!(__kernel_end) as usize;
-        let (frame_start, frame_end) =
+        let (frame_start, detected_frame_end) =
             aarch64_vm_logic::aarch64_frame_range(kernel_end, memory.base, ram_end)
                 .expect("AArch64 RAM must contain frames after the kernel");
+        let (_, frame_end) = aarch64_vm_logic::aarch64_frame_range_cap(
+            frame_start,
+            detected_frame_end,
+            PAGE_FRAME_BITMAP_WORDS * PAGE_SIZE * PAGE_FRAME_BITS_PER_WORD,
+        )
+        .expect("AArch64 RAM must contain frames within allocator capacity");
         assert!(PageFrameAllocator::init_range(frame_start, frame_end));
     }
 
