@@ -3803,10 +3803,11 @@ mod aarch64_context_logic {
         assert_eq!(offset_of!(CpuContext, elr_el1), 0x118);
         assert_eq!(offset_of!(CpuContext, spsr_el1), 0x120);
         assert_eq!(offset_of!(CpuContext, tpidr_el0), 0x128);
-        assert_eq!(offset_of!(CpuContext, fpcr), 0x130);
-        assert_eq!(offset_of!(CpuContext, fpsr), 0x138);
-        assert_eq!(offset_of!(CpuContext, simd), 0x140);
-        assert_eq!(size_of::<CpuContext>(), 0x340);
+        assert_eq!(offset_of!(CpuContext, ttbr0_el1), 0x130);
+        assert_eq!(offset_of!(CpuContext, fpcr), 0x138);
+        assert_eq!(offset_of!(CpuContext, fpsr), 0x140);
+        assert_eq!(offset_of!(CpuContext, simd), 0x150);
+        assert_eq!(size_of::<CpuContext>(), 0x350);
     }
 }
 

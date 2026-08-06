@@ -48,6 +48,7 @@ pub struct CpuContext {
     pub elr_el1: u64,
     pub spsr_el1: u64,
     pub tpidr_el0: u64,
+    pub ttbr0_el1: u64,
     pub fpcr: u64,
     pub fpsr: u64,
     pub simd: [u128; 32],

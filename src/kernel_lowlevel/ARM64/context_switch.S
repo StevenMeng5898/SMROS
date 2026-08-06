@@ -23,9 +23,10 @@
 //   0x118 = elr_el1
 //   0x120 = spsr_el1
 //   0x128 = tpidr_el0
-//   0x130 = fpcr
-//   0x138 = fpsr
-//   0x140 = q0-q31
+//   0x130 = ttbr0_el1
+//   0x138 = fpcr
+//   0x140 = fpsr
+//   0x150 = q0-q31
 
 .globl context_switch
 .type context_switch, %function
@@ -54,26 +55,28 @@ context_switch:
     str     x17, [x16, #0x120]
     mrs     x17, tpidr_el0
     str     x17, [x16, #0x128]
-    mrs     x17, fpcr
+    mrs     x17, ttbr0_el1
     str     x17, [x16, #0x130]
-    mrs     x17, fpsr
+    mrs     x17, fpcr
     str     x17, [x16, #0x138]
-    stp     q0, q1, [x16, #0x140]
-    stp     q2, q3, [x16, #0x160]
-    stp     q4, q5, [x16, #0x180]
-    stp     q6, q7, [x16, #0x1A0]
-    stp     q8, q9, [x16, #0x1C0]
-    stp     q10, q11, [x16, #0x1E0]
-    stp     q12, q13, [x16, #0x200]
-    stp     q14, q15, [x16, #0x220]
-    stp     q16, q17, [x16, #0x240]
-    stp     q18, q19, [x16, #0x260]
-    stp     q20, q21, [x16, #0x280]
-    stp     q22, q23, [x16, #0x2A0]
-    stp     q24, q25, [x16, #0x2C0]
-    stp     q26, q27, [x16, #0x2E0]
-    stp     q28, q29, [x16, #0x300]
-    stp     q30, q31, [x16, #0x320]
+    mrs     x17, fpsr
+    str     x17, [x16, #0x140]
+    stp     q0, q1, [x16, #0x150]
+    stp     q2, q3, [x16, #0x170]
+    stp     q4, q5, [x16, #0x190]
+    stp     q6, q7, [x16, #0x1B0]
+    stp     q8, q9, [x16, #0x1D0]
+    stp     q10, q11, [x16, #0x1F0]
+    stp     q12, q13, [x16, #0x210]
+    stp     q14, q15, [x16, #0x230]
+    stp     q16, q17, [x16, #0x250]
+    stp     q18, q19, [x16, #0x270]
+    stp     q20, q21, [x16, #0x290]
+    stp     q22, q23, [x16, #0x2B0]
+    stp     q24, q25, [x16, #0x2D0]
+    stp     q26, q27, [x16, #0x2F0]
+    stp     q28, q29, [x16, #0x310]
+    stp     q30, q31, [x16, #0x330]
 
     // Restore next thread context.
     add     x16, x1, #0x10
@@ -86,25 +89,31 @@ context_switch:
     ldr     x17, [x16, #0x128]
     msr     tpidr_el0, x17
     ldr     x17, [x16, #0x130]
-    msr     fpcr, x17
+    msr     ttbr0_el1, x17
+    dsb     ish
+    tlbi    vmalle1is
+    dsb     ish
+    isb
     ldr     x17, [x16, #0x138]
+    msr     fpcr, x17
+    ldr     x17, [x16, #0x140]
     msr     fpsr, x17
-    ldp     q0, q1, [x16, #0x140]
-    ldp     q2, q3, [x16, #0x160]
-    ldp     q4, q5, [x16, #0x180]
-    ldp     q6, q7, [x16, #0x1A0]
-    ldp     q8, q9, [x16, #0x1C0]
-    ldp     q10, q11, [x16, #0x1E0]
-    ldp     q12, q13, [x16, #0x200]
-    ldp     q14, q15, [x16, #0x220]
-    ldp     q16, q17, [x16, #0x240]
-    ldp     q18, q19, [x16, #0x260]
-    ldp     q20, q21, [x16, #0x280]
-    ldp     q22, q23, [x16, #0x2A0]
-    ldp     q24, q25, [x16, #0x2C0]
-    ldp     q26, q27, [x16, #0x2E0]
-    ldp     q28, q29, [x16, #0x300]
-    ldp     q30, q31, [x16, #0x320]
+    ldp     q0, q1, [x16, #0x150]
+    ldp     q2, q3, [x16, #0x170]
+    ldp     q4, q5, [x16, #0x190]
+    ldp     q6, q7, [x16, #0x1B0]
+    ldp     q8, q9, [x16, #0x1D0]
+    ldp     q10, q11, [x16, #0x1F0]
+    ldp     q12, q13, [x16, #0x210]
+    ldp     q14, q15, [x16, #0x230]
+    ldp     q16, q17, [x16, #0x250]
+    ldp     q18, q19, [x16, #0x270]
+    ldp     q20, q21, [x16, #0x290]
+    ldp     q22, q23, [x16, #0x2B0]
+    ldp     q24, q25, [x16, #0x2D0]
+    ldp     q26, q27, [x16, #0x2F0]
+    ldp     q28, q29, [x16, #0x310]
+    ldp     q30, q31, [x16, #0x330]
     ldr     x17, [x16, #0xF8]
     mov     sp, x17
     ldp     x19, x20, [x16, #0x98]
@@ -139,25 +148,31 @@ context_switch_start:
     ldr     x17, [x16, #0x128]
     msr     tpidr_el0, x17
     ldr     x17, [x16, #0x130]
-    msr     fpcr, x17
+    msr     ttbr0_el1, x17
+    dsb     ish
+    tlbi    vmalle1is
+    dsb     ish
+    isb
     ldr     x17, [x16, #0x138]
+    msr     fpcr, x17
+    ldr     x17, [x16, #0x140]
     msr     fpsr, x17
-    ldp     q0, q1, [x16, #0x140]
-    ldp     q2, q3, [x16, #0x160]
-    ldp     q4, q5, [x16, #0x180]
-    ldp     q6, q7, [x16, #0x1A0]
-    ldp     q8, q9, [x16, #0x1C0]
-    ldp     q10, q11, [x16, #0x1E0]
-    ldp     q12, q13, [x16, #0x200]
-    ldp     q14, q15, [x16, #0x220]
-    ldp     q16, q17, [x16, #0x240]
-    ldp     q18, q19, [x16, #0x260]
-    ldp     q20, q21, [x16, #0x280]
-    ldp     q22, q23, [x16, #0x2A0]
-    ldp     q24, q25, [x16, #0x2C0]
-    ldp     q26, q27, [x16, #0x2E0]
-    ldp     q28, q29, [x16, #0x300]
-    ldp     q30, q31, [x16, #0x320]
+    ldp     q0, q1, [x16, #0x150]
+    ldp     q2, q3, [x16, #0x170]
+    ldp     q4, q5, [x16, #0x190]
+    ldp     q6, q7, [x16, #0x1B0]
+    ldp     q8, q9, [x16, #0x1D0]
+    ldp     q10, q11, [x16, #0x1F0]
+    ldp     q12, q13, [x16, #0x210]
+    ldp     q14, q15, [x16, #0x230]
+    ldp     q16, q17, [x16, #0x250]
+    ldp     q18, q19, [x16, #0x270]
+    ldp     q20, q21, [x16, #0x290]
+    ldp     q22, q23, [x16, #0x2B0]
+    ldp     q24, q25, [x16, #0x2D0]
+    ldp     q26, q27, [x16, #0x2F0]
+    ldp     q28, q29, [x16, #0x310]
+    ldp     q30, q31, [x16, #0x330]
     ldr     x17, [x16, #0xF8]
     mov     sp, x17
     ldp     x19, x20, [x16, #0x98]

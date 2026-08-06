@@ -127,6 +127,44 @@ fn aarch64_bootstrap_mmu_maps_ram_mmio_and_secondary_cpus() {
     assert!(activate < unmask);
 }
 
+#[test]
+fn aarch64_context_switch_preserves_process_ttbr0() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let context =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/context_shared.rs"))
+            .expect("read AArch64 context layout");
+    let switch =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/context_switch.S"))
+            .expect("read AArch64 context switch");
+    let thread = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/thread.rs"))
+        .expect("read AArch64 thread initialization");
+
+    let context_start = context.find("pub struct CpuContext").expect("CPU context");
+    let context_body = braced_body(&context[context_start..]);
+    let tls = context_body.find("pub tpidr_el0: u64").expect("TLS field");
+    let root = context_body
+        .find("pub ttbr0_el1: u64")
+        .expect("TTBR0 field");
+    let fpcr = context_body.find("pub fpcr: u64").expect("FPCR field");
+    assert!(tls < root && root < fpcr);
+    assert!(thread.contains("ttbr0_el1: crate::kernel_lowlevel::mmu::bootstrap_root()"));
+    assert!(thread.contains("ttbr0_el1: 0"));
+
+    let scheduler_end = switch
+        .find(".globl start_linux_clone_child")
+        .expect("scheduler context-switch boundary");
+    let scheduler = &switch[..scheduler_end];
+    assert_eq!(scheduler.matches("mrs     x17, ttbr0_el1").count(), 1);
+    assert_eq!(scheduler.matches("str     x17, [x16, #0x130]").count(), 1);
+    assert_eq!(scheduler.matches("ldr     x17, [x16, #0x130]").count(), 2);
+    assert_eq!(scheduler.matches("msr     ttbr0_el1, x17").count(), 2);
+    assert_eq!(scheduler.matches("dsb     ish").count(), 4);
+    assert_eq!(scheduler.matches("tlbi    vmalle1is").count(), 2);
+    assert!(scheduler.contains("0x138 = fpcr"));
+    assert!(scheduler.contains("0x140 = fpsr"));
+    assert!(scheduler.contains("0x150 = q0-q31"));
+}
+
 mod syscall_address_logic {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -3435,10 +3473,12 @@ fn aarch64_el0_context_abi_is_complete() {
         "str     x17, [x16, #0x120]",
         "mrs     x17, tpidr_el0",
         "str     x17, [x16, #0x128]",
-        "mrs     x17, fpcr",
+        "mrs     x17, ttbr0_el1",
         "str     x17, [x16, #0x130]",
-        "mrs     x17, fpsr",
+        "mrs     x17, fpcr",
         "str     x17, [x16, #0x138]",
+        "mrs     x17, fpsr",
+        "str     x17, [x16, #0x140]",
         "ldr     x17, [x16, #0x110]",
         "msr     sp_el0, x17",
         "ldr     x17, [x16, #0x118]",
@@ -3448,8 +3488,10 @@ fn aarch64_el0_context_abi_is_complete() {
         "ldr     x17, [x16, #0x128]",
         "msr     tpidr_el0, x17",
         "ldr     x17, [x16, #0x130]",
-        "msr     fpcr, x17",
+        "msr     ttbr0_el1, x17",
         "ldr     x17, [x16, #0x138]",
+        "msr     fpcr, x17",
+        "ldr     x17, [x16, #0x140]",
         "msr     fpsr, x17",
     ] {
         assert!(switch.contains(instruction), "missing {instruction}");
@@ -3475,7 +3517,7 @@ fn aarch64_el0_context_abi_is_complete() {
 
     for pair in 0..16 {
         let first = pair * 2;
-        let offset = 0x140 + pair * 0x20;
+        let offset = 0x150 + pair * 0x20;
         let save = format!("stp     q{first}, q{}, [x16, #{offset:#05X}]", first + 1);
         let restore = format!("ldp     q{first}, q{}, [x16, #{offset:#05X}]", first + 1);
         assert!(switch.contains(&save), "missing {save}");
