@@ -9,7 +9,9 @@
 #![allow(dead_code)]
 #![allow(static_mut_refs)]
 
-use crate::kernel_lowlevel::memory::{PageFrameAllocator, PAGE_SIZE};
+#[cfg(not(target_arch = "aarch64"))]
+use crate::kernel_lowlevel::memory::PageFrameAllocator;
+use crate::kernel_lowlevel::memory::PAGE_SIZE;
 use alloc::vec::Vec;
 #[cfg(target_arch = "aarch64")]
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -406,8 +408,13 @@ impl PageTableManager {
             core::ptr::write_bytes(user_root_vaddr, 0, PT_ENTRIES);
         }
 
+        #[cfg(target_arch = "aarch64")]
+        let kernel_root_vaddr = core::ptr::null_mut();
+        #[cfg(not(target_arch = "aarch64"))]
         let kernel_root_pfn = PageFrameAllocator::alloc()?;
+        #[cfg(not(target_arch = "aarch64"))]
         let kernel_root_vaddr = map_page_table(kernel_root_pfn)?;
+        #[cfg(not(target_arch = "aarch64"))]
         unsafe {
             core::ptr::write_bytes(kernel_root_vaddr, 0, PT_ENTRIES);
         }
@@ -428,7 +435,7 @@ impl PageTableManager {
         vaddr: usize,
         paddr: u64,
         size: usize,
-        _readable: bool,
+        readable: bool,
         writable: bool,
         executable: bool,
     ) -> bool {
@@ -437,24 +444,25 @@ impl PageTableManager {
             if paddr & (PAGE_SIZE as u64 - 1) != 0 || size & (PAGE_SIZE - 1) != 0 {
                 return false;
             }
-            let mut addr = vaddr;
-            let mut pfn = paddr / PAGE_SIZE as u64;
             let end = match vaddr.checked_add(size) {
                 Some(end) => end,
                 None => return false,
             };
+            let first_pfn = paddr / PAGE_SIZE as u64;
+            let page_count = size / PAGE_SIZE;
+            if self
+                .user_address_space
+                .map_user_region(vaddr, first_pfn, page_count, readable, writable, executable)
+                .is_err()
+            {
+                return false;
+            }
+
+            let mut addr = vaddr;
             while addr < end {
-                if self
-                    .user_address_space
-                    .map_user_page(addr, pfn, _readable, writable, executable)
-                    .is_err()
-                {
-                    return false;
-                }
                 self.vmas
                     .push(Vma::new(addr, addr + PAGE_SIZE, PageAttr::empty()));
                 addr += PAGE_SIZE;
-                pfn += 1;
             }
             return true;
         }
@@ -507,39 +515,56 @@ impl PageTableManager {
         executable: bool,
         user_accessible: bool,
     ) -> bool {
-        let mut addr = vaddr;
-        let mut paddr = paddr;
-        let end = vaddr + size;
-
-        while addr < end {
-            let pte = self.walk_kernel_page_table(addr);
-            if pte.is_null() {
-                return false;
-            }
-
-            unsafe {
-                (*pte).set_valid(true);
-                (*pte).set_leaf(true);
-                (*pte).set_output_address(paddr);
-                if user_accessible {
-                    (*pte).set_user_accessible(true);
-                }
-                (*pte).set_af();
-                (*pte).set_sh(3);
-                (*pte).set_attr_idx(0);
-
-                (*pte).set_read_only(!writable);
-                (*pte).set_xn(!executable);
-                if !user_accessible && executable {
-                    (*pte).set_pxn(false); // Allow privileged execution
-                }
-            }
-
-            addr += PAGE_SIZE;
-            paddr += PAGE_SIZE as u64;
+        #[cfg(target_arch = "aarch64")]
+        {
+            let _ = (
+                vaddr,
+                paddr,
+                size,
+                _readable,
+                writable,
+                executable,
+                user_accessible,
+            );
+            return false; // AArch64 kernel mappings live in the shared root.
         }
 
-        true
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let mut addr = vaddr;
+            let mut paddr = paddr;
+            let end = vaddr + size;
+
+            while addr < end {
+                let pte = self.walk_kernel_page_table(addr);
+                if pte.is_null() {
+                    return false;
+                }
+
+                unsafe {
+                    (*pte).set_valid(true);
+                    (*pte).set_leaf(true);
+                    (*pte).set_output_address(paddr);
+                    if user_accessible {
+                        (*pte).set_user_accessible(true);
+                    }
+                    (*pte).set_af();
+                    (*pte).set_sh(3);
+                    (*pte).set_attr_idx(0);
+
+                    (*pte).set_read_only(!writable);
+                    (*pte).set_xn(!executable);
+                    if !user_accessible && executable {
+                        (*pte).set_pxn(false); // Allow privileged execution
+                    }
+                }
+
+                addr += PAGE_SIZE;
+                paddr += PAGE_SIZE as u64;
+            }
+
+            true
+        }
     }
 
     /// Select the user-space page-table slot for this virtual address.

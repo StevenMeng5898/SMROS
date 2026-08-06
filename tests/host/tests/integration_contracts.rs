@@ -51,6 +51,9 @@ fn aarch64_process_roots_walk_distinct_four_kib_pages() {
     let address_space =
         std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/user_address_space.rs"))
             .expect("read AArch64 address-space owner");
+    let shared =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/aarch64_vm_logic_shared.rs"))
+            .expect("read shared AArch64 address-space core");
     let arm64 = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/mod.rs"))
         .expect("read AArch64 module");
     let user_logic =
@@ -61,9 +64,10 @@ fn aarch64_process_roots_walk_distinct_four_kib_pages() {
     assert!(!mmu.contains("fn page_table_slot(vaddr: usize)"));
     assert!(arm64.contains("pub mod user_address_space;"));
     assert!(address_space.contains("pub struct Aarch64AddressSpace"));
-    assert!(address_space.contains("aarch64_table_indices(vaddr)"));
-    assert!(address_space.contains("indices[..2]"));
-    assert!(address_space.contains("indices[2]"));
+    assert!(address_space.contains("Aarch64AddressSpaceCore<PageFrameBackend>"));
+    assert!(shared.contains("aarch64_table_indices(vaddr)"));
+    assert!(shared.contains("indices[..2]"));
+    assert!(shared.contains("indices[2]"));
     assert!(user_logic.contains("USER_CODE_VADDR: usize = 0x1000_0000"));
     assert!(user_logic.contains("USER_DATA_VADDR: usize = 0x1000_1000"));
     assert!(user_logic.contains("USER_HEAP_VADDR: usize = 0x1000_2000"));

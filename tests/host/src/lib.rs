@@ -3538,8 +3538,6 @@ mod aarch64_vm_logic {
             supervisor & AARCH64_DESC_INNER_SHAREABLE,
             AARCH64_DESC_INNER_SHAREABLE
         );
-        assert_eq!(supervisor & (AARCH64_DESC_PXN | AARCH64_DESC_UXN), 0);
-
         let device = aarch64_supervisor_block_descriptor(paddr, true, false);
         assert_eq!(device & (1 << 2), 1 << 2);
         assert_eq!(
@@ -3577,6 +3575,24 @@ mod aarch64_vm_logic {
     }
 
     #[test]
+    fn executable_supervisor_blocks_remain_execute_never_at_el0() {
+        let descriptor = aarch64_supervisor_block_descriptor(0x4020_0000, false, true);
+        assert_eq!(descriptor & AARCH64_DESC_PXN, 0);
+        assert_eq!(descriptor & AARCH64_DESC_UXN, AARCH64_DESC_UXN);
+    }
+
+    #[test]
+    fn supervisor_block_output_is_two_mib_aligned() {
+        let paddr = 0x1234_5678_9000usize;
+        let descriptor = aarch64_supervisor_block_descriptor(paddr, false, true);
+        assert_eq!(
+            descriptor & AARCH64_DESC_ADDR_MASK,
+            paddr as u64 & 0x0000_ffff_ffe0_0000
+        );
+        assert_eq!(descriptor & 0x001f_f000, 0);
+    }
+
+    #[test]
     fn three_level_model_maps_exact_pages_with_independent_roots() {
         let mut allocator = Aarch64TestAllocator::new(0x8000);
         let mut first = Aarch64AddressSpaceModel::new(&mut allocator).expect("first root");
@@ -3610,6 +3626,30 @@ mod aarch64_vm_logic {
             first.translate_user(&allocator, 0x1000_1000, false),
             Some(0x9001_000)
         );
+    }
+
+    #[test]
+    fn three_level_model_rejects_non_page_level_three_descriptors() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let mut address_space = Aarch64AddressSpaceModel::new(&mut allocator).expect("root");
+        let vaddr = 0x1000_0000;
+        address_space
+            .map_user_page(&mut allocator, vaddr, 0x9000, true, true, false)
+            .expect("map page");
+
+        allocator.set_l3_descriptor(
+            address_space.root_pfn(),
+            vaddr,
+            0x9000_000 | AARCH64_DESC_VALID | AARCH64_DESC_AP_USER,
+        );
+
+        assert_eq!(address_space.translate_user(&allocator, vaddr, false), None);
+        assert!(address_space
+            .protect_user_page(&mut allocator, vaddr, true, false, false)
+            .is_err());
+        assert!(address_space
+            .unmap_user_page(&mut allocator, vaddr)
+            .is_err());
     }
 
     #[test]
@@ -3679,6 +3719,28 @@ mod aarch64_vm_logic {
     }
 
     #[test]
+    fn three_level_copy_preflights_missing_physical_backing() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        allocator.insert_data_page(0x9000);
+        let mut address_space = Aarch64AddressSpaceModel::new(&mut allocator).expect("root");
+        address_space
+            .map_user_page(&mut allocator, 0x1000_0000, 0x9000, true, true, false)
+            .expect("map backed page");
+        address_space
+            .map_user_page(&mut allocator, 0x1000_1000, 0x9001, true, true, false)
+            .expect("map page with missing test backing");
+
+        assert!(address_space
+            .copy_to_user(&mut allocator, 0x1000_0ff0, &[0xa5; 32])
+            .is_err());
+        let mut first_page_tail = [0u8; 16];
+        address_space
+            .copy_from_user(&allocator, 0x1000_0ff0, &mut first_page_tail)
+            .expect("read backed first-page tail");
+        assert_eq!(first_page_tail, [0; 16]);
+    }
+
+    #[test]
     fn three_level_model_destruction_returns_every_table_page() {
         let mut allocator = Aarch64TestAllocator::new(0x8000);
         let baseline = allocator.allocated_pages();
@@ -3688,7 +3750,7 @@ mod aarch64_vm_logic {
             .map_user_page(&mut allocator, 0x1000_0000, 0x9000, true, true, false)
             .expect("map page");
         assert_eq!(allocator.allocated_pages(), baseline + 3);
-        address_space.destroy(&mut allocator);
+        drop(address_space);
         assert_eq!(allocator.allocated_pages(), baseline);
     }
 
@@ -3716,6 +3778,125 @@ mod aarch64_vm_logic {
             address_space.translate_user(&allocator, 0x1000_0000, true),
             Some(0x9000_000)
         );
+    }
+
+    #[test]
+    fn three_level_region_mapping_rolls_back_leaves_and_tables() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let mut address_space = Aarch64AddressSpaceModel::new(&mut allocator).expect("root");
+        let baseline = allocator.allocated_pages();
+        let start = 0x101f_f000;
+        allocator.fail_after_table_allocations(2);
+
+        assert!(address_space
+            .map_user_region(&mut allocator, start, 0x9000, 2, true, true, false)
+            .is_err());
+        assert_eq!(allocator.allocated_pages(), baseline);
+        assert_eq!(address_space.translate_user(&allocator, start, false), None);
+        assert_eq!(
+            address_space.translate_user(&allocator, start + AARCH64_PAGE_SIZE, false),
+            None
+        );
+    }
+
+    #[test]
+    fn page_mutations_request_publish_and_break_before_make_maintenance() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let mut address_space = Aarch64AddressSpaceModel::new(&mut allocator).expect("root");
+        let vaddr = 0x1000_0000;
+
+        address_space
+            .map_user_page(&mut allocator, vaddr, 0x9000, true, true, false)
+            .expect("map page");
+        assert_eq!(
+            allocator.maintenance_events(),
+            vec![Aarch64MaintenanceEvent::Publish(vaddr)]
+        );
+
+        allocator.clear_maintenance_events();
+        address_space
+            .protect_user_page(&mut allocator, vaddr, true, false, false)
+            .expect("protect page");
+        assert_eq!(
+            allocator.maintenance_events(),
+            vec![
+                Aarch64MaintenanceEvent::Break(vaddr),
+                Aarch64MaintenanceEvent::Make,
+            ]
+        );
+
+        allocator.clear_maintenance_events();
+        address_space
+            .unmap_user_page(&mut allocator, vaddr)
+            .expect("unmap page");
+        assert_eq!(
+            allocator.maintenance_events(),
+            vec![Aarch64MaintenanceEvent::Break(vaddr)]
+        );
+    }
+
+    #[test]
+    fn production_owner_uses_the_backend_parameterized_core() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/kernel_lowlevel/ARM64/user_address_space.rs"
+        ));
+        assert!(source.contains("Aarch64AddressSpaceCore<PageFrameBackend>"));
+        assert!(source.contains("impl Aarch64AddressSpaceBackend for PageFrameBackend"));
+        assert!(!source.contains("table_pfns: Vec<u64>"));
+    }
+
+    #[test]
+    fn production_backend_enforces_user_page_tlb_maintenance() {
+        let address_space = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/kernel_lowlevel/ARM64/user_address_space.rs"
+        ));
+        let cpu = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/kernel_lowlevel/ARM64/cpu.rs"
+        ));
+        assert!(address_space.contains("cpu::invalidate_user_page(vaddr)"));
+        assert!(address_space.contains("cpu::complete_user_page_update()"));
+
+        let invalidate = cpu
+            .find("pub fn invalidate_user_page")
+            .expect("user-page invalidation helper");
+        let invalidate = &cpu[invalidate..];
+        let first_dsb = invalidate
+            .find("dsb ishst")
+            .expect("publish descriptor write");
+        let tlbi = invalidate.find("tlbi vae1is").expect("invalidate page");
+        let second_dsb = invalidate[tlbi..]
+            .find("dsb ish")
+            .map(|offset| tlbi + offset)
+            .expect("complete invalidation");
+        let isb = invalidate[second_dsb..]
+            .find("isb")
+            .map(|offset| second_dsb + offset)
+            .expect("synchronize translation use");
+        assert!(first_dsb < tlbi && tlbi < second_dsb && second_dsb < isb);
+
+        let complete = cpu
+            .find("pub fn complete_user_page_update")
+            .expect("break-before-make completion helper");
+        let complete = &cpu[complete..];
+        assert!(
+            complete.find("dsb ishst").expect("publish replacement")
+                < complete.find("isb").expect("synchronize replacement")
+        );
+    }
+
+    #[test]
+    fn aarch64_manager_delegates_regions_without_a_legacy_kernel_root() {
+        let mmu = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/kernel_lowlevel/mmu.rs"
+        ));
+        assert!(mmu.contains("let kernel_root_vaddr = core::ptr::null_mut()"));
+        assert!(mmu.contains(".user_address_space"));
+        assert!(mmu.contains(".map_user_region("));
+        assert!(mmu.contains("return false; // AArch64 kernel mappings live in the shared root."));
     }
 
     #[test]

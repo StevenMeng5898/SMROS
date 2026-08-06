@@ -79,6 +79,28 @@ pub fn sync_instruction_cache() {
 }
 
 #[inline(always)]
+pub fn invalidate_user_page(vaddr: usize) {
+    let page = (vaddr as u64) >> 12;
+    unsafe {
+        core::arch::asm!(
+            "dsb ishst",
+            "tlbi vae1is, {page}",
+            "dsb ish",
+            "isb",
+            page = in(reg) page,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+#[inline(always)]
+pub fn complete_user_page_update() {
+    unsafe {
+        core::arch::asm!("dsb ishst", "isb", options(nostack, preserves_flags));
+    }
+}
+
+#[inline(always)]
 pub unsafe fn install_stage1_translation(root: u64) {
     let mair = 0xffu64 | (0x04u64 << 8);
     let tcr = 25u64
