@@ -22,8 +22,14 @@ mod arch;
 #[path = "X86_64/mod.rs"]
 mod arch;
 
+#[cfg(target_arch = "aarch64")]
+#[path = "aarch64_vm_logic_shared.rs"]
+pub(crate) mod aarch64_vm_logic_shared;
 pub(crate) mod lowlevel_logic;
 pub mod memory;
 pub mod mmu;
+
+#[cfg(target_arch = "aarch64")]
+pub use arch::user_address_space::Aarch64AddressSpace;
 
 pub use arch::{cpu, drivers, interrupt, serial, smp, thread, timer};

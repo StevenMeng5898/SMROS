@@ -14,6 +14,16 @@ use alloc::vec::Vec;
 
 use super::lowlevel_logic;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressSpaceError {
+    OutOfMemory,
+    InvalidAddress,
+    InvalidPermissions,
+    AlreadyMapped,
+    NotMapped,
+    PermissionDenied,
+}
+
 const PTE_VALID: u64 = 1 << 0;
 
 #[cfg(target_arch = "aarch64")]
@@ -372,13 +382,24 @@ pub struct PageTableManager {
     pub asid: u16,
     /// VMAs for this address space
     pub vmas: Vec<Vma>,
+    #[cfg(target_arch = "aarch64")]
+    user_address_space: crate::kernel_lowlevel::Aarch64AddressSpace,
 }
 
 impl PageTableManager {
     /// Create a new page table manager
     pub fn new() -> Option<Self> {
-        let user_root_pfn = PageFrameAllocator::alloc()?;
+        #[cfg(target_arch = "aarch64")]
+        let user_address_space =
+            crate::kernel_lowlevel::Aarch64AddressSpace::new_with_kernel_map().ok()?;
+        #[cfg(target_arch = "aarch64")]
+        let user_root_vaddr = user_address_space.root_paddr() as *mut PageTableEntry;
+
+        #[cfg(not(target_arch = "aarch64"))]
+        let user_root_pfn = allocate_page_table_root()?;
+        #[cfg(not(target_arch = "aarch64"))]
         let user_root_vaddr = map_page_table(user_root_pfn)?;
+        #[cfg(not(target_arch = "aarch64"))]
         unsafe {
             core::ptr::write_bytes(user_root_vaddr, 0, PT_ENTRIES);
         }
@@ -394,6 +415,8 @@ impl PageTableManager {
             kernel_root: kernel_root_vaddr,
             asid: 0,
             vmas: Vec::new(),
+            #[cfg(target_arch = "aarch64")]
+            user_address_space,
         })
     }
 
@@ -407,38 +430,68 @@ impl PageTableManager {
         writable: bool,
         executable: bool,
     ) -> bool {
-        let mut addr = vaddr;
-        let mut paddr = paddr;
-        let end = vaddr + size;
-
-        while addr < end {
-            let pte = self.walk_user_page_table(addr);
-            if pte.is_null() {
+        #[cfg(target_arch = "aarch64")]
+        {
+            if paddr & (PAGE_SIZE as u64 - 1) != 0 || size & (PAGE_SIZE - 1) != 0 {
                 return false;
             }
-
-            unsafe {
-                (*pte).set_valid(true);
-                (*pte).set_leaf(true);
-                (*pte).set_output_address(paddr);
-                (*pte).set_user_accessible(true);
-                (*pte).set_af();
-                (*pte).set_sh(3); // Inner shareable
-                (*pte).set_attr_idx(0);
-
-                (*pte).set_read_only(!writable);
-                (*pte).set_xn(!executable);
+            let mut addr = vaddr;
+            let mut pfn = paddr / PAGE_SIZE as u64;
+            let end = match vaddr.checked_add(size) {
+                Some(end) => end,
+                None => return false,
+            };
+            while addr < end {
+                if self
+                    .user_address_space
+                    .map_user_page(addr, pfn, _readable, writable, executable)
+                    .is_err()
+                {
+                    return false;
+                }
+                self.vmas
+                    .push(Vma::new(addr, addr + PAGE_SIZE, PageAttr::empty()));
+                addr += PAGE_SIZE;
+                pfn += 1;
             }
-
-            // Add VMA
-            self.vmas
-                .push(Vma::new(addr, addr + PAGE_SIZE, PageAttr::empty()));
-
-            addr += PAGE_SIZE;
-            paddr += PAGE_SIZE as u64;
+            return true;
         }
 
-        true
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let mut addr = vaddr;
+            let mut paddr = paddr;
+            let end = vaddr + size;
+
+            while addr < end {
+                let pte = self.walk_user_page_table(addr);
+                if pte.is_null() {
+                    return false;
+                }
+
+                unsafe {
+                    (*pte).set_valid(true);
+                    (*pte).set_leaf(true);
+                    (*pte).set_output_address(paddr);
+                    (*pte).set_user_accessible(true);
+                    (*pte).set_af();
+                    (*pte).set_sh(3); // Inner shareable
+                    (*pte).set_attr_idx(0);
+
+                    (*pte).set_read_only(!writable);
+                    (*pte).set_xn(!executable);
+                }
+
+                // Add VMA
+                self.vmas
+                    .push(Vma::new(addr, addr + PAGE_SIZE, PageAttr::empty()));
+
+                addr += PAGE_SIZE;
+                paddr += PAGE_SIZE as u64;
+            }
+
+            true
+        }
     }
 
     /// Map a region in kernel space.
@@ -489,18 +542,27 @@ impl PageTableManager {
 
     /// Select the user-space page-table slot for this virtual address.
     fn walk_user_page_table(&mut self, vaddr: usize) -> *mut PageTableEntry {
-        let idx = page_table_slot(vaddr);
-
-        if idx >= PT_ENTRIES {
+        #[cfg(target_arch = "aarch64")]
+        {
+            let _ = vaddr;
             return core::ptr::null_mut();
         }
 
-        unsafe { self.user_root.add(idx) }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let idx = legacy_page_table_slot(vaddr);
+
+            if idx >= PT_ENTRIES {
+                return core::ptr::null_mut();
+            }
+
+            unsafe { self.user_root.add(idx) }
+        }
     }
 
     /// Select the kernel-space page-table slot for this virtual address.
     fn walk_kernel_page_table(&mut self, vaddr: usize) -> *mut PageTableEntry {
-        let idx = page_table_slot(vaddr);
+        let idx = legacy_page_table_slot(vaddr);
 
         if idx >= PT_ENTRIES {
             return core::ptr::null_mut();
@@ -515,7 +577,7 @@ impl PageTableManager {
     }
 }
 
-fn page_table_slot(vaddr: usize) -> usize {
+fn legacy_page_table_slot(vaddr: usize) -> usize {
     (vaddr >> 21) & (PT_ENTRIES - 1)
 }
 
@@ -563,6 +625,11 @@ fn map_page_table(pfn: u64) -> Option<*mut PageTableEntry> {
         NEXT_PAGE_TABLE_SLOT += 1;
         Some(PAGE_TABLE_POOL[slot].entries.as_mut_ptr())
     }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn allocate_page_table_root() -> Option<u64> {
+    PageFrameAllocator::alloc()
 }
 
 /// Global page table manager for kernel

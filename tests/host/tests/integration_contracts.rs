@@ -43,6 +43,26 @@ fn aarch64_page_allocator_uses_detected_ram_after_kernel_end() {
     assert!(memory_init < mmu_init);
 }
 
+#[test]
+fn aarch64_process_roots_walk_distinct_four_kib_pages() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mmu = std::fs::read_to_string(repository.join("src/kernel_lowlevel/mmu.rs"))
+        .expect("read MMU module");
+    let address_space =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/user_address_space.rs"))
+            .expect("read AArch64 address-space owner");
+    let arm64 = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/mod.rs"))
+        .expect("read AArch64 module");
+
+    assert!(!mmu.contains("let user_root_pfn = PageFrameAllocator::alloc()?"));
+    assert!(!mmu.contains("fn page_table_slot(vaddr: usize)"));
+    assert!(arm64.contains("pub mod user_address_space;"));
+    assert!(address_space.contains("pub struct Aarch64AddressSpace"));
+    assert!(address_space.contains("aarch64_table_indices(vaddr)"));
+    assert!(address_space.contains("indices[..2]"));
+    assert!(address_space.contains("indices[2]"));
+}
+
 mod syscall_address_logic {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

@@ -3506,6 +3506,8 @@ fn kernel_lowlevel_logic_real_fdt_memory_overrides_fallback_and_rejects_invalid_
 }
 
 mod aarch64_vm_logic {
+    extern crate alloc;
+
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/kernel_lowlevel/aarch64_vm_logic_shared.rs"
@@ -3517,6 +3519,94 @@ mod aarch64_vm_logic {
         assert_eq!(aarch64_table_indices(0x1000_1000), Some([0, 128, 1]));
         assert_eq!(aarch64_table_indices(0x4000_0000), Some([1, 0, 0]));
         assert_eq!(aarch64_table_indices(1usize << 39), None);
+    }
+
+    #[test]
+    fn descriptors_encode_tables_blocks_pages_and_permissions() {
+        let paddr = 0x1234_5678_9000;
+        assert_eq!(
+            aarch64_table_descriptor(paddr),
+            (paddr & AARCH64_DESC_ADDR_MASK) | AARCH64_DESC_VALID | AARCH64_DESC_TABLE_OR_PAGE
+        );
+
+        let supervisor = aarch64_supervisor_block_descriptor(paddr, false, true);
+        assert_eq!(supervisor & AARCH64_DESC_TABLE_OR_PAGE, 0);
+        assert_eq!(supervisor & AARCH64_DESC_AF, AARCH64_DESC_AF);
+        assert_eq!(
+            supervisor & AARCH64_DESC_INNER_SHAREABLE,
+            AARCH64_DESC_INNER_SHAREABLE
+        );
+        assert_eq!(
+            supervisor & (AARCH64_DESC_PXN | AARCH64_DESC_UXN),
+            AARCH64_DESC_UXN
+        );
+
+        let read_only = aarch64_user_page_descriptor(paddr, true, false, true);
+        assert_eq!(read_only & AARCH64_DESC_AP_USER, AARCH64_DESC_AP_USER);
+        assert_eq!(
+            read_only & AARCH64_DESC_AP_READ_ONLY,
+            AARCH64_DESC_AP_READ_ONLY
+        );
+        assert_eq!(read_only & AARCH64_DESC_UXN, 0);
+        assert_eq!(read_only & AARCH64_DESC_PXN, AARCH64_DESC_PXN);
+
+        let read_write = aarch64_user_page_descriptor(paddr, true, true, false);
+        assert_eq!(read_write & AARCH64_DESC_AP_READ_ONLY, 0);
+        assert_eq!(read_write & AARCH64_DESC_UXN, AARCH64_DESC_UXN);
+        assert_eq!(
+            read_write & AARCH64_DESC_TABLE_OR_PAGE,
+            AARCH64_DESC_TABLE_OR_PAGE
+        );
+    }
+
+    #[test]
+    fn three_level_model_maps_exact_pages_with_independent_roots() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let mut first = Aarch64AddressSpaceModel::new(&mut allocator).expect("first root");
+        let second = Aarch64AddressSpaceModel::new(&mut allocator).expect("second root");
+        assert_ne!(first.root_pfn(), second.root_pfn());
+
+        first
+            .map_user_page(&mut allocator, 0x1000_0000, 0x9000, true, true, false)
+            .expect("map first page");
+        first
+            .map_user_page(&mut allocator, 0x1000_1000, 0x9001, true, false, true)
+            .expect("map adjacent page");
+        assert_eq!(
+            first.translate_user(&allocator, 0x1000_0123, true),
+            Some(0x9000_123)
+        );
+        assert_eq!(first.translate_user(&allocator, 0x1000_1123, true), None);
+        assert_eq!(
+            first.translate_user(&allocator, 0x1000_1123, false),
+            Some(0x9001_123)
+        );
+        assert!(first
+            .map_user_page(&mut allocator, 0x1000_0000, 0xa000, true, true, false)
+            .is_err());
+        assert_eq!(
+            first.unmap_user_page(&mut allocator, 0x1000_0000),
+            Ok(0x9000)
+        );
+        assert_eq!(first.translate_user(&allocator, 0x1000_0000, false), None);
+        assert_eq!(
+            first.translate_user(&allocator, 0x1000_1000, false),
+            Some(0x9001_000)
+        );
+    }
+
+    #[test]
+    fn three_level_model_destruction_returns_every_table_page() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let baseline = allocator.allocated_pages();
+        let address_space = Aarch64AddressSpaceModel::new(&mut allocator).expect("root");
+        let mut address_space = address_space;
+        address_space
+            .map_user_page(&mut allocator, 0x1000_0000, 0x9000, true, true, false)
+            .expect("map page");
+        assert_eq!(allocator.allocated_pages(), baseline + 3);
+        address_space.destroy(&mut allocator);
+        assert_eq!(allocator.allocated_pages(), baseline);
     }
 
     #[test]

@@ -6,5 +6,6 @@ pub mod serial;
 pub mod smp;
 pub mod thread;
 pub mod timer;
+pub mod user_address_space;
 
 pub(crate) use crate::kernel_lowlevel::lowlevel_logic;
