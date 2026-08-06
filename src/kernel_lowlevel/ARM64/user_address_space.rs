@@ -44,8 +44,11 @@ impl Aarch64AddressSpace {
                 return Err(AddressSpaceError::AlreadyMapped);
             }
             *entry = aarch64_user_page_descriptor(
-                pfn.checked_mul(AARCH64_PAGE_SIZE as u64)
-                    .ok_or(AddressSpaceError::InvalidAddress)?,
+                usize::try_from(
+                    pfn.checked_mul(AARCH64_PAGE_SIZE as u64)
+                        .ok_or(AddressSpaceError::InvalidAddress)?,
+                )
+                .map_err(|_| AddressSpaceError::InvalidAddress)?,
                 readable,
                 writable,
                 executable,
@@ -68,7 +71,7 @@ impl Aarch64AddressSpace {
             return Err(AddressSpaceError::NotMapped);
         }
         *entry = aarch64_user_page_descriptor(
-            descriptor & AARCH64_DESC_ADDR_MASK,
+            (descriptor & AARCH64_DESC_ADDR_MASK) as usize,
             readable,
             writable,
             executable,
@@ -142,6 +145,17 @@ impl Aarch64AddressSpace {
             .checked_add(len)
             .ok_or(AddressSpaceError::InvalidAddress)?;
         let mut current = vaddr;
+        while current < end {
+            self.translate_user(current, write)
+                .ok_or(AddressSpaceError::PermissionDenied)?;
+            let count = core::cmp::min(
+                AARCH64_PAGE_SIZE - (current & (AARCH64_PAGE_SIZE - 1)),
+                end - current,
+            );
+            current += count;
+        }
+
+        current = vaddr;
         let mut offset = 0;
         while current < end {
             let physical = self
@@ -160,14 +174,11 @@ impl Aarch64AddressSpace {
 
     fn validate_page_operation(
         vaddr: usize,
-        readable: bool,
-        writable: bool,
+        _readable: bool,
+        _writable: bool,
     ) -> Result<(), AddressSpaceError> {
         if !aarch64_user_range_valid(vaddr, AARCH64_PAGE_SIZE) {
             return Err(AddressSpaceError::InvalidAddress);
-        }
-        if !readable || (writable && !readable) {
-            return Err(AddressSpaceError::InvalidPermissions);
         }
         Ok(())
     }
@@ -200,8 +211,10 @@ impl Aarch64AddressSpace {
                 };
                 self.table_pfns.push(child_pfn);
                 unsafe {
-                    Self::table_mut(table_pfn)?[index] =
-                        aarch64_table_descriptor(child_pfn * AARCH64_PAGE_SIZE as u64);
+                    Self::table_mut(table_pfn)?[index] = aarch64_table_descriptor(
+                        PageFrameAllocator::pfn_address(child_pfn)
+                            .ok_or(AddressSpaceError::InvalidAddress)?,
+                    );
                 }
                 created.push((table_pfn, index, child_pfn));
                 table_pfn = child_pfn;

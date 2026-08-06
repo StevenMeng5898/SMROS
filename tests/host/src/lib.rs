@@ -3526,7 +3526,9 @@ mod aarch64_vm_logic {
         let paddr = 0x1234_5678_9000;
         assert_eq!(
             aarch64_table_descriptor(paddr),
-            (paddr & AARCH64_DESC_ADDR_MASK) | AARCH64_DESC_VALID | AARCH64_DESC_TABLE_OR_PAGE
+            (paddr as u64 & AARCH64_DESC_ADDR_MASK)
+                | AARCH64_DESC_VALID
+                | AARCH64_DESC_TABLE_OR_PAGE
         );
 
         let supervisor = aarch64_supervisor_block_descriptor(paddr, false, true);
@@ -3536,9 +3538,17 @@ mod aarch64_vm_logic {
             supervisor & AARCH64_DESC_INNER_SHAREABLE,
             AARCH64_DESC_INNER_SHAREABLE
         );
+        assert_eq!(supervisor & (AARCH64_DESC_PXN | AARCH64_DESC_UXN), 0);
+
+        let device = aarch64_supervisor_block_descriptor(paddr, true, false);
+        assert_eq!(device & (1 << 2), 1 << 2);
         assert_eq!(
-            supervisor & (AARCH64_DESC_PXN | AARCH64_DESC_UXN),
-            AARCH64_DESC_UXN
+            device & AARCH64_DESC_INNER_SHAREABLE,
+            AARCH64_DESC_INNER_SHAREABLE
+        );
+        assert_eq!(
+            device & (AARCH64_DESC_PXN | AARCH64_DESC_UXN),
+            AARCH64_DESC_PXN | AARCH64_DESC_UXN
         );
 
         let read_only = aarch64_user_page_descriptor(paddr, true, false, true);
@@ -3556,6 +3566,13 @@ mod aarch64_vm_logic {
         assert_eq!(
             read_write & AARCH64_DESC_TABLE_OR_PAGE,
             AARCH64_DESC_TABLE_OR_PAGE
+        );
+
+        let no_access = aarch64_user_page_descriptor(paddr, false, false, false);
+        assert_eq!(no_access & AARCH64_DESC_AP_USER, 0);
+        assert_eq!(
+            no_access & AARCH64_DESC_AP_READ_ONLY,
+            AARCH64_DESC_AP_READ_ONLY
         );
     }
 
@@ -3596,6 +3613,72 @@ mod aarch64_vm_logic {
     }
 
     #[test]
+    fn three_level_model_protects_pages_and_supports_no_access() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let mut address_space = Aarch64AddressSpaceModel::new(&mut allocator).expect("root");
+        address_space
+            .map_user_page(&mut allocator, 0x1000_0000, 0x9000, true, true, false)
+            .expect("map writable page");
+
+        address_space
+            .protect_user_page(&mut allocator, 0x1000_0000, true, false, true)
+            .expect("protect read-only executable");
+        assert_eq!(
+            address_space.translate_user(&allocator, 0x1000_0042, false),
+            Some(0x9000_042)
+        );
+        assert_eq!(
+            address_space.translate_user(&allocator, 0x1000_0042, true),
+            None
+        );
+
+        address_space
+            .protect_user_page(&mut allocator, 0x1000_0000, false, false, false)
+            .expect("protect no-access");
+        assert_eq!(
+            address_space.translate_user(&allocator, 0x1000_0042, false),
+            None
+        );
+    }
+
+    #[test]
+    fn three_level_model_checked_copies_cross_pages_without_partial_faults() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        allocator.insert_data_page(0x9000);
+        allocator.insert_data_page(0x9001);
+        let mut address_space = Aarch64AddressSpaceModel::new(&mut allocator).expect("root");
+        address_space
+            .map_user_page(&mut allocator, 0x1000_0000, 0x9000, true, true, false)
+            .expect("map first data page");
+        address_space
+            .map_user_page(&mut allocator, 0x1000_1000, 0x9001, true, true, false)
+            .expect("map second data page");
+
+        let bytes: Vec<u8> = (0..32).map(|value| value as u8).collect();
+        address_space
+            .copy_to_user(&mut allocator, 0x1000_0ff0, &bytes)
+            .expect("copy across page boundary");
+        let mut copied = [0u8; 32];
+        address_space
+            .copy_from_user(&allocator, 0x1000_0ff0, &mut copied)
+            .expect("read across page boundary");
+        assert_eq!(copied.as_slice(), bytes.as_slice());
+
+        address_space
+            .protect_user_page(&mut allocator, 0x1000_1000, true, false, false)
+            .expect("protect second page read-only");
+        let replacement = [0xa5u8; 32];
+        assert!(address_space
+            .copy_to_user(&mut allocator, 0x1000_0ff0, &replacement)
+            .is_err());
+        let mut first_page_tail = [0u8; 16];
+        address_space
+            .copy_from_user(&allocator, 0x1000_0ff0, &mut first_page_tail)
+            .expect("read unchanged first-page tail");
+        assert_eq!(first_page_tail.as_slice(), &bytes[..16]);
+    }
+
+    #[test]
     fn three_level_model_destruction_returns_every_table_page() {
         let mut allocator = Aarch64TestAllocator::new(0x8000);
         let baseline = allocator.allocated_pages();
@@ -3607,6 +3690,32 @@ mod aarch64_vm_logic {
         assert_eq!(allocator.allocated_pages(), baseline + 3);
         address_space.destroy(&mut allocator);
         assert_eq!(allocator.allocated_pages(), baseline);
+    }
+
+    #[test]
+    fn three_level_model_rolls_back_partial_table_allocation() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let mut address_space = Aarch64AddressSpaceModel::new(&mut allocator).expect("root");
+        let baseline = allocator.allocated_pages();
+        allocator.fail_after_table_allocations(1);
+
+        assert!(address_space
+            .map_user_page(&mut allocator, 0x1000_0000, 0x9000, true, true, false)
+            .is_err());
+        assert_eq!(allocator.allocated_pages(), baseline);
+        assert_eq!(
+            address_space.translate_user(&allocator, 0x1000_0000, false),
+            None
+        );
+
+        allocator.allow_table_allocations();
+        address_space
+            .map_user_page(&mut allocator, 0x1000_0000, 0x9000, true, true, false)
+            .expect("mapping succeeds after rollback");
+        assert_eq!(
+            address_space.translate_user(&allocator, 0x1000_0000, true),
+            Some(0x9000_000)
+        );
     }
 
     #[test]

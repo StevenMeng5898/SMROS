@@ -53,6 +53,9 @@ fn aarch64_process_roots_walk_distinct_four_kib_pages() {
             .expect("read AArch64 address-space owner");
     let arm64 = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/mod.rs"))
         .expect("read AArch64 module");
+    let user_logic =
+        std::fs::read_to_string(repository.join("src/user_level/services/user_logic.rs"))
+            .expect("read user layout constants");
 
     assert!(!mmu.contains("let user_root_pfn = PageFrameAllocator::alloc()?"));
     assert!(!mmu.contains("fn page_table_slot(vaddr: usize)"));
@@ -61,6 +64,10 @@ fn aarch64_process_roots_walk_distinct_four_kib_pages() {
     assert!(address_space.contains("aarch64_table_indices(vaddr)"));
     assert!(address_space.contains("indices[..2]"));
     assert!(address_space.contains("indices[2]"));
+    assert!(user_logic.contains("USER_CODE_VADDR: usize = 0x1000_0000"));
+    assert!(user_logic.contains("USER_DATA_VADDR: usize = 0x1000_1000"));
+    assert!(user_logic.contains("USER_HEAP_VADDR: usize = 0x1000_2000"));
+    assert!(user_logic.contains("USER_STACK_VADDR: usize = 0x1FFF_D000"));
 }
 
 mod syscall_address_logic {

@@ -2,11 +2,11 @@ include!("user_logic_shared.rs");
 
 pub(crate) const USER_PROCESS_CAPACITY: usize = 16;
 pub(crate) const USER_INIT_PARENT_PID: usize = 1;
-pub(crate) const USER_CODE_VADDR: usize = 0x0000_0000;
-pub(crate) const USER_DATA_VADDR: usize = 0x0000_1000;
-pub(crate) const USER_HEAP_VADDR: usize = 0x0000_2000;
+pub(crate) const USER_CODE_VADDR: usize = 0x1000_0000;
+pub(crate) const USER_DATA_VADDR: usize = 0x1000_1000;
+pub(crate) const USER_HEAP_VADDR: usize = 0x1000_2000;
 pub(crate) const USER_HEAP_PAGES: usize = 4;
-pub(crate) const USER_STACK_VADDR: usize = 0xFFFF_0000;
+pub(crate) const USER_STACK_VADDR: usize = 0x1FFF_D000;
 pub(crate) const USER_STACK_PAGES: usize = 2;
 pub(crate) const USER_THREAD_TIME_SLICE: u32 = 10;
 pub(crate) const USER_MMAP_BASE: u64 = 0x5000_0000;
