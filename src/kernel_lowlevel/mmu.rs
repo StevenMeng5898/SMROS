@@ -28,6 +28,13 @@ pub enum AddressSpaceError {
     PermissionDenied,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MmuInitError {
+    AlreadyInitialized,
+    OutOfMemory,
+    ActivationFailed,
+}
+
 const PTE_VALID: u64 = 1 << 0;
 
 #[cfg(target_arch = "aarch64")]
@@ -679,7 +686,11 @@ pub fn bootstrap_root() -> u64 {
 
 #[cfg(target_arch = "aarch64")]
 pub fn activate_bootstrap_on_current_cpu() -> bool {
-    let root = bootstrap_root();
+    activate_root_on_current_cpu(bootstrap_root())
+}
+
+#[cfg(target_arch = "aarch64")]
+fn activate_root_on_current_cpu(root: u64) -> bool {
     if root == 0 {
         return false;
     }
@@ -695,25 +706,35 @@ pub fn activate_bootstrap_on_current_cpu() -> bool {
 }
 
 /// Initialize MMU subsystem
-pub fn init() {
-    let manager = PageTableManager::new();
-    #[cfg(target_arch = "aarch64")]
-    if let Some(manager) = manager.as_ref() {
-        BOOTSTRAP_ROOT.store(manager.user_address_space.root_paddr(), Ordering::Release);
-    }
+pub fn init() -> Result<(), MmuInitError> {
     unsafe {
-        KERNEL_PAGETABLE_MANAGER = manager;
+        if KERNEL_PAGETABLE_MANAGER.is_some() {
+            return Err(MmuInitError::AlreadyInitialized);
+        }
     }
     #[cfg(target_arch = "aarch64")]
-    let activated = activate_bootstrap_on_current_cpu();
+    if bootstrap_root() != 0 {
+        return Err(MmuInitError::AlreadyInitialized);
+    }
+
+    let manager = PageTableManager::new().ok_or(MmuInitError::OutOfMemory)?;
+    #[cfg(target_arch = "aarch64")]
+    let root = manager.user_address_space.root_paddr();
+    #[cfg(target_arch = "aarch64")]
+    if !activate_root_on_current_cpu(root) {
+        return Err(MmuInitError::ActivationFailed);
+    }
+
+    unsafe {
+        KERNEL_PAGETABLE_MANAGER = Some(manager);
+    }
+    #[cfg(target_arch = "aarch64")]
+    BOOTSTRAP_ROOT.store(root, Ordering::Release);
+
     crate::kernel_lowlevel::serial::Serial::new().init();
     let mut serial = crate::kernel_lowlevel::serial::Serial::new();
-    #[cfg(target_arch = "aarch64")]
-    if !activated {
-        serial.write_str("[MMU] Bootstrap activation failed\n");
-        return;
-    }
     serial.write_str("[MMU] Page table manager initialized\n");
+    Ok(())
 }
 
 /// Get kernel page table manager

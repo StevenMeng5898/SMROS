@@ -354,7 +354,7 @@ pub extern "C" fn kernel_main(fdt_base: usize) -> ! {
 
     // Initialize MMU
     serial.write_str("[OK] Initializing MMU... ");
-    kernel_lowlevel::mmu::init();
+    kernel_lowlevel::mmu::init().expect("initialize MMU before continuing boot");
     serial.write_str("done\n");
 
     // Initialize syscall handler

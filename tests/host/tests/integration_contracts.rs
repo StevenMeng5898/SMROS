@@ -169,10 +169,17 @@ fn aarch64_bootstrap_mmu_maps_ram_mmio_and_secondary_cpus() {
         .find("pub fn activate_bootstrap_on_current_cpu() -> bool")
         .map(|start| braced_body(&mmu[start..]))
         .expect("bootstrap activation helper");
-    let reject_zero = activate.find("if root == 0").expect("reject a zero root");
-    let install_root = activate
+    assert!(activate.contains("activate_root_on_current_cpu(bootstrap_root())"));
+    let activate_candidate = mmu
+        .find("fn activate_root_on_current_cpu(root: u64) -> bool")
+        .map(|start| braced_body(&mmu[start..]))
+        .expect("candidate-root activation helper");
+    let reject_zero = activate_candidate
+        .find("if root == 0")
+        .expect("reject a zero root");
+    let install_root = activate_candidate
         .find("install_stage1_translation(root)")
-        .expect("install the published root");
+        .expect("install the candidate root");
     assert!(reject_zero < install_root);
 
     let init = mmu
@@ -180,15 +187,15 @@ fn aarch64_bootstrap_mmu_maps_ram_mmio_and_secondary_cpus() {
         .map(|start| braced_body(&mmu[start..]))
         .expect("MMU initialization");
     let publish = init
-        .find("BOOTSTRAP_ROOT.store(manager.user_address_space.root_paddr(), Ordering::Release)")
+        .find("BOOTSTRAP_ROOT.store(root, Ordering::Release)")
         .expect("publish bootstrap root");
     let retain_owner = init
-        .find("KERNEL_PAGETABLE_MANAGER = manager")
+        .find("KERNEL_PAGETABLE_MANAGER = Some(manager)")
         .expect("retain bootstrap address-space owner");
     let activate_cpu0 = init
-        .find("activate_bootstrap_on_current_cpu()")
+        .find("activate_root_on_current_cpu(root)")
         .expect("activate bootstrap root on CPU0");
-    assert!(publish < retain_owner && retain_owner < activate_cpu0);
+    assert!(activate_cpu0 < retain_owner && retain_owner < publish);
 
     let secondary = smp
         .find("pub extern \"C\" fn secondary_cpu_entry()")
@@ -205,6 +212,42 @@ fn aarch64_bootstrap_mmu_maps_ram_mmio_and_secondary_cpus() {
         .expect("unmask secondary interrupts");
     assert!(activate < serial);
     assert!(activate < unmask);
+}
+
+#[test]
+fn aarch64_bootstrap_mmu_initialization_fails_closed() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mmu = std::fs::read_to_string(repository.join("src/kernel_lowlevel/mmu.rs"))
+        .expect("read MMU module");
+    let main =
+        std::fs::read_to_string(repository.join("src/main.rs")).expect("read kernel entry point");
+
+    assert!(mmu.contains("pub enum MmuInitError"));
+    let init_start = mmu
+        .find("pub fn init() -> Result<(), MmuInitError>")
+        .expect("fallible MMU initialization");
+    let init = braced_body(&mmu[init_start..]);
+    let reject_reinitialization = init
+        .find("KERNEL_PAGETABLE_MANAGER.is_some()")
+        .expect("reject repeated initialization");
+    let construct = init
+        .find("PageTableManager::new().ok_or(MmuInitError::OutOfMemory)?")
+        .expect("propagate manager construction failure");
+    let activate = init
+        .find("activate_root_on_current_cpu(root)")
+        .expect("activate the candidate root");
+    let retain_owner = init
+        .find("KERNEL_PAGETABLE_MANAGER = Some(manager)")
+        .expect("retain the active root owner");
+    let publish = init
+        .find("BOOTSTRAP_ROOT.store(root, Ordering::Release)")
+        .expect("publish the retained root");
+    assert!(reject_reinitialization < construct);
+    assert!(construct < activate && activate < retain_owner && retain_owner < publish);
+
+    assert!(main.contains(
+        "kernel_lowlevel::mmu::init().expect(\"initialize MMU before continuing boot\")"
+    ));
 }
 
 #[test]
@@ -234,9 +277,7 @@ fn aarch64_context_switch_preserves_process_ttbr0() {
     let context_switch_start = assembly_routine(&switch, "context_switch_start");
     assert_eq!(context_switch.matches("mrs     x17, ttbr0_el1").count(), 1);
     assert_eq!(
-        context_switch
-            .matches("str     x17, [x16, #0x130]")
-            .count(),
+        context_switch.matches("str     x17, [x16, #0x130]").count(),
         1
     );
 
@@ -261,7 +302,9 @@ fn aarch64_context_switch_preserves_process_ttbr0() {
         let simd = body
             .find("ldp     q0, q1, [x16, #0x150]")
             .expect("restore SIMD state");
-        let return_branch = body.find("br      x16").expect("return to restored context");
+        let return_branch = body
+            .find("br      x16")
+            .expect("return to restored context");
         assert!(load < restore, "{name} must load TTBR0 before restoring it");
         assert!(
             restore_end < simd,
