@@ -4158,6 +4158,31 @@ mod aarch64_vm_logic {
     }
 
     #[test]
+    fn base_zero_ram_reserves_the_user_window_for_el0_mappings() {
+        assert_eq!(
+            aarch64_frame_range(0x0800_0000, 0, 0x3c00_0000),
+            Some((AARCH64_USER_LIMIT, 0x3c00_0000))
+        );
+        assert_eq!(
+            aarch64_frame_range(0x0800_0000, 0, 0x1800_0000),
+            Some((0x0800_0000, AARCH64_USER_BASE))
+        );
+
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let mut address_space = Aarch64AddressSpaceModel::new(&mut allocator).expect("root");
+        address_space
+            .map_supervisor_ram_range(0, 0x3c00_0000)
+            .expect("map base-zero RAM around the user window");
+        address_space
+            .map_user_page(&mut allocator, AARCH64_USER_BASE, 0x9000, true, true, false)
+            .expect("map a user page after installing base-zero RAM");
+        assert_eq!(
+            address_space.translate_user(&allocator, AARCH64_USER_BASE, true),
+            Some(0x9000_000)
+        );
+    }
+
+    #[test]
     fn oversized_physical_allocator_range_is_capped_without_leaking_frames() {
         const PAGE_SIZE: usize = AARCH64_PAGE_SIZE;
         const BITMAP_CAPACITY_BYTES: usize = 2 * 1024 * 1024 * 1024;

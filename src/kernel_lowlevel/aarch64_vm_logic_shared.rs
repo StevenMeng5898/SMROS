@@ -97,7 +97,24 @@ pub(crate) fn aarch64_frame_range(
     let start = kernel_end.checked_add(AARCH64_PAGE_SIZE - 1)? & !(AARCH64_PAGE_SIZE - 1);
     let start = core::cmp::max(start, ram_base);
     let end = ram_end & !(AARCH64_PAGE_SIZE - 1);
-    (start < end).then_some((start, end))
+    if start >= end {
+        return None;
+    }
+    if end <= AARCH64_USER_BASE || start >= AARCH64_USER_LIMIT {
+        return Some((start, end));
+    }
+
+    let before_end = core::cmp::min(end, AARCH64_USER_BASE);
+    let before_len = before_end.saturating_sub(start);
+    let after_start = core::cmp::max(start, AARCH64_USER_LIMIT);
+    let after_len = end.saturating_sub(after_start);
+    if after_len >= before_len && after_len != 0 {
+        Some((after_start, end))
+    } else if before_len != 0 {
+        Some((start, before_end))
+    } else {
+        None
+    }
 }
 
 pub(crate) fn aarch64_frame_range_cap(
@@ -447,6 +464,9 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         if block_end > (1usize << AARCH64_VA_BITS) {
             return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
         }
+        if block_start < AARCH64_USER_LIMIT && block_end > AARCH64_USER_BASE {
+            return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+        }
 
         let mut current = block_start;
         while current < block_end {
@@ -469,6 +489,31 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
                 return Err(Aarch64AddressSpaceCoreError::AlreadyMapped);
             }
             current += AARCH64_L2_BLOCK_SIZE;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn map_supervisor_ram_range(
+        &mut self,
+        start: usize,
+        len: usize,
+        executable: bool,
+    ) -> Result<(), Aarch64AddressSpaceCoreError> {
+        let end = start
+            .checked_add(len)
+            .filter(|_| len != 0)
+            .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+        if end > (1usize << AARCH64_VA_BITS) {
+            return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+        }
+
+        let low_end = core::cmp::min(end, AARCH64_USER_BASE);
+        if start < low_end {
+            self.map_supervisor_range(start, low_end - start, false, executable)?;
+        }
+        let high_start = core::cmp::max(start, AARCH64_USER_LIMIT);
+        if high_start < end {
+            self.map_supervisor_range(high_start, end - high_start, false, executable)?;
         }
         Ok(())
     }
@@ -806,6 +851,12 @@ impl Aarch64AddressSpaceModel {
 
     pub(crate) fn root_pfn(&self) -> u64 {
         self.core.root_pfn()
+    }
+
+    pub(crate) fn map_supervisor_ram_range(&mut self, start: usize, len: usize) -> Result<(), ()> {
+        self.core
+            .map_supervisor_ram_range(start, len, true)
+            .map_err(|_| ())
     }
 
     pub(crate) fn map_user_page(

@@ -84,7 +84,7 @@ impl Aarch64AddressSpace {
     pub fn new_with_kernel_map() -> Result<Self, AddressSpaceError> {
         let mut address_space = Aarch64AddressSpaceCore::new(PageFrameBackend)?;
         let memory = drivers::memory_reg().ok_or(AddressSpaceError::InvalidAddress)?;
-        address_space.map_supervisor_range(memory.base, memory.size, false, true)?;
+        address_space.map_supervisor_ram_range(memory.base, memory.size, true)?;
         address_space.map_supervisor_range(
             drivers::uart_base(),
             drivers::uart_size(),

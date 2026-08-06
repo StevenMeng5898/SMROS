@@ -102,7 +102,7 @@ fn aarch64_bootstrap_mmu_maps_ram_mmio_and_secondary_cpus() {
         .filter(|character| !character.is_whitespace())
         .collect();
     assert!(kernel_map
-        .contains("address_space.map_supervisor_range(memory.base,memory.size,false,true)?;"));
+        .contains("address_space.map_supervisor_ram_range(memory.base,memory.size,true)?;"));
     for device_mapping in [
         "address_space.map_supervisor_range(drivers::uart_base(),drivers::uart_size(),true,false,)?;",
         "address_space.map_supervisor_range(drivers::gicd_base(),drivers::gicd_size(),true,false,)?;",
