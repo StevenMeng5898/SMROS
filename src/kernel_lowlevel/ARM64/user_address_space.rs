@@ -1,13 +1,16 @@
 use alloc::vec::Vec;
 
 use crate::kernel_lowlevel::aarch64_vm_logic_shared::{
-    aarch64_table_descriptor, aarch64_table_indices, aarch64_user_page_descriptor,
-    aarch64_user_range_valid, AARCH64_DESC_ADDR_MASK, AARCH64_DESC_AP_READ_ONLY,
-    AARCH64_DESC_AP_USER, AARCH64_DESC_TABLE_OR_PAGE, AARCH64_DESC_VALID, AARCH64_PAGE_SIZE,
-    AARCH64_TABLE_ENTRIES,
+    aarch64_supervisor_block_descriptor, aarch64_table_descriptor, aarch64_table_indices,
+    aarch64_user_page_descriptor, aarch64_user_range_valid, AARCH64_DESC_ADDR_MASK,
+    AARCH64_DESC_AP_READ_ONLY, AARCH64_DESC_AP_USER, AARCH64_DESC_TABLE_OR_PAGE,
+    AARCH64_DESC_VALID, AARCH64_PAGE_SIZE, AARCH64_TABLE_ENTRIES,
 };
+use crate::kernel_lowlevel::drivers;
 use crate::kernel_lowlevel::memory::PageFrameAllocator;
 use crate::kernel_lowlevel::mmu::AddressSpaceError;
+
+const AARCH64_L2_BLOCK_SIZE: usize = 1 << 21;
 
 pub struct Aarch64AddressSpace {
     root_pfn: u64,
@@ -17,10 +20,37 @@ pub struct Aarch64AddressSpace {
 impl Aarch64AddressSpace {
     pub fn new_with_kernel_map() -> Result<Self, AddressSpaceError> {
         let root_pfn = Self::allocate_table()?;
-        Ok(Self {
+        let mut address_space = Self {
             root_pfn,
             table_pfns: alloc::vec![root_pfn],
-        })
+        };
+
+        let memory = drivers::memory_reg().ok_or(AddressSpaceError::InvalidAddress)?;
+        address_space.map_supervisor_range(memory.base, memory.size, false, true)?;
+        address_space.map_supervisor_range(
+            drivers::uart_base(),
+            drivers::uart_size(),
+            true,
+            false,
+        )?;
+        address_space.map_supervisor_range(
+            drivers::gicd_base(),
+            drivers::gicd_size(),
+            true,
+            false,
+        )?;
+        address_space.map_supervisor_range(
+            drivers::gicr_base(),
+            drivers::gicr_size(),
+            true,
+            false,
+        )?;
+        let mut index = 0;
+        while let Some(reg) = drivers::virtio_mmio_reg(index) {
+            address_space.map_supervisor_range(reg.base, reg.size, true, false)?;
+            index += 1;
+        }
+        Ok(address_space)
     }
 
     pub fn root_paddr(&self) -> u64 {
@@ -134,6 +164,42 @@ impl Aarch64AddressSpace {
         })
     }
 
+    pub(crate) fn map_supervisor_range(
+        &mut self,
+        start: usize,
+        len: usize,
+        device: bool,
+        executable: bool,
+    ) -> Result<(), AddressSpaceError> {
+        let requested_end = start
+            .checked_add(len)
+            .filter(|_| len != 0)
+            .ok_or(AddressSpaceError::InvalidAddress)?;
+        let block_start = start & !(AARCH64_L2_BLOCK_SIZE - 1);
+        let block_end = requested_end
+            .checked_add(AARCH64_L2_BLOCK_SIZE - 1)
+            .map(|end| end & !(AARCH64_L2_BLOCK_SIZE - 1))
+            .ok_or(AddressSpaceError::InvalidAddress)?;
+        if block_end > (1usize << 39) {
+            return Err(AddressSpaceError::InvalidAddress);
+        }
+
+        let mut current = block_start;
+        while current < block_end {
+            let indices = aarch64_table_indices(current).ok_or(AddressSpaceError::InvalidAddress)?;
+            let table_pfn = self.ensure_level_two_table(indices[0])?;
+            let descriptor = aarch64_supervisor_block_descriptor(current, device, executable);
+            let entry = unsafe { &mut Self::table_mut(table_pfn)?[indices[1]] };
+            if *entry == 0 {
+                *entry = descriptor;
+            } else if *entry != descriptor {
+                return Err(AddressSpaceError::AlreadyMapped);
+            }
+            current += AARCH64_L2_BLOCK_SIZE;
+        }
+        Ok(())
+    }
+
     fn copy_user(
         &self,
         vaddr: usize,
@@ -228,6 +294,32 @@ impl Aarch64AddressSpace {
             }
         }
         Ok(table_pfn)
+    }
+
+    fn ensure_level_two_table(&mut self, index: usize) -> Result<u64, AddressSpaceError> {
+        let descriptor = unsafe { Self::table(self.root_pfn)?[index] };
+        if descriptor == 0 {
+            let child_pfn = Self::allocate_table()?;
+            let child_paddr = match PageFrameAllocator::pfn_address(child_pfn) {
+                Some(address) => address,
+                None => {
+                    PageFrameAllocator::free(child_pfn);
+                    return Err(AddressSpaceError::InvalidAddress);
+                }
+            };
+            unsafe {
+                Self::table_mut(self.root_pfn)?[index] =
+                    aarch64_table_descriptor(child_paddr);
+            }
+            self.table_pfns.push(child_pfn);
+            Ok(child_pfn)
+        } else if descriptor & (AARCH64_DESC_VALID | AARCH64_DESC_TABLE_OR_PAGE)
+            == AARCH64_DESC_VALID | AARCH64_DESC_TABLE_OR_PAGE
+        {
+            Ok((descriptor & AARCH64_DESC_ADDR_MASK) / AARCH64_PAGE_SIZE as u64)
+        } else {
+            Err(AddressSpaceError::AlreadyMapped)
+        }
     }
 
     fn leaf_entry_mut(&mut self, vaddr: usize) -> Result<&mut u64, AddressSpaceError> {

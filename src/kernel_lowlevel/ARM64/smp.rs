@@ -4,7 +4,7 @@
 //! This module provides functionality for booting secondary CPUs,
 //! CPU affinity management, and per-CPU data structures.
 
-use crate::kernel_lowlevel::serial::Serial;
+use crate::kernel_lowlevel::{mmu, serial::Serial};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use super::lowlevel_logic;
@@ -485,6 +485,11 @@ pub fn print_number(serial: &mut Serial, mut num: u32) {
 /// It sets up the CPU and enters the CPU's main loop
 #[no_mangle]
 pub extern "C" fn secondary_cpu_entry() -> ! {
+    if !mmu::activate_bootstrap_on_current_cpu() {
+        loop {
+            crate::kernel_lowlevel::cpu::wait_for_event();
+        }
+    }
     let mut serial = Serial::new();
     serial.init();
 

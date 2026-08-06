@@ -11,6 +11,8 @@
 
 use crate::kernel_lowlevel::memory::{PageFrameAllocator, PAGE_SIZE};
 use alloc::vec::Vec;
+#[cfg(target_arch = "aarch64")]
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::lowlevel_logic;
 
@@ -637,15 +639,56 @@ static mut KERNEL_PAGETABLE_MANAGER: Option<PageTableManager> = None;
 static mut PAGE_TABLE_POOL: [PageTablePage; MAX_PAGE_TABLE_PAGES] =
     [const { PageTablePage::new() }; MAX_PAGE_TABLE_PAGES];
 static mut NEXT_PAGE_TABLE_SLOT: usize = 0;
+#[cfg(target_arch = "aarch64")]
+static BOOTSTRAP_ROOT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(target_arch = "aarch64")]
+pub fn bootstrap_root() -> u64 {
+    BOOTSTRAP_ROOT.load(Ordering::Acquire)
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn bootstrap_root() -> u64 {
+    0
+}
+
+#[cfg(target_arch = "aarch64")]
+pub fn activate_bootstrap_on_current_cpu() -> bool {
+    let root = bootstrap_root();
+    if root == 0 {
+        return false;
+    }
+    unsafe {
+        crate::kernel_lowlevel::cpu::install_stage1_translation(root);
+    }
+    true
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn activate_bootstrap_on_current_cpu() -> bool {
+    false
+}
 
 /// Initialize MMU subsystem
 pub fn init() {
-    unsafe {
-        KERNEL_PAGETABLE_MANAGER = PageTableManager::new();
+    let manager = PageTableManager::new();
+    #[cfg(target_arch = "aarch64")]
+    if let Some(manager) = manager.as_ref() {
+        BOOTSTRAP_ROOT.store(manager.user_address_space.root_paddr(), Ordering::Release);
     }
+    unsafe {
+        KERNEL_PAGETABLE_MANAGER = manager;
+    }
+    #[cfg(target_arch = "aarch64")]
+    let activated = activate_bootstrap_on_current_cpu();
     crate::kernel_lowlevel::serial::Serial::new().init();
-    crate::kernel_lowlevel::serial::Serial::new()
-        .write_str("[MMU] Page table manager initialized\n");
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+    #[cfg(target_arch = "aarch64")]
+    if !activated {
+        serial.write_str("[MMU] Bootstrap activation failed\n");
+        return;
+    }
+    serial.write_str("[MMU] Page table manager initialized\n");
 }
 
 /// Get kernel page table manager

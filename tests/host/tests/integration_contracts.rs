@@ -70,6 +70,63 @@ fn aarch64_process_roots_walk_distinct_four_kib_pages() {
     assert!(user_logic.contains("USER_STACK_VADDR: usize = 0x1FFF_D000"));
 }
 
+#[test]
+fn aarch64_bootstrap_mmu_maps_ram_mmio_and_secondary_cpus() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mmu = std::fs::read_to_string(repository.join("src/kernel_lowlevel/mmu.rs"))
+        .expect("read MMU module");
+    let address_space =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/user_address_space.rs"))
+            .expect("read AArch64 address-space owner");
+    let cpu = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/cpu.rs"))
+        .expect("read AArch64 CPU module");
+    let smp = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/smp.rs"))
+        .expect("read AArch64 SMP module");
+
+    assert!(mmu.contains("static BOOTSTRAP_ROOT: AtomicU64"));
+    assert!(mmu.contains("pub fn bootstrap_root() -> u64"));
+    assert!(mmu.contains("pub fn activate_bootstrap_on_current_cpu() -> bool"));
+    assert!(address_space.contains("drivers::memory_reg()"));
+    assert!(address_space.contains("drivers::uart_base()"));
+    assert!(address_space.contains("drivers::gicd_base()"));
+    assert!(address_space.contains("drivers::gicr_base()"));
+    assert!(address_space.contains("drivers::virtio_mmio_reg(index)"));
+    assert!(address_space.contains("map_supervisor_range"));
+    assert!(mmu.contains("install_stage1_translation(root)"));
+
+    let install = cpu
+        .find("pub unsafe fn install_stage1_translation")
+        .expect("stage-one installation helper");
+    let install_body = braced_body(&cpu[install..]);
+    assert!(install_body.contains("0xff"));
+    assert!(install_body.contains("0x04"));
+    assert!(install_body.contains("25"));
+    assert!(install_body.contains("1 << 23"));
+    assert!(install_body.contains("msr mair_el1"));
+    assert!(install_body.contains("msr tcr_el1"));
+    assert!(install_body.contains("msr ttbr0_el1"));
+    assert!(install_body.contains("dsb ish"));
+    assert!(install_body.contains("tlbi vmalle1is"));
+    assert!(install_body.contains("isb"));
+    assert!(install_body.contains("msr sctlr_el1"));
+
+    let secondary = smp
+        .find("pub extern \"C\" fn secondary_cpu_entry()")
+        .expect("secondary CPU entry");
+    let secondary_body = braced_body(&smp[secondary..]);
+    let activate = secondary_body
+        .find("mmu::activate_bootstrap_on_current_cpu()")
+        .expect("activate bootstrap root");
+    let serial = secondary_body
+        .find("Serial::new()")
+        .expect("initialize secondary serial");
+    let unmask = secondary_body
+        .find("msr daif")
+        .expect("unmask secondary interrupts");
+    assert!(activate < serial);
+    assert!(activate < unmask);
+}
+
 mod syscall_address_logic {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

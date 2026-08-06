@@ -79,6 +79,43 @@ pub fn sync_instruction_cache() {
 }
 
 #[inline(always)]
+pub unsafe fn install_stage1_translation(root: u64) {
+    let mair = 0xffu64 | (0x04u64 << 8);
+    let tcr = 25u64
+        | (1 << 8)
+        | (1 << 10)
+        | (3 << 12)
+        | (1 << 23)
+        | (2u64 << 32);
+    core::arch::asm!(
+        "msr mair_el1, {mair}",
+        "msr tcr_el1, {tcr}",
+        "msr ttbr0_el1, {root}",
+        "dsb ish",
+        "tlbi vmalle1is",
+        "dsb ish",
+        "isb",
+        mair = in(reg) mair,
+        tcr = in(reg) tcr,
+        root = in(reg) root,
+        options(nostack),
+    );
+    let mut sctlr: u64;
+    core::arch::asm!(
+        "mrs {sctlr}, sctlr_el1",
+        sctlr = out(reg) sctlr,
+        options(nomem, nostack, preserves_flags),
+    );
+    sctlr |= (1 << 0) | (1 << 2) | (1 << 12);
+    core::arch::asm!(
+        "msr sctlr_el1, {sctlr}",
+        "isb",
+        sctlr = in(reg) sctlr,
+        options(nostack),
+    );
+}
+
+#[inline(always)]
 pub fn mmio_barrier() {
     unsafe {
         core::arch::asm!("dsb sy", options(nostack, preserves_flags));
