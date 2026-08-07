@@ -569,9 +569,22 @@ pub(crate) fn clone_for_fork(
                 }
                 pages
             } else {
-                clone_page_backings_for_fork(&mapping.pages)?
+                let mut page_ops = LinuxProcessForkPageOps { memory: &mut child };
+                super::linux_process::clone_linux_fork_pages(
+                    &mut page_ops,
+                    &mapping.pages,
+                    super::linux_process::fork_failpoint,
+                )?
             };
-            if let Err(error) = child.map_unmapped_pages(mapping.addr, &pages, mapping.prot) {
+            let map_result = super::linux_process::map_linux_fork_pages(
+                &mut LinuxProcessForkPageOps { memory: &mut child },
+                mapping.addr,
+                PAGE_SIZE,
+                &pages,
+                mapping.prot,
+                super::linux_process::fork_failpoint,
+            );
+            if let Err(error) = map_result {
                 LinuxProcessMemory::free_backings(&pages);
                 return Err(error);
             }
@@ -592,12 +605,21 @@ pub(crate) fn clone_for_fork(
             return Err(SysError::EINVAL);
         }
 
-        let brk_pages = clone_page_backings_for_fork(&parent.brk.pages)?;
-        if let Err(error) = child.map_unmapped_pages(
-            child.brk.start,
+        let brk_pages = super::linux_process::clone_linux_fork_pages(
+            &mut LinuxProcessForkPageOps { memory: &mut child },
+            &parent.brk.pages,
+            super::linux_process::fork_failpoint,
+        )?;
+        let brk_start = child.brk.start;
+        let map_result = super::linux_process::map_linux_fork_pages(
+            &mut LinuxProcessForkPageOps { memory: &mut child },
+            brk_start,
+            PAGE_SIZE,
             &brk_pages,
             LINUX_PROT_READ | LINUX_PROT_WRITE,
-        ) {
+            super::linux_process::fork_failpoint,
+        );
+        if let Err(error) = map_result {
             LinuxProcessMemory::free_backings(&brk_pages);
             return Err(error);
         }
@@ -622,66 +644,83 @@ fn fork_table_allocation_failure(allocation: usize) -> bool {
     super::linux_process::fork_failpoint(point)
 }
 
-fn clone_page_backings_for_fork(
-    parent_pages: &[LinuxPageBacking],
-) -> Result<Vec<LinuxPageBacking>, SysError> {
-    let mut child_pages = Vec::new();
-    child_pages
-        .try_reserve_exact(parent_pages.len())
-        .map_err(|_| SysError::ENOMEM)?;
-    for parent in parent_pages.iter().copied() {
-        let child = match parent {
-            LinuxPageBacking::Private { pfn: parent_pfn } => {
-                let Some(child_pfn) = PageFrameAllocator::alloc() else {
-                    LinuxProcessMemory::free_backings(&child_pages);
-                    return Err(SysError::ENOMEM);
-                };
-                let Some(parent_physical) = PageFrameAllocator::pfn_address(parent_pfn) else {
-                    PageFrameAllocator::free(child_pfn);
-                    LinuxProcessMemory::free_backings(&child_pages);
-                    return Err(SysError::ENOMEM);
-                };
-                let Some(child_physical) = PageFrameAllocator::pfn_address(child_pfn) else {
-                    PageFrameAllocator::free(child_pfn);
-                    LinuxProcessMemory::free_backings(&child_pages);
-                    return Err(SysError::ENOMEM);
-                };
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        parent_physical as *const u8,
-                        child_physical as *mut u8,
-                        PAGE_SIZE,
-                    );
-                }
-                LinuxPageBacking::Private { pfn: child_pfn }
-            }
-            LinuxPageBacking::Shared {
-                object_id,
-                page_index,
-                pfn,
-            } => {
-                if !acquire_shared_page(object_id, page_index) {
-                    LinuxProcessMemory::free_backings(&child_pages);
-                    return Err(SysError::ENOMEM);
-                }
-                LinuxPageBacking::Shared {
-                    object_id,
-                    page_index,
-                    pfn,
-                }
-            }
-        };
-        child_pages.push(child);
-        let failure_point = match parent {
-            LinuxPageBacking::Private { .. } => LinuxForkFailurePoint::PrivatePage,
-            LinuxPageBacking::Shared { .. } => LinuxForkFailurePoint::SharedReference,
-        };
-        if super::linux_process::fork_failpoint(failure_point) {
-            LinuxProcessMemory::free_backings(&child_pages);
-            return Err(SysError::ENOMEM);
-        }
+struct LinuxProcessForkPageOps<'a> {
+    memory: &'a mut LinuxProcessMemory,
+}
+
+impl super::linux_process::LinuxForkPageOps for LinuxProcessForkPageOps<'_> {
+    type Page = LinuxPageBacking;
+    type Error = SysError;
+
+    fn failure_error(&self) -> Self::Error {
+        SysError::ENOMEM
     }
-    Ok(child_pages)
+
+    fn is_private(&self, page: Self::Page) -> bool {
+        matches!(page, LinuxPageBacking::Private { .. })
+    }
+
+    fn allocate_private(&mut self, _parent: Self::Page) -> Result<Self::Page, Self::Error> {
+        PageFrameAllocator::alloc()
+            .map(|pfn| LinuxPageBacking::Private { pfn })
+            .ok_or(SysError::ENOMEM)
+    }
+
+    fn copy_private(
+        &mut self,
+        parent: Self::Page,
+        child: Self::Page,
+    ) -> Result<(), Self::Error> {
+        let LinuxPageBacking::Private { pfn: parent_pfn } = parent else {
+            return Err(SysError::EINVAL);
+        };
+        let LinuxPageBacking::Private { pfn: child_pfn } = child else {
+            return Err(SysError::EINVAL);
+        };
+        let parent_physical =
+            PageFrameAllocator::pfn_address(parent_pfn).ok_or(SysError::ENOMEM)?;
+        let child_physical =
+            PageFrameAllocator::pfn_address(child_pfn).ok_or(SysError::ENOMEM)?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                parent_physical as *const u8,
+                child_physical as *mut u8,
+                PAGE_SIZE,
+            );
+        }
+        Ok(())
+    }
+
+    fn acquire_shared(&mut self, parent: Self::Page) -> Result<Self::Page, Self::Error> {
+        let LinuxPageBacking::Shared {
+            object_id,
+            page_index,
+            ..
+        } = parent
+        else {
+            return Err(SysError::EINVAL);
+        };
+        acquire_shared_page(object_id, page_index)
+            .then_some(parent)
+            .ok_or(SysError::ENOMEM)
+    }
+
+    fn release_page(&mut self, page: Self::Page) {
+        LinuxProcessMemory::free_backings(core::slice::from_ref(&page));
+    }
+
+    fn map_page(
+        &mut self,
+        address: usize,
+        page: Self::Page,
+        prot: usize,
+    ) -> Result<(), Self::Error> {
+        self.memory.map_page(address, page.pfn(), prot)
+    }
+
+    fn unmap_page(&mut self, address: usize) {
+        let _ = self.memory.unmap_page(address);
+    }
 }
 
 pub(crate) fn copy_from_current(address: usize, out: &mut [u8]) -> Result<(), SysError> {

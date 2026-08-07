@@ -5099,6 +5099,8 @@ fn linux_fork_publishes_only_a_complete_child() {
             .expect("read shared fork transaction logic");
     let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
         .expect("read process memory runtime");
+    let host = std::fs::read_to_string(repository.join("tests/host/src/lib.rs"))
+        .expect("read host fork adapter");
     let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
         .expect("read task runtime");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
@@ -5121,19 +5123,21 @@ fn linux_fork_publishes_only_a_complete_child() {
         "pub return_pc: u64",
         "pub pstate: u64",
         "pub root_paddr: u64",
-        "pub(crate) struct LinuxForkReservation",
-        "process: Option<LinuxProcessReservation>",
-        "task: Option<LinuxTaskReservation>",
-        "scheduler_thread: Option<ThreadId>",
-        "child_start: Option<Aarch64ProcessStart>",
-        "publication_interrupt_state: Option<usize>",
+        "struct Aarch64LinuxForkOps",
+        "type LinuxForkReservation = LinuxForkOwnershipCore<Aarch64LinuxForkOps>",
+        "impl LinuxForkOwnershipOps for Aarch64LinuxForkOps",
     ] {
         assert!(process.contains(declaration), "missing `{declaration}`");
     }
     assert!(process.contains("include!(\"linux_fork_logic_shared.rs\")"));
     assert!(fork_logic.contains("pub(crate) trait LinuxForkTransactionBackend"));
+    assert!(fork_logic.contains("pub(crate) trait LinuxForkOwnershipOps"));
+    assert!(fork_logic.contains("pub(crate) struct LinuxForkOwnershipCore"));
+    assert!(fork_logic.contains(
+        "impl<O: LinuxForkOwnershipOps> LinuxForkTransactionBackend for LinuxForkOwnershipCore<O>"
+    ));
     assert!(fork_logic.contains("pub(crate) fn run_linux_fork_transaction"));
-    assert!(process.contains("impl LinuxForkTransactionBackend for LinuxForkReservation"));
+    assert!(!process.contains("impl LinuxForkTransactionBackend for LinuxForkReservation"));
 
     let fork = braced_body(
         &syscall[syscall
@@ -5199,9 +5203,30 @@ fn linux_fork_publishes_only_a_complete_child() {
     assert!(transaction_drop.contains("ledger.rollback_into"));
     assert!(transaction_drop.contains("self.backend.rollback(acquisition)"));
 
+    let ownership_core = &fork_logic[fork_logic
+        .find(
+            "impl<O: LinuxForkOwnershipOps> LinuxForkTransactionBackend for LinuxForkOwnershipCore<O>",
+        )
+        .expect("shared production ownership core")..];
+    for rollback in [
+        "self.ops.rollback_configured(configured)",
+        "self.ops.rollback_memory(memory)",
+        "self.ops.rollback_reserved_resources(resources)",
+        "self.ops.rollback_installed_resources(process)",
+        "self.ops.rollback_process(process)",
+        "self.ops.rollback_task(task)",
+        "self.ops.rollback_scheduler_thread(scheduler_thread)",
+        "self.ops.restore_publication(publication)",
+    ] {
+        assert!(
+            ownership_core.contains(rollback),
+            "missing shared ownership rollback `{rollback}`"
+        );
+    }
+
     let backend = &process[process
-        .find("impl LinuxForkTransactionBackend for LinuxForkReservation")
-        .expect("production fork backend")..];
+        .find("impl LinuxForkOwnershipOps for Aarch64LinuxForkOps")
+        .expect("production fork ownership operations")..];
     for acquisition in [
         "create_suspended_thread_on_cpu",
         "reserve_fork_task",
@@ -5218,26 +5243,28 @@ fn linux_fork_publishes_only_a_complete_child() {
         );
     }
     for release in [
-        "rollback_fork_task",
-        "release_resources",
-        "unregister",
-        "terminate_thread",
-        "rollback_fork(process)",
-        "LinuxForkAcquisition::Memory",
-        "LinuxForkAcquisition::Resources",
-        "LinuxForkAcquisition::Process",
-        "LinuxForkAcquisition::Task",
+        "unregister(memory.pid)",
+        "drop(resources)",
+        "release_resources(process.pid)",
+        "runtime.processes.rollback_fork(process)",
+        "linux_task::rollback_fork_task(task)",
+        "terminate_thread(scheduler_thread)",
     ] {
         assert!(backend.contains(release), "missing rollback `{release}`");
     }
 
     let publication_mask = backend
-        .find("Some(crate::kernel_lowlevel::cpu::mask_interrupts())")
+        .find("Ok(crate::kernel_lowlevel::cpu::mask_interrupts())")
         .expect("interrupt-masked fork publication");
     let publication_restore = backend
-        .find("self.restore_publication_interrupts()")
+        .find("restore_interrupts(publication)")
         .expect("fork publication interrupt restore");
     assert!(publication_mask < publication_restore);
+
+    assert!(host.contains("LinuxForkOwnershipCore<HostForkOps<'a>>"));
+    assert!(host.contains("impl LinuxForkOwnershipOps for HostForkOps<'_>"));
+    assert!(!host.contains("struct HostForkBackend"));
+    assert!(!host.contains("fn rollback(&mut self, acquisition: LinuxForkAcquisition)"));
 
     assert!(memory.contains("pub(crate) fn clone_for_fork("));
     assert!(memory.contains("PageFrameAllocator::alloc()"));
@@ -5252,8 +5279,29 @@ fn linux_fork_publishes_only_a_complete_child() {
     assert!(memory.contains("Aarch64AddressSpace::new_for_fork(fork_table_allocation_failure)"));
     assert!(memory.contains("LinuxForkFailurePoint::ChildRoot"));
     assert!(memory.contains("LinuxForkFailurePoint::TablePage"));
-    assert!(memory.contains("LinuxForkFailurePoint::PrivatePage"));
     assert!(memory.contains("LinuxForkFailurePoint::SharedReference"));
+    assert!(fork_logic.contains("pub(crate) trait LinuxForkPageOps"));
+    assert!(fork_logic.contains("pub(crate) fn clone_linux_fork_pages"));
+    assert!(fork_logic.contains("pub(crate) fn map_linux_fork_pages"));
+    assert!(fork_logic.contains("pub(crate) fn clone_and_map_linux_fork_pages"));
+    assert!(
+        memory.contains("impl super::linux_process::LinuxForkPageOps for LinuxProcessForkPageOps")
+    );
+    assert!(memory.contains("super::linux_process::clone_linux_fork_pages("));
+    assert!(memory.contains("super::linux_process::map_linux_fork_pages("));
+    assert!(host.contains("impl LinuxForkPageOps for HostForkPageOps<'_>"));
+    assert!(host.contains("clone_and_map_linux_fork_pages("));
+    for point in [
+        "LinuxForkFailurePoint::PrivatePageAllocation",
+        "LinuxForkFailurePoint::PrivatePageCopy",
+        "LinuxForkFailurePoint::PrivatePageMap",
+        "LinuxForkFailurePoint::SharedPageMap",
+    ] {
+        assert!(
+            fork_logic.contains(point),
+            "missing granular page failpoint `{point}`"
+        );
+    }
     assert!(syscall.contains("LinuxForkFailurePoint::DescriptorReference"));
     assert!(syscall.contains("self.linux_process_resources.try_reserve(1)"));
     assert!(syscall
@@ -5263,16 +5311,12 @@ fn linux_fork_publishes_only_a_complete_child() {
     assert!(address_space.contains("failure_hook: Option<TableAllocationFailureHook>"));
     assert!(address_space.contains("self.failure_hook.is_some_and(|hook| hook(allocation))"));
     assert!(address_space_core.contains(".try_reserve(1)"));
-    let clone_backings = &memory[memory
-        .find("fn clone_page_backings_for_fork(")
-        .expect("fork backing clone")..];
-    let allocation_failure = &clone_backings[clone_backings
-        .find("let Some(child_pfn) = PageFrameAllocator::alloc() else")
-        .expect("fallible child page allocation")
-        ..clone_backings
-            .find("let Some(parent_physical)")
-            .expect("parent physical lookup")];
-    assert!(allocation_failure.contains("LinuxProcessMemory::free_backings(&child_pages)"));
+    let clone_pages = &fork_logic[fork_logic
+        .find("pub(crate) fn clone_linux_fork_pages")
+        .expect("shared fork page clone")..];
+    assert!(clone_pages.contains("ops.allocate_private(parent)"));
+    assert!(clone_pages.contains("ops.release_page(child)"));
+    assert!(clone_pages.contains("release_linux_fork_pages(ops, &child_pages)"));
     assert!(task.contains("pub(crate) fn reserve_fork_task("));
     assert!(task.contains("task.tgid = reservation.tid"));
     assert!(task.contains("pub(crate) fn publish_fork_task("));

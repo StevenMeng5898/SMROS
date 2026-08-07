@@ -3083,6 +3083,10 @@ mod linux_process_memory_logic {
             LinuxForkFailurePoint::DescriptorReference,
             LinuxForkFailurePoint::SharedReference,
             LinuxForkFailurePoint::PrivatePage,
+            LinuxForkFailurePoint::PrivatePageAllocation,
+            LinuxForkFailurePoint::PrivatePageCopy,
+            LinuxForkFailurePoint::PrivatePageMap,
+            LinuxForkFailurePoint::SharedPageMap,
             LinuxForkFailurePoint::Memory,
             LinuxForkFailurePoint::Configured,
             LinuxForkFailurePoint::ProcessPublication,
@@ -3110,7 +3114,7 @@ mod linux_process_memory_logic {
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct HostPrivatePage {
         pfn: u64,
-        bytes: [u8; 64],
+        bytes: [u8; LINUX_PAGE_SIZE],
     }
 
     struct HostForkKernel {
@@ -3121,6 +3125,7 @@ mod linux_process_memory_logic {
         table_pages: Vec<u64>,
         private_pages: Vec<HostPrivatePage>,
         shared_pages: LinuxSharedPageTableCore<4>,
+        mapped_pages: Vec<(usize, LinuxPageBacking)>,
         shared_attachment_references: usize,
         descriptions: LinuxOpenDescriptionTableCore<8>,
         parent_resources: LinuxProcessResourceCore<4, 2>,
@@ -3140,6 +3145,7 @@ mod linux_process_memory_logic {
         table_page_ids: Vec<u64>,
         private_page_images: Vec<HostPrivatePage>,
         shared_page_records: Vec<Option<LinuxSharedPageRecord>>,
+        mapped_page_records: Vec<(usize, LinuxPageBacking)>,
         open_descriptions: Vec<Option<LinuxOpenDescription>>,
         next_description_id: u32,
         parent_descriptors: Vec<LinuxDescriptorEntry>,
@@ -3164,7 +3170,7 @@ mod linux_process_memory_logic {
     }
 
     impl HostForkKernel {
-        fn parent(parent_bytes: &[u8; 64]) -> Self {
+        fn parent(parent_bytes: &[u8; LINUX_PAGE_SIZE]) -> Self {
             let mut processes = LinuxProcessTable::<4>::new();
             processes.register_root(1).expect("register parent process");
             let mut tasks = LinuxTaskTable::<4>::new();
@@ -3202,10 +3208,32 @@ mod linux_process_memory_logic {
                     },
                     HostPrivatePage {
                         pfn: 18,
-                        bytes: core::array::from_fn(|index| parent_bytes[63 - index]),
+                        bytes: core::array::from_fn(|index| {
+                            parent_bytes[LINUX_PAGE_SIZE - 1 - index]
+                        }),
                     },
                 ],
                 shared_pages,
+                mapped_pages: vec![
+                    (0x1000_0000, LinuxPageBacking::Private { pfn: 17 }),
+                    (0x1000_1000, LinuxPageBacking::Private { pfn: 18 }),
+                    (
+                        0x1200_0000,
+                        LinuxPageBacking::Shared {
+                            object_id: 9,
+                            page_index: 0,
+                            pfn: 31,
+                        },
+                    ),
+                    (
+                        0x1200_1000,
+                        LinuxPageBacking::Shared {
+                            object_id: 9,
+                            page_index: 1,
+                            pfn: 32,
+                        },
+                    ),
+                ],
                 shared_attachment_references: 1,
                 descriptions,
                 parent_resources,
@@ -3238,6 +3266,7 @@ mod linux_process_memory_logic {
                 table_page_ids: self.table_pages.clone(),
                 private_page_images: self.private_pages.clone(),
                 shared_page_records: self.shared_pages.pages.to_vec(),
+                mapped_page_records: self.mapped_pages.clone(),
                 open_descriptions: self.descriptions.descriptions.to_vec(),
                 next_description_id: self.descriptions.next_id,
                 parent_descriptors: self.parent_resources.descriptors().to_vec(),
@@ -3327,7 +3356,7 @@ mod linux_process_memory_logic {
         credentials: LinuxCredentialsCore,
         cwd: String,
         root: String,
-        memory_image: [u8; 64],
+        memory_image: [u8; LINUX_PAGE_SIZE],
         signal_actions: [usize; 2],
         container: LinuxProcessAttributesCore,
         pending_signals: usize,
@@ -3345,80 +3374,233 @@ mod linux_process_memory_logic {
 
     static FORK_FAILPOINT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    struct HostForkBackend<'a> {
-        kernel: &'a mut HostForkKernel,
-        parent_bytes: &'a [u8; 64],
-        scheduler_thread: Option<usize>,
-        task: Option<LinuxTaskReservation>,
-        process: Option<LinuxProcessReservation>,
+    struct HostForkResources {
         resource_clone: Option<LinuxResourceCloneCore<4, 2>>,
-        acquired_shared_pages: Vec<(u32, usize)>,
         acquired_shared_attachment: bool,
+    }
+
+    struct HostForkMemory {
         root_baseline: usize,
         table_baseline: usize,
         private_baseline: usize,
+        mapped_baseline: usize,
         memory_baseline: usize,
-        child: Option<LinuxForkPreparedContext<Aarch64ExceptionFrame>>,
-        process_state: Option<HostForkProcessState>,
+        pages: Vec<LinuxPageBacking>,
     }
 
-    impl<'a> HostForkBackend<'a> {
-        fn new(kernel: &'a mut HostForkKernel, parent_bytes: &'a [u8; 64]) -> Self {
-            let root_baseline = kernel.address_space_roots.len();
-            let table_baseline = kernel.table_pages.len();
-            let private_baseline = kernel.private_pages.len();
-            let memory_baseline = kernel.memory_pids.len();
+    #[derive(Clone)]
+    struct HostForkConfigured {
+        child: LinuxForkPreparedContext<Aarch64ExceptionFrame>,
+        process_state: HostForkProcessState,
+    }
+
+    struct HostForkOps<'a> {
+        kernel: &'a mut HostForkKernel,
+        parent_bytes: &'a [u8; LINUX_PAGE_SIZE],
+    }
+
+    impl<'a> HostForkOps<'a> {
+        fn new(kernel: &'a mut HostForkKernel, parent_bytes: &'a [u8; LINUX_PAGE_SIZE]) -> Self {
             Self {
                 kernel,
                 parent_bytes,
-                scheduler_thread: None,
-                task: None,
-                process: None,
-                resource_clone: None,
-                acquired_shared_pages: Vec::new(),
-                acquired_shared_attachment: false,
-                root_baseline,
-                table_baseline,
-                private_baseline,
-                memory_baseline,
-                child: None,
-                process_state: None,
-            }
-        }
-
-        fn rollback_process_resources(&mut self) {
-            let Some(mut child) = self.kernel.child_resources.take() else {
-                return;
-            };
-            let objects: Vec<u32> = child.objects().iter().copied().rev().collect();
-            for description_id in objects {
-                assert_eq!(
-                    child.release_object(description_id, &mut self.kernel.descriptions),
-                    None
-                );
-            }
-            let descriptors: Vec<usize> = child
-                .descriptors()
-                .iter()
-                .map(|entry| entry.fd)
-                .rev()
-                .collect();
-            for fd in descriptors {
-                assert_eq!(
-                    child.close_descriptor(fd, &mut self.kernel.descriptions),
-                    None
-                );
             }
         }
     }
 
-    impl LinuxForkTransactionBackend for HostForkBackend<'_> {
+    fn rollback_host_process_resources(kernel: &mut HostForkKernel) {
+        let Some(mut child) = kernel.child_resources.take() else {
+            return;
+        };
+        let objects: Vec<u32> = child.objects().iter().copied().rev().collect();
+        for description_id in objects {
+            assert_eq!(
+                child.release_object(description_id, &mut kernel.descriptions),
+                None
+            );
+        }
+        let descriptors: Vec<usize> = child
+            .descriptors()
+            .iter()
+            .map(|entry| entry.fd)
+            .rev()
+            .collect();
+        for fd in descriptors {
+            assert_eq!(child.close_descriptor(fd, &mut kernel.descriptions), None);
+        }
+    }
+
+    fn rollback_host_reserved_resources(
+        kernel: &mut HostForkKernel,
+        mut resources: HostForkResources,
+    ) {
+        if resources.acquired_shared_attachment {
+            kernel.shared_attachment_references -= 1;
+        }
+        if let Some(resource_clone) = resources.resource_clone.take() {
+            assert!(resource_clone
+                .rollback(&mut kernel.descriptions)
+                .iter()
+                .all(Option::is_none));
+        }
+    }
+
+    struct HostForkPageOps<'a> {
+        kernel: &'a mut HostForkKernel,
+    }
+
+    impl LinuxForkPageOps for HostForkPageOps<'_> {
+        type Page = LinuxPageBacking;
+        type Error = ();
+
+        fn failure_error(&self) -> Self::Error {}
+
+        fn is_private(&self, page: Self::Page) -> bool {
+            matches!(page, LinuxPageBacking::Private { .. })
+        }
+
+        fn allocate_private(&mut self, parent: Self::Page) -> Result<Self::Page, Self::Error> {
+            if !matches!(parent, LinuxPageBacking::Private { .. }) {
+                return Err(());
+            }
+            let pfn = self
+                .kernel
+                .private_pages
+                .iter()
+                .map(|page| page.pfn)
+                .max()
+                .and_then(|pfn| pfn.checked_add(1))
+                .ok_or(())?;
+            self.kernel.private_pages.push(HostPrivatePage {
+                pfn,
+                bytes: [0; LINUX_PAGE_SIZE],
+            });
+            Ok(LinuxPageBacking::Private { pfn })
+        }
+
+        fn copy_private(
+            &mut self,
+            parent: Self::Page,
+            child: Self::Page,
+        ) -> Result<(), Self::Error> {
+            let LinuxPageBacking::Private { pfn: parent_pfn } = parent else {
+                return Err(());
+            };
+            let LinuxPageBacking::Private { pfn: child_pfn } = child else {
+                return Err(());
+            };
+            let bytes = self
+                .kernel
+                .private_pages
+                .iter()
+                .find(|page| page.pfn == parent_pfn)
+                .map(|page| page.bytes)
+                .ok_or(())?;
+            self.kernel
+                .private_pages
+                .iter_mut()
+                .find(|page| page.pfn == child_pfn)
+                .ok_or(())?
+                .bytes = bytes;
+            Ok(())
+        }
+
+        fn acquire_shared(&mut self, parent: Self::Page) -> Result<Self::Page, Self::Error> {
+            let LinuxPageBacking::Shared {
+                object_id,
+                page_index,
+                ..
+            } = parent
+            else {
+                return Err(());
+            };
+            self.kernel
+                .shared_pages
+                .acquire(object_id, page_index)
+                .then_some(parent)
+                .ok_or(())
+        }
+
+        fn release_page(&mut self, page: Self::Page) {
+            match page {
+                LinuxPageBacking::Private { pfn } => {
+                    let index = self
+                        .kernel
+                        .private_pages
+                        .iter()
+                        .position(|page| page.pfn == pfn)
+                        .expect("owned private page");
+                    self.kernel.private_pages.remove(index);
+                }
+                LinuxPageBacking::Shared {
+                    object_id,
+                    page_index,
+                    ..
+                } => {
+                    assert_eq!(
+                        self.kernel.shared_pages.release(object_id, page_index),
+                        None
+                    );
+                }
+            }
+        }
+
+        fn map_page(
+            &mut self,
+            address: usize,
+            page: Self::Page,
+            _prot: usize,
+        ) -> Result<(), Self::Error> {
+            if self
+                .kernel
+                .mapped_pages
+                .iter()
+                .any(|(mapped, _)| *mapped == address)
+            {
+                return Err(());
+            }
+            self.kernel.mapped_pages.push((address, page));
+            Ok(())
+        }
+
+        fn unmap_page(&mut self, address: usize) {
+            let index = self
+                .kernel
+                .mapped_pages
+                .iter()
+                .position(|(mapped, _)| *mapped == address)
+                .expect("mapped fork page");
+            self.kernel.mapped_pages.remove(index);
+        }
+    }
+
+    fn rollback_host_memory(kernel: &mut HostForkKernel, memory: &mut HostForkMemory) {
+        kernel.mapped_pages.truncate(memory.mapped_baseline);
+        let mut page_ops = HostForkPageOps { kernel };
+        for page in memory.pages.drain(..).rev() {
+            page_ops.release_page(page);
+        }
+        kernel.memory_pids.truncate(memory.memory_baseline);
+        kernel.private_pages.truncate(memory.private_baseline);
+        kernel.table_pages.truncate(memory.table_baseline);
+        kernel.address_space_roots.truncate(memory.root_baseline);
+    }
+
+    impl LinuxForkOwnershipOps for HostForkOps<'_> {
         type Error = ();
         type Output = HostForkResult;
+        type SchedulerThread = usize;
+        type Parent = LinuxProcessCore;
+        type Task = LinuxTaskReservation;
+        type Process = LinuxProcessReservation;
+        type Resources = HostForkResources;
+        type Memory = HostForkMemory;
+        type Configured = HostForkConfigured;
+        type Publication = ();
 
         fn injected_failure(&self) -> Self::Error {}
 
-        fn acquire_scheduler_thread(&mut self) -> Result<(), Self::Error> {
+        fn acquire_scheduler_thread(&mut self) -> Result<Self::SchedulerThread, Self::Error> {
             let slot = self
                 .kernel
                 .scheduler
@@ -3426,11 +3608,14 @@ mod linux_process_memory_logic {
                 .position(|state| *state == HostSchedulerState::Empty)
                 .ok_or(())?;
             self.kernel.scheduler[slot] = HostSchedulerState::Suspended;
-            self.scheduler_thread = Some(slot);
-            Ok(())
+            Ok(slot)
         }
 
-        fn acquire_task(&mut self) -> Result<(), Self::Error> {
+        fn acquire_task(
+            &mut self,
+            scheduler_thread: &Self::SchedulerThread,
+        ) -> Result<(Self::Parent, Self::Task), Self::Error> {
+            let parent = self.kernel.processes.by_pid(LINUX_ROOT_PID).ok_or(())?;
             let parent_slot = self
                 .kernel
                 .tasks
@@ -3444,95 +3629,146 @@ mod linux_process_memory_logic {
             let task = self
                 .kernel
                 .tasks
-                .reserve_child(2, self.scheduler_thread.ok_or(())?)
+                .reserve_child(0, *scheduler_thread)
                 .ok_or(())?;
+            self.kernel.tasks.tasks[task.slot].tgid = task.tid;
             self.kernel.tasks.signal_states[task.slot].mask = parent_mask;
-            self.task = Some(task);
-            Ok(())
+            Ok((parent, task))
         }
 
-        fn acquire_process(&mut self) -> Result<(), Self::Error> {
-            let task = self.task.ok_or(())?;
-            self.process = Some(
-                self.kernel
-                    .processes
-                    .reserve_child_with_pid(
-                        LINUX_ROOT_PID,
-                        self.scheduler_thread.ok_or(())?,
-                        task.tid,
-                        17,
-                    )
-                    .map_err(|_| ())?,
-            );
-            assert_eq!(self.kernel.snapshot().visible_pids, vec![LINUX_ROOT_PID]);
-            Ok(())
-        }
-
-        fn acquire_resources(&mut self) -> Result<(), Self::Error> {
-            self.resource_clone = Some(
-                LinuxResourceCloneCore::reserve_with_failure(
-                    &self.kernel.parent_resources,
-                    &mut self.kernel.descriptions,
-                    || fork_failpoint(LinuxForkFailurePoint::DescriptorReference),
-                )
-                .ok_or(())?,
-            );
-            self.kernel.shared_attachment_references = self
+        fn acquire_process(
+            &mut self,
+            parent: &Self::Parent,
+            scheduler_thread: &Self::SchedulerThread,
+            task: &Self::Task,
+        ) -> Result<Self::Process, Self::Error> {
+            let process = self
                 .kernel
-                .shared_attachment_references
-                .checked_add(1)
-                .ok_or(())?;
-            self.acquired_shared_attachment = true;
+                .processes
+                .reserve_child_with_pid(parent.pid, *scheduler_thread, task.tid, 17)
+                .map_err(|_| ())?;
+            assert_eq!(self.kernel.snapshot().visible_pids, vec![LINUX_ROOT_PID]);
+            Ok(process)
+        }
+
+        fn acquire_resources(
+            &mut self,
+            _parent: &Self::Parent,
+        ) -> Result<Self::Resources, Self::Error> {
+            let resource_clone = LinuxResourceCloneCore::reserve_with_failure(
+                &self.kernel.parent_resources,
+                &mut self.kernel.descriptions,
+                || fork_failpoint(LinuxForkFailurePoint::DescriptorReference),
+            )
+            .ok_or(())?;
+            let mut resources = HostForkResources {
+                resource_clone: Some(resource_clone),
+                acquired_shared_attachment: false,
+            };
+            let Some(references) = self.kernel.shared_attachment_references.checked_add(1) else {
+                rollback_host_reserved_resources(self.kernel, resources);
+                return Err(());
+            };
+            self.kernel.shared_attachment_references = references;
+            resources.acquired_shared_attachment = true;
             if fork_failpoint(LinuxForkFailurePoint::SharedReference) {
+                rollback_host_reserved_resources(self.kernel, resources);
                 return Err(());
             }
-            let shared_pages: Vec<(u32, usize)> = self
+            Ok(resources)
+        }
+
+        fn acquire_memory(
+            &mut self,
+            _parent: &Self::Parent,
+            process: &Self::Process,
+            _resources: &mut Self::Resources,
+        ) -> Result<Self::Memory, Self::Error> {
+            let memory = HostForkMemory {
+                root_baseline: self.kernel.address_space_roots.len(),
+                table_baseline: self.kernel.table_pages.len(),
+                private_baseline: self.kernel.private_pages.len(),
+                mapped_baseline: self.kernel.mapped_pages.len(),
+                memory_baseline: self.kernel.memory_pids.len(),
+                pages: Vec::new(),
+            };
+            let mut memory = memory;
+            self.kernel.address_space_roots.push(0xa000);
+            if fork_failpoint(LinuxForkFailurePoint::ChildRoot) {
+                rollback_host_memory(self.kernel, &mut memory);
+                return Err(());
+            }
+            for index in 0..memory.table_baseline {
+                self.kernel.table_pages.push(0xb000 + index as u64 * 0x1000);
+                if fork_failpoint(LinuxForkFailurePoint::TablePage) {
+                    rollback_host_memory(self.kernel, &mut memory);
+                    return Err(());
+                }
+            }
+            let private_sources: Vec<LinuxPageBacking> = self.kernel.private_pages
+                [..memory.private_baseline]
+                .iter()
+                .map(|page| LinuxPageBacking::Private { pfn: page.pfn })
+                .collect();
+            let private_pages = clone_and_map_linux_fork_pages(
+                &mut HostForkPageOps {
+                    kernel: self.kernel,
+                },
+                0x1800_0000,
+                LINUX_PAGE_SIZE,
+                &private_sources,
+                LINUX_PROT_READ | LINUX_PROT_WRITE,
+                fork_failpoint,
+            );
+            let private_pages = match private_pages {
+                Ok(pages) => pages,
+                Err(()) => {
+                    rollback_host_memory(self.kernel, &mut memory);
+                    return Err(());
+                }
+            };
+            memory.pages.extend(private_pages);
+            let shared_sources: Vec<LinuxPageBacking> = self
                 .kernel
                 .shared_pages
                 .pages
                 .iter()
                 .flatten()
-                .map(|page| (page.object_id, page.page_index))
+                .map(|page| LinuxPageBacking::Shared {
+                    object_id: page.object_id,
+                    page_index: page.page_index,
+                    pfn: page.pfn,
+                })
                 .collect();
-            for (object_id, page_index) in shared_pages {
-                if !self.kernel.shared_pages.acquire(object_id, page_index) {
+            let shared_pages = clone_and_map_linux_fork_pages(
+                &mut HostForkPageOps {
+                    kernel: self.kernel,
+                },
+                0x1800_2000,
+                LINUX_PAGE_SIZE,
+                &shared_sources,
+                LINUX_PROT_READ | LINUX_PROT_WRITE,
+                fork_failpoint,
+            );
+            let shared_pages = match shared_pages {
+                Ok(pages) => pages,
+                Err(()) => {
+                    rollback_host_memory(self.kernel, &mut memory);
                     return Err(());
                 }
-                self.acquired_shared_pages.push((object_id, page_index));
-                if fork_failpoint(LinuxForkFailurePoint::SharedReference) {
-                    return Err(());
-                }
-            }
-            Ok(())
+            };
+            memory.pages.extend(shared_pages);
+            self.kernel.memory_pids.push(process.pid);
+            Ok(memory)
         }
 
-        fn acquire_memory(&mut self) -> Result<(), Self::Error> {
-            self.kernel.address_space_roots.push(0xa000);
-            if fork_failpoint(LinuxForkFailurePoint::ChildRoot) {
-                return Err(());
-            }
-            for index in 0..self.table_baseline {
-                self.kernel.table_pages.push(0xb000 + index as u64 * 0x1000);
-                if fork_failpoint(LinuxForkFailurePoint::TablePage) {
-                    return Err(());
-                }
-            }
-            let parent_pages = self.kernel.private_pages[..self.private_baseline].to_vec();
-            for page in parent_pages {
-                self.kernel.private_pages.push(HostPrivatePage {
-                    pfn: page.pfn + 100,
-                    bytes: page.bytes,
-                });
-                if fork_failpoint(LinuxForkFailurePoint::PrivatePage) {
-                    return Err(());
-                }
-            }
-            self.kernel.memory_pids.push(2);
-            Ok(())
-        }
-
-        fn configure_child(&mut self) -> Result<(), Self::Error> {
-            self.child = Some(prepare_linux_fork_context(
+        fn configure_child(
+            &mut self,
+            _process: &Self::Process,
+            _scheduler_thread: &Self::SchedulerThread,
+            _memory: &Self::Memory,
+        ) -> Result<Self::Configured, Self::Error> {
+            let child = prepare_linux_fork_context(
                 host_parent_fork_frame(),
                 0x4000,
                 0x3c5,
@@ -3540,8 +3776,8 @@ mod linux_process_memory_logic {
                 0x9000,
                 *self.kernel.address_space_roots.last().ok_or(())?,
                 |frame| frame.regs[0] = 0,
-            ));
-            self.process_state = Some(HostForkProcessState {
+            );
+            let process_state = HostForkProcessState {
                 process_group: 1,
                 credentials: LinuxCredentialsCore {
                     real_uid: 10,
@@ -3579,122 +3815,194 @@ mod linux_process_memory_logic {
                 aio_requests: 0,
                 wait_registrations: 0,
                 timers: 0,
-            });
-            Ok(())
+            };
+            Ok(HostForkConfigured {
+                child,
+                process_state,
+            })
         }
 
-        fn install_resources(&mut self) -> Result<(), Self::Error> {
+        fn install_resources(
+            &mut self,
+            _process: &Self::Process,
+            resources: &mut Option<Self::Resources>,
+        ) -> Result<(), Self::Error> {
             if self.kernel.child_resources.is_some() {
                 return Err(());
             }
             let mut child = LinuxProcessResourceCore::<4, 2>::new();
-            if !self.resource_clone.take().ok_or(())?.commit(&mut child) {
+            let resource_clone = resources
+                .as_mut()
+                .and_then(|resources| resources.resource_clone.take())
+                .ok_or(())?;
+            if !resource_clone.commit(&mut child) {
                 return Err(());
             }
             self.kernel.child_resources = Some(child);
             Ok(())
         }
 
-        fn begin_publication(&mut self) -> Result<(), Self::Error> {
+        fn begin_publication(&mut self) -> Result<Self::Publication, Self::Error> {
             Ok(())
         }
 
-        fn publish_process(&mut self) -> Result<(), Self::Error> {
+        fn publish_process(
+            &mut self,
+            process: &Self::Process,
+            _configured: &Self::Configured,
+        ) -> Result<(), Self::Error> {
             self.kernel
                 .processes
-                .publish_fork(self.process.ok_or(())?)
+                .publish_fork(*process)
                 .then_some(())
                 .ok_or(())
         }
 
-        fn publish_task(&mut self) -> Result<(), Self::Error> {
-            self.kernel
-                .tasks
-                .publish(self.task.ok_or(())?)
-                .then_some(())
-                .ok_or(())
+        fn publish_task(&mut self, task: &Self::Task) -> Result<(), Self::Error> {
+            self.kernel.tasks.publish(*task).then_some(()).ok_or(())
         }
 
-        fn publish_scheduler_thread(&mut self) -> Result<(), Self::Error> {
-            let scheduler_thread = self.scheduler_thread.ok_or(())?;
-            if self.kernel.scheduler[scheduler_thread] != HostSchedulerState::Suspended {
+        fn publish_scheduler_thread(
+            &mut self,
+            scheduler_thread: &Self::SchedulerThread,
+        ) -> Result<(), Self::Error> {
+            if self.kernel.scheduler[*scheduler_thread] != HostSchedulerState::Suspended {
                 return Err(());
             }
-            self.kernel.scheduler[scheduler_thread] = HostSchedulerState::Ready;
+            self.kernel.scheduler[*scheduler_thread] = HostSchedulerState::Ready;
             Ok(())
         }
 
-        fn complete_publication(&mut self) -> Result<(), Self::Error> {
+        fn complete_publication(&mut self, process: &Self::Process) -> Result<(), Self::Error> {
             self.kernel
                 .processes
-                .complete_fork_publish(self.process.ok_or(())?)
+                .complete_fork_publish(*process)
                 .then_some(())
                 .ok_or(())
         }
 
-        fn finish(&mut self) -> Result<Self::Output, Self::Error> {
+        fn finish(
+            &mut self,
+            process: &Self::Process,
+            configured: &Self::Configured,
+        ) -> Result<Self::Output, Self::Error> {
             Ok(HostForkResult {
-                parent_result: self.process.ok_or(())?.pid,
-                child: self.child.ok_or(())?,
-                process_state: self.process_state.clone().ok_or(())?,
+                parent_result: process.pid,
+                child: configured.child,
+                process_state: configured.process_state.clone(),
             })
         }
 
-        fn rollback(&mut self, acquisition: LinuxForkAcquisition) {
-            match acquisition {
-                LinuxForkAcquisition::Configured => {
-                    self.child = None;
-                    self.process_state = None;
-                }
-                LinuxForkAcquisition::Memory => {
-                    self.kernel.memory_pids.truncate(self.memory_baseline);
-                    self.kernel.private_pages.truncate(self.private_baseline);
-                    self.kernel.table_pages.truncate(self.table_baseline);
-                    self.kernel.address_space_roots.truncate(self.root_baseline);
-                }
-                LinuxForkAcquisition::Resources => {
-                    self.rollback_process_resources();
-                    for (object_id, page_index) in self.acquired_shared_pages.drain(..).rev() {
-                        assert_eq!(
-                            self.kernel.shared_pages.release(object_id, page_index),
-                            None
-                        );
-                    }
-                    if self.acquired_shared_attachment {
-                        self.kernel.shared_attachment_references -= 1;
-                        self.acquired_shared_attachment = false;
-                    }
-                    if let Some(resource_clone) = self.resource_clone.take() {
-                        assert!(resource_clone
-                            .rollback(&mut self.kernel.descriptions)
-                            .iter()
-                            .all(Option::is_none));
-                    }
-                }
-                LinuxForkAcquisition::Process => {
-                    if let Some(process) = self.process.take() {
-                        assert!(self.kernel.processes.rollback_fork(process));
-                    }
-                }
-                LinuxForkAcquisition::Task => {
-                    if let Some(task) = self.task.take() {
-                        assert!(self.kernel.tasks.rollback(task));
-                    }
-                }
-                LinuxForkAcquisition::SchedulerThread => {
-                    if let Some(scheduler_thread) = self.scheduler_thread.take() {
-                        self.kernel.scheduler[scheduler_thread] = HostSchedulerState::Empty;
-                    }
-                }
-            }
+        fn restore_publication(&mut self, _publication: Self::Publication) {}
+
+        fn rollback_configured(&mut self, _configured: Self::Configured) {}
+
+        fn rollback_memory(&mut self, mut memory: Self::Memory) {
+            rollback_host_memory(self.kernel, &mut memory);
+        }
+
+        fn rollback_reserved_resources(&mut self, resources: Self::Resources) {
+            rollback_host_reserved_resources(self.kernel, resources);
+        }
+
+        fn rollback_installed_resources(&mut self, _process: &Self::Process) {
+            rollback_host_process_resources(self.kernel);
+        }
+
+        fn rollback_process(&mut self, process: Self::Process) {
+            assert!(self.kernel.processes.rollback_fork(process));
+        }
+
+        fn rollback_task(&mut self, task: Self::Task) {
+            assert!(self.kernel.tasks.rollback(task));
+        }
+
+        fn rollback_scheduler_thread(&mut self, scheduler_thread: Self::SchedulerThread) {
+            self.kernel.scheduler[scheduler_thread] = HostSchedulerState::Empty;
         }
     }
 
     fn run_shared_adapter_fork(
-        parent_bytes: &[u8; 64],
+        parent_bytes: &[u8; LINUX_PAGE_SIZE],
         kernel: &mut HostForkKernel,
     ) -> Result<HostForkResult, ()> {
-        run_linux_fork_transaction(HostForkBackend::new(kernel, parent_bytes), fork_failpoint)
+        run_linux_fork_transaction(host_fork_backend(kernel, parent_bytes), fork_failpoint)
+    }
+
+    fn host_fork_backend<'a>(
+        kernel: &'a mut HostForkKernel,
+        parent_bytes: &'a [u8; LINUX_PAGE_SIZE],
+    ) -> LinuxForkOwnershipCore<HostForkOps<'a>> {
+        LinuxForkOwnershipCore::new(HostForkOps::new(kernel, parent_bytes))
+    }
+
+    fn host_failure_occurrences(
+        parent: &[u8; LINUX_PAGE_SIZE],
+        point: LinuxForkFailurePoint,
+    ) -> usize {
+        for occurrence in 0..32 {
+            let mut kernel = HostForkKernel::parent(parent);
+            let baseline = kernel.snapshot();
+            configure_fork_failure(point, occurrence);
+            let result = run_shared_adapter_fork(parent, &mut kernel);
+            clear_fork_failure();
+            if result.is_ok() {
+                return occurrence;
+            }
+            assert_eq!(kernel.snapshot(), baseline);
+        }
+        panic!("unbounded failpoint occurrences for {point:?}");
+    }
+
+    #[test]
+    fn host_failpoints_cover_each_private_and_shared_page_operation() {
+        let _guard = FORK_FAILPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let parent = core::array::from_fn(|index| (index as u8).wrapping_mul(37));
+
+        assert_eq!(
+            host_failure_occurrences(&parent, LinuxForkFailurePoint::PrivatePage),
+            6,
+            "two private pages require allocation, copy, and map boundaries"
+        );
+        assert_eq!(
+            host_failure_occurrences(&parent, LinuxForkFailurePoint::PrivatePageAllocation),
+            2,
+            "each private allocation has its own boundary"
+        );
+        assert_eq!(
+            host_failure_occurrences(&parent, LinuxForkFailurePoint::PrivatePageCopy),
+            2,
+            "each complete private-page copy has its own boundary"
+        );
+        assert_eq!(
+            host_failure_occurrences(&parent, LinuxForkFailurePoint::PrivatePageMap),
+            2,
+            "each private-page map has its own boundary"
+        );
+        assert_eq!(
+            host_failure_occurrences(&parent, LinuxForkFailurePoint::SharedReference),
+            5,
+            "one attachment plus two shared references and maps require boundaries"
+        );
+        assert_eq!(
+            host_failure_occurrences(&parent, LinuxForkFailurePoint::SharedPageMap),
+            2,
+            "each shared-page map has its own boundary"
+        );
+    }
+
+    #[test]
+    fn host_failpoints_execute_the_production_ownership_core() {
+        let parent = [0xa5; LINUX_PAGE_SIZE];
+        let mut kernel = HostForkKernel::parent(&parent);
+        let backend = host_fork_backend(&mut kernel, &parent);
+
+        assert!(
+            core::any::type_name_of_val(&backend).contains("LinuxForkOwnershipCore"),
+            "host tests must instantiate the production ownership core"
+        );
     }
 
     #[test]
@@ -3711,6 +4019,10 @@ mod linux_process_memory_logic {
             LinuxForkFailurePoint::ChildRoot,
             LinuxForkFailurePoint::TablePage,
             LinuxForkFailurePoint::PrivatePage,
+            LinuxForkFailurePoint::PrivatePageAllocation,
+            LinuxForkFailurePoint::PrivatePageCopy,
+            LinuxForkFailurePoint::PrivatePageMap,
+            LinuxForkFailurePoint::SharedPageMap,
             LinuxForkFailurePoint::Memory,
             LinuxForkFailurePoint::Configured,
             LinuxForkFailurePoint::ProcessPublication,
@@ -3754,7 +4066,7 @@ mod linux_process_memory_logic {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         clear_fork_failure();
-        let parent = [0xa5; 64];
+        let parent = core::array::from_fn(|index| (index as u8).wrapping_mul(37));
         let mut kernel = HostForkKernel::parent(&parent);
         let result = run_shared_adapter_fork(&parent, &mut kernel).expect("fork succeeds");
 
@@ -3785,6 +4097,50 @@ mod linux_process_memory_logic {
         assert_eq!(result.process_state.aio_requests, 0);
         assert_eq!(result.process_state.wait_registrations, 0);
         assert_eq!(result.process_state.timers, 0);
+
+        let child_private_pages = &kernel.private_pages[2..];
+        assert_eq!(child_private_pages.len(), 2);
+        assert!(![17, 18].contains(&child_private_pages[0].pfn));
+        assert!(![17, 18].contains(&child_private_pages[1].pfn));
+        assert_ne!(child_private_pages[0].pfn, child_private_pages[1].pfn);
+        assert_eq!(child_private_pages[0].bytes, parent);
+        assert_eq!(
+            child_private_pages[1].bytes,
+            core::array::from_fn(|index| parent[LINUX_PAGE_SIZE - 1 - index])
+        );
+        assert_eq!(
+            &kernel.mapped_pages[4..],
+            &[
+                (
+                    0x1800_0000,
+                    LinuxPageBacking::Private {
+                        pfn: child_private_pages[0].pfn,
+                    },
+                ),
+                (
+                    0x1800_1000,
+                    LinuxPageBacking::Private {
+                        pfn: child_private_pages[1].pfn,
+                    },
+                ),
+                (
+                    0x1800_2000,
+                    LinuxPageBacking::Shared {
+                        object_id: 9,
+                        page_index: 0,
+                        pfn: 31,
+                    },
+                ),
+                (
+                    0x1800_3000,
+                    LinuxPageBacking::Shared {
+                        object_id: 9,
+                        page_index: 1,
+                        pfn: 32,
+                    },
+                ),
+            ]
+        );
     }
 
     #[test]
