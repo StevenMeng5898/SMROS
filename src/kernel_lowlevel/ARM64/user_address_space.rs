@@ -7,7 +7,21 @@ use crate::kernel_lowlevel::drivers;
 use crate::kernel_lowlevel::memory::PageFrameAllocator;
 use crate::kernel_lowlevel::mmu::AddressSpaceError;
 
-struct PageFrameBackend;
+type TableAllocationFailureHook = fn(usize) -> bool;
+
+struct PageFrameBackend {
+    allocation_count: usize,
+    failure_hook: Option<TableAllocationFailureHook>,
+}
+
+impl PageFrameBackend {
+    const fn new(failure_hook: Option<TableAllocationFailureHook>) -> Self {
+        Self {
+            allocation_count: 0,
+            failure_hook,
+        }
+    }
+}
 
 impl Aarch64AddressSpaceBackend for PageFrameBackend {
     fn allocate_table(&mut self) -> Result<u64, Aarch64AddressSpaceCoreError> {
@@ -20,6 +34,12 @@ impl Aarch64AddressSpaceBackend for PageFrameBackend {
             }
         };
         unsafe { core::ptr::write_bytes(address as *mut u64, 0, AARCH64_TABLE_ENTRIES) };
+        let allocation = self.allocation_count;
+        self.allocation_count = self.allocation_count.saturating_add(1);
+        if self.failure_hook.is_some_and(|hook| hook(allocation)) {
+            PageFrameAllocator::free(pfn);
+            return Err(Aarch64AddressSpaceCoreError::OutOfMemory);
+        }
         Ok(pfn)
     }
 
@@ -82,7 +102,17 @@ pub struct Aarch64AddressSpace {
 
 impl Aarch64AddressSpace {
     pub fn new_with_kernel_map() -> Result<Self, AddressSpaceError> {
-        let mut address_space = Aarch64AddressSpaceCore::new(PageFrameBackend)?;
+        Self::new_with_kernel_map_backend(PageFrameBackend::new(None))
+    }
+
+    pub(crate) fn new_for_fork(
+        failure_hook: TableAllocationFailureHook,
+    ) -> Result<Self, AddressSpaceError> {
+        Self::new_with_kernel_map_backend(PageFrameBackend::new(Some(failure_hook)))
+    }
+
+    fn new_with_kernel_map_backend(backend: PageFrameBackend) -> Result<Self, AddressSpaceError> {
+        let mut address_space = Aarch64AddressSpaceCore::new(backend)?;
         let memory = drivers::memory_reg().ok_or(AddressSpaceError::InvalidAddress)?;
         address_space.map_supervisor_ram_range(memory.base, memory.size, true)?;
         address_space.map_supervisor_range(

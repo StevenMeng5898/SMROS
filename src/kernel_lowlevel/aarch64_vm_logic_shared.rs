@@ -161,10 +161,15 @@ pub(crate) struct Aarch64AddressSpaceCore<B: Aarch64AddressSpaceBackend> {
 
 impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
     pub(crate) fn new(mut backend: B) -> Result<Self, Aarch64AddressSpaceCoreError> {
+        let mut table_pfns = alloc::vec::Vec::new();
+        table_pfns
+            .try_reserve(1)
+            .map_err(|_| Aarch64AddressSpaceCoreError::OutOfMemory)?;
         let root_pfn = backend.allocate_table()?;
+        table_pfns.push(root_pfn);
         Ok(Self {
             root_pfn,
-            table_pfns: alloc::vec![root_pfn],
+            table_pfns,
             backend,
         })
     }
@@ -259,6 +264,9 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         if !aarch64_user_range_valid(vaddr, AARCH64_PAGE_SIZE) {
             return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
         }
+        mapped
+            .try_reserve(1)
+            .map_err(|_| Aarch64AddressSpaceCoreError::OutOfMemory)?;
         let paddr = self
             .backend
             .pfn_address(pfn)
@@ -530,6 +538,12 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
                 .read_table_entry(table_pfn, index)
                 .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
             if descriptor == 0 {
+                self.table_pfns
+                    .try_reserve(1)
+                    .map_err(|_| Aarch64AddressSpaceCoreError::OutOfMemory)?;
+                created
+                    .try_reserve(1)
+                    .map_err(|_| Aarch64AddressSpaceCoreError::OutOfMemory)?;
                 let child_pfn = self.backend.allocate_table()?;
                 let child_paddr = match self.backend.pfn_address(child_pfn) {
                     Some(address) => address,
@@ -568,6 +582,9 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
             .read_table_entry(self.root_pfn, index)
             .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
         if descriptor == 0 {
+            self.table_pfns
+                .try_reserve(1)
+                .map_err(|_| Aarch64AddressSpaceCoreError::OutOfMemory)?;
             let child_pfn = self.backend.allocate_table()?;
             let child_paddr = match self.backend.pfn_address(child_pfn) {
                 Some(address) => address,

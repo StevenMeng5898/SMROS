@@ -48,7 +48,9 @@ use super::address_logic::{
 };
 use super::linux_futex;
 use super::linux_process;
-use super::linux_process::{LinuxDescriptorEntry, LinuxOpenDescription};
+use super::linux_process::{
+    try_clone_linux_fork_path, LinuxCredentialsCore, LinuxDescriptorEntry, LinuxOpenDescription,
+};
 use super::linux_process_memory;
 #[cfg(target_arch = "aarch64")]
 use super::linux_syscall_context;
@@ -747,6 +749,9 @@ struct LinuxProcessResources {
     pid: usize,
     descriptors: Vec<LinuxDescriptorEntry>,
     objects: Vec<u32>,
+    credentials: LinuxCredentialsCore,
+    cwd: String,
+    root: String,
     signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1],
     process_pending: LinuxPendingSignals,
     container: LinuxProcessContainerState,
@@ -755,11 +760,14 @@ struct LinuxProcessResources {
 }
 
 impl LinuxProcessResources {
-    const fn new(pid: usize) -> Self {
+    fn new(pid: usize) -> Self {
         Self {
             pid,
             descriptors: Vec::new(),
             objects: Vec::new(),
+            credentials: LinuxCredentialsCore::default(),
+            cwd: String::from("/"),
+            root: String::from("/"),
             signal_actions: [LinuxKernelSigaction::DEFAULT; LINUX_MAX_SIGNAL + 1],
             process_pending: LinuxPendingSignals::new(),
             container: LinuxProcessContainerState::new(),
@@ -770,6 +778,9 @@ impl LinuxProcessResources {
 }
 
 pub(crate) struct LinuxProcessForkState {
+    credentials: LinuxCredentialsCore,
+    cwd: String,
+    root: String,
     signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1],
     container: LinuxProcessContainerState,
 }
@@ -2814,11 +2825,17 @@ impl MemorySyscallState {
     ) -> Result<LinuxProcessForkState, SysError> {
         if let Some(parent) = self.process_resources(parent_pid) {
             return Ok(LinuxProcessForkState {
+                credentials: parent.credentials.fork_child(),
+                cwd: try_clone_linux_fork_path(&parent.cwd).map_err(|_| SysError::ENOMEM)?,
+                root: try_clone_linux_fork_path(&parent.root).map_err(|_| SysError::ENOMEM)?,
                 signal_actions: parent.signal_actions,
                 container: parent.container.try_fork(namespace_flags)?,
             });
         }
         Ok(LinuxProcessForkState {
+            credentials: LinuxCredentialsCore::default(),
+            cwd: try_clone_linux_fork_path("/").map_err(|_| SysError::ENOMEM)?,
+            root: try_clone_linux_fork_path("/").map_err(|_| SysError::ENOMEM)?,
             signal_actions: [LinuxKernelSigaction::DEFAULT; LINUX_MAX_SIGNAL + 1],
             container: LinuxProcessContainerState::new().try_fork(namespace_flags)?,
         })
@@ -2834,6 +2851,7 @@ impl MemorySyscallState {
         let process_state = self
             .clone_linux_process_state(parent_pid, namespace_flags)
             .ok()?;
+        self.linux_process_resources.try_reserve(1).ok()?;
         if let Some(parent) = self.process_resources(parent_pid) {
             parent_descriptors
                 .try_reserve_exact(parent.descriptors.len())
@@ -2852,41 +2870,31 @@ impl MemorySyscallState {
         objects.try_reserve_exact(parent_objects.len()).ok()?;
         for entry in parent_descriptors {
             if !self.acquire_open_description(entry.description_id) {
-                debug_assert!(self
-                    .release_resource_clone(&descriptors, &objects)
-                    .is_empty());
+                self.release_reserved_fork_resources(&descriptors, &objects);
                 return None;
             }
             descriptors.push(entry);
             if linux_process::fork_failpoint(
                 linux_process_memory::LinuxForkFailurePoint::DescriptorReference,
             ) {
-                debug_assert!(self
-                    .release_resource_clone(&descriptors, &objects)
-                    .is_empty());
+                self.release_reserved_fork_resources(&descriptors, &objects);
                 return None;
             }
         }
         for description_id in parent_objects {
             if !self.acquire_open_description(description_id) {
-                debug_assert!(self
-                    .release_resource_clone(&descriptors, &objects)
-                    .is_empty());
+                self.release_reserved_fork_resources(&descriptors, &objects);
                 return None;
             }
             if linux_process::fork_failpoint(
                 linux_process_memory::LinuxForkFailurePoint::DescriptorReference,
             ) {
                 let _ = self.release_open_description(description_id);
-                debug_assert!(self
-                    .release_resource_clone(&descriptors, &objects)
-                    .is_empty());
+                self.release_reserved_fork_resources(&descriptors, &objects);
                 return None;
             }
             let Some(description) = self.open_description(description_id).copied() else {
-                debug_assert!(self
-                    .release_resource_clone(&descriptors, &objects)
-                    .is_empty());
+                self.release_reserved_fork_resources(&descriptors, &objects);
                 return None;
             };
             if description.object_type == ObjectType::SharedMemory {
@@ -2897,16 +2905,12 @@ impl MemorySyscallState {
                     .map(|record| record.id)
                 else {
                     let _ = self.release_open_description(description_id);
-                    debug_assert!(self
-                        .release_resource_clone(&descriptors, &objects)
-                        .is_empty());
+                    self.release_reserved_fork_resources(&descriptors, &objects);
                     return None;
                 };
                 if !self.acquire_shared_memory_reference(id) {
                     let _ = self.release_open_description(description_id);
-                    debug_assert!(self
-                        .release_resource_clone(&descriptors, &objects)
-                        .is_empty());
+                    self.release_reserved_fork_resources(&descriptors, &objects);
                     return None;
                 }
                 if linux_process::fork_failpoint(
@@ -2914,15 +2918,55 @@ impl MemorySyscallState {
                 ) {
                     let _ = self.release_shared_memory_reference(id);
                     let _ = self.release_open_description(description_id);
-                    debug_assert!(self
-                        .release_resource_clone(&descriptors, &objects)
-                        .is_empty());
+                    self.release_reserved_fork_resources(&descriptors, &objects);
                     return None;
                 }
             }
             objects.push(description_id);
         }
         Some((descriptors, objects, process_state))
+    }
+
+    fn rollback_fork_resource_clone(
+        &mut self,
+        descriptors: &[LinuxDescriptorEntry],
+        objects: &[u32],
+    ) -> bool {
+        let mut parent_ownership_preserved = true;
+        for description_id in objects.iter().copied().rev() {
+            let object = self.open_description(description_id).copied();
+            let final_reference = self.release_open_description(description_id);
+            if let Some(object) = object {
+                if object.object_type == ObjectType::SharedMemory {
+                    if let Some(id) = self
+                        .linux_shared_memory
+                        .iter()
+                        .find(|record| record.handle == object.handle)
+                        .map(|record| record.id)
+                    {
+                        parent_ownership_preserved &=
+                            self.release_shared_memory_reference(id).is_none();
+                    }
+                } else {
+                    parent_ownership_preserved &= final_reference.is_none();
+                }
+            }
+        }
+        for entry in descriptors.iter().rev() {
+            parent_ownership_preserved &= self
+                .release_open_description(entry.description_id)
+                .is_none();
+        }
+        parent_ownership_preserved
+    }
+
+    fn release_reserved_fork_resources(
+        &mut self,
+        descriptors: &[LinuxDescriptorEntry],
+        objects: &[u32],
+    ) {
+        let parent_ownership_preserved = self.rollback_fork_resource_clone(descriptors, objects);
+        assert!(parent_ownership_preserved);
     }
 
     fn release_resource_clone(
@@ -2967,13 +3011,18 @@ impl MemorySyscallState {
         objects: &mut Vec<u32>,
         process_state: LinuxProcessForkState,
     ) -> bool {
-        if self.process_resources(pid).is_some() {
+        if self.process_resources(pid).is_some()
+            || self.linux_process_resources.len() == self.linux_process_resources.capacity()
+        {
             return false;
         }
         self.linux_process_resources.push(LinuxProcessResources {
             pid,
             descriptors: core::mem::take(descriptors),
             objects: core::mem::take(objects),
+            credentials: process_state.credentials,
+            cwd: process_state.cwd,
+            root: process_state.root,
             signal_actions: process_state.signal_actions,
             process_pending: LinuxPendingSignals::new(),
             container: process_state.container,
@@ -2995,6 +3044,22 @@ impl MemorySyscallState {
         let mut released = self.release_resource_clone(&resources.descriptors, &resources.objects);
         released.extend(resources.timer_handles);
         Some(released)
+    }
+
+    fn rollback_fork_process_resources(&mut self, pid: usize) -> bool {
+        let Some(index) = self
+            .linux_process_resources
+            .iter()
+            .position(|resources| resources.pid == pid)
+        else {
+            return false;
+        };
+        let resources = self.linux_process_resources.swap_remove(index);
+        let transient_state_empty = resources.timer_handles.is_empty()
+            && resources.real_timer_deadline_tick == LINUX_TIMER_DISABLED;
+        let parent_ownership_preserved =
+            self.rollback_fork_resource_clone(&resources.descriptors, &resources.objects);
+        transient_state_empty && parent_ownership_preserved
     }
 
     fn bind_linux_fxfs_file(&mut self, handle: u32, path: String, cursor: fxfs::FxfsCursor) {
@@ -3189,10 +3254,7 @@ pub(crate) fn reserve_linux_resource_clone(
 }
 
 pub(crate) fn release_linux_resource_clone(descriptors: &[LinuxDescriptorEntry], objects: &[u32]) {
-    let released_handles = memory_state().release_resource_clone(descriptors, objects);
-    for handle in released_handles {
-        let _ = sys_handle_close(handle);
-    }
+    memory_state().release_reserved_fork_resources(descriptors, objects);
 }
 
 pub(crate) fn install_linux_resource_clone(
@@ -3212,6 +3274,10 @@ pub(crate) fn release_linux_process_resources(pid: usize) -> bool {
         let _ = sys_handle_close(handle);
     }
     true
+}
+
+pub(crate) fn rollback_linux_fork_process_resources(pid: usize) -> bool {
+    memory_state().rollback_fork_process_resources(pid)
 }
 
 pub(crate) fn acquire_shared_memory_attachment_reference(id: u32) -> bool {
@@ -5641,31 +5707,39 @@ pub fn sys_path_noop(path: usize) -> SysResult {
 }
 
 pub fn sys_getcwd(buf: usize, len: usize) -> SysResult {
-    linux_write_cstr(buf, len, b"/")
+    let pid = linux_resource_pid();
+    let cwd = memory_state()
+        .process_resources(pid)
+        .map(|resources| resources.cwd.as_bytes())
+        .unwrap_or(b"/");
+    linux_write_cstr(buf, len, cwd)
 }
 
 pub fn sys_chdir(path: usize) -> SysResult {
-    if path == 0 {
-        Err(SysError::EFAULT)
-    } else {
-        Ok(0)
-    }
+    let path = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
+    memory_state()
+        .process_resources_mut(linux_resource_pid())
+        .cwd = path;
+    Ok(0)
 }
 
 pub fn sys_fchdir(fd: usize) -> SysResult {
-    if linux_fd_is_dir(fd) {
-        Ok(0)
-    } else {
-        Err(SysError::ENODEV)
+    if !linux_fd_is_dir(fd) {
+        return Err(SysError::ENODEV);
     }
+    if let Ok(path) = linux_fxfs_path_for_fd(fd, false) {
+        memory_state()
+            .process_resources_mut(linux_resource_pid())
+            .cwd = path;
+    }
+    Ok(0)
 }
 
 pub fn sys_chroot(path: usize) -> SysResult {
-    sys_chdir(path)?;
-    memory_state()
-        .process_resources_mut(linux_resource_pid())
-        .container
-        .chrooted = true;
+    let root = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
+    let resources = memory_state().process_resources_mut(linux_resource_pid());
+    resources.root = root;
+    resources.container.chrooted = true;
     Ok(0)
 }
 
@@ -8213,20 +8287,11 @@ fn sys_fork_with_namespace_flags(namespace_flags: usize, child_exit_signal: usiz
     {
         let context = linux_syscall_context::current().ok_or(SysError::EINVAL)?;
         let parent_pid = linux_process::current_pid()?;
-        let scheduler_thread = scheduler::scheduler()
-            .create_suspended_thread_on_cpu(
-                linux_process::linux_fork_child_entry,
-                "linux_process",
-                0,
-            )
-            .ok_or(SysError::EAGAIN)?;
-        let reservation = linux_process::reserve_fork(
-            scheduler_thread,
+        let child_pid = linux_process::run_fork_transaction(
             context,
             namespace_flags,
             child_exit_signal,
         )?;
-        let child_pid = reservation.commit()?;
         debug_assert_ne!(child_pid, parent_pid);
         Ok(child_pid)
     }
@@ -8414,68 +8479,145 @@ pub fn sys_gettid() -> SysResult {
 }
 
 pub fn sys_getuid() -> SysResult {
-    Ok(0)
+    Ok(memory_state()
+        .process_resources(linux_resource_pid())
+        .map(|resources| resources.credentials.real_uid)
+        .unwrap_or(0))
 }
 
 pub fn sys_geteuid() -> SysResult {
-    Ok(0)
+    Ok(memory_state()
+        .process_resources(linux_resource_pid())
+        .map(|resources| resources.credentials.effective_uid)
+        .unwrap_or(0))
 }
 
 pub fn sys_getgid() -> SysResult {
-    Ok(0)
+    Ok(memory_state()
+        .process_resources(linux_resource_pid())
+        .map(|resources| resources.credentials.real_gid)
+        .unwrap_or(0))
 }
 
 pub fn sys_getegid() -> SysResult {
+    Ok(memory_state()
+        .process_resources(linux_resource_pid())
+        .map(|resources| resources.credentials.effective_gid)
+        .unwrap_or(0))
+}
+
+pub fn sys_setuid(uid: usize) -> SysResult {
+    let credentials = &mut memory_state()
+        .process_resources_mut(linux_resource_pid())
+        .credentials;
+    credentials.set_resuid(uid, uid, uid);
     Ok(0)
 }
 
-pub fn sys_setuid(_uid: usize) -> SysResult {
+pub fn sys_setgid(gid: usize) -> SysResult {
+    let credentials = &mut memory_state()
+        .process_resources_mut(linux_resource_pid())
+        .credentials;
+    credentials.set_resgid(gid, gid, gid);
     Ok(0)
 }
 
-pub fn sys_setgid(_gid: usize) -> SysResult {
+pub fn sys_setreuid(ruid: usize, euid: usize) -> SysResult {
+    let credentials = &mut memory_state()
+        .process_resources_mut(linux_resource_pid())
+        .credentials;
+    let real = linux_id_or_current(ruid, credentials.real_uid);
+    let effective = linux_id_or_current(euid, credentials.effective_uid);
+    credentials.set_resuid(real, effective, effective);
     Ok(0)
 }
 
-pub fn sys_setreuid(_ruid: usize, _euid: usize) -> SysResult {
+pub fn sys_setregid(rgid: usize, egid: usize) -> SysResult {
+    let credentials = &mut memory_state()
+        .process_resources_mut(linux_resource_pid())
+        .credentials;
+    let real = linux_id_or_current(rgid, credentials.real_gid);
+    let effective = linux_id_or_current(egid, credentials.effective_gid);
+    credentials.set_resgid(real, effective, effective);
     Ok(0)
 }
 
-pub fn sys_setregid(_rgid: usize, _egid: usize) -> SysResult {
-    Ok(0)
-}
-
-pub fn sys_setresuid(_ruid: usize, _euid: usize, _suid: usize) -> SysResult {
+pub fn sys_setresuid(ruid: usize, euid: usize, suid: usize) -> SysResult {
+    let credentials = &mut memory_state()
+        .process_resources_mut(linux_resource_pid())
+        .credentials;
+    let real = linux_id_or_current(ruid, credentials.real_uid);
+    let effective = linux_id_or_current(euid, credentials.effective_uid);
+    let saved = linux_id_or_current(suid, credentials.saved_uid);
+    credentials.set_resuid(real, effective, saved);
     Ok(0)
 }
 
 pub fn sys_getresuid(ruid: usize, euid: usize, suid: usize) -> SysResult {
+    let credentials = memory_state()
+        .process_resources(linux_resource_pid())
+        .map(|resources| resources.credentials)
+        .unwrap_or_default();
     if ruid != 0 {
-        linux_write_user_u32(ruid, 0)?;
+        linux_write_user_u32(ruid, credentials.real_uid as u32)?;
     }
     if euid != 0 {
-        linux_write_user_u32(euid, 0)?;
+        linux_write_user_u32(euid, credentials.effective_uid as u32)?;
     }
     if suid != 0 {
-        linux_write_user_u32(suid, 0)?;
+        linux_write_user_u32(suid, credentials.saved_uid as u32)?;
     }
     Ok(0)
 }
 
-pub fn sys_setresgid(_rgid: usize, _egid: usize, _sgid: usize) -> SysResult {
+pub fn sys_setresgid(rgid: usize, egid: usize, sgid: usize) -> SysResult {
+    let credentials = &mut memory_state()
+        .process_resources_mut(linux_resource_pid())
+        .credentials;
+    let real = linux_id_or_current(rgid, credentials.real_gid);
+    let effective = linux_id_or_current(egid, credentials.effective_gid);
+    let saved = linux_id_or_current(sgid, credentials.saved_gid);
+    credentials.set_resgid(real, effective, saved);
     Ok(0)
 }
 
 pub fn sys_getresgid(rgid: usize, egid: usize, sgid: usize) -> SysResult {
-    sys_getresuid(rgid, egid, sgid)
-}
-
-pub fn sys_setfsuid(_uid: usize) -> SysResult {
+    let credentials = memory_state()
+        .process_resources(linux_resource_pid())
+        .map(|resources| resources.credentials)
+        .unwrap_or_default();
+    if rgid != 0 {
+        linux_write_user_u32(rgid, credentials.real_gid as u32)?;
+    }
+    if egid != 0 {
+        linux_write_user_u32(egid, credentials.effective_gid as u32)?;
+    }
+    if sgid != 0 {
+        linux_write_user_u32(sgid, credentials.saved_gid as u32)?;
+    }
     Ok(0)
 }
 
-pub fn sys_setfsgid(_gid: usize) -> SysResult {
-    Ok(0)
+pub fn sys_setfsuid(uid: usize) -> SysResult {
+    Ok(memory_state()
+        .process_resources_mut(linux_resource_pid())
+        .credentials
+        .set_filesystem_uid(uid))
+}
+
+pub fn sys_setfsgid(gid: usize) -> SysResult {
+    Ok(memory_state()
+        .process_resources_mut(linux_resource_pid())
+        .credentials
+        .set_filesystem_gid(gid))
+}
+
+fn linux_id_or_current(requested: usize, current: usize) -> usize {
+    if requested == u32::MAX as usize || requested == usize::MAX {
+        current
+    } else {
+        requested
+    }
 }
 
 /// Linux sys_kill implementation

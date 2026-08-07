@@ -94,9 +94,9 @@ fn aarch64_bootstrap_mmu_maps_ram_mmio_and_secondary_cpus() {
     assert!(mmu.contains("pub fn bootstrap_root() -> u64"));
     assert!(mmu.contains("pub fn activate_bootstrap_on_current_cpu() -> bool"));
     let kernel_map = address_space
-        .find("pub fn new_with_kernel_map()")
+        .find("fn new_with_kernel_map_backend(")
         .map(|start| braced_body(&address_space[start..]))
-        .expect("bootstrap address-space constructor");
+        .expect("bootstrap address-space backend constructor");
     let kernel_map: String = kernel_map
         .chars()
         .filter(|character| !character.is_whitespace())
@@ -4242,7 +4242,7 @@ fn linux_process_memory_review_paths_are_checked_and_reversible() {
         .expect("read ELF launcher");
 
     assert!(process_memory.contains("pub(crate) fn unregister(pid: usize)"));
-    assert!(process_memory.contains("linux_process_memory_remove_index("));
+    assert!(process_memory.contains(".position(|memory| memory.pid == pid)"));
 
     for (start_marker, end_marker) in [
         (
@@ -5057,7 +5057,21 @@ fn linux_resource_clone_inherits_open_descriptions_and_shared_pages() {
         .find("pub(crate) fn release_linux_resource_clone(")
         .expect("resource clone rollback");
     let release = braced_body(&syscall[release_start..]);
-    assert!(release.contains("sys_handle_close"));
+    assert!(release.contains("release_reserved_fork_resources"));
+    assert!(!release.contains("sys_handle_close"));
+
+    let reserved_release_start = syscall
+        .find("fn release_reserved_fork_resources(")
+        .expect("allocation-free reserved resource rollback");
+    let reserved_release = braced_body(&syscall[reserved_release_start..]);
+    assert!(reserved_release.contains("assert!(parent_ownership_preserved)"));
+    assert!(!reserved_release.contains("debug_assert!"));
+
+    let process_release_start = syscall
+        .find("pub(crate) fn release_linux_process_resources(")
+        .expect("process resource teardown");
+    let process_release = braced_body(&syscall[process_release_start..]);
+    assert!(process_release.contains("sys_handle_close"));
 
     let munmap = braced_body(
         &syscall[syscall
@@ -5080,6 +5094,9 @@ fn linux_fork_publishes_only_a_complete_child() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
         .expect("read process runtime");
+    let fork_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_fork_logic_shared.rs"))
+            .expect("read shared fork transaction logic");
     let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
         .expect("read process memory runtime");
     let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
@@ -5088,6 +5105,12 @@ fn linux_fork_publishes_only_a_complete_child() {
         .expect("read syscall implementation");
     let thread = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/thread.rs"))
         .expect("read AArch64 thread runtime");
+    let address_space =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/user_address_space.rs"))
+            .expect("read AArch64 address-space owner");
+    let address_space_core =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/aarch64_vm_logic_shared.rs"))
+            .expect("read AArch64 address-space core");
     let context_switch =
         std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/context_switch.S"))
             .expect("read AArch64 child restore assembly");
@@ -5103,11 +5126,14 @@ fn linux_fork_publishes_only_a_complete_child() {
         "task: Option<LinuxTaskReservation>",
         "scheduler_thread: Option<ThreadId>",
         "child_start: Option<Aarch64ProcessStart>",
-        "ledger: LinuxForkAcquisitionLedger",
-        "impl Drop for LinuxForkReservation",
+        "publication_interrupt_state: Option<usize>",
     ] {
         assert!(process.contains(declaration), "missing `{declaration}`");
     }
+    assert!(process.contains("include!(\"linux_fork_logic_shared.rs\")"));
+    assert!(fork_logic.contains("pub(crate) trait LinuxForkTransactionBackend"));
+    assert!(fork_logic.contains("pub(crate) fn run_linux_fork_transaction"));
+    assert!(process.contains("impl LinuxForkTransactionBackend for LinuxForkReservation"));
 
     let fork = braced_body(
         &syscall[syscall
@@ -5123,9 +5149,7 @@ fn linux_fork_publishes_only_a_complete_child() {
             .expect("shared eager fork path")..],
     );
     assert!(fork_path.contains("linux_syscall_context::current()"));
-    assert!(fork_path.contains("create_suspended_thread_on_cpu("));
-    assert!(fork_path.contains("linux_process::reserve_fork("));
-    assert!(fork_path.contains("commit()"));
+    assert!(fork_path.contains("linux_process::run_fork_transaction("));
     let clone = braced_body(
         &syscall[syscall
             .find("pub fn sys_clone(")
@@ -5135,23 +5159,27 @@ fn linux_fork_publishes_only_a_complete_child() {
     assert!(clone.contains("flags & 0xff"));
     assert!(fork_path.contains("child_exit_signal"));
 
-    let reserve = &process[process
-        .find("pub(crate) fn reserve_fork(")
-        .expect("fork reservation")..];
-    assert!(reserve.contains("LinuxForkReservation::new(scheduler_thread)"));
-    assert!(reserve.contains("reservation.acquire_task("));
-    assert!(reserve.contains("reservation.acquire_process("));
-    assert!(reserve.contains("reservation.acquire_resources("));
-    assert!(reserve.contains("reservation.acquire_memory("));
-    assert!(!reserve.contains("terminate_thread(scheduler_thread)"));
-    assert!(reserve.contains("reserve_child_with_pid("));
-    assert!(reserve.contains("reserve_resource_clone("));
-    assert!(reserve.contains("clone_for_fork("));
-    assert!(reserve.contains("reserve_fork_task("));
-    assert!(reserve.contains("frame.regs[0] = 0"));
-    assert!(reserve.contains("read_user_stack_pointer()"));
-    assert!(reserve.contains("read_user_tls()"));
-    assert!(reserve.contains("let parent = current()?"));
+    let transaction = &fork_logic[fork_logic
+        .find("pub(crate) fn run_linux_fork_transaction")
+        .expect("shared fork transaction")..];
+    for operation in [
+        "LinuxForkAcquisition::SchedulerThread",
+        "LinuxForkAcquisition::Task",
+        "LinuxForkAcquisition::Process",
+        "LinuxForkAcquisition::Resources",
+        "LinuxForkAcquisition::Memory",
+        "LinuxForkAcquisition::Configured",
+        "transaction.backend.install_resources()?",
+        "transaction.backend.publish_process()?",
+        "transaction.backend.publish_task()?",
+        "transaction.backend.publish_scheduler_thread()?",
+        "transaction.backend.complete_publication()?",
+    ] {
+        assert!(
+            transaction.contains(operation),
+            "missing transaction `{operation}`"
+        );
+    }
     for point in [
         "LinuxForkFailurePoint::SchedulerThread",
         "LinuxForkFailurePoint::Task",
@@ -5160,57 +5188,56 @@ fn linux_fork_publishes_only_a_complete_child() {
         "LinuxForkFailurePoint::Configured",
     ] {
         assert!(
-            reserve.contains(point),
-            "missing reserve failpoint `{point}`"
+            transaction.contains(point),
+            "missing transaction failpoint `{point}`"
         );
     }
 
-    let rollback = &process[process
-        .find("impl Drop for LinuxForkReservation")
-        .expect("fork rollback owner")..];
+    let transaction_drop = &fork_logic[fork_logic
+        .find("impl<B: LinuxForkTransactionBackend> Drop for LinuxForkTransaction<B>")
+        .expect("shared fork rollback owner")..];
+    assert!(transaction_drop.contains("ledger.rollback_into"));
+    assert!(transaction_drop.contains("self.backend.rollback(acquisition)"));
+
+    let backend = &process[process
+        .find("impl LinuxForkTransactionBackend for LinuxForkReservation")
+        .expect("production fork backend")..];
+    for acquisition in [
+        "create_suspended_thread_on_cpu",
+        "reserve_fork_task",
+        "reserve_child_with_pid",
+        "reserve_resource_clone",
+        "clone_for_fork",
+        "frame.regs[0] = 0",
+        "read_user_stack_pointer()",
+        "read_user_tls()",
+    ] {
+        assert!(
+            backend.contains(acquisition),
+            "missing acquisition `{acquisition}`"
+        );
+    }
     for release in [
         "rollback_fork_task",
         "release_resources",
         "unregister",
         "terminate_thread",
         "rollback_fork(process)",
-        "ledger.release(LinuxForkAcquisition::Memory)",
-        "ledger.release(LinuxForkAcquisition::Resources)",
-        "ledger.release(LinuxForkAcquisition::Process)",
-        "ledger.release(LinuxForkAcquisition::Task)",
+        "LinuxForkAcquisition::Memory",
+        "LinuxForkAcquisition::Resources",
+        "LinuxForkAcquisition::Process",
+        "LinuxForkAcquisition::Task",
     ] {
-        assert!(rollback.contains(release), "missing rollback `{release}`");
+        assert!(backend.contains(release), "missing rollback `{release}`");
     }
 
-    let reservation_impl = &process[process
-        .find("impl LinuxForkReservation")
-        .expect("fork reservation implementation")..];
-    let commit = &reservation_impl[reservation_impl
-        .find("pub(crate) fn commit(")
-        .expect("fork commit")..];
-    let publication_mask = commit
-        .find("let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts()")
+    let publication_mask = backend
+        .find("Some(crate::kernel_lowlevel::cpu::mask_interrupts())")
         .expect("interrupt-masked fork publication");
-    let process_publish = commit
-        .find(".publish_fork(process)")
-        .expect("hidden process publish");
-    let task_publish = commit.find("publish_fork_task").expect("task publish");
-    let scheduler_publish = commit
-        .find("publish_suspended_thread")
-        .expect("scheduler publish");
-    let process_complete = commit
-        .find("complete_fork_publish(process)")
-        .expect("complete process publish");
-    let publication_restore = commit
-        .find("crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state)")
+    let publication_restore = backend
+        .find("self.restore_publication_interrupts()")
         .expect("fork publication interrupt restore");
-    assert!(
-        publication_mask < process_publish
-            && process_publish < task_publish
-            && task_publish < scheduler_publish
-            && scheduler_publish < process_complete
-            && process_complete < publication_restore
-    );
+    assert!(publication_mask < publication_restore);
 
     assert!(memory.contains("pub(crate) fn clone_for_fork("));
     assert!(memory.contains("PageFrameAllocator::alloc()"));
@@ -5222,9 +5249,20 @@ fn linux_fork_publishes_only_a_complete_child() {
     assert!(memory.contains("crate::kernel_lowlevel::cpu::sync_instruction_cache()"));
     assert!(memory.contains("try_reserve_exact(parent.mappings.len())"));
     assert!(memory.contains("try_reserve(1)"));
+    assert!(memory.contains("Aarch64AddressSpace::new_for_fork(fork_table_allocation_failure)"));
+    assert!(memory.contains("LinuxForkFailurePoint::ChildRoot"));
+    assert!(memory.contains("LinuxForkFailurePoint::TablePage"));
     assert!(memory.contains("LinuxForkFailurePoint::PrivatePage"));
     assert!(memory.contains("LinuxForkFailurePoint::SharedReference"));
     assert!(syscall.contains("LinuxForkFailurePoint::DescriptorReference"));
+    assert!(syscall.contains("self.linux_process_resources.try_reserve(1)"));
+    assert!(syscall
+        .contains("self.linux_process_resources.len() == self.linux_process_resources.capacity()"));
+    assert!(syscall.contains("rollback_fork_resource_clone"));
+    assert!(!syscall.contains("debug_assert!(self.rollback_fork_resource_clone"));
+    assert!(address_space.contains("failure_hook: Option<TableAllocationFailureHook>"));
+    assert!(address_space.contains("self.failure_hook.is_some_and(|hook| hook(allocation))"));
+    assert!(address_space_core.contains(".try_reserve(1)"));
     let clone_backings = &memory[memory
         .find("fn clone_page_backings_for_fork(")
         .expect("fork backing clone")..];
@@ -5245,7 +5283,7 @@ fn linux_fork_publishes_only_a_complete_child() {
         "LinuxForkFailurePoint::SchedulerPublication",
     ] {
         assert!(
-            commit.contains(point),
+            transaction.contains(point),
             "missing publication failpoint `{point}`"
         );
     }
@@ -5349,4 +5387,74 @@ fn linux_fork_publishes_only_a_complete_child() {
         .find("isb")
         .expect("child instruction barrier");
     assert!(ttbr < first_dsb && first_dsb < tlbi && tlbi < second_dsb && second_dsb < isb);
+}
+
+#[test]
+fn linux_fork_inherits_pid_owned_identity_paths_and_clears_transient_state() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read task runtime");
+
+    for inherited in [
+        "credentials: LinuxCredentialsCore",
+        "cwd: String",
+        "root: String",
+        "credentials: parent.credentials.fork_child()",
+        "try_clone_linux_fork_path(&parent.cwd)",
+        "try_clone_linux_fork_path(&parent.root)",
+        "signal_actions: parent.signal_actions",
+        "container: parent.container.try_fork(namespace_flags)?",
+    ] {
+        assert!(
+            syscall.contains(inherited),
+            "missing fork inheritance `{inherited}`"
+        );
+    }
+
+    let install = braced_body(
+        &syscall[syscall
+            .find("fn install_process_resources(")
+            .expect("child process resource install")..],
+    );
+    for empty_child_state in [
+        "process_pending: LinuxPendingSignals::new()",
+        "timer_handles: Vec::new()",
+        "real_timer_deadline_tick: LINUX_TIMER_DISABLED",
+    ] {
+        assert!(
+            install.contains(empty_child_state),
+            "child inherited transient state `{empty_child_state}`"
+        );
+    }
+    assert!(syscall.contains("fn linux_aio_request_count() -> usize"));
+    assert!(syscall.contains("active requests are invariantly zero"));
+
+    let rollback = braced_body(
+        &syscall[syscall
+            .find("fn rollback_fork_process_resources(")
+            .expect("fork process-resource rollback")..],
+    );
+    assert!(rollback.contains("let transient_state_empty ="));
+    assert!(rollback.contains("let parent_ownership_preserved ="));
+    assert!(rollback.contains("self.rollback_fork_resource_clone("));
+    assert!(rollback.contains("transient_state_empty && parent_ownership_preserved"));
+
+    let chroot = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_chroot(")
+            .expect("process root update")..],
+    );
+    assert!(chroot.contains("resources.root = root"));
+    assert!(!chroot.contains("resources.cwd ="));
+
+    let reserve_task = braced_body(
+        &task[task
+            .find("pub(crate) fn reserve_fork_task(")
+            .expect("fork child task reservation")..],
+    );
+    assert!(reserve_task.contains("reserve_child(0, scheduler_id.0)"));
+    assert!(reserve_task.contains("signal_states[reservation.slot].reset_in_place()"));
+    assert!(reserve_task.contains("signal_states[reservation.slot].mask = parent_mask"));
 }

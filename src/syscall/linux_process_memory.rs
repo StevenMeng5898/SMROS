@@ -36,6 +36,25 @@ impl LinuxMappingSource {
             Self::SharedMemory { id } => Self::SharedMemory { id: *id },
         }
     }
+
+    fn try_clone_for_fork(&self) -> Result<Self, SysError> {
+        match self {
+            Self::Anonymous => Ok(Self::Anonymous),
+            Self::File { fd, offset, path } => {
+                let mut child_path = String::new();
+                child_path
+                    .try_reserve_exact(path.len())
+                    .map_err(|_| SysError::ENOMEM)?;
+                child_path.push_str(path);
+                Ok(Self::File {
+                    fd: *fd,
+                    offset: *offset,
+                    path: child_path,
+                })
+            }
+            Self::SharedMemory { id } => Ok(Self::SharedMemory { id: *id }),
+        }
+    }
 }
 
 pub(crate) struct LinuxProcessMapping {
@@ -463,12 +482,7 @@ pub(crate) fn reset_launch() {
 
 pub(crate) fn unregister(pid: usize) -> bool {
     with_runtime(|runtime| {
-        let pids = runtime
-            .memories
-            .iter()
-            .map(|memory| memory.pid)
-            .collect::<Vec<_>>();
-        let Some(index) = linux_process_memory_remove_index(&pids, pid) else {
+        let Some(index) = runtime.memories.iter().position(|memory| memory.pid == pid) else {
             return false;
         };
         runtime.memories.remove(index);
@@ -500,8 +514,8 @@ pub(crate) fn clone_for_fork(
             .ok_or(SysError::ESRCH)?;
 
         #[cfg(target_arch = "aarch64")]
-        let address_space =
-            Aarch64AddressSpace::new_with_kernel_map().map_err(map_address_error)?;
+        let address_space = Aarch64AddressSpace::new_for_fork(fork_table_allocation_failure)
+            .map_err(map_address_error)?;
         #[cfg(not(target_arch = "aarch64"))]
         let address_space = FallbackAddressSpace::new(child_pid)?;
         let root_paddr = address_space.root_paddr();
@@ -533,6 +547,7 @@ pub(crate) fn clone_for_fork(
             .map_err(|_| SysError::ENOMEM)?;
 
         for mapping in &parent.mappings {
+            let source = mapping.source.try_clone_for_fork()?;
             let attachment_index = shared_attachments.iter().position(|attachment| {
                 attachment.addr == mapping.addr
                     && attachment.len == mapping.len
@@ -566,7 +581,7 @@ pub(crate) fn clone_for_fork(
                 prot: mapping.prot,
                 flags: mapping.flags,
                 pages,
-                source: mapping.source.clone(),
+                source,
             });
         }
 
@@ -595,6 +610,16 @@ pub(crate) fn clone_for_fork(
         release_shared_attachments(&shared_attachments);
     }
     result
+}
+
+#[cfg(target_arch = "aarch64")]
+fn fork_table_allocation_failure(allocation: usize) -> bool {
+    let point = if allocation == 0 {
+        LinuxForkFailurePoint::ChildRoot
+    } else {
+        LinuxForkFailurePoint::TablePage
+    };
+    super::linux_process::fork_failpoint(point)
 }
 
 fn clone_page_backings_for_fork(
@@ -838,41 +863,65 @@ pub(crate) fn reserve_shared_attachments(
     pid: usize,
 ) -> Result<Vec<LinuxSharedAttachmentClone>, SysError> {
     let attachments = with_pid(pid, |memory| {
-        Ok(memory
+        let attachment_count = memory
             .mappings
             .iter()
-            .filter_map(|mapping| {
-                let LinuxMappingSource::SharedMemory { id } = mapping.source else {
-                    return None;
-                };
-                let attachment = memory.shared_attachments.iter().find(|attachment| {
-                    attachment.object_id == id
-                        && linux_shared_attachment_has_mapping(
-                            **attachment,
-                            &[LinuxSharedMappingRange {
-                                object_id: id,
-                                addr: mapping.addr,
-                                len: mapping.len,
-                            }],
-                        )
-                })?;
-                Some(LinuxSharedAttachmentClone {
-                    object_id: id,
-                    attachment_addr: attachment.addr,
-                    attachment_len: attachment.len,
-                    addr: mapping.addr,
-                    len: mapping.len,
-                    prot: mapping.prot,
-                    flags: mapping.flags,
-                    pages: mapping.pages.clone(),
-                    owns_attachment_reference: false,
-                })
-            })
-            .collect::<Vec<_>>())
+            .filter(|mapping| matches!(mapping.source, LinuxMappingSource::SharedMemory { .. }))
+            .count();
+        let mut attachments = Vec::new();
+        attachments
+            .try_reserve_exact(attachment_count)
+            .map_err(|_| SysError::ENOMEM)?;
+        for mapping in &memory.mappings {
+            let LinuxMappingSource::SharedMemory { id } = mapping.source else {
+                continue;
+            };
+            let Some(attachment) = memory.shared_attachments.iter().find(|attachment| {
+                attachment.object_id == id
+                    && linux_shared_attachment_has_mapping(
+                        **attachment,
+                        &[LinuxSharedMappingRange {
+                            object_id: id,
+                            addr: mapping.addr,
+                            len: mapping.len,
+                        }],
+                    )
+            }) else {
+                continue;
+            };
+            let mut pages = Vec::new();
+            pages
+                .try_reserve_exact(mapping.pages.len())
+                .map_err(|_| SysError::ENOMEM)?;
+            pages.extend_from_slice(&mapping.pages);
+            attachments.push(LinuxSharedAttachmentClone {
+                object_id: id,
+                attachment_addr: attachment.addr,
+                attachment_len: attachment.len,
+                addr: mapping.addr,
+                len: mapping.len,
+                prot: mapping.prot,
+                flags: mapping.flags,
+                pages,
+                owns_attachment_reference: false,
+            });
+        }
+        Ok(attachments)
     })?;
 
     let mut acquired = Vec::new();
+    acquired
+        .try_reserve_exact(attachments.len())
+        .map_err(|_| SysError::ENOMEM)?;
     for mut attachment in attachments {
+        let mut local_acquired = Vec::new();
+        if local_acquired
+            .try_reserve_exact(attachment.pages.len())
+            .is_err()
+        {
+            release_shared_attachments(&acquired);
+            return Err(SysError::ENOMEM);
+        }
         let owns_attachment_reference =
             !acquired
                 .iter()
@@ -893,7 +942,6 @@ pub(crate) fn reserve_shared_attachments(
             let _ = super::release_shared_memory_attachment_reference(attachment.object_id);
             return Err(SysError::ENOMEM);
         }
-        let mut local_acquired = Vec::new();
         for backing in &attachment.pages {
             let LinuxPageBacking::Shared {
                 object_id,

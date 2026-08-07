@@ -352,7 +352,7 @@ pub(crate) fn select_linux_pending_signal(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxPendingSignals {
     pub standard_pending: u64,
     pub standard_reserved: u64,
@@ -897,7 +897,7 @@ impl LinuxSignalFrame {
     };
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxTaskSignalState {
     pub mask: u64,
     pub pending: LinuxPendingSignals,

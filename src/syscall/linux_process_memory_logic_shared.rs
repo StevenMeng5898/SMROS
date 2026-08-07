@@ -57,6 +57,8 @@ pub(crate) enum LinuxForkFailurePoint {
     SchedulerThread,
     Task,
     Process,
+    ChildRoot,
+    TablePage,
     DescriptorReference,
     SharedReference,
     PrivatePage,
@@ -132,10 +134,7 @@ impl LinuxForkAcquisitionLedger {
         true
     }
 
-    pub(crate) fn rollback_into(
-        &mut self,
-        out: &mut [Option<LinuxForkAcquisition>],
-    ) -> usize {
+    pub(crate) fn rollback_into(&mut self, out: &mut [Option<LinuxForkAcquisition>]) -> usize {
         let mut written = 0usize;
         while self.len != 0 && written < out.len() {
             self.len -= 1;
@@ -465,6 +464,14 @@ impl<const D: usize, const O: usize> LinuxResourceCloneCore<D, O> {
         parent: &LinuxProcessResourceCore<D, O>,
         descriptions: &mut LinuxOpenDescriptionTableCore<N>,
     ) -> Option<Self> {
+        Self::reserve_with_failure(parent, descriptions, || false)
+    }
+
+    pub(crate) fn reserve_with_failure<const N: usize>(
+        parent: &LinuxProcessResourceCore<D, O>,
+        descriptions: &mut LinuxOpenDescriptionTableCore<N>,
+        mut fail_after_acquire: impl FnMut() -> bool,
+    ) -> Option<Self> {
         let mut clone = Self {
             descriptors: [LinuxDescriptorEntry::EMPTY; D],
             descriptor_len: 0,
@@ -478,6 +485,10 @@ impl<const D: usize, const O: usize> LinuxResourceCloneCore<D, O> {
             }
             clone.descriptors[clone.descriptor_len] = *entry;
             clone.descriptor_len += 1;
+            if fail_after_acquire() {
+                let _ = clone.rollback(descriptions);
+                return None;
+            }
         }
         for description_id in parent.objects() {
             if !descriptions.acquire(*description_id) {
@@ -486,6 +497,10 @@ impl<const D: usize, const O: usize> LinuxResourceCloneCore<D, O> {
             }
             clone.objects[clone.object_len] = *description_id;
             clone.object_len += 1;
+            if fail_after_acquire() {
+                let _ = clone.rollback(descriptions);
+                return None;
+            }
         }
         Some(clone)
     }
