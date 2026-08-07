@@ -647,6 +647,14 @@ fn clone_page_backings_for_fork(
             }
         };
         child_pages.push(child);
+        let failure_point = match parent {
+            LinuxPageBacking::Private { .. } => LinuxForkFailurePoint::PrivatePage,
+            LinuxPageBacking::Shared { .. } => LinuxForkFailurePoint::SharedReference,
+        };
+        if super::linux_process::fork_failpoint(failure_point) {
+            LinuxProcessMemory::free_backings(&child_pages);
+            return Err(SysError::ENOMEM);
+        }
     }
     Ok(child_pages)
 }
@@ -878,6 +886,13 @@ pub(crate) fn reserve_shared_attachments(
             release_shared_attachments(&acquired);
             return Err(SysError::ENOMEM);
         }
+        if owns_attachment_reference
+            && super::linux_process::fork_failpoint(LinuxForkFailurePoint::SharedReference)
+        {
+            release_shared_attachments(&acquired);
+            let _ = super::release_shared_memory_attachment_reference(attachment.object_id);
+            return Err(SysError::ENOMEM);
+        }
         let mut local_acquired = Vec::new();
         for backing in &attachment.pages {
             let LinuxPageBacking::Shared {
@@ -906,6 +921,16 @@ pub(crate) fn reserve_shared_attachments(
                 return Err(SysError::ENOMEM);
             }
             local_acquired.push((object_id, page_index));
+            if super::linux_process::fork_failpoint(LinuxForkFailurePoint::SharedReference) {
+                for (object_id, page_index) in local_acquired.into_iter().rev() {
+                    let _ = release_shared_page(object_id, page_index);
+                }
+                release_shared_attachments(&acquired);
+                if owns_attachment_reference {
+                    let _ = super::release_shared_memory_attachment_reference(attachment.object_id);
+                }
+                return Err(SysError::ENOMEM);
+            }
         }
         attachment.owns_attachment_reference = owns_attachment_reference;
         acquired.push(attachment);

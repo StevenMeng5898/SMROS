@@ -1318,7 +1318,6 @@ fn linux_process_reset_reclaims_transient_state_without_reinitializing_global_st
         "released_handles.push(record.handle)",
         "self.next_open_description_id = 1",
         "self.next_shared_memory_id = LINUX_SHM_ID_START",
-        "self.reset_linux_container_state()",
     ] {
         assert!(
             method.contains(required),
@@ -2930,7 +2929,9 @@ fn linux_signal_state_is_owned_by_each_live_task() {
             "task-owned signal state remains global: {removed_global}"
         );
     }
-    assert!(syscall.contains("static mut LINUX_PROCESS_PENDING: LinuxPendingSignals"));
+    assert!(syscall.contains("process_pending: LinuxPendingSignals"));
+    assert!(syscall.contains("signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1]"));
+    assert!(!syscall.contains("static mut LINUX_PROCESS_PENDING"));
     assert!(syscall.contains(
         "linux_task::LINUX_TASK_LIMIT * LINUX_SIGNAL_FRAME_LIMIT * LINUX_SIGNAL_INFO_BYTES"
     ));
@@ -2940,16 +2941,18 @@ fn linux_signal_state_is_owned_by_each_live_task() {
     let trampoline = braced_body(&syscall[trampoline_start..]);
     assert!(trampoline.contains("LINUX_SIGNAL_TRAMPOLINE_BYTES"));
     let process_queue_start = syscall
-        .find("fn with_linux_process_pending<R>(")
-        .expect("process pending queue guard");
+        .find("fn with_linux_process_signal_state<R>(")
+        .expect("process signal-state guard");
     let process_queue = braced_body(&syscall[process_queue_start..]);
     assert!(process_queue.contains("crate::kernel_lowlevel::smp::is_boot_cpu()"));
     let process_mask = process_queue
         .find("mask_interrupts()")
         .expect("process queue interrupt mask");
     let process_access = process_queue
-        .find("operation(&mut LINUX_PROCESS_PENDING)")
-        .expect("serialized process queue access");
+        .find("let result = operation(")
+        .expect("serialized process signal-state access");
+    assert!(process_queue.contains("&mut resources.signal_actions"));
+    assert!(process_queue.contains("&mut resources.process_pending"));
     let process_restore = process_queue
         .find("restore_interrupts(interrupt_state)")
         .expect("process queue interrupt restore");
@@ -2959,7 +2962,7 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         .find("pub fn reset_linux_signal_timer_state()")
         .expect("signal process reset");
     let reset = braced_body(&syscall[reset_start..]);
-    assert!(reset.contains("with_linux_process_pending("));
+    assert!(reset.contains("with_linux_process_signal_state("));
     assert!(reset.contains("pending.reset_in_place()"));
 
     for syscall_name in [
@@ -3298,7 +3301,8 @@ fn linux_standard_pending_records_are_bounded_and_shared_with_process_routing() 
     assert!(task_logic
         .contains("pub standard_records: [LinuxPendingSignal; LINUX_REALTIME_SIGNAL_MIN]"));
     assert!(task_logic.contains("pub(crate) fn requeue_front("));
-    assert!(syscall.contains("static mut LINUX_PROCESS_PENDING: LinuxPendingSignals"));
+    assert!(syscall.contains("process_pending: LinuxPendingSignals"));
+    assert!(!syscall.contains("static mut LINUX_PROCESS_PENDING"));
     assert!(syscall.contains("pending.reset_in_place()"));
     assert!(!syscall.contains("static LINUX_PROCESS_PENDING_SIGNALS: AtomicU64"));
 }
@@ -3566,12 +3570,12 @@ fn linux_sigtimedwait_copyout_masks_irqs_across_validation_and_write() {
 }
 
 #[test]
-fn linux_process_pending_static_mut_access_has_compiler_barriers() {
+fn linux_process_pending_process_state_access_has_compiler_barriers() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
         .expect("read Linux signal runtime");
     let guard_start = syscall
-        .find("fn with_linux_process_pending<R>(")
+        .find("fn with_linux_process_signal_state<R>(")
         .expect("process pending queue guard");
     let guard = braced_body(&syscall[guard_start..]);
     let mask = guard.find("mask_interrupts()").expect("process IRQ mask");
@@ -3579,8 +3583,10 @@ fn linux_process_pending_static_mut_access_has_compiler_barriers() {
         .find("compiler_fence(Ordering::SeqCst)")
         .expect("compiler fence after IRQ mask");
     let access = guard
-        .find("operation(&mut LINUX_PROCESS_PENDING)")
-        .expect("process pending static-mut access");
+        .find("let result = operation(")
+        .expect("process-owned signal-state access");
+    assert!(guard.contains("&mut resources.signal_actions"));
+    assert!(guard.contains("&mut resources.process_pending"));
     let second_fence = guard
         .rfind("compiler_fence(Ordering::SeqCst)")
         .expect("compiler fence before IRQ restore");
@@ -5044,7 +5050,8 @@ fn linux_resource_clone_inherits_open_descriptions_and_shared_pages() {
         .find("fn reserve_process_resources(")
         .expect("process resource reservation");
     let reserve = braced_body(&syscall[reserve_start..]);
-    assert!(reserve.contains("unwrap_or_else"));
+    assert!(reserve.contains("clone_linux_process_state"));
+    assert!(reserve.contains("try_reserve_exact"));
 
     let release_start = syscall
         .find("pub(crate) fn release_linux_resource_clone(")
@@ -5092,10 +5099,11 @@ fn linux_fork_publishes_only_a_complete_child() {
         "pub pstate: u64",
         "pub root_paddr: u64",
         "pub(crate) struct LinuxForkReservation",
-        "pub process: LinuxProcessReservation",
-        "pub task: LinuxTaskReservation",
-        "pub scheduler_thread: ThreadId",
-        "pub child_start: Aarch64ProcessStart",
+        "process: Option<LinuxProcessReservation>",
+        "task: Option<LinuxTaskReservation>",
+        "scheduler_thread: Option<ThreadId>",
+        "child_start: Option<Aarch64ProcessStart>",
+        "ledger: LinuxForkAcquisitionLedger",
         "impl Drop for LinuxForkReservation",
     ] {
         assert!(process.contains(declaration), "missing `{declaration}`");
@@ -5130,6 +5138,12 @@ fn linux_fork_publishes_only_a_complete_child() {
     let reserve = &process[process
         .find("pub(crate) fn reserve_fork(")
         .expect("fork reservation")..];
+    assert!(reserve.contains("LinuxForkReservation::new(scheduler_thread)"));
+    assert!(reserve.contains("reservation.acquire_task("));
+    assert!(reserve.contains("reservation.acquire_process("));
+    assert!(reserve.contains("reservation.acquire_resources("));
+    assert!(reserve.contains("reservation.acquire_memory("));
+    assert!(!reserve.contains("terminate_thread(scheduler_thread)"));
     assert!(reserve.contains("reserve_child_with_pid("));
     assert!(reserve.contains("reserve_resource_clone("));
     assert!(reserve.contains("clone_for_fork("));
@@ -5137,11 +5151,19 @@ fn linux_fork_publishes_only_a_complete_child() {
     assert!(reserve.contains("frame.regs[0] = 0"));
     assert!(reserve.contains("read_user_stack_pointer()"));
     assert!(reserve.contains("read_user_tls()"));
-    let parent_validation = &reserve[..reserve
-        .find("let process =")
-        .expect("process-slot reservation")];
-    assert!(parent_validation.contains("match current()"));
-    assert!(parent_validation.contains("terminate_thread(scheduler_thread)"));
+    assert!(reserve.contains("let parent = current()?"));
+    for point in [
+        "LinuxForkFailurePoint::SchedulerThread",
+        "LinuxForkFailurePoint::Task",
+        "LinuxForkFailurePoint::Process",
+        "LinuxForkFailurePoint::Memory",
+        "LinuxForkFailurePoint::Configured",
+    ] {
+        assert!(
+            reserve.contains(point),
+            "missing reserve failpoint `{point}`"
+        );
+    }
 
     let rollback = &process[process
         .find("impl Drop for LinuxForkReservation")
@@ -5151,7 +5173,11 @@ fn linux_fork_publishes_only_a_complete_child() {
         "release_resources",
         "unregister",
         "terminate_thread",
-        "rollback_fork(self.process)",
+        "rollback_fork(process)",
+        "ledger.release(LinuxForkAcquisition::Memory)",
+        "ledger.release(LinuxForkAcquisition::Resources)",
+        "ledger.release(LinuxForkAcquisition::Process)",
+        "ledger.release(LinuxForkAcquisition::Task)",
     ] {
         assert!(rollback.contains(release), "missing rollback `{release}`");
     }
@@ -5166,14 +5192,14 @@ fn linux_fork_publishes_only_a_complete_child() {
         .find("let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts()")
         .expect("interrupt-masked fork publication");
     let process_publish = commit
-        .find(".publish_fork(self.process)")
+        .find(".publish_fork(process)")
         .expect("hidden process publish");
     let task_publish = commit.find("publish_fork_task").expect("task publish");
     let scheduler_publish = commit
         .find("publish_suspended_thread")
         .expect("scheduler publish");
     let process_complete = commit
-        .find("complete_fork_publish(self.process)")
+        .find("complete_fork_publish(process)")
         .expect("complete process publish");
     let publication_restore = commit
         .find("crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state)")
@@ -5196,6 +5222,9 @@ fn linux_fork_publishes_only_a_complete_child() {
     assert!(memory.contains("crate::kernel_lowlevel::cpu::sync_instruction_cache()"));
     assert!(memory.contains("try_reserve_exact(parent.mappings.len())"));
     assert!(memory.contains("try_reserve(1)"));
+    assert!(memory.contains("LinuxForkFailurePoint::PrivatePage"));
+    assert!(memory.contains("LinuxForkFailurePoint::SharedReference"));
+    assert!(syscall.contains("LinuxForkFailurePoint::DescriptorReference"));
     let clone_backings = &memory[memory
         .find("fn clone_page_backings_for_fork(")
         .expect("fork backing clone")..];
@@ -5210,6 +5239,44 @@ fn linux_fork_publishes_only_a_complete_child() {
     assert!(task.contains("task.tgid = reservation.tid"));
     assert!(task.contains("pub(crate) fn publish_fork_task("));
     assert!(task.contains("pub(crate) fn rollback_fork_task("));
+    for point in [
+        "LinuxForkFailurePoint::ProcessPublication",
+        "LinuxForkFailurePoint::TaskPublication",
+        "LinuxForkFailurePoint::SchedulerPublication",
+    ] {
+        assert!(
+            commit.contains(point),
+            "missing publication failpoint `{point}`"
+        );
+    }
+
+    for process_owned_state in [
+        "signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1]",
+        "process_pending: LinuxPendingSignals",
+        "container: LinuxProcessContainerState",
+        "fn clone_linux_process_state(",
+    ] {
+        assert!(
+            syscall.contains(process_owned_state),
+            "missing process-owned fork state `{process_owned_state}`"
+        );
+    }
+    for removed_global in [
+        "static LINUX_SIGNAL_HANDLERS",
+        "static LINUX_SIGNAL_FLAGS",
+        "static LINUX_SIGNAL_RESTORERS",
+        "static LINUX_SIGNAL_ACTION_MASKS",
+        "static mut LINUX_PROCESS_PENDING",
+        "linux_mounts: Vec<LinuxMountRecord>",
+        "linux_cap_effective: u64",
+        "linux_seccomp_mode: usize",
+        "linux_chrooted: bool",
+    ] {
+        assert!(
+            !syscall.contains(removed_global),
+            "fork-shared process state remains global `{removed_global}`"
+        );
+    }
 
     for timer_ownership in [
         "timer_handles: Vec<u32>",

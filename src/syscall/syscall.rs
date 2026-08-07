@@ -678,14 +678,100 @@ struct LinuxFdRecord {
     writable: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
+struct LinuxMountRecord {
+    flags: usize,
+}
+
+struct LinuxProcessContainerState {
+    mounts: Vec<LinuxMountRecord>,
+    namespace_flags: usize,
+    setns_count: usize,
+    pivot_rooted: bool,
+    chrooted: bool,
+    no_new_privs: bool,
+    seccomp_mode: usize,
+    seccomp_filters: usize,
+    cap_effective: u64,
+    cap_permitted: u64,
+    cap_inheritable: u64,
+    hostname_set: bool,
+    domainname_set: bool,
+}
+
+impl LinuxProcessContainerState {
+    const fn new() -> Self {
+        Self {
+            mounts: Vec::new(),
+            namespace_flags: 0,
+            setns_count: 0,
+            pivot_rooted: false,
+            chrooted: false,
+            no_new_privs: false,
+            seccomp_mode: 0,
+            seccomp_filters: 0,
+            cap_effective: LINUX_CAP_FULL_SET,
+            cap_permitted: LINUX_CAP_FULL_SET,
+            cap_inheritable: 0,
+            hostname_set: false,
+            domainname_set: false,
+        }
+    }
+
+    fn try_fork(&self, namespace_flags: usize) -> Result<Self, SysError> {
+        let mut mounts = Vec::new();
+        mounts
+            .try_reserve_exact(self.mounts.len())
+            .map_err(|_| SysError::ENOMEM)?;
+        mounts.extend_from_slice(&self.mounts);
+        Ok(Self {
+            mounts,
+            namespace_flags: self.namespace_flags
+                | (namespace_flags & LINUX_CONTAINER_NAMESPACE_FLAGS),
+            setns_count: self.setns_count,
+            pivot_rooted: self.pivot_rooted,
+            chrooted: self.chrooted,
+            no_new_privs: self.no_new_privs,
+            seccomp_mode: self.seccomp_mode,
+            seccomp_filters: self.seccomp_filters,
+            cap_effective: self.cap_effective,
+            cap_permitted: self.cap_permitted,
+            cap_inheritable: self.cap_inheritable,
+            hostname_set: self.hostname_set,
+            domainname_set: self.domainname_set,
+        })
+    }
+}
+
 struct LinuxProcessResources {
     pid: usize,
     descriptors: Vec<LinuxDescriptorEntry>,
     objects: Vec<u32>,
-    namespace_flags: usize,
+    signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1],
+    process_pending: LinuxPendingSignals,
+    container: LinuxProcessContainerState,
     timer_handles: Vec<u32>,
     real_timer_deadline_tick: u64,
+}
+
+impl LinuxProcessResources {
+    const fn new(pid: usize) -> Self {
+        Self {
+            pid,
+            descriptors: Vec::new(),
+            objects: Vec::new(),
+            signal_actions: [LinuxKernelSigaction::DEFAULT; LINUX_MAX_SIGNAL + 1],
+            process_pending: LinuxPendingSignals::new(),
+            container: LinuxProcessContainerState::new(),
+            timer_handles: Vec::new(),
+            real_timer_deadline_tick: LINUX_TIMER_DISABLED,
+        }
+    }
+}
+
+pub(crate) struct LinuxProcessForkState {
+    signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1],
+    container: LinuxProcessContainerState,
 }
 
 #[derive(Clone)]
@@ -693,11 +779,6 @@ struct LinuxFxfsFileRecord {
     handle: u32,
     cursor: fxfs::FxfsCursor,
     path: String,
-}
-
-#[derive(Clone, Copy)]
-struct LinuxMountRecord {
-    flags: usize,
 }
 
 #[repr(C)]
@@ -734,6 +815,15 @@ struct LinuxKernelSigaction {
     flags: u64,
     restorer: u64,
     mask: u64,
+}
+
+impl LinuxKernelSigaction {
+    const DEFAULT: Self = Self {
+        handler: LINUX_SIG_DFL,
+        flags: 0,
+        restorer: 0,
+        mask: 0,
+    };
 }
 
 #[repr(C)]
@@ -1580,19 +1670,6 @@ struct MemorySyscallState {
     linux_fxfs_files: Vec<LinuxFxfsFileRecord>,
     linux_shared_memory: Vec<LinuxSharedMemoryRecord>,
     next_shared_memory_id: u32,
-    linux_mounts: Vec<LinuxMountRecord>,
-    linux_namespace_flags: usize,
-    linux_setns_count: usize,
-    linux_pivot_rooted: bool,
-    linux_chrooted: bool,
-    linux_no_new_privs: bool,
-    linux_seccomp_mode: usize,
-    linux_seccomp_filters: usize,
-    linux_cap_effective: u64,
-    linux_cap_permitted: u64,
-    linux_cap_inheritable: u64,
-    linux_hostname_set: bool,
-    linux_domainname_set: bool,
     next_handle: u32,
     next_open_description_id: u32,
     root_vmar_handle: u32,
@@ -1630,19 +1707,6 @@ impl MemorySyscallState {
             linux_fxfs_files: Vec::new(),
             linux_shared_memory: Vec::new(),
             next_shared_memory_id: LINUX_SHM_ID_START,
-            linux_mounts: Vec::new(),
-            linux_namespace_flags: 0,
-            linux_setns_count: 0,
-            linux_pivot_rooted: false,
-            linux_chrooted: false,
-            linux_no_new_privs: false,
-            linux_seccomp_mode: 0,
-            linux_seccomp_filters: 0,
-            linux_cap_effective: LINUX_CAP_FULL_SET,
-            linux_cap_permitted: LINUX_CAP_FULL_SET,
-            linux_cap_inheritable: 0,
-            linux_hostname_set: false,
-            linux_domainname_set: false,
             next_handle: MEMORY_HANDLE_START + 1,
             next_open_description_id: 1,
             root_vmar_handle,
@@ -2486,14 +2550,8 @@ impl MemorySyscallState {
         {
             return &mut self.linux_process_resources[index];
         }
-        self.linux_process_resources.push(LinuxProcessResources {
-            pid,
-            descriptors: Vec::new(),
-            objects: Vec::new(),
-            namespace_flags: 0,
-            timer_handles: Vec::new(),
-            real_timer_deadline_tick: LINUX_TIMER_DISABLED,
-        });
+        self.linux_process_resources
+            .push(LinuxProcessResources::new(pid));
         self.linux_process_resources.last_mut().unwrap()
     }
 
@@ -2749,24 +2807,50 @@ impl MemorySyscallState {
         Some(description_id)
     }
 
+    fn clone_linux_process_state(
+        &self,
+        parent_pid: usize,
+        namespace_flags: usize,
+    ) -> Result<LinuxProcessForkState, SysError> {
+        if let Some(parent) = self.process_resources(parent_pid) {
+            return Ok(LinuxProcessForkState {
+                signal_actions: parent.signal_actions,
+                container: parent.container.try_fork(namespace_flags)?,
+            });
+        }
+        Ok(LinuxProcessForkState {
+            signal_actions: [LinuxKernelSigaction::DEFAULT; LINUX_MAX_SIGNAL + 1],
+            container: LinuxProcessContainerState::new().try_fork(namespace_flags)?,
+        })
+    }
+
     fn reserve_process_resources(
         &mut self,
         parent_pid: usize,
-    ) -> Option<(Vec<LinuxDescriptorEntry>, Vec<u32>)> {
-        let parent = self
-            .process_resources(parent_pid)
-            .cloned()
-            .unwrap_or_else(|| LinuxProcessResources {
-                pid: parent_pid,
-                descriptors: Vec::new(),
-                objects: Vec::new(),
-                namespace_flags: 0,
-                timer_handles: Vec::new(),
-                real_timer_deadline_tick: LINUX_TIMER_DISABLED,
-            });
-        let mut descriptors = Vec::with_capacity(parent.descriptors.len());
-        let mut objects = Vec::with_capacity(parent.objects.len());
-        for entry in parent.descriptors {
+        namespace_flags: usize,
+    ) -> Option<(Vec<LinuxDescriptorEntry>, Vec<u32>, LinuxProcessForkState)> {
+        let mut parent_descriptors = Vec::new();
+        let mut parent_objects = Vec::new();
+        let process_state = self
+            .clone_linux_process_state(parent_pid, namespace_flags)
+            .ok()?;
+        if let Some(parent) = self.process_resources(parent_pid) {
+            parent_descriptors
+                .try_reserve_exact(parent.descriptors.len())
+                .ok()?;
+            parent_descriptors.extend_from_slice(&parent.descriptors);
+            parent_objects
+                .try_reserve_exact(parent.objects.len())
+                .ok()?;
+            parent_objects.extend_from_slice(&parent.objects);
+        }
+        let mut descriptors = Vec::new();
+        descriptors
+            .try_reserve_exact(parent_descriptors.len())
+            .ok()?;
+        let mut objects = Vec::new();
+        objects.try_reserve_exact(parent_objects.len()).ok()?;
+        for entry in parent_descriptors {
             if !self.acquire_open_description(entry.description_id) {
                 debug_assert!(self
                     .release_resource_clone(&descriptors, &objects)
@@ -2774,9 +2858,26 @@ impl MemorySyscallState {
                 return None;
             }
             descriptors.push(entry);
+            if linux_process::fork_failpoint(
+                linux_process_memory::LinuxForkFailurePoint::DescriptorReference,
+            ) {
+                debug_assert!(self
+                    .release_resource_clone(&descriptors, &objects)
+                    .is_empty());
+                return None;
+            }
         }
-        for description_id in parent.objects {
+        for description_id in parent_objects {
             if !self.acquire_open_description(description_id) {
+                debug_assert!(self
+                    .release_resource_clone(&descriptors, &objects)
+                    .is_empty());
+                return None;
+            }
+            if linux_process::fork_failpoint(
+                linux_process_memory::LinuxForkFailurePoint::DescriptorReference,
+            ) {
+                let _ = self.release_open_description(description_id);
                 debug_assert!(self
                     .release_resource_clone(&descriptors, &objects)
                     .is_empty());
@@ -2808,10 +2909,20 @@ impl MemorySyscallState {
                         .is_empty());
                     return None;
                 }
+                if linux_process::fork_failpoint(
+                    linux_process_memory::LinuxForkFailurePoint::SharedReference,
+                ) {
+                    let _ = self.release_shared_memory_reference(id);
+                    let _ = self.release_open_description(description_id);
+                    debug_assert!(self
+                        .release_resource_clone(&descriptors, &objects)
+                        .is_empty());
+                    return None;
+                }
             }
             objects.push(description_id);
         }
-        Some((descriptors, objects))
+        Some((descriptors, objects, process_state))
     }
 
     fn release_resource_clone(
@@ -2854,6 +2965,7 @@ impl MemorySyscallState {
         pid: usize,
         descriptors: &mut Vec<LinuxDescriptorEntry>,
         objects: &mut Vec<u32>,
+        process_state: LinuxProcessForkState,
     ) -> bool {
         if self.process_resources(pid).is_some() {
             return false;
@@ -2862,7 +2974,9 @@ impl MemorySyscallState {
             pid,
             descriptors: core::mem::take(descriptors),
             objects: core::mem::take(objects),
-            namespace_flags: 0,
+            signal_actions: process_state.signal_actions,
+            process_pending: LinuxPendingSignals::new(),
+            container: process_state.container,
             timer_handles: Vec::new(),
             real_timer_deadline_tick: LINUX_TIMER_DISABLED,
         });
@@ -2925,28 +3039,7 @@ impl MemorySyscallState {
     fn apply_linux_namespace_flags(&mut self, flags: usize) {
         let namespace_flags = flags & LINUX_CONTAINER_NAMESPACE_FLAGS;
         let pid = linux_resource_pid();
-        self.process_resources_mut(pid).namespace_flags |= namespace_flags;
-    }
-
-    fn clone_linux_process_namespace_flags(
-        &mut self,
-        parent_pid: usize,
-        child_pid: usize,
-        flags: usize,
-    ) -> bool {
-        let inherited = self
-            .process_resources(parent_pid)
-            .map(|resources| resources.namespace_flags)
-            .unwrap_or(self.linux_namespace_flags);
-        let Some(child) = self
-            .linux_process_resources
-            .iter_mut()
-            .find(|resources| resources.pid == child_pid)
-        else {
-            return false;
-        };
-        child.namespace_flags = inherited | (flags & LINUX_CONTAINER_NAMESPACE_FLAGS);
-        true
+        self.process_resources_mut(pid).container.namespace_flags |= namespace_flags;
     }
 
     fn linux_timer_owned(&self, pid: usize, handle: u32) -> bool {
@@ -2984,36 +3077,30 @@ impl MemorySyscallState {
     }
 
     fn record_linux_setns(&mut self, namespace: usize) {
-        self.apply_linux_namespace_flags(namespace);
-        self.linux_setns_count = self.linux_setns_count.saturating_add(1);
+        let container = &mut self.process_resources_mut(linux_resource_pid()).container;
+        container.namespace_flags |= namespace & LINUX_CONTAINER_NAMESPACE_FLAGS;
+        container.setns_count = container.setns_count.saturating_add(1);
     }
 
     fn record_linux_mount(&mut self, flags: usize) -> SysResult {
-        if self.linux_mounts.len() >= LINUX_MAX_MOUNTS {
+        let mounts = &mut self
+            .process_resources_mut(linux_resource_pid())
+            .container
+            .mounts;
+        if mounts.len() >= LINUX_MAX_MOUNTS {
             return Err(SysError::EBUSY);
         }
-        self.linux_mounts.push(LinuxMountRecord { flags });
+        mounts.try_reserve(1).map_err(|_| SysError::ENOMEM)?;
+        mounts.push(LinuxMountRecord { flags });
         Ok(0)
     }
 
     fn record_linux_umount(&mut self) {
-        let _ = self.linux_mounts.pop();
-    }
-
-    fn reset_linux_container_state(&mut self) {
-        self.linux_mounts.clear();
-        self.linux_namespace_flags = 0;
-        self.linux_setns_count = 0;
-        self.linux_pivot_rooted = false;
-        self.linux_chrooted = false;
-        self.linux_no_new_privs = false;
-        self.linux_seccomp_mode = 0;
-        self.linux_seccomp_filters = 0;
-        self.linux_cap_effective = LINUX_CAP_FULL_SET;
-        self.linux_cap_permitted = LINUX_CAP_FULL_SET;
-        self.linux_cap_inheritable = 0;
-        self.linux_hostname_set = false;
-        self.linux_domainname_set = false;
+        let _ = self
+            .process_resources_mut(linux_resource_pid())
+            .container
+            .mounts
+            .pop();
     }
 
     fn reset_linux_process_state(&mut self) -> Vec<u32> {
@@ -3033,46 +3120,44 @@ impl MemorySyscallState {
         self.linux_fxfs_files.clear();
         self.next_open_description_id = 1;
         self.next_shared_memory_id = LINUX_SHM_ID_START;
-        self.reset_linux_container_state();
         released_handles
     }
 
     fn linux_container_stats(&self, pid: usize) -> LinuxContainerStats {
+        let Some(container) = self
+            .process_resources(pid)
+            .map(|resources| &resources.container)
+        else {
+            return LinuxContainerStats {
+                cap_effective: LINUX_CAP_FULL_SET,
+                cap_permitted: LINUX_CAP_FULL_SET,
+                ..LinuxContainerStats::default()
+            };
+        };
         let mut mount_flags = 0usize;
-        for mount in &self.linux_mounts {
+        for mount in &container.mounts {
             mount_flags |= mount.flags;
         }
         LinuxContainerStats {
-            namespace_flags: self
-                .process_resources(pid)
-                .map(|resources| resources.namespace_flags)
-                .unwrap_or(self.linux_namespace_flags),
-            setns_count: self.linux_setns_count,
-            mount_count: self.linux_mounts.len(),
+            namespace_flags: container.namespace_flags,
+            setns_count: container.setns_count,
+            mount_count: container.mounts.len(),
             mount_flags,
-            pivot_rooted: self.linux_pivot_rooted,
-            chrooted: self.linux_chrooted,
-            no_new_privs: self.linux_no_new_privs,
-            seccomp_mode: self.linux_seccomp_mode,
-            seccomp_filters: self.linux_seccomp_filters,
-            cap_effective: self.linux_cap_effective,
-            cap_permitted: self.linux_cap_permitted,
-            cap_inheritable: self.linux_cap_inheritable,
-            hostname_set: self.linux_hostname_set,
-            domainname_set: self.linux_domainname_set,
+            pivot_rooted: container.pivot_rooted,
+            chrooted: container.chrooted,
+            no_new_privs: container.no_new_privs,
+            seccomp_mode: container.seccomp_mode,
+            seccomp_filters: container.seccomp_filters,
+            cap_effective: container.cap_effective,
+            cap_permitted: container.cap_permitted,
+            cap_inheritable: container.cap_inheritable,
+            hostname_set: container.hostname_set,
+            domainname_set: container.domainname_set,
         }
     }
 }
 
 static mut MEMORY_SYSCALL_STATE: Option<MemorySyscallState> = None;
-static LINUX_SIGNAL_HANDLERS: [AtomicU64; LINUX_MAX_SIGNAL + 1] =
-    [const { AtomicU64::new(LINUX_SIG_DFL) }; LINUX_MAX_SIGNAL + 1];
-static LINUX_SIGNAL_FLAGS: [AtomicU64; LINUX_MAX_SIGNAL + 1] =
-    [const { AtomicU64::new(0) }; LINUX_MAX_SIGNAL + 1];
-static LINUX_SIGNAL_RESTORERS: [AtomicU64; LINUX_MAX_SIGNAL + 1] =
-    [const { AtomicU64::new(0) }; LINUX_MAX_SIGNAL + 1];
-static LINUX_SIGNAL_ACTION_MASKS: [AtomicU64; LINUX_MAX_SIGNAL + 1] =
-    [const { AtomicU64::new(0) }; LINUX_MAX_SIGNAL + 1];
 static LINUX_SIGNAL_TRAMPOLINE: AtomicU64 = AtomicU64::new(0);
 
 const LINUX_SIGNAL_INFO_OFFSET: usize = PAGE_SIZE;
@@ -3080,8 +3165,6 @@ const LINUX_SIGNAL_INFO_STORAGE_BYTES: usize =
     linux_task::LINUX_TASK_LIMIT * LINUX_SIGNAL_FRAME_LIMIT * LINUX_SIGNAL_INFO_BYTES;
 const LINUX_SIGNAL_TRAMPOLINE_BYTES: usize =
     (LINUX_SIGNAL_INFO_OFFSET + LINUX_SIGNAL_INFO_STORAGE_BYTES + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-static mut LINUX_PROCESS_PENDING: LinuxPendingSignals = LinuxPendingSignals::new();
-
 fn memory_state() -> &'static mut MemorySyscallState {
     unsafe {
         if MEMORY_SYSCALL_STATE.is_none() {
@@ -3098,9 +3181,10 @@ fn linux_resource_pid() -> usize {
 
 pub(crate) fn reserve_linux_resource_clone(
     parent_pid: usize,
-) -> Result<(Vec<LinuxDescriptorEntry>, Vec<u32>), SysError> {
+    namespace_flags: usize,
+) -> Result<(Vec<LinuxDescriptorEntry>, Vec<u32>, LinuxProcessForkState), SysError> {
     memory_state()
-        .reserve_process_resources(parent_pid)
+        .reserve_process_resources(parent_pid, namespace_flags)
         .ok_or(SysError::ENOMEM)
 }
 
@@ -3115,8 +3199,9 @@ pub(crate) fn install_linux_resource_clone(
     pid: usize,
     descriptors: &mut Vec<LinuxDescriptorEntry>,
     objects: &mut Vec<u32>,
+    process_state: LinuxProcessForkState,
 ) -> bool {
-    memory_state().install_process_resources(pid, descriptors, objects)
+    memory_state().install_process_resources(pid, descriptors, objects, process_state)
 }
 
 pub(crate) fn release_linux_process_resources(pid: usize) -> bool {
@@ -3259,16 +3344,9 @@ pub fn linux_container_stats() -> LinuxContainerStats {
     memory_state().linux_container_stats(pid)
 }
 
-pub(crate) fn inherit_linux_fork_namespace_flags(
-    parent_pid: usize,
-    child_pid: usize,
-    flags: usize,
-) -> bool {
-    memory_state().clone_linux_process_namespace_flags(parent_pid, child_pid, flags)
-}
-
 pub fn reset_linux_container_state() {
-    memory_state().reset_linux_container_state();
+    let pid = linux_resource_pid();
+    memory_state().process_resources_mut(pid).container = LinuxProcessContainerState::new();
 }
 
 pub(crate) fn register_linux_initial_stack(address: usize, len: usize) -> bool {
@@ -3570,13 +3648,8 @@ fn linux_timeval_from_ticks(ticks: u64) -> LinuxTimeval {
 }
 
 pub fn reset_linux_signal_timer_state() {
-    for signum in 1..=LINUX_MAX_SIGNAL {
-        LINUX_SIGNAL_HANDLERS[signum].store(LINUX_SIG_DFL, Ordering::SeqCst);
-        LINUX_SIGNAL_FLAGS[signum].store(0, Ordering::SeqCst);
-        LINUX_SIGNAL_RESTORERS[signum].store(0, Ordering::SeqCst);
-        LINUX_SIGNAL_ACTION_MASKS[signum].store(0, Ordering::SeqCst);
-    }
-    with_linux_process_pending(|pending| {
+    with_linux_process_signal_state(|actions, pending| {
+        actions.fill(LinuxKernelSigaction::DEFAULT);
         pending.reset_in_place();
     });
     LINUX_SIGNAL_TRAMPOLINE.store(0, Ordering::SeqCst);
@@ -3591,12 +3664,7 @@ fn linux_uncatchable_signal_mask() -> u64 {
 }
 
 fn linux_signal_action(signum: usize) -> LinuxKernelSigaction {
-    LinuxKernelSigaction {
-        handler: LINUX_SIGNAL_HANDLERS[signum].load(Ordering::SeqCst),
-        flags: LINUX_SIGNAL_FLAGS[signum].load(Ordering::SeqCst),
-        restorer: LINUX_SIGNAL_RESTORERS[signum].load(Ordering::SeqCst),
-        mask: LINUX_SIGNAL_ACTION_MASKS[signum].load(Ordering::SeqCst),
-    }
+    with_linux_process_signal_state(|actions, _| actions[signum])
 }
 
 fn linux_signal_disposition(signum: usize) -> LinuxSignalDisposition {
@@ -3604,13 +3672,12 @@ fn linux_signal_disposition(signum: usize) -> LinuxSignalDisposition {
 }
 
 fn store_linux_signal_action(signum: usize, action: LinuxKernelSigaction) {
-    LINUX_SIGNAL_HANDLERS[signum].store(action.handler, Ordering::SeqCst);
-    LINUX_SIGNAL_FLAGS[signum].store(action.flags, Ordering::SeqCst);
-    LINUX_SIGNAL_RESTORERS[signum].store(action.restorer, Ordering::SeqCst);
-    LINUX_SIGNAL_ACTION_MASKS[signum].store(
-        action.mask & !linux_uncatchable_signal_mask(),
-        Ordering::SeqCst,
-    );
+    with_linux_process_signal_state(|actions, _| {
+        actions[signum] = LinuxKernelSigaction {
+            mask: action.mask & !linux_uncatchable_signal_mask(),
+            ..action
+        };
+    });
     if action.handler == LINUX_SIG_IGN {
         discard_process_linux_signal(signum);
         linux_task::discard_signal(signum);
@@ -3661,14 +3728,28 @@ fn linux_signal_record_from_user(
     Ok(record)
 }
 
-fn with_linux_process_pending<R>(operation: impl FnOnce(&mut LinuxPendingSignals) -> R) -> R {
+fn with_linux_process_signal_state<R>(
+    operation: impl FnOnce(
+        &mut [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1],
+        &mut LinuxPendingSignals,
+    ) -> R,
+) -> R {
     assert!(crate::kernel_lowlevel::smp::is_boot_cpu());
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     compiler_fence(Ordering::SeqCst);
-    let result = unsafe { operation(&mut LINUX_PROCESS_PENDING) };
+    let pid = linux_resource_pid();
+    let resources = memory_state().process_resources_mut(pid);
+    let result = operation(
+        &mut resources.signal_actions,
+        &mut resources.process_pending,
+    );
     compiler_fence(Ordering::SeqCst);
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     result
+}
+
+fn with_linux_process_pending<R>(operation: impl FnOnce(&mut LinuxPendingSignals) -> R) -> R {
+    with_linux_process_signal_state(|_, pending| operation(pending))
 }
 
 fn linux_signal_route_error(error: linux_task::LinuxSignalRouteError) -> SysError {
@@ -5581,7 +5662,10 @@ pub fn sys_fchdir(fd: usize) -> SysResult {
 
 pub fn sys_chroot(path: usize) -> SysResult {
     sys_chdir(path)?;
-    memory_state().linux_chrooted = true;
+    memory_state()
+        .process_resources_mut(linux_resource_pid())
+        .container
+        .chrooted = true;
     Ok(0)
 }
 
@@ -5620,7 +5704,10 @@ pub fn sys_pivot_root(new_root: usize, put_old: usize) -> SysResult {
     if new_root == 0 || put_old == 0 {
         return Err(SysError::EFAULT);
     }
-    memory_state().linux_pivot_rooted = true;
+    memory_state()
+        .process_resources_mut(linux_resource_pid())
+        .container
+        .pivot_rooted = true;
     Ok(0)
 }
 
@@ -8532,12 +8619,14 @@ pub fn sys_capset(header: usize, data: usize) -> SysResult {
         data.checked_add(core::mem::size_of::<LinuxCapUserData>())
             .ok_or(SysError::EFAULT)?,
     )?;
-    let state = memory_state();
-    state.linux_cap_effective =
+    let container = &mut memory_state()
+        .process_resources_mut(linux_resource_pid())
+        .container;
+    container.cap_effective =
         (((hi.effective as u64) << 32) | lo.effective as u64) & LINUX_CAP_FULL_SET;
-    state.linux_cap_permitted =
+    container.cap_permitted =
         (((hi.permitted as u64) << 32) | lo.permitted as u64) & LINUX_CAP_FULL_SET;
-    state.linux_cap_inheritable =
+    container.cap_inheritable =
         (((hi.inheritable as u64) << 32) | lo.inheritable as u64) & LINUX_CAP_FULL_SET;
     Ok(0)
 }
@@ -8546,7 +8635,10 @@ pub fn sys_sethostname(name: usize, len: usize) -> SysResult {
     if !syscall_logic::user_buffer_valid(name, len) || len > LINUX_UTS_NAME_MAX {
         return Err(SysError::EFAULT);
     }
-    memory_state().linux_hostname_set = true;
+    memory_state()
+        .process_resources_mut(linux_resource_pid())
+        .container
+        .hostname_set = true;
     Ok(0)
 }
 
@@ -8554,7 +8646,10 @@ pub fn sys_setdomainname(name: usize, len: usize) -> SysResult {
     if !syscall_logic::user_buffer_valid(name, len) || len > LINUX_UTS_NAME_MAX {
         return Err(SysError::EFAULT);
     }
-    memory_state().linux_domainname_set = true;
+    memory_state()
+        .process_resources_mut(linux_resource_pid())
+        .container
+        .domainname_set = true;
     Ok(0)
 }
 
@@ -8581,12 +8676,15 @@ pub fn sys_prctl(
             if arg2 > 1 {
                 return Err(SysError::EINVAL);
             }
-            memory_state().linux_no_new_privs = arg2 != 0;
+            memory_state()
+                .process_resources_mut(linux_resource_pid())
+                .container
+                .no_new_privs = arg2 != 0;
             Ok(0)
         }
-        PR_GET_NO_NEW_PRIVS => Ok(memory_state().linux_no_new_privs as usize),
+        PR_GET_NO_NEW_PRIVS => Ok(linux_container_stats().no_new_privs as usize),
         PR_SET_SECCOMP => sys_seccomp_mode(arg2, 0),
-        PR_GET_SECCOMP => Ok(memory_state().linux_seccomp_mode),
+        PR_GET_SECCOMP => Ok(linux_container_stats().seccomp_mode),
         PR_SET_NAME => {
             if arg2 == 0 {
                 Err(SysError::EFAULT)
@@ -8690,13 +8788,18 @@ pub fn sys_setns(fd: usize, nstype: usize) -> SysResult {
 fn sys_seccomp_mode(mode: usize, _filter: usize) -> SysResult {
     match mode {
         LINUX_SECCOMP_MODE_STRICT => {
-            memory_state().linux_seccomp_mode = LINUX_SECCOMP_MODE_STRICT;
+            memory_state()
+                .process_resources_mut(linux_resource_pid())
+                .container
+                .seccomp_mode = LINUX_SECCOMP_MODE_STRICT;
             Ok(0)
         }
         LINUX_SECCOMP_MODE_FILTER => {
-            let state = memory_state();
-            state.linux_seccomp_mode = LINUX_SECCOMP_MODE_FILTER;
-            state.linux_seccomp_filters = state.linux_seccomp_filters.saturating_add(1);
+            let container = &mut memory_state()
+                .process_resources_mut(linux_resource_pid())
+                .container;
+            container.seccomp_mode = LINUX_SECCOMP_MODE_FILTER;
+            container.seccomp_filters = container.seccomp_filters.saturating_add(1);
             Ok(0)
         }
         _ => Err(SysError::EINVAL),

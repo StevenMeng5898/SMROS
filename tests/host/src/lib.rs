@@ -521,6 +521,18 @@ mod linux_task_logic {
     }
 
     #[test]
+    fn unpublished_fork_task_can_roll_back_after_task_publication() {
+        let mut tasks = LinuxTaskTable::<2>::new();
+        tasks.register_root(7).unwrap();
+        let child = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
+
+        assert!(tasks.publish(child));
+        assert!(tasks.rollback(child));
+        assert_eq!(tasks.by_tid(child.tid), None);
+        assert_eq!(tasks.by_scheduler(child.scheduler_thread), None);
+    }
+
+    #[test]
     fn task_state_and_scheduler_identity_move_together() {
         let mut tasks = LinuxTaskTable::<3>::new();
         tasks.register_root(7).unwrap();
@@ -2982,6 +2994,89 @@ mod linux_process_memory_logic {
     fn shared_mremap_is_allowed_only_when_it_preserves_the_existing_mapping() {
         assert!(linux_shared_mremap_supported(false));
         assert!(!linux_shared_mremap_supported(true));
+    }
+
+    #[test]
+    fn forked_process_attributes_are_independent_and_inherit_security_views() {
+        let parent = LinuxProcessAttributesCore {
+            namespace_flags: 0x0200_0000,
+            setns_count: 3,
+            mount_count: 2,
+            mount_flags: 0x4000,
+            pivot_rooted: true,
+            chrooted: true,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            seccomp_filters: 4,
+            cap_effective: 0x55,
+            cap_permitted: 0xaa,
+            cap_inheritable: 0x11,
+            hostname_set: true,
+            domainname_set: false,
+        };
+
+        let mut child = parent.fork_child(0x2000_0000);
+        child.cap_effective = 0;
+        child.mount_count = 0;
+        child.chrooted = false;
+
+        assert_eq!(parent.cap_effective, 0x55);
+        assert_eq!(parent.mount_count, 2);
+        assert!(parent.chrooted);
+        assert_eq!(child.namespace_flags, 0x2200_0000);
+        assert!(child.no_new_privs);
+        assert_eq!(child.seccomp_filters, 4);
+    }
+
+    #[test]
+    fn fork_transaction_ledger_rolls_back_every_stage_in_reverse_order() {
+        let stages = [
+            LinuxForkAcquisition::SchedulerThread,
+            LinuxForkAcquisition::Task,
+            LinuxForkAcquisition::Process,
+            LinuxForkAcquisition::Resources,
+            LinuxForkAcquisition::Memory,
+            LinuxForkAcquisition::Configured,
+        ];
+
+        for fail_after in 0..=stages.len() {
+            let mut ledger = LinuxForkAcquisitionLedger::new();
+            for stage in stages.iter().copied().take(fail_after) {
+                assert!(ledger.acquire(stage));
+            }
+            let mut rollback = [None; 6];
+            let rollback_len = ledger.rollback_into(&mut rollback);
+            assert_eq!(rollback_len, fail_after);
+            for index in 0..fail_after {
+                assert_eq!(rollback[index], Some(stages[fail_after - index - 1]));
+            }
+            assert!(ledger.is_empty());
+        }
+    }
+
+    #[test]
+    fn fork_failure_schedule_targets_every_resource_occurrence() {
+        let points = [
+            LinuxForkFailurePoint::SchedulerThread,
+            LinuxForkFailurePoint::Task,
+            LinuxForkFailurePoint::Process,
+            LinuxForkFailurePoint::DescriptorReference,
+            LinuxForkFailurePoint::SharedReference,
+            LinuxForkFailurePoint::PrivatePage,
+            LinuxForkFailurePoint::Memory,
+            LinuxForkFailurePoint::Configured,
+            LinuxForkFailurePoint::ProcessPublication,
+            LinuxForkFailurePoint::TaskPublication,
+            LinuxForkFailurePoint::SchedulerPublication,
+        ];
+
+        for point in points {
+            let mut schedule = LinuxForkFailureSchedule::new(point, 2);
+            assert!(!schedule.should_fail(point));
+            assert!(!schedule.should_fail(point));
+            assert!(schedule.should_fail(point));
+            assert!(!schedule.should_fail(point));
+        }
     }
 }
 

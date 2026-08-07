@@ -1347,7 +1347,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         let Some(task) = self.tasks.get_mut(reservation.slot) else {
             return false;
         };
-        if task.state != LinuxTaskState::Starting
+        if !matches!(task.state, LinuxTaskState::Starting | LinuxTaskState::Runnable)
             || task.tid != reservation.tid
             || task.scheduler_thread != reservation.scheduler_thread
         {

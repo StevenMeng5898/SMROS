@@ -14,6 +14,151 @@ pub(crate) const LINUX_PROT_EXEC: usize = 4;
 pub(crate) const LINUX_MAP_SHARED: usize = 1;
 pub(crate) const LINUX_MAP_PRIVATE: usize = 2;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxProcessAttributesCore {
+    pub namespace_flags: usize,
+    pub setns_count: usize,
+    pub mount_count: usize,
+    pub mount_flags: usize,
+    pub pivot_rooted: bool,
+    pub chrooted: bool,
+    pub no_new_privs: bool,
+    pub seccomp_mode: usize,
+    pub seccomp_filters: usize,
+    pub cap_effective: u64,
+    pub cap_permitted: u64,
+    pub cap_inheritable: u64,
+    pub hostname_set: bool,
+    pub domainname_set: bool,
+}
+
+impl LinuxProcessAttributesCore {
+    pub(crate) const fn fork_child(self, namespace_flags: usize) -> Self {
+        Self {
+            namespace_flags: self.namespace_flags | namespace_flags,
+            ..self
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxForkAcquisition {
+    SchedulerThread,
+    Task,
+    Process,
+    Resources,
+    Memory,
+    Configured,
+}
+
+#[repr(usize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxForkFailurePoint {
+    SchedulerThread,
+    Task,
+    Process,
+    DescriptorReference,
+    SharedReference,
+    PrivatePage,
+    Memory,
+    Configured,
+    ProcessPublication,
+    TaskPublication,
+    SchedulerPublication,
+}
+
+impl LinuxForkFailurePoint {
+    pub(crate) const COUNT: usize = Self::SchedulerPublication as usize + 1;
+}
+
+pub(crate) struct LinuxForkFailureSchedule {
+    point: LinuxForkFailurePoint,
+    remaining: usize,
+    active: bool,
+}
+
+impl LinuxForkFailureSchedule {
+    pub(crate) const fn new(point: LinuxForkFailurePoint, occurrence: usize) -> Self {
+        Self {
+            point,
+            remaining: occurrence,
+            active: true,
+        }
+    }
+
+    pub(crate) fn should_fail(&mut self, point: LinuxForkFailurePoint) -> bool {
+        if !self.active || point != self.point {
+            return false;
+        }
+        if self.remaining != 0 {
+            self.remaining -= 1;
+            return false;
+        }
+        self.active = false;
+        true
+    }
+}
+
+impl LinuxForkAcquisition {
+    const ORDER: [Self; 6] = [
+        Self::SchedulerThread,
+        Self::Task,
+        Self::Process,
+        Self::Resources,
+        Self::Memory,
+        Self::Configured,
+    ];
+}
+
+pub(crate) struct LinuxForkAcquisitionLedger {
+    acquired: [Option<LinuxForkAcquisition>; 6],
+    len: usize,
+}
+
+impl LinuxForkAcquisitionLedger {
+    pub(crate) const fn new() -> Self {
+        Self {
+            acquired: [None; 6],
+            len: 0,
+        }
+    }
+
+    pub(crate) fn acquire(&mut self, stage: LinuxForkAcquisition) -> bool {
+        if LinuxForkAcquisition::ORDER.get(self.len).copied() != Some(stage) {
+            return false;
+        }
+        self.acquired[self.len] = Some(stage);
+        self.len += 1;
+        true
+    }
+
+    pub(crate) fn rollback_into(
+        &mut self,
+        out: &mut [Option<LinuxForkAcquisition>],
+    ) -> usize {
+        let mut written = 0usize;
+        while self.len != 0 && written < out.len() {
+            self.len -= 1;
+            out[written] = self.acquired[self.len].take();
+            written += 1;
+        }
+        written
+    }
+
+    pub(crate) fn release(&mut self, stage: LinuxForkAcquisition) -> bool {
+        if self.len == 0 || self.acquired[self.len - 1] != Some(stage) {
+            return false;
+        }
+        self.len -= 1;
+        self.acquired[self.len] = None;
+        true
+    }
+
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 pub(crate) const fn linux_mmap_backing_is_shared(flags: usize) -> bool {
     flags & LINUX_MAP_SHARED != 0
 }
