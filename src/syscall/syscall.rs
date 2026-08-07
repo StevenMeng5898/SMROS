@@ -58,7 +58,8 @@ use super::linux_task::{
     LinuxPendingSignal, LinuxPendingSignalReservation, LinuxPendingSignalSource,
     LinuxPendingSignals, LinuxRestartBlock, LinuxSignalDisposition, LinuxSignalFrame,
     LinuxSignalStack, LinuxSignalWait, LinuxSignalWaitOutcome, LinuxSleepOutcome, LinuxSleepWait,
-    CLONE_THREAD, LINUX_SIGNAL_FRAME_LIMIT, LINUX_SIGNAL_INFO_BYTES,
+    CLONE_FILES, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, LINUX_SIGNAL_FRAME_LIMIT,
+    LINUX_SIGNAL_INFO_BYTES,
 };
 use crate::kernel_lowlevel::memory::{process_manager, PAGE_SIZE};
 use crate::kernel_objects::channel;
@@ -681,6 +682,7 @@ struct LinuxProcessResources {
     pid: usize,
     descriptors: Vec<LinuxDescriptorEntry>,
     objects: Vec<u32>,
+    namespace_flags: usize,
 }
 
 #[derive(Clone)]
@@ -2485,6 +2487,7 @@ impl MemorySyscallState {
             pid,
             descriptors: Vec::new(),
             objects: Vec::new(),
+            namespace_flags: 0,
         });
         self.linux_process_resources.last_mut().unwrap()
     }
@@ -2752,6 +2755,7 @@ impl MemorySyscallState {
                 pid: parent_pid,
                 descriptors: Vec::new(),
                 objects: Vec::new(),
+                namespace_flags: 0,
             });
         let mut descriptors = Vec::with_capacity(parent.descriptors.len());
         let mut objects = Vec::with_capacity(parent.objects.len());
@@ -2851,6 +2855,7 @@ impl MemorySyscallState {
             pid,
             descriptors: core::mem::take(descriptors),
             objects: core::mem::take(objects),
+            namespace_flags: 0,
         });
         true
     }
@@ -2907,7 +2912,30 @@ impl MemorySyscallState {
     }
 
     fn apply_linux_namespace_flags(&mut self, flags: usize) {
-        self.linux_namespace_flags |= flags & LINUX_CONTAINER_NAMESPACE_FLAGS;
+        let namespace_flags = flags & LINUX_CONTAINER_NAMESPACE_FLAGS;
+        let pid = linux_resource_pid();
+        self.process_resources_mut(pid).namespace_flags |= namespace_flags;
+    }
+
+    fn clone_linux_process_namespace_flags(
+        &mut self,
+        parent_pid: usize,
+        child_pid: usize,
+        flags: usize,
+    ) -> bool {
+        let inherited = self
+            .process_resources(parent_pid)
+            .map(|resources| resources.namespace_flags)
+            .unwrap_or(self.linux_namespace_flags);
+        let Some(child) = self
+            .linux_process_resources
+            .iter_mut()
+            .find(|resources| resources.pid == child_pid)
+        else {
+            return false;
+        };
+        child.namespace_flags = inherited | (flags & LINUX_CONTAINER_NAMESPACE_FLAGS);
+        true
     }
 
     fn record_linux_setns(&mut self, namespace: usize) {
@@ -2963,13 +2991,16 @@ impl MemorySyscallState {
         released_handles
     }
 
-    fn linux_container_stats(&self) -> LinuxContainerStats {
+    fn linux_container_stats(&self, pid: usize) -> LinuxContainerStats {
         let mut mount_flags = 0usize;
         for mount in &self.linux_mounts {
             mount_flags |= mount.flags;
         }
         LinuxContainerStats {
-            namespace_flags: self.linux_namespace_flags,
+            namespace_flags: self
+                .process_resources(pid)
+                .map(|resources| resources.namespace_flags)
+                .unwrap_or(self.linux_namespace_flags),
             setns_count: self.linux_setns_count,
             mount_count: self.linux_mounts.len(),
             mount_flags,
@@ -2998,7 +3029,6 @@ static LINUX_SIGNAL_ACTION_MASKS: [AtomicU64; LINUX_MAX_SIGNAL + 1] =
     [const { AtomicU64::new(0) }; LINUX_MAX_SIGNAL + 1];
 static LINUX_SIGNAL_TRAMPOLINE: AtomicU64 = AtomicU64::new(0);
 static LINUX_REAL_TIMER_DEADLINE_TICK: AtomicU64 = AtomicU64::new(LINUX_TIMER_DISABLED);
-static LINUX_NEXT_SYNTHETIC_PID: AtomicU64 = AtomicU64::new(2);
 
 const LINUX_SIGNAL_INFO_OFFSET: usize = PAGE_SIZE;
 const LINUX_SIGNAL_INFO_STORAGE_BYTES: usize =
@@ -3180,7 +3210,16 @@ fn linux_prepare_fxfs_cursor(
 }
 
 pub fn linux_container_stats() -> LinuxContainerStats {
-    memory_state().linux_container_stats()
+    let pid = linux_resource_pid();
+    memory_state().linux_container_stats(pid)
+}
+
+pub(crate) fn inherit_linux_fork_namespace_flags(
+    parent_pid: usize,
+    child_pid: usize,
+    flags: usize,
+) -> bool {
+    memory_state().clone_linux_process_namespace_flags(parent_pid, child_pid, flags)
 }
 
 pub fn reset_linux_container_state() {
@@ -8019,7 +8058,31 @@ pub fn sys_vmar_unmap_handle_close_thread_exit(
 /// Linux sys_fork implementation
 pub fn sys_fork() -> SysResult {
     info!("fork");
-    Ok(LINUX_NEXT_SYNTHETIC_PID.fetch_add(1, Ordering::Relaxed) as usize)
+    sys_fork_with_namespace_flags(0)
+}
+
+fn sys_fork_with_namespace_flags(namespace_flags: usize) -> SysResult {
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = namespace_flags;
+        Err(SysError::ENOSYS)
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let context = linux_syscall_context::current().ok_or(SysError::EINVAL)?;
+        let parent_pid = linux_process::current_pid()?;
+        let scheduler_thread = scheduler::scheduler()
+            .create_suspended_thread_on_cpu(
+                linux_process::linux_fork_child_entry,
+                "linux_process",
+                0,
+            )
+            .ok_or(SysError::EAGAIN)?;
+        let reservation = linux_process::reserve_fork(scheduler_thread, context, namespace_flags)?;
+        let child_pid = reservation.commit()?;
+        debug_assert_ne!(child_pid, parent_pid);
+        Ok(child_pid)
+    }
 }
 
 /// Linux sys_vfork implementation
@@ -8038,8 +8101,17 @@ pub fn sys_clone(
 ) -> SysResult {
     info!("clone: flags={:#x}, newsp={:#x}", flags, newsp);
     if flags & CLONE_THREAD == 0 {
-        memory_state().apply_linux_namespace_flags(flags);
-        return sys_fork();
+        if flags & (CLONE_VM | CLONE_FILES | CLONE_SIGHAND) != 0 {
+            return Err(SysError::ENOSYS);
+        }
+        if !syscall_logic::linux_signal_valid(flags & 0xff, LINUX_MAX_SIGNAL) {
+            return Err(SysError::EINVAL);
+        }
+        let allowed = 0xff | LINUX_CONTAINER_NAMESPACE_FLAGS;
+        if flags & !allowed != 0 {
+            return Err(SysError::EINVAL);
+        }
+        return sys_fork_with_namespace_flags(flags & LINUX_CONTAINER_NAMESPACE_FLAGS);
     }
 
     #[cfg(not(target_arch = "aarch64"))]

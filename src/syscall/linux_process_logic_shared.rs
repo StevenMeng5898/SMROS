@@ -5,6 +5,7 @@ pub(crate) const LINUX_MAX_PID: usize = i32::MAX as usize;
 pub(crate) enum LinuxProcessState {
     Empty,
     Reserved,
+    Publishing,
     Running,
     Zombie,
 }
@@ -166,6 +167,50 @@ impl<const N: usize> LinuxProcessTable<N> {
             return false;
         }
         process.state = LinuxProcessState::Running;
+        true
+    }
+
+    pub(crate) fn publish_fork(&mut self, reservation: LinuxProcessReservation) -> bool {
+        let Some(process) = self.processes.get_mut(reservation.slot) else {
+            return false;
+        };
+        if process.state != LinuxProcessState::Reserved
+            || process.pid != reservation.pid
+            || process.parent_pid != reservation.parent_pid
+        {
+            return false;
+        }
+        process.state = LinuxProcessState::Publishing;
+        true
+    }
+
+    pub(crate) fn complete_fork_publish(&mut self, reservation: LinuxProcessReservation) -> bool {
+        let Some(process) = self.processes.get_mut(reservation.slot) else {
+            return false;
+        };
+        if process.state != LinuxProcessState::Publishing
+            || process.pid != reservation.pid
+            || process.parent_pid != reservation.parent_pid
+        {
+            return false;
+        }
+        process.state = LinuxProcessState::Running;
+        true
+    }
+
+    pub(crate) fn rollback_fork(&mut self, reservation: LinuxProcessReservation) -> bool {
+        let Some(process) = self.processes.get_mut(reservation.slot) else {
+            return false;
+        };
+        if !matches!(
+            process.state,
+            LinuxProcessState::Reserved | LinuxProcessState::Publishing
+        ) || process.pid != reservation.pid
+            || process.parent_pid != reservation.parent_pid
+        {
+            return false;
+        }
+        *process = LinuxProcessCore::EMPTY;
         true
     }
 

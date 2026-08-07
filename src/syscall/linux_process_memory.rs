@@ -369,19 +369,9 @@ pub(crate) fn copy_to_process(pid: usize, address: usize, bytes: &[u8]) -> Resul
 }
 
 pub(crate) fn reset_launch() {
-    let attachments = with_runtime(|runtime| {
-        let attachments = runtime
-            .memories
-            .iter()
-            .flat_map(|memory| memory.shared_attachments.iter())
-            .map(|attachment| attachment.object_id)
-            .collect::<Vec<_>>();
+    with_runtime(|runtime| {
         runtime.memories.clear();
-        attachments
     });
-    for id in attachments {
-        let _ = super::release_shared_memory_attachment_reference(id);
-    }
     with_shared_pages(|runtime| {
         for page in runtime.pages.drain(..) {
             PageFrameAllocator::free(page.pfn);
@@ -390,30 +380,173 @@ pub(crate) fn reset_launch() {
 }
 
 pub(crate) fn unregister(pid: usize) -> bool {
-    let attachments = with_runtime(|runtime| {
+    with_runtime(|runtime| {
         let pids = runtime
             .memories
             .iter()
             .map(|memory| memory.pid)
             .collect::<Vec<_>>();
         let Some(index) = linux_process_memory_remove_index(&pids, pid) else {
-            return None;
+            return false;
         };
-        let attachments = runtime.memories[index]
-            .shared_attachments
-            .iter()
-            .map(|attachment| attachment.object_id)
-            .collect::<Vec<_>>();
         runtime.memories.remove(index);
-        Some(attachments)
+        true
+    })
+}
+
+pub(crate) fn clone_for_fork(
+    parent_pid: usize,
+    child_pid: usize,
+    mut shared_attachments: Vec<LinuxSharedAttachmentClone>,
+) -> Result<u64, SysError> {
+    let result = with_runtime(|runtime| {
+        if runtime
+            .memories
+            .iter()
+            .any(|memory| memory.pid == child_pid)
+        {
+            return Err(SysError::EBUSY);
+        }
+        let parent = runtime
+            .memories
+            .iter()
+            .find(|memory| memory.pid == parent_pid)
+            .ok_or(SysError::ESRCH)?;
+
+        #[cfg(target_arch = "aarch64")]
+        let address_space =
+            Aarch64AddressSpace::new_with_kernel_map().map_err(map_address_error)?;
+        #[cfg(not(target_arch = "aarch64"))]
+        let address_space = FallbackAddressSpace::new(child_pid)?;
+        let root_paddr = address_space.root_paddr();
+        if root_paddr == 0 || root_paddr == parent.address_space.root_paddr() {
+            return Err(SysError::ENOMEM);
+        }
+
+        let mut child = LinuxProcessMemory {
+            pid: child_pid,
+            address_space,
+            mappings: Vec::new(),
+            shared_attachments: Vec::new(),
+            initial_stack: parent.initial_stack,
+            next_addr: parent.next_addr,
+            brk: BrkState {
+                start: parent.brk.start,
+                current: parent.brk.current,
+                limit: parent.brk.limit,
+                pages: Vec::new(),
+            },
+        };
+
+        for mapping in &parent.mappings {
+            let attachment_index = shared_attachments.iter().position(|attachment| {
+                attachment.addr == mapping.addr
+                    && attachment.len == mapping.len
+                    && matches!(
+                        mapping.source,
+                        LinuxMappingSource::SharedMemory { id }
+                            if id == attachment.object_id
+                    )
+            });
+            let pages = if let Some(index) = attachment_index {
+                let pages = core::mem::take(&mut shared_attachments[index].pages);
+                if shared_attachments[index].owns_attachment_reference {
+                    child.shared_attachments.push(LinuxSharedAttachmentRecord {
+                        object_id: shared_attachments[index].object_id,
+                        addr: shared_attachments[index].attachment_addr,
+                        len: shared_attachments[index].attachment_len,
+                    });
+                    shared_attachments[index].owns_attachment_reference = false;
+                }
+                pages
+            } else {
+                clone_page_backings_for_fork(&mapping.pages)?
+            };
+            if let Err(error) = child.map_unmapped_pages(mapping.addr, &pages, mapping.prot) {
+                LinuxProcessMemory::free_backings(&pages);
+                return Err(error);
+            }
+            child.mappings.push(LinuxProcessMapping {
+                addr: mapping.addr,
+                len: mapping.len,
+                prot: mapping.prot,
+                flags: mapping.flags,
+                pages,
+                source: mapping.source.clone(),
+            });
+        }
+
+        let brk_pages = clone_page_backings_for_fork(&parent.brk.pages)?;
+        if let Err(error) = child.map_unmapped_pages(
+            child.brk.start,
+            &brk_pages,
+            LINUX_PROT_READ | LINUX_PROT_WRITE,
+        ) {
+            LinuxProcessMemory::free_backings(&brk_pages);
+            return Err(error);
+        }
+        child.brk.pages = brk_pages;
+        runtime.memories.push(child);
+        Ok(root_paddr)
     });
-    let Some(attachments) = attachments else {
-        return false;
-    };
-    for id in attachments {
-        let _ = super::release_shared_memory_attachment_reference(id);
+    if result.is_err() {
+        release_shared_attachments(&shared_attachments);
     }
-    true
+    result
+}
+
+fn clone_page_backings_for_fork(
+    parent_pages: &[LinuxPageBacking],
+) -> Result<Vec<LinuxPageBacking>, SysError> {
+    let mut child_pages = Vec::new();
+    child_pages
+        .try_reserve_exact(parent_pages.len())
+        .map_err(|_| SysError::ENOMEM)?;
+    for parent in parent_pages.iter().copied() {
+        let child = match parent {
+            LinuxPageBacking::Private { pfn: parent_pfn } => {
+                let Some(child_pfn) = PageFrameAllocator::alloc() else {
+                    LinuxProcessMemory::free_backings(&child_pages);
+                    return Err(SysError::ENOMEM);
+                };
+                let Some(parent_physical) = PageFrameAllocator::pfn_address(parent_pfn) else {
+                    PageFrameAllocator::free(child_pfn);
+                    LinuxProcessMemory::free_backings(&child_pages);
+                    return Err(SysError::ENOMEM);
+                };
+                let Some(child_physical) = PageFrameAllocator::pfn_address(child_pfn) else {
+                    PageFrameAllocator::free(child_pfn);
+                    LinuxProcessMemory::free_backings(&child_pages);
+                    return Err(SysError::ENOMEM);
+                };
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        parent_physical as *const u8,
+                        child_physical as *mut u8,
+                        PAGE_SIZE,
+                    );
+                }
+                LinuxPageBacking::Private { pfn: child_pfn }
+            }
+            LinuxPageBacking::Shared {
+                object_id,
+                page_index,
+                pfn,
+            } => {
+                if !acquire_shared_page(object_id, page_index) {
+                    LinuxProcessMemory::free_backings(&child_pages);
+                    return Err(SysError::ENOMEM);
+                }
+                LinuxPageBacking::Shared {
+                    object_id,
+                    page_index,
+                    pfn,
+                }
+            }
+        };
+        child_pages.push(child);
+    }
+    Ok(child_pages)
 }
 
 pub(crate) fn copy_from_current(address: usize, out: &mut [u8]) -> Result<(), SysError> {
@@ -1508,6 +1641,9 @@ impl LinuxProcessMemory {
 impl Drop for LinuxProcessMemory {
     fn drop(&mut self) {
         self.release_all_pages();
+        for attachment in self.shared_attachments.drain(..).rev() {
+            let _ = super::release_shared_memory_attachment_reference(attachment.object_id);
+        }
     }
 }
 

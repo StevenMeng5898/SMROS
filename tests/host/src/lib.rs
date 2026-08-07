@@ -2533,6 +2533,59 @@ mod linux_process_logic {
         assert!(child.descriptors().is_empty());
         assert!(child.objects().is_empty());
     }
+
+    #[test]
+    fn fork_reservation_failures_never_publish_or_mutate_the_parent() {
+        let mut descriptions = LinuxOpenDescriptionTableCore::<4>::new();
+        let file = descriptions
+            .insert(91, ObjectType::LinuxFile, 0o2, 37)
+            .unwrap();
+        let mut parent_resources = LinuxProcessResourceCore::<4, 1>::new();
+        assert!(parent_resources.insert_descriptor(5, file, true, &mut descriptions));
+
+        let parent_descriptors = parent_resources.descriptors().to_vec();
+        let parent_objects = parent_resources.objects().to_vec();
+        let parent_description = *descriptions.get(file).unwrap();
+
+        for failure_after_resource_clone in [false, true] {
+            let mut processes = LinuxProcessTable::<3>::new();
+            processes.register_root(7).unwrap();
+            let parent_snapshot = processes.processes;
+            let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+
+            assert_eq!(processes.by_pid(child.pid), None);
+            assert_eq!(processes.by_scheduler(8), None);
+            assert!(
+                !processes.has_matching_child(LINUX_ROOT_PID, LinuxWaitSelector::Pid(child.pid),)
+            );
+
+            if failure_after_resource_clone {
+                let resources =
+                    LinuxResourceCloneCore::<4, 1>::reserve(&parent_resources, &mut descriptions)
+                        .unwrap();
+                assert_eq!(descriptions.get(file).unwrap().references, 2);
+                let released = resources.rollback(&mut descriptions);
+                assert_eq!(released, [None, None, None, None]);
+            }
+
+            assert!(processes.rollback(child));
+            assert_eq!(processes.processes, parent_snapshot);
+            assert_eq!(processes.by_pid(child.pid), None);
+            assert_eq!(parent_resources.descriptors(), parent_descriptors);
+            assert_eq!(parent_resources.objects(), parent_objects);
+            assert_eq!(*descriptions.get(file).unwrap(), parent_description);
+        }
+
+        let mut processes = LinuxProcessTable::<3>::new();
+        processes.register_root(7).unwrap();
+        let parent_snapshot = processes.processes;
+        let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert!(processes.publish_fork(child));
+        assert_eq!(processes.by_pid(child.pid), None);
+        assert_eq!(processes.by_scheduler(8), None);
+        assert!(processes.rollback_fork(child));
+        assert_eq!(processes.processes, parent_snapshot);
+    }
 }
 
 mod linux_process_memory_logic {
@@ -2714,6 +2767,54 @@ mod linux_process_memory_logic {
         );
         assert_ne!(linux_clone_page_backing(private, 81).pfn(), private.pfn());
         assert_eq!(linux_clone_page_backing(shared, 99), shared);
+    }
+
+    #[test]
+    fn fork_page_rollback_releases_each_private_copy_and_shared_reference() {
+        let parent_pages = [
+            LinuxPageBacking::Private { pfn: 17 },
+            LinuxPageBacking::Private { pfn: 18 },
+            LinuxPageBacking::Shared {
+                object_id: 9,
+                page_index: 0,
+                pfn: 33,
+            },
+        ];
+        let parent_snapshot = parent_pages;
+
+        for fail_after in 0..=parent_pages.len() {
+            let mut shared = LinuxSharedPageTableCore::<2>::new();
+            assert!(shared.insert(9, 0, 33));
+            let mut private_copies = Vec::new();
+            let mut acquired_shared = Vec::new();
+
+            for (index, page) in parent_pages.iter().copied().enumerate() {
+                if index == fail_after {
+                    break;
+                }
+                match page {
+                    LinuxPageBacking::Private { .. } => {
+                        private_copies.push(linux_clone_page_backing(page, 80 + index as u64));
+                    }
+                    LinuxPageBacking::Shared {
+                        object_id,
+                        page_index,
+                        ..
+                    } => {
+                        assert!(shared.acquire(object_id, page_index));
+                        acquired_shared.push((object_id, page_index));
+                    }
+                }
+            }
+
+            private_copies.clear();
+            for (object_id, page_index) in acquired_shared.into_iter().rev() {
+                assert_eq!(shared.release(object_id, page_index), None);
+            }
+
+            assert_eq!(parent_pages, parent_snapshot);
+            assert_eq!(shared.get(9, 0).unwrap().references, 1);
+        }
     }
 
     #[test]

@@ -406,6 +406,70 @@ pub(crate) fn process_signal_target(signum: usize) -> Option<LinuxTaskCore> {
     with_runtime(|runtime| runtime.tasks.process_signal_target(signum))
 }
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn reserve_fork_task(
+    scheduler_id: ThreadId,
+    child_pid: usize,
+) -> Result<LinuxTaskReservation, SysError> {
+    with_runtime(|runtime| {
+        let current = scheduler::scheduler().current();
+        let parent_slot = runtime
+            .tasks
+            .tasks
+            .iter()
+            .position(|task| {
+                task.state == LinuxTaskState::Runnable && task.scheduler_thread == current.0
+            })
+            .ok_or(SysError::ESRCH)?;
+        if scheduler_id == ThreadId::IDLE
+            || scheduler_id == current
+            || scheduler::scheduler()
+                .get_thread(scheduler_id)
+                .map(|thread| thread.state)
+                != Some(thread::ThreadState::Blocked)
+        {
+            return Err(SysError::EAGAIN);
+        }
+
+        let parent_mask = runtime.tasks.signal_states[parent_slot].mask;
+        let reservation = runtime
+            .tasks
+            .reserve_child(child_pid, scheduler_id.0)
+            .ok_or(SysError::EAGAIN)?;
+        runtime.tasks.signal_states[reservation.slot].reset_in_place();
+        runtime.tasks.signal_states[reservation.slot].mask = parent_mask;
+        Ok(reservation)
+    })
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn publish_fork_task(reservation: LinuxTaskReservation) -> bool {
+    with_runtime(|runtime| {
+        scheduler::scheduler()
+            .get_thread(ThreadId(reservation.scheduler_thread))
+            .map(|thread| thread.state)
+            == Some(thread::ThreadState::Blocked)
+            && runtime.tasks.publish(reservation)
+    })
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn rollback_fork_task(reservation: LinuxTaskReservation) {
+    with_runtime(|runtime| {
+        if runtime.tasks.rollback(reservation) {
+            return;
+        }
+        if runtime
+            .tasks
+            .exit(reservation.tid, reservation.scheduler_thread)
+        {
+            let _ = runtime
+                .tasks
+                .retire(reservation.tid, reservation.scheduler_thread);
+        }
+    });
+}
+
 pub(crate) fn discard_signal(signum: usize) {
     with_runtime(|runtime| runtime.tasks.discard_signal(signum));
 }

@@ -1,9 +1,13 @@
 use alloc::vec::Vec;
 
+#[cfg(target_arch = "aarch64")]
+use crate::kernel_lowlevel::thread::Aarch64ExceptionFrame;
 use crate::kernel_lowlevel::thread::{self, ThreadId};
 use crate::kernel_objects::scheduler;
 
 pub(crate) use super::linux_process_memory::{LinuxDescriptorEntry, LinuxOpenDescription};
+#[cfg(target_arch = "aarch64")]
+use super::linux_task::LinuxTaskReservation;
 use super::{linux_task, SysError};
 
 include!("linux_process_logic_shared.rs");
@@ -13,12 +17,16 @@ pub(crate) const LINUX_PROCESS_LIMIT: usize = thread::MAX_THREADS;
 
 struct LinuxProcessRuntime {
     processes: LinuxProcessTable<LINUX_PROCESS_LIMIT>,
+    #[cfg(target_arch = "aarch64")]
+    fork_starts: [Option<Aarch64ProcessStart>; LINUX_PROCESS_LIMIT],
 }
 
 impl LinuxProcessRuntime {
     const fn new() -> Self {
         Self {
             processes: LinuxProcessTable::new(),
+            #[cfg(target_arch = "aarch64")]
+            fork_starts: [None; LINUX_PROCESS_LIMIT],
         }
     }
 }
@@ -74,7 +82,11 @@ pub(crate) fn current_parent_pid() -> Result<usize, SysError> {
 }
 
 pub(crate) fn reset_launch() {
-    with_runtime(|runtime| runtime.processes.reset());
+    with_runtime(|runtime| {
+        runtime.processes.reset();
+        #[cfg(target_arch = "aarch64")]
+        runtime.fork_starts.fill(None);
+    });
 }
 
 pub(crate) struct LinuxResourceClone {
@@ -95,16 +107,19 @@ impl LinuxResourceClone {
         &self.shared_attachments
     }
 
-    pub(crate) fn commit(
-        mut self,
-        child_pid: usize,
-    ) -> Result<Vec<super::linux_process_memory::LinuxSharedAttachmentClone>, SysError> {
+    pub(crate) fn take_shared_attachments(
+        &mut self,
+    ) -> Vec<super::linux_process_memory::LinuxSharedAttachmentClone> {
+        core::mem::take(&mut self.shared_attachments)
+    }
+
+    pub(crate) fn commit(mut self, child_pid: usize) -> Result<(), SysError> {
         if !super::install_linux_resource_clone(child_pid, &mut self.descriptors, &mut self.objects)
         {
             return Err(SysError::EBUSY);
         }
         self.committed = true;
-        Ok(core::mem::take(&mut self.shared_attachments))
+        Ok(())
     }
 }
 
@@ -138,6 +153,258 @@ pub(crate) fn reserve_resource_clone(parent_pid: usize) -> Result<LinuxResourceC
 
 pub(crate) fn release_resources(pid: usize) -> bool {
     super::release_linux_process_resources(pid)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub(crate) struct Aarch64ProcessStart {
+    pub frame: Aarch64ExceptionFrame,
+    pub return_pc: u64,
+    pub pstate: u64,
+    pub root_paddr: u64,
+}
+
+#[cfg(target_arch = "aarch64")]
+const _: () = {
+    assert!(core::mem::offset_of!(Aarch64ProcessStart, frame) == 0x000);
+    assert!(core::mem::offset_of!(Aarch64ProcessStart, return_pc) == 0x310);
+    assert!(core::mem::offset_of!(Aarch64ProcessStart, pstate) == 0x318);
+    assert!(core::mem::offset_of!(Aarch64ProcessStart, root_paddr) == 0x320);
+};
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) struct LinuxForkReservation {
+    pub process: LinuxProcessReservation,
+    pub task: LinuxTaskReservation,
+    pub scheduler_thread: ThreadId,
+    pub child_start: Aarch64ProcessStart,
+    resources: Option<LinuxResourceClone>,
+    resources_installed: bool,
+    memory_installed: bool,
+    namespace_flags: usize,
+    published: bool,
+}
+
+#[cfg(target_arch = "aarch64")]
+impl LinuxForkReservation {
+    pub(crate) fn commit(mut self) -> Result<usize, SysError> {
+        let resources = self.resources.take().ok_or(SysError::EAGAIN)?;
+        resources.commit(self.process.pid)?;
+        self.resources_installed = true;
+        if !super::inherit_linux_fork_namespace_flags(
+            self.process.parent_pid,
+            self.process.pid,
+            self.namespace_flags,
+        ) {
+            return Err(SysError::EAGAIN);
+        }
+
+        let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+        let publication = (|| {
+            let process_published = with_runtime(|runtime| {
+                let Some(start) = runtime.fork_starts.get_mut(self.process.slot) else {
+                    return false;
+                };
+                if start.is_some() {
+                    return false;
+                }
+                *start = Some(self.child_start);
+                if !runtime.processes.publish_fork(self.process) {
+                    *start = None;
+                    return false;
+                }
+                true
+            });
+            if !process_published {
+                return Err(SysError::EAGAIN);
+            }
+            if !linux_task::publish_fork_task(self.task) {
+                return Err(SysError::EAGAIN);
+            }
+            if !scheduler::scheduler().publish_suspended_thread(self.scheduler_thread) {
+                return Err(SysError::EAGAIN);
+            }
+            if !with_runtime(|runtime| runtime.processes.complete_fork_publish(self.process)) {
+                return Err(SysError::EAGAIN);
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = publication {
+            drop(self);
+            crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+            return Err(error);
+        }
+        let pid = self.process.pid;
+        self.published = true;
+        crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+        Ok(pid)
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+impl Drop for LinuxForkReservation {
+    fn drop(&mut self) {
+        if self.published {
+            return;
+        }
+        with_runtime(|runtime| {
+            if let Some(start) = runtime.fork_starts.get_mut(self.process.slot) {
+                *start = None;
+            }
+        });
+        linux_task::rollback_fork_task(self.task);
+        if self.resources_installed {
+            let _ = release_resources(self.process.pid);
+        } else {
+            drop(self.resources.take());
+        }
+        if self.memory_installed {
+            let _ = super::linux_process_memory::unregister(self.process.pid);
+        }
+        let _ = scheduler::scheduler().terminate_thread(self.scheduler_thread);
+        with_runtime(|runtime| {
+            if !runtime.processes.rollback_fork(self.process)
+                && runtime.processes.exit(self.process.pid, 0)
+            {
+                let _ = runtime
+                    .processes
+                    .reap(self.process.parent_pid, self.process.pid);
+            }
+        });
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn reserve_fork(
+    scheduler_thread: ThreadId,
+    context: super::linux_syscall_context::LinuxSyscallFrameRef,
+    namespace_flags: usize,
+) -> Result<LinuxForkReservation, SysError> {
+    let parent = match current() {
+        Ok(parent) => parent,
+        Err(error) => {
+            let _ = scheduler::scheduler().terminate_thread(scheduler_thread);
+            return Err(error);
+        }
+    };
+    let process = match with_runtime(|runtime| {
+        runtime
+            .processes
+            .reserve_child(parent.pid, scheduler_thread.0)
+            .map_err(process_error_to_sys_error)
+    }) {
+        Ok(process) => process,
+        Err(error) => {
+            let _ = scheduler::scheduler().terminate_thread(scheduler_thread);
+            return Err(error);
+        }
+    };
+
+    let mut resources = match reserve_resource_clone(parent.pid) {
+        Ok(resources) => resources,
+        Err(error) => {
+            let _ = scheduler::scheduler().terminate_thread(scheduler_thread);
+            with_runtime(|runtime| {
+                let _ = runtime.processes.rollback_fork(process);
+            });
+            return Err(error);
+        }
+    };
+    let shared_attachments = resources.take_shared_attachments();
+    let root_paddr = match super::linux_process_memory::clone_for_fork(
+        parent.pid,
+        process.pid,
+        shared_attachments,
+    ) {
+        Ok(root_paddr) => root_paddr,
+        Err(error) => {
+            drop(resources);
+            let _ = scheduler::scheduler().terminate_thread(scheduler_thread);
+            with_runtime(|runtime| {
+                let _ = runtime.processes.rollback_fork(process);
+            });
+            return Err(error);
+        }
+    };
+    let task = match linux_task::reserve_fork_task(scheduler_thread, process.pid) {
+        Ok(task) => task,
+        Err(error) => {
+            let _ = super::linux_process_memory::unregister(process.pid);
+            drop(resources);
+            let _ = scheduler::scheduler().terminate_thread(scheduler_thread);
+            with_runtime(|runtime| {
+                let _ = runtime.processes.rollback_fork(process);
+            });
+            return Err(error);
+        }
+    };
+
+    let mut frame = unsafe { context.frame.read() };
+    frame.regs[0] = 0;
+    let user_sp = crate::kernel_lowlevel::cpu::read_user_stack_pointer();
+    let tls = crate::kernel_lowlevel::cpu::read_user_tls();
+    let configured = scheduler::scheduler()
+        .get_thread_mut(scheduler_thread)
+        .map(|thread| {
+            thread
+                .context
+                .set_linux_process_start(user_sp, tls, root_paddr)
+        })
+        .unwrap_or(false)
+        && scheduler::scheduler().bind_thread_process(scheduler_thread, process.pid);
+    if !configured {
+        linux_task::rollback_fork_task(task);
+        let _ = super::linux_process_memory::unregister(process.pid);
+        drop(resources);
+        let _ = scheduler::scheduler().terminate_thread(scheduler_thread);
+        with_runtime(|runtime| {
+            let _ = runtime.processes.rollback_fork(process);
+        });
+        return Err(SysError::EAGAIN);
+    }
+
+    Ok(LinuxForkReservation {
+        process,
+        task,
+        scheduler_thread,
+        child_start: Aarch64ProcessStart {
+            frame,
+            return_pc: context.return_pc,
+            pstate: context.pstate,
+            root_paddr,
+        },
+        resources: Some(resources),
+        resources_installed: false,
+        memory_installed: true,
+        namespace_flags,
+        published: false,
+    })
+}
+
+#[cfg(target_arch = "aarch64")]
+fn take_fork_start() -> Option<Aarch64ProcessStart> {
+    with_runtime(|runtime| {
+        let scheduler_thread = scheduler::scheduler().current().0;
+        let process = runtime.processes.processes.iter().position(|process| {
+            process.state == LinuxProcessState::Running
+                && process.root_scheduler_thread == scheduler_thread
+        })?;
+        runtime.fork_starts[process].take()
+    })
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) extern "C" fn linux_fork_child_entry() -> ! {
+    let Some(start) = take_fork_start() else {
+        scheduler::scheduler().finish_current_without_stack_free();
+        scheduler::schedule();
+        loop {
+            crate::kernel_lowlevel::cpu::wait_for_interrupt();
+        }
+    };
+    unsafe { thread::start_linux_process_child(&start as *const Aarch64ProcessStart as *const u8) }
 }
 
 fn process_error_to_sys_error(error: LinuxProcessError) -> SysError {

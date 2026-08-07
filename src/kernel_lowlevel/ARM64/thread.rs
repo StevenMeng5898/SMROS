@@ -115,6 +115,16 @@ impl CpuContext {
         self.pstate = state;
     }
 
+    pub fn set_linux_process_start(&mut self, user_sp: u64, tls: u64, root_paddr: u64) -> bool {
+        if root_paddr == 0 {
+            return false;
+        }
+        self.sp_el0 = user_sp;
+        self.tpidr_el0 = tls;
+        self.ttbr0_el1 = root_paddr;
+        true
+    }
+
     /// Create a default CPU context (for idle thread)
     pub const fn default_context() -> Self {
         CpuContext {
@@ -359,6 +369,8 @@ extern "C" {
     fn thread_start_trampoline() -> !;
     #[link_name = "start_linux_clone_child"]
     fn start_linux_clone_child_asm(start: *const u8) -> !;
+    #[link_name = "start_linux_process_child"]
+    fn start_linux_process_child_asm(start: *const u8) -> !;
 }
 
 /// Save the current thread context and restore the next one.
@@ -388,6 +400,15 @@ pub unsafe fn start_context(next: *mut ThreadControlBlock) -> ! {
 /// Linux task. The assembly routine consumes it without returning.
 pub unsafe fn start_linux_clone_child(start: *const u8) -> ! {
     unsafe { start_linux_clone_child_asm(start) }
+}
+
+/// Restore a fork-owned process startup image and enter its copied EL0 context.
+///
+/// # Safety
+/// `start` must point to the C-layout AArch64 process image owned by the current
+/// Linux process. The assembly routine consumes it without returning.
+pub unsafe fn start_linux_process_child(start: *const u8) -> ! {
+    unsafe { start_linux_process_child_asm(start) }
 }
 
 /// Print a number to serial (helper function)

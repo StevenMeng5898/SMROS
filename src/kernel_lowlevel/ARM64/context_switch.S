@@ -213,6 +213,27 @@ start_linux_clone_child:
     msr     spsr_el1, x17
     ldr     x17, [x16, #0x328]
     msr     tpidr_el0, x17
+    b       start_linux_child_register_restore
+.size start_linux_clone_child, . - start_linux_clone_child
+
+.globl start_linux_process_child
+.type start_linux_process_child, %function
+start_linux_process_child:
+    msr     daifset, #2
+    mov     x16, x0
+
+    ldr     x17, [x16, #0x310]
+    msr     elr_el1, x17
+    ldr     x17, [x16, #0x318]
+    msr     spsr_el1, x17
+    ldr     x17, [x16, #0x320]
+    msr     ttbr0_el1, x17
+    dsb     ish
+    tlbi    vmalle1is
+    dsb     ish
+    isb
+
+start_linux_child_register_restore:
     ldr     x17, [x16, #0x300]
     msr     fpcr, x17
     ldr     x17, [x16, #0x308]
@@ -255,4 +276,4 @@ start_linux_clone_child:
     ldr     x30, [x16, #0xF0]
     ldr     x16, [x16, #0x80]
     eret
-.size start_linux_clone_child, . - start_linux_clone_child
+.size start_linux_process_child, . - start_linux_process_child
