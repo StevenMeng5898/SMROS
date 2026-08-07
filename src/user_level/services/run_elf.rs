@@ -5,8 +5,8 @@
 //! initial stack, then enters the dynamic loader from a short-lived scheduler
 //! thread.
 
-use alloc::alloc::{alloc, Layout};
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::kernel_lowlevel::{memory::PAGE_SIZE, timer};
@@ -16,10 +16,10 @@ use crate::user_level::{elf, fxfs, user_logic, user_process};
 
 use super::posix_test;
 
-const RUN_ELF_MAIN_BASE: usize = 0x5000_0000;
-const RUN_ELF_INTERP_BASE: usize = 0x5100_0000;
+const RUN_ELF_MAIN_BASE: usize = syscall::linux_process_memory::LINUX_MAIN_BASE;
+const RUN_ELF_INTERP_BASE: usize = syscall::linux_process_memory::LINUX_INTERPRETER_BASE;
 const RUN_ELF_STACK_SIZE: usize = 0x20_000;
-const RUN_ELF_MAP_PROT: usize = 0x1 | 0x2 | 0x4; // PROT_READ | PROT_WRITE | PROT_EXEC
+const RUN_ELF_MAP_PROT: usize = 0x1 | 0x2; // PROT_READ | PROT_WRITE
 const RUN_ELF_MAP_FIXED_ANON_PRIVATE: usize = (1 << 4) | (1 << 5) | (1 << 1);
 const RUN_ELF_TIMER_HZ: u64 = 100;
 const RUN_ELF_MAX_ENV_ENTRIES: usize = 64;
@@ -121,7 +121,7 @@ struct RunLaunchInputs {
     start_tick: u64,
 }
 
-type ActiveRun = user_logic::RunElfActiveRequest<RunLaunchInputs, StackBuilder>;
+type ActiveRun = user_logic::RunElfActiveRequest<RunLaunchInputs, ()>;
 type RunState = user_logic::RunElfLifecycleState<ActiveRun>;
 
 static RUN_STATE: user_logic::RunElfStateCell<RunState> =
@@ -223,43 +223,38 @@ extern "C" fn run_elf_launcher_entry() -> ! {
             .request_for(launch_id)
             .map(|request| request.launch().clone())
     });
-    let preparation = request.as_ref().map(prepare_dynamic_loader);
-    let Some(preparation) = preparation else {
+    let Some(request) = request else {
         complete_active_run(cpu, launch_id, |_| {
             RunTermination::InfrastructureError(RunInfrastructureError::MissingRequest)
         });
         finish_launcher_thread();
     };
+    let scheduler_thread = scheduler::scheduler().current();
+    let pid = match syscall::linux_task::register_root(scheduler_thread) {
+        Ok(pid) => pid,
+        Err(_) => {
+            complete_active_run(cpu, launch_id, |_| {
+                RunTermination::LaunchError(RunElfError::Thread)
+            });
+            finish_launcher_thread();
+        }
+    };
+    if syscall::linux_process_memory::register_root(pid).is_err() {
+        complete_active_run(cpu, launch_id, |_| {
+            RunTermination::LaunchError(RunElfError::Map)
+        });
+        finish_launcher_thread();
+    }
+    let preparation = prepare_dynamic_loader(&request);
 
     match preparation {
         Ok(prepared) => {
             let entry = prepared.entry;
-            let stack_top = prepared.stack.stack_top();
-            let (stack_base, stack_size) = prepared.stack.range();
-            if let Err(error) = with_run_state(|state| {
-                user_logic::run_elf_attach_resource_transition(state, launch_id, prepared.stack)
-            }) {
-                drop(error.into_resource());
-                complete_active_run(cpu, launch_id, |_| {
-                    RunTermination::InfrastructureError(RunInfrastructureError::MissingRequest)
-                });
-                finish_launcher_thread();
-            }
-            if !syscall::register_linux_initial_stack(stack_base, stack_size) {
-                complete_active_run(cpu, launch_id, |_| {
-                    RunTermination::LaunchError(RunElfError::Stack)
-                });
-                finish_launcher_thread();
-            }
-            let scheduler_thread = scheduler::scheduler().current();
-            if syscall::linux_task::register_root(scheduler_thread).is_err() {
-                complete_active_run(cpu, launch_id, |_| {
-                    RunTermination::LaunchError(RunElfError::Thread)
-                });
-                finish_launcher_thread();
-            }
+            let stack_top = prepared.stack_top;
+            let root_paddr = syscall::linux_process_memory::current_root_paddr()
+                .unwrap_or_else(|_| finish_launcher_thread());
             unsafe {
-                user_process::switch_to_el0(entry, stack_top, 0);
+                user_process::switch_to_el0(entry, stack_top, root_paddr);
             }
         }
         Err(err) => {
@@ -331,8 +326,8 @@ fn complete_active_run(
             return;
         }
     };
-    let (request, stack) = active_request.into_parts();
-    drop(stack);
+    let (request, resource) = active_request.into_parts();
+    let _ = resource;
     let end_tick = timer::get_tick_count();
     let outcome = RunOutcome {
         path: request.path,
@@ -404,7 +399,7 @@ fn finish_launcher_thread() -> ! {
 
 struct PreparedRun {
     entry: u64,
-    stack: StackBuilder,
+    stack_top: u64,
 }
 
 fn prepare_dynamic_loader(request: &RunLaunchInputs) -> Result<PreparedRun, RunElfError> {
@@ -430,10 +425,29 @@ fn prepare_dynamic_loader(request: &RunLaunchInputs) -> Result<PreparedRun, RunE
     map_elf_image(&interp, &interp_bytes, RUN_ELF_INTERP_BASE)?;
     sync_instruction_cache();
 
-    let stack = build_initial_stack(request, &main)?;
+    let stack_base = syscall::linux_process_memory::LINUX_STACK_TOP
+        .checked_sub(RUN_ELF_STACK_SIZE)
+        .ok_or(RunElfError::Stack)?;
+    let mapped_stack = syscall::sys_mmap(
+        stack_base,
+        RUN_ELF_STACK_SIZE,
+        0x1 | 0x2,
+        RUN_ELF_MAP_FIXED_ANON_PRIVATE,
+        0,
+        0,
+    )
+    .map_err(|_| RunElfError::Stack)?;
+    if mapped_stack != stack_base
+        || !syscall::register_linux_initial_stack(stack_base, RUN_ELF_STACK_SIZE)
+    {
+        return Err(RunElfError::Stack);
+    }
+    let stack = build_initial_stack(request, &main, stack_base)?;
+    syscall::linux_process_memory::copy_to_current(stack.base, &stack.bytes)
+        .map_err(|_| RunElfError::Stack)?;
     Ok(PreparedRun {
         entry: (RUN_ELF_INTERP_BASE as u64).saturating_add(interp.entry),
-        stack,
+        stack_top: stack.stack_top(),
     })
 }
 
@@ -520,14 +534,38 @@ fn map_elf_image(image: &elf::ElfImage, bytes: &[u8], base: usize) -> Result<(),
         let dest = base
             .checked_add(segment.vaddr as usize)
             .ok_or(RunElfError::Map)?;
-        unsafe {
-            core::ptr::write_bytes(dest as *mut u8, 0, segment.mem_size as usize);
-            core::ptr::copy_nonoverlapping(
-                bytes.as_ptr().add(segment.file_offset as usize),
-                dest as *mut u8,
-                segment.file_size as usize,
-            );
+        let mem_size = usize::try_from(segment.mem_size).map_err(|_| RunElfError::Map)?;
+        let file_size = usize::try_from(segment.file_size).map_err(|_| RunElfError::Map)?;
+        let file_offset = usize::try_from(segment.file_offset).map_err(|_| RunElfError::Map)?;
+        let file_end = file_offset
+            .checked_add(file_size)
+            .filter(|end| *end <= bytes.len())
+            .ok_or(RunElfError::Map)?;
+        syscall::linux_process_memory::zero_current(dest, mem_size)
+            .map_err(|_| RunElfError::Map)?;
+        syscall::linux_process_memory::copy_to_current(dest, &bytes[file_offset..file_end])
+            .map_err(|_| RunElfError::Map)?;
+    }
+
+    for segment in &image.segments {
+        let vaddr = usize::try_from(segment.vaddr).map_err(|_| RunElfError::Map)?;
+        let mem_size = usize::try_from(segment.mem_size).map_err(|_| RunElfError::Map)?;
+        let (segment_start, segment_end) =
+            user_logic::elf_segment_mapping_range(vaddr, mem_size, PAGE_SIZE)
+                .ok_or(RunElfError::Map)?;
+        let segment_address = base.checked_add(segment_start).ok_or(RunElfError::Map)?;
+        let mut prot = 0usize;
+        if segment.flags & 4 != 0 {
+            prot |= 0x1;
         }
+        if segment.flags & 2 != 0 {
+            prot |= 0x2;
+        }
+        if segment.flags & 1 != 0 {
+            prot |= 0x4;
+        }
+        syscall::sys_mprotect(segment_address, segment_end - segment_start, prot)
+            .map_err(|_| RunElfError::Map)?;
     }
 
     Ok(())
@@ -559,38 +597,15 @@ fn sync_instruction_cache() {
 }
 
 struct StackBuilder {
-    _allocation: user_logic::RunElfOwnedResource<StackAllocation>,
+    bytes: Vec<u8>,
     base: usize,
     sp: usize,
 }
 
-struct StackAllocation {
-    base: usize,
-    size: usize,
-}
-
-fn release_stack_allocation(allocation: StackAllocation) {
-    if let Ok(layout) = Layout::from_size_align(allocation.size, 16) {
-        unsafe {
-            alloc::alloc::dealloc(allocation.base as *mut u8, layout);
-        }
-    }
-}
-
 impl StackBuilder {
-    fn new(size: usize) -> Result<Self, RunElfError> {
-        let layout = Layout::from_size_align(size, 16).map_err(|_| RunElfError::Stack)?;
-        let ptr = unsafe { alloc(layout) };
-        if ptr.is_null() {
-            return Err(RunElfError::Stack);
-        }
-        let base = ptr as usize;
-        let allocation = user_logic::RunElfOwnedResource::new(
-            StackAllocation { base, size },
-            release_stack_allocation,
-        );
+    fn new(base: usize, size: usize) -> Result<Self, RunElfError> {
         Ok(Self {
-            _allocation: allocation,
+            bytes: vec![0; size],
             base,
             sp: base.checked_add(size).ok_or(RunElfError::Stack)?,
         })
@@ -598,10 +613,6 @@ impl StackBuilder {
 
     fn stack_top(&self) -> u64 {
         self.sp as u64
-    }
-
-    fn range(&self) -> (usize, usize) {
-        (self.base, RUN_ELF_STACK_SIZE)
     }
 
     fn align_down(&mut self, align: usize) {
@@ -613,9 +624,12 @@ impl StackBuilder {
         if self.sp < self.base {
             return Err(RunElfError::Stack);
         }
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.sp as *mut u8, bytes.len());
-        }
+        let offset = self.sp.checked_sub(self.base).ok_or(RunElfError::Stack)?;
+        let end = offset
+            .checked_add(bytes.len())
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or(RunElfError::Stack)?;
+        self.bytes[offset..end].copy_from_slice(bytes);
         Ok(self.sp)
     }
 
@@ -623,9 +637,6 @@ impl StackBuilder {
         self.sp = self.sp.checked_sub(1).ok_or(RunElfError::Stack)?;
         if self.sp < self.base {
             return Err(RunElfError::Stack);
-        }
-        unsafe {
-            core::ptr::write(self.sp as *mut u8, 0);
         }
         self.push_bytes(value.as_bytes())
     }
@@ -635,9 +646,12 @@ impl StackBuilder {
         if self.sp < self.base {
             return Err(RunElfError::Stack);
         }
-        unsafe {
-            core::ptr::write_unaligned(self.sp as *mut u64, value);
-        }
+        let offset = self.sp.checked_sub(self.base).ok_or(RunElfError::Stack)?;
+        let end = offset.checked_add(8).ok_or(RunElfError::Stack)?;
+        self.bytes
+            .get_mut(offset..end)
+            .ok_or(RunElfError::Stack)?
+            .copy_from_slice(&value.to_ne_bytes());
         Ok(())
     }
 }
@@ -645,8 +659,9 @@ impl StackBuilder {
 fn build_initial_stack(
     request: &RunLaunchInputs,
     main: &elf::ElfImage,
+    stack_base: usize,
 ) -> Result<StackBuilder, RunElfError> {
-    let mut stack = StackBuilder::new(RUN_ELF_STACK_SIZE)?;
+    let mut stack = StackBuilder::new(stack_base, RUN_ELF_STACK_SIZE)?;
 
     let random_ptr = stack.push_bytes(&[
         0x41, 0x52, 0x4d, 0x36, 0x34, 0x2d, 0x53, 0x4d, 0x52, 0x4f, 0x53, 0x2d, 0x45, 0x4c, 0x46,

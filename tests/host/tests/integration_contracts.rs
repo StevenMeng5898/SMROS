@@ -1271,7 +1271,7 @@ fn posix_resource_snapshot_uses_authoritative_state_without_resetting_it() {
     assert!(body.contains("scheduler().active_threads()"));
     assert!(memory_body.contains("MEMORY_SYSCALL_STATE"));
     assert!(memory_body.contains(".as_ref()"));
-    assert!(memory_body.contains("state.linux_mappings.len()"));
+    assert!(memory_body.contains("linux_process_memory::total_mapping_count()"));
     assert!(memory_body.contains("state.linux_fds.len()"));
     assert!(memory_body.contains("state.linux_shared_memory.len()"));
     assert!(memory_body.contains("state.handles.len()"));
@@ -1310,13 +1310,8 @@ fn linux_process_reset_reclaims_transient_state_without_reinitializing_global_st
     let public = braced_body(&syscall[public_start..]);
 
     for required in [
-        "core::mem::take(&mut self.linux_mappings)",
-        "MemorySyscallState::free_linux_pages(&mapping.pfns)",
-        "core::mem::replace(&mut self.brk, BrkState::new())",
-        "MemorySyscallState::free_linux_pages(&brk.pfns)",
         "core::mem::take(&mut self.linux_shared_memory)",
         "compat::close_handle(HandleValue(record.handle))",
-        "self.next_linux_addr = LINUX_MAPPING_BASE",
         "self.next_fd = COMPAT_FD_START",
         "self.next_shared_memory_id = LINUX_SHM_ID_START",
         "self.reset_linux_container_state()",
@@ -1326,6 +1321,7 @@ fn linux_process_reset_reclaims_transient_state_without_reinitializing_global_st
             "missing reset operation: {required}"
         );
     }
+    assert!(public.contains("linux_process_memory::reset_launch()"));
     assert!(public.contains("sys_close(fd)"));
     assert!(public.contains("linux_timer_handles"));
     assert!(public.contains("sys_handle_close(handle)"));
@@ -1472,8 +1468,8 @@ fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
     assert!(launcher.contains("RunElfStateCell"));
     assert!(launcher.contains("RunElfLifecycleState"));
     assert!(launcher.contains("RunElfActiveRequest"));
-    assert!(launcher.contains("RunElfOwnedResource"));
-    assert!(launcher.contains("run_elf_attach_resource_transition"));
+    assert!(launcher.contains("RunElfActiveRequest<RunLaunchInputs, ()>"));
+    assert!(launcher.contains("linux_process_memory::register_root"));
     assert!(launcher.contains("fn with_run_state"));
     assert!(!launcher.contains("static RUN_ACTIVE"));
     assert!(!launcher.contains("static ACTIVE_RUN"));
@@ -2036,7 +2032,6 @@ fn run_elf_launch_identity_is_bound_and_carried_through_aarch64_resume() {
         "run_elf_prepare_return_transition(state, launch_id,",
         "run_elf_take_completion_transition(state, launch_id,",
         "run_elf_clear_transition(state, launch_id,",
-        "run_elf_attach_resource_transition(state, launch_id,",
     ] {
         assert!(
             launcher.contains(expected_id_call),
@@ -2224,7 +2219,7 @@ fn linux_child_exit_clears_tid_and_uses_deferred_stack_retirement() {
         .find("linux_clone_tid_destination_valid(clear_child_tid)")
         .expect("checked clear-child-TID write");
     let zero_write = exit_current
-        .find("core::ptr::write(clear_child_tid as *mut u32, 0)")
+        .find("linux_process_memory::copy_to_process(")
         .expect("clear-child-TID zero write");
     let compiler_fence = exit_current
         .find("core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst)")
@@ -2499,10 +2494,16 @@ fn linux_root_task_and_syscall_frame_have_bounded_owners() {
     let root = launcher
         .find("linux_task::register_root(scheduler_thread)")
         .expect("root task registration");
+    let memory_root = launcher
+        .find("linux_process_memory::register_root(pid)")
+        .expect("root process memory registration");
+    let root_paddr = launcher
+        .find("linux_process_memory::current_root_paddr()")
+        .expect("root translation address");
     let enter = launcher
-        .find("user_process::switch_to_el0(entry, stack_top, 0)")
+        .find("user_process::switch_to_el0(entry, stack_top, root_paddr)")
         .expect("EL0 transfer");
-    assert!(root < enter);
+    assert!(root < memory_root && memory_root < root_paddr && root_paddr < enter);
 
     let reset = syscall
         .find("pub fn reset_linux_process_state()")
@@ -2575,9 +2576,7 @@ fn aarch64_clone_child_is_validated_before_publication() {
     let destination_validation =
         &syscall[destination_validation..destination_validation + destination_validation_end];
     assert!(destination_validation.contains("linux_user_range_writable("));
-    assert!(destination_validation.contains("linux_mappings"));
-    assert!(destination_validation.contains("state.brk"));
-    assert!(destination_validation.contains("linux_initial_stack"));
+    assert!(destination_validation.contains("linux_process_memory::user_range_writable("));
     assert!(!destination_validation.contains("syscall_logic::user_buffer_valid"));
 
     let clone3_start = syscall.find("pub fn sys_clone3(").expect("clone3 syscall");
@@ -2605,28 +2604,41 @@ fn aarch64_clone_child_is_validated_before_publication() {
     let copy_validation = copy
         .find("linux_clone_tid_destination_valid(")
         .expect("clone TID destination revalidation");
-    assert!(copy.contains("destination.address"));
-    let first_raw_read = copy
-        .find("core::ptr::read(destination.address as *const u32)")
+    assert!(copy.contains("slot.parent_tid.address"));
+    assert!(copy.contains("slot.child_tid.address"));
+    let first_checked_read = copy
+        .find("linux_process_memory::copy_from_process(")
         .expect("clone TID snapshot read");
-    assert!(tid_conversion < first_raw_read);
-    assert!(copy_validation < first_raw_read);
+    assert!(copy.contains("linux_process_memory::copy_to_process("));
+    assert!(tid_conversion < first_checked_read);
+    assert!(copy_validation < first_checked_read);
+    assert!(!copy.contains("core::ptr::read"));
     assert!(!copy.contains("reservation.tid as u32"));
 
     let launcher = run_elf
         .find("extern \"C\" fn run_elf_launcher_entry() -> !")
         .expect("ELF launcher entry");
     let launcher = &run_elf[launcher..];
-    let attach_stack = launcher
-        .find("run_elf_attach_resource_transition(")
-        .expect("initial stack ownership attachment");
-    let register_stack = launcher
-        .find("register_linux_initial_stack(")
-        .expect("initial stack user-range registration");
+    let register_memory = launcher
+        .find("linux_process_memory::register_root(pid)")
+        .expect("process memory ownership registration");
+    let prepare = launcher
+        .find("prepare_dynamic_loader(&request)")
+        .expect("loader preparation");
+    let root_paddr = launcher
+        .find("linux_process_memory::current_root_paddr()")
+        .expect("process root selection");
     let enter_el0 = launcher
         .find("user_process::switch_to_el0(")
         .expect("EL0 entry");
-    assert!(attach_stack < register_stack && register_stack < enter_el0);
+    assert!(
+        register_memory < prepare && prepare < root_paddr && root_paddr < enter_el0
+    );
+    let prepare_start = run_elf
+        .find("fn prepare_dynamic_loader(")
+        .expect("dynamic loader preparation");
+    let prepare_body = braced_body(&run_elf[prepare_start..]);
+    assert!(prepare_body.contains("register_linux_initial_stack("));
     let commit = task
         .find("pub(crate) fn commit_clone(")
         .expect("clone commit");
@@ -2688,11 +2700,7 @@ fn linux_futex_waits_block_and_wake_scheduler_tasks() {
         .find("pub(crate) fn linux_user_range_readable(")
         .expect("Linux readable-range helper");
     let readable = braced_body(&syscall[readable_start..]);
-    assert!(readable.contains("mapping.prot & MmapProt::READ.bits()"));
-    assert!(readable.contains("mapping.prot & MmapProt::WRITE.bits()"));
-    assert!(readable.contains("state.brk.current - state.brk.start"));
-    assert!(readable.contains("linux_initial_stack"));
-    assert!(readable.contains("shared_linux_user_range_readable("));
+    assert!(readable.contains("linux_process_memory::user_range_readable(address, len)"));
     assert!(futex.contains("FutexQueue<"));
     assert!(futex.contains("include!(\"linux_runtime_lock_shared.rs\");"));
     assert!(futex.contains("LinuxRuntimeLock<FutexQueue<LINUX_FUTEX_LIMIT>>"));
@@ -2711,7 +2719,8 @@ fn linux_futex_waits_block_and_wake_scheduler_tasks() {
     assert!(queue_lock < queue_drop && queue_drop < interrupt_restore);
     assert!(!with_queue.contains("scheduler::schedule()"));
     assert!(!with_queue.contains("linux_task::wake_blocked("));
-    assert!(futex.contains("core::ptr::read(uaddr as *const u32)"));
+    assert!(futex.contains("linux_process_memory::copy_from_current("));
+    assert!(!futex.contains("core::ptr::read(uaddr as *const u32)"));
     assert!(futex.contains("linux_task::block_current(LinuxBlockReason::Futex)"));
     assert!(futex.contains("scheduler::schedule()"));
     assert!(futex.contains("linux_task::wake_blocked("));
@@ -2740,7 +2749,7 @@ fn linux_futex_waits_block_and_wake_scheduler_tasks() {
         .find("linux_user_range_readable(uaddr")
         .expect("futex address revalidation");
     let value_read = wait
-        .find("core::ptr::read(uaddr as *const u32)")
+        .find("linux_process_memory::copy_from_current(uaddr")
         .expect("futex value read");
     assert!(interrupt_mask < address_revalidation && address_revalidation < value_read);
     let mismatch = wait
@@ -2769,9 +2778,10 @@ fn linux_futex_waits_block_and_wake_scheduler_tasks() {
         .find("linux_user_range_readable(timeout_pointer")
         .expect("timeout range revalidation");
     let timeout_read = deadline
-        .find("core::ptr::read_unaligned(")
-        .expect("unaligned timeout read");
+        .find("linux_process_memory::copy_from_current(timeout_pointer")
+        .expect("checked timeout read");
     assert!(timeout_revalidation < timeout_read);
+    assert!(!deadline.contains("core::ptr::read_unaligned("));
 
     for helper in ["fn wake(", "pub(crate) fn on_timer_tick("] {
         let start = futex.find(helper).expect("futex wake helper");
@@ -4113,4 +4123,97 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
     assert!(nanosleep_with_rem.contains("linux_sleep_until(wait, rem)"));
     assert!(!nanosleep_with_rem.contains("if req == 0"));
     assert!(!nanosleep_with_rem.contains("Ok(0)"));
+}
+
+#[test]
+fn linux_memory_and_loader_are_process_owned() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let modules = std::fs::read_to_string(repository.join("src/syscall/mod.rs"))
+        .expect("read syscall modules");
+    let process_memory =
+        std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+            .expect("read process memory runtime");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let run_elf = std::fs::read_to_string(repository.join("src/user_level/services/run_elf.rs"))
+        .expect("read ELF launcher");
+
+    assert!(modules.contains("pub(crate) mod linux_process_memory;"));
+    assert!(process_memory.contains("struct LinuxProcessMemory"));
+    assert!(process_memory.contains("address_space: Aarch64AddressSpace"));
+    assert!(process_memory.contains("pub(crate) fn with_current"));
+    assert!(process_memory.contains("pub(crate) fn copy_from_current"));
+    assert!(process_memory.contains("pub(crate) fn copy_to_current"));
+    assert!(process_memory.contains("pub(crate) fn zero_current"));
+    assert!(process_memory.contains("pub(crate) fn current_root_paddr"));
+
+    let memory_state = braced_body(
+        &syscall[syscall
+            .find("struct MemorySyscallState")
+            .expect("global compatibility state")..],
+    );
+    assert!(!memory_state.contains("linux_mappings:"));
+    assert!(!memory_state.contains("linux_initial_stack:"));
+    assert!(!memory_state.contains("next_linux_addr:"));
+    assert!(!memory_state.contains("brk:"));
+
+    assert!(run_elf.contains("linux_process_memory::register_root"));
+    assert!(run_elf.contains("linux_process_memory::copy_to_current"));
+    assert!(run_elf.contains("linux_process_memory::zero_current"));
+    assert!(run_elf.contains("linux_process_memory::current_root_paddr"));
+    assert!(!run_elf.contains("core::ptr::write_bytes(dest as *mut u8"));
+    assert!(!run_elf.contains("core::ptr::copy_nonoverlapping(\n                bytes.as_ptr()"));
+    assert!(!run_elf.contains("self.sp as *mut u8"));
+    assert!(!run_elf.contains("self.sp as *mut u64"));
+    assert!(!run_elf.contains("user_process::switch_to_el0(entry, stack_top, 0)"));
+}
+
+#[test]
+fn linux_process_memory_mutations_are_transactional_and_bounded() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let process_memory =
+        std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+            .expect("read process memory runtime");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    let map_start = process_memory
+        .find("    fn map(\n")
+        .expect("process mapping implementation");
+    let map = braced_body(&process_memory[map_start..]);
+    assert!(map.contains("allocate_unmapped_pages"));
+    assert!(map.contains("replace_mapping_transactionally"));
+    assert!(!map.contains("let _ = self.unmap(address, len)"));
+
+    let protect_start = process_memory
+        .find("    fn protect(&mut self")
+        .expect("process protection implementation");
+    let protect = braced_body(&process_memory[protect_start..]);
+    assert!(protect.contains("protect_pages_transactionally"));
+    assert!(!protect.contains("core::mem::take(&mut self.mappings)"));
+
+    let unmap_start = process_memory
+        .find("    fn unmap(&mut self")
+        .expect("process unmap implementation");
+    let unmap = braced_body(&process_memory[unmap_start..]);
+    assert!(unmap.contains("unmap_pages_transactionally"));
+    assert!(!unmap.contains("core::mem::take(&mut self.mappings)"));
+
+    let brk_start = process_memory
+        .find("    fn update_brk(&mut self")
+        .expect("process brk implementation");
+    let brk = braced_body(&process_memory[brk_start..]);
+    assert!(brk.contains("zero_user_range"));
+    assert!(!brk.contains("vec![0u8; len]"));
+    assert!(process_memory.contains("impl Drop for LinuxProcessMemory"));
+
+    let mmap_start = syscall.find("pub fn sys_mmap(").expect("mmap implementation");
+    let mmap = braced_body(&syscall[mmap_start..]);
+    let preload = mmap
+        .find("linux_read_mmap_contents")
+        .expect("file contents are staged");
+    let publish = mmap
+        .find("map_current_with_contents")
+        .expect("mapping publication accepts staged contents");
+    assert!(preload < publish);
 }

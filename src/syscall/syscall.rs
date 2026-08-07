@@ -44,15 +44,11 @@ use core::sync::atomic::{compiler_fence, AtomicU64, Ordering};
 
 use super::address_logic::{
     checked_end, fixed_linux_mmap_request_ok as shared_fixed_linux_mmap_request_ok,
-    page_aligned as shared_page_aligned, range_overlaps, range_within_window,
-};
-#[cfg(target_arch = "aarch64")]
-use super::address_logic::{
-    linux_user_range_readable as shared_linux_user_range_readable,
-    linux_user_range_writable as shared_linux_user_range_writable,
+    page_aligned as shared_page_aligned,
 };
 use super::linux_futex;
 use super::linux_process;
+use super::linux_process_memory;
 #[cfg(target_arch = "aarch64")]
 use super::linux_syscall_context;
 use super::linux_task;
@@ -63,7 +59,7 @@ use super::linux_task::{
     LinuxSignalStack, LinuxSignalWait, LinuxSignalWaitOutcome, LinuxSleepOutcome, LinuxSleepWait,
     CLONE_THREAD, LINUX_SIGNAL_FRAME_LIMIT, LINUX_SIGNAL_INFO_BYTES,
 };
-use crate::kernel_lowlevel::memory::{process_manager, PageFrameAllocator, PAGE_SIZE};
+use crate::kernel_lowlevel::memory::{process_manager, PAGE_SIZE};
 use crate::kernel_objects::channel;
 use crate::kernel_objects::compat;
 use crate::kernel_objects::fifo;
@@ -151,10 +147,6 @@ impl From<SysError> for usize {
     }
 }
 
-const LINUX_MAPPING_BASE: usize = 0x5000_0000;
-const LINUX_MAPPING_LIMIT: usize = 0x6000_0000;
-const BRK_HEAP_START: usize = 0x4000_0000;
-const BRK_HEAP_LIMIT: usize = BRK_HEAP_START + (1024 * 1024);
 const ZIRCON_ROOT_VMAR_BASE: usize = 0x7000_0000;
 const ZIRCON_ROOT_VMAR_SIZE: usize = 0x1000_0000;
 const MEMORY_HANDLE_START: u32 = 0x1000;
@@ -633,80 +625,6 @@ const LINUX_CAP_FULL_SET: u64 = (1u64 << (LINUX_CAP_LAST_CAP + 1)) - 1;
 const LINUX_MAX_MOUNTS: usize = 16;
 const LINUX_UTS_NAME_MAX: usize = 64;
 
-#[derive(Clone)]
-enum LinuxMappingSource {
-    Anonymous,
-    File {
-        fd: usize,
-        offset: u64,
-        path: String,
-    },
-    SharedMemory {
-        id: u32,
-    },
-}
-
-impl LinuxMappingSource {
-    fn slice(&self, delta: usize) -> Self {
-        match self {
-            LinuxMappingSource::Anonymous => LinuxMappingSource::Anonymous,
-            LinuxMappingSource::File { fd, offset, path } => LinuxMappingSource::File {
-                fd: *fd,
-                offset: offset.saturating_add(delta as u64),
-                path: path.clone(),
-            },
-            LinuxMappingSource::SharedMemory { id } => LinuxMappingSource::SharedMemory { id: *id },
-        }
-    }
-
-    fn snapshot(&self) -> LinuxMappingSourceSnapshot {
-        match self {
-            LinuxMappingSource::Anonymous => LinuxMappingSourceSnapshot::Anonymous,
-            LinuxMappingSource::File { fd, offset, path } => LinuxMappingSourceSnapshot::File {
-                fd: *fd,
-                offset: *offset,
-                path: path.clone(),
-            },
-            LinuxMappingSource::SharedMemory { id } => {
-                LinuxMappingSourceSnapshot::SharedMemory { id: *id }
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-struct LinuxMappingRecord {
-    addr: usize,
-    len: usize,
-    prot: usize,
-    flags: usize,
-    pfns: Vec<u64>,
-    source: LinuxMappingSource,
-}
-
-#[derive(Default)]
-struct BrkState {
-    start: usize,
-    current: usize,
-    limit: usize,
-    pfns: Vec<u64>,
-}
-
-impl BrkState {
-    fn new() -> Self {
-        Self {
-            start: BRK_HEAP_START,
-            current: BRK_HEAP_START,
-            limit: BRK_HEAP_LIMIT,
-            pfns: Vec::new(),
-        }
-    }
-
-    fn committed_pages(&self) -> usize {
-        self.pfns.len()
-    }
-}
-
 struct VmoRecord {
     handle: u32,
     vmo: Vmo,
@@ -1018,10 +936,6 @@ pub struct LinuxContainerStats {
 }
 
 struct MemorySyscallState {
-    linux_mappings: Vec<LinuxMappingRecord>,
-    linux_initial_stack: Option<(usize, usize)>,
-    next_linux_addr: usize,
-    brk: BrkState,
     vmos: Vec<VmoRecord>,
     vmars: Vec<VmarRecord>,
     jobs: Vec<JobRecord>,
@@ -1072,10 +986,6 @@ impl MemorySyscallState {
         debug_assert_eq!(handles.len(), syscall_logic::MEMORY_PERMANENT_HANDLE_COUNT);
 
         Self {
-            linux_mappings: Vec::new(),
-            linux_initial_stack: None,
-            next_linux_addr: LINUX_MAPPING_BASE,
-            brk: BrkState::new(),
             vmos: Vec::new(),
             vmars,
             jobs: Vec::new(),
@@ -1287,18 +1197,30 @@ impl MemorySyscallState {
     }
 
     fn stats(&self) -> MemorySyscallStats {
+        let linux = linux_process_memory::current_stats();
         MemorySyscallStats {
-            linux_mapping_count: self.linux_mappings.len(),
-            linux_mapped_bytes: self.linux_mappings.iter().map(|mapping| mapping.len).sum(),
-            linux_committed_pages: self
-                .linux_mappings
-                .iter()
-                .map(|mapping| mapping.pfns.len())
-                .sum(),
-            brk_start: self.brk.start,
-            brk_current: self.brk.current,
-            brk_limit: self.brk.limit,
-            brk_committed_pages: self.brk.committed_pages(),
+            linux_mapping_count: linux.as_ref().map(|stats| stats.mapping_count).unwrap_or(0),
+            linux_mapped_bytes: linux.as_ref().map(|stats| stats.mapped_bytes).unwrap_or(0),
+            linux_committed_pages: linux
+                .as_ref()
+                .map(|stats| stats.committed_pages)
+                .unwrap_or(0),
+            brk_start: linux
+                .as_ref()
+                .map(|stats| stats.brk_start)
+                .unwrap_or(linux_process_memory::LINUX_BRK_BASE),
+            brk_current: linux
+                .as_ref()
+                .map(|stats| stats.brk_current)
+                .unwrap_or(linux_process_memory::LINUX_BRK_BASE),
+            brk_limit: linux
+                .as_ref()
+                .map(|stats| stats.brk_limit)
+                .unwrap_or(linux_process_memory::LINUX_BRK_LIMIT),
+            brk_committed_pages: linux
+                .as_ref()
+                .map(|stats| stats.brk_committed_pages)
+                .unwrap_or(0),
             zircon_vmo_count: self.vmos.len(),
             zircon_vmo_bytes: self.vmos.iter().map(|record| record.vmo.len()).sum(),
             zircon_vmo_committed_pages: self
@@ -1327,9 +1249,8 @@ impl MemorySyscallState {
     }
 
     fn memory_map_snapshot(&self) -> MemoryMapSnapshot {
-        let linux_mappings = self
-            .linux_mappings
-            .iter()
+        let linux_mappings = linux_process_memory::current_snapshots()
+            .into_iter()
             .map(|mapping| LinuxMappingSnapshot {
                 addr: mapping.addr,
                 len: mapping.len,
@@ -1342,7 +1263,17 @@ impl MemorySyscallState {
                 private: mapping.flags & MmapFlags::PRIVATE.bits() != 0,
                 dirty_pages: 0,
                 dirty_tracked: false,
-                source: mapping.source.snapshot(),
+                source: match mapping.source {
+                    linux_process_memory::LinuxMappingSource::Anonymous => {
+                        LinuxMappingSourceSnapshot::Anonymous
+                    }
+                    linux_process_memory::LinuxMappingSource::File { fd, offset, path } => {
+                        LinuxMappingSourceSnapshot::File { fd, offset, path }
+                    }
+                    linux_process_memory::LinuxMappingSource::SharedMemory { id } => {
+                        LinuxMappingSourceSnapshot::SharedMemory { id }
+                    }
+                },
             })
             .collect();
         let shared_memory = self
@@ -1501,86 +1432,6 @@ impl MemorySyscallState {
     fn remove_shared_memory_by_handle(&mut self, handle: u32) {
         self.linux_shared_memory
             .retain(|record| record.handle != handle);
-    }
-
-    fn free_linux_pages(pfns: &[u64]) {
-        for pfn in pfns {
-            PageFrameAllocator::free(*pfn);
-        }
-    }
-
-    fn alloc_linux_pages(page_count: usize) -> Option<Vec<u64>> {
-        let mut pfns = Vec::with_capacity(page_count);
-
-        for _ in 0..page_count {
-            if let Some(pfn) = PageFrameAllocator::alloc() {
-                pfns.push(pfn);
-            } else {
-                Self::free_linux_pages(&pfns);
-                return None;
-            }
-        }
-
-        Some(pfns)
-    }
-
-    fn sort_linux_mappings(&mut self) {
-        self.linux_mappings.sort_by_key(|mapping| mapping.addr);
-    }
-
-    fn linux_range_available(&self, addr: usize, len: usize) -> bool {
-        range_within_window(addr, len, LINUX_MAPPING_BASE, LINUX_MAPPING_LIMIT)
-            && !self
-                .linux_mappings
-                .iter()
-                .any(|mapping| range_overlaps(addr, len, mapping.addr, mapping.len))
-    }
-
-    fn find_free_linux_region(&mut self, hint: Option<usize>, len: usize) -> Option<usize> {
-        if let Some(addr) = hint {
-            if self.linux_range_available(addr, len) {
-                return Some(addr);
-            }
-        }
-
-        self.sort_linux_mappings();
-
-        if let Some(addr) = self.find_free_linux_region_from(self.next_linux_addr, len) {
-            return Some(addr);
-        }
-        self.find_free_linux_region_from(LINUX_MAPPING_BASE, len)
-    }
-
-    fn find_free_linux_region_from(&mut self, start: usize, len: usize) -> Option<usize> {
-        let mut candidate = start.max(LINUX_MAPPING_BASE);
-        if !page_aligned(candidate) {
-            candidate = roundup_pages(candidate);
-        }
-
-        for mapping in &self.linux_mappings {
-            if mapping.addr < candidate {
-                let mapping_end = checked_end(mapping.addr, mapping.len)?;
-                if mapping_end > candidate {
-                    candidate = mapping_end;
-                }
-                continue;
-            }
-
-            let candidate_end = checked_end(candidate, len)?;
-            if candidate_end <= mapping.addr && candidate_end <= LINUX_MAPPING_LIMIT {
-                self.next_linux_addr = candidate_end;
-                return Some(candidate);
-            }
-
-            candidate = checked_end(mapping.addr, mapping.len)?;
-        }
-
-        let candidate_end = checked_end(candidate, len)?;
-        if candidate_end > LINUX_MAPPING_LIMIT {
-            return None;
-        }
-        self.next_linux_addr = candidate_end;
-        Some(candidate)
     }
 
     fn get_vmo(&self, handle: u32) -> Option<&Vmo> {
@@ -2129,20 +1980,12 @@ impl MemorySyscallState {
     }
 
     fn reset_linux_process_state(&mut self) {
-        let mappings = core::mem::take(&mut self.linux_mappings);
-        for mapping in mappings {
-            MemorySyscallState::free_linux_pages(&mapping.pfns);
-        }
         let shared_memory = core::mem::take(&mut self.linux_shared_memory);
         for record in shared_memory {
             let _ = compat::close_handle(HandleValue(record.handle));
         }
 
-        let brk = core::mem::replace(&mut self.brk, BrkState::new());
-        MemorySyscallState::free_linux_pages(&brk.pfns);
-        self.linux_initial_stack = None;
         self.linux_fxfs_files.clear();
-        self.next_linux_addr = LINUX_MAPPING_BASE;
         self.next_fd = COMPAT_FD_START;
         self.next_shared_memory_id = LINUX_SHM_ID_START;
         self.reset_linux_container_state();
@@ -2202,20 +2045,50 @@ fn memory_state() -> &'static mut MemorySyscallState {
     }
 }
 
-fn linux_user_cstr(ptr: usize, max_len: usize) -> Result<&'static str, SysError> {
+fn linux_copy_from_user(address: usize, out: &mut [u8]) -> Result<(), SysError> {
+    #[cfg(target_arch = "aarch64")]
+    return linux_process_memory::copy_from_current(address, out);
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        if !syscall_logic::user_buffer_valid(address, out.len()) {
+            return Err(SysError::EFAULT);
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(address as *const u8, out.as_mut_ptr(), out.len());
+        }
+        Ok(())
+    }
+}
+
+fn linux_copy_to_user(address: usize, bytes: &[u8]) -> Result<(), SysError> {
+    #[cfg(target_arch = "aarch64")]
+    return linux_process_memory::copy_to_current(address, bytes);
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        if !syscall_logic::user_buffer_valid(address, bytes.len()) {
+            return Err(SysError::EFAULT);
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), address as *mut u8, bytes.len());
+        }
+        Ok(())
+    }
+}
+
+fn linux_user_cstr(ptr: usize, max_len: usize) -> Result<String, SysError> {
     if ptr == 0 {
         return Err(SysError::EFAULT);
     }
 
-    let mut len = 0usize;
-    while len < max_len {
-        let addr = ptr.checked_add(len).ok_or(SysError::EFAULT)?;
-        let byte = unsafe { core::ptr::read(addr as *const u8) };
-        if byte == 0 {
-            let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
-            return core::str::from_utf8(bytes).map_err(|_| SysError::EINVAL);
+    let mut bytes = Vec::new();
+    while bytes.len() < max_len {
+        let address = ptr.checked_add(bytes.len()).ok_or(SysError::EFAULT)?;
+        let mut byte = [0u8; 1];
+        linux_copy_from_user(address, &mut byte)?;
+        if byte[0] == 0 {
+            return String::from_utf8(bytes).map_err(|_| SysError::EINVAL);
         }
-        len = len.saturating_add(1);
+        bytes.push(byte[0]);
     }
 
     Err(SysError::EINVAL)
@@ -2294,19 +2167,12 @@ pub fn reset_linux_container_state() {
 }
 
 pub(crate) fn register_linux_initial_stack(address: usize, len: usize) -> bool {
-    if address == 0 || len == 0 || checked_end(address, len).is_none() {
-        return false;
-    }
-    let state = memory_state();
-    if state.linux_initial_stack.is_some() {
-        return false;
-    }
-    state.linux_initial_stack = Some((address, len));
-    true
+    linux_process_memory::register_initial_stack(address, len).is_ok()
 }
 
 pub fn reset_linux_process_state() {
     linux_futex::reset();
+    linux_process_memory::reset_launch();
     linux_task::reset();
     let fds = memory_state()
         .linux_fds
@@ -2345,47 +2211,6 @@ fn mmu_flags_from_vm_options(options: VmOptions) -> MmuFlags {
     flags
 }
 
-fn split_linux_mapping(
-    mapping: LinuxMappingRecord,
-    start: usize,
-    len: usize,
-) -> Vec<LinuxMappingRecord> {
-    let mut pieces = Vec::new();
-    let Some(end) = checked_end(start, len) else {
-        return pieces;
-    };
-    let Some(mapping_end) = checked_end(mapping.addr, mapping.len) else {
-        return pieces;
-    };
-
-    if start > mapping.addr {
-        let left_pages = (start - mapping.addr) / PAGE_SIZE;
-        let left_len = start - mapping.addr;
-        pieces.push(LinuxMappingRecord {
-            addr: mapping.addr,
-            len: left_len,
-            prot: mapping.prot,
-            flags: mapping.flags,
-            pfns: mapping.pfns[..left_pages].to_vec(),
-            source: mapping.source.slice(0),
-        });
-    }
-
-    if end < mapping_end {
-        let right_start_page = (end - mapping.addr) / PAGE_SIZE;
-        pieces.push(LinuxMappingRecord {
-            addr: end,
-            len: mapping_end - end,
-            prot: mapping.prot,
-            flags: mapping.flags,
-            pfns: mapping.pfns[right_start_page..].to_vec(),
-            source: mapping.source.slice(end - mapping.addr),
-        });
-    }
-
-    pieces
-}
-
 pub fn memory_syscall_stats() -> MemorySyscallStats {
     memory_state().stats()
 }
@@ -2419,7 +2244,7 @@ fn memory_resource_counts() -> MemoryResourceCounts {
     unsafe {
         match MEMORY_SYSCALL_STATE.as_ref() {
             Some(state) => MemoryResourceCounts {
-                linux_mappings: state.linux_mappings.len(),
+                linux_mappings: linux_process_memory::total_mapping_count(),
                 linux_fds: state.linux_fds.len(),
                 linux_shared_memory: state.linux_shared_memory.len(),
                 kernel_handles: syscall_logic::logical_memory_handle_count(Some(
@@ -2703,13 +2528,11 @@ fn ensure_linux_signal_trampoline() -> Result<usize, SysError> {
         0,
     )?;
     let instructions = [0xd63f_0200u32, 0xd280_1168, 0xd400_0001, 0xd420_0000];
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            instructions.as_ptr(),
-            mapped as *mut u32,
-            instructions.len(),
-        );
+    let mut instruction_bytes = [0u8; 16];
+    for (index, instruction) in instructions.iter().enumerate() {
+        instruction_bytes[index * 4..index * 4 + 4].copy_from_slice(&instruction.to_ne_bytes());
     }
+    linux_copy_to_user(mapped, &instruction_bytes)?;
     crate::kernel_lowlevel::cpu::sync_instruction_cache();
     sys_mprotect(
         mapped,
@@ -2730,13 +2553,7 @@ fn linux_signal_record_from_user(
     let mut record = LinuxPendingSignal::EMPTY;
     record.signum = signum;
     record.has_info = true;
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            info as *const u8,
-            record.info.as_mut_ptr(),
-            LINUX_SIGNAL_INFO_BYTES,
-        );
-    }
+    linux_copy_from_user(info, &mut record.info)?;
     Ok(record)
 }
 
@@ -3138,17 +2955,17 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
         regs[2] = 0;
         regs[16] = action.handler;
         if action.flags & LINUX_SA_SIGINFO != 0 {
-            unsafe {
-                if pending.has_info {
-                    core::ptr::copy_nonoverlapping(
-                        pending.info.as_ptr(),
-                        info as *mut u8,
-                        LINUX_SIGNAL_INFO_BYTES,
-                    );
-                } else {
-                    core::ptr::write_bytes(info as *mut u8, 0, LINUX_SIGNAL_INFO_BYTES);
-                    core::ptr::write(info as *mut i32, signum as i32);
-                }
+            let copied = if pending.has_info {
+                linux_copy_to_user(info, &pending.info)
+            } else {
+                linux_zero_user(info, LINUX_SIGNAL_INFO_BYTES)
+                    .and_then(|_| {
+                        linux_copy_to_user(info, &(signum as i32).to_ne_bytes()).map(|_| 0)
+                    })
+                    .map(|_| ())
+            };
+            if copied.is_err() {
+                return false;
             }
             regs[1] = info as u64;
         }
@@ -3305,98 +3122,31 @@ fn fixed_linux_mmap_request_ok(addr: usize, len: usize) -> bool {
         addr,
         len,
         PAGE_SIZE,
-        LINUX_MAPPING_BASE,
-        LINUX_MAPPING_LIMIT,
+        linux_process_memory::LINUX_USER_BASE,
+        linux_process_memory::LINUX_USER_LIMIT,
     )
 }
 
-fn update_linux_protection(
-    state: &mut MemorySyscallState,
-    addr: usize,
+fn linux_read_mmap_contents(
+    source: &linux_process_memory::LinuxMappingSource,
     len: usize,
-    prot_bits: usize,
-) -> SysResult {
-    let end = checked_end(addr, len).ok_or(SysError::EINVAL)?;
-    let mut touched = false;
-    let mappings = core::mem::take(&mut state.linux_mappings);
-
-    for mapping in mappings {
-        if !range_overlaps(addr, len, mapping.addr, mapping.len) {
-            state.linux_mappings.push(mapping);
-            continue;
-        }
-
-        touched = true;
-        let overlap_start = core::cmp::max(addr, mapping.addr);
-        let mapping_end = checked_end(mapping.addr, mapping.len).ok_or(SysError::EINVAL)?;
-        let overlap_end = core::cmp::min(end, mapping_end);
-        let start_page = (overlap_start - mapping.addr) / PAGE_SIZE;
-        let end_page = (overlap_end - mapping.addr) / PAGE_SIZE;
-
-        for piece in
-            split_linux_mapping(mapping.clone(), overlap_start, overlap_end - overlap_start)
-        {
-            state.linux_mappings.push(piece);
-        }
-
-        state.linux_mappings.push(LinuxMappingRecord {
-            addr: overlap_start,
-            len: overlap_end - overlap_start,
-            prot: prot_bits,
-            flags: mapping.flags,
-            pfns: mapping.pfns[start_page..end_page].to_vec(),
-            source: mapping.source.slice(overlap_start - mapping.addr),
-        });
+) -> Result<Vec<u8>, SysError> {
+    let linux_process_memory::LinuxMappingSource::File { offset, path, .. } = source else {
+        return Ok(Vec::new());
+    };
+    let attrs = fxfs::attrs(path.as_str()).map_err(|_| SysError::EIO)?;
+    let offset = usize::try_from(*offset).map_err(|_| SysError::EINVAL)?;
+    if offset >= attrs.size {
+        return Ok(Vec::new());
     }
-
-    state.sort_linux_mappings();
-    if touched {
-        Ok(0)
-    } else {
-        Err(SysError::EINVAL)
-    }
-}
-
-fn unmap_linux_range(state: &mut MemorySyscallState, addr: usize, len: usize) -> SysResult {
-    let end = checked_end(addr, len).ok_or(SysError::EINVAL)?;
-    let mut removed = false;
-    let mappings = core::mem::take(&mut state.linux_mappings);
-
-    for mapping in mappings {
-        if !range_overlaps(addr, len, mapping.addr, mapping.len) {
-            state.linux_mappings.push(mapping);
-            continue;
-        }
-
-        removed = true;
-        let overlap_start = core::cmp::max(addr, mapping.addr);
-        let mapping_end = checked_end(mapping.addr, mapping.len).ok_or(SysError::EINVAL)?;
-        let overlap_end = core::cmp::min(end, mapping_end);
-        let start_page = (overlap_start - mapping.addr) / PAGE_SIZE;
-        let end_page = (overlap_end - mapping.addr) / PAGE_SIZE;
-        MemorySyscallState::free_linux_pages(&mapping.pfns[start_page..end_page]);
-        let shared_id = match &mapping.source {
-            LinuxMappingSource::SharedMemory { id } => Some(*id),
-            _ => None,
-        };
-        if let Some(id) = shared_id {
-            state.detach_shared_memory(Some(id), mapping.addr);
-        }
-
-        for piece in split_linux_mapping(mapping, overlap_start, overlap_end - overlap_start) {
-            if let Some(id) = shared_id {
-                state.attach_shared_memory(id, piece.addr, piece.len);
-            }
-            state.linux_mappings.push(piece);
-        }
-    }
-
-    state.sort_linux_mappings();
-    if removed {
-        Ok(0)
-    } else {
-        Err(SysError::EINVAL)
-    }
+    let read_len = core::cmp::min(len, attrs.size - offset);
+    let mut contents = Vec::new();
+    contents
+        .try_reserve_exact(read_len)
+        .map_err(|_| SysError::ENOMEM)?;
+    contents.resize(read_len, 0);
+    fxfs::read_file_at(path.as_str(), offset, &mut contents).map_err(|_| SysError::EIO)?;
+    Ok(contents)
 }
 
 /// Linux sys_mmap implementation
@@ -3431,12 +3181,12 @@ pub fn sys_mmap(
         if offset != 0 {
             return Err(SysError::EINVAL);
         }
-        LinuxMappingSource::Anonymous
+        linux_process_memory::LinuxMappingSource::Anonymous
     } else {
         if !page_aligned(offset as usize) {
             return Err(SysError::EINVAL);
         }
-        LinuxMappingSource::File {
+        linux_process_memory::LinuxMappingSource::File {
             fd,
             offset,
             path: linux_fxfs_path_for_fd(fd, true)?,
@@ -3448,12 +3198,10 @@ pub fn sys_mmap(
     }
 
     let len = roundup_pages(len);
-    let state = memory_state();
     let requested = if flags.contains(MmapFlags::FIXED) {
         if !fixed_linux_mmap_request_ok(addr, len) {
             return Err(SysError::EINVAL);
         }
-        let _ = unmap_linux_range(state, addr, len);
         Some(addr)
     } else if addr != 0 && page_aligned(addr) {
         Some(addr)
@@ -3461,31 +3209,16 @@ pub fn sys_mmap(
         None
     };
 
-    let vaddr = state
-        .find_free_linux_region(requested, len)
-        .ok_or(SysError::ENOMEM)?;
-    let pfns = MemorySyscallState::alloc_linux_pages(pages(len)).ok_or(SysError::ENOMEM)?;
-
-    state.linux_mappings.push(LinuxMappingRecord {
-        addr: vaddr,
+    let contents = linux_read_mmap_contents(&source, len)?;
+    let vaddr = linux_process_memory::map_current_with_contents(
+        requested,
         len,
-        prot: prot.bits(),
-        flags: flags.bits(),
-        pfns,
-        source: source.clone(),
-    });
-    state.sort_linux_mappings();
-
-    linux_zero_user(vaddr, len)?;
-    if let LinuxMappingSource::File { offset, path, .. } = &source {
-        let attrs = fxfs::attrs(path.as_str()).map_err(|_| SysError::EIO)?;
-        let offset = *offset as usize;
-        if offset < attrs.size {
-            let read_len = core::cmp::min(len, attrs.size - offset);
-            let out = unsafe { core::slice::from_raw_parts_mut(vaddr as *mut u8, read_len) };
-            let _ = fxfs::read_file_at(path.as_str(), offset, out).map_err(|_| SysError::EIO)?;
-        }
-    }
+        prot.bits(),
+        flags.bits(),
+        source.clone(),
+        flags.contains(MmapFlags::FIXED),
+        &contents,
+    )?;
 
     Ok(vaddr)
 }
@@ -3503,7 +3236,8 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: usize) -> SysResult {
         return Err(SysError::EINVAL);
     }
 
-    update_linux_protection(memory_state(), addr, roundup_pages(len), prot.bits())
+    linux_process_memory::protect_current(addr, roundup_pages(len), prot.bits())?;
+    Ok(0)
 }
 
 /// Linux sys_munmap implementation
@@ -3514,7 +3248,11 @@ pub fn sys_munmap(addr: usize, len: usize) -> SysResult {
         return Err(SysError::EINVAL);
     }
 
-    unmap_linux_range(memory_state(), addr, roundup_pages(len))
+    let detached = linux_process_memory::unmap_current(addr, roundup_pages(len))?;
+    for (id, mapping_address) in detached {
+        memory_state().detach_shared_memory(Some(id), mapping_address);
+    }
+    Ok(0)
 }
 
 /// Linux sys_brk implementation
@@ -3531,43 +3269,7 @@ pub fn sys_munmap(addr: usize, len: usize) -> SysResult {
 pub fn sys_brk(new_brk: usize) -> SysResult {
     info!("brk: new_brk={:#x}", new_brk);
 
-    let state = memory_state();
-    let old_brk = state.brk.current;
-
-    if new_brk == 0 {
-        return Ok(state.brk.current);
-    }
-    if new_brk < state.brk.start || new_brk > state.brk.limit {
-        return Ok(state.brk.current);
-    }
-
-    let old_pages = pages(state.brk.current.saturating_sub(state.brk.start));
-    let new_pages = pages(new_brk.saturating_sub(state.brk.start));
-
-    if new_pages > old_pages {
-        let mut newly_allocated = Vec::with_capacity(new_pages - old_pages);
-        for _ in old_pages..new_pages {
-            if let Some(pfn) = PageFrameAllocator::alloc() {
-                newly_allocated.push(pfn);
-            } else {
-                MemorySyscallState::free_linux_pages(&newly_allocated);
-                return Ok(state.brk.current);
-            }
-        }
-        state.brk.pfns.extend(newly_allocated);
-    } else if new_pages < old_pages {
-        for _ in new_pages..old_pages {
-            if let Some(pfn) = state.brk.pfns.pop() {
-                PageFrameAllocator::free(pfn);
-            }
-        }
-    }
-
-    state.brk.current = new_brk;
-    if new_brk > old_brk {
-        let _ = linux_zero_user(old_brk, new_brk - old_brk);
-    }
-    Ok(state.brk.current)
+    linux_process_memory::brk_current(new_brk)
 }
 
 /// Linux sys_mremap implementation
@@ -3616,86 +3318,22 @@ pub fn sys_mremap(
 
     let old_len = roundup_pages(old_size);
     let new_len = roundup_pages(new_size);
-    let state = memory_state();
-    let Some(index) = state
-        .linux_mappings
-        .iter()
-        .position(|mapping| mapping.addr == old_address && mapping.len == old_len)
-    else {
-        return Err(SysError::EINVAL);
-    };
-
-    if new_len == old_len {
-        return Ok(old_address);
-    }
-
-    if new_len < old_len {
-        let mapping = state.linux_mappings.remove(index);
-        let keep_pages = new_len / PAGE_SIZE;
-        let mut keep_pfns = mapping.pfns;
-        let tail_pfns = keep_pfns.split_off(keep_pages);
-        MemorySyscallState::free_linux_pages(&tail_pfns);
-        state.linux_mappings.push(LinuxMappingRecord {
-            addr: old_address,
-            len: new_len,
-            prot: mapping.prot,
-            flags: mapping.flags,
-            pfns: keep_pfns,
-            source: mapping.source,
-        });
-        state.sort_linux_mappings();
-        return Ok(old_address);
-    }
-
-    let extra_len = new_len - old_len;
-    let grow_start = checked_end(old_address, old_len).ok_or(SysError::EINVAL)?;
-    if flags & MREMAP_FIXED == 0 && state.linux_range_available(grow_start, extra_len) {
-        let extra_pfns =
-            MemorySyscallState::alloc_linux_pages(extra_len / PAGE_SIZE).ok_or(SysError::ENOMEM)?;
-        state.linux_mappings[index].len = new_len;
-        state.linux_mappings[index].pfns.extend(extra_pfns);
-        state.sort_linux_mappings();
-        return Ok(old_address);
-    }
-
-    if flags & MREMAP_MAYMOVE == 0 {
-        return Err(SysError::ENOMEM);
-    }
-
-    let requested_addr = if flags & MREMAP_FIXED != 0 {
+    let fixed = if flags & MREMAP_FIXED != 0 {
         if new_address == 0 || !page_aligned(new_address) {
             return Err(SysError::EINVAL);
         }
-        let _ = unmap_linux_range(state, new_address, new_len);
         Some(new_address)
     } else {
         None
     };
-
-    let new_addr = state
-        .find_free_linux_region(requested_addr, new_len)
-        .ok_or(SysError::ENOMEM)?;
-    let new_pfns =
-        MemorySyscallState::alloc_linux_pages(new_len / PAGE_SIZE).ok_or(SysError::ENOMEM)?;
-    let prot = state.linux_mappings[index].prot;
-    let flags_bits = state.linux_mappings[index].flags;
-    let source = state.linux_mappings[index].source.clone();
-
-    if flags & MREMAP_DONTUNMAP == 0 {
-        let old_mapping = state.linux_mappings.swap_remove(index);
-        MemorySyscallState::free_linux_pages(&old_mapping.pfns);
-    }
-
-    state.linux_mappings.push(LinuxMappingRecord {
-        addr: new_addr,
-        len: new_len,
-        prot,
-        flags: flags_bits,
-        pfns: new_pfns,
-        source,
-    });
-    state.sort_linux_mappings();
-    Ok(new_addr)
+    linux_process_memory::remap_current(
+        old_address,
+        old_len,
+        new_len,
+        flags & MREMAP_MAYMOVE != 0,
+        fixed,
+        flags & MREMAP_DONTUNMAP != 0,
+    )
 }
 
 /// Linux sys_write implementation
@@ -3995,10 +3633,11 @@ fn linux_zero_user(ptr: usize, len: usize) -> SysResult {
     if !syscall_logic::user_buffer_valid(ptr, len) {
         return Err(SysError::EFAULT);
     }
+    #[cfg(target_arch = "aarch64")]
+    linux_process_memory::zero_current(ptr, len)?;
+    #[cfg(not(target_arch = "aarch64"))]
     if len != 0 {
-        unsafe {
-            core::ptr::write_bytes(ptr as *mut u8, 0, len);
-        }
+        unsafe { core::ptr::write_bytes(ptr as *mut u8, 0, len) };
     }
     Ok(0)
 }
@@ -4007,7 +3646,9 @@ fn linux_read_u64_user(ptr: usize) -> Result<u64, SysError> {
     if !syscall_logic::user_buffer_valid(ptr, core::mem::size_of::<u64>()) {
         return Err(SysError::EFAULT);
     }
-    Ok(unsafe { core::ptr::read(ptr as *const u64) })
+    let mut bytes = [0u8; core::mem::size_of::<u64>()];
+    linux_copy_from_user(ptr, &mut bytes)?;
+    Ok(u64::from_ne_bytes(bytes))
 }
 
 fn linux_signal_user_range_readable(address: usize, len: usize) -> bool {
@@ -4443,11 +4084,11 @@ pub fn sys_openat(dirfd: usize, path: usize, flags: usize, _mode: usize) -> SysR
     if object_type == ObjectType::LinuxFile
         && access_mode == LINUX_O_RDONLY
         && flags & LINUX_O_CREAT == 0
-        && !linux_path_visible(path_str)
+        && !linux_path_visible(&path_str)
     {
         return Err(SysError::ENOENT);
     }
-    let fxfs_cursor = linux_prepare_fxfs_cursor(path_str, object_type, flags, access_mode)?;
+    let fxfs_cursor = linux_prepare_fxfs_cursor(&path_str, object_type, flags, access_mode)?;
     let handle = compat::create_object(object_type).map_err(|_| SysError::ENOMEM)?;
     let readable = access_mode != LINUX_O_WRONLY;
     let writable = access_mode != LINUX_O_RDONLY;
@@ -4491,7 +4132,7 @@ pub fn sys_faccessat(_dirfd: usize, path: usize, mode: usize, _flags: usize) -> 
         return Err(SysError::EINVAL);
     }
     let path_str = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
-    if !linux_path_visible(path_str) {
+    if !linux_path_visible(&path_str) {
         return Err(SysError::ENOENT);
     }
     Ok(0)
@@ -4700,7 +4341,7 @@ pub fn sys_readlinkat(_dirfd: usize, path: usize, buf: usize, len: usize) -> Sys
         }
         return Ok(write_len);
     }
-    if !linux_path_visible(path_str) {
+    if !linux_path_visible(&path_str) {
         return Err(SysError::ENOENT);
     }
     Ok(0)
@@ -4734,10 +4375,10 @@ pub fn sys_fstatat(_dirfd: usize, path: usize, stat_ptr: usize, flags: usize) ->
         return Err(SysError::EINVAL);
     }
     let path_str = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
-    if let Ok((object_id, attrs)) = fxfs::attrs_with_object_id(path_str) {
+    if let Ok((object_id, attrs)) = fxfs::attrs_with_object_id(&path_str) {
         return linux_write_stat_from_attrs(stat_ptr, object_id, attrs);
     }
-    if !linux_path_visible(path_str) {
+    if !linux_path_visible(&path_str) {
         return Err(SysError::ENOENT);
     }
     linux_write_stat(stat_ptr)
@@ -5647,15 +5288,11 @@ pub fn sys_shmat(id: usize, addr: usize, _shmflg: usize) -> SysResult {
             0,
         )
     })?;
-    let state = memory_state();
-    if let Some(mapping) = state.linux_mappings.iter_mut().find(|mapping| {
-        mapping.addr == mapped
-            && mapping.len == size
-            && matches!(mapping.source, LinuxMappingSource::Anonymous)
-    }) {
-        mapping.source = LinuxMappingSource::SharedMemory { id: id as u32 };
+    if !linux_process_memory::mark_shared(mapped, size, id as u32) {
+        let _ = linux_process_memory::unmap_current(mapped, size);
+        return Err(SysError::EINVAL);
     }
-    state.attach_shared_memory(id as u32, mapped, size);
+    memory_state().attach_shared_memory(id as u32, mapped, size);
     Ok(mapped)
 }
 
@@ -7068,48 +6705,12 @@ pub(crate) fn linux_clone_tid_destination_valid(pointer: usize) -> bool {
 
 #[cfg(target_arch = "aarch64")]
 fn linux_user_range_writable(address: usize, len: usize) -> bool {
-    let state = memory_state();
-    let linux_mappings = state.linux_mappings.iter().map(|mapping| {
-        (
-            mapping.addr,
-            mapping.len,
-            mapping.prot & MmapProt::WRITE.bits() != 0,
-        )
-    });
-    let brk = (state.brk.current > state.brk.start).then_some((
-        state.brk.start,
-        state.brk.current - state.brk.start,
-        true,
-    ));
-    let initial_stack = state
-        .linux_initial_stack
-        .map(|(start, range_len)| (start, range_len, true));
-
-    shared_linux_user_range_writable(address, len, linux_mappings.chain(brk).chain(initial_stack))
+    linux_process_memory::user_range_writable(address, len)
 }
 
 #[cfg(target_arch = "aarch64")]
 pub(crate) fn linux_user_range_readable(address: usize, len: usize) -> bool {
-    let state = memory_state();
-    let linux_mappings = state.linux_mappings.iter().map(|mapping| {
-        (
-            mapping.addr,
-            mapping.len,
-            mapping.prot & MmapProt::READ.bits() != 0,
-            mapping.prot & MmapProt::WRITE.bits() != 0,
-        )
-    });
-    let brk = (state.brk.current > state.brk.start).then_some((
-        state.brk.start,
-        state.brk.current - state.brk.start,
-        true,
-        true,
-    ));
-    let initial_stack = state
-        .linux_initial_stack
-        .map(|(start, range_len)| (start, range_len, true, true));
-
-    shared_linux_user_range_readable(address, len, linux_mappings.chain(brk).chain(initial_stack))
+    linux_process_memory::user_range_readable(address, len)
 }
 
 pub fn sys_clone3(_args: usize, _size: usize) -> SysResult {
@@ -7132,9 +6733,7 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
     info!("wait4: pid={}, options={:#x}", pid, options);
 
     if wstatus != 0 {
-        unsafe {
-            core::ptr::write(wstatus as *mut i32, 0);
-        }
+        linux_copy_to_user(wstatus, &0i32.to_ne_bytes())?;
     }
 
     if pid > 0 {

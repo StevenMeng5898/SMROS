@@ -5,6 +5,7 @@ verus! {
 include!("../../../src/syscall/address_logic_shared.rs");
 include!("../../../src/syscall/linux_futex_logic_shared.rs");
 include!("../../../src/syscall/linux_process_logic_shared.rs");
+include!("../../../src/syscall/linux_process_memory_logic_shared.rs");
 include!("../../../src/syscall/linux_task_logic_shared.rs");
 include!("../../../src/syscall/syscall_bridge_shared.rs");
 include!("../../../src/syscall/syscall_logic_shared.rs");

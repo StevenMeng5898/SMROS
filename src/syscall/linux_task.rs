@@ -148,10 +148,15 @@ pub(crate) fn exit_current(exit_code: i32) -> ! {
         if clear_child_tid != 0
             && crate::syscall::syscall::linux_clone_tid_destination_valid(clear_child_tid)
         {
-            unsafe {
-                core::ptr::write(clear_child_tid as *mut u32, 0);
+            if super::linux_process_memory::copy_to_process(
+                transition.task.tgid,
+                clear_child_tid,
+                &0u32.to_ne_bytes(),
+            )
+            .is_ok()
+            {
+                return Some(clear_child_tid);
             }
-            return Some(clear_child_tid);
         }
         None
     });
@@ -654,57 +659,114 @@ mod aarch64_clone {
     }
 
     pub(crate) fn copy_clone_tids(reservation: LinuxTaskReservation) -> Result<(), SysError> {
-        with_runtime(|runtime| {
+        let pid = current_tgid()?;
+        let (addresses, tid) = with_runtime(|runtime| {
             let slot = runtime
                 .clone_slots
-                .get_mut(reservation.slot)
+                .get(reservation.slot)
                 .filter(|slot| slot.matches(reservation) && !slot.committed)
                 .ok_or(SysError::EAGAIN)?;
             let tid = linux_tid_to_user_value(reservation.tid).ok_or(SysError::EAGAIN)?;
-
-            for destination in [&slot.parent_tid, &slot.child_tid] {
-                if destination.address != 0
-                    && !crate::syscall::syscall::linux_clone_tid_destination_valid(
-                        destination.address,
-                    )
-                {
-                    return Err(SysError::EFAULT);
-                }
+            Ok(([slot.parent_tid.address, slot.child_tid.address], tid))
+        })?;
+        for address in addresses.into_iter().filter(|address| *address != 0) {
+            if !crate::syscall::syscall::linux_clone_tid_destination_valid(address) {
+                return Err(SysError::EFAULT);
             }
-            for destination in [&mut slot.parent_tid, &mut slot.child_tid] {
-                if destination.address != 0 {
-                    destination.original =
-                        unsafe { core::ptr::read(destination.address as *const u32) };
-                }
+        }
+        let mut originals = [0u32; 2];
+        for (index, address) in addresses.into_iter().enumerate() {
+            if address != 0 {
+                let mut bytes = [0u8; core::mem::size_of::<u32>()];
+                crate::syscall::linux_process_memory::copy_from_process(pid, address, &mut bytes)?;
+                originals[index] = u32::from_ne_bytes(bytes);
             }
-            for destination in [&mut slot.parent_tid, &mut slot.child_tid] {
-                if destination.address != 0 {
-                    unsafe {
-                        core::ptr::write(destination.address as *mut u32, tid);
+        }
+        let mut written = [false; 2];
+        for (index, address) in addresses.into_iter().enumerate() {
+            if address != 0 {
+                if let Err(error) = crate::syscall::linux_process_memory::copy_to_process(
+                    pid,
+                    address,
+                    &tid.to_ne_bytes(),
+                ) {
+                    for rollback in 0..index {
+                        if written[rollback] {
+                            let _ = crate::syscall::linux_process_memory::copy_to_process(
+                                pid,
+                                addresses[rollback],
+                                &originals[rollback].to_ne_bytes(),
+                            );
+                        }
                     }
-                    destination.written = true;
+                    return Err(error);
                 }
+                written[index] = true;
             }
-            Ok(())
-        })
-    }
-
-    pub(crate) fn restore_clone_tid_destinations(reservation: LinuxTaskReservation) {
-        with_runtime(|runtime| {
+        }
+        let committed = with_runtime(|runtime| {
             let Some(slot) = runtime
                 .clone_slots
                 .get_mut(reservation.slot)
                 .filter(|slot| slot.matches(reservation) && !slot.committed)
             else {
-                return;
+                return false;
             };
-            for destination in [&mut slot.parent_tid, &mut slot.child_tid] {
-                if destination.written {
-                    unsafe {
-                        core::ptr::write(destination.address as *mut u32, destination.original);
-                    }
-                    destination.written = false;
+            for (index, destination) in [&mut slot.parent_tid, &mut slot.child_tid]
+                .into_iter()
+                .enumerate()
+            {
+                destination.original = originals[index];
+                destination.written = written[index];
+            }
+            true
+        });
+        if committed {
+            Ok(())
+        } else {
+            for index in 0..2 {
+                if written[index] {
+                    let _ = crate::syscall::linux_process_memory::copy_to_process(
+                        pid,
+                        addresses[index],
+                        &originals[index].to_ne_bytes(),
+                    );
                 }
+            }
+            Err(SysError::EAGAIN)
+        }
+    }
+
+    pub(crate) fn restore_clone_tid_destinations(reservation: LinuxTaskReservation) {
+        let Ok(pid) = current_tgid() else {
+            return;
+        };
+        let Some(destinations) = with_runtime(|runtime| {
+            runtime
+                .clone_slots
+                .get(reservation.slot)
+                .filter(|slot| slot.matches(reservation) && !slot.committed)
+                .map(|slot| [slot.parent_tid, slot.child_tid])
+        }) else {
+            return;
+        };
+        for destination in destinations {
+            if destination.written {
+                let _ = crate::syscall::linux_process_memory::copy_to_process(
+                    pid,
+                    destination.address,
+                    &destination.original.to_ne_bytes(),
+                );
+            }
+        }
+        with_runtime(|runtime| {
+            if let Some(slot) = runtime
+                .clone_slots
+                .get_mut(reservation.slot)
+                .filter(|slot| slot.matches(reservation) && !slot.committed)
+            {
+                slot.parent_tid.written = false;
+                slot.child_tid.written = false;
             }
         });
     }

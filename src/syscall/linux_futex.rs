@@ -1,6 +1,8 @@
 use crate::kernel_lowlevel::thread;
 use crate::kernel_objects::scheduler;
 
+#[cfg(target_arch = "aarch64")]
+use super::linux_process_memory;
 use super::linux_task;
 use super::linux_task::{LinuxBlockReason, LinuxRestartTimeout};
 #[cfg(target_arch = "aarch64")]
@@ -112,7 +114,12 @@ fn wait(
         crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
         return Err(SysError::EFAULT);
     }
-    let observed = unsafe { core::ptr::read(uaddr as *const u32) };
+    let mut observed_bytes = [0u8; core::mem::size_of::<u32>()];
+    if linux_process_memory::copy_from_current(uaddr, &mut observed_bytes).is_err() {
+        crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+        return Err(SysError::EFAULT);
+    }
+    let observed = u32::from_ne_bytes(observed_bytes);
     if !futex_wait_value_matches(observed, expected) {
         crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
         return Err(SysError::EAGAIN);
@@ -222,14 +229,18 @@ fn read_deadline(
     {
         return Err(SysError::EFAULT);
     }
-    let timeout =
-        unsafe { core::ptr::read_unaligned(timeout_pointer as *const LinuxFutexTimespec) };
+    let mut timeout_bytes = [0u8; core::mem::size_of::<LinuxFutexTimespec>()];
+    linux_process_memory::copy_from_current(timeout_pointer, &mut timeout_bytes)?;
+    let mut seconds = [0u8; core::mem::size_of::<i64>()];
+    let mut nanoseconds = [0u8; core::mem::size_of::<i64>()];
+    seconds.copy_from_slice(&timeout_bytes[..core::mem::size_of::<i64>()]);
+    nanoseconds.copy_from_slice(&timeout_bytes[core::mem::size_of::<i64>()..]);
     futex_deadline_from_timeout(
         command,
         realtime,
         now_monotonic,
-        timeout.seconds,
-        timeout.nanoseconds,
+        i64::from_ne_bytes(seconds),
+        i64::from_ne_bytes(nanoseconds),
         LINUX_FUTEX_TICK_NANOS,
     )
     .map(Some)

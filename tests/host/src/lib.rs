@@ -2388,6 +2388,126 @@ mod linux_process_logic {
     }
 }
 
+mod linux_process_memory_logic {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/linux_process_memory_logic_shared.rs"
+    ));
+
+    #[test]
+    fn process_memory_metadata_is_independent_per_pid() {
+        let mut first = LinuxProcessMemoryCore::<4>::new(1, 0x4000).unwrap();
+        let mut second = LinuxProcessMemoryCore::<4>::new(2, 0x8000).unwrap();
+
+        assert!(first.set_initial_stack(0x1ffd_f000, 0x20_000));
+        assert!(first.set_brk(0x1200_0000, 0x1200_3000, 0x1210_0000));
+        assert!(first.push_mapping(LinuxProcessMappingCore {
+            owner_pid: 1,
+            addr: 0x1300_0000,
+            len: 0x2000,
+            prot: LINUX_PROT_READ | LINUX_PROT_WRITE,
+            flags: LINUX_MAP_PRIVATE,
+        }));
+
+        assert_eq!(first.root_paddr, 0x4000);
+        assert_eq!(first.mapping_count(), 1);
+        assert_eq!(first.initial_stack, Some((0x1ffd_f000, 0x20_000)));
+        assert_eq!(first.brk.current, 0x1200_3000);
+        assert_eq!(second.root_paddr, 0x8000);
+        assert_eq!(second.mapping_count(), 0);
+        assert_eq!(second.initial_stack, None);
+        assert_eq!(first.next_addr, second.next_addr);
+        assert!(first.set_next_addr(0x1400_0000));
+        assert_ne!(first.next_addr, second.next_addr);
+
+        assert!(!second.push_mapping(LinuxProcessMappingCore {
+            owner_pid: 1,
+            addr: 0x1400_0000,
+            len: 0x1000,
+            prot: LINUX_PROT_READ,
+            flags: LINUX_MAP_PRIVATE,
+        }));
+    }
+
+    #[test]
+    fn private_and_shared_backing_have_exact_reference_rules() {
+        let private = LinuxPageBacking::Private { pfn: 17 };
+        let shared = LinuxPageBacking::Shared {
+            object_id: 9,
+            page_index: 2,
+            pfn: 33,
+        };
+
+        assert_eq!(private.pfn(), 17);
+        assert_eq!(shared.pfn(), 33);
+        assert!(!private.is_shared());
+        assert!(shared.is_shared());
+        assert_eq!(linux_shared_reference_acquire(1), Some(2));
+        assert_eq!(linux_shared_reference_release(2), Some(1));
+        assert_eq!(linux_shared_reference_release(1), Some(0));
+        assert_eq!(linux_shared_reference_acquire(usize::MAX), None);
+        assert_eq!(linux_shared_reference_release(0), None);
+    }
+
+    #[test]
+    fn checked_copy_chunks_cross_pages_without_skipping_bytes() {
+        let mut address = 0x1000_0ff0usize;
+        let mut remaining = 0x1020usize;
+        let mut chunks = [0usize; 3];
+        let mut count = 0usize;
+
+        while remaining != 0 {
+            let chunk = linux_user_copy_chunk(address, remaining, LINUX_PAGE_SIZE).unwrap();
+            chunks[count] = chunk;
+            count += 1;
+            address += chunk;
+            remaining -= chunk;
+        }
+
+        assert_eq!(&chunks[..count], &[0x10, 0x1000, 0x10]);
+        assert!(linux_mapping_allows(LINUX_PROT_READ, false));
+        assert!(!linux_mapping_allows(LINUX_PROT_READ, true));
+        assert!(linux_mapping_allows(LINUX_PROT_WRITE, true));
+        assert_eq!(linux_user_copy_chunk(0x1000, 1, 0), None);
+    }
+
+    #[test]
+    fn mapping_coverage_accepts_adjacent_ranges_and_rejects_gaps() {
+        let adjacent = [
+            LinuxMappingRange {
+                addr: 0x1200_0000,
+                len: 0x1000,
+            },
+            LinuxMappingRange {
+                addr: 0x1200_1000,
+                len: 0x2000,
+            },
+        ];
+        let gapped = [
+            LinuxMappingRange {
+                addr: 0x1200_0000,
+                len: 0x1000,
+            },
+            LinuxMappingRange {
+                addr: 0x1200_2000,
+                len: 0x1000,
+            },
+        ];
+
+        assert!(linux_mapping_range_covered(
+            &adjacent,
+            0x1200_0800,
+            0x1800
+        ));
+        assert!(!linux_mapping_range_covered(
+            &gapped,
+            0x1200_0800,
+            0x1800
+        ));
+        assert!(!linux_mapping_range_covered(&adjacent, usize::MAX, 2));
+    }
+}
+
 mod linux_syscall_context_logic {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
