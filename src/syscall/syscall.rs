@@ -133,6 +133,7 @@ pub enum SysError {
     ENOTDIR = 20,
     EISDIR = 21,
     EINVAL = 22,
+    ESPIPE = 29,
     ENOSYS = 38,
     ENOTSOCK = 88,
     ETIMEDOUT = 110,
@@ -527,6 +528,9 @@ const LINUX_STAT_ALLOWED_FLAGS: usize = LINUX_AT_SYMLINK_NOFOLLOW | LINUX_AT_EMP
 const LINUX_STATX_BASIC_STATS: usize = 0x7ff;
 const LINUX_SEEK_MAX_WHENCE: usize = 5;
 const LINUX_MAX_IOV: usize = 1024;
+const LINUX_IO_STAGING_BYTES: usize = 256;
+const ZIRCON_MAX_IOV: usize = 1024;
+const ZIRCON_IO_STAGING_BYTES: usize = 256;
 const LINUX_MAX_POLL_FDS: usize = 1024;
 const LINUX_POLL_ALLOWED_EVENTS: i16 = 0x0001 | 0x0004 | 0x0008 | 0x0010 | 0x0020 | 0x0040;
 const LINUX_AF_UNIX: usize = 1;
@@ -764,6 +768,13 @@ struct LinuxIovec {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+struct ZirconIovec {
+    base: usize,
+    len: usize,
+}
+
+#[repr(C)]
 struct LinuxPollFd {
     fd: i32,
     events: i16,
@@ -813,6 +824,614 @@ struct LinuxCapUserData {
     effective: u32,
     permitted: u32,
     inheritable: u32,
+}
+
+fn linux_put_wire_field(bytes: &mut [u8], offset: usize, field: &[u8]) -> Result<(), SysError> {
+    let end = offset.checked_add(field.len()).ok_or(SysError::EFAULT)?;
+    let destination = bytes.get_mut(offset..end).ok_or(SysError::EFAULT)?;
+    destination.copy_from_slice(field);
+    Ok(())
+}
+
+fn linux_wire_field<const N: usize>(bytes: &[u8], offset: usize) -> Result<[u8; N], SysError> {
+    let end = offset.checked_add(N).ok_or(SysError::EFAULT)?;
+    let source = bytes.get(offset..end).ok_or(SysError::EFAULT)?;
+    let mut field = [0u8; N];
+    field.copy_from_slice(source);
+    Ok(field)
+}
+
+fn linux_kernel_buffer(len: usize) -> Result<Vec<u8>, SysError> {
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(len).map_err(|_| SysError::ENOMEM)?;
+    bytes.resize(len, 0);
+    Ok(bytes)
+}
+
+fn linux_write_user_u32(address: usize, value: u32) -> SysResult {
+    linux_copy_to_user(address, &value.to_ne_bytes())?;
+    Ok(0)
+}
+
+fn linux_write_user_i32(address: usize, value: i32) -> SysResult {
+    linux_copy_to_user(address, &value.to_ne_bytes())?;
+    Ok(0)
+}
+
+fn linux_write_user_i32_pair(address: usize, first: i32, second: i32) -> SysResult {
+    let mut bytes = [0u8; core::mem::size_of::<[i32; 2]>()];
+    linux_put_wire_field(&mut bytes, 0, &first.to_ne_bytes())?;
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::size_of::<i32>(),
+        &second.to_ne_bytes(),
+    )?;
+    linux_copy_to_user(address, &bytes)?;
+    Ok(0)
+}
+
+fn linux_write_user_u64(address: usize, value: u64) -> SysResult {
+    linux_copy_to_user(address, &value.to_ne_bytes())?;
+    Ok(0)
+}
+
+fn linux_write_user_usize(address: usize, value: usize) -> SysResult {
+    linux_copy_to_user(address, &value.to_ne_bytes())?;
+    Ok(0)
+}
+
+fn linux_read_user_u32(address: usize) -> Result<u32, SysError> {
+    let mut bytes = [0u8; core::mem::size_of::<u32>()];
+    linux_copy_from_user(address, &mut bytes)?;
+    Ok(u32::from_ne_bytes(bytes))
+}
+
+fn linux_fill_user(address: usize, len: usize, value: u8) -> SysResult {
+    if len == 0 {
+        return Ok(0);
+    }
+    if !linux_user_buffer_writable(address, len) {
+        return Err(SysError::EFAULT);
+    }
+    let bytes = [value; 256];
+    let mut offset = 0usize;
+    while offset < len {
+        let chunk = core::cmp::min(bytes.len(), len - offset);
+        linux_copy_to_user(
+            address.checked_add(offset).ok_or(SysError::EFAULT)?,
+            &bytes[..chunk],
+        )?;
+        offset += chunk;
+    }
+    Ok(0)
+}
+
+fn linux_write_user_timespec(address: usize, value: LinuxTimespec) -> SysResult {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxTimespec>()];
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxTimespec, tv_sec),
+        &value.tv_sec.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxTimespec, tv_nsec),
+        &value.tv_nsec.to_ne_bytes(),
+    )?;
+    linux_copy_to_user(address, &bytes)?;
+    Ok(0)
+}
+
+fn linux_encode_timeval(
+    bytes: &mut [u8],
+    offset: usize,
+    value: LinuxTimeval,
+) -> Result<(), SysError> {
+    linux_put_wire_field(
+        bytes,
+        offset
+            .checked_add(core::mem::offset_of!(LinuxTimeval, tv_sec))
+            .ok_or(SysError::EFAULT)?,
+        &value.tv_sec.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        bytes,
+        offset
+            .checked_add(core::mem::offset_of!(LinuxTimeval, tv_usec))
+            .ok_or(SysError::EFAULT)?,
+        &value.tv_usec.to_ne_bytes(),
+    )
+}
+
+fn linux_decode_timeval(bytes: &[u8], offset: usize) -> Result<LinuxTimeval, SysError> {
+    let seconds_offset = offset
+        .checked_add(core::mem::offset_of!(LinuxTimeval, tv_sec))
+        .ok_or(SysError::EFAULT)?;
+    let microseconds_offset = offset
+        .checked_add(core::mem::offset_of!(LinuxTimeval, tv_usec))
+        .ok_or(SysError::EFAULT)?;
+    Ok(LinuxTimeval {
+        tv_sec: i64::from_ne_bytes(linux_wire_field(bytes, seconds_offset)?),
+        tv_usec: i64::from_ne_bytes(linux_wire_field(bytes, microseconds_offset)?),
+    })
+}
+
+fn linux_write_user_timeval(address: usize, value: LinuxTimeval) -> SysResult {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxTimeval>()];
+    linux_encode_timeval(&mut bytes, 0, value)?;
+    linux_copy_to_user(address, &bytes)?;
+    Ok(0)
+}
+
+fn linux_write_user_itimerval(address: usize, value: LinuxItimerval) -> SysResult {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxItimerval>()];
+    linux_encode_timeval(
+        &mut bytes,
+        core::mem::offset_of!(LinuxItimerval, it_interval),
+        value.it_interval,
+    )?;
+    linux_encode_timeval(
+        &mut bytes,
+        core::mem::offset_of!(LinuxItimerval, it_value),
+        value.it_value,
+    )?;
+    linux_copy_to_user(address, &bytes)?;
+    Ok(0)
+}
+
+fn linux_read_user_itimerval(address: usize) -> Result<LinuxItimerval, SysError> {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxItimerval>()];
+    linux_copy_from_user(address, &mut bytes)?;
+    Ok(LinuxItimerval {
+        it_interval: linux_decode_timeval(
+            &bytes,
+            core::mem::offset_of!(LinuxItimerval, it_interval),
+        )?,
+        it_value: linux_decode_timeval(&bytes, core::mem::offset_of!(LinuxItimerval, it_value))?,
+    })
+}
+
+fn linux_write_user_signal_stack(address: usize, value: LinuxSignalStack) -> SysResult {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxSignalStack>()];
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxSignalStack, sp),
+        &value.sp.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxSignalStack, flags),
+        &value.flags.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxSignalStack, size),
+        &value.size.to_ne_bytes(),
+    )?;
+    linux_copy_to_user(address, &bytes)?;
+    Ok(0)
+}
+
+fn linux_read_user_signal_stack(address: usize) -> Result<LinuxSignalStack, SysError> {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxSignalStack>()];
+    linux_copy_from_user(address, &mut bytes)?;
+    Ok(LinuxSignalStack {
+        sp: u64::from_ne_bytes(linux_wire_field(
+            &bytes,
+            core::mem::offset_of!(LinuxSignalStack, sp),
+        )?),
+        flags: u32::from_ne_bytes(linux_wire_field(
+            &bytes,
+            core::mem::offset_of!(LinuxSignalStack, flags),
+        )?),
+        _padding: 0,
+        size: u64::from_ne_bytes(linux_wire_field(
+            &bytes,
+            core::mem::offset_of!(LinuxSignalStack, size),
+        )?),
+    })
+}
+
+fn linux_write_user_statfs(address: usize, value: LinuxStatFs) -> SysResult {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxStatFs>()];
+    for (offset, field) in [
+        (
+            core::mem::offset_of!(LinuxStatFs, f_type),
+            value.f_type.to_ne_bytes(),
+        ),
+        (
+            core::mem::offset_of!(LinuxStatFs, f_bsize),
+            value.f_bsize.to_ne_bytes(),
+        ),
+    ] {
+        linux_put_wire_field(&mut bytes, offset, &field)?;
+    }
+    for (offset, field) in [
+        (core::mem::offset_of!(LinuxStatFs, f_blocks), value.f_blocks),
+        (core::mem::offset_of!(LinuxStatFs, f_bfree), value.f_bfree),
+        (core::mem::offset_of!(LinuxStatFs, f_bavail), value.f_bavail),
+        (core::mem::offset_of!(LinuxStatFs, f_files), value.f_files),
+        (core::mem::offset_of!(LinuxStatFs, f_ffree), value.f_ffree),
+    ] {
+        linux_put_wire_field(&mut bytes, offset, &field.to_ne_bytes())?;
+    }
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxStatFs, f_fsid),
+        &value.f_fsid.0.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxStatFs, f_fsid) + core::mem::size_of::<i32>(),
+        &value.f_fsid.1.to_ne_bytes(),
+    )?;
+    for (offset, field) in [
+        (
+            core::mem::offset_of!(LinuxStatFs, f_namelen),
+            value.f_namelen,
+        ),
+        (core::mem::offset_of!(LinuxStatFs, f_frsize), value.f_frsize),
+        (core::mem::offset_of!(LinuxStatFs, f_flags), value.f_flags),
+    ] {
+        linux_put_wire_field(&mut bytes, offset, &field.to_ne_bytes())?;
+    }
+    for (index, field) in value.f_spare.iter().enumerate() {
+        linux_put_wire_field(
+            &mut bytes,
+            core::mem::offset_of!(LinuxStatFs, f_spare) + index * core::mem::size_of::<isize>(),
+            &field.to_ne_bytes(),
+        )?;
+    }
+    linux_copy_to_user(address, &bytes)?;
+    Ok(0)
+}
+
+fn linux_write_user_utsname(address: usize, value: &LinuxUtsname) -> SysResult {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxUtsname>()];
+    for (offset, field) in [
+        (core::mem::offset_of!(LinuxUtsname, sysname), &value.sysname),
+        (
+            core::mem::offset_of!(LinuxUtsname, nodename),
+            &value.nodename,
+        ),
+        (core::mem::offset_of!(LinuxUtsname, release), &value.release),
+        (core::mem::offset_of!(LinuxUtsname, version), &value.version),
+        (core::mem::offset_of!(LinuxUtsname, machine), &value.machine),
+        (
+            core::mem::offset_of!(LinuxUtsname, domainname),
+            &value.domainname,
+        ),
+    ] {
+        linux_put_wire_field(&mut bytes, offset, field)?;
+    }
+    linux_copy_to_user(address, &bytes)?;
+    Ok(0)
+}
+
+fn linux_write_user_tms(address: usize, value: LinuxTms) -> SysResult {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxTms>()];
+    for (offset, field) in [
+        (core::mem::offset_of!(LinuxTms, tms_utime), value.tms_utime),
+        (core::mem::offset_of!(LinuxTms, tms_stime), value.tms_stime),
+        (
+            core::mem::offset_of!(LinuxTms, tms_cutime),
+            value.tms_cutime,
+        ),
+        (
+            core::mem::offset_of!(LinuxTms, tms_cstime),
+            value.tms_cstime,
+        ),
+    ] {
+        linux_put_wire_field(&mut bytes, offset, &field.to_ne_bytes())?;
+    }
+    linux_copy_to_user(address, &bytes)?;
+    Ok(0)
+}
+
+fn linux_write_user_rusage(address: usize, value: LinuxRusage) -> SysResult {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxRusage>()];
+    linux_encode_timeval(
+        &mut bytes,
+        core::mem::offset_of!(LinuxRusage, ru_utime),
+        value.ru_utime,
+    )?;
+    linux_encode_timeval(
+        &mut bytes,
+        core::mem::offset_of!(LinuxRusage, ru_stime),
+        value.ru_stime,
+    )?;
+    for (index, field) in value.rest.iter().enumerate() {
+        linux_put_wire_field(
+            &mut bytes,
+            core::mem::offset_of!(LinuxRusage, rest) + index * core::mem::size_of::<isize>(),
+            &field.to_ne_bytes(),
+        )?;
+    }
+    linux_copy_to_user(address, &bytes)?;
+    Ok(0)
+}
+
+fn linux_write_user_rlimit64(address: usize, value: LinuxRlimit64) -> SysResult {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxRlimit64>()];
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxRlimit64, rlim_cur),
+        &value.rlim_cur.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxRlimit64, rlim_max),
+        &value.rlim_max.to_ne_bytes(),
+    )?;
+    linux_copy_to_user(address, &bytes)?;
+    Ok(0)
+}
+
+fn linux_read_user_rlimit64(address: usize) -> Result<LinuxRlimit64, SysError> {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxRlimit64>()];
+    linux_copy_from_user(address, &mut bytes)?;
+    Ok(LinuxRlimit64 {
+        rlim_cur: u64::from_ne_bytes(linux_wire_field(
+            &bytes,
+            core::mem::offset_of!(LinuxRlimit64, rlim_cur),
+        )?),
+        rlim_max: u64::from_ne_bytes(linux_wire_field(
+            &bytes,
+            core::mem::offset_of!(LinuxRlimit64, rlim_max),
+        )?),
+    })
+}
+
+fn linux_write_user_sysinfo(address: usize, value: LinuxSysinfo) -> SysResult {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxSysinfo>()];
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxSysinfo, uptime),
+        &value.uptime.to_ne_bytes(),
+    )?;
+    for (index, field) in value.loads.iter().enumerate() {
+        linux_put_wire_field(
+            &mut bytes,
+            core::mem::offset_of!(LinuxSysinfo, loads) + index * core::mem::size_of::<usize>(),
+            &field.to_ne_bytes(),
+        )?;
+    }
+    for (offset, field) in [
+        (
+            core::mem::offset_of!(LinuxSysinfo, totalram),
+            value.totalram,
+        ),
+        (core::mem::offset_of!(LinuxSysinfo, freeram), value.freeram),
+        (
+            core::mem::offset_of!(LinuxSysinfo, sharedram),
+            value.sharedram,
+        ),
+        (
+            core::mem::offset_of!(LinuxSysinfo, bufferram),
+            value.bufferram,
+        ),
+        (
+            core::mem::offset_of!(LinuxSysinfo, totalswap),
+            value.totalswap,
+        ),
+        (
+            core::mem::offset_of!(LinuxSysinfo, freeswap),
+            value.freeswap,
+        ),
+        (
+            core::mem::offset_of!(LinuxSysinfo, totalhigh),
+            value.totalhigh,
+        ),
+        (
+            core::mem::offset_of!(LinuxSysinfo, freehigh),
+            value.freehigh,
+        ),
+    ] {
+        linux_put_wire_field(&mut bytes, offset, &field.to_ne_bytes())?;
+    }
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxSysinfo, procs),
+        &value.procs.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxSysinfo, pad),
+        &value.pad.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxSysinfo, mem_unit),
+        &value.mem_unit.to_ne_bytes(),
+    )?;
+    linux_copy_to_user(address, &bytes)?;
+    Ok(0)
+}
+
+fn linux_read_user_iovec(address: usize) -> Result<LinuxIovec, SysError> {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxIovec>()];
+    linux_copy_from_user(address, &mut bytes)?;
+    Ok(LinuxIovec {
+        base: usize::from_ne_bytes(linux_wire_field(
+            &bytes,
+            core::mem::offset_of!(LinuxIovec, base),
+        )?),
+        len: usize::from_ne_bytes(linux_wire_field(
+            &bytes,
+            core::mem::offset_of!(LinuxIovec, len),
+        )?),
+    })
+}
+
+fn linux_read_user_iovecs(
+    iov_ptr: usize,
+    iov_count: usize,
+    buffers_writable: bool,
+) -> Result<Vec<LinuxIovec>, SysError> {
+    if iov_count == 0 {
+        return Ok(Vec::new());
+    }
+    if !syscall_logic::linux_iov_count_valid(iov_count, LINUX_MAX_IOV)
+        || !syscall_logic::linux_iov_bytes_valid(
+            iov_count,
+            core::mem::size_of::<LinuxIovec>(),
+            LINUX_MAX_IOV,
+        )
+    {
+        return Err(SysError::EINVAL);
+    }
+    let byte_len = iov_count
+        .checked_mul(core::mem::size_of::<LinuxIovec>())
+        .ok_or(SysError::EINVAL)?;
+    if !linux_user_buffer_readable(iov_ptr, byte_len) {
+        return Err(SysError::EFAULT);
+    }
+
+    let mut iovecs = Vec::new();
+    iovecs
+        .try_reserve_exact(iov_count)
+        .map_err(|_| SysError::ENOMEM)?;
+    for index in 0..iov_count {
+        let iov = linux_read_user_iovec(
+            iov_ptr
+                .checked_add(index * core::mem::size_of::<LinuxIovec>())
+                .ok_or(SysError::EFAULT)?,
+        )?;
+        if iov.len != 0 {
+            let accessible = if buffers_writable {
+                linux_user_buffer_writable(iov.base, iov.len)
+            } else {
+                linux_user_buffer_readable(iov.base, iov.len)
+            };
+            if iov.base == 0 || !accessible {
+                return Err(SysError::EFAULT);
+            }
+        }
+        iovecs.push(iov);
+    }
+    Ok(iovecs)
+}
+
+fn linux_read_user_poll_fd(address: usize) -> Result<LinuxPollFd, SysError> {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxPollFd>()];
+    linux_copy_from_user(address, &mut bytes)?;
+    Ok(LinuxPollFd {
+        fd: i32::from_ne_bytes(linux_wire_field(
+            &bytes,
+            core::mem::offset_of!(LinuxPollFd, fd),
+        )?),
+        events: i16::from_ne_bytes(linux_wire_field(
+            &bytes,
+            core::mem::offset_of!(LinuxPollFd, events),
+        )?),
+        revents: i16::from_ne_bytes(linux_wire_field(
+            &bytes,
+            core::mem::offset_of!(LinuxPollFd, revents),
+        )?),
+    })
+}
+
+fn linux_write_user_poll_fd(address: usize, value: LinuxPollFd) -> SysResult {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxPollFd>()];
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxPollFd, fd),
+        &value.fd.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxPollFd, events),
+        &value.events.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxPollFd, revents),
+        &value.revents.to_ne_bytes(),
+    )?;
+    linux_copy_to_user(address, &bytes)?;
+    Ok(0)
+}
+
+fn linux_encode_cap_user_data(
+    value: LinuxCapUserData,
+) -> Result<[u8; core::mem::size_of::<LinuxCapUserData>()], SysError> {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxCapUserData>()];
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxCapUserData, effective),
+        &value.effective.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxCapUserData, permitted),
+        &value.permitted.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxCapUserData, inheritable),
+        &value.inheritable.to_ne_bytes(),
+    )?;
+    Ok(bytes)
+}
+
+fn linux_decode_cap_user_data(bytes: &[u8]) -> Result<LinuxCapUserData, SysError> {
+    Ok(LinuxCapUserData {
+        effective: u32::from_ne_bytes(linux_wire_field(
+            bytes,
+            core::mem::offset_of!(LinuxCapUserData, effective),
+        )?),
+        permitted: u32::from_ne_bytes(linux_wire_field(
+            bytes,
+            core::mem::offset_of!(LinuxCapUserData, permitted),
+        )?),
+        inheritable: u32::from_ne_bytes(linux_wire_field(
+            bytes,
+            core::mem::offset_of!(LinuxCapUserData, inheritable),
+        )?),
+    })
+}
+
+fn linux_read_user_cap_header(address: usize) -> Result<LinuxCapUserHeader, SysError> {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxCapUserHeader>()];
+    linux_copy_from_user(address, &mut bytes)?;
+    Ok(LinuxCapUserHeader {
+        version: u32::from_ne_bytes(linux_wire_field(
+            &bytes,
+            core::mem::offset_of!(LinuxCapUserHeader, version),
+        )?),
+        pid: i32::from_ne_bytes(linux_wire_field(
+            &bytes,
+            core::mem::offset_of!(LinuxCapUserHeader, pid),
+        )?),
+    })
+}
+
+fn linux_write_user_cap_header(address: usize, value: LinuxCapUserHeader) -> SysResult {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxCapUserHeader>()];
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxCapUserHeader, version),
+        &value.version.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        core::mem::offset_of!(LinuxCapUserHeader, pid),
+        &value.pid.to_ne_bytes(),
+    )?;
+    linux_copy_to_user(address, &bytes)?;
+    Ok(0)
+}
+
+fn linux_read_user_cap_data(address: usize) -> Result<LinuxCapUserData, SysError> {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxCapUserData>()];
+    linux_copy_from_user(address, &mut bytes)?;
+    linux_decode_cap_user_data(&bytes)
+}
+
+fn linux_write_user_cap_data(address: usize, value: LinuxCapUserData) -> SysResult {
+    let bytes = linux_encode_cap_user_data(value)?;
+    linux_copy_to_user(address, &bytes)?;
+    Ok(0)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -2172,6 +2791,9 @@ pub(crate) fn register_linux_initial_stack(address: usize, len: usize) -> bool {
 
 pub fn reset_linux_process_state() {
     linux_futex::reset();
+    if let Ok(pid) = linux_process::current_pid() {
+        let _ = linux_process_memory::unregister(pid);
+    }
     linux_process_memory::reset_launch();
     linux_task::reset();
     let fds = memory_state()
@@ -3336,26 +3958,15 @@ pub fn sys_mremap(
     )
 }
 
-/// Linux sys_write implementation
-pub fn sys_write(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
-    info!("write: fd={}, buf={:#x}, len={:#x}", fd, buf_ptr, len);
-
-    if len == 0 {
-        return Ok(0);
-    }
-    if buf_ptr == 0 {
-        return Err(SysError::EFAULT);
-    }
-
+pub(crate) fn linux_fd_write_bytes(fd: usize, buf: &[u8]) -> SysResult {
     match fd {
         1 | 2 => {
-            let buf = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
             let mut serial = crate::kernel_lowlevel::serial::Serial::new();
             serial.init();
             for byte in buf {
                 serial.write_byte(*byte);
             }
-            Ok(len)
+            Ok(buf.len())
         }
         _ => {
             let handle = memory_state()
@@ -3363,7 +3974,6 @@ pub fn sys_write(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
                 .filter(|record| record.writable)
                 .map(|record| record.handle)
                 .ok_or(SysError::ENODEV)?;
-            let buf = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
             if socket::socket_table().contains(HandleValue(handle)) {
                 return socket::socket_table()
                     .write(HandleValue(handle), buf)
@@ -3379,23 +3989,12 @@ pub fn sys_write(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
     }
 }
 
-/// Linux sys_read implementation.
-pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
-    info!("read: fd={}, buf={:#x}, len={:#x}", fd, buf_ptr, len);
-
-    if len == 0 {
-        return Ok(0);
-    }
-    if buf_ptr == 0 {
-        return Err(SysError::EFAULT);
-    }
-
+pub(crate) fn linux_fd_read_bytes(fd: usize, out: &mut [u8]) -> SysResult {
     let handle = memory_state()
         .get_fd(fd)
         .filter(|record| record.readable)
         .map(|record| record.handle)
         .ok_or(SysError::ENODEV)?;
-    let out = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, len) };
 
     if socket::socket_table().contains(HandleValue(handle)) {
         return match socket::socket_table().read(HandleValue(handle), 0, out) {
@@ -3416,6 +4015,186 @@ pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
     }
 }
 
+fn linux_datagram_socket_info(fd: usize) -> Option<socket::SocketInfo> {
+    let handle = memory_state().get_fd(fd)?.handle;
+    let info = socket::socket_table().info(HandleValue(handle))?;
+    if info.options & socket::SOCKET_DATAGRAM != 0 {
+        Some(info)
+    } else {
+        None
+    }
+}
+
+fn linux_datagram_buffer(len: usize) -> Result<Vec<u8>, SysError> {
+    if len > socket::SOCKET_SIZE {
+        return Err(SysError::EIO);
+    }
+    let mut staging = Vec::new();
+    staging
+        .try_reserve_exact(len)
+        .map_err(|_| SysError::ENOMEM)?;
+    staging.resize(len, 0);
+    Ok(staging)
+}
+
+fn linux_datagram_write(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
+    let mut staging = linux_datagram_buffer(len)?;
+    if len != 0 {
+        linux_copy_from_user(buf_ptr, &mut staging)?;
+    }
+    linux_fd_write_bytes(fd, &staging)
+}
+
+fn linux_datagram_read(
+    fd: usize,
+    buf_ptr: usize,
+    len: usize,
+    info: socket::SocketInfo,
+) -> SysResult {
+    let available = usize::try_from(info.rx_buf_available).map_err(|_| SysError::EIO)?;
+    let read_len = core::cmp::min(len, core::cmp::min(available, socket::SOCKET_SIZE));
+    let mut staging = linux_datagram_buffer(read_len)?;
+    let read = linux_fd_read_bytes(fd, &mut staging)?;
+    if read != 0 {
+        linux_copy_to_user(buf_ptr, &staging[..read])?;
+    }
+    Ok(read)
+}
+
+fn linux_datagram_iov_len(iovecs: &[LinuxIovec]) -> Result<usize, SysError> {
+    iovecs.iter().try_fold(0usize, |total, iov| {
+        total.checked_add(iov.len).ok_or(SysError::EINVAL)
+    })
+}
+
+fn linux_datagram_writev(fd: usize, iovecs: &[LinuxIovec]) -> SysResult {
+    let len = linux_datagram_iov_len(iovecs)?;
+    let mut staging = linux_datagram_buffer(len)?;
+    let mut offset = 0usize;
+    for iov in iovecs {
+        if iov.len == 0 {
+            continue;
+        }
+        let end = offset.checked_add(iov.len).ok_or(SysError::EINVAL)?;
+        linux_copy_from_user(iov.base, &mut staging[offset..end])?;
+        offset = end;
+    }
+    linux_fd_write_bytes(fd, &staging)
+}
+
+fn linux_datagram_readv(fd: usize, iovecs: &[LinuxIovec], info: socket::SocketInfo) -> SysResult {
+    let len = linux_datagram_iov_len(iovecs)?;
+    let available = usize::try_from(info.rx_buf_available).map_err(|_| SysError::EIO)?;
+    let read_len = core::cmp::min(len, core::cmp::min(available, socket::SOCKET_SIZE));
+    let mut staging = linux_datagram_buffer(read_len)?;
+    let read = linux_fd_read_bytes(fd, &mut staging)?;
+    let mut offset = 0usize;
+    for iov in iovecs {
+        let remaining = read.checked_sub(offset).ok_or(SysError::EIO)?;
+        let count = core::cmp::min(iov.len, remaining);
+        if count != 0 {
+            linux_copy_to_user(iov.base, &staging[offset..offset + count])?;
+            offset += count;
+        }
+        if offset == read {
+            break;
+        }
+    }
+    Ok(read)
+}
+
+fn linux_fd_rollback_read_bytes(fd: usize, bytes: &[u8]) -> Result<(), SysError> {
+    let handle = memory_state()
+        .get_fd(fd)
+        .filter(|record| record.readable)
+        .map(|record| record.handle)
+        .ok_or(SysError::ENODEV)?;
+
+    if let Some(file) = memory_state().linux_fxfs_file_mut(handle) {
+        let restored = file
+            .cursor
+            .offset()
+            .checked_sub(bytes.len())
+            .ok_or(SysError::EIO)?;
+        fxfs::seek_cursor(&mut file.cursor, restored).map_err(|_| SysError::EIO)?;
+        return Ok(());
+    }
+
+    if compat::table().restore_read_bytes(HandleValue(handle), bytes) {
+        Ok(())
+    } else {
+        Err(SysError::EIO)
+    }
+}
+
+/// Linux sys_write implementation
+pub fn sys_write(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
+    info!("write: fd={}, buf={:#x}, len={:#x}", fd, buf_ptr, len);
+
+    if len != 0 && !linux_user_buffer_readable(buf_ptr, len) {
+        return Err(SysError::EFAULT);
+    }
+    if linux_datagram_socket_info(fd).is_some() {
+        return linux_datagram_write(fd, buf_ptr, len);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+    let mut staging = [0u8; LINUX_IO_STAGING_BYTES];
+    let mut total = 0usize;
+    while total < len {
+        let chunk = core::cmp::min(staging.len(), len - total);
+        linux_copy_from_user(
+            buf_ptr.checked_add(total).ok_or(SysError::EFAULT)?,
+            &mut staging[..chunk],
+        )?;
+        let written = match linux_fd_write_bytes(fd, &staging[..chunk]) {
+            Ok(written) => written,
+            Err(error) => return if total == 0 { Err(error) } else { Ok(total) },
+        };
+        total = total.saturating_add(written);
+        if written < chunk {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+/// Linux sys_read implementation.
+pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
+    info!("read: fd={}, buf={:#x}, len={:#x}", fd, buf_ptr, len);
+
+    if len != 0 && !linux_user_buffer_writable(buf_ptr, len) {
+        return Err(SysError::EFAULT);
+    }
+    if let Some(info) = linux_datagram_socket_info(fd) {
+        return linux_datagram_read(fd, buf_ptr, len, info);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+    let mut staging = [0u8; LINUX_IO_STAGING_BYTES];
+    let mut total = 0usize;
+    while total < len {
+        let chunk = core::cmp::min(staging.len(), len - total);
+        let read = match linux_fd_read_bytes(fd, &mut staging[..chunk]) {
+            Ok(read) => read,
+            Err(error) => return if total == 0 { Err(error) } else { Ok(total) },
+        };
+        if let Err(error) = linux_copy_to_user(
+            buf_ptr.checked_add(total).ok_or(SysError::EFAULT)?,
+            &staging[..read],
+        ) {
+            return if total == 0 { Err(error) } else { Ok(total) };
+        }
+        total = total.saturating_add(read);
+        if read < chunk {
+            break;
+        }
+    }
+    Ok(total)
+}
+
 /// Linux sys_close implementation.
 pub fn sys_close(fd: usize) -> SysResult {
     let Some(record) = memory_state().close_fd_record(fd) else {
@@ -3434,7 +4213,7 @@ pub fn sys_pipe2(fds_ptr: usize, flags: usize) -> SysResult {
     if !syscall_logic::linux_pipe_flags_valid(flags, LINUX_PIPE_ALLOWED_FLAGS) {
         return Err(SysError::EINVAL);
     }
-    if fds_ptr == 0 {
+    if !linux_user_buffer_writable(fds_ptr, core::mem::size_of::<[i32; 2]>()) {
         return Err(SysError::EFAULT);
     }
 
@@ -3444,10 +4223,10 @@ pub fn sys_pipe2(fds_ptr: usize, flags: usize) -> SysResult {
     let read_fd = state.alloc_fd(read_handle.0, true, false);
     let write_fd = state.alloc_fd(write_handle.0, false, true);
 
-    unsafe {
-        let out = fds_ptr as *mut i32;
-        core::ptr::write(out, read_fd as i32);
-        core::ptr::write(out.add(1), write_fd as i32);
+    if let Err(error) = linux_write_user_i32_pair(fds_ptr, read_fd as i32, write_fd as i32) {
+        let _ = sys_close(read_fd);
+        let _ = sys_close(write_fd);
+        return Err(error);
     }
 
     Ok(0)
@@ -3492,12 +4271,24 @@ pub fn sys_getrandom(buf_ptr: usize, len: usize, flags: u32) -> SysResult {
         return Ok(0);
     }
 
+    if !linux_user_buffer_writable(buf_ptr, len) {
+        return Err(SysError::EFAULT);
+    }
     let seed = monotonic_nanos() as u8;
-    let out = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, len) };
-    for (index, byte) in out.iter_mut().enumerate() {
-        *byte = seed
-            .wrapping_add((index as u8).wrapping_mul(37))
-            .wrapping_add(0xA5);
+    let mut out = [0u8; LINUX_IO_STAGING_BYTES];
+    let mut total = 0usize;
+    while total < len {
+        let chunk = core::cmp::min(out.len(), len - total);
+        for (index, byte) in out[..chunk].iter_mut().enumerate() {
+            *byte = seed
+                .wrapping_add(((total + index) as u8).wrapping_mul(37))
+                .wrapping_add(0xA5);
+        }
+        linux_copy_to_user(
+            buf_ptr.checked_add(total).ok_or(SysError::EFAULT)?,
+            &out[..chunk],
+        )?;
+        total += chunk;
     }
     Ok(len)
 }
@@ -3629,17 +4420,35 @@ fn linux_socket_fd_handle(fd: usize) -> Result<u32, SysError> {
     }
 }
 
+fn linux_user_buffer_readable(address: usize, len: usize) -> bool {
+    if !syscall_logic::user_buffer_valid(address, len) {
+        return false;
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        return linux_user_range_readable(address, len);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    true
+}
+
+fn linux_user_buffer_writable(address: usize, len: usize) -> bool {
+    if !syscall_logic::user_buffer_valid(address, len) {
+        return false;
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        return linux_user_range_writable(address, len);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    true
+}
+
 fn linux_zero_user(ptr: usize, len: usize) -> SysResult {
     if !syscall_logic::user_buffer_valid(ptr, len) {
         return Err(SysError::EFAULT);
     }
-    #[cfg(target_arch = "aarch64")]
-    linux_process_memory::zero_current(ptr, len)?;
-    #[cfg(not(target_arch = "aarch64"))]
-    if len != 0 {
-        unsafe { core::ptr::write_bytes(ptr as *mut u8, 0, len) };
-    }
-    Ok(0)
+    linux_fill_user(ptr, len, 0)
 }
 
 fn linux_read_u64_user(ptr: usize) -> Result<u64, SysError> {
@@ -3651,52 +4460,138 @@ fn linux_read_u64_user(ptr: usize) -> Result<u64, SysError> {
     Ok(u64::from_ne_bytes(bytes))
 }
 
+#[derive(Clone, Copy)]
+struct LinuxCopyOffset {
+    address: usize,
+    initial: u64,
+}
+
+fn linux_read_user_copy_offset(address: usize) -> Result<Option<LinuxCopyOffset>, SysError> {
+    if address == 0 {
+        return Ok(None);
+    }
+    if !linux_user_buffer_writable(address, core::mem::size_of::<u64>()) {
+        return Err(SysError::EFAULT);
+    }
+    Ok(Some(LinuxCopyOffset {
+        address,
+        initial: linux_read_u64_user(address)?,
+    }))
+}
+
+fn linux_positioned_fxfs_file(
+    fd: usize,
+    offset: Option<LinuxCopyOffset>,
+    writable: bool,
+) -> Result<Option<LinuxFxfsFileRecord>, SysError> {
+    let Some(offset) = offset else {
+        return Ok(None);
+    };
+    let state = memory_state();
+    let record = state
+        .get_fd(fd)
+        .filter(|record| {
+            if writable {
+                record.writable
+            } else {
+                record.readable
+            }
+        })
+        .ok_or(SysError::ENODEV)?;
+    let mut file = state
+        .linux_fxfs_file(record.handle)
+        .cloned()
+        .ok_or(SysError::ESPIPE)?;
+    let offset = usize::try_from(offset.initial).map_err(|_| SysError::EINVAL)?;
+    fxfs::position_cursor(&mut file.cursor, offset).map_err(|_| SysError::EINVAL)?;
+    Ok(Some(file))
+}
+
+fn linux_rollback_copy_offsets(
+    input: Option<LinuxCopyOffset>,
+    output: Option<LinuxCopyOffset>,
+    completed: usize,
+) -> Result<(), SysError> {
+    let mut result = Ok(());
+    for offset in [input, output].into_iter().flatten() {
+        if let Err(error) = linux_write_user_u64(
+            offset.address,
+            offset.initial.saturating_add(completed as u64),
+        ) {
+            result = Err(error);
+        }
+    }
+    result
+}
+
+fn linux_commit_copy_offsets(
+    input: Option<LinuxCopyOffset>,
+    output: Option<LinuxCopyOffset>,
+    completed: usize,
+    next_completed: usize,
+) -> Result<(), SysError> {
+    for offset in [input, output].into_iter().flatten() {
+        if let Err(error) = linux_write_user_u64(
+            offset.address,
+            offset.initial.saturating_add(next_completed as u64),
+        ) {
+            let _ = linux_rollback_copy_offsets(input, output, completed);
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn linux_copy_file_read_bytes(
+    fd: usize,
+    positioned: &mut Option<LinuxFxfsFileRecord>,
+    out: &mut [u8],
+) -> SysResult {
+    if let Some(file) = positioned.as_mut() {
+        fxfs::cursor_read(&mut file.cursor, out).map_err(|_| SysError::EIO)
+    } else {
+        linux_fd_read_bytes(fd, out)
+    }
+}
+
+fn linux_copy_file_write_bytes(
+    fd: usize,
+    positioned: &mut Option<LinuxFxfsFileRecord>,
+    bytes: &[u8],
+) -> SysResult {
+    if let Some(file) = positioned.as_mut() {
+        fxfs::cursor_write(&mut file.cursor, bytes).map_err(|_| SysError::EIO)
+    } else {
+        linux_fd_write_bytes(fd, bytes)
+    }
+}
+
+fn linux_copy_file_rollback_read(
+    fd: usize,
+    positioned: &Option<LinuxFxfsFileRecord>,
+    bytes: &[u8],
+) -> Result<(), SysError> {
+    if positioned.is_some() {
+        Ok(())
+    } else {
+        linux_fd_rollback_read_bytes(fd, bytes)
+    }
+}
+
 fn linux_signal_user_range_readable(address: usize, len: usize) -> bool {
-    if !syscall_logic::user_buffer_valid(address, len) {
-        return false;
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        return linux_user_range_readable(address, len);
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    true
+    linux_user_buffer_readable(address, len)
 }
 
 fn linux_signal_user_range_writable(address: usize, len: usize) -> bool {
-    if !syscall_logic::user_buffer_valid(address, len) {
-        return false;
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        return linux_user_range_writable(address, len);
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    true
+    linux_user_buffer_writable(address, len)
 }
 
 fn linux_sleep_user_range_readable(address: usize, len: usize) -> bool {
-    if !syscall_logic::user_buffer_valid(address, len) {
-        return false;
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        return linux_user_range_readable(address, len);
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    true
+    linux_user_buffer_readable(address, len)
 }
 
 fn linux_sleep_user_range_writable(address: usize, len: usize) -> bool {
-    if !syscall_logic::user_buffer_valid(address, len) {
-        return false;
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        return linux_user_range_writable(address, len);
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    true
+    linux_user_buffer_writable(address, len)
 }
 
 fn linux_read_sleep_timespec(address: usize) -> Result<LinuxTimespec, SysError> {
@@ -3900,10 +4795,8 @@ fn linux_write_cstr(buf: usize, len: usize, value: &[u8]) -> SysResult {
     if value.len().saturating_add(1) > len {
         return Err(SysError::EINVAL);
     }
-    unsafe {
-        core::ptr::copy_nonoverlapping(value.as_ptr(), buf as *mut u8, value.len());
-        core::ptr::write((buf + value.len()) as *mut u8, 0);
-    }
+    linux_copy_to_user(buf, value)?;
+    linux_copy_to_user(buf.checked_add(value.len()).ok_or(SysError::EFAULT)?, &[0])?;
     Ok(buf)
 }
 
@@ -3928,16 +4821,28 @@ fn linux_write_stat_from_attrs(
 
     let size = core::cmp::min(attrs.size, i64::MAX as usize) as i64;
     let blocks = ((attrs.size.saturating_add(511)) / 512) as i64;
-    unsafe {
-        core::ptr::write_unaligned((stat_ptr + ST_DEV_OFF) as *mut u64, device);
-        core::ptr::write_unaligned((stat_ptr + ST_INO_OFF) as *mut u64, inode);
-        core::ptr::write_unaligned((stat_ptr + ST_MODE_OFF) as *mut u32, attrs.mode);
-        core::ptr::write_unaligned((stat_ptr + ST_NLINK_OFF) as *mut u32, attrs.link_count);
-        core::ptr::write_unaligned((stat_ptr + ST_UID_OFF) as *mut u32, attrs.uid);
-        core::ptr::write_unaligned((stat_ptr + ST_GID_OFF) as *mut u32, attrs.gid);
-        core::ptr::write_unaligned((stat_ptr + ST_SIZE_OFF) as *mut i64, size);
-        core::ptr::write_unaligned((stat_ptr + ST_BLKSIZE_OFF) as *mut i32, PAGE_SIZE as i32);
-        core::ptr::write_unaligned((stat_ptr + ST_BLOCKS_OFF) as *mut i64, blocks);
+    for (offset, bytes) in [
+        (ST_DEV_OFF, device.to_ne_bytes()),
+        (ST_INO_OFF, inode.to_ne_bytes()),
+        (ST_SIZE_OFF, size.to_ne_bytes()),
+        (ST_BLOCKS_OFF, blocks.to_ne_bytes()),
+    ] {
+        linux_copy_to_user(
+            stat_ptr.checked_add(offset).ok_or(SysError::EFAULT)?,
+            &bytes,
+        )?;
+    }
+    for (offset, bytes) in [
+        (ST_MODE_OFF, attrs.mode.to_ne_bytes()),
+        (ST_NLINK_OFF, attrs.link_count.to_ne_bytes()),
+        (ST_UID_OFF, attrs.uid.to_ne_bytes()),
+        (ST_GID_OFF, attrs.gid.to_ne_bytes()),
+        (ST_BLKSIZE_OFF, (PAGE_SIZE as i32).to_ne_bytes()),
+    ] {
+        linux_copy_to_user(
+            stat_ptr.checked_add(offset).ok_or(SysError::EFAULT)?,
+            &bytes,
+        )?;
     }
     Ok(0)
 }
@@ -3963,26 +4868,23 @@ fn linux_write_statfs(buf: usize) -> SysResult {
     if buf == 0 {
         return Err(SysError::EFAULT);
     }
-    unsafe {
-        core::ptr::write(
-            buf as *mut LinuxStatFs,
-            LinuxStatFs {
-                f_type: 0x534d_524f,
-                f_bsize: PAGE_SIZE as i64,
-                f_blocks: 256,
-                f_bfree: 128,
-                f_bavail: 128,
-                f_files: 256,
-                f_ffree: 128,
-                f_fsid: (0, 0),
-                f_namelen: 255,
-                f_frsize: PAGE_SIZE as isize,
-                f_flags: 0,
-                f_spare: [0; 4],
-            },
-        );
-    }
-    Ok(0)
+    linux_write_user_statfs(
+        buf,
+        LinuxStatFs {
+            f_type: 0x534d_524f,
+            f_bsize: PAGE_SIZE as i64,
+            f_blocks: 256,
+            f_bfree: 128,
+            f_bavail: 128,
+            f_files: 256,
+            f_ffree: 128,
+            f_fsid: (0, 0),
+            f_namelen: 255,
+            f_frsize: PAGE_SIZE as isize,
+            f_flags: 0,
+            f_spare: [0; 4],
+        },
+    )
 }
 
 fn linux_write_uts_field(field: &mut [u8; 65], value: &[u8]) {
@@ -4340,11 +5242,7 @@ pub fn sys_readlinkat(_dirfd: usize, path: usize, buf: usize, len: usize) -> Sys
         };
         let bytes = exec_path.as_bytes();
         let write_len = core::cmp::min(len, bytes.len());
-        if write_len != 0 {
-            unsafe {
-                core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, write_len);
-            }
-        }
+        linux_copy_to_user(buf, &bytes[..write_len])?;
         return Ok(write_len);
     }
     if !linux_path_visible(&path_str) {
@@ -4627,11 +5525,7 @@ pub fn sys_getdents64(fd: usize, buf: usize, len: usize) -> SysResult {
     if !syscall_logic::user_buffer_valid(buf, len) {
         return Err(SysError::EFAULT);
     }
-    if len != 0 {
-        unsafe {
-            core::ptr::write_bytes(buf as *mut u8, 0, len);
-        }
-    }
+    linux_zero_user(buf, len)?;
     Ok(0)
 }
 
@@ -4691,9 +5585,37 @@ pub fn sys_pread(fd: usize, buf: usize, len: usize, offset: u64) -> SysResult {
     };
 
     if let Some(mut file) = file {
-        let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) };
-        fxfs::seek_cursor(&mut file.cursor, offset as usize).map_err(|_| SysError::EINVAL)?;
-        return fxfs::cursor_read(&mut file.cursor, out).map_err(|_| SysError::EIO);
+        if !linux_user_buffer_writable(buf, len) {
+            return Err(SysError::EFAULT);
+        }
+        let offset = usize::try_from(offset).map_err(|_| SysError::EINVAL)?;
+        fxfs::position_cursor(&mut file.cursor, offset).map_err(|_| SysError::EINVAL)?;
+        let mut staging = [0u8; LINUX_IO_STAGING_BYTES];
+        let mut total = 0usize;
+        while total < len {
+            let chunk = core::cmp::min(staging.len(), len - total);
+            let read = match fxfs::cursor_read(&mut file.cursor, &mut staging[..chunk]) {
+                Ok(read) => read,
+                Err(_) => {
+                    return if total == 0 {
+                        Err(SysError::EIO)
+                    } else {
+                        Ok(total)
+                    }
+                }
+            };
+            if let Err(error) = linux_copy_to_user(
+                buf.checked_add(total).ok_or(SysError::EFAULT)?,
+                &staging[..read],
+            ) {
+                return if total == 0 { Err(error) } else { Ok(total) };
+            }
+            total = total.saturating_add(read);
+            if read < chunk {
+                break;
+            }
+        }
+        return Ok(total);
     }
 
     sys_read(fd, buf, len)
@@ -4712,31 +5634,15 @@ pub fn sys_pwritev(fd: usize, iov_ptr: usize, iov_count: usize, _offset: u64) ->
 }
 
 pub fn sys_readv(fd: usize, iov_ptr: usize, iov_count: usize) -> SysResult {
-    if iov_count == 0 {
-        return Ok(0);
-    }
-    if !syscall_logic::linux_iov_count_valid(iov_count, LINUX_MAX_IOV)
-        || !syscall_logic::linux_iov_bytes_valid(
-            iov_count,
-            core::mem::size_of::<LinuxIovec>(),
-            LINUX_MAX_IOV,
-        )
-    {
-        return Err(SysError::EINVAL);
-    }
-    let byte_len = iov_count * core::mem::size_of::<LinuxIovec>();
-    if !syscall_logic::user_buffer_valid(iov_ptr, byte_len) {
-        return Err(SysError::EFAULT);
+    let iovecs = linux_read_user_iovecs(iov_ptr, iov_count, true)?;
+    if let Some(info) = linux_datagram_socket_info(fd) {
+        return linux_datagram_readv(fd, &iovecs, info);
     }
 
-    let iovs = unsafe { core::slice::from_raw_parts(iov_ptr as *const LinuxIovec, iov_count) };
     let mut total = 0usize;
-    for iov in iovs {
+    for iov in iovecs {
         if iov.len == 0 {
             continue;
-        }
-        if iov.base == 0 {
-            return Err(SysError::EFAULT);
         }
         let read = sys_read(fd, iov.base, iov.len)?;
         total = total.saturating_add(read);
@@ -4748,31 +5654,15 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iov_count: usize) -> SysResult {
 }
 
 pub fn sys_writev(fd: usize, iov_ptr: usize, iov_count: usize) -> SysResult {
-    if iov_count == 0 {
-        return Ok(0);
-    }
-    if !syscall_logic::linux_iov_count_valid(iov_count, LINUX_MAX_IOV)
-        || !syscall_logic::linux_iov_bytes_valid(
-            iov_count,
-            core::mem::size_of::<LinuxIovec>(),
-            LINUX_MAX_IOV,
-        )
-    {
-        return Err(SysError::EINVAL);
-    }
-    let byte_len = iov_count * core::mem::size_of::<LinuxIovec>();
-    if !syscall_logic::user_buffer_valid(iov_ptr, byte_len) {
-        return Err(SysError::EFAULT);
+    let iovecs = linux_read_user_iovecs(iov_ptr, iov_count, false)?;
+    if linux_datagram_socket_info(fd).is_some() {
+        return linux_datagram_writev(fd, &iovecs);
     }
 
-    let iovs = unsafe { core::slice::from_raw_parts(iov_ptr as *const LinuxIovec, iov_count) };
     let mut total = 0usize;
-    for iov in iovs {
+    for iov in iovecs {
         if iov.len == 0 {
             continue;
-        }
-        if iov.base == 0 {
-            return Err(SysError::EFAULT);
         }
         total = total.saturating_add(sys_write(fd, iov.base, iov.len)?);
     }
@@ -4797,29 +5687,51 @@ pub fn sys_copy_file_range(
     if !linux_fd_is_file_or_pipe(in_fd) || !linux_fd_is_file_or_pipe(out_fd) {
         return Err(SysError::ENODEV);
     }
+    let input_offset = linux_read_user_copy_offset(in_offset)?;
+    let output_offset = linux_read_user_copy_offset(out_offset)?;
+    let mut positioned_input = linux_positioned_fxfs_file(in_fd, input_offset, false)?;
+    let mut positioned_output = linux_positioned_fxfs_file(out_fd, output_offset, true)?;
     let mut buffer = [0u8; 256];
     let mut total = 0usize;
     while total < count {
         let chunk = core::cmp::min(buffer.len(), count - total);
-        let read = sys_read(in_fd, buffer.as_mut_ptr() as usize, chunk)?;
+        let read = linux_copy_file_read_bytes(in_fd, &mut positioned_input, &mut buffer[..chunk])?;
         if read == 0 {
             break;
         }
-        total = total.saturating_add(sys_write(out_fd, buffer.as_ptr() as usize, read)?);
-        if read < chunk {
+        let next_total = total.saturating_add(read);
+        if let Err(error) =
+            linux_commit_copy_offsets(input_offset, output_offset, total, next_total)
+        {
+            linux_copy_file_rollback_read(in_fd, &positioned_input, &buffer[..read])?;
+            return if total == 0 { Err(error) } else { Ok(total) };
+        }
+        let written =
+            match linux_copy_file_write_bytes(out_fd, &mut positioned_output, &buffer[..read]) {
+                Ok(written) => written,
+                Err(error) => {
+                    linux_rollback_copy_offsets(input_offset, output_offset, total)?;
+                    linux_copy_file_rollback_read(in_fd, &positioned_input, &buffer[..read])?;
+                    return if total == 0 { Err(error) } else { Ok(total) };
+                }
+            };
+        if written > read {
+            return Err(SysError::EIO);
+        }
+        if written < read {
+            let next_written = total.saturating_add(written);
+            let offset_result =
+                linux_rollback_copy_offsets(input_offset, output_offset, next_written);
+            let read_result =
+                linux_copy_file_rollback_read(in_fd, &positioned_input, &buffer[written..read]);
+            offset_result?;
+            read_result?;
+            total = next_written;
             break;
         }
-    }
-    if in_offset != 0 {
-        unsafe {
-            let old = core::ptr::read(in_offset as *const u64);
-            core::ptr::write(in_offset as *mut u64, old.saturating_add(total as u64));
-        }
-    }
-    if out_offset != 0 {
-        unsafe {
-            let old = core::ptr::read(out_offset as *const u64);
-            core::ptr::write(out_offset as *mut u64, old.saturating_add(total as u64));
+        total = next_total;
+        if read < chunk {
+            break;
         }
     }
     Ok(total)
@@ -4866,9 +5778,18 @@ pub fn sys_poll(fds: usize, nfds: usize, _timeout: isize) -> SysResult {
     if !syscall_logic::user_buffer_valid(fds, byte_len) {
         return Err(SysError::EFAULT);
     }
-    let poll_fds = unsafe { core::slice::from_raw_parts_mut(fds as *mut LinuxPollFd, nfds) };
+    let mut poll_fds = Vec::new();
+    poll_fds
+        .try_reserve_exact(nfds)
+        .map_err(|_| SysError::ENOMEM)?;
+    for index in 0..nfds {
+        poll_fds.push(linux_read_user_poll_fd(
+            fds.checked_add(index * core::mem::size_of::<LinuxPollFd>())
+                .ok_or(SysError::EFAULT)?,
+        )?);
+    }
     let mut ready = 0usize;
-    for poll_fd in poll_fds {
+    for poll_fd in poll_fds.iter_mut() {
         poll_fd.revents = 0;
         if poll_fd.fd < 0 {
             continue;
@@ -4892,6 +5813,13 @@ pub fn sys_poll(fds: usize, nfds: usize, _timeout: isize) -> SysResult {
         if poll_fd.revents != 0 {
             ready = ready.saturating_add(1);
         }
+    }
+    for (index, poll_fd) in poll_fds.into_iter().enumerate() {
+        linux_write_user_poll_fd(
+            fds.checked_add(index * core::mem::size_of::<LinuxPollFd>())
+                .ok_or(SysError::EFAULT)?,
+            poll_fd,
+        )?;
     }
     Ok(ready)
 }
@@ -4947,7 +5875,7 @@ pub fn sys_socketpair(
     protocol: usize,
     fds_ptr: usize,
 ) -> SysResult {
-    if fds_ptr == 0 {
+    if !linux_user_buffer_writable(fds_ptr, core::mem::size_of::<[i32; 2]>()) {
         return Err(SysError::EFAULT);
     }
     if !linux_socket_args_valid(domain, socket_type) {
@@ -4974,10 +5902,10 @@ pub fn sys_socketpair(
     let left_fd = state.alloc_fd(left.0, true, true);
     let right_fd = state.alloc_fd(right.0, true, true);
 
-    unsafe {
-        let out = fds_ptr as *mut i32;
-        core::ptr::write(out, left_fd as i32);
-        core::ptr::write(out.add(1), right_fd as i32);
+    if let Err(error) = linux_write_user_i32_pair(fds_ptr, left_fd as i32, right_fd as i32) {
+        let _ = sys_close(left_fd);
+        let _ = sys_close(right_fd);
+        return Err(error);
     }
 
     Ok(0)
@@ -5005,14 +5933,10 @@ pub fn sys_accept(sockfd: usize, addr: usize, addrlen: usize) -> SysResult {
         return Err(SysError::EFAULT);
     }
     if addrlen != 0 {
-        unsafe {
-            core::ptr::write(addrlen as *mut u32, 0);
-        }
+        linux_write_user_u32(addrlen, 0)?;
     }
     if addr != 0 {
-        unsafe {
-            core::ptr::write_bytes(addr as *mut u8, 0, 16);
-        }
+        linux_zero_user(addr, 16)?;
     }
     let record = memory_state()
         .get_fd(sockfd)
@@ -5026,13 +5950,9 @@ pub fn sys_getsockname(sockfd: usize, addr: usize, addrlen: usize) -> SysResult 
     if addr == 0 || addrlen == 0 {
         return Err(SysError::EFAULT);
     }
-    unsafe {
-        let len = core::ptr::read(addrlen as *const u32) as usize;
-        if len != 0 {
-            core::ptr::write_bytes(addr as *mut u8, 0, len);
-        }
-        core::ptr::write(addrlen as *mut u32, 0);
-    }
+    let len = linux_read_user_u32(addrlen)? as usize;
+    linux_zero_user(addr, len)?;
+    linux_write_user_u32(addrlen, 0)?;
     Ok(0)
 }
 
@@ -5065,17 +5985,15 @@ pub fn sys_getsockopt(
     if optlen == 0 {
         return Err(SysError::EFAULT);
     }
-    unsafe {
-        let len = core::ptr::read(optlen as *const u32) as usize;
-        if optval == 0 && len != 0 {
-            return Err(SysError::EFAULT);
-        }
-        if optval != 0 && len >= core::mem::size_of::<u32>() {
-            core::ptr::write(optval as *mut u32, 0);
-            core::ptr::write(optlen as *mut u32, core::mem::size_of::<u32>() as u32);
-        } else {
-            core::ptr::write(optlen as *mut u32, 0);
-        }
+    let len = linux_read_user_u32(optlen)? as usize;
+    if optval == 0 && len != 0 {
+        return Err(SysError::EFAULT);
+    }
+    if optval != 0 && len >= core::mem::size_of::<u32>() {
+        linux_write_user_u32(optval, 0)?;
+        linux_write_user_u32(optlen, core::mem::size_of::<u32>() as u32)?;
+    } else {
+        linux_write_user_u32(optlen, 0)?;
     }
     Ok(0)
 }
@@ -5095,6 +6013,27 @@ pub fn sys_sendto(
     sys_write(sockfd, buf, len)
 }
 
+fn linux_recvfrom_source_length(
+    src_addr: usize,
+    addrlen: usize,
+) -> Result<Option<usize>, SysError> {
+    if src_addr == 0 {
+        return if addrlen == 0 {
+            Ok(None)
+        } else {
+            Err(SysError::EFAULT)
+        };
+    }
+    if !linux_user_buffer_writable(addrlen, core::mem::size_of::<u32>()) {
+        return Err(SysError::EFAULT);
+    }
+    let length = linux_read_user_u32(addrlen)? as usize;
+    if length != 0 && !linux_user_buffer_writable(src_addr, length) {
+        return Err(SysError::EFAULT);
+    }
+    Ok(Some(length))
+}
+
 pub fn sys_recvfrom(
     sockfd: usize,
     buf: usize,
@@ -5104,16 +6043,11 @@ pub fn sys_recvfrom(
     addrlen: usize,
 ) -> SysResult {
     linux_socket_fd_handle(sockfd)?;
-    if src_addr == 0 && addrlen != 0 {
-        return Err(SysError::EFAULT);
-    }
+    let source_length = linux_recvfrom_source_length(src_addr, addrlen)?;
     let read = sys_read(sockfd, buf, len)?;
-    if src_addr != 0 && addrlen != 0 {
-        unsafe {
-            let len = core::ptr::read(addrlen as *const u32) as usize;
-            core::ptr::write_bytes(src_addr as *mut u8, 0, len);
-            core::ptr::write(addrlen as *mut u32, 0);
-        }
+    if let Some(source_length) = source_length {
+        linux_zero_user(src_addr, source_length)?;
+        linux_write_user_u32(addrlen, 0)?;
     }
     Ok(read)
 }
@@ -5207,13 +6141,10 @@ pub fn sys_msgsnd(id: usize, msg_ptr: usize, msg_size: usize, _flags: usize) -> 
     if !syscall_logic::user_buffer_valid(msg_ptr, msg_size) {
         return Err(SysError::EFAULT);
     }
-    let bytes = if msg_size == 0 {
-        &[][..]
-    } else {
-        unsafe { core::slice::from_raw_parts(msg_ptr as *const u8, msg_size) }
-    };
+    let mut bytes = linux_kernel_buffer(msg_size)?;
+    linux_copy_from_user(msg_ptr, &mut bytes)?;
     compat::table()
-        .write_bytes(HandleValue(id as u32), bytes)
+        .write_bytes(HandleValue(id as u32), &bytes)
         .map(|_| 0)
         .map_err(|_| SysError::EIO)
 }
@@ -5234,13 +6165,15 @@ pub fn sys_msgrcv(
     if !syscall_logic::user_buffer_valid(msg_ptr, msg_size) {
         return Err(SysError::EFAULT);
     }
-    let out = if msg_size == 0 {
-        &mut [][..]
-    } else {
-        unsafe { core::slice::from_raw_parts_mut(msg_ptr as *mut u8, msg_size) }
-    };
-    match compat::table().read_bytes(HandleValue(id as u32), out) {
-        Ok(read) => Ok(read),
+    if msg_size != 0 && !linux_user_buffer_writable(msg_ptr, msg_size) {
+        return Err(SysError::EFAULT);
+    }
+    let mut out = linux_kernel_buffer(msg_size)?;
+    match compat::table().read_bytes(HandleValue(id as u32), &mut out) {
+        Ok(read) => {
+            linux_copy_to_user(msg_ptr, &out[..read])?;
+            Ok(read)
+        }
         Err(ZxError::ErrShouldWait) => Ok(0),
         Err(_) => Err(SysError::EIO),
     }
@@ -5619,19 +6552,11 @@ pub fn sys_rt_tgsigqueueinfo(tgid: usize, tid: usize, sig: usize, info: usize) -
 
 pub fn sys_sigaltstack(ss: usize, old_ss: usize) -> SysResult {
     if old_ss != 0 {
-        if !syscall_logic::user_buffer_valid(old_ss, core::mem::size_of::<LinuxSignalStack>()) {
-            return Err(SysError::EFAULT);
-        }
         let current = linux_task::with_current_signal_state(|signal_state| signal_state.alt_stack)?;
-        unsafe {
-            core::ptr::write(old_ss as *mut LinuxSignalStack, current);
-        }
+        linux_write_user_signal_stack(old_ss, current)?;
     }
     if ss != 0 {
-        if !syscall_logic::user_buffer_valid(ss, core::mem::size_of::<LinuxSignalStack>()) {
-            return Err(SysError::EFAULT);
-        }
-        let requested = unsafe { core::ptr::read(ss as *const LinuxSignalStack) };
+        let requested = linux_read_user_signal_stack(ss)?;
         if requested.flags as u64 & !LINUX_SS_DISABLE != 0 {
             return Err(SysError::EINVAL);
         }
@@ -5691,11 +6616,7 @@ pub fn sys_sched_getaffinity(_pid: usize, len: usize, mask: usize) -> SysResult 
     if !syscall_logic::user_buffer_valid(mask, len) {
         return Err(SysError::EFAULT);
     }
-    if len != 0 {
-        unsafe {
-            core::ptr::write_bytes(mask as *mut u8, 0xff, len);
-        }
-    }
+    linux_fill_user(mask, len, 0xff)?;
     Ok(len)
 }
 
@@ -5774,18 +6695,13 @@ pub fn sys_uname(buf: usize) -> SysResult {
     linux_write_uts_field(&mut uts.version, b"SMROS");
     linux_write_uts_field(&mut uts.machine, b"aarch64");
     linux_write_uts_field(&mut uts.domainname, b"localdomain");
-    unsafe {
-        core::ptr::write(buf as *mut LinuxUtsname, uts);
-    }
-    Ok(0)
+    linux_write_user_utsname(buf, &uts)
 }
 
 pub fn sys_time(time_ptr: usize) -> SysResult {
     let seconds = (monotonic_nanos() / 1_000_000_000) as usize;
     if time_ptr != 0 {
-        unsafe {
-            core::ptr::write(time_ptr as *mut usize, seconds);
-        }
+        linux_write_user_usize(time_ptr, seconds)?;
     }
     Ok(seconds)
 }
@@ -5794,28 +6710,26 @@ pub fn sys_getitimer(which: usize, curr_value: usize) -> SysResult {
     if which > LINUX_ITIMER_MAX {
         return Err(SysError::EINVAL);
     }
-    linux_zero_user(curr_value, core::mem::size_of::<LinuxItimerval>())?;
+    let mut current = LinuxItimerval {
+        it_interval: LinuxTimeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        },
+        it_value: LinuxTimeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        },
+    };
     if which == LINUX_ITIMER_REAL {
         let deadline = LINUX_REAL_TIMER_DEADLINE_TICK.load(Ordering::SeqCst);
         if deadline != LINUX_TIMER_DISABLED {
             let now = crate::kernel_lowlevel::timer::get_tick_count();
             let remaining_ticks = deadline.saturating_sub(now);
             let remaining = linux_timeval_from_ticks(remaining_ticks);
-            unsafe {
-                core::ptr::write(
-                    curr_value as *mut LinuxItimerval,
-                    LinuxItimerval {
-                        it_interval: LinuxTimeval {
-                            tv_sec: 0,
-                            tv_usec: 0,
-                        },
-                        it_value: remaining,
-                    },
-                );
-            }
+            current.it_value = remaining;
         }
     }
-    Ok(0)
+    linux_write_user_itimerval(curr_value, current)
 }
 
 pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> SysResult {
@@ -5828,11 +6742,8 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> SysRes
     if old_value != 0 {
         sys_getitimer(which, old_value)?;
     }
-    if !syscall_logic::user_buffer_valid(new_value, core::mem::size_of::<LinuxItimerval>()) {
-        return Err(SysError::EFAULT);
-    }
+    let timer = linux_read_user_itimerval(new_value)?;
     if which == LINUX_ITIMER_REAL {
-        let timer = unsafe { core::ptr::read(new_value as *const LinuxItimerval) };
         if linux_timeval_is_zero(timer.it_value) {
             LINUX_REAL_TIMER_DEADLINE_TICK.store(LINUX_TIMER_DISABLED, Ordering::SeqCst);
         } else {
@@ -5875,13 +6786,17 @@ pub fn sys_timerfd_gettime(fd: usize, curr_value: usize) -> SysResult {
 }
 
 pub fn sys_linux_timer_create(_clockid: usize, _sevp: usize, timerid: usize) -> SysResult {
-    if timerid == 0 {
+    if !linux_user_buffer_writable(timerid, core::mem::size_of::<usize>()) {
         return Err(SysError::EFAULT);
     }
     let handle = compat::create_object(ObjectType::Timer).map_err(|_| SysError::ENOMEM)?;
     memory_state().linux_timer_handles.push(handle.0);
-    unsafe {
-        core::ptr::write(timerid as *mut usize, handle.0 as usize);
+    if let Err(error) = linux_write_user_usize(timerid, handle.0 as usize) {
+        memory_state()
+            .linux_timer_handles
+            .retain(|candidate| *candidate != handle.0);
+        let _ = sys_handle_close(handle.0);
+        return Err(error);
     }
     Ok(0)
 }
@@ -5990,60 +6905,102 @@ pub fn sys_futex(
     linux_futex::sys_futex(uaddr, op, val, val2, uaddr2, val3)
 }
 
-fn linux_iov_write_compat(handle: u32, vector: usize, vector_size: usize) -> ZxResult<usize> {
+fn zircon_read_iovec(vector: usize, index: usize) -> ZxResult<ZirconIovec> {
+    let offset = index
+        .checked_mul(core::mem::size_of::<ZirconIovec>())
+        .ok_or(ZxError::ErrInvalidArgs)?;
+    let address = vector.checked_add(offset).ok_or(ZxError::ErrInvalidArgs)?;
+    Ok(unsafe { core::ptr::read_unaligned(address as *const ZirconIovec) })
+}
+
+fn zircon_read_iovecs(vector: usize, vector_size: usize) -> ZxResult<Vec<ZirconIovec>> {
     if vector_size == 0 {
-        return Ok(0);
+        return Ok(Vec::new());
+    }
+    if vector_size > ZIRCON_MAX_IOV {
+        return Err(ZxError::ErrInvalidArgs);
     }
     let byte_len = vector_size
-        .checked_mul(core::mem::size_of::<LinuxIovec>())
+        .checked_mul(core::mem::size_of::<ZirconIovec>())
         .ok_or(ZxError::ErrInvalidArgs)?;
     if !syscall_logic::user_buffer_valid(vector, byte_len) {
         return Err(ZxError::ErrInvalidArgs);
     }
-    let iovs = unsafe { core::slice::from_raw_parts(vector as *const LinuxIovec, vector_size) };
-    let mut total = 0usize;
-    for iov in iovs {
-        if iov.len == 0 {
-            continue;
-        }
-        if iov.base == 0 {
+    let mut iovecs = Vec::new();
+    iovecs
+        .try_reserve_exact(vector_size)
+        .map_err(|_| ZxError::ErrNoMemory)?;
+    for index in 0..vector_size {
+        let iov = zircon_read_iovec(vector, index)?;
+        if iov.len != 0 && (iov.base == 0 || iov.base.checked_add(iov.len).is_none()) {
             return Err(ZxError::ErrInvalidArgs);
         }
-        let bytes = unsafe { core::slice::from_raw_parts(iov.base as *const u8, iov.len) };
-        total = total.saturating_add(compat::table().write_bytes(HandleValue(handle), bytes)?);
+        iovecs.push(iov);
+    }
+    Ok(iovecs)
+}
+
+fn zircon_iov_write_compat(handle: u32, vector: usize, vector_size: usize) -> ZxResult<usize> {
+    let iovecs = zircon_read_iovecs(vector, vector_size)?;
+    let mut staging = [0u8; ZIRCON_IO_STAGING_BYTES];
+    let mut total = 0usize;
+    for iov in iovecs {
+        let mut offset = 0usize;
+        while offset < iov.len {
+            let chunk = core::cmp::min(staging.len(), iov.len - offset);
+            let source = iov
+                .base
+                .checked_add(offset)
+                .ok_or(ZxError::ErrInvalidArgs)?;
+            unsafe {
+                core::ptr::copy_nonoverlapping(source as *const u8, staging.as_mut_ptr(), chunk);
+            }
+            let written = match compat::table().write_bytes(HandleValue(handle), &staging[..chunk])
+            {
+                Ok(written) => written,
+                Err(_) if total != 0 => return Ok(total),
+                Err(error) => return Err(error),
+            };
+            total = total.saturating_add(written);
+            offset += written;
+            if written < chunk {
+                return Ok(total);
+            }
+        }
     }
     Ok(total)
 }
 
-fn linux_iov_read_compat(handle: u32, vector: usize, vector_size: usize) -> ZxResult<usize> {
-    if vector_size == 0 {
-        return Ok(0);
-    }
-    let byte_len = vector_size
-        .checked_mul(core::mem::size_of::<LinuxIovec>())
-        .ok_or(ZxError::ErrInvalidArgs)?;
-    if !syscall_logic::user_buffer_valid(vector, byte_len) {
-        return Err(ZxError::ErrInvalidArgs);
-    }
-    let iovs = unsafe { core::slice::from_raw_parts(vector as *const LinuxIovec, vector_size) };
+fn zircon_iov_read_compat(handle: u32, vector: usize, vector_size: usize) -> ZxResult<usize> {
+    let iovecs = zircon_read_iovecs(vector, vector_size)?;
+    let mut staging = [0u8; ZIRCON_IO_STAGING_BYTES];
     let mut total = 0usize;
-    for iov in iovs {
-        if iov.len == 0 {
-            continue;
-        }
-        if iov.base == 0 {
-            return Err(ZxError::ErrInvalidArgs);
-        }
-        let out = unsafe { core::slice::from_raw_parts_mut(iov.base as *mut u8, iov.len) };
-        match compat::table().read_bytes(HandleValue(handle), out) {
-            Ok(read) => {
-                total = total.saturating_add(read);
-                if read < iov.len {
-                    break;
+    for iov in iovecs {
+        let mut offset = 0usize;
+        while offset < iov.len {
+            let chunk = core::cmp::min(staging.len(), iov.len - offset);
+            match compat::table().read_bytes(HandleValue(handle), &mut staging[..chunk]) {
+                Ok(read) => {
+                    let destination = iov
+                        .base
+                        .checked_add(offset)
+                        .ok_or(ZxError::ErrInvalidArgs)?;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            staging.as_ptr(),
+                            destination as *mut u8,
+                            read,
+                        );
+                    }
+                    total = total.saturating_add(read);
+                    offset += read;
+                    if read < chunk {
+                        return Ok(total);
+                    }
                 }
+                Err(ZxError::ErrShouldWait) if total != 0 => return Ok(total),
+                Err(err) => return Err(err),
             }
-            Err(ZxError::ErrShouldWait) if total != 0 => break,
-            Err(err) => return Err(err),
         }
     }
     Ok(total)
@@ -6833,19 +7790,13 @@ pub fn sys_setresuid(_ruid: usize, _euid: usize, _suid: usize) -> SysResult {
 
 pub fn sys_getresuid(ruid: usize, euid: usize, suid: usize) -> SysResult {
     if ruid != 0 {
-        unsafe {
-            core::ptr::write(ruid as *mut u32, 0);
-        }
+        linux_write_user_u32(ruid, 0)?;
     }
     if euid != 0 {
-        unsafe {
-            core::ptr::write(euid as *mut u32, 0);
-        }
+        linux_write_user_u32(euid, 0)?;
     }
     if suid != 0 {
-        unsafe {
-            core::ptr::write(suid as *mut u32, 0);
-        }
+        linux_write_user_u32(suid, 0)?;
     }
     Ok(0)
 }
@@ -6912,10 +7863,8 @@ pub fn sys_get_robust_list(_pid: isize, head_ptr: usize, len_ptr: usize) -> SysR
     if head_ptr == 0 || len_ptr == 0 {
         return Err(SysError::EFAULT);
     }
-    unsafe {
-        core::ptr::write(head_ptr as *mut usize, 0);
-        core::ptr::write(len_ptr as *mut usize, 0);
-    }
+    linux_write_user_usize(head_ptr, 0)?;
+    linux_write_user_usize(len_ptr, 0)?;
     Ok(0)
 }
 
@@ -6965,37 +7914,34 @@ pub fn sys_capget(header: usize, data: usize) -> SysResult {
         return Err(SysError::EFAULT);
     }
     let stats = linux_container_stats();
-    unsafe {
-        let header_ptr = header as *mut LinuxCapUserHeader;
-        let requested = core::ptr::read(header_ptr).version;
-        if requested != 0 && requested != LINUX_CAPABILITY_VERSION_3 {
-            return Err(SysError::EINVAL);
-        }
-        core::ptr::write(
-            header_ptr,
-            LinuxCapUserHeader {
-                version: LINUX_CAPABILITY_VERSION_3,
-                pid: 0,
-            },
-        );
-        let data_ptr = data as *mut LinuxCapUserData;
-        core::ptr::write(
-            data_ptr,
-            LinuxCapUserData {
-                effective: stats.cap_effective as u32,
-                permitted: stats.cap_permitted as u32,
-                inheritable: stats.cap_inheritable as u32,
-            },
-        );
-        core::ptr::write(
-            data_ptr.add(1),
-            LinuxCapUserData {
-                effective: (stats.cap_effective >> 32) as u32,
-                permitted: (stats.cap_permitted >> 32) as u32,
-                inheritable: (stats.cap_inheritable >> 32) as u32,
-            },
-        );
+    let requested = linux_read_user_cap_header(header)?.version;
+    if requested != 0 && requested != LINUX_CAPABILITY_VERSION_3 {
+        return Err(SysError::EINVAL);
     }
+    linux_write_user_cap_header(
+        header,
+        LinuxCapUserHeader {
+            version: LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        },
+    )?;
+    linux_write_user_cap_data(
+        data,
+        LinuxCapUserData {
+            effective: stats.cap_effective as u32,
+            permitted: stats.cap_permitted as u32,
+            inheritable: stats.cap_inheritable as u32,
+        },
+    )?;
+    linux_write_user_cap_data(
+        data.checked_add(core::mem::size_of::<LinuxCapUserData>())
+            .ok_or(SysError::EFAULT)?,
+        LinuxCapUserData {
+            effective: (stats.cap_effective >> 32) as u32,
+            permitted: (stats.cap_permitted >> 32) as u32,
+            inheritable: (stats.cap_inheritable >> 32) as u32,
+        },
+    )?;
     Ok(0)
 }
 
@@ -7003,22 +7949,22 @@ pub fn sys_capset(header: usize, data: usize) -> SysResult {
     if header == 0 || data == 0 {
         return Err(SysError::EFAULT);
     }
-    unsafe {
-        let version = core::ptr::read(header as *const LinuxCapUserHeader).version;
-        if version != LINUX_CAPABILITY_VERSION_3 {
-            return Err(SysError::EINVAL);
-        }
-        let data_ptr = data as *const LinuxCapUserData;
-        let lo = core::ptr::read(data_ptr);
-        let hi = core::ptr::read(data_ptr.add(1));
-        let state = memory_state();
-        state.linux_cap_effective =
-            (((hi.effective as u64) << 32) | lo.effective as u64) & LINUX_CAP_FULL_SET;
-        state.linux_cap_permitted =
-            (((hi.permitted as u64) << 32) | lo.permitted as u64) & LINUX_CAP_FULL_SET;
-        state.linux_cap_inheritable =
-            (((hi.inheritable as u64) << 32) | lo.inheritable as u64) & LINUX_CAP_FULL_SET;
+    let version = linux_read_user_cap_header(header)?.version;
+    if version != LINUX_CAPABILITY_VERSION_3 {
+        return Err(SysError::EINVAL);
     }
+    let lo = linux_read_user_cap_data(data)?;
+    let hi = linux_read_user_cap_data(
+        data.checked_add(core::mem::size_of::<LinuxCapUserData>())
+            .ok_or(SysError::EFAULT)?,
+    )?;
+    let state = memory_state();
+    state.linux_cap_effective =
+        (((hi.effective as u64) << 32) | lo.effective as u64) & LINUX_CAP_FULL_SET;
+    state.linux_cap_permitted =
+        (((hi.permitted as u64) << 32) | lo.permitted as u64) & LINUX_CAP_FULL_SET;
+    state.linux_cap_inheritable =
+        (((hi.inheritable as u64) << 32) | lo.inheritable as u64) & LINUX_CAP_FULL_SET;
     Ok(0)
 }
 
@@ -7090,14 +8036,10 @@ pub fn sys_prctl(
 
 pub fn sys_getcpu(cpu: usize, node: usize, _cache: usize) -> SysResult {
     if cpu != 0 {
-        unsafe {
-            core::ptr::write(cpu as *mut u32, 0);
-        }
+        linux_write_user_u32(cpu, 0)?;
     }
     if node != 0 {
-        unsafe {
-            core::ptr::write(node as *mut u32, 0);
-        }
+        linux_write_user_u32(node, 0)?;
     }
     Ok(0)
 }
@@ -7252,11 +8194,7 @@ pub fn sys_mincore(addr: usize, len: usize, vec: usize) -> SysResult {
     {
         return Err(SysError::EFAULT);
     }
-    if len != 0 {
-        unsafe {
-            core::ptr::write_bytes(vec as *mut u8, 1, pages(len));
-        }
-    }
+    linux_fill_user(vec, pages(len), 1)?;
     Ok(0)
 }
 
@@ -9168,7 +10106,7 @@ pub fn sys_stream_writev(
     if options & !1 != 0 || !compat::handle_known(HandleValue(handle)) {
         return Err(ZxError::ErrInvalidArgs);
     }
-    let written = linux_iov_write_compat(handle, vector, vector_size)?;
+    let written = zircon_iov_write_compat(handle, vector, vector_size)?;
     if actual_count != 0 {
         unsafe {
             core::ptr::write(actual_count as *mut usize, written);
@@ -9201,7 +10139,7 @@ pub fn sys_stream_readv(
     if options != 0 || !compat::handle_known(HandleValue(handle)) {
         return Err(ZxError::ErrInvalidArgs);
     }
-    let read = linux_iov_read_compat(handle, vector, vector_size)?;
+    let read = zircon_iov_read_compat(handle, vector, vector_size)?;
     if actual_count != 0 {
         unsafe {
             core::ptr::write(actual_count as *mut usize, read);
@@ -9359,10 +10297,7 @@ pub fn sys_clock_gettime(clock: usize, buf: usize) -> SysResult {
         tv_sec: (now / 1_000_000_000) as i64,
         tv_nsec: (now % 1_000_000_000) as i64,
     };
-    unsafe {
-        core::ptr::write(buf as *mut LinuxTimespec, timespec);
-    }
-    Ok(0)
+    linux_write_user_timespec(buf, timespec)
 }
 
 pub fn sys_clock_getres(clock: usize, buf: usize) -> SysResult {
@@ -9370,15 +10305,13 @@ pub fn sys_clock_getres(clock: usize, buf: usize) -> SysResult {
         return Err(SysError::EINVAL);
     }
     if buf != 0 {
-        unsafe {
-            core::ptr::write(
-                buf as *mut LinuxTimespec,
-                LinuxTimespec {
-                    tv_sec: 0,
-                    tv_nsec: 10_000_000,
-                },
-            );
-        }
+        linux_write_user_timespec(
+            buf,
+            LinuxTimespec {
+                tv_sec: 0,
+                tv_nsec: 10_000_000,
+            },
+        )?;
     }
     Ok(0)
 }
@@ -9386,15 +10319,13 @@ pub fn sys_clock_getres(clock: usize, buf: usize) -> SysResult {
 pub fn sys_gettimeofday(tv: usize, _tz: usize) -> SysResult {
     if tv != 0 {
         let now = monotonic_nanos().max(1);
-        unsafe {
-            core::ptr::write(
-                tv as *mut LinuxTimeval,
-                LinuxTimeval {
-                    tv_sec: (now / 1_000_000_000) as i64,
-                    tv_usec: ((now % 1_000_000_000) / 1_000) as i64,
-                },
-            );
-        }
+        linux_write_user_timeval(
+            tv,
+            LinuxTimeval {
+                tv_sec: (now / 1_000_000_000) as i64,
+                tv_usec: ((now % 1_000_000_000) / 1_000) as i64,
+            },
+        )?;
     }
     Ok(0)
 }
@@ -9402,17 +10333,15 @@ pub fn sys_gettimeofday(tv: usize, _tz: usize) -> SysResult {
 pub fn sys_times(buf: usize) -> SysResult {
     let ticks = scheduler::scheduler().get_tick_count() as isize;
     if buf != 0 {
-        unsafe {
-            core::ptr::write(
-                buf as *mut LinuxTms,
-                LinuxTms {
-                    tms_utime: ticks,
-                    tms_stime: ticks,
-                    tms_cutime: 0,
-                    tms_cstime: 0,
-                },
-            );
-        }
+        linux_write_user_tms(
+            buf,
+            LinuxTms {
+                tms_utime: ticks,
+                tms_stime: ticks,
+                tms_cutime: 0,
+                tms_cstime: 0,
+            },
+        )?;
     }
     Ok(ticks as usize)
 }
@@ -9426,17 +10355,14 @@ pub fn sys_getrusage(_who: usize, usage: usize) -> SysResult {
         tv_sec: (now / 1_000_000_000) as i64,
         tv_usec: ((now % 1_000_000_000) / 1_000) as i64,
     };
-    unsafe {
-        core::ptr::write(
-            usage as *mut LinuxRusage,
-            LinuxRusage {
-                ru_utime: timeval,
-                ru_stime: timeval,
-                rest: [0; 14],
-            },
-        );
-    }
-    Ok(0)
+    linux_write_user_rusage(
+        usage,
+        LinuxRusage {
+            ru_utime: timeval,
+            ru_stime: timeval,
+            rest: [0; 14],
+        },
+    )
 }
 
 pub fn sys_prlimit64(
@@ -9445,21 +10371,17 @@ pub fn sys_prlimit64(
     new_limit: usize,
     old_limit: usize,
 ) -> SysResult {
-    if new_limit != 0
-        && !syscall_logic::user_buffer_valid(new_limit, core::mem::size_of::<LinuxRlimit64>())
-    {
-        return Err(SysError::EFAULT);
+    if new_limit != 0 {
+        let _ = linux_read_user_rlimit64(new_limit)?;
     }
     if old_limit != 0 {
-        unsafe {
-            core::ptr::write(
-                old_limit as *mut LinuxRlimit64,
-                LinuxRlimit64 {
-                    rlim_cur: u64::MAX,
-                    rlim_max: u64::MAX,
-                },
-            );
-        }
+        linux_write_user_rlimit64(
+            old_limit,
+            LinuxRlimit64 {
+                rlim_cur: u64::MAX,
+                rlim_max: u64::MAX,
+            },
+        )?;
     }
     Ok(0)
 }
@@ -9476,27 +10398,24 @@ pub fn sys_sysinfo(info: usize) -> SysResult {
     if info == 0 {
         return Err(SysError::EFAULT);
     }
-    unsafe {
-        core::ptr::write(
-            info as *mut LinuxSysinfo,
-            LinuxSysinfo {
-                uptime: (monotonic_nanos() / 1_000_000_000) as isize,
-                loads: [0; 3],
-                totalram: 1024 * 1024,
-                freeram: 512 * 1024,
-                sharedram: 0,
-                bufferram: 0,
-                totalswap: 0,
-                freeswap: 0,
-                procs: 1,
-                pad: 0,
-                totalhigh: 0,
-                freehigh: 0,
-                mem_unit: 1,
-            },
-        );
-    }
-    Ok(0)
+    linux_write_user_sysinfo(
+        info,
+        LinuxSysinfo {
+            uptime: (monotonic_nanos() / 1_000_000_000) as isize,
+            loads: [0; 3],
+            totalram: 1024 * 1024,
+            freeram: 512 * 1024,
+            sharedram: 0,
+            bufferram: 0,
+            totalswap: 0,
+            freeswap: 0,
+            procs: 1,
+            pad: 0,
+            totalhigh: 0,
+            freehigh: 0,
+            mem_unit: 1,
+        },
+    )
 }
 
 /// Linux sys_nanosleep implementation

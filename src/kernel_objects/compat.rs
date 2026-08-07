@@ -370,6 +370,26 @@ impl CompatObjectTable {
 
         Ok(read)
     }
+
+    pub fn restore_read_bytes(&mut self, handle: HandleValue, bytes: &[u8]) -> bool {
+        let Some(object) = self
+            .objects
+            .iter_mut()
+            .find(|object| object.handle == handle && !object.closed)
+        else {
+            return false;
+        };
+        if object.queue.len().saturating_add(bytes.len()) > MAX_COMPAT_QUEUE_BYTES {
+            return false;
+        }
+        for byte in bytes.iter().rev() {
+            object.queue.push_front(*byte);
+        }
+        if !bytes.is_empty() {
+            object.signals |= crate::kernel_objects::channel::CHANNEL_SIGNAL_READABLE;
+        }
+        true
+    }
 }
 
 static mut COMPAT_OBJECT_TABLE: CompatObjectTable = CompatObjectTable::new();

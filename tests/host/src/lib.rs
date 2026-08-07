@@ -4169,6 +4169,43 @@ mod aarch64_vm_logic {
     }
 
     #[test]
+    fn destroying_one_process_root_preserves_another_process_mapping() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        allocator.insert_data_page(0x9000);
+        allocator.insert_data_page(0xa000);
+        let baseline = allocator.allocated_pages();
+        let mut first = Aarch64AddressSpaceModel::new(&mut allocator).expect("first root");
+        let mut second = Aarch64AddressSpaceModel::new(&mut allocator).expect("second root");
+
+        first
+            .map_user_page(&mut allocator, 0x1000_0000, 0x9000, true, true, false)
+            .expect("map first process page");
+        second
+            .map_user_page(&mut allocator, 0x1000_0000, 0xa000, true, true, false)
+            .expect("map second process page");
+        second
+            .copy_to_user(&mut allocator, 0x1000_0000, b"second")
+            .expect("write second process page");
+        let second_root = second.root_pfn();
+
+        drop(first);
+
+        assert_eq!(second.root_pfn(), second_root);
+        assert_eq!(
+            second.translate_user(&allocator, 0x1000_0000, true),
+            Some(0xa000_000)
+        );
+        let mut copied = [0u8; 6];
+        second
+            .copy_from_user(&allocator, 0x1000_0000, &mut copied)
+            .expect("read surviving process page");
+        assert_eq!(&copied, b"second");
+
+        drop(second);
+        assert_eq!(allocator.allocated_pages(), baseline);
+    }
+
+    #[test]
     fn three_level_model_rolls_back_partial_table_allocation() {
         let mut allocator = Aarch64TestAllocator::new(0x8000);
         let mut address_space = Aarch64AddressSpaceModel::new(&mut allocator).expect("root");

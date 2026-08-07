@@ -453,6 +453,9 @@ impl SocketTable {
             crate::kernel_objects::channel::CHANNEL_SIGNAL_READABLE,
             SOCKET_SIGNAL_READ_THRESHOLD,
         );
+        if endpoint.options & SOCKET_DATAGRAM != 0 && endpoint.datagram_count != 0 {
+            endpoint.signals |= crate::kernel_objects::channel::CHANNEL_SIGNAL_READABLE;
+        }
     }
 
     fn refresh_write_signals(&mut self, writer_index: usize) {
@@ -498,17 +501,14 @@ impl SocketTable {
             return Err(ZxError::ErrBadState);
         }
 
+        let datagram = self.endpoints[writer_index].options & SOCKET_DATAGRAM != 0;
         let remaining =
             socket_logic::remaining_capacity(self.endpoints[receiver_index].len, SOCKET_SIZE);
-        if remaining == 0 {
+        if remaining == 0 && (!datagram || !bytes.is_empty()) {
             return Err(ZxError::ErrShouldWait);
         }
 
-        let datagram = self.endpoints[writer_index].options & SOCKET_DATAGRAM != 0;
         let actual = if datagram {
-            if bytes.is_empty() {
-                return Err(ZxError::ErrInvalidArgs);
-            }
             if bytes.len() > SOCKET_SIZE {
                 return Err(ZxError::ErrOutOfRange);
             }
@@ -526,7 +526,7 @@ impl SocketTable {
         for byte in &bytes[..actual] {
             self.endpoints[receiver_index].push_byte(*byte)?;
         }
-        if datagram && actual != 0 {
+        if datagram {
             self.endpoints[receiver_index].push_datagram_len(actual)?;
         }
 
@@ -544,7 +544,13 @@ impl SocketTable {
         if !self.has_rights(handle, crate::kernel_objects::Rights::Read as u32) {
             return Err(ZxError::ErrAccessDenied);
         }
-        if self.endpoints[index].len == 0 {
+        let datagram = self.endpoints[index].options & SOCKET_DATAGRAM != 0;
+        let unavailable = if datagram {
+            self.endpoints[index].datagram_count == 0
+        } else {
+            self.endpoints[index].len == 0
+        };
+        if unavailable {
             if self.endpoints[index].peer.is_none() {
                 return Err(ZxError::ErrPeerClosed);
             }
@@ -555,7 +561,6 @@ impl SocketTable {
         }
 
         let peek = options & SOCKET_PEEK != 0;
-        let datagram = self.endpoints[index].options & SOCKET_DATAGRAM != 0;
         let was_full = self.endpoints[index].len == SOCKET_SIZE;
         let actual = if datagram {
             self.read_datagram(index, peek, out)?
@@ -563,7 +568,7 @@ impl SocketTable {
             self.read_stream(index, peek, out)?
         };
 
-        if !peek && actual > 0 {
+        if !peek && (actual > 0 || datagram) {
             Self::refresh_read_signals(&mut self.endpoints[index]);
             if let Some(peer) = self.endpoints[index].peer {
                 if let Some(peer_index) = self.index(peer) {
@@ -580,10 +585,6 @@ impl SocketTable {
     }
 
     fn read_datagram(&mut self, index: usize, peek: bool, out: &mut [u8]) -> ZxResult<usize> {
-        if out.is_empty() {
-            return Ok(0);
-        }
-
         let datagram_len = self.endpoints[index]
             .front_datagram_len()
             .ok_or(ZxError::ErrInternal)?;

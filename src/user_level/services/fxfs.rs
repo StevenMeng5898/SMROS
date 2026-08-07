@@ -522,8 +522,8 @@ fn fxfs_shared_relative_path(path: &str) -> Option<&str> {
 }
 
 fn fxfs_copy_from_data(data: &[u8], offset: usize, out: &mut [u8]) -> Result<usize, FxfsError> {
-    if offset > data.len() {
-        return Err(FxfsError::InvalidOffset);
+    if offset >= data.len() {
+        return Ok(0);
     }
     let available = data.len() - offset;
     let len = core::cmp::min(out.len(), available);
@@ -1765,6 +1765,20 @@ impl FxfsState {
         Ok(cursor.offset)
     }
 
+    fn position_cursor(&self, cursor: &mut FxfsCursor, offset: usize) -> Result<usize, FxfsError> {
+        let index = self
+            .find_object_index(cursor.object_id)
+            .ok_or(FxfsError::NotFound)?;
+        if self.objects[index].kind != FxfsNodeKind::File {
+            return Err(FxfsError::NotFile);
+        }
+        if !user_logic::fxfs_file_size_valid(offset) {
+            return Err(FxfsError::InvalidOffset);
+        }
+        cursor.offset = offset;
+        Ok(cursor.offset)
+    }
+
     fn cursor_read(&mut self, cursor: &mut FxfsCursor, out: &mut [u8]) -> Result<usize, FxfsError> {
         let index = self
             .find_object_index(cursor.object_id)
@@ -2063,6 +2077,10 @@ pub fn open_cursor(path: &str) -> Result<FxfsCursor, FxfsError> {
 
 pub fn seek_cursor(cursor: &mut FxfsCursor, offset: usize) -> Result<usize, FxfsError> {
     state().seek_cursor(cursor, offset)
+}
+
+pub fn position_cursor(cursor: &mut FxfsCursor, offset: usize) -> Result<usize, FxfsError> {
+    state().position_cursor(cursor, offset)
 }
 
 pub fn cursor_read(cursor: &mut FxfsCursor, out: &mut [u8]) -> Result<usize, FxfsError> {

@@ -2631,9 +2631,7 @@ fn aarch64_clone_child_is_validated_before_publication() {
     let enter_el0 = launcher
         .find("user_process::switch_to_el0(")
         .expect("EL0 entry");
-    assert!(
-        register_memory < prepare && prepare < root_paddr && root_paddr < enter_el0
-    );
+    assert!(register_memory < prepare && prepare < root_paddr && root_paddr < enter_el0);
     let prepare_start = run_elf
         .find("fn prepare_dynamic_loader(")
         .expect("dynamic loader preparation");
@@ -4208,7 +4206,9 @@ fn linux_process_memory_mutations_are_transactional_and_bounded() {
     assert!(!brk.contains("vec![0u8; len]"));
     assert!(process_memory.contains("impl Drop for LinuxProcessMemory"));
 
-    let mmap_start = syscall.find("pub fn sys_mmap(").expect("mmap implementation");
+    let mmap_start = syscall
+        .find("pub fn sys_mmap(")
+        .expect("mmap implementation");
     let mmap = braced_body(&syscall[mmap_start..]);
     let preload = mmap
         .find("linux_read_mmap_contents")
@@ -4234,10 +4234,22 @@ fn linux_process_memory_review_paths_are_checked_and_reversible() {
     assert!(process_memory.contains("linux_process_memory_remove_index("));
 
     for (start_marker, end_marker) in [
-        ("fn linux_read_sleep_timespec(", "fn linux_write_sleep_remaining("),
-        ("fn linux_write_sleep_remaining(", "fn linux_sleep_has_deliverable_pending_signal("),
-        ("fn linux_signal_wait_deadline(", "fn copy_linux_signal_wait_info("),
-        ("fn copy_linux_signal_wait_info(", "fn finish_linux_signal_wait("),
+        (
+            "fn linux_read_sleep_timespec(",
+            "fn linux_write_sleep_remaining(",
+        ),
+        (
+            "fn linux_write_sleep_remaining(",
+            "fn linux_sleep_has_deliverable_pending_signal(",
+        ),
+        (
+            "fn linux_signal_wait_deadline(",
+            "fn copy_linux_signal_wait_info(",
+        ),
+        (
+            "fn copy_linux_signal_wait_info(",
+            "fn finish_linux_signal_wait(",
+        ),
         ("pub fn sys_rt_sigaction(", "pub fn sys_rt_sigprocmask("),
     ] {
         let start = syscall
@@ -4277,4 +4289,663 @@ fn linux_process_memory_review_paths_are_checked_and_reversible() {
         .expect("ELF page-run mapper");
     let page_runs = braced_body(&run_elf[page_runs_start..]);
     assert!(page_runs.contains("run_elf_page_protection("));
+}
+
+#[test]
+fn linux_user_struct_paths_use_process_checked_copies() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    for (start_marker, end_marker) in [
+        ("pub fn sys_write(", "pub fn sys_read("),
+        ("pub fn sys_read(", "pub fn sys_close("),
+        ("pub fn sys_getrandom(", "fn linux_fd_known("),
+        ("fn linux_write_cstr(", "fn linux_write_stat_from_attrs("),
+        ("fn linux_write_stat_from_attrs(", "fn linux_write_stat("),
+        ("fn linux_write_statfs(", "fn linux_write_uts_field("),
+        ("pub fn sys_pipe2(", "pub fn sys_dup("),
+        ("pub fn sys_readlinkat(", "pub fn sys_stat("),
+        ("pub fn sys_getdents64(", "fn linux_lseek_target("),
+        ("pub fn sys_pread(", "pub fn sys_pwrite("),
+        ("pub fn sys_readv(", "pub fn sys_writev("),
+        ("pub fn sys_writev(", "pub fn sys_sendfile("),
+        ("pub fn sys_copy_file_range(", "pub fn sys_splice("),
+        ("pub fn sys_poll(", "pub fn sys_ppoll("),
+        ("pub fn sys_socketpair(", "pub fn sys_bind("),
+        ("pub fn sys_accept(", "pub fn sys_getsockname("),
+        ("pub fn sys_getsockname(", "pub fn sys_getpeername("),
+        ("pub fn sys_getsockopt(", "pub fn sys_sendto("),
+        ("pub fn sys_recvfrom(", "pub fn sys_recvmsg("),
+        ("pub fn sys_msgsnd(", "pub fn sys_msgrcv("),
+        ("pub fn sys_msgrcv(", "pub fn sys_shmget("),
+        ("pub fn sys_sigaltstack(", "pub fn sys_tkill("),
+        (
+            "pub fn sys_sched_getaffinity(",
+            "pub fn sys_sched_setaffinity(",
+        ),
+        ("pub fn sys_uname(", "pub fn sys_time("),
+        ("pub fn sys_time(", "pub fn sys_getitimer("),
+        ("pub fn sys_getitimer(", "pub fn sys_setitimer("),
+        ("pub fn sys_setitimer(", "pub fn sys_timerfd_create("),
+        (
+            "pub fn sys_linux_timer_create(",
+            "pub fn sys_linux_timer_settime(",
+        ),
+        ("pub fn sys_getresuid(", "pub fn sys_setresgid("),
+        ("pub fn sys_get_robust_list(", "pub fn sys_sched_yield("),
+        ("pub fn sys_capget(", "pub fn sys_capset("),
+        ("pub fn sys_capset(", "pub fn sys_sethostname("),
+        ("pub fn sys_getcpu(", "pub fn sys_madvise("),
+        ("pub fn sys_mincore(", "pub fn sys_readahead("),
+        ("pub fn sys_clock_gettime(", "pub fn sys_clock_getres("),
+        ("pub fn sys_clock_getres(", "pub fn sys_gettimeofday("),
+        ("pub fn sys_gettimeofday(", "pub fn sys_times("),
+        ("pub fn sys_times(", "pub fn sys_getrusage("),
+        ("pub fn sys_getrusage(", "pub fn sys_prlimit64("),
+        ("pub fn sys_prlimit64(", "pub fn sys_getrlimit("),
+        ("pub fn sys_sysinfo(", "pub fn sys_nanosleep_linux("),
+    ] {
+        let start = syscall
+            .find(start_marker)
+            .expect("checked Linux pointer path");
+        let end = syscall[start..]
+            .find(end_marker)
+            .expect("checked Linux pointer path end")
+            + start;
+        let body = &syscall[start..end];
+        assert!(
+            body.contains("linux_copy_from_user(")
+                || body.contains("linux_copy_to_user(")
+                || body.contains("linux_zero_user(")
+                || body.contains("linux_fill_user(")
+                || body.contains("linux_read_user_")
+                || body.contains("linux_write_user_"),
+            "missing process-owned checked copy in {start_marker}"
+        );
+        assert!(
+            !body.contains("core::ptr::"),
+            "raw user pointer in {start_marker}"
+        );
+    }
+
+    let copy_file_range_start = syscall
+        .find("pub fn sys_copy_file_range(")
+        .expect("copy_file_range implementation");
+    let copy_file_range = braced_body(&syscall[copy_file_range_start..]);
+    assert!(copy_file_range.contains("linux_copy_file_read_bytes("));
+    assert!(copy_file_range.contains("linux_copy_file_write_bytes("));
+    assert!(!copy_file_range.contains("sys_read("));
+    assert!(!copy_file_range.contains("sys_write("));
+
+    let getrandom_start = syscall
+        .find("pub fn sys_getrandom(")
+        .expect("bounded getrandom path");
+    let getrandom = braced_body(&syscall[getrandom_start..]);
+    assert!(getrandom.contains("LINUX_IO_STAGING_BYTES"));
+    assert!(!getrandom.contains("linux_kernel_buffer(len)"));
+
+    let fill_start = syscall
+        .find("fn linux_fill_user(")
+        .expect("checked Linux fill helper");
+    let fill = braced_body(&syscall[fill_start..]);
+    assert!(fill.contains("linux_user_buffer_writable("));
+
+    let reset_start = syscall
+        .find("pub fn reset_linux_process_state(")
+        .expect("Linux process reset");
+    let reset = braced_body(&syscall[reset_start..]);
+    assert!(reset.contains("linux_process_memory::unregister("));
+    assert!(reset.contains("linux_process_memory::reset_launch("));
+}
+
+#[test]
+fn linux_resource_copyouts_preflight_and_rollback_transactionally() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    let pair_copy_start = syscall
+        .find("fn linux_write_user_i32_pair(")
+        .expect("atomic descriptor-pair copyout helper");
+    let pair_copy = braced_body(&syscall[pair_copy_start..]);
+    assert_eq!(pair_copy.matches("linux_copy_to_user(").count(), 1);
+    assert!(!pair_copy.contains("linux_write_user_i32("));
+
+    for (start_marker, end_marker, first_fd, second_fd) in [
+        (
+            "pub fn sys_pipe2(",
+            "pub fn sys_dup(",
+            "read_fd",
+            "write_fd",
+        ),
+        (
+            "pub fn sys_socketpair(",
+            "pub fn sys_bind(",
+            "left_fd",
+            "right_fd",
+        ),
+    ] {
+        let start = syscall.find(start_marker).expect("pair-producing syscall");
+        let end = syscall[start..]
+            .find(end_marker)
+            .expect("pair-producing syscall end")
+            + start;
+        let body = &syscall[start..end];
+        let preflight = body
+            .find("linux_user_buffer_writable(")
+            .expect("complete descriptor-pair preflight");
+        let create = body.find("create_pair(").expect("pair allocation");
+        let failed_copyout = body
+            .find("if let Err(error) = linux_write_user_i32_pair(")
+            .expect("fallible atomic descriptor-pair copyout");
+        let first_rollback = body
+            .find(&format!("sys_close({first_fd})"))
+            .expect("first descriptor rollback");
+        let second_rollback = body
+            .find(&format!("sys_close({second_fd})"))
+            .expect("second descriptor rollback");
+
+        assert!(body.contains("core::mem::size_of::<[i32; 2]>()"));
+        assert!(preflight < create);
+        assert!(create < failed_copyout);
+        assert!(failed_copyout < first_rollback);
+        assert!(failed_copyout < second_rollback);
+        assert!(body[failed_copyout..].contains("return Err(error)"));
+        assert!(!body.contains("linux_write_user_i32(fds_ptr"));
+    }
+
+    let timer_start = syscall
+        .find("pub fn sys_linux_timer_create(")
+        .expect("POSIX timer creation");
+    let timer_end = syscall[timer_start..]
+        .find("pub fn sys_linux_timer_settime(")
+        .expect("POSIX timer creation end")
+        + timer_start;
+    let timer = &syscall[timer_start..timer_end];
+    let timer_preflight = timer
+        .find("linux_user_buffer_writable(")
+        .expect("complete timer-ID preflight");
+    let timer_create = timer
+        .find("compat::create_object(ObjectType::Timer)")
+        .expect("timer allocation");
+    let timer_failed_copyout = timer
+        .find("if let Err(error) = linux_write_user_usize(")
+        .expect("fallible timer-ID copyout");
+    let timer_registry = timer
+        .find("linux_timer_handles")
+        .expect("timer registry rollback");
+    let timer_remove = timer[timer_registry..]
+        .find(".retain(")
+        .map(|offset| timer_registry + offset)
+        .expect("timer registry removal");
+    let timer_close = timer
+        .find("sys_handle_close(handle.0)")
+        .expect("timer object rollback");
+
+    assert!(timer.contains("core::mem::size_of::<usize>()"));
+    assert!(timer_preflight < timer_create);
+    assert!(timer_create < timer_failed_copyout);
+    assert!(timer_failed_copyout < timer_remove);
+    assert!(timer_remove < timer_close);
+    assert!(timer[timer_failed_copyout..].contains("return Err(error)"));
+}
+
+#[test]
+fn linux_copy_file_range_uses_explicit_positions_without_moving_descriptor_cursors() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let compat = std::fs::read_to_string(repository.join("src/kernel_objects/compat.rs"))
+        .expect("read compatibility object implementation");
+
+    let copy_start = syscall
+        .find("pub fn sys_copy_file_range(")
+        .expect("copy_file_range implementation");
+    let copy = braced_body(&syscall[copy_start..]);
+    let input_offset = copy
+        .find("linux_read_user_copy_offset(in_offset)?")
+        .expect("input offset preflight and read");
+    let output_offset = copy
+        .find("linux_read_user_copy_offset(out_offset)?")
+        .expect("output offset preflight and read");
+    let positioned_input = copy
+        .find("linux_positioned_fxfs_file(in_fd, input_offset, false)?")
+        .expect("positioned input preflight");
+    let positioned_output = copy
+        .find("linux_positioned_fxfs_file(out_fd, output_offset, true)?")
+        .expect("positioned output preflight");
+    let first_read = copy
+        .find("linux_copy_file_read_bytes(")
+        .expect("first file-descriptor read");
+    let transactional_copyout = copy
+        .find("linux_commit_copy_offsets(")
+        .expect("offset copyout before destination mutation");
+    let destination_write = copy
+        .find("linux_copy_file_write_bytes(")
+        .expect("destination file-descriptor write");
+    let rollback = copy
+        .find("linux_copy_file_rollback_read(")
+        .expect("failed offset-copyout input rollback");
+
+    assert!(input_offset < positioned_input);
+    assert!(output_offset < positioned_output);
+    assert!(positioned_input < first_read);
+    assert!(positioned_output < first_read);
+    assert!(input_offset < first_read);
+    assert!(output_offset < first_read);
+    assert!(first_read < transactional_copyout);
+    assert!(transactional_copyout < destination_write);
+    assert!(transactional_copyout < rollback);
+    assert!(!copy[destination_write..].contains("linux_write_user_u64("));
+
+    let positioned_start = syscall
+        .find("fn linux_positioned_fxfs_file(")
+        .expect("positioned file helper");
+    let positioned = braced_body(&syscall[positioned_start..]);
+    assert!(positioned.contains(".linux_fxfs_file(record.handle)"));
+    assert!(positioned.contains(".cloned()"));
+    assert!(positioned.contains("ok_or(SysError::ESPIPE)"));
+    assert!(positioned.contains("fxfs::position_cursor(&mut file.cursor"));
+    assert!(!positioned.contains("fxfs::seek_cursor(&mut file.cursor"));
+
+    let read_start = syscall
+        .find("fn linux_copy_file_read_bytes(")
+        .expect("copy range read helper");
+    let read = braced_body(&syscall[read_start..]);
+    assert!(read.contains("positioned.as_mut()"));
+    assert!(read.contains("fxfs::cursor_read(&mut file.cursor"));
+    assert!(read.contains("linux_fd_read_bytes(fd, out)"));
+
+    let write_start = syscall
+        .find("fn linux_copy_file_write_bytes(")
+        .expect("copy range write helper");
+    let write = braced_body(&syscall[write_start..]);
+    assert!(write.contains("positioned.as_mut()"));
+    assert!(write.contains("fxfs::cursor_write(&mut file.cursor"));
+    assert!(write.contains("linux_fd_write_bytes(fd, bytes)"));
+
+    let rollback_start = syscall
+        .find("fn linux_copy_file_rollback_read(")
+        .expect("copy range rollback helper");
+    let rollback = braced_body(&syscall[rollback_start..]);
+    assert!(rollback.contains("if positioned.is_some()"));
+    assert!(rollback.contains("linux_fd_rollback_read_bytes(fd, bytes)"));
+
+    let offset_start = syscall
+        .find("fn linux_read_user_copy_offset(")
+        .expect("copy offset helper");
+    let offset = braced_body(&syscall[offset_start..]);
+    assert!(offset.contains("linux_user_buffer_writable("));
+    assert!(offset.contains("linux_read_u64_user("));
+
+    let commit_start = syscall
+        .find("fn linux_commit_copy_offsets(")
+        .expect("transactional copy offset helper");
+    let commit = braced_body(&syscall[commit_start..]);
+    assert!(commit.contains("linux_write_user_u64("));
+    assert!(commit.contains("linux_rollback_copy_offsets("));
+
+    assert!(copy.contains("if written < read"));
+    assert!(copy.contains("&buffer[written..read]"));
+    assert!(copy.contains("let next_written = total.saturating_add(written)"));
+    assert!(copy.contains("linux_rollback_copy_offsets("));
+
+    assert!(compat.contains("pub fn restore_read_bytes("));
+    assert!(compat.contains("object.queue.push_front(*byte)"));
+}
+
+#[test]
+fn fxfs_positioned_io_can_read_past_eof_and_extend_within_the_file_limit() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS implementation");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    let copy_start = fxfs
+        .find("fn fxfs_copy_from_data(")
+        .expect("FxFS positioned read helper");
+    let copy = braced_body(&fxfs[copy_start..]);
+    assert!(copy.contains("if offset >= data.len()"));
+    assert!(copy.contains("return Ok(0)"));
+
+    let position_start = fxfs
+        .find("fn position_cursor(&self")
+        .expect("FxFS positioned cursor implementation");
+    let position = braced_body(&fxfs[position_start..]);
+    assert!(position.contains("user_logic::fxfs_file_size_valid(offset)"));
+    assert!(position.contains("cursor.offset = offset"));
+
+    assert!(fxfs.contains("pub fn position_cursor(cursor: &mut FxfsCursor, offset: usize)"));
+
+    let pread_start = syscall.find("pub fn sys_pread(").expect("pread path");
+    let pread = braced_body(&syscall[pread_start..]);
+    assert!(pread.contains("fxfs::position_cursor(&mut file.cursor, offset)"));
+    assert!(!pread.contains("fxfs::seek_cursor(&mut file.cursor, offset)"));
+}
+
+#[test]
+fn linux_vectored_io_preflights_every_entry_before_io() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    let decode_start = syscall
+        .find("fn linux_read_user_iovecs(")
+        .expect("complete iovec decode and preflight helper");
+    let decode = braced_body(&syscall[decode_start..]);
+    assert!(decode.contains("linux_read_user_iovec("));
+    assert!(decode.contains("linux_user_buffer_readable("));
+    assert!(decode.contains("linux_user_buffer_writable("));
+    assert!(decode.contains("try_reserve_exact(iov_count)"));
+
+    for (start_marker, end_marker, vector_call, io_call) in [
+        (
+            "pub fn sys_readv(",
+            "pub fn sys_writev(",
+            "linux_read_user_iovecs(iov_ptr, iov_count, true)",
+            "sys_read(",
+        ),
+        (
+            "pub fn sys_writev(",
+            "pub fn sys_sendfile(",
+            "linux_read_user_iovecs(iov_ptr, iov_count, false)",
+            "sys_write(",
+        ),
+    ] {
+        let start = syscall.find(start_marker).expect("vectored I/O path");
+        let end = syscall[start..]
+            .find(end_marker)
+            .expect("vectored I/O path end")
+            + start;
+        let body = &syscall[start..end];
+        let vector = body
+            .find(vector_call)
+            .expect("complete vector preflight before I/O");
+        let io = body.find(io_call).expect("vectored I/O operation");
+
+        assert!(vector < io);
+        assert!(!body.contains("linux_read_user_iovec("));
+    }
+}
+
+#[test]
+fn native_zircon_stream_iov_is_bounded_and_independent_of_linux_process_memory() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    assert!(syscall.contains("const ZIRCON_MAX_IOV: usize"));
+    assert!(syscall.contains("const ZIRCON_IO_STAGING_BYTES: usize"));
+    assert!(syscall.contains("struct ZirconIovec"));
+
+    let snapshot_start = syscall
+        .find("fn zircon_read_iovecs(")
+        .expect("bounded native Zircon iovec snapshot");
+    let snapshot = braced_body(&syscall[snapshot_start..]);
+    assert!(snapshot.contains("ZIRCON_MAX_IOV"));
+    assert!(snapshot.contains("try_reserve_exact(vector_size)"));
+    assert!(snapshot.contains("zircon_read_iovec(vector, index)?"));
+    assert!(snapshot.contains("iov.base.checked_add(iov.len)"));
+
+    for (start_marker, end_marker, io_call, copy_call) in [
+        (
+            "fn zircon_iov_write_compat(",
+            "fn zircon_iov_read_compat(",
+            "compat::table().write_bytes(",
+            "core::ptr::copy_nonoverlapping(",
+        ),
+        (
+            "fn zircon_iov_read_compat(",
+            "// Zircon VMO Syscalls",
+            "compat::table().read_bytes(",
+            "core::ptr::copy_nonoverlapping(",
+        ),
+    ] {
+        let start = syscall
+            .find(start_marker)
+            .expect("native Zircon iovec path");
+        let end = syscall[start..]
+            .find(end_marker)
+            .expect("native Zircon iovec path end")
+            + start;
+        let body = &syscall[start..end];
+
+        let snapshot = body
+            .find("zircon_read_iovecs(vector, vector_size)?")
+            .expect("complete native iovec snapshot before I/O");
+        let io = body.find(io_call).expect("native backend I/O");
+        assert!(snapshot < io);
+        assert!(body.contains("ZIRCON_IO_STAGING_BYTES"));
+        assert!(body.contains(io_call));
+        assert!(body.contains(copy_call));
+        assert!(!body.contains("zircon_read_iovec(vector, index)"));
+        assert!(!body.contains("linux_read_user_iovec"));
+        assert!(!body.contains("linux_copy_"));
+        assert!(!body.contains("linux_kernel_buffer"));
+    }
+
+    let native_write_start = syscall
+        .find("fn zircon_iov_write_compat(")
+        .expect("native Zircon write path");
+    let native_write = braced_body(&syscall[native_write_start..]);
+    assert!(native_write.contains("Err(_) if total != 0 => return Ok(total)"));
+
+    let writev = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_stream_writev(")
+            .expect("native stream writev")..],
+    );
+    let readv = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_stream_readv(")
+            .expect("native stream readv")..],
+    );
+    assert!(writev.contains("zircon_iov_write_compat("));
+    assert!(readv.contains("zircon_iov_read_compat("));
+}
+
+#[test]
+fn linux_core_io_uses_bounded_staging_for_full_validated_ranges() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    for (start_marker, staging_name, preflight, io_call, copy_call) in [
+        (
+            "pub fn sys_write(",
+            "staging",
+            "linux_user_buffer_readable(buf_ptr, len)",
+            "linux_fd_write_bytes(fd, &staging[..chunk])",
+            "linux_copy_from_user(",
+        ),
+        (
+            "pub fn sys_read(",
+            "staging",
+            "linux_user_buffer_writable(buf_ptr, len)",
+            "linux_fd_read_bytes(fd, &mut staging[..chunk])",
+            "linux_copy_to_user(",
+        ),
+        (
+            "pub fn sys_pread(",
+            "staging",
+            "linux_user_buffer_writable(buf, len)",
+            "fxfs::cursor_read(&mut file.cursor, &mut staging[..chunk])",
+            "linux_copy_to_user(",
+        ),
+    ] {
+        let start = syscall.find(start_marker).expect("bounded Linux I/O path");
+        let body = braced_body(&syscall[start..]);
+        let validation = body.find(preflight).expect("whole-range preflight");
+        let io = body.find(io_call).expect("bounded descriptor I/O");
+
+        assert!(validation < io);
+        assert!(body.contains(&format!(
+            "let mut {staging_name} = [0u8; LINUX_IO_STAGING_BYTES]"
+        )));
+        assert!(body.contains("while total < len"));
+        assert!(body.contains("core::cmp::min(staging.len(), len - total)"));
+        assert!(body.contains(copy_call));
+        assert!(body.contains("if total == 0"));
+        assert!(!body.contains("linux_kernel_buffer(len)"));
+    }
+}
+
+#[test]
+fn linux_datagram_io_preserves_message_boundaries_with_bounded_single_operations() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    let buffer_start = syscall
+        .find("fn linux_datagram_buffer(")
+        .expect("bounded datagram allocation helper");
+    let buffer = braced_body(&syscall[buffer_start..]);
+    assert!(buffer.contains("if len > socket::SOCKET_SIZE"));
+    assert!(buffer.contains("try_reserve_exact(len)"));
+    assert!(buffer.contains("staging.resize(len, 0)"));
+    assert!(!buffer.contains("linux_kernel_buffer("));
+
+    let write_helper_start = syscall
+        .find("fn linux_datagram_write(")
+        .expect("single-operation datagram write helper");
+    let write_helper = braced_body(&syscall[write_helper_start..]);
+    assert!(write_helper.contains("linux_datagram_buffer(len)?"));
+    assert!(write_helper.contains("linux_copy_from_user("));
+    assert_eq!(write_helper.matches("linux_fd_write_bytes(").count(), 1);
+    assert!(!write_helper.contains("while "));
+
+    let read_helper_start = syscall
+        .find("fn linux_datagram_read(")
+        .expect("single-operation datagram read helper");
+    let read_helper = braced_body(&syscall[read_helper_start..]);
+    assert!(read_helper.contains("info.rx_buf_available"));
+    assert!(read_helper.contains("socket::SOCKET_SIZE"));
+    assert!(read_helper.contains("linux_datagram_buffer(read_len)?"));
+    assert!(read_helper.contains("linux_copy_to_user("));
+    assert_eq!(read_helper.matches("linux_fd_read_bytes(").count(), 1);
+    assert!(!read_helper.contains("while "));
+
+    for (start_marker, end_marker, preflight, route) in [
+        (
+            "pub fn sys_write(",
+            "pub fn sys_read(",
+            "linux_user_buffer_readable(buf_ptr, len)",
+            "linux_datagram_write(fd, buf_ptr, len)",
+        ),
+        (
+            "pub fn sys_read(",
+            "pub fn sys_close(",
+            "linux_user_buffer_writable(buf_ptr, len)",
+            "linux_datagram_read(fd, buf_ptr, len, info)",
+        ),
+    ] {
+        let start = syscall.find(start_marker).expect("Linux core I/O path");
+        let end = syscall[start..]
+            .find(end_marker)
+            .expect("Linux core I/O path end")
+            + start;
+        let body = &syscall[start..end];
+        let validation = body.find(preflight).expect("whole-range preflight");
+        let datagram = body
+            .find("linux_datagram_socket_info(fd)")
+            .expect("real datagram detection");
+        let operation = body.find(route).expect("datagram-specific I/O route");
+
+        assert!(validation < datagram);
+        assert!(datagram < operation);
+        assert!(body.contains("LINUX_IO_STAGING_BYTES"));
+        assert!(body.contains("while total < len"));
+    }
+
+    let sendto_start = syscall.find("pub fn sys_sendto(").expect("sendto path");
+    let sendto_end = syscall[sendto_start..]
+        .find("fn linux_recvfrom_source_length(")
+        .expect("sendto path end")
+        + sendto_start;
+    assert!(syscall[sendto_start..sendto_end].contains("sys_write(sockfd, buf, len)"));
+
+    let recvfrom_start = syscall.find("pub fn sys_recvfrom(").expect("recvfrom path");
+    let recvfrom_end = syscall[recvfrom_start..]
+        .find("pub fn sys_recvmsg(")
+        .expect("recvfrom path end")
+        + recvfrom_start;
+    assert!(syscall[recvfrom_start..recvfrom_end].contains("sys_read(sockfd, buf, len)"));
+
+    let writev_helper_start = syscall
+        .find("fn linux_datagram_writev(")
+        .expect("single-operation vectored datagram write helper");
+    let writev_helper = braced_body(&syscall[writev_helper_start..]);
+    assert!(writev_helper.contains("linux_datagram_iov_len(iovecs)?"));
+    assert!(writev_helper.contains("linux_copy_from_user("));
+    assert_eq!(writev_helper.matches("linux_fd_write_bytes(").count(), 1);
+
+    let readv_helper_start = syscall
+        .find("fn linux_datagram_readv(")
+        .expect("single-operation vectored datagram read helper");
+    let readv_helper = braced_body(&syscall[readv_helper_start..]);
+    assert!(readv_helper.contains("linux_datagram_iov_len(iovecs)?"));
+    assert!(readv_helper.contains("linux_copy_to_user("));
+    assert!(readv_helper.contains("read.checked_sub(offset)"));
+    assert_eq!(readv_helper.matches("linux_fd_read_bytes(").count(), 1);
+
+    for (start_marker, end_marker, route) in [
+        (
+            "pub fn sys_readv(",
+            "pub fn sys_writev(",
+            "linux_datagram_readv(fd, &iovecs, info)",
+        ),
+        (
+            "pub fn sys_writev(",
+            "pub fn sys_sendfile(",
+            "linux_datagram_writev(fd, &iovecs)",
+        ),
+    ] {
+        let start = syscall.find(start_marker).expect("Linux vectored I/O path");
+        let end = syscall[start..]
+            .find(end_marker)
+            .expect("Linux vectored I/O path end")
+            + start;
+        let body = &syscall[start..end];
+        let datagram = body
+            .find("linux_datagram_socket_info(fd)")
+            .expect("vectored datagram detection");
+        let operation = body
+            .find(route)
+            .expect("single vectored datagram operation");
+        assert!(datagram < operation);
+    }
+}
+
+#[test]
+fn linux_recvfrom_preflights_source_address_before_receive() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    let preflight_start = syscall
+        .find("fn linux_recvfrom_source_length(")
+        .expect("recvfrom source-address preflight helper");
+    let preflight = braced_body(&syscall[preflight_start..]);
+    assert!(preflight.contains("linux_user_buffer_writable(addrlen"));
+    assert!(preflight.contains("linux_read_user_u32(addrlen)"));
+    assert!(preflight.contains("linux_user_buffer_writable(src_addr, length)"));
+    assert!(preflight.contains("if length != 0 && !linux_user_buffer_writable(src_addr, length)"));
+
+    let recv_start = syscall
+        .find("pub fn sys_recvfrom(")
+        .expect("recvfrom implementation");
+    let recv_end = syscall[recv_start..]
+        .find("pub fn sys_recvmsg(")
+        .expect("recvfrom implementation end")
+        + recv_start;
+    let recv = &syscall[recv_start..recv_end];
+    let validation = recv
+        .find("linux_recvfrom_source_length(src_addr, addrlen)?")
+        .expect("source-address validation");
+    let read = recv.find("sys_read(").expect("socket receive");
+
+    assert!(validation < read);
+    assert!(!recv[read..].contains("linux_read_user_u32(addrlen)"));
 }
