@@ -1,6 +1,9 @@
+use alloc::vec::Vec;
+
 use crate::kernel_lowlevel::thread::{self, ThreadId};
 use crate::kernel_objects::scheduler;
 
+pub(crate) use super::linux_process_memory::{LinuxDescriptorEntry, LinuxOpenDescription};
 use super::{linux_task, SysError};
 
 include!("linux_process_logic_shared.rs");
@@ -72,6 +75,69 @@ pub(crate) fn current_parent_pid() -> Result<usize, SysError> {
 
 pub(crate) fn reset_launch() {
     with_runtime(|runtime| runtime.processes.reset());
+}
+
+pub(crate) struct LinuxResourceClone {
+    descriptors: Vec<LinuxDescriptorEntry>,
+    objects: Vec<u32>,
+    shared_attachments: Vec<super::linux_process_memory::LinuxSharedAttachmentClone>,
+    committed: bool,
+}
+
+impl LinuxResourceClone {
+    pub(crate) fn descriptors(&self) -> &[LinuxDescriptorEntry] {
+        &self.descriptors
+    }
+
+    pub(crate) fn shared_attachments(
+        &self,
+    ) -> &[super::linux_process_memory::LinuxSharedAttachmentClone] {
+        &self.shared_attachments
+    }
+
+    pub(crate) fn commit(
+        mut self,
+        child_pid: usize,
+    ) -> Result<Vec<super::linux_process_memory::LinuxSharedAttachmentClone>, SysError> {
+        if !super::install_linux_resource_clone(child_pid, &mut self.descriptors, &mut self.objects)
+        {
+            return Err(SysError::EBUSY);
+        }
+        self.committed = true;
+        Ok(core::mem::take(&mut self.shared_attachments))
+    }
+}
+
+impl Drop for LinuxResourceClone {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        super::linux_process_memory::release_shared_attachments(&self.shared_attachments);
+        super::release_linux_resource_clone(&self.descriptors, &self.objects);
+    }
+}
+
+pub(crate) fn reserve_resource_clone(parent_pid: usize) -> Result<LinuxResourceClone, SysError> {
+    let (descriptors, objects) = super::reserve_linux_resource_clone(parent_pid)?;
+    let shared_attachments =
+        match super::linux_process_memory::reserve_shared_attachments(parent_pid) {
+            Ok(attachments) => attachments,
+            Err(error) => {
+                super::release_linux_resource_clone(&descriptors, &objects);
+                return Err(error);
+            }
+        };
+    Ok(LinuxResourceClone {
+        descriptors,
+        objects,
+        shared_attachments,
+        committed: false,
+    })
+}
+
+pub(crate) fn release_resources(pid: usize) -> bool {
+    super::release_linux_process_resources(pid)
 }
 
 fn process_error_to_sys_error(error: LinuxProcessError) -> SysError {

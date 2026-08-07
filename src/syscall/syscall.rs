@@ -48,6 +48,7 @@ use super::address_logic::{
 };
 use super::linux_futex;
 use super::linux_process;
+use super::linux_process::{LinuxDescriptorEntry, LinuxOpenDescription};
 use super::linux_process_memory;
 #[cfg(target_arch = "aarch64")]
 use super::linux_syscall_context;
@@ -639,18 +640,13 @@ struct VmarRecord {
     vmar: Vmar,
 }
 
-#[derive(Clone, Copy)]
-struct LinuxSharedMemoryAttachment {
-    addr: usize,
-    len: usize,
-}
-
 #[derive(Clone)]
 struct LinuxSharedMemoryRecord {
     id: u32,
     handle: u32,
     size: usize,
-    attachments: Vec<LinuxSharedMemoryAttachment>,
+    named: bool,
+    references: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -670,9 +666,21 @@ struct SignalRecord {
 #[derive(Clone)]
 struct LinuxFdRecord {
     fd: usize,
+    description_id: u32,
     handle: u32,
+    object_type: ObjectType,
+    status_flags: usize,
+    offset: usize,
+    close_on_exec: bool,
     readable: bool,
     writable: bool,
+}
+
+#[derive(Clone)]
+struct LinuxProcessResources {
+    pid: usize,
+    descriptors: Vec<LinuxDescriptorEntry>,
+    objects: Vec<u32>,
 }
 
 #[derive(Clone)]
@@ -1562,7 +1570,8 @@ struct MemorySyscallState {
     threads: Vec<ThreadRecord>,
     handles: Vec<KernelHandleRecord>,
     signals: Vec<SignalRecord>,
-    linux_fds: Vec<LinuxFdRecord>,
+    linux_open_descriptions: Vec<LinuxOpenDescription>,
+    linux_process_resources: Vec<LinuxProcessResources>,
     linux_timer_handles: Vec<u32>,
     linux_fxfs_files: Vec<LinuxFxfsFileRecord>,
     linux_shared_memory: Vec<LinuxSharedMemoryRecord>,
@@ -1581,7 +1590,7 @@ struct MemorySyscallState {
     linux_hostname_set: bool,
     linux_domainname_set: bool,
     next_handle: u32,
-    next_fd: usize,
+    next_open_description_id: u32,
     root_vmar_handle: u32,
 }
 
@@ -1612,7 +1621,8 @@ impl MemorySyscallState {
             threads: Vec::new(),
             handles,
             signals: Vec::new(),
-            linux_fds: Vec::new(),
+            linux_open_descriptions: Vec::new(),
+            linux_process_resources: Vec::new(),
             linux_timer_handles: Vec::new(),
             linux_fxfs_files: Vec::new(),
             linux_shared_memory: Vec::new(),
@@ -1631,7 +1641,7 @@ impl MemorySyscallState {
             linux_hostname_set: false,
             linux_domainname_set: false,
             next_handle: MEMORY_HANDLE_START + 1,
-            next_fd: COMPAT_FD_START,
+            next_open_description_id: 1,
             root_vmar_handle,
         }
     }
@@ -1899,23 +1909,23 @@ impl MemorySyscallState {
             .linux_shared_memory
             .iter()
             .map(|record| {
-                let attachments: Vec<SharedMemoryAttachmentSnapshot> = record
-                    .attachments
-                    .iter()
-                    .map(|attachment| SharedMemoryAttachmentSnapshot {
-                        addr: attachment.addr,
-                        len: attachment.len,
-                    })
-                    .collect();
+                let attachments: Vec<SharedMemoryAttachmentSnapshot> =
+                    linux_process_memory::current_shared_attachments()
+                        .into_iter()
+                        .filter_map(|attachment| {
+                            (attachment.object_id == record.id).then_some(
+                                SharedMemoryAttachmentSnapshot {
+                                    addr: attachment.addr,
+                                    len: attachment.len,
+                                },
+                            )
+                        })
+                        .collect();
                 SharedMemorySnapshot {
                     id: record.id,
                     size: record.size,
-                    attach_count: record.attachments.len(),
-                    mapped_bytes: record
-                        .attachments
-                        .iter()
-                        .map(|attachment| attachment.len)
-                        .sum(),
+                    attach_count: attachments.len(),
+                    mapped_bytes: attachments.iter().map(|attachment| attachment.len).sum(),
                     attachments,
                 }
             })
@@ -1997,7 +2007,8 @@ impl MemorySyscallState {
             id,
             handle,
             size,
-            attachments: Vec::new(),
+            named: true,
+            references: 1,
         });
         Some(id)
     }
@@ -2005,47 +2016,48 @@ impl MemorySyscallState {
     fn shared_memory_handle(&self, id: u32) -> Option<u32> {
         self.linux_shared_memory
             .iter()
-            .find(|record| record.id == id)
+            .find(|record| record.id == id && record.named)
             .map(|record| record.handle)
     }
 
-    fn attach_shared_memory(&mut self, id: u32, addr: usize, len: usize) {
-        if let Some(record) = self
+    fn acquire_shared_memory_reference(&mut self, id: u32) -> bool {
+        let Some(record) = self
             .linux_shared_memory
             .iter_mut()
             .find(|record| record.id == id)
-        {
-            record
-                .attachments
-                .push(LinuxSharedMemoryAttachment { addr, len });
-        }
+        else {
+            return false;
+        };
+        let Some(references) = record.references.checked_add(1) else {
+            return false;
+        };
+        record.references = references;
+        true
     }
 
-    fn detach_shared_memory(&mut self, id: Option<u32>, addr: usize) -> bool {
-        let mut removed = false;
-        for record in &mut self.linux_shared_memory {
-            if let Some(id) = id {
-                if record.id != id {
-                    continue;
-                }
-            }
-            let before = record.attachments.len();
-            record
-                .attachments
-                .retain(|attachment| attachment.addr != addr);
-            if record.attachments.len() != before {
-                removed = true;
-            }
-        }
-        removed
-    }
-
-    fn remove_shared_memory(&mut self, id: u32) -> Option<LinuxSharedMemoryRecord> {
+    fn release_shared_memory_reference(&mut self, id: u32) -> Option<u32> {
         let index = self
             .linux_shared_memory
             .iter()
             .position(|record| record.id == id)?;
-        Some(self.linux_shared_memory.swap_remove(index))
+        let record = &mut self.linux_shared_memory[index];
+        record.references = record.references.checked_sub(1)?;
+        if record.references != 0 {
+            return None;
+        }
+        Some(self.linux_shared_memory.swap_remove(index).handle)
+    }
+
+    fn remove_shared_memory_name(&mut self, id: u32) -> bool {
+        let Some(record) = self
+            .linux_shared_memory
+            .iter_mut()
+            .find(|record| record.id == id && record.named)
+        else {
+            return false;
+        };
+        record.named = false;
+        true
     }
 
     fn remove_shared_memory_by_handle(&mut self, handle: u32) {
@@ -2461,26 +2473,141 @@ impl MemorySyscallState {
         self.remove_shared_memory_by_handle(handle);
     }
 
-    fn alloc_fd(&mut self, handle: u32, readable: bool, writable: bool) -> usize {
-        let fd = self.next_fd;
-        self.next_fd = self.next_fd.saturating_add(1);
-        self.linux_fds.push(LinuxFdRecord {
-            fd,
-            handle,
-            readable,
-            writable,
+    fn process_resources_mut(&mut self, pid: usize) -> &mut LinuxProcessResources {
+        if let Some(index) = self
+            .linux_process_resources
+            .iter()
+            .position(|resources| resources.pid == pid)
+        {
+            return &mut self.linux_process_resources[index];
+        }
+        self.linux_process_resources.push(LinuxProcessResources {
+            pid,
+            descriptors: Vec::new(),
+            objects: Vec::new(),
         });
+        self.linux_process_resources.last_mut().unwrap()
+    }
+
+    fn process_resources(&self, pid: usize) -> Option<&LinuxProcessResources> {
+        self.linux_process_resources
+            .iter()
+            .find(|resources| resources.pid == pid)
+    }
+
+    fn open_description(&self, id: u32) -> Option<&LinuxOpenDescription> {
+        self.linux_open_descriptions
+            .iter()
+            .find(|description| description.id == id)
+    }
+
+    fn open_description_mut(&mut self, id: u32) -> Option<&mut LinuxOpenDescription> {
+        self.linux_open_descriptions
+            .iter_mut()
+            .find(|description| description.id == id)
+    }
+
+    fn create_open_description(
+        &mut self,
+        handle: u32,
+        object_type: ObjectType,
+        status_flags: usize,
+    ) -> u32 {
+        let id = self.next_open_description_id;
+        self.next_open_description_id = id.checked_add(1).unwrap_or(1);
+        self.linux_open_descriptions.push(LinuxOpenDescription {
+            id,
+            handle,
+            object_type,
+            status_flags,
+            offset: 0,
+            references: 0,
+        });
+        id
+    }
+
+    fn acquire_open_description(&mut self, id: u32) -> bool {
+        let Some(description) = self.open_description_mut(id) else {
+            return false;
+        };
+        let Some(references) = description.references.checked_add(1) else {
+            return false;
+        };
+        description.references = references;
+        true
+    }
+
+    fn release_open_description(&mut self, id: u32) -> Option<LinuxOpenDescription> {
+        let index = self
+            .linux_open_descriptions
+            .iter()
+            .position(|description| description.id == id)?;
+        let references = self.linux_open_descriptions[index]
+            .references
+            .checked_sub(1)?;
+        self.linux_open_descriptions[index].references = references;
+        (references == 0).then(|| self.linux_open_descriptions.swap_remove(index))
+    }
+
+    fn alloc_fd(&mut self, handle: u32, readable: bool, writable: bool) -> usize {
+        let status_flags = match (readable, writable) {
+            (true, true) => LINUX_O_RDWR,
+            (false, true) => LINUX_O_WRONLY,
+            _ => LINUX_O_RDONLY,
+        };
+        self.alloc_fd_with_flags(handle, status_flags, false)
+    }
+
+    fn alloc_fd_with_flags(
+        &mut self,
+        handle: u32,
+        status_flags: usize,
+        close_on_exec: bool,
+    ) -> usize {
+        let pid = linux_resource_pid();
+        let description_id = self
+            .linux_open_descriptions
+            .iter()
+            .find(|description| description.handle == handle)
+            .map(|description| description.id)
+            .unwrap_or_else(|| {
+                let object_type = compat::table()
+                    .object_type(HandleValue(handle))
+                    .unwrap_or(ObjectType::LinuxFile);
+                self.create_open_description(handle, object_type, status_flags)
+            });
+        let mut fd = COMPAT_FD_START;
+        while self
+            .process_resources(pid)
+            .is_some_and(|resources| resources.descriptors.iter().any(|entry| entry.fd == fd))
+        {
+            fd = fd.saturating_add(1);
+        }
+        let _ = self.acquire_open_description(description_id);
+        self.process_resources_mut(pid)
+            .descriptors
+            .push(LinuxDescriptorEntry {
+                fd,
+                description_id,
+                close_on_exec,
+            });
         fd
     }
 
     fn update_fd_access(&mut self, fd: usize, readable: bool, writable: bool) -> bool {
-        if let Some(record) = self.linux_fds.iter_mut().find(|record| record.fd == fd) {
-            record.readable = readable;
-            record.writable = writable;
-            true
-        } else {
-            false
-        }
+        let Some(record) = self.get_fd(fd) else {
+            return false;
+        };
+        let access = match (readable, writable) {
+            (true, true) => LINUX_O_RDWR,
+            (false, true) => LINUX_O_WRONLY,
+            _ => LINUX_O_RDONLY,
+        };
+        let Some(description) = self.open_description_mut(record.description_id) else {
+            return false;
+        };
+        description.status_flags = (description.status_flags & !LINUX_O_ACCMODE) | access;
+        true
     }
 
     fn alloc_fd_from(
@@ -2491,35 +2618,253 @@ impl MemorySyscallState {
         writable: bool,
     ) -> usize {
         let mut fd = min_fd.max(COMPAT_FD_START);
-        while self.linux_fds.iter().any(|record| record.fd == fd) {
+        let pid = linux_resource_pid();
+        while self
+            .process_resources(pid)
+            .is_some_and(|resources| resources.descriptors.iter().any(|entry| entry.fd == fd))
+        {
             fd = fd.saturating_add(1);
         }
-        self.next_fd = self.next_fd.max(fd.saturating_add(1));
-        self.linux_fds.push(LinuxFdRecord {
-            fd,
-            handle,
-            readable,
-            writable,
-        });
+        let Some(description_id) = self
+            .linux_open_descriptions
+            .iter()
+            .find(|description| description.handle == handle)
+            .map(|description| description.id)
+        else {
+            return self.alloc_fd(handle, readable, writable);
+        };
+        let _ = self.acquire_open_description(description_id);
+        self.process_resources_mut(pid)
+            .descriptors
+            .push(LinuxDescriptorEntry {
+                fd,
+                description_id,
+                close_on_exec: false,
+            });
         fd
     }
 
-    fn get_fd(&self, fd: usize) -> Option<&LinuxFdRecord> {
-        self.linux_fds.iter().find(|record| record.fd == fd)
+    fn install_fd(&mut self, fd: usize, description_id: u32, close_on_exec: bool) -> bool {
+        if !self.acquire_open_description(description_id) {
+            return false;
+        }
+        self.process_resources_mut(linux_resource_pid())
+            .descriptors
+            .push(LinuxDescriptorEntry {
+                fd,
+                description_id,
+                close_on_exec,
+            });
+        true
+    }
+
+    fn get_fd(&self, fd: usize) -> Option<LinuxFdRecord> {
+        let entry = self
+            .process_resources(linux_resource_pid())?
+            .descriptors
+            .iter()
+            .find(|entry| entry.fd == fd)?;
+        let description = self.open_description(entry.description_id)?;
+        let access = description.status_flags & LINUX_O_ACCMODE;
+        Some(LinuxFdRecord {
+            fd,
+            description_id: description.id,
+            handle: description.handle,
+            object_type: description.object_type,
+            status_flags: description.status_flags,
+            offset: description.offset,
+            close_on_exec: entry.close_on_exec,
+            readable: access != LINUX_O_WRONLY,
+            writable: access != LINUX_O_RDONLY,
+        })
+    }
+
+    fn remove_fd_entry(&mut self, fd: usize) -> Option<LinuxDescriptorEntry> {
+        let resources = self.process_resources_mut(linux_resource_pid());
+        let index = resources
+            .descriptors
+            .iter()
+            .position(|entry| entry.fd == fd)?;
+        Some(resources.descriptors.swap_remove(index))
     }
 
     fn close_fd(&mut self, fd: usize) -> Option<u32> {
-        let index = self.linux_fds.iter().position(|record| record.fd == fd)?;
-        Some(self.linux_fds.swap_remove(index).handle)
-    }
-
-    fn close_fd_record(&mut self, fd: usize) -> Option<LinuxFdRecord> {
-        let index = self.linux_fds.iter().position(|record| record.fd == fd)?;
-        Some(self.linux_fds.swap_remove(index))
+        let entry = self.remove_fd_entry(fd)?;
+        self.release_open_description(entry.description_id)
+            .map(|description| description.handle)
     }
 
     fn handle_has_fd(&self, handle: u32) -> bool {
-        self.linux_fds.iter().any(|record| record.handle == handle)
+        self.linux_open_descriptions
+            .iter()
+            .any(|description| description.handle == handle && description.references != 0)
+    }
+
+    fn set_fd_close_on_exec(&mut self, fd: usize, close_on_exec: bool) -> bool {
+        let resources = self.process_resources_mut(linux_resource_pid());
+        let Some(entry) = resources
+            .descriptors
+            .iter_mut()
+            .find(|entry| entry.fd == fd)
+        else {
+            return false;
+        };
+        entry.close_on_exec = close_on_exec;
+        true
+    }
+
+    fn set_description_status_flags(&mut self, id: u32, flags: usize) -> bool {
+        let Some(description) = self.open_description_mut(id) else {
+            return false;
+        };
+        description.status_flags = (description.status_flags & !LINUX_FCNTL_STATUS_ALLOWED_FLAGS)
+            | (flags & LINUX_FCNTL_STATUS_ALLOWED_FLAGS);
+        true
+    }
+
+    fn set_description_offset(&mut self, id: u32, offset: usize) -> bool {
+        let Some(description) = self.open_description_mut(id) else {
+            return false;
+        };
+        description.offset = offset;
+        true
+    }
+
+    fn register_process_object(&mut self, handle: u32, object_type: ObjectType) -> Option<u32> {
+        let description_id = self.create_open_description(handle, object_type, 0);
+        if !self.acquire_open_description(description_id) {
+            return None;
+        }
+        self.process_resources_mut(linux_resource_pid())
+            .objects
+            .push(description_id);
+        Some(description_id)
+    }
+
+    fn reserve_process_resources(
+        &mut self,
+        parent_pid: usize,
+    ) -> Option<(Vec<LinuxDescriptorEntry>, Vec<u32>)> {
+        let parent = self
+            .process_resources(parent_pid)
+            .cloned()
+            .unwrap_or_else(|| LinuxProcessResources {
+                pid: parent_pid,
+                descriptors: Vec::new(),
+                objects: Vec::new(),
+            });
+        let mut descriptors = Vec::with_capacity(parent.descriptors.len());
+        let mut objects = Vec::with_capacity(parent.objects.len());
+        for entry in parent.descriptors {
+            if !self.acquire_open_description(entry.description_id) {
+                debug_assert!(self
+                    .release_resource_clone(&descriptors, &objects)
+                    .is_empty());
+                return None;
+            }
+            descriptors.push(entry);
+        }
+        for description_id in parent.objects {
+            if !self.acquire_open_description(description_id) {
+                debug_assert!(self
+                    .release_resource_clone(&descriptors, &objects)
+                    .is_empty());
+                return None;
+            }
+            let Some(description) = self.open_description(description_id).copied() else {
+                debug_assert!(self
+                    .release_resource_clone(&descriptors, &objects)
+                    .is_empty());
+                return None;
+            };
+            if description.object_type == ObjectType::SharedMemory {
+                let Some(id) = self
+                    .linux_shared_memory
+                    .iter()
+                    .find(|record| record.handle == description.handle)
+                    .map(|record| record.id)
+                else {
+                    let _ = self.release_open_description(description_id);
+                    debug_assert!(self
+                        .release_resource_clone(&descriptors, &objects)
+                        .is_empty());
+                    return None;
+                };
+                if !self.acquire_shared_memory_reference(id) {
+                    let _ = self.release_open_description(description_id);
+                    debug_assert!(self
+                        .release_resource_clone(&descriptors, &objects)
+                        .is_empty());
+                    return None;
+                }
+            }
+            objects.push(description_id);
+        }
+        Some((descriptors, objects))
+    }
+
+    fn release_resource_clone(
+        &mut self,
+        descriptors: &[LinuxDescriptorEntry],
+        objects: &[u32],
+    ) -> Vec<u32> {
+        let mut released_handles = Vec::new();
+        for description_id in objects.iter().copied().rev() {
+            let object = self.open_description(description_id).copied();
+            let final_reference = self.release_open_description(description_id);
+            if let Some(object) = object {
+                if object.object_type == ObjectType::SharedMemory {
+                    if let Some(id) = self
+                        .linux_shared_memory
+                        .iter()
+                        .find(|record| record.handle == object.handle)
+                        .map(|record| record.id)
+                    {
+                        if let Some(handle) = self.release_shared_memory_reference(id) {
+                            released_handles.push(handle);
+                        }
+                    }
+                } else if final_reference.is_some() {
+                    released_handles.push(object.handle);
+                }
+            }
+        }
+        for entry in descriptors.iter().rev() {
+            if let Some(description) = self.release_open_description(entry.description_id) {
+                self.remove_linux_fxfs_file(description.handle);
+                released_handles.push(description.handle);
+            }
+        }
+        released_handles
+    }
+
+    fn install_process_resources(
+        &mut self,
+        pid: usize,
+        descriptors: &mut Vec<LinuxDescriptorEntry>,
+        objects: &mut Vec<u32>,
+    ) -> bool {
+        if self.process_resources(pid).is_some() {
+            return false;
+        }
+        self.linux_process_resources.push(LinuxProcessResources {
+            pid,
+            descriptors: core::mem::take(descriptors),
+            objects: core::mem::take(objects),
+        });
+        true
+    }
+
+    fn release_process_resources(&mut self, pid: usize) -> Option<Vec<u32>> {
+        let Some(index) = self
+            .linux_process_resources
+            .iter()
+            .position(|resources| resources.pid == pid)
+        else {
+            return None;
+        };
+        let resources = self.linux_process_resources.swap_remove(index);
+        Some(self.release_resource_clone(&resources.descriptors, &resources.objects))
     }
 
     fn bind_linux_fxfs_file(&mut self, handle: u32, path: String, cursor: fxfs::FxfsCursor) {
@@ -2598,16 +2943,24 @@ impl MemorySyscallState {
         self.linux_domainname_set = false;
     }
 
-    fn reset_linux_process_state(&mut self) {
+    fn reset_linux_process_state(&mut self) -> Vec<u32> {
+        let mut released_handles = Vec::new();
+        let resources = core::mem::take(&mut self.linux_process_resources);
+        for resources in resources {
+            released_handles
+                .extend(self.release_resource_clone(&resources.descriptors, &resources.objects));
+        }
         let shared_memory = core::mem::take(&mut self.linux_shared_memory);
         for record in shared_memory {
-            let _ = compat::close_handle(HandleValue(record.handle));
+            released_handles.push(record.handle);
         }
 
+        self.linux_open_descriptions.clear();
         self.linux_fxfs_files.clear();
-        self.next_fd = COMPAT_FD_START;
+        self.next_open_description_id = 1;
         self.next_shared_memory_id = LINUX_SHM_ID_START;
         self.reset_linux_container_state();
+        released_handles
     }
 
     fn linux_container_stats(&self) -> LinuxContainerStats {
@@ -2662,6 +3015,55 @@ fn memory_state() -> &'static mut MemorySyscallState {
 
         MEMORY_SYSCALL_STATE.as_mut().unwrap()
     }
+}
+
+fn linux_resource_pid() -> usize {
+    linux_process::current_pid().unwrap_or(linux_process::LINUX_ROOT_PID)
+}
+
+pub(crate) fn reserve_linux_resource_clone(
+    parent_pid: usize,
+) -> Result<(Vec<LinuxDescriptorEntry>, Vec<u32>), SysError> {
+    memory_state()
+        .reserve_process_resources(parent_pid)
+        .ok_or(SysError::ENOMEM)
+}
+
+pub(crate) fn release_linux_resource_clone(descriptors: &[LinuxDescriptorEntry], objects: &[u32]) {
+    let released_handles = memory_state().release_resource_clone(descriptors, objects);
+    for handle in released_handles {
+        let _ = sys_handle_close(handle);
+    }
+}
+
+pub(crate) fn install_linux_resource_clone(
+    pid: usize,
+    descriptors: &mut Vec<LinuxDescriptorEntry>,
+    objects: &mut Vec<u32>,
+) -> bool {
+    memory_state().install_process_resources(pid, descriptors, objects)
+}
+
+pub(crate) fn release_linux_process_resources(pid: usize) -> bool {
+    let Some(released_handles) = memory_state().release_process_resources(pid) else {
+        return false;
+    };
+    for handle in released_handles {
+        let _ = sys_handle_close(handle);
+    }
+    true
+}
+
+pub(crate) fn acquire_shared_memory_attachment_reference(id: u32) -> bool {
+    memory_state().acquire_shared_memory_reference(id)
+}
+
+pub(crate) fn release_shared_memory_attachment_reference(id: u32) -> bool {
+    let Some(handle) = memory_state().release_shared_memory_reference(id) else {
+        return false;
+    };
+    let _ = sys_handle_close(handle);
+    true
 }
 
 fn linux_copy_from_user(address: usize, out: &mut [u8]) -> Result<(), SysError> {
@@ -2796,21 +3198,15 @@ pub fn reset_linux_process_state() {
     }
     linux_process_memory::reset_launch();
     linux_task::reset();
-    let fds = memory_state()
-        .linux_fds
-        .iter()
-        .map(|record| record.fd)
-        .collect::<Vec<_>>();
-    for fd in fds {
-        let _ = sys_close(fd);
-    }
-
     let timer_handles = core::mem::take(&mut memory_state().linux_timer_handles);
     for handle in timer_handles {
         let _ = sys_handle_close(handle);
     }
 
-    memory_state().reset_linux_process_state();
+    let released_handles = memory_state().reset_linux_process_state();
+    for handle in released_handles {
+        let _ = sys_handle_close(handle);
+    }
     reset_linux_signal_timer_state();
 }
 
@@ -2867,7 +3263,11 @@ fn memory_resource_counts() -> MemoryResourceCounts {
         match MEMORY_SYSCALL_STATE.as_ref() {
             Some(state) => MemoryResourceCounts {
                 linux_mappings: linux_process_memory::total_mapping_count(),
-                linux_fds: state.linux_fds.len(),
+                linux_fds: state
+                    .linux_process_resources
+                    .iter()
+                    .map(|resources| resources.descriptors.len())
+                    .sum(),
                 linux_shared_memory: state.linux_shared_memory.len(),
                 kernel_handles: syscall_logic::logical_memory_handle_count(Some(
                     state.handles.len(),
@@ -3871,8 +4271,8 @@ pub fn sys_munmap(addr: usize, len: usize) -> SysResult {
     }
 
     let detached = linux_process_memory::unmap_current(addr, roundup_pages(len))?;
-    for (id, mapping_address) in detached {
-        memory_state().detach_shared_memory(Some(id), mapping_address);
+    for (id, _mapping_address) in detached {
+        let _ = release_shared_memory_attachment_reference(id);
     }
     Ok(0)
 }
@@ -3969,18 +4369,22 @@ pub(crate) fn linux_fd_write_bytes(fd: usize, buf: &[u8]) -> SysResult {
             Ok(buf.len())
         }
         _ => {
-            let handle = memory_state()
+            let record = memory_state()
                 .get_fd(fd)
                 .filter(|record| record.writable)
-                .map(|record| record.handle)
                 .ok_or(SysError::ENODEV)?;
+            let handle = record.handle;
             if socket::socket_table().contains(HandleValue(handle)) {
                 return socket::socket_table()
                     .write(HandleValue(handle), buf)
                     .map_err(|_| SysError::EIO);
             }
             if let Some(file) = memory_state().linux_fxfs_file_mut(handle) {
-                return fxfs::cursor_write(&mut file.cursor, buf).map_err(|_| SysError::EIO);
+                let written =
+                    fxfs::cursor_write(&mut file.cursor, buf).map_err(|_| SysError::EIO)?;
+                let offset = file.cursor.offset();
+                let _ = memory_state().set_description_offset(record.description_id, offset);
+                return Ok(written);
             }
             compat::table()
                 .write_bytes(HandleValue(handle), buf)
@@ -3990,11 +4394,11 @@ pub(crate) fn linux_fd_write_bytes(fd: usize, buf: &[u8]) -> SysResult {
 }
 
 pub(crate) fn linux_fd_read_bytes(fd: usize, out: &mut [u8]) -> SysResult {
-    let handle = memory_state()
+    let record = memory_state()
         .get_fd(fd)
         .filter(|record| record.readable)
-        .map(|record| record.handle)
         .ok_or(SysError::ENODEV)?;
+    let handle = record.handle;
 
     if socket::socket_table().contains(HandleValue(handle)) {
         return match socket::socket_table().read(HandleValue(handle), 0, out) {
@@ -4005,7 +4409,10 @@ pub(crate) fn linux_fd_read_bytes(fd: usize, out: &mut [u8]) -> SysResult {
     }
 
     if let Some(file) = memory_state().linux_fxfs_file_mut(handle) {
-        return fxfs::cursor_read(&mut file.cursor, out).map_err(|_| SysError::EIO);
+        let read = fxfs::cursor_read(&mut file.cursor, out).map_err(|_| SysError::EIO)?;
+        let offset = file.cursor.offset();
+        let _ = memory_state().set_description_offset(record.description_id, offset);
+        return Ok(read);
     }
 
     match compat::table().read_bytes(HandleValue(handle), out) {
@@ -4197,13 +4604,13 @@ pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
 
 /// Linux sys_close implementation.
 pub fn sys_close(fd: usize) -> SysResult {
-    let Some(record) = memory_state().close_fd_record(fd) else {
+    let Some(entry) = memory_state().remove_fd_entry(fd) else {
         return if fd <= 2 { Ok(0) } else { Err(SysError::EBUSY) };
     };
-    let handle_still_open = memory_state().handle_has_fd(record.handle);
-    if !handle_still_open {
-        memory_state().remove_linux_fxfs_file(record.handle);
-        let _ = sys_handle_close(record.handle);
+    let final_reference = memory_state().release_open_description(entry.description_id);
+    if let Some(description) = final_reference {
+        memory_state().remove_linux_fxfs_file(description.handle);
+        let _ = sys_handle_close(description.handle);
     }
     Ok(0)
 }
@@ -4220,8 +4627,16 @@ pub fn sys_pipe2(fds_ptr: usize, flags: usize) -> SysResult {
     let (read_handle, write_handle) =
         compat::create_pair(ObjectType::LinuxPipe).map_err(|_| SysError::ENOMEM)?;
     let state = memory_state();
-    let read_fd = state.alloc_fd(read_handle.0, true, false);
-    let write_fd = state.alloc_fd(write_handle.0, false, true);
+    let read_fd = state.alloc_fd_with_flags(
+        read_handle.0,
+        LINUX_O_RDONLY | (flags & LINUX_O_NONBLOCK),
+        flags & LINUX_O_CLOEXEC != 0,
+    );
+    let write_fd = state.alloc_fd_with_flags(
+        write_handle.0,
+        LINUX_O_WRONLY | (flags & LINUX_O_NONBLOCK),
+        flags & LINUX_O_CLOEXEC != 0,
+    );
 
     if let Err(error) = linux_write_user_i32_pair(fds_ptr, read_fd as i32, write_fd as i32) {
         let _ = sys_close(read_fd);
@@ -4233,7 +4648,7 @@ pub fn sys_pipe2(fds_ptr: usize, flags: usize) -> SysResult {
 }
 
 pub fn sys_dup(fd: usize) -> SysResult {
-    let record = memory_state().get_fd(fd).cloned().ok_or(SysError::EBUSY)?;
+    let record = memory_state().get_fd(fd).ok_or(SysError::EBUSY)?;
     Ok(memory_state().alloc_fd(record.handle, record.readable, record.writable))
 }
 
@@ -4244,19 +4659,17 @@ pub fn sys_dup3(fd: usize, new_fd: usize, flags: usize) -> SysResult {
     if !syscall_logic::linux_pipe_flags_valid(flags, LINUX_O_CLOEXEC) {
         return Err(SysError::EINVAL);
     }
-    let record = memory_state().get_fd(fd).cloned().ok_or(SysError::EBUSY)?;
-    if let Some(replaced) = memory_state().close_fd_record(new_fd) {
-        if !memory_state().handle_has_fd(replaced.handle) && replaced.handle != record.handle {
-            memory_state().remove_linux_fxfs_file(replaced.handle);
-            let _ = sys_handle_close(replaced.handle);
+    let record = memory_state().get_fd(fd).ok_or(SysError::EBUSY)?;
+    if let Some(replaced) = memory_state().remove_fd_entry(new_fd) {
+        let final_reference = memory_state().release_open_description(replaced.description_id);
+        if let Some(description) = final_reference {
+            memory_state().remove_linux_fxfs_file(description.handle);
+            let _ = sys_handle_close(description.handle);
         }
     }
-    memory_state().linux_fds.push(LinuxFdRecord {
-        fd: new_fd,
-        handle: record.handle,
-        readable: record.readable,
-        writable: record.writable,
-    });
+    if !memory_state().install_fd(new_fd, record.description_id, flags & LINUX_O_CLOEXEC != 0) {
+        return Err(SysError::ENOMEM);
+    }
     Ok(new_fd)
 }
 
@@ -4998,10 +5411,12 @@ pub fn sys_openat(dirfd: usize, path: usize, flags: usize, _mode: usize) -> SysR
     }
     let fxfs_cursor = linux_prepare_fxfs_cursor(&path_str, object_type, flags, access_mode)?;
     let handle = compat::create_object(object_type).map_err(|_| SysError::ENOMEM)?;
-    let readable = access_mode != LINUX_O_WRONLY;
-    let writable = access_mode != LINUX_O_RDONLY;
     let state = memory_state();
-    let fd = state.alloc_fd(handle.0, readable, writable);
+    let fd = state.alloc_fd_with_flags(
+        handle.0,
+        flags & (LINUX_O_ACCMODE | LINUX_FCNTL_STATUS_ALLOWED_FLAGS),
+        flags & LINUX_O_CLOEXEC != 0,
+    );
     if let Some(cursor) = fxfs_cursor {
         state.bind_linux_fxfs_file(handle.0, String::from(path_str), cursor);
     }
@@ -5486,23 +5901,30 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult {
 
     match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC => {
-            let record = memory_state().get_fd(fd).cloned().ok_or(SysError::ENODEV)?;
-            Ok(memory_state().alloc_fd_from(arg, record.handle, record.readable, record.writable))
-        }
-        F_GETFD | F_GETFL => {
-            if linux_fd_known(fd) {
-                Ok(0)
-            } else {
-                Err(SysError::ENODEV)
+            let record = memory_state().get_fd(fd).ok_or(SysError::ENODEV)?;
+            let duplicated =
+                memory_state().alloc_fd_from(arg, record.handle, record.readable, record.writable);
+            if cmd == F_DUPFD_CLOEXEC {
+                let _ = memory_state().set_fd_close_on_exec(duplicated, true);
             }
+            Ok(duplicated)
         }
+        F_GETFD => memory_state()
+            .get_fd(fd)
+            .map(|record| usize::from(record.close_on_exec))
+            .ok_or(SysError::ENODEV),
+        F_GETFL => memory_state()
+            .get_fd(fd)
+            .map(|record| record.status_flags)
+            .ok_or(SysError::ENODEV),
         F_SETFD => {
             if !linux_fd_known(fd) {
                 return Err(SysError::ENODEV);
             }
-            if !syscall_logic::linux_fcntl_flags_valid(arg, LINUX_O_CLOEXEC) {
+            if arg & !1 != 0 {
                 return Err(SysError::EINVAL);
             }
+            let _ = memory_state().set_fd_close_on_exec(fd, arg & 1 != 0);
             Ok(0)
         }
         F_SETFL => {
@@ -5512,6 +5934,11 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult {
             if !syscall_logic::linux_fcntl_flags_valid(arg, LINUX_FCNTL_STATUS_ALLOWED_FLAGS) {
                 return Err(SysError::EINVAL);
             }
+            let description_id = memory_state()
+                .get_fd(fd)
+                .map(|record| record.description_id)
+                .ok_or(SysError::ENODEV)?;
+            let _ = memory_state().set_description_status_flags(description_id, arg);
             Ok(0)
         }
         _ => Err(SysError::EINVAL),
@@ -5542,7 +5969,7 @@ pub fn sys_lseek(fd: usize, offset: i64, whence: usize) -> SysResult {
         return Err(SysError::EINVAL);
     }
     let state = memory_state();
-    let record = state.get_fd(fd).cloned().ok_or(SysError::ENODEV)?;
+    let record = state.get_fd(fd).ok_or(SysError::ENODEV)?;
     if let Some(file) = state.linux_fxfs_file_mut(record.handle) {
         const SEEK_SET: usize = 0;
         const SEEK_CUR: usize = 1;
@@ -5560,6 +5987,7 @@ pub fn sys_lseek(fd: usize, offset: i64, whence: usize) -> SysResult {
         };
         let target = linux_lseek_target(base, offset).ok_or(SysError::EINVAL)?;
         fxfs::seek_cursor(&mut file.cursor, target).map_err(|_| SysError::EINVAL)?;
+        let _ = state.set_description_offset(record.description_id, target);
         return Ok(target);
     }
 
@@ -5579,7 +6007,6 @@ pub fn sys_pread(fd: usize, buf: usize, len: usize, offset: u64) -> SysResult {
         let record = state
             .get_fd(fd)
             .filter(|record| record.readable)
-            .cloned()
             .ok_or(SysError::ENODEV)?;
         state.linux_fxfs_file(record.handle).cloned()
     };
@@ -5803,7 +6230,7 @@ pub fn sys_poll(fds: usize, nfds: usize, _timeout: isize) -> SysResult {
             ready = ready.saturating_add(1);
             continue;
         }
-        let record = memory_state().get_fd(fd).cloned().ok_or(SysError::ENODEV)?;
+        let record = memory_state().get_fd(fd).ok_or(SysError::ENODEV)?;
         if record.readable && (poll_fd.events & 0x0001) != 0 {
             poll_fd.revents |= 0x0001;
         }
@@ -5938,10 +6365,7 @@ pub fn sys_accept(sockfd: usize, addr: usize, addrlen: usize) -> SysResult {
     if addr != 0 {
         linux_zero_user(addr, 16)?;
     }
-    let record = memory_state()
-        .get_fd(sockfd)
-        .cloned()
-        .ok_or(SysError::ENODEV)?;
+    let record = memory_state().get_fd(sockfd).ok_or(SysError::ENODEV)?;
     Ok(memory_state().alloc_fd(handle, record.readable, record.writable))
 }
 
@@ -6116,9 +6540,15 @@ pub fn sys_semop(id: usize, ops: usize, num_ops: usize) -> SysResult {
 }
 
 pub fn sys_msgget(_key: usize, _flags: usize) -> SysResult {
-    Ok(compat::create_object(ObjectType::MessageQueue)
-        .map_err(|_| SysError::ENOMEM)?
-        .0 as usize)
+    let handle = compat::create_object(ObjectType::MessageQueue).map_err(|_| SysError::ENOMEM)?;
+    if memory_state()
+        .register_process_object(handle.0, ObjectType::MessageQueue)
+        .is_none()
+    {
+        let _ = compat::close_handle(handle);
+        return Err(SysError::ENOMEM);
+    }
+    Ok(handle.0 as usize)
 }
 
 pub fn sys_msgctl(id: usize, _cmd: usize, buffer: usize) -> SysResult {
@@ -6191,6 +6621,14 @@ pub fn sys_shmget(_key: usize, size: usize, _shmflg: usize) -> SysResult {
         let _ = compat::close_handle(handle);
         return Err(SysError::ENOMEM);
     };
+    if memory_state()
+        .register_process_object(handle.0, ObjectType::SharedMemory)
+        .is_none()
+    {
+        let _ = memory_state().release_shared_memory_reference(id);
+        let _ = compat::close_handle(handle);
+        return Err(SysError::ENOMEM);
+    }
     Ok(id as usize)
 }
 
@@ -6231,7 +6669,10 @@ pub fn sys_shmat(id: usize, addr: usize, _shmflg: usize) -> SysResult {
         let _ = linux_process_memory::unmap_current(mapped, size);
         return Err(SysError::EINVAL);
     }
-    memory_state().attach_shared_memory(id as u32, mapped, size);
+    if !acquire_shared_memory_attachment_reference(id as u32) {
+        let _ = linux_process_memory::unmap_current(mapped, size);
+        return Err(SysError::ENOMEM);
+    }
     Ok(mapped)
 }
 
@@ -6239,12 +6680,10 @@ pub fn sys_shmdt(id: usize, addr: usize, _shmflg: usize) -> SysResult {
     if addr == 0 {
         return Err(SysError::EINVAL);
     }
-    let detach_id = if id == 0 { None } else { Some(id as u32) };
-    let removed = memory_state().detach_shared_memory(detach_id, addr);
-    if !removed {
-        return Err(SysError::EINVAL);
-    }
-    Ok(0)
+    let detach_id = (id != 0).then_some(id as u32);
+    let (_, len) =
+        linux_process_memory::shared_attachment_current(detach_id, addr).ok_or(SysError::EINVAL)?;
+    sys_munmap(addr, len)
 }
 
 pub fn sys_shmctl(id: usize, cmd: usize, buffer: usize) -> SysResult {
@@ -6260,10 +6699,10 @@ pub fn sys_shmctl(id: usize, cmd: usize, buffer: usize) -> SysResult {
     }
     const IPC_RMID: usize = 0;
     if cmd == IPC_RMID {
-        let record = memory_state()
-            .remove_shared_memory(id as u32)
-            .ok_or(SysError::EINVAL)?;
-        let _ = compat::close_handle(HandleValue(record.handle));
+        if !memory_state().remove_shared_memory_name(id as u32) {
+            return Err(SysError::EINVAL);
+        }
+        linux_process_memory::remove_shared_page_name(id as u32);
     }
     Ok(0)
 }

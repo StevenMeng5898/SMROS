@@ -26,6 +26,475 @@ pub(crate) enum LinuxPageBacking {
     },
 }
 
+pub(crate) fn linux_clone_page_backing(
+    backing: LinuxPageBacking,
+    private_pfn: u64,
+) -> LinuxPageBacking {
+    match backing {
+        LinuxPageBacking::Private { .. } => LinuxPageBacking::Private { pfn: private_pfn },
+        shared @ LinuxPageBacking::Shared { .. } => shared,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxSharedAttachmentRecord {
+    pub object_id: u32,
+    pub addr: usize,
+    pub len: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxSharedMappingRange {
+    pub object_id: u32,
+    pub addr: usize,
+    pub len: usize,
+}
+
+pub(crate) fn linux_shared_attachment_has_mapping(
+    attachment: LinuxSharedAttachmentRecord,
+    mappings: &[LinuxSharedMappingRange],
+) -> bool {
+    let Some(attachment_end) = attachment.addr.checked_add(attachment.len) else {
+        return false;
+    };
+    mappings.iter().any(|mapping| {
+        if mapping.object_id != attachment.object_id {
+            return false;
+        }
+        mapping
+            .addr
+            .checked_add(mapping.len)
+            .is_some_and(|mapping_end| {
+                attachment.addr < mapping_end && mapping.addr < attachment_end
+            })
+    })
+}
+
+pub(crate) const fn linux_shared_mremap_supported(requires_move: bool) -> bool {
+    !requires_move
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxDescriptorEntry {
+    pub fd: usize,
+    pub description_id: u32,
+    pub close_on_exec: bool,
+}
+
+impl LinuxDescriptorEntry {
+    const EMPTY: Self = Self {
+        fd: 0,
+        description_id: 0,
+        close_on_exec: false,
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxOpenDescription {
+    pub id: u32,
+    pub handle: u32,
+    pub object_type: ObjectType,
+    pub status_flags: usize,
+    pub offset: usize,
+    pub references: usize,
+}
+
+pub(crate) struct LinuxOpenDescriptionTableCore<const N: usize> {
+    descriptions: [Option<LinuxOpenDescription>; N],
+    next_id: u32,
+}
+
+impl<const N: usize> LinuxOpenDescriptionTableCore<N> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            descriptions: [None; N],
+            next_id: 1,
+        }
+    }
+
+    pub(crate) fn insert(
+        &mut self,
+        handle: u32,
+        object_type: ObjectType,
+        status_flags: usize,
+        offset: usize,
+    ) -> Option<u32> {
+        let slot = self.descriptions.iter().position(Option::is_none)?;
+        let id = self.next_id;
+        if id == 0 {
+            return None;
+        }
+        self.next_id = id.checked_add(1).unwrap_or(0);
+        self.descriptions[slot] = Some(LinuxOpenDescription {
+            id,
+            handle,
+            object_type,
+            status_flags,
+            offset,
+            references: 0,
+        });
+        Some(id)
+    }
+
+    pub(crate) fn insert_object(&mut self, handle: u32, object_type: ObjectType) -> Option<u32> {
+        self.insert(handle, object_type, 0, 0)
+    }
+
+    pub(crate) fn get(&self, id: u32) -> Option<&LinuxOpenDescription> {
+        self.descriptions
+            .iter()
+            .flatten()
+            .find(|description| description.id == id)
+    }
+
+    pub(crate) fn set_offset(&mut self, id: u32, offset: usize) -> bool {
+        let Some(description) = self
+            .descriptions
+            .iter_mut()
+            .flatten()
+            .find(|description| description.id == id)
+        else {
+            return false;
+        };
+        description.offset = offset;
+        true
+    }
+
+    pub(crate) fn acquire(&mut self, id: u32) -> bool {
+        let Some(description) = self
+            .descriptions
+            .iter_mut()
+            .flatten()
+            .find(|description| description.id == id)
+        else {
+            return false;
+        };
+        let Some(references) = description.references.checked_add(1) else {
+            return false;
+        };
+        description.references = references;
+        true
+    }
+
+    pub(crate) fn release(&mut self, id: u32) -> Option<u32> {
+        let slot = self
+            .descriptions
+            .iter()
+            .position(|description| description.is_some_and(|description| description.id == id))?;
+        let description = self.descriptions[slot].as_mut()?;
+        description.references = description.references.checked_sub(1)?;
+        if description.references != 0 {
+            return None;
+        }
+        self.descriptions[slot]
+            .take()
+            .map(|description| description.handle)
+    }
+}
+
+pub(crate) struct LinuxProcessResourceCore<const D: usize, const O: usize> {
+    descriptors: [LinuxDescriptorEntry; D],
+    descriptor_len: usize,
+    objects: [u32; O],
+    object_len: usize,
+}
+
+impl<const D: usize, const O: usize> LinuxProcessResourceCore<D, O> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            descriptors: [LinuxDescriptorEntry::EMPTY; D],
+            descriptor_len: 0,
+            objects: [0; O],
+            object_len: 0,
+        }
+    }
+
+    pub(crate) fn insert_descriptor<const N: usize>(
+        &mut self,
+        fd: usize,
+        description_id: u32,
+        close_on_exec: bool,
+        descriptions: &mut LinuxOpenDescriptionTableCore<N>,
+    ) -> bool {
+        if self.descriptor_len == D || self.descriptor(fd).is_some() {
+            return false;
+        }
+        if !descriptions.acquire(description_id) {
+            return false;
+        }
+        self.descriptors[self.descriptor_len] = LinuxDescriptorEntry {
+            fd,
+            description_id,
+            close_on_exec,
+        };
+        self.descriptor_len += 1;
+        true
+    }
+
+    pub(crate) fn insert_object<const N: usize>(
+        &mut self,
+        description_id: u32,
+        descriptions: &mut LinuxOpenDescriptionTableCore<N>,
+    ) -> bool {
+        if self.object_len == O || self.objects().contains(&description_id) {
+            return false;
+        }
+        if !descriptions.acquire(description_id) {
+            return false;
+        }
+        self.objects[self.object_len] = description_id;
+        self.object_len += 1;
+        true
+    }
+
+    pub(crate) fn descriptor(&self, fd: usize) -> Option<LinuxDescriptorEntry> {
+        self.descriptors()
+            .iter()
+            .copied()
+            .find(|entry| entry.fd == fd)
+    }
+
+    pub(crate) fn descriptors(&self) -> &[LinuxDescriptorEntry] {
+        &self.descriptors[..self.descriptor_len]
+    }
+
+    pub(crate) fn objects(&self) -> &[u32] {
+        &self.objects[..self.object_len]
+    }
+
+    pub(crate) fn close_descriptor<const N: usize>(
+        &mut self,
+        fd: usize,
+        descriptions: &mut LinuxOpenDescriptionTableCore<N>,
+    ) -> Option<u32> {
+        let index = self.descriptors[..self.descriptor_len]
+            .iter()
+            .position(|entry| entry.fd == fd)?;
+        let entry = self.descriptors[index];
+        self.remove_descriptor_index(index);
+        descriptions.release(entry.description_id)
+    }
+
+    pub(crate) fn release_object<const N: usize>(
+        &mut self,
+        description_id: u32,
+        descriptions: &mut LinuxOpenDescriptionTableCore<N>,
+    ) -> Option<u32> {
+        let index = self.objects[..self.object_len]
+            .iter()
+            .position(|object| *object == description_id)?;
+        for slot in index..self.object_len.saturating_sub(1) {
+            self.objects[slot] = self.objects[slot + 1];
+        }
+        self.object_len -= 1;
+        self.objects[self.object_len] = 0;
+        descriptions.release(description_id)
+    }
+
+    fn remove_descriptor_index(&mut self, index: usize) {
+        for slot in index..self.descriptor_len.saturating_sub(1) {
+            self.descriptors[slot] = self.descriptors[slot + 1];
+        }
+        self.descriptor_len -= 1;
+        self.descriptors[self.descriptor_len] = LinuxDescriptorEntry::EMPTY;
+    }
+}
+
+pub(crate) struct LinuxResourceCloneCore<const D: usize, const O: usize> {
+    descriptors: [LinuxDescriptorEntry; D],
+    descriptor_len: usize,
+    objects: [u32; O],
+    object_len: usize,
+}
+
+impl<const D: usize, const O: usize> LinuxResourceCloneCore<D, O> {
+    pub(crate) fn reserve<const N: usize>(
+        parent: &LinuxProcessResourceCore<D, O>,
+        descriptions: &mut LinuxOpenDescriptionTableCore<N>,
+    ) -> Option<Self> {
+        let mut clone = Self {
+            descriptors: [LinuxDescriptorEntry::EMPTY; D],
+            descriptor_len: 0,
+            objects: [0; O],
+            object_len: 0,
+        };
+        for entry in parent.descriptors() {
+            if !descriptions.acquire(entry.description_id) {
+                let _ = clone.rollback(descriptions);
+                return None;
+            }
+            clone.descriptors[clone.descriptor_len] = *entry;
+            clone.descriptor_len += 1;
+        }
+        for description_id in parent.objects() {
+            if !descriptions.acquire(*description_id) {
+                let _ = clone.rollback(descriptions);
+                return None;
+            }
+            clone.objects[clone.object_len] = *description_id;
+            clone.object_len += 1;
+        }
+        Some(clone)
+    }
+
+    pub(crate) fn descriptors(&self) -> &[LinuxDescriptorEntry] {
+        &self.descriptors[..self.descriptor_len]
+    }
+
+    pub(crate) fn objects(&self) -> &[u32] {
+        &self.objects[..self.object_len]
+    }
+
+    pub(crate) fn commit(self, child: &mut LinuxProcessResourceCore<D, O>) -> bool {
+        if child.descriptor_len != 0 || child.object_len != 0 {
+            return false;
+        }
+        child.descriptors = self.descriptors;
+        child.descriptor_len = self.descriptor_len;
+        child.objects = self.objects;
+        child.object_len = self.object_len;
+        true
+    }
+
+    pub(crate) fn rollback<const N: usize>(
+        self,
+        descriptions: &mut LinuxOpenDescriptionTableCore<N>,
+    ) -> [Option<u32>; N] {
+        let mut released = [None; N];
+        let mut released_len = 0usize;
+        for entry in self.descriptors() {
+            if let Some(handle) = descriptions.release(entry.description_id) {
+                if released_len < N {
+                    released[released_len] = Some(handle);
+                    released_len += 1;
+                }
+            }
+        }
+        for description_id in self.objects() {
+            if let Some(handle) = descriptions.release(*description_id) {
+                if released_len < N {
+                    released[released_len] = Some(handle);
+                    released_len += 1;
+                }
+            }
+        }
+        released
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxSharedPageRecord {
+    pub object_id: u32,
+    pub page_index: usize,
+    pub pfn: u64,
+    pub references: usize,
+    pub named: bool,
+}
+
+pub(crate) struct LinuxSharedPageTableCore<const N: usize> {
+    pages: [Option<LinuxSharedPageRecord>; N],
+}
+
+impl<const N: usize> LinuxSharedPageTableCore<N> {
+    pub(crate) const fn new() -> Self {
+        Self { pages: [None; N] }
+    }
+
+    pub(crate) fn insert(&mut self, object_id: u32, page_index: usize, pfn: u64) -> bool {
+        if object_id == 0 || pfn == 0 || self.get_any(object_id, page_index).is_some() {
+            return false;
+        }
+        let Some(slot) = self.pages.iter().position(Option::is_none) else {
+            return false;
+        };
+        self.pages[slot] = Some(LinuxSharedPageRecord {
+            object_id,
+            page_index,
+            pfn,
+            references: 1,
+            named: true,
+        });
+        true
+    }
+
+    pub(crate) fn acquire_or_insert(
+        &mut self,
+        object_id: u32,
+        page_index: usize,
+        candidate_pfn: u64,
+    ) -> Option<u64> {
+        if let Some(record) = self
+            .pages
+            .iter_mut()
+            .flatten()
+            .find(|record| record.object_id == object_id && record.page_index == page_index)
+        {
+            record.references = linux_shared_reference_acquire(record.references)?;
+            return Some(record.pfn);
+        }
+        self.insert(object_id, page_index, candidate_pfn)
+            .then_some(candidate_pfn)
+    }
+
+    pub(crate) fn get(&self, object_id: u32, page_index: usize) -> Option<LinuxSharedPageRecord> {
+        self.get_any(object_id, page_index)
+            .filter(|record| record.named)
+    }
+
+    pub(crate) fn get_any(
+        &self,
+        object_id: u32,
+        page_index: usize,
+    ) -> Option<LinuxSharedPageRecord> {
+        self.pages
+            .iter()
+            .flatten()
+            .copied()
+            .find(|record| record.object_id == object_id && record.page_index == page_index)
+    }
+
+    pub(crate) fn acquire(&mut self, object_id: u32, page_index: usize) -> bool {
+        let Some(record) = self
+            .pages
+            .iter_mut()
+            .flatten()
+            .find(|record| record.object_id == object_id && record.page_index == page_index)
+        else {
+            return false;
+        };
+        let Some(references) = linux_shared_reference_acquire(record.references) else {
+            return false;
+        };
+        record.references = references;
+        true
+    }
+
+    pub(crate) fn remove_name(&mut self, object_id: u32) -> bool {
+        let mut removed = false;
+        for record in self.pages.iter_mut().flatten() {
+            if record.object_id == object_id && record.named {
+                record.named = false;
+                removed = true;
+            }
+        }
+        removed
+    }
+
+    pub(crate) fn release(&mut self, object_id: u32, page_index: usize) -> Option<u64> {
+        let slot = self.pages.iter().position(|record| {
+            record.is_some_and(|record| {
+                record.object_id == object_id && record.page_index == page_index
+            })
+        })?;
+        let record = self.pages[slot].as_mut()?;
+        record.references = linux_shared_reference_release(record.references)?;
+        if record.references != 0 {
+            return None;
+        }
+        self.pages[slot].take().map(|record| record.pfn)
+    }
+}
+
 impl LinuxPageBacking {
     pub(crate) fn pfn(self) -> u64 {
         match self {
@@ -115,9 +584,7 @@ impl<const N: usize> LinuxProcessMemoryCore<N> {
     }
 
     pub(crate) fn set_next_addr(&mut self, address: usize) -> bool {
-        if address % LINUX_PAGE_SIZE != 0
-            || !(LINUX_MMAP_BASE..LINUX_BRK_BASE).contains(&address)
-        {
+        if address % LINUX_PAGE_SIZE != 0 || !(LINUX_MMAP_BASE..LINUX_BRK_BASE).contains(&address) {
             return false;
         }
         self.next_addr = address;
@@ -155,7 +622,9 @@ pub(crate) fn linux_user_page_range_valid(address: usize, len: usize) -> bool {
 }
 
 pub(crate) fn linux_shared_reference_acquire(references: usize) -> Option<usize> {
-    (references != 0).then(|| references.checked_add(1)).flatten()
+    (references != 0)
+        .then(|| references.checked_add(1))
+        .flatten()
 }
 
 pub(crate) fn linux_shared_reference_release(references: usize) -> Option<usize> {
@@ -224,7 +693,5 @@ pub(crate) fn linux_mremap_requires_move(
     fixed: Option<usize>,
     dont_unmap: bool,
 ) -> bool {
-    dont_unmap
-        || old_len != new_len
-        || fixed.is_some_and(|new_address| new_address != old_address)
+    dont_unmap || old_len != new_len || fixed.is_some_and(|new_address| new_address != old_address)
 }

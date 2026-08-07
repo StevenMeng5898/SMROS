@@ -1272,7 +1272,8 @@ fn posix_resource_snapshot_uses_authoritative_state_without_resetting_it() {
     assert!(memory_body.contains("MEMORY_SYSCALL_STATE"));
     assert!(memory_body.contains(".as_ref()"));
     assert!(memory_body.contains("linux_process_memory::total_mapping_count()"));
-    assert!(memory_body.contains("state.linux_fds.len()"));
+    assert!(memory_body.contains("linux_process_resources"));
+    assert!(memory_body.contains("resources.descriptors.len()"));
     assert!(memory_body.contains("state.linux_shared_memory.len()"));
     assert!(memory_body.contains("state.handles.len()"));
     assert!(memory_body.contains("logical_memory_handle_count"));
@@ -1310,9 +1311,11 @@ fn linux_process_reset_reclaims_transient_state_without_reinitializing_global_st
     let public = braced_body(&syscall[public_start..]);
 
     for required in [
+        "core::mem::take(&mut self.linux_process_resources)",
+        "self.release_resource_clone(&resources.descriptors, &resources.objects)",
         "core::mem::take(&mut self.linux_shared_memory)",
-        "compat::close_handle(HandleValue(record.handle))",
-        "self.next_fd = COMPAT_FD_START",
+        "released_handles.push(record.handle)",
+        "self.next_open_description_id = 1",
         "self.next_shared_memory_id = LINUX_SHM_ID_START",
         "self.reset_linux_container_state()",
     ] {
@@ -1322,7 +1325,6 @@ fn linux_process_reset_reclaims_transient_state_without_reinitializing_global_st
         );
     }
     assert!(public.contains("linux_process_memory::reset_launch()"));
-    assert!(public.contains("sys_close(fd)"));
     assert!(public.contains("linux_timer_handles"));
     assert!(public.contains("sys_handle_close(handle)"));
     assert!(public.contains("reset_linux_signal_timer_state()"));
@@ -1334,7 +1336,7 @@ fn linux_process_reset_reclaims_transient_state_without_reinitializing_global_st
         .expect("Linux close");
     let close = braced_body(&syscall[close_start..]);
     let tracked_close = close
-        .find("close_fd_record(fd)")
+        .find("remove_fd_entry(fd)")
         .expect("tracked descriptor close");
     let stdio_noop = close.find("fd <= 2").expect("untracked stdio no-op");
     assert!(
@@ -1379,8 +1381,9 @@ fn linux_shared_memory_uses_nonnegative_process_ids_separate_from_compat_handles
 
     let control_start = syscall.find("pub fn sys_shmctl(").expect("shmctl");
     let control = braced_body(&syscall[control_start..]);
-    assert!(control.contains("remove_shared_memory(id as u32)"));
-    assert!(control.contains("compat::close_handle(HandleValue(record.handle))"));
+    assert!(control.contains("remove_shared_memory_name(id as u32)"));
+    assert!(control.contains("remove_shared_page_name(id as u32)"));
+    assert!(!control.contains("compat::close_handle(HandleValue(record.handle))"));
 }
 
 #[test]
@@ -4948,4 +4951,115 @@ fn linux_recvfrom_preflights_source_address_before_receive() {
 
     assert!(validation < read);
     assert!(!recv[read..].contains("linux_read_user_u32(addrlen)"));
+}
+
+#[test]
+fn linux_resource_clone_inherits_open_descriptions_and_shared_pages() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read process runtime");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read process memory runtime");
+    let resource_logic = std::fs::read_to_string(
+        repository.join("src/syscall/linux_process_memory_logic_shared.rs"),
+    )
+    .expect("read resource ownership logic");
+
+    for declaration in [
+        "pub(crate) struct LinuxDescriptorEntry",
+        "pub fd: usize",
+        "pub description_id: u32",
+        "pub close_on_exec: bool",
+        "pub(crate) struct LinuxOpenDescription",
+        "pub object_type: ObjectType",
+        "pub status_flags: usize",
+        "pub offset: usize",
+        "pub references: usize",
+    ] {
+        assert!(
+            syscall.contains(declaration)
+                || process.contains(declaration)
+                || resource_logic.contains(declaration)
+        );
+    }
+    assert!(syscall.contains("linux_open_descriptions: Vec<LinuxOpenDescription>"));
+    assert!(syscall.contains("linux_process_resources: Vec<LinuxProcessResources>"));
+    assert!(!syscall.contains("linux_fds: Vec<LinuxFdRecord>"));
+
+    let clone_start = process
+        .find("pub(crate) struct LinuxResourceClone")
+        .expect("unpublished resource clone reservation");
+    let clone_impl = &process[clone_start..];
+    assert!(clone_impl.contains("descriptors: Vec<LinuxDescriptorEntry>"));
+    assert!(clone_impl.contains("shared_attachments"));
+    assert!(clone_impl.contains("impl Drop for LinuxResourceClone"));
+    assert!(clone_impl.contains("release_linux_resource_clone"));
+
+    let fork = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_fork()")
+            .expect("synthetic fork remains for Task 9")..],
+    );
+    assert!(!fork.contains("reserve_resource_clone"));
+    assert!(!fork.contains("LinuxResourceClone"));
+
+    let close = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_close(fd: usize)")
+            .expect("descriptor close")..],
+    );
+    assert!(close.contains("release_open_description"));
+    assert!(close.contains("final_reference"));
+
+    let shared_record = braced_body(
+        &syscall[syscall
+            .find("struct LinuxSharedMemoryRecord")
+            .expect("shared-memory object record")..],
+    );
+    assert!(shared_record.contains("named: bool"));
+    assert!(shared_record.contains("references: usize"));
+    assert!(!shared_record.contains("attachments:"));
+    assert!(resource_logic.contains("struct LinuxSharedPageRecord"));
+    assert!(resource_logic.contains("references: usize"));
+    assert!(memory.contains("reserve_shared_attachments"));
+    assert!(memory.contains("LinuxMappingSource::SharedMemory"));
+    assert!(memory.contains("shared_attachments: Vec<LinuxSharedAttachmentRecord>"));
+    assert!(memory.contains("pub attachment_len: usize"));
+    assert!(memory.contains("attachment_len: attachment.len"));
+
+    let mark_shared_start = memory
+        .find("pub(crate) fn mark_shared(")
+        .expect("shared mapping transaction");
+    let mark_shared = braced_body(&memory[mark_shared_start..]);
+    assert_eq!(mark_shared.matches("with_current(").count(), 1);
+    assert!(mark_shared.contains("acquire_or_register_shared_page"));
+
+    let reserve_start = syscall
+        .find("fn reserve_process_resources(")
+        .expect("process resource reservation");
+    let reserve = braced_body(&syscall[reserve_start..]);
+    assert!(reserve.contains("unwrap_or_else"));
+
+    let release_start = syscall
+        .find("pub(crate) fn release_linux_resource_clone(")
+        .expect("resource clone rollback");
+    let release = braced_body(&syscall[release_start..]);
+    assert!(release.contains("sys_handle_close"));
+
+    let munmap = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_munmap(")
+            .expect("process-local unmap")..],
+    );
+    assert!(munmap.contains("release_shared_memory_attachment"));
+
+    let rmid = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_shmctl(")
+            .expect("shared-memory removal")..],
+    );
+    assert!(rmid.contains("remove_shared_memory_name"));
+    assert!(!rmid.contains("compat::close_handle(HandleValue(record.handle))"));
 }

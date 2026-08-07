@@ -2166,6 +2166,19 @@ mod linux_process_logic {
         "/../../src/syscall/linux_process_logic_shared.rs"
     ));
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum ObjectType {
+        LinuxFile,
+        LinuxPipe,
+        MessageQueue,
+        SharedMemory,
+    }
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/linux_process_memory_logic_shared.rs"
+    ));
+
     #[test]
     fn root_registration_is_unique_and_published_by_pid_and_scheduler() {
         let mut processes = LinuxProcessTable::<2>::new();
@@ -2386,9 +2399,148 @@ mod linux_process_logic {
         assert_eq!(processes.register_root(17), Ok(LINUX_ROOT_PID));
         assert_eq!(processes.reserve_child(LINUX_ROOT_PID, 18).unwrap().pid, 2);
     }
+
+    #[test]
+    fn resource_clone_copies_descriptor_flags_and_shares_open_descriptions() {
+        let mut descriptions = LinuxOpenDescriptionTableCore::<8>::new();
+        let file = descriptions
+            .insert(41, ObjectType::LinuxFile, 0o2002, 7)
+            .unwrap();
+        let pipe_read = descriptions
+            .insert(51, ObjectType::LinuxPipe, 0, 0)
+            .unwrap();
+        let pipe_write = descriptions
+            .insert(52, ObjectType::LinuxPipe, 1, 0)
+            .unwrap();
+        let queue = descriptions
+            .insert_object(61, ObjectType::MessageQueue)
+            .unwrap();
+        let shared_memory = descriptions
+            .insert_object(62, ObjectType::SharedMemory)
+            .unwrap();
+
+        let mut parent = LinuxProcessResourceCore::<8, 4>::new();
+        assert!(parent.insert_descriptor(3, file, false, &mut descriptions));
+        assert!(parent.insert_descriptor(7, file, true, &mut descriptions));
+        assert!(parent.insert_descriptor(8, pipe_read, false, &mut descriptions));
+        assert!(parent.insert_descriptor(9, pipe_write, true, &mut descriptions));
+        assert!(parent.insert_object(queue, &mut descriptions));
+        assert!(parent.insert_object(shared_memory, &mut descriptions));
+
+        let clone = LinuxResourceCloneCore::<8, 4>::reserve(&parent, &mut descriptions).unwrap();
+        assert_eq!(
+            clone.descriptors(),
+            &[
+                LinuxDescriptorEntry {
+                    fd: 3,
+                    description_id: file,
+                    close_on_exec: false,
+                },
+                LinuxDescriptorEntry {
+                    fd: 7,
+                    description_id: file,
+                    close_on_exec: true,
+                },
+                LinuxDescriptorEntry {
+                    fd: 8,
+                    description_id: pipe_read,
+                    close_on_exec: false,
+                },
+                LinuxDescriptorEntry {
+                    fd: 9,
+                    description_id: pipe_write,
+                    close_on_exec: true,
+                },
+            ]
+        );
+        assert_eq!(clone.objects(), &[queue, shared_memory]);
+        assert_eq!(descriptions.get(file).unwrap().references, 4);
+        assert_eq!(descriptions.get(queue).unwrap().references, 2);
+        assert_eq!(descriptions.get(shared_memory).unwrap().references, 2);
+
+        let mut child = LinuxProcessResourceCore::<8, 4>::new();
+        assert!(clone.commit(&mut child));
+        assert_eq!(child.descriptor(7).unwrap().close_on_exec, true);
+
+        assert!(descriptions.set_offset(file, 4096));
+        assert_eq!(
+            descriptions
+                .get(child.descriptor(3).unwrap().description_id)
+                .unwrap()
+                .offset,
+            4096
+        );
+
+        assert_eq!(parent.close_descriptor(3, &mut descriptions), None);
+        assert!(parent.descriptor(3).is_none());
+        assert!(child.descriptor(3).is_some());
+        assert_eq!(descriptions.get(file).unwrap().references, 3);
+
+        assert_eq!(parent.close_descriptor(8, &mut descriptions), None);
+        assert!(
+            child.descriptor(8).is_some(),
+            "the inherited pipe endpoint survives"
+        );
+        assert_eq!(descriptions.get(pipe_read).unwrap().references, 1);
+    }
+
+    #[test]
+    fn resource_clone_final_release_destroys_once_and_rollback_preserves_parent() {
+        let mut descriptions = LinuxOpenDescriptionTableCore::<6>::new();
+        let file = descriptions
+            .insert(71, ObjectType::LinuxFile, 0, 0)
+            .unwrap();
+        let queue = descriptions
+            .insert_object(72, ObjectType::MessageQueue)
+            .unwrap();
+        let mut parent = LinuxProcessResourceCore::<4, 2>::new();
+        assert!(parent.insert_descriptor(3, file, false, &mut descriptions));
+        assert!(parent.insert_object(queue, &mut descriptions));
+
+        let rollback = LinuxResourceCloneCore::<4, 2>::reserve(&parent, &mut descriptions).unwrap();
+        assert_eq!(descriptions.get(file).unwrap().references, 2);
+        assert_eq!(descriptions.get(queue).unwrap().references, 2);
+        assert_eq!(
+            rollback.rollback(&mut descriptions),
+            [None, None, None, None, None, None]
+        );
+        assert_eq!(descriptions.get(file).unwrap().references, 1);
+        assert_eq!(descriptions.get(queue).unwrap().references, 1);
+        assert!(parent.descriptor(3).is_some());
+
+        let clone = LinuxResourceCloneCore::<4, 2>::reserve(&parent, &mut descriptions).unwrap();
+        let mut child = LinuxProcessResourceCore::<4, 2>::new();
+        assert!(clone.commit(&mut child));
+        assert_eq!(parent.close_descriptor(3, &mut descriptions), None);
+        assert_eq!(child.close_descriptor(3, &mut descriptions), Some(71));
+        assert!(descriptions.get(file).is_none());
+        assert_eq!(parent.release_object(queue, &mut descriptions), None);
+        assert_eq!(child.release_object(queue, &mut descriptions), Some(72));
+        assert!(descriptions.get(queue).is_none());
+    }
+
+    #[test]
+    fn resource_clone_accepts_a_parent_without_descriptors_or_objects() {
+        let mut descriptions = LinuxOpenDescriptionTableCore::<2>::new();
+        let parent = LinuxProcessResourceCore::<2, 2>::new();
+
+        let clone = LinuxResourceCloneCore::reserve(&parent, &mut descriptions).unwrap();
+        assert!(clone.descriptors().is_empty());
+        assert!(clone.objects().is_empty());
+
+        let mut child = LinuxProcessResourceCore::<2, 2>::new();
+        assert!(clone.commit(&mut child));
+        assert!(child.descriptors().is_empty());
+        assert!(child.objects().is_empty());
+    }
 }
 
 mod linux_process_memory_logic {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum ObjectType {
+        LinuxFile,
+    }
+
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/syscall/linux_process_memory_logic_shared.rs"
@@ -2494,16 +2646,8 @@ mod linux_process_memory_logic {
             },
         ];
 
-        assert!(linux_mapping_range_covered(
-            &adjacent,
-            0x1200_0800,
-            0x1800
-        ));
-        assert!(!linux_mapping_range_covered(
-            &gapped,
-            0x1200_0800,
-            0x1800
-        ));
+        assert!(linux_mapping_range_covered(&adjacent, 0x1200_0800, 0x1800));
+        assert!(!linux_mapping_range_covered(&gapped, 0x1200_0800, 0x1800));
         assert!(!linux_mapping_range_covered(&adjacent, usize::MAX, 2));
     }
 
@@ -2553,6 +2697,89 @@ mod linux_process_memory_logic {
             None,
             true,
         ));
+    }
+
+    #[test]
+    fn clone_backing_copies_private_pages_and_reuses_shared_pages() {
+        let private = LinuxPageBacking::Private { pfn: 17 };
+        let shared = LinuxPageBacking::Shared {
+            object_id: 9,
+            page_index: 2,
+            pfn: 33,
+        };
+
+        assert_eq!(
+            linux_clone_page_backing(private, 81),
+            LinuxPageBacking::Private { pfn: 81 }
+        );
+        assert_ne!(linux_clone_page_backing(private, 81).pfn(), private.pfn());
+        assert_eq!(linux_clone_page_backing(shared, 99), shared);
+    }
+
+    #[test]
+    fn shared_page_name_removal_defers_destruction_until_final_reference() {
+        let mut pages = LinuxSharedPageTableCore::<2>::new();
+        assert!(pages.insert(7, 0, 41));
+        assert!(pages.acquire(7, 0));
+        assert_eq!(pages.get(7, 0).unwrap().references, 2);
+        assert!(pages.remove_name(7));
+        assert!(pages.get(7, 0).is_none());
+        assert_eq!(pages.release(7, 0), None);
+        assert_eq!(pages.get_any(7, 0).unwrap().references, 1);
+        assert_eq!(pages.release(7, 0), Some(41));
+        assert!(pages.get_any(7, 0).is_none());
+    }
+
+    #[test]
+    fn shared_page_acquire_or_insert_selects_one_canonical_backing() {
+        let mut pages = LinuxSharedPageTableCore::<2>::new();
+        assert_eq!(pages.acquire_or_insert(7, 0, 41), Some(41));
+        assert_eq!(pages.acquire_or_insert(7, 0, 99), Some(41));
+        assert_eq!(pages.get(7, 0).unwrap().references, 2);
+        assert_eq!(pages.release(7, 0), None);
+        assert_eq!(pages.release(7, 0), Some(41));
+    }
+
+    #[test]
+    fn shared_attachment_survives_mapping_splits_until_its_final_fragment_is_removed() {
+        let attachment = LinuxSharedAttachmentRecord {
+            object_id: 7,
+            addr: 0x2000,
+            len: 0x3000,
+        };
+        let fragments = [
+            LinuxSharedMappingRange {
+                object_id: 7,
+                addr: 0x2000,
+                len: 0x1000,
+            },
+            LinuxSharedMappingRange {
+                object_id: 7,
+                addr: 0x4000,
+                len: 0x1000,
+            },
+        ];
+
+        assert!(linux_shared_attachment_has_mapping(attachment, &fragments));
+        assert!(linux_shared_attachment_has_mapping(
+            attachment,
+            &fragments[1..]
+        ));
+        assert!(!linux_shared_attachment_has_mapping(attachment, &[]));
+        assert!(!linux_shared_attachment_has_mapping(
+            attachment,
+            &[LinuxSharedMappingRange {
+                object_id: 8,
+                addr: 0x2000,
+                len: 0x3000,
+            }]
+        ));
+    }
+
+    #[test]
+    fn shared_mremap_is_allowed_only_when_it_preserves_the_existing_mapping() {
+        assert!(linux_shared_mremap_supported(false));
+        assert!(!linux_shared_mremap_supported(true));
     }
 }
 

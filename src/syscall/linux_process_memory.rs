@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 use crate::kernel_lowlevel::memory::{PageFrameAllocator, PAGE_SIZE};
 #[cfg(target_arch = "aarch64")]
 use crate::kernel_lowlevel::Aarch64AddressSpace;
+use crate::kernel_objects::ObjectType;
 
 use super::{linux_process, SysError};
 
@@ -78,6 +79,7 @@ pub(crate) struct LinuxProcessMemory {
     #[cfg(not(target_arch = "aarch64"))]
     address_space: FallbackAddressSpace,
     pub mappings: Vec<LinuxProcessMapping>,
+    shared_attachments: Vec<LinuxSharedAttachmentRecord>,
     pub initial_stack: Option<(usize, usize)>,
     pub next_addr: usize,
     pub brk: BrkState,
@@ -169,6 +171,29 @@ struct LinuxProcessMemoryRuntime {
     memories: Vec<LinuxProcessMemory>,
 }
 
+struct LinuxSharedPageRuntime {
+    pages: Vec<LinuxSharedPageRecord>,
+}
+
+impl LinuxSharedPageRuntime {
+    const fn new() -> Self {
+        Self { pages: Vec::new() }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct LinuxSharedAttachmentClone {
+    pub object_id: u32,
+    pub attachment_addr: usize,
+    pub attachment_len: usize,
+    pub addr: usize,
+    pub len: usize,
+    pub prot: usize,
+    pub flags: usize,
+    pub pages: Vec<LinuxPageBacking>,
+    owns_attachment_reference: bool,
+}
+
 impl LinuxProcessMemoryRuntime {
     const fn new() -> Self {
         Self {
@@ -179,6 +204,8 @@ impl LinuxProcessMemoryRuntime {
 
 static LINUX_PROCESS_MEMORY_RUNTIME: LinuxRuntimeLock<LinuxProcessMemoryRuntime> =
     LinuxRuntimeLock::new(LinuxProcessMemoryRuntime::new());
+static LINUX_SHARED_PAGE_RUNTIME: LinuxRuntimeLock<LinuxSharedPageRuntime> =
+    LinuxRuntimeLock::new(LinuxSharedPageRuntime::new());
 
 fn with_runtime<R>(operation: impl FnOnce(&mut LinuxProcessMemoryRuntime) -> R) -> R {
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
@@ -187,6 +214,89 @@ fn with_runtime<R>(operation: impl FnOnce(&mut LinuxProcessMemoryRuntime) -> R) 
     drop(runtime);
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     result
+}
+
+fn with_shared_pages<R>(operation: impl FnOnce(&mut LinuxSharedPageRuntime) -> R) -> R {
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let mut runtime = LINUX_SHARED_PAGE_RUNTIME.lock();
+    let result = operation(&mut runtime);
+    drop(runtime);
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    result
+}
+
+fn shared_page(object_id: u32, page_index: usize) -> Option<LinuxSharedPageRecord> {
+    with_shared_pages(|runtime| {
+        runtime
+            .pages
+            .iter()
+            .copied()
+            .find(|page| page.object_id == object_id && page.page_index == page_index)
+    })
+}
+
+fn acquire_or_register_shared_page(
+    object_id: u32,
+    page_index: usize,
+    candidate_pfn: u64,
+) -> Option<u64> {
+    with_shared_pages(|runtime| {
+        if let Some(page) = runtime
+            .pages
+            .iter_mut()
+            .find(|page| page.object_id == object_id && page.page_index == page_index)
+        {
+            page.references = linux_shared_reference_acquire(page.references)?;
+            return Some(page.pfn);
+        }
+        runtime.pages.push(LinuxSharedPageRecord {
+            object_id,
+            page_index,
+            pfn: candidate_pfn,
+            references: 1,
+            named: true,
+        });
+        Some(candidate_pfn)
+    })
+}
+
+fn acquire_shared_page(object_id: u32, page_index: usize) -> bool {
+    with_shared_pages(|runtime| {
+        let Some(page) = runtime
+            .pages
+            .iter_mut()
+            .find(|page| page.object_id == object_id && page.page_index == page_index)
+        else {
+            return false;
+        };
+        let Some(references) = linux_shared_reference_acquire(page.references) else {
+            return false;
+        };
+        page.references = references;
+        true
+    })
+}
+
+fn release_shared_page(object_id: u32, page_index: usize) -> Option<u64> {
+    with_shared_pages(|runtime| {
+        let index = runtime
+            .pages
+            .iter()
+            .position(|page| page.object_id == object_id && page.page_index == page_index)?;
+        let references = linux_shared_reference_release(runtime.pages[index].references)?;
+        runtime.pages[index].references = references;
+        (references == 0).then(|| runtime.pages.swap_remove(index).pfn)
+    })
+}
+
+pub(crate) fn remove_shared_page_name(object_id: u32) {
+    with_shared_pages(|runtime| {
+        for page in &mut runtime.pages {
+            if page.object_id == object_id {
+                page.named = false;
+            }
+        }
+    });
 }
 
 pub(crate) fn register_root(pid: usize) -> Result<u64, SysError> {
@@ -210,6 +320,7 @@ pub(crate) fn register_root(pid: usize) -> Result<u64, SysError> {
             pid,
             address_space,
             mappings: Vec::new(),
+            shared_attachments: Vec::new(),
             initial_stack: None,
             next_addr: LINUX_MMAP_BASE,
             brk: BrkState::new(),
@@ -258,24 +369,51 @@ pub(crate) fn copy_to_process(pid: usize, address: usize, bytes: &[u8]) -> Resul
 }
 
 pub(crate) fn reset_launch() {
-    with_runtime(|runtime| {
+    let attachments = with_runtime(|runtime| {
+        let attachments = runtime
+            .memories
+            .iter()
+            .flat_map(|memory| memory.shared_attachments.iter())
+            .map(|attachment| attachment.object_id)
+            .collect::<Vec<_>>();
         runtime.memories.clear();
+        attachments
+    });
+    for id in attachments {
+        let _ = super::release_shared_memory_attachment_reference(id);
+    }
+    with_shared_pages(|runtime| {
+        for page in runtime.pages.drain(..) {
+            PageFrameAllocator::free(page.pfn);
+        }
     });
 }
 
 pub(crate) fn unregister(pid: usize) -> bool {
-    with_runtime(|runtime| {
+    let attachments = with_runtime(|runtime| {
         let pids = runtime
             .memories
             .iter()
             .map(|memory| memory.pid)
             .collect::<Vec<_>>();
         let Some(index) = linux_process_memory_remove_index(&pids, pid) else {
-            return false;
+            return None;
         };
+        let attachments = runtime.memories[index]
+            .shared_attachments
+            .iter()
+            .map(|attachment| attachment.object_id)
+            .collect::<Vec<_>>();
         runtime.memories.remove(index);
-        true
-    })
+        Some(attachments)
+    });
+    let Some(attachments) = attachments else {
+        return false;
+    };
+    for id in attachments {
+        let _ = super::release_shared_memory_attachment_reference(id);
+    }
+    true
 }
 
 pub(crate) fn copy_from_current(address: usize, out: &mut [u8]) -> Result<(), SysError> {
@@ -343,6 +481,17 @@ pub(crate) fn unmap_current(address: usize, len: usize) -> Result<Vec<(u32, usiz
     with_current(|memory| memory.unmap(address, len))
 }
 
+pub(crate) fn shared_attachment_current(id: Option<u32>, address: usize) -> Option<(u32, usize)> {
+    with_current(|memory| {
+        Ok(memory.shared_attachments.iter().find_map(|attachment| {
+            (attachment.addr == address && id.map_or(true, |id| id == attachment.object_id))
+                .then_some((attachment.object_id, attachment.len))
+        }))
+    })
+    .ok()
+    .flatten()
+}
+
 pub(crate) fn brk_current(new_brk: usize) -> Result<usize, SysError> {
     with_current(|memory| memory.update_brk(new_brk))
 }
@@ -360,24 +509,178 @@ pub(crate) fn remap_current(
 
 pub(crate) fn mark_shared(address: usize, len: usize, object_id: u32) -> bool {
     with_current(|memory| {
-        let Some(mapping) = memory
+        let Some(mapping_index) = memory
             .mappings
-            .iter_mut()
-            .find(|mapping| mapping.addr == address && mapping.len == len)
+            .iter()
+            .position(|mapping| mapping.addr == address && mapping.len == len)
         else {
             return Ok(false);
         };
-        mapping.source = LinuxMappingSource::SharedMemory { id: object_id };
-        for (page_index, backing) in mapping.pages.iter_mut().enumerate() {
-            *backing = LinuxPageBacking::Shared {
+        let originals = memory.mappings[mapping_index].pages.clone();
+        let mut shared = Vec::with_capacity(originals.len());
+        let mut acquired = Vec::new();
+        for (page_index, original) in originals.iter().copied().enumerate() {
+            let Some(pfn) = acquire_or_register_shared_page(object_id, page_index, original.pfn())
+            else {
+                SelfContainedSharedRollback::release(&acquired);
+                return Ok(false);
+            };
+            acquired.push((object_id, page_index));
+            shared.push(LinuxPageBacking::Shared {
                 object_id,
                 page_index,
-                pfn: backing.pfn(),
-            };
+                pfn,
+            });
+        }
+
+        let pages = memory.mapped_pages_overlapping(address, len);
+        if memory.unmap_pages_transactionally(&pages).is_err() {
+            SelfContainedSharedRollback::release(&acquired);
+            return Ok(false);
+        }
+        if memory
+            .map_unmapped_pages(address, &shared, pages[0].prot)
+            .is_err()
+        {
+            memory.restore_mapped_pages(&pages);
+            SelfContainedSharedRollback::release(&acquired);
+            return Ok(false);
+        }
+        let mapping = &mut memory.mappings[mapping_index];
+        mapping.source = LinuxMappingSource::SharedMemory { id: object_id };
+        let replaced = core::mem::replace(&mut mapping.pages, shared);
+        memory.shared_attachments.push(LinuxSharedAttachmentRecord {
+            object_id,
+            addr: address,
+            len,
+        });
+
+        for (page_index, backing) in replaced.iter().copied().enumerate() {
+            let canonical_pfn = shared_page(object_id, page_index).unwrap().pfn;
+            if backing.pfn() != canonical_pfn {
+                PageFrameAllocator::free(backing.pfn());
+            }
         }
         Ok(true)
     })
     .unwrap_or(false)
+}
+
+struct SelfContainedSharedRollback;
+
+impl SelfContainedSharedRollback {
+    fn release(acquired: &[(u32, usize)]) {
+        for (object_id, page_index) in acquired.iter().copied().rev() {
+            let _ = release_shared_page(object_id, page_index);
+        }
+    }
+}
+
+pub(crate) fn reserve_shared_attachments(
+    pid: usize,
+) -> Result<Vec<LinuxSharedAttachmentClone>, SysError> {
+    let attachments = with_pid(pid, |memory| {
+        Ok(memory
+            .mappings
+            .iter()
+            .filter_map(|mapping| {
+                let LinuxMappingSource::SharedMemory { id } = mapping.source else {
+                    return None;
+                };
+                let attachment = memory.shared_attachments.iter().find(|attachment| {
+                    attachment.object_id == id
+                        && linux_shared_attachment_has_mapping(
+                            **attachment,
+                            &[LinuxSharedMappingRange {
+                                object_id: id,
+                                addr: mapping.addr,
+                                len: mapping.len,
+                            }],
+                        )
+                })?;
+                Some(LinuxSharedAttachmentClone {
+                    object_id: id,
+                    attachment_addr: attachment.addr,
+                    attachment_len: attachment.len,
+                    addr: mapping.addr,
+                    len: mapping.len,
+                    prot: mapping.prot,
+                    flags: mapping.flags,
+                    pages: mapping.pages.clone(),
+                    owns_attachment_reference: false,
+                })
+            })
+            .collect::<Vec<_>>())
+    })?;
+
+    let mut acquired = Vec::new();
+    for mut attachment in attachments {
+        let owns_attachment_reference =
+            !acquired
+                .iter()
+                .any(|acquired: &LinuxSharedAttachmentClone| {
+                    acquired.object_id == attachment.object_id
+                        && acquired.attachment_addr == attachment.attachment_addr
+                });
+        if owns_attachment_reference
+            && !super::acquire_shared_memory_attachment_reference(attachment.object_id)
+        {
+            release_shared_attachments(&acquired);
+            return Err(SysError::ENOMEM);
+        }
+        let mut local_acquired = Vec::new();
+        for backing in &attachment.pages {
+            let LinuxPageBacking::Shared {
+                object_id,
+                page_index,
+                ..
+            } = *backing
+            else {
+                for (object_id, page_index) in local_acquired.into_iter().rev() {
+                    let _ = release_shared_page(object_id, page_index);
+                }
+                release_shared_attachments(&acquired);
+                if owns_attachment_reference {
+                    let _ = super::release_shared_memory_attachment_reference(attachment.object_id);
+                }
+                return Err(SysError::EINVAL);
+            };
+            if !acquire_shared_page(object_id, page_index) {
+                for (object_id, page_index) in local_acquired.into_iter().rev() {
+                    let _ = release_shared_page(object_id, page_index);
+                }
+                release_shared_attachments(&acquired);
+                if owns_attachment_reference {
+                    let _ = super::release_shared_memory_attachment_reference(attachment.object_id);
+                }
+                return Err(SysError::ENOMEM);
+            }
+            local_acquired.push((object_id, page_index));
+        }
+        attachment.owns_attachment_reference = owns_attachment_reference;
+        acquired.push(attachment);
+    }
+    Ok(acquired)
+}
+
+pub(crate) fn release_shared_attachments(attachments: &[LinuxSharedAttachmentClone]) {
+    for attachment in attachments.iter().rev() {
+        for backing in attachment.pages.iter().rev() {
+            if let LinuxPageBacking::Shared {
+                object_id,
+                page_index,
+                ..
+            } = *backing
+            {
+                if let Some(pfn) = release_shared_page(object_id, page_index) {
+                    PageFrameAllocator::free(pfn);
+                }
+            }
+        }
+        if attachment.owns_attachment_reference {
+            let _ = super::release_shared_memory_attachment_reference(attachment.object_id);
+        }
+    }
 }
 
 pub(crate) fn user_range_readable(address: usize, len: usize) -> bool {
@@ -408,6 +711,10 @@ pub(crate) fn current_snapshots() -> Vec<LinuxMemoryMappingSnapshot> {
             .collect())
     })
     .unwrap_or_default()
+}
+
+pub(crate) fn current_shared_attachments() -> Vec<LinuxSharedAttachmentRecord> {
+    with_current(|memory| Ok(memory.shared_attachments.clone())).unwrap_or_default()
 }
 
 pub(crate) fn total_mapping_count() -> usize {
@@ -609,7 +916,18 @@ impl LinuxProcessMemory {
 
     fn free_backings(pages: &[LinuxPageBacking]) {
         for page in pages {
-            PageFrameAllocator::free(page.pfn());
+            match *page {
+                LinuxPageBacking::Private { pfn } => PageFrameAllocator::free(pfn),
+                LinuxPageBacking::Shared {
+                    object_id,
+                    page_index,
+                    ..
+                } => {
+                    if let Some(pfn) = release_shared_page(object_id, page_index) {
+                        PageFrameAllocator::free(pfn);
+                    }
+                }
+            }
         }
     }
 
@@ -883,12 +1201,29 @@ impl LinuxProcessMemory {
             let start_page = (overlap_start - mapping.addr) / PAGE_SIZE;
             let end_page = (overlap_end - mapping.addr) / PAGE_SIZE;
             removed.extend_from_slice(&mapping.pages[start_page..end_page]);
-            if let LinuxMappingSource::SharedMemory { id } = mapping.source {
-                detached.push((id, mapping.addr));
-            }
             self.push_mapping_pieces(mapping, overlap_start, overlap_end, None);
         }
         self.mappings.sort_by_key(|mapping| mapping.addr);
+        let shared_mappings = self
+            .mappings
+            .iter()
+            .filter_map(|mapping| match mapping.source {
+                LinuxMappingSource::SharedMemory { id } => Some(LinuxSharedMappingRange {
+                    object_id: id,
+                    addr: mapping.addr,
+                    len: mapping.len,
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.shared_attachments.retain(|attachment| {
+            if linux_shared_attachment_has_mapping(*attachment, &shared_mappings) {
+                true
+            } else {
+                detached.push((attachment.object_id, attachment.addr));
+                false
+            }
+        });
         (detached, removed)
     }
 
@@ -1035,7 +1370,16 @@ impl LinuxProcessMemory {
             .iter()
             .position(|mapping| mapping.addr == old_address && mapping.len == old_len)
             .ok_or(SysError::EINVAL)?;
-        if !linux_mremap_requires_move(old_address, old_len, new_len, fixed, dont_unmap) {
+        let requires_move =
+            linux_mremap_requires_move(old_address, old_len, new_len, fixed, dont_unmap);
+        if matches!(
+            self.mappings[index].source,
+            LinuxMappingSource::SharedMemory { .. }
+        ) && !linux_shared_mremap_supported(requires_move)
+        {
+            return Err(SysError::EINVAL);
+        }
+        if !requires_move {
             return Ok(old_address);
         }
         if dont_unmap && old_len != new_len {
