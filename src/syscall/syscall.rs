@@ -3704,7 +3704,16 @@ fn linux_read_sleep_timespec(address: usize) -> Result<LinuxTimespec, SysError> 
     if !linux_sleep_user_range_readable(address, size) {
         return Err(SysError::EFAULT);
     }
-    Ok(unsafe { core::ptr::read_unaligned(address as *const LinuxTimespec) })
+    let mut bytes = [0u8; core::mem::size_of::<LinuxTimespec>()];
+    linux_copy_from_user(address, &mut bytes)?;
+    let mut seconds = [0u8; core::mem::size_of::<i64>()];
+    let mut nanoseconds = [0u8; core::mem::size_of::<i64>()];
+    seconds.copy_from_slice(&bytes[..core::mem::size_of::<i64>()]);
+    nanoseconds.copy_from_slice(&bytes[core::mem::size_of::<i64>()..]);
+    Ok(LinuxTimespec {
+        tv_sec: i64::from_ne_bytes(seconds),
+        tv_nsec: i64::from_ne_bytes(nanoseconds),
+    })
 }
 
 fn linux_write_sleep_remaining(address: usize, wait: LinuxSleepWait) -> SysResult {
@@ -3724,12 +3733,10 @@ fn linux_write_sleep_remaining(address: usize, wait: LinuxSleepWait) -> SysResul
         LINUX_SIGNAL_TICK_NANOS,
     )
     .ok_or(SysError::EINVAL)?;
-    unsafe {
-        core::ptr::write_unaligned(
-            address as *mut LinuxTimespec,
-            LinuxTimespec { tv_sec, tv_nsec },
-        );
-    }
+    let mut bytes = [0u8; core::mem::size_of::<LinuxTimespec>()];
+    bytes[..core::mem::size_of::<i64>()].copy_from_slice(&tv_sec.to_ne_bytes());
+    bytes[core::mem::size_of::<i64>()..].copy_from_slice(&tv_nsec.to_ne_bytes());
+    linux_copy_to_user(address, &bytes)?;
     Ok(0)
 }
 
@@ -3831,11 +3838,16 @@ fn linux_signal_wait_deadline(timeout: usize) -> Result<Option<u64>, SysError> {
     if !linux_signal_user_range_readable(timeout, timeout_size) {
         return Err(SysError::EFAULT);
     }
-    let timeout = unsafe { core::ptr::read_unaligned(timeout as *const LinuxTimespec) };
+    let mut bytes = [0u8; core::mem::size_of::<LinuxTimespec>()];
+    linux_copy_from_user(timeout, &mut bytes)?;
+    let mut seconds = [0u8; core::mem::size_of::<i64>()];
+    let mut nanoseconds = [0u8; core::mem::size_of::<i64>()];
+    seconds.copy_from_slice(&bytes[..core::mem::size_of::<i64>()]);
+    nanoseconds.copy_from_slice(&bytes[core::mem::size_of::<i64>()..]);
     linux_task::linux_signal_timespec_to_ticks_ceil(
         crate::kernel_lowlevel::timer::get_tick_count(),
-        timeout.tv_sec,
-        timeout.tv_nsec,
+        i64::from_ne_bytes(seconds),
+        i64::from_ne_bytes(nanoseconds),
         LINUX_SIGNAL_TICK_NANOS,
     )
     .map(Some)
@@ -3855,17 +3867,11 @@ fn copy_linux_signal_wait_info(
         if !linux_signal_user_range_writable(output_address, LINUX_SIGNAL_INFO_BYTES) {
             return Err(SysError::EFAULT);
         }
-        unsafe {
-            if record.has_info {
-                core::ptr::copy_nonoverlapping(
-                    record.info.as_ptr(),
-                    output_address as *mut u8,
-                    LINUX_SIGNAL_INFO_BYTES,
-                );
-            } else {
-                core::ptr::write_bytes(output_address as *mut u8, 0, LINUX_SIGNAL_INFO_BYTES);
-                core::ptr::write(output_address as *mut i32, record.signum as i32);
-            }
+        if record.has_info {
+            linux_copy_to_user(output_address, &record.info)?;
+        } else {
+            linux_zero_user(output_address, LINUX_SIGNAL_INFO_BYTES)?;
+            linux_copy_to_user(output_address, &(record.signum as i32).to_ne_bytes())?;
         }
         compiler_fence(Ordering::SeqCst);
         Ok(())
@@ -5336,21 +5342,29 @@ pub fn sys_rt_sigaction(signum: usize, act: usize, oldact: usize, sigsetsize: us
         return Err(SysError::EINVAL);
     }
     if oldact != 0 {
-        if !syscall_logic::user_buffer_valid(oldact, core::mem::size_of::<LinuxKernelSigaction>()) {
-            return Err(SysError::EFAULT);
-        }
-        unsafe {
-            core::ptr::write(
-                oldact as *mut LinuxKernelSigaction,
-                linux_signal_action(signum),
-            );
-        }
+        let action = linux_signal_action(signum);
+        let mut bytes = [0u8; core::mem::size_of::<LinuxKernelSigaction>()];
+        bytes[0..8].copy_from_slice(&action.handler.to_ne_bytes());
+        bytes[8..16].copy_from_slice(&action.flags.to_ne_bytes());
+        bytes[16..24].copy_from_slice(&action.restorer.to_ne_bytes());
+        bytes[24..32].copy_from_slice(&action.mask.to_ne_bytes());
+        linux_copy_to_user(oldact, &bytes)?;
     }
     if act != 0 {
-        if !syscall_logic::user_buffer_valid(act, core::mem::size_of::<LinuxKernelSigaction>()) {
-            return Err(SysError::EFAULT);
+        let mut bytes = [0u8; core::mem::size_of::<LinuxKernelSigaction>()];
+        linux_copy_from_user(act, &mut bytes)?;
+        let mut fields = [0u64; 4];
+        for (field, chunk) in fields.iter_mut().zip(bytes.chunks_exact(8)) {
+            let mut encoded = [0u8; 8];
+            encoded.copy_from_slice(chunk);
+            *field = u64::from_ne_bytes(encoded);
         }
-        let action = unsafe { core::ptr::read(act as *const LinuxKernelSigaction) };
+        let action = LinuxKernelSigaction {
+            handler: fields[0],
+            flags: fields[1],
+            restorer: fields[2],
+            mask: fields[3],
+        };
         if action.handler != LINUX_SIG_DFL && action.handler != LINUX_SIG_IGN {
             let _ = ensure_linux_signal_trampoline()?;
         }
@@ -5364,13 +5378,8 @@ pub fn sys_rt_sigprocmask(how: isize, set: usize, oldset: usize, sigsetsize: usi
         return Err(SysError::EINVAL);
     }
     if oldset != 0 {
-        if !syscall_logic::user_buffer_valid(oldset, LINUX_SIGSET_SIZE) {
-            return Err(SysError::EFAULT);
-        }
         let current = linux_task::with_current_signal_state(|signal_state| signal_state.mask)?;
-        unsafe {
-            core::ptr::write(oldset as *mut u64, current);
-        }
+        linux_copy_to_user(oldset, &current.to_ne_bytes())?;
     }
     if set != 0 {
         if !matches!(how, LINUX_SIG_BLOCK | LINUX_SIG_UNBLOCK | LINUX_SIG_SETMASK) {
@@ -5400,17 +5409,12 @@ pub fn sys_rt_sigpending(set: usize, sigsetsize: usize) -> SysResult {
     if !syscall_logic::linux_sigset_size_valid(sigsetsize, LINUX_SIGSET_SIZE) {
         return Err(SysError::EINVAL);
     }
-    if !syscall_logic::user_buffer_valid(set, LINUX_SIGSET_SIZE) {
-        return Err(SysError::EFAULT);
-    }
     let task_pending =
         linux_task::with_current_signal_state(|signal_state| signal_state.pending_mask())?;
-    unsafe {
-        core::ptr::write(
-            set as *mut u64,
-            task_pending | process_pending_linux_signal_mask(),
-        );
-    }
+    linux_copy_to_user(
+        set,
+        &(task_pending | process_pending_linux_signal_mask()).to_ne_bytes(),
+    )?;
     Ok(0)
 }
 

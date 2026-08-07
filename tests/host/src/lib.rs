@@ -2506,6 +2506,54 @@ mod linux_process_memory_logic {
         ));
         assert!(!linux_mapping_range_covered(&adjacent, usize::MAX, 2));
     }
+
+    #[test]
+    fn process_removal_selects_only_the_requested_pid() {
+        let pids = [1usize, 7, 11];
+
+        assert_eq!(linux_process_memory_remove_index(&pids, 7), Some(1));
+        assert_eq!(linux_process_memory_remove_index(&pids, 1), Some(0));
+        assert_eq!(linux_process_memory_remove_index(&pids, 9), None);
+    }
+
+    #[test]
+    fn fixed_remap_moves_even_when_lengths_match() {
+        assert!(!linux_mremap_requires_move(
+            0x1200_0000,
+            0x2000,
+            0x2000,
+            None,
+            false,
+        ));
+        assert!(!linux_mremap_requires_move(
+            0x1200_0000,
+            0x2000,
+            0x2000,
+            Some(0x1200_0000),
+            false,
+        ));
+        assert!(linux_mremap_requires_move(
+            0x1200_0000,
+            0x2000,
+            0x2000,
+            Some(0x1201_0000),
+            false,
+        ));
+        assert!(linux_mremap_requires_move(
+            0x1200_0000,
+            0x2000,
+            0x3000,
+            None,
+            false,
+        ));
+        assert!(linux_mremap_requires_move(
+            0x1200_0000,
+            0x2000,
+            0x2000,
+            None,
+            true,
+        ));
+    }
 }
 
 mod linux_syscall_context_logic {
@@ -4408,6 +4456,34 @@ mod user_logic {
         assert!(!smros_user_ascii_shell_input_body!(b'\n'));
         assert_eq!(smros_user_decimal_digit_value_body!(b'7'), Some(7));
         assert_eq!(smros_user_decimal_digit_value_body!(b'x'), None);
+    }
+
+    #[test]
+    fn run_elf_page_permissions_union_overlaps_and_leave_holes_unmapped() {
+        const READ: usize = 1;
+        const WRITE: usize = 2;
+        const EXEC: usize = 4;
+        let segments = [
+            (0x1003usize, 0x0fedusize, READ),
+            (0x1ff0usize, 0x0040usize, EXEC),
+            (0x4000usize, 0x1000usize, READ | WRITE),
+        ];
+
+        assert_eq!(
+            run_elf_page_protection(0x1000, 0x1000, &segments),
+            Some(READ | EXEC)
+        );
+        assert_eq!(
+            run_elf_page_protection(0x2000, 0x1000, &segments),
+            Some(EXEC)
+        );
+        assert_eq!(run_elf_page_protection(0x3000, 0x1000, &segments), None);
+        assert_eq!(
+            run_elf_page_protection(0x4000, 0x1000, &segments),
+            Some(READ | WRITE)
+        );
+        assert_eq!(run_elf_page_protection(usize::MAX, 0x1000, &segments), None);
+        assert_eq!(run_elf_page_protection(0x1000, 0, &segments), None);
     }
 
     #[test]

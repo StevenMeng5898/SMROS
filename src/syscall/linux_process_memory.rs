@@ -263,6 +263,21 @@ pub(crate) fn reset_launch() {
     });
 }
 
+pub(crate) fn unregister(pid: usize) -> bool {
+    with_runtime(|runtime| {
+        let pids = runtime
+            .memories
+            .iter()
+            .map(|memory| memory.pid)
+            .collect::<Vec<_>>();
+        let Some(index) = linux_process_memory_remove_index(&pids, pid) else {
+            return false;
+        };
+        runtime.memories.remove(index);
+        true
+    })
+}
+
 pub(crate) fn copy_from_current(address: usize, out: &mut [u8]) -> Result<(), SysError> {
     if out.is_empty() {
         return Ok(());
@@ -986,6 +1001,26 @@ impl LinuxProcessMemory {
         Ok(())
     }
 
+    fn rollback_remap_destination(
+        &mut self,
+        address: usize,
+        pages: &[LinuxPageBacking],
+        prot: usize,
+        replaced: &[LinuxMappedPage],
+    ) {
+        let mapped = pages
+            .iter()
+            .enumerate()
+            .map(|(index, backing)| LinuxMappedPage {
+                address: address + index * PAGE_SIZE,
+                backing: *backing,
+                prot,
+            })
+            .collect::<Vec<_>>();
+        let _ = self.unmap_pages_transactionally(&mapped);
+        self.restore_mapped_pages(replaced);
+    }
+
     fn remap(
         &mut self,
         old_address: usize,
@@ -1000,16 +1035,23 @@ impl LinuxProcessMemory {
             .iter()
             .position(|mapping| mapping.addr == old_address && mapping.len == old_len)
             .ok_or(SysError::EINVAL)?;
-        if old_len == new_len {
+        if !linux_mremap_requires_move(old_address, old_len, new_len, fixed, dont_unmap) {
             return Ok(old_address);
         }
-        if new_len < old_len {
+        if dont_unmap && old_len != new_len {
+            return Err(SysError::EINVAL);
+        }
+        if fixed.is_none() && !dont_unmap && new_len < old_len {
             self.unmap(old_address + new_len, old_len - new_len)?;
             return Ok(old_address);
         }
         let grow_start = old_address + old_len;
-        let extra_len = new_len - old_len;
-        if fixed.is_none() && self.range_available(grow_start, extra_len) {
+        let extra_len = new_len.saturating_sub(old_len);
+        if fixed.is_none()
+            && !dont_unmap
+            && new_len > old_len
+            && self.range_available(grow_start, extra_len)
+        {
             let prot = self.mappings[index].prot;
             let pages = self.allocate_unmapped_pages(extra_len, &[])?;
             if let Err(error) = self.map_unmapped_pages(grow_start, &pages, prot) {
@@ -1026,29 +1068,69 @@ impl LinuxProcessMemory {
         let prot = self.mappings[index].prot;
         let flags = self.mappings[index].flags;
         let source = self.mappings[index].source.clone();
-        if fixed
-            .map(|address| ranges_overlap(address, new_len, old_address, old_len))
-            .unwrap_or(false)
-        {
-            return Err(SysError::EINVAL);
-        }
+        let new_address = if let Some(address) = fixed {
+            if !linux_user_page_range_valid(address, new_len)
+                || ranges_overlap(address, new_len, old_address, old_len)
+                || ranges_overlap(
+                    address,
+                    new_len,
+                    self.brk.start,
+                    self.brk.limit - self.brk.start,
+                )
+            {
+                return Err(SysError::EINVAL);
+            }
+            address
+        } else {
+            self.find_free_region(None, new_len)
+                .ok_or(SysError::ENOMEM)?
+        };
+        let copy_len = core::cmp::min(old_len, new_len);
         let mut contents = Vec::new();
         contents
-            .try_reserve_exact(old_len)
+            .try_reserve_exact(copy_len)
             .map_err(|_| SysError::ENOMEM)?;
-        contents.resize(old_len, 0);
+        contents.resize(copy_len, 0);
         self.copy_from_user(old_address, &mut contents)?;
-        let new_address = self.map(
-            fixed,
-            new_len,
-            prot,
-            flags,
-            source,
-            fixed.is_some(),
-            &contents,
-        )?;
+        let pages = self.allocate_unmapped_pages(new_len, &contents)?;
+        let replaced = self.mapped_pages_overlapping(new_address, new_len);
+        if let Err(error) = self.unmap_pages_transactionally(&replaced) {
+            Self::free_backings(&pages);
+            return Err(error);
+        }
+        if let Err(error) = self.map_unmapped_pages(new_address, &pages, prot) {
+            self.restore_mapped_pages(&replaced);
+            Self::free_backings(&pages);
+            return Err(error);
+        }
         if !dont_unmap {
-            let _ = self.unmap(old_address, old_len)?;
+            let source_pages = self.mapped_pages_overlapping(old_address, old_len);
+            if let Err(error) = self.unmap_pages_transactionally(&source_pages) {
+                self.rollback_remap_destination(new_address, &pages, prot, &replaced);
+                Self::free_backings(&pages);
+                return Err(error);
+            }
+        }
+
+        let replaced_backings = self.replace_mapping_metadata(
+            new_address,
+            new_len,
+            LinuxProcessMapping {
+                addr: new_address,
+                len: new_len,
+                prot,
+                flags,
+                pages,
+                source,
+            },
+        );
+        Self::free_backings(&replaced_backings);
+        if !dont_unmap {
+            let (_, source_backings) = self.remove_mapping_metadata(old_address, old_len);
+            Self::free_backings(&source_backings);
+        }
+        if (LINUX_MMAP_BASE..LINUX_BRK_BASE).contains(&new_address) {
+            self.next_addr = new_address.checked_add(new_len).ok_or(SysError::ENOMEM)?;
         }
         Ok(new_address)
     }

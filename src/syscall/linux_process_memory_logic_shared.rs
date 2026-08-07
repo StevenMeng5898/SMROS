@@ -212,3 +212,19 @@ pub(crate) fn linux_mapping_range_covered(
     }
     true
 }
+
+pub(crate) fn linux_process_memory_remove_index(pids: &[usize], pid: usize) -> Option<usize> {
+    pids.iter().position(|candidate| *candidate == pid)
+}
+
+pub(crate) fn linux_mremap_requires_move(
+    old_address: usize,
+    old_len: usize,
+    new_len: usize,
+    fixed: Option<usize>,
+    dont_unmap: bool,
+) -> bool {
+    dont_unmap
+        || old_len != new_len
+        || fixed.is_some_and(|new_address| new_address != old_address)
+}

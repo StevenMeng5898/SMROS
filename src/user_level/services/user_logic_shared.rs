@@ -390,6 +390,22 @@ macro_rules! smros_user_elf_segment_mapping_range_body {
     }};
 }
 
+pub(crate) fn run_elf_page_protection(
+    page_start: usize,
+    page_size: usize,
+    segments: &[(usize, usize, usize)],
+) -> Option<usize> {
+    let page_end = page_start.checked_add(page_size).filter(|_| page_size != 0)?;
+    let mut protection = None;
+    for (segment_start, segment_len, segment_protection) in segments {
+        let segment_end = segment_start.checked_add(*segment_len)?;
+        if *segment_len != 0 && *segment_start < page_end && page_start < segment_end {
+            protection = Some(protection.unwrap_or(0) | *segment_protection);
+        }
+    }
+    protection
+}
+
 pub(crate) fn run_elf_environment_entry_valid(entry: &str, max_entry_bytes: usize) -> bool {
     if entry.is_empty() || entry.len() > max_entry_bytes || entry.as_bytes().contains(&0) {
         return false;

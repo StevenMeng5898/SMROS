@@ -3530,8 +3530,8 @@ fn linux_sigtimedwait_copyout_masks_irqs_across_validation_and_write() {
         .find("linux_signal_user_range_writable(")
         .expect("copyout range validation");
     let write = copy
-        .find("core::ptr::copy_nonoverlapping(")
-        .expect("complete siginfo write");
+        .find("linux_copy_to_user(output_address, &record.info)?")
+        .expect("complete checked siginfo write");
     let entry_fence = copy
         .find("compiler_fence(Ordering::SeqCst)")
         .expect("copyout entry compiler fence");
@@ -3545,6 +3545,7 @@ fn linux_sigtimedwait_copyout_masks_irqs_across_validation_and_write() {
     assert!(mask < entry_fence);
     assert!(entry_fence < validation && validation < write);
     assert!(write < exit_fence && exit_fence < restore);
+    assert!(!copy.contains("core::ptr::"));
     assert!(!copy.contains("linux_task::"));
     assert!(!copy.contains("with_linux_process_pending("));
 
@@ -4216,4 +4217,64 @@ fn linux_process_memory_mutations_are_transactional_and_bounded() {
         .find("map_current_with_contents")
         .expect("mapping publication accepts staged contents");
     assert!(preload < publish);
+}
+
+#[test]
+fn linux_process_memory_review_paths_are_checked_and_reversible() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let process_memory =
+        std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+            .expect("read process memory runtime");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let run_elf = std::fs::read_to_string(repository.join("src/user_level/services/run_elf.rs"))
+        .expect("read ELF launcher");
+
+    assert!(process_memory.contains("pub(crate) fn unregister(pid: usize)"));
+    assert!(process_memory.contains("linux_process_memory_remove_index("));
+
+    for (start_marker, end_marker) in [
+        ("fn linux_read_sleep_timespec(", "fn linux_write_sleep_remaining("),
+        ("fn linux_write_sleep_remaining(", "fn linux_sleep_has_deliverable_pending_signal("),
+        ("fn linux_signal_wait_deadline(", "fn copy_linux_signal_wait_info("),
+        ("fn copy_linux_signal_wait_info(", "fn finish_linux_signal_wait("),
+        ("pub fn sys_rt_sigaction(", "pub fn sys_rt_sigprocmask("),
+    ] {
+        let start = syscall
+            .find(start_marker)
+            .expect("reviewed user-copy function");
+        let end = syscall[start..]
+            .find(end_marker)
+            .expect("reviewed function end")
+            + start;
+        let body = &syscall[start..end];
+        assert!(
+            body.contains("linux_copy_from_user(")
+                || body.contains("linux_copy_to_user(")
+                || body.contains("linux_zero_user("),
+            "missing checked copy in {start_marker}"
+        );
+        assert!(
+            !body.contains("core::ptr::"),
+            "raw user pointer in {start_marker}"
+        );
+    }
+
+    let remap_start = process_memory
+        .find("    fn remap(\n")
+        .expect("process remap implementation");
+    let remap = braced_body(&process_memory[remap_start..]);
+    assert!(remap.contains("linux_mremap_requires_move("));
+    assert!(remap.contains("rollback_remap_destination("));
+    assert!(!remap.contains("if old_len == new_len"));
+
+    let map_elf_start = run_elf.find("fn map_elf_image(").expect("ELF mapper");
+    let map_elf = braced_body(&run_elf[map_elf_start..]);
+    assert!(map_elf.contains("map_elf_page_runs("));
+    assert!(!map_elf.contains("elf_mapping_span(image)"));
+    let page_runs_start = run_elf
+        .find("fn map_elf_page_runs(")
+        .expect("ELF page-run mapper");
+    let page_runs = braced_body(&run_elf[page_runs_start..]);
+    assert!(page_runs.contains("run_elf_page_protection("));
 }

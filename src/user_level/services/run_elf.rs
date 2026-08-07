@@ -19,7 +19,7 @@ use super::posix_test;
 const RUN_ELF_MAIN_BASE: usize = syscall::linux_process_memory::LINUX_MAIN_BASE;
 const RUN_ELF_INTERP_BASE: usize = syscall::linux_process_memory::LINUX_INTERPRETER_BASE;
 const RUN_ELF_STACK_SIZE: usize = 0x20_000;
-const RUN_ELF_MAP_PROT: usize = 0x1 | 0x2; // PROT_READ | PROT_WRITE
+const RUN_ELF_STAGING_PROT: usize = 0x1 | 0x2; // PROT_READ | PROT_WRITE
 const RUN_ELF_MAP_FIXED_ANON_PRIVATE: usize = (1 << 4) | (1 << 5) | (1 << 1);
 const RUN_ELF_TIMER_HZ: u64 = 100;
 const RUN_ELF_MAX_ENV_ENTRIES: usize = 64;
@@ -515,20 +515,7 @@ fn path_under_shared(path: &str) -> bool {
 }
 
 fn map_elf_image(image: &elf::ElfImage, bytes: &[u8], base: usize) -> Result<(), RunElfError> {
-    let (start, len) = elf_mapping_span(image).ok_or(RunElfError::Map)?;
-    let map_addr = base.checked_add(start).ok_or(RunElfError::Map)?;
-    let mapped = syscall::sys_mmap(
-        map_addr,
-        len,
-        RUN_ELF_MAP_PROT,
-        RUN_ELF_MAP_FIXED_ANON_PRIVATE,
-        0,
-        0,
-    )
-    .map_err(|_| RunElfError::Map)?;
-    if mapped != map_addr {
-        return Err(RunElfError::Map);
-    }
+    let page_runs = map_elf_page_runs(image, base)?;
 
     for segment in &image.segments {
         let dest = base
@@ -547,13 +534,34 @@ fn map_elf_image(image: &elf::ElfImage, bytes: &[u8], base: usize) -> Result<(),
             .map_err(|_| RunElfError::Map)?;
     }
 
+    for run in page_runs {
+        let address = base.checked_add(run.start).ok_or(RunElfError::Map)?;
+        syscall::sys_mprotect(address, run.len, run.prot).map_err(|_| RunElfError::Map)?;
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct ElfPageRun {
+    start: usize,
+    len: usize,
+    prot: usize,
+}
+
+fn map_elf_page_runs(image: &elf::ElfImage, base: usize) -> Result<Vec<ElfPageRun>, RunElfError> {
+    let mut segments = Vec::new();
+    let mut min_addr = usize::MAX;
+    let mut max_addr = 0usize;
+
     for segment in &image.segments {
+        if segment.mem_size == 0 {
+            continue;
+        }
         let vaddr = usize::try_from(segment.vaddr).map_err(|_| RunElfError::Map)?;
         let mem_size = usize::try_from(segment.mem_size).map_err(|_| RunElfError::Map)?;
-        let (segment_start, segment_end) =
-            user_logic::elf_segment_mapping_range(vaddr, mem_size, PAGE_SIZE)
-                .ok_or(RunElfError::Map)?;
-        let segment_address = base.checked_add(segment_start).ok_or(RunElfError::Map)?;
+        let (start, end) = user_logic::elf_segment_mapping_range(vaddr, mem_size, PAGE_SIZE)
+            .ok_or(RunElfError::Map)?;
         let mut prot = 0usize;
         if segment.flags & 4 != 0 {
             prot |= 0x1;
@@ -564,32 +572,55 @@ fn map_elf_image(image: &elf::ElfImage, bytes: &[u8], base: usize) -> Result<(),
         if segment.flags & 1 != 0 {
             prot |= 0x4;
         }
-        syscall::sys_mprotect(segment_address, segment_end - segment_start, prot)
-            .map_err(|_| RunElfError::Map)?;
-    }
-
-    Ok(())
-}
-
-fn elf_mapping_span(image: &elf::ElfImage) -> Option<(usize, usize)> {
-    let mut min_addr = usize::MAX;
-    let mut max_addr = 0usize;
-
-    for segment in &image.segments {
-        if segment.mem_size == 0 || segment.vaddr > usize::MAX as u64 {
-            continue;
-        }
-        let vaddr = segment.vaddr as usize;
-        let mem_size = usize::try_from(segment.mem_size).ok()?;
-        let (start, end) = user_logic::elf_segment_mapping_range(vaddr, mem_size, PAGE_SIZE)?;
+        segments.push((vaddr, mem_size, prot));
         min_addr = core::cmp::min(min_addr, start);
         max_addr = core::cmp::max(max_addr, end);
     }
 
     if min_addr == usize::MAX || max_addr <= min_addr {
-        return None;
+        return Err(RunElfError::Map);
     }
-    Some((min_addr, max_addr - min_addr))
+
+    let mut runs: Vec<ElfPageRun> = Vec::new();
+    let mut page = min_addr;
+    while page < max_addr {
+        let prot = user_logic::run_elf_page_protection(page, PAGE_SIZE, &segments);
+        if let Some(prot) = prot {
+            if let Some(previous) = runs.last_mut() {
+                if previous.prot == prot && previous.start.checked_add(previous.len) == Some(page) {
+                    previous.len = previous
+                        .len
+                        .checked_add(PAGE_SIZE)
+                        .ok_or(RunElfError::Map)?;
+                    page = page.checked_add(PAGE_SIZE).ok_or(RunElfError::Map)?;
+                    continue;
+                }
+            }
+            runs.push(ElfPageRun {
+                start: page,
+                len: PAGE_SIZE,
+                prot,
+            });
+        }
+        page = page.checked_add(PAGE_SIZE).ok_or(RunElfError::Map)?;
+    }
+
+    for run in &runs {
+        let address = base.checked_add(run.start).ok_or(RunElfError::Map)?;
+        let mapped = syscall::sys_mmap(
+            address,
+            run.len,
+            RUN_ELF_STAGING_PROT,
+            RUN_ELF_MAP_FIXED_ANON_PRIVATE,
+            0,
+            0,
+        )
+        .map_err(|_| RunElfError::Map)?;
+        if mapped != address {
+            return Err(RunElfError::Map);
+        }
+    }
+    Ok(runs)
 }
 
 fn sync_instruction_cache() {
