@@ -2518,7 +2518,8 @@ fn linux_root_task_and_syscall_frame_have_bounded_owners() {
         .expect("signal reset");
     assert!(tasks < descriptors && tasks < mappings && tasks < signals);
 
-    assert!(syscall.contains("linux_task::current_tgid()"));
+    assert!(syscall.contains("linux_process::current_pid()"));
+    assert!(syscall.contains("linux_process::current_parent_pid()"));
     assert!(syscall.contains("linux_task::current_tid()"));
 }
 
