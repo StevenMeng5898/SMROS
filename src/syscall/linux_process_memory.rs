@@ -173,11 +173,22 @@ struct LinuxProcessMemoryRuntime {
 
 struct LinuxSharedPageRuntime {
     pages: Vec<LinuxSharedPageRecord>,
+    mmap_objects: Vec<LinuxSharedMmapObject>,
+    next_mmap_object_id: u32,
+}
+
+struct LinuxSharedMmapObject {
+    object_id: u32,
+    file_path: Option<String>,
 }
 
 impl LinuxSharedPageRuntime {
     const fn new() -> Self {
-        Self { pages: Vec::new() }
+        Self {
+            pages: Vec::new(),
+            mmap_objects: Vec::new(),
+            next_mmap_object_id: u32::MAX,
+        }
     }
 }
 
@@ -249,6 +260,9 @@ fn acquire_or_register_shared_page(
             page.references = linux_shared_reference_acquire(page.references)?;
             return Some(page.pfn);
         }
+        if runtime.pages.try_reserve(1).is_err() {
+            return None;
+        }
         runtime.pages.push(LinuxSharedPageRecord {
             object_id,
             page_index,
@@ -285,8 +299,74 @@ fn release_shared_page(object_id: u32, page_index: usize) -> Option<u64> {
             .position(|page| page.object_id == object_id && page.page_index == page_index)?;
         let references = linux_shared_reference_release(runtime.pages[index].references)?;
         runtime.pages[index].references = references;
-        (references == 0).then(|| runtime.pages.swap_remove(index).pfn)
+        if references != 0 {
+            return None;
+        }
+        let pfn = runtime.pages.swap_remove(index).pfn;
+        if !runtime.pages.iter().any(|page| page.object_id == object_id) {
+            runtime
+                .mmap_objects
+                .retain(|object| object.object_id != object_id);
+        }
+        Some(pfn)
     })
+}
+
+fn shared_mmap_object(source: &LinuxMappingSource) -> Result<(u32, usize), SysError> {
+    with_shared_pages(|runtime| {
+        let (file_path, first_page) = match source {
+            LinuxMappingSource::Anonymous => (None, 0),
+            LinuxMappingSource::File { offset, path, .. } => {
+                let offset = usize::try_from(*offset).map_err(|_| SysError::EINVAL)?;
+                (Some(path.as_str()), offset / PAGE_SIZE)
+            }
+            LinuxMappingSource::SharedMemory { .. } => return Err(SysError::EINVAL),
+        };
+        if let Some(file_path) = file_path {
+            if let Some(object) = runtime
+                .mmap_objects
+                .iter()
+                .find(|object| object.file_path.as_deref() == Some(file_path))
+            {
+                return Ok((object.object_id, first_page));
+            }
+        }
+
+        let object_id = runtime.next_mmap_object_id;
+        if object_id < 0x8000_0000 {
+            return Err(SysError::ENOMEM);
+        }
+        runtime.next_mmap_object_id = object_id.checked_sub(1).ok_or(SysError::ENOMEM)?;
+        runtime
+            .mmap_objects
+            .try_reserve(1)
+            .map_err(|_| SysError::ENOMEM)?;
+        let file_path = if let Some(path) = file_path {
+            let mut owned = String::new();
+            owned
+                .try_reserve_exact(path.len())
+                .map_err(|_| SysError::ENOMEM)?;
+            owned.push_str(path);
+            Some(owned)
+        } else {
+            None
+        };
+        runtime.mmap_objects.push(LinuxSharedMmapObject {
+            object_id,
+            file_path,
+        });
+        Ok((object_id, first_page))
+    })
+}
+
+fn remove_empty_shared_mmap_object(object_id: u32) {
+    with_shared_pages(|runtime| {
+        if !runtime.pages.iter().any(|page| page.object_id == object_id) {
+            runtime
+                .mmap_objects
+                .retain(|object| object.object_id != object_id);
+        }
+    });
 }
 
 pub(crate) fn remove_shared_page_name(object_id: u32) {
@@ -376,6 +456,8 @@ pub(crate) fn reset_launch() {
         for page in runtime.pages.drain(..) {
             PageFrameAllocator::free(page.pfn);
         }
+        runtime.mmap_objects.clear();
+        runtime.next_mmap_object_id = u32::MAX;
     });
 }
 
@@ -407,6 +489,10 @@ pub(crate) fn clone_for_fork(
         {
             return Err(SysError::EBUSY);
         }
+        runtime
+            .memories
+            .try_reserve(1)
+            .map_err(|_| SysError::ENOMEM)?;
         let parent = runtime
             .memories
             .iter()
@@ -437,6 +523,14 @@ pub(crate) fn clone_for_fork(
                 pages: Vec::new(),
             },
         };
+        child
+            .mappings
+            .try_reserve_exact(parent.mappings.len())
+            .map_err(|_| SysError::ENOMEM)?;
+        child
+            .shared_attachments
+            .try_reserve_exact(shared_attachments.len())
+            .map_err(|_| SysError::ENOMEM)?;
 
         for mapping in &parent.mappings {
             let attachment_index = shared_attachments.iter().position(|attachment| {
@@ -476,6 +570,13 @@ pub(crate) fn clone_for_fork(
             });
         }
 
+        if shared_attachments
+            .iter()
+            .any(|attachment| !attachment.pages.is_empty() || attachment.owns_attachment_reference)
+        {
+            return Err(SysError::EINVAL);
+        }
+
         let brk_pages = clone_page_backings_for_fork(&parent.brk.pages)?;
         if let Err(error) = child.map_unmapped_pages(
             child.brk.start,
@@ -486,6 +587,7 @@ pub(crate) fn clone_for_fork(
             return Err(error);
         }
         child.brk.pages = brk_pages;
+        crate::kernel_lowlevel::cpu::sync_instruction_cache();
         runtime.memories.push(child);
         Ok(root_paddr)
     });
@@ -690,8 +792,23 @@ pub(crate) fn mark_shared(address: usize, len: usize, object_id: u32) -> bool {
 
         for (page_index, backing) in replaced.iter().copied().enumerate() {
             let canonical_pfn = shared_page(object_id, page_index).unwrap().pfn;
-            if backing.pfn() != canonical_pfn {
-                PageFrameAllocator::free(backing.pfn());
+            match backing {
+                LinuxPageBacking::Private { pfn } => {
+                    if pfn != canonical_pfn {
+                        PageFrameAllocator::free(pfn);
+                    }
+                }
+                LinuxPageBacking::Shared {
+                    object_id,
+                    page_index,
+                    ..
+                } => {
+                    if let Some(pfn) = release_shared_page(object_id, page_index) {
+                        if pfn != canonical_pfn {
+                            PageFrameAllocator::free(pfn);
+                        }
+                    }
+                }
             }
         }
         Ok(true)
@@ -1047,6 +1164,56 @@ impl LinuxProcessMemory {
         Ok(pages)
     }
 
+    fn allocate_shared_mmap_pages(
+        &self,
+        len: usize,
+        contents: &[u8],
+        source: &LinuxMappingSource,
+    ) -> Result<Vec<LinuxPageBacking>, SysError> {
+        let candidates = self.allocate_unmapped_pages(len, contents)?;
+        let (object_id, first_page) = match shared_mmap_object(source) {
+            Ok(object) => object,
+            Err(error) => {
+                Self::free_backings(&candidates);
+                return Err(error);
+            }
+        };
+        let mut shared = Vec::new();
+        if shared.try_reserve_exact(candidates.len()).is_err() {
+            Self::free_backings(&candidates);
+            remove_empty_shared_mmap_object(object_id);
+            return Err(SysError::ENOMEM);
+        }
+        for (index, candidate) in candidates.iter().copied().enumerate() {
+            let Some(page_index) = linux_shared_page_index(first_page, index) else {
+                Self::free_backings(&shared);
+                for candidate in &candidates[index..] {
+                    PageFrameAllocator::free(candidate.pfn());
+                }
+                remove_empty_shared_mmap_object(object_id);
+                return Err(SysError::EINVAL);
+            };
+            let Some(pfn) = acquire_or_register_shared_page(object_id, page_index, candidate.pfn())
+            else {
+                Self::free_backings(&shared);
+                for candidate in &candidates[index..] {
+                    PageFrameAllocator::free(candidate.pfn());
+                }
+                remove_empty_shared_mmap_object(object_id);
+                return Err(SysError::ENOMEM);
+            };
+            if pfn != candidate.pfn() {
+                PageFrameAllocator::free(candidate.pfn());
+            }
+            shared.push(LinuxPageBacking::Shared {
+                object_id,
+                page_index,
+                pfn,
+            });
+        }
+        Ok(shared)
+    }
+
     fn free_backings(pages: &[LinuxPageBacking]) {
         for page in pages {
             match *page {
@@ -1185,7 +1352,11 @@ impl LinuxProcessMemory {
             self.find_free_region(requested, len)
                 .ok_or(SysError::ENOMEM)?
         };
-        let pages = self.allocate_unmapped_pages(len, contents)?;
+        let pages = if flags & LINUX_MAP_SHARED != 0 {
+            self.allocate_shared_mmap_pages(len, contents, &source)?
+        } else {
+            self.allocate_unmapped_pages(len, contents)?
+        };
         if replace {
             if let Err((error, pages)) =
                 self.replace_mapping_transactionally(address, len, prot, flags, source, pages)
@@ -1505,10 +1676,8 @@ impl LinuxProcessMemory {
             .ok_or(SysError::EINVAL)?;
         let requires_move =
             linux_mremap_requires_move(old_address, old_len, new_len, fixed, dont_unmap);
-        if matches!(
-            self.mappings[index].source,
-            LinuxMappingSource::SharedMemory { .. }
-        ) && !linux_shared_mremap_supported(requires_move)
+        if linux_mmap_backing_is_shared(self.mappings[index].flags)
+            && !linux_shared_mremap_supported(requires_move)
         {
             return Err(SysError::EINVAL);
         }

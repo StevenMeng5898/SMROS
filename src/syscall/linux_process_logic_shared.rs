@@ -18,6 +18,7 @@ pub(crate) struct LinuxProcessCore {
     pub root_scheduler_thread: usize,
     pub state: LinuxProcessState,
     pub wait_status: i32,
+    pub exit_signal: usize,
 }
 
 impl LinuxProcessCore {
@@ -28,6 +29,7 @@ impl LinuxProcessCore {
         root_scheduler_thread: 0,
         state: LinuxProcessState::Empty,
         wait_status: 0,
+        exit_signal: 0,
     };
 }
 
@@ -105,6 +107,7 @@ impl<const N: usize> LinuxProcessTable<N> {
             root_scheduler_thread: scheduler_thread,
             state: LinuxProcessState::Running,
             wait_status: 0,
+            exit_signal: 0,
         };
         Ok(LINUX_ROOT_PID)
     }
@@ -114,9 +117,20 @@ impl<const N: usize> LinuxProcessTable<N> {
         parent_pid: usize,
         scheduler_thread: usize,
     ) -> Result<LinuxProcessReservation, LinuxProcessError> {
-        if self.exhausted {
+        if self.exhausted || !(LINUX_ROOT_PID + 1..=LINUX_MAX_PID).contains(&self.next_pid) {
+            self.exhausted = true;
             return Err(LinuxProcessError::Exhausted);
         }
+        self.reserve_child_with_pid(parent_pid, scheduler_thread, self.next_pid, 0)
+    }
+
+    pub(crate) fn reserve_child_with_pid(
+        &mut self,
+        parent_pid: usize,
+        scheduler_thread: usize,
+        pid: usize,
+        exit_signal: usize,
+    ) -> Result<LinuxProcessReservation, LinuxProcessError> {
         let parent = self
             .processes
             .iter()
@@ -130,15 +144,17 @@ impl<const N: usize> LinuxProcessTable<N> {
             .iter()
             .position(|process| process.state == LinuxProcessState::Empty)
             .ok_or(LinuxProcessError::Capacity)?;
-        if !(LINUX_ROOT_PID + 1..=LINUX_MAX_PID).contains(&self.next_pid) {
-            self.exhausted = true;
+        if !(LINUX_ROOT_PID + 1..=LINUX_MAX_PID).contains(&pid)
+            || self.processes.iter().any(|process| {
+                process.state != LinuxProcessState::Empty && process.pid == pid
+            })
+        {
             return Err(LinuxProcessError::Exhausted);
         }
 
-        let pid = self.next_pid;
         if pid == LINUX_MAX_PID {
             self.exhausted = true;
-        } else {
+        } else if pid >= self.next_pid {
             self.next_pid = pid + 1;
         }
         self.processes[slot] = LinuxProcessCore {
@@ -148,6 +164,7 @@ impl<const N: usize> LinuxProcessTable<N> {
             root_scheduler_thread: scheduler_thread,
             state: LinuxProcessState::Reserved,
             wait_status: 0,
+            exit_signal,
         };
         Ok(LinuxProcessReservation {
             slot,

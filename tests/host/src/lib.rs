@@ -2197,6 +2197,7 @@ mod linux_process_logic {
                 root_scheduler_thread: 7,
                 state: LinuxProcessState::Running,
                 wait_status: 0,
+                exit_signal: 0,
             })
         );
         assert_eq!(processes.by_scheduler(7), processes.by_pid(LINUX_ROOT_PID));
@@ -2586,6 +2587,87 @@ mod linux_process_logic {
         assert!(processes.rollback_fork(child));
         assert_eq!(processes.processes, parent_snapshot);
     }
+
+    #[test]
+    fn fork_process_leader_uses_the_next_task_id_and_keeps_its_exit_signal() {
+        use super::linux_task_logic::{LinuxTaskTable, LINUX_ROOT_TID};
+
+        let mut tasks = LinuxTaskTable::<4>::new();
+        tasks.register_root(7).unwrap();
+        let thread = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
+        assert_eq!(thread.tid, 2);
+
+        let leader = tasks.reserve_child(0, 9).unwrap();
+        let mut processes = LinuxProcessTable::<3>::new();
+        processes.register_root(7).unwrap();
+        let child = processes
+            .reserve_child_with_pid(LINUX_ROOT_PID, 9, leader.tid, 17)
+            .unwrap();
+
+        assert_eq!(child.pid, 3);
+        assert_eq!(leader.tid, child.pid);
+        assert!(processes.publish(child));
+        assert_eq!(processes.by_pid(child.pid).unwrap().exit_signal, 17);
+    }
+
+    #[test]
+    fn concurrent_fork_process_slots_accept_out_of_order_reserved_task_ids() {
+        let mut processes = LinuxProcessTable::<3>::new();
+        processes.register_root(7).unwrap();
+
+        let later = processes
+            .reserve_child_with_pid(LINUX_ROOT_PID, 9, 4, 17)
+            .unwrap();
+        let earlier = processes
+            .reserve_child_with_pid(LINUX_ROOT_PID, 8, 3, 17)
+            .unwrap();
+
+        assert_eq!(later.pid, 4);
+        assert_eq!(earlier.pid, 3);
+    }
+
+    #[test]
+    fn exact_pid_reservations_accept_lower_ids_after_the_pid_ceiling() {
+        let mut processes = LinuxProcessTable::<3>::new();
+        processes.register_root(7).unwrap();
+
+        let ceiling = processes
+            .reserve_child_with_pid(LINUX_ROOT_PID, 9, LINUX_MAX_PID, 17)
+            .unwrap();
+        let lower = processes
+            .reserve_child_with_pid(LINUX_ROOT_PID, 8, 3, 17)
+            .unwrap();
+
+        assert_eq!(ceiling.pid, LINUX_MAX_PID);
+        assert_eq!(lower.pid, 3);
+    }
+
+    #[test]
+    fn fork_descriptor_failure_rolls_back_every_prior_reference() {
+        let mut descriptions = LinuxOpenDescriptionTableCore::<3>::new();
+        let first = descriptions
+            .insert(101, ObjectType::LinuxFile, 0, 0)
+            .unwrap();
+        let exhausted = descriptions
+            .insert(102, ObjectType::LinuxFile, 0, 0)
+            .unwrap();
+        let mut parent = LinuxProcessResourceCore::<3, 1>::new();
+        assert!(parent.insert_descriptor(3, first, false, &mut descriptions));
+        assert!(parent.insert_descriptor(4, exhausted, false, &mut descriptions));
+        descriptions
+            .descriptions
+            .iter_mut()
+            .flatten()
+            .find(|description| description.id == exhausted)
+            .unwrap()
+            .references = usize::MAX;
+
+        assert!(LinuxResourceCloneCore::<3, 1>::reserve(&parent, &mut descriptions).is_none());
+        assert_eq!(descriptions.get(first).unwrap().references, 1);
+        assert_eq!(descriptions.get(exhausted).unwrap().references, usize::MAX);
+        assert_eq!(parent.descriptor(3).unwrap().description_id, first);
+        assert_eq!(parent.descriptor(4).unwrap().description_id, exhausted);
+    }
 }
 
 mod linux_process_memory_logic {
@@ -2767,6 +2849,25 @@ mod linux_process_memory_logic {
         );
         assert_ne!(linux_clone_page_backing(private, 81).pfn(), private.pfn());
         assert_eq!(linux_clone_page_backing(shared, 99), shared);
+    }
+
+    #[test]
+    fn ordinary_map_shared_pages_use_shared_fork_backing() {
+        assert!(linux_mmap_backing_is_shared(LINUX_MAP_SHARED));
+        assert!(!linux_mmap_backing_is_shared(LINUX_MAP_PRIVATE));
+
+        let parent = LinuxPageBacking::Shared {
+            object_id: u32::MAX,
+            page_index: 0,
+            pfn: 33,
+        };
+        assert_eq!(linux_clone_page_backing(parent, 81), parent);
+    }
+
+    #[test]
+    fn shared_file_page_indices_reject_offset_overflow() {
+        assert_eq!(linux_shared_page_index(7, 3), Some(10));
+        assert_eq!(linux_shared_page_index(usize::MAX, 1), None);
     }
 
     #[test]

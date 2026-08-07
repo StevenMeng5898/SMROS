@@ -556,6 +556,7 @@ const LINUX_SIGSET_SIZE: usize = core::mem::size_of::<u64>();
 const LINUX_SIG_DFL: u64 = 0;
 const LINUX_SIG_IGN: u64 = 1;
 const LINUX_SIGALRM: usize = 14;
+const LINUX_SIGCHLD: usize = 17;
 const LINUX_SA_SIGINFO: u64 = 0x0000_0004;
 const LINUX_SA_ONSTACK: u64 = 0x0800_0000;
 const LINUX_SA_RESETHAND: u64 = 0x8000_0000;
@@ -683,6 +684,8 @@ struct LinuxProcessResources {
     descriptors: Vec<LinuxDescriptorEntry>,
     objects: Vec<u32>,
     namespace_flags: usize,
+    timer_handles: Vec<u32>,
+    real_timer_deadline_tick: u64,
 }
 
 #[derive(Clone)]
@@ -1574,7 +1577,6 @@ struct MemorySyscallState {
     signals: Vec<SignalRecord>,
     linux_open_descriptions: Vec<LinuxOpenDescription>,
     linux_process_resources: Vec<LinuxProcessResources>,
-    linux_timer_handles: Vec<u32>,
     linux_fxfs_files: Vec<LinuxFxfsFileRecord>,
     linux_shared_memory: Vec<LinuxSharedMemoryRecord>,
     next_shared_memory_id: u32,
@@ -1625,7 +1627,6 @@ impl MemorySyscallState {
             signals: Vec::new(),
             linux_open_descriptions: Vec::new(),
             linux_process_resources: Vec::new(),
-            linux_timer_handles: Vec::new(),
             linux_fxfs_files: Vec::new(),
             linux_shared_memory: Vec::new(),
             next_shared_memory_id: LINUX_SHM_ID_START,
@@ -1732,7 +1733,9 @@ impl MemorySyscallState {
 
     fn clear_external_handle_state(&mut self, handle: u32) {
         self.signals.retain(|signal| signal.handle != handle);
-        self.linux_timer_handles.retain(|timer| *timer != handle);
+        for resources in &mut self.linux_process_resources {
+            resources.timer_handles.retain(|timer| *timer != handle);
+        }
     }
 
     fn alloc_object_handle_with_rights(
@@ -2488,6 +2491,8 @@ impl MemorySyscallState {
             descriptors: Vec::new(),
             objects: Vec::new(),
             namespace_flags: 0,
+            timer_handles: Vec::new(),
+            real_timer_deadline_tick: LINUX_TIMER_DISABLED,
         });
         self.linux_process_resources.last_mut().unwrap()
     }
@@ -2756,6 +2761,8 @@ impl MemorySyscallState {
                 descriptors: Vec::new(),
                 objects: Vec::new(),
                 namespace_flags: 0,
+                timer_handles: Vec::new(),
+                real_timer_deadline_tick: LINUX_TIMER_DISABLED,
             });
         let mut descriptors = Vec::with_capacity(parent.descriptors.len());
         let mut objects = Vec::with_capacity(parent.objects.len());
@@ -2856,6 +2863,8 @@ impl MemorySyscallState {
             descriptors: core::mem::take(descriptors),
             objects: core::mem::take(objects),
             namespace_flags: 0,
+            timer_handles: Vec::new(),
+            real_timer_deadline_tick: LINUX_TIMER_DISABLED,
         });
         true
     }
@@ -2869,7 +2878,9 @@ impl MemorySyscallState {
             return None;
         };
         let resources = self.linux_process_resources.swap_remove(index);
-        Some(self.release_resource_clone(&resources.descriptors, &resources.objects))
+        let mut released = self.release_resource_clone(&resources.descriptors, &resources.objects);
+        released.extend(resources.timer_handles);
+        Some(released)
     }
 
     fn bind_linux_fxfs_file(&mut self, handle: u32, path: String, cursor: fxfs::FxfsCursor) {
@@ -2938,6 +2949,40 @@ impl MemorySyscallState {
         true
     }
 
+    fn linux_timer_owned(&self, pid: usize, handle: u32) -> bool {
+        self.process_resources(pid)
+            .is_some_and(|resources| resources.timer_handles.contains(&handle))
+    }
+
+    fn register_linux_timer(&mut self, pid: usize, handle: u32) -> bool {
+        let resources = self.process_resources_mut(pid);
+        if resources.timer_handles.try_reserve(1).is_err() {
+            return false;
+        }
+        resources.timer_handles.push(handle);
+        true
+    }
+
+    fn remove_linux_timer(&mut self, pid: usize, handle: u32) {
+        if let Some(resources) = self
+            .linux_process_resources
+            .iter_mut()
+            .find(|resources| resources.pid == pid)
+        {
+            resources.timer_handles.retain(|timer| *timer != handle);
+        }
+    }
+
+    fn linux_real_timer_deadline(&self, pid: usize) -> u64 {
+        self.process_resources(pid)
+            .map(|resources| resources.real_timer_deadline_tick)
+            .unwrap_or(LINUX_TIMER_DISABLED)
+    }
+
+    fn set_linux_real_timer_deadline(&mut self, pid: usize, deadline: u64) {
+        self.process_resources_mut(pid).real_timer_deadline_tick = deadline;
+    }
+
     fn record_linux_setns(&mut self, namespace: usize) {
         self.apply_linux_namespace_flags(namespace);
         self.linux_setns_count = self.linux_setns_count.saturating_add(1);
@@ -2977,6 +3022,7 @@ impl MemorySyscallState {
         for resources in resources {
             released_handles
                 .extend(self.release_resource_clone(&resources.descriptors, &resources.objects));
+            released_handles.extend(resources.timer_handles);
         }
         let shared_memory = core::mem::take(&mut self.linux_shared_memory);
         for record in shared_memory {
@@ -3028,7 +3074,6 @@ static LINUX_SIGNAL_RESTORERS: [AtomicU64; LINUX_MAX_SIGNAL + 1] =
 static LINUX_SIGNAL_ACTION_MASKS: [AtomicU64; LINUX_MAX_SIGNAL + 1] =
     [const { AtomicU64::new(0) }; LINUX_MAX_SIGNAL + 1];
 static LINUX_SIGNAL_TRAMPOLINE: AtomicU64 = AtomicU64::new(0);
-static LINUX_REAL_TIMER_DEADLINE_TICK: AtomicU64 = AtomicU64::new(LINUX_TIMER_DISABLED);
 
 const LINUX_SIGNAL_INFO_OFFSET: usize = PAGE_SIZE;
 const LINUX_SIGNAL_INFO_STORAGE_BYTES: usize =
@@ -3237,11 +3282,6 @@ pub fn reset_linux_process_state() {
     }
     linux_process_memory::reset_launch();
     linux_task::reset();
-    let timer_handles = core::mem::take(&mut memory_state().linux_timer_handles);
-    for handle in timer_handles {
-        let _ = sys_handle_close(handle);
-    }
-
     let released_handles = memory_state().reset_linux_process_state();
     for handle in released_handles {
         let _ = sys_handle_close(handle);
@@ -3295,6 +3335,7 @@ struct MemoryResourceCounts {
     linux_fds: usize,
     linux_shared_memory: usize,
     kernel_handles: usize,
+    real_timers: usize,
 }
 
 fn memory_resource_counts() -> MemoryResourceCounts {
@@ -3311,6 +3352,11 @@ fn memory_resource_counts() -> MemoryResourceCounts {
                 kernel_handles: syscall_logic::logical_memory_handle_count(Some(
                     state.handles.len(),
                 )),
+                real_timers: state
+                    .linux_process_resources
+                    .iter()
+                    .filter(|resources| resources.real_timer_deadline_tick != LINUX_TIMER_DISABLED)
+                    .count(),
             },
             None => MemoryResourceCounts {
                 kernel_handles: syscall_logic::logical_memory_handle_count(None),
@@ -3328,8 +3374,6 @@ fn linux_aio_request_count() -> usize {
 pub fn posix_resource_snapshot() -> PosixResourceSnapshot {
     let memory_counts = memory_resource_counts();
     let compat_counts = compat::posix_resource_counts();
-    let real_timer =
-        usize::from(LINUX_REAL_TIMER_DEADLINE_TICK.load(Ordering::SeqCst) != LINUX_TIMER_DISABLED);
     PosixResourceSnapshot {
         processes: crate::kernel_lowlevel::memory::process_manager().active_processes(),
         scheduler_threads: crate::kernel_objects::scheduler::scheduler().active_threads(),
@@ -3337,7 +3381,7 @@ pub fn posix_resource_snapshot() -> PosixResourceSnapshot {
         linux_fds: memory_counts.linux_fds,
         linux_shared_memory: memory_counts.linux_shared_memory,
         kernel_handles: memory_counts.kernel_handles,
-        timers: compat_counts.timers + real_timer,
+        timers: compat_counts.timers + memory_counts.real_timers,
         aio_requests: linux_aio_request_count(),
         ipc_objects: compat_counts.ipc_objects,
     }
@@ -3536,7 +3580,6 @@ pub fn reset_linux_signal_timer_state() {
         pending.reset_in_place();
     });
     LINUX_SIGNAL_TRAMPOLINE.store(0, Ordering::SeqCst);
-    LINUX_REAL_TIMER_DEADLINE_TICK.store(LINUX_TIMER_DISABLED, Ordering::SeqCst);
 }
 
 fn linux_signal_bit(signum: usize) -> u64 {
@@ -4112,7 +4155,8 @@ pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) {
         return;
     }
 
-    let deadline = LINUX_REAL_TIMER_DEADLINE_TICK.load(Ordering::SeqCst);
+    let pid = linux_resource_pid();
+    let deadline = memory_state().linux_real_timer_deadline(pid);
     if deadline == LINUX_TIMER_DISABLED {
         return;
     }
@@ -4121,11 +4165,11 @@ pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) {
     }
 
     if linux_signal_disposition(LINUX_SIGALRM) == LinuxSignalDisposition::Ignore {
-        LINUX_REAL_TIMER_DEADLINE_TICK.store(LINUX_TIMER_DISABLED, Ordering::SeqCst);
+        memory_state().set_linux_real_timer_deadline(pid, LINUX_TIMER_DISABLED);
         return;
     }
 
-    LINUX_REAL_TIMER_DEADLINE_TICK.store(LINUX_TIMER_DISABLED, Ordering::SeqCst);
+    memory_state().set_linux_real_timer_deadline(pid, LINUX_TIMER_DISABLED);
     let _ = queue_process_linux_signal_and_wake(LinuxPendingSignal::standard(LINUX_SIGALRM));
     let return_pc = crate::kernel_lowlevel::cpu::read_exception_return_pc();
     let _ = deliver_next_linux_signal(saved_regs, return_pc);
@@ -7199,7 +7243,7 @@ pub fn sys_getitimer(which: usize, curr_value: usize) -> SysResult {
         },
     };
     if which == LINUX_ITIMER_REAL {
-        let deadline = LINUX_REAL_TIMER_DEADLINE_TICK.load(Ordering::SeqCst);
+        let deadline = memory_state().linux_real_timer_deadline(linux_resource_pid());
         if deadline != LINUX_TIMER_DISABLED {
             let now = crate::kernel_lowlevel::timer::get_tick_count();
             let remaining_ticks = deadline.saturating_sub(now);
@@ -7222,12 +7266,13 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> SysRes
     }
     let timer = linux_read_user_itimerval(new_value)?;
     if which == LINUX_ITIMER_REAL {
+        let pid = linux_resource_pid();
         if linux_timeval_is_zero(timer.it_value) {
-            LINUX_REAL_TIMER_DEADLINE_TICK.store(LINUX_TIMER_DISABLED, Ordering::SeqCst);
+            memory_state().set_linux_real_timer_deadline(pid, LINUX_TIMER_DISABLED);
         } else {
             let ticks = linux_timeval_to_ticks(timer.it_value).max(1);
             let deadline = crate::kernel_lowlevel::timer::get_tick_count().saturating_add(ticks);
-            LINUX_REAL_TIMER_DEADLINE_TICK.store(deadline, Ordering::SeqCst);
+            memory_state().set_linux_real_timer_deadline(pid, deadline);
         }
     }
     Ok(0)
@@ -7268,11 +7313,13 @@ pub fn sys_linux_timer_create(_clockid: usize, _sevp: usize, timerid: usize) -> 
         return Err(SysError::EFAULT);
     }
     let handle = compat::create_object(ObjectType::Timer).map_err(|_| SysError::ENOMEM)?;
-    memory_state().linux_timer_handles.push(handle.0);
+    let pid = linux_resource_pid();
+    if !memory_state().register_linux_timer(pid, handle.0) {
+        let _ = sys_handle_close(handle.0);
+        return Err(SysError::ENOMEM);
+    }
     if let Err(error) = linux_write_user_usize(timerid, handle.0 as usize) {
-        memory_state()
-            .linux_timer_handles
-            .retain(|candidate| *candidate != handle.0);
+        memory_state().remove_linux_timer(pid, handle.0);
         let _ = sys_handle_close(handle.0);
         return Err(error);
     }
@@ -7285,7 +7332,9 @@ pub fn sys_linux_timer_settime(
     new_value: usize,
     old_value: usize,
 ) -> SysResult {
-    if !compat::handle_known(HandleValue(timerid as u32)) {
+    if !memory_state().linux_timer_owned(linux_resource_pid(), timerid as u32)
+        || !compat::handle_known(HandleValue(timerid as u32))
+    {
         return Err(SysError::EINVAL);
     }
     if new_value == 0 {
@@ -7298,14 +7347,18 @@ pub fn sys_linux_timer_settime(
 }
 
 pub fn sys_linux_timer_gettime(timerid: usize, curr_value: usize) -> SysResult {
-    if !compat::handle_known(HandleValue(timerid as u32)) {
+    if !memory_state().linux_timer_owned(linux_resource_pid(), timerid as u32)
+        || !compat::handle_known(HandleValue(timerid as u32))
+    {
         return Err(SysError::EINVAL);
     }
     linux_zero_user(curr_value, 32)
 }
 
 pub fn sys_linux_timer_getoverrun(timerid: usize) -> SysResult {
-    if compat::handle_known(HandleValue(timerid as u32)) {
+    if memory_state().linux_timer_owned(linux_resource_pid(), timerid as u32)
+        && compat::handle_known(HandleValue(timerid as u32))
+    {
         Ok(0)
     } else {
         Err(SysError::EINVAL)
@@ -7313,10 +7366,12 @@ pub fn sys_linux_timer_getoverrun(timerid: usize) -> SysResult {
 }
 
 pub fn sys_linux_timer_delete(timerid: usize) -> SysResult {
+    let pid = linux_resource_pid();
+    if !memory_state().linux_timer_owned(pid, timerid as u32) {
+        return Err(SysError::EINVAL);
+    }
     if compat::close_handle(HandleValue(timerid as u32)) {
-        memory_state()
-            .linux_timer_handles
-            .retain(|handle| *handle != timerid as u32);
+        memory_state().remove_linux_timer(pid, timerid as u32);
         Ok(0)
     } else {
         Err(SysError::EINVAL)
@@ -8058,13 +8113,13 @@ pub fn sys_vmar_unmap_handle_close_thread_exit(
 /// Linux sys_fork implementation
 pub fn sys_fork() -> SysResult {
     info!("fork");
-    sys_fork_with_namespace_flags(0)
+    sys_fork_with_namespace_flags(0, LINUX_SIGCHLD)
 }
 
-fn sys_fork_with_namespace_flags(namespace_flags: usize) -> SysResult {
+fn sys_fork_with_namespace_flags(namespace_flags: usize, child_exit_signal: usize) -> SysResult {
     #[cfg(not(target_arch = "aarch64"))]
     {
-        let _ = namespace_flags;
+        let _ = (namespace_flags, child_exit_signal);
         Err(SysError::ENOSYS)
     }
     #[cfg(target_arch = "aarch64")]
@@ -8078,7 +8133,12 @@ fn sys_fork_with_namespace_flags(namespace_flags: usize) -> SysResult {
                 0,
             )
             .ok_or(SysError::EAGAIN)?;
-        let reservation = linux_process::reserve_fork(scheduler_thread, context, namespace_flags)?;
+        let reservation = linux_process::reserve_fork(
+            scheduler_thread,
+            context,
+            namespace_flags,
+            child_exit_signal,
+        )?;
         let child_pid = reservation.commit()?;
         debug_assert_ne!(child_pid, parent_pid);
         Ok(child_pid)
@@ -8111,7 +8171,10 @@ pub fn sys_clone(
         if flags & !allowed != 0 {
             return Err(SysError::EINVAL);
         }
-        return sys_fork_with_namespace_flags(flags & LINUX_CONTAINER_NAMESPACE_FLAGS);
+        return sys_fork_with_namespace_flags(
+            flags & LINUX_CONTAINER_NAMESPACE_FLAGS,
+            flags & 0xff,
+        );
     }
 
     #[cfg(not(target_arch = "aarch64"))]

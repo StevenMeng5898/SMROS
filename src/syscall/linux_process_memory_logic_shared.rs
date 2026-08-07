@@ -14,6 +14,14 @@ pub(crate) const LINUX_PROT_EXEC: usize = 4;
 pub(crate) const LINUX_MAP_SHARED: usize = 1;
 pub(crate) const LINUX_MAP_PRIVATE: usize = 2;
 
+pub(crate) const fn linux_mmap_backing_is_shared(flags: usize) -> bool {
+    flags & LINUX_MAP_SHARED != 0
+}
+
+pub(crate) const fn linux_shared_page_index(first_page: usize, index: usize) -> Option<usize> {
+    first_page.checked_add(index)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxPageBacking {
     Private {

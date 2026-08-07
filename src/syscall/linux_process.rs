@@ -281,6 +281,7 @@ pub(crate) fn reserve_fork(
     scheduler_thread: ThreadId,
     context: super::linux_syscall_context::LinuxSyscallFrameRef,
     namespace_flags: usize,
+    child_exit_signal: usize,
 ) -> Result<LinuxForkReservation, SysError> {
     let parent = match current() {
         Ok(parent) => parent,
@@ -289,14 +290,22 @@ pub(crate) fn reserve_fork(
             return Err(error);
         }
     };
+    let task = match linux_task::reserve_fork_task(scheduler_thread) {
+        Ok(task) => task,
+        Err(error) => {
+            let _ = scheduler::scheduler().terminate_thread(scheduler_thread);
+            return Err(error);
+        }
+    };
     let process = match with_runtime(|runtime| {
         runtime
             .processes
-            .reserve_child(parent.pid, scheduler_thread.0)
+            .reserve_child_with_pid(parent.pid, scheduler_thread.0, task.tid, child_exit_signal)
             .map_err(process_error_to_sys_error)
     }) {
         Ok(process) => process,
         Err(error) => {
+            linux_task::rollback_fork_task(task);
             let _ = scheduler::scheduler().terminate_thread(scheduler_thread);
             return Err(error);
         }
@@ -305,6 +314,7 @@ pub(crate) fn reserve_fork(
     let mut resources = match reserve_resource_clone(parent.pid) {
         Ok(resources) => resources,
         Err(error) => {
+            linux_task::rollback_fork_task(task);
             let _ = scheduler::scheduler().terminate_thread(scheduler_thread);
             with_runtime(|runtime| {
                 let _ = runtime.processes.rollback_fork(process);
@@ -321,6 +331,7 @@ pub(crate) fn reserve_fork(
         Ok(root_paddr) => root_paddr,
         Err(error) => {
             drop(resources);
+            linux_task::rollback_fork_task(task);
             let _ = scheduler::scheduler().terminate_thread(scheduler_thread);
             with_runtime(|runtime| {
                 let _ = runtime.processes.rollback_fork(process);
@@ -328,19 +339,6 @@ pub(crate) fn reserve_fork(
             return Err(error);
         }
     };
-    let task = match linux_task::reserve_fork_task(scheduler_thread, process.pid) {
-        Ok(task) => task,
-        Err(error) => {
-            let _ = super::linux_process_memory::unregister(process.pid);
-            drop(resources);
-            let _ = scheduler::scheduler().terminate_thread(scheduler_thread);
-            with_runtime(|runtime| {
-                let _ = runtime.processes.rollback_fork(process);
-            });
-            return Err(error);
-        }
-    };
-
     let mut frame = unsafe { context.frame.read() };
     frame.regs[0] = 0;
     let user_sp = crate::kernel_lowlevel::cpu::read_user_stack_pointer();

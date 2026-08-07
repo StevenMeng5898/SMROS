@@ -407,10 +407,7 @@ pub(crate) fn process_signal_target(signum: usize) -> Option<LinuxTaskCore> {
 }
 
 #[cfg(target_arch = "aarch64")]
-pub(crate) fn reserve_fork_task(
-    scheduler_id: ThreadId,
-    child_pid: usize,
-) -> Result<LinuxTaskReservation, SysError> {
+pub(crate) fn reserve_fork_task(scheduler_id: ThreadId) -> Result<LinuxTaskReservation, SysError> {
     with_runtime(|runtime| {
         let current = scheduler::scheduler().current();
         let parent_slot = runtime
@@ -434,8 +431,10 @@ pub(crate) fn reserve_fork_task(
         let parent_mask = runtime.tasks.signal_states[parent_slot].mask;
         let reservation = runtime
             .tasks
-            .reserve_child(child_pid, scheduler_id.0)
+            .reserve_child(0, scheduler_id.0)
             .ok_or(SysError::EAGAIN)?;
+        let task = &mut runtime.tasks.tasks[reservation.slot];
+        task.tgid = reservation.tid;
         runtime.tasks.signal_states[reservation.slot].reset_in_place();
         runtime.tasks.signal_states[reservation.slot].mask = parent_mask;
         Ok(reservation)

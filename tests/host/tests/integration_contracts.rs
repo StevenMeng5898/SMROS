@@ -1313,6 +1313,7 @@ fn linux_process_reset_reclaims_transient_state_without_reinitializing_global_st
     for required in [
         "core::mem::take(&mut self.linux_process_resources)",
         "self.release_resource_clone(&resources.descriptors, &resources.objects)",
+        "released_handles.extend(resources.timer_handles)",
         "core::mem::take(&mut self.linux_shared_memory)",
         "released_handles.push(record.handle)",
         "self.next_open_description_id = 1",
@@ -1325,9 +1326,10 @@ fn linux_process_reset_reclaims_transient_state_without_reinitializing_global_st
         );
     }
     assert!(public.contains("linux_process_memory::reset_launch()"));
-    assert!(public.contains("linux_timer_handles"));
     assert!(public.contains("sys_handle_close(handle)"));
     assert!(public.contains("reset_linux_signal_timer_state()"));
+    assert!(syscall.contains("timer_handles: Vec<u32>"));
+    assert!(!syscall.contains("linux_timer_handles: Vec<u32>"));
     assert!(!method.contains("MemorySyscallState::new()"));
     assert!(!public.contains("MEMORY_SYSCALL_STATE = None"));
 
@@ -4475,20 +4477,22 @@ fn linux_resource_copyouts_preflight_and_rollback_transactionally() {
     let timer_failed_copyout = timer
         .find("if let Err(error) = linux_write_user_usize(")
         .expect("fallible timer-ID copyout");
-    let timer_registry = timer
-        .find("linux_timer_handles")
-        .expect("timer registry rollback");
-    let timer_remove = timer[timer_registry..]
-        .find(".retain(")
-        .map(|offset| timer_registry + offset)
-        .expect("timer registry removal");
-    let timer_close = timer
+    let timer_register = timer
+        .find("register_linux_timer(pid, handle.0)")
+        .expect("process timer registration");
+    let timer_remove = timer[timer_failed_copyout..]
+        .find("remove_linux_timer(pid, handle.0)")
+        .map(|offset| timer_failed_copyout + offset)
+        .expect("process timer registry removal");
+    let timer_close = timer[timer_failed_copyout..]
         .find("sys_handle_close(handle.0)")
+        .map(|offset| timer_failed_copyout + offset)
         .expect("timer object rollback");
 
     assert!(timer.contains("core::mem::size_of::<usize>()"));
     assert!(timer_preflight < timer_create);
-    assert!(timer_create < timer_failed_copyout);
+    assert!(timer_create < timer_register);
+    assert!(timer_register < timer_failed_copyout);
     assert!(timer_failed_copyout < timer_remove);
     assert!(timer_remove < timer_close);
     assert!(timer[timer_failed_copyout..].contains("return Err(error)"));
@@ -5102,7 +5106,7 @@ fn linux_fork_publishes_only_a_complete_child() {
             .find("pub fn sys_fork()")
             .expect("fork implementation")..],
     );
-    assert!(fork.contains("sys_fork_with_namespace_flags(0)"));
+    assert!(fork.contains("sys_fork_with_namespace_flags(0, LINUX_SIGCHLD)"));
     assert!(!fork.contains("LINUX_NEXT_SYNTHETIC_PID"));
     assert!(!syscall.contains("static LINUX_NEXT_SYNTHETIC_PID"));
     let fork_path = braced_body(
@@ -5120,11 +5124,13 @@ fn linux_fork_publishes_only_a_complete_child() {
             .expect("clone implementation")..],
     );
     assert!(clone.contains("linux_signal_valid(flags & 0xff, LINUX_MAX_SIGNAL)"));
+    assert!(clone.contains("flags & 0xff"));
+    assert!(fork_path.contains("child_exit_signal"));
 
     let reserve = &process[process
         .find("pub(crate) fn reserve_fork(")
         .expect("fork reservation")..];
-    assert!(reserve.contains("reserve_child("));
+    assert!(reserve.contains("reserve_child_with_pid("));
     assert!(reserve.contains("reserve_resource_clone("));
     assert!(reserve.contains("clone_for_fork("));
     assert!(reserve.contains("reserve_fork_task("));
@@ -5184,6 +5190,12 @@ fn linux_fork_publishes_only_a_complete_child() {
     assert!(memory.contains("PageFrameAllocator::alloc()"));
     assert!(memory.contains("core::ptr::copy_nonoverlapping"));
     assert!(memory.contains("acquire_shared_page("));
+    assert!(memory.contains("allocate_shared_mmap_pages("));
+    assert!(memory.contains("flags & LINUX_MAP_SHARED != 0"));
+    assert!(memory.contains("linux_mmap_backing_is_shared(self.mappings[index].flags)"));
+    assert!(memory.contains("crate::kernel_lowlevel::cpu::sync_instruction_cache()"));
+    assert!(memory.contains("try_reserve_exact(parent.mappings.len())"));
+    assert!(memory.contains("try_reserve(1)"));
     let clone_backings = &memory[memory
         .find("fn clone_page_backings_for_fork(")
         .expect("fork backing clone")..];
@@ -5195,8 +5207,56 @@ fn linux_fork_publishes_only_a_complete_child() {
             .expect("parent physical lookup")];
     assert!(allocation_failure.contains("LinuxProcessMemory::free_backings(&child_pages)"));
     assert!(task.contains("pub(crate) fn reserve_fork_task("));
+    assert!(task.contains("task.tgid = reservation.tid"));
     assert!(task.contains("pub(crate) fn publish_fork_task("));
     assert!(task.contains("pub(crate) fn rollback_fork_task("));
+
+    for timer_ownership in [
+        "timer_handles: Vec<u32>",
+        "real_timer_deadline_tick: u64",
+        "fn linux_timer_owned(&self, pid: usize, handle: u32) -> bool",
+        "fn linux_real_timer_deadline(&self, pid: usize) -> u64",
+        "fn set_linux_real_timer_deadline(&mut self, pid: usize, deadline: u64)",
+    ] {
+        assert!(
+            syscall.contains(timer_ownership),
+            "missing process timer ownership `{timer_ownership}`"
+        );
+    }
+    assert!(!syscall.contains("static LINUX_REAL_TIMER_DEADLINE_TICK"));
+    let installed_resources = &syscall[syscall
+        .find("fn install_process_resources(")
+        .expect("child resource installation")..];
+    assert!(installed_resources.contains("timer_handles: Vec::new()"));
+    assert!(installed_resources.contains("real_timer_deadline_tick: LINUX_TIMER_DISABLED"));
+    let process_reset = braced_body(
+        &syscall[syscall
+            .find("fn reset_linux_process_state(&mut self) -> Vec<u32>")
+            .expect("process resource reset")..],
+    );
+    assert!(process_reset.contains("resources.timer_handles"));
+    let timer_create = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_linux_timer_create(")
+            .expect("POSIX timer create")..],
+    );
+    assert!(timer_create.contains("register_linux_timer(pid, handle.0)"));
+    let timer_registration = &syscall[syscall
+        .find("fn register_linux_timer(")
+        .expect("process timer registration")..];
+    assert!(timer_registration.contains("process_resources_mut(pid)"));
+    for operation in [
+        "pub fn sys_linux_timer_settime(",
+        "pub fn sys_linux_timer_gettime(",
+        "pub fn sys_linux_timer_getoverrun(",
+        "pub fn sys_linux_timer_delete(",
+    ] {
+        let body = braced_body(&syscall[syscall.find(operation).expect("POSIX timer operation")..]);
+        assert!(
+            body.contains("linux_timer_owned("),
+            "unscoped `{operation}`"
+        );
+    }
 
     assert!(thread.contains("start_linux_process_child"));
     assert!(context_switch.contains("start_linux_process_child"));
