@@ -81,7 +81,7 @@ pub const LINUX_O_EXCL: usize = 0o200;
 pub const LINUX_O_TRUNC: usize = 0o1000;
 pub const LINUX_O_APPEND: usize = 0o2000;
 pub const LINUX_O_NONBLOCK: usize = 0o4000;
-pub const LINUX_O_DIRECTORY: usize = 0o200000;
+pub const LINUX_O_DIRECTORY: usize = 0o40000;
 pub const LINUX_O_CLOEXEC: usize = 0o2000000;
 pub const LINUX_OPEN_ALLOWED_FLAGS: usize = LINUX_O_ACCMODE
     | LINUX_O_CREAT

@@ -4235,6 +4235,41 @@ fn fxfs_bootstrap_provides_posix_shared_memory_directory() {
 }
 
 #[test]
+fn aarch64_directory_open_flags_match_staged_glibc() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let docker =
+        std::fs::read_to_string(repository.join("src/user_level/services/docker_compat.rs"))
+            .expect("read Docker compatibility service");
+    let shell = std::fs::read_to_string(repository.join("src/user_level/services/user_shell.rs"))
+        .expect("read user shell");
+    let verification = std::fs::read_to_string(repository.join("verification/syscall/src/lib.rs"))
+        .expect("read syscall verification harness");
+
+    assert!(syscall.contains("const LINUX_O_DIRECTORY: usize = 0o40000;"));
+    let allowed_start = syscall
+        .find("const LINUX_OPEN_ALLOWED_FLAGS: usize =")
+        .expect("Linux open flag allowlist");
+    let allowed_end = syscall[allowed_start..]
+        .find(';')
+        .expect("Linux open flag allowlist end")
+        + allowed_start;
+    let allowed = &syscall[allowed_start..allowed_end];
+    for flag in ["LINUX_O_NONBLOCK", "LINUX_O_DIRECTORY", "LINUX_O_CLOEXEC"] {
+        assert!(allowed.contains(flag), "missing glibc opendir flag {flag}");
+    }
+    let openat_start = syscall
+        .find("pub fn sys_openat(")
+        .expect("Linux openat implementation");
+    let openat = braced_body(&syscall[openat_start..]);
+    assert!(openat.contains("linux_open_is_directory(flags, LINUX_O_DIRECTORY)"));
+    assert!(docker.contains("const O_DIRECTORY: usize = 0o40000;"));
+    assert!(shell.contains("        0o40000,\n        0,"));
+    assert!(verification.contains("pub const LINUX_O_DIRECTORY: usize = 0o40000;"));
+}
+
+#[test]
 fn linux_process_memory_mutations_are_transactional_and_bounded() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let process_memory =

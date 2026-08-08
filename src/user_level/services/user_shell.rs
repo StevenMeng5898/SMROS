@@ -3528,7 +3528,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     let dir_fd = match crate::syscall::sys_openat(
         usize::MAX - 99,
         dir_path.as_ptr() as usize,
-        0o200000,
+        0o40000,
         0,
     ) {
         Ok(fd) => {

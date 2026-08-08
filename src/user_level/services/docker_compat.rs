@@ -43,7 +43,7 @@ const SECCOMP_SET_MODE_FILTER: usize = 1;
 const SECCOMP_FILTER_FLAG_TSYNC: usize = 1;
 const CAP_VERSION_3: u32 = 0x2008_0522;
 const O_WRONLY_CREATE_TRUNC: usize = 0o1 | 0o100 | 0o1000;
-const O_DIRECTORY: usize = 0o200000;
+const O_DIRECTORY: usize = 0o40000;
 
 const OCI_BUNDLE_DIR: &str = "/oci/docker-smoke";
 const OCI_CONFIG_PATH: &str = "/oci/docker-smoke/config.json";
