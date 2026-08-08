@@ -1275,7 +1275,7 @@ mod linux_task_logic {
             .expect("rt_tgsigqueueinfo target");
         assert_eq!(target.tid, second.tid);
         assert_eq!(
-            tasks.signal_state(second.tid, 9).unwrap().realtime_pending[0],
+            tasks.signal_state(second.tid, 10).unwrap().realtime_pending[0],
             realtime
         );
         assert_eq!(
