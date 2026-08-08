@@ -5718,6 +5718,8 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
         .expect("read syscall implementation");
     let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
         .expect("read Linux task runtime");
+    let launcher = std::fs::read_to_string(repository.join("src/user_level/services/run_elf.rs"))
+        .expect("read ELF launcher runtime");
 
     assert!(process_logic.contains("pub(crate) enum LinuxSigchldExitPolicy"));
     assert!(process_logic.contains("RetainZombieAndNotify"));
@@ -5779,6 +5781,7 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
     assert!(terminate.contains("linux_wait_status_signal(signum, false)"));
     assert!(terminate.contains("linux_task::terminate_process_tasks(tgid)"));
     assert!(terminate.contains("finish_terminal_process("));
+    assert!(!terminate.contains("by_pid(tgid)"));
     assert!(!terminate.contains("linux_task::finish_current_without_el0_return()"));
 
     let finish_signal = braced_body(
@@ -5850,17 +5853,32 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
     assert!(fork_task.contains("signal_state.mask = mask"));
     assert!(fork_task.contains("reserve_child(0, scheduler_id.0)"));
 
-    let terminal = braced_body(
-        &process[process
-            .find("fn finish_terminal_process(")
-            .expect("terminal child handling")..],
-    );
+    let terminal_start = process
+        .find("fn finish_terminal_process(")
+        .expect("terminal child handling");
+    let terminal_source = &process[terminal_start..];
+    let terminal_signature = &terminal_source[..terminal_source
+        .find('{')
+        .expect("terminal child handling body")];
+    assert!(terminal_signature.contains("pid: usize"));
+    assert!(!terminal_signature.contains("LinuxProcessCore"));
+    let terminal = braced_body(terminal_source);
     assert!(terminal.contains("LINUX_SIGCHLD"));
     assert!(terminal.contains("LINUX_SA_NOCLDWAIT"));
     assert!(terminal.contains("LINUX_LAUNCH_REAPER_PID"));
     assert!(terminal.contains("linux_sigchld_exit_policy("));
     assert!(terminal.contains("super::queue_process_linux_signal_and_wake("));
     assert!(terminal.contains("linux_task::wake_process_waiters(parent_pid)"));
+    let descendant_transition = braced_body(
+        &terminal[terminal
+            .find("let transition = with_runtime(|runtime|")
+            .expect("atomic descendant terminal transition")..],
+    );
+    assert!(descendant_transition.contains("let process = runtime"));
+    assert!(descendant_transition.contains(".by_pid(pid)"));
+    assert!(descendant_transition.contains("process.parent_pid"));
+    assert!(descendant_transition.contains(".terminate_child(pid, wait_status, policy)"));
+    assert!(descendant_transition.contains("reparent_children_to_launch_reaper(pid)"));
     let queue = terminal
         .find("super::queue_process_linux_signal_and_wake(")
         .expect("SIGCHLD notification");
@@ -5868,4 +5886,12 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
         .find("linux_task::wake_process_waiters(parent_pid)")
         .expect("matching waiter wake");
     assert!(wake > queue || terminal.contains("notify_parent"));
+
+    let prepare_return = braced_body(
+        &launcher[launcher
+            .find("pub fn prepare_run_elf_return(")
+            .expect("launcher kernel return preparation")..],
+    );
+    assert!(prepare_return.contains("set_kernel_resume("));
+    assert!(prepare_return.contains("run_elf_launcher_resume as *const () as u64"));
 }

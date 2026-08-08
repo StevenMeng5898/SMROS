@@ -282,30 +282,30 @@ pub(crate) fn exit_current_process(
 
     let _ = super::linux_process_memory::unregister(process.pid);
     let _ = super::release_linux_process_resources(process.pid);
-    finish_terminal_process(process, wait_status)
+    finish_terminal_process(process.pid, wait_status)
 }
 
 fn finish_terminal_process(
-    process: LinuxProcessCore,
+    pid: usize,
     wait_status: i32,
 ) -> Result<LinuxProcessExitOutcome, SysError> {
-    if process.pid != LINUX_ROOT_PID {
-        let parent_pid = process.parent_pid;
-        if parent_pid == LINUX_LAUNCH_REAPER_PID {
-            with_runtime(|runtime| {
-                let child_slot = process_slot(runtime, process.pid)?;
-                if !runtime.processes.exit(process.pid, wait_status) {
+    if pid != LINUX_ROOT_PID {
+        let transition = with_runtime(|runtime| {
+            let process = runtime
+                .processes
+                .by_pid(pid)
+                .filter(|process| process.state == LinuxProcessState::Running)
+                .ok_or(SysError::ESRCH)?;
+            let parent_pid = process.parent_pid;
+            let child_slot = process_slot(runtime, pid)?;
+            if parent_pid == LINUX_LAUNCH_REAPER_PID {
+                if !runtime.processes.exit(pid, wait_status) {
                     return Err(SysError::ESRCH);
                 }
                 runtime.signal_states[child_slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
-                let _ = runtime
-                    .processes
-                    .reparent_children_to_launch_reaper(process.pid);
-                Ok(())
-            })?;
-            return Ok(LinuxProcessExitOutcome::Descendant);
-        }
-        let transition = with_runtime(|runtime| {
+                let _ = runtime.processes.reparent_children_to_launch_reaper(pid);
+                return Ok(None);
+            }
             let parent_slot = runtime
                 .processes
                 .processes
@@ -319,35 +319,34 @@ fn finish_terminal_process(
                 sigchld_action.handler == LINUX_SIG_IGN,
                 sigchld_action.flags & LINUX_SA_NOCLDWAIT != 0,
             );
-            let child_slot = process_slot(runtime, process.pid)?;
             let transition = runtime
                 .processes
-                .terminate_child(process.pid, wait_status, policy)
+                .terminate_child(pid, wait_status, policy)
                 .ok_or(SysError::ESRCH)?;
             runtime.signal_states[child_slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
-            let _ = runtime
-                .processes
-                .reparent_children_to_launch_reaper(process.pid);
-            Ok(transition)
+            let _ = runtime.processes.reparent_children_to_launch_reaper(pid);
+            Ok(Some(transition))
         })?;
-        apply_linux_terminal_child_transition(
-            transition,
-            |parent_pid| {
-                super::queue_process_linux_signal_and_wake(
-                    parent_pid,
-                    LinuxPendingSignal::standard(LINUX_SIGCHLD),
-                )
-            },
-            |parent_pid| {
-                let _ = linux_task::wake_process_waiters(parent_pid);
-            },
-        )?;
+        if let Some(transition) = transition {
+            apply_linux_terminal_child_transition(
+                transition,
+                |parent_pid| {
+                    super::queue_process_linux_signal_and_wake(
+                        parent_pid,
+                        LinuxPendingSignal::standard(LINUX_SIGCHLD),
+                    )
+                },
+                |parent_pid| {
+                    let _ = linux_task::wake_process_waiters(parent_pid);
+                },
+            )?;
+        }
         return Ok(LinuxProcessExitOutcome::Descendant);
     }
 
     with_runtime(|runtime| {
-        let slot = process_slot(runtime, process.pid)?;
-        if !runtime.processes.exit(process.pid, wait_status) {
+        let slot = process_slot(runtime, pid)?;
+        if !runtime.processes.exit(pid, wait_status) {
             return Err(SysError::ESRCH);
         }
         runtime.signal_states[slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
@@ -384,7 +383,6 @@ pub(crate) fn terminate_by_signal(
     tgid: usize,
     signum: usize,
 ) -> Result<LinuxProcessExitOutcome, SysError> {
-    let process = by_pid(tgid).ok_or(SysError::ESRCH)?;
     if linux_task::current_task().is_ok_and(|task| task.tgid == tgid) {
         super::linux_process_memory::deactivate_current_address_space()?;
     }
@@ -394,7 +392,7 @@ pub(crate) fn terminate_by_signal(
     let _ = super::linux_process_memory::unregister(tgid);
     let _ = super::release_linux_process_resources(tgid);
     let wait_status = linux_wait_status_signal(signum, false).ok_or(SysError::EINVAL)?;
-    finish_terminal_process(process, wait_status)
+    finish_terminal_process(tgid, wait_status)
 }
 
 fn process_slot(runtime: &LinuxProcessRuntime, pid: usize) -> Result<usize, SysError> {

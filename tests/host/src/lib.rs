@@ -2795,6 +2795,32 @@ mod linux_process_logic {
     }
 
     #[test]
+    fn terminal_child_parent_is_resolved_after_live_reparenting() {
+        let mut processes = LinuxProcessTable::<3>::new();
+        processes.register_root(7).unwrap();
+        let parent = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert!(processes.publish(parent));
+        let child = processes.reserve_child(parent.pid, 9).unwrap();
+        assert!(processes.publish(child));
+        let stale_child = processes.by_pid(child.pid).unwrap();
+
+        assert_eq!(processes.reparent_children_to_launch_reaper(parent.pid), 1);
+        let live_child = processes.by_pid(child.pid).unwrap();
+        assert_eq!(stale_child.parent_pid, parent.pid);
+        assert_eq!(live_child.parent_pid, LINUX_LAUNCH_REAPER_PID);
+        assert_ne!(stale_child.parent_pid, live_child.parent_pid);
+
+        let transition = processes
+            .terminate_child(
+                child.pid,
+                linux_wait_status_signal(9, false).unwrap(),
+                LinuxSigchldExitPolicy::RetainZombieAndNotify,
+            )
+            .expect("the live child record remains terminal-transition eligible");
+        assert_eq!(transition.parent_pid, LINUX_LAUNCH_REAPER_PID);
+    }
+
+    #[test]
     fn launch_reaper_adopts_and_reaps_every_descendant_without_reaping_root() {
         let mut processes = LinuxProcessTable::<5>::new();
         assert!(!processes.launch_reaper_active());
