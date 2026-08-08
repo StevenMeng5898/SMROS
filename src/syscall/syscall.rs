@@ -4134,22 +4134,24 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
         let pending = deliverable.record;
         let signum = pending.signum;
         let action = linux_signal_action(signum);
-        match linux_signal_disposition(signum) {
-            LinuxSignalDisposition::Ignore => {
+        match linux_process::linux_signal_delivery_route(
+            linux_signal_disposition(signum),
+            LinuxSignalDisposition::Ignore,
+            LinuxSignalDisposition::Terminate,
+        ) {
+            linux_process::LinuxSignalDeliveryRoute::Ignore => {
                 if commit_linux_signal(deliverable).is_err() {
                     return false;
                 }
                 continue;
             }
-            LinuxSignalDisposition::Terminate => {
+            linux_process::LinuxSignalDeliveryRoute::TerminateProcess => {
                 let _ = linux_task::clear_current_restart_block();
                 if commit_linux_signal(deliverable).is_err() {
                     return false;
                 }
                 if let Ok(current) = linux_task::current_task() {
-                    if let Ok(launch_id) =
-                        terminate_linux_process_by_signal(current.tgid, signum)
-                    {
+                    if let Ok(launch_id) = terminate_linux_process_by_signal(current.tgid, signum) {
                         let launch_id = launch_id as u64;
                         let regs = unsafe { &mut *(saved_regs as *mut [u64; 32]) };
                         regs[0] = launch_id;
@@ -4157,7 +4159,7 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
                 }
                 return false;
             }
-            LinuxSignalDisposition::Handled => {}
+            linux_process::LinuxSignalDeliveryRoute::Handle => {}
         }
         let Ok(trampoline) = ensure_linux_signal_trampoline() else {
             if requeue_linux_signal(deliverable).is_err() {

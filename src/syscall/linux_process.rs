@@ -43,18 +43,14 @@ impl LinuxKernelSigaction {
     };
 }
 
-#[derive(Clone, Copy)]
-struct LinuxProcessSignalState {
-    signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1],
-    process_pending: LinuxPendingSignals,
-}
+type LinuxProcessSignalState = LinuxProcessSignalStateCore<
+    LinuxKernelSigaction,
+    LinuxPendingSignals,
+    { LINUX_MAX_SIGNAL + 1 },
+>;
 
-impl LinuxProcessSignalState {
-    const EMPTY: Self = Self {
-        signal_actions: [LinuxKernelSigaction::DEFAULT; LINUX_MAX_SIGNAL + 1],
-        process_pending: LinuxPendingSignals::new(),
-    };
-}
+const LINUX_PROCESS_SIGNAL_STATE_EMPTY: LinuxProcessSignalState =
+    LinuxProcessSignalState::new(LinuxKernelSigaction::DEFAULT, LinuxPendingSignals::new());
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LinuxProcessResourceCounts {
@@ -83,7 +79,7 @@ impl LinuxProcessRuntime {
     const fn new() -> Self {
         Self {
             processes: LinuxProcessTable::new(),
-            signal_states: [LinuxProcessSignalState::EMPTY; LINUX_PROCESS_LIMIT],
+            signal_states: [LINUX_PROCESS_SIGNAL_STATE_EMPTY; LINUX_PROCESS_LIMIT],
             #[cfg(target_arch = "aarch64")]
             fork_starts: [None; LINUX_PROCESS_LIMIT],
         }
@@ -117,7 +113,7 @@ pub(crate) fn register_root(scheduler_thread: ThreadId) -> Result<usize, SysErro
             .iter()
             .position(|process| process.pid == pid && process.state == LinuxProcessState::Running)
             .ok_or(SysError::ESRCH)?;
-        runtime.signal_states[slot] = LinuxProcessSignalState::EMPTY;
+        runtime.signal_states[slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
         Ok(pid)
     })
 }
@@ -185,11 +181,8 @@ pub(crate) fn clone_signal_state_for_fork(
                 process.pid == child_pid && process.state == LinuxProcessState::Reserved
             })
             .ok_or(SysError::ESRCH)?;
-        let signal_actions = runtime.signal_states[parent_slot].signal_actions;
-        runtime.signal_states[child_slot] = LinuxProcessSignalState {
-            signal_actions,
-            process_pending: LinuxPendingSignals::new(),
-        };
+        runtime.signal_states[child_slot] =
+            runtime.signal_states[parent_slot].fork_child(LinuxPendingSignals::new());
         Ok(())
     })
 }
@@ -304,7 +297,7 @@ fn finish_terminal_process(
                 if !runtime.processes.exit(process.pid, wait_status) {
                     return Err(SysError::ESRCH);
                 }
-                runtime.signal_states[child_slot] = LinuxProcessSignalState::EMPTY;
+                runtime.signal_states[child_slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
                 let _ = runtime
                     .processes
                     .reparent_children_to_launch_reaper(process.pid);
@@ -331,19 +324,24 @@ fn finish_terminal_process(
                 .processes
                 .terminate_child(process.pid, wait_status, policy)
                 .ok_or(SysError::ESRCH)?;
-            runtime.signal_states[child_slot] = LinuxProcessSignalState::EMPTY;
+            runtime.signal_states[child_slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
             let _ = runtime
                 .processes
                 .reparent_children_to_launch_reaper(process.pid);
             Ok(transition)
         })?;
-        if transition.notify_parent {
-            super::queue_process_linux_signal_and_wake(
-                parent_pid,
-                LinuxPendingSignal::standard(LINUX_SIGCHLD),
-            )?;
-        }
-        let _ = linux_task::wake_process_waiters(parent_pid);
+        apply_linux_terminal_child_transition(
+            transition,
+            |parent_pid| {
+                super::queue_process_linux_signal_and_wake(
+                    parent_pid,
+                    LinuxPendingSignal::standard(LINUX_SIGCHLD),
+                )
+            },
+            |parent_pid| {
+                let _ = linux_task::wake_process_waiters(parent_pid);
+            },
+        )?;
         return Ok(LinuxProcessExitOutcome::Descendant);
     }
 
@@ -352,7 +350,7 @@ fn finish_terminal_process(
         if !runtime.processes.exit(process.pid, wait_status) {
             return Err(SysError::ESRCH);
         }
-        runtime.signal_states[slot] = LinuxProcessSignalState::EMPTY;
+        runtime.signal_states[slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
         Ok(())
     })?;
 
@@ -437,7 +435,7 @@ pub(crate) fn resource_counts() -> LinuxProcessResourceCounts {
 pub(crate) fn reset_launch() {
     with_runtime(|runtime| {
         runtime.processes.reset();
-        runtime.signal_states.fill(LinuxProcessSignalState::EMPTY);
+        runtime.signal_states.fill(LINUX_PROCESS_SIGNAL_STATE_EMPTY);
         #[cfg(target_arch = "aarch64")]
         runtime.fork_starts.fill(None);
     });
@@ -621,7 +619,7 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
         })?;
         if let Err(error) = clone_signal_state_for_fork(parent.pid, process.pid) {
             with_runtime(|runtime| {
-                runtime.signal_states[process.slot] = LinuxProcessSignalState::EMPTY;
+                runtime.signal_states[process.slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
                 let _ = runtime.processes.rollback(process);
             });
             return Err(error);
@@ -788,7 +786,7 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
                 *start = None;
             }
             if runtime.processes.rollback_fork(process) {
-                runtime.signal_states[process.slot] = LinuxProcessSignalState::EMPTY;
+                runtime.signal_states[process.slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
                 return true;
             }
             let removed = runtime.processes.exit(process.pid, 0)
@@ -797,7 +795,7 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
                     .reap(process.parent_pid, process.pid)
                     .is_some();
             if removed {
-                runtime.signal_states[process.slot] = LinuxProcessSignalState::EMPTY;
+                runtime.signal_states[process.slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
             }
             removed
         });

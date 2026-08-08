@@ -78,6 +78,112 @@ pub(crate) struct LinuxTerminalChildTransition {
     pub notify_parent: bool,
 }
 
+pub(crate) fn apply_linux_terminal_child_transition<E>(
+    transition: LinuxTerminalChildTransition,
+    notify_parent: impl FnOnce(usize) -> Result<(), E>,
+    wake_parent_waiters: impl FnOnce(usize),
+) -> Result<(), E> {
+    if transition.notify_parent {
+        notify_parent(transition.parent_pid)?;
+    }
+    wake_parent_waiters(transition.parent_pid);
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxProcessSignalStateCore<Action, Pending, const N: usize> {
+    pub signal_actions: [Action; N],
+    pub process_pending: Pending,
+}
+
+impl<Action: Copy, Pending: Copy, const N: usize> LinuxProcessSignalStateCore<Action, Pending, N> {
+    pub(crate) const fn new(default_action: Action, empty_pending: Pending) -> Self {
+        Self {
+            signal_actions: [default_action; N],
+            process_pending: empty_pending,
+        }
+    }
+
+    pub(crate) fn fork_child(&self, empty_pending: Pending) -> Self {
+        Self {
+            signal_actions: self.signal_actions,
+            process_pending: empty_pending,
+        }
+    }
+}
+
+pub(crate) fn prepare_linux_fork_task_signal_state<State>(
+    child_state: &mut State,
+    parent_mask: u64,
+    reset: impl FnOnce(&mut State),
+    set_mask: impl FnOnce(&mut State, u64),
+) {
+    reset(child_state);
+    set_mask(child_state, parent_mask);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxSignalDeliveryRoute {
+    Ignore,
+    TerminateProcess,
+    Handle,
+}
+
+pub(crate) fn linux_signal_delivery_route<Disposition: PartialEq>(
+    disposition: Disposition,
+    ignored: Disposition,
+    terminate: Disposition,
+) -> LinuxSignalDeliveryRoute {
+    if disposition == ignored {
+        LinuxSignalDeliveryRoute::Ignore
+    } else if disposition == terminate {
+        LinuxSignalDeliveryRoute::TerminateProcess
+    } else {
+        LinuxSignalDeliveryRoute::Handle
+    }
+}
+
+pub(crate) fn select_linux_process_signal_target<T: Copy>(
+    tasks: &[T],
+    target_tgid: usize,
+    signal_bit: u64,
+    mut is_live: impl FnMut(T) -> bool,
+    mut task_tgid: impl FnMut(T) -> usize,
+    mut signal_mask: impl FnMut(usize) -> u64,
+) -> Option<T> {
+    if signal_bit == 0 {
+        return None;
+    }
+    tasks.iter().copied().enumerate().find_map(|(slot, task)| {
+        (is_live(task) && task_tgid(task) == target_tgid && signal_mask(slot) & signal_bit == 0)
+            .then_some(task)
+    })
+}
+
+pub(crate) fn for_each_linux_process_task<T: Copy>(
+    tasks: &[T],
+    target_tgid: usize,
+    scheduler_thread: Option<usize>,
+    mut is_live: impl FnMut(T) -> bool,
+    mut task_tgid: impl FnMut(T) -> usize,
+    mut task_scheduler_thread: impl FnMut(T) -> usize,
+    mut operation: impl FnMut(usize, T) -> bool,
+) -> usize {
+    tasks
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, task)| {
+            is_live(*task)
+                && task_tgid(*task) == target_tgid
+                && scheduler_thread
+                    .map(|scheduler| task_scheduler_thread(*task) == scheduler)
+                    .unwrap_or(true)
+        })
+        .filter(|(slot, task)| operation(*slot, *task))
+        .count()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxWaitCompletionError<E> {
     Copy(E),

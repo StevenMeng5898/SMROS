@@ -416,17 +416,14 @@ impl<const N: usize> LinuxTaskTable<N> {
     }
 
     fn process_signal_target_for(&self, tgid: usize, signum: usize) -> Option<LinuxTaskCore> {
-        let bit = linux_signal_bit(signum);
-        if bit == 0 {
-            return None;
-        }
-        self.tasks
-            .iter()
-            .zip(self.signal_states.iter())
-            .find_map(|(task, signal_state)| {
-                (Self::is_live(*task) && task.tgid == tgid && signal_state.mask & bit == 0)
-                    .then_some(*task)
-            })
+        super::linux_process::select_linux_process_signal_target(
+            &self.tasks,
+            tgid,
+            linux_signal_bit(signum),
+            |task| Self::is_live(task),
+            |task| task.tgid,
+            |slot| self.signal_states[slot].mask,
+        )
     }
 }
 
@@ -459,8 +456,12 @@ pub(crate) fn reserve_fork_task(scheduler_id: ThreadId) -> Result<LinuxTaskReser
             .ok_or(SysError::EAGAIN)?;
         let task = &mut runtime.tasks.tasks[reservation.slot];
         task.tgid = reservation.tid;
-        runtime.tasks.signal_states[reservation.slot].reset_in_place();
-        runtime.tasks.signal_states[reservation.slot].mask = parent_mask;
+        super::linux_process::prepare_linux_fork_task_signal_state(
+            &mut runtime.tasks.signal_states[reservation.slot],
+            parent_mask,
+            |signal_state| signal_state.reset_in_place(),
+            |signal_state, mask| signal_state.mask = mask,
+        );
         Ok(reservation)
     })
 }
@@ -604,44 +605,53 @@ fn retire_tasks(
 ) {
     let mut retired = [None; LINUX_TASK_LIMIT];
     let (retired_count, process_empty) = with_runtime(|runtime| {
-        let mut retired_count = 0usize;
-        for slot in 0..LINUX_TASK_LIMIT {
-            let task = runtime.tasks.tasks[slot];
-            let selected = match scope {
-                LinuxTaskRetirementScope::Process {
-                    tgid,
-                    entire_group,
-                    current_scheduler,
-                } => {
-                    task.tgid == tgid
-                        && (entire_group || task.scheduler_thread == current_scheduler)
-                }
-                LinuxTaskRetirementScope::LaunchDescendants { root_tgid } => task.tgid != root_tgid,
-            };
-            if !selected || !LinuxTaskTable::<LINUX_TASK_LIMIT>::is_live(task) {
-                continue;
-            }
+        let snapshot = runtime.tasks.tasks;
+        let mut retire_task = |slot: usize, task: LinuxTaskCore| {
             let Some(clear_child_tid) = runtime
                 .tasks
                 .exit_with_clear_child_tid(task.tid, task.scheduler_thread)
             else {
-                continue;
+                return false;
             };
             if !runtime.tasks.retire(task.tid, task.scheduler_thread) {
-                continue;
+                return false;
             }
             #[cfg(target_arch = "aarch64")]
             if let Some(clone_slot) = runtime.clone_slots.get_mut(slot) {
                 *clone_slot = aarch64_clone::LinuxCloneSlot::EMPTY;
             }
-            retired[retired_count] = Some(LinuxChildExitTransition {
+            retired[slot] = Some(LinuxChildExitTransition {
                 task,
                 slot,
                 clear_child_tid,
                 disposition: LinuxChildExitDisposition::ScheduleWithoutEl0Return,
             });
-            retired_count += 1;
-        }
+            true
+        };
+        let retired_count = match scope {
+            LinuxTaskRetirementScope::Process {
+                tgid,
+                entire_group,
+                current_scheduler,
+            } => super::linux_process::for_each_linux_process_task(
+                &snapshot,
+                tgid,
+                (!entire_group).then_some(current_scheduler),
+                |task| LinuxTaskTable::<LINUX_TASK_LIMIT>::is_live(task),
+                |task| task.tgid,
+                |task| task.scheduler_thread,
+                &mut retire_task,
+            ),
+            LinuxTaskRetirementScope::LaunchDescendants { root_tgid } => snapshot
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(_, task)| {
+                    task.tgid != root_tgid && LinuxTaskTable::<LINUX_TASK_LIMIT>::is_live(*task)
+                })
+                .filter(|(slot, task)| retire_task(*slot, *task))
+                .count(),
+        };
         let process_empty = match scope {
             LinuxTaskRetirementScope::Process { tgid, .. } => {
                 !runtime.tasks.tasks.iter().copied().any(|task| {
@@ -657,10 +667,10 @@ fn retire_tasks(
 
 fn complete_task_retirements(
     retired: [Option<LinuxChildExitTransition>; LINUX_TASK_LIMIT],
-    retired_count: usize,
+    _retired_count: usize,
     current_scheduler: ThreadId,
 ) {
-    for transition in retired.into_iter().take(retired_count).flatten() {
+    for transition in retired.into_iter().flatten() {
         let _ = super::linux_futex::remove_task_waiters(
             transition.task.tid,
             transition.task.scheduler_thread,

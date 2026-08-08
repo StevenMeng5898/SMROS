@@ -390,6 +390,76 @@ mod linux_task_logic {
         "/../../src/syscall/linux_task_logic_shared.rs"
     ));
 
+    pub(crate) fn scoped_process_signal_target<const N: usize>(
+        tasks: &LinuxTaskTable<N>,
+        tgid: usize,
+        signum: usize,
+    ) -> Option<LinuxTaskCore> {
+        crate::linux_process_logic::select_linux_process_signal_target(
+            &tasks.tasks,
+            tgid,
+            linux_signal_bit(signum),
+            |task| LinuxTaskTable::<N>::is_live(task),
+            |task| task.tgid,
+            |slot| tasks.signal_states[slot].mask,
+        )
+    }
+
+    pub(crate) fn retire_process_tasks_for_behavior<const N: usize>(
+        tasks: &mut LinuxTaskTable<N>,
+        tgid: usize,
+    ) -> usize {
+        let snapshot = tasks.tasks;
+        crate::linux_process_logic::for_each_linux_process_task(
+            &snapshot,
+            tgid,
+            None,
+            |task| LinuxTaskTable::<N>::is_live(task),
+            |task| task.tgid,
+            |task| task.scheduler_thread,
+            |_, task| {
+                tasks
+                    .exit_with_clear_child_tid(task.tid, task.scheduler_thread)
+                    .is_some()
+                    && tasks.retire(task.tid, task.scheduler_thread)
+            },
+        )
+    }
+
+    pub(crate) fn live_process_task_count<const N: usize>(
+        tasks: &LinuxTaskTable<N>,
+        tgid: usize,
+    ) -> usize {
+        tasks
+            .tasks
+            .iter()
+            .copied()
+            .filter(|task| task.tgid == tgid && LinuxTaskTable::<N>::is_live(*task))
+            .count()
+    }
+
+    pub(crate) fn prepare_fork_task_signal_state_for_behavior<const N: usize>(
+        tasks: &mut LinuxTaskTable<N>,
+        reservation: LinuxTaskReservation,
+        parent_scheduler_thread: usize,
+    ) {
+        let parent_slot = tasks
+            .tasks
+            .iter()
+            .position(|task| {
+                LinuxTaskTable::<N>::is_live(*task)
+                    && task.scheduler_thread == parent_scheduler_thread
+            })
+            .unwrap();
+        let parent_mask = tasks.signal_states[parent_slot].mask;
+        crate::linux_process_logic::prepare_linux_fork_task_signal_state(
+            &mut tasks.signal_states[reservation.slot],
+            parent_mask,
+            |signal_state| signal_state.reset_in_place(),
+            |signal_state, mask| signal_state.mask = mask,
+        );
+    }
+
     const PTHREAD_BASE_FLAGS: usize =
         CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
 
@@ -1144,29 +1214,43 @@ mod linux_task_logic {
     }
 
     #[test]
-    fn process_and_directed_signal_routing_select_only_the_addressed_live_task() {
-        let (mut tasks, first, second) = three_live_tasks();
+    fn process_and_directed_signal_routing_select_only_the_addressed_live_tgid() {
+        let mut tasks = LinuxTaskTable::<4>::new();
+        tasks.register_root(7).unwrap();
+        let first = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
+        let competing = tasks.reserve_child(42, 9).unwrap();
+        let second = tasks.reserve_child(LINUX_ROOT_TID, 10).unwrap();
+        assert!(tasks.publish(first));
+        assert!(tasks.publish(competing));
+        assert!(tasks.publish(second));
         let signal = 12usize;
         let bit = linux_signal_bit(signal);
         tasks.signal_state_mut(LINUX_ROOT_TID, 7).unwrap().mask = bit;
         tasks.signal_state_mut(first.tid, 8).unwrap().mask = bit;
 
         assert_eq!(
-            tasks.process_signal_target(signal),
+            scoped_process_signal_target(&tasks, LINUX_ROOT_TID, signal),
             Some(LinuxTaskCore {
                 tid: second.tid,
                 tgid: LINUX_ROOT_TID,
-                scheduler_thread: 9,
+                scheduler_thread: 10,
                 state: LinuxTaskState::Runnable,
                 block_reason: LinuxBlockReason::None,
             })
         );
-        tasks.signal_state_mut(second.tid, 9).unwrap().mask = bit;
-        assert_eq!(tasks.process_signal_target(signal), None);
+        tasks.signal_state_mut(second.tid, 10).unwrap().mask = bit;
+        assert_eq!(
+            scoped_process_signal_target(&tasks, LINUX_ROOT_TID, signal),
+            None,
+            "an unmasked task in another TGID must never receive the signal"
+        );
         tasks.signal_state_mut(first.tid, 8).unwrap().mask = 0;
-        assert_eq!(tasks.process_signal_target(signal), Some(target_for(first)));
+        assert_eq!(
+            scoped_process_signal_target(&tasks, LINUX_ROOT_TID, signal),
+            Some(target_for(first))
+        );
         tasks.signal_state_mut(first.tid, 8).unwrap().mask = bit;
-        tasks.signal_state_mut(second.tid, 9).unwrap().mask = 0;
+        tasks.signal_state_mut(second.tid, 10).unwrap().mask = 0;
 
         let target = tasks
             .route_signal(Some(LINUX_ROOT_TID), first.tid, signal_record(signal, 0x5a))
@@ -2232,6 +2316,12 @@ mod linux_process_logic {
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/syscall/linux_process_memory_logic_shared.rs"
     ));
+
+    #[test]
+    fn executable_linux_signal_lifecycle_behavior_contract() {
+        crate::linux_signal_lifecycle_behavior_contract();
+    }
+
     #[test]
     fn root_registration_is_unique_and_published_by_pid_and_scheduler() {
         let mut processes = LinuxProcessTable::<2>::new();
@@ -3033,6 +3123,187 @@ mod linux_process_logic {
         assert_eq!(descriptions.get(exhausted).unwrap().references, usize::MAX);
         assert_eq!(parent.descriptor(3).unwrap().description_id, first);
         assert_eq!(parent.descriptor(4).unwrap().description_id, exhausted);
+    }
+}
+
+pub fn linux_signal_lifecycle_behavior_contract() {
+    use linux_process_logic::{
+        apply_linux_terminal_child_transition, linux_signal_delivery_route,
+        linux_wait_status_signal, LinuxProcessSignalStateCore, LinuxProcessTable,
+        LinuxSigchldExitPolicy, LinuxSignalDeliveryRoute, LinuxWaitOutcome, LinuxWaitSelector,
+        LINUX_ROOT_PID,
+    };
+    use linux_task_logic::{
+        linux_signal_bit, linux_signal_disposition, live_process_task_count,
+        prepare_fork_task_signal_state_for_behavior, retire_process_tasks_for_behavior,
+        scoped_process_signal_target, LinuxBlockReason, LinuxPendingSignal, LinuxPendingSignals,
+        LinuxSignalDisposition, LinuxSignalFrame, LinuxSignalStack, LinuxTaskState, LinuxTaskTable,
+        LINUX_ROOT_TID, LINUX_SS_DISABLE,
+    };
+
+    let mut parent_process_signals =
+        LinuxProcessSignalStateCore::<u64, LinuxPendingSignals, 65>::new(
+            0,
+            LinuxPendingSignals::new(),
+        );
+    parent_process_signals.signal_actions[12] = 0x1200;
+    parent_process_signals
+        .process_pending
+        .queue(LinuxPendingSignal::standard(10))
+        .unwrap();
+    let child_process_signals = parent_process_signals.fork_child(LinuxPendingSignals::new());
+    assert_eq!(
+        child_process_signals.signal_actions, parent_process_signals.signal_actions,
+        "fork copies process dispositions"
+    );
+    assert_eq!(
+        child_process_signals.process_pending.standard_pending, 0,
+        "fork clears process-pending signals"
+    );
+
+    let mut fork_tasks = LinuxTaskTable::<2>::new();
+    fork_tasks.register_root(7).unwrap();
+    let parent_task_signals = fork_tasks.signal_state_mut(LINUX_ROOT_TID, 7).unwrap();
+    parent_task_signals.mask = linux_signal_bit(12) | linux_signal_bit(15);
+    parent_task_signals
+        .queue(LinuxPendingSignal::standard(12))
+        .unwrap();
+    parent_task_signals.alt_stack = LinuxSignalStack {
+        sp: 0x4000,
+        flags: 0,
+        _padding: 0,
+        size: 0x2000,
+    };
+    parent_task_signals
+        .push_frame(LinuxSignalFrame {
+            regs: [0x55; 32],
+            return_pc: 0x8000,
+            previous_mask: 0x22,
+            user_sp: 0x5000,
+            previous_stack_flags: 0,
+            restart: None,
+        })
+        .unwrap();
+    assert!(parent_task_signals.request_sigreturn());
+    let child_task = fork_tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
+    prepare_fork_task_signal_state_for_behavior(&mut fork_tasks, child_task, 7);
+    assert!(fork_tasks.publish(child_task));
+    let child_task_signals = fork_tasks
+        .signal_state(child_task.tid, child_task.scheduler_thread)
+        .unwrap();
+    assert_eq!(
+        child_task_signals.mask,
+        linux_signal_bit(12) | linux_signal_bit(15),
+        "fork copies only the calling thread mask"
+    );
+    assert_eq!(child_task_signals.pending_mask(), 0);
+    assert_eq!(child_task_signals.frame_depth, 0);
+    assert!(!child_task_signals.sigreturn_requested);
+    assert_eq!(child_task_signals.alt_stack.flags, LINUX_SS_DISABLE as u32);
+
+    let mut routed_tasks = LinuxTaskTable::<4>::new();
+    routed_tasks.register_root(17).unwrap();
+    let masked = routed_tasks.reserve_child(LINUX_ROOT_TID, 18).unwrap();
+    let competing = routed_tasks.reserve_child(42, 19).unwrap();
+    let selected = routed_tasks.reserve_child(LINUX_ROOT_TID, 20).unwrap();
+    assert!(routed_tasks.publish(masked));
+    assert!(routed_tasks.publish(competing));
+    assert!(routed_tasks.publish(selected));
+    let signal = 15;
+    let signal_bit = linux_signal_bit(signal);
+    routed_tasks
+        .signal_state_mut(LINUX_ROOT_TID, 17)
+        .unwrap()
+        .mask = signal_bit;
+    routed_tasks
+        .signal_state_mut(masked.tid, masked.scheduler_thread)
+        .unwrap()
+        .mask = signal_bit;
+    assert_eq!(
+        scoped_process_signal_target(&routed_tasks, LINUX_ROOT_TID, signal)
+            .map(|task| (task.tid, task.tgid)),
+        Some((selected.tid, LINUX_ROOT_TID)),
+        "process-directed selection is scoped to the target TGID"
+    );
+
+    for (policy, expected_wait, expect_sigchld) in [
+        (
+            LinuxSigchldExitPolicy::RetainZombieAndNotify,
+            LinuxWaitOutcome::Ready { pid: 2, status: 9 },
+            true,
+        ),
+        (
+            LinuxSigchldExitPolicy::ReapAndNotify,
+            LinuxWaitOutcome::NoChildren,
+            true,
+        ),
+        (
+            LinuxSigchldExitPolicy::ReapWithoutNotify,
+            LinuxWaitOutcome::NoChildren,
+            false,
+        ),
+    ] {
+        let disposition = linux_signal_disposition(0, 9);
+        assert_eq!(disposition, LinuxSignalDisposition::Terminate);
+        assert_eq!(
+            linux_signal_delivery_route(
+                disposition,
+                LinuxSignalDisposition::Ignore,
+                LinuxSignalDisposition::Terminate,
+            ),
+            LinuxSignalDeliveryRoute::TerminateProcess,
+            "default SIGKILL routes through process termination"
+        );
+
+        let mut processes = LinuxProcessTable::<2>::new();
+        processes.register_root(7).unwrap();
+        let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert!(processes.publish(child));
+
+        let mut tasks = LinuxTaskTable::<4>::new();
+        tasks.register_root(7).unwrap();
+        let first = tasks.reserve_child(child.pid, 8).unwrap();
+        let second = tasks.reserve_child(child.pid, 9).unwrap();
+        let competing = tasks.reserve_child(77, 10).unwrap();
+        assert!(tasks.publish(first));
+        assert!(tasks.publish(second));
+        assert!(tasks.publish(competing));
+        assert!(tasks.block(LINUX_ROOT_TID, 7, LinuxBlockReason::ChildWait));
+
+        assert_eq!(retire_process_tasks_for_behavior(&mut tasks, child.pid), 2);
+        assert_eq!(live_process_task_count(&tasks, child.pid), 0);
+        assert_eq!(live_process_task_count(&tasks, 77), 1);
+
+        let wait_status = linux_wait_status_signal(9, false).unwrap();
+        let transition = processes
+            .terminate_child(child.pid, wait_status, policy)
+            .expect("SIGKILL terminal transition");
+        let mut process_pending = LinuxPendingSignals::new();
+        apply_linux_terminal_child_transition(
+            transition,
+            |_| process_pending.queue(LinuxPendingSignal::standard(17)),
+            |parent_pid| {
+                for waiter in tasks.child_waiters(parent_pid).into_iter().flatten() {
+                    assert!(tasks.wake(waiter.tid, waiter.scheduler_thread));
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            process_pending.standard_pending & linux_signal_bit(17) != 0,
+            expect_sigchld,
+            "SIGCHLD delivery follows the terminal policy"
+        );
+        assert_eq!(
+            tasks.by_tid(LINUX_ROOT_TID).map(|task| task.state),
+            Some(LinuxTaskState::Runnable),
+            "a blocked child waiter wakes for every terminal policy"
+        );
+        assert_eq!(
+            processes.wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Pid(child.pid)),
+            expected_wait
+        );
     }
 }
 

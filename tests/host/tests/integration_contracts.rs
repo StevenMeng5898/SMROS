@@ -2922,8 +2922,7 @@ fn linux_signal_state_is_owned_by_each_live_task() {
             "task-owned signal state remains global: {removed_global}"
         );
     }
-    assert!(process.contains("process_pending: LinuxPendingSignals"));
-    assert!(process.contains("signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1]"));
+    assert!(process.contains("type LinuxProcessSignalState = LinuxProcessSignalStateCore<"));
     assert!(!syscall.contains("static mut LINUX_PROCESS_PENDING"));
     assert!(syscall.contains(
         "linux_task::LINUX_TASK_LIMIT * LINUX_SIGNAL_FRAME_LIMIT * LINUX_SIGNAL_INFO_BYTES"
@@ -3295,7 +3294,7 @@ fn linux_standard_pending_records_are_bounded_and_shared_with_process_routing() 
     assert!(task_logic
         .contains("pub standard_records: [LinuxPendingSignal; LINUX_REALTIME_SIGNAL_MIN]"));
     assert!(task_logic.contains("pub(crate) fn requeue_front("));
-    assert!(process.contains("process_pending: LinuxPendingSignals"));
+    assert!(process.contains("type LinuxProcessSignalState = LinuxProcessSignalStateCore<"));
     assert!(!syscall.contains("static mut LINUX_PROCESS_PENDING"));
     assert!(process.contains("process_pending.reset_in_place()"));
     assert!(!syscall.contains("static LINUX_PROCESS_PENDING_SIGNALS: AtomicU64"));
@@ -5341,8 +5340,8 @@ fn linux_fork_publishes_only_a_complete_child() {
         );
     }
     for signal_state in [
-        "signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1]",
-        "process_pending: LinuxPendingSignals",
+        "type LinuxProcessSignalState = LinuxProcessSignalStateCore<",
+        "fork_child(LinuxPendingSignals::new())",
         "pub(crate) fn clone_signal_state_for_fork(",
     ] {
         assert!(
@@ -5672,8 +5671,7 @@ fn linux_fork_inherits_pid_owned_identity_paths_and_clears_transient_state() {
             .find("pub(crate) fn clone_signal_state_for_fork(")
             .expect("fork signal-state clone")..],
     );
-    assert!(clone_signal.contains("signal_actions"));
-    assert!(clone_signal.contains("process_pending: LinuxPendingSignals::new()"));
+    assert!(clone_signal.contains("fork_child(LinuxPendingSignals::new())"));
     assert!(syscall.contains("fn linux_aio_request_count() -> usize"));
     assert!(syscall.contains("active requests are invariantly zero"));
 
@@ -5701,12 +5699,15 @@ fn linux_fork_inherits_pid_owned_identity_paths_and_clears_transient_state() {
             .expect("fork child task reservation")..],
     );
     assert!(reserve_task.contains("reserve_child(0, scheduler_id.0)"));
-    assert!(reserve_task.contains("signal_states[reservation.slot].reset_in_place()"));
-    assert!(reserve_task.contains("signal_states[reservation.slot].mask = parent_mask"));
+    assert!(reserve_task.contains("prepare_linux_fork_task_signal_state("));
+    assert!(reserve_task.contains("signal_state.reset_in_place()"));
+    assert!(reserve_task.contains("signal_state.mask = mask"));
 }
 
 #[test]
 fn linux_signal_termination_reports_wait_status_and_sigchld() {
+    smros_host_tests::linux_signal_lifecycle_behavior_contract();
+
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
         .expect("read Linux process runtime");
@@ -5724,10 +5725,12 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
     assert!(process_logic.contains("ReapWithoutNotify"));
     assert!(process_logic.contains("pub(crate) fn terminate_child("));
     assert!(process_logic.contains("pub(crate) fn linux_wait_status_signal("));
+    assert!(process_logic.contains("pub(crate) struct LinuxProcessSignalStateCore"));
+    assert!(process_logic.contains("pub signal_actions: [Action; N]"));
+    assert!(process_logic.contains("pub process_pending: Pending"));
 
     for process_owned in [
-        "signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1]",
-        "process_pending: LinuxPendingSignals",
+        "type LinuxProcessSignalState = LinuxProcessSignalStateCore<",
         "pub(crate) fn with_signal_state<R>(",
         "pub(crate) fn clone_signal_state_for_fork(",
     ] {
@@ -5766,7 +5769,7 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
     );
     assert!(target.contains("tgid"));
     assert!(target.contains("process_signal_target_for(tgid, signum)"));
-    assert!(task.contains("task.tgid == tgid"));
+    assert!(task.contains("select_linux_process_signal_target("));
 
     let terminate = braced_body(
         &process[process
@@ -5793,6 +5796,7 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
             .find("fn deliver_next_linux_signal(")
             .expect("default signal delivery")..],
     );
+    assert!(delivery.contains("linux_process::linux_signal_delivery_route("));
     assert!(delivery.contains("terminate_linux_process_by_signal(current.tgid, signum)"));
     assert!(delivery.contains("regs[0] = launch_id"));
     assert!(!delivery.contains("process_manager().terminate_process(current.tgid)"));
@@ -5835,15 +5839,15 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
             .find("pub(crate) fn clone_signal_state_for_fork(")
             .expect("fork process signal cloning")..],
     );
-    assert!(fork_process.contains("signal_actions"));
-    assert!(fork_process.contains("LinuxPendingSignals::new()"));
+    assert!(fork_process.contains("fork_child(LinuxPendingSignals::new())"));
     let fork_task = braced_body(
         &task[task
             .find("pub(crate) fn reserve_fork_task(")
             .expect("fork child task reservation")..],
     );
-    assert!(fork_task.contains("reset_in_place()"));
-    assert!(fork_task.contains("mask = parent_mask"));
+    assert!(fork_task.contains("prepare_linux_fork_task_signal_state("));
+    assert!(fork_task.contains("signal_state.reset_in_place()"));
+    assert!(fork_task.contains("signal_state.mask = mask"));
     assert!(fork_task.contains("reserve_child(0, scheduler_id.0)"));
 
     let terminal = braced_body(
