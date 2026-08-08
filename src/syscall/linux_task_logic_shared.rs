@@ -167,6 +167,7 @@ pub(crate) enum LinuxTaskState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxBlockReason {
     None,
+    ChildWait,
     Futex,
     Sleep,
     SignalWait,
@@ -1372,6 +1373,21 @@ impl<const N: usize> LinuxTaskTable<N> {
             .iter()
             .copied()
             .find(|task| Self::is_published(*task) && task.scheduler_thread == scheduler_thread)
+    }
+
+    pub(crate) fn child_waiters(&self, tgid: usize) -> [Option<LinuxTaskCore>; N] {
+        let mut waiters = [None; N];
+        let mut count = 0usize;
+        for task in self.tasks.iter().copied() {
+            if task.tgid == tgid
+                && task.state == LinuxTaskState::Blocked
+                && task.block_reason == LinuxBlockReason::ChildWait
+            {
+                waiters[count] = Some(task);
+                count += 1;
+            }
+        }
+        waiters
     }
 
     pub(crate) fn signal_state(

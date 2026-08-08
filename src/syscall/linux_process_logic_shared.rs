@@ -1,4 +1,5 @@
 pub(crate) const LINUX_ROOT_PID: usize = 1;
+pub(crate) const LINUX_LAUNCH_REAPER_PID: usize = usize::MAX;
 pub(crate) const LINUX_MAX_PID: usize = i32::MAX as usize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +49,38 @@ pub(crate) enum LinuxWaitSelector {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxWaitOutcome {
+    Ready { pid: usize, status: i32 },
+    WouldBlock,
+    NoChildren,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxWaitCompletionError<E> {
+    Copy(E),
+    Reap,
+}
+
+pub(crate) fn complete_linux_wait<const N: usize, E>(
+    processes: &mut LinuxProcessTable<N>,
+    parent_pid: usize,
+    selector: LinuxWaitSelector,
+    pid: usize,
+    status: i32,
+    copy_status: impl FnOnce(i32) -> Result<(), E>,
+) -> Result<Option<usize>, LinuxWaitCompletionError<E>> {
+    let revalidated = processes.wait_outcome(parent_pid, selector);
+    if revalidated != (LinuxWaitOutcome::Ready { pid, status }) {
+        return Ok(None);
+    }
+    copy_status(status).map_err(LinuxWaitCompletionError::Copy)?;
+    if processes.reap(parent_pid, pid).is_none() {
+        return Err(LinuxWaitCompletionError::Reap);
+    }
+    Ok(Some(pid))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxProcessError {
     Capacity,
     DuplicateRoot,
@@ -65,10 +98,34 @@ pub(crate) fn linux_wait_status_signal(signum: usize, core_dumped: bool) -> Opti
         .then_some(signum as i32 | if core_dumped { 0x80 } else { 0 })
 }
 
+pub(crate) fn linux_wait_selector(
+    pid: i32,
+    current_process_group: usize,
+) -> Option<LinuxWaitSelector> {
+    match pid {
+        value if value > 0 => usize::try_from(value).ok().map(LinuxWaitSelector::Pid),
+        -1 => Some(LinuxWaitSelector::Any),
+        0 => Some(LinuxWaitSelector::ProcessGroup(current_process_group)),
+        value => usize::try_from(value.unsigned_abs())
+            .ok()
+            .map(LinuxWaitSelector::ProcessGroup),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LinuxLaunchReaperRecord {
+    active: bool,
+}
+
+impl LinuxLaunchReaperRecord {
+    const EMPTY: Self = Self { active: false };
+}
+
 pub(crate) struct LinuxProcessTable<const N: usize> {
     processes: [LinuxProcessCore; N],
     next_pid: usize,
     exhausted: bool,
+    launch_reaper: LinuxLaunchReaperRecord,
 }
 
 impl<const N: usize> LinuxProcessTable<N> {
@@ -81,6 +138,7 @@ impl<const N: usize> LinuxProcessTable<N> {
             processes: [LinuxProcessCore::EMPTY; N],
             next_pid,
             exhausted: false,
+            launch_reaper: LinuxLaunchReaperRecord::EMPTY,
         }
     }
 
@@ -88,7 +146,7 @@ impl<const N: usize> LinuxProcessTable<N> {
         &mut self,
         scheduler_thread: usize,
     ) -> Result<usize, LinuxProcessError> {
-        if self.processes.iter().any(|process| {
+        if self.launch_reaper.active || self.processes.iter().any(|process| {
             process.state != LinuxProcessState::Empty && process.pid == LINUX_ROOT_PID
         }) {
             return Err(LinuxProcessError::DuplicateRoot);
@@ -109,6 +167,7 @@ impl<const N: usize> LinuxProcessTable<N> {
             wait_status: 0,
             exit_signal: 0,
         };
+        self.launch_reaper.active = true;
         Ok(LINUX_ROOT_PID)
     }
 
@@ -299,6 +358,47 @@ impl<const N: usize> LinuxProcessTable<N> {
         })
     }
 
+    pub(crate) fn wait_outcome(
+        &self,
+        parent_pid: usize,
+        selector: LinuxWaitSelector,
+    ) -> LinuxWaitOutcome {
+        if let Some(process) = self.select_waitable(parent_pid, selector) {
+            return LinuxWaitOutcome::Ready {
+                pid: process.pid,
+                status: process.wait_status,
+            };
+        }
+        if self.has_matching_child(parent_pid, selector) {
+            LinuxWaitOutcome::WouldBlock
+        } else {
+            LinuxWaitOutcome::NoChildren
+        }
+    }
+
+    pub(crate) fn resource_counts(&self) -> (usize, usize) {
+        self.processes.iter().fold(
+            (0, 0),
+            |(running, zombies), process| match process.state {
+                LinuxProcessState::Running => (running + 1, zombies),
+                LinuxProcessState::Zombie => (running, zombies + 1),
+                _ => (running, zombies),
+            },
+        )
+    }
+
+    pub(crate) fn running_pids_match(&self, memory_pids: &[usize]) -> bool {
+        let running_count = self
+            .processes
+            .iter()
+            .filter(|process| process.state == LinuxProcessState::Running)
+            .count();
+        running_count == memory_pids.len()
+            && self.processes.iter().all(|process| {
+                process.state != LinuxProcessState::Running || memory_pids.contains(&process.pid)
+            })
+    }
+
     pub(crate) fn reap(&mut self, parent_pid: usize, pid: usize) -> Option<LinuxProcessCore> {
         let slot = self.processes.iter().position(|process| {
             process.state == LinuxProcessState::Zombie
@@ -310,28 +410,57 @@ impl<const N: usize> LinuxProcessTable<N> {
         Some(reaped)
     }
 
-    pub(crate) fn reparent_children(&mut self, parent_pid: usize, new_parent_pid: usize) -> usize {
-        if !self
-            .processes
-            .iter()
-            .any(|process| Self::is_visible(*process) && process.pid == new_parent_pid)
-        {
+    pub(crate) fn reparent_children_to_launch_reaper(&mut self, parent_pid: usize) -> usize {
+        if !self.launch_reaper.active {
             return 0;
         }
         let mut reparented = 0;
         for process in &mut self.processes {
             if Self::is_visible(*process) && process.parent_pid == parent_pid {
-                process.parent_pid = new_parent_pid;
+                process.parent_pid = LINUX_LAUNCH_REAPER_PID;
                 reparented += 1;
             }
         }
         reparented
     }
 
+    pub(crate) fn adopt_launch_descendants(&mut self, root_pid: usize) -> usize {
+        if !self.launch_reaper.active {
+            return 0;
+        }
+        let mut adopted = 0;
+        for process in &mut self.processes {
+            if Self::is_visible(*process) && process.pid != root_pid {
+                process.parent_pid = LINUX_LAUNCH_REAPER_PID;
+                adopted += 1;
+            }
+        }
+        adopted
+    }
+
+    pub(crate) fn reap_launch_descendants(&mut self) -> usize {
+        if !self.launch_reaper.active {
+            return 0;
+        }
+        let mut reaped = 0;
+        for process in &mut self.processes {
+            if Self::is_visible(*process) && process.parent_pid == LINUX_LAUNCH_REAPER_PID {
+                *process = LinuxProcessCore::EMPTY;
+                reaped += 1;
+            }
+        }
+        reaped
+    }
+
     pub(crate) fn reset(&mut self) {
         self.processes.fill(LinuxProcessCore::EMPTY);
         self.next_pid = LINUX_ROOT_PID + 1;
         self.exhausted = false;
+        self.launch_reaper = LinuxLaunchReaperRecord::EMPTY;
+    }
+
+    pub(crate) fn launch_reaper_active(&self) -> bool {
+        self.launch_reaper.active
     }
 
     fn is_visible(process: LinuxProcessCore) -> bool {

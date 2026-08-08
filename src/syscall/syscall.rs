@@ -127,6 +127,7 @@ pub enum SysError {
     EIO = 5,
     ENXIO = 6,
     E2BIG = 7,
+    ECHILD = 10,
     EAGAIN = 11,
     ENOMEM = 12,
     EACCES = 13,
@@ -3465,6 +3466,11 @@ pub struct PosixResourceSnapshot {
     pub processes: usize,
     pub scheduler_threads: usize,
     pub linux_mappings: usize,
+    pub linux_processes: usize,
+    pub linux_zombies: usize,
+    pub private_pages: usize,
+    pub shared_pages: usize,
+    pub page_table_pages: usize,
     pub linux_fds: usize,
     pub linux_shared_memory: usize,
     pub kernel_handles: usize,
@@ -3517,11 +3523,17 @@ fn linux_aio_request_count() -> usize {
 
 pub fn posix_resource_snapshot() -> PosixResourceSnapshot {
     let memory_counts = memory_resource_counts();
+    let linux_process_counts = linux_process::resource_counts();
     let compat_counts = compat::posix_resource_counts();
     PosixResourceSnapshot {
         processes: crate::kernel_lowlevel::memory::process_manager().active_processes(),
         scheduler_threads: crate::kernel_objects::scheduler::scheduler().active_threads(),
         linux_mappings: memory_counts.linux_mappings,
+        linux_processes: linux_process_counts.linux_processes,
+        linux_zombies: linux_process_counts.linux_zombies,
+        private_pages: linux_process_counts.private_pages,
+        shared_pages: linux_process_counts.shared_pages,
+        page_table_pages: linux_process_counts.page_table_pages,
         linux_fds: memory_counts.linux_fds,
         linux_shared_memory: memory_counts.linux_shared_memory,
         kernel_handles: memory_counts.kernel_handles,
@@ -8417,27 +8429,57 @@ pub fn sys_execve(path: usize, _argv: usize, _envp: usize) -> SysResult {
 
 /// Linux sys_wait4 implementation
 pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
+    const LINUX_WNOHANG: u32 = 1;
+
     info!("wait4: pid={}, options={:#x}", pid, options);
 
-    if wstatus != 0 {
-        linux_copy_to_user(wstatus, &0i32.to_ne_bytes())?;
+    if options & !LINUX_WNOHANG != 0 {
+        return Err(SysError::EINVAL);
     }
+    let process = linux_process::current()?;
+    let selector =
+        linux_process::linux_wait_selector(pid, process.process_group).ok_or(SysError::EINVAL)?;
+    let nohang = options & LINUX_WNOHANG != 0;
 
-    if pid > 0 {
-        Ok(pid as usize)
-    } else {
-        Ok(0)
+    loop {
+        match linux_process::wait_current(selector, nohang)? {
+            linux_process::LinuxWaitOutcome::Ready { pid, status } => {
+                if let Some(reaped_pid) =
+                    linux_process::complete_wait_current(selector, pid, status, wstatus)?
+                {
+                    return Ok(reaped_pid);
+                }
+            }
+            linux_process::LinuxWaitOutcome::WouldBlock => return Ok(0),
+            linux_process::LinuxWaitOutcome::NoChildren => return Err(SysError::ECHILD),
+        }
     }
+}
+
+fn exit_current_linux_process(exit_code: i32, entire_group: bool) -> Result<Option<usize>, SysError> {
+    if linux_process::current().is_err() {
+        return Ok(None);
+    }
+    let outcome = linux_process::exit_current_process(
+        linux_process::linux_wait_status_exit(exit_code),
+        entire_group,
+    )?;
+    if outcome == linux_process::LinuxProcessExitOutcome::LaunchRoot {
+        return crate::user_level::run_elf::prepare_run_elf_return(exit_code)
+            .map(Some)
+            .ok_or(SysError::ESRCH);
+    }
+    linux_task::finish_current_without_el0_return();
 }
 
 /// Linux sys_exit implementation
 pub fn sys_exit(exit_code: i32) -> SysResult {
-    if linux_task::current_is_clone_child() {
-        linux_task::exit_current(exit_code);
-    }
-
     let exit_code = syscall_logic::linux_exit_status(exit_code);
     info!("exit: code={}", exit_code);
+
+    if let Some(launch_id) = exit_current_linux_process(exit_code, false)? {
+        return Ok(launch_id);
+    }
 
     if crate::user_level::user_test::prepare_el0_test_kernel_return(exit_code) {
         return Ok(0);
@@ -8447,19 +8489,17 @@ pub fn sys_exit(exit_code: i32) -> SysResult {
         return Ok(0);
     }
 
-    if let Some(launch_id) = crate::user_level::run_elf::prepare_run_elf_return(exit_code) {
-        return Ok(launch_id);
-    }
-
-    // No current-process binding is modeled yet; EL0 exits through the hooks above.
     Ok(0)
 }
 
 /// Linux sys_exit_group implementation
 pub fn sys_exit_group(exit_code: i32) -> SysResult {
+    let exit_code = syscall_logic::linux_exit_status(exit_code);
     info!("exit_group: code={}", exit_code);
-    linux_futex::reset();
-    linux_task::reset();
+
+    if let Some(launch_id) = exit_current_linux_process(exit_code, true)? {
+        return Ok(launch_id);
+    }
     sys_exit(exit_code)
 }
 

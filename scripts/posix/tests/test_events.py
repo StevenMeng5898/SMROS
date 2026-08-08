@@ -35,6 +35,24 @@ def _event(seq: int, event: str, **values: object) -> str:
 
 
 class SerialEventTests(unittest.TestCase):
+    def test_process_page_resource_deltas_survive_serial_parsing(self) -> None:
+        resources = _resources(
+            linux_processes=1,
+            linux_zombies=-2,
+            private_pages=3,
+            shared_pages=-4,
+            page_table_pages=5,
+        )
+        parsed = parse_serial_log(
+            self._one_attempt_log(resource_deltas=resources)
+        )
+        attempt = parsed.attempts[0]
+        self.assertEqual(attempt.resource_deltas.linux_processes, 1)
+        self.assertEqual(attempt.resource_deltas.linux_zombies, -2)
+        self.assertEqual(attempt.resource_deltas.private_pages, 3)
+        self.assertEqual(attempt.resource_deltas.shared_pages, -4)
+        self.assertEqual(attempt.resource_deltas.page_table_pages, 5)
+
     def _one_attempt_log(
         self,
         *,

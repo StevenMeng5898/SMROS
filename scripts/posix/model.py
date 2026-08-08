@@ -218,9 +218,14 @@ RESOURCE_DELTA_NAMES = (
     "kernel_handles",
     "linux_fds",
     "linux_mappings",
+    "linux_processes",
     "linux_shared_memory",
+    "linux_zombies",
+    "page_table_pages",
+    "private_pages",
     "processes",
     "scheduler_threads",
+    "shared_pages",
     "timers",
 )
 
@@ -232,9 +237,14 @@ class ResourceDeltas:
     kernel_handles: int = 0
     linux_fds: int = 0
     linux_mappings: int = 0
+    linux_processes: int = 0
     linux_shared_memory: int = 0
+    linux_zombies: int = 0
+    page_table_pages: int = 0
+    private_pages: int = 0
     processes: int = 0
     scheduler_threads: int = 0
+    shared_pages: int = 0
     timers: int = 0
 
     def __post_init__(self) -> None:

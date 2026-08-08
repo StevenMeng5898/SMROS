@@ -97,12 +97,6 @@ pub(crate) fn current_task() -> Result<LinuxTaskCore, SysError> {
     })
 }
 
-pub(crate) fn current_is_clone_child() -> bool {
-    current_task()
-        .map(|task| task.tid != task.tgid)
-        .unwrap_or(false)
-}
-
 pub(crate) fn set_current_clear_child_tid(address: usize) -> Result<usize, SysError> {
     with_runtime(|runtime| {
         let scheduler_thread = scheduler::scheduler().current();
@@ -118,74 +112,6 @@ pub(crate) fn set_current_clear_child_tid(address: usize) -> Result<usize, SysEr
         }
         Ok(task.tid)
     })
-}
-
-pub(crate) fn exit_current(exit_code: i32) -> ! {
-    let _ = exit_code;
-    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
-    let scheduler_thread = scheduler::scheduler().current();
-    let exited = {
-        let mut runtime = LINUX_TASK_RUNTIME.lock();
-        runtime
-            .tasks
-            .begin_child_exit_by_scheduler(scheduler_thread.0)
-    };
-
-    if let Some(transition) = exited {
-        let _ = super::linux_futex::remove_task_waiters(transition.task.tid, scheduler_thread.0);
-        let mut runtime = LINUX_TASK_RUNTIME.lock();
-        let _ = runtime
-            .tasks
-            .retire(transition.task.tid, scheduler_thread.0);
-        #[cfg(target_arch = "aarch64")]
-        if let Some(clone_slot) = runtime.clone_slots.get_mut(transition.slot) {
-            *clone_slot = aarch64_clone::LinuxCloneSlot::EMPTY;
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    let clear_child_tid_to_wake = exited.and_then(|transition| {
-        let clear_child_tid = transition.clear_child_tid;
-        if clear_child_tid != 0
-            && crate::syscall::syscall::linux_clone_tid_destination_valid(clear_child_tid)
-        {
-            if super::linux_process_memory::copy_to_process(
-                transition.task.tgid,
-                clear_child_tid,
-                &0u32.to_ne_bytes(),
-            )
-            .is_ok()
-            {
-                return Some(clear_child_tid);
-            }
-        }
-        None
-    });
-
-    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
-
-    #[cfg(target_arch = "aarch64")]
-    if let Some(clear_child_tid) = clear_child_tid_to_wake {
-        let _ = super::linux_futex::wake_address(
-            clear_child_tid,
-            1,
-            super::linux_futex::FUTEX_BITSET_MATCH_ANY,
-        );
-    }
-
-    let disposition = exited
-        .map(|transition| transition.disposition)
-        .unwrap_or(LinuxChildExitDisposition::ScheduleWithoutEl0Return);
-    match disposition {
-        LinuxChildExitDisposition::ScheduleWithoutEl0Return => {
-            scheduler::scheduler().finish_current_without_stack_free();
-            scheduler::schedule();
-            loop {
-                crate::kernel_lowlevel::cpu::wait_for_interrupt();
-                scheduler::schedule();
-            }
-        }
-    }
 }
 
 pub(crate) fn lookup_tid(tid: usize) -> Option<LinuxTaskCore> {
@@ -537,6 +463,161 @@ pub(crate) fn wake_blocked(tid: usize, scheduler_thread: usize, reason: LinuxBlo
     })();
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     result
+}
+
+pub(crate) fn wake_process_waiters(tgid: usize) -> usize {
+    let waiters = with_runtime(|runtime| runtime.tasks.child_waiters(tgid));
+    waiters
+        .into_iter()
+        .flatten()
+        .filter(|task| {
+            wake_blocked(
+                task.tid,
+                task.scheduler_thread,
+                LinuxBlockReason::ChildWait,
+            )
+        })
+        .count()
+}
+
+#[derive(Clone, Copy)]
+enum LinuxTaskRetirementScope {
+    Process {
+        tgid: usize,
+        entire_group: bool,
+        current_scheduler: usize,
+    },
+    LaunchDescendants {
+        root_tgid: usize,
+    },
+}
+
+fn retire_tasks(
+    scope: LinuxTaskRetirementScope,
+) -> (
+    [Option<LinuxChildExitTransition>; LINUX_TASK_LIMIT],
+    usize,
+    bool,
+) {
+    let mut retired = [None; LINUX_TASK_LIMIT];
+    let (retired_count, process_empty) = with_runtime(|runtime| {
+        let mut retired_count = 0usize;
+        for slot in 0..LINUX_TASK_LIMIT {
+            let task = runtime.tasks.tasks[slot];
+            let selected = match scope {
+                LinuxTaskRetirementScope::Process {
+                    tgid,
+                    entire_group,
+                    current_scheduler,
+                } => {
+                    task.tgid == tgid
+                        && (entire_group || task.scheduler_thread == current_scheduler)
+                }
+                LinuxTaskRetirementScope::LaunchDescendants { root_tgid } => {
+                    task.tgid != root_tgid
+                }
+            };
+            if !selected || !LinuxTaskTable::<LINUX_TASK_LIMIT>::is_live(task) {
+                continue;
+            }
+            let Some(clear_child_tid) = runtime
+                .tasks
+                .exit_with_clear_child_tid(task.tid, task.scheduler_thread)
+            else {
+                continue;
+            };
+            if !runtime.tasks.retire(task.tid, task.scheduler_thread) {
+                continue;
+            }
+            #[cfg(target_arch = "aarch64")]
+            if let Some(clone_slot) = runtime.clone_slots.get_mut(slot) {
+                *clone_slot = aarch64_clone::LinuxCloneSlot::EMPTY;
+            }
+            retired[retired_count] = Some(LinuxChildExitTransition {
+                task,
+                slot,
+                clear_child_tid,
+                disposition: LinuxChildExitDisposition::ScheduleWithoutEl0Return,
+            });
+            retired_count += 1;
+        }
+        let process_empty = match scope {
+            LinuxTaskRetirementScope::Process { tgid, .. } => {
+                !runtime.tasks.tasks.iter().copied().any(|task| {
+                    task.tgid == tgid && LinuxTaskTable::<LINUX_TASK_LIMIT>::is_live(task)
+                })
+            }
+            LinuxTaskRetirementScope::LaunchDescendants { .. } => true,
+        };
+        (retired_count, process_empty)
+    });
+    (retired, retired_count, process_empty)
+}
+
+fn complete_task_retirements(
+    retired: [Option<LinuxChildExitTransition>; LINUX_TASK_LIMIT],
+    retired_count: usize,
+    current_scheduler: ThreadId,
+) {
+    for transition in retired.into_iter().take(retired_count).flatten() {
+        let _ = super::linux_futex::remove_task_waiters(
+            transition.task.tid,
+            transition.task.scheduler_thread,
+        );
+        if transition.clear_child_tid != 0
+            && super::linux_process_memory::copy_to_process(
+                transition.task.tgid,
+                transition.clear_child_tid,
+                &0u32.to_ne_bytes(),
+            )
+            .is_ok()
+        {
+            let _ = super::linux_futex::wake_address(
+                transition.clear_child_tid,
+                1,
+                super::linux_futex::FUTEX_BITSET_MATCH_ANY,
+            );
+        }
+        if transition.task.scheduler_thread != current_scheduler.0 {
+            let _ =
+                scheduler::scheduler().terminate_thread(ThreadId(transition.task.scheduler_thread));
+        }
+    }
+}
+
+pub(crate) fn retire_process_tasks(tgid: usize, entire_group: bool) -> Result<bool, SysError> {
+    let current_scheduler = scheduler::scheduler().current();
+    let current = current_task()?;
+    if current.tgid != tgid {
+        return Err(SysError::ESRCH);
+    }
+
+    let (retired, retired_count, process_empty) = retire_tasks(
+        LinuxTaskRetirementScope::Process {
+            tgid,
+            entire_group,
+            current_scheduler: current_scheduler.0,
+        },
+    );
+    complete_task_retirements(retired, retired_count, current_scheduler);
+    Ok(process_empty)
+}
+
+pub(crate) fn retire_launch_descendants(root_tgid: usize) {
+    let current_scheduler = scheduler::scheduler().current();
+    let (retired, retired_count, _) = retire_tasks(
+        LinuxTaskRetirementScope::LaunchDescendants { root_tgid },
+    );
+    complete_task_retirements(retired, retired_count, current_scheduler);
+}
+
+pub(crate) fn finish_current_without_el0_return() -> ! {
+    scheduler::scheduler().finish_current_without_stack_free();
+    scheduler::schedule();
+    loop {
+        crate::kernel_lowlevel::cpu::wait_for_interrupt();
+        scheduler::schedule();
+    }
 }
 
 pub(crate) fn on_timer_tick(now: u64) {

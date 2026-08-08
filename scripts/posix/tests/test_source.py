@@ -818,6 +818,28 @@ class PublicApiTests(unittest.TestCase):
         self.assertIn("fetch_checkout", validate_checkout.__doc__)
         self.assertIn("current patch series", validate_checkout.__doc__)
 
+    def test_process_page_resources_are_complete_at_every_event_boundary(self) -> None:
+        model_source = (REPOSITORY_ROOT / "scripts/posix/model.py").read_text(
+            encoding="utf-8"
+        )
+        guest_source = (
+            REPOSITORY_ROOT / "src/user_level/services/posix_test.rs"
+        ).read_text(encoding="utf-8")
+        syscall_source = (REPOSITORY_ROOT / "src/syscall/syscall.rs").read_text(
+            encoding="utf-8"
+        )
+        for field in (
+            "linux_processes",
+            "linux_zombies",
+            "private_pages",
+            "shared_pages",
+            "page_table_pages",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(f'"{field}"', model_source)
+                self.assertIn(f'"{field}"', guest_source)
+                self.assertIn(f"pub {field}: usize", syscall_source)
+
 
 class SharedModelTests(unittest.TestCase):
     def test_suite_status_constants_match_open_posix_test_suite(self) -> None:

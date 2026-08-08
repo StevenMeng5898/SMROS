@@ -11,6 +11,7 @@ use super::linux_process_memory::{
 };
 #[cfg(target_arch = "aarch64")]
 use super::linux_task::LinuxTaskReservation;
+use super::linux_task::LinuxBlockReason;
 use super::{linux_task, SysError};
 
 include!("linux_process_logic_shared.rs");
@@ -18,6 +19,22 @@ include!("linux_fork_logic_shared.rs");
 include!("linux_runtime_lock_shared.rs");
 
 pub(crate) const LINUX_PROCESS_LIMIT: usize = thread::MAX_THREADS;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LinuxProcessResourceCounts {
+    pub linux_processes: usize,
+    pub linux_zombies: usize,
+    pub private_pages: usize,
+    pub shared_pages: usize,
+    pub page_table_pages: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxProcessExitOutcome {
+    TaskOnly,
+    Descendant,
+    LaunchRoot,
+}
 
 struct LinuxProcessRuntime {
     processes: LinuxProcessTable<LINUX_PROCESS_LIMIT>,
@@ -82,6 +99,147 @@ pub(crate) fn current_parent_pid() -> Result<usize, SysError> {
             process.parent_pid
         }
     })
+}
+
+pub(crate) fn wait_current(
+    selector: LinuxWaitSelector,
+    nohang: bool,
+) -> Result<LinuxWaitOutcome, SysError> {
+    let parent = current()?;
+    loop {
+        let outcome = with_runtime(|runtime| {
+            runtime.processes.wait_outcome(parent.pid, selector)
+        });
+        if outcome != LinuxWaitOutcome::WouldBlock || nohang {
+            return Ok(outcome);
+        }
+
+        let blocked = linux_task::block_current(LinuxBlockReason::ChildWait)?;
+        let rechecked = with_runtime(|runtime| {
+            runtime.processes.wait_outcome(parent.pid, selector)
+        });
+        if rechecked != LinuxWaitOutcome::WouldBlock {
+            let _ = linux_task::wake_blocked(
+                blocked.tid,
+                blocked.scheduler_thread,
+                LinuxBlockReason::ChildWait,
+            );
+            return Ok(rechecked);
+        }
+        scheduler::schedule();
+    }
+}
+
+pub(crate) fn complete_wait_current(
+    selector: LinuxWaitSelector,
+    pid: usize,
+    status: i32,
+    wstatus: usize,
+) -> Result<Option<usize>, SysError> {
+    let parent = current()?;
+    with_runtime(|runtime| {
+        match complete_linux_wait(
+            &mut runtime.processes,
+            parent.pid,
+            selector,
+            pid,
+            status,
+            |status| {
+                if wstatus != 0 {
+                    super::linux_process_memory::copy_to_process(
+                        parent.pid,
+                        wstatus,
+                        &status.to_ne_bytes(),
+                    )?;
+                }
+                Ok(())
+            },
+        ) {
+            Ok(completed) => Ok(completed),
+            Err(LinuxWaitCompletionError::Copy(error)) => Err(error),
+            Err(LinuxWaitCompletionError::Reap) => Err(SysError::ECHILD),
+        }
+    })
+}
+
+pub(crate) fn exit_current_process(
+    wait_status: i32,
+    entire_group: bool,
+) -> Result<LinuxProcessExitOutcome, SysError> {
+    let process = current()?;
+    super::linux_process_memory::deactivate_current_address_space()?;
+    if !linux_task::retire_process_tasks(process.pid, entire_group)? {
+        return Ok(LinuxProcessExitOutcome::TaskOnly);
+    }
+
+    let _ = super::linux_process_memory::unregister(process.pid);
+    let _ = super::release_linux_process_resources(process.pid);
+
+    let parent_pid = with_runtime(|runtime| {
+        if !runtime.processes.exit(process.pid, wait_status) {
+            return Err(SysError::ESRCH);
+        }
+        let _ = runtime
+            .processes
+            .reparent_children_to_launch_reaper(process.pid);
+        Ok(process.parent_pid)
+    })?;
+
+    if process.pid != LINUX_ROOT_PID {
+        let _ = linux_task::wake_process_waiters(parent_pid);
+        return Ok(LinuxProcessExitOutcome::Descendant);
+    }
+
+    let mut descendant_pids = [0usize; LINUX_PROCESS_LIMIT];
+    let descendant_count = with_runtime(|runtime| {
+        let _ = runtime.processes.adopt_launch_descendants(LINUX_ROOT_PID);
+        let mut count = 0usize;
+        for descendant in runtime.processes.processes.iter().copied() {
+            if descendant.pid == LINUX_ROOT_PID
+                || !LinuxProcessTable::<LINUX_PROCESS_LIMIT>::is_visible(descendant)
+            {
+                continue;
+            }
+            descendant_pids[count] = descendant.pid;
+            count += 1;
+        }
+        count
+    });
+    linux_task::retire_launch_descendants(LINUX_ROOT_PID);
+    for pid in descendant_pids.into_iter().take(descendant_count) {
+        let _ = super::linux_process_memory::unregister(pid);
+        let _ = super::release_linux_process_resources(pid);
+    }
+    with_runtime(|runtime| {
+        let _ = runtime.processes.reap_launch_descendants();
+    });
+    Ok(LinuxProcessExitOutcome::LaunchRoot)
+}
+
+pub(crate) fn resource_counts() -> LinuxProcessResourceCounts {
+    loop {
+        // Cross-runtime snapshots take the process lock before the memory lock.
+        let counts = with_runtime(|runtime| {
+            let linux_memory_counts = super::linux_process_memory::resource_counts();
+            if !runtime.processes.running_pids_match(
+                &linux_memory_counts.process_pids[..linux_memory_counts.process_count],
+            ) {
+                return None;
+            }
+            let (linux_processes, linux_zombies) = runtime.processes.resource_counts();
+            Some(LinuxProcessResourceCounts {
+                linux_processes,
+                linux_zombies,
+                private_pages: linux_memory_counts.private_pages,
+                shared_pages: linux_memory_counts.shared_pages,
+                page_table_pages: linux_memory_counts.page_table_pages,
+            })
+        });
+        if let Some(counts) = counts {
+            return counts;
+        }
+        core::hint::spin_loop();
+    }
 }
 
 pub(crate) fn reset_launch() {

@@ -182,6 +182,10 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         self.backend.pfn_address(self.root_pfn)
     }
 
+    pub(crate) fn table_page_count(&self) -> usize {
+        self.table_pfns.len()
+    }
+
     pub(crate) fn map_user_page(
         &mut self,
         vaddr: usize,
@@ -868,6 +872,10 @@ impl Aarch64AddressSpaceModel {
 
     pub(crate) fn root_pfn(&self) -> u64 {
         self.core.root_pfn()
+    }
+
+    pub(crate) fn table_page_count(&self) -> usize {
+        self.core.table_page_count()
     }
 
     pub(crate) fn map_supervisor_ram_range(&mut self, start: usize, len: usize) -> Result<(), ()> {

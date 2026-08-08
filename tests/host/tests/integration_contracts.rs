@@ -2054,8 +2054,14 @@ fn run_elf_launch_identity_is_bound_and_carried_through_aarch64_resume() {
         .expect("sys_exit");
     let sys_exit = braced_body(&syscall[sys_exit_start..]);
     assert!(sys_exit.contains("if let Some(launch_id)"));
-    assert!(sys_exit.contains("prepare_run_elf_return(exit_code)"));
+    assert!(sys_exit.contains("exit_current_linux_process(exit_code, false)"));
     assert!(sys_exit.contains("return Ok(launch_id)"));
+    let linux_exit_start = syscall
+        .find("fn exit_current_linux_process(")
+        .expect("shared Linux process exit helper");
+    let linux_exit = braced_body(&syscall[linux_exit_start..]);
+    assert!(linux_exit.contains("LinuxProcessExitOutcome::LaunchRoot"));
+    assert!(linux_exit.contains("prepare_run_elf_return(exit_code)"));
 
     let exception_start = aarch64
         .find("exception_handler:")
@@ -2168,16 +2174,7 @@ fn linux_child_exit_clears_tid_and_uses_deferred_stack_retirement() {
         .find("pub fn sys_exit(exit_code: i32)")
         .expect("sys_exit");
     let sys_exit = braced_body(&syscall[sys_exit_start..]);
-    let child_check = sys_exit
-        .find("linux_task::current_is_clone_child()")
-        .expect("clone-child exit check");
-    let child_exit = sys_exit
-        .find("linux_task::exit_current(exit_code)")
-        .expect("non-returning child exit");
-    let launcher_exit = sys_exit
-        .find("prepare_run_elf_return(exit_code)")
-        .expect("root launcher completion");
-    assert!(child_check < child_exit && child_exit < launcher_exit);
+    assert!(sys_exit.contains("exit_current_linux_process(exit_code, false)"));
 
     let set_tid_start = syscall
         .find("pub fn sys_set_tid_address(tidptr: usize)")
@@ -2191,60 +2188,52 @@ fn linux_child_exit_clears_tid_and_uses_deferred_stack_retirement() {
         .find("pub fn sys_exit_group(exit_code: i32)")
         .expect("exit_group");
     let group_exit = braced_body(&syscall[group_start..]);
-    let futex_reset = group_exit
-        .find("linux_futex::reset()")
-        .expect("futex reset");
-    let task_reset = group_exit.find("linux_task::reset()").expect("task reset");
-    let shared_exit = group_exit
-        .find("sys_exit(exit_code)")
-        .expect("shared root exit");
-    assert!(futex_reset < task_reset && task_reset < shared_exit);
+    assert!(group_exit.contains("exit_current_linux_process(exit_code, true)"));
+    assert!(!group_exit.contains("linux_futex::reset()"));
+    assert!(!group_exit.contains("linux_task::reset()"));
 
-    let exit_current_start = task
-        .find("pub(crate) fn exit_current(exit_code: i32) -> !")
-        .expect("child exit runtime");
-    let exit_current = braced_body(&task[exit_current_start..]);
-    let mask = exit_current
-        .find("mask_interrupts()")
-        .expect("interrupt mask");
-    let transition = exit_current
-        .find("begin_child_exit_by_scheduler")
-        .expect("one-shot child exit transition");
-    let remove_waiters = exit_current
+    let retire_tasks_start = task.find("fn retire_tasks(").expect("shared task retirement");
+    let retire_tasks = braced_body(&task[retire_tasks_start..]);
+    let clear_tid = retire_tasks
+        .find("exit_with_clear_child_tid")
+        .expect("one-shot clear-child-TID transition");
+    let retire = retire_tasks
+        .find("runtime.tasks.retire(")
+        .expect("task retirement");
+    assert!(clear_tid < retire);
+
+    let complete_start = task
+        .find("fn complete_task_retirements(")
+        .expect("retirement cleanup");
+    let complete = braced_body(&task[complete_start..]);
+    let remove_waiters = complete
         .find("linux_futex::remove_task_waiters")
         .expect("task futex cleanup");
-    let retire = exit_current
-        .find(".retire(transition.task.tid")
-        .expect("task retirement");
-    let restore = exit_current
-        .find("restore_interrupts(interrupt_state)")
-        .expect("interrupt restore");
-    let checked_write = exit_current
-        .find("linux_clone_tid_destination_valid(clear_child_tid)")
-        .expect("checked clear-child-TID write");
-    let zero_write = exit_current
+    let zero_write = complete
         .find("linux_process_memory::copy_to_process(")
-        .expect("clear-child-TID zero write");
-    let compiler_fence = exit_current
-        .find("core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst)")
-        .expect("clear-child-TID compiler fence");
-    let wake = exit_current
+        .expect("checked clear-child-TID zero write");
+    let wake = complete
         .find("linux_futex::wake_address(")
         .expect("pthread join futex wake");
-    let finish = exit_current
+    let terminate = complete
+        .find("scheduler::scheduler().terminate_thread(")
+        .expect("non-current task termination");
+    assert!(remove_waiters < zero_write && zero_write < wake && wake < terminate);
+
+    let finish_start = task
+        .find("pub(crate) fn finish_current_without_el0_return() -> !")
+        .expect("non-returning current task exit");
+    let finish_current = braced_body(&task[finish_start..]);
+    let finish = finish_current
         .find("finish_current_without_stack_free()")
         .expect("deferred current stack retirement");
-    let schedule = exit_current
+    let schedule = finish_current
         .find("scheduler::schedule()")
         .expect("reschedule");
-    let wait = exit_current
+    let wait = finish_current
         .find("wait_for_interrupt()")
         .expect("no-runnable-thread wait");
-    assert!(mask < transition && transition < remove_waiters && remove_waiters < retire);
-    assert!(retire < checked_write && checked_write < zero_write);
-    assert!(zero_write < compiler_fence && compiler_fence < restore);
-    assert!(restore < wake && wake < finish && finish < schedule && schedule < wait);
-    assert!(exit_current.contains("let _ = exit_code;"));
+    assert!(finish < schedule && schedule < wait);
 
     assert!(futex.contains("pub(crate) fn remove_task_waiters("));
     assert!(futex.contains("pub(crate) fn wake_address("));
@@ -5431,6 +5420,190 @@ fn linux_fork_publishes_only_a_complete_child() {
         .find("isb")
         .expect("child instruction barrier");
     assert!(ttbr < first_dsb && first_dsb < tlbi && tlbi < second_dsb && second_dsb < isb);
+}
+
+#[test]
+fn linux_wait_reaps_one_real_child_status() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read Linux process runtime");
+    let process_logic = std::fs::read_to_string(
+        repository.join("src/syscall/linux_process_logic_shared.rs"),
+    )
+    .expect("read Linux process logic");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall runtime");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+
+    for required in [
+        "pub(crate) enum LinuxWaitOutcome",
+        "Ready { pid: usize, status: i32 }",
+        "WouldBlock",
+        "NoChildren",
+        "pub(crate) fn wait_current(",
+        "pub(crate) fn complete_wait_current(",
+        "pub(crate) fn exit_current_process(",
+    ] {
+        assert!(
+            process.contains(required) || process_logic.contains(required),
+            "missing wait/process lifecycle API `{required}`"
+        );
+    }
+
+    let wait_start = syscall.find("pub fn sys_wait4(").expect("wait4 syscall");
+    let wait = braced_body(&syscall[wait_start..]);
+    let wait_runtime_start = process
+        .find("pub(crate) fn wait_current(")
+        .expect("wait runtime helper");
+    let wait_runtime = braced_body(&process[wait_runtime_start..]);
+    assert!(wait.contains("linux_wait_selector(pid"));
+    assert!(wait.contains("options & !LINUX_WNOHANG"));
+    assert!(wait.contains("LinuxWaitOutcome::Ready"));
+    assert!(wait.contains("complete_wait_current"));
+    assert!(wait.contains("LinuxWaitOutcome::WouldBlock"));
+    assert!(wait_runtime.contains("LinuxBlockReason::ChildWait"));
+    assert!(wait_runtime.contains("scheduler::schedule()"));
+    assert!(wait.contains("SysError::ECHILD"));
+
+    let completion_start = process
+        .find("pub(crate) fn complete_wait_current(")
+        .expect("process-locked wait completion helper");
+    let completion = braced_body(&process[completion_start..]);
+    assert!(completion.contains("with_runtime(|runtime|"));
+    assert!(completion.contains("complete_linux_wait("));
+    assert!(completion.contains("linux_process_memory::copy_to_process("));
+    assert!(completion.contains("parent.pid"));
+    let transaction_start = process_logic
+        .find("pub(crate) fn complete_linux_wait")
+        .expect("shared wait transaction");
+    let transaction = braced_body(&process_logic[transaction_start..]);
+    let revalidate = transaction
+        .find("wait_outcome(parent_pid, selector)")
+        .expect("ready child revalidation");
+    let copy = transaction.find("copy_status(status)").expect("status copyout");
+    let commit = transaction.find("reap(parent_pid, pid)").expect("one-time reap");
+    assert!(revalidate < copy && copy < commit);
+
+    let exit_start = syscall.find("pub fn sys_exit(exit_code: i32)").expect("exit");
+    let exit = braced_body(&syscall[exit_start..]);
+    assert!(exit.contains("exit_current_linux_process(exit_code, false)"));
+    let exit_runtime_start = syscall
+        .find("fn exit_current_linux_process(")
+        .expect("shared Linux exit helper");
+    let exit_runtime = braced_body(&syscall[exit_runtime_start..]);
+    assert!(exit_runtime.contains("exit_current_process"));
+    assert!(task.contains("retire_process_tasks"));
+    assert!(process.contains("linux_task::wake_process_waiters(parent_pid)"));
+
+    let group_start = syscall
+        .find("pub fn sys_exit_group(exit_code: i32)")
+        .expect("exit_group");
+    let group = braced_body(&syscall[group_start..]);
+    assert!(!group.contains("linux_task::reset()"));
+    assert!(group.contains("exit_current_linux_process(exit_code, true)"));
+}
+
+#[test]
+fn posix_resources_include_linux_process_page_lifecycle() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read Linux process runtime");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read Linux process memory");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall runtime");
+    let guest = std::fs::read_to_string(repository.join("src/user_level/services/posix_test.rs"))
+        .expect("read POSIX guest runner");
+
+    for field in [
+        "linux_processes",
+        "linux_zombies",
+        "private_pages",
+        "shared_pages",
+        "page_table_pages",
+    ] {
+        assert!(syscall.contains(&format!("pub {field}: usize")));
+        assert!(guest.contains(&format!("\"{field}\"")));
+    }
+    assert!(process.contains("pub(crate) struct LinuxProcessResourceCounts"));
+    assert!(process.contains("pub(crate) fn resource_counts("));
+    assert!(process.contains("runtime.processes.running_pids_match("));
+    assert!(memory.contains("pub(crate) fn resource_counts("));
+    assert!(syscall.contains("let linux_process_counts = linux_process::resource_counts()"));
+    assert!(!syscall.contains("let linux_memory_counts = linux_process_memory::resource_counts()"));
+    for field in ["private_pages", "shared_pages", "page_table_pages"] {
+        assert!(process.contains(&format!("{field}: linux_memory_counts.{field}")));
+    }
+    assert!(syscall.contains("processes: crate::kernel_lowlevel::memory::process_manager()"));
+}
+
+#[test]
+fn linux_wait_and_exit_runtime_own_blocking_reaping_and_safe_teardown() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read Linux process runtime");
+    let process_logic = std::fs::read_to_string(
+        repository.join("src/syscall/linux_process_logic_shared.rs"),
+    )
+    .expect("read Linux process logic");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read Linux process memory");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall runtime");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+
+    let wait_start = process
+        .find("pub(crate) fn wait_current(")
+        .expect("wait runtime helper");
+    let wait = braced_body(&process[wait_start..]);
+    assert!(wait.contains("nohang"));
+    assert!(!wait.contains("_nohang"));
+    assert!(wait.contains("linux_task::block_current(LinuxBlockReason::ChildWait)"));
+    assert!(wait.contains("scheduler::schedule()"));
+
+    let syscall_wait_start = syscall.find("pub fn sys_wait4(").expect("wait4 syscall");
+    let syscall_wait = braced_body(&syscall[syscall_wait_start..]);
+    assert!(!syscall_wait.contains("block_current"));
+    assert!(!syscall_wait.contains("scheduler::schedule()"));
+
+    assert!(process_logic.contains("pub(crate) const LINUX_LAUNCH_REAPER_PID"));
+    assert!(process_logic.contains("fn reparent_children_to_launch_reaper("));
+    assert!(process_logic.contains("fn adopt_launch_descendants("));
+    assert!(process_logic.contains("fn reap_launch_descendants("));
+
+    let exit_start = process
+        .find("pub(crate) fn exit_current_process(")
+        .expect("process exit helper");
+    let exit = braced_body(&process[exit_start..]);
+    let deactivate = exit
+        .find("deactivate_current_address_space()")
+        .expect("active address space is deactivated");
+    let retire_tasks = exit
+        .find("retire_process_tasks(")
+        .expect("current process tasks are retired");
+    let unregister = exit
+        .find("linux_process_memory::unregister(process.pid)")
+        .expect("exiting memory is unregistered");
+    assert!(deactivate < retire_tasks && retire_tasks < unregister);
+    assert!(memory.contains("mmu::activate_bootstrap_on_current_cpu()"));
+
+    assert!(task.contains("fn retire_tasks("));
+    let retire_process = braced_body(
+        &task[task
+            .find("pub(crate) fn retire_process_tasks(")
+            .expect("process task retirement")..],
+    );
+    let retire_descendants = braced_body(
+        &task[task
+            .find("pub(crate) fn retire_launch_descendants(")
+            .expect("launch descendant retirement")..],
+    );
+    assert!(retire_process.contains("retire_tasks("));
+    assert!(retire_descendants.contains("retire_tasks("));
+    assert!(task.contains("copy_to_process("));
+    assert!(task.contains("wake_address("));
 }
 
 #[test]

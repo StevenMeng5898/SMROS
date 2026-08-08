@@ -120,6 +120,10 @@ impl FallbackAddressSpace {
         self.root_paddr
     }
 
+    fn table_page_count(&self) -> usize {
+        1
+    }
+
     fn map_user_page(
         &mut self,
         _vaddr: usize,
@@ -188,6 +192,27 @@ pub(crate) struct LinuxMemoryMappingSnapshot {
 
 struct LinuxProcessMemoryRuntime {
     memories: Vec<LinuxProcessMemory>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxProcessMemoryResourceCounts {
+    pub private_pages: usize,
+    pub shared_pages: usize,
+    pub page_table_pages: usize,
+    pub(crate) process_pids: [usize; linux_process::LINUX_PROCESS_LIMIT],
+    pub(crate) process_count: usize,
+}
+
+impl LinuxProcessMemoryResourceCounts {
+    const fn new() -> Self {
+        Self {
+            private_pages: 0,
+            shared_pages: 0,
+            page_table_pages: 0,
+            process_pids: [0; linux_process::LINUX_PROCESS_LIMIT],
+            process_count: 0,
+        }
+    }
 }
 
 struct LinuxSharedPageRuntime {
@@ -488,6 +513,14 @@ pub(crate) fn unregister(pid: usize) -> bool {
         runtime.memories.remove(index);
         true
     })
+}
+
+pub(crate) fn deactivate_current_address_space() -> Result<(), SysError> {
+    #[cfg(target_arch = "aarch64")]
+    if !crate::kernel_lowlevel::mmu::activate_bootstrap_on_current_cpu() {
+        return Err(SysError::EIO);
+    }
+    Ok(())
 }
 
 pub(crate) fn clone_for_fork(
@@ -1086,6 +1119,29 @@ pub(crate) fn total_mapping_count() -> usize {
             .iter()
             .map(|memory| memory.mappings.len())
             .sum()
+    })
+}
+
+pub(crate) fn resource_counts() -> LinuxProcessMemoryResourceCounts {
+    with_runtime(|runtime| {
+        let mut counts = LinuxProcessMemoryResourceCounts::new();
+        for memory in &runtime.memories {
+            counts.process_pids[counts.process_count] = memory.pid;
+            counts.process_count += 1;
+            counts.page_table_pages += memory.address_space.table_page_count();
+            for page in memory
+                .mappings
+                .iter()
+                .flat_map(|mapping| mapping.pages.iter())
+                .chain(memory.brk.pages.iter())
+            {
+                match page {
+                    LinuxPageBacking::Private { .. } => counts.private_pages += 1,
+                    LinuxPageBacking::Shared { .. } => counts.shared_pages += 1,
+                }
+            }
+        }
+        counts
     })
 }
 

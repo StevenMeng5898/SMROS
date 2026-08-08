@@ -1701,6 +1701,43 @@ class QemuControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "build identity"):
             changed.run(resume=True)
 
+    def test_process_page_resource_deltas_survive_persistence_and_resume(self) -> None:
+        resources = ResourceDeltas.from_mapping(
+            {
+                "linux_processes": 1,
+                "linux_zombies": -2,
+                "private_pages": 3,
+                "shared_pages": -4,
+                "page_table_pages": 5,
+            }
+        )
+        interrupted = FakeTransport(
+            self.clock,
+            [
+                PROMPT,
+                _start_events(self.one),
+                _end_events(self.one, resource_deltas=resources.to_dict()),
+                KeyboardInterrupt(),
+            ],
+        )
+        controller, _factory = self._controller([interrupted])
+        with self.assertRaises(KeyboardInterrupt):
+            controller.run()
+
+        resumed_transport = FakeTransport(
+            self.clock,
+            [PROMPT, _start_events(self.two), _end_events(self.two), PROMPT],
+        )
+        resumed, _factory = self._controller([resumed_transport])
+        result = resumed.run(resume=True)
+
+        restored = result.attempts[0].resource_deltas
+        self.assertEqual(restored.linux_processes, 1)
+        self.assertEqual(restored.linux_zombies, -2)
+        self.assertEqual(restored.private_pages, 3)
+        self.assertEqual(restored.shared_pages, -4)
+        self.assertEqual(restored.page_table_pages, 5)
+
     def test_resume_rejects_inconsistent_boot_and_restart_counts(self) -> None:
         output = self.root / "resume-counter-consistency"
         _clock, progress_bytes, _raw_bytes = self._create_resumable_campaign(output)

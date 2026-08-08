@@ -147,6 +147,10 @@ impl Aarch64AddressSpace {
         self.core.root_paddr().unwrap_or(0) as u64
     }
 
+    pub(crate) fn table_page_count(&self) -> usize {
+        self.core.table_page_count()
+    }
+
     pub fn map_user_page(
         &mut self,
         vaddr: usize,

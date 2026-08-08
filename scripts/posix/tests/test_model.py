@@ -2,10 +2,28 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.posix.model import validate_raw_attempt_semantics
+from scripts.posix.model import RESOURCE_DELTA_NAMES, ResourceDeltas, validate_raw_attempt_semantics
 
 
 class RuntimeAttemptSemanticsTests(unittest.TestCase):
+    def test_linux_process_page_resource_deltas_are_complete_and_signed(self) -> None:
+        expected = {
+            "linux_processes": 1,
+            "linux_zombies": -2,
+            "private_pages": 3,
+            "shared_pages": -4,
+            "page_table_pages": 5,
+        }
+        values = {name: 0 for name in RESOURCE_DELTA_NAMES}
+        values.update(expected)
+        deltas = ResourceDeltas.from_complete_mapping(values)
+
+        for name, value in expected.items():
+            self.assertEqual(getattr(deltas, name), value)
+            self.assertEqual(deltas.to_dict()[name], value)
+        self.assertTrue(deltas.has_nonzero())
+        self.assertTrue(deltas.has_positive())
+
     def _validate_not_launched(self, **overrides: object) -> None:
         values: dict[str, object] = {
             "status": "untested",

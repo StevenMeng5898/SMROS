@@ -62,9 +62,14 @@ class ResourceModelTests(unittest.TestCase):
                 "kernel_handles": 0,
                 "linux_fds": 2,
                 "linux_mappings": 0,
+                "linux_processes": 0,
                 "linux_shared_memory": 0,
+                "linux_zombies": 0,
+                "page_table_pages": 0,
+                "private_pages": 0,
                 "processes": 0,
                 "scheduler_threads": -1,
+                "shared_pages": 0,
                 "timers": 5,
             },
         )
@@ -2010,9 +2015,14 @@ class RendererTests(ReportFixture, unittest.TestCase):
             "kernel_handles": 0,
             "linux_fds": 2,
             "linux_mappings": 0,
+            "linux_processes": 6,
             "linux_shared_memory": 0,
+            "linux_zombies": -1,
+            "page_table_pages": 7,
+            "private_pages": 8,
             "processes": 0,
             "scheduler_threads": 1,
+            "shared_pages": -9,
             "timers": 5,
         }
         resources = self.root / "resource-results.ndjson"
@@ -2040,6 +2050,11 @@ class RendererTests(ReportFixture, unittest.TestCase):
         self.assertEqual(summary["resource_deltas"]["timers"], 5)
         self.assertEqual(summary["resource_deltas"]["aio_requests"], 3)
         self.assertEqual(summary["resource_deltas"]["ipc_objects"], 4)
+        self.assertEqual(summary["resource_deltas"]["linux_processes"], 6)
+        self.assertEqual(summary["resource_deltas"]["linux_zombies"], -1)
+        self.assertEqual(summary["resource_deltas"]["page_table_pages"], 7)
+        self.assertEqual(summary["resource_deltas"]["private_pages"], 8)
+        self.assertEqual(summary["resource_deltas"]["shared_pages"], -9)
         self.assertEqual(summary["resource_leaks"]["timers"], 1)
         self.assertEqual(summary["resource_leaks"]["aio_requests"], 1)
         self.assertEqual(summary["resource_leaks"]["ipc_objects"], 1)
@@ -2057,6 +2072,11 @@ class RendererTests(ReportFixture, unittest.TestCase):
         self.assertEqual(group["resource_delta_timers"], "5")
         self.assertEqual(group["resource_delta_aio_requests"], "3")
         self.assertEqual(group["resource_delta_ipc_objects"], "4")
+        self.assertEqual(group["resource_delta_linux_processes"], "6")
+        self.assertEqual(group["resource_delta_linux_zombies"], "-1")
+        self.assertEqual(group["resource_delta_page_table_pages"], "7")
+        self.assertEqual(group["resource_delta_private_pages"], "8")
+        self.assertEqual(group["resource_delta_shared_pages"], "-9")
         junit = ET.parse(self.output / "junit.xml")
         properties = {
             item.attrib["name"]: item.attrib["value"]
@@ -2066,10 +2086,26 @@ class RendererTests(ReportFixture, unittest.TestCase):
         self.assertEqual(properties["resource_delta.timers"], "5")
         self.assertEqual(properties["resource_delta.aio_requests"], "3")
         self.assertEqual(properties["resource_delta.ipc_objects"], "4")
+        self.assertEqual(properties["resource_delta.linux_processes"], "6")
+        self.assertEqual(properties["resource_delta.linux_zombies"], "-1")
+        self.assertEqual(properties["resource_delta.page_table_pages"], "7")
+        self.assertEqual(properties["resource_delta.private_pages"], "8")
+        self.assertEqual(properties["resource_delta.shared_pages"], "-9")
         markdown = (self.output / "report.md").read_text(encoding="utf-8")
         html_text = (self.output / "index.html").read_text(encoding="utf-8")
         self.assertIn(r"linux\_fds=2", markdown)
         self.assertIn("linux_fds=2", html_text)
+        for name, value in (
+            ("linux_processes", 6),
+            ("linux_zombies", -1),
+            ("page_table_pages", 7),
+            ("private_pages", 8),
+            ("shared_pages", -9),
+        ):
+            markdown_name = name.replace("_", r"\_")
+            markdown_value = str(value).replace("-", r"\-")
+            self.assertIn(f"{markdown_name}={markdown_value}", markdown)
+            self.assertIn(f"{name}={value}", html_text)
 
     def test_negative_cleanup_delta_is_visible_but_not_a_leak(self) -> None:
         rows = [

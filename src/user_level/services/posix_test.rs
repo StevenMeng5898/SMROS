@@ -1103,9 +1103,37 @@ fn write_resource_deltas(
     );
     write_delta_field(
         serial,
+        "linux_processes",
+        before.linux_processes,
+        after.linux_processes,
+        false,
+    );
+    write_delta_field(
+        serial,
         "linux_shared_memory",
         before.linux_shared_memory,
         after.linux_shared_memory,
+        false,
+    );
+    write_delta_field(
+        serial,
+        "linux_zombies",
+        before.linux_zombies,
+        after.linux_zombies,
+        false,
+    );
+    write_delta_field(
+        serial,
+        "page_table_pages",
+        before.page_table_pages,
+        after.page_table_pages,
+        false,
+    );
+    write_delta_field(
+        serial,
+        "private_pages",
+        before.private_pages,
+        after.private_pages,
         false,
     );
     write_delta_field(
@@ -1120,6 +1148,13 @@ fn write_resource_deltas(
         "scheduler_threads",
         before.scheduler_threads,
         after.scheduler_threads,
+        false,
+    );
+    write_delta_field(
+        serial,
+        "shared_pages",
+        before.shared_pages,
+        after.shared_pages,
         false,
     );
     write_delta_field(serial, "timers", before.timers, after.timers, false);

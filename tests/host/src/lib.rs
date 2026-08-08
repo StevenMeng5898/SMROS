@@ -560,6 +560,56 @@ mod linux_task_logic {
     }
 
     #[test]
+    fn child_wait_blocking_is_tgid_scoped_and_wakes_once() {
+        let mut tasks = LinuxTaskTable::<3>::new();
+        tasks.register_root(7).unwrap();
+        let other_process = tasks.reserve_child(2, 8).unwrap();
+        assert!(tasks.publish(other_process));
+
+        assert!(tasks.block(
+            LINUX_ROOT_TID,
+            7,
+            LinuxBlockReason::ChildWait,
+        ));
+        assert_eq!(
+            tasks.by_tid(LINUX_ROOT_TID).map(|task| task.block_reason),
+            Some(LinuxBlockReason::ChildWait)
+        );
+        assert_eq!(
+            tasks.by_tid(other_process.tid).map(|task| task.tgid),
+            Some(2)
+        );
+        assert!(tasks.wake(LINUX_ROOT_TID, 7));
+        assert!(!tasks.wake(LINUX_ROOT_TID, 7));
+    }
+
+    #[test]
+    fn child_waiter_snapshot_includes_every_waiter_in_the_parent_tgid() {
+        let mut tasks = LinuxTaskTable::<4>::new();
+        tasks.register_root(7).unwrap();
+        let peer = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
+        let other_process = tasks.reserve_child(2, 9).unwrap();
+        assert!(tasks.publish(peer));
+        assert!(tasks.publish(other_process));
+
+        assert!(tasks.block(LINUX_ROOT_TID, 7, LinuxBlockReason::ChildWait));
+        assert!(tasks.block(peer.tid, 8, LinuxBlockReason::ChildWait));
+        assert!(tasks.block(
+            other_process.tid,
+            9,
+            LinuxBlockReason::ChildWait,
+        ));
+
+        let waiters: Vec<_> = tasks
+            .child_waiters(LINUX_ROOT_TID)
+            .into_iter()
+            .flatten()
+            .map(|task| task.tid)
+            .collect();
+        assert_eq!(waiters, vec![LINUX_ROOT_TID, peer.tid]);
+    }
+
+    #[test]
     fn rollback_releases_only_the_matching_starting_reservation() {
         let mut tasks = LinuxTaskTable::<2>::new();
         tasks.register_root(7).unwrap();
@@ -2332,6 +2382,220 @@ mod linux_process_logic {
     }
 
     #[test]
+    fn wait_outcomes_distinguish_ready_live_and_absent_children_without_reaping() {
+        let mut processes = LinuxProcessTable::<4>::new();
+        processes.register_root(7).unwrap();
+        let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert!(processes.publish(child));
+
+        assert_eq!(
+            processes.wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Any),
+            LinuxWaitOutcome::WouldBlock
+        );
+        assert_eq!(
+            processes.wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Pid(999)),
+            LinuxWaitOutcome::NoChildren
+        );
+
+        let status = linux_wait_status_exit(37);
+        assert!(processes.exit(child.pid, status));
+        assert_eq!(
+            processes.wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Any),
+            LinuxWaitOutcome::Ready {
+                pid: child.pid,
+                status,
+            }
+        );
+        assert_eq!(
+            processes.wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Any),
+            LinuxWaitOutcome::Ready {
+                pid: child.pid,
+                status,
+            },
+            "selecting a ready child must not reap before status copyout"
+        );
+        assert!(processes.reap(LINUX_ROOT_PID, child.pid).is_some());
+        assert_eq!(
+            processes.wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Any),
+            LinuxWaitOutcome::NoChildren
+        );
+    }
+
+    #[test]
+    fn wait_completion_copies_before_reaping_and_preserves_zombie_on_fault() {
+        let mut processes = LinuxProcessTable::<3>::new();
+        processes.register_root(7).unwrap();
+        let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert!(processes.publish(child));
+        let status = linux_wait_status_exit(37);
+        assert!(processes.exit(child.pid, status));
+
+        let selected = processes.wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Any);
+        let LinuxWaitOutcome::Ready { pid, status } = selected else {
+            panic!("child must be waitable");
+        };
+        let failed = complete_linux_wait(
+            &mut processes,
+            LINUX_ROOT_PID,
+            LinuxWaitSelector::Any,
+            pid,
+            status,
+            |_status| Err(14u8),
+        );
+        assert_eq!(failed, Err(LinuxWaitCompletionError::Copy(14)));
+        assert_eq!(
+            processes.wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Any),
+            selected
+        );
+
+        let mut copied_status = None;
+        let completed = complete_linux_wait(
+            &mut processes,
+            LINUX_ROOT_PID,
+            LinuxWaitSelector::Any,
+            pid,
+            status,
+            |status| {
+                copied_status = Some(status);
+                Ok::<(), u8>(())
+            },
+        );
+        assert_eq!(completed, Ok(Some(pid)));
+        assert_eq!(copied_status, Some(status));
+        assert_eq!(
+            processes.wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Any),
+            LinuxWaitOutcome::NoChildren
+        );
+
+        let repeated = complete_linux_wait(
+            &mut processes,
+            LINUX_ROOT_PID,
+            LinuxWaitSelector::Any,
+            pid,
+            status,
+            |_status| Ok::<(), u8>(()),
+        );
+        assert_eq!(repeated, Ok(None));
+    }
+
+    #[test]
+    fn concurrent_waiters_serialize_stale_selection_copyout_and_reap() {
+        use std::sync::{Arc, Barrier, Mutex};
+
+        let mut processes = LinuxProcessTable::<3>::new();
+        processes.register_root(7).unwrap();
+        let first = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        let second = processes.reserve_child(LINUX_ROOT_PID, 9).unwrap();
+        assert!(processes.publish(first));
+        assert!(processes.publish(second));
+        assert!(processes.exit(first.pid, linux_wait_status_exit(31)));
+        assert!(processes.exit(second.pid, linux_wait_status_exit(32)));
+
+        let stale = processes.wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Any);
+        let runtime = Arc::new(Mutex::new(processes));
+        let start = Arc::new(Barrier::new(2));
+        let mut waiters = Vec::new();
+        for _ in 0..2 {
+            let runtime = Arc::clone(&runtime);
+            let start = Arc::clone(&start);
+            waiters.push(std::thread::spawn(move || {
+                let mut observed = stale;
+                start.wait();
+                loop {
+                    let LinuxWaitOutcome::Ready { pid, status } = observed else {
+                        panic!("a distinct zombie must remain for each waiter");
+                    };
+                    let mut processes = runtime.lock().expect("process runtime lock");
+                    match complete_linux_wait(
+                        &mut processes,
+                        LINUX_ROOT_PID,
+                        LinuxWaitSelector::Any,
+                        pid,
+                        status,
+                        |_status| Ok::<(), u8>(()),
+                    ) {
+                        Ok(Some(reaped_pid)) => return reaped_pid,
+                        Ok(None) => {
+                            observed = processes
+                                .wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Any);
+                        }
+                        Err(error) => panic!("wait completion failed: {error:?}"),
+                    }
+                }
+            }));
+        }
+
+        let mut reaped: Vec<_> = waiters
+            .into_iter()
+            .map(|waiter| waiter.join().expect("waiter thread"))
+            .collect();
+        reaped.sort_unstable();
+        assert_eq!(reaped, vec![first.pid, second.pid]);
+        assert_eq!(
+            runtime
+                .lock()
+                .expect("process runtime lock")
+                .wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Any),
+            LinuxWaitOutcome::NoChildren
+        );
+    }
+
+    #[test]
+    fn wait_pid_parser_covers_posix_selectors_without_signed_overflow() {
+        assert_eq!(
+            linux_wait_selector(23, 7),
+            Some(LinuxWaitSelector::Pid(23))
+        );
+        assert_eq!(linux_wait_selector(-1, 7), Some(LinuxWaitSelector::Any));
+        assert_eq!(
+            linux_wait_selector(0, 7),
+            Some(LinuxWaitSelector::ProcessGroup(7))
+        );
+        assert_eq!(
+            linux_wait_selector(-23, 7),
+            Some(LinuxWaitSelector::ProcessGroup(23))
+        );
+        assert_eq!(
+            linux_wait_selector(i32::MIN, 7),
+            Some(LinuxWaitSelector::ProcessGroup(1usize << 31))
+        );
+    }
+
+    #[test]
+    fn process_counts_track_live_and_zombie_lifecycle_exactly() {
+        let mut processes = LinuxProcessTable::<3>::new();
+        processes.register_root(7).unwrap();
+        assert_eq!(processes.resource_counts(), (1, 0));
+        let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert_eq!(processes.resource_counts(), (1, 0));
+        assert!(processes.publish(child));
+        assert_eq!(processes.resource_counts(), (2, 0));
+        assert!(processes.exit(child.pid, linux_wait_status_exit(9)));
+        assert_eq!(processes.resource_counts(), (1, 1));
+        assert!(processes.reap(LINUX_ROOT_PID, child.pid).is_some());
+        assert_eq!(processes.resource_counts(), (1, 0));
+    }
+
+    #[test]
+    fn process_memory_identity_match_rejects_partial_fork_and_exit_snapshots() {
+        let mut processes = LinuxProcessTable::<3>::new();
+        processes.register_root(7).unwrap();
+        assert!(processes.running_pids_match(&[LINUX_ROOT_PID]));
+
+        let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert!(processes.running_pids_match(&[LINUX_ROOT_PID]));
+        assert!(!processes.running_pids_match(&[LINUX_ROOT_PID, child.pid]));
+
+        assert!(processes.publish(child));
+        assert!(processes.running_pids_match(&[LINUX_ROOT_PID, child.pid]));
+        assert!(!processes.running_pids_match(&[LINUX_ROOT_PID]));
+
+        assert!(processes.exit(child.pid, linux_wait_status_exit(9)));
+        assert!(processes.running_pids_match(&[LINUX_ROOT_PID]));
+        assert!(!processes.running_pids_match(&[LINUX_ROOT_PID, child.pid]));
+    }
+
+    #[test]
     fn zombies_are_reaped_once_without_reusing_their_pid() {
         let mut processes = LinuxProcessTable::<2>::new();
         processes.register_root(7).unwrap();
@@ -2366,21 +2630,53 @@ mod linux_process_logic {
         assert!(processes.exit(zombie.pid, linux_wait_status_exit(4)));
         let reserved = processes.reserve_child(parent.pid, 11).unwrap();
 
-        assert_eq!(processes.reparent_children(parent.pid, LINUX_ROOT_PID), 2);
+        assert_eq!(processes.reparent_children_to_launch_reaper(parent.pid), 2);
         assert_eq!(
             processes
                 .by_pid(running.pid)
                 .map(|process| process.parent_pid),
-            Some(LINUX_ROOT_PID)
+            Some(LINUX_LAUNCH_REAPER_PID)
         );
         assert_eq!(
             processes
                 .by_pid(zombie.pid)
                 .map(|process| process.parent_pid),
-            Some(LINUX_ROOT_PID)
+            Some(LINUX_LAUNCH_REAPER_PID)
         );
         assert_eq!(processes.by_pid(reserved.pid), None);
         assert!(processes.rollback(reserved));
+    }
+
+    #[test]
+    fn launch_reaper_adopts_and_reaps_every_descendant_without_reaping_root() {
+        let mut processes = LinuxProcessTable::<5>::new();
+        assert!(!processes.launch_reaper_active());
+        processes.register_root(7).unwrap();
+        assert!(processes.launch_reaper_active());
+        let parent = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert!(processes.publish(parent));
+        let grandchild = processes.reserve_child(parent.pid, 9).unwrap();
+        assert!(processes.publish(grandchild));
+        let zombie = processes.reserve_child(parent.pid, 10).unwrap();
+        assert!(processes.publish(zombie));
+        assert!(processes.exit(zombie.pid, linux_wait_status_exit(4)));
+
+        assert_eq!(processes.adopt_launch_descendants(LINUX_ROOT_PID), 3);
+        for pid in [parent.pid, grandchild.pid, zombie.pid] {
+            assert_eq!(
+                processes.by_pid(pid).map(|process| process.parent_pid),
+                Some(LINUX_LAUNCH_REAPER_PID)
+            );
+        }
+        assert_eq!(processes.reap_launch_descendants(), 3);
+        assert_eq!(processes.resource_counts(), (1, 0));
+        assert_eq!(
+            processes.by_pid(LINUX_ROOT_PID).map(|process| process.state),
+            Some(LinuxProcessState::Running)
+        );
+        assert_eq!(processes.reap_launch_descendants(), 0);
+        processes.reset();
+        assert!(!processes.launch_reaper_active());
     }
 
     #[test]
@@ -3133,6 +3429,15 @@ mod linux_process_memory_logic {
         memory_pids: Vec<usize>,
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct HostLinuxProcessResourceCounts {
+        linux_processes: usize,
+        linux_zombies: usize,
+        private_pages: usize,
+        shared_pages: usize,
+        page_table_pages: usize,
+    }
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct ForkResourceSnapshot {
         process_records: Vec<LinuxProcessCore>,
@@ -3337,6 +3642,21 @@ mod linux_process_memory_logic {
                     .filter(|state| **state == HostSchedulerState::Ready)
                     .count(),
                 visible_pids,
+            }
+        }
+
+        fn linux_process_resource_counts(&self) -> HostLinuxProcessResourceCounts {
+            let (linux_processes, linux_zombies) = self.processes.resource_counts();
+            HostLinuxProcessResourceCounts {
+                linux_processes,
+                linux_zombies,
+                private_pages: self.private_pages.len(),
+                shared_pages: self
+                    .mapped_pages
+                    .iter()
+                    .filter(|(_, page)| page.is_shared())
+                    .count(),
+                page_table_pages: self.table_pages.len(),
             }
         }
     }
@@ -4141,6 +4461,109 @@ mod linux_process_memory_logic {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn exit_wait_lifecycle_snapshots_release_memory_before_one_time_reap() {
+        let _guard = FORK_FAILPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        clear_fork_failure();
+        let parent = core::array::from_fn(|index| (index as u8).wrapping_mul(37));
+        let mut kernel = HostForkKernel::parent(&parent);
+        assert_eq!(
+            kernel.linux_process_resource_counts(),
+            HostLinuxProcessResourceCounts {
+                linux_processes: 1,
+                linux_zombies: 0,
+                private_pages: 2,
+                shared_pages: 2,
+                page_table_pages: 3,
+            }
+        );
+
+        let child_pid = run_shared_adapter_fork(&parent, &mut kernel)
+            .expect("fork succeeds")
+            .parent_result;
+        assert_eq!(
+            kernel.linux_process_resource_counts(),
+            HostLinuxProcessResourceCounts {
+                linux_processes: 2,
+                linux_zombies: 0,
+                private_pages: 4,
+                shared_pages: 4,
+                page_table_pages: 6,
+            }
+        );
+
+        let child_task = kernel.tasks.by_tid(child_pid).expect("child task");
+        assert_eq!(
+            kernel
+                .tasks
+                .exit_with_clear_child_tid(child_task.tid, child_task.scheduler_thread),
+            Some(0)
+        );
+        assert!(
+            kernel
+                .tasks
+                .retire(child_task.tid, child_task.scheduler_thread)
+        );
+        kernel.scheduler[child_task.scheduler_thread] = HostSchedulerState::Empty;
+        let child_pages: Vec<LinuxPageBacking> = kernel
+            .mapped_pages
+            .split_off(4)
+            .into_iter()
+            .map(|(_, page)| page)
+            .collect();
+        let mut page_ops = HostForkPageOps {
+            kernel: &mut kernel,
+        };
+        for page in child_pages.into_iter().rev() {
+            page_ops.release_page(page);
+        }
+        kernel.memory_pids.retain(|pid| *pid != child_pid);
+        kernel.address_space_roots.truncate(1);
+        kernel.table_pages.truncate(3);
+        kernel.shared_attachment_references -= 1;
+        rollback_host_process_resources(&mut kernel);
+
+        let status = linux_wait_status_exit(37);
+        assert!(kernel.processes.exit(child_pid, status));
+        let exited = HostLinuxProcessResourceCounts {
+            linux_processes: 1,
+            linux_zombies: 1,
+            private_pages: 2,
+            shared_pages: 2,
+            page_table_pages: 3,
+        };
+        assert_eq!(kernel.linux_process_resource_counts(), exited);
+        assert_eq!(
+            kernel
+                .processes
+                .wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Pid(child_pid)),
+            LinuxWaitOutcome::Ready {
+                pid: child_pid,
+                status,
+            }
+        );
+        assert_eq!(
+            kernel.linux_process_resource_counts(),
+            exited,
+            "failed status copyout must leave the selected zombie waitable"
+        );
+
+        assert!(kernel.processes.reap(LINUX_ROOT_PID, child_pid).is_some());
+        assert_eq!(
+            kernel.linux_process_resource_counts(),
+            HostLinuxProcessResourceCounts {
+                linux_processes: 1,
+                linux_zombies: 0,
+                private_pages: 2,
+                shared_pages: 2,
+                page_table_pages: 3,
+            }
+        );
+        assert_eq!(kernel.processes.reap(LINUX_ROOT_PID, child_pid), None);
     }
 
     #[test]
@@ -5802,6 +6225,17 @@ mod aarch64_vm_logic {
         assert_eq!(allocator.allocated_pages(), baseline + 3);
         drop(address_space);
         assert_eq!(allocator.allocated_pages(), baseline);
+    }
+
+    #[test]
+    fn page_table_resource_count_tracks_owned_table_pages() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let mut address_space = Aarch64AddressSpaceModel::new(&mut allocator).expect("root");
+        assert_eq!(address_space.table_page_count(), 1);
+        address_space
+            .map_user_page(&mut allocator, 0x1000_0000, 0x9000, true, true, false)
+            .expect("map page");
+        assert_eq!(address_space.table_page_count(), 3);
     }
 
     #[test]
