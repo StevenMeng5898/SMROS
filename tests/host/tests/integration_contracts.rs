@@ -3636,6 +3636,34 @@ fn linux_process_pending_process_state_access_has_compiler_barriers() {
 }
 
 #[test]
+fn aarch64_kernel_threads_reserve_fork_transaction_headroom() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let thread = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/thread.rs"))
+        .expect("read AArch64 thread runtime");
+    let declaration = thread
+        .lines()
+        .find(|line| {
+            line.trim_start()
+                .starts_with("pub const DEFAULT_STACK_SIZE:")
+        })
+        .expect("AArch64 default kernel stack size");
+    let value = declaration
+        .split_once('=')
+        .map(|(_, value)| value.trim().trim_end_matches(';').replace('_', ""))
+        .expect("AArch64 default kernel stack value");
+    let stack_size = value
+        .strip_prefix("0x")
+        .map(|value| usize::from_str_radix(value, 16))
+        .unwrap_or_else(|| value.parse())
+        .expect("numeric AArch64 default kernel stack value");
+
+    assert!(
+        stack_size >= 0x1_0000,
+        "AArch64 fork transaction needs 64 KiB kernel-stack headroom; got {stack_size:#x}"
+    );
+}
+
+#[test]
 fn aarch64_el0_context_abi_is_complete() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let boot = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/boot.rs"))
