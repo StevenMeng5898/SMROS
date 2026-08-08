@@ -83,11 +83,13 @@ pub(crate) fn apply_linux_terminal_child_transition<E>(
     notify_parent: impl FnOnce(usize) -> Result<(), E>,
     wake_parent_waiters: impl FnOnce(usize),
 ) -> Result<(), E> {
-    if transition.notify_parent {
-        notify_parent(transition.parent_pid)?;
-    }
+    let notification = if transition.notify_parent {
+        notify_parent(transition.parent_pid)
+    } else {
+        Ok(())
+    };
     wake_parent_waiters(transition.parent_pid);
-    Ok(())
+    notification
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

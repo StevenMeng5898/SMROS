@@ -5879,6 +5879,7 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
     assert!(descendant_transition.contains("process.parent_pid"));
     assert!(descendant_transition.contains(".terminate_child(pid, wait_status, policy)"));
     assert!(descendant_transition.contains("reparent_children_to_launch_reaper(pid)"));
+    assert!(terminal.contains("let _ = apply_linux_terminal_child_transition("));
     let queue = terminal
         .find("super::queue_process_linux_signal_and_wake(")
         .expect("SIGCHLD notification");
@@ -5886,6 +5887,15 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
         .find("linux_task::wake_process_waiters(parent_pid)")
         .expect("matching waiter wake");
     assert!(wake > queue || terminal.contains("notify_parent"));
+
+    let root_transition = braced_body(
+        &terminal[terminal
+            .find("let descendant_count = with_runtime(|runtime|")
+            .expect("atomic launch-root terminal transition")..],
+    );
+    assert!(root_transition.contains("runtime.processes.exit(pid, wait_status)"));
+    assert!(root_transition.contains("runtime.signal_states[slot]"));
+    assert!(root_transition.contains("adopt_launch_descendants(LINUX_ROOT_PID)"));
 
     let prepare_return = braced_body(
         &launcher[launcher

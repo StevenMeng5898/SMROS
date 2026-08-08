@@ -2484,6 +2484,32 @@ mod linux_process_logic {
     }
 
     #[test]
+    fn terminal_child_transition_wakes_waiters_after_notification_failure() {
+        let transition = LinuxTerminalChildTransition {
+            parent_pid: LINUX_ROOT_PID,
+            notify_parent: true,
+        };
+        let mut notification_attempts = 0usize;
+        let mut waiter_wakes = 0usize;
+
+        let result = apply_linux_terminal_child_transition(
+            transition,
+            |_| {
+                notification_attempts += 1;
+                Err(17usize)
+            },
+            |parent_pid| {
+                assert_eq!(parent_pid, LINUX_ROOT_PID);
+                waiter_wakes += 1;
+            },
+        );
+
+        assert_eq!(result, Err(17));
+        assert_eq!(notification_attempts, 1);
+        assert_eq!(waiter_wakes, 1);
+    }
+
+    #[test]
     fn wait_selection_covers_exact_any_group_and_wnohang_states() {
         let mut processes = LinuxProcessTable::<4>::new();
         processes.register_root(7).unwrap();

@@ -328,7 +328,7 @@ fn finish_terminal_process(
             Ok(Some(transition))
         })?;
         if let Some(transition) = transition {
-            apply_linux_terminal_child_transition(
+            let _ = apply_linux_terminal_child_transition(
                 transition,
                 |parent_pid| {
                     super::queue_process_linux_signal_and_wake(
@@ -339,22 +339,18 @@ fn finish_terminal_process(
                 |parent_pid| {
                     let _ = linux_task::wake_process_waiters(parent_pid);
                 },
-            )?;
+            );
         }
         return Ok(LinuxProcessExitOutcome::Descendant);
     }
 
-    with_runtime(|runtime| {
+    let mut descendant_pids = [0usize; LINUX_PROCESS_LIMIT];
+    let descendant_count = with_runtime(|runtime| {
         let slot = process_slot(runtime, pid)?;
         if !runtime.processes.exit(pid, wait_status) {
             return Err(SysError::ESRCH);
         }
         runtime.signal_states[slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
-        Ok(())
-    })?;
-
-    let mut descendant_pids = [0usize; LINUX_PROCESS_LIMIT];
-    let descendant_count = with_runtime(|runtime| {
         let _ = runtime.processes.adopt_launch_descendants(LINUX_ROOT_PID);
         let mut count = 0usize;
         for descendant in runtime.processes.processes.iter().copied() {
@@ -366,8 +362,8 @@ fn finish_terminal_process(
             descendant_pids[count] = descendant.pid;
             count += 1;
         }
-        count
-    });
+        Ok(count)
+    })?;
     linux_task::retire_launch_descendants(LINUX_ROOT_PID);
     for pid in descendant_pids.into_iter().take(descendant_count) {
         let _ = super::linux_process_memory::unregister(pid);
