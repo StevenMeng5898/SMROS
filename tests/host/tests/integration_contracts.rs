@@ -1526,8 +1526,8 @@ fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
         syscall
             .matches("crate::user_level::run_elf::prepare_run_elf_return(exit_code)")
             .count(),
-        1,
-        "exit and exit_group must converge on one launcher completion hook"
+        2,
+        "normal exit and signal termination each complete the launcher exactly once"
     );
     assert!(syscall.contains("let exit_code = syscall_logic::linux_exit_status(exit_code);"));
     assert!(syscall.contains("pub fn sys_exit_group(exit_code: i32)"));
@@ -2192,7 +2192,9 @@ fn linux_child_exit_clears_tid_and_uses_deferred_stack_retirement() {
     assert!(!group_exit.contains("linux_futex::reset()"));
     assert!(!group_exit.contains("linux_task::reset()"));
 
-    let retire_tasks_start = task.find("fn retire_tasks(").expect("shared task retirement");
+    let retire_tasks_start = task
+        .find("fn retire_tasks(")
+        .expect("shared task retirement");
     let retire_tasks = braced_body(&task[retire_tasks_start..]);
     let clear_tid = retire_tasks
         .find("exit_with_clear_child_tid")
@@ -2832,6 +2834,8 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         .expect("read Linux futex runtime");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
         .expect("read Linux signal implementation");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read Linux process runtime");
 
     for field in [
         "pub mask: u64",
@@ -2918,8 +2922,8 @@ fn linux_signal_state_is_owned_by_each_live_task() {
             "task-owned signal state remains global: {removed_global}"
         );
     }
-    assert!(syscall.contains("process_pending: LinuxPendingSignals"));
-    assert!(syscall.contains("signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1]"));
+    assert!(process.contains("process_pending: LinuxPendingSignals"));
+    assert!(process.contains("signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1]"));
     assert!(!syscall.contains("static mut LINUX_PROCESS_PENDING"));
     assert!(syscall.contains(
         "linux_task::LINUX_TASK_LIMIT * LINUX_SIGNAL_FRAME_LIMIT * LINUX_SIGNAL_INFO_BYTES"
@@ -2938,10 +2942,10 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         .find("mask_interrupts()")
         .expect("process queue interrupt mask");
     let process_access = process_queue
-        .find("let result = operation(")
+        .find("linux_process::with_signal_state(pid, operation)")
         .expect("serialized process signal-state access");
-    assert!(process_queue.contains("&mut resources.signal_actions"));
-    assert!(process_queue.contains("&mut resources.process_pending"));
+    assert!(process.contains("&mut state.signal_actions"));
+    assert!(process.contains("&mut state.process_pending"));
     let process_restore = process_queue
         .find("restore_interrupts(interrupt_state)")
         .expect("process queue interrupt restore");
@@ -2951,8 +2955,7 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         .find("pub fn reset_linux_signal_timer_state()")
         .expect("signal process reset");
     let reset = braced_body(&syscall[reset_start..]);
-    assert!(reset.contains("with_linux_process_signal_state("));
-    assert!(reset.contains("pending.reset_in_place()"));
+    assert!(reset.contains("linux_process::reset_current_signal_state()"));
 
     for syscall_name in [
         "pub fn sys_rt_sigprocmask(",
@@ -3002,7 +3005,7 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         .find("linux_task::queue_task_signal(tgid, tid, LinuxPendingSignal::EMPTY)")
         .expect("exact target validation");
     let disposition = directed
-        .find("linux_signal_disposition(signum)")
+        .find("linux_signal_disposition_for(validated_target.tgid, signum)")
         .expect("centralized directed disposition");
     let ignore = directed
         .find("LinuxSignalDisposition::Ignore => Ok(0)")
@@ -3056,7 +3059,7 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         .find("linux_task::current_task()")
         .expect("current delivery task identity");
     let terminate = delivery
-        .find("process_manager().terminate_process(current.tgid)")
+        .find("terminate_linux_process_by_signal(current.tgid, signum)")
         .expect("current process default action");
     assert!(dequeue < disposition && disposition < current && current < terminate);
     assert!(delivery.contains("linux_task::with_current_signal_state_and_slot("));
@@ -3079,7 +3082,7 @@ fn linux_signal_state_is_owned_by_each_live_task() {
 
     let kill_start = syscall.find("pub fn sys_kill(").expect("kill syscall");
     let kill = braced_body(&syscall[kill_start..]);
-    assert!(kill.contains("linux_signal_disposition(signum)"));
+    assert!(kill.contains("linux_signal_disposition_for(target_pid, signum)"));
     assert!(kill.contains("LinuxSignalDisposition::Terminate"));
     assert!(kill.contains("queue_process_linux_signal_and_wake("));
     assert!(!kill.contains("terminate_process("));
@@ -3089,7 +3092,7 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         .expect("process queued signal syscall");
     let rt_queue = braced_body(&syscall[rt_queue_start..]);
     let disposition = rt_queue
-        .find("linux_signal_disposition(sig)")
+        .find("linux_signal_disposition_for(pid, sig)")
         .expect("queued signal disposition");
     let record = rt_queue
         .find("linux_signal_record_from_user(sig, info)")
@@ -3285,14 +3288,16 @@ fn linux_standard_pending_records_are_bounded_and_shared_with_process_routing() 
             .expect("read Linux task logic");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
         .expect("read Linux signal runtime");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read Linux process runtime");
 
     assert!(task_logic.contains("pub(crate) struct LinuxPendingSignals"));
     assert!(task_logic
         .contains("pub standard_records: [LinuxPendingSignal; LINUX_REALTIME_SIGNAL_MIN]"));
     assert!(task_logic.contains("pub(crate) fn requeue_front("));
-    assert!(syscall.contains("process_pending: LinuxPendingSignals"));
+    assert!(process.contains("process_pending: LinuxPendingSignals"));
     assert!(!syscall.contains("static mut LINUX_PROCESS_PENDING"));
-    assert!(syscall.contains("pending.reset_in_place()"));
+    assert!(process.contains("process_pending.reset_in_place()"));
     assert!(!syscall.contains("static LINUX_PROCESS_PENDING_SIGNALS: AtomicU64"));
 }
 
@@ -3304,6 +3309,8 @@ fn linux_signal_runtime_resets_large_state_in_place() {
             .expect("read Linux task logic");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
         .expect("read Linux signal runtime");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read Linux process runtime");
 
     assert!(task_logic.contains("pub(crate) fn reset_in_place(&mut self)"));
     assert!(task_logic.contains("self.pending.reset_in_place()"));
@@ -3329,11 +3336,11 @@ fn linux_signal_runtime_resets_large_state_in_place() {
         );
     }
 
-    let process_reset_start = syscall
-        .find("pub fn reset_linux_signal_timer_state()")
+    let process_reset_start = process
+        .find("pub(crate) fn reset_current_signal_state()")
         .expect("process pending reset");
-    let process_reset = braced_body(&syscall[process_reset_start..]);
-    assert!(process_reset.contains("pending.reset_in_place()"));
+    let process_reset = braced_body(&process[process_reset_start..]);
+    assert!(process_reset.contains("process_pending.reset_in_place()"));
     assert!(!syscall.contains("*pending = LinuxPendingSignals::new()"));
 }
 
@@ -3442,7 +3449,7 @@ fn linux_sigtimedwait_rollback_uses_bounded_source_local_reservations() {
         .find("with_linux_process_pending(")
         .expect("one outer process-pending critical section");
     let completion = handoff
-        .find("linux_task::handoff_process_pending_signal(pending)")
+        .find("linux_task::handoff_process_pending_signal(tgid, pending)")
         .expect("source-local pending handoff");
     let wake = handoff
         .rfind("linux_task::wake_blocked(")
@@ -3563,6 +3570,8 @@ fn linux_process_pending_process_state_access_has_compiler_barriers() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
         .expect("read Linux signal runtime");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read Linux process runtime");
     let guard_start = syscall
         .find("fn with_linux_process_signal_state<R>(")
         .expect("process pending queue guard");
@@ -3572,10 +3581,10 @@ fn linux_process_pending_process_state_access_has_compiler_barriers() {
         .find("compiler_fence(Ordering::SeqCst)")
         .expect("compiler fence after IRQ mask");
     let access = guard
-        .find("let result = operation(")
+        .find("linux_process::with_signal_state(pid, operation)")
         .expect("process-owned signal-state access");
-    assert!(guard.contains("&mut resources.signal_actions"));
-    assert!(guard.contains("&mut resources.process_pending"));
+    assert!(process.contains("&mut state.signal_actions"));
+    assert!(process.contains("&mut state.process_pending"));
     let second_fence = guard
         .rfind("compiler_fence(Ordering::SeqCst)")
         .expect("compiler fence before IRQ restore");
@@ -3956,7 +3965,8 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
     assert!(pending.contains("peek_unblocked().is_some()"));
     assert!(pending.contains("with_linux_process_pending("));
     assert!(pending.contains("peek_eligible("));
-    assert!(pending.contains("linux_task::process_signal_target(signum) == Some(current)"));
+    assert!(pending
+        .contains("linux_task::process_signal_target(current.tgid, signum) == Some(current)"));
     assert!(!pending.contains("take_"));
     assert!(!pending.contains("reserve"));
     assert!(!pending.contains("commit"));
@@ -4001,7 +4011,7 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
         .expect("process signal routing caller");
     let process = braced_body(&syscall[process_start..]);
     let queue_process = process
-        .find("queue_process_linux_signal(record)?")
+        .find("queue_process_linux_signal_for(tgid, record)?")
         .expect("process signal queue");
     let interrupt_process = process
         .find("interrupt_linux_signal_target(target, record.signum)")
@@ -5322,14 +5332,22 @@ fn linux_fork_publishes_only_a_complete_child() {
     }
 
     for process_owned_state in [
-        "signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1]",
-        "process_pending: LinuxPendingSignals",
         "container: LinuxProcessContainerState",
         "fn clone_linux_process_state(",
     ] {
         assert!(
             syscall.contains(process_owned_state),
             "missing process-owned fork state `{process_owned_state}`"
+        );
+    }
+    for signal_state in [
+        "signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1]",
+        "process_pending: LinuxPendingSignals",
+        "pub(crate) fn clone_signal_state_for_fork(",
+    ] {
+        assert!(
+            process.contains(signal_state),
+            "missing process-runtime signal state `{signal_state}`"
         );
     }
     for removed_global in [
@@ -5427,10 +5445,9 @@ fn linux_wait_reaps_one_real_child_status() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
         .expect("read Linux process runtime");
-    let process_logic = std::fs::read_to_string(
-        repository.join("src/syscall/linux_process_logic_shared.rs"),
-    )
-    .expect("read Linux process logic");
+    let process_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_process_logic_shared.rs"))
+            .expect("read Linux process logic");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
         .expect("read syscall runtime");
     let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
@@ -5481,11 +5498,17 @@ fn linux_wait_reaps_one_real_child_status() {
     let revalidate = transaction
         .find("wait_outcome(parent_pid, selector)")
         .expect("ready child revalidation");
-    let copy = transaction.find("copy_status(status)").expect("status copyout");
-    let commit = transaction.find("reap(parent_pid, pid)").expect("one-time reap");
+    let copy = transaction
+        .find("copy_status(status)")
+        .expect("status copyout");
+    let commit = transaction
+        .find("reap(parent_pid, pid)")
+        .expect("one-time reap");
     assert!(revalidate < copy && copy < commit);
 
-    let exit_start = syscall.find("pub fn sys_exit(exit_code: i32)").expect("exit");
+    let exit_start = syscall
+        .find("pub fn sys_exit(exit_code: i32)")
+        .expect("exit");
     let exit = braced_body(&syscall[exit_start..]);
     assert!(exit.contains("exit_current_linux_process(exit_code, false)"));
     let exit_runtime_start = syscall
@@ -5543,10 +5566,9 @@ fn linux_wait_and_exit_runtime_own_blocking_reaping_and_safe_teardown() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
         .expect("read Linux process runtime");
-    let process_logic = std::fs::read_to_string(
-        repository.join("src/syscall/linux_process_logic_shared.rs"),
-    )
-    .expect("read Linux process logic");
+    let process_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_process_logic_shared.rs"))
+            .expect("read Linux process logic");
     let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
         .expect("read Linux process memory");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
@@ -5613,6 +5635,8 @@ fn linux_fork_inherits_pid_owned_identity_paths_and_clears_transient_state() {
         .expect("read syscall implementation");
     let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
         .expect("read task runtime");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read Linux process runtime");
 
     for inherited in [
         "credentials: LinuxCredentialsCore",
@@ -5621,7 +5645,6 @@ fn linux_fork_inherits_pid_owned_identity_paths_and_clears_transient_state() {
         "credentials: parent.credentials.fork_child()",
         "try_clone_linux_fork_path(&parent.cwd)",
         "try_clone_linux_fork_path(&parent.root)",
-        "signal_actions: parent.signal_actions",
         "container: parent.container.try_fork(namespace_flags)?",
     ] {
         assert!(
@@ -5636,7 +5659,6 @@ fn linux_fork_inherits_pid_owned_identity_paths_and_clears_transient_state() {
             .expect("child process resource install")..],
     );
     for empty_child_state in [
-        "process_pending: LinuxPendingSignals::new()",
         "timer_handles: Vec::new()",
         "real_timer_deadline_tick: LINUX_TIMER_DISABLED",
     ] {
@@ -5645,6 +5667,13 @@ fn linux_fork_inherits_pid_owned_identity_paths_and_clears_transient_state() {
             "child inherited transient state `{empty_child_state}`"
         );
     }
+    let clone_signal = braced_body(
+        &process[process
+            .find("pub(crate) fn clone_signal_state_for_fork(")
+            .expect("fork signal-state clone")..],
+    );
+    assert!(clone_signal.contains("signal_actions"));
+    assert!(clone_signal.contains("process_pending: LinuxPendingSignals::new()"));
     assert!(syscall.contains("fn linux_aio_request_count() -> usize"));
     assert!(syscall.contains("active requests are invariantly zero"));
 
@@ -5674,4 +5703,165 @@ fn linux_fork_inherits_pid_owned_identity_paths_and_clears_transient_state() {
     assert!(reserve_task.contains("reserve_child(0, scheduler_id.0)"));
     assert!(reserve_task.contains("signal_states[reservation.slot].reset_in_place()"));
     assert!(reserve_task.contains("signal_states[reservation.slot].mask = parent_mask"));
+}
+
+#[test]
+fn linux_signal_termination_reports_wait_status_and_sigchld() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read Linux process runtime");
+    let process_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_process_logic_shared.rs"))
+            .expect("read shared Linux process logic");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+
+    assert!(process_logic.contains("pub(crate) enum LinuxSigchldExitPolicy"));
+    assert!(process_logic.contains("RetainZombieAndNotify"));
+    assert!(process_logic.contains("ReapAndNotify"));
+    assert!(process_logic.contains("ReapWithoutNotify"));
+    assert!(process_logic.contains("pub(crate) fn terminate_child("));
+    assert!(process_logic.contains("pub(crate) fn linux_wait_status_signal("));
+
+    for process_owned in [
+        "signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1]",
+        "process_pending: LinuxPendingSignals",
+        "pub(crate) fn with_signal_state<R>(",
+        "pub(crate) fn clone_signal_state_for_fork(",
+    ] {
+        assert!(
+            process.contains(process_owned),
+            "missing Linux-process signal ownership `{process_owned}`"
+        );
+    }
+    assert!(!syscall.contains("struct LinuxKernelSigaction"));
+    let resources = braced_body(
+        &syscall[syscall
+            .find("struct LinuxProcessResources")
+            .expect("Linux process resources")..],
+    );
+    assert!(!resources.contains("signal_actions"));
+    assert!(!resources.contains("process_pending"));
+
+    let store_action = braced_body(
+        &syscall[syscall
+            .find("fn store_linux_signal_action(")
+            .expect("signal action storage")..],
+    );
+    assert!(store_action.contains("let tgid = linux_resource_pid()"));
+    assert!(store_action.contains("linux_task::discard_signal(tgid, signum)"));
+    let discard_task = braced_body(
+        &task[task
+            .find("pub(crate) fn discard_signal(tgid: usize, signum: usize)")
+            .expect("TGID-scoped task pending discard")..],
+    );
+    assert!(discard_task.contains("task.tgid == tgid"));
+
+    let target = braced_body(
+        &task[task
+            .find("pub(crate) fn process_signal_target(")
+            .expect("process-directed target selection")..],
+    );
+    assert!(target.contains("tgid"));
+    assert!(target.contains("process_signal_target_for(tgid, signum)"));
+    assert!(task.contains("task.tgid == tgid"));
+
+    let terminate = braced_body(
+        &process[process
+            .find("pub(crate) fn terminate_by_signal(")
+            .expect("signal termination runtime")..],
+    );
+    assert!(terminate.contains("linux_wait_status_signal(signum, false)"));
+    assert!(terminate.contains("linux_task::terminate_process_tasks(tgid)"));
+    assert!(terminate.contains("finish_terminal_process("));
+    assert!(!terminate.contains("linux_task::finish_current_without_el0_return()"));
+
+    let finish_signal = braced_body(
+        &syscall[syscall
+            .find("fn terminate_linux_process_by_signal(")
+            .expect("signal termination completion")..],
+    );
+    assert!(finish_signal.contains("linux_process::terminate_by_signal(tgid, signum)"));
+    assert!(finish_signal.contains("LinuxProcessExitOutcome::LaunchRoot"));
+    assert!(finish_signal.contains("prepare_run_elf_return"));
+    assert!(finish_signal.contains("linux_task::finish_current_without_el0_return()"));
+
+    let delivery = braced_body(
+        &syscall[syscall
+            .find("fn deliver_next_linux_signal(")
+            .expect("default signal delivery")..],
+    );
+    assert!(delivery.contains("terminate_linux_process_by_signal(current.tgid, signum)"));
+    assert!(delivery.contains("regs[0] = launch_id"));
+    assert!(!delivery.contains("process_manager().terminate_process(current.tgid)"));
+
+    let kill = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_kill(")
+            .expect("process-directed kill")..],
+    );
+    assert!(kill.contains("linux_process::by_pid(target_pid)"));
+    assert!(kill.contains("if signum == LINUX_SIGKILL"));
+    assert!(kill.contains("terminate_linux_process_by_signal(target_pid, signum)"));
+    assert!(kill.contains("queue_process_linux_signal_and_wake(target_pid"));
+
+    let sigqueue = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_rt_sigqueueinfo(")
+            .expect("process queued signal syscall")..],
+    );
+    assert!(sigqueue.contains("if sig == LINUX_SIGKILL"));
+    assert!(sigqueue.contains("terminate_linux_process_by_signal(pid, sig)"));
+    assert!(!sigqueue.contains("linux_process::terminate_by_signal(pid, sig)"));
+
+    let process_queue = braced_body(
+        &syscall[syscall
+            .find("fn queue_process_linux_signal_and_wake(")
+            .expect("process signal queue")..],
+    );
+    assert!(
+        process_queue
+            .matches("with_linux_process_signal_state_for(tgid")
+            .count()
+            >= 2,
+        "failed signal-wait completion must roll back in the target process"
+    );
+    assert!(process_queue.contains("rollback_reservation(reservation, record)"));
+
+    let fork_process = braced_body(
+        &process[process
+            .find("pub(crate) fn clone_signal_state_for_fork(")
+            .expect("fork process signal cloning")..],
+    );
+    assert!(fork_process.contains("signal_actions"));
+    assert!(fork_process.contains("LinuxPendingSignals::new()"));
+    let fork_task = braced_body(
+        &task[task
+            .find("pub(crate) fn reserve_fork_task(")
+            .expect("fork child task reservation")..],
+    );
+    assert!(fork_task.contains("reset_in_place()"));
+    assert!(fork_task.contains("mask = parent_mask"));
+    assert!(fork_task.contains("reserve_child(0, scheduler_id.0)"));
+
+    let terminal = braced_body(
+        &process[process
+            .find("fn finish_terminal_process(")
+            .expect("terminal child handling")..],
+    );
+    assert!(terminal.contains("LINUX_SIGCHLD"));
+    assert!(terminal.contains("LINUX_SA_NOCLDWAIT"));
+    assert!(terminal.contains("LINUX_LAUNCH_REAPER_PID"));
+    assert!(terminal.contains("linux_sigchld_exit_policy("));
+    assert!(terminal.contains("super::queue_process_linux_signal_and_wake("));
+    assert!(terminal.contains("linux_task::wake_process_waiters(parent_pid)"));
+    let queue = terminal
+        .find("super::queue_process_linux_signal_and_wake(")
+        .expect("SIGCHLD notification");
+    let wake = terminal
+        .find("linux_task::wake_process_waiters(parent_pid)")
+        .expect("matching waiter wake");
+    assert!(wake > queue || terminal.contains("notify_parent"));
 }

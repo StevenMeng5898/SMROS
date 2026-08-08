@@ -56,6 +56,29 @@ pub(crate) enum LinuxWaitOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxSigchldExitPolicy {
+    RetainZombieAndNotify,
+    ReapAndNotify,
+    ReapWithoutNotify,
+}
+
+impl LinuxSigchldExitPolicy {
+    fn reap_immediately(self) -> bool {
+        matches!(self, Self::ReapAndNotify | Self::ReapWithoutNotify)
+    }
+
+    fn notify_parent(self) -> bool {
+        matches!(self, Self::RetainZombieAndNotify | Self::ReapAndNotify)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxTerminalChildTransition {
+    pub parent_pid: usize,
+    pub notify_parent: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxWaitCompletionError<E> {
     Copy(E),
     Reap,
@@ -96,6 +119,19 @@ pub(crate) fn linux_wait_status_signal(signum: usize, core_dumped: bool) -> Opti
     (1..=127)
         .contains(&signum)
         .then_some(signum as i32 | if core_dumped { 0x80 } else { 0 })
+}
+
+pub(crate) fn linux_sigchld_exit_policy(
+    sigchld_ignored: bool,
+    no_child_wait: bool,
+) -> LinuxSigchldExitPolicy {
+    if sigchld_ignored {
+        LinuxSigchldExitPolicy::ReapWithoutNotify
+    } else if no_child_wait {
+        LinuxSigchldExitPolicy::ReapAndNotify
+    } else {
+        LinuxSigchldExitPolicy::RetainZombieAndNotify
+    }
 }
 
 pub(crate) fn linux_wait_selector(
@@ -146,9 +182,11 @@ impl<const N: usize> LinuxProcessTable<N> {
         &mut self,
         scheduler_thread: usize,
     ) -> Result<usize, LinuxProcessError> {
-        if self.launch_reaper.active || self.processes.iter().any(|process| {
-            process.state != LinuxProcessState::Empty && process.pid == LINUX_ROOT_PID
-        }) {
+        if self.launch_reaper.active
+            || self.processes.iter().any(|process| {
+                process.state != LinuxProcessState::Empty && process.pid == LINUX_ROOT_PID
+            })
+        {
             return Err(LinuxProcessError::DuplicateRoot);
         }
         let Some(slot) = self
@@ -204,9 +242,10 @@ impl<const N: usize> LinuxProcessTable<N> {
             .position(|process| process.state == LinuxProcessState::Empty)
             .ok_or(LinuxProcessError::Capacity)?;
         if !(LINUX_ROOT_PID + 1..=LINUX_MAX_PID).contains(&pid)
-            || self.processes.iter().any(|process| {
-                process.state != LinuxProcessState::Empty && process.pid == pid
-            })
+            || self
+                .processes
+                .iter()
+                .any(|process| process.state != LinuxProcessState::Empty && process.pid == pid)
         {
             return Err(LinuxProcessError::Exhausted);
         }
@@ -330,6 +369,28 @@ impl<const N: usize> LinuxProcessTable<N> {
         true
     }
 
+    pub(crate) fn terminate_child(
+        &mut self,
+        pid: usize,
+        wait_status: i32,
+        policy: LinuxSigchldExitPolicy,
+    ) -> Option<LinuxTerminalChildTransition> {
+        let process =
+            self.processes.iter().copied().find(|process| {
+                process.pid == pid && process.state == LinuxProcessState::Running
+            })?;
+        if !self.exit(pid, wait_status) {
+            return None;
+        }
+        if policy.reap_immediately() && self.reap(process.parent_pid, pid).is_none() {
+            return None;
+        }
+        Some(LinuxTerminalChildTransition {
+            parent_pid: process.parent_pid,
+            notify_parent: policy.notify_parent(),
+        })
+    }
+
     pub(crate) fn select_waitable(
         &self,
         parent_pid: usize,
@@ -377,14 +438,13 @@ impl<const N: usize> LinuxProcessTable<N> {
     }
 
     pub(crate) fn resource_counts(&self) -> (usize, usize) {
-        self.processes.iter().fold(
-            (0, 0),
-            |(running, zombies), process| match process.state {
+        self.processes
+            .iter()
+            .fold((0, 0), |(running, zombies), process| match process.state {
                 LinuxProcessState::Running => (running + 1, zombies),
                 LinuxProcessState::Zombie => (running, zombies + 1),
                 _ => (running, zombies),
-            },
-        )
+            })
     }
 
     pub(crate) fn running_pids_match(&self, memory_pids: &[usize]) -> bool {

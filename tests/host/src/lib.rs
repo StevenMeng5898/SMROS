@@ -566,11 +566,7 @@ mod linux_task_logic {
         let other_process = tasks.reserve_child(2, 8).unwrap();
         assert!(tasks.publish(other_process));
 
-        assert!(tasks.block(
-            LINUX_ROOT_TID,
-            7,
-            LinuxBlockReason::ChildWait,
-        ));
+        assert!(tasks.block(LINUX_ROOT_TID, 7, LinuxBlockReason::ChildWait,));
         assert_eq!(
             tasks.by_tid(LINUX_ROOT_TID).map(|task| task.block_reason),
             Some(LinuxBlockReason::ChildWait)
@@ -594,11 +590,7 @@ mod linux_task_logic {
 
         assert!(tasks.block(LINUX_ROOT_TID, 7, LinuxBlockReason::ChildWait));
         assert!(tasks.block(peer.tid, 8, LinuxBlockReason::ChildWait));
-        assert!(tasks.block(
-            other_process.tid,
-            9,
-            LinuxBlockReason::ChildWait,
-        ));
+        assert!(tasks.block(other_process.tid, 9, LinuxBlockReason::ChildWait,));
 
         let waiters: Vec<_> = tasks
             .child_waiters(LINUX_ROOT_TID)
@@ -2334,6 +2326,74 @@ mod linux_process_logic {
     }
 
     #[test]
+    fn signal_termination_status_uses_low_seven_bits_without_a_spurious_core_bit() {
+        for signum in [1usize, 9, 15, 31, 64, 127] {
+            let status = linux_wait_status_signal(signum, false).expect("valid signal status");
+            assert_eq!(status & 0x7f, signum as i32);
+            assert_eq!(status & 0x80, 0, "no core file was created");
+        }
+    }
+
+    #[test]
+    fn sigchld_policy_matches_ignored_no_child_wait_and_zombie_rules() {
+        assert_eq!(
+            linux_sigchld_exit_policy(false, false),
+            LinuxSigchldExitPolicy::RetainZombieAndNotify
+        );
+        assert_eq!(
+            linux_sigchld_exit_policy(true, false),
+            LinuxSigchldExitPolicy::ReapWithoutNotify
+        );
+        assert_eq!(
+            linux_sigchld_exit_policy(false, true),
+            LinuxSigchldExitPolicy::ReapAndNotify
+        );
+        assert_eq!(
+            linux_sigchld_exit_policy(true, true),
+            LinuxSigchldExitPolicy::ReapWithoutNotify,
+            "ignored SIGCHLD takes precedence over SA_NOCLDWAIT"
+        );
+    }
+
+    #[test]
+    fn terminal_child_transition_reaps_immediately_or_retains_one_zombie() {
+        for (policy, expected_wait, expected_notification) in [
+            (
+                LinuxSigchldExitPolicy::RetainZombieAndNotify,
+                LinuxWaitOutcome::Ready { pid: 2, status: 15 },
+                true,
+            ),
+            (
+                LinuxSigchldExitPolicy::ReapAndNotify,
+                LinuxWaitOutcome::NoChildren,
+                true,
+            ),
+            (
+                LinuxSigchldExitPolicy::ReapWithoutNotify,
+                LinuxWaitOutcome::NoChildren,
+                false,
+            ),
+        ] {
+            let mut processes = LinuxProcessTable::<2>::new();
+            processes.register_root(7).unwrap();
+            let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+            assert!(processes.publish(child));
+
+            let terminal = processes
+                .terminate_child(child.pid, 15, policy)
+                .expect("running child terminal transition");
+
+            assert_eq!(terminal.parent_pid, LINUX_ROOT_PID);
+            assert_eq!(terminal.notify_parent, expected_notification);
+            assert_eq!(
+                processes.wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Pid(child.pid)),
+                expected_wait,
+                "an immediate reap leaves a woken matching waiter with ECHILD"
+            );
+        }
+    }
+
+    #[test]
     fn wait_selection_covers_exact_any_group_and_wnohang_states() {
         let mut processes = LinuxProcessTable::<4>::new();
         processes.register_root(7).unwrap();
@@ -2516,8 +2576,8 @@ mod linux_process_logic {
                     ) {
                         Ok(Some(reaped_pid)) => return reaped_pid,
                         Ok(None) => {
-                            observed = processes
-                                .wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Any);
+                            observed =
+                                processes.wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Any);
                         }
                         Err(error) => panic!("wait completion failed: {error:?}"),
                     }
@@ -2542,10 +2602,7 @@ mod linux_process_logic {
 
     #[test]
     fn wait_pid_parser_covers_posix_selectors_without_signed_overflow() {
-        assert_eq!(
-            linux_wait_selector(23, 7),
-            Some(LinuxWaitSelector::Pid(23))
-        );
+        assert_eq!(linux_wait_selector(23, 7), Some(LinuxWaitSelector::Pid(23)));
         assert_eq!(linux_wait_selector(-1, 7), Some(LinuxWaitSelector::Any));
         assert_eq!(
             linux_wait_selector(0, 7),
@@ -2671,7 +2728,9 @@ mod linux_process_logic {
         assert_eq!(processes.reap_launch_descendants(), 3);
         assert_eq!(processes.resource_counts(), (1, 0));
         assert_eq!(
-            processes.by_pid(LINUX_ROOT_PID).map(|process| process.state),
+            processes
+                .by_pid(LINUX_ROOT_PID)
+                .map(|process| process.state),
             Some(LinuxProcessState::Running)
         );
         assert_eq!(processes.reap_launch_descendants(), 0);
@@ -4503,11 +4562,9 @@ mod linux_process_memory_logic {
                 .exit_with_clear_child_tid(child_task.tid, child_task.scheduler_thread),
             Some(0)
         );
-        assert!(
-            kernel
-                .tasks
-                .retire(child_task.tid, child_task.scheduler_thread)
-        );
+        assert!(kernel
+            .tasks
+            .retire(child_task.tid, child_task.scheduler_thread));
         kernel.scheduler[child_task.scheduler_thread] = HostSchedulerState::Empty;
         let child_pages: Vec<LinuxPageBacking> = kernel
             .mapped_pages

@@ -293,14 +293,19 @@ pub(crate) fn route_signal_and_complete_wait(
     })
 }
 
-pub(crate) fn signal_wait_target(signum: usize) -> Option<LinuxTaskCore> {
-    with_runtime(|runtime| runtime.tasks.signal_wait_target(signum))
+pub(crate) fn signal_wait_target(tgid: usize, signum: usize) -> Option<LinuxTaskCore> {
+    with_runtime(|runtime| runtime.tasks.signal_wait_target_for(tgid, signum))
 }
 
 pub(crate) fn handoff_process_pending_signal(
+    tgid: usize,
     pending: &mut LinuxPendingSignals,
 ) -> Result<Option<(LinuxTaskCore, LinuxBlockReason)>, LinuxSignalRouteError> {
-    with_runtime(|runtime| runtime.tasks.handoff_process_pending_signal(pending))
+    with_runtime(|runtime| {
+        runtime
+            .tasks
+            .handoff_process_pending_signal_for(tgid, pending)
+    })
 }
 
 pub(crate) fn complete_process_signal_wait(
@@ -328,8 +333,101 @@ pub(crate) fn interrupt_process_signal_wait(
     })
 }
 
-pub(crate) fn process_signal_target(signum: usize) -> Option<LinuxTaskCore> {
-    with_runtime(|runtime| runtime.tasks.process_signal_target(signum))
+pub(crate) fn process_signal_target(tgid: usize, signum: usize) -> Option<LinuxTaskCore> {
+    with_runtime(|runtime| runtime.tasks.process_signal_target_for(tgid, signum))
+}
+
+impl<const N: usize> LinuxTaskTable<N> {
+    fn signal_wait_target_for(&self, tgid: usize, signum: usize) -> Option<LinuxTaskCore> {
+        let matching =
+            self.tasks
+                .iter()
+                .zip(self.signal_states.iter())
+                .find_map(|(task, signal_state)| {
+                    (Self::is_live(*task)
+                        && task.tgid == tgid
+                        && matches!(
+                            task.block_reason,
+                            LinuxBlockReason::SignalWait | LinuxBlockReason::SignalSuspend
+                        )
+                        && signal_state.signal_wait_accepts(signum))
+                    .then_some(*task)
+                });
+        matching.or_else(|| {
+            self.tasks
+                .iter()
+                .zip(self.signal_states.iter())
+                .find_map(|(task, signal_state)| {
+                    (Self::is_live(*task)
+                        && task.tgid == tgid
+                        && task.block_reason == LinuxBlockReason::SignalWait
+                        && signal_state.timed_wait_interrupted_by(signum))
+                    .then_some(*task)
+                })
+        })
+    }
+
+    fn accepting_signal_wait_target_for(
+        &self,
+        tgid: usize,
+        signum: usize,
+    ) -> Option<LinuxTaskCore> {
+        self.tasks
+            .iter()
+            .zip(self.signal_states.iter())
+            .find_map(|(task, signal_state)| {
+                (Self::is_live(*task)
+                    && task.tgid == tgid
+                    && task.block_reason == LinuxBlockReason::SignalWait
+                    && signal_state.signal_wait_accepts(signum))
+                .then_some(*task)
+            })
+    }
+
+    fn handoff_process_pending_signal_for(
+        &mut self,
+        tgid: usize,
+        pending: &mut LinuxPendingSignals,
+    ) -> Result<Option<(LinuxTaskCore, LinuxBlockReason)>, LinuxSignalRouteError> {
+        let Some(record) = pending.peek_eligible(|signum| {
+            self.accepting_signal_wait_target_for(tgid, signum)
+                .is_some()
+        }) else {
+            return Ok(None);
+        };
+        let Some(target) = self.accepting_signal_wait_target_for(tgid, record.signum) else {
+            return Ok(None);
+        };
+        let Some((record, reservation)) =
+            pending.take_matching_reserved(linux_signal_bit(record.signum))
+        else {
+            return Ok(None);
+        };
+        let Some(reason) = self.complete_process_signal_wait(
+            target.tid,
+            target.scheduler_thread,
+            record,
+            reservation,
+        ) else {
+            pending.rollback_reservation(reservation, record)?;
+            return Ok(None);
+        };
+        Ok(Some((target, reason)))
+    }
+
+    fn process_signal_target_for(&self, tgid: usize, signum: usize) -> Option<LinuxTaskCore> {
+        let bit = linux_signal_bit(signum);
+        if bit == 0 {
+            return None;
+        }
+        self.tasks
+            .iter()
+            .zip(self.signal_states.iter())
+            .find_map(|(task, signal_state)| {
+                (Self::is_live(*task) && task.tgid == tgid && signal_state.mask & bit == 0)
+                    .then_some(*task)
+            })
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -395,8 +493,19 @@ pub(crate) fn rollback_fork_task(reservation: LinuxTaskReservation) {
     });
 }
 
-pub(crate) fn discard_signal(signum: usize) {
-    with_runtime(|runtime| runtime.tasks.discard_signal(signum));
+pub(crate) fn discard_signal(tgid: usize, signum: usize) {
+    with_runtime(|runtime| {
+        for (task, signal_state) in runtime
+            .tasks
+            .tasks
+            .iter()
+            .zip(runtime.tasks.signal_states.iter_mut())
+        {
+            if LinuxTaskTable::<LINUX_TASK_LIMIT>::is_live(*task) && task.tgid == tgid {
+                signal_state.discard(signum);
+            }
+        }
+    });
 }
 
 pub(crate) fn block_current(reason: LinuxBlockReason) -> Result<LinuxTaskCore, SysError> {
@@ -470,13 +579,7 @@ pub(crate) fn wake_process_waiters(tgid: usize) -> usize {
     waiters
         .into_iter()
         .flatten()
-        .filter(|task| {
-            wake_blocked(
-                task.tid,
-                task.scheduler_thread,
-                LinuxBlockReason::ChildWait,
-            )
-        })
+        .filter(|task| wake_blocked(task.tid, task.scheduler_thread, LinuxBlockReason::ChildWait))
         .count()
 }
 
@@ -513,9 +616,7 @@ fn retire_tasks(
                     task.tgid == tgid
                         && (entire_group || task.scheduler_thread == current_scheduler)
                 }
-                LinuxTaskRetirementScope::LaunchDescendants { root_tgid } => {
-                    task.tgid != root_tgid
-                }
+                LinuxTaskRetirementScope::LaunchDescendants { root_tgid } => task.tgid != root_tgid,
             };
             if !selected || !LinuxTaskTable::<LINUX_TASK_LIMIT>::is_live(task) {
                 continue;
@@ -592,22 +693,30 @@ pub(crate) fn retire_process_tasks(tgid: usize, entire_group: bool) -> Result<bo
         return Err(SysError::ESRCH);
     }
 
-    let (retired, retired_count, process_empty) = retire_tasks(
-        LinuxTaskRetirementScope::Process {
-            tgid,
-            entire_group,
-            current_scheduler: current_scheduler.0,
-        },
-    );
+    let (retired, retired_count, process_empty) = retire_tasks(LinuxTaskRetirementScope::Process {
+        tgid,
+        entire_group,
+        current_scheduler: current_scheduler.0,
+    });
     complete_task_retirements(retired, retired_count, current_scheduler);
     Ok(process_empty)
 }
 
+pub(crate) fn terminate_process_tasks(tgid: usize) -> bool {
+    let current_scheduler = scheduler::scheduler().current();
+    let (retired, retired_count, process_empty) = retire_tasks(LinuxTaskRetirementScope::Process {
+        tgid,
+        entire_group: true,
+        current_scheduler: current_scheduler.0,
+    });
+    complete_task_retirements(retired, retired_count, current_scheduler);
+    process_empty && retired_count != 0
+}
+
 pub(crate) fn retire_launch_descendants(root_tgid: usize) {
     let current_scheduler = scheduler::scheduler().current();
-    let (retired, retired_count, _) = retire_tasks(
-        LinuxTaskRetirementScope::LaunchDescendants { root_tgid },
-    );
+    let (retired, retired_count, _) =
+        retire_tasks(LinuxTaskRetirementScope::LaunchDescendants { root_tgid });
     complete_task_retirements(retired, retired_count, current_scheduler);
 }
 

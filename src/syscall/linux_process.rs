@@ -11,7 +11,9 @@ use super::linux_process_memory::{
 };
 #[cfg(target_arch = "aarch64")]
 use super::linux_task::LinuxTaskReservation;
-use super::linux_task::LinuxBlockReason;
+use super::linux_task::{
+    LinuxBlockReason, LinuxPendingSignal, LinuxPendingSignals, LINUX_MAX_SIGNAL,
+};
 use super::{linux_task, SysError};
 
 include!("linux_process_logic_shared.rs");
@@ -19,6 +21,40 @@ include!("linux_fork_logic_shared.rs");
 include!("linux_runtime_lock_shared.rs");
 
 pub(crate) const LINUX_PROCESS_LIMIT: usize = thread::MAX_THREADS;
+pub(crate) const LINUX_SIGCHLD: usize = 17;
+pub(crate) const LINUX_SA_NOCLDWAIT: u64 = 0x0000_0002;
+const LINUX_SIG_IGN: u64 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct LinuxKernelSigaction {
+    pub handler: u64,
+    pub flags: u64,
+    pub restorer: u64,
+    pub mask: u64,
+}
+
+impl LinuxKernelSigaction {
+    pub(crate) const DEFAULT: Self = Self {
+        handler: 0,
+        flags: 0,
+        restorer: 0,
+        mask: 0,
+    };
+}
+
+#[derive(Clone, Copy)]
+struct LinuxProcessSignalState {
+    signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1],
+    process_pending: LinuxPendingSignals,
+}
+
+impl LinuxProcessSignalState {
+    const EMPTY: Self = Self {
+        signal_actions: [LinuxKernelSigaction::DEFAULT; LINUX_MAX_SIGNAL + 1],
+        process_pending: LinuxPendingSignals::new(),
+    };
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LinuxProcessResourceCounts {
@@ -38,6 +74,7 @@ pub(crate) enum LinuxProcessExitOutcome {
 
 struct LinuxProcessRuntime {
     processes: LinuxProcessTable<LINUX_PROCESS_LIMIT>,
+    signal_states: [LinuxProcessSignalState; LINUX_PROCESS_LIMIT],
     #[cfg(target_arch = "aarch64")]
     fork_starts: [Option<Aarch64ProcessStart>; LINUX_PROCESS_LIMIT],
 }
@@ -46,6 +83,7 @@ impl LinuxProcessRuntime {
     const fn new() -> Self {
         Self {
             processes: LinuxProcessTable::new(),
+            signal_states: [LinuxProcessSignalState::EMPTY; LINUX_PROCESS_LIMIT],
             #[cfg(target_arch = "aarch64")]
             fork_starts: [None; LINUX_PROCESS_LIMIT],
         }
@@ -69,10 +107,90 @@ pub(crate) fn register_root(scheduler_thread: ThreadId) -> Result<usize, SysErro
         return Err(SysError::ESRCH);
     }
     with_runtime(|runtime| {
-        runtime
+        let pid = runtime
             .processes
             .register_root(scheduler_thread.0)
-            .map_err(process_error_to_sys_error)
+            .map_err(process_error_to_sys_error)?;
+        let slot = runtime
+            .processes
+            .processes
+            .iter()
+            .position(|process| process.pid == pid && process.state == LinuxProcessState::Running)
+            .ok_or(SysError::ESRCH)?;
+        runtime.signal_states[slot] = LinuxProcessSignalState::EMPTY;
+        Ok(pid)
+    })
+}
+
+pub(crate) fn by_pid(pid: usize) -> Option<LinuxProcessCore> {
+    with_runtime(|runtime| runtime.processes.by_pid(pid))
+}
+
+pub(crate) fn with_signal_state<R>(
+    pid: usize,
+    operation: impl FnOnce(
+        &mut [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1],
+        &mut LinuxPendingSignals,
+    ) -> R,
+) -> Result<R, SysError> {
+    with_runtime(|runtime| {
+        let slot = runtime
+            .processes
+            .processes
+            .iter()
+            .position(|process| {
+                process.pid == pid
+                    && matches!(
+                        process.state,
+                        LinuxProcessState::Reserved
+                            | LinuxProcessState::Publishing
+                            | LinuxProcessState::Running
+                    )
+            })
+            .ok_or(SysError::ESRCH)?;
+        let state = &mut runtime.signal_states[slot];
+        Ok(operation(
+            &mut state.signal_actions,
+            &mut state.process_pending,
+        ))
+    })
+}
+
+pub(crate) fn reset_current_signal_state() -> Result<(), SysError> {
+    let pid = current_pid()?;
+    with_signal_state(pid, |signal_actions, process_pending| {
+        signal_actions.fill(LinuxKernelSigaction::DEFAULT);
+        process_pending.reset_in_place();
+    })
+}
+
+pub(crate) fn clone_signal_state_for_fork(
+    parent_pid: usize,
+    child_pid: usize,
+) -> Result<(), SysError> {
+    with_runtime(|runtime| {
+        let parent_slot = runtime
+            .processes
+            .processes
+            .iter()
+            .position(|process| {
+                process.pid == parent_pid && process.state == LinuxProcessState::Running
+            })
+            .ok_or(SysError::ESRCH)?;
+        let child_slot = runtime
+            .processes
+            .processes
+            .iter()
+            .position(|process| {
+                process.pid == child_pid && process.state == LinuxProcessState::Reserved
+            })
+            .ok_or(SysError::ESRCH)?;
+        let signal_actions = runtime.signal_states[parent_slot].signal_actions;
+        runtime.signal_states[child_slot] = LinuxProcessSignalState {
+            signal_actions,
+            process_pending: LinuxPendingSignals::new(),
+        };
+        Ok(())
     })
 }
 
@@ -107,17 +225,14 @@ pub(crate) fn wait_current(
 ) -> Result<LinuxWaitOutcome, SysError> {
     let parent = current()?;
     loop {
-        let outcome = with_runtime(|runtime| {
-            runtime.processes.wait_outcome(parent.pid, selector)
-        });
+        let outcome = with_runtime(|runtime| runtime.processes.wait_outcome(parent.pid, selector));
         if outcome != LinuxWaitOutcome::WouldBlock || nohang {
             return Ok(outcome);
         }
 
         let blocked = linux_task::block_current(LinuxBlockReason::ChildWait)?;
-        let rechecked = with_runtime(|runtime| {
-            runtime.processes.wait_outcome(parent.pid, selector)
-        });
+        let rechecked =
+            with_runtime(|runtime| runtime.processes.wait_outcome(parent.pid, selector));
         if rechecked != LinuxWaitOutcome::WouldBlock {
             let _ = linux_task::wake_blocked(
                 blocked.tid,
@@ -174,21 +289,72 @@ pub(crate) fn exit_current_process(
 
     let _ = super::linux_process_memory::unregister(process.pid);
     let _ = super::release_linux_process_resources(process.pid);
+    finish_terminal_process(process, wait_status)
+}
 
-    let parent_pid = with_runtime(|runtime| {
-        if !runtime.processes.exit(process.pid, wait_status) {
-            return Err(SysError::ESRCH);
-        }
-        let _ = runtime
-            .processes
-            .reparent_children_to_launch_reaper(process.pid);
-        Ok(process.parent_pid)
-    })?;
-
+fn finish_terminal_process(
+    process: LinuxProcessCore,
+    wait_status: i32,
+) -> Result<LinuxProcessExitOutcome, SysError> {
     if process.pid != LINUX_ROOT_PID {
+        let parent_pid = process.parent_pid;
+        if parent_pid == LINUX_LAUNCH_REAPER_PID {
+            with_runtime(|runtime| {
+                let child_slot = process_slot(runtime, process.pid)?;
+                if !runtime.processes.exit(process.pid, wait_status) {
+                    return Err(SysError::ESRCH);
+                }
+                runtime.signal_states[child_slot] = LinuxProcessSignalState::EMPTY;
+                let _ = runtime
+                    .processes
+                    .reparent_children_to_launch_reaper(process.pid);
+                Ok(())
+            })?;
+            return Ok(LinuxProcessExitOutcome::Descendant);
+        }
+        let transition = with_runtime(|runtime| {
+            let parent_slot = runtime
+                .processes
+                .processes
+                .iter()
+                .position(|candidate| {
+                    candidate.pid == parent_pid && candidate.state == LinuxProcessState::Running
+                })
+                .ok_or(SysError::ESRCH)?;
+            let sigchld_action = runtime.signal_states[parent_slot].signal_actions[LINUX_SIGCHLD];
+            let policy = linux_sigchld_exit_policy(
+                sigchld_action.handler == LINUX_SIG_IGN,
+                sigchld_action.flags & LINUX_SA_NOCLDWAIT != 0,
+            );
+            let child_slot = process_slot(runtime, process.pid)?;
+            let transition = runtime
+                .processes
+                .terminate_child(process.pid, wait_status, policy)
+                .ok_or(SysError::ESRCH)?;
+            runtime.signal_states[child_slot] = LinuxProcessSignalState::EMPTY;
+            let _ = runtime
+                .processes
+                .reparent_children_to_launch_reaper(process.pid);
+            Ok(transition)
+        })?;
+        if transition.notify_parent {
+            super::queue_process_linux_signal_and_wake(
+                parent_pid,
+                LinuxPendingSignal::standard(LINUX_SIGCHLD),
+            )?;
+        }
         let _ = linux_task::wake_process_waiters(parent_pid);
         return Ok(LinuxProcessExitOutcome::Descendant);
     }
+
+    with_runtime(|runtime| {
+        let slot = process_slot(runtime, process.pid)?;
+        if !runtime.processes.exit(process.pid, wait_status) {
+            return Err(SysError::ESRCH);
+        }
+        runtime.signal_states[slot] = LinuxProcessSignalState::EMPTY;
+        Ok(())
+    })?;
 
     let mut descendant_pids = [0usize; LINUX_PROCESS_LIMIT];
     let descendant_count = with_runtime(|runtime| {
@@ -214,6 +380,32 @@ pub(crate) fn exit_current_process(
         let _ = runtime.processes.reap_launch_descendants();
     });
     Ok(LinuxProcessExitOutcome::LaunchRoot)
+}
+
+pub(crate) fn terminate_by_signal(
+    tgid: usize,
+    signum: usize,
+) -> Result<LinuxProcessExitOutcome, SysError> {
+    let process = by_pid(tgid).ok_or(SysError::ESRCH)?;
+    if linux_task::current_task().is_ok_and(|task| task.tgid == tgid) {
+        super::linux_process_memory::deactivate_current_address_space()?;
+    }
+    if !linux_task::terminate_process_tasks(tgid) {
+        return Err(SysError::ESRCH);
+    }
+    let _ = super::linux_process_memory::unregister(tgid);
+    let _ = super::release_linux_process_resources(tgid);
+    let wait_status = linux_wait_status_signal(signum, false).ok_or(SysError::EINVAL)?;
+    finish_terminal_process(process, wait_status)
+}
+
+fn process_slot(runtime: &LinuxProcessRuntime, pid: usize) -> Result<usize, SysError> {
+    runtime
+        .processes
+        .processes
+        .iter()
+        .position(|process| process.pid == pid && process.state != LinuxProcessState::Empty)
+        .ok_or(SysError::ESRCH)
 }
 
 pub(crate) fn resource_counts() -> LinuxProcessResourceCounts {
@@ -245,6 +437,7 @@ pub(crate) fn resource_counts() -> LinuxProcessResourceCounts {
 pub(crate) fn reset_launch() {
     with_runtime(|runtime| {
         runtime.processes.reset();
+        runtime.signal_states.fill(LinuxProcessSignalState::EMPTY);
         #[cfg(target_arch = "aarch64")]
         runtime.fork_starts.fill(None);
     });
@@ -403,7 +596,10 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
         &mut self,
         scheduler_thread: &Self::SchedulerThread,
     ) -> Result<(Self::Parent, Self::Task), Self::Error> {
-        Ok((current()?, linux_task::reserve_fork_task(*scheduler_thread)?))
+        Ok((
+            current()?,
+            linux_task::reserve_fork_task(*scheduler_thread)?,
+        ))
     }
 
     fn acquire_process(
@@ -412,7 +608,7 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
         scheduler_thread: &Self::SchedulerThread,
         task: &Self::Task,
     ) -> Result<Self::Process, Self::Error> {
-        with_runtime(|runtime| {
+        let process = with_runtime(|runtime| {
             runtime
                 .processes
                 .reserve_child_with_pid(
@@ -422,13 +618,18 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
                     self.child_exit_signal,
                 )
                 .map_err(process_error_to_sys_error)
-        })
+        })?;
+        if let Err(error) = clone_signal_state_for_fork(parent.pid, process.pid) {
+            with_runtime(|runtime| {
+                runtime.signal_states[process.slot] = LinuxProcessSignalState::EMPTY;
+                let _ = runtime.processes.rollback(process);
+            });
+            return Err(error);
+        }
+        Ok(process)
     }
 
-    fn acquire_resources(
-        &mut self,
-        parent: &Self::Parent,
-    ) -> Result<Self::Resources, Self::Error> {
+    fn acquire_resources(&mut self, parent: &Self::Parent) -> Result<Self::Resources, Self::Error> {
         reserve_resource_clone(parent.pid, self.namespace_flags)
     }
 
@@ -587,13 +788,18 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
                 *start = None;
             }
             if runtime.processes.rollback_fork(process) {
+                runtime.signal_states[process.slot] = LinuxProcessSignalState::EMPTY;
                 return true;
             }
-            runtime.processes.exit(process.pid, 0)
+            let removed = runtime.processes.exit(process.pid, 0)
                 && runtime
                     .processes
                     .reap(process.parent_pid, process.pid)
-                    .is_some()
+                    .is_some();
+            if removed {
+                runtime.signal_states[process.slot] = LinuxProcessSignalState::EMPTY;
+            }
+            removed
         });
         assert!(removed);
     }

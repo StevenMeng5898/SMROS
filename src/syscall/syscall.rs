@@ -49,7 +49,8 @@ use super::address_logic::{
 use super::linux_futex;
 use super::linux_process;
 use super::linux_process::{
-    try_clone_linux_fork_path, LinuxCredentialsCore, LinuxDescriptorEntry, LinuxOpenDescription,
+    try_clone_linux_fork_path, LinuxCredentialsCore, LinuxDescriptorEntry, LinuxKernelSigaction,
+    LinuxOpenDescription,
 };
 use super::linux_process_memory;
 #[cfg(target_arch = "aarch64")]
@@ -560,6 +561,7 @@ const LINUX_SIG_DFL: u64 = 0;
 const LINUX_SIG_IGN: u64 = 1;
 const LINUX_SIGALRM: usize = 14;
 const LINUX_SIGCHLD: usize = 17;
+const LINUX_SIGKILL: usize = 9;
 const LINUX_SA_SIGINFO: u64 = 0x0000_0004;
 const LINUX_SA_ONSTACK: u64 = 0x0800_0000;
 const LINUX_SA_RESETHAND: u64 = 0x8000_0000;
@@ -753,8 +755,6 @@ struct LinuxProcessResources {
     credentials: LinuxCredentialsCore,
     cwd: String,
     root: String,
-    signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1],
-    process_pending: LinuxPendingSignals,
     container: LinuxProcessContainerState,
     timer_handles: Vec<u32>,
     real_timer_deadline_tick: u64,
@@ -769,8 +769,6 @@ impl LinuxProcessResources {
             credentials: LinuxCredentialsCore::default(),
             cwd: String::from("/"),
             root: String::from("/"),
-            signal_actions: [LinuxKernelSigaction::DEFAULT; LINUX_MAX_SIGNAL + 1],
-            process_pending: LinuxPendingSignals::new(),
             container: LinuxProcessContainerState::new(),
             timer_handles: Vec::new(),
             real_timer_deadline_tick: LINUX_TIMER_DISABLED,
@@ -782,7 +780,6 @@ pub(crate) struct LinuxProcessForkState {
     credentials: LinuxCredentialsCore,
     cwd: String,
     root: String,
-    signal_actions: [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1],
     container: LinuxProcessContainerState,
 }
 
@@ -818,24 +815,6 @@ struct LinuxTimeval {
 struct LinuxItimerval {
     it_interval: LinuxTimeval,
     it_value: LinuxTimeval,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct LinuxKernelSigaction {
-    handler: u64,
-    flags: u64,
-    restorer: u64,
-    mask: u64,
-}
-
-impl LinuxKernelSigaction {
-    const DEFAULT: Self = Self {
-        handler: LINUX_SIG_DFL,
-        flags: 0,
-        restorer: 0,
-        mask: 0,
-    };
 }
 
 #[repr(C)]
@@ -2829,7 +2808,6 @@ impl MemorySyscallState {
                 credentials: parent.credentials.fork_child(),
                 cwd: try_clone_linux_fork_path(&parent.cwd).map_err(|_| SysError::ENOMEM)?,
                 root: try_clone_linux_fork_path(&parent.root).map_err(|_| SysError::ENOMEM)?,
-                signal_actions: parent.signal_actions,
                 container: parent.container.try_fork(namespace_flags)?,
             });
         }
@@ -2837,7 +2815,6 @@ impl MemorySyscallState {
             credentials: LinuxCredentialsCore::default(),
             cwd: try_clone_linux_fork_path("/").map_err(|_| SysError::ENOMEM)?,
             root: try_clone_linux_fork_path("/").map_err(|_| SysError::ENOMEM)?,
-            signal_actions: [LinuxKernelSigaction::DEFAULT; LINUX_MAX_SIGNAL + 1],
             container: LinuxProcessContainerState::new().try_fork(namespace_flags)?,
         })
     }
@@ -3024,8 +3001,6 @@ impl MemorySyscallState {
             credentials: process_state.credentials,
             cwd: process_state.cwd,
             root: process_state.root,
-            signal_actions: process_state.signal_actions,
-            process_pending: LinuxPendingSignals::new(),
             container: process_state.container,
             timer_handles: Vec::new(),
             real_timer_deadline_tick: LINUX_TIMER_DISABLED,
@@ -3726,10 +3701,7 @@ fn linux_timeval_from_ticks(ticks: u64) -> LinuxTimeval {
 }
 
 pub fn reset_linux_signal_timer_state() {
-    with_linux_process_signal_state(|actions, pending| {
-        actions.fill(LinuxKernelSigaction::DEFAULT);
-        pending.reset_in_place();
-    });
+    let _ = linux_process::reset_current_signal_state();
     LINUX_SIGNAL_TRAMPOLINE.store(0, Ordering::SeqCst);
 }
 
@@ -3745,11 +3717,26 @@ fn linux_signal_action(signum: usize) -> LinuxKernelSigaction {
     with_linux_process_signal_state(|actions, _| actions[signum])
 }
 
+fn linux_signal_action_for(pid: usize, signum: usize) -> Result<LinuxKernelSigaction, SysError> {
+    with_linux_process_signal_state_for(pid, |actions, _| actions[signum])
+}
+
 fn linux_signal_disposition(signum: usize) -> LinuxSignalDisposition {
     linux_task::linux_signal_disposition(linux_signal_action(signum).handler, signum)
 }
 
+fn linux_signal_disposition_for(
+    pid: usize,
+    signum: usize,
+) -> Result<LinuxSignalDisposition, SysError> {
+    Ok(linux_task::linux_signal_disposition(
+        linux_signal_action_for(pid, signum)?.handler,
+        signum,
+    ))
+}
+
 fn store_linux_signal_action(signum: usize, action: LinuxKernelSigaction) {
+    let tgid = linux_resource_pid();
     with_linux_process_signal_state(|actions, _| {
         actions[signum] = LinuxKernelSigaction {
             mask: action.mask & !linux_uncatchable_signal_mask(),
@@ -3758,7 +3745,7 @@ fn store_linux_signal_action(signum: usize, action: LinuxKernelSigaction) {
     });
     if action.handler == LINUX_SIG_IGN {
         discard_process_linux_signal(signum);
-        linux_task::discard_signal(signum);
+        linux_task::discard_signal(tgid, signum);
     }
 }
 
@@ -3816,11 +3803,24 @@ fn with_linux_process_signal_state<R>(
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     compiler_fence(Ordering::SeqCst);
     let pid = linux_resource_pid();
-    let resources = memory_state().process_resources_mut(pid);
-    let result = operation(
-        &mut resources.signal_actions,
-        &mut resources.process_pending,
-    );
+    let result = linux_process::with_signal_state(pid, operation)
+        .expect("current Linux process signal state");
+    compiler_fence(Ordering::SeqCst);
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    result
+}
+
+fn with_linux_process_signal_state_for<R>(
+    pid: usize,
+    operation: impl FnOnce(
+        &mut [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1],
+        &mut LinuxPendingSignals,
+    ) -> R,
+) -> Result<R, SysError> {
+    assert!(crate::kernel_lowlevel::smp::is_boot_cpu());
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    compiler_fence(Ordering::SeqCst);
+    let result = linux_process::with_signal_state(pid, operation);
     compiler_fence(Ordering::SeqCst);
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     result
@@ -3841,6 +3841,12 @@ fn linux_signal_route_error(error: linux_task::LinuxSignalRouteError) -> SysErro
 
 fn queue_process_linux_signal(record: LinuxPendingSignal) -> Result<(), SysError> {
     with_linux_process_pending(|pending| pending.queue(record).map_err(linux_signal_route_error))
+}
+
+fn queue_process_linux_signal_for(tgid: usize, record: LinuxPendingSignal) -> Result<(), SysError> {
+    with_linux_process_signal_state_for(tgid, |_, pending| {
+        pending.queue(record).map_err(linux_signal_route_error)
+    })?
 }
 
 fn reserve_process_linux_signal(
@@ -3875,7 +3881,7 @@ fn take_process_linux_signal(
     with_linux_process_pending(|pending| {
         pending.take_eligible_reserved(|signum| {
             mask & linux_signal_bit(signum) == 0
-                && linux_task::process_signal_target(signum) == Some(current)
+                && linux_task::process_signal_target(current.tgid, signum) == Some(current)
         })
     })
 }
@@ -3931,11 +3937,12 @@ fn take_unblocked_linux_signal() -> Option<LinuxDeliverableSignal> {
 fn update_process_linux_signals_and_handoff(
     operation: impl FnOnce(&mut LinuxPendingSignals) -> Result<(), linux_task::LinuxSignalRouteError>,
 ) -> Result<(), SysError> {
+    let tgid = linux_process::current_pid()?;
     let mut wakes = [None; linux_task::LINUX_TASK_LIMIT];
     let result = with_linux_process_pending(|pending| {
         operation(pending)?;
         for wake in &mut wakes {
-            let Some((target, reason)) = linux_task::handoff_process_pending_signal(pending)?
+            let Some((target, reason)) = linux_task::handoff_process_pending_signal(tgid, pending)?
             else {
                 break;
             };
@@ -4014,13 +4021,21 @@ fn interrupt_linux_signal_target(target: linux_task::LinuxTaskCore, signum: usiz
     }
 }
 
-fn queue_process_linux_signal_and_wake(record: LinuxPendingSignal) -> Result<(), SysError> {
+pub(crate) fn queue_process_linux_signal_and_wake(
+    tgid: usize,
+    record: LinuxPendingSignal,
+) -> Result<(), SysError> {
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let result = (|| {
-        if let Some(target) = linux_task::signal_wait_target(record.signum) {
+        if let Some(target) = linux_task::signal_wait_target(tgid, record.signum) {
             match target.block_reason {
                 LinuxBlockReason::SignalWait => {
-                    if let Some(reservation) = reserve_process_linux_signal(record)? {
+                    let reservation = with_linux_process_signal_state_for(tgid, |_, pending| {
+                        pending
+                            .reserve_direct(record)
+                            .map_err(linux_signal_route_error)
+                    })??;
+                    if let Some(reservation) = reservation {
                         if let Some(reason) = linux_task::complete_process_signal_wait(
                             target.tid,
                             target.scheduler_thread,
@@ -4034,11 +4049,11 @@ fn queue_process_linux_signal_and_wake(record: LinuxPendingSignal) -> Result<(),
                             );
                             return Ok(());
                         }
-                        requeue_linux_signal(LinuxDeliverableSignal {
-                            record,
-                            source: LinuxPendingSignalSource::Process,
-                            reservation: Some(reservation),
-                        })?;
+                        with_linux_process_signal_state_for(tgid, |_, pending| {
+                            pending
+                                .rollback_reservation(reservation, record)
+                                .map_err(linux_signal_route_error)
+                        })??;
                     }
                     if let Some(reason) = linux_task::interrupt_process_signal_wait(
                         target.tid,
@@ -4051,7 +4066,7 @@ fn queue_process_linux_signal_and_wake(record: LinuxPendingSignal) -> Result<(),
                     return Ok(());
                 }
                 LinuxBlockReason::SignalSuspend => {
-                    queue_process_linux_signal(record)?;
+                    queue_process_linux_signal_for(tgid, record)?;
                     if let Some(reason) = linux_task::interrupt_process_signal_wait(
                         target.tid,
                         target.scheduler_thread,
@@ -4066,8 +4081,8 @@ fn queue_process_linux_signal_and_wake(record: LinuxPendingSignal) -> Result<(),
             }
         }
 
-        queue_process_linux_signal(record)?;
-        if let Some(target) = linux_task::process_signal_target(record.signum) {
+        queue_process_linux_signal_for(tgid, record)?;
+        if let Some(target) = linux_task::process_signal_target(tgid, record.signum) {
             interrupt_linux_signal_target(target, record.signum);
         }
         Ok(())
@@ -4084,11 +4099,14 @@ fn queue_directed_linux_signal(
 ) -> SysResult {
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let result = (|| {
-        linux_task::queue_task_signal(tgid, tid, LinuxPendingSignal::EMPTY)?;
+        let validated_target = linux_task::queue_task_signal(tgid, tid, LinuxPendingSignal::EMPTY)?;
         if signum == 0 {
             return Ok(0);
         }
-        match linux_signal_disposition(signum) {
+        if signum == LINUX_SIGKILL {
+            return terminate_linux_process_by_signal(validated_target.tgid, signum);
+        }
+        match linux_signal_disposition_for(validated_target.tgid, signum)? {
             LinuxSignalDisposition::Ignore => Ok(0),
             LinuxSignalDisposition::Terminate | LinuxSignalDisposition::Handled => {
                 let record = make_record()?;
@@ -4129,7 +4147,13 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
                     return false;
                 }
                 if let Ok(current) = linux_task::current_task() {
-                    let _ = process_manager().terminate_process(current.tgid);
+                    if let Ok(launch_id) =
+                        terminate_linux_process_by_signal(current.tgid, signum)
+                    {
+                        let launch_id = launch_id as u64;
+                        let regs = unsafe { &mut *(saved_regs as *mut [u64; 32]) };
+                        regs[0] = launch_id;
+                    }
                 }
                 return false;
             }
@@ -4329,7 +4353,7 @@ pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) {
     }
 
     memory_state().set_linux_real_timer_deadline(pid, LINUX_TIMER_DISABLED);
-    let _ = queue_process_linux_signal_and_wake(LinuxPendingSignal::standard(LINUX_SIGALRM));
+    let _ = queue_process_linux_signal_and_wake(pid, LinuxPendingSignal::standard(LINUX_SIGALRM));
     let return_pc = crate::kernel_lowlevel::cpu::read_exception_return_pc();
     let _ = deliver_next_linux_signal(saved_regs, return_pc);
 }
@@ -5297,7 +5321,9 @@ fn linux_sleep_has_deliverable_pending_signal() -> Result<bool, SysError> {
     }
     Ok(with_linux_process_pending(|pending| {
         pending
-            .peek_eligible(|signum| linux_task::process_signal_target(signum) == Some(current))
+            .peek_eligible(|signum| {
+                linux_task::process_signal_target(current.tgid, signum) == Some(current)
+            })
             .is_some()
     }))
 }
@@ -7220,17 +7246,20 @@ pub fn sys_rt_sigqueueinfo(pid: usize, sig: usize, info: usize) -> SysResult {
     if !syscall_logic::linux_signal_valid(sig, LINUX_MAX_SIGNAL) {
         return Err(SysError::EINVAL);
     }
-    if pid != linux_task::LINUX_ROOT_TID {
+    if linux_process::by_pid(pid).is_none() {
         return Err(SysError::ESRCH);
     }
     if sig == 0 {
         return Ok(0);
     }
-    match linux_signal_disposition(sig) {
+    if sig == LINUX_SIGKILL {
+        return terminate_linux_process_by_signal(pid, sig);
+    }
+    match linux_signal_disposition_for(pid, sig)? {
         LinuxSignalDisposition::Ignore => Ok(0),
         LinuxSignalDisposition::Terminate | LinuxSignalDisposition::Handled => {
             let record = linux_signal_record_from_user(sig, info)?;
-            queue_process_linux_signal_and_wake(record)?;
+            queue_process_linux_signal_and_wake(pid, record)?;
             Ok(0)
         }
     }
@@ -8299,11 +8328,8 @@ fn sys_fork_with_namespace_flags(namespace_flags: usize, child_exit_signal: usiz
     {
         let context = linux_syscall_context::current().ok_or(SysError::EINVAL)?;
         let parent_pid = linux_process::current_pid()?;
-        let child_pid = linux_process::run_fork_transaction(
-            context,
-            namespace_flags,
-            child_exit_signal,
-        )?;
+        let child_pid =
+            linux_process::run_fork_transaction(context, namespace_flags, child_exit_signal)?;
         debug_assert_ne!(child_pid, parent_pid);
         Ok(child_pid)
     }
@@ -8456,7 +8482,10 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
     }
 }
 
-fn exit_current_linux_process(exit_code: i32, entire_group: bool) -> Result<Option<usize>, SysError> {
+fn exit_current_linux_process(
+    exit_code: i32,
+    entire_group: bool,
+) -> Result<Option<usize>, SysError> {
     if linux_process::current().is_err() {
         return Ok(None);
     }
@@ -8470,6 +8499,20 @@ fn exit_current_linux_process(exit_code: i32, entire_group: bool) -> Result<Opti
             .ok_or(SysError::ESRCH);
     }
     linux_task::finish_current_without_el0_return();
+}
+
+fn terminate_linux_process_by_signal(tgid: usize, signum: usize) -> SysResult {
+    let terminating_current = linux_task::current_task().is_ok_and(|task| task.tgid == tgid);
+    let outcome = linux_process::terminate_by_signal(tgid, signum)?;
+    if outcome == linux_process::LinuxProcessExitOutcome::LaunchRoot {
+        let exit_code = 128 + signum as i32;
+        return crate::user_level::run_elf::prepare_run_elf_return(exit_code)
+            .ok_or(SysError::ESRCH);
+    }
+    if terminating_current {
+        linux_task::finish_current_without_el0_return();
+    }
+    Ok(0)
 }
 
 /// Linux sys_exit implementation
@@ -8667,17 +8710,19 @@ pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
     if !syscall_logic::linux_signal_valid(signum, LINUX_MAX_SIGNAL) {
         return Err(SysError::EINVAL);
     }
-    if pid != linux_task::LINUX_ROOT_TID as isize {
-        return Err(SysError::ESRCH);
-    }
+    let target_pid = usize::try_from(pid).map_err(|_| SysError::ESRCH)?;
+    linux_process::by_pid(target_pid).ok_or(SysError::ESRCH)?;
     if signum == 0 {
         return Ok(0);
     }
 
-    match linux_signal_disposition(signum) {
+    if signum == LINUX_SIGKILL {
+        return terminate_linux_process_by_signal(target_pid, signum);
+    }
+    match linux_signal_disposition_for(target_pid, signum)? {
         LinuxSignalDisposition::Ignore => Ok(0),
         LinuxSignalDisposition::Terminate | LinuxSignalDisposition::Handled => {
-            queue_process_linux_signal_and_wake(LinuxPendingSignal::standard(signum))?;
+            queue_process_linux_signal_and_wake(target_pid, LinuxPendingSignal::standard(signum))?;
             Ok(0)
         }
     }
