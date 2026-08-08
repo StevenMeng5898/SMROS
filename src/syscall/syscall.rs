@@ -5530,12 +5530,12 @@ fn linux_write_stat_from_attrs(
     Ok(0)
 }
 
-fn linux_write_stat(stat_ptr: usize) -> SysResult {
+fn linux_write_stat(stat_ptr: usize, mode: u32) -> SysResult {
     linux_write_stat_from_attrs(
         stat_ptr,
         1,
         fxfs::FxfsAttributes {
-            mode: 0o100644,
+            mode,
             uid: 0,
             gid: 0,
             size: 0,
@@ -5967,7 +5967,12 @@ pub fn sys_fstat(fd: usize, stat_ptr: usize) -> SysResult {
             return linux_write_stat_from_attrs(stat_ptr, object_id, attrs);
         }
     }
-    linux_write_stat(stat_ptr)
+    let mode = if linux_fd_is_dir(fd) {
+        0o040755
+    } else {
+        0o100644
+    };
+    linux_write_stat(stat_ptr, mode)
 }
 
 pub fn sys_fstatat(_dirfd: usize, path: usize, stat_ptr: usize, flags: usize) -> SysResult {
@@ -5984,7 +5989,7 @@ pub fn sys_fstatat(_dirfd: usize, path: usize, stat_ptr: usize, flags: usize) ->
     if !linux_path_visible(&path_str) {
         return Err(SysError::ENOENT);
     }
-    linux_write_stat(stat_ptr)
+    linux_write_stat(stat_ptr, 0o100644)
 }
 
 pub fn sys_statfs(path: usize, buf: usize) -> SysResult {

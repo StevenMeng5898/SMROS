@@ -4264,6 +4264,13 @@ fn aarch64_directory_open_flags_match_staged_glibc() {
         .expect("Linux openat implementation");
     let openat = braced_body(&syscall[openat_start..]);
     assert!(openat.contains("linux_open_is_directory(flags, LINUX_O_DIRECTORY)"));
+    let fstat_start = syscall
+        .find("pub fn sys_fstat(")
+        .expect("Linux fstat implementation");
+    let fstat = braced_body(&syscall[fstat_start..]);
+    assert!(fstat.contains(
+        "let mode = if linux_fd_is_dir(fd) {\n        0o040755\n    } else {\n        0o100644\n    };\n    linux_write_stat(stat_ptr, mode)"
+    ));
     assert!(docker.contains("const O_DIRECTORY: usize = 0o40000;"));
     assert!(shell.contains("        0o40000,\n        0,"));
     assert!(verification.contains("pub const LINUX_O_DIRECTORY: usize = 0o40000;"));
