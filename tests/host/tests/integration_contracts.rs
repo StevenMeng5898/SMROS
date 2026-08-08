@@ -2670,6 +2670,45 @@ fn aarch64_clone_child_is_validated_before_publication() {
 }
 
 #[test]
+fn aarch64_glibc_fork_clone_sets_and_clears_child_tid() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read Linux process runtime");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+
+    let clone = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_clone(")
+            .expect("clone implementation")..],
+    );
+    assert!(clone.contains("CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID"));
+    assert!(clone.contains("linux_clone_tid_destination_valid(child_tid)"));
+    assert!(clone.contains("flags & CLONE_CHILD_SETTID != 0"));
+    assert!(clone.contains("flags & CLONE_CHILD_CLEARTID != 0"));
+
+    let fork_backend = &process[process
+        .find("impl LinuxForkOwnershipOps for Aarch64LinuxForkOps")
+        .expect("production fork ownership operations")..];
+    assert!(fork_backend.contains("copy_to_process("));
+    assert!(fork_backend.contains("process.pid"));
+    assert!(fork_backend.contains("child_tid"));
+    assert!(fork_backend.contains("linux_tid_to_user_value"));
+
+    let publish_fork_task = braced_body(
+        &task[task
+            .find("pub(crate) fn publish_fork_task(")
+            .expect("fork task publication")..],
+    );
+    assert!(publish_fork_task.contains("clear_child_tid"));
+    assert!(publish_fork_task.contains("set_clear_child_tid("));
+    assert!(fork_backend.contains("child_tid_write"));
+    assert!(fork_backend.contains("original.to_ne_bytes()"));
+}
+
+#[test]
 fn linux_futex_waits_block_and_wake_scheduler_tasks() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let module = std::fs::read_to_string(repository.join("src/syscall/mod.rs"))
@@ -5147,7 +5186,7 @@ fn linux_fork_publishes_only_a_complete_child() {
     assert!(!syscall.contains("static LINUX_NEXT_SYNTHETIC_PID"));
     let fork_path = braced_body(
         &syscall[syscall
-            .find("fn sys_fork_with_namespace_flags(")
+            .find("fn sys_fork_with_child_tid(")
             .expect("shared eager fork path")..],
     );
     assert!(fork_path.contains("linux_syscall_context::current()"));

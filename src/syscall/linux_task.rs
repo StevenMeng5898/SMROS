@@ -467,13 +467,21 @@ pub(crate) fn reserve_fork_task(scheduler_id: ThreadId) -> Result<LinuxTaskReser
 }
 
 #[cfg(target_arch = "aarch64")]
-pub(crate) fn publish_fork_task(reservation: LinuxTaskReservation) -> bool {
+pub(crate) fn publish_fork_task(
+    reservation: LinuxTaskReservation,
+    clear_child_tid: usize,
+) -> bool {
     with_runtime(|runtime| {
         scheduler::scheduler()
             .get_thread(ThreadId(reservation.scheduler_thread))
             .map(|thread| thread.state)
             == Some(thread::ThreadState::Blocked)
             && runtime.tasks.publish(reservation)
+            && runtime.tasks.set_clear_child_tid(
+                reservation.tid,
+                reservation.scheduler_thread,
+                clear_child_tid,
+            )
     })
 }
 

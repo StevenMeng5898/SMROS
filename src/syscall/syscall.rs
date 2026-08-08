@@ -61,8 +61,8 @@ use super::linux_task::{
     LinuxPendingSignal, LinuxPendingSignalReservation, LinuxPendingSignalSource,
     LinuxPendingSignals, LinuxRestartBlock, LinuxSignalDisposition, LinuxSignalFrame,
     LinuxSignalStack, LinuxSignalWait, LinuxSignalWaitOutcome, LinuxSleepOutcome, LinuxSleepWait,
-    CLONE_FILES, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, LINUX_SIGNAL_FRAME_LIMIT,
-    LINUX_SIGNAL_INFO_BYTES,
+    CLONE_CHILD_CLEARTID, CLONE_CHILD_SETTID, CLONE_FILES, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM,
+    LINUX_SIGNAL_FRAME_LIMIT, LINUX_SIGNAL_INFO_BYTES,
 };
 use crate::kernel_lowlevel::memory::{process_manager, PAGE_SIZE};
 use crate::kernel_objects::channel;
@@ -8320,18 +8320,40 @@ pub fn sys_fork() -> SysResult {
     sys_fork_with_namespace_flags(0, LINUX_SIGCHLD)
 }
 
-fn sys_fork_with_namespace_flags(namespace_flags: usize, child_exit_signal: usize) -> SysResult {
+fn sys_fork_with_namespace_flags(
+    namespace_flags: usize,
+    child_exit_signal: usize,
+) -> SysResult {
+    sys_fork_with_child_tid(namespace_flags, child_exit_signal, None, 0)
+}
+
+fn sys_fork_with_child_tid(
+    namespace_flags: usize,
+    child_exit_signal: usize,
+    set_child_tid: Option<usize>,
+    clear_child_tid: usize,
+) -> SysResult {
     #[cfg(not(target_arch = "aarch64"))]
     {
-        let _ = (namespace_flags, child_exit_signal);
+        let _ = (
+            namespace_flags,
+            child_exit_signal,
+            set_child_tid,
+            clear_child_tid,
+        );
         Err(SysError::ENOSYS)
     }
     #[cfg(target_arch = "aarch64")]
     {
         let context = linux_syscall_context::current().ok_or(SysError::EINVAL)?;
         let parent_pid = linux_process::current_pid()?;
-        let child_pid =
-            linux_process::run_fork_transaction(context, namespace_flags, child_exit_signal)?;
+        let child_pid = linux_process::run_fork_transaction(
+            context,
+            namespace_flags,
+            child_exit_signal,
+            set_child_tid,
+            clear_child_tid,
+        )?;
         debug_assert_ne!(child_pid, parent_pid);
         Ok(child_pid)
     }
@@ -8359,13 +8381,25 @@ pub fn sys_clone(
         if !syscall_logic::linux_signal_valid(flags & 0xff, LINUX_MAX_SIGNAL) {
             return Err(SysError::EINVAL);
         }
-        let allowed = 0xff | LINUX_CONTAINER_NAMESPACE_FLAGS;
+        let allowed = 0xff
+            | LINUX_CONTAINER_NAMESPACE_FLAGS
+            | (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID);
         if flags & !allowed != 0 {
             return Err(SysError::EINVAL);
         }
-        return sys_fork_with_namespace_flags(
+        let set_child_tid = flags & CLONE_CHILD_SETTID != 0;
+        let clear_child_tid = flags & CLONE_CHILD_CLEARTID != 0;
+        #[cfg(target_arch = "aarch64")]
+        if (set_child_tid || clear_child_tid)
+            && !linux_clone_tid_destination_valid(child_tid)
+        {
+            return Err(SysError::EFAULT);
+        }
+        return sys_fork_with_child_tid(
             flags & LINUX_CONTAINER_NAMESPACE_FLAGS,
             flags & 0xff,
+            set_child_tid.then_some(child_tid),
+            if clear_child_tid { child_tid } else { 0 },
         );
     }
 

@@ -535,6 +535,8 @@ struct Aarch64LinuxForkOps {
     context: super::linux_syscall_context::LinuxSyscallFrameRef,
     namespace_flags: usize,
     child_exit_signal: usize,
+    set_child_tid: Option<usize>,
+    clear_child_tid: usize,
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -543,11 +545,15 @@ impl Aarch64LinuxForkOps {
         context: super::linux_syscall_context::LinuxSyscallFrameRef,
         namespace_flags: usize,
         child_exit_signal: usize,
+        set_child_tid: Option<usize>,
+        clear_child_tid: usize,
     ) -> Self {
         Self {
             context,
             namespace_flags,
             child_exit_signal,
+            set_child_tid,
+            clear_child_tid,
         }
     }
 }
@@ -556,6 +562,7 @@ impl Aarch64LinuxForkOps {
 struct Aarch64LinuxForkMemory {
     pid: usize,
     root_paddr: u64,
+    child_tid_write: Option<(usize, u32)>,
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -637,9 +644,41 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
             process.pid,
             shared_attachments,
         )?;
+        let child_tid_write = if let Some(child_tid) = self.set_child_tid {
+            let Some(tid) = linux_task::linux_tid_to_user_value(process.pid) else {
+                let _ = super::linux_process_memory::unregister(process.pid);
+                return Err(SysError::EAGAIN);
+            };
+            let mut original = [0u8; core::mem::size_of::<u32>()];
+            if let Err(error) = super::linux_process_memory::copy_from_process(
+                process.pid,
+                child_tid,
+                &mut original,
+            ) {
+                let _ = super::linux_process_memory::unregister(process.pid);
+                return Err(error);
+            }
+            if let Err(error) = super::linux_process_memory::copy_to_process(
+                process.pid,
+                child_tid,
+                &tid.to_ne_bytes(),
+            ) {
+                let _ = super::linux_process_memory::copy_to_process(
+                    process.pid,
+                    child_tid,
+                    &original,
+                );
+                let _ = super::linux_process_memory::unregister(process.pid);
+                return Err(error);
+            }
+            Some((child_tid, u32::from_ne_bytes(original)))
+        } else {
+            None
+        };
         Ok(Aarch64LinuxForkMemory {
             pid: process.pid,
             root_paddr,
+            child_tid_write,
         })
     }
 
@@ -722,7 +761,7 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
     }
 
     fn publish_task(&mut self, task: &Self::Task) -> Result<(), Self::Error> {
-        if linux_task::publish_fork_task(*task) {
+        if linux_task::publish_fork_task(*task, self.clear_child_tid) {
             Ok(())
         } else {
             Err(SysError::EAGAIN)
@@ -763,6 +802,14 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
     fn rollback_configured(&mut self, _configured: Self::Configured) {}
 
     fn rollback_memory(&mut self, memory: Self::Memory) {
+        if let Some((address, original)) = memory.child_tid_write {
+            assert!(super::linux_process_memory::copy_to_process(
+                memory.pid,
+                address,
+                &original.to_ne_bytes(),
+            )
+            .is_ok());
+        }
         assert!(super::linux_process_memory::unregister(memory.pid));
     }
 
@@ -810,12 +857,16 @@ pub(crate) fn run_fork_transaction(
     context: super::linux_syscall_context::LinuxSyscallFrameRef,
     namespace_flags: usize,
     child_exit_signal: usize,
+    set_child_tid: Option<usize>,
+    clear_child_tid: usize,
 ) -> Result<usize, SysError> {
     run_linux_fork_transaction(
         LinuxForkReservation::new(Aarch64LinuxForkOps::new(
             context,
             namespace_flags,
             child_exit_signal,
+            set_child_tid,
+            clear_child_tid,
         )),
         fork_failpoint,
     )
