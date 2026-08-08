@@ -4216,6 +4216,25 @@ fn linux_memory_and_loader_are_process_owned() {
 }
 
 #[test]
+fn fxfs_bootstrap_provides_posix_shared_memory_directory() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS service");
+    let bootstrap_start = fxfs
+        .find("self.suspend_persist();\n        let result = (|| {")
+        .expect("FxFS fresh-volume bootstrap");
+    let bootstrap = braced_body(&fxfs[bootstrap_start..]);
+    let dev = bootstrap
+        .find("self.create_dir(\"/dev\")?")
+        .expect("POSIX device directory");
+    let shm = bootstrap
+        .find("self.create_dir(\"/dev/shm\")?")
+        .expect("POSIX shared-memory directory");
+
+    assert!(dev < shm);
+}
+
+#[test]
 fn linux_process_memory_mutations_are_transactional_and_bounded() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let process_memory =

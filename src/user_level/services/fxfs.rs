@@ -703,6 +703,8 @@ impl FxfsState {
             self.create_dir("/pkg")?;
             self.create_dir("/pkg/bin")?;
             self.create_dir("/data")?;
+            self.create_dir("/dev")?;
+            self.create_dir("/dev/shm")?;
             self.create_dir("/tmp")?;
             self.create_dir("/svc")?;
             self.create_dir("/config")?;
