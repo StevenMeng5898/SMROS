@@ -397,7 +397,8 @@ provenance above. The earlier full campaign remains immutably bound to `c0a513e7
 | Evidence | Result |
 | --- | --- |
 | Merge candidate | `599c4925dd708a21da1b8d9458fed0fa3232a63b` |
-| Host test counts | `make test` passed 253 unit tests, 80 integration contracts, 473 POSIX-tool tests, 4 launcher tests, and 8 linker-layout tests; the coverage run also passed 1 socket behavior test |
+| Merge-candidate host test counts | `make test` passed 253 unit tests, 80 integration contracts, 473 POSIX-tool tests, 4 launcher tests, and 8 linker-layout tests; the coverage run also passed 1 socket behavior test |
+| Final post-documentation host verification | `make test` passed 253 unit tests, 81 integration contracts, 473 POSIX-tool tests, 4 launcher tests, and 8 linker-layout tests |
 | Proof counts | Verus coverage audit passed; syscall 278, kernel objects 266, kernel low level 132, user level 172, and services 140: 988 verified, 0 errors |
 | AArch64 build and layout | passed; entry `0x40200000`, `.text [0x40200000,0x4027a000)`, `.rodata [0x4027a000,0x4a9c7000)`, `.data [0x4a9c7000,0x4bb40000)`, `.bss [0x4bb40000,0x4fb59000)`, `.stack [0x4fb59000,0x4fbd9000)` |
 | QEMU smoke | passed with SMP=4 and 512 MiB on private disk `target/posix/aarch64/smros-fxfs-task14-smoke-599c4925dd70.img` |

@@ -6156,6 +6156,36 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
 
 #[test]
 fn posix_process_runtime_results_separate_campaign_and_merge_head_evidence() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    fn sha256sum(bytes: &[u8]) -> String {
+        let mut child = Command::new("sha256sum")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start sha256sum");
+        child
+            .stdin
+            .take()
+            .expect("sha256sum stdin")
+            .write_all(bytes)
+            .expect("hash evidence bytes");
+        let output = child.wait_with_output().expect("finish sha256sum");
+        assert!(
+            output.status.success(),
+            "sha256sum failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("sha256sum output is UTF-8")
+            .split_whitespace()
+            .next()
+            .expect("sha256sum digest")
+            .to_owned()
+    }
+
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let results = std::fs::read_to_string(
         repository.join("docs/posix/2026-08-06-aarch64-fork-process-runtime-results.md"),
@@ -6166,21 +6196,44 @@ fn posix_process_runtime_results_separate_campaign_and_merge_head_evidence() {
         .split_once("## Task 14 merge-head verification")
         .expect("Task 14 merge-head verification addendum");
 
-    assert!(historical
-        .contains("SMROS implementation commit | `c0a513e75f7762b90e1e6de6ef27051e1add801d`"));
-    assert!(historical.contains("The terminal record is complete: 1,598 unique attempts"));
-    assert!(historical.contains("| pass | 948 |"));
-    assert!(historical.contains("| timeout | 333 |"));
+    let historical_document = historical
+        .strip_suffix('\n')
+        .expect("one separator newline before Task 14 evidence");
+    assert_eq!(historical_document.len(), 19_076);
+    assert_eq!(
+        sha256sum(historical_document.as_bytes()),
+        "b2b56c1663dce1ee49324fdc383c0d9793069c9687fc8a1109a39fe3d5557a76"
+    );
+
+    assert_eq!(merge_head.len(), 8_721);
+    assert_eq!(
+        sha256sum(merge_head.as_bytes()),
+        "ed96831991d93b2475e4948da31574d8afdff4a1213c7a9b7c79b72c2f99bad1"
+    );
 
     for required in [
-        "`599c4925dd708a21da1b8d9458fed0fa3232a63b`",
-        "Proof counts",
-        "Host test counts",
-        "AArch64 build and layout",
-        "QEMU smoke",
-        "Focused canaries",
-        "Repair-head campaign",
-        "1,598",
+        "| Merge candidate | `599c4925dd708a21da1b8d9458fed0fa3232a63b` |",
+        "| Merge-candidate host test counts | `make test` passed 253 unit tests, 80 integration contracts, 473 POSIX-tool tests, 4 launcher tests, and 8 linker-layout tests; the coverage run also passed 1 socket behavior test |",
+        "| Final post-documentation host verification | `make test` passed 253 unit tests, 81 integration contracts, 473 POSIX-tool tests, 4 launcher tests, and 8 linker-layout tests |",
+        "| Proof counts | Verus coverage audit passed; syscall 278, kernel objects 266, kernel low level 132, user level 172, and services 140: 988 verified, 0 errors |",
+        "| AArch64 build and layout | passed; entry `0x40200000`, `.text [0x40200000,0x4027a000)`, `.rodata [0x4027a000,0x4a9c7000)`, `.data [0x4a9c7000,0x4bb40000)`, `.bss [0x4bb40000,0x4fb59000)`, `.stack [0x4fb59000,0x4fbd9000)` |",
+        "| QEMU smoke | passed with SMP=4 and 512 MiB on private disk `target/posix/aarch64/smros-fxfs-task14-smoke-599c4925dd70.img` |",
+        "| POSIX stage | 1,979 C sources; 1,941 compile pass, 38 compile fail; 1,680 link pass, 2 link fail; 169 shell tests unported; 119,397,116 staged bytes |",
+        "| Host coverage | failed as required below 100%: 8,690/8,768 lines, 99.11%, 78 uncovered; `make coverage-host` exited 2 |",
+        "| Coverity | unavailable: `cov-build`, `cov-analyze`, and `cov-format-errors` were all missing; no findings or analysis coverage is claimed |",
+        "`9466093c93ba29f29e7a025ac98f13a79f2178c1d99274a837641aa98bf70cb8`",
+        "`ef58bb15baf69fc731bdb64810bec7a64ab8559a31e7c4152be4852858042e7a`",
+        "`2354fdb550290652373cd831c7489300bdd20344aa74fe151d8b3cfe0d009724`",
+        "`fde6be8fee45bc42dcc8fcd6442fff2156f301f2560d64094f562b9efa430bfb`",
+        "`cb4251d05bd5f23661c85b9d015a707b`",
+        "| pass | 949 |",
+        "| fail | 173 |",
+        "| unresolved | 109 |",
+        "| unsupported | 20 |",
+        "| untested | 15 |",
+        "| timeout | 332 |",
+        "build coverage `1598/1637`, execution coverage\n`1598/1598`, runtime pass coverage `949/1598`, and program completion\n`1197/2054`",
+        "The current quality record contains ten checks: eight passed, host Rust\ncoverage failed, and Coverity was unavailable. Its overall status is\n`failed`",
     ] {
         assert!(
             merge_head.contains(required),
