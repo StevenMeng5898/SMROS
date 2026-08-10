@@ -5575,6 +5575,13 @@ fn linux_wait_reaps_one_real_child_status() {
     let process_logic =
         std::fs::read_to_string(repository.join("src/syscall/linux_process_logic_shared.rs"))
             .expect("read Linux process logic");
+    let process_memory =
+        std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+            .expect("read Linux process memory runtime");
+    let process_memory_logic = std::fs::read_to_string(
+        repository.join("src/syscall/linux_process_memory_logic_shared.rs"),
+    )
+    .expect("read shared Linux process memory logic");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
         .expect("read syscall runtime");
     let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
@@ -5645,6 +5652,29 @@ fn linux_wait_reaps_one_real_child_status() {
     assert!(exit_runtime.contains("exit_current_process"));
     assert!(task.contains("retire_process_tasks"));
     assert!(process.contains("linux_task::wake_process_waiters(parent_pid)"));
+
+    assert!(process_logic.contains("pub notification_signal: Option<usize>"));
+    assert!(process_logic.contains("pub(crate) const fn linux_child_exit_notification("));
+    assert!(process_logic.contains("pub(crate) const fn linux_visible_parent_pid("));
+    let current_parent = braced_body(
+        &process[process
+            .find("pub(crate) fn current_parent_pid()")
+            .expect("visible parent identity helper")..],
+    );
+    assert!(current_parent.contains("linux_visible_parent_pid(process.pid, process.parent_pid)"));
+    assert!(process.contains("LinuxPendingSignal::standard(notification_signal)"));
+
+    assert!(process_memory_logic.contains("pub(crate) enum LinuxCopyAddressErrorClass"));
+    assert!(process_memory_logic.contains("pub(crate) const fn linux_copy_address_error_class("));
+    assert_eq!(
+        process_memory
+            .matches(".map_err(map_copy_address_error)")
+            .count(),
+        2,
+        "only checked AArch64 copy directions use the EFAULT mapper",
+    );
+    assert!(process_memory.contains("fn map_address_error("));
+    assert!(process_memory.contains("fn map_copy_address_error("));
 
     let group_start = syscall
         .find("pub fn sys_exit_group(exit_code: i32)")

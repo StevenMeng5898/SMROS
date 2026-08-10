@@ -1,6 +1,25 @@
 pub(crate) const LINUX_ROOT_PID: usize = 1;
 pub(crate) const LINUX_LAUNCH_REAPER_PID: usize = usize::MAX;
 pub(crate) const LINUX_MAX_PID: usize = i32::MAX as usize;
+pub(crate) const LINUX_SIGCHLD: usize = 17;
+
+pub(crate) const fn linux_child_exit_notification(exit_signal: usize) -> Option<usize> {
+    if exit_signal == 0 {
+        None
+    } else {
+        Some(exit_signal)
+    }
+}
+
+pub(crate) const fn linux_visible_parent_pid(pid: usize, parent_pid: usize) -> usize {
+    if pid == LINUX_ROOT_PID {
+        0
+    } else if parent_pid == LINUX_LAUNCH_REAPER_PID {
+        LINUX_ROOT_PID
+    } else {
+        parent_pid
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxProcessState {
@@ -75,16 +94,16 @@ impl LinuxSigchldExitPolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxTerminalChildTransition {
     pub parent_pid: usize,
-    pub notify_parent: bool,
+    pub notification_signal: Option<usize>,
 }
 
 pub(crate) fn apply_linux_terminal_child_transition<E>(
     transition: LinuxTerminalChildTransition,
-    notify_parent: impl FnOnce(usize) -> Result<(), E>,
+    notify_parent: impl FnOnce(usize, usize) -> Result<(), E>,
     wake_parent_waiters: impl FnOnce(usize),
 ) -> Result<(), E> {
-    let notification = if transition.notify_parent {
-        notify_parent(transition.parent_pid)
+    let notification = if let Some(signum) = transition.notification_signal {
+        notify_parent(transition.parent_pid, signum)
     } else {
         Ok(())
     };
@@ -490,12 +509,21 @@ impl<const N: usize> LinuxProcessTable<N> {
         if !self.exit(pid, wait_status) {
             return None;
         }
+        let policy = if process.exit_signal == LINUX_SIGCHLD {
+            policy
+        } else {
+            LinuxSigchldExitPolicy::RetainZombieAndNotify
+        };
         if policy.reap_immediately() && self.reap(process.parent_pid, pid).is_none() {
             return None;
         }
         Some(LinuxTerminalChildTransition {
             parent_pid: process.parent_pid,
-            notify_parent: policy.notify_parent(),
+            notification_signal: if policy.notify_parent() {
+                linux_child_exit_notification(process.exit_signal)
+            } else {
+                None
+            },
         })
     }
 

@@ -2446,27 +2446,88 @@ mod linux_process_logic {
     }
 
     #[test]
+    fn process_exit_signal_routes_exact_notification() {
+        assert_eq!(linux_child_exit_notification(0), None);
+        assert_eq!(linux_child_exit_notification(17), Some(17));
+
+        for (exit_signal, policy, expected_notification) in [
+            (0, LinuxSigchldExitPolicy::ReapWithoutNotify, None),
+            (17, LinuxSigchldExitPolicy::RetainZombieAndNotify, Some(17)),
+            (12, LinuxSigchldExitPolicy::ReapWithoutNotify, Some(12)),
+        ] {
+            let mut processes = LinuxProcessTable::<2>::new();
+            processes.register_root(7).unwrap();
+            let child = processes
+                .reserve_child_with_pid(LINUX_ROOT_PID, 8, 2, exit_signal)
+                .unwrap();
+            assert!(processes.publish(child));
+
+            let transition = processes
+                .terminate_child(child.pid, 15, policy)
+                .expect("running child terminal transition");
+
+            assert_eq!(transition.notification_signal, expected_notification);
+            let mut delivered_signal = None;
+            let mut waiter_wakes = 0usize;
+            apply_linux_terminal_child_transition(
+                transition,
+                |parent_pid, signum| {
+                    assert_eq!(parent_pid, LINUX_ROOT_PID);
+                    delivered_signal = Some(signum);
+                    Ok::<(), ()>(())
+                },
+                |parent_pid| {
+                    assert_eq!(parent_pid, LINUX_ROOT_PID);
+                    waiter_wakes += 1;
+                },
+            )
+            .unwrap();
+            assert_eq!(delivered_signal, expected_notification);
+            assert_eq!(waiter_wakes, 1);
+            assert_eq!(
+                processes.wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Pid(child.pid)),
+                LinuxWaitOutcome::Ready {
+                    pid: child.pid,
+                    status: 15,
+                },
+                "zero and custom exit signals do not inherit SIGCHLD auto-reap policy",
+            );
+        }
+    }
+
+    #[test]
+    fn orphan_parent_identity_is_user_visible() {
+        assert_eq!(linux_visible_parent_pid(LINUX_ROOT_PID, 0), 0);
+        assert_eq!(
+            linux_visible_parent_pid(42, LINUX_LAUNCH_REAPER_PID),
+            LINUX_ROOT_PID,
+        );
+    }
+
+    #[test]
     fn terminal_child_transition_reaps_immediately_or_retains_one_zombie() {
         for (policy, expected_wait, expected_notification) in [
             (
                 LinuxSigchldExitPolicy::RetainZombieAndNotify,
                 LinuxWaitOutcome::Ready { pid: 2, status: 15 },
-                true,
+                Some(17),
             ),
             (
                 LinuxSigchldExitPolicy::ReapAndNotify,
                 LinuxWaitOutcome::NoChildren,
-                true,
+                Some(17),
             ),
             (
                 LinuxSigchldExitPolicy::ReapWithoutNotify,
                 LinuxWaitOutcome::NoChildren,
-                false,
+                None,
             ),
         ] {
             let mut processes = LinuxProcessTable::<2>::new();
             processes.register_root(7).unwrap();
-            let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+            let child = processes
+                .reserve_child_with_pid(LINUX_ROOT_PID, 8, 2, LINUX_SIGCHLD)
+                .unwrap();
             assert!(processes.publish(child));
 
             let terminal = processes
@@ -2474,7 +2535,7 @@ mod linux_process_logic {
                 .expect("running child terminal transition");
 
             assert_eq!(terminal.parent_pid, LINUX_ROOT_PID);
-            assert_eq!(terminal.notify_parent, expected_notification);
+            assert_eq!(terminal.notification_signal, expected_notification);
             assert_eq!(
                 processes.wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Pid(child.pid)),
                 expected_wait,
@@ -2487,14 +2548,16 @@ mod linux_process_logic {
     fn terminal_child_transition_wakes_waiters_after_notification_failure() {
         let transition = LinuxTerminalChildTransition {
             parent_pid: LINUX_ROOT_PID,
-            notify_parent: true,
+            notification_signal: Some(17),
         };
         let mut notification_attempts = 0usize;
         let mut waiter_wakes = 0usize;
 
         let result = apply_linux_terminal_child_transition(
             transition,
-            |_| {
+            |parent_pid, signum| {
+                assert_eq!(parent_pid, LINUX_ROOT_PID);
+                assert_eq!(signum, 17);
                 notification_attempts += 1;
                 Err(17usize)
             },
@@ -3183,7 +3246,7 @@ pub fn linux_signal_lifecycle_behavior_contract() {
         apply_linux_terminal_child_transition, linux_signal_delivery_route,
         linux_wait_status_signal, LinuxProcessSignalStateCore, LinuxProcessTable,
         LinuxSigchldExitPolicy, LinuxSignalDeliveryRoute, LinuxWaitOutcome, LinuxWaitSelector,
-        LINUX_ROOT_PID,
+        LINUX_ROOT_PID, LINUX_SIGCHLD,
     };
     use linux_task_logic::{
         linux_signal_bit, linux_signal_disposition, live_process_task_count,
@@ -3309,7 +3372,9 @@ pub fn linux_signal_lifecycle_behavior_contract() {
 
         let mut processes = LinuxProcessTable::<2>::new();
         processes.register_root(7).unwrap();
-        let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        let child = processes
+            .reserve_child_with_pid(LINUX_ROOT_PID, 8, 2, LINUX_SIGCHLD)
+            .unwrap();
         assert!(processes.publish(child));
 
         let mut tasks = LinuxTaskTable::<4>::new();
@@ -3333,7 +3398,9 @@ pub fn linux_signal_lifecycle_behavior_contract() {
         let mut process_pending = LinuxPendingSignals::new();
         apply_linux_terminal_child_transition(
             transition,
-            |_| process_pending.queue(LinuxPendingSignal::standard(17)),
+            |_, notification_signal| {
+                process_pending.queue(LinuxPendingSignal::standard(notification_signal))
+            },
             |parent_pid| {
                 for waiter in tasks.child_waiters(parent_pid).into_iter().flatten() {
                     assert!(tasks.wake(waiter.tid, waiter.scheduler_thread));
@@ -3384,6 +3451,26 @@ mod linux_process_memory_logic {
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/syscall/linux_fork_logic_shared.rs"
     ));
+
+    #[test]
+    fn copy_address_errors_are_efault() {
+        for error in [
+            LinuxAddressSpaceErrorKind::InvalidAddress,
+            LinuxAddressSpaceErrorKind::InvalidPermissions,
+            LinuxAddressSpaceErrorKind::AlreadyMapped,
+            LinuxAddressSpaceErrorKind::NotMapped,
+            LinuxAddressSpaceErrorKind::PermissionDenied,
+        ] {
+            assert_eq!(
+                linux_copy_address_error_class(error),
+                LinuxCopyAddressErrorClass::Fault,
+            );
+        }
+        assert_eq!(
+            linux_copy_address_error_class(LinuxAddressSpaceErrorKind::OutOfMemory),
+            LinuxCopyAddressErrorClass::OutOfMemory,
+        );
+    }
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/kernel_lowlevel/ARM64/context_shared.rs"

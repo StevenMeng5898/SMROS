@@ -21,7 +21,6 @@ include!("linux_fork_logic_shared.rs");
 include!("linux_runtime_lock_shared.rs");
 
 pub(crate) const LINUX_PROCESS_LIMIT: usize = thread::MAX_THREADS;
-pub(crate) const LINUX_SIGCHLD: usize = 17;
 pub(crate) const LINUX_SA_NOCLDWAIT: u64 = 0x0000_0002;
 const LINUX_SIG_IGN: u64 = 1;
 
@@ -203,13 +202,7 @@ pub(crate) fn current_pid() -> Result<usize, SysError> {
 }
 
 pub(crate) fn current_parent_pid() -> Result<usize, SysError> {
-    current().map(|process| {
-        if process.pid == LINUX_ROOT_PID {
-            0
-        } else {
-            process.parent_pid
-        }
-    })
+    current().map(|process| linux_visible_parent_pid(process.pid, process.parent_pid))
 }
 
 pub(crate) fn wait_current(
@@ -306,19 +299,24 @@ fn finish_terminal_process(
                 let _ = runtime.processes.reparent_children_to_launch_reaper(pid);
                 return Ok(None);
             }
-            let parent_slot = runtime
-                .processes
-                .processes
-                .iter()
-                .position(|candidate| {
-                    candidate.pid == parent_pid && candidate.state == LinuxProcessState::Running
-                })
-                .ok_or(SysError::ESRCH)?;
-            let sigchld_action = runtime.signal_states[parent_slot].signal_actions[LINUX_SIGCHLD];
-            let policy = linux_sigchld_exit_policy(
-                sigchld_action.handler == LINUX_SIG_IGN,
-                sigchld_action.flags & LINUX_SA_NOCLDWAIT != 0,
-            );
+            let policy = if process.exit_signal == LINUX_SIGCHLD {
+                let parent_slot = runtime
+                    .processes
+                    .processes
+                    .iter()
+                    .position(|candidate| {
+                        candidate.pid == parent_pid && candidate.state == LinuxProcessState::Running
+                    })
+                    .ok_or(SysError::ESRCH)?;
+                let sigchld_action =
+                    runtime.signal_states[parent_slot].signal_actions[LINUX_SIGCHLD];
+                linux_sigchld_exit_policy(
+                    sigchld_action.handler == LINUX_SIG_IGN,
+                    sigchld_action.flags & LINUX_SA_NOCLDWAIT != 0,
+                )
+            } else {
+                LinuxSigchldExitPolicy::RetainZombieAndNotify
+            };
             let transition = runtime
                 .processes
                 .terminate_child(pid, wait_status, policy)
@@ -330,10 +328,10 @@ fn finish_terminal_process(
         if let Some(transition) = transition {
             let _ = apply_linux_terminal_child_transition(
                 transition,
-                |parent_pid| {
+                |parent_pid, notification_signal| {
                     super::queue_process_linux_signal_and_wake(
                         parent_pid,
-                        LinuxPendingSignal::standard(LINUX_SIGCHLD),
+                        LinuxPendingSignal::standard(notification_signal),
                     )
                 },
                 |parent_pid| {

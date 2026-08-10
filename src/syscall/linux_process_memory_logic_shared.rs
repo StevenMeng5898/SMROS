@@ -15,6 +15,35 @@ pub(crate) const LINUX_MAP_SHARED: usize = 1;
 pub(crate) const LINUX_MAP_PRIVATE: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxAddressSpaceErrorKind {
+    OutOfMemory,
+    InvalidAddress,
+    InvalidPermissions,
+    AlreadyMapped,
+    NotMapped,
+    PermissionDenied,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxCopyAddressErrorClass {
+    Fault,
+    OutOfMemory,
+}
+
+pub(crate) const fn linux_copy_address_error_class(
+    error: LinuxAddressSpaceErrorKind,
+) -> LinuxCopyAddressErrorClass {
+    match error {
+        LinuxAddressSpaceErrorKind::OutOfMemory => LinuxCopyAddressErrorClass::OutOfMemory,
+        LinuxAddressSpaceErrorKind::InvalidAddress
+        | LinuxAddressSpaceErrorKind::InvalidPermissions
+        | LinuxAddressSpaceErrorKind::AlreadyMapped
+        | LinuxAddressSpaceErrorKind::NotMapped
+        | LinuxAddressSpaceErrorKind::PermissionDenied => LinuxCopyAddressErrorClass::Fault,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxProcessAttributesCore {
     pub namespace_flags: usize,
     pub setns_count: usize,

@@ -1193,7 +1193,7 @@ impl LinuxProcessMemory {
         return self
             .address_space
             .copy_to_user(address, bytes)
-            .map_err(map_address_error);
+            .map_err(map_copy_address_error);
         #[cfg(not(target_arch = "aarch64"))]
         self.address_space.copy_to_user(address, bytes)
     }
@@ -1203,7 +1203,7 @@ impl LinuxProcessMemory {
         return self
             .address_space
             .copy_from_user(address, out)
-            .map_err(map_address_error);
+            .map_err(map_copy_address_error);
         #[cfg(not(target_arch = "aarch64"))]
         self.address_space.copy_from_user(address, out)
     }
@@ -2005,5 +2005,22 @@ fn map_address_error(error: crate::kernel_lowlevel::mmu::AddressSpaceError) -> S
         | AddressSpaceError::InvalidPermissions
         | AddressSpaceError::AlreadyMapped
         | AddressSpaceError::NotMapped => SysError::EINVAL,
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn map_copy_address_error(error: crate::kernel_lowlevel::mmu::AddressSpaceError) -> SysError {
+    use crate::kernel_lowlevel::mmu::AddressSpaceError;
+    let error = match error {
+        AddressSpaceError::OutOfMemory => LinuxAddressSpaceErrorKind::OutOfMemory,
+        AddressSpaceError::InvalidAddress => LinuxAddressSpaceErrorKind::InvalidAddress,
+        AddressSpaceError::InvalidPermissions => LinuxAddressSpaceErrorKind::InvalidPermissions,
+        AddressSpaceError::AlreadyMapped => LinuxAddressSpaceErrorKind::AlreadyMapped,
+        AddressSpaceError::NotMapped => LinuxAddressSpaceErrorKind::NotMapped,
+        AddressSpaceError::PermissionDenied => LinuxAddressSpaceErrorKind::PermissionDenied,
+    };
+    match linux_copy_address_error_class(error) {
+        LinuxCopyAddressErrorClass::Fault => SysError::EFAULT,
+        LinuxCopyAddressErrorClass::OutOfMemory => SysError::ENOMEM,
     }
 }
