@@ -1852,8 +1852,6 @@ impl<const N: usize> LinuxTaskTable<N> {
         }
         self.sleep_waits.fill(None);
         self.clear_child_tids.fill(0);
-        self.next_tid = LINUX_ROOT_TID + 1;
-        self.exhausted = false;
     }
 
     fn is_published(task: LinuxTaskCore) -> bool {

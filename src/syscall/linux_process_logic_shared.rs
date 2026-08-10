@@ -650,8 +650,6 @@ impl<const N: usize> LinuxProcessTable<N> {
 
     pub(crate) fn reset(&mut self) {
         self.processes.fill(LinuxProcessCore::EMPTY);
-        self.next_pid = LINUX_ROOT_PID + 1;
-        self.exhausted = false;
         self.launch_reaper = LinuxLaunchReaperRecord::EMPTY;
     }
 

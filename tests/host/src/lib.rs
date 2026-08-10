@@ -744,7 +744,7 @@ mod linux_task_logic {
     }
 
     #[test]
-    fn capacity_does_not_consume_a_tid_and_reset_starts_a_new_launch() {
+    fn launch_reset_preserves_boot_tid_high_water() {
         let mut tasks = LinuxTaskTable::<2>::new();
         tasks.register_root(7).unwrap();
         let child = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
@@ -756,7 +756,7 @@ mod linux_task_logic {
         tasks.reset();
         assert_eq!(tasks.by_scheduler(7), None);
         assert_eq!(tasks.register_root(10), Ok(LINUX_ROOT_TID));
-        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 11).unwrap().tid, 2);
+        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 11).unwrap().tid, 4);
     }
 
     #[test]
@@ -806,7 +806,7 @@ mod linux_task_logic {
 
         tasks.reset();
         tasks.register_root(10).unwrap();
-        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 11).unwrap().tid, 2);
+        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 11), None);
     }
 
     #[test]
@@ -825,7 +825,7 @@ mod linux_task_logic {
     }
 
     #[test]
-    fn allocator_exhaustion_is_permanent_until_reset() {
+    fn allocator_exhaustion_remains_permanent_across_launch_reset() {
         let mut tasks = LinuxTaskTable::<2>::new();
         tasks.register_root(7).unwrap();
         tasks.next_tid = usize::MAX;
@@ -836,7 +836,7 @@ mod linux_task_logic {
 
         tasks.reset();
         tasks.register_root(9).unwrap();
-        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 10).unwrap().tid, 2);
+        assert_eq!(tasks.reserve_child(LINUX_ROOT_TID, 10), None);
     }
 
     #[cfg(test)]
@@ -2944,7 +2944,7 @@ mod linux_process_logic {
     }
 
     #[test]
-    fn pid_exhaustion_is_monotonic_even_after_rollback() {
+    fn pid_allocator_exhaustion_remains_permanent_across_launch_reset() {
         let max_pid = i32::MAX as usize;
         let mut processes = LinuxProcessTable::<3>::with_next_pid(max_pid);
         processes.register_root(7).unwrap();
@@ -2955,10 +2955,16 @@ mod linux_process_logic {
             processes.reserve_child(LINUX_ROOT_PID, 9),
             Err(LinuxProcessError::Exhausted)
         );
+        processes.reset();
+        processes.register_root(10).unwrap();
+        assert_eq!(
+            processes.reserve_child(LINUX_ROOT_PID, 11),
+            Err(LinuxProcessError::Exhausted)
+        );
     }
 
     #[test]
-    fn reset_clears_every_record_and_starts_a_new_launch_identity_space() {
+    fn launch_reset_preserves_boot_pid_high_water() {
         let mut processes = LinuxProcessTable::<3>::new();
         processes.register_root(7).unwrap();
         let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
@@ -2969,7 +2975,7 @@ mod linux_process_logic {
         assert_eq!(processes.by_pid(LINUX_ROOT_PID), None);
         assert_eq!(processes.by_pid(child.pid), None);
         assert_eq!(processes.register_root(17), Ok(LINUX_ROOT_PID));
-        assert_eq!(processes.reserve_child(LINUX_ROOT_PID, 18).unwrap().pid, 2);
+        assert_eq!(processes.reserve_child(LINUX_ROOT_PID, 18).unwrap().pid, 3);
     }
 
     #[test]
