@@ -134,6 +134,19 @@ which QEMU loads directly as an ELF payload.
 The x86_64 build emits `target/x86_64-unknown-none/release/smros`, which QEMU
 loads as a PVH ELF payload.
 
+## AArch64 Warning Gate
+
+Run:
+
+```bash
+make aarch64-warning-check
+```
+
+This performs the optimized AArch64 kernel build and link-layout check with
+Rust warnings promoted to errors. Normal AArch64 `make build` invocations use
+the same policy. x86_64 and RISC-V64 warning policy is unchanged until their
+separate cleanup milestones.
+
 ## System Smoke Test
 
 Run:

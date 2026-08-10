@@ -915,6 +915,28 @@ fn test_layer_commands_and_docs_are_wired() {
 }
 
 #[test]
+fn aarch64_warning_gate_is_strict_and_target_scoped() {
+    let makefile = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Makefile"));
+    let docs = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/TESTING.md"
+    ));
+
+    assert!(makefile.contains("AARCH64_RUSTFLAGS = $(strip $(RUSTFLAGS) -D warnings)"));
+    assert!(makefile.contains(
+        "aarch64-warning-check:\n\t@$(MAKE) build-test ARCH=aarch64-unknown-none"
+    ));
+    assert!(makefile.contains(
+        "RUSTFLAGS='$(AARCH64_RUSTFLAGS)' SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' cargo build --release --target $(TARGET)"
+    ));
+    assert!(makefile.contains(
+        "SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' cargo build --release --target $(TARGET)"
+    ));
+    assert!(docs.contains("make aarch64-warning-check"));
+    assert!(docs.contains("x86_64 and RISC-V64 warning policy is unchanged"));
+}
+
+#[test]
 fn host_coverage_runs_outside_repository_cargo_configuration() {
     let coverage = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

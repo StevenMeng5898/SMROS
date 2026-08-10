@@ -43,6 +43,7 @@ ST_COVERAGE_DIR ?= target/coverage/st
 POSIX_QEMU_MEMORY ?= 1024M
 AARCH64_SYSROOT ?= /usr/aarch64-linux-gnu
 POSIX_QUALITY_EVIDENCE ?=
+AARCH64_RUSTFLAGS = $(strip $(RUSTFLAGS) -D warnings)
 override POSIX_QEMU_MEMORY := $(value POSIX_QEMU_MEMORY)
 override AARCH64_SYSROOT := $(value AARCH64_SYSROOT)
 override POSIX_QUALITY_EVIDENCE := $(value POSIX_QUALITY_EVIDENCE)
@@ -50,14 +51,18 @@ export POSIX_QEMU_MEMORY
 export AARCH64_SYSROOT
 export POSIX_QUALITY_EVIDENCE
 
-.PHONY: all build build-test host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report coverage-ut coverage-it coverage-host coverage-st coverage st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
+.PHONY: all build build-test aarch64-warning-check host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report coverage-ut coverage-it coverage-host coverage-st coverage st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
 
 all: build
 
 # Build the kernel
 build:
 	@echo "Building SMROS kernel for $(TARGET)..."
-	@SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' cargo build --release --target $(TARGET)
+	@if [ "$(TARGET)" = "aarch64-unknown-none" ]; then \
+		RUSTFLAGS='$(AARCH64_RUSTFLAGS)' SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' cargo build --release --target $(TARGET); \
+	else \
+		SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' cargo build --release --target $(TARGET); \
+	fi
 	@if [ "$(TARGET)" = "riscv64gc-unknown-none-elf" ]; then \
 		echo "Using RISC-V ELF payload directly for QEMU: $(KERNEL)"; \
 	elif [ "$(TARGET)" = "x86_64-unknown-none" ]; then \
@@ -72,6 +77,10 @@ build-test: build
 	@if [ "$(TARGET)" = "aarch64-unknown-none" ]; then \
 		python3 scripts/check-aarch64-link-layout.py '$(BUILD_DIR)/smros'; \
 	fi
+
+# AArch64 release build with every Rust warning promoted to an error
+aarch64-warning-check:
+	@$(MAKE) build-test ARCH=aarch64-unknown-none
 
 # Formatting check for the host-side unit-test crate
 host-fmt-check:
@@ -288,6 +297,7 @@ help:
 	@echo "  all       - Build the kernel (default)"
 	@echo "  build     - Build the kernel"
 	@echo "  build-test - Build the production kernel image as a test"
+	@echo "  aarch64-warning-check - Build and link-check AArch64 with Rust warnings denied"
 	@echo "  host-fmt-check - Check formatting for the host unit-test crate"
 	@echo "  script-check - Check shell script syntax"
 	@echo "  ut        - Run host-side unit tests for pure shared logic"
