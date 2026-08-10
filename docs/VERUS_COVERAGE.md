@@ -28,6 +28,7 @@ unsupported case.
 ## Classified Source Files
 
 - `src/kernel_lowlevel/ARM64/boot.rs`
+- `src/kernel_lowlevel/ARM64/context_shared.rs`
 - `src/kernel_lowlevel/ARM64/context_switch.S`
 - `src/kernel_lowlevel/ARM64/cpu.rs`
 - `src/kernel_lowlevel/ARM64/drivers.rs`
@@ -37,6 +38,7 @@ unsupported case.
 - `src/kernel_lowlevel/ARM64/smp.rs`
 - `src/kernel_lowlevel/ARM64/thread.rs`
 - `src/kernel_lowlevel/ARM64/timer.rs`
+- `src/kernel_lowlevel/ARM64/user_address_space.rs`
 - `src/kernel_lowlevel/RISCV64/boot.rs`
 - `src/kernel_lowlevel/RISCV64/context_switch.S`
 - `src/kernel_lowlevel/RISCV64/cpu.rs`
@@ -57,6 +59,7 @@ unsupported case.
 - `src/kernel_lowlevel/X86_64/smp.rs`
 - `src/kernel_lowlevel/X86_64/thread.rs`
 - `src/kernel_lowlevel/X86_64/timer.rs`
+- `src/kernel_lowlevel/aarch64_vm_logic_shared.rs`
 - `src/kernel_lowlevel/lowlevel_logic.rs`
 - `src/kernel_lowlevel/lowlevel_logic_shared.rs`
 - `src/kernel_lowlevel/memory.rs`
@@ -98,6 +101,18 @@ unsupported case.
 - `src/syscall/address_logic.rs`
 - `src/syscall/address_logic_shared.rs`
 - `src/syscall/fuzz.rs`
+- `src/syscall/linux_fork_logic_shared.rs`
+- `src/syscall/linux_futex.rs`
+- `src/syscall/linux_futex_logic_shared.rs`
+- `src/syscall/linux_process.rs`
+- `src/syscall/linux_process_logic_shared.rs`
+- `src/syscall/linux_process_memory.rs`
+- `src/syscall/linux_process_memory_logic_shared.rs`
+- `src/syscall/linux_runtime_lock_shared.rs`
+- `src/syscall/linux_syscall_context.rs`
+- `src/syscall/linux_syscall_context_logic_shared.rs`
+- `src/syscall/linux_task.rs`
+- `src/syscall/linux_task_logic_shared.rs`
 - `src/syscall/mod.rs`
 - `src/syscall/syscall.rs`
 - `src/syscall/syscall_bridge.rs`
@@ -114,6 +129,7 @@ unsupported case.
 - `src/user_level/drivers/driver_logic_shared.rs`
 - `src/user_level/drivers/mod.rs`
 - `src/user_level/drivers/net.rs`
+- `src/user_level/drivers/pci.rs`
 - `src/user_level/mod.rs`
 - `src/user_level/services/compat_apps.rs`
 - `src/user_level/services/component.rs`
@@ -122,12 +138,15 @@ unsupported case.
 - `src/user_level/services/fxfs.rs`
 - `src/user_level/services/gemma.rs`
 - `src/user_level/services/hermes_agent.rs`
+- `src/user_level/services/hermes_shell_logic_shared.rs`
 - `src/user_level/services/host_share.rs`
 - `src/user_level/services/html_ui.rs`
 - `src/user_level/services/lvgl.rs`
 - `src/user_level/services/mod.rs`
 - `src/user_level/services/net.rs`
 - `src/user_level/services/perfetto.rs`
+- `src/user_level/services/posix_test.rs`
+- `src/user_level/services/posix_test_logic_shared.rs`
 - `src/user_level/services/qml_cluster.rs`
 - `src/user_level/services/run_elf.rs`
 - `src/user_level/services/svc.rs`

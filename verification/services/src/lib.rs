@@ -1,6 +1,49 @@
 #![allow(unused_macros)]
 
+extern crate alloc;
+
 use vstd::prelude::*;
+
+#[allow(dead_code)]
+mod hermes_shell_runtime_shared {
+    include!("../../../src/user_level/services/hermes_shell_logic_shared.rs");
+}
+
+#[macro_use]
+#[allow(dead_code, unused_macros)]
+mod posix_test_runtime_shared {
+    include!("../../../src/user_level/services/posix_test_logic_shared.rs");
+
+    pub(crate) fn manifest_atom_valid_macro(atom: &str) -> bool {
+        smros_posix_manifest_atom_valid_body!(atom)
+    }
+
+    pub(crate) fn staged_binary_path_valid_macro(path: &str) -> bool {
+        smros_posix_staged_binary_path_valid_body!(path)
+    }
+
+    pub(crate) fn filter_matches_macro(
+        kind: PosixFilterKind,
+        value: &str,
+        test_id: &str,
+        group: &str,
+        api: &str,
+        runnable: bool,
+        complete: bool,
+    ) -> bool {
+        smros_posix_filter_matches_body!(
+            kind, value, test_id, group, api, runnable, complete
+        )
+    }
+
+    pub(crate) fn pts_status_macro(exit_code: i32) -> u8 {
+        smros_posix_pts_status_body!(exit_code)
+    }
+
+    pub(crate) fn resource_delta_macro(before: usize, after: usize) -> i128 {
+        smros_posix_resource_delta_body!(before, after)
+    }
+}
 
 verus! {
 
@@ -37,7 +80,20 @@ pub const GEMMA_DEFAULT_OUTPUT_TOKENS: usize = 32;
 
 pub const HERMES_REQUIRED_TOOLS: usize = 3;
 pub const HERMES_REQUIRED_SKILLS: usize = 4;
-pub const HERMES_MAX_ITERATIONS: usize = 64;
+
+pub const POSIX_STATUS_PASS: u8 = 0;
+pub const POSIX_STATUS_FAIL: u8 = 1;
+pub const POSIX_STATUS_UNRESOLVED: u8 = 2;
+pub const POSIX_STATUS_UNSUPPORTED: u8 = 3;
+pub const POSIX_STATUS_UNTESTED: u8 = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PosixFilterKind {
+    All,
+    Group,
+    Api,
+    Test,
+}
 
 pub const QML_CLUSTER_RENDER_WIDTH: usize = 960;
 pub const QML_CLUSTER_RENDER_HEIGHT: usize = 540;
@@ -91,11 +147,48 @@ spec fn checked_mul_spec(lhs: int, rhs: int) -> Option<int> {
 }
 
 spec fn hermes_campaign_iterations_valid_spec(iterations: int) -> bool {
-    0 < iterations && iterations <= HERMES_MAX_ITERATIONS
+    0 < iterations
 }
 
 spec fn hermes_command_class_allowed_spec(command_class: int) -> bool {
     command_class == 1
+}
+
+spec fn posix_filter_matches_spec(
+    kind: PosixFilterKind,
+    value: usize,
+    test_id: usize,
+    group: usize,
+    api: usize,
+    runnable: bool,
+    complete: bool,
+) -> bool {
+    match kind {
+        PosixFilterKind::All => runnable && complete,
+        PosixFilterKind::Group => value == group,
+        PosixFilterKind::Api => value == api,
+        PosixFilterKind::Test => value == test_id,
+    }
+}
+
+spec fn posix_pts_status_spec(exit_code: int) -> int {
+    if exit_code == 0 {
+        POSIX_STATUS_PASS as int
+    } else if exit_code == 1 {
+        POSIX_STATUS_FAIL as int
+    } else if exit_code == 2 {
+        POSIX_STATUS_UNRESOLVED as int
+    } else if exit_code == 4 {
+        POSIX_STATUS_UNSUPPORTED as int
+    } else if exit_code == 5 {
+        POSIX_STATUS_UNTESTED as int
+    } else {
+        POSIX_STATUS_FAIL as int
+    }
+}
+
+spec fn posix_resource_delta_spec(before: int, after: int) -> int {
+    after - before
 }
 
 spec fn gemma_prompt_len_valid_spec(len: int) -> bool {
@@ -501,6 +594,44 @@ fn hermes_skill_matches(skill_hits: usize, required_skills: usize, prompt_len: u
         out == hermes_skill_matches_spec(skill_hits as int, required_skills as int, prompt_len as int),
 {
     skill_hits >= required_skills && required_skills > 0 && prompt_len > 0
+}
+
+fn hermes_campaign_iterations_valid(iterations: usize) -> (out: bool)
+    ensures
+        out == hermes_campaign_iterations_valid_spec(iterations as int),
+{
+    iterations > 0
+}
+
+fn posix_filter_matches(
+    kind: PosixFilterKind,
+    value: usize,
+    test_id: usize,
+    group: usize,
+    api: usize,
+    runnable: bool,
+    complete: bool,
+) -> (out: bool)
+    ensures
+        out == posix_filter_matches_spec(
+            kind, value, test_id, group, api, runnable, complete,
+        ),
+{
+    smros_posix_filter_matches_body!(kind, value, test_id, group, api, runnable, complete)
+}
+
+fn posix_pts_status(exit_code: i32) -> (out: u8)
+    ensures
+        out as int == posix_pts_status_spec(exit_code as int),
+{
+    smros_posix_pts_status_body!(exit_code)
+}
+
+fn posix_resource_delta(before: usize, after: usize) -> (out: i128)
+    ensures
+        out as int == posix_resource_delta_spec(before as int, after as int),
+{
+    smros_posix_resource_delta_body!(before, after)
 }
 
 fn hermes_delegate_allowed(tools_len: usize, prompt_len: usize) -> (out: bool)
@@ -1129,10 +1260,20 @@ proof fn hermes_shell_logic_shared_rs_proof_slice() {
     assert(hermes_campaign_iterations_valid_spec(1));
     assert(hermes_campaign_iterations_valid_spec(64));
     assert(!hermes_campaign_iterations_valid_spec(0));
-    assert(!hermes_campaign_iterations_valid_spec(65));
+    assert(hermes_campaign_iterations_valid_spec(65));
     assert(hermes_command_class_allowed_spec(1));
     assert(!hermes_command_class_allowed_spec(0));
     assert(!hermes_command_class_allowed_spec(2));
+}
+
+proof fn posix_test_logic_shared_rs_proof_slice() {
+    assert(posix_filter_matches_spec(PosixFilterKind::All, 0, 0, 0, 0, true, true));
+    assert(!posix_filter_matches_spec(PosixFilterKind::All, 0, 0, 0, 0, true, false));
+    assert(posix_filter_matches_spec(PosixFilterKind::Group, 7, 0, 7, 0, false, false));
+    assert(posix_pts_status_spec(0) == POSIX_STATUS_PASS as int);
+    assert(posix_pts_status_spec(3) == POSIX_STATUS_FAIL as int);
+    assert(posix_resource_delta_spec(10, 14) == 4);
+    assert(posix_resource_delta_spec(14, 10) == -4);
 }
 
 proof fn host_share_rs_proof_slice()
@@ -1245,6 +1386,7 @@ proof fn services_folder_all_files_have_verification_slices()
     html_ui_rs_proof_slice();
     mod_rs_proof_slice();
     net_rs_proof_slice();
+    posix_test_logic_shared_rs_proof_slice();
     qml_cluster_rs_proof_slice();
     run_elf_rs_proof_slice();
     svc_rs_proof_slice();

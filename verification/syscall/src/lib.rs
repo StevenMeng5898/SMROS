@@ -1,6 +1,102 @@
+#![allow(unused_macros)]
+
+extern crate alloc;
+
 use vstd::prelude::*;
 
+#[allow(dead_code)]
+mod linux_fork_runtime_shared {
+    use crate::{LinuxForkAcquisition, LinuxForkAcquisitionLedger, LinuxForkFailurePoint};
+
+    include!("../../../src/syscall/linux_fork_logic_shared.rs");
+}
+
+#[allow(dead_code)]
+mod linux_syscall_context_runtime_shared {
+    include!("../../../src/syscall/linux_syscall_context_logic_shared.rs");
+}
+
+#[allow(dead_code, unused_macros)]
+mod address_runtime_macro_checks {
+    include!("../../../src/syscall/address_logic_shared.rs");
+
+    pub(crate) fn user_range_writable(
+        addr: usize,
+        len: usize,
+        ranges: impl IntoIterator<Item = (usize, usize, bool)>,
+    ) -> bool {
+        smros_linux_user_range_writable_body!(addr, len, ranges)
+    }
+
+    pub(crate) fn user_range_readable(
+        addr: usize,
+        len: usize,
+        ranges: impl IntoIterator<Item = (usize, usize, bool, bool)>,
+    ) -> bool {
+        smros_linux_user_range_readable_body!(addr, len, ranges)
+    }
+}
+
 verus! {
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectType {
+    Vmo = 1,
+    Vmar = 2,
+    Channel = 3,
+    Socket = 4,
+    Event = 5,
+    Process = 6,
+    Thread = 7,
+    Port = 8,
+    Timer = 9,
+    Resource = 10,
+    Interrupt = 11,
+    EventPair = 12,
+    Fifo = 13,
+    Stream = 14,
+    DebugLog = 15,
+    Clock = 16,
+    Job = 17,
+    SuspendToken = 18,
+    Exception = 19,
+    Iommu = 20,
+    Bti = 21,
+    Pmt = 22,
+    PciDevice = 23,
+    Guest = 24,
+    Vcpu = 25,
+    Semaphore = 26,
+    SharedMemory = 27,
+    Profile = 28,
+    Pager = 29,
+    Framebuffer = 30,
+    Ktrace = 31,
+    Mtrace = 32,
+    MessageQueue = 33,
+    EventFd = 34,
+    SignalFd = 35,
+    TimerFd = 36,
+    Inotify = 37,
+    IoUring = 38,
+    MemFd = 39,
+    PidFd = 40,
+    Futex = 41,
+    LinuxFile = 42,
+    LinuxPipe = 43,
+    LinuxTcpSocket = 44,
+    LinuxUdpSocket = 45,
+    LinuxRawSocket = 46,
+    LinuxNetlinkSocket = 47,
+    LinuxProcess = 48,
+    LinuxThread = 49,
+    LinuxSignal = 50,
+    LinuxEventBus = 51,
+    LinuxDevice = 52,
+    LinuxDir = 53,
+    Hypervisor = 54,
+}
 
 include!("../../../src/syscall/address_logic_shared.rs");
 include!("../../../src/syscall/linux_futex_logic_shared.rs");
@@ -152,6 +248,23 @@ spec fn range_within_window_spec(addr: int, len: int, base: int, limit: int) -> 
     }
 }
 
+spec fn linux_user_range_covers_spec(
+    addr: int,
+    len: int,
+    range_start: int,
+    range_len: int,
+    permitted: bool,
+) -> bool {
+    if len == 0 || !permitted {
+        false
+    } else {
+        match (checked_end_spec(addr, len), checked_end_spec(range_start, range_len)) {
+            (Some(end), Some(range_end)) => addr >= range_start && end <= range_end,
+            _ => false,
+        }
+    }
+}
+
 spec fn page_aligned_spec(addr: int) -> bool {
     addr % PAGE_SIZE as int == 0
 }
@@ -261,6 +374,10 @@ spec fn wait_satisfied_spec(observed: u32, requested: u32) -> bool {
 
 spec fn linux_clock_id_supported_spec(clock_id: int) -> bool {
     0 <= clock_id && clock_id <= 1
+}
+
+spec fn linux_clock_nanosleep_flags_valid_spec(flags: usize, timer_abstime: usize) -> bool {
+    (flags & !timer_abstime) == 0
 }
 
 spec fn linux_signal_valid_spec(signum: int, max_signal: int) -> bool {
@@ -528,6 +645,32 @@ fn fixed_linux_mmap_request_ok(addr: usize, len: usize) -> (out: bool)
     )
 }
 
+fn linux_user_range_covers(
+    addr: usize,
+    len: usize,
+    range_start: usize,
+    range_len: usize,
+    permitted: bool,
+) -> (out: bool)
+    ensures
+        out == linux_user_range_covers_spec(
+            addr as int,
+            len as int,
+            range_start as int,
+            range_len as int,
+            permitted,
+        ),
+{
+    if len == 0 || !permitted {
+        false
+    } else {
+        match (checked_end(addr, len), checked_end(range_start, range_len)) {
+            (Some(end), Some(range_end)) => addr >= range_start && end <= range_end,
+            _ => false,
+        }
+    }
+}
+
 fn no_overlap_with_mappings(addr: usize, len: usize, mappings: &Vec<LinuxRange>) -> (out: bool)
     ensures
         out == no_overlap_with_mappings_spec(addr as int, len as int, mappings@),
@@ -688,6 +831,13 @@ fn linux_clock_id_supported(clock_id: usize) -> (out: bool)
         out == linux_clock_id_supported_spec(clock_id as int),
 {
     smros_linux_clock_id_supported_body!(clock_id)
+}
+
+fn linux_clock_nanosleep_flags_valid(flags: usize, timer_abstime: usize) -> (out: bool)
+    ensures
+        out == linux_clock_nanosleep_flags_valid_spec(flags, timer_abstime),
+{
+    smros_linux_clock_nanosleep_flags_valid_body!(flags, timer_abstime)
 }
 
 fn linux_signal_valid(signum: usize, max_signal: usize) -> (out: bool)

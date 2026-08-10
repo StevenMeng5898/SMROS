@@ -2,6 +2,28 @@ extern crate alloc;
 
 use vstd::prelude::*;
 
+#[allow(dead_code, unused_macros)]
+mod lowlevel_runtime_macro_checks {
+    include!("../../../src/kernel_lowlevel/lowlevel_logic_shared.rs");
+
+    pub(crate) fn pfn_address(
+        pfn: u64,
+        base_pfn: u64,
+        total_pages: usize,
+        page_size: usize,
+    ) -> Option<usize> {
+        smros_ll_pfn_address_body!(pfn, base_pfn, total_pages, page_size)
+    }
+
+    pub(crate) fn pfn_index(
+        pfn: u64,
+        base_pfn: u64,
+        total_pages: usize,
+    ) -> Option<usize> {
+        smros_ll_pfn_index_body!(pfn, base_pfn, total_pages)
+    }
+}
+
 verus! {
 
 include!("../../../src/kernel_lowlevel/lowlevel_logic_shared.rs");
@@ -175,6 +197,54 @@ spec fn page_to_vaddr_spec(page_idx: int, valid_page_count: int, page_size: int)
         Option::<int>::None
     } else {
         segment_size_spec(page_idx, page_size)
+    }
+}
+
+spec fn memory_reg_spec(
+    detected: Option<(usize, usize)>,
+    fallback_base: usize,
+    fallback_size: usize,
+) -> Option<(int, int)> {
+    let selected = match detected {
+        Some(region) => region,
+        None => (fallback_base, fallback_size),
+    };
+    if selected.1 != 0
+        && selected.0 as int <= usize::MAX as int - selected.1 as int
+    {
+        Some((selected.0 as int, selected.1 as int))
+    } else {
+        Option::<(int, int)>::None
+    }
+}
+
+spec fn pfn_from_index_spec(index: int, base_pfn: int) -> Option<int> {
+    if 0 <= index && 0 <= base_pfn && base_pfn <= u64::MAX as int - index {
+        Some(base_pfn + index)
+    } else {
+        Option::<int>::None
+    }
+}
+
+spec fn pfn_index_spec(pfn: int, base_pfn: int, total_pages: int) -> Option<int> {
+    if base_pfn <= pfn && pfn - base_pfn < total_pages {
+        Some(pfn - base_pfn)
+    } else {
+        Option::<int>::None
+    }
+}
+
+spec fn pfn_address_spec(
+    pfn: int,
+    base_pfn: int,
+    total_pages: int,
+    page_size: int,
+) -> Option<int> {
+    match pfn_index_spec(pfn, base_pfn, total_pages) {
+        Some(_) if pfn <= usize::MAX as int && pfn * page_size <= usize::MAX as int => {
+            Some(pfn * page_size)
+        },
+        _ => Option::<int>::None,
     }
 }
 
@@ -413,6 +483,79 @@ fn ll_page_to_vaddr(page_idx: usize, valid_page_count: usize) -> (out: Option<us
         },
 {
     smros_ll_page_to_vaddr_body!(page_idx, valid_page_count, PAGE_SIZE)
+}
+
+fn ll_memory_reg(
+    detected: Option<(usize, usize)>,
+    fallback_base: usize,
+    fallback_size: usize,
+) -> (out: Option<(usize, usize)>)
+    ensures
+        match out {
+            Some((base, size)) => memory_reg_spec(detected, fallback_base, fallback_size)
+                == Some((base as int, size as int)),
+            None => memory_reg_spec(detected, fallback_base, fallback_size)
+                == Option::<(int, int)>::None,
+        },
+{
+    smros_ll_memory_reg_body!(detected, fallback_base, fallback_size)
+}
+
+fn ll_pfn_from_index(index: usize, base_pfn: u64) -> (out: Option<u64>)
+    ensures
+        match out {
+            Some(pfn) => pfn_from_index_spec(index as int, base_pfn as int) == Some(pfn as int),
+            None => pfn_from_index_spec(index as int, base_pfn as int) == Option::<int>::None,
+        },
+{
+    smros_ll_pfn_from_index_body!(index, base_pfn)
+}
+
+fn ll_pfn_index(pfn: u64, base_pfn: u64, total_pages: usize) -> (out: Option<usize>)
+    ensures
+        match out {
+            Some(index) => pfn_index_spec(pfn as int, base_pfn as int, total_pages as int)
+                == Some(index as int),
+            None => pfn_index_spec(pfn as int, base_pfn as int, total_pages as int)
+                == Option::<int>::None,
+        },
+{
+    match pfn.checked_sub(base_pfn) {
+        Some(index) if index < total_pages as u64 => Some(index as usize),
+        _ => None,
+    }
+}
+
+fn ll_pfn_address(
+    pfn: u64,
+    base_pfn: u64,
+    total_pages: usize,
+    page_size: usize,
+) -> (out: Option<usize>)
+    requires
+        page_size > 0,
+        pfn <= usize::MAX as u64,
+        pfn as int * page_size as int <= usize::MAX as int,
+    ensures
+        match out {
+            Some(address) => pfn_address_spec(
+                pfn as int,
+                base_pfn as int,
+                total_pages as int,
+                page_size as int,
+            ) == Some(address as int),
+            None => pfn_address_spec(
+                pfn as int,
+                base_pfn as int,
+                total_pages as int,
+                page_size as int,
+            ) == Option::<int>::None,
+        },
+{
+    match ll_pfn_index(pfn, base_pfn, total_pages) {
+        Some(_) => Some((pfn as usize) * page_size),
+        None => None,
+    }
 }
 
 fn find_segment_model(segments: &Vec<SegmentModel>, vaddr: usize) -> (out: Option<usize>)
