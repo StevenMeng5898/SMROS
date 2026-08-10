@@ -49,7 +49,7 @@ verus! {
 
 include!("../../../src/user_level/services/user_logic_shared.rs");
 
-pub const SERVICES_FILE_COUNT: usize = 18;
+pub const SERVICES_FILE_COUNT: usize = 19;
 
 pub const USER_NAMESPACE_RIGHTS_MASK: u32 = 0x7;
 pub const USER_FXFS_MAX_NODES: usize = 8192;
@@ -1290,7 +1290,7 @@ proof fn html_ui_rs_proof_slice()
 
 proof fn mod_rs_proof_slice()
     ensures
-        SERVICES_FILE_COUNT == 18,
+        SERVICES_FILE_COUNT == 19,
 {
 }
 
@@ -1372,7 +1372,7 @@ proof fn user_shell_rs_proof_slice() {
 
 proof fn services_folder_all_files_have_verification_slices()
     ensures
-        SERVICES_FILE_COUNT == 18,
+        SERVICES_FILE_COUNT == 19,
 {
     compat_apps_rs_proof_slice();
     component_rs_proof_slice();
