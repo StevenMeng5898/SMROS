@@ -4357,6 +4357,96 @@ fn linux_process_memory_mutations_are_transactional_and_bounded() {
 }
 
 #[test]
+fn linux_process_memory_metadata_commit_is_allocation_free() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read process memory runtime");
+
+    for required in [
+        "struct LinuxMappingMetadataPlan",
+        "fn try_clone_mapping_metadata(",
+        "fn commit_mapping_metadata(",
+        "fn try_mapped_pages_overlapping(",
+        "fn try_mapped_pages_from_backings(",
+        "try_reserve_exact",
+        "linux_shared_attachment_detached_reference",
+    ] {
+        assert!(
+            memory.contains(required),
+            "missing allocation-free metadata primitive: {required}",
+        );
+    }
+
+    for marker in [
+        "    fn map(\n",
+        "    fn replace_mapping_transactionally(\n",
+        "    fn protect(&mut self",
+        "    fn unmap(&mut self",
+        "    fn update_brk(&mut self",
+        "    fn remap(\n",
+        "pub(crate) fn mark_shared(",
+    ] {
+        let start = memory.find(marker).expect("VM mutation entry point");
+        let body = braced_body(&memory[start..]);
+        let first_hardware_mutation = [
+            "map_unmapped_pages(",
+            "protect_pages_transactionally(",
+            "unmap_pages_transactionally(",
+        ]
+        .into_iter()
+        .filter_map(|needle| body.find(needle))
+        .min()
+        .expect("transactional page-table mutation");
+        let planning = [
+            "try_clone_mapping_metadata(",
+            "try_mapped_pages_overlapping(",
+            "try_mapped_pages_from_backings(",
+            "try_reserve_exact",
+        ]
+        .into_iter()
+        .filter_map(|needle| body.find(needle))
+        .min()
+        .expect("fallible metadata planning");
+        assert!(
+            planning < first_hardware_mutation,
+            "metadata planning must precede page-table mutation in {marker}",
+        );
+
+        let committed = &body[first_hardware_mutation..];
+        for forbidden in [
+            ".to_vec()",
+            ".collect::<Vec<_>>()",
+            ".clone()",
+            ".extend(",
+            ".push(",
+            "Vec::with_capacity(",
+            "debug_assert",
+        ] {
+            assert!(
+                !committed.contains(forbidden),
+                "post-mutation forbidden operation {forbidden} remains in {marker}",
+            );
+        }
+    }
+
+    for marker in [
+        "pub(crate) fn map_current_with_contents(",
+        "pub(crate) fn remap_current(",
+    ] {
+        let start = memory.find(marker).expect("VM replacement wrapper");
+        let body = braced_body(&memory[start..]);
+        let mutation = body.find("with_current(").expect("locked VM mutation");
+        let release = body
+            .find("release_detached_attachment_references(")
+            .expect("detached SysV reference release");
+        assert!(
+            mutation < release,
+            "detached references must be released after with_current in {marker}",
+        );
+    }
+}
+
+#[test]
 fn linux_process_memory_review_paths_are_checked_and_reversible() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let process_memory =

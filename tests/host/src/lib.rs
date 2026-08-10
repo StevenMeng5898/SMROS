@@ -3471,6 +3471,32 @@ mod linux_process_memory_logic {
             LinuxCopyAddressErrorClass::OutOfMemory,
         );
     }
+
+    #[test]
+    fn shared_attachment_replacement_reconciles_final_mappings() {
+        let attachment = LinuxSharedAttachmentRecord {
+            object_id: 7,
+            addr: 0x1200_0000,
+            len: 0x3000,
+        };
+        let partial_replacement = [LinuxSharedMappingRange {
+            object_id: 7,
+            addr: 0x1200_2000,
+            len: 0x1000,
+        }];
+
+        assert_eq!(
+            linux_shared_attachment_detached_reference(attachment, &partial_replacement),
+            None,
+            "one surviving page retains the SysV attachment reference",
+        );
+        assert_eq!(
+            linux_shared_attachment_detached_reference(attachment, &[]),
+            Some((7, 0x1200_0000)),
+            "full replacement emits exactly one detached attachment reference",
+        );
+    }
+
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/kernel_lowlevel/ARM64/context_shared.rs"

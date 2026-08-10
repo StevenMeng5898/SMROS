@@ -25,31 +25,23 @@ pub(crate) enum LinuxMappingSource {
 }
 
 impl LinuxMappingSource {
-    pub(crate) fn slice(&self, delta: usize) -> Self {
-        match self {
-            Self::Anonymous => Self::Anonymous,
-            Self::File { fd, offset, path } => Self::File {
-                fd: *fd,
-                offset: offset.saturating_add(delta as u64),
-                path: path.clone(),
-            },
-            Self::SharedMemory { id } => Self::SharedMemory { id: *id },
-        }
+    fn try_clone_for_fork(&self) -> Result<Self, SysError> {
+        self.try_slice(0)
     }
 
-    fn try_clone_for_fork(&self) -> Result<Self, SysError> {
+    fn try_slice(&self, delta: usize) -> Result<Self, SysError> {
         match self {
             Self::Anonymous => Ok(Self::Anonymous),
             Self::File { fd, offset, path } => {
-                let mut child_path = String::new();
-                child_path
+                let mut sliced_path = String::new();
+                sliced_path
                     .try_reserve_exact(path.len())
                     .map_err(|_| SysError::ENOMEM)?;
-                child_path.push_str(path);
+                sliced_path.push_str(path);
                 Ok(Self::File {
                     fd: *fd,
-                    offset: *offset,
-                    path: child_path,
+                    offset: offset.saturating_add(delta as u64),
+                    path: sliced_path,
                 })
             }
             Self::SharedMemory { id } => Ok(Self::SharedMemory { id: *id }),
@@ -64,6 +56,212 @@ pub(crate) struct LinuxProcessMapping {
     pub flags: usize,
     pub pages: Vec<LinuxPageBacking>,
     pub source: LinuxMappingSource,
+}
+
+struct LinuxMappingMetadataPlan {
+    mappings: Vec<LinuxProcessMapping>,
+    removed: Vec<LinuxPageBacking>,
+    shared_attachments: Vec<LinuxSharedAttachmentRecord>,
+    detached: Vec<(u32, usize)>,
+}
+
+impl LinuxMappingMetadataPlan {
+    fn try_clone_mapping(mapping: &LinuxProcessMapping) -> Result<LinuxProcessMapping, SysError> {
+        let mut pages = Vec::new();
+        pages
+            .try_reserve_exact(mapping.pages.len())
+            .map_err(|_| SysError::ENOMEM)?;
+        pages.extend_from_slice(&mapping.pages);
+        Ok(LinuxProcessMapping {
+            addr: mapping.addr,
+            len: mapping.len,
+            prot: mapping.prot,
+            flags: mapping.flags,
+            pages,
+            source: mapping.source.try_clone_for_fork()?,
+        })
+    }
+
+    fn try_clone_mapping_metadata(memory: &LinuxProcessMemory) -> Result<Self, SysError> {
+        let mut mappings = Vec::new();
+        mappings
+            .try_reserve_exact(memory.mappings.len())
+            .map_err(|_| SysError::ENOMEM)?;
+        for mapping in &memory.mappings {
+            mappings.push(Self::try_clone_mapping(mapping)?);
+        }
+
+        let mut shared_attachments = Vec::new();
+        shared_attachments
+            .try_reserve_exact(memory.shared_attachments.len())
+            .map_err(|_| SysError::ENOMEM)?;
+        shared_attachments.extend_from_slice(&memory.shared_attachments);
+        Ok(Self {
+            mappings,
+            removed: Vec::new(),
+            shared_attachments,
+            detached: Vec::new(),
+        })
+    }
+
+    fn try_mapping_piece(
+        mapping: &LinuxProcessMapping,
+        start: usize,
+        end: usize,
+        prot: usize,
+    ) -> Result<LinuxProcessMapping, SysError> {
+        let start_page = (start - mapping.addr) / PAGE_SIZE;
+        let end_page = (end - mapping.addr) / PAGE_SIZE;
+        let mut pages = Vec::new();
+        pages
+            .try_reserve_exact(end_page - start_page)
+            .map_err(|_| SysError::ENOMEM)?;
+        pages.extend_from_slice(&mapping.pages[start_page..end_page]);
+        Ok(LinuxProcessMapping {
+            addr: start,
+            len: end - start,
+            prot,
+            flags: mapping.flags,
+            pages,
+            source: mapping.source.try_slice(start - mapping.addr)?,
+        })
+    }
+
+    fn try_transform_range(
+        &mut self,
+        address: usize,
+        len: usize,
+        replacement_prot: Option<usize>,
+    ) -> Result<(), SysError> {
+        let end = address.checked_add(len).ok_or(SysError::EINVAL)?;
+        let mut mapping_count = 0usize;
+        let mut removed_count = 0usize;
+        for mapping in &self.mappings {
+            if !ranges_overlap(address, len, mapping.addr, mapping.len) {
+                mapping_count = mapping_count.checked_add(1).ok_or(SysError::ENOMEM)?;
+                continue;
+            }
+            let mapping_end = mapping.addr + mapping.len;
+            let overlap_start = core::cmp::max(address, mapping.addr);
+            let overlap_end = core::cmp::min(end, mapping_end);
+            mapping_count = mapping_count
+                .checked_add(usize::from(overlap_start > mapping.addr))
+                .and_then(|count| count.checked_add(usize::from(replacement_prot.is_some())))
+                .and_then(|count| count.checked_add(usize::from(overlap_end < mapping_end)))
+                .ok_or(SysError::ENOMEM)?;
+            if replacement_prot.is_none() {
+                removed_count = removed_count
+                    .checked_add((overlap_end - overlap_start) / PAGE_SIZE)
+                    .ok_or(SysError::ENOMEM)?;
+            }
+        }
+
+        let mut transformed = Vec::new();
+        transformed
+            .try_reserve_exact(mapping_count)
+            .map_err(|_| SysError::ENOMEM)?;
+        self.removed
+            .try_reserve_exact(removed_count)
+            .map_err(|_| SysError::ENOMEM)?;
+
+        let mappings = core::mem::take(&mut self.mappings);
+        for mapping in mappings {
+            if !ranges_overlap(address, len, mapping.addr, mapping.len) {
+                transformed.push(mapping);
+                continue;
+            }
+            let mapping_end = mapping.addr + mapping.len;
+            let overlap_start = core::cmp::max(address, mapping.addr);
+            let overlap_end = core::cmp::min(end, mapping_end);
+            let start_page = (overlap_start - mapping.addr) / PAGE_SIZE;
+            let end_page = (overlap_end - mapping.addr) / PAGE_SIZE;
+            if replacement_prot.is_none() {
+                self.removed
+                    .extend_from_slice(&mapping.pages[start_page..end_page]);
+            }
+            if overlap_start > mapping.addr {
+                transformed.push(Self::try_mapping_piece(
+                    &mapping,
+                    mapping.addr,
+                    overlap_start,
+                    mapping.prot,
+                )?);
+            }
+            if let Some(prot) = replacement_prot {
+                transformed.push(Self::try_mapping_piece(
+                    &mapping,
+                    overlap_start,
+                    overlap_end,
+                    prot,
+                )?);
+            }
+            if overlap_end < mapping_end {
+                transformed.push(Self::try_mapping_piece(
+                    &mapping,
+                    overlap_end,
+                    mapping_end,
+                    mapping.prot,
+                )?);
+            }
+        }
+        self.mappings = transformed;
+        Ok(())
+    }
+
+    fn try_reserve_mapping_slot(&mut self) -> Result<(), SysError> {
+        self.mappings
+            .try_reserve_exact(1)
+            .map_err(|_| SysError::ENOMEM)
+    }
+
+    fn insert_mapping(&mut self, mapping: LinuxProcessMapping) {
+        let index = self
+            .mappings
+            .iter()
+            .position(|candidate| candidate.addr > mapping.addr)
+            .unwrap_or(self.mappings.len());
+        self.mappings.insert(index, mapping);
+    }
+
+    fn take_mapping(&mut self, address: usize, len: usize) -> Option<LinuxProcessMapping> {
+        let index = self
+            .mappings
+            .iter()
+            .position(|mapping| mapping.addr == address && mapping.len == len)?;
+        Some(self.mappings.remove(index))
+    }
+
+    fn try_reserve_attachment_slot(&mut self) -> Result<(), SysError> {
+        self.shared_attachments
+            .try_reserve_exact(1)
+            .map_err(|_| SysError::ENOMEM)
+    }
+
+    fn try_prepare_attachment_reconciliation(&mut self) -> Result<(), SysError> {
+        self.detached
+            .try_reserve_exact(self.shared_attachments.len())
+            .map_err(|_| SysError::ENOMEM)
+    }
+
+    fn reconcile_shared_attachments(&mut self) {
+        let mappings = &self.mappings;
+        let detached = &mut self.detached;
+        self.shared_attachments.retain(|attachment| {
+            let has_mapping = mappings.iter().any(|mapping| {
+                matches!(
+                    mapping.source,
+                    LinuxMappingSource::SharedMemory { id } if id == attachment.object_id
+                ) && ranges_overlap(attachment.addr, attachment.len, mapping.addr, mapping.len)
+            });
+            if !has_mapping {
+                detached.push(
+                    linux_shared_attachment_detached_reference(*attachment, &[])
+                        .expect("missing shared mapping detaches the attachment"),
+                );
+            }
+            has_mapping
+        });
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -699,11 +897,7 @@ impl super::linux_process::LinuxForkPageOps for LinuxProcessForkPageOps<'_> {
             .ok_or(SysError::ENOMEM)
     }
 
-    fn copy_private(
-        &mut self,
-        parent: Self::Page,
-        child: Self::Page,
-    ) -> Result<(), Self::Error> {
+    fn copy_private(&mut self, parent: Self::Page, child: Self::Page) -> Result<(), Self::Error> {
         let LinuxPageBacking::Private { pfn: parent_pfn } = parent else {
             return Err(SysError::EINVAL);
         };
@@ -712,8 +906,7 @@ impl super::linux_process::LinuxForkPageOps for LinuxProcessForkPageOps<'_> {
         };
         let parent_physical =
             PageFrameAllocator::pfn_address(parent_pfn).ok_or(SysError::ENOMEM)?;
-        let child_physical =
-            PageFrameAllocator::pfn_address(child_pfn).ok_or(SysError::ENOMEM)?;
+        let child_physical = PageFrameAllocator::pfn_address(child_pfn).ok_or(SysError::ENOMEM)?;
         unsafe {
             core::ptr::copy_nonoverlapping(
                 parent_physical as *const u8,
@@ -810,7 +1003,10 @@ pub(crate) fn map_current_with_contents(
     replace: bool,
     contents: &[u8],
 ) -> Result<usize, SysError> {
-    with_current(|memory| memory.map(requested, len, prot, flags, source, replace, contents))
+    let (address, detached) =
+        with_current(|memory| memory.map(requested, len, prot, flags, source, replace, contents))?;
+    release_detached_attachment_references(&detached);
+    Ok(address)
 }
 
 pub(crate) fn protect_current(address: usize, len: usize, prot: usize) -> Result<(), SysError> {
@@ -844,7 +1040,17 @@ pub(crate) fn remap_current(
     fixed: Option<usize>,
     dont_unmap: bool,
 ) -> Result<usize, SysError> {
-    with_current(|memory| memory.remap(old_address, old_len, new_len, may_move, fixed, dont_unmap))
+    let (address, detached) = with_current(|memory| {
+        memory.remap(old_address, old_len, new_len, may_move, fixed, dont_unmap)
+    })?;
+    release_detached_attachment_references(&detached);
+    Ok(address)
+}
+
+fn release_detached_attachment_references(detached: &[(u32, usize)]) {
+    for (object_id, _address) in detached {
+        let _ = super::release_shared_memory_attachment_reference(*object_id);
+    }
 }
 
 pub(crate) fn mark_shared(address: usize, len: usize, object_id: u32) -> bool {
@@ -856,9 +1062,31 @@ pub(crate) fn mark_shared(address: usize, len: usize, object_id: u32) -> bool {
         else {
             return Ok(false);
         };
-        let originals = memory.mappings[mapping_index].pages.clone();
-        let mut shared = Vec::with_capacity(originals.len());
+        let mut plan = match LinuxMappingMetadataPlan::try_clone_mapping_metadata(memory) {
+            Ok(plan) => plan,
+            Err(_) => return Ok(false),
+        };
+        if plan.try_reserve_attachment_slot().is_err() {
+            return Ok(false);
+        }
+        let page_count = memory.mappings[mapping_index].pages.len();
+        let mut originals = Vec::new();
+        if originals.try_reserve_exact(page_count).is_err() {
+            return Ok(false);
+        }
+        originals.extend_from_slice(&memory.mappings[mapping_index].pages);
+        let mut shared = Vec::new();
+        if shared.try_reserve_exact(page_count).is_err() {
+            return Ok(false);
+        }
         let mut acquired = Vec::new();
+        if acquired.try_reserve_exact(page_count).is_err() {
+            return Ok(false);
+        }
+        let pages = match memory.try_mapped_pages_overlapping(address, len) {
+            Ok(pages) if !pages.is_empty() => pages,
+            _ => return Ok(false),
+        };
         for (page_index, original) in originals.iter().copied().enumerate() {
             let Some(pfn) = acquire_or_register_shared_page(object_id, page_index, original.pfn())
             else {
@@ -873,29 +1101,31 @@ pub(crate) fn mark_shared(address: usize, len: usize, object_id: u32) -> bool {
             });
         }
 
-        let pages = memory.mapped_pages_overlapping(address, len);
+        {
+            let planned_mapping = &mut plan.mappings[mapping_index];
+            planned_mapping.source = LinuxMappingSource::SharedMemory { id: object_id };
+            planned_mapping.pages = shared;
+        }
+        plan.shared_attachments.push(LinuxSharedAttachmentRecord {
+            object_id,
+            addr: address,
+            len,
+        });
         if memory.unmap_pages_transactionally(&pages).is_err() {
             SelfContainedSharedRollback::release(&acquired);
             return Ok(false);
         }
         if memory
-            .map_unmapped_pages(address, &shared, pages[0].prot)
+            .map_unmapped_pages(address, &plan.mappings[mapping_index].pages, pages[0].prot)
             .is_err()
         {
             memory.restore_mapped_pages(&pages);
             SelfContainedSharedRollback::release(&acquired);
             return Ok(false);
         }
-        let mapping = &mut memory.mappings[mapping_index];
-        mapping.source = LinuxMappingSource::SharedMemory { id: object_id };
-        let replaced = core::mem::replace(&mut mapping.pages, shared);
-        memory.shared_attachments.push(LinuxSharedAttachmentRecord {
-            object_id,
-            addr: address,
-            len,
-        });
+        let _ = memory.commit_mapping_metadata(plan);
 
-        for (page_index, backing) in replaced.iter().copied().enumerate() {
+        for (page_index, backing) in originals.iter().copied().enumerate() {
             let canonical_pfn = shared_page(object_id, page_index).unwrap().pfn;
             match backing {
                 LinuxPageBacking::Private { pfn } => {
@@ -1235,7 +1465,28 @@ impl LinuxProcessMemory {
     }
 
     fn range_is_mapped(&self, address: usize, len: usize) -> bool {
-        linux_mapping_range_covered(&self.mapping_ranges(), address, len)
+        let Some(end) = address.checked_add(len) else {
+            return false;
+        };
+        if len == 0 {
+            return false;
+        }
+        let mut cursor = address;
+        for mapping in &self.mappings {
+            let Some(mapping_end) = mapping.addr.checked_add(mapping.len) else {
+                continue;
+            };
+            if mapping.addr > cursor {
+                break;
+            }
+            if mapping.addr <= cursor && mapping_end > cursor {
+                cursor = core::cmp::min(mapping_end, end);
+                if cursor == end {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn range_available(&self, address: usize, len: usize) -> bool {
@@ -1295,7 +1546,10 @@ impl LinuxProcessMemory {
             return Err(SysError::EINVAL);
         }
         let page_count = len / PAGE_SIZE;
-        let mut pages = Vec::with_capacity(page_count);
+        let mut pages = Vec::new();
+        pages
+            .try_reserve_exact(page_count)
+            .map_err(|_| SysError::ENOMEM)?;
         for _ in 0..page_count {
             let Some(pfn) = PageFrameAllocator::alloc() else {
                 Self::free_backings(&pages);
@@ -1419,19 +1673,28 @@ impl LinuxProcessMemory {
         Ok(())
     }
 
-    fn mapping_ranges(&self) -> Vec<LinuxMappingRange> {
-        self.mappings
-            .iter()
-            .map(|mapping| LinuxMappingRange {
-                addr: mapping.addr,
-                len: mapping.len,
-            })
-            .collect()
-    }
-
-    fn mapped_pages_overlapping(&self, address: usize, len: usize) -> Vec<LinuxMappedPage> {
-        let end = address + len;
+    fn try_mapped_pages_overlapping(
+        &self,
+        address: usize,
+        len: usize,
+    ) -> Result<Vec<LinuxMappedPage>, SysError> {
+        let end = address.checked_add(len).ok_or(SysError::EINVAL)?;
+        let mut page_count = 0usize;
+        for mapping in &self.mappings {
+            if !ranges_overlap(address, len, mapping.addr, mapping.len) {
+                continue;
+            }
+            let mapping_end = mapping.addr + mapping.len;
+            let overlap_start = core::cmp::max(address, mapping.addr);
+            let overlap_end = core::cmp::min(end, mapping_end);
+            page_count = page_count
+                .checked_add((overlap_end - overlap_start) / PAGE_SIZE)
+                .ok_or(SysError::ENOMEM)?;
+        }
         let mut pages = Vec::new();
+        pages
+            .try_reserve_exact(page_count)
+            .map_err(|_| SysError::ENOMEM)?;
         for mapping in &self.mappings {
             if !ranges_overlap(address, len, mapping.addr, mapping.len) {
                 continue;
@@ -1450,7 +1713,43 @@ impl LinuxProcessMemory {
             }
         }
         pages.sort_by_key(|page| page.address);
-        pages
+        Ok(pages)
+    }
+
+    fn try_mapped_pages_from_backings(
+        address: usize,
+        pages: &[LinuxPageBacking],
+        prot: usize,
+    ) -> Result<Vec<LinuxMappedPage>, SysError> {
+        let mut mapped = Vec::new();
+        mapped
+            .try_reserve_exact(pages.len())
+            .map_err(|_| SysError::ENOMEM)?;
+        for (index, backing) in pages.iter().copied().enumerate() {
+            mapped.push(LinuxMappedPage {
+                address: address
+                    .checked_add(index.checked_mul(PAGE_SIZE).ok_or(SysError::ENOMEM)?)
+                    .ok_or(SysError::ENOMEM)?,
+                backing,
+                prot,
+            });
+        }
+        Ok(mapped)
+    }
+
+    fn commit_mapping_metadata(
+        &mut self,
+        plan: LinuxMappingMetadataPlan,
+    ) -> (Vec<LinuxPageBacking>, Vec<(u32, usize)>) {
+        let LinuxMappingMetadataPlan {
+            mappings,
+            removed,
+            shared_attachments,
+            detached,
+        } = plan;
+        self.mappings = mappings;
+        self.shared_attachments = shared_attachments;
+        (removed, detached)
     }
 
     fn restore_mapped_pages(&mut self, pages: &[LinuxMappedPage]) {
@@ -1499,7 +1798,7 @@ impl LinuxProcessMemory {
         source: LinuxMappingSource,
         replace: bool,
         contents: &[u8],
-    ) -> Result<usize, SysError> {
+    ) -> Result<(usize, Vec<(u32, usize)>), SysError> {
         if len == 0 || len % PAGE_SIZE != 0 || contents.len() > len {
             return Err(SysError::EINVAL);
         }
@@ -1520,37 +1819,65 @@ impl LinuxProcessMemory {
             self.find_free_region(requested, len)
                 .ok_or(SysError::ENOMEM)?
         };
+        let next_addr = if (LINUX_MMAP_BASE..LINUX_BRK_BASE).contains(&address) {
+            Some(address.checked_add(len).ok_or(SysError::ENOMEM)?)
+        } else {
+            None
+        };
+        if replace {
+            let pages = if flags & LINUX_MAP_SHARED != 0 {
+                self.allocate_shared_mmap_pages(len, contents, &source)?
+            } else {
+                self.allocate_unmapped_pages(len, contents)?
+            };
+            let detached = match self
+                .replace_mapping_transactionally(address, len, prot, flags, source, pages)
+            {
+                Ok(detached) => detached,
+                Err((error, pages)) => {
+                    Self::free_backings(&pages);
+                    return Err(error);
+                }
+            };
+            if let Some(next_addr) = next_addr {
+                self.next_addr = next_addr;
+            }
+            return Ok((address, detached));
+        }
+
+        let mut plan = LinuxMappingMetadataPlan::try_clone_mapping_metadata(self)?;
+        plan.try_reserve_mapping_slot()?;
         let pages = if flags & LINUX_MAP_SHARED != 0 {
             self.allocate_shared_mmap_pages(len, contents, &source)?
         } else {
             self.allocate_unmapped_pages(len, contents)?
         };
-        if replace {
-            if let Err((error, pages)) =
-                self.replace_mapping_transactionally(address, len, prot, flags, source, pages)
-            {
-                Self::free_backings(&pages);
-                return Err(error);
-            }
-        } else {
-            if let Err(error) = self.map_unmapped_pages(address, &pages, prot) {
-                Self::free_backings(&pages);
-                return Err(error);
-            }
-            self.mappings.push(LinuxProcessMapping {
-                addr: address,
-                len,
-                prot,
-                flags,
-                pages,
-                source,
-            });
-            self.mappings.sort_by_key(|mapping| mapping.addr);
+        plan.insert_mapping(LinuxProcessMapping {
+            addr: address,
+            len,
+            prot,
+            flags,
+            pages,
+            source,
+        });
+        let mapping_pages = &plan
+            .mappings
+            .iter()
+            .find(|mapping| mapping.addr == address && mapping.len == len)
+            .expect("reserved mapping was inserted")
+            .pages;
+        if let Err(error) = self.map_unmapped_pages(address, mapping_pages, prot) {
+            let replacement = plan
+                .take_mapping(address, len)
+                .expect("failed mapping remains staged");
+            Self::free_backings(&replacement.pages);
+            return Err(error);
         }
-        if (LINUX_MMAP_BASE..LINUX_BRK_BASE).contains(&address) {
-            self.next_addr = address.checked_add(len).ok_or(SysError::ENOMEM)?;
+        let (_, detached) = self.commit_mapping_metadata(plan);
+        if let Some(next_addr) = next_addr {
+            self.next_addr = next_addr;
         }
-        Ok(address)
+        Ok((address, detached))
     }
 
     fn replace_mapping_transactionally(
@@ -1561,185 +1888,85 @@ impl LinuxProcessMemory {
         flags: usize,
         source: LinuxMappingSource,
         pages: Vec<LinuxPageBacking>,
-    ) -> Result<(), (SysError, Vec<LinuxPageBacking>)> {
-        let old_pages = self.mapped_pages_overlapping(address, len);
-        if let Err(error) = self.unmap_pages_transactionally(&old_pages) {
+    ) -> Result<Vec<(u32, usize)>, (SysError, Vec<LinuxPageBacking>)> {
+        let old_pages = match self.try_mapped_pages_overlapping(address, len) {
+            Ok(pages) => pages,
+            Err(error) => return Err((error, pages)),
+        };
+        let mut plan = match LinuxMappingMetadataPlan::try_clone_mapping_metadata(self) {
+            Ok(plan) => plan,
+            Err(error) => return Err((error, pages)),
+        };
+        if let Err(error) = plan.try_transform_range(address, len, None) {
             return Err((error, pages));
         }
-        if let Err(error) = self.map_unmapped_pages(address, &pages, prot) {
-            self.restore_mapped_pages(&old_pages);
+        if let Err(error) = plan.try_reserve_mapping_slot() {
             return Err((error, pages));
         }
-
-        let replaced = self.replace_mapping_metadata(
-            address,
+        if let Err(error) = plan.try_prepare_attachment_reconciliation() {
+            return Err((error, pages));
+        }
+        plan.insert_mapping(LinuxProcessMapping {
+            addr: address,
             len,
-            LinuxProcessMapping {
-                addr: address,
-                len,
-                prot,
-                flags,
-                pages,
-                source,
-            },
-        );
-        Self::free_backings(&replaced);
-        Ok(())
-    }
+            prot,
+            flags,
+            pages,
+            source,
+        });
+        plan.reconcile_shared_attachments();
+        let mapping_pages = &plan
+            .mappings
+            .iter()
+            .find(|mapping| mapping.addr == address && mapping.len == len)
+            .expect("replacement mapping was inserted")
+            .pages;
 
-    fn replace_mapping_metadata(
-        &mut self,
-        address: usize,
-        len: usize,
-        replacement: LinuxProcessMapping,
-    ) -> Vec<LinuxPageBacking> {
-        let end = address + len;
-        let mut replaced = Vec::new();
-        let mappings = core::mem::take(&mut self.mappings);
-        for mapping in mappings {
-            if !ranges_overlap(address, len, mapping.addr, mapping.len) {
-                self.mappings.push(mapping);
-                continue;
-            }
-            let mapping_end = mapping.addr + mapping.len;
-            let overlap_start = core::cmp::max(address, mapping.addr);
-            let overlap_end = core::cmp::min(end, mapping_end);
-            let start_page = (overlap_start - mapping.addr) / PAGE_SIZE;
-            let end_page = (overlap_end - mapping.addr) / PAGE_SIZE;
-            replaced.extend_from_slice(&mapping.pages[start_page..end_page]);
-            self.push_mapping_pieces(mapping, overlap_start, overlap_end, None);
+        if let Err(error) = self.unmap_pages_transactionally(&old_pages) {
+            let replacement = plan
+                .take_mapping(address, len)
+                .expect("failed replacement remains staged");
+            return Err((error, replacement.pages));
         }
-        self.mappings.push(replacement);
-        self.mappings.sort_by_key(|mapping| mapping.addr);
-        replaced
-    }
+        if let Err(error) = self.map_unmapped_pages(address, mapping_pages, prot) {
+            self.restore_mapped_pages(&old_pages);
+            let replacement = plan
+                .take_mapping(address, len)
+                .expect("failed replacement remains staged");
+            return Err((error, replacement.pages));
+        }
 
-    fn protect(&mut self, address: usize, len: usize, prot: usize) -> Result<(), SysError> {
-        let ranges = self.mapping_ranges();
-        if !linux_mapping_range_covered(&ranges, address, len) {
-            return Err(SysError::EINVAL);
-        }
-        let pages = self.mapped_pages_overlapping(address, len);
-        self.protect_pages_transactionally(&pages, prot)?;
-        self.update_mapping_protections(address, len, prot);
-        Ok(())
-    }
-
-    fn update_mapping_protections(&mut self, address: usize, len: usize, prot: usize) {
-        let end = address + len;
-        let mappings = core::mem::take(&mut self.mappings);
-        for mapping in mappings {
-            if !ranges_overlap(address, len, mapping.addr, mapping.len) {
-                self.mappings.push(mapping);
-                continue;
-            }
-            let mapping_end = mapping.addr + mapping.len;
-            let overlap_start = core::cmp::max(address, mapping.addr);
-            let overlap_end = core::cmp::min(end, mapping_end);
-            self.push_mapping_pieces(mapping, overlap_start, overlap_end, Some(prot));
-        }
-        self.mappings.sort_by_key(|mapping| mapping.addr);
-    }
-
-    fn unmap(&mut self, address: usize, len: usize) -> Result<Vec<(u32, usize)>, SysError> {
-        address.checked_add(len).ok_or(SysError::EINVAL)?;
-        let pages = self.mapped_pages_overlapping(address, len);
-        if pages.is_empty() {
-            return Err(SysError::EINVAL);
-        }
-        self.unmap_pages_transactionally(&pages)?;
-        let (detached, removed) = self.remove_mapping_metadata(address, len);
+        let (removed, detached) = self.commit_mapping_metadata(plan);
         Self::free_backings(&removed);
         Ok(detached)
     }
 
-    fn remove_mapping_metadata(
-        &mut self,
-        address: usize,
-        len: usize,
-    ) -> (Vec<(u32, usize)>, Vec<LinuxPageBacking>) {
-        let end = address + len;
-        let mut detached = Vec::new();
-        let mut removed = Vec::new();
-        let mappings = core::mem::take(&mut self.mappings);
-        for mapping in mappings {
-            if !ranges_overlap(address, len, mapping.addr, mapping.len) {
-                self.mappings.push(mapping);
-                continue;
-            }
-            let mapping_end = mapping.addr + mapping.len;
-            let overlap_start = core::cmp::max(address, mapping.addr);
-            let overlap_end = core::cmp::min(end, mapping_end);
-            let start_page = (overlap_start - mapping.addr) / PAGE_SIZE;
-            let end_page = (overlap_end - mapping.addr) / PAGE_SIZE;
-            removed.extend_from_slice(&mapping.pages[start_page..end_page]);
-            self.push_mapping_pieces(mapping, overlap_start, overlap_end, None);
+    fn protect(&mut self, address: usize, len: usize, prot: usize) -> Result<(), SysError> {
+        if !self.range_is_mapped(address, len) {
+            return Err(SysError::EINVAL);
         }
-        self.mappings.sort_by_key(|mapping| mapping.addr);
-        let shared_mappings = self
-            .mappings
-            .iter()
-            .filter_map(|mapping| match mapping.source {
-                LinuxMappingSource::SharedMemory { id } => Some(LinuxSharedMappingRange {
-                    object_id: id,
-                    addr: mapping.addr,
-                    len: mapping.len,
-                }),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        self.shared_attachments.retain(|attachment| {
-            if linux_shared_attachment_has_mapping(*attachment, &shared_mappings) {
-                true
-            } else {
-                detached.push((attachment.object_id, attachment.addr));
-                false
-            }
-        });
-        (detached, removed)
+        let mut plan = LinuxMappingMetadataPlan::try_clone_mapping_metadata(self)?;
+        plan.try_transform_range(address, len, Some(prot))?;
+        let pages = self.try_mapped_pages_overlapping(address, len)?;
+        self.protect_pages_transactionally(&pages, prot)?;
+        let _ = self.commit_mapping_metadata(plan);
+        Ok(())
     }
 
-    fn push_mapping_pieces(
-        &mut self,
-        mut mapping: LinuxProcessMapping,
-        overlap_start: usize,
-        overlap_end: usize,
-        replacement_prot: Option<usize>,
-    ) {
-        let mapping_end = mapping.addr + mapping.len;
-        let start_page = (overlap_start - mapping.addr) / PAGE_SIZE;
-        let end_page = (overlap_end - mapping.addr) / PAGE_SIZE;
-        let original_pages = core::mem::take(&mut mapping.pages);
-        if overlap_start > mapping.addr {
-            self.mappings.push(LinuxProcessMapping {
-                addr: mapping.addr,
-                len: overlap_start - mapping.addr,
-                prot: mapping.prot,
-                flags: mapping.flags,
-                pages: original_pages[..start_page].to_vec(),
-                source: mapping.source.slice(0),
-            });
+    fn unmap(&mut self, address: usize, len: usize) -> Result<Vec<(u32, usize)>, SysError> {
+        address.checked_add(len).ok_or(SysError::EINVAL)?;
+        let pages = self.try_mapped_pages_overlapping(address, len)?;
+        if pages.is_empty() {
+            return Err(SysError::EINVAL);
         }
-        if let Some(prot) = replacement_prot {
-            self.mappings.push(LinuxProcessMapping {
-                addr: overlap_start,
-                len: overlap_end - overlap_start,
-                prot,
-                flags: mapping.flags,
-                pages: original_pages[start_page..end_page].to_vec(),
-                source: mapping.source.slice(overlap_start - mapping.addr),
-            });
-        }
-        if overlap_end < mapping_end {
-            self.mappings.push(LinuxProcessMapping {
-                addr: overlap_end,
-                len: mapping_end - overlap_end,
-                prot: mapping.prot,
-                flags: mapping.flags,
-                pages: original_pages[end_page..].to_vec(),
-                source: mapping.source.slice(overlap_end - mapping.addr),
-            });
-        }
+        let mut plan = LinuxMappingMetadataPlan::try_clone_mapping_metadata(self)?;
+        plan.try_transform_range(address, len, None)?;
+        plan.try_prepare_attachment_reconciliation()?;
+        plan.reconcile_shared_attachments();
+        self.unmap_pages_transactionally(&pages)?;
+        let (removed, detached) = self.commit_mapping_metadata(plan);
+        Self::free_backings(&removed);
+        Ok(detached)
     }
 
     fn update_brk(&mut self, new_brk: usize) -> Result<usize, SysError> {
@@ -1755,7 +1982,30 @@ impl LinuxProcessMemory {
         if new_pages > old_pages {
             let start = self.brk.start + old_pages * PAGE_SIZE;
             let len = (new_pages - old_pages) * PAGE_SIZE;
+            let planned_page_count = self
+                .brk
+                .pages
+                .len()
+                .checked_add(new_pages - old_pages)
+                .ok_or(SysError::ENOMEM)?;
+            let mut planned_pages = Vec::new();
+            planned_pages
+                .try_reserve_exact(planned_page_count)
+                .map_err(|_| SysError::ENOMEM)?;
+            planned_pages.extend_from_slice(&self.brk.pages);
             let pages = self.allocate_unmapped_pages(len, &[])?;
+            let mapped = match Self::try_mapped_pages_from_backings(
+                start,
+                &pages,
+                LINUX_PROT_READ | LINUX_PROT_WRITE,
+            ) {
+                Ok(mapped) => mapped,
+                Err(error) => {
+                    Self::free_backings(&pages);
+                    return Err(error);
+                }
+            };
+            planned_pages.extend_from_slice(&pages);
             if let Err(error) =
                 self.map_unmapped_pages(start, &pages, LINUX_PROT_READ | LINUX_PROT_WRITE)
             {
@@ -1763,32 +2013,29 @@ impl LinuxProcessMemory {
                 return Err(error);
             }
             if let Err(error) = self.zero_user_range(old_brk, new_brk - old_brk) {
-                let mapped = pages
-                    .iter()
-                    .enumerate()
-                    .map(|(index, backing)| LinuxMappedPage {
-                        address: start + index * PAGE_SIZE,
-                        backing: *backing,
-                        prot: LINUX_PROT_READ | LINUX_PROT_WRITE,
-                    })
-                    .collect::<Vec<_>>();
                 let _ = self.unmap_pages_transactionally(&mapped);
                 Self::free_backings(&pages);
                 return Err(error);
             }
-            self.brk.pages.extend(pages);
+            self.brk.pages = planned_pages;
         } else if new_pages < old_pages {
-            let removed = self.brk.pages[new_pages..old_pages]
-                .iter()
-                .enumerate()
-                .map(|(offset, backing)| LinuxMappedPage {
-                    address: self.brk.start + (new_pages + offset) * PAGE_SIZE,
-                    backing: *backing,
-                    prot: LINUX_PROT_READ | LINUX_PROT_WRITE,
-                })
-                .collect::<Vec<_>>();
+            let mut planned_pages = Vec::new();
+            planned_pages
+                .try_reserve_exact(new_pages)
+                .map_err(|_| SysError::ENOMEM)?;
+            planned_pages.extend_from_slice(&self.brk.pages[..new_pages]);
+            let mut backings = Vec::new();
+            backings
+                .try_reserve_exact(old_pages - new_pages)
+                .map_err(|_| SysError::ENOMEM)?;
+            backings.extend_from_slice(&self.brk.pages[new_pages..old_pages]);
+            let removed = Self::try_mapped_pages_from_backings(
+                self.brk.start + new_pages * PAGE_SIZE,
+                &backings,
+                LINUX_PROT_READ | LINUX_PROT_WRITE,
+            )?;
             self.unmap_pages_transactionally(&removed)?;
-            let backings = self.brk.pages.split_off(new_pages);
+            self.brk.pages = planned_pages;
             Self::free_backings(&backings);
         } else if new_brk > old_brk {
             self.zero_user_range(old_brk, new_brk - old_brk)?;
@@ -1810,21 +2057,10 @@ impl LinuxProcessMemory {
 
     fn rollback_remap_destination(
         &mut self,
-        address: usize,
-        pages: &[LinuxPageBacking],
-        prot: usize,
+        mapped: &[LinuxMappedPage],
         replaced: &[LinuxMappedPage],
     ) {
-        let mapped = pages
-            .iter()
-            .enumerate()
-            .map(|(index, backing)| LinuxMappedPage {
-                address: address + index * PAGE_SIZE,
-                backing: *backing,
-                prot,
-            })
-            .collect::<Vec<_>>();
-        let _ = self.unmap_pages_transactionally(&mapped);
+        let _ = self.unmap_pages_transactionally(mapped);
         self.restore_mapped_pages(replaced);
     }
 
@@ -1836,7 +2072,7 @@ impl LinuxProcessMemory {
         may_move: bool,
         fixed: Option<usize>,
         dont_unmap: bool,
-    ) -> Result<usize, SysError> {
+    ) -> Result<(usize, Vec<(u32, usize)>), SysError> {
         let index = self
             .mappings
             .iter()
@@ -1850,14 +2086,14 @@ impl LinuxProcessMemory {
             return Err(SysError::EINVAL);
         }
         if !requires_move {
-            return Ok(old_address);
+            return Ok((old_address, Vec::new()));
         }
         if dont_unmap && old_len != new_len {
             return Err(SysError::EINVAL);
         }
         if fixed.is_none() && !dont_unmap && new_len < old_len {
-            self.unmap(old_address + new_len, old_len - new_len)?;
-            return Ok(old_address);
+            let detached = self.unmap(old_address + new_len, old_len - new_len)?;
+            return Ok((old_address, detached));
         }
         let grow_start = old_address + old_len;
         let extra_len = new_len.saturating_sub(old_len);
@@ -1867,21 +2103,32 @@ impl LinuxProcessMemory {
             && self.range_available(grow_start, extra_len)
         {
             let prot = self.mappings[index].prot;
+            let planned_page_count = self.mappings[index]
+                .pages
+                .len()
+                .checked_add(extra_len / PAGE_SIZE)
+                .ok_or(SysError::ENOMEM)?;
+            let mut planned_pages = Vec::new();
+            planned_pages
+                .try_reserve_exact(planned_page_count)
+                .map_err(|_| SysError::ENOMEM)?;
+            planned_pages.extend_from_slice(&self.mappings[index].pages);
             let pages = self.allocate_unmapped_pages(extra_len, &[])?;
+            planned_pages.extend_from_slice(&pages);
             if let Err(error) = self.map_unmapped_pages(grow_start, &pages, prot) {
                 Self::free_backings(&pages);
                 return Err(error);
             }
             self.mappings[index].len = new_len;
-            self.mappings[index].pages.extend(pages);
-            return Ok(old_address);
+            self.mappings[index].pages = planned_pages;
+            return Ok((old_address, Vec::new()));
         }
         if !may_move {
             return Err(SysError::ENOMEM);
         }
         let prot = self.mappings[index].prot;
         let flags = self.mappings[index].flags;
-        let source = self.mappings[index].source.clone();
+        let source = self.mappings[index].source.try_clone_for_fork()?;
         let new_address = if let Some(address) = fixed {
             if !linux_user_page_range_valid(address, new_len)
                 || ranges_overlap(address, new_len, old_address, old_len)
@@ -1899,6 +2146,25 @@ impl LinuxProcessMemory {
             self.find_free_region(None, new_len)
                 .ok_or(SysError::ENOMEM)?
         };
+        let next_addr = if (LINUX_MMAP_BASE..LINUX_BRK_BASE).contains(&new_address) {
+            Some(new_address.checked_add(new_len).ok_or(SysError::ENOMEM)?)
+        } else {
+            None
+        };
+        let replaced = self.try_mapped_pages_overlapping(new_address, new_len)?;
+        let source_pages = if dont_unmap {
+            Vec::new()
+        } else {
+            self.try_mapped_pages_overlapping(old_address, old_len)?
+        };
+        let mut plan = LinuxMappingMetadataPlan::try_clone_mapping_metadata(self)?;
+        plan.try_transform_range(new_address, new_len, None)?;
+        if !dont_unmap {
+            plan.try_transform_range(old_address, old_len, None)?;
+        }
+        plan.try_reserve_mapping_slot()?;
+        plan.try_prepare_attachment_reconciliation()?;
+
         let copy_len = core::cmp::min(old_len, new_len);
         let mut contents = Vec::new();
         contents
@@ -1907,46 +2173,60 @@ impl LinuxProcessMemory {
         contents.resize(copy_len, 0);
         self.copy_from_user(old_address, &mut contents)?;
         let pages = self.allocate_unmapped_pages(new_len, &contents)?;
-        let replaced = self.mapped_pages_overlapping(new_address, new_len);
+        let mapped = match Self::try_mapped_pages_from_backings(new_address, &pages, prot) {
+            Ok(mapped) => mapped,
+            Err(error) => {
+                Self::free_backings(&pages);
+                return Err(error);
+            }
+        };
+        plan.insert_mapping(LinuxProcessMapping {
+            addr: new_address,
+            len: new_len,
+            prot,
+            flags,
+            pages,
+            source,
+        });
+        plan.reconcile_shared_attachments();
+        let mapping_pages = &plan
+            .mappings
+            .iter()
+            .find(|mapping| mapping.addr == new_address && mapping.len == new_len)
+            .expect("remap destination was inserted")
+            .pages;
         if let Err(error) = self.unmap_pages_transactionally(&replaced) {
-            Self::free_backings(&pages);
+            let replacement = plan
+                .take_mapping(new_address, new_len)
+                .expect("failed remap destination remains staged");
+            Self::free_backings(&replacement.pages);
             return Err(error);
         }
-        if let Err(error) = self.map_unmapped_pages(new_address, &pages, prot) {
+        if let Err(error) = self.map_unmapped_pages(new_address, mapping_pages, prot) {
             self.restore_mapped_pages(&replaced);
-            Self::free_backings(&pages);
+            let replacement = plan
+                .take_mapping(new_address, new_len)
+                .expect("failed remap destination remains staged");
+            Self::free_backings(&replacement.pages);
             return Err(error);
         }
         if !dont_unmap {
-            let source_pages = self.mapped_pages_overlapping(old_address, old_len);
             if let Err(error) = self.unmap_pages_transactionally(&source_pages) {
-                self.rollback_remap_destination(new_address, &pages, prot, &replaced);
-                Self::free_backings(&pages);
+                self.rollback_remap_destination(&mapped, &replaced);
+                let replacement = plan
+                    .take_mapping(new_address, new_len)
+                    .expect("failed remap destination remains staged");
+                Self::free_backings(&replacement.pages);
                 return Err(error);
             }
         }
 
-        let replaced_backings = self.replace_mapping_metadata(
-            new_address,
-            new_len,
-            LinuxProcessMapping {
-                addr: new_address,
-                len: new_len,
-                prot,
-                flags,
-                pages,
-                source,
-            },
-        );
-        Self::free_backings(&replaced_backings);
-        if !dont_unmap {
-            let (_, source_backings) = self.remove_mapping_metadata(old_address, old_len);
-            Self::free_backings(&source_backings);
+        let (removed, detached) = self.commit_mapping_metadata(plan);
+        Self::free_backings(&removed);
+        if let Some(next_addr) = next_addr {
+            self.next_addr = next_addr;
         }
-        if (LINUX_MMAP_BASE..LINUX_BRK_BASE).contains(&new_address) {
-            self.next_addr = new_address.checked_add(new_len).ok_or(SysError::ENOMEM)?;
-        }
-        Ok(new_address)
+        Ok((new_address, detached))
     }
 
     fn stats(&self) -> LinuxMemoryStats {

@@ -255,6 +255,14 @@ pub(crate) fn linux_shared_attachment_has_mapping(
     })
 }
 
+pub(crate) fn linux_shared_attachment_detached_reference(
+    attachment: LinuxSharedAttachmentRecord,
+    mappings: &[LinuxSharedMappingRange],
+) -> Option<(u32, usize)> {
+    (!linux_shared_attachment_has_mapping(attachment, mappings))
+        .then_some((attachment.object_id, attachment.addr))
+}
+
 pub(crate) const fn linux_shared_mremap_supported(requires_move: bool) -> bool {
     !requires_move
 }
