@@ -6153,3 +6153,42 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
     assert!(prepare_return.contains("set_kernel_resume("));
     assert!(prepare_return.contains("run_elf_launcher_resume as *const () as u64"));
 }
+
+#[test]
+fn posix_process_runtime_results_separate_campaign_and_merge_head_evidence() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let results = std::fs::read_to_string(
+        repository.join("docs/posix/2026-08-06-aarch64-fork-process-runtime-results.md"),
+    )
+    .expect("read AArch64 fork process runtime results");
+
+    let (historical, merge_head) = results
+        .split_once("## Task 14 merge-head verification")
+        .expect("Task 14 merge-head verification addendum");
+
+    assert!(historical
+        .contains("SMROS implementation commit | `c0a513e75f7762b90e1e6de6ef27051e1add801d`"));
+    assert!(historical.contains("The terminal record is complete: 1,598 unique attempts"));
+    assert!(historical.contains("| pass | 948 |"));
+    assert!(historical.contains("| timeout | 333 |"));
+
+    for required in [
+        "`599c4925dd708a21da1b8d9458fed0fa3232a63b`",
+        "Proof counts",
+        "Host test counts",
+        "AArch64 build and layout",
+        "QEMU smoke",
+        "Focused canaries",
+        "Repair-head campaign",
+        "1,598",
+    ] {
+        assert!(
+            merge_head.contains(required),
+            "merge-head evidence is missing `{required}`"
+        );
+    }
+    assert!(merge_head.contains(
+        "The earlier full campaign remains immutably bound to \
+         `c0a513e75f7762b90e1e6de6ef27051e1add801d` as a historical baseline."
+    ));
+}

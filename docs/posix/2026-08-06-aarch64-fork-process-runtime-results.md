@@ -385,3 +385,136 @@ queues, timers, optional scheduling policies, the full timeout regression,
 100% host coverage, the syscall Verus harness, the Verus coverage audit, and
 available static analysis. Copy-on-write, `execve`, x86_64 process address
 spaces, and RISC-V64 process address spaces remain separate increments.
+
+## Task 14 merge-head verification
+
+This additive verification records the repaired merge candidate
+`599c4925dd708a21da1b8d9458fed0fa3232a63b` without changing any result or
+provenance above. The earlier full campaign remains immutably bound to `c0a513e75f7762b90e1e6de6ef27051e1add801d` as a historical baseline.
+
+### Current-head gates
+
+| Evidence | Result |
+| --- | --- |
+| Merge candidate | `599c4925dd708a21da1b8d9458fed0fa3232a63b` |
+| Host test counts | `make test` passed 253 unit tests, 80 integration contracts, 473 POSIX-tool tests, 4 launcher tests, and 8 linker-layout tests; the coverage run also passed 1 socket behavior test |
+| Proof counts | Verus coverage audit passed; syscall 278, kernel objects 266, kernel low level 132, user level 172, and services 140: 988 verified, 0 errors |
+| AArch64 build and layout | passed; entry `0x40200000`, `.text [0x40200000,0x4027a000)`, `.rodata [0x4027a000,0x4a9c7000)`, `.data [0x4a9c7000,0x4bb40000)`, `.bss [0x4bb40000,0x4fb59000)`, `.stack [0x4fb59000,0x4fbd9000)` |
+| QEMU smoke | passed with SMP=4 and 512 MiB on private disk `target/posix/aarch64/smros-fxfs-task14-smoke-599c4925dd70.img` |
+| POSIX stage | 1,979 C sources; 1,941 compile pass, 38 compile fail; 1,680 link pass, 2 link fail; 169 shell tests unported; 119,397,116 staged bytes |
+| Host coverage | failed as required below 100%: 8,690/8,768 lines, 99.11%, 78 uncovered; `make coverage-host` exited 2 |
+| Coverity | unavailable: `cov-build`, `cov-analyze`, and `cov-format-errors` were all missing; no findings or analysis coverage is claimed |
+
+The current stage is bound to canonical manifest
+`9466093c93ba29f29e7a025ac98f13a79f2178c1d99274a837641aa98bf70cb8`,
+canonical build results
+`ef58bb15baf69fc731bdb64810bec7a64ab8559a31e7c4152be4852858042e7a`,
+patch digest
+`2354fdb550290652373cd831c7489300bdd20344aa74fe151d8b3cfe0d009724`,
+and build ID
+`fde6be8fee45bc42dcc8fcd6442fff2156f301f2560d64094f562b9efa430bfb`.
+
+### Focused canaries
+
+Every canary launched on its own fresh private 128 MiB disk, passed with no
+restart, and measured zero in all 14 resource dimensions.
+
+| Test | Status | Duration | Boots / restarts | Resource evidence |
+| --- | --- | ---: | ---: | --- |
+| `conformance/behavior/WIFEXITED/1-3.c` | pass | 17 ms | 1 / 0 | measured zero |
+| `conformance/interfaces/fork/16-1.c` | pass | 120 ms | 1 / 0 | measured zero |
+| `conformance/interfaces/fork/6-1.c` | pass | 22 ms | 1 / 0 | measured zero |
+
+The complete focused selections retained every genuine non-pass and used
+separate fresh private disks.
+
+| Selection | Attempts | Statuses | Duration | Boots / restarts | Measured / unavailable |
+| --- | ---: | --- | ---: | ---: | ---: |
+| complete `fork` API | 19 | 9 pass, 4 fail, 4 unresolved, 2 timeout | 61,288 ms | 3 / 2 | 17 / 2 |
+| base group | 38 | 24 pass, 7 fail, 4 unresolved, 3 timeout | 92,265 ms | 4 / 3 | 35 / 3 |
+| memory group | 93 | 40 pass, 33 fail, 10 unresolved, 5 untested, 5 timeout | 158,510 ms | 6 / 5 | 88 / 5 |
+
+All measured focused attempts had zero positive and zero nonzero deltas. All
+six focused serial logs had zero panic, glibc-fatal, heap-corruption,
+loader-segment-map, shared-object-descriptor, translation-fault, or
+stale-address-space-root markers.
+
+### Repair-head campaign
+
+The fresh repair-head campaign used private disk
+`target/posix/aarch64/smros-fxfs-task14-599c4925dd70-all.img`, selected all
+1,598 complete runnable tests, published 1,598 unique terminal attempts, and
+exited successfully after 332 boots and 331 watchdog restarts. Its run ID is
+`cb4251d05bd5f23661c85b9d015a707b` and its aggregate attempt duration is
+10,048,159 ms.
+
+| Runtime status | Count |
+| --- | ---: |
+| pass | 949 |
+| fail | 173 |
+| unresolved | 109 |
+| unsupported | 20 |
+| untested | 15 |
+| timeout | 332 |
+| interrupted | 0 |
+| crash | 0 |
+| launch error | 0 |
+
+The 1,266 measured attempts had zero positive and zero nonzero deltas in all
+14 resource dimensions. The 332 unavailable snapshots belong exactly to the
+332 host-watchdog timeouts. The 5,002,731-byte serial log had zero matches in
+the fatal-marker audit.
+
+The repair-head report records build coverage `1598/1637`, execution coverage
+`1598/1598`, runtime pass coverage `949/1598`, and program completion
+`1197/2054`. All 69 scheduling attempts executed; 20 remained genuinely
+unsupported and none timed out. Compared with the immutable campaign, the raw
+aggregate has one more pass and one fewer timeout. Nine individual statuses
+changed, and no status was remapped.
+
+The current quality record contains ten checks: eight passed, host Rust
+coverage failed, and Coverity was unavailable. Its overall status is
+`failed`; quality evidence does not alter a POSIX numerator or denominator.
+
+The retained Linux reference file remains unchanged at SHA-256
+`ecf0b11b8ed87da68d7bc1dac557d8fe99324964ee101055bcd4ff7c2d8ebb9b`.
+Because the strict report validator requires current-stage provenance, the
+report uses a separate derivative whose 1,599 records differ only in
+`manifest_sha256` and `smros_commit`; its SHA-256 is
+`7c1691f6e214870c928677a51a77dc6b31b86db1bde1c9725f85db5979dd573e`.
+No retained Linux status, duration, output, run ID, or binary identity was
+changed.
+
+### Repair-head artifact hashes
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `stage-task14-599c4925dd70/manifest.json` | `d930383cb701df1b8272ca35814b71d5ebf32c14ed4438443eadad7c8d322ea9` |
+| `stage-task14-599c4925dd70/manifest.tsv` | `d9ab7cd2b98ec64fae6076fb111ca6bf51b25d90b89095ded31731d67e0ac315` |
+| `stage-task14-599c4925dd70/build-results.ndjson` | `e5ff7bc93e32f54f35fd3f78ef8ab18161112a4f83fa52b1b2c0bca238421b30` |
+| `smros-run-task14-599c4925dd70-wifexited/results.ndjson` | `fdfa02e061dda3ecb4343e6337aeda6138c3571e7ba5e0c322625fda8cf8952f` |
+| `smros-run-task14-599c4925dd70-wifexited/qemu-serial.log` | `84ce8503e77a614b4e2e7b3c502ece8a13590e47322d7dd71302841d48e8bcf8` |
+| `smros-run-task14-599c4925dd70-fork-16-1/results.ndjson` | `273432bb606c4f503334183201080bd3edd183e269466f1f2bfbc4555c5ee95b` |
+| `smros-run-task14-599c4925dd70-fork-16-1/qemu-serial.log` | `1045b38412dcd636ce1fd7684ae32b5cc88ed193835f81686cd55db01ce0068a` |
+| `smros-run-task14-599c4925dd70-fork-6-1/results.ndjson` | `16deb323fe416e392799112334f1fdb54bee8ec52b76a839ebfdd5f1a1e85e70` |
+| `smros-run-task14-599c4925dd70-fork-6-1/qemu-serial.log` | `815d1379277be7e9c6ce394e4afcea87d4db5ea23c57a8c4042611eac63e6b4c` |
+| `smros-run-task14-599c4925dd70-fork-api/results.ndjson` | `d8785c76273f8069a32983d7ff1f835da718d0452f80e1ff505c29b3d2d14070` |
+| `smros-run-task14-599c4925dd70-fork-api/qemu-serial.log` | `582a9f343968295cf67a904f24707c4de35f2e46ba584b2bc9d7883e75d7814d` |
+| `smros-run-task14-599c4925dd70-base/results.ndjson` | `e8bbf19c9e14363d60e46b01fb8504421ab5b443b9fccf652d60f2e6964949a7` |
+| `smros-run-task14-599c4925dd70-base/qemu-serial.log` | `c853f809d4662e46b015fab7790013386eb48cd9812314ecf02e407df4a6dae8` |
+| `smros-run-task14-599c4925dd70-memory/results.ndjson` | `6792ba8e39411988b954019aa60913e72f856884cc949086a8f29d5ff5f5f5c3` |
+| `smros-run-task14-599c4925dd70-memory/qemu-serial.log` | `7ae6866a69dafd3b6abcb2ffb216f43a9c2f78ecc3621e4e034930643049bac8` |
+| `smros-run-task14-599c4925dd70-all/results.ndjson` | `a4b81d6f2cdebaf5900e444111cc5495cd772deec9b56fc7412ce77caea315fe` |
+| `smros-run-task14-599c4925dd70-all/qemu-serial.log` | `bebb39b72385bc88d6b9821251489057cb8652f5fdfa347c554aad99ff4ab709` |
+| `quality-task14-599c4925dd70/quality.json` | `d1cc6d8e39c9aec9e0dc84c53337300aa26a36315606b38491713fd12bf785b4` |
+| `report-task14-599c4925dd70/events.ndjson` | `b70ecdc8f0238cec18c3902de22245be4bbb4f7d7d845caa0547eb8d198a871b` |
+| `report-task14-599c4925dd70/summary.json` | `1a096d472880222d2d641b3792664ee22b0293e70c4d092d1043c09a1a1321c8` |
+| `report-task14-599c4925dd70/junit.xml` | `51306e4a420f21fb17ac9f98e202866f1588c03f2b196b323160603247c871f1` |
+| `report-task14-599c4925dd70/groups.csv` | `aff5dadbb77038dbaaf59ac6ff1886477ae649551fe8c710b8e4207a5aba8857` |
+| `report-task14-599c4925dd70/apis.csv` | `2cb8a78534d8f4ee49b717e01b0a4eb47bba18c36b23bc000fede7444add67e7` |
+| `report-task14-599c4925dd70/report.md` | `ab4748a5535a9c12cfafd079fe86cdaac6a6d57cca880d45a2437db79cbe380f` |
+| `report-task14-599c4925dd70/index.html` | `df7ad2c7d41960c50be3837698987c13005005df6454448320efe95a509add73` |
+
+The report directory contains exactly those seven report files. JSON, NDJSON,
+JUnit XML, CSV, Markdown, and HTML parsed in their native formats; the CSV and
+summary inventories match all nine manifest groups and all 195 manifest APIs.
