@@ -732,6 +732,13 @@ pub(crate) struct LinuxMappingRange {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxMappingAccessRange {
+    pub addr: usize,
+    pub len: usize,
+    pub prot: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxBrkCore {
     pub start: usize,
     pub current: usize,
@@ -858,6 +865,44 @@ pub(crate) fn linux_mapping_allows(prot: usize, write: bool) -> bool {
     } else {
         prot & (LINUX_PROT_READ | LINUX_PROT_WRITE) != 0
     }
+}
+
+pub(crate) fn linux_mapping_access_range_covered<I>(
+    mappings: I,
+    address: usize,
+    len: usize,
+    write: bool,
+) -> bool
+where
+    I: Clone + IntoIterator<Item = LinuxMappingAccessRange>,
+{
+    let Some(end) = address.checked_add(len) else {
+        return false;
+    };
+    if len == 0 {
+        return false;
+    }
+
+    let mut cursor = address;
+    while cursor < end {
+        let mut covered_until = cursor;
+        for mapping in mappings.clone() {
+            if !linux_mapping_allows(mapping.prot, write) {
+                continue;
+            }
+            let Some(mapping_end) = mapping.addr.checked_add(mapping.len) else {
+                continue;
+            };
+            if mapping.addr <= cursor && mapping_end > covered_until {
+                covered_until = mapping_end;
+            }
+        }
+        if covered_until == cursor {
+            return false;
+        }
+        cursor = core::cmp::min(covered_until, end);
+    }
+    true
 }
 
 pub(crate) fn linux_mapping_range_covered(

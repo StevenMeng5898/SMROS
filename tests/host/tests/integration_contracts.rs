@@ -4519,6 +4519,55 @@ fn linux_process_memory_review_paths_are_checked_and_reversible() {
 }
 
 #[test]
+fn linux_process_memory_copies_enforce_metadata_without_blocking_mremap() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read process memory runtime");
+    let process_memory = &memory[memory
+        .find("impl LinuxProcessMemory {")
+        .expect("process memory implementation")..];
+
+    let copy_to_start = process_memory
+        .find("    fn copy_to_user(&self")
+        .expect("checked user copyout");
+    let copy_to = braced_body(&process_memory[copy_to_start..]);
+    assert!(copy_to.contains("self.range_accessible(address, bytes.len(), true)"));
+    assert!(copy_to.contains("self.copy_to_mapped_pages(address, bytes)"));
+
+    let copy_from_start = process_memory
+        .find("    fn copy_from_user(&self")
+        .expect("checked user copyin");
+    let copy_from = braced_body(&process_memory[copy_from_start..]);
+    assert!(copy_from.contains("self.range_accessible(address, out.len(), false)"));
+
+    let range_start = process_memory
+        .find("    fn range_accessible(&self")
+        .expect("user metadata and PTE validation");
+    let range = braced_body(&process_memory[range_start..]);
+    assert!(range.contains("linux_mapping_access_range_covered("));
+
+    let remap_start = process_memory
+        .find("    fn remap(\n")
+        .expect("process remap implementation");
+    let remap = braced_body(&process_memory[remap_start..]);
+    assert!(remap.contains("copy_mapping_backings("));
+    assert!(!remap.contains("copy_from_user(old_address"));
+
+    let backing_copy_start = process_memory
+        .find("    fn copy_mapping_backings(")
+        .expect("permission-independent mapping copy");
+    let backing_copy = braced_body(&process_memory[backing_copy_start..]);
+    assert!(backing_copy.contains("PageFrameAllocator::pfn_address"));
+    assert!(backing_copy.contains("core::ptr::copy_nonoverlapping"));
+
+    let zero_start = process_memory
+        .find("    fn zero_user_range(&self")
+        .expect("transactional brk initialization");
+    let zero = braced_body(&process_memory[zero_start..]);
+    assert!(zero.contains("copy_to_mapped_pages("));
+}
+
+#[test]
 fn linux_user_struct_paths_use_process_checked_copies() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))

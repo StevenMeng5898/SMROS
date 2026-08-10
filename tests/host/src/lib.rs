@@ -3586,6 +3586,75 @@ mod linux_process_memory_logic {
     }
 
     #[test]
+    fn mapping_metadata_denies_execute_only_data_access_and_covers_brk() {
+        let ranges = [
+            LinuxMappingAccessRange {
+                addr: 0x1200_0000,
+                len: 0x1000,
+                prot: LINUX_PROT_EXEC,
+            },
+            LinuxMappingAccessRange {
+                addr: 0x1200_1000,
+                len: 0x1000,
+                prot: LINUX_PROT_READ,
+            },
+            LinuxMappingAccessRange {
+                addr: 0x1200_2000,
+                len: 0x1000,
+                prot: LINUX_PROT_WRITE,
+            },
+            LinuxMappingAccessRange {
+                addr: LINUX_BRK_BASE,
+                len: 0x2000,
+                prot: LINUX_PROT_READ | LINUX_PROT_WRITE,
+            },
+        ];
+
+        assert!(!linux_mapping_access_range_covered(
+            ranges,
+            0x1200_0800,
+            1,
+            false,
+        ));
+        assert!(!linux_mapping_access_range_covered(
+            ranges,
+            0x1200_0800,
+            1,
+            true,
+        ));
+        assert!(linux_mapping_access_range_covered(
+            ranges,
+            0x1200_1800,
+            0x1000,
+            false,
+        ));
+        assert!(!linux_mapping_access_range_covered(
+            ranges,
+            0x1200_1800,
+            0x1000,
+            true,
+        ));
+        assert!(linux_mapping_access_range_covered(
+            ranges,
+            LINUX_BRK_BASE + 0x1000,
+            0x1000,
+            true,
+        ));
+        assert!(!linux_mapping_access_range_covered(
+            ranges,
+            0x1200_3000,
+            1,
+            false,
+        ));
+        assert!(!linux_mapping_access_range_covered(
+            ranges,
+            usize::MAX,
+            2,
+            false,
+        ));
+    }
+
+    #[test]
     fn mapping_coverage_accepts_adjacent_ranges_and_rejects_gaps() {
         let adjacent = [
             LinuxMappingRange {

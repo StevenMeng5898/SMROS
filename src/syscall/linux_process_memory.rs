@@ -1419,6 +1419,13 @@ impl LinuxProcessMemory {
     }
 
     fn copy_to_user(&self, address: usize, bytes: &[u8]) -> Result<(), SysError> {
+        if !self.range_accessible(address, bytes.len(), true) {
+            return Err(SysError::EFAULT);
+        }
+        self.copy_to_mapped_pages(address, bytes)
+    }
+
+    fn copy_to_mapped_pages(&self, address: usize, bytes: &[u8]) -> Result<(), SysError> {
         #[cfg(target_arch = "aarch64")]
         return self
             .address_space
@@ -1429,6 +1436,9 @@ impl LinuxProcessMemory {
     }
 
     fn copy_from_user(&self, address: usize, out: &mut [u8]) -> Result<(), SysError> {
+        if !self.range_accessible(address, out.len(), false) {
+            return Err(SysError::EFAULT);
+        }
         #[cfg(target_arch = "aarch64")]
         return self
             .address_space
@@ -1439,7 +1449,23 @@ impl LinuxProcessMemory {
     }
 
     fn range_accessible(&self, address: usize, len: usize, write: bool) -> bool {
-        if len == 0 || address.checked_add(len).is_none() {
+        let Some(brk_len) = self.brk.pages.len().checked_mul(PAGE_SIZE) else {
+            return false;
+        };
+        let access_ranges = self
+            .mappings
+            .iter()
+            .map(|mapping| LinuxMappingAccessRange {
+                addr: mapping.addr,
+                len: mapping.len,
+                prot: mapping.prot,
+            })
+            .chain(core::iter::once(LinuxMappingAccessRange {
+                addr: self.brk.start,
+                len: brk_len,
+                prot: LINUX_PROT_READ | LINUX_PROT_WRITE,
+            }));
+        if !linux_mapping_access_range_covered(access_ranges, address, len, write) {
             return false;
         }
         let mut offset = 0usize;
@@ -1462,6 +1488,37 @@ impl LinuxProcessMemory {
             offset += chunk;
         }
         true
+    }
+
+    fn copy_mapping_backings(
+        pages: &[LinuxPageBacking],
+        out: &mut [u8],
+    ) -> Result<(), SysError> {
+        let capacity = pages
+            .len()
+            .checked_mul(PAGE_SIZE)
+            .ok_or(SysError::ENOMEM)?;
+        if out.len() > capacity {
+            return Err(SysError::EFAULT);
+        }
+        let mut copied = 0usize;
+        for page in pages {
+            if copied == out.len() {
+                break;
+            }
+            let physical =
+                PageFrameAllocator::pfn_address(page.pfn()).ok_or(SysError::ENOMEM)?;
+            let chunk = core::cmp::min(PAGE_SIZE, out.len() - copied);
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    physical as *const u8,
+                    out[copied..copied + chunk].as_mut_ptr(),
+                    chunk,
+                );
+            }
+            copied += chunk;
+        }
+        Ok(())
     }
 
     fn range_is_mapped(&self, address: usize, len: usize) -> bool {
@@ -2049,7 +2106,7 @@ impl LinuxProcessMemory {
         let mut offset = 0usize;
         while offset < len {
             let chunk = core::cmp::min(zeros.len(), len - offset);
-            self.copy_to_user(address + offset, &zeros[..chunk])?;
+            self.copy_to_mapped_pages(address + offset, &zeros[..chunk])?;
             offset += chunk;
         }
         Ok(())
@@ -2171,7 +2228,7 @@ impl LinuxProcessMemory {
             .try_reserve_exact(copy_len)
             .map_err(|_| SysError::ENOMEM)?;
         contents.resize(copy_len, 0);
-        self.copy_from_user(old_address, &mut contents)?;
+        Self::copy_mapping_backings(&self.mappings[index].pages, &mut contents)?;
         let pages = self.allocate_unmapped_pages(new_len, &contents)?;
         let mapped = match Self::try_mapped_pages_from_backings(new_address, &pages, prot) {
             Ok(mapped) => mapped,
