@@ -30,7 +30,7 @@ pub(crate) fn aarch64_user_page_descriptor(
     writable: bool,
     executable: bool,
 ) -> u64 {
-    let user_access = if readable || writable {
+    let user_access = if readable || writable || executable {
         AARCH64_DESC_AP_USER
     } else {
         0

@@ -6547,6 +6547,18 @@ mod aarch64_vm_logic {
     }
 
     #[test]
+    fn execute_only_user_page_is_el0_accessible() {
+        let descriptor = aarch64_user_page_descriptor(0x1234_5678_9000, false, false, true);
+        assert_eq!(descriptor & AARCH64_DESC_AP_USER, AARCH64_DESC_AP_USER);
+        assert_eq!(
+            descriptor & AARCH64_DESC_AP_READ_ONLY,
+            AARCH64_DESC_AP_READ_ONLY
+        );
+        assert_eq!(descriptor & AARCH64_DESC_UXN, 0);
+        assert_eq!(descriptor & AARCH64_DESC_PXN, AARCH64_DESC_PXN);
+    }
+
+    #[test]
     fn executable_supervisor_blocks_remain_execute_never_at_el0() {
         let descriptor = aarch64_supervisor_block_descriptor(0x4020_0000, false, true);
         assert_eq!(descriptor & AARCH64_DESC_PXN, 0);
