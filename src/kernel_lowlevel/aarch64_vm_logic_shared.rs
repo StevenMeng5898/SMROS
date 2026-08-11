@@ -174,6 +174,7 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         })
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn root_pfn(&self) -> u64 {
         self.root_pfn
     }

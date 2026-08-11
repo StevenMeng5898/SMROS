@@ -46,6 +46,7 @@ macro_rules! smros_ll_segment_end_body {
     }};
 }
 
+#[cfg(not(target_os = "none"))]
 macro_rules! smros_ll_segment_contains_body {
     ($valid:expr, $base:expr, $page_count:expr, $page_size:expr, $vaddr:expr) => {{
         match smros_ll_segment_end_body!($valid, $base, $page_count, $page_size) {
@@ -76,6 +77,7 @@ macro_rules! smros_ll_permission_executable_body {
     }};
 }
 
+#[cfg(not(target_os = "none"))]
 macro_rules! smros_ll_heap_alloc_body {
     ($current:expr, $max:expr, $size:expr, $page_size:expr) => {{
         match smros_ll_align_up_body!($size, $page_size) {
@@ -88,6 +90,7 @@ macro_rules! smros_ll_heap_alloc_body {
     }};
 }
 
+#[cfg(not(target_os = "none"))]
 macro_rules! smros_ll_stack_alloc_body {
     ($current:expr, $size:expr, $page_size:expr) => {{
         match smros_ll_align_up_body!($size, $page_size) {
@@ -97,6 +100,7 @@ macro_rules! smros_ll_stack_alloc_body {
     }};
 }
 
+#[cfg(not(target_os = "none"))]
 macro_rules! smros_ll_page_to_vaddr_body {
     ($page_idx:expr, $valid_page_count:expr, $page_size:expr) => {{
         if $page_idx >= $valid_page_count {
@@ -107,6 +111,7 @@ macro_rules! smros_ll_page_to_vaddr_body {
     }};
 }
 
+#[cfg(not(target_os = "none"))]
 macro_rules! smros_ll_pfn_valid_body {
     ($pfn:expr, $total_pages:expr) => {{
         ($pfn as usize) < $total_pages
@@ -259,18 +264,21 @@ macro_rules! smros_ll_pfn_address_body {
     }};
 }
 
+#[cfg(not(target_os = "none"))]
 macro_rules! smros_ll_bitmap_word_index_body {
     ($pfn:expr) => {{
         ($pfn as usize) / 64
     }};
 }
 
+#[cfg(not(target_os = "none"))]
 macro_rules! smros_ll_bitmap_bit_index_body {
     ($pfn:expr) => {{
         ($pfn as usize) % 64
     }};
 }
 
+#[cfg(not(target_os = "none"))]
 macro_rules! smros_ll_bitmap_mask_body {
     ($bit:expr) => {{
         1u64 << $bit

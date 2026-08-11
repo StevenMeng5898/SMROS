@@ -44,6 +44,43 @@ fn aarch64_page_allocator_uses_detected_ram_after_kernel_end() {
 }
 
 #[test]
+fn aarch64_memory_uses_one_vm_logic_module_without_broad_dead_code_suppression() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let modules = std::fs::read_to_string(repository.join("src/kernel_lowlevel/mod.rs"))
+        .expect("read kernel low-level modules");
+    let memory = std::fs::read_to_string(repository.join("src/kernel_lowlevel/memory.rs"))
+        .expect("read memory module");
+    let shared =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/lowlevel_logic_shared.rs"))
+            .expect("read shared low-level logic");
+
+    assert!(modules.contains("pub(crate) mod aarch64_vm_logic_shared;"));
+    assert!(memory.contains("use super::aarch64_vm_logic_shared as aarch64_vm_logic;"));
+    assert!(!memory.contains("#![allow(dead_code)]"));
+    assert!(!memory.contains("use alloc::vec::Vec;"));
+    assert!(!memory.contains("#[path = \"aarch64_vm_logic_shared.rs\"]"));
+    assert!(!memory.contains("pub struct Shell"));
+    assert!(!memory.contains("pub fn demo_processes()"));
+    for model_macro in [
+        "smros_ll_segment_contains_body",
+        "smros_ll_heap_alloc_body",
+        "smros_ll_stack_alloc_body",
+        "smros_ll_page_to_vaddr_body",
+        "smros_ll_pfn_valid_body",
+        "smros_ll_bitmap_word_index_body",
+        "smros_ll_bitmap_bit_index_body",
+        "smros_ll_bitmap_mask_body",
+    ] {
+        assert!(
+            shared.contains(&format!(
+                "#[cfg(not(target_os = \"none\"))]\nmacro_rules! {model_macro}"
+            )),
+            "model-only macro {model_macro} must not enter the kernel build"
+        );
+    }
+}
+
+#[test]
 fn aarch64_process_roots_walk_distinct_four_kib_pages() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mmu = std::fs::read_to_string(repository.join("src/kernel_lowlevel/mmu.rs"))

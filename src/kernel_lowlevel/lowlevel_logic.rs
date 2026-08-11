@@ -2,10 +2,6 @@
 
 include!("lowlevel_logic_shared.rs");
 
-pub(crate) fn segment_size(page_count: usize, page_size: usize) -> Option<usize> {
-    smros_ll_segment_size_body!(page_count, page_size)
-}
-
 pub(crate) fn segment_end(
     valid: bool,
     base: usize,
@@ -13,16 +9,6 @@ pub(crate) fn segment_end(
     page_size: usize,
 ) -> Option<usize> {
     smros_ll_segment_end_body!(valid, base, page_count, page_size)
-}
-
-pub(crate) fn segment_contains(
-    valid: bool,
-    base: usize,
-    page_count: usize,
-    page_size: usize,
-    vaddr: usize,
-) -> bool {
-    smros_ll_segment_contains_body!(valid, base, page_count, page_size, vaddr)
 }
 
 pub(crate) fn memory_capacity_ok(
@@ -55,43 +41,6 @@ pub(crate) fn permission_executable<T: Copy + PartialEq>(
     read_execute: T,
 ) -> bool {
     smros_ll_permission_executable_body!(permission, execute, read_execute)
-}
-
-pub(crate) fn heap_alloc(
-    current: usize,
-    max: usize,
-    size: usize,
-    page_size: usize,
-) -> Option<(usize, usize)> {
-    smros_ll_heap_alloc_body!(current, max, size, page_size)
-}
-
-pub(crate) fn stack_alloc(current: usize, size: usize, page_size: usize) -> Option<usize> {
-    smros_ll_stack_alloc_body!(current, size, page_size)
-}
-
-pub(crate) fn page_to_vaddr(
-    page_idx: usize,
-    valid_page_count: usize,
-    page_size: usize,
-) -> Option<usize> {
-    smros_ll_page_to_vaddr_body!(page_idx, valid_page_count, page_size)
-}
-
-pub(crate) fn pfn_valid(pfn: u64, total_pages: usize) -> bool {
-    smros_ll_pfn_valid_body!(pfn, total_pages)
-}
-
-pub(crate) fn bitmap_word_index(pfn: u64) -> usize {
-    smros_ll_bitmap_word_index_body!(pfn)
-}
-
-pub(crate) fn bitmap_bit_index(pfn: u64) -> usize {
-    smros_ll_bitmap_bit_index_body!(pfn)
-}
-
-pub(crate) fn bitmap_mask(bit: usize) -> u64 {
-    smros_ll_bitmap_mask_body!(bit)
 }
 
 pub(crate) fn process_index_valid(index: usize, max_processes: usize) -> bool {
