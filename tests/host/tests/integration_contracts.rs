@@ -110,6 +110,53 @@ fn posix_clock_timer_syscalls_copy_validate_and_publish_owned_state() {
 }
 
 #[test]
+fn posix_clock_timer_cpu0_expiry_queues_process_signals() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let main = std::fs::read_to_string(repository.join("src/main.rs")).expect("read kernel main");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    let timer = braced_body(
+        &main[main
+            .find("extern \"C\" fn timer_interrupt_handler()")
+            .expect("timer interrupt handler")..],
+    );
+    let expiry = braced_body(
+        &syscall[syscall
+            .find("pub fn deliver_linux_posix_timer_signals_from_irq()")
+            .expect("POSIX timer IRQ expiry entry point")..],
+    );
+
+    assert!(timer.contains("if current_cpu_id() == 0"));
+    assert!(timer.contains("deliver_linux_posix_timer_signals_from_irq()"));
+    assert!(expiry.contains("linux_realtime_nanos()"));
+    assert!(expiry.contains("timer.expire(now_monotonic, now_realtime)"));
+    assert!(expiry.contains("queue_process_linux_signal_and_wake("));
+    assert!(expiry.contains("LinuxPendingSignal::standard(signal)"));
+
+    let scheduler = timer
+        .find("scheduler().on_timer_tick()")
+        .expect("scheduler timer accounting");
+    let linux_task = timer
+        .find("linux_task::on_timer_tick(now)")
+        .expect("Linux task timeout expiry");
+    let posix_timer = timer
+        .find("deliver_linux_posix_timer_signals_from_irq()")
+        .expect("POSIX timer signal expiry");
+    let futex = timer
+        .find("linux_futex::on_timer_tick(now, now)")
+        .expect("Linux futex timeout expiry");
+    let completion = timer
+        .find("interrupt::end_of_interrupt(interrupt_id)")
+        .expect("timer interrupt completion");
+
+    assert!(scheduler < linux_task);
+    assert!(linux_task < posix_timer);
+    assert!(posix_timer < futex);
+    assert!(futex < completion);
+}
+
+#[test]
 fn aarch64_page_allocator_uses_detected_ram_after_kernel_end() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let memory = std::fs::read_to_string(repository.join("src/kernel_lowlevel/memory.rs"))

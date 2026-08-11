@@ -4535,6 +4535,25 @@ pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) {
     let _ = deliver_next_linux_signal(saved_regs, return_pc);
 }
 
+pub fn deliver_linux_posix_timer_signals_from_irq() {
+    let now_monotonic = monotonic_nanos();
+    let Ok(now_realtime) = linux_realtime_nanos() else {
+        return;
+    };
+    let state = memory_state();
+    for resources in &mut state.linux_process_resources {
+        for timer in &mut resources.posix_timers {
+            if timer.expire(now_monotonic, now_realtime) {
+                let signal = timer.signal;
+                let _ = queue_process_linux_signal_and_wake(
+                    resources.pid,
+                    LinuxPendingSignal::standard(signal),
+                );
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Linux-compatible Memory Syscalls
 // ============================================================================
