@@ -12,6 +12,7 @@ pub(crate) const LINUX_PROT_READ: usize = 1;
 pub(crate) const LINUX_PROT_WRITE: usize = 2;
 pub(crate) const LINUX_PROT_EXEC: usize = 4;
 pub(crate) const LINUX_MAP_SHARED: usize = 1;
+#[cfg(not(target_os = "none"))]
 pub(crate) const LINUX_MAP_PRIVATE: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +45,7 @@ pub(crate) const fn linux_copy_address_error_class(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(not(target_os = "none"))]
 pub(crate) struct LinuxProcessAttributesCore {
     pub namespace_flags: usize,
     pub setns_count: usize,
@@ -61,6 +63,7 @@ pub(crate) struct LinuxProcessAttributesCore {
     pub domainname_set: bool,
 }
 
+#[cfg(not(target_os = "none"))]
 impl LinuxProcessAttributesCore {
     pub(crate) const fn fork_child(self, namespace_flags: usize) -> Self {
         Self {
@@ -106,12 +109,14 @@ impl LinuxForkFailurePoint {
     pub(crate) const COUNT: usize = Self::SchedulerPublication as usize + 1;
 }
 
+#[cfg(not(target_os = "none"))]
 pub(crate) struct LinuxForkFailureSchedule {
     point: LinuxForkFailurePoint,
     remaining: usize,
     active: bool,
 }
 
+#[cfg(not(target_os = "none"))]
 impl LinuxForkFailureSchedule {
     pub(crate) const fn new(point: LinuxForkFailurePoint, occurrence: usize) -> Self {
         Self {
@@ -177,6 +182,7 @@ impl LinuxForkAcquisitionLedger {
         written
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn release(&mut self, stage: LinuxForkAcquisition) -> bool {
         if self.len == 0 || self.acquired[self.len - 1] != Some(stage) {
             return false;
@@ -211,6 +217,7 @@ pub(crate) enum LinuxPageBacking {
     },
 }
 
+#[cfg(not(target_os = "none"))]
 pub(crate) fn linux_clone_page_backing(
     backing: LinuxPageBacking,
     private_pfn: u64,
@@ -275,6 +282,7 @@ pub(crate) struct LinuxDescriptorEntry {
 }
 
 impl LinuxDescriptorEntry {
+    #[cfg(not(target_os = "none"))]
     const EMPTY: Self = Self {
         fd: 0,
         description_id: 0,
@@ -292,11 +300,13 @@ pub(crate) struct LinuxOpenDescription {
     pub references: usize,
 }
 
+#[cfg(not(target_os = "none"))]
 pub(crate) struct LinuxOpenDescriptionTableCore<const N: usize> {
     descriptions: [Option<LinuxOpenDescription>; N],
     next_id: u32,
 }
 
+#[cfg(not(target_os = "none"))]
 impl<const N: usize> LinuxOpenDescriptionTableCore<N> {
     pub(crate) const fn new() -> Self {
         Self {
@@ -385,6 +395,7 @@ impl<const N: usize> LinuxOpenDescriptionTableCore<N> {
     }
 }
 
+#[cfg(not(target_os = "none"))]
 pub(crate) struct LinuxProcessResourceCore<const D: usize, const O: usize> {
     descriptors: [LinuxDescriptorEntry; D],
     descriptor_len: usize,
@@ -392,6 +403,7 @@ pub(crate) struct LinuxProcessResourceCore<const D: usize, const O: usize> {
     object_len: usize,
 }
 
+#[cfg(not(target_os = "none"))]
 impl<const D: usize, const O: usize> LinuxProcessResourceCore<D, O> {
     pub(crate) const fn new() -> Self {
         Self {
@@ -493,6 +505,7 @@ impl<const D: usize, const O: usize> LinuxProcessResourceCore<D, O> {
     }
 }
 
+#[cfg(not(target_os = "none"))]
 pub(crate) struct LinuxResourceCloneCore<const D: usize, const O: usize> {
     descriptors: [LinuxDescriptorEntry; D],
     descriptor_len: usize,
@@ -500,6 +513,7 @@ pub(crate) struct LinuxResourceCloneCore<const D: usize, const O: usize> {
     object_len: usize,
 }
 
+#[cfg(not(target_os = "none"))]
 impl<const D: usize, const O: usize> LinuxResourceCloneCore<D, O> {
     pub(crate) fn reserve<const N: usize>(
         parent: &LinuxProcessResourceCore<D, O>,
@@ -600,10 +614,12 @@ pub(crate) struct LinuxSharedPageRecord {
     pub named: bool,
 }
 
+#[cfg(not(target_os = "none"))]
 pub(crate) struct LinuxSharedPageTableCore<const N: usize> {
     pages: [Option<LinuxSharedPageRecord>; N],
 }
 
+#[cfg(not(target_os = "none"))]
 impl<const N: usize> LinuxSharedPageTableCore<N> {
     pub(crate) const fn new() -> Self {
         Self { pages: [None; N] }
@@ -711,12 +727,14 @@ impl LinuxPageBacking {
         }
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn is_shared(self) -> bool {
         matches!(self, Self::Shared { .. })
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(not(target_os = "none"))]
 pub(crate) struct LinuxProcessMappingCore {
     pub owner_pid: usize,
     pub addr: usize,
@@ -726,6 +744,7 @@ pub(crate) struct LinuxProcessMappingCore {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(not(target_os = "none"))]
 pub(crate) struct LinuxMappingRange {
     pub addr: usize,
     pub len: usize,
@@ -739,12 +758,14 @@ pub(crate) struct LinuxMappingAccessRange {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(not(target_os = "none"))]
 pub(crate) struct LinuxBrkCore {
     pub start: usize,
     pub current: usize,
     pub limit: usize,
 }
 
+#[cfg(not(target_os = "none"))]
 pub(crate) struct LinuxProcessMemoryCore<const N: usize> {
     pub pid: usize,
     pub root_paddr: u64,
@@ -755,6 +776,7 @@ pub(crate) struct LinuxProcessMemoryCore<const N: usize> {
     mappings_len: usize,
 }
 
+#[cfg(not(target_os = "none"))]
 impl<const N: usize> LinuxProcessMemoryCore<N> {
     pub(crate) fn new(pid: usize, root_paddr: u64) -> Option<Self> {
         if pid == 0 || root_paddr == 0 || root_paddr as usize % LINUX_PAGE_SIZE != 0 {
@@ -905,6 +927,7 @@ where
     true
 }
 
+#[cfg(not(target_os = "none"))]
 pub(crate) fn linux_mapping_range_covered(
     mappings: &[LinuxMappingRange],
     address: usize,
@@ -936,6 +959,7 @@ pub(crate) fn linux_mapping_range_covered(
     true
 }
 
+#[cfg(not(target_os = "none"))]
 pub(crate) fn linux_process_memory_remove_index(pids: &[usize], pid: usize) -> Option<usize> {
     pids.iter().position(|candidate| *candidate == pid)
 }
