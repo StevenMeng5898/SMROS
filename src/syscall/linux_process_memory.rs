@@ -1486,14 +1486,8 @@ impl LinuxProcessMemory {
         true
     }
 
-    fn copy_mapping_backings(
-        pages: &[LinuxPageBacking],
-        out: &mut [u8],
-    ) -> Result<(), SysError> {
-        let capacity = pages
-            .len()
-            .checked_mul(PAGE_SIZE)
-            .ok_or(SysError::ENOMEM)?;
+    fn copy_mapping_backings(pages: &[LinuxPageBacking], out: &mut [u8]) -> Result<(), SysError> {
+        let capacity = pages.len().checked_mul(PAGE_SIZE).ok_or(SysError::ENOMEM)?;
         if out.len() > capacity {
             return Err(SysError::EFAULT);
         }
@@ -1502,8 +1496,7 @@ impl LinuxProcessMemory {
             if copied == out.len() {
                 break;
             }
-            let physical =
-                PageFrameAllocator::pfn_address(page.pfn()).ok_or(SysError::ENOMEM)?;
+            let physical = PageFrameAllocator::pfn_address(page.pfn()).ok_or(SysError::ENOMEM)?;
             let chunk = core::cmp::min(PAGE_SIZE, out.len() - copied);
             unsafe {
                 core::ptr::copy_nonoverlapping(

@@ -55,7 +55,8 @@ fn execute_hermes_command(
             return HermesCommandStatus::Denied;
         }
         HermesShellPolicy::Invalid => {
-            ctx.serial.write_str("Hermes rejected invalid command arguments: ");
+            ctx.serial
+                .write_str("Hermes rejected invalid command arguments: ");
             ctx.serial.write_str(command);
             ctx.serial.write_str("\n");
             return HermesCommandStatus::Invalid;
@@ -3525,22 +3526,18 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
                 return;
             }
         };
-    let dir_fd = match crate::syscall::sys_openat(
-        usize::MAX - 99,
-        dir_path.as_ptr() as usize,
-        0o40000,
-        0,
-    ) {
-        Ok(fd) => {
-            print_linux_ok(ctx, "open directory");
-            fd
-        }
-        Err(e) => {
-            print_linux_error(ctx, "open directory", e);
-            let _ = crate::syscall::sys_close(file_fd);
-            return;
-        }
-    };
+    let dir_fd =
+        match crate::syscall::sys_openat(usize::MAX - 99, dir_path.as_ptr() as usize, 0o40000, 0) {
+            Ok(fd) => {
+                print_linux_ok(ctx, "open directory");
+                fd
+            }
+            Err(e) => {
+                print_linux_error(ctx, "open directory", e);
+                let _ = crate::syscall::sys_close(file_fd);
+                return;
+            }
+        };
     match crate::syscall::sys_openat(usize::MAX - 99, file_path.as_ptr() as usize, 0x8000_0000, 0) {
         Err(crate::syscall::SysError::EINVAL) => print_linux_ok(ctx, "reject bad open flags"),
         Ok(fd) => {
@@ -4857,7 +4854,8 @@ fn cmd_hermes(ctx: &mut ShellContext, args: &[&str]) {
     match args[0] {
         "exec" => {
             if args.len() < 2 {
-                ctx.serial.write_str("usage: hermes exec <safe-command> [args...]\n");
+                ctx.serial
+                    .write_str("usage: hermes exec <safe-command> [args...]\n");
                 return;
             }
             let _ = execute_hermes_command(ctx, args[1], &args[2..]);
@@ -5205,7 +5203,8 @@ fn run_hermes_test_all(ctx: &mut ShellContext, args: &[&str]) {
         return;
     };
     let seed = options.seed.unwrap_or(1);
-    ctx.serial.write_str("\n=== Hermes Full Test Orchestration ===\n");
+    ctx.serial
+        .write_str("\n=== Hermes Full Test Orchestration ===\n");
     let native_ok = run_hermes_agent_tests(ctx);
 
     let mut report = String::from("Hermes test-all\nseed=");
@@ -5319,7 +5318,8 @@ fn run_hermes_test_all(ctx: &mut ShellContext, args: &[&str]) {
     print_usize(&mut ctx.serial, options.iterations);
     ctx.serial.write_str("\n");
     ctx.serial.write_str("Hermes test-all result: ");
-    ctx.serial.write_str(if overall { "PASS\n" } else { "FAIL\n" });
+    ctx.serial
+        .write_str(if overall { "PASS\n" } else { "FAIL\n" });
 }
 
 fn run_hermes_random_campaign(ctx: &mut ShellContext, args: &[&str]) {
@@ -5376,7 +5376,8 @@ fn run_hermes_random_campaign(ctx: &mut ShellContext, args: &[&str]) {
     append_usize_shell(&mut report, unknown);
     report.push('\n');
 
-    ctx.serial.write_str("Hermes random campaign complete seed=");
+    ctx.serial
+        .write_str("Hermes random campaign complete seed=");
     print_u64(&mut ctx.serial, seed);
     ctx.serial.write_str(" iterations=");
     print_usize(&mut ctx.serial, options.iterations);
@@ -8335,10 +8336,8 @@ fn print_posix_coverage_ratio(serial: &mut Serial, numerator: usize, denominator
     serial.write_byte(b'/');
     print_usize(serial, denominator);
     serial.write_str(" (");
-    let percent = super::posix_test_logic_shared::coverage_percent_hundredths(
-        numerator,
-        denominator,
-    );
+    let percent =
+        super::posix_test_logic_shared::coverage_percent_hundredths(numerator, denominator);
     print_usize(serial, percent / 100);
     serial.write_byte(b'.');
     serial.write_byte(b'0' + ((percent / 10) % 10) as u8);
@@ -8401,11 +8400,7 @@ fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
             coverage.apis_selected,
         );
         ctx.serial.write_str(" apis-pass=");
-        print_posix_coverage_ratio(
-            &mut ctx.serial,
-            coverage.apis_pass,
-            coverage.apis_selected,
-        );
+        print_posix_coverage_ratio(&mut ctx.serial, coverage.apis_pass, coverage.apis_selected);
         ctx.serial.write_str(" groups-complete=");
         print_posix_coverage_ratio(
             &mut ctx.serial,

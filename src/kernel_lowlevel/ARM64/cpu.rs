@@ -103,12 +103,7 @@ pub fn complete_user_page_update() {
 #[inline(always)]
 pub unsafe fn install_stage1_translation(root: u64) {
     let mair = 0xffu64 | (0x04u64 << 8);
-    let tcr = 25u64
-        | (1 << 8)
-        | (1 << 10)
-        | (3 << 12)
-        | (1 << 23)
-        | (2u64 << 32);
+    let tcr = 25u64 | (1 << 8) | (1 << 10) | (3 << 12) | (1 << 23) | (2u64 << 32);
     core::arch::asm!(
         "msr mair_el1, {mair}",
         "msr tcr_el1, {tcr}",

@@ -8325,10 +8325,7 @@ pub fn sys_fork() -> SysResult {
     sys_fork_with_namespace_flags(0, LINUX_SIGCHLD)
 }
 
-fn sys_fork_with_namespace_flags(
-    namespace_flags: usize,
-    child_exit_signal: usize,
-) -> SysResult {
+fn sys_fork_with_namespace_flags(namespace_flags: usize, child_exit_signal: usize) -> SysResult {
     sys_fork_with_child_tid(namespace_flags, child_exit_signal, None, 0)
 }
 
@@ -8386,18 +8383,15 @@ pub fn sys_clone(
         if !syscall_logic::linux_signal_valid(flags & 0xff, LINUX_MAX_SIGNAL) {
             return Err(SysError::EINVAL);
         }
-        let allowed = 0xff
-            | LINUX_CONTAINER_NAMESPACE_FLAGS
-            | (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID);
+        let allowed =
+            0xff | LINUX_CONTAINER_NAMESPACE_FLAGS | (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID);
         if flags & !allowed != 0 {
             return Err(SysError::EINVAL);
         }
         let set_child_tid = flags & CLONE_CHILD_SETTID != 0;
         let clear_child_tid = flags & CLONE_CHILD_CLEARTID != 0;
         #[cfg(target_arch = "aarch64")]
-        if (set_child_tid || clear_child_tid)
-            && !linux_clone_tid_destination_valid(child_tid)
-        {
+        if (set_child_tid || clear_child_tid) && !linux_clone_tid_destination_valid(child_tid) {
             return Err(SysError::EFAULT);
         }
         return sys_fork_with_child_tid(

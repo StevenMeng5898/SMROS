@@ -266,8 +266,7 @@ pub fn persist_campaign_report(report: &str) -> Result<usize, HermesAgentError> 
     if report.len() > 16 * 1024 {
         return Err(HermesAgentError::Tool);
     }
-    fxfs::write_file(HERMES_LATEST_TEST_PATH, report.as_bytes())
-        .map_err(|_| HermesAgentError::Tool)
+    fxfs::write_file(HERMES_LATEST_TEST_PATH, report.as_bytes()).map_err(|_| HermesAgentError::Tool)
 }
 
 pub fn info() -> Result<HermesAgentInfo, HermesAgentError> {

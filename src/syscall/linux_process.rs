@@ -651,11 +651,8 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
                 child_tid,
                 &tid.to_ne_bytes(),
             ) {
-                let _ = super::linux_process_memory::copy_to_process(
-                    process.pid,
-                    child_tid,
-                    &original,
-                );
+                let _ =
+                    super::linux_process_memory::copy_to_process(process.pid, child_tid, &original);
                 let _ = super::linux_process_memory::unregister(process.pid);
                 return Err(error);
             }

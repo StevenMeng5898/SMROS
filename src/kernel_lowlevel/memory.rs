@@ -340,7 +340,6 @@ impl ProcessAddressSpace {
 
         true
     }
-
 }
 
 /// Process Control Block (PCB) - represents a process
@@ -665,7 +664,6 @@ impl ProcessManager {
     pub fn active_processes(&self) -> usize {
         self.active_processes
     }
-
 }
 
 /// Global process manager

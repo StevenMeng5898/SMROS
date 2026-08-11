@@ -61,10 +61,10 @@ pub fn classify(command: &str, args: &[&str]) -> HermesShellPolicy {
     }
 
     match command {
-        "rm" | "kill" | "reboot" | "exit" | "clear" | "vi" | "run" | "write"
-        | "mkdir" | "mv" | "cp" | "mount" | "cd" | "cd.." => HermesShellPolicy::Forbidden,
-        "help" | "version" | "meminfo" | "components" | "fxfs" | "drivers" | "ifconfig"
-        | "pwd" | "ls" | "svc" | "uptime" | "testsc" => no_args(args),
+        "rm" | "kill" | "reboot" | "exit" | "clear" | "vi" | "run" | "write" | "mkdir" | "mv"
+        | "cp" | "mount" | "cd" | "cd.." => HermesShellPolicy::Forbidden,
+        "help" | "version" | "meminfo" | "components" | "fxfs" | "drivers" | "ifconfig" | "pwd"
+        | "ls" | "svc" | "uptime" | "testsc" => no_args(args),
         "ps" => optional_exact_arg(args, "-a"),
         "top" => no_args(args),
         "sched" => sched_policy(args),
