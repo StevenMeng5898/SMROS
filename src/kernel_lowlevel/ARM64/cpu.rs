@@ -241,17 +241,6 @@ pub fn read_user_tls() -> u64 {
 }
 
 #[inline(always)]
-pub fn set_user_tls(tls: u64) {
-    unsafe {
-        core::arch::asm!(
-            "msr tpidr_el0, {tls}",
-            tls = in(reg) tls,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-}
-
-#[inline(always)]
 pub unsafe fn switch_to_user(entry_point: u64, user_stack: u64, ttbr0: u64, state: u64) -> ! {
     let _interrupt_state = mask_interrupts();
     core::arch::asm!(

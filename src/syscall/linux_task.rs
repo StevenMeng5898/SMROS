@@ -114,10 +114,6 @@ pub(crate) fn set_current_clear_child_tid(address: usize) -> Result<usize, SysEr
     })
 }
 
-pub(crate) fn lookup_tid(tid: usize) -> Option<LinuxTaskCore> {
-    with_runtime(|runtime| runtime.tasks.by_tid(tid))
-}
-
 pub(crate) fn with_current_signal_state<R>(
     operation: impl FnOnce(&mut LinuxTaskSignalState) -> R,
 ) -> Result<R, SysError> {

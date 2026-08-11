@@ -442,16 +442,6 @@ pub(crate) struct LinuxResourceClone {
 }
 
 impl LinuxResourceClone {
-    pub(crate) fn descriptors(&self) -> &[LinuxDescriptorEntry] {
-        &self.descriptors
-    }
-
-    pub(crate) fn shared_attachments(
-        &self,
-    ) -> &[super::linux_process_memory::LinuxSharedAttachmentClone] {
-        &self.shared_attachments
-    }
-
     pub(crate) fn take_shared_attachments(
         &mut self,
     ) -> Vec<super::linux_process_memory::LinuxSharedAttachmentClone> {

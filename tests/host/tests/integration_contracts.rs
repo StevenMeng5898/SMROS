@@ -2522,7 +2522,6 @@ fn linux_root_task_and_syscall_frame_have_bounded_owners() {
         "pub(crate) fn register_root(",
         "pub(crate) fn current_tid(",
         "pub(crate) fn current_tgid(",
-        "pub(crate) fn lookup_tid(",
         "pub(crate) fn reset(",
     ] {
         assert!(task.contains(api), "missing Linux task API {api}");
@@ -2576,6 +2575,56 @@ fn linux_root_task_and_syscall_frame_have_bounded_owners() {
     assert!(syscall.contains("linux_process::current_pid()"));
     assert!(syscall.contains("linux_process::current_parent_pid()"));
     assert!(syscall.contains("linux_task::current_tid()"));
+}
+
+#[test]
+fn aarch64_runtime_has_no_obsolete_warning_only_surface() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let cpu = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/cpu.rs"))
+        .expect("read AArch64 CPU module");
+    let address = std::fs::read_to_string(repository.join("src/syscall/address_logic.rs"))
+        .expect("read address wrappers");
+    let address_shared =
+        std::fs::read_to_string(repository.join("src/syscall/address_logic_shared.rs"))
+            .expect("read shared address logic");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read Linux process runtime");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read Linux process memory runtime");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+
+    assert!(!cpu.contains("pub fn set_user_tls("));
+    for helper in [
+        "pub(crate) fn range_overlaps(",
+        "pub(crate) fn range_within_window(",
+        "pub(crate) fn linux_user_range_writable(",
+        "pub(crate) fn linux_user_range_readable(",
+    ] {
+        assert!(!address.contains(helper), "obsolete address wrapper {helper}");
+    }
+    for model_macro in [
+        "smros_range_overlaps_body",
+        "smros_linux_user_range_writable_body",
+        "smros_linux_user_range_readable_body",
+    ] {
+        assert!(
+            address_shared.contains(&format!(
+                "#[cfg(not(target_os = \"none\"))]\nmacro_rules! {model_macro}"
+            )),
+            "model-only macro {model_macro} must not enter the kernel build"
+        );
+    }
+    assert!(!process.contains("pub(crate) fn descriptors(&self)"));
+    assert!(!process.contains("pub(crate) fn shared_attachments("));
+    assert!(!task.contains("pub(crate) fn lookup_tid("));
+
+    let clone_start = memory
+        .find("pub(crate) struct LinuxSharedAttachmentClone")
+        .expect("shared attachment clone");
+    let clone_body = braced_body(&memory[clone_start..]);
+    assert!(!clone_body.contains("pub prot:"));
+    assert!(!clone_body.contains("pub flags:"));
 }
 
 #[test]

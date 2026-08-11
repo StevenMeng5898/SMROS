@@ -8,6 +8,7 @@ macro_rules! smros_checked_end_body {
     }};
 }
 
+#[cfg(not(target_os = "none"))]
 macro_rules! smros_range_overlaps_body {
     ($start_a:expr, $len_a:expr, $start_b:expr, $len_b:expr) => {{
         match (
@@ -46,6 +47,7 @@ macro_rules! smros_fixed_linux_mmap_request_ok_body {
     }};
 }
 
+#[cfg(not(target_os = "none"))]
 macro_rules! smros_linux_user_range_writable_body {
     ($addr:expr, $len:expr, $ranges:expr) => {{
         let address = $addr;
@@ -69,6 +71,7 @@ macro_rules! smros_linux_user_range_writable_body {
     }};
 }
 
+#[cfg(not(target_os = "none"))]
 macro_rules! smros_linux_user_range_readable_body {
     ($addr:expr, $len:expr, $ranges:expr) => {{
         let address = $addr;

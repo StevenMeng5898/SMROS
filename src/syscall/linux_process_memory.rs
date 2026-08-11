@@ -441,8 +441,6 @@ pub(crate) struct LinuxSharedAttachmentClone {
     pub attachment_len: usize,
     pub addr: usize,
     pub len: usize,
-    pub prot: usize,
-    pub flags: usize,
     pub pages: Vec<LinuxPageBacking>,
     owns_attachment_reference: bool,
 }
@@ -1202,8 +1200,6 @@ pub(crate) fn reserve_shared_attachments(
                 attachment_len: attachment.len,
                 addr: mapping.addr,
                 len: mapping.len,
-                prot: mapping.prot,
-                flags: mapping.flags,
                 pages,
                 owns_attachment_reference: false,
             });
