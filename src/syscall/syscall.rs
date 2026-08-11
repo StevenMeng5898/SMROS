@@ -1174,7 +1174,8 @@ fn linux_read_user_sigevent(address: usize) -> Result<LinuxSigevent, SysError> {
     linux_copy_from_user(address, &mut bytes)?;
     let mut padding = [0u8; 48];
     let padding_offset = core::mem::offset_of!(LinuxSigevent, padding);
-    padding.copy_from_slice(&bytes[padding_offset..padding_offset + padding.len()]);
+    let padding_len = padding.len();
+    padding.copy_from_slice(&bytes[padding_offset..padding_offset + padding_len]);
     Ok(LinuxSigevent {
         sigev_value: usize::from_ne_bytes(linux_wire_field(
             &bytes,

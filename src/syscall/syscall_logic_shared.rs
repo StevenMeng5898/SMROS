@@ -219,6 +219,9 @@ impl LinuxPosixTimerCore {
         now_monotonic: u64,
         now_realtime: u64,
     ) -> LinuxPosixTimerSpec {
+        if self.deadline.is_none() {
+            return LinuxPosixTimerSpec::DISARMED;
+        }
         let now = match self.deadline_clock {
             LinuxPosixClock::Monotonic => now_monotonic,
             LinuxPosixClock::Realtime => now_realtime,
