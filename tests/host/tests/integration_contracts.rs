@@ -1,6 +1,42 @@
 #![allow(unused_comparisons, unused_macros)]
 
 #[test]
+fn posix_clock_timer_clock_runtime_applies_checked_realtime_offsets() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    let settime_start = syscall
+        .find("pub fn sys_clock_settime(")
+        .expect("clock_settime implementation");
+    let settime = braced_body(&syscall[settime_start..]);
+    let gettime_start = syscall
+        .find("pub fn sys_clock_gettime(")
+        .expect("clock_gettime implementation");
+    let gettime = braced_body(&syscall[gettime_start..]);
+    let time_start = syscall.find("pub fn sys_time(").expect("time implementation");
+    let time = braced_body(&syscall[time_start..]);
+    let gettimeofday_start = syscall
+        .find("pub fn sys_gettimeofday(")
+        .expect("gettimeofday implementation");
+    let gettimeofday = braced_body(&syscall[gettimeofday_start..]);
+    let reset_start = syscall
+        .find("pub fn reset_linux_signal_timer_state(")
+        .expect("Linux signal and timer reset");
+    let reset = braced_body(&syscall[reset_start..]);
+
+    assert!(syscall.contains("static LINUX_REALTIME_OFFSET_NANOS: AtomicI64"));
+    assert!(settime.contains("linux_posix_clock_settable(clockid)"));
+    assert!(settime.contains("linux_read_user_timespec(tp)?"));
+    assert!(settime.contains("linux_realtime_offset_for_set("));
+    assert!(settime.contains("LINUX_REALTIME_OFFSET_NANOS.store("));
+    assert!(gettime.contains("linux_clock_nanoseconds(clock)?"));
+    assert!(time.contains("linux_realtime_nanos()?"));
+    assert!(gettimeofday.contains("linux_realtime_nanos()?"));
+    assert!(reset.contains("LINUX_REALTIME_OFFSET_NANOS.store(0"));
+}
+
+#[test]
 fn aarch64_page_allocator_uses_detected_ram_after_kernel_end() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let memory = std::fs::read_to_string(repository.join("src/kernel_lowlevel/memory.rs"))
@@ -4577,7 +4613,7 @@ fn linux_process_memory_review_paths_are_checked_and_reversible() {
 
     for (start_marker, end_marker) in [
         (
-            "fn linux_read_sleep_timespec(",
+            "fn linux_read_user_timespec(",
             "fn linux_write_sleep_remaining(",
         ),
         (

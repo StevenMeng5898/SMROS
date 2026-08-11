@@ -40,7 +40,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
-use core::sync::atomic::{compiler_fence, AtomicU64, Ordering};
+use core::sync::atomic::{compiler_fence, AtomicI64, AtomicU64, Ordering};
 
 use super::address_logic::{
     checked_end, fixed_linux_mmap_request_ok as shared_fixed_linux_mmap_request_ok,
@@ -141,6 +141,7 @@ pub enum SysError {
     EINVAL = 22,
     ESPIPE = 29,
     ENOSYS = 38,
+    EOVERFLOW = 75,
     ENOTSOCK = 88,
     ETIMEDOUT = 110,
 }
@@ -798,6 +799,7 @@ struct ZxWaitItem {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct LinuxTimespec {
     tv_sec: i64,
     tv_nsec: i64,
@@ -3200,6 +3202,7 @@ impl MemorySyscallState {
 
 static mut MEMORY_SYSCALL_STATE: Option<MemorySyscallState> = None;
 static LINUX_SIGNAL_TRAMPOLINE: AtomicU64 = AtomicU64::new(0);
+static LINUX_REALTIME_OFFSET_NANOS: AtomicI64 = AtomicI64::new(0);
 
 const LINUX_SIGNAL_INFO_OFFSET: usize = PAGE_SIZE;
 const LINUX_SIGNAL_INFO_STORAGE_BYTES: usize =
@@ -3675,6 +3678,21 @@ fn monotonic_nanos() -> u64 {
     crate::kernel_lowlevel::timer::get_tick_count().saturating_mul(10_000_000)
 }
 
+fn linux_realtime_nanos() -> Result<u64, SysError> {
+    syscall_logic::linux_realtime_from_offset(
+        monotonic_nanos(),
+        LINUX_REALTIME_OFFSET_NANOS.load(Ordering::SeqCst),
+    )
+    .ok_or(SysError::EOVERFLOW)
+}
+
+fn linux_clock_nanoseconds(clock_id: usize) -> Result<u64, SysError> {
+    match syscall_logic::LinuxPosixClock::from_id(clock_id).ok_or(SysError::EINVAL)? {
+        syscall_logic::LinuxPosixClock::Realtime => linux_realtime_nanos(),
+        syscall_logic::LinuxPosixClock::Monotonic => Ok(monotonic_nanos()),
+    }
+}
+
 fn linux_timeval_is_zero(timeval: LinuxTimeval) -> bool {
     timeval.tv_sec == 0 && timeval.tv_usec == 0
 }
@@ -3703,6 +3721,7 @@ fn linux_timeval_from_ticks(ticks: u64) -> LinuxTimeval {
 pub fn reset_linux_signal_timer_state() {
     let _ = linux_process::reset_current_signal_state();
     LINUX_SIGNAL_TRAMPOLINE.store(0, Ordering::SeqCst);
+    LINUX_REALTIME_OFFSET_NANOS.store(0, Ordering::SeqCst);
 }
 
 fn linux_signal_bit(signum: usize) -> u64 {
@@ -5275,7 +5294,7 @@ fn linux_sleep_user_range_writable(address: usize, len: usize) -> bool {
     linux_user_buffer_writable(address, len)
 }
 
-fn linux_read_sleep_timespec(address: usize) -> Result<LinuxTimespec, SysError> {
+fn linux_read_user_timespec(address: usize) -> Result<LinuxTimespec, SysError> {
     let size = core::mem::size_of::<LinuxTimespec>();
     if !linux_sleep_user_range_readable(address, size) {
         return Err(SysError::EFAULT);
@@ -7430,7 +7449,7 @@ pub fn sys_uname(buf: usize) -> SysResult {
 }
 
 pub fn sys_time(time_ptr: usize) -> SysResult {
-    let seconds = (monotonic_nanos() / 1_000_000_000) as usize;
+    let seconds = (linux_realtime_nanos()? / 1_000_000_000) as usize;
     if time_ptr != 0 {
         linux_write_user_usize(time_ptr, seconds)?;
     }
@@ -7588,12 +7607,19 @@ pub fn sys_linux_timer_delete(timerid: usize) -> SysResult {
 }
 
 pub fn sys_clock_settime(clockid: usize, tp: usize) -> SysResult {
-    if !syscall_logic::linux_clock_id_supported(clockid) {
+    if !syscall_logic::linux_posix_clock_settable(clockid) {
         return Err(SysError::EINVAL);
     }
-    if tp == 0 {
-        return Err(SysError::EFAULT);
-    }
+    let requested = linux_read_user_timespec(tp)?;
+    syscall_logic::linux_posix_timespec_nanoseconds(requested.tv_sec, requested.tv_nsec)
+        .ok_or(SysError::EINVAL)?;
+    let offset = syscall_logic::linux_realtime_offset_for_set(
+        monotonic_nanos(),
+        requested.tv_sec,
+        requested.tv_nsec,
+    )
+    .ok_or(SysError::EOVERFLOW)?;
+    LINUX_REALTIME_OFFSET_NANOS.store(offset, Ordering::SeqCst);
     Ok(0)
 }
 
@@ -7603,7 +7629,7 @@ pub fn sys_clock_nanosleep(clockid: usize, flags: usize, req: usize, rem: usize)
     {
         return Err(SysError::EINVAL);
     }
-    let requested = linux_read_sleep_timespec(req)?;
+    let requested = linux_read_user_timespec(req)?;
     let absolute = flags & LINUX_TIMER_ABSTIME != 0;
     let now = crate::kernel_lowlevel::timer::get_tick_count();
     let requested_nanoseconds =
@@ -11231,7 +11257,7 @@ pub fn sys_clock_gettime(clock: usize, buf: usize) -> SysResult {
         return Err(SysError::EFAULT);
     }
 
-    let now = monotonic_nanos().max(1);
+    let now = linux_clock_nanoseconds(clock)?;
     let timespec = LinuxTimespec {
         tv_sec: (now / 1_000_000_000) as i64,
         tv_nsec: (now % 1_000_000_000) as i64,
@@ -11257,7 +11283,7 @@ pub fn sys_clock_getres(clock: usize, buf: usize) -> SysResult {
 
 pub fn sys_gettimeofday(tv: usize, _tz: usize) -> SysResult {
     if tv != 0 {
-        let now = monotonic_nanos().max(1);
+        let now = linux_realtime_nanos()?;
         linux_write_user_timeval(
             tv,
             LinuxTimeval {
@@ -11363,7 +11389,7 @@ pub fn sys_nanosleep_linux(req: usize) -> SysResult {
 }
 
 fn sys_nanosleep_linux_with_rem(req: usize, rem: usize) -> SysResult {
-    let requested = linux_read_sleep_timespec(req)?;
+    let requested = linux_read_user_timespec(req)?;
     let now = crate::kernel_lowlevel::timer::get_tick_count();
     let requested_nanoseconds =
         linux_task::linux_sleep_timespec_nanoseconds(requested.tv_sec, requested.tv_nsec)
