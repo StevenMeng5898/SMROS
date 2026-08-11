@@ -510,6 +510,7 @@ impl LinuxPendingSignals {
         .map(|index| self.realtime_pending[index])
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn take_eligible(
         &mut self,
         mut eligible: impl FnMut(usize) -> bool,
@@ -577,6 +578,7 @@ impl LinuxPendingSignals {
         self.peek_eligible(|signum| wait_mask & linux_signal_bit(signum) != 0)
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn take_matching(&mut self, wait_mask: u64) -> Option<LinuxPendingSignal> {
         self.take_eligible(|signum| wait_mask & linux_signal_bit(signum) != 0)
     }
@@ -978,6 +980,7 @@ impl LinuxTaskSignalState {
         self.pending.queue(record)
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn take_unblocked(&mut self) -> Option<LinuxPendingSignal> {
         self.pending
             .take_eligible(|signum| self.mask & linux_signal_bit(signum) == 0)
@@ -1000,6 +1003,7 @@ impl LinuxTaskSignalState {
         self.pending.peek_matching(wait_mask)
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn take_matching(&mut self, wait_mask: u64) -> Option<LinuxPendingSignal> {
         self.pending.take_matching(wait_mask)
     }
@@ -1112,6 +1116,7 @@ impl LinuxTaskSignalState {
         true
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn take_suspend_restore_mask(&mut self) -> Option<u64> {
         self.suspend_restore_mask.take()
     }
@@ -1390,6 +1395,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         waiters
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn signal_state(
         &self,
         tid: usize,
@@ -1501,6 +1507,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         }
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn signal_wait_target(&self, signum: usize) -> Option<LinuxTaskCore> {
         let matching =
             self.tasks
@@ -1528,6 +1535,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         })
     }
 
+    #[cfg(not(target_os = "none"))]
     fn accepting_signal_wait_target(&self, signum: usize) -> Option<LinuxTaskCore> {
         self.tasks
             .iter()
@@ -1540,6 +1548,7 @@ impl<const N: usize> LinuxTaskTable<N> {
             })
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn handoff_process_pending_signal(
         &mut self,
         pending: &mut LinuxPendingSignals,
@@ -1725,6 +1734,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         expired
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn process_signal_target(&self, signum: usize) -> Option<LinuxTaskCore> {
         let bit = linux_signal_bit(signum);
         if bit == 0 {
@@ -1738,6 +1748,7 @@ impl<const N: usize> LinuxTaskTable<N> {
             })
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn discard_signal(&mut self, signum: usize) {
         for (task, signal_state) in self.tasks.iter().zip(self.signal_states.iter_mut()) {
             if Self::is_live(*task) {
@@ -1811,6 +1822,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         Some(core::mem::replace(&mut self.clear_child_tids[slot], 0))
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn begin_child_exit_by_scheduler(
         &mut self,
         scheduler_thread: usize,
