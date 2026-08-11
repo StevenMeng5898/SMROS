@@ -960,9 +960,8 @@ fn aarch64_warning_gate_is_strict_and_target_scoped() {
     ));
 
     assert!(makefile.contains("AARCH64_RUSTFLAGS = $(strip $(RUSTFLAGS) -D warnings)"));
-    assert!(makefile.contains(
-        "aarch64-warning-check:\n\t@$(MAKE) build-test ARCH=aarch64-unknown-none"
-    ));
+    assert!(makefile
+        .contains("aarch64-warning-check:\n\t@$(MAKE) build-test ARCH=aarch64-unknown-none"));
     assert!(makefile.contains(
         "RUSTFLAGS='$(AARCH64_RUSTFLAGS)' SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' cargo build --release --target $(TARGET)"
     ));
@@ -2601,7 +2600,10 @@ fn aarch64_runtime_has_no_obsolete_warning_only_surface() {
         "pub(crate) fn linux_user_range_writable(",
         "pub(crate) fn linux_user_range_readable(",
     ] {
-        assert!(!address.contains(helper), "obsolete address wrapper {helper}");
+        assert!(
+            !address.contains(helper),
+            "obsolete address wrapper {helper}"
+        );
     }
     for model_macro in [
         "smros_range_overlaps_body",
@@ -4408,7 +4410,12 @@ fn aarch64_directory_open_flags_match_staged_glibc() {
         "let mode = if linux_fd_is_dir(fd) {\n        0o040755\n    } else {\n        0o100644\n    };\n    linux_write_stat(stat_ptr, mode)"
     ));
     assert!(docker.contains("const O_DIRECTORY: usize = 0o40000;"));
-    assert!(shell.contains("        0o40000,\n        0,"));
+    let compact_shell: String = shell
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    assert!(compact_shell
+        .contains("crate::syscall::sys_openat(usize::MAX-99,dir_path.as_ptr()asusize,0o40000,0)"));
     assert!(verification.contains("pub const LINUX_O_DIRECTORY: usize = 0o40000;"));
 }
 
