@@ -1911,10 +1911,14 @@ impl MemorySyscallState {
     fn clear_external_handle_state(&mut self, handle: u32) {
         self.signals.retain(|signal| signal.handle != handle);
         for resources in &mut self.linux_process_resources {
-            resources.timer_handles.retain(|timer| *timer != handle);
-            resources
-                .posix_timers
-                .retain(|timer| timer.handle != handle);
+            if let Some(index) = resources
+                .timer_handles
+                .iter()
+                .position(|timer_handle| *timer_handle == handle)
+            {
+                resources.timer_handles.swap_remove(index);
+                resources.posix_timers.swap_remove(index);
+            }
         }
     }
 
@@ -3211,15 +3215,20 @@ impl MemorySyscallState {
         self.process_resources_mut(pid).container.namespace_flags |= namespace_flags;
     }
 
-    fn linux_timer_owned(&self, pid: usize, handle: u32) -> bool {
-        self.process_resources(pid)
-            .is_some_and(|resources| resources.timer_handles.contains(&handle))
+    fn linux_timer_owned(&self, pid: usize, timer_id: u32) -> bool {
+        self.process_resources(pid).is_some_and(|resources| {
+            resources
+                .posix_timers
+                .iter()
+                .any(|timer| timer.timer_id == timer_id)
+        })
     }
 
     fn register_linux_timer(
         &mut self,
         pid: usize,
         handle: u32,
+        timer_id: u32,
         clock: LinuxPosixClock,
         signal: usize,
     ) -> bool {
@@ -3232,36 +3241,49 @@ impl MemorySyscallState {
         resources.timer_handles.push(handle);
         resources
             .posix_timers
-            .push(LinuxPosixTimerCore::new(handle, clock, signal));
+            .push(LinuxPosixTimerCore::new(timer_id, clock, signal));
         true
     }
 
-    fn linux_timer(&self, pid: usize, handle: u32) -> Option<&LinuxPosixTimerCore> {
+    fn linux_timer_handle(&self, pid: usize, timer_id: u32) -> Option<u32> {
+        let resources = self.process_resources(pid)?;
+        let index = resources
+            .posix_timers
+            .iter()
+            .position(|timer| timer.timer_id == timer_id)?;
+        resources.timer_handles.get(index).copied()
+    }
+
+    fn linux_timer(&self, pid: usize, timer_id: u32) -> Option<&LinuxPosixTimerCore> {
         self.process_resources(pid)?
             .posix_timers
             .iter()
-            .find(|timer| timer.handle == handle)
+            .find(|timer| timer.timer_id == timer_id)
     }
 
-    fn linux_timer_mut(&mut self, pid: usize, handle: u32) -> Option<&mut LinuxPosixTimerCore> {
+    fn linux_timer_mut(&mut self, pid: usize, timer_id: u32) -> Option<&mut LinuxPosixTimerCore> {
         self.linux_process_resources
             .iter_mut()
             .find(|resources| resources.pid == pid)?
             .posix_timers
             .iter_mut()
-            .find(|timer| timer.handle == handle)
+            .find(|timer| timer.timer_id == timer_id)
     }
 
-    fn remove_linux_timer(&mut self, pid: usize, handle: u32) {
+    fn remove_linux_timer(&mut self, pid: usize, timer_id: u32) {
         if let Some(resources) = self
             .linux_process_resources
             .iter_mut()
             .find(|resources| resources.pid == pid)
         {
-            resources.timer_handles.retain(|timer| *timer != handle);
-            resources
+            if let Some(index) = resources
                 .posix_timers
-                .retain(|timer| timer.handle != handle);
+                .iter()
+                .position(|timer| timer.timer_id == timer_id)
+            {
+                resources.timer_handles.swap_remove(index);
+                resources.posix_timers.swap_remove(index);
+            }
         }
     }
 
@@ -7713,7 +7735,7 @@ pub fn sys_timerfd_gettime(fd: usize, curr_value: usize) -> SysResult {
 }
 
 pub fn sys_linux_timer_create(clockid: usize, sevp: usize, timerid: usize) -> SysResult {
-    if !linux_user_buffer_writable(timerid, core::mem::size_of::<usize>()) {
+    if !linux_user_buffer_writable(timerid, core::mem::size_of::<i32>()) {
         return Err(SysError::EFAULT);
     }
     let clock = LinuxPosixClock::from_id(clockid).ok_or(SysError::EINVAL)?;
@@ -7729,17 +7751,18 @@ pub fn sys_linux_timer_create(clockid: usize, sevp: usize, timerid: usize) -> Sy
         event.sigev_signo as usize
     };
     let handle = compat::create_object(ObjectType::Timer).map_err(|_| SysError::ENOMEM)?;
+    let timer_id = handle.0 & i32::MAX as u32;
     let pid = linux_resource_pid();
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
-    let registered = memory_state().register_linux_timer(pid, handle.0, clock, signal);
+    let registered = memory_state().register_linux_timer(pid, handle.0, timer_id, clock, signal);
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     if !registered {
         let _ = sys_handle_close(handle.0);
         return Err(SysError::ENOMEM);
     }
-    if let Err(error) = linux_write_user_usize(timerid, handle.0 as usize) {
+    if let Err(error) = linux_write_user_i32(timerid, timer_id as i32) {
         let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
-        memory_state().remove_linux_timer(pid, handle.0);
+        memory_state().remove_linux_timer(pid, timer_id);
         crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
         let _ = sys_handle_close(handle.0);
         return Err(error);
@@ -7754,8 +7777,9 @@ pub fn sys_linux_timer_settime(
     old_value: usize,
 ) -> SysResult {
     let pid = linux_resource_pid();
+    let handle = memory_state().linux_timer_handle(pid, timerid as u32);
     if !memory_state().linux_timer_owned(pid, timerid as u32)
-        || !compat::handle_known(HandleValue(timerid as u32))
+        || !handle.is_some_and(|handle| compat::handle_known(HandleValue(handle)))
     {
         return Err(SysError::EINVAL);
     }
@@ -7805,8 +7829,9 @@ pub fn sys_linux_timer_settime(
 
 pub fn sys_linux_timer_gettime(timerid: usize, curr_value: usize) -> SysResult {
     let pid = linux_resource_pid();
+    let handle = memory_state().linux_timer_handle(pid, timerid as u32);
     if !memory_state().linux_timer_owned(pid, timerid as u32)
-        || !compat::handle_known(HandleValue(timerid as u32))
+        || !handle.is_some_and(|handle| compat::handle_known(HandleValue(handle)))
     {
         return Err(SysError::EINVAL);
     }
@@ -7825,8 +7850,10 @@ pub fn sys_linux_timer_gettime(timerid: usize, curr_value: usize) -> SysResult {
 }
 
 pub fn sys_linux_timer_getoverrun(timerid: usize) -> SysResult {
-    if memory_state().linux_timer_owned(linux_resource_pid(), timerid as u32)
-        && compat::handle_known(HandleValue(timerid as u32))
+    let pid = linux_resource_pid();
+    let handle = memory_state().linux_timer_handle(pid, timerid as u32);
+    if memory_state().linux_timer_owned(pid, timerid as u32)
+        && handle.is_some_and(|handle| compat::handle_known(HandleValue(handle)))
     {
         Ok(0)
     } else {
@@ -7837,9 +7864,10 @@ pub fn sys_linux_timer_getoverrun(timerid: usize) -> SysResult {
 pub fn sys_linux_timer_delete(timerid: usize) -> SysResult {
     let pid = linux_resource_pid();
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let handle = memory_state().linux_timer_handle(pid, timerid as u32);
     let result = if !memory_state().linux_timer_owned(pid, timerid as u32) {
         Err(SysError::EINVAL)
-    } else if compat::close_handle(HandleValue(timerid as u32)) {
+    } else if handle.is_some_and(|handle| compat::close_handle(HandleValue(handle))) {
         memory_state().remove_linux_timer(pid, timerid as u32);
         Ok(0)
     } else {

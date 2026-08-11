@@ -169,7 +169,7 @@ impl LinuxPosixTimerSpec {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxPosixTimerCore {
-    pub handle: u32,
+    pub timer_id: u32,
     pub clock: LinuxPosixClock,
     pub signal: usize,
     deadline_clock: LinuxPosixClock,
@@ -178,9 +178,9 @@ pub(crate) struct LinuxPosixTimerCore {
 }
 
 impl LinuxPosixTimerCore {
-    pub(crate) const fn new(handle: u32, clock: LinuxPosixClock, signal: usize) -> Self {
+    pub(crate) const fn new(timer_id: u32, clock: LinuxPosixClock, signal: usize) -> Self {
         Self {
-            handle,
+            timer_id,
             clock,
             signal,
             deadline_clock: LinuxPosixClock::Monotonic,
