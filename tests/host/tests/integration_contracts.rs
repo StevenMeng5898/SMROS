@@ -37,6 +37,79 @@ fn posix_clock_timer_clock_runtime_applies_checked_realtime_offsets() {
 }
 
 #[test]
+fn posix_clock_timer_syscalls_copy_validate_and_publish_owned_state() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    let timer_create = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_linux_timer_create(")
+            .expect("POSIX timer creation")..],
+    );
+    let timer_settime = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_linux_timer_settime(")
+            .expect("POSIX timer arming")..],
+    );
+    let timer_gettime = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_linux_timer_gettime(")
+            .expect("POSIX timer query")..],
+    );
+    let timer_delete = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_linux_timer_delete(")
+            .expect("POSIX timer deletion")..],
+    );
+    let reset = braced_body(
+        &syscall[syscall
+            .find("fn reset_linux_process_state(&mut self) -> Vec<u32>")
+            .expect("process-owned resource reset")..],
+    );
+
+    assert!(syscall.contains("struct LinuxItimerspec"));
+    assert!(syscall.contains("struct LinuxSigevent"));
+    assert!(syscall.contains("posix_timers: Vec<LinuxPosixTimerCore>"));
+    assert!(timer_create.contains("LinuxPosixClock::from_id(clockid)"));
+    assert!(timer_create.contains("linux_read_user_sigevent(sevp)?"));
+    assert!(timer_create.contains("register_linux_timer(pid, handle.0, clock, signal)"));
+    assert!(timer_settime.contains("linux_read_user_itimerspec(new_value)?"));
+    assert!(timer_settime.contains("linux_posix_timespec_nanoseconds("));
+    assert!(timer_settime.contains("timer.arm("));
+    assert!(timer_gettime.contains("timer.snapshot("));
+    assert!(timer_delete.contains("remove_linux_timer(pid, timerid as u32)"));
+    assert!(reset.contains("resources.posix_timers"));
+
+    let preflight = timer_create
+        .find("linux_user_buffer_writable(")
+        .expect("complete timer-ID preflight");
+    let create = timer_create
+        .find("compat::create_object(ObjectType::Timer)")
+        .expect("timer compatibility object allocation");
+    let register = timer_create
+        .find("register_linux_timer(pid, handle.0, clock, signal)")
+        .expect("timer state registration");
+    let failed_copyout = timer_create
+        .find("if let Err(error) = linux_write_user_usize(")
+        .expect("fallible timer-ID copyout");
+    let remove = timer_create[failed_copyout..]
+        .find("remove_linux_timer(pid, handle.0)")
+        .map(|offset| failed_copyout + offset)
+        .expect("timer state rollback");
+    let close = timer_create[failed_copyout..]
+        .find("sys_handle_close(handle.0)")
+        .map(|offset| failed_copyout + offset)
+        .expect("timer handle rollback");
+
+    assert!(preflight < create);
+    assert!(create < register);
+    assert!(register < failed_copyout);
+    assert!(failed_copyout < remove);
+    assert!(remove < close);
+}
+
+#[test]
 fn aarch64_page_allocator_uses_detected_ram_after_kernel_end() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let memory = std::fs::read_to_string(repository.join("src/kernel_lowlevel/memory.rs"))
@@ -4900,7 +4973,7 @@ fn linux_resource_copyouts_preflight_and_rollback_transactionally() {
         .find("if let Err(error) = linux_write_user_usize(")
         .expect("fallible timer-ID copyout");
     let timer_register = timer
-        .find("register_linux_timer(pid, handle.0)")
+        .find("register_linux_timer(pid, handle.0, clock, signal)")
         .expect("process timer registration");
     let timer_remove = timer[timer_failed_copyout..]
         .find("remove_linux_timer(pid, handle.0)")
@@ -5813,7 +5886,7 @@ fn linux_fork_publishes_only_a_complete_child() {
             .find("pub fn sys_linux_timer_create(")
             .expect("POSIX timer create")..],
     );
-    assert!(timer_create.contains("register_linux_timer(pid, handle.0)"));
+    assert!(timer_create.contains("register_linux_timer(pid, handle.0, clock, signal)"));
     let timer_registration = &syscall[syscall
         .find("fn register_linux_timer(")
         .expect("process timer registration")..];

@@ -79,7 +79,9 @@ use crate::kernel_objects::scheduler;
 use crate::kernel_objects::socket;
 use crate::kernel_objects::vmar::{Vmar, VmarMapping};
 use crate::kernel_objects::{default_rights_for_object, rights_are_valid};
-use crate::syscall::syscall_logic;
+use crate::syscall::syscall_logic::{
+    self, LinuxPosixClock, LinuxPosixTimerCore, LinuxPosixTimerSpec,
+};
 use crate::user_level::fxfs;
 
 #[path = "fuzz.rs"]
@@ -466,6 +468,7 @@ const ZX_TIMER_SIGNALED: u32 = 1 << 7;
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
 const LINUX_TIMER_ABSTIME: usize = 1;
+const LINUX_SIGEV_SIGNAL: i32 = 0;
 const ZX_CLOCK_OPT_AUTO_START: u32 = 1 << 0;
 const ZX_CLOCK_UPDATE_OPTION_SYNTHETIC_VALUE_VALID: u64 = 1 << 0;
 const ZX_CLOCK_UPDATE_OPTION_REFERENCE_VALUE_VALID: u64 = 1 << 1;
@@ -758,6 +761,7 @@ struct LinuxProcessResources {
     root: String,
     container: LinuxProcessContainerState,
     timer_handles: Vec<u32>,
+    posix_timers: Vec<LinuxPosixTimerCore>,
     real_timer_deadline_tick: u64,
 }
 
@@ -772,6 +776,7 @@ impl LinuxProcessResources {
             root: String::from("/"),
             container: LinuxProcessContainerState::new(),
             timer_handles: Vec::new(),
+            posix_timers: Vec::new(),
             real_timer_deadline_tick: LINUX_TIMER_DISABLED,
         }
     }
@@ -817,6 +822,21 @@ struct LinuxTimeval {
 struct LinuxItimerval {
     it_interval: LinuxTimeval,
     it_value: LinuxTimeval,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxItimerspec {
+    it_interval: LinuxTimespec,
+    it_value: LinuxTimespec,
+}
+
+#[repr(C)]
+struct LinuxSigevent {
+    sigev_value: usize,
+    sigev_signo: i32,
+    sigev_notify: i32,
+    padding: [u8; 48],
 }
 
 #[repr(C)]
@@ -1085,6 +1105,105 @@ fn linux_read_user_itimerval(address: usize) -> Result<LinuxItimerval, SysError>
         )?,
         it_value: linux_decode_timeval(&bytes, core::mem::offset_of!(LinuxItimerval, it_value))?,
     })
+}
+
+fn linux_decode_timespec(bytes: &[u8], offset: usize) -> Result<LinuxTimespec, SysError> {
+    let seconds_offset = offset
+        .checked_add(core::mem::offset_of!(LinuxTimespec, tv_sec))
+        .ok_or(SysError::EFAULT)?;
+    let nanoseconds_offset = offset
+        .checked_add(core::mem::offset_of!(LinuxTimespec, tv_nsec))
+        .ok_or(SysError::EFAULT)?;
+    Ok(LinuxTimespec {
+        tv_sec: i64::from_ne_bytes(linux_wire_field(bytes, seconds_offset)?),
+        tv_nsec: i64::from_ne_bytes(linux_wire_field(bytes, nanoseconds_offset)?),
+    })
+}
+
+fn linux_encode_timespec(
+    bytes: &mut [u8],
+    offset: usize,
+    value: LinuxTimespec,
+) -> Result<(), SysError> {
+    linux_put_wire_field(
+        bytes,
+        offset
+            .checked_add(core::mem::offset_of!(LinuxTimespec, tv_sec))
+            .ok_or(SysError::EFAULT)?,
+        &value.tv_sec.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        bytes,
+        offset
+            .checked_add(core::mem::offset_of!(LinuxTimespec, tv_nsec))
+            .ok_or(SysError::EFAULT)?,
+        &value.tv_nsec.to_ne_bytes(),
+    )
+}
+
+fn linux_read_user_itimerspec(address: usize) -> Result<LinuxItimerspec, SysError> {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxItimerspec>()];
+    linux_copy_from_user(address, &mut bytes)?;
+    Ok(LinuxItimerspec {
+        it_interval: linux_decode_timespec(
+            &bytes,
+            core::mem::offset_of!(LinuxItimerspec, it_interval),
+        )?,
+        it_value: linux_decode_timespec(&bytes, core::mem::offset_of!(LinuxItimerspec, it_value))?,
+    })
+}
+
+fn linux_write_user_itimerspec(address: usize, value: LinuxItimerspec) -> SysResult {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxItimerspec>()];
+    linux_encode_timespec(
+        &mut bytes,
+        core::mem::offset_of!(LinuxItimerspec, it_interval),
+        value.it_interval,
+    )?;
+    linux_encode_timespec(
+        &mut bytes,
+        core::mem::offset_of!(LinuxItimerspec, it_value),
+        value.it_value,
+    )?;
+    linux_copy_to_user(address, &bytes)?;
+    Ok(0)
+}
+
+fn linux_read_user_sigevent(address: usize) -> Result<LinuxSigevent, SysError> {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxSigevent>()];
+    linux_copy_from_user(address, &mut bytes)?;
+    let mut padding = [0u8; 48];
+    let padding_offset = core::mem::offset_of!(LinuxSigevent, padding);
+    padding.copy_from_slice(&bytes[padding_offset..padding_offset + padding.len()]);
+    Ok(LinuxSigevent {
+        sigev_value: usize::from_ne_bytes(linux_wire_field(
+            &bytes,
+            core::mem::offset_of!(LinuxSigevent, sigev_value),
+        )?),
+        sigev_signo: i32::from_ne_bytes(linux_wire_field(
+            &bytes,
+            core::mem::offset_of!(LinuxSigevent, sigev_signo),
+        )?),
+        sigev_notify: i32::from_ne_bytes(linux_wire_field(
+            &bytes,
+            core::mem::offset_of!(LinuxSigevent, sigev_notify),
+        )?),
+        padding,
+    })
+}
+
+fn linux_timespec_from_nanoseconds(nanoseconds: u64) -> LinuxTimespec {
+    LinuxTimespec {
+        tv_sec: (nanoseconds / 1_000_000_000) as i64,
+        tv_nsec: (nanoseconds % 1_000_000_000) as i64,
+    }
+}
+
+fn linux_itimerspec_from_timer_spec(spec: LinuxPosixTimerSpec) -> LinuxItimerspec {
+    LinuxItimerspec {
+        it_interval: linux_timespec_from_nanoseconds(spec.interval),
+        it_value: linux_timespec_from_nanoseconds(spec.value),
+    }
 }
 
 fn linux_write_user_signal_stack(address: usize, value: LinuxSignalStack) -> SysResult {
@@ -1792,6 +1911,9 @@ impl MemorySyscallState {
         self.signals.retain(|signal| signal.handle != handle);
         for resources in &mut self.linux_process_resources {
             resources.timer_handles.retain(|timer| *timer != handle);
+            resources
+                .posix_timers
+                .retain(|timer| timer.handle != handle);
         }
     }
 
@@ -3005,6 +3127,7 @@ impl MemorySyscallState {
             root: process_state.root,
             container: process_state.container,
             timer_handles: Vec::new(),
+            posix_timers: Vec::new(),
             real_timer_deadline_tick: LINUX_TIMER_DISABLED,
         });
         true
@@ -3019,6 +3142,7 @@ impl MemorySyscallState {
             return None;
         };
         let resources = self.linux_process_resources.swap_remove(index);
+        debug_assert_eq!(resources.timer_handles.len(), resources.posix_timers.len());
         let mut released = self.release_resource_clone(&resources.descriptors, &resources.objects);
         released.extend(resources.timer_handles);
         Some(released)
@@ -3034,6 +3158,7 @@ impl MemorySyscallState {
         };
         let resources = self.linux_process_resources.swap_remove(index);
         let transient_state_empty = resources.timer_handles.is_empty()
+            && resources.posix_timers.is_empty()
             && resources.real_timer_deadline_tick == LINUX_TIMER_DISABLED;
         let parent_ownership_preserved =
             self.rollback_fork_resource_clone(&resources.descriptors, &resources.objects);
@@ -3090,13 +3215,40 @@ impl MemorySyscallState {
             .is_some_and(|resources| resources.timer_handles.contains(&handle))
     }
 
-    fn register_linux_timer(&mut self, pid: usize, handle: u32) -> bool {
+    fn register_linux_timer(
+        &mut self,
+        pid: usize,
+        handle: u32,
+        clock: LinuxPosixClock,
+        signal: usize,
+    ) -> bool {
         let resources = self.process_resources_mut(pid);
-        if resources.timer_handles.try_reserve(1).is_err() {
+        if resources.timer_handles.try_reserve(1).is_err()
+            || resources.posix_timers.try_reserve(1).is_err()
+        {
             return false;
         }
         resources.timer_handles.push(handle);
+        resources
+            .posix_timers
+            .push(LinuxPosixTimerCore::new(handle, clock, signal));
         true
+    }
+
+    fn linux_timer(&self, pid: usize, handle: u32) -> Option<&LinuxPosixTimerCore> {
+        self.process_resources(pid)?
+            .posix_timers
+            .iter()
+            .find(|timer| timer.handle == handle)
+    }
+
+    fn linux_timer_mut(&mut self, pid: usize, handle: u32) -> Option<&mut LinuxPosixTimerCore> {
+        self.linux_process_resources
+            .iter_mut()
+            .find(|resources| resources.pid == pid)?
+            .posix_timers
+            .iter_mut()
+            .find(|timer| timer.handle == handle)
     }
 
     fn remove_linux_timer(&mut self, pid: usize, handle: u32) {
@@ -3106,6 +3258,9 @@ impl MemorySyscallState {
             .find(|resources| resources.pid == pid)
         {
             resources.timer_handles.retain(|timer| *timer != handle);
+            resources
+                .posix_timers
+                .retain(|timer| timer.handle != handle);
         }
     }
 
@@ -3150,6 +3305,7 @@ impl MemorySyscallState {
         let mut released_handles = Vec::new();
         let resources = core::mem::take(&mut self.linux_process_resources);
         for resources in resources {
+            debug_assert_eq!(resources.timer_handles.len(), resources.posix_timers.len());
             released_handles
                 .extend(self.release_resource_clone(&resources.descriptors, &resources.objects));
             released_handles.extend(resources.timer_handles);
@@ -7536,18 +7692,35 @@ pub fn sys_timerfd_gettime(fd: usize, curr_value: usize) -> SysResult {
     linux_zero_user(curr_value, 32)
 }
 
-pub fn sys_linux_timer_create(_clockid: usize, _sevp: usize, timerid: usize) -> SysResult {
+pub fn sys_linux_timer_create(clockid: usize, sevp: usize, timerid: usize) -> SysResult {
     if !linux_user_buffer_writable(timerid, core::mem::size_of::<usize>()) {
         return Err(SysError::EFAULT);
     }
+    let clock = LinuxPosixClock::from_id(clockid).ok_or(SysError::EINVAL)?;
+    let signal = if sevp == 0 {
+        LINUX_SIGALRM
+    } else {
+        let event = linux_read_user_sigevent(sevp)?;
+        if event.sigev_notify != LINUX_SIGEV_SIGNAL
+            || !(1..=LINUX_MAX_SIGNAL).contains(&(event.sigev_signo as usize))
+        {
+            return Err(SysError::EINVAL);
+        }
+        event.sigev_signo as usize
+    };
     let handle = compat::create_object(ObjectType::Timer).map_err(|_| SysError::ENOMEM)?;
     let pid = linux_resource_pid();
-    if !memory_state().register_linux_timer(pid, handle.0) {
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let registered = memory_state().register_linux_timer(pid, handle.0, clock, signal);
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    if !registered {
         let _ = sys_handle_close(handle.0);
         return Err(SysError::ENOMEM);
     }
     if let Err(error) = linux_write_user_usize(timerid, handle.0 as usize) {
+        let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
         memory_state().remove_linux_timer(pid, handle.0);
+        crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
         let _ = sys_handle_close(handle.0);
         return Err(error);
     }
@@ -7556,31 +7729,79 @@ pub fn sys_linux_timer_create(_clockid: usize, _sevp: usize, timerid: usize) -> 
 
 pub fn sys_linux_timer_settime(
     timerid: usize,
-    _flags: usize,
+    flags: usize,
     new_value: usize,
     old_value: usize,
 ) -> SysResult {
-    if !memory_state().linux_timer_owned(linux_resource_pid(), timerid as u32)
+    let pid = linux_resource_pid();
+    if !memory_state().linux_timer_owned(pid, timerid as u32)
         || !compat::handle_known(HandleValue(timerid as u32))
     {
         return Err(SysError::EINVAL);
     }
-    if new_value == 0 {
+    if flags & !LINUX_TIMER_ABSTIME != 0 {
+        return Err(SysError::EINVAL);
+    }
+    let new_timer = linux_read_user_itimerspec(new_value)?;
+    let spec = LinuxPosixTimerSpec {
+        interval: syscall_logic::linux_posix_timespec_nanoseconds(
+            new_timer.it_interval.tv_sec,
+            new_timer.it_interval.tv_nsec,
+        )
+        .ok_or(SysError::EINVAL)?,
+        value: syscall_logic::linux_posix_timespec_nanoseconds(
+            new_timer.it_value.tv_sec,
+            new_timer.it_value.tv_nsec,
+        )
+        .ok_or(SysError::EINVAL)?,
+    };
+    if old_value != 0
+        && !linux_user_buffer_writable(old_value, core::mem::size_of::<LinuxItimerspec>())
+    {
         return Err(SysError::EFAULT);
     }
-    if old_value != 0 {
-        linux_zero_user(old_value, 32)?;
-    }
-    Ok(0)
+
+    let now_monotonic = monotonic_nanos();
+    let now_realtime = linux_realtime_nanos()?;
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let result = (|| {
+        let mut timer = *memory_state()
+            .linux_timer(pid, timerid as u32)
+            .ok_or(SysError::EINVAL)?;
+        let previous = timer.snapshot(now_monotonic, now_realtime);
+        if old_value != 0 {
+            linux_write_user_itimerspec(old_value, linux_itimerspec_from_timer_spec(previous))?;
+        }
+        let arm_result = timer.arm(flags & LINUX_TIMER_ABSTIME != 0, now_monotonic, spec);
+        arm_result.ok_or(SysError::EOVERFLOW)?;
+        *memory_state()
+            .linux_timer_mut(pid, timerid as u32)
+            .ok_or(SysError::EINVAL)? = timer;
+        Ok(0)
+    })();
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    result
 }
 
 pub fn sys_linux_timer_gettime(timerid: usize, curr_value: usize) -> SysResult {
-    if !memory_state().linux_timer_owned(linux_resource_pid(), timerid as u32)
+    let pid = linux_resource_pid();
+    if !memory_state().linux_timer_owned(pid, timerid as u32)
         || !compat::handle_known(HandleValue(timerid as u32))
     {
         return Err(SysError::EINVAL);
     }
-    linux_zero_user(curr_value, 32)
+    if !linux_user_buffer_writable(curr_value, core::mem::size_of::<LinuxItimerspec>()) {
+        return Err(SysError::EFAULT);
+    }
+    let now_monotonic = monotonic_nanos();
+    let now_realtime = linux_realtime_nanos()?;
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let snapshot = memory_state()
+        .linux_timer(pid, timerid as u32)
+        .map(|timer| timer.snapshot(now_monotonic, now_realtime));
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    let snapshot = snapshot.ok_or(SysError::EINVAL)?;
+    linux_write_user_itimerspec(curr_value, linux_itimerspec_from_timer_spec(snapshot))
 }
 
 pub fn sys_linux_timer_getoverrun(timerid: usize) -> SysResult {
@@ -7595,15 +7816,17 @@ pub fn sys_linux_timer_getoverrun(timerid: usize) -> SysResult {
 
 pub fn sys_linux_timer_delete(timerid: usize) -> SysResult {
     let pid = linux_resource_pid();
-    if !memory_state().linux_timer_owned(pid, timerid as u32) {
-        return Err(SysError::EINVAL);
-    }
-    if compat::close_handle(HandleValue(timerid as u32)) {
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let result = if !memory_state().linux_timer_owned(pid, timerid as u32) {
+        Err(SysError::EINVAL)
+    } else if compat::close_handle(HandleValue(timerid as u32)) {
         memory_state().remove_linux_timer(pid, timerid as u32);
         Ok(0)
     } else {
         Err(SysError::EINVAL)
-    }
+    };
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    result
 }
 
 pub fn sys_clock_settime(clockid: usize, tp: usize) -> SysResult {
