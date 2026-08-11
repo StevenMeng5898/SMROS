@@ -213,6 +213,12 @@ start_linux_clone_child:
     msr     spsr_el1, x17
     ldr     x17, [x16, #0x328]
     msr     tpidr_el0, x17
+    ldr     x17, [x16, #0x330]
+    msr     ttbr0_el1, x17
+    dsb     ish
+    tlbi    vmalle1is
+    dsb     ish
+    isb
     b       start_linux_child_register_restore
 .size start_linux_clone_child, . - start_linux_clone_child
 

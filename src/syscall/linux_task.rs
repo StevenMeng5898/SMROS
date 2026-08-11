@@ -802,6 +802,7 @@ mod aarch64_clone {
         pub return_pc: u64,
         pub pstate: u64,
         pub tls: u64,
+        pub root_paddr: u64,
     }
 
     const _: () = {
@@ -810,6 +811,7 @@ mod aarch64_clone {
         assert!(core::mem::offset_of!(Aarch64CloneStart, return_pc) == 0x318);
         assert!(core::mem::offset_of!(Aarch64CloneStart, pstate) == 0x320);
         assert!(core::mem::offset_of!(Aarch64CloneStart, tls) == 0x328);
+        assert!(core::mem::offset_of!(Aarch64CloneStart, root_paddr) == 0x330);
     };
 
     #[derive(Clone, Copy)]
@@ -861,6 +863,10 @@ mod aarch64_clone {
         request: LinuxCloneRequest,
         context: LinuxSyscallFrameRef,
     ) -> Result<LinuxTaskReservation, SysError> {
+        let root_paddr = crate::syscall::linux_process_memory::current_root_paddr()?;
+        if root_paddr == 0 {
+            return Err(SysError::EAGAIN);
+        }
         with_runtime(|runtime| {
             let current = scheduler::scheduler().current();
             let Some(parent) = runtime.tasks.by_scheduler(current.0) else {
@@ -890,6 +896,21 @@ mod aarch64_clone {
                 .tls
                 .map(|tls| tls as u64)
                 .unwrap_or_else(crate::kernel_lowlevel::cpu::read_user_tls);
+            let configured = scheduler::scheduler()
+                .get_thread_mut(scheduler_id)
+                .map(|thread| {
+                    thread.context.set_linux_process_start(
+                        request.user_sp as u64,
+                        tls,
+                        root_paddr,
+                    )
+                })
+                .unwrap_or(false)
+                && scheduler::scheduler().bind_thread_process(scheduler_id, parent.tgid);
+            if !configured {
+                let _ = runtime.tasks.rollback(reservation);
+                return Err(SysError::EAGAIN);
+            }
             runtime.clone_slots[reservation.slot] = LinuxCloneSlot {
                 reservation,
                 start: Some(Aarch64CloneStart {
@@ -898,6 +919,7 @@ mod aarch64_clone {
                     return_pc: context.return_pc,
                     pstate: context.pstate,
                     tls,
+                    root_paddr,
                 }),
                 parent_tid: TidDestination {
                     address: request.parent_tid.unwrap_or(0),

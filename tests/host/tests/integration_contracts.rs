@@ -2982,6 +2982,86 @@ fn aarch64_clone_child_is_validated_before_publication() {
 }
 
 #[test]
+fn aarch64_clone_child_installs_process_translation_root_before_el0() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+    let switch =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/context_switch.S"))
+            .expect("read AArch64 context switch");
+
+    let clone_layout_start = task
+        .find("pub(crate) struct Aarch64CloneStart")
+        .expect("clone startup image");
+    let clone_layout_end = task[clone_layout_start..]
+        .find("#[derive(Clone, Copy)]\n    struct TidDestination")
+        .expect("end of clone startup layout");
+    let clone_layout = &task[clone_layout_start..clone_layout_start + clone_layout_end];
+    assert!(clone_layout.contains("pub root_paddr: u64"));
+    assert!(clone_layout.contains(
+        "assert!(core::mem::offset_of!(Aarch64CloneStart, root_paddr) == 0x330)"
+    ));
+
+    let reserve_start = task
+        .find("pub(crate) fn reserve_clone(")
+        .expect("clone reservation");
+    let reserve = braced_body(&task[reserve_start..]);
+    let root = reserve
+        .find("linux_process_memory::current_root_paddr()")
+        .expect("current process translation root");
+    let task_reservation = reserve
+        .find(".reserve_child(parent.tgid, scheduler_id.0)")
+        .expect("Linux task reservation");
+    let scheduler_context = reserve
+        .find("thread.context.set_linux_process_start(")
+        .expect("suspended scheduler context configuration");
+    let process_binding = reserve
+        .find("bind_thread_process(scheduler_id, parent.tgid)")
+        .expect("scheduler process binding");
+    let startup_slot = reserve
+        .find("runtime.clone_slots[reservation.slot] = LinuxCloneSlot")
+        .expect("clone startup publication");
+    assert!(root < task_reservation);
+    assert!(task_reservation < scheduler_context);
+    assert!(scheduler_context < process_binding);
+    assert!(process_binding < startup_slot);
+    assert!(reserve.contains("root_paddr,"));
+    assert!(reserve.contains("runtime.tasks.rollback(reservation)"));
+
+    let clone_start = switch
+        .find("start_linux_clone_child:")
+        .expect("clone child assembly entry");
+    let clone_end = switch[clone_start..]
+        .find(".size start_linux_clone_child")
+        .expect("end of clone child assembly entry");
+    let clone = &switch[clone_start..clone_start + clone_end];
+    let load_root = clone
+        .find("ldr     x17, [x16, #0x330]")
+        .expect("clone process root load");
+    let install_root = clone
+        .find("msr     ttbr0_el1, x17")
+        .expect("clone process root install");
+    let first_dsb = clone.find("dsb     ish").expect("pre-TLBI barrier");
+    let tlbi = clone
+        .find("tlbi    vmalle1is")
+        .expect("clone TLB invalidation");
+    let second_dsb = tlbi
+        + clone[tlbi..]
+            .find("dsb     ish")
+            .expect("post-TLBI barrier");
+    let isb = clone.find("isb").expect("clone instruction barrier");
+    let register_restore = clone
+        .find("b       start_linux_child_register_restore")
+        .expect("shared child register restore");
+    assert!(load_root < install_root);
+    assert!(install_root < first_dsb);
+    assert!(first_dsb < tlbi);
+    assert!(tlbi < second_dsb);
+    assert!(second_dsb < isb);
+    assert!(isb < register_restore);
+}
+
+#[test]
 fn aarch64_glibc_fork_clone_sets_and_clears_child_tid() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
