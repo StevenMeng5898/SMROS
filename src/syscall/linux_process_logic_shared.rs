@@ -336,6 +336,7 @@ impl<const N: usize> LinuxProcessTable<N> {
         Ok(LINUX_ROOT_PID)
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn reserve_child(
         &mut self,
         parent_pid: usize,
@@ -398,6 +399,7 @@ impl<const N: usize> LinuxProcessTable<N> {
         })
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn publish(&mut self, reservation: LinuxProcessReservation) -> bool {
         let Some(process) = self.processes.get_mut(reservation.slot) else {
             return false;
@@ -477,6 +479,7 @@ impl<const N: usize> LinuxProcessTable<N> {
             .find(|process| Self::is_visible(*process) && process.pid == pid)
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn by_scheduler(&self, scheduler_thread: usize) -> Option<LinuxProcessCore> {
         self.processes.iter().copied().find(|process| {
             Self::is_visible(*process) && process.root_scheduler_thread == scheduler_thread
@@ -653,6 +656,7 @@ impl<const N: usize> LinuxProcessTable<N> {
         self.launch_reaper = LinuxLaunchReaperRecord::EMPTY;
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn launch_reaper_active(&self) -> bool {
         self.launch_reaper.active
     }

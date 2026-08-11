@@ -12,6 +12,7 @@ pub(crate) fn try_clone_linux_fork_path(
 static LINUX_FORK_FAILURE_POINT: AtomicUsize = AtomicUsize::new(LinuxForkFailurePoint::COUNT);
 static LINUX_FORK_FAILURE_OCCURRENCE: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(not(target_os = "none"))]
 pub(crate) fn configure_fork_failure(point: LinuxForkFailurePoint, occurrence: usize) {
     LINUX_FORK_FAILURE_OCCURRENCE.store(occurrence, Ordering::SeqCst);
     LINUX_FORK_FAILURE_POINT.store(point as usize, Ordering::SeqCst);
@@ -639,6 +640,7 @@ pub(crate) fn map_linux_fork_pages<O: LinuxForkPageOps>(
     Ok(())
 }
 
+#[cfg(not(target_os = "none"))]
 pub(crate) fn clone_and_map_linux_fork_pages<O: LinuxForkPageOps>(
     ops: &mut O,
     address: usize,
