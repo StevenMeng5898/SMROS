@@ -99,6 +99,45 @@ macro_rules! smros_linux_clock_nanosleep_flags_valid_body {
     }};
 }
 
+const LINUX_POSIX_NANOS_PER_SECOND: u64 = 1_000_000_000;
+
+pub(crate) fn linux_posix_clock_settable(clock_id: usize) -> bool {
+    clock_id == 0
+}
+
+pub(crate) fn linux_posix_timespec_nanoseconds(
+    seconds: i64,
+    nanoseconds: i64,
+) -> Option<u64> {
+    if seconds < 0 || !(0..LINUX_POSIX_NANOS_PER_SECOND as i64).contains(&nanoseconds) {
+        return None;
+    }
+    (seconds as u64)
+        .checked_mul(LINUX_POSIX_NANOS_PER_SECOND)?
+        .checked_add(nanoseconds as u64)
+}
+
+pub(crate) fn linux_realtime_offset_for_set(
+    monotonic_nanoseconds: u64,
+    seconds: i64,
+    nanoseconds: i64,
+) -> Option<i64> {
+    let requested = linux_posix_timespec_nanoseconds(seconds, nanoseconds)?;
+    let offset = i128::from(requested) - i128::from(monotonic_nanoseconds);
+    i64::try_from(offset).ok()
+}
+
+pub(crate) fn linux_realtime_from_offset(
+    monotonic_nanoseconds: u64,
+    offset_nanoseconds: i64,
+) -> Option<u64> {
+    if offset_nanoseconds >= 0 {
+        monotonic_nanoseconds.checked_add(offset_nanoseconds as u64)
+    } else {
+        monotonic_nanoseconds.checked_sub(offset_nanoseconds.unsigned_abs())
+    }
+}
+
 macro_rules! smros_linux_signal_valid_body {
     ($signum:expr, $max_signal:expr) => {{
         $signum <= $max_signal

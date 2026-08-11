@@ -256,6 +256,35 @@ mod syscall_logic {
     }
 
     #[test]
+    fn posix_realtime_offset_is_checked_and_monotonic_is_not_settable() {
+        assert!(linux_posix_clock_settable(0));
+        assert!(!linux_posix_clock_settable(1));
+        assert!(!linux_posix_clock_settable(usize::MAX));
+
+        assert_eq!(
+            linux_posix_timespec_nanoseconds(2, 3),
+            Some(2_000_000_003)
+        );
+        assert_eq!(linux_posix_timespec_nanoseconds(-1, 0), None);
+        assert_eq!(linux_posix_timespec_nanoseconds(0, -1), None);
+        assert_eq!(
+            linux_posix_timespec_nanoseconds(0, 1_000_000_000),
+            None
+        );
+
+        assert_eq!(
+            linux_realtime_offset_for_set(3_000_000_000, 2, 0),
+            Some(-1_000_000_000)
+        );
+        assert_eq!(
+            linux_realtime_from_offset(3_000_000_000, -1_000_000_000),
+            Some(2_000_000_000)
+        );
+        assert_eq!(linux_realtime_from_offset(1, -2), None);
+        assert_eq!(linux_realtime_from_offset(u64::MAX, 1), None);
+    }
+
+    #[test]
     fn zircon_syscall_numbers_round_trip_from_raw_threshold() {
         fn from_raw(syscall_num: u64, threshold: u64) -> u32 {
             smros_zircon_syscall_from_raw_body!(syscall_num, threshold)
