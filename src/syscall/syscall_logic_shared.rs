@@ -138,6 +138,129 @@ pub(crate) fn linux_realtime_from_offset(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxPosixClock {
+    Realtime,
+    Monotonic,
+}
+
+impl LinuxPosixClock {
+    pub(crate) fn from_id(clock_id: usize) -> Option<Self> {
+        match clock_id {
+            0 => Some(Self::Realtime),
+            1 => Some(Self::Monotonic),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxPosixTimerSpec {
+    pub interval: u64,
+    pub value: u64,
+}
+
+impl LinuxPosixTimerSpec {
+    pub(crate) const DISARMED: Self = Self {
+        interval: 0,
+        value: 0,
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxPosixTimerCore {
+    pub handle: u32,
+    pub clock: LinuxPosixClock,
+    pub signal: usize,
+    deadline_clock: LinuxPosixClock,
+    deadline: Option<u64>,
+    interval: u64,
+}
+
+impl LinuxPosixTimerCore {
+    pub(crate) const fn new(handle: u32, clock: LinuxPosixClock, signal: usize) -> Self {
+        Self {
+            handle,
+            clock,
+            signal,
+            deadline_clock: LinuxPosixClock::Monotonic,
+            deadline: None,
+            interval: 0,
+        }
+    }
+
+    pub(crate) fn arm(
+        &mut self,
+        absolute: bool,
+        now_monotonic: u64,
+        spec: LinuxPosixTimerSpec,
+    ) -> Option<()> {
+        if spec.value == 0 {
+            self.deadline = None;
+            self.interval = 0;
+            return Some(());
+        }
+        let (deadline_clock, deadline) = if absolute {
+            (self.clock, spec.value)
+        } else {
+            (
+                LinuxPosixClock::Monotonic,
+                now_monotonic.checked_add(spec.value)?,
+            )
+        };
+        self.deadline_clock = deadline_clock;
+        self.deadline = Some(deadline);
+        self.interval = spec.interval;
+        Some(())
+    }
+
+    pub(crate) fn snapshot(
+        &self,
+        now_monotonic: u64,
+        now_realtime: u64,
+    ) -> LinuxPosixTimerSpec {
+        let now = match self.deadline_clock {
+            LinuxPosixClock::Monotonic => now_monotonic,
+            LinuxPosixClock::Realtime => now_realtime,
+        };
+        LinuxPosixTimerSpec {
+            interval: self.interval,
+            value: self
+                .deadline
+                .map(|deadline| deadline.saturating_sub(now))
+                .unwrap_or(0),
+        }
+    }
+
+    pub(crate) fn expire(&mut self, now_monotonic: u64, now_realtime: u64) -> bool {
+        let Some(deadline) = self.deadline else {
+            return false;
+        };
+        let now = match self.deadline_clock {
+            LinuxPosixClock::Monotonic => now_monotonic,
+            LinuxPosixClock::Realtime => now_realtime,
+        };
+        if now < deadline {
+            return false;
+        }
+        if self.interval == 0 {
+            self.deadline = None;
+            return true;
+        }
+
+        self.deadline = now
+            .saturating_sub(deadline)
+            .checked_div(self.interval)
+            .and_then(|periods| periods.checked_add(1))
+            .and_then(|periods| periods.checked_mul(self.interval))
+            .and_then(|advance| deadline.checked_add(advance));
+        if self.deadline.is_none() {
+            self.interval = 0;
+        }
+        true
+    }
+}
+
 macro_rules! smros_linux_signal_valid_body {
     ($signum:expr, $max_signal:expr) => {{
         $signum <= $max_signal

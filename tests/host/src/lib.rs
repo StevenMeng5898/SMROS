@@ -285,6 +285,74 @@ mod syscall_logic {
     }
 
     #[test]
+    fn posix_relative_and_absolute_timers_use_the_correct_clock_domain() {
+        let mut relative = LinuxPosixTimerCore::new(7, LinuxPosixClock::Realtime, 14);
+        relative
+            .arm(
+                false,
+                100,
+                LinuxPosixTimerSpec {
+                    interval: 0,
+                    value: 50,
+                },
+            )
+            .unwrap();
+        assert_eq!(relative.snapshot(120, 20_000).value, 30);
+        assert!(!relative.expire(149, 30_000));
+        assert!(relative.expire(150, 30_000));
+        assert_eq!(relative.snapshot(150, 30_000).value, 0);
+
+        let mut absolute = LinuxPosixTimerCore::new(8, LinuxPosixClock::Realtime, 14);
+        absolute
+            .arm(
+                true,
+                100,
+                LinuxPosixTimerSpec {
+                    interval: 0,
+                    value: 1_050,
+                },
+            )
+            .unwrap();
+        assert!(!absolute.expire(200, 1_049));
+        assert!(absolute.expire(200, 1_050));
+    }
+
+    #[test]
+    fn posix_timer_disarm_query_and_periodic_reschedule_are_one_shot_per_scan() {
+        let mut timer = LinuxPosixTimerCore::new(9, LinuxPosixClock::Monotonic, 10);
+        timer
+            .arm(
+                false,
+                100,
+                LinuxPosixTimerSpec {
+                    interval: 20,
+                    value: 10,
+                },
+            )
+            .unwrap();
+        assert!(timer.expire(150, 900));
+        let snapshot = timer.snapshot(150, 900);
+        assert_eq!(snapshot.interval, 20);
+        assert_eq!(snapshot.value, 20);
+        assert!(!timer.expire(150, 900));
+
+        timer
+            .arm(
+                false,
+                150,
+                LinuxPosixTimerSpec {
+                    interval: 20,
+                    value: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            timer.snapshot(150, 900),
+            LinuxPosixTimerSpec::DISARMED
+        );
+    }
+
+    #[test]
     fn zircon_syscall_numbers_round_trip_from_raw_threshold() {
         fn from_raw(syscall_num: u64, threshold: u64) -> u32 {
             smros_zircon_syscall_from_raw_body!(syscall_num, threshold)
