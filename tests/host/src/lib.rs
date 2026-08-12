@@ -261,16 +261,10 @@ mod syscall_logic {
         assert!(!linux_posix_clock_settable(1));
         assert!(!linux_posix_clock_settable(usize::MAX));
 
-        assert_eq!(
-            linux_posix_timespec_nanoseconds(2, 3),
-            Some(2_000_000_003)
-        );
+        assert_eq!(linux_posix_timespec_nanoseconds(2, 3), Some(2_000_000_003));
         assert_eq!(linux_posix_timespec_nanoseconds(-1, 0), None);
         assert_eq!(linux_posix_timespec_nanoseconds(0, -1), None);
-        assert_eq!(
-            linux_posix_timespec_nanoseconds(0, 1_000_000_000),
-            None
-        );
+        assert_eq!(linux_posix_timespec_nanoseconds(0, 1_000_000_000), None);
 
         assert_eq!(
             linux_realtime_offset_for_set(3_000_000_000, 2, 0),
@@ -346,10 +340,7 @@ mod syscall_logic {
                 },
             )
             .unwrap();
-        assert_eq!(
-            timer.snapshot(150, 900),
-            LinuxPosixTimerSpec::DISARMED
-        );
+        assert_eq!(timer.snapshot(150, 900), LinuxPosixTimerSpec::DISARMED);
     }
 
     #[test]

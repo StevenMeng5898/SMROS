@@ -14,7 +14,9 @@ fn posix_clock_timer_clock_runtime_applies_checked_realtime_offsets() {
         .find("pub fn sys_clock_gettime(")
         .expect("clock_gettime implementation");
     let gettime = braced_body(&syscall[gettime_start..]);
-    let time_start = syscall.find("pub fn sys_time(").expect("time implementation");
+    let time_start = syscall
+        .find("pub fn sys_time(")
+        .expect("time implementation");
     let time = braced_body(&syscall[time_start..]);
     let gettimeofday_start = syscall
         .find("pub fn sys_gettimeofday(")
@@ -73,9 +75,7 @@ fn posix_clock_timer_syscalls_copy_validate_and_publish_owned_state() {
     assert!(syscall.contains("posix_timers: Vec<LinuxPosixTimerCore>"));
     assert!(timer_create.contains("LinuxPosixClock::from_id(clockid)"));
     assert!(timer_create.contains("linux_read_user_sigevent(sevp)?"));
-    assert!(
-        timer_create.contains("register_linux_timer(pid, handle.0, timer_id, clock, signal)")
-    );
+    assert!(timer_create.contains("register_linux_timer(pid, handle.0, timer_id, clock, signal)"));
     assert!(timer_settime.contains("linux_read_user_itimerspec(new_value)?"));
     assert!(timer_settime.contains("linux_posix_timespec_nanoseconds("));
     assert!(timer_settime.contains("timer.arm("));
@@ -144,13 +144,11 @@ fn posix_timer_ids_do_not_expose_negative_compatibility_handles() {
     );
 
     assert!(timer_create.contains("let timer_id = handle.0 & i32::MAX as u32"));
-    assert!(timer_create.contains(
-        "register_linux_timer(pid, handle.0, timer_id, clock, signal)"
-    ));
+    assert!(timer_create.contains("register_linux_timer(pid, handle.0, timer_id, clock, signal)"));
     assert!(timer_create.contains("linux_write_user_i32(timerid, timer_id as i32)"));
-    assert!(syscall.contains(
-        "fn linux_timer_handle(&self, pid: usize, timer_id: u32) -> Option<u32>"
-    ));
+    assert!(
+        syscall.contains("fn linux_timer_handle(&self, pid: usize, timer_id: u32) -> Option<u32>")
+    );
     assert!(timer_settime.contains("linux_timer_handle(pid, timerid as u32)"));
     assert!(!timer_settime.contains("compat::handle_known(HandleValue(timerid as u32))"));
 }
@@ -1732,9 +1730,7 @@ fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
     assert!(launcher.contains("RunElfStateCell"));
     assert!(launcher.contains("RunElfLifecycleState"));
     assert!(launcher.contains("RunElfActiveRequest"));
-    assert!(launcher.contains(
-        "RunElfActiveRequest<RunLaunchInputs, fxfs::FxfsPersistGuard>"
-    ));
+    assert!(launcher.contains("RunElfActiveRequest<RunLaunchInputs, fxfs::FxfsPersistGuard>"));
     assert!(launcher.contains("linux_process_memory::register_root"));
     assert!(launcher.contains("fn with_run_state"));
     assert!(!launcher.contains("static RUN_ACTIVE"));
@@ -3000,9 +2996,8 @@ fn aarch64_clone_child_installs_process_translation_root_before_el0() {
         .expect("end of clone startup layout");
     let clone_layout = &task[clone_layout_start..clone_layout_start + clone_layout_end];
     assert!(clone_layout.contains("pub root_paddr: u64"));
-    assert!(clone_layout.contains(
-        "assert!(core::mem::offset_of!(Aarch64CloneStart, root_paddr) == 0x330)"
-    ));
+    assert!(clone_layout
+        .contains("assert!(core::mem::offset_of!(Aarch64CloneStart, root_paddr) == 0x330)"));
 
     let reserve_start = task
         .find("pub(crate) fn reserve_clone(")
@@ -6207,9 +6202,7 @@ fn linux_fork_publishes_only_a_complete_child() {
             .find("pub fn sys_linux_timer_create(")
             .expect("POSIX timer create")..],
     );
-    assert!(
-        timer_create.contains("register_linux_timer(pid, handle.0, timer_id, clock, signal)")
-    );
+    assert!(timer_create.contains("register_linux_timer(pid, handle.0, timer_id, clock, signal)"));
     let timer_registration = &syscall[syscall
         .find("fn register_linux_timer(")
         .expect("process timer registration")..];
