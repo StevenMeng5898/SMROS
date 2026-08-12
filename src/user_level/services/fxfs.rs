@@ -600,19 +600,30 @@ impl FxfsState {
             self.persist_pending = true;
             return;
         }
+        let _ = self.force_persist();
+    }
+
+    fn force_persist(&mut self) -> Result<(), FxfsError> {
+        let pending = self.persist_pending;
         if !self.block_backed {
+            let err = FxfsError::StorageUnavailable;
+            self.persist_pending = pending;
             self.last_sync_ok = false;
-            return;
+            self.last_storage_error = Some(err);
+            return Err(err);
         }
-        self.persist_pending = false;
         match self.sync_to_block() {
             Ok(()) => {
+                self.persist_pending = false;
                 self.last_sync_ok = true;
                 self.last_storage_error = None;
+                Ok(())
             }
             Err(err) => {
+                self.persist_pending = pending;
                 self.last_sync_ok = false;
                 self.last_storage_error = Some(err);
+                Err(err)
             }
         }
     }
@@ -2053,8 +2064,12 @@ pub fn suspend_persist() -> FxfsPersistGuard {
     FxfsPersistGuard { active: true }
 }
 
+pub fn force_persist() -> Result<(), FxfsError> {
+    state().force_persist()
+}
+
 pub fn flush_persist() {
-    state().persist()
+    let _ = force_persist();
 }
 
 pub fn ensure_host_share() -> Result<(), FxfsError> {

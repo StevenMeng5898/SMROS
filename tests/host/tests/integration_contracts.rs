@@ -4655,6 +4655,53 @@ fn fxfs_bootstrap_provides_posix_shared_memory_directory() {
 }
 
 #[test]
+fn fxfs_forced_persist_bypasses_suspension_and_preserves_failed_pending_work() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS service");
+
+    let persist_start = fxfs
+        .find("fn persist(&mut self)")
+        .expect("ordinary persistence path");
+    let persist = braced_body(&fxfs[persist_start..]);
+    assert!(persist.contains("if self.persist_suspended > 0"));
+    assert!(persist.contains("self.persist_pending = true;"));
+    assert!(persist.contains("let _ = self.force_persist();"));
+
+    let force_start = fxfs
+        .find("fn force_persist(&mut self) -> Result<(), FxfsError>")
+        .expect("fallible forced persistence path");
+    let force = braced_body(&fxfs[force_start..]);
+    let pending = force
+        .find("let pending = self.persist_pending;")
+        .expect("pending state snapshot");
+    let sync = force
+        .find("self.sync_to_block()")
+        .expect("full image commit");
+    let clear = force
+        .find("self.persist_pending = false;")
+        .expect("successful commit clears pending work");
+    assert!(pending < sync && sync < clear);
+    assert!(force.contains("self.persist_pending = pending;"));
+    assert!(force.contains("self.last_sync_ok = true;"));
+    assert!(force.contains("self.last_sync_ok = false;"));
+    assert!(force.contains("self.last_storage_error = Some(err);"));
+    assert!(force.contains("Err(err)"));
+
+    let public_force_start = fxfs
+        .find("pub fn force_persist() -> Result<(), FxfsError>")
+        .expect("public forced persistence API");
+    let public_force = braced_body(&fxfs[public_force_start..]);
+    assert!(public_force.contains("state().force_persist()"));
+
+    let flush_start = fxfs
+        .find("pub fn flush_persist()")
+        .expect("best-effort compatibility flush");
+    let flush = braced_body(&fxfs[flush_start..]);
+    assert!(flush.contains("let _ = force_persist();"));
+}
+
+#[test]
 fn aarch64_directory_open_flags_match_staged_glibc() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
