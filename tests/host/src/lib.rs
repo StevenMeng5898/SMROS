@@ -627,6 +627,21 @@ mod syscall_logic {
     ));
 
     #[test]
+    fn linux_fcntl_recognizes_record_lock_commands() {
+        for command in 0usize..=7 {
+            assert!(smros_linux_fcntl_cmd_supported_body!(
+                command, 0, 1, 2, 3, 4, 5, 6, 7, 1030
+            ));
+        }
+        assert!(smros_linux_fcntl_cmd_supported_body!(
+            1030usize, 0, 1, 2, 3, 4, 5, 6, 7, 1030
+        ));
+        assert!(!smros_linux_fcntl_cmd_supported_body!(
+            8usize, 0, 1, 2, 3, 4, 5, 6, 7, 1030
+        ));
+    }
+
+    #[test]
     fn clock_nanosleep_accepts_only_relative_or_timer_abstime_flags() {
         const TIMER_ABSTIME: usize = 1;
         assert!(smros_linux_clock_nanosleep_flags_valid_body!(

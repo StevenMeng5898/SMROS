@@ -131,6 +131,7 @@ pub enum SysError {
     EIO = 5,
     ENXIO = 6,
     E2BIG = 7,
+    EBADF = 9,
     ECHILD = 10,
     EAGAIN = 11,
     ENOMEM = 12,
@@ -944,6 +945,22 @@ struct LinuxCapUserData {
     inheritable: u32,
 }
 
+const LINUX_FLOCK_BYTES: usize = 32;
+const LINUX_FLOCK_TYPE_OFFSET: usize = 0;
+const LINUX_FLOCK_WHENCE_OFFSET: usize = 2;
+const LINUX_FLOCK_START_OFFSET: usize = 8;
+const LINUX_FLOCK_LEN_OFFSET: usize = 16;
+const LINUX_FLOCK_PID_OFFSET: usize = 24;
+
+#[derive(Clone, Copy)]
+struct LinuxFlock {
+    l_type: i16,
+    l_whence: i16,
+    l_start: i64,
+    l_len: i64,
+    l_pid: i32,
+}
+
 fn linux_put_wire_field(bytes: &mut [u8], offset: usize, field: &[u8]) -> Result<(), SysError> {
     let end = offset.checked_add(field.len()).ok_or(SysError::EFAULT)?;
     let destination = bytes.get_mut(offset..end).ok_or(SysError::EFAULT)?;
@@ -957,6 +974,48 @@ fn linux_wire_field<const N: usize>(bytes: &[u8], offset: usize) -> Result<[u8; 
     let mut field = [0u8; N];
     field.copy_from_slice(source);
     Ok(field)
+}
+
+fn linux_read_flock(address: usize) -> Result<LinuxFlock, SysError> {
+    let mut bytes = [0u8; LINUX_FLOCK_BYTES];
+    linux_copy_from_user(address, &mut bytes)?;
+    Ok(LinuxFlock {
+        l_type: i16::from_ne_bytes(linux_wire_field(&bytes, LINUX_FLOCK_TYPE_OFFSET)?),
+        l_whence: i16::from_ne_bytes(linux_wire_field(&bytes, LINUX_FLOCK_WHENCE_OFFSET)?),
+        l_start: i64::from_ne_bytes(linux_wire_field(&bytes, LINUX_FLOCK_START_OFFSET)?),
+        l_len: i64::from_ne_bytes(linux_wire_field(&bytes, LINUX_FLOCK_LEN_OFFSET)?),
+        l_pid: i32::from_ne_bytes(linux_wire_field(&bytes, LINUX_FLOCK_PID_OFFSET)?),
+    })
+}
+
+fn linux_write_flock(address: usize, flock: LinuxFlock) -> Result<(), SysError> {
+    let mut bytes = [0u8; LINUX_FLOCK_BYTES];
+    linux_put_wire_field(
+        &mut bytes,
+        LINUX_FLOCK_TYPE_OFFSET,
+        &flock.l_type.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        LINUX_FLOCK_WHENCE_OFFSET,
+        &flock.l_whence.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        LINUX_FLOCK_START_OFFSET,
+        &flock.l_start.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        LINUX_FLOCK_LEN_OFFSET,
+        &flock.l_len.to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        LINUX_FLOCK_PID_OFFSET,
+        &flock.l_pid.to_ne_bytes(),
+    )?;
+    linux_copy_to_user(address, &bytes)
 }
 
 fn linux_kernel_buffer(len: usize) -> Result<Vec<u8>, SysError> {
@@ -6391,12 +6450,124 @@ pub fn sys_flock(fd: usize, _operation: usize) -> SysResult {
     }
 }
 
+fn linux_fcntl_record_lock(fd: usize, cmd: usize, arg: usize) -> SysResult {
+    const F_GETLK: usize = 5;
+    const F_SETLK: usize = 6;
+    const F_SETLKW: usize = 7;
+    const F_RDLCK: i16 = 0;
+    const F_WRLCK: i16 = 1;
+    const F_UNLCK: i16 = 2;
+    const SEEK_SET: i16 = 0;
+
+    let (readable, writable, file_id, offset, file_size) = {
+        let state = memory_state();
+        let record = state.get_fd(fd).ok_or(SysError::EBADF)?;
+        if record.object_type != ObjectType::LinuxFile {
+            return Err(SysError::EINVAL);
+        }
+        let file = state
+            .linux_fxfs_file(record.handle)
+            .ok_or(SysError::EINVAL)?;
+        let file_size = fxfs::cursor_attrs(file.cursor)
+            .map_err(linux_fxfs_error)?
+            .size;
+        (
+            record.readable,
+            record.writable,
+            file.cursor.object_id(),
+            record.offset,
+            file_size,
+        )
+    };
+    let owner = linux_process::current_pid()?;
+
+    let mut flock = linux_read_flock(arg)?;
+    let kind = match flock.l_type {
+        F_RDLCK => Some(linux_record_lock::LinuxRecordLockKind::Read),
+        F_WRLCK => Some(linux_record_lock::LinuxRecordLockKind::Write),
+        F_UNLCK if cmd != F_GETLK => None,
+        _ => return Err(SysError::EINVAL),
+    };
+
+    if cmd != F_GETLK {
+        match kind {
+            Some(linux_record_lock::LinuxRecordLockKind::Read) if !readable => {
+                return Err(SysError::EBADF);
+            }
+            Some(linux_record_lock::LinuxRecordLockKind::Write) if !writable => {
+                return Err(SysError::EBADF);
+            }
+            _ => {}
+        }
+    }
+
+    let cursor_offset = u64::try_from(offset).map_err(|_| SysError::EOVERFLOW)?;
+    let file_size = u64::try_from(file_size).map_err(|_| SysError::EOVERFLOW)?;
+    let range = linux_record_lock::normalize_linux_record_lock_range(
+        flock.l_whence,
+        flock.l_start,
+        flock.l_len,
+        cursor_offset,
+        file_size,
+    )
+    .map_err(|error| match error {
+        linux_record_lock::LinuxRecordLockRangeError::Invalid => SysError::EINVAL,
+        linux_record_lock::LinuxRecordLockRangeError::Overflow => SysError::EOVERFLOW,
+    })?;
+    if cmd == F_GETLK {
+        let kind = kind.expect("F_GETLK accepts only read and write locks");
+        if let Some(conflict) = linux_record_lock::first_conflict(file_id, owner, kind, range) {
+            flock.l_type = match conflict.kind {
+                linux_record_lock::LinuxRecordLockKind::Read => F_RDLCK,
+                linux_record_lock::LinuxRecordLockKind::Write => F_WRLCK,
+            };
+            flock.l_whence = SEEK_SET;
+            flock.l_start = i64::try_from(conflict.range.start).map_err(|_| SysError::EOVERFLOW)?;
+            flock.l_len = if conflict.range.end == linux_record_lock::LINUX_RECORD_LOCK_END_OF_FILE
+            {
+                0
+            } else {
+                i64::try_from(conflict.range.end - conflict.range.start)
+                    .map_err(|_| SysError::EOVERFLOW)?
+            };
+            flock.l_pid = i32::try_from(conflict.owner).map_err(|_| SysError::EOVERFLOW)?;
+        } else {
+            flock.l_type = F_UNLCK;
+        }
+        linux_write_flock(arg, flock)?;
+        return Ok(0);
+    }
+
+    let map_nonblocking_error = |error| match error {
+        linux_record_lock::LinuxRecordLockRuntimeError::Conflict => SysError::EAGAIN,
+        linux_record_lock::LinuxRecordLockRuntimeError::Capacity => SysError::ENOLCK,
+    };
+    if cmd == F_SETLK || kind.is_none() {
+        linux_record_lock::set_nonblocking(file_id, owner, kind, range)
+            .map_err(map_nonblocking_error)?;
+        return Ok(0);
+    }
+    if cmd == F_SETLKW {
+        linux_record_lock::set_blocking(
+            file_id,
+            owner,
+            kind.expect("F_SETLKW unlocks use the nonblocking path"),
+            range,
+        )?;
+        return Ok(0);
+    }
+    Err(SysError::EINVAL)
+}
+
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult {
     const F_DUPFD: usize = 0;
     const F_GETFD: usize = 1;
     const F_SETFD: usize = 2;
     const F_GETFL: usize = 3;
     const F_SETFL: usize = 4;
+    const F_GETLK: usize = 5;
+    const F_SETLK: usize = 6;
+    const F_SETLKW: usize = 7;
     const F_DUPFD_CLOEXEC: usize = 1030;
 
     if !syscall_logic::linux_fcntl_cmd_supported(
@@ -6406,12 +6577,16 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult {
         F_SETFD,
         F_GETFL,
         F_SETFL,
+        F_GETLK,
+        F_SETLK,
+        F_SETLKW,
         F_DUPFD_CLOEXEC,
     ) {
         return Err(SysError::EINVAL);
     }
 
     match cmd {
+        F_GETLK | F_SETLK | F_SETLKW => linux_fcntl_record_lock(fd, cmd, arg),
         F_DUPFD | F_DUPFD_CLOEXEC => {
             let record = memory_state().get_fd(fd).ok_or(SysError::ENODEV)?;
             let duplicated =

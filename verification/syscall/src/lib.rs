@@ -501,6 +501,9 @@ spec fn linux_fcntl_cmd_supported_spec(
     setfd: int,
     getfl: int,
     setfl: int,
+    getlk: int,
+    setlk: int,
+    setlkw: int,
     dupfd_cloexec: int,
 ) -> bool {
     cmd == dupfd
@@ -508,6 +511,9 @@ spec fn linux_fcntl_cmd_supported_spec(
         || cmd == setfd
         || cmd == getfl
         || cmd == setfl
+        || cmd == getlk
+        || cmd == setlk
+        || cmd == setlkw
         || cmd == dupfd_cloexec
 }
 
@@ -1035,6 +1041,9 @@ fn linux_fcntl_cmd_supported(
     setfd: usize,
     getfl: usize,
     setfl: usize,
+    getlk: usize,
+    setlk: usize,
+    setlkw: usize,
     dupfd_cloexec: usize,
 ) -> (out: bool)
     ensures
@@ -1045,10 +1054,15 @@ fn linux_fcntl_cmd_supported(
             setfd as int,
             getfl as int,
             setfl as int,
+            getlk as int,
+            setlk as int,
+            setlkw as int,
             dupfd_cloexec as int,
         ),
 {
-    smros_linux_fcntl_cmd_supported_body!(cmd, dupfd, getfd, setfd, getfl, setfl, dupfd_cloexec)
+    smros_linux_fcntl_cmd_supported_body!(
+        cmd, dupfd, getfd, setfd, getfl, setfl, getlk, setlk, setlkw, dupfd_cloexec
+    )
 }
 
 fn linux_fcntl_flags_valid(flags: usize, allowed_mask: usize) -> (out: bool)
@@ -1982,8 +1996,8 @@ fn syscall_linux_file_dir_fd_poll_stat_exec_smoke() {
     let pipe_flags_bad = linux_pipe_flags_valid(LINUX_O_APPEND, LINUX_PIPE_ALLOWED_FLAGS);
     let dup_args_ok = linux_dup3_args_valid(3, 4);
     let dup_args_bad = linux_dup3_args_valid(3, 3);
-    let fcntl_cmd_ok = linux_fcntl_cmd_supported(4, 0, 1, 2, 3, 4, 1030);
-    let fcntl_cmd_bad = linux_fcntl_cmd_supported(99, 0, 1, 2, 3, 4, 1030);
+    let fcntl_cmd_ok = linux_fcntl_cmd_supported(7, 0, 1, 2, 3, 4, 5, 6, 7, 1030);
+    let fcntl_cmd_bad = linux_fcntl_cmd_supported(99, 0, 1, 2, 3, 4, 5, 6, 7, 1030);
     let fcntl_flags_ok =
         linux_fcntl_flags_valid(LINUX_O_NONBLOCK, LINUX_FCNTL_STATUS_ALLOWED_FLAGS);
     let fcntl_flags_bad =
@@ -2045,8 +2059,8 @@ fn syscall_linux_file_dir_fd_poll_stat_exec_smoke() {
     assert(!pipe_flags_bad);
     assert(dup_args_ok == linux_dup3_args_valid_spec(3, 4));
     assert(dup_args_bad == linux_dup3_args_valid_spec(3, 3));
-    assert(fcntl_cmd_ok == linux_fcntl_cmd_supported_spec(4, 0, 1, 2, 3, 4, 1030));
-    assert(fcntl_cmd_bad == linux_fcntl_cmd_supported_spec(99, 0, 1, 2, 3, 4, 1030));
+    assert(fcntl_cmd_ok == linux_fcntl_cmd_supported_spec(7, 0, 1, 2, 3, 4, 5, 6, 7, 1030));
+    assert(fcntl_cmd_bad == linux_fcntl_cmd_supported_spec(99, 0, 1, 2, 3, 4, 5, 6, 7, 1030));
     assert(linux_usize_options_within_mask_spec(
         LINUX_O_NONBLOCK,
         LINUX_FCNTL_STATUS_ALLOWED_FLAGS,

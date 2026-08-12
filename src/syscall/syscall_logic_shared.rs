@@ -403,12 +403,15 @@ macro_rules! smros_linux_dup3_args_valid_body {
 }
 
 macro_rules! smros_linux_fcntl_cmd_supported_body {
-    ($cmd:expr, $dupfd:expr, $getfd:expr, $setfd:expr, $getfl:expr, $setfl:expr, $dupfd_cloexec:expr) => {{
+    ($cmd:expr, $dupfd:expr, $getfd:expr, $setfd:expr, $getfl:expr, $setfl:expr, $getlk:expr, $setlk:expr, $setlkw:expr, $dupfd_cloexec:expr) => {{
         $cmd == $dupfd
             || $cmd == $getfd
             || $cmd == $setfd
             || $cmd == $getfl
             || $cmd == $setfl
+            || $cmd == $getlk
+            || $cmd == $setlk
+            || $cmd == $setlkw
             || $cmd == $dupfd_cloexec
     }};
 }

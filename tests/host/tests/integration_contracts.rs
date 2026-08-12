@@ -18,6 +18,110 @@ fn fxfs_cursor_identity_drives_record_lock_size_lookup() {
 }
 
 #[test]
+fn linux_fcntl_marshals_aarch64_record_locks() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    for declaration in [
+        "const LINUX_FLOCK_BYTES: usize = 32;",
+        "const LINUX_FLOCK_TYPE_OFFSET: usize = 0;",
+        "const LINUX_FLOCK_WHENCE_OFFSET: usize = 2;",
+        "const LINUX_FLOCK_START_OFFSET: usize = 8;",
+        "const LINUX_FLOCK_LEN_OFFSET: usize = 16;",
+        "const LINUX_FLOCK_PID_OFFSET: usize = 24;",
+    ] {
+        assert!(syscall.contains(declaration), "missing {declaration}");
+    }
+
+    let read_start = syscall
+        .find("fn linux_read_flock(")
+        .expect("AArch64 flock copy-in helper");
+    let read = braced_body(&syscall[read_start..]);
+    assert!(read.contains("linux_copy_from_user("));
+    assert!(read.contains("linux_wire_field"));
+    assert!(!read.contains("as *const LinuxFlock"));
+
+    let write_start = syscall
+        .find("fn linux_write_flock(")
+        .expect("AArch64 flock copy-out helper");
+    let write = braced_body(&syscall[write_start..]);
+    assert!(write.contains("linux_put_wire_field"));
+    assert!(write.contains("linux_copy_to_user("));
+    assert!(!write.contains("as *mut LinuxFlock"));
+}
+
+#[test]
+fn linux_fcntl_routes_process_owned_record_locks_without_state_locking() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let fcntl_start = syscall.find("pub fn sys_fcntl(").expect("fcntl syscall");
+    let fcntl = braced_body(&syscall[fcntl_start..]);
+    assert!(fcntl.contains("F_GETLK | F_SETLK | F_SETLKW => linux_fcntl_record_lock(fd, cmd, arg)"));
+    let route_start = syscall
+        .find("fn linux_fcntl_record_lock(")
+        .expect("record-lock fcntl route");
+    let route = braced_body(&syscall[route_start..]);
+
+    for token in [
+        "F_GETLK",
+        "F_SETLK",
+        "F_SETLKW",
+        "ObjectType::LinuxFile",
+        "linux_read_flock(arg)",
+        "linux_process::current_pid()",
+        "file.cursor.object_id()",
+        "fxfs::cursor_attrs(file.cursor)",
+        "normalize_linux_record_lock_range(",
+        "LinuxRecordLockRangeError::Invalid => SysError::EINVAL",
+        "LinuxRecordLockRangeError::Overflow => SysError::EOVERFLOW",
+        "linux_record_lock::first_conflict(",
+        "linux_record_lock::set_nonblocking(",
+        "linux_record_lock::set_blocking(",
+        "LinuxRecordLockRuntimeError::Conflict => SysError::EAGAIN",
+        "LinuxRecordLockRuntimeError::Capacity => SysError::ENOLCK",
+        "SysError::EBADF",
+        "linux_write_flock(arg, flock)",
+    ] {
+        assert!(route.contains(token), "missing fcntl routing token {token}");
+    }
+
+    let snapshot_start = route
+        .find("let (readable, writable, file_id, offset, file_size) = {")
+        .expect("bounded descriptor snapshot");
+    let snapshot = braced_body(&route[snapshot_start..]);
+    assert!(snapshot.contains("memory_state()"));
+    let blocking = route
+        .find("linux_record_lock::set_blocking(")
+        .expect("blocking record-lock route");
+    let last_state_borrow = route
+        .rfind("memory_state()")
+        .expect("descriptor state borrow");
+    assert!(last_state_borrow < blocking);
+    assert!(!route[blocking..].contains("memory_state()"));
+    let descriptor_lookup = route
+        .find("state.get_fd(fd).ok_or(SysError::EBADF)")
+        .expect("record-lock descriptor validation");
+    let owner_lookup = route
+        .find("linux_process::current_pid()")
+        .expect("process record-lock ownership");
+    let flock_copy = route
+        .find("linux_read_flock(arg)")
+        .expect("record-lock flock copy-in");
+    let access_check = route
+        .find("if cmd != F_GETLK")
+        .expect("set-lock access-mode validation");
+    let normalization = route
+        .find("normalize_linux_record_lock_range(")
+        .expect("record-lock range normalization");
+    assert!(descriptor_lookup < owner_lookup && owner_lookup < flock_copy);
+    assert!(flock_copy < access_check && access_check < normalization);
+    assert!(!route.contains("fork/11-1.c"));
+    assert!(!route.contains("timeout"));
+}
+
+#[test]
 fn linux_record_lock_runtime_blocks_without_missed_wakeups() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let runtime = std::fs::read_to_string(repository.join("src/syscall/linux_record_lock.rs"))

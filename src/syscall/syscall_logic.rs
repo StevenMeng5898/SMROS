@@ -178,9 +178,23 @@ pub(crate) fn linux_fcntl_cmd_supported(
     setfd: usize,
     getfl: usize,
     setfl: usize,
+    getlk: usize,
+    setlk: usize,
+    setlkw: usize,
     dupfd_cloexec: usize,
 ) -> bool {
-    smros_linux_fcntl_cmd_supported_body!(cmd, dupfd, getfd, setfd, getfl, setfl, dupfd_cloexec)
+    smros_linux_fcntl_cmd_supported_body!(
+        cmd,
+        dupfd,
+        getfd,
+        setfd,
+        getfl,
+        setfl,
+        getlk,
+        setlk,
+        setlkw,
+        dupfd_cloexec
+    )
 }
 
 pub(crate) fn linux_fcntl_flags_valid(flags: usize, allowed_mask: usize) -> bool {
