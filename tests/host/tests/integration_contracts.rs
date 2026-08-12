@@ -1923,8 +1923,13 @@ fn linux_process_reset_reclaims_transient_state_without_reinitializing_global_st
         .find("pub fn sys_close(fd: usize)")
         .expect("Linux close");
     let close = braced_body(&syscall[close_start..]);
+    let close_helper_start = syscall
+        .find("fn close_linux_fd_for_current_process(fd: usize)")
+        .expect("central descriptor close helper");
+    let close_helper = braced_body(&syscall[close_helper_start..]);
+    assert!(close_helper.contains("remove_fd_entry(fd)"));
     let tracked_close = close
-        .find("remove_fd_entry(fd)")
+        .find("close_linux_fd_for_current_process(fd)")
         .expect("tracked descriptor close");
     let stdio_noop = close.find("fd <= 2").expect("untracked stdio no-op");
     assert!(
@@ -3339,7 +3344,7 @@ fn aarch64_clone_child_installs_process_translation_root_before_el0() {
         .find(".reserve_child(parent.tgid, scheduler_id.0)")
         .expect("Linux task reservation");
     let scheduler_context = reserve
-        .find("thread.context.set_linux_process_start(")
+        .find(".set_linux_process_start(")
         .expect("suspended scheduler context configuration");
     let process_binding = reserve
         .find("bind_thread_process(scheduler_id, parent.tgid)")
@@ -6154,8 +6159,14 @@ fn linux_resource_clone_inherits_open_descriptions_and_shared_pages() {
             .find("pub fn sys_close(fd: usize)")
             .expect("descriptor close")..],
     );
-    assert!(close.contains("release_open_description"));
-    assert!(close.contains("final_reference"));
+    assert!(close.contains("close_linux_fd_for_current_process(fd)"));
+    let close_helper = braced_body(
+        &syscall[syscall
+            .find("fn close_linux_fd_for_current_process(fd: usize)")
+            .expect("central descriptor close helper")..],
+    );
+    assert!(close_helper.contains("release_open_description"));
+    assert!(close_helper.contains("final_reference"));
 
     let shared_record = braced_body(
         &syscall[syscall

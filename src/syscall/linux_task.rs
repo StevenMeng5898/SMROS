@@ -903,11 +903,9 @@ mod aarch64_clone {
             let configured = scheduler::scheduler()
                 .get_thread_mut(scheduler_id)
                 .map(|thread| {
-                    thread.context.set_linux_process_start(
-                        request.user_sp as u64,
-                        tls,
-                        root_paddr,
-                    )
+                    thread
+                        .context
+                        .set_linux_process_start(request.user_sp as u64, tls, root_paddr)
                 })
                 .unwrap_or(false)
                 && scheduler::scheduler().bind_thread_process(scheduler_id, parent.tgid);

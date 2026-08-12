@@ -105,10 +105,7 @@ pub(crate) fn linux_posix_clock_settable(clock_id: usize) -> bool {
     clock_id == 0
 }
 
-pub(crate) fn linux_posix_timespec_nanoseconds(
-    seconds: i64,
-    nanoseconds: i64,
-) -> Option<u64> {
+pub(crate) fn linux_posix_timespec_nanoseconds(seconds: i64, nanoseconds: i64) -> Option<u64> {
     if seconds < 0 || !(0..LINUX_POSIX_NANOS_PER_SECOND as i64).contains(&nanoseconds) {
         return None;
     }
@@ -214,11 +211,7 @@ impl LinuxPosixTimerCore {
         Some(())
     }
 
-    pub(crate) fn snapshot(
-        &self,
-        now_monotonic: u64,
-        now_realtime: u64,
-    ) -> LinuxPosixTimerSpec {
+    pub(crate) fn snapshot(&self, now_monotonic: u64, now_realtime: u64) -> LinuxPosixTimerSpec {
         if self.deadline.is_none() {
             return LinuxPosixTimerSpec::DISARMED;
         }

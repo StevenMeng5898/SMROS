@@ -108,6 +108,8 @@ unsupported case.
 - `src/syscall/linux_process_logic_shared.rs`
 - `src/syscall/linux_process_memory.rs`
 - `src/syscall/linux_process_memory_logic_shared.rs`
+- `src/syscall/linux_record_lock.rs`
+- `src/syscall/linux_record_lock_logic_shared.rs`
 - `src/syscall/linux_runtime_lock_shared.rs`
 - `src/syscall/linux_syscall_context.rs`
 - `src/syscall/linux_syscall_context_logic_shared.rs`
