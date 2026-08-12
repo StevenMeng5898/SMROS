@@ -1732,7 +1732,9 @@ fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
     assert!(launcher.contains("RunElfStateCell"));
     assert!(launcher.contains("RunElfLifecycleState"));
     assert!(launcher.contains("RunElfActiveRequest"));
-    assert!(launcher.contains("RunElfActiveRequest<RunLaunchInputs, ()>"));
+    assert!(launcher.contains(
+        "RunElfActiveRequest<RunLaunchInputs, fxfs::FxfsPersistGuard>"
+    ));
     assert!(launcher.contains("linux_process_memory::register_root"));
     assert!(launcher.contains("fn with_run_state"));
     assert!(!launcher.contains("static RUN_ACTIVE"));
@@ -4760,6 +4762,44 @@ fn run_elf_batches_fxfs_persistence_for_the_exact_launch_lifecycle() {
         .find("dispatch_outcome(request.observer, outcome)")
         .expect("observer dispatch");
     assert!(parts < release && release < end_tick && end_tick < dispatch);
+}
+
+#[test]
+fn linux_sync_syscalls_force_fxfs_persistence() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    let sync_start = syscall.find("pub fn sys_sync()").expect("sync syscall");
+    let sync = braced_body(&syscall[sync_start..]);
+    assert!(sync.contains("let _ = fxfs::force_persist();"));
+    assert!(sync.contains("Ok(0)"));
+
+    let fsync_start = syscall
+        .find("pub fn sys_fsync(fd: usize)")
+        .expect("fsync syscall");
+    let fsync = braced_body(&syscall[fsync_start..]);
+    let validate = fsync
+        .find("if !linux_fd_is_file_or_pipe(fd)")
+        .expect("descriptor validation");
+    let force = fsync
+        .find("fxfs::force_persist()")
+        .expect("forced FxFS commit");
+    assert!(validate < force);
+    assert!(fsync.contains("map_err(|_| SysError::EIO)?"));
+    assert!(fsync.contains("Err(SysError::ENODEV)"));
+
+    let fdatasync_start = syscall
+        .find("pub fn sys_fdatasync(fd: usize)")
+        .expect("fdatasync syscall");
+    let fdatasync = braced_body(&syscall[fdatasync_start..]);
+    assert!(fdatasync.contains("sys_fsync(fd)"));
+
+    let sync_range_start = syscall
+        .find("pub fn sys_sync_file_range(")
+        .expect("sync_file_range syscall");
+    let sync_range = braced_body(&syscall[sync_range_start..]);
+    assert!(sync_range.contains("sys_fsync(fd)"));
 }
 
 #[test]

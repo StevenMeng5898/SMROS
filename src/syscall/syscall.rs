@@ -6294,15 +6294,16 @@ pub fn sys_fchownat(
 }
 
 pub fn sys_sync() -> SysResult {
+    let _ = fxfs::force_persist();
     Ok(0)
 }
 
 pub fn sys_fsync(fd: usize) -> SysResult {
-    if linux_fd_is_file_or_pipe(fd) {
-        Ok(0)
-    } else {
-        Err(SysError::ENODEV)
+    if !linux_fd_is_file_or_pipe(fd) {
+        return Err(SysError::ENODEV);
     }
+    fxfs::force_persist().map_err(|_| SysError::EIO)?;
+    Ok(0)
 }
 
 pub fn sys_fdatasync(fd: usize) -> SysResult {
