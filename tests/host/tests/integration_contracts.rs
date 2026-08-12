@@ -1,6 +1,23 @@
 #![allow(unused_comparisons, unused_macros)]
 
 #[test]
+fn fxfs_cursor_identity_drives_record_lock_size_lookup() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS implementation");
+
+    assert!(fxfs.contains("pub fn object_id(self) -> u64"));
+    assert!(fxfs.contains("pub fn cursor_attrs(cursor: FxfsCursor)"));
+
+    let cursor_attrs_start = fxfs
+        .find("fn cursor_attrs(&mut self, cursor: FxfsCursor)")
+        .expect("FxFS cursor attribute lookup");
+    let cursor_attrs = braced_body(&fxfs[cursor_attrs_start..]);
+    assert!(cursor_attrs.contains("cursor.object_id"));
+    assert!(!cursor_attrs.contains("resolve_path("));
+}
+
+#[test]
 fn linux_record_lock_runtime_blocks_without_missed_wakeups() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let runtime = std::fs::read_to_string(repository.join("src/syscall/linux_record_lock.rs"))

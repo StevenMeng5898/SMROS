@@ -1871,6 +1871,15 @@ impl FxfsState {
         Ok((self.objects[index].object_id, self.objects[index].attrs))
     }
 
+    fn cursor_attrs(&mut self, cursor: FxfsCursor) -> Result<FxfsAttributes, FxfsError> {
+        let index = self
+            .objects
+            .iter()
+            .position(|object| object.object_id == cursor.object_id)
+            .ok_or(FxfsError::NotFound)?;
+        Ok(self.objects[index].attrs)
+    }
+
     fn attrs(&mut self, path: &str) -> Result<FxfsAttributes, FxfsError> {
         self.attrs_with_object_id(path).map(|(_, attrs)| attrs)
     }
@@ -2114,6 +2123,10 @@ pub fn attrs(path: &str) -> Result<FxfsAttributes, FxfsError> {
 
 pub fn attrs_with_object_id(path: &str) -> Result<(u64, FxfsAttributes), FxfsError> {
     state().attrs_with_object_id(path)
+}
+
+pub fn cursor_attrs(cursor: FxfsCursor) -> Result<FxfsAttributes, FxfsError> {
+    state().cursor_attrs(cursor)
 }
 
 pub fn set_attrs(path: &str, mode: u32, uid: u32, gid: u32) -> Result<FxfsAttributes, FxfsError> {
