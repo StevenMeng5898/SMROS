@@ -981,6 +981,63 @@ class SharedModelTests(unittest.TestCase):
 
 
 class RepositoryPatchTests(unittest.TestCase):
+    def test_fork_11_patch_ports_ltp_record_lock_assertion_without_weakening(
+        self,
+    ) -> None:
+        patch_root = REPOSITORY_ROOT / "third_party" / "posixtest" / "patches"
+        entries = [
+            line.strip()
+            for line in (patch_root / "series").read_text(encoding="ascii").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        name = "replace-defective-fork-11-record-lock-test.patch"
+        self.assertEqual(entries.count(name), 1)
+        self.assertEqual(entries[-1], name)
+
+        patch = (patch_root / name).read_text(encoding="utf-8")
+        self.assertIn("conformance/interfaces/fork/11-1.c", patch)
+        removed_lines = [
+            line[1:].strip()
+            for line in patch.splitlines()
+            if line.startswith("-") and not line.startswith("---")
+        ]
+        for removed in (
+            "flockfile( stdout );",
+            "ret = ftrylockfile( stdout );",
+            '#include "testfrmw.c"',
+        ):
+            self.assertIn(removed, removed_lines)
+        for retained in (
+            "fcntl(fd, F_GETLK, &fl)",
+            "fcntl(fd, F_SETLK, &fl)",
+            "errno == EACCES || errno == EAGAIN",
+            ".l_start = 0",
+            ".l_len = 100",
+            ".l_start = 1",
+            ".l_len = 99",
+            "child_pid = fork()",
+            "waitpid(child_pid, &child_stat, 0)",
+            "result = WEXITSTATUS(child_stat)",
+        ):
+            self.assertIn(retained, patch)
+        self.assertNotIn("PTS_ATTRIBUTE_UNUSED", patch)
+        self.assertNotIn("timeout_ms", patch)
+        self.assertNotIn("SMROS", patch)
+        unconditional_pass = [
+            line
+            for line in patch.splitlines()
+            if line.startswith("+") and "return PTS_PASS;" in line
+        ]
+        self.assertEqual(len(unconditional_pass), 1)
+        self.assertIn("errno == EACCES || errno == EAGAIN", patch)
+
+        readme = (patch_root.parent / "README.md").read_text(encoding="utf-8")
+        self.assertIn("0b69550e055b5385822f001e2a27fedfbef31816", readme)
+        self.assertIn(
+            "fcf9b794dd054586f65625ee6dd9a5daee61b98c1a43887de57e8c230a7d1626",
+            readme,
+        )
+
     def test_aio_patch_accepts_newer_option_versions_without_weakening_tests(
         self,
     ) -> None:
