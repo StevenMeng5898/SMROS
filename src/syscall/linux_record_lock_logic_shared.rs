@@ -217,6 +217,7 @@ impl<const N: usize> LinuxRecordLockTable<N> {
         self.retain(|record| record.owner != owner);
     }
 
+    #[cfg(test)]
     pub(crate) const fn snapshot(&self) -> [Option<LinuxRecordLock>; N] {
         self.records
     }
@@ -519,6 +520,7 @@ impl<const L: usize, const W: usize> LinuxRecordLockState<L, W> {
         slot.take().map(|waiter| waiter.outcome)
     }
 
+    #[cfg(test)]
     pub(crate) const fn waiter_snapshot(&self) -> [Option<LinuxRecordLockWaiter>; W] {
         self.waiters
     }

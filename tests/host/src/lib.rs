@@ -488,6 +488,73 @@ mod linux_record_lock_logic {
     }
 
     #[test]
+    fn record_lock_duplicate_close_is_idempotent_and_file_scoped() {
+        let mut locks = LinuxRecordLockTable::<4>::new();
+        locks
+            .set(7, 100, LinuxRecordLockKind::Write, range(0, 100))
+            .unwrap();
+        locks
+            .set(8, 100, LinuxRecordLockKind::Write, range(0, 100))
+            .unwrap();
+
+        locks.release_owner_file(100, 7);
+        locks.release_owner_file(100, 7);
+
+        assert!(locks
+            .first_conflict(7, 200, LinuxRecordLockKind::Write, range(1, 100))
+            .is_none());
+        assert!(locks
+            .first_conflict(8, 200, LinuxRecordLockKind::Write, range(1, 100))
+            .is_some());
+    }
+
+    #[test]
+    fn record_lock_child_exit_and_fork_rollback_preserve_parent_ownership() {
+        let mut locks = LinuxRecordLockTable::<4>::new();
+        locks
+            .set(7, 100, LinuxRecordLockKind::Write, range(0, 100))
+            .unwrap();
+
+        locks.release_owner(200);
+        locks.release_owner(200);
+
+        assert_eq!(
+            locks
+                .first_conflict(7, 200, LinuxRecordLockKind::Write, range(1, 100))
+                .map(|lock| lock.owner),
+            Some(100)
+        );
+        assert!(!locks
+            .snapshot()
+            .iter()
+            .flatten()
+            .any(|lock| lock.owner == 200));
+    }
+
+    #[test]
+    fn record_lock_parent_exit_wakes_waiting_child() {
+        let mut state = LinuxRecordLockState::<4, 2>::new();
+        state
+            .locks
+            .set(7, 100, LinuxRecordLockKind::Write, range(0, 100))
+            .unwrap();
+        state
+            .push(LinuxRecordLockWaiter::new(
+                7,
+                200,
+                LinuxRecordLockKind::Write,
+                range(1, 100),
+                20,
+                30,
+            ))
+            .unwrap();
+
+        assert_eq!(state.wake_ready(), [None, None]);
+        state.locks.release_owner(100);
+        assert_eq!(state.wake_ready(), [Some((20, 30)), None]);
+    }
+
+    #[test]
     fn record_lock_waiter_interrupt_records_terminal_outcome() {
         let mut state = LinuxRecordLockState::<2, 2>::new();
         let waiter =

@@ -122,6 +122,112 @@ fn linux_fcntl_routes_process_owned_record_locks_without_state_locking() {
 }
 
 #[test]
+fn linux_record_locks_follow_process_associated_lifecycle() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read Linux process runtime");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+    let modules = std::fs::read_to_string(repository.join("src/syscall/mod.rs"))
+        .expect("read syscall modules");
+
+    let close_helper_start = syscall
+        .find("fn close_linux_fd_for_current_process(")
+        .expect("central current-process descriptor close helper");
+    let close_helper = braced_body(&syscall[close_helper_start..]);
+    assert!(close_helper.contains("linux_process::current_pid().ok()"));
+    assert!(!close_helper.contains("linux_resource_pid()"));
+    let object_id = close_helper
+        .find("file.cursor.object_id()")
+        .expect("stable close file identity");
+    let remove = close_helper
+        .find("remove_fd_entry(fd)")
+        .expect("descriptor removal");
+    let release_lock = close_helper
+        .find("linux_record_lock::release_owner_file(owner, file_id)")
+        .expect("process/file record-lock release");
+    let release_description = close_helper
+        .find("release_open_description(entry.description_id)")
+        .expect("open-description release");
+    assert!(object_id < remove && remove < release_lock && release_lock < release_description);
+
+    let close_start = syscall.find("pub fn sys_close(").expect("close syscall");
+    let close = braced_body(&syscall[close_start..]);
+    assert!(close.contains("close_linux_fd_for_current_process(fd)"));
+    assert!(close.contains("fd <= 2"));
+
+    let dup_start = syscall.find("pub fn sys_dup3(").expect("dup3 syscall");
+    let dup = braced_body(&syscall[dup_start..]);
+    assert!(dup.contains("close_linux_fd_for_current_process(new_fd)"));
+
+    let close_range_start = syscall
+        .find("pub fn sys_close_range(")
+        .expect("close_range syscall");
+    let close_range = braced_body(&syscall[close_range_start..]);
+    assert!(close_range.contains("sys_close(fd)"));
+
+    let release_start = syscall
+        .find("pub(crate) fn release_linux_process_resources(")
+        .expect("process resource release");
+    let release = braced_body(&syscall[release_start..]);
+    let owner_release = release
+        .find("linux_record_lock::release_owner(pid)")
+        .expect("process record-lock release");
+    let resource_release = release
+        .find("memory_state().release_process_resources(pid)")
+        .expect("descriptor/object release");
+    assert!(owner_release < resource_release);
+
+    for function in [
+        "pub(crate) fn reserve_linux_resource_clone(",
+        "pub(crate) fn install_linux_resource_clone(",
+        "pub(crate) fn rollback_linux_fork_process_resources(",
+    ] {
+        let start = syscall
+            .find(function)
+            .expect("fork resource lifecycle function");
+        assert!(!braced_body(&syscall[start..]).contains("linux_record_lock"));
+    }
+
+    let normal_exit = braced_body(
+        &process[process
+            .find("pub(crate) fn exit_current_process(")
+            .expect("normal process exit")..],
+    );
+    let signal_exit = braced_body(
+        &process[process
+            .find("pub(crate) fn terminate_by_signal(")
+            .expect("signal process exit")..],
+    );
+    assert!(normal_exit.contains("release_linux_process_resources(process.pid)"));
+    assert!(signal_exit.contains("release_linux_process_resources(tgid)"));
+
+    let reset = braced_body(
+        &syscall[syscall
+            .find("pub fn reset_linux_process_state(")
+            .expect("Linux launch reset")..],
+    );
+    let task_reset = reset.find("linux_task::reset()").expect("task reset");
+    let lock_reset = reset
+        .find("linux_record_lock::reset()")
+        .expect("record-lock reset");
+    assert!(task_reset < lock_reset);
+
+    let retire = braced_body(
+        &task[task
+            .find("fn complete_task_retirements(")
+            .expect("task retirement")..],
+    );
+    assert!(retire.contains("linux_record_lock::remove_task_waiters("));
+
+    let execve = braced_body(&syscall[syscall.find("pub fn sys_execve(").expect("execve stub")..]);
+    assert!(!execve.contains("linux_record_lock"));
+    assert!(!modules.contains("#[allow(dead_code)]\npub(crate) mod linux_record_lock;"));
+}
+
+#[test]
 fn linux_record_lock_runtime_blocks_without_missed_wakeups() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let runtime = std::fs::read_to_string(repository.join("src/syscall/linux_record_lock.rs"))

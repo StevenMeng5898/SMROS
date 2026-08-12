@@ -3486,6 +3486,7 @@ pub(crate) fn install_linux_resource_clone(
 }
 
 pub(crate) fn release_linux_process_resources(pid: usize) -> bool {
+    linux_record_lock::release_owner(pid);
     let Some(released_handles) = memory_state().release_process_resources(pid) else {
         return false;
     };
@@ -3645,6 +3646,7 @@ pub fn reset_linux_process_state() {
     }
     linux_process_memory::reset_launch();
     linux_task::reset();
+    linux_record_lock::reset();
     let released_handles = memory_state().reset_linux_process_state();
     for handle in released_handles {
         let _ = sys_handle_close(handle);
@@ -5153,13 +5155,8 @@ pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
 
 /// Linux sys_close implementation.
 pub fn sys_close(fd: usize) -> SysResult {
-    let Some(entry) = memory_state().remove_fd_entry(fd) else {
+    if !close_linux_fd_for_current_process(fd) {
         return if fd <= 2 { Ok(0) } else { Err(SysError::EBUSY) };
-    };
-    let final_reference = memory_state().release_open_description(entry.description_id);
-    if let Some(description) = final_reference {
-        memory_state().remove_linux_fxfs_file(description.handle);
-        let _ = sys_handle_close(description.handle);
     }
     Ok(0)
 }
@@ -5201,6 +5198,32 @@ pub fn sys_dup(fd: usize) -> SysResult {
     Ok(memory_state().alloc_fd(record.handle, record.readable, record.writable))
 }
 
+fn close_linux_fd_for_current_process(fd: usize) -> bool {
+    let owner = linux_process::current_pid().ok();
+    let (entry, file_id) = {
+        let state = memory_state();
+        let Some(record) = state.get_fd(fd) else {
+            return false;
+        };
+        let file_id = state
+            .linux_fxfs_file(record.handle)
+            .map(|file| file.cursor.object_id());
+        let Some(entry) = state.remove_fd_entry(fd) else {
+            return false;
+        };
+        (entry, file_id)
+    };
+    if let (Some(owner), Some(file_id)) = (owner, file_id) {
+        linux_record_lock::release_owner_file(owner, file_id);
+    }
+    let final_reference = memory_state().release_open_description(entry.description_id);
+    if let Some(description) = final_reference {
+        memory_state().remove_linux_fxfs_file(description.handle);
+        let _ = sys_handle_close(description.handle);
+    }
+    true
+}
+
 pub fn sys_dup3(fd: usize, new_fd: usize, flags: usize) -> SysResult {
     if !syscall_logic::linux_dup3_args_valid(fd, new_fd) {
         return Err(SysError::EINVAL);
@@ -5209,13 +5232,7 @@ pub fn sys_dup3(fd: usize, new_fd: usize, flags: usize) -> SysResult {
         return Err(SysError::EINVAL);
     }
     let record = memory_state().get_fd(fd).ok_or(SysError::EBUSY)?;
-    if let Some(replaced) = memory_state().remove_fd_entry(new_fd) {
-        let final_reference = memory_state().release_open_description(replaced.description_id);
-        if let Some(description) = final_reference {
-            memory_state().remove_linux_fxfs_file(description.handle);
-            let _ = sys_handle_close(description.handle);
-        }
-    }
+    let _ = close_linux_fd_for_current_process(new_fd);
     if !memory_state().install_fd(new_fd, record.description_id, flags & LINUX_O_CLOEXEC != 0) {
         return Err(SysError::ENOMEM);
     }
