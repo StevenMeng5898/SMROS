@@ -1,6 +1,108 @@
 #![allow(unused_comparisons, unused_macros)]
 
 #[test]
+fn linux_record_lock_runtime_blocks_without_missed_wakeups() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let runtime = std::fs::read_to_string(repository.join("src/syscall/linux_record_lock.rs"))
+        .unwrap_or_default();
+    let task_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_task_logic_shared.rs"))
+            .expect("read Linux task shared logic");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    assert!(task_logic.contains("RecordLock"));
+    assert!(runtime.contains("LinuxRecordLockState<"));
+    assert!(runtime.contains("LinuxRuntimeLock<LinuxRecordLockRuntimeState>"));
+    assert!(runtime.contains("current_cpu_id() != 0"));
+
+    let blocking_start = runtime
+        .find("pub(crate) fn set_blocking(")
+        .expect("blocking record-lock operation");
+    let blocking = braced_body(&runtime[blocking_start..]);
+    let interrupt_mask = blocking.find("mask_interrupts()").expect("interrupt mask");
+    let runtime_lock = blocking
+        .find("LINUX_RECORD_LOCK_RUNTIME.lock()")
+        .expect("record-lock runtime guard");
+    let conflict = blocking
+        .find("first_conflict(")
+        .expect("conflict recheck under runtime guard");
+    let publication = blocking
+        .find("runtime.push(waiter)")
+        .expect("waiter publication");
+    let runtime_drop = publication
+        + blocking[publication..]
+            .find("drop(runtime)")
+            .expect("record-lock runtime unlock after waiter publication");
+    let task_block = blocking
+        .find("linux_task::block_current(LinuxBlockReason::RecordLock)")
+        .expect("task-runtime block publication");
+    let schedule = blocking
+        .find("scheduler::schedule()")
+        .expect("scheduler handoff");
+    let interrupt_restore = blocking
+        .rfind("restore_interrupts(interrupt_state)")
+        .expect("interrupt restore");
+    assert!(interrupt_mask < runtime_lock);
+    assert!(runtime_lock < conflict);
+    assert!(conflict < publication);
+    assert!(publication < runtime_drop);
+    assert!(runtime_drop < task_block);
+    assert!(task_block < schedule);
+    assert!(schedule < interrupt_restore);
+    let take_outcome = blocking
+        .find("runtime.take_outcome(tid, scheduler_thread.0)")
+        .expect("terminal waiter outcome consumption");
+    let missing_outcome = blocking[take_outcome..]
+        .find("None =>")
+        .expect("missing record-lock outcome branch");
+    let cleanup_relative = blocking[take_outcome + missing_outcome..]
+        .find("runtime.remove_task(tid, scheduler_thread.0)")
+        .expect("spurious-resume waiter cleanup");
+    let cleanup = take_outcome + missing_outcome + cleanup_relative;
+    assert!(take_outcome + missing_outcome < cleanup);
+
+    let wake_start = runtime
+        .find("fn wake_ready_tasks(")
+        .expect("post-commit record-lock wake helper");
+    let wake = braced_body(&runtime[wake_start..]);
+    let lock = wake
+        .find("LINUX_RECORD_LOCK_RUNTIME.lock()")
+        .expect("record-lock wake guard");
+    let collect = wake
+        .find("wake_ready()")
+        .expect("ready identity collection");
+    let drop = wake.find("drop(runtime)").expect("record-lock wake unlock");
+    let wake_task = wake
+        .find("linux_task::wake_blocked(")
+        .expect("task wake after unlock");
+    assert!(lock < collect && collect < drop && drop < wake_task);
+
+    let interrupt_target = braced_body(
+        &syscall[syscall
+            .find("fn interrupt_linux_signal_target(")
+            .expect("signal target interruption")..],
+    );
+    assert!(interrupt_target.contains("LinuxBlockReason::RecordLock"));
+    assert!(interrupt_target.contains("linux_record_lock::interrupt_task("));
+
+    let retire = braced_body(
+        &task[task
+            .find("fn complete_task_retirements(")
+            .expect("task retirement completion")..],
+    );
+    let futex_cleanup = retire
+        .find("linux_futex::remove_task_waiters(")
+        .expect("futex waiter cleanup");
+    let lock_cleanup = retire
+        .find("linux_record_lock::remove_task_waiters(")
+        .expect("record-lock waiter cleanup");
+    assert!(futex_cleanup < lock_cleanup);
+}
+
+#[test]
 fn posix_clock_timer_clock_runtime_applies_checked_realtime_offsets() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))

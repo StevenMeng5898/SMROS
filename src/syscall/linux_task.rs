@@ -676,6 +676,10 @@ fn complete_task_retirements(
             transition.task.tid,
             transition.task.scheduler_thread,
         );
+        let _ = super::linux_record_lock::remove_task_waiters(
+            transition.task.tid,
+            transition.task.scheduler_thread,
+        );
         if transition.clear_child_tid != 0
             && super::linux_process_memory::copy_to_process(
                 transition.task.tgid,

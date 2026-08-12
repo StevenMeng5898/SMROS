@@ -486,6 +486,138 @@ mod linux_record_lock_logic {
             .flatten()
             .any(|lock| lock.owner == 101));
     }
+
+    #[test]
+    fn record_lock_waiter_interrupt_records_terminal_outcome() {
+        let mut state = LinuxRecordLockState::<2, 2>::new();
+        let waiter =
+            LinuxRecordLockWaiter::new(7, 101, LinuxRecordLockKind::Write, range(20, 40), 11, 12);
+
+        assert_eq!(state.push(waiter), Ok(()));
+        assert!(state.interrupt(11, 12));
+        assert_eq!(
+            state.take_outcome(11, 12),
+            Some(LinuxRecordLockWaitOutcome::Interrupted)
+        );
+        assert_eq!(state.take_outcome(11, 12), None);
+    }
+
+    #[test]
+    fn record_lock_waiter_publication_is_fifo_and_task_unique() {
+        let mut state = LinuxRecordLockState::<2, 3>::new();
+        let first =
+            LinuxRecordLockWaiter::new(7, 101, LinuxRecordLockKind::Write, range(20, 40), 11, 12);
+        let second =
+            LinuxRecordLockWaiter::new(7, 102, LinuxRecordLockKind::Write, range(20, 40), 13, 14);
+
+        assert_eq!(state.push(first), Ok(()));
+        assert_eq!(state.push(second), Ok(()));
+        assert_eq!(
+            state.push(first),
+            Err(LinuxRecordLockWaiterError::Duplicate)
+        );
+        assert_eq!(state.waiter_snapshot()[0].unwrap().sequence, 0);
+        assert_eq!(state.waiter_snapshot()[1].unwrap().sequence, 1);
+    }
+
+    #[test]
+    fn record_lock_waiter_capacity_failure_preserves_existing_waiters() {
+        let mut state = LinuxRecordLockState::<2, 1>::new();
+        let first =
+            LinuxRecordLockWaiter::new(7, 101, LinuxRecordLockKind::Write, range(20, 40), 11, 12);
+        let second =
+            LinuxRecordLockWaiter::new(7, 102, LinuxRecordLockKind::Write, range(20, 40), 13, 14);
+        state.push(first).unwrap();
+        let before = state.waiter_snapshot();
+
+        assert_eq!(
+            state.push(second),
+            Err(LinuxRecordLockWaiterError::Capacity)
+        );
+        assert_eq!(state.waiter_snapshot(), before);
+    }
+
+    #[test]
+    fn record_lock_waiters_wake_in_fifo_order_only_after_conflict_clears() {
+        let mut state = LinuxRecordLockState::<4, 3>::new();
+        state
+            .locks
+            .set(7, 100, LinuxRecordLockKind::Write, range(0, 100))
+            .unwrap();
+        state
+            .push(LinuxRecordLockWaiter::new(
+                7,
+                101,
+                LinuxRecordLockKind::Write,
+                range(20, 40),
+                11,
+                12,
+            ))
+            .unwrap();
+        state
+            .push(LinuxRecordLockWaiter::new(
+                7,
+                102,
+                LinuxRecordLockKind::Read,
+                range(30, 50),
+                13,
+                14,
+            ))
+            .unwrap();
+
+        assert_eq!(state.wake_ready(), [None, None, None]);
+        state.locks.release_owner_file(100, 7);
+        assert_eq!(state.wake_ready(), [Some((11, 12)), Some((13, 14)), None]);
+        assert_eq!(
+            state.take_outcome(11, 12),
+            Some(LinuxRecordLockWaitOutcome::Woken)
+        );
+        assert_eq!(
+            state.take_outcome(13, 14),
+            Some(LinuxRecordLockWaitOutcome::Woken)
+        );
+    }
+
+    #[test]
+    fn record_lock_waiter_task_cleanup_and_reset_are_scoped() {
+        let mut state = LinuxRecordLockState::<4, 3>::new();
+        state
+            .locks
+            .set(7, 100, LinuxRecordLockKind::Write, range(0, 100))
+            .unwrap();
+        state
+            .push(LinuxRecordLockWaiter::new(
+                7,
+                101,
+                LinuxRecordLockKind::Write,
+                range(20, 40),
+                11,
+                12,
+            ))
+            .unwrap();
+        state
+            .push(LinuxRecordLockWaiter::new(
+                7,
+                102,
+                LinuxRecordLockKind::Write,
+                range(20, 40),
+                13,
+                14,
+            ))
+            .unwrap();
+
+        assert_eq!(state.remove_task(11, 12), 1);
+        assert_eq!(state.remove_task(11, 12), 0);
+        assert!(state
+            .waiter_snapshot()
+            .iter()
+            .flatten()
+            .any(|waiter| { waiter.tid == 13 && waiter.scheduler_thread == 14 }));
+
+        state.reset();
+        assert_eq!(state.locks.snapshot(), [None; 4]);
+        assert_eq!(state.waiter_snapshot(), [None; 3]);
+    }
 }
 
 mod syscall_logic {

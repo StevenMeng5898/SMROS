@@ -169,6 +169,7 @@ pub(crate) enum LinuxBlockReason {
     None,
     ChildWait,
     Futex,
+    RecordLock,
     Sleep,
     SignalWait,
     SignalSuspend,

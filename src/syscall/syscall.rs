@@ -53,6 +53,7 @@ use super::linux_process::{
     LinuxOpenDescription,
 };
 use super::linux_process_memory;
+use super::linux_record_lock;
 #[cfg(target_arch = "aarch64")]
 use super::linux_syscall_context;
 use super::linux_task;
@@ -142,6 +143,7 @@ pub enum SysError {
     EISDIR = 21,
     EINVAL = 22,
     ESPIPE = 29,
+    ENOLCK = 37,
     ENOSYS = 38,
     EOVERFLOW = 75,
     ENOTSOCK = 88,
@@ -4203,6 +4205,9 @@ fn interrupt_linux_signal_target(target: linux_task::LinuxTaskCore, signum: usiz
     match target.block_reason {
         linux_task::LinuxBlockReason::Futex => {
             let _ = linux_futex::interrupt_task(target.tid, target.scheduler_thread);
+        }
+        linux_task::LinuxBlockReason::RecordLock => {
+            let _ = linux_record_lock::interrupt_task(target.tid, target.scheduler_thread);
         }
         linux_task::LinuxBlockReason::Sleep => {
             if linux_task::interrupt_sleep(target.tid, target.scheduler_thread, signum)

@@ -11,6 +11,8 @@ pub(crate) mod address_logic;
 pub(crate) mod linux_futex;
 pub(crate) mod linux_process;
 pub(crate) mod linux_process_memory;
+#[allow(dead_code)]
+pub(crate) mod linux_record_lock;
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod linux_syscall_context;
 pub(crate) mod linux_task;

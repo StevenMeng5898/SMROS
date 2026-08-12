@@ -347,3 +347,185 @@ fn record_less(left: LinuxRecordLock, right: LinuxRecordLock) -> bool {
         right_kind,
     )
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxRecordLockWaitOutcome {
+    Waiting,
+    Woken,
+    Interrupted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxRecordLockWaiter {
+    pub file_id: u64,
+    pub owner: usize,
+    pub kind: LinuxRecordLockKind,
+    pub range: LinuxRecordLockRange,
+    pub tid: usize,
+    pub scheduler_thread: usize,
+    pub sequence: u64,
+    pub outcome: LinuxRecordLockWaitOutcome,
+}
+
+impl LinuxRecordLockWaiter {
+    pub(crate) const fn new(
+        file_id: u64,
+        owner: usize,
+        kind: LinuxRecordLockKind,
+        range: LinuxRecordLockRange,
+        tid: usize,
+        scheduler_thread: usize,
+    ) -> Self {
+        Self {
+            file_id,
+            owner,
+            kind,
+            range,
+            tid,
+            scheduler_thread,
+            sequence: 0,
+            outcome: LinuxRecordLockWaitOutcome::Waiting,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxRecordLockWaiterError {
+    Capacity,
+    Duplicate,
+    Exhausted,
+}
+
+pub(crate) struct LinuxRecordLockState<const L: usize, const W: usize> {
+    pub locks: LinuxRecordLockTable<L>,
+    waiters: [Option<LinuxRecordLockWaiter>; W],
+    next_sequence: u64,
+}
+
+impl<const L: usize, const W: usize> LinuxRecordLockState<L, W> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            locks: LinuxRecordLockTable::new(),
+            waiters: [None; W],
+            next_sequence: 0,
+        }
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        mut waiter: LinuxRecordLockWaiter,
+    ) -> Result<(), LinuxRecordLockWaiterError> {
+        if self.waiters.iter().flatten().any(|current| {
+            current.tid == waiter.tid && current.scheduler_thread == waiter.scheduler_thread
+        }) {
+            return Err(LinuxRecordLockWaiterError::Duplicate);
+        }
+        let next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .ok_or(LinuxRecordLockWaiterError::Exhausted)?;
+        let slot = self
+            .waiters
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or(LinuxRecordLockWaiterError::Capacity)?;
+        waiter.sequence = self.next_sequence;
+        waiter.outcome = LinuxRecordLockWaitOutcome::Waiting;
+        *slot = Some(waiter);
+        self.next_sequence = next_sequence;
+        Ok(())
+    }
+
+    pub(crate) fn wake_ready(&mut self) -> [Option<(usize, usize)>; W] {
+        let mut identities = [None; W];
+        let mut count = 0usize;
+        loop {
+            let mut selected: Option<(usize, u64)> = None;
+            for (index, waiter) in self.waiters.iter().enumerate() {
+                let Some(waiter) = waiter else {
+                    continue;
+                };
+                if waiter.outcome != LinuxRecordLockWaitOutcome::Waiting
+                    || self
+                        .locks
+                        .first_conflict(waiter.file_id, waiter.owner, waiter.kind, waiter.range)
+                        .is_some()
+                {
+                    continue;
+                }
+                if selected
+                    .map(|(_, sequence)| waiter.sequence < sequence)
+                    .unwrap_or(true)
+                {
+                    selected = Some((index, waiter.sequence));
+                }
+            }
+            let Some((index, _)) = selected else {
+                break;
+            };
+            let waiter = self.waiters[index]
+                .as_mut()
+                .expect("selected record-lock waiter remains published");
+            waiter.outcome = LinuxRecordLockWaitOutcome::Woken;
+            identities[count] = Some((waiter.tid, waiter.scheduler_thread));
+            count += 1;
+        }
+        identities
+    }
+
+    pub(crate) fn interrupt(&mut self, tid: usize, scheduler_thread: usize) -> bool {
+        let Some(waiter) = self
+            .waiters
+            .iter_mut()
+            .flatten()
+            .find(|waiter| waiter.tid == tid && waiter.scheduler_thread == scheduler_thread)
+        else {
+            return false;
+        };
+        if waiter.outcome != LinuxRecordLockWaitOutcome::Waiting {
+            return false;
+        }
+        waiter.outcome = LinuxRecordLockWaitOutcome::Interrupted;
+        true
+    }
+
+    pub(crate) fn remove_task(&mut self, tid: usize, scheduler_thread: usize) -> usize {
+        let mut removed = 0usize;
+        for slot in &mut self.waiters {
+            if slot
+                .map(|waiter| waiter.tid == tid && waiter.scheduler_thread == scheduler_thread)
+                .unwrap_or(false)
+            {
+                *slot = None;
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    pub(crate) fn take_outcome(
+        &mut self,
+        tid: usize,
+        scheduler_thread: usize,
+    ) -> Option<LinuxRecordLockWaitOutcome> {
+        let slot = self.waiters.iter_mut().find(|slot| {
+            slot.map(|waiter| {
+                waiter.tid == tid
+                    && waiter.scheduler_thread == scheduler_thread
+                    && waiter.outcome != LinuxRecordLockWaitOutcome::Waiting
+            })
+            .unwrap_or(false)
+        })?;
+        slot.take().map(|waiter| waiter.outcome)
+    }
+
+    pub(crate) const fn waiter_snapshot(&self) -> [Option<LinuxRecordLockWaiter>; W] {
+        self.waiters
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.locks.reset();
+        self.waiters = [None; W];
+        self.next_sequence = 0;
+    }
+}
