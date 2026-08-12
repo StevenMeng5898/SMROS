@@ -121,7 +121,7 @@ struct RunLaunchInputs {
     start_tick: u64,
 }
 
-type ActiveRun = user_logic::RunElfActiveRequest<RunLaunchInputs, ()>;
+type ActiveRun = user_logic::RunElfActiveRequest<RunLaunchInputs, fxfs::FxfsPersistGuard>;
 type RunState = user_logic::RunElfLifecycleState<ActiveRun>;
 
 static RUN_STATE: user_logic::RunElfStateCell<RunState> =
@@ -169,6 +169,15 @@ pub fn spawn_observed(
             return Err(RunElfError::Busy);
         }
     };
+
+    let persist_guard = fxfs::suspend_persist();
+    if let Err(error) = with_run_state(|state| {
+        user_logic::run_elf_attach_resource_transition(state, launch_id, persist_guard)
+    }) {
+        drop(error.into_resource());
+        clear_launch_state_without_outcome(LINUX_RUNTIME_CPU, launch_id);
+        return Err(RunElfError::Thread);
+    }
 
     let cpu = LINUX_RUNTIME_CPU;
     if RUN_CPU_BINDINGS.bind(cpu, launch_id).is_err() {
@@ -302,11 +311,12 @@ fn take_active_request(
 
 fn clear_launch_state_without_outcome(cpu: usize, launch_id: user_logic::RunElfLaunchId) {
     let _ = RUN_CPU_BINDINGS.clear(cpu, launch_id);
-    let _ = with_run_state(|state| {
+    let completion = with_run_state(|state| {
         user_logic::run_elf_clear_transition(state, launch_id, || {
             syscall::reset_linux_process_state()
         })
     });
+    drop(completion);
 }
 
 fn complete_active_run(
@@ -327,7 +337,7 @@ fn complete_active_run(
         }
     };
     let (request, resource) = active_request.into_parts();
-    let _ = resource;
+    drop(resource);
     let end_tick = timer::get_tick_count();
     let outcome = RunOutcome {
         path: request.path,

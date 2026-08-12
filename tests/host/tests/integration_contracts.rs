@@ -4702,6 +4702,67 @@ fn fxfs_forced_persist_bypasses_suspension_and_preserves_failed_pending_work() {
 }
 
 #[test]
+fn run_elf_batches_fxfs_persistence_for_the_exact_launch_lifecycle() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let launcher = std::fs::read_to_string(repository.join("src/user_level/services/run_elf.rs"))
+        .expect("read ELF launcher");
+
+    let compact_launcher: String = launcher
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    assert!(compact_launcher.contains(
+        "typeActiveRun=user_logic::RunElfActiveRequest<RunLaunchInputs,fxfs::FxfsPersistGuard>;"
+    ));
+
+    let spawn_start = launcher
+        .find("pub fn spawn_observed(")
+        .expect("observed ELF spawn");
+    let spawn = braced_body(&launcher[spawn_start..]);
+    let accept = spawn
+        .find("run_elf_start_transition(state, request")
+        .expect("accepted launch transition");
+    let suspend = spawn
+        .find("let persist_guard = fxfs::suspend_persist();")
+        .expect("persistence suspension");
+    let attach = spawn
+        .find("run_elf_attach_resource_transition(state, launch_id, persist_guard)")
+        .expect("launch-ID-aware guard attachment");
+    let bind = spawn
+        .find("RUN_CPU_BINDINGS.bind(cpu, launch_id)")
+        .expect("CPU binding");
+    let create = spawn
+        .find("create_thread_on_cpu(")
+        .expect("launcher thread publication");
+    assert!(accept < suspend && suspend < attach && attach < bind && bind < create);
+    assert!(spawn.contains("drop(error.into_resource());"));
+    assert!(spawn.contains("clear_launch_state_without_outcome(LINUX_RUNTIME_CPU, launch_id);"));
+
+    let clear_start = launcher
+        .find("fn clear_launch_state_without_outcome(")
+        .expect("launch cleanup");
+    let clear = braced_body(&launcher[clear_start..]);
+    assert!(clear.contains("let completion = with_run_state("));
+    assert!(clear.contains("drop(completion);"));
+
+    let complete_start = launcher
+        .find("fn complete_active_run(")
+        .expect("launch completion");
+    let complete = braced_body(&launcher[complete_start..]);
+    let parts = complete
+        .find("active_request.into_parts()")
+        .expect("owned launch decomposition");
+    let release = complete.find("drop(resource);").expect("guard release");
+    let end_tick = complete
+        .find("timer::get_tick_count()")
+        .expect("completion timestamp");
+    let dispatch = complete
+        .find("dispatch_outcome(request.observer, outcome)")
+        .expect("observer dispatch");
+    assert!(parts < release && release < end_tick && end_tick < dispatch);
+}
+
+#[test]
 fn aarch64_directory_open_flags_match_staged_glibc() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
