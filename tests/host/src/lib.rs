@@ -228,6 +228,266 @@ mod syscall_address_logic {
     }
 }
 
+mod linux_record_lock_logic {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/linux_record_lock_logic_shared.rs"
+    ));
+
+    #[test]
+    fn record_lock_ranges_normalize_all_whence_and_length_forms() {
+        assert_eq!(
+            normalize_linux_record_lock_range(0, 10, 20, 40, 80),
+            Ok(LinuxRecordLockRange::finite(10, 30).unwrap())
+        );
+        assert_eq!(
+            normalize_linux_record_lock_range(1, -5, 10, 40, 80),
+            Ok(LinuxRecordLockRange::finite(35, 45).unwrap())
+        );
+        assert_eq!(
+            normalize_linux_record_lock_range(2, -20, 0, 40, 80),
+            Ok(LinuxRecordLockRange::to_eof(60))
+        );
+        assert_eq!(
+            normalize_linux_record_lock_range(0, 30, -10, 40, 80),
+            Ok(LinuxRecordLockRange::finite(20, 30).unwrap())
+        );
+    }
+
+    #[test]
+    fn record_lock_range_errors_distinguish_invalid_from_overflow() {
+        assert_eq!(
+            normalize_linux_record_lock_range(3, 0, 1, 0, 0),
+            Err(LinuxRecordLockRangeError::Invalid)
+        );
+        assert_eq!(
+            normalize_linux_record_lock_range(0, -1, 1, 0, 0),
+            Err(LinuxRecordLockRangeError::Invalid)
+        );
+        assert_eq!(
+            normalize_linux_record_lock_range(0, i64::MAX, 1, 0, 0),
+            Err(LinuxRecordLockRangeError::Overflow)
+        );
+        assert_eq!(
+            normalize_linux_record_lock_range(1, 0, 1, u64::MAX, 0),
+            Err(LinuxRecordLockRangeError::Overflow)
+        );
+    }
+
+    fn range(start: u64, end: u64) -> LinuxRecordLockRange {
+        LinuxRecordLockRange::finite(start, end).unwrap()
+    }
+
+    #[test]
+    fn record_lock_table_conflicts_follow_process_ownership_and_lock_kind() {
+        let mut locks = LinuxRecordLockTable::<4>::new();
+        locks
+            .set(7, 100, LinuxRecordLockKind::Write, range(0, 100))
+            .unwrap();
+
+        assert_eq!(
+            locks.first_conflict(7, 100, LinuxRecordLockKind::Write, range(20, 40)),
+            None
+        );
+        assert_eq!(
+            locks
+                .first_conflict(7, 101, LinuxRecordLockKind::Read, range(20, 40))
+                .unwrap()
+                .owner,
+            100
+        );
+
+        let mut reads = LinuxRecordLockTable::<4>::new();
+        reads
+            .set(7, 100, LinuxRecordLockKind::Read, range(0, 100))
+            .unwrap();
+        assert_eq!(
+            reads.first_conflict(7, 101, LinuxRecordLockKind::Read, range(0, 100)),
+            None
+        );
+        assert!(reads
+            .first_conflict(7, 101, LinuxRecordLockKind::Write, range(0, 100))
+            .is_some());
+    }
+
+    #[test]
+    fn record_lock_table_replacement_splits_and_coalesces_owner_ranges() {
+        let mut locks = LinuxRecordLockTable::<4>::new();
+        locks
+            .set(7, 100, LinuxRecordLockKind::Write, range(0, 100))
+            .unwrap();
+        locks
+            .set(7, 100, LinuxRecordLockKind::Read, range(20, 80))
+            .unwrap();
+
+        assert_eq!(
+            locks.snapshot(),
+            [
+                Some(LinuxRecordLock {
+                    file_id: 7,
+                    owner: 100,
+                    kind: LinuxRecordLockKind::Write,
+                    range: range(0, 20),
+                }),
+                Some(LinuxRecordLock {
+                    file_id: 7,
+                    owner: 100,
+                    kind: LinuxRecordLockKind::Read,
+                    range: range(20, 80),
+                }),
+                Some(LinuxRecordLock {
+                    file_id: 7,
+                    owner: 100,
+                    kind: LinuxRecordLockKind::Write,
+                    range: range(80, 100),
+                }),
+                None,
+            ]
+        );
+
+        locks
+            .set(7, 100, LinuxRecordLockKind::Write, range(20, 80))
+            .unwrap();
+        assert_eq!(
+            locks.snapshot(),
+            [
+                Some(LinuxRecordLock {
+                    file_id: 7,
+                    owner: 100,
+                    kind: LinuxRecordLockKind::Write,
+                    range: range(0, 100),
+                }),
+                None,
+                None,
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn record_lock_table_unlock_splits_only_matching_file_and_owner() {
+        let mut locks = LinuxRecordLockTable::<6>::new();
+        locks
+            .set(7, 100, LinuxRecordLockKind::Write, range(0, 100))
+            .unwrap();
+        locks
+            .set(8, 100, LinuxRecordLockKind::Write, range(0, 100))
+            .unwrap();
+        locks
+            .set(7, 101, LinuxRecordLockKind::Write, range(0, 100))
+            .unwrap();
+        locks.unlock(7, 100, range(20, 80)).unwrap();
+
+        let snapshot = locks.snapshot();
+        assert!(snapshot.contains(&Some(LinuxRecordLock {
+            file_id: 7,
+            owner: 100,
+            kind: LinuxRecordLockKind::Write,
+            range: range(0, 20),
+        })));
+        assert!(snapshot.contains(&Some(LinuxRecordLock {
+            file_id: 7,
+            owner: 100,
+            kind: LinuxRecordLockKind::Write,
+            range: range(80, 100),
+        })));
+        assert!(snapshot.contains(&Some(LinuxRecordLock {
+            file_id: 8,
+            owner: 100,
+            kind: LinuxRecordLockKind::Write,
+            range: range(0, 100),
+        })));
+        assert!(snapshot.contains(&Some(LinuxRecordLock {
+            file_id: 7,
+            owner: 101,
+            kind: LinuxRecordLockKind::Write,
+            range: range(0, 100),
+        })));
+    }
+
+    #[test]
+    fn record_lock_table_zero_length_range_remains_open_through_growth() {
+        let mut locks = LinuxRecordLockTable::<2>::new();
+        locks
+            .set(
+                7,
+                100,
+                LinuxRecordLockKind::Write,
+                LinuxRecordLockRange::to_eof(50),
+            )
+            .unwrap();
+
+        assert!(locks
+            .first_conflict(7, 101, LinuxRecordLockKind::Read, range(1_000, 1_100))
+            .is_some());
+    }
+
+    #[test]
+    fn record_lock_table_capacity_failure_is_atomic() {
+        let mut locks = LinuxRecordLockTable::<2>::new();
+        locks
+            .set(7, 100, LinuxRecordLockKind::Write, range(0, 100))
+            .unwrap();
+        let before = locks.snapshot();
+
+        assert_eq!(
+            locks.set(7, 100, LinuxRecordLockKind::Read, range(20, 80)),
+            Err(LinuxRecordLockTableError::Capacity)
+        );
+        assert_eq!(locks.snapshot(), before);
+    }
+
+    #[test]
+    fn record_lock_table_release_is_scoped_and_fork_does_not_copy_ownership() {
+        let mut locks = LinuxRecordLockTable::<6>::new();
+        locks
+            .set(7, 100, LinuxRecordLockKind::Write, range(0, 100))
+            .unwrap();
+        locks
+            .set(8, 100, LinuxRecordLockKind::Write, range(0, 100))
+            .unwrap();
+        locks
+            .set(7, 101, LinuxRecordLockKind::Read, range(100, 200))
+            .unwrap();
+
+        assert!(locks
+            .first_conflict(7, 200, LinuxRecordLockKind::Write, range(1, 100))
+            .is_some());
+        assert!(!locks
+            .snapshot()
+            .iter()
+            .flatten()
+            .any(|lock| lock.owner == 200));
+
+        locks.release_owner_file(100, 7);
+        assert!(locks
+            .first_conflict(7, 200, LinuxRecordLockKind::Write, range(1, 100))
+            .is_none());
+        assert!(locks
+            .snapshot()
+            .iter()
+            .flatten()
+            .any(|lock| { lock.file_id == 8 && lock.owner == 100 }));
+        assert!(locks
+            .snapshot()
+            .iter()
+            .flatten()
+            .any(|lock| { lock.file_id == 7 && lock.owner == 101 }));
+
+        locks.release_owner(100);
+        assert!(!locks
+            .snapshot()
+            .iter()
+            .flatten()
+            .any(|lock| lock.owner == 100));
+        assert!(locks
+            .snapshot()
+            .iter()
+            .flatten()
+            .any(|lock| lock.owner == 101));
+    }
+}
+
 mod syscall_logic {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

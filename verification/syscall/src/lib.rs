@@ -16,6 +16,12 @@ mod linux_syscall_context_runtime_shared {
     include!("../../../src/syscall/linux_syscall_context_logic_shared.rs");
 }
 
+#[macro_use]
+#[allow(dead_code)]
+mod linux_record_lock_runtime_shared {
+    include!("../../../src/syscall/linux_record_lock_logic_shared.rs");
+}
+
 #[allow(dead_code, unused_macros)]
 mod address_runtime_macro_checks {
     include!("../../../src/syscall/address_logic_shared.rs");
@@ -2377,6 +2383,19 @@ proof fn linux_futex_rules_smoke() {
     assert(!smros_linux_futex_bitset_matches_body!(0u32, u32::MAX)) by(bit_vector);
     assert(!smros_linux_futex_deadline_expired_body!(9u64, 10u64));
     assert(smros_linux_futex_deadline_expired_body!(10u64, 10u64));
+}
+
+proof fn linux_record_lock_rules_smoke() {
+    assert(smros_linux_record_lock_ranges_overlap_body!(
+        0u64, 100u64, 99u64, 101u64
+    ));
+    assert(!smros_linux_record_lock_ranges_overlap_body!(
+        0u64, 100u64, 100u64, 101u64
+    ));
+    assert(!smros_linux_record_lock_types_conflict_body!(false, false));
+    assert(smros_linux_record_lock_types_conflict_body!(false, true));
+    assert(smros_linux_record_lock_types_conflict_body!(true, false));
+    assert(smros_linux_record_lock_types_conflict_body!(true, true));
 }
 
 } // verus!
