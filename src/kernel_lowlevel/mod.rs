@@ -34,4 +34,4 @@ pub mod mmu;
 #[cfg(target_arch = "aarch64")]
 pub use arch::user_address_space::Aarch64AddressSpace;
 
-pub use arch::{cpu, drivers, interrupt, serial, smp, thread, timer};
+pub use arch::{boot, cpu, drivers, interrupt, serial, smp, thread, timer};

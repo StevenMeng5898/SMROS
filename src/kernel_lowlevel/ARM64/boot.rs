@@ -186,7 +186,7 @@ secondary_entry:
 .globl exception_vectors
 exception_vectors:
     // Synchronous Exception (Current EL with SP0) - offset 0x000
-    b       exception_handler
+    b       current_sync_sp0
     .balign 0x80
     // IRQ (Current EL with SP0) - offset 0x080
     b       irq_handler
@@ -199,7 +199,7 @@ exception_vectors:
     .balign 0x80
 
     // Synchronous Exception (Current EL with SPx) - offset 0x200
-    b       exception_handler
+    b       current_sync_spx
     .balign 0x80
     // IRQ (Current EL with SPx) - offset 0x280
     b       irq_handler_sp
@@ -212,7 +212,7 @@ exception_vectors:
     .balign 0x80
 
     // Synchronous Exception (Lower EL using AArch64) - offset 0x400
-    b       exception_handler
+    b       lower_sync_a64
     .balign 0x80
     // IRQ (Lower EL using AArch64) - offset 0x480
     b       irq_handler_lower
@@ -225,7 +225,7 @@ exception_vectors:
     .balign 0x80
 
     // Synchronous Exception (Lower EL using AArch32) - offset 0x600
-    b       exception_handler
+    b       lower_sync_a32
     .balign 0x80
     // IRQ (Lower EL using AArch32) - offset 0x680
     b       irq_handler
@@ -236,6 +236,29 @@ exception_vectors:
     // SError (Lower EL using AArch32) - offset 0x780
     b       .
     .balign 0x80
+
+current_sync_sp0:
+    // Select the EL1 stack before entering fatal Rust diagnostics.
+    msr     spsel, #1
+    mrs     x0, esr_el1
+    mrs     x1, far_el1
+    mrs     x2, elr_el1
+    bl      fatal_aarch64_sync_exception
+    b       .
+
+current_sync_spx:
+    mrs     x0, esr_el1
+    mrs     x1, far_el1
+    mrs     x2, elr_el1
+    bl      fatal_aarch64_sync_exception
+    b       .
+
+lower_sync_a32:
+    mrs     x0, esr_el1
+    mrs     x1, far_el1
+    mrs     x2, elr_el1
+    bl      fatal_aarch64_sync_exception
+    b       .
 
 // IRQ Handler (Current EL with SPx)
 irq_handler_sp:
@@ -498,8 +521,8 @@ irq_handler_lower:
 
     eret
 
-// Exception Handler - handles all synchronous exceptions
-exception_handler:
+// Synchronous exception from a lower EL using AArch64.
+lower_sync_a64:
     // Save all general purpose registers to stack
     sub     sp, sp, #0x310
     stp     x0, x1, [sp, #0]
@@ -545,7 +568,7 @@ exception_handler:
     
     // EC = 0x15 for SVC from AArch64
     cmp     x0, #0x15
-    b.ne    99f // Not SVC, jump to error handler
+    b.ne    lower_sync_a64_non_svc
     
     // This is SVC exception - handle syscall
     // Pass the complete saved frame, followed by x8 and x0..x5.
@@ -568,24 +591,27 @@ exception_handler:
     // before the saved EL0 register frame is reloaded.
     mov     x0, sp
     bl      complete_linux_signal_syscall_return
-    b       3f
-    
-99:
-    // General exception - return error
-    mov     x0, #-38  // ENOSYS
-    str     x0, [sp, #0]
-    
-3:
+
     // On AArch64 SVC, ELR_EL1 already points at the next instruction. Keep
     // the hook so tests can override the behavior if needed, but do not
     // advance by default.
     bl      syscall_should_advance_elr
-    cbz     x0, 5f
+    cbz     x0, restore_lower_el_frame
     mrs     x0, elr_el1
     add     x0, x0, #4
     msr     elr_el1, x0
+    b       restore_lower_el_frame
 
-5:  // Restore registers and return
+lower_sync_a64_non_svc:
+    mov     x0, sp
+    mrs     x1, esr_el1
+    mrs     x2, far_el1
+    mrs     x3, elr_el1
+    bl      handle_aarch64_lower_el_sync
+    b       restore_lower_el_frame
+
+restore_lower_el_frame:
+    // Restore registers and return using the ELR selected by Rust.
     ldr     x16, [sp, #0x300]
     msr     fpcr, x16
     ldr     x16, [sp, #0x308]
@@ -629,3 +655,19 @@ exception_handler:
 );
 
 core::arch::global_asm!(include_str!("context_switch.S"));
+
+#[no_mangle]
+pub extern "C" fn fatal_aarch64_sync_exception(esr: u64, far: u64, elr: u64) -> ! {
+    let mut serial = super::serial::Serial::new();
+    serial.init();
+    serial.write_str("\n[AARCH64] fatal synchronous exception ESR=");
+    serial.write_hex(esr);
+    serial.write_str(" FAR=");
+    serial.write_hex(far);
+    serial.write_str(" ELR=");
+    serial.write_hex(elr);
+    serial.write_str("\n[ERROR] System halted\n");
+    loop {
+        super::cpu::wait_for_interrupt();
+    }
+}

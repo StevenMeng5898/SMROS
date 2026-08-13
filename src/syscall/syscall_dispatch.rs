@@ -98,3 +98,39 @@ pub extern "C" fn handle_syscall_simple(
 fn zircon_error_to_u64(err: ZxError) -> u64 {
     err as i32 as i64 as u64
 }
+
+#[cfg(target_arch = "aarch64")]
+#[no_mangle]
+pub extern "C" fn handle_aarch64_lower_el_sync(
+    saved_frame: usize,
+    esr: u64,
+    far: u64,
+    return_pc: u64,
+) {
+    use crate::kernel_lowlevel::aarch64_exception_logic_shared::{
+        aarch64_lower_el_sync, Aarch64El0MemoryAccess, Aarch64LowerElSync,
+    };
+    use crate::syscall::linux_process_memory::LinuxMemoryFaultAccess;
+
+    let access = match aarch64_lower_el_sync(esr) {
+        Aarch64LowerElSync::MemoryFault(fault) => {
+            let _ = fault.kind;
+            match fault.access {
+                Aarch64El0MemoryAccess::Read => LinuxMemoryFaultAccess::Read,
+                Aarch64El0MemoryAccess::Write => LinuxMemoryFaultAccess::Write,
+                Aarch64El0MemoryAccess::Execute => LinuxMemoryFaultAccess::Execute,
+            }
+        }
+        _ => crate::kernel_lowlevel::boot::fatal_aarch64_sync_exception(esr, far, return_pc),
+    };
+    if crate::syscall::deliver_linux_synchronous_memory_fault(
+        saved_frame,
+        return_pc,
+        far,
+        access,
+    )
+    .is_err()
+    {
+        crate::kernel_lowlevel::boot::fatal_aarch64_sync_exception(esr, far, return_pc);
+    }
+}

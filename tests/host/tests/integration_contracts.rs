@@ -1178,6 +1178,151 @@ fn synchronous_memory_fault_delivery_is_immediate_complete_and_fail_closed() {
     assert!(termination.contains("prepare_run_elf_return(exit_code)"));
 }
 
+#[test]
+fn aarch64_synchronous_exception_vectors_are_origin_specific_and_fail_closed() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let boot = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/boot.rs"))
+        .expect("read AArch64 exception vectors");
+    let dispatch = std::fs::read_to_string(repository.join("src/syscall/syscall_dispatch.rs"))
+        .expect("read AArch64 exception bridge");
+    let lowlevel = std::fs::read_to_string(repository.join("src/kernel_lowlevel/mod.rs"))
+        .expect("read architecture exports");
+
+    let vectors_start = boot
+        .find("exception_vectors:")
+        .expect("AArch64 vector table");
+    let vectors_end = boot[vectors_start..]
+        .find("current_sync_sp0:")
+        .expect("first synchronous vector routine");
+    let vectors = &boot[vectors_start..vectors_start + vectors_end];
+    for target in [
+        "b       current_sync_sp0",
+        "b       current_sync_spx",
+        "b       lower_sync_a64",
+        "b       lower_sync_a32",
+    ] {
+        assert!(
+            vectors.contains(target),
+            "missing origin-specific vector {target}"
+        );
+    }
+
+    let routine = |name: &str, next: &str| {
+        let start = boot
+            .find(&format!("{name}:"))
+            .unwrap_or_else(|| panic!("missing AArch64 routine {name}"));
+        let end = boot[start..]
+            .find(&format!("{next}:"))
+            .unwrap_or_else(|| panic!("missing end marker {next} for {name}"));
+        &boot[start..start + end]
+    };
+    let current_sp0 = routine("current_sync_sp0", "current_sync_spx");
+    assert!(current_sp0.contains("msr     spsel, #1"));
+    for body in [
+        current_sp0,
+        routine("current_sync_spx", "lower_sync_a32"),
+        routine("lower_sync_a32", "irq_handler_sp"),
+    ] {
+        for instruction in [
+            "mrs     x0, esr_el1",
+            "mrs     x1, far_el1",
+            "mrs     x2, elr_el1",
+            "bl      fatal_aarch64_sync_exception",
+        ] {
+            assert!(
+                body.contains(instruction),
+                "fatal vector is missing {instruction}"
+            );
+        }
+        assert!(!body.contains("eret"));
+    }
+
+    let lower = routine("lower_sync_a64", "restore_lower_el_frame");
+    for instruction in [
+        "sub     sp, sp, #0x310",
+        "stp     x30, xzr, [sp, #240]",
+        "stp     q30, q31, [sp, #0x2e0]",
+        "str     x16, [sp, #0x308]",
+        "bl      handle_syscall_simple",
+        "bl      complete_linux_signal_syscall_return",
+        "bl      syscall_should_advance_elr",
+        "mov     x0, sp",
+        "mrs     x1, esr_el1",
+        "mrs     x2, far_el1",
+        "mrs     x3, elr_el1",
+        "bl      handle_aarch64_lower_el_sync",
+        "b       restore_lower_el_frame",
+    ] {
+        assert!(
+            lower.contains(instruction),
+            "lower-EL frame is missing {instruction}"
+        );
+    }
+    let fault_start = lower
+        .find("lower_sync_a64_non_svc:")
+        .expect("lower-EL non-SVC path");
+    let fault = &lower[fault_start..];
+    assert!(!fault.contains("mov     x0, #-38"));
+    assert!(!fault.contains("str     x0, [sp, #0]"));
+    assert!(!fault.contains("syscall_should_advance_elr"));
+    assert!(!fault.contains("add     x0, x0, #4"));
+    assert!(!fault.contains("msr     elr_el1, x0"));
+
+    let restore = &boot[boot
+        .find("restore_lower_el_frame:")
+        .expect("lower-EL frame restore")..];
+    assert!(restore.contains("add     sp, sp, #0x310"));
+    assert!(restore.contains("eret"));
+
+    let bridge_start = dispatch
+        .find("pub extern \"C\" fn handle_aarch64_lower_el_sync(")
+        .expect("AArch64 lower-EL Rust bridge");
+    let bridge = braced_body(&dispatch[bridge_start..]);
+    for token in [
+        "aarch64_lower_el_sync(esr)",
+        "Aarch64LowerElSync::MemoryFault(fault)",
+        "Aarch64El0MemoryAccess::Read => LinuxMemoryFaultAccess::Read",
+        "Aarch64El0MemoryAccess::Write => LinuxMemoryFaultAccess::Write",
+        "Aarch64El0MemoryAccess::Execute => LinuxMemoryFaultAccess::Execute",
+        "deliver_linux_synchronous_memory_fault(",
+        "fatal_aarch64_sync_exception(esr, far, return_pc)",
+    ] {
+        assert!(
+            bridge.contains(token),
+            "exception bridge is missing {token}"
+        );
+    }
+    let delivery = bridge
+        .find("deliver_linux_synchronous_memory_fault(")
+        .expect("synchronous fault delivery call");
+    let delivery = &bridge[delivery..bridge.len().min(delivery + 180)];
+    for argument in ["saved_frame", "return_pc", "far", "access"] {
+        assert!(
+            delivery.contains(argument),
+            "delivery call is missing {argument}"
+        );
+    }
+    assert!(lowlevel
+        .contains("pub use arch::{boot, cpu, drivers, interrupt, serial, smp, thread, timer};"));
+
+    let fatal_start = boot
+        .find("pub extern \"C\" fn fatal_aarch64_sync_exception(")
+        .expect("fatal AArch64 synchronous exception diagnostic");
+    let fatal = braced_body(&boot[fatal_start..]);
+    for token in [
+        "fatal synchronous exception ESR=",
+        "serial.write_hex(esr)",
+        "serial.write_hex(far)",
+        "serial.write_hex(elr)",
+        "super::cpu::wait_for_interrupt()",
+    ] {
+        assert!(fatal.contains(token), "fatal diagnostic is missing {token}");
+    }
+    assert!(
+        boot[fatal_start..fatal_start + boot[fatal_start..].find('{').unwrap()].contains(") -> !")
+    );
+}
+
 fn assembly_routine<'a>(source: &'a str, name: &str) -> &'a str {
     let label = format!("{name}:");
     let start = source.find(&label).expect("assembly routine label");
@@ -2779,7 +2924,7 @@ fn run_elf_launch_identity_is_bound_and_carried_through_aarch64_resume() {
     assert!(linux_exit.contains("prepare_run_elf_return(exit_code)"));
 
     let exception_start = aarch64
-        .find("exception_handler:")
+        .find("lower_sync_a64:")
         .expect("AArch64 synchronous exception handler");
     let exception = &aarch64[exception_start..];
     let dispatch = exception
@@ -3012,7 +3157,7 @@ fn scheduler_exposes_atomic_linux_task_transitions() {
         .find("irq_handler_lower:")
         .expect("lower-EL timer handler");
     let lower_end = boot[lower_start..]
-        .find("// Exception Handler")
+        .find("// Synchronous exception from a lower EL using AArch64.")
         .expect("end of lower-EL timer handler");
     let lower = &boot[lower_start..lower_start + lower_end];
     let timer = lower
@@ -3060,7 +3205,7 @@ fn linux_root_task_and_syscall_frame_have_bounded_owners() {
             .expect("read Linux runtime lock");
 
     let exception_start = boot
-        .find("exception_handler:")
+        .find("lower_sync_a64:")
         .expect("synchronous exception handler");
     let exception = &boot[exception_start..];
     let frame_arg = exception
@@ -4526,8 +4671,11 @@ fn aarch64_el0_context_abi_is_complete() {
     for (handler, next) in [
         ("irq_handler_sp:", "// IRQ Handler (Current EL with SP0)"),
         ("irq_handler:", "// IRQ Handler (Lower EL using AArch64)"),
-        ("irq_handler_lower:", "// Exception Handler"),
-        ("exception_handler:", "\n\"#,"),
+        (
+            "irq_handler_lower:",
+            "// Synchronous exception from a lower EL using AArch64.",
+        ),
+        ("lower_sync_a64:", "\n\"#,"),
     ] {
         let start = boot.find(handler).expect("AArch64 exception handler");
         let relative_end = boot[start..]
