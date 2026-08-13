@@ -2157,6 +2157,7 @@ impl MemorySyscallState {
                         fd,
                         offset,
                         path,
+                        object_id: _,
                         backing_len,
                     } => LinuxMappingSourceSnapshot::File {
                         fd,
@@ -3281,7 +3282,14 @@ impl MemorySyscallState {
             .iter()
             .position(|record| record.handle == handle)
         {
-            self.linux_fxfs_files.swap_remove(index);
+            let object_id = self.linux_fxfs_files.swap_remove(index).cursor.object_id();
+            if !self
+                .linux_fxfs_files
+                .iter()
+                .any(|record| record.cursor.object_id() == object_id)
+            {
+                let _ = fxfs::release_unlinked_file(object_id);
+            }
         }
     }
 
@@ -3415,7 +3423,9 @@ impl MemorySyscallState {
         }
 
         self.linux_open_descriptions.clear();
-        self.linux_fxfs_files.clear();
+        while let Some(handle) = self.linux_fxfs_files.last().map(|file| file.handle) {
+            self.remove_linux_fxfs_file(handle);
+        }
         self.next_open_description_id = 1;
         self.next_shared_memory_id = LINUX_SHM_ID_START;
         released_handles
@@ -4815,8 +4825,8 @@ fn linux_read_mmap_contents(
     len: usize,
 ) -> Result<Vec<u8>, SysError> {
     let linux_process_memory::LinuxMappingSource::File {
+        fd,
         offset,
-        path,
         backing_len,
         ..
     } = source
@@ -4833,7 +4843,9 @@ fn linux_read_mmap_contents(
         .try_reserve_exact(read_len)
         .map_err(|_| SysError::ENOMEM)?;
     contents.resize(read_len, 0);
-    fxfs::read_file_at(path.as_str(), offset, &mut contents).map_err(|_| SysError::EIO)?;
+    let mut file = linux_fxfs_file_for_fd(*fd, true)?;
+    fxfs::position_cursor(&mut file.cursor, offset).map_err(linux_fxfs_error)?;
+    fxfs::cursor_read(&mut file.cursor, &mut contents).map_err(linux_fxfs_error)?;
     Ok(contents)
 }
 
@@ -4874,12 +4886,13 @@ pub fn sys_mmap(
         if !page_aligned(offset as usize) {
             return Err(SysError::EINVAL);
         }
-        let path = linux_fxfs_path_for_fd(fd, true)?;
-        let attrs = fxfs::attrs(path.as_str()).map_err(|_| SysError::EIO)?;
+        let file = linux_fxfs_file_for_fd(fd, true)?;
+        let attrs = fxfs::cursor_attrs(file.cursor).map_err(linux_fxfs_error)?;
         linux_process_memory::LinuxMappingSource::File {
             fd,
             offset,
-            path,
+            object_id: file.cursor.object_id(),
+            path: file.path,
             backing_len: attrs.size,
         }
     };
@@ -5411,6 +5424,28 @@ fn linux_fxfs_path_for_fd(fd: usize, require_readable: bool) -> Result<String, S
         .linux_fxfs_file(record.handle)
         .ok_or(SysError::ENODEV)?;
     Ok(file.path.clone())
+}
+
+fn linux_fxfs_file_for_fd(
+    fd: usize,
+    require_readable: bool,
+) -> Result<LinuxFxfsFileRecord, SysError> {
+    let state = memory_state();
+    let record = state
+        .get_fd(fd)
+        .filter(|record| !require_readable || record.readable)
+        .ok_or(SysError::ENODEV)?;
+    state
+        .linux_fxfs_file(record.handle)
+        .cloned()
+        .ok_or(SysError::ENODEV)
+}
+
+fn linux_fxfs_object_is_open(object_id: u64) -> bool {
+    memory_state()
+        .linux_fxfs_files
+        .iter()
+        .any(|record| record.cursor.object_id() == object_id)
 }
 
 fn linux_fd_object_type(fd: usize) -> Option<ObjectType> {
@@ -6278,13 +6313,18 @@ pub fn sys_linkat(
     oldpath: usize,
     _newdirfd: usize,
     newpath: usize,
-    _flags: usize,
+    flags: usize,
 ) -> SysResult {
     if oldpath == 0 || newpath == 0 {
-        Err(SysError::EFAULT)
-    } else {
-        Ok(0)
+        return Err(SysError::EFAULT);
     }
+    if flags != 0 {
+        return Err(SysError::EINVAL);
+    }
+    let old_path = linux_user_cstr(oldpath, LINUX_PATH_MAX_BYTES)?;
+    let new_path = linux_user_cstr(newpath, LINUX_PATH_MAX_BYTES)?;
+    fxfs::link_file(old_path.as_str(), new_path.as_str()).map_err(linux_fxfs_error)?;
+    Ok(0)
 }
 
 pub fn sys_symlinkat(oldpath: usize, _newdirfd: usize, newpath: usize) -> SysResult {
@@ -6305,6 +6345,14 @@ pub fn sys_unlinkat(_dirfd: usize, path: usize, flags: usize) -> SysResult {
     }
     if !syscall_logic::linux_unlink_flags_valid(flags, LINUX_UNLINK_ALLOWED_FLAGS) {
         return Err(SysError::EINVAL);
+    }
+    if flags & LINUX_AT_REMOVEDIR != 0 {
+        return Err(SysError::EISDIR);
+    }
+    let path = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
+    let object_id = fxfs::unlink_file(path.as_str()).map_err(linux_fxfs_error)?;
+    if !linux_fxfs_object_is_open(object_id) {
+        fxfs::release_unlinked_file(object_id).map_err(linux_fxfs_error)?;
     }
     Ok(0)
 }
@@ -9103,17 +9151,15 @@ pub fn sys_execve(path: usize, _argv: usize, _envp: usize) -> SysResult {
 
 /// Linux sys_wait4 implementation
 pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
-    const LINUX_WNOHANG: u32 = 1;
-
     info!("wait4: pid={}, options={:#x}", pid, options);
 
-    if options & !LINUX_WNOHANG != 0 {
+    if !linux_process::linux_wait_options_valid(options) {
         return Err(SysError::EINVAL);
     }
     let process = linux_process::current()?;
     let selector =
         linux_process::linux_wait_selector(pid, process.process_group).ok_or(SysError::EINVAL)?;
-    let nohang = options & LINUX_WNOHANG != 0;
+    let nohang = options & linux_process::LINUX_WAIT_WNOHANG != 0;
 
     loop {
         match linux_process::wait_current(selector, nohang)? {

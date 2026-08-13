@@ -309,6 +309,22 @@ spec fn fxfs_dirent_capacity_valid_spec(entries: int, max_entries: int) -> bool 
     0 <= entries && entries < max_entries
 }
 
+spec fn fxfs_link_count_after_link_spec(link_count: int) -> Option<int> {
+    if link_count <= 0 || link_count >= u32::MAX as int {
+        None
+    } else {
+        Some(link_count + 1)
+    }
+}
+
+spec fn fxfs_link_count_after_unlink_spec(link_count: int) -> Option<int> {
+    if link_count <= 0 {
+        None
+    } else {
+        Some(link_count - 1)
+    }
+}
+
 spec fn fxfs_append_size_spec(old_size: int, append_len: int) -> Option<int> {
     checked_end_spec(old_size, append_len)
 }
@@ -780,6 +796,26 @@ fn fxfs_dirent_capacity_valid(entries: usize) -> (out: bool)
     smros_user_fxfs_dirent_capacity_valid_body!(entries, USER_FXFS_MAX_DIRENTS)
 }
 
+fn verified_fxfs_link_count_after_link(link_count: u32) -> (out: Option<u32>)
+    ensures
+        match out {
+            Some(count) => fxfs_link_count_after_link_spec(link_count as int) == Some(count as int),
+            None => fxfs_link_count_after_link_spec(link_count as int) == Option::<int>::None,
+        },
+{
+    smros_user_fxfs_link_count_after_link_body!(link_count)
+}
+
+fn verified_fxfs_link_count_after_unlink(link_count: u32) -> (out: Option<u32>)
+    ensures
+        match out {
+            Some(count) => fxfs_link_count_after_unlink_spec(link_count as int) == Some(count as int),
+            None => fxfs_link_count_after_unlink_spec(link_count as int) == Option::<int>::None,
+        },
+{
+    smros_user_fxfs_link_count_after_unlink_body!(link_count)
+}
+
 fn fxfs_append_size(old_size: usize, append_len: usize) -> (out: Option<usize>)
     ensures
         match out {
@@ -1215,6 +1251,11 @@ proof fn fxfs_rs_proof_slice() {
     assert(fxfs_file_size_valid_spec(0, USER_FXFS_MAX_FILE_BYTES as int));
     assert(fxfs_node_capacity_valid_spec(USER_FXFS_MAX_NODES as int - 1, USER_FXFS_MAX_NODES as int));
     assert(fxfs_dirent_capacity_valid_spec(USER_FXFS_MAX_DIRENTS as int - 1, USER_FXFS_MAX_DIRENTS as int));
+    assert(fxfs_link_count_after_link_spec(0) == Option::<int>::None);
+    assert(fxfs_link_count_after_link_spec(1) == Some(2int));
+    assert(fxfs_link_count_after_link_spec(u32::MAX as int) == Option::<int>::None);
+    assert(fxfs_link_count_after_unlink_spec(0) == Option::<int>::None);
+    assert(fxfs_link_count_after_unlink_spec(1) == Some(0int));
     assert(fxfs_append_size_spec(10, 5) == Some(15int));
     assert(fxfs_write_end_spec(4, 6) == Some(10int));
     assert(fxfs_seek_valid_spec(10, 10));

@@ -18,6 +18,7 @@ pub(crate) enum LinuxMappingSource {
         fd: usize,
         offset: u64,
         path: String,
+        object_id: u64,
         backing_len: usize,
     },
     SharedMemory {
@@ -37,6 +38,7 @@ impl LinuxMappingSource {
                 fd,
                 offset,
                 path,
+                object_id,
                 backing_len,
             } => {
                 let mut sliced_path = String::new();
@@ -48,6 +50,7 @@ impl LinuxMappingSource {
                     fd: *fd,
                     offset: offset.saturating_add(delta as u64),
                     path: sliced_path,
+                    object_id: *object_id,
                     backing_len: *backing_len,
                 })
             }
@@ -435,7 +438,7 @@ struct LinuxSharedPageRuntime {
 
 struct LinuxSharedMmapObject {
     object_id: u32,
-    file_path: Option<String>,
+    file_object_id: Option<u64>,
 }
 
 impl LinuxSharedPageRuntime {
@@ -568,19 +571,25 @@ fn release_shared_page(object_id: u32, page_index: usize) -> Option<u64> {
 
 fn shared_mmap_object(source: &LinuxMappingSource) -> Result<(u32, usize), SysError> {
     with_shared_pages(|runtime| {
-        let (file_path, first_page) = match source {
+        let (file_object_id, first_page) = match source {
             LinuxMappingSource::Anonymous => (None, 0),
-            LinuxMappingSource::File { offset, path, .. } => {
+            LinuxMappingSource::File {
+                offset, object_id, ..
+            } => {
                 let offset = usize::try_from(*offset).map_err(|_| SysError::EINVAL)?;
-                (Some(path.as_str()), offset / PAGE_SIZE)
+                (Some(*object_id), offset / PAGE_SIZE)
             }
             LinuxMappingSource::SharedMemory { .. } => return Err(SysError::EINVAL),
         };
-        if let Some(file_path) = file_path {
+        if let Some(file_object_id) = file_object_id {
             if let Some(object) = runtime
                 .mmap_objects
                 .iter()
-                .find(|object| object.file_path.as_deref() == Some(file_path))
+                .find(|object| {
+                    object.file_object_id.is_some_and(|current| {
+                        linux_shared_file_identity_matches(current, file_object_id)
+                    })
+                })
             {
                 return Ok((object.object_id, first_page));
             }
@@ -595,19 +604,9 @@ fn shared_mmap_object(source: &LinuxMappingSource) -> Result<(u32, usize), SysEr
             .mmap_objects
             .try_reserve(1)
             .map_err(|_| SysError::ENOMEM)?;
-        let file_path = if let Some(path) = file_path {
-            let mut owned = String::new();
-            owned
-                .try_reserve_exact(path.len())
-                .map_err(|_| SysError::ENOMEM)?;
-            owned.push_str(path);
-            Some(owned)
-        } else {
-            None
-        };
         runtime.mmap_objects.push(LinuxSharedMmapObject {
             object_id,
-            file_path,
+            file_object_id,
         });
         Ok((object_id, first_page))
     })

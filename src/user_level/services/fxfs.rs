@@ -1446,6 +1446,38 @@ impl FxfsState {
         }
     }
 
+    fn link_file(&mut self, old_path: &str, new_path: &str) -> Result<(), FxfsError> {
+        let source_index = self.resolve_path(old_path)?;
+        if self.objects[source_index].kind != FxfsNodeKind::File {
+            return Err(FxfsError::NotFile);
+        }
+        let (parent_id, name) = self.parent_and_name(new_path)?;
+        if self.find_dirent_index(parent_id, name).is_some() {
+            return Err(FxfsError::AlreadyExists);
+        }
+        if !user_logic::fxfs_dirent_capacity_valid(self.dirents.len()) {
+            return Err(FxfsError::NoSpace);
+        }
+        let link_count = user_logic::fxfs_link_count_after_link(
+            self.objects[source_index].attrs.link_count,
+        )
+        .ok_or(FxfsError::NoSpace)?;
+        let name = copy_string(name)?;
+        try_reserve_vec(&mut self.dirents, 1)?;
+
+        let object_id = self.objects[source_index].object_id;
+        self.dirents.push(FxfsDirectoryEntry {
+            parent_id,
+            name,
+            object_id,
+        });
+        self.objects[source_index].attrs.link_count = link_count;
+        self.touch_directory(parent_id);
+        self.record(FxfsJournalOp::CreateFile, object_id, parent_id, 0);
+        self.persist();
+        Ok(())
+    }
+
     fn append_file(&mut self, path: &str, data: &[u8]) -> Result<usize, FxfsError> {
         let index = self.resolve_path(path)?;
         if self.objects[index].kind != FxfsNodeKind::File {
@@ -1507,7 +1539,7 @@ impl FxfsState {
         Ok(size)
     }
 
-    fn delete_file(&mut self, path: &str) -> Result<(), FxfsError> {
+    fn unlink_file(&mut self, path: &str) -> Result<u64, FxfsError> {
         let shared_relative = fxfs_shared_relative_path(path)
             .filter(|relative| fxfs_host_share_file_exists(relative))
             .map(String::from);
@@ -1516,14 +1548,16 @@ impl FxfsState {
             return Err(FxfsError::IsDirectory);
         }
         let object_id = self.objects[index].object_id;
+        let (parent_id, name) = self.parent_and_name(path)?;
         let dirent_index = self
-            .dirents
-            .iter()
-            .position(|entry| entry.object_id == object_id)
+            .find_dirent_index(parent_id, name)
             .ok_or(FxfsError::NotFound)?;
-        let parent_id = self.dirents[dirent_index].parent_id;
+        let link_count = user_logic::fxfs_link_count_after_unlink(
+            self.objects[index].attrs.link_count,
+        )
+        .ok_or(FxfsError::StorageCorrupt)?;
         self.dirents.remove(dirent_index);
-        self.objects.remove(index);
+        self.objects[index].attrs.link_count = link_count;
         self.touch_directory(parent_id);
         self.record(FxfsJournalOp::DeleteFile, object_id, parent_id, 0);
         if let Some(relative) = shared_relative {
@@ -1531,6 +1565,33 @@ impl FxfsState {
         } else {
             self.persist();
         }
+        Ok(object_id)
+    }
+
+    fn delete_file(&mut self, path: &str) -> Result<(), FxfsError> {
+        let object_id = self.unlink_file(path)?;
+        self.release_unlinked_file(object_id)
+    }
+
+    fn release_unlinked_file(&mut self, object_id: u64) -> Result<(), FxfsError> {
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        if !user_logic::fxfs_unlinked_object_reclaimable(
+            self.objects[index].attrs.link_count,
+            0,
+        ) {
+            return Ok(());
+        }
+        if self
+            .dirents
+            .iter()
+            .any(|entry| entry.object_id == object_id)
+        {
+            return Err(FxfsError::StorageCorrupt);
+        }
+        self.objects.remove(index);
+        self.persist();
         Ok(())
     }
 
@@ -2056,6 +2117,10 @@ pub fn write_file(path: &str, data: &[u8]) -> Result<usize, FxfsError> {
     state().write_file(path, data)
 }
 
+pub fn link_file(old_path: &str, new_path: &str) -> Result<(), FxfsError> {
+    state().link_file(old_path, new_path)
+}
+
 pub fn append_file(path: &str, data: &[u8]) -> Result<usize, FxfsError> {
     state().append_file(path, data)
 }
@@ -2066,6 +2131,14 @@ pub fn truncate_file(path: &str, size: usize) -> Result<usize, FxfsError> {
 
 pub fn delete_file(path: &str) -> Result<(), FxfsError> {
     state().delete_file(path)
+}
+
+pub fn unlink_file(path: &str) -> Result<u64, FxfsError> {
+    state().unlink_file(path)
+}
+
+pub fn release_unlinked_file(object_id: u64) -> Result<(), FxfsError> {
+    state().release_unlinked_file(object_id)
 }
 
 pub fn suspend_persist() -> FxfsPersistGuard {

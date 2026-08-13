@@ -2,6 +2,12 @@ pub(crate) const LINUX_ROOT_PID: usize = 1;
 pub(crate) const LINUX_LAUNCH_REAPER_PID: usize = usize::MAX;
 pub(crate) const LINUX_MAX_PID: usize = i32::MAX as usize;
 pub(crate) const LINUX_SIGCHLD: usize = 17;
+pub(crate) const LINUX_WAIT_WNOHANG: u32 = 1;
+pub(crate) const LINUX_WAIT_WUNTRACED: u32 = 2;
+
+pub(crate) const fn linux_wait_options_valid(options: u32) -> bool {
+    options & !(LINUX_WAIT_WNOHANG | LINUX_WAIT_WUNTRACED) == 0
+}
 
 pub(crate) const fn linux_child_exit_notification(exit_signal: usize) -> Option<usize> {
     if exit_signal == 0 {

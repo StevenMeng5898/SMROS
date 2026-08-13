@@ -232,6 +232,37 @@ macro_rules! smros_user_fxfs_dirent_capacity_valid_body {
     }};
 }
 
+macro_rules! smros_user_fxfs_link_count_after_link_body {
+    ($link_count:expr) => {{
+        if $link_count == 0 {
+            None
+        } else {
+            $link_count.checked_add(1)
+        }
+    }};
+}
+
+macro_rules! smros_user_fxfs_link_count_after_unlink_body {
+    ($link_count:expr) => {{
+        $link_count.checked_sub(1)
+    }};
+}
+
+pub(crate) fn fxfs_link_count_after_link(link_count: u32) -> Option<u32> {
+    smros_user_fxfs_link_count_after_link_body!(link_count)
+}
+
+pub(crate) fn fxfs_link_count_after_unlink(link_count: u32) -> Option<u32> {
+    smros_user_fxfs_link_count_after_unlink_body!(link_count)
+}
+
+pub(crate) const fn fxfs_unlinked_object_reclaimable(
+    link_count: u32,
+    open_references: usize,
+) -> bool {
+    link_count == 0 && open_references == 0
+}
+
 macro_rules! smros_user_fxfs_append_size_body {
     ($old_size:expr, $append_len:expr) => {{
         $old_size.checked_add($append_len)

@@ -3388,6 +3388,17 @@ mod linux_process_logic {
     }
 
     #[test]
+    fn wait_options_accept_posix_untraced_without_accepting_unknown_bits() {
+        assert!(linux_wait_options_valid(0));
+        assert!(linux_wait_options_valid(LINUX_WAIT_WNOHANG));
+        assert!(linux_wait_options_valid(LINUX_WAIT_WUNTRACED));
+        assert!(linux_wait_options_valid(
+            LINUX_WAIT_WNOHANG | LINUX_WAIT_WUNTRACED
+        ));
+        assert!(!linux_wait_options_valid(1 << 2));
+    }
+
+    #[test]
     fn process_counts_track_live_and_zombie_lifecycle_exactly() {
         let mut processes = LinuxProcessTable::<3>::new();
         processes.register_root(7).unwrap();
@@ -4345,6 +4356,12 @@ mod linux_process_memory_logic {
         assert_eq!(linux_shared_reference_release(1), Some(0));
         assert_eq!(linux_shared_reference_acquire(usize::MAX), None);
         assert_eq!(linux_shared_reference_release(0), None);
+    }
+
+    #[test]
+    fn shared_file_mapping_identity_follows_the_inode_not_its_path_alias() {
+        assert!(linux_shared_file_identity_matches(41, 41));
+        assert!(!linux_shared_file_identity_matches(41, 42));
     }
 
     #[test]
@@ -7976,6 +7993,19 @@ mod user_logic {
         assert!(!smros_user_ascii_shell_input_body!(b'\n'));
         assert_eq!(smros_user_decimal_digit_value_body!(b'7'), Some(7));
         assert_eq!(smros_user_decimal_digit_value_body!(b'x'), None);
+    }
+
+    #[test]
+    fn fxfs_hard_link_counts_retain_the_inode_until_the_last_name_is_removed() {
+        assert_eq!(fxfs_link_count_after_link(1), Some(2));
+        assert_eq!(fxfs_link_count_after_unlink(2), Some(1));
+        assert_eq!(fxfs_link_count_after_unlink(1), Some(0));
+        assert_eq!(fxfs_link_count_after_link(0), None);
+        assert_eq!(fxfs_link_count_after_link(u32::MAX), None);
+        assert_eq!(fxfs_link_count_after_unlink(0), None);
+        assert!(!fxfs_unlinked_object_reclaimable(0, 1));
+        assert!(fxfs_unlinked_object_reclaimable(0, 0));
+        assert!(!fxfs_unlinked_object_reclaimable(1, 0));
     }
 
     #[test]

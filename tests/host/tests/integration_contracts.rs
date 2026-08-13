@@ -4389,6 +4389,41 @@ fn linux_fxfs_stat_preserves_file_identity_for_dynamic_loader_deduplication() {
 }
 
 #[test]
+fn linux_named_semaphore_publication_uses_atomic_fxfs_links_and_inode_mmap_identity() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS service");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux syscall implementation");
+    let process_memory =
+        std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+            .expect("read Linux process memory implementation");
+
+    assert!(fxfs.contains("pub fn link_file("));
+    assert!(fxfs.contains("pub fn unlink_file("));
+    assert!(fxfs.contains("pub fn delete_file("));
+    assert!(fxfs.contains("pub fn release_unlinked_file("));
+
+    let link_start = syscall.find("pub fn sys_linkat(").expect("linkat syscall");
+    let link = braced_body(&syscall[link_start..]);
+    assert!(link.contains("fxfs::link_file("));
+
+    let unlink_start = syscall
+        .find("pub fn sys_unlinkat(")
+        .expect("unlinkat syscall");
+    let unlink = braced_body(&syscall[unlink_start..]);
+    assert!(unlink.contains("let object_id = fxfs::unlink_file(path.as_str())"));
+    assert!(!unlink.contains("fxfs::attrs_with_object_id("));
+    assert!(unlink.contains("linux_fxfs_object_is_open(object_id)"));
+    assert!(unlink.contains("fxfs::release_unlinked_file(object_id)"));
+
+    assert!(syscall.contains("object_id: file.cursor.object_id()"));
+    assert!(syscall.contains("fxfs::release_unlinked_file(object_id)"));
+    assert!(process_memory.contains("file_object_id: Option<u64>"));
+    assert!(process_memory.contains("linux_shared_file_identity_matches(current, file_object_id)"));
+}
+
+#[test]
 fn linux_sigtimedwait_selects_the_lowest_signal_across_pending_sources() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let task_logic =
@@ -6924,6 +6959,10 @@ fn linux_wait_reaps_one_real_child_status() {
         "pub(crate) fn wait_current(",
         "pub(crate) fn complete_wait_current(",
         "pub(crate) fn exit_current_process(",
+        "pub(crate) const LINUX_WAIT_WNOHANG: u32 = 1;",
+        "pub(crate) const LINUX_WAIT_WUNTRACED: u32 = 2;",
+        "pub(crate) const fn linux_wait_options_valid(options: u32) -> bool",
+        "options & !(LINUX_WAIT_WNOHANG | LINUX_WAIT_WUNTRACED) == 0",
     ] {
         assert!(
             process.contains(required) || process_logic.contains(required),
@@ -6938,7 +6977,8 @@ fn linux_wait_reaps_one_real_child_status() {
         .expect("wait runtime helper");
     let wait_runtime = braced_body(&process[wait_runtime_start..]);
     assert!(wait.contains("linux_wait_selector(pid"));
-    assert!(wait.contains("options & !LINUX_WNOHANG"));
+    assert!(wait.contains("!linux_process::linux_wait_options_valid(options)"));
+    assert!(wait.contains("options & linux_process::LINUX_WAIT_WNOHANG"));
     assert!(wait.contains("LinuxWaitOutcome::Ready"));
     assert!(wait.contains("complete_wait_current"));
     assert!(wait.contains("LinuxWaitOutcome::WouldBlock"));

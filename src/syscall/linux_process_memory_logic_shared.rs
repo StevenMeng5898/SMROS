@@ -15,6 +15,10 @@ pub(crate) const LINUX_MAP_SHARED: usize = 1;
 #[cfg(not(target_os = "none"))]
 pub(crate) const LINUX_MAP_PRIVATE: usize = 2;
 
+pub(crate) const fn linux_shared_file_identity_matches(left: u64, right: u64) -> bool {
+    left != 0 && left == right
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxMemoryFaultAccess {
     Read,
