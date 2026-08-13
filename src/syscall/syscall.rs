@@ -1735,6 +1735,7 @@ pub enum LinuxMappingSourceSnapshot {
         fd: usize,
         offset: u64,
         path: String,
+        backing_len: usize,
     },
     SharedMemory {
         id: u32,
@@ -2146,9 +2147,17 @@ impl MemorySyscallState {
                     linux_process_memory::LinuxMappingSource::Anonymous => {
                         LinuxMappingSourceSnapshot::Anonymous
                     }
-                    linux_process_memory::LinuxMappingSource::File { fd, offset, path } => {
-                        LinuxMappingSourceSnapshot::File { fd, offset, path }
-                    }
+                    linux_process_memory::LinuxMappingSource::File {
+                        fd,
+                        offset,
+                        path,
+                        backing_len,
+                    } => LinuxMappingSourceSnapshot::File {
+                        fd,
+                        offset,
+                        path,
+                        backing_len,
+                    },
                     linux_process_memory::LinuxMappingSource::SharedMemory { id } => {
                         LinuxMappingSourceSnapshot::SharedMemory { id }
                     }
@@ -4704,15 +4713,20 @@ fn linux_read_mmap_contents(
     source: &linux_process_memory::LinuxMappingSource,
     len: usize,
 ) -> Result<Vec<u8>, SysError> {
-    let linux_process_memory::LinuxMappingSource::File { offset, path, .. } = source else {
+    let linux_process_memory::LinuxMappingSource::File {
+        offset,
+        path,
+        backing_len,
+        ..
+    } = source
+    else {
         return Ok(Vec::new());
     };
-    let attrs = fxfs::attrs(path.as_str()).map_err(|_| SysError::EIO)?;
     let offset = usize::try_from(*offset).map_err(|_| SysError::EINVAL)?;
-    if offset >= attrs.size {
+    if offset >= *backing_len {
         return Ok(Vec::new());
     }
-    let read_len = core::cmp::min(len, attrs.size - offset);
+    let read_len = core::cmp::min(len, *backing_len - offset);
     let mut contents = Vec::new();
     contents
         .try_reserve_exact(read_len)
@@ -4759,10 +4773,13 @@ pub fn sys_mmap(
         if !page_aligned(offset as usize) {
             return Err(SysError::EINVAL);
         }
+        let path = linux_fxfs_path_for_fd(fd, true)?;
+        let attrs = fxfs::attrs(path.as_str()).map_err(|_| SysError::EIO)?;
         linux_process_memory::LinuxMappingSource::File {
             fd,
             offset,
-            path: linux_fxfs_path_for_fd(fd, true)?,
+            path,
+            backing_len: attrs.size,
         }
     };
 

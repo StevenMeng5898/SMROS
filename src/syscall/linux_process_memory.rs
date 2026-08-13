@@ -18,6 +18,7 @@ pub(crate) enum LinuxMappingSource {
         fd: usize,
         offset: u64,
         path: String,
+        backing_len: usize,
     },
     SharedMemory {
         id: u32,
@@ -32,7 +33,12 @@ impl LinuxMappingSource {
     fn try_slice(&self, delta: usize) -> Result<Self, SysError> {
         match self {
             Self::Anonymous => Ok(Self::Anonymous),
-            Self::File { fd, offset, path } => {
+            Self::File {
+                fd,
+                offset,
+                path,
+                backing_len,
+            } => {
                 let mut sliced_path = String::new();
                 sliced_path
                     .try_reserve_exact(path.len())
@@ -42,6 +48,7 @@ impl LinuxMappingSource {
                     fd: *fd,
                     offset: offset.saturating_add(delta as u64),
                     path: sliced_path,
+                    backing_len: *backing_len,
                 })
             }
             Self::SharedMemory { id } => Ok(Self::SharedMemory { id: *id }),
@@ -269,6 +276,13 @@ struct LinuxMappedPage {
     address: usize,
     backing: LinuxPageBacking,
     prot: usize,
+}
+
+#[derive(Clone, Copy)]
+struct LinuxPageProtectionChange {
+    address: usize,
+    old_prot: usize,
+    new_prot: usize,
 }
 
 pub(crate) struct BrkState {
@@ -805,12 +819,14 @@ pub(crate) fn clone_for_fork(
                     super::linux_process::fork_failpoint,
                 )?
             };
-            let map_result = super::linux_process::map_linux_fork_pages(
+            let map_result = super::linux_process::map_linux_fork_pages_with_protection(
                 &mut LinuxProcessForkPageOps { memory: &mut child },
                 mapping.addr,
                 PAGE_SIZE,
                 &pages,
-                mapping.prot,
+                |page_index| {
+                    LinuxProcessMemory::mapping_page_prot(&source, mapping.prot, page_index)
+                },
                 super::linux_process::fork_failpoint,
             );
             if let Err(error) = map_result {
@@ -1113,8 +1129,15 @@ pub(crate) fn mark_shared(address: usize, len: usize, object_id: u32) -> bool {
             SelfContainedSharedRollback::release(&acquired);
             return Ok(false);
         }
+        let planned_mapping = &plan.mappings[mapping_index];
         if memory
-            .map_unmapped_pages(address, &plan.mappings[mapping_index].pages, pages[0].prot)
+            .map_mapping_pages(
+                address,
+                &planned_mapping.pages,
+                &planned_mapping.source,
+                planned_mapping.prot,
+                0,
+            )
             .is_err()
         {
             memory.restore_mapped_pages(&pages);
@@ -1312,6 +1335,14 @@ pub(crate) fn user_range_writable(address: usize, len: usize) -> bool {
     with_current(|memory| Ok(memory.range_accessible(address, len, true))).unwrap_or(false)
 }
 
+pub(crate) fn classify_current_memory_fault(
+    address: usize,
+    access: LinuxMemoryFaultAccess,
+) -> LinuxMemoryFaultSignal {
+    with_current(|memory| memory.classify_memory_fault(address, access))
+        .unwrap_or(LinuxMemoryFaultSignal::SegvMaperr)
+}
+
 pub(crate) fn current_stats() -> Option<LinuxMemoryStats> {
     with_current(|memory| Ok(memory.stats())).ok()
 }
@@ -1372,6 +1403,82 @@ pub(crate) fn resource_counts() -> LinuxProcessMemoryResourceCounts {
 }
 
 impl LinuxProcessMemory {
+    fn classify_memory_fault(
+        &self,
+        address: usize,
+        access: LinuxMemoryFaultAccess,
+    ) -> Result<LinuxMemoryFaultSignal, SysError> {
+        let include_brk = self.brk.current > self.brk.start;
+        let capacity = self
+            .mappings
+            .len()
+            .checked_add(usize::from(include_brk))
+            .ok_or(SysError::ENOMEM)?;
+        let mut regions = Vec::new();
+        regions
+            .try_reserve_exact(capacity)
+            .map_err(|_| SysError::ENOMEM)?;
+        for mapping in &self.mappings {
+            let (file_offset, backing_len) = match &mapping.source {
+                LinuxMappingSource::File {
+                    offset,
+                    backing_len,
+                    ..
+                } => (usize::try_from(*offset).ok(), Some(*backing_len)),
+                LinuxMappingSource::Anonymous | LinuxMappingSource::SharedMemory { .. } => {
+                    (None, None)
+                }
+            };
+            regions.push(LinuxMemoryFaultRegion {
+                addr: mapping.addr,
+                len: mapping.len,
+                prot: mapping.prot,
+                file_offset,
+                backing_len,
+            });
+        }
+        if include_brk {
+            regions.push(LinuxMemoryFaultRegion {
+                addr: self.brk.start,
+                len: self.brk.current - self.brk.start,
+                prot: LINUX_PROT_READ | LINUX_PROT_WRITE,
+                file_offset: None,
+                backing_len: None,
+            });
+        }
+        Ok(linux_memory_fault_signal(
+            &regions, address, access, PAGE_SIZE,
+        ))
+    }
+
+    fn mapping_page_prot(
+        source: &LinuxMappingSource,
+        requested_prot: usize,
+        page_index: usize,
+    ) -> usize {
+        match source {
+            LinuxMappingSource::File {
+                offset,
+                backing_len,
+                ..
+            } => {
+                let Ok(offset) = usize::try_from(*offset) else {
+                    return 0;
+                };
+                linux_effective_mapping_page_prot(
+                    requested_prot,
+                    Some(offset),
+                    Some(*backing_len),
+                    page_index,
+                    PAGE_SIZE,
+                )
+            }
+            LinuxMappingSource::Anonymous | LinuxMappingSource::SharedMemory { .. } => {
+                linux_effective_mapping_page_prot(requested_prot, None, None, page_index, PAGE_SIZE)
+            }
+        }
+    }
+
     fn page_permissions(prot: usize) -> (bool, bool, bool) {
         (
             prot & (LINUX_PROT_READ | LINUX_PROT_WRITE) != 0,
@@ -1699,16 +1806,16 @@ impl LinuxProcessMemory {
         }
     }
 
-    fn map_unmapped_pages(
+    fn map_unmapped_pages_with_protection(
         &mut self,
         address: usize,
         pages: &[LinuxPageBacking],
-        prot: usize,
+        mut protection: impl FnMut(usize) -> usize,
     ) -> Result<(), SysError> {
         let mut mapped = 0usize;
         for (page_index, page) in pages.iter().enumerate() {
             let page_address = address + page_index * PAGE_SIZE;
-            if let Err(error) = self.map_page(page_address, page.pfn(), prot) {
+            if let Err(error) = self.map_page(page_address, page.pfn(), protection(page_index)) {
                 for rollback in (0..mapped).rev() {
                     let _ = self.unmap_page(address + rollback * PAGE_SIZE);
                 }
@@ -1717,6 +1824,32 @@ impl LinuxProcessMemory {
             mapped += 1;
         }
         Ok(())
+    }
+
+    fn map_unmapped_pages(
+        &mut self,
+        address: usize,
+        pages: &[LinuxPageBacking],
+        prot: usize,
+    ) -> Result<(), SysError> {
+        self.map_unmapped_pages_with_protection(address, pages, |_| prot)
+    }
+
+    fn map_mapping_pages(
+        &mut self,
+        address: usize,
+        pages: &[LinuxPageBacking],
+        source: &LinuxMappingSource,
+        requested_prot: usize,
+        first_page_index: usize,
+    ) -> Result<(), SysError> {
+        self.map_unmapped_pages_with_protection(address, pages, |page_index| {
+            Self::mapping_page_prot(
+                source,
+                requested_prot,
+                first_page_index.saturating_add(page_index),
+            )
+        })
     }
 
     fn try_mapped_pages_overlapping(
@@ -1754,7 +1887,7 @@ impl LinuxProcessMemory {
                 pages.push(LinuxMappedPage {
                     address: mapping.addr + page_index * PAGE_SIZE,
                     backing: mapping.pages[page_index],
-                    prot: mapping.prot,
+                    prot: Self::mapping_page_prot(&mapping.source, mapping.prot, page_index),
                 });
             }
         }
@@ -1767,6 +1900,16 @@ impl LinuxProcessMemory {
         pages: &[LinuxPageBacking],
         prot: usize,
     ) -> Result<Vec<LinuxMappedPage>, SysError> {
+        Self::try_mapped_pages_for_mapping(address, pages, &LinuxMappingSource::Anonymous, prot, 0)
+    }
+
+    fn try_mapped_pages_for_mapping(
+        address: usize,
+        pages: &[LinuxPageBacking],
+        source: &LinuxMappingSource,
+        requested_prot: usize,
+        first_page_index: usize,
+    ) -> Result<Vec<LinuxMappedPage>, SysError> {
         let mut mapped = Vec::new();
         mapped
             .try_reserve_exact(pages.len())
@@ -1777,7 +1920,11 @@ impl LinuxProcessMemory {
                     .checked_add(index.checked_mul(PAGE_SIZE).ok_or(SysError::ENOMEM)?)
                     .ok_or(SysError::ENOMEM)?,
                 backing,
-                prot,
+                prot: Self::mapping_page_prot(
+                    source,
+                    requested_prot,
+                    first_page_index.saturating_add(index),
+                ),
             });
         }
         Ok(mapped)
@@ -1818,21 +1965,49 @@ impl LinuxProcessMemory {
 
     fn protect_pages_transactionally(
         &mut self,
-        pages: &[LinuxMappedPage],
-        prot: usize,
+        changes: &[LinuxPageProtectionChange],
     ) -> Result<(), SysError> {
         let mut changed = 0usize;
-        for page in pages {
-            if let Err(error) = self.protect_page(page.address, prot) {
-                let _ = self.map_page(page.address, page.backing.pfn(), page.prot);
-                for rollback in pages[..changed].iter().rev() {
-                    let _ = self.protect_page(rollback.address, rollback.prot);
+        for change in changes {
+            if let Err(error) = self.protect_page(change.address, change.new_prot) {
+                let _ = self.protect_page(change.address, change.old_prot);
+                for rollback in changes[..changed].iter().rev() {
+                    let _ = self.protect_page(rollback.address, rollback.old_prot);
                 }
                 return Err(error);
             }
             changed += 1;
         }
         Ok(())
+    }
+
+    fn protection_changes(
+        pages: &[LinuxMappedPage],
+        mappings: &[LinuxProcessMapping],
+    ) -> Result<Vec<LinuxPageProtectionChange>, SysError> {
+        let mut changes = Vec::new();
+        changes
+            .try_reserve_exact(pages.len())
+            .map_err(|_| SysError::ENOMEM)?;
+        for page in pages {
+            let mapping = mappings
+                .iter()
+                .find(|mapping| {
+                    page.address >= mapping.addr
+                        && mapping
+                            .addr
+                            .checked_add(mapping.len)
+                            .is_some_and(|end| page.address < end)
+                })
+                .ok_or(SysError::EINVAL)?;
+            let page_index = (page.address - mapping.addr) / PAGE_SIZE;
+            changes.push(LinuxPageProtectionChange {
+                address: page.address,
+                old_prot: page.prot,
+                new_prot: Self::mapping_page_prot(&mapping.source, mapping.prot, page_index),
+            });
+        }
+        Ok(changes)
     }
 
     fn map(
@@ -1906,13 +2081,14 @@ impl LinuxProcessMemory {
             pages,
             source,
         });
-        let mapping_pages = &plan
+        let mapping = plan
             .mappings
             .iter()
             .find(|mapping| mapping.addr == address && mapping.len == len)
-            .expect("reserved mapping was inserted")
-            .pages;
-        if let Err(error) = self.map_unmapped_pages(address, mapping_pages, prot) {
+            .expect("reserved mapping was inserted");
+        if let Err(error) =
+            self.map_mapping_pages(address, &mapping.pages, &mapping.source, mapping.prot, 0)
+        {
             let replacement = plan
                 .take_mapping(address, len)
                 .expect("failed mapping remains staged");
@@ -1961,12 +2137,11 @@ impl LinuxProcessMemory {
             source,
         });
         plan.reconcile_shared_attachments();
-        let mapping_pages = &plan
+        let mapping = plan
             .mappings
             .iter()
             .find(|mapping| mapping.addr == address && mapping.len == len)
-            .expect("replacement mapping was inserted")
-            .pages;
+            .expect("replacement mapping was inserted");
 
         if let Err(error) = self.unmap_pages_transactionally(&old_pages) {
             let replacement = plan
@@ -1974,7 +2149,9 @@ impl LinuxProcessMemory {
                 .expect("failed replacement remains staged");
             return Err((error, replacement.pages));
         }
-        if let Err(error) = self.map_unmapped_pages(address, mapping_pages, prot) {
+        if let Err(error) =
+            self.map_mapping_pages(address, &mapping.pages, &mapping.source, mapping.prot, 0)
+        {
             self.restore_mapped_pages(&old_pages);
             let replacement = plan
                 .take_mapping(address, len)
@@ -1994,7 +2171,8 @@ impl LinuxProcessMemory {
         let mut plan = LinuxMappingMetadataPlan::try_clone_mapping_metadata(self)?;
         plan.try_transform_range(address, len, Some(prot))?;
         let pages = self.try_mapped_pages_overlapping(address, len)?;
-        self.protect_pages_transactionally(&pages, prot)?;
+        let changes = Self::protection_changes(&pages, &plan.mappings)?;
+        self.protect_pages_transactionally(&changes)?;
         let _ = self.commit_mapping_metadata(plan);
         Ok(())
     }
@@ -2149,6 +2327,8 @@ impl LinuxProcessMemory {
             && self.range_available(grow_start, extra_len)
         {
             let prot = self.mappings[index].prot;
+            let source = self.mappings[index].source.try_clone_for_fork()?;
+            let first_page_index = self.mappings[index].pages.len();
             let planned_page_count = self.mappings[index]
                 .pages
                 .len()
@@ -2161,7 +2341,9 @@ impl LinuxProcessMemory {
             planned_pages.extend_from_slice(&self.mappings[index].pages);
             let pages = self.allocate_unmapped_pages(extra_len, &[])?;
             planned_pages.extend_from_slice(&pages);
-            if let Err(error) = self.map_unmapped_pages(grow_start, &pages, prot) {
+            if let Err(error) =
+                self.map_mapping_pages(grow_start, &pages, &source, prot, first_page_index)
+            {
                 Self::free_backings(&pages);
                 return Err(error);
             }
@@ -2219,7 +2401,8 @@ impl LinuxProcessMemory {
         contents.resize(copy_len, 0);
         Self::copy_mapping_backings(&self.mappings[index].pages, &mut contents)?;
         let pages = self.allocate_unmapped_pages(new_len, &contents)?;
-        let mapped = match Self::try_mapped_pages_from_backings(new_address, &pages, prot) {
+        let mapped = match Self::try_mapped_pages_for_mapping(new_address, &pages, &source, prot, 0)
+        {
             Ok(mapped) => mapped,
             Err(error) => {
                 Self::free_backings(&pages);
@@ -2235,12 +2418,11 @@ impl LinuxProcessMemory {
             source,
         });
         plan.reconcile_shared_attachments();
-        let mapping_pages = &plan
+        let mapping = plan
             .mappings
             .iter()
             .find(|mapping| mapping.addr == new_address && mapping.len == new_len)
-            .expect("remap destination was inserted")
-            .pages;
+            .expect("remap destination was inserted");
         if let Err(error) = self.unmap_pages_transactionally(&replaced) {
             let replacement = plan
                 .take_mapping(new_address, new_len)
@@ -2248,7 +2430,13 @@ impl LinuxProcessMemory {
             Self::free_backings(&replacement.pages);
             return Err(error);
         }
-        if let Err(error) = self.map_unmapped_pages(new_address, mapping_pages, prot) {
+        if let Err(error) = self.map_mapping_pages(
+            new_address,
+            &mapping.pages,
+            &mapping.source,
+            mapping.prot,
+            0,
+        ) {
             self.restore_mapped_pages(&replaced);
             let replacement = plan
                 .take_mapping(new_address, new_len)

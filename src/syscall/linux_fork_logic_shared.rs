@@ -597,6 +597,17 @@ pub(crate) fn map_linux_fork_pages<O: LinuxForkPageOps>(
     page_size: usize,
     pages: &[O::Page],
     prot: usize,
+    should_fail: impl FnMut(LinuxForkFailurePoint) -> bool,
+) -> Result<(), O::Error> {
+    map_linux_fork_pages_with_protection(ops, address, page_size, pages, |_| prot, should_fail)
+}
+
+pub(crate) fn map_linux_fork_pages_with_protection<O: LinuxForkPageOps>(
+    ops: &mut O,
+    address: usize,
+    page_size: usize,
+    pages: &[O::Page],
+    mut protection: impl FnMut(usize) -> usize,
     mut should_fail: impl FnMut(LinuxForkFailurePoint) -> bool,
 ) -> Result<(), O::Error> {
     let mut mapped = 0usize;
@@ -610,7 +621,7 @@ pub(crate) fn map_linux_fork_pages<O: LinuxForkPageOps>(
             }
             return Err(ops.failure_error());
         };
-        if let Err(error) = ops.map_page(page_address, page, prot) {
+        if let Err(error) = ops.map_page(page_address, page, protection(mapped)) {
             for rollback in (0..mapped).rev() {
                 ops.unmap_page(address + rollback * page_size);
             }

@@ -10061,7 +10061,12 @@ fn print_linux_mapping_source(
 ) {
     match source {
         crate::syscall::LinuxMappingSourceSnapshot::Anonymous => ctx.serial.write_str("anonymous"),
-        crate::syscall::LinuxMappingSourceSnapshot::File { fd, offset, path } => {
+        crate::syscall::LinuxMappingSourceSnapshot::File {
+            fd,
+            offset,
+            path,
+            backing_len: _,
+        } => {
             ctx.serial.write_str("file(fd=");
             print_usize(&mut ctx.serial, *fd);
             ctx.serial.write_str(",off=0x");

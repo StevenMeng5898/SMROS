@@ -4141,6 +4141,121 @@ mod linux_process_memory_logic {
         "/../../src/kernel_lowlevel/ARM64/context_shared.rs"
     ));
 
+    struct PerPageProtectionOps {
+        mapped: Vec<(usize, u64, usize)>,
+        unmapped: Vec<usize>,
+        map_attempts: usize,
+        fail_map_attempt: Option<usize>,
+    }
+
+    impl PerPageProtectionOps {
+        fn new(fail_map_attempt: Option<usize>) -> Self {
+            Self {
+                mapped: Vec::new(),
+                unmapped: Vec::new(),
+                map_attempts: 0,
+                fail_map_attempt,
+            }
+        }
+    }
+
+    impl LinuxForkPageOps for PerPageProtectionOps {
+        type Page = u64;
+        type Error = ();
+
+        fn failure_error(&self) -> Self::Error {}
+
+        fn is_private(&self, _page: Self::Page) -> bool {
+            true
+        }
+
+        fn allocate_private(&mut self, parent: Self::Page) -> Result<Self::Page, Self::Error> {
+            Ok(parent)
+        }
+
+        fn copy_private(
+            &mut self,
+            _parent: Self::Page,
+            _child: Self::Page,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn acquire_shared(&mut self, parent: Self::Page) -> Result<Self::Page, Self::Error> {
+            Ok(parent)
+        }
+
+        fn release_page(&mut self, _page: Self::Page) {}
+
+        fn map_page(
+            &mut self,
+            address: usize,
+            page: Self::Page,
+            prot: usize,
+        ) -> Result<(), Self::Error> {
+            self.map_attempts += 1;
+            if self.fail_map_attempt == Some(self.map_attempts) {
+                return Err(());
+            }
+            self.mapped.push((address, page, prot));
+            Ok(())
+        }
+
+        fn unmap_page(&mut self, address: usize) {
+            self.unmapped.push(address);
+            let index = self
+                .mapped
+                .iter()
+                .position(|(mapped, _, _)| *mapped == address)
+                .expect("rollback address was mapped");
+            self.mapped.remove(index);
+        }
+    }
+
+    #[test]
+    fn map_linux_fork_pages_with_protection_applies_each_page_and_rolls_back_in_reverse() {
+        let pages = [41, 42, 43];
+        let mut success = PerPageProtectionOps::new(None);
+        map_linux_fork_pages_with_protection(
+            &mut success,
+            0x1000,
+            0x1000,
+            &pages,
+            |index| {
+                if index == 1 {
+                    0
+                } else {
+                    LINUX_PROT_READ
+                }
+            },
+            |_| false,
+        )
+        .expect("per-page fork map");
+        assert_eq!(
+            success
+                .mapped
+                .iter()
+                .map(|(_, _, prot)| *prot)
+                .collect::<Vec<_>>(),
+            vec![LINUX_PROT_READ, 0, LINUX_PROT_READ]
+        );
+
+        let mut failure = PerPageProtectionOps::new(Some(3));
+        assert_eq!(
+            map_linux_fork_pages_with_protection(
+                &mut failure,
+                0x1000,
+                0x1000,
+                &pages,
+                |_| LINUX_PROT_READ,
+                |_| false,
+            ),
+            Err(())
+        );
+        assert!(failure.mapped.is_empty());
+        assert_eq!(failure.unmapped, vec![0x2000, 0x1000]);
+    }
+
     #[test]
     fn memory_fault_policy_distinguishes_maperr_accerr_and_file_tail_bus() {
         let anonymous = LinuxMemoryFaultRegion {

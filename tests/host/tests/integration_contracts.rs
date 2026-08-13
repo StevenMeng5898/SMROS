@@ -1055,6 +1055,54 @@ fn braced_body(source: &str) -> &str {
     panic!("closing brace");
 }
 
+#[test]
+fn linux_file_tail_fault_metadata_is_preserved_at_every_mapping_boundary() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read Linux process memory runtime");
+    let fork = std::fs::read_to_string(repository.join("src/syscall/linux_fork_logic_shared.rs"))
+        .expect("read Linux fork page logic");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux mmap syscall runtime");
+
+    for token in [
+        "backing_len: usize",
+        "backing_len: *backing_len",
+        "linux_effective_mapping_page_prot(",
+        "classify_current_memory_fault(",
+    ] {
+        assert!(
+            memory.contains(token),
+            "missing file-fault metadata token {token}"
+        );
+    }
+    assert!(syscall.contains("backing_len: attrs.size"));
+    assert!(syscall.contains("linux_read_mmap_contents(&source, len)"));
+    assert!(fork.contains("pub(crate) fn map_linux_fork_pages_with_protection"));
+    assert!(memory.contains("super::linux_process::map_linux_fork_pages_with_protection("));
+
+    let slice = braced_body(
+        &memory[memory
+            .find("fn try_slice(")
+            .expect("mapping source slice implementation")..],
+    );
+    assert!(slice.contains("backing_len: *backing_len"));
+    assert!(slice.contains("offset: offset.saturating_add(delta as u64)"));
+
+    for boundary in [
+        "fn try_mapping_piece(",
+        "pub(crate) fn clone_for_fork(",
+        "fn replace_mapping_transactionally(",
+        "fn protect(",
+        "fn remap(",
+    ] {
+        assert!(
+            memory.contains(boundary),
+            "missing mapping boundary {boundary}"
+        );
+    }
+}
+
 fn assembly_routine<'a>(source: &'a str, name: &str) -> &'a str {
     let label = format!("{name}:");
     let start = source.find(&label).expect("assembly routine label");
@@ -5264,6 +5312,7 @@ fn linux_process_memory_metadata_commit_is_allocation_free() {
         let body = braced_body(&memory[start..]);
         let first_hardware_mutation = [
             "map_unmapped_pages(",
+            "map_mapping_pages(",
             "protect_pages_transactionally(",
             "unmap_pages_transactionally(",
         ]
