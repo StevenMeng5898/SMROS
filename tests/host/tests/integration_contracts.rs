@@ -5503,6 +5503,42 @@ fn linux_process_memory_mutations_are_transactional_and_bounded() {
 }
 
 #[test]
+fn linux_common_mmap_paths_avoid_quadratic_metadata_cloning() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let process_memory =
+        std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+            .expect("read process memory runtime");
+
+    let map_start = process_memory
+        .find("    fn map(\n")
+        .expect("process mapping implementation");
+    let map = braced_body(&process_memory[map_start..]);
+    assert!(map.contains("self.mappings"));
+    assert!(map.contains(".try_reserve(1)"));
+    assert!(map.contains("self.mappings.insert(index, mapping)"));
+    assert!(!map.contains("LinuxMappingMetadataPlan::try_clone_mapping_metadata(self)?"));
+
+    let find_start = process_memory
+        .find("    fn find_free_region(")
+        .expect("free-region search");
+    let find = braced_body(&process_memory[find_start..]);
+    assert!(find.contains("self.mappings.partition_point"));
+
+    let unmap_start = process_memory
+        .find("    fn unmap(&mut self")
+        .expect("process unmap implementation");
+    let unmap = braced_body(&process_memory[unmap_start..]);
+    let exact = unmap
+        .find("exact_mapping_index")
+        .expect("exact mapping fast path");
+    let clone = unmap
+        .find("LinuxMappingMetadataPlan::try_clone_mapping_metadata(self)?")
+        .expect("general transactional unmap path");
+    assert!(exact < clone);
+    assert!(unmap.contains("self.next_addr = core::cmp::min(self.next_addr, address)"));
+}
+
+#[test]
 fn linux_process_memory_metadata_commit_is_allocation_free() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
@@ -5548,6 +5584,7 @@ fn linux_process_memory_metadata_commit_is_allocation_free() {
             "try_clone_mapping_metadata(",
             "try_mapped_pages_overlapping(",
             "try_mapped_pages_from_backings(",
+            "try_reserve(",
             "try_reserve_exact",
         ]
         .into_iter()

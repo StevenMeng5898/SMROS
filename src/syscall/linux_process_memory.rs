@@ -1670,7 +1670,13 @@ impl LinuxProcessMemory {
             }
         }
         let mut candidate = self.next_addr.max(LINUX_MMAP_BASE);
-        for mapping in &self.mappings {
+        let first_candidate = self.mappings.partition_point(|mapping| {
+            mapping
+                .addr
+                .checked_add(mapping.len)
+                .is_some_and(|end| end <= candidate)
+        });
+        for mapping in &self.mappings[first_candidate..] {
             if mapping.addr >= LINUX_BRK_BASE {
                 break;
             }
@@ -2066,40 +2072,36 @@ impl LinuxProcessMemory {
             return Ok((address, detached));
         }
 
-        let mut plan = LinuxMappingMetadataPlan::try_clone_mapping_metadata(self)?;
-        plan.try_reserve_mapping_slot()?;
+        self.mappings
+            .try_reserve(1)
+            .map_err(|_| SysError::ENOMEM)?;
+        let index = self
+            .mappings
+            .partition_point(|candidate| candidate.addr <= address);
         let pages = if flags & LINUX_MAP_SHARED != 0 {
             self.allocate_shared_mmap_pages(len, contents, &source)?
         } else {
             self.allocate_unmapped_pages(len, contents)?
         };
-        plan.insert_mapping(LinuxProcessMapping {
+        let mapping = LinuxProcessMapping {
             addr: address,
             len,
             prot,
             flags,
             pages,
             source,
-        });
-        let mapping = plan
-            .mappings
-            .iter()
-            .find(|mapping| mapping.addr == address && mapping.len == len)
-            .expect("reserved mapping was inserted");
+        };
         if let Err(error) =
             self.map_mapping_pages(address, &mapping.pages, &mapping.source, mapping.prot, 0)
         {
-            let replacement = plan
-                .take_mapping(address, len)
-                .expect("failed mapping remains staged");
-            Self::free_backings(&replacement.pages);
+            Self::free_backings(&mapping.pages);
             return Err(error);
         }
-        let (_, detached) = self.commit_mapping_metadata(plan);
+        self.mappings.insert(index, mapping);
         if let Some(next_addr) = next_addr {
             self.next_addr = next_addr;
         }
-        Ok((address, detached))
+        Ok((address, Vec::new()))
     }
 
     fn replace_mapping_transactionally(
@@ -2179,6 +2181,19 @@ impl LinuxProcessMemory {
 
     fn unmap(&mut self, address: usize, len: usize) -> Result<Vec<(u32, usize)>, SysError> {
         address.checked_add(len).ok_or(SysError::EINVAL)?;
+        let exact_mapping_index = self.mappings.iter().position(|mapping| {
+            mapping.addr == address
+                && mapping.len == len
+                && !matches!(mapping.source, LinuxMappingSource::SharedMemory { .. })
+        });
+        if let Some(index) = exact_mapping_index {
+            let pages = self.try_mapped_pages_overlapping(address, len)?;
+            self.unmap_pages_transactionally(&pages)?;
+            let mapping = self.mappings.remove(index);
+            self.next_addr = core::cmp::min(self.next_addr, address);
+            Self::free_backings(&mapping.pages);
+            return Ok(Vec::new());
+        }
         let pages = self.try_mapped_pages_overlapping(address, len)?;
         if pages.is_empty() {
             return Err(SysError::EINVAL);
