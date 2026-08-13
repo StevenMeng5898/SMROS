@@ -52,18 +52,21 @@ use super::linux_process::{
     try_clone_linux_fork_path, LinuxCredentialsCore, LinuxDescriptorEntry, LinuxKernelSigaction,
     LinuxOpenDescription,
 };
-use super::linux_process_memory;
+use super::linux_process_memory::{
+    self, LinuxMemoryFaultAccess, LinuxMemoryFaultSignal,
+};
 use super::linux_record_lock;
 #[cfg(target_arch = "aarch64")]
 use super::linux_syscall_context;
 use super::linux_task;
 use super::linux_task::{
-    select_linux_pending_signal, LinuxBlockReason, LinuxCloneRequest, LinuxCloneValidationError,
-    LinuxPendingSignal, LinuxPendingSignalReservation, LinuxPendingSignalSource,
-    LinuxPendingSignals, LinuxRestartBlock, LinuxSignalDisposition, LinuxSignalFrame,
-    LinuxSignalStack, LinuxSignalWait, LinuxSignalWaitOutcome, LinuxSleepOutcome, LinuxSleepWait,
-    CLONE_CHILD_CLEARTID, CLONE_CHILD_SETTID, CLONE_FILES, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM,
-    LINUX_SIGNAL_FRAME_LIMIT, LINUX_SIGNAL_INFO_BYTES,
+    linux_aarch64_signal_user_frame, linux_aarch64_ucontext_core, select_linux_pending_signal,
+    LinuxBlockReason, LinuxCloneRequest, LinuxCloneValidationError, LinuxPendingSignal,
+    LinuxPendingSignalReservation, LinuxPendingSignalSource, LinuxPendingSignals,
+    LinuxRestartBlock, LinuxSignalDisposition, LinuxSignalFrame, LinuxSignalStack, LinuxSignalWait,
+    LinuxSignalWaitOutcome, LinuxSleepOutcome, LinuxSleepWait, CLONE_CHILD_CLEARTID,
+    CLONE_CHILD_SETTID, CLONE_FILES, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM,
+    LINUX_AARCH64_UCONTEXT_BYTES, LINUX_SIGNAL_INFO_BYTES,
 };
 use crate::kernel_lowlevel::memory::{process_manager, PAGE_SIZE};
 use crate::kernel_objects::channel;
@@ -566,9 +569,14 @@ const LINUX_MAX_SIGNAL: usize = 64;
 const LINUX_SIGSET_SIZE: usize = core::mem::size_of::<u64>();
 const LINUX_SIG_DFL: u64 = 0;
 const LINUX_SIG_IGN: u64 = 1;
+const LINUX_SIGBUS: usize = 7;
+const LINUX_SIGSEGV: usize = 11;
 const LINUX_SIGALRM: usize = 14;
 const LINUX_SIGCHLD: usize = 17;
 const LINUX_SIGKILL: usize = 9;
+const LINUX_SEGV_MAPERR: i32 = 1;
+const LINUX_SEGV_ACCERR: i32 = 2;
+const LINUX_BUS_ADRERR: i32 = 2;
 const LINUX_SA_SIGINFO: u64 = 0x0000_0004;
 const LINUX_SA_ONSTACK: u64 = 0x0800_0000;
 const LINUX_SA_RESETHAND: u64 = 0x8000_0000;
@@ -3453,11 +3461,7 @@ static mut MEMORY_SYSCALL_STATE: Option<MemorySyscallState> = None;
 static LINUX_SIGNAL_TRAMPOLINE: AtomicU64 = AtomicU64::new(0);
 static LINUX_REALTIME_OFFSET_NANOS: AtomicI64 = AtomicI64::new(0);
 
-const LINUX_SIGNAL_INFO_OFFSET: usize = PAGE_SIZE;
-const LINUX_SIGNAL_INFO_STORAGE_BYTES: usize =
-    linux_task::LINUX_TASK_LIMIT * LINUX_SIGNAL_FRAME_LIMIT * LINUX_SIGNAL_INFO_BYTES;
-const LINUX_SIGNAL_TRAMPOLINE_BYTES: usize =
-    (LINUX_SIGNAL_INFO_OFFSET + LINUX_SIGNAL_INFO_STORAGE_BYTES + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+const LINUX_SIGNAL_TRAMPOLINE_BYTES: usize = PAGE_SIZE;
 fn memory_state() -> &'static mut MemorySyscallState {
     unsafe {
         if MEMORY_SYSCALL_STATE.is_none() {
@@ -4401,6 +4405,143 @@ fn queue_directed_linux_signal(
     result
 }
 
+fn install_linux_signal_handler(
+    saved_regs: usize,
+    return_pc: u64,
+    pending: LinuxPendingSignal,
+    action: LinuxKernelSigaction,
+    restart: Option<LinuxRestartBlock>,
+    context_fault_address: u64,
+) -> Result<(), SysError> {
+    const LINUX_SA_NODEFER: u64 = 0x4000_0000;
+
+    if saved_regs == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let trampoline = ensure_linux_signal_trampoline()?;
+    let saved_registers = unsafe { core::ptr::read(saved_regs as *const [u64; 32]) };
+    let user_sp = crate::kernel_lowlevel::cpu::read_user_stack_pointer();
+    let pstate = crate::kernel_lowlevel::cpu::read_exception_return_state();
+    let prepared = linux_task::with_current_signal_state(|signal_state| {
+        if signal_state.frame_depth >= signal_state.frames.len() {
+            return None;
+        }
+        let handler_base_mask = signal_state.mask;
+        let previous_mask = signal_state
+            .suspend_restore_mask
+            .unwrap_or(handler_base_mask);
+        let mut handler_mask = handler_base_mask | action.mask;
+        if action.flags & LINUX_SA_NODEFER == 0 {
+            handler_mask |= linux_signal_bit(pending.signum);
+        }
+        let alt_stack = signal_state.alt_stack;
+        let use_alt_stack = action.flags & LINUX_SA_ONSTACK != 0
+            && alt_stack.flags as u64 & (LINUX_SS_DISABLE | LINUX_SS_ONSTACK) == 0;
+        let stack_top = if use_alt_stack {
+            alt_stack.sp.checked_add(alt_stack.size)? & !0xf
+        } else {
+            user_sp
+        };
+        let (frame_sp, info, context) = linux_aarch64_signal_user_frame(stack_top)?;
+        Some((
+            signal_state.frame_depth,
+            handler_base_mask,
+            previous_mask,
+            handler_mask,
+            alt_stack,
+            use_alt_stack,
+            frame_sp,
+            info,
+            context,
+        ))
+    })?;
+    let Some((
+        frame_depth,
+        handler_base_mask,
+        previous_mask,
+        handler_mask,
+        alt_stack,
+        use_alt_stack,
+        frame_sp,
+        info,
+        context,
+    )) = prepared
+    else {
+        return Err(SysError::EFAULT);
+    };
+
+    let user_frame_bytes = LINUX_SIGNAL_INFO_BYTES
+        .checked_add(LINUX_AARCH64_UCONTEXT_BYTES)
+        .ok_or(SysError::EFAULT)?;
+    let frame_address = usize::try_from(frame_sp).map_err(|_| SysError::EFAULT)?;
+    if !linux_signal_user_range_writable(frame_address, user_frame_bytes) {
+        return Err(SysError::EFAULT);
+    }
+    let mut signal_info = pending.info;
+    if !pending.has_info {
+        signal_info = [0; LINUX_SIGNAL_INFO_BYTES];
+        signal_info[..core::mem::size_of::<i32>()]
+            .copy_from_slice(&(pending.signum as i32).to_ne_bytes());
+    }
+    linux_copy_to_user(info as usize, &signal_info)?;
+    linux_zero_user(context as usize, LINUX_AARCH64_UCONTEXT_BYTES)?;
+    let context_core = linux_aarch64_ucontext_core(
+        context_fault_address,
+        saved_registers,
+        user_sp,
+        return_pc,
+        pstate,
+        previous_mask,
+        alt_stack,
+    );
+    linux_copy_to_user(context as usize, &context_core)?;
+
+    let frame = LinuxSignalFrame {
+        regs: saved_registers,
+        return_pc,
+        previous_mask,
+        user_sp,
+        previous_stack_flags: alt_stack.flags as u64,
+        restart,
+    };
+    let installed = linux_task::with_current_signal_state(|signal_state| {
+        if signal_state.frame_depth != frame_depth
+            || signal_state.mask != handler_base_mask
+            || signal_state.alt_stack != alt_stack
+            || signal_state
+                .suspend_restore_mask
+                .unwrap_or(handler_base_mask)
+                != previous_mask
+        {
+            return false;
+        }
+        if signal_state.push_frame(frame).is_none() {
+            return false;
+        }
+        signal_state.suspend_restore_mask = None;
+        signal_state.mask = handler_mask & !linux_uncatchable_signal_mask();
+        if use_alt_stack {
+            signal_state.alt_stack.flags = LINUX_SS_ONSTACK as u32;
+        }
+        true
+    })?;
+    if !installed {
+        return Err(SysError::EAGAIN);
+    }
+    let regs = unsafe { &mut *(saved_regs as *mut [u64; 32]) };
+    regs[0] = pending.signum as u64;
+    regs[1] = 0;
+    regs[2] = 0;
+    regs[16] = action.handler;
+    if action.flags & LINUX_SA_SIGINFO != 0 {
+        regs[1] = info;
+        regs[2] = context;
+    }
+    crate::kernel_lowlevel::cpu::set_user_stack_pointer(frame_sp);
+    crate::kernel_lowlevel::cpu::set_exception_return_pc(trampoline as u64);
+    Ok(())
+}
+
 fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
     const LINUX_SA_RESTART: u64 = 0x1000_0000;
     while let Some(deliverable) = take_unblocked_linux_signal() {
@@ -4434,65 +4575,13 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
             }
             linux_process::LinuxSignalDeliveryRoute::Handle => {}
         }
-        let Ok(trampoline) = ensure_linux_signal_trampoline() else {
-            if requeue_linux_signal(deliverable).is_err() {
-                return false;
-            }
-            return false;
-        };
         let restart = linux_task::with_current_signal_state(|signal_state| {
             signal_state.take_restart_for_signal(action.flags & LINUX_SA_RESTART != 0)
         })
         .ok()
         .flatten();
-        let regs = unsafe { core::ptr::read(saved_regs as *const [u64; 32]) };
-        let user_sp = crate::kernel_lowlevel::cpu::read_user_stack_pointer();
-        let prepared = linux_task::with_current_signal_state_and_slot(|task_slot, signal_state| {
-            let handler_base_mask = signal_state.mask;
-            let previous_mask = signal_state
-                .suspend_restore_mask
-                .unwrap_or(handler_base_mask);
-            let mut handler_mask = handler_base_mask | action.mask;
-            const LINUX_SA_NODEFER: u64 = 0x4000_0000;
-            if action.flags & LINUX_SA_NODEFER == 0 {
-                handler_mask |= linux_signal_bit(signum);
-            }
-            let frame = LinuxSignalFrame {
-                regs,
-                return_pc,
-                previous_mask,
-                user_sp,
-                previous_stack_flags: signal_state.alt_stack.flags as u64,
-                restart,
-            };
-            let info_offset =
-                linux_task::linux_signal_info_offset(task_slot, signal_state.frame_depth)?;
-            let info = trampoline
-                .checked_add(LINUX_SIGNAL_INFO_OFFSET)?
-                .checked_add(info_offset)?;
-            signal_state.push_frame(frame)?;
-            signal_state.suspend_restore_mask = None;
-            signal_state.mask = handler_mask & !linux_uncatchable_signal_mask();
-            let stack_top = if action.flags & LINUX_SA_ONSTACK != 0
-                && signal_state.alt_stack.flags as u64 & (LINUX_SS_DISABLE | LINUX_SS_ONSTACK) == 0
-            {
-                let stack_top = signal_state
-                    .alt_stack
-                    .sp
-                    .saturating_add(signal_state.alt_stack.size)
-                    & !0xf;
-                if stack_top != 0 {
-                    signal_state.alt_stack.flags = LINUX_SS_ONSTACK as u32;
-                    Some(stack_top)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            Some((stack_top, info))
-        });
-        let Ok(Some((stack_top, info))) = prepared else {
+        if install_linux_signal_handler(saved_regs, return_pc, pending, action, restart, 0).is_err()
+        {
             if let Some(restart) = restart {
                 let _ = linux_task::install_current_restart_block(restart);
             }
@@ -4500,41 +4589,64 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
                 return false;
             }
             return false;
-        };
+        }
         if commit_linux_signal(deliverable).is_err() {
             return false;
         }
         if action.flags & LINUX_SA_RESETHAND != 0 {
             store_linux_signal_action(signum, LinuxKernelSigaction::default());
         }
-        if let Some(stack_top) = stack_top {
-            crate::kernel_lowlevel::cpu::set_user_stack_pointer(stack_top);
-        }
-
-        let regs = unsafe { &mut *(saved_regs as *mut [u64; 32]) };
-        regs[0] = signum as u64;
-        regs[1] = 0;
-        regs[2] = 0;
-        regs[16] = action.handler;
-        if action.flags & LINUX_SA_SIGINFO != 0 {
-            let copied = if pending.has_info {
-                linux_copy_to_user(info, &pending.info)
-            } else {
-                linux_zero_user(info, LINUX_SIGNAL_INFO_BYTES)
-                    .and_then(|_| {
-                        linux_copy_to_user(info, &(signum as i32).to_ne_bytes()).map(|_| 0)
-                    })
-                    .map(|_| ())
-            };
-            if copied.is_err() {
-                return false;
-            }
-            regs[1] = info as u64;
-        }
-        crate::kernel_lowlevel::cpu::set_exception_return_pc(trampoline as u64);
         return true;
     }
     false
+}
+
+pub(crate) fn deliver_linux_synchronous_memory_fault(
+    saved_regs: usize,
+    return_pc: u64,
+    fault_address: u64,
+    access: LinuxMemoryFaultAccess,
+) -> Result<(), SysError> {
+    if saved_regs == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let current = linux_task::current_task()?;
+    let (signum, code) = match linux_process_memory::classify_current_memory_fault(
+        fault_address as usize,
+        access,
+    ) {
+        LinuxMemoryFaultSignal::SegvMaperr => (LINUX_SIGSEGV, LINUX_SEGV_MAPERR),
+        LinuxMemoryFaultSignal::SegvAccerr => (LINUX_SIGSEGV, LINUX_SEGV_ACCERR),
+        LinuxMemoryFaultSignal::BusAdrerr => (LINUX_SIGBUS, LINUX_BUS_ADRERR),
+    };
+    let pending = LinuxPendingSignal::synchronous_fault(signum, code, fault_address);
+    let action = linux_signal_action(signum);
+    let blocked = linux_task::with_current_signal_state(|signal_state| {
+        signal_state.mask & linux_signal_bit(signum) != 0
+    })?;
+    if linux_task::linux_signal_disposition(action.handler, signum)
+        == LinuxSignalDisposition::Handled
+        && !blocked
+        && install_linux_signal_handler(
+            saved_regs,
+            return_pc,
+            pending,
+            action,
+            None,
+            fault_address,
+        )
+        .is_ok()
+    {
+        if action.flags & LINUX_SA_RESETHAND != 0 {
+            store_linux_signal_action(signum, LinuxKernelSigaction::default());
+        }
+        return Ok(());
+    }
+
+    let launch_id = terminate_linux_process_by_signal(current.tgid, signum)?;
+    let regs = unsafe { &mut *(saved_regs as *mut [u64; 32]) };
+    regs[0] = launch_id as u64;
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

@@ -1103,6 +1103,81 @@ fn linux_file_tail_fault_metadata_is_preserved_at_every_mapping_boundary() {
     }
 }
 
+#[test]
+fn synchronous_memory_fault_delivery_is_immediate_complete_and_fail_closed() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux signal runtime");
+
+    for constant in [
+        "const LINUX_SIGBUS: usize = 7;",
+        "const LINUX_SIGSEGV: usize = 11;",
+        "const LINUX_SEGV_MAPERR: i32 = 1;",
+        "const LINUX_SEGV_ACCERR: i32 = 2;",
+        "const LINUX_BUS_ADRERR: i32 = 2;",
+    ] {
+        assert!(
+            syscall.contains(constant),
+            "missing fault ABI constant {constant}"
+        );
+    }
+
+    let delivery_start = syscall
+        .find("pub(crate) fn deliver_linux_synchronous_memory_fault(")
+        .expect("synchronous memory-fault entry");
+    let delivery = braced_body(&syscall[delivery_start..]);
+    for required in [
+        "linux_task::current_task()",
+        "LinuxMemoryFaultSignal::SegvMaperr => (LINUX_SIGSEGV, LINUX_SEGV_MAPERR)",
+        "LinuxMemoryFaultSignal::SegvAccerr => (LINUX_SIGSEGV, LINUX_SEGV_ACCERR)",
+        "LinuxMemoryFaultSignal::BusAdrerr => (LINUX_SIGBUS, LINUX_BUS_ADRERR)",
+        "LinuxPendingSignal::synchronous_fault(signum, code, fault_address)",
+        "linux_signal_action(signum)",
+        "signal_state.mask & linux_signal_bit(signum)",
+        "install_linux_signal_handler(",
+        "terminate_linux_process_by_signal(current.tgid, signum)",
+        "regs[0] = launch_id as u64",
+    ] {
+        assert!(
+            delivery.contains(required),
+            "missing synchronous delivery step {required}"
+        );
+    }
+    assert!(!delivery.contains("queue_process_linux_signal"));
+    assert!(!delivery.contains("requeue_linux_signal"));
+
+    let installer_start = syscall
+        .find("fn install_linux_signal_handler(")
+        .expect("shared signal-handler installer");
+    let installer = braced_body(&syscall[installer_start..]);
+    for required in [
+        "linux_aarch64_signal_user_frame(",
+        "linux_signal_user_range_writable(",
+        "linux_zero_user(context as usize, LINUX_AARCH64_UCONTEXT_BYTES)",
+        "linux_aarch64_ucontext_core(",
+        "linux_copy_to_user(context as usize, &context_core)",
+        "signal_state.push_frame(frame)",
+        "set_user_stack_pointer(frame_sp)",
+        "regs[2] = context",
+        "set_exception_return_pc(trampoline as u64)",
+    ] {
+        assert!(
+            installer.contains(required),
+            "missing signal-frame step {required}"
+        );
+    }
+    assert!(!installer.contains("[u8; LINUX_AARCH64_UCONTEXT_BYTES]"));
+    assert!(!syscall.contains("LINUX_SIGNAL_INFO_STORAGE_BYTES"));
+    assert!(!syscall.contains("LINUX_SIGNAL_INFO_OFFSET"));
+
+    let termination_start = syscall
+        .find("fn terminate_linux_process_by_signal(")
+        .expect("signal termination lifecycle");
+    let termination = braced_body(&syscall[termination_start..]);
+    assert!(termination.contains("linux_task::finish_current_without_el0_return()"));
+    assert!(termination.contains("prepare_run_elf_return(exit_code)"));
+}
+
 fn assembly_routine<'a>(source: &'a str, name: &str) -> &'a str {
     let label = format!("{name}:");
     let start = source.find(&label).expect("assembly routine label");
@@ -3663,13 +3738,13 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         );
     }
     assert!(task_logic.contains("signal_states: [LinuxTaskSignalState; N]"));
-    assert!(task_logic.contains("pub(crate) fn linux_signal_info_offset("));
+    assert!(task_logic.contains("pub(crate) fn linux_aarch64_signal_user_frame("));
     assert!(task_logic.contains("pub(crate) fn inherit_signal_mask("));
     assert!(task_logic.contains("pub(crate) fn route_signal("));
     assert!(task_logic.contains("pub(crate) fn process_signal_target("));
     assert!(task.contains("pub(crate) fn queue_task_signal("));
     assert!(task.contains("pub(crate) fn process_signal_target("));
-    assert!(task.contains("pub(crate) fn with_current_signal_state_and_slot<R>("));
+    assert!(task.contains("pub(crate) fn with_current_signal_state<R>("));
     assert!(task.contains("LinuxSignalRouteError::QueueFull => SysError::EAGAIN"));
 
     let reserve_clone_start = task
@@ -3734,9 +3809,8 @@ fn linux_signal_state_is_owned_by_each_live_task() {
     }
     assert!(process.contains("type LinuxProcessSignalState = LinuxProcessSignalStateCore<"));
     assert!(!syscall.contains("static mut LINUX_PROCESS_PENDING"));
-    assert!(syscall.contains(
-        "linux_task::LINUX_TASK_LIMIT * LINUX_SIGNAL_FRAME_LIMIT * LINUX_SIGNAL_INFO_BYTES"
-    ));
+    assert!(syscall.contains("const LINUX_SIGNAL_TRAMPOLINE_BYTES: usize = PAGE_SIZE;"));
+    assert!(!syscall.contains("LINUX_SIGNAL_INFO_STORAGE_BYTES"));
     let trampoline_start = syscall
         .find("fn ensure_linux_signal_trampoline()")
         .expect("signal trampoline allocation");
@@ -3871,14 +3945,16 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         .find("terminate_linux_process_by_signal(current.tgid, signum)")
         .expect("current process default action");
     assert!(dequeue < disposition && disposition < current && current < terminate);
-    assert!(delivery.contains("linux_task::with_current_signal_state_and_slot("));
-    assert!(delivery.contains("linux_task::linux_signal_info_offset(task_slot"));
-    assert!(delivery.contains("checked_add(LINUX_SIGNAL_INFO_OFFSET)"));
-    assert!(delivery.contains("checked_add(info_offset)"));
-    assert!(!delivery.contains("depth * LINUX_SIGNAL_INFO_BYTES"));
-    assert!(delivery.contains("signal_state.push_frame(frame)?"));
+    assert!(delivery.contains("install_linux_signal_handler("));
     assert!(delivery.contains("requeue_linux_signal(deliverable)"));
-    assert!(delivery.contains("signal_state.alt_stack.flags = LINUX_SS_ONSTACK as u32"));
+    let installer_start = syscall
+        .find("fn install_linux_signal_handler(")
+        .expect("shared signal frame installation");
+    let installer = braced_body(&syscall[installer_start..]);
+    assert!(installer.contains("linux_task::with_current_signal_state("));
+    assert!(installer.contains("linux_aarch64_signal_user_frame(stack_top)"));
+    assert!(installer.contains("signal_state.push_frame(frame)"));
+    assert!(installer.contains("signal_state.alt_stack.flags = LINUX_SS_ONSTACK as u32"));
 
     for syscall_name in ["pub fn sys_tkill(", "pub fn sys_tgkill("] {
         let start = syscall.find(syscall_name).expect("directed signal syscall");
@@ -4317,13 +4393,13 @@ fn linux_handler_delivery_reserves_pending_capacity_until_the_frame_is_ready() {
         .find("fn deliver_next_linux_signal(")
         .expect("signal delivery helper");
     let delivery = braced_body(&syscall[delivery_start..]);
-    let frame = delivery
-        .find("signal_state.push_frame(frame)?")
+    let install = delivery
+        .find("install_linux_signal_handler(")
         .expect("handler frame setup");
     let commit = delivery
         .rfind("commit_linux_signal(deliverable)")
         .expect("successful handler reservation commit");
-    assert!(frame < commit);
+    assert!(install < commit);
     assert!(delivery.contains("requeue_linux_signal(deliverable)"));
 }
 

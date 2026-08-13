@@ -274,16 +274,6 @@ pub(crate) fn linux_signal_bit(signum: usize) -> u64 {
     1u64 << (signum - 1)
 }
 
-pub(crate) fn linux_signal_info_offset(task_slot: usize, frame_depth: usize) -> Option<usize> {
-    if frame_depth >= LINUX_SIGNAL_FRAME_LIMIT {
-        return None;
-    }
-    task_slot
-        .checked_mul(LINUX_SIGNAL_FRAME_LIMIT)?
-        .checked_add(frame_depth)?
-        .checked_mul(LINUX_SIGNAL_INFO_BYTES)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxSignalDisposition {
     Ignore,

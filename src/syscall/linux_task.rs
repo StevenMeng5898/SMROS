@@ -127,19 +127,6 @@ pub(crate) fn with_current_signal_state<R>(
     })
 }
 
-pub(crate) fn with_current_signal_state_and_slot<R>(
-    operation: impl FnOnce(usize, &mut LinuxTaskSignalState) -> R,
-) -> Result<R, SysError> {
-    with_runtime(|runtime| {
-        let scheduler_thread = scheduler::scheduler().current();
-        let (slot, signal_state, _) = runtime
-            .tasks
-            .signal_state_by_scheduler_mut(scheduler_thread.0)
-            .ok_or(SysError::ESRCH)?;
-        Ok(operation(slot, signal_state))
-    })
-}
-
 pub(crate) fn peek_current_matching_signal(
     wait_mask: u64,
 ) -> Result<Option<LinuxPendingSignal>, SysError> {
