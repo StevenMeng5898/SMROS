@@ -59,6 +59,7 @@ unsupported case.
 - `src/kernel_lowlevel/X86_64/smp.rs`
 - `src/kernel_lowlevel/X86_64/thread.rs`
 - `src/kernel_lowlevel/X86_64/timer.rs`
+- `src/kernel_lowlevel/aarch64_exception_logic_shared.rs`
 - `src/kernel_lowlevel/aarch64_vm_logic_shared.rs`
 - `src/kernel_lowlevel/lowlevel_logic.rs`
 - `src/kernel_lowlevel/lowlevel_logic_shared.rs`

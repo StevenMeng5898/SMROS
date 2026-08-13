@@ -27,6 +27,7 @@ mod lowlevel_runtime_macro_checks {
 verus! {
 
 include!("../../../src/kernel_lowlevel/lowlevel_logic_shared.rs");
+include!("../../../src/kernel_lowlevel/aarch64_exception_logic_shared.rs");
 include!("../../../src/kernel_lowlevel/aarch64_vm_logic_shared.rs");
 
 pub const PAGE_SIZE: usize = 4096;
