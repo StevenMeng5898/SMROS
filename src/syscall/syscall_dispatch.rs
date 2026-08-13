@@ -123,13 +123,8 @@ pub extern "C" fn handle_aarch64_lower_el_sync(
         }
         _ => crate::kernel_lowlevel::boot::fatal_aarch64_sync_exception(esr, far, return_pc),
     };
-    if crate::syscall::deliver_linux_synchronous_memory_fault(
-        saved_frame,
-        return_pc,
-        far,
-        access,
-    )
-    .is_err()
+    if crate::syscall::deliver_linux_synchronous_memory_fault(saved_frame, return_pc, far, access)
+        .is_err()
     {
         crate::kernel_lowlevel::boot::fatal_aarch64_sync_exception(esr, far, return_pc);
     }

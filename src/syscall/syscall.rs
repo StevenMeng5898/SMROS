@@ -52,9 +52,7 @@ use super::linux_process::{
     try_clone_linux_fork_path, LinuxCredentialsCore, LinuxDescriptorEntry, LinuxKernelSigaction,
     LinuxOpenDescription,
 };
-use super::linux_process_memory::{
-    self, LinuxMemoryFaultAccess, LinuxMemoryFaultSignal,
-};
+use super::linux_process_memory::{self, LinuxMemoryFaultAccess, LinuxMemoryFaultSignal};
 use super::linux_record_lock;
 #[cfg(target_arch = "aarch64")]
 use super::linux_syscall_context;
@@ -4611,14 +4609,12 @@ pub(crate) fn deliver_linux_synchronous_memory_fault(
         return Err(SysError::EFAULT);
     }
     let current = linux_task::current_task()?;
-    let (signum, code) = match linux_process_memory::classify_current_memory_fault(
-        fault_address as usize,
-        access,
-    ) {
-        LinuxMemoryFaultSignal::SegvMaperr => (LINUX_SIGSEGV, LINUX_SEGV_MAPERR),
-        LinuxMemoryFaultSignal::SegvAccerr => (LINUX_SIGSEGV, LINUX_SEGV_ACCERR),
-        LinuxMemoryFaultSignal::BusAdrerr => (LINUX_SIGBUS, LINUX_BUS_ADRERR),
-    };
+    let (signum, code) =
+        match linux_process_memory::classify_current_memory_fault(fault_address as usize, access) {
+            LinuxMemoryFaultSignal::SegvMaperr => (LINUX_SIGSEGV, LINUX_SEGV_MAPERR),
+            LinuxMemoryFaultSignal::SegvAccerr => (LINUX_SIGSEGV, LINUX_SEGV_ACCERR),
+            LinuxMemoryFaultSignal::BusAdrerr => (LINUX_SIGBUS, LINUX_BUS_ADRERR),
+        };
     let pending = LinuxPendingSignal::synchronous_fault(signum, code, fault_address);
     let action = linux_signal_action(signum);
     let blocked = linux_task::with_current_signal_state(|signal_state| {
@@ -4627,15 +4623,8 @@ pub(crate) fn deliver_linux_synchronous_memory_fault(
     if linux_task::linux_signal_disposition(action.handler, signum)
         == LinuxSignalDisposition::Handled
         && !blocked
-        && install_linux_signal_handler(
-            saved_regs,
-            return_pc,
-            pending,
-            action,
-            None,
-            fault_address,
-        )
-        .is_ok()
+        && install_linux_signal_handler(saved_regs, return_pc, pending, action, None, fault_address)
+            .is_ok()
     {
         if action.flags & LINUX_SA_RESETHAND != 0 {
             store_linux_signal_action(signum, LinuxKernelSigaction::default());
