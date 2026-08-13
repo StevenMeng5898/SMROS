@@ -325,6 +325,16 @@ impl LinuxPendingSignal {
             ..Self::EMPTY
         }
     }
+
+    pub(crate) fn synchronous_fault(signum: usize, code: i32, address: u64) -> Self {
+        let mut record = Self::standard(signum);
+        record.has_info = true;
+        record.info[0..4].copy_from_slice(&(signum as i32).to_ne_bytes());
+        record.info[4..8].copy_from_slice(&0i32.to_ne_bytes());
+        record.info[8..12].copy_from_slice(&code.to_ne_bytes());
+        record.info[16..24].copy_from_slice(&address.to_ne_bytes());
+        record
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -878,6 +888,44 @@ impl LinuxSignalStack {
         _padding: 0,
         size: 0,
     };
+}
+
+pub(crate) const LINUX_AARCH64_UCONTEXT_BYTES: usize = 4560;
+pub(crate) const LINUX_AARCH64_UCONTEXT_CORE_BYTES: usize = 464;
+
+pub(crate) fn linux_aarch64_ucontext_core(
+    fault_address: u64,
+    regs: [u64; 32],
+    sp: u64,
+    pc: u64,
+    pstate: u64,
+    signal_mask: u64,
+    signal_stack: LinuxSignalStack,
+) -> [u8; LINUX_AARCH64_UCONTEXT_CORE_BYTES] {
+    let mut core = [0; LINUX_AARCH64_UCONTEXT_CORE_BYTES];
+    core[16..24].copy_from_slice(&signal_stack.sp.to_ne_bytes());
+    core[24..28].copy_from_slice(&signal_stack.flags.to_ne_bytes());
+    core[32..40].copy_from_slice(&signal_stack.size.to_ne_bytes());
+    core[40..48].copy_from_slice(&signal_mask.to_ne_bytes());
+    core[176..184].copy_from_slice(&fault_address.to_ne_bytes());
+    for (index, value) in regs[..31].iter().enumerate() {
+        let offset = 184 + index * 8;
+        core[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+    }
+    core[432..440].copy_from_slice(&sp.to_ne_bytes());
+    core[440..448].copy_from_slice(&pc.to_ne_bytes());
+    core[448..456].copy_from_slice(&pstate.to_ne_bytes());
+    core
+}
+
+pub(crate) fn linux_aarch64_signal_user_frame(stack_top: u64) -> Option<(u64, u64, u64)> {
+    let frame_bytes = (LINUX_SIGNAL_INFO_BYTES + LINUX_AARCH64_UCONTEXT_BYTES) as u64;
+    let frame_base = stack_top.checked_sub(frame_bytes)? & !0xf;
+    Some((
+        frame_base,
+        frame_base,
+        frame_base.checked_add(LINUX_SIGNAL_INFO_BYTES as u64)?,
+    ))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

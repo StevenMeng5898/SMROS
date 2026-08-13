@@ -16,6 +16,91 @@ pub(crate) const LINUX_MAP_SHARED: usize = 1;
 pub(crate) const LINUX_MAP_PRIVATE: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxMemoryFaultAccess {
+    Read,
+    Write,
+    Execute,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxMemoryFaultSignal {
+    SegvMaperr,
+    SegvAccerr,
+    BusAdrerr,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxMemoryFaultRegion {
+    pub addr: usize,
+    pub len: usize,
+    pub prot: usize,
+    pub file_offset: Option<usize>,
+    pub backing_len: Option<usize>,
+}
+
+pub(crate) fn linux_effective_mapping_page_prot(
+    prot: usize,
+    file_offset: Option<usize>,
+    backing_len: Option<usize>,
+    page_index: usize,
+    page_size: usize,
+) -> usize {
+    let Some((file_offset, backing_len)) = file_offset.zip(backing_len) else {
+        return prot;
+    };
+    let Some(page_offset) = page_index
+        .checked_mul(page_size)
+        .and_then(|value| file_offset.checked_add(value))
+    else {
+        return 0;
+    };
+    if page_offset >= backing_len {
+        0
+    } else {
+        prot
+    }
+}
+
+pub(crate) fn linux_memory_fault_signal(
+    regions: &[LinuxMemoryFaultRegion],
+    address: usize,
+    access: LinuxMemoryFaultAccess,
+    page_size: usize,
+) -> LinuxMemoryFaultSignal {
+    let Some(region) = regions.iter().copied().find(|region| {
+        address >= region.addr
+            && region
+                .addr
+                .checked_add(region.len)
+                .is_some_and(|end| address < end)
+    }) else {
+        return LinuxMemoryFaultSignal::SegvMaperr;
+    };
+    let permission = match access {
+        LinuxMemoryFaultAccess::Read => LINUX_PROT_READ | LINUX_PROT_WRITE,
+        LinuxMemoryFaultAccess::Write => LINUX_PROT_WRITE,
+        LinuxMemoryFaultAccess::Execute => LINUX_PROT_EXEC,
+    };
+    if region.prot & permission == 0 || page_size == 0 {
+        return LinuxMemoryFaultSignal::SegvAccerr;
+    }
+    let page_index = (address - region.addr) / page_size;
+    if linux_effective_mapping_page_prot(
+        region.prot,
+        region.file_offset,
+        region.backing_len,
+        page_index,
+        page_size,
+    ) == 0
+        && region.file_offset.is_some()
+    {
+        LinuxMemoryFaultSignal::BusAdrerr
+    } else {
+        LinuxMemoryFaultSignal::SegvAccerr
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxAddressSpaceErrorKind {
     OutOfMemory,
     InvalidAddress,

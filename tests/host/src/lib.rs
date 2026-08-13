@@ -1026,6 +1026,77 @@ mod linux_task_logic {
         CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
 
     #[test]
+    fn synchronous_fault_record_uses_aarch64_linux_siginfo_layout() {
+        let record = LinuxPendingSignal::synchronous_fault(11, 2, 0x1234_5678_9abc_def0);
+        assert_eq!(record.signum, 11);
+        assert!(record.has_info);
+        assert_eq!(
+            i32::from_ne_bytes(record.info[0..4].try_into().unwrap()),
+            11
+        );
+        assert_eq!(i32::from_ne_bytes(record.info[4..8].try_into().unwrap()), 0);
+        assert_eq!(
+            i32::from_ne_bytes(record.info[8..12].try_into().unwrap()),
+            2
+        );
+        assert_eq!(
+            u64::from_ne_bytes(record.info[16..24].try_into().unwrap()),
+            0x1234_5678_9abc_def0
+        );
+    }
+
+    #[test]
+    fn synchronous_fault_ucontext_core_preserves_faulting_aarch64_state() {
+        let regs = core::array::from_fn::<u64, 32, _>(|index| 0x1000 + index as u64);
+        let core = linux_aarch64_ucontext_core(
+            0xdead_beef,
+            regs,
+            0x1fff_f000,
+            0x1234_5000,
+            0x6000_0000,
+            0x55aa,
+            LinuxSignalStack::DISABLED,
+        );
+        assert_eq!(LINUX_AARCH64_UCONTEXT_BYTES, 4560);
+        assert_eq!(core.len(), LINUX_AARCH64_UCONTEXT_CORE_BYTES);
+        assert_eq!(u64::from_ne_bytes(core[40..48].try_into().unwrap()), 0x55aa);
+        assert_eq!(
+            u64::from_ne_bytes(core[176..184].try_into().unwrap()),
+            0xdead_beef
+        );
+        assert_eq!(
+            u64::from_ne_bytes(core[184..192].try_into().unwrap()),
+            regs[0]
+        );
+        assert_eq!(
+            u64::from_ne_bytes(core[424..432].try_into().unwrap()),
+            regs[30]
+        );
+        assert_eq!(
+            u64::from_ne_bytes(core[432..440].try_into().unwrap()),
+            0x1fff_f000
+        );
+        assert_eq!(
+            u64::from_ne_bytes(core[440..448].try_into().unwrap()),
+            0x1234_5000
+        );
+        assert_eq!(
+            u64::from_ne_bytes(core[448..456].try_into().unwrap()),
+            0x6000_0000
+        );
+    }
+
+    #[test]
+    fn synchronous_fault_user_frame_is_aligned_bounded_and_non_overlapping() {
+        let (sp, info, context) = linux_aarch64_signal_user_frame(0x20_000).unwrap();
+        assert_eq!(sp & 0xf, 0);
+        assert_eq!(info, sp);
+        assert_eq!(context, info + LINUX_SIGNAL_INFO_BYTES as u64);
+        assert!(context + LINUX_AARCH64_UCONTEXT_BYTES as u64 <= 0x20_000);
+        assert_eq!(linux_aarch64_signal_user_frame(1), None);
+    }
+
+    #[test]
     fn clone_validation_accepts_the_pthread_flag_and_pointer_matrix() {
         let request = LinuxCloneRequest::validate(
             PTHREAD_BASE_FLAGS
@@ -4069,6 +4140,85 @@ mod linux_process_memory_logic {
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/kernel_lowlevel/ARM64/context_shared.rs"
     ));
+
+    #[test]
+    fn memory_fault_policy_distinguishes_maperr_accerr_and_file_tail_bus() {
+        let anonymous = LinuxMemoryFaultRegion {
+            addr: 0x1200_0000,
+            len: 0x2000,
+            prot: LINUX_PROT_READ,
+            file_offset: None,
+            backing_len: None,
+        };
+        let file = LinuxMemoryFaultRegion {
+            addr: 0x1300_0000,
+            len: 0x3000,
+            prot: LINUX_PROT_READ | LINUX_PROT_WRITE,
+            file_offset: Some(0),
+            backing_len: Some(0x800),
+        };
+
+        assert_eq!(
+            linux_memory_fault_signal(
+                &[anonymous, file],
+                0x1100_0000,
+                LinuxMemoryFaultAccess::Read,
+                0x1000,
+            ),
+            LinuxMemoryFaultSignal::SegvMaperr
+        );
+        assert_eq!(
+            linux_memory_fault_signal(
+                &[anonymous, file],
+                0x1200_0008,
+                LinuxMemoryFaultAccess::Write,
+                0x1000,
+            ),
+            LinuxMemoryFaultSignal::SegvAccerr
+        );
+        assert_eq!(
+            linux_memory_fault_signal(
+                &[anonymous, file],
+                0x1300_1001,
+                LinuxMemoryFaultAccess::Write,
+                0x1000,
+            ),
+            LinuxMemoryFaultSignal::BusAdrerr
+        );
+        assert_eq!(
+            linux_memory_fault_signal(&[file], 0x1300_07ff, LinuxMemoryFaultAccess::Read, 0x1000,),
+            LinuxMemoryFaultSignal::SegvAccerr,
+            "the partial final page is not a beyond-object page"
+        );
+    }
+
+    #[test]
+    fn effective_file_page_protection_blocks_only_pages_wholly_beyond_object() {
+        assert_eq!(
+            linux_effective_mapping_page_prot(
+                LINUX_PROT_READ | LINUX_PROT_WRITE,
+                Some(0),
+                Some(0x800),
+                0,
+                0x1000,
+            ),
+            LINUX_PROT_READ | LINUX_PROT_WRITE
+        );
+        assert_eq!(
+            linux_effective_mapping_page_prot(
+                LINUX_PROT_READ | LINUX_PROT_WRITE,
+                Some(0),
+                Some(0x800),
+                1,
+                0x1000,
+            ),
+            0
+        );
+        assert_eq!(
+            linux_effective_mapping_page_prot(LINUX_PROT_EXEC, None, None, 99, 0x1000),
+            LINUX_PROT_EXEC
+        );
+    }
 
     #[test]
     fn process_memory_metadata_is_independent_per_pid() {
