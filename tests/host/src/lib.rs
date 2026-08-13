@@ -7108,6 +7108,55 @@ fn kernel_lowlevel_logic_real_fdt_memory_overrides_fallback_and_rejects_invalid_
     assert_eq!(memory.size, base_zero_size);
 }
 
+mod aarch64_exception_logic {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/kernel_lowlevel/aarch64_exception_logic_shared.rs"
+    ));
+
+    fn esr(ec: u64, iss: u64) -> u64 {
+        (ec << 26) | iss
+    }
+
+    #[test]
+    fn lower_el_abort_decoder_preserves_access_and_fault_kind() {
+        assert_eq!(
+            aarch64_lower_el_sync(esr(0x24, 0x07)),
+            Aarch64LowerElSync::MemoryFault(Aarch64El0MemoryFault {
+                access: Aarch64El0MemoryAccess::Read,
+                kind: Aarch64El0AbortKind::Translation,
+            })
+        );
+        assert_eq!(
+            aarch64_lower_el_sync(esr(0x24, (1 << 6) | 0x0f)),
+            Aarch64LowerElSync::MemoryFault(Aarch64El0MemoryFault {
+                access: Aarch64El0MemoryAccess::Write,
+                kind: Aarch64El0AbortKind::Permission,
+            })
+        );
+        assert_eq!(
+            aarch64_lower_el_sync(esr(0x20, 0x09)),
+            Aarch64LowerElSync::MemoryFault(Aarch64El0MemoryFault {
+                access: Aarch64El0MemoryAccess::Execute,
+                kind: Aarch64El0AbortKind::AccessFlag,
+            })
+        );
+    }
+
+    #[test]
+    fn decoder_separates_svc_and_unsupported_lower_el_exceptions() {
+        assert_eq!(aarch64_lower_el_sync(esr(0x15, 0)), Aarch64LowerElSync::Svc);
+        assert_eq!(
+            aarch64_lower_el_sync(esr(0x24, 0x21)),
+            Aarch64LowerElSync::Unsupported
+        );
+        assert_eq!(
+            aarch64_lower_el_sync(esr(0x3c, 0)),
+            Aarch64LowerElSync::Unsupported
+        );
+    }
+}
+
 mod aarch64_vm_logic {
     extern crate alloc;
 
