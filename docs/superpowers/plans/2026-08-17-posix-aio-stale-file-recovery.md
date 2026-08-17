@@ -76,7 +76,7 @@ Expected: one documentation-only commit. Do not add generated stage or runtime e
 Run:
 
 ```bash
-./scripts/run-host-unit-tests.sh --lib fxfs_hard_link_counts_retain_the_inode_until_the_last_name_is_removed -- --exact
+./scripts/run-host-unit-tests.sh --lib user_logic::fxfs_hard_link_counts_retain_the_inode_until_the_last_name_is_removed -- --exact
 ```
 
 Expected: PASS. This proves link counts do not underflow and an unlinked inode is reclaimable only at zero links and zero open references.
@@ -86,7 +86,7 @@ Expected: PASS. This proves link counts do not underflow and an unlinked inode i
 Run:
 
 ```bash
-./scripts/run-host-unit-tests.sh --test integration_contracts linux_link_unlink_syscalls_route_through_fxfs -- --exact
+./scripts/run-host-unit-tests.sh --test integration_contracts linux_named_semaphore_publication_uses_atomic_fxfs_links_and_inode_mmap_identity -- --exact
 ```
 
 Expected: PASS. This proves `sys_unlinkat` calls `fxfs::unlink_file`, checks `linux_fxfs_object_is_open(object_id)`, and calls `fxfs::release_unlinked_file(object_id)` instead of returning stub success.
