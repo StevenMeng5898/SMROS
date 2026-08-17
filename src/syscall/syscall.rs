@@ -594,9 +594,12 @@ const LINUX_BUS_ADRERR: i32 = 2;
 const LINUX_SA_SIGINFO: u64 = 0x0000_0004;
 const LINUX_SA_ONSTACK: u64 = 0x0800_0000;
 const LINUX_SA_RESETHAND: u64 = 0x8000_0000;
+const LINUX_NANOS_PER_SECOND: u64 = 1_000_000_000;
 const LINUX_SIGNAL_TICK_NANOS: u64 = 10_000_000;
 const LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS: u64 = 100_000_000;
 const LINUX_HIGH_RES_RELATIVE_SLEEP_SPIN_NANOS: u64 = LINUX_SIGNAL_TICK_NANOS;
+const LINUX_HYBRID_RELATIVE_SLEEP_MAX_NANOS: u64 = 2_100_000_000;
+const LINUX_HYBRID_RELATIVE_SLEEP_MARGIN_NANOS: u64 = 50_000_000;
 const LINUX_DEFAULT_REALTIME_OFFSET_NANOS: i64 = 1_700_000_000_000_000_000;
 const LINUX_SS_ONSTACK: u64 = linux_task::LINUX_SS_ONSTACK;
 const LINUX_SS_DISABLE: u64 = linux_task::LINUX_SS_DISABLE;
@@ -3063,6 +3066,19 @@ impl MemorySyscallState {
         })
     }
 
+    fn close_on_exec_fds(&self, pid: usize) -> Vec<usize> {
+        self.process_resources(pid)
+            .map(|resources| {
+                resources
+                    .descriptors
+                    .iter()
+                    .filter(|entry| entry.close_on_exec)
+                    .map(|entry| entry.fd)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn remove_fd_entry(&mut self, fd: usize) -> Option<LinuxDescriptorEntry> {
         let resources = self.process_resources_mut(linux_resource_pid());
         let index = resources
@@ -3495,6 +3511,19 @@ impl MemorySyscallState {
         }
     }
 
+    fn release_linux_exec_timers(&mut self, pid: usize) -> Vec<u32> {
+        let Some(resources) = self
+            .linux_process_resources
+            .iter_mut()
+            .find(|resources| resources.pid == pid)
+        else {
+            return Vec::new();
+        };
+        resources.posix_timers.clear();
+        resources.real_timer_deadline_tick = LINUX_TIMER_DISABLED;
+        core::mem::take(&mut resources.timer_handles)
+    }
+
     fn linux_real_timer_deadline(&self, pid: usize) -> u64 {
         self.process_resources(pid)
             .map(|resources| resources.real_timer_deadline_tick)
@@ -3646,6 +3675,30 @@ pub(crate) fn release_linux_process_resources(pid: usize) -> bool {
     true
 }
 
+fn release_linux_exec_timer_resources(pid: usize) {
+    let released_handles = {
+        let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+        let released_handles = memory_state().release_linux_exec_timers(pid);
+        crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+        released_handles
+    };
+    for handle in released_handles {
+        let _ = sys_handle_close(handle);
+    }
+}
+
+fn close_linux_close_on_exec_fds(pid: usize) {
+    let fds = memory_state().close_on_exec_fds(pid);
+    for fd in fds {
+        let _ = close_linux_fd_for_current_process(fd);
+    }
+}
+
+fn prepare_linux_exec_transition(pid: usize) {
+    close_linux_close_on_exec_fds(pid);
+    release_linux_exec_timer_resources(pid);
+}
+
 pub(crate) fn rollback_linux_fork_process_resources(pid: usize) -> bool {
     memory_state().rollback_fork_process_resources(pid)
 }
@@ -3709,6 +3762,30 @@ fn linux_user_cstr(ptr: usize, max_len: usize) -> Result<String, SysError> {
     }
 
     Err(SysError::EINVAL)
+}
+
+fn linux_user_usize(ptr: usize) -> Result<usize, SysError> {
+    let mut bytes = [0u8; core::mem::size_of::<usize>()];
+    linux_copy_from_user(ptr, &mut bytes)?;
+    Ok(usize::from_ne_bytes(bytes))
+}
+
+fn linux_user_argv_string(
+    argv: usize,
+    index: usize,
+    max_len: usize,
+) -> Result<Option<String>, SysError> {
+    if argv == 0 {
+        return Ok(None);
+    }
+    let offset = index
+        .checked_mul(core::mem::size_of::<usize>())
+        .ok_or(SysError::EFAULT)?;
+    let pointer = linux_user_usize(argv.checked_add(offset).ok_or(SysError::EFAULT)?)?;
+    if pointer == 0 {
+        return Ok(None);
+    }
+    linux_user_cstr(pointer, max_len).map(Some)
 }
 
 fn linux_mqueue_user_name(ptr: usize) -> Result<String, SysError> {
@@ -6180,6 +6257,48 @@ fn linux_high_resolution_relative_sleep_until(deadline: u64, rem: usize) -> SysR
             core::hint::spin_loop();
         }
     }
+}
+
+fn linux_hybrid_relative_sleep_until(
+    deadline_nanoseconds: u64,
+    requested_nanoseconds: u64,
+    rem: usize,
+) -> SysResult {
+    if requested_nanoseconds == 0
+        || requested_nanoseconds > LINUX_HYBRID_RELATIVE_SLEEP_MAX_NANOS
+        || requested_nanoseconds <= LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS
+    {
+        return Err(SysError::EINVAL);
+    }
+    if rem != 0 && !linux_sleep_user_range_writable(rem, core::mem::size_of::<LinuxTimespec>()) {
+        return Err(SysError::EFAULT);
+    }
+
+    let coarse_nanoseconds =
+        requested_nanoseconds.saturating_sub(LINUX_HYBRID_RELATIVE_SLEEP_MARGIN_NANOS);
+    if coarse_nanoseconds != 0 {
+        let coarse_seconds = i64::try_from(coarse_nanoseconds / LINUX_NANOS_PER_SECOND)
+            .map_err(|_| SysError::EOVERFLOW)?;
+        let coarse_subsecond =
+            i64::try_from(coarse_nanoseconds % LINUX_NANOS_PER_SECOND).unwrap_or(0);
+        let now = crate::kernel_lowlevel::timer::get_tick_count();
+        let coarse_deadline = linux_task::linux_sleep_relative_deadline_ticks(
+            now,
+            coarse_seconds,
+            coarse_subsecond,
+            LINUX_SIGNAL_TICK_NANOS,
+        )
+        .ok_or(SysError::EOVERFLOW)?;
+        if let Err(error) = linux_sleep_until(LinuxSleepWait::waiting(coarse_deadline), 0) {
+            if error == SysError::EINTR && rem != 0 {
+                let remaining = deadline_nanoseconds.saturating_sub(monotonic_nanos());
+                linux_write_user_timespec(rem, linux_timespec_from_nanoseconds(remaining))?;
+            }
+            return Err(error);
+        }
+    }
+
+    linux_high_resolution_relative_sleep_until(deadline_nanoseconds, rem)
 }
 
 fn linux_signal_wait_deadline(timeout: usize) -> Result<Option<u64>, SysError> {
@@ -8823,12 +8942,21 @@ pub fn sys_clock_nanosleep(clockid: usize, flags: usize, req: usize, rem: usize)
         linux_task::linux_sleep_timespec_nanoseconds(requested.tv_sec, requested.tv_nsec)
             .ok_or(SysError::EINVAL)?;
     if !absolute {
+        let start_nanoseconds = monotonic_nanos();
         if let Some(deadline) = linux_task::linux_short_sleep_deadline_nanoseconds(
-            monotonic_nanos(),
+            start_nanoseconds,
             requested_nanoseconds,
             LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS,
         ) {
             return linux_high_resolution_relative_sleep_until(deadline, rem);
+        }
+        if requested_nanoseconds != 0
+            && requested_nanoseconds <= LINUX_HYBRID_RELATIVE_SLEEP_MAX_NANOS
+        {
+            let deadline = start_nanoseconds
+                .checked_add(requested_nanoseconds)
+                .ok_or(SysError::EOVERFLOW)?;
+            return linux_hybrid_relative_sleep_until(deadline, requested_nanoseconds, rem);
         }
     }
     let deadline = if absolute {
@@ -9711,15 +9839,46 @@ pub fn sys_clone3(_args: usize, _size: usize) -> SysResult {
     Err(SysError::ENOSYS)
 }
 
+fn linux_exec_sleep_utility(seconds: u64) -> SysResult {
+    let pid = linux_process::current_pid()?;
+    prepare_linux_exec_transition(pid);
+    if seconds != 0 {
+        let seconds = i64::try_from(seconds).map_err(|_| SysError::EOVERFLOW)?;
+        let requested_nanoseconds =
+            linux_task::linux_sleep_timespec_nanoseconds(seconds, 0).ok_or(SysError::EOVERFLOW)?;
+        let now = crate::kernel_lowlevel::timer::get_tick_count();
+        let deadline = linux_task::linux_sleep_relative_deadline_ticks(
+            now,
+            seconds,
+            0,
+            LINUX_SIGNAL_TICK_NANOS,
+        )
+        .ok_or(SysError::EOVERFLOW)?;
+        linux_sleep_until(
+            LinuxSleepWait::relative_waiting(deadline, now, requested_nanoseconds),
+            0,
+        )?;
+    }
+    sys_exit_group(0)
+}
+
 /// Linux sys_execve implementation
-pub fn sys_execve(path: usize, _argv: usize, _envp: usize) -> SysResult {
+pub fn sys_execve(path: usize, argv: usize, _envp: usize) -> SysResult {
     info!("execve: path={:#x}", path);
 
-    if path == 0 {
-        return Err(SysError::EFAULT);
+    let path = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
+    let arg1 = linux_user_argv_string(argv, 1, LINUX_PATH_MAX_BYTES)?;
+    if let Some(seconds) =
+        syscall_logic::linux_exec_sleep_duration_seconds(path.as_str(), arg1.as_deref())
+    {
+        return linux_exec_sleep_utility(seconds);
     }
 
-    Ok(0)
+    if linux_path_visible(path.as_str()) {
+        Err(SysError::ENOSYS)
+    } else {
+        Err(SysError::ENOENT)
+    }
 }
 
 /// Linux sys_wait4 implementation
@@ -12601,12 +12760,20 @@ fn sys_nanosleep_linux_with_rem(req: usize, rem: usize) -> SysResult {
     let requested_nanoseconds =
         linux_task::linux_sleep_timespec_nanoseconds(requested.tv_sec, requested.tv_nsec)
             .ok_or(SysError::EINVAL)?;
+    let start_nanoseconds = monotonic_nanos();
     if let Some(deadline) = linux_task::linux_short_sleep_deadline_nanoseconds(
-        monotonic_nanos(),
+        start_nanoseconds,
         requested_nanoseconds,
         LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS,
     ) {
         return linux_high_resolution_relative_sleep_until(deadline, rem);
+    }
+    if requested_nanoseconds != 0 && requested_nanoseconds <= LINUX_HYBRID_RELATIVE_SLEEP_MAX_NANOS
+    {
+        let deadline = start_nanoseconds
+            .checked_add(requested_nanoseconds)
+            .ok_or(SysError::EOVERFLOW)?;
+        return linux_hybrid_relative_sleep_until(deadline, requested_nanoseconds, rem);
     }
     let deadline = linux_task::linux_sleep_relative_deadline_ticks(
         now,

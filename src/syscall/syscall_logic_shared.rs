@@ -16,6 +16,27 @@ pub fn linux_fxfs_stat_identity(object_id: u64) -> Option<(u64, u64)> {
     }
 }
 
+pub(crate) fn linux_exec_sleep_duration_seconds(path: &str, arg: Option<&str>) -> Option<u64> {
+    if path != "/bin/sleep" && path != "/usr/bin/sleep" {
+        return None;
+    }
+    let arg = arg?;
+    if arg.is_empty() {
+        return None;
+    }
+
+    let mut seconds = 0u64;
+    for byte in arg.as_bytes() {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        seconds = seconds
+            .checked_mul(10)?
+            .checked_add(u64::from(byte - b'0'))?;
+    }
+    Some(seconds)
+}
+
 macro_rules! smros_zircon_syscall_from_raw_body {
     ($syscall_num:expr, $threshold:expr) => {{
         if smros_is_zircon_syscall_number_body!($syscall_num, $threshold) {

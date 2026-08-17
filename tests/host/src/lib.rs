@@ -1220,6 +1220,24 @@ mod syscall_logic {
         assert_ne!(linux_fxfs_stat_identity(2), linux_fxfs_stat_identity(3));
         assert_eq!(linux_fxfs_stat_identity(0), None);
     }
+
+    #[test]
+    fn exec_sleep_duration_accepts_only_sleep_utility_decimal_seconds() {
+        assert_eq!(linux_exec_sleep_duration_seconds("/bin/sleep", Some("3")), Some(3));
+        assert_eq!(
+            linux_exec_sleep_duration_seconds("/usr/bin/sleep", Some("12")),
+            Some(12)
+        );
+        assert_eq!(linux_exec_sleep_duration_seconds("/bin/true", Some("3")), None);
+        assert_eq!(linux_exec_sleep_duration_seconds("/bin/sleep", None), None);
+        assert_eq!(linux_exec_sleep_duration_seconds("/bin/sleep", Some("")), None);
+        assert_eq!(linux_exec_sleep_duration_seconds("/bin/sleep", Some("+3")), None);
+        assert_eq!(linux_exec_sleep_duration_seconds("/bin/sleep", Some("3s")), None);
+        assert_eq!(
+            linux_exec_sleep_duration_seconds("/bin/sleep", Some("18446744073709551616")),
+            None
+        );
+    }
 }
 
 mod linux_mqueue_logic {
