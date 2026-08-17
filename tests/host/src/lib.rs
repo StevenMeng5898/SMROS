@@ -2485,6 +2485,55 @@ mod linux_task_logic {
     }
 
     #[test]
+    fn absolute_realtime_sleeps_track_clock_settime_offsets() {
+        const TICK_NANOS: u64 = 10_000_000;
+        const TARGET_REALTIME_NANOS: u64 = 5_000_000_000;
+
+        assert_eq!(
+            linux_sleep_realtime_deadline_ticks(3_000_000_001, 1_000_000_000, TICK_NANOS),
+            Some(201)
+        );
+        assert_eq!(
+            linux_sleep_realtime_deadline_ticks(1_000_000_000, 2_000_000_000, TICK_NANOS),
+            Some(0)
+        );
+        assert_eq!(
+            linux_sleep_realtime_deadline_ticks(1_000_000_000, 0, 0),
+            None
+        );
+
+        let mut tasks = LinuxTaskTable::<3>::new();
+        tasks.register_root(7).unwrap();
+        let child = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
+        assert!(tasks.publish(child));
+
+        let wait = LinuxSleepWait::absolute_realtime_waiting(500, TARGET_REALTIME_NANOS);
+        assert_eq!(wait.absolute_realtime_nanoseconds, Some(TARGET_REALTIME_NANOS));
+        assert!(tasks.install_sleep(child.tid, 8, wait));
+        assert!(tasks.block(child.tid, 8, LinuxBlockReason::Sleep));
+
+        assert_eq!(
+            tasks.refresh_realtime_sleep_deadlines(100, -1_000_000_000, TICK_NANOS),
+            [None, None, None]
+        );
+        assert_eq!(tasks.sleep_waits[child.slot].unwrap().deadline, 600);
+        assert_eq!(
+            tasks.refresh_realtime_sleep_deadlines(100, 7_000_000_000, TICK_NANOS)[0],
+            Some((child.tid, 8, LinuxBlockReason::Sleep))
+        );
+        assert!(tasks.wake(child.tid, 8));
+        assert_eq!(
+            tasks.take_sleep_outcome(child.tid, 8),
+            Some(LinuxSleepWait {
+                deadline: 0,
+                outcome: LinuxSleepOutcome::Completed,
+                relative: None,
+                absolute_realtime_nanoseconds: Some(TARGET_REALTIME_NANOS),
+            })
+        );
+    }
+
+    #[test]
     fn linux_sleep_waits_expire_or_interrupt_once_and_reset_with_their_task() {
         let mut tasks = LinuxTaskTable::<3>::new();
         tasks.register_root(7).unwrap();
@@ -2498,6 +2547,7 @@ mod linux_task_logic {
                 deadline: 40,
                 outcome: LinuxSleepOutcome::Completed,
                 relative: None,
+                absolute_realtime_nanoseconds: None,
             },
         ));
         assert!(!tasks.install_sleep(
@@ -2507,6 +2557,7 @@ mod linux_task_logic {
                 deadline: 40,
                 outcome: LinuxSleepOutcome::Interrupted,
                 relative: None,
+                absolute_realtime_nanoseconds: None,
             },
         ));
         assert_eq!(LinuxSleepWait::waiting(45).relative, None);
@@ -2533,6 +2584,7 @@ mod linux_task_logic {
                 deadline: 50,
                 outcome: LinuxSleepOutcome::Completed,
                 relative: completed_wait.relative,
+                absolute_realtime_nanoseconds: None,
             })
         );
         assert_eq!(tasks.take_sleep_outcome(child.tid, 8), None);
@@ -2569,6 +2621,7 @@ mod linux_task_logic {
                 deadline: 80,
                 outcome: LinuxSleepOutcome::Interrupted,
                 relative: interrupted_wait.relative,
+                absolute_realtime_nanoseconds: None,
             })
         );
 

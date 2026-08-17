@@ -6001,6 +6001,17 @@ fn linux_write_sleep_remaining(address: usize, wait: LinuxSleepWait) -> SysResul
     Ok(0)
 }
 
+fn wake_linux_sleep_outcomes(
+    expired: [Option<(usize, usize, LinuxBlockReason)>; linux_task::LINUX_TASK_LIMIT],
+) {
+    for identity in expired.into_iter().flatten() {
+        let (tid, scheduler_thread, reason) = identity;
+        if !linux_task::wake_blocked(tid, scheduler_thread, reason) {
+            let _ = linux_task::cancel_sleep(tid, scheduler_thread);
+        }
+    }
+}
+
 fn linux_sleep_has_deliverable_pending_signal() -> Result<bool, SysError> {
     let current = linux_task::current_task()?;
     if linux_task::with_current_signal_state(|state| state.peek_unblocked().is_some())? {
@@ -8707,6 +8718,10 @@ pub fn sys_clock_settime(clockid: usize, tp: usize) -> SysResult {
     )
     .ok_or(SysError::EOVERFLOW)?;
     LINUX_REALTIME_OFFSET_NANOS.store(offset, Ordering::SeqCst);
+    let now = crate::kernel_lowlevel::timer::get_tick_count();
+    let expired =
+        linux_task::refresh_realtime_sleep_deadlines(now, offset, LINUX_SIGNAL_TICK_NANOS);
+    wake_linux_sleep_outcomes(expired);
     Ok(0)
 }
 
@@ -8723,11 +8738,19 @@ pub fn sys_clock_nanosleep(clockid: usize, flags: usize, req: usize, rem: usize)
         linux_task::linux_sleep_timespec_nanoseconds(requested.tv_sec, requested.tv_nsec)
             .ok_or(SysError::EINVAL)?;
     let deadline = if absolute {
-        linux_task::linux_sleep_absolute_deadline_ticks(
-            requested.tv_sec,
-            requested.tv_nsec,
-            LINUX_SIGNAL_TICK_NANOS,
-        )
+        if clockid == CLOCK_REALTIME || clockid == CLOCK_REALTIME_COARSE {
+            linux_task::linux_sleep_realtime_deadline_ticks(
+                requested_nanoseconds,
+                LINUX_REALTIME_OFFSET_NANOS.load(Ordering::SeqCst),
+                LINUX_SIGNAL_TICK_NANOS,
+            )
+        } else {
+            linux_task::linux_sleep_absolute_deadline_ticks(
+                requested.tv_sec,
+                requested.tv_nsec,
+                LINUX_SIGNAL_TICK_NANOS,
+            )
+        }
     } else {
         linux_task::linux_sleep_relative_deadline_ticks(
             now,
@@ -8738,7 +8761,11 @@ pub fn sys_clock_nanosleep(clockid: usize, flags: usize, req: usize, rem: usize)
     }
     .ok_or(SysError::EINVAL)?;
     let wait = if absolute {
-        LinuxSleepWait::waiting(deadline)
+        if clockid == CLOCK_REALTIME || clockid == CLOCK_REALTIME_COARSE {
+            LinuxSleepWait::absolute_realtime_waiting(deadline, requested_nanoseconds)
+        } else {
+            LinuxSleepWait::waiting(deadline)
+        }
     } else {
         LinuxSleepWait::relative_waiting(deadline, now, requested_nanoseconds)
     };

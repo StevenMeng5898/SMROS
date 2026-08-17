@@ -218,6 +218,20 @@ pub(crate) fn cancel_sleep(tid: usize, scheduler_thread: usize) -> bool {
     with_runtime(|runtime| runtime.tasks.cancel_sleep(tid, scheduler_thread))
 }
 
+pub(crate) fn refresh_realtime_sleep_deadlines(
+    now: u64,
+    realtime_offset_nanoseconds: i64,
+    tick_nanoseconds: u64,
+) -> [Option<(usize, usize, LinuxBlockReason)>; LINUX_TASK_LIMIT] {
+    with_runtime(|runtime| {
+        runtime.tasks.refresh_realtime_sleep_deadlines(
+            now,
+            realtime_offset_nanoseconds,
+            tick_nanoseconds,
+        )
+    })
+}
+
 pub(crate) fn interrupt_sleep(tid: usize, scheduler_thread: usize, signum: usize) -> bool {
     with_runtime(|runtime| runtime.tasks.interrupt_sleep(tid, scheduler_thread, signum))
 }
