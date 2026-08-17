@@ -964,6 +964,24 @@ mod linux_mqueue_logic {
     }
 
     #[test]
+    fn open_normalizes_linux_syscall_names_without_leading_slash() {
+        let mut state = LinuxMqueueState::<4, 8, 4>::new();
+
+        let opened = state
+            .open("smros-mq", 101, true, false, Some(attr(3, 16)))
+            .unwrap();
+        assert!(opened.created);
+
+        let reopened = state.open("/smros-mq", 102, false, false, None).unwrap();
+        assert!(!reopened.created);
+
+        state.send(101, b"hello", 4).unwrap();
+        let received = state.receive(102, 16).unwrap().message;
+        assert_eq!(received.bytes, b"hello");
+        assert_eq!(received.priority, 4);
+    }
+
+    #[test]
     fn open_preserves_attributes_and_rejects_exclusive_existing_queue() {
         let mut state = LinuxMqueueState::<4, 8, 4>::new();
 

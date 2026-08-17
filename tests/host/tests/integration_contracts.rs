@@ -360,7 +360,8 @@ fn arm64_posix_mqueue_syscalls_are_real_handlers_not_compat_noops() {
         "ARM64_SYS_MQ_OPEN => sys_mq_open(args[0], args[1], args[2], args[3])",
         "ARM64_SYS_MQ_UNLINK => sys_mq_unlink(args[0])",
         "ARM64_SYS_MQ_TIMEDSEND => sys_mq_timedsend(args[0], args[1], args[2], args[3], args[4])",
-        "ARM64_SYS_MQ_TIMEDRECEIVE => sys_mq_timedreceive(args[0], args[1], args[2], args[3], args[4])",
+        "ARM64_SYS_MQ_TIMEDRECEIVE =>",
+        "sys_mq_timedreceive(args[0], args[1], args[2], args[3], args[4])",
         "ARM64_SYS_MQ_NOTIFY => sys_mq_notify(args[0], args[1])",
         "ARM64_SYS_MQ_GETSETATTR => sys_mq_getsetattr(args[0], args[1], args[2])",
     ] {
@@ -384,6 +385,23 @@ fn arm64_posix_mqueue_syscalls_are_real_handlers_not_compat_noops() {
     assert!(task_logic.contains("Mqueue"));
     assert!(syscall.contains("linux_mqueue::close_handle(handle);"));
     assert!(syscall.contains("linux_mqueue::reset();"));
+}
+
+#[test]
+fn mq_open_creation_ignores_mq_attr_fields_posix_marks_ignored() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let reader = braced_body(
+        &syscall[syscall
+            .find("fn linux_read_user_mq_attr(")
+            .expect("mq_attr reader")..],
+    );
+
+    assert!(!reader.contains("flags < 0"));
+    assert!(!reader.contains("curmsgs < 0"));
+    assert!(reader.contains("maxmsg <= 0"));
+    assert!(reader.contains("msgsize <= 0"));
 }
 
 #[test]

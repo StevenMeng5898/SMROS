@@ -84,10 +84,7 @@ pub(crate) fn getattr(handle: u32, flags: usize) -> Result<LinuxMqueueAttr, SysE
     with_state(|state| state.getattr(handle, flags)).map_err(linux_mqueue_error)
 }
 
-pub(crate) fn notify(
-    handle: u32,
-    notification: Option<LinuxMqueueNotification>,
-) -> SysResult {
+pub(crate) fn notify(handle: u32, notification: Option<LinuxMqueueNotification>) -> SysResult {
     with_state(|state| state.notify(handle, notification)).map_err(linux_mqueue_error)?;
     Ok(0)
 }
@@ -97,8 +94,8 @@ pub(crate) fn send(
     bytes: &[u8],
     priority: usize,
 ) -> Result<LinuxMqueueSendOutcome, SysError> {
-    let outcome = with_state(|state| state.send(handle, bytes, priority))
-        .map_err(linux_mqueue_error)?;
+    let outcome =
+        with_state(|state| state.send(handle, bytes, priority)).map_err(linux_mqueue_error)?;
     wake_identity(outcome.receiver);
     Ok(outcome)
 }
@@ -107,8 +104,8 @@ pub(crate) fn receive(
     handle: u32,
     buffer_len: usize,
 ) -> Result<LinuxMqueueReceiveOutcome, SysError> {
-    let outcome = with_state(|state| state.receive(handle, buffer_len))
-        .map_err(linux_mqueue_error)?;
+    let outcome =
+        with_state(|state| state.receive(handle, buffer_len)).map_err(linux_mqueue_error)?;
     wake_identity(outcome.sender);
     Ok(outcome)
 }

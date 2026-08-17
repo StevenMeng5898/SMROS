@@ -149,7 +149,7 @@ impl<const Q: usize, const H: usize, const W: usize> LinuxMqueueState<Q, H, W> {
         exclusive: bool,
         attr: Option<LinuxMqueueAttr>,
     ) -> Result<LinuxMqueueOpen, LinuxMqueueError> {
-        validate_linux_mqueue_name(name)?;
+        let name = linux_mqueue_name_component(name)?;
         self.validate_new_handle(handle)?;
 
         if let Some(index) = self.queue_index_by_name(name) {
@@ -229,7 +229,7 @@ impl<const Q: usize, const H: usize, const W: usize> LinuxMqueueState<Q, H, W> {
     }
 
     pub(crate) fn unlink(&mut self, name: &str) -> Result<(), LinuxMqueueError> {
-        validate_linux_mqueue_name(name)?;
+        let name = linux_mqueue_name_component(name)?;
         let index = self
             .queue_index_by_name(name)
             .ok_or(LinuxMqueueError::NotFound)?;
@@ -582,18 +582,18 @@ impl<const Q: usize, const H: usize, const W: usize> LinuxMqueueState<Q, H, W> {
     }
 }
 
-pub(crate) fn validate_linux_mqueue_name(name: &str) -> Result<(), LinuxMqueueError> {
-    if name.len() <= 1 || !name.starts_with('/') {
+pub(crate) fn linux_mqueue_name_component(name: &str) -> Result<&str, LinuxMqueueError> {
+    let component = name.strip_prefix('/').unwrap_or(name);
+    if component.is_empty() {
         return Err(LinuxMqueueError::Invalid);
     }
-    let component = &name[1..];
     if component.len() > LINUX_MQ_NAME_MAX {
         return Err(LinuxMqueueError::NameTooLong);
     }
     if component.as_bytes().iter().any(|byte| *byte == b'/') {
         return Err(LinuxMqueueError::Invalid);
     }
-    Ok(())
+    Ok(component)
 }
 
 pub(crate) fn validate_linux_mqueue_attr(

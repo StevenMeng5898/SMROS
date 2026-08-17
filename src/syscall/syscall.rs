@@ -1276,18 +1276,16 @@ fn linux_read_user_mq_attr(address: usize) -> Result<linux_mqueue::LinuxMqueueAt
     }
     let mut bytes = [0u8; LINUX_MQ_ATTR_BYTES];
     linux_copy_from_user(address, &mut bytes)?;
-    let flags = i64::from_ne_bytes(linux_wire_field(&bytes, LINUX_MQ_ATTR_FLAGS_OFFSET)?);
     let maxmsg = i64::from_ne_bytes(linux_wire_field(&bytes, LINUX_MQ_ATTR_MAXMSG_OFFSET)?);
     let msgsize = i64::from_ne_bytes(linux_wire_field(&bytes, LINUX_MQ_ATTR_MSGSIZE_OFFSET)?);
-    let curmsgs = i64::from_ne_bytes(linux_wire_field(&bytes, LINUX_MQ_ATTR_CURMSGS_OFFSET)?);
-    if flags < 0 || maxmsg <= 0 || msgsize <= 0 || curmsgs < 0 {
+    if maxmsg <= 0 || msgsize <= 0 {
         return Err(SysError::EINVAL);
     }
     Ok(linux_mqueue::LinuxMqueueAttr {
-        flags: usize::try_from(flags).map_err(|_| SysError::EINVAL)?,
+        flags: 0,
         maxmsg: usize::try_from(maxmsg).map_err(|_| SysError::EINVAL)?,
         msgsize: usize::try_from(msgsize).map_err(|_| SysError::EINVAL)?,
-        curmsgs: usize::try_from(curmsgs).map_err(|_| SysError::EINVAL)?,
+        curmsgs: 0,
     })
 }
 
@@ -5845,7 +5843,9 @@ fn linux_read_user_timespec(address: usize) -> Result<LinuxTimespec, SysError> {
     })
 }
 
-fn linux_mqueue_deadline(timeout: usize) -> Result<Option<linux_mqueue::LinuxMqueueDeadline>, SysError> {
+fn linux_mqueue_deadline(
+    timeout: usize,
+) -> Result<Option<linux_mqueue::LinuxMqueueDeadline>, SysError> {
     if timeout == 0 {
         return Ok(None);
     }
@@ -7672,10 +7672,7 @@ pub fn sys_mq_timedreceive(
                     linux_copy_to_user(msg_ptr, &outcome.message.bytes)?;
                 }
                 if msg_prio != 0 {
-                    linux_copy_to_user(
-                        msg_prio,
-                        &(outcome.message.priority as u32).to_ne_bytes(),
-                    )?;
+                    linux_copy_to_user(msg_prio, &(outcome.message.priority as u32).to_ne_bytes())?;
                 }
                 return Ok(outcome.message.bytes.len());
             }
@@ -13014,7 +13011,9 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_MQ_OPEN => sys_mq_open(args[0], args[1], args[2], args[3]),
         ARM64_SYS_MQ_UNLINK => sys_mq_unlink(args[0]),
         ARM64_SYS_MQ_TIMEDSEND => sys_mq_timedsend(args[0], args[1], args[2], args[3], args[4]),
-        ARM64_SYS_MQ_TIMEDRECEIVE => sys_mq_timedreceive(args[0], args[1], args[2], args[3], args[4]),
+        ARM64_SYS_MQ_TIMEDRECEIVE => {
+            sys_mq_timedreceive(args[0], args[1], args[2], args[3], args[4])
+        }
         ARM64_SYS_MQ_NOTIFY => sys_mq_notify(args[0], args[1]),
         ARM64_SYS_MQ_GETSETATTR => sys_mq_getsetattr(args[0], args[1], args[2]),
         ARM64_SYS_MSGGET => sys_msgget(args[0], args[1]),
