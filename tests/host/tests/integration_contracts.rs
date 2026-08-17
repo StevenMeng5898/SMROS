@@ -2427,7 +2427,7 @@ fn posix_test_preloads_smros_compat_runtime_without_affecting_shell_run() {
 }
 
 #[test]
-fn smros_posix_compat_runtime_validates_aio_before_forwarding_to_glibc() {
+fn smros_posix_compat_runtime_tracks_aio_completion_state() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let compat =
         std::fs::read_to_string(repository.join("scripts/posix/runtime/smros_posix_compat.c"))
@@ -2437,10 +2437,25 @@ fn smros_posix_compat_runtime_validates_aio_before_forwarding_to_glibc() {
         "#define _GNU_SOURCE",
         "int aio_write(struct aiocb *request)",
         "int aio_read(struct aiocb *request)",
+        "int aio_error(const struct aiocb *request)",
+        "ssize_t aio_return(struct aiocb *request)",
+        "int aio_cancel(int fd, struct aiocb *request)",
+        "int aio_suspend(",
+        "SMROS_AIO_RECORDS",
+        "smros_aio_record",
+        "smros_store_completed_aio",
+        "smros_find_aio_record",
+        "smros_mark_aio_canceled",
+        "pwrite(",
+        "pread(",
+        "EINPROGRESS",
+        "ECANCELED",
+        "AIO_NOTCANCELED",
+        "AIO_CANCELED",
+        "AIO_ALLDONE",
         "dlsym(RTLD_NEXT, symbol)",
-        "smros_forward_aio_submit(\"aio_write\", request)",
-        "smros_forward_aio_submit(\"aio_read\", request)",
         "request == NULL || request->aio_buf == NULL",
+        "request->aio_offset < 0 || request->aio_reqprio < 0",
         "errno = EINVAL;",
         "fcntl(request->aio_fildes, F_GETFL)",
         "errno = EBADF;",

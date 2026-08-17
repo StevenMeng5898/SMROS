@@ -2772,6 +2772,225 @@ with tempfile.TemporaryDirectory() as temporary:
             "target/libsmros-posix-compat.so",
         )
 
+    def test_smros_posix_compat_preload_tracks_completed_aio_requests(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "aio-probe.c"
+            binary = root / "aio-probe"
+            probe.write_text(
+                r'''
+#define _XOPEN_SOURCE 600
+
+#include <aio.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static int expect_errno(const char *name, int expected) {
+    if (errno != expected) {
+        fprintf(stderr, "%s errno=%d expected=%d\n", name, errno, expected);
+        return 1;
+    }
+    return 0;
+}
+
+int main(void) {
+    struct aiocb invalid;
+    memset(&invalid, 0, sizeof(invalid));
+    errno = 0;
+    if (aio_error(&invalid) != -1) {
+        fprintf(stderr, "bad aio_error accepted\n");
+        return 1;
+    }
+    if (expect_errno("bad aio_error", EINVAL) != 0) {
+        return 1;
+    }
+
+    char template[] = "/tmp/smros-aio-probe-XXXXXX";
+    int fd = mkstemp(template);
+    if (fd < 0) {
+        perror("mkstemp");
+        return 1;
+    }
+    unlink(template);
+
+    char buffer[] = "smros";
+    struct aiocb request;
+    memset(&request, 0, sizeof(request));
+    request.aio_fildes = fd;
+    request.aio_buf = buffer;
+    request.aio_nbytes = sizeof(buffer);
+    request.aio_offset = 0;
+
+    if (aio_write(&request) != 0) {
+        perror("aio_write");
+        return 1;
+    }
+    close(fd);
+
+    while (aio_error(&request) == EINPROGRESS) {
+    }
+    if (aio_error(&request) != 0) {
+        perror("aio_error");
+        return 1;
+    }
+    errno = 0;
+    if (aio_return(&request) != (ssize_t)sizeof(buffer)) {
+        perror("aio_return");
+        return 1;
+    }
+    errno = 0;
+    if (aio_return(&request) != -1) {
+        fprintf(stderr, "duplicate aio_return accepted\n");
+        return 1;
+    }
+    if (expect_errno("duplicate aio_return", EINVAL) != 0) {
+        return 1;
+    }
+
+    char append_template[] = "/tmp/smros-aio-append-XXXXXX";
+    int append_fd = mkstemp(append_template);
+    if (append_fd < 0) {
+        perror("mkstemp append");
+        return 1;
+    }
+    close(append_fd);
+    append_fd = open(append_template, O_CREAT | O_APPEND | O_RDWR, 0600);
+    if (append_fd < 0) {
+        perror("open append");
+        return 1;
+    }
+    unlink(append_template);
+
+    char first[] = "aa";
+    char second[] = "bbb";
+    char third[] = "cccc";
+    char *buffers[3] = { first, second, third };
+    size_t sizes[3] = { sizeof(first) - 1, sizeof(second) - 1, sizeof(third) - 1 };
+    struct aiocb writes[3];
+    for (int index = 0; index < 3; index++) {
+        memset(&writes[index], 0, sizeof(writes[index]));
+        writes[index].aio_fildes = append_fd;
+        writes[index].aio_buf = buffers[index];
+        writes[index].aio_nbytes = sizes[index];
+        if (aio_write(&writes[index]) != 0) {
+            perror("aio_write append");
+            return 1;
+        }
+    }
+
+    while (aio_error(&writes[2]) == EINPROGRESS) {
+    }
+    for (int index = 0; index < 3; index++) {
+        if (aio_error(&writes[index]) != 0) {
+            fprintf(stderr, "append aio_error[%d]=%d\n", index, aio_error(&writes[index]));
+            return 1;
+        }
+        if (aio_return(&writes[index]) != (ssize_t)sizes[index]) {
+            fprintf(stderr, "append aio_return[%d]\n", index);
+            return 1;
+        }
+    }
+    char appended[9];
+    if (lseek(append_fd, 0, SEEK_SET) != 0) {
+        perror("append lseek");
+        return 1;
+    }
+    if (read(append_fd, appended, sizeof(appended)) != (ssize_t)sizeof(appended)) {
+        perror("append read");
+        return 1;
+    }
+    if (memcmp(appended, "aabbbcccc", sizeof(appended)) != 0) {
+        fprintf(stderr, "append order corrupted\n");
+        return 1;
+    }
+    close(append_fd);
+
+    int read_only = open("/dev/null", O_RDONLY);
+    if (read_only < 0) {
+        perror("open read-only");
+        return 1;
+    }
+    memset(&request, 0, sizeof(request));
+    request.aio_fildes = read_only;
+    request.aio_buf = buffer;
+    request.aio_nbytes = sizeof(buffer);
+    errno = 0;
+    if (aio_write(&request) != -1) {
+        fprintf(stderr, "read-only aio_write accepted\n");
+        return 1;
+    }
+    if (expect_errno("read-only aio_write", EBADF) != 0) {
+        return 1;
+    }
+    close(read_only);
+
+    int write_only = open("/dev/null", O_WRONLY);
+    if (write_only < 0) {
+        perror("open write-only");
+        return 1;
+    }
+    memset(&request, 0, sizeof(request));
+    request.aio_fildes = write_only;
+    request.aio_buf = buffer;
+    request.aio_nbytes = sizeof(buffer);
+    errno = 0;
+    if (aio_read(&request) != -1) {
+        fprintf(stderr, "write-only aio_read accepted\n");
+        return 1;
+    }
+    if (expect_errno("write-only aio_read", EBADF) != 0) {
+        return 1;
+    }
+    close(write_only);
+
+    return 0;
+}
+''',
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    "cc",
+                    "-std=gnu99",
+                    "-fPIC",
+                    "-shared",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    str(source),
+                    "-o",
+                    str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so",
+                    "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "cc",
+                    "-std=gnu99",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    str(probe),
+                    "-o",
+                    str(binary),
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+            )
+
     def test_runtime_staging_passes_held_stage_descriptor_to_readelf(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             stage = Path(temporary)
