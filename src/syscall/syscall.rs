@@ -40,7 +40,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
-use core::sync::atomic::{compiler_fence, AtomicI64, AtomicU64, Ordering};
+use core::sync::atomic::{compiler_fence, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
 use super::address_logic::{
     checked_end, fixed_linux_mmap_request_ok as shared_fixed_linux_mmap_request_ok,
@@ -1106,7 +1106,9 @@ fn linux_fill_user(address: usize, len: usize, value: u8) -> SysResult {
     Ok(0)
 }
 
-fn linux_write_user_timespec(address: usize, value: LinuxTimespec) -> SysResult {
+fn linux_encode_flat_timespec(
+    value: LinuxTimespec,
+) -> Result<[u8; core::mem::size_of::<LinuxTimespec>()], SysError> {
     let mut bytes = [0u8; core::mem::size_of::<LinuxTimespec>()];
     linux_put_wire_field(
         &mut bytes,
@@ -1118,8 +1120,45 @@ fn linux_write_user_timespec(address: usize, value: LinuxTimespec) -> SysResult 
         core::mem::offset_of!(LinuxTimespec, tv_nsec),
         &value.tv_nsec.to_ne_bytes(),
     )?;
+    Ok(bytes)
+}
+
+fn linux_write_user_timespec(address: usize, value: LinuxTimespec) -> SysResult {
+    let bytes = linux_encode_flat_timespec(value)?;
     linux_copy_to_user(address, &bytes)?;
     Ok(0)
+}
+
+fn linux_write_user_timespec_clock_gettime(address: usize, value: LinuxTimespec) -> SysResult {
+    let bytes = linux_encode_flat_timespec(value)?;
+    let Ok(pid) = linux_process::current_pid() else {
+        return linux_copy_to_user(address, &bytes).map(|_| 0);
+    };
+    let generation = linux_process_memory::memory_generation();
+    if LINUX_CLOCK_GETTIME_CACHE_PID.load(Ordering::Relaxed) == pid
+        && LINUX_CLOCK_GETTIME_CACHE_GENERATION.load(Ordering::Relaxed) == generation
+        && LINUX_CLOCK_GETTIME_CACHE_ADDRESS.load(Ordering::Relaxed) == address
+    {
+        let physical = LINUX_CLOCK_GETTIME_CACHE_PHYSICAL.load(Ordering::Relaxed);
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), physical as *mut u8, bytes.len());
+        }
+        return Ok(0);
+    }
+
+    match linux_process_memory::current_writable_contiguous_physical(address, bytes.len()) {
+        Ok((translated_pid, translated_generation, physical)) => {
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), physical as *mut u8, bytes.len());
+            }
+            LINUX_CLOCK_GETTIME_CACHE_PHYSICAL.store(physical, Ordering::Relaxed);
+            LINUX_CLOCK_GETTIME_CACHE_ADDRESS.store(address, Ordering::Relaxed);
+            LINUX_CLOCK_GETTIME_CACHE_GENERATION.store(translated_generation, Ordering::Relaxed);
+            LINUX_CLOCK_GETTIME_CACHE_PID.store(translated_pid, Ordering::Relaxed);
+            Ok(0)
+        }
+        Err(_) => linux_copy_to_user(address, &bytes).map(|_| 0),
+    }
 }
 
 fn linux_encode_timeval(
@@ -3551,6 +3590,11 @@ impl MemorySyscallState {
 static mut MEMORY_SYSCALL_STATE: Option<MemorySyscallState> = None;
 static LINUX_SIGNAL_TRAMPOLINE: AtomicU64 = AtomicU64::new(0);
 static LINUX_REALTIME_OFFSET_NANOS: AtomicI64 = AtomicI64::new(LINUX_DEFAULT_REALTIME_OFFSET_NANOS);
+static LINUX_CPU_CLOCK_OFFSET_NANOS: AtomicI64 = AtomicI64::new(0);
+static LINUX_CLOCK_GETTIME_CACHE_PID: AtomicUsize = AtomicUsize::new(usize::MAX);
+static LINUX_CLOCK_GETTIME_CACHE_GENERATION: AtomicUsize = AtomicUsize::new(usize::MAX);
+static LINUX_CLOCK_GETTIME_CACHE_ADDRESS: AtomicUsize = AtomicUsize::new(0);
+static LINUX_CLOCK_GETTIME_CACHE_PHYSICAL: AtomicUsize = AtomicUsize::new(0);
 
 const LINUX_SIGNAL_TRAMPOLINE_BYTES: usize = PAGE_SIZE;
 fn memory_state() -> &'static mut MemorySyscallState {
@@ -4054,15 +4098,22 @@ fn linux_realtime_nanos() -> Result<u64, SysError> {
     .ok_or(SysError::EOVERFLOW)
 }
 
+fn linux_cpu_clock_nanos() -> Result<u64, SysError> {
+    syscall_logic::linux_realtime_from_offset(
+        monotonic_nanos(),
+        LINUX_CPU_CLOCK_OFFSET_NANOS.load(Ordering::SeqCst),
+    )
+    .ok_or(SysError::EOVERFLOW)
+}
+
 fn linux_clock_nanoseconds(clock_id: usize) -> Result<u64, SysError> {
     match clock_id {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE => linux_realtime_nanos(),
-        CLOCK_MONOTONIC
-        | CLOCK_PROCESS_CPUTIME_ID
-        | CLOCK_THREAD_CPUTIME_ID
-        | CLOCK_MONOTONIC_RAW
-        | CLOCK_MONOTONIC_COARSE
-        | CLOCK_BOOTTIME => Ok(monotonic_nanos()),
+        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => linux_cpu_clock_nanos(),
+        CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME => {
+            Ok(monotonic_nanos())
+        }
+        _ if syscall_logic::linux_cpu_clock_id_supported(clock_id) => linux_cpu_clock_nanos(),
         _ => Err(SysError::EINVAL),
     }
 }
@@ -4096,6 +4147,7 @@ pub fn reset_linux_signal_timer_state() {
     let _ = linux_process::reset_current_signal_state();
     LINUX_SIGNAL_TRAMPOLINE.store(0, Ordering::SeqCst);
     LINUX_REALTIME_OFFSET_NANOS.store(LINUX_DEFAULT_REALTIME_OFFSET_NANOS, Ordering::SeqCst);
+    LINUX_CPU_CLOCK_OFFSET_NANOS.store(0, Ordering::SeqCst);
 }
 
 fn linux_signal_bit(signum: usize) -> u64 {
@@ -8603,8 +8655,18 @@ pub fn sys_clock_settime(clockid: usize, tp: usize) -> SysResult {
         return Err(SysError::EINVAL);
     }
     let requested = linux_read_user_timespec(tp)?;
-    syscall_logic::linux_posix_timespec_nanoseconds(requested.tv_sec, requested.tv_nsec)
-        .ok_or(SysError::EINVAL)?;
+    let requested_nanos =
+        syscall_logic::linux_posix_timespec_nanoseconds(requested.tv_sec, requested.tv_nsec)
+            .ok_or(SysError::EINVAL)?;
+    if clockid == CLOCK_PROCESS_CPUTIME_ID
+        || clockid == CLOCK_THREAD_CPUTIME_ID
+        || syscall_logic::linux_cpu_clock_id_supported(clockid)
+    {
+        let offset = i128::from(requested_nanos) - i128::from(monotonic_nanos());
+        let offset = i64::try_from(offset).map_err(|_| SysError::EOVERFLOW)?;
+        LINUX_CPU_CLOCK_OFFSET_NANOS.store(offset, Ordering::SeqCst);
+        return Ok(0);
+    }
     let offset = syscall_logic::linux_realtime_offset_for_set(
         monotonic_nanos(),
         requested.tv_sec,
@@ -12238,8 +12300,6 @@ pub fn sys_nanosleep(deadline: u64) -> ZxResult {
 
 /// Linux sys_clock_gettime implementation
 pub fn sys_clock_gettime(clock: usize, buf: usize) -> SysResult {
-    info!("clock_gettime: clock={}", clock);
-
     if !syscall_logic::linux_clock_id_supported(clock) {
         return Err(SysError::EINVAL);
     }
@@ -12252,7 +12312,7 @@ pub fn sys_clock_gettime(clock: usize, buf: usize) -> SysResult {
         tv_sec: (now / 1_000_000_000) as i64,
         tv_nsec: (now % 1_000_000_000) as i64,
     };
-    linux_write_user_timespec(buf, timespec)
+    linux_write_user_timespec_clock_gettime(buf, timespec)
 }
 
 pub fn sys_clock_getres(clock: usize, buf: usize) -> SysResult {

@@ -89,7 +89,7 @@ macro_rules! smros_syscall_wait_satisfied_body {
 
 macro_rules! smros_linux_clock_id_supported_body {
     ($clock_id:expr) => {{
-        $clock_id <= 7
+        $clock_id <= 7 || linux_cpu_clock_id_supported($clock_id)
     }};
 }
 
@@ -102,7 +102,25 @@ macro_rules! smros_linux_clock_nanosleep_flags_valid_body {
 const LINUX_POSIX_NANOS_PER_SECOND: u64 = 1_000_000_000;
 
 pub(crate) fn linux_posix_clock_settable(clock_id: usize) -> bool {
-    clock_id == 0
+    clock_id == 0 || clock_id == 2 || clock_id == 3 || linux_cpu_clock_id_supported(clock_id)
+}
+
+#[cfg(test)]
+pub(crate) const fn linux_make_process_cpu_clock_id(pid: i32) -> i32 {
+    ((!pid) << 3) | 2
+}
+
+pub(crate) const fn linux_cpu_clock_id_signed(clock_id: usize) -> i32 {
+    clock_id as u32 as i32
+}
+
+pub(crate) const fn linux_cpu_clock_id_supported(clock_id: usize) -> bool {
+    let signed = linux_cpu_clock_id_signed(clock_id);
+    if signed >= 0 {
+        return false;
+    }
+    let kind = (signed as u32) & 7;
+    kind == 0 || kind == 1 || kind == 2 || kind == 4 || kind == 5 || kind == 6
 }
 
 pub(crate) fn linux_posix_timespec_nanoseconds(seconds: i64, nanoseconds: i64) -> Option<u64> {

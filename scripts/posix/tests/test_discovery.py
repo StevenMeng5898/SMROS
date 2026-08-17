@@ -196,6 +196,28 @@ class TestDiscovery(DiscoveryFixture):
                 test = tests[test_id]
                 self.assertEqual((test.api, test.group, test.kind), (api, "base", "runnable"))
 
+    def test_cpu_clock_syscall_volume_tests_have_reviewed_timeouts(self) -> None:
+        self.write_source(
+            "conformance/interfaces/clock/1-1.c",
+            "int main(void) { return 0; }\n",
+        )
+        self.write_source(
+            "conformance/interfaces/clock_gettime/4-1.c",
+            "int main(void) { return 0; }\n",
+        )
+
+        tests = {test.test_id: test for test in discover_tests(self.root)}
+
+        self.assertEqual(
+            tests["conformance/interfaces/clock/1-1.c"].timeout_ms,
+            180_000,
+        )
+        self.assertEqual(
+            tests["conformance/interfaces/clock_gettime/4-1.c"].timeout_ms,
+            60_000,
+        )
+        self.assertEqual(tests["conformance/interfaces/mmap/1-1.c"].timeout_ms, 30_000)
+
     def test_api_group_uses_the_approved_mapping(self) -> None:
         expected = {
             "pthread_create": "threads",

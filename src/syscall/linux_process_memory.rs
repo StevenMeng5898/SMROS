@@ -1,5 +1,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::kernel_lowlevel::memory::{PageFrameAllocator, PAGE_SIZE};
 #[cfg(target_arch = "aarch64")]
@@ -10,6 +11,16 @@ use super::{linux_process, SysError};
 
 include!("linux_process_memory_logic_shared.rs");
 include!("linux_runtime_lock_shared.rs");
+
+static LINUX_MEMORY_GENERATION: AtomicUsize = AtomicUsize::new(0);
+
+fn bump_memory_generation() {
+    LINUX_MEMORY_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+pub(crate) fn memory_generation() -> usize {
+    LINUX_MEMORY_GENERATION.load(Ordering::SeqCst)
+}
 
 #[derive(Clone)]
 pub(crate) enum LinuxMappingSource {
@@ -308,6 +319,7 @@ impl BrkState {
 
 pub(crate) struct LinuxProcessMemory {
     pub pid: usize,
+    generation: usize,
     #[cfg(target_arch = "aarch64")]
     pub address_space: Aarch64AddressSpace,
     #[cfg(not(target_arch = "aarch64"))]
@@ -647,6 +659,7 @@ pub(crate) fn register_root(pid: usize) -> Result<u64, SysError> {
         }
         runtime.memories.push(LinuxProcessMemory {
             pid,
+            generation: memory_generation(),
             address_space,
             mappings: Vec::new(),
             shared_attachments: Vec::new(),
@@ -698,6 +711,7 @@ pub(crate) fn copy_to_process(pid: usize, address: usize, bytes: &[u8]) -> Resul
 }
 
 pub(crate) fn reset_launch() {
+    bump_memory_generation();
     with_runtime(|runtime| {
         runtime.memories.clear();
     });
@@ -716,6 +730,7 @@ pub(crate) fn unregister(pid: usize) -> bool {
             return false;
         };
         runtime.memories.remove(index);
+        bump_memory_generation();
         true
     })
 }
@@ -763,6 +778,7 @@ pub(crate) fn clone_for_fork(
 
         let mut child = LinuxProcessMemory {
             pid: child_pid,
+            generation: memory_generation(),
             address_space,
             mappings: Vec::new(),
             shared_attachments: Vec::new(),
@@ -970,6 +986,20 @@ pub(crate) fn copy_to_current(address: usize, bytes: &[u8]) -> Result<(), SysErr
         return Ok(());
     }
     with_current(|memory| memory.copy_to_user(address, bytes))
+}
+
+pub(crate) fn current_writable_contiguous_physical(
+    address: usize,
+    len: usize,
+) -> Result<(usize, usize, usize), SysError> {
+    if len == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let pid = linux_process::current_pid()?;
+    with_pid(pid, |memory| {
+        let physical = memory.writable_contiguous_physical(address, len)?;
+        Ok((pid, memory.generation, physical))
+    })
 }
 
 pub(crate) fn zero_current(address: usize, len: usize) -> Result<(), SysError> {
@@ -1398,6 +1428,11 @@ pub(crate) fn resource_counts() -> LinuxProcessMemoryResourceCounts {
 }
 
 impl LinuxProcessMemory {
+    fn bump_generation(&mut self) {
+        bump_memory_generation();
+        self.generation = memory_generation();
+    }
+
     fn classify_memory_fault(
         &self,
         address: usize,
@@ -1521,6 +1556,27 @@ impl LinuxProcessMemory {
             return Err(SysError::EFAULT);
         }
         self.copy_to_mapped_pages(address, bytes)
+    }
+
+    fn writable_contiguous_physical(&self, address: usize, len: usize) -> Result<usize, SysError> {
+        let end = address.checked_add(len).ok_or(SysError::EFAULT)?;
+        if end > (address | (PAGE_SIZE - 1)).saturating_add(1) {
+            return Err(SysError::EFAULT);
+        }
+        if !self.range_accessible(address, len, true) {
+            return Err(SysError::EFAULT);
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            return self
+                .address_space
+                .translate_user(address, true)
+                .ok_or(SysError::EFAULT);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            Ok(address)
+        }
     }
 
     fn copy_to_mapped_pages(&self, address: usize, bytes: &[u8]) -> Result<(), SysError> {
@@ -1943,6 +1999,7 @@ impl LinuxProcessMemory {
         } = plan;
         self.mappings = mappings;
         self.shared_attachments = shared_attachments;
+        self.bump_generation();
         (removed, detached)
     }
 
@@ -2091,6 +2148,7 @@ impl LinuxProcessMemory {
             return Err(error);
         }
         self.mappings.insert(index, mapping);
+        self.bump_generation();
         if let Some(next_addr) = next_addr {
             self.next_addr = next_addr;
         }
@@ -2250,6 +2308,7 @@ impl LinuxProcessMemory {
                 return Err(error);
             }
             self.brk.pages = planned_pages;
+            self.bump_generation();
         } else if new_pages < old_pages {
             let mut planned_pages = Vec::new();
             planned_pages
@@ -2269,6 +2328,7 @@ impl LinuxProcessMemory {
             self.unmap_pages_transactionally(&removed)?;
             self.brk.pages = planned_pages;
             Self::free_backings(&backings);
+            self.bump_generation();
         } else if new_brk > old_brk {
             self.zero_user_range(old_brk, new_brk - old_brk)?;
         }

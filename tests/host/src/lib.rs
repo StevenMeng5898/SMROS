@@ -757,8 +757,30 @@ mod syscall_logic {
     }
 
     #[test]
+    fn clock_gettime_accepts_linux_dynamic_cpu_clock_ids() {
+        let pid_zero_process_clock = linux_make_process_cpu_clock_id(0);
+        let pid_123_process_clock = linux_make_process_cpu_clock_id(123);
+        let zero_extended = pid_123_process_clock as u32 as usize;
+        let sign_extended = pid_123_process_clock as isize as usize;
+
+        assert_eq!(pid_zero_process_clock, -6);
+        assert!(linux_cpu_clock_id_supported(pid_zero_process_clock as isize as usize));
+        assert!(linux_cpu_clock_id_supported(zero_extended));
+        assert!(linux_cpu_clock_id_supported(sign_extended));
+        assert!(smros_linux_clock_id_supported_body!(zero_extended));
+        assert!(smros_linux_clock_id_supported_body!(sign_extended));
+
+        assert!(!linux_cpu_clock_id_supported(8));
+        assert!(!linux_cpu_clock_id_supported(usize::MAX));
+        assert!(!linux_cpu_clock_id_supported((-5isize) as usize));
+    }
+
+    #[test]
     fn posix_realtime_offset_is_checked_and_monotonic_is_not_settable() {
         assert!(linux_posix_clock_settable(0));
+        assert!(linux_posix_clock_settable(2));
+        assert!(linux_posix_clock_settable(3));
+        assert!(linux_posix_clock_settable((-6isize) as usize));
         assert!(!linux_posix_clock_settable(1));
         assert!(!linux_posix_clock_settable(usize::MAX));
 
