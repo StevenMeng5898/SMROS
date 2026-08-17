@@ -474,6 +474,12 @@ const ZX_USER_SIGNAL_0: u32 = 1 << 24;
 const ZX_TIMER_SIGNALED: u32 = 1 << 7;
 const CLOCK_REALTIME: usize = 0;
 const CLOCK_MONOTONIC: usize = 1;
+const CLOCK_PROCESS_CPUTIME_ID: usize = 2;
+const CLOCK_THREAD_CPUTIME_ID: usize = 3;
+const CLOCK_MONOTONIC_RAW: usize = 4;
+const CLOCK_REALTIME_COARSE: usize = 5;
+const CLOCK_MONOTONIC_COARSE: usize = 6;
+const CLOCK_BOOTTIME: usize = 7;
 const LINUX_TIMER_ABSTIME: usize = 1;
 const LINUX_SIGEV_SIGNAL: i32 = 0;
 const ZX_CLOCK_OPT_AUTO_START: u32 = 1 << 0;
@@ -589,6 +595,7 @@ const LINUX_SA_SIGINFO: u64 = 0x0000_0004;
 const LINUX_SA_ONSTACK: u64 = 0x0800_0000;
 const LINUX_SA_RESETHAND: u64 = 0x8000_0000;
 const LINUX_SIGNAL_TICK_NANOS: u64 = 10_000_000;
+const LINUX_DEFAULT_REALTIME_OFFSET_NANOS: i64 = 1_700_000_000_000_000_000;
 const LINUX_SS_ONSTACK: u64 = linux_task::LINUX_SS_ONSTACK;
 const LINUX_SS_DISABLE: u64 = linux_task::LINUX_SS_DISABLE;
 const LINUX_MINSIGSTKSZ: u64 = 5120;
@@ -3540,7 +3547,7 @@ impl MemorySyscallState {
 
 static mut MEMORY_SYSCALL_STATE: Option<MemorySyscallState> = None;
 static LINUX_SIGNAL_TRAMPOLINE: AtomicU64 = AtomicU64::new(0);
-static LINUX_REALTIME_OFFSET_NANOS: AtomicI64 = AtomicI64::new(0);
+static LINUX_REALTIME_OFFSET_NANOS: AtomicI64 = AtomicI64::new(LINUX_DEFAULT_REALTIME_OFFSET_NANOS);
 
 const LINUX_SIGNAL_TRAMPOLINE_BYTES: usize = PAGE_SIZE;
 fn memory_state() -> &'static mut MemorySyscallState {
@@ -4045,9 +4052,15 @@ fn linux_realtime_nanos() -> Result<u64, SysError> {
 }
 
 fn linux_clock_nanoseconds(clock_id: usize) -> Result<u64, SysError> {
-    match syscall_logic::LinuxPosixClock::from_id(clock_id).ok_or(SysError::EINVAL)? {
-        syscall_logic::LinuxPosixClock::Realtime => linux_realtime_nanos(),
-        syscall_logic::LinuxPosixClock::Monotonic => Ok(monotonic_nanos()),
+    match clock_id {
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => linux_realtime_nanos(),
+        CLOCK_MONOTONIC
+        | CLOCK_PROCESS_CPUTIME_ID
+        | CLOCK_THREAD_CPUTIME_ID
+        | CLOCK_MONOTONIC_RAW
+        | CLOCK_MONOTONIC_COARSE
+        | CLOCK_BOOTTIME => Ok(monotonic_nanos()),
+        _ => Err(SysError::EINVAL),
     }
 }
 
@@ -4079,7 +4092,7 @@ fn linux_timeval_from_ticks(ticks: u64) -> LinuxTimeval {
 pub fn reset_linux_signal_timer_state() {
     let _ = linux_process::reset_current_signal_state();
     LINUX_SIGNAL_TRAMPOLINE.store(0, Ordering::SeqCst);
-    LINUX_REALTIME_OFFSET_NANOS.store(0, Ordering::SeqCst);
+    LINUX_REALTIME_OFFSET_NANOS.store(LINUX_DEFAULT_REALTIME_OFFSET_NANOS, Ordering::SeqCst);
 }
 
 fn linux_signal_bit(signum: usize) -> u64 {

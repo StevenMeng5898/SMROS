@@ -89,7 +89,7 @@ macro_rules! smros_syscall_wait_satisfied_body {
 
 macro_rules! smros_linux_clock_id_supported_body {
     ($clock_id:expr) => {{
-        $clock_id <= 1
+        $clock_id <= 7
     }};
 }
 

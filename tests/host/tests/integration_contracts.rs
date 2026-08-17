@@ -439,7 +439,10 @@ fn posix_clock_timer_clock_runtime_applies_checked_realtime_offsets() {
     assert!(gettime.contains("linux_clock_nanoseconds(clock)?"));
     assert!(time.contains("linux_realtime_nanos()?"));
     assert!(gettimeofday.contains("linux_realtime_nanos()?"));
-    assert!(reset.contains("LINUX_REALTIME_OFFSET_NANOS.store(0"));
+    assert!(syscall.contains("const LINUX_DEFAULT_REALTIME_OFFSET_NANOS: i64"));
+    assert!(reset.contains(
+        "LINUX_REALTIME_OFFSET_NANOS.store(LINUX_DEFAULT_REALTIME_OFFSET_NANOS"
+    ));
 }
 
 #[test]

@@ -730,6 +730,33 @@ mod syscall_logic {
     }
 
     #[test]
+    fn clock_gettime_accepts_glibc_time_coarse_clock_ids() {
+        const CLOCK_REALTIME: usize = 0;
+        const CLOCK_MONOTONIC: usize = 1;
+        const CLOCK_PROCESS_CPUTIME_ID: usize = 2;
+        const CLOCK_THREAD_CPUTIME_ID: usize = 3;
+        const CLOCK_MONOTONIC_RAW: usize = 4;
+        const CLOCK_REALTIME_COARSE: usize = 5;
+        const CLOCK_MONOTONIC_COARSE: usize = 6;
+        const CLOCK_BOOTTIME: usize = 7;
+
+        for clock_id in [
+            CLOCK_REALTIME,
+            CLOCK_MONOTONIC,
+            CLOCK_PROCESS_CPUTIME_ID,
+            CLOCK_THREAD_CPUTIME_ID,
+            CLOCK_MONOTONIC_RAW,
+            CLOCK_REALTIME_COARSE,
+            CLOCK_MONOTONIC_COARSE,
+            CLOCK_BOOTTIME,
+        ] {
+            assert!(smros_linux_clock_id_supported_body!(clock_id));
+        }
+        assert!(!smros_linux_clock_id_supported_body!(8));
+        assert!(!smros_linux_clock_id_supported_body!(usize::MAX));
+    }
+
+    #[test]
     fn posix_realtime_offset_is_checked_and_monotonic_is_not_settable() {
         assert!(linux_posix_clock_settable(0));
         assert!(!linux_posix_clock_settable(1));
