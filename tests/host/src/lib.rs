@@ -2561,7 +2561,7 @@ mod linux_task_logic {
         );
         assert_eq!(
             linux_sleep_relative_deadline_ticks(40, 1, 0, TICK_NANOS),
-            Some(140)
+            Some(141)
         );
         assert_eq!(
             linux_sleep_absolute_deadline_ticks(0, 1, TICK_NANOS),
@@ -2606,6 +2606,22 @@ mod linux_task_logic {
         assert_eq!(
             linux_sleep_remaining_timespec(0, u64::MAX, 0, TICK_NANOS),
             Some((18_446_744_073, 709_551_615))
+        );
+        assert_eq!(
+            linux_short_sleep_deadline_nanoseconds(1_000, 40_000_000, 100_000_000),
+            Some(40_001_000)
+        );
+        assert_eq!(
+            linux_short_sleep_deadline_nanoseconds(1_000, 0, 100_000_000),
+            None
+        );
+        assert_eq!(
+            linux_short_sleep_deadline_nanoseconds(1_000, 2_000_000_000, 100_000_000),
+            None
+        );
+        assert_eq!(
+            linux_short_sleep_deadline_nanoseconds(u64::MAX - 10, 40, 100),
+            None
         );
         assert_eq!(
             linux_sleep_relative_deadline_ticks(0, -1, 0, TICK_NANOS),
@@ -7569,6 +7585,10 @@ mod lowlevel_logic {
         smros_ll_timer_counter_nanoseconds_body!(counter, frequency)
     }
 
+    pub(crate) fn timer_compare(current: u64, period: u64) -> u64 {
+        smros_ll_timer_compare_body!(current, period)
+    }
+
     #[test]
     fn lowlevel_alignment_and_segments_reject_overflow() {
         assert_eq!(smros_ll_align_up_body!(5usize, 4usize), Some(8));
@@ -7600,6 +7620,13 @@ mod lowlevel_logic {
         assert_eq!(timer_counter_nanoseconds(50_000, 1_000_000), 50_000_000);
         assert_eq!(timer_counter_nanoseconds(1, 3), 333_333_333);
         assert_eq!(timer_counter_nanoseconds(u64::MAX, 0), 0);
+    }
+
+    #[test]
+    fn timer_compare_rearms_on_the_next_absolute_tick_boundary() {
+        assert_eq!(timer_compare(12, 10), 20);
+        assert_eq!(timer_compare(20, 10), 30);
+        assert_eq!(timer_compare(0, 0), 0);
     }
 
     #[test]

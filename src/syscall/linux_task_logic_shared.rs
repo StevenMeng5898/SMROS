@@ -830,11 +830,7 @@ pub(crate) fn linux_signal_timespec_to_ticks_ceil(
     let ticks = total_nanoseconds / tick_nanoseconds;
     let has_partial_tick = total_nanoseconds % tick_nanoseconds != 0;
     let ticks = ticks.checked_add(u64::from(has_partial_tick))?;
-    let phase_guard = if total_nanoseconds == 0 || !has_partial_tick {
-        0
-    } else {
-        1
-    };
+    let phase_guard = if total_nanoseconds == 0 { 0 } else { 1 };
     now.checked_add(ticks)?.checked_add(phase_guard)
 }
 
@@ -906,6 +902,17 @@ pub(crate) fn linux_sleep_remaining_timespec(
     let seconds = i64::try_from(remaining_nanoseconds / 1_000_000_000u128).ok()?;
     let nanoseconds = i64::try_from(remaining_nanoseconds % 1_000_000_000u128).ok()?;
     Some((seconds, nanoseconds))
+}
+
+pub(crate) fn linux_short_sleep_deadline_nanoseconds(
+    now: u64,
+    requested_nanoseconds: u64,
+    max_short_sleep_nanoseconds: u64,
+) -> Option<u64> {
+    if requested_nanoseconds == 0 || requested_nanoseconds > max_short_sleep_nanoseconds {
+        return None;
+    }
+    now.checked_add(requested_nanoseconds)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

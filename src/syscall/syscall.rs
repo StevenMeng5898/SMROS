@@ -595,6 +595,8 @@ const LINUX_SA_SIGINFO: u64 = 0x0000_0004;
 const LINUX_SA_ONSTACK: u64 = 0x0800_0000;
 const LINUX_SA_RESETHAND: u64 = 0x8000_0000;
 const LINUX_SIGNAL_TICK_NANOS: u64 = 10_000_000;
+const LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS: u64 = 100_000_000;
+const LINUX_HIGH_RES_RELATIVE_SLEEP_SPIN_NANOS: u64 = LINUX_SIGNAL_TICK_NANOS;
 const LINUX_DEFAULT_REALTIME_OFFSET_NANOS: i64 = 1_700_000_000_000_000_000;
 const LINUX_SS_ONSTACK: u64 = linux_task::LINUX_SS_ONSTACK;
 const LINUX_SS_DISABLE: u64 = linux_task::LINUX_SS_DISABLE;
@@ -6143,6 +6145,43 @@ fn linux_sleep_until(wait: LinuxSleepWait, rem: usize) -> SysResult {
     }
 }
 
+fn linux_high_resolution_relative_sleep_until(deadline: u64, rem: usize) -> SysResult {
+    if rem != 0 && !linux_sleep_user_range_writable(rem, core::mem::size_of::<LinuxTimespec>()) {
+        return Err(SysError::EFAULT);
+    }
+    loop {
+        let now = monotonic_nanos();
+        if now >= deadline {
+            return Ok(0);
+        }
+
+        let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+        let pending = match linux_sleep_has_deliverable_pending_signal() {
+            Ok(pending) => pending,
+            Err(error) => {
+                crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+                return Err(error);
+            }
+        };
+        crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+
+        if pending {
+            let remaining = deadline.saturating_sub(monotonic_nanos());
+            if rem != 0 {
+                linux_write_user_timespec(rem, linux_timespec_from_nanoseconds(remaining))?;
+            }
+            return Err(SysError::EINTR);
+        }
+
+        let remaining = deadline.saturating_sub(now);
+        if remaining > LINUX_HIGH_RES_RELATIVE_SLEEP_SPIN_NANOS {
+            crate::kernel_lowlevel::cpu::wait_for_interrupt();
+        } else {
+            core::hint::spin_loop();
+        }
+    }
+}
+
 fn linux_signal_wait_deadline(timeout: usize) -> Result<Option<u64>, SysError> {
     if timeout == 0 {
         return Ok(None);
@@ -8783,6 +8822,15 @@ pub fn sys_clock_nanosleep(clockid: usize, flags: usize, req: usize, rem: usize)
     let requested_nanoseconds =
         linux_task::linux_sleep_timespec_nanoseconds(requested.tv_sec, requested.tv_nsec)
             .ok_or(SysError::EINVAL)?;
+    if !absolute {
+        if let Some(deadline) = linux_task::linux_short_sleep_deadline_nanoseconds(
+            monotonic_nanos(),
+            requested_nanoseconds,
+            LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS,
+        ) {
+            return linux_high_resolution_relative_sleep_until(deadline, rem);
+        }
+    }
     let deadline = if absolute {
         if clockid == CLOCK_REALTIME || clockid == CLOCK_REALTIME_COARSE {
             linux_task::linux_sleep_realtime_deadline_ticks(
@@ -12553,6 +12601,13 @@ fn sys_nanosleep_linux_with_rem(req: usize, rem: usize) -> SysResult {
     let requested_nanoseconds =
         linux_task::linux_sleep_timespec_nanoseconds(requested.tv_sec, requested.tv_nsec)
             .ok_or(SysError::EINVAL)?;
+    if let Some(deadline) = linux_task::linux_short_sleep_deadline_nanoseconds(
+        monotonic_nanos(),
+        requested_nanoseconds,
+        LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS,
+    ) {
+        return linux_high_resolution_relative_sleep_until(deadline, rem);
+    }
     let deadline = linux_task::linux_sleep_relative_deadline_ticks(
         now,
         requested.tv_sec,

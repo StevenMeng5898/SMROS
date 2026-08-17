@@ -425,7 +425,14 @@ macro_rules! smros_ll_timer_period_body {
 
 macro_rules! smros_ll_timer_compare_body {
     ($current:expr, $period:expr) => {{
-        $current.wrapping_add($period)
+        if $period == 0 {
+            $current
+        } else {
+            ($current / $period)
+                .checked_add(1)
+                .and_then(|tick| tick.checked_mul($period))
+                .unwrap_or_else(|| $current.wrapping_add($period))
+        }
     }};
 }
 
