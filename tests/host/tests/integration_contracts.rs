@@ -6198,6 +6198,11 @@ fn fxfs_positioned_io_can_read_past_eof_and_extend_within_the_file_limit() {
     let pread = braced_body(&syscall[pread_start..]);
     assert!(pread.contains("fxfs::position_cursor(&mut file.cursor, offset)"));
     assert!(!pread.contains("fxfs::seek_cursor(&mut file.cursor, offset)"));
+
+    let pwrite_start = syscall.find("pub fn sys_pwrite(").expect("pwrite path");
+    let pwrite = braced_body(&syscall[pwrite_start..]);
+    assert!(pwrite.contains("fxfs::position_cursor(&mut file.cursor, offset)"));
+    assert!(!pwrite.contains("fxfs::seek_cursor(&mut file.cursor, offset)"));
 }
 
 #[test]
@@ -6348,6 +6353,13 @@ fn linux_core_io_uses_bounded_staging_for_full_validated_ranges() {
             "linux_user_buffer_writable(buf, len)",
             "fxfs::cursor_read(&mut file.cursor, &mut staging[..chunk])",
             "linux_copy_to_user(",
+        ),
+        (
+            "pub fn sys_pwrite(",
+            "staging",
+            "linux_user_buffer_readable(buf, len)",
+            "fxfs::cursor_write(&mut file.cursor, &staging[..chunk])",
+            "linux_copy_from_user(",
         ),
     ] {
         let start = syscall.find(start_marker).expect("bounded Linux I/O path");

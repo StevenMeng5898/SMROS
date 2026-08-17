@@ -7360,7 +7360,55 @@ pub fn sys_pread(fd: usize, buf: usize, len: usize, offset: u64) -> SysResult {
     sys_read(fd, buf, len)
 }
 
-pub fn sys_pwrite(fd: usize, buf: usize, len: usize, _offset: u64) -> SysResult {
+pub fn sys_pwrite(fd: usize, buf: usize, len: usize, offset: u64) -> SysResult {
+    if len == 0 {
+        return Ok(0);
+    }
+    if buf == 0 {
+        return Err(SysError::EFAULT);
+    }
+
+    let file = {
+        let state = memory_state();
+        let record = state
+            .get_fd(fd)
+            .filter(|record| record.writable)
+            .ok_or(SysError::ENODEV)?;
+        state.linux_fxfs_file(record.handle).cloned()
+    };
+
+    if let Some(mut file) = file {
+        if !linux_user_buffer_readable(buf, len) {
+            return Err(SysError::EFAULT);
+        }
+        let offset = usize::try_from(offset).map_err(|_| SysError::EINVAL)?;
+        fxfs::position_cursor(&mut file.cursor, offset).map_err(|_| SysError::EINVAL)?;
+        let mut staging = [0u8; LINUX_IO_STAGING_BYTES];
+        let mut total = 0usize;
+        while total < len {
+            let chunk = core::cmp::min(staging.len(), len - total);
+            linux_copy_from_user(
+                buf.checked_add(total).ok_or(SysError::EFAULT)?,
+                &mut staging[..chunk],
+            )?;
+            let written = match fxfs::cursor_write(&mut file.cursor, &staging[..chunk]) {
+                Ok(written) => written,
+                Err(_) => {
+                    return if total == 0 {
+                        Err(SysError::EIO)
+                    } else {
+                        Ok(total)
+                    }
+                }
+            };
+            total = total.saturating_add(written);
+            if written < chunk {
+                break;
+            }
+        }
+        return Ok(total);
+    }
+
     sys_write(fd, buf, len)
 }
 
