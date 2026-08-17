@@ -3261,6 +3261,9 @@ impl MemorySyscallState {
         }
         for entry in descriptors.iter().rev() {
             if let Some(description) = self.release_open_description(entry.description_id) {
+                if description.object_type == ObjectType::MessageQueue {
+                    linux_mqueue::close_handle(description.handle);
+                }
                 self.remove_linux_fxfs_file(description.handle);
                 released_handles.push(description.handle);
             }
@@ -5208,10 +5211,21 @@ pub(crate) fn linux_fd_read_bytes(fd: usize, out: &mut [u8]) -> SysResult {
         return Ok(read);
     }
 
-    match compat::table().read_bytes(HandleValue(handle), out) {
-        Ok(read) => Ok(read),
-        Err(ZxError::ErrShouldWait) => Ok(0),
-        Err(_) => Err(SysError::EIO),
+    loop {
+        match compat::table().read_bytes(HandleValue(handle), out) {
+            Ok(read) => return Ok(read),
+            Err(ZxError::ErrShouldWait) if record.object_type == ObjectType::LinuxPipe => {
+                if record.status_flags & LINUX_O_NONBLOCK != 0 {
+                    return Err(SysError::EAGAIN);
+                }
+                scheduler::schedule();
+            }
+            Err(ZxError::ErrPeerClosed) if record.object_type == ObjectType::LinuxPipe => {
+                return Ok(0);
+            }
+            Err(ZxError::ErrShouldWait) => return Ok(0),
+            Err(_) => return Err(SysError::EIO),
+        }
     }
 }
 
@@ -7722,11 +7736,12 @@ pub fn sys_mq_notify(mqd: usize, notification: usize) -> SysResult {
     }
     let event = linux_read_user_sigevent(notification)?;
     if event.sigev_notify != LINUX_SIGEV_SIGNAL
-        || !(1..=LINUX_MAX_SIGNAL).contains(&(event.sigev_signo as usize))
+        || !syscall_logic::linux_signal_valid(event.sigev_signo as usize, LINUX_MAX_SIGNAL)
     {
         return Err(SysError::EINVAL);
     }
     let notification = linux_mqueue::LinuxMqueueNotification {
+        handle: record.handle,
         pid: linux_process::current_pid()?,
         signum: event.sigev_signo as usize,
     };

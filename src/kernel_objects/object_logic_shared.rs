@@ -157,6 +157,16 @@ macro_rules! smros_ko_channel_signal_state_body {
     }};
 }
 
+macro_rules! smros_ko_empty_peer_queue_read_error_body {
+    ($peer_open:expr, $would_wait_error:expr, $peer_closed_error:expr) => {{
+        if $peer_open {
+            $would_wait_error
+        } else {
+            $peer_closed_error
+        }
+    }};
+}
+
 macro_rules! smros_ko_thread_is_runnable_body {
     ($state:expr, $ready:expr, $running:expr) => {{
         $state == $ready || $state == $running

@@ -899,6 +899,11 @@ mod syscall_logic {
     fn linux_signal_actions_reject_sigkill_and_sigstop() {
         let max_signal = 64usize;
 
+        assert!(smros_linux_signal_valid_body!(0usize, max_signal));
+        assert!(smros_linux_signal_valid_body!(1usize, max_signal));
+        assert!(smros_linux_signal_valid_body!(64usize, max_signal));
+        assert!(!smros_linux_signal_valid_body!(65usize, max_signal));
+
         assert!(smros_linux_signal_action_valid_body!(1usize, max_signal));
         assert!(smros_linux_signal_action_valid_body!(64usize, max_signal));
         assert!(!smros_linux_signal_action_valid_body!(0usize, max_signal));
@@ -1161,10 +1166,21 @@ mod linux_mqueue_logic {
             .open("/smros-mq", 101, true, false, Some(attr(2, 8)))
             .unwrap();
 
-        let notification = LinuxMqueueNotification { pid: 42, signum: 10 };
+        let notification = LinuxMqueueNotification {
+            handle: 101,
+            pid: 42,
+            signum: 10,
+        };
         state.notify(101, Some(notification)).unwrap();
         assert_eq!(
-            state.notify(101, Some(LinuxMqueueNotification { pid: 43, signum: 12 })),
+            state.notify(
+                101,
+                Some(LinuxMqueueNotification {
+                    handle: 101,
+                    pid: 43,
+                    signum: 12,
+                })
+            ),
             Err(LinuxMqueueError::Busy)
         );
 
@@ -1179,6 +1195,38 @@ mod linux_mqueue_logic {
         state.notify(101, Some(notification)).unwrap();
         state.notify(101, None).unwrap();
         assert_eq!(state.send(101, b"silent", 0).unwrap().notification, None);
+    }
+
+    #[test]
+    fn close_of_registering_handle_releases_notification_registration() {
+        let mut state = LinuxMqueueState::<4, 8, 4>::new();
+        state
+            .open("/smros-mq", 101, true, false, Some(attr(2, 8)))
+            .unwrap();
+        state.open("/smros-mq", 102, false, false, None).unwrap();
+
+        state
+            .notify(
+                101,
+                Some(LinuxMqueueNotification {
+                    handle: 101,
+                    pid: 42,
+                    signum: 10,
+                }),
+            )
+            .unwrap();
+        assert!(state.close_handle(101));
+
+        state
+            .notify(
+                102,
+                Some(LinuxMqueueNotification {
+                    handle: 102,
+                    pid: 43,
+                    signum: 0,
+                }),
+            )
+            .unwrap();
     }
 }
 
@@ -6661,6 +6709,21 @@ mod kernel_object_logic {
         assert_eq!(
             smros_ko_channel_signal_state_body!(true, true, readable, peer_closed),
             readable | peer_closed
+        );
+    }
+
+    #[test]
+    fn empty_peer_queue_read_reports_wait_only_while_peer_is_open() {
+        const WOULD_WAIT: i32 = -31;
+        const PEER_CLOSED: i32 = -34;
+
+        assert_eq!(
+            smros_ko_empty_peer_queue_read_error_body!(true, WOULD_WAIT, PEER_CLOSED),
+            WOULD_WAIT
+        );
+        assert_eq!(
+            smros_ko_empty_peer_queue_read_error_body!(false, WOULD_WAIT, PEER_CLOSED),
+            PEER_CLOSED
         );
     }
 }

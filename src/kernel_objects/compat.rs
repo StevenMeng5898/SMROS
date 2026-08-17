@@ -352,7 +352,9 @@ impl CompatObjectTable {
             .ok_or(ZxError::ErrNotFound)?;
 
         if object.queue.is_empty() {
-            return Err(ZxError::ErrShouldWait);
+            return Err(object_logic::empty_peer_queue_read_error(
+                object.peer.is_some(),
+            ));
         }
 
         let mut read = 0usize;

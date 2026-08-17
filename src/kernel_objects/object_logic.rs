@@ -100,6 +100,14 @@ pub(crate) fn channel_signal_state(
     )
 }
 
+pub(crate) fn empty_peer_queue_read_error(peer_open: bool) -> super::ZxError {
+    smros_ko_empty_peer_queue_read_error_body!(
+        peer_open,
+        super::ZxError::ErrShouldWait,
+        super::ZxError::ErrPeerClosed
+    )
+}
+
 pub(crate) fn thread_is_runnable<T: Copy + PartialEq>(state: T, ready: T, running: T) -> bool {
     smros_ko_thread_is_runnable_body!(state, ready, running)
 }

@@ -53,6 +53,7 @@ pub(crate) struct LinuxMqueueReceiveOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxMqueueNotification {
+    pub handle: u32,
     pub pid: usize,
     pub signum: usize,
 }
@@ -220,6 +221,12 @@ impl<const Q: usize, const H: usize, const W: usize> LinuxMqueueState<Q, H, W> {
             .position(|current| *current == handle)
         {
             self.queues[index].handles.swap_remove(handle_index);
+        }
+        if self.queues[index]
+            .notification
+            .is_some_and(|notification| notification.handle == handle)
+        {
+            self.queues[index].notification = None;
         }
         if self.queues[index].handles.is_empty() && self.queues[index].name.is_none() {
             self.queues.swap_remove(index);
