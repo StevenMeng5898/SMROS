@@ -205,6 +205,10 @@ class TestDiscovery(DiscoveryFixture):
             "conformance/interfaces/clock_gettime/4-1.c",
             "int main(void) { return 0; }\n",
         )
+        self.write_source(
+            "conformance/interfaces/timer_settime/2-1.c",
+            "int main(void) { return 0; }\n",
+        )
 
         tests = {test.test_id: test for test in discover_tests(self.root)}
 
@@ -215,6 +219,10 @@ class TestDiscovery(DiscoveryFixture):
         self.assertEqual(
             tests["conformance/interfaces/clock_gettime/4-1.c"].timeout_ms,
             60_000,
+        )
+        self.assertEqual(
+            tests["conformance/interfaces/timer_settime/2-1.c"].timeout_ms,
+            45_000,
         )
         self.assertEqual(tests["conformance/interfaces/mmap/1-1.c"].timeout_ms, 30_000)
 

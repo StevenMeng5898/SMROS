@@ -106,6 +106,10 @@ pub(crate) fn timer_tick_count(counter: u64, period: u64) -> u64 {
     smros_ll_timer_tick_count_body!(counter, period)
 }
 
+pub(crate) fn timer_counter_nanoseconds(counter: u64, frequency: u64) -> u64 {
+    smros_ll_timer_counter_nanoseconds_body!(counter, frequency)
+}
+
 #[cfg(target_arch = "aarch64")]
 pub(crate) fn timer_ctl(enable: u64, imask: u64) -> u64 {
     smros_ll_timer_ctl_body!(enable, imask)

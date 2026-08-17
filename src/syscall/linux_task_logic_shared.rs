@@ -329,6 +329,8 @@ pub(crate) struct LinuxPendingSignal {
     pub signum: usize,
     pub has_info: bool,
     pub info: [u8; LINUX_SIGNAL_INFO_BYTES],
+    pub timer_pid: usize,
+    pub timer_id: u32,
 }
 
 impl LinuxPendingSignal {
@@ -336,12 +338,31 @@ impl LinuxPendingSignal {
         signum: 0,
         has_info: false,
         info: [0; LINUX_SIGNAL_INFO_BYTES],
+        timer_pid: 0,
+        timer_id: 0,
     };
 
     pub(crate) const fn standard(signum: usize) -> Self {
         Self {
             signum,
             ..Self::EMPTY
+        }
+    }
+
+    pub(crate) const fn timer(signum: usize, timer_pid: usize, timer_id: u32) -> Self {
+        Self {
+            signum,
+            timer_pid,
+            timer_id,
+            ..Self::EMPTY
+        }
+    }
+
+    pub(crate) const fn timer_identity(self) -> Option<(usize, u32)> {
+        if self.timer_pid == 0 {
+            None
+        } else {
+            Some((self.timer_pid, self.timer_id))
         }
     }
 
@@ -418,11 +439,15 @@ impl LinuxPendingSignals {
             record.signum = 0;
             record.has_info = false;
             record.info.fill(0);
+            record.timer_pid = 0;
+            record.timer_id = 0;
         }
         for record in &mut self.realtime_pending {
             record.signum = 0;
             record.has_info = false;
             record.info.fill(0);
+            record.timer_pid = 0;
+            record.timer_id = 0;
         }
         self.realtime_sequences.fill(0);
         self.realtime_len = 0;
@@ -803,8 +828,13 @@ pub(crate) fn linux_signal_timespec_to_ticks_ceil(
     }
     let total_nanoseconds = linux_sleep_timespec_nanoseconds(seconds, nanoseconds)?;
     let ticks = total_nanoseconds / tick_nanoseconds;
-    let ticks = ticks.checked_add(u64::from(total_nanoseconds % tick_nanoseconds != 0))?;
-    let phase_guard = if total_nanoseconds == 0 { 0 } else { 1 };
+    let has_partial_tick = total_nanoseconds % tick_nanoseconds != 0;
+    let ticks = ticks.checked_add(u64::from(has_partial_tick))?;
+    let phase_guard = if total_nanoseconds == 0 || !has_partial_tick {
+        0
+    } else {
+        1
+    };
     now.checked_add(ticks)?.checked_add(phase_guard)
 }
 

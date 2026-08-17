@@ -28,6 +28,13 @@ pub fn get_tick_count() -> u64 {
     lowlevel_logic::timer_tick_count(crate::kernel_lowlevel::cpu::read_cycle_counter(), period)
 }
 
+pub fn get_nanoseconds() -> u64 {
+    lowlevel_logic::timer_counter_nanoseconds(
+        crate::kernel_lowlevel::cpu::read_cycle_counter(),
+        TIMER_FREQUENCY.load(Ordering::Relaxed),
+    )
+}
+
 #[allow(dead_code)]
 pub fn arm_next_tick() {}
 

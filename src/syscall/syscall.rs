@@ -4087,7 +4087,7 @@ fn set_object_signal_state(handle: u32, clear_mask: u32, set_mask: u32) -> ZxRes
 }
 
 fn monotonic_nanos() -> u64 {
-    crate::kernel_lowlevel::timer::get_tick_count().saturating_mul(10_000_000)
+    crate::kernel_lowlevel::timer::get_nanoseconds()
 }
 
 fn linux_realtime_nanos() -> Result<u64, SysError> {
@@ -4137,6 +4137,12 @@ fn linux_posix_clock_settable_for_current(clock_id: usize) -> bool {
         return syscall_logic::linux_posix_clock_settable_for_current_ids(clock_id, 0, 0);
     };
     syscall_logic::linux_posix_clock_settable_for_current_ids(clock_id, current_pid, current_tid)
+}
+
+fn linux_posix_timer_clock_for_current(clock_id: usize) -> Option<LinuxPosixClock> {
+    let current_pid = linux_process::current_pid().ok()?;
+    let current_tid = linux_task::current_tid().ok()?;
+    syscall_logic::linux_posix_timer_clock_for_current_ids(clock_id, current_pid, current_tid)
 }
 
 fn linux_clock_nanoseconds(clock_id: usize) -> Result<u64, SysError> {
@@ -4459,11 +4465,24 @@ fn requeue_linux_signal(deliverable: LinuxDeliverableSignal) -> Result<(), SysEr
     }
 }
 
+fn acknowledge_linux_timer_notification(record: LinuxPendingSignal) {
+    let Some((pid, timer_id)) = record.timer_identity() else {
+        return;
+    };
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    if let Some(timer) = memory_state().linux_timer_mut(pid, timer_id) {
+        timer.acknowledge_notification();
+    }
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+}
+
 fn commit_linux_signal(deliverable: LinuxDeliverableSignal) -> Result<(), SysError> {
+    let record = deliverable.record;
     let Some(reservation) = deliverable.reservation else {
+        acknowledge_linux_timer_notification(record);
         return Ok(());
     };
-    match deliverable.source {
+    let result = match deliverable.source {
         LinuxPendingSignalSource::Task => {
             let result = linux_task::with_current_signal_state(|signal_state| {
                 signal_state.pending.commit_reservation(reservation)
@@ -4473,7 +4492,11 @@ fn commit_linux_signal(deliverable: LinuxDeliverableSignal) -> Result<(), SysErr
         LinuxPendingSignalSource::Process => update_process_linux_signals_and_handoff(|pending| {
             pending.commit_reservation(reservation)
         }),
+    };
+    if result.is_ok() {
+        acknowledge_linux_timer_notification(record);
     }
+    result
 }
 
 fn interrupt_linux_signal_target(target: linux_task::LinuxTaskCore, signum: usize) {
@@ -4968,9 +4991,10 @@ pub fn deliver_linux_posix_timer_signals_from_irq() {
         for timer in &mut resources.posix_timers {
             if timer.expire(now_monotonic, now_realtime) {
                 let signal = timer.signal;
+                let timer_id = timer.timer_id;
                 let _ = queue_process_linux_signal_and_wake(
                     resources.pid,
-                    LinuxPendingSignal::standard(signal),
+                    LinuxPendingSignal::timer(signal, resources.pid, timer_id),
                 );
             }
         }
@@ -8573,7 +8597,7 @@ pub fn sys_linux_timer_create(clockid: usize, sevp: usize, timerid: usize) -> Sy
     if !linux_user_buffer_writable(timerid, core::mem::size_of::<i32>()) {
         return Err(SysError::EFAULT);
     }
-    let clock = LinuxPosixClock::from_id(clockid).ok_or(SysError::EINVAL)?;
+    let clock = linux_posix_timer_clock_for_current(clockid).ok_or(SysError::EINVAL)?;
     let signal = if sevp == 0 {
         LINUX_SIGALRM
     } else {
@@ -8690,7 +8714,11 @@ pub fn sys_linux_timer_getoverrun(timerid: usize) -> SysResult {
     if memory_state().linux_timer_owned(pid, timerid as u32)
         && handle.is_some_and(|handle| compat::handle_known(HandleValue(handle)))
     {
-        Ok(0)
+        let overrun = memory_state()
+            .linux_timer(pid, timerid as u32)
+            .map(|timer| timer.overrun())
+            .ok_or(SysError::EINVAL)?;
+        Ok(overrun.min(i32::MAX as u64) as usize)
     } else {
         Err(SysError::EINVAL)
     }
@@ -12405,7 +12433,7 @@ pub fn sys_clock_getres(clock: usize, buf: usize) -> SysResult {
             buf,
             LinuxTimespec {
                 tv_sec: 0,
-                tv_nsec: 10_000_000,
+                tv_nsec: syscall_logic::linux_clock_resolution_nanoseconds(),
             },
         )?;
     }

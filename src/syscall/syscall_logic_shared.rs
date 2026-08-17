@@ -101,6 +101,10 @@ macro_rules! smros_linux_clock_nanosleep_flags_valid_body {
 
 const LINUX_POSIX_NANOS_PER_SECOND: u64 = 1_000_000_000;
 
+pub(crate) const fn linux_clock_resolution_nanoseconds() -> i64 {
+    1
+}
+
 #[cfg(test)]
 pub(crate) const fn linux_make_process_cpu_clock_id(pid: i32) -> i32 {
     ((!pid) << 3) | 2
@@ -194,15 +198,33 @@ pub(crate) fn linux_realtime_from_offset(
 pub(crate) enum LinuxPosixClock {
     Realtime,
     Monotonic,
+    ProcessCpu,
+    ThreadCpu,
 }
 
 impl LinuxPosixClock {
-    pub(crate) fn from_id(clock_id: usize) -> Option<Self> {
+    pub(crate) const fn from_id(clock_id: usize) -> Option<Self> {
         match clock_id {
             0 => Some(Self::Realtime),
             1 => Some(Self::Monotonic),
+            2 => Some(Self::ProcessCpu),
+            3 => Some(Self::ThreadCpu),
             _ => None,
         }
+    }
+}
+
+pub(crate) const fn linux_posix_timer_clock_for_current_ids(
+    clock_id: usize,
+    current_pid: usize,
+    current_tid: usize,
+) -> Option<LinuxPosixClock> {
+    match LinuxPosixClock::from_id(clock_id) {
+        Some(clock) => Some(clock),
+        None if linux_cpu_clock_id_valid_for_current_ids(clock_id, current_pid, current_tid) => {
+            Some(LinuxPosixClock::ProcessCpu)
+        }
+        None => None,
     }
 }
 
@@ -227,6 +249,8 @@ pub(crate) struct LinuxPosixTimerCore {
     deadline_clock: LinuxPosixClock,
     deadline: Option<u64>,
     interval: u64,
+    notification_pending: bool,
+    overrun: u64,
 }
 
 impl LinuxPosixTimerCore {
@@ -238,6 +262,17 @@ impl LinuxPosixTimerCore {
             deadline_clock: LinuxPosixClock::Monotonic,
             deadline: None,
             interval: 0,
+            notification_pending: false,
+            overrun: 0,
+        }
+    }
+
+    fn now_for(clock: LinuxPosixClock, now_monotonic: u64, now_realtime: u64) -> u64 {
+        match clock {
+            LinuxPosixClock::Realtime => now_realtime,
+            LinuxPosixClock::Monotonic
+            | LinuxPosixClock::ProcessCpu
+            | LinuxPosixClock::ThreadCpu => now_monotonic,
         }
     }
 
@@ -250,6 +285,8 @@ impl LinuxPosixTimerCore {
         if spec.value == 0 {
             self.deadline = None;
             self.interval = 0;
+            self.notification_pending = false;
+            self.overrun = 0;
             return Some(());
         }
         let (deadline_clock, deadline) = if absolute {
@@ -263,6 +300,8 @@ impl LinuxPosixTimerCore {
         self.deadline_clock = deadline_clock;
         self.deadline = Some(deadline);
         self.interval = spec.interval;
+        self.notification_pending = false;
+        self.overrun = 0;
         Some(())
     }
 
@@ -270,10 +309,7 @@ impl LinuxPosixTimerCore {
         if self.deadline.is_none() {
             return LinuxPosixTimerSpec::DISARMED;
         }
-        let now = match self.deadline_clock {
-            LinuxPosixClock::Monotonic => now_monotonic,
-            LinuxPosixClock::Realtime => now_realtime,
-        };
+        let now = Self::now_for(self.deadline_clock, now_monotonic, now_realtime);
         LinuxPosixTimerSpec {
             interval: self.interval,
             value: self
@@ -283,31 +319,46 @@ impl LinuxPosixTimerCore {
         }
     }
 
+    pub(crate) const fn overrun(&self) -> u64 {
+        self.overrun
+    }
+
+    pub(crate) fn acknowledge_notification(&mut self) {
+        self.notification_pending = false;
+    }
+
     pub(crate) fn expire(&mut self, now_monotonic: u64, now_realtime: u64) -> bool {
         let Some(deadline) = self.deadline else {
             return false;
         };
-        let now = match self.deadline_clock {
-            LinuxPosixClock::Monotonic => now_monotonic,
-            LinuxPosixClock::Realtime => now_realtime,
-        };
+        let now = Self::now_for(self.deadline_clock, now_monotonic, now_realtime);
         if now < deadline {
             return false;
         }
+        let expirations = if self.interval == 0 {
+            1
+        } else {
+            now.saturating_sub(deadline)
+                .checked_div(self.interval)
+                .and_then(|periods| periods.checked_add(1))
+                .unwrap_or(u64::MAX)
+        };
         if self.interval == 0 {
             self.deadline = None;
-            return true;
+        } else {
+            self.deadline = expirations
+                .checked_mul(self.interval)
+                .and_then(|advance| deadline.checked_add(advance));
+            if self.deadline.is_none() {
+                self.interval = 0;
+            }
         }
-
-        self.deadline = now
-            .saturating_sub(deadline)
-            .checked_div(self.interval)
-            .and_then(|periods| periods.checked_add(1))
-            .and_then(|periods| periods.checked_mul(self.interval))
-            .and_then(|advance| deadline.checked_add(advance));
-        if self.deadline.is_none() {
-            self.interval = 0;
+        if self.notification_pending {
+            self.overrun = self.overrun.saturating_add(expirations);
+            return false;
         }
+        self.notification_pending = true;
+        self.overrun = self.overrun.saturating_add(expirations.saturating_sub(1));
         true
     }
 }

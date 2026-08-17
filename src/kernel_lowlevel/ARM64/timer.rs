@@ -122,6 +122,14 @@ pub fn get_tick_count() -> u64 {
     lowlevel_logic::timer_tick_count(read_cntpct_el0(), period)
 }
 
+/// Get the current monotonic time in nanoseconds.
+pub fn get_nanoseconds() -> u64 {
+    lowlevel_logic::timer_counter_nanoseconds(
+        read_cntpct_el0(),
+        TIMER_FREQUENCY.load(Ordering::Relaxed),
+    )
+}
+
 /// Arm the timer for the next tick
 pub fn arm_next_tick() {
     let period = TICK_PERIOD.load(Ordering::Relaxed);

@@ -786,6 +786,7 @@ mod syscall_logic {
 
     #[test]
     fn posix_realtime_offset_is_checked_and_monotonic_is_not_settable() {
+        assert_eq!(linux_clock_resolution_nanoseconds(), 1);
         assert!(linux_posix_clock_settable_for_current_ids(0, 0, 0));
         assert!(linux_posix_clock_settable_for_current_ids(2, 0, 0));
         assert!(linux_posix_clock_settable_for_current_ids(3, 0, 0));
@@ -943,6 +944,45 @@ mod syscall_logic {
     }
 
     #[test]
+    fn posix_timer_create_accepts_cpu_clock_ids() {
+        const CURRENT_PID: usize = 123;
+        const CURRENT_TID: usize = 124;
+        let dynamic_process_clock = linux_make_process_cpu_clock_id(CURRENT_PID as i32);
+        let dynamic_thread_clock = linux_make_process_cpu_clock_id(CURRENT_TID as i32);
+        let foreign_process_clock = linux_make_process_cpu_clock_id(125);
+
+        assert_eq!(LinuxPosixClock::from_id(0), Some(LinuxPosixClock::Realtime));
+        assert_eq!(LinuxPosixClock::from_id(1), Some(LinuxPosixClock::Monotonic));
+        assert_eq!(LinuxPosixClock::from_id(2), Some(LinuxPosixClock::ProcessCpu));
+        assert_eq!(LinuxPosixClock::from_id(3), Some(LinuxPosixClock::ThreadCpu));
+        assert_eq!(LinuxPosixClock::from_id(4), None);
+        assert_eq!(
+            linux_posix_timer_clock_for_current_ids(
+                dynamic_process_clock as isize as usize,
+                CURRENT_PID,
+                CURRENT_TID
+            ),
+            Some(LinuxPosixClock::ProcessCpu)
+        );
+        assert_eq!(
+            linux_posix_timer_clock_for_current_ids(
+                dynamic_thread_clock as isize as usize,
+                CURRENT_PID,
+                CURRENT_TID
+            ),
+            Some(LinuxPosixClock::ProcessCpu)
+        );
+        assert_eq!(
+            linux_posix_timer_clock_for_current_ids(
+                foreign_process_clock as isize as usize,
+                CURRENT_PID,
+                CURRENT_TID
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn posix_timer_disarm_query_and_periodic_reschedule_are_one_shot_per_scan() {
         let mut timer = LinuxPosixTimerCore::new(9, LinuxPosixClock::Monotonic, 10);
         timer
@@ -972,6 +1012,80 @@ mod syscall_logic {
             )
             .unwrap();
         assert_eq!(timer.snapshot(150, 900), LinuxPosixTimerSpec::DISARMED);
+    }
+
+    #[test]
+    fn posix_timer_overrun_counts_expirations_while_notification_is_pending() {
+        let mut timer = LinuxPosixTimerCore::new(10, LinuxPosixClock::Monotonic, 18);
+        timer
+            .arm(
+                false,
+                100,
+                LinuxPosixTimerSpec {
+                    interval: 40,
+                    value: 30,
+                },
+            )
+            .unwrap();
+
+        assert!(timer.expire(130, 0));
+        assert_eq!(timer.overrun(), 0);
+        assert!(!timer.expire(170, 0));
+        assert_eq!(timer.overrun(), 1);
+        assert!(!timer.expire(210, 0));
+        assert_eq!(timer.overrun(), 2);
+
+        timer.acknowledge_notification();
+        assert!(timer.expire(250, 0));
+        assert_eq!(timer.overrun(), 2);
+
+        timer
+            .arm(
+                false,
+                250,
+                LinuxPosixTimerSpec {
+                    interval: 40,
+                    value: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(timer.overrun(), 0);
+    }
+
+    #[test]
+    fn posix_timer_batches_missed_intervals_into_overrun_count() {
+        let mut timer = LinuxPosixTimerCore::new(11, LinuxPosixClock::Monotonic, 18);
+        timer
+            .arm(
+                false,
+                100,
+                LinuxPosixTimerSpec {
+                    interval: 40,
+                    value: 30,
+                },
+            )
+            .unwrap();
+
+        assert!(timer.expire(250, 0));
+        assert_eq!(timer.overrun(), 3);
+        assert_eq!(timer.snapshot(250, 0).value, 40);
+    }
+
+    #[test]
+    fn posix_timer_snapshot_uses_cpu_clock_domain_for_cpu_timers() {
+        let mut timer = LinuxPosixTimerCore::new(12, LinuxPosixClock::ProcessCpu, 14);
+        timer
+            .arm(
+                false,
+                1_000,
+                LinuxPosixTimerSpec {
+                    interval: 0,
+                    value: 100,
+                },
+            )
+            .unwrap();
+        assert_eq!(timer.snapshot(1_050, 99_000).value, 50);
+        assert!(timer.expire(1_100, 99_000));
     }
 
     #[test]
@@ -1892,6 +2006,7 @@ mod linux_task_logic {
             signum,
             has_info: true,
             info: [marker; LINUX_SIGNAL_INFO_BYTES],
+            ..LinuxPendingSignal::EMPTY
         }
     }
 
@@ -2419,6 +2534,7 @@ mod linux_task_logic {
             signum: 35,
             has_info: true,
             info: core::array::from_fn(|index| index as u8 ^ 0x5a),
+            ..LinuxPendingSignal::EMPTY
         };
         state.queue(signal_record(34, 0x34)).unwrap();
         state.queue(complete_info).unwrap();
@@ -2445,7 +2561,7 @@ mod linux_task_logic {
         );
         assert_eq!(
             linux_sleep_relative_deadline_ticks(40, 1, 0, TICK_NANOS),
-            Some(141)
+            Some(140)
         );
         assert_eq!(
             linux_sleep_absolute_deadline_ticks(0, 1, TICK_NANOS),
@@ -7449,6 +7565,10 @@ mod lowlevel_logic {
         smros_ll_dt_timer_irq_index_body!(entry_count)
     }
 
+    pub(crate) fn timer_counter_nanoseconds(counter: u64, frequency: u64) -> u64 {
+        smros_ll_timer_counter_nanoseconds_body!(counter, frequency)
+    }
+
     #[test]
     fn lowlevel_alignment_and_segments_reject_overflow() {
         assert_eq!(smros_ll_align_up_body!(5usize, 4usize), Some(8));
@@ -7473,6 +7593,13 @@ mod lowlevel_logic {
             0x1000usize,
             0x3000usize
         ));
+    }
+
+    #[test]
+    fn timer_counter_nanoseconds_preserves_sub_tick_precision() {
+        assert_eq!(timer_counter_nanoseconds(50_000, 1_000_000), 50_000_000);
+        assert_eq!(timer_counter_nanoseconds(1, 3), 333_333_333);
+        assert_eq!(timer_counter_nanoseconds(u64::MAX, 0), 0);
     }
 
     #[test]

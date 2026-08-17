@@ -39,6 +39,10 @@ pub fn get_tick_count() -> u64 {
     lowlevel_logic::timer_tick_count(read_time(), period)
 }
 
+pub fn get_nanoseconds() -> u64 {
+    lowlevel_logic::timer_counter_nanoseconds(read_time(), TIMER_FREQUENCY.load(Ordering::Relaxed))
+}
+
 pub fn arm_next_tick() {
     let period = TICK_PERIOD.load(Ordering::Relaxed);
     let compare_value = lowlevel_logic::timer_compare(read_time(), period);

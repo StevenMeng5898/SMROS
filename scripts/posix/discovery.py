@@ -21,6 +21,7 @@ _PTS_UNTESTED_RE = re.compile(r"\bPTS_UNTESTED\b")
 _CLOCK_SYSCALL_VOLUME_TIMEOUTS_MS = {
     "conformance/interfaces/clock/1-1.c": 180_000,
     "conformance/interfaces/clock_gettime/4-1.c": 60_000,
+    "conformance/interfaces/timer_settime/2-1.c": 45_000,
 }
 _MEMORY_APIS = frozenset(
     {

@@ -439,6 +439,18 @@ macro_rules! smros_ll_timer_tick_count_body {
     }};
 }
 
+macro_rules! smros_ll_timer_counter_nanoseconds_body {
+    ($counter:expr, $frequency:expr) => {{
+        if $frequency == 0 {
+            0
+        } else {
+            let nanoseconds = ($counter as u128).saturating_mul(1_000_000_000u128)
+                / ($frequency as u128);
+            nanoseconds.min(u64::MAX as u128) as u64
+        }
+    }};
+}
+
 #[allow(unused_macros)]
 macro_rules! smros_ll_timer_ctl_body {
     ($enable:expr, $imask:expr) => {{
