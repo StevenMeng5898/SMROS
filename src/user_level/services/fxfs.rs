@@ -1458,10 +1458,9 @@ impl FxfsState {
         if !user_logic::fxfs_dirent_capacity_valid(self.dirents.len()) {
             return Err(FxfsError::NoSpace);
         }
-        let link_count = user_logic::fxfs_link_count_after_link(
-            self.objects[source_index].attrs.link_count,
-        )
-        .ok_or(FxfsError::NoSpace)?;
+        let link_count =
+            user_logic::fxfs_link_count_after_link(self.objects[source_index].attrs.link_count)
+                .ok_or(FxfsError::NoSpace)?;
         let name = copy_string(name)?;
         try_reserve_vec(&mut self.dirents, 1)?;
 
@@ -1552,10 +1551,9 @@ impl FxfsState {
         let dirent_index = self
             .find_dirent_index(parent_id, name)
             .ok_or(FxfsError::NotFound)?;
-        let link_count = user_logic::fxfs_link_count_after_unlink(
-            self.objects[index].attrs.link_count,
-        )
-        .ok_or(FxfsError::StorageCorrupt)?;
+        let link_count =
+            user_logic::fxfs_link_count_after_unlink(self.objects[index].attrs.link_count)
+                .ok_or(FxfsError::StorageCorrupt)?;
         self.dirents.remove(dirent_index);
         self.objects[index].attrs.link_count = link_count;
         self.touch_directory(parent_id);
@@ -1577,10 +1575,7 @@ impl FxfsState {
         let Some(index) = self.find_object_index(object_id) else {
             return Ok(());
         };
-        if !user_logic::fxfs_unlinked_object_reclaimable(
-            self.objects[index].attrs.link_count,
-            0,
-        ) {
+        if !user_logic::fxfs_unlinked_object_reclaimable(self.objects[index].attrs.link_count, 0) {
             return Ok(());
         }
         if self

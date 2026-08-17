@@ -582,15 +582,11 @@ fn shared_mmap_object(source: &LinuxMappingSource) -> Result<(u32, usize), SysEr
             LinuxMappingSource::SharedMemory { .. } => return Err(SysError::EINVAL),
         };
         if let Some(file_object_id) = file_object_id {
-            if let Some(object) = runtime
-                .mmap_objects
-                .iter()
-                .find(|object| {
-                    object.file_object_id.is_some_and(|current| {
-                        linux_shared_file_identity_matches(current, file_object_id)
-                    })
+            if let Some(object) = runtime.mmap_objects.iter().find(|object| {
+                object.file_object_id.is_some_and(|current| {
+                    linux_shared_file_identity_matches(current, file_object_id)
                 })
-            {
+            }) {
                 return Ok((object.object_id, first_page));
             }
         }
@@ -2071,9 +2067,7 @@ impl LinuxProcessMemory {
             return Ok((address, detached));
         }
 
-        self.mappings
-            .try_reserve(1)
-            .map_err(|_| SysError::ENOMEM)?;
+        self.mappings.try_reserve(1).map_err(|_| SysError::ENOMEM)?;
         let index = self
             .mappings
             .partition_point(|candidate| candidate.addr <= address);
