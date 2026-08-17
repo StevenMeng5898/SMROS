@@ -2634,8 +2634,18 @@ with tempfile.TemporaryDirectory() as temporary:
                 )
                 return mock.Mock(returncode=0, stdout=output, stderr="")
 
+            def stage_preload(stage_root: Path, **_kwargs: object) -> Path:
+                preload = stage_root / "lib/libsmros-posix-compat.so"
+                preload.parent.mkdir(parents=True, exist_ok=True)
+                preload.write_bytes(b"compat")
+                preload.chmod(0o755)
+                return preload
+
             with mock.patch("scripts.posix.build.compiler_query", side_effect=query), mock.patch(
                 "scripts.posix.build.run_bounded_command", side_effect=readelf
+            ), mock.patch(
+                "scripts.posix.build.stage_posix_compat_preload",
+                side_effect=stage_preload,
             ):
                 stage_runtime_dependencies((executable,), stage)
 
@@ -2672,14 +2682,95 @@ with tempfile.TemporaryDirectory() as temporary:
                 )
                 return mock.Mock(returncode=0, stdout=output, stderr="")
 
+            def stage_preload(stage_root: Path, **_kwargs: object) -> Path:
+                preload = stage_root / "lib/libsmros-posix-compat.so"
+                preload.parent.mkdir(parents=True, exist_ok=True)
+                preload.write_bytes(b"compat")
+                preload.chmod(0o755)
+                return preload
+
             with mock.patch(
                 "scripts.posix.build.compiler_query", side_effect=query
             ), mock.patch(
                 "scripts.posix.build.run_bounded_command", side_effect=readelf
+            ), mock.patch(
+                "scripts.posix.build.stage_posix_compat_preload",
+                side_effect=stage_preload,
             ):
                 stage_runtime_dependencies((executable,), stage)
 
             self.assertEqual((stage / "lib/libgcc_s.so.1").read_bytes(), b"libgcc")
+
+    def test_runtime_staging_includes_smros_posix_compat_preload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sysroot = root / "sysroot"
+            library_root = sysroot / "usr/aarch64-linux-gnu/lib"
+            library_root.mkdir(parents=True)
+            (library_root / "libc.so.6").write_bytes(b"libc")
+            (library_root / "libgcc_s.so.1").write_bytes(b"libgcc")
+            executable = root / "aio-write.test"
+            executable.write_bytes(b"executable")
+            stage = root / "stage"
+
+            def query(_compiler: str, argument: str) -> str:
+                return {
+                    "-print-sysroot": str(sysroot),
+                    "-print-multiarch": "aarch64-linux-gnu",
+                    "-print-file-name=libc.so.6": str(library_root / "libc.so.6"),
+                    "-print-file-name=libgcc_s.so.1": str(
+                        library_root / "libgcc_s.so.1"
+                    ),
+                }[argument]
+
+            def readelf(argv: list[str], **_kwargs: object) -> object:
+                output = (
+                    "(NEEDED) Shared library: [libc.so.6]\n"
+                    if Path(argv[-1]) == executable
+                    else ""
+                )
+                return mock.Mock(returncode=0, stdout=output, stderr="")
+
+            def stage_preload(stage_root: Path, **_kwargs: object) -> Path:
+                preload = stage_root / "lib/libsmros-posix-compat.so"
+                preload.parent.mkdir(parents=True, exist_ok=True)
+                preload.write_bytes(b"compat")
+                preload.chmod(0o755)
+                return preload
+
+            with mock.patch(
+                "scripts.posix.build.compiler_query", side_effect=query
+            ), mock.patch(
+                "scripts.posix.build.run_bounded_command", side_effect=readelf
+            ), mock.patch(
+                "scripts.posix.build.stage_posix_compat_preload",
+                side_effect=stage_preload,
+            ) as preload:
+                staged = stage_runtime_dependencies((executable,), stage)
+
+            preload.assert_called_once()
+            self.assertIn(stage / "lib/libsmros-posix-compat.so", staged)
+            self.assertEqual(
+                (stage / "lib/libsmros-posix-compat.so").read_bytes(), b"compat"
+            )
+
+    def test_smros_posix_compat_preload_is_linked_as_shared_aarch64_library(self) -> None:
+        command = build_module.posix_compat_preload_command(
+            "aarch64-linux-gnu-gcc",
+            Path("scripts/posix/runtime/smros_posix_compat.c"),
+            Path("target/libsmros-posix-compat.so"),
+        )
+
+        self.assertEqual(command[0], "aarch64-linux-gnu-gcc")
+        self.assertIn("-std=gnu99", command)
+        self.assertIn("-fPIC", command)
+        self.assertIn("-shared", command)
+        self.assertIn("-Wl,-soname,libsmros-posix-compat.so", command)
+        self.assertIn("-ldl", command)
+        self.assertEqual(
+            command[command.index("-o") + 1],
+            "target/libsmros-posix-compat.so",
+        )
 
     def test_runtime_staging_passes_held_stage_descriptor_to_readelf(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2717,6 +2808,9 @@ with tempfile.TemporaryDirectory() as temporary:
                 ) as run:
                     with mock.patch(
                         "scripts.posix.build.resolve_runtime_file",
+                        return_value=opened_executable,
+                    ), mock.patch(
+                        "scripts.posix.build.stage_posix_compat_preload",
                         return_value=opened_executable,
                     ):
                         stage_runtime_dependencies(

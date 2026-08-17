@@ -2398,6 +2398,61 @@ fn run_elf_observer_api_is_typed_environment_aware_and_compatible() {
 }
 
 #[test]
+fn posix_test_preloads_smros_compat_runtime_without_affecting_shell_run() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let launcher = std::fs::read_to_string(repository.join("src/user_level/services/run_elf.rs"))
+        .expect("read ELF launcher");
+    let posix = std::fs::read_to_string(repository.join("src/user_level/services/posix_test.rs"))
+        .expect("read POSIX test service");
+    let shell = std::fs::read_to_string(repository.join("src/user_level/services/user_shell.rs"))
+        .expect("read shell service");
+
+    assert!(posix.contains("const POSIX_COMPAT_PRELOAD_ENV: &str"));
+    assert!(posix.contains("LD_PRELOAD=/shared/posixtest/lib/libsmros-posix-compat.so"));
+    let launch_start = posix
+        .find("fn launch_current_test(")
+        .expect("POSIX launch loop");
+    let launch = braced_body(&posix[launch_start..]);
+    assert!(launch.contains("String::from(POSIX_COMPAT_PRELOAD_ENV)"));
+    assert!(launch.contains("run_elf::spawn_observed("));
+    assert!(launch.contains("path.clone()"));
+    assert!(launch.contains("argv"));
+    assert!(launch.contains("env"));
+    assert!(launch.contains("RunObserver::PosixTest"));
+
+    assert!(launcher.contains("spawn_observed(path, argv, Vec::new(), RunObserver::Shell)"));
+    assert!(shell.contains("crate::user_level::run_elf::spawn(path.clone(), argv)"));
+    assert!(!shell.contains("POSIX_COMPAT_PRELOAD_ENV"));
+    assert!(!shell.contains("LD_PRELOAD=/shared/posixtest/lib/libsmros-posix-compat.so"));
+}
+
+#[test]
+fn smros_posix_compat_runtime_validates_aio_before_forwarding_to_glibc() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let compat =
+        std::fs::read_to_string(repository.join("scripts/posix/runtime/smros_posix_compat.c"))
+            .expect("read POSIX compatibility runtime");
+
+    for required in [
+        "#define _GNU_SOURCE",
+        "int aio_write(struct aiocb *request)",
+        "int aio_read(struct aiocb *request)",
+        "dlsym(RTLD_NEXT, symbol)",
+        "smros_forward_aio_submit(\"aio_write\", request)",
+        "smros_forward_aio_submit(\"aio_read\", request)",
+        "request == NULL || request->aio_buf == NULL",
+        "errno = EINVAL;",
+        "fcntl(request->aio_fildes, F_GETFL)",
+        "errno = EBADF;",
+        "O_ACCMODE",
+        "O_RDONLY",
+        "O_WRONLY",
+    ] {
+        assert!(compat.contains(required), "missing {required}");
+    }
+}
+
+#[test]
 fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let launcher = std::fs::read_to_string(repository.join("src/user_level/services/run_elf.rs"))

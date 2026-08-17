@@ -38,6 +38,7 @@ pub const POSIX_FILTER_MAX_BYTES: usize = 256;
 pub const POSIX_EVENT_PREFIX: &str = "SMROS_POSIX_EVENT ";
 pub const POSIX_EVENT_SCHEMA: u32 = 1;
 
+const POSIX_COMPAT_PRELOAD_ENV: &str = "LD_PRELOAD=/shared/posixtest/lib/libsmros-posix-compat.so";
 const MAX_TIMEOUT_MS: u32 = i32::MAX as u32;
 const EMPTY_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const MANIFEST_HEADER: &str = "SMROS_POSIX_MANIFEST\t1";
@@ -607,7 +608,9 @@ fn launch_current_test(harness_launcher_active: bool) -> PosixLaunchLoopResult {
         };
         let mut argv = Vec::new();
         argv.push(path.clone());
-        match run_elf::spawn_observed(path.clone(), argv, Vec::new(), RunObserver::PosixTest) {
+        let mut env = Vec::new();
+        env.push(String::from(POSIX_COMPAT_PRELOAD_ENV));
+        match run_elf::spawn_observed(path.clone(), argv, env, RunObserver::PosixTest) {
             Ok(()) => return PosixLaunchLoopResult::Running(synchronous_launch_errors),
             Err(err) => {
                 synchronous_launch_errors = synchronous_launch_errors.saturating_add(1);

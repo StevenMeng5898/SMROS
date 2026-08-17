@@ -91,6 +91,11 @@ _ALLOWED_KIND_DISPOSITIONS = frozenset(
         ("shell", "not-built-shell-test"),
     }
 )
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+POSIX_COMPAT_PRELOAD_NAME = "libsmros-posix-compat.so"
+POSIX_COMPAT_PRELOAD_SOURCE = (
+    _REPOSITORY_ROOT / "scripts" / "posix" / "runtime" / "smros_posix_compat.c"
+)
 _METADATA_KEYS = (
     "source",
     "revision",
@@ -156,6 +161,27 @@ def link_command(compiler: str, object_path: Path, executable: Path) -> list[str
         str(executable),
         "-lrt",
         "-lm",
+    ]
+
+
+def posix_compat_preload_command(
+    compiler: str,
+    source: Path,
+    output: Path,
+) -> list[str]:
+    return [
+        compiler,
+        "-std=gnu99",
+        "-fPIC",
+        "-shared",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        str(source),
+        "-o",
+        str(output),
+        f"-Wl,-soname,{POSIX_COMPAT_PRELOAD_NAME}",
+        "-ldl",
     ]
 
 
@@ -862,6 +888,11 @@ def stage_runtime_dependencies(
     readelf: str = "aarch64-linux-gnu-readelf",
     stage_descriptor: int | None = None,
 ) -> tuple[Path, ...]:
+    compat_preload = stage_posix_compat_preload(
+        stage_root,
+        compiler=compiler,
+        stage_descriptor=stage_descriptor,
+    )
     sysroot_text = compiler_query(compiler, "-print-sysroot")
     multiarch = compiler_query(compiler, "-print-multiarch")
     sysroot = Path(sysroot_text)
@@ -872,7 +903,9 @@ def stage_runtime_dependencies(
         )
         if runtime_path != runtime_name:
             extra_roots.append(Path(runtime_path).resolve().parent)
-    pending = list(sorted(executables, key=lambda path: path.as_posix()))
+    pending = list(
+        sorted((*executables, compat_preload), key=lambda path: path.as_posix())
+    )
     inspected: set[Path] = set()
     runtime_by_name: dict[str, Path] = {}
     for name in _IMPLICIT_RUNTIME_NAMES:
@@ -908,7 +941,7 @@ def stage_runtime_dependencies(
             if previous is None:
                 runtime_by_name[basename] = source
                 pending.append(source)
-    staged: list[Path] = []
+    staged: list[Path] = [compat_preload]
     for basename, source in sorted(runtime_by_name.items()):
         destination = safe_stage_path(stage_root, f"lib/{basename}")
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -916,6 +949,35 @@ def stage_runtime_dependencies(
         os.chmod(destination, 0o755)
         staged.append(destination)
     return tuple(staged)
+
+
+def stage_posix_compat_preload(
+    stage_root: Path,
+    *,
+    compiler: str = "aarch64-linux-gnu-gcc",
+    stage_descriptor: int | None = None,
+) -> Path:
+    destination = safe_stage_path(stage_root, f"lib/{POSIX_COMPAT_PRELOAD_NAME}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    result = _run_command(
+        "runtime",
+        "compat-preload-link",
+        posix_compat_preload_command(
+            compiler,
+            POSIX_COMPAT_PRELOAD_SOURCE,
+            destination,
+        ),
+        _SUBPROCESS_RUN,
+        destination,
+        pass_fds=(stage_descriptor,) if stage_descriptor is not None else (),
+    )
+    if result.returncode is None or result.status != "passed":
+        raise ValueError(
+            "AArch64 POSIX compatibility preload link failed: "
+            f"{result.stderr}"
+        )
+    os.chmod(destination, 0o755)
+    return destination
 
 
 def _json_build_result(result: BuildResult) -> str:
