@@ -4106,6 +4106,39 @@ fn linux_cpu_clock_nanos() -> Result<u64, SysError> {
     .ok_or(SysError::EOVERFLOW)
 }
 
+fn linux_dynamic_cpu_clock_current_ids(clock_id: usize) -> Option<(usize, usize)> {
+    let Some(pid) = syscall_logic::linux_cpu_clock_id_pid(clock_id) else {
+        return None;
+    };
+    if pid == 0 {
+        return Some((0, 0));
+    }
+    let current_pid = linux_process::current_pid().ok()?;
+    let current_tid = linux_task::current_tid().ok()?;
+    Some((current_pid, current_tid))
+}
+
+fn linux_cpu_clock_id_valid_for_current(clock_id: usize) -> bool {
+    let Some((current_pid, current_tid)) = linux_dynamic_cpu_clock_current_ids(clock_id) else {
+        return false;
+    };
+    syscall_logic::linux_cpu_clock_id_valid_for_current_ids(clock_id, current_pid, current_tid)
+}
+
+fn linux_clock_id_valid_for_current(clock_id: usize) -> bool {
+    let Some((current_pid, current_tid)) = linux_dynamic_cpu_clock_current_ids(clock_id) else {
+        return clock_id <= CLOCK_BOOTTIME;
+    };
+    syscall_logic::linux_clock_id_valid_for_current_ids(clock_id, current_pid, current_tid)
+}
+
+fn linux_posix_clock_settable_for_current(clock_id: usize) -> bool {
+    let Some((current_pid, current_tid)) = linux_dynamic_cpu_clock_current_ids(clock_id) else {
+        return syscall_logic::linux_posix_clock_settable_for_current_ids(clock_id, 0, 0);
+    };
+    syscall_logic::linux_posix_clock_settable_for_current_ids(clock_id, current_pid, current_tid)
+}
+
 fn linux_clock_nanoseconds(clock_id: usize) -> Result<u64, SysError> {
     match clock_id {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE => linux_realtime_nanos(),
@@ -4113,7 +4146,7 @@ fn linux_clock_nanoseconds(clock_id: usize) -> Result<u64, SysError> {
         CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME => {
             Ok(monotonic_nanos())
         }
-        _ if syscall_logic::linux_cpu_clock_id_supported(clock_id) => linux_cpu_clock_nanos(),
+        _ if linux_cpu_clock_id_valid_for_current(clock_id) => linux_cpu_clock_nanos(),
         _ => Err(SysError::EINVAL),
     }
 }
@@ -8651,7 +8684,7 @@ pub fn sys_linux_timer_delete(timerid: usize) -> SysResult {
 }
 
 pub fn sys_clock_settime(clockid: usize, tp: usize) -> SysResult {
-    if !syscall_logic::linux_posix_clock_settable(clockid) {
+    if !linux_posix_clock_settable_for_current(clockid) {
         return Err(SysError::EINVAL);
     }
     let requested = linux_read_user_timespec(tp)?;
@@ -8660,7 +8693,7 @@ pub fn sys_clock_settime(clockid: usize, tp: usize) -> SysResult {
             .ok_or(SysError::EINVAL)?;
     if clockid == CLOCK_PROCESS_CPUTIME_ID
         || clockid == CLOCK_THREAD_CPUTIME_ID
-        || syscall_logic::linux_cpu_clock_id_supported(clockid)
+        || linux_cpu_clock_id_valid_for_current(clockid)
     {
         let offset = i128::from(requested_nanos) - i128::from(monotonic_nanos());
         let offset = i64::try_from(offset).map_err(|_| SysError::EOVERFLOW)?;
@@ -12300,7 +12333,7 @@ pub fn sys_nanosleep(deadline: u64) -> ZxResult {
 
 /// Linux sys_clock_gettime implementation
 pub fn sys_clock_gettime(clock: usize, buf: usize) -> SysResult {
-    if !syscall_logic::linux_clock_id_supported(clock) {
+    if !linux_clock_id_valid_for_current(clock) {
         return Err(SysError::EINVAL);
     }
     if buf == 0 {
@@ -12316,7 +12349,7 @@ pub fn sys_clock_gettime(clock: usize, buf: usize) -> SysResult {
 }
 
 pub fn sys_clock_getres(clock: usize, buf: usize) -> SysResult {
-    if !syscall_logic::linux_clock_id_supported(clock) {
+    if !linux_clock_id_valid_for_current(clock) {
         return Err(SysError::EINVAL);
     }
     if buf != 0 {

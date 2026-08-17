@@ -767,22 +767,39 @@ mod syscall_logic {
         assert!(linux_cpu_clock_id_supported(pid_zero_process_clock as isize as usize));
         assert!(linux_cpu_clock_id_supported(zero_extended));
         assert!(linux_cpu_clock_id_supported(sign_extended));
+        assert_eq!(
+            linux_cpu_clock_id_pid(pid_zero_process_clock as isize as usize),
+            Some(0)
+        );
+        assert_eq!(linux_cpu_clock_id_pid(sign_extended), Some(123));
         assert!(smros_linux_clock_id_supported_body!(zero_extended));
         assert!(smros_linux_clock_id_supported_body!(sign_extended));
 
         assert!(!linux_cpu_clock_id_supported(8));
         assert!(!linux_cpu_clock_id_supported(usize::MAX));
         assert!(!linux_cpu_clock_id_supported((-5isize) as usize));
+        assert_eq!(
+            linux_cpu_clock_id_pid(i32::MIN as isize as usize),
+            Some(268_435_455)
+        );
     }
 
     #[test]
     fn posix_realtime_offset_is_checked_and_monotonic_is_not_settable() {
-        assert!(linux_posix_clock_settable(0));
-        assert!(linux_posix_clock_settable(2));
-        assert!(linux_posix_clock_settable(3));
-        assert!(linux_posix_clock_settable((-6isize) as usize));
-        assert!(!linux_posix_clock_settable(1));
-        assert!(!linux_posix_clock_settable(usize::MAX));
+        assert!(linux_posix_clock_settable_for_current_ids(0, 0, 0));
+        assert!(linux_posix_clock_settable_for_current_ids(2, 0, 0));
+        assert!(linux_posix_clock_settable_for_current_ids(3, 0, 0));
+        assert!(linux_posix_clock_settable_for_current_ids(
+            (-6isize) as usize,
+            0,
+            0
+        ));
+        assert!(!linux_posix_clock_settable_for_current_ids(1, 0, 0));
+        assert!(!linux_posix_clock_settable_for_current_ids(
+            usize::MAX,
+            0,
+            0
+        ));
 
         assert_eq!(linux_posix_timespec_nanoseconds(2, 3), Some(2_000_000_003));
         assert_eq!(linux_posix_timespec_nanoseconds(-1, 0), None);
@@ -799,6 +816,97 @@ mod syscall_logic {
         );
         assert_eq!(linux_realtime_from_offset(1, -2), None);
         assert_eq!(linux_realtime_from_offset(u64::MAX, 1), None);
+    }
+
+    #[test]
+    fn dynamic_cpu_clock_ids_are_restricted_to_current_process_or_thread() {
+        const CLOCK_REALTIME: usize = 0;
+        const CLOCK_MONOTONIC: usize = 1;
+        const CLOCK_PROCESS_CPUTIME_ID: usize = 2;
+        const CLOCK_THREAD_CPUTIME_ID: usize = 3;
+        const CURRENT_PID: usize = 123;
+        const CURRENT_TID: usize = 124;
+
+        let current_pid_clock = linux_make_process_cpu_clock_id(CURRENT_PID as i32);
+        let current_tid_clock = linux_make_process_cpu_clock_id(CURRENT_TID as i32);
+        let foreign_pid_clock = linux_make_process_cpu_clock_id(125);
+
+        assert!(linux_clock_id_valid_for_current_ids(
+            current_pid_clock as isize as usize,
+            CURRENT_PID,
+            CURRENT_TID
+        ));
+        assert!(linux_clock_id_valid_for_current_ids(
+            current_tid_clock as isize as usize,
+            CURRENT_PID,
+            CURRENT_TID
+        ));
+        assert!(linux_clock_id_valid_for_current_ids(
+            linux_make_process_cpu_clock_id(0) as isize as usize,
+            CURRENT_PID,
+            CURRENT_TID
+        ));
+        assert!(!linux_clock_id_valid_for_current_ids(
+            foreign_pid_clock as isize as usize,
+            CURRENT_PID,
+            CURRENT_TID
+        ));
+        assert!(!linux_clock_id_valid_for_current_ids(
+            i32::MIN as isize as usize,
+            CURRENT_PID,
+            CURRENT_TID
+        ));
+        assert!(!linux_clock_id_valid_for_current_ids(
+            -2147483647isize as usize,
+            CURRENT_PID,
+            CURRENT_TID
+        ));
+        assert!(!linux_clock_id_valid_for_current_ids(
+            -1073743192isize as usize,
+            CURRENT_PID,
+            CURRENT_TID
+        ));
+        assert!(!linux_clock_id_valid_for_current_ids(
+            -1isize as usize,
+            CURRENT_PID,
+            CURRENT_TID
+        ));
+
+        assert!(linux_clock_id_valid_for_current_ids(
+            CLOCK_MONOTONIC,
+            CURRENT_PID,
+            CURRENT_TID
+        ));
+        assert!(linux_posix_clock_settable_for_current_ids(
+            CLOCK_REALTIME,
+            CURRENT_PID,
+            CURRENT_TID
+        ));
+        assert!(linux_posix_clock_settable_for_current_ids(
+            CLOCK_PROCESS_CPUTIME_ID,
+            CURRENT_PID,
+            CURRENT_TID
+        ));
+        assert!(linux_posix_clock_settable_for_current_ids(
+            CLOCK_THREAD_CPUTIME_ID,
+            CURRENT_PID,
+            CURRENT_TID
+        ));
+        assert!(linux_posix_clock_settable_for_current_ids(
+            current_pid_clock as isize as usize,
+            CURRENT_PID,
+            CURRENT_TID
+        ));
+        assert!(!linux_posix_clock_settable_for_current_ids(
+            CLOCK_MONOTONIC,
+            CURRENT_PID,
+            CURRENT_TID
+        ));
+        assert!(!linux_posix_clock_settable_for_current_ids(
+            foreign_pid_clock as isize as usize,
+            CURRENT_PID,
+            CURRENT_TID
+        ));
     }
 
     #[test]

@@ -101,10 +101,6 @@ macro_rules! smros_linux_clock_nanosleep_flags_valid_body {
 
 const LINUX_POSIX_NANOS_PER_SECOND: u64 = 1_000_000_000;
 
-pub(crate) fn linux_posix_clock_settable(clock_id: usize) -> bool {
-    clock_id == 0 || clock_id == 2 || clock_id == 3 || linux_cpu_clock_id_supported(clock_id)
-}
-
 #[cfg(test)]
 pub(crate) const fn linux_make_process_cpu_clock_id(pid: i32) -> i32 {
     ((!pid) << 3) | 2
@@ -121,6 +117,47 @@ pub(crate) const fn linux_cpu_clock_id_supported(clock_id: usize) -> bool {
     }
     let kind = (signed as u32) & 7;
     kind == 0 || kind == 1 || kind == 2 || kind == 4 || kind == 5 || kind == 6
+}
+
+pub(crate) const fn linux_cpu_clock_id_pid(clock_id: usize) -> Option<i32> {
+    if !linux_cpu_clock_id_supported(clock_id) {
+        return None;
+    }
+    Some(!(linux_cpu_clock_id_signed(clock_id) >> 3))
+}
+
+pub(crate) const fn linux_cpu_clock_id_valid_for_current_ids(
+    clock_id: usize,
+    current_pid: usize,
+    current_tid: usize,
+) -> bool {
+    let Some(pid) = linux_cpu_clock_id_pid(clock_id) else {
+        return false;
+    };
+    if pid < 0 {
+        return false;
+    }
+    let pid = pid as usize;
+    pid == 0 || pid == current_pid || pid == current_tid
+}
+
+pub(crate) const fn linux_clock_id_valid_for_current_ids(
+    clock_id: usize,
+    current_pid: usize,
+    current_tid: usize,
+) -> bool {
+    clock_id <= 7 || linux_cpu_clock_id_valid_for_current_ids(clock_id, current_pid, current_tid)
+}
+
+pub(crate) const fn linux_posix_clock_settable_for_current_ids(
+    clock_id: usize,
+    current_pid: usize,
+    current_tid: usize,
+) -> bool {
+    clock_id == 0
+        || clock_id == 2
+        || clock_id == 3
+        || linux_cpu_clock_id_valid_for_current_ids(clock_id, current_pid, current_tid)
 }
 
 pub(crate) fn linux_posix_timespec_nanoseconds(seconds: i64, nanoseconds: i64) -> Option<u64> {
