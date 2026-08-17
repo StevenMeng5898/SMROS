@@ -418,6 +418,7 @@ extern "C" fn timer_interrupt_handler() {
         crate::syscall::linux_task::on_timer_tick(now);
         crate::syscall::deliver_linux_posix_timer_signals_from_irq();
         crate::syscall::linux_futex::on_timer_tick(now, now);
+        crate::syscall::linux_mqueue::on_timer_tick(now);
     }
     crate::kernel_objects::scheduler::scheduler().record_trace_sample(current_cpu_id() as usize);
 

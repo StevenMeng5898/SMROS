@@ -47,6 +47,7 @@ use super::address_logic::{
     page_aligned as shared_page_aligned,
 };
 use super::linux_futex;
+use super::linux_mqueue;
 use super::linux_process;
 use super::linux_process::{
     try_clone_linux_fork_path, LinuxCredentialsCore, LinuxDescriptorEntry, LinuxKernelSigaction,
@@ -145,10 +146,12 @@ pub enum SysError {
     EISDIR = 21,
     EINVAL = 22,
     ESPIPE = 29,
+    ENAMETOOLONG = 36,
     ENOLCK = 37,
     ENOSYS = 38,
     EOVERFLOW = 75,
     ENOTSOCK = 88,
+    EMSGSIZE = 90,
     ETIMEDOUT = 110,
 }
 
@@ -526,6 +529,13 @@ const LINUX_OPEN_ALLOWED_FLAGS: usize = LINUX_O_ACCMODE
     | LINUX_O_NOFOLLOW
     | LINUX_O_CLOEXEC;
 const LINUX_PATH_MAX_BYTES: usize = 4096;
+const LINUX_MQUEUE_ALLOWED_FLAGS: usize =
+    LINUX_O_ACCMODE | LINUX_O_CREAT | LINUX_O_EXCL | LINUX_O_NONBLOCK | LINUX_O_CLOEXEC;
+const LINUX_MQ_ATTR_BYTES: usize = 64;
+const LINUX_MQ_ATTR_FLAGS_OFFSET: usize = 0;
+const LINUX_MQ_ATTR_MAXMSG_OFFSET: usize = 8;
+const LINUX_MQ_ATTR_MSGSIZE_OFFSET: usize = 16;
+const LINUX_MQ_ATTR_CURMSGS_OFFSET: usize = 24;
 const LINUX_PIPE_ALLOWED_FLAGS: usize = LINUX_O_CLOEXEC | LINUX_O_NONBLOCK;
 const LINUX_FCNTL_STATUS_ALLOWED_FLAGS: usize = LINUX_O_APPEND | LINUX_O_NONBLOCK;
 const LINUX_ACCESS_MODE_MASK: usize = 0o7;
@@ -1258,6 +1268,71 @@ fn linux_read_user_sigevent(address: usize) -> Result<LinuxSigevent, SysError> {
         )?),
         padding,
     })
+}
+
+fn linux_read_user_mq_attr(address: usize) -> Result<linux_mqueue::LinuxMqueueAttr, SysError> {
+    if address == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let mut bytes = [0u8; LINUX_MQ_ATTR_BYTES];
+    linux_copy_from_user(address, &mut bytes)?;
+    let flags = i64::from_ne_bytes(linux_wire_field(&bytes, LINUX_MQ_ATTR_FLAGS_OFFSET)?);
+    let maxmsg = i64::from_ne_bytes(linux_wire_field(&bytes, LINUX_MQ_ATTR_MAXMSG_OFFSET)?);
+    let msgsize = i64::from_ne_bytes(linux_wire_field(&bytes, LINUX_MQ_ATTR_MSGSIZE_OFFSET)?);
+    let curmsgs = i64::from_ne_bytes(linux_wire_field(&bytes, LINUX_MQ_ATTR_CURMSGS_OFFSET)?);
+    if flags < 0 || maxmsg <= 0 || msgsize <= 0 || curmsgs < 0 {
+        return Err(SysError::EINVAL);
+    }
+    Ok(linux_mqueue::LinuxMqueueAttr {
+        flags: usize::try_from(flags).map_err(|_| SysError::EINVAL)?,
+        maxmsg: usize::try_from(maxmsg).map_err(|_| SysError::EINVAL)?,
+        msgsize: usize::try_from(msgsize).map_err(|_| SysError::EINVAL)?,
+        curmsgs: usize::try_from(curmsgs).map_err(|_| SysError::EINVAL)?,
+    })
+}
+
+fn linux_read_user_mq_flags(address: usize) -> Result<usize, SysError> {
+    if address == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let mut bytes = [0u8; core::mem::size_of::<i64>()];
+    linux_copy_from_user(address, &mut bytes)?;
+    let flags = i64::from_ne_bytes(bytes);
+    if flags < 0 {
+        return Err(SysError::EINVAL);
+    }
+    usize::try_from(flags).map_err(|_| SysError::EINVAL)
+}
+
+fn linux_write_user_mq_attr(
+    address: usize,
+    attr: linux_mqueue::LinuxMqueueAttr,
+) -> Result<(), SysError> {
+    if address == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let mut bytes = [0u8; LINUX_MQ_ATTR_BYTES];
+    linux_put_wire_field(
+        &mut bytes,
+        LINUX_MQ_ATTR_FLAGS_OFFSET,
+        &(attr.flags as i64).to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        LINUX_MQ_ATTR_MAXMSG_OFFSET,
+        &(attr.maxmsg as i64).to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        LINUX_MQ_ATTR_MSGSIZE_OFFSET,
+        &(attr.msgsize as i64).to_ne_bytes(),
+    )?;
+    linux_put_wire_field(
+        &mut bytes,
+        LINUX_MQ_ATTR_CURMSGS_OFFSET,
+        &(attr.curmsgs as i64).to_ne_bytes(),
+    )?;
+    linux_copy_to_user(address, &bytes)
 }
 
 fn linux_timespec_from_nanoseconds(nanoseconds: u64) -> LinuxTimespec {
@@ -3582,6 +3657,27 @@ fn linux_user_cstr(ptr: usize, max_len: usize) -> Result<String, SysError> {
     Err(SysError::EINVAL)
 }
 
+fn linux_mqueue_user_name(ptr: usize) -> Result<String, SysError> {
+    if ptr == 0 {
+        return Err(SysError::EFAULT);
+    }
+
+    let max_len = linux_mqueue::LINUX_MQ_NAME_MAX + 1;
+    let mut bytes = Vec::new();
+    loop {
+        let address = ptr.checked_add(bytes.len()).ok_or(SysError::EFAULT)?;
+        let mut byte = [0u8; 1];
+        linux_copy_from_user(address, &mut byte)?;
+        if byte[0] == 0 {
+            return String::from_utf8(bytes).map_err(|_| SysError::EINVAL);
+        }
+        bytes.push(byte[0]);
+        if bytes.len() > max_len {
+            return Err(SysError::ENAMETOOLONG);
+        }
+    }
+}
+
 fn linux_path_is_container_pseudo_file(path: &str) -> bool {
     path.starts_with("/sys/fs/cgroup/") || path.starts_with("/proc/self/attr/")
 }
@@ -3662,6 +3758,7 @@ pub(crate) fn register_linux_initial_stack(address: usize, len: usize) -> bool {
 
 pub fn reset_linux_process_state() {
     linux_futex::reset();
+    linux_mqueue::reset();
     if let Ok(pid) = linux_process::current_pid() {
         let _ = linux_process_memory::unregister(pid);
     }
@@ -4287,6 +4384,9 @@ fn interrupt_linux_signal_target(target: linux_task::LinuxTaskCore, signum: usiz
     match target.block_reason {
         linux_task::LinuxBlockReason::Futex => {
             let _ = linux_futex::interrupt_task(target.tid, target.scheduler_thread);
+        }
+        linux_task::LinuxBlockReason::Mqueue => {
+            let _ = linux_mqueue::interrupt_task(target.tid, target.scheduler_thread);
         }
         linux_task::LinuxBlockReason::RecordLock => {
             let _ = linux_record_lock::interrupt_task(target.tid, target.scheduler_thread);
@@ -5287,7 +5387,7 @@ pub fn sys_read(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
 /// Linux sys_close implementation.
 pub fn sys_close(fd: usize) -> SysResult {
     if !close_linux_fd_for_current_process(fd) {
-        return if fd <= 2 { Ok(0) } else { Err(SysError::EBUSY) };
+        return if fd <= 2 { Ok(0) } else { Err(SysError::EBADF) };
     }
     Ok(0)
 }
@@ -5349,8 +5449,10 @@ fn close_linux_fd_for_current_process(fd: usize) -> bool {
     }
     let final_reference = memory_state().release_open_description(entry.description_id);
     if let Some(description) = final_reference {
-        memory_state().remove_linux_fxfs_file(description.handle);
-        let _ = sys_handle_close(description.handle);
+        let handle = description.handle;
+        linux_mqueue::close_handle(handle);
+        memory_state().remove_linux_fxfs_file(handle);
+        let _ = sys_handle_close(handle);
     }
     true
 }
@@ -5741,6 +5843,26 @@ fn linux_read_user_timespec(address: usize) -> Result<LinuxTimespec, SysError> {
         tv_sec: i64::from_ne_bytes(seconds),
         tv_nsec: i64::from_ne_bytes(nanoseconds),
     })
+}
+
+fn linux_mqueue_deadline(timeout: usize) -> Result<Option<linux_mqueue::LinuxMqueueDeadline>, SysError> {
+    if timeout == 0 {
+        return Ok(None);
+    }
+    let requested = linux_read_user_timespec(timeout)?;
+    let requested_realtime =
+        syscall_logic::linux_posix_timespec_nanoseconds(requested.tv_sec, requested.tv_nsec)
+            .ok_or(SysError::EINVAL)?;
+    let offset = LINUX_REALTIME_OFFSET_NANOS.load(Ordering::SeqCst);
+    let target_monotonic = i128::from(requested_realtime) - i128::from(offset);
+    let target_monotonic = if target_monotonic <= 0 {
+        0
+    } else {
+        u64::try_from(target_monotonic).map_err(|_| SysError::EOVERFLOW)?
+    };
+    let ticks = target_monotonic / LINUX_SIGNAL_TICK_NANOS
+        + u64::from(target_monotonic % LINUX_SIGNAL_TICK_NANOS != 0);
+    Ok(Some(linux_mqueue::LinuxMqueueDeadline { ticks }))
 }
 
 fn linux_write_sleep_remaining(address: usize, wait: LinuxSleepWait) -> SysResult {
@@ -7405,6 +7527,216 @@ pub fn sys_semop(id: usize, ops: usize, num_ops: usize) -> SysResult {
     }
     if num_ops != 0 && ops == 0 {
         return Err(SysError::EFAULT);
+    }
+    Ok(0)
+}
+
+fn linux_mqueue_fd(fd: usize, readable: bool, writable: bool) -> Result<LinuxFdRecord, SysError> {
+    let record = memory_state().get_fd(fd).ok_or(SysError::EBADF)?;
+    if record.object_type != ObjectType::MessageQueue {
+        return Err(SysError::EBADF);
+    }
+    if readable && !record.readable || writable && !record.writable {
+        return Err(SysError::EBADF);
+    }
+    Ok(record)
+}
+
+fn linux_mqueue_deliver_notification(notification: linux_mqueue::LinuxMqueueNotification) {
+    if notification.signum == 0 {
+        return;
+    }
+    let _ = queue_process_linux_signal_and_wake(
+        notification.pid,
+        LinuxPendingSignal::standard(notification.signum),
+    );
+}
+
+pub fn sys_mq_open(name: usize, flags: usize, _mode: usize, attr: usize) -> SysResult {
+    if !syscall_logic::linux_open_access_mode_valid(
+        flags,
+        LINUX_O_ACCMODE,
+        LINUX_O_RDONLY,
+        LINUX_O_WRONLY,
+        LINUX_O_RDWR,
+    ) || !syscall_logic::linux_open_flags_valid(flags, LINUX_MQUEUE_ALLOWED_FLAGS)
+    {
+        return Err(SysError::EINVAL);
+    }
+    let name = linux_mqueue_user_name(name)?;
+    let create = flags & LINUX_O_CREAT != 0;
+    let exclusive = flags & LINUX_O_EXCL != 0;
+    let requested_attr = if create && attr != 0 {
+        Some(linux_read_user_mq_attr(attr)?)
+    } else {
+        None
+    };
+
+    let handle = compat::create_object(ObjectType::MessageQueue).map_err(|_| SysError::ENOMEM)?;
+    let opened = match linux_mqueue::open_named(&name, handle.0, create, exclusive, requested_attr)
+    {
+        Ok(opened) => opened,
+        Err(error) => {
+            let _ = sys_handle_close(handle.0);
+            return Err(error);
+        }
+    };
+    let _ = (opened.created, opened.attr);
+
+    let fd = memory_state().alloc_fd_with_flags(
+        handle.0,
+        flags & (LINUX_O_ACCMODE | LINUX_O_NONBLOCK),
+        flags & LINUX_O_CLOEXEC != 0,
+    );
+    Ok(fd)
+}
+
+pub fn sys_mq_unlink(name: usize) -> SysResult {
+    let name = linux_mqueue_user_name(name)?;
+    linux_mqueue::unlink(&name)
+}
+
+pub fn sys_mq_timedsend(
+    mqd: usize,
+    msg_ptr: usize,
+    msg_len: usize,
+    msg_prio: usize,
+    abs_timeout: usize,
+) -> SysResult {
+    let record = linux_mqueue_fd(mqd, false, true)?;
+    if msg_len != 0 && !linux_user_buffer_readable(msg_ptr, msg_len) {
+        return Err(SysError::EFAULT);
+    }
+    let mut bytes = linux_kernel_buffer(msg_len)?;
+    if msg_len != 0 {
+        linux_copy_from_user(msg_ptr, &mut bytes)?;
+    }
+    let nonblock = record.status_flags & LINUX_O_NONBLOCK != 0;
+    let mut deadline = None;
+    let mut deadline_loaded = false;
+    loop {
+        match linux_mqueue::send(record.handle, &bytes, msg_prio) {
+            Ok(outcome) => {
+                if let Some(notification) = outcome.notification {
+                    linux_mqueue_deliver_notification(notification);
+                }
+                return Ok(0);
+            }
+            Err(SysError::EAGAIN) if nonblock => return Err(SysError::EAGAIN),
+            Err(SysError::EAGAIN) => {
+                if !deadline_loaded {
+                    deadline = linux_mqueue_deadline(abs_timeout)?;
+                    deadline_loaded = true;
+                }
+                match linux_mqueue::wait(
+                    record.handle,
+                    linux_mqueue::LinuxMqueueWaitKind::Send,
+                    deadline,
+                )? {
+                    linux_mqueue::LinuxMqueueWaitOutcome::Woken => {}
+                    linux_mqueue::LinuxMqueueWaitOutcome::TimedOut => {
+                        return Err(SysError::ETIMEDOUT);
+                    }
+                    linux_mqueue::LinuxMqueueWaitOutcome::Interrupted => {
+                        return Err(SysError::EINTR);
+                    }
+                    linux_mqueue::LinuxMqueueWaitOutcome::Waiting => return Err(SysError::EAGAIN),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+pub fn sys_mq_timedreceive(
+    mqd: usize,
+    msg_ptr: usize,
+    msg_len: usize,
+    msg_prio: usize,
+    abs_timeout: usize,
+) -> SysResult {
+    let record = linux_mqueue_fd(mqd, true, false)?;
+    if msg_len != 0 && !linux_user_buffer_writable(msg_ptr, msg_len) {
+        return Err(SysError::EFAULT);
+    }
+    if msg_prio != 0 && !linux_user_buffer_writable(msg_prio, core::mem::size_of::<u32>()) {
+        return Err(SysError::EFAULT);
+    }
+    let nonblock = record.status_flags & LINUX_O_NONBLOCK != 0;
+    let mut deadline = None;
+    let mut deadline_loaded = false;
+    loop {
+        match linux_mqueue::receive(record.handle, msg_len) {
+            Ok(outcome) => {
+                if !outcome.message.bytes.is_empty() {
+                    linux_copy_to_user(msg_ptr, &outcome.message.bytes)?;
+                }
+                if msg_prio != 0 {
+                    linux_copy_to_user(
+                        msg_prio,
+                        &(outcome.message.priority as u32).to_ne_bytes(),
+                    )?;
+                }
+                return Ok(outcome.message.bytes.len());
+            }
+            Err(SysError::EAGAIN) if nonblock => return Err(SysError::EAGAIN),
+            Err(SysError::EAGAIN) => {
+                if !deadline_loaded {
+                    deadline = linux_mqueue_deadline(abs_timeout)?;
+                    deadline_loaded = true;
+                }
+                match linux_mqueue::wait(
+                    record.handle,
+                    linux_mqueue::LinuxMqueueWaitKind::Receive,
+                    deadline,
+                )? {
+                    linux_mqueue::LinuxMqueueWaitOutcome::Woken => {}
+                    linux_mqueue::LinuxMqueueWaitOutcome::TimedOut => {
+                        return Err(SysError::ETIMEDOUT);
+                    }
+                    linux_mqueue::LinuxMqueueWaitOutcome::Interrupted => {
+                        return Err(SysError::EINTR);
+                    }
+                    linux_mqueue::LinuxMqueueWaitOutcome::Waiting => return Err(SysError::EAGAIN),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+pub fn sys_mq_notify(mqd: usize, notification: usize) -> SysResult {
+    let record = linux_mqueue_fd(mqd, false, false)?;
+    if notification == 0 {
+        return linux_mqueue::notify(record.handle, None);
+    }
+    let event = linux_read_user_sigevent(notification)?;
+    if event.sigev_notify != LINUX_SIGEV_SIGNAL
+        || !(1..=LINUX_MAX_SIGNAL).contains(&(event.sigev_signo as usize))
+    {
+        return Err(SysError::EINVAL);
+    }
+    let notification = linux_mqueue::LinuxMqueueNotification {
+        pid: linux_process::current_pid()?,
+        signum: event.sigev_signo as usize,
+    };
+    linux_mqueue::notify(record.handle, Some(notification))
+}
+
+pub fn sys_mq_getsetattr(mqd: usize, newattr: usize, oldattr: usize) -> SysResult {
+    let record = linux_mqueue_fd(mqd, false, false)?;
+    let current = linux_mqueue::getattr(record.handle, record.status_flags & LINUX_O_NONBLOCK)?;
+    if oldattr != 0 {
+        linux_write_user_mq_attr(oldattr, current)?;
+    }
+    if newattr != 0 {
+        let requested_flags = linux_read_user_mq_flags(newattr)?;
+        let new_flags = if requested_flags & LINUX_O_NONBLOCK != 0 {
+            record.status_flags | LINUX_O_NONBLOCK
+        } else {
+            record.status_flags & !LINUX_O_NONBLOCK
+        };
+        let _ = memory_state().set_description_status_flags(record.description_id, new_flags);
     }
     Ok(0)
 }
@@ -12489,12 +12821,6 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         | ARM64_SYS_REBOOT
         | ARM64_SYS_SETTIMEOFDAY
         | ARM64_SYS_ADJTIMEX
-        | ARM64_SYS_MQ_OPEN
-        | ARM64_SYS_MQ_UNLINK
-        | ARM64_SYS_MQ_TIMEDSEND
-        | ARM64_SYS_MQ_TIMEDRECEIVE
-        | ARM64_SYS_MQ_NOTIFY
-        | ARM64_SYS_MQ_GETSETATTR
         | ARM64_SYS_ADD_KEY
         | ARM64_SYS_REQUEST_KEY
         | ARM64_SYS_KEYCTL
@@ -12685,6 +13011,12 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_GETEGID => sys_getegid(),
         ARM64_SYS_GETTID => sys_gettid(),
         ARM64_SYS_SYSINFO => sys_sysinfo(args[0]),
+        ARM64_SYS_MQ_OPEN => sys_mq_open(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_MQ_UNLINK => sys_mq_unlink(args[0]),
+        ARM64_SYS_MQ_TIMEDSEND => sys_mq_timedsend(args[0], args[1], args[2], args[3], args[4]),
+        ARM64_SYS_MQ_TIMEDRECEIVE => sys_mq_timedreceive(args[0], args[1], args[2], args[3], args[4]),
+        ARM64_SYS_MQ_NOTIFY => sys_mq_notify(args[0], args[1]),
+        ARM64_SYS_MQ_GETSETATTR => sys_mq_getsetattr(args[0], args[1], args[2]),
         ARM64_SYS_MSGGET => sys_msgget(args[0], args[1]),
         ARM64_SYS_MSGCTL => sys_msgctl(args[0], args[1], args[2]),
         ARM64_SYS_MSGRCV => sys_msgrcv(args[0], args[1], args[2], args[3] as isize, args[4]),

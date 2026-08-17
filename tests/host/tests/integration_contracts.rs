@@ -330,6 +330,63 @@ fn linux_record_lock_runtime_blocks_without_missed_wakeups() {
 }
 
 #[test]
+fn arm64_posix_mqueue_syscalls_are_real_handlers_not_compat_noops() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let modules = std::fs::read_to_string(repository.join("src/syscall/mod.rs"))
+        .expect("read syscall modules");
+    let task_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_task_logic_shared.rs"))
+            .expect("read Linux task shared logic");
+
+    for declaration in [
+        "const ARM64_SYS_MQ_OPEN: u32 = 180;",
+        "const ARM64_SYS_MQ_UNLINK: u32 = 181;",
+        "const ARM64_SYS_MQ_TIMEDSEND: u32 = 182;",
+        "const ARM64_SYS_MQ_TIMEDRECEIVE: u32 = 183;",
+        "const ARM64_SYS_MQ_NOTIFY: u32 = 184;",
+        "const ARM64_SYS_MQ_GETSETATTR: u32 = 185;",
+    ] {
+        assert!(syscall.contains(declaration), "missing {declaration}");
+    }
+
+    let dispatch = braced_body(
+        &syscall[syscall
+            .find("pub fn dispatch_linux_syscall(")
+            .expect("Linux syscall dispatcher")..],
+    );
+    for route in [
+        "ARM64_SYS_MQ_OPEN => sys_mq_open(args[0], args[1], args[2], args[3])",
+        "ARM64_SYS_MQ_UNLINK => sys_mq_unlink(args[0])",
+        "ARM64_SYS_MQ_TIMEDSEND => sys_mq_timedsend(args[0], args[1], args[2], args[3], args[4])",
+        "ARM64_SYS_MQ_TIMEDRECEIVE => sys_mq_timedreceive(args[0], args[1], args[2], args[3], args[4])",
+        "ARM64_SYS_MQ_NOTIFY => sys_mq_notify(args[0], args[1])",
+        "ARM64_SYS_MQ_GETSETATTR => sys_mq_getsetattr(args[0], args[1], args[2])",
+    ] {
+        assert!(dispatch.contains(route), "missing dispatch route {route}");
+    }
+    let unsupported_start = dispatch
+        .find("ARM64_SYS_LOOKUP_DCOOKIE")
+        .expect("compatibility unsupported cluster");
+    let unsupported_end = dispatch[unsupported_start..]
+        .find("=> Ok(0)")
+        .expect("unsupported cluster end")
+        + unsupported_start;
+    let unsupported = &dispatch[unsupported_start..unsupported_end];
+    assert!(!unsupported.contains("ARM64_SYS_MQ_"));
+
+    let close = braced_body(&syscall[syscall.find("pub fn sys_close(").expect("close syscall")..]);
+    assert!(close.contains("Err(SysError::EBADF)"));
+    assert!(!close.contains("Err(SysError::EBUSY)"));
+
+    assert!(modules.contains("pub(crate) mod linux_mqueue;"));
+    assert!(task_logic.contains("Mqueue"));
+    assert!(syscall.contains("linux_mqueue::close_handle(handle);"));
+    assert!(syscall.contains("linux_mqueue::reset();"));
+}
+
+#[test]
 fn posix_clock_timer_clock_runtime_applies_checked_realtime_offsets() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))

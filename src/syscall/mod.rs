@@ -9,6 +9,7 @@
 
 pub(crate) mod address_logic;
 pub(crate) mod linux_futex;
+pub(crate) mod linux_mqueue;
 pub(crate) mod linux_process;
 pub(crate) mod linux_process_memory;
 pub(crate) mod linux_record_lock;

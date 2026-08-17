@@ -946,6 +946,197 @@ mod syscall_logic {
     }
 }
 
+mod linux_mqueue_logic {
+    extern crate alloc;
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/linux_mqueue_logic_shared.rs"
+    ));
+
+    fn attr(maxmsg: usize, msgsize: usize) -> LinuxMqueueAttr {
+        LinuxMqueueAttr {
+            flags: 0,
+            maxmsg,
+            msgsize,
+            curmsgs: 0,
+        }
+    }
+
+    #[test]
+    fn open_preserves_attributes_and_rejects_exclusive_existing_queue() {
+        let mut state = LinuxMqueueState::<4, 8, 4>::new();
+
+        let opened = state
+            .open("/smros-mq", 101, true, false, Some(attr(3, 16)))
+            .unwrap();
+        assert!(opened.created);
+        assert_eq!(opened.attr.maxmsg, 3);
+        assert_eq!(opened.attr.msgsize, 16);
+
+        assert_eq!(
+            state.open("/smros-mq", 102, true, true, None),
+            Err(LinuxMqueueError::Exists)
+        );
+
+        let reopened = state
+            .open("/smros-mq", 103, true, false, Some(attr(1, 1)))
+            .unwrap();
+        assert!(!reopened.created);
+        assert_eq!(reopened.attr.maxmsg, 3);
+        assert_eq!(reopened.attr.msgsize, 16);
+    }
+
+    #[test]
+    fn send_receive_uses_priority_order_and_fifo_within_equal_priority() {
+        let mut state = LinuxMqueueState::<4, 8, 4>::new();
+        state
+            .open("/smros-mq", 101, true, false, Some(attr(4, 16)))
+            .unwrap();
+
+        state.send(101, b"low-first", 1).unwrap();
+        state.send(101, b"high", 3).unwrap();
+        state.send(101, b"low-second", 1).unwrap();
+
+        let first = state.receive(101, 16).unwrap().message;
+        let second = state.receive(101, 16).unwrap().message;
+        let third = state.receive(101, 16).unwrap().message;
+
+        assert_eq!(first.bytes, b"high");
+        assert_eq!(first.priority, 3);
+        assert_eq!(second.bytes, b"low-first");
+        assert_eq!(second.priority, 1);
+        assert_eq!(third.bytes, b"low-second");
+        assert_eq!(third.priority, 1);
+    }
+
+    #[test]
+    fn message_size_priority_empty_and_full_errors_match_posix() {
+        let mut state = LinuxMqueueState::<4, 8, 4>::new();
+        state
+            .open("/smros-mq", 101, true, false, Some(attr(1, 4)))
+            .unwrap();
+
+        assert_eq!(
+            state.send(101, b"12345", 0),
+            Err(LinuxMqueueError::MessageTooLarge)
+        );
+        assert_eq!(
+            state.send(101, b"1234", LINUX_MQ_PRIO_MAX),
+            Err(LinuxMqueueError::Invalid)
+        );
+        assert_eq!(
+            state.receive(101, 4),
+            Err(LinuxMqueueError::WouldBlock)
+        );
+
+        state.send(101, b"1234", 0).unwrap();
+        assert_eq!(
+            state.send(101, b"5678", 0),
+            Err(LinuxMqueueError::WouldBlock)
+        );
+        assert_eq!(
+            state.receive(101, 3),
+            Err(LinuxMqueueError::MessageTooLarge)
+        );
+        assert_eq!(state.getattr(101, 0).unwrap().curmsgs, 1);
+    }
+
+    #[test]
+    fn unlink_hides_name_but_keeps_open_handle_usable_until_close() {
+        let mut state = LinuxMqueueState::<4, 8, 4>::new();
+        state
+            .open("/smros-mq", 101, true, false, Some(attr(2, 8)))
+            .unwrap();
+        state.unlink("/smros-mq").unwrap();
+
+        assert_eq!(
+            state.open("/smros-mq", 102, false, false, None),
+            Err(LinuxMqueueError::NotFound)
+        );
+        state.send(101, b"old", 0).unwrap();
+        assert_eq!(state.receive(101, 8).unwrap().message.bytes, b"old");
+
+        assert!(state.close_handle(101));
+        assert_eq!(state.getattr(101, 0), Err(LinuxMqueueError::BadDescriptor));
+    }
+
+    #[test]
+    fn waiters_wake_by_operation_and_report_timeout_or_interrupt() {
+        let mut state = LinuxMqueueState::<4, 8, 4>::new();
+        state
+            .open("/smros-mq", 101, true, false, Some(attr(1, 8)))
+            .unwrap();
+
+        state
+            .push_waiter(
+                101,
+                LinuxMqueueWaitKind::Receive,
+                11,
+                12,
+                Some(LinuxMqueueDeadline { ticks: 50 }),
+            )
+            .unwrap();
+        assert_eq!(state.send(101, b"wake", 0).unwrap().receiver, Some((11, 12)));
+        assert_eq!(
+            state.take_outcome(11, 12),
+            Some(LinuxMqueueWaitOutcome::Woken)
+        );
+
+        state
+            .push_waiter(
+                101,
+                LinuxMqueueWaitKind::Send,
+                21,
+                22,
+                Some(LinuxMqueueDeadline { ticks: 70 }),
+            )
+            .unwrap();
+        assert_eq!(state.expire(69), [None, None, None, None]);
+        assert_eq!(state.expire(70)[0], Some((21, 22)));
+        assert_eq!(
+            state.take_outcome(21, 22),
+            Some(LinuxMqueueWaitOutcome::TimedOut)
+        );
+
+        state
+            .push_waiter(101, LinuxMqueueWaitKind::Receive, 31, 32, None)
+            .unwrap();
+        assert!(state.interrupt(31, 32));
+        assert_eq!(
+            state.take_outcome(31, 32),
+            Some(LinuxMqueueWaitOutcome::Interrupted)
+        );
+    }
+
+    #[test]
+    fn notify_is_single_registrant_and_fires_once_on_empty_to_nonempty() {
+        let mut state = LinuxMqueueState::<4, 8, 4>::new();
+        state
+            .open("/smros-mq", 101, true, false, Some(attr(2, 8)))
+            .unwrap();
+
+        let notification = LinuxMqueueNotification { pid: 42, signum: 10 };
+        state.notify(101, Some(notification)).unwrap();
+        assert_eq!(
+            state.notify(101, Some(LinuxMqueueNotification { pid: 43, signum: 12 })),
+            Err(LinuxMqueueError::Busy)
+        );
+
+        assert_eq!(
+            state.send(101, b"first", 0).unwrap().notification,
+            Some(notification)
+        );
+        assert_eq!(state.send(101, b"second", 0).unwrap().notification, None);
+
+        state.receive(101, 8).unwrap();
+        state.receive(101, 8).unwrap();
+        state.notify(101, Some(notification)).unwrap();
+        state.notify(101, None).unwrap();
+        assert_eq!(state.send(101, b"silent", 0).unwrap().notification, None);
+    }
+}
+
 mod linux_task_logic {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
