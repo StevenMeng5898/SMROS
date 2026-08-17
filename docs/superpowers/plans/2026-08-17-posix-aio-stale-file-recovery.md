@@ -278,7 +278,8 @@ for root in roots:
     for forbidden in ("posixtest: timeout", "infrastructure_error", "panic", "fatal"):
         if forbidden in serial.lower():
             raise SystemExit(f"{root}: forbidden marker {forbidden}")
-    attempts = [json.loads(line) for line in (root / "results.ndjson").read_text().splitlines() if line.strip()]
+    rows = [json.loads(line) for line in (root / "results.ndjson").read_text().splitlines() if line.strip()]
+    attempts = [row for row in rows if row.get("record_type") == "attempt"]
     by_id = {attempt["test_id"]: attempt for attempt in attempts}
     missing = required_pass.difference(by_id)
     if missing:
@@ -362,7 +363,8 @@ root = Path("target/posix/aarch64/aio-stale-file-affected-copy")
 serial = (root / "qemu-serial.log").read_text(errors="replace")
 if "Error at open(): File exists" in serial:
     raise SystemExit("affected-copy stale File exists setup error")
-attempts = [json.loads(line) for line in (root / "results.ndjson").read_text().splitlines() if line.strip()]
+rows = [json.loads(line) for line in (root / "results.ndjson").read_text().splitlines() if line.strip()]
+attempts = [row for row in rows if row.get("record_type") == "attempt"]
 counts = {}
 for attempt in attempts:
     counts[attempt["status"]] = counts.get(attempt["status"], 0) + 1
@@ -596,7 +598,8 @@ required_pass = {
 }
 
 def load_attempts(root: Path) -> list[dict]:
-    return [json.loads(line) for line in (root / "results.ndjson").read_text().splitlines() if line.strip()]
+    rows = [json.loads(line) for line in (root / "results.ndjson").read_text().splitlines() if line.strip()]
+    return [row for row in rows if row.get("record_type") == "attempt"]
 
 def status_counts(attempts: list[dict]) -> str:
     counts = {}
