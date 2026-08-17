@@ -4491,7 +4491,10 @@ fn interrupt_linux_signal_target(target: linux_task::LinuxTaskCore, signum: usiz
             let _ = linux_record_lock::interrupt_task(target.tid, target.scheduler_thread);
         }
         linux_task::LinuxBlockReason::Sleep => {
-            if linux_task::interrupt_sleep(target.tid, target.scheduler_thread, signum)
+            let interrupts_sleep = linux_signal_disposition_for(target.tgid, signum)
+                .is_ok_and(linux_task::linux_signal_interrupts_sleep);
+            if interrupts_sleep
+                && linux_task::interrupt_sleep(target.tid, target.scheduler_thread, signum)
                 && !linux_task::wake_blocked(
                     target.tid,
                     target.scheduler_thread,
@@ -4592,7 +4595,10 @@ fn queue_directed_linux_signal(
         }
         match linux_signal_disposition_for(validated_target.tgid, signum)? {
             LinuxSignalDisposition::Ignore => Ok(0),
-            LinuxSignalDisposition::Terminate | LinuxSignalDisposition::Handled => {
+            LinuxSignalDisposition::Stop
+            | LinuxSignalDisposition::Continue
+            | LinuxSignalDisposition::Terminate
+            | LinuxSignalDisposition::Handled => {
                 let record = make_record()?;
                 let (target, wake_reason) =
                     linux_task::route_signal_and_complete_wait(tgid, tid, record)?;
@@ -4781,6 +4787,15 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
                 return false;
             }
             linux_process::LinuxSignalDeliveryRoute::Handle => {}
+        }
+        if matches!(
+            linux_signal_disposition(signum),
+            LinuxSignalDisposition::Stop | LinuxSignalDisposition::Continue
+        ) {
+            if commit_linux_signal(deliverable).is_err() {
+                return false;
+            }
+            continue;
         }
         let restart = linux_task::with_current_signal_state(|signal_state| {
             signal_state.take_restart_for_signal(action.flags & LINUX_SA_RESTART != 0)
@@ -8298,7 +8313,10 @@ pub fn sys_rt_sigqueueinfo(pid: usize, sig: usize, info: usize) -> SysResult {
     }
     match linux_signal_disposition_for(pid, sig)? {
         LinuxSignalDisposition::Ignore => Ok(0),
-        LinuxSignalDisposition::Terminate | LinuxSignalDisposition::Handled => {
+        LinuxSignalDisposition::Stop
+        | LinuxSignalDisposition::Continue
+        | LinuxSignalDisposition::Terminate
+        | LinuxSignalDisposition::Handled => {
             let record = linux_signal_record_from_user(sig, info)?;
             queue_process_linux_signal_and_wake(pid, record)?;
             Ok(0)
@@ -9894,7 +9912,10 @@ pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
     }
     match linux_signal_disposition_for(target_pid, signum)? {
         LinuxSignalDisposition::Ignore => Ok(0),
-        LinuxSignalDisposition::Terminate | LinuxSignalDisposition::Handled => {
+        LinuxSignalDisposition::Stop
+        | LinuxSignalDisposition::Continue
+        | LinuxSignalDisposition::Terminate
+        | LinuxSignalDisposition::Handled => {
             queue_process_linux_signal_and_wake(target_pid, LinuxPendingSignal::standard(signum))?;
             Ok(0)
         }

@@ -2042,12 +2042,31 @@ mod linux_task_logic {
                 LinuxSignalDisposition::Ignore
             );
         }
+        assert_eq!(
+            linux_signal_disposition(SIG_DFL, 18),
+            LinuxSignalDisposition::Continue
+        );
+        for signum in [19, 20, 21, 22] {
+            assert_eq!(
+                linux_signal_disposition(SIG_DFL, signum),
+                LinuxSignalDisposition::Stop
+            );
+        }
         for signum in [9, 15] {
             assert_eq!(
                 linux_signal_disposition(SIG_DFL, signum),
                 LinuxSignalDisposition::Terminate
             );
         }
+        assert!(!linux_signal_interrupts_sleep(LinuxSignalDisposition::Ignore));
+        assert!(!linux_signal_interrupts_sleep(LinuxSignalDisposition::Stop));
+        assert!(!linux_signal_interrupts_sleep(
+            LinuxSignalDisposition::Continue
+        ));
+        assert!(linux_signal_interrupts_sleep(
+            LinuxSignalDisposition::Terminate
+        ));
+        assert!(linux_signal_interrupts_sleep(LinuxSignalDisposition::Handled));
         assert_eq!(
             linux_signal_disposition(0x1000, 15),
             LinuxSignalDisposition::Handled

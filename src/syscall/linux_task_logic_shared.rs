@@ -293,6 +293,8 @@ pub(crate) fn linux_signal_bit(signum: usize) -> u64 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxSignalDisposition {
     Ignore,
+    Stop,
+    Continue,
     Terminate,
     Handled,
 }
@@ -305,10 +307,21 @@ pub(crate) fn linux_signal_disposition(handler: u64, signum: usize) -> LinuxSign
         LINUX_IGNORE_SIGNAL_HANDLER => LinuxSignalDisposition::Ignore,
         LINUX_DEFAULT_SIGNAL_HANDLER => match signum {
             17 | 23 | 28 => LinuxSignalDisposition::Ignore,
+            18 => LinuxSignalDisposition::Continue,
+            19 | 20 | 21 | 22 => LinuxSignalDisposition::Stop,
             _ => LinuxSignalDisposition::Terminate,
         },
         _ => LinuxSignalDisposition::Handled,
     }
+}
+
+pub(crate) const fn linux_signal_interrupts_sleep(
+    disposition: LinuxSignalDisposition,
+) -> bool {
+    matches!(
+        disposition,
+        LinuxSignalDisposition::Terminate | LinuxSignalDisposition::Handled
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
