@@ -5371,7 +5371,7 @@ pub(crate) fn linux_fd_write_bytes(fd: usize, buf: &[u8]) -> SysResult {
             let record = memory_state()
                 .get_fd(fd)
                 .filter(|record| record.writable)
-                .ok_or(SysError::ENODEV)?;
+                .ok_or(SysError::EBADF)?;
             let handle = record.handle;
             if socket::socket_table().contains(HandleValue(handle)) {
                 return socket::socket_table()
@@ -5379,6 +5379,13 @@ pub(crate) fn linux_fd_write_bytes(fd: usize, buf: &[u8]) -> SysResult {
                     .map_err(|_| SysError::EIO);
             }
             if let Some(file) = memory_state().linux_fxfs_file_mut(handle) {
+                if record.status_flags & LINUX_O_APPEND != 0 {
+                    let append_offset = fxfs::cursor_attrs(file.cursor)
+                        .map_err(linux_fxfs_error)?
+                        .size;
+                    fxfs::position_cursor(&mut file.cursor, append_offset)
+                        .map_err(|_| SysError::EINVAL)?;
+                }
                 let written =
                     fxfs::cursor_write(&mut file.cursor, buf).map_err(|_| SysError::EIO)?;
                 let offset = file.cursor.offset();
@@ -5396,7 +5403,7 @@ pub(crate) fn linux_fd_read_bytes(fd: usize, out: &mut [u8]) -> SysResult {
     let record = memory_state()
         .get_fd(fd)
         .filter(|record| record.readable)
-        .ok_or(SysError::ENODEV)?;
+        .ok_or(SysError::EBADF)?;
     let handle = record.handle;
 
     if socket::socket_table().contains(HandleValue(handle)) {
@@ -5525,7 +5532,7 @@ fn linux_fd_rollback_read_bytes(fd: usize, bytes: &[u8]) -> Result<(), SysError>
         .get_fd(fd)
         .filter(|record| record.readable)
         .map(|record| record.handle)
-        .ok_or(SysError::ENODEV)?;
+        .ok_or(SysError::EBADF)?;
 
     if let Some(file) = memory_state().linux_fxfs_file_mut(handle) {
         let restored = file
@@ -7213,7 +7220,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult {
     match cmd {
         F_GETLK | F_SETLK | F_SETLKW => linux_fcntl_record_lock(fd, cmd, arg),
         F_DUPFD | F_DUPFD_CLOEXEC => {
-            let record = memory_state().get_fd(fd).ok_or(SysError::ENODEV)?;
+            let record = memory_state().get_fd(fd).ok_or(SysError::EBADF)?;
             let duplicated =
                 memory_state().alloc_fd_from(arg, record.handle, record.readable, record.writable);
             if cmd == F_DUPFD_CLOEXEC {
@@ -7224,14 +7231,14 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult {
         F_GETFD => memory_state()
             .get_fd(fd)
             .map(|record| usize::from(record.close_on_exec))
-            .ok_or(SysError::ENODEV),
+            .ok_or(SysError::EBADF),
         F_GETFL => memory_state()
             .get_fd(fd)
             .map(|record| record.status_flags)
-            .ok_or(SysError::ENODEV),
+            .ok_or(SysError::EBADF),
         F_SETFD => {
             if !linux_fd_known(fd) {
-                return Err(SysError::ENODEV);
+                return Err(SysError::EBADF);
             }
             if arg & !1 != 0 {
                 return Err(SysError::EINVAL);
@@ -7241,7 +7248,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult {
         }
         F_SETFL => {
             if !linux_fd_known(fd) {
-                return Err(SysError::ENODEV);
+                return Err(SysError::EBADF);
             }
             if !syscall_logic::linux_fcntl_flags_valid(arg, LINUX_FCNTL_STATUS_ALLOWED_FLAGS) {
                 return Err(SysError::EINVAL);
@@ -7249,7 +7256,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult {
             let description_id = memory_state()
                 .get_fd(fd)
                 .map(|record| record.description_id)
-                .ok_or(SysError::ENODEV)?;
+                .ok_or(SysError::EBADF)?;
             let _ = memory_state().set_description_status_flags(description_id, arg);
             Ok(0)
         }
@@ -7281,7 +7288,7 @@ pub fn sys_lseek(fd: usize, offset: i64, whence: usize) -> SysResult {
         return Err(SysError::EINVAL);
     }
     let state = memory_state();
-    let record = state.get_fd(fd).ok_or(SysError::ENODEV)?;
+    let record = state.get_fd(fd).ok_or(SysError::EBADF)?;
     if let Some(file) = state.linux_fxfs_file_mut(record.handle) {
         const SEEK_SET: usize = 0;
         const SEEK_CUR: usize = 1;
@@ -7319,7 +7326,7 @@ pub fn sys_pread(fd: usize, buf: usize, len: usize, offset: u64) -> SysResult {
         let record = state
             .get_fd(fd)
             .filter(|record| record.readable)
-            .ok_or(SysError::ENODEV)?;
+            .ok_or(SysError::EBADF)?;
         state.linux_fxfs_file(record.handle).cloned()
     };
 
@@ -7368,13 +7375,14 @@ pub fn sys_pwrite(fd: usize, buf: usize, len: usize, offset: u64) -> SysResult {
         return Err(SysError::EFAULT);
     }
 
-    let file = {
+    let (file, append) = {
         let state = memory_state();
         let record = state
             .get_fd(fd)
             .filter(|record| record.writable)
-            .ok_or(SysError::ENODEV)?;
-        state.linux_fxfs_file(record.handle).cloned()
+            .ok_or(SysError::EBADF)?;
+        let append = record.status_flags & LINUX_O_APPEND != 0;
+        (state.linux_fxfs_file(record.handle).cloned(), append)
     };
 
     if let Some(mut file) = file {
@@ -7382,7 +7390,9 @@ pub fn sys_pwrite(fd: usize, buf: usize, len: usize, offset: u64) -> SysResult {
             return Err(SysError::EFAULT);
         }
         let offset = usize::try_from(offset).map_err(|_| SysError::EINVAL)?;
-        fxfs::position_cursor(&mut file.cursor, offset).map_err(|_| SysError::EINVAL)?;
+        if !append {
+            fxfs::position_cursor(&mut file.cursor, offset).map_err(|_| SysError::EINVAL)?;
+        }
         let mut staging = [0u8; LINUX_IO_STAGING_BYTES];
         let mut total = 0usize;
         while total < len {
@@ -7391,6 +7401,13 @@ pub fn sys_pwrite(fd: usize, buf: usize, len: usize, offset: u64) -> SysResult {
                 buf.checked_add(total).ok_or(SysError::EFAULT)?,
                 &mut staging[..chunk],
             )?;
+            if append {
+                let append_offset = fxfs::cursor_attrs(file.cursor)
+                    .map_err(linux_fxfs_error)?
+                    .size;
+                fxfs::position_cursor(&mut file.cursor, append_offset)
+                    .map_err(|_| SysError::EINVAL)?;
+            }
             let written = match fxfs::cursor_write(&mut file.cursor, &staging[..chunk]) {
                 Ok(written) => written,
                 Err(_) => {

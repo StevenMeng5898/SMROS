@@ -6206,6 +6206,60 @@ fn fxfs_positioned_io_can_read_past_eof_and_extend_within_the_file_limit() {
 }
 
 #[test]
+fn linux_append_mode_positions_fxfs_writes_at_current_end_of_file() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    let write_bytes_start = syscall
+        .find("pub(crate) fn linux_fd_write_bytes(")
+        .expect("Linux fd write helper");
+    let write_bytes = braced_body(&syscall[write_bytes_start..]);
+    assert!(write_bytes.contains("record.status_flags & LINUX_O_APPEND != 0"));
+    assert!(write_bytes.contains("fxfs::cursor_attrs(file.cursor)"));
+    assert!(write_bytes.contains("fxfs::position_cursor(&mut file.cursor, append_offset)"));
+
+    let pwrite_start = syscall.find("pub fn sys_pwrite(").expect("pwrite path");
+    let pwrite = braced_body(&syscall[pwrite_start..]);
+    assert!(pwrite.contains("let append = record.status_flags & LINUX_O_APPEND != 0"));
+    assert!(pwrite.contains("fxfs::cursor_attrs(file.cursor)"));
+    assert!(pwrite.contains("fxfs::position_cursor(&mut file.cursor, append_offset)"));
+}
+
+#[test]
+fn linux_fd_syscalls_report_bad_file_descriptor_for_bad_fds() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    for start_marker in [
+        "pub fn sys_pread(",
+        "pub fn sys_pwrite(",
+        "pub fn sys_fcntl(",
+        "pub fn sys_lseek(",
+    ] {
+        let start = syscall.find(start_marker).expect("fd syscall");
+        let body = braced_body(&syscall[start..]);
+        assert!(
+            body.contains("ok_or(SysError::EBADF)") || body.contains("ok_or(SysError::EBADF)?"),
+            "{start_marker} should map absent file descriptors to EBADF"
+        );
+    }
+
+    let write_bytes_start = syscall
+        .find("pub(crate) fn linux_fd_write_bytes(")
+        .expect("Linux fd write helper");
+    let write_bytes = braced_body(&syscall[write_bytes_start..]);
+    assert!(write_bytes.contains("ok_or(SysError::EBADF)"));
+
+    let read_bytes_start = syscall
+        .find("pub(crate) fn linux_fd_read_bytes(")
+        .expect("Linux fd read helper");
+    let read_bytes = braced_body(&syscall[read_bytes_start..]);
+    assert!(read_bytes.contains("ok_or(SysError::EBADF)"));
+}
+
+#[test]
 fn linux_vectored_io_preflights_every_entry_before_io() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
