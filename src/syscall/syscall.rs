@@ -5304,7 +5304,7 @@ pub(crate) fn deliver_linux_synchronous_memory_fault(
     if saved_regs == 0 {
         return Err(SysError::EFAULT);
     }
-    crate::kobj_info!(
+    crate::kobj_debug!(
         "posix-fault",
         "fault pid={} address={:#x} access={:?}",
         linux_process::current_pid().unwrap_or(0),
@@ -5313,7 +5313,7 @@ pub(crate) fn deliver_linux_synchronous_memory_fault(
     );
     if matches!(access, LinuxMemoryFaultAccess::Write) {
         let cow_result = linux_process_memory::resolve_current_cow_fault(fault_address as usize);
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-cow",
             "fault pid={} address={:#x} result={:?}",
             linux_process::current_pid().unwrap_or(0),
@@ -5429,7 +5429,7 @@ pub extern "C" fn complete_linux_signal_syscall_return(saved_regs: usize) {
     };
     let return_pc = crate::kernel_lowlevel::cpu::read_exception_return_pc();
     if (0x1202_0000..0x1204_0000).contains(&return_pc) {
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "fork",
             "complete syscall return_pc={:#x} saved_frame={:#x}",
             return_pc,
@@ -7189,21 +7189,6 @@ pub fn sys_openat(dirfd: usize, path: usize, flags: usize, mode: usize) -> SysRe
     }
     let access_mode = flags & LINUX_O_ACCMODE;
     let existed_in_fxfs = fxfs::attrs(&path_str).is_ok();
-    if path_str.starts_with(LINUX_SHM_ROOT_PATH) {
-        let (credentials, umask) = linux_shm_current_credentials();
-        crate::kobj_info!(
-            "posix-shm",
-            "open path={} flags={:#x} mode={:#o} existed={} attrs={:?} euid={} egid={} umask={:#o}",
-            path_str,
-            flags,
-            mode,
-            existed_in_fxfs,
-            fxfs::attrs(&path_str).ok(),
-            credentials.effective_uid,
-            credentials.effective_gid,
-            umask
-        );
-    }
     if path_str.starts_with(LINUX_SHM_ROOT_PATH) && existed_in_fxfs {
         let _ = linux_shm_check_open_permissions(&path_str, access_mode)?;
     }
@@ -10621,7 +10606,7 @@ pub fn sys_vmar_unmap_handle_close_thread_exit(
 pub fn sys_fork() -> SysResult {
     info!("fork");
     let result = sys_fork_with_namespace_flags(0, LINUX_SIGCHLD);
-    crate::kobj_info!(
+    crate::kobj_debug!(
         "posix-fork",
         "return parent={} result={:?}",
         linux_process::current_pid().unwrap_or(0),
@@ -10705,7 +10690,7 @@ pub fn sys_clone(
             set_child_tid.then_some(child_tid),
             if clear_child_tid { child_tid } else { 0 },
         );
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-fork",
             "clone return parent={} flags={:#x} child_tid={:#x} result={:?}",
             linux_process::current_pid().unwrap_or(0),
@@ -10845,7 +10830,7 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
         linux_process::linux_wait_selector(pid, process.process_group).ok_or(SysError::EINVAL)?;
     let nohang = options & linux_process::LINUX_WAIT_WNOHANG != 0;
     let include_stopped = options & linux_process::LINUX_WAIT_WUNTRACED != 0;
-    crate::kobj_info!(
+    crate::kobj_debug!(
         "posix-wait",
         "enter parent={} selector={} options={:#x}",
         process.pid,
@@ -10856,7 +10841,7 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
     loop {
         match linux_process::wait_current(selector, nohang, include_stopped)? {
             linux_process::LinuxWaitOutcome::Ready { pid, status } => {
-                crate::kobj_info!(
+                crate::kobj_debug!(
                     "posix-wait",
                     "ready parent={} child={} status={:#x}",
                     process.pid,
@@ -10870,7 +10855,7 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
                     wstatus,
                     include_stopped,
                 )? {
-                    crate::kobj_info!(
+                    crate::kobj_debug!(
                         "posix-wait",
                         "reaped parent={} child={}",
                         process.pid,
@@ -10880,7 +10865,7 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
                 }
             }
             linux_process::LinuxWaitOutcome::WouldBlock => {
-                crate::kobj_info!(
+                crate::kobj_debug!(
                     "posix-wait",
                     "would-block parent={} nohang={}",
                     process.pid,
@@ -10889,7 +10874,7 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
                 return Ok(0);
             }
             linux_process::LinuxWaitOutcome::NoChildren => {
-                crate::kobj_info!(
+                crate::kobj_debug!(
                     "posix-wait",
                     "no-children parent={}",
                     process.pid
@@ -10937,7 +10922,7 @@ fn terminate_linux_process_by_signal(tgid: usize, signum: usize) -> SysResult {
 pub fn sys_exit(exit_code: i32) -> SysResult {
     let exit_code = syscall_logic::linux_exit_status(exit_code);
     info!("exit: code={}", exit_code);
-    crate::kobj_info!(
+    crate::kobj_debug!(
         "posix-exit",
         "sys_exit pid={} code={}",
         linux_process::current_pid().unwrap_or(0),
@@ -10963,7 +10948,7 @@ pub fn sys_exit(exit_code: i32) -> SysResult {
 pub fn sys_exit_group(exit_code: i32) -> SysResult {
     let exit_code = syscall_logic::linux_exit_status(exit_code);
     info!("exit_group: code={}", exit_code);
-    crate::kobj_info!(
+    crate::kobj_debug!(
         "posix-exit",
         "sys_exit_group pid={} code={}",
         linux_process::current_pid().unwrap_or(0),

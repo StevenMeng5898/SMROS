@@ -2889,6 +2889,21 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertIn("SYS_setreuid", source)
         self.assertIn("smros_sync_kernel_effective_uid", source)
 
+    def test_smros_posix_compat_reports_shm_unlink_path_too_long_before_libc(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("int shm_unlink(const char *name)", source)
+        self.assertIn("strnlen(name, PATH_MAX)", source)
+        self.assertIn("errno = ENAMETOOLONG", source)
+
+    def test_smros_posix_compat_reports_shm_open_path_too_long_before_libc(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("int shm_open(const char *name, int oflag, mode_t mode)", source)
+        self.assertIn("smros_shm_open_fn", source)
+
     def test_smros_posix_compat_condvar_lazy_static_and_signal_handoff(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c")
         with tempfile.TemporaryDirectory() as temporary:

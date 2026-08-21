@@ -285,7 +285,7 @@ pub(crate) fn wait_current(
             return Ok(outcome);
         }
 
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-wait",
             "block parent={} selector={:?}",
             parent.pid,
@@ -367,7 +367,7 @@ pub(crate) fn exit_current_process(
     entire_group: bool,
 ) -> Result<LinuxProcessExitOutcome, SysError> {
     let process = current()?;
-    crate::kobj_info!(
+    crate::kobj_debug!(
         "posix-exit",
         "begin pid={} parent={} status={:#x} group={}",
         process.pid,
@@ -377,7 +377,7 @@ pub(crate) fn exit_current_process(
     );
     super::linux_process_memory::deactivate_current_address_space()?;
     let process_empty = linux_task::retire_process_tasks(process.pid, entire_group)?;
-    crate::kobj_info!(
+    crate::kobj_debug!(
         "posix-exit",
         "retired pid={} process_empty={}",
         process.pid,
@@ -397,7 +397,7 @@ fn finish_terminal_process(
     pid: usize,
     wait_status: i32,
 ) -> Result<LinuxProcessExitOutcome, SysError> {
-    crate::kobj_info!(
+    crate::kobj_debug!(
         "posix-exit",
         "finish pid={} status={:#x}",
         pid,
@@ -447,7 +447,7 @@ fn finish_terminal_process(
             Ok(Some(transition))
         })?;
         if let Some(transition) = transition {
-            crate::kobj_info!(
+            crate::kobj_debug!(
                 "posix-exit",
                 "terminal pid={} parent={} notify={:?}",
                 pid,
@@ -464,7 +464,7 @@ fn finish_terminal_process(
                 },
                 |parent_pid| {
                     let count = linux_task::wake_process_waiters(parent_pid);
-                    crate::kobj_info!(
+                    crate::kobj_debug!(
                         "posix-wait",
                         "wake parent={} waiters={}",
                         parent_pid,
@@ -819,7 +819,7 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
             memory.root_paddr,
             |frame| frame.regs[0] = 0,
         );
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "fork",
             "configure child pid={} return_pc={:#x} pstate={:#x} root={:#x}",
             process.pid,
@@ -1038,7 +1038,7 @@ pub(crate) extern "C" fn linux_fork_child_entry() -> ! {
             crate::kernel_lowlevel::cpu::wait_for_interrupt();
         }
     };
-    crate::kobj_info!(
+    crate::kobj_debug!(
         "fork",
         "enter child return_pc={:#x} pstate={:#x} root={:#x}",
         start.return_pc,

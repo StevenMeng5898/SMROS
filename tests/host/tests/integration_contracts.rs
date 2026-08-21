@@ -6365,6 +6365,21 @@ fn linux_shm_open_honors_mode_umask_permissions_and_name_limits() {
 }
 
 #[test]
+fn linux_fd_object_capacity_covers_the_posix_emfile_limit() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let compat = std::fs::read_to_string(repository.join("src/kernel_objects/compat.rs"))
+        .expect("read compatibility object table");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    assert!(syscall.contains("const LINUX_MAX_OPEN_FDS: usize = 1024;"));
+    assert!(
+        compat.contains("const MAX_COMPAT_OBJECTS: usize = 4096;"),
+        "compatibility objects must not fail before the POSIX per-process FD limit"
+    );
+}
+
+#[test]
 fn linux_mmap_enforces_posix_limit_and_object_errors() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
@@ -6392,6 +6407,17 @@ fn linux_mmap_enforces_posix_limit_and_object_errors() {
     assert!(mmap.contains("flags.contains(MmapFlags::SHARED)"));
     assert!(mmap.contains("linux_mmap_object_span_available(*offset, len, *backing_len)"));
     assert!(mmap.contains("return Err(SysError::ENXIO);"));
+}
+
+#[test]
+fn linux_mmap_bounds_mapping_metadata_before_address_space_exhaustion() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read Linux process memory implementation");
+
+    assert!(memory.contains("const LINUX_MAX_PROCESS_MAPPINGS: usize = 4096;"));
+    assert!(memory.contains("self.mappings.len() >= LINUX_MAX_PROCESS_MAPPINGS"));
+    assert!(memory.contains("return Err(SysError::ENOMEM);"));
 }
 
 #[test]

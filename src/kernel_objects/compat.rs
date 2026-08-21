@@ -16,7 +16,10 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 const COMPAT_HANDLE_START: u32 = 0x8000_0000;
-const MAX_COMPAT_OBJECTS: usize = 256;
+// Linux descriptors are backed by compatibility objects. Keep enough object
+// slots for a full per-process descriptor table plus kernel-side objects that
+// remain live during a POSIX test.
+const MAX_COMPAT_OBJECTS: usize = 4096;
 const MAX_COMPAT_QUEUE_BYTES: usize = 65536;
 
 #[derive(Clone)]

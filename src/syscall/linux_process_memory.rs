@@ -14,6 +14,7 @@ include!("linux_runtime_lock_shared.rs");
 
 static LINUX_MEMORY_GENERATION: AtomicUsize = AtomicUsize::new(0);
 const LINUX_SHARED_FILE_PAGE_CACHE_LIMIT: usize = 64;
+const LINUX_MAX_PROCESS_MAPPINGS: usize = 4096;
 
 fn bump_memory_generation() {
     LINUX_MEMORY_GENERATION.fetch_add(1, Ordering::SeqCst);
@@ -1103,7 +1104,7 @@ pub(crate) fn clone_for_fork(
     child_pid: usize,
     mut shared_attachments: Vec<LinuxSharedAttachmentClone>,
 ) -> Result<u64, SysError> {
-    crate::kobj_info!(
+    crate::kobj_debug!(
         "fork",
         "clone begin parent={} child={} allocated={} free={}",
         parent_pid,
@@ -1186,7 +1187,7 @@ pub(crate) fn clone_for_fork(
                         offset,
                         backing_len,
                         ..
-                    } => crate::kobj_info!(
+                    } => crate::kobj_debug!(
                         "fork",
                         "clone mapping addr={:#x} len={:#x} prot={:#x} flags={:#x} page={} effective={:#x} file_offset={:#x} backing_len={:#x}",
                         mapping.addr,
@@ -1199,7 +1200,7 @@ pub(crate) fn clone_for_fork(
                         backing_len
                     ),
                     LinuxMappingSource::Anonymous | LinuxMappingSource::SharedMemory { .. } => {
-                        crate::kobj_info!(
+                        crate::kobj_debug!(
                             "fork",
                             "clone mapping addr={:#x} len={:#x} prot={:#x} flags={:#x} page={} effective={:#x}",
                             mapping.addr,
@@ -1301,7 +1302,7 @@ pub(crate) fn clone_for_fork(
         runtime.memories.push(child);
         Ok(root_paddr)
     });
-    crate::kobj_info!(
+    crate::kobj_debug!(
         "fork",
         "clone end parent={} child={} ok={} allocated={} free={}",
         parent_pid,
@@ -1884,7 +1885,7 @@ impl LinuxProcessMemory {
             }) => {
                 let key = super::linux_futex::futex_shared_key(pfn, address);
                 if (0x1222_0000..0x1223_2000).contains(&address) {
-                    crate::kobj_info!(
+                    crate::kobj_debug!(
                         "fork",
                         "futex shared key pid={} addr={:#x} object={} page={} pfn={} key={:#x}",
                         self.pid,
@@ -2838,7 +2839,7 @@ impl LinuxProcessMemory {
             self.find_free_region(requested, len)
                 .ok_or(SysError::ENOMEM)?
         };
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "fork",
             "map selected addr={:#x} len={:#x} prot={:#x} flags={:#x} requested={:?} replace={}",
             address,
@@ -2874,6 +2875,9 @@ impl LinuxProcessMemory {
             return Ok((address, detached));
         }
 
+        if self.mappings.len() >= LINUX_MAX_PROCESS_MAPPINGS {
+            return Err(SysError::ENOMEM);
+        }
         self.mappings.try_reserve(1).map_err(|_| SysError::ENOMEM)?;
         let index = self
             .mappings
@@ -2900,7 +2904,7 @@ impl LinuxProcessMemory {
         self.mappings.insert(index, mapping);
         if flags & LINUX_MAP_SHARED != 0 && (0x1222_0000..0x1222_2000).contains(&address) {
             let mapping = &self.mappings[index];
-            crate::kobj_info!(
+            crate::kobj_debug!(
                 "fork",
                 "shared map addr={:#x} len={:#x} pfn={} source_shared={}",
                 address,
@@ -2985,7 +2989,7 @@ impl LinuxProcessMemory {
         if address <= 0x1203_00a0
             && 0x1203_00a0 < address.saturating_add(len)
         {
-            crate::kobj_info!(
+            crate::kobj_debug!(
                 "fork",
                 "protect range addr={:#x} len={:#x} prot={:#x}",
                 address,
@@ -3003,7 +3007,7 @@ impl LinuxProcessMemory {
             mapping.addr <= 0x1203_00a0
                 && 0x1203_00a0 < mapping.addr.saturating_add(mapping.len)
         }) {
-            crate::kobj_info!(
+            crate::kobj_debug!(
                 "fork",
                 "protect result addr={:#x} len={:#x} prot={:#x}",
                 mapping.addr,

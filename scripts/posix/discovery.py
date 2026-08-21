@@ -24,6 +24,7 @@ _REVIEWED_VOLUME_TIMEOUTS_MS = {
     "conformance/interfaces/clock_settime/speculative/4-4.c": 45_000,
     "conformance/interfaces/mmap/10-1.c": 90_000,
     "conformance/interfaces/pthread_cond_broadcast/1-2.c": 180_000,
+    "conformance/interfaces/shm_open/23-1.c": 180_000,
     "conformance/interfaces/timer_settime/2-1.c": 45_000,
 }
 _MEMORY_APIS = frozenset(

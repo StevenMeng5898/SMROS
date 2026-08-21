@@ -257,6 +257,19 @@ class TestDiscovery(DiscoveryFixture):
             180_000,
         )
 
+    def test_shm_open_atomic_create_stress_has_reviewed_timeout(self) -> None:
+        self.write_source(
+            "conformance/interfaces/shm_open/23-1.c",
+            "int main(void) { return 0; }\n",
+        )
+
+        tests = {test.test_id: test for test in discover_tests(self.root)}
+
+        self.assertEqual(
+            tests["conformance/interfaces/shm_open/23-1.c"].timeout_ms,
+            180_000,
+        )
+
     def test_api_group_uses_the_approved_mapping(self) -> None:
         expected = {
             "pthread_create": "threads",

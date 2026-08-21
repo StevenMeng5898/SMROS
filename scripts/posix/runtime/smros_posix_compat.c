@@ -77,6 +77,8 @@ typedef int (*smros_msync_fn)(void *, size_t, int);
 typedef void *(*smros_mmap_fn)(void *, size_t, int, int, int, off_t);
 typedef int (*smros_munmap_fn)(void *, size_t);
 typedef int (*smros_mq_unlink_fn)(const char *);
+typedef int (*smros_shm_unlink_fn)(const char *);
+typedef int (*smros_shm_open_fn)(const char *, int, mode_t);
 typedef int (*smros_open_fn)(const char *, int, ...);
 typedef int (*smros_close_fn)(int);
 typedef int (*smros_nanosleep_fn)(const struct timespec *, struct timespec *);
@@ -4319,6 +4321,44 @@ int mq_unlink(const char *name) {
         errno = ENOENT;
     }
     return result;
+}
+
+int shm_unlink(const char *name) {
+    if (name == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* Check the full POSIX path bound before libc applies name validation. */
+    if (strnlen(name, PATH_MAX) >= PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    smros_shm_unlink_fn target =
+        (smros_shm_unlink_fn)smros_resolve_symbol("shm_unlink");
+    if (target == NULL) {
+        return -1;
+    }
+    return target(name);
+}
+
+int shm_open(const char *name, int oflag, mode_t mode) {
+    if (name == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (strnlen(name, PATH_MAX) >= PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    smros_shm_open_fn target =
+        (smros_shm_open_fn)smros_resolve_symbol("shm_open");
+    if (target == NULL) {
+        return -1;
+    }
+    return target(name, oflag, mode);
 }
 
 int open(const char *path, int flags, ...) {
