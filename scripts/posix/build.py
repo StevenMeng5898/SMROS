@@ -68,6 +68,9 @@ _REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
 _NEEDED_RE = re.compile(r"\(NEEDED\).*Shared library: \[([^\]]+)\]")
 _INTERPRETER_RE = re.compile(r"Requesting program interpreter: ([^\]]+)\]")
 _IMPLICIT_RUNTIME_NAMES = ("libgcc_s.so.1",)
+_FORK_MESSAGE_CATALOG_TEST_ID = "conformance/interfaces/fork/7-1.c"
+_FORK_MESSAGE_CATALOG_SOURCE = "conformance/interfaces/fork/messcat_src.txt"
+_FORK_MESSAGE_CATALOG_SUPPORT = "conformance/interfaces/fork/mess.cat"
 _ALLOWED_KINDS = frozenset({"runnable", "definition", "shell"})
 _ALLOWED_DISPOSITIONS = frozenset(
     {
@@ -978,6 +981,59 @@ def stage_posix_compat_preload(
         )
     os.chmod(destination, 0o755)
     return destination
+
+
+def _support_catalog_required(tests: Sequence[SuiteTest]) -> bool:
+    return any(
+        test.test_id == _FORK_MESSAGE_CATALOG_TEST_ID
+        and test.disposition != "excluded-upstream-stub"
+        for test in tests
+    )
+
+
+def stage_support_files(
+    checkout: Path,
+    stage_root: Path,
+    tests: Sequence[SuiteTest],
+) -> tuple[Path, ...]:
+    staged: list[Path] = []
+    if not _support_catalog_required(tests):
+        return ()
+
+    source = safe_stage_path(checkout, _FORK_MESSAGE_CATALOG_SOURCE)
+    if not source.is_file():
+        raise ValueError(
+            "missing POSIX support source: "
+            f"{_FORK_MESSAGE_CATALOG_SOURCE}"
+    )
+    destination = safe_stage_path(stage_root, _FORK_MESSAGE_CATALOG_SUPPORT)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination_text = str(destination)
+    if destination_text.startswith("/proc/self/fd/"):
+        destination_text = "/proc/{}/fd/{}".format(
+            os.getpid(), destination_text.removeprefix("/proc/self/fd/")
+        )
+    result = run_bounded_command(["gencat", destination_text, str(source)])
+    if result.returncode != 0 or not destination.is_file():
+        diagnostic = _bounded_text(result.stderr or result.stdout)
+        raise ValueError(
+            "POSIX support catalog generation failed: "
+            f"{_FORK_MESSAGE_CATALOG_SUPPORT}: {diagnostic}"
+        )
+    os.chmod(destination, 0o644)
+    staged.append(destination)
+    return tuple(staged)
+
+
+def _support_manifest(
+    stage: Path,
+    support_files: Sequence[Path],
+) -> list[dict[str, str]]:
+    manifest: list[dict[str, str]] = []
+    for path in sorted(support_files, key=lambda item: item.as_posix()):
+        relative = path.relative_to(stage).as_posix()
+        manifest.append({"path": relative, "sha256": sha256_file(path)})
+    return manifest
 
 
 def _json_build_result(result: BuildResult) -> str:
@@ -2111,6 +2167,7 @@ def _write_manifests(
     metadata: ManifestMetadata,
     tests: Sequence[SuiteTest],
     results: Sequence[BuildResult],
+    support_files: Sequence[Path] = (),
 ) -> str:
     build_results_text = "".join(
         _json_build_result(result) + "\n" for result in results
@@ -2136,6 +2193,7 @@ def _write_manifests(
         "checksum_definition": CHECKSUM_DEFINITION,
         "metadata": asdict(final_metadata),
         "runtime": runtime,
+        "support": _support_manifest(stage, support_files),
         "tests": [asdict(test) for test in sorted(tests, key=lambda item: item.test_id)],
     }
     (stage / "manifest.tsv").write_text(manifest_text, encoding="utf-8", newline="\n")
@@ -2404,7 +2462,14 @@ def build_campaign(
             )
         else:
             dependency_stager(tuple(staged_executables), temporary_stage)
-        _write_manifests(temporary_stage, metadata, manifested, results)
+        support_files = stage_support_files(checkout, temporary_stage, ordered_tests)
+        _write_manifests(
+            temporary_stage,
+            metadata,
+            manifested,
+            results,
+            support_files,
+        )
         staged_bytes = _stage_size(temporary_stage)
         _verify_open_stage(
             temporary_stage,
@@ -3014,6 +3079,30 @@ def _expected_manifest_inventory(
     return inventory
 
 
+def _validate_support_inventory(raw_support: object) -> dict[str, str]:
+    if raw_support is None:
+        return {}
+    if not isinstance(raw_support, list):
+        raise ValueError("host support manifest is invalid")
+    support: dict[str, str] = {}
+    for entry in raw_support:
+        if not isinstance(entry, Mapping) or set(entry) != {"path", "sha256"}:
+            raise ValueError("host support manifest entry is invalid")
+        relative = entry.get("path")
+        digest = entry.get("sha256")
+        if not isinstance(relative, str) or not isinstance(digest, str):
+            raise ValueError("host support manifest entry is invalid")
+        path = _validate_relative_path(relative, "support path")
+        if relative != _FORK_MESSAGE_CATALOG_SUPPORT:
+            raise ValueError(f"unsafe support path: {relative!r}")
+        if relative in support:
+            raise ValueError(f"duplicate support path: {relative}")
+        if _DIGEST_RE.fullmatch(digest) is None:
+            raise ValueError(f"invalid support checksum: {relative}")
+        support[relative] = digest
+    return support
+
+
 def _verify_open_stage(
     stage: Path,
     stage_descriptor: int,
@@ -3114,10 +3203,13 @@ def _verify_open_stage(
         )
     except (UnicodeError, json.JSONDecodeError) as error:
         raise ValueError("host manifest is invalid JSON") from error
+    host_keys = set(host_manifest) if isinstance(host_manifest, Mapping) else set()
+    required_host_keys = {"schema", "checksum_definition", "metadata", "runtime", "tests"}
+    optional_host_keys = {"support"}
     if (
         not isinstance(host_manifest, Mapping)
-        or set(host_manifest)
-        != {"schema", "checksum_definition", "metadata", "runtime", "tests"}
+        or not required_host_keys.issubset(host_keys)
+        or not host_keys.issubset(required_host_keys | optional_host_keys)
         or host_manifest.get("schema") != 1
     ):
         raise ValueError("host manifest schema is invalid")
@@ -3139,6 +3231,7 @@ def _verify_open_stage(
         raise ValueError("host manifest metadata differs from guest manifest")
     if host_manifest.get("tests") != [asdict(test) for test in tests]:
         raise ValueError("host manifest tests differ from guest manifest")
+    support_manifest = _validate_support_inventory(host_manifest.get("support"))
     runtime_manifest = host_manifest.get("runtime")
     if not isinstance(runtime_manifest, list):
         raise ValueError("host runtime manifest is invalid")
@@ -3222,12 +3315,20 @@ def _verify_open_stage(
     for relative, digest in sorted(expected_runtime.items()):
         if sha256_file(safe_stage_path(stage, relative)) != digest:
             raise ValueError(f"runtime checksum mismatch: {relative}")
+    for relative, digest in sorted(support_manifest.items()):
+        support_file = safe_stage_path(stage, relative)
+        support_info = _require_regular_file(support_file, f"support file {relative}")
+        if stat.S_IMODE(support_info.st_mode) != 0o644:
+            raise ValueError(f"invalid support mode: {relative}")
+        if sha256_file(support_file) != digest:
+            raise ValueError(f"support checksum mismatch: {relative}")
     expected_files = {
         "manifest.tsv",
         "manifest.json",
         "build-results.ndjson",
         *expected_binaries,
         *expected_runtime,
+        *support_manifest,
     }
     actual_files = {
         path.relative_to(stage).as_posix()

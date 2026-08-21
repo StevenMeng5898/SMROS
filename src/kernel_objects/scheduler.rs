@@ -810,6 +810,15 @@ impl Scheduler {
         self.create_thread_with_state(entry, name, Some(cpu_affinity), ThreadState::Blocked)
     }
 
+    /// Allocate an unpinned thread that remains blocked until explicitly published.
+    pub fn create_suspended_thread(
+        &mut self,
+        entry: extern "C" fn() -> !,
+        name: &'static str,
+    ) -> Option<ThreadId> {
+        self.create_thread_with_state(entry, name, None, ThreadState::Blocked)
+    }
+
     fn create_thread_with_state(
         &mut self,
         entry: extern "C" fn() -> !,

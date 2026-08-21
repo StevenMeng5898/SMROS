@@ -195,6 +195,29 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         writable: bool,
         executable: bool,
     ) -> Result<(), Aarch64AddressSpaceCoreError> {
+        if !aarch64_user_range_valid(vaddr, AARCH64_PAGE_SIZE) {
+            return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+        }
+        let paddr = self
+            .backend
+            .pfn_address(pfn)
+            .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+        if let Ok((table_pfn, index)) = self.leaf_location(vaddr) {
+            let descriptor = self
+                .backend
+                .read_table_entry(table_pfn, index)
+                .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+            if descriptor != 0 {
+                return Err(Aarch64AddressSpaceCoreError::AlreadyMapped);
+            }
+            let descriptor = aarch64_user_page_descriptor(paddr, readable, writable, executable);
+            if !self.backend.write_table_entry(table_pfn, index, descriptor) {
+                return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+            }
+            self.backend.publish_user_mapping(vaddr);
+            return Ok(());
+        }
+
         let mut created = alloc::vec::Vec::new();
         let mut mapped = alloc::vec::Vec::new();
         let result = self.map_user_page_recorded(

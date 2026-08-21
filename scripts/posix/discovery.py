@@ -18,9 +18,12 @@ _ALL_DISPOSITIONS = STUB_DISPOSITIONS | SHELL_DISPOSITIONS
 _REVIEW_HEADER = "path\tdisposition\treason"
 _CANDIDATE_HEADER = "path\tevidence"
 _PTS_UNTESTED_RE = re.compile(r"\bPTS_UNTESTED\b")
-_CLOCK_SYSCALL_VOLUME_TIMEOUTS_MS = {
+_REVIEWED_VOLUME_TIMEOUTS_MS = {
     "conformance/interfaces/clock/1-1.c": 180_000,
     "conformance/interfaces/clock_gettime/4-1.c": 60_000,
+    "conformance/interfaces/clock_settime/speculative/4-4.c": 45_000,
+    "conformance/interfaces/mmap/10-1.c": 90_000,
+    "conformance/interfaces/pthread_cond_broadcast/1-2.c": 180_000,
     "conformance/interfaces/timer_settime/2-1.c": 45_000,
 }
 _MEMORY_APIS = frozenset(
@@ -190,7 +193,7 @@ def discover_tests(checkout: Path) -> tuple[SuiteTest, ...]:
                 source=source,
                 binary=None,
                 sha256=None,
-                timeout_ms=_CLOCK_SYSCALL_VOLUME_TIMEOUTS_MS.get(source, 30_000),
+                timeout_ms=_REVIEWED_VOLUME_TIMEOUTS_MS.get(source, 30_000),
             )
         )
     return tuple(tests)

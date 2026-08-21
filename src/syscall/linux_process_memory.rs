@@ -13,6 +13,7 @@ include!("linux_process_memory_logic_shared.rs");
 include!("linux_runtime_lock_shared.rs");
 
 static LINUX_MEMORY_GENERATION: AtomicUsize = AtomicUsize::new(0);
+const LINUX_SHARED_FILE_PAGE_CACHE_LIMIT: usize = 64;
 
 fn bump_memory_generation() {
     LINUX_MEMORY_GENERATION.fetch_add(1, Ordering::SeqCst);
@@ -77,6 +78,14 @@ pub(crate) struct LinuxProcessMapping {
     pub flags: usize,
     pub pages: Vec<LinuxPageBacking>,
     pub source: LinuxMappingSource,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct LinuxFileMappingSyncRange {
+    pub fd: usize,
+    pub address: usize,
+    pub file_offset: usize,
+    pub len: usize,
 }
 
 struct LinuxMappingMetadataPlan {
@@ -443,6 +452,8 @@ impl LinuxProcessMemoryResourceCounts {
 }
 
 struct LinuxSharedPageRuntime {
+    // Records stay sorted by (object_id, page_index) so fork/COW operations use
+    // logarithmic lookups instead of scanning every shared page.
     pages: Vec<LinuxSharedPageRecord>,
     mmap_objects: Vec<LinuxSharedMmapObject>,
     next_mmap_object_id: u32,
@@ -451,6 +462,7 @@ struct LinuxSharedPageRuntime {
 struct LinuxSharedMmapObject {
     object_id: u32,
     file_object_id: Option<u64>,
+    file_backing_len: Option<usize>,
 }
 
 impl LinuxSharedPageRuntime {
@@ -507,12 +519,75 @@ fn with_shared_pages<R>(operation: impl FnOnce(&mut LinuxSharedPageRuntime) -> R
 
 fn shared_page(object_id: u32, page_index: usize) -> Option<LinuxSharedPageRecord> {
     with_shared_pages(|runtime| {
+        let index = runtime
+            .pages
+            .binary_search_by_key(&(object_id, page_index), |page| {
+                (page.object_id, page.page_index)
+            })
+            .ok()?;
+        runtime.pages.get(index).copied()
+    })
+}
+
+fn linux_shared_file_page_cacheable(runtime: &LinuxSharedPageRuntime, object_id: u32) -> bool {
+    runtime
+        .mmap_objects
+        .iter()
+        .any(|object| object.object_id == object_id && object.file_object_id.is_some())
+}
+
+fn remove_empty_shared_mmap_object_locked(runtime: &mut LinuxSharedPageRuntime, object_id: u32) {
+    if !runtime.pages.iter().any(|page| page.object_id == object_id) {
+        runtime
+            .mmap_objects
+            .retain(|object| object.object_id != object_id);
+    }
+}
+
+fn prune_cached_shared_file_pages(runtime: &mut LinuxSharedPageRuntime) {
+    let cached = runtime
+        .pages
+        .iter()
+        .filter(|page| {
+            page.references == 0 && linux_shared_file_page_cacheable(runtime, page.object_id)
+        })
+        .count();
+    let mut evict = cached.saturating_sub(LINUX_SHARED_FILE_PAGE_CACHE_LIMIT);
+    if evict == 0 {
+        return;
+    }
+    let mut cacheable_objects = Vec::new();
+    if cacheable_objects
+        .try_reserve_exact(runtime.mmap_objects.len())
+        .is_err()
+    {
+        return;
+    }
+    cacheable_objects.extend(
+        runtime
+            .mmap_objects
+            .iter()
+            .filter(|object| object.file_object_id.is_some())
+            .map(|object| object.object_id),
+    );
+    runtime.pages.retain(|page| {
+        if evict != 0
+            && page.references == 0
+            && cacheable_objects.contains(&page.object_id)
+        {
+            evict -= 1;
+            PageFrameAllocator::free(page.pfn);
+            false
+        } else {
+            true
+        }
+    });
+    runtime.mmap_objects.retain(|object| {
         runtime
             .pages
             .iter()
-            .copied()
-            .find(|page| page.object_id == object_id && page.page_index == page_index)
-    })
+            .any(|page| page.object_id == object.object_id)
+    });
 }
 
 fn acquire_or_register_shared_page(
@@ -521,18 +596,33 @@ fn acquire_or_register_shared_page(
     candidate_pfn: u64,
 ) -> Option<u64> {
     with_shared_pages(|runtime| {
-        if let Some(page) = runtime
+        if let Ok(index) = runtime
             .pages
-            .iter_mut()
-            .find(|page| page.object_id == object_id && page.page_index == page_index)
+            .binary_search_by_key(&(object_id, page_index), |page| {
+                (page.object_id, page.page_index)
+            })
         {
-            page.references = linux_shared_reference_acquire(page.references)?;
-            return Some(page.pfn);
+            if runtime.pages[index].references == 0
+                && linux_shared_file_page_cacheable(runtime, object_id)
+            {
+                zero_cached_shared_file_tail(runtime, index);
+                runtime.pages[index].references = 1;
+                return Some(runtime.pages[index].pfn);
+            }
+            runtime.pages[index].references =
+                linux_shared_reference_acquire(runtime.pages[index].references)?;
+            return Some(runtime.pages[index].pfn);
         }
         if runtime.pages.try_reserve(1).is_err() {
             return None;
         }
-        runtime.pages.push(LinuxSharedPageRecord {
+        let index = runtime
+            .pages
+            .binary_search_by_key(&(object_id, page_index), |page| {
+                (page.object_id, page.page_index)
+            })
+            .unwrap_err();
+        runtime.pages.insert(index, LinuxSharedPageRecord {
             object_id,
             page_index,
             pfn: candidate_pfn,
@@ -543,15 +633,105 @@ fn acquire_or_register_shared_page(
     })
 }
 
+fn promote_private_fork_page(page: &mut LinuxPageBacking) -> Result<(), SysError> {
+    let LinuxPageBacking::Private { pfn } = *page else {
+        return Ok(());
+    };
+    let page_index = usize::try_from(pfn).map_err(|_| SysError::ENOMEM)?;
+    let canonical = acquire_or_register_shared_page(
+        LINUX_FORK_PRIVATE_OBJECT_ID,
+        page_index,
+        pfn,
+    )
+    .ok_or(SysError::ENOMEM)?;
+    if canonical != pfn {
+        return Err(SysError::ENOMEM);
+    }
+    *page = LinuxPageBacking::Shared {
+        object_id: LINUX_FORK_PRIVATE_OBJECT_ID,
+        page_index,
+        pfn,
+    };
+    Ok(())
+}
+
+fn promote_private_fork_pages(memory: &mut LinuxProcessMemory) -> Result<(), SysError> {
+    let initial_stack = memory.initial_stack;
+    for mapping in &mut memory.mappings {
+        if initial_stack.is_some_and(|(addr, len)| ranges_overlap(mapping.addr, mapping.len, addr, len)) {
+            continue;
+        }
+        for page in &mut mapping.pages {
+            promote_private_fork_page(page)?;
+        }
+    }
+    for page in &mut memory.brk.pages {
+        promote_private_fork_page(page)?;
+    }
+
+    let mut protections = Vec::new();
+    protections
+        .try_reserve(memory.mappings.len().saturating_add(1))
+        .map_err(|_| SysError::ENOMEM)?;
+    for mapping in &memory.mappings {
+        for (page_index, page) in mapping.pages.iter().copied().enumerate() {
+            let prot = LinuxProcessMemory::mapping_page_prot(
+                &mapping.source,
+                mapping.prot,
+                page_index,
+            );
+            let cow_prot = linux_page_protection_for_backing(page, prot);
+            if cow_prot != prot {
+                protections.push((mapping.addr + page_index * PAGE_SIZE, cow_prot));
+            }
+        }
+    }
+    for (page_index, page) in memory.brk.pages.iter().copied().enumerate() {
+        let prot = LINUX_PROT_READ | LINUX_PROT_WRITE;
+        let cow_prot = linux_page_protection_for_backing(page, prot);
+        if cow_prot != prot {
+            protections.push((memory.brk.start + page_index * PAGE_SIZE, cow_prot));
+        }
+    }
+    for (address, prot) in protections {
+        memory.protect_page(address, prot)?;
+    }
+    Ok(())
+}
+
+fn acquire_cached_shared_page(object_id: u32, page_index: usize) -> Option<u64> {
+    with_shared_pages(|runtime| {
+        let index = runtime
+            .pages
+            .binary_search_by_key(&(object_id, page_index), |page| {
+                (page.object_id, page.page_index)
+            })
+            .ok()?;
+        if runtime.pages[index].references == 0 {
+            if !linux_shared_file_page_cacheable(runtime, object_id) {
+                return None;
+            }
+            zero_cached_shared_file_tail(runtime, index);
+            runtime.pages[index].references = 1;
+            return Some(runtime.pages[index].pfn);
+        }
+        runtime.pages[index].references =
+            linux_shared_reference_acquire(runtime.pages[index].references)?;
+        Some(runtime.pages[index].pfn)
+    })
+}
+
 fn acquire_shared_page(object_id: u32, page_index: usize) -> bool {
     with_shared_pages(|runtime| {
-        let Some(page) = runtime
+        let Ok(index) = runtime
             .pages
-            .iter_mut()
-            .find(|page| page.object_id == object_id && page.page_index == page_index)
+            .binary_search_by_key(&(object_id, page_index), |page| {
+                (page.object_id, page.page_index)
+            })
         else {
             return false;
         };
+        let page = &mut runtime.pages[index];
         let Some(references) = linux_shared_reference_acquire(page.references) else {
             return false;
         };
@@ -564,41 +744,175 @@ fn release_shared_page(object_id: u32, page_index: usize) -> Option<u64> {
     with_shared_pages(|runtime| {
         let index = runtime
             .pages
-            .iter()
-            .position(|page| page.object_id == object_id && page.page_index == page_index)?;
+            .binary_search_by_key(&(object_id, page_index), |page| {
+                (page.object_id, page.page_index)
+            })
+            .ok()?;
         let references = linux_shared_reference_release(runtime.pages[index].references)?;
         runtime.pages[index].references = references;
         if references != 0 {
             return None;
         }
-        let pfn = runtime.pages.swap_remove(index).pfn;
-        if !runtime.pages.iter().any(|page| page.object_id == object_id) {
-            runtime
-                .mmap_objects
-                .retain(|object| object.object_id != object_id);
+        if runtime.pages[index].named && linux_shared_file_page_cacheable(runtime, object_id) {
+            runtime.pages[index].references = 0;
+            prune_cached_shared_file_pages(runtime);
+            return None;
         }
+        let pfn = runtime.pages.remove(index).pfn;
+        remove_empty_shared_mmap_object_locked(runtime, object_id);
         Some(pfn)
     })
 }
 
+fn release_shared_backings(backings: &[LinuxPageBacking]) {
+    // Process teardown can release tens of thousands of COW pages. Apply all
+    // reference decrements under one lock, then free the resulting PFNs.
+    let shared_count = backings
+        .iter()
+        .filter(|backing| matches!(backing, LinuxPageBacking::Shared { .. }))
+        .count();
+    if shared_count == 0 {
+        return;
+    }
+
+    let mut keys = Vec::new();
+    let mut removed_keys = Vec::new();
+    let mut released_pfns = Vec::new();
+    if keys.try_reserve_exact(shared_count).is_err()
+        || removed_keys.try_reserve_exact(shared_count).is_err()
+        || released_pfns.try_reserve_exact(shared_count).is_err()
+    {
+        for backing in backings {
+            if let LinuxPageBacking::Shared {
+                object_id,
+                page_index,
+                ..
+            } = *backing
+            {
+                if let Some(pfn) = release_shared_page(object_id, page_index) {
+                    PageFrameAllocator::free(pfn);
+                }
+            }
+        }
+        return;
+    }
+    for backing in backings {
+        if let LinuxPageBacking::Shared {
+            object_id,
+            page_index,
+            ..
+        } = *backing
+        {
+            keys.push((object_id, page_index));
+        }
+    }
+    keys.sort_unstable();
+
+    with_shared_pages(|runtime| {
+        for (object_id, page_index) in keys.iter().copied() {
+            let Ok(index) = runtime
+                .pages
+                .binary_search_by_key(&(object_id, page_index), |page| {
+                    (page.object_id, page.page_index)
+                })
+            else {
+                continue;
+            };
+            let Some(references) = linux_shared_reference_release(runtime.pages[index].references)
+            else {
+                continue;
+            };
+            runtime.pages[index].references = references;
+            if references != 0
+                || (runtime.pages[index].named
+                    && linux_shared_file_page_cacheable(runtime, object_id))
+            {
+                continue;
+            }
+            released_pfns.push(runtime.pages[index].pfn);
+            removed_keys.push((object_id, page_index));
+        }
+        runtime.pages.retain(|page| {
+            removed_keys
+                .binary_search(&(page.object_id, page.page_index))
+                .is_err()
+        });
+        runtime.mmap_objects.retain(|object| {
+            runtime
+                .pages
+                .iter()
+                .any(|page| page.object_id == object.object_id)
+        });
+        prune_cached_shared_file_pages(runtime);
+    });
+
+    for pfn in released_pfns {
+        PageFrameAllocator::free(pfn);
+    }
+}
+
+fn zero_cached_shared_file_tail(runtime: &LinuxSharedPageRuntime, index: usize) {
+    let Some(page) = runtime.pages.get(index).copied() else {
+        return;
+    };
+    let Some(object) = runtime
+        .mmap_objects
+        .iter()
+        .find(|object| object.object_id == page.object_id)
+    else {
+        return;
+    };
+    let Some(file_backing_len) = object.file_backing_len else {
+        return;
+    };
+    let Some(page_start) = page.page_index.checked_mul(PAGE_SIZE) else {
+        return;
+    };
+    let Some(page_end) = page_start.checked_add(PAGE_SIZE) else {
+        return;
+    };
+    if file_backing_len >= page_end {
+        return;
+    }
+    let tail_offset = file_backing_len.saturating_sub(page_start);
+    if tail_offset >= PAGE_SIZE {
+        return;
+    }
+    let Some(physical) = PageFrameAllocator::pfn_address(page.pfn) else {
+        return;
+    };
+    unsafe {
+        core::ptr::write_bytes(
+            (physical as *mut u8).add(tail_offset),
+            0,
+            PAGE_SIZE - tail_offset,
+        );
+    }
+}
+
 fn shared_mmap_object(source: &LinuxMappingSource) -> Result<(u32, usize), SysError> {
     with_shared_pages(|runtime| {
-        let (file_object_id, first_page) = match source {
-            LinuxMappingSource::Anonymous => (None, 0),
+        let (file_object_id, file_backing_len, first_page) = match source {
+            LinuxMappingSource::Anonymous => (None, None, 0),
             LinuxMappingSource::File {
-                offset, object_id, ..
+                offset,
+                object_id,
+                backing_len,
+                ..
             } => {
                 let offset = usize::try_from(*offset).map_err(|_| SysError::EINVAL)?;
-                (Some(*object_id), offset / PAGE_SIZE)
+                (Some(*object_id), Some(*backing_len), offset / PAGE_SIZE)
             }
             LinuxMappingSource::SharedMemory { .. } => return Err(SysError::EINVAL),
         };
         if let Some(file_object_id) = file_object_id {
-            if let Some(object) = runtime.mmap_objects.iter().find(|object| {
+            if let Some(index) = runtime.mmap_objects.iter().position(|object| {
                 object.file_object_id.is_some_and(|current| {
                     linux_shared_file_identity_matches(current, file_object_id)
                 })
             }) {
+                runtime.mmap_objects[index].file_backing_len = file_backing_len;
+                let object = &runtime.mmap_objects[index];
                 return Ok((object.object_id, first_page));
             }
         }
@@ -615,6 +929,7 @@ fn shared_mmap_object(source: &LinuxMappingSource) -> Result<(u32, usize), SysEr
         runtime.mmap_objects.push(LinuxSharedMmapObject {
             object_id,
             file_object_id,
+            file_backing_len,
         });
         Ok((object_id, first_page))
     })
@@ -622,12 +937,47 @@ fn shared_mmap_object(source: &LinuxMappingSource) -> Result<(u32, usize), SysEr
 
 fn remove_empty_shared_mmap_object(object_id: u32) {
     with_shared_pages(|runtime| {
-        if !runtime.pages.iter().any(|page| page.object_id == object_id) {
-            runtime
-                .mmap_objects
-                .retain(|object| object.object_id != object_id);
-        }
+        remove_empty_shared_mmap_object_locked(runtime, object_id);
     });
+}
+
+pub(crate) fn shared_file_mmap_pages_cached(source: &LinuxMappingSource, len: usize) -> bool {
+    let LinuxMappingSource::File {
+        offset, object_id, ..
+    } = source
+    else {
+        return false;
+    };
+    if len == 0 || len % PAGE_SIZE != 0 {
+        return false;
+    }
+    let Ok(offset) = usize::try_from(*offset) else {
+        return false;
+    };
+    let first_page = offset / PAGE_SIZE;
+    let page_count = len / PAGE_SIZE;
+    with_shared_pages(|runtime| {
+        let Some(object) = runtime.mmap_objects.iter().find(|object| {
+            object
+                .file_object_id
+                .is_some_and(|current| linux_shared_file_identity_matches(current, *object_id))
+        }) else {
+            return false;
+        };
+        for index in 0..page_count {
+            let Some(page_index) = linux_shared_page_index(first_page, index) else {
+                return false;
+            };
+            if !runtime
+                .pages
+                .iter()
+                .any(|page| page.object_id == object.object_id && page.page_index == page_index)
+            {
+                return false;
+            }
+        }
+        true
+    })
 }
 
 pub(crate) fn remove_shared_page_name(object_id: u32) {
@@ -676,6 +1026,11 @@ pub(crate) fn with_current<R>(
 ) -> Result<R, SysError> {
     let pid = linux_process::current_pid()?;
     with_pid(pid, operation)
+}
+
+pub(crate) fn futex_address_key(address: usize) -> usize {
+    with_current(|memory| Ok(memory.futex_address_key(address)))
+        .unwrap_or(address)
 }
 
 fn with_pid<R>(
@@ -748,6 +1103,14 @@ pub(crate) fn clone_for_fork(
     child_pid: usize,
     mut shared_attachments: Vec<LinuxSharedAttachmentClone>,
 ) -> Result<u64, SysError> {
+    crate::kobj_info!(
+        "fork",
+        "clone begin parent={} child={} allocated={} free={}",
+        parent_pid,
+        child_pid,
+        PageFrameAllocator::allocated_pages(),
+        PageFrameAllocator::free_pages()
+    );
     let result = with_runtime(|runtime| {
         if runtime
             .memories
@@ -760,10 +1123,20 @@ pub(crate) fn clone_for_fork(
             .memories
             .try_reserve(1)
             .map_err(|_| SysError::ENOMEM)?;
-        let parent = runtime
+        let parent_index = runtime
             .memories
             .iter()
-            .find(|memory| memory.pid == parent_pid)
+            .position(|memory| memory.pid == parent_pid)
+            .ok_or(SysError::ESRCH)?;
+        promote_private_fork_pages(
+            runtime
+                .memories
+                .get_mut(parent_index)
+                .ok_or(SysError::ESRCH)?,
+        )?;
+        let parent = runtime
+            .memories
+            .get(parent_index)
             .ok_or(SysError::ESRCH)?;
 
         #[cfg(target_arch = "aarch64")]
@@ -802,6 +1175,43 @@ pub(crate) fn clone_for_fork(
 
         for mapping in &parent.mappings {
             let source = mapping.source.try_clone_for_fork()?;
+            if mapping.addr <= 0x1203_00a0
+                && 0x1203_00a0 < mapping.addr.saturating_add(mapping.len)
+            {
+                let page_index = (0x1203_00a0 - mapping.addr) / PAGE_SIZE;
+                let effective_prot =
+                    LinuxProcessMemory::mapping_page_prot(&source, mapping.prot, page_index);
+                match &source {
+                    LinuxMappingSource::File {
+                        offset,
+                        backing_len,
+                        ..
+                    } => crate::kobj_info!(
+                        "fork",
+                        "clone mapping addr={:#x} len={:#x} prot={:#x} flags={:#x} page={} effective={:#x} file_offset={:#x} backing_len={:#x}",
+                        mapping.addr,
+                        mapping.len,
+                        mapping.prot,
+                        mapping.flags,
+                        page_index,
+                        effective_prot,
+                        offset,
+                        backing_len
+                    ),
+                    LinuxMappingSource::Anonymous | LinuxMappingSource::SharedMemory { .. } => {
+                        crate::kobj_info!(
+                            "fork",
+                            "clone mapping addr={:#x} len={:#x} prot={:#x} flags={:#x} page={} effective={:#x}",
+                            mapping.addr,
+                            mapping.len,
+                            mapping.prot,
+                            mapping.flags,
+                            page_index,
+                            effective_prot
+                        )
+                    }
+                }
+            }
             let attachment_index = shared_attachments.iter().position(|attachment| {
                 attachment.addr == mapping.addr
                     && attachment.len == mapping.len
@@ -836,7 +1246,14 @@ pub(crate) fn clone_for_fork(
                 PAGE_SIZE,
                 &pages,
                 |page_index| {
-                    LinuxProcessMemory::mapping_page_prot(&source, mapping.prot, page_index)
+                    linux_page_protection_for_backing(
+                        pages[page_index],
+                        LinuxProcessMemory::mapping_page_prot(
+                            &source,
+                            mapping.prot,
+                            page_index,
+                        ),
+                    )
                 },
                 super::linux_process::fork_failpoint,
             );
@@ -884,6 +1301,15 @@ pub(crate) fn clone_for_fork(
         runtime.memories.push(child);
         Ok(root_paddr)
     });
+    crate::kobj_info!(
+        "fork",
+        "clone end parent={} child={} ok={} allocated={} free={}",
+        parent_pid,
+        child_pid,
+        result.is_ok(),
+        PageFrameAllocator::allocated_pages(),
+        PageFrameAllocator::free_pages()
+    );
     if result.is_err() {
         release_shared_attachments(&shared_attachments);
     }
@@ -1046,6 +1472,13 @@ pub(crate) fn map_current_with_contents(
         with_current(|memory| memory.map(requested, len, prot, flags, source, replace, contents))?;
     release_detached_attachment_references(&detached);
     Ok(address)
+}
+
+pub(crate) fn sync_current_file_mappings(
+    address: usize,
+    len: usize,
+) -> Result<Vec<LinuxFileMappingSyncRange>, SysError> {
+    with_current(|memory| memory.file_mapping_sync_ranges(address, len))
 }
 
 pub(crate) fn protect_current(address: usize, len: usize, prot: usize) -> Result<(), SysError> {
@@ -1368,6 +1801,10 @@ pub(crate) fn classify_current_memory_fault(
         .unwrap_or(LinuxMemoryFaultSignal::SegvMaperr)
 }
 
+pub(crate) fn resolve_current_cow_fault(address: usize) -> Result<bool, SysError> {
+    with_current(|memory| memory.resolve_cow_fault(address))
+}
+
 pub(crate) fn current_stats() -> Option<LinuxMemoryStats> {
     with_current(|memory| Ok(memory.stats())).ok()
 }
@@ -1428,6 +1865,42 @@ pub(crate) fn resource_counts() -> LinuxProcessMemoryResourceCounts {
 }
 
 impl LinuxProcessMemory {
+    fn futex_address_key(&self, address: usize) -> usize {
+        let Some(mapping) = self.mappings.iter().find(|mapping| {
+            address >= mapping.addr
+                && mapping
+                    .addr
+                    .checked_add(mapping.len)
+                    .is_some_and(|end| address < end)
+        }) else {
+            return address;
+        };
+        let page_index = (address - mapping.addr) / PAGE_SIZE;
+        match mapping.pages.get(page_index).copied() {
+            Some(LinuxPageBacking::Shared {
+                object_id,
+                page_index,
+                pfn,
+            }) => {
+                let key = super::linux_futex::futex_shared_key(pfn, address);
+                if (0x1222_0000..0x1223_2000).contains(&address) {
+                    crate::kobj_info!(
+                        "fork",
+                        "futex shared key pid={} addr={:#x} object={} page={} pfn={} key={:#x}",
+                        self.pid,
+                        address,
+                        object_id,
+                        page_index,
+                        pfn,
+                        key
+                    );
+                }
+                key
+            }
+            Some(LinuxPageBacking::Private { .. }) | None => address,
+        }
+    }
+
     fn bump_generation(&mut self) {
         bump_memory_generation();
         self.generation = memory_generation();
@@ -1551,18 +2024,157 @@ impl LinuxProcessMemory {
         self.address_space.unmap_user_page(address)
     }
 
-    fn copy_to_user(&self, address: usize, bytes: &[u8]) -> Result<(), SysError> {
+    fn materialize_cow_page(&mut self, address: usize) -> Result<bool, SysError> {
+        let page_address = address & !(PAGE_SIZE - 1);
+        let mut mapping_location = None;
+        for (mapping_index, mapping) in self.mappings.iter().enumerate() {
+            if page_address < mapping.addr
+                || page_address >= mapping.addr.saturating_add(mapping.len)
+            {
+                continue;
+            }
+            let page_index = (page_address - mapping.addr) / PAGE_SIZE;
+            let backing = mapping.pages.get(page_index).copied().ok_or(SysError::EFAULT)?;
+            let prot = Self::mapping_page_prot(&mapping.source, mapping.prot, page_index);
+            mapping_location = Some((mapping_index, page_index, backing, prot));
+            break;
+        }
+
+        let Some((mapping_index, page_index, backing, prot)) = mapping_location else {
+            if page_address < self.brk.start
+                || page_address >= self.brk.start.saturating_add(self.brk.pages.len() * PAGE_SIZE)
+            {
+                return Ok(false);
+            }
+            let page_index = (page_address - self.brk.start) / PAGE_SIZE;
+            let backing = self.brk.pages.get(page_index).copied().ok_or(SysError::EFAULT)?;
+            let prot = LINUX_PROT_READ | LINUX_PROT_WRITE;
+            if !linux_page_backing_is_cow(backing) || prot & LINUX_PROT_WRITE == 0 {
+                return Ok(false);
+            }
+            let Some(new_pfn) = PageFrameAllocator::alloc() else {
+                return Err(SysError::ENOMEM);
+            };
+            let Some(source) = PageFrameAllocator::pfn_address(backing.pfn()) else {
+                PageFrameAllocator::free(new_pfn);
+                return Err(SysError::ENOMEM);
+            };
+            let Some(destination) = PageFrameAllocator::pfn_address(new_pfn) else {
+                PageFrameAllocator::free(new_pfn);
+                return Err(SysError::ENOMEM);
+            };
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    source as *const u8,
+                    destination as *mut u8,
+                    PAGE_SIZE,
+                );
+            }
+            if let Err(error) = self.unmap_page(page_address) {
+                PageFrameAllocator::free(new_pfn);
+                return Err(error);
+            }
+            if let Err(error) = self.map_page(page_address, new_pfn, prot) {
+                let _ = self.map_page(page_address, backing.pfn(), linux_page_protection_for_backing(backing, prot));
+                PageFrameAllocator::free(new_pfn);
+                return Err(error);
+            }
+            self.brk.pages[page_index] = LinuxPageBacking::Private { pfn: new_pfn };
+            LinuxProcessMemory::free_backings(core::slice::from_ref(&backing));
+            self.bump_generation();
+            return Ok(true);
+        };
+
+        if !linux_page_backing_is_cow(backing) || prot & LINUX_PROT_WRITE == 0 {
+            return Ok(false);
+        }
+        let Some(new_pfn) = PageFrameAllocator::alloc() else {
+            return Err(SysError::ENOMEM);
+        };
+        let Some(source) = PageFrameAllocator::pfn_address(backing.pfn()) else {
+            PageFrameAllocator::free(new_pfn);
+            return Err(SysError::ENOMEM);
+        };
+        let Some(destination) = PageFrameAllocator::pfn_address(new_pfn) else {
+            PageFrameAllocator::free(new_pfn);
+            return Err(SysError::ENOMEM);
+        };
+        unsafe {
+            core::ptr::copy_nonoverlapping(source as *const u8, destination as *mut u8, PAGE_SIZE);
+        }
+        let page_prot = prot | LINUX_PROT_WRITE;
+        if let Err(error) = self.unmap_page(page_address) {
+            PageFrameAllocator::free(new_pfn);
+            return Err(error);
+        }
+        if let Err(error) = self.map_page(page_address, new_pfn, page_prot) {
+            let _ = self.map_page(
+                page_address,
+                backing.pfn(),
+                linux_page_protection_for_backing(backing, prot),
+            );
+            PageFrameAllocator::free(new_pfn);
+            return Err(error);
+        }
+        self.mappings[mapping_index].pages[page_index] = LinuxPageBacking::Private { pfn: new_pfn };
+        LinuxProcessMemory::free_backings(core::slice::from_ref(&backing));
+        self.bump_generation();
+        Ok(true)
+    }
+
+    fn materialize_cow_range(&mut self, address: usize, len: usize) -> Result<(), SysError> {
+        let end = address.checked_add(len).ok_or(SysError::EFAULT)?;
+        let mut page = address & !(PAGE_SIZE - 1);
+        while page < end {
+            let _ = self.materialize_cow_page(page)?;
+            page = page.checked_add(PAGE_SIZE).ok_or(SysError::EFAULT)?;
+        }
+        Ok(())
+    }
+
+    fn address_is_cow(&self, address: usize) -> bool {
+        let page_address = address & !(PAGE_SIZE - 1);
+        if let Some(mapping) = self.mappings.iter().find(|mapping| {
+            page_address >= mapping.addr
+                && page_address < mapping.addr.saturating_add(mapping.len)
+        }) {
+            let page_index = (page_address - mapping.addr) / PAGE_SIZE;
+            return mapping
+                .pages
+                .get(page_index)
+                .copied()
+                .is_some_and(linux_page_backing_is_cow);
+        }
+        if page_address < self.brk.start
+            || page_address >= self.brk.start.saturating_add(self.brk.pages.len() * PAGE_SIZE)
+        {
+            return false;
+        }
+        self.brk
+            .pages
+            .get((page_address - self.brk.start) / PAGE_SIZE)
+            .copied()
+            .is_some_and(linux_page_backing_is_cow)
+    }
+
+    pub(crate) fn resolve_cow_fault(&mut self, address: usize) -> Result<bool, SysError> {
+        self.materialize_cow_page(address)
+    }
+
+    fn copy_to_user(&mut self, address: usize, bytes: &[u8]) -> Result<(), SysError> {
+        self.materialize_cow_range(address, bytes.len())?;
         if !self.range_accessible(address, bytes.len(), true) {
             return Err(SysError::EFAULT);
         }
         self.copy_to_mapped_pages(address, bytes)
     }
 
-    fn writable_contiguous_physical(&self, address: usize, len: usize) -> Result<usize, SysError> {
+    fn writable_contiguous_physical(&mut self, address: usize, len: usize) -> Result<usize, SysError> {
         let end = address.checked_add(len).ok_or(SysError::EFAULT)?;
         if end > (address | (PAGE_SIZE - 1)).saturating_add(1) {
             return Err(SysError::EFAULT);
         }
+        self.materialize_cow_range(address, len)?;
         if !self.range_accessible(address, len, true) {
             return Err(SysError::EFAULT);
         }
@@ -1629,7 +2241,9 @@ impl LinuxProcessMemory {
                 None => return false,
             };
             #[cfg(target_arch = "aarch64")]
-            if self.address_space.translate_user(current, write).is_none() {
+            if self.address_space.translate_user(current, write).is_none()
+                && !(write && self.address_is_cow(current))
+            {
                 return false;
             }
             #[cfg(not(target_arch = "aarch64"))]
@@ -1802,40 +2416,64 @@ impl LinuxProcessMemory {
         contents: &[u8],
         source: &LinuxMappingSource,
     ) -> Result<Vec<LinuxPageBacking>, SysError> {
-        let candidates = self.allocate_unmapped_pages(len, contents)?;
         let (object_id, first_page) = match shared_mmap_object(source) {
             Ok(object) => object,
-            Err(error) => {
-                Self::free_backings(&candidates);
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
+        let page_count = len / PAGE_SIZE;
         let mut shared = Vec::new();
-        if shared.try_reserve_exact(candidates.len()).is_err() {
-            Self::free_backings(&candidates);
+        if shared.try_reserve_exact(page_count).is_err() {
             remove_empty_shared_mmap_object(object_id);
             return Err(SysError::ENOMEM);
         }
-        for (index, candidate) in candidates.iter().copied().enumerate() {
+        for index in 0..page_count {
             let Some(page_index) = linux_shared_page_index(first_page, index) else {
                 Self::free_backings(&shared);
-                for candidate in &candidates[index..] {
-                    PageFrameAllocator::free(candidate.pfn());
-                }
                 remove_empty_shared_mmap_object(object_id);
                 return Err(SysError::EINVAL);
             };
-            let Some(pfn) = acquire_or_register_shared_page(object_id, page_index, candidate.pfn())
-            else {
+            if let Some(pfn) = acquire_cached_shared_page(object_id, page_index) {
+                shared.push(LinuxPageBacking::Shared {
+                    object_id,
+                    page_index,
+                    pfn,
+                });
+                continue;
+            }
+
+            let Some(candidate_pfn) = PageFrameAllocator::alloc() else {
                 Self::free_backings(&shared);
-                for candidate in &candidates[index..] {
-                    PageFrameAllocator::free(candidate.pfn());
-                }
                 remove_empty_shared_mmap_object(object_id);
                 return Err(SysError::ENOMEM);
             };
-            if pfn != candidate.pfn() {
-                PageFrameAllocator::free(candidate.pfn());
+            let Some(physical) = PageFrameAllocator::pfn_address(candidate_pfn) else {
+                PageFrameAllocator::free(candidate_pfn);
+                Self::free_backings(&shared);
+                remove_empty_shared_mmap_object(object_id);
+                return Err(SysError::ENOMEM);
+            };
+            unsafe { core::ptr::write_bytes(physical as *mut u8, 0, PAGE_SIZE) };
+            let content_offset = index * PAGE_SIZE;
+            if content_offset < contents.len() {
+                let chunk = core::cmp::min(PAGE_SIZE, contents.len() - content_offset);
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        contents[content_offset..content_offset + chunk].as_ptr(),
+                        physical as *mut u8,
+                        chunk,
+                    );
+                }
+            }
+
+            let Some(pfn) = acquire_or_register_shared_page(object_id, page_index, candidate_pfn)
+            else {
+                PageFrameAllocator::free(candidate_pfn);
+                Self::free_backings(&shared);
+                remove_empty_shared_mmap_object(object_id);
+                return Err(SysError::ENOMEM);
+            };
+            if pfn != candidate_pfn {
+                PageFrameAllocator::free(candidate_pfn);
             }
             shared.push(LinuxPageBacking::Shared {
                 object_id,
@@ -1872,7 +2510,8 @@ impl LinuxProcessMemory {
         let mut mapped = 0usize;
         for (page_index, page) in pages.iter().enumerate() {
             let page_address = address + page_index * PAGE_SIZE;
-            if let Err(error) = self.map_page(page_address, page.pfn(), protection(page_index)) {
+            let prot = linux_page_protection_for_backing(*page, protection(page_index));
+            if let Err(error) = self.map_page(page_address, page.pfn(), prot) {
                 for rollback in (0..mapped).rev() {
                     let _ = self.unmap_page(address + rollback * PAGE_SIZE);
                 }
@@ -1941,15 +2580,80 @@ impl LinuxProcessMemory {
             let start_page = (overlap_start - mapping.addr) / PAGE_SIZE;
             let end_page = (overlap_end - mapping.addr) / PAGE_SIZE;
             for page_index in start_page..end_page {
-                pages.push(LinuxMappedPage {
-                    address: mapping.addr + page_index * PAGE_SIZE,
-                    backing: mapping.pages[page_index],
-                    prot: Self::mapping_page_prot(&mapping.source, mapping.prot, page_index),
+            pages.push(LinuxMappedPage {
+                address: mapping.addr + page_index * PAGE_SIZE,
+                backing: mapping.pages[page_index],
+                prot: linux_page_protection_for_backing(
+                    mapping.pages[page_index],
+                    Self::mapping_page_prot(&mapping.source, mapping.prot, page_index),
+                ),
                 });
             }
         }
         pages.sort_by_key(|page| page.address);
         Ok(pages)
+    }
+
+    fn file_mapping_sync_ranges(
+        &self,
+        address: usize,
+        len: usize,
+    ) -> Result<Vec<LinuxFileMappingSyncRange>, SysError> {
+        let end = address.checked_add(len).ok_or(SysError::EINVAL)?;
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        if !self.range_is_mapped(address, len) {
+            return Err(SysError::ENOMEM);
+        }
+
+        let mut ranges = Vec::new();
+        for mapping in &self.mappings {
+            if mapping.flags & LINUX_MAP_SHARED == 0
+                || !ranges_overlap(address, len, mapping.addr, mapping.len)
+            {
+                continue;
+            }
+            let LinuxMappingSource::File {
+                fd,
+                offset,
+                backing_len,
+                ..
+            } = &mapping.source
+            else {
+                continue;
+            };
+            let mapping_end = mapping
+                .addr
+                .checked_add(mapping.len)
+                .ok_or(SysError::EINVAL)?;
+            let overlap_start = core::cmp::max(address, mapping.addr);
+            let overlap_end = core::cmp::min(end, mapping_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+
+            let source_start = usize::try_from(*offset).map_err(|_| SysError::EINVAL)?;
+            let mapping_delta = overlap_start - mapping.addr;
+            let file_offset = source_start
+                .checked_add(mapping_delta)
+                .ok_or(SysError::EOVERFLOW)?;
+            if file_offset >= *backing_len {
+                continue;
+            }
+            let sync_len = core::cmp::min(overlap_end - overlap_start, *backing_len - file_offset);
+            if sync_len == 0 {
+                continue;
+            }
+            ranges.try_reserve(1).map_err(|_| SysError::ENOMEM)?;
+            ranges.push(LinuxFileMappingSyncRange {
+                fd: *fd,
+                address: overlap_start,
+                file_offset,
+                len: sync_len,
+            });
+        }
+        Ok(ranges)
     }
 
     fn try_mapped_pages_from_backings(
@@ -1977,10 +2681,13 @@ impl LinuxProcessMemory {
                     .checked_add(index.checked_mul(PAGE_SIZE).ok_or(SysError::ENOMEM)?)
                     .ok_or(SysError::ENOMEM)?,
                 backing,
-                prot: Self::mapping_page_prot(
-                    source,
-                    requested_prot,
-                    first_page_index.saturating_add(index),
+                prot: linux_page_protection_for_backing(
+                    backing,
+                    Self::mapping_page_prot(
+                        source,
+                        requested_prot,
+                        first_page_index.saturating_add(index),
+                    ),
                 ),
             });
         }
@@ -2014,6 +2721,36 @@ impl LinuxProcessMemory {
         for page in pages {
             if let Err(error) = self.unmap_page(page.address) {
                 self.restore_mapped_pages(&pages[..removed]);
+                return Err(error);
+            }
+            removed += 1;
+        }
+        Ok(())
+    }
+
+    fn unmap_exact_mapping_pages_transactionally(
+        &mut self,
+        mapping_index: usize,
+    ) -> Result<(), SysError> {
+        let mapping_addr = self.mappings[mapping_index].addr;
+        let page_count = self.mappings[mapping_index].pages.len();
+        let mut removed = 0usize;
+        for page_index in 0..page_count {
+            let address = mapping_addr + page_index * PAGE_SIZE;
+            if let Err(error) = self.unmap_page(address) {
+                for rollback_index in (0..removed).rev() {
+                    let rollback_address = mapping_addr + rollback_index * PAGE_SIZE;
+                    let backing = self.mappings[mapping_index].pages[rollback_index];
+                    let prot = linux_page_protection_for_backing(
+                        backing,
+                        Self::mapping_page_prot(
+                            &self.mappings[mapping_index].source,
+                            self.mappings[mapping_index].prot,
+                            rollback_index,
+                        ),
+                    );
+                    let _ = self.map_page(rollback_address, backing.pfn(), prot);
+                }
                 return Err(error);
             }
             removed += 1;
@@ -2062,7 +2799,10 @@ impl LinuxProcessMemory {
             changes.push(LinuxPageProtectionChange {
                 address: page.address,
                 old_prot: page.prot,
-                new_prot: Self::mapping_page_prot(&mapping.source, mapping.prot, page_index),
+                new_prot: linux_page_protection_for_backing(
+                    page.backing,
+                    Self::mapping_page_prot(&mapping.source, mapping.prot, page_index),
+                ),
             });
         }
         Ok(changes)
@@ -2098,6 +2838,16 @@ impl LinuxProcessMemory {
             self.find_free_region(requested, len)
                 .ok_or(SysError::ENOMEM)?
         };
+        crate::kobj_info!(
+            "fork",
+            "map selected addr={:#x} len={:#x} prot={:#x} flags={:#x} requested={:?} replace={}",
+            address,
+            len,
+            prot,
+            flags,
+            requested,
+            replace
+        );
         let next_addr = if (LINUX_MMAP_BASE..LINUX_BRK_BASE).contains(&address) {
             Some(address.checked_add(len).ok_or(SysError::ENOMEM)?)
         } else {
@@ -2148,6 +2898,17 @@ impl LinuxProcessMemory {
             return Err(error);
         }
         self.mappings.insert(index, mapping);
+        if flags & LINUX_MAP_SHARED != 0 && (0x1222_0000..0x1222_2000).contains(&address) {
+            let mapping = &self.mappings[index];
+            crate::kobj_info!(
+                "fork",
+                "shared map addr={:#x} len={:#x} pfn={} source_shared={}",
+                address,
+                len,
+                mapping.pages.first().copied().map(LinuxPageBacking::pfn).unwrap_or(0),
+                matches!(mapping.source, LinuxMappingSource::SharedMemory { .. })
+            );
+        }
         self.bump_generation();
         if let Some(next_addr) = next_addr {
             self.next_addr = next_addr;
@@ -2221,12 +2982,35 @@ impl LinuxProcessMemory {
         if !self.range_is_mapped(address, len) {
             return Err(SysError::EINVAL);
         }
+        if address <= 0x1203_00a0
+            && 0x1203_00a0 < address.saturating_add(len)
+        {
+            crate::kobj_info!(
+                "fork",
+                "protect range addr={:#x} len={:#x} prot={:#x}",
+                address,
+                len,
+                prot
+            );
+        }
         let mut plan = LinuxMappingMetadataPlan::try_clone_mapping_metadata(self)?;
         plan.try_transform_range(address, len, Some(prot))?;
         let pages = self.try_mapped_pages_overlapping(address, len)?;
         let changes = Self::protection_changes(&pages, &plan.mappings)?;
         self.protect_pages_transactionally(&changes)?;
         let _ = self.commit_mapping_metadata(plan);
+        if let Some(mapping) = self.mappings.iter().find(|mapping| {
+            mapping.addr <= 0x1203_00a0
+                && 0x1203_00a0 < mapping.addr.saturating_add(mapping.len)
+        }) {
+            crate::kobj_info!(
+                "fork",
+                "protect result addr={:#x} len={:#x} prot={:#x}",
+                mapping.addr,
+                mapping.len,
+                mapping.prot
+            );
+        }
         Ok(())
     }
 
@@ -2238,8 +3022,7 @@ impl LinuxProcessMemory {
                 && !matches!(mapping.source, LinuxMappingSource::SharedMemory { .. })
         });
         if let Some(index) = exact_mapping_index {
-            let pages = self.try_mapped_pages_overlapping(address, len)?;
-            self.unmap_pages_transactionally(&pages)?;
+            self.unmap_exact_mapping_pages_transactionally(index)?;
             let mapping = self.mappings.remove(index);
             self.next_addr = core::cmp::min(self.next_addr, address);
             Self::free_backings(&mapping.pages);
@@ -2549,11 +3332,56 @@ impl LinuxProcessMemory {
 
     fn release_all_pages(&mut self) {
         let mappings = core::mem::take(&mut self.mappings);
+        let mut shared_backings = Vec::new();
+        let shared_capacity = mappings
+            .iter()
+            .flat_map(|mapping| mapping.pages.iter())
+            .chain(self.brk.pages.iter())
+            .filter(|backing| matches!(backing, LinuxPageBacking::Shared { .. }))
+            .count();
+        let batch_shared_release = shared_backings
+            .try_reserve_exact(shared_capacity)
+            .is_ok();
         for mapping in mappings {
-            Self::free_backings(&mapping.pages);
+            for backing in mapping.pages {
+                match backing {
+                    LinuxPageBacking::Private { pfn } => PageFrameAllocator::free(pfn),
+                    shared @ LinuxPageBacking::Shared { .. } if batch_shared_release => {
+                        shared_backings.push(shared)
+                    }
+                    LinuxPageBacking::Shared {
+                        object_id,
+                        page_index,
+                        ..
+                    } => {
+                        if let Some(pfn) = release_shared_page(object_id, page_index) {
+                            PageFrameAllocator::free(pfn);
+                        }
+                    }
+                }
+            }
         }
         let brk_pages = core::mem::take(&mut self.brk.pages);
-        Self::free_backings(&brk_pages);
+        for backing in brk_pages {
+            match backing {
+                LinuxPageBacking::Private { pfn } => PageFrameAllocator::free(pfn),
+                shared @ LinuxPageBacking::Shared { .. } if batch_shared_release => {
+                    shared_backings.push(shared)
+                }
+                LinuxPageBacking::Shared {
+                    object_id,
+                    page_index,
+                    ..
+                } => {
+                    if let Some(pfn) = release_shared_page(object_id, page_index) {
+                        PageFrameAllocator::free(pfn);
+                    }
+                }
+            }
+        }
+        if batch_shared_release {
+            release_shared_backings(&shared_backings);
+        }
     }
 }
 

@@ -432,7 +432,7 @@ fn posix_clock_timer_clock_runtime_applies_checked_realtime_offsets() {
     let reset = braced_body(&syscall[reset_start..]);
 
     assert!(syscall.contains("static LINUX_REALTIME_OFFSET_NANOS: AtomicI64"));
-    assert!(settime.contains("linux_posix_clock_settable(clockid)"));
+    assert!(settime.contains("linux_posix_clock_settable_for_current(clockid)"));
     assert!(settime.contains("linux_read_user_timespec(tp)?"));
     assert!(settime.contains("linux_realtime_offset_for_set("));
     assert!(settime.contains("LINUX_REALTIME_OFFSET_NANOS.store("));
@@ -440,9 +440,7 @@ fn posix_clock_timer_clock_runtime_applies_checked_realtime_offsets() {
     assert!(time.contains("linux_realtime_nanos()?"));
     assert!(gettimeofday.contains("linux_realtime_nanos()?"));
     assert!(syscall.contains("const LINUX_DEFAULT_REALTIME_OFFSET_NANOS: i64"));
-    assert!(reset.contains(
-        "LINUX_REALTIME_OFFSET_NANOS.store(LINUX_DEFAULT_REALTIME_OFFSET_NANOS"
-    ));
+    assert!(reset.contains("LINUX_REALTIME_OFFSET_NANOS.store(LINUX_DEFAULT_REALTIME_OFFSET_NANOS"));
 }
 
 #[test]
@@ -480,9 +478,10 @@ fn posix_clock_timer_syscalls_copy_validate_and_publish_owned_state() {
     assert!(syscall.contains("struct LinuxItimerspec"));
     assert!(syscall.contains("struct LinuxSigevent"));
     assert!(syscall.contains("posix_timers: Vec<LinuxPosixTimerCore>"));
-    assert!(timer_create.contains("LinuxPosixClock::from_id(clockid)"));
+    assert!(timer_create.contains("linux_posix_timer_clock_for_current(clockid)"));
     assert!(timer_create.contains("linux_read_user_sigevent(sevp)?"));
-    assert!(timer_create.contains("register_linux_timer(pid, handle.0, timer_id, clock, signal)"));
+    assert!(timer_create
+        .contains("register_linux_timer(pid, handle.0, timer_id, clock, signal, signal_value)"));
     assert!(timer_settime.contains("linux_read_user_itimerspec(new_value)?"));
     assert!(timer_settime.contains("linux_posix_timespec_nanoseconds("));
     assert!(timer_settime.contains("timer.arm("));
@@ -497,7 +496,7 @@ fn posix_clock_timer_syscalls_copy_validate_and_publish_owned_state() {
         .find("compat::create_object(ObjectType::Timer)")
         .expect("timer compatibility object allocation");
     let register = timer_create
-        .find("register_linux_timer(pid, handle.0, timer_id, clock, signal)")
+        .find("register_linux_timer(pid, handle.0, timer_id, clock, signal, signal_value)")
         .expect("timer state registration");
     let failed_copyout = timer_create
         .find("if let Err(error) = linux_write_user_i32(")
@@ -551,7 +550,8 @@ fn posix_timer_ids_do_not_expose_negative_compatibility_handles() {
     );
 
     assert!(timer_create.contains("let timer_id = handle.0 & i32::MAX as u32"));
-    assert!(timer_create.contains("register_linux_timer(pid, handle.0, timer_id, clock, signal)"));
+    assert!(timer_create
+        .contains("register_linux_timer(pid, handle.0, timer_id, clock, signal, signal_value)"));
     assert!(timer_create.contains("linux_write_user_i32(timerid, timer_id as i32)"));
     assert!(
         syscall.contains("fn linux_timer_handle(&self, pid: usize, timer_id: u32) -> Option<u32>")
@@ -583,7 +583,7 @@ fn posix_clock_timer_cpu0_expiry_queues_process_signals() {
     assert!(expiry.contains("linux_realtime_nanos()"));
     assert!(expiry.contains("timer.expire(now_monotonic, now_realtime)"));
     assert!(expiry.contains("queue_process_linux_signal_and_wake("));
-    assert!(expiry.contains("LinuxPendingSignal::standard(signal)"));
+    assert!(expiry.contains("linux_timer_signal_record("));
 
     let scheduler = timer
         .find("scheduler().on_timer_tick()")
@@ -605,6 +605,35 @@ fn posix_clock_timer_cpu0_expiry_queues_process_signals() {
     assert!(linux_task < posix_timer);
     assert!(posix_timer < futex);
     assert!(futex < completion);
+}
+
+#[test]
+fn timer_interrupt_expires_real_timers_for_kernel_mode_ticks() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let main = std::fs::read_to_string(repository.join("src/main.rs"))
+        .expect("read kernel main");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    assert!(
+        syscall.contains("pub fn expire_linux_real_timers_from_irq()"),
+        "real-timer expiry must have a frame-independent IRQ entry point"
+    );
+    let timer = braced_body(
+        &main[main
+            .find("extern \"C\" fn timer_interrupt_handler()")
+            .expect("timer interrupt handler")..],
+    );
+    let real_timer = timer
+        .find("expire_linux_real_timers_from_irq()")
+        .expect("all timer IRQ paths must scan ITIMER_REAL deadlines");
+    let task_tick = timer
+        .find("linux_task::on_timer_tick(now)")
+        .expect("Linux task timeout expiry");
+    assert!(
+        real_timer < task_tick,
+        "real-timer expiry must run before task timeout handling can reschedule"
+    );
 }
 
 #[test]
@@ -1179,6 +1208,21 @@ fn linux_file_tail_fault_metadata_is_preserved_at_every_mapping_boundary() {
             "missing mapping boundary {boundary}"
         );
     }
+}
+
+#[test]
+fn linux_fork_maps_shared_cow_pages_without_write_permission() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read Linux process memory runtime");
+    let map_start = memory
+        .find("super::linux_process::map_linux_fork_pages_with_protection(")
+        .expect("fork mapping call");
+    let map_body = &memory[map_start..memory[map_start..].find("            );").expect("fork mapping closure") + map_start];
+    assert!(
+        map_body.contains("linux_page_protection_for_backing"),
+        "fork child mappings must clear write permission for shared COW backings"
+    );
 }
 
 #[test]
@@ -3188,8 +3232,8 @@ fn linux_child_exit_clears_tid_and_uses_deferred_stack_retirement() {
         .find("pub fn sys_set_tid_address(tidptr: usize)")
         .expect("set_tid_address");
     let set_tid = braced_body(&syscall[set_tid_start..]);
-    assert!(set_tid.contains("tidptr != 0"));
-    assert!(set_tid.contains("linux_clone_tid_destination_valid(tidptr)"));
+    assert!(!set_tid.contains("linux_clone_tid_destination_valid(tidptr)"));
+    assert!(!set_tid.contains("SysError::EFAULT"));
     assert!(set_tid.contains("linux_task::set_current_clear_child_tid(tidptr)"));
 
     let group_start = syscall
@@ -3324,6 +3368,31 @@ fn scheduler_exposes_atomic_linux_task_transitions() {
 
     let current_handlers = &boot[..lower_start];
     assert!(!current_handlers.contains("bl      check_preemption"));
+}
+
+#[test]
+fn aarch64_context_switch_preserves_irq_mask_until_resume() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let context = std::fs::read_to_string(
+        repository.join("src/kernel_lowlevel/ARM64/context_switch.S"),
+    )
+    .expect("read AArch64 context switch assembly");
+    let switch = context
+        .find("context_switch:")
+        .and_then(|start| context[start..].find(".size context_switch").map(|end| start + end))
+        .map(|end| &context[context.find("context_switch:").unwrap()..end])
+        .expect("context switch body");
+    let restored_pc = switch
+        .find("ldr     x16, [x16, #0x100]")
+        .expect("restored context PC");
+    let branch = switch[restored_pc..]
+        .find("br      x16")
+        .map(|offset| restored_pc + offset)
+        .expect("restored context branch");
+    assert!(
+        !switch[restored_pc..branch].contains("msr     daifclr, #2"),
+        "resumed scheduler contexts must keep IRQs masked until the caller restores DAIF"
+    );
 }
 
 #[test]
@@ -3858,6 +3927,8 @@ fn linux_futex_waits_block_and_wake_scheduler_tasks() {
         .expect("read syscall implementation");
     let futex = std::fs::read_to_string(repository.join("src/syscall/linux_futex.rs"))
         .expect("read Linux futex runtime");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read Linux process memory runtime");
     let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
         .expect("read Linux task runtime");
     let main = std::fs::read_to_string(repository.join("src/main.rs"))
@@ -3891,6 +3962,8 @@ fn linux_futex_waits_block_and_wake_scheduler_tasks() {
     assert!(!with_queue.contains("scheduler::schedule()"));
     assert!(!with_queue.contains("linux_task::wake_blocked("));
     assert!(futex.contains("linux_process_memory::copy_from_current("));
+    assert!(memory.contains("pub(crate) fn futex_address_key("));
+    assert!(futex.contains("linux_process_memory::futex_address_key("));
     assert!(!futex.contains("core::ptr::read(uaddr as *const u32)"));
     assert!(futex.contains("linux_task::block_current(LinuxBlockReason::Futex)"));
     assert!(futex.contains("scheduler::schedule()"));
@@ -4260,10 +4333,15 @@ fn linux_signal_state_is_owned_by_each_live_task() {
 
     let kill_start = syscall.find("pub fn sys_kill(").expect("kill syscall");
     let kill = braced_body(&syscall[kill_start..]);
-    assert!(kill.contains("linux_signal_disposition_for(target_pid, signum)"));
-    assert!(kill.contains("LinuxSignalDisposition::Terminate"));
-    assert!(kill.contains("queue_process_linux_signal_and_wake("));
-    assert!(!kill.contains("terminate_process("));
+    assert!(kill.contains("linux_deliver_kill_to_target("));
+    let kill_target_start = syscall
+        .find("fn linux_deliver_kill_to_target(")
+        .expect("kill target delivery helper");
+    let kill_target = braced_body(&syscall[kill_target_start..]);
+    assert!(kill_target.contains("linux_signal_disposition_for(target_pid, signum)"));
+    assert!(kill_target.contains("LinuxSignalDisposition::Terminate"));
+    assert!(kill_target.contains("queue_process_linux_signal_and_wake("));
+    assert!(!kill_target.contains("terminate_process("));
 
     let rt_queue_start = syscall
         .find("pub fn sys_rt_sigqueueinfo(")
@@ -4282,9 +4360,14 @@ fn linux_signal_state_is_owned_by_each_live_task() {
         .find("pub extern \"C\" fn deliver_linux_timer_signal_from_irq(")
         .expect("timer signal delivery");
     let timer = braced_body(&syscall[timer_start..]);
-    assert!(timer.contains("linux_signal_disposition(LINUX_SIGALRM)"));
-    assert!(!timer.contains("action.handler == LINUX_SIG_DFL"));
-    assert!(timer.contains("queue_process_linux_signal_and_wake("));
+    assert!(timer.contains("expire_linux_real_timers_from_irq()"));
+    let expiry_start = syscall
+        .find("pub fn expire_linux_real_timers_from_irq(")
+        .expect("real timer expiry helper");
+    let expiry = braced_body(&syscall[expiry_start..]);
+    assert!(expiry.contains("linux_signal_disposition_for(pid, LINUX_SIGALRM)"));
+    assert!(!expiry.contains("action.handler == LINUX_SIG_DFL"));
+    assert!(expiry.contains("queue_process_linux_signal_and_wake("));
 }
 
 #[test]
@@ -4456,6 +4539,87 @@ fn linux_signal_waits_block_and_restart_from_the_original_svc() {
     assert!(futex.contains("linux_task::set_current_restart_timeout("));
     assert!(task.contains("pub(crate) fn install_current_signal_wait("));
     assert!(task.contains("pub(crate) fn on_timer_tick("));
+}
+
+#[test]
+fn linux_stop_continue_signals_report_sigchld_and_resume_stopped_tasks() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read process runtime");
+    let process_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_process_logic_shared.rs"))
+            .expect("read shared process logic");
+    let task_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_task_logic_shared.rs"))
+            .expect("read shared task logic");
+
+    for token in [
+        "Stopped",
+        "linux_wait_status_stopped",
+        "stop_child(",
+        "continue_child(",
+        "wait_outcome_with_options",
+        "complete_linux_wait_with_options",
+    ] {
+        assert!(
+            process_logic.contains(token) || task_logic.contains(token),
+            "missing stopped-child lifecycle token {token}"
+        );
+    }
+
+    assert!(process.contains("pub(crate) fn stop_current_child("));
+    assert!(process.contains("pub(crate) fn continue_child("));
+    assert!(process.contains("linux_task::wake_process_waiters(transition.parent_pid)"));
+
+    let wait4 = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_wait4(")
+            .expect("wait4 implementation")..],
+    );
+    assert!(
+        wait4.contains("let include_stopped = options & linux_process::LINUX_WAIT_WUNTRACED != 0")
+    );
+    assert!(wait4.contains("linux_process::wait_current(selector, nohang, include_stopped)"));
+    assert!(wait4.contains("linux_process::complete_wait_current("));
+    assert!(wait4.contains("include_stopped"));
+
+    let siginfo = braced_body(
+        &syscall[syscall
+            .find("fn linux_sigchld_child_state_record(")
+            .expect("SIGCHLD child-state siginfo builder")..],
+    );
+    for token in [
+        "LINUX_CLD_STOPPED",
+        "LINUX_CLD_CONTINUED",
+        "LINUX_SIGINFO_CODE_OFF",
+        "record.has_info = true",
+        "child_pid as i32",
+        "status.to_ne_bytes()",
+    ] {
+        assert!(siginfo.contains(token), "missing siginfo token {token}");
+    }
+
+    let delivery = braced_body(
+        &syscall[syscall
+            .find("fn deliver_next_linux_signal(")
+            .expect("signal delivery")..],
+    );
+    assert!(delivery.contains("LinuxSignalDisposition::Stop"));
+    assert!(delivery.contains("stop_current_linux_process_for_signal(signum)"));
+    assert!(delivery.contains("linux_task::block_current(LinuxBlockReason::Stopped)"));
+    assert!(delivery.contains("scheduler::schedule()"));
+
+    let interrupt = braced_body(
+        &syscall[syscall
+            .find("fn interrupt_linux_signal_target(")
+            .expect("signal target interrupt")..],
+    );
+    assert!(interrupt.contains("LinuxBlockReason::Stopped"));
+    assert!(interrupt.contains("signum == LINUX_SIGCONT"));
+    assert!(interrupt.contains("continue_linux_process_for_signal(target.tgid)"));
+    assert!(interrupt.contains("wake_blocked("));
 }
 
 #[test]
@@ -5239,13 +5403,16 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
     assert!(interrupt.contains("linux_task::interrupt_sleep("));
     assert!(interrupt.contains("linux_task::wake_blocked("));
     assert!(interrupt.contains("linux_task::cancel_sleep("));
-    let interrupt_sleep = interrupt
+    let sleep = &interrupt[interrupt
+        .find("LinuxBlockReason::Sleep")
+        .expect("sleep interruption branch")..];
+    let interrupt_sleep = sleep
         .find("linux_task::interrupt_sleep(")
         .expect("sleep interruption publication");
-    let wake_blocked = interrupt
+    let wake_blocked = sleep
         .find("linux_task::wake_blocked(")
         .expect("sleep wake");
-    let cancel_sleep = interrupt
+    let cancel_sleep = sleep
         .find("linux_task::cancel_sleep(")
         .expect("failed wake cleanup");
     assert!(interrupt_sleep < wake_blocked && wake_blocked < cancel_sleep);
@@ -5379,6 +5546,287 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
 }
 
 #[test]
+fn linux_stop_signals_restart_sleep_syscalls_after_continue() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall runtime");
+    let syscall_context =
+        std::fs::read_to_string(repository.join("src/syscall/linux_syscall_context.rs"))
+            .expect("read Linux syscall context");
+    let task_logic =
+        std::fs::read_to_string(repository.join("src/syscall/linux_task_logic_shared.rs"))
+            .expect("read Linux task logic");
+
+    assert!(task_logic.contains("LinuxSignalDisposition::Stop"));
+    assert!(task_logic.contains("pub(crate) fn discard_stop_signals("));
+
+    let frame_context = braced_body(
+        &syscall_context[syscall_context
+            .find("pub(crate) fn with_linux_syscall_frame(")
+            .expect("syscall frame context")..],
+    );
+    assert!(syscall_context.contains("const ARM64_SYS_NANOSLEEP: u64 = 101"));
+    assert!(syscall_context.contains("const ARM64_SYS_CLOCK_NANOSLEEP: u64 = 115"));
+    assert!(frame_context.contains("ARM64_SYS_NANOSLEEP"));
+    assert!(frame_context.contains("ARM64_SYS_CLOCK_NANOSLEEP"));
+    assert!(frame_context.contains("LinuxRestartBlock"));
+
+    assert!(syscall.contains("enum LinuxSignalDeliveryOutcome"));
+    let delivery = braced_body(
+        &syscall[syscall
+            .find("fn deliver_next_linux_signal(")
+            .expect("signal delivery")..],
+    );
+    assert!(delivery.contains("LinuxSignalDeliveryOutcome::DefaultStopped"));
+    assert!(delivery.contains("default_stopped = true"));
+
+    let completion = braced_body(
+        &syscall[syscall
+            .find("pub extern \"C\" fn complete_linux_signal_syscall_return(")
+            .expect("signal return completion")..],
+    );
+    assert!(completion.contains("LinuxSignalDeliveryOutcome::DefaultStopped"));
+    assert!(completion.contains("apply_current_linux_restart_block(saved_regs)"));
+
+    assert!(syscall.contains("fn discard_pending_linux_stop_signals("));
+    assert!(syscall.contains("fn discard_pending_linux_continue_signal("));
+    assert!(syscall.contains("with_linux_process_signal_state_for(tgid"));
+    let cancellation = braced_body(
+        &syscall[syscall
+            .find("fn cancel_opposing_linux_stop_continue_signals(")
+            .expect("stop/continue cancellation helper")..],
+    );
+    assert!(cancellation.contains("signum == LINUX_SIGCONT"));
+    assert!(cancellation
+        .contains("linux_task::LINUX_STOP_SIGNAL_FIRST..=linux_task::LINUX_STOP_SIGNAL_LAST"));
+
+    let process = braced_body(
+        &syscall[syscall
+            .find("fn queue_process_linux_signal_and_wake(")
+            .expect("process signal queue")..],
+    );
+    assert!(process.contains("cancel_opposing_linux_stop_continue_signals(tgid, record.signum)"));
+
+    let directed = braced_body(
+        &syscall[syscall
+            .find("fn queue_directed_linux_signal(")
+            .expect("directed signal queue")..],
+    );
+    assert!(directed
+        .contains("cancel_opposing_linux_stop_continue_signals(validated_target.tgid, signum)"));
+}
+
+#[test]
+fn linux_scheduler_policy_and_priority_are_process_state_inherited_by_fork() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall runtime");
+    let linux_process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read Linux process runtime");
+    let linux_task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+    let scheduler = std::fs::read_to_string(repository.join("src/kernel_objects/scheduler.rs"))
+        .expect("read scheduler runtime");
+    let syscall_logic =
+        std::fs::read_to_string(repository.join("src/syscall/syscall_logic_shared.rs"))
+            .expect("read syscall shared logic");
+
+    assert!(syscall_logic.contains("pub(crate) const fn linux_sched_priority_bounds("));
+    assert!(syscall_logic.contains("pub(crate) const fn linux_sched_priority_valid("));
+    assert!(syscall_logic.contains("pub(crate) const fn linux_sched_kernel_priority("));
+    assert!(syscall_logic.contains("pub(crate) const LINUX_SCHED_ONLINE_CPU_COUNT: usize = 1"));
+    assert!(syscall_logic.contains("pub(crate) fn linux_sched_affinity_mask_intersects("));
+
+    for token in [
+        "scheduler_policy: usize",
+        "scheduler_priority: i32",
+        "scheduler_policy: process_state.scheduler_policy",
+        "scheduler_priority: process_state.scheduler_priority",
+        "scheduler_policy: parent.scheduler_policy",
+        "scheduler_priority: parent.scheduler_priority",
+    ] {
+        assert!(
+            syscall.contains(token),
+            "missing scheduler inheritance token {token}"
+        );
+    }
+    assert!(linux_task.contains("pub(crate) fn by_tid(tid: usize) -> Option<LinuxTaskCore>"));
+    assert!(linux_task.contains("pub(crate) fn sched_param("));
+    assert!(linux_task.contains("pub(crate) fn set_sched_param("));
+    assert!(linux_task.contains("runtime.tasks.inherit_sched_param(reservation, current.0)"));
+    assert!(linux_process
+        .contains("apply_linux_resource_scheduler_priority(process.pid, scheduler_thread)"));
+    assert!(scheduler.contains("pub fn create_suspended_thread("));
+    assert!(linux_process
+        .contains("create_suspended_thread(linux_fork_child_entry, \"linux_process\")"));
+    assert!(!linux_process
+        .contains("create_suspended_thread_on_cpu(linux_fork_child_entry, \"linux_process\", 0)"));
+
+    let target_task = braced_body(
+        &syscall[syscall
+            .find("fn linux_sched_target_task(")
+            .expect("sched task-id target helper")..],
+    );
+    assert!(target_task.contains("linux_task::current_task()?"));
+    assert!(target_task.contains("linux_task::by_tid(pid).ok_or(SysError::ESRCH)?"));
+    assert!(target_task.contains("scheduler_thread: task.scheduler_thread"));
+
+    let target_param = braced_body(
+        &syscall[syscall
+            .find("fn linux_sched_target_param(")
+            .expect("sched target param helper")..],
+    );
+    assert!(target_param.contains("linux_task::sched_param(target.tid, target.scheduler_thread)"));
+    assert!(target_param.contains("process_resources(target.tgid)"));
+
+    let set_target_param = braced_body(
+        &syscall[syscall
+            .find("fn linux_set_sched_target_param(")
+            .expect("sched target update helper")..],
+    );
+    assert!(set_target_param.contains("linux_apply_sched_priority_to_thread("));
+    assert!(set_target_param.contains("linux_task::set_sched_param("));
+    assert!(set_target_param.contains("target.tid == target.tgid"));
+
+    let getparam = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_sched_getparam(")
+            .expect("sched_getparam implementation")..],
+    );
+    assert!(getparam.contains("linux_sched_target_task(pid)"));
+    assert!(getparam.contains("linux_sched_target_param(target).priority"));
+    assert!(getparam.contains("linux_write_user_sched_param(param,"));
+    let write_param = braced_body(
+        &syscall[syscall
+            .find("fn linux_write_user_sched_param(")
+            .expect("sched_param copyout helper")..],
+    );
+    assert!(write_param.contains("linux_copy_to_user("));
+
+    let setparam = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_sched_setparam(")
+            .expect("sched_setparam implementation")..],
+    );
+    assert!(setparam.contains("linux_read_user_sched_param(param)"));
+    assert!(setparam.contains("linux_sched_target_task(pid)"));
+    assert!(setparam.contains("linux_sched_target_param(target).policy"));
+    assert!(setparam.contains("linux_sched_priority_valid(policy, priority)"));
+    assert!(setparam.contains("linux_set_sched_target_param("));
+
+    let getscheduler = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_sched_getscheduler(")
+            .expect("sched_getscheduler implementation")..],
+    );
+    assert!(getscheduler.contains("linux_sched_target_task(pid)"));
+    assert!(getscheduler.contains("linux_sched_target_param(target).policy"));
+
+    let setscheduler = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_sched_setscheduler(")
+            .expect("sched_setscheduler implementation")..],
+    );
+    assert!(setscheduler.contains("linux_read_user_sched_param(param)"));
+    assert!(setscheduler.contains("linux_sched_priority_valid(policy, priority)"));
+    assert!(setscheduler.contains("linux_sched_target_task(pid)"));
+    assert!(setscheduler.contains("linux_set_sched_target_param("));
+
+    let apply_priority = braced_body(
+        &syscall[syscall
+            .find("fn linux_apply_sched_priority_to_thread(")
+            .expect("scheduler priority propagation helper")..],
+    );
+    assert!(apply_priority.contains("linux_sched_kernel_priority(policy, priority)"));
+    assert!(apply_priority.contains("scheduler::scheduler().set_thread_priority("));
+    let reschedule = braced_body(
+        &syscall[syscall
+            .find("fn linux_reschedule_after_sched_change(")
+            .expect("scheduler change preemption helper")..],
+    );
+    assert!(reschedule.contains("scheduler::scheduler().should_preempt()"));
+    assert!(reschedule.contains("scheduler::yield_now()"));
+
+    assert!(syscall.contains("pub fn sys_sched_get_priority_max(policy: usize)"));
+    assert!(syscall.contains("pub fn sys_sched_get_priority_min(policy: usize)"));
+
+    let rr_interval = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_sched_rr_get_interval(")
+            .expect("sched_rr_get_interval implementation")..],
+    );
+    assert!(rr_interval.contains("linux_sched_target_pid(pid)"));
+    assert!(rr_interval.contains("linux_zero_user("));
+
+    let getaffinity = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_sched_getaffinity(")
+            .expect("sched_getaffinity implementation")..],
+    );
+    assert!(getaffinity.contains("linux_sched_target_pid(pid)"));
+    assert!(getaffinity.contains("linux_sched_affinity_byte("));
+
+    let setaffinity = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_sched_setaffinity(")
+            .expect("sched_setaffinity implementation")..],
+    );
+    assert!(setaffinity.contains("linux_sched_target_pid(pid)"));
+    assert!(setaffinity.contains("linux_sched_affinity_mask_intersects_at("));
+
+    let dispatch = braced_body(
+        &syscall[syscall
+            .find("pub fn dispatch_linux_syscall(")
+            .expect("Linux syscall dispatcher")..],
+    );
+    assert!(dispatch.contains("ARM64_SYS_SCHED_YIELD => sys_sched_yield()"));
+}
+
+#[test]
+fn linux_select_zero_fd_timeout_uses_interruptible_sleep() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    assert!(
+        syscall.contains("fn linux_read_user_timeval("),
+        "select timeout path should decode struct timeval with checked user copies"
+    );
+    let read_timeval = braced_body(
+        &syscall[syscall
+            .find("fn linux_read_user_timeval(")
+            .expect("timeval reader")..],
+    );
+    assert!(read_timeval.contains("linux_copy_from_user(address, &mut bytes)?"));
+    assert!(read_timeval.contains("linux_decode_timeval(&bytes, 0)"));
+
+    let helper = braced_body(
+        &syscall[syscall
+            .find("fn linux_select_timeout_wait(")
+            .expect("select timeout sleep helper")..],
+    );
+    assert!(helper.contains("linux_read_user_timeval(timeout)?"));
+    assert!(helper.contains("linux_timeval_is_zero(timeval)"));
+    assert!(helper.contains("linux_task::linux_sleep_timespec_nanoseconds("));
+    assert!(helper.contains("linux_timeval_to_ticks(timeval).max(1)"));
+    assert!(helper.contains("LinuxSleepWait::relative_waiting("));
+    assert!(helper.contains("linux_sleep_until(wait, 0)"));
+
+    let select = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_select(")
+            .expect("select implementation")..],
+    );
+    let zero_fd = select
+        .find("if nfds == 0")
+        .expect("zero-fd select timeout path");
+    let timeout_wait = select
+        .find("return linux_select_timeout_wait(timeout);")
+        .expect("zero-fd select should use interruptible timeout sleep");
+    assert!(zero_fd < timeout_wait);
+}
+
+#[test]
 fn linux_memory_and_loader_are_process_owned() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let modules = std::fs::read_to_string(repository.join("src/syscall/mod.rs"))
@@ -5438,6 +5886,34 @@ fn fxfs_bootstrap_provides_posix_shared_memory_directory() {
         .expect("POSIX shared-memory directory");
 
     assert!(dev < shm);
+}
+
+#[test]
+fn fxfs_loaded_volume_repairs_posix_shared_memory_directory() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS service");
+    let load_match = fxfs
+        .find("match self.load_from_block()")
+        .expect("FxFS block-backed load");
+    let load_success = fxfs[load_match..]
+        .find("Ok(()) => {")
+        .map(|start| braced_body(&fxfs[load_match + start..]))
+        .expect("FxFS block-backed load success path");
+    let shm = load_success
+        .find("self.ensure_dir_tree(\"/dev/shm\")?")
+        .expect("loaded FxFS volumes must repair POSIX shared-memory directory");
+    let host_share = load_success
+        .find("self.install_host_share(false)?")
+        .expect("host share install after runtime directory repair");
+    let suspend = load_success
+        .find("self.suspend_persist();")
+        .expect("loaded FxFS repairs should batch persistence");
+    let resume = load_success
+        .find("self.resume_persist();")
+        .expect("loaded FxFS repairs should resume persistence once");
+
+    assert!(suspend < shm && shm < host_share && host_share < resume);
 }
 
 #[test]
@@ -5564,14 +6040,18 @@ fn linux_sync_syscalls_force_fxfs_persistence() {
         .expect("fsync syscall");
     let fsync = braced_body(&syscall[fsync_start..]);
     let validate = fsync
-        .find("if !linux_fd_is_file_or_pipe(fd)")
+        .find("if !linux_fd_known(fd)")
         .expect("descriptor validation");
+    let operation_possible = fsync
+        .find("if !linux_fd_is_file(fd)")
+        .expect("operation-possible validation");
     let force = fsync
         .find("fxfs::force_persist()")
         .expect("forced FxFS commit");
-    assert!(validate < force);
+    assert!(validate < operation_possible && operation_possible < force);
     assert!(fsync.contains("map_err(|_| SysError::EIO)?"));
-    assert!(fsync.contains("Err(SysError::ENODEV)"));
+    assert!(fsync.contains("Err(SysError::EBADF)"));
+    assert!(fsync.contains("Err(SysError::EINVAL)"));
 
     let fdatasync_start = syscall
         .find("pub fn sys_fdatasync(fd: usize)")
@@ -5620,6 +6100,8 @@ fn aarch64_directory_open_flags_match_staged_glibc() {
         .find("pub fn sys_fstat(")
         .expect("Linux fstat implementation");
     let fstat = braced_body(&syscall[fstat_start..]);
+    assert!(fstat.contains("linux_fd_is_console(fd)"));
+    assert!(fstat.contains("0o020666"));
     assert!(fstat.contains(
         "let mode = if linux_fd_is_dir(fd) {\n        0o040755\n    } else {\n        0o100644\n    };\n    linux_write_stat(stat_ptr, mode)"
     ));
@@ -5719,6 +6201,530 @@ fn linux_common_mmap_paths_avoid_quadratic_metadata_cloning() {
         .expect("general transactional unmap path");
     assert!(exact < clone);
     assert!(unmap.contains("self.next_addr = core::cmp::min(self.next_addr, address)"));
+}
+
+#[test]
+fn linux_mmap_rejects_unsupported_fd_type_before_access_mode() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    let mmap_start = syscall
+        .find("pub fn sys_mmap(")
+        .expect("mmap implementation");
+    let mmap = braced_body(&syscall[mmap_start..]);
+    let unsupported_type = mmap
+        .find("ok_or(SysError::ENODEV)")
+        .expect("unsupported mmap fd type maps to ENODEV");
+    let access_mode = mmap
+        .find("linux_mmap_fd_access_ok")
+        .expect("mmap open mode check");
+    assert!(
+        unsupported_type < access_mode,
+        "mmap should report ENODEV for unsupported descriptor types before EACCES open-mode checks"
+    );
+}
+
+#[test]
+fn linux_msync_flushes_file_backed_shared_mappings() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let process_memory =
+        std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+            .expect("read process memory implementation");
+
+    assert!(
+        syscall.contains("pub fn sys_msync("),
+        "Linux msync must be a real syscall, not sys_memory_noop"
+    );
+
+    let dispatch = braced_body(
+        &syscall[syscall
+            .find("pub fn dispatch_linux_syscall(")
+            .expect("syscall dispatch")..],
+    );
+    assert!(dispatch.contains("ARM64_SYS_MSYNC => sys_msync(args[0], args[1], args[2])"));
+
+    let msync = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_msync(")
+            .expect("msync implementation")..],
+    );
+    assert!(msync.contains("linux_process_memory::sync_current_file_mappings"));
+    assert!(msync.contains("linux_process_memory::copy_from_current"));
+    assert!(msync.contains("fxfs::position_cursor("));
+    assert!(msync.contains("fxfs::cursor_write(&mut file.cursor"));
+    assert!(!msync.contains("sys_memory_noop"));
+
+    assert!(process_memory.contains("pub(crate) struct LinuxFileMappingSyncRange"));
+    assert!(process_memory.contains("fn file_mapping_sync_ranges("));
+    assert!(process_memory.contains("flags & LINUX_MAP_SHARED == 0"));
+    assert!(process_memory.contains("LinuxMappingSource::File"));
+}
+
+#[test]
+fn linux_fxfs_stat_and_read_paths_publish_posix_timestamps() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS implementation");
+
+    let stat = braced_body(
+        &syscall[syscall
+            .find("fn linux_write_stat_from_attrs(")
+            .expect("stat writer")..],
+    );
+    for token in [
+        "const ST_ATIME_OFF: usize = 72;",
+        "const ST_MTIME_OFF: usize = 88;",
+        "const ST_CTIME_OFF: usize = 104;",
+        "attrs.accessed_at",
+        "attrs.modified_at",
+    ] {
+        assert!(stat.contains(token), "missing stat timestamp token {token}");
+    }
+
+    let cursor_read = braced_body(
+        &fxfs[fxfs
+            .find("fn cursor_read(&mut self")
+            .expect("FxFS cursor_read implementation")..],
+    );
+    assert!(cursor_read.contains("self.touch_file_read(index)"));
+    assert!(cursor_read.contains("FxfsJournalOp::ReadFile"));
+}
+
+#[test]
+fn linux_ftruncate_resizes_fxfs_backed_files_for_mmap() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS implementation");
+
+    let ftruncate = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_ftruncate(")
+            .expect("ftruncate implementation")..],
+    );
+    assert!(ftruncate.contains("linux_fxfs_file_for_fd(fd, false)"));
+    assert!(ftruncate.contains("fxfs::truncate_cursor(file.cursor, len)"));
+    assert!(ftruncate.contains("record.writable"));
+    assert!(ftruncate.contains("compat::table().set_property"));
+    assert!(fxfs.contains("pub fn truncate_cursor("));
+    assert!(!ftruncate.contains("fxfs::truncate_file(path.as_str(), len)"));
+    assert!(!ftruncate.contains("if linux_fd_is_file(fd) {\n        Ok(0)\n    }"));
+
+    let mmap = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_mmap(")
+            .expect("mmap implementation")..],
+    );
+    assert!(mmap.contains("backing_len: attrs.size"));
+}
+
+#[test]
+fn linux_ftruncate_reports_einval_for_read_only_shared_memory() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let ftruncate = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_ftruncate(")
+            .expect("ftruncate implementation")..],
+    );
+
+    assert!(ftruncate.contains("linux_fxfs_path_for_fd(fd, false)"));
+    assert!(ftruncate.contains("SysError::EINVAL"));
+}
+
+#[test]
+fn linux_shm_open_honors_mode_umask_permissions_and_name_limits() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let openat = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_openat(")
+            .expect("openat implementation")..],
+    );
+    let umask = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_umask(")
+            .expect("umask implementation")..],
+    );
+
+    assert!(openat.contains("linux_apply_creation_attributes"));
+    assert!(syscall.contains("fxfs::set_attrs"));
+    assert!(syscall.contains("umask"));
+    assert!(syscall.contains("linux_mode_access_allowed"));
+    assert!(syscall.contains("linux_shm_check_unlink_permissions"));
+    assert!(syscall.contains("SysError::ENAMETOOLONG"));
+    assert!(!umask.contains("Ok(0o022)"));
+}
+
+#[test]
+fn linux_mmap_enforces_posix_limit_and_object_errors() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    for token in [
+        "const LINUX_RLIMIT_MEMLOCK: usize = 8;",
+        "const LINUX_MCL_FUTURE: usize = 0x2;",
+        "pub fn sys_mlockall(",
+        "pub fn sys_munlockall(",
+        "linux_mlock_future_mapping_exceeds_limit(len)",
+    ] {
+        assert!(syscall.contains(token), "missing mmap limit token {token}");
+    }
+    assert!(syscall.contains("resources.rlimit_memlock = new"));
+    assert!(syscall.contains("ARM64_SYS_MLOCKALL => sys_mlockall(args[0])"));
+
+    let mmap = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_mmap(")
+            .expect("mmap implementation")..],
+    );
+    assert!(mmap.contains("return Err(SysError::EAGAIN);"));
+    assert!(mmap.contains("return Err(SysError::ENOMEM);"));
+    assert!(mmap.contains("flags.contains(MmapFlags::SHARED)"));
+    assert!(mmap.contains("linux_mmap_object_span_available(*offset, len, *backing_len)"));
+    assert!(mmap.contains("return Err(SysError::ENXIO);"));
+}
+
+#[test]
+fn linux_mmap_file_prefill_avoids_fxfs_read_metadata_persist() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS implementation");
+
+    let prefill = braced_body(
+        &syscall[syscall
+            .find("fn linux_read_mmap_contents(")
+            .expect("mmap prefill implementation")..],
+    );
+    assert!(
+        prefill.contains("fxfs::cursor_read_for_mmap(&mut file.cursor, &mut contents)"),
+        "mmap file prefill should not call the metadata-persisting normal read path"
+    );
+    assert!(
+        !prefill.contains("fxfs::cursor_read(&mut file.cursor, &mut contents)"),
+        "mmap hot path must avoid cursor_read(), which updates atime and persists every read"
+    );
+
+    assert!(fxfs.contains("pub fn cursor_read_for_mmap("));
+    let mmap_read = braced_body(
+        &fxfs[fxfs
+            .find("fn cursor_read_for_mmap(")
+            .expect("FxFS mmap read implementation")..],
+    );
+    assert!(!mmap_read.contains("FxfsJournalOp::ReadFile"));
+    assert!(!mmap_read.contains("self.persist()"));
+}
+
+#[test]
+fn linux_mmap_marks_fxfs_atime_without_read_journal_persist() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS implementation");
+
+    assert!(fxfs.contains("pub fn cursor_mark_mmap_access("));
+    let marker = braced_body(
+        &fxfs[fxfs
+            .find("fn cursor_mark_mmap_access(")
+            .expect("FxFS mmap atime marker")..],
+    );
+    assert!(marker.contains("self.touch_file_read(index)"));
+    assert!(
+        marker.contains("attrs.link_count == 0") && marker.contains("return Ok(())"),
+        "mmap atime marker should skip unlinked open files that no path can stat"
+    );
+    assert!(
+        !marker.contains("FxfsJournalOp::ReadFile"),
+        "mmap atime marking should not use the normal read journal path"
+    );
+    assert!(
+        !marker.contains("self.persist()"),
+        "mmap atime marking should not persist metadata on the mmap hot path"
+    );
+
+    assert!(syscall.contains("fn linux_mark_mmap_access("));
+    let mmap = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_mmap(")
+            .expect("mmap implementation")..],
+    );
+    let mark = mmap
+        .find("linux_mark_mmap_access(&source)?")
+        .expect("mmap should mark file access before installing the mapping");
+    let map = mmap
+        .find("linux_process_memory::map_current_with_contents(")
+        .expect("mmap should install process memory mapping");
+    assert!(
+        mark < map,
+        "file mmap access time should be marked during mmap, before returning the mapping"
+    );
+}
+
+#[test]
+fn linux_mmap_skips_fxfs_atime_marker_for_unlinked_open_files_from_cached_attrs() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    let mmap = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_mmap(")
+            .expect("mmap implementation")..],
+    );
+    assert!(
+        mmap.contains("let mmap_access_updates_atime = attrs.link_count != 0;"),
+        "sys_mmap should derive the atime decision from the attrs already read for file size"
+    );
+    let gate = mmap
+        .find("if mmap_access_updates_atime")
+        .expect("file mmap atime marker should be gated by cached link count");
+    let marker = mmap[gate..]
+        .find("linux_mark_mmap_access(&source)?")
+        .expect("linked file mmap should still mark atime");
+    let map = mmap
+        .find("linux_process_memory::map_current_with_contents(")
+        .expect("mmap should install process memory mapping");
+    assert!(
+        gate + marker < map,
+        "linked-file atime marking should still happen before the mapping is returned"
+    );
+}
+
+#[test]
+fn linux_file_backed_shared_mmap_reuses_cached_pages_before_allocating() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read process memory implementation");
+
+    for token in [
+        "const LINUX_SHARED_FILE_PAGE_CACHE_LIMIT",
+        "fn acquire_cached_shared_page(",
+        "fn prune_cached_shared_file_pages(",
+        "fn linux_shared_file_page_cacheable(",
+    ] {
+        assert!(
+            memory.contains(token),
+            "missing shared mmap cache token {token}"
+        );
+    }
+
+    let allocate_shared = braced_body(
+        &memory[memory
+            .find("fn allocate_shared_mmap_pages(")
+            .expect("shared mmap allocator")..],
+    );
+    let cached = allocate_shared
+        .find("acquire_cached_shared_page(object_id, page_index)")
+        .expect("shared mmap allocator should try cached pages first");
+    let alloc = allocate_shared
+        .find("PageFrameAllocator::alloc()")
+        .expect("shared mmap allocator should still allocate misses");
+    assert!(
+        cached < alloc,
+        "file-backed MAP_SHARED mmap should reuse a cached page before allocating a new page"
+    );
+    assert!(
+        !allocate_shared.contains("let candidates = self.allocate_unmapped_pages(len, contents)?"),
+        "shared mmap hot path should not allocate candidate pages before checking the cache"
+    );
+
+    let release = braced_body(
+        &memory[memory
+            .find("fn release_shared_page(")
+            .expect("shared page release")..],
+    );
+    assert!(release.contains("linux_shared_file_page_cacheable(runtime, object_id)"));
+    assert!(release.contains("runtime.pages[index].references = 0"));
+    assert!(release.contains("prune_cached_shared_file_pages(runtime)"));
+}
+
+#[test]
+fn linux_file_backed_shared_mmap_zeros_partial_eof_cache_before_reuse() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read process memory implementation");
+
+    assert!(memory.contains("file_backing_len: Option<usize>"));
+    assert!(memory.contains("fn zero_cached_shared_file_tail("));
+    let zero_tail = braced_body(
+        &memory[memory
+            .find("fn zero_cached_shared_file_tail(")
+            .expect("partial EOF tail clearing helper")..],
+    );
+    for token in [
+        "file_backing_len",
+        "page.page_index.checked_mul(PAGE_SIZE)",
+        "PageFrameAllocator::pfn_address(page.pfn)",
+        "core::ptr::write_bytes",
+    ] {
+        assert!(
+            zero_tail.contains(token),
+            "missing tail clearing token {token}"
+        );
+    }
+
+    let acquire_cached = braced_body(
+        &memory[memory
+            .find("fn acquire_cached_shared_page(")
+            .expect("cached shared page acquisition")..],
+    );
+    let zero = acquire_cached
+        .find("zero_cached_shared_file_tail(runtime, index)")
+        .expect("cached file page should clear partial EOF tail before reuse");
+    let acquire = acquire_cached
+        .find("runtime.pages[index].references = 1")
+        .expect("cached page should be reacquired");
+    assert!(
+        zero < acquire,
+        "partial EOF bytes must be zeroed before a cached file page becomes visible again"
+    );
+}
+
+#[test]
+fn linux_file_backed_shared_mmap_skips_prefill_when_cached() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read process memory implementation");
+
+    assert!(
+        memory.contains("pub(crate) fn shared_file_mmap_pages_cached("),
+        "process memory should expose an allocation-free shared file mmap cache probe"
+    );
+    let cache_probe = braced_body(
+        &memory[memory
+            .find("fn shared_file_mmap_pages_cached(")
+            .expect("shared file mmap cache probe")..],
+    );
+    assert!(cache_probe.contains("LinuxMappingSource::File"));
+    assert!(cache_probe.contains("runtime.mmap_objects.iter().find"));
+    assert!(
+        cache_probe.contains(".pages")
+            && cache_probe.contains(".iter()")
+            && cache_probe.contains(".any("),
+        "cache probe should verify every requested page exists in the shared page table"
+    );
+    assert!(
+        !cache_probe.contains("PageFrameAllocator::alloc"),
+        "cache probe must not allocate pages"
+    );
+    assert!(
+        !cache_probe.contains("fxfs::"),
+        "cache probe must not perform filesystem I/O"
+    );
+
+    let mmap = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_mmap(")
+            .expect("mmap implementation")..],
+    );
+    let cache_check = mmap
+        .find("linux_process_memory::shared_file_mmap_pages_cached(&source, len)")
+        .expect("mmap should check the shared file page cache before prefill");
+    let prefill = mmap
+        .find("linux_read_mmap_contents(&source, len)")
+        .expect("mmap should still prefill uncached file mappings");
+    assert!(
+        cache_check < prefill,
+        "cached MAP_SHARED file mappings should skip the FxFS prefill hot path"
+    );
+    assert!(mmap.contains("Vec::new()"));
+}
+
+#[test]
+fn aarch64_user_page_publish_avoids_unnecessary_tlbi_on_new_mappings() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let user_space =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/user_address_space.rs"))
+            .expect("read aarch64 user address-space backend");
+
+    let publish = braced_body(
+        &user_space[user_space
+            .find("fn publish_user_mapping(")
+            .expect("publish hook")..],
+    );
+    assert!(publish.contains("cpu::complete_user_page_update();"));
+    assert!(
+        !publish.contains("invalidate_user_page"),
+        "installing a new mapping should publish page-table writes without per-page TLBI"
+    );
+
+    let break_mapping = braced_body(
+        &user_space[user_space
+            .find("fn break_user_mapping(")
+            .expect("break hook")..],
+    );
+    assert!(
+        break_mapping.contains("cpu::invalidate_user_page(vaddr);"),
+        "removing a mapping must still invalidate stale TLB entries"
+    );
+}
+
+#[test]
+fn linux_exact_munmap_uses_mapping_pages_without_overlap_vector() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read process memory implementation");
+
+    assert!(memory.contains("fn unmap_exact_mapping_pages_transactionally("));
+    let unmap = braced_body(
+        &memory[memory
+            .find("    fn unmap(&mut self")
+            .expect("process unmap implementation")..],
+    );
+    let exact = unmap
+        .find("if let Some(index) = exact_mapping_index")
+        .expect("exact unmap path");
+    let general = unmap[exact..]
+        .find("let pages = self.try_mapped_pages_overlapping(address, len)?")
+        .map(|offset| exact + offset)
+        .expect("general overlap-vector unmap path");
+    let exact_path = &unmap[exact..general];
+    assert!(exact_path.contains("self.unmap_exact_mapping_pages_transactionally(index)?"));
+    assert!(
+        !exact_path.contains("try_mapped_pages_overlapping"),
+        "exact munmap should use the mapping's existing page vector directly"
+    );
+}
+
+#[test]
+fn aarch64_single_page_map_uses_existing_leaf_without_heap_rollback_vectors() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let core =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/aarch64_vm_logic_shared.rs"))
+            .expect("read aarch64 VM core");
+
+    let map_user_page = braced_body(
+        &core[core
+            .find("    pub(crate) fn map_user_page(\n")
+            .expect("single-page map implementation")..],
+    );
+    let fast = map_user_page
+        .find("if let Ok((table_pfn, index)) = self.leaf_location(vaddr)")
+        .expect("existing-leaf fast path");
+    let rollback_vectors = map_user_page
+        .find("let mut created = alloc::vec::Vec::new();")
+        .expect("fallback rollback vector path");
+    assert!(
+        fast < rollback_vectors,
+        "single-page map should try the existing leaf table before allocating rollback vectors"
+    );
+    let fast_path = &map_user_page[fast..rollback_vectors];
+    assert!(fast_path.contains("return Ok(());"));
+    assert!(!fast_path.contains("alloc::vec::Vec::new()"));
 }
 
 #[test]
@@ -6116,7 +7122,7 @@ fn linux_resource_copyouts_preflight_and_rollback_transactionally() {
         .find("if let Err(error) = linux_write_user_i32(")
         .expect("fallible timer-ID copyout");
     let timer_register = timer
-        .find("register_linux_timer(pid, handle.0, timer_id, clock, signal)")
+        .find("register_linux_timer(pid, handle.0, timer_id, clock, signal, signal_value)")
         .expect("process timer registration");
     let timer_remove = timer[timer_failed_copyout..]
         .find("remove_linux_timer(pid, timer_id)")
@@ -6307,6 +7313,7 @@ fn linux_fd_syscalls_report_bad_file_descriptor_for_bad_fds() {
         "pub fn sys_pwrite(",
         "pub fn sys_fcntl(",
         "pub fn sys_lseek(",
+        "pub fn sys_mmap(",
     ] {
         let start = syscall.find(start_marker).expect("fd syscall");
         let body = braced_body(&syscall[start..]);
@@ -6932,7 +7939,7 @@ fn linux_fork_publishes_only_a_complete_child() {
         .find("impl LinuxForkOwnershipOps for Aarch64LinuxForkOps")
         .expect("production fork ownership operations")..];
     for acquisition in [
-        "create_suspended_thread_on_cpu",
+        "create_suspended_thread(",
         "reserve_fork_task",
         "reserve_child_with_pid",
         "reserve_resource_clone",
@@ -7101,7 +8108,8 @@ fn linux_fork_publishes_only_a_complete_child() {
             .find("pub fn sys_linux_timer_create(")
             .expect("POSIX timer create")..],
     );
-    assert!(timer_create.contains("register_linux_timer(pid, handle.0, timer_id, clock, signal)"));
+    assert!(timer_create
+        .contains("register_linux_timer(pid, handle.0, timer_id, clock, signal, signal_value)"));
     let timer_registration = &syscall[syscall
         .find("fn register_linux_timer(")
         .expect("process timer registration")..];
@@ -7205,15 +8213,15 @@ fn linux_wait_reaps_one_real_child_status() {
         .expect("process-locked wait completion helper");
     let completion = braced_body(&process[completion_start..]);
     assert!(completion.contains("with_runtime(|runtime|"));
-    assert!(completion.contains("complete_linux_wait("));
+    assert!(completion.contains("complete_linux_wait_with_options("));
     assert!(completion.contains("linux_process_memory::copy_to_process("));
     assert!(completion.contains("parent.pid"));
     let transaction_start = process_logic
-        .find("pub(crate) fn complete_linux_wait")
+        .find("pub(crate) fn complete_linux_wait_with_options")
         .expect("shared wait transaction");
     let transaction = braced_body(&process_logic[transaction_start..]);
     let revalidate = transaction
-        .find("wait_outcome(parent_pid, selector)")
+        .find("wait_outcome_with_options(parent_pid, selector, include_stopped)")
         .expect("ready child revalidation");
     let copy = transaction
         .find("copy_status(status)")
@@ -7550,10 +8558,17 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
             .find("pub fn sys_kill(")
             .expect("process-directed kill")..],
     );
-    assert!(kill.contains("linux_process::by_pid(target_pid)"));
-    assert!(kill.contains("if signum == LINUX_SIGKILL"));
-    assert!(kill.contains("terminate_linux_process_by_signal(target_pid, signum)"));
-    assert!(kill.contains("queue_process_linux_signal_and_wake(target_pid"));
+    assert!(kill.contains("let targets = linux_kill_targets(pid)?"));
+    assert!(kill.contains("linux_deliver_kill_to_target(target_pid, signum)"));
+    let kill_delivery = braced_body(
+        &syscall[syscall
+            .find("fn linux_deliver_kill_to_target(")
+            .expect("per-target kill delivery")..],
+    );
+    assert!(kill_delivery.contains("linux_process::by_pid(target_pid)"));
+    assert!(kill_delivery.contains("if signum == LINUX_SIGKILL"));
+    assert!(kill_delivery.contains("terminate_linux_process_by_signal(target_pid, signum)"));
+    assert!(kill_delivery.contains("queue_process_linux_signal_and_wake(target_pid"));
 
     let sigqueue = braced_body(
         &syscall[syscall
@@ -7645,6 +8660,142 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
     );
     assert!(prepare_return.contains("set_kernel_resume("));
     assert!(prepare_return.contains("run_elf_launcher_resume as *const () as u64"));
+}
+
+#[test]
+fn linux_kill_checks_credentials_and_process_groups() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux signal syscall implementation");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read Linux process runtime");
+
+    let targets = braced_body(
+        &syscall[syscall
+            .find("fn linux_kill_targets(")
+            .expect("kill target resolver")..],
+    );
+    assert!(targets.contains("pid == 0"));
+    assert!(targets.contains("pid == -1"));
+    assert!(targets.contains("pid < -1"));
+    assert!(targets.contains("linux_process::pids_in_process_group("));
+
+    let permission = braced_body(
+        &syscall[syscall
+            .find("fn linux_kill_permission(")
+            .expect("kill credential check")..],
+    );
+    assert!(permission.contains("sender.effective_uid == 0"));
+    assert!(permission.contains("target_pid == linux_process::LINUX_ROOT_PID"));
+    assert!(permission.contains("SysError::EPERM"));
+
+    assert!(syscall.contains("fn linux_pid_t_arg("));
+    assert!(syscall.contains("ARM64_SYS_KILL => sys_kill(linux_pid_t_arg(args[0]), args[1])"));
+
+    let kill = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_kill(")
+            .expect("process-directed kill")..],
+    );
+    let resolve = kill
+        .find("let targets = linux_kill_targets(pid)?")
+        .expect("resolve target set before delivery");
+    let deliver = kill
+        .find("linux_deliver_kill_to_target(")
+        .expect("centralized per-target delivery");
+    assert!(resolve < deliver);
+    assert!(kill.contains("linux_kill_permission(target_pid)"));
+
+    let getpgid = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_getpgid(")
+            .expect("getpgid implementation")..],
+    );
+    assert!(getpgid.contains("linux_process::by_pid(target)"));
+    assert!(getpgid.contains("process.process_group"));
+
+    let setpgid = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_setpgid(")
+            .expect("setpgid implementation")..],
+    );
+    assert!(setpgid.contains("linux_process::set_process_group(target, group)"));
+
+    assert!(process.contains("pub(crate) fn pids_in_process_group("));
+    assert!(process.contains("pub(crate) fn set_process_group("));
+}
+
+#[test]
+fn linux_fork_resets_cpu_accounting_and_timer_inheritance() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux syscall implementation");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read Linux process runtime");
+
+    let resources = braced_body(
+        &syscall[syscall
+            .find("struct LinuxProcessResources")
+            .expect("Linux process resources")..],
+    );
+    for field in [
+        "cpu_start_tick: u64",
+        "cpu_start_nanos: u64",
+        "cpu_clock_offset_nanos: i64",
+        "child_user_ticks: isize",
+        "child_system_ticks: isize",
+    ] {
+        assert!(resources.contains(field), "missing process CPU field {field}");
+    }
+
+    let install = braced_body(
+        &syscall[syscall
+            .find("fn install_process_resources(")
+            .expect("fork resource publication")..],
+    );
+    assert!(install.contains("cpu_start_tick: linux_cpu_start_tick()"));
+    assert!(install.contains("cpu_start_nanos: monotonic_nanos()"));
+    assert!(install.contains("posix_timers: Vec::new()"));
+
+    let clock = braced_body(
+        &syscall[syscall
+            .find("fn linux_clock_nanoseconds(")
+            .expect("clock source selection")..],
+    );
+    assert!(clock.contains("linux_current_cpu_clock_nanos()"));
+
+    let times = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_times(")
+            .expect("times implementation")..],
+    );
+    assert!(times.contains("linux_process_elapsed_ticks(pid)"));
+    assert!(times.contains("resources.child_user_ticks"));
+    assert!(times.contains("resources.child_system_ticks"));
+
+    assert!(syscall.contains("fn record_linux_child_cpu_usage("));
+    assert!(process.contains("super::record_linux_child_cpu_usage(process.parent_pid, process.pid)"));
+    assert!(process.contains("super::record_linux_child_cpu_usage(parent_pid, tgid)"));
+
+    let timer_create = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_linux_timer_create(")
+            .expect("timer_create implementation")..],
+    );
+    assert!(timer_create.contains("LINUX_SIGEV_THREAD_ID"));
+    assert!(timer_create.contains("LINUX_SIGEV_THREAD"));
+    assert!(timer_create.contains("event.sigev_value"));
+    assert!(timer_create.contains("register_linux_timer(pid, handle.0, timer_id, clock, signal, signal_value)"));
+
+    let timer_irq = braced_body(
+        &syscall[syscall
+            .find("pub fn deliver_linux_posix_timer_signals_from_irq()")
+            .expect("timer signal delivery")..],
+    );
+    assert!(syscall.contains("const LINUX_SI_TIMER: i32 = -2"));
+    assert!(syscall.contains("fn linux_timer_signal_record("));
+    assert!(timer_irq.contains("linux_timer_signal_record("));
+    assert!(timer_irq.contains("timer.signal_value"));
 }
 
 #[test]

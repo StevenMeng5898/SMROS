@@ -1,0 +1,47 @@
+diff --git a/conformance/interfaces/pthread_cond_destroy/2-1.c b/conformance/interfaces/pthread_cond_destroy/2-1.c
+index a170436..70abdb0 100644
+--- a/conformance/interfaces/pthread_cond_destroy/2-1.c
++++ b/conformance/interfaces/pthread_cond_destroy/2-1.c
+@@ -669,4 +669,3 @@ int main (int argc, char * argv[])
+ 	/* exit */
+ 	PASSED;
+ }
+-
+diff --git a/conformance/interfaces/pthread_cond_destroy/testfrmw.c b/conformance/interfaces/pthread_cond_destroy/testfrmw.c
+index 38adaa8..e1b8250 100644
+--- a/conformance/interfaces/pthread_cond_destroy/testfrmw.c
++++ b/conformance/interfaces/pthread_cond_destroy/testfrmw.c
+@@ -38,11 +38,11 @@ static pthread_mutex_t m_trace = PTHREAD_MUTEX_INITIALIZER;
+ /*****************************************************************************************/
+ /* The following functions will output to stdout */
+ #if (1)
+-void output_init()
+-{
+-	/* do nothing */
+-	return;
+-}
++void output_init()
++{
++	/* do nothing */
++	return;
++}
+ void output( char * string, ... )
+ {
+    va_list ap;
+diff --git a/conformance/interfaces/pthread_cond_init/1-3.c b/conformance/interfaces/pthread_cond_init/1-3.c
+index 944e3ee..d9be906 100644
+--- a/conformance/interfaces/pthread_cond_init/1-3.c
++++ b/conformance/interfaces/pthread_cond_init/1-3.c
+@@ -93,7 +93,6 @@
+ #ifndef VERBOSE
+ #define VERBOSE 1
+ #endif
+-
+ /********************************************************************************************/
+ /***********************************    Test case   *****************************************/
+ /********************************************************************************************/
+@@ -896,4 +895,3 @@ int main(int argc, char * argv[])
+ 	UNTESTED("This test requires XSI features");
+ }
+ #endif
+-

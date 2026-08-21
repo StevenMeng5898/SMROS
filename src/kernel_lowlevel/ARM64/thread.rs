@@ -13,7 +13,7 @@ use super::lowlevel_logic;
 include!("context_shared.rs");
 
 /// Maximum number of concurrent threads
-pub const MAX_THREADS: usize = 32;
+pub const MAX_THREADS: usize = 128;
 
 /// Default thread stack size (64KB)
 pub const DEFAULT_STACK_SIZE: usize = 0x1_0000;

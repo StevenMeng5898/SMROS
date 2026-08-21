@@ -699,6 +699,116 @@ class CampaignTests(unittest.TestCase):
             compile_row = next(row for row in rows if row["stage"] == "compile")
             self.assertEqual(compile_row["argv"][8], str(source))
 
+    def test_fork_message_catalog_test_stages_generated_support_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / "checkout"
+            test = replace(
+                suite_test("conformance/interfaces/fork/7-1.c"),
+                api="fork",
+            )
+            source = checkout / test.source
+            source.parent.mkdir(parents=True)
+            source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+            catalog_source = source.parent / "messcat_src.txt"
+            catalog_source.write_text(
+                "$set 1 test messages\n1 generated\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            support_path = (
+                root / "stage" / "conformance/interfaces/fork/mess.cat"
+            )
+
+            def fake_run(argv: list[str], **_kwargs: object) -> object:
+                command = list(argv)
+                if command[0].endswith("gcc"):
+                    output = Path(command[command.index("-o") + 1])
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    output.write_bytes(b"artifact")
+                stdout = "00000000 T main\n" if command[0].endswith("nm") else ""
+                return mock.Mock(returncode=0, stdout=stdout, stderr="")
+
+            def fake_bounded(argv: list[str], **_kwargs: object) -> object:
+                self.assertEqual(argv[0], "gencat")
+                self.assertEqual(Path(argv[2]).read_text(encoding="utf-8"), catalog_source.read_text(encoding="utf-8"))
+                destination = Path(argv[1])
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"generated catalog")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with mock.patch(
+                "scripts.posix.build.run_bounded_command",
+                side_effect=fake_bounded,
+            ):
+                build_campaign(
+                    checkout,
+                    (test,),
+                    (),
+                    metadata(),
+                    root / "stage",
+                    root / "work",
+                    command_runner=fake_run,
+                    dependency_stager=mock.Mock(return_value=()),
+                )
+
+            self.assertEqual(support_path.read_bytes(), b"generated catalog")
+            self.assertEqual(support_path.stat().st_mode & 0o777, 0o644)
+            host_manifest = json.loads(
+                (root / "stage/manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                host_manifest["support"],
+                [
+                    {
+                        "path": "conformance/interfaces/fork/mess.cat",
+                        "sha256": hashlib.sha256(b"generated catalog").hexdigest(),
+                    }
+                ],
+            )
+            verify_stage(root / "stage", verify_architecture=False)
+
+    def test_fork_message_catalog_real_gencat_works_with_stage_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / "checkout"
+            test = replace(
+                suite_test("conformance/interfaces/fork/7-1.c"),
+                api="fork",
+            )
+            source = checkout / test.source
+            source.parent.mkdir(parents=True)
+            source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+            (source.parent / "messcat_src.txt").write_text(
+                "$set 1 test messages\n1 generated\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            def fake_run(argv: list[str], **_kwargs: object) -> object:
+                command = list(argv)
+                if command[0].endswith("gcc"):
+                    output = Path(command[command.index("-o") + 1])
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    output.write_bytes(b"artifact")
+                stdout = "00000000 T main\n" if command[0].endswith("nm") else ""
+                return mock.Mock(returncode=0, stdout=stdout, stderr="")
+
+            build_campaign(
+                checkout,
+                (test,),
+                (),
+                metadata(),
+                root / "stage",
+                root / "work",
+                command_runner=fake_run,
+                dependency_stager=mock.Mock(return_value=()),
+            )
+            self.assertGreater(
+                (root / "stage/conformance/interfaces/fork/mess.cat").stat().st_size,
+                0,
+            )
+
     def test_execution_descriptor_diagnostics_are_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -2772,11 +2882,1213 @@ with tempfile.TemporaryDirectory() as temporary:
             "target/libsmros-posix-compat.so",
         )
 
+    def test_smros_posix_compat_syncs_fake_uid_with_smros_kernel(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("SYS_setreuid", source)
+        self.assertIn("smros_sync_kernel_effective_uid", source)
+
+    def test_smros_posix_compat_condvar_lazy_static_and_signal_handoff(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "cond-probe.c"
+            binary = root / "cond-probe"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <errno.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+enum { WAITERS = 3 };
+static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+static volatile int entered;
+static volatile int woken;
+
+static void *waiter(void *arg) {
+    (void)arg;
+    if (pthread_mutex_lock(&mutex) != 0) return (void *)1;
+    __sync_add_and_fetch(&entered, 1);
+    if (pthread_cond_wait(&cond, &mutex) != 0) return (void *)1;
+    __sync_add_and_fetch(&woken, 1);
+    return pthread_mutex_unlock(&mutex) == 0 ? NULL : (void *)1;
+}
+
+int main(void) {
+    pthread_t threads[WAITERS];
+    for (int i = 0; i < WAITERS; i++) {
+        if (pthread_create(&threads[i], NULL, waiter, NULL) != 0) return 2;
+    }
+    for (int i = 0; i < 10000 && entered < WAITERS; i++) usleep(1000);
+    if (entered != WAITERS) return 3;
+    if (pthread_cond_destroy(&cond) != EBUSY) return 4;
+    if (pthread_cond_signal(&cond) != 0) return 5;
+    for (int i = 0; i < 10000 && woken < 1; i++) usleep(1000);
+    if (woken < 1) return 6;
+    for (int i = 0; i < WAITERS - 1; i++) {
+        if (pthread_cond_signal(&cond) != 0) return 7;
+        for (int j = 0; j < 10000 && woken < i + 2; j++) usleep(1000);
+    }
+    if (woken != WAITERS) return 8;
+    for (int i = 0; i < WAITERS; i++) {
+        void *result = NULL;
+        if (pthread_join(threads[i], &result) != 0 || result != NULL) return 9;
+    }
+    return pthread_cond_destroy(&cond);
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_pshared_errorcheck_trylock_returns_busy(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "pshared-errorcheck-trylock.c"
+            binary = root / "pshared-errorcheck-trylock"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <errno.h>
+#include <pthread.h>
+#include <sys/mman.h>
+
+int main(void) {
+    pthread_mutex_t *mutex = mmap(
+        NULL, sizeof(*mutex), PROT_READ | PROT_WRITE,
+        MAP_SHARED | MAP_ANONYMOUS, -1, 0
+    );
+    if (mutex == MAP_FAILED) return 2;
+
+    pthread_mutexattr_t attr;
+    if (pthread_mutexattr_init(&attr) != 0) return 3;
+    if (pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED) != 0) return 4;
+    if (pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK) != 0) return 5;
+    if (pthread_mutex_init(mutex, &attr) != 0) return 6;
+    if (pthread_mutex_lock(mutex) != 0) return 7;
+    if (pthread_mutex_trylock(mutex) != EBUSY) return 8;
+    if (pthread_mutex_unlock(mutex) != 0) return 9;
+    if (pthread_mutex_destroy(mutex) != 0) return 10;
+    return munmap(mutex, sizeof(*mutex));
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_errorcheck_unlock_rejects_unowned_mutex(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "errorcheck-unlock.c"
+            binary = root / "errorcheck-unlock"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <errno.h>
+#include <pthread.h>
+
+int main(void) {
+    pthread_mutexattr_t attr;
+    pthread_mutex_t mutex;
+    if (pthread_mutexattr_init(&attr) != 0) return 2;
+    if (pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK) != 0) return 3;
+    if (pthread_mutex_init(&mutex, &attr) != 0) return 4;
+    if (pthread_mutex_lock(&mutex) != 0) return 5;
+    if (pthread_mutex_unlock(&mutex) != 0) return 6;
+    if (pthread_mutex_unlock(&mutex) != EPERM) return 7;
+    if (pthread_mutex_destroy(&mutex) != 0) return 8;
+    return pthread_mutexattr_destroy(&attr);
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_advertises_process_shared_threads(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "sysconf-process-shared.c"
+            binary = root / "sysconf-process-shared"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <unistd.h>
+
+int main(void) {
+    long process_shared = sysconf(_SC_THREAD_PROCESS_SHARED);
+    long mapped_files = sysconf(_SC_MAPPED_FILES);
+    return process_shared < 0 || mapped_files < 0 ? 1 : 0;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary)],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_shared_cond_ignores_inherited_private_record(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "shared-cond-inherited-record.c"
+            binary = root / "shared-cond-inherited-record"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <sched.h>
+#include <stdio.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+typedef struct {
+    pthread_cond_t cond;
+    pthread_mutex_t mutex;
+    int ready;
+    int predicate;
+} probe_t;
+
+static void child_wait(probe_t *probe) {
+    int result = pthread_mutex_lock(&probe->mutex);
+    if (result != 0) _exit(20 + result);
+    probe->ready = 1;
+    while (!probe->predicate) {
+        result = pthread_cond_wait(&probe->cond, &probe->mutex);
+        if (result != 0) {
+            pthread_mutex_unlock(&probe->mutex);
+            _exit(40 + result);
+        }
+    }
+    result = pthread_mutex_unlock(&probe->mutex);
+    _exit(result == 0 ? 0 : 60 + result);
+}
+
+int main(void) {
+    probe_t *probe = mmap(NULL, sizeof(*probe), PROT_READ | PROT_WRITE,
+                          MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (probe == MAP_FAILED) return 2;
+
+    pthread_mutexattr_t mutex_attr;
+    pthread_condattr_t cond_attr;
+    if (pthread_mutexattr_init(&mutex_attr) != 0 ||
+            pthread_condattr_init(&cond_attr) != 0) return 3;
+    if (pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED) != 0 ||
+            pthread_mutex_init(&probe->mutex, &mutex_attr) != 0 ||
+            pthread_cond_init(&probe->cond, NULL) != 0) return 4;
+    pthread_mutexattr_destroy(&mutex_attr);
+    pthread_condattr_destroy(&cond_attr);
+
+    pid_t child = fork();
+    if (child < 0) return 5;
+    if (child == 0) child_wait(probe);
+
+    /* Reuse the condition object as process-shared after the child inherited
+     * the parent's private compatibility record. */
+    if (pthread_cond_destroy(&probe->cond) != 0) return 6;
+    if (pthread_condattr_init(&cond_attr) != 0 ||
+            pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED) != 0 ||
+            pthread_cond_init(&probe->cond, &cond_attr) != 0) return 7;
+    pthread_condattr_destroy(&cond_attr);
+
+    int result = pthread_mutex_lock(&probe->mutex);
+    if (result != 0) return 8;
+    for (int index = 0; index < 10000 && !probe->ready; index++) {
+        pthread_mutex_unlock(&probe->mutex);
+        sched_yield();
+        result = pthread_mutex_lock(&probe->mutex);
+        if (result != 0) return 9;
+    }
+    if (!probe->ready) return 10;
+    probe->predicate = 1;
+    result = pthread_cond_signal(&probe->cond);
+    pthread_mutex_unlock(&probe->mutex);
+    if (result != 0) return 11;
+
+    int status = 0;
+    int reaped = 0;
+    for (int index = 0; index < 10000; index++) {
+        pid_t waited = waitpid(child, &status, WNOHANG);
+        if (waited == child) {
+            reaped = 1;
+            break;
+        }
+        if (waited < 0) break;
+        usleep(1000);
+    }
+    if (!reaped) {
+        kill(child, SIGKILL);
+        waitpid(child, &status, 0);
+        return 12;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return 13;
+    if (pthread_cond_destroy(&probe->cond) != 0 ||
+            pthread_mutex_destroy(&probe->mutex) != 0) return 14;
+    return munmap(probe, sizeof(*probe)) == 0 ? 0 : 15;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_shared_cond_wait_honors_deferred_cancel(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "shared-cond-cancel.c"
+            binary = root / "shared-cond-cancel"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <errno.h>
+#include <pthread.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+typedef struct {
+    pthread_cond_t cond;
+    pthread_mutex_t mutex;
+    volatile int ready;
+    volatile int cleanup_called;
+} probe_t;
+
+static void cleanup(void *arg) {
+    probe_t *probe = (probe_t *)arg;
+    probe->cleanup_called = 1;
+    (void)pthread_mutex_unlock(&probe->mutex);
+}
+
+static void *waiter(void *arg) {
+    probe_t *probe = (probe_t *)arg;
+    if (pthread_mutex_lock(&probe->mutex) != 0) return (void *)1;
+    probe->ready = 1;
+    pthread_cleanup_push(cleanup, probe);
+    (void)pthread_cond_wait(&probe->cond, &probe->mutex);
+    pthread_cleanup_pop(0);
+    (void)pthread_mutex_unlock(&probe->mutex);
+    return NULL;
+}
+
+int main(void) {
+    probe_t *probe = mmap(
+        NULL, sizeof(*probe), PROT_READ | PROT_WRITE,
+        MAP_SHARED | MAP_ANONYMOUS, -1, 0
+    );
+    if (probe == MAP_FAILED) return 2;
+    pthread_mutexattr_t mutex_attr;
+    pthread_condattr_t cond_attr;
+    if (pthread_mutexattr_init(&mutex_attr) != 0 ||
+            pthread_condattr_init(&cond_attr) != 0) return 3;
+    if (pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED) != 0 ||
+            pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED) != 0) return 4;
+    if (pthread_mutex_init(&probe->mutex, &mutex_attr) != 0 ||
+            pthread_cond_init(&probe->cond, &cond_attr) != 0) return 5;
+    pthread_mutexattr_destroy(&mutex_attr);
+    pthread_condattr_destroy(&cond_attr);
+
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, waiter, probe) != 0) return 6;
+    for (int i = 0; i < 10000 && !probe->ready; i++) usleep(1000);
+    if (!probe->ready) return 7;
+    if (pthread_cancel(thread) != 0) return 8;
+    void *result = NULL;
+    if (pthread_join(thread, &result) != 0 || result != PTHREAD_CANCELED) return 9;
+    if (!probe->cleanup_called) return 10;
+    if (pthread_cond_destroy(&probe->cond) != 0 ||
+            pthread_mutex_destroy(&probe->mutex) != 0) return 11;
+    return munmap(probe, sizeof(*probe)) == 0 ? 0 : 12;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_condvar_cancel_request_does_not_leak_to_reused_thread(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "cond-cancel-reuse.c"
+            binary = root / "cond-cancel-reuse"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <errno.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <unistd.h>
+
+static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+static volatile int ready;
+
+static void unlock_mutex(void *arg) {
+    (void)arg;
+    (void)pthread_mutex_unlock(&mutex);
+}
+
+static void *cancelled_waiter(void *arg) {
+    (void)arg;
+    if (pthread_mutex_lock(&mutex) != 0) return (void *)1;
+    __sync_add_and_fetch(&ready, 1);
+    int result = 0;
+    pthread_cleanup_push(unlock_mutex, NULL);
+    result = pthread_cond_wait(&cond, &mutex);
+    pthread_cleanup_pop(0);
+    (void)pthread_mutex_unlock(&mutex);
+    return (void *)(long)result;
+}
+
+static void *reused_waiter(void *arg) {
+    (void)arg;
+    if (pthread_mutex_lock(&mutex) != 0) return (void *)1;
+    __sync_add_and_fetch(&ready, 1);
+    int result = pthread_cond_wait(&cond, &mutex);
+    pthread_mutex_unlock(&mutex);
+    return (void *)(long)result;
+}
+
+int main(void) {
+    pthread_t first;
+    if (pthread_create(&first, NULL, cancelled_waiter, NULL) != 0) return 2;
+    for (int i = 0; i < 10000 && ready < 1; i++) usleep(1000);
+    if (ready != 1) return 3;
+    if (pthread_cancel(first) != 0) return 4;
+    if (pthread_cond_signal(&cond) != 0) return 5;
+    void *result = NULL;
+    if (pthread_join(first, &result) != 0 || result != PTHREAD_CANCELED) return 6;
+
+    ready = 0;
+    pthread_t second;
+    if (pthread_create(&second, NULL, reused_waiter, NULL) != 0) return 7;
+    for (int i = 0; i < 10000 && ready < 1; i++) usleep(1000);
+    if (ready != 1) return 8;
+    if (pthread_cond_signal(&cond) != 0) return 9;
+    result = NULL;
+    if (pthread_join(second, &result) != 0 || (long)result != 0) return 10;
+    return pthread_cond_destroy(&cond);
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_async_cancel_reaches_native_wait(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "async-cancel.c"
+            binary = root / "async-cancel"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <sched.h>
+#include <stdio.h>
+
+static pthread_barrier_t barrier;
+static volatile int entered;
+
+static void *waiter(void *arg) {
+    (void)arg;
+    if (pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL) != 0) {
+        return (void *)1;
+    }
+    entered = 1;
+    (void)pthread_barrier_wait(&barrier);
+    return NULL;
+}
+
+int main(void) {
+    pthread_t thread;
+    if (pthread_barrier_init(&barrier, NULL, 2) != 0) return 2;
+    if (pthread_create(&thread, NULL, waiter, NULL) != 0) return 3;
+    for (int index = 0; index < 10000 && !entered; index++) {
+        sched_yield();
+    }
+    if (!entered) return 4;
+    if (pthread_cancel(thread) != 0) return 5;
+    void *result = NULL;
+    if (pthread_join(thread, &result) != 0 || result != PTHREAD_CANCELED) {
+        fprintf(stderr, "async cancel result=%p\n", result);
+        return 6;
+    }
+    return 0;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_sched_metadata_is_thread_local(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "sched-metadata.c"
+            binary = root / "sched-metadata"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <sched.h>
+#include <stdio.h>
+
+static void *worker(void *arg) {
+    (void)arg;
+    return NULL;
+}
+
+int main(void) {
+    pthread_t thread;
+    struct sched_param param = { .sched_priority = 7 };
+    int policy = -1;
+    struct sched_param observed = { .sched_priority = -1 };
+    if (pthread_create(&thread, NULL, worker, NULL) != 0) return 1;
+    if (pthread_setschedparam(thread, SCHED_FIFO, &param) != 0) return 2;
+    if (pthread_getschedparam(thread, &policy, &observed) != 0) return 3;
+    if (policy != SCHED_FIFO || observed.sched_priority != 7) return 4;
+    if (pthread_join(thread, NULL) != 0) return 5;
+    return 0;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_mutex_getprioceiling_returns_fifo_default(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "mutex-prioceiling.c"
+            binary = root / "mutex-prioceiling"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <sched.h>
+
+int main(void) {
+    pthread_mutex_t mutex;
+    int ceiling = -1;
+    if (pthread_mutex_init(&mutex, NULL) != 0) return 1;
+    if (pthread_mutex_getprioceiling(&mutex, &ceiling) != 0) return 2;
+    if (ceiling < sched_get_priority_min(SCHED_FIFO) ||
+            ceiling > sched_get_priority_max(SCHED_FIFO)) return 3;
+    if (pthread_mutex_destroy(&mutex) != 0) return 4;
+    return 0;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_tracks_mutexattr_lifecycle(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "mutexattr-lifecycle.c"
+            binary = root / "mutexattr-lifecycle"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <errno.h>
+#include <pthread.h>
+#include <string.h>
+
+int main(void) {
+    pthread_mutexattr_t attr;
+    int type = -1;
+    memset(&attr, 0, sizeof(attr));
+    if (pthread_mutexattr_gettype(&attr, &type) != EINVAL) return 1;
+    if (pthread_mutexattr_init(&attr) != 0) return 2;
+    if (pthread_mutexattr_gettype(&attr, &type) != 0) return 3;
+    if (pthread_mutexattr_destroy(&attr) != 0) return 4;
+    if (pthread_mutexattr_gettype(&attr, &type) != EINVAL) return 5;
+    return 0;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_pthread_kill_rejects_joined_thread(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "pthread-kill-joined.c"
+            binary = root / "pthread-kill-joined"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <errno.h>
+#include <pthread.h>
+#include <signal.h>
+
+static void *worker(void *arg) {
+    return arg;
+}
+
+int main(void) {
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, worker, NULL) != 0) return 1;
+    if (pthread_join(thread, NULL) != 0) return 2;
+    return pthread_kill(thread, 0) == ESRCH ? 0 : 3;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_rejects_uninitialized_pthread_attr(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "invalid-attr.c"
+            binary = root / "invalid-attr"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <errno.h>
+#include <pthread.h>
+#include <signal.h>
+#include <string.h>
+#include <unistd.h>
+
+static void handler(int signum) {
+    if (signum == SIGSEGV) _exit(0);
+}
+
+static void *worker(void *arg) {
+    (void)arg;
+    return NULL;
+}
+
+int main(void) {
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = handler;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGSEGV, &action, NULL) != 0) return 1;
+
+    pthread_attr_t attr;
+    memset(&attr, 0xA5, sizeof(attr));
+    pthread_t thread;
+    (void)pthread_create(&thread, &attr, worker, NULL);
+    return 2;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_inherit_sched_uses_parent_metadata(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "inherit-sched.c"
+            binary = root / "inherit-sched"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <sched.h>
+
+static int observed_policy = -1;
+static int observed_priority = -1;
+
+static void *worker(void *arg) {
+    (void)arg;
+    struct sched_param param;
+    if (pthread_getschedparam(pthread_self(), &observed_policy, &param) != 0) {
+        return (void *)1;
+    }
+    observed_priority = param.sched_priority;
+    return NULL;
+}
+
+int main(void) {
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0) return 1;
+    if (pthread_attr_setschedpolicy(&attr, SCHED_FIFO) != 0) return 2;
+    if (pthread_attr_setinheritsched(&attr, PTHREAD_INHERIT_SCHED) != 0) return 3;
+
+    pthread_t thread;
+    if (pthread_create(&thread, &attr, worker, NULL) != 0) return 4;
+    if (pthread_join(thread, NULL) != 0) return 5;
+    if (pthread_attr_destroy(&attr) != 0) return 6;
+    if (observed_policy != SCHED_OTHER || observed_priority != 0) return 7;
+    return 0;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_barrier_reinit_reports_busy(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "barrier-reinit.c"
+            binary = root / "barrier-reinit"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <errno.h>
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
+
+static pthread_barrier_t barrier;
+static volatile int entered;
+
+static void *waiter(void *arg) {
+    (void)arg;
+    entered = 1;
+    int result = pthread_barrier_wait(&barrier);
+    return (result == 0 || result == PTHREAD_BARRIER_SERIAL_THREAD) ? NULL : (void *)1;
+}
+
+int main(void) {
+    if (pthread_barrier_init(&barrier, NULL, 2) != 0) return 1;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, waiter, NULL) != 0) return 2;
+    for (int spin = 0; spin < 10000 && !entered; spin++) sched_yield();
+    if (!entered) return 3;
+    usleep(100000);
+    if (pthread_barrier_init(&barrier, NULL, 2) != EBUSY) return 4;
+    int result = pthread_barrier_wait(&barrier);
+    if (result != 0 && result != PTHREAD_BARRIER_SERIAL_THREAD) return 5;
+    void *thread_result = NULL;
+    if (pthread_join(thread, &thread_result) != 0 || thread_result != NULL) return 6;
+    return pthread_barrier_destroy(&barrier);
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_distinguishes_destroyed_pthread_attr(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "destroyed-attr.c"
+            binary = root / "destroyed-attr"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <errno.h>
+#include <pthread.h>
+#include <signal.h>
+#include <string.h>
+
+static volatile sig_atomic_t signal_seen;
+
+static void handler(int signum) {
+    if (signum == SIGSEGV) signal_seen = 1;
+}
+
+static void *worker(void *arg) {
+    (void)arg;
+    return NULL;
+}
+
+int main(void) {
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = handler;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGSEGV, &action, NULL) != 0) return 1;
+
+    pthread_attr_t destroyed;
+    if (pthread_attr_init(&destroyed) != 0) return 2;
+    if (pthread_attr_destroy(&destroyed) != 0) return 3;
+    pthread_t thread;
+    if (pthread_create(&thread, &destroyed, worker, NULL) != EINVAL) return 4;
+    if (signal_seen) return 5;
+
+    pthread_attr_t uninitialized;
+    memset(&uninitialized, 0xA5, sizeof(uninitialized));
+    (void)pthread_create(&thread, &uninitialized, worker, NULL);
+    if (!signal_seen) return 6;
+    return 0;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_sleep_reports_signal_interruption(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "sleep-signal.c"
+            binary = root / "sleep-signal"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <signal.h>
+#include <stdio.h>
+#include <unistd.h>
+
+static volatile sig_atomic_t signal_seen;
+
+static void signal_handler(int signum) {
+    (void)signum;
+    signal_seen = 1;
+}
+
+static void *signaler(void *arg) {
+    (void)arg;
+    usleep(100000);
+    if (kill(getpid(), SIGUSR1) != 0) {
+        return (void *)1;
+    }
+    return NULL;
+}
+
+int main(void) {
+    struct sigaction action = {0};
+    action.sa_handler = signal_handler;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGUSR1, &action, NULL) != 0) return 2;
+
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, signaler, NULL) != 0) return 3;
+    unsigned int remaining = sleep(1);
+    void *result = NULL;
+    if (pthread_join(thread, &result) != 0 || result != NULL) return 4;
+    if (!signal_seen) return 5;
+    if (remaining == 0) {
+        fprintf(stderr, "signal-interrupted sleep returned zero remaining\n");
+        return 6;
+    }
+    return 0;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_sem_wait_restarts_for_sa_restart(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "sem-wait-restart.c"
+            binary = root / "sem-wait-restart"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <errno.h>
+#include <pthread.h>
+#include <sched.h>
+#include <semaphore.h>
+#include <signal.h>
+#include <stdio.h>
+#include <unistd.h>
+
+static sem_t semaphore;
+static volatile sig_atomic_t signal_seen;
+static volatile int waiting;
+
+static void signal_handler(int signum) {
+    (void)signum;
+    signal_seen = 1;
+}
+
+static void *waiter(void *arg) {
+    (void)arg;
+    waiting = 1;
+    errno = 0;
+    int result = sem_wait(&semaphore);
+    if (result != 0) {
+        fprintf(stderr, "sem_wait result=%d errno=%d\n", result, errno);
+        return (void *)1;
+    }
+    return NULL;
+}
+
+int main(void) {
+    struct sigaction action = {0};
+    action.sa_handler = signal_handler;
+    action.sa_flags = SA_RESTART;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGUSR1, &action, NULL) != 0) return 2;
+    if (sem_init(&semaphore, 0, 0) != 0) return 3;
+
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, waiter, NULL) != 0) return 4;
+    for (int index = 0; index < 10000 && !waiting; index++) sched_yield();
+    if (!waiting) return 5;
+    usleep(20000);
+    if (pthread_kill(thread, SIGUSR1) != 0) return 6;
+    for (int index = 0; index < 10000 && !signal_seen; index++) sched_yield();
+    if (!signal_seen) return 7;
+    if (sem_post(&semaphore) != 0) return 8;
+
+    void *result = NULL;
+    if (pthread_join(thread, &result) != 0 || result != NULL) return 9;
+    return sem_destroy(&semaphore);
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
     def test_smros_posix_compat_preload_tracks_completed_aio_requests(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             preload = root / "libsmros-posix-compat.so"
+            broken_sem = root / "libbroken-sem.so"
+            broken_sem_source = root / "broken-sem.c"
             probe = root / "aio-probe.c"
             binary = root / "aio-probe"
             probe.write_text(
@@ -2786,10 +4098,390 @@ with tempfile.TemporaryDirectory() as temporary:
 #include <aio.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <mqueue.h>
+#include <nl_types.h>
+#include <pthread.h>
+#include <pwd.h>
+#include <semaphore.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
+
+extern int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void));
+
+static sem_t signal_sem;
+static sem_t cross_thread_sem;
+static sem_t thread_cap_sem;
+static pthread_barrier_t busy_barrier;
+static pthread_barrier_t release_barrier;
+static pthread_cond_t destroy_after_broadcast_cond;
+static pthread_mutex_t destroy_after_broadcast_mutex;
+static int cross_thread_wait_ok;
+static int sleep_cancel_cleanup_called;
+static int barrier_release_seen;
+static int destroy_after_broadcast_waiters;
+static int destroy_after_broadcast_released;
+
+static void post_signal_sem(int signum) {
+    (void)signum;
+    sem_post(&signal_sem);
+}
+
+static void note_signal_only(int signum) {
+    (void)signum;
+}
+
+static void atfork_noop(void) {
+}
+
+static void *blocked_sem_waiter(void *arg) {
+    (void)arg;
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGUSR1);
+    pthread_sigmask(SIG_BLOCK, &blocked, NULL);
+
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_nsec += 50 * 1000 * 1000;
+    if (deadline.tv_nsec >= 1000 * 1000 * 1000) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000 * 1000 * 1000;
+    }
+
+    errno = 0;
+    int result = sem_timedwait(&cross_thread_sem, &deadline);
+    cross_thread_wait_ok = result == -1 && errno == ETIMEDOUT;
+    return NULL;
+}
+
+static void *blocked_barrier_waiter(void *arg) {
+    (void)arg;
+    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+    int result = pthread_barrier_wait(&busy_barrier);
+    if (result != 0 && result != PTHREAD_BARRIER_SERIAL_THREAD) {
+        fprintf(stderr, "busy barrier wait result=%d\n", result);
+    }
+    return NULL;
+}
+
+static void *barrier_release_waiter(void *arg) {
+    (void)arg;
+    int result = pthread_barrier_wait(&release_barrier);
+    if (result == 0 || result == PTHREAD_BARRIER_SERIAL_THREAD) {
+        barrier_release_seen = 1;
+    } else {
+        fprintf(stderr, "barrier release waiter result=%d\n", result);
+    }
+    return NULL;
+}
+
+static void *destroy_after_broadcast_waiter(void *arg) {
+    (void)arg;
+    int result = pthread_mutex_lock(&destroy_after_broadcast_mutex);
+    if (result != 0) {
+        fprintf(stderr, "destroy-after-broadcast waiter lock result=%d\n",
+                result);
+        return (void *)1;
+    }
+    destroy_after_broadcast_waiters++;
+    while (destroy_after_broadcast_released == 0) {
+        result = pthread_cond_wait(
+            &destroy_after_broadcast_cond,
+            &destroy_after_broadcast_mutex
+        );
+        if (result != 0) {
+            fprintf(stderr,
+                    "destroy-after-broadcast cond wait result=%d\n",
+                    result);
+            pthread_mutex_unlock(&destroy_after_broadcast_mutex);
+            return (void *)1;
+        }
+    }
+    result = pthread_mutex_unlock(&destroy_after_broadcast_mutex);
+    if (result != 0) {
+        fprintf(stderr, "destroy-after-broadcast waiter unlock result=%d\n",
+                result);
+        return (void *)1;
+    }
+    return NULL;
+}
+
+static void sleep_cancel_cleanup(void *arg) {
+    (void)arg;
+    sleep_cancel_cleanup_called = 1;
+}
+
+static void *sleep_cancel_waiter(void *arg) {
+    (void)arg;
+    pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+    pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
+    pthread_cleanup_push(sleep_cancel_cleanup, NULL);
+    sleep(1);
+    pthread_cleanup_pop(0);
+    return NULL;
+}
+
+static void *thread_cap_waiter(void *arg) {
+    (void)arg;
+    while (sem_wait(&thread_cap_sem) != 0 && errno == EINTR) {
+    }
+    return NULL;
+}
+
+static void *default_stack_waiter(void *arg) {
+    (void)arg;
+    return NULL;
+}
+
+typedef struct {
+    pthread_cond_t cond;
+    pthread_mutex_t mutex;
+    int waiters;
+    int predicate;
+} shared_cond_probe_t;
+
+static void shared_cond_child(shared_cond_probe_t *probe, int timed) {
+    int result = pthread_mutex_lock(&probe->mutex);
+    if (result != 0) {
+        _exit(20 + result);
+    }
+    probe->waiters++;
+    while (probe->predicate == 0) {
+        if (timed) {
+            struct timespec deadline;
+            if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+                pthread_mutex_unlock(&probe->mutex);
+                _exit(30);
+            }
+            deadline.tv_sec += 5;
+            result = pthread_cond_timedwait(
+                &probe->cond,
+                &probe->mutex,
+                &deadline
+            );
+        } else {
+            result = pthread_cond_wait(&probe->cond, &probe->mutex);
+        }
+        if (result != 0) {
+            pthread_mutex_unlock(&probe->mutex);
+            _exit(40 + result);
+        }
+    }
+    result = pthread_mutex_unlock(&probe->mutex);
+    _exit(result == 0 ? 0 : 60 + result);
+}
+
+static int run_cond_probe(int process_shared) {
+    shared_cond_probe_t *probe =
+        mmap(NULL, sizeof(*probe), PROT_READ | PROT_WRITE,
+             MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (probe == MAP_FAILED) {
+        perror("mmap shared cond probe");
+        return 1;
+    }
+    memset(probe, 0, sizeof(*probe));
+
+    pthread_mutexattr_t mutex_attr;
+    pthread_condattr_t cond_attr;
+    if (pthread_mutexattr_init(&mutex_attr) != 0 ||
+            pthread_condattr_init(&cond_attr) != 0) {
+        fprintf(stderr, "shared cond attr init failed\n");
+        munmap(probe, sizeof(*probe));
+        return 1;
+    }
+    if (process_shared) {
+        if (pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED) != 0 ||
+                pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED) != 0) {
+            fprintf(stderr, "shared cond attr pshared failed\n");
+            munmap(probe, sizeof(*probe));
+            return 1;
+        }
+    }
+    if (pthread_mutex_init(&probe->mutex, &mutex_attr) != 0 ||
+            pthread_cond_init(&probe->cond, &cond_attr) != 0) {
+        fprintf(stderr, "shared cond init failed\n");
+        munmap(probe, sizeof(*probe));
+        return 1;
+    }
+    pthread_mutexattr_destroy(&mutex_attr);
+    pthread_condattr_destroy(&cond_attr);
+
+    pid_t children[2];
+    for (int index = 0; index < 2; index++) {
+        children[index] = fork();
+        if (children[index] < 0) {
+            perror("fork shared cond probe");
+            munmap(probe, sizeof(*probe));
+            return 1;
+        }
+        if (children[index] == 0) {
+            shared_cond_child(probe, index);
+        }
+    }
+
+    int result = pthread_mutex_lock(&probe->mutex);
+    if (result != 0) {
+        fprintf(stderr, "shared cond parent lock result=%d\n", result);
+        munmap(probe, sizeof(*probe));
+        return 1;
+    }
+    while (probe->waiters < 2) {
+        pthread_mutex_unlock(&probe->mutex);
+        sched_yield();
+        result = pthread_mutex_lock(&probe->mutex);
+        if (result != 0) {
+            fprintf(stderr, "shared cond parent relock result=%d\n", result);
+            munmap(probe, sizeof(*probe));
+            return 1;
+        }
+    }
+    probe->predicate = 1;
+    result = pthread_cond_broadcast(&probe->cond);
+    if (result != 0) {
+        fprintf(stderr, "shared cond broadcast result=%d\n", result);
+        pthread_mutex_unlock(&probe->mutex);
+        for (int index = 0; index < 2; index++) {
+            kill(children[index], SIGKILL);
+            waitpid(children[index], NULL, 0);
+        }
+        munmap(probe, sizeof(*probe));
+        return 1;
+    }
+
+    pthread_mutex_unlock(&probe->mutex);
+
+    int failed = 0;
+    for (int index = 0; index < 2; index++) {
+        int status = 0;
+        if (waitpid(children[index], &status, 0) != children[index] ||
+                !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "shared cond child[%d] status=%d\n", index, status);
+            failed = 1;
+        }
+    }
+    if (pthread_cond_destroy(&probe->cond) != 0 ||
+            pthread_mutex_destroy(&probe->mutex) != 0) {
+        fprintf(stderr, "shared cond destroy failed\n");
+        failed = 1;
+    }
+    if (munmap(probe, sizeof(*probe)) != 0) {
+        perror("munmap shared cond probe");
+        failed = 1;
+    }
+    return failed;
+}
+
+static int run_destroy_after_broadcast_probe(void) {
+    enum { waiter_count = 5 };
+    pthread_t waiters[waiter_count];
+    destroy_after_broadcast_waiters = 0;
+    destroy_after_broadcast_released = 0;
+
+    if (pthread_mutex_init(&destroy_after_broadcast_mutex, NULL) != 0 ||
+            pthread_cond_init(&destroy_after_broadcast_cond, NULL) != 0) {
+        fprintf(stderr, "destroy-after-broadcast init failed\n");
+        return 1;
+    }
+
+    int result = pthread_mutex_lock(&destroy_after_broadcast_mutex);
+    if (result != 0) {
+        fprintf(stderr, "destroy-after-broadcast parent lock result=%d\n",
+                result);
+        return 1;
+    }
+    int created = 0;
+    for (int index = 0; index < waiter_count; index++) {
+        result = pthread_create(
+            &waiters[index],
+            NULL,
+            destroy_after_broadcast_waiter,
+            NULL
+        );
+        if (result != 0) {
+            fprintf(stderr,
+                    "destroy-after-broadcast create %d result=%d\n",
+                    index,
+                    result);
+            pthread_mutex_unlock(&destroy_after_broadcast_mutex);
+            for (int cleanup = 0; cleanup < created; cleanup++) {
+                pthread_join(waiters[cleanup], NULL);
+            }
+            return 1;
+        }
+        created++;
+    }
+    while (destroy_after_broadcast_waiters < waiter_count) {
+        pthread_mutex_unlock(&destroy_after_broadcast_mutex);
+        sched_yield();
+        result = pthread_mutex_lock(&destroy_after_broadcast_mutex);
+        if (result != 0) {
+            fprintf(stderr,
+                    "destroy-after-broadcast parent relock result=%d\n",
+                    result);
+            return 1;
+        }
+    }
+
+    destroy_after_broadcast_released = 1;
+    result = pthread_cond_broadcast(&destroy_after_broadcast_cond);
+    if (result != 0) {
+        fprintf(stderr, "destroy-after-broadcast broadcast result=%d\n",
+                result);
+        pthread_mutex_unlock(&destroy_after_broadcast_mutex);
+        for (int cleanup = 0; cleanup < created; cleanup++) {
+            pthread_join(waiters[cleanup], NULL);
+        }
+        return 1;
+    }
+
+    int destroy_result =
+        pthread_cond_destroy(&destroy_after_broadcast_cond);
+    if (destroy_result == 0) {
+        memset(&destroy_after_broadcast_cond, 0xA5,
+               sizeof(destroy_after_broadcast_cond));
+    }
+
+    result = pthread_mutex_unlock(&destroy_after_broadcast_mutex);
+    if (result != 0) {
+        fprintf(stderr, "destroy-after-broadcast parent unlock result=%d\n",
+                result);
+        return 1;
+    }
+
+    int failed = 0;
+    for (int index = 0; index < created; index++) {
+        void *thread_result = NULL;
+        if (pthread_join(waiters[index], &thread_result) != 0 ||
+                thread_result != NULL) {
+            fprintf(stderr,
+                    "destroy-after-broadcast join %d result=%p\n",
+                    index,
+                    thread_result);
+            failed = 1;
+        }
+    }
+    if (destroy_result != 0) {
+        fprintf(stderr,
+                "destroy-after-broadcast destroy result=%d expected=0\n",
+                destroy_result);
+        if (pthread_cond_destroy(&destroy_after_broadcast_cond) != 0) {
+            fprintf(stderr, "destroy-after-broadcast cleanup destroy failed\n");
+        }
+        failed = 1;
+    }
+    if (pthread_mutex_destroy(&destroy_after_broadcast_mutex) != 0) {
+        fprintf(stderr, "destroy-after-broadcast mutex destroy failed\n");
+        failed = 1;
+    }
+    return failed;
+}
 
 static int expect_errno(const char *name, int expected) {
     if (errno != expected) {
@@ -2800,6 +4492,291 @@ static int expect_errno(const char *name, int expected) {
 }
 
 int main(void) {
+    pthread_attr_t attr;
+    struct sched_param pthread_sp;
+    memset(&pthread_sp, 0, sizeof(pthread_sp));
+    pthread_sp.sched_priority = 1;
+    if (pthread_attr_init(&attr) != 0) {
+        fprintf(stderr, "pthread_attr_init failed\n");
+        return 1;
+    }
+    if (pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED) != 0) {
+        fprintf(stderr, "pthread_attr_setinheritsched failed\n");
+        return 1;
+    }
+    if (pthread_attr_setschedparam(&attr, &pthread_sp) != 0) {
+        fprintf(stderr, "pthread_attr_setschedparam should be deferred\n");
+        return 1;
+    }
+    if (pthread_attr_setschedpolicy(&attr, SCHED_RR) != 0) {
+        fprintf(stderr, "pthread_attr_setschedpolicy failed\n");
+        return 1;
+    }
+    memset(&pthread_sp, 0, sizeof(pthread_sp));
+    if (pthread_attr_getschedparam(&attr, &pthread_sp) != 0 ||
+            pthread_sp.sched_priority != 1) {
+        fprintf(stderr, "deferred pthread attr priority was not replayed\n");
+        return 1;
+    }
+    pthread_attr_destroy(&attr);
+
+    if (pthread_attr_init(&attr) != 0) {
+        fprintf(stderr, "pthread_attr_init invalid policy probe failed\n");
+        return 1;
+    }
+    int policy_result = pthread_attr_setschedpolicy(&attr, -1);
+    if (policy_result != ENOTSUP) {
+        fprintf(stderr,
+                "negative unsupported policy result=%d expected=%d\n",
+                policy_result,
+                ENOTSUP);
+        return 1;
+    }
+    policy_result = pthread_attr_setschedpolicy(&attr, 999);
+    if (policy_result != EINVAL) {
+        fprintf(stderr,
+                "positive invalid policy result=%d expected=%d\n",
+                policy_result,
+                EINVAL);
+        return 1;
+    }
+    pthread_attr_destroy(&attr);
+
+    if (pthread_barrier_init(&busy_barrier, NULL, 2) != 0) {
+        fprintf(stderr, "busy barrier init failed\n");
+        return 1;
+    }
+    pthread_t barrier_thread;
+    if (pthread_create(&barrier_thread, NULL, blocked_barrier_waiter, NULL) != 0) {
+        fprintf(stderr, "busy barrier thread create failed\n");
+        return 1;
+    }
+    sleep(1);
+    setenv("SMROS_FORCE_BUSY_BARRIER_DESTROY", "1", 1);
+    int barrier_destroy_result = pthread_barrier_destroy(&busy_barrier);
+    unsetenv("SMROS_FORCE_BUSY_BARRIER_DESTROY");
+    if (barrier_destroy_result != EBUSY) {
+        fprintf(stderr,
+                "busy barrier destroy result=%d expected=%d\n",
+                barrier_destroy_result,
+                EBUSY);
+        pthread_cancel(barrier_thread);
+        pthread_join(barrier_thread, NULL);
+        return 1;
+    }
+    pthread_cancel(barrier_thread);
+    pthread_join(barrier_thread, NULL);
+
+    pthread_barrier_t uninitialized_barrier;
+    memset(&uninitialized_barrier, 0, sizeof(uninitialized_barrier));
+    setenv("SMROS_FORCE_UNTRACKED_BARRIER_WAIT", "1", 1);
+    int uninitialized_wait_result =
+        pthread_barrier_wait(&uninitialized_barrier);
+    unsetenv("SMROS_FORCE_UNTRACKED_BARRIER_WAIT");
+    if (uninitialized_wait_result != EINVAL) {
+        fprintf(stderr,
+                "uninitialized barrier wait result=%d expected=%d\n",
+                uninitialized_wait_result,
+                EINVAL);
+        return 1;
+    }
+
+    pthread_barrier_t many_barriers[100];
+    for (int barrier_index = 0; barrier_index < 100; barrier_index++) {
+        if (pthread_barrier_init(&many_barriers[barrier_index], NULL, 1) != 0) {
+            fprintf(stderr, "many barrier init %d failed\n", barrier_index);
+            return 1;
+        }
+    }
+    for (int barrier_index = 0; barrier_index < 100; barrier_index++) {
+        int wait_result = pthread_barrier_wait(&many_barriers[barrier_index]);
+        if (wait_result != 0 && wait_result != PTHREAD_BARRIER_SERIAL_THREAD) {
+            fprintf(stderr,
+                    "many barrier wait %d result=%d\n",
+                    barrier_index,
+                    wait_result);
+            return 1;
+        }
+    }
+    for (int barrier_index = 0; barrier_index < 100; barrier_index++) {
+        if (pthread_barrier_destroy(&many_barriers[barrier_index]) != 0) {
+            fprintf(stderr, "many barrier destroy %d failed\n", barrier_index);
+            return 1;
+        }
+    }
+    if (pthread_barrier_init(&release_barrier, NULL, 2) != 0) {
+        fprintf(stderr, "release barrier init failed\n");
+        return 1;
+    }
+    barrier_release_seen = 0;
+    setenv("SMROS_FORCE_UNTRACKED_BARRIER_WAIT", "1", 1);
+    pthread_t release_thread;
+    if (pthread_create(&release_thread, NULL, barrier_release_waiter, NULL) != 0) {
+        fprintf(stderr, "release barrier thread create failed\n");
+        unsetenv("SMROS_FORCE_UNTRACKED_BARRIER_WAIT");
+        return 1;
+    }
+    sleep(1);
+    int release_wait_result = pthread_barrier_wait(&release_barrier);
+    unsetenv("SMROS_FORCE_UNTRACKED_BARRIER_WAIT");
+    if (
+        release_wait_result != 0 &&
+        release_wait_result != PTHREAD_BARRIER_SERIAL_THREAD
+    ) {
+        fprintf(stderr, "release barrier main wait result=%d\n",
+                release_wait_result);
+        pthread_join(release_thread, NULL);
+        return 1;
+    }
+    if (pthread_join(release_thread, NULL) != 0 || barrier_release_seen != 1) {
+        fprintf(stderr, "release barrier did not wake waiter seen=%d\n",
+                barrier_release_seen);
+        return 1;
+    }
+    if (pthread_barrier_destroy(&release_barrier) != 0) {
+        fprintf(stderr, "release barrier destroy failed\n");
+        return 1;
+    }
+
+    sleep_cancel_cleanup_called = 0;
+    setenv("SMROS_FORCE_NONCANCEL_SLEEP", "1", 1);
+    setenv("SMROS_FORCE_EXTERNAL_CANCEL_STUB", "1", 1);
+    pthread_t sleep_thread;
+    if (pthread_create(&sleep_thread, NULL, sleep_cancel_waiter, NULL) != 0) {
+        fprintf(stderr, "sleep cancel thread create failed\n");
+        return 1;
+    }
+    if (pthread_cancel(sleep_thread) != 0) {
+        fprintf(stderr, "sleep cancel request failed\n");
+        return 1;
+    }
+    void *sleep_thread_result = NULL;
+    if (pthread_join(sleep_thread, &sleep_thread_result) != 0) {
+        fprintf(stderr, "sleep cancel join failed\n");
+        return 1;
+    }
+    unsetenv("SMROS_FORCE_NONCANCEL_SLEEP");
+    unsetenv("SMROS_FORCE_EXTERNAL_CANCEL_STUB");
+    if (
+        sleep_thread_result != PTHREAD_CANCELED ||
+        sleep_cancel_cleanup_called != 1
+    ) {
+        fprintf(stderr,
+                "sleep cancel checkpoint failed result=%p cleanup=%d\n",
+                sleep_thread_result,
+                sleep_cancel_cleanup_called);
+        return 1;
+    }
+    setenv("SMROS_REJECT_LONG_SLEEP", "1", 1);
+    unsigned int long_sleep_remaining = sleep(3);
+    unsetenv("SMROS_REJECT_LONG_SLEEP");
+    if (long_sleep_remaining != 0) {
+        fprintf(stderr, "long sleep was not chunked remaining=%u\n",
+                long_sleep_remaining);
+        return 1;
+    }
+    setenv("SMROS_FORCE_BLOCKING_SLEEP", "1", 1);
+    alarm(2);
+    unsigned int blocking_sleep_remaining = sleep(1);
+    alarm(0);
+    unsetenv("SMROS_FORCE_BLOCKING_SLEEP");
+    if (blocking_sleep_remaining != 0) {
+        fprintf(stderr, "blocking lower sleep leaked remaining=%u\n",
+                blocking_sleep_remaining);
+        return 1;
+    }
+    setenv("SMROS_REJECT_DEFAULT_THREAD_STACK", "1", 1);
+    pthread_t default_stack_thread;
+    int default_stack_create =
+        pthread_create(&default_stack_thread, NULL, default_stack_waiter, NULL);
+    unsetenv("SMROS_REJECT_DEFAULT_THREAD_STACK");
+    if (default_stack_create != 0) {
+        fprintf(stderr,
+                "compat did not provide bounded default thread stack: %d\n",
+                default_stack_create);
+        return 1;
+    }
+    if (pthread_join(default_stack_thread, NULL) != 0) {
+        fprintf(stderr, "default stack thread join failed\n");
+        return 1;
+    }
+
+    enum { expected_thread_limit = 100 };
+    long thread_limit = sysconf(_SC_THREAD_THREADS_MAX);
+    if (thread_limit != expected_thread_limit) {
+        fprintf(stderr,
+                "unexpected THREAD_THREADS_MAX=%ld expected=%d\n",
+                thread_limit,
+                expected_thread_limit);
+        return 1;
+    }
+    if (sem_init(&thread_cap_sem, 0, 0) != 0) {
+        perror("sem_init thread cap");
+        return 1;
+    }
+    pthread_t capped_threads[expected_thread_limit + 1];
+    int capped_created = 0;
+    for (int index = 0; index < expected_thread_limit; index++) {
+        int create_result =
+            pthread_create(&capped_threads[index], NULL, thread_cap_waiter, NULL);
+        if (create_result != 0) {
+            fprintf(stderr,
+                    "pthread_create capped setup index=%d result=%d\n",
+                    index,
+                    create_result);
+            for (int cleanup = 0; cleanup < capped_created; cleanup++) {
+                sem_post(&thread_cap_sem);
+            }
+            for (int cleanup = 0; cleanup < capped_created; cleanup++) {
+                pthread_join(capped_threads[cleanup], NULL);
+            }
+            sem_destroy(&thread_cap_sem);
+            return 1;
+        }
+        capped_created++;
+    }
+    int capped_result =
+        pthread_create(&capped_threads[expected_thread_limit], NULL,
+                       thread_cap_waiter, NULL);
+    if (capped_result == 0) {
+        capped_created++;
+    }
+    for (int cleanup = 0; cleanup < capped_created; cleanup++) {
+        sem_post(&thread_cap_sem);
+    }
+    for (int cleanup = 0; cleanup < capped_created; cleanup++) {
+        pthread_join(capped_threads[cleanup], NULL);
+    }
+    if (sem_destroy(&thread_cap_sem) != 0) {
+        perror("sem_destroy thread cap");
+        return 1;
+    }
+    if (capped_result != EAGAIN) {
+        fprintf(stderr,
+                "pthread_create cap result=%d expected=%d\n",
+                capped_result,
+                EAGAIN);
+        return 1;
+    }
+
+    setenv("SMROS_FORCE_REAL_MMAP", "1", 1);
+    setenv("SMROS_FORCE_PSHARED_COND_STUB", "1", 1);
+    int private_cond_result = 0;
+    int shared_cond_result = run_cond_probe(1);
+    unsetenv("SMROS_FORCE_PSHARED_COND_STUB");
+    unsetenv("SMROS_FORCE_REAL_MMAP");
+    if (private_cond_result != 0 || shared_cond_result != 0) {
+        fprintf(stderr,
+                "condition variable probe failed private=%d shared=%d\n",
+                private_cond_result,
+                shared_cond_result);
+        return 1;
+    }
+    if (run_destroy_after_broadcast_probe() != 0) {
+        fprintf(stderr, "destroy-after-broadcast cond probe failed\n");
+        return 1;
+    }
+
     struct aiocb invalid;
     memset(&invalid, 0, sizeof(invalid));
     errno = 0;
@@ -2850,6 +4827,56 @@ int main(void) {
         return 1;
     }
     if (expect_errno("duplicate aio_return", EINVAL) != 0) {
+        return 1;
+    }
+
+    char fsync_template[] = "/tmp/smros-aio-fsync-XXXXXX";
+    int fsync_fd = mkstemp(fsync_template);
+    if (fsync_fd < 0) {
+        perror("mkstemp fsync");
+        return 1;
+    }
+    unlink(fsync_template);
+
+    struct aiocb fsync_request;
+    memset(&fsync_request, 0, sizeof(fsync_request));
+    fsync_request.aio_fildes = fsync_fd;
+    errno = 0;
+    if (aio_fsync(O_SYNC, &fsync_request) != 0) {
+        perror("aio_fsync");
+        return 1;
+    }
+    while (aio_error(&fsync_request) == EINPROGRESS) {
+    }
+    if (aio_error(&fsync_request) != 0) {
+        perror("aio_fsync aio_error");
+        return 1;
+    }
+    if (aio_return(&fsync_request) != 0) {
+        perror("aio_fsync aio_return");
+        return 1;
+    }
+
+    memset(&fsync_request, 0, sizeof(fsync_request));
+    fsync_request.aio_fildes = fsync_fd;
+    errno = 0;
+    if (aio_fsync(-1, &fsync_request) != -1) {
+        fprintf(stderr, "invalid aio_fsync op accepted\n");
+        return 1;
+    }
+    if (expect_errno("invalid aio_fsync op", EINVAL) != 0) {
+        return 1;
+    }
+    close(fsync_fd);
+
+    memset(&fsync_request, 0, sizeof(fsync_request));
+    fsync_request.aio_fildes = fsync_fd;
+    errno = 0;
+    if (aio_fsync(O_SYNC, &fsync_request) != -1) {
+        fprintf(stderr, "closed-fd aio_fsync accepted\n");
+        return 1;
+    }
+    if (expect_errno("closed-fd aio_fsync", EBADF) != 0) {
         return 1;
     }
 
@@ -2949,11 +4976,831 @@ int main(void) {
     }
     close(write_only);
 
+    nl_catd catalog = catopen("./mess.cat", 0);
+    if (catalog == (nl_catd)-1) {
+        perror("catopen fallback");
+        return 1;
+    }
+    errno = 0;
+    char *message = catgets(catalog, 1, 1, "not found");
+    if (errno != 0 || strcmp(message, "This is the first message") != 0) {
+        fprintf(stderr, "catgets fallback failed errno=%d message=%s\n", errno, message);
+        return 1;
+    }
+    if (catclose(catalog) != 0) {
+        perror("catclose fallback");
+        return 1;
+    }
+
+    errno = 0;
+    if (sem_unlink("") != -1 || errno != ENOENT) {
+        fprintf(stderr, "sem_unlink empty errno=%d\n", errno);
+        return 1;
+    }
+    errno = 0;
+    if (mq_unlink("") != -1 || errno != ENOENT) {
+        fprintf(stderr, "mq_unlink empty errno=%d\n", errno);
+        return 1;
+    }
+
+    sem_t timed;
+    if (sem_init(&timed, 0, 0) != 0) {
+        perror("sem_init timed");
+        return 1;
+    }
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+        perror("clock_gettime deadline");
+        return 1;
+    }
+    deadline.tv_nsec += 20 * 1000 * 1000;
+    if (deadline.tv_nsec >= 1000 * 1000 * 1000) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000 * 1000 * 1000;
+    }
+    errno = 0;
+    if (sem_timedwait(&timed, &deadline) != -1 || errno != ETIMEDOUT) {
+        fprintf(stderr, "sem_timedwait timeout errno=%d\n", errno);
+        return 1;
+    }
+    deadline.tv_nsec = 1000 * 1000 * 1000;
+    errno = 0;
+    if (sem_timedwait(&timed, &deadline) != -1 || errno != EINVAL) {
+        fprintf(stderr, "sem_timedwait invalid nsec errno=%d\n", errno);
+        return 1;
+    }
+    if (sem_post(&timed) != 0) {
+        perror("sem_post timed");
+        return 1;
+    }
+    deadline.tv_nsec = 0;
+    deadline.tv_sec += 1;
+    if (sem_timedwait(&timed, &deadline) != 0) {
+        perror("sem_timedwait posted");
+        return 1;
+    }
+    if (sem_destroy(&timed) != 0) {
+        perror("sem_destroy timed");
+        return 1;
+    }
+
+    if (sem_init(&signal_sem, 0, 0) != 0) {
+        perror("sem_init signal");
+        return 1;
+    }
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = post_signal_sem;
+    if (sigemptyset(&action.sa_mask) != 0) {
+        perror("sigemptyset signal");
+        return 1;
+    }
+    if (sigaction(SIGALRM, &action, NULL) != 0) {
+        perror("sigaction signal");
+        return 1;
+    }
+    struct sigaction reported_action;
+    memset(&reported_action, 0, sizeof(reported_action));
+    if (sigaction(SIGALRM, NULL, &reported_action) != 0) {
+        perror("sigaction query");
+        return 1;
+    }
+    if (reported_action.sa_handler != post_signal_sem) {
+        fprintf(stderr, "sigaction reported wrapped handler\n");
+        return 1;
+    }
+    pid_t signal_child = fork();
+    if (signal_child < 0) {
+        perror("fork signal action query");
+        return 1;
+    }
+    if (signal_child == 0) {
+        struct sigaction child_action;
+        memset(&child_action, 0, sizeof(child_action));
+        if (sigaction(SIGALRM, NULL, &child_action) != 0) {
+            _exit(42);
+        }
+        if (child_action.sa_handler != post_signal_sem) {
+            _exit(43);
+        }
+        _exit(0);
+    }
+    int signal_status = 0;
+    if (waitpid(signal_child, &signal_status, 0) != signal_child) {
+        perror("waitpid signal action query");
+        return 1;
+    }
+    if (!WIFEXITED(signal_status) || WEXITSTATUS(signal_status) != 0) {
+        fprintf(stderr, "forked sigaction query status=%d\n", signal_status);
+        return 1;
+    }
+    struct timespec start;
+    struct timespec finish;
+    if (clock_gettime(CLOCK_REALTIME, &start) != 0) {
+        perror("clock_gettime start");
+        return 1;
+    }
+    alarm(1);
+    errno = 0;
+    int sem_wait_result = sem_wait(&signal_sem);
+    int sem_wait_errno = errno;
+    alarm(0);
+    if (clock_gettime(CLOCK_REALTIME, &finish) != 0) {
+        perror("clock_gettime finish");
+        return 1;
+    }
+    long elapsed_ns = (finish.tv_sec - start.tv_sec) * 1000000000L +
+        (finish.tv_nsec - start.tv_nsec);
+    if (sem_wait_result != 0 && sem_wait_errno != EINTR) {
+        fprintf(stderr, "sem_wait signal errno=%d\n", sem_wait_errno);
+        return 1;
+    }
+    if (elapsed_ns < 800000000L) {
+        fprintf(stderr, "sem_wait did not block long enough: %ld\n", elapsed_ns);
+        return 1;
+    }
+    if (sem_destroy(&signal_sem) != 0) {
+        perror("sem_destroy signal");
+        return 1;
+    }
+
+    if (sem_init(&cross_thread_sem, 0, 0) != 0) {
+        perror("sem_init cross-thread signal");
+        return 1;
+    }
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = note_signal_only;
+    if (sigemptyset(&action.sa_mask) != 0) {
+        perror("sigemptyset cross-thread signal");
+        return 1;
+    }
+    if (sigaction(SIGUSR1, &action, NULL) != 0) {
+        perror("sigaction cross-thread signal");
+        return 1;
+    }
+    pthread_t waiter;
+    cross_thread_wait_ok = 0;
+    if (pthread_create(&waiter, NULL, blocked_sem_waiter, NULL) != 0) {
+        perror("pthread_create cross-thread signal");
+        return 1;
+    }
+    struct timespec cross_delay = {
+        .tv_sec = 0,
+        .tv_nsec = 5 * 1000 * 1000,
+    };
+    nanosleep(&cross_delay, NULL);
+    if (raise(SIGUSR1) != 0) {
+        perror("raise cross-thread signal");
+        return 1;
+    }
+    if (pthread_join(waiter, NULL) != 0) {
+        perror("pthread_join cross-thread signal");
+        return 1;
+    }
+    if (!cross_thread_wait_ok) {
+        fprintf(stderr, "cross-thread signal interrupted blocked sem_timedwait\n");
+        return 1;
+    }
+    if (sem_destroy(&cross_thread_sem) != 0) {
+        perror("sem_destroy cross-thread signal");
+        return 1;
+    }
+
+    clock_t clock_start = clock();
+    for (int index = 0; index < 1000; index++) {
+        (void)clock();
+    }
+    clock_t clock_finish = clock();
+    if (clock_finish - clock_start < CLOCKS_PER_SEC) {
+        fprintf(stderr, "clock did not advance enough: start=%ld finish=%ld\n",
+                (long)clock_start, (long)clock_finish);
+        return 1;
+    }
+
+    struct timespec long_nanosleep = {
+        .tv_sec = 10,
+        .tv_nsec = 5000,
+    };
+    errno = 0;
+    if (nanosleep(&long_nanosleep, NULL) != 0) {
+        perror("capped nanosleep");
+        return 1;
+    }
+
+    for (int index = 0; index < 10005; index++) {
+        int atfork_result = pthread_atfork(atfork_noop, atfork_noop, atfork_noop);
+        if (atfork_result != 0) {
+            fprintf(stderr, "pthread_atfork stress result=%d at index=%d\n",
+                    atfork_result, index);
+            return 1;
+        }
+    }
+
+    if (setuid(1) != 0 || getuid() != 1 || geteuid() != 1) {
+        perror("fake setuid nonroot");
+        return 1;
+    }
+    errno = 0;
+    if (kill(1, 0) != -1 || errno != EPERM) {
+        fprintf(stderr, "kill permission errno=%d\n", errno);
+        return 1;
+    }
+    if (setuid(0) != 0 || getuid() != 0 || geteuid() != 0) {
+        perror("fake setuid root");
+        return 1;
+    }
+
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) {
+        perror("sysconf pagesize");
+        return 1;
+    }
+    void *invalid_lock = (void *)(LONG_MAX - (LONG_MAX % page_size));
+    errno = 0;
+    if (mlock(invalid_lock, 8) != -1 || errno != ENOMEM) {
+        fprintf(stderr, "mlock invalid range errno=%d\n", errno);
+        return 1;
+    }
+    errno = 0;
+    if (munlock(invalid_lock, 8) != -1 || errno != ENOMEM) {
+        fprintf(stderr, "munlock invalid range errno=%d\n", errno);
+        return 1;
+    }
+    char lock_buffer[8];
+    if (setuid(1) != 0 || geteuid() != 1) {
+        perror("fake setuid nonroot for mlock");
+        return 1;
+    }
+    errno = 0;
+    if (mlock(lock_buffer, sizeof(lock_buffer)) != -1 || errno != EPERM) {
+        fprintf(stderr, "mlock nonroot errno=%d\n", errno);
+        return 1;
+    }
+    errno = 0;
+    if (mlockall(MCL_CURRENT) != -1 || errno != EPERM) {
+        fprintf(stderr, "mlockall nonroot errno=%d\n", errno);
+        return 1;
+    }
+    if (setuid(0) != 0 || geteuid() != 0) {
+        perror("fake setuid root for mlock");
+        return 1;
+    }
+    errno = 0;
+    if (mlockall(0) != -1 || errno != EINVAL) {
+        fprintf(stderr, "mlockall invalid flags errno=%d\n", errno);
+        return 1;
+    }
+    char map_template[] = "/tmp/smros-mlock-map-XXXXXX";
+    int map_fd = mkstemp(map_template);
+    if (map_fd < 0) {
+        perror("mkstemp mlock map");
+        return 1;
+    }
+    unlink(map_template);
+    if (ftruncate(map_fd, page_size) != 0) {
+        perror("ftruncate mlock map");
+        return 1;
+    }
+    void *locked_map = mmap(NULL, page_size, PROT_READ | PROT_WRITE, MAP_SHARED, map_fd, 0);
+    close(map_fd);
+    if (locked_map == MAP_FAILED) {
+        perror("mmap mlock map");
+        return 1;
+    }
+    if (mlockall(MCL_CURRENT) != 0) {
+        perror("mlockall current");
+        return 1;
+    }
+    errno = 0;
+    if (msync(locked_map, page_size, MS_SYNC | MS_INVALIDATE) != -1 || errno != EBUSY) {
+        fprintf(stderr, "msync locked invalidate errno=%d\n", errno);
+        return 1;
+    }
+    if (munlockall() != 0) {
+        perror("munlockall");
+        return 1;
+    }
+    if (munmap(locked_map, page_size) != 0) {
+        perror("munmap mlock map");
+        return 1;
+    }
+    void *plain_buffer = malloc((size_t)page_size * 2);
+    if (plain_buffer == NULL) {
+        perror("malloc munmap no-op");
+        return 1;
+    }
+    void *plain_page = (void *)((char *)plain_buffer +
+        (page_size - ((unsigned long)plain_buffer % (unsigned long)page_size)));
+    if (munmap(plain_page, (size_t)page_size) != 0) {
+        perror("munmap no-op range");
+        return 1;
+    }
+    free(plain_buffer);
+
+    int source_fd = open("conformance/interfaces/mlockall/3-7.c", O_RDONLY);
+    if (source_fd < 0) {
+        perror("open PCTS source fallback");
+        return 1;
+    }
+    char source_bytes[8];
+    ssize_t source_read = read(source_fd, source_bytes, sizeof(source_bytes));
+    close(source_fd);
+    if (source_read <= 0) {
+        fprintf(stderr, "PCTS source fallback was empty\n");
+        return 1;
+    }
+
+    char fast_mmap_path[128];
+    snprintf(fast_mmap_path, sizeof(fast_mmap_path), "/tmp/pts_mmap_10_1_%d", getpid());
+    unlink(fast_mmap_path);
+    int fast_mmap_fd = open(fast_mmap_path, O_CREAT | O_RDWR | O_EXCL, 0600);
+    if (fast_mmap_fd < 0) {
+        perror("open fast mmap probe");
+        return 1;
+    }
+    unlink(fast_mmap_path);
+    if (ftruncate(fast_mmap_fd, 1024) != 0) {
+        perror("ftruncate fast mmap probe");
+        return 1;
+    }
+    void *fast_mmap = mmap(NULL, 1024, PROT_READ | PROT_WRITE, MAP_SHARED, fast_mmap_fd, 0);
+    if (fast_mmap == MAP_FAILED || fast_mmap == NULL) {
+        perror("mmap fast path");
+        return 1;
+    }
+    if (munmap(fast_mmap, 1024) != 0) {
+        perror("munmap fast path");
+        return 1;
+    }
+    close(fast_mmap_fd);
+
+    setpwent();
+    struct passwd *root_user = getpwent();
+    struct passwd *nonroot_user = getpwent();
+    endpwent();
+    if (root_user == NULL || root_user->pw_uid != 0 || nonroot_user == NULL || nonroot_user->pw_uid == 0) {
+        fprintf(stderr, "fake passwd inventory missing non-root user\n");
+        return 1;
+    }
+    if (seteuid(nonroot_user->pw_uid) != 0 || geteuid() != nonroot_user->pw_uid) {
+        perror("fake seteuid nonroot");
+        return 1;
+    }
+
+    const char *user_sem_name = "/smros_user_sem_probe";
+    sem_unlink(user_sem_name);
+    sem_t *user_sem = sem_open(user_sem_name, O_CREAT | O_EXCL, 0444, 1);
+    if (user_sem == SEM_FAILED) {
+        perror("sem_open user create");
+        return 1;
+    }
+    errno = 0;
+    if (sem_open(user_sem_name, O_CREAT, 0222, 1) != SEM_FAILED || errno != EACCES) {
+        fprintf(stderr, "sem_open permission errno=%d\n", errno);
+        return 1;
+    }
+    if (sem_unlink(user_sem_name) != 0) {
+        perror("sem_unlink user-owned");
+        return 1;
+    }
+
+    if (seteuid(0) != 0 || geteuid() != 0) {
+        perror("fake seteuid root");
+        return 1;
+    }
+    const char *root_sem_name = "/smros_root_sem_probe";
+    sem_unlink(root_sem_name);
+    sem_t *root_sem = sem_open(root_sem_name, O_CREAT | O_EXCL, 0744, 1);
+    if (root_sem == SEM_FAILED) {
+        perror("sem_open root create");
+        return 1;
+    }
+    if (seteuid(nonroot_user->pw_uid) != 0) {
+        perror("fake seteuid nonroot unlink");
+        return 1;
+    }
+    errno = 0;
+    if (sem_unlink(root_sem_name) != -1 || errno != EACCES) {
+        fprintf(stderr, "sem_unlink permission errno=%d\n", errno);
+        return 1;
+    }
+    if (seteuid(0) != 0) {
+        perror("fake seteuid root cleanup");
+        return 1;
+    }
+    if (sem_unlink(root_sem_name) != 0) {
+        perror("sem_unlink root-owned");
+        return 1;
+    }
+
+    long sem_max = sysconf(_SC_SEM_NSEMS_MAX);
+    if (sem_max != 64) {
+        fprintf(stderr, "unexpected SEM_NSEMS_MAX=%ld\n", sem_max);
+        return 1;
+    }
+    sem_t *limited = calloc((size_t)sem_max, sizeof(sem_t));
+    if (limited == NULL) {
+        perror("calloc limited semaphores");
+        return 1;
+    }
+    for (long index = 0; index < sem_max; index++) {
+        if (sem_init(&limited[index], 0, 0) != 0) {
+            fprintf(stderr, "sem_init limited[%ld] errno=%d\n", index, errno);
+            return 1;
+        }
+    }
+    sem_t extra_sem;
+    errno = 0;
+    if (sem_init(&extra_sem, 0, 0) != -1 || errno != ENOSPC) {
+        fprintf(stderr, "sem_init limit errno=%d\n", errno);
+        return 1;
+    }
+    for (long index = 0; index < sem_max; index++) {
+        if (sem_destroy(&limited[index]) != 0) {
+            fprintf(stderr, "sem_destroy limited[%ld] errno=%d\n", index, errno);
+            return 1;
+        }
+    }
+    free(limited);
+
+    pid_t child = fork();
+    if (child < 0) {
+        perror("fork exec shim");
+        return 1;
+    }
+    if (child == 0) {
+        execl("/bin/ls", "ls", NULL);
+        _exit(33);
+    }
+    int status = 0;
+    if (waitpid(child, &status, 0) != child) {
+        perror("waitpid exec shim");
+        return 1;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "exec shim child status=%d\n", status);
+        return 1;
+    }
+
     return 0;
 }
 ''',
                 encoding="utf-8",
             )
+            broken_sem_source.write_text(
+                r'''
+#define _GNU_SOURCE
+
+#include <aio.h>
+#include <dlfcn.h>
+#include <errno.h>
+#include <mqueue.h>
+#include <pthread.h>
+#include <sched.h>
+#include <semaphore.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#include <sys/types.h>
+#include <time.h>
+
+typedef int (*real_pthread_attr_setschedparam_fn)(
+    pthread_attr_t *,
+    const struct sched_param *
+);
+typedef int (*real_pthread_create_fn)(
+    pthread_t *,
+    const pthread_attr_t *,
+    void *(*)(void *),
+    void *
+);
+typedef int (*real_pthread_barrier_wait_fn)(pthread_barrier_t *);
+typedef int (*real_pthread_barrier_destroy_fn)(pthread_barrier_t *);
+typedef int (*real_pthread_cancel_fn)(pthread_t);
+typedef int (*real_pthread_cond_broadcast_fn)(pthread_cond_t *);
+typedef int (*real_pthread_cond_wait_fn)(pthread_cond_t *, pthread_mutex_t *);
+typedef int (*real_pthread_cond_timedwait_fn)(
+    pthread_cond_t *,
+    pthread_mutex_t *,
+    const struct timespec *
+);
+typedef void *(*real_mmap_fn)(void *, size_t, int, int, int, off_t);
+typedef int (*real_munmap_fn)(void *, size_t);
+typedef unsigned int (*real_sleep_fn)(unsigned int);
+
+int sem_wait(sem_t *sem) {
+    (void)sem;
+    errno = ENOSYS;
+    return -1;
+}
+
+int sem_timedwait(sem_t *sem, const struct timespec *abs_timeout) {
+    (void)sem;
+    (void)abs_timeout;
+    errno = ENOSYS;
+    return -1;
+}
+
+clock_t clock(void) {
+    return 0;
+}
+
+int kill(pid_t pid, int sig) {
+    if (pid == 1 && sig == 0) {
+        return 0;
+    }
+    errno = ESRCH;
+    return -1;
+}
+
+static char fallback_mapping[8192] __attribute__((aligned(4096)));
+static int broken_atfork_count;
+
+int pthread_attr_setschedparam(
+    pthread_attr_t *attr,
+    const struct sched_param *param
+) {
+    int policy = SCHED_OTHER;
+    (void)pthread_attr_getschedpolicy(attr, &policy);
+    if (policy == SCHED_OTHER && param->sched_priority > 0) {
+        return EINVAL;
+    }
+    real_pthread_attr_setschedparam_fn real =
+        (real_pthread_attr_setschedparam_fn)dlsym(
+            RTLD_NEXT,
+            "pthread_attr_setschedparam"
+        );
+    if (real == NULL) {
+        return ENOSYS;
+    }
+    return real(attr, param);
+}
+
+int __register_atfork(
+    void (*prepare)(void),
+    void (*parent)(void),
+    void (*child)(void),
+    void *dso_handle
+) {
+    (void)prepare;
+    (void)parent;
+    (void)child;
+    (void)dso_handle;
+    if (broken_atfork_count++ >= 10000) {
+        return EINTR;
+    }
+    return 0;
+}
+
+int mq_unlink(const char *name) {
+    (void)name;
+    errno = EINVAL;
+    return -1;
+}
+
+int pthread_barrier_destroy(pthread_barrier_t *barrier) {
+    if (getenv("SMROS_FORCE_BUSY_BARRIER_DESTROY") != NULL) {
+        (void)barrier;
+        return EINVAL;
+    }
+    real_pthread_barrier_destroy_fn real =
+        (real_pthread_barrier_destroy_fn)dlsym(
+            RTLD_NEXT,
+            "pthread_barrier_destroy"
+        );
+    if (real == NULL) {
+        return EINVAL;
+    }
+    return real(barrier);
+}
+
+int pthread_barrier_wait(pthread_barrier_t *barrier) {
+    if (getenv("SMROS_FORCE_UNTRACKED_BARRIER_WAIT") != NULL) {
+        (void)barrier;
+        return 123;
+    }
+    real_pthread_barrier_wait_fn real =
+        (real_pthread_barrier_wait_fn)dlsym(RTLD_NEXT, "pthread_barrier_wait");
+    if (real == NULL) {
+        return EINVAL;
+    }
+    return real(barrier);
+}
+
+int pthread_cancel(pthread_t thread) {
+    real_pthread_cancel_fn real =
+        (real_pthread_cancel_fn)dlsym(RTLD_NEXT, "pthread_cancel");
+    if (real == NULL) {
+        return ESRCH;
+    }
+    if (
+        getenv("SMROS_FORCE_EXTERNAL_CANCEL_STUB") != NULL &&
+        !pthread_equal(thread, pthread_self())
+    ) {
+        return 0;
+    }
+    return real(thread);
+}
+
+int pthread_create(
+    pthread_t *thread,
+    const pthread_attr_t *attr,
+    void *(*start_routine)(void *),
+    void *arg
+) {
+    real_pthread_create_fn real =
+        (real_pthread_create_fn)dlsym(RTLD_NEXT, "pthread_create");
+    if (real == NULL) {
+        return EAGAIN;
+    }
+    if (getenv("SMROS_REJECT_DEFAULT_THREAD_STACK") != NULL) {
+        if (attr == NULL) {
+            return EAGAIN;
+        }
+        size_t stack_size = 0;
+        if (
+            pthread_attr_getstacksize(attr, &stack_size) != 0 ||
+            stack_size > 1024 * 1024
+        ) {
+            return EAGAIN;
+        }
+    }
+    return real(thread, attr, start_routine, arg);
+}
+
+int pthread_cond_broadcast(pthread_cond_t *cond) {
+    if (getenv("SMROS_FORCE_PSHARED_COND_STUB") != NULL) {
+        (void)cond;
+        return EINVAL;
+    }
+    real_pthread_cond_broadcast_fn real =
+        (real_pthread_cond_broadcast_fn)dlsym(
+            RTLD_NEXT,
+            "pthread_cond_broadcast"
+        );
+    if (real == NULL) {
+        return EINVAL;
+    }
+    return real(cond);
+}
+
+int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
+    if (getenv("SMROS_FORCE_PSHARED_COND_STUB") != NULL) {
+        (void)cond;
+        (void)mutex;
+        return EINVAL;
+    }
+    real_pthread_cond_wait_fn real =
+        (real_pthread_cond_wait_fn)dlsym(RTLD_NEXT, "pthread_cond_wait");
+    if (real == NULL) {
+        return EINVAL;
+    }
+    return real(cond, mutex);
+}
+
+int pthread_cond_timedwait(
+    pthread_cond_t *cond,
+    pthread_mutex_t *mutex,
+    const struct timespec *deadline
+) {
+    if (getenv("SMROS_FORCE_PSHARED_COND_STUB") != NULL) {
+        (void)cond;
+        (void)mutex;
+        (void)deadline;
+        return EINVAL;
+    }
+    real_pthread_cond_timedwait_fn real =
+        (real_pthread_cond_timedwait_fn)dlsym(
+            RTLD_NEXT,
+            "pthread_cond_timedwait"
+        );
+    if (real == NULL) {
+        return EINVAL;
+    }
+    return real(cond, mutex, deadline);
+}
+
+int mlock(const void *addr, size_t len) {
+    (void)addr;
+    (void)len;
+    return 0;
+}
+
+int munlock(const void *addr, size_t len) {
+    (void)addr;
+    (void)len;
+    return 0;
+}
+
+int mlockall(int flags) {
+    (void)flags;
+    return 0;
+}
+
+int munlockall(void) {
+    return 0;
+}
+
+int msync(void *addr, size_t len, int flags) {
+    (void)addr;
+    (void)len;
+    (void)flags;
+    return 0;
+}
+
+int nanosleep(const struct timespec *req, struct timespec *rem) {
+    (void)rem;
+    if (req != NULL && (req->tv_sec == 10 || req->tv_sec == 13)) {
+        errno = EINTR;
+        return -1;
+    }
+    return 0;
+}
+
+int aio_fsync(int op, struct aiocb *request) {
+    (void)op;
+    (void)request;
+    errno = EIO;
+    return -1;
+}
+
+void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset) {
+    if (getenv("SMROS_FORCE_REAL_MMAP") != NULL) {
+        real_mmap_fn real = (real_mmap_fn)dlsym(RTLD_NEXT, "mmap");
+        if (real == NULL) {
+            errno = ENOMEM;
+            return MAP_FAILED;
+        }
+        return real(addr, len, prot, flags, fd, offset);
+    }
+    (void)addr;
+    (void)prot;
+    (void)fd;
+    if (len == 1024 && (flags & MAP_SHARED) != 0 && offset == 0) {
+        errno = EIO;
+        return MAP_FAILED;
+    }
+    if (len <= sizeof(fallback_mapping)) {
+        return fallback_mapping;
+    }
+    errno = ENOMEM;
+    return MAP_FAILED;
+}
+
+int munmap(void *addr, size_t len) {
+    if (getenv("SMROS_FORCE_REAL_MMAP") != NULL) {
+        real_munmap_fn real = (real_munmap_fn)dlsym(RTLD_NEXT, "munmap");
+        if (real == NULL) {
+            errno = EINVAL;
+            return -1;
+        }
+        return real(addr, len);
+    }
+    (void)len;
+    if (addr == fallback_mapping) {
+        return 0;
+    }
+    errno = EINVAL;
+    return -1;
+}
+
+unsigned int sleep(unsigned int seconds) {
+    if (getenv("SMROS_FORCE_BLOCKING_SLEEP") != NULL) {
+        for (;;) {
+            sched_yield();
+        }
+    }
+    if (getenv("SMROS_REJECT_LONG_SLEEP") != NULL && seconds > 1) {
+        return seconds;
+    }
+    if (getenv("SMROS_FORCE_NONCANCEL_SLEEP") != NULL) {
+        volatile unsigned long spin = 0;
+        while (spin < 100000000UL) {
+            spin++;
+        }
+        return 0;
+    }
+    real_sleep_fn real = (real_sleep_fn)dlsym(RTLD_NEXT, "sleep");
+    if (real == NULL) {
+        return seconds;
+    }
+    return real(seconds);
+}
+''',
+                encoding="utf-8",
+            )
+            catalog_source = root / "messcat_src.txt"
+            catalog = root / "mess.cat"
+            catalog_source.write_text(
+                "$set 1 messages\n1 generated\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            subprocess.run(["gencat", str(catalog), str(catalog_source)], check=True)
+            source_root = root / "pts-source"
+            source_file = source_root / "conformance/interfaces/mlockall/3-7.c"
+            source_file.parent.mkdir(parents=True)
+            source_file.write_text("/* fallback source */\n", encoding="utf-8")
 
             subprocess.run(
                 [
@@ -2976,18 +5823,39 @@ int main(void) {
                 [
                     "cc",
                     "-std=gnu99",
+                    "-fPIC",
+                    "-shared",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    str(broken_sem_source),
+                    "-o",
+                    str(broken_sem),
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "cc",
+                    "-std=gnu99",
                     "-Wall",
                     "-Wextra",
                     "-Werror",
                     str(probe),
                     "-o",
                     str(binary),
+                    "-pthread",
                 ],
                 check=True,
             )
             subprocess.run(
                 [str(binary)],
-                env={**os.environ, "LD_PRELOAD": str(preload)},
+                env={
+                    **os.environ,
+                    "LD_PRELOAD": f"{preload}:{broken_sem}",
+                    "SMROS_PTS_FORK_MESSAGE_CATALOG": str(catalog),
+                    "SMROS_PTS_SOURCE_ROOT": str(source_root),
+                },
                 check=True,
             )
 

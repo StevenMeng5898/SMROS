@@ -97,6 +97,25 @@ pub(crate) fn current_task() -> Result<LinuxTaskCore, SysError> {
     })
 }
 
+pub(crate) fn by_tid(tid: usize) -> Option<LinuxTaskCore> {
+    with_runtime(|runtime| runtime.tasks.by_tid(tid))
+}
+
+pub(crate) fn sched_param(
+    tid: usize,
+    scheduler_thread: usize,
+) -> Option<LinuxTaskSchedParam> {
+    with_runtime(|runtime| runtime.tasks.sched_param(tid, scheduler_thread))
+}
+
+pub(crate) fn set_sched_param(
+    tid: usize,
+    scheduler_thread: usize,
+    param: LinuxTaskSchedParam,
+) -> bool {
+    with_runtime(|runtime| runtime.tasks.set_sched_param(tid, scheduler_thread, param))
+}
+
 pub(crate) fn set_current_clear_child_tid(address: usize) -> Result<usize, SysError> {
     with_runtime(|runtime| {
         let scheduler_thread = scheduler::scheduler().current();
@@ -579,11 +598,20 @@ pub(crate) fn wake_blocked(tid: usize, scheduler_thread: usize, reason: LinuxBlo
 
 pub(crate) fn wake_process_waiters(tgid: usize) -> usize {
     let waiters = with_runtime(|runtime| runtime.tasks.child_waiters(tgid));
-    waiters
+    let count = waiters
         .into_iter()
         .flatten()
         .filter(|task| wake_blocked(task.tid, task.scheduler_thread, LinuxBlockReason::ChildWait))
-        .count()
+        .count();
+    if count != 0 {
+        crate::kobj_info!(
+            "posix-wait",
+            "wake-process-waiters parent={} count={}",
+            tgid,
+            count
+        );
+    }
+    count
 }
 
 #[derive(Clone, Copy)]
@@ -896,6 +924,10 @@ mod aarch64_clone {
                 .reserve_child(parent.tgid, scheduler_id.0)
                 .ok_or(SysError::EAGAIN)?;
             if !runtime.tasks.inherit_signal_mask(reservation, current.0) {
+                let _ = runtime.tasks.rollback(reservation);
+                return Err(SysError::EAGAIN);
+            }
+            if !runtime.tasks.inherit_sched_param(reservation, current.0) {
                 let _ = runtime.tasks.rollback(reservation);
                 return Err(SysError::EAGAIN);
             }

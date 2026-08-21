@@ -415,6 +415,7 @@ extern "C" fn timer_interrupt_handler() {
     crate::kernel_objects::scheduler::scheduler().on_timer_tick();
     if current_cpu_id() == 0 {
         let now = kernel_lowlevel::timer::get_tick_count();
+        crate::syscall::expire_linux_real_timers_from_irq();
         crate::syscall::linux_task::on_timer_tick(now);
         crate::syscall::deliver_linux_posix_timer_signals_from_irq();
         crate::syscall::linux_futex::on_timer_tick(now, now);

@@ -6,6 +6,7 @@ pub(crate) const FUTEX_PRIVATE_FLAG: u32 = 128;
 pub(crate) const FUTEX_CLOCK_REALTIME: u32 = 256;
 pub(crate) const FUTEX_CMD_MASK: u32 = 0x7f;
 pub(crate) const FUTEX_BITSET_MATCH_ANY: u32 = u32::MAX;
+pub(crate) const FUTEX_SHARED_KEY_TAG: usize = 1usize << (usize::BITS - 1);
 
 const FUTEX_ALLOWED_OP_BITS: u32 = FUTEX_CMD_MASK | FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME;
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
@@ -81,6 +82,12 @@ pub(crate) fn futex_address_valid(address: usize) -> bool {
         && address.checked_add(core::mem::size_of::<u32>()).is_some()
 }
 
+pub(crate) fn futex_shared_key(pfn: u64, address: usize) -> usize {
+    FUTEX_SHARED_KEY_TAG
+        | ((pfn as usize).wrapping_mul(0x1000) & !FUTEX_SHARED_KEY_TAG)
+        | (address & 0xfff)
+}
+
 pub(crate) fn futex_bitset_valid(bitset: u32) -> bool {
     bitset != 0
 }
@@ -127,6 +134,32 @@ pub(crate) fn futex_relative_deadline(
     now.checked_add(duration_ticks)?.checked_add(phase_guard)
 }
 
+pub(crate) fn futex_realtime_deadline_ticks(
+    seconds: i64,
+    nanoseconds: i64,
+    realtime_offset_nanoseconds: i64,
+    tick_nanoseconds: u64,
+) -> Option<u64> {
+    if tick_nanoseconds == 0 || !futex_timespec_valid(seconds, nanoseconds) {
+        return None;
+    }
+    let realtime_nanoseconds = i128::from(seconds)
+        .checked_mul(i128::from(NANOS_PER_SECOND))?
+        .checked_add(i128::from(nanoseconds))?;
+    let monotonic_nanoseconds = realtime_nanoseconds
+        .checked_sub(i128::from(realtime_offset_nanoseconds))?;
+    let monotonic_nanoseconds = if monotonic_nanoseconds <= 0 {
+        0
+    } else {
+        u128::try_from(monotonic_nanoseconds).ok()?
+    };
+    let tick_nanoseconds = u128::from(tick_nanoseconds);
+    let ticks = monotonic_nanoseconds / tick_nanoseconds;
+    ticks
+        .checked_add(u128::from(monotonic_nanoseconds % tick_nanoseconds != 0))
+        .and_then(|ticks| u64::try_from(ticks).ok())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FutexClock {
     Monotonic,
@@ -146,6 +179,7 @@ pub(crate) fn futex_deadline_from_timeout(
     seconds: i64,
     nanoseconds: i64,
     tick_nanoseconds: u64,
+    realtime_offset_nanoseconds: i64,
 ) -> Option<FutexDeadline> {
     match (command, realtime) {
         (FutexCommand::Wait, false) => Some(FutexDeadline {
@@ -157,8 +191,13 @@ pub(crate) fn futex_deadline_from_timeout(
             clock: FutexClock::Monotonic,
         }),
         (FutexCommand::WaitBitset, true) => Some(FutexDeadline {
-            ticks: futex_timespec_to_ticks_ceil(seconds, nanoseconds, tick_nanoseconds)?,
-            clock: FutexClock::Realtime,
+            ticks: futex_realtime_deadline_ticks(
+                seconds,
+                nanoseconds,
+                realtime_offset_nanoseconds,
+                tick_nanoseconds,
+            )?,
+            clock: FutexClock::Monotonic,
         }),
         _ => None,
     }

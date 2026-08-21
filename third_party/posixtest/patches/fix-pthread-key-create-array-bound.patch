@@ -1,0 +1,13 @@
+diff --git a/conformance/interfaces/pthread_key_create/speculative/5-1.c b/conformance/interfaces/pthread_key_create/speculative/5-1.c
+--- a/conformance/interfaces/pthread_key_create/speculative/5-1.c
++++ b/conformance/interfaces/pthread_key_create/speculative/5-1.c
+@@ -37,8 +37,8 @@
+ int NUM_OF_KEYS = PTHREAD_KEYS_MAX;
+ 
+-static pthread_key_t keys[5];
++static pthread_key_t keys[PTHREAD_KEYS_MAX + 1];
+ 
+ int main()
+ {
+ 	int i, rc;
+ 

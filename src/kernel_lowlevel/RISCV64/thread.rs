@@ -11,7 +11,7 @@ use core::ptr;
 use super::lowlevel_logic;
 
 /// Maximum number of concurrent threads
-pub const MAX_THREADS: usize = 32;
+pub const MAX_THREADS: usize = 128;
 
 /// Default thread stack size (32KB)
 pub const DEFAULT_STACK_SIZE: usize = 0x8000;

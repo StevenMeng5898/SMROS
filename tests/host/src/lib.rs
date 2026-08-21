@@ -117,6 +117,30 @@ mod syscall_address_logic {
     }
 
     #[test]
+    fn regular_file_mmap_span_rejects_offset_max_overflow() {
+        assert!(smros_regular_file_mmap_span_ok_body!(
+            0x1000u64,
+            0x2000usize,
+            u64::MAX
+        ));
+        assert!(smros_regular_file_mmap_span_ok_body!(
+            u64::MAX - 0x1000,
+            0x1000usize,
+            u64::MAX
+        ));
+        assert!(!smros_regular_file_mmap_span_ok_body!(
+            u64::MAX - 0x0fff,
+            0x1000usize,
+            u64::MAX
+        ));
+        assert!(!smros_regular_file_mmap_span_ok_body!(
+            0xffff_ffff_ffff_f000u64,
+            0xffff_ffff_ffff_f000usize,
+            u64::MAX
+        ));
+    }
+
+    #[test]
     fn writable_user_range_requires_one_complete_writable_mapping() {
         let mappings = [
             (0x1000usize, 0x1000usize, true),
@@ -694,6 +718,18 @@ mod syscall_logic {
     ));
 
     #[test]
+    fn expired_real_timer_scan_includes_processes_not_currently_scheduled() {
+        const DISABLED: u64 = u64::MAX;
+        let deadlines = [(7usize, 100u64), (8, DISABLED), (9, 99), (10, 101)];
+        let mut expired = Vec::new();
+        for_each_linux_expired_real_timer_pid(&deadlines, 100, DISABLED, |pid| {
+            expired.push(pid)
+        });
+
+        assert_eq!(expired, vec![7, 9]);
+    }
+
+    #[test]
     fn linux_fcntl_recognizes_record_lock_commands() {
         for command in 0usize..=7 {
             assert!(smros_linux_fcntl_cmd_supported_body!(
@@ -727,6 +763,43 @@ mod syscall_logic {
             usize::MAX,
             TIMER_ABSTIME
         ));
+    }
+
+    #[test]
+    fn sched_policy_priority_bounds_match_linux_realtime_rules() {
+        assert_eq!(linux_sched_priority_bounds(0), Some((0, 0)));
+        assert_eq!(linux_sched_priority_bounds(1), Some((1, 99)));
+        assert_eq!(linux_sched_priority_bounds(2), Some((1, 99)));
+        assert_eq!(linux_sched_priority_bounds(3), None);
+
+        assert!(linux_sched_priority_valid(0, 0));
+        assert!(!linux_sched_priority_valid(0, 1));
+        assert!(linux_sched_priority_valid(1, 1));
+        assert!(linux_sched_priority_valid(2, 99));
+        assert!(!linux_sched_priority_valid(1, 0));
+        assert!(!linux_sched_priority_valid(2, 100));
+
+        assert_eq!(linux_sched_kernel_priority(0, 0), Some(16));
+        assert_eq!(linux_sched_kernel_priority(1, 1), Some(65));
+        assert_eq!(linux_sched_kernel_priority(1, 50), Some(114));
+        assert_eq!(linux_sched_kernel_priority(2, 99), Some(163));
+        assert_eq!(linux_sched_kernel_priority(0, 1), None);
+        assert_eq!(linux_sched_kernel_priority(1, 0), None);
+    }
+
+    #[test]
+    fn sched_affinity_reports_only_qemu_online_cpus() {
+        assert_eq!(linux_sched_online_cpu_count(), 1);
+        assert_eq!(linux_sched_affinity_byte(0), 0b0000_0001);
+        assert_eq!(linux_sched_affinity_byte(1), 0);
+        assert_eq!(linux_sched_affinity_byte(64), 0);
+
+        assert!(linux_sched_affinity_mask_intersects(&[0b0000_0001]));
+        assert!(!linux_sched_affinity_mask_intersects(&[0b0000_0010]));
+        assert!(!linux_sched_affinity_mask_intersects(&[0b0000_1000]));
+        assert!(!linux_sched_affinity_mask_intersects(&[0b0001_0000]));
+        assert!(!linux_sched_affinity_mask_intersects(&[0]));
+        assert!(!linux_sched_affinity_mask_intersects(&[]));
     }
 
     #[test]
@@ -764,7 +837,9 @@ mod syscall_logic {
         let sign_extended = pid_123_process_clock as isize as usize;
 
         assert_eq!(pid_zero_process_clock, -6);
-        assert!(linux_cpu_clock_id_supported(pid_zero_process_clock as isize as usize));
+        assert!(linux_cpu_clock_id_supported(
+            pid_zero_process_clock as isize as usize
+        ));
         assert!(linux_cpu_clock_id_supported(zero_extended));
         assert!(linux_cpu_clock_id_supported(sign_extended));
         assert_eq!(
@@ -782,6 +857,23 @@ mod syscall_logic {
             linux_cpu_clock_id_pid(i32::MIN as isize as usize),
             Some(268_435_455)
         );
+    }
+
+    #[test]
+    fn mmap_file_descriptor_access_matches_posix_prot_and_share_rules() {
+        assert!(smros_linux_mmap_fd_access_ok_body!(true, true, true, true));
+        assert!(smros_linux_mmap_fd_access_ok_body!(
+            true, false, true, false
+        ));
+        assert!(smros_linux_mmap_fd_access_ok_body!(
+            true, false, false, true
+        ));
+        assert!(!smros_linux_mmap_fd_access_ok_body!(
+            true, false, true, true
+        ));
+        assert!(!smros_linux_mmap_fd_access_ok_body!(
+            false, true, false, false
+        ));
     }
 
     #[test]
@@ -912,7 +1004,7 @@ mod syscall_logic {
 
     #[test]
     fn posix_relative_and_absolute_timers_use_the_correct_clock_domain() {
-        let mut relative = LinuxPosixTimerCore::new(7, LinuxPosixClock::Realtime, 14);
+        let mut relative = LinuxPosixTimerCore::new(7, LinuxPosixClock::Realtime, 14, 0);
         relative
             .arm(
                 false,
@@ -928,7 +1020,7 @@ mod syscall_logic {
         assert!(relative.expire(150, 30_000));
         assert_eq!(relative.snapshot(150, 30_000).value, 0);
 
-        let mut absolute = LinuxPosixTimerCore::new(8, LinuxPosixClock::Realtime, 14);
+        let mut absolute = LinuxPosixTimerCore::new(8, LinuxPosixClock::Realtime, 14, 0);
         absolute
             .arm(
                 true,
@@ -952,9 +1044,18 @@ mod syscall_logic {
         let foreign_process_clock = linux_make_process_cpu_clock_id(125);
 
         assert_eq!(LinuxPosixClock::from_id(0), Some(LinuxPosixClock::Realtime));
-        assert_eq!(LinuxPosixClock::from_id(1), Some(LinuxPosixClock::Monotonic));
-        assert_eq!(LinuxPosixClock::from_id(2), Some(LinuxPosixClock::ProcessCpu));
-        assert_eq!(LinuxPosixClock::from_id(3), Some(LinuxPosixClock::ThreadCpu));
+        assert_eq!(
+            LinuxPosixClock::from_id(1),
+            Some(LinuxPosixClock::Monotonic)
+        );
+        assert_eq!(
+            LinuxPosixClock::from_id(2),
+            Some(LinuxPosixClock::ProcessCpu)
+        );
+        assert_eq!(
+            LinuxPosixClock::from_id(3),
+            Some(LinuxPosixClock::ThreadCpu)
+        );
         assert_eq!(LinuxPosixClock::from_id(4), None);
         assert_eq!(
             linux_posix_timer_clock_for_current_ids(
@@ -984,7 +1085,7 @@ mod syscall_logic {
 
     #[test]
     fn posix_timer_disarm_query_and_periodic_reschedule_are_one_shot_per_scan() {
-        let mut timer = LinuxPosixTimerCore::new(9, LinuxPosixClock::Monotonic, 10);
+        let mut timer = LinuxPosixTimerCore::new(9, LinuxPosixClock::Monotonic, 10, 0);
         timer
             .arm(
                 false,
@@ -1016,7 +1117,7 @@ mod syscall_logic {
 
     #[test]
     fn posix_timer_overrun_counts_expirations_while_notification_is_pending() {
-        let mut timer = LinuxPosixTimerCore::new(10, LinuxPosixClock::Monotonic, 18);
+        let mut timer = LinuxPosixTimerCore::new(10, LinuxPosixClock::Monotonic, 18, 0);
         timer
             .arm(
                 false,
@@ -1054,7 +1155,7 @@ mod syscall_logic {
 
     #[test]
     fn posix_timer_batches_missed_intervals_into_overrun_count() {
-        let mut timer = LinuxPosixTimerCore::new(11, LinuxPosixClock::Monotonic, 18);
+        let mut timer = LinuxPosixTimerCore::new(11, LinuxPosixClock::Monotonic, 18, 0);
         timer
             .arm(
                 false,
@@ -1073,7 +1174,7 @@ mod syscall_logic {
 
     #[test]
     fn posix_timer_snapshot_uses_cpu_clock_domain_for_cpu_timers() {
-        let mut timer = LinuxPosixTimerCore::new(12, LinuxPosixClock::ProcessCpu, 14);
+        let mut timer = LinuxPosixTimerCore::new(12, LinuxPosixClock::ProcessCpu, 14, 0);
         timer
             .arm(
                 false,
@@ -1223,16 +1324,31 @@ mod syscall_logic {
 
     #[test]
     fn exec_sleep_duration_accepts_only_sleep_utility_decimal_seconds() {
-        assert_eq!(linux_exec_sleep_duration_seconds("/bin/sleep", Some("3")), Some(3));
+        assert_eq!(
+            linux_exec_sleep_duration_seconds("/bin/sleep", Some("3")),
+            Some(3)
+        );
         assert_eq!(
             linux_exec_sleep_duration_seconds("/usr/bin/sleep", Some("12")),
             Some(12)
         );
-        assert_eq!(linux_exec_sleep_duration_seconds("/bin/true", Some("3")), None);
+        assert_eq!(
+            linux_exec_sleep_duration_seconds("/bin/true", Some("3")),
+            None
+        );
         assert_eq!(linux_exec_sleep_duration_seconds("/bin/sleep", None), None);
-        assert_eq!(linux_exec_sleep_duration_seconds("/bin/sleep", Some("")), None);
-        assert_eq!(linux_exec_sleep_duration_seconds("/bin/sleep", Some("+3")), None);
-        assert_eq!(linux_exec_sleep_duration_seconds("/bin/sleep", Some("3s")), None);
+        assert_eq!(
+            linux_exec_sleep_duration_seconds("/bin/sleep", Some("")),
+            None
+        );
+        assert_eq!(
+            linux_exec_sleep_duration_seconds("/bin/sleep", Some("+3")),
+            None
+        );
+        assert_eq!(
+            linux_exec_sleep_duration_seconds("/bin/sleep", Some("3s")),
+            None
+        );
         assert_eq!(
             linux_exec_sleep_duration_seconds("/bin/sleep", Some("18446744073709551616")),
             None
@@ -1337,10 +1453,7 @@ mod linux_mqueue_logic {
             state.send(101, b"1234", LINUX_MQ_PRIO_MAX),
             Err(LinuxMqueueError::Invalid)
         );
-        assert_eq!(
-            state.receive(101, 4),
-            Err(LinuxMqueueError::WouldBlock)
-        );
+        assert_eq!(state.receive(101, 4), Err(LinuxMqueueError::WouldBlock));
 
         state.send(101, b"1234", 0).unwrap();
         assert_eq!(
@@ -1389,7 +1502,10 @@ mod linux_mqueue_logic {
                 Some(LinuxMqueueDeadline { ticks: 50 }),
             )
             .unwrap();
-        assert_eq!(state.send(101, b"wake", 0).unwrap().receiver, Some((11, 12)));
+        assert_eq!(
+            state.send(101, b"wake", 0).unwrap().receiver,
+            Some((11, 12))
+        );
         assert_eq!(
             state.take_outcome(11, 12),
             Some(LinuxMqueueWaitOutcome::Woken)
@@ -1737,6 +1853,64 @@ mod linux_task_logic {
     }
 
     #[test]
+    fn scheduler_parameters_are_per_task_and_clone_inherits_parent_values() {
+        let mut tasks = LinuxTaskTable::<3>::new();
+
+        assert_eq!(tasks.register_root(7), Ok(LINUX_ROOT_TID));
+        assert_eq!(
+            tasks.sched_param(LINUX_ROOT_TID, 7),
+            Some(LinuxTaskSchedParam {
+                policy: 0,
+                priority: 0,
+            })
+        );
+
+        assert!(tasks.set_sched_param(
+            LINUX_ROOT_TID,
+            7,
+            LinuxTaskSchedParam {
+                policy: 1,
+                priority: 20,
+            }
+        ));
+        let child = tasks
+            .reserve_child(LINUX_ROOT_TID, 8)
+            .expect("child reservation");
+        assert!(tasks.inherit_sched_param(child, 7));
+        assert!(tasks.publish(child));
+        assert_eq!(
+            tasks.sched_param(child.tid, 8),
+            Some(LinuxTaskSchedParam {
+                policy: 1,
+                priority: 20,
+            })
+        );
+
+        assert!(tasks.set_sched_param(
+            child.tid,
+            8,
+            LinuxTaskSchedParam {
+                policy: 2,
+                priority: 3,
+            }
+        ));
+        assert_eq!(
+            tasks.sched_param(LINUX_ROOT_TID, 7),
+            Some(LinuxTaskSchedParam {
+                policy: 1,
+                priority: 20,
+            })
+        );
+        assert_eq!(
+            tasks.sched_param(child.tid, 8),
+            Some(LinuxTaskSchedParam {
+                policy: 2,
+                priority: 3,
+            })
+        );
+    }
+
+    #[test]
     fn root_registration_reports_zero_capacity() {
         let mut tasks = LinuxTaskTable::<0>::new();
 
@@ -2029,6 +2203,24 @@ mod linux_task_logic {
     }
 
     #[test]
+    fn sigcont_cancels_pending_stop_signals() {
+        let mut pending = LinuxPendingSignals::new();
+        pending.queue(signal_record(18, 0x18)).unwrap();
+        pending.queue(signal_record(19, 0x19)).unwrap();
+        pending.queue(signal_record(20, 0x20)).unwrap();
+        pending.queue(signal_record(21, 0x21)).unwrap();
+        pending.queue(signal_record(22, 0x22)).unwrap();
+
+        pending.discard_stop_signals();
+
+        assert_eq!(pending.pending_mask(), linux_signal_bit(18));
+        assert_eq!(
+            pending.take_matching(linux_signal_bit(18)).unwrap().signum,
+            18
+        );
+    }
+
+    #[test]
     fn pending_and_task_signal_state_reset_in_place_matches_new_state() {
         let mut pending = LinuxPendingSignals::new();
         pending.queue(signal_record(10, 0x10)).unwrap();
@@ -2191,15 +2383,19 @@ mod linux_task_logic {
                 LinuxSignalDisposition::Terminate
             );
         }
-        assert!(!linux_signal_interrupts_sleep(LinuxSignalDisposition::Ignore));
-        assert!(!linux_signal_interrupts_sleep(LinuxSignalDisposition::Stop));
+        assert!(!linux_signal_interrupts_sleep(
+            LinuxSignalDisposition::Ignore
+        ));
+        assert!(linux_signal_interrupts_sleep(LinuxSignalDisposition::Stop));
         assert!(!linux_signal_interrupts_sleep(
             LinuxSignalDisposition::Continue
         ));
         assert!(linux_signal_interrupts_sleep(
             LinuxSignalDisposition::Terminate
         ));
-        assert!(linux_signal_interrupts_sleep(LinuxSignalDisposition::Handled));
+        assert!(linux_signal_interrupts_sleep(
+            LinuxSignalDisposition::Handled
+        ));
         assert_eq!(
             linux_signal_disposition(0x1000, 15),
             LinuxSignalDisposition::Handled
@@ -2677,7 +2873,10 @@ mod linux_task_logic {
         assert!(tasks.publish(child));
 
         let wait = LinuxSleepWait::absolute_realtime_waiting(500, TARGET_REALTIME_NANOS);
-        assert_eq!(wait.absolute_realtime_nanoseconds, Some(TARGET_REALTIME_NANOS));
+        assert_eq!(
+            wait.absolute_realtime_nanoseconds,
+            Some(TARGET_REALTIME_NANOS)
+        );
         assert!(tasks.install_sleep(child.tid, 8, wait));
         assert!(tasks.block(child.tid, 8, LinuxBlockReason::Sleep));
 
@@ -3887,6 +4086,61 @@ mod linux_process_logic {
     }
 
     #[test]
+    fn stopped_children_are_waitable_with_wuntraced_without_reaping() {
+        let mut processes = LinuxProcessTable::<4>::new();
+        processes.register_root(7).unwrap();
+        let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert!(processes.publish(child));
+
+        let stopped_status = linux_wait_status_stopped(19).expect("SIGSTOP status");
+        let transition = processes
+            .stop_child(child.pid, 19)
+            .expect("running child can report a stop");
+        assert_eq!(transition.parent_pid, LINUX_ROOT_PID);
+        assert_eq!(transition.child_pid, child.pid);
+        assert_eq!(transition.status, stopped_status);
+
+        assert_eq!(
+            processes.wait_outcome(LINUX_ROOT_PID, LinuxWaitSelector::Any),
+            LinuxWaitOutcome::WouldBlock,
+            "plain waitpid must not consume a stopped child without WUNTRACED"
+        );
+        let selected =
+            processes.wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Any, true);
+        assert_eq!(
+            selected,
+            LinuxWaitOutcome::Ready {
+                pid: child.pid,
+                status: stopped_status,
+            }
+        );
+
+        let LinuxWaitOutcome::Ready { pid, status } = selected else {
+            panic!("stopped child must be waitable with WUNTRACED");
+        };
+        let completed = complete_linux_wait_with_options(
+            &mut processes,
+            LINUX_ROOT_PID,
+            LinuxWaitSelector::Any,
+            pid,
+            status,
+            true,
+            |_status| Ok::<(), u8>(()),
+        );
+        assert_eq!(completed, Ok(Some(pid)));
+        assert_eq!(
+            processes.by_pid(child.pid).map(|process| process.state),
+            Some(LinuxProcessState::Running),
+            "reporting a stopped child must not reap the live process"
+        );
+        assert_eq!(
+            processes.wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Any, true),
+            LinuxWaitOutcome::WouldBlock,
+            "a stopped child report is one-shot until a later stop event"
+        );
+    }
+
+    #[test]
     fn wait_completion_copies_before_reaping_and_preserves_zombie_on_fault() {
         let mut processes = LinuxProcessTable::<3>::new();
         processes.register_root(7).unwrap();
@@ -4992,6 +5246,31 @@ mod linux_process_memory_logic {
         assert_eq!(linux_shared_reference_release(1), Some(0));
         assert_eq!(linux_shared_reference_acquire(usize::MAX), None);
         assert_eq!(linux_shared_reference_release(0), None);
+    }
+
+    #[test]
+    fn fork_shared_backing_is_read_only_until_cow_materialization() {
+        let cow = LinuxPageBacking::Shared {
+            object_id: LINUX_FORK_PRIVATE_OBJECT_ID,
+            page_index: 2,
+            pfn: 33,
+        };
+        let ordinary_shared = LinuxPageBacking::Shared {
+            object_id: 9,
+            page_index: 2,
+            pfn: 33,
+        };
+
+        assert!(linux_page_backing_is_cow(cow));
+        assert!(!linux_page_backing_is_cow(ordinary_shared));
+        assert_eq!(
+            linux_page_protection_for_backing(cow, LINUX_PROT_READ | LINUX_PROT_WRITE),
+            LINUX_PROT_READ
+        );
+        assert_eq!(
+            linux_page_protection_for_backing(ordinary_shared, LINUX_PROT_READ | LINUX_PROT_WRITE),
+            LINUX_PROT_READ | LINUX_PROT_WRITE
+        );
     }
 
     #[test]
@@ -6815,6 +7094,15 @@ mod linux_futex_logic {
     }
 
     #[test]
+    fn process_shared_futex_aliases_use_one_backing_key() {
+        let first = futex_shared_key(0x1234, 0x1222_0008);
+        let second = futex_shared_key(0x1234, 0x1222_1008);
+        assert_eq!(first, second);
+        assert_ne!(first, futex_shared_key(0x1235, 0x1222_1008));
+        assert!(first & FUTEX_SHARED_KEY_TAG != 0);
+    }
+
+    #[test]
     fn futex_queue_wakes_matching_waiters_in_fifo_order() {
         let mut queue = FutexQueue::<4>::new();
         queue
@@ -6927,8 +7215,15 @@ mod linux_futex_logic {
         let now = 100;
         let tick_nanoseconds = 10_000_000;
 
-        let zero_relative =
-            futex_deadline_from_timeout(FutexCommand::Wait, false, now, 0, 0, tick_nanoseconds);
+        let zero_relative = futex_deadline_from_timeout(
+            FutexCommand::Wait,
+            false,
+            now,
+            0,
+            0,
+            tick_nanoseconds,
+            0,
+        );
         assert_eq!(
             zero_relative,
             Some(FutexDeadline {
@@ -6944,6 +7239,7 @@ mod linux_futex_logic {
                 0,
                 20_000_000,
                 tick_nanoseconds,
+                0,
             ),
             Some(FutexDeadline {
                 ticks: 103,
@@ -6958,6 +7254,7 @@ mod linux_futex_logic {
                 0,
                 20_000_000,
                 tick_nanoseconds,
+                0,
             ),
             Some(FutexDeadline {
                 ticks: 2,
@@ -6972,11 +7269,34 @@ mod linux_futex_logic {
                 0,
                 20_000_000,
                 tick_nanoseconds,
+                0,
             ),
             Some(FutexDeadline {
                 ticks: 2,
-                clock: FutexClock::Realtime,
+                clock: FutexClock::Monotonic,
             })
+        );
+    }
+
+    #[test]
+    fn futex_realtime_absolute_deadline_maps_to_monotonic_ticks() {
+        assert_eq!(
+            futex_realtime_deadline_ticks(
+                1_700_000_003,
+                250_000_000,
+                1_700_000_000_000_000_000,
+                10_000_000,
+            ),
+            Some(325)
+        );
+        assert_eq!(
+            futex_realtime_deadline_ticks(
+                1_699_999_999,
+                0,
+                1_700_000_000_000_000_000,
+                10_000_000,
+            ),
+            Some(0)
         );
     }
 }

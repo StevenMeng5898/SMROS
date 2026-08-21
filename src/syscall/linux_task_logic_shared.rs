@@ -174,6 +174,7 @@ pub(crate) enum LinuxBlockReason {
     Sleep,
     SignalWait,
     SignalSuspend,
+    Stopped,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -244,6 +245,19 @@ pub(crate) struct LinuxTaskReservation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxTaskSchedParam {
+    pub policy: usize,
+    pub priority: i32,
+}
+
+impl LinuxTaskSchedParam {
+    pub(crate) const DEFAULT: Self = Self {
+        policy: 0,
+        priority: 0,
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxTaskCore {
     pub tid: usize,
     pub tgid: usize,
@@ -280,6 +294,9 @@ pub(crate) const LINUX_REALTIME_SIGNAL_MIN: usize = 32;
 pub(crate) const LINUX_SIGNAL_INFO_BYTES: usize = 128;
 pub(crate) const LINUX_RT_QUEUE_LIMIT: usize = 64;
 pub(crate) const LINUX_SIGNAL_FRAME_LIMIT: usize = 16;
+pub(crate) const LINUX_SIGCONT_SIGNAL: usize = 18;
+pub(crate) const LINUX_STOP_SIGNAL_FIRST: usize = 19;
+pub(crate) const LINUX_STOP_SIGNAL_LAST: usize = 22;
 pub(crate) const LINUX_SS_ONSTACK: u64 = 1;
 pub(crate) const LINUX_SS_DISABLE: u64 = 2;
 
@@ -307,8 +324,8 @@ pub(crate) fn linux_signal_disposition(handler: u64, signum: usize) -> LinuxSign
         LINUX_IGNORE_SIGNAL_HANDLER => LinuxSignalDisposition::Ignore,
         LINUX_DEFAULT_SIGNAL_HANDLER => match signum {
             17 | 23 | 28 => LinuxSignalDisposition::Ignore,
-            18 => LinuxSignalDisposition::Continue,
-            19 | 20 | 21 | 22 => LinuxSignalDisposition::Stop,
+            LINUX_SIGCONT_SIGNAL => LinuxSignalDisposition::Continue,
+            LINUX_STOP_SIGNAL_FIRST..=LINUX_STOP_SIGNAL_LAST => LinuxSignalDisposition::Stop,
             _ => LinuxSignalDisposition::Terminate,
         },
         _ => LinuxSignalDisposition::Handled,
@@ -320,7 +337,9 @@ pub(crate) const fn linux_signal_interrupts_sleep(
 ) -> bool {
     matches!(
         disposition,
-        LinuxSignalDisposition::Terminate | LinuxSignalDisposition::Handled
+        LinuxSignalDisposition::Stop
+            | LinuxSignalDisposition::Terminate
+            | LinuxSignalDisposition::Handled
     )
 }
 
@@ -345,15 +364,6 @@ impl LinuxPendingSignal {
     pub(crate) const fn standard(signum: usize) -> Self {
         Self {
             signum,
-            ..Self::EMPTY
-        }
-    }
-
-    pub(crate) const fn timer(signum: usize, timer_pid: usize, timer_id: u32) -> Self {
-        Self {
-            signum,
-            timer_pid,
-            timer_id,
             ..Self::EMPTY
         }
     }
@@ -757,6 +767,12 @@ impl LinuxPendingSignals {
             self.realtime_sequences[index] = 0;
         }
         self.realtime_len = write;
+    }
+
+    pub(crate) fn discard_stop_signals(&mut self) {
+        for signum in LINUX_STOP_SIGNAL_FIRST..=LINUX_STOP_SIGNAL_LAST {
+            self.discard(signum);
+        }
     }
 }
 
@@ -1343,6 +1359,7 @@ pub(crate) struct LinuxTaskTable<const N: usize> {
     tasks: [LinuxTaskCore; N],
     signal_states: [LinuxTaskSignalState; N],
     sleep_waits: [Option<LinuxSleepWait>; N],
+    sched_params: [LinuxTaskSchedParam; N],
     clear_child_tids: [usize; N],
     next_tid: usize,
     exhausted: bool,
@@ -1354,6 +1371,7 @@ impl<const N: usize> LinuxTaskTable<N> {
             tasks: [LinuxTaskCore::EMPTY; N],
             signal_states: [LinuxTaskSignalState::new(); N],
             sleep_waits: [None; N],
+            sched_params: [LinuxTaskSchedParam::DEFAULT; N],
             clear_child_tids: [0; N],
             next_tid: LINUX_ROOT_TID + 1,
             exhausted: false,
@@ -1387,6 +1405,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         };
         self.signal_states[slot].reset_in_place();
         self.sleep_waits[slot] = None;
+        self.sched_params[slot] = LinuxTaskSchedParam::DEFAULT;
         self.clear_child_tids[slot] = 0;
         Ok(LINUX_ROOT_TID)
     }
@@ -1426,6 +1445,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         };
         self.signal_states[slot].reset_in_place();
         self.sleep_waits[slot] = None;
+        self.sched_params[slot] = LinuxTaskSchedParam::DEFAULT;
         self.clear_child_tids[slot] = 0;
         Some(reservation)
     }
@@ -1454,6 +1474,31 @@ impl<const N: usize> LinuxTaskTable<N> {
         let parent_mask = self.signal_states[parent_slot].mask;
         self.signal_states[reservation.slot].reset_in_place();
         self.signal_states[reservation.slot].mask = parent_mask;
+        true
+    }
+
+    pub(crate) fn inherit_sched_param(
+        &mut self,
+        reservation: LinuxTaskReservation,
+        parent_scheduler_thread: usize,
+    ) -> bool {
+        let Some(parent_slot) = self.tasks.iter().position(|task| {
+            Self::is_live(*task) && task.scheduler_thread == parent_scheduler_thread
+        }) else {
+            return false;
+        };
+        let Some(child) = self.tasks.get(reservation.slot).copied() else {
+            return false;
+        };
+        if child.state != LinuxTaskState::Starting
+            || child.tid != reservation.tid
+            || child.scheduler_thread != reservation.scheduler_thread
+            || child.tgid != self.tasks[parent_slot].tgid
+        {
+            return false;
+        }
+
+        self.sched_params[reservation.slot] = self.sched_params[parent_slot];
         true
     }
 
@@ -1490,6 +1535,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         *task = LinuxTaskCore::EMPTY;
         self.signal_states[reservation.slot].reset_in_place();
         self.sleep_waits[reservation.slot] = None;
+        self.sched_params[reservation.slot] = LinuxTaskSchedParam::DEFAULT;
         self.clear_child_tids[reservation.slot] = 0;
         true
     }
@@ -1506,6 +1552,31 @@ impl<const N: usize> LinuxTaskTable<N> {
             .iter()
             .copied()
             .find(|task| Self::is_published(*task) && task.scheduler_thread == scheduler_thread)
+    }
+
+    pub(crate) fn sched_param(
+        &self,
+        tid: usize,
+        scheduler_thread: usize,
+    ) -> Option<LinuxTaskSchedParam> {
+        let slot = self.task_slot(tid, scheduler_thread)?;
+        self.sched_params.get(slot).copied()
+    }
+
+    pub(crate) fn set_sched_param(
+        &mut self,
+        tid: usize,
+        scheduler_thread: usize,
+        param: LinuxTaskSchedParam,
+    ) -> bool {
+        let Some(slot) = self.task_slot_index(tid, scheduler_thread) else {
+            return false;
+        };
+        if self.tasks[slot].state == LinuxTaskState::Empty {
+            return false;
+        }
+        self.sched_params[slot] = param;
+        true
     }
 
     pub(crate) fn child_waiters(&self, tgid: usize) -> [Option<LinuxTaskCore>; N] {
@@ -2018,6 +2089,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         self.tasks[slot] = LinuxTaskCore::EMPTY;
         self.signal_states[slot].reset_in_place();
         self.sleep_waits[slot] = None;
+        self.sched_params[slot] = LinuxTaskSchedParam::DEFAULT;
         self.clear_child_tids[slot] = 0;
         true
     }
@@ -2028,6 +2100,7 @@ impl<const N: usize> LinuxTaskTable<N> {
             signal_state.reset_in_place();
         }
         self.sleep_waits.fill(None);
+        self.sched_params.fill(LinuxTaskSchedParam::DEFAULT);
         self.clear_child_tids.fill(0);
     }
 

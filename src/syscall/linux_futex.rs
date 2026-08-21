@@ -62,9 +62,29 @@ pub(crate) fn sys_futex(
         {
             return Err(SysError::EFAULT);
         }
+        let key = if decoded.private {
+            uaddr
+        } else {
+            linux_process_memory::futex_address_key(uaddr)
+        };
+        crate::kobj_info!(
+            "posix-futex",
+            "pid={} tid={} op={:#x} uaddr={:#x} key={:#x} private={} cmd={:?} val={} timeout={:#x} val3={:#x}",
+            super::linux_process::current_pid().unwrap_or(0),
+            linux_task::current_tid().unwrap_or(0),
+            op,
+            uaddr,
+            key,
+            decoded.private,
+            decoded.command,
+            val,
+            timeout,
+            val3
+        );
         match decoded.command {
             FutexCommand::Wait => wait(
                 uaddr,
+                key,
                 val,
                 timeout,
                 FUTEX_BITSET_MATCH_ANY,
@@ -73,14 +93,15 @@ pub(crate) fn sys_futex(
             ),
             FutexCommand::WaitBitset => wait(
                 uaddr,
+                key,
                 val,
                 timeout,
                 val3,
                 FutexCommand::WaitBitset,
                 decoded.realtime,
             ),
-            FutexCommand::Wake => wake(uaddr, val as usize, FUTEX_BITSET_MATCH_ANY),
-            FutexCommand::WakeBitset => wake(uaddr, val as usize, val3),
+            FutexCommand::Wake => wake(key, val as usize, FUTEX_BITSET_MATCH_ANY),
+            FutexCommand::WakeBitset => wake(key, val as usize, val3),
         }
     }
 }
@@ -99,6 +120,7 @@ pub(crate) fn restartable_wait_operation(op: u32) -> bool {
 #[cfg(target_arch = "aarch64")]
 fn wait(
     uaddr: usize,
+    key: usize,
     expected: u32,
     timeout_pointer: usize,
     bitset: u32,
@@ -139,7 +161,13 @@ fn wait(
             },
         }),
         Some(LinuxRestartTimeout::Unset) | None => {
-            let deadline = match read_deadline(timeout_pointer, now_monotonic, command, realtime) {
+            let deadline = match read_deadline(
+                timeout_pointer,
+                now_monotonic,
+                command,
+                realtime,
+                super::syscall::linux_realtime_offset_nanoseconds(),
+            ) {
                 Ok(deadline) => deadline,
                 Err(error) => {
                     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
@@ -173,7 +201,7 @@ fn wait(
         }
     };
     let waiter = FutexWaiter {
-        address: uaddr,
+        address: key,
         bitset,
         tid,
         scheduler_thread: scheduler_thread.0,
@@ -182,6 +210,14 @@ fn wait(
         outcome: FutexWaitOutcome::Waiting,
     };
     if with_queue(|queue| queue.push(waiter)).is_err() {
+        crate::kobj_info!(
+            "posix-futex",
+            "wait-queue-full pid={} tid={} key={:#x} uaddr={:#x}",
+            super::linux_process::current_pid().unwrap_or(0),
+            tid,
+            key,
+            uaddr
+        );
         crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
         return Err(SysError::EAGAIN);
     }
@@ -194,8 +230,27 @@ fn wait(
         }
     }
 
+    crate::kobj_info!(
+        "posix-futex",
+        "wait-enqueued pid={} tid={} key={:#x} uaddr={:#x} expected={} deadline={:?}",
+        super::linux_process::current_pid().unwrap_or(0),
+        tid,
+        key,
+        uaddr,
+        expected,
+        deadline
+    );
     scheduler::schedule();
     let outcome = with_queue(|queue| queue.take_outcome(tid, scheduler_thread.0));
+    crate::kobj_info!(
+        "posix-futex",
+        "wait-resume pid={} tid={} key={:#x} uaddr={:#x} outcome={:?}",
+        super::linux_process::current_pid().unwrap_or(0),
+        tid,
+        key,
+        uaddr,
+        outcome
+    );
     if outcome.is_none() {
         let _ = with_queue(|queue| queue.remove(tid, scheduler_thread.0));
         if linux_task::wake_blocked(tid, scheduler_thread.0, LinuxBlockReason::Futex) {
@@ -219,6 +274,7 @@ fn read_deadline(
     now_monotonic: u64,
     command: FutexCommand,
     realtime: bool,
+    realtime_offset_nanoseconds: i64,
 ) -> Result<Option<FutexDeadline>, SysError> {
     if timeout_pointer == 0 {
         return Ok(None);
@@ -242,6 +298,7 @@ fn read_deadline(
         i64::from_ne_bytes(seconds),
         i64::from_ne_bytes(nanoseconds),
         LINUX_FUTEX_TICK_NANOS,
+        realtime_offset_nanoseconds,
     )
     .map(Some)
     .ok_or(SysError::EINVAL)
@@ -260,12 +317,35 @@ fn wake(address: usize, requested: usize, bitset: u32) -> SysResult {
         let Some((tid, scheduler_thread)) = identity else {
             break;
         };
+        crate::kobj_info!(
+            "posix-futex",
+            "wake-match key={:#x} target_tid={} target_scheduler={} bitset={:#x}",
+            address,
+            tid,
+            scheduler_thread,
+            bitset
+        );
         if linux_task::wake_blocked(tid, scheduler_thread, LinuxBlockReason::Futex) {
             woken += 1;
         } else {
+            crate::kobj_info!(
+                "posix-futex",
+                "wake-target-not-blocked key={:#x} target_tid={} target_scheduler={}",
+                address,
+                tid,
+                scheduler_thread
+            );
             let _ = with_queue(|queue| queue.take_outcome(tid, scheduler_thread));
         }
     }
+    crate::kobj_info!(
+        "posix-futex",
+        "wake-result key={:#x} requested={} woken={} bitset={:#x}",
+        address,
+        requested,
+        woken,
+        bitset
+    );
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     Ok(woken)
 }
@@ -301,7 +381,11 @@ pub(crate) fn remove_task_waiters(tid: usize, scheduler_thread: usize) -> usize 
 
 #[cfg(target_arch = "aarch64")]
 pub(crate) fn wake_address(address: usize, requested: usize, bitset: u32) -> SysResult {
-    wake(address, requested, bitset)
+    wake(
+        linux_process_memory::futex_address_key(address),
+        requested,
+        bitset,
+    )
 }
 
 pub(crate) fn reset() {

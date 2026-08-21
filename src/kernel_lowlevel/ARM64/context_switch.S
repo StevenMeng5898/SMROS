@@ -124,8 +124,10 @@ context_switch:
     ldp     x29, x30, [x16, #0xE8]
     ldr     x16, [x16, #0x100]
 
-    // The resumed scheduler frame restores the DAIF state it captured before
-    // switching. Keeping IRQs masked here also protects exception-return state.
+    // The caller masks interrupts around the switch and restores its previous
+    // DAIF state after this branch returns. Keep IRQs masked while resuming
+    // the saved kernel continuation so an interrupt cannot nest on its stack
+    // before the caller has restored that state.
     br      x16
 .size context_switch, . - context_switch
 

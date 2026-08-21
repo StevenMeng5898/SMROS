@@ -83,8 +83,8 @@ impl Aarch64AddressSpaceBackend for PageFrameBackend {
         true
     }
 
-    fn publish_user_mapping(&mut self, vaddr: usize) {
-        cpu::invalidate_user_page(vaddr);
+    fn publish_user_mapping(&mut self, _vaddr: usize) {
+        cpu::complete_user_page_update();
     }
 
     fn break_user_mapping(&mut self, vaddr: usize) {

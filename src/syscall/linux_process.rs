@@ -121,6 +121,70 @@ pub(crate) fn by_pid(pid: usize) -> Option<LinuxProcessCore> {
     with_runtime(|runtime| runtime.processes.by_pid(pid))
 }
 
+fn running_parent_pid(pid: usize) -> Result<usize, SysError> {
+    with_runtime(|runtime| {
+        runtime
+            .processes
+            .processes
+            .iter()
+            .find(|process| process.pid == pid && process.state == LinuxProcessState::Running)
+            .map(|process| process.parent_pid)
+            .ok_or(SysError::ESRCH)
+    })
+}
+
+pub(crate) fn pids_in_process_group(process_group: usize) -> Vec<usize> {
+    with_runtime(|runtime| {
+        runtime
+            .processes
+            .processes
+            .iter()
+            .copied()
+            .filter(|process| {
+                matches!(
+                    process.state,
+                    LinuxProcessState::Running | LinuxProcessState::Zombie
+                ) && process.process_group == process_group
+            })
+            .map(|process| process.pid)
+            .collect()
+    })
+}
+
+pub(crate) fn visible_pids() -> Vec<usize> {
+    with_runtime(|runtime| {
+        runtime
+            .processes
+            .processes
+            .iter()
+            .copied()
+            .filter(|process| {
+                matches!(
+                    process.state,
+                    LinuxProcessState::Running | LinuxProcessState::Zombie
+                )
+            })
+            .map(|process| process.pid)
+            .collect()
+    })
+}
+
+pub(crate) fn set_process_group(pid: usize, process_group: usize) -> Result<(), SysError> {
+    if process_group == 0 {
+        return Err(SysError::EINVAL);
+    }
+    with_runtime(|runtime| {
+        let process = runtime
+            .processes
+            .processes
+            .iter_mut()
+            .find(|process| process.pid == pid && process.state == LinuxProcessState::Running)
+            .ok_or(SysError::ESRCH)?;
+        process.process_group = process_group;
+        Ok(())
+    })
+}
+
 pub(crate) fn with_signal_state<R>(
     pid: usize,
     operation: impl FnOnce(
@@ -208,17 +272,31 @@ pub(crate) fn current_parent_pid() -> Result<usize, SysError> {
 pub(crate) fn wait_current(
     selector: LinuxWaitSelector,
     nohang: bool,
+    include_stopped: bool,
 ) -> Result<LinuxWaitOutcome, SysError> {
     let parent = current()?;
     loop {
-        let outcome = with_runtime(|runtime| runtime.processes.wait_outcome(parent.pid, selector));
+        let outcome = with_runtime(|runtime| {
+            runtime
+                .processes
+                .wait_outcome_with_options(parent.pid, selector, include_stopped)
+        });
         if outcome != LinuxWaitOutcome::WouldBlock || nohang {
             return Ok(outcome);
         }
 
+        crate::kobj_info!(
+            "posix-wait",
+            "block parent={} selector={:?}",
+            parent.pid,
+            selector
+        );
         let blocked = linux_task::block_current(LinuxBlockReason::ChildWait)?;
-        let rechecked =
-            with_runtime(|runtime| runtime.processes.wait_outcome(parent.pid, selector));
+        let rechecked = with_runtime(|runtime| {
+            runtime
+                .processes
+                .wait_outcome_with_options(parent.pid, selector, include_stopped)
+        });
         if rechecked != LinuxWaitOutcome::WouldBlock {
             let _ = linux_task::wake_blocked(
                 blocked.tid,
@@ -236,15 +314,17 @@ pub(crate) fn complete_wait_current(
     pid: usize,
     status: i32,
     wstatus: usize,
+    include_stopped: bool,
 ) -> Result<Option<usize>, SysError> {
     let parent = current()?;
     with_runtime(|runtime| {
-        match complete_linux_wait(
+        match complete_linux_wait_with_options(
             &mut runtime.processes,
             parent.pid,
             selector,
             pid,
             status,
+            include_stopped,
             |status| {
                 if wstatus != 0 {
                     super::linux_process_memory::copy_to_process(
@@ -263,17 +343,52 @@ pub(crate) fn complete_wait_current(
     })
 }
 
+pub(crate) fn stop_current_child(
+    signum: usize,
+) -> Result<Option<LinuxChildStateTransition>, SysError> {
+    let process = current()?;
+    let transition = with_runtime(|runtime| runtime.processes.stop_child(process.pid, signum));
+    if let Some(transition) = transition {
+        let _ = linux_task::wake_process_waiters(transition.parent_pid);
+    }
+    Ok(transition)
+}
+
+pub(crate) fn continue_child(pid: usize) -> Result<Option<LinuxChildStateTransition>, SysError> {
+    let transition = with_runtime(|runtime| runtime.processes.continue_child(pid));
+    if let Some(transition) = transition {
+        let _ = linux_task::wake_process_waiters(transition.parent_pid);
+    }
+    Ok(transition)
+}
+
 pub(crate) fn exit_current_process(
     wait_status: i32,
     entire_group: bool,
 ) -> Result<LinuxProcessExitOutcome, SysError> {
     let process = current()?;
+    crate::kobj_info!(
+        "posix-exit",
+        "begin pid={} parent={} status={:#x} group={}",
+        process.pid,
+        process.parent_pid,
+        wait_status,
+        entire_group
+    );
     super::linux_process_memory::deactivate_current_address_space()?;
-    if !linux_task::retire_process_tasks(process.pid, entire_group)? {
+    let process_empty = linux_task::retire_process_tasks(process.pid, entire_group)?;
+    crate::kobj_info!(
+        "posix-exit",
+        "retired pid={} process_empty={}",
+        process.pid,
+        process_empty
+    );
+    if !process_empty {
         return Ok(LinuxProcessExitOutcome::TaskOnly);
     }
 
     let _ = super::linux_process_memory::unregister(process.pid);
+    super::record_linux_child_cpu_usage(process.parent_pid, process.pid);
     let _ = super::release_linux_process_resources(process.pid);
     finish_terminal_process(process.pid, wait_status)
 }
@@ -282,6 +397,12 @@ fn finish_terminal_process(
     pid: usize,
     wait_status: i32,
 ) -> Result<LinuxProcessExitOutcome, SysError> {
+    crate::kobj_info!(
+        "posix-exit",
+        "finish pid={} status={:#x}",
+        pid,
+        wait_status
+    );
     if pid != LINUX_ROOT_PID {
         let transition = with_runtime(|runtime| {
             let process = runtime
@@ -326,6 +447,13 @@ fn finish_terminal_process(
             Ok(Some(transition))
         })?;
         if let Some(transition) = transition {
+            crate::kobj_info!(
+                "posix-exit",
+                "terminal pid={} parent={} notify={:?}",
+                pid,
+                transition.parent_pid,
+                transition.notification_signal
+            );
             let _ = apply_linux_terminal_child_transition(
                 transition,
                 |parent_pid, notification_signal| {
@@ -335,7 +463,13 @@ fn finish_terminal_process(
                     )
                 },
                 |parent_pid| {
-                    let _ = linux_task::wake_process_waiters(parent_pid);
+                    let count = linux_task::wake_process_waiters(parent_pid);
+                    crate::kobj_info!(
+                        "posix-wait",
+                        "wake parent={} waiters={}",
+                        parent_pid,
+                        count
+                    );
                 },
             );
         }
@@ -377,6 +511,7 @@ pub(crate) fn terminate_by_signal(
     tgid: usize,
     signum: usize,
 ) -> Result<LinuxProcessExitOutcome, SysError> {
+    let parent_pid = running_parent_pid(tgid)?;
     if linux_task::current_task().is_ok_and(|task| task.tgid == tgid) {
         super::linux_process_memory::deactivate_current_address_space()?;
     }
@@ -384,6 +519,7 @@ pub(crate) fn terminate_by_signal(
         return Err(SysError::ESRCH);
     }
     let _ = super::linux_process_memory::unregister(tgid);
+    super::record_linux_child_cpu_usage(parent_pid, tgid);
     let _ = super::release_linux_process_resources(tgid);
     let wait_status = linux_wait_status_signal(signum, false).ok_or(SysError::EINVAL)?;
     finish_terminal_process(tgid, wait_status)
@@ -575,7 +711,7 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
 
     fn acquire_scheduler_thread(&mut self) -> Result<Self::SchedulerThread, Self::Error> {
         scheduler::scheduler()
-            .create_suspended_thread_on_cpu(linux_fork_child_entry, "linux_process", 0)
+            .create_suspended_thread(linux_fork_child_entry, "linux_process")
             .ok_or(SysError::EAGAIN)
     }
 
@@ -683,6 +819,14 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
             memory.root_paddr,
             |frame| frame.regs[0] = 0,
         );
+        crate::kobj_info!(
+            "fork",
+            "configure child pid={} return_pc={:#x} pstate={:#x} root={:#x}",
+            process.pid,
+            child_context.return_pc,
+            child_context.pstate,
+            child_context.root_paddr
+        );
         let configured = scheduler::scheduler()
             .get_thread_mut(*scheduler_thread)
             .map(|thread| {
@@ -710,8 +854,24 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
         process: &Self::Process,
         resources: &mut Option<Self::Resources>,
     ) -> Result<(), Self::Error> {
+        let scheduler_thread = with_runtime(|runtime| {
+            let process_record = runtime.processes.processes.get(process.slot)?;
+            if process_record.pid == process.pid && process_record.parent_pid == process.parent_pid
+            {
+                Some(process_record.root_scheduler_thread)
+            } else {
+                None
+            }
+        })
+        .ok_or(SysError::EAGAIN)?;
         let resources = resources.take().ok_or(SysError::EAGAIN)?;
         resources.commit(process.pid)?;
+        if let Err(error) =
+            super::apply_linux_resource_scheduler_priority(process.pid, scheduler_thread)
+        {
+            let _ = super::rollback_linux_fork_process_resources(process.pid);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -878,6 +1038,13 @@ pub(crate) extern "C" fn linux_fork_child_entry() -> ! {
             crate::kernel_lowlevel::cpu::wait_for_interrupt();
         }
     };
+    crate::kobj_info!(
+        "fork",
+        "enter child return_pc={:#x} pstate={:#x} root={:#x}",
+        start.return_pc,
+        start.pstate,
+        start.root_paddr
+    );
     unsafe { thread::start_linux_process_child(&start as *const Aarch64ProcessStart as *const u8) }
 }
 

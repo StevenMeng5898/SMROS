@@ -143,6 +143,7 @@ pub(crate) struct PageFrameAllocatorCore<const WORDS: usize> {
     base_pfn: u64,
     total_pages: usize,
     allocated_pages: usize,
+    next_search_page: usize,
 }
 
 impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
@@ -152,6 +153,7 @@ impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
             base_pfn: 0,
             total_pages,
             allocated_pages: 0,
+            next_search_page: 0,
         }
     }
 
@@ -172,27 +174,26 @@ impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
         self.base_pfn = (start / page_size) as u64;
         self.total_pages = pages;
         self.allocated_pages = 0;
+        self.next_search_page = 0;
         true
     }
 
     pub(crate) fn alloc(&mut self) -> Option<u64> {
-        for word_index in 0..WORDS {
-            if self.bitmap[word_index] == u64::MAX {
-                continue;
-            }
+        if self.total_pages == 0 {
+            return None;
+        }
 
-            for bit_index in 0..64 {
-                let page_index = word_index * 64 + bit_index;
-                if page_index >= self.total_pages {
-                    return None;
-                }
-
-                let mask = 1u64 << bit_index;
-                if self.bitmap[word_index] & mask == 0 {
-                    self.bitmap[word_index] |= mask;
-                    self.allocated_pages += 1;
-                    return self.base_pfn.checked_add(page_index as u64);
-                }
+        let start = self.next_search_page.min(self.total_pages - 1);
+        for offset in 0..self.total_pages {
+            let page_index = (start + offset) % self.total_pages;
+            let word_index = page_index / 64;
+            let bit_index = page_index % 64;
+            let mask = 1u64 << bit_index;
+            if self.bitmap[word_index] & mask == 0 {
+                self.bitmap[word_index] |= mask;
+                self.allocated_pages += 1;
+                self.next_search_page = (page_index + 1) % self.total_pages;
+                return self.base_pfn.checked_add(page_index as u64);
             }
         }
 
@@ -215,6 +216,7 @@ impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
 
         self.bitmap[word_index] &= !mask;
         self.allocated_pages -= 1;
+        self.next_search_page = self.next_search_page.min(page_index);
         true
     }
 

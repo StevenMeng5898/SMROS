@@ -9,6 +9,10 @@ include!("linux_syscall_context_logic_shared.rs");
 static FRAME_OWNERS: LinuxSyscallFrameOwners<{ thread::MAX_THREADS }> =
     LinuxSyscallFrameOwners::new();
 
+const ARM64_SYS_FUTEX: u64 = 98;
+const ARM64_SYS_NANOSLEEP: u64 = 101;
+const ARM64_SYS_CLOCK_NANOSLEEP: u64 = 115;
+
 #[derive(Clone, Copy)]
 pub(crate) struct LinuxSyscallFrameRef {
     pub frame: *mut Aarch64ExceptionFrame,
@@ -37,13 +41,16 @@ pub(crate) fn with_linux_syscall_frame(
         return Err(SysError::EINVAL);
     }
     let frame_snapshot = unsafe { &*frame };
-    let restart = if frame_snapshot.regs[8] == 98
-        && super::linux_futex::restartable_wait_operation(frame_snapshot.regs[1] as u32)
-    {
+    let syscall_number = frame_snapshot.regs[8];
+    let restartable = (syscall_number == ARM64_SYS_FUTEX
+        && super::linux_futex::restartable_wait_operation(frame_snapshot.regs[1] as u32))
+        || syscall_number == ARM64_SYS_NANOSLEEP
+        || syscall_number == ARM64_SYS_CLOCK_NANOSLEEP;
+    let restart = if restartable {
         return_pc
             .checked_sub(4)
             .map(|svc_address| LinuxRestartBlock {
-                syscall_number: frame_snapshot.regs[8],
+                syscall_number,
                 arguments: [
                     frame_snapshot.regs[0],
                     frame_snapshot.regs[1],

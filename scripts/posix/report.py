@@ -436,6 +436,35 @@ def _validate_runtime_inventory(value: object) -> tuple[tuple[str, str], ...]:
     return tuple(result)
 
 
+def _validate_support_inventory(value: object) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("manifest support is invalid")
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for entry in value:
+        if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+            raise ValueError("manifest support entry is invalid")
+        path = entry["path"]
+        digest = entry["sha256"]
+        if not isinstance(path, str) or not isinstance(digest, str):
+            raise ValueError("manifest support entry is invalid")
+        parsed = PurePosixPath(path)
+        if (
+            parsed.is_absolute()
+            or parsed.as_posix() != path
+            or path != "conformance/interfaces/fork/mess.cat"
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or path in seen
+            or not _is_digest(digest)
+        ):
+            raise ValueError(f"manifest support entry is invalid: {path!r}")
+        seen.add(path)
+        result.append((path, digest))
+    return tuple(result)
+
+
 def _load_manifest(path: Path) -> _ManifestInput:
     if path.name != "manifest.json":
         raise ValueError("report manifest input must be manifest.json")
@@ -443,13 +472,20 @@ def _load_manifest(path: Path) -> _ManifestInput:
         _read_regular(path, "manifest.json", MAX_HOST_MANIFEST_BYTES),
         "manifest.json",
     )
-    if not isinstance(host_value, dict) or set(host_value) != {
+    required_host_keys = {
         "schema",
         "checksum_definition",
         "metadata",
         "runtime",
         "tests",
-    }:
+    }
+    optional_host_keys = {"support"}
+    host_keys = set(host_value) if isinstance(host_value, dict) else set()
+    if (
+        not isinstance(host_value, dict)
+        or not required_host_keys.issubset(host_keys)
+        or not host_keys.issubset(required_host_keys | optional_host_keys)
+    ):
         raise ValueError("manifest.json schema is invalid")
     if (
         host_value["schema"] != 1
@@ -465,6 +501,7 @@ def _load_manifest(path: Path) -> _ManifestInput:
     ]:
         raise ValueError("manifest.json differs from manifest.tsv")
     runtime = _validate_runtime_inventory(host_value["runtime"])
+    _validate_support_inventory(host_value.get("support"))
     build_path = path.with_name("build-results.ndjson")
     build_parent = _open_directory_chain(
         build_path.parent, "build-results.ndjson parent", create=False

@@ -14,6 +14,7 @@ pub(crate) const LINUX_PROT_EXEC: usize = 4;
 pub(crate) const LINUX_MAP_SHARED: usize = 1;
 #[cfg(not(target_os = "none"))]
 pub(crate) const LINUX_MAP_PRIVATE: usize = 2;
+pub(crate) const LINUX_FORK_PRIVATE_OBJECT_ID: u32 = 0x8000_0000;
 
 pub(crate) const fn linux_shared_file_identity_matches(left: u64, right: u64) -> bool {
     left != 0 && left == right
@@ -304,6 +305,25 @@ pub(crate) enum LinuxPageBacking {
         page_index: usize,
         pfn: u64,
     },
+}
+
+pub(crate) const fn linux_page_backing_is_cow(backing: LinuxPageBacking) -> bool {
+    matches!(
+        backing,
+        LinuxPageBacking::Shared { object_id, .. }
+            if object_id == LINUX_FORK_PRIVATE_OBJECT_ID
+    )
+}
+
+pub(crate) const fn linux_page_protection_for_backing(
+    backing: LinuxPageBacking,
+    prot: usize,
+) -> usize {
+    if linux_page_backing_is_cow(backing) {
+        prot & !LINUX_PROT_WRITE
+    } else {
+        prot
+    }
 }
 
 #[cfg(not(target_os = "none"))]

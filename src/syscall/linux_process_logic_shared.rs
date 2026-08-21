@@ -103,6 +103,13 @@ pub(crate) struct LinuxTerminalChildTransition {
     pub notification_signal: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxChildStateTransition {
+    pub parent_pid: usize,
+    pub child_pid: usize,
+    pub status: i32,
+}
+
 pub(crate) fn apply_linux_terminal_child_transition<E>(
     transition: LinuxTerminalChildTransition,
     notify_parent: impl FnOnce(usize, usize) -> Result<(), E>,
@@ -217,6 +224,7 @@ pub(crate) enum LinuxWaitCompletionError<E> {
     Reap,
 }
 
+#[cfg(not(target_os = "none"))]
 pub(crate) fn complete_linux_wait<const N: usize, E>(
     processes: &mut LinuxProcessTable<N>,
     parent_pid: usize,
@@ -225,12 +233,39 @@ pub(crate) fn complete_linux_wait<const N: usize, E>(
     status: i32,
     copy_status: impl FnOnce(i32) -> Result<(), E>,
 ) -> Result<Option<usize>, LinuxWaitCompletionError<E>> {
-    let revalidated = processes.wait_outcome(parent_pid, selector);
+    complete_linux_wait_with_options(
+        processes,
+        parent_pid,
+        selector,
+        pid,
+        status,
+        false,
+        copy_status,
+    )
+}
+
+pub(crate) fn complete_linux_wait_with_options<const N: usize, E>(
+    processes: &mut LinuxProcessTable<N>,
+    parent_pid: usize,
+    selector: LinuxWaitSelector,
+    pid: usize,
+    status: i32,
+    include_stopped: bool,
+    copy_status: impl FnOnce(i32) -> Result<(), E>,
+) -> Result<Option<usize>, LinuxWaitCompletionError<E>> {
+    let revalidated = processes.wait_outcome_with_options(parent_pid, selector, include_stopped);
     if revalidated != (LinuxWaitOutcome::Ready { pid, status }) {
         return Ok(None);
     }
     copy_status(status).map_err(LinuxWaitCompletionError::Copy)?;
-    if processes.reap(parent_pid, pid).is_none() {
+    if processes
+        .by_pid(pid)
+        .is_some_and(|process| process.state == LinuxProcessState::Zombie)
+    {
+        if processes.reap(parent_pid, pid).is_none() {
+            return Err(LinuxWaitCompletionError::Reap);
+        }
+    } else if !processes.complete_child_state_report(parent_pid, pid, status) {
         return Err(LinuxWaitCompletionError::Reap);
     }
     Ok(Some(pid))
@@ -252,6 +287,16 @@ pub(crate) fn linux_wait_status_signal(signum: usize, core_dumped: bool) -> Opti
     (1..=127)
         .contains(&signum)
         .then_some(signum as i32 | if core_dumped { 0x80 } else { 0 })
+}
+
+pub(crate) fn linux_wait_status_stopped(signum: usize) -> Option<i32> {
+    (1..=127)
+        .contains(&signum)
+        .then_some(((signum as i32) << 8) | 0x7f)
+}
+
+pub(crate) const fn linux_wait_status_is_stopped(status: i32) -> bool {
+    status & 0xff == 0x7f
 }
 
 pub(crate) fn linux_sigchld_exit_policy(
@@ -505,6 +550,40 @@ impl<const N: usize> LinuxProcessTable<N> {
         true
     }
 
+    pub(crate) fn stop_child(
+        &mut self,
+        pid: usize,
+        signum: usize,
+    ) -> Option<LinuxChildStateTransition> {
+        let status = linux_wait_status_stopped(signum)?;
+        let process = self
+            .processes
+            .iter_mut()
+            .find(|process| process.pid == pid && process.state == LinuxProcessState::Running)?;
+        process.wait_status = status;
+        Some(LinuxChildStateTransition {
+            parent_pid: process.parent_pid,
+            child_pid: process.pid,
+            status,
+        })
+    }
+
+    pub(crate) fn continue_child(&mut self, pid: usize) -> Option<LinuxChildStateTransition> {
+        let process = self
+            .processes
+            .iter_mut()
+            .find(|process| process.pid == pid && process.state == LinuxProcessState::Running)?;
+        if !linux_wait_status_is_stopped(process.wait_status) {
+            return None;
+        }
+        process.wait_status = 0;
+        Some(LinuxChildStateTransition {
+            parent_pid: process.parent_pid,
+            child_pid: process.pid,
+            status: 0,
+        })
+    }
+
     pub(crate) fn terminate_child(
         &mut self,
         pid: usize,
@@ -536,18 +615,31 @@ impl<const N: usize> LinuxProcessTable<N> {
         })
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn select_waitable(
         &self,
         parent_pid: usize,
         selector: LinuxWaitSelector,
     ) -> Option<LinuxProcessCore> {
+        self.select_waitable_with_options(parent_pid, selector, false)
+    }
+
+    pub(crate) fn select_waitable_with_options(
+        &self,
+        parent_pid: usize,
+        selector: LinuxWaitSelector,
+        include_stopped: bool,
+    ) -> Option<LinuxProcessCore> {
         self.processes
             .iter()
             .copied()
             .filter(|process| {
-                process.state == LinuxProcessState::Zombie
-                    && process.parent_pid == parent_pid
+                process.parent_pid == parent_pid
                     && Self::selector_matches(*process, selector)
+                    && (process.state == LinuxProcessState::Zombie
+                        || include_stopped
+                            && process.state == LinuxProcessState::Running
+                            && linux_wait_status_is_stopped(process.wait_status))
             })
             .min_by_key(|process| process.pid)
     }
@@ -564,12 +656,24 @@ impl<const N: usize> LinuxProcessTable<N> {
         })
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn wait_outcome(
         &self,
         parent_pid: usize,
         selector: LinuxWaitSelector,
     ) -> LinuxWaitOutcome {
-        if let Some(process) = self.select_waitable(parent_pid, selector) {
+        self.wait_outcome_with_options(parent_pid, selector, false)
+    }
+
+    pub(crate) fn wait_outcome_with_options(
+        &self,
+        parent_pid: usize,
+        selector: LinuxWaitSelector,
+        include_stopped: bool,
+    ) -> LinuxWaitOutcome {
+        if let Some(process) =
+            self.select_waitable_with_options(parent_pid, selector, include_stopped)
+        {
             return LinuxWaitOutcome::Ready {
                 pid: process.pid,
                 status: process.wait_status,
@@ -580,6 +684,25 @@ impl<const N: usize> LinuxProcessTable<N> {
         } else {
             LinuxWaitOutcome::NoChildren
         }
+    }
+
+    pub(crate) fn complete_child_state_report(
+        &mut self,
+        parent_pid: usize,
+        pid: usize,
+        status: i32,
+    ) -> bool {
+        let Some(process) = self.processes.iter_mut().find(|process| {
+            process.pid == pid
+                && process.parent_pid == parent_pid
+                && process.state == LinuxProcessState::Running
+                && process.wait_status == status
+                && linux_wait_status_is_stopped(status)
+        }) else {
+            return false;
+        };
+        process.wait_status = 0;
+        true
     }
 
     pub(crate) fn resource_counts(&self) -> (usize, usize) {

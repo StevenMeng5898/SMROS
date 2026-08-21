@@ -17,3 +17,7 @@ pub(crate) fn fixed_linux_mmap_request_ok(
 ) -> bool {
     smros_fixed_linux_mmap_request_ok_body!(addr, len, page_size, base, limit)
 }
+
+pub(crate) fn regular_file_mmap_span_ok(offset: u64, len: usize, offset_max: u64) -> bool {
+    smros_regular_file_mmap_span_ok_body!(offset, len, offset_max)
+}

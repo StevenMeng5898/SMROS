@@ -676,10 +676,17 @@ impl FxfsState {
                 Ok(()) => {
                     self.last_sync_ok = true;
                     self.last_storage_error = None;
-                    self.ensure_dir_tree(FXFS_SHARED_ROOT)?;
-                    self.install_default_configs()?;
-                    self.install_host_share(false)?;
-                    self.migrate_default_vm_configs()?;
+                    self.suspend_persist();
+                    let result = (|| {
+                        self.ensure_dir_tree("/dev/shm")?;
+                        self.ensure_dir_tree(FXFS_SHARED_ROOT)?;
+                        self.install_default_configs()?;
+                        self.install_host_share(false)?;
+                        self.migrate_default_vm_configs()?;
+                        Ok(())
+                    })();
+                    self.resume_persist();
+                    result?;
                     return Ok(());
                 }
                 Err(FxfsError::NotFound) => {}
@@ -1510,11 +1517,10 @@ impl FxfsState {
         Ok(data.len())
     }
 
-    fn truncate_file(&mut self, path: &str, size: usize) -> Result<usize, FxfsError> {
+    fn truncate_object_index(&mut self, index: usize, size: usize) -> Result<usize, FxfsError> {
         if !user_logic::fxfs_file_size_valid(size) {
             return Err(FxfsError::NoSpace);
         }
-        let index = self.resolve_path(path)?;
         if self.objects[index].kind != FxfsNodeKind::File {
             return Err(FxfsError::NotFile);
         }
@@ -1536,6 +1542,18 @@ impl FxfsState {
         self.record(FxfsJournalOp::TruncateFile, object_id, 0, size);
         self.persist();
         Ok(size)
+    }
+
+    fn truncate_file(&mut self, path: &str, size: usize) -> Result<usize, FxfsError> {
+        let index = self.resolve_path(path)?;
+        self.truncate_object_index(index, size)
+    }
+
+    fn truncate_cursor(&mut self, cursor: FxfsCursor, size: usize) -> Result<usize, FxfsError> {
+        let index = self
+            .find_object_index(cursor.object_id)
+            .ok_or(FxfsError::NotFound)?;
+        self.truncate_object_index(index, size)
     }
 
     fn unlink_file(&mut self, path: &str) -> Result<u64, FxfsError> {
@@ -1848,6 +1866,55 @@ impl FxfsState {
         Ok(cursor.offset)
     }
 
+    fn cursor_read_from_index(
+        &self,
+        index: usize,
+        object_id: u64,
+        offset: usize,
+        out: &mut [u8],
+    ) -> Result<usize, FxfsError> {
+        if self.objects[index].data.is_empty() {
+            if let Some(snapshot) = self.host_share_snapshot_for_object(object_id) {
+                fxfs_copy_from_data(snapshot, offset, out)
+            } else {
+                fxfs_copy_from_data(self.objects[index].data.as_slice(), offset, out)
+            }
+        } else {
+            fxfs_copy_from_data(self.objects[index].data.as_slice(), offset, out)
+        }
+    }
+
+    fn cursor_read_for_mmap(
+        &mut self,
+        cursor: &mut FxfsCursor,
+        out: &mut [u8],
+    ) -> Result<usize, FxfsError> {
+        let index = self
+            .find_object_index(cursor.object_id)
+            .ok_or(FxfsError::NotFound)?;
+        if self.objects[index].kind != FxfsNodeKind::File {
+            return Err(FxfsError::NotFile);
+        }
+        let len = self.cursor_read_from_index(index, cursor.object_id, cursor.offset, out)?;
+        cursor.offset = cursor.offset.saturating_add(len);
+        Ok(len)
+    }
+
+    fn cursor_mark_mmap_access(&mut self, cursor: FxfsCursor) -> Result<(), FxfsError> {
+        let index = self
+            .find_object_index(cursor.object_id)
+            .ok_or(FxfsError::NotFound)?;
+        if self.objects[index].kind != FxfsNodeKind::File {
+            return Err(FxfsError::NotFile);
+        }
+        let attrs = self.objects[index].attrs;
+        if attrs.link_count == 0 {
+            return Ok(());
+        }
+        self.touch_file_read(index);
+        Ok(())
+    }
+
     fn cursor_read(&mut self, cursor: &mut FxfsCursor, out: &mut [u8]) -> Result<usize, FxfsError> {
         let index = self
             .find_object_index(cursor.object_id)
@@ -1855,16 +1922,14 @@ impl FxfsState {
         if self.objects[index].kind != FxfsNodeKind::File {
             return Err(FxfsError::NotFile);
         }
-        let len = if self.objects[index].data.is_empty() {
-            if let Some(snapshot) = self.host_share_snapshot_for_object(cursor.object_id) {
-                fxfs_copy_from_data(snapshot, cursor.offset, out)?
-            } else {
-                fxfs_copy_from_data(self.objects[index].data.as_slice(), cursor.offset, out)?
-            }
-        } else {
-            fxfs_copy_from_data(self.objects[index].data.as_slice(), cursor.offset, out)?
-        };
+        let len = self.cursor_read_from_index(index, cursor.object_id, cursor.offset, out)?;
         cursor.offset = cursor.offset.saturating_add(len);
+        if len != 0 {
+            self.touch_file_read(index);
+            let object_id = self.objects[index].object_id;
+            self.record(FxfsJournalOp::ReadFile, object_id, 0, len);
+            self.persist();
+        }
         Ok(len)
     }
 
@@ -2124,6 +2189,10 @@ pub fn truncate_file(path: &str, size: usize) -> Result<usize, FxfsError> {
     state().truncate_file(path, size)
 }
 
+pub fn truncate_cursor(cursor: FxfsCursor, size: usize) -> Result<usize, FxfsError> {
+    state().truncate_cursor(cursor, size)
+}
+
 pub fn delete_file(path: &str) -> Result<(), FxfsError> {
     state().delete_file(path)
 }
@@ -2179,6 +2248,14 @@ pub fn position_cursor(cursor: &mut FxfsCursor, offset: usize) -> Result<usize, 
 
 pub fn cursor_read(cursor: &mut FxfsCursor, out: &mut [u8]) -> Result<usize, FxfsError> {
     state().cursor_read(cursor, out)
+}
+
+pub fn cursor_read_for_mmap(cursor: &mut FxfsCursor, out: &mut [u8]) -> Result<usize, FxfsError> {
+    state().cursor_read_for_mmap(cursor, out)
+}
+
+pub fn cursor_mark_mmap_access(cursor: FxfsCursor) -> Result<(), FxfsError> {
+    state().cursor_mark_mmap_access(cursor)
 }
 
 pub fn cursor_write(cursor: &mut FxfsCursor, data: &[u8]) -> Result<usize, FxfsError> {

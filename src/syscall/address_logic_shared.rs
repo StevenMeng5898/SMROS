@@ -47,6 +47,18 @@ macro_rules! smros_fixed_linux_mmap_request_ok_body {
     }};
 }
 
+macro_rules! smros_regular_file_mmap_span_ok_body {
+    ($offset:expr, $len:expr, $offset_max:expr) => {{
+        let offset: u64 = $offset;
+        let len = $len as u64;
+        let offset_max: u64 = $offset_max;
+        match offset.checked_add(len) {
+            Some(end) => end <= offset_max,
+            None => false,
+        }
+    }};
+}
+
 #[cfg(not(target_os = "none"))]
 macro_rules! smros_linux_user_range_writable_body {
     ($addr:expr, $len:expr, $ranges:expr) => {{

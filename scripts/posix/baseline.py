@@ -1626,13 +1626,20 @@ def _load_stage_identity(stage: Path) -> _StageIdentity:
         host = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
     except (UnicodeError, json.JSONDecodeError) as error:
         raise ValueError("manifest.json is invalid JSON") from error
-    if not isinstance(host, dict) or set(host) != {
+    required_host_keys = {
         "schema",
         "checksum_definition",
         "metadata",
         "runtime",
         "tests",
-    }:
+    }
+    optional_host_keys = {"support"}
+    host_keys = set(host) if isinstance(host, dict) else set()
+    if (
+        not isinstance(host, dict)
+        or not required_host_keys.issubset(host_keys)
+        or not host_keys.issubset(required_host_keys | optional_host_keys)
+    ):
         raise ValueError("manifest.json schema is invalid")
     canonical = (
         json.dumps(
@@ -1648,6 +1655,27 @@ def _load_stage_identity(stage: Path) -> _StageIdentity:
         asdict(test) for test in tests
     ]:
         raise ValueError("manifest.json differs from manifest.tsv")
+    raw_support = host.get("support")
+    if raw_support is not None:
+        if not isinstance(raw_support, list):
+            raise ValueError("manifest support is invalid")
+        seen_support: set[str] = set()
+        for entry in raw_support:
+            if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+                raise ValueError("manifest support entry is invalid")
+            relative = entry["path"]
+            digest = entry["sha256"]
+            if not isinstance(relative, str) or not isinstance(digest, str):
+                raise ValueError("manifest support entry is invalid")
+            _safe_relative(relative, "support path")
+            if (
+                relative != "conformance/interfaces/fork/mess.cat"
+                or relative in seen_support
+                or len(digest) != _DIGEST_LENGTH
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise ValueError(f"invalid support entry: {relative}")
+            seen_support.add(relative)
     raw_runtime = host["runtime"]
     if not isinstance(raw_runtime, list):
         raise ValueError("manifest runtime is invalid")

@@ -209,6 +209,14 @@ class TestDiscovery(DiscoveryFixture):
             "conformance/interfaces/timer_settime/2-1.c",
             "int main(void) { return 0; }\n",
         )
+        self.write_source(
+            "conformance/interfaces/clock_settime/speculative/4-4.c",
+            "int main(void) { return 0; }\n",
+        )
+        self.write_source(
+            "conformance/interfaces/mmap/10-1.c",
+            "int main(void) { return 0; }\n",
+        )
 
         tests = {test.test_id: test for test in discover_tests(self.root)}
 
@@ -224,7 +232,30 @@ class TestDiscovery(DiscoveryFixture):
             tests["conformance/interfaces/timer_settime/2-1.c"].timeout_ms,
             45_000,
         )
+        self.assertEqual(
+            tests["conformance/interfaces/clock_settime/speculative/4-4.c"].timeout_ms,
+            45_000,
+        )
+        self.assertEqual(
+            tests["conformance/interfaces/mmap/10-1.c"].timeout_ms,
+            90_000,
+        )
         self.assertEqual(tests["conformance/interfaces/mmap/1-1.c"].timeout_ms, 30_000)
+
+    def test_pthread_cond_broadcast_stress_has_reviewed_timeout(self) -> None:
+        self.write_source(
+            "conformance/interfaces/pthread_cond_broadcast/1-2.c",
+            "int main(void) { return 0; }\n",
+        )
+
+        tests = {test.test_id: test for test in discover_tests(self.root)}
+
+        self.assertEqual(
+            tests[
+                "conformance/interfaces/pthread_cond_broadcast/1-2.c"
+            ].timeout_ms,
+            180_000,
+        )
 
     def test_api_group_uses_the_approved_mapping(self) -> None:
         expected = {

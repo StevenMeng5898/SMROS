@@ -45,6 +45,7 @@ use core::sync::atomic::{compiler_fence, AtomicI64, AtomicU64, AtomicUsize, Orde
 use super::address_logic::{
     checked_end, fixed_linux_mmap_request_ok as shared_fixed_linux_mmap_request_ok,
     page_aligned as shared_page_aligned,
+    regular_file_mmap_span_ok as shared_regular_file_mmap_span_ok,
 };
 use super::linux_futex;
 use super::linux_mqueue;
@@ -63,9 +64,9 @@ use super::linux_task::{
     LinuxBlockReason, LinuxCloneRequest, LinuxCloneValidationError, LinuxPendingSignal,
     LinuxPendingSignalReservation, LinuxPendingSignalSource, LinuxPendingSignals,
     LinuxRestartBlock, LinuxSignalDisposition, LinuxSignalFrame, LinuxSignalStack, LinuxSignalWait,
-    LinuxSignalWaitOutcome, LinuxSleepOutcome, LinuxSleepWait, CLONE_CHILD_CLEARTID,
-    CLONE_CHILD_SETTID, CLONE_FILES, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM,
-    LINUX_AARCH64_UCONTEXT_BYTES, LINUX_SIGNAL_INFO_BYTES,
+    LinuxSignalWaitOutcome, LinuxSleepOutcome, LinuxSleepWait, LinuxTaskSchedParam,
+    CLONE_CHILD_CLEARTID, CLONE_CHILD_SETTID, CLONE_FILES, CLONE_SIGHAND, CLONE_THREAD,
+    CLONE_VM, LINUX_AARCH64_UCONTEXT_BYTES, LINUX_SIGNAL_INFO_BYTES,
 };
 use crate::kernel_lowlevel::memory::{process_manager, PAGE_SIZE};
 use crate::kernel_objects::channel;
@@ -141,6 +142,7 @@ pub enum SysError {
     EFAULT = 14,
     EBUSY = 16,
     EEXIST = 17,
+    EMFILE = 24,
     ENODEV = 19,
     ENOTDIR = 20,
     EISDIR = 21,
@@ -482,6 +484,9 @@ const CLOCK_MONOTONIC_COARSE: usize = 6;
 const CLOCK_BOOTTIME: usize = 7;
 const LINUX_TIMER_ABSTIME: usize = 1;
 const LINUX_SIGEV_SIGNAL: i32 = 0;
+const LINUX_SIGEV_NONE: i32 = 1;
+const LINUX_SIGEV_THREAD: i32 = 2;
+const LINUX_SIGEV_THREAD_ID: i32 = 4;
 const ZX_CLOCK_OPT_AUTO_START: u32 = 1 << 0;
 const ZX_CLOCK_UPDATE_OPTION_SYNTHETIC_VALUE_VALID: u64 = 1 << 0;
 const ZX_CLOCK_UPDATE_OPTION_REFERENCE_VALUE_VALID: u64 = 1 << 1;
@@ -535,6 +540,9 @@ const LINUX_OPEN_ALLOWED_FLAGS: usize = LINUX_O_ACCMODE
     | LINUX_O_NOFOLLOW
     | LINUX_O_CLOEXEC;
 const LINUX_PATH_MAX_BYTES: usize = 4096;
+const LINUX_NAME_MAX_BYTES: usize = 255;
+const LINUX_SHM_ROOT_PATH: &str = "/dev/shm/";
+const LINUX_MAX_OPEN_FDS: usize = 1024;
 const LINUX_MQUEUE_ALLOWED_FLAGS: usize =
     LINUX_O_ACCMODE | LINUX_O_CREAT | LINUX_O_EXCL | LINUX_O_NONBLOCK | LINUX_O_CLOEXEC;
 const LINUX_MQ_ATTR_BYTES: usize = 64;
@@ -587,10 +595,23 @@ const LINUX_SIGBUS: usize = 7;
 const LINUX_SIGSEGV: usize = 11;
 const LINUX_SIGALRM: usize = 14;
 const LINUX_SIGCHLD: usize = 17;
+const LINUX_SIGCONT: usize = 18;
+const LINUX_SIGSTOP: usize = 19;
 const LINUX_SIGKILL: usize = 9;
 const LINUX_SEGV_MAPERR: i32 = 1;
 const LINUX_SEGV_ACCERR: i32 = 2;
 const LINUX_BUS_ADRERR: i32 = 2;
+const LINUX_CLD_STOPPED: i32 = 5;
+const LINUX_CLD_CONTINUED: i32 = 6;
+const LINUX_SI_TIMER: i32 = -2;
+const LINUX_SIGINFO_SIGNO_OFF: usize = 0;
+const LINUX_SIGINFO_CODE_OFF: usize = 8;
+const LINUX_SIGINFO_CHILD_PID_OFF: usize = 16;
+const LINUX_SIGINFO_CHILD_STATUS_OFF: usize = 24;
+const LINUX_SIGINFO_TIMER_ID_OFF: usize = 16;
+const LINUX_SIGINFO_TIMER_OVERRUN_OFF: usize = 20;
+const LINUX_SIGINFO_TIMER_VALUE_OFF: usize = 24;
+const LINUX_SA_NOCLDSTOP: u64 = 0x0000_0001;
 const LINUX_SA_SIGINFO: u64 = 0x0000_0004;
 const LINUX_SA_ONSTACK: u64 = 0x0800_0000;
 const LINUX_SA_RESETHAND: u64 = 0x8000_0000;
@@ -616,6 +637,10 @@ const LINUX_MAX_IPC_BYTES: usize = 65536;
 const LINUX_MAX_MSG_BYTES: usize = 8192;
 const LINUX_MEMFD_ALLOWED_FLAGS: usize = 0x0001 | 0x0002 | 0x0004;
 const LINUX_GETRANDOM_ALLOWED_FLAGS: u32 = 0x0001 | 0x0002;
+const LINUX_RLIMIT_MEMLOCK: usize = 8;
+const LINUX_MCL_CURRENT: usize = 0x1;
+const LINUX_MCL_FUTURE: usize = 0x2;
+const LINUX_MCL_ALLOWED_FLAGS: usize = LINUX_MCL_CURRENT | LINUX_MCL_FUTURE;
 const LINUX_CLONE_NEWNS: usize = 0x0002_0000;
 const LINUX_CLONE_NEWCGROUP: usize = 0x0200_0000;
 const LINUX_CLONE_NEWUTS: usize = 0x0400_0000;
@@ -788,12 +813,22 @@ struct LinuxProcessResources {
     descriptors: Vec<LinuxDescriptorEntry>,
     objects: Vec<u32>,
     credentials: LinuxCredentialsCore,
+    umask: usize,
     cwd: String,
     root: String,
     container: LinuxProcessContainerState,
+    scheduler_policy: usize,
+    scheduler_priority: i32,
     timer_handles: Vec<u32>,
     posix_timers: Vec<LinuxPosixTimerCore>,
     real_timer_deadline_tick: u64,
+    cpu_start_tick: u64,
+    cpu_start_nanos: u64,
+    cpu_clock_offset_nanos: i64,
+    child_user_ticks: isize,
+    child_system_ticks: isize,
+    rlimit_memlock: LinuxRlimit64,
+    mlock_future: bool,
 }
 
 impl LinuxProcessResources {
@@ -803,21 +838,35 @@ impl LinuxProcessResources {
             descriptors: Vec::new(),
             objects: Vec::new(),
             credentials: LinuxCredentialsCore::default(),
+            umask: 0o022,
             cwd: String::from("/"),
             root: String::from("/"),
             container: LinuxProcessContainerState::new(),
+            scheduler_policy: 0,
+            scheduler_priority: 0,
             timer_handles: Vec::new(),
             posix_timers: Vec::new(),
             real_timer_deadline_tick: LINUX_TIMER_DISABLED,
+            cpu_start_tick: linux_cpu_start_tick(),
+            cpu_start_nanos: monotonic_nanos(),
+            cpu_clock_offset_nanos: LINUX_CPU_CLOCK_OFFSET_NANOS.load(Ordering::SeqCst),
+            child_user_ticks: 0,
+            child_system_ticks: 0,
+            rlimit_memlock: LINUX_RLIMIT64_UNLIMITED,
+            mlock_future: false,
         }
     }
 }
 
 pub(crate) struct LinuxProcessForkState {
     credentials: LinuxCredentialsCore,
+    umask: usize,
     cwd: String,
     root: String,
     container: LinuxProcessContainerState,
+    scheduler_policy: usize,
+    scheduler_priority: i32,
+    rlimit_memlock: LinuxRlimit64,
 }
 
 #[derive(Clone)]
@@ -886,10 +935,16 @@ struct LinuxRusage {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct LinuxRlimit64 {
     rlim_cur: u64,
     rlim_max: u64,
 }
+
+const LINUX_RLIMIT64_UNLIMITED: LinuxRlimit64 = LinuxRlimit64 {
+    rlim_cur: u64::MAX,
+    rlim_max: u64::MAX,
+};
 
 #[repr(C)]
 struct LinuxSysinfo {
@@ -1198,6 +1253,12 @@ fn linux_decode_timeval(bytes: &[u8], offset: usize) -> Result<LinuxTimeval, Sys
         tv_sec: i64::from_ne_bytes(linux_wire_field(bytes, seconds_offset)?),
         tv_usec: i64::from_ne_bytes(linux_wire_field(bytes, microseconds_offset)?),
     })
+}
+
+fn linux_read_user_timeval(address: usize) -> Result<LinuxTimeval, SysError> {
+    let mut bytes = [0u8; core::mem::size_of::<LinuxTimeval>()];
+    linux_copy_from_user(address, &mut bytes)?;
+    linux_decode_timeval(&bytes, 0)
 }
 
 fn linux_write_user_timeval(address: usize, value: LinuxTimeval) -> SysResult {
@@ -2876,6 +2937,14 @@ impl MemorySyscallState {
         self.linux_process_resources.last_mut().unwrap()
     }
 
+    fn process_resources_mut_if_exists(&mut self, pid: usize) -> Option<&mut LinuxProcessResources> {
+        let index = self
+            .linux_process_resources
+            .iter()
+            .position(|resources| resources.pid == pid)?;
+        Some(&mut self.linux_process_resources[index])
+    }
+
     fn process_resources(&self, pid: usize) -> Option<&LinuxProcessResources> {
         self.linux_process_resources
             .iter()
@@ -3149,16 +3218,24 @@ impl MemorySyscallState {
         if let Some(parent) = self.process_resources(parent_pid) {
             return Ok(LinuxProcessForkState {
                 credentials: parent.credentials.fork_child(),
+                umask: parent.umask,
                 cwd: try_clone_linux_fork_path(&parent.cwd).map_err(|_| SysError::ENOMEM)?,
                 root: try_clone_linux_fork_path(&parent.root).map_err(|_| SysError::ENOMEM)?,
                 container: parent.container.try_fork(namespace_flags)?,
+                scheduler_policy: parent.scheduler_policy,
+                scheduler_priority: parent.scheduler_priority,
+                rlimit_memlock: parent.rlimit_memlock,
             });
         }
         Ok(LinuxProcessForkState {
             credentials: LinuxCredentialsCore::default(),
+            umask: 0o022,
             cwd: try_clone_linux_fork_path("/").map_err(|_| SysError::ENOMEM)?,
             root: try_clone_linux_fork_path("/").map_err(|_| SysError::ENOMEM)?,
             container: LinuxProcessContainerState::new().try_fork(namespace_flags)?,
+            scheduler_policy: 0,
+            scheduler_priority: 0,
+            rlimit_memlock: LINUX_RLIMIT64_UNLIMITED,
         })
     }
 
@@ -3345,12 +3422,22 @@ impl MemorySyscallState {
             descriptors: core::mem::take(descriptors),
             objects: core::mem::take(objects),
             credentials: process_state.credentials,
+            umask: process_state.umask,
             cwd: process_state.cwd,
             root: process_state.root,
             container: process_state.container,
+            scheduler_policy: process_state.scheduler_policy,
+            scheduler_priority: process_state.scheduler_priority,
             timer_handles: Vec::new(),
             posix_timers: Vec::new(),
             real_timer_deadline_tick: LINUX_TIMER_DISABLED,
+            cpu_start_tick: linux_cpu_start_tick(),
+            cpu_start_nanos: monotonic_nanos(),
+            cpu_clock_offset_nanos: 0,
+            child_user_ticks: 0,
+            child_system_ticks: 0,
+            rlimit_memlock: process_state.rlimit_memlock,
+            mlock_future: false,
         });
         true
     }
@@ -3455,6 +3542,7 @@ impl MemorySyscallState {
         timer_id: u32,
         clock: LinuxPosixClock,
         signal: usize,
+        signal_value: usize,
     ) -> bool {
         let resources = self.process_resources_mut(pid);
         if resources.timer_handles.try_reserve(1).is_err()
@@ -3465,7 +3553,7 @@ impl MemorySyscallState {
         resources.timer_handles.push(handle);
         resources
             .posix_timers
-            .push(LinuxPosixTimerCore::new(timer_id, clock, signal));
+            .push(LinuxPosixTimerCore::new(timer_id, clock, signal, signal_value));
         true
     }
 
@@ -3622,6 +3710,10 @@ static mut MEMORY_SYSCALL_STATE: Option<MemorySyscallState> = None;
 static LINUX_SIGNAL_TRAMPOLINE: AtomicU64 = AtomicU64::new(0);
 static LINUX_REALTIME_OFFSET_NANOS: AtomicI64 = AtomicI64::new(LINUX_DEFAULT_REALTIME_OFFSET_NANOS);
 static LINUX_CPU_CLOCK_OFFSET_NANOS: AtomicI64 = AtomicI64::new(0);
+
+pub(crate) fn linux_realtime_offset_nanoseconds() -> i64 {
+    LINUX_REALTIME_OFFSET_NANOS.load(Ordering::SeqCst)
+}
 static LINUX_CLOCK_GETTIME_CACHE_PID: AtomicUsize = AtomicUsize::new(usize::MAX);
 static LINUX_CLOCK_GETTIME_CACHE_GENERATION: AtomicUsize = AtomicUsize::new(usize::MAX);
 static LINUX_CLOCK_GETTIME_CACHE_ADDRESS: AtomicUsize = AtomicUsize::new(0);
@@ -3761,7 +3853,7 @@ fn linux_user_cstr(ptr: usize, max_len: usize) -> Result<String, SysError> {
         bytes.push(byte[0]);
     }
 
-    Err(SysError::EINVAL)
+    Err(SysError::ENAMETOOLONG)
 }
 
 fn linux_user_usize(ptr: usize) -> Result<usize, SysError> {
@@ -3811,6 +3903,79 @@ fn linux_mqueue_user_name(ptr: usize) -> Result<String, SysError> {
 
 fn linux_path_is_container_pseudo_file(path: &str) -> bool {
     path.starts_with("/sys/fs/cgroup/") || path.starts_with("/proc/self/attr/")
+}
+
+fn linux_shm_path_error(path: &str) -> Option<SysError> {
+    let name = path.strip_prefix(LINUX_SHM_ROOT_PATH)?;
+    if name.is_empty() || name.contains('/') {
+        return Some(SysError::EINVAL);
+    }
+    if name.as_bytes().len() > LINUX_NAME_MAX_BYTES {
+        return Some(SysError::ENAMETOOLONG);
+    }
+    None
+}
+
+fn linux_shm_current_credentials() -> (LinuxCredentialsCore, usize) {
+    memory_state()
+        .process_resources(linux_resource_pid())
+        .map(|resources| (resources.credentials, resources.umask))
+        .unwrap_or((LinuxCredentialsCore::default(), 0o022))
+}
+
+fn linux_shm_check_open_permissions(path: &str, access_mode: usize) -> Result<bool, SysError> {
+    let Ok(attrs) = fxfs::attrs(path) else {
+        return Ok(false);
+    };
+    let (credentials, _) = linux_shm_current_credentials();
+    let allowed = syscall_logic::linux_mode_access_allowed(
+        attrs.mode,
+        attrs.uid as usize,
+        attrs.gid as usize,
+        credentials.effective_uid,
+        credentials.effective_gid,
+        access_mode != LINUX_O_WRONLY,
+        access_mode != LINUX_O_RDONLY,
+    );
+    if !allowed {
+        return Err(SysError::EACCES);
+    }
+    Ok(true)
+}
+
+fn linux_shm_check_unlink_permissions(path: &str) -> Result<(), SysError> {
+    if !path.starts_with(LINUX_SHM_ROOT_PATH) {
+        return Ok(());
+    }
+    let attrs = fxfs::attrs("/dev/shm").map_err(linux_fxfs_error)?;
+    let (credentials, _) = linux_shm_current_credentials();
+    if !syscall_logic::linux_mode_access_allowed(
+        attrs.mode,
+        attrs.uid as usize,
+        attrs.gid as usize,
+        credentials.effective_uid,
+        credentials.effective_gid,
+        false,
+        true,
+    ) {
+        return Err(SysError::EACCES);
+    }
+    Ok(())
+}
+
+fn linux_apply_creation_attributes(path: &str, mode: usize) -> Result<(), SysError> {
+    let (credentials, umask) = linux_shm_current_credentials();
+    let attrs = fxfs::attrs(path).map_err(linux_fxfs_error)?;
+    let mode = (attrs.mode & 0o170000)
+        | (syscall_logic::linux_creation_mode(mode, umask) & 0o777);
+    fxfs::set_attrs(
+        path,
+        mode,
+        credentials.effective_uid as u32,
+        credentials.effective_gid as u32,
+    )
+    .map(|_| ())
+    .map_err(linux_fxfs_error)
 }
 
 fn linux_path_visible(path: &str) -> bool {
@@ -4185,6 +4350,60 @@ fn linux_cpu_clock_nanos() -> Result<u64, SysError> {
     .ok_or(SysError::EOVERFLOW)
 }
 
+fn linux_cpu_start_tick() -> u64 {
+    scheduler::scheduler().get_tick_count()
+}
+
+fn linux_process_elapsed_ticks(pid: usize) -> isize {
+    let Some(resources) = memory_state().process_resources(pid) else {
+        return scheduler::scheduler().get_tick_count() as isize;
+    };
+    let elapsed = linux_cpu_start_tick().saturating_sub(resources.cpu_start_tick);
+    isize::try_from(elapsed).unwrap_or(isize::MAX)
+}
+
+fn linux_current_cpu_clock_nanos() -> Result<u64, SysError> {
+    let pid = linux_resource_pid();
+    let Some(resources) = memory_state().process_resources(pid) else {
+        return linux_cpu_clock_nanos();
+    };
+    let elapsed = monotonic_nanos().saturating_sub(resources.cpu_start_nanos);
+    syscall_logic::linux_realtime_from_offset(elapsed, resources.cpu_clock_offset_nanos)
+        .ok_or(SysError::EOVERFLOW)
+}
+
+fn set_linux_current_cpu_clock_nanos(requested_nanos: u64) -> Result<(), SysError> {
+    let pid = linux_resource_pid();
+    let start_nanos = memory_state()
+        .process_resources(pid)
+        .map(|resources| resources.cpu_start_nanos);
+    if let Some(start_nanos) = start_nanos {
+        let elapsed = monotonic_nanos().saturating_sub(start_nanos);
+        let offset = i128::from(requested_nanos) - i128::from(elapsed);
+        let offset = i64::try_from(offset).map_err(|_| SysError::EOVERFLOW)?;
+        memory_state()
+            .process_resources_mut(pid)
+            .cpu_clock_offset_nanos = offset;
+        return Ok(());
+    }
+
+    let offset = i128::from(requested_nanos) - i128::from(monotonic_nanos());
+    let offset = i64::try_from(offset).map_err(|_| SysError::EOVERFLOW)?;
+    LINUX_CPU_CLOCK_OFFSET_NANOS.store(offset, Ordering::SeqCst);
+    Ok(())
+}
+
+pub(crate) fn record_linux_child_cpu_usage(parent_pid: usize, child_pid: usize) {
+    if parent_pid == 0 || parent_pid == child_pid {
+        return;
+    }
+    let child_ticks = linux_process_elapsed_ticks(child_pid).max(1);
+    let Some(parent) = memory_state().process_resources_mut_if_exists(parent_pid) else {
+        return;
+    };
+    parent.child_user_ticks = parent.child_user_ticks.saturating_add(child_ticks);
+}
+
 fn linux_dynamic_cpu_clock_current_ids(clock_id: usize) -> Option<(usize, usize)> {
     let Some(pid) = syscall_logic::linux_cpu_clock_id_pid(clock_id) else {
         return None;
@@ -4227,11 +4446,11 @@ fn linux_posix_timer_clock_for_current(clock_id: usize) -> Option<LinuxPosixCloc
 fn linux_clock_nanoseconds(clock_id: usize) -> Result<u64, SysError> {
     match clock_id {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE => linux_realtime_nanos(),
-        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => linux_cpu_clock_nanos(),
+        CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => linux_current_cpu_clock_nanos(),
         CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME => {
             Ok(monotonic_nanos())
         }
-        _ if linux_cpu_clock_id_valid_for_current(clock_id) => linux_cpu_clock_nanos(),
+        _ if linux_cpu_clock_id_valid_for_current(clock_id) => linux_current_cpu_clock_nanos(),
         _ => Err(SysError::EINVAL),
     }
 }
@@ -4356,6 +4575,72 @@ fn linux_signal_record_from_user(
     Ok(record)
 }
 
+fn linux_sigchld_child_state_record(
+    child_pid: usize,
+    status: i32,
+    code: i32,
+) -> LinuxPendingSignal {
+    debug_assert!(matches!(code, LINUX_CLD_STOPPED | LINUX_CLD_CONTINUED));
+    let mut record = LinuxPendingSignal::standard(LINUX_SIGCHLD);
+    record.has_info = true;
+    record.info[LINUX_SIGINFO_SIGNO_OFF..LINUX_SIGINFO_SIGNO_OFF + 4]
+        .copy_from_slice(&(LINUX_SIGCHLD as i32).to_ne_bytes());
+    record.info[LINUX_SIGINFO_CODE_OFF..LINUX_SIGINFO_CODE_OFF + 4]
+        .copy_from_slice(&code.to_ne_bytes());
+    record.info[LINUX_SIGINFO_CHILD_PID_OFF..LINUX_SIGINFO_CHILD_PID_OFF + 4]
+        .copy_from_slice(&(child_pid as i32).to_ne_bytes());
+    record.info[LINUX_SIGINFO_CHILD_STATUS_OFF..LINUX_SIGINFO_CHILD_STATUS_OFF + 4]
+        .copy_from_slice(&status.to_ne_bytes());
+    record
+}
+
+fn linux_timer_signal_record(
+    signum: usize,
+    pid: usize,
+    timer_id: u32,
+    overrun: u64,
+    signal_value: usize,
+) -> LinuxPendingSignal {
+    let mut record = LinuxPendingSignal::standard(signum);
+    record.has_info = true;
+    record.timer_pid = pid;
+    record.timer_id = timer_id;
+    record.info[LINUX_SIGINFO_SIGNO_OFF..LINUX_SIGINFO_SIGNO_OFF + 4]
+        .copy_from_slice(&(signum as i32).to_ne_bytes());
+    record.info[LINUX_SIGINFO_CODE_OFF..LINUX_SIGINFO_CODE_OFF + 4]
+        .copy_from_slice(&LINUX_SI_TIMER.to_ne_bytes());
+    record.info[LINUX_SIGINFO_TIMER_ID_OFF..LINUX_SIGINFO_TIMER_ID_OFF + 4]
+        .copy_from_slice(&(timer_id as i32).to_ne_bytes());
+    let overrun = i32::try_from(overrun).unwrap_or(i32::MAX);
+    record.info[LINUX_SIGINFO_TIMER_OVERRUN_OFF..LINUX_SIGINFO_TIMER_OVERRUN_OFF + 4]
+        .copy_from_slice(&overrun.to_ne_bytes());
+    record.info[LINUX_SIGINFO_TIMER_VALUE_OFF
+        ..LINUX_SIGINFO_TIMER_VALUE_OFF + core::mem::size_of::<usize>()]
+        .copy_from_slice(&signal_value.to_ne_bytes());
+    record
+}
+
+fn queue_linux_sigchld_child_state(
+    parent_pid: usize,
+    child_pid: usize,
+    status: i32,
+    code: i32,
+) -> Result<(), SysError> {
+    let action = linux_signal_action_for(parent_pid, LINUX_SIGCHLD)?;
+    if action.flags & LINUX_SA_NOCLDSTOP != 0 {
+        return Ok(());
+    }
+    if linux_task::linux_signal_disposition(action.handler, LINUX_SIGCHLD)
+        == LinuxSignalDisposition::Ignore
+    {
+        return Ok(());
+    }
+    queue_process_linux_signal_and_wake(
+        parent_pid,
+        linux_sigchld_child_state_record(child_pid, status, code),
+    )
+}
+
 fn with_linux_process_signal_state<R>(
     operation: impl FnOnce(
         &mut [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1],
@@ -4424,6 +4709,32 @@ fn reserve_process_linux_signal(
 
 fn discard_process_linux_signal(signum: usize) {
     with_linux_process_pending(|pending| pending.discard(signum));
+}
+
+fn discard_pending_linux_stop_signals(tgid: usize) {
+    let _ = with_linux_process_signal_state_for(tgid, |_, pending| {
+        pending.discard_stop_signals();
+    });
+    for signum in linux_task::LINUX_STOP_SIGNAL_FIRST..=linux_task::LINUX_STOP_SIGNAL_LAST {
+        linux_task::discard_signal(tgid, signum);
+    }
+}
+
+fn discard_pending_linux_continue_signal(tgid: usize) {
+    let _ = with_linux_process_signal_state_for(tgid, |_, pending| {
+        pending.discard(LINUX_SIGCONT);
+    });
+    linux_task::discard_signal(tgid, LINUX_SIGCONT);
+}
+
+fn cancel_opposing_linux_stop_continue_signals(tgid: usize, signum: usize) {
+    if signum == LINUX_SIGCONT {
+        discard_pending_linux_stop_signals(tgid);
+    } else if (linux_task::LINUX_STOP_SIGNAL_FIRST..=linux_task::LINUX_STOP_SIGNAL_LAST)
+        .contains(&signum)
+    {
+        discard_pending_linux_continue_signal(tgid);
+    }
 }
 
 fn process_pending_linux_signal_mask() -> u64 {
@@ -4578,11 +4889,45 @@ fn commit_linux_signal(deliverable: LinuxDeliverableSignal) -> Result<(), SysErr
     result
 }
 
+fn notify_linux_child_state(
+    transition: linux_process::LinuxChildStateTransition,
+    code: i32,
+) -> Result<(), SysError> {
+    queue_linux_sigchld_child_state(
+        transition.parent_pid,
+        transition.child_pid,
+        transition.status,
+        code,
+    )
+}
+
+fn stop_current_linux_process_for_signal(signum: usize) -> Result<(), SysError> {
+    if let Some(transition) = linux_process::stop_current_child(signum)? {
+        notify_linux_child_state(transition, LINUX_CLD_STOPPED)?;
+    }
+    Ok(())
+}
+
+fn continue_linux_process_for_signal(pid: usize) -> Result<(), SysError> {
+    if let Some(transition) = linux_process::continue_child(pid)? {
+        notify_linux_child_state(transition, LINUX_CLD_CONTINUED)?;
+    }
+    Ok(())
+}
+
 fn interrupt_linux_signal_target(target: linux_task::LinuxTaskCore, signum: usize) {
     if target.state != linux_task::LinuxTaskState::Blocked {
         return;
     }
     match target.block_reason {
+        linux_task::LinuxBlockReason::Stopped if signum == LINUX_SIGCONT => {
+            let _ = continue_linux_process_for_signal(target.tgid);
+            let _ = linux_task::wake_blocked(
+                target.tid,
+                target.scheduler_thread,
+                LinuxBlockReason::Stopped,
+            );
+        }
         linux_task::LinuxBlockReason::Futex => {
             let _ = linux_futex::interrupt_task(target.tid, target.scheduler_thread);
         }
@@ -4616,6 +4961,7 @@ pub(crate) fn queue_process_linux_signal_and_wake(
 ) -> Result<(), SysError> {
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let result = (|| {
+        cancel_opposing_linux_stop_continue_signals(tgid, record.signum);
         if let Some(target) = linux_task::signal_wait_target(tgid, record.signum) {
             match target.block_reason {
                 LinuxBlockReason::SignalWait => {
@@ -4695,6 +5041,7 @@ fn queue_directed_linux_signal(
         if signum == LINUX_SIGKILL {
             return terminate_linux_process_by_signal(validated_target.tgid, signum);
         }
+        cancel_opposing_linux_stop_continue_signals(validated_target.tgid, signum);
         match linux_signal_disposition_for(validated_target.tgid, signum)? {
             LinuxSignalDisposition::Ignore => Ok(0),
             LinuxSignalDisposition::Stop
@@ -4857,8 +5204,9 @@ fn install_linux_signal_handler(
     Ok(())
 }
 
-fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
+fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> LinuxSignalDeliveryOutcome {
     const LINUX_SA_RESTART: u64 = 0x1000_0000;
+    let mut default_stopped = false;
     while let Some(deliverable) = take_unblocked_linux_signal() {
         let pending = deliverable.record;
         let signum = pending.signum;
@@ -4870,14 +5218,14 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
         ) {
             linux_process::LinuxSignalDeliveryRoute::Ignore => {
                 if commit_linux_signal(deliverable).is_err() {
-                    return false;
+                    return LinuxSignalDeliveryOutcome::Idle;
                 }
                 continue;
             }
             linux_process::LinuxSignalDeliveryRoute::TerminateProcess => {
                 let _ = linux_task::clear_current_restart_block();
                 if commit_linux_signal(deliverable).is_err() {
-                    return false;
+                    return LinuxSignalDeliveryOutcome::Idle;
                 }
                 if let Ok(current) = linux_task::current_task() {
                     if let Ok(launch_id) = terminate_linux_process_by_signal(current.tgid, signum) {
@@ -4886,18 +5234,36 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
                         regs[0] = launch_id;
                     }
                 }
-                return false;
+                return LinuxSignalDeliveryOutcome::Idle;
             }
             linux_process::LinuxSignalDeliveryRoute::Handle => {}
         }
-        if matches!(
-            linux_signal_disposition(signum),
-            LinuxSignalDisposition::Stop | LinuxSignalDisposition::Continue
-        ) {
-            if commit_linux_signal(deliverable).is_err() {
-                return false;
+        match linux_signal_disposition(signum) {
+            LinuxSignalDisposition::Stop => {
+                if commit_linux_signal(deliverable).is_err() {
+                    return LinuxSignalDeliveryOutcome::Idle;
+                }
+                if stop_current_linux_process_for_signal(signum).is_err() {
+                    return LinuxSignalDeliveryOutcome::Idle;
+                }
+                if linux_task::block_current(LinuxBlockReason::Stopped).is_err() {
+                    return LinuxSignalDeliveryOutcome::Idle;
+                }
+                default_stopped = true;
+                scheduler::schedule();
+                continue;
             }
-            continue;
+            LinuxSignalDisposition::Continue => {
+                if commit_linux_signal(deliverable).is_err() {
+                    return LinuxSignalDeliveryOutcome::Idle;
+                }
+                if let Ok(current) = linux_task::current_task() {
+                    let _ = continue_linux_process_for_signal(current.tgid);
+                }
+                default_stopped = true;
+                continue;
+            }
+            _ => {}
         }
         let restart = linux_task::with_current_signal_state(|signal_state| {
             signal_state.take_restart_for_signal(action.flags & LINUX_SA_RESTART != 0)
@@ -4910,19 +5276,23 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> bool {
                 let _ = linux_task::install_current_restart_block(restart);
             }
             if requeue_linux_signal(deliverable).is_err() {
-                return false;
+                return LinuxSignalDeliveryOutcome::Idle;
             }
-            return false;
+            return LinuxSignalDeliveryOutcome::Idle;
         }
         if commit_linux_signal(deliverable).is_err() {
-            return false;
+            return LinuxSignalDeliveryOutcome::Idle;
         }
         if action.flags & LINUX_SA_RESETHAND != 0 {
             store_linux_signal_action(signum, LinuxKernelSigaction::default());
         }
-        return true;
+        return LinuxSignalDeliveryOutcome::HandlerInstalled;
     }
-    false
+    if default_stopped {
+        LinuxSignalDeliveryOutcome::DefaultStopped
+    } else {
+        LinuxSignalDeliveryOutcome::Idle
+    }
 }
 
 pub(crate) fn deliver_linux_synchronous_memory_fault(
@@ -4933,6 +5303,26 @@ pub(crate) fn deliver_linux_synchronous_memory_fault(
 ) -> Result<(), SysError> {
     if saved_regs == 0 {
         return Err(SysError::EFAULT);
+    }
+    crate::kobj_info!(
+        "posix-fault",
+        "fault pid={} address={:#x} access={:?}",
+        linux_process::current_pid().unwrap_or(0),
+        fault_address,
+        access
+    );
+    if matches!(access, LinuxMemoryFaultAccess::Write) {
+        let cow_result = linux_process_memory::resolve_current_cow_fault(fault_address as usize);
+        crate::kobj_info!(
+            "posix-cow",
+            "fault pid={} address={:#x} result={:?}",
+            linux_process::current_pid().unwrap_or(0),
+            fault_address,
+            cow_result
+        );
+        if cow_result.unwrap_or(false) {
+            return Ok(());
+        }
     }
     let current = linux_task::current_task()?;
     let (signum, code) =
@@ -5003,6 +5393,24 @@ fn restore_linux_signal_frame(saved_regs: usize) -> Option<LinuxSignalFrameResto
     )
 }
 
+fn apply_current_linux_restart_block(saved_regs: usize) -> bool {
+    let restart = linux_task::with_current_signal_state(|signal_state| signal_state.restart_block)
+        .ok()
+        .flatten();
+    let Some(restart) = restart else {
+        return false;
+    };
+    apply_linux_restart_block(saved_regs, restart);
+    true
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinuxSignalDeliveryOutcome {
+    Idle,
+    HandlerInstalled,
+    DefaultStopped,
+}
+
 #[no_mangle]
 pub extern "C" fn complete_linux_signal_syscall_return(saved_regs: usize) {
     if saved_regs == 0 {
@@ -5020,8 +5428,22 @@ pub extern "C" fn complete_linux_signal_syscall_return(saved_regs: usize) {
         None
     };
     let return_pc = crate::kernel_lowlevel::cpu::read_exception_return_pc();
-    if deliver_next_linux_signal(saved_regs, return_pc) {
-        return;
+    if (0x1202_0000..0x1204_0000).contains(&return_pc) {
+        crate::kobj_info!(
+            "fork",
+            "complete syscall return_pc={:#x} saved_frame={:#x}",
+            return_pc,
+            saved_regs
+        );
+    }
+    match deliver_next_linux_signal(saved_regs, return_pc) {
+        LinuxSignalDeliveryOutcome::HandlerInstalled => return,
+        LinuxSignalDeliveryOutcome::DefaultStopped => {
+            if apply_current_linux_restart_block(saved_regs) {
+                return;
+            }
+        }
+        LinuxSignalDeliveryOutcome::Idle => {}
     }
     if let Some(LinuxSignalFrameRestore::Restart(restart)) = restored {
         let restart_still_pending = linux_task::with_current_signal_state(|signal_state| {
@@ -5034,28 +5456,44 @@ pub extern "C" fn complete_linux_signal_syscall_return(saved_regs: usize) {
     }
 }
 
+pub fn expire_linux_real_timers_from_irq() {
+    let now = crate::kernel_lowlevel::timer::get_tick_count();
+    let deadlines = {
+        let state = memory_state();
+        state
+            .linux_process_resources
+            .iter()
+            .map(|resources| (resources.pid, resources.real_timer_deadline_tick))
+            .collect::<Vec<_>>()
+    };
+    let mut expired = Vec::new();
+    syscall_logic::for_each_linux_expired_real_timer_pid(
+        &deadlines,
+        now,
+        LINUX_TIMER_DISABLED,
+        |pid| expired.push(pid),
+    );
+    for pid in expired {
+        memory_state().set_linux_real_timer_deadline(pid, LINUX_TIMER_DISABLED);
+        if linux_signal_disposition_for(pid, LINUX_SIGALRM)
+            .is_ok_and(|disposition| disposition == LinuxSignalDisposition::Ignore)
+        {
+            continue;
+        }
+        let _ = queue_process_linux_signal_and_wake(
+            pid,
+            LinuxPendingSignal::standard(LINUX_SIGALRM),
+        );
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) {
     if saved_regs == 0 {
         return;
     }
 
-    let pid = linux_resource_pid();
-    let deadline = memory_state().linux_real_timer_deadline(pid);
-    if deadline == LINUX_TIMER_DISABLED {
-        return;
-    }
-    if crate::kernel_lowlevel::timer::get_tick_count() < deadline {
-        return;
-    }
-
-    if linux_signal_disposition(LINUX_SIGALRM) == LinuxSignalDisposition::Ignore {
-        memory_state().set_linux_real_timer_deadline(pid, LINUX_TIMER_DISABLED);
-        return;
-    }
-
-    memory_state().set_linux_real_timer_deadline(pid, LINUX_TIMER_DISABLED);
-    let _ = queue_process_linux_signal_and_wake(pid, LinuxPendingSignal::standard(LINUX_SIGALRM));
+    expire_linux_real_timers_from_irq();
     let return_pc = crate::kernel_lowlevel::cpu::read_exception_return_pc();
     let _ = deliver_next_linux_signal(saved_regs, return_pc);
 }
@@ -5070,10 +5508,21 @@ pub fn deliver_linux_posix_timer_signals_from_irq() {
         for timer in &mut resources.posix_timers {
             if timer.expire(now_monotonic, now_realtime) {
                 let signal = timer.signal;
+                if signal == 0 {
+                    continue;
+                }
                 let timer_id = timer.timer_id;
+                let overrun = timer.overrun();
+                let signal_value = timer.signal_value;
                 let _ = queue_process_linux_signal_and_wake(
                     resources.pid,
-                    LinuxPendingSignal::timer(signal, resources.pid, timer_id),
+                    linux_timer_signal_record(
+                        signal,
+                        resources.pid,
+                        timer_id,
+                        overrun,
+                        signal_value,
+                    ),
                 );
             }
         }
@@ -5122,6 +5571,11 @@ bitflags::bitflags! {
     }
 }
 
+const LINUX_MS_ASYNC: usize = 0x01;
+const LINUX_MS_INVALIDATE: usize = 0x02;
+const LINUX_MS_SYNC: usize = 0x04;
+const LINUX_MS_ALLOWED_FLAGS: usize = LINUX_MS_ASYNC | LINUX_MS_INVALIDATE | LINUX_MS_SYNC;
+
 /// Helper: check if address is page-aligned
 pub fn page_aligned(addr: usize) -> bool {
     shared_page_aligned(addr, PAGE_SIZE)
@@ -5135,6 +5589,28 @@ fn fixed_linux_mmap_request_ok(addr: usize, len: usize) -> bool {
         linux_process_memory::LINUX_USER_BASE,
         linux_process_memory::LINUX_USER_LIMIT,
     )
+}
+
+fn linux_mlock_future_mapping_exceeds_limit(len: usize) -> bool {
+    let Some(resources) = memory_state().process_resources(linux_resource_pid()) else {
+        return false;
+    };
+    if !resources.mlock_future || resources.rlimit_memlock.rlim_cur == u64::MAX {
+        return false;
+    }
+    let len = u64::try_from(len).unwrap_or(u64::MAX);
+    len > resources.rlimit_memlock.rlim_cur
+}
+
+fn linux_mmap_object_span_available(offset: u64, len: usize, object_size: usize) -> bool {
+    let Ok(offset) = usize::try_from(offset) else {
+        return false;
+    };
+    let Some(end) = offset.checked_add(len) else {
+        return false;
+    };
+    let available = roundup_pages(object_size).saturating_add(PAGE_SIZE);
+    end <= available
 }
 
 fn linux_read_mmap_contents(
@@ -5162,8 +5638,18 @@ fn linux_read_mmap_contents(
     contents.resize(read_len, 0);
     let mut file = linux_fxfs_file_for_fd(*fd, true)?;
     fxfs::position_cursor(&mut file.cursor, offset).map_err(linux_fxfs_error)?;
-    fxfs::cursor_read(&mut file.cursor, &mut contents).map_err(linux_fxfs_error)?;
+    fxfs::cursor_read_for_mmap(&mut file.cursor, &mut contents).map_err(linux_fxfs_error)?;
     Ok(contents)
+}
+
+fn linux_mark_mmap_access(
+    source: &linux_process_memory::LinuxMappingSource,
+) -> Result<(), SysError> {
+    let linux_process_memory::LinuxMappingSource::File { fd, .. } = source else {
+        return Ok(());
+    };
+    let file = linux_fxfs_file_for_fd(*fd, true)?;
+    fxfs::cursor_mark_mmap_access(file.cursor).map_err(linux_fxfs_error)
 }
 
 /// Linux sys_mmap implementation
@@ -5192,36 +5678,80 @@ pub fn sys_mmap(
     if !flags.contains(MmapFlags::SHARED) && !flags.contains(MmapFlags::PRIVATE) {
         return Err(SysError::EINVAL);
     }
+    if flags.contains(MmapFlags::FIXED) && !page_aligned(addr) {
+        return Err(SysError::EINVAL);
+    }
+    if checked_end(addr, len).is_none() {
+        if flags.contains(MmapFlags::FIXED) {
+            return Err(SysError::ENOMEM);
+        }
+        return Err(SysError::EINVAL);
+    }
 
     let anonymous = flags.contains(MmapFlags::ANONYMOUS);
-    let source = if anonymous {
+    let (source, mmap_access_updates_atime) = if anonymous {
         if offset != 0 {
             return Err(SysError::EINVAL);
         }
-        linux_process_memory::LinuxMappingSource::Anonymous
+        (linux_process_memory::LinuxMappingSource::Anonymous, false)
     } else {
         if !page_aligned(offset as usize) {
             return Err(SysError::EINVAL);
         }
-        let file = linux_fxfs_file_for_fd(fd, true)?;
-        let attrs = fxfs::cursor_attrs(file.cursor).map_err(linux_fxfs_error)?;
-        linux_process_memory::LinuxMappingSource::File {
-            fd,
-            offset,
-            object_id: file.cursor.object_id(),
-            path: file.path,
-            backing_len: attrs.size,
+        let (record, file) = {
+            let state = memory_state();
+            let record = state.get_fd(fd).ok_or(SysError::EBADF)?;
+            let file = state
+                .linux_fxfs_file(record.handle)
+                .cloned()
+                .ok_or(SysError::ENODEV)?;
+            (record, file)
+        };
+        if !syscall_logic::linux_mmap_fd_access_ok(
+            record.readable,
+            record.writable,
+            prot.contains(MmapProt::WRITE),
+            flags.contains(MmapFlags::SHARED),
+        ) {
+            return Err(SysError::EACCES);
         }
+        if !shared_regular_file_mmap_span_ok(offset, len, u64::MAX) {
+            return Err(SysError::EOVERFLOW);
+        }
+        let attrs = fxfs::cursor_attrs(file.cursor).map_err(linux_fxfs_error)?;
+        let mmap_access_updates_atime = attrs.link_count != 0;
+        (
+            linux_process_memory::LinuxMappingSource::File {
+                fd,
+                offset,
+                object_id: file.cursor.object_id(),
+                path: file.path,
+                backing_len: attrs.size,
+            },
+            mmap_access_updates_atime,
+        )
     };
 
-    if checked_end(addr, len).is_none() {
-        return Err(SysError::EINVAL);
+    if linux_mlock_future_mapping_exceeds_limit(len) {
+        return Err(SysError::EAGAIN);
+    }
+    if flags.contains(MmapFlags::SHARED) {
+        if let linux_process_memory::LinuxMappingSource::File {
+            offset,
+            backing_len,
+            ..
+        } = &source
+        {
+            if !linux_mmap_object_span_available(*offset, len, *backing_len) {
+                return Err(SysError::ENXIO);
+            }
+        }
     }
 
     let len = roundup_pages(len);
     let requested = if flags.contains(MmapFlags::FIXED) {
         if !fixed_linux_mmap_request_ok(addr, len) {
-            return Err(SysError::EINVAL);
+            return Err(SysError::ENOMEM);
         }
         Some(addr)
     } else if addr != 0 && page_aligned(addr) {
@@ -5230,7 +5760,16 @@ pub fn sys_mmap(
         None
     };
 
-    let contents = linux_read_mmap_contents(&source, len)?;
+    if mmap_access_updates_atime {
+        linux_mark_mmap_access(&source)?;
+    }
+    let contents = if flags.contains(MmapFlags::SHARED)
+        && linux_process_memory::shared_file_mmap_pages_cached(&source, len)
+    {
+        Vec::new()
+    } else {
+        linux_read_mmap_contents(&source, len)?
+    };
     let vaddr = linux_process_memory::map_current_with_contents(
         requested,
         len,
@@ -5273,6 +5812,67 @@ pub fn sys_munmap(addr: usize, len: usize) -> SysResult {
     for (id, _mapping_address) in detached {
         let _ = release_shared_memory_attachment_reference(id);
     }
+    Ok(0)
+}
+
+/// Linux sys_msync implementation
+pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SysResult {
+    if !page_aligned(addr)
+        || flags & !LINUX_MS_ALLOWED_FLAGS != 0
+        || flags & (LINUX_MS_ASYNC | LINUX_MS_SYNC) == (LINUX_MS_ASYNC | LINUX_MS_SYNC)
+    {
+        return Err(SysError::EINVAL);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+    checked_end(addr, len).ok_or(SysError::EINVAL)?;
+    let len = roundup_pages(len);
+    let ranges = linux_process_memory::sync_current_file_mappings(addr, len)?;
+    let mut staging = [0u8; LINUX_IO_STAGING_BYTES];
+    for range in ranges {
+        let mut file = linux_fxfs_file_for_fd(range.fd, false)?;
+        let mut total = 0usize;
+        while total < range.len {
+            let chunk = core::cmp::min(staging.len(), range.len - total);
+            linux_process_memory::copy_from_current(
+                range.address.checked_add(total).ok_or(SysError::EFAULT)?,
+                &mut staging[..chunk],
+            )?;
+            fxfs::position_cursor(
+                &mut file.cursor,
+                range
+                    .file_offset
+                    .checked_add(total)
+                    .ok_or(SysError::EOVERFLOW)?,
+            )
+            .map_err(|_| SysError::EINVAL)?;
+            let written = fxfs::cursor_write(&mut file.cursor, &staging[..chunk])
+                .map_err(|_| SysError::EIO)?;
+            if written != chunk {
+                return Err(SysError::EIO);
+            }
+            total += chunk;
+        }
+    }
+    if flags & LINUX_MS_SYNC != 0 {
+        fxfs::force_persist().map_err(|_| SysError::EIO)?;
+    }
+    Ok(0)
+}
+
+pub fn sys_mlockall(flags: usize) -> SysResult {
+    if flags == 0 || flags & !LINUX_MCL_ALLOWED_FLAGS != 0 {
+        return Err(SysError::EINVAL);
+    }
+    let resources = memory_state().process_resources_mut(linux_resource_pid());
+    resources.mlock_future = flags & LINUX_MCL_FUTURE != 0;
+    Ok(0)
+}
+
+pub fn sys_munlockall() -> SysResult {
+    let resources = memory_state().process_resources_mut(linux_resource_pid());
+    resources.mlock_future = false;
     Ok(0)
 }
 
@@ -5742,6 +6342,10 @@ pub fn sys_getrandom(buf_ptr: usize, len: usize, flags: u32) -> SysResult {
 
 fn linux_fd_known(fd: usize) -> bool {
     fd <= 2 || memory_state().get_fd(fd).is_some()
+}
+
+fn linux_fd_is_console(fd: usize) -> bool {
+    fd <= 2
 }
 
 fn linux_fd_handle(fd: usize) -> Result<u32, SysError> {
@@ -6397,6 +7001,9 @@ fn linux_write_stat_from_attrs(
     const ST_SIZE_OFF: usize = 48;
     const ST_BLKSIZE_OFF: usize = 56;
     const ST_BLOCKS_OFF: usize = 64;
+    const ST_ATIME_OFF: usize = 72;
+    const ST_MTIME_OFF: usize = 88;
+    const ST_CTIME_OFF: usize = 104;
 
     linux_zero_user(stat_ptr, core::mem::size_of::<LinuxStat>())?;
     let (device, inode) =
@@ -6404,11 +7011,17 @@ fn linux_write_stat_from_attrs(
 
     let size = core::cmp::min(attrs.size, i64::MAX as usize) as i64;
     let blocks = ((attrs.size.saturating_add(511)) / 512) as i64;
+    let atime = core::cmp::min(attrs.accessed_at, i64::MAX as u64) as i64;
+    let mtime = core::cmp::min(attrs.modified_at, i64::MAX as u64) as i64;
+    let ctime = core::cmp::min(attrs.modified_at, i64::MAX as u64) as i64;
     for (offset, bytes) in [
         (ST_DEV_OFF, device.to_ne_bytes()),
         (ST_INO_OFF, inode.to_ne_bytes()),
         (ST_SIZE_OFF, size.to_ne_bytes()),
         (ST_BLOCKS_OFF, blocks.to_ne_bytes()),
+        (ST_ATIME_OFF, atime.to_ne_bytes()),
+        (ST_MTIME_OFF, mtime.to_ne_bytes()),
+        (ST_CTIME_OFF, ctime.to_ne_bytes()),
     ] {
         linux_copy_to_user(
             stat_ptr.checked_add(offset).ok_or(SysError::EFAULT)?,
@@ -6544,7 +7157,7 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SysResult {
 }
 
 /// Linux sys_openat compatibility implementation.
-pub fn sys_openat(dirfd: usize, path: usize, flags: usize, _mode: usize) -> SysResult {
+pub fn sys_openat(dirfd: usize, path: usize, flags: usize, mode: usize) -> SysResult {
     if path == 0 {
         return Err(SysError::EFAULT);
     }
@@ -6571,7 +7184,29 @@ pub fn sys_openat(dirfd: usize, path: usize, flags: usize, _mode: usize) -> SysR
         ObjectType::LinuxFile
     };
     let path_str = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
+    if let Some(error) = linux_shm_path_error(&path_str) {
+        return Err(error);
+    }
     let access_mode = flags & LINUX_O_ACCMODE;
+    let existed_in_fxfs = fxfs::attrs(&path_str).is_ok();
+    if path_str.starts_with(LINUX_SHM_ROOT_PATH) {
+        let (credentials, umask) = linux_shm_current_credentials();
+        crate::kobj_info!(
+            "posix-shm",
+            "open path={} flags={:#x} mode={:#o} existed={} attrs={:?} euid={} egid={} umask={:#o}",
+            path_str,
+            flags,
+            mode,
+            existed_in_fxfs,
+            fxfs::attrs(&path_str).ok(),
+            credentials.effective_uid,
+            credentials.effective_gid,
+            umask
+        );
+    }
+    if path_str.starts_with(LINUX_SHM_ROOT_PATH) && existed_in_fxfs {
+        let _ = linux_shm_check_open_permissions(&path_str, access_mode)?;
+    }
     if object_type == ObjectType::LinuxFile
         && access_mode == LINUX_O_RDONLY
         && flags & LINUX_O_CREAT == 0
@@ -6579,7 +7214,16 @@ pub fn sys_openat(dirfd: usize, path: usize, flags: usize, _mode: usize) -> SysR
     {
         return Err(SysError::ENOENT);
     }
+    if memory_state()
+        .process_resources(linux_resource_pid())
+        .is_some_and(|resources| resources.descriptors.len() >= LINUX_MAX_OPEN_FDS)
+    {
+        return Err(SysError::EMFILE);
+    }
     let fxfs_cursor = linux_prepare_fxfs_cursor(&path_str, object_type, flags, access_mode)?;
+    if object_type == ObjectType::LinuxFile && !existed_in_fxfs && flags & LINUX_O_CREAT != 0 {
+        linux_apply_creation_attributes(&path_str, mode)?;
+    }
     let handle = compat::create_object(object_type).map_err(|_| SysError::ENOMEM)?;
     let state = memory_state();
     let fd = state.alloc_fd_with_flags(
@@ -6799,6 +7443,10 @@ pub fn sys_unlinkat(_dirfd: usize, path: usize, flags: usize) -> SysResult {
         return Err(SysError::EISDIR);
     }
     let path = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
+    if let Some(error) = linux_shm_path_error(&path) {
+        return Err(error);
+    }
+    linux_shm_check_unlink_permissions(&path)?;
     let object_id = fxfs::unlink_file(path.as_str()).map_err(linux_fxfs_error)?;
     if !linux_fxfs_object_is_open(object_id) {
         fxfs::release_unlinked_file(object_id).map_err(linux_fxfs_error)?;
@@ -6872,6 +7520,9 @@ pub fn sys_lstat(path: usize, stat_ptr: usize) -> SysResult {
 }
 
 pub fn sys_fstat(fd: usize, stat_ptr: usize) -> SysResult {
+    if linux_fd_is_console(fd) {
+        return linux_write_stat(stat_ptr, 0o020666);
+    }
     if !linux_fd_is_file_or_pipe(fd) && !linux_fd_is_dir(fd) {
         return Err(SysError::ENODEV);
     }
@@ -6927,11 +7578,35 @@ pub fn sys_truncate(path: usize, _len: usize) -> SysResult {
     }
 }
 
-pub fn sys_ftruncate(fd: usize, _len: usize) -> SysResult {
-    if linux_fd_is_file(fd) {
-        Ok(0)
-    } else {
-        Err(SysError::ENODEV)
+pub fn sys_ftruncate(fd: usize, len: usize) -> SysResult {
+    let record = memory_state().get_fd(fd).ok_or(SysError::EBADF)?;
+    if !record.writable {
+        if record.object_type == ObjectType::LinuxFile
+            && linux_fxfs_path_for_fd(fd, false)
+                .map(|path| path.starts_with("/dev/shm/"))
+                .unwrap_or(false)
+        {
+            return Err(SysError::EINVAL);
+        }
+        return Err(SysError::EBADF);
+    }
+    if len > i64::MAX as usize {
+        return Err(SysError::EINVAL);
+    }
+
+    match record.object_type {
+        ObjectType::LinuxFile => {
+            let file = linux_fxfs_file_for_fd(fd, false)?;
+            fxfs::truncate_cursor(file.cursor, len).map_err(linux_fxfs_error)?;
+            Ok(0)
+        }
+        ObjectType::MemFd | ObjectType::SharedMemory => {
+            if !compat::table().set_property(HandleValue(record.handle), len as u64) {
+                return Err(SysError::ENODEV);
+            }
+            Ok(0)
+        }
+        _ => Err(SysError::EINVAL),
     }
 }
 
@@ -6995,8 +7670,11 @@ pub fn sys_sync() -> SysResult {
 }
 
 pub fn sys_fsync(fd: usize) -> SysResult {
-    if !linux_fd_is_file_or_pipe(fd) {
-        return Err(SysError::ENODEV);
+    if !linux_fd_known(fd) {
+        return Err(SysError::EBADF);
+    }
+    if !linux_fd_is_file(fd) {
+        return Err(SysError::EINVAL);
     }
     fxfs::force_persist().map_err(|_| SysError::EIO)?;
     Ok(0)
@@ -7632,21 +8310,46 @@ pub fn sys_ppoll(fds: usize, nfds: usize, _timeout: usize, _sigmask: usize) -> S
     sys_poll(fds, nfds, 0)
 }
 
+fn linux_select_timeout_wait(timeout: usize) -> SysResult {
+    if timeout == 0 {
+        return Ok(0);
+    }
+    let timeval = linux_read_user_timeval(timeout)?;
+    if timeval.tv_sec < 0 || timeval.tv_usec < 0 || timeval.tv_usec >= 1_000_000 {
+        return Err(SysError::EINVAL);
+    }
+    if linux_timeval_is_zero(timeval) {
+        return Ok(0);
+    }
+    let requested_nanoseconds =
+        linux_task::linux_sleep_timespec_nanoseconds(timeval.tv_sec, timeval.tv_usec * 1000)
+            .ok_or(SysError::EINVAL)?;
+    let now = crate::kernel_lowlevel::timer::get_tick_count();
+    let deadline = now
+        .checked_add(linux_timeval_to_ticks(timeval).max(1))
+        .ok_or(SysError::EOVERFLOW)?;
+    let wait = LinuxSleepWait::relative_waiting(deadline, now, requested_nanoseconds);
+    linux_sleep_until(wait, 0)
+}
+
 pub fn sys_select(
     nfds: usize,
     readfds: usize,
     writefds: usize,
     exceptfds: usize,
-    _timeout: usize,
+    timeout: usize,
 ) -> SysResult {
+    if nfds == 0 {
+        return linux_select_timeout_wait(timeout);
+    }
     let word_bits = usize::BITS as usize;
     let words = nfds.checked_add(word_bits - 1).ok_or(SysError::EINVAL)? / word_bits;
     let bytes = words
         .checked_mul(core::mem::size_of::<usize>())
         .ok_or(SysError::EINVAL)?;
-    if !syscall_logic::user_buffer_valid(readfds, bytes)
-        || !syscall_logic::user_buffer_valid(writefds, bytes)
-        || !syscall_logic::user_buffer_valid(exceptfds, bytes)
+    if (readfds != 0 && !syscall_logic::user_buffer_valid(readfds, bytes))
+        || (writefds != 0 && !syscall_logic::user_buffer_valid(writefds, bytes))
+        || (exceptfds != 0 && !syscall_logic::user_buffer_valid(exceptfds, bytes))
     {
         return Err(SysError::EFAULT);
     }
@@ -8642,55 +9345,212 @@ pub fn sys_get_priority(_which: usize, _who: usize) -> SysResult {
     Ok(0)
 }
 
-pub fn sys_sched_getaffinity(_pid: usize, len: usize, mask: usize) -> SysResult {
+pub fn sys_sched_getaffinity(pid: usize, len: usize, mask: usize) -> SysResult {
+    let _ = linux_sched_target_pid(pid)?;
     if !syscall_logic::user_buffer_valid(mask, len) {
         return Err(SysError::EFAULT);
     }
-    linux_fill_user(mask, len, 0xff)?;
+    let mut offset = 0usize;
+    let mut bytes = [0u8; 64];
+    while offset < len {
+        let chunk = core::cmp::min(bytes.len(), len - offset);
+        let mut index = 0usize;
+        while index < chunk {
+            bytes[index] = syscall_logic::linux_sched_affinity_byte(offset + index);
+            index += 1;
+        }
+        linux_copy_to_user(
+            mask.checked_add(offset).ok_or(SysError::EFAULT)?,
+            &bytes[..chunk],
+        )?;
+        offset += chunk;
+    }
     Ok(len)
 }
 
-pub fn sys_sched_setaffinity(_pid: usize, len: usize, mask: usize) -> SysResult {
+pub fn sys_sched_setaffinity(pid: usize, len: usize, mask: usize) -> SysResult {
+    let _ = linux_sched_target_pid(pid)?;
+    if len == 0 {
+        return Err(SysError::EINVAL);
+    }
     if !syscall_logic::user_buffer_valid(mask, len) {
-        Err(SysError::EFAULT)
-    } else {
-        Ok(0)
+        return Err(SysError::EFAULT);
     }
-}
-
-pub fn sys_sched_getparam(_pid: usize, param: usize) -> SysResult {
-    linux_zero_user(param, core::mem::size_of::<i32>())
-}
-
-pub fn sys_sched_setparam(_pid: usize, param: usize) -> SysResult {
-    if param == 0 {
-        Err(SysError::EFAULT)
-    } else {
-        Ok(0)
+    let mut offset = 0usize;
+    let mut bytes = [0u8; 64];
+    let mut intersects = false;
+    while offset < len {
+        let chunk = core::cmp::min(bytes.len(), len - offset);
+        linux_copy_from_user(
+            mask.checked_add(offset).ok_or(SysError::EFAULT)?,
+            &mut bytes[..chunk],
+        )?;
+        if syscall_logic::linux_sched_affinity_mask_intersects_at(&bytes[..chunk], offset) {
+            intersects = true;
+        }
+        offset += chunk;
     }
-}
-
-pub fn sys_sched_getscheduler(_pid: usize) -> SysResult {
+    if !intersects {
+        return Err(SysError::EINVAL);
+    }
     Ok(0)
 }
 
-pub fn sys_sched_setscheduler(_pid: usize, _policy: usize, param: usize) -> SysResult {
-    if param == 0 {
-        Err(SysError::EFAULT)
+fn linux_read_user_sched_param(param: usize) -> Result<i32, SysError> {
+    let mut priority = [0u8; core::mem::size_of::<i32>()];
+    linux_copy_from_user(param, &mut priority)?;
+    Ok(i32::from_ne_bytes(priority))
+}
+
+fn linux_write_user_sched_param(param: usize, priority: i32) -> Result<(), SysError> {
+    linux_copy_to_user(param, &priority.to_ne_bytes())
+}
+
+#[derive(Clone, Copy)]
+struct LinuxSchedTarget {
+    tid: usize,
+    tgid: usize,
+    scheduler_thread: usize,
+}
+
+fn linux_sched_target_task(pid: usize) -> Result<LinuxSchedTarget, SysError> {
+    let task = if pid == 0 {
+        linux_task::current_task()?
     } else {
+        linux_task::by_tid(pid).ok_or(SysError::ESRCH)?
+    };
+    Ok(LinuxSchedTarget {
+        tid: task.tid,
+        tgid: task.tgid,
+        scheduler_thread: task.scheduler_thread,
+    })
+}
+
+fn linux_sched_target_pid(pid: usize) -> Result<usize, SysError> {
+    linux_sched_target_task(pid).map(|target| target.tgid)
+}
+
+fn linux_apply_sched_priority_to_thread(
+    scheduler_thread: usize,
+    policy: usize,
+    priority: i32,
+) -> SysResult {
+    let kernel_priority =
+        syscall_logic::linux_sched_kernel_priority(policy, priority).ok_or(SysError::EINVAL)?;
+    if scheduler::scheduler().set_thread_priority(
+        crate::kernel_lowlevel::thread::ThreadId(scheduler_thread),
+        kernel_priority,
+    ) {
         Ok(0)
+    } else {
+        Err(SysError::ESRCH)
     }
 }
 
-pub fn sys_sched_get_priority_max(_policy: usize) -> SysResult {
+fn linux_apply_sched_priority_to_process(pid: usize, policy: usize, priority: i32) -> SysResult {
+    let process = linux_process::by_pid(pid).ok_or(SysError::ESRCH)?;
+    linux_apply_sched_priority_to_thread(process.root_scheduler_thread, policy, priority)
+}
+
+pub(crate) fn apply_linux_resource_scheduler_priority(
+    pid: usize,
+    scheduler_thread: usize,
+) -> SysResult {
+    let (policy, priority) = memory_state()
+        .process_resources(pid)
+        .map(|resources| (resources.scheduler_policy, resources.scheduler_priority))
+        .ok_or(SysError::ESRCH)?;
+    linux_apply_sched_priority_to_thread(scheduler_thread, policy, priority)
+        .and_then(|_| {
+            if linux_task::set_sched_param(
+                pid,
+                scheduler_thread,
+                LinuxTaskSchedParam { policy, priority },
+            ) {
+                Ok(0)
+            } else {
+                Err(SysError::ESRCH)
+            }
+        })
+}
+
+fn linux_reschedule_after_sched_change() {
+    if scheduler::scheduler().should_preempt() {
+        scheduler::yield_now();
+    }
+}
+
+fn linux_sched_target_param(target: LinuxSchedTarget) -> LinuxTaskSchedParam {
+    linux_task::sched_param(target.tid, target.scheduler_thread)
+        .or_else(|| {
+            memory_state()
+                .process_resources(target.tgid)
+                .map(|resources| LinuxTaskSchedParam {
+                    policy: resources.scheduler_policy,
+                    priority: resources.scheduler_priority,
+                })
+        })
+        .unwrap_or(LinuxTaskSchedParam::DEFAULT)
+}
+
+fn linux_set_sched_target_param(target: LinuxSchedTarget, param: LinuxTaskSchedParam) -> SysResult {
+    linux_apply_sched_priority_to_thread(target.scheduler_thread, param.policy, param.priority)?;
+    if !linux_task::set_sched_param(target.tid, target.scheduler_thread, param) {
+        return Err(SysError::ESRCH);
+    }
+    if target.tid == target.tgid {
+        let resources = memory_state().process_resources_mut(target.tgid);
+        resources.scheduler_policy = param.policy;
+        resources.scheduler_priority = param.priority;
+    }
+    linux_reschedule_after_sched_change();
     Ok(0)
 }
 
-pub fn sys_sched_get_priority_min(_policy: usize) -> SysResult {
+pub fn sys_sched_getparam(pid: usize, param: usize) -> SysResult {
+    let target = linux_sched_target_task(pid)?;
+    linux_write_user_sched_param(param, linux_sched_target_param(target).priority)?;
     Ok(0)
 }
 
-pub fn sys_sched_rr_get_interval(_pid: usize, tp: usize) -> SysResult {
+pub fn sys_sched_setparam(pid: usize, param: usize) -> SysResult {
+    let priority = linux_read_user_sched_param(param)?;
+    let target = linux_sched_target_task(pid)?;
+    let policy = linux_sched_target_param(target).policy;
+    if !syscall_logic::linux_sched_priority_valid(policy, priority) {
+        return Err(SysError::EINVAL);
+    }
+    linux_set_sched_target_param(target, LinuxTaskSchedParam { policy, priority })
+}
+
+pub fn sys_sched_getscheduler(pid: usize) -> SysResult {
+    let target = linux_sched_target_task(pid)?;
+    Ok(linux_sched_target_param(target).policy)
+}
+
+pub fn sys_sched_setscheduler(pid: usize, policy: usize, param: usize) -> SysResult {
+    let priority = linux_read_user_sched_param(param)?;
+    if !syscall_logic::linux_sched_priority_valid(policy, priority) {
+        return Err(SysError::EINVAL);
+    }
+    let target = linux_sched_target_task(pid)?;
+    linux_set_sched_target_param(target, LinuxTaskSchedParam { policy, priority })
+}
+
+pub fn sys_sched_get_priority_max(policy: usize) -> SysResult {
+    syscall_logic::linux_sched_priority_bounds(policy)
+        .map(|(_, max)| max as usize)
+        .ok_or(SysError::EINVAL)
+}
+
+pub fn sys_sched_get_priority_min(policy: usize) -> SysResult {
+    syscall_logic::linux_sched_priority_bounds(policy)
+        .map(|(min, _)| min as usize)
+        .ok_or(SysError::EINVAL)
+}
+
+pub fn sys_sched_rr_get_interval(pid: usize, tp: usize) -> SysResult {
+    let _ = linux_sched_target_pid(pid)?;
     linux_zero_user(tp, core::mem::size_of::<LinuxTimespec>())
 }
 
@@ -8821,22 +9681,35 @@ pub fn sys_linux_timer_create(clockid: usize, sevp: usize, timerid: usize) -> Sy
         return Err(SysError::EFAULT);
     }
     let clock = linux_posix_timer_clock_for_current(clockid).ok_or(SysError::EINVAL)?;
-    let signal = if sevp == 0 {
-        LINUX_SIGALRM
+    let (signal, signal_value) = if sevp == 0 {
+        (LINUX_SIGALRM, 0)
     } else {
         let event = linux_read_user_sigevent(sevp)?;
-        if event.sigev_notify != LINUX_SIGEV_SIGNAL
-            || !(1..=LINUX_MAX_SIGNAL).contains(&(event.sigev_signo as usize))
-        {
-            return Err(SysError::EINVAL);
-        }
-        event.sigev_signo as usize
+        let signal = match event.sigev_notify {
+            LINUX_SIGEV_NONE => 0,
+            LINUX_SIGEV_SIGNAL | LINUX_SIGEV_THREAD_ID => {
+                if !(1..=LINUX_MAX_SIGNAL).contains(&(event.sigev_signo as usize)) {
+                    return Err(SysError::EINVAL);
+                }
+                event.sigev_signo as usize
+            }
+            LINUX_SIGEV_THREAD => {
+                if (1..=LINUX_MAX_SIGNAL).contains(&(event.sigev_signo as usize)) {
+                    event.sigev_signo as usize
+                } else {
+                    0
+                }
+            }
+            _ => return Err(SysError::EINVAL),
+        };
+        (signal, event.sigev_value)
     };
     let handle = compat::create_object(ObjectType::Timer).map_err(|_| SysError::ENOMEM)?;
     let timer_id = handle.0 & i32::MAX as u32;
     let pid = linux_resource_pid();
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
-    let registered = memory_state().register_linux_timer(pid, handle.0, timer_id, clock, signal);
+    let registered =
+        memory_state().register_linux_timer(pid, handle.0, timer_id, clock, signal, signal_value);
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     if !registered {
         let _ = sys_handle_close(handle.0);
@@ -8975,9 +9848,7 @@ pub fn sys_clock_settime(clockid: usize, tp: usize) -> SysResult {
         || clockid == CLOCK_THREAD_CPUTIME_ID
         || linux_cpu_clock_id_valid_for_current(clockid)
     {
-        let offset = i128::from(requested_nanos) - i128::from(monotonic_nanos());
-        let offset = i64::try_from(offset).map_err(|_| SysError::EOVERFLOW)?;
-        LINUX_CPU_CLOCK_OFFSET_NANOS.store(offset, Ordering::SeqCst);
+        set_linux_current_cpu_clock_nanos(requested_nanos)?;
         return Ok(0);
     }
     let offset = syscall_logic::linux_realtime_offset_for_set(
@@ -9749,7 +10620,14 @@ pub fn sys_vmar_unmap_handle_close_thread_exit(
 /// Linux sys_fork implementation
 pub fn sys_fork() -> SysResult {
     info!("fork");
-    sys_fork_with_namespace_flags(0, LINUX_SIGCHLD)
+    let result = sys_fork_with_namespace_flags(0, LINUX_SIGCHLD);
+    crate::kobj_info!(
+        "posix-fork",
+        "return parent={} result={:?}",
+        linux_process::current_pid().unwrap_or(0),
+        result
+    );
+    result
 }
 
 fn sys_fork_with_namespace_flags(namespace_flags: usize, child_exit_signal: usize) -> SysResult {
@@ -9821,12 +10699,21 @@ pub fn sys_clone(
         if (set_child_tid || clear_child_tid) && !linux_clone_tid_destination_valid(child_tid) {
             return Err(SysError::EFAULT);
         }
-        return sys_fork_with_child_tid(
+        let result = sys_fork_with_child_tid(
             flags & LINUX_CONTAINER_NAMESPACE_FLAGS,
             flags & 0xff,
             set_child_tid.then_some(child_tid),
             if clear_child_tid { child_tid } else { 0 },
         );
+        crate::kobj_info!(
+            "posix-fork",
+            "clone return parent={} flags={:#x} child_tid={:#x} result={:?}",
+            linux_process::current_pid().unwrap_or(0),
+            flags,
+            child_tid,
+            result
+        );
+        return result;
     }
 
     #[cfg(not(target_arch = "aarch64"))]
@@ -9957,18 +10844,58 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
     let selector =
         linux_process::linux_wait_selector(pid, process.process_group).ok_or(SysError::EINVAL)?;
     let nohang = options & linux_process::LINUX_WAIT_WNOHANG != 0;
+    let include_stopped = options & linux_process::LINUX_WAIT_WUNTRACED != 0;
+    crate::kobj_info!(
+        "posix-wait",
+        "enter parent={} selector={} options={:#x}",
+        process.pid,
+        pid,
+        options
+    );
 
     loop {
-        match linux_process::wait_current(selector, nohang)? {
+        match linux_process::wait_current(selector, nohang, include_stopped)? {
             linux_process::LinuxWaitOutcome::Ready { pid, status } => {
-                if let Some(reaped_pid) =
-                    linux_process::complete_wait_current(selector, pid, status, wstatus)?
-                {
+                crate::kobj_info!(
+                    "posix-wait",
+                    "ready parent={} child={} status={:#x}",
+                    process.pid,
+                    pid,
+                    status
+                );
+                if let Some(reaped_pid) = linux_process::complete_wait_current(
+                    selector,
+                    pid,
+                    status,
+                    wstatus,
+                    include_stopped,
+                )? {
+                    crate::kobj_info!(
+                        "posix-wait",
+                        "reaped parent={} child={}",
+                        process.pid,
+                        reaped_pid
+                    );
                     return Ok(reaped_pid);
                 }
             }
-            linux_process::LinuxWaitOutcome::WouldBlock => return Ok(0),
-            linux_process::LinuxWaitOutcome::NoChildren => return Err(SysError::ECHILD),
+            linux_process::LinuxWaitOutcome::WouldBlock => {
+                crate::kobj_info!(
+                    "posix-wait",
+                    "would-block parent={} nohang={}",
+                    process.pid,
+                    nohang
+                );
+                return Ok(0);
+            }
+            linux_process::LinuxWaitOutcome::NoChildren => {
+                crate::kobj_info!(
+                    "posix-wait",
+                    "no-children parent={}",
+                    process.pid
+                );
+                return Err(SysError::ECHILD);
+            }
         }
     }
 }
@@ -10010,6 +10937,12 @@ fn terminate_linux_process_by_signal(tgid: usize, signum: usize) -> SysResult {
 pub fn sys_exit(exit_code: i32) -> SysResult {
     let exit_code = syscall_logic::linux_exit_status(exit_code);
     info!("exit: code={}", exit_code);
+    crate::kobj_info!(
+        "posix-exit",
+        "sys_exit pid={} code={}",
+        linux_process::current_pid().unwrap_or(0),
+        exit_code
+    );
 
     if let Some(launch_id) = exit_current_linux_process(exit_code, false)? {
         return Ok(launch_id);
@@ -10030,6 +10963,12 @@ pub fn sys_exit(exit_code: i32) -> SysResult {
 pub fn sys_exit_group(exit_code: i32) -> SysResult {
     let exit_code = syscall_logic::linux_exit_status(exit_code);
     info!("exit_group: code={}", exit_code);
+    crate::kobj_info!(
+        "posix-exit",
+        "sys_exit_group pid={} code={}",
+        linux_process::current_pid().unwrap_or(0),
+        exit_code
+    );
 
     if let Some(launch_id) = exit_current_linux_process(exit_code, true)? {
         return Ok(launch_id);
@@ -10194,14 +11133,71 @@ fn linux_id_or_current(requested: usize, current: usize) -> usize {
     }
 }
 
-/// Linux sys_kill implementation
-pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
-    info!("kill: pid={}, signal={}", pid, signum);
+fn linux_pid_t_arg(value: usize) -> isize {
+    (value as u32 as i32) as isize
+}
 
-    if !syscall_logic::linux_signal_valid(signum, LINUX_MAX_SIGNAL) {
-        return Err(SysError::EINVAL);
+fn linux_process_group_or_current(process_group: usize) -> Result<usize, SysError> {
+    if process_group != 0 {
+        return Ok(process_group);
     }
-    let target_pid = usize::try_from(pid).map_err(|_| SysError::ESRCH)?;
+    linux_process::current().map(|process| process.process_group)
+}
+
+fn linux_kill_targets(pid: isize) -> Result<Vec<usize>, SysError> {
+    let targets = if pid > 0 {
+        let target_pid = pid as usize;
+        linux_process::by_pid(target_pid).ok_or(SysError::ESRCH)?;
+        let mut targets = Vec::new();
+        targets.push(target_pid);
+        targets
+    } else if pid == 0 {
+        let process_group = linux_process_group_or_current(0)?;
+        linux_process::pids_in_process_group(process_group)
+    } else if pid == -1 {
+        linux_process::visible_pids()
+    } else if pid < -1 {
+        let process_group = pid.checked_neg().ok_or(SysError::ESRCH)? as usize;
+        linux_process::pids_in_process_group(process_group)
+    } else {
+        Vec::new()
+    };
+
+    if targets.is_empty() {
+        Err(SysError::ESRCH)
+    } else {
+        Ok(targets)
+    }
+}
+
+fn linux_kill_permission(target_pid: usize) -> Result<(), SysError> {
+    let sender_pid = linux_resource_pid();
+    let sender = memory_state()
+        .process_resources(sender_pid)
+        .map(|resources| resources.credentials)
+        .unwrap_or_default();
+    if sender.effective_uid == 0 {
+        return Ok(());
+    }
+    if target_pid == linux_process::LINUX_ROOT_PID {
+        return Err(SysError::EPERM);
+    }
+    let target = memory_state()
+        .process_resources(target_pid)
+        .map(|resources| resources.credentials)
+        .unwrap_or_default();
+    if sender.real_uid == target.real_uid
+        || sender.real_uid == target.saved_uid
+        || sender.effective_uid == target.real_uid
+        || sender.effective_uid == target.saved_uid
+    {
+        Ok(())
+    } else {
+        Err(SysError::EPERM)
+    }
+}
+
+fn linux_deliver_kill_to_target(target_pid: usize, signum: usize) -> SysResult {
     linux_process::by_pid(target_pid).ok_or(SysError::ESRCH)?;
     if signum == 0 {
         return Ok(0);
@@ -10222,15 +11218,36 @@ pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
     }
 }
 
-pub fn sys_set_tid_address(tidptr: usize) -> SysResult {
-    if tidptr != 0 {
-        #[cfg(target_arch = "aarch64")]
-        if !linux_clone_tid_destination_valid(tidptr) {
-            return Err(SysError::EFAULT);
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        return Err(SysError::ENOSYS);
+/// Linux sys_kill implementation
+pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
+    info!("kill: pid={}, signal={}", pid, signum);
+
+    if !syscall_logic::linux_signal_valid(signum, LINUX_MAX_SIGNAL) {
+        return Err(SysError::EINVAL);
     }
+    let targets = linux_kill_targets(pid)?;
+    let mut denied = false;
+    let mut delivered = false;
+    for target_pid in targets {
+        match linux_kill_permission(target_pid) {
+            Ok(()) => {
+                linux_deliver_kill_to_target(target_pid, signum)?;
+                delivered = true;
+            }
+            Err(SysError::EPERM) => denied = true,
+            Err(error) => return Err(error),
+        }
+    }
+    if delivered {
+        Ok(0)
+    } else if denied {
+        Err(SysError::EPERM)
+    } else {
+        Err(SysError::ESRCH)
+    }
+}
+
+pub fn sys_set_tid_address(tidptr: usize) -> SysResult {
     linux_task::set_current_clear_child_tid(tidptr)
 }
 
@@ -10255,16 +11272,29 @@ pub fn sys_sched_yield() -> SysResult {
     Ok(0)
 }
 
-pub fn sys_umask(_mask: usize) -> SysResult {
-    Ok(0o022)
+pub fn sys_umask(mask: usize) -> SysResult {
+    let resources = memory_state().process_resources_mut(linux_resource_pid());
+    let previous = resources.umask;
+    resources.umask = mask & 0o777;
+    Ok(previous)
 }
 
-pub fn sys_setpgid(_pid: usize, _pgid: usize) -> SysResult {
+pub fn sys_setpgid(pid: usize, pgid: usize) -> SysResult {
+    let current = linux_process::current()?;
+    let target = if pid == 0 { current.pid } else { pid };
+    let group = if pgid == 0 { target } else { pgid };
+    linux_process::set_process_group(target, group)?;
     Ok(0)
 }
 
-pub fn sys_getpgid(_pid: usize) -> SysResult {
-    Ok(1)
+pub fn sys_getpgid(pid: usize) -> SysResult {
+    let target = if pid == 0 {
+        linux_process::current_pid()?
+    } else {
+        pid
+    };
+    let process = linux_process::by_pid(target).ok_or(SysError::ESRCH)?;
+    Ok(process.process_group)
 }
 
 pub fn sys_getsid(_pid: usize) -> SysResult {
@@ -12729,13 +13759,19 @@ pub fn sys_gettimeofday(tv: usize, _tz: usize) -> SysResult {
 pub fn sys_times(buf: usize) -> SysResult {
     let ticks = scheduler::scheduler().get_tick_count() as isize;
     if buf != 0 {
+        let pid = linux_resource_pid();
+        let process_ticks = linux_process_elapsed_ticks(pid);
+        let (child_user_ticks, child_system_ticks) = memory_state()
+            .process_resources(pid)
+            .map(|resources| (resources.child_user_ticks, resources.child_system_ticks))
+            .unwrap_or((0, 0));
         linux_write_user_tms(
             buf,
             LinuxTms {
-                tms_utime: ticks,
-                tms_stime: ticks,
-                tms_cutime: 0,
-                tms_cstime: 0,
+                tms_utime: process_ticks,
+                tms_stime: 0,
+                tms_cutime: child_user_ticks,
+                tms_cstime: child_system_ticks,
             },
         )?;
     }
@@ -12763,21 +13799,34 @@ pub fn sys_getrusage(_who: usize, usage: usize) -> SysResult {
 
 pub fn sys_prlimit64(
     _pid: usize,
-    _resource: usize,
+    resource: usize,
     new_limit: usize,
     old_limit: usize,
 ) -> SysResult {
-    if new_limit != 0 {
-        let _ = linux_read_user_rlimit64(new_limit)?;
-    }
+    let old = match resource {
+        LINUX_RLIMIT_MEMLOCK => memory_state()
+            .process_resources(linux_resource_pid())
+            .map(|resources| resources.rlimit_memlock)
+            .unwrap_or(LINUX_RLIMIT64_UNLIMITED),
+        _ => LINUX_RLIMIT64_UNLIMITED,
+    };
+    let new = if new_limit != 0 {
+        let new = linux_read_user_rlimit64(new_limit)?;
+        if new.rlim_cur > new.rlim_max {
+            return Err(SysError::EINVAL);
+        }
+        Some(new)
+    } else {
+        None
+    };
     if old_limit != 0 {
-        linux_write_user_rlimit64(
-            old_limit,
-            LinuxRlimit64 {
-                rlim_cur: u64::MAX,
-                rlim_max: u64::MAX,
-            },
-        )?;
+        linux_write_user_rlimit64(old_limit, old)?;
+    }
+    if let Some(new) = new {
+        if resource == LINUX_RLIMIT_MEMLOCK {
+            let resources = memory_state().process_resources_mut(linux_resource_pid());
+            resources.rlimit_memlock = new;
+        }
     }
     Ok(0)
 }
@@ -13447,10 +14496,11 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_SCHED_GETPARAM => sys_sched_getparam(args[0], args[1]),
         ARM64_SYS_SCHED_SETAFFINITY => sys_sched_setaffinity(args[0], args[1], args[2]),
         ARM64_SYS_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0], args[1], args[2]),
+        ARM64_SYS_SCHED_YIELD => sys_sched_yield(),
         ARM64_SYS_SCHED_GET_PRIORITY_MAX => sys_sched_get_priority_max(args[0]),
         ARM64_SYS_SCHED_GET_PRIORITY_MIN => sys_sched_get_priority_min(args[0]),
         ARM64_SYS_SCHED_RR_GET_INTERVAL => sys_sched_rr_get_interval(args[0], args[1]),
-        ARM64_SYS_KILL => sys_kill(args[0] as isize, args[1]),
+        ARM64_SYS_KILL => sys_kill(linux_pid_t_arg(args[0]), args[1]),
         ARM64_SYS_TKILL => sys_tkill(args[0], args[1]),
         ARM64_SYS_TGKILL => sys_tgkill(args[0], args[1], args[2]),
         ARM64_SYS_SIGALTSTACK => sys_sigaltstack(args[0], args[1]),
@@ -13538,9 +14588,10 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5] as u64),
         ARM64_SYS_FADVISE64 => sys_fadvise64(args[0], args[1], args[2], args[3]),
         ARM64_SYS_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
-        ARM64_SYS_MSYNC => sys_memory_noop(args[0], args[1]),
+        ARM64_SYS_MSYNC => sys_msync(args[0], args[1], args[2]),
         ARM64_SYS_MLOCK | ARM64_SYS_MUNLOCK => sys_memory_noop(args[0], args[1]),
-        ARM64_SYS_MLOCKALL | ARM64_SYS_MUNLOCKALL => Ok(0),
+        ARM64_SYS_MLOCKALL => sys_mlockall(args[0]),
+        ARM64_SYS_MUNLOCKALL => sys_munlockall(),
         ARM64_SYS_MINCORE => sys_mincore(args[0], args[1], args[2]),
         ARM64_SYS_MADVISE => sys_madvise(args[0], args[1], args[2]),
         ARM64_SYS_REMAP_FILE_PAGES => Ok(0),
@@ -13567,7 +14618,6 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_STATX => sys_statx(args[0], args[1], args[2], args[3], args[4]),
         ARM64_SYS_CLOSE_RANGE => sys_close_range(args[0], args[1], args[2]),
         ARM64_SYS_OPENAT2 => sys_openat(args[0], args[1], 0, 0),
-        ARM64_SYS_SCHED_YIELD => sys_sched_yield(),
         ARM64_SYS_UMASK => sys_umask(args[0]),
         ARM64_SYS_PIPE2 => sys_pipe2(args[0], args[1]),
         ARM64_SYS_DUP => sys_dup(args[0]),

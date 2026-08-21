@@ -120,10 +120,135 @@ macro_rules! smros_linux_clock_nanosleep_flags_valid_body {
     }};
 }
 
+macro_rules! smros_linux_mmap_fd_access_ok_body {
+    ($readable:expr, $writable:expr, $prot_write:expr, $map_shared:expr) => {{
+        $readable && (!$prot_write || !$map_shared || $writable)
+    }};
+}
+
+pub(crate) const fn linux_mmap_fd_access_ok(
+    readable: bool,
+    writable: bool,
+    prot_write: bool,
+    map_shared: bool,
+) -> bool {
+    smros_linux_mmap_fd_access_ok_body!(readable, writable, prot_write, map_shared)
+}
+
+pub(crate) const fn linux_creation_mode(mode: usize, umask: usize) -> u32 {
+    0o100000 | ((mode & 0o777) & !(umask & 0o777)) as u32
+}
+
+pub(crate) const fn linux_mode_access_allowed(
+    mode: u32,
+    owner_uid: usize,
+    owner_gid: usize,
+    effective_uid: usize,
+    effective_gid: usize,
+    read: bool,
+    write: bool,
+) -> bool {
+    if effective_uid == 0 {
+        return true;
+    }
+    let permission_bits = if effective_uid == owner_uid {
+        (mode >> 6) & 0o7
+    } else if effective_gid == owner_gid {
+        (mode >> 3) & 0o7
+    } else {
+        mode & 0o7
+    };
+    (!read || permission_bits & 0o4 != 0) && (!write || permission_bits & 0o2 != 0)
+}
+
 const LINUX_POSIX_NANOS_PER_SECOND: u64 = 1_000_000_000;
 
 pub(crate) const fn linux_clock_resolution_nanoseconds() -> i64 {
     1
+}
+
+pub(crate) const fn linux_sched_priority_bounds(policy: usize) -> Option<(i32, i32)> {
+    match policy {
+        0 => Some((0, 0)),
+        1 | 2 => Some((1, 99)),
+        _ => None,
+    }
+}
+
+pub(crate) const fn linux_sched_priority_valid(policy: usize, priority: i32) -> bool {
+    let Some((min, max)) = linux_sched_priority_bounds(policy) else {
+        return false;
+    };
+    min <= priority && priority <= max
+}
+
+pub(crate) const fn linux_sched_kernel_priority(policy: usize, priority: i32) -> Option<u8> {
+    if !linux_sched_priority_valid(policy, priority) {
+        return None;
+    }
+    match policy {
+        0 => Some(16),
+        1 | 2 => Some((64 + priority) as u8),
+        _ => None,
+    }
+}
+
+pub(crate) fn for_each_linux_expired_real_timer_pid(
+    deadlines: &[(usize, u64)],
+    now: u64,
+    disabled: u64,
+    mut visit: impl FnMut(usize),
+) {
+    for (pid, deadline) in deadlines {
+        if *deadline != disabled && *deadline <= now {
+            visit(*pid);
+        }
+    }
+}
+
+pub(crate) const LINUX_SCHED_ONLINE_CPU_COUNT: usize = 1;
+
+pub(crate) const fn linux_sched_online_cpu_count() -> usize {
+    LINUX_SCHED_ONLINE_CPU_COUNT
+}
+
+pub(crate) const fn linux_sched_affinity_byte(offset: usize) -> u8 {
+    if offset > usize::MAX / 8 {
+        return 0;
+    }
+    let first_cpu = offset * 8;
+    let online_cpus = linux_sched_online_cpu_count();
+    if first_cpu >= online_cpus {
+        return 0;
+    }
+    let remaining = online_cpus - first_cpu;
+    let bits = if remaining >= 8 { 8 } else { remaining };
+    ((1u16 << bits) - 1) as u8
+}
+
+pub(crate) fn linux_sched_affinity_mask_intersects(mask: &[u8]) -> bool {
+    let mut offset = 0usize;
+    while offset < mask.len() {
+        if mask[offset] & linux_sched_affinity_byte(offset) != 0 {
+            return true;
+        }
+        offset += 1;
+    }
+    false
+}
+
+pub(crate) fn linux_sched_affinity_mask_intersects_at(mask: &[u8], first_byte: usize) -> bool {
+    if first_byte == 0 {
+        return linux_sched_affinity_mask_intersects(mask);
+    }
+    let mut offset = 0usize;
+    while offset < mask.len() {
+        if mask[offset] & linux_sched_affinity_byte(first_byte.saturating_add(offset)) != 0 {
+            return true;
+        }
+        offset += 1;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -267,6 +392,7 @@ pub(crate) struct LinuxPosixTimerCore {
     pub timer_id: u32,
     pub clock: LinuxPosixClock,
     pub signal: usize,
+    pub signal_value: usize,
     deadline_clock: LinuxPosixClock,
     deadline: Option<u64>,
     interval: u64,
@@ -275,11 +401,17 @@ pub(crate) struct LinuxPosixTimerCore {
 }
 
 impl LinuxPosixTimerCore {
-    pub(crate) const fn new(timer_id: u32, clock: LinuxPosixClock, signal: usize) -> Self {
+    pub(crate) const fn new(
+        timer_id: u32,
+        clock: LinuxPosixClock,
+        signal: usize,
+        signal_value: usize,
+    ) -> Self {
         Self {
             timer_id,
             clock,
             signal,
+            signal_value,
             deadline_clock: LinuxPosixClock::Monotonic,
             deadline: None,
             interval: 0,
