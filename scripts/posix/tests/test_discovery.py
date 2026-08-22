@@ -257,6 +257,21 @@ class TestDiscovery(DiscoveryFixture):
             180_000,
         )
 
+    def test_pthread_cond_broadcast_multi_batch_stress_has_reviewed_timeout(self) -> None:
+        self.write_source(
+            "conformance/interfaces/pthread_cond_broadcast/2-3.c",
+            "int main(void) { return 0; }\n",
+        )
+
+        tests = {test.test_id: test for test in discover_tests(self.root)}
+
+        self.assertEqual(
+            tests[
+                "conformance/interfaces/pthread_cond_broadcast/2-3.c"
+            ].timeout_ms,
+            180_000,
+        )
+
     def test_shm_open_atomic_create_stress_has_reviewed_timeout(self) -> None:
         self.write_source(
             "conformance/interfaces/shm_open/23-1.c",

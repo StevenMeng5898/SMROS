@@ -424,16 +424,19 @@ extern "C" fn timer_interrupt_handler() {
     // Clear the timer interrupt
     kernel_lowlevel::timer::clear_interrupt();
 
-    crate::kernel_objects::scheduler::scheduler().on_timer_tick();
+    // The scheduler owns a single global current-thread state and the Linux
+    // runtime is intentionally bound to physical CPU0.  Secondary timer IRQs
+    // must not mutate that state or attempt a context switch with CPU0's TCB.
     if current_cpu_id() == 0 {
+        crate::kernel_objects::scheduler::scheduler().on_timer_tick();
         let now = kernel_lowlevel::timer::get_tick_count();
         crate::syscall::expire_linux_real_timers_from_irq();
         crate::syscall::linux_task::on_timer_tick(now);
         crate::syscall::deliver_linux_posix_timer_signals_from_irq();
         crate::syscall::linux_futex::on_timer_tick(now, now);
         crate::syscall::linux_mqueue::on_timer_tick(now);
+        crate::kernel_objects::scheduler::scheduler().record_trace_sample(0);
     }
-    crate::kernel_objects::scheduler::scheduler().record_trace_sample(current_cpu_id() as usize);
 
     // End of interrupt
     kernel_lowlevel::interrupt::end_of_interrupt(interrupt_id);
@@ -443,6 +446,9 @@ extern "C" fn timer_interrupt_handler() {
 #[no_mangle]
 extern "C" fn check_preemption() {
     let cpu_id = current_cpu_id();
+    if cpu_id != 0 {
+        return;
+    }
     let s = crate::kernel_objects::scheduler::scheduler();
 
     if s.should_preempt() {

@@ -2980,6 +2980,87 @@ int main(void) {
                 timeout=5.0,
             )
 
+    def test_smros_posix_compat_condvar_stress_stays_within_reviewed_budget(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "cond-stress.c"
+            binary = root / "cond-stress"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <unistd.h>
+
+enum { SCENARIOS = 4, WAITERS = 100 };
+
+static pthread_cond_t condition;
+static pthread_mutex_t mutex;
+static int ready;
+static int predicate;
+
+static void *waiter(void *arg) {
+    (void)arg;
+    if (pthread_mutex_lock(&mutex) != 0) return (void *)1;
+    __sync_add_and_fetch(&ready, 1);
+    while (!predicate) {
+        if (pthread_cond_wait(&condition, &mutex) != 0) {
+            pthread_mutex_unlock(&mutex);
+            return (void *)1;
+        }
+    }
+    return pthread_mutex_unlock(&mutex) == 0 ? NULL : (void *)1;
+}
+
+int main(void) {
+    for (int scenario = 0; scenario < SCENARIOS; ++scenario) {
+        ready = 0;
+        predicate = 0;
+        if (pthread_cond_init(&condition, NULL) != 0 ||
+                pthread_mutex_init(&mutex, NULL) != 0) return 2;
+        pthread_t threads[WAITERS];
+        for (int index = 0; index < WAITERS; ++index) {
+            if (pthread_create(&threads[index], NULL, waiter, NULL) != 0) return 3;
+        }
+        for (int spin = 0; spin < 5000 && ready < WAITERS; ++spin) usleep(1000);
+        if (ready != WAITERS) return 4;
+        if (pthread_mutex_lock(&mutex) != 0) return 5;
+        predicate = 1;
+        if (pthread_cond_broadcast(&condition) != 0) return 6;
+        if (pthread_mutex_unlock(&mutex) != 0) return 7;
+        for (int index = 0; index < WAITERS; ++index) {
+            void *result = NULL;
+            if (pthread_join(threads[index], &result) != 0 || result != NULL) return 8;
+        }
+        if (pthread_cond_destroy(&condition) != 0 ||
+                pthread_mutex_destroy(&mutex) != 0) return 9;
+    }
+    return 0;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=3.0,
+            )
+
     def test_smros_posix_compat_pshared_errorcheck_trylock_returns_busy(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c")
         with tempfile.TemporaryDirectory() as temporary:
@@ -3929,6 +4010,111 @@ int main(void) {
             subprocess.run(
                 [str(binary)],
                 env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_barrier_wait_ignores_spurious_native_serial(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            broken = root / "libbroken-barrier.so"
+            broken_source = root / "broken-barrier.c"
+            probe = root / "barrier-spurious-serial.c"
+            binary = root / "barrier-spurious-serial"
+            broken_source.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <pthread.h>
+
+typedef int (*real_barrier_wait_fn)(pthread_barrier_t *);
+static pthread_t main_thread;
+static real_barrier_wait_fn real_barrier_wait;
+
+__attribute__((constructor)) static void remember_main_thread(void) {
+    main_thread = pthread_self();
+    real_barrier_wait = (real_barrier_wait_fn)dlsym(
+        RTLD_NEXT, "pthread_barrier_wait"
+    );
+}
+
+int pthread_barrier_wait(pthread_barrier_t *barrier) {
+    if (pthread_equal(pthread_self(), main_thread)) {
+        return PTHREAD_BARRIER_SERIAL_THREAD;
+    }
+    return real_barrier_wait == NULL ? EINVAL : real_barrier_wait(barrier);
+}
+''',
+                encoding="utf-8",
+            )
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <errno.h>
+#include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
+
+static pthread_barrier_t barrier;
+static volatile int child_entered;
+
+static void timeout_handler(int signum) {
+    (void)signum;
+    _exit(99);
+}
+
+static void *child(void *arg) {
+    (void)arg;
+    child_entered = 1;
+    int result = pthread_barrier_wait(&barrier);
+    return (result == 0 || result == PTHREAD_BARRIER_SERIAL_THREAD)
+        ? NULL : (void *)1;
+}
+
+int main(void) {
+    if (pthread_barrier_init(&barrier, NULL, 2) != 0) return 1;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, child, NULL) != 0) return 2;
+    for (int spin = 0; spin < 10000 && !child_entered; spin++) sched_yield();
+    if (!child_entered) return 3;
+    signal(SIGALRM, timeout_handler);
+    alarm(1);
+    int result = pthread_barrier_wait(&barrier);
+    alarm(0);
+    if (result != 0 && result != PTHREAD_BARRIER_SERIAL_THREAD) return 4;
+    void *thread_result = NULL;
+    if (pthread_join(thread, &thread_result) != 0 || thread_result != NULL) return 5;
+    return pthread_barrier_destroy(&barrier);
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(broken_source), "-o", str(broken), "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": f"{preload}:{broken}"},
                 check=True,
                 timeout=5.0,
             )

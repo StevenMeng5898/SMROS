@@ -2908,9 +2908,9 @@ static void smros_pthread_cond_wait_pause(void) {
     /*
      * The private condition-variable fallback tracks wakeups in user space.
      * A pure sched_yield() loop leaves every waiter runnable, and SMROS
-     * implements sub-10 ms nanosleeps as a busy-spin.  Park for one timer
-     * quantum so a stress test can block its waiters while still polling
-     * promptly for a broadcast.
+     * implements requests up to 100 ms as a high-resolution spin/WFI loop.
+     * Use the blocking sleep path so a large waiter set does not consume all
+     * runnable slots while still polling promptly for a broadcast.
      */
     const struct timespec pause = {
         .tv_sec = 0,
@@ -3990,18 +3990,9 @@ int pthread_barrier_wait(pthread_barrier_t *barrier) {
         return result;
     }
 
-    smros_pthread_barrier_wait_fn target =
-        (smros_pthread_barrier_wait_fn)smros_resolve_symbol(
-            "pthread_barrier_wait"
-        );
-    if (target == NULL) {
-        return ENOSYS;
-    }
-
     smros_pthread_barrier_record *record =
         smros_find_pthread_barrier_record(barrier);
     if (record == NULL) {
-        (void)target;
         return EINVAL;
     }
 
@@ -4011,20 +4002,16 @@ int pthread_barrier_wait(pthread_barrier_t *barrier) {
     };
     int old_cancel_state = PTHREAD_CANCEL_ENABLE;
     int result = 0;
+    int cancel_type = smros_pthread_cancel_type_for(pthread_self());
 
     (void)pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_cancel_state);
     smros_pthread_barrier_waiter_enter(record);
     guard.active = 1;
     pthread_cleanup_push(smros_pthread_barrier_wait_cleanup, &guard);
-    (void)pthread_setcancelstate(old_cancel_state, NULL);
-
-    result = target(barrier);
-
-    if (result != 0 && result != PTHREAD_BARRIER_SERIAL_THREAD) {
-        result = smros_pthread_barrier_fallback_wait(record);
+    if (cancel_type == PTHREAD_CANCEL_ASYNCHRONOUS) {
+        (void)pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
     }
-
-    (void)pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_cancel_state);
+    result = smros_pthread_barrier_fallback_wait(record);
     pthread_cleanup_pop(0);
     if (guard.active) {
         smros_pthread_barrier_waiter_leave(record);

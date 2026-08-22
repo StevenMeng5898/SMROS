@@ -64,7 +64,10 @@ pub const PAGE_SIZE: usize = 0x1000;
 
 const PAGE_FRAME_BITMAP_WORDS: usize = (2 * 1024 * 1024 * 1024 / PAGE_SIZE) / 64;
 const PAGE_FRAME_BITS_PER_WORD: usize = 64;
-const DEFAULT_PAGE_FRAME_COUNT: usize = 64 * PAGE_FRAME_BITS_PER_WORD;
+// Use the complete bitmap capacity.  Fork-heavy POSIX tests can retain many
+// address spaces at once; the previous 4,096-page cap exhausted frames long
+// before the configured AArch64 RAM limit.
+const DEFAULT_PAGE_FRAME_COUNT: usize = PAGE_FRAME_BITMAP_WORDS * PAGE_FRAME_BITS_PER_WORD;
 
 /// Maximum number of processes supported
 pub const MAX_PROCESSES: usize = 16;

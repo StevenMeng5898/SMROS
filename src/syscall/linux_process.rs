@@ -711,7 +711,7 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
 
     fn acquire_scheduler_thread(&mut self) -> Result<Self::SchedulerThread, Self::Error> {
         scheduler::scheduler()
-            .create_suspended_thread(linux_fork_child_entry, "linux_process")
+            .create_suspended_thread_on_cpu(linux_fork_child_entry, "linux_process", 0)
             .ok_or(SysError::EAGAIN)
     }
 

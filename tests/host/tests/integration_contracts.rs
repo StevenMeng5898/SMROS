@@ -641,6 +641,34 @@ fn posix_clock_timer_cpu0_expiry_queues_process_signals() {
 }
 
 #[test]
+fn scheduler_irq_work_is_owned_by_cpu0() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let main = std::fs::read_to_string(repository.join("src/main.rs"))
+        .expect("read kernel main");
+    let timer = braced_body(
+        &main[main
+            .find("extern \"C\" fn timer_interrupt_handler()")
+            .expect("timer interrupt handler")..],
+    );
+    let cpu0 = timer
+        .find("if current_cpu_id() == 0")
+        .expect("CPU0 scheduler owner guard");
+    let cpu0_body = braced_body(&timer[cpu0..]);
+    assert!(cpu0_body.contains("scheduler().on_timer_tick()"));
+    assert!(cpu0_body.contains("scheduler().record_trace_sample(0)"));
+    assert!(!timer[..cpu0].contains("scheduler().on_timer_tick()"));
+    assert!(!timer[..cpu0].contains("scheduler().record_trace_sample"));
+
+    let preemption = braced_body(
+        &main[main
+            .find("extern \"C\" fn check_preemption()")
+            .expect("preemption hook")..],
+    );
+    assert!(preemption.contains("if cpu_id != 0"));
+    assert!(preemption.contains("return;"));
+}
+
+#[test]
 fn timer_interrupt_expires_real_timers_for_kernel_mode_ticks() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let main = std::fs::read_to_string(repository.join("src/main.rs"))
@@ -2637,8 +2665,8 @@ fn smros_private_condition_wait_pause_avoids_sub_tick_busy_spin() {
         .and_then(|(value, _)| value.trim().parse::<u64>().ok())
         .expect("condition wait pause nanoseconds");
     assert!(
-        nanos >= 10_000_000,
-        "condition wait fallback must block instead of using SMROS's sub-tick busy-spin"
+        nanos > 100_000_000,
+        "condition wait fallback must use the blocking sleep path for waiter scalability"
     );
 }
 
@@ -5813,10 +5841,11 @@ fn linux_scheduler_policy_and_priority_are_process_state_inherited_by_fork() {
     assert!(linux_process
         .contains("apply_linux_resource_scheduler_priority(process.pid, scheduler_thread)"));
     assert!(scheduler.contains("pub fn create_suspended_thread("));
-    assert!(linux_process
-        .contains("create_suspended_thread(linux_fork_child_entry, \"linux_process\")"));
+    assert!(linux_process.contains(
+        "create_suspended_thread_on_cpu(linux_fork_child_entry, \"linux_process\", 0)"
+    ));
     assert!(!linux_process
-        .contains("create_suspended_thread_on_cpu(linux_fork_child_entry, \"linux_process\", 0)"));
+        .contains("create_suspended_thread(linux_fork_child_entry, \"linux_process\")"));
 
     let target_task = braced_body(
         &syscall[syscall
@@ -8173,7 +8202,7 @@ fn linux_fork_publishes_only_a_complete_child() {
         .find("impl LinuxForkOwnershipOps for Aarch64LinuxForkOps")
         .expect("production fork ownership operations")..];
     for acquisition in [
-        "create_suspended_thread(",
+        "create_suspended_thread_on_cpu(",
         "reserve_fork_task",
         "reserve_child_with_pid",
         "reserve_resource_clone",
