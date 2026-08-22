@@ -420,6 +420,7 @@ impl<const Q: usize, const H: usize, const W: usize> LinuxMqueueState<Q, H, W> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn expire(&mut self, now: u64) -> [Option<(usize, usize)>; W] {
         let mut identities = [None; W];
         let mut selected_count = 0usize;
@@ -438,6 +439,20 @@ impl<const Q: usize, const H: usize, const W: usize> LinuxMqueueState<Q, H, W> {
             selected_count += 1;
         }
         identities
+    }
+
+    pub(crate) fn expire_one(&mut self, now: u64) -> Option<(usize, usize)> {
+        let index = self.oldest_waiter_index(|waiter| {
+            waiter.outcome == LinuxMqueueWaitOutcome::Waiting
+                && waiter
+                    .deadline
+                    .is_some_and(|deadline| deadline.ticks <= now)
+        })?;
+        let waiter = self.waiters[index]
+            .as_mut()
+            .expect("selected mqueue waiter");
+        waiter.outcome = LinuxMqueueWaitOutcome::TimedOut;
+        Some((waiter.tid, waiter.scheduler_thread))
     }
 
     pub(crate) fn interrupt(&mut self, tid: usize, scheduler_thread: usize) -> bool {

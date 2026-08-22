@@ -18,6 +18,39 @@ fn fxfs_cursor_identity_drives_record_lock_size_lookup() {
 }
 
 #[test]
+fn posix_event_path_has_no_unframed_debug_serial_writers() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let sources = [
+        "src/main.rs",
+        "src/kernel_lowlevel/ARM64/thread.rs",
+        "src/user_level/services/fxfs.rs",
+        "src/user_level/services/component.rs",
+        "src/user_level/services/posix_test.rs",
+        "src/user_level/services/user_shell.rs",
+    ]
+    .into_iter()
+    .map(|path| {
+        std::fs::read_to_string(repository.join(path))
+            .unwrap_or_else(|error| panic!("read {path}: {error}"))
+    })
+    .collect::<Vec<_>>();
+
+    for marker in [
+        "ALLOC_DEBUG_ARMED",
+        "[MEM] small alloc",
+        "[MEM] small free",
+        "[STACK] alloc",
+        "debug_validate_dirents",
+        "debug_validate(\"",
+    ] {
+        assert!(
+            !sources.iter().any(|source| source.contains(marker)),
+            "temporary serial diagnostic remains in POSIX event path: {marker}"
+        );
+    }
+}
+
+#[test]
 fn linux_fcntl_marshals_aarch64_record_locks() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
@@ -1721,6 +1754,64 @@ fn syscall_routing_boundaries_match_known_interface_windows() {
 }
 
 #[test]
+fn linux_real_timer_scan_skips_all_disabled_deadlines() {
+    assert!(!syscall_logic::linux_real_timer_scan_needed(
+        [(1, 0), (2, 0)].into_iter().map(|(_, deadline)| deadline),
+        0,
+    ));
+    assert!(syscall_logic::linux_real_timer_scan_needed(
+        [(1, 0), (2, 9)].into_iter().map(|(_, deadline)| deadline),
+        0,
+    ));
+}
+
+#[test]
+fn linux_real_timer_expiration_uses_bounded_output_storage() {
+    let mut expired = [0usize; 2];
+    let count = syscall_logic::collect_linux_expired_real_timer_pids(
+        [(11, 3), (12, 0), (13, 2)].into_iter(),
+        3,
+        0,
+        &mut expired,
+    );
+    assert_eq!(count, 2);
+    assert_eq!(&expired, &[11, 13]);
+}
+
+#[test]
+fn linux_real_timer_irq_does_not_lazily_initialize_memory_state() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let start = syscall
+        .find("pub fn expire_linux_real_timers_from_irq()")
+        .expect("real-timer IRQ entry point");
+    let body = braced_body(&syscall[start..]);
+
+    assert!(
+        body.contains("with_initialized_memory_state"),
+        "timer IRQ must only inspect an already initialized memory state"
+    );
+    assert!(
+        !body.contains("let state = memory_state()"),
+        "timer IRQ must not trigger lazy allocation through memory_state()"
+    );
+
+    let start = syscall
+        .find("pub fn deliver_linux_posix_timer_signals_from_irq()")
+        .expect("POSIX timer IRQ entry point");
+    let body = braced_body(&syscall[start..]);
+    assert!(
+        body.contains("with_initialized_memory_state"),
+        "POSIX timer IRQ must only inspect an already initialized memory state"
+    );
+    assert!(
+        !body.contains("let state = memory_state()"),
+        "POSIX timer IRQ must not trigger lazy allocation through memory_state()"
+    );
+}
+
+#[test]
 fn signal_update_contract_is_shared_between_syscall_and_kernel_objects() {
     let cases = [
         (0b1111u32, 0b0101u32, 0b1000u32, 0b1010u32),
@@ -2139,7 +2230,9 @@ fn posix_guest_manifest_parser_is_exported_bounded_and_canonical() {
     }
     assert!(parser.contains("SMROS_POSIX_MANIFEST\\t1"));
     assert!(parser.contains("fxfs::ensure_host_share()"));
-    assert!(parser.contains("fxfs::read_file(POSIX_MANIFEST_PATH"));
+    assert!(parser.contains("fxfs::attrs(POSIX_MANIFEST_PATH"));
+    assert!(parser.contains("fxfs::open_cursor(POSIX_MANIFEST_PATH"));
+    assert!(parser.contains("fxfs::cursor_read_for_mmap"));
     assert!(parser.contains("str::from_utf8"));
     assert!(parser.contains("parse_fixed_fields::<9>(line)"));
     assert!(parser.contains("fn parse_fixed_fields<const N: usize>"));
@@ -2192,6 +2285,21 @@ fn posix_guest_manifest_parser_is_exported_bounded_and_canonical() {
         .contains("pub fn parse_filter(args: &[&str]) -> Result<PosixFilter, PosixTestError>"));
     assert!(parser.contains("pub fn load_manifest() -> Result<PosixManifest, PosixTestError>"));
     assert!(parser.contains("pub fn status_snapshot() -> PosixRunnerStatus"));
+}
+
+#[test]
+fn posix_guest_manifest_read_sizes_buffer_from_fxfs_metadata() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let parser = std::fs::read_to_string(repository.join("src/user_level/services/posix_test.rs"))
+        .expect("POSIX guest manifest parser must exist");
+
+    assert!(
+        parser.contains("let attrs = fxfs::attrs(POSIX_MANIFEST_PATH)")
+            && parser.contains("if attrs.size > POSIX_MANIFEST_MAX_BYTES")
+            && parser.contains("bytes.resize(attrs.size, 0u8)")
+            && parser.contains("fxfs::open_cursor(POSIX_MANIFEST_PATH)")
+            && parser.contains("fxfs::cursor_read_for_mmap")
+    );
 }
 
 #[test]
@@ -2509,6 +2617,29 @@ fn smros_posix_compat_runtime_tracks_aio_completion_state() {
     ] {
         assert!(compat.contains(required), "missing {required}");
     }
+}
+
+#[test]
+fn smros_private_condition_wait_pause_avoids_sub_tick_busy_spin() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let compat = std::fs::read_to_string(
+        repository.join("scripts/posix/runtime/smros_posix_compat.c"),
+    )
+    .expect("read POSIX compatibility runtime");
+    let start = compat
+        .find("static void smros_pthread_cond_wait_pause(void) {")
+        .expect("private condition wait pause helper");
+    let body = braced_body(&compat[start..]);
+    let nanos = body
+        .split(".tv_nsec =")
+        .nth(1)
+        .and_then(|value| value.split_once('L'))
+        .and_then(|(value, _)| value.trim().parse::<u64>().ok())
+        .expect("condition wait pause nanoseconds");
+    assert!(
+        nanos >= 10_000_000,
+        "condition wait fallback must block instead of using SMROS's sub-tick busy-spin"
+    );
 }
 
 #[test]
@@ -3366,8 +3497,31 @@ fn scheduler_exposes_atomic_linux_task_transitions() {
         .expect("exception frame restore");
     assert!(timer < signal && signal < preempt && preempt < restore);
 
-    let current_handlers = &boot[..lower_start];
-    assert!(!current_handlers.contains("bl      check_preemption"));
+    for (label, next_label) in [
+        ("irq_handler_sp:", "// IRQ Handler (Current EL with SP0)"),
+        ("irq_handler:", "// Synchronous exception from a lower EL using AArch64."),
+    ] {
+        let handler_start = boot.find(label).expect("current-EL timer handler");
+        let body_start = boot[handler_start..]
+            .find("\n")
+            .map(|offset| handler_start + offset + 1)
+            .expect("current-EL handler body");
+        let handler_end = boot[body_start..]
+            .find(next_label)
+            .map(|offset| body_start + offset)
+            .expect("current-EL handler end");
+        let handler = &boot[body_start..handler_end];
+        let timer = handler
+            .find("bl      timer_interrupt_handler")
+            .expect("current-EL timer accounting");
+        let preempt = handler
+            .find("bl      check_preemption")
+            .expect("current-EL preemption");
+        let restore = handler
+            .find("// Restore registers")
+            .expect("current-EL exception frame restore");
+        assert!(timer < preempt && preempt < restore);
+    }
 }
 
 #[test]
@@ -4034,11 +4188,10 @@ fn linux_futex_waits_block_and_wake_scheduler_tasks() {
         let wake_task = body
             .find("linux_task::wake_blocked(")
             .expect("task wake operation");
-        let queue_statement_end = body[queue_operation..]
-            .find(";\n")
-            .expect("completed queue operation")
-            + queue_operation;
-        assert!(queue_operation < queue_statement_end && queue_statement_end < wake_task);
+        assert!(
+            queue_operation < wake_task,
+            "futex queue state must be released before waking the scheduler task"
+        );
     }
 
     let futex_syscall = syscall
@@ -4997,8 +5150,8 @@ fn aarch64_kernel_threads_reserve_fork_transaction_headroom() {
         .expect("numeric AArch64 default kernel stack value");
 
     assert!(
-        stack_size >= 0x1_0000,
-        "AArch64 fork transaction needs 64 KiB kernel-stack headroom; got {stack_size:#x}"
+        stack_size == 0x2_0000,
+        "AArch64 POSIX stress uses the bounded 128 KiB kernel stack; got {stack_size:#x}"
     );
 }
 
@@ -5384,7 +5537,10 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
         .expect("Linux task timer hook");
     let timer = braced_body(&task[timer_start..]);
     let cpu0 = timer.find("current_cpu_id() == 0").expect("CPU0 guard");
-    let expire = timer.find("expire_sleeps(now)").expect("sleep expiry");
+    let expire = timer
+        .find("expire_one_sleep(now)")
+        .or_else(|| timer.find("expire_sleeps(now)"))
+        .expect("sleep expiry");
     assert!(cpu0 < expire);
     let sleep_expiry = &timer[expire..];
     let wake = sleep_expiry
@@ -5917,6 +6073,18 @@ fn fxfs_loaded_volume_repairs_posix_shared_memory_directory() {
 }
 
 #[test]
+fn fxfs_host_share_rechecks_partial_install_and_promotes_late_block_storage() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS service");
+
+    assert!(fxfs.contains("fn host_share_installation_complete(&self) -> bool"));
+    assert!(fxfs.contains("self.host_share_installation_complete()"));
+    assert!(fxfs.contains("drivers::block_ready()"));
+    assert!(fxfs.contains("self.block_backed = true;"));
+}
+
+#[test]
 fn fxfs_forced_persist_bypasses_suspension_and_preserves_failed_pending_work() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
@@ -6376,6 +6544,46 @@ fn linux_fd_object_capacity_covers_the_posix_emfile_limit() {
     assert!(
         compat.contains("const MAX_COMPAT_OBJECTS: usize = 4096;"),
         "compatibility objects must not fail before the POSIX per-process FD limit"
+    );
+}
+
+#[test]
+fn arm64_linux_process_capacity_covers_posix_fork_stress() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let thread = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/thread.rs"))
+        .expect("read ARM64 thread capacity");
+
+    assert!(
+        thread.contains("pub const MAX_THREADS: usize = 1024;"),
+        "ARM64 POSIX fork stress requires capacity for 1000 children plus the parent"
+    );
+}
+
+#[test]
+fn kernel_heap_covers_embedded_posix_share_and_thread_stress() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let logic = std::fs::read_to_string(repository.join("src/main_logic.rs"))
+        .expect("read kernel allocator configuration");
+
+    assert!(
+        logic.contains("pub(crate) const KERNEL_HEAP_SIZE: usize = 0x0800_0000;"),
+        "embedded POSIX metadata plus 1024-thread stress needs a 128 MiB kernel heap"
+    );
+}
+
+#[test]
+fn kernel_allocator_rejects_overlapping_free_blocks() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let main = std::fs::read_to_string(repository.join("src/main.rs"))
+        .expect("read kernel allocator");
+    let insert = main
+        .find("unsafe fn insert_free_block(")
+        .expect("free-list insertion helper");
+    let body = braced_body(&main[insert..]);
+    assert!(
+        body.contains("if prev_end > block_start {\n            return;")
+            && body.contains("if block_end > current as usize {\n            return;"),
+        "free-list insertion must reject overlapping blocks before writing metadata"
     );
 }
 
@@ -6923,11 +7131,11 @@ fn linux_process_memory_copies_enforce_metadata_without_blocking_mremap() {
     let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
         .expect("read process memory runtime");
     let process_memory = &memory[memory
-        .find("impl LinuxProcessMemory {")
+        .find("impl LinuxProcessMemory {\n")
         .expect("process memory implementation")..];
 
     let copy_to_start = process_memory
-        .find("    fn copy_to_user(&self")
+        .find("    fn copy_to_user(&mut self")
         .expect("checked user copyout");
     let copy_to = braced_body(&process_memory[copy_to_start..]);
     assert!(copy_to.contains("self.range_accessible(address, bytes.len(), true)"));

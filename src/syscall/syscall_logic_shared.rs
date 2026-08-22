@@ -193,17 +193,33 @@ pub(crate) const fn linux_sched_kernel_priority(policy: usize, priority: i32) ->
     }
 }
 
-pub(crate) fn for_each_linux_expired_real_timer_pid(
-    deadlines: &[(usize, u64)],
+pub(crate) fn linux_real_timer_scan_needed<I>(deadlines: I, disabled: u64) -> bool
+where
+    I: IntoIterator<Item = u64>,
+{
+    deadlines.into_iter().any(|deadline| deadline != disabled)
+}
+
+pub(crate) fn collect_linux_expired_real_timer_pids<I>(
+    deadlines: I,
     now: u64,
     disabled: u64,
-    mut visit: impl FnMut(usize),
-) {
+    output: &mut [usize],
+) -> usize
+where
+    I: IntoIterator<Item = (usize, u64)>,
+{
+    let mut count = 0usize;
     for (pid, deadline) in deadlines {
-        if *deadline != disabled && *deadline <= now {
-            visit(*pid);
+        if deadline != disabled && deadline <= now {
+            if count == output.len() {
+                break;
+            }
+            output[count] = pid;
+            count += 1;
         }
     }
+    count
 }
 
 pub(crate) const LINUX_SCHED_ONLINE_CPU_COUNT: usize = 1;

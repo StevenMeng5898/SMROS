@@ -1579,16 +1579,14 @@ impl<const N: usize> LinuxTaskTable<N> {
         true
     }
 
-    pub(crate) fn child_waiters(&self, tgid: usize) -> [Option<LinuxTaskCore>; N] {
-        let mut waiters = [None; N];
-        let mut count = 0usize;
+    pub(crate) fn child_waiters(&self, tgid: usize) -> alloc::vec::Vec<LinuxTaskCore> {
+        let mut waiters = alloc::vec::Vec::new();
         for task in self.tasks.iter().copied() {
             if task.tgid == tgid
                 && task.state == LinuxTaskState::Blocked
                 && task.block_reason == LinuxBlockReason::ChildWait
             {
-                waiters[count] = Some(task);
-                count += 1;
+                waiters.push(task);
             }
         }
         waiters
@@ -1826,6 +1824,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn expire_signal_waits(
         &mut self,
         now: u64,
@@ -1842,6 +1841,23 @@ impl<const N: usize> LinuxTaskTable<N> {
             }
         }
         expired
+    }
+
+    pub(crate) fn expire_one_signal_wait(
+        &mut self,
+        now: u64,
+    ) -> Option<(usize, usize, LinuxBlockReason)> {
+        for index in 0..N {
+            let task = self.tasks[index];
+            let signal_state = &mut self.signal_states[index];
+            if task.state == LinuxTaskState::Blocked
+                && task.block_reason == LinuxBlockReason::SignalWait
+                && signal_state.expire_signal_wait(now)
+            {
+                return Some((task.tid, task.scheduler_thread, task.block_reason));
+            }
+        }
+        None
     }
 
     pub(crate) fn install_sleep(
@@ -1909,6 +1925,7 @@ impl<const N: usize> LinuxTaskTable<N> {
         true
     }
 
+    #[allow(dead_code)]
     pub(crate) fn expire_sleeps(
         &mut self,
         now: u64,
@@ -1931,6 +1948,27 @@ impl<const N: usize> LinuxTaskTable<N> {
             }
         }
         expired
+    }
+
+    pub(crate) fn expire_one_sleep(
+        &mut self,
+        now: u64,
+    ) -> Option<(usize, usize, LinuxBlockReason)> {
+        for index in 0..N {
+            let task = self.tasks[index];
+            let Some(wait) = self.sleep_waits[index].as_mut() else {
+                continue;
+            };
+            if task.state == LinuxTaskState::Blocked
+                && task.block_reason == LinuxBlockReason::Sleep
+                && wait.outcome == LinuxSleepOutcome::Waiting
+                && wait.deadline <= now
+            {
+                wait.outcome = LinuxSleepOutcome::Completed;
+                return Some((task.tid, task.scheduler_thread, task.block_reason));
+            }
+        }
+        None
     }
 
     pub(crate) fn refresh_realtime_sleep_deadlines(

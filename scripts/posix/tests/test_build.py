@@ -3123,6 +3123,67 @@ int main(void) {
                 timeout=5.0,
             )
 
+    def test_smros_posix_compat_releases_bounded_fork_children_after_wait(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "fork-budget.c"
+            binary = root / "fork-budget"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <errno.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+enum { PROBE_CHILDREN = 64 };
+
+int main(void) {
+    pid_t children[PROBE_CHILDREN];
+    int count = 0;
+    while (count < PROBE_CHILDREN) {
+        pid_t child = fork();
+        if (child < 0) {
+            if (errno != EAGAIN) return 10;
+            break;
+        }
+        if (child == 0) _exit(0);
+        children[count++] = child;
+    }
+    if (count >= PROBE_CHILDREN) return 11;
+    for (int index = 0; index < count; ++index) {
+        if (waitpid(children[index], NULL, 0) != children[index]) return 12;
+    }
+    pid_t child = fork();
+    if (child < 0) return 13;
+    if (child == 0) _exit(0);
+    return waitpid(child, NULL, 0) == child ? 0 : 14;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary)],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
     def test_smros_posix_compat_shared_cond_ignores_inherited_private_record(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c")
         with tempfile.TemporaryDirectory() as temporary:

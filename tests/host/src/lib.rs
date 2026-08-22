@@ -23,11 +23,34 @@ mod fxfs {
         Unavailable,
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct FxfsAttrs {
+        pub size: usize,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct FxfsCursor;
+
     pub fn ensure_host_share() -> Result<(), FxfsError> {
         Err(FxfsError::Unavailable)
     }
 
     pub fn read_file(_path: &str, _out: &mut [u8]) -> Result<usize, FxfsError> {
+        Err(FxfsError::Unavailable)
+    }
+
+    pub fn attrs(_path: &str) -> Result<FxfsAttrs, FxfsError> {
+        Err(FxfsError::Unavailable)
+    }
+
+    pub fn open_cursor(_path: &str) -> Result<FxfsCursor, FxfsError> {
+        Err(FxfsError::Unavailable)
+    }
+
+    pub fn cursor_read_for_mmap(
+        _cursor: &mut FxfsCursor,
+        _out: &mut [u8],
+    ) -> Result<usize, FxfsError> {
         Err(FxfsError::Unavailable)
     }
 }
@@ -721,12 +744,15 @@ mod syscall_logic {
     fn expired_real_timer_scan_includes_processes_not_currently_scheduled() {
         const DISABLED: u64 = u64::MAX;
         let deadlines = [(7usize, 100u64), (8, DISABLED), (9, 99), (10, 101)];
-        let mut expired = Vec::new();
-        for_each_linux_expired_real_timer_pid(&deadlines, 100, DISABLED, |pid| {
-            expired.push(pid)
-        });
+        let mut expired = [0usize; 4];
+        let count = collect_linux_expired_real_timer_pids(
+            deadlines.into_iter(),
+            100,
+            DISABLED,
+            &mut expired,
+        );
 
-        assert_eq!(expired, vec![7, 9]);
+        assert_eq!(&expired[..count], &[7, 9]);
     }
 
     #[test]
@@ -1538,6 +1564,27 @@ mod linux_mqueue_logic {
     }
 
     #[test]
+    fn mqueue_timer_expiry_can_be_drained_one_record_at_a_time() {
+        let mut state = LinuxMqueueState::<2, 4, 2>::new();
+        state
+            .open("/smros-mq", 101, true, false, Some(attr(1, 8)))
+            .unwrap();
+        state
+            .push_waiter(
+                101,
+                LinuxMqueueWaitKind::Receive,
+                11,
+                12,
+                Some(LinuxMqueueDeadline { ticks: 70 }),
+            )
+            .unwrap();
+
+        assert_eq!(state.expire_one(69), None);
+        assert_eq!(state.expire_one(70), Some((11, 12)));
+        assert_eq!(state.expire_one(71), None);
+    }
+
+    #[test]
     fn notify_is_single_registrant_and_fires_once_on_empty_to_nonempty() {
         let mut state = LinuxMqueueState::<4, 8, 4>::new();
         state
@@ -1609,6 +1656,8 @@ mod linux_mqueue_logic {
 }
 
 mod linux_task_logic {
+    extern crate alloc;
+
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/syscall/linux_task_logic_shared.rs"
@@ -1634,20 +1683,17 @@ mod linux_task_logic {
         tgid: usize,
     ) -> usize {
         let snapshot = tasks.tasks;
-        crate::linux_process_logic::for_each_linux_process_task(
-            &snapshot,
-            tgid,
-            None,
-            |task| LinuxTaskTable::<N>::is_live(task),
-            |task| task.tgid,
-            |task| task.scheduler_thread,
-            |_, task| {
+        snapshot
+            .iter()
+            .copied()
+            .filter(|task| task.tgid == tgid && LinuxTaskTable::<N>::is_live(*task))
+            .filter(|task| {
                 tasks
                     .exit_with_clear_child_tid(task.tid, task.scheduler_thread)
                     .is_some()
                     && tasks.retire(task.tid, task.scheduler_thread)
-            },
-        )
+            })
+            .count()
     }
 
     pub(crate) fn live_process_task_count<const N: usize>(
@@ -2018,7 +2064,6 @@ mod linux_task_logic {
         let waiters: Vec<_> = tasks
             .child_waiters(LINUX_ROOT_TID)
             .into_iter()
-            .flatten()
             .map(|task| task.tid)
             .collect();
         assert_eq!(waiters, vec![LINUX_ROOT_TID, peer.tid]);
@@ -3009,6 +3054,23 @@ mod linux_task_logic {
 
         tasks.reset();
         assert_eq!(tasks.expire_sleeps(u64::MAX), [None, None, None]);
+    }
+
+    #[test]
+    fn linux_sleep_timer_expiry_can_be_drained_one_record_at_a_time() {
+        let mut tasks = LinuxTaskTable::<2>::new();
+        tasks.register_root(7).unwrap();
+        let child = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
+        assert!(tasks.publish(child));
+        assert!(tasks.install_sleep(child.tid, 8, LinuxSleepWait::waiting(50)));
+        assert!(tasks.block(child.tid, 8, LinuxBlockReason::Sleep));
+
+        assert_eq!(tasks.expire_one_sleep(49), None);
+        assert_eq!(
+            tasks.expire_one_sleep(50),
+            Some((child.tid, 8, LinuxBlockReason::Sleep))
+        );
+        assert_eq!(tasks.expire_one_sleep(51), None);
     }
 
     #[test]
@@ -4899,7 +4961,7 @@ pub fn linux_signal_lifecycle_behavior_contract() {
                 process_pending.queue(LinuxPendingSignal::standard(notification_signal))
             },
             |parent_pid| {
-                for waiter in tasks.child_waiters(parent_pid).into_iter().flatten() {
+                for waiter in tasks.child_waiters(parent_pid) {
                     assert!(tasks.wake(waiter.tid, waiter.scheduler_thread));
                 }
             },
@@ -7208,6 +7270,27 @@ mod linux_futex_logic {
         assert_eq!(queue.take_outcome(2, 8), Some(FutexWaitOutcome::TimedOut));
         assert_eq!(queue.reset(), 1);
         assert_eq!(queue.len(), 0);
+    }
+
+    #[test]
+    fn futex_timer_expiry_can_be_drained_one_record_at_a_time() {
+        let mut queue = FutexQueue::<2>::new();
+        queue
+            .push(waiter(
+                2,
+                8,
+                0x1000,
+                FUTEX_BITSET_MATCH_ANY,
+                Some(FutexDeadline {
+                    ticks: 5,
+                    clock: FutexClock::Monotonic,
+                }),
+            ))
+            .unwrap();
+
+        assert_eq!(queue.expire_one(4, 5), None);
+        assert_eq!(queue.expire_one(5, 5), Some((2, 8)));
+        assert_eq!(queue.expire_one(6, 6), None);
     }
 
     #[test]

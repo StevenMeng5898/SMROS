@@ -69,17 +69,6 @@ pub extern "C" fn handle_syscall_simple(
         {
             let return_pc = crate::kernel_lowlevel::cpu::read_exception_return_pc();
             let pstate = crate::kernel_lowlevel::cpu::read_exception_return_state();
-            if syscall_num == 98 {
-                crate::kobj_info!(
-                    "fork",
-                    "futex syscall frame={:#x} return_pc={:#x} pstate={:#x} op={:#x} uaddr={:#x}",
-                    saved_frame,
-                    return_pc,
-                    pstate,
-                    args[1],
-                    args[0]
-                );
-            }
             let result = linux_sys_result_to_u64(linux_syscall_context::with_linux_syscall_frame(
                 saved_frame as *mut Aarch64ExceptionFrame,
                 return_pc,

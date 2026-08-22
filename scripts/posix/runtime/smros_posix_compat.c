@@ -88,6 +88,8 @@ typedef int (*smros_pthread_create_fn)(
     void *(*)(void *),
     void *
 );
+typedef pid_t (*smros_fork_fn)(void);
+typedef pid_t (*smros_waitpid_fn)(pid_t, int *, int);
 typedef int (*smros_pthread_join_fn)(pthread_t, void **);
 typedef int (*smros_pthread_tryjoin_fn)(pthread_t, void **);
 typedef int (*smros_pthread_kill_fn)(pthread_t, int);
@@ -222,6 +224,7 @@ enum {
     SMROS_UNNAMED_SEM_RECORDS = 64,
     SMROS_SEM_NSEMS_MAX = 64,
     SMROS_PTHREAD_CREATE_LIMIT = 100,
+    SMROS_FORK_CHILD_LIMIT = 32,
     SMROS_PTHREAD_ATTR_RECORDS = 64,
     SMROS_PTHREAD_MUTEXATTR_RECORDS = 128,
     SMROS_PTHREAD_MUTEX_RECORDS = 512,
@@ -384,6 +387,14 @@ static smros_pthread_cond_record
 static smros_pthread_cond_waiter_record
     smros_pthread_cond_waiter_records[SMROS_PTHREAD_COND_RECORDS];
 static int smros_pthread_active_created;
+typedef struct {
+    pid_t pid;
+    int reserved;
+} smros_fork_child_record;
+static smros_fork_child_record
+    smros_fork_child_records[SMROS_FORK_CHILD_LIMIT];
+static int smros_fork_child_count;
+static int smros_fork_child_records_lock;
 static int smros_pthread_cond_records_lock;
 static int smros_pthread_mutex_records_lock;
 static int smros_pthread_cancel_record_active[SMROS_PTHREAD_CANCEL_RECORDS];
@@ -453,6 +464,115 @@ static void *smros_resolve_symbol(const char *symbol) {
         errno = ENOSYS;
     }
     return target;
+}
+
+static int smros_reserve_fork_child_slot(void) {
+    int slot = -1;
+    while (__sync_lock_test_and_set(&smros_fork_child_records_lock, 1) != 0) {
+        sched_yield();
+    }
+    if (smros_fork_child_count < SMROS_FORK_CHILD_LIMIT) {
+        for (int index = 0; index < SMROS_FORK_CHILD_LIMIT; index++) {
+            if (
+                smros_fork_child_records[index].pid == 0 &&
+                !smros_fork_child_records[index].reserved
+            ) {
+                smros_fork_child_records[index].reserved = 1;
+                smros_fork_child_count++;
+                slot = index;
+                break;
+            }
+        }
+    }
+    __sync_lock_release(&smros_fork_child_records_lock);
+    return slot;
+}
+
+static void smros_publish_fork_child_slot(int slot, pid_t pid) {
+    while (__sync_lock_test_and_set(&smros_fork_child_records_lock, 1) != 0) {
+        sched_yield();
+    }
+    if (slot >= 0 && slot < SMROS_FORK_CHILD_LIMIT) {
+        smros_fork_child_records[slot].pid = pid;
+        smros_fork_child_records[slot].reserved = 0;
+    }
+    __sync_lock_release(&smros_fork_child_records_lock);
+}
+
+static void smros_cancel_fork_child_slot(int slot) {
+    while (__sync_lock_test_and_set(&smros_fork_child_records_lock, 1) != 0) {
+        sched_yield();
+    }
+    if (
+        slot >= 0 &&
+        slot < SMROS_FORK_CHILD_LIMIT &&
+        smros_fork_child_records[slot].reserved
+    ) {
+        smros_fork_child_records[slot].reserved = 0;
+        smros_fork_child_count--;
+    }
+    __sync_lock_release(&smros_fork_child_records_lock);
+}
+
+static void smros_forget_fork_child(pid_t pid) {
+    while (__sync_lock_test_and_set(&smros_fork_child_records_lock, 1) != 0) {
+        sched_yield();
+    }
+    for (int index = 0; index < SMROS_FORK_CHILD_LIMIT; index++) {
+        if (smros_fork_child_records[index].pid == pid) {
+            smros_fork_child_records[index].pid = 0;
+            smros_fork_child_count--;
+            break;
+        }
+    }
+    __sync_lock_release(&smros_fork_child_records_lock);
+}
+
+static void smros_reset_fork_children(void) {
+    while (__sync_lock_test_and_set(&smros_fork_child_records_lock, 1) != 0) {
+        sched_yield();
+    }
+    memset(smros_fork_child_records, 0, sizeof(smros_fork_child_records));
+    smros_fork_child_count = 0;
+    __sync_lock_release(&smros_fork_child_records_lock);
+}
+
+pid_t fork(void) {
+    smros_fork_fn target = (smros_fork_fn)smros_resolve_symbol("fork");
+    if (target == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    int slot = smros_reserve_fork_child_slot();
+    if (slot < 0) {
+        errno = EAGAIN;
+        return -1;
+    }
+    pid_t result = target();
+    if (result == 0) {
+        smros_reset_fork_children();
+        return 0;
+    }
+    if (result < 0) {
+        smros_cancel_fork_child_slot(slot);
+        return result;
+    }
+    smros_publish_fork_child_slot(slot, result);
+    return result;
+}
+
+pid_t waitpid(pid_t pid, int *status, int options) {
+    smros_waitpid_fn target =
+        (smros_waitpid_fn)smros_resolve_symbol("waitpid");
+    if (target == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    pid_t result = target(pid, status, options);
+    if (result > 0) {
+        smros_forget_fork_child(result);
+    }
+    return result;
 }
 
 static int smros_pointer_is_null(const void *pointer) {
@@ -2785,7 +2905,20 @@ static int smros_pthread_cond_attr_clock(
 }
 
 static void smros_pthread_cond_wait_pause(void) {
-    (void)sched_yield();
+    /*
+     * The private condition-variable fallback tracks wakeups in user space.
+     * A pure sched_yield() loop leaves every waiter runnable, and SMROS
+     * implements sub-10 ms nanosleeps as a busy-spin.  Park for one timer
+     * quantum so a stress test can block its waiters while still polling
+     * promptly for a broadcast.
+     */
+    const struct timespec pause = {
+        .tv_sec = 0,
+        .tv_nsec = 200000000L,
+    };
+    if (nanosleep(&pause, NULL) != 0 && errno != EINTR) {
+        (void)sched_yield();
+    }
 }
 
 static uint32_t smros_pthread_cond_record_users(

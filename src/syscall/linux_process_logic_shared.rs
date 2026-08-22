@@ -194,30 +194,6 @@ pub(crate) fn select_linux_process_signal_target<T: Copy>(
     })
 }
 
-pub(crate) fn for_each_linux_process_task<T: Copy>(
-    tasks: &[T],
-    target_tgid: usize,
-    scheduler_thread: Option<usize>,
-    mut is_live: impl FnMut(T) -> bool,
-    mut task_tgid: impl FnMut(T) -> usize,
-    mut task_scheduler_thread: impl FnMut(T) -> usize,
-    mut operation: impl FnMut(usize, T) -> bool,
-) -> usize {
-    tasks
-        .iter()
-        .copied()
-        .enumerate()
-        .filter(|(_, task)| {
-            is_live(*task)
-                && task_tgid(*task) == target_tgid
-                && scheduler_thread
-                    .map(|scheduler| task_scheduler_thread(*task) == scheduler)
-                    .unwrap_or(true)
-        })
-        .filter(|(slot, task)| operation(*slot, *task))
-        .count()
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxWaitCompletionError<E> {
     Copy(E),

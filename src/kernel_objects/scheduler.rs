@@ -833,7 +833,16 @@ impl Scheduler {
         for i in 1..MAX_THREADS {
             if self.threads[i].state == ThreadState::Empty {
                 // Allocate stack
-                let stack = ThreadStack::alloc(DEFAULT_STACK_SIZE)?;
+                let Some(stack) = ThreadStack::alloc(DEFAULT_STACK_SIZE) else {
+                    crate::kobj_info!(
+                        "scheduler",
+                        "thread-stack-alloc-failed active_threads={} slot={} stack_size={}",
+                        self.active_threads,
+                        i,
+                        DEFAULT_STACK_SIZE
+                    );
+                    return None;
+                };
 
                 let tcb = &mut self.threads[i];
                 tcb.init(

@@ -3730,6 +3730,12 @@ fn memory_state() -> &'static mut MemorySyscallState {
     }
 }
 
+fn with_initialized_memory_state<R>(
+    operation: impl FnOnce(&mut MemorySyscallState) -> R,
+) -> Option<R> {
+    unsafe { MEMORY_SYSCALL_STATE.as_mut().map(operation) }
+}
+
 fn linux_resource_pid() -> usize {
     linux_process::current_pid().unwrap_or(linux_process::LINUX_ROOT_PID)
 }
@@ -5458,22 +5464,39 @@ pub extern "C" fn complete_linux_signal_syscall_return(saved_regs: usize) {
 
 pub fn expire_linux_real_timers_from_irq() {
     let now = crate::kernel_lowlevel::timer::get_tick_count();
-    let deadlines = {
-        let state = memory_state();
-        state
-            .linux_process_resources
-            .iter()
-            .map(|resources| (resources.pid, resources.real_timer_deadline_tick))
-            .collect::<Vec<_>>()
-    };
-    let mut expired = Vec::new();
-    syscall_logic::for_each_linux_expired_real_timer_pid(
-        &deadlines,
-        now,
-        LINUX_TIMER_DISABLED,
-        |pid| expired.push(pid),
-    );
-    for pid in expired {
+    let has_active_timer = with_initialized_memory_state(|state| {
+        syscall_logic::linux_real_timer_scan_needed(
+            state
+                .linux_process_resources
+                .iter()
+                .map(|resources| resources.real_timer_deadline_tick),
+            LINUX_TIMER_DISABLED,
+        )
+    })
+    .unwrap_or(false);
+    if !has_active_timer {
+        return;
+    }
+
+    loop {
+        let mut expired = [0usize; 1];
+        let Some(expired_count) = with_initialized_memory_state(|state| {
+            syscall_logic::collect_linux_expired_real_timer_pids(
+                state
+                    .linux_process_resources
+                    .iter()
+                    .map(|resources| (resources.pid, resources.real_timer_deadline_tick)),
+                now,
+                LINUX_TIMER_DISABLED,
+                &mut expired,
+            )
+        }) else {
+            break;
+        };
+        if expired_count == 0 {
+            break;
+        }
+        let pid = expired[0];
         memory_state().set_linux_real_timer_deadline(pid, LINUX_TIMER_DISABLED);
         if linux_signal_disposition_for(pid, LINUX_SIGALRM)
             .is_ok_and(|disposition| disposition == LinuxSignalDisposition::Ignore)
@@ -5503,29 +5526,35 @@ pub fn deliver_linux_posix_timer_signals_from_irq() {
     let Ok(now_realtime) = linux_realtime_nanos() else {
         return;
     };
-    let state = memory_state();
-    for resources in &mut state.linux_process_resources {
-        for timer in &mut resources.posix_timers {
-            if timer.expire(now_monotonic, now_realtime) {
-                let signal = timer.signal;
-                if signal == 0 {
-                    continue;
-                }
-                let timer_id = timer.timer_id;
-                let overrun = timer.overrun();
-                let signal_value = timer.signal_value;
-                let _ = queue_process_linux_signal_and_wake(
-                    resources.pid,
-                    linux_timer_signal_record(
-                        signal,
+    loop {
+        let expired = with_initialized_memory_state(|state| {
+            for resources in &mut state.linux_process_resources {
+                for timer in &mut resources.posix_timers {
+                    if !timer.expire(now_monotonic, now_realtime) || timer.signal == 0 {
+                        continue;
+                    }
+                    let signal = timer.signal;
+                    let timer_id = timer.timer_id;
+                    let overrun = timer.overrun();
+                    let signal_value = timer.signal_value;
+                    return Some((
                         resources.pid,
-                        timer_id,
-                        overrun,
-                        signal_value,
-                    ),
-                );
+                        linux_timer_signal_record(
+                            signal,
+                            resources.pid,
+                            timer_id,
+                            overrun,
+                            signal_value,
+                        ),
+                    ));
+                }
             }
-        }
+            None
+        });
+        let Some(Some((pid, record))) = expired else {
+            break;
+        };
+        let _ = queue_process_linux_signal_and_wake(pid, record);
     }
 }
 
@@ -10722,9 +10751,16 @@ pub fn sys_clone(
             return Err(SysError::EFAULT);
         }
 
-        let scheduler_id = scheduler::scheduler()
-            .create_suspended_thread_on_cpu(linux_task::linux_clone_child_entry, "linux_thread", 0)
-            .ok_or(SysError::EAGAIN)?;
+        let scheduler_id = match scheduler::scheduler().create_suspended_thread_on_cpu(
+            linux_task::linux_clone_child_entry,
+            "linux_thread",
+            0,
+        ) {
+            Some(id) => id,
+            None => {
+                return Err(SysError::EAGAIN);
+            }
+        };
         let reservation = match linux_task::reserve_clone(scheduler_id, request, context) {
             Ok(reservation) => reservation,
             Err(error) => {

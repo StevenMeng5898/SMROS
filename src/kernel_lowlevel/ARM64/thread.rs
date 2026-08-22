@@ -12,11 +12,19 @@ use super::lowlevel_logic;
 
 include!("context_shared.rs");
 
-/// Maximum number of concurrent threads
-pub const MAX_THREADS: usize = 128;
+/// Maximum number of concurrent threads.
+///
+/// POSIX conformance stress cases may create 1000 children concurrently, so
+/// the scheduler and Linux process tables must leave room for the test parent
+/// and kernel-owned threads as well.
+pub const MAX_THREADS: usize = 1024;
 
-/// Default thread stack size (64KB)
-pub const DEFAULT_STACK_SIZE: usize = 0x1_0000;
+/// Default thread stack size (128 KiB).
+///
+/// POSIX launchers and fork/exec paths perform deep kernel-side work before
+/// returning to EL0. Keep enough headroom for those frames while bounding the
+/// memory cost of the many concurrent POSIX stress-test threads.
+pub const DEFAULT_STACK_SIZE: usize = 0x2_0000;
 
 /// Thread states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -444,7 +452,7 @@ impl ThreadStack {
     pub fn alloc(size: usize) -> Option<Self> {
         let layout = alloc::alloc::Layout::from_size_align(size, 16).ok()?;
 
-        // SAFETY: `size` is DEFAULT_STACK_SIZE (64KB) which is valid and 16-byte aligned.
+        // SAFETY: `size` is DEFAULT_STACK_SIZE (128 KiB) which is valid and 16-byte aligned.
         // The global allocator is our KernelAllocator bump allocator, which is safe to use.
         let ptr = unsafe { alloc::alloc::alloc(layout) };
 

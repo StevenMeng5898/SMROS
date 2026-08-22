@@ -1750,12 +1750,37 @@ impl FxfsState {
         Ok(())
     }
 
+    fn host_share_installation_complete(&self) -> bool {
+        if !self.host_share_installed {
+            return false;
+        }
+
+        let deleted = self.host_share_deleted_data();
+        for file in host_share::HOST_SHARE_FILES {
+            if deleted
+                .map(|data| fxfs_deleted_data_contains(data, file.path))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let Ok(path) = fxfs_host_share_path(file.path) else {
+                return false;
+            };
+            return self.resolve_path(path.as_str()).is_ok();
+        }
+        true
+    }
+
     fn install_host_share(&mut self, force: bool) -> Result<(), FxfsError> {
         self.ensure_mounted()?;
-        if self.host_share_installed && !force {
+        let block_backed = self.block_backed || drivers::block_ready();
+        if !force && self.host_share_installation_complete() {
+            if block_backed && !self.block_backed {
+                self.block_backed = true;
+                self.persist();
+            }
             return Ok(());
         }
-        let block_backed = self.block_backed;
         let last_sync_ok = self.last_sync_ok;
         let last_storage_error = self.last_storage_error;
 

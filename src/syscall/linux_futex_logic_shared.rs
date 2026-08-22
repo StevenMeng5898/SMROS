@@ -310,6 +310,7 @@ impl<const N: usize> FutexQueue<N> {
         identities
     }
 
+    #[allow(dead_code)]
     pub(crate) fn expire(
         &mut self,
         now_monotonic: u64,
@@ -345,6 +346,29 @@ impl<const N: usize> FutexQueue<N> {
             selected_count += 1;
         }
         identities
+    }
+
+    pub(crate) fn expire_one(
+        &mut self,
+        now_monotonic: u64,
+        now_realtime: u64,
+    ) -> Option<(usize, usize)> {
+        let index = self.oldest_matching(|waiter| {
+            waiter.outcome == FutexWaitOutcome::Waiting
+                && waiter.deadline.is_some_and(|deadline| match deadline.clock {
+                    FutexClock::Monotonic => smros_linux_futex_deadline_expired_body!(
+                        now_monotonic,
+                        deadline.ticks
+                    ),
+                    FutexClock::Realtime => smros_linux_futex_deadline_expired_body!(
+                        now_realtime,
+                        deadline.ticks
+                    ),
+                })
+        })?;
+        let waiter = self.waiters[index].as_mut().expect("selected futex waiter");
+        waiter.outcome = FutexWaitOutcome::TimedOut;
+        Some((waiter.tid, waiter.scheduler_thread))
     }
 
     pub(crate) fn interrupt(&mut self, tid: usize, scheduler_thread: usize) -> bool {

@@ -391,8 +391,8 @@ impl UserShell {
     /// Print shell prompt
     fn print_prompt(&mut self) {
         self.print("smros:");
-        let cwd = self.context.cwd.clone();
-        self.print(cwd.as_str());
+        let cwd = self.context.cwd.as_str();
+        self.context.serial.write_str(cwd);
         self.print("> ");
     }
 

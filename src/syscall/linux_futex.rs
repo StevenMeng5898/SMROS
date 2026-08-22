@@ -67,20 +67,6 @@ pub(crate) fn sys_futex(
         } else {
             linux_process_memory::futex_address_key(uaddr)
         };
-        crate::kobj_info!(
-            "posix-futex",
-            "pid={} tid={} op={:#x} uaddr={:#x} key={:#x} private={} cmd={:?} val={} timeout={:#x} val3={:#x}",
-            super::linux_process::current_pid().unwrap_or(0),
-            linux_task::current_tid().unwrap_or(0),
-            op,
-            uaddr,
-            key,
-            decoded.private,
-            decoded.command,
-            val,
-            timeout,
-            val3
-        );
         match decoded.command {
             FutexCommand::Wait => wait(
                 uaddr,
@@ -230,27 +216,8 @@ fn wait(
         }
     }
 
-    crate::kobj_info!(
-        "posix-futex",
-        "wait-enqueued pid={} tid={} key={:#x} uaddr={:#x} expected={} deadline={:?}",
-        super::linux_process::current_pid().unwrap_or(0),
-        tid,
-        key,
-        uaddr,
-        expected,
-        deadline
-    );
     scheduler::schedule();
     let outcome = with_queue(|queue| queue.take_outcome(tid, scheduler_thread.0));
-    crate::kobj_info!(
-        "posix-futex",
-        "wait-resume pid={} tid={} key={:#x} uaddr={:#x} outcome={:?}",
-        super::linux_process::current_pid().unwrap_or(0),
-        tid,
-        key,
-        uaddr,
-        outcome
-    );
     if outcome.is_none() {
         let _ = with_queue(|queue| queue.remove(tid, scheduler_thread.0));
         if linux_task::wake_blocked(tid, scheduler_thread.0, LinuxBlockReason::Futex) {
@@ -317,35 +284,12 @@ fn wake(address: usize, requested: usize, bitset: u32) -> SysResult {
         let Some((tid, scheduler_thread)) = identity else {
             break;
         };
-        crate::kobj_info!(
-            "posix-futex",
-            "wake-match key={:#x} target_tid={} target_scheduler={} bitset={:#x}",
-            address,
-            tid,
-            scheduler_thread,
-            bitset
-        );
         if linux_task::wake_blocked(tid, scheduler_thread, LinuxBlockReason::Futex) {
             woken += 1;
         } else {
-            crate::kobj_info!(
-                "posix-futex",
-                "wake-target-not-blocked key={:#x} target_tid={} target_scheduler={}",
-                address,
-                tid,
-                scheduler_thread
-            );
             let _ = with_queue(|queue| queue.take_outcome(tid, scheduler_thread));
         }
     }
-    crate::kobj_info!(
-        "posix-futex",
-        "wake-result key={:#x} requested={} woken={} bitset={:#x}",
-        address,
-        requested,
-        woken,
-        bitset
-    );
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     Ok(woken)
 }
@@ -353,9 +297,9 @@ fn wake(address: usize, requested: usize, bitset: u32) -> SysResult {
 pub(crate) fn on_timer_tick(now_monotonic: u64, now_realtime: u64) {
     #[cfg(target_arch = "aarch64")]
     if crate::kernel_lowlevel::smp::current_cpu_id() == 0 {
-        let expired = with_queue(|queue| queue.expire(now_monotonic, now_realtime));
-        for identity in expired.into_iter().flatten() {
-            let (tid, scheduler_thread) = identity;
+        while let Some((tid, scheduler_thread)) =
+            with_queue(|queue| queue.expire_one(now_monotonic, now_realtime))
+        {
             if !linux_task::wake_blocked(tid, scheduler_thread, LinuxBlockReason::Futex) {
                 let _ = with_queue(|queue| queue.take_outcome(tid, scheduler_thread));
             }

@@ -355,10 +355,16 @@ fn parse_filter_value(value: &str) -> Result<String, PosixTestError> {
 
 pub fn load_manifest() -> Result<PosixManifest, PosixTestError> {
     fxfs::ensure_host_share().map_err(|_| PosixTestError::FxfsPrepare)?;
+    let attrs = fxfs::attrs(POSIX_MANIFEST_PATH).map_err(|_| PosixTestError::FxfsRead)?;
+    if attrs.size > POSIX_MANIFEST_MAX_BYTES {
+        return Err(PosixTestError::ManifestTooLarge);
+    }
     let mut bytes = Vec::new();
-    bytes.resize(POSIX_MANIFEST_MAX_BYTES + 1, 0u8);
-    let read =
-        fxfs::read_file(POSIX_MANIFEST_PATH, &mut bytes).map_err(|_| PosixTestError::FxfsRead)?;
+    bytes.resize(attrs.size, 0u8);
+    let mut cursor =
+        fxfs::open_cursor(POSIX_MANIFEST_PATH).map_err(|_| PosixTestError::FxfsRead)?;
+    let read = fxfs::cursor_read_for_mmap(&mut cursor, &mut bytes)
+        .map_err(|_| PosixTestError::FxfsRead)?;
     if read > POSIX_MANIFEST_MAX_BYTES {
         return Err(PosixTestError::ManifestTooLarge);
     }

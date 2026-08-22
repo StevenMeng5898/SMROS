@@ -164,8 +164,7 @@ pub(crate) fn wait(
 pub(crate) fn on_timer_tick(now: u64) {
     #[cfg(target_arch = "aarch64")]
     if crate::kernel_lowlevel::smp::current_cpu_id() == 0 {
-        let expired = with_state(|state| state.expire(now));
-        for identity in expired.into_iter().flatten() {
+        while let Some(identity) = with_state(|state| state.expire_one(now)) {
             wake_identity(Some(identity));
         }
     }

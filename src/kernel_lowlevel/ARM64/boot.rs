@@ -303,6 +303,7 @@ irq_handler_sp:
 
     // Call timer interrupt handler
     bl      timer_interrupt_handler
+    bl      check_preemption
 
     // Restore registers
     ldr     x16, [sp, #0x300]
@@ -388,6 +389,7 @@ irq_handler:
 
     // Call timer interrupt handler
     bl      timer_interrupt_handler
+    bl      check_preemption
 
     // Restore registers
     ldr     x16, [sp, #0x300]

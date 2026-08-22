@@ -231,6 +231,18 @@ unsafe fn insert_free_block(
         current = (*current).next;
     }
 
+    if !prev.is_null() {
+        let prev_end = (prev as usize).saturating_add((*prev).size);
+        if prev_end > block_start {
+            return;
+        }
+    }
+    if !current.is_null() {
+        if block_end > current as usize {
+            return;
+        }
+    }
+
     let block = block_start as *mut FreeBlock;
     (*block).size = block_size;
     (*block).next = current;

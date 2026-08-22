@@ -1,3 +1,5 @@
+use alloc::vec::Vec;
+
 use crate::kernel_lowlevel::thread::{self, ThreadId};
 use crate::kernel_objects::scheduler;
 
@@ -600,7 +602,6 @@ pub(crate) fn wake_process_waiters(tgid: usize) -> usize {
     let waiters = with_runtime(|runtime| runtime.tasks.child_waiters(tgid));
     let count = waiters
         .into_iter()
-        .flatten()
         .filter(|task| wake_blocked(task.tid, task.scheduler_thread, LinuxBlockReason::ChildWait))
         .count();
     if count != 0 {
@@ -628,14 +629,31 @@ enum LinuxTaskRetirementScope {
 
 fn retire_tasks(
     scope: LinuxTaskRetirementScope,
-) -> (
-    [Option<LinuxChildExitTransition>; LINUX_TASK_LIMIT],
-    usize,
-    bool,
-) {
-    let mut retired = [None; LINUX_TASK_LIMIT];
+) -> (Vec<LinuxChildExitTransition>, usize, bool) {
+    let mut retired = Vec::new();
     let (retired_count, process_empty) = with_runtime(|runtime| {
-        let snapshot = runtime.tasks.tasks;
+        let candidates: Vec<(usize, LinuxTaskCore)> = runtime
+            .tasks
+            .tasks
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, task)| match scope {
+                LinuxTaskRetirementScope::Process {
+                    tgid,
+                    entire_group,
+                    current_scheduler,
+                } => {
+                    LinuxTaskTable::<LINUX_TASK_LIMIT>::is_live(*task)
+                        && task.tgid == tgid
+                        && (entire_group || task.scheduler_thread == current_scheduler)
+                }
+                LinuxTaskRetirementScope::LaunchDescendants { root_tgid } => {
+                    task.tgid != root_tgid
+                        && LinuxTaskTable::<LINUX_TASK_LIMIT>::is_live(*task)
+                }
+            })
+            .collect();
         let mut retire_task = |slot: usize, task: LinuxTaskCore| {
             let Some(clear_child_tid) = runtime
                 .tasks
@@ -650,7 +668,7 @@ fn retire_tasks(
             if let Some(clone_slot) = runtime.clone_slots.get_mut(slot) {
                 *clone_slot = aarch64_clone::LinuxCloneSlot::EMPTY;
             }
-            retired[slot] = Some(LinuxChildExitTransition {
+            retired.push(LinuxChildExitTransition {
                 task,
                 slot,
                 clear_child_tid,
@@ -658,30 +676,12 @@ fn retire_tasks(
             });
             true
         };
-        let retired_count = match scope {
-            LinuxTaskRetirementScope::Process {
-                tgid,
-                entire_group,
-                current_scheduler,
-            } => super::linux_process::for_each_linux_process_task(
-                &snapshot,
-                tgid,
-                (!entire_group).then_some(current_scheduler),
-                |task| LinuxTaskTable::<LINUX_TASK_LIMIT>::is_live(task),
-                |task| task.tgid,
-                |task| task.scheduler_thread,
-                &mut retire_task,
-            ),
-            LinuxTaskRetirementScope::LaunchDescendants { root_tgid } => snapshot
-                .iter()
-                .copied()
-                .enumerate()
-                .filter(|(_, task)| {
-                    task.tgid != root_tgid && LinuxTaskTable::<LINUX_TASK_LIMIT>::is_live(*task)
-                })
-                .filter(|(slot, task)| retire_task(*slot, *task))
-                .count(),
-        };
+        let mut retired_count = 0usize;
+        for (slot, task) in candidates {
+            if retire_task(slot, task) {
+                retired_count += 1;
+            }
+        }
         let process_empty = match scope {
             LinuxTaskRetirementScope::Process { tgid, .. } => {
                 !runtime.tasks.tasks.iter().copied().any(|task| {
@@ -696,11 +696,11 @@ fn retire_tasks(
 }
 
 fn complete_task_retirements(
-    retired: [Option<LinuxChildExitTransition>; LINUX_TASK_LIMIT],
+    retired: Vec<LinuxChildExitTransition>,
     _retired_count: usize,
     current_scheduler: ThreadId,
 ) {
-    for transition in retired.into_iter().flatten() {
+    for transition in retired {
         let _ = super::linux_futex::remove_task_waiters(
             transition.task.tid,
             transition.task.scheduler_thread,
@@ -780,8 +780,8 @@ pub(crate) fn finish_current_without_el0_return() -> ! {
 pub(crate) fn on_timer_tick(now: u64) {
     #[cfg(target_arch = "aarch64")]
     if crate::kernel_lowlevel::smp::current_cpu_id() == 0 {
-        let expired = with_runtime(|runtime| runtime.tasks.expire_signal_waits(now));
-        for identity in expired.into_iter().flatten() {
+        while let Some(identity) = with_runtime(|runtime| runtime.tasks.expire_one_signal_wait(now))
+        {
             let (tid, scheduler_thread, reason) = identity;
             if !wake_blocked(tid, scheduler_thread, reason) {
                 let _ = with_runtime(|runtime| {
@@ -793,8 +793,7 @@ pub(crate) fn on_timer_tick(now: u64) {
             }
         }
 
-        let expired_sleeps = with_runtime(|runtime| runtime.tasks.expire_sleeps(now));
-        for identity in expired_sleeps.into_iter().flatten() {
+        while let Some(identity) = with_runtime(|runtime| runtime.tasks.expire_one_sleep(now)) {
             let (tid, scheduler_thread, reason) = identity;
             if !wake_blocked(tid, scheduler_thread, reason) {
                 let _ = cancel_sleep(tid, scheduler_thread);
