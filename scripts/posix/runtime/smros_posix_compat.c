@@ -3295,8 +3295,23 @@ static int smros_pthread_private_cond_wake(
     }
     record->wakeups += broadcast ? waiters : 1;
     smros_unlock_pthread_cond_records();
-    /* Let a waiter observe the published token before the signaling thread continues. */
-    (void)sched_yield();
+    if (!broadcast) {
+        /*
+         * Private waiters poll the compatibility token instead of blocking
+         * in libc.  Complete the one-waiter handoff before returning so a
+         * caller cannot publish several signals before any waiter observes
+         * the first token.
+         */
+        for (;;) {
+            smros_lock_pthread_cond_records();
+            int pending = record->wakeups > 0 && record->waiters >= waiters;
+            smros_unlock_pthread_cond_records();
+            if (!pending) {
+                break;
+            }
+            smros_pthread_cond_wait_pause();
+        }
+    }
     return 0;
 }
 

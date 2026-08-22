@@ -3061,6 +3061,85 @@ int main(void) {
                 timeout=3.0,
             )
 
+    def test_smros_posix_compat_condvar_signal_handoffs_one_token(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "cond-signal.c"
+            binary = root / "cond-signal"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
+
+enum { WAITERS = 3 };
+static pthread_cond_t condition;
+static pthread_mutex_t mutex;
+static volatile int started;
+static volatile int woken;
+
+static void *waiter(void *arg) {
+    (void)arg;
+    if (pthread_mutex_lock(&mutex) != 0) return (void *)1;
+    __sync_add_and_fetch(&started, 1);
+    if (pthread_cond_wait(&condition, &mutex) != 0) {
+        pthread_mutex_unlock(&mutex);
+        return (void *)1;
+    }
+    __sync_add_and_fetch(&woken, 1);
+    return pthread_mutex_unlock(&mutex) == 0 ? NULL : (void *)1;
+}
+
+int main(void) {
+    if (pthread_mutex_init(&mutex, NULL) != 0 ||
+            pthread_cond_init(&condition, NULL) != 0) return 1;
+    pthread_t threads[WAITERS];
+    for (int index = 0; index < WAITERS; ++index) {
+        if (pthread_create(&threads[index], NULL, waiter, NULL) != 0) return 2;
+    }
+    for (int spin = 0; spin < 5000 && started < WAITERS; ++spin) usleep(1000);
+    if (started != WAITERS) return 3;
+    if (pthread_mutex_lock(&mutex) != 0 || pthread_mutex_unlock(&mutex) != 0) return 4;
+    int signals = 0;
+    while (woken < WAITERS && signals <= WAITERS) {
+        if (pthread_cond_signal(&condition) != 0) return 5;
+        ++signals;
+        usleep(1000);
+    }
+    for (int index = 0; index < WAITERS; ++index) {
+        void *result = NULL;
+        if (pthread_join(threads[index], &result) != 0 || result != NULL) return 6;
+    }
+    if (signals > WAITERS || woken != WAITERS) return 7;
+    return pthread_cond_destroy(&condition) != 0 ||
+        pthread_mutex_destroy(&mutex) != 0;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
     def test_smros_posix_compat_pshared_errorcheck_trylock_returns_busy(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c")
         with tempfile.TemporaryDirectory() as temporary:
