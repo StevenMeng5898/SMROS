@@ -3297,14 +3297,15 @@ static int smros_pthread_private_cond_wake(
     smros_unlock_pthread_cond_records();
     if (!broadcast) {
         /*
-         * Private waiters poll the compatibility token instead of blocking
-         * in libc.  Complete the one-waiter handoff before returning so a
-         * caller cannot publish several signals before any waiter observes
-         * the first token.
+         * Give a waiter a short opportunity to consume the token so rapid
+         * signal cascades retain one-token pacing.  The handoff is bounded:
+         * pthread_cond_signal may be called while its associated mutex is
+         * held, so waiting indefinitely here can deadlock the awakened waiter
+         * while it tries to reacquire that mutex.
          */
-        for (;;) {
+        for (unsigned int attempt = 0; attempt < 2; ++attempt) {
             smros_lock_pthread_cond_records();
-            int pending = record->wakeups > 0 && record->waiters >= waiters;
+            int pending = record->wakeups > 0;
             smros_unlock_pthread_cond_records();
             if (!pending) {
                 break;
