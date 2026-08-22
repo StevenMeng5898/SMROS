@@ -69,8 +69,13 @@ const PAGE_FRAME_BITS_PER_WORD: usize = 64;
 // before the configured AArch64 RAM limit.
 const DEFAULT_PAGE_FRAME_COUNT: usize = PAGE_FRAME_BITMAP_WORDS * PAGE_FRAME_BITS_PER_WORD;
 
-/// Maximum number of processes supported
-pub const MAX_PROCESSES: usize = 16;
+/// Maximum number of processes supported.
+///
+/// POSIX process-shared stress cases create a parent, a timer thread, and
+/// twenty children concurrently. Keep enough slots for that workload and
+/// ordinary kernel/user processes without making process-table exhaustion the
+/// conformance result.
+pub const MAX_PROCESSES: usize = 64;
 const MAX_DYNAMIC_PROCESS_NAMES: usize = 16;
 const DYNAMIC_PROCESS_NAME_LEN: usize = 32;
 
