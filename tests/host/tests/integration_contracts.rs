@@ -2648,7 +2648,7 @@ fn smros_posix_compat_runtime_tracks_aio_completion_state() {
 }
 
 #[test]
-fn smros_private_condition_wait_pause_avoids_sub_tick_busy_spin() {
+fn smros_private_condition_wait_pause_is_bounded_and_blocking() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let compat = std::fs::read_to_string(
         repository.join("scripts/posix/runtime/smros_posix_compat.c"),
@@ -2665,8 +2665,8 @@ fn smros_private_condition_wait_pause_avoids_sub_tick_busy_spin() {
         .and_then(|(value, _)| value.trim().parse::<u64>().ok())
         .expect("condition wait pause nanoseconds");
     assert!(
-        nanos > 100_000_000,
-        "condition wait fallback must use the blocking sleep path for waiter scalability"
+        (1_000_000..=100_000_000).contains(&nanos),
+        "condition wait fallback must use a bounded blocking sleep interval"
     );
 }
 

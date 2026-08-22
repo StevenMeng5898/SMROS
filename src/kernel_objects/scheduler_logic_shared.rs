@@ -253,8 +253,11 @@ pub(crate) fn scheduler_retired_slot_reuse_action(
     }
 }
 
+const DEFERRED_RETIREMENT_CAPACITY: usize = 1024;
+
 pub(crate) struct DeferredThreadRetirements<const CPU_COUNT: usize> {
-    retired_by_cpu: [core::sync::atomic::AtomicUsize; CPU_COUNT],
+    retired_by_cpu:
+        [[core::sync::atomic::AtomicUsize; DEFERRED_RETIREMENT_CAPACITY]; CPU_COUNT],
 }
 
 impl<const CPU_COUNT: usize> DeferredThreadRetirements<CPU_COUNT> {
@@ -263,8 +266,10 @@ impl<const CPU_COUNT: usize> DeferredThreadRetirements<CPU_COUNT> {
 
     pub(crate) const fn new() -> Self {
         Self {
-            retired_by_cpu: [const { core::sync::atomic::AtomicUsize::new(Self::EMPTY) };
-                CPU_COUNT],
+            retired_by_cpu: [const {
+                [const { core::sync::atomic::AtomicUsize::new(Self::EMPTY) };
+                    DEFERRED_RETIREMENT_CAPACITY]
+            }; CPU_COUNT],
         }
     }
 
@@ -272,50 +277,54 @@ impl<const CPU_COUNT: usize> DeferredThreadRetirements<CPU_COUNT> {
         if cpu_id >= CPU_COUNT || thread == 0 || thread & Self::RECLAIMABLE_BIT != 0 {
             return false;
         }
-        self.retired_by_cpu[cpu_id]
-            .compare_exchange(
+        self.retired_by_cpu[cpu_id].iter().any(|slot| {
+            slot.compare_exchange(
                 Self::EMPTY,
                 thread,
                 core::sync::atomic::Ordering::Release,
                 core::sync::atomic::Ordering::Relaxed,
             )
             .is_ok()
+        })
     }
 
     pub(crate) fn confirm_after_switch(&self, cpu_id: usize, current_thread: usize) -> bool {
-        let slot = match self.retired_by_cpu.get(cpu_id) {
-            Some(slot) => slot,
-            None => return false,
-        };
-        let pending = slot.load(core::sync::atomic::Ordering::Acquire);
-        if pending == Self::EMPTY
-            || pending & Self::RECLAIMABLE_BIT != 0
-            || pending == current_thread
-        {
+        let Some(retirements) = self.retired_by_cpu.get(cpu_id) else {
             return false;
-        }
-        slot.compare_exchange(
-            pending,
-            pending | Self::RECLAIMABLE_BIT,
-            core::sync::atomic::Ordering::AcqRel,
-            core::sync::atomic::Ordering::Acquire,
-        )
-        .is_ok()
+        };
+        retirements.iter().any(|slot| {
+            let pending = slot.load(core::sync::atomic::Ordering::Acquire);
+            if pending == Self::EMPTY
+                || pending & Self::RECLAIMABLE_BIT != 0
+                || pending == current_thread
+            {
+                return false;
+            }
+            slot.compare_exchange(
+                pending,
+                pending | Self::RECLAIMABLE_BIT,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        })
     }
 
     pub(crate) fn take_reclaimable(&self, cpu_id: usize) -> Option<usize> {
-        let slot = self.retired_by_cpu.get(cpu_id)?;
-        let reclaimable = slot.load(core::sync::atomic::Ordering::Acquire);
-        if reclaimable == Self::EMPTY || reclaimable & Self::RECLAIMABLE_BIT == 0 {
-            return None;
-        }
-        slot.compare_exchange(
-            reclaimable,
-            Self::EMPTY,
-            core::sync::atomic::Ordering::AcqRel,
-            core::sync::atomic::Ordering::Acquire,
-        )
-        .ok()
-        .map(|encoded| encoded & !Self::RECLAIMABLE_BIT)
+        let retirements = self.retired_by_cpu.get(cpu_id)?;
+        retirements.iter().find_map(|slot| {
+            let reclaimable = slot.load(core::sync::atomic::Ordering::Acquire);
+            if reclaimable == Self::EMPTY || reclaimable & Self::RECLAIMABLE_BIT == 0 {
+                return None;
+            }
+            slot.compare_exchange(
+                reclaimable,
+                Self::EMPTY,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            )
+            .ok()
+            .map(|encoded| encoded & !Self::RECLAIMABLE_BIT)
+        })
     }
 }

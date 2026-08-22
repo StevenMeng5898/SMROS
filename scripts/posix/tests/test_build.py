@@ -3140,6 +3140,106 @@ int main(void) {
                 timeout=5.0,
             )
 
+    def test_smros_posix_compat_condvar_signal_cascade_stays_within_budget(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "cond-cascade.c"
+            binary = root / "cond-cascade"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <unistd.h>
+
+enum { ROUNDS = 6, WAITERS = 20 };
+
+static pthread_cond_t condition;
+static pthread_mutex_t mutex;
+static volatile int started;
+static volatile int woken;
+
+static void *waiter(void *arg) {
+    (void)arg;
+    if (pthread_mutex_lock(&mutex) != 0) return (void *)1;
+    __sync_add_and_fetch(&started, 1);
+    if (pthread_cond_wait(&condition, &mutex) != 0) {
+        pthread_mutex_unlock(&mutex);
+        return (void *)1;
+    }
+    __sync_add_and_fetch(&woken, 1);
+    if (pthread_cond_signal(&condition) != 0) {
+        pthread_mutex_unlock(&mutex);
+        return (void *)1;
+    }
+    return pthread_mutex_unlock(&mutex) == 0 ? NULL : (void *)1;
+}
+
+int main(void) {
+    for (int round = 0; round < ROUNDS; ++round) {
+        started = 0;
+        woken = 0;
+        if (pthread_mutex_init(&mutex, NULL) != 0 ||
+                pthread_cond_init(&condition, NULL) != 0) return 2;
+
+        pthread_t threads[WAITERS];
+        for (int index = 0; index < WAITERS; ++index) {
+            if (pthread_create(&threads[index], NULL, waiter, NULL) != 0) return 3;
+        }
+        for (int spin = 0; spin < 5000 && started < WAITERS; ++spin) {
+            usleep(1000);
+        }
+        if (started != WAITERS) return 4;
+
+        if (pthread_mutex_lock(&mutex) != 0) return 5;
+        if (pthread_cond_signal(&condition) != 0) return 6;
+        if (pthread_mutex_unlock(&mutex) != 0) return 7;
+
+        for (int index = 0; index < WAITERS; ++index) {
+            void *result = NULL;
+            if (pthread_join(threads[index], &result) != 0 || result != NULL) {
+                return 8;
+            }
+        }
+        if (woken != WAITERS) return 9;
+        if (pthread_cond_destroy(&condition) != 0 ||
+                pthread_mutex_destroy(&mutex) != 0) return 10;
+    }
+    return 0;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            try:
+                result = subprocess.run(
+                    [str(binary)],
+                    env={**os.environ, "LD_PRELOAD": str(preload)},
+                    capture_output=True,
+                    text=True,
+                    timeout=8.0,
+                )
+            except subprocess.TimeoutExpired as error:
+                self.fail(f"condition signal cascade exceeded 8-second budget: {error}")
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"condition signal cascade failed: {result.stderr}",
+            )
+
     def test_smros_posix_compat_pshared_errorcheck_trylock_returns_busy(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c")
         with tempfile.TemporaryDirectory() as temporary:

@@ -7844,6 +7844,20 @@ mod scheduler_logic {
     }
 
     #[test]
+    fn deferred_retirements_accept_multiple_consecutive_exits_on_one_cpu() {
+        let retirements = DeferredThreadRetirements::<1>::new();
+
+        assert!(retirements.record_before_switch(0, 3));
+        assert!(retirements.record_before_switch(0, 4));
+
+        assert!(retirements.confirm_after_switch(0, 5));
+        assert_eq!(retirements.take_reclaimable(0), Some(3));
+        assert!(retirements.confirm_after_switch(0, 5));
+        assert_eq!(retirements.take_reclaimable(0), Some(4));
+        assert_eq!(retirements.take_reclaimable(0), None);
+    }
+
+    #[test]
     fn terminated_slot_reuse_rejects_inconsistent_stack_metadata() {
         for (has_stack_pointer, has_stack_size) in [(true, false), (false, true)] {
             let malformed = TestSlot {
