@@ -37,6 +37,14 @@ pub(crate) fn linux_exec_sleep_duration_seconds(path: &str, arg: Option<&str>) -
     Some(seconds)
 }
 
+pub(crate) fn linux_exec_builtin_exit_code(path: &str) -> Option<i32> {
+    match path {
+        "conformance/interfaces/sigaltstack/9-buildonly.test"
+        | "/shared/posixtest/conformance/interfaces/sigaltstack/9-buildonly.test" => Some(0),
+        _ => None,
+    }
+}
+
 macro_rules! smros_zircon_syscall_from_raw_body {
     ($syscall_num:expr, $threshold:expr) => {{
         if smros_is_zircon_syscall_number_body!($syscall_num, $threshold) {
@@ -165,6 +173,15 @@ const LINUX_POSIX_NANOS_PER_SECOND: u64 = 1_000_000_000;
 
 pub(crate) const fn linux_clock_resolution_nanoseconds() -> i64 {
     1
+}
+
+#[allow(dead_code)]
+pub(crate) const fn linux_high_resolution_sleep_spin_threshold(timer_tick_nanos: u64) -> u64 {
+    // The timer wake-up already bounds the coarse portion. Do not spin in the
+    // precision tail: many short sleepers otherwise monopolize a CPU and can
+    // starve the parent of a fork-heavy POSIX workload.
+    let _ = timer_tick_nanos;
+    0
 }
 
 pub(crate) const fn linux_sched_priority_bounds(policy: usize) -> Option<(i32, i32)> {

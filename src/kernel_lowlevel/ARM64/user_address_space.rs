@@ -12,6 +12,7 @@ type TableAllocationFailureHook = fn(usize) -> bool;
 struct PageFrameBackend {
     allocation_count: usize,
     failure_hook: Option<TableAllocationFailureHook>,
+    defer_user_updates: bool,
 }
 
 impl PageFrameBackend {
@@ -19,17 +20,19 @@ impl PageFrameBackend {
         Self {
             allocation_count: 0,
             failure_hook,
+            defer_user_updates: false,
         }
     }
 }
 
 impl Aarch64AddressSpaceBackend for PageFrameBackend {
     fn allocate_table(&mut self) -> Result<u64, Aarch64AddressSpaceCoreError> {
-        let pfn = PageFrameAllocator::alloc().ok_or(Aarch64AddressSpaceCoreError::OutOfMemory)?;
+        let pfn = PageFrameAllocator::alloc_table()
+            .ok_or(Aarch64AddressSpaceCoreError::OutOfMemory)?;
         let address = match PageFrameAllocator::pfn_address(pfn) {
             Some(address) => address,
             None => {
-                PageFrameAllocator::free(pfn);
+                PageFrameAllocator::release_table(pfn);
                 return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
             }
         };
@@ -37,14 +40,14 @@ impl Aarch64AddressSpaceBackend for PageFrameBackend {
         let allocation = self.allocation_count;
         self.allocation_count = self.allocation_count.saturating_add(1);
         if self.failure_hook.is_some_and(|hook| hook(allocation)) {
-            PageFrameAllocator::free(pfn);
+            PageFrameAllocator::release_table(pfn);
             return Err(Aarch64AddressSpaceCoreError::OutOfMemory);
         }
         Ok(pfn)
     }
 
     fn free_table(&mut self, pfn: u64) {
-        PageFrameAllocator::free(pfn);
+        PageFrameAllocator::release_table(pfn);
     }
 
     fn pfn_address(&self, pfn: u64) -> Option<usize> {
@@ -83,8 +86,57 @@ impl Aarch64AddressSpaceBackend for PageFrameBackend {
         true
     }
 
+    #[cfg(not(target_arch = "aarch64"))]
+    fn copy_table_from(&mut self, source: &Self, source_pfn: u64, destination_pfn: u64) -> bool {
+        let Some(source_address) = source.pfn_address(source_pfn) else {
+            return false;
+        };
+        let Some(destination_address) = self.pfn_address(destination_pfn) else {
+            return false;
+        };
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                source_address as *const u8,
+                destination_address as *mut u8,
+                crate::kernel_lowlevel::aarch64_vm_logic_shared::AARCH64_PAGE_SIZE,
+            );
+        }
+        true
+    }
+
+    fn copy_table_within(&mut self, source_pfn: u64, destination_pfn: u64) -> bool {
+        let Some(source_address) = self.pfn_address(source_pfn) else {
+            return false;
+        };
+        let Some(destination_address) = self.pfn_address(destination_pfn) else {
+            return false;
+        };
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                source_address as *const u8,
+                destination_address as *mut u8,
+                crate::kernel_lowlevel::aarch64_vm_logic_shared::AARCH64_PAGE_SIZE,
+            );
+        }
+        true
+    }
+
+    fn retain_table(&mut self, pfn: u64) -> bool {
+        PageFrameAllocator::retain_table(pfn)
+    }
+
+    fn release_table(&mut self, pfn: u64) {
+        PageFrameAllocator::release_table(pfn);
+    }
+
+    fn table_is_shared(&self, pfn: u64) -> bool {
+        PageFrameAllocator::table_is_shared(pfn)
+    }
+
     fn publish_user_mapping(&mut self, _vaddr: usize) {
-        cpu::complete_user_page_update();
+        if !self.defer_user_updates {
+            cpu::complete_user_page_update();
+        }
     }
 
     fn break_user_mapping(&mut self, vaddr: usize) {
@@ -93,6 +145,14 @@ impl Aarch64AddressSpaceBackend for PageFrameBackend {
 
     fn complete_user_mapping(&mut self) {
         cpu::complete_user_page_update();
+    }
+
+    fn begin_deferred_user_updates(&mut self) {
+        self.defer_user_updates = true;
+    }
+
+    fn end_deferred_user_updates(&mut self) {
+        self.defer_user_updates = false;
     }
 }
 
@@ -106,9 +166,17 @@ impl Aarch64AddressSpace {
     }
 
     pub(crate) fn new_for_fork(
+        parent: &Self,
         failure_hook: TableAllocationFailureHook,
     ) -> Result<Self, AddressSpaceError> {
-        Self::new_with_kernel_map_backend(PageFrameBackend::new(Some(failure_hook)))
+        let mut address_space = Aarch64AddressSpaceCore::new(PageFrameBackend::new(Some(failure_hook)))
+            .map_err(map_core_error)?;
+        address_space
+            .clone_shared_mappings_from(&parent.core)
+            .map_err(map_core_error)?;
+        Ok(Self {
+            core: address_space,
+        })
     }
 
     fn new_with_kernel_map_backend(backend: PageFrameBackend) -> Result<Self, AddressSpaceError> {
@@ -151,6 +219,14 @@ impl Aarch64AddressSpace {
         self.core.table_page_count()
     }
 
+    pub(crate) fn begin_deferred_user_updates(&mut self) {
+        self.core.begin_deferred_user_updates();
+    }
+
+    pub(crate) fn end_deferred_user_updates(&mut self) {
+        self.core.end_deferred_user_updates();
+    }
+
     pub fn map_user_page(
         &mut self,
         vaddr: usize,
@@ -161,6 +237,18 @@ impl Aarch64AddressSpace {
     ) -> Result<(), AddressSpaceError> {
         self.core
             .map_user_page(vaddr, pfn, readable, writable, executable)
+            .map_err(map_core_error)
+    }
+
+    pub(crate) fn map_user_pages_with_protection(
+        &mut self,
+        vaddr: usize,
+        page_count: usize,
+        pfn_at: impl FnMut(usize) -> u64,
+        protection_at: impl FnMut(usize) -> (bool, bool, bool),
+    ) -> Result<(), AddressSpaceError> {
+        self.core
+            .map_user_pages_with_protection(vaddr, page_count, pfn_at, protection_at)
             .map_err(map_core_error)
     }
 

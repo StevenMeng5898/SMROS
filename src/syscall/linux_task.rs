@@ -6,6 +6,7 @@ use crate::kernel_objects::scheduler;
 use super::SysError;
 
 include!("linux_task_logic_shared.rs");
+
 include!("linux_runtime_lock_shared.rs");
 
 pub(crate) const LINUX_TASK_LIMIT: usize = thread::MAX_THREADS;
@@ -728,8 +729,8 @@ fn complete_task_retirements(
             );
         }
         if transition.task.scheduler_thread != current_scheduler.0 {
-            let _ =
-                scheduler::scheduler().terminate_thread(ThreadId(transition.task.scheduler_thread));
+            let _ = scheduler::scheduler()
+                .terminate_thread(ThreadId(transition.task.scheduler_thread));
         }
     }
 }

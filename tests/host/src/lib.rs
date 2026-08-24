@@ -16,6 +16,47 @@ mod alloc {
     }
 }
 
+mod linux_shm_cache_logic {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/linux_shm_cache_logic_shared.rs"
+    ));
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Record {
+        path: String,
+    }
+
+    #[test]
+    fn sorted_path_search_scales_to_many_shared_memory_names() {
+        let mut records = Vec::new();
+        for index in (0..1_000).rev() {
+            let path = format!("/dev/shm/object-{index:04}");
+            let insertion = sorted_path_search(&records, &path, |record: &Record| {
+                record.path.as_str()
+            })
+            .expect_err("new shared-memory names must not already be present");
+            records.insert(insertion, Record { path });
+        }
+
+        for (index, record) in records.iter().enumerate() {
+            assert_eq!(record.path, format!("/dev/shm/object-{index:04}"));
+            assert_eq!(
+                sorted_path_search(&records, &record.path, |record: &Record| {
+                    record.path.as_str()
+                }),
+                Ok(index)
+            );
+        }
+
+        let missing = "/dev/shm/object-0500-missing";
+        assert_eq!(
+            sorted_path_search(&records, missing, |record: &Record| record.path.as_str()),
+            Err(501)
+        );
+    }
+}
+
 #[cfg(test)]
 mod fxfs {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -792,6 +833,15 @@ mod syscall_logic {
     }
 
     #[test]
+    fn high_resolution_sleep_spin_window_is_bounded_for_many_sleepers() {
+        assert_eq!(linux_high_resolution_sleep_spin_threshold(10_000_000), 0);
+        assert_eq!(
+            linux_high_resolution_sleep_spin_threshold(u64::MAX),
+            0
+        );
+    }
+
+    #[test]
     fn sched_policy_priority_bounds_match_linux_realtime_rules() {
         assert_eq!(linux_sched_priority_bounds(0), Some((0, 0)));
         assert_eq!(linux_sched_priority_bounds(1), Some((1, 99)));
@@ -1379,6 +1429,23 @@ mod syscall_logic {
             linux_exec_sleep_duration_seconds("/bin/sleep", Some("18446744073709551616")),
             None
         );
+    }
+
+    #[test]
+    fn sigaltstack_exec_helper_is_a_known_builtin() {
+        assert_eq!(
+            linux_exec_builtin_exit_code(
+                "conformance/interfaces/sigaltstack/9-buildonly.test"
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            linux_exec_builtin_exit_code(
+                "/shared/posixtest/conformance/interfaces/sigaltstack/9-buildonly.test"
+            ),
+            Some(0)
+        );
+        assert_eq!(linux_exec_builtin_exit_code("/bin/true"), None);
     }
 }
 
@@ -2310,6 +2377,23 @@ mod linux_task_logic {
             expected_pending.next_realtime_sequence
         );
 
+        let mut handler_state = LinuxTaskSignalState::new();
+        let frame = LinuxSignalFrame {
+            regs: [0; 32],
+            return_pc: 0x9000,
+            previous_mask: 0,
+            user_sp: 0x8000,
+            previous_stack_flags: 0,
+            restart: None,
+        };
+        let frame_depth = handler_state.push_frame(frame).unwrap();
+        assert!(handler_state.defer_timer_notification(frame_depth, Some((42, 7))));
+        assert!(handler_state.request_sigreturn());
+        let (_, timer_identity) = handler_state
+            .take_requested_frame_with_timer_notification()
+            .expect("requested handler frame");
+        assert_eq!(timer_identity, Some((42, 7)));
+
         let mut state = LinuxTaskSignalState::new();
         state.mask = linux_signal_bit(12);
         state.alt_stack = LinuxSignalStack {
@@ -3071,6 +3155,26 @@ mod linux_task_logic {
             Some((child.tid, 8, LinuxBlockReason::Sleep))
         );
         assert_eq!(tasks.expire_one_sleep(51), None);
+    }
+
+    #[test]
+    fn linux_sleep_timer_expiry_resumes_scan_after_last_expired_slot() {
+        let mut tasks = LinuxTaskTable::<4>::new();
+        tasks.register_root(7).unwrap();
+        let first = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
+        let second = tasks.reserve_child(LINUX_ROOT_TID, 9).unwrap();
+        assert!(tasks.publish(first));
+        assert!(tasks.publish(second));
+        assert!(tasks.install_sleep(first.tid, 8, LinuxSleepWait::waiting(50)));
+        assert!(tasks.install_sleep(second.tid, 9, LinuxSleepWait::waiting(50)));
+        assert!(tasks.block(first.tid, 8, LinuxBlockReason::Sleep));
+        assert!(tasks.block(second.tid, 9, LinuxBlockReason::Sleep));
+
+        assert_eq!(tasks.expire_one_sleep(50), Some((first.tid, 8, LinuxBlockReason::Sleep)));
+        assert_eq!(tasks.sleep_expiry_cursor, first.slot + 1);
+        assert!(tasks.wake(first.tid, 8));
+        assert_eq!(tasks.expire_one_sleep(50), Some((second.tid, 9, LinuxBlockReason::Sleep)));
+        assert_eq!(tasks.sleep_expiry_cursor, second.slot + 1);
     }
 
     #[test]
@@ -5614,6 +5718,116 @@ mod linux_process_memory_logic {
         assert_eq!(pages.get(7, 0).unwrap().references, 2);
         assert_eq!(pages.release(7, 0), None);
         assert_eq!(pages.release(7, 0), Some(41));
+    }
+
+    #[test]
+    fn shared_page_record_merge_preserves_order_and_accumulates_references() {
+        let existing = [
+            LinuxSharedPageRecord {
+                object_id: 7,
+                page_index: 0,
+                pfn: 41,
+                references: 2,
+                named: true,
+            },
+            LinuxSharedPageRecord {
+                object_id: 9,
+                page_index: 3,
+                pfn: 43,
+                references: 1,
+                named: false,
+            },
+        ];
+        let additions = [
+            LinuxSharedPageRecord {
+                object_id: 7,
+                page_index: 0,
+                pfn: 41,
+                references: 3,
+                named: true,
+            },
+            LinuxSharedPageRecord {
+                object_id: 8,
+                page_index: 2,
+                pfn: 42,
+                references: 1,
+                named: true,
+            },
+        ];
+
+        let merged = linux_merge_shared_page_records(&existing, &additions)
+            .expect("sorted shared page merge");
+        assert_eq!(
+            merged,
+            vec![
+                LinuxSharedPageRecord {
+                    object_id: 7,
+                    page_index: 0,
+                    pfn: 41,
+                    references: 5,
+                    named: true,
+                },
+                LinuxSharedPageRecord {
+                    object_id: 8,
+                    page_index: 2,
+                    pfn: 42,
+                    references: 1,
+                    named: true,
+                },
+                LinuxSharedPageRecord {
+                    object_id: 9,
+                    page_index: 3,
+                    pfn: 43,
+                    references: 1,
+                    named: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn shared_page_record_in_place_merge_avoids_copying_existing_table() {
+        let mut existing = Vec::with_capacity(4);
+        existing.extend([
+            LinuxSharedPageRecord {
+                object_id: 7,
+                page_index: 0,
+                pfn: 41,
+                references: 2,
+                named: true,
+            },
+            LinuxSharedPageRecord {
+                object_id: 9,
+                page_index: 3,
+                pfn: 43,
+                references: 1,
+                named: false,
+            },
+        ]);
+        let original_ptr = existing.as_ptr();
+        let additions = [
+            LinuxSharedPageRecord {
+                object_id: 7,
+                page_index: 0,
+                pfn: 41,
+                references: 3,
+                named: true,
+            },
+            LinuxSharedPageRecord {
+                object_id: 8,
+                page_index: 2,
+                pfn: 42,
+                references: 1,
+                named: true,
+            },
+        ];
+
+        linux_merge_shared_page_records_in_place(&mut existing, &additions)
+            .expect("sorted shared page merge");
+        assert_eq!(existing.as_ptr(), original_ptr);
+        assert_eq!(existing[0].references, 5);
+        assert_eq!(existing[1].object_id, 8);
+        assert_eq!(existing[2].object_id, 9);
     }
 
     #[test]
@@ -8838,6 +9052,139 @@ mod aarch64_vm_logic {
             address_space.translate_user(&allocator, start + AARCH64_PAGE_SIZE, false),
             None
         );
+    }
+
+    #[test]
+    fn three_level_batch_mapping_preserves_each_page_and_permissions() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let mut address_space = Aarch64AddressSpaceModel::new(&mut allocator).expect("root");
+        let start = 0x1000_0000;
+        let pages = [0x9000, 0x9001, 0x9002];
+        let permissions = [(true, true, false), (true, false, false), (true, false, true)];
+
+        address_space
+            .map_user_pages_with_protection(&mut allocator, start, &pages, |index| {
+                permissions[index]
+            })
+            .expect("batch mapping");
+
+        assert_eq!(
+            address_space.translate_user(&allocator, start, true),
+            Some(0x9000_000)
+        );
+        assert_eq!(
+            address_space.translate_user(&allocator, start + AARCH64_PAGE_SIZE, true),
+            None
+        );
+        assert_eq!(
+            address_space.translate_user(&allocator, start + 2 * AARCH64_PAGE_SIZE, false),
+            Some(0x9002_000)
+        );
+    }
+
+    #[test]
+    fn three_level_mapping_clone_preserves_user_pages_with_independent_tables() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let mut source = Aarch64AddressSpaceModel::new(&mut allocator).expect("source root");
+        source
+            .map_user_region(&mut allocator, 0x1000_0000, 0x9000, 2, true, true, false)
+            .expect("source mapping");
+        let mut child = Aarch64AddressSpaceModel::new(&mut allocator).expect("child root");
+
+        child
+            .clone_mappings_from(&source)
+            .expect("clone mappings");
+        assert_ne!(source.root_pfn(), child.root_pfn());
+        assert_eq!(
+            child.translate_user(&allocator, 0x1000_0000, true),
+            Some(0x9000_000)
+        );
+        source
+            .unmap_user_page(&mut allocator, 0x1000_0000)
+            .expect("source unmap");
+        assert_eq!(
+            child.translate_user(&allocator, 0x1000_0000, true),
+            Some(0x9000_000)
+        );
+    }
+
+    #[test]
+    fn three_level_shared_mapping_clone_detaches_tables_before_mutation() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let mut source = Aarch64AddressSpaceModel::new(&mut allocator).expect("source root");
+        source
+            .map_user_region(&mut allocator, 0x1000_0000, 0x9000, 2, true, true, false)
+            .expect("source mapping");
+        let mut child = Aarch64AddressSpaceModel::new(&mut allocator).expect("child root");
+
+        child
+            .clone_shared_mappings_from(&source)
+            .expect("share mappings");
+        assert_eq!(
+            child.translate_user(&allocator, 0x1000_0000, true),
+            Some(0x9000_000)
+        );
+        child
+            .unmap_user_page(&mut allocator, 0x1000_0000)
+            .expect("child unmap");
+        assert_eq!(
+            source.translate_user(&allocator, 0x1000_0000, true),
+            Some(0x9000_000)
+        );
+        assert_eq!(
+            child.translate_user(&allocator, 0x1000_0000, true),
+            None
+        );
+    }
+
+    #[test]
+    fn shared_mapping_clone_rolls_back_references_after_a_later_root_failure() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let mut source = Aarch64AddressSpaceModel::new(&mut allocator).expect("source root");
+        source
+            .map_user_page(&mut allocator, 0x1000_0000, 0x9000, true, true, false)
+            .expect("user mapping");
+        source
+            .map_supervisor_ram_range(0x4000_0000, 0x2_00000)
+            .expect("second root mapping");
+        let source_root = source.root_pfn();
+        allocator.set_root_descriptor(source_root, 1, aarch64_table_descriptor(0xdead));
+
+        let baseline = allocator.allocated_pages();
+        let mut child = Aarch64AddressSpaceModel::new(&mut allocator).expect("child root");
+        assert!(child.clone_shared_mappings_from(&source).is_err());
+        drop(child);
+        drop(source);
+        assert_eq!(allocator.allocated_pages(), 0);
+        assert!(baseline > 0);
+    }
+
+    #[test]
+    fn shared_table_detach_rolls_back_descendant_references_after_a_later_failure() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let mut source = Aarch64AddressSpaceModel::new(&mut allocator).expect("source root");
+        source
+            .map_user_page(&mut allocator, 0x1000_0000, 0x9000, true, true, false)
+            .expect("first user mapping");
+        source
+            .map_user_page(&mut allocator, 0x1020_0000, 0x9001, true, true, false)
+            .expect("second user mapping");
+        let source_root = source.root_pfn();
+
+        let mut child = Aarch64AddressSpaceModel::new(&mut allocator).expect("child root");
+        child
+            .clone_shared_mappings_from(&source)
+            .expect("share mappings");
+        allocator.set_level_one_descriptor(
+            source_root,
+            0x1020_0000,
+            aarch64_table_descriptor(0xdead),
+        );
+
+        assert!(child.unmap_user_page(&mut allocator, 0x1000_0000).is_err());
+        drop(child);
+        drop(source);
+        assert_eq!(allocator.allocated_pages(), 0);
     }
 
     #[test]

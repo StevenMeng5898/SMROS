@@ -680,6 +680,7 @@ impl Aarch64LinuxForkOps {
             clear_child_tid,
         }
     }
+
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -719,10 +720,9 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
         &mut self,
         scheduler_thread: &Self::SchedulerThread,
     ) -> Result<(Self::Parent, Self::Task), Self::Error> {
-        Ok((
-            current()?,
-            linux_task::reserve_fork_task(*scheduler_thread)?,
-        ))
+        let parent = current()?;
+        let task = linux_task::reserve_fork_task(*scheduler_thread)?;
+        Ok((parent, task))
     }
 
     fn acquire_process(
@@ -818,14 +818,6 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
             crate::kernel_lowlevel::cpu::read_user_tls(),
             memory.root_paddr,
             |frame| frame.regs[0] = 0,
-        );
-        crate::kobj_debug!(
-            "fork",
-            "configure child pid={} return_pc={:#x} pstate={:#x} root={:#x}",
-            process.pid,
-            child_context.return_pc,
-            child_context.pstate,
-            child_context.root_paddr
         );
         let configured = scheduler::scheduler()
             .get_thread_mut(*scheduler_thread)
@@ -1005,7 +997,7 @@ pub(crate) fn run_fork_transaction(
     set_child_tid: Option<usize>,
     clear_child_tid: usize,
 ) -> Result<usize, SysError> {
-    run_linux_fork_transaction(
+    let result = run_linux_fork_transaction(
         LinuxForkReservation::new(Aarch64LinuxForkOps::new(
             context,
             namespace_flags,
@@ -1014,7 +1006,8 @@ pub(crate) fn run_fork_transaction(
             clear_child_tid,
         )),
         fork_failpoint,
-    )
+    );
+    result
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -1038,13 +1031,6 @@ pub(crate) extern "C" fn linux_fork_child_entry() -> ! {
             crate::kernel_lowlevel::cpu::wait_for_interrupt();
         }
     };
-    crate::kobj_debug!(
-        "fork",
-        "enter child return_pc={:#x} pstate={:#x} root={:#x}",
-        start.return_pc,
-        start.pstate,
-        start.root_paddr
-    );
     unsafe { thread::start_linux_process_child(&start as *const Aarch64ProcessStart as *const u8) }
 }
 

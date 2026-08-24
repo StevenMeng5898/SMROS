@@ -18,6 +18,105 @@ fn fxfs_cursor_identity_drives_record_lock_size_lookup() {
 }
 
 #[test]
+fn fxfs_directory_lookup_uses_ordered_entries() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS implementation");
+
+    assert!(
+        fxfs.contains("fn sort_dirents(&mut self)"),
+        "FxFS must maintain an ordered directory-entry index"
+    );
+    let lookup_start = fxfs
+        .find("fn find_dirent_index(&self, parent_id: u64, name: &str)")
+        .expect("FxFS directory lookup");
+    let lookup = braced_body(&fxfs[lookup_start..]);
+    assert!(
+        lookup.contains("binary_search_by"),
+        "FxFS directory lookup must use binary search"
+    );
+}
+
+#[test]
+fn fxfs_object_lookup_uses_ordered_ids() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS implementation");
+
+    assert!(
+        fxfs.contains("fn sort_objects(&mut self)"),
+        "FxFS must maintain an ordered object-id index"
+    );
+    let lookup_start = fxfs
+        .find("fn find_object_index(&self, object_id: u64)")
+        .expect("FxFS object lookup");
+    let lookup = braced_body(&fxfs[lookup_start..]);
+    assert!(
+        lookup.contains("binary_search_by_key"),
+        "FxFS object lookup must use binary search"
+    );
+}
+
+#[test]
+fn fxfs_shared_memory_mutations_defer_durable_persistence() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS implementation");
+
+    assert!(
+        fxfs.contains("fn is_ephemeral_shm_path(path: &str) -> bool"),
+        "FxFS must identify POSIX shared-memory paths as ephemeral"
+    );
+    let write_start = fxfs.find("fn write_file(&mut self, path: &str").expect("write_file");
+    let write = braced_body(&fxfs[write_start..]);
+    assert!(
+        write.contains("!is_ephemeral_shm_path(path)"),
+        "shared-memory writes must not synchronously persist the full image"
+    );
+    let attrs_start = fxfs
+        .find("fn set_attrs(\n        &mut self,")
+        .expect("set_attrs");
+    let attrs = braced_body(&fxfs[attrs_start..]);
+    assert!(
+        attrs.contains("!is_ephemeral_shm_path(path)"),
+        "shared-memory attribute changes must not synchronously persist the full image"
+    );
+}
+
+#[test]
+fn linux_fd_allocation_keeps_a_per_process_hint() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    assert!(
+        syscall.contains("next_fd: usize,"),
+        "Linux process resources must retain the next descriptor hint"
+    );
+    let alloc_start = syscall
+        .find("fn alloc_fd_for_description(")
+        .expect("Linux descriptor allocation");
+    let alloc = braced_body(&syscall[alloc_start..]);
+    assert!(
+        alloc.contains("resources.next_fd"),
+        "descriptor allocation must use the per-process hint"
+    );
+}
+
+#[test]
+fn linux_shm_open_reuses_live_open_description_handles() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+
+    assert!(syscall.contains("linux_shm_cached_handle"));
+    assert!(syscall.contains("alloc_fd_for_description"));
+    let open_start = syscall.find("pub fn sys_openat(").expect("openat");
+    let open = braced_body(&syscall[open_start..]);
+    assert!(open.contains("cached_handle"));
+}
+
+#[test]
 fn posix_event_path_has_no_unframed_debug_serial_writers() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let sources = [
@@ -1283,6 +1382,54 @@ fn linux_fork_maps_shared_cow_pages_without_write_permission() {
     assert!(
         map_body.contains("linux_page_protection_for_backing"),
         "fork child mappings must clear write permission for shared COW backings"
+    );
+}
+
+#[test]
+fn fork_cow_promotion_skips_already_promoted_address_spaces() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read Linux process memory runtime");
+    let start = memory
+        .find("fn promote_private_fork_pages(")
+        .expect("fork COW promotion helper");
+    let body = braced_body(&memory[start..]);
+    let no_private_pages = body
+        .find("private_page_count == 0")
+        .expect("already-promoted fast path");
+    let page_collection = body
+        .find("let mut private_pfns = Vec::new()")
+        .expect("private page collection");
+    assert!(no_private_pages < page_collection);
+}
+
+#[test]
+fn fork_cow_promotion_includes_initial_stack_pages() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read Linux process memory runtime");
+    let start = memory
+        .find("fn promote_private_fork_pages(")
+        .expect("fork COW promotion helper");
+    let body = braced_body(&memory[start..]);
+    assert!(
+        !body.contains("initial_stack.is_some_and"),
+        "fork COW promotion must include initial stack pages"
+    );
+}
+
+#[test]
+fn fork_address_space_mapping_uses_deferred_user_updates() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let memory = std::fs::read_to_string(repository.join("src/syscall/linux_process_memory.rs"))
+        .expect("read Linux process memory runtime");
+    let start = memory
+        .find("pub(crate) fn clone_for_fork(")
+        .expect("fork address-space clone");
+    let body = braced_body(&memory[start..]);
+    assert!(
+        body.contains("address_space.begin_deferred_user_updates()"),
+        "fork child mappings must defer TLB publication until the address space is active"
     );
 }
 
@@ -3364,6 +3511,60 @@ fn scheduler_reclaims_thread_stacks_only_after_a_confirmed_context_switch() {
 }
 
 #[test]
+fn round_robin_scheduler_uses_ready_bitset_for_large_thread_sets() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let scheduler = std::fs::read_to_string(repository.join("src/kernel_objects/scheduler.rs"))
+        .expect("read scheduler");
+
+    assert!(scheduler.contains("ready_threads"));
+    assert!(scheduler.contains("ready_priority_counts"));
+    assert!(scheduler.contains("fn visit_ready_threads<"));
+    let picker_start = scheduler
+        .find("fn pick_round_robin(")
+        .expect("round-robin picker");
+    let picker = braced_body(&scheduler[picker_start..]);
+    assert!(picker.contains("visit_ready_threads"));
+    assert!(picker.contains("highest_ready_priority"));
+    assert!(!picker.contains("for attempts in 0..scan_limit"));
+}
+
+#[test]
+fn scheduler_tracks_ready_priority_by_cpu_for_bound_cascades() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let scheduler = std::fs::read_to_string(repository.join("src/kernel_objects/scheduler.rs"))
+        .expect("read scheduler");
+
+    assert!(scheduler.contains("ready_priority_counts_by_cpu"));
+    let set_ready_start = scheduler
+        .find("fn set_ready_bit(")
+        .expect("ready bit update helper");
+    let set_ready = braced_body(&scheduler[set_ready_start..]);
+    assert!(set_ready.contains("ready_priority_counts_by_cpu"));
+    let highest_start = scheduler
+        .find("fn highest_ready_priority(")
+        .expect("highest ready priority helper");
+    let highest = braced_body(&scheduler[highest_start..]);
+    assert!(highest.contains("ready_priority_counts_by_cpu"));
+}
+
+#[test]
+fn scheduler_repairs_ready_index_before_picking_after_external_state_changes() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let scheduler = std::fs::read_to_string(repository.join("src/kernel_objects/scheduler.rs"))
+        .expect("read scheduler");
+
+    assert!(
+        scheduler.contains("fn rebuild_ready_index(&mut self)"),
+        "scheduler must repair stale ready bits before selecting a task"
+    );
+    let picker = scheduler
+        .find("fn schedule_next_filtered(")
+        .expect("scheduler picker");
+    let picker = braced_body(&scheduler[picker..]);
+    assert!(picker.contains("self.rebuild_ready_index();"));
+}
+
+#[test]
 fn linux_child_exit_clears_tid_and_uses_deferred_stack_retirement() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
@@ -5023,7 +5224,7 @@ fn linux_sigtimedwait_rollback_uses_bounded_source_local_reservations() {
     assert!(!requeue.contains("let _ ="));
 
     let commit_start = syscall
-        .find("fn commit_linux_signal(")
+        .find("fn commit_linux_signal_with_timer_ack(")
         .expect("source-aware commit helper");
     let commit = braced_body(&syscall[commit_start..]);
     assert!(commit.contains("update_process_linux_signals_and_handoff("));
@@ -5070,7 +5271,7 @@ fn linux_handler_delivery_reserves_pending_capacity_until_the_frame_is_ready() {
         .find("install_linux_signal_handler(")
         .expect("handler frame setup");
     let commit = delivery
-        .rfind("commit_linux_signal(deliverable)")
+        .rfind("commit_linux_signal_deferred_timer_ack(deliverable)")
         .expect("successful handler reservation commit");
     assert!(install < commit);
     assert!(delivery.contains("requeue_linux_signal(deliverable)"));
@@ -5178,8 +5379,8 @@ fn aarch64_kernel_threads_reserve_fork_transaction_headroom() {
         .expect("numeric AArch64 default kernel stack value");
 
     assert!(
-        stack_size == 0x2_0000,
-        "AArch64 POSIX stress uses the bounded 128 KiB kernel stack; got {stack_size:#x}"
+        stack_size == 0x2_8000,
+        "AArch64 POSIX stress uses the bounded 160 KiB kernel stack; got {stack_size:#x}"
     );
 }
 
@@ -5727,6 +5928,109 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
     assert!(nanosleep_with_rem.contains("linux_sleep_until(wait, rem)"));
     assert!(!nanosleep_with_rem.contains("if req == 0"));
     assert!(!nanosleep_with_rem.contains("Ok(0)"));
+}
+
+#[test]
+fn linux_high_resolution_sleep_waits_without_inflight_context_switch() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux syscall runtime");
+    let start = syscall
+        .find("fn linux_high_resolution_relative_sleep_until(")
+        .expect("high-resolution sleep helper");
+    let body = braced_body(&syscall[start..]);
+    assert!(body.contains("linux_sleep_until("));
+    assert!(body.contains("LinuxSleepWait::relative_waiting"));
+    assert!(body.contains("mask_interrupts()"));
+    assert!(!body.contains("unmask_timer_interrupts()"));
+    assert!(!body.contains("scheduler::schedule()"));
+}
+
+#[test]
+fn linux_high_resolution_sleep_restores_interrupts_before_waiting() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux syscall runtime");
+    let start = syscall
+        .find("fn linux_high_resolution_relative_sleep_until(")
+        .expect("high-resolution sleep helper");
+    let body = braced_body(&syscall[start..]);
+    let arm = body
+        .find("arm_at_nanoseconds(deadline)")
+        .expect("high-resolution sleep must arm the precision deadline");
+    let wait = body
+        .find("linux_sleep_until(wait, rem)")
+        .expect("high-resolution sleep must enter the scheduler sleep queue");
+    assert!(
+        arm < wait,
+        "high-resolution sleep must arm the deadline before scheduler waiting"
+    );
+}
+
+#[test]
+fn linux_high_resolution_sleep_does_not_spin_with_many_ready_tasks() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux syscall runtime");
+    let start = syscall
+        .find("fn linux_high_resolution_relative_sleep_until(")
+        .expect("high-resolution sleep helper");
+    let body = braced_body(&syscall[start..]);
+    assert!(!body.contains("core::hint::spin_loop()"));
+}
+
+#[test]
+fn linux_high_resolution_sleep_arms_the_precision_deadline() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux syscall runtime");
+    let start = syscall
+        .find("fn linux_high_resolution_relative_sleep_until(")
+        .expect("high-resolution sleep helper");
+    let body = braced_body(&syscall[start..]);
+    assert!(body.contains("arm_at_nanoseconds(deadline)"));
+}
+
+#[test]
+fn linux_high_resolution_sleep_blocks_in_the_scheduler_sleep_queue() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux syscall runtime");
+    let start = syscall
+        .find("fn linux_high_resolution_relative_sleep_until(")
+        .expect("high-resolution sleep helper");
+    let body = braced_body(&syscall[start..]);
+    assert!(
+        body.contains("LinuxSleepWait::relative_waiting"),
+        "precision sleeps must register a scheduler-visible deadline"
+    );
+    assert!(
+        body.contains("linux_sleep_until("),
+        "precision sleeps must block instead of occupying a runnable thread"
+    );
+}
+
+#[test]
+fn relative_sleep_uses_high_resolution_path_at_or_below_threshold() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux syscall runtime");
+
+    for function in [
+        "pub fn sys_clock_nanosleep(",
+        "fn sys_nanosleep_linux_with_rem(",
+    ] {
+        let start = syscall.find(function).expect("relative sleep syscall");
+        let body = braced_body(&syscall[start..]);
+        assert!(
+            body.contains("requested_nanoseconds <= LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS"),
+            "{function} must route short relative sleeps through high resolution"
+        );
+        assert!(
+            body.contains("linux_high_resolution_relative_sleep_until("),
+            "{function} must call the high-resolution sleep helper"
+        );
+    }
 }
 
 #[test]
@@ -6583,8 +6887,8 @@ fn arm64_linux_process_capacity_covers_posix_fork_stress() {
         .expect("read ARM64 thread capacity");
 
     assert!(
-        thread.contains("pub const MAX_THREADS: usize = 1024;"),
-        "ARM64 POSIX fork stress requires capacity for 1000 children plus the parent"
+        thread.contains("pub const MAX_THREADS: usize = 2048;"),
+        "ARM64 POSIX fork stress requires capacity for 1000 children plus kernel threads"
     );
 }
 
@@ -6595,8 +6899,8 @@ fn kernel_heap_covers_embedded_posix_share_and_thread_stress() {
         .expect("read kernel allocator configuration");
 
     assert!(
-        logic.contains("pub(crate) const KERNEL_HEAP_SIZE: usize = 0x0800_0000;"),
-        "embedded POSIX metadata plus 1024-thread stress needs a 128 MiB kernel heap"
+        logic.contains("pub(crate) const KERNEL_HEAP_SIZE: usize = 0x1000_0000;"),
+        "embedded POSIX metadata plus 1024-thread stress needs a 256 MiB kernel heap"
     );
 }
 

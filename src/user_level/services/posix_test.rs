@@ -39,7 +39,6 @@ pub const POSIX_EVENT_PREFIX: &str = "SMROS_POSIX_EVENT ";
 pub const POSIX_EVENT_SCHEMA: u32 = 1;
 
 const POSIX_COMPAT_PRELOAD_ENV: &str = "LD_PRELOAD=/shared/posixtest/lib/libsmros-posix-compat.so";
-const POSIX_COMPAT_DIAG_ENV: &str = "SMROS_PTHREAD_DIAG=1";
 const MAX_TIMEOUT_MS: u32 = i32::MAX as u32;
 const EMPTY_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const MANIFEST_HEADER: &str = "SMROS_POSIX_MANIFEST\t1";
@@ -617,7 +616,9 @@ fn launch_current_test(harness_launcher_active: bool) -> PosixLaunchLoopResult {
         argv.push(path.clone());
         let mut env = Vec::new();
         env.push(String::from(POSIX_COMPAT_PRELOAD_ENV));
-        env.push(String::from(POSIX_COMPAT_DIAG_ENV));
+        // Temporary bounded diagnostics for the intermittent pthread_join
+        // stress case. Remove after the kernel exit/futex boundary is traced.
+        env.push(String::from("SMROS_PTHREAD_DIAG=1"));
         match run_elf::spawn_observed(path.clone(), argv, env, RunObserver::PosixTest) {
             Ok(()) => return PosixLaunchLoopResult::Running(synchronous_launch_errors),
             Err(err) => {

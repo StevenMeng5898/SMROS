@@ -164,7 +164,7 @@ class CampaignIdentity:
 class ControllerConfig:
     output_directory: Path
     qemu_argv: tuple[str, ...]
-    boot_timeout_seconds: float = 30.0
+    boot_timeout_seconds: float = 60.0
     max_test_serial_bytes: int = 8 * 1024 * 1024
 
 
@@ -238,10 +238,12 @@ def _memory_mebibytes(value: str) -> int:
 
 
 def build_qemu_argv(
-    *, qemu: str | Path, kernel: Path, disk: Path, memory: str
+    *, qemu: str | Path, kernel: Path, disk: Path, memory: str, smp: str = "4"
 ) -> tuple[str, ...]:
     """Build the AArch64 command line used by the normal smoke launcher."""
     configured_memory = memory if _memory_mebibytes(memory) >= 1024 else "1024M"
+    if re.fullmatch(r"[1-9][0-9]*", smp) is None:
+        raise ValueError(f"invalid QEMU SMP count: {smp}")
     return (
         str(qemu),
         "-M",
@@ -249,7 +251,7 @@ def build_qemu_argv(
         "-cpu",
         "cortex-a710",
         "-smp",
-        "4",
+        smp,
         "-m",
         configured_memory,
         "-nographic",
@@ -3096,6 +3098,7 @@ def run_smros(
         kernel=_regular_file(kernel, "kernel image"),
         disk=_regular_file(disk, "FxFS disk image"),
         memory=memory,
+        smp=os.environ.get("POSIX_QEMU_SMP", "4"),
     )
     return QemuController(
         identity=identity,

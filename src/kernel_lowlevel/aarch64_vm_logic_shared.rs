@@ -144,6 +144,47 @@ pub(crate) trait Aarch64AddressSpaceBackend {
     fn copy_to_physical(&self, physical: usize, bytes: &[u8]) -> bool;
     fn copy_from_physical(&self, physical: usize, out: &mut [u8]) -> bool;
 
+    #[cfg(not(target_arch = "aarch64"))]
+    fn copy_table_from(&mut self, source: &Self, source_pfn: u64, destination_pfn: u64) -> bool {
+        for index in 0..AARCH64_TABLE_ENTRIES {
+            let Some(descriptor) = source.read_table_entry(source_pfn, index) else {
+                return false;
+            };
+            if !self.write_table_entry(destination_pfn, index, descriptor) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn copy_table_within(&mut self, source_pfn: u64, destination_pfn: u64) -> bool {
+        let mut entries = [0u64; AARCH64_TABLE_ENTRIES];
+        for (index, entry) in entries.iter_mut().enumerate() {
+            let Some(descriptor) = self.read_table_entry(source_pfn, index) else {
+                return false;
+            };
+            *entry = descriptor;
+        }
+        for (index, descriptor) in entries.into_iter().enumerate() {
+            if !self.write_table_entry(destination_pfn, index, descriptor) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn retain_table(&mut self, _pfn: u64) -> bool {
+        true
+    }
+
+    fn release_table(&mut self, pfn: u64) {
+        self.free_table(pfn);
+    }
+
+    fn table_is_shared(&self, _pfn: u64) -> bool {
+        false
+    }
+
     fn physical_page_accessible(&self, pfn: u64) -> bool {
         self.pfn_address(pfn).is_some()
     }
@@ -151,6 +192,10 @@ pub(crate) trait Aarch64AddressSpaceBackend {
     fn publish_user_mapping(&mut self, _vaddr: usize) {}
     fn break_user_mapping(&mut self, _vaddr: usize) {}
     fn complete_user_mapping(&mut self) {}
+
+    fn begin_deferred_user_updates(&mut self) {}
+
+    fn end_deferred_user_updates(&mut self) {}
 }
 
 pub(crate) struct Aarch64AddressSpaceCore<B: Aarch64AddressSpaceBackend> {
@@ -187,6 +232,14 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         self.table_pfns.len()
     }
 
+    pub(crate) fn begin_deferred_user_updates(&mut self) {
+        self.backend.begin_deferred_user_updates();
+    }
+
+    pub(crate) fn end_deferred_user_updates(&mut self) {
+        self.backend.end_deferred_user_updates();
+    }
+
     pub(crate) fn map_user_page(
         &mut self,
         vaddr: usize,
@@ -198,6 +251,7 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         if !aarch64_user_range_valid(vaddr, AARCH64_PAGE_SIZE) {
             return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
         }
+        self.ensure_private_existing_path(vaddr)?;
         let paddr = self
             .backend
             .pfn_address(pfn)
@@ -279,6 +333,88 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         Ok(())
     }
 
+    /// Map a contiguous virtual range while reusing the page-table walk for
+    /// adjacent pages. The callback form keeps fork cloning from allocating a
+    /// temporary PFN or permission vector for every mapping.
+    pub(crate) fn map_user_pages_with_protection<P, F>(
+        &mut self,
+        vaddr: usize,
+        page_count: usize,
+        mut pfn_at: P,
+        mut protection_at: F,
+    ) -> Result<(), Aarch64AddressSpaceCoreError>
+    where
+        P: FnMut(usize) -> u64,
+        F: FnMut(usize) -> (bool, bool, bool),
+    {
+        let len = page_count
+            .checked_mul(AARCH64_PAGE_SIZE)
+            .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+        if !aarch64_user_range_valid(vaddr, len) {
+            return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+        }
+        if page_count == 0 {
+            return Ok(());
+        }
+
+        let mut created = alloc::vec::Vec::new();
+        created
+            .try_reserve(2)
+            .map_err(|_| Aarch64AddressSpaceCoreError::OutOfMemory)?;
+        let mut mapped = alloc::vec::Vec::new();
+        mapped
+            .try_reserve_exact(page_count)
+            .map_err(|_| Aarch64AddressSpaceCoreError::OutOfMemory)?;
+        let mut cached_indices = None;
+        let mut cached_leaf = 0;
+
+        for page_index in 0..page_count {
+            let page_vaddr = vaddr
+                .checked_add(page_index * AARCH64_PAGE_SIZE)
+                .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+            self.ensure_private_existing_path(page_vaddr)?;
+            let indices =
+                aarch64_table_indices(page_vaddr).ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+            let table_pfn = if cached_indices == Some([indices[0], indices[1]]) {
+                cached_leaf
+            } else {
+                let leaf = self.ensure_leaf_table(indices, &mut created)?;
+                cached_indices = Some([indices[0], indices[1]]);
+                cached_leaf = leaf;
+                leaf
+            };
+            let descriptor = self
+                .backend
+                .read_table_entry(table_pfn, indices[2])
+                .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+            if descriptor != 0 {
+                self.rollback_mapping_transaction(&mapped, &created);
+                return Err(Aarch64AddressSpaceCoreError::AlreadyMapped);
+            }
+            let paddr = self
+                .backend
+                .pfn_address(pfn_at(page_index))
+                .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+            let (readable, writable, executable) = protection_at(page_index);
+            let descriptor = aarch64_user_page_descriptor(
+                paddr,
+                readable,
+                writable,
+                executable,
+            );
+            if !self
+                .backend
+                .write_table_entry(table_pfn, indices[2], descriptor)
+            {
+                self.rollback_mapping_transaction(&mapped, &created);
+                return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+            }
+            self.backend.publish_user_mapping(page_vaddr);
+            mapped.push(page_vaddr);
+        }
+        Ok(())
+    }
+
     fn map_user_page_recorded(
         &mut self,
         vaddr: usize,
@@ -292,6 +428,7 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         if !aarch64_user_range_valid(vaddr, AARCH64_PAGE_SIZE) {
             return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
         }
+        self.ensure_private_existing_path(vaddr)?;
         mapped
             .try_reserve(1)
             .map_err(|_| Aarch64AddressSpaceCoreError::OutOfMemory)?;
@@ -331,6 +468,7 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         if !aarch64_user_range_valid(vaddr, AARCH64_PAGE_SIZE) {
             return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
         }
+        self.ensure_private_existing_path(vaddr)?;
         let (table_pfn, index) = self.leaf_location(vaddr)?;
         let descriptor = self
             .backend
@@ -366,6 +504,7 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         if !aarch64_user_range_valid(vaddr, AARCH64_PAGE_SIZE) {
             return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
         }
+        self.ensure_private_existing_path(vaddr)?;
         let (table_pfn, index) = self.leaf_location(vaddr)?;
         let descriptor = self
             .backend
@@ -554,6 +693,371 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         Ok(())
     }
 
+    /// Copy the supervisor portion of an address space without copying user mappings.
+    ///
+    /// Kernel mappings are immutable after boot, so each fork can copy the small
+    /// page-table hierarchy that describes them instead of rebuilding every RAM
+    /// block descriptor from the physical-memory range.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub(crate) fn clone_kernel_mappings_from(
+        &mut self,
+        source: &Self,
+    ) -> Result<(), Aarch64AddressSpaceCoreError> {
+        self.clone_mappings_from_mode(source, false)
+    }
+
+    /// Clone the complete page-table hierarchy, including user mappings.
+    ///
+    /// Fork uses this path so the child gets an independent set of table pages
+    /// without walking and rewriting every mapped user page individually.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub(crate) fn clone_mappings_from(
+        &mut self,
+        source: &Self,
+    ) -> Result<(), Aarch64AddressSpaceCoreError> {
+        self.clone_mappings_from_mode(source, true)
+    }
+
+    pub(crate) fn clone_shared_mappings_from(
+        &mut self,
+        source: &Self,
+    ) -> Result<(), Aarch64AddressSpaceCoreError> {
+        let original_len = self.table_pfns.len();
+        let result = (|| {
+            for root_index in 0..AARCH64_TABLE_ENTRIES {
+                let descriptor = source
+                    .backend
+                    .read_table_entry(source.root_pfn, root_index)
+                    .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+                if descriptor == 0 {
+                    continue;
+                }
+                if descriptor
+                    & (AARCH64_DESC_VALID | AARCH64_DESC_TABLE_OR_PAGE)
+                    != AARCH64_DESC_VALID | AARCH64_DESC_TABLE_OR_PAGE
+                {
+                    if !self
+                        .backend
+                        .write_table_entry(self.root_pfn, root_index, descriptor)
+                    {
+                        return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+                    }
+                    continue;
+                }
+                let source_child = (descriptor & AARCH64_DESC_ADDR_MASK) / AARCH64_PAGE_SIZE as u64;
+                if !self.backend.retain_table(source_child) {
+                    return Err(Aarch64AddressSpaceCoreError::OutOfMemory);
+                }
+                if self.table_pfns.try_reserve(1).is_err() {
+                    self.backend.release_table(source_child);
+                    return Err(Aarch64AddressSpaceCoreError::OutOfMemory);
+                }
+                self.table_pfns.push(source_child);
+                if !self.backend.write_table_entry(self.root_pfn, root_index, descriptor) {
+                    return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+                }
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.rollback_shared_tables(original_len);
+        }
+        result
+    }
+
+    fn rollback_shared_tables(&mut self, original_len: usize) {
+        while self.table_pfns.len() > original_len {
+            if let Some(pfn) = self.table_pfns.pop() {
+                self.backend.release_table(pfn);
+            }
+        }
+    }
+
+    fn ensure_private_existing_path(
+        &mut self,
+        vaddr: usize,
+    ) -> Result<(), Aarch64AddressSpaceCoreError> {
+        let indices = aarch64_table_indices(vaddr)
+            .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+        let level_one = self
+            .backend
+            .read_table_entry(self.root_pfn, indices[0])
+            .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+        if level_one == 0 {
+            return Ok(());
+        }
+        if level_one & (AARCH64_DESC_VALID | AARCH64_DESC_TABLE_OR_PAGE)
+            != AARCH64_DESC_VALID | AARCH64_DESC_TABLE_OR_PAGE
+        {
+            return Err(Aarch64AddressSpaceCoreError::AlreadyMapped);
+        }
+        let level_one_pfn = self.detach_shared_table(
+            self.root_pfn,
+            indices[0],
+            (level_one & AARCH64_DESC_ADDR_MASK) / AARCH64_PAGE_SIZE as u64,
+            1,
+        )?;
+        let level_two = self
+            .backend
+            .read_table_entry(level_one_pfn, indices[1])
+            .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+        if level_two == 0 {
+            return Ok(());
+        }
+        if level_two & (AARCH64_DESC_VALID | AARCH64_DESC_TABLE_OR_PAGE)
+            != AARCH64_DESC_VALID | AARCH64_DESC_TABLE_OR_PAGE
+        {
+            return Err(Aarch64AddressSpaceCoreError::AlreadyMapped);
+        }
+        let level_two_pfn = (level_two & AARCH64_DESC_ADDR_MASK) / AARCH64_PAGE_SIZE as u64;
+        let _ = self.detach_shared_table(level_one_pfn, indices[1], level_two_pfn, 2)?;
+        Ok(())
+    }
+
+    fn detach_shared_table(
+        &mut self,
+        parent_pfn: u64,
+        parent_index: usize,
+        source_pfn: u64,
+        level: usize,
+    ) -> Result<u64, Aarch64AddressSpaceCoreError> {
+        if !self.backend.table_is_shared(source_pfn) {
+            return Ok(source_pfn);
+        }
+        self.table_pfns
+            .try_reserve(1)
+            .map_err(|_| Aarch64AddressSpaceCoreError::OutOfMemory)?;
+        let destination_pfn = self.backend.allocate_table()?;
+        let retained_start = self.table_pfns.len();
+        if !self
+            .backend
+            .copy_table_within(source_pfn, destination_pfn)
+        {
+            self.backend.release_table(destination_pfn);
+            return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+        }
+        if level == 1 {
+            for index in 0..AARCH64_TABLE_ENTRIES {
+                let descriptor = match self.backend.read_table_entry(destination_pfn, index) {
+                    Some(descriptor) => descriptor,
+                    None => {
+                        self.rollback_detached_table(destination_pfn, retained_start);
+                        return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+                    }
+                };
+                if descriptor
+                    & (AARCH64_DESC_VALID | AARCH64_DESC_TABLE_OR_PAGE)
+                    != AARCH64_DESC_VALID | AARCH64_DESC_TABLE_OR_PAGE
+                {
+                    continue;
+                }
+                let child_pfn =
+                    (descriptor & AARCH64_DESC_ADDR_MASK) / AARCH64_PAGE_SIZE as u64;
+                if !self.backend.retain_table(child_pfn) {
+                    self.rollback_detached_table(destination_pfn, retained_start);
+                    return Err(Aarch64AddressSpaceCoreError::OutOfMemory);
+                }
+                if self.table_pfns.try_reserve(1).is_err() {
+                    self.backend.release_table(child_pfn);
+                    self.rollback_detached_table(destination_pfn, retained_start);
+                    return Err(Aarch64AddressSpaceCoreError::OutOfMemory);
+                }
+                self.table_pfns.push(child_pfn);
+            }
+        }
+        let destination_paddr = match self.backend.pfn_address(destination_pfn) {
+            Some(address) => address,
+            None => {
+                self.rollback_detached_table(destination_pfn, retained_start);
+                return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+            }
+        };
+        let Some(position) = self.table_pfns.iter().position(|pfn| *pfn == source_pfn) else {
+            self.rollback_detached_table(destination_pfn, retained_start);
+            return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+        };
+        if !self.backend.write_table_entry(
+            parent_pfn,
+            parent_index,
+            aarch64_table_descriptor(destination_paddr),
+        ) {
+            self.rollback_detached_table(destination_pfn, retained_start);
+            return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+        }
+        self.table_pfns.swap_remove(position);
+        self.backend.release_table(source_pfn);
+        self.table_pfns.push(destination_pfn);
+        Ok(destination_pfn)
+    }
+
+    fn rollback_detached_table(&mut self, destination_pfn: u64, retained_start: usize) {
+        self.backend.release_table(destination_pfn);
+        while self.table_pfns.len() > retained_start {
+            if let Some(pfn) = self.table_pfns.pop() {
+                self.backend.release_table(pfn);
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    fn clone_mappings_from_mode(
+        &mut self,
+        source: &Self,
+        preserve_user: bool,
+    ) -> Result<(), Aarch64AddressSpaceCoreError> {
+        for root_index in 0..AARCH64_TABLE_ENTRIES {
+            let Some(descriptor) = source.backend.read_table_entry(source.root_pfn, root_index)
+            else {
+                return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+            };
+            if descriptor == 0 {
+                continue;
+            }
+
+            let base = root_index
+                .checked_mul(1usize << 30)
+                .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+            let child = if descriptor
+                & (AARCH64_DESC_VALID | AARCH64_DESC_TABLE_OR_PAGE)
+                == AARCH64_DESC_VALID | AARCH64_DESC_TABLE_OR_PAGE
+            {
+                let source_child = (descriptor & AARCH64_DESC_ADDR_MASK) / AARCH64_PAGE_SIZE as u64;
+                self.clone_table_from(source, source_child, 1, base, preserve_user)?
+            } else {
+                None
+            };
+            if let Some(child_pfn) = child {
+                let child_paddr = self
+                    .backend
+                    .pfn_address(child_pfn)
+                    .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+                if !self.backend.write_table_entry(
+                    self.root_pfn,
+                    root_index,
+                    aarch64_table_descriptor(child_paddr),
+                ) {
+                    return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    fn clone_table_from(
+        &mut self,
+        source: &Self,
+        source_pfn: u64,
+        level: usize,
+        base: usize,
+        preserve_user: bool,
+    ) -> Result<Option<u64>, Aarch64AddressSpaceCoreError> {
+        let span = match level {
+            1 => 1usize << 21,
+            2 => AARCH64_PAGE_SIZE,
+            _ => return Err(Aarch64AddressSpaceCoreError::InvalidAddress),
+        };
+        if preserve_user && level == 2 {
+            let mut populated = false;
+            for index in 0..AARCH64_TABLE_ENTRIES {
+                if source
+                    .backend
+                    .read_table_entry(source_pfn, index)
+                    .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?
+                    != 0
+                {
+                    populated = true;
+                    break;
+                }
+            }
+            if !populated {
+                return Ok(None);
+            }
+        }
+        self.table_pfns
+            .try_reserve(1)
+            .map_err(|_| Aarch64AddressSpaceCoreError::OutOfMemory)?;
+        let destination_pfn = self.backend.allocate_table()?;
+        self.table_pfns.push(destination_pfn);
+        if !self
+            .backend
+            .copy_table_from(&source.backend, source_pfn, destination_pfn)
+        {
+            return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+        }
+        // A level-3 table contains only user page descriptors when a full
+        // fork hierarchy is being cloned. Its entries already refer to the
+        // shared COW backings, so the copied table needs no further filtering.
+        if preserve_user && level == 2 {
+            return Ok(Some(destination_pfn));
+        }
+        let mut copied = false;
+
+        for index in 0..AARCH64_TABLE_ENTRIES {
+            let entry_base = base
+                .checked_add(
+                    index
+                        .checked_mul(span)
+                        .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?,
+                )
+                .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+            let entry_end = entry_base
+                .checked_add(span)
+                .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+            if !preserve_user && entry_base < AARCH64_USER_LIMIT && entry_end > AARCH64_USER_BASE {
+                if !self.backend.write_table_entry(destination_pfn, index, 0) {
+                    return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+                }
+                continue;
+            }
+            let descriptor = source
+                .backend
+                .read_table_entry(source_pfn, index)
+                .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+            if descriptor == 0 {
+                continue;
+            }
+
+            let descriptor = if level == 1
+                && descriptor
+                    & (AARCH64_DESC_VALID | AARCH64_DESC_TABLE_OR_PAGE)
+                    == AARCH64_DESC_VALID | AARCH64_DESC_TABLE_OR_PAGE
+            {
+                let source_child =
+                    (descriptor & AARCH64_DESC_ADDR_MASK) / AARCH64_PAGE_SIZE as u64;
+                let Some(child_pfn) = self.clone_table_from(
+                    source,
+                    source_child,
+                    2,
+                    entry_base,
+                    preserve_user,
+                )?
+                else {
+                    continue;
+                };
+                let child_paddr = self
+                    .backend
+                    .pfn_address(child_pfn)
+                    .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+                aarch64_table_descriptor(child_paddr)
+            } else {
+                descriptor
+            };
+            if !self.backend.write_table_entry(destination_pfn, index, descriptor) {
+                return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+            }
+            copied = true;
+        }
+
+        if !copied {
+            debug_assert_eq!(self.table_pfns.last(), Some(&destination_pfn));
+            self.table_pfns.pop();
+            self.backend.release_table(destination_pfn);
+            return Ok(None);
+        }
+        Ok(Some(destination_pfn))
+    }
+
     fn ensure_leaf_table(
         &mut self,
         indices: [usize; 3],
@@ -576,7 +1080,7 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
                 let child_paddr = match self.backend.pfn_address(child_pfn) {
                     Some(address) => address,
                     None => {
-                        self.backend.free_table(child_pfn);
+                        self.backend.release_table(child_pfn);
                         return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
                     }
                 };
@@ -617,7 +1121,7 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
             let child_paddr = match self.backend.pfn_address(child_pfn) {
                 Some(address) => address,
                 None => {
-                    self.backend.free_table(child_pfn);
+                    self.backend.release_table(child_pfn);
                     return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
                 }
             };
@@ -626,7 +1130,7 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
                 index,
                 aarch64_table_descriptor(child_paddr),
             ) {
-                self.backend.free_table(child_pfn);
+                self.backend.release_table(child_pfn);
                 return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
             }
             self.table_pfns.push(child_pfn);
@@ -673,7 +1177,7 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
             if self.table_pfns.last() == Some(&child_pfn) {
                 self.table_pfns.pop();
             }
-            self.backend.free_table(child_pfn);
+            self.backend.release_table(child_pfn);
         }
     }
 }
@@ -681,7 +1185,7 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
 impl<B: Aarch64AddressSpaceBackend> Drop for Aarch64AddressSpaceCore<B> {
     fn drop(&mut self) {
         for pfn in self.table_pfns.drain(..) {
-            self.backend.free_table(pfn);
+            self.backend.release_table(pfn);
         }
     }
 }
@@ -699,6 +1203,7 @@ struct Aarch64TestAllocatorState {
     next_pfn: u64,
     remaining_table_allocations: Option<usize>,
     pages: alloc::collections::BTreeMap<u64, [u64; AARCH64_TABLE_ENTRIES]>,
+    table_references: alloc::collections::BTreeMap<u64, usize>,
     data_pages: alloc::collections::BTreeMap<u64, alloc::boxed::Box<[u8; AARCH64_PAGE_SIZE]>>,
     maintenance_events: alloc::vec::Vec<Aarch64MaintenanceEvent>,
 }
@@ -717,6 +1222,7 @@ impl Aarch64TestAllocator {
                 next_pfn,
                 remaining_table_allocations: None,
                 pages: alloc::collections::BTreeMap::new(),
+                table_references: alloc::collections::BTreeMap::new(),
                 data_pages: alloc::collections::BTreeMap::new(),
                 maintenance_events: alloc::vec::Vec::new(),
             })),
@@ -762,6 +1268,30 @@ impl Aarch64TestAllocator {
             .get_mut(&level_three_pfn)
             .expect("level three table")[indices[2]] = descriptor;
     }
+
+    pub(crate) fn set_root_descriptor(&mut self, root_pfn: u64, index: usize, descriptor: u64) {
+        self.state
+            .borrow_mut()
+            .pages
+            .get_mut(&root_pfn)
+            .expect("test root table")[index] = descriptor;
+    }
+
+    pub(crate) fn set_level_one_descriptor(
+        &mut self,
+        root_pfn: u64,
+        vaddr: usize,
+        descriptor: u64,
+    ) {
+        let indices = aarch64_table_indices(vaddr).expect("test address indices");
+        let mut state = self.state.borrow_mut();
+        let level_one_pfn = (state.pages[&root_pfn][indices[0]] & AARCH64_DESC_ADDR_MASK)
+            / AARCH64_PAGE_SIZE as u64;
+        state
+            .pages
+            .get_mut(&level_one_pfn)
+            .expect("test level-one table")[indices[1]] = descriptor;
+    }
 }
 
 #[cfg(test)]
@@ -786,11 +1316,46 @@ impl Aarch64AddressSpaceBackend for Aarch64TestBackend {
             .checked_add(1)
             .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
         state.pages.insert(pfn, [0; AARCH64_TABLE_ENTRIES]);
+        state.table_references.insert(pfn, 1);
         Ok(pfn)
     }
 
     fn free_table(&mut self, pfn: u64) {
-        self.allocator.state.borrow_mut().pages.remove(&pfn);
+        let mut state = self.allocator.state.borrow_mut();
+        state.pages.remove(&pfn);
+        state.table_references.remove(&pfn);
+    }
+
+    fn retain_table(&mut self, pfn: u64) -> bool {
+        let mut state = self.allocator.state.borrow_mut();
+        let Some(references) = state.table_references.get_mut(&pfn) else {
+            return false;
+        };
+        *references = references.saturating_add(1);
+        true
+    }
+
+    fn release_table(&mut self, pfn: u64) {
+        let mut state = self.allocator.state.borrow_mut();
+        let Some(references) = state.table_references.get_mut(&pfn) else {
+            return;
+        };
+        if *references > 1 {
+            *references -= 1;
+            return;
+        }
+        state.table_references.remove(&pfn);
+        state.pages.remove(&pfn);
+    }
+
+    fn table_is_shared(&self, pfn: u64) -> bool {
+        self.allocator
+            .state
+            .borrow()
+            .table_references
+            .get(&pfn)
+            .copied()
+            .is_some_and(|references| references > 1)
     }
 
     fn pfn_address(&self, pfn: u64) -> Option<usize> {
@@ -934,6 +1499,39 @@ impl Aarch64AddressSpaceModel {
     ) -> Result<(), ()> {
         self.core
             .map_user_region(vaddr, first_pfn, page_count, readable, writable, executable)
+            .map_err(|_| ())
+    }
+
+    pub(crate) fn map_user_pages_with_protection(
+        &mut self,
+        _allocator: &mut Aarch64TestAllocator,
+        vaddr: usize,
+        pages: &[u64],
+        mut protection: impl FnMut(usize) -> (bool, bool, bool),
+    ) -> Result<(), ()> {
+        self.core
+            .map_user_pages_with_protection(
+                vaddr,
+                pages.len(),
+                |index| pages[index],
+                |index| protection(index),
+            )
+            .map_err(|_| ())
+    }
+
+    pub(crate) fn clone_mappings_from(
+        &mut self,
+        source: &Self,
+    ) -> Result<(), ()> {
+        self.core.clone_mappings_from(&source.core).map_err(|_| ())
+    }
+
+    pub(crate) fn clone_shared_mappings_from(
+        &mut self,
+        source: &Self,
+    ) -> Result<(), ()> {
+        self.core
+            .clone_shared_mappings_from(&source.core)
             .map_err(|_| ())
     }
 

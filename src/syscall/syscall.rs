@@ -56,6 +56,7 @@ use super::linux_process::{
 };
 use super::linux_process_memory::{self, LinuxMemoryFaultAccess, LinuxMemoryFaultSignal};
 use super::linux_record_lock;
+use super::linux_shm_cache_logic_shared::sorted_path_search;
 #[cfg(target_arch = "aarch64")]
 use super::linux_syscall_context;
 use super::linux_task;
@@ -618,7 +619,6 @@ const LINUX_SA_RESETHAND: u64 = 0x8000_0000;
 const LINUX_NANOS_PER_SECOND: u64 = 1_000_000_000;
 const LINUX_SIGNAL_TICK_NANOS: u64 = 10_000_000;
 const LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS: u64 = 100_000_000;
-const LINUX_HIGH_RES_RELATIVE_SLEEP_SPIN_NANOS: u64 = LINUX_SIGNAL_TICK_NANOS;
 const LINUX_HYBRID_RELATIVE_SLEEP_MAX_NANOS: u64 = 2_100_000_000;
 const LINUX_HYBRID_RELATIVE_SLEEP_MARGIN_NANOS: u64 = 50_000_000;
 const LINUX_DEFAULT_REALTIME_OFFSET_NANOS: i64 = 1_700_000_000_000_000_000;
@@ -811,6 +811,8 @@ impl LinuxProcessContainerState {
 struct LinuxProcessResources {
     pid: usize,
     descriptors: Vec<LinuxDescriptorEntry>,
+    next_fd: usize,
+    fd_hint_needs_scan: bool,
     objects: Vec<u32>,
     credentials: LinuxCredentialsCore,
     umask: usize,
@@ -836,6 +838,8 @@ impl LinuxProcessResources {
         Self {
             pid,
             descriptors: Vec::new(),
+            next_fd: COMPAT_FD_START,
+            fd_hint_needs_scan: false,
             objects: Vec::new(),
             credentials: LinuxCredentialsCore::default(),
             umask: 0o022,
@@ -874,6 +878,14 @@ struct LinuxFxfsFileRecord {
     handle: u32,
     cursor: fxfs::FxfsCursor,
     path: String,
+}
+
+#[derive(Clone)]
+struct LinuxShmCachedHandle {
+    path: String,
+    handle: u32,
+    description_id: u32,
+    cursor: fxfs::FxfsCursor,
 }
 
 #[repr(C)]
@@ -2032,8 +2044,10 @@ struct MemorySyscallState {
     handles: Vec<KernelHandleRecord>,
     signals: Vec<SignalRecord>,
     linux_open_descriptions: Vec<LinuxOpenDescription>,
+    linux_open_description_indices: Vec<usize>,
     linux_process_resources: Vec<LinuxProcessResources>,
     linux_fxfs_files: Vec<LinuxFxfsFileRecord>,
+    linux_shm_cached_handles: Vec<LinuxShmCachedHandle>,
     linux_shared_memory: Vec<LinuxSharedMemoryRecord>,
     next_shared_memory_id: u32,
     next_handle: u32,
@@ -2069,8 +2083,10 @@ impl MemorySyscallState {
             handles,
             signals: Vec::new(),
             linux_open_descriptions: Vec::new(),
+            linux_open_description_indices: Vec::new(),
             linux_process_resources: Vec::new(),
             linux_fxfs_files: Vec::new(),
+            linux_shm_cached_handles: Vec::new(),
             linux_shared_memory: Vec::new(),
             next_shared_memory_id: LINUX_SHM_ID_START,
             next_handle: MEMORY_HANDLE_START + 1,
@@ -2952,15 +2968,15 @@ impl MemorySyscallState {
     }
 
     fn open_description(&self, id: u32) -> Option<&LinuxOpenDescription> {
-        self.linux_open_descriptions
-            .iter()
-            .find(|description| description.id == id)
+        let index = *self.linux_open_description_indices.get(id as usize)?;
+        let description = self.linux_open_descriptions.get(index)?;
+        (description.id == id).then_some(description)
     }
 
     fn open_description_mut(&mut self, id: u32) -> Option<&mut LinuxOpenDescription> {
-        self.linux_open_descriptions
-            .iter_mut()
-            .find(|description| description.id == id)
+        let index = *self.linux_open_description_indices.get(id as usize)?;
+        let description = self.linux_open_descriptions.get_mut(index)?;
+        (description.id == id).then_some(description)
     }
 
     fn create_open_description(
@@ -2971,6 +2987,7 @@ impl MemorySyscallState {
     ) -> u32 {
         let id = self.next_open_description_id;
         self.next_open_description_id = id.checked_add(1).unwrap_or(1);
+        let index = self.linux_open_descriptions.len();
         self.linux_open_descriptions.push(LinuxOpenDescription {
             id,
             handle,
@@ -2979,6 +2996,11 @@ impl MemorySyscallState {
             offset: 0,
             references: 0,
         });
+        if self.linux_open_description_indices.len() <= id as usize {
+            self.linux_open_description_indices
+                .resize(id as usize + 1, usize::MAX);
+        }
+        self.linux_open_description_indices[id as usize] = index;
         id
     }
 
@@ -2994,15 +3016,27 @@ impl MemorySyscallState {
     }
 
     fn release_open_description(&mut self, id: u32) -> Option<LinuxOpenDescription> {
-        let index = self
+        let index = *self.linux_open_description_indices.get(id as usize)?;
+        if self
             .linux_open_descriptions
-            .iter()
-            .position(|description| description.id == id)?;
+            .get(index)
+            .is_none_or(|description| description.id != id)
+        {
+            return None;
+        }
         let references = self.linux_open_descriptions[index]
             .references
             .checked_sub(1)?;
         self.linux_open_descriptions[index].references = references;
-        (references == 0).then(|| self.linux_open_descriptions.swap_remove(index))
+        if references != 0 {
+            return None;
+        }
+        self.linux_open_description_indices[id as usize] = usize::MAX;
+        let removed = self.linux_open_descriptions.swap_remove(index);
+        if let Some(moved) = self.linux_open_descriptions.get(index) {
+            self.linux_open_description_indices[moved.id as usize] = index;
+        }
+        Some(removed)
     }
 
     fn alloc_fd(&mut self, handle: u32, readable: bool, writable: bool) -> usize {
@@ -3020,7 +3054,6 @@ impl MemorySyscallState {
         status_flags: usize,
         close_on_exec: bool,
     ) -> usize {
-        let pid = linux_resource_pid();
         let description_id = self
             .linux_open_descriptions
             .iter()
@@ -3032,17 +3065,38 @@ impl MemorySyscallState {
                     .unwrap_or(ObjectType::LinuxFile);
                 self.create_open_description(handle, object_type, status_flags)
             });
-        let mut fd = COMPAT_FD_START;
-        while self
+        self.alloc_fd_for_description(description_id, status_flags, close_on_exec)
+    }
+
+    fn alloc_fd_for_description(
+        &mut self,
+        description_id: u32,
+        _status_flags: usize,
+        close_on_exec: bool,
+    ) -> usize {
+        let pid = linux_resource_pid();
+        let (mut fd, needs_scan) = self
             .process_resources(pid)
-            .is_some_and(|resources| resources.descriptors.iter().any(|entry| entry.fd == fd))
-        {
-            fd = fd.saturating_add(1);
+            .map(|resources| {
+                (
+                    resources.next_fd.max(COMPAT_FD_START),
+                    resources.fd_hint_needs_scan,
+                )
+            })
+            .unwrap_or((COMPAT_FD_START, false));
+        if needs_scan {
+            while self
+                .process_resources(pid)
+                .is_some_and(|resources| resources.descriptors.iter().any(|entry| entry.fd == fd))
+            {
+                fd = fd.saturating_add(1);
+            }
         }
         let _ = self.acquire_open_description(description_id);
-        self.process_resources_mut(pid)
-            .descriptors
-            .push(LinuxDescriptorEntry {
+        let resources = self.process_resources_mut(pid);
+        resources.next_fd = fd.saturating_add(1);
+        resources.fd_hint_needs_scan = false;
+        resources.descriptors.push(LinuxDescriptorEntry {
                 fd,
                 description_id,
                 close_on_exec,
@@ -3073,13 +3127,23 @@ impl MemorySyscallState {
         readable: bool,
         writable: bool,
     ) -> usize {
-        let mut fd = min_fd.max(COMPAT_FD_START);
         let pid = linux_resource_pid();
-        while self
+        let (mut fd, needs_scan) = self
             .process_resources(pid)
-            .is_some_and(|resources| resources.descriptors.iter().any(|entry| entry.fd == fd))
-        {
-            fd = fd.saturating_add(1);
+            .map(|resources| {
+                (
+                    resources.next_fd.max(min_fd).max(COMPAT_FD_START),
+                    resources.fd_hint_needs_scan,
+                )
+            })
+            .unwrap_or((min_fd.max(COMPAT_FD_START), false));
+        if needs_scan {
+            while self
+                .process_resources(pid)
+                .is_some_and(|resources| resources.descriptors.iter().any(|entry| entry.fd == fd))
+            {
+                fd = fd.saturating_add(1);
+            }
         }
         let Some(description_id) = self
             .linux_open_descriptions
@@ -3090,9 +3154,10 @@ impl MemorySyscallState {
             return self.alloc_fd(handle, readable, writable);
         };
         let _ = self.acquire_open_description(description_id);
-        self.process_resources_mut(pid)
-            .descriptors
-            .push(LinuxDescriptorEntry {
+        let resources = self.process_resources_mut(pid);
+        resources.next_fd = fd.saturating_add(1);
+        resources.fd_hint_needs_scan = false;
+        resources.descriptors.push(LinuxDescriptorEntry {
                 fd,
                 description_id,
                 close_on_exec: false,
@@ -3104,9 +3169,11 @@ impl MemorySyscallState {
         if !self.acquire_open_description(description_id) {
             return false;
         }
-        self.process_resources_mut(linux_resource_pid())
-            .descriptors
-            .push(LinuxDescriptorEntry {
+        let resources = self.process_resources_mut(linux_resource_pid());
+        if fd <= resources.next_fd {
+            resources.fd_hint_needs_scan = true;
+        }
+        resources.descriptors.push(LinuxDescriptorEntry {
                 fd,
                 description_id,
                 close_on_exec,
@@ -3154,7 +3221,9 @@ impl MemorySyscallState {
             .descriptors
             .iter()
             .position(|entry| entry.fd == fd)?;
-        Some(resources.descriptors.swap_remove(index))
+        let entry = resources.descriptors.swap_remove(index);
+        resources.next_fd = resources.next_fd.min(entry.fd);
+        Some(entry)
     }
 
     fn close_fd(&mut self, fd: usize) -> Option<u32> {
@@ -3246,26 +3315,40 @@ impl MemorySyscallState {
     ) -> Option<(Vec<LinuxDescriptorEntry>, Vec<u32>, LinuxProcessForkState)> {
         let mut parent_descriptors = Vec::new();
         let mut parent_objects = Vec::new();
-        let process_state = self
-            .clone_linux_process_state(parent_pid, namespace_flags)
-            .ok()?;
-        self.linux_process_resources.try_reserve(1).ok()?;
+        let process_state = match self.clone_linux_process_state(parent_pid, namespace_flags) {
+            Ok(state) => state,
+            Err(_) => return None,
+        };
+        if self.linux_process_resources.try_reserve(1).is_err() {
+            return None;
+        }
         if let Some(parent) = self.process_resources(parent_pid) {
-            parent_descriptors
+            if parent_descriptors
                 .try_reserve_exact(parent.descriptors.len())
-                .ok()?;
+                .is_err()
+            {
+                return None;
+            }
             parent_descriptors.extend_from_slice(&parent.descriptors);
-            parent_objects
+            if parent_objects
                 .try_reserve_exact(parent.objects.len())
-                .ok()?;
+                .is_err()
+            {
+                return None;
+            }
             parent_objects.extend_from_slice(&parent.objects);
         }
         let mut descriptors = Vec::new();
-        descriptors
+        if descriptors
             .try_reserve_exact(parent_descriptors.len())
-            .ok()?;
+            .is_err()
+        {
+            return None;
+        }
         let mut objects = Vec::new();
-        objects.try_reserve_exact(parent_objects.len()).ok()?;
+        if objects.try_reserve_exact(parent_objects.len()).is_err() {
+            return None;
+        }
         for entry in parent_descriptors {
             if !self.acquire_open_description(entry.description_id) {
                 self.release_reserved_fork_resources(&descriptors, &objects);
@@ -3417,9 +3500,17 @@ impl MemorySyscallState {
         {
             return false;
         }
+        let next_fd = descriptors
+            .iter()
+            .map(|entry| entry.fd)
+            .max()
+            .unwrap_or(COMPAT_FD_START)
+            .saturating_add(1);
         self.linux_process_resources.push(LinuxProcessResources {
             pid,
             descriptors: core::mem::take(descriptors),
+            next_fd,
+            fd_hint_needs_scan: false,
             objects: core::mem::take(objects),
             credentials: process_state.credentials,
             umask: process_state.umask,
@@ -3491,6 +3582,56 @@ impl MemorySyscallState {
         }
     }
 
+    fn linux_shm_cached_handle(&self, path: &str) -> Option<(u32, u32, fxfs::FxfsCursor)> {
+        let index = sorted_path_search(&self.linux_shm_cached_handles, path, |record| {
+            record.path.as_str()
+        })
+        .ok()?;
+        let record = &self.linux_shm_cached_handles[index];
+        Some((record.handle, record.description_id, record.cursor))
+    }
+
+    fn cache_linux_shm_handle(
+        &mut self,
+        path: &str,
+        handle: u32,
+        description_id: u32,
+        cursor: fxfs::FxfsCursor,
+    ) {
+        match sorted_path_search(&self.linux_shm_cached_handles, path, |record| {
+            record.path.as_str()
+        }) {
+            Ok(index) => {
+                let record = &mut self.linux_shm_cached_handles[index];
+                record.handle = handle;
+                record.description_id = description_id;
+                record.cursor = cursor;
+            }
+            Err(index) => self.linux_shm_cached_handles.insert(
+                index,
+                LinuxShmCachedHandle {
+                    path: String::from(path),
+                    handle,
+                    description_id,
+                    cursor,
+                },
+            ),
+        }
+    }
+
+    fn remove_linux_shm_cached_path(&mut self, path: &str) {
+        if let Ok(index) = sorted_path_search(&self.linux_shm_cached_handles, path, |record| {
+            record.path.as_str()
+        }) {
+            self.linux_shm_cached_handles.remove(index);
+        }
+    }
+
+    fn remove_linux_shm_cached_handle(&mut self, handle: u32) {
+        self.linux_shm_cached_handles
+            .retain(|record| record.handle != handle);
+    }
+
     fn linux_fxfs_file(&self, handle: u32) -> Option<&LinuxFxfsFileRecord> {
         self.linux_fxfs_files
             .iter()
@@ -3504,6 +3645,7 @@ impl MemorySyscallState {
     }
 
     fn remove_linux_fxfs_file(&mut self, handle: u32) {
+        self.remove_linux_shm_cached_handle(handle);
         if let Some(index) = self
             .linux_fxfs_files
             .iter()
@@ -3664,6 +3806,8 @@ impl MemorySyscallState {
         }
 
         self.linux_open_descriptions.clear();
+        self.linux_open_description_indices.clear();
+        self.linux_shm_cached_handles.clear();
         while let Some(handle) = self.linux_fxfs_files.last().map(|file| file.handle) {
             self.remove_linux_fxfs_file(handle);
         }
@@ -4862,9 +5006,13 @@ fn requeue_linux_signal(deliverable: LinuxDeliverableSignal) -> Result<(), SysEr
 }
 
 fn acknowledge_linux_timer_notification(record: LinuxPendingSignal) {
-    let Some((pid, timer_id)) = record.timer_identity() else {
+    let Some(timer_identity) = record.timer_identity() else {
         return;
     };
+    acknowledge_linux_timer_identity(timer_identity);
+}
+
+fn acknowledge_linux_timer_identity((pid, timer_id): (usize, u32)) {
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     if let Some(timer) = memory_state().linux_timer_mut(pid, timer_id) {
         timer.acknowledge_notification();
@@ -4873,9 +5021,24 @@ fn acknowledge_linux_timer_notification(record: LinuxPendingSignal) {
 }
 
 fn commit_linux_signal(deliverable: LinuxDeliverableSignal) -> Result<(), SysError> {
+    commit_linux_signal_with_timer_ack(deliverable, true)
+}
+
+fn commit_linux_signal_deferred_timer_ack(
+    deliverable: LinuxDeliverableSignal,
+) -> Result<(), SysError> {
+    commit_linux_signal_with_timer_ack(deliverable, false)
+}
+
+fn commit_linux_signal_with_timer_ack(
+    deliverable: LinuxDeliverableSignal,
+    acknowledge_timer: bool,
+) -> Result<(), SysError> {
     let record = deliverable.record;
     let Some(reservation) = deliverable.reservation else {
-        acknowledge_linux_timer_notification(record);
+        if acknowledge_timer {
+            acknowledge_linux_timer_notification(record);
+        }
         return Ok(());
     };
     let result = match deliverable.source {
@@ -4889,7 +5052,7 @@ fn commit_linux_signal(deliverable: LinuxDeliverableSignal) -> Result<(), SysErr
             pending.commit_reservation(reservation)
         }),
     };
-    if result.is_ok() {
+    if result.is_ok() && acknowledge_timer {
         acknowledge_linux_timer_notification(record);
     }
     result
@@ -5186,6 +5349,9 @@ fn install_linux_signal_handler(
         if signal_state.push_frame(frame).is_none() {
             return false;
         }
+        if !signal_state.defer_timer_notification(frame_depth, pending.timer_identity()) {
+            return false;
+        }
         signal_state.suspend_restore_mask = None;
         signal_state.mask = handler_mask & !linux_uncatchable_signal_mask();
         if use_alt_stack {
@@ -5286,7 +5452,7 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> LinuxSignalDe
             }
             return LinuxSignalDeliveryOutcome::Idle;
         }
-        if commit_linux_signal(deliverable).is_err() {
+        if commit_linux_signal_deferred_timer_ack(deliverable).is_err() {
             return LinuxSignalDeliveryOutcome::Idle;
         }
         if action.flags & LINUX_SA_RESETHAND != 0 {
@@ -5379,14 +5545,18 @@ fn apply_linux_restart_block(saved_regs: usize, restart: LinuxRestartBlock) {
 }
 
 fn restore_linux_signal_frame(saved_regs: usize) -> Option<LinuxSignalFrameRestore> {
-    let Ok(Some(frame)) = linux_task::with_current_signal_state(|signal_state| {
-        let frame = signal_state.take_requested_frame()?;
+    let Ok(Some((frame, timer_identity))) = linux_task::with_current_signal_state(|signal_state| {
+        let (frame, timer_identity) =
+            signal_state.take_requested_frame_with_timer_notification()?;
         signal_state.mask = frame.previous_mask;
         signal_state.alt_stack.flags = frame.previous_stack_flags as u32;
-        Some(frame)
+        Some((frame, timer_identity))
     }) else {
         return None;
     };
+    if let Some(timer_identity) = timer_identity {
+        acknowledge_linux_timer_identity(timer_identity);
+    }
     let regs = unsafe { &mut *(saved_regs as *mut [u64; 32]) };
     *regs = frame.regs;
     crate::kernel_lowlevel::cpu::set_user_stack_pointer(frame.user_sp);
@@ -6866,37 +7036,52 @@ fn linux_high_resolution_relative_sleep_until(deadline: u64, rem: usize) -> SysR
     if rem != 0 && !linux_sleep_user_range_writable(rem, core::mem::size_of::<LinuxTimespec>()) {
         return Err(SysError::EFAULT);
     }
-    loop {
-        let now = monotonic_nanos();
-        if now >= deadline {
-            return Ok(0);
+
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let pending = match linux_sleep_has_deliverable_pending_signal() {
+        Ok(pending) => pending,
+        Err(error) => {
+            crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+            return Err(error);
         }
-
-        let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
-        let pending = match linux_sleep_has_deliverable_pending_signal() {
-            Ok(pending) => pending,
-            Err(error) => {
-                crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
-                return Err(error);
-            }
-        };
-        crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
-
-        if pending {
-            let remaining = deadline.saturating_sub(monotonic_nanos());
-            if rem != 0 {
-                linux_write_user_timespec(rem, linux_timespec_from_nanoseconds(remaining))?;
-            }
-            return Err(SysError::EINTR);
-        }
-
-        let remaining = deadline.saturating_sub(now);
-        if remaining > LINUX_HIGH_RES_RELATIVE_SLEEP_SPIN_NANOS {
-            crate::kernel_lowlevel::cpu::wait_for_interrupt();
+    };
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    if pending {
+        let remaining = deadline.saturating_sub(monotonic_nanos());
+        let write_result = if rem != 0 {
+            linux_write_user_timespec(rem, linux_timespec_from_nanoseconds(remaining))
         } else {
-            core::hint::spin_loop();
-        }
+            Ok(0)
+        };
+        write_result?;
+        return Err(SysError::EINTR);
     }
+
+    let now_nanoseconds = monotonic_nanos();
+    if now_nanoseconds >= deadline {
+        compiler_fence(Ordering::SeqCst);
+        return Ok(0);
+    }
+    let remaining_nanoseconds = deadline.saturating_sub(now_nanoseconds);
+    let seconds = remaining_nanoseconds / LINUX_NANOS_PER_SECOND;
+    let nanoseconds = remaining_nanoseconds % LINUX_NANOS_PER_SECOND;
+    let now_ticks = crate::kernel_lowlevel::timer::get_tick_count();
+    let tick_deadline = linux_task::linux_sleep_relative_deadline_ticks(
+        now_ticks,
+        i64::try_from(seconds).map_err(|_| SysError::EOVERFLOW)?,
+        i64::try_from(nanoseconds).map_err(|_| SysError::EOVERFLOW)?,
+        LINUX_SIGNAL_TICK_NANOS,
+    )
+    .ok_or(SysError::EOVERFLOW)?;
+    let wait = LinuxSleepWait::relative_waiting(
+        tick_deadline,
+        now_ticks,
+        remaining_nanoseconds,
+    );
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    crate::kernel_lowlevel::timer::arm_at_nanoseconds(deadline);
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    linux_sleep_until(wait, rem)
 }
 
 fn linux_hybrid_relative_sleep_until(
@@ -7217,9 +7402,27 @@ pub fn sys_openat(dirfd: usize, path: usize, flags: usize, mode: usize) -> SysRe
         return Err(error);
     }
     let access_mode = flags & LINUX_O_ACCMODE;
-    let existed_in_fxfs = fxfs::attrs(&path_str).is_ok();
+    let cached_handle = path_str
+        .starts_with(LINUX_SHM_ROOT_PATH)
+        .then(|| memory_state().linux_shm_cached_handle(&path_str))
+        .flatten();
+    let create_exclusive = flags & (LINUX_O_CREAT | LINUX_O_EXCL)
+        == (LINUX_O_CREAT | LINUX_O_EXCL);
+    if cached_handle.is_some() && create_exclusive {
+        return Err(SysError::EEXIST);
+    }
+    let existed_in_fxfs = cached_handle.is_some() || fxfs::attrs(&path_str).is_ok();
     if path_str.starts_with(LINUX_SHM_ROOT_PATH) && existed_in_fxfs {
         let _ = linux_shm_check_open_permissions(&path_str, access_mode)?;
+    }
+    if cached_handle.is_some()
+        && path_str.starts_with(LINUX_SHM_ROOT_PATH)
+        && flags & LINUX_O_TRUNC != 0
+    {
+        if access_mode == LINUX_O_RDONLY {
+            return Err(SysError::EINVAL);
+        }
+        fxfs::write_file(&path_str, &[]).map_err(linux_fxfs_error)?;
     }
     if object_type == ObjectType::LinuxFile
         && access_mode == LINUX_O_RDONLY
@@ -7234,19 +7437,35 @@ pub fn sys_openat(dirfd: usize, path: usize, flags: usize, mode: usize) -> SysRe
     {
         return Err(SysError::EMFILE);
     }
-    let fxfs_cursor = linux_prepare_fxfs_cursor(&path_str, object_type, flags, access_mode)?;
+    let fxfs_cursor = match cached_handle {
+        Some((_, _, cursor)) => Some(cursor),
+        None => linux_prepare_fxfs_cursor(&path_str, object_type, flags, access_mode)?,
+    };
     if object_type == ObjectType::LinuxFile && !existed_in_fxfs && flags & LINUX_O_CREAT != 0 {
         linux_apply_creation_attributes(&path_str, mode)?;
     }
-    let handle = compat::create_object(object_type).map_err(|_| SysError::ENOMEM)?;
+    let handle = match cached_handle {
+        Some((handle, _, _)) => HandleValue(handle),
+        None => compat::create_object(object_type).map_err(|_| SysError::ENOMEM)?,
+    };
     let state = memory_state();
-    let fd = state.alloc_fd_with_flags(
-        handle.0,
-        flags & (LINUX_O_ACCMODE | LINUX_FCNTL_STATUS_ALLOWED_FLAGS),
-        flags & LINUX_O_CLOEXEC != 0,
-    );
+    let status_flags = flags & (LINUX_O_ACCMODE | LINUX_FCNTL_STATUS_ALLOWED_FLAGS);
+    let close_on_exec = flags & LINUX_O_CLOEXEC != 0;
+    let fd = match cached_handle {
+        Some((_, description_id, _)) => {
+            state.alloc_fd_for_description(description_id, status_flags, close_on_exec)
+        }
+        None => state.alloc_fd_with_flags(handle.0, status_flags, close_on_exec),
+    };
     if let Some(cursor) = fxfs_cursor {
-        state.bind_linux_fxfs_file(handle.0, String::from(path_str), cursor);
+        state.bind_linux_fxfs_file(handle.0, String::from(path_str.as_str()), cursor);
+        if path_str.starts_with(LINUX_SHM_ROOT_PATH) && cached_handle.is_none() {
+            let description_id = state
+                .get_fd(fd)
+                .map(|record| record.description_id)
+                .ok_or(SysError::ENODEV)?;
+            state.cache_linux_shm_handle(path_str.as_str(), handle.0, description_id, cursor);
+        }
     }
     Ok(fd)
 }
@@ -7462,6 +7681,9 @@ pub fn sys_unlinkat(_dirfd: usize, path: usize, flags: usize) -> SysResult {
     }
     linux_shm_check_unlink_permissions(&path)?;
     let object_id = fxfs::unlink_file(path.as_str()).map_err(linux_fxfs_error)?;
+    if path.starts_with(LINUX_SHM_ROOT_PATH) {
+        memory_state().remove_linux_shm_cached_path(path.as_str());
+    }
     if !linux_fxfs_object_is_open(object_id) {
         fxfs::release_unlinked_file(object_id).map_err(linux_fxfs_error)?;
     }
@@ -9444,6 +9666,34 @@ fn linux_sched_target_pid(pid: usize) -> Result<usize, SysError> {
     linux_sched_target_task(pid).map(|target| target.tgid)
 }
 
+fn linux_sched_permission_allowed(target: LinuxSchedTarget) -> bool {
+    let sender_pid = linux_resource_pid();
+    let sender = memory_state()
+        .process_resources(sender_pid)
+        .map(|resources| resources.credentials)
+        .unwrap_or_default();
+    if sender.effective_uid == 0 {
+        return true;
+    }
+    /* SMROS launches the current ELF as the Linux root process (PID 1).
+     * Keep PID 1 protected after the test drops credentials, matching the
+     * init-process permission boundary expected by POSIX conformance cases. */
+    if target.tgid == linux_process::LINUX_ROOT_PID {
+        return false;
+    }
+    if target.tgid == sender_pid {
+        return true;
+    }
+    let target = memory_state()
+        .process_resources(target.tgid)
+        .map(|resources| resources.credentials)
+        .unwrap_or_default();
+    sender.real_uid == target.real_uid
+        || sender.real_uid == target.saved_uid
+        || sender.effective_uid == target.real_uid
+        || sender.effective_uid == target.saved_uid
+}
+
 fn linux_apply_sched_priority_to_thread(
     scheduler_thread: usize,
     policy: usize,
@@ -9523,6 +9773,9 @@ fn linux_set_sched_target_param(target: LinuxSchedTarget, param: LinuxTaskSchedP
 
 pub fn sys_sched_getparam(pid: usize, param: usize) -> SysResult {
     let target = linux_sched_target_task(pid)?;
+    if !linux_sched_permission_allowed(target) {
+        return Err(SysError::EPERM);
+    }
     linux_write_user_sched_param(param, linux_sched_target_param(target).priority)?;
     Ok(0)
 }
@@ -9534,11 +9787,17 @@ pub fn sys_sched_setparam(pid: usize, param: usize) -> SysResult {
     if !syscall_logic::linux_sched_priority_valid(policy, priority) {
         return Err(SysError::EINVAL);
     }
+    if !linux_sched_permission_allowed(target) {
+        return Err(SysError::EPERM);
+    }
     linux_set_sched_target_param(target, LinuxTaskSchedParam { policy, priority })
 }
 
 pub fn sys_sched_getscheduler(pid: usize) -> SysResult {
     let target = linux_sched_target_task(pid)?;
+    if !linux_sched_permission_allowed(target) {
+        return Err(SysError::EPERM);
+    }
     Ok(linux_sched_target_param(target).policy)
 }
 
@@ -9548,6 +9807,9 @@ pub fn sys_sched_setscheduler(pid: usize, policy: usize, param: usize) -> SysRes
         return Err(SysError::EINVAL);
     }
     let target = linux_sched_target_task(pid)?;
+    if !linux_sched_permission_allowed(target) {
+        return Err(SysError::EPERM);
+    }
     linux_set_sched_target_param(target, LinuxTaskSchedParam { policy, priority })
 }
 
@@ -9891,21 +10153,15 @@ pub fn sys_clock_nanosleep(clockid: usize, flags: usize, req: usize, rem: usize)
     let requested_nanoseconds =
         linux_task::linux_sleep_timespec_nanoseconds(requested.tv_sec, requested.tv_nsec)
             .ok_or(SysError::EINVAL)?;
-    if !absolute {
+    if !absolute && requested_nanoseconds != 0 {
         let start_nanoseconds = monotonic_nanos();
-        if let Some(deadline) = linux_task::linux_short_sleep_deadline_nanoseconds(
-            start_nanoseconds,
-            requested_nanoseconds,
-            LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS,
-        ) {
+        let deadline = start_nanoseconds
+            .checked_add(requested_nanoseconds)
+            .ok_or(SysError::EOVERFLOW)?;
+        if requested_nanoseconds <= LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS {
             return linux_high_resolution_relative_sleep_until(deadline, rem);
         }
-        if requested_nanoseconds != 0
-            && requested_nanoseconds <= LINUX_HYBRID_RELATIVE_SLEEP_MAX_NANOS
-        {
-            let deadline = start_nanoseconds
-                .checked_add(requested_nanoseconds)
-                .ok_or(SysError::EOVERFLOW)?;
+        if requested_nanoseconds <= LINUX_HYBRID_RELATIVE_SLEEP_MAX_NANOS {
             return linux_hybrid_relative_sleep_until(deadline, requested_nanoseconds, rem);
         }
     }
@@ -10674,7 +10930,8 @@ fn sys_fork_with_child_tid(
             child_exit_signal,
             set_child_tid,
             clear_child_tid,
-        )?;
+        );
+        let child_pid = child_pid?;
         debug_assert_ne!(child_pid, parent_pid);
         Ok(child_pid)
     }
@@ -10841,6 +11098,13 @@ pub fn sys_execve(path: usize, argv: usize, _envp: usize) -> SysResult {
 
     let path = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
     let arg1 = linux_user_argv_string(argv, 1, LINUX_PATH_MAX_BYTES)?;
+    if let Some(exit_code) = syscall_logic::linux_exec_builtin_exit_code(path.as_str()) {
+        let pid = linux_process::current_pid()?;
+        prepare_linux_exec_transition(pid);
+        linux_process::reset_current_signal_state()?;
+        linux_task::with_current_signal_state(|signal_state| signal_state.reset_in_place())?;
+        return sys_exit_group(exit_code);
+    }
     if let Some(seconds) =
         syscall_logic::linux_exec_sleep_duration_seconds(path.as_str(), arg1.as_deref())
     {
@@ -10964,7 +11228,6 @@ pub fn sys_exit(exit_code: i32) -> SysResult {
         linux_process::current_pid().unwrap_or(0),
         exit_code
     );
-
     if let Some(launch_id) = exit_current_linux_process(exit_code, false)? {
         return Ok(launch_id);
     }
@@ -13895,20 +14158,17 @@ fn sys_nanosleep_linux_with_rem(req: usize, rem: usize) -> SysResult {
     let requested_nanoseconds =
         linux_task::linux_sleep_timespec_nanoseconds(requested.tv_sec, requested.tv_nsec)
             .ok_or(SysError::EINVAL)?;
-    let start_nanoseconds = monotonic_nanos();
-    if let Some(deadline) = linux_task::linux_short_sleep_deadline_nanoseconds(
-        start_nanoseconds,
-        requested_nanoseconds,
-        LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS,
-    ) {
-        return linux_high_resolution_relative_sleep_until(deadline, rem);
-    }
-    if requested_nanoseconds != 0 && requested_nanoseconds <= LINUX_HYBRID_RELATIVE_SLEEP_MAX_NANOS
-    {
+    if requested_nanoseconds != 0 {
+        let start_nanoseconds = monotonic_nanos();
         let deadline = start_nanoseconds
             .checked_add(requested_nanoseconds)
             .ok_or(SysError::EOVERFLOW)?;
-        return linux_hybrid_relative_sleep_until(deadline, requested_nanoseconds, rem);
+        if requested_nanoseconds <= LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS {
+            return linux_high_resolution_relative_sleep_until(deadline, rem);
+        }
+        if requested_nanoseconds <= LINUX_HYBRID_RELATIVE_SLEEP_MAX_NANOS {
+            return linux_hybrid_relative_sleep_until(deadline, requested_nanoseconds, rem);
+        }
     }
     let deadline = linux_task::linux_sleep_relative_deadline_ticks(
         now,

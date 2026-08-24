@@ -13,6 +13,7 @@ pub(crate) mod linux_mqueue;
 pub(crate) mod linux_process;
 pub(crate) mod linux_process_memory;
 pub(crate) mod linux_record_lock;
+pub(crate) mod linux_shm_cache_logic_shared;
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod linux_syscall_context;
 pub(crate) mod linux_task;

@@ -228,6 +228,11 @@ impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
         (pfn as usize).checked_mul(page_size)
     }
 
+    pub(crate) fn pfn_index(&self, pfn: u64) -> Option<usize> {
+        let index = pfn.checked_sub(self.base_pfn)?;
+        (index < self.total_pages as u64).then_some(index as usize)
+    }
+
     pub(crate) const fn total_pages(&self) -> usize {
         self.total_pages
     }

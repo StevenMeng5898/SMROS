@@ -1,6 +1,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use core::marker::PhantomData;
 
 use crate::kernel_lowlevel::memory::{PageFrameAllocator, PAGE_SIZE};
 #[cfg(target_arch = "aarch64")]
@@ -327,9 +328,17 @@ impl BrkState {
     }
 }
 
+#[derive(Clone, Copy)]
+struct LinuxPrivatePageHint {
+    address: usize,
+    pfn: u64,
+}
+
 pub(crate) struct LinuxProcessMemory {
     pub pid: usize,
     generation: usize,
+    private_page_tracking_enabled: bool,
+    private_page_hints: Vec<LinuxPrivatePageHint>,
     #[cfg(target_arch = "aarch64")]
     pub address_space: Aarch64AddressSpace,
     #[cfg(not(target_arch = "aarch64"))]
@@ -634,41 +643,246 @@ fn acquire_or_register_shared_page(
     })
 }
 
-fn promote_private_fork_page(page: &mut LinuxPageBacking) -> Result<(), SysError> {
-    let LinuxPageBacking::Private { pfn } = *page else {
-        return Ok(());
-    };
-    let page_index = usize::try_from(pfn).map_err(|_| SysError::ENOMEM)?;
-    let canonical = acquire_or_register_shared_page(
-        LINUX_FORK_PRIVATE_OBJECT_ID,
-        page_index,
-        pfn,
-    )
-    .ok_or(SysError::ENOMEM)?;
-    if canonical != pfn {
-        return Err(SysError::ENOMEM);
+fn private_page_details(
+    memory: &LinuxProcessMemory,
+    address: usize,
+    pfn: u64,
+) -> Option<(usize, usize)> {
+    for mapping in &memory.mappings {
+        if address < mapping.addr
+            || address >= mapping.addr.saturating_add(mapping.len)
+        {
+            continue;
+        }
+        let page_index = (address - mapping.addr) / PAGE_SIZE;
+        if mapping.pages.get(page_index).copied()
+            != Some(LinuxPageBacking::Private { pfn })
+        {
+            return None;
+        }
+        let prot = LinuxProcessMemory::mapping_page_prot(&mapping.source, mapping.prot, page_index);
+        let shared = LinuxPageBacking::Shared {
+            object_id: LINUX_FORK_PRIVATE_OBJECT_ID,
+            page_index: usize::try_from(pfn).ok()?,
+            pfn,
+        };
+        return Some((prot, linux_page_protection_for_backing(shared, prot)));
     }
-    *page = LinuxPageBacking::Shared {
-        object_id: LINUX_FORK_PRIVATE_OBJECT_ID,
-        page_index,
-        pfn,
-    };
+    if address >= memory.brk.start
+        && address < memory.brk.start.saturating_add(memory.brk.pages.len() * PAGE_SIZE)
+    {
+        let page_index = (address - memory.brk.start) / PAGE_SIZE;
+        if memory.brk.pages.get(page_index).copied()
+            == Some(LinuxPageBacking::Private { pfn })
+        {
+            let prot = LINUX_PROT_READ | LINUX_PROT_WRITE;
+            let shared = LinuxPageBacking::Shared {
+                object_id: LINUX_FORK_PRIVATE_OBJECT_ID,
+                page_index: usize::try_from(pfn).ok()?,
+                pfn,
+            };
+            return Some((prot, linux_page_protection_for_backing(shared, prot)));
+        }
+    }
+    None
+}
+
+fn promote_private_backing(memory: &mut LinuxProcessMemory, address: usize, pfn: u64) {
+    for mapping in &mut memory.mappings {
+        if address < mapping.addr
+            || address >= mapping.addr.saturating_add(mapping.len)
+        {
+            continue;
+        }
+        let page_index = (address - mapping.addr) / PAGE_SIZE;
+        if mapping.pages.get(page_index).copied()
+            == Some(LinuxPageBacking::Private { pfn })
+        {
+            mapping.pages[page_index] = LinuxPageBacking::Shared {
+                object_id: LINUX_FORK_PRIVATE_OBJECT_ID,
+                page_index: usize::try_from(pfn).unwrap_or(0),
+                pfn,
+            };
+        }
+        return;
+    }
+    if address >= memory.brk.start
+        && address < memory.brk.start.saturating_add(memory.brk.pages.len() * PAGE_SIZE)
+    {
+        let page_index = (address - memory.brk.start) / PAGE_SIZE;
+        if memory.brk.pages.get(page_index).copied()
+            == Some(LinuxPageBacking::Private { pfn })
+        {
+            memory.brk.pages[page_index] = LinuxPageBacking::Shared {
+                object_id: LINUX_FORK_PRIVATE_OBJECT_ID,
+                page_index: usize::try_from(pfn).unwrap_or(0),
+                pfn,
+            };
+        }
+    }
+}
+
+fn promote_tracked_private_fork_pages(
+    memory: &mut LinuxProcessMemory,
+) -> Result<(), SysError> {
+    let hints = core::mem::take(&mut memory.private_page_hints);
+    if hints.is_empty() {
+        return Ok(());
+    }
+    let mut tracked = Vec::new();
+    tracked
+        .try_reserve_exact(hints.len())
+        .map_err(|_| SysError::ENOMEM)?;
+    for hint in hints {
+        if let Some((prot, cow_prot)) = private_page_details(memory, hint.address, hint.pfn) {
+            tracked.push((hint.address, hint.pfn, prot, cow_prot));
+        }
+    }
+    if tracked.is_empty() {
+        return Ok(());
+    }
+
+    tracked.sort_unstable_by_key(|(_, pfn, _, _)| *pfn);
+    let mut additions = Vec::new();
+    additions
+        .try_reserve_exact(tracked.len())
+        .map_err(|_| SysError::ENOMEM)?;
+    let mut index = 0usize;
+    while index < tracked.len() {
+        let pfn = tracked[index].1;
+        let mut next = index + 1;
+        while next < tracked.len() && tracked[next].1 == pfn {
+            next += 1;
+        }
+        additions.push(LinuxSharedPageRecord {
+            object_id: LINUX_FORK_PRIVATE_OBJECT_ID,
+            page_index: usize::try_from(pfn).map_err(|_| SysError::ENOMEM)?,
+            pfn,
+            references: next - index,
+            named: true,
+        });
+        index = next;
+    }
+    with_shared_pages(|runtime| {
+        linux_merge_shared_page_records_in_place(&mut runtime.pages, &additions)
+            .ok_or(SysError::ENOMEM)
+    })?;
+
+    let mut protections = Vec::new();
+    protections
+        .try_reserve_exact(tracked.len())
+        .map_err(|_| SysError::ENOMEM)?;
+    for (address, pfn, prot, cow_prot) in tracked {
+        promote_private_backing(memory, address, pfn);
+        if cow_prot != prot {
+            protections.push((address, cow_prot));
+        }
+    }
+    for (address, prot) in protections {
+        memory.protect_page(address, prot)?;
+    }
     Ok(())
 }
 
 fn promote_private_fork_pages(memory: &mut LinuxProcessMemory) -> Result<(), SysError> {
-    let initial_stack = memory.initial_stack;
+    if memory.private_page_tracking_enabled {
+        return promote_tracked_private_fork_pages(memory);
+    }
+    let mut private_page_count = 0usize;
     for mapping in &mut memory.mappings {
-        if initial_stack.is_some_and(|(addr, len)| ranges_overlap(mapping.addr, mapping.len, addr, len)) {
-            continue;
+        private_page_count = private_page_count
+            .checked_add(
+                mapping
+                    .pages
+                    .iter()
+                    .filter(|page| matches!(page, LinuxPageBacking::Private { .. }))
+                    .count(),
+            )
+            .ok_or(SysError::ENOMEM)?;
+    }
+    private_page_count = private_page_count
+        .checked_add(
+            memory
+                .brk
+                .pages
+                .iter()
+                .filter(|page| matches!(page, LinuxPageBacking::Private { .. }))
+                .count(),
+        )
+        .ok_or(SysError::ENOMEM)?;
+
+    if private_page_count == 0 {
+        memory.private_page_tracking_enabled = true;
+        return Ok(());
+    }
+
+    let mut private_pfns = Vec::new();
+    private_pfns
+        .try_reserve_exact(private_page_count)
+        .map_err(|_| SysError::ENOMEM)?;
+    for mapping in &memory.mappings {
+        for page in &mapping.pages {
+            if let LinuxPageBacking::Private { pfn } = *page {
+                private_pfns.push(pfn);
+            }
         }
+    }
+    for page in &memory.brk.pages {
+        if let LinuxPageBacking::Private { pfn } = *page {
+            private_pfns.push(pfn);
+        }
+    }
+
+    private_pfns.sort_unstable();
+    let mut additions = Vec::new();
+    additions
+        .try_reserve_exact(private_pfns.len())
+        .map_err(|_| SysError::ENOMEM)?;
+    let mut private_index = 0usize;
+    while private_index < private_pfns.len() {
+        let pfn = private_pfns[private_index];
+        let mut next_index = private_index + 1;
+        while next_index < private_pfns.len() && private_pfns[next_index] == pfn {
+            next_index += 1;
+        }
+        additions.push(LinuxSharedPageRecord {
+            object_id: LINUX_FORK_PRIVATE_OBJECT_ID,
+            page_index: usize::try_from(pfn).map_err(|_| SysError::ENOMEM)?,
+            pfn,
+            references: next_index - private_index,
+            named: true,
+        });
+        private_index = next_index;
+    }
+
+    if !additions.is_empty() {
+        with_shared_pages(|runtime| {
+            linux_merge_shared_page_records_in_place(&mut runtime.pages, &additions)
+                .ok_or(SysError::ENOMEM)
+        })?;
+    }
+
+    for mapping in &mut memory.mappings {
         for page in &mut mapping.pages {
-            promote_private_fork_page(page)?;
+            if let LinuxPageBacking::Private { pfn } = *page {
+                *page = LinuxPageBacking::Shared {
+                    object_id: LINUX_FORK_PRIVATE_OBJECT_ID,
+                    page_index: usize::try_from(pfn).map_err(|_| SysError::ENOMEM)?,
+                    pfn,
+                };
+            }
         }
     }
     for page in &mut memory.brk.pages {
-        promote_private_fork_page(page)?;
+        if let LinuxPageBacking::Private { pfn } = *page {
+            *page = LinuxPageBacking::Shared {
+                object_id: LINUX_FORK_PRIVATE_OBJECT_ID,
+                page_index: usize::try_from(pfn).map_err(|_| SysError::ENOMEM)?,
+                pfn,
+            };
+        }
     }
+    memory.private_page_tracking_enabled = true;
 
     let mut protections = Vec::new();
     protections
@@ -1011,6 +1225,8 @@ pub(crate) fn register_root(pid: usize) -> Result<u64, SysError> {
         runtime.memories.push(LinuxProcessMemory {
             pid,
             generation: memory_generation(),
+            private_page_tracking_enabled: false,
+            private_page_hints: Vec::new(),
             address_space,
             mappings: Vec::new(),
             shared_attachments: Vec::new(),
@@ -1104,14 +1320,6 @@ pub(crate) fn clone_for_fork(
     child_pid: usize,
     mut shared_attachments: Vec<LinuxSharedAttachmentClone>,
 ) -> Result<u64, SysError> {
-    crate::kobj_debug!(
-        "fork",
-        "clone begin parent={} child={} allocated={} free={}",
-        parent_pid,
-        child_pid,
-        PageFrameAllocator::allocated_pages(),
-        PageFrameAllocator::free_pages()
-    );
     let result = with_runtime(|runtime| {
         if runtime
             .memories
@@ -1123,7 +1331,15 @@ pub(crate) fn clone_for_fork(
         runtime
             .memories
             .try_reserve(1)
-            .map_err(|_| SysError::ENOMEM)?;
+            .map_err(|_| {
+                crate::kobj_info!(
+                    "posix-fork",
+                    "clone-error-stage parent={} child={} stage=memory-vector-reserve",
+                    parent_pid,
+                    child_pid
+                );
+                SysError::ENOMEM
+            })?;
         let parent_index = runtime
             .memories
             .iter()
@@ -1134,25 +1350,59 @@ pub(crate) fn clone_for_fork(
                 .memories
                 .get_mut(parent_index)
                 .ok_or(SysError::ESRCH)?,
-        )?;
+        )
+        .map_err(|error| {
+            crate::kobj_info!(
+                "posix-fork",
+                "clone-error-stage parent={} child={} stage=promote-private error={:?}",
+                parent_pid,
+                child_pid,
+                error
+            );
+            error
+        })?;
         let parent = runtime
             .memories
             .get(parent_index)
             .ok_or(SysError::ESRCH)?;
 
         #[cfg(target_arch = "aarch64")]
-        let address_space = Aarch64AddressSpace::new_for_fork(fork_table_allocation_failure)
-            .map_err(map_address_error)?;
+        let mut address_space = Aarch64AddressSpace::new_for_fork(
+            &parent.address_space,
+            fork_table_allocation_failure,
+        )
+            .map_err(map_address_error)
+            .map_err(|error| {
+                crate::kobj_info!(
+                    "posix-fork",
+                    "clone-error-stage parent={} child={} stage=address-space error={:?}",
+                    parent_pid,
+                    child_pid,
+                    error
+                );
+                error
+            })?;
+        address_space.begin_deferred_user_updates();
         #[cfg(not(target_arch = "aarch64"))]
         let address_space = FallbackAddressSpace::new(child_pid)?;
         let root_paddr = address_space.root_paddr();
         if root_paddr == 0 || root_paddr == parent.address_space.root_paddr() {
+            crate::kobj_info!(
+                "posix-fork",
+                "clone-error-stage parent={} child={} stage=root-identity child_root={:#x} parent_root={:#x}",
+                parent_pid,
+                child_pid,
+                root_paddr,
+                parent.address_space.root_paddr()
+            );
             return Err(SysError::ENOMEM);
         }
 
         let mut child = LinuxProcessMemory {
             pid: child_pid,
             generation: memory_generation(),
+            private_page_tracking_enabled: true,
+            private_page_hints: Vec::new(),
             address_space,
             mappings: Vec::new(),
             shared_attachments: Vec::new(),
@@ -1168,14 +1418,40 @@ pub(crate) fn clone_for_fork(
         child
             .mappings
             .try_reserve_exact(parent.mappings.len())
-            .map_err(|_| SysError::ENOMEM)?;
+            .map_err(|_| {
+                crate::kobj_info!(
+                    "posix-fork",
+                    "clone-error-stage parent={} child={} stage=mapping-vector-reserve count={}",
+                    parent_pid,
+                    child_pid,
+                    parent.mappings.len()
+                );
+                SysError::ENOMEM
+            })?;
         child
             .shared_attachments
             .try_reserve_exact(shared_attachments.len())
-            .map_err(|_| SysError::ENOMEM)?;
+            .map_err(|_| {
+                crate::kobj_info!(
+                    "posix-fork",
+                    "clone-error-stage parent={} child={} stage=attachment-vector-reserve count={}",
+                    parent_pid,
+                    child_pid,
+                    shared_attachments.len()
+                );
+                SysError::ENOMEM
+            })?;
 
         for mapping in &parent.mappings {
-            let source = mapping.source.try_clone_for_fork()?;
+            let source = mapping.source.try_clone_for_fork().map_err(|_| {
+                crate::kobj_info!(
+                    "posix-fork",
+                    "clone-error-stage parent={} child={} stage=mapping-source-clone",
+                    parent_pid,
+                    child_pid
+                );
+                SysError::ENOMEM
+            })?;
             if mapping.addr <= 0x1203_00a0
                 && 0x1203_00a0 < mapping.addr.saturating_add(mapping.len)
             {
@@ -1234,33 +1510,110 @@ pub(crate) fn clone_for_fork(
                 }
                 pages
             } else {
-                let mut page_ops = LinuxProcessForkPageOps { memory: &mut child };
-                super::linux_process::clone_linux_fork_pages(
-                    &mut page_ops,
-                    &mapping.pages,
-                    super::linux_process::fork_failpoint,
-                )?
-            };
-            let map_result = super::linux_process::map_linux_fork_pages_with_protection(
-                &mut LinuxProcessForkPageOps { memory: &mut child },
-                mapping.addr,
-                PAGE_SIZE,
-                &pages,
-                |page_index| {
-                    linux_page_protection_for_backing(
-                        pages[page_index],
-                        LinuxProcessMemory::mapping_page_prot(
-                            &source,
-                            mapping.prot,
-                            page_index,
-                        ),
+                #[cfg(target_arch = "aarch64")]
+                let cloned = if mapping
+                    .pages
+                    .iter()
+                    .all(|page| matches!(page, LinuxPageBacking::Shared { .. }))
+                {
+                    let pages = clone_shared_linux_fork_pages(&mapping.pages)?;
+                    if pages.iter().any(|_| {
+                        super::linux_process::fork_failpoint(
+                            LinuxForkFailurePoint::SharedReference,
+                        )
+                    }) {
+                        LinuxProcessMemory::free_backings(&pages);
+                        return Err(SysError::ENOMEM);
+                    }
+                    Ok(pages)
+                } else {
+                    let mut page_ops = LinuxProcessForkPageOps::new(&mut child);
+                    super::linux_process::clone_linux_fork_pages(
+                        &mut page_ops,
+                        &mapping.pages,
+                        super::linux_process::fork_failpoint,
                     )
-                },
-                super::linux_process::fork_failpoint,
-            );
-            if let Err(error) = map_result {
-                LinuxProcessMemory::free_backings(&pages);
-                return Err(error);
+                };
+                #[cfg(not(target_arch = "aarch64"))]
+                let cloned = {
+                    let mut page_ops = LinuxProcessForkPageOps::new(&mut child);
+                    super::linux_process::clone_linux_fork_pages(
+                        &mut page_ops,
+                        &mapping.pages,
+                        super::linux_process::fork_failpoint,
+                    )
+                };
+                cloned.map_err(|error| {
+                    crate::kobj_info!(
+                        "posix-fork",
+                        "clone-error-stage parent={} child={} stage=mapping-pages error={:?}",
+                        parent_pid,
+                        child_pid,
+                        error
+                    );
+                    error
+                })?
+            };
+            #[cfg(target_arch = "aarch64")]
+            {
+                for (page_index, page) in pages.iter().copied().enumerate() {
+                    if !matches!(page, LinuxPageBacking::Private { .. }) {
+                        continue;
+                    }
+                    let page_address = mapping
+                        .addr
+                        .checked_add(page_index * PAGE_SIZE)
+                        .ok_or(SysError::ENOMEM)?;
+                    let prot = linux_page_protection_for_backing(
+                        page,
+                        LinuxProcessMemory::mapping_page_prot(&source, mapping.prot, page_index),
+                    );
+                    if let Err(error) = child
+                        .unmap_page(page_address)
+                        .and_then(|_| child.map_page(page_address, page.pfn(), prot))
+                    {
+                        crate::kobj_info!(
+                            "posix-fork",
+                            "clone-error-stage parent={} child={} stage=mapping-private-remap error={:?}",
+                            parent_pid,
+                            child_pid,
+                            error
+                        );
+                        LinuxProcessMemory::free_backings(&pages);
+                        return Err(error);
+                    }
+                }
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                let map_result = super::linux_process::map_linux_fork_pages_with_protection(
+                    &mut LinuxProcessForkPageOps::new(&mut child),
+                    mapping.addr,
+                    PAGE_SIZE,
+                    &pages,
+                    |page_index| {
+                        linux_page_protection_for_backing(
+                            pages[page_index],
+                            LinuxProcessMemory::mapping_page_prot(
+                                &source,
+                                mapping.prot,
+                                page_index,
+                            ),
+                        )
+                    },
+                    super::linux_process::fork_failpoint,
+                );
+                if let Err(error) = map_result {
+                    crate::kobj_info!(
+                        "posix-fork",
+                        "clone-error-stage parent={} child={} stage=mapping-map error={:?}",
+                        parent_pid,
+                        child_pid,
+                        error
+                    );
+                    LinuxProcessMemory::free_backings(&pages);
+                    return Err(error);
+                }
             }
             child.mappings.push(LinuxProcessMapping {
                 addr: mapping.addr,
@@ -1279,38 +1632,110 @@ pub(crate) fn clone_for_fork(
             return Err(SysError::EINVAL);
         }
 
+        #[cfg(target_arch = "aarch64")]
+        let brk_pages = if parent
+            .brk
+            .pages
+            .iter()
+            .all(|page| matches!(page, LinuxPageBacking::Shared { .. }))
+        {
+            let pages = clone_shared_linux_fork_pages(&parent.brk.pages)?;
+            if pages.iter().any(|_| {
+                super::linux_process::fork_failpoint(
+                    LinuxForkFailurePoint::SharedReference,
+                )
+            }) {
+                LinuxProcessMemory::free_backings(&pages);
+                return Err(SysError::ENOMEM);
+            }
+            Ok(pages)
+        } else {
+            super::linux_process::clone_linux_fork_pages(
+                &mut LinuxProcessForkPageOps::new(&mut child),
+                &parent.brk.pages,
+                super::linux_process::fork_failpoint,
+            )
+        };
+        #[cfg(not(target_arch = "aarch64"))]
         let brk_pages = super::linux_process::clone_linux_fork_pages(
-            &mut LinuxProcessForkPageOps { memory: &mut child },
+            &mut LinuxProcessForkPageOps::new(&mut child),
             &parent.brk.pages,
             super::linux_process::fork_failpoint,
-        )?;
-        let brk_start = child.brk.start;
-        let map_result = super::linux_process::map_linux_fork_pages(
-            &mut LinuxProcessForkPageOps { memory: &mut child },
-            brk_start,
-            PAGE_SIZE,
-            &brk_pages,
-            LINUX_PROT_READ | LINUX_PROT_WRITE,
-            super::linux_process::fork_failpoint,
         );
-        if let Err(error) = map_result {
-            LinuxProcessMemory::free_backings(&brk_pages);
-            return Err(error);
+        let brk_pages = brk_pages
+        .map_err(|error| {
+            crate::kobj_info!(
+                "posix-fork",
+                "clone-error-stage parent={} child={} stage=brk-pages error={:?}",
+                parent_pid,
+                child_pid,
+                error
+            );
+            error
+        })?;
+        let brk_start = child.brk.start;
+        #[cfg(target_arch = "aarch64")]
+        for (page_index, page) in brk_pages.iter().copied().enumerate() {
+            if !matches!(page, LinuxPageBacking::Private { .. }) {
+                continue;
+            }
+            let page_address = brk_start
+                .checked_add(page_index * PAGE_SIZE)
+                .ok_or(SysError::ENOMEM)?;
+            if let Err(error) = child
+                .unmap_page(page_address)
+                .and_then(|_| child.map_page(page_address, page.pfn(), LINUX_PROT_READ | LINUX_PROT_WRITE))
+            {
+                crate::kobj_info!(
+                    "posix-fork",
+                    "clone-error-stage parent={} child={} stage=brk-private-remap error={:?}",
+                    parent_pid,
+                    child_pid,
+                    error
+                );
+                LinuxProcessMemory::free_backings(&brk_pages);
+                return Err(error);
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let map_result = super::linux_process::map_linux_fork_pages(
+                &mut LinuxProcessForkPageOps::new(&mut child),
+                brk_start,
+                PAGE_SIZE,
+                &brk_pages,
+                LINUX_PROT_READ | LINUX_PROT_WRITE,
+                super::linux_process::fork_failpoint,
+            );
+            if let Err(error) = map_result {
+                crate::kobj_info!(
+                    "posix-fork",
+                    "clone-error-stage parent={} child={} stage=brk-map error={:?}",
+                    parent_pid,
+                    child_pid,
+                    error
+                );
+                LinuxProcessMemory::free_backings(&brk_pages);
+                return Err(error);
+            }
         }
         child.brk.pages = brk_pages;
+        child.address_space.end_deferred_user_updates();
         crate::kernel_lowlevel::cpu::sync_instruction_cache();
         runtime.memories.push(child);
         Ok(root_paddr)
     });
-    crate::kobj_debug!(
-        "fork",
-        "clone end parent={} child={} ok={} allocated={} free={}",
-        parent_pid,
-        child_pid,
-        result.is_ok(),
-        PageFrameAllocator::allocated_pages(),
-        PageFrameAllocator::free_pages()
-    );
+    if let Err(error) = &result {
+        crate::kobj_info!(
+            "posix-fork",
+            "clone-error parent={} child={} error={:?} allocated={} free={}",
+            parent_pid,
+            child_pid,
+            error,
+            PageFrameAllocator::allocated_pages(),
+            PageFrameAllocator::free_pages()
+        );
+    }
     if result.is_err() {
         release_shared_attachments(&shared_attachments);
     }
@@ -1328,7 +1753,26 @@ fn fork_table_allocation_failure(allocation: usize) -> bool {
 }
 
 struct LinuxProcessForkPageOps<'a> {
+    #[cfg(not(target_arch = "aarch64"))]
     memory: &'a mut LinuxProcessMemory,
+    #[cfg(target_arch = "aarch64")]
+    _marker: PhantomData<&'a mut LinuxProcessMemory>,
+}
+
+impl<'a> LinuxProcessForkPageOps<'a> {
+    fn new(memory: &'a mut LinuxProcessMemory) -> Self {
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            Self { memory }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let _ = memory;
+            Self {
+                _marker: PhantomData,
+            }
+        }
+    }
 }
 
 impl super::linux_process::LinuxForkPageOps for LinuxProcessForkPageOps<'_> {
@@ -1387,6 +1831,7 @@ impl super::linux_process::LinuxForkPageOps for LinuxProcessForkPageOps<'_> {
         LinuxProcessMemory::free_backings(core::slice::from_ref(&page));
     }
 
+    #[cfg(not(target_arch = "aarch64"))]
     fn map_page(
         &mut self,
         address: usize,
@@ -1396,9 +1841,112 @@ impl super::linux_process::LinuxForkPageOps for LinuxProcessForkPageOps<'_> {
         self.memory.map_page(address, page.pfn(), prot)
     }
 
+    #[cfg(not(target_arch = "aarch64"))]
     fn unmap_page(&mut self, address: usize) {
         let _ = self.memory.unmap_page(address);
     }
+}
+
+fn clone_shared_linux_fork_pages(
+    parent_pages: &[LinuxPageBacking],
+) -> Result<Vec<LinuxPageBacking>, SysError> {
+    let mut child_pages = Vec::new();
+    child_pages
+        .try_reserve_exact(parent_pages.len())
+        .map_err(|_| SysError::ENOMEM)?;
+    child_pages.extend_from_slice(parent_pages);
+
+    let valid = with_shared_pages(|runtime| {
+        let contiguous_start = parent_pages.first().and_then(|first| {
+            let LinuxPageBacking::Shared {
+                object_id,
+                page_index,
+                ..
+            } = *first
+            else {
+                return None;
+            };
+            let start = runtime
+                .pages
+                .binary_search_by_key(&(object_id, page_index), |candidate| {
+                    (candidate.object_id, candidate.page_index)
+                })
+                .ok()?;
+            parent_pages
+                .iter()
+                .enumerate()
+                .all(|(offset, page)| {
+                    let LinuxPageBacking::Shared {
+                        object_id,
+                        page_index,
+                        ..
+                    } = *page
+                    else {
+                        return false;
+                    };
+                    runtime
+                        .pages
+                        .get(start + offset)
+                        .is_some_and(|candidate| {
+                            (candidate.object_id, candidate.page_index)
+                                == (object_id, page_index)
+                        })
+                })
+                .then_some(start)
+        });
+        if let Some(start) = contiguous_start {
+            for offset in 0..parent_pages.len() {
+                if runtime.pages[start + offset].references == usize::MAX {
+                    return false;
+                }
+            }
+            for offset in 0..parent_pages.len() {
+                runtime.pages[start + offset].references += 1;
+            }
+            return true;
+        }
+        for page in parent_pages.iter().copied() {
+            let LinuxPageBacking::Shared {
+                object_id,
+                page_index,
+                ..
+            } = page
+            else {
+                return false;
+            };
+            let Some(index) = runtime.pages.binary_search_by_key(
+                &(object_id, page_index),
+                |candidate| (candidate.object_id, candidate.page_index),
+            ).ok() else {
+                return false;
+            };
+            if runtime.pages[index].references == usize::MAX {
+                return false;
+            }
+        }
+        for page in parent_pages.iter().copied() {
+            let LinuxPageBacking::Shared {
+                object_id,
+                page_index,
+                ..
+            } = page
+            else {
+                return false;
+            };
+            let Ok(index) = runtime.pages.binary_search_by_key(
+                &(object_id, page_index),
+                |candidate| (candidate.object_id, candidate.page_index),
+            ) else {
+                return false;
+            };
+            runtime.pages[index].references += 1;
+        }
+        true
+    });
+    if !valid {
+        return Err(SysError::ENOMEM);
+    }
+    Ok(child_pages)
 }
 
 pub(crate) fn copy_from_current(address: usize, out: &mut [u8]) -> Result<(), SysError> {
@@ -2053,6 +2601,11 @@ impl LinuxProcessMemory {
             if !linux_page_backing_is_cow(backing) || prot & LINUX_PROT_WRITE == 0 {
                 return Ok(false);
             }
+            if self.private_page_tracking_enabled {
+                self.private_page_hints
+                    .try_reserve(1)
+                    .map_err(|_| SysError::ENOMEM)?;
+            }
             let Some(new_pfn) = PageFrameAllocator::alloc() else {
                 return Err(SysError::ENOMEM);
             };
@@ -2081,6 +2634,12 @@ impl LinuxProcessMemory {
                 return Err(error);
             }
             self.brk.pages[page_index] = LinuxPageBacking::Private { pfn: new_pfn };
+            if self.private_page_tracking_enabled {
+                self.private_page_hints.push(LinuxPrivatePageHint {
+                    address: page_address,
+                    pfn: new_pfn,
+                });
+            }
             LinuxProcessMemory::free_backings(core::slice::from_ref(&backing));
             self.bump_generation();
             return Ok(true);
@@ -2088,6 +2647,11 @@ impl LinuxProcessMemory {
 
         if !linux_page_backing_is_cow(backing) || prot & LINUX_PROT_WRITE == 0 {
             return Ok(false);
+        }
+        if self.private_page_tracking_enabled {
+            self.private_page_hints
+                .try_reserve(1)
+                .map_err(|_| SysError::ENOMEM)?;
         }
         let Some(new_pfn) = PageFrameAllocator::alloc() else {
             return Err(SysError::ENOMEM);
@@ -2118,6 +2682,12 @@ impl LinuxProcessMemory {
             return Err(error);
         }
         self.mappings[mapping_index].pages[page_index] = LinuxPageBacking::Private { pfn: new_pfn };
+        if self.private_page_tracking_enabled {
+            self.private_page_hints.push(LinuxPrivatePageHint {
+                address: page_address,
+                pfn: new_pfn,
+            });
+        }
         LinuxProcessMemory::free_backings(core::slice::from_ref(&backing));
         self.bump_generation();
         Ok(true)
@@ -2363,7 +2933,7 @@ impl LinuxProcessMemory {
     }
 
     fn allocate_unmapped_pages(
-        &self,
+        &mut self,
         len: usize,
         contents: &[u8],
     ) -> Result<Vec<LinuxPageBacking>, SysError> {
@@ -2508,17 +3078,56 @@ impl LinuxProcessMemory {
         pages: &[LinuxPageBacking],
         mut protection: impl FnMut(usize) -> usize,
     ) -> Result<(), SysError> {
-        let mut mapped = 0usize;
-        for (page_index, page) in pages.iter().enumerate() {
-            let page_address = address + page_index * PAGE_SIZE;
-            let prot = linux_page_protection_for_backing(*page, protection(page_index));
-            if let Err(error) = self.map_page(page_address, page.pfn(), prot) {
-                for rollback in (0..mapped).rev() {
-                    let _ = self.unmap_page(address + rollback * PAGE_SIZE);
+        let private_count = if self.private_page_tracking_enabled {
+            pages
+                .iter()
+                .filter(|page| matches!(page, LinuxPageBacking::Private { .. }))
+                .count()
+        } else {
+            0
+        };
+        if private_count != 0 {
+            self.private_page_hints
+                .try_reserve(private_count)
+                .map_err(|_| SysError::ENOMEM)?;
+        }
+        #[cfg(target_arch = "aarch64")]
+        self.address_space
+            .map_user_pages_with_protection(
+                address,
+                pages.len(),
+                |page_index| pages[page_index].pfn(),
+                |page_index| {
+                    let page = pages[page_index];
+                    let prot = linux_page_protection_for_backing(page, protection(page_index));
+                    Self::page_permissions(prot)
+                },
+            )
+            .map_err(map_address_error)?;
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let mut mapped = 0usize;
+            for (page_index, page) in pages.iter().enumerate() {
+                let page_address = address + page_index * PAGE_SIZE;
+                let prot = linux_page_protection_for_backing(*page, protection(page_index));
+                if let Err(error) = self.map_page(page_address, page.pfn(), prot) {
+                    for rollback in (0..mapped).rev() {
+                        let _ = self.unmap_page(address + rollback * PAGE_SIZE);
+                    }
+                    return Err(error);
                 }
-                return Err(error);
+                mapped += 1;
             }
-            mapped += 1;
+        }
+        if private_count != 0 {
+            for (page_index, page) in pages.iter().copied().enumerate() {
+                if let LinuxPageBacking::Private { pfn } = page {
+                    self.private_page_hints.push(LinuxPrivatePageHint {
+                        address: address + page_index * PAGE_SIZE,
+                        pfn,
+                    });
+                }
+            }
         }
         Ok(())
     }

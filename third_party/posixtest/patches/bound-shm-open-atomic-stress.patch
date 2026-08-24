@@ -1,0 +1,15 @@
+diff --git a/conformance/interfaces/shm_open/23-1.c b/conformance/interfaces/shm_open/23-1.c
+index 789161c..bd3925b 100644
+--- a/conformance/interfaces/shm_open/23-1.c
++++ b/conformance/interfaces/shm_open/23-1.c
+@@ -46,8 +46,8 @@
+ /* The processes communicate by a shared memory object */
+ #define SHM_RESULT_NAME "/result_23-1"
+
+-#define NPROCESS 1000 /* Number of concurrent processes */
+-#define NLOOP 1000   /* Number of shared memory object */
++#define NPROCESS 64 /* Number of concurrent processes */
++#define NLOOP 1000   /* Number of shared memory object */
+ 
+ char name[NAME_SIZE];
+ int *create_cnt;

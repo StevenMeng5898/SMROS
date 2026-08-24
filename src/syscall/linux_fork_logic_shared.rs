@@ -505,12 +505,14 @@ pub(crate) trait LinuxForkPageOps {
     ) -> Result<(), Self::Error>;
     fn acquire_shared(&mut self, parent: Self::Page) -> Result<Self::Page, Self::Error>;
     fn release_page(&mut self, page: Self::Page);
+    #[cfg(not(target_arch = "aarch64"))]
     fn map_page(
         &mut self,
         address: usize,
         page: Self::Page,
         prot: usize,
     ) -> Result<(), Self::Error>;
+    #[cfg(not(target_arch = "aarch64"))]
     fn unmap_page(&mut self, address: usize);
 }
 
@@ -591,6 +593,7 @@ pub(crate) fn clone_linux_fork_pages<O: LinuxForkPageOps>(
     Ok(child_pages)
 }
 
+#[cfg(not(target_arch = "aarch64"))]
 pub(crate) fn map_linux_fork_pages<O: LinuxForkPageOps>(
     ops: &mut O,
     address: usize,
@@ -602,6 +605,7 @@ pub(crate) fn map_linux_fork_pages<O: LinuxForkPageOps>(
     map_linux_fork_pages_with_protection(ops, address, page_size, pages, |_| prot, should_fail)
 }
 
+#[cfg(not(target_arch = "aarch64"))]
 pub(crate) fn map_linux_fork_pages_with_protection<O: LinuxForkPageOps>(
     ops: &mut O,
     address: usize,

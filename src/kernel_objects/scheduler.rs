@@ -14,7 +14,6 @@ use crate::kernel_objects::object_logic;
 use crate::syscall::linux_syscall_context;
 use core::cell::UnsafeCell;
 use core::ptr;
-
 include!("scheduler_logic_shared.rs");
 
 /// A Sync wrapper around UnsafeCell that is safe to use as a static.
@@ -43,7 +42,7 @@ pub const SCHED_SAMPLE_MAX_WORKERS: usize = MAX_THREADS - 2;
 const SCHED_SAMPLE_WORK_UNITS: u32 = 960;
 const SCHED_SAMPLE_SPIN_UNITS: u32 = 80_000;
 const SCHED_SAMPLE_TRACE_SNAPSHOT_ROUNDS: usize = 8;
-
+const READY_BITMAP_WORDS: usize = (MAX_THREADS + 63) / 64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedulePolicy {
     RoundRobin,
@@ -195,6 +194,20 @@ pub struct Scheduler {
 
     /// Number of active threads
     active_threads: usize,
+
+    /// Highest thread slot ever allocated, plus one. Scheduling scans only
+    /// this prefix; terminated slots remain reusable without making every
+    /// context switch walk the full capacity array.
+    thread_scan_limit: usize,
+
+    /// Ready thread slots, allowing RoundRobin selection to skip blocked slots.
+    ready_threads: [u64; READY_BITMAP_WORDS],
+
+    /// Number of ready threads at each scheduler priority.
+    ready_priority_counts: [u16; 256],
+
+    /// Number of ready threads at each priority that can run on each CPU.
+    ready_priority_counts_by_cpu: [[u16; 256]; MAX_CPUS],
 
     /// Threads created blocked but not yet published to the ready set.
     suspended_threads: [bool; MAX_THREADS],
@@ -730,6 +743,10 @@ impl Scheduler {
             current_thread: ThreadId::INVALID,
             next_thread: 0,
             active_threads: 0,
+            thread_scan_limit: 1,
+            ready_threads: [0; READY_BITMAP_WORDS],
+            ready_priority_counts: [0; 256],
+            ready_priority_counts_by_cpu: [[0; 256]; MAX_CPUS],
             suspended_threads: [false; MAX_THREADS],
             tick_count: 0,
             time_slice_ticks: DEFAULT_TIME_SLICE_TICKS,
@@ -765,6 +782,14 @@ impl Scheduler {
         self.current_thread = ThreadId::IDLE;
         self.next_thread = 1;
         self.active_threads = 1;
+        self.thread_scan_limit = 1;
+        self.ready_threads = [0; READY_BITMAP_WORDS];
+        self.ready_priority_counts = [0; 256];
+        for counts in &mut self.ready_priority_counts_by_cpu {
+            for count in counts {
+                *count = 0;
+            }
+        }
         self.suspended_threads = [false; MAX_THREADS];
         self.tick_count = 0;
         self.policy = SchedulePolicy::RoundRobin;
@@ -857,6 +882,8 @@ impl Scheduler {
                 tcb.state = initial_state;
                 self.init_thread_schedule_info(i);
                 self.suspended_threads[i] = initial_state == ThreadState::Blocked;
+                self.set_ready_bit(i, initial_state == ThreadState::Ready);
+                self.thread_scan_limit = self.thread_scan_limit.max(i + 1);
 
                 // Leak the stack (it will be freed when thread terminates)
                 core::mem::forget(stack);
@@ -884,6 +911,7 @@ impl Scheduler {
             return false;
         };
         self.threads[id.0].state = next_state;
+        self.set_ready_bit(id.0, true);
         self.suspended_threads[id.0] = false;
         true
     }
@@ -900,7 +928,11 @@ impl Scheduler {
         {
             return false;
         }
+        let was_ready = self.threads[id.0].state == ThreadState::Ready;
         self.threads[id.0].state = ThreadState::Blocked;
+        if was_ready {
+            self.set_ready_bit(id.0, false);
+        }
         self.threads[id.0].time_slice = 0;
         true
     }
@@ -918,6 +950,7 @@ impl Scheduler {
             return false;
         };
         self.threads[id.0].state = next_state;
+        self.set_ready_bit(id.0, true);
         true
     }
 
@@ -941,6 +974,7 @@ impl Scheduler {
         linux_syscall_context::retire_owner(id.0);
 
         self.suspended_threads[id.0] = false;
+        self.set_ready_bit(id.0, false);
         self.active_threads = next_active_threads;
         if defer_current {
             self.threads[id.0].state = ThreadState::Terminated;
@@ -1052,7 +1086,14 @@ impl Scheduler {
         if self.threads[id.0].state == ThreadState::Empty {
             return false;
         }
+        let was_ready = self.ready_threads[id.0 / 64] & (1u64 << (id.0 % 64)) != 0;
+        if was_ready {
+            self.set_ready_bit(id.0, false);
+        }
         self.schedule_info[id.0].priority = priority;
+        if was_ready {
+            self.set_ready_bit(id.0, true);
+        }
         if self.threads[id.0].state == ThreadState::Running {
             self.threads[id.0].time_slice = 0;
         }
@@ -1074,8 +1115,15 @@ impl Scheduler {
             }
         }
 
+        let was_ready = self.ready_threads[id.0 / 64] & (1u64 << (id.0 % 64)) != 0;
+        if was_ready {
+            self.set_ready_bit(id.0, false);
+        }
+        self.threads[id.0].cpu_affinity = cpu_id;
+        if was_ready {
+            self.set_ready_bit(id.0, true);
+        }
         let thread = &mut self.threads[id.0];
-        thread.cpu_affinity = cpu_id;
         if thread.state != ThreadState::Running {
             thread.current_cpu = cpu_id;
         } else if let Some(cpu) = cpu_id {
@@ -1232,6 +1280,7 @@ impl Scheduler {
         self.threads[idx] = ThreadControlBlock::new();
         self.threads[idx].id = ThreadId(idx);
         self.schedule_info[idx] = ThreadScheduleInfo::empty();
+        self.set_ready_bit(idx, false);
         self.suspended_threads[idx] = false;
     }
 
@@ -1482,6 +1531,7 @@ impl Scheduler {
     }
 
     fn schedule_next_filtered(&mut self, cpu_id: Option<usize>) -> Option<ThreadId> {
+        self.rebuild_ready_index();
         if self.active_threads <= 1 {
             return Some(ThreadId::IDLE);
         }
@@ -1494,6 +1544,100 @@ impl Scheduler {
         };
 
         selected.map(ThreadId).or(Some(ThreadId::IDLE))
+    }
+
+    /// Rebuild the derived ready indexes from the authoritative thread states.
+    ///
+    /// Scheduler state can be changed by interrupt and syscall paths that do
+    /// not share the normal ready-bit transition helper. Recomputing at the
+    /// picker boundary prevents a stale bitmap or priority count from hiding
+    /// a runnable thread indefinitely.
+    fn rebuild_ready_index(&mut self) {
+        self.ready_threads = [0; READY_BITMAP_WORDS];
+        self.ready_priority_counts = [0; 256];
+        for counts in &mut self.ready_priority_counts_by_cpu {
+            *counts = [0; 256];
+        }
+
+        let scan_limit = self.thread_scan_limit.min(MAX_THREADS);
+        for index in 1..scan_limit {
+            if self.threads[index].state == ThreadState::Ready {
+                self.set_ready_bit(index, true);
+            }
+        }
+    }
+
+    #[inline]
+    fn thread_scan_limit(&self) -> usize {
+        self.thread_scan_limit.max(2).min(MAX_THREADS)
+    }
+
+    #[inline]
+    fn set_ready_bit(&mut self, index: usize, ready: bool) {
+        if index == 0 || index >= MAX_THREADS {
+            return;
+        }
+        let word = index / 64;
+        let mask = 1u64 << (index % 64);
+        let was_ready = self.ready_threads[word] & mask != 0;
+        if was_ready == ready {
+            return;
+        }
+        let priority = self.schedule_info[index].priority as usize;
+        if ready {
+            self.ready_threads[word] |= mask;
+            self.ready_priority_counts[priority] =
+                self.ready_priority_counts[priority].saturating_add(1);
+        } else {
+            self.ready_threads[word] &= !mask;
+            self.ready_priority_counts[priority] =
+                self.ready_priority_counts[priority].saturating_sub(1);
+        }
+        match self.threads[index].cpu_affinity {
+            Some(cpu) if cpu < MAX_CPUS => {
+                let count = &mut self.ready_priority_counts_by_cpu[cpu][priority];
+                if ready {
+                    *count = count.saturating_add(1);
+                } else {
+                    *count = count.saturating_sub(1);
+                }
+            }
+            None => {
+                for counts in &mut self.ready_priority_counts_by_cpu {
+                    let count = &mut counts[priority];
+                    if ready {
+                        *count = count.saturating_add(1);
+                    } else {
+                        *count = count.saturating_sub(1);
+                    }
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
+    fn visit_ready_threads<F>(&self, start: usize, limit: usize, mut visitor: F) -> bool
+    where
+        F: FnMut(usize) -> bool,
+    {
+        let runnable_slots = limit.saturating_sub(1);
+        if runnable_slots == 0 {
+            return false;
+        }
+        let first = if start <= 1 || start >= limit {
+            1
+        } else {
+            start
+        };
+        for offset in 0..runnable_slots {
+            let index = 1 + ((first - 1 + offset) % runnable_slots);
+            let word = index / 64;
+            let mask = 1u64 << (index % 64);
+            if self.ready_threads[word] & mask != 0 && visitor(index) {
+                return true;
+            }
+        }
+        false
     }
 
     fn thread_allowed_on_cpu(&self, idx: usize, cpu_id: Option<usize>) -> bool {
@@ -1518,25 +1662,35 @@ impl Scheduler {
 
     fn highest_ready_priority(&self, cpu_id: Option<usize>) -> Option<u8> {
         let current = self.current_thread.0;
-        let mut best_priority = 0u8;
-        let mut found = false;
-        for idx in 1..MAX_THREADS {
-            if self.candidate_can_run(idx, current, cpu_id)
-                && smros_sched_priority_better_body!(
-                    self.schedule_info[idx].priority,
-                    found,
-                    best_priority
-                )
-            {
-                best_priority = self.schedule_info[idx].priority;
-                found = true;
+        let current_ready = current < MAX_THREADS
+            && self.ready_threads[current / 64] & (1u64 << (current % 64)) != 0;
+        for priority in (0..256).rev() {
+            let ready_count = match cpu_id {
+                Some(cpu) if cpu < MAX_CPUS => self.ready_priority_counts_by_cpu[cpu][priority],
+                Some(_) => 0,
+                None => self.ready_priority_counts[priority],
+            };
+            if ready_count == 0 {
+                continue;
+            }
+            if !current_ready {
+                return Some(priority as u8);
+            }
+            let mut found = false;
+            self.visit_ready_threads(1, self.thread_scan_limit(), |idx| {
+                if self.schedule_info[idx].priority as usize == priority
+                    && self.candidate_can_run(idx, current, cpu_id)
+                {
+                    found = true;
+                    return true;
+                }
+                false
+            });
+            if found {
+                return Some(priority as u8);
             }
         }
-        if found {
-            Some(best_priority)
-        } else {
-            None
-        }
+        None
     }
 
     fn ready_higher_priority_exists(&self, cpu_id: Option<usize>) -> bool {
@@ -1552,25 +1706,22 @@ impl Scheduler {
 
     fn pick_round_robin(&mut self, cpu_id: Option<usize>) -> Option<usize> {
         let start = self.next_thread;
-        let mut attempts = 0;
         let current = self.current_thread.0;
+        let scan_limit = self.thread_scan_limit();
+        let mut selected = None;
         let best_priority = self.highest_ready_priority(cpu_id)?;
-
-        while attempts < MAX_THREADS {
-            let idx = object_logic::scheduler_candidate_index(start, attempts, MAX_THREADS);
-
-            // Skip the current thread and idle thread (unless it's the only option)
-            if self.candidate_can_run(idx, current, cpu_id)
-                && self.schedule_info[idx].priority == best_priority
+        self.visit_ready_threads(start, scan_limit, |idx| {
+            if self.schedule_info[idx].priority == best_priority
+                && self.candidate_can_run(idx, current, cpu_id)
             {
-                self.next_thread = (idx + 1) % MAX_THREADS;
-                return Some(idx);
+                selected = Some(idx);
+                return true;
             }
-
-            attempts += 1;
-        }
-
-        None
+            false
+        });
+        let selected = selected?;
+        self.next_thread = (selected + 1) % scan_limit;
+        Some(selected)
     }
 
     fn pick_edf(&mut self, cpu_id: Option<usize>) -> Option<usize> {
@@ -1580,9 +1731,10 @@ impl Scheduler {
         let mut best: Option<usize> = None;
         let mut best_deadline = u64::MAX;
         let best_priority = self.highest_ready_priority(cpu_id)?;
+        let scan_limit = self.thread_scan_limit();
 
-        while attempts < MAX_THREADS {
-            let idx = object_logic::scheduler_candidate_index(start, attempts, MAX_THREADS);
+        while attempts < scan_limit {
+            let idx = object_logic::scheduler_candidate_index(start, attempts, scan_limit);
             if self.candidate_can_run(idx, current, cpu_id)
                 && self.schedule_info[idx].priority == best_priority
             {
@@ -1596,7 +1748,7 @@ impl Scheduler {
         }
 
         if let Some(idx) = best {
-            self.next_thread = (idx + 1) % MAX_THREADS;
+            self.next_thread = (idx + 1) % scan_limit;
         }
         best
     }
@@ -1612,9 +1764,10 @@ impl Scheduler {
         let current = self.current_thread.0;
         let mut best: Option<usize> = None;
         let mut best_credit = i32::MIN;
+        let scan_limit = self.thread_scan_limit();
 
-        while attempts < MAX_THREADS {
-            let idx = object_logic::scheduler_candidate_index(start, attempts, MAX_THREADS);
+        while attempts < scan_limit {
+            let idx = object_logic::scheduler_candidate_index(start, attempts, scan_limit);
             if self.candidate_can_run(idx, current, cpu_id)
                 && self.schedule_info[idx].priority == best_priority
             {
@@ -1628,7 +1781,7 @@ impl Scheduler {
         }
 
         if let Some(idx) = best {
-            self.next_thread = (idx + 1) % MAX_THREADS;
+            self.next_thread = (idx + 1) % scan_limit;
         }
         best
     }
@@ -1641,9 +1794,10 @@ impl Scheduler {
         let mut best_ticks = 0u32;
         let mut best_weight = 1u32;
         let best_priority = self.highest_ready_priority(cpu_id)?;
+        let scan_limit = self.thread_scan_limit();
 
-        while attempts < MAX_THREADS {
-            let idx = object_logic::scheduler_candidate_index(start, attempts, MAX_THREADS);
+        while attempts < scan_limit {
+            let idx = object_logic::scheduler_candidate_index(start, attempts, scan_limit);
             if self.candidate_can_run(idx, current, cpu_id)
                 && self.schedule_info[idx].priority == best_priority
             {
@@ -1665,14 +1819,14 @@ impl Scheduler {
         }
 
         if let Some(idx) = best {
-            self.next_thread = (idx + 1) % MAX_THREADS;
+            self.next_thread = (idx + 1) % scan_limit;
         }
         best
     }
 
     fn any_ready_credit(&self, cpu_id: Option<usize>, priority: u8) -> bool {
         let current = self.current_thread.0;
-        for idx in 1..MAX_THREADS {
+        for idx in 1..self.thread_scan_limit() {
             if self.candidate_can_run(idx, current, cpu_id)
                 && self.schedule_info[idx].priority == priority
                 && self.schedule_info[idx].credit > 0
@@ -1684,7 +1838,7 @@ impl Scheduler {
     }
 
     fn refill_credits(&mut self) {
-        for idx in 1..MAX_THREADS {
+        for idx in 1..self.thread_scan_limit() {
             if self.threads[idx].state == ThreadState::Ready
                 || self.threads[idx].state == ThreadState::Running
             {
@@ -1873,10 +2027,12 @@ impl Scheduler {
 
     /// Block the current thread
     pub fn block_current(&mut self) {
-        if let Some(tcb) = self.get_thread_mut(self.current_thread) {
+        let current = self.current_thread;
+        if let Some(tcb) = self.get_thread_mut(current) {
             tcb.state = ThreadState::Blocked;
             tcb.time_slice = 0;
         }
+        self.set_ready_bit(current.0, false);
     }
 
     /// Terminate the current thread
@@ -1988,8 +2144,10 @@ pub fn schedule() {
         unsafe {
             if (*current_tcb_ptr).state == ThreadState::Running {
                 (*current_tcb_ptr).state = ThreadState::Ready;
+                s.set_ready_bit(current_id.0, true);
             }
             (*next_tcb_ptr).state = ThreadState::Running;
+            s.set_ready_bit(next_id.0, false);
             (*next_tcb_ptr).time_slice = next_time_slice;
             (*next_tcb_ptr).current_cpu = Some(cpu_id);
         }
@@ -2045,7 +2203,9 @@ pub fn start_first_thread() -> ! {
         // Update states through raw pointers
         unsafe {
             (*current_tcb_ptr).state = ThreadState::Ready;
+            s.set_ready_bit(current_id.0, true);
             (*next_tcb_ptr).state = ThreadState::Running;
+            s.set_ready_bit(next_id.0, false);
             (*next_tcb_ptr).time_slice = next_time_slice;
             (*next_tcb_ptr).current_cpu = Some(0);
         }
@@ -2171,8 +2331,10 @@ pub fn schedule_on_cpu(cpu_id: usize) {
         unsafe {
             if (*current_tcb_ptr).state == ThreadState::Running {
                 (*current_tcb_ptr).state = ThreadState::Ready;
+                s.set_ready_bit(current_id.0, true);
             }
             (*next_tcb_ptr).state = ThreadState::Running;
+            s.set_ready_bit(next_id.0, false);
             (*next_tcb_ptr).time_slice = next_time_slice;
             // Mark which logical CPU this thread is running on
             (*next_tcb_ptr).current_cpu = Some(cpu_id);
@@ -2226,7 +2388,9 @@ pub fn start_first_thread_for_cpu(cpu_id: usize) -> ! {
         // Update states through raw pointers
         unsafe {
             (*current_tcb_ptr).state = ThreadState::Ready;
+            s.set_ready_bit(current_id.0, true);
             (*next_tcb_ptr).state = ThreadState::Running;
+            s.set_ready_bit(next_id.0, false);
             (*next_tcb_ptr).time_slice = next_time_slice;
             (*next_tcb_ptr).current_cpu = Some(cpu_id);
         }
@@ -2252,6 +2416,7 @@ pub fn sleep_ticks(_ticks: u32) {
     let s = scheduler();
     if let Some(tcb) = s.get_thread_mut(s.current_thread) {
         tcb.state = ThreadState::Blocked;
+        s.set_ready_bit(s.current_thread.0, false);
     }
     schedule();
 }

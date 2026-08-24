@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::{drivers, lowlevel_logic};
+use super::{cpu, drivers, lowlevel_logic};
 
 /// ARM Generic Timer registers (Physical Timer)
 const CNTFRQ_EL0: usize = 0xFD80; // Counter-timer Frequency Register
@@ -124,10 +124,18 @@ pub fn get_tick_count() -> u64 {
 
 /// Get the current monotonic time in nanoseconds.
 pub fn get_nanoseconds() -> u64 {
-    lowlevel_logic::timer_counter_nanoseconds(
-        read_cntpct_el0(),
-        TIMER_FREQUENCY.load(Ordering::Relaxed),
-    )
+    // Keep the PC-relative address materialization for TIMER_FREQUENCY and the
+    // dependent conversion together. An IRQ may use x9 as a scratch register;
+    // masking it here prevents an interrupt from landing between ADRP/LDR and
+    // corrupting the address while the syscall is still in flight.
+    let interrupt_state = cpu::mask_interrupts();
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    let counter = read_cntpct_el0();
+    let frequency = TIMER_FREQUENCY.load(Ordering::Relaxed);
+    let nanoseconds = lowlevel_logic::timer_counter_nanoseconds(counter, frequency);
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    cpu::restore_interrupts(interrupt_state);
+    nanoseconds
 }
 
 /// Arm the timer for the next tick
@@ -136,6 +144,23 @@ pub fn arm_next_tick() {
     let current_count = read_cntpct_el0();
     let compare_value = lowlevel_logic::timer_compare(current_count, period);
     write_cntp_cval_el0(compare_value);
+}
+
+/// Arm the physical timer for an absolute monotonic deadline.
+pub fn arm_at_nanoseconds(deadline: u64) {
+    let frequency = TIMER_FREQUENCY.load(Ordering::Relaxed);
+    if frequency == 0 {
+        return;
+    }
+    let current_count = read_cntpct_el0();
+    let scaled = (deadline as u128).saturating_mul(frequency as u128);
+    let target_count = scaled
+        .saturating_add(999_999_999)
+        / 1_000_000_000u128;
+    let target_count = target_count
+        .min(u64::MAX as u128)
+        .max((current_count as u128).saturating_add(1)) as u64;
+    write_cntp_cval_el0(target_count);
 }
 
 /// Clear timer interrupt by re-arming the timer

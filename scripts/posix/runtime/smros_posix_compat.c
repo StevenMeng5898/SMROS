@@ -68,7 +68,9 @@ typedef int (*smros_sem_destroy_fn)(sem_t *);
 typedef int (*smros_sem_unlink_fn)(const char *);
 typedef int (*smros_sem_trywait_fn)(sem_t *);
 typedef int (*smros_sigaction_fn)(int, const struct sigaction *, struct sigaction *);
+typedef int (*smros_sigprocmask_fn)(int, const sigset_t *, sigset_t *);
 typedef int (*smros_kill_fn)(pid_t, int);
+typedef int (*smros_sigqueue_fn)(pid_t, int, const union sigval);
 typedef int (*smros_mlock_fn)(const void *, size_t);
 typedef int (*smros_munlock_fn)(const void *, size_t);
 typedef int (*smros_mlockall_fn)(int);
@@ -82,6 +84,12 @@ typedef int (*smros_shm_open_fn)(const char *, int, mode_t);
 typedef int (*smros_open_fn)(const char *, int, ...);
 typedef int (*smros_close_fn)(int);
 typedef int (*smros_nanosleep_fn)(const struct timespec *, struct timespec *);
+typedef int (*smros_clock_nanosleep_fn)(
+    clockid_t,
+    int,
+    const struct timespec *,
+    struct timespec *
+);
 typedef int (*smros_pthread_create_fn)(
     pthread_t *,
     const pthread_attr_t *,
@@ -224,7 +232,10 @@ enum {
     SMROS_UNNAMED_SEM_RECORDS = 64,
     SMROS_SEM_NSEMS_MAX = 64,
     SMROS_PTHREAD_CREATE_LIMIT = 100,
-    SMROS_FORK_CHILD_LIMIT = 32,
+    /* Keep process-heavy conformance cases below SMROS's 64-process kernel
+     * table limit; tests still exercise fork/wait semantics and receive
+     * EAGAIN once the bounded process budget is consumed. */
+    SMROS_FORK_CHILD_LIMIT = 64,
     SMROS_PTHREAD_ATTR_RECORDS = 64,
     SMROS_PTHREAD_MUTEXATTR_RECORDS = 128,
     SMROS_PTHREAD_MUTEX_RECORDS = 512,
@@ -387,6 +398,65 @@ static smros_pthread_cond_record
 static smros_pthread_cond_waiter_record
     smros_pthread_cond_waiter_records[SMROS_PTHREAD_COND_RECORDS];
 static int smros_pthread_active_created;
+static int smros_pthread_destroy_attempts;
+static int smros_shared_cond_trace_count;
+static int smros_signal_trace_count;
+static int smros_sem_trace_count;
+
+static void smros_trace_shared_cond(
+    const char *operation,
+    const pthread_cond_t *cond,
+    int result,
+    uint32_t waiters,
+    uint32_t wakeups
+) {
+    if (getenv("SMROS_PTHREAD_DIAG") == NULL) {
+        return;
+    }
+    int count = __sync_add_and_fetch(&smros_shared_cond_trace_count, 1);
+    if (count <= 420) {
+        (void)dprintf(
+            STDERR_FILENO,
+            "SMROS_SHARED_COND_TRACE n=%d pid=%ld op=%s cond=%p result=%d waiters=%u wakeups=%u\\n",
+            count,
+            (long)getpid(),
+            operation,
+            (const void *)cond,
+            result,
+            waiters,
+            wakeups
+        );
+    }
+}
+
+static int smros_trace_destroy_enter(void) {
+    if (getenv("SMROS_PTHREAD_DIAG") == NULL) {
+        return 0;
+    }
+    int attempt = __sync_add_and_fetch(&smros_pthread_destroy_attempts, 1);
+    if (attempt <= 24 || (attempt % 10) == 0) {
+        (void)dprintf(
+            STDERR_FILENO,
+            "SMROS_DESTROY_TRACE n=%d phase=enter\n",
+            attempt
+        );
+    }
+    return attempt;
+}
+
+static void smros_trace_destroy_exit(int attempt, int result) {
+    if (attempt == 0) {
+        return;
+    }
+    if (attempt <= 24 || (attempt % 10) == 0) {
+        (void)dprintf(
+            STDERR_FILENO,
+            "SMROS_DESTROY_TRACE n=%d phase=exit result=%d\n",
+            attempt,
+            result
+        );
+    }
+}
 typedef struct {
     pid_t pid;
     int reserved;
@@ -397,6 +467,7 @@ static int smros_fork_child_count;
 static int smros_fork_child_records_lock;
 static int smros_pthread_cond_records_lock;
 static int smros_pthread_mutex_records_lock;
+static int smros_shared_mutex_trace_count;
 static int smros_pthread_cancel_record_active[SMROS_PTHREAD_CANCEL_RECORDS];
 static pthread_t smros_pthread_cancel_records[SMROS_PTHREAD_CANCEL_RECORDS];
 static int smros_pthread_cancel_type_record_active[SMROS_PTHREAD_CANCEL_RECORDS];
@@ -404,6 +475,8 @@ static pthread_t smros_pthread_cancel_type_records[SMROS_PTHREAD_CANCEL_RECORDS]
 static int smros_pthread_cancel_types[SMROS_PTHREAD_CANCEL_RECORDS];
 static int smros_fast_mmap_fds[SMROS_FAST_MMAP_FD_RECORDS];
 static char smros_fast_mmap_page[4096] __attribute__((aligned(4096)));
+static smros_nanosleep_fn smros_nanosleep_target;
+static smros_clock_nanosleep_fn smros_clock_nanosleep_target;
 
 static void __attribute__((unused)) smros_pthread_diag(const char *message) {
     if (getenv("SMROS_PTHREAD_DIAG") != NULL) {
@@ -458,12 +531,60 @@ static void smros_pthread_cond_trace(
     );
 }
 
+static void smros_shared_mutex_trace(
+    const char *operation,
+    const pthread_mutex_t *mutex,
+    uint32_t lock,
+    uint32_t owner,
+    uint32_t token,
+    uint32_t type,
+    int result,
+    uint32_t attempts
+) {
+    if (getenv("SMROS_PTHREAD_DIAG") == NULL) {
+        return;
+    }
+    pid_t pid = getpid();
+    if (pid == 1) {
+        return;
+    }
+    int trace = __sync_add_and_fetch(&smros_shared_mutex_trace_count, 1);
+    if (trace > 240) {
+        return;
+    }
+    (void)dprintf(
+        STDERR_FILENO,
+        "SMROS_SHARED_MUTEX_TRACE n=%d pid=%ld op=%s mutex=%p lock=%u owner=%u token=%u type=%u result=%d attempts=%u\\n",
+        trace,
+        (long)pid,
+        operation,
+        (const void *)mutex,
+        lock,
+        owner,
+        token,
+        type,
+        result,
+        attempts
+    );
+}
+
 static void *smros_resolve_symbol(const char *symbol) {
     void *target = dlsym(RTLD_NEXT, symbol);
     if (target == NULL) {
         errno = ENOSYS;
     }
     return target;
+}
+
+/* Resolve the sleep entry points before the first test syscall.  The POSIX
+ * tests measure elapsed time across adjacent timer calls, so lazy dlsym work
+ * in the first nanosleep/clock_nanosleep invocation becomes observable as
+ * milliseconds of apparent timer drift. */
+static void __attribute__((constructor)) smros_posix_compat_init(void) {
+    smros_nanosleep_target =
+        (smros_nanosleep_fn)smros_resolve_symbol("nanosleep");
+    smros_clock_nanosleep_target =
+        (smros_clock_nanosleep_fn)smros_resolve_symbol("clock_nanosleep");
 }
 
 static int smros_reserve_fork_child_slot(void) {
@@ -529,12 +650,8 @@ static void smros_forget_fork_child(pid_t pid) {
 }
 
 static void smros_reset_fork_children(void) {
-    while (__sync_lock_test_and_set(&smros_fork_child_records_lock, 1) != 0) {
-        sched_yield();
-    }
     memset(smros_fork_child_records, 0, sizeof(smros_fork_child_records));
     smros_fork_child_count = 0;
-    __sync_lock_release(&smros_fork_child_records_lock);
 }
 
 pid_t fork(void) {
@@ -551,6 +668,7 @@ pid_t fork(void) {
     pid_t result = target();
     if (result == 0) {
         smros_reset_fork_children();
+        smros_shared_mutex_trace_count = 0;
         return 0;
     }
     if (result < 0) {
@@ -581,6 +699,8 @@ static int smros_pointer_is_null(const void *pointer) {
 
 static void smros_forget_pthread_cancel(pthread_t thread);
 static void smros_forget_pthread_cancel_type(pthread_t thread);
+static int smros_current_pthread_cancel_requested(void);
+static void smros_forget_pthread_joined(pthread_t thread);
 static int smros_realtime_sched_priority_valid(int priority);
 static smros_pthread_attr_lifecycle_record *
 smros_find_pthread_attr_lifecycle_record(pthread_attr_t *attr);
@@ -885,12 +1005,33 @@ int nanosleep(const struct timespec *req, struct timespec *rem) {
         return 0;
     }
 
-    smros_nanosleep_fn target =
-        (smros_nanosleep_fn)smros_resolve_symbol("nanosleep");
+    smros_nanosleep_fn target = smros_nanosleep_target;
+    if (target == NULL) {
+        target = (smros_nanosleep_fn)smros_resolve_symbol("nanosleep");
+        smros_nanosleep_target = target;
+    }
     if (target == NULL) {
         return -1;
     }
     return target(req, rem);
+}
+
+int clock_nanosleep(
+    clockid_t clock_id,
+    int flags,
+    const struct timespec *req,
+    struct timespec *rem
+) {
+    smros_clock_nanosleep_fn target = smros_clock_nanosleep_target;
+    if (target == NULL) {
+        target = (smros_clock_nanosleep_fn)smros_resolve_symbol("clock_nanosleep");
+        smros_clock_nanosleep_target = target;
+    }
+    if (target == NULL) {
+        errno = ENOSYS;
+        return ENOSYS;
+    }
+    return target(clock_id, flags, req, rem);
 }
 
 static int smros_try_acquire_pthread_create_slot(void) {
@@ -1019,6 +1160,20 @@ static void smros_remember_pthread_joined(pthread_t thread) {
             record->thread = thread;
             __sync_synchronize();
             record->active = 1;
+            return;
+        }
+    }
+}
+
+static void smros_forget_pthread_joined(pthread_t thread) {
+    for (size_t index = 0; index < SMROS_PTHREAD_JOINED_RECORDS; index++) {
+        if (smros_pthread_joined_record_matches(index, thread)) {
+            __sync_lock_test_and_set(
+                &smros_pthread_joined_records[index].active,
+                0
+            );
+            memset(&smros_pthread_joined_records[index].thread, 0,
+                   sizeof(smros_pthread_joined_records[index].thread));
             return;
         }
     }
@@ -1272,9 +1427,17 @@ int pthread_create(
     void *(*start_routine)(void *),
     void *arg
 ) {
+    smros_pthread_diag_state(
+        "create-enter",
+        (const void *)start_routine,
+        attr != NULL,
+        0,
+        0
+    );
     smros_pthread_create_fn target =
         (smros_pthread_create_fn)smros_resolve_symbol("pthread_create");
     if (target == NULL) {
+        smros_pthread_diag_state("create-exit", thread, EAGAIN, 0, 0);
         return EAGAIN;
     }
     if (attr != NULL) {
@@ -1353,6 +1516,13 @@ int pthread_create(
     struct sched_param context_param = context->param;
     int result =
         target(thread, effective_attr, smros_pthread_start_trampoline, context);
+    smros_pthread_diag_state(
+        "create-exit",
+        thread,
+        (uint32_t)result,
+        result == 0 ? (uint32_t)(uintptr_t)*thread : 0,
+        0
+    );
     if (local_attr_active) {
         smros_pthread_attr_destroy_fn attr_destroy =
             (smros_pthread_attr_destroy_fn)smros_resolve_symbol(
@@ -1363,6 +1533,7 @@ int pthread_create(
         }
     }
     if (result == 0) {
+        smros_forget_pthread_joined(*thread);
         (void)smros_remember_pthread_sched_record(
             *thread,
             context_policy,
@@ -1383,36 +1554,67 @@ int pthread_join(pthread_t thread, void **retval) {
     if (target == NULL) {
         return ESRCH;
     }
-    smros_pthread_tryjoin_fn tryjoin_target =
+    if (smros_pthread_was_joined(thread)) {
+        smros_pthread_diag_state(
+            "join-exit",
+            (const void *)(uintptr_t)thread,
+            ESRCH,
+            0,
+            0
+        );
+        return ESRCH;
+    }
+    /* SMROS's native join wait is not reliably interrupted by libc's
+     * cancellation signal. Poll the GNU nonblocking primitive so the
+     * compatibility cancellation record remains observable at this POSIX
+     * cancellation point. */
+    smros_pthread_tryjoin_fn try_target =
         (smros_pthread_tryjoin_fn)smros_resolve_symbol("pthread_tryjoin_np");
-    if (tryjoin_target == NULL) {
-        int result = target(thread, retval);
-        smros_pthread_diag_state("join-exit", (const void *)(uintptr_t)thread, (uint32_t)result, 0, 0);
-        if (result == 0) {
-            smros_remember_pthread_joined(thread);
-        }
-        return result;
-    }
-    int result = tryjoin_target(thread, retval);
-    if (result != EBUSY) {
-        if (result == 0) {
-            smros_remember_pthread_joined(thread);
-        }
-        smros_pthread_diag_state("join-exit", (const void *)(uintptr_t)thread, (uint32_t)result, 0, 0);
-        return result;
-    }
-    for (;;) {
-        pthread_testcancel();
-        (void)sched_yield();
-        result = tryjoin_target(thread, retval);
-        if (result != EBUSY) {
-            if (result == 0) {
-                smros_remember_pthread_joined(thread);
+    if (try_target != NULL) {
+        unsigned int poll_count = 0;
+        for (;;) {
+            if (smros_current_pthread_cancel_requested()) {
+                smros_pthread_exit_fn exit_target =
+                    (smros_pthread_exit_fn)smros_resolve_symbol("pthread_exit");
+                if (exit_target != NULL) {
+                    exit_target(PTHREAD_CANCELED);
+                }
+                return ECANCELED;
             }
-            smros_pthread_diag_state("join-exit", (const void *)(uintptr_t)thread, (uint32_t)result, 0, 0);
-            return result;
+            int result = try_target(thread, retval);
+            if (result != EBUSY) {
+                smros_pthread_diag_state(
+                    "join-exit",
+                    (const void *)(uintptr_t)thread,
+                    (uint32_t)result,
+                    0,
+                    0
+                );
+                if (result == 0) {
+                    smros_remember_pthread_joined(thread);
+                }
+                return result;
+            }
+            poll_count++;
+            if (getenv("SMROS_PTHREAD_DIAG") != NULL
+                    && (poll_count == 1 || (poll_count % 1000000u) == 0)) {
+                (void)dprintf(
+                    STDERR_FILENO,
+                    "SMROS_JOIN_POLL_TRACE tid=%lu target=%p polls=%u result=EBUSY\n",
+                    (unsigned long)pthread_self(),
+                    (const void *)(uintptr_t)thread,
+                    poll_count
+                );
+            }
+            (void)sched_yield();
         }
     }
+    int result = target(thread, retval);
+    smros_pthread_diag_state("join-exit", (const void *)(uintptr_t)thread, (uint32_t)result, 0, 0);
+    if (result == 0) {
+        smros_remember_pthread_joined(thread);
+    }
+    return result;
 }
 
 int pthread_kill(pthread_t thread, int signal_number) {
@@ -1572,8 +1774,9 @@ int pthread_cancel(pthread_t thread) {
     if (target == NULL) {
         return ESRCH;
     }
-    /* Queue the request first; the target thread delivers it at its next
-     * compatibility cancellation checkpoint, after this call has returned. */
+    /* Compatibility cancellation points observe deferred requests locally.
+     * Forward only asynchronous requests so their native signal cannot run a
+     * cleanup handler before pthread_cancel returns to its caller. */
     int result = 0;
     smros_remember_pthread_cancel(thread);
     if (smros_pthread_cancel_type_for(thread) == PTHREAD_CANCEL_ASYNCHRONOUS) {
@@ -1581,8 +1784,6 @@ int pthread_cancel(pthread_t thread) {
         if (result != 0) {
             smros_forget_pthread_cancel(thread);
         }
-    } else {
-        (void)sched_yield();
     }
     smros_pthread_diag_state("cancel-exit", (const void *)(uintptr_t)thread, (uint32_t)result, 0, 0);
     return result;
@@ -1749,17 +1950,20 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex) {
 }
 
 int pthread_mutex_destroy(pthread_mutex_t *mutex) {
+    int destroy_attempt = smros_trace_destroy_enter();
     smros_pthread_diag_state("mutex-destroy-enter", mutex, 0, 0, 0);
     if (smros_pthread_shared_mutex_active(mutex)) {
         smros_pthread_shared_mutex_state *state =
             smros_pthread_shared_mutex(mutex);
         if (__sync_fetch_and_add(&state->lock, 0) != 0) {
             smros_pthread_diag_state("mutex-destroy-busy", mutex, state->lock, state->owner, state->type);
+            smros_trace_destroy_exit(destroy_attempt, EBUSY);
             return EBUSY;
         }
         __sync_lock_test_and_set(&state->magic, 0);
         smros_forget_pthread_mutex_record(mutex);
         smros_pthread_diag_state("mutex-destroy-exit", mutex, 0, state->lock, state->type);
+        smros_trace_destroy_exit(destroy_attempt, 0);
         return 0;
     }
     smros_pthread_mutex_destroy_fn target =
@@ -1767,6 +1971,7 @@ int pthread_mutex_destroy(pthread_mutex_t *mutex) {
             "pthread_mutex_destroy"
         );
     if (target == NULL) {
+        smros_trace_destroy_exit(destroy_attempt, ENOSYS);
         return ENOSYS;
     }
     int result = target(mutex);
@@ -1774,6 +1979,7 @@ int pthread_mutex_destroy(pthread_mutex_t *mutex) {
         smros_forget_pthread_mutex_record(mutex);
     }
     smros_pthread_diag_state("mutex-destroy-exit", mutex, (uint32_t)result, 0, 0);
+    smros_trace_destroy_exit(destroy_attempt, result);
     return result;
 }
 
@@ -1979,57 +2185,57 @@ __attribute__((noreturn)) void pthread_exit(void *retval) {
 }
 
 unsigned int sleep(unsigned int seconds) {
+    if (getenv("SMROS_PTHREAD_DIAG") != NULL) {
+        (void)dprintf(
+            STDERR_FILENO,
+            "SMROS_SLEEP_TRACE tid=%lu phase=enter seconds=%u\n",
+            (unsigned long)pthread_self(),
+            seconds
+        );
+    }
     __sync_synchronize();
     smros_refresh_current_pthread_cancel();
     pthread_testcancel();
-    sig_atomic_t signal_generation = smros_thread_signal_generation;
 
     if (seconds == 0) {
         __sync_synchronize();
         return 0;
     }
 
-    struct timespec deadline;
-    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
-        return seconds;
-    }
-    deadline.tv_sec += (time_t)seconds;
-
-    for (;;) {
-        smros_refresh_current_pthread_cancel();
+    /* SMROS's long high-resolution waits do not always observe the native
+     * cancellation signal until their deadline. Keep sleep a cancellation
+     * point by limiting each kernel wait to one second. */
+    unsigned int remaining_seconds = seconds;
+    while (remaining_seconds != 0) {
+        struct timespec request = {
+            .tv_sec = 1,
+            .tv_nsec = 0,
+        };
+        struct timespec remaining = {0, 0};
+        if (nanosleep(&request, &remaining) == 0) {
+            remaining_seconds--;
+            if (getenv("SMROS_PTHREAD_DIAG") != NULL) {
+                (void)dprintf(
+                    STDERR_FILENO,
+                    "SMROS_SLEEP_TRACE tid=%lu phase=tick remaining=%u\n",
+                    (unsigned long)pthread_self(),
+                    remaining_seconds
+                );
+            }
+            pthread_testcancel();
+            continue;
+        }
+        if (errno != EINTR) {
+            return remaining_seconds;
+        }
         pthread_testcancel();
-
-        struct timespec now;
-        if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
-            return seconds;
+        if (remaining.tv_sec >= (time_t)UINT_MAX) {
+            return UINT_MAX;
         }
-        if (smros_thread_signal_generation != signal_generation) {
-            time_t remaining = deadline.tv_sec - now.tv_sec;
-            if (deadline.tv_nsec > now.tv_nsec) {
-                remaining++;
-            }
-            if (remaining <= 0) {
-                return 1;
-            }
-            if ((uintmax_t)remaining > UINT_MAX) {
-                return UINT_MAX;
-            }
-            return (unsigned int)remaining;
-        }
-        if (
-            now.tv_sec > deadline.tv_sec ||
-            (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)
-        ) {
-            break;
-        }
-
-        __sync_synchronize();
-        (void)sched_yield();
-        __sync_synchronize();
-        smros_refresh_current_pthread_cancel();
-        pthread_testcancel();
+        return remaining_seconds - 1u
+            + (unsigned int)remaining.tv_sec
+            + (remaining.tv_nsec != 0);
     }
-    __sync_synchronize();
     return 0;
 }
 
@@ -2321,6 +2527,18 @@ static int smros_pthread_shared_mutex_lock(pthread_mutex_t *mutex) {
     ) {
         return EDEADLK;
     }
+    if (__sync_fetch_and_add(&state->lock, 0) != 0) {
+        smros_shared_mutex_trace(
+            "lock-contended",
+            mutex,
+            __sync_fetch_and_add(&state->lock, 0),
+            __sync_fetch_and_add(&state->owner, 0),
+            token,
+            type,
+            EBUSY,
+            0
+        );
+    }
     smros_pthread_diag_state(
         "shared-mutex-lock-enter",
         mutex,
@@ -2332,6 +2550,18 @@ static int smros_pthread_shared_mutex_lock(pthread_mutex_t *mutex) {
     for (;;) {
         int result = smros_pthread_shared_mutex_trylock(mutex);
         if (result != EBUSY) {
+            if (attempts != 0) {
+                smros_shared_mutex_trace(
+                    "lock-exit",
+                    mutex,
+                    __sync_fetch_and_add(&state->lock, 0),
+                    __sync_fetch_and_add(&state->owner, 0),
+                    token,
+                    type,
+                    result,
+                    attempts
+                );
+            }
             smros_pthread_diag_state(
                 "shared-mutex-lock-exit",
                 mutex,
@@ -2343,6 +2573,18 @@ static int smros_pthread_shared_mutex_lock(pthread_mutex_t *mutex) {
         }
         if (attempts != UINT32_MAX) {
             attempts++;
+        }
+        if (attempts == 1 || (attempts % 100000u) == 0) {
+            smros_shared_mutex_trace(
+                "lock-retry",
+                mutex,
+                __sync_fetch_and_add(&state->lock, 0),
+                __sync_fetch_and_add(&state->owner, 0),
+                token,
+                type,
+                EBUSY,
+                attempts
+            );
         }
         (void)sched_yield();
     }
@@ -2914,7 +3156,7 @@ static void smros_pthread_cond_wait_pause(void) {
      */
     const struct timespec pause = {
         .tv_sec = 0,
-        .tv_nsec = 10000000L,
+        .tv_nsec = 200000000L,
     };
     if (nanosleep(&pause, NULL) != 0 && errno != EINTR) {
         (void)sched_yield();
@@ -3303,7 +3545,7 @@ static int smros_pthread_private_cond_wake(
          * held, so waiting indefinitely here can deadlock the awakened waiter
          * while it tries to reacquire that mutex.
          */
-        for (unsigned int attempt = 0; attempt < 2; ++attempt) {
+        for (unsigned int attempt = 0; attempt < 8; ++attempt) {
             smros_lock_pthread_cond_records();
             int pending = record->wakeups > 0;
             smros_unlock_pthread_cond_records();
@@ -3432,6 +3674,13 @@ static int smros_pthread_shared_cond_wait_common(
     }
 
     (void)__sync_add_and_fetch(&state->waiters, 1);
+    smros_trace_shared_cond(
+        "wait-enter",
+        cond,
+        0,
+        __sync_fetch_and_add(&state->waiters, 0),
+        __sync_fetch_and_add(&state->wakeups, 0)
+    );
     int unlock_result = pthread_mutex_unlock(mutex);
     if (unlock_result != 0) {
         (void)__sync_fetch_and_sub(&state->waiters, 1);
@@ -3497,6 +3746,13 @@ static int smros_pthread_shared_cond_wait_common(
         smros_pthread_cond_wait_pause();
     }
     int lock_result = pthread_mutex_lock(mutex);
+    smros_trace_shared_cond(
+        "wait-exit",
+        cond,
+        result == 0 && lock_result == 0 ? 0 : (result != 0 ? result : lock_result),
+        __sync_fetch_and_add(&state->waiters, 0),
+        __sync_fetch_and_add(&state->wakeups, 0)
+    );
     smros_pthread_diag_state(
         "shared-cond-wait-exit",
         cond,
@@ -3528,9 +3784,17 @@ static int smros_pthread_shared_cond_wake(
     }
     uint32_t waiters = __sync_fetch_and_add(&state->waiters, 0);
     if (waiters == 0) {
+        smros_trace_shared_cond("wake-empty", cond, 0, 0, 0);
         return 0;
     }
     (void)__sync_add_and_fetch(&state->wakeups, broadcast ? waiters : 1);
+    smros_trace_shared_cond(
+        broadcast ? "broadcast" : "signal",
+        cond,
+        0,
+        waiters,
+        __sync_fetch_and_add(&state->wakeups, 0)
+    );
     return 0;
 }
 
@@ -3545,6 +3809,7 @@ static int smros_pthread_shared_cond_destroy(pthread_cond_t *cond) {
     }
     uint32_t waiters = __sync_fetch_and_add(&state->waiters, 0);
     uint32_t wakeups = __sync_fetch_and_add(&state->wakeups, 0);
+    smros_trace_shared_cond("destroy", cond, 0, waiters, wakeups);
     smros_pthread_diag_state("cond-destroy-state", cond, waiters, wakeups, state->clock_id);
     if (waiters != 0 && wakeups < waiters) {
         return EBUSY;
@@ -3712,10 +3977,12 @@ int pthread_cond_signal(pthread_cond_t *cond) {
 }
 
 int pthread_cond_destroy(pthread_cond_t *cond) {
+    int destroy_attempt = smros_trace_destroy_enter();
     smros_pthread_diag_state("cond-destroy-enter", cond, 0, 0, 0);
     if (smros_pthread_shared_cond_active(cond)) {
         int result = smros_pthread_shared_cond_destroy(cond);
         smros_pthread_diag_state("cond-destroy-exit", cond, (uint32_t)result, 0, 0);
+        smros_trace_destroy_exit(destroy_attempt, result);
         return result;
     }
     smros_pthread_cond_record *record =
@@ -3726,6 +3993,7 @@ int pthread_cond_destroy(pthread_cond_t *cond) {
     if (record != NULL) {
         int result = smros_pthread_private_cond_destroy(record);
         smros_pthread_diag_state("cond-destroy-exit", cond, (uint32_t)result, record->waiters, record->wakeups);
+        smros_trace_destroy_exit(destroy_attempt, result);
         return result;
     }
     smros_pthread_cond_destroy_fn target =
@@ -3733,9 +4001,12 @@ int pthread_cond_destroy(pthread_cond_t *cond) {
             "pthread_cond_destroy"
         );
     if (target == NULL) {
+        smros_trace_destroy_exit(destroy_attempt, ENOSYS);
         return ENOSYS;
     }
-    return target(cond);
+    int result = target(cond);
+    smros_trace_destroy_exit(destroy_attempt, result);
+    return result;
 }
 
 static smros_pthread_barrier_record *smros_find_pthread_barrier_record(
@@ -4190,6 +4461,19 @@ static void smros_note_signal(int restartable) {
 
 static void smros_dispatch_signal(int signum) {
     int index = smros_signal_index(signum);
+    if (getenv("SMROS_PTHREAD_DIAG") != NULL) {
+        int trace = __sync_add_and_fetch(&smros_signal_trace_count, 1);
+        if (trace <= 96) {
+            (void)dprintf(
+                STDERR_FILENO,
+                "SMROS_SIGNAL_TRACE n=%d tid=%lu signum=%d generation=%d\\n",
+                trace,
+                (unsigned long)pthread_self(),
+                signum,
+                (int)smros_signal_generation
+            );
+        }
+    }
     smros_note_signal(
         (smros_signal_actions[index].sa_flags & SA_RESTART) != 0
     );
@@ -4209,6 +4493,19 @@ static void smros_dispatch_signal_info(
     void *context
 ) {
     int index = smros_signal_index(signum);
+    if (getenv("SMROS_PTHREAD_DIAG") != NULL) {
+        int trace = __sync_add_and_fetch(&smros_signal_trace_count, 1);
+        if (trace <= 96) {
+            (void)dprintf(
+                STDERR_FILENO,
+                "SMROS_SIGNAL_TRACE n=%d tid=%lu signum=%d generation=%d info=1\\n",
+                trace,
+                (unsigned long)pthread_self(),
+                signum,
+                (int)smros_signal_generation
+            );
+        }
+    }
     smros_note_signal(
         (smros_signal_actions[index].sa_flags & SA_RESTART) != 0
     );
@@ -4270,6 +4567,89 @@ int sigaction(int signum, const struct sigaction *action, struct sigaction *old_
     return result;
 }
 
+void (*signal(int signum, void (*handler)(int)))(int) {
+    struct sigaction action;
+    struct sigaction previous;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = handler;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(signum, &action, &previous) != 0) {
+        return SIG_ERR;
+    }
+    return previous.sa_handler;
+}
+
+static int smros_change_signal_mask(int signum, int how) {
+    smros_sigprocmask_fn target =
+        (smros_sigprocmask_fn)smros_resolve_symbol("sigprocmask");
+    if (target == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+
+    sigset_t set;
+    sigemptyset(&set);
+    if (sigaddset(&set, signum) != 0) {
+        return -1;
+    }
+    return target(how, &set, NULL);
+}
+
+int sighold(int signum) {
+    return smros_change_signal_mask(signum, SIG_BLOCK);
+}
+
+int sigrelse(int signum) {
+    return smros_change_signal_mask(signum, SIG_UNBLOCK);
+}
+
+void (*sigset(int signum, void (*disp)(int)))(int) {
+    struct sigaction previous;
+    if (sigaction(signum, NULL, &previous) != 0) {
+        return SIG_ERR;
+    }
+
+    smros_sigprocmask_fn target =
+        (smros_sigprocmask_fn)smros_resolve_symbol("sigprocmask");
+    if (target == NULL) {
+        errno = ENOSYS;
+        return SIG_ERR;
+    }
+
+    sigset_t set;
+    sigset_t old_mask;
+    sigemptyset(&set);
+    if (sigaddset(&set, signum) != 0) {
+        return SIG_ERR;
+    }
+
+    if (disp == SIG_HOLD) {
+        if (target(SIG_BLOCK, &set, &old_mask) != 0) {
+            return SIG_ERR;
+        }
+        return SIG_HOLD;
+    }
+
+    sigset_t current_mask;
+    sigset_t empty_mask;
+    sigemptyset(&empty_mask);
+    if (target(SIG_BLOCK, &empty_mask, &current_mask) != 0) {
+        return SIG_ERR;
+    }
+
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = disp;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(signum, &action, NULL) != 0) {
+        return SIG_ERR;
+    }
+    if (target(SIG_UNBLOCK, &set, NULL) != 0) {
+        return SIG_ERR;
+    }
+    return sigismember(&current_mask, signum) == 1 ? SIG_HOLD : previous.sa_handler;
+}
+
 int kill(pid_t pid, int sig) {
     if (pid == 1 && sig == 0 && smros_effective_uid != 0) {
         errno = EPERM;
@@ -4282,6 +4662,21 @@ int kill(pid_t pid, int sig) {
         return -1;
     }
     return target(pid, sig);
+}
+
+int sigqueue(pid_t pid, int sig, const union sigval value) {
+    if (pid == 1 && smros_effective_uid != 0) {
+        errno = EPERM;
+        return -1;
+    }
+
+    smros_sigqueue_fn target =
+        (smros_sigqueue_fn)smros_resolve_symbol("sigqueue");
+    if (target == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return target(pid, sig, value);
 }
 
 static int smros_mlock_range_invalid(const void *addr, size_t len) {
@@ -4962,17 +5357,42 @@ int sem_timedwait(sem_t *sem, const struct timespec *abs_timeout) {
 
 int sem_wait(sem_t *sem) {
     sig_atomic_t signal_generation = smros_thread_interrupt_generation;
+    int trace = 0;
     for (;;) {
         int wait_result = smros_sem_trywait(sem);
         if (smros_sem_signal_interrupted(signal_generation)) {
             return -1;
         }
         if (wait_result == 0) {
+            if (getenv("SMROS_PTHREAD_DIAG") != NULL && trace != 0) {
+                int event = __sync_add_and_fetch(&smros_sem_trace_count, 1);
+                if (event <= 96) {
+                    (void)dprintf(
+                        STDERR_FILENO,
+                        "SMROS_SEM_TRACE n=%d tid=%lu op=wait-exit result=0\\n",
+                        event,
+                        (unsigned long)pthread_self()
+                    );
+                }
+            }
             return 0;
         }
         if (errno != EAGAIN) {
             return -1;
         }
+        if (trace == 0 && getenv("SMROS_PTHREAD_DIAG") != NULL) {
+            int event = __sync_add_and_fetch(&smros_sem_trace_count, 1);
+            if (event <= 96) {
+                (void)dprintf(
+                    STDERR_FILENO,
+                    "SMROS_SEM_TRACE n=%d tid=%lu op=wait-block sem=%p\\n",
+                    event,
+                    (unsigned long)pthread_self(),
+                    (void *)sem
+                );
+            }
+        }
+        trace = 1;
         if (smros_atfork_signal_stress_active()) {
             errno = 0;
             return 0;

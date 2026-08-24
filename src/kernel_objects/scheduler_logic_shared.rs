@@ -327,4 +327,5 @@ impl<const CPU_COUNT: usize> DeferredThreadRetirements<CPU_COUNT> {
             .map(|encoded| encoded & !Self::RECLAIMABLE_BIT)
         })
     }
+
 }

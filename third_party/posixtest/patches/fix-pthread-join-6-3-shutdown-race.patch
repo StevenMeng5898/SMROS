@@ -1,0 +1,23 @@
+diff --git a/conformance/interfaces/pthread_join/6-3.c b/conformance/interfaces/pthread_join/6-3.c
+--- a/conformance/interfaces/pthread_join/6-3.c
++++ b/conformance/interfaces/pthread_join/6-3.c
+@@ -351,6 +351,19 @@
+ 	}
+ 	while ( do_it );
+
++	/*
++	 * The sender threads may be asleep in sem_wait() when the worker
++	 * observes do_it == 0.  No further signal is then guaranteed to
++	 * reach the worker and post the semaphore, so release both waiters
++	 * before joining them.  This only drains the test's private
++	 * shutdown synchronization and does not affect the pthread_join
++	 * assertion under test.
++	 */
++#ifdef WITH_SYNCHRO
++	(void)sem_post( &semsig1 );
++	(void)sem_post( &semsig2 );
++#endif
++
+
+ 	if ( ( ret = pthread_join( th_sig1, NULL ) ) )
+ 	{

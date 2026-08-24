@@ -186,7 +186,9 @@ pub(crate) enum LinuxForkFailurePoint {
     PrivatePage,
     PrivatePageAllocation,
     PrivatePageCopy,
+    #[cfg(not(target_arch = "aarch64"))]
     PrivatePageMap,
+    #[cfg(not(target_arch = "aarch64"))]
     SharedPageMap,
     Memory,
     Configured,
@@ -721,6 +723,125 @@ pub(crate) struct LinuxSharedPageRecord {
     pub pfn: u64,
     pub references: usize,
     pub named: bool,
+}
+
+fn linux_shared_page_record_key(record: LinuxSharedPageRecord) -> (u32, usize) {
+    (record.object_id, record.page_index)
+}
+
+#[cfg(not(target_os = "none"))]
+pub(crate) fn linux_merge_shared_page_records(
+    existing: &[LinuxSharedPageRecord],
+    additions: &[LinuxSharedPageRecord],
+) -> Option<Vec<LinuxSharedPageRecord>> {
+    if !existing
+        .windows(2)
+        .all(|records| linux_shared_page_record_key(records[0]) < linux_shared_page_record_key(records[1]))
+        || !additions
+            .windows(2)
+            .all(|records| linux_shared_page_record_key(records[0]) < linux_shared_page_record_key(records[1]))
+    {
+        return None;
+    }
+
+    let capacity = existing.len().checked_add(additions.len())?;
+    let mut merged = Vec::new();
+    merged.try_reserve_exact(capacity).ok()?;
+    let mut existing_index = 0;
+    let mut additions_index = 0;
+    while existing_index < existing.len() || additions_index < additions.len() {
+        let next = match (
+            existing.get(existing_index).copied(),
+            additions.get(additions_index).copied(),
+        ) {
+            (Some(existing), Some(addition)) => {
+                match linux_shared_page_record_key(existing)
+                    .cmp(&linux_shared_page_record_key(addition))
+                {
+                    core::cmp::Ordering::Less => {
+                        existing_index += 1;
+                        existing
+                    }
+                    core::cmp::Ordering::Greater => {
+                        additions_index += 1;
+                        addition
+                    }
+                    core::cmp::Ordering::Equal => {
+                        if existing.pfn != addition.pfn {
+                            return None;
+                        }
+                        let references = existing.references.checked_add(addition.references)?;
+                        existing_index += 1;
+                        additions_index += 1;
+                        LinuxSharedPageRecord {
+                            references,
+                            ..existing
+                        }
+                    }
+                }
+            }
+            (Some(existing), None) => {
+                existing_index += 1;
+                existing
+            }
+            (None, Some(addition)) => {
+                additions_index += 1;
+                addition
+            }
+            (None, None) => return None,
+        };
+        merged.push(next);
+    }
+    Some(merged)
+}
+
+pub(crate) fn linux_merge_shared_page_records_in_place(
+    existing: &mut Vec<LinuxSharedPageRecord>,
+    additions: &[LinuxSharedPageRecord],
+) -> Option<()> {
+    #[cfg(not(target_os = "none"))]
+    if !existing
+        .windows(2)
+        .all(|records| linux_shared_page_record_key(records[0]) < linux_shared_page_record_key(records[1]))
+    {
+        return None;
+    }
+    if !additions
+        .windows(2)
+        .all(|records| linux_shared_page_record_key(records[0]) < linux_shared_page_record_key(records[1]))
+    {
+        return None;
+    }
+
+    for addition in additions {
+        if let Ok(index) = existing.binary_search_by_key(
+            &linux_shared_page_record_key(*addition),
+            |record| linux_shared_page_record_key(*record),
+        ) {
+            if existing[index].pfn != addition.pfn
+                || existing[index]
+                    .references
+                    .checked_add(addition.references)
+                    .is_none()
+            {
+                return None;
+            }
+        }
+    }
+
+    existing.try_reserve_exact(additions.len()).ok()?;
+    for addition in additions {
+        match existing.binary_search_by_key(
+            &linux_shared_page_record_key(*addition),
+            |record| linux_shared_page_record_key(*record),
+        ) {
+            Ok(index) => {
+                existing[index].references += addition.references;
+            }
+            Err(index) => existing.insert(index, *addition),
+        }
+    }
+    Some(())
 }
 
 #[cfg(not(target_os = "none"))]

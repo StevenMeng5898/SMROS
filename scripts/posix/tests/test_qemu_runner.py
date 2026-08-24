@@ -329,6 +329,13 @@ class QemuControllerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_default_boot_timeout_allows_large_scheduler_boot(self) -> None:
+        config = ControllerConfig(
+            output_directory=self.root,
+            qemu_argv=("qemu-system-aarch64", "-nographic"),
+        )
+        self.assertGreaterEqual(config.boot_timeout_seconds, 60.0)
+
     def _controller(
         self,
         transports: list[FakeTransport],
@@ -5769,10 +5776,20 @@ class QemuIntegrationSurfaceTests(unittest.TestCase):
         self.assertEqual(argv[0], "qemu-system-aarch64")
         self.assertIn("virt,gic-version=4,virtualization=on", argv)
         self.assertIn("cortex-a710", argv)
+        self.assertEqual(argv[argv.index("-smp") + 1], "4")
         self.assertIn("virtio-blk-device,drive=fxfs", argv)
         self.assertIn("virtio-net-device,netdev=smrosnet", argv)
         self.assertEqual(argv[argv.index("-m") + 1], "1024M")
         self.assertNotIn("-shell", argv)
+
+        smp_override = build_qemu_argv(
+            qemu="qemu-system-aarch64",
+            kernel=Path("kernel8.img"),
+            disk=Path("smros-fxfs.img"),
+            memory="1024M",
+            smp="4",
+        )
+        self.assertEqual(smp_override[smp_override.index("-smp") + 1], "4")
 
     @mock.patch("scripts.posix.qemu_runner.subprocess.Popen")
     def test_popen_transport_uses_argument_array_and_combined_serial(

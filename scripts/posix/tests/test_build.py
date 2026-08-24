@@ -3383,7 +3383,7 @@ int main(void) {
                 timeout=5.0,
             )
 
-    def test_smros_posix_compat_releases_bounded_fork_children_after_wait(self) -> None:
+    def test_smros_posix_compat_releases_fork_children_after_wait(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -3412,7 +3412,7 @@ int main(void) {
         if (child == 0) _exit(0);
         children[count++] = child;
     }
-    if (count >= PROBE_CHILDREN) return 11;
+        if (count != PROBE_CHILDREN) return 11;
     for (int index = 0; index < count; ++index) {
         if (waitpid(children[index], NULL, 0) != children[index]) return 12;
     }
@@ -3443,6 +3443,17 @@ int main(void) {
                 check=True,
                 timeout=5.0,
             )
+
+    def test_smros_posix_compat_child_fork_reset_does_not_take_inherited_lock(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("static void smros_reset_fork_children(void)")
+        end = source.index("\n}", start) + 2
+        body = source[start:end]
+        self.assertIn("memset(smros_fork_child_records", body)
+        self.assertNotIn("__sync_lock_test_and_set", body)
+        self.assertNotIn("__sync_lock_release", body)
 
     def test_smros_posix_compat_shared_cond_ignores_inherited_private_record(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c")
@@ -3789,6 +3800,223 @@ int main(void) {
         return 6;
     }
     return 0;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_deferred_cancel_reaches_native_join(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "deferred-join-cancel.c"
+            binary = root / "deferred-join-cancel"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
+
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+static volatile int child_started;
+
+static void *child_func(void *arg) {
+    (void)arg;
+    if (pthread_mutex_lock(&mutex) != 0) return (void *)1;
+    child_started = 1;
+    pthread_mutex_unlock(&mutex);
+    return NULL;
+}
+
+static void *joiner_func(void *arg) {
+    pthread_t child = *(pthread_t *)arg;
+    (void)pthread_join(child, NULL);
+    return (void *)1;
+}
+
+int main(void) {
+    pthread_t child;
+    pthread_t joiner;
+    if (pthread_mutex_lock(&mutex) != 0) return 2;
+    if (pthread_create(&child, NULL, child_func, NULL) != 0) return 3;
+    for (int index = 0; index < 10000 && !child_started; index++) {
+        sched_yield();
+    }
+    if (pthread_create(&joiner, NULL, joiner_func, &child) != 0) return 4;
+    usleep(10000);
+    if (pthread_cancel(joiner) != 0) return 5;
+    void *result = NULL;
+    if (pthread_join(joiner, &result) != 0 || result != PTHREAD_CANCELED) {
+        return 6;
+    }
+    if (pthread_mutex_unlock(&mutex) != 0) return 7;
+    if (pthread_join(child, NULL) != 0) return 8;
+    return 0;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_deferred_cancel_interrupts_join_without_native_signal(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            cancel_stub = root / "cancel-stub.c"
+            cancel_stub_so = root / "libcancel-stub.so"
+            probe = root / "deferred-join-cancel-stub.c"
+            binary = root / "deferred-join-cancel-stub"
+            cancel_stub.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <pthread.h>
+
+int pthread_cancel(pthread_t thread) {
+    (void)thread;
+    return 0;
+}
+''',
+                encoding="utf-8",
+            )
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
+
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+static volatile int child_started;
+
+static void *child_func(void *arg) {
+    (void)arg;
+    if (pthread_mutex_lock(&mutex) != 0) return (void *)1;
+    child_started = 1;
+    pthread_mutex_unlock(&mutex);
+    return NULL;
+}
+
+static void *joiner_func(void *arg) {
+    pthread_t child = *(pthread_t *)arg;
+    (void)pthread_join(child, NULL);
+    return (void *)1;
+}
+
+int main(void) {
+    pthread_t child;
+    pthread_t joiner;
+    if (pthread_mutex_lock(&mutex) != 0) return 2;
+    if (pthread_create(&child, NULL, child_func, NULL) != 0) return 3;
+    for (int index = 0; index < 10000 && !child_started; index++) {
+        sched_yield();
+    }
+    if (pthread_create(&joiner, NULL, joiner_func, &child) != 0) return 4;
+    usleep(10000);
+    if (pthread_cancel(joiner) != 0) return 5;
+    void *result = NULL;
+    if (pthread_join(joiner, &result) != 0 || result != PTHREAD_CANCELED) {
+        return 6;
+    }
+    if (pthread_mutex_unlock(&mutex) != 0) return 7;
+    if (pthread_join(child, NULL) != 0) return 8;
+    return 0;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(cancel_stub), "-o", str(cancel_stub_so),
+                    "-Wl,-soname,libcancel-stub.so", "-pthread",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            subprocess.run(
+                [str(binary)],
+                env={
+                    **os.environ,
+                    "LD_PRELOAD": f"{preload}:{cancel_stub_so}",
+                },
+                check=True,
+                timeout=5.0,
+            )
+
+    def test_smros_posix_compat_join_rejects_already_joined_thread(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "join-again.c"
+            binary = root / "join-again"
+            probe.write_text(
+                r'''
+#include <errno.h>
+#include <pthread.h>
+
+static void *worker(void *arg) {
+    (void)arg;
+    return NULL;
+}
+
+int main(void) {
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, worker, NULL) != 0) return 2;
+    if (pthread_join(thread, NULL) != 0) return 3;
+    return pthread_join(thread, NULL) == ESRCH ? 0 : 4;
 }
 ''',
                 encoding="utf-8",
@@ -4564,6 +4792,7 @@ static pthread_barrier_t release_barrier;
 static pthread_cond_t destroy_after_broadcast_cond;
 static pthread_mutex_t destroy_after_broadcast_mutex;
 static int cross_thread_wait_ok;
+static volatile int busy_barrier_waiting;
 static int sleep_cancel_cleanup_called;
 static int barrier_release_seen;
 static int destroy_after_broadcast_waiters;
@@ -4604,6 +4833,7 @@ static void *blocked_sem_waiter(void *arg) {
 
 static void *blocked_barrier_waiter(void *arg) {
     (void)arg;
+    busy_barrier_waiting = 1;
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
     int result = pthread_barrier_wait(&busy_barrier);
     if (result != 0 && result != PTHREAD_BARRIER_SERIAL_THREAD) {
@@ -4992,9 +5222,24 @@ int main(void) {
         fprintf(stderr, "busy barrier thread create failed\n");
         return 1;
     }
-    sleep(1);
+    for (int index = 0; index < 100000 && !busy_barrier_waiting; index++) {
+        sched_yield();
+    }
+    if (!busy_barrier_waiting) {
+        fprintf(stderr, "busy barrier waiter did not start\n");
+        pthread_cancel(barrier_thread);
+        pthread_join(barrier_thread, NULL);
+        return 1;
+    }
     setenv("SMROS_FORCE_BUSY_BARRIER_DESTROY", "1", 1);
-    int barrier_destroy_result = pthread_barrier_destroy(&busy_barrier);
+    int barrier_destroy_result = EINVAL;
+    for (int index = 0; index < 100000; index++) {
+        barrier_destroy_result = pthread_barrier_destroy(&busy_barrier);
+        if (barrier_destroy_result == EBUSY) {
+            break;
+        }
+        sched_yield();
+    }
     unsetenv("SMROS_FORCE_BUSY_BARRIER_DESTROY");
     if (barrier_destroy_result != EBUSY) {
         fprintf(stderr,

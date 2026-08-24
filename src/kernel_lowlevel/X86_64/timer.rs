@@ -38,4 +38,7 @@ pub fn get_nanoseconds() -> u64 {
 #[allow(dead_code)]
 pub fn arm_next_tick() {}
 
+#[allow(dead_code)]
+pub fn arm_at_nanoseconds(_deadline: u64) {}
+
 pub fn clear_interrupt() {}

@@ -52,7 +52,7 @@
 //! 0x0000_0000_FFFF_0000 - Stack Segment (grows downward)
 //! ```
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 
 #[cfg(target_arch = "aarch64")]
 use super::aarch64_vm_logic_shared as aarch64_vm_logic;
@@ -430,15 +430,21 @@ impl PageFrameAllocator {
     }
 
     pub fn init_range(start: usize, end: usize) -> bool {
+        let _guard = AllocatorGuard::acquire();
         let allocator = unsafe { &mut *ALLOCATOR.get() };
-        allocator.core.init_range(start, end, PAGE_SIZE)
+        let initialized = allocator.core.init_range(start, end, PAGE_SIZE);
+        if initialized {
+            for references in &TABLE_REFERENCES {
+                references.store(0, Ordering::Relaxed);
+            }
+        }
+        initialized
     }
 
     /// Allocate a single page frame
     /// Returns the page frame number (PFN)
     pub fn alloc() -> Option<u64> {
-        // SAFETY: We use interior mutability with careful synchronization.
-        // In a single-threaded kernel context, this is safe.
+        let _guard = AllocatorGuard::acquire();
         let allocator = unsafe { &mut *ALLOCATOR.get() };
 
         allocator.core.alloc()
@@ -446,8 +452,79 @@ impl PageFrameAllocator {
 
     /// Free a page frame
     pub fn free(pfn: u64) {
+        let _guard = AllocatorGuard::acquire();
         let allocator = unsafe { &mut *ALLOCATOR.get() };
         let _ = allocator.core.free(pfn);
+    }
+
+    pub fn alloc_table() -> Option<u64> {
+        let pfn = Self::alloc()?;
+        let allocator = unsafe { &*ALLOCATOR.get() };
+        let Some(index) = allocator.core.pfn_index(pfn) else {
+            Self::free(pfn);
+            return None;
+        };
+        TABLE_REFERENCES[index].store(1, Ordering::Release);
+        Some(pfn)
+    }
+
+    pub fn retain_table(pfn: u64) -> bool {
+        let allocator = unsafe { &*ALLOCATOR.get() };
+        let Some(index) = allocator.core.pfn_index(pfn) else {
+            return false;
+        };
+        let references = &TABLE_REFERENCES[index];
+        let mut current = references.load(Ordering::Acquire);
+        loop {
+            if current == 0 || current == u16::MAX {
+                return false;
+            }
+            match references.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    pub fn release_table(pfn: u64) {
+        let allocator = unsafe { &*ALLOCATOR.get() };
+        let Some(index) = allocator.core.pfn_index(pfn) else {
+            return;
+        };
+        let references = &TABLE_REFERENCES[index];
+        let mut current = references.load(Ordering::Acquire);
+        loop {
+            if current == 0 {
+                return;
+            }
+            match references.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if current == 1 {
+                        Self::free(pfn);
+                    }
+                    return;
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    pub fn table_is_shared(pfn: u64) -> bool {
+        let allocator = unsafe { &*ALLOCATOR.get() };
+        let Some(index) = allocator.core.pfn_index(pfn) else {
+            return false;
+        };
+        TABLE_REFERENCES[index].load(Ordering::Acquire) > 1
     }
 
     pub fn pfn_address(pfn: u64) -> Option<usize> {
@@ -463,12 +540,14 @@ impl PageFrameAllocator {
 
     /// Get number of allocated pages
     pub fn allocated_pages() -> usize {
+        let _guard = AllocatorGuard::acquire();
         let allocator = unsafe { &*ALLOCATOR.get() };
         allocator.core.allocated_pages()
     }
 
     /// Get number of free pages
     pub fn free_pages() -> usize {
+        let _guard = AllocatorGuard::acquire();
         let allocator = unsafe { &*ALLOCATOR.get() };
         allocator.core.free_pages()
     }
@@ -485,6 +564,33 @@ impl AllocatorCell {
 
 static ALLOCATOR: AllocatorCell =
     AllocatorCell(core::cell::UnsafeCell::new(PageFrameAllocator::new()));
+static ALLOCATOR_LOCKED: AtomicBool = AtomicBool::new(false);
+static TABLE_REFERENCES: [AtomicU16; DEFAULT_PAGE_FRAME_COUNT] =
+    [const { AtomicU16::new(0) }; DEFAULT_PAGE_FRAME_COUNT];
+
+struct AllocatorGuard {
+    interrupt_state: crate::kernel_lowlevel::cpu::IrqState,
+}
+
+impl AllocatorGuard {
+    fn acquire() -> Self {
+        let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+        while ALLOCATOR_LOCKED
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        Self { interrupt_state }
+    }
+}
+
+impl Drop for AllocatorGuard {
+    fn drop(&mut self) {
+        ALLOCATOR_LOCKED.store(false, Ordering::Release);
+        crate::kernel_lowlevel::cpu::restore_interrupts(self.interrupt_state);
+    }
+}
 
 /// Process manager - manages all processes in the system
 pub struct ProcessManager {

@@ -49,6 +49,22 @@ pub fn arm_next_tick() {
     set_timer(compare_value);
 }
 
+pub fn arm_at_nanoseconds(deadline: u64) {
+    let frequency = TIMER_FREQUENCY.load(Ordering::Relaxed);
+    if frequency == 0 {
+        return;
+    }
+    let current = read_time();
+    let scaled = (deadline as u128).saturating_mul(frequency as u128);
+    let target = scaled
+        .saturating_add(999_999_999)
+        / 1_000_000_000u128;
+    let target = target
+        .min(u64::MAX as u128)
+        .max((current as u128).saturating_add(1)) as u64;
+    set_timer(target);
+}
+
 pub fn clear_interrupt() {
     clear_pending_timer();
     arm_next_tick();

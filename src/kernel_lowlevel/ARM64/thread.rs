@@ -17,14 +17,14 @@ include!("context_shared.rs");
 /// POSIX conformance stress cases may create 1000 children concurrently, so
 /// the scheduler and Linux process tables must leave room for the test parent
 /// and kernel-owned threads as well.
-pub const MAX_THREADS: usize = 1024;
+pub const MAX_THREADS: usize = 2048;
 
-/// Default thread stack size (128 KiB).
+/// Default thread stack size (160 KiB).
 ///
 /// POSIX launchers and fork/exec paths perform deep kernel-side work before
 /// returning to EL0. Keep enough headroom for those frames while bounding the
 /// memory cost of the many concurrent POSIX stress-test threads.
-pub const DEFAULT_STACK_SIZE: usize = 0x2_0000;
+pub const DEFAULT_STACK_SIZE: usize = 0x2_8000;
 
 /// Thread states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

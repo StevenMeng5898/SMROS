@@ -7,7 +7,7 @@ use core::alloc::Layout;
 use core::cell::UnsafeCell;
 use core::mem::{align_of, size_of};
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 mod kernel_lowlevel;
 mod kernel_objects;
@@ -41,6 +41,7 @@ static ALLOCATOR: KernelAllocator = KernelAllocator;
 struct FreeBlock {
     size: usize,
     next: *mut FreeBlock,
+    prev: *mut FreeBlock,
 }
 
 #[repr(C)]
@@ -52,6 +53,7 @@ struct AllocationHeader {
 struct KernelAllocatorState {
     initialized: bool,
     free_head: *mut FreeBlock,
+    largest_free: *mut FreeBlock,
 }
 
 struct AllocIrqGuard {
@@ -65,8 +67,12 @@ static ALLOC_STATE: SyncUnsafeCell<KernelAllocatorState> =
     SyncUnsafeCell::new(KernelAllocatorState {
         initialized: false,
         free_head: core::ptr::null_mut(),
+        largest_free: core::ptr::null_mut(),
     });
 static ALLOC_LOCK: AtomicBool = AtomicBool::new(false);
+static ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
+static ALLOC_SCAN_STEPS: AtomicUsize = AtomicUsize::new(0);
+const LARGE_ALLOCATION_THRESHOLD: usize = 64 * 1024;
 
 fn allocator_align_up(value: usize, align: usize) -> Option<usize> {
     if align == 0 || !align.is_power_of_two() {
@@ -102,19 +108,23 @@ unsafe fn init_kernel_allocator(state: &mut KernelAllocatorState) {
         None => {
             state.initialized = true;
             state.free_head = core::ptr::null_mut();
+            state.largest_free = core::ptr::null_mut();
             return;
         }
     };
     if block_start + size_of::<FreeBlock>() > heap_end {
         state.initialized = true;
         state.free_head = core::ptr::null_mut();
+        state.largest_free = core::ptr::null_mut();
         return;
     }
     let block = block_start as *mut FreeBlock;
     (*block).size = heap_end - block_start;
     (*block).next = core::ptr::null_mut();
+    (*block).prev = core::ptr::null_mut();
     state.initialized = true;
     state.free_head = block;
+    state.largest_free = block;
 }
 
 unsafe fn replace_free_block(
@@ -128,78 +138,143 @@ unsafe fn replace_free_block(
     } else {
         (*prev).next = replacement;
     }
+    if !replacement.is_null() {
+        (*replacement).prev = prev;
+    }
     let _ = old;
 }
 
-unsafe fn alloc_from_free_list(state: &mut KernelAllocatorState, layout: Layout) -> *mut u8 {
-    if !state.initialized {
-        init_kernel_allocator(state);
+unsafe fn rebuild_largest_free(state: &mut KernelAllocatorState) {
+    let mut largest: *mut FreeBlock = core::ptr::null_mut();
+    let mut current = state.free_head;
+    while !current.is_null() {
+        ALLOC_SCAN_STEPS.fetch_add(1, Ordering::Relaxed);
+        if largest.is_null() || (*current).size > (*largest).size {
+            largest = current;
+        }
+        current = (*current).next;
     }
+    state.largest_free = largest;
+}
 
+unsafe fn alloc_from_known_block(
+    state: &mut KernelAllocatorState,
+    current: *mut FreeBlock,
+    layout: Layout,
+) -> *mut u8 {
     let request_size = layout.size().max(1);
     let request_align = layout.align().max(align_of::<FreeBlock>());
     let min_free = size_of::<FreeBlock>();
     let header_size = size_of::<AllocationHeader>();
+    let block_start = current as usize;
+    let block_size = (*current).size;
+    let block_end = match block_start.checked_add(block_size) {
+        Some(value) => value,
+        None => return core::ptr::null_mut(),
+    };
+    let payload_addr = match allocator_align_up(block_start + header_size, request_align) {
+        Some(value) => value,
+        None => return core::ptr::null_mut(),
+    };
+    let header_addr = payload_addr - header_size;
+    let alloc_end = match payload_addr.checked_add(request_size) {
+        Some(value) => value,
+        None => return core::ptr::null_mut(),
+    };
+    if alloc_end > block_end {
+        return core::ptr::null_mut();
+    }
 
-    let mut prev = core::ptr::null_mut();
+    let prev = (*current).prev;
+    let next = (*current).next;
+    let prefix_size = header_addr - block_start;
+    let has_prefix = prefix_size >= min_free;
+    let alloc_start = if has_prefix { header_addr } else { block_start };
+    let suffix_start = match allocator_align_up(alloc_end, align_of::<FreeBlock>()) {
+        Some(value) => value,
+        None => return core::ptr::null_mut(),
+    };
+    let suffix_size = block_end - suffix_start;
+    let has_suffix = suffix_size >= min_free;
+    let alloc_size = if has_suffix {
+        suffix_start - alloc_start
+    } else {
+        block_end - alloc_start
+    };
+    let was_largest = current == state.largest_free;
+
+    if has_prefix {
+        (*current).size = prefix_size;
+        if has_suffix {
+            let suffix = suffix_start as *mut FreeBlock;
+            (*suffix).size = suffix_size;
+            (*suffix).prev = current;
+            (*suffix).next = next;
+            (*current).next = suffix;
+            if !next.is_null() {
+                (*next).prev = suffix;
+            }
+            if was_largest {
+                state.largest_free = if (*suffix).size > (*current).size {
+                    suffix
+                } else {
+                    current
+                };
+            }
+        } else {
+            (*current).next = next;
+            if !next.is_null() {
+                (*next).prev = current;
+            }
+            if was_largest {
+                rebuild_largest_free(state);
+            }
+        }
+    } else if has_suffix {
+        let suffix = suffix_start as *mut FreeBlock;
+        (*suffix).size = suffix_size;
+        (*suffix).next = next;
+        (*suffix).prev = prev;
+        replace_free_block(state, prev, current, suffix);
+        if !next.is_null() {
+            (*next).prev = suffix;
+        }
+        if was_largest {
+            state.largest_free = suffix;
+        }
+    } else {
+        replace_free_block(state, prev, current, next);
+        if was_largest {
+            rebuild_largest_free(state);
+        }
+    }
+
+    let header = header_addr as *mut AllocationHeader;
+    (*header).block_start = alloc_start;
+    (*header).block_size = alloc_size;
+    payload_addr as *mut u8
+}
+
+unsafe fn alloc_from_free_list(state: &mut KernelAllocatorState, layout: Layout) -> *mut u8 {
+    ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+    if !state.initialized {
+        init_kernel_allocator(state);
+    }
+
+    if layout.size() >= LARGE_ALLOCATION_THRESHOLD && !state.largest_free.is_null() {
+        let payload = alloc_from_known_block(state, state.largest_free, layout);
+        if !payload.is_null() {
+            return payload;
+        }
+    }
+
     let mut current = state.free_head;
     while !current.is_null() {
-        let block_start = current as usize;
-        let block_size = (*current).size;
-        let block_end = match block_start.checked_add(block_size) {
-            Some(value) => value,
-            None => return core::ptr::null_mut(),
-        };
-        let payload_addr = match allocator_align_up(block_start + header_size, request_align) {
-            Some(value) => value,
-            None => return core::ptr::null_mut(),
-        };
-        let header_addr = payload_addr - header_size;
-        let alloc_end = match payload_addr.checked_add(request_size) {
-            Some(value) => value,
-            None => return core::ptr::null_mut(),
-        };
-        if alloc_end <= block_end {
-            let next = (*current).next;
-            let prefix_size = header_addr - block_start;
-            let has_prefix = prefix_size >= min_free;
-            let alloc_start = if has_prefix { header_addr } else { block_start };
-            let suffix_start = match allocator_align_up(alloc_end, align_of::<FreeBlock>()) {
-                Some(value) => value,
-                None => return core::ptr::null_mut(),
-            };
-            let suffix_size = block_end - suffix_start;
-            let has_suffix = suffix_size >= min_free;
-            let alloc_size = if has_suffix {
-                suffix_start - alloc_start
-            } else {
-                block_end - alloc_start
-            };
-
-            if has_prefix {
-                (*current).size = prefix_size;
-                if has_suffix {
-                    let suffix = suffix_start as *mut FreeBlock;
-                    (*suffix).size = suffix_size;
-                    (*suffix).next = next;
-                    (*current).next = suffix;
-                }
-            } else if has_suffix {
-                let suffix = suffix_start as *mut FreeBlock;
-                (*suffix).size = suffix_size;
-                (*suffix).next = next;
-                replace_free_block(state, prev, current, suffix);
-            } else {
-                replace_free_block(state, prev, current, next);
-            }
-
-            let header = header_addr as *mut AllocationHeader;
-            (*header).block_start = alloc_start;
-            (*header).block_size = alloc_size;
-            return payload_addr as *mut u8;
+        ALLOC_SCAN_STEPS.fetch_add(1, Ordering::Relaxed);
+        let payload = alloc_from_known_block(state, current, layout);
+        if !payload.is_null() {
+            return payload;
         }
-
-        prev = current;
         current = (*current).next;
     }
     core::ptr::null_mut()
@@ -246,16 +321,23 @@ unsafe fn insert_free_block(
     let block = block_start as *mut FreeBlock;
     (*block).size = block_size;
     (*block).next = current;
+    (*block).prev = prev;
 
     if prev.is_null() {
         state.free_head = block;
     } else {
         (*prev).next = block;
     }
+    if !current.is_null() {
+        (*current).prev = block;
+    }
 
     if !current.is_null() && block_start + (*block).size == current as usize {
         (*block).size += (*current).size;
         (*block).next = (*current).next;
+        if !(*block).next.is_null() {
+            (*(*block).next).prev = block;
+        }
     }
 
     if !prev.is_null() {
@@ -263,8 +345,21 @@ unsafe fn insert_free_block(
         if prev_end == block_start {
             (*prev).size += (*block).size;
             (*prev).next = (*block).next;
+            if !(*prev).next.is_null() {
+                (*(*prev).next).prev = prev;
+            }
         }
     }
+
+    let result = if !prev.is_null() && prev as usize + (*prev).size >= block_end {
+        prev
+    } else {
+        block
+    };
+    if state.largest_free.is_null() || (*result).size > (*state.largest_free).size {
+        state.largest_free = result;
+    }
+
 }
 
 // SAFETY: The heap buffer is exclusively managed behind a global spin lock.

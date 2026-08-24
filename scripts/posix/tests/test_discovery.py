@@ -217,6 +217,10 @@ class TestDiscovery(DiscoveryFixture):
             "conformance/interfaces/mmap/10-1.c",
             "int main(void) { return 0; }\n",
         )
+        self.write_source(
+            "conformance/interfaces/shm_open/23-1.c",
+            "int main(void) { return 0; }\n",
+        )
 
         tests = {test.test_id: test for test in discover_tests(self.root)}
 
@@ -231,6 +235,10 @@ class TestDiscovery(DiscoveryFixture):
         self.assertEqual(
             tests["conformance/interfaces/timer_settime/2-1.c"].timeout_ms,
             45_000,
+        )
+        self.assertEqual(
+            tests["conformance/interfaces/shm_open/23-1.c"].timeout_ms,
+            600_000,
         )
         self.assertEqual(
             tests["conformance/interfaces/clock_settime/speculative/4-4.c"].timeout_ms,
@@ -254,7 +262,52 @@ class TestDiscovery(DiscoveryFixture):
             tests[
                 "conformance/interfaces/pthread_cond_broadcast/1-2.c"
             ].timeout_ms,
+            240_000,
+        )
+
+    def test_pthread_cond_signal_stress_has_reviewed_timeout(self) -> None:
+        self.write_source(
+            "conformance/interfaces/pthread_cond_signal/1-2.c",
+            "int main(void) { return 0; }\n",
+        )
+
+        tests = {test.test_id: test for test in discover_tests(self.root)}
+
+        self.assertEqual(
+            tests[
+                "conformance/interfaces/pthread_cond_signal/1-2.c"
+            ].timeout_ms,
             180_000,
+        )
+
+    def test_pthread_cond_init_process_shared_volume_has_reviewed_timeout(self) -> None:
+        self.write_source(
+            "conformance/interfaces/pthread_cond_init/1-3.c",
+            "int main(void) { return 0; }\n",
+        )
+
+        tests = {test.test_id: test for test in discover_tests(self.root)}
+
+        self.assertEqual(
+            tests[
+                "conformance/interfaces/pthread_cond_init/1-3.c"
+            ].timeout_ms,
+            240_000,
+        )
+
+    def test_pthread_cond_timedwait_invalid_timespec_volume_has_reviewed_timeout(self) -> None:
+        self.write_source(
+            "conformance/interfaces/pthread_cond_timedwait/4-2.c",
+            "int main(void) { return 0; }\n",
+        )
+
+        tests = {test.test_id: test for test in discover_tests(self.root)}
+
+        self.assertEqual(
+            tests[
+                "conformance/interfaces/pthread_cond_timedwait/4-2.c"
+            ].timeout_ms,
+            600_000,
         )
 
     def test_pthread_cond_broadcast_multi_batch_stress_has_reviewed_timeout(self) -> None:
@@ -282,7 +335,7 @@ class TestDiscovery(DiscoveryFixture):
 
         self.assertEqual(
             tests["conformance/interfaces/shm_open/23-1.c"].timeout_ms,
-            180_000,
+            600_000,
         )
 
     def test_api_group_uses_the_approved_mapping(self) -> None:

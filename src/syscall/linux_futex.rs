@@ -284,7 +284,8 @@ fn wake(address: usize, requested: usize, bitset: u32) -> SysResult {
         let Some((tid, scheduler_thread)) = identity else {
             break;
         };
-        if linux_task::wake_blocked(tid, scheduler_thread, LinuxBlockReason::Futex) {
+        let woke = linux_task::wake_blocked(tid, scheduler_thread, LinuxBlockReason::Futex);
+        if woke {
             woken += 1;
         } else {
             let _ = with_queue(|queue| queue.take_outcome(tid, scheduler_thread));

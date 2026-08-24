@@ -45,6 +45,10 @@ const FXFS_STALE_LINUX_DEMO_NAME: &[u8] = b"<vm name=\"linux-demo\">";
 const FXFS_VM_DEMO_XML: &[u8] = b"<vm name=\"plc-demo\"><cpu time_slice_us=\"1000\" priority=\"80\"></cpu><memory bytes=\"67108864\"></memory><restart policy=\"on-crash\" limit=\"3\"></restart><linux kernel=\"host_shared/linux/Image\" initrd=\"host_shared/linux/initrd.img\" append=\"console=ttyAMA0 root=/dev/ram0 rw rdinit=/init\"></linux><qemu machine=\"virt\" cpu=\"cortex-a57\" smp=\"1\" memory=\"512M\" display=\"gtk\" serial=\"vc\"></qemu><launcher port=\"7070\"></launcher></vm>";
 const FXFS_VM_DEMO2_XML: &[u8] = b"<vm name=\"plc-demo2\"><cpu time_slice_us=\"1000\" priority=\"80\"></cpu><memory bytes=\"67108864\"></memory><restart policy=\"on-crash\" limit=\"3\"></restart><linux kernel=\"host_shared/linux/Image\" initrd=\"host_shared/linux/initrd.img\" append=\"console=ttyAMA0 root=/dev/ram0 rw rdinit=/init\"></linux><qemu machine=\"virt\" cpu=\"cortex-a57\" smp=\"1\" memory=\"512M\" display=\"gtk\" serial=\"vc\"></qemu><launcher port=\"7070\"></launcher></vm>";
 
+fn is_ephemeral_shm_path(path: &str) -> bool {
+    path.starts_with("/dev/shm/")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FxfsNodeKind {
     Directory,
@@ -1200,21 +1204,42 @@ impl FxfsState {
         self.sequence = image.sequence;
         self.replayed_records = image.replayed_records;
         self.objects = image.objects;
+        self.sort_objects();
         self.dirents = image.dirents;
+        self.sort_dirents();
         self.journal = image.journal;
         Ok(())
     }
 
+    fn sort_objects(&mut self) {
+        self.objects
+            .sort_unstable_by_key(|object| object.object_id);
+    }
+
     fn find_object_index(&self, object_id: u64) -> Option<usize> {
         self.objects
-            .iter()
-            .position(|object| object.object_id == object_id)
+            .binary_search_by_key(&object_id, |object| object.object_id)
+            .ok()
+    }
+
+    fn sort_dirents(&mut self) {
+        self.dirents.sort_unstable_by(|left, right| {
+            left.parent_id
+                .cmp(&right.parent_id)
+                .then_with(|| left.name.as_bytes().cmp(right.name.as_bytes()))
+                .then_with(|| left.object_id.cmp(&right.object_id))
+        });
     }
 
     fn find_dirent_index(&self, parent_id: u64, name: &str) -> Option<usize> {
         self.dirents
-            .iter()
-            .position(|entry| entry.parent_id == parent_id && entry.name == name)
+            .binary_search_by(|entry| {
+                entry
+                    .parent_id
+                    .cmp(&parent_id)
+                    .then_with(|| entry.name.as_bytes().cmp(name.as_bytes()))
+            })
+            .ok()
     }
 
     fn object_relative_path(&self, object_id: u64) -> Option<String> {
@@ -1348,11 +1373,13 @@ impl FxfsState {
         try_reserve_vec(&mut self.dirents, 1)?;
         self.next_object_id = self.next_object_id.saturating_add(1);
         self.objects.push(object);
+        self.sort_objects();
         self.dirents.push(FxfsDirectoryEntry {
             parent_id,
             name: dirent_name,
             object_id,
         });
+        self.sort_dirents();
         self.touch_directory(parent_id);
         Ok(object_id)
     }
@@ -1438,7 +1465,9 @@ impl FxfsState {
                 self.touch_file_write(index);
                 let object_id = self.objects[index].object_id;
                 self.record(FxfsJournalOp::WriteFile, object_id, 0, data.len());
-                self.persist();
+                if !is_ephemeral_shm_path(path) {
+                    self.persist();
+                }
                 Ok(data.len())
             }
             Err(FxfsError::NotFound) => {
@@ -1446,7 +1475,9 @@ impl FxfsState {
                 let object_id = self.create_object(parent_id, name, FxfsNodeKind::File, data)?;
                 self.record(FxfsJournalOp::CreateFile, object_id, parent_id, data.len());
                 self.record(FxfsJournalOp::WriteFile, object_id, parent_id, data.len());
-                self.persist();
+                if !is_ephemeral_shm_path(path) {
+                    self.persist();
+                }
                 Ok(data.len())
             }
             Err(err) => Err(err),
@@ -1477,6 +1508,7 @@ impl FxfsState {
             name,
             object_id,
         });
+        self.sort_dirents();
         self.objects[source_index].attrs.link_count = link_count;
         self.touch_directory(parent_id);
         self.record(FxfsJournalOp::CreateFile, object_id, parent_id, 0);
@@ -1578,7 +1610,7 @@ impl FxfsState {
         self.record(FxfsJournalOp::DeleteFile, object_id, parent_id, 0);
         if let Some(relative) = shared_relative {
             self.remember_host_share_deleted(relative.as_str())?;
-        } else {
+        } else if !is_ephemeral_shm_path(path) {
             self.persist();
         }
         Ok(object_id)
@@ -2047,7 +2079,9 @@ impl FxfsState {
         let object_id = self.objects[index].object_id;
         let size = self.objects[index].attrs.size;
         self.record(FxfsJournalOp::SetAttributes, object_id, 0, size);
-        self.persist();
+        if !is_ephemeral_shm_path(path) {
+            self.persist();
+        }
         Ok(self.objects[index].attrs)
     }
 

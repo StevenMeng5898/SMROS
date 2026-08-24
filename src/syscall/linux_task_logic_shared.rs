@@ -920,6 +920,7 @@ pub(crate) fn linux_sleep_remaining_timespec(
     Some((seconds, nanoseconds))
 }
 
+#[cfg_attr(target_os = "none", allow(dead_code))]
 pub(crate) fn linux_short_sleep_deadline_nanoseconds(
     now: u64,
     requested_nanoseconds: u64,
@@ -1048,6 +1049,7 @@ pub(crate) struct LinuxTaskSignalState {
     pub pending: LinuxPendingSignals,
     pub alt_stack: LinuxSignalStack,
     pub frames: [LinuxSignalFrame; LINUX_SIGNAL_FRAME_LIMIT],
+    timer_notifications: [Option<(usize, u32)>; LINUX_SIGNAL_FRAME_LIMIT],
     pub frame_depth: usize,
     pub sigreturn_requested: bool,
     pub signal_wait: Option<LinuxSignalWait>,
@@ -1076,6 +1078,7 @@ impl LinuxTaskSignalState {
             pending: LinuxPendingSignals::new(),
             alt_stack: LinuxSignalStack::DISABLED,
             frames: [LinuxSignalFrame::EMPTY; LINUX_SIGNAL_FRAME_LIMIT],
+            timer_notifications: [None; LINUX_SIGNAL_FRAME_LIMIT],
             frame_depth: 0,
             sigreturn_requested: false,
             signal_wait: None,
@@ -1099,6 +1102,7 @@ impl LinuxTaskSignalState {
             frame.previous_stack_flags = LINUX_SS_DISABLE;
             frame.restart = None;
         }
+        self.timer_notifications.fill(None);
         self.frame_depth = 0;
         self.sigreturn_requested = false;
         self.signal_wait = None;
@@ -1321,6 +1325,18 @@ impl LinuxTaskSignalState {
         Some(depth)
     }
 
+    pub(crate) fn defer_timer_notification(
+        &mut self,
+        frame_depth: usize,
+        timer_identity: Option<(usize, u32)>,
+    ) -> bool {
+        if frame_depth >= self.frame_depth || frame_depth >= self.timer_notifications.len() {
+            return false;
+        }
+        self.timer_notifications[frame_depth] = timer_identity;
+        true
+    }
+
     pub(crate) fn request_sigreturn(&mut self) -> bool {
         if self.frame_depth == 0 {
             return false;
@@ -1329,7 +1345,15 @@ impl LinuxTaskSignalState {
         true
     }
 
+    #[cfg(not(target_os = "none"))]
     pub(crate) fn take_requested_frame(&mut self) -> Option<LinuxSignalFrame> {
+        self.take_requested_frame_with_timer_notification()
+            .map(|(frame, _)| frame)
+    }
+
+    pub(crate) fn take_requested_frame_with_timer_notification(
+        &mut self,
+    ) -> Option<(LinuxSignalFrame, Option<(usize, u32)>)> {
         if !self.sigreturn_requested {
             return None;
         }
@@ -1340,10 +1364,11 @@ impl LinuxTaskSignalState {
         self.frame_depth -= 1;
         let frame = self.frames[self.frame_depth];
         self.frames[self.frame_depth] = LinuxSignalFrame::EMPTY;
+        let timer_identity = self.timer_notifications[self.frame_depth].take();
         if let Some(restart) = frame.restart {
             self.install_restart_block(restart);
         }
-        Some(frame)
+        Some((frame, timer_identity))
     }
 }
 
@@ -1359,6 +1384,7 @@ pub(crate) struct LinuxTaskTable<const N: usize> {
     tasks: [LinuxTaskCore; N],
     signal_states: [LinuxTaskSignalState; N],
     sleep_waits: [Option<LinuxSleepWait>; N],
+    sleep_expiry_cursor: usize,
     sched_params: [LinuxTaskSchedParam; N],
     clear_child_tids: [usize; N],
     next_tid: usize,
@@ -1371,6 +1397,7 @@ impl<const N: usize> LinuxTaskTable<N> {
             tasks: [LinuxTaskCore::EMPTY; N],
             signal_states: [LinuxTaskSignalState::new(); N],
             sleep_waits: [None; N],
+            sleep_expiry_cursor: 0,
             sched_params: [LinuxTaskSchedParam::DEFAULT; N],
             clear_child_tids: [0; N],
             next_tid: LINUX_ROOT_TID + 1,
@@ -1954,7 +1981,12 @@ impl<const N: usize> LinuxTaskTable<N> {
         &mut self,
         now: u64,
     ) -> Option<(usize, usize, LinuxBlockReason)> {
-        for index in 0..N {
+        if N == 0 {
+            return None;
+        }
+        let start = self.sleep_expiry_cursor % N;
+        for offset in 0..N {
+            let index = (start + offset) % N;
             let task = self.tasks[index];
             let Some(wait) = self.sleep_waits[index].as_mut() else {
                 continue;
@@ -1965,6 +1997,7 @@ impl<const N: usize> LinuxTaskTable<N> {
                 && wait.deadline <= now
             {
                 wait.outcome = LinuxSleepOutcome::Completed;
+                self.sleep_expiry_cursor = (index + 1) % N;
                 return Some((task.tid, task.scheduler_thread, task.block_reason));
             }
         }
@@ -2138,6 +2171,7 @@ impl<const N: usize> LinuxTaskTable<N> {
             signal_state.reset_in_place();
         }
         self.sleep_waits.fill(None);
+        self.sleep_expiry_cursor = 0;
         self.sched_params.fill(LinuxTaskSchedParam::DEFAULT);
         self.clear_child_tids.fill(0);
     }
