@@ -1,5 +1,4 @@
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::kernel_lowlevel::thread::{self, ThreadId};
 use crate::kernel_objects::scheduler;
@@ -30,8 +29,6 @@ impl LinuxTaskRuntime {
 
 static LINUX_TASK_RUNTIME: LinuxRuntimeLock<LinuxTaskRuntime> =
     LinuxRuntimeLock::new(LinuxTaskRuntime::new());
-
-static POSIX_EXIT_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 fn with_runtime<R>(operation: impl FnOnce(&mut LinuxTaskRuntime) -> R) -> R {
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
@@ -717,39 +714,18 @@ fn complete_task_retirements(
             transition.task.tid,
             transition.task.scheduler_thread,
         );
-        let (clear_child_tid_written, wake_count) = if transition.clear_child_tid != 0 {
-            let written = super::linux_process_memory::copy_to_process(
+        if transition.clear_child_tid != 0
+            && super::linux_process_memory::copy_to_process(
                 transition.task.tgid,
                 transition.clear_child_tid,
                 &0u32.to_ne_bytes(),
             )
-            .is_ok();
-            let wake_count = if written {
-                super::linux_futex::wake_address(
-                    transition.clear_child_tid,
-                    1,
-                    super::linux_futex::FUTEX_BITSET_MATCH_ANY,
-                )
-                .ok()
-                .unwrap_or(usize::MAX)
-            } else {
-                usize::MAX
-            };
-            (written, wake_count)
-        } else {
-            (false, 0)
-        };
-        let trace = POSIX_EXIT_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
-        if trace < 700 {
-            crate::kobj_info!(
-                "posix-exit",
-                "task-retire tid={} sched={} current={} clear={:#x} clear-written={} futex-wake={}",
-                transition.task.tid,
-                transition.task.scheduler_thread,
-                current_scheduler.0,
+            .is_ok()
+        {
+            let _ = super::linux_futex::wake_address(
                 transition.clear_child_tid,
-                clear_child_tid_written,
-                wake_count
+                1,
+                super::linux_futex::FUTEX_BITSET_MATCH_ANY,
             );
         }
         if transition.task.scheduler_thread != current_scheduler.0 {

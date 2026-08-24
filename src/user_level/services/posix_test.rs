@@ -616,9 +616,6 @@ fn launch_current_test(harness_launcher_active: bool) -> PosixLaunchLoopResult {
         argv.push(path.clone());
         let mut env = Vec::new();
         env.push(String::from(POSIX_COMPAT_PRELOAD_ENV));
-        // Temporary bounded diagnostics for the intermittent pthread_join
-        // stress case. Remove after the kernel exit/futex boundary is traced.
-        env.push(String::from("SMROS_PTHREAD_DIAG=1"));
         match run_elf::spawn_observed(path.clone(), argv, env, RunObserver::PosixTest) {
             Ok(()) => return PosixLaunchLoopResult::Running(synchronous_launch_errors),
             Err(err) => {

@@ -65,7 +65,6 @@ typedef int (*smros_catclose_fn)(nl_catd);
 typedef sem_t *(*smros_sem_open_fn)(const char *, int, ...);
 typedef int (*smros_sem_init_fn)(sem_t *, int, unsigned int);
 typedef int (*smros_sem_destroy_fn)(sem_t *);
-typedef int (*smros_sem_post_fn)(sem_t *);
 typedef int (*smros_sem_unlink_fn)(const char *);
 typedef int (*smros_sem_trywait_fn)(sem_t *);
 typedef int (*smros_sigaction_fn)(int, const struct sigaction *, struct sigaction *);
@@ -402,7 +401,6 @@ static int smros_pthread_active_created;
 static int smros_pthread_destroy_attempts;
 static int smros_shared_cond_trace_count;
 static int smros_signal_trace_count;
-static int smros_sem_trace_count;
 
 static void smros_trace_shared_cond(
     const char *operation,
@@ -478,56 +476,6 @@ static int smros_fast_mmap_fds[SMROS_FAST_MMAP_FD_RECORDS];
 static char smros_fast_mmap_page[4096] __attribute__((aligned(4096)));
 static smros_nanosleep_fn smros_nanosleep_target;
 static smros_clock_nanosleep_fn smros_clock_nanosleep_target;
-static int smros_thread_trace_count;
-static int smros_sem_detail_trace_count;
-
-static void smros_thread_trace(
-    const char *operation,
-    pthread_t thread,
-    int result,
-    int error_number
-) {
-    if (getenv("SMROS_PTHREAD_DIAG") == NULL) {
-        return;
-    }
-    int trace = __sync_add_and_fetch(&smros_thread_trace_count, 1);
-    if (trace <= 256) {
-        (void)dprintf(
-            STDERR_FILENO,
-            "SMROS_THREAD_TRACE n=%d tid=%lu op=%s thread=%lu result=%d errno=%d\\n",
-            trace,
-            (unsigned long)pthread_self(),
-            operation,
-            (unsigned long)thread,
-            result,
-            error_number
-        );
-    }
-}
-
-static void smros_sem_detail_trace(
-    const char *operation,
-    sem_t *sem,
-    int result,
-    int error_number
-) {
-    if (getenv("SMROS_PTHREAD_DIAG") == NULL) {
-        return;
-    }
-    int trace = __sync_add_and_fetch(&smros_sem_detail_trace_count, 1);
-    if (trace <= 100000) {
-        (void)dprintf(
-            STDERR_FILENO,
-            "SMROS_SEM_DETAIL n=%d tid=%lu op=%s sem=%p result=%d errno=%d\\n",
-            trace,
-            (unsigned long)pthread_self(),
-            operation,
-            (void *)sem,
-            result,
-            error_number
-        );
-    }
-}
 
 static void __attribute__((unused)) smros_pthread_diag(const char *message) {
     if (getenv("SMROS_PTHREAD_DIAG") != NULL) {
@@ -1124,7 +1072,6 @@ static void *smros_pthread_start_trampoline(void *arg) {
     smros_pthread_start_context *context =
         (smros_pthread_start_context *)arg;
     void *result = NULL;
-    smros_thread_trace("start", pthread_self(), 0, 0);
     (void)smros_remember_pthread_sched_record(
         pthread_self(),
         context->policy,
@@ -1132,7 +1079,6 @@ static void *smros_pthread_start_trampoline(void *arg) {
     );
     pthread_cleanup_push(smros_pthread_start_cleanup, context);
     result = context->start_routine(context->arg);
-    smros_thread_trace("routine-return", pthread_self(), 0, 0);
     pthread_cleanup_pop(1);
     return result;
 }
@@ -1624,7 +1570,6 @@ int pthread_join(pthread_t thread, void **retval) {
     smros_pthread_tryjoin_fn try_target =
         (smros_pthread_tryjoin_fn)smros_resolve_symbol("pthread_tryjoin_np");
     if (try_target != NULL) {
-        unsigned int poll_count = 0;
         for (;;) {
             if (smros_current_pthread_cancel_requested()) {
                 smros_pthread_exit_fn exit_target =
@@ -1647,17 +1592,6 @@ int pthread_join(pthread_t thread, void **retval) {
                     smros_remember_pthread_joined(thread);
                 }
                 return result;
-            }
-            poll_count++;
-            if (getenv("SMROS_PTHREAD_DIAG") != NULL
-                    && (poll_count == 1 || (poll_count % 1000000u) == 0)) {
-                (void)dprintf(
-                    STDERR_FILENO,
-                    "SMROS_JOIN_POLL_TRACE tid=%lu target=%p polls=%u result=EBUSY\n",
-                    (unsigned long)pthread_self(),
-                    (const void *)(uintptr_t)thread,
-                    poll_count
-                );
             }
             (void)sched_yield();
         }
@@ -4714,10 +4648,7 @@ int kill(pid_t pid, int sig) {
     if (target == NULL) {
         return -1;
     }
-    smros_thread_trace("kill-enter", pthread_self(), sig, pid);
-    int result = target(pid, sig);
-    smros_thread_trace("kill-exit", pthread_self(), result, result == 0 ? 0 : errno);
-    return result;
+    return target(pid, sig);
 }
 
 int sigqueue(pid_t pid, int sig, const union sigval value) {
@@ -5366,32 +5297,6 @@ int sem_destroy(sem_t *sem) {
     return result;
 }
 
-int sem_post(sem_t *sem) {
-    smros_sem_post_fn target =
-        (smros_sem_post_fn)smros_resolve_symbol("sem_post");
-    if (target == NULL) {
-        errno = ENOSYS;
-        return -1;
-    }
-    int result = target(sem);
-    smros_sem_detail_trace("post", sem, result, result == 0 ? 0 : errno);
-    if (getenv("SMROS_PTHREAD_DIAG") != NULL) {
-        int event = __sync_add_and_fetch(&smros_sem_trace_count, 1);
-        if (event <= 32 || (event % 1000) == 0) {
-            (void)dprintf(
-                STDERR_FILENO,
-                "SMROS_SEM_TRACE n=%d tid=%lu op=post sem=%p result=%d errno=%d\\n",
-                event,
-                (unsigned long)pthread_self(),
-                (void *)sem,
-                result,
-                result == 0 ? 0 : errno
-            );
-        }
-    }
-    return result;
-}
-
 int sem_timedwait(sem_t *sem, const struct timespec *abs_timeout) {
     if (abs_timeout->tv_nsec < 0 || abs_timeout->tv_nsec >= SMROS_NSEC_PER_SEC) {
         errno = EINVAL;
@@ -5439,50 +5344,17 @@ int sem_timedwait(sem_t *sem, const struct timespec *abs_timeout) {
 
 int sem_wait(sem_t *sem) {
     sig_atomic_t signal_generation = smros_thread_interrupt_generation;
-    int trace = 0;
     for (;;) {
         int wait_result = smros_sem_trywait(sem);
         if (smros_sem_signal_interrupted(signal_generation)) {
-            smros_sem_detail_trace("wait-interrupted", sem, -1, EINTR);
             return -1;
         }
         if (wait_result == 0) {
-            if (trace != 0) {
-                smros_sem_detail_trace("wait-exit", sem, 0, 0);
-            }
-            if (getenv("SMROS_PTHREAD_DIAG") != NULL && trace != 0) {
-                int event = __sync_add_and_fetch(&smros_sem_trace_count, 1);
-                if (event <= 32 || (event % 1000) == 0) {
-                    (void)dprintf(
-                        STDERR_FILENO,
-                        "SMROS_SEM_TRACE n=%d tid=%lu op=wait-exit result=0\\n",
-                        event,
-                        (unsigned long)pthread_self()
-                    );
-                }
-            }
             return 0;
         }
         if (errno != EAGAIN) {
-            smros_sem_detail_trace("wait-error", sem, -1, errno);
             return -1;
         }
-        if (trace == 0) {
-            smros_sem_detail_trace("wait-block", sem, -1, EAGAIN);
-        }
-        if (trace == 0 && getenv("SMROS_PTHREAD_DIAG") != NULL) {
-            int event = __sync_add_and_fetch(&smros_sem_trace_count, 1);
-            if (event <= 32 || (event % 1000) == 0) {
-                (void)dprintf(
-                    STDERR_FILENO,
-                    "SMROS_SEM_TRACE n=%d tid=%lu op=wait-block sem=%p\\n",
-                    event,
-                    (unsigned long)pthread_self(),
-                    (void *)sem
-                );
-            }
-        }
-        trace = 1;
         if (smros_atfork_signal_stress_active()) {
             errno = 0;
             return 0;

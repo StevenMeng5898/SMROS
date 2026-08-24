@@ -2741,6 +2741,7 @@ fn posix_test_preloads_smros_compat_runtime_without_affecting_shell_run() {
         .expect("POSIX launch loop");
     let launch = braced_body(&posix[launch_start..]);
     assert!(launch.contains("String::from(POSIX_COMPAT_PRELOAD_ENV)"));
+    assert!(!launch.contains("SMROS_PTHREAD_DIAG"));
     assert!(launch.contains("run_elf::spawn_observed("));
     assert!(launch.contains("path.clone()"));
     assert!(launch.contains("argv"));
