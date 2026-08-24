@@ -65,6 +65,7 @@ typedef int (*smros_catclose_fn)(nl_catd);
 typedef sem_t *(*smros_sem_open_fn)(const char *, int, ...);
 typedef int (*smros_sem_init_fn)(sem_t *, int, unsigned int);
 typedef int (*smros_sem_destroy_fn)(sem_t *);
+typedef int (*smros_sem_post_fn)(sem_t *);
 typedef int (*smros_sem_unlink_fn)(const char *);
 typedef int (*smros_sem_trywait_fn)(sem_t *);
 typedef int (*smros_sigaction_fn)(int, const struct sigaction *, struct sigaction *);
@@ -5310,6 +5311,31 @@ int sem_destroy(sem_t *sem) {
     return result;
 }
 
+int sem_post(sem_t *sem) {
+    smros_sem_post_fn target =
+        (smros_sem_post_fn)smros_resolve_symbol("sem_post");
+    if (target == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    int result = target(sem);
+    if (getenv("SMROS_PTHREAD_DIAG") != NULL) {
+        int event = __sync_add_and_fetch(&smros_sem_trace_count, 1);
+        if (event <= 32 || (event % 1000) == 0) {
+            (void)dprintf(
+                STDERR_FILENO,
+                "SMROS_SEM_TRACE n=%d tid=%lu op=post sem=%p result=%d errno=%d\\n",
+                event,
+                (unsigned long)pthread_self(),
+                (void *)sem,
+                result,
+                result == 0 ? 0 : errno
+            );
+        }
+    }
+    return result;
+}
+
 int sem_timedwait(sem_t *sem, const struct timespec *abs_timeout) {
     if (abs_timeout->tv_nsec < 0 || abs_timeout->tv_nsec >= SMROS_NSEC_PER_SEC) {
         errno = EINVAL;
@@ -5366,7 +5392,7 @@ int sem_wait(sem_t *sem) {
         if (wait_result == 0) {
             if (getenv("SMROS_PTHREAD_DIAG") != NULL && trace != 0) {
                 int event = __sync_add_and_fetch(&smros_sem_trace_count, 1);
-                if (event <= 96) {
+                if (event <= 32 || (event % 1000) == 0) {
                     (void)dprintf(
                         STDERR_FILENO,
                         "SMROS_SEM_TRACE n=%d tid=%lu op=wait-exit result=0\\n",
@@ -5382,7 +5408,7 @@ int sem_wait(sem_t *sem) {
         }
         if (trace == 0 && getenv("SMROS_PTHREAD_DIAG") != NULL) {
             int event = __sync_add_and_fetch(&smros_sem_trace_count, 1);
-            if (event <= 96) {
+            if (event <= 32 || (event % 1000) == 0) {
                 (void)dprintf(
                     STDERR_FILENO,
                     "SMROS_SEM_TRACE n=%d tid=%lu op=wait-block sem=%p\\n",
