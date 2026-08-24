@@ -3143,7 +3143,7 @@ static void smros_pthread_cond_wait_pause(void) {
      */
     const struct timespec pause = {
         .tv_sec = 0,
-        .tv_nsec = 200000000L,
+        .tv_nsec = 50000000L,
     };
     if (nanosleep(&pause, NULL) != 0 && errno != EINTR) {
         (void)sched_yield();

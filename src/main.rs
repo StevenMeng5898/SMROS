@@ -7,7 +7,7 @@ use core::alloc::Layout;
 use core::cell::UnsafeCell;
 use core::mem::{align_of, size_of};
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 mod kernel_lowlevel;
 mod kernel_objects;
@@ -73,6 +73,32 @@ static ALLOC_LOCK: AtomicBool = AtomicBool::new(false);
 static ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
 static ALLOC_SCAN_STEPS: AtomicUsize = AtomicUsize::new(0);
 const LARGE_ALLOCATION_THRESHOLD: usize = 64 * 1024;
+
+// AArch64 timer interrupts can be observed more than once for the same
+// physical counter tick while an IRQ/context switch is in flight.  The
+// scheduler and POSIX expiration paths are global, so admit each tick once.
+static LAST_ACCEPTED_TIMER_TICK: AtomicU64 = AtomicU64::new(0);
+
+fn claim_timer_tick(now: u64) -> bool {
+    if now == 0 {
+        return false;
+    }
+    let mut last = LAST_ACCEPTED_TIMER_TICK.load(Ordering::Acquire);
+    loop {
+        if !kernel_lowlevel::lowlevel_logic::timer_tick_is_new(last, now) {
+            return false;
+        }
+        match LAST_ACCEPTED_TIMER_TICK.compare_exchange_weak(
+            last,
+            now,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(observed) => last = observed,
+        }
+    }
+}
 
 fn allocator_align_up(value: usize, align: usize) -> Option<usize> {
     if align == 0 || !align.is_power_of_two() {
@@ -519,12 +545,9 @@ extern "C" fn timer_interrupt_handler() {
     // Clear the timer interrupt
     kernel_lowlevel::timer::clear_interrupt();
 
-    // The scheduler owns a single global current-thread state and the Linux
-    // runtime is intentionally bound to physical CPU0.  Secondary timer IRQs
-    // must not mutate that state or attempt a context switch with CPU0's TCB.
-    if current_cpu_id() == 0 {
+    let now = kernel_lowlevel::timer::get_tick_count();
+    if current_cpu_id() == 0 && claim_timer_tick(now) {
         crate::kernel_objects::scheduler::scheduler().on_timer_tick();
-        let now = kernel_lowlevel::timer::get_tick_count();
         crate::syscall::expire_linux_real_timers_from_irq();
         crate::syscall::linux_task::on_timer_tick(now);
         crate::syscall::deliver_linux_posix_timer_signals_from_irq();

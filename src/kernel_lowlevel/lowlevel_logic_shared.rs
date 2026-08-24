@@ -443,6 +443,47 @@ macro_rules! smros_ll_timer_compare_body {
     }};
 }
 
+macro_rules! smros_ll_timer_tick_is_new_body {
+    ($last:expr, $current:expr) => {{
+        $current > $last
+    }};
+}
+
+#[allow(unused_macros)]
+macro_rules! smros_ll_timer_earliest_compare_body {
+    ($periodic:expr, $precision:expr) => {{
+        if $precision == 0 {
+            $periodic
+        } else if $periodic == 0 {
+            $precision
+        } else {
+            core::cmp::min($periodic, $precision)
+        }
+    }};
+}
+
+macro_rules! smros_ll_timer_program_compare_body {
+    ($periodic:expr, $armed:expr, $requested:expr) => {{
+        let periodic = $periodic;
+        let armed = $armed;
+        let requested = $requested;
+        let first = if periodic == 0 {
+            armed
+        } else if armed == 0 {
+            periodic
+        } else {
+            core::cmp::min(periodic, armed)
+        };
+        if requested == 0 {
+            first
+        } else if first == 0 {
+            requested
+        } else {
+            core::cmp::min(first, requested)
+        }
+    }};
+}
+
 macro_rules! smros_ll_timer_tick_count_body {
     ($counter:expr, $period:expr) => {{
         if $period == 0 {

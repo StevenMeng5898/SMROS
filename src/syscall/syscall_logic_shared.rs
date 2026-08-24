@@ -171,6 +171,12 @@ pub(crate) const fn linux_mode_access_allowed(
 
 const LINUX_POSIX_NANOS_PER_SECOND: u64 = 1_000_000_000;
 
+pub(crate) const fn linux_hybrid_sleep_uses_precision_tail(
+    requested_nanoseconds: u64,
+) -> bool {
+    requested_nanoseconds != 0 && requested_nanoseconds < LINUX_POSIX_NANOS_PER_SECOND
+}
+
 pub(crate) const fn linux_clock_resolution_nanoseconds() -> i64 {
     1
 }

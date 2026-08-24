@@ -89,6 +89,7 @@ use crate::syscall::syscall_logic::{
 };
 use crate::user_level::fxfs;
 
+
 #[path = "fuzz.rs"]
 mod fuzz;
 pub use fuzz::{fuzz_syscalls, fuzz_syscalls_with_config, SyscallFuzzConfig, SyscallFuzzReport};
@@ -10161,7 +10162,9 @@ pub fn sys_clock_nanosleep(clockid: usize, flags: usize, req: usize, rem: usize)
         if requested_nanoseconds <= LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS {
             return linux_high_resolution_relative_sleep_until(deadline, rem);
         }
-        if requested_nanoseconds <= LINUX_HYBRID_RELATIVE_SLEEP_MAX_NANOS {
+        if syscall_logic::linux_hybrid_sleep_uses_precision_tail(requested_nanoseconds)
+            && requested_nanoseconds <= LINUX_HYBRID_RELATIVE_SLEEP_MAX_NANOS
+        {
             return linux_hybrid_relative_sleep_until(deadline, requested_nanoseconds, rem);
         }
     }
@@ -14166,7 +14169,9 @@ fn sys_nanosleep_linux_with_rem(req: usize, rem: usize) -> SysResult {
         if requested_nanoseconds <= LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS {
             return linux_high_resolution_relative_sleep_until(deadline, rem);
         }
-        if requested_nanoseconds <= LINUX_HYBRID_RELATIVE_SLEEP_MAX_NANOS {
+        if syscall_logic::linux_hybrid_sleep_uses_precision_tail(requested_nanoseconds)
+            && requested_nanoseconds <= LINUX_HYBRID_RELATIVE_SLEEP_MAX_NANOS
+        {
             return linux_hybrid_relative_sleep_until(deadline, requested_nanoseconds, rem);
         }
     }

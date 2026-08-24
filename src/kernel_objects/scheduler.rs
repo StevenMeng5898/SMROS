@@ -43,6 +43,7 @@ const SCHED_SAMPLE_WORK_UNITS: u32 = 960;
 const SCHED_SAMPLE_SPIN_UNITS: u32 = 80_000;
 const SCHED_SAMPLE_TRACE_SNAPSHOT_ROUNDS: usize = 8;
 const READY_BITMAP_WORDS: usize = (MAX_THREADS + 63) / 64;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedulePolicy {
     RoundRobin,
@@ -2112,6 +2113,7 @@ extern "C" fn idle_thread_entry() -> ! {
 
 /// Perform a context switch to the next thread
 pub fn schedule() {
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let s = scheduler();
     let executing_cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
     let cpu_id = current_logical_cpu(s);
@@ -2120,13 +2122,12 @@ pub fn schedule() {
     // Find next thread to run
     if let Some(next_id) = s.schedule_next_for_cpu(cpu_id) {
         let current_id = s.current_thread;
-
         if next_id == current_id {
             // No need to switch
+            crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
             return;
         }
 
-        let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
         if !s.defer_terminated_thread_before_switch(executing_cpu, current_id) {
             crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
             return;
@@ -2160,8 +2161,8 @@ pub fn schedule() {
         unsafe {
             thread::switch_context(current_tcb_ptr, next_tcb_ptr);
         }
-        crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     }
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
 }
 
 fn current_logical_cpu(s: &Scheduler) -> usize {
@@ -2279,6 +2280,7 @@ fn print_i32(serial: &mut crate::kernel_lowlevel::serial::Serial, value: i32) {
 
 /// Yield the current thread's time slice voluntarily
 pub fn yield_now() {
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     // Reset time slice to force preemption
     let s = scheduler();
     s.charge_current_runtime(1);
@@ -2286,20 +2288,24 @@ pub fn yield_now() {
         tcb.time_slice = 0;
     }
     schedule();
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
 }
 
 /// Yield the current thread's time slice on a specific CPU
 pub fn yield_now_on_cpu(cpu_id: usize) {
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let s = scheduler();
     s.charge_current_runtime(1);
     if let Some(tcb) = s.get_thread_mut(s.current_thread) {
         tcb.time_slice = 0;
     }
     schedule_on_cpu(cpu_id);
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
 }
 
 /// Perform a context switch to the next thread on a specific CPU
 pub fn schedule_on_cpu(cpu_id: usize) {
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let s = scheduler();
     let executing_cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
     s.reap_deferred_thread_for_cpu(executing_cpu);
@@ -2310,10 +2316,10 @@ pub fn schedule_on_cpu(cpu_id: usize) {
 
         if next_id == current_id {
             // No need to switch
+            crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
             return;
         }
 
-        let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
         if !s.defer_terminated_thread_before_switch(executing_cpu, current_id) {
             crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
             return;
@@ -2348,8 +2354,8 @@ pub fn schedule_on_cpu(cpu_id: usize) {
         unsafe {
             thread::switch_context(current_tcb_ptr, next_tcb_ptr);
         }
-        crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     }
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
 }
 
 /// Start the first user thread on a specific CPU (called from secondary CPU entry)

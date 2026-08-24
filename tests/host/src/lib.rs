@@ -842,6 +842,13 @@ mod syscall_logic {
     }
 
     #[test]
+    fn hybrid_sleep_precision_tail_is_reserved_for_subsecond_waits() {
+        assert!(linux_hybrid_sleep_uses_precision_tail(100_000_001));
+        assert!(!linux_hybrid_sleep_uses_precision_tail(1_000_000_000));
+        assert!(!linux_hybrid_sleep_uses_precision_tail(2_100_000_000));
+    }
+
+    #[test]
     fn sched_policy_priority_bounds_match_linux_realtime_rules() {
         assert_eq!(linux_sched_priority_bounds(0), Some((0, 0)));
         assert_eq!(linux_sched_priority_bounds(1), Some((1, 99)));
@@ -8238,6 +8245,18 @@ mod lowlevel_logic {
         smros_ll_timer_compare_body!(current, period)
     }
 
+    pub(crate) fn timer_tick_is_new(last: u64, current: u64) -> bool {
+        smros_ll_timer_tick_is_new_body!(last, current)
+    }
+
+    pub(crate) fn timer_earliest_compare(periodic: u64, precision: u64) -> u64 {
+        smros_ll_timer_earliest_compare_body!(periodic, precision)
+    }
+
+    pub(crate) fn timer_program_compare(periodic: u64, armed: u64, requested: u64) -> u64 {
+        smros_ll_timer_program_compare_body!(periodic, armed, requested)
+    }
+
     #[test]
     fn lowlevel_alignment_and_segments_reject_overflow() {
         assert_eq!(smros_ll_align_up_body!(5usize, 4usize), Some(8));
@@ -8276,6 +8295,27 @@ mod lowlevel_logic {
         assert_eq!(timer_compare(12, 10), 20);
         assert_eq!(timer_compare(20, 10), 30);
         assert_eq!(timer_compare(0, 0), 0);
+    }
+
+    #[test]
+    fn timer_precision_compare_never_delays_the_periodic_tick() {
+        assert_eq!(timer_earliest_compare(1_000, 900), 900);
+        assert_eq!(timer_earliest_compare(1_000, 1_100), 1_000);
+        assert_eq!(timer_earliest_compare(1_000, 0), 1_000);
+    }
+
+    #[test]
+    fn timer_precision_compare_never_postpones_an_earlier_request() {
+        assert_eq!(timer_program_compare(1_000, 900, 1_100), 900);
+        assert_eq!(timer_program_compare(1_000, 900, 950), 900);
+        assert_eq!(timer_program_compare(1_000, 0, 950), 950);
+    }
+
+    #[test]
+    fn timer_event_admission_requires_a_strictly_new_tick() {
+        assert!(!timer_tick_is_new(2_000, 2_000));
+        assert!(!timer_tick_is_new(2_001, 2_000));
+        assert!(timer_tick_is_new(1_999, 2_000));
     }
 
     #[test]

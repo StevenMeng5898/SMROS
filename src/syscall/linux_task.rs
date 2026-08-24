@@ -729,8 +729,7 @@ fn complete_task_retirements(
             );
         }
         if transition.task.scheduler_thread != current_scheduler.0 {
-            let _ = scheduler::scheduler()
-                .terminate_thread(ThreadId(transition.task.scheduler_thread));
+            let _ = scheduler::scheduler().terminate_thread(ThreadId(transition.task.scheduler_thread));
         }
     }
 }

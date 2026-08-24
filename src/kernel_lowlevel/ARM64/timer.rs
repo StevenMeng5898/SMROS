@@ -23,6 +23,13 @@ static TIMER_FREQUENCY: AtomicU64 = AtomicU64::new(0);
 
 /// Timer tick period in timer counts (for 10ms tick)
 static TICK_PERIOD: AtomicU64 = AtomicU64::new(0);
+/// The next periodic compare value. Precision sleepers may program an earlier
+/// compare, but they must never postpone this scheduler tick.
+static NEXT_PERIODIC_COMPARE: AtomicU64 = AtomicU64::new(0);
+/// The compare value currently programmed in CNTP_CVAL_EL0. Keeping this
+/// separately from the periodic deadline prevents a later precision waiter
+/// from postponing an earlier one already armed in the hardware timer.
+static PROGRAMMED_COMPARE: AtomicU64 = AtomicU64::new(0);
 
 /// Read the Counter-timer Frequency Register
 fn read_cntfrq_el0() -> u64 {
@@ -100,6 +107,8 @@ pub fn init() {
     // Set the timer to fire after TICK_PERIOD counts
     let current_count = read_cntpct_el0();
     let compare_value = lowlevel_logic::timer_compare(current_count, tick_period);
+    NEXT_PERIODIC_COMPARE.store(compare_value, Ordering::Release);
+    PROGRAMMED_COMPARE.store(compare_value, Ordering::Release);
     write_cntp_cval_el0(compare_value);
 
     // Enable timer with interrupt unmasked
@@ -143,6 +152,8 @@ pub fn arm_next_tick() {
     let period = TICK_PERIOD.load(Ordering::Relaxed);
     let current_count = read_cntpct_el0();
     let compare_value = lowlevel_logic::timer_compare(current_count, period);
+    NEXT_PERIODIC_COMPARE.store(compare_value, Ordering::Release);
+    PROGRAMMED_COMPARE.store(compare_value, Ordering::Release);
     write_cntp_cval_el0(compare_value);
 }
 
@@ -160,7 +171,14 @@ pub fn arm_at_nanoseconds(deadline: u64) {
     let target_count = target_count
         .min(u64::MAX as u128)
         .max((current_count as u128).saturating_add(1)) as u64;
-    write_cntp_cval_el0(target_count);
+    let periodic_compare = NEXT_PERIODIC_COMPARE.load(Ordering::Acquire);
+    let armed_compare = PROGRAMMED_COMPARE.load(Ordering::Acquire);
+    let programmed_compare =
+        lowlevel_logic::timer_program_compare(periodic_compare, armed_compare, target_count);
+    if programmed_compare != armed_compare {
+        write_cntp_cval_el0(programmed_compare);
+        PROGRAMMED_COMPARE.store(programmed_compare, Ordering::Release);
+    }
 }
 
 /// Clear timer interrupt by re-arming the timer

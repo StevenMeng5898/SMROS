@@ -5598,6 +5598,38 @@ fn aarch64_context_switch_preserves_irq_mask_until_the_resumed_owner_restores_it
 }
 
 #[test]
+fn scheduler_handoffs_mask_interrupts_before_observing_global_state() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let scheduler = std::fs::read_to_string(repository.join("src/kernel_objects/scheduler.rs"))
+        .expect("read scheduler");
+
+    for function in ["pub fn schedule()", "pub fn schedule_on_cpu(cpu_id: usize)"] {
+        let start = scheduler.find(function).expect("scheduler handoff");
+        let body = braced_body(&scheduler[start..]);
+        let mask = body
+            .find("crate::kernel_lowlevel::cpu::mask_interrupts()")
+            .expect("scheduler handoff IRQ mask");
+        let state_read = body
+            .find("s.reap_deferred_thread_for_cpu(executing_cpu)")
+            .expect("scheduler state read");
+        let picker = body
+            .find("s.schedule_next_for_cpu")
+            .expect("scheduler picker");
+        assert!(mask < state_read && state_read < picker);
+    }
+
+    let yield_start = scheduler.find("pub fn yield_now()").expect("scheduler yield");
+    let yield_body = braced_body(&scheduler[yield_start..]);
+    let mask = yield_body
+        .find("crate::kernel_lowlevel::cpu::mask_interrupts()")
+        .expect("yield IRQ mask");
+    let mutation = yield_body
+        .find("s.charge_current_runtime(1)")
+        .expect("yield scheduler mutation");
+    assert!(mask < mutation);
+}
+
+#[test]
 fn x86_system_reset_uses_hardware_reset_ports_before_halting() {
     let smp = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -8555,7 +8587,13 @@ fn linux_fork_publishes_only_a_complete_child() {
     assert!(memory.contains("crate::kernel_lowlevel::cpu::sync_instruction_cache()"));
     assert!(memory.contains("try_reserve_exact(parent.mappings.len())"));
     assert!(memory.contains("try_reserve(1)"));
-    assert!(memory.contains("Aarch64AddressSpace::new_for_fork(fork_table_allocation_failure)"));
+    let fork_address_space = memory
+        .find("Aarch64AddressSpace::new_for_fork(")
+        .expect("fork address-space constructor");
+    let fork_address_space_call = &memory[fork_address_space..]
+        [..memory[fork_address_space..].find(")\n").expect("fork constructor end") + 1];
+    assert!(fork_address_space_call.contains("&parent.address_space"));
+    assert!(fork_address_space_call.contains("fork_table_allocation_failure"));
     assert!(memory.contains("LinuxForkFailurePoint::ChildRoot"));
     assert!(memory.contains("LinuxForkFailurePoint::TablePage"));
     assert!(memory.contains("LinuxForkFailurePoint::SharedReference"));

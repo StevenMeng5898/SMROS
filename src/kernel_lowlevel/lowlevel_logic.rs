@@ -102,6 +102,14 @@ pub(crate) fn timer_compare(current: u64, period: u64) -> u64 {
     smros_ll_timer_compare_body!(current, period)
 }
 
+pub(crate) fn timer_tick_is_new(last: u64, current: u64) -> bool {
+    smros_ll_timer_tick_is_new_body!(last, current)
+}
+
+pub(crate) fn timer_program_compare(periodic: u64, armed: u64, requested: u64) -> u64 {
+    smros_ll_timer_program_compare_body!(periodic, armed, requested)
+}
+
 pub(crate) fn timer_tick_count(counter: u64, period: u64) -> u64 {
     smros_ll_timer_tick_count_body!(counter, period)
 }
