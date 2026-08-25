@@ -1825,6 +1825,12 @@ int pthread_cancel(pthread_t thread) {
     return result;
 }
 
+/* AArch64 glibc places these entry points in GLIBC_2.34. Keep the
+ * compatibility implementations visible for both the older and newer
+ * symbol versions used by the test binaries. */
+__asm__(".symver pthread_create,pthread_create@GLIBC_2.34");
+__asm__(".symver pthread_cancel,pthread_cancel@GLIBC_2.34");
+
 int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type) {
     if (smros_pointer_is_null(attr)) {
         return EINVAL;

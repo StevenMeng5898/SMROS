@@ -2939,6 +2939,17 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertIn("global:", version_script)
         self.assertIn("*;", version_script)
         self.assertNotIn("local:\n        *;", version_script)
+        source = Path(
+            "scripts/posix/runtime/smros_posix_compat.c"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '.symver pthread_create,pthread_create@GLIBC_2.34',
+            source,
+        )
+        self.assertIn(
+            '.symver pthread_cancel,pthread_cancel@GLIBC_2.34',
+            source,
+        )
 
     def test_smros_posix_compat_condvar_lazy_static_and_signal_handoff(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c")
