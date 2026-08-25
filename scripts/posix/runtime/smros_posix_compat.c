@@ -605,11 +605,9 @@ int smros_pthread_spin_trylock(
     return status == 0 ? 0 : EBUSY;
 }
 
-/* Tests are linked against GLIBC_2.34; retain that version on the preload
- * export so the dynamic linker selects this implementation. */
-__asm__(
-    ".symver smros_pthread_spin_trylock,pthread_spin_trylock@GLIBC_2.34"
-);
+int pthread_spin_trylock(pthread_spinlock_t *lock) {
+    return smros_pthread_spin_trylock(lock);
+}
 #else
 int pthread_spin_trylock(pthread_spinlock_t *lock) {
     typedef int (*smros_pthread_spin_trylock_fn)(pthread_spinlock_t *);
@@ -1824,13 +1822,6 @@ int pthread_cancel(pthread_t thread) {
     smros_pthread_diag_state("cancel-exit", (const void *)(uintptr_t)thread, (uint32_t)result, 0, 0);
     return result;
 }
-
-/* AArch64 glibc places these entry points in GLIBC_2.34. Keep the
- * compatibility implementations visible for both the older and newer
- * symbol versions used by the test binaries. */
-__asm__(".symver pthread_create,pthread_create@GLIBC_2.34");
-__asm__(".symver pthread_cancel,pthread_cancel@GLIBC_2.34");
-__asm__(".symver pthread_testcancel,pthread_testcancel@GLIBC_2.34");
 
 int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type) {
     if (smros_pointer_is_null(attr)) {

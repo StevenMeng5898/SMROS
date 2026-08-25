@@ -2917,10 +2917,7 @@ with tempfile.TemporaryDirectory() as temporary:
             "smros_pthread_spin_trylock(",
             source,
         )
-        self.assertIn(
-            ".symver smros_pthread_spin_trylock,pthread_spin_trylock@GLIBC_2.34",
-            source,
-        )
+        self.assertIn("int pthread_spin_trylock(pthread_spinlock_t *lock)", source)
         start = source.index(
             "smros_pthread_spin_trylock("
         )
@@ -2942,18 +2939,47 @@ with tempfile.TemporaryDirectory() as temporary:
         source = Path(
             "scripts/posix/runtime/smros_posix_compat.c"
         ).read_text(encoding="utf-8")
-        self.assertIn(
-            '.symver pthread_create,pthread_create@GLIBC_2.34',
-            source,
-        )
-        self.assertIn(
-            '.symver pthread_cancel,pthread_cancel@GLIBC_2.34',
-            source,
-        )
-        self.assertIn(
-            '.symver pthread_testcancel,pthread_testcancel@GLIBC_2.34',
-            source,
-        )
+        for symbol in (
+            "pthread_cancel",
+            "pthread_create",
+            "pthread_spin_trylock",
+            "pthread_testcancel",
+            "aio_cancel",
+            "aio_error",
+            "aio_fsync",
+            "aio_read",
+            "aio_return",
+            "aio_suspend",
+            "aio_write",
+            "mq_unlink",
+            "pthread_barrier_destroy",
+            "pthread_barrier_init",
+            "pthread_barrier_wait",
+            "pthread_join",
+            "pthread_kill",
+            "pthread_mutex_getprioceiling",
+            "pthread_mutex_trylock",
+            "pthread_mutexattr_destroy",
+            "pthread_mutexattr_gettype",
+            "pthread_mutexattr_init",
+            "pthread_mutexattr_setpshared",
+            "pthread_mutexattr_settype",
+            "pthread_rwlock_destroy",
+            "pthread_rwlock_init",
+            "pthread_rwlock_rdlock",
+            "pthread_rwlock_unlock",
+            "pthread_rwlock_wrlock",
+            "pthread_setschedprio",
+            "sem_destroy",
+            "sem_init",
+            "sem_open",
+            "sem_timedwait",
+            "sem_unlink",
+            "sem_wait",
+            "shm_open",
+            "shm_unlink",
+        ):
+            self.assertIn(f"        {symbol};", version_script)
 
     def test_smros_posix_compat_condvar_lazy_static_and_signal_handoff(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c")
