@@ -7,5 +7,6 @@ GLIBC_2.34 {
     global:
         pthread_cancel;
         pthread_create;
+        pthread_testcancel;
         pthread_spin_trylock;
 } GLIBC_2.17;
