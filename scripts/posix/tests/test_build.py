@@ -2876,6 +2876,11 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertIn("-fPIC", command)
         self.assertIn("-shared", command)
         self.assertIn("-Wl,-soname,libsmros-posix-compat.so", command)
+        self.assertIn(
+            "-Wl,--version-script,"
+            + str(build_module.POSIX_COMPAT_PRELOAD_VERSION_SCRIPT),
+            command,
+        )
         self.assertIn("-ldl", command)
         self.assertEqual(
             command[command.index("-o") + 1],
@@ -2908,8 +2913,17 @@ with tempfile.TemporaryDirectory() as temporary:
         source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
             encoding="utf-8"
         )
-        self.assertIn("int pthread_spin_trylock(pthread_spinlock_t *lock)", source)
-        start = source.index("int pthread_spin_trylock(pthread_spinlock_t *lock)")
+        self.assertIn(
+            "smros_pthread_spin_trylock(",
+            source,
+        )
+        self.assertIn(
+            ".symver smros_pthread_spin_trylock,pthread_spin_trylock@GLIBC_2.34",
+            source,
+        )
+        start = source.index(
+            "smros_pthread_spin_trylock("
+        )
         body = source[start:source.index("\n}", start) + 2]
         aarch64_body = body.split("#else", 1)[0]
         self.assertIn('"ldaxr %w0, [%1]"', aarch64_body)

@@ -99,6 +99,9 @@ POSIX_COMPAT_PRELOAD_NAME = "libsmros-posix-compat.so"
 POSIX_COMPAT_PRELOAD_SOURCE = (
     _REPOSITORY_ROOT / "scripts" / "posix" / "runtime" / "smros_posix_compat.c"
 )
+POSIX_COMPAT_PRELOAD_VERSION_SCRIPT = (
+    _REPOSITORY_ROOT / "scripts" / "posix" / "runtime" / "smros_posix_compat.map"
+)
 _METADATA_KEYS = (
     "source",
     "revision",
@@ -184,6 +187,7 @@ def posix_compat_preload_command(
         "-o",
         str(output),
         f"-Wl,-soname,{POSIX_COMPAT_PRELOAD_NAME}",
+        f"-Wl,--version-script,{POSIX_COMPAT_PRELOAD_VERSION_SCRIPT}",
         "-ldl",
     ]
 
