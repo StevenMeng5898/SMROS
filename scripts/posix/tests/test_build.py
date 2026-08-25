@@ -2931,6 +2931,15 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertIn("return EBUSY;", aarch64_body)
         self.assertNotIn("pthread_spin_trylock_fn", aarch64_body)
 
+    def test_smros_posix_compat_version_script_exports_compatibility_symbols(self) -> None:
+        version_script = Path(
+            "scripts/posix/runtime/smros_posix_compat.map"
+        ).read_text(encoding="ascii")
+        self.assertIn("GLIBC_2.17", version_script)
+        self.assertIn("global:", version_script)
+        self.assertIn("*;", version_script)
+        self.assertNotIn("local:\n        *;", version_script)
+
     def test_smros_posix_compat_condvar_lazy_static_and_signal_handoff(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c")
         with tempfile.TemporaryDirectory() as temporary:

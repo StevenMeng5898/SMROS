@@ -1,6 +1,9 @@
+GLIBC_2.17 {
+    global:
+        *;
+};
+
 GLIBC_2.34 {
     global:
         pthread_spin_trylock;
-    local:
-        *;
-};
+} GLIBC_2.17;
