@@ -575,6 +575,45 @@ static void *smros_resolve_symbol(const char *symbol) {
     return target;
 }
 
+/* glibc's AArch64 trylock uses an LSE swap helper which can keep retrying on
+ * SMROS's shared user mappings.  POSIX trylock must never wait: one exclusive
+ * load/store attempt is enough to report either acquisition or EBUSY. */
+int pthread_spin_trylock(pthread_spinlock_t *lock) {
+#if defined(__aarch64__)
+    uint32_t observed;
+    uint32_t status;
+    const uint32_t locked = 1;
+
+    __asm__ volatile(
+        "ldaxr %w0, [%1]"
+        : "=r"(observed)
+        : "r"(lock)
+        : "memory"
+    );
+    if (observed != 0) {
+        __asm__ volatile("clrex" ::: "memory");
+        return EBUSY;
+    }
+    __asm__ volatile(
+        "stxr %w0, %w2, [%1]"
+        : "=&r"(status)
+        : "r"(lock), "r"(locked)
+        : "memory"
+    );
+    return status == 0 ? 0 : EBUSY;
+#else
+    typedef int (*smros_pthread_spin_trylock_fn)(pthread_spinlock_t *);
+    smros_pthread_spin_trylock_fn target =
+        (smros_pthread_spin_trylock_fn)smros_resolve_symbol(
+            "pthread_spin_trylock"
+        );
+    if (target == NULL) {
+        return ENOSYS;
+    }
+    return target(lock);
+#endif
+}
+
 /* Resolve the sleep entry points before the first test syscall.  The POSIX
  * tests measure elapsed time across adjacent timer calls, so lazy dlsym work
  * in the first nanosleep/clock_nanosleep invocation becomes observable as

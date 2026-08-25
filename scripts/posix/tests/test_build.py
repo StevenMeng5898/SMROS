@@ -2904,6 +2904,19 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertIn("int shm_open(const char *name, int oflag, mode_t mode)", source)
         self.assertIn("smros_shm_open_fn", source)
 
+    def test_smros_posix_compat_spin_trylock_is_single_attempt(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("int pthread_spin_trylock(pthread_spinlock_t *lock)", source)
+        start = source.index("int pthread_spin_trylock(pthread_spinlock_t *lock)")
+        body = source[start:source.index("\n}", start) + 2]
+        aarch64_body = body.split("#else", 1)[0]
+        self.assertIn('"ldaxr %w0, [%1]"', aarch64_body)
+        self.assertIn('"stxr %w0, %w2, [%1]"', aarch64_body)
+        self.assertIn("return EBUSY;", aarch64_body)
+        self.assertNotIn("pthread_spin_trylock_fn", aarch64_body)
+
     def test_smros_posix_compat_condvar_lazy_static_and_signal_handoff(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c")
         with tempfile.TemporaryDirectory() as temporary:
