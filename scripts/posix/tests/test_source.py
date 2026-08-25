@@ -1093,6 +1093,27 @@ class RepositoryPatchTests(unittest.TestCase):
             + ["\tchild_pid = malloc(nb_cpu * sizeof(*child_pid));"] * 2,
         )
 
+    def test_pthread_key_limit_patch_stops_after_validating_terminal_eagain(self) -> None:
+        patch_root = REPOSITORY_ROOT / "third_party" / "posixtest" / "patches"
+        series_entries = [
+            line.strip()
+            for line in (patch_root / "series").read_text(encoding="ascii").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        patch_name = "fix-pthread-key-create-limit-check.patch"
+        self.assertIn(patch_name, series_entries)
+
+        patch = (patch_root / patch_name).read_text(encoding="ascii")
+        self.assertIn(
+            "if(i == NUM_OF_KEYS)",
+            patch,
+        )
+        self.assertIn(
+            "+\t\t\tcontinue;",
+            patch,
+        )
+        self.assertNotIn("PTS_PASS", patch)
+
 
 class DocumentationTests(unittest.TestCase):
     def test_readme_describes_default_and_overridden_work_directories(self) -> None:

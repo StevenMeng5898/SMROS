@@ -2,6 +2,7 @@
 accept-newer-aio-option-versions.patch
 fix-sched-setparam-pid-array-allocation.patch
 fix-pthread-key-create-array-bound.patch
+fix-pthread-key-create-limit-check.patch
 normalize-pthread-cond-test-sources.patch
 bound-shm-open-atomic-stress.patch
 replace-defective-fork-11-record-lock-test.patch

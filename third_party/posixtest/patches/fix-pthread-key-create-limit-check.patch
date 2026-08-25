@@ -1,0 +1,13 @@
+diff --git a/conformance/interfaces/pthread_key_create/speculative/5-1.c b/conformance/interfaces/pthread_key_create/speculative/5-1.c
+--- a/conformance/interfaces/pthread_key_create/speculative/5-1.c
++++ b/conformance/interfaces/pthread_key_create/speculative/5-1.c
+@@ -48,8 +48,9 @@ int main()
+ 		if(i == NUM_OF_KEYS)
+ 		{
+ 			if(rc != EAGAIN)
+ 			{
+ 				printf("Test FAILED: Expected EAGAIN when exceeded the limit of keys in a single process, but got: %d\n", rc);
+ 				return PTS_FAIL;
+ 			}
++			continue;
+ 		}
