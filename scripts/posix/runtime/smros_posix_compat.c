@@ -83,6 +83,8 @@ typedef int (*smros_shm_unlink_fn)(const char *);
 typedef int (*smros_shm_open_fn)(const char *, int, mode_t);
 typedef int (*smros_open_fn)(const char *, int, ...);
 typedef int (*smros_close_fn)(int);
+typedef int (*smros_sched_getscheduler_fn)(pid_t);
+typedef int (*smros_sched_yield_fn)(void);
 typedef int (*smros_nanosleep_fn)(const struct timespec *, struct timespec *);
 typedef int (*smros_clock_nanosleep_fn)(
     clockid_t,
@@ -224,6 +226,7 @@ static unsigned int smros_atfork_registrations;
 
 enum {
     SMROS_NSEC_PER_SEC = 1000000000L,
+    SMROS_SCHED_YIELD_HANDOFF_NSEC = 1000000L,
     SMROS_SEM_POLL_NSEC = 1000000L,
     SMROS_SEM_SIGNAL_GRACE_NSEC = 2000000L,
     SMROS_SIGNAL_SLOTS = 128,
@@ -1026,6 +1029,35 @@ clock_t clock(void) {
     }
     smros_clock_ticks += increment;
     return smros_clock_ticks;
+}
+
+int sched_yield(void) {
+    smros_sched_yield_fn target =
+        (smros_sched_yield_fn)smros_resolve_symbol("sched_yield");
+    if (target == NULL) {
+        return -1;
+    }
+
+    int result = target();
+    smros_sched_getscheduler_fn get_scheduler =
+        (smros_sched_getscheduler_fn)smros_resolve_symbol("sched_getscheduler");
+    int policy = get_scheduler == NULL ? SCHED_OTHER : get_scheduler(0);
+    if (result == 0 && (policy == SCHED_FIFO || policy == SCHED_RR)) {
+        /* Equal-priority SCHED_FIFO threads can otherwise remain runnable on
+         * the same SMROS CPU after the yield syscall returns.  A short native
+         * sleep creates the required blocking handoff while preserving the
+         * successful sched_yield return value. */
+        smros_nanosleep_fn sleep_target =
+            (smros_nanosleep_fn)smros_resolve_symbol("nanosleep");
+        if (sleep_target != NULL) {
+            const struct timespec handoff = {
+                .tv_sec = 0,
+                .tv_nsec = SMROS_SCHED_YIELD_HANDOFF_NSEC,
+            };
+            (void)sleep_target(&handoff, NULL);
+        }
+    }
+    return result;
 }
 
 static int smros_pcts_long_nanosleep_validation_case(

@@ -2909,6 +2909,14 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertIn("int shm_open(const char *name, int oflag, mode_t mode)", source)
         self.assertIn("smros_shm_open_fn", source)
 
+    def test_smros_posix_compat_sched_yield_forces_realtime_handoff(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("int sched_yield(void)", source)
+        self.assertIn('smros_resolve_symbol("sched_yield")', source)
+        self.assertIn("SMROS_SCHED_YIELD_HANDOFF_NSEC", source)
+
     def test_smros_posix_compat_spin_trylock_is_single_attempt(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
             encoding="utf-8"
