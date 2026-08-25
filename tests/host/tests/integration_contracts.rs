@@ -6266,8 +6266,8 @@ fn linux_scheduler_policy_and_priority_are_process_state_inherited_by_fork() {
             .find("fn linux_reschedule_after_sched_change(")
             .expect("scheduler change preemption helper")..],
     );
-    assert!(reschedule.contains("scheduler::scheduler().should_preempt()"));
     assert!(reschedule.contains("scheduler::yield_now()"));
+    assert!(!reschedule.contains("scheduler::scheduler().should_preempt()"));
 
     assert!(syscall.contains("pub fn sys_sched_get_priority_max(policy: usize)"));
     assert!(syscall.contains("pub fn sys_sched_get_priority_min(policy: usize)"));

@@ -9740,9 +9740,10 @@ pub(crate) fn apply_linux_resource_scheduler_priority(
 }
 
 fn linux_reschedule_after_sched_change() {
-    if scheduler::scheduler().should_preempt() {
-        scheduler::yield_now();
-    }
+    // The target may be a different process, so the current-thread priority
+    // snapshot can be stale when the update completes. Yield unconditionally
+    // to make a newly runnable higher-priority target observable immediately.
+    scheduler::yield_now();
 }
 
 fn linux_sched_target_param(target: LinuxSchedTarget) -> LinuxTaskSchedParam {
