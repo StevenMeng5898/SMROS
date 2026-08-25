@@ -992,7 +992,10 @@ class RepositoryPatchTests(unittest.TestCase):
         ]
         name = "replace-defective-fork-11-record-lock-test.patch"
         self.assertEqual(entries.count(name), 1)
-        self.assertEqual(entries[-1], name)
+        self.assertLess(
+            entries.index(name),
+            entries.index("fix-pthread-join-6-3-shutdown-race.patch"),
+        )
 
         patch = (patch_root / name).read_text(encoding="utf-8")
         self.assertIn("conformance/interfaces/fork/11-1.c", patch)
@@ -1112,6 +1115,22 @@ class RepositoryPatchTests(unittest.TestCase):
             "+\t\t\tcontinue;",
             patch,
         )
+        self.assertNotIn("PTS_PASS", patch)
+
+    def test_cond_broadcast_shutdown_patch_releases_signal_sender_waiters(self) -> None:
+        patch_root = REPOSITORY_ROOT / "third_party" / "posixtest" / "patches"
+        series_entries = [
+            line.strip()
+            for line in (patch_root / "series").read_text(encoding="ascii").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        patch_name = "fix-cond-broadcast-4-2-shutdown-race.patch"
+        self.assertIn(patch_name, series_entries)
+
+        patch = (patch_root / patch_name).read_text(encoding="ascii")
+        self.assertIn("conformance/interfaces/pthread_cond_broadcast/4-2.c", patch)
+        self.assertIn("sem_post( &semsig1 )", patch)
+        self.assertIn("sem_post( &semsig2 )", patch)
         self.assertNotIn("PTS_PASS", patch)
 
 
