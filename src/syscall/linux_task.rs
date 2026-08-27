@@ -802,6 +802,18 @@ pub(crate) fn on_timer_tick(now: u64) {
     }
 }
 
+pub(crate) fn on_precision_timer(now_nanoseconds: u64) {
+    loop {
+        let identity = with_runtime(|runtime| runtime.tasks.expire_precision_sleep(now_nanoseconds));
+        let Some((tid, scheduler_thread, reason)) = identity else {
+            break;
+        };
+        if !wake_blocked(tid, scheduler_thread, reason) {
+            let _ = cancel_sleep(tid, scheduler_thread);
+        }
+    }
+}
+
 pub(crate) fn reset() {
     with_runtime(|runtime| {
         let current = scheduler::scheduler().current();
@@ -929,6 +941,14 @@ mod aarch64_clone {
             if !runtime.tasks.inherit_sched_param(reservation, current.0) {
                 let _ = runtime.tasks.rollback(reservation);
                 return Err(SysError::EAGAIN);
+            }
+            let inherited_sched_param = runtime.tasks.sched_params[reservation.slot];
+            if let Err(error) = crate::syscall::syscall::apply_linux_task_scheduler_priority(
+                reservation.scheduler_thread,
+                inherited_sched_param,
+            ) {
+                let _ = runtime.tasks.rollback(reservation);
+                return Err(error);
             }
             let mut frame = unsafe { context.frame.read() };
             frame.regs[0] = 0;

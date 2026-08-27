@@ -2136,7 +2136,6 @@ pub fn schedule() {
         // Update states - get raw pointers first to avoid borrow issues
         let current_tcb_ptr = s.get_thread_mut(current_id).unwrap() as *mut ThreadControlBlock;
         let next_tcb_ptr = s.get_thread_mut(next_id).unwrap() as *mut ThreadControlBlock;
-
         let next_time_slice = s
             .thread_time_slice_ticks(next_id)
             .unwrap_or(s.time_slice_ticks);

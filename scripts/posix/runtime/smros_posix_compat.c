@@ -83,7 +83,6 @@ typedef int (*smros_shm_unlink_fn)(const char *);
 typedef int (*smros_shm_open_fn)(const char *, int, mode_t);
 typedef int (*smros_open_fn)(const char *, int, ...);
 typedef int (*smros_close_fn)(int);
-typedef int (*smros_sched_getscheduler_fn)(pid_t);
 typedef int (*smros_sched_yield_fn)(void);
 typedef int (*smros_nanosleep_fn)(const struct timespec *, struct timespec *);
 typedef int (*smros_clock_nanosleep_fn)(
@@ -226,7 +225,6 @@ static unsigned int smros_atfork_registrations;
 
 enum {
     SMROS_NSEC_PER_SEC = 1000000000L,
-    SMROS_SCHED_YIELD_HANDOFF_NSEC = 1000000L,
     SMROS_SEM_POLL_NSEC = 1000000L,
     SMROS_SEM_SIGNAL_GRACE_NSEC = 2000000L,
     SMROS_SIGNAL_SLOTS = 128,
@@ -477,6 +475,7 @@ static pthread_t smros_pthread_cancel_type_records[SMROS_PTHREAD_CANCEL_RECORDS]
 static int smros_pthread_cancel_types[SMROS_PTHREAD_CANCEL_RECORDS];
 static int smros_fast_mmap_fds[SMROS_FAST_MMAP_FD_RECORDS];
 static char smros_fast_mmap_page[4096] __attribute__((aligned(4096)));
+static smros_sched_yield_fn smros_sched_yield_target;
 static smros_nanosleep_fn smros_nanosleep_target;
 static smros_clock_nanosleep_fn smros_clock_nanosleep_target;
 
@@ -630,6 +629,8 @@ int pthread_spin_trylock(pthread_spinlock_t *lock) {
  * in the first nanosleep/clock_nanosleep invocation becomes observable as
  * milliseconds of apparent timer drift. */
 static void __attribute__((constructor)) smros_posix_compat_init(void) {
+    smros_sched_yield_target =
+        (smros_sched_yield_fn)smros_resolve_symbol("sched_yield");
     smros_nanosleep_target =
         (smros_nanosleep_fn)smros_resolve_symbol("nanosleep");
     smros_clock_nanosleep_target =
@@ -1032,32 +1033,15 @@ clock_t clock(void) {
 }
 
 int sched_yield(void) {
-    smros_sched_yield_fn target =
-        (smros_sched_yield_fn)smros_resolve_symbol("sched_yield");
+    smros_sched_yield_fn target = smros_sched_yield_target;
+    if (target == NULL) {
+        target = (smros_sched_yield_fn)smros_resolve_symbol("sched_yield");
+        smros_sched_yield_target = target;
+    }
     if (target == NULL) {
         return -1;
     }
-
-    int result = target();
-    smros_sched_getscheduler_fn get_scheduler =
-        (smros_sched_getscheduler_fn)smros_resolve_symbol("sched_getscheduler");
-    int policy = get_scheduler == NULL ? SCHED_OTHER : get_scheduler(0);
-    if (result == 0 && (policy == SCHED_FIFO || policy == SCHED_RR)) {
-        /* Equal-priority SCHED_FIFO threads can otherwise remain runnable on
-         * the same SMROS CPU after the yield syscall returns.  A short native
-         * sleep creates the required blocking handoff while preserving the
-         * successful sched_yield return value. */
-        smros_nanosleep_fn sleep_target =
-            (smros_nanosleep_fn)smros_resolve_symbol("nanosleep");
-        if (sleep_target != NULL) {
-            const struct timespec handoff = {
-                .tv_sec = 0,
-                .tv_nsec = SMROS_SCHED_YIELD_HANDOFF_NSEC,
-            };
-            (void)sleep_target(&handoff, NULL);
-        }
-    }
-    return result;
+    return target();
 }
 
 static int smros_pcts_long_nanosleep_validation_case(

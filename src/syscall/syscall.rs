@@ -89,7 +89,6 @@ use crate::syscall::syscall_logic::{
 };
 use crate::user_level::fxfs;
 
-
 #[path = "fuzz.rs"]
 mod fuzz;
 pub use fuzz::{fuzz_syscalls, fuzz_syscalls_with_config, SyscallFuzzConfig, SyscallFuzzReport};
@@ -7064,21 +7063,19 @@ fn linux_high_resolution_relative_sleep_until(deadline: u64, rem: usize) -> SysR
         return Ok(0);
     }
     let remaining_nanoseconds = deadline.saturating_sub(now_nanoseconds);
-    let seconds = remaining_nanoseconds / LINUX_NANOS_PER_SECOND;
-    let nanoseconds = remaining_nanoseconds % LINUX_NANOS_PER_SECOND;
     let now_ticks = crate::kernel_lowlevel::timer::get_tick_count();
-    let tick_deadline = linux_task::linux_sleep_relative_deadline_ticks(
+    let tick_deadline = linux_task::linux_sleep_relative_deadline_ticks_precise(
         now_ticks,
-        i64::try_from(seconds).map_err(|_| SysError::EOVERFLOW)?,
-        i64::try_from(nanoseconds).map_err(|_| SysError::EOVERFLOW)?,
+        remaining_nanoseconds,
         LINUX_SIGNAL_TICK_NANOS,
     )
     .ok_or(SysError::EOVERFLOW)?;
-    let wait = LinuxSleepWait::relative_waiting(
+    let mut wait = LinuxSleepWait::relative_waiting(
         tick_deadline,
         now_ticks,
         remaining_nanoseconds,
     );
+    wait.precision_deadline_nanoseconds = Some(deadline);
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     crate::kernel_lowlevel::timer::arm_at_nanoseconds(deadline);
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
@@ -9605,8 +9602,15 @@ pub fn sys_sched_getaffinity(pid: usize, len: usize, mask: usize) -> SysResult {
     Ok(len)
 }
 
+fn linux_sched_online_cpu_count() -> usize {
+    core::cmp::min(
+        core::cmp::max(crate::kernel_lowlevel::smp::online_cpu_count() as usize, 1),
+        scheduler::MAX_CPUS,
+    )
+}
+
 pub fn sys_sched_setaffinity(pid: usize, len: usize, mask: usize) -> SysResult {
-    let _ = linux_sched_target_pid(pid)?;
+    let target = linux_sched_target_task(pid)?;
     if len == 0 {
         return Err(SysError::EINVAL);
     }
@@ -9615,20 +9619,44 @@ pub fn sys_sched_setaffinity(pid: usize, len: usize, mask: usize) -> SysResult {
     }
     let mut offset = 0usize;
     let mut bytes = [0u8; 64];
-    let mut intersects = false;
+    let online_cpus = linux_sched_online_cpu_count();
+    let mut selected_cpu = None;
     while offset < len {
         let chunk = core::cmp::min(bytes.len(), len - offset);
         linux_copy_from_user(
             mask.checked_add(offset).ok_or(SysError::EFAULT)?,
             &mut bytes[..chunk],
         )?;
-        if syscall_logic::linux_sched_affinity_mask_intersects_at(&bytes[..chunk], offset) {
-            intersects = true;
+        let _ = syscall_logic::linux_sched_affinity_mask_intersects_at(&bytes[..chunk], offset);
+        let mut byte_index = 0usize;
+        while byte_index < chunk {
+            let mut bit = 0usize;
+            while bit < 8 {
+                if bytes[byte_index] & (1u8 << bit) != 0 {
+                    let cpu = offset
+                        .checked_add(byte_index)
+                        .and_then(|index| index.checked_mul(8))
+                        .and_then(|index| index.checked_add(bit))
+                        .ok_or(SysError::EINVAL)?;
+                    if cpu >= online_cpus {
+                        return Err(SysError::EINVAL);
+                    }
+                    if selected_cpu.is_none() {
+                        selected_cpu = Some(cpu);
+                    }
+                }
+                bit += 1;
+            }
+            byte_index += 1;
         }
         offset += chunk;
     }
-    if !intersects {
-        return Err(SysError::EINVAL);
+    let cpu = selected_cpu.ok_or(SysError::EINVAL)?;
+    if !scheduler::scheduler().set_thread_cpu_affinity(
+        crate::kernel_lowlevel::thread::ThreadId(target.scheduler_thread),
+        Some(cpu),
+    ) {
+        return Err(SysError::ESRCH);
     }
     Ok(0)
 }
@@ -9667,7 +9695,7 @@ fn linux_sched_target_pid(pid: usize) -> Result<usize, SysError> {
     linux_sched_target_task(pid).map(|target| target.tgid)
 }
 
-fn linux_sched_permission_allowed(target: LinuxSchedTarget) -> bool {
+fn linux_sched_permission_allowed(requested_pid: usize, target: LinuxSchedTarget) -> bool {
     let sender_pid = linux_resource_pid();
     let sender = memory_state()
         .process_resources(sender_pid)
@@ -9676,14 +9704,57 @@ fn linux_sched_permission_allowed(target: LinuxSchedTarget) -> bool {
     if sender.effective_uid == 0 {
         return true;
     }
+    if target.tgid == sender_pid && requested_pid != linux_process::LINUX_ROOT_PID {
+        return true;
+    }
+    if requested_pid == linux_process::LINUX_ROOT_PID
+        && target.tgid == linux_process::LINUX_ROOT_PID
+    {
+        return false;
+    }
     /* SMROS launches the current ELF as the Linux root process (PID 1).
-     * Keep PID 1 protected after the test drops credentials, matching the
-     * init-process permission boundary expected by POSIX conformance cases. */
+     * Keep PID 1 protected from other processes after it drops credentials,
+     * while preserving the process's access to its own scheduler state. */
     if target.tgid == linux_process::LINUX_ROOT_PID {
         return false;
     }
-    if target.tgid == sender_pid {
+    let target = memory_state()
+        .process_resources(target.tgid)
+        .map(|resources| resources.credentials)
+        .unwrap_or_default();
+    sender.real_uid == target.real_uid
+        || sender.real_uid == target.saved_uid
+        || sender.effective_uid == target.real_uid
+        || sender.effective_uid == target.saved_uid
+}
+
+fn linux_sched_write_permission_allowed(
+    requested_pid: usize,
+    target: LinuxSchedTarget,
+    current: LinuxTaskSchedParam,
+    requested: LinuxTaskSchedParam,
+) -> bool {
+    let sender_pid = linux_resource_pid();
+    let sender = memory_state()
+        .process_resources(sender_pid)
+        .map(|resources| resources.credentials)
+        .unwrap_or_default();
+    if sender.effective_uid == 0 {
         return true;
+    }
+    if requested.policy != current.policy || requested.priority > current.priority {
+        return false;
+    }
+    if target.tgid == sender_pid && requested_pid != linux_process::LINUX_ROOT_PID {
+        return true;
+    }
+    if requested_pid == linux_process::LINUX_ROOT_PID
+        && target.tgid == linux_process::LINUX_ROOT_PID
+    {
+        return false;
+    }
+    if target.tgid == linux_process::LINUX_ROOT_PID {
+        return false;
     }
     let target = memory_state()
         .process_resources(target.tgid)
@@ -9710,6 +9781,13 @@ fn linux_apply_sched_priority_to_thread(
     } else {
         Err(SysError::ESRCH)
     }
+}
+
+pub(crate) fn apply_linux_task_scheduler_priority(
+    scheduler_thread: usize,
+    param: LinuxTaskSchedParam,
+) -> SysResult {
+    linux_apply_sched_priority_to_thread(scheduler_thread, param.policy, param.priority)
 }
 
 fn linux_apply_sched_priority_to_process(pid: usize, policy: usize, priority: i32) -> SysResult {
@@ -9775,7 +9853,7 @@ fn linux_set_sched_target_param(target: LinuxSchedTarget, param: LinuxTaskSchedP
 
 pub fn sys_sched_getparam(pid: usize, param: usize) -> SysResult {
     let target = linux_sched_target_task(pid)?;
-    if !linux_sched_permission_allowed(target) {
+    if !linux_sched_permission_allowed(pid, target) {
         return Err(SysError::EPERM);
     }
     linux_write_user_sched_param(param, linux_sched_target_param(target).priority)?;
@@ -9785,19 +9863,21 @@ pub fn sys_sched_getparam(pid: usize, param: usize) -> SysResult {
 pub fn sys_sched_setparam(pid: usize, param: usize) -> SysResult {
     let priority = linux_read_user_sched_param(param)?;
     let target = linux_sched_target_task(pid)?;
-    let policy = linux_sched_target_param(target).policy;
+    let current = linux_sched_target_param(target);
+    let policy = current.policy;
     if !syscall_logic::linux_sched_priority_valid(policy, priority) {
         return Err(SysError::EINVAL);
     }
-    if !linux_sched_permission_allowed(target) {
+    let requested = LinuxTaskSchedParam { policy, priority };
+    if !linux_sched_write_permission_allowed(pid, target, current, requested) {
         return Err(SysError::EPERM);
     }
-    linux_set_sched_target_param(target, LinuxTaskSchedParam { policy, priority })
+    linux_set_sched_target_param(target, requested)
 }
 
 pub fn sys_sched_getscheduler(pid: usize) -> SysResult {
     let target = linux_sched_target_task(pid)?;
-    if !linux_sched_permission_allowed(target) {
+    if !linux_sched_permission_allowed(pid, target) {
         return Err(SysError::EPERM);
     }
     Ok(linux_sched_target_param(target).policy)
@@ -9809,10 +9889,12 @@ pub fn sys_sched_setscheduler(pid: usize, policy: usize, param: usize) -> SysRes
         return Err(SysError::EINVAL);
     }
     let target = linux_sched_target_task(pid)?;
-    if !linux_sched_permission_allowed(target) {
+    let current = linux_sched_target_param(target);
+    let requested = LinuxTaskSchedParam { policy, priority };
+    if !linux_sched_write_permission_allowed(pid, target, current, requested) {
         return Err(SysError::EPERM);
     }
-    linux_set_sched_target_param(target, LinuxTaskSchedParam { policy, priority })
+    linux_set_sched_target_param(target, requested)
 }
 
 pub fn sys_sched_get_priority_max(policy: usize) -> SysResult {
@@ -11141,7 +11223,6 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
         pid,
         options
     );
-
     loop {
         match linux_process::wait_current(selector, nohang, include_stopped)? {
             linux_process::LinuxWaitOutcome::Ready { pid, status } => {

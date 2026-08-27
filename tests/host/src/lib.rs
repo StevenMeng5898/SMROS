@@ -32,10 +32,9 @@ mod linux_shm_cache_logic {
         let mut records = Vec::new();
         for index in (0..1_000).rev() {
             let path = format!("/dev/shm/object-{index:04}");
-            let insertion = sorted_path_search(&records, &path, |record: &Record| {
-                record.path.as_str()
-            })
-            .expect_err("new shared-memory names must not already be present");
+            let insertion =
+                sorted_path_search(&records, &path, |record: &Record| record.path.as_str())
+                    .expect_err("new shared-memory names must not already be present");
             records.insert(insertion, Record { path });
         }
 
@@ -62,6 +61,14 @@ mod fxfs {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum FxfsError {
         Unavailable,
+    }
+
+    impl FxfsError {
+        pub fn as_str(self) -> &'static str {
+            match self {
+                FxfsError::Unavailable => "unavailable",
+            }
+        }
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -835,10 +842,7 @@ mod syscall_logic {
     #[test]
     fn high_resolution_sleep_spin_window_is_bounded_for_many_sleepers() {
         assert_eq!(linux_high_resolution_sleep_spin_threshold(10_000_000), 0);
-        assert_eq!(
-            linux_high_resolution_sleep_spin_threshold(u64::MAX),
-            0
-        );
+        assert_eq!(linux_high_resolution_sleep_spin_threshold(u64::MAX), 0);
     }
 
     #[test]
@@ -1441,9 +1445,7 @@ mod syscall_logic {
     #[test]
     fn sigaltstack_exec_helper_is_a_known_builtin() {
         assert_eq!(
-            linux_exec_builtin_exit_code(
-                "conformance/interfaces/sigaltstack/9-buildonly.test"
-            ),
+            linux_exec_builtin_exit_code("conformance/interfaces/sigaltstack/9-buildonly.test"),
             Some(0)
         );
         assert_eq!(
@@ -2914,6 +2916,10 @@ mod linux_task_logic {
             Some(141)
         );
         assert_eq!(
+            linux_sleep_relative_deadline_ticks_precise(100, 40_000_000, TICK_NANOS),
+            Some(104)
+        );
+        assert_eq!(
             linux_sleep_absolute_deadline_ticks(0, 1, TICK_NANOS),
             Some(1)
         );
@@ -3033,6 +3039,7 @@ mod linux_task_logic {
                 outcome: LinuxSleepOutcome::Completed,
                 relative: None,
                 absolute_realtime_nanoseconds: Some(TARGET_REALTIME_NANOS),
+                precision_deadline_nanoseconds: None,
             })
         );
     }
@@ -3052,6 +3059,7 @@ mod linux_task_logic {
                 outcome: LinuxSleepOutcome::Completed,
                 relative: None,
                 absolute_realtime_nanoseconds: None,
+                precision_deadline_nanoseconds: None,
             },
         ));
         assert!(!tasks.install_sleep(
@@ -3062,6 +3070,7 @@ mod linux_task_logic {
                 outcome: LinuxSleepOutcome::Interrupted,
                 relative: None,
                 absolute_realtime_nanoseconds: None,
+                precision_deadline_nanoseconds: None,
             },
         ));
         assert_eq!(LinuxSleepWait::waiting(45).relative, None);
@@ -3089,6 +3098,7 @@ mod linux_task_logic {
                 outcome: LinuxSleepOutcome::Completed,
                 relative: completed_wait.relative,
                 absolute_realtime_nanoseconds: None,
+                precision_deadline_nanoseconds: None,
             })
         );
         assert_eq!(tasks.take_sleep_outcome(child.tid, 8), None);
@@ -3126,6 +3136,7 @@ mod linux_task_logic {
                 outcome: LinuxSleepOutcome::Interrupted,
                 relative: interrupted_wait.relative,
                 absolute_realtime_nanoseconds: None,
+                precision_deadline_nanoseconds: None,
             })
         );
 
@@ -3145,6 +3156,33 @@ mod linux_task_logic {
 
         tasks.reset();
         assert_eq!(tasks.expire_sleeps(u64::MAX), [None, None, None]);
+    }
+
+    #[test]
+    fn precision_sleep_expiry_uses_nanosecond_deadline() {
+        let mut tasks = LinuxTaskTable::<2>::new();
+        tasks.register_root(7).unwrap();
+        let child = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
+        assert!(tasks.publish(child));
+
+        let mut wait = LinuxSleepWait::relative_waiting(104, 100, 40_000_000);
+        wait.precision_deadline_nanoseconds = Some(140_000_000);
+        assert_eq!(wait.precision_deadline_nanoseconds, Some(140_000_000));
+        assert!(tasks.install_sleep(child.tid, 8, wait));
+        assert!(tasks.block(child.tid, 8, LinuxBlockReason::Sleep));
+        assert_eq!(tasks.expire_one_sleep(104), None);
+        assert_eq!(tasks.expire_precision_sleep(139_999_999), None);
+        assert_eq!(
+            tasks.expire_precision_sleep(140_000_000),
+            Some((child.tid, 8, LinuxBlockReason::Sleep))
+        );
+        assert!(tasks.wake(child.tid, 8));
+        assert_eq!(
+            tasks
+                .take_sleep_outcome(child.tid, 8)
+                .map(|wait| wait.outcome),
+            Some(LinuxSleepOutcome::Completed)
+        );
     }
 
     #[test]
@@ -3177,10 +3215,16 @@ mod linux_task_logic {
         assert!(tasks.block(first.tid, 8, LinuxBlockReason::Sleep));
         assert!(tasks.block(second.tid, 9, LinuxBlockReason::Sleep));
 
-        assert_eq!(tasks.expire_one_sleep(50), Some((first.tid, 8, LinuxBlockReason::Sleep)));
+        assert_eq!(
+            tasks.expire_one_sleep(50),
+            Some((first.tid, 8, LinuxBlockReason::Sleep))
+        );
         assert_eq!(tasks.sleep_expiry_cursor, first.slot + 1);
         assert!(tasks.wake(first.tid, 8));
-        assert_eq!(tasks.expire_one_sleep(50), Some((second.tid, 9, LinuxBlockReason::Sleep)));
+        assert_eq!(
+            tasks.expire_one_sleep(50),
+            Some((second.tid, 9, LinuxBlockReason::Sleep))
+        );
         assert_eq!(tasks.sleep_expiry_cursor, second.slot + 1);
     }
 
@@ -7519,15 +7563,8 @@ mod linux_futex_logic {
         let now = 100;
         let tick_nanoseconds = 10_000_000;
 
-        let zero_relative = futex_deadline_from_timeout(
-            FutexCommand::Wait,
-            false,
-            now,
-            0,
-            0,
-            tick_nanoseconds,
-            0,
-        );
+        let zero_relative =
+            futex_deadline_from_timeout(FutexCommand::Wait, false, now, 0, 0, tick_nanoseconds, 0);
         assert_eq!(
             zero_relative,
             Some(FutexDeadline {
@@ -7594,12 +7631,7 @@ mod linux_futex_logic {
             Some(325)
         );
         assert_eq!(
-            futex_realtime_deadline_ticks(
-                1_699_999_999,
-                0,
-                1_700_000_000_000_000_000,
-                10_000_000,
-            ),
+            futex_realtime_deadline_ticks(1_699_999_999, 0, 1_700_000_000_000_000_000, 10_000_000,),
             Some(0)
         );
     }
@@ -8309,6 +8341,7 @@ mod lowlevel_logic {
         assert_eq!(timer_program_compare(1_000, 900, 1_100), 900);
         assert_eq!(timer_program_compare(1_000, 900, 950), 900);
         assert_eq!(timer_program_compare(1_000, 0, 950), 950);
+        assert_eq!(timer_program_compare(2_000, 1_500, 0), 1_500);
     }
 
     #[test]
@@ -9100,7 +9133,11 @@ mod aarch64_vm_logic {
         let mut address_space = Aarch64AddressSpaceModel::new(&mut allocator).expect("root");
         let start = 0x1000_0000;
         let pages = [0x9000, 0x9001, 0x9002];
-        let permissions = [(true, true, false), (true, false, false), (true, false, true)];
+        let permissions = [
+            (true, true, false),
+            (true, false, false),
+            (true, false, true),
+        ];
 
         address_space
             .map_user_pages_with_protection(&mut allocator, start, &pages, |index| {
@@ -9131,9 +9168,7 @@ mod aarch64_vm_logic {
             .expect("source mapping");
         let mut child = Aarch64AddressSpaceModel::new(&mut allocator).expect("child root");
 
-        child
-            .clone_mappings_from(&source)
-            .expect("clone mappings");
+        child.clone_mappings_from(&source).expect("clone mappings");
         assert_ne!(source.root_pfn(), child.root_pfn());
         assert_eq!(
             child.translate_user(&allocator, 0x1000_0000, true),
@@ -9171,10 +9206,7 @@ mod aarch64_vm_logic {
             source.translate_user(&allocator, 0x1000_0000, true),
             Some(0x9000_000)
         );
-        assert_eq!(
-            child.translate_user(&allocator, 0x1000_0000, true),
-            None
-        );
+        assert_eq!(child.translate_user(&allocator, 0x1000_0000, true), None);
     }
 
     #[test]

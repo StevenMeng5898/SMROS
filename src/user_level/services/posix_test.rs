@@ -57,8 +57,8 @@ const METADATA_KEYS: [&str; 9] = [
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PosixTestError {
-    FxfsPrepare,
-    FxfsRead,
+    FxfsPrepare(fxfs::FxfsError),
+    FxfsRead(fxfs::FxfsError),
     ManifestTooLarge,
     InvalidUtf8,
     InvalidLineEndings,
@@ -93,8 +93,8 @@ pub enum PosixTestError {
 impl PosixTestError {
     fn as_str(self) -> &'static str {
         match self {
-            PosixTestError::FxfsPrepare => "host-share-prepare",
-            PosixTestError::FxfsRead => "manifest-read",
+            PosixTestError::FxfsPrepare(_) => "host-share-prepare",
+            PosixTestError::FxfsRead(_) => "manifest-read",
             PosixTestError::ManifestTooLarge => "manifest-too-large",
             PosixTestError::InvalidUtf8 => "invalid-utf8",
             PosixTestError::InvalidLineEndings => "invalid-line-endings",
@@ -126,6 +126,21 @@ impl PosixTestError {
             PosixTestError::InfrastructureError => "infrastructure-error",
         }
     }
+}
+
+fn error_message(error: PosixTestError) -> String {
+    let mut message = String::from(error.as_str());
+    let detail = match error {
+        PosixTestError::FxfsPrepare(error) | PosixTestError::FxfsRead(error) => {
+            Some(error.as_str())
+        }
+        _ => None,
+    };
+    if let Some(detail) = detail {
+        message.push(':');
+        message.push_str(detail);
+    }
+    message
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -354,17 +369,16 @@ fn parse_filter_value(value: &str) -> Result<String, PosixTestError> {
 }
 
 pub fn load_manifest() -> Result<PosixManifest, PosixTestError> {
-    fxfs::ensure_host_share().map_err(|_| PosixTestError::FxfsPrepare)?;
-    let attrs = fxfs::attrs(POSIX_MANIFEST_PATH).map_err(|_| PosixTestError::FxfsRead)?;
+    fxfs::ensure_host_share().map_err(PosixTestError::FxfsPrepare)?;
+    let attrs = fxfs::attrs(POSIX_MANIFEST_PATH).map_err(PosixTestError::FxfsRead)?;
     if attrs.size > POSIX_MANIFEST_MAX_BYTES {
         return Err(PosixTestError::ManifestTooLarge);
     }
     let mut bytes = Vec::new();
     bytes.resize(attrs.size, 0u8);
-    let mut cursor =
-        fxfs::open_cursor(POSIX_MANIFEST_PATH).map_err(|_| PosixTestError::FxfsRead)?;
-    let read = fxfs::cursor_read_for_mmap(&mut cursor, &mut bytes)
-        .map_err(|_| PosixTestError::FxfsRead)?;
+    let mut cursor = fxfs::open_cursor(POSIX_MANIFEST_PATH).map_err(PosixTestError::FxfsRead)?;
+    let read =
+        fxfs::cursor_read_for_mmap(&mut cursor, &mut bytes).map_err(PosixTestError::FxfsRead)?;
     if read > POSIX_MANIFEST_MAX_BYTES {
         return Err(PosixTestError::ManifestTooLarge);
     }
@@ -488,7 +502,8 @@ pub fn start(filter: PosixFilter) -> Result<(), PosixTestError> {
     let manifest = match load_manifest() {
         Ok(manifest) => manifest,
         Err(error) => {
-            emit_unbound_infrastructure_error(error.as_str());
+            let message = error_message(error);
+            emit_unbound_infrastructure_error(message.as_str());
             return Err(error);
         }
     };
@@ -1786,6 +1801,18 @@ mod tests {
         assert_eq!(
             parse_manifest(tampered.as_bytes()),
             Err(PosixTestError::ManifestChecksumMismatch)
+        );
+    }
+
+    #[test]
+    fn fxfs_errors_are_included_in_manifest_failure_messages() {
+        assert_eq!(
+            error_message(PosixTestError::FxfsPrepare(fxfs::FxfsError::Unavailable)),
+            "host-share-prepare:unavailable"
+        );
+        assert_eq!(
+            error_message(PosixTestError::FxfsRead(fxfs::FxfsError::Unavailable)),
+            "manifest-read:unavailable"
         );
     }
 

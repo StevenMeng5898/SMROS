@@ -196,6 +196,7 @@ pub(crate) struct LinuxSleepWait {
     pub outcome: LinuxSleepOutcome,
     pub relative: Option<LinuxSleepRelative>,
     pub absolute_realtime_nanoseconds: Option<u64>,
+    pub precision_deadline_nanoseconds: Option<u64>,
 }
 
 impl LinuxSleepWait {
@@ -205,6 +206,7 @@ impl LinuxSleepWait {
             outcome: LinuxSleepOutcome::Waiting,
             relative: None,
             absolute_realtime_nanoseconds: None,
+            precision_deadline_nanoseconds: None,
         }
     }
 
@@ -221,6 +223,7 @@ impl LinuxSleepWait {
                 requested_nanoseconds,
             }),
             absolute_realtime_nanoseconds: None,
+            precision_deadline_nanoseconds: None,
         }
     }
 
@@ -233,6 +236,7 @@ impl LinuxSleepWait {
             outcome: LinuxSleepOutcome::Waiting,
             relative: None,
             absolute_realtime_nanoseconds: Some(realtime_nanoseconds),
+            precision_deadline_nanoseconds: None,
         }
     }
 }
@@ -857,6 +861,19 @@ pub(crate) fn linux_sleep_relative_deadline_ticks(
     tick_nanoseconds: u64,
 ) -> Option<u64> {
     linux_signal_timespec_to_ticks_ceil(now, seconds, nanoseconds, tick_nanoseconds)
+}
+
+pub(crate) fn linux_sleep_relative_deadline_ticks_precise(
+    now: u64,
+    requested_nanoseconds: u64,
+    tick_nanoseconds: u64,
+) -> Option<u64> {
+    if tick_nanoseconds == 0 {
+        return None;
+    }
+    let ticks = requested_nanoseconds / tick_nanoseconds;
+    let ticks = ticks.checked_add(u64::from(requested_nanoseconds % tick_nanoseconds != 0))?;
+    now.checked_add(ticks)
 }
 
 pub(crate) fn linux_sleep_absolute_deadline_ticks(
@@ -1967,6 +1984,7 @@ impl<const N: usize> LinuxTaskTable<N> {
             if task.state == LinuxTaskState::Blocked
                 && task.block_reason == LinuxBlockReason::Sleep
                 && wait.outcome == LinuxSleepOutcome::Waiting
+                && wait.precision_deadline_nanoseconds.is_none()
                 && wait.deadline <= now
             {
                 wait.outcome = LinuxSleepOutcome::Completed;
@@ -1994,12 +2012,40 @@ impl<const N: usize> LinuxTaskTable<N> {
             if task.state == LinuxTaskState::Blocked
                 && task.block_reason == LinuxBlockReason::Sleep
                 && wait.outcome == LinuxSleepOutcome::Waiting
+                && wait.precision_deadline_nanoseconds.is_none()
                 && wait.deadline <= now
             {
                 wait.outcome = LinuxSleepOutcome::Completed;
                 self.sleep_expiry_cursor = (index + 1) % N;
                 return Some((task.tid, task.scheduler_thread, task.block_reason));
             }
+        }
+        None
+    }
+
+    pub(crate) fn expire_precision_sleep(
+        &mut self,
+        now_nanoseconds: u64,
+    ) -> Option<(usize, usize, LinuxBlockReason)> {
+        if N == 0 {
+            return None;
+        }
+        for index in 0..N {
+            let task = self.tasks[index];
+            let Some(wait) = self.sleep_waits[index].as_mut() else {
+                continue;
+            };
+            if task.state != LinuxTaskState::Blocked
+                || task.block_reason != LinuxBlockReason::Sleep
+                || wait.outcome != LinuxSleepOutcome::Waiting
+                || !wait
+                    .precision_deadline_nanoseconds
+                    .is_some_and(|deadline| deadline <= now_nanoseconds)
+            {
+                continue;
+            }
+            wait.outcome = LinuxSleepOutcome::Completed;
+            return Some((task.tid, task.scheduler_thread, task.block_reason));
         }
         None
     }

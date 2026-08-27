@@ -19,12 +19,12 @@ include!("context_shared.rs");
 /// and kernel-owned threads as well.
 pub const MAX_THREADS: usize = 2048;
 
-/// Default thread stack size (160 KiB).
+/// Default thread stack size (256 KiB).
 ///
 /// POSIX launchers and fork/exec paths perform deep kernel-side work before
 /// returning to EL0. Keep enough headroom for those frames while bounding the
 /// memory cost of the many concurrent POSIX stress-test threads.
-pub const DEFAULT_STACK_SIZE: usize = 0x2_8000;
+pub const DEFAULT_STACK_SIZE: usize = 0x4_0000;
 
 /// Thread states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -452,7 +452,7 @@ impl ThreadStack {
     pub fn alloc(size: usize) -> Option<Self> {
         let layout = alloc::alloc::Layout::from_size_align(size, 16).ok()?;
 
-        // SAFETY: `size` is DEFAULT_STACK_SIZE (128 KiB) which is valid and 16-byte aligned.
+        // SAFETY: `size` is DEFAULT_STACK_SIZE (256 KiB) which is valid and 16-byte aligned.
         // The global allocator is our KernelAllocator bump allocator, which is safe to use.
         let ptr = unsafe { alloc::alloc::alloc(layout) };
 

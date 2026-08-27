@@ -26,6 +26,9 @@ static TICK_PERIOD: AtomicU64 = AtomicU64::new(0);
 /// The next periodic compare value. Precision sleepers may program an earlier
 /// compare, but they must never postpone this scheduler tick.
 static NEXT_PERIODIC_COMPARE: AtomicU64 = AtomicU64::new(0);
+/// The earliest outstanding precision compare. Periodic IRQs preserve this
+/// deadline until the precision waiter has actually expired.
+static PRECISION_COMPARE: AtomicU64 = AtomicU64::new(0);
 /// The compare value currently programmed in CNTP_CVAL_EL0. Keeping this
 /// separately from the periodic deadline prevents a later precision waiter
 /// from postponing an earlier one already armed in the hardware timer.
@@ -151,8 +154,20 @@ pub fn get_nanoseconds() -> u64 {
 pub fn arm_next_tick() {
     let period = TICK_PERIOD.load(Ordering::Relaxed);
     let current_count = read_cntpct_el0();
-    let compare_value = lowlevel_logic::timer_compare(current_count, period);
-    NEXT_PERIODIC_COMPARE.store(compare_value, Ordering::Release);
+    let periodic_compare = lowlevel_logic::timer_compare(current_count, period);
+    NEXT_PERIODIC_COMPARE.store(periodic_compare, Ordering::Release);
+    let precision_compare = PRECISION_COMPARE.load(Ordering::Acquire);
+    let precision_compare = if precision_compare > current_count {
+        precision_compare
+    } else {
+        PRECISION_COMPARE.store(0, Ordering::Release);
+        0
+    };
+    let compare_value = lowlevel_logic::timer_program_compare(
+        periodic_compare,
+        precision_compare,
+        0,
+    );
     PROGRAMMED_COMPARE.store(compare_value, Ordering::Release);
     write_cntp_cval_el0(compare_value);
 }
@@ -171,6 +186,13 @@ pub fn arm_at_nanoseconds(deadline: u64) {
     let target_count = target_count
         .min(u64::MAX as u128)
         .max((current_count as u128).saturating_add(1)) as u64;
+    let existing_precision = PRECISION_COMPARE.load(Ordering::Acquire);
+    let precision_compare = if existing_precision > current_count {
+        existing_precision.min(target_count)
+    } else {
+        target_count
+    };
+    PRECISION_COMPARE.store(precision_compare, Ordering::Release);
     let periodic_compare = NEXT_PERIODIC_COMPARE.load(Ordering::Acquire);
     let armed_compare = PROGRAMMED_COMPARE.load(Ordering::Acquire);
     let programmed_compare =

@@ -8453,7 +8453,7 @@ fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
             }
         }
         Err(PosixTestError::AlreadyRunning) => ctx.serial.write_str("posixtest: busy\n"),
-        Err(PosixTestError::FxfsPrepare | PosixTestError::FxfsRead) => {
+        Err(PosixTestError::FxfsPrepare(_) | PosixTestError::FxfsRead(_)) => {
             ctx.serial.write_str("posixtest: manifest unavailable\n");
         }
         Err(PosixTestError::EmptySelection) => {

@@ -2909,13 +2909,26 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertIn("int shm_open(const char *name, int oflag, mode_t mode)", source)
         self.assertIn("smros_shm_open_fn", source)
 
-    def test_smros_posix_compat_sched_yield_forces_realtime_handoff(self) -> None:
+    def test_smros_posix_compat_sched_yield_delegates_without_blocking(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
             encoding="utf-8"
         )
         self.assertIn("int sched_yield(void)", source)
+        self.assertIn("smros_sched_yield_target", source)
         self.assertIn('smros_resolve_symbol("sched_yield")', source)
-        self.assertIn("SMROS_SCHED_YIELD_HANDOFF_NSEC", source)
+        start = source.index("int sched_yield(void)")
+        end = source.index("\n}", start) + 2
+        self.assertNotIn("nanosleep", source[start:end])
+
+    def test_smros_posix_compat_sched_yield_does_not_block_the_thread(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("int sched_yield(void)")
+        end = source.index("\n}", start) + 2
+        body = source[start:end]
+        self.assertNotIn("nanosleep", body)
+        self.assertNotIn("SMROS_SCHED_YIELD_HANDOFF_NSEC", body)
 
     def test_smros_posix_compat_spin_trylock_is_single_attempt(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(

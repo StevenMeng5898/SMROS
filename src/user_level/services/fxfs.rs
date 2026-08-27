@@ -93,6 +93,24 @@ pub enum FxfsError {
     StorageCorrupt,
 }
 
+impl FxfsError {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FxfsError::NotMounted => "not-mounted",
+            FxfsError::InvalidPath => "invalid-path",
+            FxfsError::NotFound => "not-found",
+            FxfsError::AlreadyExists => "already-exists",
+            FxfsError::NoSpace => "no-space",
+            FxfsError::NotDirectory => "not-directory",
+            FxfsError::IsDirectory => "is-directory",
+            FxfsError::NotFile => "not-file",
+            FxfsError::InvalidOffset => "invalid-offset",
+            FxfsError::StorageUnavailable => "storage-unavailable",
+            FxfsError::StorageCorrupt => "storage-corrupt",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FxfsJournalOp {
     Mount,
@@ -684,9 +702,13 @@ impl FxfsState {
                     let result = (|| {
                         self.ensure_dir_tree("/dev/shm")?;
                         self.ensure_dir_tree(FXFS_SHARED_ROOT)?;
+                        let purged_ephemeral_shm = self.purge_ephemeral_shm()?;
                         self.install_default_configs()?;
                         self.install_host_share(false)?;
                         self.migrate_default_vm_configs()?;
+                        if purged_ephemeral_shm {
+                            self.persist();
+                        }
                         Ok(())
                     })();
                     self.resume_persist();
@@ -766,15 +788,18 @@ impl FxfsState {
                 if dirent.parent_id != parent_id {
                     continue;
                 }
-                if parent_id == FXFS_ROOT_OBJECT_ID && dirent.name == "shared" {
+                    if parent_id == FXFS_ROOT_OBJECT_ID && dirent.name == "shared" {
+                        if !fxfs_id_in_list(&persist_object_ids, dirent.object_id) {
+                            persist_object_ids.push(dirent.object_id);
+                        }
+                        continue;
+                    }
+                    if self.object_is_under_ephemeral_shm(dirent.object_id) {
+                        continue;
+                    }
                     if !fxfs_id_in_list(&persist_object_ids, dirent.object_id) {
                         persist_object_ids.push(dirent.object_id);
                     }
-                    continue;
-                }
-                if !fxfs_id_in_list(&persist_object_ids, dirent.object_id) {
-                    persist_object_ids.push(dirent.object_id);
-                }
             }
             index += 1;
         }
@@ -788,6 +813,7 @@ impl FxfsState {
             .filter(|dirent| {
                 fxfs_id_in_list(&persist_object_ids, dirent.parent_id)
                     && fxfs_id_in_list(&persist_object_ids, dirent.object_id)
+                    && !self.object_is_under_ephemeral_shm(dirent.object_id)
             })
             .count();
 
@@ -803,6 +829,7 @@ impl FxfsState {
         for dirent in &self.dirents {
             if !fxfs_id_in_list(&persist_object_ids, dirent.parent_id)
                 || !fxfs_id_in_list(&persist_object_ids, dirent.object_id)
+                || self.object_is_under_ephemeral_shm(dirent.object_id)
             {
                 continue;
             }
@@ -848,6 +875,7 @@ impl FxfsState {
         for dirent in &self.dirents {
             if !fxfs_id_in_list(&persist_object_ids, dirent.parent_id)
                 || !fxfs_id_in_list(&persist_object_ids, dirent.object_id)
+                || self.object_is_under_ephemeral_shm(dirent.object_id)
             {
                 continue;
             }
@@ -1311,6 +1339,63 @@ impl FxfsState {
             }
             current = dirent.parent_id;
         }
+    }
+
+    fn object_is_under_ephemeral_shm(&self, object_id: u64) -> bool {
+        let Some(dev_id) = self.child_object_id(FXFS_ROOT_OBJECT_ID, "dev") else {
+            return false;
+        };
+        let Some(shm_id) = self.child_object_id(dev_id, "shm") else {
+            return false;
+        };
+        if object_id == shm_id {
+            return false;
+        }
+
+        let mut current = object_id;
+        loop {
+            let Some(dirent) = self
+                .dirents
+                .iter()
+                .find(|entry| entry.object_id == current)
+            else {
+                return false;
+            };
+            if dirent.parent_id == shm_id {
+                return true;
+            }
+            if dirent.parent_id == FXFS_ROOT_OBJECT_ID {
+                return false;
+            }
+            current = dirent.parent_id;
+        }
+    }
+
+    fn purge_ephemeral_shm(&mut self) -> Result<bool, FxfsError> {
+        let Some(dev_id) = self.child_object_id(FXFS_ROOT_OBJECT_ID, "dev") else {
+            return Ok(false);
+        };
+        let Some(shm_id) = self.child_object_id(dev_id, "shm") else {
+            return Ok(false);
+        };
+        let mut paths = Vec::new();
+        for dirent in self
+            .dirents
+            .iter()
+            .filter(|entry| entry.parent_id == shm_id)
+        {
+            let mut path = String::from("/dev/shm/");
+            path.push_str(dirent.name.as_str());
+            paths.push(path);
+        }
+
+        let mut removed = false;
+        for path in paths {
+            let object_id = self.unlink_file(path.as_str())?;
+            self.release_unlinked_file(object_id)?;
+            removed = true;
+        }
+        Ok(removed)
     }
 
     fn parent_and_name<'a>(&self, path: &'a str) -> Result<(u64, &'a str), FxfsError> {
@@ -2278,7 +2363,11 @@ pub fn flush_persist() {
 }
 
 pub fn ensure_host_share() -> Result<(), FxfsError> {
-    state().install_host_share(false)
+    let state = state();
+    if !state.mounted {
+        state.mount()?;
+    }
+    state.install_host_share(false)
 }
 
 pub fn mount_host_share() -> Result<(), FxfsError> {

@@ -546,14 +546,19 @@ extern "C" fn timer_interrupt_handler() {
     kernel_lowlevel::timer::clear_interrupt();
 
     let now = kernel_lowlevel::timer::get_tick_count();
-    if current_cpu_id() == 0 && claim_timer_tick(now) {
-        crate::kernel_objects::scheduler::scheduler().on_timer_tick();
-        crate::syscall::expire_linux_real_timers_from_irq();
-        crate::syscall::linux_task::on_timer_tick(now);
-        crate::syscall::deliver_linux_posix_timer_signals_from_irq();
-        crate::syscall::linux_futex::on_timer_tick(now, now);
-        crate::syscall::linux_mqueue::on_timer_tick(now);
-        crate::kernel_objects::scheduler::scheduler().record_trace_sample(0);
+    if current_cpu_id() == 0 {
+        crate::syscall::linux_task::on_precision_timer(
+            kernel_lowlevel::timer::get_nanoseconds(),
+        );
+        if claim_timer_tick(now) {
+            crate::kernel_objects::scheduler::scheduler().on_timer_tick();
+            crate::syscall::expire_linux_real_timers_from_irq();
+            crate::syscall::linux_task::on_timer_tick(now);
+            crate::syscall::deliver_linux_posix_timer_signals_from_irq();
+            crate::syscall::linux_futex::on_timer_tick(now, now);
+            crate::syscall::linux_mqueue::on_timer_tick(now);
+            crate::kernel_objects::scheduler::scheduler().record_trace_sample(0);
+        }
     }
 
     // End of interrupt

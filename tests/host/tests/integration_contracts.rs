@@ -67,7 +67,9 @@ fn fxfs_shared_memory_mutations_defer_durable_persistence() {
         fxfs.contains("fn is_ephemeral_shm_path(path: &str) -> bool"),
         "FxFS must identify POSIX shared-memory paths as ephemeral"
     );
-    let write_start = fxfs.find("fn write_file(&mut self, path: &str").expect("write_file");
+    let write_start = fxfs
+        .find("fn write_file(&mut self, path: &str")
+        .expect("write_file");
     let write = braced_body(&fxfs[write_start..]);
     assert!(
         write.contains("!is_ephemeral_shm_path(path)"),
@@ -80,6 +82,38 @@ fn fxfs_shared_memory_mutations_defer_durable_persistence() {
     assert!(
         attrs.contains("!is_ephemeral_shm_path(path)"),
         "shared-memory attribute changes must not synchronously persist the full image"
+    );
+}
+
+#[test]
+fn fxfs_serialization_excludes_ephemeral_shared_memory_entries() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS implementation");
+
+    assert!(
+        fxfs.contains("fn object_is_under_ephemeral_shm(&self, object_id: u64) -> bool"),
+        "FxFS must identify shared-memory descendants while serializing"
+    );
+    let serialize_start = fxfs
+        .find("fn serialize_image(&self)")
+        .expect("FxFS image serializer");
+    let serialize = braced_body(&fxfs[serialize_start..]);
+    assert!(
+        serialize.contains("object_is_under_ephemeral_shm"),
+        "FxFS serialization must omit ephemeral shared-memory descendants"
+    );
+
+    let load_start = fxfs
+        .find("match self.load_from_block()")
+        .expect("FxFS block-backed load");
+    let load_success = fxfs[load_start..]
+        .find("Ok(()) => {")
+        .map(|start| braced_body(&fxfs[load_start + start..]))
+        .expect("FxFS block-backed load success path");
+    assert!(
+        load_success.contains("purge_ephemeral_shm"),
+        "loaded volumes must remove legacy shared-memory entries"
     );
 }
 
@@ -742,8 +776,7 @@ fn posix_clock_timer_cpu0_expiry_queues_process_signals() {
 #[test]
 fn scheduler_irq_work_is_owned_by_cpu0() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let main = std::fs::read_to_string(repository.join("src/main.rs"))
-        .expect("read kernel main");
+    let main = std::fs::read_to_string(repository.join("src/main.rs")).expect("read kernel main");
     let timer = braced_body(
         &main[main
             .find("extern \"C\" fn timer_interrupt_handler()")
@@ -770,8 +803,7 @@ fn scheduler_irq_work_is_owned_by_cpu0() {
 #[test]
 fn timer_interrupt_expires_real_timers_for_kernel_mode_ticks() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let main = std::fs::read_to_string(repository.join("src/main.rs"))
-        .expect("read kernel main");
+    let main = std::fs::read_to_string(repository.join("src/main.rs")).expect("read kernel main");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
         .expect("read syscall implementation");
 
@@ -1378,7 +1410,11 @@ fn linux_fork_maps_shared_cow_pages_without_write_permission() {
     let map_start = memory
         .find("super::linux_process::map_linux_fork_pages_with_protection(")
         .expect("fork mapping call");
-    let map_body = &memory[map_start..memory[map_start..].find("            );").expect("fork mapping closure") + map_start];
+    let map_body = &memory[map_start
+        ..memory[map_start..]
+            .find("            );")
+            .expect("fork mapping closure")
+            + map_start];
     assert!(
         map_body.contains("linux_page_protection_for_backing"),
         "fork child mappings must clear write permission for shared COW backings"
@@ -2798,10 +2834,9 @@ fn smros_posix_compat_runtime_tracks_aio_completion_state() {
 #[test]
 fn smros_private_condition_wait_pause_is_bounded_and_blocking() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let compat = std::fs::read_to_string(
-        repository.join("scripts/posix/runtime/smros_posix_compat.c"),
-    )
-    .expect("read POSIX compatibility runtime");
+    let compat =
+        std::fs::read_to_string(repository.join("scripts/posix/runtime/smros_posix_compat.c"))
+            .expect("read POSIX compatibility runtime");
     let start = compat
         .find("static void smros_pthread_cond_wait_pause(void) {")
         .expect("private condition wait pause helper");
@@ -3729,7 +3764,10 @@ fn scheduler_exposes_atomic_linux_task_transitions() {
 
     for (label, next_label) in [
         ("irq_handler_sp:", "// IRQ Handler (Current EL with SP0)"),
-        ("irq_handler:", "// Synchronous exception from a lower EL using AArch64."),
+        (
+            "irq_handler:",
+            "// Synchronous exception from a lower EL using AArch64.",
+        ),
     ] {
         let handler_start = boot.find(label).expect("current-EL timer handler");
         let body_start = boot[handler_start..]
@@ -3757,13 +3795,16 @@ fn scheduler_exposes_atomic_linux_task_transitions() {
 #[test]
 fn aarch64_context_switch_preserves_irq_mask_until_resume() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let context = std::fs::read_to_string(
-        repository.join("src/kernel_lowlevel/ARM64/context_switch.S"),
-    )
-    .expect("read AArch64 context switch assembly");
+    let context =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/context_switch.S"))
+            .expect("read AArch64 context switch assembly");
     let switch = context
         .find("context_switch:")
-        .and_then(|start| context[start..].find(".size context_switch").map(|end| start + end))
+        .and_then(|start| {
+            context[start..]
+                .find(".size context_switch")
+                .map(|end| start + end)
+        })
         .map(|end| &context[context.find("context_switch:").unwrap()..end])
         .expect("context switch body");
     let restored_pc = switch
@@ -5380,8 +5421,8 @@ fn aarch64_kernel_threads_reserve_fork_transaction_headroom() {
         .expect("numeric AArch64 default kernel stack value");
 
     assert!(
-        stack_size == 0x2_8000,
-        "AArch64 POSIX stress uses the bounded 160 KiB kernel stack; got {stack_size:#x}"
+        stack_size == 0x4_0000,
+        "AArch64 POSIX stress uses the bounded 256 KiB kernel stack; got {stack_size:#x}"
     );
 }
 
@@ -5618,7 +5659,9 @@ fn scheduler_handoffs_mask_interrupts_before_observing_global_state() {
         assert!(mask < state_read && state_read < picker);
     }
 
-    let yield_start = scheduler.find("pub fn yield_now()").expect("scheduler yield");
+    let yield_start = scheduler
+        .find("pub fn yield_now()")
+        .expect("scheduler yield");
     let yield_body = braced_body(&scheduler[yield_start..]);
     let mask = yield_body
         .find("crate::kernel_lowlevel::cpu::mask_interrupts()")
@@ -5827,9 +5870,7 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
     let interrupt_sleep = sleep
         .find("linux_task::interrupt_sleep(")
         .expect("sleep interruption publication");
-    let wake_blocked = sleep
-        .find("linux_task::wake_blocked(")
-        .expect("sleep wake");
+    let wake_blocked = sleep.find("linux_task::wake_blocked(").expect("sleep wake");
     let cancel_sleep = sleep
         .find("linux_task::cancel_sleep(")
         .expect("failed wake cleanup");
@@ -6175,12 +6216,12 @@ fn linux_scheduler_policy_and_priority_are_process_state_inherited_by_fork() {
     assert!(linux_task.contains("pub(crate) fn sched_param("));
     assert!(linux_task.contains("pub(crate) fn set_sched_param("));
     assert!(linux_task.contains("runtime.tasks.inherit_sched_param(reservation, current.0)"));
+    assert!(linux_task.contains("apply_linux_task_scheduler_priority"));
     assert!(linux_process
         .contains("apply_linux_resource_scheduler_priority(process.pid, scheduler_thread)"));
     assert!(scheduler.contains("pub fn create_suspended_thread("));
-    assert!(linux_process.contains(
-        "create_suspended_thread_on_cpu(linux_fork_child_entry, \"linux_process\", 0)"
-    ));
+    assert!(linux_process
+        .contains("create_suspended_thread_on_cpu(linux_fork_child_entry, \"linux_process\", 0)"));
     assert!(!linux_process
         .contains("create_suspended_thread(linux_fork_child_entry, \"linux_process\")"));
 
@@ -6232,8 +6273,12 @@ fn linux_scheduler_policy_and_priority_are_process_state_inherited_by_fork() {
     );
     assert!(setparam.contains("linux_read_user_sched_param(param)"));
     assert!(setparam.contains("linux_sched_target_task(pid)"));
-    assert!(setparam.contains("linux_sched_target_param(target).policy"));
+    assert!(setparam.contains("let current = linux_sched_target_param(target)"));
+    assert!(setparam.contains("policy, priority }"));
     assert!(setparam.contains("linux_sched_priority_valid(policy, priority)"));
+    assert!(
+        setparam.contains("linux_sched_write_permission_allowed(pid, target, current, requested)")
+    );
     assert!(setparam.contains("linux_set_sched_target_param("));
 
     let getscheduler = braced_body(
@@ -6293,8 +6338,9 @@ fn linux_scheduler_policy_and_priority_are_process_state_inherited_by_fork() {
             .find("pub fn sys_sched_setaffinity(")
             .expect("sched_setaffinity implementation")..],
     );
-    assert!(setaffinity.contains("linux_sched_target_pid(pid)"));
+    assert!(setaffinity.contains("linux_sched_target_task(pid)"));
     assert!(setaffinity.contains("linux_sched_affinity_mask_intersects_at("));
+    assert!(setaffinity.contains("set_thread_cpu_affinity("));
 
     let dispatch = braced_body(
         &syscall[syscall
@@ -6302,6 +6348,40 @@ fn linux_scheduler_policy_and_priority_are_process_state_inherited_by_fork() {
             .expect("Linux syscall dispatcher")..],
     );
     assert!(dispatch.contains("ARM64_SYS_SCHED_YIELD => sys_sched_yield()"));
+}
+
+#[test]
+fn linux_scheduler_allows_an_unprivileged_process_to_query_itself() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux scheduler syscall implementation");
+    let permission = braced_body(
+        &syscall[syscall
+            .find("fn linux_sched_permission_allowed(")
+            .expect("scheduler credential check")..],
+    );
+    let self_access = permission
+        .find("target.tgid == sender_pid")
+        .expect("self-process scheduler access");
+    let protected_root = permission
+        .find("target.tgid == linux_process::LINUX_ROOT_PID")
+        .expect("protected root-process scheduler access");
+
+    assert!(
+        self_access < protected_root,
+        "a process must retain scheduler access to itself after dropping credentials"
+    );
+
+    assert!(
+        syscall.contains("fn linux_sched_write_permission_allowed("),
+        "scheduler writes need a privilege-aware permission check"
+    );
+    let setparam = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_sched_setparam(")
+            .expect("sched_setparam implementation")..],
+    );
+    assert!(setparam.contains("linux_sched_write_permission_allowed("));
 }
 
 #[test]
@@ -6448,6 +6528,39 @@ fn fxfs_host_share_rechecks_partial_install_and_promotes_late_block_storage() {
     assert!(fxfs.contains("self.host_share_installation_complete()"));
     assert!(fxfs.contains("drivers::block_ready()"));
     assert!(fxfs.contains("self.block_backed = true;"));
+}
+
+#[test]
+fn fxfs_ensure_host_share_mounts_before_installing_seed() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read FxFS service");
+    let start = fxfs
+        .find("pub fn ensure_host_share() -> Result<(), FxfsError>")
+        .expect("public host-share preparation helper");
+    let body = braced_body(&fxfs[start..]);
+
+    let mount = body
+        .find("state.mount()")
+        .expect("host-share preparation must recover an unmounted FxFS state");
+    let install = body
+        .find("install_host_share(false)")
+        .expect("host-share preparation must install the embedded seed");
+    assert!(mount < install);
+    assert!(body.contains("if !state.mounted"));
+}
+
+#[test]
+fn posix_guest_preserves_fxfs_prepare_error_details_in_terminal_events() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let parser = std::fs::read_to_string(repository.join("src/user_level/services/posix_test.rs"))
+        .expect("read POSIX guest runner");
+
+    assert!(parser.contains("FxfsPrepare(fxfs::FxfsError)"));
+    assert!(parser.contains("map_err(PosixTestError::FxfsPrepare)"));
+    assert!(parser.contains("fn error_message(error: PosixTestError) -> String"));
+    assert!(parser.contains("message.push_str(detail)"));
+    assert!(parser.contains("emit_unbound_infrastructure_error(message.as_str())"));
 }
 
 #[test]
@@ -6940,8 +7053,8 @@ fn kernel_heap_covers_embedded_posix_share_and_thread_stress() {
 #[test]
 fn kernel_allocator_rejects_overlapping_free_blocks() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let main = std::fs::read_to_string(repository.join("src/main.rs"))
-        .expect("read kernel allocator");
+    let main =
+        std::fs::read_to_string(repository.join("src/main.rs")).expect("read kernel allocator");
     let insert = main
         .find("unsafe fn insert_free_block(")
         .expect("free-list insertion helper");
@@ -8590,8 +8703,10 @@ fn linux_fork_publishes_only_a_complete_child() {
     let fork_address_space = memory
         .find("Aarch64AddressSpace::new_for_fork(")
         .expect("fork address-space constructor");
-    let fork_address_space_call = &memory[fork_address_space..]
-        [..memory[fork_address_space..].find(")\n").expect("fork constructor end") + 1];
+    let fork_address_space_call = &memory[fork_address_space..][..memory[fork_address_space..]
+        .find(")\n")
+        .expect("fork constructor end")
+        + 1];
     assert!(fork_address_space_call.contains("&parent.address_space"));
     assert!(fork_address_space_call.contains("fork_table_allocation_failure"));
     assert!(memory.contains("LinuxForkFailurePoint::ChildRoot"));
@@ -9351,7 +9466,10 @@ fn linux_fork_resets_cpu_accounting_and_timer_inheritance() {
         "child_user_ticks: isize",
         "child_system_ticks: isize",
     ] {
-        assert!(resources.contains(field), "missing process CPU field {field}");
+        assert!(
+            resources.contains(field),
+            "missing process CPU field {field}"
+        );
     }
 
     let install = braced_body(
@@ -9380,7 +9498,9 @@ fn linux_fork_resets_cpu_accounting_and_timer_inheritance() {
     assert!(times.contains("resources.child_system_ticks"));
 
     assert!(syscall.contains("fn record_linux_child_cpu_usage("));
-    assert!(process.contains("super::record_linux_child_cpu_usage(process.parent_pid, process.pid)"));
+    assert!(
+        process.contains("super::record_linux_child_cpu_usage(process.parent_pid, process.pid)")
+    );
     assert!(process.contains("super::record_linux_child_cpu_usage(parent_pid, tgid)"));
 
     let timer_create = braced_body(
@@ -9391,7 +9511,8 @@ fn linux_fork_resets_cpu_accounting_and_timer_inheritance() {
     assert!(timer_create.contains("LINUX_SIGEV_THREAD_ID"));
     assert!(timer_create.contains("LINUX_SIGEV_THREAD"));
     assert!(timer_create.contains("event.sigev_value"));
-    assert!(timer_create.contains("register_linux_timer(pid, handle.0, timer_id, clock, signal, signal_value)"));
+    assert!(timer_create
+        .contains("register_linux_timer(pid, handle.0, timer_id, clock, signal, signal_value)"));
 
     let timer_irq = braced_body(
         &syscall[syscall
