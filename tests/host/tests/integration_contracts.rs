@@ -829,6 +829,24 @@ fn timer_interrupt_expires_real_timers_for_kernel_mode_ticks() {
 }
 
 #[test]
+fn linux_interval_timer_deadline_cannot_expire_in_the_current_tick_phase() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let setitimer = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_setitimer(")
+            .expect("setitimer implementation")..],
+    );
+    let compact: String = setitimer.split_whitespace().collect();
+
+    assert!(
+        compact.contains("saturating_add(ticks).saturating_add(1)"),
+        "ITIMER_REAL must include one phase-guard tick so a rounded interval cannot expire early"
+    );
+}
+
+#[test]
 fn aarch64_page_allocator_uses_detected_ram_after_kernel_end() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let memory = std::fs::read_to_string(repository.join("src/kernel_lowlevel/memory.rs"))

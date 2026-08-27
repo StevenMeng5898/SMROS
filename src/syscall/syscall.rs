@@ -9999,7 +9999,9 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> SysRes
             memory_state().set_linux_real_timer_deadline(pid, LINUX_TIMER_DISABLED);
         } else {
             let ticks = linux_timeval_to_ticks(timer.it_value).max(1);
-            let deadline = crate::kernel_lowlevel::timer::get_tick_count().saturating_add(ticks);
+            let deadline = crate::kernel_lowlevel::timer::get_tick_count()
+                .saturating_add(ticks)
+                .saturating_add(1);
             memory_state().set_linux_real_timer_deadline(pid, deadline);
         }
     }
