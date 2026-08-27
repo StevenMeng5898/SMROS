@@ -8,11 +8,10 @@ Suite manifest. The run used QEMU system emulation with one virtual CPU and a
 
 ```text
 PYTHONDONTWRITEBYTECODE=1 POSIX_QEMU_SMP=1 \
-  python3 -m scripts.posix.cli run-smros --qemu-memory 1024M --resume
+  python3 -m scripts.posix.cli run-smros --qemu-memory 1024M
 ```
 
-The campaign resumed from a checkpoint after an interactive interruption. The
-runner performed one controlled restart and retained the completed attempts.
+The campaign ran from a clean results directory and completed in one QEMU boot.
 
 ## Runtime Result
 
@@ -28,7 +27,7 @@ runner performed one controlled restart and retained the completed attempts.
 | Timeout | `0` |
 | Crash | `0` |
 | Launch errors | `0` |
-| QEMU restarts | `1` |
+| QEMU restarts | `0` |
 
 The structured result file is `target/posix/aarch64/smros-run/results.ndjson`.
 The run terminal record is complete and reports the same status counts.
@@ -47,6 +46,9 @@ The run terminal record is complete and reports the same status counts.
 The detailed generated artifacts are in `target/posix/aarch64/report/`:
 `summary.json`, `report.md`, `index.html`, `apis.csv`, `groups.csv`,
 `junit.xml`, and `events.ndjson`.
+
+The report was generated from the SMROS results only because no Linux-reference
+result directory was present. It does not claim comparative Linux evidence.
 
 ## Group Coverage
 
@@ -86,8 +88,13 @@ not counted as ordinary failures.
 
 - AArch64 release kernel build passed with `make build
   ARCH=aarch64-unknown-none QEMU_SMP=1 SMROS_LOGICAL_CPUS=1`.
-- Host integration contracts passed: `171` passed, `0` failed.
-- POSIX host-tool tests passed: `523` passed, `0` failed.
+- Host unit tests passed: `337` passed, `0` failed.
+- Host integration contracts passed: `172` passed, `0` failed.
+- POSIX host-tool tests passed: `524` passed, `0` failed.
+- The repaired `sem_wait/13-1.c` case passed on five consecutive cold boots;
+  the corrected `difftime/1-1.c` case passed on ten consecutive cold boots.
+- The report records zero aggregate resource deltas and zero resource leaks for
+  every measured resource category.
 - Coverity was unavailable: `cov-build`, `cov-analyze`, and
   `cov-format-errors` were not installed, so no Coverity findings or coverage
   are claimed.
@@ -97,9 +104,10 @@ not counted as ordinary failures.
 ## Provenance
 
 The manifest and staged POSIX runtime used by this campaign carry
-`smros_commit=6cdee1062780b92c69c9910eb66c165fe37a4a6e` and
-`manifest_sha256=d755ecc1d2c3ba90c3925ad8a06055b24236f761d8b3f1d340c618552e4db44b`.
-The local branch is currently at `9bff87a4846b72871c7d67fa402a0d481d352aec`
-with relevant uncommitted changes, so a future clean-stage run should be made
-after those changes are committed. This distinction is preserved here rather
-than silently relabeling the existing result.
+`smros_commit=f10011c1cdd9fc51fc8fc07c712537a5682e4ef7`,
+`manifest_sha256=2087164360d57724f778502d646938b393e43668ce507ee0ed2e79aa9227edca`,
+`build_results_sha256=b01d5e1876d9eece7bd346140fe5d1565d6497b63c776b24ebafb406e83e8c94`,
+and `patch_sha256=faf39d0193308e76e192a227222a62b37fb1167eff9f723d873ad5a90485ca93`.
+The terminal run record carries build ID
+`a3d7c8c592663243d4c2345b0dbd935acfa68542acb183cd0510a9274238798d`
+and run ID `9935f568ca6efe4ca68b16a796b7ed35`.
