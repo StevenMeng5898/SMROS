@@ -39,6 +39,12 @@ the pinned suite's `main`, with explicit `(void)argc` and `(void)argv` casts.
 The pinned `posixtest.h` does not define `PTS_ATTRIBUTE_UNUSED`; the maintained
 record-lock checks and result propagation are otherwise unchanged.
 
+`fix-difftime-sleep-boundary.patch` preserves the test's one-second minimum
+while accepting a larger result when `sleep(1)` resumes after an additional
+calendar-second boundary. POSIX does not require `sleep` to resume at exactly
+the requested duration, so rejecting `difftime` values above one second makes
+the original test depend on scheduler timing rather than `difftime` semantics.
+
 Updating the pinned commit requires reviewing and regenerating the future
 `stub-review.tsv` and `shell-review.tsv` classifications against the new
 source.

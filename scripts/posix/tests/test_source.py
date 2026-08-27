@@ -1133,6 +1133,23 @@ class RepositoryPatchTests(unittest.TestCase):
         self.assertIn("sem_post( &semsig2 )", patch)
         self.assertNotIn("PTS_PASS", patch)
 
+    def test_difftime_patch_accepts_scheduler_delay_without_weakening_minimum(self) -> None:
+        patch_root = REPOSITORY_ROOT / "third_party" / "posixtest" / "patches"
+        series_entries = [
+            line.strip()
+            for line in (patch_root / "series").read_text(encoding="ascii").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        patch_name = "fix-difftime-sleep-boundary.patch"
+        self.assertEqual(series_entries.count(patch_name), 1)
+
+        patch = (patch_root / patch_name).read_text(encoding="ascii")
+        self.assertIn("conformance/interfaces/difftime/1-1.c", patch)
+        self.assertIn("-\tif (time_diff != WAIT_DURATION) {", patch)
+        self.assertIn("+\tif (time_diff < WAIT_DURATION) {", patch)
+        self.assertNotIn("return PTS_PASS", patch)
+        self.assertNotIn("SMROS", patch)
+
 
 class DocumentationTests(unittest.TestCase):
     def test_readme_describes_default_and_overridden_work_directories(self) -> None:

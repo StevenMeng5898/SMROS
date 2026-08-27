@@ -1,0 +1,12 @@
+diff --git a/conformance/interfaces/difftime/1-1.c b/conformance/interfaces/difftime/1-1.c
+--- a/conformance/interfaces/difftime/1-1.c
++++ b/conformance/interfaces/difftime/1-1.c
+@@ -28,7 +28,7 @@ int main()
+ 	time1 = time(NULL);
+ 	time_diff = difftime(time1, time0);
+ 
+-	if (time_diff != WAIT_DURATION) {
++	if (time_diff < WAIT_DURATION) {
+ 		perror("Test FAILED: difftime did not return the correct value\n");
+ 		return PTS_FAIL;
+ 	}
