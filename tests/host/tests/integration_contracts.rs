@@ -2872,6 +2872,34 @@ fn smros_private_condition_wait_pause_is_bounded_and_blocking() {
 }
 
 #[test]
+fn smros_private_condition_broadcast_completes_the_polling_handoff() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let compat =
+        std::fs::read_to_string(repository.join("scripts/posix/runtime/smros_posix_compat.c"))
+            .expect("read POSIX compatibility runtime");
+    let wake_start = compat
+        .find("static int smros_pthread_private_cond_wake(")
+        .expect("private condition wake helper");
+    let wake = braced_body(&compat[wake_start..]);
+    let handoff_start = compat
+        .find("static void smros_pthread_private_cond_complete_handoff(")
+        .expect("private condition broadcast handoff helper");
+    let handoff = braced_body(&compat[handoff_start..]);
+    let leave_start = compat
+        .find("static void smros_pthread_private_cond_blocked_leave(")
+        .expect("private condition blocked-leave helper");
+    let leave = braced_body(&compat[leave_start..]);
+
+    assert!(wake.contains("if (broadcast)"));
+    assert!(wake.contains("smros_pthread_private_cond_complete_handoff(record);"));
+    assert!(wake.contains("record->wakeups = waiters;"));
+    assert!(handoff.contains("attempt < 8"));
+    assert!(handoff.contains("smros_pthread_cond_wait_pause();"));
+    assert!(leave.contains("if (record->wakeups > record->waiters)"));
+    assert!(leave.contains("record->wakeups = record->waiters;"));
+}
+
+#[test]
 fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let launcher = std::fs::read_to_string(repository.join("src/user_level/services/run_elf.rs"))

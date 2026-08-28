@@ -3430,7 +3430,26 @@ static void smros_pthread_private_cond_blocked_leave(
     if (record->waiters > 0) {
         record->waiters--;
     }
+    if (record->wakeups > record->waiters) {
+        record->wakeups = record->waiters;
+    }
     smros_unlock_pthread_cond_records();
+}
+
+static void smros_pthread_private_cond_complete_handoff(
+    smros_pthread_cond_record *record
+) {
+    /* Waiters poll user-space wake tokens every 50 ms.  Bound the handoff so
+     * a stalled waiter cannot make pthread_cond_broadcast() hang. */
+    for (unsigned int attempt = 0; attempt < 8; ++attempt) {
+        smros_lock_pthread_cond_records();
+        int pending = record->waiters > 0 && record->wakeups > 0;
+        smros_unlock_pthread_cond_records();
+        if (!pending) {
+            break;
+        }
+        smros_pthread_cond_wait_pause();
+    }
 }
 
 static void smros_pthread_private_cond_user_leave(
@@ -3585,9 +3604,15 @@ static int smros_pthread_private_cond_wake(
         smros_unlock_pthread_cond_records();
         return 0;
     }
-    record->wakeups += broadcast ? waiters : 1;
+    if (broadcast) {
+        record->wakeups = waiters;
+    } else if (record->wakeups < waiters) {
+        record->wakeups++;
+    }
     smros_unlock_pthread_cond_records();
-    if (!broadcast) {
+    if (broadcast) {
+        smros_pthread_private_cond_complete_handoff(record);
+    } else {
         /*
          * Give a waiter a short opportunity to consume the token so rapid
          * signal cascades retain one-token pacing.  The handoff is bounded:
