@@ -44,6 +44,10 @@ pub(crate) fn virtio_driver_features(accepted: u64, version_1: u64, modern: bool
     smros_driver_virtio_driver_features_body!(accepted, version_1, modern)
 }
 
+pub(crate) fn virtio_completion_timed_out(now: u64, deadline: u64) -> bool {
+    smros_driver_virtio_completion_timed_out_body!(now, deadline)
+}
+
 pub(crate) fn virtio_net_accepted_features(
     features: u64,
     mac: u64,

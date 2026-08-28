@@ -32,7 +32,7 @@ const VIRTIO_BLK_T_OUT: u32 = 1;
 const VIRTIO_BLK_T_FLUSH: u32 = 4;
 const VIRTIO_BLK_S_OK: u8 = 0;
 const VIRTIO_QUEUE_SIZE: u16 = 8;
-const VIRTIO_TIMEOUT_SPINS: usize = 10_000_000;
+const VIRTIO_COMPLETION_TIMEOUT_NANOS: u64 = 5_000_000_000;
 
 const REG_MAGIC_VALUE: usize = 0x000;
 const REG_VERSION: usize = 0x004;
@@ -723,7 +723,9 @@ impl QemuVirtBlockDriver {
             self.notify_queue(0);
 
             let target = self.last_used_idx.wrapping_add(1);
-            for _ in 0..VIRTIO_TIMEOUT_SPINS {
+            let completion_deadline = crate::kernel_lowlevel::timer::get_nanoseconds()
+                .saturating_add(VIRTIO_COMPLETION_TIMEOUT_NANOS);
+            loop {
                 memory_barrier();
                 if core::ptr::read_volatile(&raw const VIRTIO_QUEUE.used.idx) == target {
                     self.last_used_idx = target;
@@ -735,6 +737,12 @@ impl QemuVirtBlockDriver {
                     } else {
                         Err(UserDriverError::Io)
                     };
+                }
+                if driver_logic::virtio_completion_timed_out(
+                    crate::kernel_lowlevel::timer::get_nanoseconds(),
+                    completion_deadline,
+                ) {
+                    break;
                 }
             }
         }

@@ -53,6 +53,12 @@ macro_rules! smros_driver_virtio_driver_features_body {
     }};
 }
 
+macro_rules! smros_driver_virtio_completion_timed_out_body {
+    ($now:expr, $deadline:expr) => {{
+        $now >= $deadline
+    }};
+}
+
 macro_rules! smros_driver_virtio_net_accepted_features_body {
     ($features:expr, $mac:expr, $status:expr, $version_1:expr, $modern:expr) => {{
         let mut accepted = 0u64;

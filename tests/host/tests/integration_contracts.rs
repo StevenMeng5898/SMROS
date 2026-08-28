@@ -6732,6 +6732,23 @@ fn linux_sync_syscalls_force_fxfs_persistence() {
 }
 
 #[test]
+fn virtio_block_completion_wait_uses_a_monotonic_deadline() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let block = std::fs::read_to_string(repository.join("src/user_level/drivers/block.rs"))
+        .expect("read VirtIO block driver");
+
+    assert!(block.contains("const VIRTIO_COMPLETION_TIMEOUT_NANOS: u64 = 5_000_000_000;"));
+    let submit_start = block
+        .find("fn submit(\n")
+        .expect("VirtIO block submission path");
+    let submit = braced_body(&block[submit_start..]);
+    assert!(submit.contains("let completion_deadline ="));
+    assert!(submit.contains("get_nanoseconds()"));
+    assert!(submit.contains("driver_logic::virtio_completion_timed_out("));
+    assert!(!submit.contains("for _ in 0..VIRTIO_TIMEOUT_SPINS"));
+}
+
+#[test]
 fn aarch64_directory_open_flags_match_staged_glibc() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
