@@ -6421,6 +6421,10 @@ fn posix_scheduler_optionals_have_runtime_contracts() {
         repository.join("scripts/posix/runtime/include/sched.h"),
     )
     .expect("read POSIX scheduler compatibility header");
+    let unistd = std::fs::read_to_string(
+        repository.join("scripts/posix/runtime/include/unistd.h"),
+    )
+    .expect("read POSIX feature compatibility header");
     assert!(runtime.contains("int pthread_attr_setscope("));
     assert!(runtime.contains("int pthread_attr_getscope("));
     assert!(runtime.contains("int sched_setparam("));
@@ -6434,6 +6438,9 @@ fn posix_scheduler_optionals_have_runtime_contracts() {
     assert!(header.contains("struct sched_param"));
     assert!(header.contains("sched_ss_low_priority"));
     assert!(header.contains("SS_REPL_MAX"));
+    assert!(unistd.contains("#include_next <unistd.h>"));
+    assert!(unistd.contains("#define _POSIX_SPORADIC_SERVER 200809L"));
+    assert!(unistd.contains("#define _POSIX_THREAD_SPORADIC_SERVER 200809L"));
 }
 
 #[test]
