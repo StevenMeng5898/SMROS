@@ -858,6 +858,7 @@ mod syscall_logic {
         assert_eq!(linux_sched_priority_bounds(1), Some((1, 99)));
         assert_eq!(linux_sched_priority_bounds(2), Some((1, 99)));
         assert_eq!(linux_sched_priority_bounds(3), None);
+        assert_eq!(linux_sched_priority_bounds(4), Some((1, 99)));
 
         assert!(linux_sched_priority_valid(0, 0));
         assert!(!linux_sched_priority_valid(0, 1));
@@ -870,6 +871,7 @@ mod syscall_logic {
         assert_eq!(linux_sched_kernel_priority(1, 1), Some(65));
         assert_eq!(linux_sched_kernel_priority(1, 50), Some(114));
         assert_eq!(linux_sched_kernel_priority(2, 99), Some(163));
+        assert_eq!(linux_sched_kernel_priority(4, 1), Some(65));
         assert_eq!(linux_sched_kernel_priority(0, 1), None);
         assert_eq!(linux_sched_kernel_priority(1, 0), None);
     }

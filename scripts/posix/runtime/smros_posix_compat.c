@@ -84,6 +84,15 @@ typedef int (*smros_shm_open_fn)(const char *, int, mode_t);
 typedef int (*smros_open_fn)(const char *, int, ...);
 typedef int (*smros_close_fn)(int);
 typedef int (*smros_sched_yield_fn)(void);
+typedef int (*smros_sched_setparam_fn)(pid_t, const struct sched_param *);
+typedef int (*smros_sched_getparam_fn)(pid_t, struct sched_param *);
+typedef int (*smros_sched_setscheduler_fn)(
+    pid_t,
+    int,
+    const struct sched_param *
+);
+typedef int (*smros_sched_getscheduler_fn)(pid_t);
+typedef int (*smros_sched_priority_fn)(int);
 typedef int (*smros_nanosleep_fn)(const struct timespec *, struct timespec *);
 typedef int (*smros_clock_nanosleep_fn)(
     clockid_t,
@@ -123,6 +132,8 @@ typedef int (*smros_pthread_setcanceltype_fn)(int, int *);
 typedef void (*smros_pthread_testcancel_fn)(void);
 typedef void (*smros_pthread_exit_fn)(void *);
 typedef int (*smros_pthread_attr_init_fn)(pthread_attr_t *);
+typedef int (*smros_pthread_attr_setscope_fn)(pthread_attr_t *, int);
+typedef int (*smros_pthread_attr_getscope_fn)(const pthread_attr_t *, int *);
 typedef int (*smros_pthread_attr_setstacksize_fn)(pthread_attr_t *, size_t);
 typedef int (*smros_pthread_attr_setschedparam_fn)(
     pthread_attr_t *,
@@ -265,6 +276,7 @@ typedef struct {
 typedef struct {
     int active;
     pthread_attr_t *attr;
+    int scope;
     int policy;
     struct sched_param param;
 } smros_pthread_attr_sched_record;
@@ -273,6 +285,7 @@ typedef struct {
     int active;
     int destroyed;
     pthread_attr_t *attr;
+    int scope;
 } smros_pthread_attr_lifecycle_record;
 
 typedef struct {
@@ -296,6 +309,7 @@ typedef struct {
 typedef struct {
     void *(*start_routine)(void *);
     void *arg;
+    int scope;
     int policy;
     struct sched_param param;
 } smros_pthread_start_context;
@@ -303,6 +317,7 @@ typedef struct {
 typedef struct {
     int active;
     pthread_t thread;
+    int scope;
     int policy;
     struct sched_param param;
 } smros_pthread_sched_record;
@@ -478,6 +493,14 @@ static char smros_fast_mmap_page[4096] __attribute__((aligned(4096)));
 static smros_sched_yield_fn smros_sched_yield_target;
 static smros_nanosleep_fn smros_nanosleep_target;
 static smros_clock_nanosleep_fn smros_clock_nanosleep_target;
+static int smros_process_sched_policy = SCHED_OTHER;
+static struct sched_param smros_process_sched_param = {
+    .sched_priority = 0,
+    .sched_ss_low_priority = 0,
+    .sched_ss_repl_period = { .tv_sec = 1, .tv_nsec = 0 },
+    .sched_ss_init_budget = { .tv_sec = 1, .tv_nsec = 0 },
+    .sched_ss_max_repl = 1,
+};
 
 static void __attribute__((unused)) smros_pthread_diag(const char *message) {
     if (getenv("SMROS_PTHREAD_DIAG") != NULL) {
@@ -752,6 +775,17 @@ static void smros_forget_pthread_cancel_type(pthread_t thread);
 static int smros_current_pthread_cancel_requested(void);
 static void smros_forget_pthread_joined(pthread_t thread);
 static int smros_realtime_sched_priority_valid(int priority);
+static int smros_sched_sporadic_param_valid(
+    const struct sched_param *param,
+    int allow_default
+);
+static int smros_sched_metadata_valid(int policy, int priority);
+static int smros_pthread_attr_scope_value(const pthread_attr_t *attr);
+static void smros_update_process_sched_records(
+    int policy,
+    const struct sched_param *param
+);
+static void smros_sched_param_defaults(struct sched_param *param);
 static smros_pthread_attr_lifecycle_record *
 smros_find_pthread_attr_lifecycle_record(pthread_attr_t *attr);
 static smros_pthread_attr_lifecycle_record *
@@ -792,7 +826,8 @@ static void smros_forget_pthread_sched_record(pthread_t thread);
 static int smros_remember_pthread_sched_record(
     pthread_t thread,
     int policy,
-    const struct sched_param *param
+    const struct sched_param *param,
+    int scope
 );
 
 static int smros_open_with_optional_mode(
@@ -1138,7 +1173,8 @@ static void *smros_pthread_start_trampoline(void *arg) {
     (void)smros_remember_pthread_sched_record(
         pthread_self(),
         context->policy,
-        &context->param
+        &context->param,
+        context->scope
     );
     pthread_cleanup_push(smros_pthread_start_cleanup, context);
     result = context->start_routine(context->arg);
@@ -1162,8 +1198,67 @@ static int smros_sched_metadata_valid(int policy, int priority) {
     if (policy == SCHED_OTHER) {
         return priority == 0;
     }
-    return (policy == SCHED_FIFO || policy == SCHED_RR) &&
+    if (policy == SCHED_SPORADIC && priority == 0) {
+        return 1;
+    }
+    return (policy == SCHED_FIFO || policy == SCHED_RR ||
+            policy == SCHED_SPORADIC) &&
         smros_realtime_sched_priority_valid(priority);
+}
+
+static int smros_timespec_nonnegative(const struct timespec *value) {
+    return value != NULL && value->tv_sec >= 0 && value->tv_nsec >= 0 &&
+        value->tv_nsec < SMROS_NSEC_PER_SEC;
+}
+
+static int smros_sched_param_extension_zero(
+    const struct sched_param *param
+) {
+    return param != NULL &&
+        param->sched_ss_low_priority == 0 &&
+        param->sched_ss_repl_period.tv_sec == 0 &&
+        param->sched_ss_repl_period.tv_nsec == 0 &&
+        param->sched_ss_init_budget.tv_sec == 0 &&
+        param->sched_ss_init_budget.tv_nsec == 0 &&
+        param->sched_ss_max_repl == 0;
+}
+
+/* The optional sporadic-server fields are part of the target ABI.  A zeroed
+ * extension is accepted as the default server configuration when switching
+ * policies, while any explicitly supplied non-default value is validated. */
+static int smros_sched_sporadic_param_valid(
+    const struct sched_param *param,
+    int allow_default
+) {
+    if (param == NULL) {
+        return 0;
+    }
+    if (
+        allow_default &&
+        smros_sched_param_extension_zero(param)
+    ) {
+        return param->sched_priority >= 0 && param->sched_priority <= 99;
+    }
+    if (!smros_realtime_sched_priority_valid(param->sched_priority)) {
+        return 0;
+    }
+    if (!smros_realtime_sched_priority_valid(param->sched_ss_low_priority)) {
+        return 0;
+    }
+    if (
+        !smros_timespec_nonnegative(&param->sched_ss_repl_period) ||
+        !smros_timespec_nonnegative(&param->sched_ss_init_budget)
+    ) {
+        return 0;
+    }
+    if (
+        param->sched_ss_repl_period.tv_sec < param->sched_ss_init_budget.tv_sec ||
+        (param->sched_ss_repl_period.tv_sec == param->sched_ss_init_budget.tv_sec &&
+         param->sched_ss_repl_period.tv_nsec < param->sched_ss_init_budget.tv_nsec)
+    ) {
+        return 0;
+    }
+    return param->sched_ss_max_repl >= 1 && param->sched_ss_max_repl <= SS_REPL_MAX;
 }
 
 static smros_pthread_sched_record *smros_find_pthread_sched_record(
@@ -1178,12 +1273,41 @@ static smros_pthread_sched_record *smros_find_pthread_sched_record(
     return NULL;
 }
 
+static int smros_pthread_attr_scope_value(const pthread_attr_t *attr) {
+    if (attr == NULL) {
+        return PTHREAD_SCOPE_SYSTEM;
+    }
+    smros_pthread_attr_lifecycle_record *record =
+        smros_find_pthread_attr_lifecycle_record((pthread_attr_t *)attr);
+    return record == NULL ? PTHREAD_SCOPE_SYSTEM : record->scope;
+}
+
+static void smros_update_process_sched_records(
+    int policy,
+    const struct sched_param *param
+) {
+    if (param == NULL) {
+        return;
+    }
+    smros_process_sched_policy = policy;
+    smros_process_sched_param = *param;
+    for (size_t index = 0; index < SMROS_PTHREAD_SCHED_RECORDS; index++) {
+        smros_pthread_sched_record *record =
+            &smros_pthread_sched_records[index];
+        if (record->active && record->scope == PTHREAD_SCOPE_PROCESS) {
+            record->policy = policy;
+            record->param = *param;
+        }
+    }
+}
+
 static void smros_forget_pthread_sched_record(pthread_t thread) {
     smros_pthread_sched_record *record =
         smros_find_pthread_sched_record(thread);
     if (record != NULL) {
         record->active = 0;
         memset(&record->thread, 0, sizeof(record->thread));
+        record->scope = PTHREAD_SCOPE_SYSTEM;
         record->policy = SCHED_OTHER;
         record->param.sched_priority = 0;
     }
@@ -1380,7 +1504,8 @@ static void smros_forget_pthread_rwlock(pthread_rwlock_t *rwlock) {
 static int smros_remember_pthread_sched_record(
     pthread_t thread,
     int policy,
-    const struct sched_param *param
+    const struct sched_param *param,
+    int scope
 ) {
     smros_pthread_sched_record *record =
         smros_find_pthread_sched_record(thread);
@@ -1396,6 +1521,7 @@ static int smros_remember_pthread_sched_record(
         return EAGAIN;
     }
     record->thread = thread;
+    record->scope = scope;
     record->policy = policy;
     record->param = *param;
     __sync_synchronize();
@@ -1409,7 +1535,7 @@ static void smros_pthread_attr_sched_values(
     struct sched_param *param
 ) {
     *policy = SCHED_OTHER;
-    param->sched_priority = 0;
+    memset(param, 0, sizeof(*param));
     if (attr == NULL) {
         return;
     }
@@ -1453,15 +1579,20 @@ static void smros_pthread_attr_sched_values(
     }
     if (inherit == PTHREAD_INHERIT_SCHED) {
         int parent_policy = SCHED_OTHER;
-        struct sched_param parent_param = {
-            .sched_priority = 0,
-        };
+        struct sched_param parent_param = { .sched_priority = 0 };
+        if (smros_pthread_attr_scope_value(attr) == PTHREAD_SCOPE_PROCESS) {
+            parent_policy = smros_process_sched_policy;
+            parent_param = smros_process_sched_param;
+        }
         smros_pthread_sched_record *parent_record =
             smros_find_pthread_sched_record(pthread_self());
-        if (parent_record != NULL) {
+        if (
+            parent_record != NULL &&
+            smros_pthread_attr_scope_value(attr) != PTHREAD_SCOPE_PROCESS
+        ) {
             parent_policy = parent_record->policy;
             parent_param = parent_record->param;
-        } else {
+        } else if (smros_pthread_attr_scope_value(attr) != PTHREAD_SCOPE_PROCESS) {
             smros_pthread_getschedparam_fn get_parent =
                 (smros_pthread_getschedparam_fn)smros_resolve_symbol(
                     "pthread_getschedparam"
@@ -1574,8 +1705,10 @@ int pthread_create(
         &context->policy,
         &context->param
     );
+    context->scope = smros_pthread_attr_scope_value(effective_attr);
     int context_policy = context->policy;
     struct sched_param context_param = context->param;
+    int context_scope = context->scope;
     int result =
         target(thread, effective_attr, smros_pthread_start_trampoline, context);
     smros_pthread_diag_state(
@@ -1599,7 +1732,8 @@ int pthread_create(
         (void)smros_remember_pthread_sched_record(
             *thread,
             context_policy,
-            &context_param
+            &context_param,
+            context_scope
         );
     }
     if (result != 0) {
@@ -2333,6 +2467,7 @@ static int smros_remember_pthread_attr_lifecycle_record(pthread_attr_t *attr) {
     }
     record->attr = attr;
     record->destroyed = 0;
+    record->scope = PTHREAD_SCOPE_SYSTEM;
     __sync_synchronize();
     record->active = 1;
     return 0;
@@ -2774,10 +2909,12 @@ static int smros_remember_pthread_attr_sched_record(
     }
     record->active = 1;
     record->attr = attr;
+    record->scope = smros_pthread_attr_scope_value(attr);
     if (
         record->policy != SCHED_OTHER &&
         record->policy != SCHED_FIFO &&
-        record->policy != SCHED_RR
+        record->policy != SCHED_RR &&
+        record->policy != SCHED_SPORADIC
     ) {
         record->policy = SCHED_OTHER;
     }
@@ -2792,6 +2929,9 @@ static int smros_replay_pthread_attr_sched_record(
     smros_pthread_attr_sched_record *record =
         smros_find_pthread_attr_sched_record(attr);
     if (record == NULL) {
+        return 0;
+    }
+    if (record->policy == SCHED_SPORADIC) {
         return 0;
     }
     int result = target(attr, &record->param);
@@ -2825,10 +2965,69 @@ int pthread_attr_init(pthread_attr_t *attr) {
     return result;
 }
 
+int pthread_attr_setscope(pthread_attr_t *attr, int scope) {
+    if (
+        smros_pointer_is_null(attr) ||
+        (scope != PTHREAD_SCOPE_SYSTEM && scope != PTHREAD_SCOPE_PROCESS)
+    ) {
+        return EINVAL;
+    }
+    smros_pthread_attr_setscope_fn target =
+        (smros_pthread_attr_setscope_fn)smros_resolve_symbol(
+            "pthread_attr_setscope"
+        );
+    if (target == NULL) {
+        return ENOSYS;
+    }
+    int result = target(attr, scope);
+    if (result == 0 || (scope == PTHREAD_SCOPE_PROCESS && result == ENOTSUP)) {
+        smros_pthread_attr_lifecycle_record *record =
+            smros_find_pthread_attr_lifecycle_record(attr);
+        if (record == NULL) {
+            if (smros_find_destroyed_pthread_attr_record(attr) != NULL) {
+                return EINVAL;
+            }
+            int remember = smros_remember_pthread_attr_lifecycle_record(attr);
+            if (remember != 0) {
+                return remember;
+            }
+            record = smros_find_pthread_attr_lifecycle_record(attr);
+        }
+        if (record != NULL) {
+            record->scope = scope;
+        }
+        return 0;
+    }
+    return result;
+}
+
+int pthread_attr_getscope(const pthread_attr_t *attr, int *scope) {
+    if (smros_pointer_is_null(attr) || smros_pointer_is_null(scope)) {
+        return EINVAL;
+    }
+    smros_pthread_attr_lifecycle_record *record =
+        smros_find_pthread_attr_lifecycle_record((pthread_attr_t *)attr);
+    if (record != NULL) {
+        *scope = record->scope;
+        return 0;
+    }
+    smros_pthread_attr_getscope_fn target =
+        (smros_pthread_attr_getscope_fn)smros_resolve_symbol(
+            "pthread_attr_getscope"
+        );
+    if (target == NULL) {
+        return ENOSYS;
+    }
+    return target(attr, scope);
+}
+
 int pthread_attr_setschedparam(
     pthread_attr_t *attr,
     const struct sched_param *param
 ) {
+    if (smros_pointer_is_null(attr) || smros_pointer_is_null(param)) {
+        return EINVAL;
+    }
     smros_pthread_attr_setschedparam_fn target =
         (smros_pthread_attr_setschedparam_fn)smros_resolve_symbol(
             "pthread_attr_setschedparam"
@@ -2841,21 +3040,34 @@ int pthread_attr_setschedparam(
         (void)smros_remember_pthread_attr_sched_record(attr, param);
         return 0;
     }
+    smros_pthread_attr_sched_record *record =
+        smros_find_pthread_attr_sched_record(attr);
     if (
         result == EINVAL &&
-        smros_realtime_sched_priority_valid(param->sched_priority)
+        record != NULL &&
+        record->policy == SCHED_SPORADIC &&
+        smros_sched_sporadic_param_valid(param, 1)
     ) {
+        return smros_remember_pthread_attr_sched_record(attr, param);
+    }
+    if (result == EINVAL && smros_realtime_sched_priority_valid(param->sched_priority)) {
         return smros_remember_pthread_attr_sched_record(attr, param);
     }
     return result;
 }
 
 int pthread_attr_setschedpolicy(pthread_attr_t *attr, int policy) {
+    if (smros_pointer_is_null(attr)) {
+        return EINVAL;
+    }
     if (policy < 0) {
         (void)attr;
         return ENOTSUP;
     }
-    if (policy != SCHED_OTHER && policy != SCHED_FIFO && policy != SCHED_RR) {
+    if (
+        policy != SCHED_OTHER && policy != SCHED_FIFO &&
+        policy != SCHED_RR && policy != SCHED_SPORADIC
+    ) {
         return EINVAL;
     }
 
@@ -2968,7 +3180,11 @@ int pthread_attr_getschedparam(
     if (target == NULL) {
         return ENOSYS;
     }
-    return target(attr, param);
+    int result = target(attr, param);
+    if (result == 0) {
+        smros_sched_param_defaults(param);
+    }
+    return result;
 }
 
 int pthread_attr_destroy(pthread_attr_t *attr) {
@@ -2987,11 +3203,225 @@ int pthread_attr_destroy(pthread_attr_t *attr) {
     return result;
 }
 
+static void smros_sched_param_defaults(struct sched_param *param) {
+    if (param == NULL) {
+        return;
+    }
+    param->sched_ss_low_priority = 1;
+    param->sched_ss_repl_period.tv_sec = 1;
+    param->sched_ss_repl_period.tv_nsec = 0;
+    param->sched_ss_init_budget.tv_sec = 1;
+    param->sched_ss_init_budget.tv_nsec = 0;
+    param->sched_ss_max_repl = 1;
+}
+
+static struct sched_param smros_sched_param_for_storage(
+    int policy,
+    const struct sched_param *param
+) {
+    struct sched_param stored = *param;
+    if (
+        policy != SCHED_SPORADIC ||
+        smros_sched_param_extension_zero(param)
+    ) {
+        smros_sched_param_defaults(&stored);
+        stored.sched_priority = param->sched_priority;
+    }
+    return stored;
+}
+
+static int smros_sched_param_is_current_process(pid_t pid) {
+    return pid == 0 || pid == getpid();
+}
+
+int sched_getscheduler(pid_t pid) {
+    smros_sched_getscheduler_fn target =
+        (smros_sched_getscheduler_fn)smros_resolve_symbol(
+            "sched_getscheduler"
+        );
+    if (target == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    int result = target(pid);
+    if (result >= 0 && smros_sched_param_is_current_process(pid)) {
+        smros_process_sched_policy = result;
+    }
+    return result;
+}
+
+int sched_get_priority_max(int policy) {
+    if (policy == SCHED_SPORADIC) {
+        return 99;
+    }
+    smros_sched_priority_fn target =
+        (smros_sched_priority_fn)smros_resolve_symbol(
+            "sched_get_priority_max"
+        );
+    if (target == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return target(policy);
+}
+
+int sched_get_priority_min(int policy) {
+    if (policy == SCHED_SPORADIC) {
+        return 1;
+    }
+    smros_sched_priority_fn target =
+        (smros_sched_priority_fn)smros_resolve_symbol(
+            "sched_get_priority_min"
+        );
+    if (target == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return target(policy);
+}
+
+int sched_getparam(pid_t pid, struct sched_param *param) {
+    smros_sched_getparam_fn target =
+        (smros_sched_getparam_fn)smros_resolve_symbol("sched_getparam");
+    if (target == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    int result = target(pid, param);
+    if (result != 0 || param == NULL || !smros_sched_param_is_current_process(pid)) {
+        return result;
+    }
+    int policy = smros_process_sched_policy;
+    smros_sched_getscheduler_fn get_policy =
+        (smros_sched_getscheduler_fn)smros_resolve_symbol(
+            "sched_getscheduler"
+        );
+    if (get_policy != NULL) {
+        int observed = get_policy(pid);
+        if (observed >= 0) {
+            policy = observed;
+            smros_process_sched_policy = observed;
+        }
+    }
+    if (policy == SCHED_SPORADIC) {
+        param->sched_priority = smros_process_sched_param.sched_priority;
+        param->sched_ss_low_priority =
+            smros_process_sched_param.sched_ss_low_priority;
+        param->sched_ss_repl_period =
+            smros_process_sched_param.sched_ss_repl_period;
+        param->sched_ss_init_budget =
+            smros_process_sched_param.sched_ss_init_budget;
+        param->sched_ss_max_repl = smros_process_sched_param.sched_ss_max_repl;
+    } else {
+        smros_process_sched_param.sched_priority = param->sched_priority;
+        smros_sched_param_defaults(&smros_process_sched_param);
+        param->sched_ss_low_priority =
+            smros_process_sched_param.sched_ss_low_priority;
+        param->sched_ss_repl_period =
+            smros_process_sched_param.sched_ss_repl_period;
+        param->sched_ss_init_budget =
+            smros_process_sched_param.sched_ss_init_budget;
+        param->sched_ss_max_repl = smros_process_sched_param.sched_ss_max_repl;
+    }
+    return result;
+}
+
+int sched_setparam(pid_t pid, const struct sched_param *param) {
+    if (param == NULL) {
+        smros_sched_setparam_fn null_target =
+            (smros_sched_setparam_fn)smros_resolve_symbol("sched_setparam");
+        if (null_target == NULL) {
+            errno = ENOSYS;
+            return -1;
+        }
+        return null_target(pid, param);
+    }
+    smros_sched_getscheduler_fn get_policy =
+        (smros_sched_getscheduler_fn)smros_resolve_symbol(
+            "sched_getscheduler"
+        );
+    int policy = smros_process_sched_policy;
+    if (get_policy != NULL) {
+        int observed = get_policy(pid);
+        if (observed >= 0) {
+            policy = observed;
+        }
+    }
+    if (!smros_sched_metadata_valid(policy, param->sched_priority)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (
+        policy == SCHED_SPORADIC &&
+        !smros_sched_sporadic_param_valid(param, 1)
+    ) {
+        errno = EINVAL;
+        return -1;
+    }
+    smros_sched_setparam_fn target =
+        (smros_sched_setparam_fn)smros_resolve_symbol("sched_setparam");
+    if (target == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    struct sched_param kernel_param = *param;
+    if (policy == SCHED_SPORADIC && kernel_param.sched_priority == 0) {
+        kernel_param.sched_priority = 1;
+    }
+    int result = target(pid, &kernel_param);
+    if (result == 0 && smros_sched_param_is_current_process(pid)) {
+        struct sched_param stored =
+            smros_sched_param_for_storage(policy, param);
+        smros_update_process_sched_records(policy, &stored);
+    }
+    return result;
+}
+
+int sched_setscheduler(
+    pid_t pid,
+    int policy,
+    const struct sched_param *param
+) {
+    if (!smros_sched_metadata_valid(policy, param == NULL ? -1 : param->sched_priority)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (
+        policy == SCHED_SPORADIC &&
+        !smros_sched_sporadic_param_valid(param, 1)
+    ) {
+        errno = EINVAL;
+        return -1;
+    }
+    smros_sched_setscheduler_fn target =
+        (smros_sched_setscheduler_fn)smros_resolve_symbol(
+            "sched_setscheduler"
+        );
+    if (target == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    struct sched_param kernel_param = *param;
+    if (policy == SCHED_SPORADIC && kernel_param.sched_priority == 0) {
+        kernel_param.sched_priority = 1;
+    }
+    int result = target(pid, policy, &kernel_param);
+    if (result == 0 && smros_sched_param_is_current_process(pid)) {
+        struct sched_param stored =
+            smros_sched_param_for_storage(policy, param);
+        smros_update_process_sched_records(policy, &stored);
+    }
+    return result;
+}
+
 int pthread_getschedparam(
     pthread_t thread,
     int *policy,
     struct sched_param *param
 ) {
+    if (smros_pointer_is_null(policy) || smros_pointer_is_null(param)) {
+        return EINVAL;
+    }
     smros_pthread_sched_record *record =
         smros_find_pthread_sched_record(thread);
     if (record != NULL) {
@@ -3001,6 +3431,7 @@ int pthread_getschedparam(
     }
     *policy = SCHED_OTHER;
     param->sched_priority = 0;
+    smros_sched_param_defaults(param);
     return 0;
 }
 
@@ -3009,10 +3440,24 @@ int pthread_setschedparam(
     int policy,
     const struct sched_param *param
 ) {
-    if (!smros_sched_metadata_valid(policy, param->sched_priority)) {
+    if (smros_pointer_is_null(param) || !smros_sched_metadata_valid(policy, param->sched_priority)) {
         return EINVAL;
     }
-    int result = smros_remember_pthread_sched_record(thread, policy, param);
+    if (
+        policy == SCHED_SPORADIC &&
+        !smros_sched_sporadic_param_valid(param, 1)
+    ) {
+        return EINVAL;
+    }
+    smros_pthread_sched_record *record =
+        smros_find_pthread_sched_record(thread);
+    int scope = record == NULL ? PTHREAD_SCOPE_SYSTEM : record->scope;
+    int result = smros_remember_pthread_sched_record(
+        thread,
+        policy,
+        param,
+        scope
+    );
     return result;
 }
 
@@ -3023,10 +3468,20 @@ int pthread_setschedprio(pthread_t thread, int priority) {
     if (!smros_sched_metadata_valid(policy, priority)) {
         return EINVAL;
     }
-    struct sched_param param = {
-        .sched_priority = priority,
-    };
-    int result = smros_remember_pthread_sched_record(thread, policy, &param);
+    struct sched_param param = record == NULL ?
+        (struct sched_param){ .sched_priority = priority } : record->param;
+    param.sched_priority = priority;
+    if (policy == SCHED_SPORADIC && smros_sched_param_extension_zero(&param)) {
+        smros_sched_param_defaults(&param);
+        param.sched_priority = priority;
+    }
+    int scope = record == NULL ? PTHREAD_SCOPE_SYSTEM : record->scope;
+    int result = smros_remember_pthread_sched_record(
+        thread,
+        policy,
+        &param,
+        scope
+    );
     return result;
 }
 

@@ -6411,6 +6411,32 @@ fn linux_scheduler_policy_and_priority_are_process_state_inherited_by_fork() {
 }
 
 #[test]
+fn posix_scheduler_optionals_have_runtime_contracts() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let runtime = std::fs::read_to_string(
+        repository.join("scripts/posix/runtime/smros_posix_compat.c"),
+    )
+    .expect("read POSIX compatibility runtime");
+    let header = std::fs::read_to_string(
+        repository.join("scripts/posix/runtime/include/sched.h"),
+    )
+    .expect("read POSIX scheduler compatibility header");
+    assert!(runtime.contains("int pthread_attr_setscope("));
+    assert!(runtime.contains("int pthread_attr_getscope("));
+    assert!(runtime.contains("int sched_setparam("));
+    assert!(runtime.contains("int sched_setscheduler("));
+    assert!(runtime.contains("int sched_getparam("));
+    assert!(runtime.contains("int sched_get_priority_max("));
+    assert!(runtime.contains("smros_sched_sporadic_param_valid"));
+    assert!(runtime.contains("SCHED_SPORADIC"));
+    assert!(runtime.contains("sched_ss_repl_period"));
+    assert!(header.contains("_POSIX_SPORADIC_SERVER"));
+    assert!(header.contains("struct sched_param"));
+    assert!(header.contains("sched_ss_low_priority"));
+    assert!(header.contains("SS_REPL_MAX"));
+}
+
+#[test]
 fn linux_scheduler_allows_an_unprivileged_process_to_query_itself() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))

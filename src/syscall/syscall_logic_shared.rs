@@ -193,7 +193,7 @@ pub(crate) const fn linux_high_resolution_sleep_spin_threshold(timer_tick_nanos:
 pub(crate) const fn linux_sched_priority_bounds(policy: usize) -> Option<(i32, i32)> {
     match policy {
         0 => Some((0, 0)),
-        1 | 2 => Some((1, 99)),
+        1 | 2 | 4 => Some((1, 99)),
         _ => None,
     }
 }
@@ -211,7 +211,7 @@ pub(crate) const fn linux_sched_kernel_priority(policy: usize, priority: i32) ->
     }
     match policy {
         0 => Some(16),
-        1 | 2 => Some((64 + priority) as u8),
+        1 | 2 | 4 => Some((64 + priority) as u8),
         _ => None,
     }
 }

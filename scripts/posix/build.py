@@ -99,6 +99,9 @@ POSIX_COMPAT_PRELOAD_NAME = "libsmros-posix-compat.so"
 POSIX_COMPAT_PRELOAD_SOURCE = (
     _REPOSITORY_ROOT / "scripts" / "posix" / "runtime" / "smros_posix_compat.c"
 )
+POSIX_COMPAT_INCLUDE_DIRECTORY = (
+    _REPOSITORY_ROOT / "scripts" / "posix" / "runtime" / "include"
+)
 POSIX_COMPAT_PRELOAD_VERSION_SCRIPT = (
     _REPOSITORY_ROOT / "scripts" / "posix" / "runtime" / "smros_posix_compat.map"
 )
@@ -150,6 +153,8 @@ def compile_command(
         "-D_XOPEN_SOURCE=600",
         "-pthread",
         "-I",
+        str(POSIX_COMPAT_INCLUDE_DIRECTORY),
+        "-I",
         str(include_directory),
         "-c",
         str(source),
@@ -183,6 +188,8 @@ def posix_compat_preload_command(
         "-Wall",
         "-Wextra",
         "-Werror",
+        "-I",
+        str(POSIX_COMPAT_INCLUDE_DIRECTORY),
         str(source),
         "-o",
         str(output),
@@ -2711,16 +2718,16 @@ def _validate_build_argv(
     object_suffix = f"{test.test_id}.o"
     executable_suffix = f"{test.test_id}.test"
     if stage_name == "compile":
-        valid = (
+        prefix = [
+            "aarch64-linux-gnu-gcc",
+            "-std=gnu99",
+            "-D_POSIX_C_SOURCE=200112L",
+            "-D_XOPEN_SOURCE=600",
+            "-pthread",
+        ]
+        legacy = (
             len(argv) == 11
-            and argv[:5]
-            == [
-                "aarch64-linux-gnu-gcc",
-                "-std=gnu99",
-                "-D_POSIX_C_SOURCE=200112L",
-                "-D_XOPEN_SOURCE=600",
-                "-pthread",
-            ]
+            and argv[:5] == prefix
             and argv[5] == "-I"
             and Path(argv[6]).name == "include"
             and argv[7] == "-c"
@@ -2728,17 +2735,37 @@ def _validate_build_argv(
             and argv[9] == "-o"
             and _path_ends_with(argv[10], object_suffix)
         )
+        compatibility = (
+            len(argv) == 13
+            and argv[:5] == prefix
+            and argv[5] == "-I"
+            and Path(argv[6]).name == "include"
+            and argv[7] == "-I"
+            and Path(argv[8]).name == "include"
+            and argv[9] == "-c"
+            and _path_ends_with(argv[10], test.source)
+            and argv[11] == "-o"
+            and _path_ends_with(argv[12], object_suffix)
+        )
+        valid = legacy or compatibility
         if not valid:
             raise ValueError(f"invalid target compiler argv for {test.test_id}")
         if strict_paths:
             expected_source = f"target/posix/src/{revision}/{test.source}"
             expected_object = f"target/posix/aarch64/obj/{object_suffix}"
             expected_include = f"target/posix/src/{revision}/include"
-            if [argv[6], argv[8], argv[10]] != [
-                expected_include,
-                expected_source,
-                expected_object,
-            ]:
+            if legacy:
+                actual_paths = [argv[6], argv[8], argv[10]]
+                expected_paths = [expected_include, expected_source, expected_object]
+            else:
+                actual_paths = [argv[6], argv[8], argv[10], argv[12]]
+                expected_paths = [
+                    str(POSIX_COMPAT_INCLUDE_DIRECTORY),
+                    expected_include,
+                    expected_source,
+                    expected_object,
+                ]
+            if actual_paths != expected_paths:
                 raise ValueError(f"invalid production compiler path for {test.test_id}")
         return
     if stage_name == "nm":
