@@ -3385,6 +3385,20 @@ fn posix_test_shell_command_is_strictly_wired_to_the_runner() {
 }
 
 #[test]
+fn posix_guest_suite_completion_reports_shell_readiness() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let runner = std::fs::read_to_string(repository.join("src/user_level/services/posix_test.rs"))
+        .expect("read POSIX runner");
+    let finish_start = runner.find("fn finish_suite()").expect("suite finisher");
+    let finish = braced_body(&runner[finish_start..]);
+    let suite_end = finish.find("emit_suite_end(state)").expect("suite end event");
+    let completion = finish
+        .find("posixtest: completed")
+        .expect("completion readiness line");
+    assert!(suite_end < completion);
+}
+
+#[test]
 fn shell_yields_before_waiting_for_uart_activity() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let shell = std::fs::read_to_string(repository.join("src/user_level/services/user_shell.rs"))

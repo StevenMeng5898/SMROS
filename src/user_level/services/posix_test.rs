@@ -756,6 +756,9 @@ fn finish_suite() {
             let snapshot = state.coverage.snapshot();
             if snapshot.tests_completed == state.selected.len() {
                 emit_suite_end(state);
+                let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+                serial.init();
+                serial.write_str("posixtest: completed\n");
             } else {
                 emit_infrastructure_error(state, "coverage-completion-invariant");
             }
