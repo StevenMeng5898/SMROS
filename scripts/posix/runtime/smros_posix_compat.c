@@ -1239,7 +1239,13 @@ static int smros_sched_sporadic_param_valid(
     ) {
         return param->sched_priority >= 0 && param->sched_priority <= 99;
     }
-    if (!smros_realtime_sched_priority_valid(param->sched_priority)) {
+    /* SCHED_OTHER reports priority zero.  That value is also the inherited
+     * default when a caller switches to SCHED_SPORADIC, so validate it like a
+     * default while still rejecting every other out-of-range priority. */
+    if (
+        param->sched_priority != 0 &&
+        !smros_realtime_sched_priority_valid(param->sched_priority)
+    ) {
         return 0;
     }
     if (!smros_realtime_sched_priority_valid(param->sched_ss_low_priority)) {
@@ -3352,7 +3358,9 @@ int sched_setparam(pid_t pid, const struct sched_param *param) {
         return -1;
     }
     if (
-        policy == SCHED_SPORADIC &&
+        (policy == SCHED_SPORADIC ||
+         (policy == SCHED_OTHER &&
+          !smros_sched_param_extension_zero(param))) &&
         !smros_sched_sporadic_param_valid(param, 1)
     ) {
         errno = EINVAL;

@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -981,6 +982,182 @@ class SharedModelTests(unittest.TestCase):
 
 
 class RepositoryPatchTests(unittest.TestCase):
+    def test_sporadic_runtime_validates_default_priority_and_extensions(self) -> None:
+        runtime_source = REPOSITORY_ROOT / "scripts/posix/runtime/smros_posix_compat.c"
+        runtime_map = REPOSITORY_ROOT / "scripts/posix/runtime/smros_posix_compat.map"
+        include_directory = REPOSITORY_ROOT / "scripts/posix/runtime/include"
+        compiler = shutil.which("gcc")
+        if compiler is None:
+            self.skipTest("gcc is required for the scheduler runtime smoke test")
+
+        mock_source = r'''
+#include <sched.h>
+
+static int mock_policy = SCHED_OTHER;
+static int mock_priority;
+
+int sched_getscheduler(pid_t pid) {
+    (void)pid;
+    return mock_policy;
+}
+
+int sched_getparam(pid_t pid, struct sched_param *param) {
+    (void)pid;
+    if (param == 0) {
+        return -1;
+    }
+    param->sched_priority = mock_priority;
+    return 0;
+}
+
+int sched_setscheduler(
+    pid_t pid,
+    int policy,
+    const struct sched_param *param
+) {
+    (void)pid;
+    if (param == 0) {
+        return -1;
+    }
+    mock_policy = policy;
+    mock_priority = param->sched_priority;
+    return 0;
+}
+
+int sched_setparam(pid_t pid, const struct sched_param *param) {
+    (void)pid;
+    if (param == 0) {
+        return -1;
+    }
+    mock_priority = param->sched_priority;
+    return 0;
+}
+'''
+        harness_source = r'''
+#include <errno.h>
+#include <sched.h>
+
+static int expect_einval(struct sched_param *param) {
+    errno = 0;
+    return sched_setparam(0, param) == -1 && errno == EINVAL;
+}
+
+int main(void) {
+    struct sched_param param;
+
+    if (sched_getparam(0, &param) != 0) {
+        return 1;
+    }
+    param.sched_ss_repl_period.tv_sec = 1;
+    param.sched_ss_init_budget.tv_sec = 2;
+    if (!expect_einval(&param)) {
+        return 2;
+    }
+
+    if (sched_getparam(0, &param) != 0) {
+        return 3;
+    }
+    param.sched_ss_max_repl = 0;
+    if (!expect_einval(&param)) {
+        return 4;
+    }
+
+    if (sched_getparam(0, &param) != 0) {
+        return 5;
+    }
+    if (sched_setscheduler(0, SCHED_SPORADIC, &param) != 0) {
+        return 6;
+    }
+    return 0;
+}
+'''
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            mock_path = temporary / "mock.c"
+            harness_path = temporary / "harness.c"
+            mock_library = temporary / "libmock-scheduler.so"
+            compat_library = temporary / "libsmros-posix-compat.so"
+            executable = temporary / "scheduler-smoke"
+            mock_path.write_text(mock_source, encoding="ascii")
+            harness_path.write_text(harness_source, encoding="ascii")
+
+            subprocess.run(
+                [
+                    compiler,
+                    "-std=gnu99",
+                    "-fPIC",
+                    "-shared",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-I",
+                    str(include_directory),
+                    str(mock_path),
+                    "-o",
+                    str(mock_library),
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    compiler,
+                    "-std=gnu99",
+                    "-fPIC",
+                    "-shared",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-I",
+                    str(include_directory),
+                    str(runtime_source),
+                    "-o",
+                    str(compat_library),
+                    "-Wl,--version-script," + str(runtime_map),
+                    "-ldl",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    compiler,
+                    "-std=gnu99",
+                    "-I",
+                    str(include_directory),
+                    str(harness_path),
+                    "-L",
+                    str(temporary),
+                    "-Wl,--no-as-needed",
+                    "-Wl,-rpath," + str(temporary),
+                    "-l:libsmros-posix-compat.so",
+                    "-l:libmock-scheduler.so",
+                    "-o",
+                    str(executable),
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            result = subprocess.run(
+                [str(executable)],
+                check=False,
+                env={key: value for key, value in os.environ.items() if key != "LD_PRELOAD"},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"scheduler smoke test failed: {result.stdout}{result.stderr}",
+            )
+
     def test_fork_11_patch_ports_ltp_record_lock_assertion_without_weakening(
         self,
     ) -> None:
