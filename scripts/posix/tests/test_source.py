@@ -1119,8 +1119,6 @@ int main(void) {
                     "-Wall",
                     "-Wextra",
                     "-Werror",
-                    "-I",
-                    str(include_directory),
                     str(runtime_source),
                     "-o",
                     str(compat_library),

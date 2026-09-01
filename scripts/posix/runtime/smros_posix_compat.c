@@ -8,9 +8,9 @@
 #include <fcntl.h>
 #include <mqueue.h>
 #include <nl_types.h>
-#include <pthread.h>
 #include <pwd.h>
-#include <sched.h>
+#include "include/sched.h"
+#include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
 #include <stdio.h>

@@ -188,8 +188,6 @@ def posix_compat_preload_command(
         "-Wall",
         "-Wextra",
         "-Werror",
-        "-I",
-        str(POSIX_COMPAT_INCLUDE_DIRECTORY),
         str(source),
         "-o",
         str(output),

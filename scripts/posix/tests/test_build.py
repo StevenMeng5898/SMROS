@@ -697,7 +697,11 @@ class CampaignTests(unittest.TestCase):
                 "replacement source\n",
             )
             compile_row = next(row for row in rows if row["stage"] == "compile")
-            self.assertEqual(compile_row["argv"][8], str(source))
+            compile_argv = compile_row["argv"]
+            self.assertEqual(
+                compile_argv[compile_argv.index("-c") + 1],
+                str(source),
+            )
 
     def test_fork_message_catalog_test_stages_generated_support_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2887,6 +2891,32 @@ with tempfile.TemporaryDirectory() as temporary:
             "target/libsmros-posix-compat.so",
         )
 
+    def test_smros_posix_compat_compiles_without_include_path_override(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "libsmros-posix-compat.so"
+            subprocess.run(
+                [
+                    "cc",
+                    "-std=gnu99",
+                    "-fPIC",
+                    "-shared",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    str(source),
+                    "-o",
+                    str(output),
+                    "-Wl,-soname,libsmros-posix-compat.so",
+                    "-ldl",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertTrue(output.is_file())
+
     def test_smros_posix_compat_syncs_fake_uid_with_smros_kernel(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
             encoding="utf-8"
@@ -4183,6 +4213,7 @@ int main(void) {
             )
             subprocess.run(
                 ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 "-I", str(build_module.POSIX_COMPAT_INCLUDE_DIRECTORY),
                  str(probe), "-o", str(binary), "-pthread"],
                 check=True,
             )
@@ -4447,6 +4478,7 @@ int main(void) {
             )
             subprocess.run(
                 ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 "-I", str(build_module.POSIX_COMPAT_INCLUDE_DIRECTORY),
                  str(probe), "-o", str(binary), "-pthread"],
                 check=True,
             )
@@ -6981,7 +7013,8 @@ unsigned int sleep(unsigned int seconds) {
             path = stage / "build-results.ndjson"
             rows = [json.loads(line) for line in path.read_text().splitlines()]
             compile_row = next(row for row in rows if row["stage"] == "compile")
-            compile_row["argv"][8] = f"/tmp/untrusted/{test.source}"
+            compile_argv = compile_row["argv"]
+            compile_argv[compile_argv.index("-c") + 1] = f"/tmp/untrusted/{test.source}"
             path.write_text(
                 "".join(
                     json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
