@@ -1050,14 +1050,15 @@ int main(void) {
     }
     param.sched_ss_repl_period.tv_sec = 1;
     param.sched_ss_init_budget.tv_sec = 2;
-    if (!expect_einval(&param)) {
+    if (sched_setparam(1234, &param) != 0) {
         return 2;
     }
 
     if (sched_getparam(0, &param) != 0) {
         return 3;
     }
-    param.sched_ss_max_repl = 0;
+    param.sched_ss_repl_period.tv_sec = 1;
+    param.sched_ss_init_budget.tv_sec = 2;
     if (!expect_einval(&param)) {
         return 4;
     }
@@ -1065,8 +1066,16 @@ int main(void) {
     if (sched_getparam(0, &param) != 0) {
         return 5;
     }
-    if (sched_setscheduler(0, SCHED_SPORADIC, &param) != 0) {
+    param.sched_ss_max_repl = 0;
+    if (!expect_einval(&param)) {
         return 6;
+    }
+
+    if (sched_getparam(0, &param) != 0) {
+        return 7;
+    }
+    if (sched_setscheduler(0, SCHED_SPORADIC, &param) != 0) {
+        return 8;
     }
     return 0;
 }

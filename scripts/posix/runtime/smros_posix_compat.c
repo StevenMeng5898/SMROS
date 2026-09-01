@@ -3359,7 +3359,7 @@ int sched_setparam(pid_t pid, const struct sched_param *param) {
     }
     if (
         (policy == SCHED_SPORADIC ||
-         (policy == SCHED_OTHER &&
+         (policy == SCHED_OTHER && smros_sched_param_is_current_process(pid) &&
           !smros_sched_param_extension_zero(param))) &&
         !smros_sched_sporadic_param_valid(param, 1)
     ) {
