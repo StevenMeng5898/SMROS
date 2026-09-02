@@ -2924,6 +2924,16 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertIn("SYS_setreuid", source)
         self.assertIn("smros_sync_kernel_effective_uid", source)
 
+    def test_smros_posix_compat_applies_regular_user_profile_from_environment(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('getenv("SMROS_POSIX_TEST_USER")', source)
+        self.assertIn(
+            "smros_sync_kernel_effective_uid(SMROS_POSIX_TEST_UID)", source
+        )
+        self.assertIn("smros_effective_uid = SMROS_POSIX_TEST_UID", source)
+
     def test_smros_posix_compat_reports_shm_unlink_path_too_long_before_libc(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
             encoding="utf-8"

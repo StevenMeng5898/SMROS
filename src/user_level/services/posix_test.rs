@@ -39,6 +39,7 @@ pub const POSIX_EVENT_PREFIX: &str = "SMROS_POSIX_EVENT ";
 pub const POSIX_EVENT_SCHEMA: u32 = 1;
 
 const POSIX_COMPAT_PRELOAD_ENV: &str = "LD_PRELOAD=/shared/posixtest/lib/libsmros-posix-compat.so";
+const POSIX_COMPAT_REGULAR_USER_ENV: &str = "SMROS_POSIX_TEST_USER=regular";
 const MAX_TIMEOUT_MS: u32 = i32::MAX as u32;
 const EMPTY_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const MANIFEST_HEADER: &str = "SMROS_POSIX_MANIFEST\t1";
@@ -294,6 +295,14 @@ fn selected_test_action(test: &PosixManifestTest) -> SelectedTestAction {
         (PosixTestKind::Definition, _) => SelectedTestAction::Ignore,
         _ => SelectedTestAction::Ignore,
     }
+}
+
+fn requires_regular_user(test_id: &str) -> bool {
+    matches!(
+        test_id,
+        "conformance/interfaces/sched_setparam/26-1.c"
+            | "conformance/interfaces/sched_setscheduler/17-6.c"
+    )
 }
 
 fn pts_status(exit_code: i32) -> PosixRuntimeStatus {
@@ -631,6 +640,9 @@ fn launch_current_test(harness_launcher_active: bool) -> PosixLaunchLoopResult {
         argv.push(path.clone());
         let mut env = Vec::new();
         env.push(String::from(POSIX_COMPAT_PRELOAD_ENV));
+        if requires_regular_user(test.test_id.as_str()) {
+            env.push(String::from(POSIX_COMPAT_REGULAR_USER_ENV));
+        }
         match run_elf::spawn_observed(path.clone(), argv, env, RunObserver::PosixTest) {
             Ok(()) => return PosixLaunchLoopResult::Running(synchronous_launch_errors),
             Err(err) => {
@@ -2235,6 +2247,18 @@ mod tests {
             coverage_result(PosixRuntimeStatus::LaunchError),
             PosixCoverageResult::LaunchError
         );
+    }
+
+    #[test]
+    fn regular_user_profile_is_limited_to_privilege_gated_scheduler_cases() {
+        assert!(requires_regular_user(
+            "conformance/interfaces/sched_setparam/26-1.c"
+        ));
+        assert!(requires_regular_user(
+            "conformance/interfaces/sched_setscheduler/17-6.c"
+        ));
+        assert!(!requires_regular_user("conformance/interfaces/mmap/27-1.c"));
+        assert!(!requires_regular_user("conformance/interfaces/sched_setparam/27-1.c"));
     }
 
     #[test]

@@ -490,6 +490,7 @@ static pthread_t smros_pthread_cancel_type_records[SMROS_PTHREAD_CANCEL_RECORDS]
 static int smros_pthread_cancel_types[SMROS_PTHREAD_CANCEL_RECORDS];
 static int smros_fast_mmap_fds[SMROS_FAST_MMAP_FD_RECORDS];
 static char smros_fast_mmap_page[4096] __attribute__((aligned(4096)));
+static int smros_sync_kernel_effective_uid(uid_t uid);
 static smros_sched_yield_fn smros_sched_yield_target;
 static smros_nanosleep_fn smros_nanosleep_target;
 static smros_clock_nanosleep_fn smros_clock_nanosleep_target;
@@ -658,6 +659,13 @@ static void __attribute__((constructor)) smros_posix_compat_init(void) {
         (smros_nanosleep_fn)smros_resolve_symbol("nanosleep");
     smros_clock_nanosleep_target =
         (smros_clock_nanosleep_fn)smros_resolve_symbol("clock_nanosleep");
+    const char *user_profile = getenv("SMROS_POSIX_TEST_USER");
+    if (user_profile != NULL && strcmp(user_profile, "regular") == 0) {
+        if (smros_sync_kernel_effective_uid(SMROS_POSIX_TEST_UID) == 0) {
+            smros_real_uid = SMROS_POSIX_TEST_UID;
+            smros_effective_uid = SMROS_POSIX_TEST_UID;
+        }
+    }
 }
 
 static int smros_reserve_fork_child_slot(void) {

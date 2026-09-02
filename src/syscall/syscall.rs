@@ -4203,13 +4203,16 @@ pub(crate) fn register_linux_initial_stack(address: usize, len: usize) -> bool {
 }
 
 pub fn reset_linux_process_state() {
+    // Capture the owner before task reset clears the Linux process table.
+    let pid = linux_process::current_pid().ok();
     linux_futex::reset();
     linux_mqueue::reset();
-    if let Ok(pid) = linux_process::current_pid() {
+    // Stop all user scheduler threads before tearing down their address space.
+    linux_task::reset();
+    if let Some(pid) = pid {
         let _ = linux_process_memory::unregister(pid);
     }
     linux_process_memory::reset_launch();
-    linux_task::reset();
     linux_record_lock::reset();
     let released_handles = memory_state().reset_linux_process_state();
     for handle in released_handles {

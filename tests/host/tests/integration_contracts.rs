@@ -2790,11 +2790,15 @@ fn posix_test_preloads_smros_compat_runtime_without_affecting_shell_run() {
 
     assert!(posix.contains("const POSIX_COMPAT_PRELOAD_ENV: &str"));
     assert!(posix.contains("LD_PRELOAD=/shared/posixtest/lib/libsmros-posix-compat.so"));
+    assert!(posix.contains("const POSIX_COMPAT_REGULAR_USER_ENV: &str"));
+    assert!(posix.contains("fn requires_regular_user(test_id: &str) -> bool"));
     let launch_start = posix
         .find("fn launch_current_test(")
         .expect("POSIX launch loop");
     let launch = braced_body(&posix[launch_start..]);
     assert!(launch.contains("String::from(POSIX_COMPAT_PRELOAD_ENV)"));
+    assert!(launch.contains("requires_regular_user(test.test_id.as_str())"));
+    assert!(launch.contains("String::from(POSIX_COMPAT_REGULAR_USER_ENV)"));
     assert!(!launch.contains("SMROS_PTHREAD_DIAG"));
     assert!(launch.contains("run_elf::spawn_observed("));
     assert!(launch.contains("path.clone()"));
@@ -4064,8 +4068,14 @@ fn linux_root_task_and_syscall_frame_have_bounded_owners() {
     let reset = syscall
         .find("pub fn reset_linux_process_state()")
         .expect("Linux process reset");
+    let reset_body = braced_body(&syscall[reset..]);
+    let tasks = reset_body
+        .find("linux_task::reset()")
+        .expect("Linux task reset");
+    let unregister = reset_body
+        .find("linux_process_memory::unregister(pid)")
+        .expect("process address-space unregister");
     let reset = &syscall[reset..];
-    let tasks = reset.find("linux_task::reset()").expect("Linux task reset");
     let descriptors = reset.find("sys_close(fd)").expect("descriptor reset");
     let mappings = reset
         .find("memory_state().reset_linux_process_state()")
@@ -4073,7 +4083,7 @@ fn linux_root_task_and_syscall_frame_have_bounded_owners() {
     let signals = reset
         .find("reset_linux_signal_timer_state()")
         .expect("signal reset");
-    assert!(tasks < descriptors && tasks < mappings && tasks < signals);
+    assert!(tasks < unregister && tasks < descriptors && tasks < mappings && tasks < signals);
 
     assert!(syscall.contains("linux_process::current_pid()"));
     assert!(syscall.contains("linux_process::current_parent_pid()"));
