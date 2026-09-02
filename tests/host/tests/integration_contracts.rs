@@ -6474,6 +6474,10 @@ fn linux_scheduler_allows_an_unprivileged_process_to_query_itself() {
         self_access < protected_root,
         "a process must retain scheduler access to itself after dropping credentials"
     );
+    assert!(
+        !permission.contains("target.tgid == sender_pid && requested_pid != linux_process::LINUX_ROOT_PID"),
+        "self scheduler queries must remain allowed when the caller is SMROS's PID 1"
+    );
 
     assert!(
         syscall.contains("fn linux_sched_write_permission_allowed("),

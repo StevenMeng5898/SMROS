@@ -1334,6 +1334,35 @@ int main(void) {
         self.assertNotIn("return PTS_PASS", patch)
         self.assertNotIn("SMROS", patch)
 
+    def test_scheduler_permission_tests_query_a_separate_root_parent(self) -> None:
+        patch_root = REPOSITORY_ROOT / "third_party" / "posixtest" / "patches"
+        series_entries = [
+            line.strip()
+            for line in (patch_root / "series").read_text(encoding="ascii").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        patch_name = "fix-scheduler-permission-parent-tests.patch"
+        self.assertIn(patch_name, series_entries)
+
+        patch = (patch_root / patch_name).read_text(encoding="ascii")
+        for test_path in (
+            "conformance/interfaces/sched_getparam/6-1.c",
+            "conformance/interfaces/sched_getscheduler/7-1.c",
+        ):
+            self.assertIn(test_path, patch)
+        for retained in (
+            "child_pid = fork()",
+            "waitpid(child_pid, &child_stat, 0)",
+            "WIFEXITED(child_stat)",
+            "set_nonroot()",
+            "errno == EPERM",
+        ):
+            self.assertGreaterEqual(patch.count(retained), 2, retained)
+        self.assertIn("sched_getparam(target_pid", patch)
+        self.assertIn("sched_getscheduler(target_pid", patch)
+        self.assertNotIn("PTS_PASS;\n+", patch)
+        self.assertNotIn("SMROS", patch)
+
 
 class DocumentationTests(unittest.TestCase):
     def test_readme_describes_default_and_overridden_work_directories(self) -> None:

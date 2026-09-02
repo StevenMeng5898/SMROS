@@ -9707,7 +9707,7 @@ fn linux_sched_permission_allowed(requested_pid: usize, target: LinuxSchedTarget
     if sender.effective_uid == 0 {
         return true;
     }
-    if target.tgid == sender_pid && requested_pid != linux_process::LINUX_ROOT_PID {
+    if target.tgid == sender_pid {
         return true;
     }
     if requested_pid == linux_process::LINUX_ROOT_PID

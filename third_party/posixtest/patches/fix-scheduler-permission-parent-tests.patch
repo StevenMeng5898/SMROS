@@ -1,0 +1,159 @@
+diff --git a/conformance/interfaces/sched_getparam/6-1.c b/conformance/interfaces/sched_getparam/6-1.c
+index 9eb04f5..b5db203 100644
+--- a/conformance/interfaces/sched_getparam/6-1.c
++++ b/conformance/interfaces/sched_getparam/6-1.c
+@@ -27,6 +27,7 @@
+ #include <sys/types.h>
+ #include <pwd.h>
+ #include <string.h>
++#include <sys/wait.h>
+ #include "posixtest.h"
+ 
+ 
+@@ -59,23 +60,20 @@ int set_nonroot()
+ 	return 0;
+ }
+ 
+-int main(int argc, char **argv)
+-{	       
++static int run_permission_test(pid_t target_pid)
++{       
+ 
+ 	struct sched_param param;
+ 	int result = -1;
+ 
+-	/* We assume process Number 1 is created by root */
+-	/* and can only be accessed by root */ 
+-	/* This test should be run under standard user permissions */
+ 	if (getuid() == 0) {
+                 if (set_nonroot() != 0) {
+-			printf("Cannot run this test as non-root user\n");	
++			printf("Cannot run this test as non-root user\n");
+ 			return PTS_UNTESTED;
+ 		}
+ 	}
+ 
+-	result = sched_getparam( 1, &param);
++	result = sched_getparam(target_pid, &param);
+ 	
+ 	if(result == -1 && errno == EPERM) {
+ 		printf("Test PASSED\n");
+@@ -95,4 +93,39 @@ int main(int argc, char **argv)
+ 	}        
+ }
+ 
++int main(int argc, char **argv)
++{
++	pid_t target_pid = getpid();
++	pid_t child_pid;
++	int child_stat;
++	pid_t wait_result;
++
++	(void)argc;
++	(void)argv;
++
++	/* A root parent must remain alive while the non-root child queries it. */
++	if (getuid() != 0)
++		return run_permission_test(1);
++
++	child_pid = fork();
++	if (child_pid == (pid_t)-1) {
++		perror("Failed to fork");
++		return PTS_UNRESOLVED;
++	}
++	if (child_pid == (pid_t)0)
++		return run_permission_test(target_pid);
++
++	do {
++		wait_result = waitpid(child_pid, &child_stat, 0);
++	} while (wait_result == (pid_t)-1 && errno == EINTR);
++	if (wait_result == (pid_t)-1) {
++		perror("Failed to wait for permission test child");
++		return PTS_UNRESOLVED;
++	}
++	if (!WIFEXITED(child_stat)) {
++		printf("Permission test child terminated unexpectedly\n");
++		return PTS_UNRESOLVED;
++	}
++	return WEXITSTATUS(child_stat);
++}
+ 
+diff --git a/conformance/interfaces/sched_getscheduler/7-1.c b/conformance/interfaces/sched_getscheduler/7-1.c
+index 6ef2599..9f3004b 100644
+--- a/conformance/interfaces/sched_getscheduler/7-1.c
++++ b/conformance/interfaces/sched_getscheduler/7-1.c
+@@ -19,6 +19,7 @@
+ #include <sys/types.h>
+ #include <pwd.h>
+ #include <string.h>
++#include <sys/wait.h>
+ #include "posixtest.h"
+ 
+ /** Set the euid of this process to a non-root uid */
+@@ -50,22 +51,19 @@ int set_nonroot()
+ 	return 0;
+ }
+ 
+-int main(int argc, char **argv)
+-{	       
++static int run_permission_test(pid_t target_pid)
++{       
+ 
+ 	int result = -1;
+ 
+-	/* We assume process Number 1 is created by root */
+-	/* and can only be accessed by root */ 
+-	/* This test should be run under standard user permissions */
+         if (getuid() == 0) {
+                 if (set_nonroot() != 0) {
+-			printf("Cannot run this test as non-root user\n");	
++			printf("Cannot run this test as non-root user\n");
+ 			return PTS_UNTESTED;
+ 		}
+         }
+ 
+-	result = sched_getscheduler( 1 );
++	result = sched_getscheduler(target_pid);
+ 	
+ 	if(result == -1 && errno == EPERM) {
+ 		printf("Test PASSED\n");
+@@ -84,4 +82,39 @@ int main(int argc, char **argv)
+ 	}        
+ }
+ 
++int main(int argc, char **argv)
++{
++	pid_t target_pid = getpid();
++	pid_t child_pid;
++	int child_stat;
++	pid_t wait_result;
++
++	(void)argc;
++	(void)argv;
++
++	/* A root parent must remain alive while the non-root child queries it. */
++	if (getuid() != 0)
++		return run_permission_test(1);
++
++	child_pid = fork();
++	if (child_pid == (pid_t)-1) {
++		perror("Failed to fork");
++		return PTS_UNRESOLVED;
++	}
++	if (child_pid == (pid_t)0)
++		return run_permission_test(target_pid);
++
++	do {
++		wait_result = waitpid(child_pid, &child_stat, 0);
++	} while (wait_result == (pid_t)-1 && errno == EINTR);
++	if (wait_result == (pid_t)-1) {
++		perror("Failed to wait for permission test child");
++		return PTS_UNRESOLVED;
++	}
++	if (!WIFEXITED(child_stat)) {
++		printf("Permission test child terminated unexpectedly\n");
++		return PTS_UNRESOLVED;
++	}
++	return WEXITSTATUS(child_stat);
++}
+ 
