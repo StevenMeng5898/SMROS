@@ -2335,7 +2335,10 @@ class QemuController:
             raise ControllerError("guest POSIX suite has no terminal event")
         _event_name, end_offset = terminal
         try:
-            parsed = parse_serial_log(data.decode("utf-8", errors="replace"))
+            parsed = parse_serial_log(
+                data.decode("utf-8", errors="replace"),
+                expected_architecture=self.identity.metadata.architecture,
+            )
         except ValueError as error:
             raise ControllerError(
                 f"invalid guest POSIX event stream: {error}"
@@ -2373,7 +2376,10 @@ class QemuController:
             raise ControllerError("guest POSIX suite has no infrastructure terminal")
         _event_name, end_offset = terminal
         try:
-            parsed = parse_serial_log(data.decode("utf-8", errors="replace"))
+            parsed = parse_serial_log(
+                data.decode("utf-8", errors="replace"),
+                expected_architecture=self.identity.metadata.architecture,
+            )
         except ValueError as error:
             raise ControllerError(
                 f"invalid guest POSIX event stream: {error}"

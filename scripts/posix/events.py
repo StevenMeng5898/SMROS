@@ -163,7 +163,9 @@ def _infrastructure_error_detail(value: Mapping[str, object]) -> str:
     return selected
 
 
-def _validate_common(value: object, line_number: int) -> dict[str, object]:
+def _validate_common(
+    value: object, line_number: int, expected_architecture: str
+) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError(f"event at line {line_number} is not an object")
     event_name = value.get("event")
@@ -179,7 +181,7 @@ def _validate_common(value: object, line_number: int) -> dict[str, object]:
     digest = _require_string(value, "manifest_sha256")
     if _DIGEST_RE.fullmatch(digest) is None:
         raise ValueError(f"event manifest checksum is invalid at line {line_number}")
-    if _require_string(value, "architecture") != "aarch64":
+    if _require_string(value, "architecture") != expected_architecture:
         raise ValueError(f"event architecture is invalid at line {line_number}")
     return value
 
@@ -335,7 +337,9 @@ def _validate_infrastructure_error_identity(
         raise ValueError("infrastructure error identity mismatch")
 
 
-def parse_serial_log(log: str) -> ParsedEventRun:
+def parse_serial_log(
+    log: str, *, expected_architecture: str = "aarch64"
+) -> ParsedEventRun:
     """Parse one serial log, retaining output while making truncation explicit."""
     if not isinstance(log, str):
         raise TypeError("serial log must be text")
@@ -368,7 +372,7 @@ def parse_serial_log(log: str) -> ParsedEventRun:
             if value.get("event") == "infrastructure_error":
                 _infrastructure_error_detail(value)
         _require_recursive_strict_utf8(value, line_number)
-        value = _validate_common(value, line_number)
+        value = _validate_common(value, line_number, expected_architecture)
         event = _serial_event(value)
         if previous_seq is not None and event.seq <= previous_seq:
             raise ValueError(f"event sequence is not monotonically increasing at line {line_number}")

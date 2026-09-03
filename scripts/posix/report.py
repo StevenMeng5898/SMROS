@@ -60,6 +60,18 @@ LINUX_REFERENCE_SOURCE = "qemu-user"
 SMROS_PLATFORM = "smros-aarch64"
 SMROS_SOURCES = frozenset({"host-watchdog", "smros-qemu", "smros-serial"})
 SMROS_SERIAL_SOURCE = "smros-serial"
+
+
+def linux_reference_platform(architecture: str) -> str:
+    """Return the stable platform identity for a host reference run."""
+    return f"{architecture}-linux-reference"
+
+
+def smros_platform(architecture: str) -> str:
+    """Return the stable platform identity for an SMROS run."""
+    return f"smros-{architecture}"
+
+
 _REPORT_QUARANTINE_NAME = ".smros-posix-report-quarantine"
 _REPORT_WORK_ROOT_NAME = "generation"
 _MAX_RUNTIME_RESULTS_BYTES = 128 * 1024 * 1024
@@ -528,7 +540,10 @@ def _load_manifest(path: Path) -> _ManifestInput:
         if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
             raise ValueError("build-results.ndjson changed while being opened")
         build_results = _load_build_results(
-            descriptor, tests, revision=metadata.revision
+            descriptor,
+            tests,
+            revision=metadata.revision,
+            architecture=metadata.architecture,
         )
     except FileNotFoundError as error:
         raise ValueError(f"missing build-results.ndjson: {build_path}") from error
@@ -641,14 +656,17 @@ def _validate_attempt(
             raise ValueError(f"runtime attempt {key} is invalid at line {line_number}")
     if role == "linux":
         if (
-            value["platform"] != LINUX_REFERENCE_PLATFORM
+            value["platform"] != linux_reference_platform(metadata.architecture)
             or value["source"] != LINUX_REFERENCE_SOURCE
         ):
             raise ValueError(
                 "Linux-reference platform/source does not match its input role"
             )
     elif role == "smros":
-        if value["platform"] != SMROS_PLATFORM or value["source"] not in SMROS_SOURCES:
+        if (
+            value["platform"] != smros_platform(metadata.architecture)
+            or value["source"] not in SMROS_SOURCES
+        ):
             raise ValueError("SMROS platform/source does not match its input role")
     else:
         raise AssertionError(f"unknown runtime input role: {role}")
@@ -981,7 +999,7 @@ def _load_runtime_results(
         raise ValueError("runtime results lack a terminal run record")
     if role == "linux":
         if (
-            terminal["platform"] != LINUX_REFERENCE_PLATFORM
+            terminal["platform"] != linux_reference_platform(metadata.architecture)
             or terminal["source"] != LINUX_REFERENCE_SOURCE
         ):
             raise ValueError(
@@ -989,7 +1007,7 @@ def _load_runtime_results(
             )
     elif role == "smros":
         if (
-            terminal["platform"] != SMROS_PLATFORM
+            terminal["platform"] != smros_platform(metadata.architecture)
             or terminal["source"] not in SMROS_SOURCES
         ):
             raise ValueError("SMROS platform/source does not match its input role")
@@ -1011,7 +1029,10 @@ def _load_serial_results(
     *,
     byte_count: int,
 ) -> _RuntimeInput:
-    parsed = parse_serial_log(text)
+    parsed = parse_serial_log(
+        text,
+        expected_architecture=manifest.metadata.architecture,
+    )
     if not is_valid_run_id(parsed.run_id):
         raise ValueError("serial run ID is invalid")
     if parsed.infrastructure_error is not None and not _is_strict_utf8_text(
@@ -1075,7 +1096,7 @@ def _load_serial_results(
                 test_id=test.test_id,
                 group=test.group,
                 api=test.api,
-                platform=SMROS_PLATFORM,
+                platform=smros_platform(metadata.architecture),
                 build_status=(
                     compile_result.status if compile_result is not None else "not-built"
                 ),
@@ -1126,7 +1147,7 @@ def _load_serial_results(
         "patch_sha256": (
             unknown_digest if suite_start is None else metadata.patch_sha256
         ),
-        "platform": SMROS_PLATFORM,
+        "platform": smros_platform(metadata.architecture),
         "record_type": "run",
         "revision": unknown_commit if suite_start is None else metadata.revision,
         "run_id": parsed.run_id,

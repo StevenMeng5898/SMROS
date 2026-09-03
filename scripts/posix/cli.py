@@ -59,6 +59,20 @@ SMROS_KERNEL_PATH = REPOSITORY_ROOT / "kernel8.img"
 SMROS_DISK_PATH = REPOSITORY_ROOT / "smros-fxfs.img"
 
 
+def baseline_results_path(architecture: str) -> Path:
+    """Return the result location associated with one target architecture."""
+    if architecture == "aarch64":
+        return BASELINE_RESULTS_PATH
+    return (
+        REPOSITORY_ROOT
+        / "target"
+        / "posix"
+        / architecture
+        / "linux-reference"
+        / "results.ndjson"
+    )
+
+
 def _print_exception_notes(error: BaseException) -> None:
     for note in getattr(error, "__notes__", ()):
         if isinstance(note, str):
@@ -387,7 +401,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = run_baseline(
                 BASELINE_STAGE_PATH,
                 arguments.sysroot,
-                BASELINE_RESULTS_PATH,
+                baseline_results_path(arguments.arch),
                 api=arguments.api,
                 group=arguments.group,
                 test_id=arguments.test,

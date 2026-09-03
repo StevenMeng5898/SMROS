@@ -65,6 +65,27 @@ class RiscvArchitectureContractTests(unittest.TestCase):
         )
         self.assertIn('f"{architecture}-linux-reference"', source)
 
+    def test_riscv_report_and_serial_events_are_architecture_aware(self):
+        report_source = (REPOSITORY_ROOT / "scripts/posix/report.py").read_text()
+        self.assertIn('def linux_reference_platform(architecture: str) -> str:', report_source)
+        self.assertIn('def smros_platform(architecture: str) -> str:', report_source)
+        self.assertRegex(
+            report_source,
+            r"_load_build_results\(\s*descriptor,\s*tests,\s*revision=metadata\.revision,\s*"
+            r"architecture=metadata\.architecture",
+        )
+        events_source = (REPOSITORY_ROOT / "scripts/posix/events.py").read_text()
+        self.assertIn("def parse_serial_log(", events_source)
+        self.assertIn('expected_architecture: str = "aarch64"', events_source)
+
+    def test_riscv_cli_uses_architecture_specific_baseline_results(self):
+        source = (REPOSITORY_ROOT / "scripts/posix/cli.py").read_text()
+        self.assertIn("def baseline_results_path(architecture: str) -> Path:", source)
+        self.assertRegex(
+            source,
+            r"baseline_results_path\(arguments\.arch\)",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
