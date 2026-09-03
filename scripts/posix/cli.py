@@ -15,6 +15,7 @@ from .build import (
     compiler_query,
     run_bounded_command,
     sha256_file,
+    toolchain_for_architecture,
     validate_build_checkout,
     verify_stage,
 )
@@ -89,6 +90,7 @@ def create_parser() -> argparse.ArgumentParser:
     baseline_parser = subparsers.add_parser(
         "baseline", help="run the staged suite under qemu-user"
     )
+    baseline_parser.add_argument("--arch", default="aarch64")
     filters = baseline_parser.add_mutually_exclusive_group()
     filters.add_argument("--api")
     filters.add_argument("--group")
@@ -97,6 +99,7 @@ def create_parser() -> argparse.ArgumentParser:
     smros_parser = subparsers.add_parser(
         "run-smros", help="collect staged POSIX results from SMROS under QEMU"
     )
+    smros_parser.add_argument("--arch", default="aarch64")
     smros_filters = smros_parser.add_mutually_exclusive_group()
     smros_filters.add_argument("--api")
     smros_filters.add_argument("--group")
@@ -121,7 +124,7 @@ def create_parser() -> argparse.ArgumentParser:
 def _required_tool(name: str) -> str:
     path = shutil.which(name)
     if path is None:
-        raise ValueError(f"required AArch64 tool is unavailable: {name}")
+        raise ValueError(f"required POSIX tool is unavailable: {name}")
     return name
 
 
@@ -172,7 +175,7 @@ def _libc_identity(compiler: str) -> str:
     value = compiler_query(compiler, "-print-file-name=libc.so.6")
     path = Path(value)
     if value == "libc.so.6" or not path.is_file():
-        raise ValueError("AArch64 libc.so.6 could not be resolved by the compiler")
+        raise ValueError("POSIX libc.so.6 could not be resolved by the compiler")
     return f"libc.so.6:{sha256_file(path.resolve())}"
 
 
@@ -213,6 +216,13 @@ def _current_build_inputs() -> tuple[
     tuple[SuiteTest, ...],
     tuple[str, ...],
 ]:
+    return _current_build_inputs_for_architecture("aarch64")
+
+
+def _current_build_inputs_for_architecture(
+    architecture: str,
+) -> tuple[ManifestMetadata, Path, tuple[SuiteTest, ...], tuple[str, ...]]:
+    toolchain = toolchain_for_architecture(architecture)
     lock = load_source_lock(SOURCE_LOCK_PATH)
     checkout = Path("target/posix") / "src" / lock.revision
     expected_patch = validate_build_checkout(
@@ -237,13 +247,42 @@ def _current_build_inputs() -> tuple[
     metadata = ManifestMetadata(
         source=lock.url,
         revision=lock.revision,
-        architecture="aarch64",
-        compiler=_compiler_identity("aarch64-linux-gnu-gcc"),
-        libc=_libc_identity("aarch64-linux-gnu-gcc"),
+        architecture=architecture,
+        compiler=_compiler_identity(toolchain.compiler),
+        libc=_libc_identity(toolchain.compiler),
         patch_sha256=expected_patch,
         smros_commit=_smros_commit(),
     )
     return metadata, checkout, audit.tests, shell_tests
+
+
+def _current_build_inputs_for_cli(
+    architecture: str,
+) -> tuple[ManifestMetadata, Path, tuple[SuiteTest, ...], tuple[str, ...]]:
+    # Keep the established AArch64 seam for callers and tests that replace the
+    # default input snapshot; alternate targets use their own toolchain identity.
+    if architecture == "aarch64":
+        return _current_build_inputs()
+    return _current_build_inputs_for_architecture(architecture)
+
+
+def _verify_stage_for_cli(
+    stage: Path,
+    *,
+    expected_metadata: ManifestMetadata,
+    expected_tests: Sequence[SuiteTest],
+    expected_shell_tests: Sequence[str],
+    architecture: str,
+) -> BuildSummary:
+    kwargs = dict(
+        expected_metadata=expected_metadata,
+        expected_tests=expected_tests,
+        expected_shell_tests=expected_shell_tests,
+        strict_command_paths=True,
+    )
+    if architecture != "aarch64":
+        kwargs["architecture"] = architecture
+    return verify_stage(stage, **kwargs)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -280,39 +319,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(result.format_counts())
         return 0
     if arguments.command == "build":
-        if arguments.arch != "aarch64":
-            print(
-                f"build failed: unsupported architecture: {arguments.arch}",
-                file=sys.stderr,
-            )
-            return 1
         try:
-            _required_tool("aarch64-linux-gnu-gcc")
-            _required_tool("aarch64-linux-gnu-nm")
-            _required_tool("aarch64-linux-gnu-readelf")
+            toolchain = toolchain_for_architecture(arguments.arch)
+            _required_tool(toolchain.compiler)
+            _required_tool(toolchain.nm)
+            _required_tool(toolchain.readelf)
             if arguments.verify_only:
                 (
                     expected_metadata,
                     _checkout,
                     expected_tests,
                     expected_shell_tests,
-                ) = _current_build_inputs()
-                summary = verify_stage(
+                ) = _current_build_inputs_for_cli(arguments.arch)
+                summary = _verify_stage_for_cli(
                     arguments.stage,
                     expected_metadata=expected_metadata,
                     expected_tests=expected_tests,
                     expected_shell_tests=expected_shell_tests,
-                    strict_command_paths=True,
+                    architecture=arguments.arch,
                 )
             else:
-                metadata, checkout, tests, shell_tests = _current_build_inputs()
+                metadata, checkout, tests, shell_tests = _current_build_inputs_for_cli(
+                    arguments.arch
+                )
                 summary = build_campaign(
                     checkout,
                     tests,
                     shell_tests,
                     metadata,
                     arguments.stage,
-                    Path("target/posix/aarch64"),
+                    Path("target/posix") / arguments.arch,
                 )
         except (OSError, ValueError) as error:
             print(f"build failed: {error}", file=sys.stderr)
@@ -320,9 +356,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(summary.format_counts())
         return 0
     if arguments.command == "baseline":
-        qemu = shutil.which("qemu-aarch64")
+        toolchain = toolchain_for_architecture(arguments.arch)
+        qemu = shutil.which(
+            "qemu-" + arguments.arch if arguments.arch != "x86_64" else "qemu-x86_64"
+        )
         if qemu is None:
-            print("baseline failed: qemu-aarch64 is unavailable", file=sys.stderr)
+            print(
+                f"baseline failed: qemu-user for {arguments.arch} is unavailable",
+                file=sys.stderr,
+            )
             print(BASELINE_PREREQUISITE, file=sys.stderr)
             return 1
         try:
@@ -331,15 +373,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _checkout,
                 expected_tests,
                 expected_shell_tests,
-            ) = _current_build_inputs()
+            ) = _current_build_inputs_for_cli(arguments.arch)
 
             def strict_verifier(stage: Path) -> BuildSummary:
-                return verify_stage(
+                return _verify_stage_for_cli(
                     stage,
                     expected_metadata=expected_metadata,
                     expected_tests=expected_tests,
                     expected_shell_tests=expected_shell_tests,
-                    strict_command_paths=True,
+                    architecture=arguments.arch,
                 )
 
             result = run_baseline(
@@ -369,16 +411,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if result.all_passed else 1
     if arguments.command == "run-smros":
         try:
+            toolchain = toolchain_for_architecture(arguments.arch)
+            stage = BASELINE_STAGE_PATH
+            results_directory = (
+                REPOSITORY_ROOT / "target" / "posix" / arguments.arch / "smros-run"
+            )
+            kernel = (
+                SMROS_KERNEL_PATH
+                if arguments.arch == "aarch64"
+                else REPOSITORY_ROOT
+                / "target"
+                / (
+                    "riscv64gc-unknown-none-elf"
+                    if arguments.arch == "riscv64"
+                    else "x86_64-unknown-none"
+                )
+                / "release"
+                / "smros"
+            )
             result = run_smros(
-                BASELINE_STAGE_PATH,
-                SMROS_RESULTS_DIRECTORY,
-                kernel=SMROS_KERNEL_PATH,
+                stage,
+                results_directory,
+                kernel=kernel,
                 disk=SMROS_DISK_PATH,
                 memory=arguments.qemu_memory,
                 api=arguments.api,
                 group=arguments.group,
                 test_id=arguments.test,
                 resume=arguments.resume,
+                qemu=toolchain.qemu,
             )
         except (OSError, ValueError, ControllerError) as error:
             print(f"run-smros failed: {error}", file=sys.stderr)

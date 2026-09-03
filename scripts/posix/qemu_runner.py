@@ -29,7 +29,7 @@ from .baseline import (
     _validate_selected,
     filter_runnable_tests,
 )
-from .build import MAX_TESTS, ManifestMetadata
+from .build import MAX_TESTS, ManifestMetadata, toolchain_for_architecture
 from .events import EVENT_PREFIX, parse_serial_log
 from .model import (
     BuildResult,
@@ -238,18 +238,25 @@ def _memory_mebibytes(value: str) -> int:
 
 
 def build_qemu_argv(
-    *, qemu: str | Path, kernel: Path, disk: Path, memory: str, smp: str = "4"
+    *,
+    qemu: str | Path,
+    kernel: Path,
+    disk: Path,
+    memory: str,
+    smp: str = "4",
+    architecture: str = "aarch64",
 ) -> tuple[str, ...]:
-    """Build the AArch64 command line used by the normal smoke launcher."""
+    """Build the architecture-specific command line used by the launcher."""
+    toolchain = toolchain_for_architecture(architecture)
     configured_memory = memory if _memory_mebibytes(memory) >= 1024 else "1024M"
     if re.fullmatch(r"[1-9][0-9]*", smp) is None:
         raise ValueError(f"invalid QEMU SMP count: {smp}")
     return (
         str(qemu),
         "-M",
-        "virt,gic-version=4,virtualization=on",
+        toolchain.qemu_machine,
         "-cpu",
-        "cortex-a710",
+        toolchain.qemu_cpu,
         "-smp",
         smp,
         "-m",
@@ -260,11 +267,11 @@ def build_qemu_argv(
         "-drive",
         f"file={disk},if=none,format=raw,id=fxfs,cache=writethrough",
         "-device",
-        "virtio-blk-device,drive=fxfs",
+        f"{toolchain.block_device},drive=fxfs",
         "-netdev",
         "user,id=smrosnet",
         "-device",
-        "virtio-net-device,netdev=smrosnet",
+        f"{toolchain.net_device},netdev=smrosnet",
     )
 
 
@@ -358,7 +365,9 @@ _TEST_START_FIELDS = _COMMON_EVENT_FIELDS | {
 }
 
 
-def _event_common_is_valid(value: dict[str, object], event: str, seq: int) -> bool:
+def _event_common_is_valid(
+    value: dict[str, object], event: str, seq: int, architecture: str
+) -> bool:
     return (
         type(value.get("schema")) is int
         and value.get("schema") == 1
@@ -366,7 +375,7 @@ def _event_common_is_valid(value: dict[str, object], event: str, seq: int) -> bo
         and value.get("seq") == seq
         and value.get("event") == event
         and is_valid_run_id(value.get("run_id"))
-        and value.get("architecture") == "aarch64"
+        and value.get("architecture") == architecture
     )
 
 
@@ -377,7 +386,9 @@ def _suite_start_is_valid(
 ) -> bool:
     return (
         set(suite_start) <= _SUITE_START_FIELDS
-        and _event_common_is_valid(suite_start, "suite_start", 1)
+        and _event_common_is_valid(
+            suite_start, "suite_start", 1, identity.metadata.architecture
+        )
         and suite_start.get("manifest_sha256")
         == identity.metadata.manifest_sha256
         and type(suite_start.get("selected_count")) is int
@@ -404,7 +415,9 @@ def _start_pair_is_valid(
     suite_is_valid = _suite_start_is_valid(suite_start, test, identity)
     test_is_valid = (
         set(test_start) <= _TEST_START_FIELDS
-        and _event_common_is_valid(test_start, "test_start", 2)
+        and _event_common_is_valid(
+            test_start, "test_start", 2, identity.metadata.architecture
+        )
         and test_start.get("run_id") == suite_start.get("run_id")
         and test_start.get("manifest_sha256")
         == identity.metadata.manifest_sha256
@@ -896,6 +909,8 @@ class QemuController:
         ):
             raise ValueError("QEMU per-test serial byte limit must be positive")
         self.identity = identity
+        toolchain_for_architecture(identity.metadata.architecture)
+        self._platform = f"smros-{identity.metadata.architecture}"
         self.selected = tuple(selected)
         self.config = config
         self._transport_factory = transport_factory
@@ -2121,7 +2136,7 @@ class QemuController:
             and attempt.group == test.group
             and attempt.api == test.api
             and attempt.binary_sha256 == test.sha256
-            and attempt.platform == PLATFORM
+            and attempt.platform == self._platform
             and attempt.build_status == build_status
             and attempt.link_status == link_status
             and attempt.manifest_sha256 == self.identity.metadata.manifest_sha256
@@ -2452,7 +2467,7 @@ class QemuController:
             test_id=test.test_id,
             group=test.group,
             api=test.api,
-            platform=PLATFORM,
+            platform=self._platform,
             build_status=build_status,
             link_status=link_status,
             launch_status=guest.launch_status,
@@ -2515,7 +2530,7 @@ class QemuController:
             test_id=test.test_id,
             group=test.group,
             api=test.api,
-            platform=PLATFORM,
+            platform=self._platform,
             build_status=build_status,
             link_status=link_status,
             launch_status="launched" if started else "interrupted",
@@ -2697,7 +2712,7 @@ class QemuController:
             "completed_count": len(self._attempts),
             "manifest_sha256": self.identity.metadata.manifest_sha256,
             "patch_sha256": self.identity.metadata.patch_sha256,
-            "platform": PLATFORM,
+            "platform": self._platform,
             "qemu": _bounded_reason(" ".join(self.config.qemu_argv)),
             "raw_log": str(self._raw_log_path),
             "record_type": "run",
@@ -3083,6 +3098,8 @@ def run_smros(
         raise ValueError(f"required QEMU executable is unavailable: {qemu}")
     stage = Path(os.path.abspath(stage))
     loaded = _load_stage_identity(stage)
+    architecture = loaded.metadata.architecture
+    toolchain = toolchain_for_architecture(architecture)
     selected = filter_runnable_tests(
         loaded.tests, api=api, group=group, test_id=test_id
     )
@@ -3099,6 +3116,7 @@ def run_smros(
         disk=_regular_file(disk, "FxFS disk image"),
         memory=memory,
         smp=os.environ.get("POSIX_QEMU_SMP", "4"),
+        architecture=architecture,
     )
     return QemuController(
         identity=identity,

@@ -131,6 +131,63 @@ class ManifestMetadata:
     manifest_sha256: str = EMPTY_SHA256
 
 
+@dataclass(frozen=True)
+class PosixToolchain:
+    architecture: str
+    compiler: str
+    nm: str
+    readelf: str
+    qemu: str
+    qemu_machine: str
+    qemu_cpu: str
+    block_device: str
+    net_device: str
+
+
+_TOOLCHAINS = {
+    "aarch64": PosixToolchain(
+        architecture="aarch64",
+        compiler="aarch64-linux-gnu-gcc",
+        nm="aarch64-linux-gnu-nm",
+        readelf="aarch64-linux-gnu-readelf",
+        qemu="qemu-system-aarch64",
+        qemu_machine="virt,gic-version=4,virtualization=on",
+        qemu_cpu="cortex-a710",
+        block_device="virtio-blk-device",
+        net_device="virtio-net-device",
+    ),
+    "riscv64": PosixToolchain(
+        architecture="riscv64",
+        compiler="riscv64-linux-gnu-gcc",
+        nm="riscv64-linux-gnu-nm",
+        readelf="riscv64-linux-gnu-readelf",
+        qemu="qemu-system-riscv64",
+        qemu_machine="virt",
+        qemu_cpu="rv64",
+        block_device="virtio-blk-device",
+        net_device="virtio-net-device",
+    ),
+    "x86_64": PosixToolchain(
+        architecture="x86_64",
+        compiler="gcc",
+        nm="nm",
+        readelf="readelf",
+        qemu="qemu-system-x86_64",
+        qemu_machine="q35",
+        qemu_cpu="max",
+        block_device="virtio-blk-pci",
+        net_device="virtio-net-pci",
+    ),
+}
+
+
+def toolchain_for_architecture(architecture: str) -> PosixToolchain:
+    try:
+        return _TOOLCHAINS[architecture]
+    except KeyError as error:
+        raise ValueError(f"unsupported architecture: {architecture}") from error
+
+
 CommandRunner = Callable[..., object]
 DependencyStager = Callable[[Sequence[Path], Path], Sequence[Path]]
 _SUBPROCESS_RUN = subprocess.run
@@ -251,8 +308,7 @@ def _validate_metadata(metadata: ManifestMetadata) -> None:
         _validate_field_limit(
             value, f"metadata {key}", MAX_MANIFEST_METADATA_VALUE_BYTES
         )
-    if metadata.architecture != "aarch64":
-        raise ValueError(f"unsupported architecture: {metadata.architecture}")
+    toolchain_for_architecture(metadata.architecture)
     if _REVISION_RE.fullmatch(metadata.revision) is None:
         raise ValueError("manifest revision is not a lowercase 40-hex commit")
     if _REVISION_RE.fullmatch(metadata.smros_commit) is None:
@@ -2230,6 +2286,7 @@ def build_campaign(
     command_runner: CommandRunner = subprocess.run,
     dependency_stager: DependencyStager | None = None,
 ) -> BuildSummary:
+    toolchain = toolchain_for_architecture(metadata.architecture)
     ordered_tests = tuple(sorted(tests, key=lambda test: test.test_id))
     ordered_shells = tuple(sorted(shell_tests))
     object_root = work / "obj"
@@ -2323,12 +2380,12 @@ def build_campaign(
                 test.test_id,
                 "compile",
                 compile_command(
-                    "aarch64-linux-gnu-gcc", source, object_path, include_directory
+                    toolchain.compiler, source, object_path, include_directory
                 ),
                 command_runner,
                 execution_object_path,
                 execution_argv=compile_command(
-                    "aarch64-linux-gnu-gcc",
+                    toolchain.compiler,
                     execution_source,
                     execution_object_path,
                     execution_include_directory,
@@ -2368,11 +2425,11 @@ def build_campaign(
             nm_result = _run_command(
                 test.test_id,
                 "nm",
-                nm_command("aarch64-linux-gnu-nm", object_path),
+                nm_command(toolchain.nm, object_path),
                 command_runner,
                 None,
                 execution_argv=nm_command(
-                    "aarch64-linux-gnu-nm",
+                    toolchain.nm,
                     execution_object_path,
                 ),
                 diagnostic_path_replacements=(
@@ -2414,11 +2471,11 @@ def build_campaign(
             link_result = _run_command(
                 test.test_id,
                 "link",
-                link_command("aarch64-linux-gnu-gcc", object_path, executable),
+                link_command(toolchain.compiler, object_path, executable),
                 command_runner,
                 execution_executable,
                 execution_argv=link_command(
-                    "aarch64-linux-gnu-gcc",
+                    toolchain.compiler,
                     execution_object_path,
                     execution_executable,
                 ),
@@ -2467,6 +2524,8 @@ def build_campaign(
             stage_runtime_dependencies(
                 tuple(staged_executables),
                 temporary_stage,
+                compiler=toolchain.compiler,
+                readelf=toolchain.readelf,
                 stage_descriptor=temporary_descriptor,
             )
         else:
@@ -2487,6 +2546,7 @@ def build_campaign(
             expected_metadata=metadata,
             expected_tests=ordered_tests,
             expected_shell_tests=ordered_shells,
+            architecture=metadata.architecture,
         )
         replaced_stage_descriptor = _publish_stage(
             work_slot_descriptor,
@@ -2710,14 +2770,16 @@ def _validate_build_argv(
     *,
     strict_paths: bool,
     revision: str | None,
+    architecture: str = "aarch64",
 ) -> None:
     if any(_has_forbidden_character(argument) for argument in argv):
         raise ValueError(f"invalid control character in build argv for {test.test_id}")
     object_suffix = f"{test.test_id}.o"
     executable_suffix = f"{test.test_id}.test"
+    toolchain = toolchain_for_architecture(architecture)
     if stage_name == "compile":
         prefix = [
-            "aarch64-linux-gnu-gcc",
+            toolchain.compiler,
             "-std=gnu99",
             "-D_POSIX_C_SOURCE=200112L",
             "-D_XOPEN_SOURCE=600",
@@ -2750,7 +2812,7 @@ def _validate_build_argv(
             raise ValueError(f"invalid target compiler argv for {test.test_id}")
         if strict_paths:
             expected_source = f"target/posix/src/{revision}/{test.source}"
-            expected_object = f"target/posix/aarch64/obj/{object_suffix}"
+            expected_object = f"target/posix/{architecture}/obj/{object_suffix}"
             expected_include = f"target/posix/src/{revision}/include"
             if legacy:
                 actual_paths = [argv[6], argv[8], argv[10]]
@@ -2770,11 +2832,11 @@ def _validate_build_argv(
         if not (
             len(argv) == 4
             and argv[:3]
-            == ["aarch64-linux-gnu-nm", "-g", "--defined-only"]
+            == [toolchain.nm, "-g", "--defined-only"]
             and _path_ends_with(argv[3], object_suffix)
         ):
             raise ValueError(f"invalid target nm argv for {test.test_id}")
-        if strict_paths and argv[3] != f"target/posix/aarch64/obj/{object_suffix}":
+        if strict_paths and argv[3] != f"target/posix/{architecture}/obj/{object_suffix}":
             raise ValueError(f"invalid production nm path for {test.test_id}")
         return
     if not argv:
@@ -2787,7 +2849,7 @@ def _validate_build_argv(
         return
     valid = (
         len(argv) == 7
-        and argv[0] == "aarch64-linux-gnu-gcc"
+        and argv[0] == toolchain.compiler
         and argv[1] == "-pthread"
         and _path_ends_with(argv[2], object_suffix)
         and argv[3] == "-o"
@@ -2797,8 +2859,8 @@ def _validate_build_argv(
     if not valid:
         raise ValueError(f"invalid target linker argv for {test.test_id}")
     if strict_paths and [argv[2], argv[4]] != [
-        f"target/posix/aarch64/obj/{object_suffix}",
-        f"target/posix/aarch64/bin/{executable_suffix}",
+        f"target/posix/{architecture}/obj/{object_suffix}",
+        f"target/posix/{architecture}/bin/{executable_suffix}",
     ]:
         raise ValueError(f"invalid production linker path for {test.test_id}")
 
@@ -2877,6 +2939,7 @@ def _parse_build_results(
     *,
     strict_paths: bool = False,
     revision: str | None = None,
+    architecture: str = "aarch64",
 ) -> tuple[BuildResult, ...]:
     expected_fields = {
         "test_id",
@@ -2959,6 +3022,7 @@ def _parse_build_results(
             stderr,
             strict_paths=strict_paths,
             revision=revision,
+            architecture=architecture,
         )
         identity = (test_id, stage_name)
         if identity in seen:
@@ -3041,6 +3105,7 @@ def _load_build_results(
     *,
     strict_paths: bool = False,
     revision: str | None = None,
+    architecture: str = "aarch64",
 ) -> tuple[BuildResult, ...]:
     with _open_build_results_source(source) as source_file, tempfile.TemporaryFile(
         "w+b"
@@ -3054,6 +3119,7 @@ def _load_build_results(
             tests,
             strict_paths=strict_paths,
             revision=revision,
+            architecture=architecture,
         )
         if _build_results_fingerprint(os.fstat(source_file.fileno())) != fingerprint:
             raise ValueError("build-results.ndjson changed while being verified")
@@ -3142,6 +3208,7 @@ def _verify_open_stage(
     expected_tests: Sequence[SuiteTest] | None = None,
     expected_shell_tests: Sequence[str] | None = None,
     strict_command_paths: bool = False,
+    architecture: str | None = None,
 ) -> BuildSummary:
     _validate_stage_tree(stage)
     _stage_size(stage)
@@ -3169,6 +3236,10 @@ def _verify_open_stage(
     finally:
         os.close(manifest_descriptor)
     metadata, tests = parse_manifest(manifest_data)
+    selected_architecture = architecture or metadata.architecture
+    toolchain = toolchain_for_architecture(selected_architecture)
+    if metadata.architecture != selected_architecture:
+        raise ValueError("stage architecture does not match verification architecture")
     if expected_metadata is not None:
         expected_provenance = replace(
             expected_metadata,
@@ -3195,6 +3266,7 @@ def _verify_open_stage(
             tests,
             strict_paths=strict_command_paths,
             revision=metadata.revision,
+            architecture=selected_architecture,
         )
     finally:
         os.close(build_results_descriptor)
@@ -3300,12 +3372,19 @@ def _verify_open_stage(
         if verify_architecture:
             header = _run_readelf(
                 readelf_runner,
-                ["aarch64-linux-gnu-readelf", "-h", str(executable)],
+                [toolchain.readelf, "-h", str(executable)],
                 test.binary,
                 (stage_descriptor,),
             )
-            if "AArch64" not in header:
-                raise ValueError(f"staged binary is not AArch64 ELF: {test.binary}")
+            expected_machine = {
+                "aarch64": "AArch64",
+                "riscv64": "RISC-V",
+                "x86_64": "Advanced Micro Devices X86-64",
+            }[selected_architecture]
+            if expected_machine not in header:
+                raise ValueError(
+                    f"staged binary is not {selected_architecture} ELF: {test.binary}"
+                )
             elf_files.append(executable)
     actual_binaries = {
         path.relative_to(stage).as_posix()
@@ -3327,12 +3406,19 @@ def _verify_open_stage(
         if verify_architecture:
             header = _run_readelf(
                 readelf_runner,
-                ["aarch64-linux-gnu-readelf", "-h", str(library)],
+                [toolchain.readelf, "-h", str(library)],
                 library.name,
                 (stage_descriptor,),
             )
-            if "AArch64" not in header:
-                raise ValueError(f"staged runtime is not AArch64 ELF: {library.name}")
+            expected_machine = {
+                "aarch64": "AArch64",
+                "riscv64": "RISC-V",
+                "x86_64": "Advanced Micro Devices X86-64",
+            }[selected_architecture]
+            if expected_machine not in header:
+                raise ValueError(
+                    f"staged runtime is not {selected_architecture} ELF: {library.name}"
+                )
             elf_files.append(library)
     actual_runtime = {f"lib/{name}" for name in runtime_files}
     if actual_runtime != set(expected_runtime):
@@ -3374,7 +3460,7 @@ def _verify_open_stage(
         for elf_file in elf_files:
             dependencies = _run_readelf(
                 readelf_runner,
-                readelf_command("aarch64-linux-gnu-readelf", elf_file),
+                readelf_command(toolchain.readelf, elf_file),
                 elf_file.name,
                 (stage_descriptor,),
             )
@@ -3431,6 +3517,7 @@ def verify_stage(
     expected_tests: Sequence[SuiteTest] | None = None,
     expected_shell_tests: Sequence[str] | None = None,
     strict_command_paths: bool = False,
+    architecture: str | None = None,
 ) -> BuildSummary:
     stage = Path(os.path.abspath(stage))
     if not stage.name:
@@ -3452,6 +3539,7 @@ def verify_stage(
             expected_tests=expected_tests,
             expected_shell_tests=expected_shell_tests,
             strict_command_paths=strict_command_paths,
+            architecture=architecture,
         )
     finally:
         if stage_descriptor is not None:

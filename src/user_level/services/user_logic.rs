@@ -18,7 +18,20 @@ pub(crate) const USER_FXFS_MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const USER_ELF_HEADER_SIZE: usize = 64;
 pub(crate) const USER_ELF_PHDR_SIZE: usize = 56;
 pub(crate) const USER_ELF_MAX_PHDRS: usize = 16;
+#[cfg(any(test, target_arch = "aarch64"))]
 pub(crate) const USER_ELF_MACHINE_AARCH64: u16 = 183;
+#[cfg(target_arch = "riscv64")]
+pub(crate) const USER_ELF_MACHINE_RISCV64: u16 = 243;
+#[cfg(target_arch = "x86_64")]
+pub(crate) const USER_ELF_MACHINE_X86_64: u16 = 62;
+#[cfg(test)]
+pub(crate) const USER_ELF_MACHINE: u16 = USER_ELF_MACHINE_AARCH64;
+#[cfg(all(not(test), target_arch = "aarch64"))]
+pub(crate) const USER_ELF_MACHINE: u16 = USER_ELF_MACHINE_AARCH64;
+#[cfg(all(not(test), target_arch = "riscv64"))]
+pub(crate) const USER_ELF_MACHINE: u16 = USER_ELF_MACHINE_RISCV64;
+#[cfg(all(not(test), target_arch = "x86_64"))]
+pub(crate) const USER_ELF_MACHINE: u16 = USER_ELF_MACHINE_X86_64;
 pub(crate) const USER_ELF_TYPE_EXEC: u16 = 2;
 pub(crate) const USER_ELF_TYPE_DYN: u16 = 3;
 pub(crate) const USER_SVC_MAX_NAME_LEN: usize = 64;
@@ -235,7 +248,7 @@ pub(crate) fn elf_type_valid(elf_type: u16) -> bool {
 }
 
 pub(crate) fn elf_machine_valid(machine: u16) -> bool {
-    smros_user_elf_machine_valid_body!(machine, USER_ELF_MACHINE_AARCH64)
+    smros_user_elf_machine_valid_body!(machine, USER_ELF_MACHINE)
 }
 
 pub(crate) fn elf_entry_valid(entry: u64) -> bool {

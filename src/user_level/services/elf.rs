@@ -1,4 +1,4 @@
-//! Minimal ELF64/AArch64 image parser for boot userspace components.
+//! Minimal ELF64 image parser for boot userspace components.
 //!
 //! This loader intentionally handles only the first bring-up shape SMROS uses:
 //! little-endian ELF64 images with a small program-header table, PT_LOAD
@@ -17,7 +17,20 @@ pub const ELF_HEADER_SIZE: usize = 64;
 pub const ELF_PHDR_SIZE: usize = 56;
 pub const ELF_MAX_PHDRS: usize = 16;
 pub const ELF_MAX_LOAD_SEGMENTS: usize = 4;
+#[cfg(any(test, target_arch = "aarch64"))]
 pub const ELF_MACHINE_AARCH64: u16 = 183;
+#[cfg(target_arch = "riscv64")]
+pub const ELF_MACHINE_RISCV64: u16 = 243;
+#[cfg(target_arch = "x86_64")]
+pub const ELF_MACHINE_X86_64: u16 = 62;
+#[cfg(test)]
+pub const ELF_MACHINE: u16 = ELF_MACHINE_AARCH64;
+#[cfg(all(not(test), target_arch = "aarch64"))]
+pub const ELF_MACHINE: u16 = ELF_MACHINE_AARCH64;
+#[cfg(all(not(test), target_arch = "riscv64"))]
+pub const ELF_MACHINE: u16 = ELF_MACHINE_RISCV64;
+#[cfg(all(not(test), target_arch = "x86_64"))]
+pub const ELF_MACHINE: u16 = ELF_MACHINE_X86_64;
 
 const ELF_CLASS_64: u8 = 2;
 const ELF_DATA_LSB: u8 = 1;
@@ -443,7 +456,7 @@ pub fn build_trampoline_elf(entry: u64) -> Vec<u8> {
     image[16] = 2;
 
     write_u16_le(&mut image, 16, ELF_TYPE_EXEC);
-    write_u16_le(&mut image, 18, ELF_MACHINE_AARCH64);
+    write_u16_le(&mut image, 18, ELF_MACHINE);
     write_u32_le(&mut image, 20, ELF_VERSION_CURRENT as u32);
     write_u64_le(&mut image, 24, entry);
     write_u64_le(&mut image, 32, ELF_HEADER_SIZE as u64);

@@ -11146,12 +11146,12 @@ pub(crate) fn linux_clone_tid_destination_valid(pointer: usize) -> bool {
         && linux_user_range_writable(pointer, core::mem::size_of::<u32>())
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 fn linux_user_range_writable(address: usize, len: usize) -> bool {
     linux_process_memory::user_range_writable(address, len)
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub(crate) fn linux_user_range_readable(address: usize, len: usize) -> bool {
     linux_process_memory::user_range_readable(address, len)
 }

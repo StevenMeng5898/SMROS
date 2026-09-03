@@ -43,7 +43,16 @@ const POSIX_COMPAT_REGULAR_USER_ENV: &str = "SMROS_POSIX_TEST_USER=regular";
 const MAX_TIMEOUT_MS: u32 = i32::MAX as u32;
 const EMPTY_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const MANIFEST_HEADER: &str = "SMROS_POSIX_MANIFEST\t1";
+// Host unit tests use the canonical fixture below; deployed guests report their
+// actual target so a stage built for another architecture cannot be executed.
+#[cfg(test)]
 const POSIX_EVENT_ARCHITECTURE: &str = "aarch64";
+#[cfg(all(not(test), target_arch = "aarch64"))]
+const POSIX_EVENT_ARCHITECTURE: &str = "aarch64";
+#[cfg(all(not(test), target_arch = "riscv64"))]
+const POSIX_EVENT_ARCHITECTURE: &str = "riscv64";
+#[cfg(all(not(test), target_arch = "x86_64"))]
+const POSIX_EVENT_ARCHITECTURE: &str = "x86_64";
 const METADATA_KEYS: [&str; 9] = [
     "source",
     "revision",
@@ -1543,7 +1552,7 @@ fn build_metadata(
 }
 
 fn validate_provenance(metadata: &PosixManifestMetadata) -> Result<(), PosixTestError> {
-    if metadata.architecture != "aarch64"
+    if metadata.architecture != POSIX_EVENT_ARCHITECTURE
         || !lower_hex(&metadata.revision, 40)
         || !lower_hex(&metadata.smros_commit, 40)
         || !lower_hex(&metadata.patch_sha256, 64)

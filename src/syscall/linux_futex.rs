@@ -1,11 +1,11 @@
 use crate::kernel_lowlevel::thread;
 use crate::kernel_objects::scheduler;
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use super::linux_process_memory;
 use super::linux_task;
 use super::linux_task::{LinuxBlockReason, LinuxRestartTimeout};
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use super::syscall::linux_user_range_readable;
 use super::syscall::{SysError, SysResult};
 
@@ -42,13 +42,13 @@ pub(crate) fn sys_futex(
     _uaddr2: usize,
     val3: u32,
 ) -> SysResult {
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
     {
         let _ = (uaddr, op, val, timeout, val3);
         return Err(SysError::ENOSYS);
     }
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     {
         if crate::kernel_lowlevel::smp::current_cpu_id() != 0 {
             return Err(SysError::EINVAL);
@@ -103,7 +103,7 @@ pub(crate) fn restartable_wait_operation(op: u32) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 fn wait(
     uaddr: usize,
     key: usize,
@@ -235,7 +235,7 @@ fn wait(
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 fn read_deadline(
     timeout_pointer: usize,
     now_monotonic: u64,
@@ -271,7 +271,7 @@ fn read_deadline(
     .ok_or(SysError::EINVAL)
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 fn wake(address: usize, requested: usize, bitset: u32) -> SysResult {
     if !futex_bitset_valid(bitset) {
         return Err(SysError::EINVAL);
@@ -296,7 +296,7 @@ fn wake(address: usize, requested: usize, bitset: u32) -> SysResult {
 }
 
 pub(crate) fn on_timer_tick(now_monotonic: u64, now_realtime: u64) {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     if crate::kernel_lowlevel::smp::current_cpu_id() == 0 {
         while let Some((tid, scheduler_thread)) =
             with_queue(|queue| queue.expire_one(now_monotonic, now_realtime))
@@ -324,7 +324,7 @@ pub(crate) fn remove_task_waiters(tid: usize, scheduler_thread: usize) -> usize 
     with_queue(|queue| queue.remove_task(tid, scheduler_thread))
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub(crate) fn wake_address(address: usize, requested: usize, bitset: u32) -> SysResult {
     wake(
         linux_process_memory::futex_address_key(address),

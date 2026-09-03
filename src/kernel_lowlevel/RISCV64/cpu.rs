@@ -104,6 +104,19 @@ pub fn read_exception_return_pc() -> u64 {
 }
 
 #[inline(always)]
+pub fn read_exception_return_state() -> u64 {
+    let state: usize;
+    unsafe {
+        core::arch::asm!(
+            "csrr {state}, sstatus",
+            state = out(reg) state,
+            options(nomem, nostack),
+        );
+    }
+    state as u64
+}
+
+#[inline(always)]
 pub fn read_user_stack_pointer() -> u64 {
     0
 }

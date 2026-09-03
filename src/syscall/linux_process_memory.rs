@@ -1382,6 +1382,7 @@ pub(crate) fn clone_for_fork(
                 );
                 error
             })?;
+        #[cfg(target_arch = "aarch64")]
         address_space.begin_deferred_user_updates();
         #[cfg(not(target_arch = "aarch64"))]
         let address_space = FallbackAddressSpace::new(child_pid)?;
@@ -1720,6 +1721,7 @@ pub(crate) fn clone_for_fork(
             }
         }
         child.brk.pages = brk_pages;
+        #[cfg(target_arch = "aarch64")]
         child.address_space.end_deferred_user_updates();
         crate::kernel_lowlevel::cpu::sync_instruction_cache();
         runtime.memories.push(child);
