@@ -56,6 +56,15 @@ class RiscvArchitectureContractTests(unittest.TestCase):
             r"write_u16_le\(&mut image, 18, ELF_MACHINE\);",
         )
 
+    def test_riscv_baseline_validates_riscv_build_rows_and_platform(self):
+        source = (REPOSITORY_ROOT / "scripts/posix/baseline.py").read_text()
+        self.assertRegex(
+            source,
+            r"_load_build_results\(\s*stage / \"build-results\.ndjson\",\s*tests,\s*"
+            r"architecture=metadata\.architecture",
+        )
+        self.assertIn('f"{architecture}-linux-reference"', source)
+
 
 if __name__ == "__main__":
     unittest.main()

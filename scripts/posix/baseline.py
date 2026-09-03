@@ -60,6 +60,10 @@ _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
 
 
+def _platform_for_architecture(architecture: str) -> str:
+    return f"{architecture}-linux-reference"
+
+
 @dataclass(frozen=True)
 class BaselineResult:
     attempts: tuple[RuntimeAttempt, ...]
@@ -1402,7 +1406,7 @@ def run_runtime_attempt(
         test_id=test.test_id,
         group=test.group,
         api=test.api,
-        platform=PLATFORM,
+        platform=_platform_for_architecture(metadata.architecture),
         build_status=build_status,
         link_status=link_status,
         launch_status="launch-error" if launch_error is not None else "launched",
@@ -1516,7 +1520,7 @@ def _interrupted_attempt(
         test_id=test.test_id,
         group=test.group,
         api=test.api,
-        platform=PLATFORM,
+        platform=_platform_for_architecture(metadata.architecture),
         build_status=build_status,
         link_status=link_status,
         launch_status=launch_status,
@@ -1698,7 +1702,9 @@ def _load_stage_identity(stage: Path) -> _StageIdentity:
         seen.add(relative)
         runtime.append((relative, digest))
     build_results = _load_build_results(
-        stage / "build-results.ndjson", tests
+        stage / "build-results.ndjson",
+        tests,
+        architecture=metadata.architecture,
     )
     if _build_results_digest(build_results) != metadata.build_results_sha256:
         raise ValueError("build results checksum mismatch")
@@ -2277,7 +2283,7 @@ def _terminal_record(
         "completed_count": len(attempts),
         "manifest_sha256": identity.metadata.manifest_sha256,
         "patch_sha256": identity.metadata.patch_sha256,
-        "platform": PLATFORM,
+        "platform": _platform_for_architecture(identity.metadata.architecture),
         "qemu": str(qemu),
         "record_type": "run",
         "revision": identity.metadata.revision,
