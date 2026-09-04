@@ -3505,7 +3505,7 @@ impl MemorySyscallState {
         objects: &mut Vec<u32>,
         process_state: LinuxProcessForkState,
     ) -> bool {
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-fork",
             "resource state install begin pid={} current={}",
             pid,
@@ -3546,7 +3546,7 @@ impl MemorySyscallState {
             rlimit_memlock: process_state.rlimit_memlock,
             mlock_future: false,
         });
-        crate::kobj_info!("posix-fork", "resource state install pushed pid={}", pid);
+        crate::kobj_debug!("posix-fork", "resource state install pushed pid={}", pid);
         true
     }
 
@@ -3920,11 +3920,11 @@ pub(crate) fn install_linux_resource_clone(
     objects: &mut Vec<u32>,
     process_state: LinuxProcessForkState,
 ) -> bool {
-    crate::kobj_info!("posix-fork", "resource state access begin pid={}", pid);
+    crate::kobj_debug!("posix-fork", "resource state access begin pid={}", pid);
     let state = memory_state();
-    crate::kobj_info!("posix-fork", "resource state access ready pid={}", pid);
+    crate::kobj_debug!("posix-fork", "resource state access ready pid={}", pid);
     let installed = state.install_process_resources(pid, descriptors, objects, process_state);
-    crate::kobj_info!("posix-fork", "resource state access done pid={} installed={}", pid, installed);
+    crate::kobj_debug!("posix-fork", "resource state access done pid={} installed={}", pid, installed);
     installed
 }
 
@@ -11097,7 +11097,7 @@ fn sys_fork_with_child_tid(
             set_child_tid,
             clear_child_tid,
         )?;
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-fork",
             "riscv syscall return parent={} child={}",
             parent_pid,
@@ -11384,7 +11384,7 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
                     wstatus,
                     include_stopped,
                 )? {
-                    crate::kobj_info!(
+                    crate::kobj_debug!(
                         "posix-wait",
                         "riscv wait complete parent={} child={}",
                         process.pid,

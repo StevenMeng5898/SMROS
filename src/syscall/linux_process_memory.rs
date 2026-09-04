@@ -1,7 +1,11 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(target_arch = "aarch64")]
 use core::marker::PhantomData;
+
+#[cfg(target_arch = "riscv64")]
+use core::sync::atomic::AtomicBool;
 
 use crate::kernel_lowlevel::memory::{PageFrameAllocator, PAGE_SIZE};
 #[cfg(target_arch = "aarch64")]
@@ -353,10 +357,20 @@ pub(crate) struct LinuxProcessMemory {
 #[cfg(not(target_arch = "aarch64"))]
 struct FallbackAddressSpace {
     root_paddr: u64,
+    #[cfg(target_arch = "riscv64")]
+    cached_leaf_table: u64,
+    #[cfg(target_arch = "riscv64")]
+    cached_vpn2: usize,
+    #[cfg(target_arch = "riscv64")]
+    cached_vpn1: usize,
 }
 
 #[cfg(target_arch = "riscv64")]
-const RISCV_PAGE_TABLE_COUNT: usize = 512;
+// POSIX condition-variable stress cases hold up to 200 forked address spaces
+// before reaping them. Each address space currently needs roughly forty Sv39
+// tables for the staged user mappings, so keep bounded storage for that peak
+// plus headroom for concurrent workloads.
+const RISCV_PAGE_TABLE_COUNT: usize = 16384;
 
 #[cfg(target_arch = "riscv64")]
 const RISCV_PTE_V: u64 = 1 << 0;
@@ -392,22 +406,72 @@ impl RiscvPageTable {
 static mut RISCV_PAGE_TABLE_POOL: [RiscvPageTable; RISCV_PAGE_TABLE_COUNT] =
     [const { RiscvPageTable::new() }; RISCV_PAGE_TABLE_COUNT];
 #[cfg(target_arch = "riscv64")]
-static RISCV_PAGE_TABLE_NEXT: AtomicUsize = AtomicUsize::new(0);
+static RISCV_PAGE_TABLE_USED: [AtomicBool; RISCV_PAGE_TABLE_COUNT] =
+    [const { AtomicBool::new(false) }; RISCV_PAGE_TABLE_COUNT];
 
 #[cfg(target_arch = "riscv64")]
 fn reset_riscv_page_tables() {
-    RISCV_PAGE_TABLE_NEXT.store(0, Ordering::Release);
+    for index in 0..RISCV_PAGE_TABLE_COUNT {
+        if RISCV_PAGE_TABLE_USED[index].swap(false, Ordering::AcqRel) {
+            let table = unsafe {
+                core::ptr::addr_of_mut!(RISCV_PAGE_TABLE_POOL)
+                    .cast::<RiscvPageTable>()
+                    .add(index)
+            };
+            unsafe { table.write(RiscvPageTable::new()) };
+        }
+    }
 }
 
 #[cfg(target_arch = "riscv64")]
 fn alloc_riscv_page_table() -> Option<u64> {
-    let index = RISCV_PAGE_TABLE_NEXT.fetch_add(1, Ordering::AcqRel);
-    if index >= RISCV_PAGE_TABLE_COUNT {
+    for index in 0..RISCV_PAGE_TABLE_COUNT {
+        if RISCV_PAGE_TABLE_USED[index]
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let table = unsafe {
+                core::ptr::addr_of_mut!(RISCV_PAGE_TABLE_POOL)
+                    .cast::<RiscvPageTable>()
+                    .add(index)
+            };
+            unsafe { table.write(RiscvPageTable::new()) };
+            return Some(table as u64);
+        }
+    }
+    None
+}
+
+#[cfg(target_arch = "riscv64")]
+fn riscv_page_table_index(paddr: u64) -> Option<usize> {
+    let base = core::ptr::addr_of!(RISCV_PAGE_TABLE_POOL) as u64;
+    let size = core::mem::size_of::<RiscvPageTable>() as u64;
+    let offset = paddr.checked_sub(base)?;
+    if offset % size != 0 {
         return None;
     }
-    let table = unsafe { core::ptr::addr_of_mut!(RISCV_PAGE_TABLE_POOL).cast::<RiscvPageTable>().add(index) };
-    unsafe { table.write(RiscvPageTable::new()) };
-    Some(table as u64)
+    let index = usize::try_from(offset / size).ok()?;
+    (index < RISCV_PAGE_TABLE_COUNT).then_some(index)
+}
+
+#[cfg(target_arch = "riscv64")]
+unsafe fn free_riscv_page_table(paddr: u64) {
+    let Some(index) = riscv_page_table_index(paddr) else {
+        return;
+    };
+    if !RISCV_PAGE_TABLE_USED[index].swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let table = core::ptr::addr_of_mut!(RISCV_PAGE_TABLE_POOL)
+        .cast::<RiscvPageTable>()
+        .add(index);
+    let entries = (*table).entries;
+    for entry in entries {
+        if let Some(child) = riscv_table_from_pte(entry) {
+            free_riscv_page_table(child as u64);
+        }
+    }
+    table.write(RiscvPageTable::new());
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -443,7 +507,11 @@ fn riscv_leaf_pte(paddr: u64, readable: bool, writable: bool, executable: bool, 
 }
 
 #[cfg(target_arch = "riscv64")]
-unsafe fn riscv_leaf_slot(root_paddr: u64, vaddr: usize, create: bool) -> Option<*mut u64> {
+unsafe fn riscv_leaf_table(
+    root_paddr: u64,
+    vaddr: usize,
+    create: bool,
+) -> Option<*mut RiscvPageTable> {
     let vpn = [
         (vaddr >> 12) & 0x1ff,
         (vaddr >> 21) & 0x1ff,
@@ -463,7 +531,14 @@ unsafe fn riscv_leaf_slot(root_paddr: u64, vaddr: usize, create: bool) -> Option
             table = riscv_table_from_pte(entry)?;
         }
     }
-    Some((*table).entries.as_mut_ptr().add(vpn[0]))
+    Some(table)
+}
+
+#[cfg(target_arch = "riscv64")]
+unsafe fn riscv_leaf_slot(root_paddr: u64, vaddr: usize, create: bool) -> Option<*mut u64> {
+    let table = riscv_leaf_table(root_paddr, vaddr, create)?;
+    let vpn0 = (vaddr >> 12) & 0x1ff;
+    Some((*table).entries.as_mut_ptr().add(vpn0))
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -560,7 +635,12 @@ impl FallbackAddressSpace {
                 virtio_mmio_index += 1;
             }
         }
-        Ok(Self { root_paddr })
+        Ok(Self {
+            root_paddr,
+            cached_leaf_table: 0,
+            cached_vpn2: usize::MAX,
+            cached_vpn1: usize::MAX,
+        })
     }
 
     fn root_paddr(&self) -> u64 {
@@ -571,7 +651,7 @@ impl FallbackAddressSpace {
         1
     }
 
-    fn map_user_page(
+    fn map_user_page_no_flush(
         &mut self,
         vaddr: usize,
         pfn: u64,
@@ -581,17 +661,43 @@ impl FallbackAddressSpace {
     ) -> Result<(), SysError> {
         let paddr = crate::kernel_lowlevel::memory::PageFrameAllocator::pfn_address(pfn)
             .ok_or(SysError::ENOMEM)?;
+        let vpn2 = (vaddr >> 30) & 0x1ff;
+        let vpn1 = (vaddr >> 21) & 0x1ff;
+        if self.cached_leaf_table == 0
+            || self.cached_vpn2 != vpn2
+            || self.cached_vpn1 != vpn1
+        {
+            let table = unsafe { riscv_leaf_table(self.root_paddr, vaddr, true) }
+                .ok_or(SysError::ENOMEM)?;
+            self.cached_leaf_table = table as u64;
+            self.cached_vpn2 = vpn2;
+            self.cached_vpn1 = vpn1;
+        }
+        let vpn0 = (vaddr >> 12) & 0x1ff;
         unsafe {
-            riscv_map_page(
-                self.root_paddr,
-                vaddr,
-                paddr as u64,
-                readable,
-                writable,
-                executable,
-                true,
-            )
-        }?;
+            let slot = (self.cached_leaf_table as *mut RiscvPageTable)
+                .as_mut()
+                .ok_or(SysError::ENOMEM)?
+                .entries
+                .as_mut_ptr()
+                .add(vpn0);
+            if *slot & RISCV_PTE_V != 0 {
+                return Err(SysError::EINVAL);
+            }
+            *slot = riscv_leaf_pte(paddr as u64, readable, writable, executable, true);
+        }
+        Ok(())
+    }
+
+    fn map_user_page(
+        &mut self,
+        vaddr: usize,
+        pfn: u64,
+        readable: bool,
+        writable: bool,
+        executable: bool,
+    ) -> Result<(), SysError> {
+        self.map_user_page_no_flush(vaddr, pfn, readable, writable, executable)?;
         crate::kernel_lowlevel::cpu::flush_tlb();
         Ok(())
     }
@@ -676,6 +782,13 @@ impl FallbackAddressSpace {
 
     fn writable_physical(&self, vaddr: usize) -> Option<usize> {
         unsafe { riscv_translate_user(self.root_paddr, vaddr, true) }
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+impl Drop for FallbackAddressSpace {
+    fn drop(&mut self) {
+        unsafe { free_riscv_page_table(self.root_paddr) };
     }
 }
 
@@ -1663,14 +1776,14 @@ pub(crate) fn clone_for_fork(
     child_pid: usize,
     mut shared_attachments: Vec<LinuxSharedAttachmentClone>,
 ) -> Result<u64, SysError> {
-    crate::kobj_info!(
+    crate::kobj_debug!(
         "posix-fork",
         "riscv clone begin parent={} child={}",
         parent_pid,
         child_pid
     );
     let result = with_runtime(|runtime| {
-        crate::kobj_info!("posix-fork", "riscv clone runtime lock acquired");
+        crate::kobj_debug!("posix-fork", "riscv clone runtime lock acquired");
         if runtime
             .memories
             .iter()
@@ -1711,7 +1824,7 @@ pub(crate) fn clone_for_fork(
             );
             error
         })?;
-        crate::kobj_info!("posix-fork", "riscv clone parent promotion complete");
+        crate::kobj_debug!("posix-fork", "riscv clone parent promotion complete");
         let parent = runtime
             .memories
             .get(parent_index)
@@ -1737,7 +1850,7 @@ pub(crate) fn clone_for_fork(
         address_space.begin_deferred_user_updates();
         #[cfg(not(target_arch = "aarch64"))]
         let address_space = FallbackAddressSpace::new(child_pid)?;
-        crate::kobj_info!("posix-fork", "riscv clone child root allocated");
+        crate::kobj_debug!("posix-fork", "riscv clone child root allocated");
         let root_paddr = address_space.root_paddr();
         if root_paddr == 0 || root_paddr == parent.address_space.root_paddr() {
             crate::kobj_info!(
@@ -1793,15 +1906,9 @@ pub(crate) fn clone_for_fork(
                     shared_attachments.len()
                 );
                 SysError::ENOMEM
-            })?;
+        })?;
 
         for mapping in parent.mappings.iter() {
-            crate::kobj_info!(
-                "posix-fork",
-                "riscv clone mapping addr={:#x} pages={}",
-                mapping.addr,
-                mapping.pages.len()
-            );
             let source = mapping.source.try_clone_for_fork().map_err(|_| {
                 crate::kobj_info!(
                     "posix-fork",
@@ -1991,7 +2098,7 @@ pub(crate) fn clone_for_fork(
             return Err(SysError::EINVAL);
         }
 
-        crate::kobj_info!("posix-fork", "riscv clone mappings complete");
+        crate::kobj_debug!("posix-fork", "riscv clone mappings complete");
 
         #[cfg(target_arch = "aarch64")]
         let brk_pages = if parent
@@ -2084,7 +2191,7 @@ pub(crate) fn clone_for_fork(
             }
         }
         child.brk.pages = brk_pages;
-        crate::kobj_info!("posix-fork", "riscv clone brk complete");
+        crate::kobj_debug!("posix-fork", "riscv clone brk complete");
         #[cfg(target_arch = "aarch64")]
         child.address_space.end_deferred_user_updates();
         crate::kernel_lowlevel::cpu::sync_instruction_cache();
@@ -2204,7 +2311,14 @@ impl super::linux_process::LinuxForkPageOps for LinuxProcessForkPageOps<'_> {
         page: Self::Page,
         prot: usize,
     ) -> Result<(), Self::Error> {
-        self.memory.map_page(address, page.pfn(), prot)
+        #[cfg(target_arch = "riscv64")]
+        {
+            self.memory.map_page_no_flush(address, page.pfn(), prot)
+        }
+        #[cfg(not(target_arch = "riscv64"))]
+        {
+            self.memory.map_page(address, page.pfn(), prot)
+        }
     }
 
     #[cfg(not(target_arch = "aarch64"))]
@@ -2928,6 +3042,18 @@ impl LinuxProcessMemory {
             .map_user_page(address, pfn, readable, writable, executable)
     }
 
+    #[cfg(target_arch = "riscv64")]
+    fn map_page_no_flush(
+        &mut self,
+        address: usize,
+        pfn: u64,
+        prot: usize,
+    ) -> Result<(), SysError> {
+        let (readable, writable, executable) = Self::page_permissions(prot);
+        self.address_space
+            .map_user_page_no_flush(address, pfn, readable, writable, executable)
+    }
+
     fn protect_page(&mut self, address: usize, prot: usize) -> Result<(), SysError> {
         let (readable, writable, executable) = Self::page_permissions(prot);
         #[cfg(target_arch = "aarch64")]
@@ -3495,13 +3621,21 @@ impl LinuxProcessMemory {
             for (page_index, page) in pages.iter().enumerate() {
                 let page_address = address + page_index * PAGE_SIZE;
                 let prot = linux_page_protection_for_backing(*page, protection(page_index));
-                if let Err(error) = self.map_page(page_address, page.pfn(), prot) {
+                #[cfg(target_arch = "riscv64")]
+                let result = self.map_page_no_flush(page_address, page.pfn(), prot);
+                #[cfg(not(target_arch = "riscv64"))]
+                let result = self.map_page(page_address, page.pfn(), prot);
+                if let Err(error) = result {
                     for rollback in (0..mapped).rev() {
                         let _ = self.unmap_page(address + rollback * PAGE_SIZE);
                     }
                     return Err(error);
                 }
                 mapped += 1;
+            }
+            #[cfg(target_arch = "riscv64")]
+            if mapped != 0 {
+                crate::kernel_lowlevel::cpu::flush_tlb();
             }
         }
         if private_count != 0 {

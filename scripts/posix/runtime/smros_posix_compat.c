@@ -4588,6 +4588,77 @@ int pthread_cond_destroy(pthread_cond_t *cond) {
     return result;
 }
 
+/* The RISC-V cross toolchain resolves these APIs at GLIBC_2.27. Keep the
+ * same implementations available at GLIBC_2.17 for AArch64 binaries. */
+#if defined(__aarch64__) || defined(__riscv)
+int smros_pthread_cond_init_glibc217(
+    pthread_cond_t *cond,
+    const pthread_condattr_t *attr
+) {
+    return pthread_cond_init(cond, attr);
+}
+int smros_pthread_cond_wait_glibc217(
+    pthread_cond_t *cond,
+    pthread_mutex_t *mutex
+) {
+    return pthread_cond_wait(cond, mutex);
+}
+int smros_pthread_cond_timedwait_glibc217(
+    pthread_cond_t *cond,
+    pthread_mutex_t *mutex,
+    const struct timespec *deadline
+) {
+    return pthread_cond_timedwait(cond, mutex, deadline);
+}
+int smros_pthread_cond_broadcast_glibc217(pthread_cond_t *cond) {
+    return pthread_cond_broadcast(cond);
+}
+int smros_pthread_cond_signal_glibc217(pthread_cond_t *cond) {
+    return pthread_cond_signal(cond);
+}
+int smros_pthread_cond_destroy_glibc217(pthread_cond_t *cond) {
+    return pthread_cond_destroy(cond);
+}
+int smros_pthread_mutex_init_glibc217(
+    pthread_mutex_t *mutex,
+    const pthread_mutexattr_t *attr
+) {
+    return pthread_mutex_init(mutex, attr);
+}
+int smros_pthread_mutex_lock_glibc217(pthread_mutex_t *mutex) {
+    return pthread_mutex_lock(mutex);
+}
+int smros_pthread_mutex_unlock_glibc217(pthread_mutex_t *mutex) {
+    return pthread_mutex_unlock(mutex);
+}
+int smros_pthread_mutex_destroy_glibc217(pthread_mutex_t *mutex) {
+    return pthread_mutex_destroy(mutex);
+}
+int smros_sigaction_glibc217(
+    int signum,
+    const struct sigaction *action,
+    struct sigaction *old_action
+) {
+    return sigaction(signum, action, old_action);
+}
+int smros_kill_glibc217(pid_t pid, int sig) {
+    return kill(pid, sig);
+}
+
+__asm__(".symver smros_pthread_cond_init_glibc217,pthread_cond_init@GLIBC_2.17");
+__asm__(".symver smros_pthread_cond_wait_glibc217,pthread_cond_wait@GLIBC_2.17");
+__asm__(".symver smros_pthread_cond_timedwait_glibc217,pthread_cond_timedwait@GLIBC_2.17");
+__asm__(".symver smros_pthread_cond_broadcast_glibc217,pthread_cond_broadcast@GLIBC_2.17");
+__asm__(".symver smros_pthread_cond_signal_glibc217,pthread_cond_signal@GLIBC_2.17");
+__asm__(".symver smros_pthread_cond_destroy_glibc217,pthread_cond_destroy@GLIBC_2.17");
+__asm__(".symver smros_pthread_mutex_init_glibc217,pthread_mutex_init@GLIBC_2.17");
+__asm__(".symver smros_pthread_mutex_lock_glibc217,pthread_mutex_lock@GLIBC_2.17");
+__asm__(".symver smros_pthread_mutex_unlock_glibc217,pthread_mutex_unlock@GLIBC_2.17");
+__asm__(".symver smros_pthread_mutex_destroy_glibc217,pthread_mutex_destroy@GLIBC_2.17");
+__asm__(".symver smros_sigaction_glibc217,sigaction@GLIBC_2.17");
+__asm__(".symver smros_kill_glibc217,kill@GLIBC_2.17");
+#endif
+
 static smros_pthread_barrier_record *smros_find_pthread_barrier_record(
     pthread_barrier_t *barrier
 ) {

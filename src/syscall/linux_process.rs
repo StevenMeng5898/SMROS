@@ -305,7 +305,7 @@ pub(crate) fn wait_current(
                 .processes
                 .wait_outcome_with_options(parent.pid, selector, include_stopped)
         });
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-wait",
             "riscv wait probe parent={} selector={:?} outcome={:?} current={}",
             parent.pid,
@@ -317,7 +317,7 @@ pub(crate) fn wait_current(
             return Ok(outcome);
         }
 
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-wait",
             "block parent={} selector={:?} parent_addr={:#x} selector_addr={:#x}",
             parent.pid,
@@ -340,7 +340,7 @@ pub(crate) fn wait_current(
             return Ok(rechecked);
         }
         scheduler::schedule();
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-wait",
             "riscv wait resumed parent={} current={} parent_addr={:#x} selector_addr={:#x}",
             parent.pid,
@@ -630,7 +630,7 @@ impl LinuxResourceClone {
 
     pub(crate) fn commit(mut self, child_pid: usize) -> Result<(), SysError> {
         let process_state = self.process_state.take().ok_or(SysError::EAGAIN)?;
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-fork",
             "riscv resource commit begin child={} descriptors={} objects={}",
             child_pid,
@@ -646,7 +646,7 @@ impl LinuxResourceClone {
             crate::kobj_err!("posix-fork", "riscv resource commit rejected child={}", child_pid);
             return Err(SysError::EBUSY);
         }
-        crate::kobj_info!("posix-fork", "riscv resource commit installed child={}", child_pid);
+        crate::kobj_debug!("posix-fork", "riscv resource commit installed child={}", child_pid);
         self.committed = true;
         Ok(())
     }
@@ -1153,7 +1153,7 @@ impl LinuxForkOwnershipOps for RiscvLinuxForkOps {
         scheduler_thread: &Self::SchedulerThread,
     ) -> Result<(Self::Parent, Self::Task), Self::Error> {
         let parent = current()?;
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-fork",
             "riscv acquire task current={} parent={} child-scheduler={}",
             scheduler::scheduler().current().0,
@@ -1201,7 +1201,7 @@ impl LinuxForkOwnershipOps for RiscvLinuxForkOps {
         process: &Self::Process,
         resources: &mut Self::Resources,
     ) -> Result<Self::Memory, Self::Error> {
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-fork",
             "riscv acquire memory begin current={}",
             scheduler::scheduler().current().0
@@ -1212,7 +1212,7 @@ impl LinuxForkOwnershipOps for RiscvLinuxForkOps {
             process.pid,
             shared_attachments,
         )?;
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-fork",
             "riscv acquire memory cloned root={:#x} current={}",
             root_paddr,
@@ -1262,7 +1262,7 @@ impl LinuxForkOwnershipOps for RiscvLinuxForkOps {
         scheduler_thread: &Self::SchedulerThread,
         memory: &Self::Memory,
     ) -> Result<Self::Configured, Self::Error> {
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-fork",
             "riscv configure begin current={}",
             scheduler::scheduler().current().0
@@ -1294,7 +1294,7 @@ impl LinuxForkOwnershipOps for RiscvLinuxForkOps {
         if !configured_thread {
             return Err(SysError::EAGAIN);
         }
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-fork",
             "riscv configure done current={} child-thread={}",
             scheduler::scheduler().current().0,
@@ -1309,7 +1309,7 @@ impl LinuxForkOwnershipOps for RiscvLinuxForkOps {
         process: &Self::Process,
         resources: &mut Option<Self::Resources>,
     ) -> Result<(), Self::Error> {
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-fork",
             "riscv install resources begin current={}",
             scheduler::scheduler().current().0
@@ -1317,7 +1317,7 @@ impl LinuxForkOwnershipOps for RiscvLinuxForkOps {
         let scheduler_thread = self.child_scheduler_thread.ok_or(SysError::EAGAIN)?.0;
         let resources = resources.take().ok_or(SysError::EAGAIN)?;
         resources.commit(process.pid)?;
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-fork",
             "riscv install resources committed current={}",
             scheduler::scheduler().current().0
@@ -1369,7 +1369,7 @@ impl LinuxForkOwnershipOps for RiscvLinuxForkOps {
         scheduler_thread: &Self::SchedulerThread,
     ) -> Result<(), Self::Error> {
         let published = scheduler::scheduler().publish_suspended_thread(*scheduler_thread);
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-fork",
             "riscv publish scheduler={} published={} state={:?} current={}",
             scheduler_thread.0,
@@ -1464,7 +1464,7 @@ pub(crate) fn run_riscv_fork_transaction(
     set_child_tid: Option<usize>,
     clear_child_tid: usize,
 ) -> Result<usize, SysError> {
-    crate::kobj_info!("posix-fork", "riscv transaction begin");
+    crate::kobj_debug!("posix-fork", "riscv transaction begin");
     let result = run_linux_fork_transaction(
         RiscvForkReservation::new(RiscvLinuxForkOps::new(
             context,
@@ -1475,7 +1475,7 @@ pub(crate) fn run_riscv_fork_transaction(
         )),
         fork_failpoint,
     );
-    crate::kobj_info!("posix-fork", "riscv transaction end result={:?}", result);
+    crate::kobj_debug!("posix-fork", "riscv transaction end result={:?}", result);
     result
 }
 
@@ -1501,7 +1501,7 @@ pub(crate) extern "C" fn riscv_linux_fork_child_entry() -> ! {
             crate::kernel_lowlevel::cpu::wait_for_interrupt();
         }
     };
-    crate::kobj_info!(
+    crate::kobj_debug!(
         "posix-fork",
         "riscv child entering user pc={:#x} sp={:#x} ra={:#x} gp={:#x} a0={:#x} a1={:#x}",
         start.return_pc,

@@ -551,6 +551,9 @@ extern "C" fn timer_interrupt_handler() {
     let precision_woke_task = crate::syscall::linux_task::on_precision_timer(
         kernel_lowlevel::timer::get_nanoseconds(),
     );
+    if let Some(deadline) = crate::syscall::linux_task::next_precision_sleep_deadline() {
+        kernel_lowlevel::timer::arm_at_nanoseconds(deadline);
+    }
     if precision_woke_task {
         crate::kernel_objects::scheduler::schedule_on_cpu(current_cpu_id() as usize);
     }

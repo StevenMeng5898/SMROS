@@ -846,6 +846,42 @@ class CampaignTests(unittest.TestCase):
         ):
             self.assertIn(f"        {symbol};", riscv_symbols)
 
+    def test_pthread_interposition_exports_riscv_glibc_version(self) -> None:
+        runtime = Path(__file__).parents[1] / "runtime"
+        version_script = (runtime / "smros_posix_compat.map").read_text(
+            encoding="ascii"
+        )
+        glibc_227 = version_script.index("GLIBC_2.27")
+        riscv_symbols = version_script[glibc_227:]
+        for symbol in (
+            "pthread_cond_wait",
+            "pthread_cond_timedwait",
+            "pthread_cond_signal",
+            "pthread_cond_broadcast",
+            "pthread_mutex_lock",
+            "pthread_mutex_unlock",
+            "sigaction",
+            "kill",
+        ):
+            self.assertIn(f"        {symbol};", riscv_symbols)
+
+        source = (runtime / "smros_posix_compat.c").read_text(encoding="utf-8")
+        for symbol in (
+            "pthread_cond_wait",
+            "pthread_cond_timedwait",
+            "pthread_cond_signal",
+            "pthread_cond_broadcast",
+            "pthread_mutex_lock",
+            "pthread_mutex_unlock",
+            "sigaction",
+            "kill",
+        ):
+            self.assertIn(
+                f"smros_{symbol}_glibc217",
+                source,
+                f"AArch64 compatibility must retain {symbol}@GLIBC_2.17",
+            )
+
     def test_atfork_interposer_caches_libc_resolution(self) -> None:
         source = (
             Path(__file__).parents[1] / "runtime" / "smros_posix_compat.c"

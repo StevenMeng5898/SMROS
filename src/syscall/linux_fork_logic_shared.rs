@@ -421,43 +421,43 @@ pub(crate) fn run_linux_fork_transaction<B: LinuxForkTransactionBackend>(
     let mut transaction = LinuxForkTransaction::new(backend);
 
     #[cfg(target_arch = "riscv64")]
-    crate::kobj_info!("posix-fork", "riscv stage scheduler-thread");
+    crate::kobj_debug!("posix-fork", "riscv stage scheduler-thread");
 
     transaction.acquire(LinuxForkAcquisition::SchedulerThread, |backend| {
         backend.acquire_scheduler_thread()
     })?;
     #[cfg(target_arch = "riscv64")]
-    crate::kobj_info!("posix-fork", "riscv stage task");
+    crate::kobj_debug!("posix-fork", "riscv stage task");
     transaction.fail_if(LinuxForkFailurePoint::SchedulerThread, &mut should_fail)?;
     transaction.acquire(LinuxForkAcquisition::Task, |backend| backend.acquire_task())?;
     #[cfg(target_arch = "riscv64")]
-    crate::kobj_info!("posix-fork", "riscv stage process");
+    crate::kobj_debug!("posix-fork", "riscv stage process");
     transaction.fail_if(LinuxForkFailurePoint::Task, &mut should_fail)?;
     transaction.acquire(LinuxForkAcquisition::Process, |backend| {
         backend.acquire_process()
     })?;
     #[cfg(target_arch = "riscv64")]
-    crate::kobj_info!("posix-fork", "riscv stage resources");
+    crate::kobj_debug!("posix-fork", "riscv stage resources");
     transaction.fail_if(LinuxForkFailurePoint::Process, &mut should_fail)?;
     transaction.acquire(LinuxForkAcquisition::Resources, |backend| {
         backend.acquire_resources()
     })?;
     #[cfg(target_arch = "riscv64")]
-    crate::kobj_info!("posix-fork", "riscv stage memory");
+    crate::kobj_debug!("posix-fork", "riscv stage memory");
     transaction.acquire(LinuxForkAcquisition::Memory, |backend| backend.acquire_memory())?;
     #[cfg(target_arch = "riscv64")]
-    crate::kobj_info!("posix-fork", "riscv stage configure");
+    crate::kobj_debug!("posix-fork", "riscv stage configure");
     transaction.fail_if(LinuxForkFailurePoint::Memory, &mut should_fail)?;
     transaction.acquire(LinuxForkAcquisition::Configured, |backend| {
         backend.configure_child()
     })?;
     #[cfg(target_arch = "riscv64")]
-    crate::kobj_info!("posix-fork", "riscv stage install");
+    crate::kobj_debug!("posix-fork", "riscv stage install");
     transaction.fail_if(LinuxForkFailurePoint::Configured, &mut should_fail)?;
 
     transaction.backend.install_resources()?;
     #[cfg(target_arch = "riscv64")]
-    crate::kobj_info!("posix-fork", "riscv stage publication");
+    crate::kobj_debug!("posix-fork", "riscv stage publication");
     transaction.backend.begin_publication()?;
     transaction.backend.publish_process()?;
     transaction.fail_if(

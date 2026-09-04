@@ -200,6 +200,10 @@ pub fn set_exception_return_pc(pc: u64) {
 
 #[inline(always)]
 pub fn read_exception_return_pc() -> u64 {
+    if let Some(context) = crate::syscall::linux_riscv_syscall_context::current_riscv_syscall_context()
+    {
+        return context.return_pc;
+    }
     let pc: u64;
     unsafe {
         core::arch::asm!("csrr {pc}, sepc", pc = out(reg) pc, options(nomem, nostack));

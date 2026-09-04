@@ -38,6 +38,17 @@ class RiscvArchitectureContractTests(unittest.TestCase):
         source = (REPOSITORY_ROOT / "src/kernel_lowlevel/RISCV64/cpu.rs").read_text()
         self.assertRegex(source, r"pub fn read_exception_return_state\(\) -> u64")
 
+    def test_riscv_signal_restore_reads_context_return_pc(self):
+        source = (REPOSITORY_ROOT / "src/kernel_lowlevel/RISCV64/cpu.rs").read_text()
+        start = source.index("pub fn read_exception_return_pc() -> u64")
+        end = source.index("\n}\n", start) + 3
+        body = source[start:end]
+        self.assertRegex(
+            body,
+            r"current_riscv_syscall_context\(\)[\s\S]*return context\.return_pc",
+            "signal restoration must read the updated per-thread return PC",
+        )
+
     def test_guest_protocol_and_elf_parser_use_riscv_architecture(self):
         posix_source = (REPOSITORY_ROOT / "src/user_level/services/posix_test.rs").read_text()
         self.assertRegex(
@@ -117,7 +128,13 @@ class RiscvArchitectureContractTests(unittest.TestCase):
 
     def test_riscv_linux_memory_has_real_sv39_mappings(self):
         source = (REPOSITORY_ROOT / "src/syscall/linux_process_memory.rs").read_text()
-        start = source.index("#[cfg(target_arch = \"riscv64\")]\nconst RISCV_PAGE_TABLE_COUNT")
+        match = re.search(
+            r"#\[cfg\(target_arch = \"riscv64\"\)\][\s\S]*?"
+            r"const RISCV_PAGE_TABLE_COUNT",
+            source,
+        )
+        self.assertIsNotNone(match)
+        start = match.start()
         end = source.index("#[cfg(target_arch = \"x86_64\")]\nimpl FallbackAddressSpace", start)
         riscv_source = source[start:end]
         self.assertIn("struct RiscvPageTable", riscv_source)
@@ -275,6 +292,56 @@ class RiscvArchitectureContractTests(unittest.TestCase):
             sleep_source,
             r"#if !defined\(__riscv\)\s*\(void\)sched_yield\(\);\s*#endif",
             "RISC-V sleep must enter its wait before yielding to an awakened mqueue peer",
+        )
+
+    def test_riscv_precision_sleep_rearms_remaining_deadline(self):
+        task_source = (REPOSITORY_ROOT / "src/syscall/linux_task.rs").read_text()
+        self.assertIn(
+            "pub(crate) fn next_precision_sleep_deadline() -> Option<u64>",
+            task_source,
+            "RISC-V timer handling needs the next outstanding precision sleep",
+        )
+        main_source = (REPOSITORY_ROOT / "src/main.rs").read_text()
+        timer_start = main_source.index("extern \"C\" fn timer_interrupt_handler()")
+        timer_end = main_source.index("\n}\n", timer_start) + 3
+        timer_source = main_source[timer_start:timer_end]
+        self.assertRegex(
+            timer_source,
+            r"on_precision_timer\([\s\S]*?next_precision_sleep_deadline\([\s\S]*?"
+            r"arm_at_nanoseconds",
+            "RISC-V timer interrupts must re-arm the next precision sleeper",
+        )
+
+    def test_riscv_address_spaces_reclaim_page_tables(self):
+        source = (REPOSITORY_ROOT / "src/syscall/linux_process_memory.rs").read_text()
+        self.assertIn(
+            "const RISCV_PAGE_TABLE_COUNT: usize = 16384;",
+            source,
+            "RISC-V must reserve enough Sv39 tables for the 200-process POSIX stress case",
+        )
+        self.assertRegex(
+            source,
+            r"#\[cfg\(target_arch = \"riscv64\"\)\]\n"
+            r"impl Drop for FallbackAddressSpace",
+            "RISC-V process exits must return page-table pool entries",
+        )
+        self.assertIn(
+            "free_riscv_page_table(self.root_paddr)",
+            source,
+            "RISC-V address-space teardown must recursively free its page tables",
+        )
+
+    def test_riscv_fork_mapping_batches_tlb_flushes(self):
+        source = (REPOSITORY_ROOT / "src/syscall/linux_process_memory.rs").read_text()
+        self.assertIn(
+            "fn map_user_page_no_flush(",
+            source,
+            "RISC-V fork mapping needs a no-flush page-table primitive",
+        )
+        self.assertIn(
+            "self.memory.map_page_no_flush(address, page.pfn(), prot)",
+            source,
+            "RISC-V fork mapping must avoid a TLB fence for every page",
         )
 
 

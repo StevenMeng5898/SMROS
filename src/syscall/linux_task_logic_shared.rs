@@ -2048,6 +2048,24 @@ impl<const N: usize> LinuxTaskTable<N> {
         None
     }
 
+    pub(crate) fn next_precision_sleep_deadline(&self) -> Option<u64> {
+        self.tasks
+            .iter()
+            .zip(self.sleep_waits.iter())
+            .filter_map(|(task, wait)| {
+                if task.state != LinuxTaskState::Blocked
+                    || task.block_reason != LinuxBlockReason::Sleep
+                    || wait
+                        .as_ref()
+                        .is_none_or(|wait| wait.outcome != LinuxSleepOutcome::Waiting)
+                {
+                    return None;
+                }
+                wait.as_ref()?.precision_deadline_nanoseconds
+            })
+            .min()
+    }
+
     pub(crate) fn refresh_realtime_sleep_deadlines(
         &mut self,
         now: u64,

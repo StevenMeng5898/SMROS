@@ -831,6 +831,10 @@ pub(crate) fn on_precision_timer(now_nanoseconds: u64) -> bool {
     woke_task
 }
 
+pub(crate) fn next_precision_sleep_deadline() -> Option<u64> {
+    with_runtime(|runtime| runtime.tasks.next_precision_sleep_deadline())
+}
+
 pub(crate) fn reset() {
     with_runtime(|runtime| {
         let current = scheduler::scheduler().current();
