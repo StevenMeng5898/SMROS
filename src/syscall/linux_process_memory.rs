@@ -476,11 +476,13 @@ unsafe fn free_riscv_page_table(paddr: u64) {
 
 #[cfg(target_arch = "riscv64")]
 fn riscv_table_from_pte(pte: u64) -> Option<*mut RiscvPageTable> {
-    if pte & RISCV_PTE_V == 0 || pte & (RISCV_PTE_R | RISCV_PTE_W | RISCV_PTE_X) != 0 {
+    if pte & RISCV_PTE_V == 0
+        || pte & (RISCV_PTE_R | RISCV_PTE_W | RISCV_PTE_X | RISCV_PTE_U) != 0
+    {
         return None;
     }
     let paddr = ((pte & RISCV_PTE_PPN_MASK) >> 10) << 12;
-    (paddr != 0).then_some(paddr as *mut RiscvPageTable)
+    riscv_page_table_index(paddr).map(|_| paddr as *mut RiscvPageTable)
 }
 
 #[cfg(target_arch = "riscv64")]
