@@ -254,6 +254,29 @@ class RiscvArchitectureContractTests(unittest.TestCase):
             "RISC-V timer traps must run scheduler preemption before restoring user mode",
         )
 
+    def test_riscv_mqueue_timer_hook_expires_waiters(self):
+        source = (REPOSITORY_ROOT / "src/syscall/linux_mqueue.rs").read_text()
+        hook_start = source.index("pub(crate) fn on_timer_tick")
+        hook_end = source.index("\n}\n", hook_start) + 2
+        hook_source = source[hook_start:hook_end]
+        self.assertRegex(
+            hook_source,
+            r"#\[cfg\(any\(target_arch = \"aarch64\", target_arch = \"riscv64\"\)\)\]",
+            "RISC-V mqueue waits must be expired by the timer hook",
+        )
+        self.assertIn("state.expire_one(now)", hook_source)
+
+    def test_riscv_sleep_does_not_yield_before_wait(self):
+        source = (REPOSITORY_ROOT / "scripts/posix/runtime/smros_posix_compat.c").read_text()
+        sleep_start = source.index("unsigned int sleep(unsigned int seconds)")
+        sleep_end = source.index("\n}\n", sleep_start) + 2
+        sleep_source = source[sleep_start:sleep_end]
+        self.assertRegex(
+            sleep_source,
+            r"#if !defined\(__riscv\)\s*\(void\)sched_yield\(\);\s*#endif",
+            "RISC-V sleep must enter its wait before yielding to an awakened mqueue peer",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

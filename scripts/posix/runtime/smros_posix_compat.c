@@ -2399,7 +2399,9 @@ unsigned int sleep(unsigned int seconds) {
     __sync_synchronize();
     smros_refresh_current_pthread_cancel();
     pthread_testcancel();
+#if !defined(__riscv)
     (void)sched_yield();
+#endif
 
     if (seconds == 0) {
         __sync_synchronize();
