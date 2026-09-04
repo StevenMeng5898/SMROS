@@ -489,6 +489,26 @@ fn riscv_table_pte(paddr: u64) -> u64 {
 }
 
 #[cfg(target_arch = "riscv64")]
+unsafe fn clone_riscv_page_table(root_paddr: u64) -> Option<u64> {
+    let cloned_root = alloc_riscv_page_table()?;
+    let source = root_paddr as *const RiscvPageTable;
+    let destination = cloned_root as *mut RiscvPageTable;
+    (*destination).entries.copy_from_slice(&(*source).entries);
+    for index in 0..(*source).entries.len() {
+        let entry = (*source).entries[index];
+        let Some(child) = riscv_table_from_pte(entry) else {
+            continue;
+        };
+        let Some(cloned_child) = clone_riscv_page_table(child as u64) else {
+            free_riscv_page_table(cloned_root);
+            return None;
+        };
+        (*destination).entries[index] = riscv_table_pte(cloned_child);
+    }
+    Some(cloned_root)
+}
+
+#[cfg(target_arch = "riscv64")]
 fn riscv_leaf_pte(paddr: u64, readable: bool, writable: bool, executable: bool, user: bool) -> u64 {
     let mut pte = RISCV_PTE_V | RISCV_PTE_A;
     if readable {
@@ -578,6 +598,17 @@ unsafe fn riscv_translate_user(root_paddr: u64, vaddr: usize, write: bool) -> Op
 
 #[cfg(target_arch = "riscv64")]
 impl FallbackAddressSpace {
+    fn clone_for_fork(parent: &Self) -> Result<Self, SysError> {
+        let root_paddr = unsafe { clone_riscv_page_table(parent.root_paddr) }
+            .ok_or(SysError::ENOMEM)?;
+        Ok(Self {
+            root_paddr,
+            cached_leaf_table: 0,
+            cached_vpn2: usize::MAX,
+            cached_vpn1: usize::MAX,
+        })
+    }
+
     fn new(_pid: usize) -> Result<Self, SysError> {
         let root_paddr = alloc_riscv_page_table().ok_or(SysError::ENOMEM)?;
         // Keep the kernel image, kernel data/stack, and firmware handoff
@@ -1848,7 +1879,9 @@ pub(crate) fn clone_for_fork(
             })?;
         #[cfg(target_arch = "aarch64")]
         address_space.begin_deferred_user_updates();
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(target_arch = "riscv64")]
+        let address_space = FallbackAddressSpace::clone_for_fork(&parent.address_space)?;
+        #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "riscv64")))]
         let address_space = FallbackAddressSpace::new(child_pid)?;
         crate::kobj_debug!("posix-fork", "riscv clone child root allocated");
         let root_paddr = address_space.root_paddr();
@@ -2052,23 +2085,26 @@ pub(crate) fn clone_for_fork(
             }
             #[cfg(not(target_arch = "aarch64"))]
             {
+                #[cfg(target_arch = "riscv64")]
+                let map_result: Result<(), SysError> = Ok(());
+                #[cfg(not(target_arch = "riscv64"))]
                 let map_result = super::linux_process::map_linux_fork_pages_with_protection(
-                    &mut LinuxProcessForkPageOps::new(&mut child),
-                    mapping.addr,
-                    PAGE_SIZE,
-                    &pages,
-                    |page_index| {
-                        linux_page_protection_for_backing(
-                            pages[page_index],
-                            LinuxProcessMemory::mapping_page_prot(
-                                &source,
-                                mapping.prot,
-                                page_index,
-                            ),
-                        )
-                    },
-                    super::linux_process::fork_failpoint,
-                );
+                        &mut LinuxProcessForkPageOps::new(&mut child),
+                        mapping.addr,
+                        PAGE_SIZE,
+                        &pages,
+                        |page_index| {
+                            linux_page_protection_for_backing(
+                                pages[page_index],
+                                LinuxProcessMemory::mapping_page_prot(
+                                    &source,
+                                    mapping.prot,
+                                    page_index,
+                                ),
+                            )
+                        },
+                        super::linux_process::fork_failpoint,
+                    );
                 if let Err(error) = map_result {
                     crate::kobj_info!(
                         "posix-fork",
@@ -2170,14 +2206,17 @@ pub(crate) fn clone_for_fork(
         }
         #[cfg(not(target_arch = "aarch64"))]
         {
+            #[cfg(target_arch = "riscv64")]
+            let map_result: Result<(), SysError> = Ok(());
+            #[cfg(not(target_arch = "riscv64"))]
             let map_result = super::linux_process::map_linux_fork_pages(
-                &mut LinuxProcessForkPageOps::new(&mut child),
-                brk_start,
-                PAGE_SIZE,
-                &brk_pages,
-                LINUX_PROT_READ | LINUX_PROT_WRITE,
-                super::linux_process::fork_failpoint,
-            );
+                    &mut LinuxProcessForkPageOps::new(&mut child),
+                    brk_start,
+                    PAGE_SIZE,
+                    &brk_pages,
+                    LINUX_PROT_READ | LINUX_PROT_WRITE,
+                    super::linux_process::fork_failpoint,
+                );
             if let Err(error) = map_result {
                 crate::kobj_info!(
                     "posix-fork",
