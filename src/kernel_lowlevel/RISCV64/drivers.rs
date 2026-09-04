@@ -86,6 +86,7 @@ struct FdtNodeScratch {
     reg: Option<DeviceReg>,
     hart_id: Option<usize>,
     device_type_cpu: bool,
+    device_type_memory: bool,
     timebase_frequency: Option<u64>,
     virtio_mmio: bool,
 }
@@ -104,6 +105,7 @@ impl FdtNodeScratch {
             reg: None,
             hart_id: None,
             device_type_cpu: false,
+            device_type_memory: false,
             timebase_frequency: None,
             virtio_mmio: false,
         }
@@ -119,6 +121,7 @@ struct ParsedResources {
     hart_count: usize,
     virtio_mmio: [DeviceReg; MAX_VIRTIO_MMIO_TRANSPORTS],
     virtio_mmio_count: usize,
+    memory: Option<DeviceReg>,
 }
 
 impl ParsedResources {
@@ -131,6 +134,7 @@ impl ParsedResources {
             hart_count: 0,
             virtio_mmio: [DeviceReg { base: 0, size: 0 }; MAX_VIRTIO_MMIO_TRANSPORTS],
             virtio_mmio_count: 0,
+            memory: None,
         }
     }
 
@@ -141,6 +145,12 @@ impl ParsedResources {
 
         if let Some(freq) = node.timebase_frequency {
             self.timebase_frequency = Some(freq);
+        }
+
+        if node.device_type_memory {
+            if let Some(reg) = node.reg {
+                self.memory = Some(reg);
+            }
         }
 
         if node.device_type_cpu || fdt_node_compatible_has(node, "riscv") {
@@ -197,6 +207,8 @@ static UART_SIZE: AtomicUsize = AtomicUsize::new(0);
 static TIMEBASE_FREQUENCY: AtomicUsize = AtomicUsize::new(DEFAULT_TIMEBASE_HZ);
 static HART_COUNT: AtomicUsize = AtomicUsize::new(1);
 static VIRTIO_MMIO_COUNT: AtomicUsize = AtomicUsize::new(0);
+static MEMORY_BASE: AtomicUsize = AtomicUsize::new(0);
+static MEMORY_SIZE: AtomicUsize = AtomicUsize::new(0);
 static MACHINE_INDEX: AtomicUsize = AtomicUsize::new(0);
 static mut HART_IDS: [usize; MAX_HARTS] = [0; MAX_HARTS];
 static mut VIRTIO_MMIO_REGS: [DeviceReg; MAX_VIRTIO_MMIO_TRANSPORTS] =
@@ -227,6 +239,10 @@ pub fn init_from_fdt(fdt_base: usize) -> bool {
     );
     HART_COUNT.store(core::cmp::max(parsed.hart_count, 1), Ordering::Release);
     VIRTIO_MMIO_COUNT.store(parsed.virtio_mmio_count, Ordering::Release);
+    if let Some(memory) = parsed.memory {
+        MEMORY_BASE.store(memory.base, Ordering::Release);
+        MEMORY_SIZE.store(memory.size, Ordering::Release);
+    }
     RESOURCE_SOURCE.store(ResourceSource::Fdt as usize, Ordering::Release);
     MACHINE_INDEX.store(copy_machine_name(parsed.machine), Ordering::Release);
 
@@ -268,6 +284,12 @@ pub fn virtio_mmio_reg(index: usize) -> Option<DeviceReg> {
     } else {
         Some(unsafe { VIRTIO_MMIO_REGS[index] })
     }
+}
+
+pub fn memory_reg() -> Option<DeviceReg> {
+    let base = MEMORY_BASE.load(Ordering::Acquire);
+    let size = MEMORY_SIZE.load(Ordering::Acquire);
+    (size != 0).then_some(DeviceReg { base, size })
 }
 
 pub fn hart_id(index: usize) -> Option<usize> {
@@ -481,6 +503,7 @@ fn handle_fdt_property(
     }
     if fdt_string_eq(info.strings_base, info.strings_size, nameoff, "device_type") {
         node.device_type_cpu = fdt_bytes_eq(value_addr, len, "cpu");
+        node.device_type_memory = fdt_bytes_eq(value_addr, len, "memory");
         return Some(());
     }
     if fdt_string_eq(

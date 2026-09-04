@@ -9,7 +9,7 @@ pub(crate) use super::linux_process_memory::{LinuxDescriptorEntry, LinuxOpenDesc
 use super::linux_process_memory::{
     LinuxForkAcquisition, LinuxForkAcquisitionLedger, LinuxForkFailurePoint,
 };
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use super::linux_task::LinuxTaskReservation;
 use super::linux_task::{
     LinuxBlockReason, LinuxPendingSignal, LinuxPendingSignals, LINUX_MAX_SIGNAL,
@@ -72,6 +72,8 @@ struct LinuxProcessRuntime {
     signal_states: [LinuxProcessSignalState; LINUX_PROCESS_LIMIT],
     #[cfg(target_arch = "aarch64")]
     fork_starts: [Option<Aarch64ProcessStart>; LINUX_PROCESS_LIMIT],
+    #[cfg(target_arch = "riscv64")]
+    riscv_fork_starts: [Option<RiscvProcessStart>; LINUX_PROCESS_LIMIT],
 }
 
 impl LinuxProcessRuntime {
@@ -81,6 +83,8 @@ impl LinuxProcessRuntime {
             signal_states: [LINUX_PROCESS_SIGNAL_STATE_EMPTY; LINUX_PROCESS_LIMIT],
             #[cfg(target_arch = "aarch64")]
             fork_starts: [None; LINUX_PROCESS_LIMIT],
+            #[cfg(target_arch = "riscv64")]
+            riscv_fork_starts: [None; LINUX_PROCESS_LIMIT],
         }
     }
 }
@@ -269,6 +273,26 @@ pub(crate) fn current_parent_pid() -> Result<usize, SysError> {
     current().map(|process| linux_visible_parent_pid(process.pid, process.parent_pid))
 }
 
+#[cfg(target_arch = "riscv64")]
+pub(crate) fn switch_riscv_process_address_space(scheduler_thread: usize) {
+    let root_pid = super::linux_task::by_scheduler(scheduler_thread).map(|task| task.tgid);
+    let root_pid = root_pid.or_else(|| with_runtime(|runtime| {
+        runtime
+            .processes
+            .processes
+            .iter()
+            .find(|process| {
+                process.state == LinuxProcessState::Running
+                    && process.root_scheduler_thread == scheduler_thread
+            })
+            .map(|process| process.pid)
+    }));
+    let root = root_pid
+        .and_then(super::linux_process_memory::root_paddr_for_pid)
+        .unwrap_or(0);
+    crate::kernel_lowlevel::cpu::switch_user_address_space(root);
+}
+
 pub(crate) fn wait_current(
     selector: LinuxWaitSelector,
     nohang: bool,
@@ -281,15 +305,25 @@ pub(crate) fn wait_current(
                 .processes
                 .wait_outcome_with_options(parent.pid, selector, include_stopped)
         });
+        crate::kobj_info!(
+            "posix-wait",
+            "riscv wait probe parent={} selector={:?} outcome={:?} current={}",
+            parent.pid,
+            selector,
+            outcome,
+            scheduler::scheduler().current().0
+        );
         if outcome != LinuxWaitOutcome::WouldBlock || nohang {
             return Ok(outcome);
         }
 
-        crate::kobj_debug!(
+        crate::kobj_info!(
             "posix-wait",
-            "block parent={} selector={:?}",
+            "block parent={} selector={:?} parent_addr={:#x} selector_addr={:#x}",
             parent.pid,
-            selector
+            selector,
+            &parent as *const LinuxProcessCore as usize,
+            &selector as *const LinuxWaitSelector as usize
         );
         let blocked = linux_task::block_current(LinuxBlockReason::ChildWait)?;
         let rechecked = with_runtime(|runtime| {
@@ -306,6 +340,14 @@ pub(crate) fn wait_current(
             return Ok(rechecked);
         }
         scheduler::schedule();
+        crate::kobj_info!(
+            "posix-wait",
+            "riscv wait resumed parent={} current={} parent_addr={:#x} selector_addr={:#x}",
+            parent.pid,
+            scheduler::scheduler().current().0,
+            &parent as *const LinuxProcessCore as usize,
+            &selector as *const LinuxWaitSelector as usize
+        );
     }
 }
 
@@ -566,6 +608,8 @@ pub(crate) fn reset_launch() {
         runtime.signal_states.fill(LINUX_PROCESS_SIGNAL_STATE_EMPTY);
         #[cfg(target_arch = "aarch64")]
         runtime.fork_starts.fill(None);
+        #[cfg(target_arch = "riscv64")]
+        runtime.riscv_fork_starts.fill(None);
     });
 }
 
@@ -586,14 +630,23 @@ impl LinuxResourceClone {
 
     pub(crate) fn commit(mut self, child_pid: usize) -> Result<(), SysError> {
         let process_state = self.process_state.take().ok_or(SysError::EAGAIN)?;
+        crate::kobj_info!(
+            "posix-fork",
+            "riscv resource commit begin child={} descriptors={} objects={}",
+            child_pid,
+            self.descriptors.len(),
+            self.objects.len()
+        );
         if !super::install_linux_resource_clone(
             child_pid,
             &mut self.descriptors,
             &mut self.objects,
             process_state,
         ) {
+            crate::kobj_err!("posix-fork", "riscv resource commit rejected child={}", child_pid);
             return Err(SysError::EBUSY);
         }
+        crate::kobj_info!("posix-fork", "riscv resource commit installed child={}", child_pid);
         self.committed = true;
         Ok(())
     }
@@ -652,6 +705,27 @@ const _: () = {
     assert!(core::mem::offset_of!(Aarch64ProcessStart, return_pc) == 0x310);
     assert!(core::mem::offset_of!(Aarch64ProcessStart, pstate) == 0x318);
     assert!(core::mem::offset_of!(Aarch64ProcessStart, root_paddr) == 0x320);
+};
+
+#[cfg(target_arch = "riscv64")]
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub(crate) struct RiscvProcessStart {
+    /// The trap vector saves thirty registers plus sepc, user sp, and sstatus.
+    pub frame: [u64; 34],
+    pub return_pc: u64,
+    pub pstate: u64,
+    pub user_sp: u64,
+    pub root_paddr: u64,
+}
+
+#[cfg(target_arch = "riscv64")]
+const _: () = {
+    assert!(core::mem::offset_of!(RiscvProcessStart, frame) == 0x000);
+    assert!(core::mem::offset_of!(RiscvProcessStart, return_pc) == 0x110);
+    assert!(core::mem::offset_of!(RiscvProcessStart, pstate) == 0x118);
+    assert!(core::mem::offset_of!(RiscvProcessStart, user_sp) == 0x120);
+    assert!(core::mem::offset_of!(RiscvProcessStart, root_paddr) == 0x128);
 };
 
 #[cfg(target_arch = "aarch64")]
@@ -868,7 +942,8 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
     }
 
     fn begin_publication(&mut self) -> Result<Self::Publication, Self::Error> {
-        Ok(crate::kernel_lowlevel::cpu::mask_interrupts())
+        let state = crate::kernel_lowlevel::cpu::mask_interrupts();
+        Ok(state)
     }
 
     fn publish_process(
@@ -1008,6 +1083,435 @@ pub(crate) fn run_fork_transaction(
         fork_failpoint,
     );
     result
+}
+
+#[cfg(target_arch = "riscv64")]
+struct RiscvLinuxForkOps {
+    context: super::linux_riscv_syscall_context::LinuxRiscvSyscallFrameRef,
+    namespace_flags: usize,
+    child_exit_signal: usize,
+    set_child_tid: Option<usize>,
+    clear_child_tid: usize,
+    child_scheduler_thread: Option<ThreadId>,
+}
+
+#[cfg(target_arch = "riscv64")]
+impl RiscvLinuxForkOps {
+    fn new(
+        context: super::linux_riscv_syscall_context::LinuxRiscvSyscallFrameRef,
+        namespace_flags: usize,
+        child_exit_signal: usize,
+        set_child_tid: Option<usize>,
+        clear_child_tid: usize,
+    ) -> Self {
+        Self {
+            context,
+            namespace_flags,
+            child_exit_signal,
+            set_child_tid,
+            clear_child_tid,
+            child_scheduler_thread: None,
+        }
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+struct RiscvLinuxForkMemory {
+    pid: usize,
+    root_paddr: u64,
+    child_tid_write: Option<(usize, u32)>,
+}
+
+#[cfg(target_arch = "riscv64")]
+type RiscvForkReservation = LinuxForkOwnershipCore<RiscvLinuxForkOps>;
+
+#[cfg(target_arch = "riscv64")]
+impl LinuxForkOwnershipOps for RiscvLinuxForkOps {
+    type Error = SysError;
+    type Output = usize;
+    type SchedulerThread = ThreadId;
+    type Parent = LinuxProcessCore;
+    type Task = LinuxTaskReservation;
+    type Process = LinuxProcessReservation;
+    type Resources = LinuxResourceClone;
+    type Memory = RiscvLinuxForkMemory;
+    type Configured = RiscvProcessStart;
+    type Publication = usize;
+
+    fn injected_failure(&self) -> Self::Error {
+        SysError::EAGAIN
+    }
+
+    fn acquire_scheduler_thread(&mut self) -> Result<Self::SchedulerThread, Self::Error> {
+        scheduler::scheduler()
+            .create_suspended_thread_on_cpu(riscv_linux_fork_child_entry, "linux_process", 0)
+            .ok_or(SysError::EAGAIN)
+    }
+
+    fn acquire_task(
+        &mut self,
+        scheduler_thread: &Self::SchedulerThread,
+    ) -> Result<(Self::Parent, Self::Task), Self::Error> {
+        let parent = current()?;
+        crate::kobj_info!(
+            "posix-fork",
+            "riscv acquire task current={} parent={} child-scheduler={}",
+            scheduler::scheduler().current().0,
+            parent.pid,
+            scheduler_thread.0
+        );
+        let task = linux_task::reserve_fork_task(*scheduler_thread)?;
+        Ok((parent, task))
+    }
+
+    fn acquire_process(
+        &mut self,
+        parent: &Self::Parent,
+        scheduler_thread: &Self::SchedulerThread,
+        task: &Self::Task,
+    ) -> Result<Self::Process, Self::Error> {
+        let process = with_runtime(|runtime| {
+            runtime
+                .processes
+                .reserve_child_with_pid(
+                    parent.pid,
+                    scheduler_thread.0,
+                    task.tid,
+                    self.child_exit_signal,
+                )
+                .map_err(process_error_to_sys_error)
+        })?;
+        if let Err(error) = clone_signal_state_for_fork(parent.pid, process.pid) {
+            with_runtime(|runtime| {
+                runtime.signal_states[process.slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
+                let _ = runtime.processes.rollback(process);
+            });
+            return Err(error);
+        }
+        Ok(process)
+    }
+
+    fn acquire_resources(&mut self, parent: &Self::Parent) -> Result<Self::Resources, Self::Error> {
+        reserve_resource_clone(parent.pid, self.namespace_flags)
+    }
+
+    fn acquire_memory(
+        &mut self,
+        parent: &Self::Parent,
+        process: &Self::Process,
+        resources: &mut Self::Resources,
+    ) -> Result<Self::Memory, Self::Error> {
+        crate::kobj_info!(
+            "posix-fork",
+            "riscv acquire memory begin current={}",
+            scheduler::scheduler().current().0
+        );
+        let shared_attachments = resources.take_shared_attachments();
+        let root_paddr = super::linux_process_memory::clone_for_fork(
+            parent.pid,
+            process.pid,
+            shared_attachments,
+        )?;
+        crate::kobj_info!(
+            "posix-fork",
+            "riscv acquire memory cloned root={:#x} current={}",
+            root_paddr,
+            scheduler::scheduler().current().0
+        );
+        let child_tid_write = if let Some(child_tid) = self.set_child_tid {
+            let Some(tid) = linux_task::linux_tid_to_user_value(process.pid) else {
+                let _ = super::linux_process_memory::unregister(process.pid);
+                return Err(SysError::EAGAIN);
+            };
+            let mut original = [0u8; core::mem::size_of::<u32>()];
+            if let Err(error) = super::linux_process_memory::copy_from_process(
+                process.pid,
+                child_tid,
+                &mut original,
+            ) {
+                let _ = super::linux_process_memory::unregister(process.pid);
+                return Err(error);
+            }
+            if let Err(error) = super::linux_process_memory::copy_to_process(
+                process.pid,
+                child_tid,
+                &tid.to_ne_bytes(),
+            ) {
+                let _ = super::linux_process_memory::copy_to_process(
+                    process.pid,
+                    child_tid,
+                    &original,
+                );
+                let _ = super::linux_process_memory::unregister(process.pid);
+                return Err(error);
+            }
+            Some((child_tid, u32::from_ne_bytes(original)))
+        } else {
+            None
+        };
+        Ok(RiscvLinuxForkMemory {
+            pid: process.pid,
+            root_paddr,
+            child_tid_write,
+        })
+    }
+
+    fn configure_child(
+        &mut self,
+        process: &Self::Process,
+        scheduler_thread: &Self::SchedulerThread,
+        memory: &Self::Memory,
+    ) -> Result<Self::Configured, Self::Error> {
+        crate::kobj_info!(
+            "posix-fork",
+            "riscv configure begin current={}",
+            scheduler::scheduler().current().0
+        );
+        let mut frame = [0u64; 34];
+        unsafe {
+            core::ptr::copy_nonoverlapping(self.context.frame, frame.as_mut_ptr(), frame.len());
+        }
+        // fork returns zero in the child. The trap restore code reads a0 from
+        // slot 8 before returning to the instruction after ecall.
+        frame[8] = 0;
+        let configured = RiscvProcessStart {
+            frame,
+            return_pc: self.context.return_pc,
+            pstate: self.context.pstate,
+            user_sp: self.context.user_sp,
+            root_paddr: memory.root_paddr,
+        };
+        let configured_thread = scheduler::scheduler()
+            .get_thread_mut(*scheduler_thread)
+            .is_some_and(|thread| {
+                thread.context.set_entry_stack(
+                    riscv_linux_fork_child_entry as *const () as u64,
+                    thread.context.sp,
+                );
+                true
+            })
+            && scheduler::scheduler().bind_thread_process(*scheduler_thread, process.pid);
+        if !configured_thread {
+            return Err(SysError::EAGAIN);
+        }
+        crate::kobj_info!(
+            "posix-fork",
+            "riscv configure done current={} child-thread={}",
+            scheduler::scheduler().current().0,
+            scheduler_thread.0
+        );
+        self.child_scheduler_thread = Some(*scheduler_thread);
+        Ok(configured)
+    }
+
+    fn install_resources(
+        &mut self,
+        process: &Self::Process,
+        resources: &mut Option<Self::Resources>,
+    ) -> Result<(), Self::Error> {
+        crate::kobj_info!(
+            "posix-fork",
+            "riscv install resources begin current={}",
+            scheduler::scheduler().current().0
+        );
+        let scheduler_thread = self.child_scheduler_thread.ok_or(SysError::EAGAIN)?.0;
+        let resources = resources.take().ok_or(SysError::EAGAIN)?;
+        resources.commit(process.pid)?;
+        crate::kobj_info!(
+            "posix-fork",
+            "riscv install resources committed current={}",
+            scheduler::scheduler().current().0
+        );
+        if let Err(error) = super::apply_linux_resource_scheduler_priority(process.pid, scheduler_thread)
+        {
+            let _ = super::rollback_linux_fork_process_resources(process.pid);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn begin_publication(&mut self) -> Result<Self::Publication, Self::Error> {
+        Ok(crate::kernel_lowlevel::cpu::mask_interrupts())
+    }
+
+    fn publish_process(
+        &mut self,
+        process: &Self::Process,
+        configured: &Self::Configured,
+    ) -> Result<(), Self::Error> {
+        let published = with_runtime(|runtime| {
+            let Some(start) = runtime.riscv_fork_starts.get_mut(process.slot) else {
+                return false;
+            };
+            if start.is_some() {
+                return false;
+            }
+            *start = Some(*configured);
+            if !runtime.processes.publish_fork(*process) {
+                *start = None;
+                return false;
+            }
+            true
+        });
+        if published { Ok(()) } else { Err(SysError::EAGAIN) }
+    }
+
+    fn publish_task(&mut self, task: &Self::Task) -> Result<(), Self::Error> {
+        if linux_task::publish_fork_task(*task, self.clear_child_tid) {
+            Ok(())
+        } else {
+            Err(SysError::EAGAIN)
+        }
+    }
+
+    fn publish_scheduler_thread(
+        &mut self,
+        scheduler_thread: &Self::SchedulerThread,
+    ) -> Result<(), Self::Error> {
+        let published = scheduler::scheduler().publish_suspended_thread(*scheduler_thread);
+        crate::kobj_info!(
+            "posix-fork",
+            "riscv publish scheduler={} published={} state={:?} current={}",
+            scheduler_thread.0,
+            published,
+            scheduler::scheduler()
+                .get_thread(*scheduler_thread)
+                .map(|thread| thread.state),
+            scheduler::scheduler().current().0
+        );
+        if published {
+            Ok(())
+        } else {
+            Err(SysError::EAGAIN)
+        }
+    }
+
+    fn complete_publication(&mut self, process: &Self::Process) -> Result<(), Self::Error> {
+        if with_runtime(|runtime| runtime.processes.complete_fork_publish(*process)) {
+            Ok(())
+        } else {
+            Err(SysError::EAGAIN)
+        }
+    }
+
+    fn finish(
+        &mut self,
+        process: &Self::Process,
+        _configured: &Self::Configured,
+    ) -> Result<Self::Output, Self::Error> {
+        Ok(process.pid)
+    }
+
+    fn restore_publication(&mut self, publication: Self::Publication) {
+        crate::kernel_lowlevel::cpu::restore_interrupts(publication);
+    }
+
+    fn rollback_configured(&mut self, _configured: Self::Configured) {}
+
+    fn rollback_memory(&mut self, memory: Self::Memory) {
+        if let Some((address, original)) = memory.child_tid_write {
+            assert!(super::linux_process_memory::copy_to_process(
+                memory.pid,
+                address,
+                &original.to_ne_bytes(),
+            )
+            .is_ok());
+        }
+        assert!(super::linux_process_memory::unregister(memory.pid));
+    }
+
+    fn rollback_reserved_resources(&mut self, resources: Self::Resources) {
+        drop(resources);
+    }
+
+    fn rollback_installed_resources(&mut self, process: &Self::Process) {
+        assert!(release_resources(process.pid));
+    }
+
+    fn rollback_process(&mut self, process: Self::Process) {
+        let removed = with_runtime(|runtime| {
+            if let Some(start) = runtime.riscv_fork_starts.get_mut(process.slot) {
+                *start = None;
+            }
+            if runtime.processes.rollback_fork(process) {
+                runtime.signal_states[process.slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
+                return true;
+            }
+            let removed = runtime.processes.exit(process.pid, 0)
+                && runtime.processes.reap(process.parent_pid, process.pid).is_some();
+            if removed {
+                runtime.signal_states[process.slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
+            }
+            removed
+        });
+        assert!(removed);
+    }
+
+    fn rollback_task(&mut self, task: Self::Task) {
+        linux_task::rollback_fork_task(task);
+    }
+
+    fn rollback_scheduler_thread(&mut self, scheduler_thread: Self::SchedulerThread) {
+        assert!(scheduler::scheduler().terminate_thread(scheduler_thread));
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+pub(crate) fn run_riscv_fork_transaction(
+    context: super::linux_riscv_syscall_context::LinuxRiscvSyscallFrameRef,
+    namespace_flags: usize,
+    child_exit_signal: usize,
+    set_child_tid: Option<usize>,
+    clear_child_tid: usize,
+) -> Result<usize, SysError> {
+    crate::kobj_info!("posix-fork", "riscv transaction begin");
+    let result = run_linux_fork_transaction(
+        RiscvForkReservation::new(RiscvLinuxForkOps::new(
+            context,
+            namespace_flags,
+            child_exit_signal,
+            set_child_tid,
+            clear_child_tid,
+        )),
+        fork_failpoint,
+    );
+    crate::kobj_info!("posix-fork", "riscv transaction end result={:?}", result);
+    result
+}
+
+#[cfg(target_arch = "riscv64")]
+fn take_riscv_fork_start() -> Option<RiscvProcessStart> {
+    with_runtime(|runtime| {
+        let scheduler_thread = scheduler::scheduler().current().0;
+        let process = runtime.processes.processes.iter().position(|process| {
+            process.state == LinuxProcessState::Running
+                && process.root_scheduler_thread == scheduler_thread
+        })?;
+        runtime.riscv_fork_starts[process].take()
+    })
+}
+
+#[cfg(target_arch = "riscv64")]
+pub(crate) extern "C" fn riscv_linux_fork_child_entry() -> ! {
+    let Some(start) = take_riscv_fork_start() else {
+        crate::kobj_err!("posix-fork", "riscv child start image missing");
+        scheduler::scheduler().finish_current_without_stack_free();
+        scheduler::schedule();
+        loop {
+            crate::kernel_lowlevel::cpu::wait_for_interrupt();
+        }
+    };
+    crate::kobj_info!(
+        "posix-fork",
+        "riscv child entering user pc={:#x} sp={:#x} ra={:#x} gp={:#x} a0={:#x} a1={:#x}",
+        start.return_pc,
+        start.user_sp,
+        start.frame[0],
+        start.frame[1],
+        start.frame[8],
+        start.frame[9]
+    );
+    unsafe { thread::start_linux_process_child(&start as *const RiscvProcessStart as *const u8) }
 }
 
 #[cfg(target_arch = "aarch64")]

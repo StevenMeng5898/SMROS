@@ -824,6 +824,26 @@ pub fn init() {
         assert!(PageFrameAllocator::init_range(frame_start, frame_end));
     }
 
+    #[cfg(target_arch = "riscv64")]
+    {
+        unsafe extern "C" {
+            static __kernel_end: u8;
+        }
+
+        let memory = crate::kernel_lowlevel::drivers::memory_reg()
+            .unwrap_or(crate::kernel_lowlevel::RISCV64_RAM_FALLBACK);
+        let kernel_end = core::ptr::addr_of!(__kernel_end) as usize;
+        let frame_start = core::cmp::max(memory.base, kernel_end)
+            .saturating_add(PAGE_SIZE - 1)
+            & !(PAGE_SIZE - 1);
+        let frame_end = memory
+            .base
+            .checked_add(memory.size)
+            .map(|end| end & !(PAGE_SIZE - 1))
+            .expect("RISC-V RAM range must not overflow");
+        assert!(PageFrameAllocator::init_range(frame_start, frame_end));
+    }
+
     // Initialize process manager
     process_manager().init();
 

@@ -28,12 +28,12 @@ impl Serial {
 
     pub fn active() -> Self {
         Self {
-            base: drivers::uart_base(),
+            base: Self::resolved_uart_base(),
         }
     }
 
     pub fn init(&mut self) {
-        self.base = drivers::uart_base();
+        self.base = Self::resolved_uart_base();
         if self.base == 0 {
             return;
         }
@@ -156,12 +156,25 @@ impl Serial {
     }
 
     fn checked_mmio_addr(&self, offset: usize) -> usize {
+        if crate::kernel_lowlevel::cpu::user_address_space_active()
+            && self.base == crate::kernel_lowlevel::RISCV_USER_UART_ALIAS
+        {
+            return self.base.saturating_add(offset);
+        }
         let size = drivers::uart_size();
         match lowlevel_logic::mmio_addr(self.base, offset) {
             Some(addr) if size == 0 || lowlevel_logic::dt_reg_contains(self.base, size, addr) => {
                 addr
             }
             _ => self.base,
+        }
+    }
+
+    fn resolved_uart_base() -> usize {
+        if crate::kernel_lowlevel::cpu::user_address_space_active() {
+            crate::kernel_lowlevel::RISCV_USER_UART_ALIAS
+        } else {
+            drivers::uart_base()
         }
     }
 }

@@ -323,6 +323,10 @@ pub fn wait_for_interrupt() {
 extern "C" {
     fn context_switch(current: *mut ThreadControlBlock, next: *mut ThreadControlBlock);
     fn context_switch_start(next: *mut ThreadControlBlock) -> !;
+    #[link_name = "start_linux_clone_child"]
+    fn start_linux_clone_child_asm(start: *const u8) -> !;
+    #[link_name = "start_linux_process_child"]
+    fn start_linux_process_child_asm(start: *const u8) -> !;
 }
 
 /// Save the current thread context and restore the next one.
@@ -343,6 +347,30 @@ pub unsafe fn switch_context(current: *mut ThreadControlBlock, next: *mut Thread
 /// `context_switch.S`.
 pub unsafe fn start_context(next: *mut ThreadControlBlock) -> ! {
     unsafe { context_switch_start(next) }
+}
+
+/// Restore a fork-owned process image and return to its copied user context.
+///
+/// # Safety
+/// `start` must point to a valid `RiscvProcessStart` image owned by the child
+/// process, and the child page table must retain the kernel identity mapping.
+pub unsafe fn start_linux_process_child(start: *const u8) -> ! {
+    crate::kernel_lowlevel::cpu::activate_user_address_space();
+    unsafe { start_linux_process_child_asm(start) }
+}
+
+/// Restore a task-owned clone startup image and enter its copied user context.
+///
+/// RISC-V clone and fork images intentionally share the same C layout. The
+/// clone path changes the copied trap frame's `tp` slot for `CLONE_SETTLS` and
+/// then uses the dedicated assembly entry to restore the shared address space.
+///
+/// # Safety
+/// `start` must point to a valid `RiscvProcessStart` image owned by the child
+/// task. The image's root page table must retain the kernel identity mapping.
+pub unsafe fn start_linux_clone_child(start: *const u8) -> ! {
+    crate::kernel_lowlevel::cpu::activate_user_address_space();
+    unsafe { start_linux_clone_child_asm(start) }
 }
 
 /// Print a number to serial (helper function)

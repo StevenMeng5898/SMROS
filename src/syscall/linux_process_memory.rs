@@ -355,7 +355,331 @@ struct FallbackAddressSpace {
     root_paddr: u64,
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(target_arch = "riscv64")]
+const RISCV_PAGE_TABLE_COUNT: usize = 512;
+
+#[cfg(target_arch = "riscv64")]
+const RISCV_PTE_V: u64 = 1 << 0;
+#[cfg(target_arch = "riscv64")]
+const RISCV_PTE_R: u64 = 1 << 1;
+#[cfg(target_arch = "riscv64")]
+const RISCV_PTE_W: u64 = 1 << 2;
+#[cfg(target_arch = "riscv64")]
+const RISCV_PTE_X: u64 = 1 << 3;
+#[cfg(target_arch = "riscv64")]
+const RISCV_PTE_U: u64 = 1 << 4;
+#[cfg(target_arch = "riscv64")]
+const RISCV_PTE_A: u64 = 1 << 6;
+#[cfg(target_arch = "riscv64")]
+const RISCV_PTE_D: u64 = 1 << 7;
+#[cfg(target_arch = "riscv64")]
+const RISCV_PTE_PPN_MASK: u64 = 0x003f_ffff_ffff_fc00;
+
+#[cfg(target_arch = "riscv64")]
+#[repr(C, align(4096))]
+struct RiscvPageTable {
+    entries: [u64; 512],
+}
+
+#[cfg(target_arch = "riscv64")]
+impl RiscvPageTable {
+    const fn new() -> Self {
+        Self { entries: [0; 512] }
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+static mut RISCV_PAGE_TABLE_POOL: [RiscvPageTable; RISCV_PAGE_TABLE_COUNT] =
+    [const { RiscvPageTable::new() }; RISCV_PAGE_TABLE_COUNT];
+#[cfg(target_arch = "riscv64")]
+static RISCV_PAGE_TABLE_NEXT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(target_arch = "riscv64")]
+fn reset_riscv_page_tables() {
+    RISCV_PAGE_TABLE_NEXT.store(0, Ordering::Release);
+}
+
+#[cfg(target_arch = "riscv64")]
+fn alloc_riscv_page_table() -> Option<u64> {
+    let index = RISCV_PAGE_TABLE_NEXT.fetch_add(1, Ordering::AcqRel);
+    if index >= RISCV_PAGE_TABLE_COUNT {
+        return None;
+    }
+    let table = unsafe { core::ptr::addr_of_mut!(RISCV_PAGE_TABLE_POOL).cast::<RiscvPageTable>().add(index) };
+    unsafe { table.write(RiscvPageTable::new()) };
+    Some(table as u64)
+}
+
+#[cfg(target_arch = "riscv64")]
+fn riscv_table_from_pte(pte: u64) -> Option<*mut RiscvPageTable> {
+    if pte & RISCV_PTE_V == 0 || pte & (RISCV_PTE_R | RISCV_PTE_W | RISCV_PTE_X) != 0 {
+        return None;
+    }
+    let paddr = ((pte & RISCV_PTE_PPN_MASK) >> 10) << 12;
+    (paddr != 0).then_some(paddr as *mut RiscvPageTable)
+}
+
+#[cfg(target_arch = "riscv64")]
+fn riscv_table_pte(paddr: u64) -> u64 {
+    RISCV_PTE_V | (((paddr >> 12) << 10) & RISCV_PTE_PPN_MASK)
+}
+
+#[cfg(target_arch = "riscv64")]
+fn riscv_leaf_pte(paddr: u64, readable: bool, writable: bool, executable: bool, user: bool) -> u64 {
+    let mut pte = RISCV_PTE_V | RISCV_PTE_A;
+    if readable {
+        pte |= RISCV_PTE_R;
+    }
+    if writable {
+        pte |= RISCV_PTE_W | RISCV_PTE_D;
+    }
+    if executable {
+        pte |= RISCV_PTE_X;
+    }
+    if user {
+        pte |= RISCV_PTE_U;
+    }
+    pte | (((paddr >> 12) << 10) & RISCV_PTE_PPN_MASK)
+}
+
+#[cfg(target_arch = "riscv64")]
+unsafe fn riscv_leaf_slot(root_paddr: u64, vaddr: usize, create: bool) -> Option<*mut u64> {
+    let vpn = [
+        (vaddr >> 12) & 0x1ff,
+        (vaddr >> 21) & 0x1ff,
+        (vaddr >> 30) & 0x1ff,
+    ];
+    let mut table = root_paddr as *mut RiscvPageTable;
+    for level in [2usize, 1usize] {
+        let entry = (*table).entries[vpn[level]];
+        if entry & RISCV_PTE_V == 0 {
+            if !create {
+                return None;
+            }
+            let child = alloc_riscv_page_table()?;
+            (*table).entries[vpn[level]] = riscv_table_pte(child);
+            table = child as *mut RiscvPageTable;
+        } else {
+            table = riscv_table_from_pte(entry)?;
+        }
+    }
+    Some((*table).entries.as_mut_ptr().add(vpn[0]))
+}
+
+#[cfg(target_arch = "riscv64")]
+unsafe fn riscv_map_page(
+    root_paddr: u64,
+    vaddr: usize,
+    paddr: u64,
+    readable: bool,
+    writable: bool,
+    executable: bool,
+    user: bool,
+) -> Result<(), SysError> {
+    let slot = riscv_leaf_slot(root_paddr, vaddr, true).ok_or(SysError::ENOMEM)?;
+    let current = *slot;
+    if current & RISCV_PTE_V != 0 {
+        return Err(SysError::EINVAL);
+    }
+    *slot = riscv_leaf_pte(paddr, readable, writable, executable, user);
+    Ok(())
+}
+
+#[cfg(target_arch = "riscv64")]
+unsafe fn riscv_translate_user(root_paddr: u64, vaddr: usize, write: bool) -> Option<usize> {
+    let slot = riscv_leaf_slot(root_paddr, vaddr, false)?;
+    let pte = *slot;
+    if pte & (RISCV_PTE_V | RISCV_PTE_U) != (RISCV_PTE_V | RISCV_PTE_U)
+        || pte & (RISCV_PTE_R | RISCV_PTE_W | RISCV_PTE_X) == 0
+        || (write && pte & RISCV_PTE_W == 0)
+    {
+        return None;
+    }
+    let paddr = ((pte & RISCV_PTE_PPN_MASK) >> 10) << 12;
+    paddr
+        .checked_add((vaddr & (PAGE_SIZE - 1)) as u64)
+        .and_then(|address| usize::try_from(address).ok())
+}
+
+#[cfg(target_arch = "riscv64")]
+impl FallbackAddressSpace {
+    fn new(_pid: usize) -> Result<Self, SysError> {
+        let root_paddr = alloc_riscv_page_table().ok_or(SysError::ENOMEM)?;
+        // Keep the kernel image, kernel data/stack, and firmware handoff
+        // addresses available after switching to the process's Sv39 root.
+        unsafe {
+            let root = root_paddr as *mut RiscvPageTable;
+            (*root).entries[2] = riscv_leaf_pte(
+                0x8000_0000,
+                true,
+                true,
+                true,
+                false,
+            );
+            let uart = crate::kernel_lowlevel::drivers::uart_base();
+            if uart != 0 {
+                riscv_map_page(
+                    root_paddr,
+                    crate::kernel_lowlevel::RISCV_USER_UART_ALIAS,
+                    (uart & !(PAGE_SIZE - 1)) as u64,
+                    true,
+                    true,
+                    false,
+                    false,
+                )?;
+            }
+            let mut virtio_mmio_index = 0;
+            while let Some(reg) = crate::kernel_lowlevel::drivers::virtio_mmio_reg(virtio_mmio_index)
+            {
+                let page_base = reg.base & !(PAGE_SIZE - 1);
+                let page_count = reg
+                    .size
+                    .checked_add(PAGE_SIZE - 1)
+                    .ok_or(SysError::ENOMEM)?
+                    / PAGE_SIZE;
+                let mut page_index = 0;
+                while page_index < page_count {
+                    let page_offset = page_index.checked_mul(PAGE_SIZE).ok_or(SysError::ENOMEM)?;
+                    let page = page_base.checked_add(page_offset).ok_or(SysError::ENOMEM)?;
+                    let alias_base = crate::kernel_lowlevel::virtio_mmio_user_alias(page_base)
+                        .ok_or(SysError::EINVAL)?;
+                    let alias_page = alias_base
+                        .checked_add(page_offset)
+                        .ok_or(SysError::ENOMEM)?;
+                    riscv_map_page(
+                        root_paddr,
+                        alias_page,
+                        page as u64,
+                        true,
+                        true,
+                        false,
+                        false,
+                    )?;
+                    page_index += 1;
+                }
+                virtio_mmio_index += 1;
+            }
+        }
+        Ok(Self { root_paddr })
+    }
+
+    fn root_paddr(&self) -> u64 {
+        self.root_paddr
+    }
+
+    fn table_page_count(&self) -> usize {
+        1
+    }
+
+    fn map_user_page(
+        &mut self,
+        vaddr: usize,
+        pfn: u64,
+        readable: bool,
+        writable: bool,
+        executable: bool,
+    ) -> Result<(), SysError> {
+        let paddr = crate::kernel_lowlevel::memory::PageFrameAllocator::pfn_address(pfn)
+            .ok_or(SysError::ENOMEM)?;
+        unsafe {
+            riscv_map_page(
+                self.root_paddr,
+                vaddr,
+                paddr as u64,
+                readable,
+                writable,
+                executable,
+                true,
+            )
+        }?;
+        crate::kernel_lowlevel::cpu::flush_tlb();
+        Ok(())
+    }
+
+    fn protect_user_page(
+        &mut self,
+        vaddr: usize,
+        readable: bool,
+        writable: bool,
+        executable: bool,
+    ) -> Result<(), SysError> {
+        unsafe {
+            let slot = riscv_leaf_slot(self.root_paddr, vaddr, false).ok_or(SysError::EINVAL)?;
+            let pte = *slot;
+            if pte & (RISCV_PTE_V | RISCV_PTE_U) != (RISCV_PTE_V | RISCV_PTE_U) {
+                return Err(SysError::EINVAL);
+            }
+            let paddr = ((pte & RISCV_PTE_PPN_MASK) >> 10) << 12;
+            *slot = riscv_leaf_pte(paddr, readable, writable, executable, true);
+        }
+        crate::kernel_lowlevel::cpu::flush_tlb();
+        Ok(())
+    }
+
+    fn unmap_user_page(&mut self, vaddr: usize) -> Result<u64, SysError> {
+        unsafe {
+            let slot = riscv_leaf_slot(self.root_paddr, vaddr, false).ok_or(SysError::EINVAL)?;
+            let pte = *slot;
+            if pte & (RISCV_PTE_V | RISCV_PTE_U) != (RISCV_PTE_V | RISCV_PTE_U) {
+                return Err(SysError::EINVAL);
+            }
+            *slot = 0;
+            let pfn = ((pte & RISCV_PTE_PPN_MASK) >> 10) as u64;
+            crate::kernel_lowlevel::cpu::flush_tlb();
+            Ok(pfn)
+        }
+    }
+
+    fn copy_to_user(&self, vaddr: usize, bytes: &[u8]) -> Result<(), SysError> {
+        if !super::syscall_logic::user_buffer_valid(vaddr, bytes.len()) {
+            return Err(SysError::EFAULT);
+        }
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let address = vaddr.checked_add(offset).ok_or(SysError::EFAULT)?;
+            let physical = unsafe { riscv_translate_user(self.root_paddr, address, true) }
+                .ok_or(SysError::EFAULT)?;
+            let chunk = core::cmp::min(PAGE_SIZE - (address & (PAGE_SIZE - 1)), bytes.len() - offset);
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    bytes.as_ptr().add(offset),
+                    physical as *mut u8,
+                    chunk,
+                );
+            }
+            offset += chunk;
+        }
+        Ok(())
+    }
+
+    fn copy_from_user(&self, vaddr: usize, out: &mut [u8]) -> Result<(), SysError> {
+        if !super::syscall_logic::user_buffer_valid(vaddr, out.len()) {
+            return Err(SysError::EFAULT);
+        }
+        let mut offset = 0usize;
+        while offset < out.len() {
+            let address = vaddr.checked_add(offset).ok_or(SysError::EFAULT)?;
+            let physical = unsafe { riscv_translate_user(self.root_paddr, address, false) }
+                .ok_or(SysError::EFAULT)?;
+            let chunk = core::cmp::min(PAGE_SIZE - (address & (PAGE_SIZE - 1)), out.len() - offset);
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    physical as *const u8,
+                    out.as_mut_ptr().add(offset),
+                    chunk,
+                );
+            }
+            offset += chunk;
+        }
+        Ok(())
+    }
+
+    fn writable_physical(&self, vaddr: usize) -> Option<usize> {
+        unsafe { riscv_translate_user(self.root_paddr, vaddr, true) }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
 impl FallbackAddressSpace {
     fn new(pid: usize) -> Result<Self, SysError> {
         let root_paddr = pid.checked_mul(PAGE_SIZE).ok_or(SysError::ENOMEM)? as u64;
@@ -414,6 +738,7 @@ impl FallbackAddressSpace {
         }
         Ok(())
     }
+
 }
 
 pub(crate) struct LinuxMemoryStats {
@@ -1216,7 +1541,21 @@ pub(crate) fn register_root(pid: usize) -> Result<u64, SysError> {
         #[cfg(target_arch = "aarch64")]
         let address_space =
             Aarch64AddressSpace::new_with_kernel_map().map_err(map_address_error)?;
+        #[cfg(target_arch = "riscv64")]
+        let address_space = match FallbackAddressSpace::new(pid) {
+            Ok(address_space) => address_space,
+            Err(error) => {
+                crate::kobj_err!(
+                    "posix-map",
+                    "riscv root map failed pid={} error={:?}",
+                    pid,
+                    error
+                );
+                return Err(error);
+            }
+        };
         #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(not(target_arch = "riscv64"))]
         let address_space = FallbackAddressSpace::new(pid)?;
         let root_paddr = address_space.root_paddr();
         if root_paddr == 0 {
@@ -1284,6 +1623,8 @@ pub(crate) fn copy_to_process(pid: usize, address: usize, bytes: &[u8]) -> Resul
 
 pub(crate) fn reset_launch() {
     bump_memory_generation();
+    #[cfg(target_arch = "riscv64")]
+    reset_riscv_page_tables();
     with_runtime(|runtime| {
         runtime.memories.clear();
     });
@@ -1312,6 +1653,8 @@ pub(crate) fn deactivate_current_address_space() -> Result<(), SysError> {
     if !crate::kernel_lowlevel::mmu::activate_bootstrap_on_current_cpu() {
         return Err(SysError::EIO);
     }
+    #[cfg(target_arch = "riscv64")]
+    crate::kernel_lowlevel::cpu::deactivate_user_address_space();
     Ok(())
 }
 
@@ -1320,7 +1663,14 @@ pub(crate) fn clone_for_fork(
     child_pid: usize,
     mut shared_attachments: Vec<LinuxSharedAttachmentClone>,
 ) -> Result<u64, SysError> {
+    crate::kobj_info!(
+        "posix-fork",
+        "riscv clone begin parent={} child={}",
+        parent_pid,
+        child_pid
+    );
     let result = with_runtime(|runtime| {
+        crate::kobj_info!("posix-fork", "riscv clone runtime lock acquired");
         if runtime
             .memories
             .iter()
@@ -1361,6 +1711,7 @@ pub(crate) fn clone_for_fork(
             );
             error
         })?;
+        crate::kobj_info!("posix-fork", "riscv clone parent promotion complete");
         let parent = runtime
             .memories
             .get(parent_index)
@@ -1386,6 +1737,7 @@ pub(crate) fn clone_for_fork(
         address_space.begin_deferred_user_updates();
         #[cfg(not(target_arch = "aarch64"))]
         let address_space = FallbackAddressSpace::new(child_pid)?;
+        crate::kobj_info!("posix-fork", "riscv clone child root allocated");
         let root_paddr = address_space.root_paddr();
         if root_paddr == 0 || root_paddr == parent.address_space.root_paddr() {
             crate::kobj_info!(
@@ -1443,7 +1795,13 @@ pub(crate) fn clone_for_fork(
                 SysError::ENOMEM
             })?;
 
-        for mapping in &parent.mappings {
+        for mapping in parent.mappings.iter() {
+            crate::kobj_info!(
+                "posix-fork",
+                "riscv clone mapping addr={:#x} pages={}",
+                mapping.addr,
+                mapping.pages.len()
+            );
             let source = mapping.source.try_clone_for_fork().map_err(|_| {
                 crate::kobj_info!(
                     "posix-fork",
@@ -1633,6 +1991,8 @@ pub(crate) fn clone_for_fork(
             return Err(SysError::EINVAL);
         }
 
+        crate::kobj_info!("posix-fork", "riscv clone mappings complete");
+
         #[cfg(target_arch = "aarch64")]
         let brk_pages = if parent
             .brk
@@ -1658,11 +2018,14 @@ pub(crate) fn clone_for_fork(
             )
         };
         #[cfg(not(target_arch = "aarch64"))]
-        let brk_pages = super::linux_process::clone_linux_fork_pages(
-            &mut LinuxProcessForkPageOps::new(&mut child),
-            &parent.brk.pages,
-            super::linux_process::fork_failpoint,
-        );
+        let brk_pages = {
+            let result = super::linux_process::clone_linux_fork_pages(
+                &mut LinuxProcessForkPageOps::new(&mut child),
+                &parent.brk.pages,
+                super::linux_process::fork_failpoint,
+            );
+            result
+        };
         let brk_pages = brk_pages
         .map_err(|error| {
             crate::kobj_info!(
@@ -1721,6 +2084,7 @@ pub(crate) fn clone_for_fork(
             }
         }
         child.brk.pages = brk_pages;
+        crate::kobj_info!("posix-fork", "riscv clone brk complete");
         #[cfg(target_arch = "aarch64")]
         child.address_space.end_deferred_user_updates();
         crate::kernel_lowlevel::cpu::sync_instruction_cache();
@@ -1995,6 +2359,17 @@ pub(crate) fn zero_current(address: usize, len: usize) -> Result<(), SysError> {
 
 pub(crate) fn current_root_paddr() -> Result<u64, SysError> {
     with_current(|memory| Ok(memory.address_space.root_paddr()))
+}
+
+#[cfg(target_arch = "riscv64")]
+pub(crate) fn root_paddr_for_pid(pid: usize) -> Option<u64> {
+    with_runtime(|runtime| {
+        runtime
+            .memories
+            .iter()
+            .find(|memory| memory.pid == pid)
+            .map(|memory| memory.address_space.root_paddr())
+    })
 }
 
 pub(crate) fn register_initial_stack(address: usize, len: usize) -> Result<(), SysError> {
@@ -2758,7 +3133,15 @@ impl LinuxProcessMemory {
                 .translate_user(address, true)
                 .ok_or(SysError::EFAULT);
         }
+        #[cfg(target_arch = "riscv64")]
+        {
+            return self
+                .address_space
+                .writable_physical(address)
+                .ok_or(SysError::EFAULT);
+        }
         #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(not(target_arch = "riscv64"))]
         {
             Ok(address)
         }

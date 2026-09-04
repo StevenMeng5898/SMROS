@@ -1125,6 +1125,19 @@ mod syscall_logic {
     }
 
     #[test]
+    fn posix_timer_remaining_rounds_up_to_effective_resolution() {
+        assert_eq!(
+            linux_posix_timer_remaining_rounded(35_202_800, 10_000_000),
+            40_000_000
+        );
+        assert_eq!(
+            linux_posix_timer_remaining_rounded(40_000_000, 10_000_000),
+            40_000_000
+        );
+        assert_eq!(linux_posix_timer_remaining_rounded(0, 10_000_000), 0);
+    }
+
+    #[test]
     fn posix_timer_create_accepts_cpu_clock_ids() {
         const CURRENT_PID: usize = 123;
         const CURRENT_TID: usize = 124;
@@ -2526,7 +2539,7 @@ mod linux_task_logic {
         assert!(!linux_signal_interrupts_sleep(
             LinuxSignalDisposition::Ignore
         ));
-        assert!(linux_signal_interrupts_sleep(LinuxSignalDisposition::Stop));
+        assert!(!linux_signal_interrupts_sleep(LinuxSignalDisposition::Stop));
         assert!(!linux_signal_interrupts_sleep(
             LinuxSignalDisposition::Continue
         ));

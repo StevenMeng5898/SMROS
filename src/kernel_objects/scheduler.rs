@@ -935,6 +935,14 @@ impl Scheduler {
             self.set_ready_bit(id.0, false);
         }
         self.threads[id.0].time_slice = 0;
+        if id == self.current_thread {
+            let scan_limit = self.thread_scan_limit();
+            self.next_thread = if scan_limit <= 1 {
+                1
+            } else {
+                (id.0 + 1) % scan_limit
+            };
+        }
         true
     }
 
@@ -2155,6 +2163,12 @@ pub fn schedule() {
         s.current_thread = next_id;
         s.record_trace_switch(cpu_id);
 
+        #[cfg(target_arch = "riscv64")]
+        crate::kernel_lowlevel::cpu::set_trap_stack_for_thread(next_id.0);
+
+        #[cfg(target_arch = "riscv64")]
+        crate::syscall::linux_process::switch_riscv_process_address_space(next_id.0);
+
         // Perform context switch
         // SAFETY: These pointers are valid TCB references
         unsafe {
@@ -2212,6 +2226,12 @@ pub fn start_first_thread() -> ! {
 
         s.current_thread = next_id;
         s.record_trace_switch(0);
+
+        #[cfg(target_arch = "riscv64")]
+        crate::kernel_lowlevel::cpu::set_trap_stack_for_thread(next_id.0);
+
+        #[cfg(target_arch = "riscv64")]
+        crate::syscall::linux_process::switch_riscv_process_address_space(next_id.0);
 
         // Jump to the first thread (don't save current context)
         // SAFETY: This is safe - we're jumping to a valid thread entry point
@@ -2348,6 +2368,12 @@ pub fn schedule_on_cpu(cpu_id: usize) {
         s.current_thread = next_id;
         s.record_trace_switch(cpu_id);
 
+        #[cfg(target_arch = "riscv64")]
+        crate::kernel_lowlevel::cpu::set_trap_stack_for_thread(next_id.0);
+
+        #[cfg(target_arch = "riscv64")]
+        crate::syscall::linux_process::switch_riscv_process_address_space(next_id.0);
+
         // Perform context switch
         // SAFETY: These pointers are valid TCB references
         unsafe {
@@ -2402,6 +2428,12 @@ pub fn start_first_thread_for_cpu(cpu_id: usize) -> ! {
 
         s.current_thread = next_id;
         s.record_trace_switch(cpu_id);
+
+        #[cfg(target_arch = "riscv64")]
+        crate::kernel_lowlevel::cpu::set_trap_stack_for_thread(next_id.0);
+
+        #[cfg(target_arch = "riscv64")]
+        crate::syscall::linux_process::switch_riscv_process_address_space(next_id.0);
 
         // Jump to the first thread (don't save current context)
         // SAFETY: This is safe - we're jumping to a valid thread entry point

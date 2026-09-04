@@ -181,6 +181,24 @@ pub(crate) const fn linux_clock_resolution_nanoseconds() -> i64 {
     1
 }
 
+/// Report a non-zero POSIX timer value at the granularity at which the
+/// platform can observe expiry. Rounding upward never reports a timer as
+/// expired early and avoids exposing sub-resolution truncation to callers.
+pub(crate) const fn linux_posix_timer_remaining_rounded(
+    remaining_nanoseconds: u64,
+    resolution_nanoseconds: u64,
+) -> u64 {
+    if remaining_nanoseconds == 0 || resolution_nanoseconds <= 1 {
+        return remaining_nanoseconds;
+    }
+    let remainder = remaining_nanoseconds % resolution_nanoseconds;
+    if remainder == 0 {
+        remaining_nanoseconds
+    } else {
+        remaining_nanoseconds.saturating_add(resolution_nanoseconds - remainder)
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) const fn linux_high_resolution_sleep_spin_threshold(timer_tick_nanos: u64) -> u64 {
     // The timer wake-up already bounds the coarse portion. Do not spin in the

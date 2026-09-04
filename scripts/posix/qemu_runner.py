@@ -166,6 +166,7 @@ class ControllerConfig:
     qemu_argv: tuple[str, ...]
     boot_timeout_seconds: float = 60.0
     max_test_serial_bytes: int = 8 * 1024 * 1024
+    refresh_host_share: bool = False
 
 
 @dataclass(frozen=True)
@@ -2322,6 +2323,14 @@ class QemuController:
                 raise ControllerError(
                     f"QEMU failed before the exact shell prompt (status {status})"
                 )
+            if self.config.refresh_host_share:
+                transport.write(b"mount share\n")
+                if not self._wait_for_prompt(transport, raw):
+                    status = transport.poll()
+                    raise ControllerError(
+                        "QEMU failed while refreshing the embedded host_shared stage "
+                        f"(status {status})"
+                    )
             return transport
         except BaseException:
             self._stop(transport)
@@ -3130,5 +3139,6 @@ def run_smros(
         config=ControllerConfig(
             output_directory=output_directory,
             qemu_argv=argv,
+            refresh_host_share=True,
         ),
     ).run(resume=resume)

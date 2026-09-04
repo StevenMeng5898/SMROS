@@ -81,12 +81,10 @@ pub extern "C" fn riscv64_record_boot_hart(hartid: usize) {
 }
 
 pub fn current_cpu_id() -> u32 {
-    let index = crate::kernel_lowlevel::drivers::hart_index(read_hartid());
-    if lowlevel_logic::valid_cpu_id(index as u32, MAX_CPUS) {
-        index as u32
-    } else {
-        0
-    }
+    // SBI HSM startup is not wired yet, so only the boot hart executes kernel
+    // threads. Keep that active hart on scheduler CPU 0 even when OpenSBI
+    // chooses a non-zero physical boot hart (as QEMU may do).
+    0
 }
 
 pub fn is_boot_cpu() -> bool {

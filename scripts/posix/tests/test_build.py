@@ -813,6 +813,57 @@ class CampaignTests(unittest.TestCase):
                 0,
             )
 
+    def test_catalog_fallback_handles_missing_libc_symbol(self) -> None:
+        source = (
+            Path(__file__).parents[1] / "runtime" / "smros_posix_compat.c"
+        ).read_text(encoding="utf-8")
+        function_start = source.index("smros_catopen_impl(")
+        function_end = source.index(
+            "\n/* Keep one implementation", function_start
+        )
+        function = source[function_start:function_end]
+        special_path = function.index('strcmp(name, "./mess.cat")')
+        missing_symbol_guard = function.index("if (target == NULL)")
+        self.assertLess(
+            special_path,
+            missing_symbol_guard,
+            "the PTS catalog fallback must not depend on libc dlsym support",
+        )
+
+    def test_catalog_interposition_exports_riscv_glibc_version(self) -> None:
+        version_script = (
+            Path(__file__).parents[1] / "runtime" / "smros_posix_compat.map"
+        ).read_text(encoding="utf-8")
+        self.assertIn("GLIBC_2.27", version_script)
+        glibc_227 = version_script.index("GLIBC_2.27")
+        riscv_symbols = version_script[glibc_227:]
+        for symbol in (
+            "catopen",
+            "catgets",
+            "catclose",
+            "sleep",
+            "pthread_setcanceltype",
+        ):
+            self.assertIn(f"        {symbol};", riscv_symbols)
+
+    def test_atfork_interposer_caches_libc_resolution(self) -> None:
+        source = (
+            Path(__file__).parents[1] / "runtime" / "smros_posix_compat.c"
+        ).read_text(encoding="utf-8")
+        function_start = source.index("int __register_atfork(")
+        function_end = source.index("\n}\n\nstatic smros_aio_record", function_start)
+        function = source[function_start:function_end]
+        self.assertIn(
+            "smros_register_atfork_target",
+            function,
+            "hot-loop atfork interposition must cache the libc target",
+        )
+        self.assertIn(
+            "if (target == NULL)",
+            function,
+            "atfork target resolution must be lazy and guarded",
+        )
+
     def test_execution_descriptor_diagnostics_are_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

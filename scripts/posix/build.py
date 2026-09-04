@@ -206,6 +206,7 @@ def compile_command(
     return [
         compiler,
         "-std=gnu99",
+        "-O2",
         "-D_POSIX_C_SOURCE=200112L",
         "-D_XOPEN_SOURCE=600",
         "-pthread",
@@ -240,6 +241,7 @@ def posix_compat_preload_command(
     return [
         compiler,
         "-std=gnu99",
+        "-O2",
         "-fPIC",
         "-shared",
         "-Wall",
@@ -2778,47 +2780,69 @@ def _validate_build_argv(
     executable_suffix = f"{test.test_id}.test"
     toolchain = toolchain_for_architecture(architecture)
     if stage_name == "compile":
-        prefix = [
-            toolchain.compiler,
-            "-std=gnu99",
-            "-D_POSIX_C_SOURCE=200112L",
-            "-D_XOPEN_SOURCE=600",
-            "-pthread",
-        ]
-        legacy = (
-            len(argv) == 11
-            and argv[:5] == prefix
-            and argv[5] == "-I"
-            and Path(argv[6]).name == "include"
-            and argv[7] == "-c"
-            and _path_ends_with(argv[8], test.source)
-            and argv[9] == "-o"
-            and _path_ends_with(argv[10], object_suffix)
+        prefixes = (
+            [
+                toolchain.compiler,
+                "-std=gnu99",
+                "-O2",
+                "-D_POSIX_C_SOURCE=200112L",
+                "-D_XOPEN_SOURCE=600",
+                "-pthread",
+            ],
+            [
+                toolchain.compiler,
+                "-std=gnu99",
+                "-D_POSIX_C_SOURCE=200112L",
+                "-D_XOPEN_SOURCE=600",
+                "-pthread",
+            ],
         )
-        compatibility = (
-            len(argv) == 13
-            and argv[:5] == prefix
-            and argv[5] == "-I"
-            and Path(argv[6]).name == "include"
-            and argv[7] == "-I"
-            and Path(argv[8]).name == "include"
-            and argv[9] == "-c"
-            and _path_ends_with(argv[10], test.source)
-            and argv[11] == "-o"
-            and _path_ends_with(argv[12], object_suffix)
-        )
-        valid = legacy or compatibility
-        if not valid:
+        layout: tuple[bool, int] | None = None
+        for prefix in prefixes:
+            offset = len(prefix)
+            if (
+                len(argv) == offset + 6
+                and argv[:offset] == prefix
+                and argv[offset] == "-I"
+                and Path(argv[offset + 1]).name == "include"
+                and argv[offset + 2] == "-c"
+                and _path_ends_with(argv[offset + 3], test.source)
+                and argv[offset + 4] == "-o"
+                and _path_ends_with(argv[offset + 5], object_suffix)
+            ):
+                layout = (False, offset)
+                break
+            if (
+                len(argv) == offset + 8
+                and argv[:offset] == prefix
+                and argv[offset] == "-I"
+                and Path(argv[offset + 1]).name == "include"
+                and argv[offset + 2] == "-I"
+                and Path(argv[offset + 3]).name == "include"
+                and argv[offset + 4] == "-c"
+                and _path_ends_with(argv[offset + 5], test.source)
+                and argv[offset + 6] == "-o"
+                and _path_ends_with(argv[offset + 7], object_suffix)
+            ):
+                layout = (True, offset)
+                break
+        if layout is None:
             raise ValueError(f"invalid target compiler argv for {test.test_id}")
+        compatibility, offset = layout
         if strict_paths:
             expected_source = f"target/posix/src/{revision}/{test.source}"
             expected_object = f"target/posix/{architecture}/obj/{object_suffix}"
             expected_include = f"target/posix/src/{revision}/include"
-            if legacy:
-                actual_paths = [argv[6], argv[8], argv[10]]
+            if not compatibility:
+                actual_paths = [argv[offset + 1], argv[offset + 3], argv[offset + 5]]
                 expected_paths = [expected_include, expected_source, expected_object]
             else:
-                actual_paths = [argv[6], argv[8], argv[10], argv[12]]
+                actual_paths = [
+                    argv[offset + 1],
+                    argv[offset + 3],
+                    argv[offset + 5],
+                    argv[offset + 7],
+                ]
                 expected_paths = [
                     str(POSIX_COMPAT_INCLUDE_DIRECTORY),
                     expected_include,

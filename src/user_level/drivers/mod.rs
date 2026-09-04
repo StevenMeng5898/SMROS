@@ -137,7 +137,6 @@ impl UserDriverFramework {
         if self.initialized {
             return true;
         }
-
         self.nodes.clear();
         self.bindings.clear();
         self.install_qemu_virt_tree();

@@ -52,3 +52,31 @@ GLIBC_2.34 {
         shm_open;
         shm_unlink;
 } GLIBC_2.17;
+
+/* Debian RISC-V glibc toolchains version selected POSIX APIs at 2.27, while
+ * the AArch64 toolchain uses 2.17. Export the interposers at the newer node
+ * so both target ABIs resolve the preload. */
+GLIBC_2.27 {
+    global:
+        clock;
+        catopen;
+        catgets;
+        catclose;
+        sleep;
+        pthread_setcanceltype;
+        __register_atfork;
+        pthread_attr_init;
+        pthread_attr_setschedparam;
+        pthread_attr_setschedpolicy;
+        pthread_attr_getschedpolicy;
+        pthread_attr_getschedparam;
+        pthread_attr_destroy;
+        mlock;
+        munlock;
+        mlockall;
+        munlockall;
+        msync;
+        mmap;
+        munmap;
+        open;
+} GLIBC_2.17;

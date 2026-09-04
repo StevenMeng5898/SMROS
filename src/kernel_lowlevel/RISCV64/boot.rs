@@ -22,6 +22,10 @@ _start:
 2:
     la      t0, trap_vector
     csrw    stvec, t0
+    la      t0, RISCV_TRAP_STACKS
+    li      t1, 0x10000
+    add     t0, t0, t1
+    csrw    sscratch, t0
 
     li      t0, (1 << 1) | (1 << 5)
     csrc    sstatus, t0
@@ -44,12 +48,22 @@ secondary_entry:
     mv      sp, a1
     la      t0, trap_vector
     csrw    stvec, t0
+    la      t0, RISCV_TRAP_STACKS
+    li      t1, 0x10000
+    add     t0, t0, t1
+    csrw    sscratch, t0
     tail    secondary_cpu_entry
 
 .align 4
 .globl trap_vector
 trap_vector:
-    addi    sp, sp, -256
+    // Swap the interrupted stack with the dedicated kernel trap stack. The
+    // old stack pointer is retained in sscratch until trap_restore.
+    // RISCV_TRAP_FRAME_SEPC_SLOT = 30, RISCV_TRAP_FRAME_USER_SP_SLOT = 31,
+    // RISCV_TRAP_FRAME_SSTATUS_SLOT = 32.
+    csrrw   sp, sscratch, sp
+    // 32 registers plus saved sepc, user sp, and sstatus.
+    addi    sp, sp, -272
     sd      ra, 0(sp)
     sd      gp, 8(sp)
     sd      tp, 16(sp)
@@ -80,6 +94,14 @@ trap_vector:
     sd      t4, 216(sp)
     sd      t5, 224(sp)
     sd      t6, 232(sp)
+    csrr    t0, sepc
+    sd      t0, 240(sp)
+    csrr    t0, sscratch
+    sd      t0, 248(sp)
+    csrr    t0, sstatus
+    sd      t0, 256(sp)
+    addi    t0, sp, 272
+    csrw    sscratch, t0
 
     csrr    t0, scause
     bltz    t0, trap_interrupt
@@ -88,6 +110,12 @@ trap_vector:
     beq     t0, t1, trap_user_ecall
     li      t1, 9
     beq     t0, t1, trap_supervisor_ecall
+    li      t1, 12
+    beq     t0, t1, trap_page_fault
+    li      t1, 13
+    beq     t0, t1, trap_page_fault
+    li      t1, 15
+    beq     t0, t1, trap_page_fault
     j       trap_unknown
 
 trap_interrupt:
@@ -99,6 +127,9 @@ trap_interrupt:
 
 trap_timer:
     call    timer_interrupt_handler
+    // Timer accounting may have made a blocked user thread runnable. Select
+    // the next thread before restoring the interrupted user context.
+    call    check_preemption
     j       trap_restore
 
 trap_user_ecall:
@@ -113,50 +144,77 @@ trap_supervisor_ecall:
     ld      a7, 104(sp)
     call    handle_syscall_simple
     sd      a0, 64(sp)
-    csrr    t0, sepc
-    addi    t0, t0, 4
+    // linux_riscv_syscall_context::install advances the frame's saved sepc
+    // before dispatch and preserves explicit restart/return PCs. Publish that
+    // return PC to the CSR before signal handling so sigreturn can restore it.
+    ld      t0, 240(sp)
     csrw    sepc, t0
+    mv      a0, sp
+    call    complete_linux_signal_syscall_return
+    call    clear_linux_riscv_syscall_context
     j       trap_restore
 
+trap_page_fault:
+    mv      a0, sp
+    csrr    a1, scause
+    csrr    a2, stval
+    call    handle_riscv_page_fault
+    bnez    a0, trap_restore
+    j       trap_unknown
+
 trap_unknown:
+    csrr    a0, scause
+    csrr    a1, sepc
+    csrr    a2, stval
+    call    riscv64_record_unhandled_trap
     li      t0, -38
     sd      t0, 64(sp)
-    csrr    t0, sepc
+    ld      t0, 240(sp)
     addi    t0, t0, 4
-    csrw    sepc, t0
+    sd      t0, 240(sp)
 
 trap_restore:
-    ld      ra, 0(sp)
-    ld      gp, 8(sp)
-    ld      tp, 16(sp)
-    ld      t0, 24(sp)
-    ld      t1, 32(sp)
-    ld      t2, 40(sp)
-    ld      s0, 48(sp)
-    ld      s1, 56(sp)
-    ld      a0, 64(sp)
-    ld      a1, 72(sp)
-    ld      a2, 80(sp)
-    ld      a3, 88(sp)
-    ld      a4, 96(sp)
-    ld      a5, 104(sp)
-    ld      a6, 112(sp)
-    ld      a7, 120(sp)
-    ld      s2, 128(sp)
-    ld      s3, 136(sp)
-    ld      s4, 144(sp)
-    ld      s5, 152(sp)
-    ld      s6, 160(sp)
-    ld      s7, 168(sp)
-    ld      s8, 176(sp)
-    ld      s9, 184(sp)
-    ld      s10, 192(sp)
-    ld      s11, 200(sp)
-    ld      t3, 208(sp)
-    ld      t4, 216(sp)
-    ld      t5, 224(sp)
-    ld      t6, 232(sp)
-    addi    sp, sp, 256
+    // Keep the frame pointer in t6 while restoring the interrupted stack
+    // directly from slot 31. sscratch remains the hart's trap-stack top, so a
+    // context switch while a trap is blocked cannot change the return stack.
+    mv      t6, sp
+    ld      sp, 248(t6)
+    addi    t0, t6, 272
+    csrw    sscratch, t0
+    ld      t0, 240(t6)
+    csrw    sepc, t0
+    ld      t0, 256(t6)
+    csrw    sstatus, t0
+    ld      ra, 0(t6)
+    ld      gp, 8(t6)
+    ld      tp, 16(t6)
+    ld      t0, 24(t6)
+    ld      t1, 32(t6)
+    ld      t2, 40(t6)
+    ld      s0, 48(t6)
+    ld      s1, 56(t6)
+    ld      a0, 64(t6)
+    ld      a1, 72(t6)
+    ld      a2, 80(t6)
+    ld      a3, 88(t6)
+    ld      a4, 96(t6)
+    ld      a5, 104(t6)
+    ld      a6, 112(t6)
+    ld      a7, 120(t6)
+    ld      s2, 128(t6)
+    ld      s3, 136(t6)
+    ld      s4, 144(t6)
+    ld      s5, 152(t6)
+    ld      s6, 160(t6)
+    ld      s7, 168(t6)
+    ld      s8, 176(t6)
+    ld      s9, 184(t6)
+    ld      s10, 192(t6)
+    ld      s11, 200(t6)
+    ld      t3, 208(t6)
+    ld      t4, 216(t6)
+    ld      t5, 224(t6)
+    ld      t6, 232(t6)
     sret
 "#,
 );

@@ -1,6 +1,67 @@
 pub type IrqState = usize;
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 const SSTATUS_SIE: usize = 1 << 1;
+
+static USER_ADDRESS_SPACE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub const RISCV_TRAP_STACK_SIZE: usize = 0x10_000;
+
+#[repr(C, align(16))]
+pub struct RiscvTrapStack(pub [u8; RISCV_TRAP_STACK_SIZE]);
+
+#[no_mangle]
+pub static mut RISCV_TRAP_STACKS: [RiscvTrapStack; crate::kernel_lowlevel::RISCV_MAX_THREADS] =
+    [const { RiscvTrapStack([0; RISCV_TRAP_STACK_SIZE]) }; crate::kernel_lowlevel::RISCV_MAX_THREADS];
+
+#[inline(always)]
+pub fn trap_stack_top() -> usize {
+    trap_stack_top_for_thread(0)
+}
+
+#[inline(always)]
+pub fn trap_stack_top_for_thread(thread_id: usize) -> usize {
+    let index = core::cmp::min(thread_id, crate::kernel_lowlevel::RISCV_MAX_THREADS - 1);
+    core::ptr::addr_of!(RISCV_TRAP_STACKS) as usize
+        + (index + 1) * RISCV_TRAP_STACK_SIZE
+}
+
+#[inline(always)]
+pub fn set_trap_stack_for_thread(thread_id: usize) {
+    let top = trap_stack_top_for_thread(thread_id);
+    unsafe {
+        core::arch::asm!("csrw sscratch, {top}", top = in(reg) top, options(nomem, nostack));
+    }
+}
+
+#[inline(always)]
+pub fn user_address_space_active() -> bool {
+    USER_ADDRESS_SPACE_ACTIVE.load(Ordering::Acquire)
+}
+
+#[inline(always)]
+fn set_user_address_space_active(active: bool) {
+    USER_ADDRESS_SPACE_ACTIVE.store(active, Ordering::Release);
+}
+
+#[inline(always)]
+pub fn activate_user_address_space() {
+    set_user_address_space_active(true);
+}
+
+pub fn deactivate_user_address_space() {
+    set_user_address_space_active(false);
+    let satp = 0usize;
+    unsafe {
+        core::arch::asm!(
+            "csrw satp, {satp}",
+            "sfence.vma",
+            satp = in(reg) satp,
+            options(nostack),
+        );
+    }
+}
 
 #[inline(always)]
 pub fn mask_interrupts() -> IrqState {
@@ -46,6 +107,32 @@ pub fn wait_for_interrupt() {
 }
 
 #[inline(always)]
+pub fn flush_tlb() {
+    unsafe {
+        core::arch::asm!("sfence.vma", options(nomem, nostack));
+    }
+}
+
+/// Switch the active Sv39 root for the scheduler's next thread. A zero root
+/// selects the kernel's bare-address mode used by non-Linux kernel threads.
+pub fn switch_user_address_space(root: u64) {
+    if root == 0 {
+        deactivate_user_address_space();
+        return;
+    }
+    set_user_address_space_active(true);
+    let satp = (8usize << 60) | ((root as usize) >> 12);
+    unsafe {
+        core::arch::asm!(
+            "csrw satp, {satp}",
+            "sfence.vma",
+            satp = in(reg) satp,
+            options(nostack),
+        );
+    }
+}
+
+#[inline(always)]
 pub fn wait_for_event() {
     wait_for_interrupt();
 }
@@ -75,11 +162,26 @@ pub fn mmio_barrier() {
 
 #[inline(always)]
 pub unsafe fn set_kernel_resume(resume: u64, _state: u64) {
-    core::arch::asm!(
-        "csrw sepc, {resume}",
-        resume = in(reg) resume,
-        options(nostack),
-    );
+    // The shared user-logic state value is an ARM SPSR encoding. RISC-V must
+    // explicitly request an S-mode sret target and keep interrupts masked.
+    const SSTATUS_SPP: u64 = 1 << 8;
+    const SSTATUS_SUM: u64 = 1 << 18;
+    let kernel_state = SSTATUS_SPP | SSTATUS_SUM;
+    if crate::syscall::linux_riscv_syscall_context::set_return_pc(resume) {
+        let _ = crate::syscall::linux_riscv_syscall_context::set_return_state(kernel_state);
+        let _ = crate::syscall::linux_riscv_syscall_context::set_return_stack_to_trap_top();
+    } else {
+        core::arch::asm!(
+            "csrw sepc, {resume}",
+            resume = in(reg) resume,
+            options(nostack),
+        );
+        core::arch::asm!(
+            "csrw sstatus, {kernel_state}",
+            kernel_state = in(reg) kernel_state,
+            options(nostack),
+        );
+    }
 }
 
 #[inline(always)]
@@ -89,8 +191,10 @@ pub unsafe fn set_kernel_resume_preserve_flags(resume: u64, state: u64) {
 
 #[inline(always)]
 pub fn set_exception_return_pc(pc: u64) {
-    unsafe {
-        core::arch::asm!("csrw sepc, {pc}", pc = in(reg) pc, options(nomem, nostack));
+    if !crate::syscall::linux_riscv_syscall_context::set_return_pc(pc) {
+        unsafe {
+            core::arch::asm!("csrw sepc, {pc}", pc = in(reg) pc, options(nomem, nostack));
+        }
     }
 }
 
@@ -105,6 +209,10 @@ pub fn read_exception_return_pc() -> u64 {
 
 #[inline(always)]
 pub fn read_exception_return_state() -> u64 {
+    if let Some(context) = crate::syscall::linux_riscv_syscall_context::current_riscv_syscall_context()
+    {
+        return context.pstate;
+    }
     let state: usize;
     unsafe {
         core::arch::asm!(
@@ -118,30 +226,43 @@ pub fn read_exception_return_state() -> u64 {
 
 #[inline(always)]
 pub fn read_user_stack_pointer() -> u64 {
-    0
+    crate::syscall::linux_riscv_syscall_context::current_riscv_syscall_context()
+        .map(|context| context.user_sp)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn riscv64_record_unhandled_trap(scause: u64, sepc: u64, stval: u64) {
+    crate::kobj_err!(
+        "riscv-trap",
+        "unhandled scause={:#x} sepc={:#x} stval={:#x}",
+        scause,
+        sepc,
+        stval
+    );
 }
 
 #[inline(always)]
-pub fn set_user_stack_pointer(_sp: u64) {}
+pub fn set_user_stack_pointer(sp: u64) {
+    let _ = crate::syscall::linux_riscv_syscall_context::set_return_stack(sp);
+}
 
 #[inline(always)]
 pub unsafe fn switch_to_user(entry_point: u64, user_stack: u64, ttbr0: u64, _state: u64) -> ! {
     if ttbr0 != 0 {
-        let satp = (8usize << 60) | ((ttbr0 as usize) >> 12);
-        core::arch::asm!(
-            "csrw satp, {satp}",
-            "sfence.vma",
-            satp = in(reg) satp,
-            options(nostack),
-        );
+        switch_user_address_space(ttbr0);
     }
 
     const SSTATUS_SPIE: usize = 1 << 5;
     const SSTATUS_SPP: usize = 1 << 8;
+    const SSTATUS_SUM: usize = 1 << 18;
     let mut sstatus: usize;
     core::arch::asm!("csrr {sstatus}, sstatus", sstatus = out(reg) sstatus, options(nostack));
     sstatus &= !SSTATUS_SPP;
-    sstatus |= SSTATUS_SPIE;
+    // Trap entry and syscall handlers use the current address space for the
+    // user stack and buffers. Permit those S-mode accesses while the process
+    // is active; user mode itself cannot observe or modify SUM.
+    sstatus |= SSTATUS_SPIE | SSTATUS_SUM;
     core::arch::asm!(
         "csrw sstatus, {sstatus}",
         "csrw sepc, {entry}",
@@ -172,9 +293,9 @@ pub unsafe fn linux_syscall(syscall_num: u32, args: [u64; 6]) -> u64 {
 }
 
 pub fn print_system_info(serial: &mut crate::kernel_lowlevel::serial::Serial) {
-    let hartid = crate::kernel_lowlevel::smp::current_cpu_id();
+    let hartid = crate::kernel_lowlevel::smp::read_hartid();
     serial.write_str("[CPU] hartid: ");
-    crate::kernel_lowlevel::smp::print_number(serial, hartid);
+    crate::kernel_lowlevel::smp::print_number(serial, hartid as u32);
     serial.write_str("\n");
 
     let sstatus: usize;

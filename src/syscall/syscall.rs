@@ -89,6 +89,7 @@ use crate::syscall::syscall_logic::{
 };
 use crate::user_level::fxfs;
 
+
 #[path = "fuzz.rs"]
 mod fuzz;
 pub use fuzz::{fuzz_syscalls, fuzz_syscalls_with_config, SyscallFuzzConfig, SyscallFuzzReport};
@@ -526,8 +527,17 @@ const LINUX_O_EXCL: usize = 0o200;
 const LINUX_O_TRUNC: usize = 0o1000;
 const LINUX_O_APPEND: usize = 0o2000;
 const LINUX_O_NONBLOCK: usize = 0o4000;
+#[cfg(target_arch = "aarch64")]
+const LINUX_O_LARGEFILE: usize = 0o400000;
+#[cfg(not(target_arch = "aarch64"))]
 const LINUX_O_LARGEFILE: usize = 0o100000;
+#[cfg(target_arch = "aarch64")]
 const LINUX_O_DIRECTORY: usize = 0o40000;
+#[cfg(not(target_arch = "aarch64"))]
+const LINUX_O_DIRECTORY: usize = 0o200000;
+#[cfg(target_arch = "aarch64")]
+const LINUX_O_NOFOLLOW: usize = 0o100000;
+#[cfg(not(target_arch = "aarch64"))]
 const LINUX_O_NOFOLLOW: usize = 0o400000;
 const LINUX_O_CLOEXEC: usize = 0o2000000;
 const LINUX_OPEN_ALLOWED_FLAGS: usize = LINUX_O_ACCMODE
@@ -3495,6 +3505,12 @@ impl MemorySyscallState {
         objects: &mut Vec<u32>,
         process_state: LinuxProcessForkState,
     ) -> bool {
+        crate::kobj_info!(
+            "posix-fork",
+            "resource state install begin pid={} current={}",
+            pid,
+            scheduler::scheduler().current().0
+        );
         if self.process_resources(pid).is_some()
             || self.linux_process_resources.len() == self.linux_process_resources.capacity()
         {
@@ -3530,6 +3546,7 @@ impl MemorySyscallState {
             rlimit_memlock: process_state.rlimit_memlock,
             mlock_future: false,
         });
+        crate::kobj_info!("posix-fork", "resource state install pushed pid={}", pid);
         true
     }
 
@@ -3903,7 +3920,12 @@ pub(crate) fn install_linux_resource_clone(
     objects: &mut Vec<u32>,
     process_state: LinuxProcessForkState,
 ) -> bool {
-    memory_state().install_process_resources(pid, descriptors, objects, process_state)
+    crate::kobj_info!("posix-fork", "resource state access begin pid={}", pid);
+    let state = memory_state();
+    crate::kobj_info!("posix-fork", "resource state access ready pid={}", pid);
+    let installed = state.install_process_resources(pid, descriptors, objects, process_state);
+    crate::kobj_info!("posix-fork", "resource state access done pid={} installed={}", pid, installed);
+    installed
 }
 
 pub(crate) fn release_linux_process_resources(pid: usize) -> bool {
@@ -3958,9 +3980,9 @@ pub(crate) fn release_shared_memory_attachment_reference(id: u32) -> bool {
 }
 
 fn linux_copy_from_user(address: usize, out: &mut [u8]) -> Result<(), SysError> {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     return linux_process_memory::copy_from_current(address, out);
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
     {
         if !syscall_logic::user_buffer_valid(address, out.len()) {
             return Err(SysError::EFAULT);
@@ -3973,9 +3995,9 @@ fn linux_copy_from_user(address: usize, out: &mut [u8]) -> Result<(), SysError> 
 }
 
 fn linux_copy_to_user(address: usize, bytes: &[u8]) -> Result<(), SysError> {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     return linux_process_memory::copy_to_current(address, bytes);
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
     {
         if !syscall_logic::user_buffer_valid(address, bytes.len()) {
             return Err(SysError::EFAULT);
@@ -4698,7 +4720,10 @@ fn ensure_linux_signal_trampoline() -> Result<usize, SysError> {
         0,
         0,
     )?;
+    #[cfg(target_arch = "aarch64")]
     let instructions = [0xd63f_0200u32, 0xd280_1168, 0xd400_0001, 0xd420_0000];
+    #[cfg(target_arch = "riscv64")]
+    let instructions = [0x08b0_0893u32, 0x0000_0073, 0x0010_0073, 0x0000_0013];
     let mut instruction_bytes = [0u8; 16];
     for (index, instruction) in instructions.iter().enumerate() {
         instruction_bytes[index * 4..index * 4 + 4].copy_from_slice(&instruction.to_ne_bytes());
@@ -5189,7 +5214,8 @@ pub(crate) fn queue_process_linux_signal_and_wake(
         }
 
         queue_process_linux_signal_for(tgid, record)?;
-        if let Some(target) = linux_task::process_signal_target(tgid, record.signum) {
+        let target = linux_task::process_signal_target(tgid, record.signum);
+        if let Some(target) = target {
             interrupt_linux_signal_target(target, record.signum);
         }
         Ok(())
@@ -5366,16 +5392,33 @@ fn install_linux_signal_handler(
         return Err(SysError::EAGAIN);
     }
     let regs = unsafe { &mut *(saved_regs as *mut [u64; 32]) };
-    regs[0] = pending.signum as u64;
-    regs[1] = 0;
-    regs[2] = 0;
-    regs[16] = action.handler;
-    if action.flags & LINUX_SA_SIGINFO != 0 {
-        regs[1] = info;
-        regs[2] = context;
+    #[cfg(target_arch = "aarch64")]
+    {
+        regs[0] = pending.signum as u64;
+        regs[1] = 0;
+        regs[2] = 0;
+        regs[16] = action.handler;
+        if action.flags & LINUX_SA_SIGINFO != 0 {
+            regs[1] = info;
+            regs[2] = context;
+        }
+        crate::kernel_lowlevel::cpu::set_exception_return_pc(trampoline as u64);
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        // RISC-V trap frames store x1..x31 in ABI order with a0 at slot 8.
+        // Return from the handler through the sigreturn trampoline in ra.
+        regs[0] = trampoline as u64;
+        regs[8] = pending.signum as u64;
+        regs[9] = 0;
+        regs[10] = 0;
+        if action.flags & LINUX_SA_SIGINFO != 0 {
+            regs[9] = info;
+            regs[10] = context;
+        }
+        crate::kernel_lowlevel::cpu::set_exception_return_pc(action.handler);
     }
     crate::kernel_lowlevel::cpu::set_user_stack_pointer(frame_sp);
-    crate::kernel_lowlevel::cpu::set_exception_return_pc(trampoline as u64);
     Ok(())
 }
 
@@ -6699,11 +6742,11 @@ fn linux_user_buffer_readable(address: usize, len: usize) -> bool {
     if !syscall_logic::user_buffer_valid(address, len) {
         return false;
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     {
         return linux_user_range_readable(address, len);
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
     true
 }
 
@@ -6711,11 +6754,11 @@ fn linux_user_buffer_writable(address: usize, len: usize) -> bool {
     if !syscall_logic::user_buffer_valid(address, len) {
         return false;
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     {
         return linux_user_range_writable(address, len);
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
     true
 }
 
@@ -10136,7 +10179,12 @@ pub fn sys_linux_timer_settime(
         if old_value != 0 {
             linux_write_user_itimerspec(old_value, linux_itimerspec_from_timer_spec(previous))?;
         }
-        let arm_result = timer.arm(flags & LINUX_TIMER_ABSTIME != 0, now_monotonic, spec);
+        let arm_now_monotonic = monotonic_nanos();
+        let arm_result = timer.arm(
+            flags & LINUX_TIMER_ABSTIME != 0,
+            arm_now_monotonic,
+            spec,
+        );
         arm_result.ok_or(SysError::EOVERFLOW)?;
         *memory_state()
             .linux_timer_mut(pid, timerid as u32)
@@ -10166,6 +10214,17 @@ pub fn sys_linux_timer_gettime(timerid: usize, curr_value: usize) -> SysResult {
         .map(|timer| timer.snapshot(now_monotonic, now_realtime));
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     let snapshot = snapshot.ok_or(SysError::EINVAL)?;
+    // RISC-V timer notifications are sampled on the 100 Hz scheduler tick.
+    // Report the remaining value at that effective resolution, preserving
+    // the POSIX guarantee that a non-expired timer is never reported early.
+    #[cfg(target_arch = "riscv64")]
+    let snapshot = LinuxPosixTimerSpec {
+        interval: snapshot.interval,
+        value: syscall_logic::linux_posix_timer_remaining_rounded(
+            snapshot.value,
+            LINUX_SIGNAL_TICK_NANOS,
+        ),
+    };
     linux_write_user_itimerspec(curr_value, linux_itimerspec_from_timer_spec(snapshot))
 }
 
@@ -11001,7 +11060,7 @@ fn sys_fork_with_child_tid(
     set_child_tid: Option<usize>,
     clear_child_tid: usize,
 ) -> SysResult {
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
     {
         let _ = (
             namespace_flags,
@@ -11023,6 +11082,27 @@ fn sys_fork_with_child_tid(
             clear_child_tid,
         );
         let child_pid = child_pid?;
+        debug_assert_ne!(child_pid, parent_pid);
+        Ok(child_pid)
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        let context = super::linux_riscv_syscall_context::current_riscv_syscall_context()
+            .ok_or(SysError::EINVAL)?;
+        let parent_pid = linux_process::current_pid()?;
+        let child_pid = linux_process::run_riscv_fork_transaction(
+            context,
+            namespace_flags,
+            child_exit_signal,
+            set_child_tid,
+            clear_child_tid,
+        )?;
+        crate::kobj_info!(
+            "posix-fork",
+            "riscv syscall return parent={} child={}",
+            parent_pid,
+            child_pid
+        );
         debug_assert_ne!(child_pid, parent_pid);
         Ok(child_pid)
     }
@@ -11057,7 +11137,7 @@ pub fn sys_clone(
         }
         let set_child_tid = flags & CLONE_CHILD_SETTID != 0;
         let clear_child_tid = flags & CLONE_CHILD_CLEARTID != 0;
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
         if (set_child_tid || clear_child_tid) && !linux_clone_tid_destination_valid(child_tid) {
             return Err(SysError::EFAULT);
         }
@@ -11078,14 +11158,18 @@ pub fn sys_clone(
         return result;
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
     {
         return Err(SysError::ENOSYS);
     }
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     {
+        #[cfg(target_arch = "aarch64")]
         let context = linux_syscall_context::current().ok_or(SysError::EINVAL)?;
+        #[cfg(target_arch = "riscv64")]
+        let context = super::linux_riscv_syscall_context::current_riscv_syscall_context()
+            .ok_or(SysError::EINVAL)?;
         let request = LinuxCloneRequest::validate(flags, newsp, parent_tid, newtls, child_tid)
             .map_err(|error| match error {
                 LinuxCloneValidationError::Flags
@@ -11131,7 +11215,7 @@ pub fn sys_clone(
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 fn linux_clone_tid_destinations_valid(request: &LinuxCloneRequest) -> bool {
     request
         .parent_tid
@@ -11140,7 +11224,7 @@ fn linux_clone_tid_destinations_valid(request: &LinuxCloneRequest) -> bool {
         .all(linux_clone_tid_destination_valid)
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub(crate) fn linux_clone_tid_destination_valid(pointer: usize) -> bool {
     pointer & (core::mem::align_of::<u32>() - 1) == 0
         && linux_user_range_writable(pointer, core::mem::size_of::<u32>())
@@ -11156,8 +11240,63 @@ pub(crate) fn linux_user_range_readable(address: usize, len: usize) -> bool {
     linux_process_memory::user_range_readable(address, len)
 }
 
-pub fn sys_clone3(_args: usize, _size: usize) -> SysResult {
-    Err(SysError::ENOSYS)
+/// Linux `clone3` compatibility shim.
+///
+/// The POSIX runtime only needs the common thread-clone fields. Decode the
+/// versioned user structure through the process-memory helpers, then route it
+/// through `sys_clone` so flag, stack, TLS, and TID validation stays in one
+/// place. Unsupported clone3-only features remain rejected by that validator.
+pub fn sys_clone3(args: usize, size: usize) -> SysResult {
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        let _ = (args, size);
+        return Err(SysError::ENOSYS);
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    {
+    const CLONE_ARGS_MIN_SIZE: usize = 64;
+    const CLONE_ARGS_KNOWN_SIZE: usize = 88;
+    if args == 0 || size < CLONE_ARGS_MIN_SIZE {
+        return Err(SysError::EINVAL);
+    }
+    let read_size = core::cmp::min(size, CLONE_ARGS_KNOWN_SIZE);
+    if !linux_user_range_readable(args, read_size) {
+        return Err(SysError::EFAULT);
+    }
+    let pid = linux_process::current_pid()?;
+    let mut bytes = [0u8; CLONE_ARGS_KNOWN_SIZE];
+    linux_process_memory::copy_from_process(pid, args, &mut bytes[..read_size])?;
+    let field = |offset: usize| -> u64 {
+        let mut value = [0u8; core::mem::size_of::<u64>()];
+        value.copy_from_slice(&bytes[offset..offset + core::mem::size_of::<u64>()]);
+        u64::from_ne_bytes(value)
+    };
+
+    let flags = usize::try_from(field(0)).map_err(|_| SysError::EINVAL)?;
+    let parent_tid = usize::try_from(field(24)).map_err(|_| SysError::EFAULT)?;
+    let child_tid = usize::try_from(field(16)).map_err(|_| SysError::EFAULT)?;
+    let exit_signal = usize::try_from(field(32)).map_err(|_| SysError::EINVAL)?;
+    if exit_signal & !0xff != 0 {
+        return Err(SysError::EINVAL);
+    }
+    let stack = usize::try_from(field(40)).map_err(|_| SysError::EINVAL)?;
+    let stack_size = usize::try_from(field(48)).map_err(|_| SysError::EINVAL)?;
+    let newsp = if stack == 0 {
+        0
+    } else {
+        stack.checked_add(stack_size).ok_or(SysError::EINVAL)?
+    };
+    let newtls = usize::try_from(field(56)).map_err(|_| SysError::EINVAL)?;
+
+    sys_clone(
+        flags | exit_signal,
+        newsp,
+        parent_tid,
+        newtls,
+        child_tid,
+    )
+    }
 }
 
 fn linux_exec_sleep_utility(seconds: u64) -> SysResult {
@@ -11245,6 +11384,12 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
                     wstatus,
                     include_stopped,
                 )? {
+                    crate::kobj_info!(
+                        "posix-wait",
+                        "riscv wait complete parent={} child={}",
+                        process.pid,
+                        reaped_pid
+                    );
                     crate::kobj_debug!(
                         "posix-wait",
                         "reaped parent={} child={}",
@@ -11580,7 +11725,8 @@ fn linux_deliver_kill_to_target(target_pid: usize, signum: usize) -> SysResult {
     if signum == LINUX_SIGKILL {
         return terminate_linux_process_by_signal(target_pid, signum);
     }
-    match linux_signal_disposition_for(target_pid, signum)? {
+    let disposition = linux_signal_disposition_for(target_pid, signum)?;
+    match disposition {
         LinuxSignalDisposition::Ignore => Ok(0),
         LinuxSignalDisposition::Stop
         | LinuxSignalDisposition::Continue

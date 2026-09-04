@@ -219,6 +219,9 @@ impl QemuVirtNetDriver {
         }
         self.mmio_base = base;
         self.transport = VirtioNetTransport::Mmio;
+        // Keep the FDT/physical address as the driver identity.  RISC-V may
+        // switch between the kernel root and a process root after binding, so
+        // MMIO access selects the appropriate supervisor alias dynamically.
         set_active_mmio_base(base);
 
         if !driver_logic::virtio_identity_valid(
@@ -820,7 +823,14 @@ fn set_active_mmio_base(base: usize) {
 }
 
 fn active_mmio_base() -> usize {
-    unsafe { ACTIVE_VIRTIO_MMIO_BASE }
+    let base = unsafe { ACTIVE_VIRTIO_MMIO_BASE };
+    #[cfg(target_arch = "riscv64")]
+    {
+        if crate::kernel_lowlevel::cpu::user_address_space_active() {
+            return crate::kernel_lowlevel::virtio_mmio_user_alias(base).unwrap_or(base);
+        }
+    }
+    base
 }
 
 fn mmio_read(offset: usize) -> u32 {

@@ -11,6 +11,12 @@ const LEGACY_SBI_SET_TIMER: usize = 0;
 
 static TIMER_FREQUENCY: AtomicU64 = AtomicU64::new(0);
 static TICK_PERIOD: AtomicU64 = AtomicU64::new(0);
+/// Absolute periodic compare value for the next scheduler tick.
+static NEXT_PERIODIC_COMPARE: AtomicU64 = AtomicU64::new(0);
+/// Earliest outstanding precision compare requested by a short sleeper.
+static PRECISION_COMPARE: AtomicU64 = AtomicU64::new(0);
+/// Compare value currently programmed through SBI.
+static PROGRAMMED_COMPARE: AtomicU64 = AtomicU64::new(0);
 
 pub fn driver_name() -> &'static str {
     "RISC-V SBI timer"
@@ -45,10 +51,27 @@ pub fn get_nanoseconds() -> u64 {
 
 pub fn arm_next_tick() {
     let period = TICK_PERIOD.load(Ordering::Relaxed);
-    let compare_value = lowlevel_logic::timer_compare(read_time(), period);
+    let current = read_time();
+    let periodic_compare = lowlevel_logic::timer_compare(current, period);
+    NEXT_PERIODIC_COMPARE.store(periodic_compare, Ordering::Release);
+    let precision_compare = PRECISION_COMPARE.load(Ordering::Acquire);
+    let precision_compare = if precision_compare > current {
+        precision_compare
+    } else {
+        PRECISION_COMPARE.store(0, Ordering::Release);
+        0
+    };
+    let compare_value = lowlevel_logic::timer_program_compare(
+        periodic_compare,
+        precision_compare,
+        0,
+    );
+    PROGRAMMED_COMPARE.store(compare_value, Ordering::Release);
     set_timer(compare_value);
 }
 
+/// Arm the SBI timer for an absolute monotonic deadline while preserving the
+/// periodic scheduler compare and any earlier precision request.
 pub fn arm_at_nanoseconds(deadline: u64) {
     let frequency = TIMER_FREQUENCY.load(Ordering::Relaxed);
     if frequency == 0 {
@@ -62,7 +85,24 @@ pub fn arm_at_nanoseconds(deadline: u64) {
     let target = target
         .min(u64::MAX as u128)
         .max((current as u128).saturating_add(1)) as u64;
-    set_timer(target);
+    let existing_precision = PRECISION_COMPARE.load(Ordering::Acquire);
+    let precision_compare = if existing_precision > current {
+        existing_precision.min(target)
+    } else {
+        target
+    };
+    PRECISION_COMPARE.store(precision_compare, Ordering::Release);
+    let periodic_compare = NEXT_PERIODIC_COMPARE.load(Ordering::Acquire);
+    let armed_compare = PROGRAMMED_COMPARE.load(Ordering::Acquire);
+    let programmed_compare = lowlevel_logic::timer_program_compare(
+        periodic_compare,
+        armed_compare,
+        target,
+    );
+    if programmed_compare != armed_compare {
+        PROGRAMMED_COMPARE.store(programmed_compare, Ordering::Release);
+        set_timer(programmed_compare);
+    }
 }
 
 pub fn clear_interrupt() {

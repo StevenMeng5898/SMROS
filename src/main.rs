@@ -546,10 +546,15 @@ extern "C" fn timer_interrupt_handler() {
     kernel_lowlevel::timer::clear_interrupt();
 
     let now = kernel_lowlevel::timer::get_tick_count();
+    // SBI timers are per-hart, so a precision sleeper may be woken by any
+    // CPU's compare interrupt. The shared task table makes this idempotent.
+    let precision_woke_task = crate::syscall::linux_task::on_precision_timer(
+        kernel_lowlevel::timer::get_nanoseconds(),
+    );
+    if precision_woke_task {
+        crate::kernel_objects::scheduler::schedule_on_cpu(current_cpu_id() as usize);
+    }
     if current_cpu_id() == 0 {
-        crate::syscall::linux_task::on_precision_timer(
-            kernel_lowlevel::timer::get_nanoseconds(),
-        );
         if claim_timer_tick(now) {
             crate::kernel_objects::scheduler::scheduler().on_timer_tick();
             crate::syscall::expire_linux_real_timers_from_irq();

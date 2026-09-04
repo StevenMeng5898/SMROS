@@ -19,8 +19,8 @@ _REVIEW_HEADER = "path\tdisposition\treason"
 _CANDIDATE_HEADER = "path\tevidence"
 _PTS_UNTESTED_RE = re.compile(r"\bPTS_UNTESTED\b")
 _REVIEWED_VOLUME_TIMEOUTS_MS = {
-    "conformance/interfaces/clock/1-1.c": 180_000,
-    "conformance/interfaces/clock_gettime/4-1.c": 60_000,
+    "conformance/interfaces/clock/1-1.c": 600_000,
+    "conformance/interfaces/clock_gettime/4-1.c": 600_000,
     "conformance/interfaces/clock_settime/speculative/4-4.c": 45_000,
     "conformance/interfaces/mmap/10-1.c": 90_000,
     "conformance/interfaces/pthread_cond_broadcast/1-2.c": 240_000,

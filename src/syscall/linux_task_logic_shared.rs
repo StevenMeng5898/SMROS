@@ -341,9 +341,7 @@ pub(crate) const fn linux_signal_interrupts_sleep(
 ) -> bool {
     matches!(
         disposition,
-        LinuxSignalDisposition::Stop
-            | LinuxSignalDisposition::Terminate
-            | LinuxSignalDisposition::Handled
+        LinuxSignalDisposition::Terminate | LinuxSignalDisposition::Handled
     )
 }
 

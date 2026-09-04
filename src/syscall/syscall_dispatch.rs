@@ -63,6 +63,9 @@ pub extern "C" fn handle_syscall_simple(
 ) -> u64 {
     let args = linux_args_from_u64s(arg0, arg1, arg2, arg3, arg4, arg5);
 
+    #[cfg(target_arch = "riscv64")]
+    let _ = crate::syscall::linux_riscv_syscall_context::install(saved_frame as usize);
+
     let result = if is_linux_syscall_number(syscall_num) {
         // Linux syscall
         #[cfg(target_arch = "aarch64")]
@@ -93,7 +96,43 @@ pub extern "C" fn handle_syscall_simple(
     };
 
     crate::user_level::user_test::record_el0_kernel_syscall_result(syscall_num as u32, result);
+    // The RISC-V trap return hook must run after the result has been written
+    // to the saved frame; it owns signal delivery and sigreturn restoration.
+    // The assembly handler clears the per-thread context after that hook.
     result
+}
+
+#[cfg(target_arch = "riscv64")]
+#[no_mangle]
+pub extern "C" fn clear_linux_riscv_syscall_context() {
+    crate::syscall::linux_riscv_syscall_context::clear();
+}
+
+#[cfg(target_arch = "riscv64")]
+#[no_mangle]
+pub extern "C" fn handle_riscv_page_fault(
+    saved_frame: usize,
+    scause: u64,
+    fault_address: u64,
+) -> u64 {
+    let access = match scause & !(1u64 << 63) {
+        12 => crate::syscall::linux_process_memory::LinuxMemoryFaultAccess::Execute,
+        13 => crate::syscall::linux_process_memory::LinuxMemoryFaultAccess::Read,
+        15 => crate::syscall::linux_process_memory::LinuxMemoryFaultAccess::Write,
+        _ => return 0,
+    };
+    if !crate::syscall::linux_riscv_syscall_context::install_fault(saved_frame) {
+        return 0;
+    }
+    let return_pc = unsafe { *(saved_frame as *const u64).add(30) };
+    let result = crate::syscall::deliver_linux_synchronous_memory_fault(
+        saved_frame,
+        return_pc,
+        fault_address,
+        access,
+    );
+    crate::syscall::linux_riscv_syscall_context::clear();
+    u64::from(result.is_ok())
 }
 
 fn zircon_error_to_u64(err: ZxError) -> u64 {

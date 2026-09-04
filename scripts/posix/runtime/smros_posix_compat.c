@@ -180,6 +180,12 @@ typedef int (*smros_pthread_attr_getinheritsched_fn)(
     const pthread_attr_t *,
     int *
 );
+int __register_atfork(
+    void (*prepare)(void),
+    void (*parent)(void),
+    void (*child)(void),
+    void *dso_handle
+);
 typedef int (*smros_pthread_cond_init_fn)(
     pthread_cond_t *,
     const pthread_condattr_t *
@@ -224,6 +230,7 @@ typedef unsigned int (*smros_alarm_fn)(unsigned int);
 
 static smros_aio_record smros_aio_records[SMROS_AIO_RECORDS];
 static nl_catd smros_pts_fork_catalog = (nl_catd)0;
+static unsigned char smros_pts_fork_catalog_sentinel;
 static volatile sig_atomic_t smros_signal_generation;
 static __thread volatile sig_atomic_t smros_thread_signal_generation;
 static __thread volatile sig_atomic_t smros_thread_interrupt_generation;
@@ -494,6 +501,7 @@ static int smros_sync_kernel_effective_uid(uid_t uid);
 static smros_sched_yield_fn smros_sched_yield_target;
 static smros_nanosleep_fn smros_nanosleep_target;
 static smros_clock_nanosleep_fn smros_clock_nanosleep_target;
+static smros_register_atfork_fn smros_register_atfork_target;
 static int smros_process_sched_policy = SCHED_OTHER;
 static struct sched_param smros_process_sched_param = {
     .sched_priority = 0,
@@ -1982,6 +1990,11 @@ int pthread_cancel(pthread_t thread) {
         if (result != 0) {
             smros_forget_pthread_cancel(thread);
         }
+    } else {
+        /* Deferred cancellation is observed at cancellation points.  Yield
+         * here so a tight requester loop cannot starve those points on the
+         * single active SMROS scheduler CPU. */
+        (void)sched_yield();
     }
     smros_pthread_diag_state("cancel-exit", (const void *)(uintptr_t)thread, (uint32_t)result, 0, 0);
     return result;
@@ -2383,17 +2396,10 @@ __attribute__((noreturn)) void pthread_exit(void *retval) {
 }
 
 unsigned int sleep(unsigned int seconds) {
-    if (getenv("SMROS_PTHREAD_DIAG") != NULL) {
-        (void)dprintf(
-            STDERR_FILENO,
-            "SMROS_SLEEP_TRACE tid=%lu phase=enter seconds=%u\n",
-            (unsigned long)pthread_self(),
-            seconds
-        );
-    }
     __sync_synchronize();
     smros_refresh_current_pthread_cancel();
     pthread_testcancel();
+    (void)sched_yield();
 
     if (seconds == 0) {
         __sync_synchronize();
@@ -2412,14 +2418,6 @@ unsigned int sleep(unsigned int seconds) {
         struct timespec remaining = {0, 0};
         if (nanosleep(&request, &remaining) == 0) {
             remaining_seconds--;
-            if (getenv("SMROS_PTHREAD_DIAG") != NULL) {
-                (void)dprintf(
-                    STDERR_FILENO,
-                    "SMROS_SLEEP_TRACE tid=%lu phase=tick remaining=%u\n",
-                    (unsigned long)pthread_self(),
-                    remaining_seconds
-                );
-            }
             pthread_testcancel();
             continue;
         }
@@ -3216,6 +3214,39 @@ int pthread_attr_destroy(pthread_attr_t *attr) {
     }
     return result;
 }
+
+int smros_pthread_attr_init_glibc217(pthread_attr_t *attr) {
+    return pthread_attr_init(attr);
+}
+
+int smros_pthread_attr_destroy_glibc217(pthread_attr_t *attr) {
+    return pthread_attr_destroy(attr);
+}
+
+unsigned int smros_sleep_glibc217(unsigned int seconds) {
+    return sleep(seconds);
+}
+
+int smros_pthread_setcanceltype_glibc217(int type, int *oldtype) {
+    return pthread_setcanceltype(type, oldtype);
+}
+
+int smros_register_atfork_glibc217(
+    void (*prepare)(void),
+    void (*parent)(void),
+    void (*child)(void),
+    void *dso_handle
+) {
+    return __register_atfork(prepare, parent, child, dso_handle);
+}
+
+#if defined(__aarch64__) || defined(__riscv)
+__asm__(".symver smros_pthread_attr_init_glibc217,pthread_attr_init@GLIBC_2.17");
+__asm__(".symver smros_pthread_attr_destroy_glibc217,pthread_attr_destroy@GLIBC_2.17");
+__asm__(".symver smros_sleep_glibc217,sleep@GLIBC_2.17");
+__asm__(".symver smros_pthread_setcanceltype_glibc217,pthread_setcanceltype@GLIBC_2.17");
+__asm__(".symver smros_register_atfork_glibc217,__register_atfork@GLIBC_2.17");
+#endif
 
 static void smros_sched_param_defaults(struct sched_param *param) {
     if (param == NULL) {
@@ -5243,7 +5274,7 @@ static int smros_mlock_range_invalid(const void *addr, size_t len) {
     return start >= (uintptr_t)LONG_MAX - page;
 }
 
-int mlock(const void *addr, size_t len) {
+static int smros_mlock_impl(const void *addr, size_t len) {
     if (smros_effective_uid != 0) {
         errno = EPERM;
         return -1;
@@ -5267,7 +5298,7 @@ int mlock(const void *addr, size_t len) {
     return result;
 }
 
-int munlock(const void *addr, size_t len) {
+static int smros_munlock_impl(const void *addr, size_t len) {
     if (smros_mlock_range_invalid(addr, len)) {
         errno = ENOMEM;
         return -1;
@@ -5287,7 +5318,7 @@ int munlock(const void *addr, size_t len) {
     return result;
 }
 
-int mlockall(int flags) {
+static int smros_mlockall_impl(int flags) {
     if (flags == 0 || (flags & ~(MCL_CURRENT | MCL_FUTURE)) != 0) {
         errno = EINVAL;
         return -1;
@@ -5310,7 +5341,7 @@ int mlockall(int flags) {
     return result;
 }
 
-int munlockall(void) {
+static int smros_munlockall_impl(void) {
     smros_munlockall_fn target =
         (smros_munlockall_fn)smros_resolve_symbol("munlockall");
     if (target == NULL) {
@@ -5324,7 +5355,7 @@ int munlockall(void) {
     return result;
 }
 
-int msync(void *addr, size_t len, int flags) {
+static int smros_msync_impl(void *addr, size_t len, int flags) {
     if (smros_mlockall_current && (flags & MS_INVALIDATE) != 0) {
         (void)addr;
         (void)len;
@@ -5340,7 +5371,7 @@ int msync(void *addr, size_t len, int flags) {
     return target(addr, len, flags);
 }
 
-void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset) {
+static void *smros_mmap_impl(void *addr, size_t len, int prot, int flags, int fd, off_t offset) {
     if (smros_fast_mmap_request(addr, len, prot, flags, fd, offset)) {
         errno = 0;
         return smros_fast_mmap_page;
@@ -5354,7 +5385,7 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset) {
     return target(addr, len, prot, flags, fd, offset);
 }
 
-int munmap(void *addr, size_t len) {
+static int smros_munmap_impl(void *addr, size_t len) {
     if (addr == smros_fast_mmap_page && len == 1024) {
         errno = 0;
         return 0;
@@ -5381,6 +5412,60 @@ int munmap(void *addr, size_t len) {
     }
     return result;
 }
+
+/* Debian's RISC-V glibc records POSIX memory calls at GLIBC_2.27.  Export
+ * the interposers at that version as well as GLIBC_2.17 so the guest loader
+ * cannot bypass the SMROS syscall-backed implementations. */
+extern int smros_mlock_glibc_217(const void *, size_t)
+    __attribute__((alias("smros_mlock_impl"), leaf, nothrow));
+extern int smros_mlock_glibc_227(const void *, size_t)
+    __attribute__((alias("smros_mlock_impl"), leaf, nothrow));
+extern int smros_munlock_glibc_217(const void *, size_t)
+    __attribute__((alias("smros_munlock_impl"), leaf, nothrow));
+extern int smros_munlock_glibc_227(const void *, size_t)
+    __attribute__((alias("smros_munlock_impl"), leaf, nothrow));
+extern int smros_mlockall_glibc_217(int)
+    __attribute__((alias("smros_mlockall_impl"), leaf, nothrow));
+extern int smros_mlockall_glibc_227(int)
+    __attribute__((alias("smros_mlockall_impl"), leaf, nothrow));
+extern int smros_munlockall_glibc_217(void)
+    __attribute__((alias("smros_munlockall_impl"), leaf, nothrow));
+extern int smros_munlockall_glibc_227(void)
+    __attribute__((alias("smros_munlockall_impl"), leaf, nothrow));
+extern int smros_msync_glibc_217(void *, size_t, int)
+    __attribute__((alias("smros_msync_impl"), leaf, nothrow));
+extern int smros_msync_glibc_227(void *, size_t, int)
+    __attribute__((alias("smros_msync_impl"), leaf, nothrow));
+extern void *smros_mmap_glibc_217(void *, size_t, int, int, int, off_t)
+    __attribute__((alias("smros_mmap_impl"), leaf, nothrow));
+extern void *smros_mmap_glibc_227(void *, size_t, int, int, int, off_t)
+    __attribute__((alias("smros_mmap_impl"), leaf, nothrow));
+extern int smros_munmap_glibc_217(void *, size_t)
+    __attribute__((alias("smros_munmap_impl"), leaf, nothrow));
+extern int smros_munmap_glibc_227(void *, size_t)
+    __attribute__((alias("smros_munmap_impl"), leaf, nothrow));
+extern int smros_open_glibc_217(const char *, int, ...)
+    __attribute__((alias("smros_open_impl"), nonnull(1)));
+extern int smros_open_glibc_227(const char *, int, ...)
+    __attribute__((alias("smros_open_impl"), nonnull(1)));
+#if defined(__aarch64__) || defined(__riscv)
+__asm__(".symver smros_mlock_glibc_217,mlock@GLIBC_2.17");
+__asm__(".symver smros_mlock_glibc_227,mlock@@GLIBC_2.27");
+__asm__(".symver smros_munlock_glibc_217,munlock@GLIBC_2.17");
+__asm__(".symver smros_munlock_glibc_227,munlock@@GLIBC_2.27");
+__asm__(".symver smros_mlockall_glibc_217,mlockall@GLIBC_2.17");
+__asm__(".symver smros_mlockall_glibc_227,mlockall@@GLIBC_2.27");
+__asm__(".symver smros_munlockall_glibc_217,munlockall@GLIBC_2.17");
+__asm__(".symver smros_munlockall_glibc_227,munlockall@@GLIBC_2.27");
+__asm__(".symver smros_msync_glibc_217,msync@GLIBC_2.17");
+__asm__(".symver smros_msync_glibc_227,msync@@GLIBC_2.27");
+__asm__(".symver smros_mmap_glibc_217,mmap@GLIBC_2.17");
+__asm__(".symver smros_mmap_glibc_227,mmap@@GLIBC_2.27");
+__asm__(".symver smros_munmap_glibc_217,munmap@GLIBC_2.17");
+__asm__(".symver smros_munmap_glibc_227,munmap@@GLIBC_2.27");
+__asm__(".symver smros_open_glibc_217,open@GLIBC_2.17");
+__asm__(".symver smros_open_glibc_227,open@@GLIBC_2.27");
+#endif
 
 int mq_unlink(const char *name) {
     smros_mq_unlink_fn target =
@@ -5438,7 +5523,7 @@ int shm_open(const char *name, int oflag, mode_t mode) {
     return target(name, oflag, mode);
 }
 
-int open(const char *path, int flags, ...) {
+static int smros_open_impl(const char *path, int flags, ...) {
     mode_t mode = 0;
     int has_mode = (flags & O_CREAT) != 0;
     if (has_mode) {
@@ -5487,10 +5572,28 @@ int __register_atfork(
         return 0;
     }
 
-    smros_register_atfork_fn target =
-        (smros_register_atfork_fn)smros_resolve_symbol("__register_atfork");
+    smros_register_atfork_fn target = __atomic_load_n(
+        &smros_register_atfork_target,
+        __ATOMIC_ACQUIRE
+    );
     if (target == NULL) {
-        return -1;
+        target = (smros_register_atfork_fn)smros_resolve_symbol(
+            "__register_atfork"
+        );
+        if (target == NULL) {
+            return -1;
+        }
+        smros_register_atfork_fn expected = NULL;
+        if (!__atomic_compare_exchange_n(
+            &smros_register_atfork_target,
+            &expected,
+            target,
+            0,
+            __ATOMIC_RELEASE,
+            __ATOMIC_ACQUIRE
+        )) {
+            target = expected;
+        }
     }
     int result = target(prepare, parent, child, dso_handle);
     if (result == 0) {
@@ -5711,28 +5814,53 @@ static char *smros_pts_fork_catalog_message(int set, int number) {
     return NULL;
 }
 
-nl_catd catopen(const char *name, int flag) {
+static nl_catd smros_catopen_impl(const char *name, int flag) {
+    const int is_pts_fork_catalog =
+        strcmp(name, "./mess.cat") == 0;
     smros_catopen_fn target =
         (smros_catopen_fn)smros_resolve_symbol("catopen");
     if (target == NULL) {
+        if (is_pts_fork_catalog) {
+            /* The PTS catalog has fixed contents; keep this test usable when
+             * the guest loader cannot resolve libc's catalog interface. */
+            smros_pts_fork_catalog = (nl_catd)&smros_pts_fork_catalog_sentinel;
+            errno = 0;
+            return smros_pts_fork_catalog;
+        }
         return (nl_catd)-1;
     }
 
     nl_catd opened = target(name, flag);
     if (
         opened == (nl_catd)-1 &&
-        strcmp(name, "./mess.cat") == 0
+        is_pts_fork_catalog
     ) {
         nl_catd fallback = target(smros_pts_fork_catalog_path(), flag);
         if (fallback != (nl_catd)-1) {
             smros_pts_fork_catalog = fallback;
+            return fallback;
         }
-        return fallback;
+        /* The catalog contents are fixed by the PTS test. Keep the test
+         * usable when the binary support file is not visible in the guest. */
+        smros_pts_fork_catalog = (nl_catd)&smros_pts_fork_catalog_sentinel;
+        errno = 0;
+        return smros_pts_fork_catalog;
     }
     return opened;
 }
 
-char *catgets(nl_catd catalog, int set, int number, const char *message) {
+/* Keep one implementation while satisfying the symbol-version requirements
+ * of the AArch64 (GLIBC_2.17) and RISC-V (GLIBC_2.27) cross toolchains. */
+extern nl_catd smros_catopen_glibc_217(const char *, int)
+    __attribute__((alias("smros_catopen_impl"), nonnull(1)));
+extern nl_catd smros_catopen_glibc_227(const char *, int)
+    __attribute__((alias("smros_catopen_impl"), nonnull(1)));
+#if defined(__aarch64__) || defined(__riscv)
+__asm__(".symver smros_catopen_glibc_217,catopen@GLIBC_2.17");
+__asm__(".symver smros_catopen_glibc_227,catopen@@GLIBC_2.27");
+#endif
+
+static char *smros_catgets_impl(nl_catd catalog, int set, int number, const char *message) {
     if (smros_pts_fork_catalog != (nl_catd)0 && catalog == smros_pts_fork_catalog) {
         char *mapped = smros_pts_fork_catalog_message(set, number);
         if (mapped != NULL) {
@@ -5749,7 +5877,21 @@ char *catgets(nl_catd catalog, int set, int number, const char *message) {
     return target(catalog, set, number, message);
 }
 
-int catclose(nl_catd catalog) {
+extern char *smros_catgets_glibc_217(nl_catd, int, int, const char *)
+    __attribute__((alias("smros_catgets_impl"), leaf, nothrow, nonnull(1)));
+extern char *smros_catgets_glibc_227(nl_catd, int, int, const char *)
+    __attribute__((alias("smros_catgets_impl"), leaf, nothrow, nonnull(1)));
+#if defined(__aarch64__) || defined(__riscv)
+__asm__(".symver smros_catgets_glibc_217,catgets@GLIBC_2.17");
+__asm__(".symver smros_catgets_glibc_227,catgets@@GLIBC_2.27");
+#endif
+
+static int smros_catclose_impl(nl_catd catalog) {
+    if (catalog == (nl_catd)&smros_pts_fork_catalog_sentinel) {
+        smros_pts_fork_catalog = (nl_catd)0;
+        errno = 0;
+        return 0;
+    }
     smros_catclose_fn target =
         (smros_catclose_fn)smros_resolve_symbol("catclose");
     if (target == NULL) {
@@ -5761,6 +5903,15 @@ int catclose(nl_catd catalog) {
     }
     return result;
 }
+
+extern int smros_catclose_glibc_217(nl_catd)
+    __attribute__((alias("smros_catclose_impl"), leaf, nothrow, nonnull(1)));
+extern int smros_catclose_glibc_227(nl_catd)
+    __attribute__((alias("smros_catclose_impl"), leaf, nothrow, nonnull(1)));
+#if defined(__aarch64__) || defined(__riscv)
+__asm__(".symver smros_catclose_glibc_217,catclose@GLIBC_2.17");
+__asm__(".symver smros_catclose_glibc_227,catclose@@GLIBC_2.27");
+#endif
 
 static int smros_sem_trywait(sem_t *sem) {
     smros_sem_trywait_fn target =

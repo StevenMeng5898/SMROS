@@ -35,3 +35,12 @@ pub mod mmu;
 pub use arch::user_address_space::Aarch64AddressSpace;
 
 pub use arch::{boot, cpu, drivers, interrupt, serial, smp, thread, timer};
+
+#[cfg(target_arch = "riscv64")]
+pub const RISCV_MAX_THREADS: usize = arch::thread::MAX_THREADS;
+#[cfg(target_arch = "riscv64")]
+pub use arch::RISCV64_RAM_FALLBACK;
+#[cfg(target_arch = "riscv64")]
+pub use arch::RISCV_USER_UART_ALIAS;
+#[cfg(target_arch = "riscv64")]
+pub use arch::virtio_mmio_user_alias;

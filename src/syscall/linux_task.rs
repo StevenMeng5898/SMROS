@@ -15,6 +15,8 @@ struct LinuxTaskRuntime {
     tasks: LinuxTaskTable<LINUX_TASK_LIMIT>,
     #[cfg(target_arch = "aarch64")]
     clone_slots: [aarch64_clone::LinuxCloneSlot; LINUX_TASK_LIMIT],
+    #[cfg(target_arch = "riscv64")]
+    clone_slots: [riscv64_clone::LinuxCloneSlot; LINUX_TASK_LIMIT],
 }
 
 impl LinuxTaskRuntime {
@@ -23,12 +25,15 @@ impl LinuxTaskRuntime {
             tasks: LinuxTaskTable::new(),
             #[cfg(target_arch = "aarch64")]
             clone_slots: [aarch64_clone::LinuxCloneSlot::EMPTY; LINUX_TASK_LIMIT],
+            #[cfg(target_arch = "riscv64")]
+            clone_slots: [riscv64_clone::LinuxCloneSlot::EMPTY; LINUX_TASK_LIMIT],
         }
     }
 }
 
 static LINUX_TASK_RUNTIME: LinuxRuntimeLock<LinuxTaskRuntime> =
     LinuxRuntimeLock::new(LinuxTaskRuntime::new());
+
 
 fn with_runtime<R>(operation: impl FnOnce(&mut LinuxTaskRuntime) -> R) -> R {
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
@@ -102,6 +107,11 @@ pub(crate) fn current_task() -> Result<LinuxTaskCore, SysError> {
 
 pub(crate) fn by_tid(tid: usize) -> Option<LinuxTaskCore> {
     with_runtime(|runtime| runtime.tasks.by_tid(tid))
+}
+
+#[cfg(target_arch = "riscv64")]
+pub(crate) fn by_scheduler(scheduler_thread: usize) -> Option<LinuxTaskCore> {
+    with_runtime(|runtime| runtime.tasks.by_scheduler(scheduler_thread))
 }
 
 pub(crate) fn sched_param(
@@ -446,7 +456,7 @@ impl<const N: usize> LinuxTaskTable<N> {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub(crate) fn reserve_fork_task(scheduler_id: ThreadId) -> Result<LinuxTaskReservation, SysError> {
     with_runtime(|runtime| {
         let current = scheduler::scheduler().current();
@@ -485,7 +495,7 @@ pub(crate) fn reserve_fork_task(scheduler_id: ThreadId) -> Result<LinuxTaskReser
     })
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub(crate) fn publish_fork_task(reservation: LinuxTaskReservation, clear_child_tid: usize) -> bool {
     with_runtime(|runtime| {
         scheduler::scheduler()
@@ -501,7 +511,7 @@ pub(crate) fn publish_fork_task(reservation: LinuxTaskReservation, clear_child_t
     })
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub(crate) fn rollback_fork_task(reservation: LinuxTaskReservation) {
     with_runtime(|runtime| {
         if runtime.tasks.rollback(reservation) {
@@ -567,11 +577,10 @@ pub(crate) fn wake_blocked(tid: usize, scheduler_thread: usize, reason: LinuxBlo
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let result = (|| {
         let scheduler_id = ThreadId(scheduler_thread);
-        if scheduler::scheduler()
+        let scheduler_state = scheduler::scheduler()
             .get_thread(scheduler_id)
-            .map(|thread| thread.state)
-            != Some(thread::ThreadState::Blocked)
-        {
+            .map(|thread| thread.state);
+        if scheduler_state != Some(thread::ThreadState::Blocked) {
             return false;
         }
         let woken = with_runtime(|runtime| {
@@ -589,7 +598,8 @@ pub(crate) fn wake_blocked(tid: usize, scheduler_thread: usize, reason: LinuxBlo
         if !woken {
             return false;
         }
-        if scheduler::scheduler().wake_thread(scheduler_id) {
+        let scheduler_woken = scheduler::scheduler().wake_thread(scheduler_id);
+        if scheduler_woken {
             return true;
         }
         let _ = with_runtime(|runtime| runtime.tasks.block(tid, scheduler_thread, reason));
@@ -668,6 +678,10 @@ fn retire_tasks(
             #[cfg(target_arch = "aarch64")]
             if let Some(clone_slot) = runtime.clone_slots.get_mut(slot) {
                 *clone_slot = aarch64_clone::LinuxCloneSlot::EMPTY;
+            }
+            #[cfg(target_arch = "riscv64")]
+            if let Some(clone_slot) = runtime.clone_slots.get_mut(slot) {
+                *clone_slot = riscv64_clone::LinuxCloneSlot::EMPTY;
             }
             retired.push(LinuxChildExitTransition {
                 task,
@@ -778,7 +792,6 @@ pub(crate) fn finish_current_without_el0_return() -> ! {
 }
 
 pub(crate) fn on_timer_tick(now: u64) {
-    #[cfg(target_arch = "aarch64")]
     if crate::kernel_lowlevel::smp::current_cpu_id() == 0 {
         while let Some(identity) = with_runtime(|runtime| runtime.tasks.expire_one_signal_wait(now))
         {
@@ -802,7 +815,8 @@ pub(crate) fn on_timer_tick(now: u64) {
     }
 }
 
-pub(crate) fn on_precision_timer(now_nanoseconds: u64) {
+pub(crate) fn on_precision_timer(now_nanoseconds: u64) -> bool {
+    let mut woke_task = false;
     loop {
         let identity = with_runtime(|runtime| runtime.tasks.expire_precision_sleep(now_nanoseconds));
         let Some((tid, scheduler_thread, reason)) = identity else {
@@ -810,8 +824,11 @@ pub(crate) fn on_precision_timer(now_nanoseconds: u64) {
         };
         if !wake_blocked(tid, scheduler_thread, reason) {
             let _ = cancel_sleep(tid, scheduler_thread);
+        } else {
+            woke_task = true;
         }
     }
+    woke_task
 }
 
 pub(crate) fn reset() {
@@ -828,6 +845,10 @@ pub(crate) fn reset() {
         runtime
             .clone_slots
             .fill(aarch64_clone::LinuxCloneSlot::EMPTY);
+        #[cfg(target_arch = "riscv64")]
+        runtime
+            .clone_slots
+            .fill(riscv64_clone::LinuxCloneSlot::EMPTY);
         runtime.tasks.reset();
     });
     super::linux_process::reset_launch();
@@ -1202,6 +1223,354 @@ mod aarch64_clone {
 
 #[cfg(target_arch = "aarch64")]
 pub(crate) use aarch64_clone::{
+    commit_clone, copy_clone_tids, linux_clone_child_entry, reserve_clone,
+    restore_clone_tid_destinations, rollback_clone,
+};
+
+#[cfg(target_arch = "riscv64")]
+mod riscv64_clone {
+    use crate::kernel_lowlevel::thread::{ThreadState, ThreadId};
+    use crate::syscall::linux_process::RiscvProcessStart;
+    use crate::syscall::linux_riscv_syscall_context::LinuxRiscvSyscallFrameRef;
+
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    struct TidDestination {
+        address: usize,
+        original: u32,
+        written: bool,
+    }
+
+    impl TidDestination {
+        const EMPTY: Self = Self {
+            address: 0,
+            original: 0,
+            written: false,
+        };
+    }
+
+    #[derive(Clone, Copy)]
+    pub(super) struct LinuxCloneSlot {
+        reservation: LinuxTaskReservation,
+        start: Option<RiscvProcessStart>,
+        parent_tid: TidDestination,
+        child_tid: TidDestination,
+        clear_child_tid: usize,
+        committed: bool,
+    }
+
+    impl LinuxCloneSlot {
+        pub(super) const EMPTY: Self = Self {
+            reservation: LinuxTaskReservation {
+                slot: usize::MAX,
+                tid: 0,
+                scheduler_thread: usize::MAX,
+            },
+            start: None,
+            parent_tid: TidDestination::EMPTY,
+            child_tid: TidDestination::EMPTY,
+            clear_child_tid: 0,
+            committed: false,
+        };
+
+        fn matches(&self, reservation: LinuxTaskReservation) -> bool {
+            self.reservation == reservation && self.start.is_some()
+        }
+    }
+
+    pub(crate) fn reserve_clone(
+        scheduler_id: ThreadId,
+        request: LinuxCloneRequest,
+        context: LinuxRiscvSyscallFrameRef,
+    ) -> Result<LinuxTaskReservation, SysError> {
+        let root_paddr = crate::syscall::linux_process_memory::current_root_paddr()?;
+        if root_paddr == 0 {
+            return Err(SysError::EAGAIN);
+        }
+        with_runtime(|runtime| {
+            let current = scheduler::scheduler().current();
+            let Some(parent) = runtime.tasks.by_scheduler(current.0) else {
+                return Err(SysError::EAGAIN);
+            };
+            if scheduler_id == ThreadId::IDLE
+                || scheduler_id == current
+                || scheduler::scheduler()
+                    .get_thread(scheduler_id)
+                    .map(|thread| thread.state)
+                    != Some(ThreadState::Blocked)
+            {
+                return Err(SysError::EAGAIN);
+            }
+
+            let reservation = runtime
+                .tasks
+                .reserve_child(parent.tgid, scheduler_id.0)
+                .ok_or(SysError::EAGAIN)?;
+            if !runtime.tasks.inherit_signal_mask(reservation, current.0) {
+                let _ = runtime.tasks.rollback(reservation);
+                return Err(SysError::EAGAIN);
+            }
+            if !runtime.tasks.inherit_sched_param(reservation, current.0) {
+                let _ = runtime.tasks.rollback(reservation);
+                return Err(SysError::EAGAIN);
+            }
+            let inherited_sched_param = runtime.tasks.sched_params[reservation.slot];
+            if let Err(error) = crate::syscall::syscall::apply_linux_task_scheduler_priority(
+                reservation.scheduler_thread,
+                inherited_sched_param,
+            ) {
+                let _ = runtime.tasks.rollback(reservation);
+                return Err(error);
+            }
+
+            let mut frame = [0u64; 34];
+            unsafe {
+                core::ptr::copy_nonoverlapping(context.frame, frame.as_mut_ptr(), frame.len());
+            }
+            frame[8] = 0;
+            if let Some(tls) = request.tls {
+                frame[2] = tls as u64;
+            }
+            let configured = scheduler::scheduler()
+                .get_thread_mut(scheduler_id)
+                .map(|thread| {
+                    thread.context.set_entry_stack(
+                        linux_clone_child_entry as *const () as u64,
+                        thread.context.sp,
+                    );
+                    true
+                })
+                .unwrap_or(false)
+                && scheduler::scheduler().bind_thread_process(scheduler_id, parent.tgid);
+            if !configured {
+                let _ = runtime.tasks.rollback(reservation);
+                return Err(SysError::EAGAIN);
+            }
+            runtime.clone_slots[reservation.slot] = LinuxCloneSlot {
+                reservation,
+                start: Some(RiscvProcessStart {
+                    frame,
+                    return_pc: context.return_pc,
+                    pstate: context.pstate,
+                    user_sp: request.user_sp as u64,
+                    root_paddr,
+                }),
+                parent_tid: TidDestination {
+                    address: request.parent_tid.unwrap_or(0),
+                    ..TidDestination::EMPTY
+                },
+                child_tid: TidDestination {
+                    address: if request.flags & CLONE_CHILD_SETTID != 0 {
+                        request.child_tid.unwrap_or(0)
+                    } else {
+                        0
+                    },
+                    ..TidDestination::EMPTY
+                },
+                clear_child_tid: if request.clear_child_tid {
+                    request.child_tid.unwrap_or(0)
+                } else {
+                    0
+                },
+                committed: false,
+            };
+            Ok(reservation)
+        })
+    }
+
+    pub(crate) fn copy_clone_tids(reservation: LinuxTaskReservation) -> Result<(), SysError> {
+        let pid = current_tgid()?;
+        let (addresses, tid) = with_runtime(|runtime| {
+            let slot = runtime
+                .clone_slots
+                .get(reservation.slot)
+                .filter(|slot| slot.matches(reservation) && !slot.committed)
+                .ok_or(SysError::EAGAIN)?;
+            let tid = linux_tid_to_user_value(reservation.tid).ok_or(SysError::EAGAIN)?;
+            Ok(([slot.parent_tid.address, slot.child_tid.address], tid))
+        })?;
+        for address in addresses.into_iter().filter(|address| *address != 0) {
+            if !crate::syscall::syscall::linux_clone_tid_destination_valid(address) {
+                return Err(SysError::EFAULT);
+            }
+        }
+        let mut originals = [0u32; 2];
+        for (index, address) in addresses.into_iter().enumerate() {
+            if address != 0 {
+                let mut bytes = [0u8; core::mem::size_of::<u32>()];
+                crate::syscall::linux_process_memory::copy_from_process(pid, address, &mut bytes)?;
+                originals[index] = u32::from_ne_bytes(bytes);
+            }
+        }
+        let mut written = [false; 2];
+        for (index, address) in addresses.into_iter().enumerate() {
+            if address != 0 {
+                if let Err(error) = crate::syscall::linux_process_memory::copy_to_process(
+                    pid,
+                    address,
+                    &tid.to_ne_bytes(),
+                ) {
+                    for rollback in 0..index {
+                        if written[rollback] {
+                            let _ = crate::syscall::linux_process_memory::copy_to_process(
+                                pid,
+                                addresses[rollback],
+                                &originals[rollback].to_ne_bytes(),
+                            );
+                        }
+                    }
+                    return Err(error);
+                }
+                written[index] = true;
+            }
+        }
+        let recorded = with_runtime(|runtime| {
+            let Some(slot) = runtime
+                .clone_slots
+                .get_mut(reservation.slot)
+                .filter(|slot| slot.matches(reservation) && !slot.committed)
+            else {
+                return false;
+            };
+            for (index, destination) in [&mut slot.parent_tid, &mut slot.child_tid]
+                .into_iter()
+                .enumerate()
+            {
+                destination.original = originals[index];
+                destination.written = written[index];
+            }
+            true
+        });
+        if recorded {
+            Ok(())
+        } else {
+            for index in 0..2 {
+                if written[index] {
+                    let _ = crate::syscall::linux_process_memory::copy_to_process(
+                        pid,
+                        addresses[index],
+                        &originals[index].to_ne_bytes(),
+                    );
+                }
+            }
+            Err(SysError::EAGAIN)
+        }
+    }
+
+    pub(crate) fn restore_clone_tid_destinations(reservation: LinuxTaskReservation) {
+        let Ok(pid) = current_tgid() else {
+            return;
+        };
+        let Some(destinations) = with_runtime(|runtime| {
+            runtime
+                .clone_slots
+                .get(reservation.slot)
+                .filter(|slot| slot.matches(reservation) && !slot.committed)
+                .map(|slot| [slot.parent_tid, slot.child_tid])
+        }) else {
+            return;
+        };
+        for destination in destinations {
+            if destination.written {
+                let _ = crate::syscall::linux_process_memory::copy_to_process(
+                    pid,
+                    destination.address,
+                    &destination.original.to_ne_bytes(),
+                );
+            }
+        }
+        with_runtime(|runtime| {
+            if let Some(slot) = runtime
+                .clone_slots
+                .get_mut(reservation.slot)
+                .filter(|slot| slot.matches(reservation) && !slot.committed)
+            {
+                slot.parent_tid.written = false;
+                slot.child_tid.written = false;
+            }
+        });
+    }
+
+    pub(crate) fn rollback_clone(reservation: LinuxTaskReservation) {
+        with_runtime(|runtime| {
+            let Some(slot) = runtime.clone_slots.get_mut(reservation.slot) else {
+                return;
+            };
+            if !slot.matches(reservation) || slot.committed {
+                return;
+            }
+            let _ = runtime.tasks.rollback(reservation);
+            *slot = LinuxCloneSlot::EMPTY;
+        });
+    }
+
+    pub(crate) fn commit_clone(reservation: LinuxTaskReservation) -> Result<(), SysError> {
+        with_runtime(|runtime| {
+            let valid_slot = runtime
+                .clone_slots
+                .get(reservation.slot)
+                .map(|slot| slot.matches(reservation) && !slot.committed)
+                .unwrap_or(false);
+            let scheduler_id = ThreadId(reservation.scheduler_thread);
+            let suspended = scheduler::scheduler()
+                .get_thread(scheduler_id)
+                .map(|thread| thread.state)
+                == Some(ThreadState::Blocked);
+            if !valid_slot || !suspended || !runtime.tasks.publish(reservation) {
+                return Err(SysError::EAGAIN);
+            }
+            let clear_child_tid = runtime.clone_slots[reservation.slot].clear_child_tid;
+            if !runtime.tasks.set_clear_child_tid(
+                reservation.tid,
+                reservation.scheduler_thread,
+                clear_child_tid,
+            ) {
+                let _ = runtime.tasks.exit(reservation.tid, reservation.scheduler_thread);
+                let _ = runtime.tasks.retire(reservation.tid, reservation.scheduler_thread);
+                return Err(SysError::EAGAIN);
+            }
+            if !scheduler::scheduler().publish_suspended_thread(scheduler_id) {
+                let _ = runtime.tasks.exit(reservation.tid, reservation.scheduler_thread);
+                let _ = runtime.tasks.retire(reservation.tid, reservation.scheduler_thread);
+                return Err(SysError::EAGAIN);
+            }
+            runtime.clone_slots[reservation.slot].committed = true;
+            Ok(())
+        })
+    }
+
+    fn take_clone_start() -> Option<RiscvProcessStart> {
+        with_runtime(|runtime| {
+            let scheduler_id = scheduler::scheduler().current();
+            let task = runtime.tasks.by_scheduler(scheduler_id.0)?;
+            runtime
+                .clone_slots
+                .iter_mut()
+                .find(|slot| {
+                    slot.committed
+                        && slot.reservation.tid == task.tid
+                        && slot.reservation.scheduler_thread == scheduler_id.0
+                })?
+                .start
+                .take()
+        })
+    }
+
+    pub(crate) extern "C" fn linux_clone_child_entry() -> ! {
+        let Some(start) = take_clone_start() else {
+            scheduler::scheduler().finish_current_without_stack_free();
+            scheduler::schedule();
+            loop {
+                crate::kernel_lowlevel::cpu::wait_for_interrupt();
+            }
+        };
+        unsafe { thread::start_linux_clone_child(&start as *const RiscvProcessStart as *const u8) }
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+pub(crate) use riscv64_clone::{
     commit_clone, copy_clone_tids, linux_clone_child_entry, reserve_clone,
     restore_clone_tid_destinations, rollback_clone,
 };
