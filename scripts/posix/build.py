@@ -925,7 +925,9 @@ def resolve_runtime_file(
         raise ValueError(f"unresolved AArch64 runtime file: {name}")
     fingerprints = {(path.stat().st_dev, path.stat().st_ino) for path in matches}
     if len(fingerprints) > 1:
-        raise ValueError(f"basename-colliding runtime libraries: {name}")
+        content_digests = {sha256_file(path) for path in matches}
+        if len(content_digests) > 1:
+            raise ValueError(f"basename-colliding runtime libraries: {name}")
     return matches[0]
 
 

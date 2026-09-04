@@ -2767,6 +2767,37 @@ with tempfile.TemporaryDirectory() as temporary:
 
         self.assertEqual(resolved, libc)
 
+    def test_runtime_resolution_accepts_identical_duplicate_basenames(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            (first / "libgcc_s.so.1").write_bytes(b"same runtime")
+            (second / "libgcc_s.so.1").write_bytes(b"same runtime")
+
+            resolved = resolve_runtime_file(
+                "libgcc_s.so.1", root, "aarch64-linux-gnu", (first, second)
+            )
+
+        self.assertEqual(resolved, (first / "libgcc_s.so.1").resolve())
+
+    def test_runtime_resolution_rejects_different_duplicate_basenames(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            (first / "libgcc_s.so.1").write_bytes(b"first runtime")
+            (second / "libgcc_s.so.1").write_bytes(b"second runtime")
+
+            with self.assertRaisesRegex(ValueError, "basename-colliding"):
+                resolve_runtime_file(
+                    "libgcc_s.so.1", root, "aarch64-linux-gnu", (first, second)
+                )
+
     def test_runtime_staging_preserves_requested_soname_basename(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

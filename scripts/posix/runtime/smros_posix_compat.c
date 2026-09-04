@@ -5448,6 +5448,26 @@ extern int smros_open_glibc_217(const char *, int, ...)
     __attribute__((alias("smros_open_impl"), nonnull(1)));
 extern int smros_open_glibc_227(const char *, int, ...)
     __attribute__((alias("smros_open_impl"), nonnull(1)));
+#if !defined(__aarch64__) && !defined(__riscv)
+/* Host-side probes use unversioned libc symbols; target builds use the
+ * explicit glibc version nodes below. */
+extern int mlock(const void *, size_t)
+    __attribute__((alias("smros_mlock_impl")));
+extern int munlock(const void *, size_t)
+    __attribute__((alias("smros_munlock_impl")));
+extern int mlockall(int)
+    __attribute__((alias("smros_mlockall_impl")));
+extern int munlockall(void)
+    __attribute__((alias("smros_munlockall_impl")));
+extern int msync(void *, size_t, int)
+    __attribute__((alias("smros_msync_impl")));
+extern void *mmap(void *, size_t, int, int, int, off_t)
+    __attribute__((alias("smros_mmap_impl")));
+extern int munmap(void *, size_t)
+    __attribute__((alias("smros_munmap_impl")));
+extern int open(const char *, int, ...)
+    __attribute__((alias("smros_open_impl"), nonnull(1)));
+#endif
 #if defined(__aarch64__) || defined(__riscv)
 __asm__(".symver smros_mlock_glibc_217,mlock@GLIBC_2.17");
 __asm__(".symver smros_mlock_glibc_227,mlock@@GLIBC_2.27");
@@ -5855,6 +5875,10 @@ extern nl_catd smros_catopen_glibc_217(const char *, int)
     __attribute__((alias("smros_catopen_impl"), nonnull(1)));
 extern nl_catd smros_catopen_glibc_227(const char *, int)
     __attribute__((alias("smros_catopen_impl"), nonnull(1)));
+#if !defined(__aarch64__) && !defined(__riscv)
+extern nl_catd catopen(const char *, int)
+    __attribute__((alias("smros_catopen_impl"), nonnull(1)));
+#endif
 #if defined(__aarch64__) || defined(__riscv)
 __asm__(".symver smros_catopen_glibc_217,catopen@GLIBC_2.17");
 __asm__(".symver smros_catopen_glibc_227,catopen@@GLIBC_2.27");
@@ -5881,6 +5905,10 @@ extern char *smros_catgets_glibc_217(nl_catd, int, int, const char *)
     __attribute__((alias("smros_catgets_impl"), leaf, nothrow, nonnull(1)));
 extern char *smros_catgets_glibc_227(nl_catd, int, int, const char *)
     __attribute__((alias("smros_catgets_impl"), leaf, nothrow, nonnull(1)));
+#if !defined(__aarch64__) && !defined(__riscv)
+extern char *catgets(nl_catd, int, int, const char *)
+    __attribute__((alias("smros_catgets_impl"), nonnull(1)));
+#endif
 #if defined(__aarch64__) || defined(__riscv)
 __asm__(".symver smros_catgets_glibc_217,catgets@GLIBC_2.17");
 __asm__(".symver smros_catgets_glibc_227,catgets@@GLIBC_2.27");
@@ -5908,6 +5936,10 @@ extern int smros_catclose_glibc_217(nl_catd)
     __attribute__((alias("smros_catclose_impl"), leaf, nothrow, nonnull(1)));
 extern int smros_catclose_glibc_227(nl_catd)
     __attribute__((alias("smros_catclose_impl"), leaf, nothrow, nonnull(1)));
+#if !defined(__aarch64__) && !defined(__riscv)
+extern int catclose(nl_catd)
+    __attribute__((alias("smros_catclose_impl")));
+#endif
 #if defined(__aarch64__) || defined(__riscv)
 __asm__(".symver smros_catclose_glibc_217,catclose@GLIBC_2.17");
 __asm__(".symver smros_catclose_glibc_227,catclose@@GLIBC_2.27");
