@@ -60,6 +60,8 @@ GLIBC_2.27 {
         sleep;
         pthread_setcanceltype;
         pthread_exit;
+        fork;
+        waitpid;
         __register_atfork;
         pthread_attr_init;
         pthread_attr_setschedparam;

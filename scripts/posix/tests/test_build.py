@@ -3115,12 +3115,17 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertIn("global:", version_script)
         self.assertIn("*;", version_script)
         self.assertNotIn("local:\n        *;", version_script)
+        glibc_227 = version_script.split("GLIBC_2.27", 1)[1].split("}", 1)[0]
+        for symbol in ("fork", "waitpid"):
+            self.assertIn(f"        {symbol};", glibc_227)
         source = Path(
             "scripts/posix/runtime/smros_posix_compat.c"
         ).read_text(encoding="utf-8")
         for symbol in (
             "pthread_cancel",
             "pthread_create",
+            "fork",
+            "waitpid",
             "pthread_spin_trylock",
             "pthread_testcancel",
             "aio_cancel",
