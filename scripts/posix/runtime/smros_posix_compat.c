@@ -2142,7 +2142,7 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex) {
     int type = PTHREAD_MUTEX_NORMAL;
     if (
         !smros_pthread_mutex_owned_by_self(mutex, &type) &&
-        type == PTHREAD_MUTEX_ERRORCHECK
+        (type == PTHREAD_MUTEX_ERRORCHECK || type == PTHREAD_MUTEX_RECURSIVE)
     ) {
         return EPERM;
     }
