@@ -77,9 +77,11 @@ GLIBC_2.27 {
         pthread_cond_broadcast;
         pthread_cond_signal;
         pthread_cond_destroy;
+        pthread_getschedparam;
         pthread_mutex_init;
         pthread_mutex_lock;
         pthread_mutex_unlock;
+        pthread_setschedparam;
         pthread_mutex_destroy;
         sigaction;
         kill;
