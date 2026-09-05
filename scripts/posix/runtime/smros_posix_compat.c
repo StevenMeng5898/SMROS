@@ -657,6 +657,16 @@ int pthread_spin_trylock(pthread_spinlock_t *lock) {
 }
 #endif
 
+int pthread_spin_lock(pthread_spinlock_t *lock) {
+    for (;;) {
+        int result = pthread_spin_trylock(lock);
+        if (result != EBUSY) {
+            return result;
+        }
+        (void)sched_yield();
+    }
+}
+
 /* Resolve the sleep entry points before the first test syscall.  The POSIX
  * tests measure elapsed time across adjacent timer calls, so lazy dlsym work
  * in the first nanosleep/clock_nanosleep invocation becomes observable as
