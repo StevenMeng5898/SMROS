@@ -1777,6 +1777,9 @@ int pthread_create(
             &context_param,
             context_scope
         );
+        /* Publish the child before returning so single-CPU guests cannot
+         * leave the parent in its startup polling loop indefinitely. */
+        (void)sched_yield();
     }
     if (result != 0) {
         free(context);

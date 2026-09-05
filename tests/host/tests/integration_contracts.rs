@@ -2813,6 +2813,23 @@ fn posix_test_preloads_smros_compat_runtime_without_affecting_shell_run() {
 }
 
 #[test]
+fn smros_pthread_create_yields_after_publishing_child() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let compat = std::fs::read_to_string(
+        repository.join("scripts/posix/runtime/smros_posix_compat.c"),
+    )
+    .expect("read POSIX compatibility runtime");
+    let create_start = compat
+        .find("int pthread_create(")
+        .expect("pthread_create interposer");
+    let create = braced_body(&compat[create_start..]);
+    assert!(
+        create.contains("(void)sched_yield();"),
+        "pthread_create must hand the CPU to a newly published child"
+    );
+}
+
+#[test]
 fn smros_posix_compat_runtime_tracks_aio_completion_state() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let compat =
