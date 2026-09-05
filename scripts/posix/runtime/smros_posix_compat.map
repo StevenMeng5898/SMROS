@@ -11,6 +11,7 @@ GLIBC_2.34 {
         pthread_create;
         pthread_testcancel;
         pthread_spin_trylock;
+        pthread_spin_lock;
         aio_cancel;
         aio_error;
         aio_fsync;
@@ -72,7 +73,6 @@ GLIBC_2.27 {
         pthread_cond_signal;
         pthread_cond_destroy;
         pthread_getschedparam;
-        pthread_spin_lock;
         sched_getparam;
         sched_setparam;
         sched_setscheduler;
