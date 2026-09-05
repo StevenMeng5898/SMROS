@@ -861,6 +861,7 @@ class CampaignTests(unittest.TestCase):
             "pthread_mutex_lock",
             "pthread_mutex_unlock",
             "sigaction",
+            "sigset",
             "kill",
         ):
             self.assertIn(f"        {symbol};", riscv_symbols)

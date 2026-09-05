@@ -3139,6 +3139,9 @@ def run_smros(
         config=ControllerConfig(
             output_directory=output_directory,
             qemu_argv=argv,
+            # RISC-V's first boot can spend over a minute initializing the
+            # virtual block device and scheduler before the shell prompt.
+            boot_timeout_seconds=120.0 if architecture == "riscv64" else 60.0,
             refresh_host_share=True,
         ),
     ).run(resume=resume)

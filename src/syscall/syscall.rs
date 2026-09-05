@@ -9289,6 +9289,11 @@ pub fn sys_shmctl(id: usize, cmd: usize, buffer: usize) -> SysResult {
 }
 
 pub fn sys_rt_sigaction(signum: usize, act: usize, oldact: usize, sigsetsize: usize) -> SysResult {
+    #[cfg(target_arch = "riscv64")]
+    const LINUX_SIGACTION_MASK_OFFSET: usize = 16;
+    #[cfg(not(target_arch = "riscv64"))]
+    const LINUX_SIGACTION_MASK_OFFSET: usize = 24;
+
     if !syscall_logic::linux_signal_action_valid(signum, LINUX_MAX_SIGNAL)
         || !syscall_logic::linux_sigset_size_valid(sigsetsize, LINUX_SIGSET_SIZE)
     {
@@ -9299,8 +9304,11 @@ pub fn sys_rt_sigaction(signum: usize, act: usize, oldact: usize, sigsetsize: us
         let mut bytes = [0u8; core::mem::size_of::<LinuxKernelSigaction>()];
         bytes[0..8].copy_from_slice(&action.handler.to_ne_bytes());
         bytes[8..16].copy_from_slice(&action.flags.to_ne_bytes());
-        bytes[16..24].copy_from_slice(&action.restorer.to_ne_bytes());
-        bytes[24..32].copy_from_slice(&action.mask.to_ne_bytes());
+        if LINUX_SIGACTION_MASK_OFFSET == 24 {
+            bytes[16..24].copy_from_slice(&action.restorer.to_ne_bytes());
+        }
+        bytes[LINUX_SIGACTION_MASK_OFFSET..LINUX_SIGACTION_MASK_OFFSET + 8]
+            .copy_from_slice(&action.mask.to_ne_bytes());
         linux_copy_to_user(oldact, &bytes)?;
     }
     if act != 0 {
@@ -9315,8 +9323,16 @@ pub fn sys_rt_sigaction(signum: usize, act: usize, oldact: usize, sigsetsize: us
         let action = LinuxKernelSigaction {
             handler: fields[0],
             flags: fields[1],
-            restorer: fields[2],
-            mask: fields[3],
+            restorer: if LINUX_SIGACTION_MASK_OFFSET == 24 {
+                fields[2]
+            } else {
+                0
+            },
+            mask: if LINUX_SIGACTION_MASK_OFFSET == 24 {
+                fields[3]
+            } else {
+                fields[2]
+            },
         };
         if action.handler != LINUX_SIG_DFL && action.handler != LINUX_SIG_IGN {
             let _ = ensure_linux_signal_trampoline()?;
