@@ -2851,7 +2851,10 @@ static int smros_pthread_shared_mutex_unlock(pthread_mutex_t *mutex) {
     uint32_t token = smros_pthread_shared_mutex_owner_token();
     uint32_t owner = __sync_fetch_and_add(&state->owner, 0);
     uint32_t type = __sync_fetch_and_add(&state->type, 0);
-    if (owner != token && type == PTHREAD_MUTEX_ERRORCHECK) {
+    if (
+        owner != token &&
+        (type == PTHREAD_MUTEX_ERRORCHECK || type == PTHREAD_MUTEX_RECURSIVE)
+    ) {
         smros_pthread_diag_state("shared-mutex-unlock-perm", mutex, owner, token, type);
         return EPERM;
     }
@@ -2863,7 +2866,7 @@ static int smros_pthread_shared_mutex_unlock(pthread_mutex_t *mutex) {
         (void)__sync_fetch_and_sub(&state->count, 1);
         return 0;
     }
-    if (!__sync_bool_compare_and_swap(&state->lock, 1, 0)) {
+    if (__sync_fetch_and_add(&state->lock, 0) != 1) {
         smros_pthread_diag_state(
             "shared-mutex-unlock-race",
             mutex,
@@ -2873,7 +2876,9 @@ static int smros_pthread_shared_mutex_unlock(pthread_mutex_t *mutex) {
         );
         return EPERM;
     }
+    __sync_lock_test_and_set(&state->count, 0);
     __sync_lock_test_and_set(&state->owner, 0);
+    __sync_lock_release(&state->lock);
     smros_pthread_diag_state("shared-mutex-unlock", mutex, 0, owner, token);
     return 0;
 }
