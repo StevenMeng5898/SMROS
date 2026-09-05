@@ -59,6 +59,7 @@ GLIBC_2.27 {
         catclose;
         sleep;
         pthread_setcanceltype;
+        pthread_exit;
         __register_atfork;
         pthread_attr_init;
         pthread_attr_setschedparam;

@@ -5732,9 +5732,22 @@ pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) {
         return;
     }
 
+    #[cfg(target_arch = "riscv64")]
+    if linux_task::current_task().is_err() {
+        return;
+    }
+
     expire_linux_real_timers_from_irq();
+    #[cfg(target_arch = "riscv64")]
+    {
+        if !super::linux_riscv_syscall_context::install_interrupt(saved_regs) {
+            return;
+        }
+    }
     let return_pc = crate::kernel_lowlevel::cpu::read_exception_return_pc();
     let _ = deliver_next_linux_signal(saved_regs, return_pc);
+    #[cfg(target_arch = "riscv64")]
+    super::linux_riscv_syscall_context::clear();
 }
 
 pub fn deliver_linux_posix_timer_signals_from_irq() {

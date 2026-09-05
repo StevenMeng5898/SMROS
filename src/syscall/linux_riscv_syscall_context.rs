@@ -67,6 +67,32 @@ pub(crate) fn install_fault(saved_frame: usize) -> bool {
     true
 }
 
+/// Install a user-mode timer trap frame without advancing its return PC.
+///
+/// Timer interrupts can arrive while the current Linux thread is executing in
+/// user mode. Signal delivery needs the same per-thread frame context as a
+/// syscall, but the interrupted instruction must be resumed unchanged.
+pub(crate) fn install_interrupt(saved_frame: usize) -> bool {
+    if saved_frame == 0 || saved_frame & (core::mem::align_of::<u64>() - 1) != 0 {
+        return false;
+    }
+    let frame_ptr = saved_frame as *mut u64;
+    let return_pc = unsafe { frame_ptr.add(30).read() };
+    let user_sp = unsafe { frame_ptr.add(31).read() as usize };
+    let pstate = unsafe { frame_ptr.add(32).read() };
+    // SSTATUS.SPP is set when the trap interrupted supervisor mode. Such a
+    // frame has a kernel stack and must not be used for a user signal frame.
+    if pstate & (1 << 8) != 0 || user_sp == 0 {
+        return false;
+    }
+    let slot = current_slot();
+    RETURN_PCS[slot].store(return_pc as usize, Ordering::Relaxed);
+    PSTATES[slot].store(pstate as usize, Ordering::Relaxed);
+    USER_SPS[slot].store(user_sp, Ordering::Relaxed);
+    FRAMES[slot].store(saved_frame, Ordering::Release);
+    true
+}
+
 pub(crate) fn current_riscv_syscall_context() -> Option<LinuxRiscvSyscallFrameRef> {
     let slot = current_slot();
     let frame = FRAMES[slot].load(Ordering::Acquire);

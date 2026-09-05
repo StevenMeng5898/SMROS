@@ -234,6 +234,7 @@ static unsigned char smros_pts_fork_catalog_sentinel;
 static volatile sig_atomic_t smros_signal_generation;
 static __thread volatile sig_atomic_t smros_thread_signal_generation;
 static __thread volatile sig_atomic_t smros_thread_interrupt_generation;
+static __thread volatile sig_atomic_t smros_signal_handler_depth;
 static clock_t smros_clock_ticks;
 static uid_t smros_effective_uid = 0;
 static uid_t smros_real_uid = 0;
@@ -608,6 +609,12 @@ static void *smros_resolve_symbol(const char *symbol) {
         errno = ENOSYS;
     }
     return target;
+}
+
+static __attribute__((noreturn)) void smros_exit_current_thread(void) {
+    (void)syscall(SYS_exit, 0);
+    _exit(0);
+    __builtin_unreachable();
 }
 
 /* glibc's AArch64 trylock uses an LSE swap helper which can keep retrying on
@@ -2409,6 +2416,9 @@ int pthread_rwlock_unlock(pthread_rwlock_t *rwlock) {
 
 __attribute__((noreturn)) void pthread_exit(void *retval) {
     __sync_synchronize();
+    if (smros_signal_handler_depth != 0) {
+        smros_exit_current_thread();
+    }
     smros_pthread_exit_fn target =
         (smros_pthread_exit_fn)smros_resolve_symbol("pthread_exit");
     if (target != NULL) {
@@ -5206,7 +5216,9 @@ static void smros_dispatch_signal(int signum) {
 
     void (*handler)(int) = smros_signal_actions[index].sa_handler;
     if (handler != SIG_DFL && handler != SIG_IGN) {
+        smros_signal_handler_depth++;
         handler(signum);
+        smros_signal_handler_depth--;
     }
 }
 
@@ -5239,7 +5251,9 @@ static void smros_dispatch_signal_info(
     void (*handler)(int, siginfo_t *, void *) =
         smros_signal_actions[index].sa_sigaction;
     if (handler != NULL) {
+        smros_signal_handler_depth++;
         handler(signum, info, context);
+        smros_signal_handler_depth--;
     }
 }
 
