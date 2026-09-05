@@ -310,6 +310,7 @@ typedef struct {
     int pshared;
     int shared_storage;
     int owner_valid;
+    unsigned int recursion;
     pthread_t owner;
 } smros_pthread_mutex_record;
 
@@ -831,6 +832,8 @@ static int smros_pthread_mutex_owned_by_self(
     pthread_mutex_t *mutex,
     int *type
 );
+static int smros_pthread_mutex_recursive_relock(pthread_mutex_t *mutex);
+static int smros_pthread_mutex_recursive_unlock(pthread_mutex_t *mutex);
 static smros_pthread_shared_mutex_state *smros_pthread_shared_mutex(
     pthread_mutex_t *mutex
 );
@@ -2146,6 +2149,9 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex) {
     ) {
         return EPERM;
     }
+    if (smros_pthread_mutex_recursive_unlock(mutex)) {
+        return 0;
+    }
     smros_pthread_mutex_unlock_fn target =
         (smros_pthread_mutex_unlock_fn)smros_resolve_symbol(
             "pthread_mutex_unlock"
@@ -2198,6 +2204,9 @@ int pthread_mutex_trylock(pthread_mutex_t *mutex) {
     if (smros_pthread_shared_mutex_active(mutex)) {
         return smros_pthread_shared_mutex_trylock(mutex);
     }
+    if (smros_pthread_mutex_recursive_relock(mutex)) {
+        return 0;
+    }
     smros_pthread_mutex_trylock_fn target =
         (smros_pthread_mutex_trylock_fn)smros_resolve_symbol(
             "pthread_mutex_trylock"
@@ -2215,6 +2224,9 @@ int pthread_mutex_trylock(pthread_mutex_t *mutex) {
 int pthread_mutex_lock(pthread_mutex_t *mutex) {
     if (smros_pthread_shared_mutex_active(mutex)) {
         return smros_pthread_shared_mutex_lock(mutex);
+    }
+    if (smros_pthread_mutex_recursive_relock(mutex)) {
+        return 0;
     }
     smros_pthread_mutex_trylock_fn trylock_target =
         (smros_pthread_mutex_trylock_fn)smros_resolve_symbol(
@@ -2606,6 +2618,7 @@ static int smros_remember_pthread_mutex_record(
     record->pshared = pshared;
     record->shared_storage = shared_storage;
     record->owner_valid = 0;
+    record->recursion = 0;
     __sync_synchronize();
     record->active = 1;
     smros_unlock_pthread_mutex_records();
@@ -2617,6 +2630,7 @@ static void smros_forget_pthread_mutex_record(pthread_mutex_t *mutex) {
     smros_pthread_mutex_record *record = smros_find_pthread_mutex_record(mutex);
     if (record != NULL) {
         record->owner_valid = 0;
+        record->recursion = 0;
         record->mutex = NULL;
         record->type = PTHREAD_MUTEX_NORMAL;
         __sync_lock_test_and_set(&record->active, 0);
@@ -2632,6 +2646,7 @@ static void smros_note_pthread_mutex_lock(
     smros_pthread_mutex_record *record = smros_find_pthread_mutex_record(mutex);
     if (record != NULL) {
         record->owner = owner;
+        record->recursion = 1;
         __sync_synchronize();
         record->owner_valid = 1;
     }
@@ -2643,6 +2658,7 @@ static void smros_note_pthread_mutex_unlock(pthread_mutex_t *mutex) {
     smros_pthread_mutex_record *record = smros_find_pthread_mutex_record(mutex);
     if (record != NULL) {
         record->owner_valid = 0;
+        record->recursion = 0;
     }
     smros_unlock_pthread_mutex_records();
 }
@@ -2663,6 +2679,43 @@ static int smros_pthread_mutex_owned_by_self(
     }
     smros_unlock_pthread_mutex_records();
     return owned;
+}
+
+static int smros_pthread_mutex_recursive_relock(pthread_mutex_t *mutex) {
+    int relocked = 0;
+    smros_lock_pthread_mutex_records();
+    smros_pthread_mutex_record *record = smros_find_pthread_mutex_record(mutex);
+    if (
+        record != NULL &&
+        record->type == PTHREAD_MUTEX_RECURSIVE &&
+        record->owner_valid &&
+        pthread_equal(record->owner, pthread_self())
+    ) {
+        if (record->recursion != UINT_MAX) {
+            record->recursion++;
+        }
+        relocked = 1;
+    }
+    smros_unlock_pthread_mutex_records();
+    return relocked;
+}
+
+static int smros_pthread_mutex_recursive_unlock(pthread_mutex_t *mutex) {
+    int consumed = 0;
+    smros_lock_pthread_mutex_records();
+    smros_pthread_mutex_record *record = smros_find_pthread_mutex_record(mutex);
+    if (
+        record != NULL &&
+        record->type == PTHREAD_MUTEX_RECURSIVE &&
+        record->owner_valid &&
+        pthread_equal(record->owner, pthread_self()) &&
+        record->recursion > 1
+    ) {
+        record->recursion--;
+        consumed = 1;
+    }
+    smros_unlock_pthread_mutex_records();
+    return consumed;
 }
 
 static smros_pthread_shared_mutex_state *smros_pthread_shared_mutex(
