@@ -3348,7 +3348,8 @@ int sched_getscheduler(pid_t pid) {
         errno = ENOSYS;
         return -1;
     }
-    int result = target(pid);
+    pid_t query_pid = pid == 0 ? getpid() : pid;
+    int result = target(query_pid);
     if (result >= 0 && smros_sched_param_is_current_process(pid)) {
         smros_process_sched_policy = result;
     }
@@ -3392,7 +3393,8 @@ int sched_getparam(pid_t pid, struct sched_param *param) {
         errno = ENOSYS;
         return -1;
     }
-    int result = target(pid, param);
+    pid_t query_pid = pid == 0 ? getpid() : pid;
+    int result = target(query_pid, param);
     if (result != 0 || param == NULL || !smros_sched_param_is_current_process(pid)) {
         return result;
     }
@@ -3402,7 +3404,7 @@ int sched_getparam(pid_t pid, struct sched_param *param) {
             "sched_getscheduler"
         );
     if (get_policy != NULL) {
-        int observed = get_policy(pid);
+        int observed = get_policy(query_pid);
         if (observed >= 0) {
             policy = observed;
             smros_process_sched_policy = observed;
@@ -3447,7 +3449,8 @@ int sched_setparam(pid_t pid, const struct sched_param *param) {
         );
     int policy = smros_process_sched_policy;
     if (get_policy != NULL) {
-        int observed = get_policy(pid);
+        pid_t query_pid = pid == 0 ? getpid() : pid;
+        int observed = get_policy(query_pid);
         if (observed >= 0) {
             policy = observed;
         }
@@ -3475,7 +3478,8 @@ int sched_setparam(pid_t pid, const struct sched_param *param) {
     if (policy == SCHED_SPORADIC && kernel_param.sched_priority == 0) {
         kernel_param.sched_priority = 1;
     }
-    int result = target(pid, &kernel_param);
+    pid_t query_pid = pid == 0 ? getpid() : pid;
+    int result = target(query_pid, &kernel_param);
     if (result == 0 && smros_sched_param_is_current_process(pid)) {
         struct sched_param stored =
             smros_sched_param_for_storage(policy, param);
@@ -3512,7 +3516,8 @@ int sched_setscheduler(
     if (policy == SCHED_SPORADIC && kernel_param.sched_priority == 0) {
         kernel_param.sched_priority = 1;
     }
-    int result = target(pid, policy, &kernel_param);
+    pid_t query_pid = pid == 0 ? getpid() : pid;
+    int result = target(query_pid, policy, &kernel_param);
     if (result == 0 && smros_sched_param_is_current_process(pid)) {
         struct sched_param stored =
             smros_sched_param_for_storage(policy, param);
