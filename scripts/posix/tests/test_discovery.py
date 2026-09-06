@@ -303,7 +303,7 @@ class TestDiscovery(DiscoveryFixture):
 
         self.assertEqual(
             tests["conformance/interfaces/pthread_create/1-6.c"].timeout_ms,
-            120_000,
+            600_000,
         )
 
     def test_pthread_cond_signal_stress_has_reviewed_timeout(self) -> None:
