@@ -26,6 +26,7 @@ _REVIEWED_VOLUME_TIMEOUTS_MS = {
     "conformance/interfaces/nanosleep/10000-1.c": 45_000,
     "conformance/interfaces/pthread_cond_broadcast/1-2.c": 240_000,
     "conformance/interfaces/pthread_cond_broadcast/2-3.c": 180_000,
+    "conformance/interfaces/pthread_cond_destroy/2-1.c": 240_000,
     "conformance/interfaces/pthread_cond_init/1-3.c": 240_000,
     "conformance/interfaces/pthread_cond_signal/1-2.c": 180_000,
     "conformance/interfaces/pthread_cond_timedwait/4-2.c": 600_000,
