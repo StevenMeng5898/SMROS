@@ -326,6 +326,7 @@ typedef struct {
 typedef struct {
     int active;
     pthread_t thread;
+    pid_t kernel_tid;
     int scope;
     int policy;
     struct sched_param param;
@@ -1212,6 +1213,12 @@ static void *smros_pthread_start_trampoline(void *arg) {
         &context->param,
         context->scope
     );
+    smros_pthread_sched_record *record =
+        smros_find_pthread_sched_record(pthread_self());
+    if (record != NULL) {
+        record->kernel_tid = (pid_t)syscall(SYS_gettid);
+        __sync_synchronize();
+    }
     pthread_cleanup_push(smros_pthread_start_cleanup, context);
     result = context->start_routine(context->arg);
     pthread_cleanup_pop(1);
@@ -1315,6 +1322,16 @@ static smros_pthread_sched_record *smros_find_pthread_sched_record(
     return NULL;
 }
 
+static int smros_pthread_kernel_tid_for(pthread_t thread, pid_t *kernel_tid) {
+    smros_pthread_sched_record *record =
+        smros_find_pthread_sched_record(thread);
+    if (record == NULL || record->kernel_tid <= 0 || kernel_tid == NULL) {
+        return 0;
+    }
+    *kernel_tid = record->kernel_tid;
+    return 1;
+}
+
 static int smros_pthread_attr_scope_value(const pthread_attr_t *attr) {
     if (attr == NULL) {
         return PTHREAD_SCOPE_SYSTEM;
@@ -1349,6 +1366,7 @@ static void smros_forget_pthread_sched_record(pthread_t thread) {
     if (record != NULL) {
         record->active = 0;
         memset(&record->thread, 0, sizeof(record->thread));
+        record->kernel_tid = 0;
         record->scope = PTHREAD_SCOPE_SYSTEM;
         record->policy = SCHED_OTHER;
         record->param.sched_priority = 0;
@@ -1563,6 +1581,7 @@ static int smros_remember_pthread_sched_record(
         return EAGAIN;
     }
     record->thread = thread;
+    record->kernel_tid = 0;
     record->scope = scope;
     record->policy = policy;
     record->param = *param;
@@ -1862,6 +1881,32 @@ int pthread_kill(pthread_t thread, int signal_number) {
     }
     if (smros_pthread_was_joined(thread)) {
         return ESRCH;
+    }
+    pid_t kernel_tid = 0;
+    if (smros_pthread_kernel_tid_for(thread, &kernel_tid)) {
+        long syscall_result = syscall(
+            SYS_tgkill,
+            (pid_t)getpid(),
+            kernel_tid,
+            signal_number
+        );
+        int result = syscall_result == -1 ? errno : 0;
+        if (getenv("SMROS_PTHREAD_DIAG") != NULL) {
+            int trace = __sync_add_and_fetch(&smros_signal_trace_count, 1);
+            if (trace <= 192) {
+                (void)dprintf(
+                    STDERR_FILENO,
+                    "SMROS_PTHREAD_KILL_TRACE n=%d self=%lu target=%lu tid=%ld signum=%d direct-result=%d\\n",
+                    trace,
+                    (unsigned long)pthread_self(),
+                    (unsigned long)thread,
+                    (long)kernel_tid,
+                    signal_number,
+                    result
+                );
+            }
+        }
+        return result;
     }
     smros_pthread_kill_fn target =
         (smros_pthread_kill_fn)smros_resolve_symbol("pthread_kill");
