@@ -7,6 +7,7 @@ const SSTATUS_SIE: usize = 1 << 1;
 static USER_ADDRESS_SPACE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub const RISCV_TRAP_STACK_SIZE: usize = 0x10_000;
+const RISCV_TRAP_FRAME_SIZE: usize = 34 * core::mem::size_of::<u64>();
 
 #[repr(C, align(16))]
 pub struct RiscvTrapStack(pub [u8; RISCV_TRAP_STACK_SIZE]);
@@ -167,10 +168,31 @@ pub unsafe fn set_kernel_resume(resume: u64, _state: u64) {
     const SSTATUS_SPP: u64 = 1 << 8;
     const SSTATUS_SUM: u64 = 1 << 18;
     let kernel_state = SSTATUS_SPP | SSTATUS_SUM;
-    if crate::syscall::linux_riscv_syscall_context::set_return_pc(resume) {
-        let _ = crate::syscall::linux_riscv_syscall_context::set_return_state(kernel_state);
-        let _ = crate::syscall::linux_riscv_syscall_context::set_return_stack_to_trap_top();
+    if let Some(context) = crate::syscall::linux_riscv_syscall_context::current_riscv_syscall_context()
+    {
+        let pc_installed = crate::syscall::linux_riscv_syscall_context::set_return_pc(resume);
+        let state_installed =
+            crate::syscall::linux_riscv_syscall_context::set_return_state(kernel_state);
+        let stack_installed =
+            crate::syscall::linux_riscv_syscall_context::set_return_stack_to_trap_top();
+        crate::kobj_info!(
+            "posix-timer",
+            "kernel resume frame={:#x} pc={:#x} state={:#x} sp={:#x} installed={}/{}/{}",
+            context.frame as usize,
+            resume,
+            kernel_state,
+            context.frame as usize + RISCV_TRAP_FRAME_SIZE,
+            pc_installed,
+            state_installed,
+            stack_installed
+        );
     } else {
+        crate::kobj_info!(
+            "posix-timer",
+            "kernel resume fallback pc={:#x} state={:#x}",
+            resume,
+            kernel_state
+        );
         core::arch::asm!(
             "csrw sepc, {resume}",
             resume = in(reg) resume,

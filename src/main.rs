@@ -78,6 +78,7 @@ const LARGE_ALLOCATION_THRESHOLD: usize = 64 * 1024;
 // physical counter tick while an IRQ/context switch is in flight.  The
 // scheduler and POSIX expiration paths are global, so admit each tick once.
 static LAST_ACCEPTED_TIMER_TICK: AtomicU64 = AtomicU64::new(0);
+static TIMER_DIAGNOSTIC_TICKS: AtomicU64 = AtomicU64::new(0);
 
 fn claim_timer_tick(now: u64) -> bool {
     if now == 0 {
@@ -558,6 +559,15 @@ fn timer_interrupt_handler_common() -> bool {
     }
     if current_cpu_id() == 0 {
         if claim_timer_tick(now) {
+            let diagnostic_tick = TIMER_DIAGNOSTIC_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+            if diagnostic_tick % 1000 == 0 {
+                crate::kobj_info!(
+                    "posix-timer",
+                    "timer tick count={} now={}",
+                    diagnostic_tick,
+                    now
+                );
+            }
             crate::kernel_objects::scheduler::scheduler().on_timer_tick();
             crate::syscall::expire_linux_real_timers_from_irq();
             crate::syscall::linux_task::on_timer_tick(now);
@@ -599,11 +609,13 @@ extern "C" fn riscv64_timer_interrupt_handler(saved_regs: usize) {
     if pstate & SSTATUS_SPP != 0 {
         return;
     }
-    if precision_woke_task {
+    let signal_frame_changed = crate::syscall::deliver_linux_timer_signal_from_irq(saved_regs);
+    if precision_woke_task && !signal_frame_changed {
         crate::kernel_objects::scheduler::schedule_on_cpu(current_cpu_id() as usize);
     }
-    crate::syscall::deliver_linux_timer_signal_from_irq(saved_regs);
-    check_preemption();
+    if !signal_frame_changed {
+        check_preemption();
+    }
 }
 
 /// Check if preemption is needed

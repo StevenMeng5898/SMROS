@@ -3869,6 +3869,8 @@ impl MemorySyscallState {
 
 static mut MEMORY_SYSCALL_STATE: Option<MemorySyscallState> = None;
 static LINUX_SIGNAL_TRAMPOLINE: AtomicU64 = AtomicU64::new(0);
+static LINUX_TIMER_SIGNAL_DIAGNOSTIC_TICKS: AtomicU64 = AtomicU64::new(0);
+static LINUX_TIMER_SIGNAL_DIAGNOSTIC_REJECTS: AtomicU64 = AtomicU64::new(0);
 static LINUX_REALTIME_OFFSET_NANOS: AtomicI64 = AtomicI64::new(LINUX_DEFAULT_REALTIME_OFFSET_NANOS);
 static LINUX_CPU_CLOCK_OFFSET_NANOS: AtomicI64 = AtomicI64::new(0);
 
@@ -4927,13 +4929,15 @@ struct LinuxDeliverableSignal {
 }
 
 fn take_process_linux_signal(
-    current: linux_task::LinuxTaskCore,
     mask: u64,
 ) -> Option<(LinuxPendingSignal, LinuxPendingSignalReservation)> {
     with_linux_process_pending(|pending| {
         pending.take_eligible_reserved(|signum| {
+            // Process-directed signals are pending for the whole process. Any
+            // currently running thread that does not block the signal may
+            // consume the pending record; pinning it to the first eligible
+            // thread can starve delivery behind a higher-priority thread.
             mask & linux_signal_bit(signum) == 0
-                && linux_task::process_signal_target(current.tgid, signum) == Some(current)
         })
     })
 }
@@ -4977,9 +4981,8 @@ fn take_unblocked_linux_signal() -> Option<LinuxDeliverableSignal> {
             reservation: Some(reservation),
         });
     }
-    let current = linux_task::current_task().ok()?;
     let mask = linux_task::with_current_signal_state(|signal_state| signal_state.mask).ok()?;
-    take_process_linux_signal(current, mask).map(|(record, reservation)| LinuxDeliverableSignal {
+    take_process_linux_signal(mask).map(|(record, reservation)| LinuxDeliverableSignal {
         record,
         source: LinuxPendingSignalSource::Process,
         reservation: Some(reservation),
@@ -5428,6 +5431,12 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> LinuxSignalDe
     while let Some(deliverable) = take_unblocked_linux_signal() {
         let pending = deliverable.record;
         let signum = pending.signum;
+        crate::kobj_info!(
+            "posix-timer",
+            "deliver signal signum={} saved_frame={:#x}",
+            signum,
+            saved_regs
+        );
         let action = linux_signal_action(signum);
         match linux_process::linux_signal_delivery_route(
             linux_signal_disposition(signum),
@@ -5449,7 +5458,16 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> LinuxSignalDe
                     if let Ok(launch_id) = terminate_linux_process_by_signal(current.tgid, signum) {
                         let launch_id = launch_id as u64;
                         let regs = unsafe { &mut *(saved_regs as *mut [u64; 32]) };
-                        regs[0] = launch_id;
+                        #[cfg(target_arch = "riscv64")]
+                        {
+                            // The trap frame stores x1..x31, so a0 (x10) is
+                            // slot 8. Slot 0 is ra and must remain intact.
+                            regs[8] = launch_id;
+                        }
+                        #[cfg(not(target_arch = "riscv64"))]
+                        {
+                            regs[0] = launch_id;
+                        }
                     }
                 }
                 return LinuxSignalDeliveryOutcome::Idle;
@@ -5568,7 +5586,14 @@ pub(crate) fn deliver_linux_synchronous_memory_fault(
 
     let launch_id = terminate_linux_process_by_signal(current.tgid, signum)?;
     let regs = unsafe { &mut *(saved_regs as *mut [u64; 32]) };
-    regs[0] = launch_id as u64;
+    #[cfg(target_arch = "riscv64")]
+    {
+        regs[8] = launch_id as u64;
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        regs[0] = launch_id as u64;
+    }
     Ok(())
 }
 
@@ -5713,6 +5738,12 @@ pub fn expire_linux_real_timers_from_irq() {
             break;
         }
         let pid = expired[0];
+        crate::kobj_info!(
+            "posix-timer",
+            "expire real timer pid={} now={}",
+            pid,
+            now
+        );
         memory_state().set_linux_real_timer_deadline(pid, LINUX_TIMER_DISABLED);
         if linux_signal_disposition_for(pid, LINUX_SIGALRM)
             .is_ok_and(|disposition| disposition == LinuxSignalDisposition::Ignore)
@@ -5727,27 +5758,50 @@ pub fn expire_linux_real_timers_from_irq() {
 }
 
 #[no_mangle]
-pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) {
+pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) -> bool {
     if saved_regs == 0 {
-        return;
+        return false;
     }
 
     #[cfg(target_arch = "riscv64")]
     if linux_task::current_task().is_err() {
-        return;
+        return false;
     }
 
     expire_linux_real_timers_from_irq();
+    let diagnostic_tick = LINUX_TIMER_SIGNAL_DIAGNOSTIC_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    if diagnostic_tick % 1000 == 0 {
+        let pstate = unsafe { (saved_regs as *const u64).add(32).read() };
+        crate::kobj_info!(
+            "posix-timer",
+            "deliver irq count={} saved_frame={:#x} pstate={:#x}",
+            diagnostic_tick,
+            saved_regs,
+            pstate
+        );
+    }
     #[cfg(target_arch = "riscv64")]
     {
         if !super::linux_riscv_syscall_context::install_interrupt(saved_regs) {
-            return;
+            let rejects =
+                LINUX_TIMER_SIGNAL_DIAGNOSTIC_REJECTS.fetch_add(1, Ordering::Relaxed) + 1;
+            if rejects % 1000 == 0 {
+                crate::kobj_info!(
+                    "posix-timer",
+                    "interrupt frames rejected={} saved_frame={:#x}",
+                    rejects,
+                    saved_regs
+                );
+            }
+            return false;
         }
     }
     let return_pc = crate::kernel_lowlevel::cpu::read_exception_return_pc();
-    let _ = deliver_next_linux_signal(saved_regs, return_pc);
+    let outcome = deliver_next_linux_signal(saved_regs, return_pc);
+    let frame_rewritten = crate::kernel_lowlevel::cpu::read_exception_return_pc() != return_pc;
     #[cfg(target_arch = "riscv64")]
     super::linux_riscv_syscall_context::clear();
+    frame_rewritten || !matches!(outcome, LinuxSignalDeliveryOutcome::Idle)
 }
 
 pub fn deliver_linux_posix_timer_signals_from_irq() {
@@ -10077,6 +10131,16 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> SysRes
             let deadline = crate::kernel_lowlevel::timer::get_tick_count()
                 .saturating_add(ticks)
                 .saturating_add(1);
+            crate::kobj_info!(
+                "posix-timer",
+                "setitimer pid={} value={}.{} ticks={} now={} deadline={}",
+                pid,
+                timer.it_value.tv_sec,
+                timer.it_value.tv_usec,
+                ticks,
+                crate::kernel_lowlevel::timer::get_tick_count(),
+                deadline
+            );
             memory_state().set_linux_real_timer_deadline(pid, deadline);
         }
     }
@@ -11471,10 +11535,24 @@ fn exit_current_linux_process(
 fn terminate_linux_process_by_signal(tgid: usize, signum: usize) -> SysResult {
     let terminating_current = linux_task::current_task().is_ok_and(|task| task.tgid == tgid);
     let outcome = linux_process::terminate_by_signal(tgid, signum)?;
+    crate::kobj_info!(
+        "posix-timer",
+        "terminate signal tgid={} signum={} current={} outcome={:?}",
+        tgid,
+        signum,
+        terminating_current,
+        outcome
+    );
     if outcome == linux_process::LinuxProcessExitOutcome::LaunchRoot {
         let exit_code = 128 + signum as i32;
-        return crate::user_level::run_elf::prepare_run_elf_return(exit_code)
-            .ok_or(SysError::ESRCH);
+        let launch_id = crate::user_level::run_elf::prepare_run_elf_return(exit_code);
+        crate::kobj_info!(
+            "posix-timer",
+            "prepare run-elf return exit_code={} launch_id={:?}",
+            exit_code,
+            launch_id
+        );
+        return launch_id.ok_or(SysError::ESRCH);
     }
     if terminating_current {
         linux_task::finish_current_without_el0_return();

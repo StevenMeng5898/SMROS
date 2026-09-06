@@ -1799,9 +1799,14 @@ int pthread_create(
             &context_param,
             context_scope
         );
-        /* Publish the child before returning so single-CPU guests cannot
-         * leave the parent in its startup polling loop indefinitely. */
+        /* The RISC-V kernel currently exposes logical CPU affinity while
+         * executing scheduler code only on hart 0. Yielding here would hand
+         * the only hart to a high-priority FIFO child before the creator can
+         * finish its setup. Blocking operations and pthread_join still yield
+         * explicitly, so defer this publication yield on that backend. */
+#if !defined(__riscv)
         (void)sched_yield();
+#endif
     }
     if (result != 0) {
         free(context);

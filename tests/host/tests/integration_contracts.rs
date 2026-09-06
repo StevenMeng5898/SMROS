@@ -5407,6 +5407,52 @@ fn linux_handler_delivery_reserves_pending_capacity_until_the_frame_is_ready() {
 }
 
 #[test]
+fn process_pending_signals_can_be_delivered_by_the_running_unmasked_thread() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux signal runtime");
+
+    let start = syscall
+        .find("fn take_process_linux_signal(")
+        .expect("process signal selection");
+    let body = braced_body(&syscall[start..]);
+
+    assert!(
+        body.contains("mask & linux_signal_bit(signum) == 0"),
+        "the running thread's signal mask must gate process-pending delivery"
+    );
+    assert!(
+        !body.contains("process_signal_target(current.tgid, signum) == Some(current)"),
+        "delivery must not be pinned to the first eligible thread"
+    );
+}
+
+#[test]
+fn riscv_timer_signal_delivery_preserves_a_rewritten_trap_frame() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let main = std::fs::read_to_string(repository.join("src/main.rs"))
+        .expect("read kernel timer entry point");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read Linux timer signal entry point");
+
+    let handler_start = main
+        .find("extern \"C\" fn riscv64_timer_interrupt_handler(")
+        .expect("RISC-V timer handler");
+    let handler = braced_body(&main[handler_start..]);
+    assert!(handler.contains("let signal_frame_changed ="));
+    assert!(handler.contains("deliver_linux_timer_signal_from_irq(saved_regs)"));
+    assert!(handler.contains("if !signal_frame_changed"));
+    assert!(handler.contains("check_preemption()"));
+
+    let delivery_start = syscall
+        .find("pub extern \"C\" fn deliver_linux_timer_signal_from_irq(")
+        .expect("timer signal delivery");
+    let delivery = braced_body(&syscall[delivery_start..]);
+    assert!(syscall[delivery_start..].contains(") -> bool"));
+    assert!(delivery.contains("return_pc"));
+}
+
+#[test]
 fn linux_sigtimedwait_copyout_masks_irqs_across_validation_and_write() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
@@ -9412,6 +9458,7 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
     );
     assert!(delivery.contains("linux_process::linux_signal_delivery_route("));
     assert!(delivery.contains("terminate_linux_process_by_signal(current.tgid, signum)"));
+    assert!(delivery.contains("regs[8] = launch_id"));
     assert!(delivery.contains("regs[0] = launch_id"));
     assert!(!delivery.contains("process_manager().terminate_process(current.tgid)"));
 
