@@ -1909,6 +1909,7 @@ int pthread_kill(pthread_t thread, int signal_number) {
                 );
             }
         }
+        (void)sched_yield();
         return result;
     }
     smros_pthread_kill_fn target =
