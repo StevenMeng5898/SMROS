@@ -860,6 +860,9 @@ static int smros_pthread_shared_mutex_trylock(pthread_mutex_t *mutex);
 static int smros_pthread_shared_mutex_lock(pthread_mutex_t *mutex);
 static int smros_pthread_shared_mutex_unlock(pthread_mutex_t *mutex);
 static void smros_forget_pthread_sched_record(pthread_t thread);
+static smros_pthread_sched_record *smros_find_pthread_sched_record(
+    pthread_t thread
+);
 static int smros_remember_pthread_sched_record(
     pthread_t thread,
     int policy,
