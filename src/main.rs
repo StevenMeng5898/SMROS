@@ -535,9 +535,11 @@ pub extern "C" fn kernel_main(fdt_base: usize) -> ! {
     crate::kernel_objects::scheduler::start_first_thread();
 }
 
-/// Timer interrupt handler
-#[no_mangle]
-extern "C" fn timer_interrupt_handler() {
+/// Service the hardware timer and return whether it woke a precision sleeper.
+///
+/// RISC-V invokes this from a trap frame-aware wrapper so it can avoid
+/// switching address spaces while returning from a supervisor-mode trap.
+fn timer_interrupt_handler_common() -> bool {
     // Acknowledge the interrupt first so the CPU interface has an active IRQ
     // to complete after the timer is serviced.
     let interrupt_id = kernel_lowlevel::interrupt::acknowledge_interrupt();
@@ -554,9 +556,6 @@ extern "C" fn timer_interrupt_handler() {
     if let Some(deadline) = crate::syscall::linux_task::next_precision_sleep_deadline() {
         kernel_lowlevel::timer::arm_at_nanoseconds(deadline);
     }
-    if precision_woke_task {
-        crate::kernel_objects::scheduler::schedule_on_cpu(current_cpu_id() as usize);
-    }
     if current_cpu_id() == 0 {
         if claim_timer_tick(now) {
             crate::kernel_objects::scheduler::scheduler().on_timer_tick();
@@ -571,6 +570,40 @@ extern "C" fn timer_interrupt_handler() {
 
     // End of interrupt
     kernel_lowlevel::interrupt::end_of_interrupt(interrupt_id);
+    precision_woke_task
+}
+
+/// Timer interrupt handler for architectures whose trap return can safely
+/// perform the scheduler handoff from the common interrupt path.
+#[cfg(not(target_arch = "riscv64"))]
+#[no_mangle]
+extern "C" fn timer_interrupt_handler() {
+    if timer_interrupt_handler_common() {
+        crate::kernel_objects::scheduler::schedule_on_cpu(current_cpu_id() as usize);
+    }
+}
+
+/// RISC-V timer entry point. A timer can interrupt either user mode or kernel
+/// mode. A scheduler switch from kernel mode would change `satp` while the
+/// interrupted kernel return address is still on the trap frame, so defer that
+/// handoff until a safe user-mode trap boundary.
+#[cfg(target_arch = "riscv64")]
+#[no_mangle]
+extern "C" fn riscv64_timer_interrupt_handler(saved_regs: usize) {
+    let precision_woke_task = timer_interrupt_handler_common();
+    if saved_regs == 0 {
+        return;
+    }
+    const SSTATUS_SPP: u64 = 1 << 8;
+    let pstate = unsafe { (saved_regs as *const u64).add(32).read() };
+    if pstate & SSTATUS_SPP != 0 {
+        return;
+    }
+    if precision_woke_task {
+        crate::kernel_objects::scheduler::schedule_on_cpu(current_cpu_id() as usize);
+    }
+    crate::syscall::deliver_linux_timer_signal_from_irq(saved_regs);
+    check_preemption();
 }
 
 /// Check if preemption is needed

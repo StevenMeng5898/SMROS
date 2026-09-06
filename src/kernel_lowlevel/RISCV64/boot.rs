@@ -126,14 +126,8 @@ trap_interrupt:
     j       trap_restore
 
 trap_timer:
-    call    timer_interrupt_handler
-    // Timer expiry may have queued a Linux signal. Give the compatibility
-    // layer the saved user frame so a handler can run before sret restores it.
     mv      a0, sp
-    call    deliver_linux_timer_signal_from_irq
-    // Timer accounting may have made a blocked user thread runnable. Select
-    // the next thread before restoring the interrupted user context.
-    call    check_preemption
+    call    riscv64_timer_interrupt_handler
     j       trap_restore
 
 trap_user_ecall:

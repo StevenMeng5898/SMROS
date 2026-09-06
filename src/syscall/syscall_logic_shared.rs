@@ -184,6 +184,7 @@ pub(crate) const fn linux_clock_resolution_nanoseconds() -> i64 {
 /// Report a non-zero POSIX timer value at the granularity at which the
 /// platform can observe expiry. Rounding upward never reports a timer as
 /// expired early and avoids exposing sub-resolution truncation to callers.
+#[cfg(target_arch = "riscv64")]
 pub(crate) const fn linux_posix_timer_remaining_rounded(
     remaining_nanoseconds: u64,
     resolution_nanoseconds: u64,
