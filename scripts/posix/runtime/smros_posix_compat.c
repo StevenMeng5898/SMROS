@@ -1847,6 +1847,19 @@ int pthread_join(pthread_t thread, void **retval) {
 }
 
 int pthread_kill(pthread_t thread, int signal_number) {
+    if (getenv("SMROS_PTHREAD_DIAG") != NULL) {
+        int trace = __sync_add_and_fetch(&smros_signal_trace_count, 1);
+        if (trace <= 96) {
+            (void)dprintf(
+                STDERR_FILENO,
+                "SMROS_PTHREAD_KILL_TRACE n=%d self=%lu target=%lu signum=%d enter\\n",
+                trace,
+                (unsigned long)pthread_self(),
+                (unsigned long)thread,
+                signal_number
+            );
+        }
+    }
     if (smros_pthread_was_joined(thread)) {
         return ESRCH;
     }
@@ -1855,7 +1868,22 @@ int pthread_kill(pthread_t thread, int signal_number) {
     if (target == NULL) {
         return ESRCH;
     }
-    return target(thread, signal_number);
+    int result = target(thread, signal_number);
+    if (getenv("SMROS_PTHREAD_DIAG") != NULL) {
+        int trace = __sync_add_and_fetch(&smros_signal_trace_count, 1);
+        if (trace <= 192) {
+            (void)dprintf(
+                STDERR_FILENO,
+                "SMROS_PTHREAD_KILL_TRACE n=%d self=%lu target=%lu signum=%d result=%d\\n",
+                trace,
+                (unsigned long)pthread_self(),
+                (unsigned long)thread,
+                signal_number,
+                result
+            );
+        }
+    }
+    return result;
 }
 
 static int smros_pthread_cancel_record_matches(
