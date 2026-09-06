@@ -265,6 +265,19 @@ class TestDiscovery(DiscoveryFixture):
             240_000,
         )
 
+    def test_nanosleep_long_volume_has_reviewed_timeout(self) -> None:
+        self.write_source(
+            "conformance/interfaces/nanosleep/10000-1.c",
+            "int main(void) { return 0; }\n",
+        )
+
+        tests = {test.test_id: test for test in discover_tests(self.root)}
+
+        self.assertEqual(
+            tests["conformance/interfaces/nanosleep/10000-1.c"].timeout_ms,
+            45_000,
+        )
+
     def test_pthread_cond_signal_stress_has_reviewed_timeout(self) -> None:
         self.write_source(
             "conformance/interfaces/pthread_cond_signal/1-2.c",
