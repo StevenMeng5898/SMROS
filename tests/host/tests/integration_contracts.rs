@@ -2830,6 +2830,47 @@ fn smros_pthread_create_yields_after_publishing_child() {
 }
 
 #[test]
+fn smros_riscv_pthread_create_defers_explicit_fifo_startup() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let compat = std::fs::read_to_string(
+        repository.join("scripts/posix/runtime/smros_posix_compat.c"),
+    )
+    .expect("read POSIX compatibility runtime");
+
+    assert!(
+        compat.contains("smros_pthread_attr_setinheritsched_fn"),
+        "runtime must be able to defer explicit scheduling attributes"
+    );
+    assert!(
+        compat.contains("smros_riscv_pthread_sched_deferral"),
+        "RISC-V pthread startup scheduling deferral state is missing"
+    );
+    let create_start = compat
+        .find("int pthread_create(")
+        .expect("pthread_create interposer");
+    let create = braced_body(&compat[create_start..]);
+    let defer = create
+        .find("PTHREAD_INHERIT_SCHED")
+        .expect("pthread_create must temporarily inherit the parent schedule");
+    let launch = create
+        .find("target(thread, effective_attr")
+        .expect("pthread_create libc launch");
+    let restore = create
+        .find("set_inherit((pthread_attr_t *)effective_attr, PTHREAD_EXPLICIT_SCHED)")
+        .expect("pthread_create must restore the caller's scheduling attribute");
+    let apply = create
+        .find("SYS_sched_setscheduler")
+        .expect("pthread_create must apply the requested policy after launch");
+    assert!(defer < launch);
+    assert!(launch < restore);
+    assert!(restore < apply);
+    assert!(
+        compat.contains("record->kernel_tid = existing_kernel_tid"),
+        "publishing the parent-side record must preserve the child kernel TID"
+    );
+}
+
+#[test]
 fn smros_posix_compat_runtime_tracks_aio_completion_state() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let compat =

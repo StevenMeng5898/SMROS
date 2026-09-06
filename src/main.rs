@@ -78,7 +78,6 @@ const LARGE_ALLOCATION_THRESHOLD: usize = 64 * 1024;
 // physical counter tick while an IRQ/context switch is in flight.  The
 // scheduler and POSIX expiration paths are global, so admit each tick once.
 static LAST_ACCEPTED_TIMER_TICK: AtomicU64 = AtomicU64::new(0);
-static TIMER_DIAGNOSTIC_TICKS: AtomicU64 = AtomicU64::new(0);
 
 fn claim_timer_tick(now: u64) -> bool {
     if now == 0 {
@@ -559,15 +558,6 @@ fn timer_interrupt_handler_common() -> bool {
     }
     if current_cpu_id() == 0 {
         if claim_timer_tick(now) {
-            let diagnostic_tick = TIMER_DIAGNOSTIC_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
-            if diagnostic_tick % 1000 == 0 {
-                crate::kobj_info!(
-                    "posix-timer",
-                    "timer tick count={} now={}",
-                    diagnostic_tick,
-                    now
-                );
-            }
             crate::kernel_objects::scheduler::scheduler().on_timer_tick();
             crate::syscall::expire_linux_real_timers_from_irq();
             crate::syscall::linux_task::on_timer_tick(now);
@@ -614,6 +604,16 @@ extern "C" fn riscv64_timer_interrupt_handler(saved_regs: usize) {
         crate::kernel_objects::scheduler::schedule_on_cpu(current_cpu_id() as usize);
     }
     if !signal_frame_changed {
+        // RISC-V currently exposes logical CPU affinity but executes the
+        // scheduler on one hart. Keep the launch-root coordinator runnable
+        // until it can explicitly yield or block; otherwise the first
+        // high-priority FIFO child can starve the creator indefinitely.
+        let current_scheduler = crate::kernel_objects::scheduler::scheduler().current().0;
+        if crate::syscall::linux_process::current()
+            .is_ok_and(|process| process.root_scheduler_thread == current_scheduler)
+        {
+            return;
+        }
         check_preemption();
     }
 }

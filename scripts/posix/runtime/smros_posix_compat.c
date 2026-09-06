@@ -180,6 +180,7 @@ typedef int (*smros_pthread_attr_getinheritsched_fn)(
     const pthread_attr_t *,
     int *
 );
+typedef int (*smros_pthread_attr_setinheritsched_fn)(pthread_attr_t *, int);
 int __register_atfork(
     void (*prepare)(void),
     void (*parent)(void),
@@ -424,6 +425,11 @@ static smros_pthread_cond_record
 static smros_pthread_cond_waiter_record
     smros_pthread_cond_waiter_records[SMROS_PTHREAD_COND_RECORDS];
 static int smros_pthread_active_created;
+#if defined(__riscv)
+/* A single-hart RISC-V image must finish the pthread_create handshake before
+ * a newly-created FIFO/RR child can take over the only scheduler. */
+static volatile int smros_riscv_pthread_sched_deferral;
+#endif
 static int smros_pthread_destroy_attempts;
 static int smros_shared_cond_trace_count;
 static int smros_signal_trace_count;
@@ -1583,8 +1589,9 @@ static int smros_remember_pthread_sched_record(
     if (record == NULL) {
         return EAGAIN;
     }
+    pid_t existing_kernel_tid = record->kernel_tid;
     record->thread = thread;
-    record->kernel_tid = 0;
+    record->kernel_tid = existing_kernel_tid;
     record->scope = scope;
     record->policy = policy;
     record->param = *param;
@@ -1773,8 +1780,42 @@ int pthread_create(
     int context_policy = context->policy;
     struct sched_param context_param = context->param;
     int context_scope = context->scope;
+#if defined(__riscv)
+    int riscv_sched_deferred = 0;
+    smros_pthread_attr_setinheritsched_fn set_inherit = NULL;
+    if (
+        attr != NULL &&
+        (context_policy == SCHED_FIFO || context_policy == SCHED_RR)
+    ) {
+        int inherit = PTHREAD_EXPLICIT_SCHED;
+        smros_pthread_attr_getinheritsched_fn get_inherit =
+            (smros_pthread_attr_getinheritsched_fn)smros_resolve_symbol(
+                "pthread_attr_getinheritsched"
+            );
+        set_inherit = (smros_pthread_attr_setinheritsched_fn)
+            smros_resolve_symbol("pthread_attr_setinheritsched");
+        if (get_inherit != NULL && set_inherit != NULL) {
+            if (get_inherit(effective_attr, &inherit) != 0) {
+                inherit = PTHREAD_EXPLICIT_SCHED;
+            }
+            if (
+                inherit == PTHREAD_EXPLICIT_SCHED &&
+                set_inherit((pthread_attr_t *)effective_attr, PTHREAD_INHERIT_SCHED) == 0
+            ) {
+                __sync_add_and_fetch(&smros_riscv_pthread_sched_deferral, 1);
+                riscv_sched_deferred = 1;
+            }
+        }
+    }
+#endif
     int result =
         target(thread, effective_attr, smros_pthread_start_trampoline, context);
+#if defined(__riscv)
+    if (riscv_sched_deferred) {
+        (void)set_inherit((pthread_attr_t *)effective_attr, PTHREAD_EXPLICIT_SCHED);
+        __sync_sub_and_fetch(&smros_riscv_pthread_sched_deferral, 1);
+    }
+#endif
     smros_pthread_diag_state(
         "create-exit",
         thread,
@@ -1799,6 +1840,25 @@ int pthread_create(
             &context_param,
             context_scope
         );
+#if defined(__riscv)
+        if (riscv_sched_deferred) {
+            pid_t kernel_tid = 0;
+            for (unsigned attempt = 0; attempt < 64; attempt++) {
+                if (smros_pthread_kernel_tid_for(*thread, &kernel_tid)) {
+                    break;
+                }
+                (void)sched_yield();
+            }
+            if (kernel_tid > 0) {
+                (void)syscall(
+                    SYS_sched_setscheduler,
+                    kernel_tid,
+                    context_policy,
+                    &context_param
+                );
+            }
+        }
+#endif
         /* The RISC-V kernel currently exposes logical CPU affinity while
          * executing scheduler code only on hart 0. Yielding here would hand
          * the only hart to a high-priority FIFO child before the creator can
@@ -3609,6 +3669,14 @@ int sched_setscheduler(
         errno = EINVAL;
         return -1;
     }
+#if defined(__riscv)
+    if (
+        pid == 0 &&
+        __sync_fetch_and_add(&smros_riscv_pthread_sched_deferral, 0) != 0
+    ) {
+        return 0;
+    }
+#endif
     smros_sched_setscheduler_fn target =
         (smros_sched_setscheduler_fn)smros_resolve_symbol(
             "sched_setscheduler"
