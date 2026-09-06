@@ -170,6 +170,7 @@ impl From<SysError> for usize {
 
 const ZIRCON_ROOT_VMAR_BASE: usize = 0x7000_0000;
 const ZIRCON_ROOT_VMAR_SIZE: usize = 0x1000_0000;
+static LINUX_DIRECTED_SIGNAL_TRACE: AtomicUsize = AtomicUsize::new(0);
 const MEMORY_HANDLE_START: u32 = 0x1000;
 const ARM64_SYS_IO_SETUP: u32 = 0;
 const ARM64_SYS_IO_DESTROY: u32 = 1;
@@ -5230,9 +5231,28 @@ fn queue_directed_linux_signal(
     signum: usize,
     make_record: impl FnOnce() -> Result<LinuxPendingSignal, SysError>,
 ) -> SysResult {
+    let trace = LINUX_DIRECTED_SIGNAL_TRACE.fetch_add(1, Ordering::Relaxed);
+    if trace < 48 {
+        crate::kobj_info!(
+            "posix-signal",
+            "directed enter tgid={:?} tid={} sig={}",
+            tgid,
+            tid,
+            signum
+        );
+    }
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let result = (|| {
         let validated_target = linux_task::queue_task_signal(tgid, tid, LinuxPendingSignal::EMPTY)?;
+        if trace < 48 {
+            crate::kobj_info!(
+                "posix-signal",
+                "directed target tgid={} tid={} sig={}",
+                validated_target.tgid,
+                validated_target.tid,
+                signum
+            );
+        }
         if signum == 0 {
             return Ok(0);
         }
@@ -5247,8 +5267,27 @@ fn queue_directed_linux_signal(
             | LinuxSignalDisposition::Terminate
             | LinuxSignalDisposition::Handled => {
                 let record = make_record()?;
+                if trace < 48 {
+                    crate::kobj_info!(
+                        "posix-signal",
+                        "directed route tgid={} tid={} sig={}",
+                        validated_target.tgid,
+                        validated_target.tid,
+                        signum
+                    );
+                }
                 let (target, wake_reason) =
                     linux_task::route_signal_and_complete_wait(tgid, tid, record)?;
+                if trace < 48 {
+                    crate::kobj_info!(
+                        "posix-signal",
+                        "directed queued tgid={} tid={} sig={} wake={:?}",
+                        target.tgid,
+                        target.tid,
+                        signum,
+                        wake_reason
+                    );
+                }
                 if let Some(
                     reason @ (LinuxBlockReason::SignalWait | LinuxBlockReason::SignalSuspend),
                 ) = wake_reason
