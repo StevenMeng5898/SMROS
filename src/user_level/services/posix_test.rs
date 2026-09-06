@@ -649,6 +649,7 @@ fn launch_current_test(harness_launcher_active: bool) -> PosixLaunchLoopResult {
         argv.push(path.clone());
         let mut env = Vec::new();
         env.push(String::from(POSIX_COMPAT_PRELOAD_ENV));
+        env.push(String::from("SMROS_PTHREAD_DIAG=1"));
         if requires_regular_user(test.test_id.as_str()) {
             env.push(String::from(POSIX_COMPAT_REGULAR_USER_ENV));
         }
