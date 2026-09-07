@@ -4376,17 +4376,10 @@ static void smros_pthread_private_cond_blocked_leave(
 static void smros_pthread_private_cond_complete_handoff(
     smros_pthread_cond_record *record
 ) {
-    /* Waiters poll user-space wake tokens every 50 ms.  Bound the handoff so
-     * a stalled waiter cannot make pthread_cond_broadcast() hang. */
-    for (unsigned int attempt = 0; attempt < 8; ++attempt) {
-        smros_lock_pthread_cond_records();
-        int pending = record->waiters > 0 && record->wakeups > 0;
-        smros_unlock_pthread_cond_records();
-        if (!pending) {
-            break;
-        }
-        smros_pthread_cond_wait_pause();
-    }
+    /* Wake marks are installed synchronously while the condition-record lock
+     * is held.  POSIX broadcast must not wait for awakened threads to run or
+     * reacquire their mutex, so there is no handoff polling here. */
+    (void)record;
 }
 
 static void smros_pthread_private_cond_user_leave(

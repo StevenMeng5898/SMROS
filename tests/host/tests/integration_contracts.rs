@@ -3046,8 +3046,8 @@ fn smros_private_condition_broadcast_completes_the_polling_handoff() {
     assert!(wake.contains("if (broadcast)"));
     assert!(wake.contains("smros_pthread_private_cond_complete_handoff(record);"));
     assert!(wake.contains("record->wakeups += marked;"));
-    assert!(handoff.contains("attempt < 8"));
-    assert!(handoff.contains("smros_pthread_cond_wait_pause();"));
+    assert!(handoff.contains("Wake marks are installed synchronously"));
+    assert!(handoff.contains("(void)record;"));
     assert!(leave.contains("if (record->wakeups > record->waiters)"));
     assert!(leave.contains("record->wakeups = record->waiters;"));
 }
