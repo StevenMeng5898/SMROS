@@ -311,6 +311,8 @@ fn requires_regular_user(test_id: &str) -> bool {
         test_id,
         "conformance/interfaces/sched_setparam/26-1.c"
             | "conformance/interfaces/sched_setscheduler/17-6.c"
+            | "conformance/interfaces/mlock/speculative/12-1.c"
+            | "conformance/interfaces/mlockall/speculative/15-1.c"
     )
 }
 
@@ -649,6 +651,9 @@ fn launch_current_test(harness_launcher_active: bool) -> PosixLaunchLoopResult {
         argv.push(path.clone());
         let mut env = Vec::new();
         env.push(String::from(POSIX_COMPAT_PRELOAD_ENV));
+        if test.test_id == "conformance/interfaces/pthread_cond_timedwait/2-5.c" {
+            env.push(String::from("SMROS_PTHREAD_DIAG=1"));
+        }
         if requires_regular_user(test.test_id.as_str()) {
             env.push(String::from(POSIX_COMPAT_REGULAR_USER_ENV));
         }
@@ -2259,12 +2264,18 @@ mod tests {
     }
 
     #[test]
-    fn regular_user_profile_is_limited_to_privilege_gated_scheduler_cases() {
+    fn regular_user_profile_covers_privilege_gated_cases() {
         assert!(requires_regular_user(
             "conformance/interfaces/sched_setparam/26-1.c"
         ));
         assert!(requires_regular_user(
             "conformance/interfaces/sched_setscheduler/17-6.c"
+        ));
+        assert!(requires_regular_user(
+            "conformance/interfaces/mlock/speculative/12-1.c"
+        ));
+        assert!(requires_regular_user(
+            "conformance/interfaces/mlockall/speculative/15-1.c"
         ));
         assert!(!requires_regular_user("conformance/interfaces/mmap/27-1.c"));
         assert!(!requires_regular_user("conformance/interfaces/sched_setparam/27-1.c"));

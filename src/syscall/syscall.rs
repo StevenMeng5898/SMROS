@@ -42,6 +42,9 @@ use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::sync::atomic::{compiler_fence, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
+#[cfg(target_arch = "riscv64")]
+static POSIX_CLONE_DIAG_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 use super::address_logic::{
     checked_end, fixed_linux_mmap_request_ok as shared_fixed_linux_mmap_request_ok,
     page_aligned as shared_page_aligned,
@@ -11275,19 +11278,57 @@ pub fn sys_clone(
         if !linux_clone_tid_destinations_valid(&request) {
             return Err(SysError::EFAULT);
         }
+        #[cfg(target_arch = "riscv64")]
+        let clone_diag = POSIX_CLONE_DIAG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        #[cfg(target_arch = "riscv64")]
+        if clone_diag >= 195 {
+            crate::kobj_info!(
+                "posix-clone",
+                "diag n={} stage=validated current={}",
+                clone_diag,
+                scheduler::scheduler().current().0
+            );
+        }
 
         let scheduler_id = match scheduler::scheduler().create_suspended_thread_on_cpu(
             linux_task::linux_clone_child_entry,
             "linux_thread",
             0,
         ) {
-            Some(id) => id,
+            Some(id) => {
+                #[cfg(target_arch = "riscv64")]
+                if clone_diag >= 195 {
+                    crate::kobj_info!(
+                        "posix-clone",
+                        "diag n={} stage=scheduler-created id={}",
+                        clone_diag,
+                        id.0
+                    );
+                }
+                id
+            }
             None => {
+                crate::kobj_info!(
+                    "posix-clone",
+                    "scheduler-thread-allocation-failed current={}",
+                    scheduler::scheduler().current().0
+                );
                 return Err(SysError::EAGAIN);
             }
         };
         let reservation = match linux_task::reserve_clone(scheduler_id, request, context) {
-            Ok(reservation) => reservation,
+            Ok(reservation) => {
+                #[cfg(target_arch = "riscv64")]
+                if clone_diag >= 195 {
+                    crate::kobj_info!(
+                        "posix-clone",
+                        "diag n={} stage=reserved tid={}",
+                        clone_diag,
+                        reservation.tid
+                    );
+                }
+                reservation
+            }
             Err(error) => {
                 let _ = scheduler::scheduler().terminate_thread(scheduler_id);
                 return Err(error);

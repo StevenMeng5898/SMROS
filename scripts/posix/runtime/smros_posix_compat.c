@@ -322,6 +322,10 @@ typedef struct {
     int scope;
     int policy;
     struct sched_param param;
+#if defined(__riscv)
+    int sched_deferred;
+    volatile int creator_returned;
+#endif
 } smros_pthread_start_context;
 
 typedef struct {
@@ -400,6 +404,7 @@ typedef struct {
     int active;
     pthread_t thread;
     smros_pthread_cond_record *record;
+    int woken;
 } smros_pthread_cond_waiter_record;
 
 static smros_named_sem_record smros_named_semaphores[SMROS_NAMED_SEM_RECORDS];
@@ -433,6 +438,7 @@ static volatile int smros_riscv_pthread_sched_deferral;
 static int smros_pthread_destroy_attempts;
 static int smros_shared_cond_trace_count;
 static int smros_signal_trace_count;
+static int smros_mutex_contention_trace_count;
 
 static void smros_trace_shared_cond(
     const char *operation,
@@ -1228,6 +1234,31 @@ static void *smros_pthread_start_trampoline(void *arg) {
         record->kernel_tid = (pid_t)syscall(SYS_gettid);
         __sync_synchronize();
     }
+#if defined(__riscv)
+    if (context->sched_deferred) {
+        while (__sync_fetch_and_add(&context->creator_returned, 0) == 0) {
+            (void)sched_yield();
+        }
+        struct timespec startup_pause = { .tv_sec = 0, .tv_nsec = 750000000 };
+        (void)nanosleep(&startup_pause, NULL);
+        long applied = syscall(
+            SYS_sched_setscheduler,
+            0,
+            context->policy,
+            &context->param
+        );
+        long observed = syscall(SYS_sched_getscheduler, 0);
+        struct sched_param observed_param = { .sched_priority = -1 };
+        (void)syscall(SYS_sched_getparam, 0, &observed_param);
+        smros_pthread_diag_state(
+            "trampoline-policy",
+            context->start_routine,
+            (uint32_t)(applied < 0 ? -applied : applied),
+            (uint32_t)(observed < 0 ? -observed : observed),
+            (uint32_t)observed_param.sched_priority
+        );
+    }
+#endif
     pthread_cleanup_push(smros_pthread_start_cleanup, context);
     result = context->start_routine(context->arg);
     pthread_cleanup_pop(1);
@@ -1381,6 +1412,41 @@ static void smros_forget_pthread_sched_record(pthread_t thread) {
         record->param.sched_priority = 0;
     }
 }
+
+#if defined(__riscv)
+static int smros_riscv_join_priority_guard_enter(
+    int *policy,
+    struct sched_param *param
+) {
+    smros_pthread_sched_record *record =
+        smros_find_pthread_sched_record(pthread_self());
+    if (
+        record == NULL ||
+        (record->policy != SCHED_FIFO && record->policy != SCHED_RR)
+    ) {
+        return 0;
+    }
+    if (policy != NULL) {
+        *policy = record->policy;
+    }
+    if (param != NULL) {
+        *param = record->param;
+    }
+    struct sched_param neutral = { .sched_priority = 0 };
+    return syscall(SYS_sched_setscheduler, 0, SCHED_OTHER, &neutral) == 0;
+}
+
+static void smros_riscv_join_priority_guard_leave(
+    int active,
+    int policy,
+    const struct sched_param *param
+) {
+    if (!active || param == NULL) {
+        return;
+    }
+    (void)syscall(SYS_sched_setscheduler, 0, policy, param);
+}
+#endif
 
 static int smros_pthread_joined_record_matches(
     size_t index,
@@ -1783,6 +1849,11 @@ int pthread_create(
 #if defined(__riscv)
     int riscv_sched_deferred = 0;
     smros_pthread_attr_setinheritsched_fn set_inherit = NULL;
+    smros_pthread_attr_setschedpolicy_fn set_policy = NULL;
+    smros_pthread_attr_setschedparam_fn set_param = NULL;
+    int riscv_sched_attr_modified = 0;
+    context->sched_deferred = 0;
+    context->creator_returned = 0;
     if (
         attr != NULL &&
         (context_policy == SCHED_FIFO || context_policy == SCHED_RR)
@@ -1794,16 +1865,35 @@ int pthread_create(
             );
         set_inherit = (smros_pthread_attr_setinheritsched_fn)
             smros_resolve_symbol("pthread_attr_setinheritsched");
-        if (get_inherit != NULL && set_inherit != NULL) {
+        set_policy = (smros_pthread_attr_setschedpolicy_fn)
+            smros_resolve_symbol("pthread_attr_setschedpolicy");
+        set_param = (smros_pthread_attr_setschedparam_fn)
+            smros_resolve_symbol("pthread_attr_setschedparam");
+        if (
+            get_inherit != NULL &&
+            set_inherit != NULL &&
+            set_policy != NULL &&
+            set_param != NULL
+        ) {
             if (get_inherit(effective_attr, &inherit) != 0) {
                 inherit = PTHREAD_EXPLICIT_SCHED;
             }
             if (
                 inherit == PTHREAD_EXPLICIT_SCHED &&
-                set_inherit((pthread_attr_t *)effective_attr, PTHREAD_INHERIT_SCHED) == 0
+                set_policy((pthread_attr_t *)effective_attr, SCHED_OTHER) == 0
             ) {
-                __sync_add_and_fetch(&smros_riscv_pthread_sched_deferral, 1);
-                riscv_sched_deferred = 1;
+                riscv_sched_attr_modified = 1;
+                struct sched_param neutral_param = { .sched_priority = 0 };
+                if (
+                    set_param(
+                        (pthread_attr_t *)effective_attr,
+                        &neutral_param
+                    ) == 0
+                ) {
+                    __sync_add_and_fetch(&smros_riscv_pthread_sched_deferral, 1);
+                    riscv_sched_deferred = 1;
+                    context->sched_deferred = 1;
+                }
             }
         }
     }
@@ -1811,8 +1901,16 @@ int pthread_create(
     int result =
         target(thread, effective_attr, smros_pthread_start_trampoline, context);
 #if defined(__riscv)
-    if (riscv_sched_deferred) {
+    if (riscv_sched_attr_modified) {
+        (void)set_policy((pthread_attr_t *)effective_attr, context_policy);
+        (void)set_param((pthread_attr_t *)effective_attr, &context_param);
         (void)set_inherit((pthread_attr_t *)effective_attr, PTHREAD_EXPLICIT_SCHED);
+    }
+    if (riscv_sched_deferred) {
+        __sync_synchronize();
+        if (result == 0) {
+            context->creator_returned = 1;
+        }
         __sync_sub_and_fetch(&smros_riscv_pthread_sched_deferral, 1);
     }
 #endif
@@ -1840,31 +1938,15 @@ int pthread_create(
             &context_param,
             context_scope
         );
+        /* On RISC-V, default SCHED_OTHER children must receive the CPU so
+         * they can publish their startup state and reach blocking waits. An
+         * explicit FIFO/RR child is handed off by its deferred trampoline
+         * instead, keeping the creator ahead of a higher-priority child. */
 #if defined(__riscv)
-        if (riscv_sched_deferred) {
-            pid_t kernel_tid = 0;
-            for (unsigned attempt = 0; attempt < 64; attempt++) {
-                if (smros_pthread_kernel_tid_for(*thread, &kernel_tid)) {
-                    break;
-                }
-                (void)sched_yield();
-            }
-            if (kernel_tid > 0) {
-                (void)syscall(
-                    SYS_sched_setscheduler,
-                    kernel_tid,
-                    context_policy,
-                    &context_param
-                );
-            }
+        if (!riscv_sched_deferred && context_policy == SCHED_OTHER) {
+            (void)sched_yield();
         }
-#endif
-        /* The RISC-V kernel currently exposes logical CPU affinity while
-         * executing scheduler code only on hart 0. Yielding here would hand
-         * the only hart to a high-priority FIFO child before the creator can
-         * finish its setup. Blocking operations and pthread_join still yield
-         * explicitly, so defer this publication yield on that backend. */
-#if !defined(__riscv)
+#else
         (void)sched_yield();
 #endif
     }
@@ -1898,6 +1980,49 @@ int pthread_join(pthread_t thread, void **retval) {
      * cancellation point. */
     smros_pthread_tryjoin_fn try_target =
         (smros_pthread_tryjoin_fn)smros_resolve_symbol("pthread_tryjoin_np");
+#if defined(__riscv)
+    int join_priority_guard_active = 0;
+    int join_priority_guard_policy = SCHED_OTHER;
+    struct sched_param join_priority_guard_param = { .sched_priority = 0 };
+    join_priority_guard_active = smros_riscv_join_priority_guard_enter(
+        &join_priority_guard_policy,
+        &join_priority_guard_param
+    );
+    if (try_target == NULL) {
+        for (;;) {
+            if (smros_current_pthread_cancel_requested()) {
+                smros_pthread_exit_fn exit_target =
+                    (smros_pthread_exit_fn)smros_resolve_symbol("pthread_exit");
+                if (exit_target != NULL) {
+                    exit_target(PTHREAD_CANCELED);
+                }
+                return ECANCELED;
+            }
+            if (smros_find_pthread_sched_record(thread) == NULL) {
+                break;
+            }
+            struct timespec join_pause = { .tv_sec = 0, .tv_nsec = 1000000 };
+            (void)nanosleep(&join_pause, NULL);
+        }
+        int result = target(thread, retval);
+        smros_riscv_join_priority_guard_leave(
+            join_priority_guard_active,
+            join_priority_guard_policy,
+            &join_priority_guard_param
+        );
+        smros_pthread_diag_state(
+            "join-exit",
+            (const void *)(uintptr_t)thread,
+            (uint32_t)result,
+            0,
+            0
+        );
+        if (result == 0) {
+            smros_remember_pthread_joined(thread);
+        }
+        return result;
+    }
+#endif
     if (try_target != NULL) {
         for (;;) {
             if (smros_current_pthread_cancel_requested()) {
@@ -1920,12 +2045,31 @@ int pthread_join(pthread_t thread, void **retval) {
                 if (result == 0) {
                     smros_remember_pthread_joined(thread);
                 }
+                smros_riscv_join_priority_guard_leave(
+                    join_priority_guard_active,
+                    join_priority_guard_policy,
+                    &join_priority_guard_param
+                );
                 return result;
             }
+#if defined(__riscv)
+            /* A FIFO parent can outrank the child forever; yield alone does
+             * not make a lower-priority child runnable on the single hart. */
+            struct timespec join_pause = { .tv_sec = 0, .tv_nsec = 1000000 };
+            (void)nanosleep(&join_pause, NULL);
+#else
             (void)sched_yield();
+#endif
         }
     }
     int result = target(thread, retval);
+#if defined(__riscv)
+    smros_riscv_join_priority_guard_leave(
+        join_priority_guard_active,
+        join_priority_guard_policy,
+        &join_priority_guard_param
+    );
+#endif
     smros_pthread_diag_state("join-exit", (const void *)(uintptr_t)thread, (uint32_t)result, 0, 0);
     if (result == 0) {
         smros_remember_pthread_joined(thread);
@@ -2321,9 +2465,14 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex) {
     if (target == NULL) {
         return ENOSYS;
     }
+    /* Clear the side-table ownership before releasing the underlying lock.
+     * Otherwise a racing successor can publish itself as owner and have that
+     * metadata erased by this unlock after the native unlock returns. */
+    smros_note_pthread_mutex_unlock(mutex);
     int result = target(mutex);
-    if (result == 0) {
-        smros_note_pthread_mutex_unlock(mutex);
+    if (result != 0) {
+        /* A failed native unlock leaves ownership with this thread. */
+        smros_note_pthread_mutex_lock(mutex, pthread_self());
     }
     return result;
 }
@@ -2423,6 +2572,18 @@ int pthread_mutex_lock(pthread_mutex_t *mutex) {
         type == PTHREAD_MUTEX_ERRORCHECK
     ) {
         return EDEADLK;
+    }
+    if (getenv("SMROS_PTHREAD_DIAG") != NULL) {
+        int trace = __sync_add_and_fetch(&smros_mutex_contention_trace_count, 1);
+        if (trace <= 128) {
+            smros_pthread_diag_state(
+                "mutex-lock-contended",
+                mutex,
+                (uint32_t)type,
+                0,
+                (uint32_t)trace
+            );
+        }
     }
     for (;;) {
         if (
@@ -3981,8 +4142,11 @@ static int smros_pthread_cond_waiter_enter(
         if (!waiter->active) {
             waiter->thread = thread;
             waiter->record = record;
+            waiter->woken = 0;
             __sync_synchronize();
             waiter->active = 1;
+            record->users++;
+            record->waiters++;
             entered = 1;
             break;
         }
@@ -4004,6 +4168,7 @@ static void smros_pthread_cond_waiter_leave(
             waiter->record == record &&
             pthread_equal(waiter->thread, thread)
         ) {
+            waiter->woken = 0;
             waiter->record = NULL;
             __sync_synchronize();
             waiter->active = 0;
@@ -4148,30 +4313,62 @@ static int smros_pthread_private_cond_deadline_reached(
 }
 
 static int smros_pthread_private_cond_consume_wakeup(
-    smros_pthread_cond_record *record
+    smros_pthread_cond_record *record,
+    pthread_t thread
 ) {
     int consumed = 0;
     smros_lock_pthread_cond_records();
-    if (record->wakeups > 0) {
-        record->wakeups--;
-        if (record->waiters > 0) {
-            record->waiters--;
+    for (size_t index = 0; index < SMROS_PTHREAD_COND_RECORDS; index++) {
+        smros_pthread_cond_waiter_record *waiter =
+            &smros_pthread_cond_waiter_records[index];
+        if (
+            waiter->active &&
+            waiter->record == record &&
+            pthread_equal(waiter->thread, thread) &&
+            waiter->woken
+        ) {
+            waiter->woken = 0;
+            waiter->active = 0;
+            if (record->wakeups > 0) {
+                record->wakeups--;
+            }
+            if (record->waiters > 0) {
+                record->waiters--;
+            }
+            consumed = 1;
+            break;
         }
-        consumed = 1;
     }
     smros_unlock_pthread_cond_records();
     return consumed;
 }
 
 static void smros_pthread_private_cond_blocked_leave(
-    smros_pthread_cond_record *record
+    smros_pthread_cond_record *record,
+    pthread_t thread
 ) {
     smros_lock_pthread_cond_records();
-    if (record->waiters > 0) {
-        record->waiters--;
-    }
-    if (record->wakeups > record->waiters) {
-        record->wakeups = record->waiters;
+    for (size_t index = 0; index < SMROS_PTHREAD_COND_RECORDS; index++) {
+        smros_pthread_cond_waiter_record *waiter =
+            &smros_pthread_cond_waiter_records[index];
+        if (
+            waiter->active &&
+            waiter->record == record &&
+            pthread_equal(waiter->thread, thread)
+        ) {
+            if (waiter->woken && record->wakeups > 0) {
+                record->wakeups--;
+            }
+            waiter->woken = 0;
+            waiter->active = 0;
+            if (record->waiters > 0) {
+                record->waiters--;
+            }
+            if (record->wakeups > record->waiters) {
+                record->wakeups = record->waiters;
+            }
+            break;
+        }
     }
     smros_unlock_pthread_cond_records();
 }
@@ -4241,19 +4438,15 @@ static int smros_pthread_private_cond_wait_common(
         return cancel_state_result;
     }
 
-    (void)__sync_add_and_fetch(&record->users, 1);
-    (void)__sync_add_and_fetch(&record->waiters, 1);
     pthread_t self = pthread_self();
     if (!smros_pthread_cond_waiter_enter(record, self)) {
-        smros_pthread_private_cond_blocked_leave(record);
-        smros_pthread_private_cond_user_leave(record);
         (void)pthread_setcancelstate(old_cancel_state, NULL);
         return EAGAIN;
     }
     int unlock_result = pthread_mutex_unlock(mutex);
     if (unlock_result != 0) {
+        smros_pthread_private_cond_blocked_leave(record, self);
         smros_pthread_cond_waiter_leave(record, self);
-        smros_pthread_private_cond_blocked_leave(record);
         smros_pthread_private_cond_user_leave(record);
         (void)pthread_setcancelstate(old_cancel_state, NULL);
         return unlock_result;
@@ -4263,8 +4456,8 @@ static int smros_pthread_private_cond_wait_common(
     int waiter_registered = 1;
     for (;;) {
         if (smros_current_pthread_cancel_requested()) {
+            smros_pthread_private_cond_blocked_leave(record, self);
             smros_pthread_cond_waiter_leave(record, self);
-            smros_pthread_private_cond_blocked_leave(record);
             smros_pthread_private_cond_user_leave(record);
             waiter_registered = 0;
             int cancel_lock_result = pthread_mutex_lock(mutex);
@@ -4281,18 +4474,14 @@ static int smros_pthread_private_cond_wait_common(
                 break;
             }
             (void)pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-            (void)__sync_add_and_fetch(&record->users, 1);
-            (void)__sync_add_and_fetch(&record->waiters, 1);
             if (!smros_pthread_cond_waiter_enter(record, self)) {
-                smros_pthread_private_cond_blocked_leave(record);
-                smros_pthread_private_cond_user_leave(record);
                 result = EAGAIN;
                 break;
             }
             waiter_registered = 1;
             continue;
         }
-        if (smros_pthread_private_cond_consume_wakeup(record)) {
+        if (smros_pthread_private_cond_consume_wakeup(record, self)) {
             break;
         }
         if (timed) {
@@ -4305,7 +4494,7 @@ static int smros_pthread_private_cond_wait_common(
                 )
             ) {
                 result = clock_error == 0 ? ETIMEDOUT : clock_error;
-                smros_pthread_private_cond_blocked_leave(record);
+                smros_pthread_private_cond_blocked_leave(record, self);
                 break;
             }
         }
@@ -4317,6 +4506,13 @@ static int smros_pthread_private_cond_wait_common(
         smros_pthread_private_cond_user_leave(record);
     }
     int lock_result = pthread_mutex_lock(mutex);
+    smros_pthread_diag_state(
+        "private-cond-wait-exit",
+        record->cond,
+        (uint32_t)result,
+        (uint32_t)lock_result,
+        __sync_fetch_and_add(&record->waiters, 0)
+    );
     if (result == 0 && lock_result != 0) {
         result = lock_result;
     }
@@ -4344,12 +4540,29 @@ static int smros_pthread_private_cond_wake(
         smros_unlock_pthread_cond_records();
         return 0;
     }
-    if (broadcast) {
-        record->wakeups = waiters;
-    } else if (record->wakeups < waiters) {
-        record->wakeups++;
+    uint32_t marked = 0;
+    for (size_t index = 0; index < SMROS_PTHREAD_COND_RECORDS; index++) {
+        smros_pthread_cond_waiter_record *waiter =
+            &smros_pthread_cond_waiter_records[index];
+        if (
+            waiter->active &&
+            waiter->record == record &&
+            !waiter->woken
+        ) {
+            waiter->woken = 1;
+            marked++;
+            if (!broadcast) {
+                break;
+            }
+        }
+    }
+    if (marked > 0) {
+        record->wakeups += marked;
     }
     smros_unlock_pthread_cond_records();
+    if (marked == 0) {
+        return 0;
+    }
     if (broadcast) {
         smros_pthread_private_cond_complete_handoff(record);
     } else {

@@ -2792,6 +2792,8 @@ fn posix_test_preloads_smros_compat_runtime_without_affecting_shell_run() {
     assert!(posix.contains("LD_PRELOAD=/shared/posixtest/lib/libsmros-posix-compat.so"));
     assert!(posix.contains("const POSIX_COMPAT_REGULAR_USER_ENV: &str"));
     assert!(posix.contains("fn requires_regular_user(test_id: &str) -> bool"));
+    assert!(posix.contains("conformance/interfaces/mlock/speculative/12-1.c"));
+    assert!(posix.contains("conformance/interfaces/mlockall/speculative/15-1.c"));
     let launch_start = posix
         .find("fn launch_current_test(")
         .expect("POSIX launch loop");
@@ -2830,6 +2832,30 @@ fn smros_pthread_create_yields_after_publishing_child() {
 }
 
 #[test]
+fn smros_private_mutex_unlock_clears_metadata_before_native_release() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let compat = std::fs::read_to_string(
+        repository.join("scripts/posix/runtime/smros_posix_compat.c"),
+    )
+    .expect("read POSIX compatibility runtime");
+    let unlock_start = compat
+        .find("int pthread_mutex_unlock(")
+        .expect("pthread_mutex_unlock interposer");
+    let unlock = braced_body(&compat[unlock_start..]);
+    let clear = unlock
+        .find("smros_note_pthread_mutex_unlock(mutex);")
+        .expect("unlock must clear side-table ownership");
+    let native = unlock
+        .find("int result = target(mutex);")
+        .expect("unlock must call the native mutex implementation");
+    let restore = unlock
+        .find("smros_note_pthread_mutex_lock(mutex, pthread_self());")
+        .expect("unlock must restore metadata after a failed native release");
+    assert!(clear < native);
+    assert!(native < restore);
+}
+
+#[test]
 fn smros_riscv_pthread_create_defers_explicit_fifo_startup() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let compat = std::fs::read_to_string(
@@ -2842,6 +2868,10 @@ fn smros_riscv_pthread_create_defers_explicit_fifo_startup() {
         "runtime must be able to defer explicit scheduling attributes"
     );
     assert!(
+        compat.contains("smros_pthread_attr_setschedpolicy_fn"),
+        "runtime must be able to give a child a neutral startup policy"
+    );
+    assert!(
         compat.contains("smros_riscv_pthread_sched_deferral"),
         "RISC-V pthread startup scheduling deferral state is missing"
     );
@@ -2850,24 +2880,85 @@ fn smros_riscv_pthread_create_defers_explicit_fifo_startup() {
         .expect("pthread_create interposer");
     let create = braced_body(&compat[create_start..]);
     let defer = create
-        .find("PTHREAD_INHERIT_SCHED")
-        .expect("pthread_create must temporarily inherit the parent schedule");
+        .find("SCHED_OTHER")
+        .expect("pthread_create must temporarily use a neutral startup policy");
     let launch = create
         .find("target(thread, effective_attr")
         .expect("pthread_create libc launch");
     let restore = create
         .find("set_inherit((pthread_attr_t *)effective_attr, PTHREAD_EXPLICIT_SCHED)")
         .expect("pthread_create must restore the caller's scheduling attribute");
-    let apply = create
-        .find("SYS_sched_setscheduler")
-        .expect("pthread_create must apply the requested policy after launch");
+    let publish = create
+        .find("context->creator_returned = 1")
+        .expect("pthread_create must release the child after libc returns");
     assert!(defer < launch);
     assert!(launch < restore);
-    assert!(restore < apply);
+    assert!(restore < publish);
+    let trampoline_start = compat
+        .find("static void *smros_pthread_start_trampoline")
+        .expect("pthread startup trampoline");
+    let trampoline = braced_body(&compat[trampoline_start..]);
+    assert!(trampoline.contains("context->creator_returned"));
+    let handoff = trampoline
+        .find("startup_pause")
+        .expect("child must give the creator a bounded startup handoff");
+    let apply = trampoline
+        .find("SYS_sched_setscheduler")
+        .expect("child must apply the requested scheduler after the handoff");
+    assert!(handoff < apply);
+    assert!(
+        apply < trampoline.len(),
+        "child must apply the requested scheduler after the creator returns"
+    );
     assert!(
         compat.contains("record->kernel_tid = existing_kernel_tid"),
         "publishing the parent-side record must preserve the child kernel TID"
     );
+}
+
+#[test]
+fn smros_riscv_pthread_join_poll_blocks_for_lower_priority_children() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let compat = std::fs::read_to_string(
+        repository.join("scripts/posix/runtime/smros_posix_compat.c"),
+    )
+    .expect("read POSIX compatibility runtime");
+    let join_start = compat
+        .find("int pthread_join(")
+        .expect("pthread_join interposer");
+    let join = braced_body(&compat[join_start..]);
+    assert!(
+        join.contains("#if defined(__riscv)") && join.contains("nanosleep"),
+        "RISC-V pthread_join must block while polling a lower-priority child"
+    );
+    assert!(
+        join.contains("smros_find_pthread_sched_record"),
+        "RISC-V pthread_join must observe SMROS child-exit records when GNU tryjoin is absent"
+    );
+}
+
+#[test]
+fn smros_riscv_pthread_create_yields_for_default_children() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let compat = std::fs::read_to_string(
+        repository.join("scripts/posix/runtime/smros_posix_compat.c"),
+    )
+    .expect("read POSIX compatibility runtime");
+    let create_start = compat
+        .find("int pthread_create(")
+        .expect("pthread_create interposer");
+    let create = braced_body(&compat[create_start..]);
+    let publish = create
+        .find("smros_remember_pthread_sched_record")
+        .expect("pthread_create must publish the child scheduling record");
+    let default_gate = create
+        .find("!riscv_sched_deferred && context_policy == SCHED_OTHER")
+        .expect("RISC-V default children must have an explicit scheduling gate");
+    let yield_call = create
+        .find("(void)sched_yield();")
+        .expect("pthread_create must yield after publishing a default child");
+    assert!(publish < default_gate);
+    assert!(default_gate < yield_call);
 }
 
 #[test]
@@ -2954,11 +3045,50 @@ fn smros_private_condition_broadcast_completes_the_polling_handoff() {
 
     assert!(wake.contains("if (broadcast)"));
     assert!(wake.contains("smros_pthread_private_cond_complete_handoff(record);"));
-    assert!(wake.contains("record->wakeups = waiters;"));
+    assert!(wake.contains("record->wakeups += marked;"));
     assert!(handoff.contains("attempt < 8"));
     assert!(handoff.contains("smros_pthread_cond_wait_pause();"));
     assert!(leave.contains("if (record->wakeups > record->waiters)"));
     assert!(leave.contains("record->wakeups = record->waiters;"));
+}
+
+#[test]
+fn smros_private_condition_wake_tokens_belong_to_registered_waiters() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let compat =
+        std::fs::read_to_string(repository.join("scripts/posix/runtime/smros_posix_compat.c"))
+            .expect("read POSIX compatibility runtime");
+    let waiter_start = compat
+        .find("typedef struct {\n    int active;\n    pthread_t thread;\n    smros_pthread_cond_record *record;")
+        .expect("private condition waiter record");
+    let waiter = braced_body(&compat[waiter_start..]);
+    assert!(
+        waiter.contains("int woken;"),
+        "private condition wake state must be tracked per waiter"
+    );
+
+    let consume_start = compat
+        .find("static int smros_pthread_private_cond_consume_wakeup(")
+        .expect("private condition wake consumption helper");
+    let consume_source = &compat[consume_start..];
+    let consume_signature = consume_source
+        .split_once('{')
+        .map(|(signature, _)| signature)
+        .expect("private condition wake consumption signature");
+    let consume = braced_body(&compat[consume_start..]);
+    assert!(
+        consume_signature.contains("pthread_t thread") && consume.contains("waiter->woken"),
+        "wake consumption must select the registering waiter, not a global token"
+    );
+
+    let wake_start = compat
+        .find("static int smros_pthread_private_cond_wake(")
+        .expect("private condition wake helper");
+    let wake = braced_body(&compat[wake_start..]);
+    assert!(
+        wake.contains("waiter->woken = 1") && wake.contains("if (!broadcast)"),
+        "signal and broadcast must mark active waiter records directly"
+    );
 }
 
 #[test]

@@ -895,6 +895,29 @@ impl Scheduler {
             }
         }
 
+        let mut empty = 0usize;
+        let mut ready = 0usize;
+        let mut blocked = 0usize;
+        let mut terminated = 0usize;
+        for thread in &self.threads[1..] {
+            match thread.state {
+                ThreadState::Empty => empty += 1,
+                ThreadState::Ready => ready += 1,
+                ThreadState::Blocked => blocked += 1,
+                ThreadState::Terminated => terminated += 1,
+                ThreadState::Running => {}
+            }
+        }
+        crate::kobj_info!(
+            "scheduler",
+            "thread-slot-exhausted active={} current={} empty={} ready={} blocked={} terminated={}",
+            self.active_threads,
+            self.current_thread.0,
+            empty,
+            ready,
+            blocked,
+            terminated
+        );
         None // No available slots
     }
 

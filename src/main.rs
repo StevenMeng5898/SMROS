@@ -72,6 +72,9 @@ static ALLOC_STATE: SyncUnsafeCell<KernelAllocatorState> =
 static ALLOC_LOCK: AtomicBool = AtomicBool::new(false);
 static ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
 static ALLOC_SCAN_STEPS: AtomicUsize = AtomicUsize::new(0);
+static ALLOC_LOCK_CONTENTION_REPORTS: AtomicUsize = AtomicUsize::new(0);
+static ALLOC_SCAN_REPORTS: AtomicUsize = AtomicUsize::new(0);
+static ALLOC_FREE_INSERT_REPORTS: AtomicUsize = AtomicUsize::new(0);
 const LARGE_ALLOCATION_THRESHOLD: usize = 64 * 1024;
 
 // AArch64 timer interrupts can be observed more than once for the same
@@ -110,11 +113,18 @@ fn allocator_align_up(value: usize, align: usize) -> Option<usize> {
 
 fn allocator_lock() -> AllocIrqGuard {
     let state = kernel_lowlevel::cpu::mask_interrupts();
+    let mut spins = 0usize;
     while ALLOC_LOCK
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
         core::hint::spin_loop();
+        spins = spins.saturating_add(1);
+        if spins == 1_000_000
+            && ALLOC_LOCK_CONTENTION_REPORTS.fetch_add(1, Ordering::Relaxed) < 4
+        {
+            crate::kobj_info!("allocator", "lock-contention spins={}", spins);
+        }
     }
     AllocIrqGuard { state }
 }
@@ -295,8 +305,21 @@ unsafe fn alloc_from_free_list(state: &mut KernelAllocatorState, layout: Layout)
     }
 
     let mut current = state.free_head;
+    let mut scan_steps = 0usize;
     while !current.is_null() {
         ALLOC_SCAN_STEPS.fetch_add(1, Ordering::Relaxed);
+        scan_steps = scan_steps.saturating_add(1);
+        if scan_steps == 100_000
+            && ALLOC_SCAN_REPORTS.fetch_add(1, Ordering::Relaxed) < 4
+        {
+            crate::kobj_info!(
+                "allocator",
+                "free-list-scan-excessive steps={} layout={} align={}",
+                scan_steps,
+                layout.size(),
+                layout.align()
+            );
+        }
         let payload = alloc_from_known_block(state, current, layout);
         if !payload.is_null() {
             return payload;
@@ -327,7 +350,20 @@ unsafe fn insert_free_block(
 
     let mut prev = core::ptr::null_mut();
     let mut current = state.free_head;
+    let mut scan_steps = 0usize;
     while !current.is_null() && (current as usize) < block_start {
+        scan_steps = scan_steps.saturating_add(1);
+        if scan_steps == 10_000
+            && ALLOC_FREE_INSERT_REPORTS.fetch_add(1, Ordering::Relaxed) < 4
+        {
+            crate::kobj_info!(
+                "allocator",
+                "free-list-insert-excessive steps={} block={:#x}",
+                scan_steps,
+                block_start
+            );
+            return;
+        }
         prev = current;
         current = (*current).next;
     }
