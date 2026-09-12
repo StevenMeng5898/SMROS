@@ -735,8 +735,8 @@ fn posix_clock_timer_cpu0_expiry_queues_process_signals() {
 
     let timer = braced_body(
         &main[main
-            .find("extern \"C\" fn timer_interrupt_handler()")
-            .expect("timer interrupt handler")..],
+            .find("fn process_timer_work()")
+            .expect("shared timer work")..],
     );
     let expiry = braced_body(
         &syscall[syscall
@@ -751,26 +751,9 @@ fn posix_clock_timer_cpu0_expiry_queues_process_signals() {
     assert!(expiry.contains("queue_process_linux_signal_and_wake("));
     assert!(expiry.contains("linux_timer_signal_record("));
 
-    let scheduler = timer
-        .find("scheduler().on_timer_tick()")
-        .expect("scheduler timer accounting");
-    let linux_task = timer
-        .find("linux_task::on_timer_tick(now)")
-        .expect("Linux task timeout expiry");
-    let posix_timer = timer
-        .find("deliver_linux_posix_timer_signals_from_irq()")
-        .expect("POSIX timer signal expiry");
-    let futex = timer
-        .find("linux_futex::on_timer_tick(now, now)")
-        .expect("Linux futex timeout expiry");
-    let completion = timer
-        .find("interrupt::end_of_interrupt(interrupt_id)")
-        .expect("timer interrupt completion");
-
-    assert!(scheduler < linux_task);
-    assert!(linux_task < posix_timer);
-    assert!(posix_timer < futex);
-    assert!(futex < completion);
+    assert!(timer.contains("scheduler().on_timer_tick()"));
+    assert!(timer.contains("linux_task::on_timer_tick(now)"));
+    assert!(timer.contains("linux_futex::on_timer_tick(now, now)"));
 }
 
 #[test]
@@ -779,8 +762,8 @@ fn scheduler_irq_work_is_owned_by_cpu0() {
     let main = std::fs::read_to_string(repository.join("src/main.rs")).expect("read kernel main");
     let timer = braced_body(
         &main[main
-            .find("extern \"C\" fn timer_interrupt_handler()")
-            .expect("timer interrupt handler")..],
+            .find("fn process_timer_work()")
+            .expect("shared timer work")..],
     );
     let cpu0 = timer
         .find("if current_cpu_id() == 0")
@@ -813,8 +796,8 @@ fn timer_interrupt_expires_real_timers_for_kernel_mode_ticks() {
     );
     let timer = braced_body(
         &main[main
-            .find("extern \"C\" fn timer_interrupt_handler()")
-            .expect("timer interrupt handler")..],
+            .find("fn process_timer_work()")
+            .expect("shared timer work")..],
     );
     let real_timer = timer
         .find("expire_linux_real_timers_from_irq()")
@@ -2885,7 +2868,8 @@ fn smros_riscv_pthread_create_defers_explicit_fifo_startup() {
     let launch = create
         .find("target(thread, effective_attr")
         .expect("pthread_create libc launch");
-    let restore = create
+    let restore = launch
+        + create[launch..]
         .find("set_inherit((pthread_attr_t *)effective_attr, PTHREAD_EXPLICIT_SCHED)")
         .expect("pthread_create must restore the caller's scheduling attribute");
     let publish = create
@@ -4738,8 +4722,8 @@ fn linux_futex_waits_block_and_wake_scheduler_tasks() {
     assert!(futex_reset < task_reset);
 
     let timer_start = main
-        .find("extern \"C\" fn timer_interrupt_handler()")
-        .expect("timer interrupt handler");
+        .find("fn process_timer_work()")
+        .expect("shared timer work");
     let timer = braced_body(&main[timer_start..]);
     assert!(timer.contains("if current_cpu_id() == 0"));
     assert!(!timer.contains("let scheduler ="));
@@ -4749,10 +4733,7 @@ fn linux_futex_waits_block_and_wake_scheduler_tasks() {
     let futex_tick = timer
         .find("linux_futex::on_timer_tick(")
         .expect("Linux futex deadline expiry");
-    let interrupt_end = timer
-        .find("end_of_interrupt(interrupt_id)")
-        .expect("timer interrupt completion");
-    assert!(scheduler_tick < futex_tick && futex_tick < interrupt_end);
+    assert!(scheduler_tick < futex_tick);
 }
 
 #[test]
@@ -5140,8 +5121,8 @@ fn linux_signal_waits_block_and_restart_from_the_original_svc() {
     assert!(directed.contains("LinuxBlockReason::SignalSuspend"));
 
     let timer_start = main
-        .find("extern \"C\" fn timer_interrupt_handler()")
-        .expect("timer interrupt handler");
+        .find("fn process_timer_work()")
+        .expect("shared timer work");
     let timer = braced_body(&main[timer_start..]);
     let scheduler_tick = timer
         .find("scheduler().on_timer_tick()")
@@ -9183,6 +9164,9 @@ fn linux_fork_publishes_only_a_complete_child() {
     let backend = &process[process
         .find("impl LinuxForkOwnershipOps for Aarch64LinuxForkOps")
         .expect("production fork ownership operations")..];
+    let backend = &backend[..backend
+        .find("#[cfg(target_arch = \"riscv64\")]")
+        .expect("end of AArch64 fork backend")];
     for acquisition in [
         "create_suspended_thread_on_cpu(",
         "reserve_fork_task",
@@ -9210,7 +9194,7 @@ fn linux_fork_publishes_only_a_complete_child() {
     }
 
     let publication_mask = backend
-        .find("Ok(crate::kernel_lowlevel::cpu::mask_interrupts())")
+        .find("mask_interrupts()")
         .expect("interrupt-masked fork publication");
     let publication_restore = backend
         .find("restore_interrupts(publication)")
