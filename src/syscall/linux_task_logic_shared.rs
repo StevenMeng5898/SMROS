@@ -1009,6 +1009,7 @@ impl LinuxSignalStack {
 }
 
 #[cfg(not(target_arch = "riscv64"))]
+#[allow(dead_code)]
 pub(crate) const LINUX_AARCH64_UCONTEXT_BYTES: usize = 4560;
 pub(crate) const LINUX_AARCH64_UCONTEXT_CORE_BYTES: usize = 464;
 

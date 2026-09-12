@@ -10,7 +10,9 @@ include!("linux_task_logic_shared.rs");
 include!("linux_runtime_lock_shared.rs");
 
 pub(crate) const LINUX_TASK_LIMIT: usize = thread::MAX_THREADS;
+#[cfg(target_arch = "riscv64")]
 const LINUX_SCHED_FIFO: usize = 1;
+#[cfg(target_arch = "riscv64")]
 const LINUX_SCHED_RR: usize = 2;
 
 struct LinuxTaskRuntime {
