@@ -1,0 +1,13 @@
+diff --git a/conformance/interfaces/pthread_equal/2-1.c b/conformance/interfaces/pthread_equal/2-1.c
+index 2e44f8c..0000000 100644
+--- a/conformance/interfaces/pthread_equal/2-1.c
++++ b/conformance/interfaces/pthread_equal/2-1.c
+@@ -77,7 +77,7 @@
+ /***********************************    Test cases  *****************************************/
+ /********************************************************************************************/
+ 
+-char do_it=1;
++volatile sig_atomic_t do_it=1;
+ unsigned long count_ope=0;
+ #ifdef WITH_SYNCHRO
+ sem_t semsig1;

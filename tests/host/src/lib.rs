@@ -1256,6 +1256,25 @@ mod syscall_logic {
     }
 
     #[test]
+    fn posix_timer_precision_deadline_stops_while_notification_is_pending() {
+        let mut timer = LinuxPosixTimerCore::new(13, LinuxPosixClock::Monotonic, 18, 0);
+        timer
+            .arm(
+                false,
+                100,
+                LinuxPosixTimerSpec {
+                    interval: 2,
+                    value: 30,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(timer.next_hardware_deadline(0, 10), Some(130));
+        assert!(timer.expire(130, 0));
+        assert_eq!(timer.next_hardware_deadline(0, 10), None);
+    }
+
+    #[test]
     fn posix_timer_batches_missed_intervals_into_overrun_count() {
         let mut timer = LinuxPosixTimerCore::new(11, LinuxPosixClock::Monotonic, 18, 0);
         timer

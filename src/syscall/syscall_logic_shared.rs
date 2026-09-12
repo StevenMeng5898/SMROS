@@ -184,7 +184,6 @@ pub(crate) const fn linux_clock_resolution_nanoseconds() -> i64 {
 /// Report a non-zero POSIX timer value at the granularity at which the
 /// platform can observe expiry. Rounding upward never reports a timer as
 /// expired early and avoids exposing sub-resolution truncation to callers.
-#[cfg(target_arch = "riscv64")]
 pub(crate) const fn linux_posix_timer_remaining_rounded(
     remaining_nanoseconds: u64,
     resolution_nanoseconds: u64,
@@ -456,6 +455,7 @@ pub(crate) struct LinuxPosixTimerCore {
     interval: u64,
     notification_pending: bool,
     overrun: u64,
+    precision_deadline_consumed: bool,
 }
 
 impl LinuxPosixTimerCore {
@@ -475,6 +475,7 @@ impl LinuxPosixTimerCore {
             interval: 0,
             notification_pending: false,
             overrun: 0,
+            precision_deadline_consumed: false,
         }
     }
 
@@ -513,6 +514,7 @@ impl LinuxPosixTimerCore {
         self.interval = spec.interval;
         self.notification_pending = false;
         self.overrun = 0;
+        self.precision_deadline_consumed = false;
         Some(())
     }
 
@@ -532,6 +534,35 @@ impl LinuxPosixTimerCore {
 
     pub(crate) const fn overrun(&self) -> u64 {
         self.overrun
+    }
+
+    pub(crate) fn next_hardware_deadline(
+        &self,
+        realtime_offset_nanoseconds: i64,
+        tick_nanoseconds: u64,
+    ) -> Option<u64> {
+        if self.notification_pending {
+            return None;
+        }
+        if self.interval != 0
+            && self.interval < tick_nanoseconds
+            && self.precision_deadline_consumed
+        {
+            return None;
+        }
+        let deadline = self.deadline?;
+        match self.deadline_clock {
+            LinuxPosixClock::Monotonic => Some(deadline),
+            LinuxPosixClock::Realtime => {
+                let monotonic = i128::from(deadline) - i128::from(realtime_offset_nanoseconds);
+                if monotonic <= 0 {
+                    Some(0)
+                } else {
+                    u64::try_from(monotonic).ok()
+                }
+            }
+            LinuxPosixClock::ProcessCpu | LinuxPosixClock::ThreadCpu => None,
+        }
     }
 
     pub(crate) fn acknowledge_notification(&mut self) {
@@ -554,6 +585,9 @@ impl LinuxPosixTimerCore {
                 .and_then(|periods| periods.checked_add(1))
                 .unwrap_or(u64::MAX)
         };
+        if self.interval != 0 {
+            self.precision_deadline_consumed = true;
+        }
         if self.interval == 0 {
             self.deadline = None;
         } else {

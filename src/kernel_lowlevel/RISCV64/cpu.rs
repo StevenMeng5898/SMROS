@@ -36,6 +36,31 @@ pub fn set_trap_stack_for_thread(thread_id: usize) {
     }
 }
 
+/// Return the scheduler-thread slot that owns a saved trap frame.
+///
+/// Each logical thread has a dedicated trap stack, so this remains valid even
+/// when a syscall blocked and left the scheduler's current-thread marker stale
+/// while a user frame was already running on another stack.
+pub fn trap_stack_thread_id(saved_frame: usize) -> Option<usize> {
+    let base = core::ptr::addr_of!(RISCV_TRAP_STACKS) as usize;
+    let end = base.checked_add(
+        crate::kernel_lowlevel::RISCV_MAX_THREADS
+            .checked_mul(RISCV_TRAP_STACK_SIZE)?,
+    )?;
+    let frame_end = saved_frame.checked_add(RISCV_TRAP_FRAME_SIZE)?;
+    if saved_frame < base || frame_end > end {
+        return None;
+    }
+    let offset = saved_frame.checked_sub(base)?;
+    let slot = offset / RISCV_TRAP_STACK_SIZE;
+    let slot_start = base.checked_add(slot.checked_mul(RISCV_TRAP_STACK_SIZE)?)?;
+    let slot_end = slot_start.checked_add(RISCV_TRAP_STACK_SIZE)?;
+    (slot < crate::kernel_lowlevel::RISCV_MAX_THREADS
+        && saved_frame >= slot_start
+        && frame_end <= slot_end)
+    .then_some(slot)
+}
+
 #[inline(always)]
 pub fn user_address_space_active() -> bool {
     USER_ADDRESS_SPACE_ACTIVE.load(Ordering::Acquire)

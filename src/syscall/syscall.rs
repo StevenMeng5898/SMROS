@@ -42,9 +42,6 @@ use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::sync::atomic::{compiler_fence, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
-#[cfg(target_arch = "riscv64")]
-static POSIX_CLONE_DIAG_COUNT: AtomicUsize = AtomicUsize::new(0);
-
 use super::address_logic::{
     checked_end, fixed_linux_mmap_request_ok as shared_fixed_linux_mmap_request_ok,
     page_aligned as shared_page_aligned,
@@ -70,7 +67,7 @@ use super::linux_task::{
     LinuxRestartBlock, LinuxSignalDisposition, LinuxSignalFrame, LinuxSignalStack, LinuxSignalWait,
     LinuxSignalWaitOutcome, LinuxSleepOutcome, LinuxSleepWait, LinuxTaskSchedParam,
     CLONE_CHILD_CLEARTID, CLONE_CHILD_SETTID, CLONE_FILES, CLONE_SIGHAND, CLONE_THREAD,
-    CLONE_VM, LINUX_AARCH64_UCONTEXT_BYTES, LINUX_SIGNAL_INFO_BYTES,
+    CLONE_VM, LINUX_SIGNAL_INFO_BYTES, LINUX_SIGNAL_UCONTEXT_BYTES,
 };
 use crate::kernel_lowlevel::memory::{process_manager, PAGE_SIZE};
 use crate::kernel_objects::channel;
@@ -631,6 +628,12 @@ const LINUX_SA_ONSTACK: u64 = 0x0800_0000;
 const LINUX_SA_RESETHAND: u64 = 0x8000_0000;
 const LINUX_NANOS_PER_SECOND: u64 = 1_000_000_000;
 const LINUX_SIGNAL_TICK_NANOS: u64 = 10_000_000;
+// RISC-V uses the SBI compare for precision wakeups. Keep waits through the
+// hybrid range on that platform in the precision path so a coarse 100 Hz wake
+// cannot consume the entire tail and return a sleep late by multiple ticks.
+#[cfg(target_arch = "riscv64")]
+const LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS: u64 = LINUX_HYBRID_RELATIVE_SLEEP_MAX_NANOS;
+#[cfg(not(target_arch = "riscv64"))]
 const LINUX_HIGH_RES_RELATIVE_SLEEP_MAX_NANOS: u64 = 100_000_000;
 const LINUX_HYBRID_RELATIVE_SLEEP_MAX_NANOS: u64 = 2_100_000_000;
 const LINUX_HYBRID_RELATIVE_SLEEP_MARGIN_NANOS: u64 = 50_000_000;
@@ -5337,7 +5340,7 @@ fn install_linux_signal_handler(
     };
 
     let user_frame_bytes = LINUX_SIGNAL_INFO_BYTES
-        .checked_add(LINUX_AARCH64_UCONTEXT_BYTES)
+        .checked_add(LINUX_SIGNAL_UCONTEXT_BYTES)
         .ok_or(SysError::EFAULT)?;
     let frame_address = usize::try_from(frame_sp).map_err(|_| SysError::EFAULT)?;
     if !linux_signal_user_range_writable(frame_address, user_frame_bytes) {
@@ -5350,7 +5353,7 @@ fn install_linux_signal_handler(
             .copy_from_slice(&(pending.signum as i32).to_ne_bytes());
     }
     linux_copy_to_user(info as usize, &signal_info)?;
-    linux_zero_user(context as usize, LINUX_AARCH64_UCONTEXT_BYTES)?;
+    linux_zero_user(context as usize, LINUX_SIGNAL_UCONTEXT_BYTES)?;
     let context_core = linux_aarch64_ucontext_core(
         context_fault_address,
         saved_registers,
@@ -5434,6 +5437,7 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> LinuxSignalDe
     while let Some(deliverable) = take_unblocked_linux_signal() {
         let pending = deliverable.record;
         let signum = pending.signum;
+        #[cfg(not(target_arch = "riscv64"))]
         crate::kobj_info!(
             "posix-timer",
             "deliver signal signum={} saved_frame={:#x}",
@@ -5666,6 +5670,12 @@ pub extern "C" fn complete_linux_signal_syscall_return(saved_regs: usize) {
     if saved_regs == 0 {
         return;
     }
+    #[cfg(target_arch = "riscv64")]
+    crate::reconcile_riscv_trap_owner(saved_regs);
+    #[cfg(target_arch = "riscv64")]
+    crate::service_deferred_riscv_timer_work();
+    #[cfg(target_arch = "riscv64")]
+    crate::service_deferred_riscv_scheduler_tick();
     let sigreturn_requested =
         linux_task::with_current_signal_state(|signal_state| signal_state.sigreturn_requested)
             .unwrap_or(false);
@@ -5758,6 +5768,19 @@ pub fn expire_linux_real_timers_from_irq() {
             LinuxPendingSignal::standard(LINUX_SIGALRM),
         );
     }
+}
+
+pub fn next_linux_posix_timer_deadline() -> Option<u64> {
+    let offset = LINUX_REALTIME_OFFSET_NANOS.load(Ordering::SeqCst);
+    with_initialized_memory_state(|state| {
+        state
+            .linux_process_resources
+            .iter()
+            .flat_map(|resources| resources.posix_timers.iter())
+            .filter_map(|timer| timer.next_hardware_deadline(offset, LINUX_SIGNAL_TICK_NANOS))
+            .min()
+    })
+    .flatten()
 }
 
 #[no_mangle]
@@ -11219,6 +11242,18 @@ pub fn sys_clone(
     child_tid: usize,
 ) -> SysResult {
     info!("clone: flags={:#x}, newsp={:#x}", flags, newsp);
+    #[cfg(target_arch = "riscv64")]
+    crate::kobj_info!(
+        "posix-clone",
+        "sys_clone flags={:#x} newsp={:#x} parent_tid={:#x} tls={:#x} child_tid={:#x} current={} pid={}",
+        flags,
+        newsp,
+        parent_tid,
+        newtls,
+        child_tid,
+        scheduler::scheduler().current().0,
+        linux_process::current_pid().unwrap_or(0)
+    );
     if flags & CLONE_THREAD == 0 {
         if flags & (CLONE_VM | CLONE_FILES | CLONE_SIGHAND) != 0 {
             return Err(SysError::ENOSYS);
@@ -11278,33 +11313,12 @@ pub fn sys_clone(
         if !linux_clone_tid_destinations_valid(&request) {
             return Err(SysError::EFAULT);
         }
-        #[cfg(target_arch = "riscv64")]
-        let clone_diag = POSIX_CLONE_DIAG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        #[cfg(target_arch = "riscv64")]
-        if clone_diag >= 195 {
-            crate::kobj_info!(
-                "posix-clone",
-                "diag n={} stage=validated current={}",
-                clone_diag,
-                scheduler::scheduler().current().0
-            );
-        }
-
         let scheduler_id = match scheduler::scheduler().create_suspended_thread_on_cpu(
             linux_task::linux_clone_child_entry,
             "linux_thread",
             0,
         ) {
             Some(id) => {
-                #[cfg(target_arch = "riscv64")]
-                if clone_diag >= 195 {
-                    crate::kobj_info!(
-                        "posix-clone",
-                        "diag n={} stage=scheduler-created id={}",
-                        clone_diag,
-                        id.0
-                    );
-                }
                 id
             }
             None => {
@@ -11318,15 +11332,6 @@ pub fn sys_clone(
         };
         let reservation = match linux_task::reserve_clone(scheduler_id, request, context) {
             Ok(reservation) => {
-                #[cfg(target_arch = "riscv64")]
-                if clone_diag >= 195 {
-                    crate::kobj_info!(
-                        "posix-clone",
-                        "diag n={} stage=reserved tid={}",
-                        clone_diag,
-                        reservation.tid
-                    );
-                }
                 reservation
             }
             Err(error) => {

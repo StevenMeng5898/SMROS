@@ -1,0 +1,29 @@
+diff --git a/conformance/interfaces/sigpause/3-1.c b/conformance/interfaces/sigpause/3-1.c
+index b16fc5c..2ce7918 100644
+--- a/conformance/interfaces/sigpause/3-1.c
++++ b/conformance/interfaces/sigpause/3-1.c
+@@ -29,8 +29,8 @@
+ #define INTHREAD 0
+ #define INMAIN 1
+ 
+-int result = 2;
+-int sem = INMAIN;
++volatile sig_atomic_t result = 2;
++volatile sig_atomic_t sem = INMAIN;
+ 
+ void handler() {
+ 	printf("signal was called\n");
+@@ -79,12 +79,12 @@ int main()
+ 
+ 	sleep(1);
+ 
++	sem = INTHREAD;
+ 	if(pthread_kill(new_th, SIGTOTEST) != 0) 
+ 	{
+ 		printf("Test UNRESOLVED: Couldn't send signal to thread\n");
+ 		return PTS_UNRESOLVED;
+ 	}
+ 
+-	sem = INTHREAD;
+ 	while (sem == INTHREAD)
+ 		sleep(1);

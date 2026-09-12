@@ -10,6 +10,8 @@ include!("linux_task_logic_shared.rs");
 include!("linux_runtime_lock_shared.rs");
 
 pub(crate) const LINUX_TASK_LIMIT: usize = thread::MAX_THREADS;
+const LINUX_SCHED_FIFO: usize = 1;
+const LINUX_SCHED_RR: usize = 2;
 
 struct LinuxTaskRuntime {
     tasks: LinuxTaskTable<LINUX_TASK_LIMIT>,
@@ -119,6 +121,24 @@ pub(crate) fn sched_param(
     scheduler_thread: usize,
 ) -> Option<LinuxTaskSchedParam> {
     with_runtime(|runtime| runtime.tasks.sched_param(tid, scheduler_thread))
+}
+
+#[cfg(target_arch = "riscv64")]
+pub(crate) fn current_root_scheduler_is_realtime() -> bool {
+    let current_scheduler = scheduler::scheduler().current().0;
+    let Ok(task) = current_task() else {
+        return false;
+    };
+    let Some(process) = super::linux_process::by_pid(task.tgid) else {
+        return false;
+    };
+    if process.root_scheduler_thread != current_scheduler {
+        return false;
+    }
+    matches!(
+        sched_param(task.tid, task.scheduler_thread).map(|param| param.policy),
+        Some(policy) if policy == LINUX_SCHED_FIFO || policy == LINUX_SCHED_RR
+    )
 }
 
 pub(crate) fn set_sched_param(
@@ -784,9 +804,13 @@ pub(crate) fn retire_launch_descendants(root_tgid: usize) {
 
 pub(crate) fn finish_current_without_el0_return() -> ! {
     scheduler::scheduler().finish_current_without_stack_free();
+    #[cfg(target_arch = "riscv64")]
+    crate::kernel_lowlevel::cpu::unmask_timer_interrupts();
     scheduler::schedule();
     loop {
         crate::kernel_lowlevel::cpu::wait_for_interrupt();
+        #[cfg(target_arch = "riscv64")]
+        crate::service_deferred_riscv_timer_work();
         scheduler::schedule();
     }
 }

@@ -296,6 +296,15 @@ impl LinuxTaskCore {
 pub(crate) const LINUX_MAX_SIGNAL: usize = smros_linux_max_signal_body!();
 pub(crate) const LINUX_REALTIME_SIGNAL_MIN: usize = 32;
 pub(crate) const LINUX_SIGNAL_INFO_BYTES: usize = 128;
+// The internal signal snapshot is architecture-neutral, but the user-visible
+// ucontext must fit on the POSIX minimum thread stack. RISC-V's Linux
+// ucontext is substantially smaller than AArch64's 4.5 KiB register context;
+// using the AArch64 size here causes two nested signals to cross the guard page
+// of a 16 KiB pthread stack.
+#[cfg(target_arch = "riscv64")]
+pub(crate) const LINUX_SIGNAL_UCONTEXT_BYTES: usize = 512;
+#[cfg(not(target_arch = "riscv64"))]
+pub(crate) const LINUX_SIGNAL_UCONTEXT_BYTES: usize = 4560;
 pub(crate) const LINUX_RT_QUEUE_LIMIT: usize = 64;
 pub(crate) const LINUX_SIGNAL_FRAME_LIMIT: usize = 16;
 pub(crate) const LINUX_SIGCONT_SIGNAL: usize = 18;
@@ -999,6 +1008,7 @@ impl LinuxSignalStack {
     };
 }
 
+#[cfg(not(target_arch = "riscv64"))]
 pub(crate) const LINUX_AARCH64_UCONTEXT_BYTES: usize = 4560;
 pub(crate) const LINUX_AARCH64_UCONTEXT_CORE_BYTES: usize = 464;
 
@@ -1028,7 +1038,7 @@ pub(crate) fn linux_aarch64_ucontext_core(
 }
 
 pub(crate) fn linux_aarch64_signal_user_frame(stack_top: u64) -> Option<(u64, u64, u64)> {
-    let frame_bytes = (LINUX_SIGNAL_INFO_BYTES + LINUX_AARCH64_UCONTEXT_BYTES) as u64;
+    let frame_bytes = (LINUX_SIGNAL_INFO_BYTES + LINUX_SIGNAL_UCONTEXT_BYTES) as u64;
     let frame_base = stack_top.checked_sub(frame_bytes)? & !0xf;
     Some((
         frame_base,

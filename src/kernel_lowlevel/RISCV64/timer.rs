@@ -78,7 +78,20 @@ pub fn arm_at_nanoseconds(deadline: u64) {
         return;
     }
     let current = read_time();
-    let scaled = (deadline as u128).saturating_mul(frequency as u128);
+    // Reserve several scheduler periods to re-arm the exact compare after a
+    // periodic tick. Without this guard, a late periodic interrupt can pass
+    // the exact deadline before the precision compare is programmed.
+    let current_nanoseconds =
+        lowlevel_logic::timer_counter_nanoseconds(current, frequency);
+    let tick_period = TICK_PERIOD.load(Ordering::Relaxed);
+    let tick_nanoseconds = lowlevel_logic::timer_counter_nanoseconds(tick_period, frequency);
+    let precision_guard = tick_nanoseconds.saturating_mul(5);
+    let precision_deadline = if deadline.saturating_sub(current_nanoseconds) > precision_guard {
+        deadline.saturating_sub(precision_guard)
+    } else {
+        deadline
+    };
+    let scaled = (precision_deadline as u128).saturating_mul(frequency as u128);
     let target = scaled
         .saturating_add(999_999_999)
         / 1_000_000_000u128;

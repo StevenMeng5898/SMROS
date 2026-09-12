@@ -1120,6 +1120,7 @@ clock_t clock(void) {
 }
 
 int sched_yield(void) {
+    __sync_synchronize();
     smros_sched_yield_fn target = smros_sched_yield_target;
     if (target == NULL) {
         target = (smros_sched_yield_fn)smros_resolve_symbol("sched_yield");
@@ -1128,7 +1129,9 @@ int sched_yield(void) {
     if (target == NULL) {
         return -1;
     }
-    return target();
+    int result = target();
+    __sync_synchronize();
+    return result;
 }
 
 static int smros_pcts_long_nanosleep_validation_case(
@@ -1878,18 +1881,12 @@ int pthread_create(
             if (get_inherit(effective_attr, &inherit) != 0) {
                 inherit = PTHREAD_EXPLICIT_SCHED;
             }
-            if (
-                inherit == PTHREAD_EXPLICIT_SCHED &&
-                set_policy((pthread_attr_t *)effective_attr, SCHED_OTHER) == 0
+            if (set_inherit((pthread_attr_t *)effective_attr, PTHREAD_EXPLICIT_SCHED) == 0
+                && set_policy((pthread_attr_t *)effective_attr, SCHED_OTHER) == 0
             ) {
                 riscv_sched_attr_modified = 1;
                 struct sched_param neutral_param = { .sched_priority = 0 };
-                if (
-                    set_param(
-                        (pthread_attr_t *)effective_attr,
-                        &neutral_param
-                    ) == 0
-                ) {
+                if (set_param((pthread_attr_t *)effective_attr, &neutral_param) == 0) {
                     __sync_add_and_fetch(&smros_riscv_pthread_sched_deferral, 1);
                     riscv_sched_deferred = 1;
                     context->sched_deferred = 1;
@@ -2045,11 +2042,13 @@ int pthread_join(pthread_t thread, void **retval) {
                 if (result == 0) {
                     smros_remember_pthread_joined(thread);
                 }
+#if defined(__riscv)
                 smros_riscv_join_priority_guard_leave(
                     join_priority_guard_active,
                     join_priority_guard_policy,
                     &join_priority_guard_param
                 );
+#endif
                 return result;
             }
 #if defined(__riscv)

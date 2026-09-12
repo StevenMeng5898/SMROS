@@ -10,3 +10,5 @@ replace-defective-fork-11-record-lock-test.patch
 fix-pthread-join-6-3-shutdown-race.patch
 fix-difftime-sleep-boundary.patch
 fix-scheduler-permission-parent-tests.patch
+fix-pthread-equal-stop-flag.patch
+fix-sigpause-thread-completion-race.patch

@@ -1537,7 +1537,7 @@ fn synchronous_memory_fault_delivery_is_immediate_complete_and_fail_closed() {
     for required in [
         "linux_aarch64_signal_user_frame(",
         "linux_signal_user_range_writable(",
-        "linux_zero_user(context as usize, LINUX_AARCH64_UCONTEXT_BYTES)",
+        "linux_zero_user(context as usize, LINUX_SIGNAL_UCONTEXT_BYTES)",
         "linux_aarch64_ucontext_core(",
         "linux_copy_to_user(context as usize, &context_core)",
         "signal_state.push_frame(frame)",
@@ -1550,7 +1550,7 @@ fn synchronous_memory_fault_delivery_is_immediate_complete_and_fail_closed() {
             "missing signal-frame step {required}"
         );
     }
-    assert!(!installer.contains("[u8; LINUX_AARCH64_UCONTEXT_BYTES]"));
+    assert!(!installer.contains("[u8; LINUX_SIGNAL_UCONTEXT_BYTES]"));
     assert!(!syscall.contains("LINUX_SIGNAL_INFO_STORAGE_BYTES"));
     assert!(!syscall.contains("LINUX_SIGNAL_INFO_OFFSET"));
 
@@ -5621,6 +5621,180 @@ fn riscv_timer_signal_delivery_preserves_a_rewritten_trap_frame() {
     let delivery = braced_body(&syscall[delivery_start..]);
     assert!(syscall[delivery_start..].contains(") -> bool"));
     assert!(delivery.contains("return_pc"));
+}
+
+#[test]
+fn riscv_signal_frames_use_a_compact_nested_stack_layout() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let logic = std::fs::read_to_string(
+        repository.join("src/syscall/linux_task_logic_shared.rs"),
+    )
+    .expect("read Linux signal frame layout");
+
+    assert!(
+        logic.contains("#[cfg(target_arch = \"riscv64\")]\npub(crate) const LINUX_SIGNAL_UCONTEXT_BYTES: usize = 512;")
+    );
+    assert!(
+        logic.contains("let frame_bytes = (LINUX_SIGNAL_INFO_BYTES + LINUX_SIGNAL_UCONTEXT_BYTES) as u64;")
+    );
+}
+
+#[test]
+fn riscv_kernel_timer_ticks_skip_linux_runtime_work_until_trap_return() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let main = std::fs::read_to_string(repository.join("src/main.rs"))
+        .expect("read kernel timer entry point");
+    let handler_start = main
+        .find("extern \"C\" fn riscv64_timer_interrupt_handler(")
+        .expect("RISC-V timer handler");
+    let handler = braced_body(&main[handler_start..]);
+    let kernel_guard = handler
+        .find("if pstate & SSTATUS_SPP != 0")
+        .expect("kernel-mode trap guard");
+    let common = handler
+        .find("timer_interrupt_handler_common()")
+        .expect("user-mode timer work");
+    assert!(
+        handler.contains("timer_interrupt_handler_kernel()"),
+        "kernel-mode timer entry must only acknowledge and complete the IRQ"
+    );
+    assert!(
+        kernel_guard < common,
+        "Linux task-table timer work must not run while a supervisor syscall holds its lock"
+    );
+}
+
+#[test]
+fn riscv_root_timer_preemption_is_only_deferred_for_realtime_root_tasks() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let main = std::fs::read_to_string(repository.join("src/main.rs"))
+        .expect("read kernel timer entry point");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task scheduler state");
+    let handler_start = main
+        .find("extern \"C\" fn riscv64_timer_interrupt_handler(")
+        .expect("RISC-V timer handler");
+    let handler = braced_body(&main[handler_start..]);
+    assert!(
+        handler.contains(
+            "if !crate::syscall::linux_task::current_root_scheduler_is_realtime()",
+        ),
+        "RISC-V timer preemption must inspect the root task policy"
+    );
+    assert!(
+        task.contains("pub(crate) fn current_root_scheduler_is_realtime()"),
+        "Linux task runtime must expose the root task realtime policy"
+    );
+    assert!(
+        task.contains("LINUX_SCHED_FIFO") && task.contains("LINUX_SCHED_RR"),
+        "the realtime root policy check must distinguish FIFO and RR"
+    );
+}
+
+#[test]
+fn riscv_kernel_timer_work_is_replayed_after_syscall_return() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let main = std::fs::read_to_string(repository.join("src/main.rs"))
+        .expect("read RISC-V timer entry point");
+    let dispatch = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall return path");
+    assert!(
+        main.contains("DEFERRED_RISCV_TIMER_WORK"),
+        "kernel-mode timer traps must record deferred Linux timer work"
+    );
+    assert!(
+        main.contains("service_deferred_riscv_timer_work"),
+        "RISC-V must expose a deferred timer service"
+    );
+    let return_start = dispatch
+        .find("pub extern \"C\" fn complete_linux_signal_syscall_return(")
+        .expect("Linux syscall return hook");
+    let return_body = braced_body(&dispatch[return_start..]);
+    assert!(
+        return_body.contains("service_deferred_riscv_timer_work"),
+        "syscall return must replay timer work after Linux runtime locks are released"
+    );
+}
+
+#[test]
+fn riscv_task_exit_reenables_timer_interrupts_before_handoff() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task exit path");
+    let start = task
+        .find("pub(crate) fn finish_current_without_el0_return() -> !")
+        .expect("RISC-V task exit handoff");
+    let body = braced_body(&task[start..]);
+    let unmask = body
+        .find("crate::kernel_lowlevel::cpu::unmask_timer_interrupts()")
+        .expect("task exit must re-enable RISC-V timer interrupts");
+    let schedule = body
+        .find("scheduler::schedule()")
+        .expect("task exit must hand off to another scheduler thread");
+    let deferred = body
+        .find("crate::service_deferred_riscv_timer_work()")
+        .expect("task exit must replay deferred RISC-V timer work");
+    assert!(
+        unmask < schedule,
+        "task exit must enable timer interrupts before abandoning the syscall context"
+    );
+    assert!(
+        deferred > schedule,
+        "task exit must service deferred timer work after the handoff"
+    );
+}
+
+#[test]
+fn riscv_kernel_context_switch_keeps_interrupts_masked_until_scheduler_restore() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let context_switch = std::fs::read_to_string(
+        repository.join("src/kernel_lowlevel/RISCV64/context_switch.S"),
+    )
+    .expect("read RISC-V context switch assembly");
+    let start = context_switch
+        .find("context_switch:")
+        .expect("RISC-V context switch entry");
+    let end = context_switch[start..]
+        .find(".size context_switch, . - context_switch")
+        .map(|offset| start + offset)
+        .expect("RISC-V context switch end");
+    let body = &context_switch[start..end];
+    assert!(body.contains("csrci   sstatus, 0x2"));
+    assert!(
+        !body.contains("csrsi   sstatus, 0x2"),
+        "context switches must not enable interrupts before scheduler restore"
+    );
+}
+
+#[test]
+fn posix_timer_deadlines_are_armed_on_the_precision_compare() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let main = std::fs::read_to_string(repository.join("src/main.rs"))
+        .expect("read timer interrupt service");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read POSIX timer state");
+    let logic = std::fs::read_to_string(repository.join("src/syscall/syscall_logic_shared.rs"))
+        .expect("read POSIX timer core");
+    assert!(
+        main.contains("next_linux_posix_timer_deadline"),
+        "timer service must include POSIX timer deadlines"
+    );
+    assert!(
+        syscall.contains("pub fn next_linux_posix_timer_deadline()"),
+        "POSIX timer state must expose its next hardware deadline"
+    );
+    assert!(
+        logic.contains("pub(crate) fn next_hardware_deadline("),
+        "timer core must expose a precision deadline"
+    );
+    assert!(
+        logic.contains("if self.notification_pending"),
+        "pending signal notifications must prevent nanosecond rearming"
+    );
+    assert!(
+        main.contains("posix_timer_deadline_due"),
+        "a due POSIX precision deadline must be serviced immediately"
+    );
 }
 
 #[test]

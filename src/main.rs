@@ -82,6 +82,11 @@ const LARGE_ALLOCATION_THRESHOLD: usize = 64 * 1024;
 // scheduler and POSIX expiration paths are global, so admit each tick once.
 static LAST_ACCEPTED_TIMER_TICK: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(target_arch = "riscv64")]
+static DEFERRED_RISCV_TIMER_WORK: AtomicBool = AtomicBool::new(false);
+#[cfg(target_arch = "riscv64")]
+static RISCV_SCHEDULER_TICK_PENDING: AtomicBool = AtomicBool::new(false);
+
 fn claim_timer_tick(now: u64) -> bool {
     if now == 0 {
         return false;
@@ -571,42 +576,125 @@ pub extern "C" fn kernel_main(fdt_base: usize) -> ! {
     crate::kernel_objects::scheduler::start_first_thread();
 }
 
-/// Service the hardware timer and return whether it woke a precision sleeper.
-///
-/// RISC-V invokes this from a trap frame-aware wrapper so it can avoid
-/// switching address spaces while returning from a supervisor-mode trap.
-fn timer_interrupt_handler_common() -> bool {
+/// Acknowledge the hardware timer interrupt and clear its pending state.
+fn acknowledge_timer_interrupt() -> u32 {
     // Acknowledge the interrupt first so the CPU interface has an active IRQ
     // to complete after the timer is serviced.
     let interrupt_id = kernel_lowlevel::interrupt::acknowledge_interrupt();
 
     // Clear the timer interrupt
     kernel_lowlevel::timer::clear_interrupt();
+    interrupt_id
+}
 
+fn process_timer_work() -> bool {
     let now = kernel_lowlevel::timer::get_tick_count();
+    let now_nanoseconds = kernel_lowlevel::timer::get_nanoseconds();
+    let next_posix_timer_deadline = crate::syscall::next_linux_posix_timer_deadline();
+    let posix_timer_deadline_due = next_posix_timer_deadline
+        .is_some_and(|deadline| deadline <= now_nanoseconds);
     // SBI timers are per-hart, so a precision sleeper may be woken by any
     // CPU's compare interrupt. The shared task table makes this idempotent.
-    let precision_woke_task = crate::syscall::linux_task::on_precision_timer(
-        kernel_lowlevel::timer::get_nanoseconds(),
-    );
-    if let Some(deadline) = crate::syscall::linux_task::next_precision_sleep_deadline() {
+    let precision_woke_task = crate::syscall::linux_task::on_precision_timer(now_nanoseconds);
+    let next_sleep_deadline = crate::syscall::linux_task::next_precision_sleep_deadline();
+    if let Some(deadline) = next_sleep_deadline
+        .into_iter()
+        .chain(next_posix_timer_deadline)
+        .min()
+    {
         kernel_lowlevel::timer::arm_at_nanoseconds(deadline);
+    }
+    if posix_timer_deadline_due {
+        crate::syscall::deliver_linux_posix_timer_signals_from_irq();
     }
     if current_cpu_id() == 0 {
         if claim_timer_tick(now) {
-            crate::kernel_objects::scheduler::scheduler().on_timer_tick();
+            #[cfg(target_arch = "riscv64")]
+            RISCV_SCHEDULER_TICK_PENDING.store(true, Ordering::Release);
+            #[cfg(not(target_arch = "riscv64"))]
+            {
+                crate::kernel_objects::scheduler::scheduler().on_timer_tick();
+            }
             crate::syscall::expire_linux_real_timers_from_irq();
+            #[cfg(not(target_arch = "riscv64"))]
             crate::syscall::linux_task::on_timer_tick(now);
-            crate::syscall::deliver_linux_posix_timer_signals_from_irq();
-            crate::syscall::linux_futex::on_timer_tick(now, now);
-            crate::syscall::linux_mqueue::on_timer_tick(now);
+            if !posix_timer_deadline_due {
+                crate::syscall::deliver_linux_posix_timer_signals_from_irq();
+            }
+            #[cfg(not(target_arch = "riscv64"))]
+            {
+                crate::syscall::linux_futex::on_timer_tick(now, now);
+                crate::syscall::linux_mqueue::on_timer_tick(now);
+            }
             crate::kernel_objects::scheduler::scheduler().record_trace_sample(0);
         }
     }
 
+    precision_woke_task
+}
+
+/// Service the hardware timer and return whether it woke a precision sleeper.
+///
+/// RISC-V invokes this from a trap frame-aware wrapper so it can avoid
+/// switching address spaces while returning from a supervisor-mode trap.
+fn timer_interrupt_handler_common() -> bool {
+    let interrupt_id = acknowledge_timer_interrupt();
+    let precision_woke_task = process_timer_work();
+
     // End of interrupt
     kernel_lowlevel::interrupt::end_of_interrupt(interrupt_id);
     precision_woke_task
+}
+
+#[cfg(target_arch = "riscv64")]
+fn timer_interrupt_handler_kernel() {
+    let interrupt_id = acknowledge_timer_interrupt();
+    DEFERRED_RISCV_TIMER_WORK.store(true, Ordering::Release);
+    kernel_lowlevel::interrupt::end_of_interrupt(interrupt_id);
+}
+
+#[cfg(target_arch = "riscv64")]
+pub(crate) fn service_deferred_riscv_timer_work() -> bool {
+    if !DEFERRED_RISCV_TIMER_WORK.swap(false, Ordering::AcqRel) {
+        return false;
+    }
+    let precision_woke_task = process_timer_work();
+    service_deferred_riscv_scheduler_tick();
+    precision_woke_task
+}
+
+#[cfg(target_arch = "riscv64")]
+pub(crate) fn service_deferred_riscv_scheduler_tick() {
+    if !RISCV_SCHEDULER_TICK_PENDING.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let scheduler = crate::kernel_objects::scheduler::scheduler();
+    if scheduler
+        .get_thread(scheduler.current())
+        .is_none_or(|thread| thread.state != crate::kernel_lowlevel::thread::ThreadState::Running)
+    {
+        return;
+    }
+    let now = kernel_lowlevel::timer::get_tick_count();
+    scheduler.on_timer_tick();
+    crate::syscall::linux_task::on_timer_tick(now);
+    crate::syscall::linux_futex::on_timer_tick(now, now);
+    crate::syscall::linux_mqueue::on_timer_tick(now);
+}
+
+#[cfg(target_arch = "riscv64")]
+#[no_mangle]
+pub extern "C" fn reconcile_riscv_trap_owner_entry(saved_regs: usize) {
+    if let Some(thread_id) = kernel_lowlevel::cpu::trap_stack_thread_id(saved_regs) {
+        crate::kernel_objects::scheduler::scheduler().reconcile_current_thread(
+            crate::kernel_lowlevel::thread::ThreadId(thread_id),
+        );
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+pub(crate) fn reconcile_riscv_trap_owner(saved_regs: usize) {
+    reconcile_riscv_trap_owner_entry(saved_regs);
 }
 
 /// Timer interrupt handler for architectures whose trap return can safely
@@ -626,31 +714,34 @@ extern "C" fn timer_interrupt_handler() {
 #[cfg(target_arch = "riscv64")]
 #[no_mangle]
 extern "C" fn riscv64_timer_interrupt_handler(saved_regs: usize) {
+    const SSTATUS_SPP: u64 = 1 << 8;
+    reconcile_riscv_trap_owner(saved_regs);
+    if saved_regs != 0 {
+        let pstate = unsafe { (saved_regs as *const u64).add(32).read() };
+        if pstate & SSTATUS_SPP != 0 {
+            timer_interrupt_handler_kernel();
+            return;
+        }
+    }
     let precision_woke_task = timer_interrupt_handler_common();
     if saved_regs == 0 {
         return;
     }
-    const SSTATUS_SPP: u64 = 1 << 8;
-    let pstate = unsafe { (saved_regs as *const u64).add(32).read() };
-    if pstate & SSTATUS_SPP != 0 {
-        return;
-    }
     let signal_frame_changed = crate::syscall::deliver_linux_timer_signal_from_irq(saved_regs);
+    if !signal_frame_changed {
+        service_deferred_riscv_scheduler_tick();
+    }
     if precision_woke_task && !signal_frame_changed {
         crate::kernel_objects::scheduler::schedule_on_cpu(current_cpu_id() as usize);
     }
-    if !signal_frame_changed {
-        // RISC-V currently exposes logical CPU affinity but executes the
-        // scheduler on one hart. Keep the launch-root coordinator runnable
-        // until it can explicitly yield or block; otherwise the first
-        // high-priority FIFO child can starve the creator indefinitely.
-        let current_scheduler = crate::kernel_objects::scheduler::scheduler().current().0;
-        if crate::syscall::linux_process::current()
-            .is_ok_and(|process| process.root_scheduler_thread == current_scheduler)
-        {
-            return;
+    // Realtime roots may intentionally retain the CPU during pthread startup
+    // handoff. Normal SCHED_OTHER threads must remain preemptible even after
+    // a signal rewrites the trap frame; otherwise a signal-heavy worker can
+    // consume every tick and starve the thread that must stop the workload.
+    if !crate::syscall::linux_task::current_root_scheduler_is_realtime() {
+        if !signal_frame_changed {
+            check_preemption();
         }
-        check_preemption();
     }
 }
 

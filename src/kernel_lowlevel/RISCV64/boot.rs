@@ -133,6 +133,8 @@ trap_timer:
 trap_user_ecall:
 trap_supervisor_ecall:
     mv      a0, sp
+    call    reconcile_riscv_trap_owner_entry
+    mv      a0, sp
     ld      a1, 120(sp)
     ld      a2, 64(sp)
     ld      a3, 72(sp)

@@ -1534,6 +1534,19 @@ impl Scheduler {
         self.current_thread
     }
 
+    /// Reconcile the current-thread marker with a trap frame that interrupted
+    /// a running thread after a blocking syscall handoff.
+    pub fn reconcile_current_thread(&mut self, id: ThreadId) -> bool {
+        if id.0 == ThreadId::IDLE.0 || id.0 >= MAX_THREADS {
+            return false;
+        }
+        if self.threads[id.0].state != ThreadState::Running {
+            return false;
+        }
+        self.current_thread = id;
+        true
+    }
+
     /// Get a reference to a thread's TCB
     pub fn get_thread(&self, id: ThreadId) -> Option<&ThreadControlBlock> {
         if id.0 < MAX_THREADS {
@@ -2131,6 +2144,9 @@ impl Scheduler {
 /// Idle thread entry point
 extern "C" fn idle_thread_entry() -> ! {
     loop {
+        #[cfg(target_arch = "riscv64")]
+        crate::service_deferred_riscv_timer_work();
+
         // Immediately try to schedule another thread
         // If shell (or other threads) are ready, switch to them
         // This prevents deadlocks and ensures cooperative scheduling
@@ -2355,7 +2371,6 @@ pub fn schedule_on_cpu(cpu_id: usize) {
     // Find next thread to run for this CPU
     if let Some(next_id) = s.schedule_next_for_cpu(cpu_id) {
         let current_id = s.current_thread;
-
         if next_id == current_id {
             // No need to switch
             crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);

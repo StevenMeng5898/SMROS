@@ -302,7 +302,7 @@ class RiscvArchitectureContractTests(unittest.TestCase):
             "RISC-V timer handling needs the next outstanding precision sleep",
         )
         main_source = (REPOSITORY_ROOT / "src/main.rs").read_text()
-        timer_start = main_source.index("extern \"C\" fn timer_interrupt_handler()")
+        timer_start = main_source.index("fn process_timer_work()")
         timer_end = main_source.index("\n}\n", timer_start) + 3
         timer_source = main_source[timer_start:timer_end]
         self.assertRegex(
