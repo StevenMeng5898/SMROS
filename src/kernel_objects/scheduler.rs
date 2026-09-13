@@ -2169,15 +2169,6 @@ pub fn schedule() {
     // Find next thread to run
     if let Some(next_id) = s.schedule_next_for_cpu(cpu_id) {
         let current_id = s.current_thread;
-        #[cfg(target_arch = "riscv64")]
-        {
-            use core::sync::atomic::{AtomicUsize, Ordering};
-            static COUNT: AtomicUsize = AtomicUsize::new(0);
-            let n = COUNT.fetch_add(1, Ordering::Relaxed);
-            if n < 40 {
-                crate::kobj_info!("sched-diag", "n={} current={} next={} cursor={}", n, current_id.0, next_id.0, s.next_thread);
-            }
-        }
         if next_id == current_id {
             // No need to switch
             crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
