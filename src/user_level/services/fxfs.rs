@@ -508,22 +508,20 @@ fn fxfs_id_in_list(ids: &[u64], object_id: u64) -> bool {
 }
 
 fn fxfs_host_share_file_exists(relative: &str) -> bool {
-    host_share::HOST_SHARE_FILES
-        .iter()
-        .any(|file| file.path == relative)
+    fxfs_host_share_file_data(relative).is_some()
 }
 
 fn fxfs_host_share_file_data(relative: &str) -> Option<&'static [u8]> {
     host_share::HOST_SHARE_FILES
-        .iter()
-        .find(|file| file.path == relative)
-        .map(|file| file.data)
+        .binary_search_by(|file| file.path.cmp(relative))
+        .ok()
+        .map(|index| host_share::HOST_SHARE_FILES[index].data)
 }
 
 fn fxfs_host_share_dir_exists(relative: &str) -> bool {
     host_share::HOST_SHARE_DIRS
-        .iter()
-        .any(|dir| *dir == relative)
+        .binary_search_by(|dir| dir.cmp(&relative))
+        .is_ok()
 }
 
 fn fxfs_deleted_data_contains(data: &[u8], relative: &str) -> bool {
