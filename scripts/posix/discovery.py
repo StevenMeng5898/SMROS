@@ -29,6 +29,7 @@ _REVIEWED_VOLUME_TIMEOUTS_MS = {
     "conformance/interfaces/pthread_cond_destroy/2-1.c": 240_000,
     "conformance/interfaces/pthread_cond_init/1-3.c": 240_000,
     "conformance/interfaces/pthread_cond_signal/1-2.c": 180_000,
+    "conformance/interfaces/pthread_cond_timedwait/2-5.c": 120_000,
     "conformance/interfaces/pthread_cond_timedwait/4-2.c": 600_000,
     "conformance/interfaces/pthread_create/1-6.c": 600_000,
     "conformance/interfaces/shm_open/23-1.c": 600_000,

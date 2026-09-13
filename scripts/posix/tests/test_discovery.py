@@ -351,6 +351,19 @@ class TestDiscovery(DiscoveryFixture):
             600_000,
         )
 
+    def test_pthread_cond_timedwait_multi_mutex_volume_has_reviewed_timeout(self) -> None:
+        self.write_source(
+            "conformance/interfaces/pthread_cond_timedwait/2-5.c",
+            "int main(void) { return 0; }\n",
+        )
+        tests = {test.test_id: test for test in discover_tests(self.root)}
+        self.assertEqual(
+            tests[
+                "conformance/interfaces/pthread_cond_timedwait/2-5.c"
+            ].timeout_ms,
+            120_000,
+        )
+
     def test_pthread_cond_broadcast_multi_batch_stress_has_reviewed_timeout(self) -> None:
         self.write_source(
             "conformance/interfaces/pthread_cond_broadcast/2-3.c",
