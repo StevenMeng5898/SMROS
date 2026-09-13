@@ -732,7 +732,8 @@ extern "C" fn riscv64_timer_interrupt_handler(saved_regs: usize) {
         service_deferred_riscv_scheduler_tick();
     }
     if precision_woke_task && !signal_frame_changed {
-        crate::kernel_objects::scheduler::schedule_on_cpu(current_cpu_id() as usize);
+        // A wakeup only makes a sleeper ready; use normal preemption rules.
+        check_preemption();
     }
     // Realtime roots may intentionally retain the CPU during pthread startup
     // handoff. Normal SCHED_OTHER threads must remain preemptible even after
