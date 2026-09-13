@@ -9813,6 +9813,13 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
             .find("pub fn sys_rt_sigqueueinfo(")
             .expect("process queued signal syscall")..],
     );
+    let permission = sigqueue
+        .find("linux_kill_permission(pid)")
+        .expect("queued signal must enforce sender/receiver credentials");
+    let existence = sigqueue
+        .find("if linux_process::by_pid(pid).is_none()")
+        .expect("queued signal must validate the target process");
+    assert!(existence < permission);
     assert!(sigqueue.contains("if sig == LINUX_SIGKILL"));
     assert!(sigqueue.contains("terminate_linux_process_by_signal(pid, sig)"));
     assert!(!sigqueue.contains("linux_process::terminate_by_signal(pid, sig)"));

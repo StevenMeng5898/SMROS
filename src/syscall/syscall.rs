@@ -9644,6 +9644,7 @@ pub fn sys_rt_sigqueueinfo(pid: usize, sig: usize, info: usize) -> SysResult {
     if linux_process::by_pid(pid).is_none() {
         return Err(SysError::ESRCH);
     }
+    linux_kill_permission(pid)?;
     if sig == 0 {
         return Ok(0);
     }
