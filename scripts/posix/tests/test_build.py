@@ -3089,16 +3089,6 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertNotIn("nanosleep", body)
         self.assertNotIn("SMROS_SCHED_YIELD_HANDOFF_NSEC", body)
 
-    def test_inherit_sched_starts_from_smros_process_policy(self) -> None:
-        source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
-            encoding="utf-8"
-        )
-        start = source.index("if (inherit == PTHREAD_INHERIT_SCHED)")
-        end = source.index("\n    }\n}", start) + 6
-        body = source[start:end]
-        self.assertIn("int parent_policy = smros_process_sched_policy;", body)
-        self.assertIn("struct sched_param parent_param = smros_process_sched_param;", body)
-
     def test_smros_posix_compat_spin_trylock_is_single_attempt(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
             encoding="utf-8"

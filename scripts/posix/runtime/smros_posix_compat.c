@@ -1253,16 +1253,6 @@ static void *smros_pthread_start_trampoline(void *arg) {
         long observed = syscall(SYS_sched_getscheduler, 0);
         struct sched_param observed_param = { .sched_priority = -1 };
         (void)syscall(SYS_sched_getparam, 0, &observed_param);
-        (void)dprintf(
-            STDERR_FILENO,
-            "SMROS_RISCV_SCHED child=%lu requested=%d/%d applied=%ld observed=%ld/%d\n",
-            (unsigned long)pthread_self(),
-            context->policy,
-            context->param.sched_priority,
-            applied,
-            observed,
-            observed_param.sched_priority
-        );
         smros_pthread_diag_state(
             "trampoline-policy",
             context->start_routine,
@@ -1728,8 +1718,12 @@ static void smros_pthread_attr_sched_values(
         }
     }
     if (inherit == PTHREAD_INHERIT_SCHED) {
-        int parent_policy = smros_process_sched_policy;
-        struct sched_param parent_param = smros_process_sched_param;
+        int parent_policy = SCHED_OTHER;
+        struct sched_param parent_param = { .sched_priority = 0 };
+        if (smros_pthread_attr_scope_value(attr) == PTHREAD_SCOPE_PROCESS) {
+            parent_policy = smros_process_sched_policy;
+            parent_param = smros_process_sched_param;
+        }
         smros_pthread_sched_record *parent_record =
             smros_find_pthread_sched_record(pthread_self());
         if (
@@ -1738,6 +1732,22 @@ static void smros_pthread_attr_sched_values(
         ) {
             parent_policy = parent_record->policy;
             parent_param = parent_record->param;
+        } else if (smros_pthread_attr_scope_value(attr) != PTHREAD_SCOPE_PROCESS) {
+            smros_pthread_getschedparam_fn get_parent =
+                (smros_pthread_getschedparam_fn)smros_resolve_symbol(
+                    "pthread_getschedparam"
+                );
+            if (
+                get_parent == NULL ||
+                get_parent(pthread_self(), &parent_policy, &parent_param) != 0 ||
+                !smros_sched_metadata_valid(
+                    parent_policy,
+                    parent_param.sched_priority
+                )
+            ) {
+                parent_policy = SCHED_OTHER;
+                parent_param.sched_priority = 0;
+            }
         }
         *policy = parent_policy;
         *param = parent_param;
