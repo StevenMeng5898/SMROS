@@ -1253,6 +1253,16 @@ static void *smros_pthread_start_trampoline(void *arg) {
         long observed = syscall(SYS_sched_getscheduler, 0);
         struct sched_param observed_param = { .sched_priority = -1 };
         (void)syscall(SYS_sched_getparam, 0, &observed_param);
+        (void)dprintf(
+            STDERR_FILENO,
+            "SMROS_RISCV_SCHED child=%lu requested=%d/%d applied=%ld observed=%ld/%d\n",
+            (unsigned long)pthread_self(),
+            context->policy,
+            context->param.sched_priority,
+            applied,
+            observed,
+            observed_param.sched_priority
+        );
         smros_pthread_diag_state(
             "trampoline-policy",
             context->start_routine,
