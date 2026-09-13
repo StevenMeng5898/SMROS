@@ -3107,6 +3107,7 @@ def run_smros(
     test_id: str | None = None,
     resume: bool = False,
     qemu: str = "qemu-system-aarch64",
+    expected_architecture: str | None = None,
 ) -> ControllerResult:
     qemu_path = shutil.which(qemu)
     if qemu_path is None:
@@ -3114,6 +3115,14 @@ def run_smros(
     stage = Path(os.path.abspath(stage))
     loaded = _load_stage_identity(stage)
     architecture = loaded.metadata.architecture
+    if (
+        expected_architecture is not None
+        and architecture != expected_architecture
+    ):
+        raise ValueError(
+            "requested architecture mismatch: "
+            f"requested {expected_architecture}, stage contains {architecture}"
+        )
     toolchain = toolchain_for_architecture(architecture)
     selected = filter_runnable_tests(
         loaded.tests, api=api, group=group, test_id=test_id

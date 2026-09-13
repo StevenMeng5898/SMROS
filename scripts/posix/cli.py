@@ -454,6 +454,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 test_id=arguments.test,
                 resume=arguments.resume,
                 qemu=toolchain.qemu,
+                expected_architecture=arguments.arch,
             )
         except (OSError, ValueError, ControllerError) as error:
             print(f"run-smros failed: {error}", file=sys.stderr)

@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from scripts.posix.build import (
@@ -5766,6 +5767,68 @@ class QemuControllerTests(unittest.TestCase):
 
 
 class QemuIntegrationSurfaceTests(unittest.TestCase):
+    def test_run_smros_rejects_requested_architecture_before_launch(self) -> None:
+        loaded = SimpleNamespace(
+            metadata=SimpleNamespace(architecture="riscv64"),
+            tests=(),
+            build_id="build",
+            build_results=(),
+            runtime_snapshot_sha256="",
+        )
+        with mock.patch.object(
+            qemu_runner_module, "_load_stage_identity", return_value=loaded
+        ), mock.patch.object(
+            qemu_runner_module, "shutil"
+        ) as shutil_module, mock.patch.object(
+            qemu_runner_module, "QemuController"
+        ) as controller:
+            shutil_module.which.return_value = "/usr/bin/qemu-system-aarch64"
+            with self.assertRaisesRegex(ValueError, "architecture mismatch"):
+                qemu_runner_module.run_smros(
+                    Path("stage"),
+                    Path("output"),
+                    kernel=Path("kernel"),
+                    disk=Path("disk"),
+                    expected_architecture="aarch64",
+                )
+        controller.assert_not_called()
+
+    def test_run_smros_accepts_matching_requested_architecture(self) -> None:
+        loaded = SimpleNamespace(
+            metadata=SimpleNamespace(architecture="aarch64"),
+            tests=(SimpleNamespace(test_id="case", kind="runnable", disposition="complete"),),
+            build_id="build",
+            build_results=(),
+            runtime_snapshot_sha256="",
+        )
+        result = object()
+        with mock.patch.object(
+            qemu_runner_module, "_load_stage_identity", return_value=loaded
+        ), mock.patch.object(
+            qemu_runner_module, "shutil"
+        ) as shutil_module, mock.patch.object(
+            qemu_runner_module, "filter_runnable_tests", return_value=loaded.tests
+        ), mock.patch.object(
+            qemu_runner_module, "_validate_selected"
+        ), mock.patch.object(
+            qemu_runner_module, "_regular_file", side_effect=lambda path, label: path
+        ), mock.patch.object(
+            qemu_runner_module, "build_qemu_argv", return_value=("qemu",)
+        ), mock.patch.object(
+            qemu_runner_module, "QemuController"
+        ) as controller:
+            shutil_module.which.return_value = "/usr/bin/qemu-system-aarch64"
+            controller.return_value.run.return_value = result
+            observed = qemu_runner_module.run_smros(
+                Path("stage"),
+                Path("output"),
+                kernel=Path("kernel"),
+                disk=Path("disk"),
+                expected_architecture="aarch64",
+            )
+        self.assertIs(observed, result)
+        controller.return_value.run.assert_called_once_with(resume=False)
+
     def test_qemu_argv_mirrors_smoke_options_and_clamps_memory(self) -> None:
         argv = build_qemu_argv(
             qemu="qemu-system-aarch64",
@@ -5836,6 +5899,7 @@ class QemuIntegrationSurfaceTests(unittest.TestCase):
         self.assertEqual(runner.call_args.kwargs["test_id"], "case.c")
         self.assertEqual(runner.call_args.kwargs["memory"], "2G")
         self.assertTrue(runner.call_args.kwargs["resume"])
+        self.assertEqual(runner.call_args.kwargs["expected_architecture"], "aarch64")
 
         runner.side_effect = ControllerError("QEMU failed")
         stderr = io.StringIO()
