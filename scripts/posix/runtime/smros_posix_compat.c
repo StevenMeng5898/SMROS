@@ -1058,7 +1058,7 @@ uid_t geteuid(void) {
 }
 
 static int smros_sync_kernel_effective_uid(uid_t uid) {
-#if defined(__aarch64__)
+#if defined(__aarch64__) || defined(__riscv)
     return (int)syscall(SYS_setreuid, (uid_t)-1, uid);
 #else
     (void)uid;

@@ -883,6 +883,12 @@ class CampaignTests(unittest.TestCase):
                 f"AArch64 compatibility must retain {symbol}@GLIBC_2.17",
             )
 
+    def test_credential_sync_supports_riscv_linux_syscalls(self) -> None:
+        source = (
+            Path(__file__).parents[1] / "runtime" / "smros_posix_compat.c"
+        ).read_text(encoding="utf-8")
+        self.assertIn("defined(__riscv)", source)
+
     def test_atfork_interposer_caches_libc_resolution(self) -> None:
         source = (
             Path(__file__).parents[1] / "runtime" / "smros_posix_compat.c"
