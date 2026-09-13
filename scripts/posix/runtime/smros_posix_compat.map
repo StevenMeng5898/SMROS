@@ -90,6 +90,11 @@ GLIBC_2.27 {
         sigaction;
         sigset;
         kill;
+        getuid;
+        setpwent;
+        getpwent;
+        endpwent;
+        seteuid;
         mlock;
         munlock;
         mlockall;

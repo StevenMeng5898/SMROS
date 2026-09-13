@@ -887,7 +887,74 @@ class CampaignTests(unittest.TestCase):
         source = (
             Path(__file__).parents[1] / "runtime" / "smros_posix_compat.c"
         ).read_text(encoding="utf-8")
-        self.assertIn("defined(__riscv)", source)
+        start = source.index("static int smros_sync_kernel_effective_uid(uid_t uid) {")
+        end = source.index("\n}\n", start) + 3
+        # Compile the actual production helper for each supported ABI. The
+        # syscall double observes the boundary without changing host credentials.
+        helper = source[start:end]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            probe = root / "credential-sync.c"
+            probe.write_text(
+                r'''
+#include <errno.h>
+#include <stdarg.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+static int calls;
+static long observed_number;
+static uid_t observed_real, observed_effective;
+static long result;
+static long observe_syscall(long number, ...) {
+    va_list args;
+    va_start(args, number);
+    observed_number = number;
+    observed_real = va_arg(args, uid_t);
+    observed_effective = va_arg(args, uid_t);
+    va_end(args);
+    calls++;
+    if (result < 0) errno = EPERM;
+    return result;
+}
+#define syscall observe_syscall
+'''
+                + helper
+                + r'''
+int main(void) {
+    result = 0;
+    if (smros_sync_kernel_effective_uid(1234) != 0) return 1;
+    if (calls != 1 || observed_number != SYS_setreuid) return 2;
+    if (observed_real != (uid_t)-1 || observed_effective != 1234) return 3;
+    result = -1;
+    errno = 0;
+    if (smros_sync_kernel_effective_uid(5678) != -1) return 4;
+    if (calls != 2 || errno != EPERM || observed_effective != 5678) return 5;
+    return 0;
+}
+''',
+                encoding="utf-8",
+            )
+            for architecture in ("__aarch64__", "__riscv"):
+                with self.subTest(architecture=architecture):
+                    executable = root / architecture
+                    subprocess.run(
+                        ["cc", "-std=gnu99", f"-D{architecture}",
+                         str(probe), "-o", str(executable)],
+                        check=True, capture_output=True, text=True, timeout=30,
+                    )
+                    completed = subprocess.run(
+                        [str(executable)], capture_output=True, text=True, timeout=5,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_identity_interposition_exports_riscv_glibc_version(self) -> None:
+        version_script = (
+            Path(__file__).parents[1] / "runtime" / "smros_posix_compat.map"
+        ).read_text(encoding="ascii")
+        glibc_227 = version_script.index("GLIBC_2.27")
+        riscv_symbols = version_script[glibc_227:]
+        for symbol in ("getuid", "setpwent", "getpwent", "endpwent", "seteuid"):
+            self.assertIn(f"        {symbol};", riscv_symbols)
 
     def test_atfork_interposer_caches_libc_resolution(self) -> None:
         source = (
