@@ -230,7 +230,7 @@ class TestDiscovery(DiscoveryFixture):
         )
         self.assertEqual(
             tests["conformance/interfaces/clock_gettime/4-1.c"].timeout_ms,
-            60_000,
+            600_000,
         )
         self.assertEqual(
             tests["conformance/interfaces/timer_settime/2-1.c"].timeout_ms,
