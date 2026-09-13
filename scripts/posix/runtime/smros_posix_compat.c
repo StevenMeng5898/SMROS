@@ -1733,21 +1733,12 @@ static void smros_pthread_attr_sched_values(
             parent_policy = parent_record->policy;
             parent_param = parent_record->param;
         } else if (smros_pthread_attr_scope_value(attr) != PTHREAD_SCOPE_PROCESS) {
-            smros_pthread_getschedparam_fn get_parent =
-                (smros_pthread_getschedparam_fn)smros_resolve_symbol(
-                    "pthread_getschedparam"
-                );
-            if (
-                get_parent == NULL ||
-                get_parent(pthread_self(), &parent_policy, &parent_param) != 0 ||
-                !smros_sched_metadata_valid(
-                    parent_policy,
-                    parent_param.sched_priority
-                )
-            ) {
-                parent_policy = SCHED_OTHER;
-                parent_param.sched_priority = 0;
-            }
+            /* The host pthread query cannot observe SMROS's process policy.
+             * Use the compatibility-layer process state when the parent has
+             * not been registered yet (the process root is created before
+             * the interposer can register its thread record). */
+            parent_policy = smros_process_sched_policy;
+            parent_param = smros_process_sched_param;
         }
         *policy = parent_policy;
         *param = parent_param;
