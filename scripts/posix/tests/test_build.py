@@ -863,6 +863,7 @@ class CampaignTests(unittest.TestCase):
             "sigaction",
             "sigset",
             "kill",
+            "sigqueue",
         ):
             self.assertIn(f"        {symbol};", riscv_symbols)
 
@@ -876,6 +877,7 @@ class CampaignTests(unittest.TestCase):
             "pthread_mutex_unlock",
             "sigaction",
             "kill",
+            "sigqueue",
         ):
             self.assertIn(
                 f"smros_{symbol}_glibc217",

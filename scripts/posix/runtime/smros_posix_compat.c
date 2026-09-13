@@ -5111,6 +5111,9 @@ int smros_sigaction_glibc217(
 int smros_kill_glibc217(pid_t pid, int sig) {
     return kill(pid, sig);
 }
+int smros_sigqueue_glibc217(pid_t pid, int sig, const union sigval value) {
+    return sigqueue(pid, sig, value);
+}
 
 __asm__(".symver smros_pthread_cond_init_glibc217,pthread_cond_init@GLIBC_2.17");
 __asm__(".symver smros_pthread_cond_wait_glibc217,pthread_cond_wait@GLIBC_2.17");
@@ -5124,6 +5127,7 @@ __asm__(".symver smros_pthread_mutex_unlock_glibc217,pthread_mutex_unlock@GLIBC_
 __asm__(".symver smros_pthread_mutex_destroy_glibc217,pthread_mutex_destroy@GLIBC_2.17");
 __asm__(".symver smros_sigaction_glibc217,sigaction@GLIBC_2.17");
 __asm__(".symver smros_kill_glibc217,kill@GLIBC_2.17");
+__asm__(".symver smros_sigqueue_glibc217,sigqueue@GLIBC_2.17");
 #endif
 
 static smros_pthread_barrier_record *smros_find_pthread_barrier_record(
