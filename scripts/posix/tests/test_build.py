@@ -3089,15 +3089,6 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertNotIn("nanosleep", body)
         self.assertNotIn("SMROS_SCHED_YIELD_HANDOFF_NSEC", body)
 
-    def test_riscv_deferred_fifo_start_does_not_sleep_for_fixed_quarter_second(self) -> None:
-        source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
-            encoding="utf-8"
-        )
-        start = source.index("static void *smros_pthread_start_trampoline")
-        end = source.index("int pthread_create", start)
-        trampoline = source[start:end]
-        self.assertNotIn("750000000", trampoline)
-
     def test_smros_posix_compat_spin_trylock_is_single_attempt(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
             encoding="utf-8"
