@@ -2960,23 +2960,6 @@ fn smros_pthread_inherit_sched_uses_process_metadata_without_parent_record() {
     let fallback = &body[fallback..];
     assert!(fallback.contains("parent_policy = smros_process_sched_policy"));
     assert!(fallback.contains("parent_param = smros_process_sched_param"));
-}
-
-#[test]
-fn smros_pthread_inherit_sched_uses_process_metadata_without_parent_record() {
-    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let compat = std::fs::read_to_string(
-        repository.join("scripts/posix/runtime/smros_posix_compat.c"),
-    )
-    .expect("read POSIX compatibility runtime");
-    let start = compat.find("static void smros_pthread_attr_sched_values(").unwrap();
-    let body = braced_body(&compat[start..]);
-    let fallback = body
-        .find("else if (smros_pthread_attr_scope_value(attr) != PTHREAD_SCOPE_PROCESS)")
-        .expect("inheritance fallback");
-    let fallback = &body[fallback..];
-    assert!(fallback.contains("parent_policy = smros_process_sched_policy"));
-    assert!(fallback.contains("parent_param = smros_process_sched_param"));
     assert!(!fallback.contains("pthread_getschedparam"));
 }
 
