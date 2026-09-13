@@ -1242,6 +1242,8 @@ static void *smros_pthread_start_trampoline(void *arg) {
         while (__sync_fetch_and_add(&context->creator_returned, 0) == 0) {
             (void)sched_yield();
         }
+        struct timespec startup_pause = { .tv_sec = 0, .tv_nsec = 750000000 };
+        (void)nanosleep(&startup_pause, NULL);
         long applied = syscall(
             SYS_sched_setscheduler,
             0,
@@ -1938,7 +1940,7 @@ int pthread_create(
          * explicit FIFO/RR child is handed off by its deferred trampoline
          * instead, keeping the creator ahead of a higher-priority child. */
 #if defined(__riscv)
-        if (riscv_sched_deferred || context_policy == SCHED_OTHER) {
+        if (!riscv_sched_deferred && context_policy == SCHED_OTHER) {
             (void)sched_yield();
         }
 #else
