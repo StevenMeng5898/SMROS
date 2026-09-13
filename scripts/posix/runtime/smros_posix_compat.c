@@ -3626,6 +3626,32 @@ int smros_register_atfork_glibc217(
 }
 
 #if defined(__aarch64__) || defined(__riscv)
+/* Adding a RISC-V default version must retain the AArch64 ABI. Each alias
+ * enters the same implementation, including its validation and state. */
+uid_t smros_getuid_glibc217(void) { return getuid(); }
+uid_t smros_geteuid_glibc217(void) { return geteuid(); }
+int smros_setuid_glibc217(uid_t uid) { return setuid(uid); }
+int smros_seteuid_glibc217(uid_t uid) { return seteuid(uid); }
+void smros_setpwent_glibc217(void) { setpwent(); }
+void smros_endpwent_glibc217(void) { endpwent(); }
+struct passwd *smros_getpwent_glibc217(void) { return getpwent(); }
+long smros_sysconf_glibc217(int name) { return sysconf(name); }
+int smros_pthread_attr_setscope_glibc217(pthread_attr_t *attr, int scope) {
+    return pthread_attr_setscope(attr, scope);
+}
+int smros_pthread_attr_getscope_glibc217(const pthread_attr_t *attr, int *scope) {
+    return pthread_attr_getscope(attr, scope);
+}
+__asm__(".symver smros_getuid_glibc217,getuid@GLIBC_2.17");
+__asm__(".symver smros_geteuid_glibc217,geteuid@GLIBC_2.17");
+__asm__(".symver smros_setuid_glibc217,setuid@GLIBC_2.17");
+__asm__(".symver smros_seteuid_glibc217,seteuid@GLIBC_2.17");
+__asm__(".symver smros_setpwent_glibc217,setpwent@GLIBC_2.17");
+__asm__(".symver smros_endpwent_glibc217,endpwent@GLIBC_2.17");
+__asm__(".symver smros_getpwent_glibc217,getpwent@GLIBC_2.17");
+__asm__(".symver smros_sysconf_glibc217,sysconf@GLIBC_2.17");
+__asm__(".symver smros_pthread_attr_setscope_glibc217,pthread_attr_setscope@GLIBC_2.17");
+__asm__(".symver smros_pthread_attr_getscope_glibc217,pthread_attr_getscope@GLIBC_2.17");
 __asm__(".symver smros_pthread_attr_init_glibc217,pthread_attr_init@GLIBC_2.17");
 __asm__(".symver smros_pthread_attr_destroy_glibc217,pthread_attr_destroy@GLIBC_2.17");
 __asm__(".symver smros_sleep_glibc217,sleep@GLIBC_2.17");
