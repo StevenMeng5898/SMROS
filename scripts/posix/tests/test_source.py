@@ -1317,6 +1317,89 @@ int main(void) {
         self.assertIn("sem_post( &semsig2 )", patch)
         self.assertNotIn("PTS_PASS", patch)
 
+    def test_cond_signal_shutdown_patch_releases_signal_sender_waiters(self) -> None:
+        # Exercise the patched shutdown on real semaphore-blocked senders.
+        # Removing either post must leave a join blocked; checking patch text
+        # alone would not establish that the shutdown actually terminates.
+        checkout = REPOSITORY_ROOT / "target/posix/src" / PINNED_REVISION
+        if not (checkout / ".git").exists():
+            self.skipTest("requires the pinned POSIX source checkout")
+        relative = "conformance/interfaces/pthread_cond_signal/4-2.c"
+        original = run_git("show", f"{PINNED_REVISION}:{relative}", cwd=checkout)
+        patch_root = REPOSITORY_ROOT / "third_party" / "posixtest" / "patches"
+        series_entries = [
+            line.strip()
+            for line in (patch_root / "series").read_text(encoding="ascii").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            case = root / relative
+            case.parent.mkdir(parents=True)
+            case.write_text(original + "\n", encoding="utf-8")
+            for name in series_entries:
+                patch = (patch_root / name).read_text(encoding="utf-8")
+                for section in patch.split("diff --git ")[1:]:
+                    if section.startswith(f"a/{relative} b/{relative}\n"):
+                        subprocess.run(
+                            ["patch", "-p1", "--batch", "--directory", str(root)],
+                            input="diff --git " + section, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            check=True,
+                        )
+            patched = case.read_text(encoding="utf-8")
+            shutdown = patched.split("/* Now stop the threads and join them */", 1)[1]
+            shutdown = shutdown.split("#if VERBOSE", 1)[0]
+            harness = root / "shutdown.c"
+            harness.write_text(r'''
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <semaphore.h>
+#include <stdlib.h>
+#include <unistd.h>
+#define WITH_SYNCHRO
+#define UNRESOLVED(ret, message) exit(90)
+static sem_t semsig1, semsig2;
+static pthread_barrier_t ready;
+static pthread_t th_sig1, th_sig2, th_waiter, th_worker;
+static int do_it = 1;
+static void *sender(void *arg) {
+    pthread_barrier_wait(&ready);
+    if (sem_wait(arg) != 0) exit(91);
+    return NULL;
+}
+static void *finished(void *arg) { return arg; }
+static void shutdown_senders(void) {
+    int ret;
+''' + shutdown + r'''
+}
+int main(void) {
+    if (sem_init(&semsig1, 0, 0) || sem_init(&semsig2, 0, 0) ||
+            pthread_barrier_init(&ready, NULL, 3)) return 1;
+    if (pthread_create(&th_sig1, NULL, sender, &semsig1) ||
+            pthread_create(&th_sig2, NULL, sender, &semsig2) ||
+            pthread_create(&th_waiter, NULL, finished, NULL) ||
+            pthread_create(&th_worker, NULL, finished, NULL)) return 2;
+    pthread_barrier_wait(&ready);
+    shutdown_senders();
+    return do_it != 0;
+}
+''', encoding="utf-8")
+            binary = root / "shutdown"
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(harness), "-pthread", "-o", str(binary)], check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                completed = subprocess.run(
+                    [str(binary)], timeout=2, check=False,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail("condition signal shutdown left semaphore senders blocked")
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_difftime_patch_accepts_scheduler_delay_without_weakening_minimum(self) -> None:
         patch_root = REPOSITORY_ROOT / "third_party" / "posixtest" / "patches"
         series_entries = [

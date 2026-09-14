@@ -5,6 +5,7 @@ fix-pthread-key-create-array-bound.patch
 fix-pthread-key-create-limit-check.patch
 normalize-pthread-cond-test-sources.patch
 fix-cond-broadcast-4-2-shutdown-race.patch
+fix-cond-signal-4-2-shutdown-race.patch
 bound-shm-open-atomic-stress.patch
 replace-defective-fork-11-record-lock-test.patch
 fix-pthread-join-6-3-shutdown-race.patch
