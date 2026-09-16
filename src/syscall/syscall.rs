@@ -5798,7 +5798,7 @@ pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) -> bool
     let diagnostic_tick = LINUX_TIMER_SIGNAL_DIAGNOSTIC_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
     if diagnostic_tick % 1000 == 0 {
         let pstate = unsafe { (saved_regs as *const u64).add(32).read() };
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-timer",
             "deliver irq count={} saved_frame={:#x} pstate={:#x}",
             diagnostic_tick,

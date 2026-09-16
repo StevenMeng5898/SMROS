@@ -278,6 +278,19 @@ impl Aarch64AddressSpace {
             .map_err(map_core_error)
     }
 
+    pub(crate) fn replace_user_page(
+        &mut self,
+        vaddr: usize,
+        pfn: u64,
+        readable: bool,
+        writable: bool,
+        executable: bool,
+    ) -> Result<u64, AddressSpaceError> {
+        self.core
+            .replace_user_page(vaddr, pfn, readable, writable, executable)
+            .map_err(map_core_error)
+    }
+
     pub fn unmap_user_page(&mut self, vaddr: usize) -> Result<u64, AddressSpaceError> {
         self.core.unmap_user_page(vaddr).map_err(map_core_error)
     }

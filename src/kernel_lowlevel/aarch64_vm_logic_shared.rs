@@ -497,6 +497,52 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         Ok(())
     }
 
+    pub(crate) fn replace_user_page(
+        &mut self,
+        vaddr: usize,
+        pfn: u64,
+        readable: bool,
+        writable: bool,
+        executable: bool,
+    ) -> Result<u64, Aarch64AddressSpaceCoreError> {
+        if !aarch64_user_range_valid(vaddr, AARCH64_PAGE_SIZE) {
+            return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+        }
+        let replacement_paddr = self
+            .backend
+            .pfn_address(pfn)
+            .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+        self.ensure_private_existing_path(vaddr)?;
+        let (table_pfn, index) = self.leaf_location(vaddr)?;
+        let descriptor = self
+            .backend
+            .read_table_entry(table_pfn, index)
+            .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+        if !aarch64_l3_page_descriptor_valid(descriptor) {
+            return Err(Aarch64AddressSpaceCoreError::NotMapped);
+        }
+        if !self.backend.write_table_entry(table_pfn, index, 0) {
+            return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+        }
+        self.backend.break_user_mapping(vaddr);
+        let replacement = aarch64_user_page_descriptor(
+            replacement_paddr,
+            readable,
+            writable,
+            executable,
+        );
+        if !self
+            .backend
+            .write_table_entry(table_pfn, index, replacement)
+        {
+            let _ = self.backend.write_table_entry(table_pfn, index, descriptor);
+            self.backend.complete_user_mapping();
+            return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
+        }
+        self.backend.complete_user_mapping();
+        Ok((descriptor & AARCH64_DESC_ADDR_MASK) / AARCH64_PAGE_SIZE as u64)
+    }
+
     pub(crate) fn unmap_user_page(
         &mut self,
         vaddr: usize,
@@ -1545,6 +1591,20 @@ impl Aarch64AddressSpaceModel {
     ) -> Result<(), ()> {
         self.core
             .protect_user_page(vaddr, readable, writable, executable)
+            .map_err(|_| ())
+    }
+
+    pub(crate) fn replace_user_page(
+        &mut self,
+        _allocator: &mut Aarch64TestAllocator,
+        vaddr: usize,
+        pfn: u64,
+        readable: bool,
+        writable: bool,
+        executable: bool,
+    ) -> Result<u64, ()> {
+        self.core
+            .replace_user_page(vaddr, pfn, readable, writable, executable)
             .map_err(|_| ())
     }
 

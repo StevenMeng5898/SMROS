@@ -3792,6 +3792,133 @@ int main(void) {
         self.assertNotIn("__sync_lock_test_and_set", body)
         self.assertNotIn("__sync_lock_release", body)
 
+    def test_smros_posix_compat_shared_cond_broadcast_does_not_poll(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preload = root / "libsmros-posix-compat.so"
+            probe = root / "shared-cond-wakeup.c"
+            binary = root / "shared-cond-wakeup"
+            probe.write_text(
+                r'''
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <sched.h>
+#include <stdint.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+enum { WAITERS = 4 };
+
+typedef struct {
+    pthread_cond_t cond;
+    pthread_mutex_t mutex;
+    int ready;
+    int predicate;
+    int completed;
+} probe_t;
+
+static void child_wait(probe_t *probe) {
+    int result = pthread_mutex_lock(&probe->mutex);
+    if (result != 0) _exit(20 + result);
+    probe->ready++;
+    while (!probe->predicate) {
+        result = pthread_cond_wait(&probe->cond, &probe->mutex);
+        if (result != 0) {
+            pthread_mutex_unlock(&probe->mutex);
+            _exit(40 + result);
+        }
+    }
+    probe->completed++;
+    result = pthread_mutex_unlock(&probe->mutex);
+    _exit(result == 0 ? 0 : 60 + result);
+}
+
+int main(void) {
+    probe_t *probe = mmap(
+        NULL, sizeof(*probe), PROT_READ | PROT_WRITE,
+        MAP_SHARED | MAP_ANONYMOUS, -1, 0
+    );
+    if (probe == MAP_FAILED) return 2;
+
+    pthread_mutexattr_t mutex_attr;
+    pthread_condattr_t cond_attr;
+    if (pthread_mutexattr_init(&mutex_attr) != 0 ||
+            pthread_condattr_init(&cond_attr) != 0) return 3;
+    if (pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED) != 0 ||
+            pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED) != 0)
+        return 4;
+    if (pthread_mutex_init(&probe->mutex, &mutex_attr) != 0 ||
+            pthread_cond_init(&probe->cond, &cond_attr) != 0) return 5;
+    pthread_mutexattr_destroy(&mutex_attr);
+    pthread_condattr_destroy(&cond_attr);
+
+    pid_t children[WAITERS];
+    for (int index = 0; index < WAITERS; ++index) {
+        children[index] = fork();
+        if (children[index] < 0) return 6;
+        if (children[index] == 0) child_wait(probe);
+    }
+
+    int result = pthread_mutex_lock(&probe->mutex);
+    if (result != 0) return 7;
+    while (probe->ready < WAITERS) {
+        pthread_mutex_unlock(&probe->mutex);
+        sched_yield();
+        result = pthread_mutex_lock(&probe->mutex);
+        if (result != 0) return 8;
+    }
+
+    /* All waiters have released the mutex. Give each one time to enter its
+     * blocking wait before broadcasting, then require prompt delivery. */
+    struct timespec settle = { .tv_sec = 0, .tv_nsec = 10000000L };
+    nanosleep(&settle, NULL);
+    probe->predicate = 1;
+    if (pthread_cond_broadcast(&probe->cond) != 0) return 9;
+    if (pthread_mutex_unlock(&probe->mutex) != 0) return 10;
+
+    struct timespec wake_budget = { .tv_sec = 0, .tv_nsec = 30000000L };
+    nanosleep(&wake_budget, NULL);
+    int prompt = probe->completed == WAITERS;
+
+    int failed = !prompt;
+    for (int index = 0; index < WAITERS; ++index) {
+        int status = 0;
+        if (waitpid(children[index], &status, 0) != children[index] ||
+                !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            failed = 1;
+        }
+    }
+    if (pthread_cond_destroy(&probe->cond) != 0 ||
+            pthread_mutex_destroy(&probe->mutex) != 0) failed = 1;
+    if (munmap(probe, sizeof(*probe)) != 0) failed = 1;
+    return failed ? 11 : 0;
+}
+''',
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "cc", "-std=gnu99", "-fPIC", "-shared", "-Wall", "-Wextra",
+                    "-Werror", str(source), "-o", str(preload),
+                    "-Wl,-soname,libsmros-posix-compat.so", "-ldl",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["cc", "-std=gnu99", "-Wall", "-Wextra", "-Werror",
+                 str(probe), "-o", str(binary), "-pthread"],
+                check=True,
+            )
+            result = subprocess.run(
+                [str(binary)],
+                env={**os.environ, "LD_PRELOAD": str(preload)},
+                timeout=5.0,
+            )
+            self.assertEqual(result.returncode, 0)
+
     def test_smros_posix_compat_shared_cond_ignores_inherited_private_record(self) -> None:
         source = Path("scripts/posix/runtime/smros_posix_compat.c")
         with tempfile.TemporaryDirectory() as temporary:

@@ -61,6 +61,7 @@ fn collect_snapshot(
     files: &mut Vec<SnapshotFile>,
     dirs: &mut Vec<String>,
     skipped: &mut Vec<SkippedFile>,
+    excluded: Option<&Path>,
 ) {
     println!("cargo:rerun-if-changed={}", dir.display());
 
@@ -70,6 +71,9 @@ fn collect_snapshot(
     for entry in entries.flatten() {
         let path = entry.path();
         println!("cargo:rerun-if-changed={}", path.display());
+        if excluded.is_some_and(|excluded| excluded == path) {
+            continue;
+        }
 
         let Ok(metadata) = entry.metadata() else {
             continue;
@@ -83,7 +87,7 @@ fn collect_snapshot(
 
         if metadata.is_dir() {
             dirs.push(relative);
-            collect_snapshot(root, &path, files, dirs, skipped);
+            collect_snapshot(root, &path, files, dirs, skipped, excluded);
         } else if metadata.is_file() {
             if metadata.len() > HOST_SHARE_MAX_FILE_BYTES {
                 skipped.push(SkippedFile {
@@ -100,6 +104,82 @@ fn collect_snapshot(
             }
         }
     }
+}
+
+fn target_architecture(target: &str) -> Option<&'static str> {
+    match target {
+        "aarch64-unknown-none" => Some("aarch64"),
+        "riscv64gc-unknown-none-elf" => Some("riscv64"),
+        "x86_64-unknown-none" => Some("x86_64"),
+        _ => None,
+    }
+}
+
+fn selected_posix_stage(manifest_dir: &Path, target: &str) -> Result<Option<PathBuf>, String> {
+    println!("cargo:rerun-if-env-changed=SMROS_POSIX_STAGE");
+    println!("cargo:rerun-if-env-changed=TARGET");
+    let Some(architecture) = target_architecture(target) else {
+        return Ok(None);
+    };
+    let host_share_root = manifest_dir.join(HOST_SHARE_DIR);
+    let override_path = env::var_os("SMROS_POSIX_STAGE");
+    let stage = match &override_path {
+        Some(value) => {
+            if value.is_empty() {
+                return Err("POSIX stage override SMROS_POSIX_STAGE must not be empty".into());
+            }
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                path
+            } else {
+                manifest_dir.join(path)
+            }
+        }
+        _ if architecture == "aarch64" => host_share_root.join("posixtest"),
+        _ => manifest_dir
+            .join("target")
+            .join("posix")
+            .join(architecture)
+            .join("stage"),
+    };
+    // Watch an absent stage as well: publishing it must invalidate Cargo's
+    // previous stage-less build. The selection is independent of OUT_DIR.
+    println!("cargo:rerun-if-changed={}", stage.display());
+    if override_path.is_none() && !stage.exists() && !host_share_root.join("posixtest").exists() {
+        return Ok(None);
+    }
+    if !stage.is_dir() {
+        return Err(format!(
+            "POSIX stage for {architecture} is unavailable at {}; run `python3 -m scripts.posix.cli build --arch {architecture}` or set SMROS_POSIX_STAGE to a valid stage",
+            stage.display()
+        ));
+    }
+
+    let manifest = stage.join("manifest.tsv");
+    let contents = fs::read_to_string(&manifest).map_err(|error| {
+        format!(
+            "POSIX stage for {architecture} has no readable manifest.tsv at {}: {error}",
+            manifest.display()
+        )
+    })?;
+    if contents.lines().next() != Some("SMROS_POSIX_MANIFEST\t1") {
+        return Err(format!(
+            "POSIX stage has invalid manifest schema: {}",
+            manifest.display()
+        ));
+    }
+    let architectures: Vec<&str> = contents
+        .lines()
+        .filter_map(|line| line.strip_prefix("meta\tarchitecture\t"))
+        .collect();
+    if architectures.len() != 1 || architectures[0] != architecture {
+        return Err(format!(
+            "POSIX stage architecture mismatch for target {target}: expected {architecture}, found {:?} in {}",
+            architectures,
+            manifest.display()
+        ));
+    }
+    Ok(Some(stage))
 }
 
 fn linker_script_for_target(target: &str) -> Option<&'static str> {
@@ -191,12 +271,17 @@ fn main() {
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let target = env::var("TARGET").unwrap();
     let host_share_root = manifest_dir.join(HOST_SHARE_DIR);
     println!("cargo:rerun-if-changed={}", host_share_root.display());
+
+    let selected_stage =
+        selected_posix_stage(&manifest_dir, &target).unwrap_or_else(|error| panic!("{error}"));
 
     let mut dirs = Vec::new();
     let mut files = Vec::new();
     let mut skipped = Vec::new();
+    let legacy_stage = host_share_root.join("posixtest");
     if host_share_root.is_dir() {
         collect_snapshot(
             &host_share_root,
@@ -204,7 +289,34 @@ fn main() {
             &mut files,
             &mut dirs,
             &mut skipped,
+            selected_stage.as_ref().map(|_| legacy_stage.as_path()),
         );
+    }
+
+    if let Some(stage) = selected_stage {
+        dirs.push("posixtest".into());
+        let mut stage_dirs = Vec::new();
+        let mut stage_files = Vec::new();
+        let mut stage_skipped = Vec::new();
+        collect_snapshot(
+            &stage,
+            &stage,
+            &mut stage_files,
+            &mut stage_dirs,
+            &mut stage_skipped,
+            None,
+        );
+        for dir in stage_dirs {
+            dirs.push(format!("posixtest/{dir}"));
+        }
+        for mut file in stage_files {
+            file.relative = format!("posixtest/{}", file.relative);
+            files.push(file);
+        }
+        for mut file in stage_skipped {
+            file.relative = format!("posixtest/{}", file.relative);
+            skipped.push(file);
+        }
     }
 
     dirs.sort();
@@ -213,7 +325,9 @@ fn main() {
     skipped.sort_by(|a, b| a.relative.cmp(&b.relative));
 
     let mut generated = String::new();
-    generated.push_str("// Generated by build.rs from host_shared/. Do not edit.\n");
+    generated.push_str(
+        "// Generated by build.rs from host_shared/ and the target POSIX stage. Do not edit.\n",
+    );
     generated.push_str("#[derive(Clone, Copy, Debug)]\n");
     generated.push_str("pub struct HostShareFile {\n");
     generated.push_str("    pub path: &'static str,\n");

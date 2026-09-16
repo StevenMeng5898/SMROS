@@ -184,6 +184,12 @@ trap_restore:
     ld      t0, 240(t6)
     csrw    sepc, t0
     ld      t0, 256(t6)
+    // Linux user-space and its dynamic loader use the RISC-V floating-point
+    // register file. Mark it dirty before sret so valid fld/fsd instructions
+    // do not re-enter the illegal-instruction path when returning from a
+    // syscall, signal, or timer trap.
+    li      t1, 3 << 13
+    or      t0, t0, t1
     csrw    sstatus, t0
     ld      ra, 0(t6)
     ld      gp, 8(t6)

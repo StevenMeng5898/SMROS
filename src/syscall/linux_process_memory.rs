@@ -1809,6 +1809,17 @@ pub(crate) fn clone_for_fork(
     child_pid: usize,
     mut shared_attachments: Vec<LinuxSharedAttachmentClone>,
 ) -> Result<u64, SysError> {
+    let fork_trace = child_pid < 8 || child_pid % 25 == 0;
+    let fork_started = crate::kernel_lowlevel::timer::get_tick_count();
+    if fork_trace {
+        crate::kobj_info!(
+            "posix-fork",
+            "fork-timing begin parent={} child={} tick={}",
+            parent_pid,
+            child_pid,
+            fork_started
+        );
+    }
     crate::kobj_debug!(
         "posix-fork",
         "riscv clone begin parent={} child={}",
@@ -1857,6 +1868,15 @@ pub(crate) fn clone_for_fork(
             );
             error
         })?;
+        if fork_trace {
+            crate::kobj_info!(
+                "posix-fork",
+                "fork-timing promoted child={} elapsed={}",
+                child_pid,
+                crate::kernel_lowlevel::timer::get_tick_count()
+                    .saturating_sub(fork_started)
+            );
+        }
         crate::kobj_debug!("posix-fork", "riscv clone parent promotion complete");
         let parent = runtime
             .memories
@@ -1885,6 +1905,15 @@ pub(crate) fn clone_for_fork(
         let address_space = FallbackAddressSpace::clone_for_fork(&parent.address_space)?;
         #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "riscv64")))]
         let address_space = FallbackAddressSpace::new(child_pid)?;
+        if fork_trace {
+            crate::kobj_info!(
+                "posix-fork",
+                "fork-timing address-space child={} elapsed={}",
+                child_pid,
+                crate::kernel_lowlevel::timer::get_tick_count()
+                    .saturating_sub(fork_started)
+            );
+        }
         crate::kobj_debug!("posix-fork", "riscv clone child root allocated");
         let root_paddr = address_space.root_paddr();
         if root_paddr == 0 || root_paddr == parent.address_space.root_paddr() {
@@ -2137,6 +2166,15 @@ pub(crate) fn clone_for_fork(
         }
 
         crate::kobj_debug!("posix-fork", "riscv clone mappings complete");
+        if fork_trace {
+            crate::kobj_info!(
+                "posix-fork",
+                "fork-timing mappings child={} elapsed={}",
+                child_pid,
+                crate::kernel_lowlevel::timer::get_tick_count()
+                    .saturating_sub(fork_started)
+            );
+        }
 
         #[cfg(target_arch = "aarch64")]
         let brk_pages = if parent
@@ -2233,10 +2271,28 @@ pub(crate) fn clone_for_fork(
         }
         child.brk.pages = brk_pages;
         crate::kobj_debug!("posix-fork", "riscv clone brk complete");
+        if fork_trace {
+            crate::kobj_info!(
+                "posix-fork",
+                "fork-timing brk child={} elapsed={}",
+                child_pid,
+                crate::kernel_lowlevel::timer::get_tick_count()
+                    .saturating_sub(fork_started)
+            );
+        }
         #[cfg(target_arch = "aarch64")]
         child.address_space.end_deferred_user_updates();
         crate::kernel_lowlevel::cpu::sync_instruction_cache();
         runtime.memories.push(child);
+        if fork_trace {
+            crate::kobj_info!(
+                "posix-fork",
+                "fork-timing complete child={} elapsed={}",
+                child_pid,
+                crate::kernel_lowlevel::timer::get_tick_count()
+                    .saturating_sub(fork_started)
+            );
+        }
         Ok(root_paddr)
     });
     if let Err(error) = &result {
@@ -3117,6 +3173,29 @@ impl LinuxProcessMemory {
         self.address_space.unmap_user_page(address)
     }
 
+    fn replace_page(
+        &mut self,
+        address: usize,
+        pfn: u64,
+        prot: usize,
+    ) -> Result<u64, SysError> {
+        let (readable, writable, executable) = Self::page_permissions(prot);
+        #[cfg(target_arch = "aarch64")]
+        return self
+            .address_space
+            .replace_user_page(address, pfn, readable, writable, executable)
+            .map_err(map_address_error);
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let old_pfn = self.unmap_page(address)?;
+            if let Err(error) = self.map_page(address, pfn, prot) {
+                let _ = self.map_page(address, old_pfn, prot);
+                return Err(error);
+            }
+            Ok(old_pfn)
+        }
+    }
+
     fn materialize_cow_page(&mut self, address: usize) -> Result<bool, SysError> {
         let page_address = address & !(PAGE_SIZE - 1);
         let mut mapping_location = None;
@@ -3168,12 +3247,7 @@ impl LinuxProcessMemory {
                     PAGE_SIZE,
                 );
             }
-            if let Err(error) = self.unmap_page(page_address) {
-                PageFrameAllocator::free(new_pfn);
-                return Err(error);
-            }
-            if let Err(error) = self.map_page(page_address, new_pfn, prot) {
-                let _ = self.map_page(page_address, backing.pfn(), linux_page_protection_for_backing(backing, prot));
+            if let Err(error) = self.replace_page(page_address, new_pfn, prot) {
                 PageFrameAllocator::free(new_pfn);
                 return Err(error);
             }
@@ -3212,16 +3286,7 @@ impl LinuxProcessMemory {
             core::ptr::copy_nonoverlapping(source as *const u8, destination as *mut u8, PAGE_SIZE);
         }
         let page_prot = prot | LINUX_PROT_WRITE;
-        if let Err(error) = self.unmap_page(page_address) {
-            PageFrameAllocator::free(new_pfn);
-            return Err(error);
-        }
-        if let Err(error) = self.map_page(page_address, new_pfn, page_prot) {
-            let _ = self.map_page(
-                page_address,
-                backing.pfn(),
-                linux_page_protection_for_backing(backing, prot),
-            );
+        if let Err(error) = self.replace_page(page_address, new_pfn, page_prot) {
             PageFrameAllocator::free(new_pfn);
             return Err(error);
         }

@@ -2255,7 +2255,8 @@ fn posix_make_targets_are_explicit_and_keep_the_default_suite_offline() {
     assert!(makefile.contains("posix-build: posix-audit"));
     assert!(makefile.contains("posix-stage: posix-build"));
     assert!(makefile.contains("posix-baseline: posix-stage"));
-    assert!(makefile.contains("--sysroot \"$${AARCH64_SYSROOT}\""));
+    assert!(makefile.contains("POSIX_SYSROOT ?="));
+    assert!(makefile.contains("sysroot=\"$${AARCH64_SYSROOT}\""));
     assert!(makefile.contains("posix-run: posix-stage $(FXFS_DISK)"));
     assert!(makefile.contains("--qemu-memory \"$${POSIX_QEMU_MEMORY}\""));
     assert!(makefile.contains("POSIX_QUALITY_EVIDENCE"));
@@ -5744,6 +5745,62 @@ fn riscv_kernel_context_switch_keeps_interrupts_masked_until_scheduler_restore()
     assert!(
         !body.contains("csrsi   sstatus, 0x2"),
         "context switches must not enable interrupts before scheduler restore"
+    );
+}
+
+#[test]
+fn riscv_user_returns_enable_float_state_for_glibc_resolver() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let cpu = std::fs::read_to_string(repository.join("src/kernel_lowlevel/RISCV64/cpu.rs"))
+        .expect("read RISC-V CPU state code");
+    let boot = std::fs::read_to_string(repository.join("src/kernel_lowlevel/RISCV64/boot.rs"))
+        .expect("read RISC-V trap return assembly");
+    let context_switch = std::fs::read_to_string(
+        repository.join("src/kernel_lowlevel/RISCV64/context_switch.S"),
+    )
+    .expect("read RISC-V Linux child return assembly");
+
+    let switch_start = cpu
+        .find("pub unsafe fn switch_to_user(")
+        .expect("RISC-V user entry");
+    let switch_to_user = braced_body(&cpu[switch_start..]);
+    assert!(
+        switch_to_user.contains("const SSTATUS_FS_DIRTY: usize = 3 << 13"),
+        "RISC-V initial user entry must define the FS=Dirty state"
+    );
+    assert!(
+        switch_to_user.contains("sstatus |= SSTATUS_SPIE | SSTATUS_SUM | SSTATUS_FS_DIRTY"),
+        "RISC-V initial user entry must enable FP instructions for the dynamic loader"
+    );
+
+    let restore_start = boot
+        .find("trap_restore:")
+        .expect("RISC-V trap restore");
+    let restore = &boot[restore_start..];
+    let saved_state = restore
+        .find("ld      t0, 256(t6)")
+        .expect("saved sstatus load");
+    let float_state = restore[saved_state..]
+        .find("li      t1, 3 << 13")
+        .map(|offset| saved_state + offset)
+        .expect("trap restore must force FS=Dirty before sret");
+    let write_state = restore[float_state..]
+        .find("csrw    sstatus, t0")
+        .map(|offset| float_state + offset)
+        .expect("trap restore writes sstatus");
+    assert!(saved_state < float_state && float_state < write_state);
+
+    let child_start = context_switch
+        .find("start_linux_process_child:")
+        .expect("Linux child return path");
+    let child_end = context_switch[child_start..]
+        .find(".size start_linux_process_child")
+        .map(|offset| child_start + offset)
+        .expect("Linux child return path end");
+    let child = &context_switch[child_start..child_end];
+    assert!(
+        child.contains("li      t1, (1 << 5) | (1 << 18) | (3 << 13)"),
+        "fork and clone child returns must preserve FP-enabled user state"
     );
 }
 

@@ -141,7 +141,7 @@ start_linux_process_child:
     li      t1, (1 << 8)
     not     t1, t1
     and     t0, t0, t1
-    li      t1, (1 << 5) | (1 << 18)
+    li      t1, (1 << 5) | (1 << 18) | (3 << 13)
     or      t0, t0, t1
     csrw    sstatus, t0
     ld      t0, 0x110(t6)

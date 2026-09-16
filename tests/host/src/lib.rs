@@ -8996,6 +8996,34 @@ mod aarch64_vm_logic {
     }
 
     #[test]
+    fn three_level_model_replaces_user_page_with_one_leaf_mutation() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let mut address_space = Aarch64AddressSpaceModel::new(&mut allocator).expect("root");
+        let vaddr = 0x1000_0000;
+        address_space
+            .map_user_page(&mut allocator, vaddr, 0x9000, true, false, false)
+            .expect("map original read-only page");
+
+        allocator.clear_maintenance_events();
+        assert_eq!(
+            address_space.replace_user_page(&mut allocator, vaddr, 0x9001, true, true, false),
+            Ok(0x9000)
+        );
+
+        assert_eq!(
+            address_space.translate_user(&allocator, vaddr, true),
+            Some(0x9001_000)
+        );
+        assert_eq!(
+            allocator.maintenance_events(),
+            vec![
+                Aarch64MaintenanceEvent::Break(vaddr),
+                Aarch64MaintenanceEvent::Make,
+            ]
+        );
+    }
+
+    #[test]
     fn three_level_model_checked_copies_cross_pages_without_partial_faults() {
         let mut allocator = Aarch64TestAllocator::new(0x8000);
         allocator.insert_data_page(0x9000);

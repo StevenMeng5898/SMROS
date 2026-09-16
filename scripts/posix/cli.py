@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -39,7 +40,6 @@ PINNED_STUB_REVIEW_SHA256 = (
 PINNED_SHELL_REVIEW_SHA256 = (
     "be5f388dbf4768769a503a6ce58e5642ac8fbf9ed705c03093338b25c0afe7b5"
 )
-BASELINE_STAGE_PATH = REPOSITORY_ROOT / "host_shared" / "posixtest"
 BASELINE_RESULTS_PATH = (
     REPOSITORY_ROOT
     / "target"
@@ -57,6 +57,18 @@ SMROS_RESULTS_DIRECTORY = (
 )
 SMROS_KERNEL_PATH = REPOSITORY_ROOT / "kernel8.img"
 SMROS_DISK_PATH = REPOSITORY_ROOT / "smros-fxfs.img"
+
+
+def posix_stage_path(architecture: str) -> Path:
+    """Match build.rs snapshot selection without swapping host_shared contents."""
+    override = os.environ.get("SMROS_POSIX_STAGE")
+    if override is not None:
+        if not override:
+            raise ValueError("POSIX stage override SMROS_POSIX_STAGE must not be empty")
+        return REPOSITORY_ROOT / override
+    if architecture == "aarch64":
+        return REPOSITORY_ROOT / "host_shared" / "posixtest"
+    return REPOSITORY_ROOT / "target" / "posix" / architecture / "stage"
 
 
 def baseline_results_path(architecture: str) -> Path:
@@ -99,7 +111,7 @@ def create_parser() -> argparse.ArgumentParser:
         "build", help="cross-build and stage the reviewed POSIX suite"
     )
     build_parser.add_argument("--arch", required=True)
-    build_parser.add_argument("--stage", required=True, type=Path)
+    build_parser.add_argument("--stage", type=Path)
     build_parser.add_argument("--verify-only", action="store_true")
     baseline_parser = subparsers.add_parser(
         "baseline", help="run the staged suite under qemu-user"
@@ -335,6 +347,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.command == "build":
         try:
             toolchain = toolchain_for_architecture(arguments.arch)
+            stage = (
+                arguments.stage
+                if arguments.stage is not None
+                else posix_stage_path(arguments.arch)
+            )
             _required_tool(toolchain.compiler)
             _required_tool(toolchain.nm)
             _required_tool(toolchain.readelf)
@@ -346,7 +363,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     expected_shell_tests,
                 ) = _current_build_inputs_for_cli(arguments.arch)
                 summary = _verify_stage_for_cli(
-                    arguments.stage,
+                    stage,
                     expected_metadata=expected_metadata,
                     expected_tests=expected_tests,
                     expected_shell_tests=expected_shell_tests,
@@ -361,7 +378,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     tests,
                     shell_tests,
                     metadata,
-                    arguments.stage,
+                    stage,
                     Path("target/posix") / arguments.arch,
                 )
         except (OSError, ValueError) as error:
@@ -399,7 +416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
 
             result = run_baseline(
-                BASELINE_STAGE_PATH,
+                posix_stage_path(arguments.arch),
                 arguments.sysroot,
                 baseline_results_path(arguments.arch),
                 api=arguments.api,
@@ -426,7 +443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.command == "run-smros":
         try:
             toolchain = toolchain_for_architecture(arguments.arch)
-            stage = BASELINE_STAGE_PATH
+            stage = posix_stage_path(arguments.arch)
             results_directory = (
                 REPOSITORY_ROOT / "target" / "posix" / arguments.arch / "smros-run"
             )

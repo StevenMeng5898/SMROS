@@ -41,13 +41,17 @@ SMOKE_QEMU_MEMORY ?= 512M
 SMROS_ST_LOG ?= target/smros-smoke-qemu.log
 ST_COVERAGE_DIR ?= target/coverage/st
 POSIX_QEMU_MEMORY ?= 1024M
+POSIX_ARCH = $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),riscv64,$(if $(filter x86_64-unknown-none,$(TARGET)),x86_64,aarch64))
+POSIX_SYSROOT ?=
 AARCH64_SYSROOT ?= /usr/aarch64-linux-gnu
 POSIX_QUALITY_EVIDENCE ?=
 AARCH64_RUSTFLAGS = $(strip $(RUSTFLAGS) -D warnings)
 override POSIX_QEMU_MEMORY := $(value POSIX_QEMU_MEMORY)
+override POSIX_SYSROOT := $(value POSIX_SYSROOT)
 override AARCH64_SYSROOT := $(value AARCH64_SYSROOT)
 override POSIX_QUALITY_EVIDENCE := $(value POSIX_QUALITY_EVIDENCE)
 export POSIX_QEMU_MEMORY
+export POSIX_SYSROOT
 export AARCH64_SYSROOT
 export POSIX_QUALITY_EVIDENCE
 
@@ -118,22 +122,29 @@ posix-fetch:
 posix-audit: posix-fetch
 	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli audit --check
 
-# Cross-build the reviewed AArch64 test inventory and publish its stage
+# Cross-build the reviewed test inventory for ARCH and publish its stage
 posix-build: posix-audit
-	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli build --arch aarch64 --stage host_shared/posixtest
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli build --arch $(POSIX_ARCH)
 
 # Verify the published guest stage against current pinned inputs
 posix-stage: posix-build
-	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli build --arch aarch64 --stage host_shared/posixtest --verify-only
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli build --arch $(POSIX_ARCH) --verify-only
 
-# Run the staged AArch64 Linux reference under qemu-user
+# Run the staged target's Linux reference under qemu-user
 posix-baseline: posix-stage
-	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli baseline --sysroot "$${AARCH64_SYSROOT}"
+	@if [ -n "$${POSIX_SYSROOT}" ]; then \
+		sysroot="$${POSIX_SYSROOT}"; \
+	elif [ "$(POSIX_ARCH)" = aarch64 ]; then \
+		sysroot="$${AARCH64_SYSROOT}"; \
+	else \
+		sysroot="/usr/$(POSIX_ARCH)-linux-gnu"; \
+	fi; \
+	PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli baseline --arch $(POSIX_ARCH) --sysroot "$$sysroot"
 
 # Run the staged suite in SMROS under QEMU system emulation
 posix-run: posix-stage $(FXFS_DISK)
-	@$(MAKE) build ARCH=aarch64-unknown-none
-	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli run-smros --qemu-memory "$${POSIX_QEMU_MEMORY}"
+	@$(MAKE) build ARCH=$(TARGET)
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli run-smros --arch $(POSIX_ARCH) --qemu-memory "$${POSIX_QEMU_MEMORY}"
 
 # Publish all seven report artifacts; quality evidence is optional and separate
 posix-report:
@@ -305,9 +316,9 @@ help:
 	@echo "  posix-tool-test - Run offline POSIX host-tool unit tests"
 	@echo "  posix-fetch - Fetch and validate the pinned POSIX source (network)"
 	@echo "  posix-audit - Audit pinned POSIX inventory and review ledgers"
-	@echo "  posix-build - Cross-build and publish the AArch64 POSIX stage"
-	@echo "  posix-stage - Build and verify the generated AArch64 POSIX stage"
-	@echo "  posix-baseline - Run the AArch64 Linux reference under qemu-user"
+	@echo "  posix-build - Cross-build and publish the POSIX stage for ARCH"
+	@echo "  posix-stage - Build and verify the generated POSIX stage for ARCH"
+	@echo "  posix-baseline - Run the target's Linux reference under qemu-user"
 	@echo "  posix-run - Run the staged POSIX suite under QEMU/SMROS"
 	@echo "  posix-report - Render seven POSIX report artifacts (optional POSIX_QUALITY_EVIDENCE=path)"
 	@echo "  coverage-ut - Generate cargo-tarpaulin HTML for unit tests"

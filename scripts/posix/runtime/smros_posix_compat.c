@@ -2,6 +2,7 @@
 
 #include <aio.h>
 #include <limits.h>
+#include <linux/futex.h>
 #include <stdarg.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -4687,6 +4688,44 @@ static int smros_pthread_shared_cond_consume_wakeup(
     }
 }
 
+static int smros_pthread_shared_cond_park(
+    smros_pthread_shared_cond_state *state,
+    const struct timespec *deadline
+) {
+    /* Deferred cancellation is recorded in this preload, so recheck it at
+     * least every 50 ms. Futex wake makes signal/broadcast delivery immediate;
+     * unlike a short nanosleep this actually blocks the task in SMROS. */
+    struct timespec until;
+    int saved_errno = errno;
+    if (clock_gettime((clockid_t)state->clock_id, &until) != 0) {
+        int error = errno;
+        errno = saved_errno;
+        return error;
+    }
+    until.tv_nsec += 50000000L;
+    if (until.tv_nsec >= SMROS_NSEC_PER_SEC) {
+        until.tv_nsec -= SMROS_NSEC_PER_SEC;
+        until.tv_sec++;
+    }
+    if (deadline != NULL &&
+            (deadline->tv_sec < until.tv_sec ||
+             (deadline->tv_sec == until.tv_sec && deadline->tv_nsec < until.tv_nsec))) {
+        until = *deadline;
+    }
+    int operation = FUTEX_WAIT_BITSET;
+    if (state->clock_id == CLOCK_REALTIME) {
+        operation |= FUTEX_CLOCK_REALTIME;
+    }
+    /* Always expect zero: a signal between checking tokens and entering the
+     * kernel must return EAGAIN instead of putting a signaled waiter to sleep.
+     * No PRIVATE flag: different processes may map the same word elsewhere. */
+    long waited = syscall(SYS_futex, &state->wakeups, operation, 0, &until,
+                          NULL, FUTEX_BITSET_MATCH_ANY);
+    int error = waited == 0 ? 0 : errno;
+    errno = saved_errno;
+    return error == EAGAIN || error == EINTR || error == ETIMEDOUT ? 0 : error;
+}
+
 static int smros_pthread_shared_cond_wait_common(
     pthread_cond_t *cond,
     pthread_mutex_t *mutex,
@@ -4789,7 +4828,11 @@ static int smros_pthread_shared_cond_wait_common(
                 break;
             }
         }
-        smros_pthread_cond_wait_pause();
+        result = smros_pthread_shared_cond_park(state, timed ? deadline : NULL);
+        if (result != 0) {
+            (void)__sync_fetch_and_sub(&state->waiters, 1);
+            break;
+        }
     }
     int lock_result = pthread_mutex_lock(mutex);
     smros_trace_shared_cond(
@@ -4834,14 +4877,19 @@ static int smros_pthread_shared_cond_wake(
         return 0;
     }
     (void)__sync_add_and_fetch(&state->wakeups, broadcast ? waiters : 1);
+    int saved_errno = errno;
+    long woken = syscall(SYS_futex, &state->wakeups, FUTEX_WAKE,
+                         broadcast ? INT_MAX : 1, NULL, NULL, 0);
+    int result = woken < 0 ? errno : 0;
+    errno = saved_errno;
     smros_trace_shared_cond(
         broadcast ? "broadcast" : "signal",
         cond,
-        0,
+        result,
         waiters,
         __sync_fetch_and_add(&state->wakeups, 0)
     );
-    return 0;
+    return result;
 }
 
 static int smros_pthread_shared_cond_destroy(pthread_cond_t *cond) {

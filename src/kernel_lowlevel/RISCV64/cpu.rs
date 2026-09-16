@@ -307,13 +307,14 @@ pub unsafe fn switch_to_user(entry_point: u64, user_stack: u64, ttbr0: u64, _sta
     const SSTATUS_SPIE: usize = 1 << 5;
     const SSTATUS_SPP: usize = 1 << 8;
     const SSTATUS_SUM: usize = 1 << 18;
+    const SSTATUS_FS_DIRTY: usize = 3 << 13;
     let mut sstatus: usize;
     core::arch::asm!("csrr {sstatus}, sstatus", sstatus = out(reg) sstatus, options(nostack));
     sstatus &= !SSTATUS_SPP;
     // Trap entry and syscall handlers use the current address space for the
     // user stack and buffers. Permit those S-mode accesses while the process
     // is active; user mode itself cannot observe or modify SUM.
-    sstatus |= SSTATUS_SPIE | SSTATUS_SUM;
+    sstatus |= SSTATUS_SPIE | SSTATUS_SUM | SSTATUS_FS_DIRTY;
     core::arch::asm!(
         "csrw sstatus, {sstatus}",
         "csrw sepc, {entry}",
