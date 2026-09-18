@@ -4,6 +4,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -860,6 +861,8 @@ class CampaignTests(unittest.TestCase):
             "pthread_cond_broadcast",
             "pthread_mutex_lock",
             "pthread_mutex_unlock",
+            "fork",
+            "waitpid",
             "sigaction",
             "sigset",
             "kill",
@@ -2020,6 +2023,24 @@ class ManifestTests(unittest.TestCase):
 
 
 class StagingTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("aarch64-linux-gnu-gcc"), "needs ARM64 cross compiler")
+    def test_arm64_fork_and_waitpid_resolve_both_supported_symbol_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            library = Path(temporary) / "libsmros-posix-compat.so"
+            subprocess.run(build_module.posix_compat_preload_command(
+                "aarch64-linux-gnu-gcc", build_module.POSIX_COMPAT_PRELOAD_SOURCE,
+                library,
+            ), check=True, capture_output=True)
+            symbols = subprocess.check_output(
+                ["aarch64-linux-gnu-readelf", "--dyn-syms", "--wide", str(library)],
+                text=True,
+            )
+            # Real ARM64 binaries require 2.17; RISC-V's default stays 2.27.
+            # Missing versions cause the loader to silently select libc instead.
+            for name in ("fork", "waitpid"):
+                for version in ("@GLIBC_2.17", "@@GLIBC_2.27"):
+                    self.assertIn(name + version, symbols)
+
     def test_stage_journal_hardlink_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
