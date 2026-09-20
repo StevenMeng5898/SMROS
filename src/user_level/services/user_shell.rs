@@ -803,7 +803,7 @@ fn cmd_loglevel(ctx: &mut ShellContext, args: &[&str]) {
     ctx.serial.write_str("kernel object log level set to ");
     ctx.serial.write_str(level.as_str());
     ctx.serial.write_str("\n");
-    crate::kobj_info!("log", "runtime log level changed to {}", level.as_str());
+    crate::kobj_debug!("log", "runtime log level changed to {}", level.as_str());
 }
 
 /// Command: testsc - Test syscall interface

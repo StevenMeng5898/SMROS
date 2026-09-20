@@ -50,9 +50,6 @@ pub(crate) fn sys_futex(
 
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     {
-        if crate::kernel_lowlevel::smp::current_cpu_id() != 0 {
-            return Err(SysError::EINVAL);
-        }
         let decoded = decode_futex_op(op).ok_or(SysError::EINVAL)?;
         if uaddr % core::mem::align_of::<u32>() != 0 {
             return Err(SysError::EINVAL);
@@ -92,6 +89,7 @@ pub(crate) fn sys_futex(
     }
 }
 
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub(crate) fn restartable_wait_operation(op: u32) -> bool {
     decode_futex_op(op)
         .map(|decoded| {
@@ -196,7 +194,7 @@ fn wait(
         outcome: FutexWaitOutcome::Waiting,
     };
     if with_queue(|queue| queue.push(waiter)).is_err() {
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-futex",
             "wait-queue-full pid={} tid={} key={:#x} uaddr={:#x}",
             super::linux_process::current_pid().unwrap_or(0),

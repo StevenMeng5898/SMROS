@@ -81,5 +81,5 @@ pub fn kernel_object_manager() -> &'static mut KernelObjectManager {
 pub fn init() {
     right::init_boot_right_config().expect("kernel object right config failed");
     hypervisor::init();
-    log::info("init", "kernel object subsystem initialized");
+    log::debug("init", "kernel object subsystem initialized");
 }

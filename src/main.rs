@@ -128,7 +128,7 @@ fn allocator_lock() -> AllocIrqGuard {
         if spins == 1_000_000
             && ALLOC_LOCK_CONTENTION_REPORTS.fetch_add(1, Ordering::Relaxed) < 4
         {
-            crate::kobj_info!("allocator", "lock-contention spins={}", spins);
+            crate::kobj_debug!("allocator", "lock-contention spins={}", spins);
         }
     }
     AllocIrqGuard { state }
@@ -317,7 +317,7 @@ unsafe fn alloc_from_free_list(state: &mut KernelAllocatorState, layout: Layout)
         if scan_steps == 100_000
             && ALLOC_SCAN_REPORTS.fetch_add(1, Ordering::Relaxed) < 4
         {
-            crate::kobj_info!(
+            crate::kobj_debug!(
                 "allocator",
                 "free-list-scan-excessive steps={} layout={} align={}",
                 scan_steps,
@@ -361,7 +361,7 @@ unsafe fn insert_free_block(
         if scan_steps == 10_000
             && ALLOC_FREE_INSERT_REPORTS.fetch_add(1, Ordering::Relaxed) < 4
         {
-            crate::kobj_info!(
+            crate::kobj_debug!(
                 "allocator",
                 "free-list-insert-excessive steps={} block={:#x}",
                 scan_steps,

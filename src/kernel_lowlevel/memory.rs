@@ -457,6 +457,7 @@ impl PageFrameAllocator {
         let _ = allocator.core.free(pfn);
     }
 
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
     pub fn alloc_table() -> Option<u64> {
         let pfn = Self::alloc()?;
         let allocator = unsafe { &*ALLOCATOR.get() };
@@ -468,6 +469,7 @@ impl PageFrameAllocator {
         Some(pfn)
     }
 
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
     pub fn retain_table(pfn: u64) -> bool {
         let allocator = unsafe { &*ALLOCATOR.get() };
         let Some(index) = allocator.core.pfn_index(pfn) else {
@@ -491,6 +493,7 @@ impl PageFrameAllocator {
         }
     }
 
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
     pub fn release_table(pfn: u64) {
         let allocator = unsafe { &*ALLOCATOR.get() };
         let Some(index) = allocator.core.pfn_index(pfn) else {
@@ -519,6 +522,7 @@ impl PageFrameAllocator {
         }
     }
 
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
     pub fn table_is_shared(pfn: u64) -> bool {
         let allocator = unsafe { &*ALLOCATOR.get() };
         let Some(index) = allocator.core.pfn_index(pfn) else {

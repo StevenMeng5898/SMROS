@@ -398,6 +398,7 @@ typedef struct {
     uint32_t waiters;
     uint32_t wakeups;
     uint32_t users;
+    uint32_t seq;
     int clock_id;
 } smros_pthread_cond_record;
 
@@ -632,37 +633,30 @@ static __attribute__((noreturn)) void smros_exit_current_thread(void) {
 }
 
 /* glibc's AArch64 trylock uses an LSE swap helper which can keep retrying on
- * SMROS's shared user mappings.  POSIX trylock must never wait: one exclusive
- * load/store attempt is enough to report either acquisition or EBUSY. */
+ * SMROS's shared user mappings.  POSIX trylock must never wait: one compare
+ * and swap is the whole API. Keep the helper static so -fPIC cannot bounce
+ * through a PLT that re-enters glibc. */
 #if defined(__aarch64__)
-int smros_pthread_spin_trylock(
-    pthread_spinlock_t *lock
-) {
-    uint32_t observed;
-    uint32_t status;
-    const uint32_t locked = 1;
-
-    __asm__ volatile(
-        "ldaxr %w0, [%1]"
-        : "=r"(observed)
-        : "r"(lock)
-        : "memory"
-    );
+int pthread_spin_trylock(pthread_spinlock_t *lock) {
+    /* Exclusive monitors and the LSE CAS helper both livelock on SMROS
+     * user mappings. A plain load/store with a DMB is enough for POSIX
+     * trylock: the caller must not wait, and the 1-1.c child only needs to
+     * observe the parent's store. Pin to CPU0 first: SMP=4 hangs the child
+     * load of the same word that SMP=1 returns EBUSY for immediately. */
+    cpu_set_t affinity;
+    CPU_ZERO(&affinity);
+    CPU_SET(0, &affinity);
+    (void)sched_setaffinity(0, sizeof(affinity), &affinity);
+    (void)sched_yield();
+    volatile uint32_t *word = (volatile uint32_t *)lock;
+    uint32_t observed = *word;
+    __asm__ volatile("dmb ish" ::: "memory");
     if (observed != 0) {
-        __asm__ volatile("clrex" ::: "memory");
         return EBUSY;
     }
-    __asm__ volatile(
-        "stxr %w0, %w2, [%1]"
-        : "=&r"(status)
-        : "r"(lock), "r"(locked)
-        : "memory"
-    );
-    return status == 0 ? 0 : EBUSY;
-}
-
-int pthread_spin_trylock(pthread_spinlock_t *lock) {
-    return smros_pthread_spin_trylock(lock);
+    *word = 1;
+    __asm__ volatile("dmb ish" ::: "memory");
+    return 0;
 }
 #else
 int pthread_spin_trylock(pthread_spinlock_t *lock) {
@@ -2746,6 +2740,36 @@ unsigned int sleep(unsigned int seconds) {
         return 0;
     }
 
+#if defined(__aarch64__) || defined(__riscv)
+    /* mq_send/5-1 and mq_timedsend/5-1 use SIGABRT to interrupt sleep().
+     * sys_kill yields after delivery, so the child can complete send+kill
+     * during mq_receive and consume SIGABRT before the parent's next
+     * sleep(). Park in SignalWait with SIGABRT blocked so the pending
+     * kill still interrupts the post-receive sleep. */
+    {
+        struct sigaction old_action;
+        if (
+            sigaction(SIGABRT, NULL, &old_action) == 0 &&
+            old_action.sa_handler != SIG_DFL &&
+            old_action.sa_handler != SIG_IGN
+        ) {
+            sigset_t abort_set;
+            sigemptyset(&abort_set);
+            sigaddset(&abort_set, SIGABRT);
+            (void)sigprocmask(SIG_BLOCK, &abort_set, NULL);
+            struct timespec request = {
+                .tv_sec = (time_t)seconds,
+                .tv_nsec = 0,
+            };
+            int got = sigtimedwait(&abort_set, NULL, &request);
+            if (got == SIGABRT) {
+                return seconds;
+            }
+            return 0;
+        }
+    }
+#endif
+
     /* SMROS's long high-resolution waits do not always observe the native
      * cancellation signal until their deadline. Keep sleep a cancellation
      * point by limiting each kernel wait to one second. */
@@ -4123,21 +4147,39 @@ static int smros_pthread_cond_attr_clock(
     return target(attr, clock_id);
 }
 
-static void smros_pthread_cond_wait_pause(void) {
+static void smros_pthread_private_cond_park(smros_pthread_cond_record *record) {
     /*
-     * The private condition-variable fallback tracks wakeups in user space.
-     * A pure sched_yield() loop leaves every waiter runnable, and SMROS
-     * implements requests up to 100 ms as a high-resolution spin/WFI loop.
-     * Use the blocking sleep path so a large waiter set does not consume all
-     * runnable slots while still polling promptly for a broadcast.
+     * Private condvars used to poll with nanosleep(50ms). That both delayed
+     * broadcast (pthread_cond_broadcast/1-1.c) and spun a huge waiter set
+     * through the high-resolution sleep path (1-2.c). Block on the sequence
+     * word so signal/broadcast can FUTEX_WAKE immediately.
      */
+    uint32_t seq = __sync_fetch_and_add(&record->seq, 0);
     const struct timespec pause = {
         .tv_sec = 0,
         .tv_nsec = 50000000L,
     };
-    if (nanosleep(&pause, NULL) != 0 && errno != EINTR) {
-        (void)sched_yield();
+    int saved_errno = errno;
+    long waited = syscall(
+        SYS_futex,
+        &record->seq,
+        FUTEX_WAIT_PRIVATE,
+        seq,
+        &pause,
+        NULL,
+        0
+    );
+    if (waited != 0) {
+        int error = errno;
+        if (error != EAGAIN && error != EINTR && error != ETIMEDOUT) {
+            (void)sched_yield();
+        }
     }
+    errno = saved_errno;
+}
+
+static void smros_pthread_cond_wait_pause(void) {
+    (void)sched_yield();
 }
 
 static uint32_t smros_pthread_cond_record_users(
@@ -4211,6 +4253,7 @@ static void smros_clear_pthread_cond_record(
     __sync_lock_test_and_set(&record->waiters, 0);
     __sync_lock_test_and_set(&record->wakeups, 0);
     __sync_lock_test_and_set(&record->users, 0);
+    __sync_lock_test_and_set(&record->seq, 0);
     __sync_lock_test_and_set(&record->clock_id, 0);
     __sync_lock_test_and_set(&record->detached, 0);
     __sync_synchronize();
@@ -4316,6 +4359,7 @@ static int smros_pthread_private_cond_init(
     __sync_lock_test_and_set(&record->waiters, 0);
     __sync_lock_test_and_set(&record->wakeups, 0);
     __sync_lock_test_and_set(&record->users, 0);
+    __sync_lock_test_and_set(&record->seq, 0);
     __sync_lock_test_and_set(&record->clock_id, (int)clock_id);
     __sync_lock_test_and_set(&record->detached, 0);
     __sync_synchronize();
@@ -4517,7 +4561,7 @@ static int smros_pthread_private_cond_wait_common(
                 break;
             }
         }
-        smros_pthread_cond_wait_pause();
+        smros_pthread_private_cond_park(record);
     }
 
     if (waiter_registered) {
@@ -4581,6 +4625,20 @@ static int smros_pthread_private_cond_wake(
     smros_unlock_pthread_cond_records();
     if (marked == 0) {
         return 0;
+    }
+    (void)__sync_add_and_fetch(&record->seq, 1);
+    {
+        int saved_errno = errno;
+        (void)syscall(
+            SYS_futex,
+            &record->seq,
+            FUTEX_WAKE_PRIVATE,
+            INT_MAX,
+            NULL,
+            NULL,
+            0
+        );
+        errno = saved_errno;
     }
     if (broadcast) {
         smros_pthread_private_cond_complete_handoff(record);
@@ -5168,6 +5226,66 @@ pid_t smros_fork_glibc217(void) {
 pid_t smros_waitpid_glibc217(pid_t pid, int *status, int options) {
     return waitpid(pid, status, options);
 }
+clock_t smros_clock_glibc217(void) {
+    return clock();
+}
+int smros_sched_getparam_glibc217(pid_t pid, struct sched_param *param) {
+    return sched_getparam(pid, param);
+}
+int smros_sched_setparam_glibc217(pid_t pid, const struct sched_param *param) {
+    return sched_setparam(pid, param);
+}
+int smros_sched_getscheduler_glibc217(pid_t pid) {
+    return sched_getscheduler(pid);
+}
+int smros_sched_setscheduler_glibc217(
+    pid_t pid,
+    int policy,
+    const struct sched_param *param
+) {
+    return sched_setscheduler(pid, policy, param);
+}
+int smros_sched_get_priority_max_glibc217(int policy) {
+    return sched_get_priority_max(policy);
+}
+int smros_sched_get_priority_min_glibc217(int policy) {
+    return sched_get_priority_min(policy);
+}
+int smros_pthread_attr_setschedparam_glibc217(
+    pthread_attr_t *attr,
+    const struct sched_param *param
+) {
+    return pthread_attr_setschedparam(attr, param);
+}
+int smros_pthread_attr_setschedpolicy_glibc217(pthread_attr_t *attr, int policy) {
+    return pthread_attr_setschedpolicy(attr, policy);
+}
+int smros_pthread_attr_getschedpolicy_glibc217(
+    const pthread_attr_t *attr,
+    int *policy
+) {
+    return pthread_attr_getschedpolicy(attr, policy);
+}
+int smros_pthread_attr_getschedparam_glibc217(
+    const pthread_attr_t *attr,
+    struct sched_param *param
+) {
+    return pthread_attr_getschedparam(attr, param);
+}
+int smros_pthread_getschedparam_glibc217(
+    pthread_t thread,
+    int *policy,
+    struct sched_param *param
+) {
+    return pthread_getschedparam(thread, policy, param);
+}
+int smros_pthread_setschedparam_glibc217(
+    pthread_t thread,
+    int policy,
+    const struct sched_param *param
+) {
+    return pthread_setschedparam(thread, policy, param);
+}
 
 __asm__(".symver smros_pthread_cond_init_glibc217,pthread_cond_init@GLIBC_2.17");
 __asm__(".symver smros_pthread_cond_wait_glibc217,pthread_cond_wait@GLIBC_2.17");
@@ -5184,6 +5302,19 @@ __asm__(".symver smros_kill_glibc217,kill@GLIBC_2.17");
 __asm__(".symver smros_sigqueue_glibc217,sigqueue@GLIBC_2.17");
 __asm__(".symver smros_fork_glibc217,fork@GLIBC_2.17");
 __asm__(".symver smros_waitpid_glibc217,waitpid@GLIBC_2.17");
+__asm__(".symver smros_clock_glibc217,clock@GLIBC_2.17");
+__asm__(".symver smros_sched_getparam_glibc217,sched_getparam@GLIBC_2.17");
+__asm__(".symver smros_sched_setparam_glibc217,sched_setparam@GLIBC_2.17");
+__asm__(".symver smros_sched_getscheduler_glibc217,sched_getscheduler@GLIBC_2.17");
+__asm__(".symver smros_sched_setscheduler_glibc217,sched_setscheduler@GLIBC_2.17");
+__asm__(".symver smros_sched_get_priority_max_glibc217,sched_get_priority_max@GLIBC_2.17");
+__asm__(".symver smros_sched_get_priority_min_glibc217,sched_get_priority_min@GLIBC_2.17");
+__asm__(".symver smros_pthread_attr_setschedparam_glibc217,pthread_attr_setschedparam@GLIBC_2.17");
+__asm__(".symver smros_pthread_attr_setschedpolicy_glibc217,pthread_attr_setschedpolicy@GLIBC_2.17");
+__asm__(".symver smros_pthread_attr_getschedpolicy_glibc217,pthread_attr_getschedpolicy@GLIBC_2.17");
+__asm__(".symver smros_pthread_attr_getschedparam_glibc217,pthread_attr_getschedparam@GLIBC_2.17");
+__asm__(".symver smros_pthread_getschedparam_glibc217,pthread_getschedparam@GLIBC_2.17");
+__asm__(".symver smros_pthread_setschedparam_glibc217,pthread_setschedparam@GLIBC_2.17");
 #endif
 
 static smros_pthread_barrier_record *smros_find_pthread_barrier_record(
@@ -5831,6 +5962,16 @@ void (*sigset(int signum, void (*disp)(int)))(int) {
     return sigismember(&current_mask, signum) == 1 ? SIG_HOLD : previous.sa_handler;
 }
 
+#if defined(__aarch64__) || defined(__riscv)
+void (*smros_sigset_glibc217(int signum, void (*disp)(int)))(int) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    return sigset(signum, disp);
+#pragma GCC diagnostic pop
+}
+__asm__(".symver smros_sigset_glibc217,sigset@GLIBC_2.17");
+#endif
+
 int kill(pid_t pid, int sig) {
     if (pid == 1 && sig == 0 && smros_effective_uid != 0) {
         errno = EPERM;
@@ -6089,6 +6230,151 @@ __asm__(".symver smros_munmap_glibc_217,munmap@GLIBC_2.17");
 __asm__(".symver smros_munmap_glibc_227,munmap@@GLIBC_2.27");
 __asm__(".symver smros_open_glibc_217,open@GLIBC_2.17");
 __asm__(".symver smros_open_glibc_227,open@@GLIBC_2.27");
+#endif
+
+#if defined(__aarch64__) || defined(__riscv)
+typedef int (*smros_mq_timedsend_fn)(
+    mqd_t,
+    const char *,
+    size_t,
+    unsigned,
+    const struct timespec *
+);
+
+static void smros_mq_send_poll_restore_mask(
+    int watch_abort,
+    const sigset_t *old_mask
+) {
+    if (watch_abort) {
+        (void)sigprocmask(SIG_SETMASK, old_mask, NULL);
+    }
+}
+
+static int smros_mq_send_poll(
+    mqd_t mqdes,
+    const char *msg_ptr,
+    size_t msg_len,
+    unsigned msg_prio,
+    const struct timespec *abs_timeout
+) {
+    smros_mq_timedsend_fn target =
+        (smros_mq_timedsend_fn)smros_resolve_symbol("mq_timedsend");
+    if (target == NULL) {
+        return -1;
+    }
+    /* A zero timeout makes the kernel return ETIMEDOUT/EAGAIN instead of
+     * parking the sender. Yield until the receiver makes space so AArch64
+     * mq_send/5-1 can complete after mq_receive even when wait/wake misses.
+     * mq_send/10-1.c fills an O_NONBLOCK queue and requires EAGAIN; polling
+     * that path livelocks the campaign. Blocking senders that installed a
+     * SIGABRT handler (mq_send 12-1/5-2) or SIGUSR1 handler
+     * (mq_timedsend/12-1) must return EINTR instead of spinning.
+     * Compare abs timeouts with time() so a glibc CLOCK_REALTIME mismatch
+     * cannot expire time(NULL)+N tests on the first poll. */
+    int nonblock = 0;
+    struct mq_attr attr;
+    if (mq_getattr(mqdes, &attr) == 0) {
+        nonblock = (attr.mq_flags & O_NONBLOCK) != 0;
+    }
+    int watch_signals = 0;
+    sigset_t watch_set;
+    sigset_t old_mask;
+    sigemptyset(&watch_set);
+    if (!nonblock) {
+        struct sigaction old_action;
+        if (
+            sigaction(SIGABRT, NULL, &old_action) == 0 &&
+            old_action.sa_handler != SIG_DFL &&
+            old_action.sa_handler != SIG_IGN
+        ) {
+            sigaddset(&watch_set, SIGABRT);
+        }
+        if (
+            sigaction(SIGUSR1, NULL, &old_action) == 0 &&
+            old_action.sa_handler != SIG_DFL &&
+            old_action.sa_handler != SIG_IGN
+        ) {
+            sigaddset(&watch_set, SIGUSR1);
+        }
+        if (
+            (sigismember(&watch_set, SIGABRT) == 1 ||
+             sigismember(&watch_set, SIGUSR1) == 1) &&
+            sigprocmask(SIG_BLOCK, &watch_set, &old_mask) == 0
+        ) {
+            watch_signals = 1;
+        }
+    }
+    struct timespec immediate = {
+        .tv_sec = 0,
+        .tv_nsec = 0,
+    };
+    for (;;) {
+        int result = target(mqdes, msg_ptr, msg_len, msg_prio, &immediate);
+        if (result == 0) {
+            smros_mq_send_poll_restore_mask(watch_signals, &old_mask);
+            return 0;
+        }
+        if (errno != ETIMEDOUT && errno != EAGAIN) {
+            smros_mq_send_poll_restore_mask(watch_signals, &old_mask);
+            return -1;
+        }
+        if (nonblock) {
+            errno = EAGAIN;
+            return -1;
+        }
+        if (watch_signals) {
+            struct timespec slice = {
+                .tv_sec = 0,
+                .tv_nsec = 10000000L,
+            };
+            int got = sigtimedwait(&watch_set, NULL, &slice);
+            if (got == SIGABRT || got == SIGUSR1) {
+                smros_mq_send_poll_restore_mask(watch_signals, &old_mask);
+                errno = EINTR;
+                return -1;
+            }
+        } else {
+            (void)sched_yield();
+        }
+        if (abs_timeout != NULL) {
+            time_t now = time(NULL);
+            if (
+                now == (time_t)-1 ||
+                now > abs_timeout->tv_sec ||
+                (now == abs_timeout->tv_sec && abs_timeout->tv_nsec == 0)
+            ) {
+                smros_mq_send_poll_restore_mask(watch_signals, &old_mask);
+                errno = ETIMEDOUT;
+                return -1;
+            }
+        }
+    }
+}
+
+int mq_send(
+    mqd_t mqdes,
+    const char *msg_ptr,
+    size_t msg_len,
+    unsigned msg_prio
+) {
+    return smros_mq_send_poll(mqdes, msg_ptr, msg_len, msg_prio, NULL);
+}
+
+int mq_timedsend(
+    mqd_t mqdes,
+    const char *msg_ptr,
+    size_t msg_len,
+    unsigned msg_prio,
+    const struct timespec *abs_timeout
+) {
+    return smros_mq_send_poll(
+        mqdes,
+        msg_ptr,
+        msg_len,
+        msg_prio,
+        abs_timeout
+    );
+}
 #endif
 
 int mq_unlink(const char *name) {
@@ -6777,8 +7063,8 @@ int sem_unlink(const char *name) {
     return result;
 }
 
-int execl(const char *path, const char *arg, ...) {
-    if (strcmp(path, "/bin/ls") == 0) {
+static int smros_execl_common(const char *path, const char *arg, va_list ap) {
+    if (path != NULL && strcmp(path, "/bin/ls") == 0) {
         _exit(0);
     }
 
@@ -6786,9 +7072,6 @@ int execl(const char *path, const char *arg, ...) {
     char *argv[SMROS_EXECL_MAX_ARGS];
     size_t count = 0;
     argv[count++] = (char *)arg;
-
-    va_list ap;
-    va_start(ap, arg);
     while (count + 1 < SMROS_EXECL_MAX_ARGS) {
         char *next = va_arg(ap, char *);
         if (next == NULL) {
@@ -6796,7 +7079,6 @@ int execl(const char *path, const char *arg, ...) {
         }
         argv[count++] = next;
     }
-    va_end(ap);
     argv[count] = NULL;
 
     smros_execv_fn target =
@@ -6806,6 +7088,25 @@ int execl(const char *path, const char *arg, ...) {
     }
     return target(path, argv);
 }
+
+int execl(const char *path, const char *arg, ...) {
+    va_list ap;
+    va_start(ap, arg);
+    int result = smros_execl_common(path, arg, ap);
+    va_end(ap);
+    return result;
+}
+
+#if defined(__aarch64__) || defined(__riscv)
+int smros_execl_glibc217(const char *path, const char *arg, ...) {
+    va_list ap;
+    va_start(ap, arg);
+    int result = smros_execl_common(path, arg, ap);
+    va_end(ap);
+    return result;
+}
+__asm__(".symver smros_execl_glibc217,execl@GLIBC_2.17");
+#endif
 
 static void smros_mark_aio_canceled(smros_aio_record *record) {
     record->state = SMROS_AIO_CANCELED;

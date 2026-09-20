@@ -122,7 +122,7 @@ posixtest status
 
 The command reads the checksummed manifest staged at
 `/shared/posixtest/manifest.tsv`, permits only one serialized run, launches
-reviewed staged AArch64 binaries, and emits versioned serial events for the host
+reviewed staged guest binaries, and emits versioned serial events for the host
 controller. `status` reports the active/completed counts without starting a
 campaign. It includes selected-test, API, and group completion/pass ratios with
 two-decimal percentages. A missing/invalid manifest, empty selection, launch

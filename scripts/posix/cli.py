@@ -40,23 +40,6 @@ PINNED_STUB_REVIEW_SHA256 = (
 PINNED_SHELL_REVIEW_SHA256 = (
     "be5f388dbf4768769a503a6ce58e5642ac8fbf9ed705c03093338b25c0afe7b5"
 )
-BASELINE_RESULTS_PATH = (
-    REPOSITORY_ROOT
-    / "target"
-    / "posix"
-    / "aarch64"
-    / "linux-reference"
-    / "results.ndjson"
-)
-BASELINE_PREREQUISITE = (
-    "sudo apt-get install qemu-user gcc-aarch64-linux-gnu "
-    "libc6-dev-arm64-cross"
-)
-SMROS_RESULTS_DIRECTORY = (
-    REPOSITORY_ROOT / "target" / "posix" / "aarch64" / "smros-run"
-)
-SMROS_KERNEL_PATH = REPOSITORY_ROOT / "kernel8.img"
-SMROS_DISK_PATH = REPOSITORY_ROOT / "smros-fxfs.img"
 
 
 def posix_stage_path(architecture: str) -> Path:
@@ -71,10 +54,39 @@ def posix_stage_path(architecture: str) -> Path:
     return REPOSITORY_ROOT / "target" / "posix" / architecture / "stage"
 
 
+def smros_kernel_path(architecture: str) -> Path:
+    """Return the kernel image associated with one POSIX target."""
+    toolchain = toolchain_for_architecture(architecture)
+    return REPOSITORY_ROOT / toolchain.kernel_relative_path
+
+
+def smros_posix_disk_path(architecture: str) -> Path:
+    """Keep each architecture on its own FxFS image so overlays cannot mix."""
+    return (
+        REPOSITORY_ROOT
+        / "target"
+        / "posix"
+        / architecture
+        / "smros-fxfs.img"
+    )
+
+
+def smros_results_directory(architecture: str) -> Path:
+    """Return the host-controlled SMROS result directory for one target."""
+    return REPOSITORY_ROOT / "target" / "posix" / architecture / "smros-run"
+
+
+def baseline_prerequisite(architecture: str) -> str:
+    """Return the host packages needed for one architecture's qemu-user baseline."""
+    toolchain = toolchain_for_architecture(architecture)
+    return f"sudo apt-get install {toolchain.baseline_packages}"
+
+
+BASELINE_PREREQUISITE = baseline_prerequisite("aarch64")
+
+
 def baseline_results_path(architecture: str) -> Path:
-    """Return the result location associated with one target architecture."""
-    if architecture == "aarch64":
-        return BASELINE_RESULTS_PATH
+    """Return the qemu-user result location associated with one target."""
     return (
         REPOSITORY_ROOT
         / "target"
@@ -83,6 +95,9 @@ def baseline_results_path(architecture: str) -> Path:
         / "linux-reference"
         / "results.ndjson"
     )
+
+
+BASELINE_RESULTS_PATH = baseline_results_path("aarch64")
 
 
 def _print_exception_notes(error: BaseException) -> None:
@@ -388,15 +403,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if arguments.command == "baseline":
         toolchain = toolchain_for_architecture(arguments.arch)
-        qemu = shutil.which(
-            "qemu-" + arguments.arch if arguments.arch != "x86_64" else "qemu-x86_64"
-        )
+        qemu = shutil.which(toolchain.qemu_user)
         if qemu is None:
             print(
                 f"baseline failed: qemu-user for {arguments.arch} is unavailable",
                 file=sys.stderr,
             )
-            print(BASELINE_PREREQUISITE, file=sys.stderr)
+            print(baseline_prerequisite(arguments.arch), file=sys.stderr)
             return 1
         try:
             (
@@ -428,7 +441,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except BaselinePrerequisiteError as error:
             print(f"baseline failed: {error}", file=sys.stderr)
             _print_exception_notes(error)
-            print(BASELINE_PREREQUISITE, file=sys.stderr)
+            print(baseline_prerequisite(arguments.arch), file=sys.stderr)
             return 1
         except (OSError, ValueError) as error:
             print(f"baseline failed: {error}", file=sys.stderr)
@@ -444,27 +457,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             toolchain = toolchain_for_architecture(arguments.arch)
             stage = posix_stage_path(arguments.arch)
-            results_directory = (
-                REPOSITORY_ROOT / "target" / "posix" / arguments.arch / "smros-run"
-            )
-            kernel = (
-                SMROS_KERNEL_PATH
-                if arguments.arch == "aarch64"
-                else REPOSITORY_ROOT
-                / "target"
-                / (
-                    "riscv64gc-unknown-none-elf"
-                    if arguments.arch == "riscv64"
-                    else "x86_64-unknown-none"
-                )
-                / "release"
-                / "smros"
-            )
+            results_directory = smros_results_directory(arguments.arch)
             result = run_smros(
                 stage,
                 results_directory,
-                kernel=kernel,
-                disk=SMROS_DISK_PATH,
+                kernel=smros_kernel_path(arguments.arch),
+                disk=smros_posix_disk_path(arguments.arch),
                 memory=arguments.qemu_memory,
                 api=arguments.api,
                 group=arguments.group,

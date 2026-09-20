@@ -58,10 +58,11 @@ fn wake_identity(identity: Option<(usize, usize)>) {
     let Some((tid, scheduler_thread)) = identity else {
         return;
     };
-    if linux_task::wake_blocked(tid, scheduler_thread, LinuxBlockReason::Mqueue) {
-        return;
-    }
-    let _ = with_state(|state| state.take_outcome(tid, scheduler_thread));
+    // If the waiter has published but not yet blocked, leave the Woken
+    // outcome in place. Stealing it here makes AArch64 SMP mq_send miss
+    // the wakeup and never complete after mq_receive.
+    let _ = linux_task::wake_blocked(tid, scheduler_thread, LinuxBlockReason::Mqueue);
+    scheduler::yield_now();
 }
 
 pub(crate) fn open_named(
@@ -115,11 +116,6 @@ pub(crate) fn wait(
     kind: LinuxMqueueWaitKind,
     deadline: Option<LinuxMqueueDeadline>,
 ) -> Result<LinuxMqueueWaitOutcome, SysError> {
-    #[cfg(target_arch = "aarch64")]
-    if crate::kernel_lowlevel::smp::current_cpu_id() != 0 {
-        return Err(SysError::EINVAL);
-    }
-
     let now = crate::kernel_lowlevel::timer::get_tick_count();
     if deadline.is_some_and(|deadline| deadline.ticks <= now) {
         return Err(SysError::ETIMEDOUT);
@@ -146,7 +142,9 @@ pub(crate) fn wait(
             }
         }
 
+        crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
         scheduler::schedule();
+        let _ = crate::kernel_lowlevel::cpu::mask_interrupts();
         let outcome = with_state(|state| state.take_outcome(tid, scheduler_thread.0));
         if let Some(outcome) = outcome {
             return Ok(outcome);

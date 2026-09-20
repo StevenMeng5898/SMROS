@@ -13,3 +13,5 @@ fix-difftime-sleep-boundary.patch
 fix-scheduler-permission-parent-tests.patch
 fix-pthread-equal-stop-flag.patch
 fix-sigpause-thread-completion-race.patch
+fix-mmap-27-1-map-fixed-supported.patch
+fix-mq-open-16-1-exclusive-create-race.patch

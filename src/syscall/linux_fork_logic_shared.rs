@@ -479,6 +479,7 @@ pub(crate) fn run_linux_fork_transaction<B: LinuxForkTransactionBackend>(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub(crate) struct LinuxForkPreparedContext<F> {
     pub frame: F,
     pub return_pc: u64,
@@ -488,6 +489,7 @@ pub(crate) struct LinuxForkPreparedContext<F> {
     pub root_paddr: u64,
 }
 
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub(crate) fn prepare_linux_fork_context<F: Copy>(
     mut frame: F,
     return_pc: u64,
@@ -523,6 +525,7 @@ pub(crate) trait LinuxForkPageOps {
     fn acquire_shared(&mut self, parent: Self::Page) -> Result<Self::Page, Self::Error>;
     fn release_page(&mut self, page: Self::Page);
     #[cfg(not(target_arch = "aarch64"))]
+    #[cfg_attr(target_arch = "riscv64", allow(dead_code))]
     fn map_page(
         &mut self,
         address: usize,
@@ -530,6 +533,7 @@ pub(crate) trait LinuxForkPageOps {
         prot: usize,
     ) -> Result<(), Self::Error>;
     #[cfg(not(target_arch = "aarch64"))]
+    #[cfg_attr(target_arch = "riscv64", allow(dead_code))]
     fn unmap_page(&mut self, address: usize);
 }
 
@@ -611,6 +615,7 @@ pub(crate) fn clone_linux_fork_pages<O: LinuxForkPageOps>(
 }
 
 #[cfg(not(target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "riscv64", allow(dead_code))]
 pub(crate) fn map_linux_fork_pages<O: LinuxForkPageOps>(
     ops: &mut O,
     address: usize,
@@ -623,6 +628,7 @@ pub(crate) fn map_linux_fork_pages<O: LinuxForkPageOps>(
 }
 
 #[cfg(not(target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "riscv64", allow(dead_code))]
 pub(crate) fn map_linux_fork_pages_with_protection<O: LinuxForkPageOps>(
     ops: &mut O,
     address: usize,

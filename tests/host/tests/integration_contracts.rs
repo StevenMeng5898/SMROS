@@ -184,6 +184,159 @@ fn posix_event_path_has_no_unframed_debug_serial_writers() {
 }
 
 #[test]
+fn kobject_production_call_sites_use_debug_instead_of_info() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let src = repository.join("src");
+    let mut offenders = Vec::new();
+
+    fn visit_rust_files(dir: &std::path::Path, visit: &mut impl FnMut(&std::path::Path, &str)) {
+        let mut entries = std::fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("read {}: {error}", dir.display()))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("directory entries");
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                visit_rust_files(&path, visit);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let contents = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+                visit(&path, &contents);
+            }
+        }
+    }
+
+    visit_rust_files(&src, &mut |path, contents| {
+        let relative = path
+            .strip_prefix(&repository)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let is_kobj_log = relative == "src/kernel_objects/log.rs";
+        for (index, line) in contents.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                continue;
+            }
+            if is_kobj_log && trimmed.starts_with("macro_rules! kobj_info") {
+                continue;
+            }
+            if trimmed.contains("kobj_info!") || trimmed.contains("log::info(") {
+                offenders.push(format!("{relative}:{}:{trimmed}", index + 1));
+            }
+        }
+    });
+
+    assert!(
+        offenders.is_empty(),
+        "kobject Info-level logs remain on production paths; demote them to debug so guest posixtest all cannot hang on SIGUSR1/SIGUSR2 floods such as pthread_create/14-1.c:\n{}",
+        offenders.join("\n")
+    );
+
+    let log_rs =
+        std::fs::read_to_string(src.join("kernel_objects/log.rs")).expect("read kobject logger");
+    assert!(
+        log_rs.contains("AtomicUsize::new(LogLevel::Info as usize)"),
+        "default kobject threshold must stay Info so Debug logs stay silent"
+    );
+}
+
+#[test]
+fn linux_kill_yields_after_delivering_a_real_signal() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let kill = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_kill(")
+            .expect("process-directed kill")..],
+    );
+    let delivered = kill
+        .find("linux_deliver_kill_to_target(target_pid, signum)")
+        .expect("kill queues the signal before considering a yield");
+    let yield_now = kill.find("scheduler::yield_now()").expect(
+        "sys_kill must yield after delivering a real signal so SIGUSR storms such as pthread_create/14-1.c cannot starve sleepers",
+    );
+    assert!(
+        kill.contains("if signum != 0"),
+        "existence probes (signum 0) must not force a yield"
+    );
+    assert!(
+        delivered < yield_now,
+        "yield must happen after the signal is queued"
+    );
+}
+
+#[test]
+fn linux_mqueue_wait_accepts_any_cpu() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let runtime = std::fs::read_to_string(repository.join("src/syscall/linux_mqueue.rs"))
+        .expect("read Linux mqueue runtime");
+    let wait = braced_body(
+        &runtime[runtime
+            .find("pub(crate) fn wait(")
+            .expect("mqueue wait")..],
+    );
+    assert!(
+        !wait.contains("current_cpu_id() != 0"),
+        "blocking mq_send/mq_receive must work on every CPU so AArch64 SMP campaigns can drain a full queue"
+    );
+}
+
+#[test]
+fn linux_mqueue_wake_leaves_outcome_if_waiter_has_not_blocked() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let runtime = std::fs::read_to_string(repository.join("src/syscall/linux_mqueue.rs"))
+        .expect("read Linux mqueue runtime");
+    let wake = braced_body(
+        &runtime[runtime.find("fn wake_identity(").expect("mqueue wake helper")..],
+    );
+    assert!(wake.contains("linux_task::wake_blocked("));
+    assert!(
+        wake.contains("scheduler::yield_now()"),
+        "yield after mq wakeup so the sender can complete and SIGABRT the parent before sleep(3) starts"
+    );
+    assert!(
+        !wake.contains("take_outcome("),
+        "stealing the waiter outcome before block_current publishes makes mq_send/5-1 miss the receive wakeup on SMP"
+    );
+}
+
+#[test]
+fn linux_futex_accepts_any_cpu() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let futex = std::fs::read_to_string(repository.join("src/syscall/linux_futex.rs"))
+        .expect("read Linux futex runtime");
+    let entry = braced_body(
+        &futex[futex.find("pub(crate) fn sys_futex(").expect("sys_futex")..],
+    );
+    assert!(
+        !entry.contains("current_cpu_id() != 0"),
+        "private condvar futex waits must be allowed on secondary CPUs"
+    );
+}
+
+#[test]
+fn linux_timer_settime_arms_hardware_deadline() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall implementation");
+    let settime = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_linux_timer_settime(")
+            .expect("timer_settime")..],
+    );
+    let armed = settime
+        .find("timer.arm(")
+        .expect("POSIX timer is armed in software");
+    let hardware = settime
+        .find("arm_at_nanoseconds")
+        .expect("timer_settime must program a hardware compare so RISC-V 30ms timers fire during nanosleep");
+    assert!(armed < hardware);
+}
+
+#[test]
 fn linux_fcntl_marshals_aarch64_record_locks() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
@@ -1765,7 +1918,7 @@ fn assert_posix_make_value_is_shell_safe(target: &str, variable: &str, flag: &st
         .env("PATH", &path);
     if target == "posix-run" {
         command
-            .arg(format!("FXFS_DISK={}", disk.display()))
+            .arg(format!("POSIX_DISK={}", disk.display()))
             .arg("MAKE=true");
     }
     let output = command.output().expect("execute POSIX Make target");
@@ -1795,7 +1948,7 @@ fn assert_posix_make_value_is_shell_safe(target: &str, variable: &str, flag: &st
         .arg(format!("{variable}={make_value}"));
     if target == "posix-run" {
         dry_run
-            .arg(format!("FXFS_DISK={}", disk.display()))
+            .arg(format!("POSIX_DISK={}", disk.display()))
             .arg("MAKE=true");
     }
     let dry_output = dry_run.output().expect("dry-run POSIX Make target");
@@ -2245,7 +2398,6 @@ fn posix_make_targets_are_explicit_and_keep_the_default_suite_offline() {
     }
 
     assert!(makefile.contains("POSIX_QEMU_MEMORY ?= 1024M"));
-    assert!(makefile.contains("AARCH64_SYSROOT ?= /usr/aarch64-linux-gnu"));
     assert!(makefile.contains(
         "posix-tool-test:\n\t@PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/posix/tests -v"
     ));
@@ -2256,8 +2408,10 @@ fn posix_make_targets_are_explicit_and_keep_the_default_suite_offline() {
     assert!(makefile.contains("posix-stage: posix-build"));
     assert!(makefile.contains("posix-baseline: posix-stage"));
     assert!(makefile.contains("POSIX_SYSROOT ?="));
-    assert!(makefile.contains("sysroot=\"$${AARCH64_SYSROOT}\""));
-    assert!(makefile.contains("posix-run: posix-stage $(FXFS_DISK)"));
+    assert!(makefile.contains("sysroot=\"$${POSIX_SYSROOT:-/usr/$(POSIX_ARCH)-linux-gnu}\""));
+    assert!(makefile.contains("posix-run: posix-stage $(POSIX_DISK)"));
+    assert!(!makefile.contains("posix-run: posix-stage $(FXFS_DISK)"));
+    assert!(!makefile.contains("AARCH64_SYSROOT"));
     assert!(makefile.contains("--qemu-memory \"$${POSIX_QEMU_MEMORY}\""));
     assert!(makefile.contains("POSIX_QUALITY_EVIDENCE"));
     assert!(makefile.contains("--quality-evidence"));
@@ -2284,7 +2438,7 @@ fn posix_make_targets_are_explicit_and_keep_the_default_suite_offline() {
 
 #[test]
 fn posix_baseline_make_value_is_shell_safe() {
-    assert_posix_make_value_is_shell_safe("posix-baseline", "AARCH64_SYSROOT", "--sysroot");
+    assert_posix_make_value_is_shell_safe("posix-baseline", "POSIX_SYSROOT", "--sysroot");
 }
 
 #[test]
@@ -2801,10 +2955,9 @@ fn posix_test_preloads_smros_compat_runtime_without_affecting_shell_run() {
 #[test]
 fn smros_pthread_create_yields_after_publishing_child() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let compat = std::fs::read_to_string(
-        repository.join("scripts/posix/runtime/smros_posix_compat.c"),
-    )
-    .expect("read POSIX compatibility runtime");
+    let compat =
+        std::fs::read_to_string(repository.join("scripts/posix/runtime/smros_posix_compat.c"))
+            .expect("read POSIX compatibility runtime");
     let create_start = compat
         .find("int pthread_create(")
         .expect("pthread_create interposer");
@@ -2818,10 +2971,9 @@ fn smros_pthread_create_yields_after_publishing_child() {
 #[test]
 fn smros_private_mutex_unlock_clears_metadata_before_native_release() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let compat = std::fs::read_to_string(
-        repository.join("scripts/posix/runtime/smros_posix_compat.c"),
-    )
-    .expect("read POSIX compatibility runtime");
+    let compat =
+        std::fs::read_to_string(repository.join("scripts/posix/runtime/smros_posix_compat.c"))
+            .expect("read POSIX compatibility runtime");
     let unlock_start = compat
         .find("int pthread_mutex_unlock(")
         .expect("pthread_mutex_unlock interposer");
@@ -2842,10 +2994,9 @@ fn smros_private_mutex_unlock_clears_metadata_before_native_release() {
 #[test]
 fn smros_riscv_pthread_create_defers_explicit_fifo_startup() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let compat = std::fs::read_to_string(
-        repository.join("scripts/posix/runtime/smros_posix_compat.c"),
-    )
-    .expect("read POSIX compatibility runtime");
+    let compat =
+        std::fs::read_to_string(repository.join("scripts/posix/runtime/smros_posix_compat.c"))
+            .expect("read POSIX compatibility runtime");
 
     assert!(
         compat.contains("smros_pthread_attr_setinheritsched_fn"),
@@ -2871,8 +3022,8 @@ fn smros_riscv_pthread_create_defers_explicit_fifo_startup() {
         .expect("pthread_create libc launch");
     let restore = launch
         + create[launch..]
-        .find("set_inherit((pthread_attr_t *)effective_attr, PTHREAD_EXPLICIT_SCHED)")
-        .expect("pthread_create must restore the caller's scheduling attribute");
+            .find("set_inherit((pthread_attr_t *)effective_attr, PTHREAD_EXPLICIT_SCHED)")
+            .expect("pthread_create must restore the caller's scheduling attribute");
     let publish = create
         .find("context->creator_returned = 1")
         .expect("pthread_create must release the child after libc returns");
@@ -2904,10 +3055,9 @@ fn smros_riscv_pthread_create_defers_explicit_fifo_startup() {
 #[test]
 fn smros_riscv_pthread_join_poll_blocks_for_lower_priority_children() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let compat = std::fs::read_to_string(
-        repository.join("scripts/posix/runtime/smros_posix_compat.c"),
-    )
-    .expect("read POSIX compatibility runtime");
+    let compat =
+        std::fs::read_to_string(repository.join("scripts/posix/runtime/smros_posix_compat.c"))
+            .expect("read POSIX compatibility runtime");
     let join_start = compat
         .find("int pthread_join(")
         .expect("pthread_join interposer");
@@ -2925,10 +3075,9 @@ fn smros_riscv_pthread_join_poll_blocks_for_lower_priority_children() {
 #[test]
 fn smros_riscv_pthread_create_yields_for_default_children() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let compat = std::fs::read_to_string(
-        repository.join("scripts/posix/runtime/smros_posix_compat.c"),
-    )
-    .expect("read POSIX compatibility runtime");
+    let compat =
+        std::fs::read_to_string(repository.join("scripts/posix/runtime/smros_posix_compat.c"))
+            .expect("read POSIX compatibility runtime");
     let create_start = compat
         .find("int pthread_create(")
         .expect("pthread_create interposer");
@@ -3568,7 +3717,9 @@ fn posix_guest_suite_completion_reports_shell_readiness() {
         .expect("read POSIX runner");
     let finish_start = runner.find("fn finish_suite()").expect("suite finisher");
     let finish = braced_body(&runner[finish_start..]);
-    let suite_end = finish.find("emit_suite_end(state)").expect("suite end event");
+    let suite_end = finish
+        .find("emit_suite_end(state)")
+        .expect("suite end event");
     let completion = finish
         .find("posixtest: completed")
         .expect("completion readiness line");
@@ -5608,17 +5759,15 @@ fn riscv_timer_signal_delivery_preserves_a_rewritten_trap_frame() {
 #[test]
 fn riscv_signal_frames_use_a_compact_nested_stack_layout() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let logic = std::fs::read_to_string(
-        repository.join("src/syscall/linux_task_logic_shared.rs"),
-    )
-    .expect("read Linux signal frame layout");
+    let logic = std::fs::read_to_string(repository.join("src/syscall/linux_task_logic_shared.rs"))
+        .expect("read Linux signal frame layout");
 
     assert!(
         logic.contains("#[cfg(target_arch = \"riscv64\")]\npub(crate) const LINUX_SIGNAL_UCONTEXT_BYTES: usize = 512;")
     );
-    assert!(
-        logic.contains("let frame_bytes = (LINUX_SIGNAL_INFO_BYTES + LINUX_SIGNAL_UCONTEXT_BYTES) as u64;")
-    );
+    assert!(logic.contains(
+        "let frame_bytes = (LINUX_SIGNAL_INFO_BYTES + LINUX_SIGNAL_UCONTEXT_BYTES) as u64;"
+    ));
 }
 
 #[test]
@@ -5658,9 +5807,7 @@ fn riscv_root_timer_preemption_is_only_deferred_for_realtime_root_tasks() {
         .expect("RISC-V timer handler");
     let handler = braced_body(&main[handler_start..]);
     assert!(
-        handler.contains(
-            "if !crate::syscall::linux_task::current_root_scheduler_is_realtime()",
-        ),
+        handler.contains("if !crate::syscall::linux_task::current_root_scheduler_is_realtime()",),
         "RISC-V timer preemption must inspect the root task policy"
     );
     assert!(
@@ -5729,10 +5876,9 @@ fn riscv_task_exit_reenables_timer_interrupts_before_handoff() {
 #[test]
 fn riscv_kernel_context_switch_keeps_interrupts_masked_until_scheduler_restore() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let context_switch = std::fs::read_to_string(
-        repository.join("src/kernel_lowlevel/RISCV64/context_switch.S"),
-    )
-    .expect("read RISC-V context switch assembly");
+    let context_switch =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/RISCV64/context_switch.S"))
+            .expect("read RISC-V context switch assembly");
     let start = context_switch
         .find("context_switch:")
         .expect("RISC-V context switch entry");
@@ -5755,10 +5901,9 @@ fn riscv_user_returns_enable_float_state_for_glibc_resolver() {
         .expect("read RISC-V CPU state code");
     let boot = std::fs::read_to_string(repository.join("src/kernel_lowlevel/RISCV64/boot.rs"))
         .expect("read RISC-V trap return assembly");
-    let context_switch = std::fs::read_to_string(
-        repository.join("src/kernel_lowlevel/RISCV64/context_switch.S"),
-    )
-    .expect("read RISC-V Linux child return assembly");
+    let context_switch =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/RISCV64/context_switch.S"))
+            .expect("read RISC-V Linux child return assembly");
 
     let switch_start = cpu
         .find("pub unsafe fn switch_to_user(")
@@ -5773,9 +5918,7 @@ fn riscv_user_returns_enable_float_state_for_glibc_resolver() {
         "RISC-V initial user entry must enable FP instructions for the dynamic loader"
     );
 
-    let restore_start = boot
-        .find("trap_restore:")
-        .expect("RISC-V trap restore");
+    let restore_start = boot.find("trap_restore:").expect("RISC-V trap restore");
     let restore = &boot[restore_start..];
     let saved_state = restore
         .find("ld      t0, 256(t6)")
@@ -6869,18 +7012,13 @@ fn linux_scheduler_policy_and_priority_are_process_state_inherited_by_fork() {
 #[test]
 fn posix_scheduler_optionals_have_runtime_contracts() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let runtime = std::fs::read_to_string(
-        repository.join("scripts/posix/runtime/smros_posix_compat.c"),
-    )
-    .expect("read POSIX compatibility runtime");
-    let header = std::fs::read_to_string(
-        repository.join("scripts/posix/runtime/include/sched.h"),
-    )
-    .expect("read POSIX scheduler compatibility header");
-    let unistd = std::fs::read_to_string(
-        repository.join("scripts/posix/runtime/include/unistd.h"),
-    )
-    .expect("read POSIX feature compatibility header");
+    let runtime =
+        std::fs::read_to_string(repository.join("scripts/posix/runtime/smros_posix_compat.c"))
+            .expect("read POSIX compatibility runtime");
+    let header = std::fs::read_to_string(repository.join("scripts/posix/runtime/include/sched.h"))
+        .expect("read POSIX scheduler compatibility header");
+    let unistd = std::fs::read_to_string(repository.join("scripts/posix/runtime/include/unistd.h"))
+        .expect("read POSIX feature compatibility header");
     assert!(runtime.contains("int pthread_attr_setscope("));
     assert!(runtime.contains("int pthread_attr_getscope("));
     assert!(runtime.contains("int sched_setparam("));
@@ -6921,7 +7059,9 @@ fn linux_scheduler_allows_an_unprivileged_process_to_query_itself() {
         "a process must retain scheduler access to itself after dropping credentials"
     );
     assert!(
-        !permission.contains("target.tgid == sender_pid && requested_pid != linux_process::LINUX_ROOT_PID"),
+        !permission.contains(
+            "target.tgid == sender_pid && requested_pid != linux_process::LINUX_ROOT_PID"
+        ),
         "self scheduler queries must remain allowed when the caller is SMROS's PID 1"
     );
 

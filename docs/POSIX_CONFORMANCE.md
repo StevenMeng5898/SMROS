@@ -9,9 +9,10 @@ completion.
 
 The pinned suite targets **IEEE 1003.1-2001 System Interfaces**. Project
 architecture work proceeds in this order: **AArch64, then x86_64, then RISC-V64**.
-Only AArch64 is wired today. Every optional group is required for
-the SMROS project target; an unsupported option is recorded as an incomplete
-result, not removed from the target.
+AArch64 and RISC-V64 POSIX campaigns are wired through `ARCH`; x86_64 remains
+the later target. Every optional group is required for the SMROS project
+target; an unsupported option is recorded as an incomplete result, not removed
+from the target.
 
 The source is the public Emscripten-maintained Open POSIX Test Suite mirror at
 the immutable commit in `third_party/posixtest/source.lock.json`. The suite is
@@ -22,16 +23,17 @@ or convert failures into passes.
 ## Prerequisites
 
 The offline tool tests require Python 3 and the Rust host-test toolchain. The
-full AArch64 workflow additionally requires Git, GNU Make,
-`aarch64-linux-gnu-gcc`, `aarch64-linux-gnu-nm`,
-`aarch64-linux-gnu-readelf`, `qemu-aarch64`, `qemu-system-aarch64`, and
-`qemu-img`. On Ubuntu or Debian, the additional reference/cross tools are:
+full workflow additionally requires Git, GNU Make, the selected target's
+cross `gcc`/`nm`/`readelf`, matching `qemu-user` and `qemu-system-*`, and
+`qemu-img`. On Ubuntu or Debian, AArch64 reference/cross tools are:
 
 ```bash
 sudo apt-get install qemu-user gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 ```
 
-`AARCH64_SYSROOT` defaults to `/usr/aarch64-linux-gnu`.
+RISC-V64 uses `gcc-riscv64-linux-gnu` and `libc6-dev-riscv64-cross`.
+`POSIX_SYSROOT` defaults to `/usr/<arch>-linux-gnu` and overrides the qemu-user
+sysroot for any architecture.
 `POSIX_QEMU_MEMORY` defaults to `1024M`.
 
 ## Exact Workflow
@@ -57,23 +59,30 @@ make posix-build
 make posix-stage
 ```
 
-Run the AArch64 Linux reference and SMROS campaigns:
+Run the Linux reference and SMROS campaigns for the selected `ARCH`.
+AArch64 is the Makefile default; RISC-V64 uses
+`ARCH=riscv64gc-unknown-none-elf`. Each architecture keeps its own FxFS
+image under `target/posix/<arch>/smros-fxfs.img`.
 
 ```bash
 make posix-baseline
 make posix-run
+make posix-baseline ARCH=riscv64gc-unknown-none-elf
+make posix-run ARCH=riscv64gc-unknown-none-elf
 ```
 
-Render the report after both result inputs exist:
+Render the report after SMROS results exist. Linux-reference results are
+included when present:
 
 ```bash
 make posix-report
+make posix-report ARCH=riscv64gc-unknown-none-elf
 ```
 
 Useful overrides are explicit Make variables:
 
 ```bash
-make posix-baseline AARCH64_SYSROOT=/usr/aarch64-linux-gnu
+make posix-baseline POSIX_SYSROOT=/usr/aarch64-linux-gnu
 make posix-run POSIX_QEMU_MEMORY=1024M
 make posix-report POSIX_QUALITY_EVIDENCE=target/quality/aarch64.json
 ```
@@ -130,20 +139,23 @@ decisions by filename without reviewing the new contents.
 Each source has a stable test ID. Compilation, symbol inspection, and linking
 are recorded independently, so a compiler or linker failure stays visible in
 `build-results.ndjson` rather than aborting into a false clean result. The stage
-contains the manifest, runnable test binaries, and the resolved AArch64 dynamic
+contains the manifest, runnable test binaries, and the resolved target dynamic
 runtime closure. Publication verifies paths, checksums, ELF architecture,
 runtime closure, and current source/build identity.
 
-Generated build data lives below `target/posix/aarch64/`. The guest stage lives
-at `host_shared/posixtest/` and is embedded into `/shared/posixtest/` on the next
-kernel build. The generated staging tree has a hard **256 MiB** aggregate bound;
-crossing it fails staging. Generated data is ignored and must not be committed.
+Generated build data lives below `target/posix/<arch>/`. The AArch64 guest
+stage lives at `host_shared/posixtest/`; other architectures use
+`target/posix/<arch>/stage`. The selected stage is embedded into
+`/shared/posixtest/` on the next kernel build. The generated staging tree has a
+hard **256 MiB** aggregate bound; crossing it fails staging. Generated data is
+ignored and must not be committed.
 
 ## Reference, Watchdog, And Resume Semantics
 
-The Linux reference runs the exact staged AArch64 binaries through
-`qemu-aarch64` with the selected sysroot and per-test deadlines. It is a
-behavioral reference, not a substitute build and not a POSIX pass for SMROS.
+The Linux reference runs the exact staged binaries through the selected
+architecture's `qemu-user` with the selected sysroot and per-test deadlines. It
+is a behavioral reference, not a substitute build and not a POSIX pass for
+SMROS.
 
 The SMROS controller boots QEMU, waits for the shell prompt, and runs one
 manifest test at a time. Its host watchdog enforces the boot deadline, each
@@ -209,10 +221,11 @@ Default paths are:
 
 ```text
 target/posix/src/<pinned-revision>/
-target/posix/aarch64/linux-reference/results.ndjson
-target/posix/aarch64/smros-run/results.ndjson
-target/posix/aarch64/report/
-host_shared/posixtest/
+target/posix/<arch>/linux-reference/results.ndjson
+target/posix/<arch>/smros-run/results.ndjson
+target/posix/<arch>/report/
+host_shared/posixtest/            # AArch64 guest stage
+target/posix/<arch>/stage/        # other architectures
 ```
 
 The report directory contains exactly seven artifacts:

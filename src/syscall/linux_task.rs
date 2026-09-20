@@ -638,7 +638,7 @@ pub(crate) fn wake_process_waiters(tgid: usize) -> usize {
         .filter(|task| wake_blocked(task.tid, task.scheduler_thread, LinuxBlockReason::ChildWait))
         .count();
     if count != 0 {
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-wait",
             "wake-process-waiters parent={} count={}",
             tgid,

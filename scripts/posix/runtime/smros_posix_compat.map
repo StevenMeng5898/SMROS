@@ -18,6 +18,8 @@ GLIBC_2.34 {
         aio_suspend;
         aio_write;
         mq_unlink;
+        mq_send;
+        mq_timedsend;
         pthread_barrier_destroy;
         pthread_barrier_init;
         pthread_barrier_wait;
@@ -60,6 +62,7 @@ GLIBC_2.27 {
         pthread_exit;
         fork;
         waitpid;
+        execl;
         __register_atfork;
         pthread_attr_init;
         pthread_attr_setscope;

@@ -42,17 +42,15 @@ SMROS_ST_LOG ?= target/smros-smoke-qemu.log
 ST_COVERAGE_DIR ?= target/coverage/st
 POSIX_QEMU_MEMORY ?= 1024M
 POSIX_ARCH = $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),riscv64,$(if $(filter x86_64-unknown-none,$(TARGET)),x86_64,aarch64))
+POSIX_DISK = target/posix/$(POSIX_ARCH)/smros-fxfs.img
 POSIX_SYSROOT ?=
-AARCH64_SYSROOT ?= /usr/aarch64-linux-gnu
 POSIX_QUALITY_EVIDENCE ?=
 AARCH64_RUSTFLAGS = $(strip $(RUSTFLAGS) -D warnings)
 override POSIX_QEMU_MEMORY := $(value POSIX_QEMU_MEMORY)
 override POSIX_SYSROOT := $(value POSIX_SYSROOT)
-override AARCH64_SYSROOT := $(value AARCH64_SYSROOT)
 override POSIX_QUALITY_EVIDENCE := $(value POSIX_QUALITY_EVIDENCE)
 export POSIX_QEMU_MEMORY
 export POSIX_SYSROOT
-export AARCH64_SYSROOT
 export POSIX_QUALITY_EVIDENCE
 
 .PHONY: all build build-test aarch64-warning-check host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report coverage-ut coverage-it coverage-host coverage-st coverage st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
@@ -132,29 +130,32 @@ posix-stage: posix-build
 
 # Run the staged target's Linux reference under qemu-user
 posix-baseline: posix-stage
-	@if [ -n "$${POSIX_SYSROOT}" ]; then \
-		sysroot="$${POSIX_SYSROOT}"; \
-	elif [ "$(POSIX_ARCH)" = aarch64 ]; then \
-		sysroot="$${AARCH64_SYSROOT}"; \
-	else \
-		sysroot="/usr/$(POSIX_ARCH)-linux-gnu"; \
-	fi; \
+	@sysroot="$${POSIX_SYSROOT:-/usr/$(POSIX_ARCH)-linux-gnu}"; \
 	PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli baseline --arch $(POSIX_ARCH) --sysroot "$$sysroot"
 
+# Isolated per-architecture POSIX disks keep FxFS overlays from mixing ABIs
+target/posix/%/smros-fxfs.img:
+	@mkdir -p "$(dir $@)"
+	@echo "Creating POSIX FxFS disk image: $@"
+	@qemu-img create -f raw "$@" $(FXFS_DISK_SIZE) >/dev/null
+
 # Run the staged suite in SMROS under QEMU system emulation
-posix-run: posix-stage $(FXFS_DISK)
+posix-run: posix-stage $(POSIX_DISK)
 	@$(MAKE) build ARCH=$(TARGET)
 	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli run-smros --arch $(POSIX_ARCH) --qemu-memory "$${POSIX_QEMU_MEMORY}"
 
 # Publish all seven report artifacts; quality evidence is optional and separate
 posix-report:
-	@set -- --manifest host_shared/posixtest/manifest.json \
-		--smros-results target/posix/aarch64/smros-run/results.ndjson \
-		--linux-results target/posix/aarch64/linux-reference/results.ndjson; \
+	@manifest="$$(PYTHONDONTWRITEBYTECODE=1 python3 -c 'from scripts.posix.cli import posix_stage_path; print(posix_stage_path("$(POSIX_ARCH)") / "manifest.json")')"; \
+	set -- --manifest "$$manifest" \
+		--smros-results target/posix/$(POSIX_ARCH)/smros-run/results.ndjson; \
+	if [ -f target/posix/$(POSIX_ARCH)/linux-reference/results.ndjson ]; then \
+		set -- "$${@}" --linux-results target/posix/$(POSIX_ARCH)/linux-reference/results.ndjson; \
+	fi; \
 	if [ -n "$${POSIX_QUALITY_EVIDENCE}" ]; then \
 		set -- "$${@}" --quality-evidence "$${POSIX_QUALITY_EVIDENCE}"; \
 	fi; \
-	set -- "$${@}" --out target/posix/aarch64/report; \
+	set -- "$${@}" --out target/posix/$(POSIX_ARCH)/report; \
 	PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli report "$${@}"
 
 # cargo-tarpaulin HTML coverage for host unit tests

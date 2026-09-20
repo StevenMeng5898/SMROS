@@ -223,7 +223,7 @@ pub fn prepare_run_elf_return(exit_code: i32) -> Option<usize> {
 
 extern "C" fn run_elf_launcher_entry() -> ! {
     let cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
-    crate::kobj_info!(
+    crate::kobj_debug!(
         "posix-fork",
         "run-elf launcher entry scheduler={}",
         scheduler::scheduler().current().0

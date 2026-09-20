@@ -958,6 +958,7 @@ pub(crate) fn linux_short_sleep_deadline_nanoseconds(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxRestartTimeout {
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
     Unset,
     Infinite,
     Deadline { ticks: u64, realtime: bool },

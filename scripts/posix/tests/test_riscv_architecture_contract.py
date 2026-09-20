@@ -97,6 +97,38 @@ class RiscvArchitectureContractTests(unittest.TestCase):
             r"baseline_results_path\(arguments\.arch\)",
         )
 
+    def test_cli_kernel_and_disk_follow_architecture_toolchains(self):
+        source = (REPOSITORY_ROOT / "scripts/posix/cli.py").read_text()
+        self.assertIn("def smros_kernel_path(architecture: str) -> Path:", source)
+        self.assertIn("def smros_posix_disk_path(architecture: str) -> Path:", source)
+        self.assertIn("def smros_results_directory(architecture: str) -> Path:", source)
+        self.assertIn("kernel=smros_kernel_path(arguments.arch)", source)
+        self.assertIn("disk=smros_posix_disk_path(arguments.arch)", source)
+        self.assertIn("results_directory = smros_results_directory(arguments.arch)", source)
+        self.assertNotIn("SMROS_KERNEL_PATH", source)
+        self.assertNotIn("SMROS_DISK_PATH", source)
+        self.assertNotIn("SMROS_RESULTS_DIRECTORY", source)
+        makefile = (REPOSITORY_ROOT / "Makefile").read_text()
+        self.assertIn("posix-run: posix-stage $(POSIX_DISK)", makefile)
+        self.assertIn(
+            'sysroot="$${POSIX_SYSROOT:-/usr/$(POSIX_ARCH)-linux-gnu}"',
+            makefile,
+        )
+        self.assertNotIn("AARCH64_SYSROOT", makefile)
+        self.assertNotIn("posix-run: posix-stage $(FXFS_DISK)", makefile)
+        build_source = (REPOSITORY_ROOT / "scripts/posix/build.py").read_text()
+        self.assertIn("kernel_relative_path:", build_source)
+        self.assertIn("boot_timeout_seconds:", build_source)
+        runner_source = (REPOSITORY_ROOT / "scripts/posix/qemu_runner.py").read_text()
+        self.assertIn(
+            "boot_timeout_seconds=toolchain.boot_timeout_seconds",
+            runner_source,
+        )
+        self.assertNotIn(
+            '120.0 if architecture == "riscv64"',
+            runner_source,
+        )
+
     def test_smros_runner_refreshes_embedded_stage_before_tests(self):
         source = (REPOSITORY_ROOT / "scripts/posix/qemu_runner.py").read_text()
         self.assertIn("refresh_host_share: bool = False", source)
@@ -267,8 +299,26 @@ class RiscvArchitectureContractTests(unittest.TestCase):
         trap_source = boot_source[trap_start:trap_end]
         self.assertRegex(
             trap_source,
-            r"call\s+timer_interrupt_handler[\s\S]*call\s+check_preemption",
-            "RISC-V timer traps must run scheduler preemption before restoring user mode",
+            r"call\s+riscv64_timer_interrupt_handler",
+            "RISC-V timer traps must enter the saved-frame-aware timer handler",
+        )
+        main_source = (REPOSITORY_ROOT / "src/main.rs").read_text()
+        handler_start = main_source.index(
+            "extern \"C\" fn riscv64_timer_interrupt_handler"
+        )
+        handler_end = main_source.index(
+            "/// Check if preemption is needed", handler_start
+        )
+        handler_source = main_source[handler_start:handler_end]
+        self.assertIn(
+            "timer_interrupt_handler_common()",
+            handler_source,
+            "RISC-V timer handling must account for elapsed timer work",
+        )
+        self.assertIn(
+            "check_preemption()",
+            handler_source,
+            "RISC-V timer handling must run scheduler preemption before return",
         )
 
     def test_riscv_mqueue_timer_hook_expires_waiters(self):

@@ -17,6 +17,7 @@ pub static mut RISCV_TRAP_STACKS: [RiscvTrapStack; crate::kernel_lowlevel::RISCV
     [const { RiscvTrapStack([0; RISCV_TRAP_STACK_SIZE]) }; crate::kernel_lowlevel::RISCV_MAX_THREADS];
 
 #[inline(always)]
+#[allow(dead_code)]
 pub fn trap_stack_top() -> usize {
     trap_stack_top_for_thread(0)
 }
@@ -200,7 +201,7 @@ pub unsafe fn set_kernel_resume(resume: u64, _state: u64) {
             crate::syscall::linux_riscv_syscall_context::set_return_state(kernel_state);
         let stack_installed =
             crate::syscall::linux_riscv_syscall_context::set_return_stack_to_trap_top();
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-timer",
             "kernel resume frame={:#x} pc={:#x} state={:#x} sp={:#x} installed={}/{}/{}",
             context.frame as usize,
@@ -212,7 +213,7 @@ pub unsafe fn set_kernel_resume(resume: u64, _state: u64) {
             stack_installed
         );
     } else {
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-timer",
             "kernel resume fallback pc={:#x} state={:#x}",
             resume,

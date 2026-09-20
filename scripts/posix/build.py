@@ -142,6 +142,10 @@ class PosixToolchain:
     qemu_cpu: str
     block_device: str
     net_device: str
+    kernel_relative_path: str
+    boot_timeout_seconds: float
+    qemu_user: str
+    baseline_packages: str
 
 
 _TOOLCHAINS = {
@@ -155,6 +159,10 @@ _TOOLCHAINS = {
         qemu_cpu="cortex-a710",
         block_device="virtio-blk-device",
         net_device="virtio-net-device",
+        kernel_relative_path="kernel8.img",
+        boot_timeout_seconds=60.0,
+        qemu_user="qemu-aarch64",
+        baseline_packages="qemu-user gcc-aarch64-linux-gnu libc6-dev-arm64-cross",
     ),
     "riscv64": PosixToolchain(
         architecture="riscv64",
@@ -166,6 +174,10 @@ _TOOLCHAINS = {
         qemu_cpu="rv64",
         block_device="virtio-blk-device",
         net_device="virtio-net-device",
+        kernel_relative_path="target/riscv64gc-unknown-none-elf/release/smros",
+        boot_timeout_seconds=120.0,
+        qemu_user="qemu-riscv64",
+        baseline_packages="qemu-user gcc-riscv64-linux-gnu libc6-dev-riscv64-cross",
     ),
     "x86_64": PosixToolchain(
         architecture="x86_64",
@@ -177,6 +189,10 @@ _TOOLCHAINS = {
         qemu_cpu="max",
         block_device="virtio-blk-pci",
         net_device="virtio-net-pci",
+        kernel_relative_path="target/x86_64-unknown-none/release/smros",
+        boot_timeout_seconds=60.0,
+        qemu_user="qemu-x86_64",
+        baseline_packages="qemu-user gcc libc6-dev",
     ),
 }
 
@@ -922,7 +938,7 @@ def resolve_runtime_file(
             if resolved not in matches:
                 matches.append(resolved)
     if not matches:
-        raise ValueError(f"unresolved AArch64 runtime file: {name}")
+        raise ValueError(f"unresolved runtime file: {name}")
     fingerprints = {(path.stat().st_dev, path.stat().st_ino) for path in matches}
     if len(fingerprints) > 1:
         content_digests = {sha256_file(path) for path in matches}
@@ -999,7 +1015,7 @@ def stage_runtime_dependencies(
             pass_fds=(stage_descriptor,) if stage_descriptor is not None else (),
         )
         if result.returncode != 0:
-            raise ValueError(f"AArch64 readelf failed for {elf}: {result.stderr}")
+            raise ValueError(f"readelf failed for {elf}: {result.stderr}")
         interpreter, needed = parse_elf_dependencies(result.stdout)
         names = list(needed)
         if interpreter is not None:
@@ -1045,7 +1061,7 @@ def stage_posix_compat_preload(
     )
     if result.returncode is None or result.status != "passed":
         raise ValueError(
-            "AArch64 POSIX compatibility preload link failed: "
+            "POSIX compatibility preload link failed: "
             f"{result.stderr}"
         )
     os.chmod(destination, 0o755)
@@ -2403,7 +2419,7 @@ def build_campaign(
             results.append(compile_result)
             if compile_result.returncode is None:
                 raise ValueError(
-                    "AArch64 compiler toolchain failed during compilation: "
+                    f"{toolchain.architecture} compiler toolchain failed during compilation: "
                     f"{compile_result.stderr}"
                 )
             if compile_result.status != "passed":
@@ -2492,7 +2508,7 @@ def build_campaign(
             results.append(link_result)
             if link_result.returncode is None:
                 raise ValueError(
-                    "AArch64 compiler toolchain failed during linking: "
+                    f"{toolchain.architecture} compiler toolchain failed during linking: "
                     f"{link_result.stderr}"
                 )
             if link_result.status != "passed":
@@ -2750,10 +2766,10 @@ def _run_readelf(
                 pass_fds=tuple(pass_fds),
             )
     except OSError as error:
-        raise ValueError(f"AArch64 readelf unavailable while checking {label}: {error}") from error
+        raise ValueError(f"readelf unavailable while checking {label}: {error}") from error
     if int(getattr(result, "returncode")) != 0:
         raise ValueError(
-            f"AArch64 readelf failed for {label}: "
+            f"readelf failed for {label}: "
             f"{_bounded_text(getattr(result, 'stderr', ''))}"
         )
     return str(getattr(result, "stdout", ""))

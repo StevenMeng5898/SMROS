@@ -34,6 +34,7 @@ pub mod mmu;
 #[cfg(target_arch = "aarch64")]
 pub use arch::user_address_space::Aarch64AddressSpace;
 
+#[cfg_attr(target_arch = "riscv64", allow(unused_imports))]
 pub use arch::{boot, cpu, drivers, interrupt, serial, smp, thread, timer};
 
 #[cfg(target_arch = "riscv64")]

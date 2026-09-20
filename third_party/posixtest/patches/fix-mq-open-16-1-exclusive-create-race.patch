@@ -1,0 +1,23 @@
+diff --git a/conformance/interfaces/mq_open/16-1.c b/conformance/interfaces/mq_open/16-1.c
+--- a/conformance/interfaces/mq_open/16-1.c
++++ b/conformance/interfaces/mq_open/16-1.c
+@@ -28,6 +28,7 @@
+ #include <unistd.h>
+ #include <string.h>
+ #include <sys/wait.h>
++#include <errno.h>
+ #include "posixtest.h"
+ 
+ #define NAMESIZE 50
+@@ -84,6 +85,11 @@ int main()
+ 			printf("mq_open() in parent failed\n");
+ #endif
+         	}
++		else if (errno == EEXIST) {
++			/* Child won the O_CREAT|O_EXCL race. Atomic exclusive
++			 * create still held, which is the property under test. */
++			succeeded++;
++		}
+ 
+ 		if (wait(&i) == -1) {
+ 			perror("Error waiting for child to exit");

@@ -5438,7 +5438,7 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> LinuxSignalDe
         let pending = deliverable.record;
         let signum = pending.signum;
         #[cfg(not(target_arch = "riscv64"))]
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-timer",
             "deliver signal signum={} saved_frame={:#x}",
             signum,
@@ -5751,7 +5751,7 @@ pub fn expire_linux_real_timers_from_irq() {
             break;
         }
         let pid = expired[0];
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-timer",
             "expire real timer pid={} now={}",
             pid,
@@ -5812,7 +5812,7 @@ pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) -> bool
             let rejects =
                 LINUX_TIMER_SIGNAL_DIAGNOSTIC_REJECTS.fetch_add(1, Ordering::Relaxed) + 1;
             if rejects % 1000 == 0 {
-                crate::kobj_info!(
+                crate::kobj_debug!(
                     "posix-timer",
                     "interrupt frames rejected={} saved_frame={:#x}",
                     rejects,
@@ -10158,7 +10158,7 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> SysRes
             let deadline = crate::kernel_lowlevel::timer::get_tick_count()
                 .saturating_add(ticks)
                 .saturating_add(1);
-            crate::kobj_info!(
+            crate::kobj_debug!(
                 "posix-timer",
                 "setitimer pid={} value={}.{} ticks={} now={} deadline={}",
                 pid,
@@ -10312,6 +10312,11 @@ pub fn sys_linux_timer_settime(
         Ok(0)
     })();
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    if result.is_ok() {
+        if let Some(deadline) = next_linux_posix_timer_deadline() {
+            crate::kernel_lowlevel::timer::arm_at_nanoseconds(deadline);
+        }
+    }
     result
 }
 
@@ -11244,7 +11249,7 @@ pub fn sys_clone(
 ) -> SysResult {
     info!("clone: flags={:#x}, newsp={:#x}", flags, newsp);
     #[cfg(target_arch = "riscv64")]
-    crate::kobj_info!(
+    crate::kobj_debug!(
         "posix-clone",
         "sys_clone flags={:#x} newsp={:#x} parent_tid={:#x} tls={:#x} child_tid={:#x} current={} pid={}",
         flags,
@@ -11323,7 +11328,7 @@ pub fn sys_clone(
                 id
             }
             None => {
-                crate::kobj_info!(
+                crate::kobj_debug!(
                     "posix-clone",
                     "scheduler-thread-allocation-failed current={}",
                     scheduler::scheduler().current().0
@@ -11582,7 +11587,7 @@ fn exit_current_linux_process(
 fn terminate_linux_process_by_signal(tgid: usize, signum: usize) -> SysResult {
     let terminating_current = linux_task::current_task().is_ok_and(|task| task.tgid == tgid);
     let outcome = linux_process::terminate_by_signal(tgid, signum)?;
-    crate::kobj_info!(
+    crate::kobj_debug!(
         "posix-timer",
         "terminate signal tgid={} signum={} current={} outcome={:?}",
         tgid,
@@ -11593,7 +11598,7 @@ fn terminate_linux_process_by_signal(tgid: usize, signum: usize) -> SysResult {
     if outcome == linux_process::LinuxProcessExitOutcome::LaunchRoot {
         let exit_code = 128 + signum as i32;
         let launch_id = crate::user_level::run_elf::prepare_run_elf_return(exit_code);
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-timer",
             "prepare run-elf return exit_code={} launch_id={:?}",
             exit_code,
@@ -11907,6 +11912,9 @@ pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
             Ok(()) => {
                 linux_deliver_kill_to_target(target_pid, signum)?;
                 delivered = true;
+                if signum != 0 {
+                    scheduler::yield_now();
+                }
             }
             Err(SysError::EPERM) => denied = true,
             Err(error) => return Err(error),

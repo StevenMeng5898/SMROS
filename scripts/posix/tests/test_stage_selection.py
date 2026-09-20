@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 from scripts.posix import cli
+from scripts.posix.build import toolchain_for_architecture
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -146,6 +147,15 @@ class StageSelectionTests(unittest.TestCase):
                 with self.subTest(architecture=architecture), redirect_stdout(io.StringIO()):
                     self.assertEqual(cli.main(["run-smros", "--arch", architecture]), 0)
                     self.assertEqual(runner.call_args.args[0], expected)
+                    toolchain = toolchain_for_architecture(architecture)
+                    self.assertEqual(
+                        runner.call_args.kwargs["kernel"],
+                        self.root / toolchain.kernel_relative_path,
+                    )
+                    self.assertEqual(
+                        runner.call_args.kwargs["disk"],
+                        self.root / "target" / "posix" / architecture / "smros-fxfs.img",
+                    )
             with mock.patch.dict(os.environ, {"SMROS_POSIX_STAGE": "custom stage"}):
                 with redirect_stdout(io.StringIO()):
                     self.assertEqual(cli.main(["run-smros", "--arch", "riscv64"]), 0)
@@ -159,17 +169,39 @@ class StageSelectionTests(unittest.TestCase):
             for command, prerequisites in (
                 ("posix-build", ["posix-audit"]),
                 ("posix-stage", ["posix-build"]),
-                ("posix-run", ["posix-stage", "smros-fxfs.img"]),
+                (
+                    "posix-run",
+                    ["posix-stage", f"target/posix/{architecture}/smros-fxfs.img"],
+                ),
                 ("posix-baseline", ["posix-stage"]),
+                ("posix-report", []),
             ):
                 with self.subTest(target=target, command=command):
                     args = ["make", "--no-print-directory", "-n", command, f"ARCH={target}"]
                     for prerequisite in prerequisites:
                         args.extend(["-o", prerequisite])
                     result = subprocess.run(args, cwd=ROOT, text=True, capture_output=True, check=True)
+                    if command == "posix-report":
+                        self.assertIn(
+                            f"target/posix/{architecture}/smros-run/results.ndjson",
+                            result.stdout,
+                        )
+                        self.assertIn(
+                            f"target/posix/{architecture}/report",
+                            result.stdout,
+                        )
+                        self.assertIn("posix_stage_path", result.stdout)
+                        continue
                     self.assertIn(f"--arch {architecture}", result.stdout)
                     if architecture != "aarch64":
                         self.assertNotIn("--stage host_shared/posixtest", result.stdout)
+                    if command == "posix-baseline":
+                        self.assertIn(
+                            f"/usr/{architecture}-linux-gnu",
+                            result.stdout,
+                        )
+                        self.assertIn("POSIX_SYSROOT", result.stdout)
+                        self.assertNotIn("AARCH64_SYSROOT", result.stdout)
                     if command == "posix-run":
                         self.assertIn(f"build ARCH={target}", result.stdout)
 

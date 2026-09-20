@@ -16,8 +16,8 @@ SMROS is an experimental bare-metal multi-architecture kernel written in Rust fo
 - Embeds repository-local `host_shared/` files into the kernel at build time and installs them under `/shared` during FxFS initialization.
 - Supports `run <elf>` for dynamic PIE AArch64 ELF files stored in FxFS. The dynamic loader and C library are resolved from `/shared/lib` or `/lib`. RISC-V64 and x86_64 kernel boot support is present, but external user ELF loading for those ABIs is still future work.
 - Maintains standalone Verus harnesses for syscall, kernel-object, low-level, and user-level pure helper logic.
-- Provides a pinned AArch64 Open POSIX Test Suite harness whose current
-  milestone is infrastructure and a failure baseline, not a POSIX
+- Provides a pinned Open POSIX Test Suite harness for AArch64 and RISC-V64
+  whose current milestone is infrastructure and a failure baseline, not a POSIX
   certification. See `docs/POSIX_CONFORMANCE.md` for the evidence boundary and
   architecture order.
 

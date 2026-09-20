@@ -106,6 +106,10 @@ pub(crate) fn linux_memory_fault_signal(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    all(target_os = "none", not(target_arch = "aarch64")),
+    allow(dead_code)
+)]
 pub(crate) enum LinuxAddressSpaceErrorKind {
     OutOfMemory,
     InvalidAddress,
@@ -116,11 +120,19 @@ pub(crate) enum LinuxAddressSpaceErrorKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    all(target_os = "none", not(target_arch = "aarch64")),
+    allow(dead_code)
+)]
 pub(crate) enum LinuxCopyAddressErrorClass {
     Fault,
     OutOfMemory,
 }
 
+#[cfg_attr(
+    all(target_os = "none", not(target_arch = "aarch64")),
+    allow(dead_code)
+)]
 pub(crate) const fn linux_copy_address_error_class(
     error: LinuxAddressSpaceErrorKind,
 ) -> LinuxCopyAddressErrorClass {
@@ -179,7 +191,9 @@ pub(crate) enum LinuxForkFailurePoint {
     SchedulerThread,
     Task,
     Process,
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
     ChildRoot,
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
     TablePage,
     DescriptorReference,
     SharedReference,
@@ -187,8 +201,10 @@ pub(crate) enum LinuxForkFailurePoint {
     PrivatePageAllocation,
     PrivatePageCopy,
     #[cfg(not(target_arch = "aarch64"))]
+    #[cfg_attr(target_os = "none", allow(dead_code))]
     PrivatePageMap,
     #[cfg(not(target_arch = "aarch64"))]
+    #[cfg_attr(target_os = "none", allow(dead_code))]
     SharedPageMap,
     Memory,
     Configured,

@@ -1,0 +1,64 @@
+diff --git a/conformance/interfaces/mmap/27-1.c b/conformance/interfaces/mmap/27-1.c
+--- a/conformance/interfaces/mmap/27-1.c
++++ b/conformance/interfaces/mmap/27-1.c
+@@ -42,8 +42,58 @@
+   int fd;
+   off_t off = 0;
+ #ifdef MAP_FIXED
+-  printf("Test Untested: MAP_FIXED defined\n");
+-  exit(PTS_UNTESTED);
++  /* MAP_FIXED is supported. Verify a fixed mapping lands at the requested
++   * address instead of treating the advertised feature as untested. */
++  snprintf(tmpfname, sizeof(tmpfname), "/tmp/pts_mmap_27_1_%d",
++           getpid());
++  unlink(tmpfname);
++  fd = open(tmpfname, O_CREAT | O_RDWR | O_EXCL,
++            S_IRUSR | S_IWUSR);
++  if (fd == -1)
++  {
++    printf(TNAME " Error at open(): %s\n",
++           strerror(errno));
++    exit(PTS_UNRESOLVED);
++  }
++  unlink(tmpfname);
++  if (ftruncate(fd, total_size) == -1)
++  {
++    printf(TNAME "Error at ftruncate(): %s\n",
++            strerror(errno));
++    exit(PTS_UNRESOLVED);
++  }
++  prot = PROT_READ | PROT_WRITE;
++  flag = MAP_SHARED;
++  pa = mmap(NULL, len, prot, flag, fd, off);
++  if (pa == MAP_FAILED)
++  {
++    printf(TNAME " Error at mmap(): %s\n",
++           strerror(errno));
++    exit(PTS_UNRESOLVED);
++  }
++  addr = pa;
++  if (munmap(pa, len) == -1)
++  {
++    printf(TNAME " Error at munmap(): %s\n",
++           strerror(errno));
++    exit(PTS_UNRESOLVED);
++  }
++  flag = MAP_FIXED | MAP_SHARED;
++  pa = mmap(addr, len, prot, flag, fd, off);
++  if (pa == MAP_FAILED)
++  {
++    printf("Test Fail: " TNAME " MAP_FIXED mmap failed: %s\n",
++           strerror(errno));
++    exit(PTS_FAIL);
++  }
++  if (pa != addr)
++  {
++    printf("Test Fail: " TNAME " MAP_FIXED did not honor address\n");
++    exit(PTS_FAIL);
++  }
++  close(fd);
++  printf ("Test Pass\n");
++  return PTS_PASS;
+ #endif
+ 
+ #ifdef MAP_SHARED

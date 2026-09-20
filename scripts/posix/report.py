@@ -55,9 +55,7 @@ OUTPUT_NAMES = (
     "report.md",
     "index.html",
 )
-LINUX_REFERENCE_PLATFORM = "aarch64-linux-reference"
 LINUX_REFERENCE_SOURCE = "qemu-user"
-SMROS_PLATFORM = "smros-aarch64"
 SMROS_SOURCES = frozenset({"host-watchdog", "smros-qemu", "smros-serial"})
 SMROS_SERIAL_SOURCE = "smros-serial"
 

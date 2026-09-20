@@ -1812,7 +1812,7 @@ pub(crate) fn clone_for_fork(
     let fork_trace = child_pid < 8 || child_pid % 25 == 0;
     let fork_started = crate::kernel_lowlevel::timer::get_tick_count();
     if fork_trace {
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-fork",
             "fork-timing begin parent={} child={} tick={}",
             parent_pid,
@@ -1839,7 +1839,7 @@ pub(crate) fn clone_for_fork(
             .memories
             .try_reserve(1)
             .map_err(|_| {
-                crate::kobj_info!(
+                crate::kobj_debug!(
                     "posix-fork",
                     "clone-error-stage parent={} child={} stage=memory-vector-reserve",
                     parent_pid,
@@ -1859,7 +1859,7 @@ pub(crate) fn clone_for_fork(
                 .ok_or(SysError::ESRCH)?,
         )
         .map_err(|error| {
-            crate::kobj_info!(
+            crate::kobj_debug!(
                 "posix-fork",
                 "clone-error-stage parent={} child={} stage=promote-private error={:?}",
                 parent_pid,
@@ -1869,7 +1869,7 @@ pub(crate) fn clone_for_fork(
             error
         })?;
         if fork_trace {
-            crate::kobj_info!(
+            crate::kobj_debug!(
                 "posix-fork",
                 "fork-timing promoted child={} elapsed={}",
                 child_pid,
@@ -1890,7 +1890,7 @@ pub(crate) fn clone_for_fork(
         )
             .map_err(map_address_error)
             .map_err(|error| {
-                crate::kobj_info!(
+                crate::kobj_debug!(
                     "posix-fork",
                     "clone-error-stage parent={} child={} stage=address-space error={:?}",
                     parent_pid,
@@ -1906,7 +1906,7 @@ pub(crate) fn clone_for_fork(
         #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "riscv64")))]
         let address_space = FallbackAddressSpace::new(child_pid)?;
         if fork_trace {
-            crate::kobj_info!(
+            crate::kobj_debug!(
                 "posix-fork",
                 "fork-timing address-space child={} elapsed={}",
                 child_pid,
@@ -1917,7 +1917,7 @@ pub(crate) fn clone_for_fork(
         crate::kobj_debug!("posix-fork", "riscv clone child root allocated");
         let root_paddr = address_space.root_paddr();
         if root_paddr == 0 || root_paddr == parent.address_space.root_paddr() {
-            crate::kobj_info!(
+            crate::kobj_debug!(
                 "posix-fork",
                 "clone-error-stage parent={} child={} stage=root-identity child_root={:#x} parent_root={:#x}",
                 parent_pid,
@@ -1949,7 +1949,7 @@ pub(crate) fn clone_for_fork(
             .mappings
             .try_reserve_exact(parent.mappings.len())
             .map_err(|_| {
-                crate::kobj_info!(
+                crate::kobj_debug!(
                     "posix-fork",
                     "clone-error-stage parent={} child={} stage=mapping-vector-reserve count={}",
                     parent_pid,
@@ -1962,7 +1962,7 @@ pub(crate) fn clone_for_fork(
             .shared_attachments
             .try_reserve_exact(shared_attachments.len())
             .map_err(|_| {
-                crate::kobj_info!(
+                crate::kobj_debug!(
                     "posix-fork",
                     "clone-error-stage parent={} child={} stage=attachment-vector-reserve count={}",
                     parent_pid,
@@ -1974,7 +1974,7 @@ pub(crate) fn clone_for_fork(
 
         for mapping in parent.mappings.iter() {
             let source = mapping.source.try_clone_for_fork().map_err(|_| {
-                crate::kobj_info!(
+                crate::kobj_debug!(
                     "posix-fork",
                     "clone-error-stage parent={} child={} stage=mapping-source-clone",
                     parent_pid,
@@ -2074,7 +2074,7 @@ pub(crate) fn clone_for_fork(
                     )
                 };
                 cloned.map_err(|error| {
-                    crate::kobj_info!(
+                    crate::kobj_debug!(
                         "posix-fork",
                         "clone-error-stage parent={} child={} stage=mapping-pages error={:?}",
                         parent_pid,
@@ -2102,7 +2102,7 @@ pub(crate) fn clone_for_fork(
                         .unmap_page(page_address)
                         .and_then(|_| child.map_page(page_address, page.pfn(), prot))
                     {
-                        crate::kobj_info!(
+                        crate::kobj_debug!(
                             "posix-fork",
                             "clone-error-stage parent={} child={} stage=mapping-private-remap error={:?}",
                             parent_pid,
@@ -2137,7 +2137,7 @@ pub(crate) fn clone_for_fork(
                         super::linux_process::fork_failpoint,
                     );
                 if let Err(error) = map_result {
-                    crate::kobj_info!(
+                    crate::kobj_debug!(
                         "posix-fork",
                         "clone-error-stage parent={} child={} stage=mapping-map error={:?}",
                         parent_pid,
@@ -2167,7 +2167,7 @@ pub(crate) fn clone_for_fork(
 
         crate::kobj_debug!("posix-fork", "riscv clone mappings complete");
         if fork_trace {
-            crate::kobj_info!(
+            crate::kobj_debug!(
                 "posix-fork",
                 "fork-timing mappings child={} elapsed={}",
                 child_pid,
@@ -2211,7 +2211,7 @@ pub(crate) fn clone_for_fork(
         };
         let brk_pages = brk_pages
         .map_err(|error| {
-            crate::kobj_info!(
+            crate::kobj_debug!(
                 "posix-fork",
                 "clone-error-stage parent={} child={} stage=brk-pages error={:?}",
                 parent_pid,
@@ -2220,6 +2220,7 @@ pub(crate) fn clone_for_fork(
             );
             error
         })?;
+        #[cfg(not(target_arch = "riscv64"))]
         let brk_start = child.brk.start;
         #[cfg(target_arch = "aarch64")]
         for (page_index, page) in brk_pages.iter().copied().enumerate() {
@@ -2233,7 +2234,7 @@ pub(crate) fn clone_for_fork(
                 .unmap_page(page_address)
                 .and_then(|_| child.map_page(page_address, page.pfn(), LINUX_PROT_READ | LINUX_PROT_WRITE))
             {
-                crate::kobj_info!(
+                crate::kobj_debug!(
                     "posix-fork",
                     "clone-error-stage parent={} child={} stage=brk-private-remap error={:?}",
                     parent_pid,
@@ -2258,7 +2259,7 @@ pub(crate) fn clone_for_fork(
                     super::linux_process::fork_failpoint,
                 );
             if let Err(error) = map_result {
-                crate::kobj_info!(
+                crate::kobj_debug!(
                     "posix-fork",
                     "clone-error-stage parent={} child={} stage=brk-map error={:?}",
                     parent_pid,
@@ -2272,7 +2273,7 @@ pub(crate) fn clone_for_fork(
         child.brk.pages = brk_pages;
         crate::kobj_debug!("posix-fork", "riscv clone brk complete");
         if fork_trace {
-            crate::kobj_info!(
+            crate::kobj_debug!(
                 "posix-fork",
                 "fork-timing brk child={} elapsed={}",
                 child_pid,
@@ -2285,7 +2286,7 @@ pub(crate) fn clone_for_fork(
         crate::kernel_lowlevel::cpu::sync_instruction_cache();
         runtime.memories.push(child);
         if fork_trace {
-            crate::kobj_info!(
+            crate::kobj_debug!(
                 "posix-fork",
                 "fork-timing complete child={} elapsed={}",
                 child_pid,
@@ -2296,7 +2297,7 @@ pub(crate) fn clone_for_fork(
         Ok(root_paddr)
     });
     if let Err(error) = &result {
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-fork",
             "clone-error parent={} child={} error={:?} allocated={} free={}",
             parent_pid,
@@ -2324,6 +2325,7 @@ fn fork_table_allocation_failure(allocation: usize) -> bool {
 
 struct LinuxProcessForkPageOps<'a> {
     #[cfg(not(target_arch = "aarch64"))]
+    #[cfg_attr(target_arch = "riscv64", allow(dead_code))]
     memory: &'a mut LinuxProcessMemory,
     #[cfg(target_arch = "aarch64")]
     _marker: PhantomData<&'a mut LinuxProcessMemory>,
@@ -2424,6 +2426,7 @@ impl super::linux_process::LinuxForkPageOps for LinuxProcessForkPageOps<'_> {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
 fn clone_shared_linux_fork_pages(
     parent_pages: &[LinuxPageBacking],
 ) -> Result<Vec<LinuxPageBacking>, SysError> {
@@ -3179,6 +3182,7 @@ impl LinuxProcessMemory {
         pfn: u64,
         prot: usize,
     ) -> Result<u64, SysError> {
+        #[cfg(target_arch = "aarch64")]
         let (readable, writable, executable) = Self::page_permissions(prot);
         #[cfg(target_arch = "aarch64")]
         return self
@@ -3312,6 +3316,7 @@ impl LinuxProcessMemory {
         Ok(())
     }
 
+    #[cfg(target_arch = "aarch64")]
     fn address_is_cow(&self, address: usize) -> bool {
         let page_address = address & !(PAGE_SIZE - 1);
         if let Some(mapping) = self.mappings.iter().find(|mapping| {

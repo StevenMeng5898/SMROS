@@ -130,6 +130,7 @@ macro_rules! smros_ll_memory_reg_body {
     }};
 }
 
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub(crate) fn memory_reg(
     detected: Option<(usize, usize)>,
     fallback_base: usize,
@@ -228,6 +229,7 @@ impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
         (pfn as usize).checked_mul(page_size)
     }
 
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
     pub(crate) fn pfn_index(&self, pfn: u64) -> Option<usize> {
         let index = pfn.checked_sub(self.base_pfn)?;
         (index < self.total_pages as u64).then_some(index as usize)

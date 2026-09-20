@@ -860,7 +860,7 @@ impl Scheduler {
             if self.threads[i].state == ThreadState::Empty {
                 // Allocate stack
                 let Some(stack) = ThreadStack::alloc(DEFAULT_STACK_SIZE) else {
-                    crate::kobj_info!(
+                    crate::kobj_debug!(
                         "scheduler",
                         "thread-stack-alloc-failed active_threads={} slot={} stack_size={}",
                         self.active_threads,
@@ -908,7 +908,7 @@ impl Scheduler {
                 ThreadState::Running => {}
             }
         }
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "scheduler",
             "thread-slot-exhausted active={} current={} empty={} ready={} blocked={} terminated={}",
             self.active_threads,
@@ -1061,7 +1061,7 @@ impl Scheduler {
         if policy == SchedulePolicy::Credit {
             self.refill_credits();
         }
-        crate::kobj_info!("scheduler", "policy set to {}", policy.as_str());
+        crate::kobj_debug!("scheduler", "policy set to {}", policy.as_str());
     }
 
     /// Set EDF timing metadata for a thread.
@@ -2342,10 +2342,23 @@ pub fn yield_now() {
     // Reset time slice to force preemption
     let s = scheduler();
     s.charge_current_runtime(1);
-    if let Some(tcb) = s.get_thread_mut(s.current_thread) {
+    let current = s.current_thread;
+    if let Some(tcb) = s.get_thread_mut(current) {
         tcb.time_slice = 0;
+        if tcb.state == ThreadState::Running {
+            tcb.state = ThreadState::Ready;
+            s.set_ready_bit(current.0, true);
+        }
     }
+    s.next_thread = current.0.saturating_add(1);
     schedule();
+    let s = scheduler();
+    if let Some(tcb) = s.get_thread_mut(s.current_thread) {
+        if tcb.state == ThreadState::Ready {
+            tcb.state = ThreadState::Running;
+            s.set_ready_bit(s.current_thread.0, false);
+        }
+    }
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
 }
 
@@ -2354,10 +2367,23 @@ pub fn yield_now_on_cpu(cpu_id: usize) {
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let s = scheduler();
     s.charge_current_runtime(1);
-    if let Some(tcb) = s.get_thread_mut(s.current_thread) {
+    let current = s.current_thread;
+    if let Some(tcb) = s.get_thread_mut(current) {
         tcb.time_slice = 0;
+        if tcb.state == ThreadState::Running {
+            tcb.state = ThreadState::Ready;
+            s.set_ready_bit(current.0, true);
+        }
     }
+    s.next_thread = current.0.saturating_add(1);
     schedule_on_cpu(cpu_id);
+    let s = scheduler();
+    if let Some(tcb) = s.get_thread_mut(s.current_thread) {
+        if tcb.state == ThreadState::Ready {
+            tcb.state = ThreadState::Running;
+            s.set_ready_bit(s.current_thread.0, false);
+        }
+    }
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
 }
 

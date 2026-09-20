@@ -16,10 +16,10 @@ completion. Run the offline host-tool checks with:
 make posix-tool-test
 ```
 
-The network fetch, AArch64 cross-build, qemu-user reference, QEMU/SMROS run,
-and seven-artifact report are explicit `make posix-*` targets and are not
-pulled into ordinary offline testing. The architecture order is AArch64, then
-x86_64, then RISC-V64.
+The network fetch, selected-target cross-build, qemu-user reference,
+QEMU/SMROS run, and seven-artifact report are explicit `make posix-*` targets
+and are not pulled into ordinary offline testing. The architecture order is
+AArch64, then x86_64, then RISC-V64.
 
 ## Fast Unit Tests
 

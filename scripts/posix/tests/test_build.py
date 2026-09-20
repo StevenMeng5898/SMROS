@@ -2023,23 +2023,146 @@ class ManifestTests(unittest.TestCase):
 
 
 class StagingTests(unittest.TestCase):
-    @unittest.skipUnless(shutil.which("aarch64-linux-gnu-gcc"), "needs ARM64 cross compiler")
-    def test_arm64_fork_and_waitpid_resolve_both_supported_symbol_versions(self) -> None:
+    def test_fork_and_waitpid_resolve_both_supported_symbol_versions(self) -> None:
+        exercised = False
+        for architecture in ("aarch64", "riscv64"):
+            toolchain = build_module.toolchain_for_architecture(architecture)
+            if shutil.which(toolchain.compiler) is None or shutil.which(toolchain.readelf) is None:
+                continue
+            exercised = True
+            with self.subTest(architecture=architecture), tempfile.TemporaryDirectory() as temporary:
+                library = Path(temporary) / "libsmros-posix-compat.so"
+                subprocess.run(build_module.posix_compat_preload_command(
+                    toolchain.compiler, build_module.POSIX_COMPAT_PRELOAD_SOURCE,
+                    library,
+                ), check=True, capture_output=True)
+                symbols = subprocess.check_output(
+                    [toolchain.readelf, "--dyn-syms", "--wide", str(library)],
+                    text=True,
+                )
+                # ARM64 binaries require 2.17; RISC-V's default stays 2.27.
+                # Missing versions cause the loader to silently select libc instead.
+                for name in (
+                    "fork",
+                    "waitpid",
+                    "clock",
+                    "sigset",
+                    "sched_getparam",
+                    "sched_setparam",
+                    "sched_getscheduler",
+                    "sched_setscheduler",
+                    "sched_get_priority_max",
+                    "sched_get_priority_min",
+                    "pthread_attr_setschedparam",
+                    "pthread_attr_setschedpolicy",
+                    "pthread_attr_getschedpolicy",
+                    "pthread_attr_getschedparam",
+                    "pthread_getschedparam",
+                    "pthread_setschedparam",
+                    "execl",
+                ):
+                    for version in ("@GLIBC_2.17", "@@GLIBC_2.27"):
+                        self.assertIn(
+                            name + version,
+                            symbols,
+                            f"{architecture} preload must export {name}{version}",
+                        )
+        if not exercised:
+            self.skipTest("needs a POSIX cross compiler and matching readelf")
+
+    def test_mq_open_16_1_counts_exclusive_create_race_as_success(self) -> None:
+        series = cli.PATCH_SERIES_PATH.read_text(encoding="utf-8")
+        self.assertIn("fix-mq-open-16-1-exclusive-create-race.patch", series)
+        patch = (
+            cli.PATCH_SERIES_PATH.parent / "fix-mq-open-16-1-exclusive-create-race.patch"
+        ).read_text(encoding="utf-8")
+        self.assertIn("EEXIST", patch)
+        self.assertIn("succeeded++", patch)
+        lock = json.loads(cli.SOURCE_LOCK_PATH.read_text(encoding="utf-8"))
+        source = (
+            cli.REPOSITORY_ROOT
+            / "target"
+            / "posix"
+            / "src"
+            / lock["revision"]
+            / "conformance"
+            / "interfaces"
+            / "mq_open"
+            / "16-1.c"
+        )
+        if source.is_file():
+            body = source.read_text(encoding="utf-8")
+            self.assertIn("errno == EEXIST", body)
+
+    def test_mmap_27_1_exercises_supported_map_fixed(self) -> None:
+        series = cli.PATCH_SERIES_PATH.read_text(encoding="utf-8")
+        self.assertIn("fix-mmap-27-1-map-fixed-supported.patch", series)
+        patch = (
+            cli.PATCH_SERIES_PATH.parent / "fix-mmap-27-1-map-fixed-supported.patch"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("+  printf(\"Test Untested: MAP_FIXED defined", patch)
+        self.assertNotIn("+  exit(PTS_UNTESTED)", patch)
+        self.assertIn("MAP_FIXED | MAP_SHARED", patch)
+        self.assertIn("return PTS_PASS", patch)
+        lock = json.loads(cli.SOURCE_LOCK_PATH.read_text(encoding="utf-8"))
+        source = (
+            cli.REPOSITORY_ROOT
+            / "target"
+            / "posix"
+            / "src"
+            / lock["revision"]
+            / "conformance"
+            / "interfaces"
+            / "mmap"
+            / "27-1.c"
+        )
+        if source.is_file():
+            body = source.read_text(encoding="utf-8")
+            self.assertNotIn("Test Untested: MAP_FIXED defined", body)
+            self.assertIn("MAP_FIXED | MAP_SHARED", body)
+            self.assertIn("return PTS_PASS", body)
+
+    def test_private_cond_broadcast_wakes_with_futex(self) -> None:
+        source = build_module.POSIX_COMPAT_PRELOAD_SOURCE.read_text(encoding="utf-8")
+        wake_start = source.find("static int smros_pthread_private_cond_wake(")
+        self.assertNotEqual(wake_start, -1)
+        wake = source[wake_start:wake_start + 2500]
+        self.assertIn("FUTEX_WAKE_PRIVATE", wake)
+        self.assertIn("&record->seq", wake)
+        wait_start = source.find("static int smros_pthread_private_cond_wait_common(")
+        self.assertNotEqual(wait_start, -1)
+        wait = source[wait_start:wait_start + 4500]
+        self.assertIn("smros_pthread_private_cond_park", wait)
+
+    def test_aarch64_spin_trylock_is_one_shot_without_plt(self) -> None:
+        toolchain = build_module.toolchain_for_architecture("aarch64")
+        objdump = shutil.which("aarch64-linux-gnu-objdump")
+        if shutil.which(toolchain.compiler) is None or objdump is None:
+            self.skipTest("needs the AArch64 cross compiler and objdump")
         with tempfile.TemporaryDirectory() as temporary:
             library = Path(temporary) / "libsmros-posix-compat.so"
-            subprocess.run(build_module.posix_compat_preload_command(
-                "aarch64-linux-gnu-gcc", build_module.POSIX_COMPAT_PRELOAD_SOURCE,
-                library,
-            ), check=True, capture_output=True)
-            symbols = subprocess.check_output(
-                ["aarch64-linux-gnu-readelf", "--dyn-syms", "--wide", str(library)],
+            subprocess.run(
+                build_module.posix_compat_preload_command(
+                    toolchain.compiler,
+                    build_module.POSIX_COMPAT_PRELOAD_SOURCE,
+                    library,
+                ),
+                check=True,
+                capture_output=True,
+            )
+            disassembly = subprocess.check_output(
+                [objdump, "-d", str(library)],
                 text=True,
             )
-            # Real ARM64 binaries require 2.17; RISC-V's default stays 2.27.
-            # Missing versions cause the loader to silently select libc instead.
-            for name in ("fork", "waitpid"):
-                for version in ("@GLIBC_2.17", "@@GLIBC_2.27"):
-                    self.assertIn(name + version, symbols)
+            start = disassembly.find("<pthread_spin_trylock>:")
+            self.assertNotEqual(start, -1)
+            nxt = disassembly.find("\n\n", start + 1)
+            body = disassembly[start:nxt if nxt != -1 else start + 4000]
+            self.assertNotIn("__aarch64_cas", body)
+            self.assertNotIn("ldaxr", body)
+            self.assertNotIn("stxr", body)
+            self.assertIn("sched_setaffinity", body)
+            self.assertTrue("dmb" in body or "dmb\tish" in body, msg=body)
 
     def test_stage_journal_hardlink_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -3189,20 +3312,75 @@ with tempfile.TemporaryDirectory() as temporary:
         source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
             encoding="utf-8"
         )
-        self.assertIn(
-            "smros_pthread_spin_trylock(",
-            source,
-        )
-        self.assertIn("int pthread_spin_trylock(pthread_spinlock_t *lock)", source)
+        start = source.index("#if defined(__aarch64__)")
+        # Prefer the spin_trylock aarch64 specialization, not an earlier ifdef.
         start = source.index(
-            "smros_pthread_spin_trylock("
+            "int pthread_spin_trylock(pthread_spinlock_t *lock)",
+            start,
         )
-        body = source[start:source.index("\n}", start) + 2]
-        aarch64_body = body.split("#else", 1)[0]
-        self.assertIn('"ldaxr %w0, [%1]"', aarch64_body)
-        self.assertIn('"stxr %w0, %w2, [%1]"', aarch64_body)
-        self.assertIn("return EBUSY;", aarch64_body)
-        self.assertNotIn("pthread_spin_trylock_fn", aarch64_body)
+        body = source[start:source.index("#else", start)]
+        self.assertIn("volatile uint32_t *word", body)
+        self.assertIn('dmb ish', body)
+        self.assertIn("sched_setaffinity", body)
+        self.assertIn("sched_yield", body)
+        self.assertIn("return EBUSY;", body)
+        self.assertNotIn("ldaxr", body)
+        self.assertNotIn("stxr", body)
+        self.assertNotIn("__aarch64_cas", body)
+        self.assertNotIn("pthread_spin_trylock_fn", body)
+        self.assertNotIn("for (", body)
+        self.assertNotIn("while (", body)
+
+    def test_aarch64_sleep_uses_sigtimedwait_for_abort(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("unsigned int sleep(unsigned int seconds)")
+        body = source[start:start + 2200]
+        self.assertIn("sigtimedwait", body)
+        self.assertIn("SIGABRT", body)
+        self.assertIn("SIG_BLOCK", body)
+        # RISC-V mq_send/5-1 hits the same kill-before-sleep race once
+        # sys_kill yields, so both arches must park in SignalWait.
+        self.assertIn("defined(__aarch64__) || defined(__riscv)", body)
+
+    def test_sched_yield_enqueues_current_before_reschedule(self) -> None:
+        source = Path("src/kernel_objects/scheduler.rs").read_text(encoding="utf-8")
+        start = source.index("pub fn yield_now()")
+        body = source[start:start + 900]
+        self.assertIn("ThreadState::Ready", body)
+        self.assertIn("set_ready_bit", body)
+        self.assertLess(body.index("ThreadState::Ready"), body.index("schedule();"))
+        self.assertLess(body.index("set_ready_bit"), body.index("schedule();"))
+
+
+    def test_aarch64_mq_send_polls_instead_of_parking(self) -> None:
+        source = Path("scripts/posix/runtime/smros_posix_compat.c").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("static int smros_mq_send_poll(")
+        guard_start = source.rfind("#if ", 0, start)
+        self.assertGreaterEqual(guard_start, 0)
+        guard = source[guard_start:start]
+        self.assertIn("__aarch64__", guard)
+        self.assertIn("__riscv", guard)
+        body = source[start:source.index("#endif", start)]
+        self.assertIn("sched_yield", body)
+        self.assertIn("mq_timedsend", body)
+        self.assertIn("int mq_send(", body)
+        self.assertIn("int mq_timedsend(", body)
+        self.assertIn("ETIMEDOUT", body)
+        # mq_send/10-1.c fills an O_NONBLOCK queue and requires EAGAIN.
+        # Polling forever on that path hangs the AArch64 campaign.
+        self.assertIn("mq_getattr", body)
+        self.assertIn("O_NONBLOCK", body)
+        self.assertIn("errno = EAGAIN", body)
+        self.assertIn("EINTR", body)
+        self.assertIn("sigtimedwait", body)
+        self.assertIn("SIGABRT", body)
+        # mq_timedsend/12-1.c interrupts a blocking send with SIGUSR1, not SIGABRT.
+        self.assertIn("SIGUSR1", body)
+        self.assertIn("time(", body)
 
     def test_smros_posix_compat_version_script_exports_compatibility_symbols(self) -> None:
         version_script = Path(
@@ -3233,6 +3411,8 @@ with tempfile.TemporaryDirectory() as temporary:
             "aio_suspend",
             "aio_write",
             "mq_unlink",
+            "mq_send",
+            "mq_timedsend",
             "pthread_barrier_destroy",
             "pthread_barrier_init",
             "pthread_barrier_wait",
@@ -7698,9 +7878,12 @@ class CliTests(unittest.TestCase):
         self.assertTrue(arguments.verify_only)
 
     def test_rejects_unsupported_architecture(self) -> None:
+        architecture = "not-a-supported-posix-arch"
+        with self.assertRaisesRegex(ValueError, "unsupported architecture"):
+            build_module.toolchain_for_architecture(architecture)
         stderr = mock.Mock()
         with mock.patch("sys.stderr", stderr):
-            result = cli.main(["build", "--arch", "x86_64", "--stage", "stage"])
+            result = cli.main(["build", "--arch", architecture, "--stage", "stage"])
         self.assertEqual(result, 1)
 
     def test_verify_only_supplies_current_expected_inventory(self) -> None:

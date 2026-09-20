@@ -43,7 +43,6 @@ from .model import (
 )
 
 
-PLATFORM = "smros-aarch64"
 SOURCE = "smros-qemu"
 WATCHDOG_SOURCE = "host-watchdog"
 PROMPT = b"smros:/> "
@@ -3150,7 +3149,7 @@ def run_smros(
             qemu_argv=argv,
             # RISC-V's first boot can spend over a minute initializing the
             # virtual block device and scheduler before the shell prompt.
-            boot_timeout_seconds=120.0 if architecture == "riscv64" else 60.0,
+            boot_timeout_seconds=toolchain.boot_timeout_seconds,
             refresh_host_share=True,
         ),
     ).run(resume=resume)

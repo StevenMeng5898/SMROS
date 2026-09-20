@@ -476,6 +476,7 @@ impl PageTableManager {
 
         #[cfg(not(target_arch = "aarch64"))]
         {
+            let _ = readable;
             let mut addr = vaddr;
             let mut paddr = paddr;
             let end = vaddr + size;

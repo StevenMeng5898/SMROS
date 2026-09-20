@@ -488,7 +488,7 @@ pub fn hypervisor() -> &'static mut HypervisorObject {
 
 pub fn init() {
     let _ = ObjectType::Hypervisor;
-    crate::kobj_info!("hypervisor", "modeled hypervisor object initialized");
+    crate::kobj_debug!("hypervisor", "modeled hypervisor object initialized");
 }
 
 pub fn parse_vm_config(config_xml: &str) -> Result<VmConfig, HypervisorConfigError> {
