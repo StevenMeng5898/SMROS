@@ -133,16 +133,16 @@ host UT/IT crate and writes the source-highlighted heatmap to
 `make coverage-it` for narrower 100% gated reports, or `make coverage` to
 generate host coverage and then run the QEMU system smoke test. `make
 coverage-st` writes `target/coverage/st/index.html` and the raw serial log. The
-QEMU `st` layer is reported as required serial milestone coverage; it is not
+QEMU `skt` smoke layer is reported as required serial milestone coverage; it is not
 Tarpaulin guest line coverage.
 
-Boot-level smoke test:
+Boot-level smoke test (SKT):
 
 ```bash
-make st
-make st ARCH=riscv64gc-unknown-none-elf
-make st ARCH=x86_64-unknown-none
-make st ARCH=aarch64-unknown-none QEMU_CPU_AARCH64=cortex-a57
+make skt
+make skt ARCH=riscv64gc-unknown-none-elf
+make skt ARCH=x86_64-unknown-none
+make skt ARCH=aarch64-unknown-none QEMU_CPU_AARCH64=cortex-a57
 ```
 
 This starts QEMU non-interactively and passes when the serial log reaches the
@@ -351,6 +351,7 @@ hermes test
 hermes exec meminfo
 hermes random seed=1234 iterations=8
 hermes test-all seed=1234 iterations=8
+hermes test-all mode=syscall seed=1 iterations=1
 hermes ui
 hermes ask test hermes agent on SMROS
 lvgl info
@@ -370,8 +371,10 @@ pulls are still reported as unsupported until TLS and bearer-token auth exist.
 shell. It also accepts named limits such as
 `fuzzsc seed=1234 iterations=4 time=2` or `fuzzsc iter 4 ms=500`. It mutates
 structured Linux and Zircon syscall arguments against the live dispatch tables,
-prints a compact success/error/unsupported summary, and only walks modeled
-success-path syscalls. Unsupported ABI entries, non-returning calls, and
+then named POSIX APIs with libc-shaped arguments (`mq_*`, `pthread_cond_*`,
+`sched_yield`, clocks, `mmap`/`shm_open`, files), prints a compact
+success/error/unsupported summary including POSIX totals, and only walks modeled
+success-path syscalls plus the POSIX catalog. Unsupported ABI entries, non-returning calls, and
 destructive calls such as process exit, kill, close-many, and clone-style task
 creation are kept out of the interactive run so `err`, `ENOSYS`, and
 unsupported counts indicate a harness or coverage gap.
@@ -401,10 +404,12 @@ or run a deterministic safe campaign with `hermes random`. Each campaign
 accepts any positive, platform-representable `iterations=<n>`, prints a replay
 seed, and writes its bounded report to `/data/hermes/tests/latest.log`.
 `hermes test-all` runs the native Hermes test once and then runs one random
-guest operation plus each host job once per iteration: `make ut`, `make it`,
-and `make st`. Reports keep aggregate totals and at most 64 round details, so
-large iteration counts remain persistable. The host jobs require
-`scripts/smros-vm-launcher.py`; the guest can request only those three jobs and
+guest operation plus each host job once per iteration: `make ut` and
+`make it`. It does not run ST/SKT, because the guest cannot boot another
+SMROS from the command line. `mode=syscall` keeps those host jobs and selects the guest
+catalog of `testsc`, bounded `fuzzsc`, and `hermes test`. Reports keep
+aggregate totals and at most 64 round details, so large iteration counts remain persistable. The host jobs require
+`scripts/smros-vm-launcher.py`; the guest can request only those two jobs and
 cannot supply host command text. Destructive commands remain unavailable to
 Hermes.
 

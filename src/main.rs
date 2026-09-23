@@ -1,11 +1,13 @@
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 
 extern crate alloc;
 
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
 use core::mem::{align_of, size_of};
+use core::ptr::{addr_of, addr_of_mut};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
@@ -60,9 +62,22 @@ struct AllocIrqGuard {
     state: kernel_lowlevel::cpu::IrqState,
 }
 
-// 64 MiB heap for kernel dynamic allocations.
-static HEAP: SyncUnsafeCell<[u8; main_logic::KERNEL_HEAP_SIZE]> =
-    SyncUnsafeCell::new([0; main_logic::KERNEL_HEAP_SIZE]);
+// 256 MiB kernel heap lives in the linker .heap (NOLOAD) section so rustc/LTO
+// does not materialize a 256 MiB [0; N] constant while compiling smros(bin).
+extern "C" {
+    static mut __heap_start: u8;
+    static __heap_end: u8;
+}
+
+unsafe fn kernel_heap_bounds() -> (usize, usize) {
+    let start = addr_of_mut!(__heap_start) as usize;
+    let linked_end = addr_of!(__heap_end) as usize;
+    if linked_end.wrapping_sub(start) == main_logic::KERNEL_HEAP_SIZE {
+        (start, linked_end)
+    } else {
+        (start, start.wrapping_add(main_logic::KERNEL_HEAP_SIZE))
+    }
+}
 static ALLOC_STATE: SyncUnsafeCell<KernelAllocatorState> =
     SyncUnsafeCell::new(KernelAllocatorState {
         initialized: false,
@@ -142,8 +157,7 @@ impl Drop for AllocIrqGuard {
 }
 
 unsafe fn init_kernel_allocator(state: &mut KernelAllocatorState) {
-    let heap_start = (*HEAP.get()).as_mut_ptr() as usize;
-    let heap_end = heap_start + main_logic::KERNEL_HEAP_SIZE;
+    let (heap_start, heap_end) = kernel_heap_bounds();
     let block_start = match allocator_align_up(heap_start, align_of::<FreeBlock>()) {
         Some(value) => value,
         None => {
@@ -343,8 +357,7 @@ unsafe fn insert_free_block(
         return;
     }
 
-    let heap_start = (*HEAP.get()).as_mut_ptr() as usize;
-    let heap_end = heap_start + main_logic::KERNEL_HEAP_SIZE;
+    let (heap_start, heap_end) = kernel_heap_bounds();
     let block_end = match block_start.checked_add(block_size) {
         Some(value) => value,
         None => return,
@@ -367,7 +380,6 @@ unsafe fn insert_free_block(
                 scan_steps,
                 block_start
             );
-            return;
         }
         prev = current;
         current = (*current).next;
@@ -790,6 +802,51 @@ fn print_system_info(serial: &mut Serial) {
     serial.write_str("--------------------------\n");
 }
 
+struct SerialFmt<'a>(&'a mut Serial);
+
+impl core::fmt::Write for SerialFmt<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.0.write_str(s);
+        Ok(())
+    }
+}
+
+fn write_usize(serial: &mut Serial, mut num: usize) {
+    if num == 0 {
+        serial.write_byte(b'0');
+        return;
+    }
+    let mut buf = [0u8; 20];
+    let mut i = 0;
+    while num > 0 && i < buf.len() {
+        buf[i] = b'0' + (num % 10) as u8;
+        num /= 10;
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        serial.write_byte(buf[i]);
+    }
+}
+
+fn halt_forever() -> ! {
+    loop {
+        kernel_lowlevel::cpu::wait_for_interrupt();
+    }
+}
+
+#[alloc_error_handler]
+fn alloc_error_handler(layout: Layout) -> ! {
+    let mut serial = Serial::new();
+    serial.init();
+    serial.write_str("\n!!! KERNEL PANIC !!!\n[OOM] memory allocation of ");
+    write_usize(&mut serial, layout.size());
+    serial.write_str(" bytes failed (align=");
+    write_usize(&mut serial, layout.align());
+    serial.write_str(")\n\n[ERROR] System halted\n");
+    halt_forever()
+}
+
 /// Panic handler
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -802,34 +859,13 @@ fn panic(info: &PanicInfo) -> ! {
         serial.write_str("[PANIC] In file ");
         serial.write_str(location.file());
         serial.write_str(" at line ");
-        // Convert line number to string manually
-        let mut num = location.line();
-        let mut buf = [0u8; 16];
-        let mut i = 0;
-        if num == 0 {
-            buf[i] = b'0';
-            i += 1;
-        } else {
-            let mut temp = [0u8; 16];
-            let mut j = 0;
-            while num > 0 {
-                temp[j] = b'0' + (num % 10) as u8;
-                num /= 10;
-                j += 1;
-            }
-            while j > 0 {
-                j -= 1;
-                buf[i] = temp[j];
-                i += 1;
-            }
-        }
-        serial.write_buf(&buf[..i]);
+        write_usize(&mut serial, location.line() as usize);
         serial.write_str("\n");
     }
 
-    serial.write_str("\n[ERROR] System halted\n");
+    serial.write_str("[PANIC] ");
+    let _ = core::fmt::write(&mut SerialFmt(&mut serial), format_args!("{}\n", info.message()));
 
-    loop {
-        kernel_lowlevel::cpu::wait_for_interrupt();
-    }
+    serial.write_str("\n[ERROR] System halted\n");
+    halt_forever()
 }

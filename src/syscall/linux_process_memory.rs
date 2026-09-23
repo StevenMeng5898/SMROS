@@ -1,8 +1,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(target_arch = "aarch64")]
 use core::marker::PhantomData;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(target_arch = "riscv64")]
 use core::sync::atomic::AtomicBool;
@@ -12,7 +12,7 @@ use crate::kernel_lowlevel::memory::{PageFrameAllocator, PAGE_SIZE};
 use crate::kernel_lowlevel::Aarch64AddressSpace;
 use crate::kernel_objects::ObjectType;
 
-use super::{linux_process, SysError};
+use super::{linux_process, linux_task, syscall_logic, SysError};
 
 include!("linux_process_memory_logic_shared.rs");
 include!("linux_runtime_lock_shared.rs");
@@ -476,8 +476,7 @@ unsafe fn free_riscv_page_table(paddr: u64) {
 
 #[cfg(target_arch = "riscv64")]
 fn riscv_table_from_pte(pte: u64) -> Option<*mut RiscvPageTable> {
-    if pte & RISCV_PTE_V == 0
-        || pte & (RISCV_PTE_R | RISCV_PTE_W | RISCV_PTE_X | RISCV_PTE_U) != 0
+    if pte & RISCV_PTE_V == 0 || pte & (RISCV_PTE_R | RISCV_PTE_W | RISCV_PTE_X | RISCV_PTE_U) != 0
     {
         return None;
     }
@@ -601,8 +600,8 @@ unsafe fn riscv_translate_user(root_paddr: u64, vaddr: usize, write: bool) -> Op
 #[cfg(target_arch = "riscv64")]
 impl FallbackAddressSpace {
     fn clone_for_fork(parent: &Self) -> Result<Self, SysError> {
-        let root_paddr = unsafe { clone_riscv_page_table(parent.root_paddr) }
-            .ok_or(SysError::ENOMEM)?;
+        let root_paddr =
+            unsafe { clone_riscv_page_table(parent.root_paddr) }.ok_or(SysError::ENOMEM)?;
         Ok(Self {
             root_paddr,
             cached_leaf_table: 0,
@@ -617,13 +616,7 @@ impl FallbackAddressSpace {
         // addresses available after switching to the process's Sv39 root.
         unsafe {
             let root = root_paddr as *mut RiscvPageTable;
-            (*root).entries[2] = riscv_leaf_pte(
-                0x8000_0000,
-                true,
-                true,
-                true,
-                false,
-            );
+            (*root).entries[2] = riscv_leaf_pte(0x8000_0000, true, true, true, false);
             let uart = crate::kernel_lowlevel::drivers::uart_base();
             if uart != 0 {
                 riscv_map_page(
@@ -637,7 +630,8 @@ impl FallbackAddressSpace {
                 )?;
             }
             let mut virtio_mmio_index = 0;
-            while let Some(reg) = crate::kernel_lowlevel::drivers::virtio_mmio_reg(virtio_mmio_index)
+            while let Some(reg) =
+                crate::kernel_lowlevel::drivers::virtio_mmio_reg(virtio_mmio_index)
             {
                 let page_base = reg.base & !(PAGE_SIZE - 1);
                 let page_count = reg
@@ -696,10 +690,7 @@ impl FallbackAddressSpace {
             .ok_or(SysError::ENOMEM)?;
         let vpn2 = (vaddr >> 30) & 0x1ff;
         let vpn1 = (vaddr >> 21) & 0x1ff;
-        if self.cached_leaf_table == 0
-            || self.cached_vpn2 != vpn2
-            || self.cached_vpn1 != vpn1
-        {
+        if self.cached_leaf_table == 0 || self.cached_vpn2 != vpn2 || self.cached_vpn1 != vpn1 {
             let table = unsafe { riscv_leaf_table(self.root_paddr, vaddr, true) }
                 .ok_or(SysError::ENOMEM)?;
             self.cached_leaf_table = table as u64;
@@ -778,7 +769,10 @@ impl FallbackAddressSpace {
             let address = vaddr.checked_add(offset).ok_or(SysError::EFAULT)?;
             let physical = unsafe { riscv_translate_user(self.root_paddr, address, true) }
                 .ok_or(SysError::EFAULT)?;
-            let chunk = core::cmp::min(PAGE_SIZE - (address & (PAGE_SIZE - 1)), bytes.len() - offset);
+            let chunk = core::cmp::min(
+                PAGE_SIZE - (address & (PAGE_SIZE - 1)),
+                bytes.len() - offset,
+            );
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     bytes.as_ptr().add(offset),
@@ -884,7 +878,6 @@ impl FallbackAddressSpace {
         }
         Ok(())
     }
-
 }
 
 pub(crate) struct LinuxMemoryStats {
@@ -1052,10 +1045,7 @@ fn prune_cached_shared_file_pages(runtime: &mut LinuxSharedPageRuntime) {
             .map(|object| object.object_id),
     );
     runtime.pages.retain(|page| {
-        if evict != 0
-            && page.references == 0
-            && cacheable_objects.contains(&page.object_id)
-        {
+        if evict != 0 && page.references == 0 && cacheable_objects.contains(&page.object_id) {
             evict -= 1;
             PageFrameAllocator::free(page.pfn);
             false
@@ -1103,13 +1093,16 @@ fn acquire_or_register_shared_page(
                 (page.object_id, page.page_index)
             })
             .unwrap_err();
-        runtime.pages.insert(index, LinuxSharedPageRecord {
-            object_id,
-            page_index,
-            pfn: candidate_pfn,
-            references: 1,
-            named: true,
-        });
+        runtime.pages.insert(
+            index,
+            LinuxSharedPageRecord {
+                object_id,
+                page_index,
+                pfn: candidate_pfn,
+                references: 1,
+                named: true,
+            },
+        );
         Some(candidate_pfn)
     })
 }
@@ -1120,15 +1113,11 @@ fn private_page_details(
     pfn: u64,
 ) -> Option<(usize, usize)> {
     for mapping in &memory.mappings {
-        if address < mapping.addr
-            || address >= mapping.addr.saturating_add(mapping.len)
-        {
+        if address < mapping.addr || address >= mapping.addr.saturating_add(mapping.len) {
             continue;
         }
         let page_index = (address - mapping.addr) / PAGE_SIZE;
-        if mapping.pages.get(page_index).copied()
-            != Some(LinuxPageBacking::Private { pfn })
-        {
+        if mapping.pages.get(page_index).copied() != Some(LinuxPageBacking::Private { pfn }) {
             return None;
         }
         let prot = LinuxProcessMemory::mapping_page_prot(&mapping.source, mapping.prot, page_index);
@@ -1140,12 +1129,14 @@ fn private_page_details(
         return Some((prot, linux_page_protection_for_backing(shared, prot)));
     }
     if address >= memory.brk.start
-        && address < memory.brk.start.saturating_add(memory.brk.pages.len() * PAGE_SIZE)
+        && address
+            < memory
+                .brk
+                .start
+                .saturating_add(memory.brk.pages.len() * PAGE_SIZE)
     {
         let page_index = (address - memory.brk.start) / PAGE_SIZE;
-        if memory.brk.pages.get(page_index).copied()
-            == Some(LinuxPageBacking::Private { pfn })
-        {
+        if memory.brk.pages.get(page_index).copied() == Some(LinuxPageBacking::Private { pfn }) {
             let prot = LINUX_PROT_READ | LINUX_PROT_WRITE;
             let shared = LinuxPageBacking::Shared {
                 object_id: LINUX_FORK_PRIVATE_OBJECT_ID,
@@ -1160,15 +1151,11 @@ fn private_page_details(
 
 fn promote_private_backing(memory: &mut LinuxProcessMemory, address: usize, pfn: u64) {
     for mapping in &mut memory.mappings {
-        if address < mapping.addr
-            || address >= mapping.addr.saturating_add(mapping.len)
-        {
+        if address < mapping.addr || address >= mapping.addr.saturating_add(mapping.len) {
             continue;
         }
         let page_index = (address - mapping.addr) / PAGE_SIZE;
-        if mapping.pages.get(page_index).copied()
-            == Some(LinuxPageBacking::Private { pfn })
-        {
+        if mapping.pages.get(page_index).copied() == Some(LinuxPageBacking::Private { pfn }) {
             mapping.pages[page_index] = LinuxPageBacking::Shared {
                 object_id: LINUX_FORK_PRIVATE_OBJECT_ID,
                 page_index: usize::try_from(pfn).unwrap_or(0),
@@ -1178,12 +1165,14 @@ fn promote_private_backing(memory: &mut LinuxProcessMemory, address: usize, pfn:
         return;
     }
     if address >= memory.brk.start
-        && address < memory.brk.start.saturating_add(memory.brk.pages.len() * PAGE_SIZE)
+        && address
+            < memory
+                .brk
+                .start
+                .saturating_add(memory.brk.pages.len() * PAGE_SIZE)
     {
         let page_index = (address - memory.brk.start) / PAGE_SIZE;
-        if memory.brk.pages.get(page_index).copied()
-            == Some(LinuxPageBacking::Private { pfn })
-        {
+        if memory.brk.pages.get(page_index).copied() == Some(LinuxPageBacking::Private { pfn }) {
             memory.brk.pages[page_index] = LinuxPageBacking::Shared {
                 object_id: LINUX_FORK_PRIVATE_OBJECT_ID,
                 page_index: usize::try_from(pfn).unwrap_or(0),
@@ -1193,9 +1182,7 @@ fn promote_private_backing(memory: &mut LinuxProcessMemory, address: usize, pfn:
     }
 }
 
-fn promote_tracked_private_fork_pages(
-    memory: &mut LinuxProcessMemory,
-) -> Result<(), SysError> {
+fn promote_tracked_private_fork_pages(memory: &mut LinuxProcessMemory) -> Result<(), SysError> {
     let hints = core::mem::take(&mut memory.private_page_hints);
     if hints.is_empty() {
         return Ok(());
@@ -1361,11 +1348,8 @@ fn promote_private_fork_pages(memory: &mut LinuxProcessMemory) -> Result<(), Sys
         .map_err(|_| SysError::ENOMEM)?;
     for mapping in &memory.mappings {
         for (page_index, page) in mapping.pages.iter().copied().enumerate() {
-            let prot = LinuxProcessMemory::mapping_page_prot(
-                &mapping.source,
-                mapping.prot,
-                page_index,
-            );
+            let prot =
+                LinuxProcessMemory::mapping_page_prot(&mapping.source, mapping.prot, page_index);
             let cow_prot = linux_page_protection_for_backing(page, prot);
             if cow_prot != prot {
                 protections.push((mapping.addr + page_index * PAGE_SIZE, cow_prot));
@@ -1731,8 +1715,7 @@ pub(crate) fn with_current<R>(
 }
 
 pub(crate) fn futex_address_key(address: usize) -> usize {
-    with_current(|memory| Ok(memory.futex_address_key(address)))
-        .unwrap_or(address)
+    with_current(|memory| Ok(memory.futex_address_key(address))).unwrap_or(address)
 }
 
 fn with_pid<R>(
@@ -1835,18 +1818,15 @@ pub(crate) fn clone_for_fork(
         {
             return Err(SysError::EBUSY);
         }
-        runtime
-            .memories
-            .try_reserve(1)
-            .map_err(|_| {
-                crate::kobj_debug!(
-                    "posix-fork",
-                    "clone-error-stage parent={} child={} stage=memory-vector-reserve",
-                    parent_pid,
-                    child_pid
-                );
-                SysError::ENOMEM
-            })?;
+        runtime.memories.try_reserve(1).map_err(|_| {
+            crate::kobj_debug!(
+                "posix-fork",
+                "clone-error-stage parent={} child={} stage=memory-vector-reserve",
+                parent_pid,
+                child_pid
+            );
+            SysError::ENOMEM
+        })?;
         let parent_index = runtime
             .memories
             .iter()
@@ -1873,32 +1853,26 @@ pub(crate) fn clone_for_fork(
                 "posix-fork",
                 "fork-timing promoted child={} elapsed={}",
                 child_pid,
-                crate::kernel_lowlevel::timer::get_tick_count()
-                    .saturating_sub(fork_started)
+                crate::kernel_lowlevel::timer::get_tick_count().saturating_sub(fork_started)
             );
         }
         crate::kobj_debug!("posix-fork", "riscv clone parent promotion complete");
-        let parent = runtime
-            .memories
-            .get(parent_index)
-            .ok_or(SysError::ESRCH)?;
+        let parent = runtime.memories.get(parent_index).ok_or(SysError::ESRCH)?;
 
         #[cfg(target_arch = "aarch64")]
-        let mut address_space = Aarch64AddressSpace::new_for_fork(
-            &parent.address_space,
-            fork_table_allocation_failure,
-        )
-            .map_err(map_address_error)
-            .map_err(|error| {
-                crate::kobj_debug!(
-                    "posix-fork",
-                    "clone-error-stage parent={} child={} stage=address-space error={:?}",
-                    parent_pid,
-                    child_pid,
+        let mut address_space =
+            Aarch64AddressSpace::new_for_fork(&parent.address_space, fork_table_allocation_failure)
+                .map_err(map_address_error)
+                .map_err(|error| {
+                    crate::kobj_debug!(
+                        "posix-fork",
+                        "clone-error-stage parent={} child={} stage=address-space error={:?}",
+                        parent_pid,
+                        child_pid,
+                        error
+                    );
                     error
-                );
-                error
-            })?;
+                })?;
         #[cfg(target_arch = "aarch64")]
         address_space.begin_deferred_user_updates();
         #[cfg(target_arch = "riscv64")]
@@ -1910,8 +1884,7 @@ pub(crate) fn clone_for_fork(
                 "posix-fork",
                 "fork-timing address-space child={} elapsed={}",
                 child_pid,
-                crate::kernel_lowlevel::timer::get_tick_count()
-                    .saturating_sub(fork_started)
+                crate::kernel_lowlevel::timer::get_tick_count().saturating_sub(fork_started)
             );
         }
         crate::kobj_debug!("posix-fork", "riscv clone child root allocated");
@@ -1970,7 +1943,7 @@ pub(crate) fn clone_for_fork(
                     shared_attachments.len()
                 );
                 SysError::ENOMEM
-        })?;
+            })?;
 
         for mapping in parent.mappings.iter() {
             let source = mapping.source.try_clone_for_fork().map_err(|_| {
@@ -1982,8 +1955,7 @@ pub(crate) fn clone_for_fork(
                 );
                 SysError::ENOMEM
             })?;
-            if mapping.addr <= 0x1203_00a0
-                && 0x1203_00a0 < mapping.addr.saturating_add(mapping.len)
+            if mapping.addr <= 0x1203_00a0 && 0x1203_00a0 < mapping.addr.saturating_add(mapping.len)
             {
                 let page_index = (0x1203_00a0 - mapping.addr) / PAGE_SIZE;
                 let effective_prot =
@@ -2048,9 +2020,7 @@ pub(crate) fn clone_for_fork(
                 {
                     let pages = clone_shared_linux_fork_pages(&mapping.pages)?;
                     if pages.iter().any(|_| {
-                        super::linux_process::fork_failpoint(
-                            LinuxForkFailurePoint::SharedReference,
-                        )
+                        super::linux_process::fork_failpoint(LinuxForkFailurePoint::SharedReference)
                     }) {
                         LinuxProcessMemory::free_backings(&pages);
                         return Err(SysError::ENOMEM);
@@ -2120,22 +2090,22 @@ pub(crate) fn clone_for_fork(
                 let map_result: Result<(), SysError> = Ok(());
                 #[cfg(not(target_arch = "riscv64"))]
                 let map_result = super::linux_process::map_linux_fork_pages_with_protection(
-                        &mut LinuxProcessForkPageOps::new(&mut child),
-                        mapping.addr,
-                        PAGE_SIZE,
-                        &pages,
-                        |page_index| {
-                            linux_page_protection_for_backing(
-                                pages[page_index],
-                                LinuxProcessMemory::mapping_page_prot(
-                                    &source,
-                                    mapping.prot,
-                                    page_index,
-                                ),
-                            )
-                        },
-                        super::linux_process::fork_failpoint,
-                    );
+                    &mut LinuxProcessForkPageOps::new(&mut child),
+                    mapping.addr,
+                    PAGE_SIZE,
+                    &pages,
+                    |page_index| {
+                        linux_page_protection_for_backing(
+                            pages[page_index],
+                            LinuxProcessMemory::mapping_page_prot(
+                                &source,
+                                mapping.prot,
+                                page_index,
+                            ),
+                        )
+                    },
+                    super::linux_process::fork_failpoint,
+                );
                 if let Err(error) = map_result {
                     crate::kobj_debug!(
                         "posix-fork",
@@ -2171,8 +2141,7 @@ pub(crate) fn clone_for_fork(
                 "posix-fork",
                 "fork-timing mappings child={} elapsed={}",
                 child_pid,
-                crate::kernel_lowlevel::timer::get_tick_count()
-                    .saturating_sub(fork_started)
+                crate::kernel_lowlevel::timer::get_tick_count().saturating_sub(fork_started)
             );
         }
 
@@ -2185,9 +2154,7 @@ pub(crate) fn clone_for_fork(
         {
             let pages = clone_shared_linux_fork_pages(&parent.brk.pages)?;
             if pages.iter().any(|_| {
-                super::linux_process::fork_failpoint(
-                    LinuxForkFailurePoint::SharedReference,
-                )
+                super::linux_process::fork_failpoint(LinuxForkFailurePoint::SharedReference)
             }) {
                 LinuxProcessMemory::free_backings(&pages);
                 return Err(SysError::ENOMEM);
@@ -2209,8 +2176,7 @@ pub(crate) fn clone_for_fork(
             );
             result
         };
-        let brk_pages = brk_pages
-        .map_err(|error| {
+        let brk_pages = brk_pages.map_err(|error| {
             crate::kobj_debug!(
                 "posix-fork",
                 "clone-error-stage parent={} child={} stage=brk-pages error={:?}",
@@ -2230,10 +2196,9 @@ pub(crate) fn clone_for_fork(
             let page_address = brk_start
                 .checked_add(page_index * PAGE_SIZE)
                 .ok_or(SysError::ENOMEM)?;
-            if let Err(error) = child
-                .unmap_page(page_address)
-                .and_then(|_| child.map_page(page_address, page.pfn(), LINUX_PROT_READ | LINUX_PROT_WRITE))
-            {
+            if let Err(error) = child.unmap_page(page_address).and_then(|_| {
+                child.map_page(page_address, page.pfn(), LINUX_PROT_READ | LINUX_PROT_WRITE)
+            }) {
                 crate::kobj_debug!(
                     "posix-fork",
                     "clone-error-stage parent={} child={} stage=brk-private-remap error={:?}",
@@ -2251,13 +2216,13 @@ pub(crate) fn clone_for_fork(
             let map_result: Result<(), SysError> = Ok(());
             #[cfg(not(target_arch = "riscv64"))]
             let map_result = super::linux_process::map_linux_fork_pages(
-                    &mut LinuxProcessForkPageOps::new(&mut child),
-                    brk_start,
-                    PAGE_SIZE,
-                    &brk_pages,
-                    LINUX_PROT_READ | LINUX_PROT_WRITE,
-                    super::linux_process::fork_failpoint,
-                );
+                &mut LinuxProcessForkPageOps::new(&mut child),
+                brk_start,
+                PAGE_SIZE,
+                &brk_pages,
+                LINUX_PROT_READ | LINUX_PROT_WRITE,
+                super::linux_process::fork_failpoint,
+            );
             if let Err(error) = map_result {
                 crate::kobj_debug!(
                     "posix-fork",
@@ -2277,8 +2242,7 @@ pub(crate) fn clone_for_fork(
                 "posix-fork",
                 "fork-timing brk child={} elapsed={}",
                 child_pid,
-                crate::kernel_lowlevel::timer::get_tick_count()
-                    .saturating_sub(fork_started)
+                crate::kernel_lowlevel::timer::get_tick_count().saturating_sub(fork_started)
             );
         }
         #[cfg(target_arch = "aarch64")]
@@ -2290,8 +2254,7 @@ pub(crate) fn clone_for_fork(
                 "posix-fork",
                 "fork-timing complete child={} elapsed={}",
                 child_pid,
-                crate::kernel_lowlevel::timer::get_tick_count()
-                    .saturating_sub(fork_started)
+                crate::kernel_lowlevel::timer::get_tick_count().saturating_sub(fork_started)
             );
         }
         Ok(root_paddr)
@@ -2464,13 +2427,9 @@ fn clone_shared_linux_fork_pages(
                     else {
                         return false;
                     };
-                    runtime
-                        .pages
-                        .get(start + offset)
-                        .is_some_and(|candidate| {
-                            (candidate.object_id, candidate.page_index)
-                                == (object_id, page_index)
-                        })
+                    runtime.pages.get(start + offset).is_some_and(|candidate| {
+                        (candidate.object_id, candidate.page_index) == (object_id, page_index)
+                    })
                 })
                 .then_some(start)
         });
@@ -2494,10 +2453,13 @@ fn clone_shared_linux_fork_pages(
             else {
                 return false;
             };
-            let Some(index) = runtime.pages.binary_search_by_key(
-                &(object_id, page_index),
-                |candidate| (candidate.object_id, candidate.page_index),
-            ).ok() else {
+            let Some(index) = runtime
+                .pages
+                .binary_search_by_key(&(object_id, page_index), |candidate| {
+                    (candidate.object_id, candidate.page_index)
+                })
+                .ok()
+            else {
                 return false;
             };
             if runtime.pages[index].references == usize::MAX {
@@ -2513,10 +2475,12 @@ fn clone_shared_linux_fork_pages(
             else {
                 return false;
             };
-            let Ok(index) = runtime.pages.binary_search_by_key(
-                &(object_id, page_index),
-                |candidate| (candidate.object_id, candidate.page_index),
-            ) else {
+            let Ok(index) = runtime
+                .pages
+                .binary_search_by_key(&(object_id, page_index), |candidate| {
+                    (candidate.object_id, candidate.page_index)
+                })
+            else {
                 return false;
             };
             runtime.pages[index].references += 1;
@@ -2529,8 +2493,30 @@ fn clone_shared_linux_fork_pages(
     Ok(child_pages)
 }
 
+fn kernel_dispatch_copy_allowed(address: usize, len: usize) -> bool {
+    linux_task::kernel_dispatch_range_contains(address, len)
+        && syscall_logic::user_buffer_valid(address, len)
+}
+
+fn kernel_resident_copy_allowed(address: usize, len: usize) -> bool {
+    // Kernel-thread callers (docker/runc, the user shell) pass kernel C strings
+    // and stack buffers into Linux syscalls. There is no Linux process address
+    // space on that scheduler thread, so walking user mappings returns ESRCH.
+    syscall_logic::user_buffer_valid(address, len) && linux_process::current_pid().is_err()
+}
+
+fn in_process_kernel_copy_allowed(address: usize, len: usize) -> bool {
+    kernel_dispatch_copy_allowed(address, len) || kernel_resident_copy_allowed(address, len)
+}
+
 pub(crate) fn copy_from_current(address: usize, out: &mut [u8]) -> Result<(), SysError> {
     if out.is_empty() {
+        return Ok(());
+    }
+    if in_process_kernel_copy_allowed(address, out.len()) {
+        unsafe {
+            core::ptr::copy_nonoverlapping(address as *const u8, out.as_mut_ptr(), out.len());
+        }
         return Ok(());
     }
     with_current(|memory| memory.copy_from_user(address, out))
@@ -2540,7 +2526,20 @@ pub(crate) fn copy_to_current(address: usize, bytes: &[u8]) -> Result<(), SysErr
     if bytes.is_empty() {
         return Ok(());
     }
+    if in_process_kernel_copy_allowed(address, bytes.len()) {
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), address as *mut u8, bytes.len());
+        }
+        return Ok(());
+    }
     with_current(|memory| memory.copy_to_user(address, bytes))
+}
+
+pub(crate) fn ensure_dispatch_memory(pid: usize) -> Result<(), SysError> {
+    if with_current(|_| Ok(())).is_ok() {
+        return Ok(());
+    }
+    register_root(pid).map(|_| ())
 }
 
 pub(crate) fn current_writable_contiguous_physical(
@@ -2926,10 +2925,16 @@ pub(crate) fn release_shared_attachments(attachments: &[LinuxSharedAttachmentClo
 }
 
 pub(crate) fn user_range_readable(address: usize, len: usize) -> bool {
+    if in_process_kernel_copy_allowed(address, len) {
+        return true;
+    }
     with_current(|memory| Ok(memory.range_accessible(address, len, false))).unwrap_or(false)
 }
 
 pub(crate) fn user_range_writable(address: usize, len: usize) -> bool {
+    if in_process_kernel_copy_allowed(address, len) {
+        return true;
+    }
     with_current(|memory| Ok(memory.range_accessible(address, len, true))).unwrap_or(false)
 }
 
@@ -3143,12 +3148,7 @@ impl LinuxProcessMemory {
     }
 
     #[cfg(target_arch = "riscv64")]
-    fn map_page_no_flush(
-        &mut self,
-        address: usize,
-        pfn: u64,
-        prot: usize,
-    ) -> Result<(), SysError> {
+    fn map_page_no_flush(&mut self, address: usize, pfn: u64, prot: usize) -> Result<(), SysError> {
         let (readable, writable, executable) = Self::page_permissions(prot);
         self.address_space
             .map_user_page_no_flush(address, pfn, readable, writable, executable)
@@ -3176,12 +3176,7 @@ impl LinuxProcessMemory {
         self.address_space.unmap_user_page(address)
     }
 
-    fn replace_page(
-        &mut self,
-        address: usize,
-        pfn: u64,
-        prot: usize,
-    ) -> Result<u64, SysError> {
+    fn replace_page(&mut self, address: usize, pfn: u64, prot: usize) -> Result<u64, SysError> {
         #[cfg(target_arch = "aarch64")]
         let (readable, writable, executable) = Self::page_permissions(prot);
         #[cfg(target_arch = "aarch64")]
@@ -3210,7 +3205,11 @@ impl LinuxProcessMemory {
                 continue;
             }
             let page_index = (page_address - mapping.addr) / PAGE_SIZE;
-            let backing = mapping.pages.get(page_index).copied().ok_or(SysError::EFAULT)?;
+            let backing = mapping
+                .pages
+                .get(page_index)
+                .copied()
+                .ok_or(SysError::EFAULT)?;
             let prot = Self::mapping_page_prot(&mapping.source, mapping.prot, page_index);
             mapping_location = Some((mapping_index, page_index, backing, prot));
             break;
@@ -3218,12 +3217,21 @@ impl LinuxProcessMemory {
 
         let Some((mapping_index, page_index, backing, prot)) = mapping_location else {
             if page_address < self.brk.start
-                || page_address >= self.brk.start.saturating_add(self.brk.pages.len() * PAGE_SIZE)
+                || page_address
+                    >= self
+                        .brk
+                        .start
+                        .saturating_add(self.brk.pages.len() * PAGE_SIZE)
             {
                 return Ok(false);
             }
             let page_index = (page_address - self.brk.start) / PAGE_SIZE;
-            let backing = self.brk.pages.get(page_index).copied().ok_or(SysError::EFAULT)?;
+            let backing = self
+                .brk
+                .pages
+                .get(page_index)
+                .copied()
+                .ok_or(SysError::EFAULT)?;
             let prot = LINUX_PROT_READ | LINUX_PROT_WRITE;
             if !linux_page_backing_is_cow(backing) || prot & LINUX_PROT_WRITE == 0 {
                 return Ok(false);
@@ -3320,8 +3328,7 @@ impl LinuxProcessMemory {
     fn address_is_cow(&self, address: usize) -> bool {
         let page_address = address & !(PAGE_SIZE - 1);
         if let Some(mapping) = self.mappings.iter().find(|mapping| {
-            page_address >= mapping.addr
-                && page_address < mapping.addr.saturating_add(mapping.len)
+            page_address >= mapping.addr && page_address < mapping.addr.saturating_add(mapping.len)
         }) {
             let page_index = (page_address - mapping.addr) / PAGE_SIZE;
             return mapping
@@ -3331,7 +3338,11 @@ impl LinuxProcessMemory {
                 .is_some_and(linux_page_backing_is_cow);
         }
         if page_address < self.brk.start
-            || page_address >= self.brk.start.saturating_add(self.brk.pages.len() * PAGE_SIZE)
+            || page_address
+                >= self
+                    .brk
+                    .start
+                    .saturating_add(self.brk.pages.len() * PAGE_SIZE)
         {
             return false;
         }
@@ -3354,7 +3365,11 @@ impl LinuxProcessMemory {
         self.copy_to_mapped_pages(address, bytes)
     }
 
-    fn writable_contiguous_physical(&mut self, address: usize, len: usize) -> Result<usize, SysError> {
+    fn writable_contiguous_physical(
+        &mut self,
+        address: usize,
+        len: usize,
+    ) -> Result<usize, SysError> {
         let end = address.checked_add(len).ok_or(SysError::EFAULT)?;
         if end > (address | (PAGE_SIZE - 1)).saturating_add(1) {
             return Err(SysError::EFAULT);
@@ -3820,13 +3835,13 @@ impl LinuxProcessMemory {
             let start_page = (overlap_start - mapping.addr) / PAGE_SIZE;
             let end_page = (overlap_end - mapping.addr) / PAGE_SIZE;
             for page_index in start_page..end_page {
-            pages.push(LinuxMappedPage {
-                address: mapping.addr + page_index * PAGE_SIZE,
-                backing: mapping.pages[page_index],
-                prot: linux_page_protection_for_backing(
-                    mapping.pages[page_index],
-                    Self::mapping_page_prot(&mapping.source, mapping.prot, page_index),
-                ),
+                pages.push(LinuxMappedPage {
+                    address: mapping.addr + page_index * PAGE_SIZE,
+                    backing: mapping.pages[page_index],
+                    prot: linux_page_protection_for_backing(
+                        mapping.pages[page_index],
+                        Self::mapping_page_prot(&mapping.source, mapping.prot, page_index),
+                    ),
                 });
             }
         }
@@ -4148,7 +4163,12 @@ impl LinuxProcessMemory {
                 "shared map addr={:#x} len={:#x} pfn={} source_shared={}",
                 address,
                 len,
-                mapping.pages.first().copied().map(LinuxPageBacking::pfn).unwrap_or(0),
+                mapping
+                    .pages
+                    .first()
+                    .copied()
+                    .map(LinuxPageBacking::pfn)
+                    .unwrap_or(0),
                 matches!(mapping.source, LinuxMappingSource::SharedMemory { .. })
             );
         }
@@ -4225,9 +4245,7 @@ impl LinuxProcessMemory {
         if !self.range_is_mapped(address, len) {
             return Err(SysError::EINVAL);
         }
-        if address <= 0x1203_00a0
-            && 0x1203_00a0 < address.saturating_add(len)
-        {
+        if address <= 0x1203_00a0 && 0x1203_00a0 < address.saturating_add(len) {
             crate::kobj_debug!(
                 "fork",
                 "protect range addr={:#x} len={:#x} prot={:#x}",
@@ -4243,8 +4261,7 @@ impl LinuxProcessMemory {
         self.protect_pages_transactionally(&changes)?;
         let _ = self.commit_mapping_metadata(plan);
         if let Some(mapping) = self.mappings.iter().find(|mapping| {
-            mapping.addr <= 0x1203_00a0
-                && 0x1203_00a0 < mapping.addr.saturating_add(mapping.len)
+            mapping.addr <= 0x1203_00a0 && 0x1203_00a0 < mapping.addr.saturating_add(mapping.len)
         }) {
             crate::kobj_debug!(
                 "fork",
@@ -4582,9 +4599,7 @@ impl LinuxProcessMemory {
             .chain(self.brk.pages.iter())
             .filter(|backing| matches!(backing, LinuxPageBacking::Shared { .. }))
             .count();
-        let batch_shared_release = shared_backings
-            .try_reserve_exact(shared_capacity)
-            .is_ok();
+        let batch_shared_release = shared_backings.try_reserve_exact(shared_capacity).is_ok();
         for mapping in mappings {
             for backing in mapping.pages {
                 match backing {

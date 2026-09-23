@@ -3344,6 +3344,435 @@ with tempfile.TemporaryDirectory() as temporary:
         # sys_kill yields, so both arches must park in SignalWait.
         self.assertIn("defined(__aarch64__) || defined(__riscv)", body)
 
+    def test_fuzzing_covers_posix_apis_not_only_syscalls(self) -> None:
+        source = Path("src/syscall/fuzz.rs").read_text(encoding="utf-8")
+        self.assertIn("fn fuzz_posix_round", source)
+        self.assertIn("posix_calls", source)
+        self.assertIn("POSIX_API_FUZZ_NAMES", source)
+        names_start = source.index("pub const POSIX_API_FUZZ_NAMES")
+        names = source[names_start:names_start + 2500]
+        for api in (
+            "getpid",
+            "sched_yield",
+            "clock_gettime",
+            "nanosleep",
+            "kill",
+            "sigprocmask",
+            "mq_open",
+            "mq_send",
+            "mq_timedsend",
+            "mq_receive",
+            "pthread_cond_broadcast",
+            "mmap",
+            "shm_open",
+            "open",
+        ):
+            self.assertIn('"' + api + '"', names)
+        loop = source[
+            source.index("pub fn fuzz_syscalls_with_config") : source.index(
+                "fn count_linux_interface_syscalls"
+            )
+        ]
+        self.assertIn("fuzz_posix_round", loop)
+        self.assertGreater(loop.index("fuzz_posix_round"), loop.index("fuzz_linux_round"))
+        shell = Path("src/user_level/services/user_shell.rs").read_text(encoding="utf-8")
+        self.assertIn("POSIX APIs:", shell)
+        self.assertIn("POSIX: calls=", shell)
+        desc_start = shell.index('name: "fuzzsc"')
+        desc = shell[desc_start:desc_start + 240]
+        self.assertIn("POSIX", desc)
+        cmd = shell[shell.index("fn cmd_fuzz_syscall(") : shell.index("fn print_fuzz_usage(")]
+        self.assertIn("=== Syscall and POSIX API Fuzzer ===", cmd)
+        self.assertIn("[OK] syscall and POSIX fuzz completed", cmd)
+        usage = shell[shell.index("fn print_fuzz_usage(") : shell.index("fn print_fuzz_error_buckets(")]
+        self.assertIn("POSIX API", usage)
+        docs = Path("docs/USER_SHELL.md").read_text(encoding="utf-8")
+        self.assertIn("POSIX API", docs)
+
+    def test_fuzzsc_does_not_panic_without_linux_process_signal_state(self) -> None:
+        syscall = Path("src/syscall/syscall.rs").read_text(encoding="utf-8")
+        fuzz = Path("src/syscall/fuzz.rs").read_text(encoding="utf-8")
+        guard_start = syscall.index("fn with_linux_process_signal_state<R>(")
+        guard = syscall[guard_start : syscall.index("fn with_linux_process_signal_state_for<R>(", guard_start)]
+        self.assertNotIn('.expect("current Linux process signal state")', guard)
+        self.assertIn("-> Result<R, SysError>", guard)
+        self.assertIn("linux_process::with_signal_state(pid, operation)", guard)
+        self.assertNotIn("unwrap()", guard)
+        sigaction_start = syscall.index("pub fn sys_rt_sigaction(")
+        sigaction = syscall[sigaction_start : syscall.index("pub fn sys_rt_sigprocmask(", sigaction_start)]
+        self.assertIn("linux_signal_action(signum)?", sigaction)
+        round_start = fuzz.index("fn fuzz_linux_round(")
+        round_body = fuzz[round_start : fuzz.index("fn fuzz_zircon_round(", round_start)]
+        self.assertIn("linux_fuzz_is_destructive", round_body)
+        destructive = fuzz[fuzz.index("fn linux_fuzz_is_destructive(") : fuzz.index("fn fuzz_linux_round(")]
+        for name in (
+            "ARM64_SYS_EXIT",
+            "ARM64_SYS_EXIT_GROUP",
+            "ARM64_SYS_CLONE",
+            "ARM64_SYS_CLONE3",
+            "ARM64_SYS_EXECVE",
+            "ARM64_SYS_WAIT4",
+            "ARM64_SYS_RT_SIGRETURN",
+            "ARM64_SYS_RT_SIGSUSPEND",
+            "ARM64_SYS_RT_SIGTIMEDWAIT",
+        ):
+            self.assertIn(name, destructive)
+        self.assertIn("register_kernel_dispatch_range", fuzz)
+        self.assertIn("ensure_dispatch_identity", fuzz)
+        self.assertIn("write_cpu0_affinity_mask", fuzz)
+        self.assertIn("write_zero_rlimit64", fuzz)
+        self.assertIn("write_mq_success_attr", fuzz)
+        self.assertIn(
+            "226 => {\n            let addr = state.transient_mapping();",
+            fuzz,
+        )
+        self.assertNotIn(
+            "226 => out = [state.mapping(), PAGE_SIZE, MmapProt::READ.bits(), 0, 0, 0]",
+            fuzz,
+        )
+        self.assertIn("posix_err_apis", fuzz)
+        self.assertIn("record_posix_err_api", fuzz)
+        self.assertIn("untrack_mapping", fuzz)
+        self.assertIn('fxfs::set_attrs("/dev/shm", 0o40777, 0, 0)', fuzz)
+        self.assertIn('fxfs::unlink_file("/dev/shm/fz")', fuzz)
+        shell = Path("src/user_level/services/user_shell.rs").read_text(encoding="utf-8")
+        self.assertIn("posix_err_list=", shell)
+        self.assertIn("print_posix_fuzz_error_buckets", shell)
+        msgrcv = syscall[syscall.index("pub fn sys_msgrcv("):syscall.index("pub fn sys_shmget(")]
+        self.assertIn("ZxError::ErrPeerClosed", msgrcv)
+        self.assertIn("ZxError::ErrShouldWait", msgrcv)
+
+    def test_fxfs_cursor_read_does_not_persist_on_read(self) -> None:
+        fxfs = Path("src/user_level/services/fxfs.rs").read_text(encoding="utf-8")
+        cursor = fxfs[fxfs.index("fn cursor_read(&mut self"):fxfs.index("fn cursor_write(")]
+        self.assertIn("self.touch_file_read(index)", cursor)
+        self.assertIn("FxfsJournalOp::ReadFile", cursor)
+        self.assertNotIn("self.persist()", cursor)
+
+    def test_fxfs_persist_streams_without_second_image_copy(self) -> None:
+        fxfs = Path("src/user_level/services/fxfs.rs").read_text(encoding="utf-8")
+        sync = fxfs[fxfs.index("fn sync_to_block(&mut self"):fxfs.index("fn load_image_from_slot(")]
+        self.assertNotIn("self.serialize_image()", sync)
+        self.assertIn("BlockImageSink::new(offset)", sync)
+        self.assertIn("write_image_body", sync)
+        load = fxfs[fxfs.index("fn load_image_from_slot("):fxfs.index("fn load_from_block(")]
+        self.assertIn("try_reserve_vec(&mut body, body_len)", load)
+        self.assertIn("copy_bytes(read_bytes(&body, &mut body_pos, data_len)?)", load)
+        main = Path("src/main.rs").read_text(encoding="utf-8")
+        marker = 'allocator",\n                "free-list-insert-excessive steps={} block={:#x}",'
+        start = main.index(marker)
+        block = main[start:start+280]
+        self.assertIn("free-list-insert-excessive", block)
+        self.assertNotIn("return;", block)
+        self.assertIn("#[alloc_error_handler]", main)
+        self.assertIn("[OOM] memory allocation of ", main)
+
+    def test_docker_run_kernel_thread_namespace_copies(self) -> None:
+        memory = Path("src/syscall/linux_process_memory.rs").read_text(encoding="utf-8")
+        self.assertIn("fn kernel_resident_copy_allowed(", memory)
+        copy_from = memory[
+            memory.index("pub(crate) fn copy_from_current") : memory.index(
+                "pub(crate) fn copy_to_current"
+            )
+        ]
+        self.assertIn("in_process_kernel_copy_allowed", copy_from)
+        copy_to = memory[
+            memory.index("pub(crate) fn copy_to_current") : memory.index(
+                "pub(crate) fn ensure_dispatch_memory"
+            )
+        ]
+        self.assertIn("in_process_kernel_copy_allowed", copy_to)
+        readable = memory[
+            memory.index("pub(crate) fn user_range_readable") : memory.index(
+                "pub(crate) fn user_range_writable"
+            )
+        ]
+        self.assertIn("in_process_kernel_copy_allowed", readable)
+        syscall = Path("src/syscall/syscall.rs").read_text(encoding="utf-8")
+        self.assertIn("pub fn enter_kernel_service_copy(", syscall)
+        self.assertIn("register_kernel_dispatch_range(1, usize::MAX - 1)", syscall)
+        self.assertIn("pub fn leave_kernel_service_copy(", syscall)
+        docker = Path("src/user_level/services/docker_compat.rs").read_text(encoding="utf-8")
+        run = docker[
+            docker.index("fn run_oci_runtime_request(") : docker.index(
+                "fn install_sample_oci_bundle("
+            )
+        ]
+        self.assertIn("KernelServiceCopyGuard::enter()", run)
+        self.assertIn("syscall::sys_unshare(request.namespace_flags)", run)
+        self.assertIn("syscall::sys_openat(AT_FDCWD, ROOT_PATH.as_ptr() as usize, O_DIRECTORY, 0)", run)
+
+        syscall = Path("src/syscall/syscall.rs").read_text(encoding="utf-8")
+        self.assertIn("pub fn prepare_kernel_thread_linux(", syscall)
+        self.assertIn("linux_process::ensure_dispatch_identity()?", syscall)
+        self.assertIn("linux_process_memory::ensure_dispatch_memory(pid)", syscall)
+        shell = Path("src/user_level/services/user_shell.rs").read_text(encoding="utf-8")
+        cmd = shell[shell.index("fn cmd_test_syscall(") : shell.index("fn cmd_fuzz_syscall(")]
+        self.assertIn("KernelSyscallTestGuard::enter()", cmd)
+        self.assertIn("crate::syscall::sys_write(1, msg.as_ptr() as usize, msg.len())", cmd)
+        self.assertNotIn("test_write(", cmd)
+
+    def test_st_makefile_forwards_isolated_fxfs_disk(self) -> None:
+        makefile = Path("Makefile").read_text(encoding="utf-8")
+        self.assertIn("SMOKE_QEMU_MEMORY ?= 2G", makefile)
+        self.assertIn("FXFS_DISK='$(FXFS_DISK)'", makefile)
+        self.assertIn(
+            "QEMU_MEMORY='$(SMOKE_QEMU_MEMORY)' QEMU_BLOCK_DEVICE='$(QEMU_BLOCK_DEVICE)' QEMU_NET_DEVICE='$(QEMU_NET_DEVICE)' FXFS_DISK='$(FXFS_DISK)' SMROS_ST_LOG='$(SMROS_ST_LOG)' ./scripts/smoke-qemu.sh",
+            makefile,
+        )
+
+    def test_fxfs_and_virtio_batch_persist_io(self) -> None:
+        block = Path("src/user_level/drivers/block.rs").read_text(encoding="utf-8")
+        self.assertIn("pub const VIRTIO_IO_BYTES: usize = 64 * 1024;", block)
+        write = block[block.index("fn write_at(&mut self"):block.index("fn read_block(")]
+        self.assertIn("VIRTIO_IO_BYTES", write)
+        self.assertIn("let chunk = core::cmp::min(aligned, VIRTIO_IO_BYTES);", write)
+        read = block[block.index("fn read_at(&mut self"):block.index("fn write_at(&mut self")]
+        self.assertIn("VIRTIO_IO_BYTES", read)
+        fxfs = Path("src/user_level/services/fxfs.rs").read_text(encoding="utf-8")
+        self.assertIn("const FXFS_PERSIST_BUFFER_LEN: usize = 64 * 1024;", fxfs)
+        agent = Path("src/user_level/services/hermes_agent.rs").read_text(encoding="utf-8")
+        prompt = agent[agent.index("pub fn run_prompt("):agent.index("pub fn render_web_ui(")]
+        self.assertIn("fxfs::suspend_persist()", prompt)
+        docker = Path("src/user_level/services/docker_compat.rs").read_text(encoding="utf-8")
+        install = docker[docker.index("pub fn install_builtin_docker_images("):docker.index("pub fn builtin_image_info(")]
+        self.assertIn("fxfs::suspend_persist()", install)
+        load = docker[docker.index("fn load_docker_archive("):docker.index("fn extract_layer_tar(")]
+        self.assertIn("fxfs::suspend_persist()", load)
+
+    def test_hermes_info_does_not_rebuild_web_ui_or_persist_per_file(self) -> None:
+        agent = Path("src/user_level/services/hermes_agent.rs").read_text(encoding="utf-8")
+        info = agent[agent.index("pub fn info("):agent.index("pub fn run_prompt(")]
+        self.assertIn("fxfs::init()", info)
+        self.assertIn("fxfs::exists(HERMES_CONFIG_PATH)", info)
+        self.assertIn("prepare_storage()", info)
+        self.assertIn("info_without_web_refresh()", info)
+        self.assertNotIn("refresh_web_ui()", info)
+        prepare = agent[agent.index("fn prepare_storage("):agent.index("fn create_dir(")]
+        self.assertIn("fxfs::suspend_persist()", prepare)
+        self.assertIn("if !fxfs::exists(HERMES_WEB_INDEX_PATH)", prepare)
+        self.assertIn("refresh_web_ui()", prepare)
+        self.assertNotIn("refresh_web_ui()?;\n    Ok(())", prepare)
+
+    def test_hermes_skill_files_pass_agent_validation(self) -> None:
+        agent = Path("src/user_level/services/hermes_agent.rs").read_text(encoding="utf-8")
+        valid = agent[agent.index("fn skill_file_valid("):agent.index("fn skill_matches_prompt(")]
+        self.assertIn('contains_case_insensitive(text, "skill")', valid)
+        self.assertIn('contains_case_insensitive(text, "hermes")', valid)
+        self.assertIn('contains_case_insensitive(text, "smros")', valid)
+        bodies = {
+            "HERMES_KERNEL_SKILL": agent[agent.index("const HERMES_KERNEL_SKILL"):agent.index("const HERMES_WEB_SKILL")],
+            "HERMES_WEB_SKILL": agent[agent.index("const HERMES_WEB_SKILL"):agent.index("const HERMES_OPS_SKILL")],
+            "HERMES_OPS_SKILL": agent[agent.index("const HERMES_OPS_SKILL"):agent.index("const HERMES_MEMORY_SKILL")],
+            "HERMES_MEMORY_SKILL": agent[agent.index("const HERMES_MEMORY_SKILL"):agent.index("const HERMES_UT_SKILL")],
+            "HERMES_UT_SKILL": agent[agent.index("const HERMES_UT_SKILL"):agent.index("const HERMES_IT_SKILL")],
+            "HERMES_IT_SKILL": agent[agent.index("const HERMES_IT_SKILL"):agent.index("const HERMES_SKT_SKILL")],
+            "HERMES_SKT_SKILL": agent[agent.index("const HERMES_SKT_SKILL"):agent.index("const HERMES_FUZZING_SKILL")],
+            "HERMES_FUZZING_SKILL": agent[agent.index("const HERMES_FUZZING_SKILL"):agent.index("const HERMES_CRON:")],
+        }
+        for name, body in bodies.items():
+            lower = body.lower()
+            self.assertIn("skill", lower, name)
+            self.assertTrue("hermes" in lower or "smros" in lower, name)
+
+    def test_hermes_syscall_skills_are_installed(self) -> None:
+        agent = Path("src/user_level/services/hermes_agent.rs").read_text(encoding="utf-8")
+        skills_start = agent.index("const HERMES_SKILLS")
+        skills = agent[skills_start:agent.index("pub enum HermesAgentError")]
+        for slug in ("ut", "it", "skt", "fuzzing"):
+            self.assertIn('slug: "' + slug + '"', skills)
+            self.assertIn("/data/hermes/skills/" + slug + "/SKILL.md", skills)
+        self.assertIn("make ut", skills)
+        self.assertIn("posix-tool-test", skills)
+        self.assertIn("make it", skills)
+        self.assertIn("launcher-test", skills)
+        self.assertIn("make skt", skills)
+        self.assertIn("testsc", skills)
+        self.assertIn("fuzzsc", skills)
+        self.assertIn("smros-kernel", skills)
+        self.assertIn("hermes-web-ui", skills)
+        self.assertIn("smros-ops", skills)
+        self.assertIn("hermes-memory", skills)
+        docs = Path("docs/USER_SHELL.md").read_text(encoding="utf-8")
+        testing = Path("docs/TESTING.md").read_text(encoding="utf-8")
+        for slug in ("ut", "it", "skt", "fuzzing"):
+            self.assertIn(slug, docs)
+            self.assertIn(slug, testing)
+
+    def test_hermes_run_full_test_does_not_require_every_skill_to_match_one_prompt(self) -> None:
+        agent = Path("src/user_level/services/hermes_agent.rs").read_text(encoding="utf-8")
+        start = agent.index("pub fn run_full_test()")
+        body = agent[start:agent.index("pub fn smoke_test()")]
+        self.assertIn("list_skills()", body)
+        self.assertNotIn(">= HERMES_SKILLS.len()", body)
+        self.assertIn("smros-kernel", body)
+        self.assertIn("hermes-web-ui", body)
+        self.assertIn("smros-ops", body)
+        self.assertIn("hermes-memory", body)
+
+    def test_hermes_campaign_catalogs_include_testsc_and_fuzzsc(self) -> None:
+        policy = Path("src/user_level/services/hermes_shell_logic_shared.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('campaign_case_const("fuzzsc", "seed=1", "iterations=1", 2)', policy)
+        self.assertIn('campaign_case_const("testsc", "", "", 0)', policy)
+        self.assertIn('campaign_case_const("hermes", "test", "", 1)', policy)
+        self.assertIn("HermesCampaignMode", policy)
+        self.assertIn("Syscall", policy)
+        catalogs = policy[
+            policy.index("const CAMPAIGN_CATALOG") : policy.index("pub fn classify(")
+        ]
+        self.assertNotIn("posixtest", catalogs)
+        self.assertNotIn("reboot", catalogs)
+
+    def test_hermes_classify_allows_syscall_canaries_and_forbids_posixtest_all(self) -> None:
+        policy = Path("src/user_level/services/hermes_shell_logic_shared.rs").read_text(
+            encoding="utf-8"
+        )
+        classify = policy[policy.index("pub fn classify(") : policy.index("fn no_args(")]
+        self.assertIn('"testsc" => no_args(args)', classify)
+        self.assertIn('"fuzzsc" => fuzz_policy(args)', classify)
+        self.assertIn('"posixtest" => posix_policy(args)', classify)
+        self.assertIn('"rm" | "kill" | "reboot"', classify)
+        posix_start = policy.index("fn posix_policy(")
+        posix = policy[posix_start:policy.index("fn valid_identifier(")]
+        self.assertIn('["status"]', posix)
+        self.assertIn("getpid/1-1.c", posix)
+        self.assertIn("HermesShellPolicy::Allowed", posix)
+        self.assertIn("HermesShellPolicy::Forbidden", posix)
+        self.assertNotIn('["all"]', posix)
+        self.assertNotIn("group", posix)
+        fuzz = policy[policy.index("fn fuzz_policy(") : policy.index("fn parse_decimal(")]
+        self.assertIn("iterations", fuzz)
+        self.assertIn("number <= 16", fuzz)
+        self.assertIn("number <= 5", fuzz)
+
+    def test_hermes_functions_are_all_wired(self) -> None:
+        agent = Path("src/user_level/services/hermes_agent.rs").read_text(encoding="utf-8")
+        policy = Path("src/user_level/services/hermes_shell_logic_shared.rs").read_text(
+            encoding="utf-8"
+        )
+        shell = Path("src/user_level/services/user_shell.rs").read_text(encoding="utf-8")
+        for name in (
+            "pub fn init()",
+            "pub fn persist_campaign_report(",
+            "pub fn info()",
+            "pub fn run_prompt(",
+            "pub fn render_web_ui()",
+            "pub fn render_native_ui(",
+            "pub fn render_cpu_ui()",
+            "pub fn list_skills()",
+            "pub fn run_full_test()",
+            "pub fn smoke_test()",
+            "fn prepare_storage()",
+            "fn parse_config(",
+            "fn matching_skills(",
+            "fn skill_matches_prompt(",
+            "fn run_tool(",
+            "fn delegate_subagents(",
+            "fn persist_memory(",
+            "fn compose_answer(",
+            "fn append_transcript(",
+            "fn refresh_web_ui()",
+            "fn build_web_ui_html(",
+            "fn memory_item_count()",
+            "fn tool_audit_valid()",
+            "fn cron_ready()",
+            "fn transcript_valid(",
+        ):
+            self.assertIn(name, agent)
+        for name in (
+            "pub fn classify(",
+            "fn no_args(",
+            "fn optional_exact_arg(",
+            "fn sched_policy(",
+            "fn loglevel_policy(",
+            "fn vm_policy(",
+            "fn docker_policy(",
+            "fn hermes_policy(",
+            "fn posix_policy(",
+            "fn fuzz_policy(",
+            "pub fn campaign_iterations_valid(",
+            "pub fn campaign_report_includes_round(",
+            "pub fn campaign_report_omitted_rounds(",
+            "pub fn campaign_case_index(",
+            "pub fn campaign_case_index_for_mode(",
+            "pub fn campaign_case(",
+            "pub fn campaign_case_for_mode(",
+            "pub fn parse_campaign_options(",
+            "pub fn next_random(",
+        ):
+            self.assertIn(name, policy)
+        for name in (
+            "fn execute_hermes_command(",
+            "fn cmd_hermes(",
+            "fn print_hermes_usage(",
+            "fn run_hermes_test_all(",
+            "fn run_hermes_random_campaign(",
+            "fn execute_hermes_campaign_round(",
+            "fn count_hermes_command_status(",
+            "fn run_hermes_ui_entry(",
+            "fn hermes_ui_submit(",
+            "fn hermes_ui_run_test(",
+            "fn print_hermes_info(",
+            "fn run_hermes_agent_tests(",
+        ):
+            self.assertIn(name, shell)
+        self.assertIn("hermes_shell_logic_shared::classify", shell)
+        self.assertIn('"exec" =>', shell)
+        self.assertIn('"test-all" => run_hermes_test_all', shell)
+        self.assertIn("mode=syscall", shell)
+        self.assertIn("campaign_case_for_mode", shell)
+        cmd = shell[shell.index("fn cmd_hermes("):shell.index("fn cmd_lvgl(")]
+        for token in (
+            '"exec" =>',
+            '"random" =>',
+            '"test-all" =>',
+            '"info" | "status"',
+            '"test" | "smoke"',
+            '"skills" =>',
+            '"web" | "ui"',
+            '"ask" | "run"',
+        ):
+            self.assertIn(token, cmd)
+
+    def test_hermes_test_all_parses_mode_syscall(self) -> None:
+        policy = Path("src/user_level/services/hermes_shell_logic_shared.rs").read_text(
+            encoding="utf-8"
+        )
+        parse = policy[
+            policy.index("pub fn parse_campaign_options(") : policy.index("pub fn next_random(")
+        ]
+        self.assertIn('"mode"', parse)
+        self.assertIn('"syscall"', parse)
+        self.assertIn("HermesCampaignMode::Syscall", parse)
+        self.assertIn("HermesCampaignMode::Ops", parse)
+        shell = Path("src/user_level/services/user_shell.rs").read_text(encoding="utf-8")
+        test_all = shell[
+            shell.index("fn run_hermes_test_all(") : shell.index("fn run_hermes_random_campaign(")
+        ]
+        self.assertIn("options.mode", test_all)
+        self.assertIn("execute_hermes_campaign_round", test_all)
+        random = shell[
+            shell.index("fn run_hermes_random_campaign(") : shell.index(
+                "fn execute_hermes_campaign_round("
+            )
+        ]
+        self.assertIn("options.mode", random)
+
+    def test_hermes_st_smoke_probes_testsc_and_fuzzsc(self) -> None:
+        smoke = Path("scripts/smoke-qemu.sh").read_text(encoding="utf-8")
+        self.assertIn("testsc", smoke)
+        self.assertIn("fuzzsc seed=1 iterations=1", smoke)
+        self.assertIn("hermes random seed=1 iterations=1", smoke)
+        self.assertIn("hermes exec reboot", smoke)
+        self.assertIn("=== Test Complete ===", smoke)
+        self.assertIn("[OK] syscall and POSIX fuzz completed", smoke)
+        self.assertIn("Hermes denied forbidden command: reboot", smoke)
+        posix = Path("docs/POSIX_CONFORMANCE.md").read_text(encoding="utf-8")
+        self.assertIn("posixtest all", posix)
+        self.assertIn("Hermes", posix)
+
     def test_sched_yield_enqueues_current_before_reschedule(self) -> None:
         source = Path("src/kernel_objects/scheduler.rs").read_text(encoding="utf-8")
         start = source.index("pub fn yield_now()")

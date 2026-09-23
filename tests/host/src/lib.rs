@@ -10497,9 +10497,10 @@ fn hermes_shell_policy_allows_only_bounded_safe_forms() {
 #[test]
 fn hermes_campaign_selection_is_reproducible_and_bounded() {
     use hermes_shell_logic::{
-        campaign_case, campaign_case_index, campaign_iterations_valid,
-        campaign_report_includes_round, campaign_report_omitted_rounds, parse_campaign_options,
-        HermesCampaignOptions, HERMES_CAMPAIGN_CASES,
+        campaign_case, campaign_case_for_mode, campaign_case_index, campaign_iterations_valid,
+        campaign_report_includes_round, campaign_report_omitted_rounds, classify,
+        parse_campaign_options, HermesCampaignMode, HermesCampaignOptions, HermesShellPolicy,
+        HERMES_CAMPAIGN_CASES, HERMES_SYSCALL_CAMPAIGN_CASES,
     };
 
     let first: Vec<_> = (0..8)
@@ -10519,6 +10520,7 @@ fn hermes_campaign_selection_is_reproducible_and_bounded() {
         Some(HermesCampaignOptions {
             seed: Some(9393),
             iterations: 65,
+            mode: HermesCampaignMode::Ops,
         })
     );
     let maximum = format!("iterations={}", usize::MAX);
@@ -10527,6 +10529,7 @@ fn hermes_campaign_selection_is_reproducible_and_bounded() {
         Some(HermesCampaignOptions {
             seed: None,
             iterations: usize::MAX,
+            mode: HermesCampaignMode::Ops,
         })
     );
     assert_eq!(parse_campaign_options(&["iterations=0"]), None);
@@ -10544,8 +10547,41 @@ fn hermes_campaign_selection_is_reproducible_and_bounded() {
     for index in 0..HERMES_CAMPAIGN_CASES {
         let case = campaign_case(index, 1234, index).expect("catalog index");
         assert_eq!(
-            hermes_shell_logic::classify(case.command, &case.args[..case.arg_count]),
-            hermes_shell_logic::HermesShellPolicy::Allowed
+            classify(case.command, &case.args[..case.arg_count]),
+            HermesShellPolicy::Allowed
+        );
+    }
+    assert_eq!(
+        parse_campaign_options(&["seed=1", "iterations=2", "mode=syscall"]),
+        Some(HermesCampaignOptions {
+            seed: Some(1),
+            iterations: 2,
+            mode: HermesCampaignMode::Syscall,
+        })
+    );
+    assert_eq!(parse_campaign_options(&["mode=unknown"]), None);
+    assert_eq!(
+        classify("posixtest", &["test", "getpid/1-1.c"]),
+        HermesShellPolicy::Allowed
+    );
+    assert_eq!(
+        classify("posixtest", &["status"]),
+        HermesShellPolicy::Allowed
+    );
+    assert_eq!(
+        classify("posixtest", &["all"]),
+        HermesShellPolicy::Forbidden
+    );
+    assert_eq!(
+        classify("posixtest", &["test", "mq_send/5-1.c"]),
+        HermesShellPolicy::Forbidden
+    );
+    for index in 0..HERMES_SYSCALL_CAMPAIGN_CASES {
+        let case =
+            campaign_case_for_mode(HermesCampaignMode::Syscall, index).expect("syscall catalog");
+        assert_eq!(
+            classify(case.command, &case.args[..case.arg_count]),
+            HermesShellPolicy::Allowed
         );
     }
 }

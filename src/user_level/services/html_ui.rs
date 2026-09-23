@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 pub enum HtmlUiError {
     Empty,
     Parse,
+    NoSpace,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,9 +102,13 @@ impl Rgb {
 }
 
 impl Canvas {
-    fn new(width: usize, height: usize, background: Rgb) -> Self {
+    fn new(width: usize, height: usize, background: Rgb) -> Result<Self, HtmlUiError> {
+        let pixel_len = width.saturating_mul(height).saturating_mul(3);
         let mut pixels = Vec::new();
-        pixels.resize(width.saturating_mul(height).saturating_mul(3), 0);
+        pixels
+            .try_reserve_exact(pixel_len)
+            .map_err(|_| HtmlUiError::NoSpace)?;
+        pixels.resize(pixel_len, 0);
         let mut canvas = Self {
             width,
             height,
@@ -118,7 +123,7 @@ impl Canvas {
             },
             background,
         );
-        canvas
+        Ok(canvas)
     }
 
     fn set_pixel(&mut self, x: usize, y: usize, color: Rgb) {
@@ -292,10 +297,10 @@ pub fn render_native_view(html: &str, width: usize) -> Result<NativeHtmlView, Ht
 
 pub fn render_cpu_view(html: &str) -> Result<CpuHtmlView, HtmlUiError> {
     let model = parse_ui_model(html)?;
-    let mut canvas = Canvas::new(CPU_UI_WIDTH, CPU_UI_HEIGHT, COLOR_BG);
+    let mut canvas = Canvas::new(CPU_UI_WIDTH, CPU_UI_HEIGHT, COLOR_BG)?;
     draw_cpu_dashboard(&mut canvas, &model);
     let preview = render_ansi_preview(&model);
-    let ppm = encode_ppm(canvas.width, canvas.height, canvas.pixels.as_slice());
+    let ppm = encode_ppm(canvas.width, canvas.height, canvas.pixels.as_slice())?;
     let widgets =
         model.metrics.len() + model.pills.len() + model.skills.len() + model.buttons.len() + 2;
     Ok(CpuHtmlView {
@@ -846,15 +851,17 @@ fn rounded_rect_contains(x: usize, y: usize, w: usize, h: usize, radius: usize) 
     dx.saturating_mul(dx) + dy.saturating_mul(dy) <= radius.saturating_mul(radius)
 }
 
-fn encode_ppm(width: usize, height: usize, pixels: &[u8]) -> Vec<u8> {
+fn encode_ppm(width: usize, height: usize, pixels: &[u8]) -> Result<Vec<u8>, HtmlUiError> {
     let mut out = Vec::new();
+    out.try_reserve_exact(64usize.saturating_add(pixels.len()))
+        .map_err(|_| HtmlUiError::NoSpace)?;
     out.extend_from_slice(b"P6\n");
     push_decimal_bytes(&mut out, width);
     out.push(b' ');
     push_decimal_bytes(&mut out, height);
     out.extend_from_slice(b"\n255\n");
     out.extend_from_slice(pixels);
-    out
+    Ok(out)
 }
 
 fn push_decimal_bytes(out: &mut Vec<u8>, mut value: usize) {

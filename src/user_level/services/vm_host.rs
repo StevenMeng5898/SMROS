@@ -15,6 +15,9 @@ pub const DEFAULT_LAUNCHER_PORT: u16 = 7070;
 const MAX_REQUEST_BYTES: usize = 2048;
 const MAX_RESPONSE_BYTES: usize = 512;
 const RESPONSE_READ_ATTEMPTS: usize = 8;
+/// Host ST can take the full smoke timeout plus kernel build. Keep the TCP
+/// session open until that completes instead of reporting UNAVAILABLE.
+const HERMES_TEST_WAIT_NANOS: u64 = 6 * 60 * 1_000_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmHostError {
@@ -39,7 +42,6 @@ pub struct VmHostLaunch {
 pub enum HermesHostTestJob {
     Ut,
     It,
-    St,
 }
 
 impl HermesHostTestJob {
@@ -47,7 +49,6 @@ impl HermesHostTestJob {
         match self {
             Self::Ut => "ut",
             Self::It => "it",
-            Self::St => "st",
         }
     }
 }
@@ -70,7 +71,9 @@ pub fn run_hermes_test(job: HermesHostTestJob) -> Result<HermesHostTestResult, V
         .write(request.as_bytes())
         .map_err(VmHostError::Write)?;
     let mut response = [0u8; MAX_RESPONSE_BYTES];
-    let bytes = read_response(&mut socket, &mut response, RESPONSE_READ_ATTEMPTS)?;
+    let deadline = crate::kernel_lowlevel::timer::get_nanoseconds()
+        .saturating_add(HERMES_TEST_WAIT_NANOS);
+    let bytes = read_response_until(&mut socket, &mut response, deadline)?;
     let _ = socket.close();
     parse_hermes_test_response(job, &response[..bytes])
 }
@@ -187,6 +190,26 @@ fn read_response(
         Err(VmHostError::Read(NetError::Timeout))
     } else {
         Err(VmHostError::ResponseInvalid)
+    }
+}
+
+fn read_response_until(
+    socket: &mut net::TcpSocket,
+    response: &mut [u8],
+    deadline_ns: u64,
+) -> Result<usize, VmHostError> {
+    loop {
+        match socket.read(response) {
+            Ok(0) => return Err(VmHostError::ResponseInvalid),
+            Ok(bytes) => return Ok(bytes),
+            Err(NetError::Timeout) => {
+                if crate::kernel_lowlevel::timer::get_nanoseconds() >= deadline_ns {
+                    return Err(VmHostError::Read(NetError::Timeout));
+                }
+                let _ = socket.keepalive();
+            }
+            Err(err) => return Err(VmHostError::Read(err)),
+        }
     }
 }
 

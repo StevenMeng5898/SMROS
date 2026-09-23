@@ -15,16 +15,17 @@ SPEC.loader.exec_module(LAUNCHER)
 
 
 class HermesHostTestProtocolTests(unittest.TestCase):
-    def test_launcher_protocol_version_covers_isolated_st(self) -> None:
-        self.assertGreaterEqual(LAUNCHER.LAUNCHER_VERSION, 6)
+    def test_launcher_protocol_version_covers_host_jobs(self) -> None:
+        self.assertGreaterEqual(LAUNCHER.LAUNCHER_VERSION, 8)
 
     def test_only_fixed_test_jobs_are_accepted(self) -> None:
         self.assertEqual(LAUNCHER.parse_test_job({"job": "ut"}), ("make", "ut"))
         self.assertEqual(LAUNCHER.parse_test_job({"job": "it"}), ("make", "it"))
-        self.assertEqual(LAUNCHER.parse_test_job({"job": "st"}), ("make", "st"))
 
         for values in (
             {"job": "verify"},
+            {"job": "st"},
+            {"job": "skt"},
             {"job": "ut", "command": "make clean"},
             {"command": "make ut"},
             {},
@@ -47,24 +48,18 @@ class HermesHostTestProtocolTests(unittest.TestCase):
         self.assertIn("OK job=ut status=0", response)
 
     @mock.patch.object(LAUNCHER.subprocess, "run")
-    def test_st_uses_an_isolated_disk_and_smoke_log(self, run: mock.Mock) -> None:
+    def test_it_job_does_not_boot_qemu_smoke(self, run: mock.Mock) -> None:
         run.return_value = subprocess.CompletedProcess(
-            args=["make", "st"], returncode=0, stdout="smoke passed\n", stderr=""
+            args=["make", "it"], returncode=0, stdout="199 passed\n", stderr=""
         )
 
-        response = LAUNCHER.run_test_job({"job": "st"})
+        response = LAUNCHER.run_test_job({"job": "it"})
 
         args, _ = run.call_args
-        self.assertEqual(
-            args[0],
-            (
-                "make",
-                "st",
-                "FXFS_DISK=target/hermes-tests/st-fxfs.img",
-                "SMROS_ST_LOG=target/hermes-tests/st-smoke.log",
-            ),
-        )
-        self.assertIn("OK job=st status=0", response)
+        self.assertEqual(args[0], ("make", "it"))
+        self.assertNotIn("skt", args[0])
+        self.assertNotIn("st", args[0])
+        self.assertIn("OK job=it status=0", response)
 
 
 if __name__ == "__main__":

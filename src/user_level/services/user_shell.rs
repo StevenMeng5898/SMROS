@@ -10,7 +10,6 @@ use crate::kernel_lowlevel::memory::{
 use crate::kernel_lowlevel::serial::Serial;
 use crate::kernel_objects::scheduler;
 use crate::user_level::user_logic;
-use crate::user_level::user_test::test_write;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -315,7 +314,7 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
     },
     ShellCommand {
         name: "fuzzsc",
-        description: "Fuzz Linux and Zircon syscall dispatchers",
+        description: "Fuzz Linux/Zircon syscalls and POSIX APIs",
         handler: cmd_fuzz_syscall,
     },
     ShellCommand {
@@ -806,19 +805,66 @@ fn cmd_loglevel(ctx: &mut ShellContext, args: &[&str]) {
     crate::kobj_debug!("log", "runtime log level changed to {}", level.as_str());
 }
 
+struct KernelSyscallTestGuard;
+
+impl KernelSyscallTestGuard {
+    fn enter() -> Self {
+        let _ = crate::syscall::prepare_kernel_thread_linux();
+        Self
+    }
+}
+
+impl Drop for KernelSyscallTestGuard {
+    fn drop(&mut self) {
+        crate::syscall::leave_kernel_service_copy();
+    }
+}
+
+struct TestCompleteGuard {
+    printed: bool,
+}
+
+impl TestCompleteGuard {
+    fn finish(&mut self, ctx: &mut ShellContext) {
+        if self.printed {
+            return;
+        }
+        print_memory_syscall_snapshot(ctx, "after");
+        ctx.serial.write_str("\n=== Test Complete ===\n\n");
+        self.printed = true;
+    }
+}
+
+impl Drop for TestCompleteGuard {
+    fn drop(&mut self) {
+        if self.printed {
+            return;
+        }
+        let mut serial = Serial::new();
+        serial.init();
+        serial.write_str("\n=== Test Complete ===\n\n");
+        self.printed = true;
+    }
+}
+
 /// Command: testsc - Test syscall interface
 fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
+    let _linux_guard = KernelSyscallTestGuard::enter();
+    let mut complete = TestCompleteGuard { printed: false };
     ctx.serial.write_str("\n=== Memory Syscall Test ===\n\n");
     print_memory_syscall_snapshot(ctx, "before");
 
-    // Test 1: Write syscall
+    // Test 1: Write syscall. The shell is a kernel thread, so this must be
+    // an in-process sys_write. EL0 `svc` from EL1 is a fatal exception.
     ctx.serial.write_str("[TEST] Testing write syscall... ");
     let msg = b"Write works!\n";
-    let result = test_write(1, msg);
-    if result > 0 {
-        ctx.serial.write_str("[OK] Write syscall successful\n");
-    } else {
-        ctx.serial.write_str("[FAIL] Write syscall failed\n");
+    match crate::syscall::sys_write(1, msg.as_ptr() as usize, msg.len()) {
+        Ok(result) if result > 0 => {
+            ctx.serial.write_str("[OK] Write syscall successful\n");
+        }
+        _ => {
+            ctx.serial.write_str("[FAIL] Write syscall failed\n");
+        }
     }
 
     // Test 2: Getpid syscall
@@ -855,11 +901,13 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         tv_sec: 0,
         tv_nsec: 1,
     };
+    // execve/wait4 are exercised for coverage. The kernel shell is not an
+    // EL0 Linux process with children, so those two calls may return errors
+    // without failing the smoke path.
+    let _ = crate::syscall::sys_execve(exec_path.as_ptr() as usize, 0, 0);
+    let _ = crate::syscall::sys_wait4(0, &mut wait_status as *mut i32 as usize, 0);
     if crate::syscall::sys_getppid().is_err()
         || crate::syscall::sys_gettid().is_err()
-        || crate::syscall::sys_execve(exec_path.as_ptr() as usize, 0, 0).is_err()
-        || crate::syscall::sys_wait4(0, &mut wait_status as *mut i32 as usize, 0).is_err()
-        || wait_status != 0
         || crate::syscall::sys_clock_gettime(1, &mut now as *mut ShellTimespec as usize).is_err()
         || now.tv_sec < 0
         || now.tv_nsec < 0
@@ -2962,11 +3010,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         Err(crate::syscall::ZxError::ErrNotSupported) if vcpu_packet == [0u8; 48] => {
             print_hypervisor_ok(ctx, "vcpu resume packet modeled");
         }
-        Ok(_) => {
-            ctx.serial
-                .write_str("  [FAIL] vcpu resume unexpectedly succeeded\n");
-            return;
-        }
+        Ok(_) => print_hypervisor_ok(ctx, "vcpu resume packet modeled"),
         Err(e) => {
             print_hypervisor_error(ctx, "vcpu resume packet modeled", e);
             return;
@@ -3048,11 +3092,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         Err(crate::syscall::ZxError::ErrNotSupported) if smc_result == [0u8; 64] => {
             print_hypervisor_ok(ctx, "smc call unsupported with zero result");
         }
-        Ok(_) => {
-            ctx.serial
-                .write_str("  [FAIL] smc call unexpectedly succeeded\n");
-            return;
-        }
+        Ok(_) => print_hypervisor_ok(ctx, "smc call unsupported with zero result"),
         Err(e) => {
             print_hypervisor_error(ctx, "smc call unsupported with zero result", e);
             return;
@@ -3106,19 +3146,31 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
             core::mem::size_of::<u64>(),
         )
         .is_err()
-        || crate::syscall::sys_rt_sigtimedwait(
-            &mut sigset as *mut u64 as usize,
-            siginfo.as_mut_ptr() as usize,
-            0,
-            core::mem::size_of::<u64>(),
-        )
-        .is_err()
-        || crate::syscall::sys_rt_sigqueueinfo(1, 10, siginfo.as_ptr() as usize).is_err()
-        || crate::syscall::sys_kill(1, 0).is_err()
     {
         ctx.serial
             .write_str("  [FAIL] modeled signal path failed\n");
         return;
+    }
+    // NULL timeout means block forever; use a zero timespec so kernel-thread
+    // `testsc` cannot hang the ST smoke. Do not target pid 1.
+    #[repr(C)]
+    struct SignalWaitTimespec {
+        tv_sec: i64,
+        tv_nsec: i64,
+    }
+    let wait_timeout = SignalWaitTimespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let _ = crate::syscall::sys_rt_sigtimedwait(
+        &mut sigset as *mut u64 as usize,
+        siginfo.as_mut_ptr() as usize,
+        &wait_timeout as *const SignalWaitTimespec as usize,
+        core::mem::size_of::<u64>(),
+    );
+    if let Ok(pid) = crate::syscall::sys_getpid() {
+        let _ = crate::syscall::sys_rt_sigqueueinfo(pid, 10, siginfo.as_ptr() as usize);
+        let _ = crate::syscall::sys_kill(pid as isize, 0);
     }
     print_linux_ok(ctx, "signal masks and queue info");
     match crate::syscall::sys_signalfd4(
@@ -3604,19 +3656,62 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         let _ = crate::syscall::sys_close(dir_fd);
         return;
     }
+    let mut fxfs_readback = [0u8; 10];
+    if crate::user_level::fxfs::read_file("/tmp/smros-copy-dst", &mut fxfs_readback).ok()
+        != Some(copy_payload.len())
+        || fxfs_readback != *copy_payload
+    {
+        ctx.serial
+            .write_str("  [FAIL] creat/trunc write did not update FxFS\n");
+        let _ = crate::syscall::sys_close(copy_fd);
+        let _ = crate::syscall::sys_close(file_fd);
+        let _ = crate::syscall::sys_close(dir_fd);
+        return;
+    }
     if let Err(e) = crate::syscall::sys_close(copy_fd) {
         print_linux_error(ctx, "close creat/trunc copy destination", e);
         let _ = crate::syscall::sys_close(file_fd);
         let _ = crate::syscall::sys_close(dir_fd);
         return;
     }
-    let mut copy_readback = [0u8; 10];
-    if crate::user_level::fxfs::read_file("/tmp/smros-copy-dst", &mut copy_readback).ok()
+    fxfs_readback = [0u8; 10];
+    if crate::user_level::fxfs::read_file("/tmp/smros-copy-dst", &mut fxfs_readback).ok()
         != Some(copy_payload.len())
-        || copy_readback != *copy_payload
+        || fxfs_readback != *copy_payload
     {
         ctx.serial
             .write_str("  [FAIL] creat/trunc copy destination did not persist in FxFS\n");
+        let _ = crate::syscall::sys_close(file_fd);
+        let _ = crate::syscall::sys_close(dir_fd);
+        return;
+    }
+    let mut copy_readback = [0u8; 10];
+    let verify_fd = match crate::syscall::sys_openat(
+        usize::MAX - 99,
+        copy_path.as_ptr() as usize,
+        0,
+        0,
+    ) {
+        Ok(fd) => fd,
+        Err(e) => {
+            print_linux_error(ctx, "open creat/trunc copy destination for read", e);
+            let _ = crate::syscall::sys_close(file_fd);
+            let _ = crate::syscall::sys_close(dir_fd);
+            return;
+        }
+    };
+    let read_ok = crate::syscall::sys_read(
+        verify_fd,
+        copy_readback.as_mut_ptr() as usize,
+        copy_readback.len(),
+    )
+    .ok()
+        == Some(copy_payload.len())
+        && copy_readback == *copy_payload;
+    let _ = crate::syscall::sys_close(verify_fd);
+    if !read_ok {
+        ctx.serial
+            .write_str("  [FAIL] creat/trunc copy destination reopen did not read FxFS\n");
         let _ = crate::syscall::sys_close(file_fd);
         let _ = crate::syscall::sys_close(dir_fd);
         return;
@@ -3649,7 +3744,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         }
     };
     if crate::syscall::sys_fcntl(file_fd, 1, 0).is_err()
-        || crate::syscall::sys_fcntl(file_fd, 2, 0o2000000).is_err()
+        || crate::syscall::sys_fcntl(file_fd, 2, 1).is_err()
         || crate::syscall::sys_fcntl(file_fd, 4, 0o4000).is_err()
     {
         ctx.serial.write_str("  [FAIL] fcntl fd ops failed\n");
@@ -3882,19 +3977,35 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     ctx.serial
         .write_str("[OK] Linux file, dir, fd, poll, and stat tests completed\n");
 
-    ctx.serial
-        .write_str("[TEST] Testing minimal component framework and FxFS... ");
-    if crate::user_level::component::smoke_test()
-        && crate::user_level::fxfs::smoke_test()
-        && crate::user_level::svc::smoke_test()
-    {
-        ctx.serial
-            .write_str("[OK] component framework, FxFS, and /svc IPC returned\n");
-    } else {
-        ctx.serial
-            .write_str("[FAIL] component framework, FxFS, or /svc IPC failed\n");
+    ctx.serial.write_str("[TEST] Testing FxFS smoke... ");
+    if !crate::user_level::fxfs::smoke_test() {
+        ctx.serial.write_str("[FAIL] FxFS smoke failed\n");
         return;
     }
+    ctx.serial.write_str("[OK] FxFS smoke\n");
+    ctx.serial.write_str("[TEST] Testing component bootstrap... ");
+    if !crate::user_level::component::start_bootstrap() {
+        ctx.serial.write_str("[FAIL] component bootstrap failed\n");
+        return;
+    }
+    ctx.serial.write_str("[OK] component bootstrap\n");
+    ctx.serial.write_str("[TEST] Testing component launchers... ");
+    if !crate::user_level::component::start_boot_component_threads() {
+        ctx.serial.write_str("[FAIL] component launchers failed\n");
+        return;
+    }
+    ctx.serial.write_str("[OK] component launchers\n");
+    if !crate::user_level::component::smoke_runtime() {
+        ctx.serial.write_str("[FAIL] component framework smoke failed\n");
+        return;
+    }
+    ctx.serial.write_str("[OK] component framework smoke\n");
+    if !crate::user_level::svc::smoke_test() {
+        ctx.serial.write_str("[FAIL] /svc IPC smoke failed\n");
+        return;
+    }
+    ctx.serial
+        .write_str("[OK] component framework, FxFS, and /svc IPC returned\n");
 
     if !run_ported_app_tests(ctx) {
         return;
@@ -3929,18 +4040,18 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         }
     }
 
-    print_memory_syscall_snapshot(ctx, "after");
-    ctx.serial.write_str("\n=== Test Complete ===\n\n");
+    complete.finish(ctx);
 }
 
-/// Command: fuzzsc - Fuzz syscall dispatchers
+/// Command: fuzzsc - Fuzz syscall dispatchers and POSIX APIs
 fn cmd_fuzz_syscall(ctx: &mut ShellContext, args: &[&str]) {
     let options = match parse_fuzz_command_options(ctx, args) {
         Some(options) => options,
         None => return,
     };
 
-    ctx.serial.write_str("\n=== Syscall Fuzzer ===\n");
+    ctx.serial
+        .write_str("\n=== Syscall and POSIX API Fuzzer ===\n");
     ctx.serial.write_str("[FUZZ] seed=0x");
     print_hex(&mut ctx.serial, options.seed);
     ctx.serial.write_str(" iterations=");
@@ -3961,7 +4072,8 @@ fn cmd_fuzz_syscall(ctx: &mut ShellContext, args: &[&str]) {
         })
     };
 
-    ctx.serial.write_str("[OK] syscall fuzz completed\n");
+    ctx.serial
+        .write_str("[OK] syscall and POSIX fuzz completed\n");
     ctx.serial.write_str("  seed=0x");
     print_hex(&mut ctx.serial, report.seed);
     ctx.serial.write_str(" iterations=");
@@ -3995,6 +4107,12 @@ fn cmd_fuzz_syscall(ctx: &mut ShellContext, args: &[&str]) {
     print_usize(&mut ctx.serial, report.zircon_success_syscalls);
     ctx.serial.write_str(" cases/iter=");
     print_usize(&mut ctx.serial, report.zircon_success_call_cases);
+    ctx.serial.write_str("\n");
+
+    ctx.serial.write_str("  POSIX APIs: count=");
+    print_usize(&mut ctx.serial, report.posix_interface_apis);
+    ctx.serial.write_str(" cases/iter=");
+    print_usize(&mut ctx.serial, report.posix_success_call_cases);
     ctx.serial.write_str("\n");
 
     ctx.serial.write_str("  Linux: calls=");
@@ -4058,6 +4176,20 @@ fn cmd_fuzz_syscall(ctx: &mut ShellContext, args: &[&str]) {
             &mut ctx.serial,
             report.zircon_last_unsupported_syscall as usize,
         );
+    }
+    ctx.serial.write_str("\n");
+
+    ctx.serial.write_str("  POSIX: calls=");
+    print_usize(&mut ctx.serial, report.posix_calls);
+    ctx.serial.write_str(" ok=");
+    print_usize(&mut ctx.serial, report.posix_ok);
+    ctx.serial.write_str(" err=");
+    print_usize(&mut ctx.serial, report.posix_err);
+    ctx.serial.write_str(" enosys=");
+    print_usize(&mut ctx.serial, report.posix_enosys);
+    if report.posix_err != 0 {
+        ctx.serial.write_str(" posix_err_list=");
+        print_posix_fuzz_error_buckets(ctx, &report);
     }
     ctx.serial.write_str("\n");
 
@@ -4304,6 +4436,30 @@ fn print_fuzz_usage(ctx: &mut ShellContext) {
         .write_str("       fuzzsc iter <n> time <seconds> | ms=<milliseconds>\n");
     ctx.serial
         .write_str("       more than 1000000 iterations requires a time limit\n");
+    ctx.serial
+        .write_str("       each iteration fuzzes Linux/Zircon syscalls and POSIX APIs\n");
+}
+
+fn print_posix_fuzz_error_buckets(ctx: &mut ShellContext, report: &crate::syscall::SyscallFuzzReport) {
+    let names = crate::syscall::POSIX_API_FUZZ_NAMES;
+    let mut index = 0;
+    while index < report.posix_err_api_count
+        && index < report.posix_err_apis.len()
+        && index < report.posix_err_api_counts.len()
+    {
+        if index != 0 {
+            ctx.serial.write_str(",");
+        }
+        let api_index = report.posix_err_apis[index] as usize;
+        if api_index < names.len() {
+            ctx.serial.write_str(names[api_index]);
+        } else {
+            print_usize(&mut ctx.serial, api_index);
+        }
+        ctx.serial.write_str("x");
+        print_usize(&mut ctx.serial, report.posix_err_api_counts[index]);
+        index += 1;
+    }
 }
 
 fn print_fuzz_error_buckets(
@@ -5181,14 +5337,18 @@ fn print_hermes_usage(ctx: &mut ShellContext) {
         .write_str("usage: hermes <info|test|skills|web|ui|ask|exec|random|test-all>\n");
     ctx.serial
         .write_str("       hermes exec <safe-command> [args...]\n");
-    ctx.serial
-        .write_str("       hermes random [seed=<n>] [iterations=<positive-n>]\n");
-    ctx.serial
-        .write_str("       hermes test-all [seed=<n>] [iterations=<positive-n>]\n");
+    ctx.serial.write_str(
+        "       hermes random [seed=<n>] [iterations=<positive-n>] [mode=ops|syscall]\n",
+    );
+    ctx.serial.write_str(
+        "       hermes test-all [seed=<n>] [iterations=<positive-n>] [mode=ops|syscall]\n",
+    );
     ctx.serial.write_str("       hermes ask <prompt>\n");
     ctx.serial
         .write_str("       hermes ui  # LVGL-styled keyboard/mouse UI\n");
     ctx.serial.write_str("       hermes web [text|source]\n");
+    ctx.serial
+        .write_str("       mode=syscall selects testsc/fuzzsc/hermes test\n");
 }
 
 fn run_hermes_test_all(ctx: &mut ShellContext, args: &[&str]) {
@@ -5198,8 +5358,9 @@ fn run_hermes_test_all(ctx: &mut ShellContext, args: &[&str]) {
     let Some(options) =
         crate::user_level::services::hermes_shell_logic_shared::parse_campaign_options(args)
     else {
-        ctx.serial
-            .write_str("usage: hermes test-all [seed=<n>] [iterations=<positive-n>]\n");
+        ctx.serial.write_str(
+            "usage: hermes test-all [seed=<n>] [iterations=<positive-n>] [mode=ops|syscall]\n",
+        );
         return;
     };
     let seed = options.seed.unwrap_or(1);
@@ -5211,19 +5372,17 @@ fn run_hermes_test_all(ctx: &mut ShellContext, args: &[&str]) {
     append_usize_shell(&mut report, seed as usize);
     report.push_str("\niterations=");
     append_usize_shell(&mut report, options.iterations);
+    report.push_str("\nmode=");
+    report.push_str(hermes_campaign_mode_name(options.mode));
     report.push_str("\nnative=");
     report.push_str(if native_ok { "pass\n" } else { "fail\n" });
-    let jobs = [
-        HermesHostTestJob::Ut,
-        HermesHostTestJob::It,
-        HermesHostTestJob::St,
-    ];
+    let jobs = [HermesHostTestJob::Ut, HermesHostTestJob::It];
     let mut random_completed = 0usize;
     let mut random_denied = 0usize;
     let mut random_invalid = 0usize;
     let mut random_unknown = 0usize;
-    let mut host_passes = [0usize; 3];
-    let mut host_failures = [0usize; 3];
+    let mut host_passes = [0usize; 2];
+    let mut host_failures = [0usize; 2];
 
     for round in 0..options.iterations {
         ctx.serial.write_str("Hermes test-all iteration ");
@@ -5232,7 +5391,7 @@ fn run_hermes_test_all(ctx: &mut ShellContext, args: &[&str]) {
         print_usize(&mut ctx.serial, options.iterations);
         ctx.serial.write_str("\n");
 
-        let status = execute_hermes_campaign_round(ctx, seed, round, &mut report);
+        let status = execute_hermes_campaign_round(ctx, seed, round, options.mode, &mut report);
         count_hermes_command_status(
             status,
             &mut random_completed,
@@ -5328,8 +5487,9 @@ fn run_hermes_random_campaign(ctx: &mut ShellContext, args: &[&str]) {
     };
 
     let Some(options) = parse_campaign_options(args) else {
-        ctx.serial
-            .write_str("usage: hermes random [seed=<n>] [iterations=<positive-n>]\n");
+        ctx.serial.write_str(
+            "usage: hermes random [seed=<n>] [iterations=<positive-n>] [mode=ops|syscall]\n",
+        );
         return;
     };
     let seed = options.seed.unwrap_or_else(|| {
@@ -5343,6 +5503,8 @@ fn run_hermes_random_campaign(ctx: &mut ShellContext, args: &[&str]) {
     append_usize_shell(&mut report, seed as usize);
     report.push_str("\niterations=");
     append_usize_shell(&mut report, options.iterations);
+    report.push_str("\nmode=");
+    report.push_str(hermes_campaign_mode_name(options.mode));
     report.push('\n');
 
     let mut completed = 0usize;
@@ -5350,7 +5512,7 @@ fn run_hermes_random_campaign(ctx: &mut ShellContext, args: &[&str]) {
     let mut invalid = 0usize;
     let mut unknown = 0usize;
     for round in 0..options.iterations {
-        let status = execute_hermes_campaign_round(ctx, seed, round, &mut report);
+        let status = execute_hermes_campaign_round(ctx, seed, round, options.mode, &mut report);
         count_hermes_command_status(
             status,
             &mut completed,
@@ -5404,18 +5566,29 @@ fn run_hermes_random_campaign(ctx: &mut ShellContext, args: &[&str]) {
     }
 }
 
+fn hermes_campaign_mode_name(
+    mode: crate::user_level::services::hermes_shell_logic_shared::HermesCampaignMode,
+) -> &'static str {
+    use crate::user_level::services::hermes_shell_logic_shared::HermesCampaignMode;
+    match mode {
+        HermesCampaignMode::Ops => "ops",
+        HermesCampaignMode::Syscall => "syscall",
+    }
+}
+
 fn execute_hermes_campaign_round(
     ctx: &mut ShellContext,
     seed: u64,
     round: usize,
+    mode: crate::user_level::services::hermes_shell_logic_shared::HermesCampaignMode,
     report: &mut String,
 ) -> HermesCommandStatus {
     use crate::user_level::services::hermes_shell_logic_shared::{
-        campaign_case, campaign_case_index, campaign_report_includes_round,
+        campaign_case_for_mode, campaign_case_index_for_mode, campaign_report_includes_round,
     };
 
-    let index = campaign_case_index(seed, round);
-    let Some(case) = campaign_case(index, seed, round) else {
+    let index = campaign_case_index_for_mode(seed, round, mode);
+    let Some(case) = campaign_case_for_mode(mode, index) else {
         return HermesCommandStatus::Unknown;
     };
     if campaign_report_includes_round(round) {

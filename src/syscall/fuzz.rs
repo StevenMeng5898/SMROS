@@ -10,13 +10,17 @@ use super::{
     LinuxCapUserHeader, LinuxIovec, LinuxItimerval, LinuxPollFd, LinuxTimespec, LinuxTimeval,
     MmapFlags, MmapProt, SysError, ZxError, ZxWaitItem, LINUX_AF_UNIX, LINUX_CAPABILITY_VERSION_3,
     LINUX_CONTAINER_NAMESPACE_FLAGS, LINUX_O_CLOEXEC, LINUX_O_CREAT, LINUX_O_DIRECTORY,
-    LINUX_O_RDWR, LINUX_SECCOMP_FILTER_ALLOWED_FLAGS, LINUX_SECCOMP_GET_NOTIF_SIZES,
-    LINUX_SECCOMP_SET_MODE_FILTER, LINUX_SIGSET_SIZE, LINUX_SOCK_DGRAM, LINUX_SOCK_STREAM,
+    LINUX_O_NONBLOCK, LINUX_O_RDWR, LINUX_SECCOMP_FILTER_ALLOWED_FLAGS,
+    LINUX_SECCOMP_GET_NOTIF_SIZES, LINUX_SECCOMP_SET_MODE_FILTER, LINUX_SIGSET_SIZE,
+    LINUX_SOCK_DGRAM, LINUX_SOCK_STREAM,
 };
 use crate::kernel_lowlevel::memory::PAGE_SIZE;
 use crate::kernel_lowlevel::timer;
 use crate::kernel_objects::port::{PortPacket, PORT_PACKET_TYPE_USER};
 use crate::kernel_objects::{ObjectType, VmOptions, VmarFlags, INVALID_HANDLE, RIGHT_SAME_RIGHTS};
+use crate::syscall::linux_process;
+use crate::syscall::linux_process_memory;
+use crate::syscall::linux_task;
 use crate::syscall::syscall_logic;
 use crate::user_level::fxfs;
 
@@ -100,6 +104,16 @@ pub struct SyscallFuzzReport {
     pub zircon_err_syscall_count: usize,
     pub zircon_first_unsupported_syscall: u32,
     pub zircon_last_unsupported_syscall: u32,
+    pub posix_interface_apis: usize,
+    pub posix_success_apis: usize,
+    pub posix_success_call_cases: usize,
+    pub posix_calls: usize,
+    pub posix_ok: usize,
+    pub posix_err: usize,
+    pub posix_enosys: usize,
+    pub posix_err_apis: [u8; FUZZ_ERROR_BUCKETS],
+    pub posix_err_api_counts: [usize; FUZZ_ERROR_BUCKETS],
+    pub posix_err_api_count: usize,
     pub skipped: usize,
     pub created_handles: usize,
     pub created_fds: usize,
@@ -159,10 +173,33 @@ impl FuzzRng {
     }
 }
 
+struct KernelDispatchGuard;
+
+impl KernelDispatchGuard {
+    fn enter(state: &FuzzState) -> Self {
+        linux_task::enter_kernel_dispatch();
+        linux_task::register_kernel_dispatch_range(
+            state as *const FuzzState as usize,
+            core::mem::size_of::<FuzzState>(),
+        );
+        Self
+    }
+}
+
+impl Drop for KernelDispatchGuard {
+    fn drop(&mut self) {
+        linux_task::leave_kernel_dispatch();
+    }
+}
+
 struct FuzzArena {
     scratch: [u8; FUZZ_SCRATCH_BYTES],
     path: [u8; 32],
     path_alt: [u8; 32],
+    path_dir: [u8; 8],
+    path_root: [u8; 2],
+    path_unlink: [u8; 32],
+    path_link: [u8; 32],
     name: [u8; 32],
     iov: [LinuxIovec; 2],
     poll: [LinuxPollFd; 2],
@@ -185,6 +222,10 @@ impl FuzzArena {
             scratch: [0; FUZZ_SCRATCH_BYTES],
             path: [0; 32],
             path_alt: [0; 32],
+            path_dir: [0; 8],
+            path_root: [0; 2],
+            path_unlink: [0; 32],
+            path_link: [0; 32],
             name: [0; 32],
             iov: [
                 LinuxIovec { base: 0, len: 0 },
@@ -225,11 +266,11 @@ impl FuzzArena {
             },
             timespec: LinuxTimespec {
                 tv_sec: 0,
-                tv_nsec: 1,
+                tv_nsec: 0,
             },
             timeval: LinuxTimeval {
                 tv_sec: 0,
-                tv_usec: 1,
+                tv_usec: 0,
             },
             itimer: LinuxItimerval {
                 it_interval: LinuxTimeval {
@@ -238,7 +279,7 @@ impl FuzzArena {
                 },
                 it_value: LinuxTimeval {
                     tv_sec: 0,
-                    tv_usec: 1,
+                    tv_usec: 0,
                 },
             },
             cap_header: LinuxCapUserHeader {
@@ -270,6 +311,10 @@ impl FuzzArena {
     fn write_cstrs(&mut self) {
         write_cstr(&mut self.path, b"/tmp/smros-fuzz");
         write_cstr(&mut self.path_alt, b"/tmp/smros-fuzz-alt");
+        write_cstr(&mut self.path_dir, b"/tmp");
+        write_cstr(&mut self.path_root, b"/");
+        write_cstr(&mut self.path_unlink, b"/tmp/smros-fuzz-un");
+        write_cstr(&mut self.path_link, b"/tmp/smros-fuzz-ln");
         write_cstr(&mut self.name, b"smros-test");
     }
 
@@ -347,12 +392,46 @@ impl FuzzArena {
         self.scratch.as_mut_ptr().wrapping_add(offset) as usize
     }
 
+    fn write_cpu0_affinity_mask(&mut self) -> usize {
+        self.scratch[..8].fill(0);
+        self.scratch[0] = 1;
+        self.scratch_ptr()
+    }
+
+    fn write_zero_rlimit64(&mut self) -> usize {
+        self.scratch[..16].fill(0);
+        self.scratch_ptr()
+    }
+
+    fn write_mq_success_attr(&mut self) -> usize {
+        self.scratch[..64].fill(0);
+        self.scratch[8..16].copy_from_slice(&10i64.to_ne_bytes());
+        self.scratch[16..24].copy_from_slice(&64i64.to_ne_bytes());
+        self.scratch_ptr()
+    }
+
     fn path_ptr(&self) -> usize {
         self.path.as_ptr() as usize
     }
 
     fn path_alt_ptr(&self) -> usize {
         self.path_alt.as_ptr() as usize
+    }
+
+    fn path_dir_ptr(&self) -> usize {
+        self.path_dir.as_ptr() as usize
+    }
+
+    fn path_root_ptr(&self) -> usize {
+        self.path_root.as_ptr() as usize
+    }
+
+    fn path_unlink_ptr(&self) -> usize {
+        self.path_unlink.as_ptr() as usize
+    }
+
+    fn path_link_ptr(&self) -> usize {
+        self.path_link.as_ptr() as usize
     }
 
     fn name_ptr(&self) -> usize {
@@ -433,6 +512,9 @@ struct FuzzState {
     active_shm_mapping: usize,
     zircon_mappings: [usize; 32],
     zircon_mapping_count: usize,
+    mq_fd: usize,
+    linux_timer_id: usize,
+    posix_api: &'static str,
     start_tick: u64,
     deadline_tick: u64,
     report: SyscallFuzzReport,
@@ -462,6 +544,9 @@ impl FuzzState {
             active_shm_mapping: 0,
             zircon_mappings: [0; 32],
             zircon_mapping_count: 0,
+            mq_fd: 0,
+            linux_timer_id: 0,
+            posix_api: "",
             start_tick,
             deadline_tick,
             report: SyscallFuzzReport {
@@ -474,6 +559,9 @@ impl FuzzState {
                 zircon_interface_syscalls: count_zircon_interface_syscalls(),
                 zircon_success_syscalls: ZIRCON_SUCCESS_SYSCALLS.len(),
                 zircon_success_call_cases: zircon_success_call_cases(),
+                posix_interface_apis: POSIX_API_FUZZ_NAMES.len(),
+                posix_success_apis: POSIX_API_FUZZ_NAMES.len(),
+                posix_success_call_cases: POSIX_API_FUZZ_NAMES.len(),
                 ..SyscallFuzzReport::default()
             },
         }
@@ -574,6 +662,21 @@ impl FuzzState {
             let _ = sys_munmap(addr, PAGE_SIZE);
             false
         }
+    }
+
+    fn untrack_mapping(&mut self, addr: usize) {
+        if addr == 0 {
+            return;
+        }
+        if let Some(index) = self.mappings[..self.mapping_count]
+            .iter()
+            .position(|mapped| *mapped == addr)
+        {
+            self.mapping_count -= 1;
+            self.mappings[index] = self.mappings[self.mapping_count];
+            self.mappings[self.mapping_count] = 0;
+        }
+        self.clear_active_shm_mapping(addr);
     }
 
     fn track_zircon_mapping(&mut self, addr: usize) {
@@ -678,7 +781,7 @@ impl FuzzState {
             0,
             0,
         )
-        .unwrap_or(0x5000_0000)
+        .unwrap_or(0)
     }
 
     fn linux_timer_delete_handle(&mut self) -> usize {
@@ -1048,9 +1151,46 @@ impl FuzzState {
 
     fn mapping(&mut self) -> usize {
         if self.mapping_count == 0 {
-            0x5000_0000
+            let addr = self.transient_mapping();
+            if addr != 0 {
+                let _ = self.track_mapping(addr);
+            }
+            addr
         } else {
             self.mappings[self.rng.below(self.mapping_count)]
+        }
+    }
+
+    fn ensure_mq_fd(&mut self) -> usize {
+        if self.mq_fd != 0 {
+            return self.mq_fd;
+        }
+        let flags = LINUX_O_CREAT | LINUX_O_RDWR | LINUX_O_NONBLOCK;
+        let attr = self.arena.write_mq_success_attr();
+        match dispatch_linux_syscall(
+            super::ARM64_SYS_MQ_OPEN,
+            [self.arena.name_ptr(), flags, 0o600, attr, 0, 0],
+        ) {
+            Ok(fd) => {
+                self.mq_fd = fd;
+                self.track_fd(fd);
+                fd
+            }
+            Err(_) => 0,
+        }
+    }
+
+    fn ensure_linux_timer_id(&mut self) -> usize {
+        if self.linux_timer_id != 0 {
+            return self.linux_timer_id;
+        }
+        let out = self.arena.words_ptr();
+        if dispatch_linux_syscall(107, [0, 0, out, 0, 0, 0]).is_ok() {
+            let id = unsafe { core::ptr::read(out as *const i32) as usize };
+            self.linux_timer_id = id;
+            id
+        } else {
+            0
         }
     }
 
@@ -1151,6 +1291,50 @@ impl FuzzState {
         }
     }
 
+    fn record_posix_err_api(&mut self, name: &'static str) {
+        if name.is_empty() {
+            return;
+        }
+        let Some(api_index) = POSIX_API_FUZZ_NAMES.iter().position(|api| *api == name) else {
+            return;
+        };
+        let api_index = api_index as u8;
+        let mut index = 0;
+        while index < self.report.posix_err_api_count {
+            if self.report.posix_err_apis[index] == api_index {
+                self.report.posix_err_api_counts[index] += 1;
+                return;
+            }
+            index += 1;
+        }
+        if self.report.posix_err_api_count < FUZZ_ERROR_BUCKETS {
+            let bucket = self.report.posix_err_api_count;
+            self.report.posix_err_apis[bucket] = api_index;
+            self.report.posix_err_api_counts[bucket] = 1;
+            self.report.posix_err_api_count += 1;
+        }
+    }
+
+    fn call_posix(&mut self, num: u32, args: [usize; 6]) -> Result<usize, SysError> {
+        self.report.posix_calls += 1;
+        match dispatch_linux_syscall(num, args) {
+            Ok(value) => {
+                self.report.posix_ok += 1;
+                self.capture_linux_result(num, value, &args);
+                Ok(value)
+            }
+            Err(SysError::ENOSYS) => {
+                self.report.posix_enosys += 1;
+                Err(SysError::ENOSYS)
+            }
+            Err(err) => {
+                self.report.posix_err += 1;
+                self.record_posix_err_api(self.posix_api);
+                Err(err)
+            }
+        }
+    }
+
     fn call_linux(&mut self, num: u32, args: [usize; 6]) {
         self.report.linux_calls += 1;
         match dispatch_linux_syscall(num, args) {
@@ -1213,6 +1397,10 @@ impl FuzzState {
     fn capture_linux_result(&mut self, num: u32, value: usize, args: &[usize; 6]) {
         match num {
             19 | 20 | 26 | 56 | 74 | 85 | 198 | 279 | 437 => self.track_fd(value),
+            180 => {
+                self.mq_fd = value;
+                self.track_fd(value);
+            }
             23 | 24 | 25 | 202 | 242 => self.track_fd(value),
             59 => {
                 if args[0] != 0 {
@@ -1234,7 +1422,7 @@ impl FuzzState {
             }
             186 | 190 | 194 => self.track_handle(value as u32),
             107 if args[2] != 0 => unsafe {
-                self.track_handle(core::ptr::read(args[2] as *const usize) as u32);
+                self.linux_timer_id = core::ptr::read(args[2] as *const i32) as usize;
             },
             107 | 108 | 109 | 110 => {
                 if args[0] != 0 {
@@ -1246,9 +1434,13 @@ impl FuzzState {
                     self.active_shm_mapping = value;
                 }
             }
-            197 => self.clear_active_shm_mapping(args[1]),
+            197 => self.untrack_mapping(args[1]),
+            215 => self.untrack_mapping(args[0]),
             222 => {
                 self.track_mapping(value);
+            }
+            226 => {
+                let _ = self.track_mapping(args[0]);
             }
             _ => {}
         }
@@ -1460,6 +1652,8 @@ pub fn fuzz_syscalls_with_config(config: SyscallFuzzConfig) -> SyscallFuzzReport
     };
     let start_tick = timer::get_tick_count();
     let mut state = FuzzState::new(config.seed, iterations, config.time_limit_ticks, start_tick);
+    let _dispatch = KernelDispatchGuard::enter(&state);
+    prepare_fuzz_linux_context();
 
     seed_fuzz_state(&mut state);
     state.freeze_seed_objects();
@@ -1480,6 +1674,12 @@ pub fn fuzz_syscalls_with_config(config: SyscallFuzzConfig) -> SyscallFuzzReport
             break;
         }
         state.cleanup_zircon_mappings();
+        state.cleanup_transient_handles();
+        if !fuzz_posix_round(&mut state) {
+            break;
+        }
+        state.cleanup_linux_mappings();
+        state.cleanup_transient_fds();
         state.cleanup_transient_handles();
         state.report.completed_iterations += 1;
     }
@@ -1539,7 +1739,24 @@ fn zircon_success_call_cases() -> usize {
     count
 }
 
+fn prepare_fuzz_linux_context() {
+    if let Ok(pid) = linux_process::ensure_dispatch_identity() {
+        let _ = linux_process_memory::ensure_dispatch_memory(pid);
+    }
+}
+
+fn prepare_fuzz_paths() {
+    let _ = fxfs::create_dir("/tmp");
+    let _ = fxfs::create_dir("/dev");
+    let _ = fxfs::create_dir("/dev/shm");
+    let _ = fxfs::set_attrs("/dev/shm", 0o40777, 0, 0);
+    let _ = fxfs::unlink_file("/dev/shm/fz");
+    let _ = fxfs::write_file("/tmp/smros-fuzz", b"smros syscall fuzz seed\n");
+    let _ = fxfs::write_file("/tmp/smros-fuzz-alt", b"smros syscall fuzz alt\n");
+}
+
 fn seed_fuzz_state(state: &mut FuzzState) {
+    prepare_fuzz_paths();
     let flags = MmapFlags::PRIVATE.bits() | MmapFlags::ANONYMOUS.bits();
     if let Ok(addr) = sys_mmap(
         0,
@@ -1552,11 +1769,8 @@ fn seed_fuzz_state(state: &mut FuzzState) {
         state.track_mapping(addr);
     }
 
-    let _ = fxfs::write_file("/tmp/smros-fuzz", b"smros syscall fuzz seed\n");
-    let _ = fxfs::write_file("/tmp/smros-fuzz-alt", b"smros syscall fuzz alt\n");
-
     if let Ok(fd) = sys_openat(
-        usize::MAX - 99,
+        LINUX_AT_FDCWD,
         state.arena.path_ptr(),
         LINUX_O_CREAT | LINUX_O_RDWR,
         0,
@@ -1564,8 +1778,8 @@ fn seed_fuzz_state(state: &mut FuzzState) {
         state.seed_fd(fd);
     }
     if let Ok(fd) = sys_openat(
-        usize::MAX - 99,
-        state.arena.path_ptr(),
+        LINUX_AT_FDCWD,
+        state.arena.path_dir_ptr(),
         LINUX_O_DIRECTORY,
         0,
     ) {
@@ -1580,19 +1794,25 @@ fn seed_fuzz_state(state: &mut FuzzState) {
     if let Ok(fd) = sys_socket(LINUX_AF_UNIX, LINUX_SOCK_STREAM, 0) {
         state.seed_fd(fd);
     }
-    let mut pair = [0i32; 2];
-    if sys_pipe2(pair.as_mut_ptr() as usize, 0).is_ok() {
+    let pair_ptr = state.arena.handles_ptr();
+    if sys_pipe2(pair_ptr, LINUX_O_NONBLOCK).is_ok() {
+        let pair = unsafe { core::ptr::read(pair_ptr as *const [i32; 2]) };
         state.seed_fd(pair[0] as usize);
         state.seed_fd(pair[1] as usize);
+        let _ = dispatch_linux_syscall(
+            super::ARM64_SYS_WRITE,
+            [
+                pair[1] as usize,
+                state.arena.scratch_ptr(),
+                FUZZ_IO_BYTES,
+                0,
+                0,
+                0,
+            ],
+        );
     }
-    if sys_socketpair(
-        LINUX_AF_UNIX,
-        LINUX_SOCK_DGRAM,
-        0,
-        pair.as_mut_ptr() as usize,
-    )
-    .is_ok()
-    {
+    if sys_socketpair(LINUX_AF_UNIX, LINUX_SOCK_DGRAM, 0, pair_ptr).is_ok() {
+        let pair = unsafe { core::ptr::read(pair_ptr as *const [i32; 2]) };
         state.seed_fd(pair[0] as usize);
         state.seed_fd(pair[1] as usize);
     }
@@ -1744,10 +1964,29 @@ fn seed_fuzz_state(state: &mut FuzzState) {
     }
 }
 
+fn linux_fuzz_is_destructive(num: u32) -> bool {
+    matches!(
+        num,
+        super::ARM64_SYS_EXIT
+            | super::ARM64_SYS_EXIT_GROUP
+            | super::ARM64_SYS_CLONE
+            | super::ARM64_SYS_CLONE3
+            | super::ARM64_SYS_EXECVE
+            | super::ARM64_SYS_WAIT4
+            | super::ARM64_SYS_RT_SIGRETURN
+            | super::ARM64_SYS_RT_SIGSUSPEND
+            | super::ARM64_SYS_RT_SIGTIMEDWAIT
+    )
+}
+
 fn fuzz_linux_round(state: &mut FuzzState) -> bool {
+    prepare_fuzz_paths();
+    state.arena.write_cstrs();
+    state.mq_fd = 0;
+    state.linux_timer_id = 0;
     let mut num = 0;
     while num <= FUZZ_LINUX_INTERFACE_MAX {
-        if syscall_logic::linux_syscall_interface_known(num) {
+        if syscall_logic::linux_syscall_interface_known(num) && !linux_fuzz_is_destructive(num) {
             let variants = linux_variants(num);
             for variant in 0..variants {
                 if state.should_stop() {
@@ -1771,6 +2010,351 @@ fn fuzz_zircon_round(state: &mut FuzzState) -> bool {
             }
             let args = zircon_args(state, num, variant);
             state.call_zircon(num, args);
+        }
+    }
+
+    true
+}
+
+/// Named IEEE 1003.1 System Interfaces exercised with libc-shaped arguments.
+/// This is distinct from the Linux/Zircon dispatcher number sweep: mq_open
+/// gets a `/name`, O_CREAT|O_RDWR|O_NONBLOCK, and an mq_attr, not a generic
+/// `[0, ptr, len]` register blob.
+pub const POSIX_API_FUZZ_NAMES: &[&str] = &[
+    "getpid",
+    "getppid",
+    "sched_yield",
+    "clock_gettime",
+    "clock_getres",
+    "nanosleep",
+    "kill",
+    "sigprocmask",
+    "sigaction",
+    "mq_open",
+    "mq_getattr",
+    "mq_send",
+    "mq_receive",
+    "mq_timedsend",
+    "mq_timedreceive",
+    "mq_setattr",
+    "mq_close",
+    "mq_unlink",
+    "mmap",
+    "mprotect",
+    "munmap",
+    "shm_open",
+    "shm_unlink",
+    "pthread_cond_broadcast",
+    "pthread_cond_timedwait",
+    "open",
+    "read",
+    "write",
+    "close",
+    "pipe",
+    "dup",
+    "fcntl",
+    "poll",
+];
+
+const LINUX_AT_FDCWD: usize = usize::MAX - 99;
+const POSIX_AT_FDCWD: usize = usize::MAX - 99;
+const POSIX_FUTEX_WAKE_PRIVATE: usize = 129;
+const POSIX_SIG_SETMASK: usize = 2;
+const POSIX_F_GETFL: usize = 3;
+const POSIX_MQ_ATTR_BYTES: usize = 64;
+const POSIX_CLOCK_REALTIME: usize = 0;
+const POSIX_CLOCK_MONOTONIC: usize = 1;
+
+fn fuzz_posix_round(state: &mut FuzzState) -> bool {
+    prepare_fuzz_paths();
+    {
+        let arena = &mut state.arena;
+        arena.write_cstrs();
+        write_cstr(&mut arena.name, b"/smrosfuzzmq");
+        write_cstr(&mut arena.path_alt, b"/dev/shm/fz");
+        arena.scratch[..POSIX_MQ_ATTR_BYTES].fill(0);
+        arena.scratch[8..16].copy_from_slice(&10i64.to_ne_bytes());
+        arena.scratch[16..24].copy_from_slice(&64i64.to_ne_bytes());
+        arena.timespec = LinuxTimespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        arena.futex = 0;
+    }
+
+    let mq_name = state.arena.name_ptr();
+    let shm_path = state.arena.path_alt_ptr();
+    let file_path = state.arena.path_ptr();
+    let attr_ptr = state.arena.scratch_ptr();
+    let msg_ptr = state.arena.scratch_ptr_offset(POSIX_MQ_ATTR_BYTES);
+    let timespec_ptr = state.arena.timespec_ptr();
+    let futex_ptr = state.arena.futex_ptr();
+    let poll_ptr = state.arena.poll_ptr();
+    let sigset_ptr = state.arena.scratch_ptr_offset(192);
+    let mq_flags = LINUX_O_CREAT | LINUX_O_RDWR | LINUX_O_NONBLOCK;
+    let mut pid = 1usize;
+    let mut mqd = 0usize;
+    let mut mapping = 0usize;
+    let mut extra_fd = 0usize;
+
+    for name in POSIX_API_FUZZ_NAMES {
+        if state.should_stop() {
+            return false;
+        }
+        state.posix_api = name;
+        match *name {
+            "getpid" => {
+                if let Ok(value) = state.call_posix(super::ARM64_SYS_GETPID, [0; 6]) {
+                    pid = value;
+                }
+            }
+            "getppid" => {
+                let _ = state.call_posix(super::ARM64_SYS_GETPPID, [0; 6]);
+            }
+            "sched_yield" => {
+                let _ = state.call_posix(super::ARM64_SYS_SCHED_YIELD, [0; 6]);
+            }
+            "clock_gettime" => {
+                let _ = state.call_posix(
+                    super::ARM64_SYS_CLOCK_GETTIME,
+                    [POSIX_CLOCK_REALTIME, timespec_ptr, 0, 0, 0, 0],
+                );
+                let _ = state.call_posix(
+                    super::ARM64_SYS_CLOCK_GETTIME,
+                    [POSIX_CLOCK_MONOTONIC, timespec_ptr, 0, 0, 0, 0],
+                );
+            }
+            "clock_getres" => {
+                let _ = state.call_posix(
+                    super::ARM64_SYS_CLOCK_GETRES,
+                    [POSIX_CLOCK_REALTIME, timespec_ptr, 0, 0, 0, 0],
+                );
+            }
+            "nanosleep" => {
+                let _ = state.call_posix(
+                    super::ARM64_SYS_NANOSLEEP,
+                    [timespec_ptr, timespec_ptr, 0, 0, 0, 0],
+                );
+            }
+            "kill" => {
+                // POSIX kill(0, 0) probes the current process group without a real signal.
+                let _ = pid;
+                let _ = state.call_posix(super::ARM64_SYS_KILL, [0, 0, 0, 0, 0, 0]);
+            }
+            "sigprocmask" => {
+                let _ = state.call_posix(
+                    super::ARM64_SYS_RT_SIGPROCMASK,
+                    [POSIX_SIG_SETMASK, 0, sigset_ptr, LINUX_SIGSET_SIZE, 0, 0],
+                );
+            }
+            "sigaction" => {
+                let _ = state.call_posix(
+                    super::ARM64_SYS_RT_SIGACTION,
+                    [10, 0, sigset_ptr, LINUX_SIGSET_SIZE, 0, 0],
+                );
+            }
+            "mq_open" => {
+                if let Ok(value) = state.call_posix(
+                    super::ARM64_SYS_MQ_OPEN,
+                    [mq_name, mq_flags, 0o600, attr_ptr, 0, 0],
+                ) {
+                    mqd = value;
+                }
+            }
+            "mq_getattr" => {
+                let _ =
+                    state.call_posix(super::ARM64_SYS_MQ_GETSETATTR, [mqd, 0, attr_ptr, 0, 0, 0]);
+            }
+            "mq_send" => {
+                let _ = state.call_posix(super::ARM64_SYS_MQ_TIMEDSEND, [mqd, msg_ptr, 8, 0, 0, 0]);
+            }
+            "mq_receive" => {
+                let _ = state.call_posix(
+                    super::ARM64_SYS_MQ_TIMEDRECEIVE,
+                    [mqd, msg_ptr, 64, 0, 0, 0],
+                );
+            }
+            "mq_timedsend" => {
+                let _ = state.call_posix(
+                    super::ARM64_SYS_MQ_TIMEDSEND,
+                    [mqd, msg_ptr, 8, 0, timespec_ptr, 0],
+                );
+            }
+            "mq_timedreceive" => {
+                let _ = dispatch_linux_syscall(
+                    super::ARM64_SYS_MQ_TIMEDSEND,
+                    [mqd, msg_ptr, 8, 0, 0, 0],
+                );
+                let _ = state.call_posix(
+                    super::ARM64_SYS_MQ_TIMEDRECEIVE,
+                    [mqd, msg_ptr, 64, 0, timespec_ptr, 0],
+                );
+            }
+            "mq_setattr" => {
+                let _ = state.call_posix(
+                    super::ARM64_SYS_MQ_GETSETATTR,
+                    [mqd, attr_ptr, attr_ptr, 0, 0, 0],
+                );
+            }
+            "mq_close" => {
+                if mqd != 0 {
+                    let _ = state.call_posix(super::ARM64_SYS_CLOSE, [mqd, 0, 0, 0, 0, 0]);
+                    mqd = 0;
+                }
+            }
+            "mq_unlink" => {
+                let _ = state.call_posix(super::ARM64_SYS_MQ_UNLINK, [mq_name, 0, 0, 0, 0, 0]);
+            }
+            "mmap" => {
+                let flags = MmapFlags::PRIVATE.bits() | MmapFlags::ANONYMOUS.bits();
+                if let Ok(addr) = state.call_posix(
+                    super::ARM64_SYS_MMAP,
+                    [
+                        0,
+                        PAGE_SIZE,
+                        MmapProt::READ.bits() | MmapProt::WRITE.bits(),
+                        flags,
+                        0,
+                        0,
+                    ],
+                ) {
+                    mapping = addr;
+                }
+            }
+            "mprotect" => {
+                let addr = if mapping != 0 {
+                    mapping
+                } else {
+                    dispatch_linux_syscall(
+                        super::ARM64_SYS_MMAP,
+                        [
+                            0,
+                            PAGE_SIZE,
+                            MmapProt::READ.bits() | MmapProt::WRITE.bits(),
+                            MmapFlags::PRIVATE.bits() | MmapFlags::ANONYMOUS.bits(),
+                            0,
+                            0,
+                        ],
+                    )
+                    .unwrap_or(0)
+                };
+                let _ = state.call_posix(
+                    super::ARM64_SYS_MPROTECT,
+                    [addr, PAGE_SIZE, MmapProt::READ.bits(), 0, 0, 0],
+                );
+            }
+            "munmap" => {
+                if mapping != 0 {
+                    let _ = state.call_posix(
+                        super::ARM64_SYS_MUNMAP,
+                        [mapping, PAGE_SIZE, 0, 0, 0, 0],
+                    );
+                    mapping = 0;
+                } else if let Ok(addr) = state.call_posix(
+                    super::ARM64_SYS_MMAP,
+                    [
+                        0,
+                        PAGE_SIZE,
+                        MmapProt::READ.bits() | MmapProt::WRITE.bits(),
+                        MmapFlags::PRIVATE.bits() | MmapFlags::ANONYMOUS.bits(),
+                        0,
+                        0,
+                    ],
+                ) {
+                    let _ =
+                        state.call_posix(super::ARM64_SYS_MUNMAP, [addr, PAGE_SIZE, 0, 0, 0, 0]);
+                }
+            }
+            "shm_open" => {
+                if let Ok(value) = state.call_posix(
+                    super::ARM64_SYS_OPENAT,
+                    [
+                        POSIX_AT_FDCWD,
+                        shm_path,
+                        LINUX_O_CREAT | LINUX_O_RDWR,
+                        0o600,
+                        0,
+                        0,
+                    ],
+                ) {
+                    extra_fd = value;
+                }
+            }
+            "shm_unlink" => {
+                let _ = state.call_posix(
+                    super::ARM64_SYS_UNLINKAT,
+                    [POSIX_AT_FDCWD, shm_path, 0, 0, 0, 0],
+                );
+            }
+            "pthread_cond_broadcast" => {
+                let _ = state.call_posix(
+                    super::ARM64_SYS_FUTEX,
+                    [futex_ptr, POSIX_FUTEX_WAKE_PRIVATE, 1, 0, 0, 0],
+                );
+            }
+            "pthread_cond_timedwait" => {
+                let _ = state.call_posix(
+                    super::ARM64_SYS_FUTEX,
+                    [futex_ptr, POSIX_FUTEX_WAKE_PRIVATE, 1, 0, 0, 0],
+                );
+            }
+            "open" => {
+                let _ = state.call_posix(
+                    super::ARM64_SYS_OPENAT,
+                    [
+                        POSIX_AT_FDCWD,
+                        file_path,
+                        LINUX_O_CREAT | LINUX_O_RDWR,
+                        0o600,
+                        0,
+                        0,
+                    ],
+                );
+            }
+            "read" => {
+                let fd = state.file_fd();
+                let _ = state.call_posix(super::ARM64_SYS_READ, [fd, msg_ptr, 8, 0, 0, 0]);
+            }
+            "write" => {
+                let fd = state.file_fd();
+                let _ = state.call_posix(super::ARM64_SYS_WRITE, [fd, msg_ptr, 8, 0, 0, 0]);
+            }
+            "close" => {
+                if extra_fd != 0 {
+                    let _ = state.call_posix(super::ARM64_SYS_CLOSE, [extra_fd, 0, 0, 0, 0, 0]);
+                    extra_fd = 0;
+                } else {
+                    let file_fd = state.file_fd();
+                    if let Ok(fd) = state.call_posix(super::ARM64_SYS_DUP, [file_fd, 0, 0, 0, 0, 0])
+                    {
+                        let _ = state.call_posix(super::ARM64_SYS_CLOSE, [fd, 0, 0, 0, 0, 0]);
+                    }
+                }
+            }
+            "pipe" => {
+                let pipe_ptr = state.arena.scratch_ptr_offset(128);
+                let _ = state.call_posix(
+                    super::ARM64_SYS_PIPE2,
+                    [pipe_ptr, LINUX_O_NONBLOCK | LINUX_O_CLOEXEC, 0, 0, 0, 0],
+                );
+            }
+            "dup" => {
+                let fd = state.file_fd();
+                let _ = state.call_posix(super::ARM64_SYS_DUP, [fd, 0, 0, 0, 0, 0]);
+            }
+            "fcntl" => {
+                let fd = state.file_fd();
+                let _ = state.call_posix(super::ARM64_SYS_FCNTL, [fd, POSIX_F_GETFL, 0, 0, 0, 0]);
+            }
+            "poll" => {
+                let fd = state.file_fd();
+                state.arena.poll[0].fd = fd as i32;
+                state.arena.poll[0].events = 0x0001 | 0x0004;
+                state.arena.poll[0].revents = 0;
+                let _ =
+                    state.call_posix(super::ARM64_SYS_PPOLL, [poll_ptr, 1, timespec_ptr, 0, 0, 0]);
+            }
+            _ => {}
         }
     }
 
@@ -1811,19 +2395,12 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
     let socket_fd = state.socket_fd();
     let path = state.cstr_ptr();
     let path2 = state.arena.path_alt_ptr();
-    let mut out = [
-        state.rng.next_usize(),
-        state.rng.next_usize(),
-        state.rng.next_usize(),
-        state.rng.next_usize(),
-        state.rng.next_usize(),
-        state.rng.next_usize(),
-    ];
+    let mut out = [0usize; 6];
 
     match num {
         5 | 6 | 8 | 9 | 11 | 12 | 14 | 15 => out = [path, state.arena.name_ptr(), ptr, len, 0, 0],
         7 | 10 | 13 | 16 => out = [file_fd, state.arena.name_ptr(), ptr, len, 0, 0],
-        17 => out = [ptr, len.max(2), 0, 0, 0, 0],
+        17 => out = [state.arena.scratch_ptr(), FUZZ_SCRATCH_BYTES, 0, 0, 0, 0],
         19 => out = [state.rng.below(4), variant * LINUX_O_CLOEXEC, 0, 0, 0, 0],
         20 => out = [0, 0, 0, 0, 0, 0],
         21 => out = [fd, variant, state.fd(), ptr, 0, 0],
@@ -1841,9 +2418,11 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         39 => out = [path, 0, 0, 0, 0, 0],
         40 => out = [path, path2, state.arena.name_ptr(), variant, 0, 0],
         41 => out = [path, path2, 0, 0, 0, 0],
-        43 => out = [path, ptr, 0, 0, 0, 0],
-        44 => out = [file_fd, ptr, 0, 0, 0, 0],
-        46 | 47 | 52 | 55 | 82 | 83 | 84 => out = [file_fd, ptr, len, variant, ptr, len],
+        43 => out = [path, state.arena.scratch_ptr(), 0, 0, 0, 0],
+        44 => out = [file_fd, state.arena.scratch_ptr(), 0, 0, 0, 0],
+        46 => out = [file_fd, FUZZ_IO_BYTES, 0, 0, 0, 0],
+        47 => out = [file_fd, 0, 0, FUZZ_IO_BYTES, 0, 0],
+        52 | 55 | 82 | 83 | 84 => out = [file_fd, 0, 0, 0, 0, 0],
         50 => out = [dir_fd, 0, 0, 0, 0, 0],
         57 => out = [state.linux_close_fd(), 0, 0, 0, 0, 0],
         62 => out = [file_fd, 0, 0, 0, 0, 0],
@@ -1861,7 +2440,16 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
                 0,
             ]
         }
-        61 => out = [dir_fd, ptr, len, 0, 0, 0],
+        61 => {
+            out = [
+                dir_fd,
+                state.arena.scratch_ptr(),
+                FUZZ_SCRATCH_BYTES,
+                0,
+                0,
+                0,
+            ]
+        }
         63 => out = [file_fd, ptr, len, 0, 0, 0],
         64 => out = [state.transient_file_fd(), ptr, len, 0, 0, 0],
         65 => out = [file_fd, state.arena.iov_ptr(), 2, 0, 0, 0],
@@ -1883,7 +2471,18 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         }
         74 => out = [event_fd, ptr, LINUX_SIGSET_SIZE, 0, 0, 0],
         75 => out = [state.transient_file_fd(), state.arena.iov_ptr(), 2, 0, 0, 0],
-        76 => {
+        76 | 285 => {
+            let _ = dispatch_linux_syscall(
+                super::ARM64_SYS_WRITE,
+                [
+                    state.pipe_write_fd(),
+                    state.arena.scratch_ptr(),
+                    FUZZ_IO_BYTES,
+                    0,
+                    0,
+                    0,
+                ],
+            );
             out = [
                 state.pipe_read_fd(),
                 0,
@@ -1894,6 +2493,17 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
             ]
         }
         77 => {
+            let _ = dispatch_linux_syscall(
+                super::ARM64_SYS_WRITE,
+                [
+                    state.pipe_write_fd(),
+                    state.arena.scratch_ptr(),
+                    FUZZ_IO_BYTES,
+                    0,
+                    0,
+                    0,
+                ],
+            );
             out = [
                 state.pipe_read_fd(),
                 state.pipe_write_fd(),
@@ -1903,11 +2513,26 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
                 0,
             ]
         }
-        80 => out = [file_fd, ptr, 0, 0, 0, 0],
+        80 => out = [file_fd, state.arena.scratch_ptr(), 0, 0, 0, 0],
         81 | 124 | 139 | 155 | 172 | 173 | 174 | 175 | 176 | 177 | 178 => out = [0, 0, 0, 0, 0, 0],
         127 => out = [0, ptr, 0, 0, 0, 0],
-        128 | 129 | 130 => out = [1, 0, 0, 0, 0, 0],
-        131 => out = [1, 1, 0, 0, 0, 0],
+        128 => out = [0, 0, 0, 0, 0, 0],
+        129 => out = [0, 0, 0, 0, 0, 0],
+        130 => {
+            out = [
+                linux_task::current_tid().unwrap_or(linux_process::LINUX_ROOT_PID),
+                0,
+                0,
+                0,
+                0,
+                0,
+            ]
+        }
+        131 => {
+            let tid = linux_task::current_tid().unwrap_or(linux_process::LINUX_ROOT_PID);
+            let tgid = linux_process::current_pid().unwrap_or(linux_process::LINUX_ROOT_PID);
+            out = [tgid, tid, 0, 0, 0, 0];
+        }
         90 => {
             out = [
                 state.arena.cap_header_ptr(),
@@ -1934,8 +2559,8 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         98 => {
             out = [
                 state.arena.futex_ptr(),
-                variant,
-                0,
+                if variant == 0 { 1 } else { 129 },
+                1,
                 0,
                 state.arena.alt_futex_ptr(),
                 0,
@@ -1946,43 +2571,109 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         101 => out = [state.arena.timespec_ptr(), 0, 0, 0, 0, 0],
         115 => out = [1, 0, state.arena.timespec_ptr(), 0, 0, 0],
         102 | 103 => out = [0, state.arena.itimer_ptr(), ptr, 0, 0, 0],
-        107 => out = [1, 0, state.arena.words_ptr(), 0, 0, 0],
-        108 => out = [state.linux_timer_handle(), ptr, 0, 0, 0, 0],
-        110 => {
+        107 => out = [0, 0, state.arena.words_ptr(), 0, 0, 0],
+        108 | 109 => {
             out = [
-                state.linux_timer_handle(),
-                variant,
-                state.arena.itimer_ptr(),
-                ptr,
+                state.ensure_linux_timer_id(),
+                state.arena.scratch_ptr(),
+                0,
+                0,
                 0,
                 0,
             ]
         }
-        109 => out = [state.linux_timer_handle(), ptr, 0, 0, 0, 0],
-        111 => out = [state.linux_timer_delete_handle(), 0, 0, 0, 0, 0],
-        112 | 113 | 114 => out = [1, state.arena.timespec_ptr(), 0, 0, 0, 0],
-        116 | 117 | 171 | 180 | 181 | 182 | 183 | 184 | 185 | 217 | 218 | 219 | 224 | 225 | 235
-        | 236 | 237 | 238 | 239 | 241 | 267 | 269 | 270 | 271 | 272 | 274 | 275 | 280 | 281
-        | 282 | 284 | 288 | 289 | 290 | 292 | 293 | 428 | 429 | 430 | 431 | 432 | 434 | 442 => {
-            out = [0, ptr, len, 0, 0, 0]
+        110 => {
+            out = [
+                state.ensure_linux_timer_id(),
+                0,
+                state.arena.itimer_ptr(),
+                state.arena.scratch_ptr(),
+                0,
+                0,
+            ]
         }
+        111 => out = [state.ensure_linux_timer_id(), 0, 0, 0, 0, 0],
+        112 => out = [0, state.arena.timespec_ptr(), 0, 0, 0, 0],
+        113 | 114 => out = [1, state.arena.timespec_ptr(), 0, 0, 0, 0],
+        116 | 117 | 171 | 217 | 218 | 219 | 224 | 225 | 235 | 236 | 237 | 238 | 239 | 241 | 267
+        | 269 | 270 | 271 | 272 | 274 | 275 | 280 | 281 | 282 | 284 | 288 | 289 | 290 | 292
+        | 293 | 428 | 429 | 430 | 431 | 432 | 434 | 442 => out = [0, ptr, len, 0, 0, 0],
+        180 => {
+            out = [
+                state.arena.name_ptr(),
+                LINUX_O_CREAT | LINUX_O_RDWR | LINUX_O_NONBLOCK,
+                0o600,
+                state.arena.write_mq_success_attr(),
+                0,
+                0,
+            ]
+        }
+        181 => out = [state.arena.name_ptr(), 0, 0, 0, 0, 0],
+        182 => out = [state.ensure_mq_fd(), state.arena.scratch_ptr(), 8, 0, 0, 0],
+        183 => {
+            let fd = state.ensure_mq_fd();
+            let buf = state.arena.scratch_ptr();
+            let _ = dispatch_linux_syscall(
+                super::ARM64_SYS_MQ_TIMEDSEND,
+                [fd, buf, 8, 0, 0, 0],
+            );
+            out = [fd, buf, 64, 0, 0, 0];
+        }
+        184 => out = [state.ensure_mq_fd(), 0, 0, 0, 0, 0],
+        185 => out = [state.ensure_mq_fd(), 0, state.arena.scratch_ptr(), 0, 0, 0],
         118 => out = [0, ptr, 0, 0, 0, 0],
         119 => out = [0, 0, ptr, 0, 0, 0],
         120 => out = [0, 0, 0, 0, 0, 0],
         121 => out = [0, ptr, 0, 0, 0, 0],
-        122 | 123 => out = [0, FUZZ_IO_BYTES, ptr, 0, 0, 0],
+        122 => {
+            out = [
+                0,
+                8,
+                state.arena.write_cpu0_affinity_mask(),
+                0,
+                0,
+                0,
+            ]
+        }
+        123 => out = [0, FUZZ_IO_BYTES, state.arena.scratch_ptr(), 0, 0, 0],
         125 | 126 => out = [0, 0, 0, 0, 0, 0],
-        132 => out = [ptr, ptr, 0, 0, 0, 0],
-        133 => out = [ptr, LINUX_SIGSET_SIZE, 0, 0, 0, 0],
-        134 => out = [variant + 1, ptr, ptr, LINUX_SIGSET_SIZE, 0, 0],
-        135 => out = [variant, ptr, ptr, LINUX_SIGSET_SIZE, 0, 0],
-        136 => out = [ptr, LINUX_SIGSET_SIZE, 0, 0, 0, 0],
-        137 => out = [ptr, ptr, 0, LINUX_SIGSET_SIZE, 0, 0],
-        138 => out = [1, variant + 1, ptr, 0, 0, 0],
-        240 => out = [1, 1, variant + 1, ptr, 0, 0],
-        140 | 141 | 143 | 144 | 145 | 147 | 149 | 151 | 152 | 154 | 156 | 157 | 159 | 164 => {
+        132 => out = [0, state.arena.scratch_ptr(), 0, 0, 0, 0],
+        133 => out = [state.arena.scratch_ptr(), LINUX_SIGSET_SIZE, 0, 0, 0, 0],
+        134 => {
+            out = [
+                variant + 1,
+                0,
+                state.arena.scratch_ptr(),
+                LINUX_SIGSET_SIZE,
+                0,
+                0,
+            ]
+        }
+        135 => out = [2, 0, state.arena.scratch_ptr(), LINUX_SIGSET_SIZE, 0, 0],
+        136 => out = [state.arena.scratch_ptr(), LINUX_SIGSET_SIZE, 0, 0, 0, 0],
+        137 => {
+            out = [
+                state.arena.scratch_ptr(),
+                state.arena.scratch_ptr(),
+                state.arena.timespec_ptr(),
+                LINUX_SIGSET_SIZE,
+                0,
+                0,
+            ]
+        }
+        138 => {
+            let pid = linux_process::current_pid().unwrap_or(linux_process::LINUX_ROOT_PID);
+            out = [pid, 0, 0, 0, 0, 0];
+        }
+        240 => {
+            let tid = linux_task::current_tid().unwrap_or(linux_process::LINUX_ROOT_PID);
+            let tgid = linux_process::current_pid().unwrap_or(linux_process::LINUX_ROOT_PID);
+            out = [tgid, tid, 0, 0, 0, 0];
+        }
+        140 | 141 | 143 | 144 | 145 | 147 | 149 | 151 | 152 | 154 | 156 | 157 | 159 => {
             out = [variant, path, len, ptr, 0, 0]
         }
+        164 => out = [variant, state.arena.write_zero_rlimit64(), 0, 0, 0, 0],
         142 | 170 => out = [1, state.arena.timespec_ptr(), 0, 0, 0, 0],
         161 | 162 => out = [ptr, len.min(32), 0, 0, 0, 0],
         146 | 148 => out = [ptr, ptr, ptr, 0, 0, 0],
@@ -1998,7 +2689,15 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         179 => out = [ptr, 0, 0, 0, 0, 0],
         186 => out = [1, 0, 0, 0, 0, 0],
         187 => out = [state.msg_handle() as usize, variant, ptr, 0, 0, 0],
-        188 => out = [state.msg_handle() as usize, ptr, FUZZ_IO_BYTES, 0, 0, 0],
+        188 => {
+            let handle = state.msg_handle() as usize;
+            let buf = state.arena.scratch_ptr();
+            let _ = dispatch_linux_syscall(
+                super::ARM64_SYS_MSGSND,
+                [handle, buf, FUZZ_IO_BYTES, 0, 0, 0],
+            );
+            out = [handle, buf, FUZZ_IO_BYTES, 0, 0, 0];
+        }
         189 => out = [state.msg_handle() as usize, ptr, FUZZ_IO_BYTES, 0, 0, 0],
         190 => out = [1, 1, 0, 0, 0, 0],
         191 => out = [state.sem_handle() as usize, 0, variant, ptr, 0, 0],
@@ -2040,7 +2739,8 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         213 | 223 => out = [file_fd, 0, FUZZ_IO_BYTES, 0, 0, 0],
         215 => out = [state.transient_mapping(), PAGE_SIZE, 0, 0, 0, 0],
         216 => out = [state.attached_shm_mapping(), PAGE_SIZE, PAGE_SIZE, 0, 0, 0],
-        227 | 228 | 229 | 233 | 234 => out = [state.mapping(), PAGE_SIZE, variant, 0, 0, 0],
+        227 => out = [0, 0, 0, 0, 0, 0],
+        228 | 229 | 233 | 234 => out = [state.mapping(), PAGE_SIZE, variant, 0, 0, 0],
         232 => out = [state.mapping(), PAGE_SIZE, ptr, 0, 0, 0],
         214 => out = [if variant == 0 { 0 } else { 0x4000_1000 }, 0, 0, 0, 0, 0],
         220 => out = [LINUX_CONTAINER_NAMESPACE_FLAGS, 0, 0, 0, 0, 0],
@@ -2055,22 +2755,16 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
                 0,
             ]
         }
-        226 => out = [state.mapping(), PAGE_SIZE, MmapProt::READ.bits(), 0, 0, 0],
-        230 | 231 | 283 => out = [variant, 0, 0, 0, 0, 0],
-        260 => out = [0, ptr, 0, 0, 0, 0],
-        261 => out = [0, 0, 0, ptr, 0, 0],
-        285 => {
-            out = [
-                state.pipe_read_fd(),
-                0,
-                state.pipe_write_fd(),
-                0,
-                FUZZ_IO_BYTES,
-                0,
-            ]
+        226 => {
+            let addr = state.transient_mapping();
+            out = [addr, PAGE_SIZE, MmapProt::READ.bits(), 0, 0, 0];
         }
+        230 => out = [1, 0, 0, 0, 0, 0],
+        231 | 283 => out = [0, 0, 0, 0, 0, 0],
+        260 => out = [-1isize as usize, state.arena.scratch_ptr(), 1, 0, 0, 0],
+        261 => out = [0, 0, 0, ptr, 0, 0],
         268 => out = [file_fd, LINUX_CONTAINER_NAMESPACE_FLAGS, 0, 0, 0, 0],
-        276 => out = [0, path, 0, path2, variant, 0],
+        276 => out = [LINUX_AT_FDCWD, path, LINUX_AT_FDCWD, path2, 0, 0],
         277 => {
             out = [
                 if variant == 0 {
@@ -2114,15 +2808,35 @@ fn linux_path_args(
 ) -> [usize; 6] {
     let visible_path = state.arena.path_ptr();
     match num {
-        35 => [fd, path, variant * 0x200, 0, 0, 0],
+        35 => {
+            let _ = fxfs::write_file("/tmp/smros-fuzz-un", b"unlink");
+            [LINUX_AT_FDCWD, state.arena.path_unlink_ptr(), 0, 0, 0, 0]
+        }
         36 => [path, fd, path2, 0, 0, 0],
-        37 => [fd, path, fd, path2, 0, 0],
+        37 => {
+            let _ = fxfs::write_file("/tmp/smros-fuzz", b"smros syscall fuzz seed\n");
+            let _ = fxfs::unlink_file("/tmp/smros-fuzz-ln");
+            [
+                LINUX_AT_FDCWD,
+                visible_path,
+                LINUX_AT_FDCWD,
+                state.arena.path_link_ptr(),
+                0,
+                0,
+            ]
+        }
         38 => [fd, path, fd, path2, 0, 0],
         45 => [path, FUZZ_IO_BYTES, 0, 0, 0, 0],
         48 | 439 => [fd, visible_path, 0, 0, 0, 0],
+        49 => [state.arena.path_dir_ptr(), 0, 0, 0, 0, 0],
+        51 => [state.arena.path_root_ptr(), 0, 0, 0, 0, 0],
         56 => [
-            usize::MAX - 99,
-            visible_path,
+            LINUX_AT_FDCWD,
+            if variant == 0 {
+                visible_path
+            } else {
+                state.arena.path_dir_ptr()
+            },
             if variant == 0 {
                 LINUX_O_CREAT | LINUX_O_RDWR
             } else {

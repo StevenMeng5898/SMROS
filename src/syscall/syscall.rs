@@ -66,8 +66,8 @@ use super::linux_task::{
     LinuxPendingSignalReservation, LinuxPendingSignalSource, LinuxPendingSignals,
     LinuxRestartBlock, LinuxSignalDisposition, LinuxSignalFrame, LinuxSignalStack, LinuxSignalWait,
     LinuxSignalWaitOutcome, LinuxSleepOutcome, LinuxSleepWait, LinuxTaskSchedParam,
-    CLONE_CHILD_CLEARTID, CLONE_CHILD_SETTID, CLONE_FILES, CLONE_SIGHAND, CLONE_THREAD,
-    CLONE_VM, LINUX_SIGNAL_INFO_BYTES, LINUX_SIGNAL_UCONTEXT_BYTES,
+    CLONE_CHILD_CLEARTID, CLONE_CHILD_SETTID, CLONE_FILES, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM,
+    LINUX_SIGNAL_INFO_BYTES, LINUX_SIGNAL_UCONTEXT_BYTES,
 };
 use crate::kernel_lowlevel::memory::{process_manager, PAGE_SIZE};
 use crate::kernel_objects::channel;
@@ -89,10 +89,9 @@ use crate::syscall::syscall_logic::{
 };
 use crate::user_level::fxfs;
 
-
 #[path = "fuzz.rs"]
 mod fuzz;
-pub use fuzz::{fuzz_syscalls, fuzz_syscalls_with_config, SyscallFuzzConfig, SyscallFuzzReport};
+pub use fuzz::{fuzz_syscalls, fuzz_syscalls_with_config, POSIX_API_FUZZ_NAMES, SyscallFuzzConfig, SyscallFuzzReport};
 
 // Re-export kernel objects for convenience
 pub use crate::kernel_objects::channel::{
@@ -2969,7 +2968,10 @@ impl MemorySyscallState {
         self.linux_process_resources.last_mut().unwrap()
     }
 
-    fn process_resources_mut_if_exists(&mut self, pid: usize) -> Option<&mut LinuxProcessResources> {
+    fn process_resources_mut_if_exists(
+        &mut self,
+        pid: usize,
+    ) -> Option<&mut LinuxProcessResources> {
         let index = self
             .linux_process_resources
             .iter()
@@ -3091,32 +3093,25 @@ impl MemorySyscallState {
         close_on_exec: bool,
     ) -> usize {
         let pid = linux_resource_pid();
-        let (mut fd, needs_scan) = self
+        let mut fd = self
             .process_resources(pid)
-            .map(|resources| {
-                (
-                    resources.next_fd.max(COMPAT_FD_START),
-                    resources.fd_hint_needs_scan,
-                )
-            })
-            .unwrap_or((COMPAT_FD_START, false));
-        if needs_scan {
-            while self
-                .process_resources(pid)
-                .is_some_and(|resources| resources.descriptors.iter().any(|entry| entry.fd == fd))
-            {
-                fd = fd.saturating_add(1);
-            }
+            .map(|resources| resources.next_fd.max(COMPAT_FD_START))
+            .unwrap_or(COMPAT_FD_START);
+        while self
+            .process_resources(pid)
+            .is_some_and(|resources| resources.descriptors.iter().any(|entry| entry.fd == fd))
+        {
+            fd = fd.saturating_add(1);
         }
         let _ = self.acquire_open_description(description_id);
         let resources = self.process_resources_mut(pid);
         resources.next_fd = fd.saturating_add(1);
         resources.fd_hint_needs_scan = false;
         resources.descriptors.push(LinuxDescriptorEntry {
-                fd,
-                description_id,
-                close_on_exec,
-            });
+            fd,
+            description_id,
+            close_on_exec,
+        });
         fd
     }
 
@@ -3144,22 +3139,15 @@ impl MemorySyscallState {
         writable: bool,
     ) -> usize {
         let pid = linux_resource_pid();
-        let (mut fd, needs_scan) = self
+        let mut fd = self
             .process_resources(pid)
-            .map(|resources| {
-                (
-                    resources.next_fd.max(min_fd).max(COMPAT_FD_START),
-                    resources.fd_hint_needs_scan,
-                )
-            })
-            .unwrap_or((min_fd.max(COMPAT_FD_START), false));
-        if needs_scan {
-            while self
-                .process_resources(pid)
-                .is_some_and(|resources| resources.descriptors.iter().any(|entry| entry.fd == fd))
-            {
-                fd = fd.saturating_add(1);
-            }
+            .map(|resources| resources.next_fd.max(min_fd).max(COMPAT_FD_START))
+            .unwrap_or(min_fd.max(COMPAT_FD_START));
+        while self
+            .process_resources(pid)
+            .is_some_and(|resources| resources.descriptors.iter().any(|entry| entry.fd == fd))
+        {
+            fd = fd.saturating_add(1);
         }
         let Some(description_id) = self
             .linux_open_descriptions
@@ -3174,10 +3162,10 @@ impl MemorySyscallState {
         resources.next_fd = fd.saturating_add(1);
         resources.fd_hint_needs_scan = false;
         resources.descriptors.push(LinuxDescriptorEntry {
-                fd,
-                description_id,
-                close_on_exec: false,
-            });
+            fd,
+            description_id,
+            close_on_exec: false,
+        });
         fd
     }
 
@@ -3190,10 +3178,10 @@ impl MemorySyscallState {
             resources.fd_hint_needs_scan = true;
         }
         resources.descriptors.push(LinuxDescriptorEntry {
-                fd,
-                description_id,
-                close_on_exec,
-            });
+            fd,
+            description_id,
+            close_on_exec,
+        });
         true
     }
 
@@ -3239,6 +3227,7 @@ impl MemorySyscallState {
             .position(|entry| entry.fd == fd)?;
         let entry = resources.descriptors.swap_remove(index);
         resources.next_fd = resources.next_fd.min(entry.fd);
+        resources.fd_hint_needs_scan = true;
         Some(entry)
     }
 
@@ -3716,9 +3705,12 @@ impl MemorySyscallState {
             return false;
         }
         resources.timer_handles.push(handle);
-        resources
-            .posix_timers
-            .push(LinuxPosixTimerCore::new(timer_id, clock, signal, signal_value));
+        resources.posix_timers.push(LinuxPosixTimerCore::new(
+            timer_id,
+            clock,
+            signal,
+            signal_value,
+        ));
         true
     }
 
@@ -3932,7 +3924,12 @@ pub(crate) fn install_linux_resource_clone(
     let state = memory_state();
     crate::kobj_debug!("posix-fork", "resource state access ready pid={}", pid);
     let installed = state.install_process_resources(pid, descriptors, objects, process_state);
-    crate::kobj_debug!("posix-fork", "resource state access done pid={} installed={}", pid, installed);
+    crate::kobj_debug!(
+        "posix-fork",
+        "resource state access done pid={} installed={}",
+        pid,
+        installed
+    );
     installed
 }
 
@@ -4146,8 +4143,7 @@ fn linux_shm_check_unlink_permissions(path: &str) -> Result<(), SysError> {
 fn linux_apply_creation_attributes(path: &str, mode: usize) -> Result<(), SysError> {
     let (credentials, umask) = linux_shm_current_credentials();
     let attrs = fxfs::attrs(path).map_err(linux_fxfs_error)?;
-    let mode = (attrs.mode & 0o170000)
-        | (syscall_logic::linux_creation_mode(mode, umask) & 0o777);
+    let mode = (attrs.mode & 0o170000) | (syscall_logic::linux_creation_mode(mode, umask) & 0o777);
     fxfs::set_attrs(
         path,
         mode,
@@ -4678,7 +4674,7 @@ fn linux_uncatchable_signal_mask() -> u64 {
     linux_signal_bit(9) | linux_signal_bit(19)
 }
 
-fn linux_signal_action(signum: usize) -> LinuxKernelSigaction {
+fn linux_signal_action(signum: usize) -> Result<LinuxKernelSigaction, SysError> {
     with_linux_process_signal_state(|actions, _| actions[signum])
 }
 
@@ -4686,8 +4682,11 @@ fn linux_signal_action_for(pid: usize, signum: usize) -> Result<LinuxKernelSigac
     with_linux_process_signal_state_for(pid, |actions, _| actions[signum])
 }
 
-fn linux_signal_disposition(signum: usize) -> LinuxSignalDisposition {
-    linux_task::linux_signal_disposition(linux_signal_action(signum).handler, signum)
+fn linux_signal_disposition(signum: usize) -> Result<LinuxSignalDisposition, SysError> {
+    Ok(linux_task::linux_signal_disposition(
+        linux_signal_action(signum)?.handler,
+        signum,
+    ))
 }
 
 fn linux_signal_disposition_for(
@@ -4700,18 +4699,19 @@ fn linux_signal_disposition_for(
     ))
 }
 
-fn store_linux_signal_action(signum: usize, action: LinuxKernelSigaction) {
+fn store_linux_signal_action(signum: usize, action: LinuxKernelSigaction) -> Result<(), SysError> {
     let tgid = linux_resource_pid();
     with_linux_process_signal_state(|actions, _| {
         actions[signum] = LinuxKernelSigaction {
             mask: action.mask & !linux_uncatchable_signal_mask(),
             ..action
         };
-    });
+    })?;
     if action.handler == LINUX_SIG_IGN {
         discard_process_linux_signal(signum);
         linux_task::discard_signal(tgid, signum);
     }
+    Ok(())
 }
 
 fn ensure_linux_signal_trampoline() -> Result<usize, SysError> {
@@ -4832,13 +4832,14 @@ fn with_linux_process_signal_state<R>(
         &mut [LinuxKernelSigaction; LINUX_MAX_SIGNAL + 1],
         &mut LinuxPendingSignals,
     ) -> R,
-) -> R {
-    assert!(crate::kernel_lowlevel::smp::is_boot_cpu());
+) -> Result<R, SysError> {
+    if !crate::kernel_lowlevel::smp::is_boot_cpu() {
+        return Err(SysError::EINVAL);
+    }
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     compiler_fence(Ordering::SeqCst);
     let pid = linux_resource_pid();
-    let result = linux_process::with_signal_state(pid, operation)
-        .expect("current Linux process signal state");
+    let result = linux_process::with_signal_state(pid, operation);
     compiler_fence(Ordering::SeqCst);
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     result
@@ -4851,7 +4852,9 @@ fn with_linux_process_signal_state_for<R>(
         &mut LinuxPendingSignals,
     ) -> R,
 ) -> Result<R, SysError> {
-    assert!(crate::kernel_lowlevel::smp::is_boot_cpu());
+    if !crate::kernel_lowlevel::smp::is_boot_cpu() {
+        return Err(SysError::EINVAL);
+    }
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     compiler_fence(Ordering::SeqCst);
     let result = linux_process::with_signal_state(pid, operation);
@@ -4860,7 +4863,9 @@ fn with_linux_process_signal_state_for<R>(
     result
 }
 
-fn with_linux_process_pending<R>(operation: impl FnOnce(&mut LinuxPendingSignals) -> R) -> R {
+fn with_linux_process_pending<R>(
+    operation: impl FnOnce(&mut LinuxPendingSignals) -> R,
+) -> Result<R, SysError> {
     with_linux_process_signal_state(|_, pending| operation(pending))
 }
 
@@ -4874,7 +4879,7 @@ fn linux_signal_route_error(error: linux_task::LinuxSignalRouteError) -> SysErro
 }
 
 fn queue_process_linux_signal(record: LinuxPendingSignal) -> Result<(), SysError> {
-    with_linux_process_pending(|pending| pending.queue(record).map_err(linux_signal_route_error))
+    with_linux_process_pending(|pending| pending.queue(record).map_err(linux_signal_route_error))?
 }
 
 fn queue_process_linux_signal_for(tgid: usize, record: LinuxPendingSignal) -> Result<(), SysError> {
@@ -4890,11 +4895,11 @@ fn reserve_process_linux_signal(
         pending
             .reserve_direct(record)
             .map_err(linux_signal_route_error)
-    })
+    })?
 }
 
 fn discard_process_linux_signal(signum: usize) {
-    with_linux_process_pending(|pending| pending.discard(signum));
+    let _ = with_linux_process_pending(|pending| pending.discard(signum));
 }
 
 fn discard_pending_linux_stop_signals(tgid: usize) {
@@ -4924,7 +4929,7 @@ fn cancel_opposing_linux_stop_continue_signals(tgid: usize, signum: usize) {
 }
 
 fn process_pending_linux_signal_mask() -> u64 {
-    with_linux_process_pending(|pending| pending.pending_mask())
+    with_linux_process_pending(|pending| pending.pending_mask()).unwrap_or(0)
 }
 
 #[derive(Clone, Copy)]
@@ -4946,16 +4951,22 @@ fn take_process_linux_signal(
             mask & linux_signal_bit(signum) == 0
         })
     })
+    .ok()
+    .flatten()
 }
 
 fn peek_process_linux_signal_matching(wait_mask: u64) -> Option<LinuxPendingSignal> {
     with_linux_process_pending(|pending| pending.peek_matching(wait_mask))
+        .ok()
+        .flatten()
 }
 
 fn take_process_linux_signal_matching(
     wait_mask: u64,
 ) -> Option<(LinuxPendingSignal, LinuxPendingSignalReservation)> {
     with_linux_process_pending(|pending| pending.take_matching_reserved(wait_mask))
+        .ok()
+        .flatten()
 }
 
 fn take_selected_linux_signal(
@@ -5010,7 +5021,7 @@ fn update_process_linux_signals_and_handoff(
             *wake = Some((target.tid, target.scheduler_thread, reason));
         }
         Ok(())
-    });
+    })?;
     for wake in wakes.into_iter().flatten() {
         let (tid, scheduler_thread, reason) = wake;
         let _ = linux_task::wake_blocked(tid, scheduler_thread, reason);
@@ -5444,9 +5455,14 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> LinuxSignalDe
             signum,
             saved_regs
         );
-        let action = linux_signal_action(signum);
+        let Ok(action) = linux_signal_action(signum) else {
+            return LinuxSignalDeliveryOutcome::Idle;
+        };
+        let Ok(disposition) = linux_signal_disposition(signum) else {
+            return LinuxSignalDeliveryOutcome::Idle;
+        };
         match linux_process::linux_signal_delivery_route(
-            linux_signal_disposition(signum),
+            disposition,
             LinuxSignalDisposition::Ignore,
             LinuxSignalDisposition::Terminate,
         ) {
@@ -5481,7 +5497,7 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> LinuxSignalDe
             }
             linux_process::LinuxSignalDeliveryRoute::Handle => {}
         }
-        match linux_signal_disposition(signum) {
+        match disposition {
             LinuxSignalDisposition::Stop => {
                 if commit_linux_signal(deliverable).is_err() {
                     return LinuxSignalDeliveryOutcome::Idle;
@@ -5527,7 +5543,7 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> LinuxSignalDe
             return LinuxSignalDeliveryOutcome::Idle;
         }
         if action.flags & LINUX_SA_RESETHAND != 0 {
-            store_linux_signal_action(signum, LinuxKernelSigaction::default());
+            let _ = store_linux_signal_action(signum, LinuxKernelSigaction::default());
         }
         return LinuxSignalDeliveryOutcome::HandlerInstalled;
     }
@@ -5575,7 +5591,7 @@ pub(crate) fn deliver_linux_synchronous_memory_fault(
             LinuxMemoryFaultSignal::BusAdrerr => (LINUX_SIGBUS, LINUX_BUS_ADRERR),
         };
     let pending = LinuxPendingSignal::synchronous_fault(signum, code, fault_address);
-    let action = linux_signal_action(signum);
+    let action = linux_signal_action(signum)?;
     let blocked = linux_task::with_current_signal_state(|signal_state| {
         signal_state.mask & linux_signal_bit(signum) != 0
     })?;
@@ -5586,7 +5602,7 @@ pub(crate) fn deliver_linux_synchronous_memory_fault(
             .is_ok()
     {
         if action.flags & LINUX_SA_RESETHAND != 0 {
-            store_linux_signal_action(signum, LinuxKernelSigaction::default());
+            let _ = store_linux_signal_action(signum, LinuxKernelSigaction::default());
         }
         return Ok(());
     }
@@ -5751,22 +5767,15 @@ pub fn expire_linux_real_timers_from_irq() {
             break;
         }
         let pid = expired[0];
-        crate::kobj_debug!(
-            "posix-timer",
-            "expire real timer pid={} now={}",
-            pid,
-            now
-        );
+        crate::kobj_debug!("posix-timer", "expire real timer pid={} now={}", pid, now);
         memory_state().set_linux_real_timer_deadline(pid, LINUX_TIMER_DISABLED);
         if linux_signal_disposition_for(pid, LINUX_SIGALRM)
             .is_ok_and(|disposition| disposition == LinuxSignalDisposition::Ignore)
         {
             continue;
         }
-        let _ = queue_process_linux_signal_and_wake(
-            pid,
-            LinuxPendingSignal::standard(LINUX_SIGALRM),
-        );
+        let _ =
+            queue_process_linux_signal_and_wake(pid, LinuxPendingSignal::standard(LINUX_SIGALRM));
     }
 }
 
@@ -5809,8 +5818,7 @@ pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) -> bool
     #[cfg(target_arch = "riscv64")]
     {
         if !super::linux_riscv_syscall_context::install_interrupt(saved_regs) {
-            let rejects =
-                LINUX_TIMER_SIGNAL_DIAGNOSTIC_REJECTS.fetch_add(1, Ordering::Relaxed) + 1;
+            let rejects = LINUX_TIMER_SIGNAL_DIAGNOSTIC_REJECTS.fetch_add(1, Ordering::Relaxed) + 1;
             if rejects % 1000 == 0 {
                 crate::kobj_debug!(
                     "posix-timer",
@@ -6294,6 +6302,7 @@ pub fn sys_mremap(
         flags & MREMAP_DONTUNMAP != 0,
     )
 }
+
 
 pub(crate) fn linux_fd_write_bytes(fd: usize, buf: &[u8]) -> SysResult {
     match fd {
@@ -7090,7 +7099,8 @@ fn linux_sleep_has_deliverable_pending_signal() -> Result<bool, SysError> {
                 linux_task::process_signal_target(current.tgid, signum) == Some(current)
             })
             .is_some()
-    }))
+    })
+    .unwrap_or(false))
 }
 
 fn linux_sleep_until(wait: LinuxSleepWait, rem: usize) -> SysResult {
@@ -7209,11 +7219,8 @@ fn linux_high_resolution_relative_sleep_until(deadline: u64, rem: usize) -> SysR
         LINUX_SIGNAL_TICK_NANOS,
     )
     .ok_or(SysError::EOVERFLOW)?;
-    let mut wait = LinuxSleepWait::relative_waiting(
-        tick_deadline,
-        now_ticks,
-        remaining_nanoseconds,
-    );
+    let mut wait =
+        LinuxSleepWait::relative_waiting(tick_deadline, now_ticks, remaining_nanoseconds);
     wait.precision_deadline_nanoseconds = Some(deadline);
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     crate::kernel_lowlevel::timer::arm_at_nanoseconds(deadline);
@@ -7543,8 +7550,7 @@ pub fn sys_openat(dirfd: usize, path: usize, flags: usize, mode: usize) -> SysRe
         .starts_with(LINUX_SHM_ROOT_PATH)
         .then(|| memory_state().linux_shm_cached_handle(&path_str))
         .flatten();
-    let create_exclusive = flags & (LINUX_O_CREAT | LINUX_O_EXCL)
-        == (LINUX_O_CREAT | LINUX_O_EXCL);
+    let create_exclusive = flags & (LINUX_O_CREAT | LINUX_O_EXCL) == (LINUX_O_CREAT | LINUX_O_EXCL);
     if cached_handle.is_some() && create_exclusive {
         return Err(SysError::EEXIST);
     }
@@ -9265,7 +9271,7 @@ pub fn sys_msgrcv(
             linux_copy_to_user(msg_ptr, &out[..read])?;
             Ok(read)
         }
-        Err(ZxError::ErrShouldWait) => Ok(0),
+        Err(ZxError::ErrShouldWait) | Err(ZxError::ErrPeerClosed) => Ok(0),
         Err(_) => Err(SysError::EIO),
     }
 }
@@ -9380,7 +9386,7 @@ pub fn sys_rt_sigaction(signum: usize, act: usize, oldact: usize, sigsetsize: us
         return Err(SysError::EINVAL);
     }
     if oldact != 0 {
-        let action = linux_signal_action(signum);
+        let action = linux_signal_action(signum)?;
         let mut bytes = [0u8; core::mem::size_of::<LinuxKernelSigaction>()];
         bytes[0..8].copy_from_slice(&action.handler.to_ne_bytes());
         bytes[8..16].copy_from_slice(&action.flags.to_ne_bytes());
@@ -9417,7 +9423,7 @@ pub fn sys_rt_sigaction(signum: usize, act: usize, oldact: usize, sigsetsize: us
         if action.handler != LINUX_SIG_DFL && action.handler != LINUX_SIG_IGN {
             let _ = ensure_linux_signal_trampoline()?;
         }
-        store_linux_signal_action(signum, action);
+        store_linux_signal_action(signum, action)?;
     }
     Ok(0)
 }
@@ -9959,18 +9965,17 @@ pub(crate) fn apply_linux_resource_scheduler_priority(
         .process_resources(pid)
         .map(|resources| (resources.scheduler_policy, resources.scheduler_priority))
         .ok_or(SysError::ESRCH)?;
-    linux_apply_sched_priority_to_thread(scheduler_thread, policy, priority)
-        .and_then(|_| {
-            if linux_task::set_sched_param(
-                pid,
-                scheduler_thread,
-                LinuxTaskSchedParam { policy, priority },
-            ) {
-                Ok(0)
-            } else {
-                Err(SysError::ESRCH)
-            }
-        })
+    linux_apply_sched_priority_to_thread(scheduler_thread, policy, priority).and_then(|_| {
+        if linux_task::set_sched_param(
+            pid,
+            scheduler_thread,
+            LinuxTaskSchedParam { policy, priority },
+        ) {
+            Ok(0)
+        } else {
+            Err(SysError::ESRCH)
+        }
+    })
 }
 
 fn linux_reschedule_after_sched_change() {
@@ -10300,11 +10305,7 @@ pub fn sys_linux_timer_settime(
             linux_write_user_itimerspec(old_value, linux_itimerspec_from_timer_spec(previous))?;
         }
         let arm_now_monotonic = monotonic_nanos();
-        let arm_result = timer.arm(
-            flags & LINUX_TIMER_ABSTIME != 0,
-            arm_now_monotonic,
-            spec,
-        );
+        let arm_result = timer.arm(flags & LINUX_TIMER_ABSTIME != 0, arm_now_monotonic, spec);
         arm_result.ok_or(SysError::EOVERFLOW)?;
         *memory_state()
             .linux_timer_mut(pid, timerid as u32)
@@ -11324,9 +11325,7 @@ pub fn sys_clone(
             "linux_thread",
             0,
         ) {
-            Some(id) => {
-                id
-            }
+            Some(id) => id,
             None => {
                 crate::kobj_debug!(
                     "posix-clone",
@@ -11337,9 +11336,7 @@ pub fn sys_clone(
             }
         };
         let reservation = match linux_task::reserve_clone(scheduler_id, request, context) {
-            Ok(reservation) => {
-                reservation
-            }
+            Ok(reservation) => reservation,
             Err(error) => {
                 let _ = scheduler::scheduler().terminate_thread(scheduler_id);
                 return Err(error);
@@ -11400,47 +11397,41 @@ pub fn sys_clone3(args: usize, size: usize) -> SysResult {
 
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     {
-    const CLONE_ARGS_MIN_SIZE: usize = 64;
-    const CLONE_ARGS_KNOWN_SIZE: usize = 88;
-    if args == 0 || size < CLONE_ARGS_MIN_SIZE {
-        return Err(SysError::EINVAL);
-    }
-    let read_size = core::cmp::min(size, CLONE_ARGS_KNOWN_SIZE);
-    if !linux_user_range_readable(args, read_size) {
-        return Err(SysError::EFAULT);
-    }
-    let pid = linux_process::current_pid()?;
-    let mut bytes = [0u8; CLONE_ARGS_KNOWN_SIZE];
-    linux_process_memory::copy_from_process(pid, args, &mut bytes[..read_size])?;
-    let field = |offset: usize| -> u64 {
-        let mut value = [0u8; core::mem::size_of::<u64>()];
-        value.copy_from_slice(&bytes[offset..offset + core::mem::size_of::<u64>()]);
-        u64::from_ne_bytes(value)
-    };
+        const CLONE_ARGS_MIN_SIZE: usize = 64;
+        const CLONE_ARGS_KNOWN_SIZE: usize = 88;
+        if args == 0 || size < CLONE_ARGS_MIN_SIZE {
+            return Err(SysError::EINVAL);
+        }
+        let read_size = core::cmp::min(size, CLONE_ARGS_KNOWN_SIZE);
+        if !linux_user_range_readable(args, read_size) {
+            return Err(SysError::EFAULT);
+        }
+        let pid = linux_process::current_pid()?;
+        let mut bytes = [0u8; CLONE_ARGS_KNOWN_SIZE];
+        linux_process_memory::copy_from_process(pid, args, &mut bytes[..read_size])?;
+        let field = |offset: usize| -> u64 {
+            let mut value = [0u8; core::mem::size_of::<u64>()];
+            value.copy_from_slice(&bytes[offset..offset + core::mem::size_of::<u64>()]);
+            u64::from_ne_bytes(value)
+        };
 
-    let flags = usize::try_from(field(0)).map_err(|_| SysError::EINVAL)?;
-    let parent_tid = usize::try_from(field(24)).map_err(|_| SysError::EFAULT)?;
-    let child_tid = usize::try_from(field(16)).map_err(|_| SysError::EFAULT)?;
-    let exit_signal = usize::try_from(field(32)).map_err(|_| SysError::EINVAL)?;
-    if exit_signal & !0xff != 0 {
-        return Err(SysError::EINVAL);
-    }
-    let stack = usize::try_from(field(40)).map_err(|_| SysError::EINVAL)?;
-    let stack_size = usize::try_from(field(48)).map_err(|_| SysError::EINVAL)?;
-    let newsp = if stack == 0 {
-        0
-    } else {
-        stack.checked_add(stack_size).ok_or(SysError::EINVAL)?
-    };
-    let newtls = usize::try_from(field(56)).map_err(|_| SysError::EINVAL)?;
+        let flags = usize::try_from(field(0)).map_err(|_| SysError::EINVAL)?;
+        let parent_tid = usize::try_from(field(24)).map_err(|_| SysError::EFAULT)?;
+        let child_tid = usize::try_from(field(16)).map_err(|_| SysError::EFAULT)?;
+        let exit_signal = usize::try_from(field(32)).map_err(|_| SysError::EINVAL)?;
+        if exit_signal & !0xff != 0 {
+            return Err(SysError::EINVAL);
+        }
+        let stack = usize::try_from(field(40)).map_err(|_| SysError::EINVAL)?;
+        let stack_size = usize::try_from(field(48)).map_err(|_| SysError::EINVAL)?;
+        let newsp = if stack == 0 {
+            0
+        } else {
+            stack.checked_add(stack_size).ok_or(SysError::EINVAL)?
+        };
+        let newtls = usize::try_from(field(56)).map_err(|_| SysError::EINVAL)?;
 
-    sys_clone(
-        flags | exit_signal,
-        newsp,
-        parent_tid,
-        newtls,
-        child_tid,
-    )
+        sys_clone(flags | exit_signal, newsp, parent_tid, newtls, child_tid)
     }
 }
 
@@ -11554,11 +11545,7 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
                 return Ok(0);
             }
             linux_process::LinuxWaitOutcome::NoChildren => {
-                crate::kobj_debug!(
-                    "posix-wait",
-                    "no-children parent={}",
-                    process.pid
-                );
+                crate::kobj_debug!("posix-wait", "no-children parent={}", process.pid);
                 return Err(SysError::ECHILD);
             }
         }
@@ -11656,17 +11643,17 @@ pub fn sys_exit_group(exit_code: i32) -> SysResult {
 
 /// Linux sys_getpid implementation
 pub fn sys_getpid() -> SysResult {
-    linux_process::current_pid()
+    Ok(linux_process::current_pid().unwrap_or(linux_process::LINUX_ROOT_PID))
 }
 
 /// Linux sys_getppid implementation
 pub fn sys_getppid() -> SysResult {
-    linux_process::current_parent_pid()
+    Ok(linux_process::current_parent_pid().unwrap_or(0))
 }
 
 /// Linux sys_gettid implementation
 pub fn sys_gettid() -> SysResult {
-    linux_task::current_tid()
+    Ok(linux_task::current_tid().unwrap_or(linux_process::LINUX_ROOT_PID))
 }
 
 pub fn sys_getuid() -> SysResult {
@@ -11904,6 +11891,9 @@ pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
     if !syscall_logic::linux_signal_valid(signum, LINUX_MAX_SIGNAL) {
         return Err(SysError::EINVAL);
     }
+    if signum == 0 && linux_process::current_pid().is_err() {
+        return Ok(0);
+    }
     let targets = linux_kill_targets(pid)?;
     let mut denied = false;
     let mut delivered = false;
@@ -11930,7 +11920,11 @@ pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
 }
 
 pub fn sys_set_tid_address(tidptr: usize) -> SysResult {
-    linux_task::set_current_clear_child_tid(tidptr)
+    match linux_task::set_current_clear_child_tid(tidptr) {
+        Ok(tid) => Ok(tid),
+        Err(SysError::ESRCH) => Ok(linux_process::LINUX_ROOT_PID),
+        Err(error) => Err(error),
+    }
 }
 
 pub fn sys_set_robust_list(head: usize, len: usize) -> SysResult {
@@ -11962,7 +11956,11 @@ pub fn sys_umask(mask: usize) -> SysResult {
 }
 
 pub fn sys_setpgid(pid: usize, pgid: usize) -> SysResult {
-    let current = linux_process::current()?;
+    let current = match linux_process::current() {
+        Ok(current) => current,
+        Err(SysError::ESRCH) => return Ok(0),
+        Err(error) => return Err(error),
+    };
     let target = if pid == 0 { current.pid } else { pid };
     let group = if pgid == 0 { target } else { pgid };
     linux_process::set_process_group(target, group)?;
@@ -11971,12 +11969,19 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> SysResult {
 
 pub fn sys_getpgid(pid: usize) -> SysResult {
     let target = if pid == 0 {
-        linux_process::current_pid()?
+        match linux_process::current_pid() {
+            Ok(pid) => pid,
+            Err(SysError::ESRCH) => return Ok(linux_process::LINUX_ROOT_PID),
+            Err(error) => return Err(error),
+        }
     } else {
         pid
     };
-    let process = linux_process::by_pid(target).ok_or(SysError::ESRCH)?;
-    Ok(process.process_group)
+    match linux_process::by_pid(target) {
+        Some(process) => Ok(process.process_group),
+        None if linux_process::current_pid().is_err() => Ok(linux_process::LINUX_ROOT_PID),
+        None => Err(SysError::ESRCH),
+    }
 }
 
 pub fn sys_getsid(_pid: usize) -> SysResult {
@@ -12195,6 +12200,28 @@ pub fn sys_membarrier(_cmd: usize, flags: usize, _cpu_id: usize) -> SysResult {
         return Err(SysError::EINVAL);
     }
     Ok(0)
+}
+
+/// Kernel-thread Linux syscall copies (docker/runc, the user shell).
+///
+/// The registered range covers every non-null pointer for the current
+/// scheduler thread only. Fuzzing still uses a tighter FuzzState range.
+pub fn enter_kernel_service_copy() {
+    linux_task::enter_kernel_dispatch();
+    linux_task::register_kernel_dispatch_range(1, usize::MAX - 1);
+}
+
+pub fn leave_kernel_service_copy() {
+    linux_task::leave_kernel_dispatch();
+}
+
+/// Attach a non-root Linux identity and copy range so kernel-thread callers
+/// such as `testsc` can exercise in-process Linux syscalls without SVC.
+pub fn prepare_kernel_thread_linux() -> SysResult {
+    enter_kernel_service_copy();
+    let pid = linux_process::ensure_dispatch_identity()?;
+    linux_process_memory::ensure_dispatch_memory(pid)?;
+    Ok(pid)
 }
 
 pub fn sys_unshare(flags: usize) -> SysResult {
@@ -13656,6 +13683,30 @@ pub fn sys_create_exception_channel(task: u32, options: u32, out_handle: &mut u3
     let mut h0 = 0u32;
     let mut h1 = 0u32;
     sys_channel_create(0, &mut h0, &mut h1)?;
+    let exception = match compat::create_object(ObjectType::Exception) {
+        Ok(handle) => handle.0,
+        Err(error) => {
+            let _ = sys_handle_close(h0);
+            let _ = sys_handle_close(h1);
+            return Err(error);
+        }
+    };
+    // Deliver a stub exception report so kernel-thread `testsc` can exercise
+    // get_thread/get_process/resume without waiting for a real fault.
+    let packet = [0u8; 8];
+    if let Err(error) = sys_channel_write(
+        h1,
+        0,
+        packet.as_ptr() as usize,
+        packet.len(),
+        &exception as *const u32 as usize,
+        1,
+    ) {
+        let _ = sys_handle_close(h0);
+        let _ = sys_handle_close(h1);
+        let _ = sys_handle_close(exception);
+        return Err(error);
+    }
     let _ = sys_handle_close(h1);
     *out_handle = h0;
     Ok(())

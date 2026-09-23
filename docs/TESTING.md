@@ -88,8 +88,8 @@ make coverage
 ```
 
 `make coverage` generates the combined host UT/IT Tarpaulin HTML report and the
-QEMU `st` smoke HTML/log report. The host reports are hard-gated at 100%.
-Tarpaulin measures the Rust host tests; the QEMU `st` layer is reported as
+QEMU `skt` smoke HTML/log report. The host reports are hard-gated at 100%.
+Tarpaulin measures the Rust host tests; the QEMU `skt` layer is reported as
 100% required-serial-milestone coverage when every boot milestone is found, not
 guest line coverage. To get bare-metal guest line coverage, SMROS would need a
 separate kernel/QEMU instrumentation path.
@@ -152,13 +152,19 @@ separate cleanup milestones.
 Run:
 
 ```bash
-make st
+make skt
 ```
 
 This builds the kernel, starts QEMU in non-interactive mode, captures serial
-output in `target/smros-smoke-qemu.log`, sends `hermes random seed=1
-iterations=1` and `hermes exec reboot`, and passes when the safe campaign
+output in `target/smros-smoke-qemu.log`, sends `testsc`, `fuzzsc seed=1
+iterations=1`, `hermes random seed=1 iterations=1`, and `hermes exec reboot`,
+and passes when the syscall smoke and bounded fuzz complete, the safe campaign
 completes, reboot is denied, and the required boot milestones are seen.
+The Hermes skills `ut`, `it`, `skt`, and `fuzzing` map onto this stack:
+`make posix-tool-test` is the current syscall/POSIX unit/integration gate while
+`tests/host` is uncompilable, `make skt` is the fast guest smoke test (SKT),
+and official POSIX remains host-controlled `make posix-run`. `make st` remains
+a compatibility alias for `make skt`.
 
 Run the constrained host-launcher protocol tests separately with:
 
@@ -166,26 +172,28 @@ Run the constrained host-launcher protocol tests separately with:
 make launcher-test
 ```
 
-The protocol accepts only named `ut`, `it`, and `st` jobs. `hermes test-all`
-runs its native check once. It then runs one random operation and all three host
-jobs in every iteration. Its positive `iterations=<n>` value therefore controls
-both the guest operations and the number of `ut`, `it`, and `st` requests.
-Reports keep aggregate totals and no more than 64 round details. Host logs are
-bounded under `target/hermes-tests/`.
+The protocol accepts only named `ut` and `it` jobs. `hermes test-all` does not
+request ST/SKT: a nested command-line SMROS boot from the guest cannot run.
+`make skt` remains the host-only QEMU smoke test. `hermes test-all` runs its
+native check once, then one random operation and the `ut`/`it` host jobs in
+every iteration. Its positive `iterations=<n>` value therefore controls both
+the guest operations and the number of `ut` and `it` requests. Reports keep
+aggregate totals and no more than 64 round details. Host logs are bounded
+under `target/hermes-tests/`.
 
 Useful overrides:
 
 ```bash
-SMROS_ST_TIMEOUT=90 make st
-SMOKE_QEMU_SMP=1 SMOKE_QEMU_MEMORY=256M make st
-SMROS_ST_LOG=/tmp/smros.log make st
-SMROS_ST_REQUIRED_PATTERNS='[OK] Kernel initialized successfully!|smros:/>' make st
-make st ARCH=riscv64gc-unknown-none-elf
-make st ARCH=x86_64-unknown-none
-make st ARCH=aarch64-unknown-none QEMU_CPU_AARCH64=cortex-a57
+SMROS_ST_TIMEOUT=180 make skt
+SMOKE_QEMU_SMP=1 SMOKE_QEMU_MEMORY=2G make skt
+SMROS_ST_LOG=/tmp/smros.log make skt
+SMROS_ST_REQUIRED_PATTERNS='[OK] Kernel initialized successfully!|smros:/>' make skt
+make skt ARCH=riscv64gc-unknown-none-elf
+make skt ARCH=x86_64-unknown-none
+make skt ARCH=aarch64-unknown-none QEMU_CPU_AARCH64=cortex-a57
 ```
 
-`make st` requires `qemu-img` plus the QEMU system binary for the selected
+`make skt` requires `qemu-img` plus the QEMU system binary for the selected
 architecture: `qemu-system-aarch64` for ARM64 or `qemu-system-riscv64` for
 RISC-V64, or `qemu-system-x86_64` for x86_64.
 
@@ -207,7 +215,7 @@ make test
 integration tests, the offline `posix-tool-test`, and the kernel build test. It
 intentionally does not fetch sources, cross-build the POSIX suite, run
 qemu-user, or boot QEMU, so it stays suitable for quick local and CI checks.
-Use `make st` for the boot-level smoke test, or `make verify` for unit tests,
+Use `make skt` for the boot-level smoke test, or `make verify` for unit tests,
 integration tests, build, system smoke, and Verus verification.
 
 ## Test Layers
@@ -222,12 +230,12 @@ integration tests, build, system smoke, and Verus verification.
 - Build test: production `aarch64-unknown-none` release build plus raw image by
   default; use `ARCH=riscv64gc-unknown-none-elf` for the RISC-V64 ELF payload or
   `ARCH=x86_64-unknown-none` for the x86_64 PVH ELF payload.
-- ST: QEMU boot smoke test that validates the selected architecture's serial
+- SKT: QEMU boot smoke test that validates the selected architecture's serial
   boot path reaches required milestones and the shell.
 - Verus: proof harnesses for selected syscall, kernel-object, low-level,
   user-level, and service logic.
 
-Future higher-value additions are a serial command runner that sends `testsc`
-and `lvgl test` inside QEMU, fixture-based ELF loader tests, and a small CI
-workflow that runs `make test` on every change and `make verify` on scheduled
-or protected-branch runs.
+`make skt` now sends `testsc` and bounded `fuzzsc` in addition to the Hermes
+safe campaign. Future higher-value additions are fixture-based ELF loader
+tests and a small CI workflow that runs `make test` on every change and
+`make verify` on scheduled or protected-branch runs.

@@ -1,6 +1,7 @@
 pub const HERMES_MAX_ARGS: usize = 8;
 pub const HERMES_MAX_ARG_LEN: usize = 96;
 pub const HERMES_CAMPAIGN_CASES: usize = 12;
+pub const HERMES_SYSCALL_CAMPAIGN_CASES: usize = 12;
 pub const HERMES_REPORT_DETAIL_LIMIT: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11,9 +12,16 @@ pub enum HermesShellPolicy {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HermesCampaignMode {
+    Ops,
+    Syscall,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HermesCampaignOptions {
     pub seed: Option<u64>,
     pub iterations: usize,
+    pub mode: HermesCampaignMode,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +45,23 @@ const CAMPAIGN_CATALOG: [HermesCampaignCase; HERMES_CAMPAIGN_CASES] = [
     campaign_case_const("docker", "images", "", 1),
     campaign_case_const("fuzzsc", "seed=1", "iterations=1", 2),
 ];
+
+const SYSCALL_CAMPAIGN_CATALOG: [HermesCampaignCase; HERMES_SYSCALL_CAMPAIGN_CASES] = [
+    campaign_case_const("testsc", "", "", 0),
+    campaign_case_const("fuzzsc", "seed=1", "iterations=1", 2),
+    campaign_case_const("hermes", "test", "", 1),
+    campaign_case_const("version", "", "", 0),
+    campaign_case_const("meminfo", "", "", 0),
+    campaign_case_const("ps", "-a", "", 1),
+    campaign_case_const("components", "", "", 0),
+    campaign_case_const("fxfs", "", "", 0),
+    campaign_case_const("svc", "", "", 0),
+    campaign_case_const("uptime", "", "", 0),
+    campaign_case_const("drivers", "", "", 0),
+    campaign_case_const("ifconfig", "", "", 0),
+];
+
+const POSIX_CANARY_IDS: [&str; 1] = ["getpid/1-1.c"];
 
 const fn campaign_case_const(
     command: &'static str,
@@ -64,7 +89,8 @@ pub fn classify(command: &str, args: &[&str]) -> HermesShellPolicy {
         "rm" | "kill" | "reboot" | "exit" | "clear" | "vi" | "run" | "write" | "mkdir" | "mv"
         | "cp" | "mount" | "cd" | "cd.." => HermesShellPolicy::Forbidden,
         "help" | "version" | "meminfo" | "components" | "fxfs" | "drivers" | "ifconfig" | "pwd"
-        | "ls" | "svc" | "uptime" | "testsc" => no_args(args),
+        | "ls" | "svc" | "uptime" => no_args(args),
+        "testsc" => no_args(args),
         "ps" => optional_exact_arg(args, "-a"),
         "top" => no_args(args),
         "sched" => sched_policy(args),
@@ -74,6 +100,7 @@ pub fn classify(command: &str, args: &[&str]) -> HermesShellPolicy {
         "vm" => vm_policy(args),
         "docker" => docker_policy(args),
         "hermes" => hermes_policy(args),
+        "posixtest" => posix_policy(args),
         _ => HermesShellPolicy::Forbidden,
     }
 }
@@ -134,12 +161,32 @@ fn hermes_policy(args: &[&str]) -> HermesShellPolicy {
     }
 }
 
+fn posix_policy(args: &[&str]) -> HermesShellPolicy {
+    match args {
+        ["status"] => HermesShellPolicy::Allowed,
+        ["test", "getpid/1-1.c"] => HermesShellPolicy::Allowed,
+        ["test", id] if posix_canary_id(id) => HermesShellPolicy::Allowed,
+        _ => HermesShellPolicy::Forbidden,
+    }
+}
+
 fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
+fn posix_canary_id(value: &str) -> bool {
+    let mut index = 0usize;
+    while index < POSIX_CANARY_IDS.len() {
+        if POSIX_CANARY_IDS[index] == value {
+            return true;
+        }
+        index += 1;
+    }
+    false
 }
 
 fn fuzz_policy(args: &[&str]) -> HermesShellPolicy {
@@ -190,22 +237,57 @@ pub fn campaign_report_omitted_rounds(iterations: usize) -> usize {
     iterations.saturating_sub(HERMES_REPORT_DETAIL_LIMIT)
 }
 
+pub fn campaign_catalog_len(mode: HermesCampaignMode) -> usize {
+    match mode {
+        HermesCampaignMode::Ops => HERMES_CAMPAIGN_CASES,
+        HermesCampaignMode::Syscall => HERMES_SYSCALL_CAMPAIGN_CASES,
+    }
+}
+
 pub fn campaign_case_index(seed: u64, round: usize) -> usize {
+    campaign_case_index_for_mode(seed, round, HermesCampaignMode::Ops)
+}
+
+pub fn campaign_case_index_for_mode(seed: u64, round: usize, mode: HermesCampaignMode) -> usize {
     let mut state = seed ^ (round as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    next_random(&mut state) as usize % HERMES_CAMPAIGN_CASES
+    next_random(&mut state) as usize % campaign_catalog_len(mode)
 }
 
 pub fn campaign_case(index: usize, _seed: u64, _round: usize) -> Option<HermesCampaignCase> {
-    CAMPAIGN_CATALOG.get(index).copied()
+    campaign_case_for_mode(HermesCampaignMode::Ops, index)
+}
+
+pub fn campaign_case_for_mode(
+    mode: HermesCampaignMode,
+    index: usize,
+) -> Option<HermesCampaignCase> {
+    match mode {
+        HermesCampaignMode::Ops => CAMPAIGN_CATALOG.get(index).copied(),
+        HermesCampaignMode::Syscall => SYSCALL_CAMPAIGN_CATALOG.get(index).copied(),
+    }
 }
 
 pub fn parse_campaign_options(args: &[&str]) -> Option<HermesCampaignOptions> {
     let mut seed = None;
     let mut iterations = 8usize;
     let mut iterations_seen = false;
+    let mut mode = HermesCampaignMode::Ops;
+    let mut mode_seen = false;
 
     for arg in args {
         let (key, value) = arg.split_once('=')?;
+        if key == "mode" {
+            if mode_seen {
+                return None;
+            }
+            mode = match value {
+                "ops" => HermesCampaignMode::Ops,
+                "syscall" => HermesCampaignMode::Syscall,
+                _ => return None,
+            };
+            mode_seen = true;
+            continue;
+        }
         let number = parse_decimal(value)?;
         match key {
             "seed" if seed.is_none() => seed = Some(number),
@@ -218,7 +300,11 @@ pub fn parse_campaign_options(args: &[&str]) -> Option<HermesCampaignOptions> {
     }
 
     if campaign_iterations_valid(iterations) {
-        Some(HermesCampaignOptions { seed, iterations })
+        Some(HermesCampaignOptions {
+            seed,
+            iterations,
+            mode,
+        })
     } else {
         None
     }

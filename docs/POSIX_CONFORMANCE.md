@@ -3,7 +3,11 @@
 This `docs/POSIX_CONFORMANCE.md` guide describes the reproducible Open POSIX
 Test Suite workflow. The current milestone establishes infrastructure and a
 failure baseline. It is not POSIX certification and does not claim conformance
-completion.
+completion. Hermes does not run guest `posixtest all`; that path is diagnostic
+only and is forbidden to the Hermes allowlist. Official POSIX evidence stays
+host-controlled `make posix-run` (or a focused `run-smros --api ...` canary).
+Hermes may only exec `posixtest status` or the closed canary
+`posixtest test getpid/1-1.c`.
 
 ## Scope And Order
 

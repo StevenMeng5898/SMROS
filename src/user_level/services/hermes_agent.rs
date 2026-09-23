@@ -45,6 +45,10 @@ const HERMES_KERNEL_SKILL: &str = "# SMROS Kernel Skill\n\nUse FxFS, /svc, and s
 const HERMES_WEB_SKILL: &str = "# Hermes Web UI Skill\n\nBuild and review the Hermes web console, dashboard HTML, prompt composer, skills list, and transcript surface for SMROS.\n";
 const HERMES_OPS_SKILL: &str = "# SMROS Ops Skill\n\nRun Gemma, Hermes, Docker, network, QEMU, and shell smoke tests; summarize failures with concrete SMROS commands.\n";
 const HERMES_MEMORY_SKILL: &str = "# Hermes Memory Skill\n\nUse Hermes memory, session transcripts, user notes, and FxFS persistence to keep agent context visible and auditable.\n";
+const HERMES_UT_SKILL: &str = "# UT Skill\n\nRun `make ut` when the host crate compiles. Until then, `make posix-tool-test` is the SMROS syscall and POSIX unit gate. No QEMU.\n";
+const HERMES_IT_SKILL: &str = "# IT Skill\n\nRun `make it` when the host crate compiles, plus `make posix-tool-test` and `make launcher-test`. Hermes host jobs stay {ut,it}. SKT/smoke stays host-only `make skt`.\n";
+const HERMES_SKT_SKILL: &str = "# SKT Skill\n\nSKT is the host-side SMROS smoke test (`make skt`). Hermes test-all does not run SKT because the guest cannot boot another SMROS from the command line. Official POSIX is host-controlled `make posix-run`, never guest `posixtest all`.\n";
+const HERMES_FUZZING_SKILL: &str = "# Fuzzing Skill\n\nRun bounded `fuzzsc` through Hermes (iterations<=16, time<=5). Pointers stay in kernel scratch. Skip clone/exit/exec. Do not execute Gemma text.\n";
 const HERMES_CRON: &str =
     "name: nightly-smros-hermes-smoke\nschedule: '0 3 * * *'\ncommand: hermes test\n";
 
@@ -95,6 +99,42 @@ const HERMES_SKILLS: &[HermesSkillDefinition] = &[
         body: HERMES_MEMORY_SKILL,
         keywords: &["memory", "session", "transcript", "audit", "notes"],
     },
+    HermesSkillDefinition {
+        name: "UT",
+        slug: "ut",
+        dir: "/data/hermes/skills/ut",
+        path: "/data/hermes/skills/ut/SKILL.md",
+        description: "Unit gate: make ut and posix-tool-test",
+        body: HERMES_UT_SKILL,
+        keywords: &["posix-tool-test", "make ut", "unit"],
+    },
+    HermesSkillDefinition {
+        name: "IT",
+        slug: "it",
+        dir: "/data/hermes/skills/it",
+        path: "/data/hermes/skills/it/SKILL.md",
+        description: "Integration gate: make it and launcher-test",
+        body: HERMES_IT_SKILL,
+        keywords: &["launcher-test", "make it", "integration"],
+    },
+    HermesSkillDefinition {
+        name: "SKT",
+        slug: "skt",
+        dir: "/data/hermes/skills/skt",
+        path: "/data/hermes/skills/skt/SKILL.md",
+        description: "Host-only smoke test: make skt, not a hermes test-all job",
+        body: HERMES_SKT_SKILL,
+        keywords: &["testsc", "make skt", "fuzzsc seed=1", "smoke test"],
+    },
+    HermesSkillDefinition {
+        name: "Fuzzing",
+        slug: "fuzzing",
+        dir: "/data/hermes/skills/fuzzing",
+        path: "/data/hermes/skills/fuzzing/SKILL.md",
+        description: "Bounded fuzzsc syscall and POSIX dispatcher coverage",
+        body: HERMES_FUZZING_SKILL,
+        keywords: &["fuzzsc", "fuzzing", "syzkaller"],
+    },
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,7 +160,7 @@ impl HermesAgentError {
             HermesAgentError::FxfsPrepare => "fxfs prepare",
             HermesAgentError::Config => "config",
             HermesAgentError::ModelRoute => "model route",
-            HermesAgentError::Skill => "skill",
+            HermesAgentError::Skill => "invalid skill file",
             HermesAgentError::Memory => "memory",
             HermesAgentError::Tool => "tool",
             HermesAgentError::Delegate => "delegate",
@@ -270,38 +310,18 @@ pub fn persist_campaign_report(report: &str) -> Result<usize, HermesAgentError> 
 }
 
 pub fn info() -> Result<HermesAgentInfo, HermesAgentError> {
-    prepare_storage()?;
-    let config = load_config()?;
-    if !route_model(config.provider.as_str(), config.model.as_str()) {
-        return Err(HermesAgentError::ModelRoute);
+    if !fxfs::init() {
+        return Err(HermesAgentError::FxfsInit);
     }
-
-    Ok(HermesAgentInfo {
-        name: "Hermes Agent for SMROS",
-        upstream: "NousResearch/hermes-agent",
-        upstream_version: "0.14.0",
-        provider: HERMES_PROVIDER_GEMMA,
-        model: HERMES_MODEL_DEFAULT,
-        personality: HERMES_PERSONALITY,
-        tools: config.tools.len(),
-        skills: count_dir_entries(HERMES_SKILL_DIR),
-        memory_items: memory_item_count()?,
-        cron_jobs: count_dir_entries(HERMES_CRON_DIR),
-        transcripts: count_dir_entries(HERMES_SESSION_DIR),
-        web_ui_path: HERMES_WEB_INDEX_PATH,
-        web_ui_bytes: fxfs::attrs(HERMES_WEB_INDEX_PATH)
-            .map(|attrs| attrs.size)
-            .unwrap_or(0),
-        cpu_ui_path: HERMES_WEB_PPM_PATH,
-        cpu_ui_bytes: fxfs::attrs(HERMES_WEB_PPM_PATH)
-            .map(|attrs| attrs.size)
-            .unwrap_or(0),
-        generation_backend: "smros-native",
-    })
+    if !fxfs::exists(HERMES_CONFIG_PATH) {
+        prepare_storage()?;
+    }
+    info_without_web_refresh()
 }
 
 pub fn run_prompt(prompt: &str) -> Result<HermesAgentTurn, HermesAgentError> {
     prepare_storage()?;
+    let _persist_guard = fxfs::suspend_persist();
     let config = load_config()?;
     if !route_model(config.provider.as_str(), config.model.as_str()) {
         return Err(HermesAgentError::ModelRoute);
@@ -346,6 +366,7 @@ pub fn run_prompt(prompt: &str) -> Result<HermesAgentTurn, HermesAgentError> {
 
 pub fn render_web_ui() -> Result<HermesWebUi, HermesAgentError> {
     prepare_storage()?;
+    let _persist_guard = fxfs::suspend_persist();
     refresh_web_ui()?;
     let html = read_text_file(HERMES_WEB_INDEX_PATH)?;
     let bytes = html.len();
@@ -370,6 +391,7 @@ pub fn render_native_ui(width: usize) -> Result<HermesNativeUi, HermesAgentError
 }
 
 pub fn render_cpu_ui() -> Result<HermesCpuUi, HermesAgentError> {
+    let _persist_guard = fxfs::suspend_persist();
     let web = render_web_ui()?;
     let view = html_ui::render_cpu_view(web.html.as_str()).map_err(|_| HermesAgentError::Tool)?;
     fxfs::write_file(HERMES_WEB_PPM_PATH, view.ppm.as_slice())
@@ -407,6 +429,7 @@ pub fn list_skills() -> Result<Vec<HermesSkillInfo>, HermesAgentError> {
 
 pub fn run_full_test() -> Result<HermesAgentTestReport, HermesAgentError> {
     prepare_storage()?;
+    let _persist_guard = fxfs::suspend_persist();
 
     let config = load_config()?;
     let config_ok = config.provider == HERMES_PROVIDER_GEMMA
@@ -426,10 +449,14 @@ pub fn run_full_test() -> Result<HermesAgentTestReport, HermesAgentError> {
         return Err(HermesAgentError::ModelRoute);
     }
 
-    let skill_ok =
-        matching_skills("Use the SMROS kernel, web UI, ops, and memory skills to test Hermes")?
-            .len()
-            >= HERMES_SKILLS.len();
+    let skills = list_skills()?;
+    let core_hits =
+        matching_skills("Use the SMROS kernel, web UI, ops, and memory skills to test Hermes")?;
+    let skill_ok = skills.len() == HERMES_SKILLS.len()
+        && core_hits.iter().any(|skill| skill.slug == "smros-kernel")
+        && core_hits.iter().any(|skill| skill.slug == "hermes-web-ui")
+        && core_hits.iter().any(|skill| skill.slug == "smros-ops")
+        && core_hits.iter().any(|skill| skill.slug == "hermes-memory");
     if !skill_ok {
         return Err(HermesAgentError::Skill);
     }
@@ -442,8 +469,10 @@ pub fn run_full_test() -> Result<HermesAgentTestReport, HermesAgentError> {
         return Err(HermesAgentError::Memory);
     }
 
-    let tool_ok =
-        turn.tool_calls == 3 && turn.skill_hits >= HERMES_SKILLS.len() && tool_audit_valid()?;
+    let tool_ok = turn.tool_calls == 3
+        && turn.skill_hits >= 4
+        && turn.skill_summary.contains("smros-kernel")
+        && tool_audit_valid()?;
     if !tool_ok {
         return Err(HermesAgentError::Tool);
     }
@@ -528,6 +557,7 @@ fn prepare_storage() -> Result<(), HermesAgentError> {
     if !fxfs::init() {
         return Err(HermesAgentError::FxfsInit);
     }
+    let _persist_guard = fxfs::suspend_persist();
     if !gemma::init() {
         return Err(HermesAgentError::Gemma);
     }
@@ -553,7 +583,9 @@ fn prepare_storage() -> Result<(), HermesAgentError> {
     ensure_exact_file(HERMES_CRON_PATH, HERMES_CRON)?;
     ensure_file(HERMES_TOOL_AUDIT_PATH, "")?;
     ensure_file(HERMES_SESSION_PATH, "")?;
-    refresh_web_ui()?;
+    if !fxfs::exists(HERMES_WEB_INDEX_PATH) {
+        refresh_web_ui()?;
+    }
     Ok(())
 }
 
@@ -585,7 +617,12 @@ fn ensure_exact_file(path: &str, data: &str) -> Result<(), HermesAgentError> {
 
 fn read_text_file(path: &str) -> Result<String, HermesAgentError> {
     let attrs = fxfs::attrs(path).map_err(|_| HermesAgentError::FxfsPrepare)?;
+    if attrs.size > 1024 * 1024 {
+        return Err(HermesAgentError::FxfsPrepare);
+    }
     let mut out = Vec::new();
+    out.try_reserve_exact(attrs.size)
+        .map_err(|_| HermesAgentError::FxfsPrepare)?;
     out.resize(attrs.size, 0);
     let read = fxfs::read_file(path, &mut out).map_err(|_| HermesAgentError::FxfsPrepare)?;
     out.truncate(read);
@@ -699,7 +736,8 @@ fn matching_skills(prompt: &str) -> Result<Vec<&'static HermesSkillDefinition>, 
 }
 
 fn skill_file_valid(text: &str) -> bool {
-    text.contains("Skill") && (text.contains("Hermes") || text.contains("SMROS"))
+    contains_case_insensitive(text, "skill")
+        && (contains_case_insensitive(text, "hermes") || contains_case_insensitive(text, "smros"))
 }
 
 fn skill_matches_prompt(skill: &HermesSkillDefinition, prompt: &str) -> bool {

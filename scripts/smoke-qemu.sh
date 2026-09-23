@@ -43,13 +43,15 @@ QEMU_CPU="${QEMU_CPU:-$DEFAULT_QEMU_CPU}"
 QEMU_BLOCK_DEVICE="${QEMU_BLOCK_DEVICE:-$DEFAULT_QEMU_BLOCK_DEVICE}"
 QEMU_NET_DEVICE="${QEMU_NET_DEVICE:-$DEFAULT_QEMU_NET_DEVICE}"
 QEMU_SMP="${QEMU_SMP:-4}"
-QEMU_MEMORY="${QEMU_MEMORY:-512M}"
-SMROS_ST_TIMEOUT="${SMROS_ST_TIMEOUT:-45}"
+QEMU_MEMORY="${QEMU_MEMORY:-2G}"
+SMROS_ST_TIMEOUT="${SMROS_ST_TIMEOUT:-180}"
 SMROS_ST_LOG="${SMROS_ST_LOG:-$REPO_ROOT/target/smros-smoke-qemu.log}"
 SMROS_ST_PROMPT="${SMROS_ST_PROMPT:-smros:/>}"
-DEFAULT_SMROS_ST_REQUIRED_PATTERNS="SMROS-A Distributed AI-Native Operating System|[OK] Kernel initialized successfully!|[OK] Serial console initialized|[SYSCALL] Syscall handler initialized|[CHANNEL] Channel subsystem initialized|[INFO] Fast boot complete. Starting shell|[SHELL] Starting shell as scheduled thread...|Hermes random campaign complete seed=1 iterations=1|Hermes denied forbidden command: reboot|$SMROS_ST_PROMPT"
+DEFAULT_SMROS_ST_REQUIRED_PATTERNS="SMROS-A Distributed AI-Native Operating System|[OK] Kernel initialized successfully!|[OK] Serial console initialized|[SYSCALL] Syscall handler initialized|[CHANNEL] Channel subsystem initialized|[INFO] Fast boot complete. Starting shell|[SHELL] Starting shell as scheduled thread...|=== Test Complete ===|[OK] syscall and POSIX fuzz completed|Hermes random campaign complete seed=1 iterations=1|Hermes denied forbidden command: reboot|$SMROS_ST_PROMPT"
 SMROS_ST_REQUIRED_PATTERNS="${SMROS_ST_REQUIRED_PATTERNS:-$DEFAULT_SMROS_ST_REQUIRED_PATTERNS}"
-SMROS_ST_COMMANDS="${SMROS_ST_COMMANDS:-hermes random seed=1 iterations=1
+SMROS_ST_COMMANDS="${SMROS_ST_COMMANDS:-testsc
+fuzzsc seed=1 iterations=1
+hermes random seed=1 iterations=1
 hermes exec reboot}"
 
 if ! command -v "$QEMU_SYSTEM" >/dev/null 2>&1; then

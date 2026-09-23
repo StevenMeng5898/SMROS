@@ -490,11 +490,12 @@ pub fn stop_component(moniker: &str) -> bool {
     manager().stop_component_by_moniker(moniker)
 }
 
-pub fn smoke_test() -> bool {
-    if !fxfs::smoke_test() {
-        return false;
-    }
-    if !manager().start_bootstrap_components() {
+pub fn start_bootstrap() -> bool {
+    manager().start_bootstrap_components()
+}
+
+pub fn smoke_runtime() -> bool {
+    if !start_bootstrap() {
         return false;
     }
     if !start_boot_component_threads() {
@@ -510,6 +511,10 @@ pub fn smoke_test() -> bool {
                 && component.loaded_entry.is_some()
                 && component.loaded_segments > 0
         })
+}
+
+pub fn smoke_test() -> bool {
+    fxfs::smoke_test() && smoke_runtime()
 }
 
 pub fn prepare_component_return(exit_code: i32) -> bool {

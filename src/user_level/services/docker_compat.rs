@@ -350,6 +350,7 @@ pub fn install_builtin_docker_images() -> Result<(), DockerCompatError> {
     if !fxfs::init() {
         return Err(DockerCompatError::FxfsInit);
     }
+    let _persist_guard = fxfs::suspend_persist();
     let _ = fxfs::create_dir("/docker");
     let _ = fxfs::create_dir(DOCKER_IMAGE_ROOT);
     let _ = fxfs::create_dir(DOCKER_CONTAINER_ROOT);
@@ -1605,10 +1606,26 @@ fn container_log_path(id: &str) -> String {
     out
 }
 
+struct KernelServiceCopyGuard;
+
+impl KernelServiceCopyGuard {
+    fn enter() -> Self {
+        syscall::enter_kernel_service_copy();
+        Self
+    }
+}
+
+impl Drop for KernelServiceCopyGuard {
+    fn drop(&mut self) {
+        syscall::leave_kernel_service_copy();
+    }
+}
+
 fn run_oci_runtime_request(
     request: &OciRuntimeRequest<'_>,
     config_len: usize,
 ) -> Result<DockerCompatResult, DockerCompatError> {
+    let _copy_guard = KernelServiceCopyGuard::enter();
     if request.root_path.is_empty()
         || request.arg0.is_empty()
         || request.namespace_flags & DOCKER_NS_FLAGS != DOCKER_NS_FLAGS

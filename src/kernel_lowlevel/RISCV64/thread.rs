@@ -13,8 +13,12 @@ use super::lowlevel_logic;
 /// Maximum number of concurrent threads
 pub const MAX_THREADS: usize = 128;
 
-/// Default thread stack size (32KB)
-pub const DEFAULT_STACK_SIZE: usize = 0x8000;
+/// Default thread stack size (256 KiB).
+///
+/// The user shell runs `fuzzsc` in-process on this stack. FuzzState plus
+/// Linux mmap/FxFS frames overflow a 32 KiB stack, smash the kernel heap
+/// free list, and panic in the allocator (OOM 8192/align=1). Match AArch64.
+pub const DEFAULT_STACK_SIZE: usize = 0x4_0000;
 
 /// Thread states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -406,7 +410,7 @@ impl ThreadStack {
     pub fn alloc(size: usize) -> Option<Self> {
         let layout = alloc::alloc::Layout::from_size_align(size, 16).ok()?;
 
-        // SAFETY: `size` is DEFAULT_STACK_SIZE (32KB) which is valid and 16-byte aligned.
+        // SAFETY: `size` is DEFAULT_STACK_SIZE (256 KiB) which is valid and 16-byte aligned.
         // The global allocator is our KernelAllocator bump allocator, which is safe to use.
         let ptr = unsafe { alloc::alloc::alloc(layout) };
 

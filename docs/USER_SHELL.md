@@ -95,7 +95,7 @@ The shell directly uses:
 - `scheduler::scheduler()` for `top` and `uptime`
 - `PageFrameAllocator` for `meminfo`
 - many `crate::syscall::sys_*()` helpers inside `testsc`
-- the EL0 `test_write()` helper for the first write smoke call
+- in-process `sys_write()` for the first write smoke call
 
 ### Direct Serial Access
 
@@ -151,7 +151,7 @@ does not prove POSIX compliance.
 
 It currently:
 
-- attempts a write-style smoke call through `test_write()`
+- attempts a write-style smoke call through in-process `sys_write()`
 - directly exercises Linux process/time calls
 - directly exercises Linux memory calls and memory accounting
 - directly exercises Zircon VMO/VMAR, handle/object, signal/wait, port, channel, socket, FIFO, futex, process/thread, time/debug/system/exception, and hypervisor helpers
@@ -292,7 +292,11 @@ fuzzsc iter <n> ms=<milliseconds>
 ```
 
 It runs at the dispatcher layer and mutates structured arguments for the modeled
-Linux ARM64 and Zircon syscall tables.
+Linux ARM64 and Zircon syscall tables, then a named POSIX API catalog (IEEE
+1003.1 System Interfaces such as `mq_open`/`mq_send`, `pthread_cond_*` via
+private futex, `sched_yield`, `clock_gettime`, `kill(pid, 0)`, `mmap`/`shm_open`,
+and file `open`/`read`/`write`). POSIX cases use libc-shaped arguments, not the
+generic syscall-number register blobs.
 
 It is deliberately a safe interactive fuzzer:
 
@@ -312,7 +316,8 @@ iteration, so the interactive `calls` total is not treated as the full
 compatibility surface. Explicit iteration values are not clamped; the time
 limit, when present, is the early-stop condition. It is not a full external
 syzkaller executor with coverage feedback yet; it is the in-kernel fuzzing entry
-point for broad syscall-dispatch coverage.
+point for broad syscall-dispatch and POSIX API coverage. The report prints
+separate Linux, Zircon, and POSIX totals.
 
 Successful current runs include markers such as:
 
@@ -358,6 +363,7 @@ hermes test
 hermes exec meminfo
 hermes random seed=1234 iterations=8
 hermes test-all seed=1234 iterations=8
+hermes test-all mode=syscall seed=1 iterations=1
 hermes skills
 hermes ui
 hermes web
@@ -389,9 +395,14 @@ skill lookup, memory updates, tool calls, subagent delegation, cron metadata,
 `/svc`, Gemma generation, the generated web UI, and transcript persistence
 under `/data/hermes`.
 
-Hermes installs four native SMROS skills under `/data/hermes/skills`:
-`smros-kernel`, `hermes-web-ui`, `smros-ops`, and `hermes-memory`. Prompt
-routing reports the matched skills in the shell response. The web UI renderer
+Hermes installs native SMROS skills under `/data/hermes/skills`:
+`smros-kernel`, `hermes-web-ui`, `smros-ops`, `hermes-memory`, plus the
+syscall/POSIX control-plane skills `ut`, `it`, `skt`, and `fuzzing`. Prompt
+routing reports the matched skills in the shell response. `ut` is
+`make posix-tool-test` (and `make ut` when the host crate compiles). `it`
+adds launcher identity checks. `skt` documents the host-only smoke test
+(`make skt`); Hermes test-all does not run it because the guest cannot boot
+another SMROS from the command line. `fuzzing` is bounded `fuzzsc`. The web UI renderer
 writes a static HTML model to `/data/hermes/web/index.html`. By default,
 `hermes web` parses that HTML and renders a richer CPU-drawn native UI surface:
 panels, status tiles, buttons, text, and skill rows are rasterized into
@@ -454,16 +465,21 @@ default to denial. These commands are permanently forbidden to Hermes: `rm`,
 `docker stop`, and equivalent destructive lifecycle operations. Gemma-generated
 text is never executed directly.
 
-`hermes random [seed=<n>] [iterations=<positive-n>]` selects bounded safe test
-and status operations deterministically. The finite iteration count has no
+`hermes random [seed=<n>] [iterations=<positive-n>] [mode=ops|syscall]` selects
+bounded safe test and status operations deterministically. `mode=syscall`
+uses the syscall catalog (`testsc`, `fuzzsc seed=1 iterations=1`,
+`hermes test`). Hermes may also `exec posixtest status` or
+`exec posixtest test getpid/1-1.c`; `posixtest all` stays forbidden.
+The finite iteration count has no
 policy maximum but must fit the platform `usize`. The command prints the
 effective seed for replay and persists a bounded report at
 `/data/hermes/tests/latest.log`. Reports retain aggregate totals and the first
 64 round details, then record how many details were omitted. `hermes test-all`
 runs the native Hermes check once, then executes one deterministic random guest
-operation and each host job once per iteration. Thus `iterations=1000`
-requests `ut`, `it`, and `st` 1000 times each through
-`scripts/smros-vm-launcher.py`. The launcher maps those three identifiers to
+operation and each host job once per iteration. Optional `mode=syscall` keeps
+the same host jobs but selects the syscall/POSIX guest catalog. Thus `iterations=1000`
+requests `ut` and `it` 1000 times each through
+`scripts/smros-vm-launcher.py`. The launcher maps those two identifiers to
 fixed Make argv, runs one job at a time with a timeout, and does not accept
 arbitrary command strings.
 

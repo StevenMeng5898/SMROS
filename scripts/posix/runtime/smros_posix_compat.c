@@ -4179,7 +4179,8 @@ static void smros_pthread_private_cond_park(smros_pthread_cond_record *record) {
 }
 
 static void smros_pthread_cond_wait_pause(void) {
-    (void)sched_yield();
+    struct timespec pause = { .tv_sec = 0, .tv_nsec = 1000000L };
+    (void)nanosleep(&pause, NULL);
 }
 
 static uint32_t smros_pthread_cond_record_users(

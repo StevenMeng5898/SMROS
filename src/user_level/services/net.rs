@@ -886,6 +886,21 @@ impl TcpSocket {
         Ok(data.len())
     }
 
+    pub fn keepalive(&mut self) -> Result<(), NetError> {
+        if !self.connected {
+            return Err(NetError::NotReady);
+        }
+        send_tcp_segment(
+            self.peer,
+            self.route_mac,
+            self.local_port,
+            self.seq,
+            self.ack,
+            TCP_FLAG_ACK,
+            &[],
+        )
+    }
+
     pub fn read(&mut self, out: &mut [u8]) -> Result<usize, NetError> {
         if !self.connected {
             return Err(NetError::NotReady);

@@ -190,6 +190,8 @@ def validate_elf(data: bytes) -> ElfLayout:
             raise LayoutError(f"{current.name} must follow {previous.name} without overlap")
     if by_name[".stack"][0].address < by_name[".bss"][0].end:
         raise LayoutError(".stack must be after .bss")
+    if by_name[".bss"][0].end & 15:
+        raise LayoutError(".bss end must be 16-byte aligned for the boot BSS clear")
 
     return layout
 

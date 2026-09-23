@@ -236,7 +236,12 @@ fn ensure_exact_file(path: &str, data: &str) -> Result<(), GemmaError> {
 
 fn read_text_file(path: &str) -> Result<String, GemmaError> {
     let attrs = fxfs::attrs(path).map_err(|_| GemmaError::FxfsPrepare)?;
+    if attrs.size > 1024 * 1024 {
+        return Err(GemmaError::FxfsPrepare);
+    }
     let mut out = Vec::new();
+    out.try_reserve_exact(attrs.size)
+        .map_err(|_| GemmaError::FxfsPrepare)?;
     out.resize(attrs.size, 0);
     let read = fxfs::read_file(path, &mut out).map_err(|_| GemmaError::FxfsPrepare)?;
     out.truncate(read);

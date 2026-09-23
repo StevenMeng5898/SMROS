@@ -10,7 +10,7 @@ _start:
     b       1f
     .word   0
     .quad   0x00200000
-    .quad   __kernel_end - _start
+    .quad   __kernel_image_end - _start
     .quad   0
     .quad   0
     .quad   0
@@ -116,7 +116,7 @@ _start:
     mov     x3, #0
 4:
     cmp     x1, x2
-    b.eq    5f
+    b.hs    5f
     str     x3, [x1], #8
     b       4b
 5:

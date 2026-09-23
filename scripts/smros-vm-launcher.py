@@ -15,6 +15,7 @@ import argparse
 import os
 import shlex
 import signal
+import socket
 import socketserver
 import subprocess
 import sys
@@ -26,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 7070
 MAX_REQUEST = 4096
-LAUNCHER_VERSION = 6
+LAUNCHER_VERSION = 8
 DEFAULT_LAUNCH_STABLE_SECONDS = 2.0
 DEFAULT_TERMINATE_TIMEOUT_SECONDS = 3.0
 DEFAULT_TEST_TIMEOUT_SECONDS = 300.0
@@ -191,7 +192,7 @@ def parse_test_job(values: dict[str, str]) -> tuple[str, str]:
     if set(values) != {"job"}:
         raise ValueError("test request requires exactly one job field")
     job = values["job"]
-    if job not in {"ut", "it", "st"}:
+    if job not in {"ut", "it"}:
         raise ValueError(f"unsupported test job: {job}")
     return ("make", job)
 
@@ -201,11 +202,6 @@ def run_test_job(values: dict[str, str]) -> str:
     job = values["job"]
     test_dir = ROOT / "target" / "hermes-tests"
     test_dir.mkdir(parents=True, exist_ok=True)
-    if job == "st":
-        cmd += (
-            "FXFS_DISK=target/hermes-tests/st-fxfs.img",
-            "SMROS_ST_LOG=target/hermes-tests/st-smoke.log",
-        )
     timeout = float(os.environ.get("SMROS_HERMES_TEST_TIMEOUT", DEFAULT_TEST_TIMEOUT_SECONDS))
     if timeout <= 0 or timeout > 1800:
         timeout = DEFAULT_TEST_TIMEOUT_SECONDS
@@ -227,7 +223,8 @@ def run_test_job(values: dict[str, str]) -> str:
     write_test_log(job, output)
     summary = bounded_test_summary(output)
     prefix = "OK" if result.returncode == 0 else "ERR"
-    return f"{prefix} job={job} status={result.returncode} summary={summary}\n"
+    response = f"{prefix} job={job} status={result.returncode} summary={summary}\n"
+    return response
 
 
 def write_test_log(job: str, output: str) -> None:
@@ -419,6 +416,10 @@ def qemu_args_match_name(args: list[str], expected: str) -> bool:
 
 class Handler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
+        try:
+            self.request.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except OSError:
+            pass
         data = self.request.recv(MAX_REQUEST)
         try:
             header, values = parse_request(data)
@@ -454,6 +455,10 @@ class Handler(socketserver.BaseRequestHandler):
 
 class LauncherServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
+
+    def server_bind(self) -> None:
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        super().server_bind()
 
 
 def main() -> int:

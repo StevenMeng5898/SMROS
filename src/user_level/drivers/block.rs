@@ -11,6 +11,7 @@ pub const MMIO_BASE: usize = 0x0a00_0000;
 pub const MMIO_STRIDE: usize = 0x200;
 pub const MMIO_SLOT_COUNT: usize = 32;
 pub const BLOCK_SIZE: usize = 512;
+pub const VIRTIO_IO_BYTES: usize = 64 * 1024;
 
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 const VIRTIO_BLK_F_FLUSH: u64 = 1 << 9;
@@ -122,7 +123,7 @@ struct VirtioBlockQueue {
     used: VirtqUsed,
     req: VirtioBlkReq,
     status: u8,
-    data: [u8; BLOCK_SIZE],
+    data: [u8; VIRTIO_IO_BYTES],
 }
 
 impl VirtioBlockQueue {
@@ -151,7 +152,7 @@ impl VirtioBlockQueue {
                 sector: 0,
             },
             status: 0xff,
-            data: [0; BLOCK_SIZE],
+            data: [0; VIRTIO_IO_BYTES],
         }
     }
 }
@@ -544,18 +545,43 @@ impl QemuVirtBlockDriver {
         }
         let mut done = 0usize;
         while done < out.len() {
-            let block = (offset + done) / BLOCK_SIZE;
-            let block_offset = (offset + done) % BLOCK_SIZE;
-            let len = core::cmp::min(BLOCK_SIZE - block_offset, out.len() - done);
-            if let Err(err) = self.read_block(block, unsafe { &mut VIRTIO_QUEUE.data }) {
-                self.last_error = Some(err);
-                return Err(err);
+            let pos = offset + done;
+            let block = pos / BLOCK_SIZE;
+            let block_offset = pos % BLOCK_SIZE;
+            let remaining = out.len() - done;
+            if block_offset != 0 || remaining < BLOCK_SIZE {
+                let len = core::cmp::min(BLOCK_SIZE - block_offset, remaining);
+                if let Err(err) = self.submit(
+                    VIRTIO_BLK_T_IN,
+                    block as u64,
+                    unsafe { VIRTIO_QUEUE.data.as_mut_ptr() },
+                    BLOCK_SIZE,
+                ) {
+                    self.last_error = Some(err);
+                    return Err(err);
+                }
+                unsafe {
+                    out[done..done + len]
+                        .copy_from_slice(&VIRTIO_QUEUE.data[block_offset..block_offset + len]);
+                }
+                done += len;
+            } else {
+                let aligned = remaining - (remaining % BLOCK_SIZE);
+                let chunk = core::cmp::min(aligned, VIRTIO_IO_BYTES);
+                if let Err(err) = self.submit(
+                    VIRTIO_BLK_T_IN,
+                    block as u64,
+                    unsafe { VIRTIO_QUEUE.data.as_mut_ptr() },
+                    chunk,
+                ) {
+                    self.last_error = Some(err);
+                    return Err(err);
+                }
+                unsafe {
+                    out[done..done + chunk].copy_from_slice(&VIRTIO_QUEUE.data[..chunk]);
+                }
+                done += chunk;
             }
-            unsafe {
-                out[done..done + len]
-                    .copy_from_slice(&VIRTIO_QUEUE.data[block_offset..block_offset + len]);
-            }
-            done += len;
         }
         self.reads = self.reads.saturating_add(1);
         self.bytes_read = self.bytes_read.saturating_add(out.len() as u64);
@@ -574,29 +600,54 @@ impl QemuVirtBlockDriver {
         }
         let mut done = 0usize;
         while done < data.len() {
-            let block = (offset + done) / BLOCK_SIZE;
-            let block_offset = (offset + done) % BLOCK_SIZE;
-            let len = core::cmp::min(BLOCK_SIZE - block_offset, data.len() - done);
-            if block_offset != 0 || len != BLOCK_SIZE {
-                if let Err(err) = self.read_block(block, unsafe { &mut VIRTIO_QUEUE.data }) {
+            let pos = offset + done;
+            let block = pos / BLOCK_SIZE;
+            let block_offset = pos % BLOCK_SIZE;
+            let remaining = data.len() - done;
+            if block_offset != 0 || remaining < BLOCK_SIZE {
+                let len = core::cmp::min(BLOCK_SIZE - block_offset, remaining);
+                if block_offset != 0 || len != BLOCK_SIZE {
+                    if let Err(err) = self.submit(
+                        VIRTIO_BLK_T_IN,
+                        block as u64,
+                        unsafe { VIRTIO_QUEUE.data.as_mut_ptr() },
+                        BLOCK_SIZE,
+                    ) {
+                        self.last_error = Some(err);
+                        return Err(err);
+                    }
+                }
+                unsafe {
+                    VIRTIO_QUEUE.data[block_offset..block_offset + len]
+                        .copy_from_slice(&data[done..done + len]);
+                }
+                if let Err(err) = self.submit(
+                    VIRTIO_BLK_T_OUT,
+                    block as u64,
+                    unsafe { VIRTIO_QUEUE.data.as_mut_ptr() },
+                    BLOCK_SIZE,
+                ) {
                     self.last_error = Some(err);
                     return Err(err);
                 }
+                done += len;
+            } else {
+                let aligned = remaining - (remaining % BLOCK_SIZE);
+                let chunk = core::cmp::min(aligned, VIRTIO_IO_BYTES);
+                unsafe {
+                    VIRTIO_QUEUE.data[..chunk].copy_from_slice(&data[done..done + chunk]);
+                }
+                if let Err(err) = self.submit(
+                    VIRTIO_BLK_T_OUT,
+                    block as u64,
+                    unsafe { VIRTIO_QUEUE.data.as_mut_ptr() },
+                    chunk,
+                ) {
+                    self.last_error = Some(err);
+                    return Err(err);
+                }
+                done += chunk;
             }
-            unsafe {
-                VIRTIO_QUEUE.data[block_offset..block_offset + len]
-                    .copy_from_slice(&data[done..done + len]);
-            }
-            if let Err(err) = self.submit(
-                VIRTIO_BLK_T_OUT,
-                block as u64,
-                unsafe { VIRTIO_QUEUE.data.as_mut_ptr() },
-                BLOCK_SIZE,
-            ) {
-                self.last_error = Some(err);
-                return Err(err);
-            }
-            done += len;
         }
         self.writes = self.writes.saturating_add(1);
         self.bytes_written = self.bytes_written.saturating_add(data.len() as u64);
@@ -627,7 +678,7 @@ impl QemuVirtBlockDriver {
             return Err(UserDriverError::OutOfRange);
         }
         unsafe {
-            VIRTIO_QUEUE.data.copy_from_slice(data);
+            VIRTIO_QUEUE.data[..BLOCK_SIZE].copy_from_slice(data);
         }
         if let Err(err) = self.submit(
             VIRTIO_BLK_T_OUT,
@@ -723,15 +774,16 @@ impl QemuVirtBlockDriver {
             memory_barrier();
             VIRTIO_QUEUE.avail.idx = VIRTIO_QUEUE.avail.idx.wrapping_add(1);
             memory_barrier();
+            let start_used = core::ptr::read_volatile(&raw const VIRTIO_QUEUE.used.idx);
             self.notify_queue(0);
 
-            let target = self.last_used_idx.wrapping_add(1);
             let completion_deadline = crate::kernel_lowlevel::timer::get_nanoseconds()
                 .saturating_add(VIRTIO_COMPLETION_TIMEOUT_NANOS);
             loop {
                 memory_barrier();
-                if core::ptr::read_volatile(&raw const VIRTIO_QUEUE.used.idx) == target {
-                    self.last_used_idx = target;
+                let used = core::ptr::read_volatile(&raw const VIRTIO_QUEUE.used.idx);
+                if used != start_used {
+                    self.last_used_idx = used;
                     self.ack_interrupt();
                     return if core::ptr::read_volatile(&raw const VIRTIO_QUEUE.status)
                         == VIRTIO_BLK_S_OK

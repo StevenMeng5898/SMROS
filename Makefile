@@ -32,12 +32,12 @@ OBJCOPY_RISCV64 ?= riscv64-linux-gnu-objcopy
 OBJCOPY = $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),$(OBJCOPY_RISCV64),$(OBJCOPY_AARCH64))
 # Top-level CPU knob. QEMU_SMP controls QEMU vCPUs; SMROS_LOGICAL_CPUS controls
 # the kernel's logical scheduler model. By default they move together.
-SMROS_CPUS ?= 4
+SMROS_CPUS ?= 8
 QEMU_SMP ?= $(SMROS_CPUS)
 SMROS_LOGICAL_CPUS ?= $(QEMU_SMP)
 QEMU_MEMORY ?= 2G
 SMOKE_QEMU_SMP ?= 4
-SMOKE_QEMU_MEMORY ?= 512M
+SMOKE_QEMU_MEMORY ?= 2G
 SMROS_ST_LOG ?= target/smros-smoke-qemu.log
 ST_COVERAGE_DIR ?= target/coverage/st
 POSIX_QEMU_MEMORY ?= 1024M
@@ -53,7 +53,7 @@ export POSIX_QEMU_MEMORY
 export POSIX_SYSROOT
 export POSIX_QUALITY_EVIDENCE
 
-.PHONY: all build build-test aarch64-warning-check host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report coverage-ut coverage-it coverage-host coverage-st coverage st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
+.PHONY: all build build-test aarch64-warning-check host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report coverage-ut coverage-it coverage-host coverage-st coverage skt st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
 
 all: build
 
@@ -173,17 +173,20 @@ coverage-host:
 # HTML report for the QEMU system smoke layer
 coverage-st:
 	@mkdir -p '$(ST_COVERAGE_DIR)'
-	@$(MAKE) st SMROS_ST_LOG='$(ST_COVERAGE_DIR)/smros-smoke-qemu.log'
+	@$(MAKE) skt SMROS_ST_LOG='$(ST_COVERAGE_DIR)/smros-smoke-qemu.log'
 	@./scripts/write-smoke-html-report.sh '$(ST_COVERAGE_DIR)/smros-smoke-qemu.log' '$(ST_COVERAGE_DIR)/index.html'
 
-# Coverage and smoke summary for UT/IT/ST layers. Tarpaulin measures host UT/IT;
-# ST remains a QEMU milestone smoke because guest line coverage is not wired.
+# Coverage and smoke summary for UT/IT/SKT layers. Tarpaulin measures host UT/IT;
+# SKT remains a QEMU milestone smoke because guest line coverage is not wired.
 coverage: coverage-host coverage-st
 
-# QEMU system smoke test: boot until required milestones and the shell prompt appear
-st: $(FXFS_DISK)
+# QEMU system smoke test (SKT): boot until required milestones and the shell prompt appear
+skt: $(FXFS_DISK)
 	@$(MAKE) build ARCH='$(TARGET)' QEMU_SMP='$(SMOKE_QEMU_SMP)'
-	@ARCH='$(TARGET)' QEMU_SYSTEM='$(QEMU_SYSTEM)' KERNEL_IMAGE='$(KERNEL)' QEMU_MACHINE='$(QEMU_MACHINE)' QEMU_CPU='$(QEMU_CPU)' QEMU_SMP='$(SMOKE_QEMU_SMP)' QEMU_MEMORY='$(SMOKE_QEMU_MEMORY)' QEMU_BLOCK_DEVICE='$(QEMU_BLOCK_DEVICE)' QEMU_NET_DEVICE='$(QEMU_NET_DEVICE)' SMROS_ST_LOG='$(SMROS_ST_LOG)' ./scripts/smoke-qemu.sh
+	@ARCH='$(TARGET)' QEMU_SYSTEM='$(QEMU_SYSTEM)' KERNEL_IMAGE='$(KERNEL)' QEMU_MACHINE='$(QEMU_MACHINE)' QEMU_CPU='$(QEMU_CPU)' QEMU_SMP='$(SMOKE_QEMU_SMP)' QEMU_MEMORY='$(SMOKE_QEMU_MEMORY)' QEMU_BLOCK_DEVICE='$(QEMU_BLOCK_DEVICE)' QEMU_NET_DEVICE='$(QEMU_NET_DEVICE)' FXFS_DISK='$(FXFS_DISK)' SMROS_ST_LOG='$(SMROS_ST_LOG)' ./scripts/smoke-qemu.sh
+
+# Compatibility alias for the SKT smoke test
+st: skt
 
 # Fast local confidence suite; intentionally does not boot QEMU
 test: host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test build-test
@@ -299,7 +302,7 @@ verus-coverage:
 verus: verus-coverage verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
 
 # Full local confidence suite, including QEMU smoke and Verus
-verify: test st verus
+verify: test skt verus
 
 # Show help
 help:
@@ -327,9 +330,10 @@ help:
 	@echo "  coverage-host - Generate cargo-tarpaulin HTML for all host tests"
 	@echo "  coverage-st - Generate QEMU smoke HTML/log report"
 	@echo "  coverage  - Generate host HTML coverage and run QEMU smoke"
-	@echo "  st        - Build and boot QEMU until required milestones and the smros:/> prompt appear"
+	@echo "  skt       - Build and boot QEMU smoke test until required milestones and the smros:/> prompt appear"
+	@echo "  st        - Compatibility alias for skt"
 	@echo "  test      - Run fast local tests (format + scripts + ut + it + offline POSIX tools + build-test)"
-	@echo "  verify    - Run test + st + all Verus proof harnesses"
+	@echo "  verify    - Run test + skt + all Verus proof harnesses"
 	@echo "  run       - Build and run with QEMU"
 	@echo "  debug     - Run with QEMU in debug mode"
 	@echo "  gdb       - Run with QEMU GDB server"
@@ -350,8 +354,9 @@ help:
 	@echo "Usage:"
 	@echo "  make          - Build the kernel"
 	@echo "  make test     - Run unit tests and production build test"
-	@echo "  make st       - Run QEMU boot smoke test"
-	@echo "  make verify   - Run unit, integration, build, QEMU smoke, and Verus checks"
+	@echo "  make skt      - Run QEMU boot smoke test"
+	@echo "  make st       - Alias for make skt"
+	@echo "  make verify   - Run unit, integration, build, QEMU smoke (skt), and Verus checks"
 	@echo "  make run      - Build and run in QEMU"
 	@echo "  make run ARCH=riscv64gc-unknown-none-elf - Run RISC-V64"
 	@echo "  make run ARCH=x86_64-unknown-none - Run x86_64"

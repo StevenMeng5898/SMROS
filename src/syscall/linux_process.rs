@@ -125,6 +125,54 @@ pub(crate) fn by_pid(pid: usize) -> Option<LinuxProcessCore> {
     with_runtime(|runtime| runtime.processes.by_pid(pid))
 }
 
+const LINUX_DISPATCH_PID: usize = 0x1_0000;
+
+pub(crate) fn ensure_dispatch_process(pid: usize, scheduler_thread: usize) -> Result<usize, SysError> {
+    with_runtime(|runtime| {
+        if runtime
+            .processes
+            .processes
+            .iter()
+            .any(|process| process.pid == pid && process.state == LinuxProcessState::Running)
+        {
+            return Ok(pid);
+        }
+        let slot = runtime
+            .processes
+            .processes
+            .iter()
+            .position(|process| process.state == LinuxProcessState::Empty)
+            .ok_or(SysError::EAGAIN)?;
+        runtime.processes.processes[slot] = LinuxProcessCore {
+            pid,
+            parent_pid: 0,
+            process_group: pid,
+            root_scheduler_thread: scheduler_thread,
+            state: LinuxProcessState::Running,
+            wait_status: 0,
+            exit_signal: 0,
+        };
+        runtime.signal_states[slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
+        Ok(pid)
+    })
+}
+
+pub(crate) fn ensure_dispatch_identity() -> Result<usize, SysError> {
+    if let Ok(pid) = current_pid() {
+        return Ok(pid);
+    }
+    let scheduler_thread = scheduler::scheduler().current().0;
+    let pid = match linux_task::current_task() {
+        Ok(task) => task.tgid,
+        Err(_) => {
+            linux_task::ensure_dispatch_task(LINUX_DISPATCH_PID, scheduler_thread)?;
+            LINUX_DISPATCH_PID
+        }
+    };
+    ensure_dispatch_process(pid, scheduler_thread)?;
+    Ok(pid)
+}
+
 fn running_parent_pid(pid: usize) -> Result<usize, SysError> {
     with_runtime(|runtime| {
         runtime
@@ -287,6 +335,13 @@ pub(crate) fn switch_riscv_process_address_space(scheduler_thread: usize) {
             })
             .map(|process| process.pid)
     }));
+    // fuzzsc/hermes dispatch a fake Linux pid on the kernel shell thread.
+    // RISC-V has one satp; installing that process root unmaps UART/virtio
+    // MMIO and hangs after the first schedule. Keep dispatch in bare mode.
+    if root_pid == Some(LINUX_DISPATCH_PID) {
+        crate::kernel_lowlevel::cpu::switch_user_address_space(0);
+        return;
+    }
     let root = root_pid
         .and_then(super::linux_process_memory::root_paddr_for_pid)
         .unwrap_or(0);

@@ -371,12 +371,112 @@ fn read_u64(data: &[u8], pos: &mut usize) -> Result<u64, FxfsError> {
     ]))
 }
 
+const FXFS_PERSIST_BUFFER_LEN: usize = 64 * 1024;
+
+fn fxfs_checksum_add(checksum: &mut u32, data: &[u8]) {
+    for byte in data {
+        *checksum = checksum.rotate_left(5).wrapping_add(*byte as u32);
+    }
+}
+
 fn fxfs_checksum(data: &[u8]) -> u32 {
     let mut checksum = 0u32;
-    for byte in data {
-        checksum = checksum.rotate_left(5).wrapping_add(*byte as u32);
-    }
+    fxfs_checksum_add(&mut checksum, data);
     checksum
+}
+
+struct PersistPlan {
+    object_ids: Vec<u64>,
+    dirent_count: usize,
+    image_len: usize,
+}
+
+trait FxfsImageSink {
+    fn write_bytes(&mut self, data: &[u8]) -> Result<(), FxfsError>;
+}
+
+fn sink_write_u8<S: FxfsImageSink>(sink: &mut S, value: u8) -> Result<(), FxfsError> {
+    sink.write_bytes(&[value])
+}
+
+fn sink_write_u16<S: FxfsImageSink>(sink: &mut S, value: u16) -> Result<(), FxfsError> {
+    sink.write_bytes(&value.to_le_bytes())
+}
+
+fn sink_write_u32<S: FxfsImageSink>(sink: &mut S, value: u32) -> Result<(), FxfsError> {
+    sink.write_bytes(&value.to_le_bytes())
+}
+
+fn sink_write_u64<S: FxfsImageSink>(sink: &mut S, value: u64) -> Result<(), FxfsError> {
+    sink.write_bytes(&value.to_le_bytes())
+}
+
+struct SliceImageSink<'a> {
+    buf: &'a mut [u8],
+    pos: usize,
+}
+
+impl FxfsImageSink for SliceImageSink<'_> {
+    fn write_bytes(&mut self, data: &[u8]) -> Result<(), FxfsError> {
+        write_bytes_at(self.buf, &mut self.pos, data)
+    }
+}
+
+struct BlockImageSink {
+    slot_offset: usize,
+    pos: usize,
+    filled: usize,
+    checksum: u32,
+    buf: [u8; FXFS_PERSIST_BUFFER_LEN],
+}
+
+impl BlockImageSink {
+    fn new(slot_offset: usize) -> Self {
+        Self {
+            slot_offset,
+            pos: 0,
+            filled: 0,
+            checksum: 0,
+            buf: [0; FXFS_PERSIST_BUFFER_LEN],
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), FxfsError> {
+        if self.filled == 0 {
+            return Ok(());
+        }
+        let start = self.pos.checked_sub(self.filled).ok_or(FxfsError::NoSpace)?;
+        drivers::block_write_at(self.slot_offset + start, &self.buf[..self.filled])
+            .map_err(|_| FxfsError::StorageUnavailable)?;
+        self.filled = 0;
+        Ok(())
+    }
+}
+
+impl FxfsImageSink for BlockImageSink {
+    fn write_bytes(&mut self, mut data: &[u8]) -> Result<(), FxfsError> {
+        while !data.is_empty() {
+            if self.filled == self.buf.len() {
+                self.flush()?;
+            }
+            let space = self.buf.len() - self.filled;
+            let n = core::cmp::min(space, data.len());
+            let chunk = &data[..n];
+            self.buf[self.filled..self.filled + n].copy_from_slice(chunk);
+            for (index, byte) in chunk.iter().enumerate() {
+                if self.pos.saturating_add(index) >= FXFS_BLOCK_HEADER_LEN as usize {
+                    self.checksum = self
+                        .checksum
+                        .rotate_left(5)
+                        .wrapping_add(*byte as u32);
+                }
+            }
+            self.filled += n;
+            self.pos = checked_add_len(self.pos, n)?;
+            data = &data[n..];
+        }
+        Ok(())
+    }
 }
 
 fn fxfs_header_is_blank(header: &[u8]) -> bool {
@@ -605,6 +705,8 @@ impl FxfsState {
         let sequence = self.next_sequence();
         if self.journal.len() >= FXFS_MAX_JOURNAL_RECORDS {
             let _ = self.journal.remove(0);
+        } else if try_reserve_vec(&mut self.journal, 1).is_err() {
+            return;
         }
         self.journal.push(FxfsJournalRecord {
             sequence,
@@ -766,8 +868,9 @@ impl FxfsState {
         result
     }
 
-    fn serialize_image(&self) -> Result<Vec<u8>, FxfsError> {
+    fn collect_persist_plan(&self) -> Result<PersistPlan, FxfsError> {
         let mut persist_object_ids = Vec::new();
+        try_reserve_vec(&mut persist_object_ids, self.objects.len())?;
         if let Some(root_index) = self.find_object_index(FXFS_ROOT_OBJECT_ID) {
             persist_object_ids.push(self.objects[root_index].object_id);
         }
@@ -786,18 +889,18 @@ impl FxfsState {
                 if dirent.parent_id != parent_id {
                     continue;
                 }
-                    if parent_id == FXFS_ROOT_OBJECT_ID && dirent.name == "shared" {
-                        if !fxfs_id_in_list(&persist_object_ids, dirent.object_id) {
-                            persist_object_ids.push(dirent.object_id);
-                        }
-                        continue;
-                    }
-                    if self.object_is_under_ephemeral_shm(dirent.object_id) {
-                        continue;
-                    }
+                if parent_id == FXFS_ROOT_OBJECT_ID && dirent.name == "shared" {
                     if !fxfs_id_in_list(&persist_object_ids, dirent.object_id) {
                         persist_object_ids.push(dirent.object_id);
                     }
+                    continue;
+                }
+                if self.object_is_under_ephemeral_shm(dirent.object_id) {
+                    continue;
+                }
+                if !fxfs_id_in_list(&persist_object_ids, dirent.object_id) {
+                    persist_object_ids.push(dirent.object_id);
+                }
             }
             index += 1;
         }
@@ -843,107 +946,15 @@ impl FxfsState {
                 .len()
                 .saturating_mul(FXFS_SERIALIZED_JOURNAL_FIXED_BYTES),
         )?;
-        if image_len > drivers::block_capacity() {
+        if image_len > drivers::block_capacity() || image_len > u32::MAX as usize {
             return Err(FxfsError::NoSpace);
         }
 
-        let mut image = Vec::new();
-        try_reserve_vec(&mut image, image_len)?;
-        image.resize(FXFS_BLOCK_HEADER_LEN as usize, 0);
-        let body_start = image.len();
-
-        for object_id in &persist_object_ids {
-            let index = self
-                .find_object_index(*object_id)
-                .ok_or(FxfsError::NotFound)?;
-            let object = &self.objects[index];
-            push_u64(&mut image, object.object_id);
-            push_u8(&mut image, kind_to_u8(object.kind));
-            push_u32(&mut image, object.attrs.mode);
-            push_u32(&mut image, object.attrs.uid);
-            push_u32(&mut image, object.attrs.gid);
-            push_u64(&mut image, object.attrs.size as u64);
-            push_u64(&mut image, object.attrs.created_at);
-            push_u64(&mut image, object.attrs.modified_at);
-            push_u64(&mut image, object.attrs.accessed_at);
-            push_u32(&mut image, object.attrs.link_count);
-            push_u32(&mut image, object.data.len() as u32);
-            image.extend_from_slice(&object.data);
-        }
-        for dirent in &self.dirents {
-            if !fxfs_id_in_list(&persist_object_ids, dirent.parent_id)
-                || !fxfs_id_in_list(&persist_object_ids, dirent.object_id)
-                || self.object_is_under_ephemeral_shm(dirent.object_id)
-            {
-                continue;
-            }
-            if dirent.name.len() > u16::MAX as usize {
-                return Err(FxfsError::NoSpace);
-            }
-            push_u64(&mut image, dirent.parent_id);
-            push_u64(&mut image, dirent.object_id);
-            push_u16(&mut image, dirent.name.len() as u16);
-            image.extend_from_slice(dirent.name.as_bytes());
-        }
-        for record in &self.journal {
-            push_u64(&mut image, record.sequence);
-            push_u8(&mut image, journal_op_to_u8(record.op));
-            push_u64(&mut image, record.object_id);
-            push_u64(&mut image, record.parent_id);
-            push_u64(&mut image, record.size as u64);
-        }
-
-        let body_len = image.len() - body_start;
-        let total_len = (FXFS_BLOCK_HEADER_LEN as usize)
-            .checked_add(body_len)
-            .ok_or(FxfsError::NoSpace)?;
-        if total_len > drivers::block_capacity() {
-            return Err(FxfsError::NoSpace);
-        }
-
-        let checksum = fxfs_checksum(&image[body_start..]);
-        let mut header_pos = 0usize;
-        write_u32_at(&mut image[..body_start], &mut header_pos, FXFS_BLOCK_MAGIC)?;
-        write_u16_at(
-            &mut image[..body_start],
-            &mut header_pos,
-            FXFS_BLOCK_VERSION,
-        )?;
-        write_u16_at(
-            &mut image[..body_start],
-            &mut header_pos,
-            FXFS_BLOCK_HEADER_LEN,
-        )?;
-        write_u32_at(&mut image[..body_start], &mut header_pos, total_len as u32)?;
-        write_u32_at(&mut image[..body_start], &mut header_pos, checksum)?;
-        write_u64_at(
-            &mut image[..body_start],
-            &mut header_pos,
-            self.next_object_id,
-        )?;
-        write_u64_at(&mut image[..body_start], &mut header_pos, self.sequence)?;
-        write_u64_at(
-            &mut image[..body_start],
-            &mut header_pos,
-            self.replayed_records as u64,
-        )?;
-        write_u32_at(
-            &mut image[..body_start],
-            &mut header_pos,
-            persist_object_ids.len() as u32,
-        )?;
-        write_u32_at(
-            &mut image[..body_start],
-            &mut header_pos,
-            persist_dirent_count as u32,
-        )?;
-        write_u32_at(
-            &mut image[..body_start],
-            &mut header_pos,
-            self.journal.len() as u32,
-        )?;
-        write_u32_at(&mut image[..body_start], &mut header_pos, 0)?;
-        Ok(image)
+        Ok(PersistPlan {
+            object_ids: persist_object_ids,
+            dirent_count: persist_dirent_count,
+            image_len,
+        })
     }
 
     fn collect_shared_persist_ids(
@@ -969,6 +980,10 @@ impl FxfsState {
                     .filter(|entry| entry.parent_id == object_id)
                 {
                     let mut child_relative = String::new();
+                    let extra = if relative.is_empty() { 0 } else { relative.len() + 1 };
+                    child_relative
+                        .try_reserve_exact(extra + dirent.name.len())
+                        .map_err(|_| FxfsError::NoSpace)?;
                     if !relative.is_empty() {
                         child_relative.push_str(relative);
                         child_relative.push('/');
@@ -986,18 +1001,110 @@ impl FxfsState {
             }
         };
         if should_persist && !fxfs_id_in_list(persist_object_ids, object_id) {
+            try_reserve_vec(persist_object_ids, 1)?;
             persist_object_ids.push(object_id);
         }
         Ok(should_persist)
+    }
+
+    fn write_image_header_bytes(
+        &self,
+        header: &mut [u8],
+        plan: &PersistPlan,
+        checksum: u32,
+    ) -> Result<(), FxfsError> {
+        let mut header_pos = 0usize;
+        write_u32_at(header, &mut header_pos, FXFS_BLOCK_MAGIC)?;
+        write_u16_at(header, &mut header_pos, FXFS_BLOCK_VERSION)?;
+        write_u16_at(header, &mut header_pos, FXFS_BLOCK_HEADER_LEN)?;
+        write_u32_at(header, &mut header_pos, plan.image_len as u32)?;
+        write_u32_at(header, &mut header_pos, checksum)?;
+        write_u64_at(header, &mut header_pos, self.next_object_id)?;
+        write_u64_at(header, &mut header_pos, self.sequence)?;
+        write_u64_at(header, &mut header_pos, self.replayed_records as u64)?;
+        write_u32_at(header, &mut header_pos, plan.object_ids.len() as u32)?;
+        write_u32_at(header, &mut header_pos, plan.dirent_count as u32)?;
+        write_u32_at(header, &mut header_pos, self.journal.len() as u32)?;
+        write_u32_at(header, &mut header_pos, 0)?;
+        Ok(())
+    }
+
+    fn write_image_body<S: FxfsImageSink>(
+        &self,
+        plan: &PersistPlan,
+        sink: &mut S,
+    ) -> Result<(), FxfsError> {
+        for object_id in &plan.object_ids {
+            let index = self
+                .find_object_index(*object_id)
+                .ok_or(FxfsError::NotFound)?;
+            let object = &self.objects[index];
+            sink_write_u64(sink, object.object_id)?;
+            sink_write_u8(sink, kind_to_u8(object.kind))?;
+            sink_write_u32(sink, object.attrs.mode)?;
+            sink_write_u32(sink, object.attrs.uid)?;
+            sink_write_u32(sink, object.attrs.gid)?;
+            sink_write_u64(sink, object.attrs.size as u64)?;
+            sink_write_u64(sink, object.attrs.created_at)?;
+            sink_write_u64(sink, object.attrs.modified_at)?;
+            sink_write_u64(sink, object.attrs.accessed_at)?;
+            sink_write_u32(sink, object.attrs.link_count)?;
+            sink_write_u32(sink, object.data.len() as u32)?;
+            sink.write_bytes(&object.data)?;
+        }
+        for dirent in &self.dirents {
+            if !fxfs_id_in_list(&plan.object_ids, dirent.parent_id)
+                || !fxfs_id_in_list(&plan.object_ids, dirent.object_id)
+                || self.object_is_under_ephemeral_shm(dirent.object_id)
+            {
+                continue;
+            }
+            if dirent.name.len() > u16::MAX as usize {
+                return Err(FxfsError::NoSpace);
+            }
+            sink_write_u64(sink, dirent.parent_id)?;
+            sink_write_u64(sink, dirent.object_id)?;
+            sink_write_u16(sink, dirent.name.len() as u16)?;
+            sink.write_bytes(dirent.name.as_bytes())?;
+        }
+        for record in &self.journal {
+            sink_write_u64(sink, record.sequence)?;
+            sink_write_u8(sink, journal_op_to_u8(record.op))?;
+            sink_write_u64(sink, record.object_id)?;
+            sink_write_u64(sink, record.parent_id)?;
+            sink_write_u64(sink, record.size as u64)?;
+        }
+        Ok(())
+    }
+
+    fn serialize_image(&self) -> Result<Vec<u8>, FxfsError> {
+        let plan = self.collect_persist_plan()?;
+        let mut image = Vec::new();
+        try_reserve_vec(&mut image, plan.image_len)?;
+        image.resize(plan.image_len, 0);
+        let header_len = FXFS_BLOCK_HEADER_LEN as usize;
+        {
+            let mut sink = SliceImageSink {
+                buf: &mut image[header_len..],
+                pos: 0,
+            };
+            self.write_image_body(&plan, &mut sink)?;
+            if sink.pos != plan.image_len - header_len {
+                return Err(FxfsError::NoSpace);
+            }
+        }
+        let checksum = fxfs_checksum(&image[header_len..]);
+        self.write_image_header_bytes(&mut image[..header_len], &plan, checksum)?;
+        Ok(image)
     }
 
     fn sync_to_block(&mut self) -> Result<(), FxfsError> {
         if !drivers::block_ready() {
             return Err(FxfsError::StorageUnavailable);
         }
-        let image = self.serialize_image()?;
+        let plan = self.collect_persist_plan()?;
         let (slot_count, slot_size) = fxfs_storage_layout()?;
-        if image.len() > slot_size {
+        if plan.image_len > slot_size {
             return Err(FxfsError::NoSpace);
         }
 
@@ -1007,7 +1114,16 @@ impl FxfsState {
             0
         };
         let offset = fxfs_slot_offset(next_slot, slot_size);
-        drivers::block_write_at(offset, &image).map_err(|_| FxfsError::StorageUnavailable)?;
+        let mut sink = BlockImageSink::new(offset);
+        sink.write_bytes(&[0u8; FXFS_BLOCK_HEADER_LEN as usize])?;
+        self.write_image_body(&plan, &mut sink)?;
+        if sink.pos != plan.image_len {
+            return Err(FxfsError::NoSpace);
+        }
+        sink.flush()?;
+        let mut header = [0u8; FXFS_BLOCK_HEADER_LEN as usize];
+        self.write_image_header_bytes(&mut header, &plan, sink.checksum)?;
+        drivers::block_write_at(offset, &header).map_err(|_| FxfsError::StorageUnavailable)?;
         drivers::block_flush().map_err(|_| FxfsError::StorageUnavailable)?;
         self.active_slot = next_slot;
         Ok(())
@@ -1060,6 +1176,7 @@ impl FxfsState {
 
         let body_len = total_len - header_len;
         let mut body = Vec::new();
+        try_reserve_vec(&mut body, body_len)?;
         body.resize(body_len, 0);
         if body_len > 0 {
             drivers::block_read_at(slot_offset + header_len, &mut body)
@@ -1071,6 +1188,7 @@ impl FxfsState {
 
         let mut body_pos = 0usize;
         let mut objects = Vec::new();
+        try_reserve_vec(&mut objects, object_count)?;
         for _ in 0..object_count {
             let object_id = read_u64(&body, &mut body_pos)?;
             let kind = kind_from_u8(read_u8(&body, &mut body_pos)?)?;
@@ -1090,7 +1208,7 @@ impl FxfsState {
             {
                 return Err(FxfsError::StorageCorrupt);
             }
-            let data = read_bytes(&body, &mut body_pos, data_len)?.to_vec();
+            let data = copy_bytes(read_bytes(&body, &mut body_pos, data_len)?)?;
             objects.push(FxfsObject {
                 object_id,
                 kind,
@@ -1109,13 +1227,15 @@ impl FxfsState {
         }
 
         let mut dirents = Vec::new();
+        try_reserve_vec(&mut dirents, dirent_count)?;
         for _ in 0..dirent_count {
             let parent_id = read_u64(&body, &mut body_pos)?;
             let object_id = read_u64(&body, &mut body_pos)?;
             let name_len = read_u16(&body, &mut body_pos)? as usize;
             let name_bytes = read_bytes(&body, &mut body_pos, name_len)?;
-            let name =
-                String::from_utf8(name_bytes.to_vec()).map_err(|_| FxfsError::StorageCorrupt)?;
+            let name = copy_string(
+                core::str::from_utf8(name_bytes).map_err(|_| FxfsError::StorageCorrupt)?,
+            )?;
             dirents.push(FxfsDirectoryEntry {
                 parent_id,
                 name,
@@ -1151,6 +1271,7 @@ impl FxfsState {
         }
 
         let mut journal = Vec::new();
+        try_reserve_vec(&mut journal, journal_count)?;
         for _ in 0..journal_count {
             let sequence = read_u64(&body, &mut body_pos)?;
             let op = journal_op_from_u8(read_u8(&body, &mut body_pos)?)?;
@@ -2068,7 +2189,6 @@ impl FxfsState {
             self.touch_file_read(index);
             let object_id = self.objects[index].object_id;
             self.record(FxfsJournalOp::ReadFile, object_id, 0, len);
-            self.persist();
         }
         Ok(len)
     }

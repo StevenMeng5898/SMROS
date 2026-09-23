@@ -1,4 +1,5 @@
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::kernel_lowlevel::thread::{self, ThreadId};
 use crate::kernel_objects::scheduler;
@@ -37,6 +38,80 @@ impl LinuxTaskRuntime {
 
 static LINUX_TASK_RUNTIME: LinuxRuntimeLock<LinuxTaskRuntime> =
     LinuxRuntimeLock::new(LinuxTaskRuntime::new());
+static KERNEL_DISPATCH_THREAD: AtomicUsize = AtomicUsize::new(usize::MAX);
+static KERNEL_DISPATCH_RANGE_BASE: AtomicUsize = AtomicUsize::new(0);
+static KERNEL_DISPATCH_RANGE_END: AtomicUsize = AtomicUsize::new(0);
+const KERNEL_DISPATCH_INACTIVE: usize = usize::MAX;
+
+pub(crate) fn enter_kernel_dispatch() {
+    KERNEL_DISPATCH_THREAD.store(scheduler::scheduler().current().0, Ordering::Relaxed);
+}
+
+pub(crate) fn register_kernel_dispatch_range(base: usize, len: usize) {
+    KERNEL_DISPATCH_RANGE_BASE.store(base, Ordering::Relaxed);
+    KERNEL_DISPATCH_RANGE_END.store(base.saturating_add(len), Ordering::Relaxed);
+}
+
+pub(crate) fn leave_kernel_dispatch() {
+    let current = scheduler::scheduler().current().0;
+    if KERNEL_DISPATCH_THREAD
+        .compare_exchange(
+            current,
+            KERNEL_DISPATCH_INACTIVE,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+        .is_ok()
+    {
+        KERNEL_DISPATCH_RANGE_BASE.store(0, Ordering::Relaxed);
+        KERNEL_DISPATCH_RANGE_END.store(0, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn kernel_dispatch_active() -> bool {
+    KERNEL_DISPATCH_THREAD.load(Ordering::Relaxed) == scheduler::scheduler().current().0
+}
+
+pub(crate) fn kernel_dispatch_range_contains(address: usize, len: usize) -> bool {
+    if !kernel_dispatch_active() {
+        return false;
+    }
+    if len == 0 {
+        return true;
+    }
+    let base = KERNEL_DISPATCH_RANGE_BASE.load(Ordering::Relaxed);
+    let end = KERNEL_DISPATCH_RANGE_END.load(Ordering::Relaxed);
+    match address.checked_add(len) {
+        Some(last) => address >= base && last <= end,
+        None => false,
+    }
+}
+
+pub(crate) fn ensure_dispatch_task(pid: usize, scheduler_thread: usize) -> Result<usize, SysError> {
+    with_runtime(|runtime| {
+        if let Some(task) = runtime.tasks.by_scheduler(scheduler_thread) {
+            return Ok(task.tid);
+        }
+        let slot = runtime
+            .tasks
+            .tasks
+            .iter()
+            .position(|task| task.state == LinuxTaskState::Empty)
+            .ok_or(SysError::EAGAIN)?;
+        runtime.tasks.tasks[slot] = LinuxTaskCore {
+            tid: pid,
+            tgid: pid,
+            scheduler_thread,
+            state: LinuxTaskState::Runnable,
+            block_reason: LinuxBlockReason::None,
+        };
+        runtime.tasks.signal_states[slot].reset_in_place();
+        runtime.tasks.sleep_waits[slot] = None;
+        runtime.tasks.sched_params[slot] = LinuxTaskSchedParam::DEFAULT;
+        runtime.tasks.clear_child_tids[slot] = 0;
+        Ok(pid)
+    })
+}
 
 
 fn with_runtime<R>(operation: impl FnOnce(&mut LinuxTaskRuntime) -> R) -> R {

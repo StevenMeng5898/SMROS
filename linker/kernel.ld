@@ -38,10 +38,21 @@ SECTIONS
         __bss_start = .;
         *(.bss .bss.*)
         *(COMMON)
+        . = ALIGN(16);
         __bss_end = .;
+    }
+
+    __kernel_image_end = .;
+    
+
+    .heap (NOLOAD) : ALIGN(4K)
+    {
+        __heap_start = .;
+        . += 0x10000000; /* KERNEL_HEAP_SIZE in src/main_logic.rs */
+        __heap_end = .;
         . = ALIGN(4K);
     }
-    
+
     .stack (NOLOAD) : ALIGN(16)
     {
         __stack_bottom = .;

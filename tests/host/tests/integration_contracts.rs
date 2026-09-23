@@ -98,10 +98,26 @@ fn fxfs_serialization_excludes_ephemeral_shared_memory_entries() {
     let serialize_start = fxfs
         .find("fn serialize_image(&self)")
         .expect("FxFS image serializer");
-    let serialize = braced_body(&fxfs[serialize_start..]);
+    let _serialize = braced_body(&fxfs[serialize_start..]);
+    let plan_start = fxfs
+        .find("fn collect_persist_plan(")
+        .expect("FxFS persist planner");
+    let plan = braced_body(&fxfs[plan_start..]);
     assert!(
-        serialize.contains("object_is_under_ephemeral_shm"),
+        plan.contains("object_is_under_ephemeral_shm"),
         "FxFS serialization must omit ephemeral shared-memory descendants"
+    );
+    let sync_start = fxfs
+        .find("fn sync_to_block(&mut self)")
+        .expect("FxFS block sync");
+    let sync = braced_body(&fxfs[sync_start..]);
+    assert!(
+        !sync.contains("self.serialize_image()"),
+        "block persist must stream the image instead of allocating a second full snapshot"
+    );
+    assert!(
+        sync.contains("BlockImageSink::new(offset)"),
+        "block persist must write through a bounded disk sink"
     );
 
     let load_start = fxfs
@@ -134,6 +150,50 @@ fn linux_fd_allocation_keeps_a_per_process_hint() {
     assert!(
         alloc.contains("resources.next_fd"),
         "descriptor allocation must use the per-process hint"
+    );
+    assert!(
+        alloc.contains("descriptors.iter().any(|entry| entry.fd == fd)"),
+        "descriptor allocation must skip live file descriptors"
+    );
+    assert!(
+        !alloc.contains("if needs_scan"),
+        "reusing a closed low fd must still skip higher live descriptors"
+    );
+
+    let close_start = syscall
+        .find("fn remove_fd_entry(")
+        .expect("Linux descriptor close");
+    let close = braced_body(&syscall[close_start..]);
+    assert!(
+        close.contains("fd_hint_needs_scan = true"),
+        "closing a descriptor must mark the allocator to rescan live fds"
+    );
+}
+
+#[test]
+fn testsc_does_not_repeat_fxfs_smoke_after_starting_component_threads() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let shell = std::fs::read_to_string(repository.join("src/user_level/services/user_shell.rs"))
+        .expect("read user shell");
+    let start = shell
+        .find("fn cmd_test_syscall(")
+        .expect("testsc command");
+    let body = braced_body(&shell[start..]);
+    let fxfs = body
+        .find("fxfs::smoke_test()")
+        .expect("testsc runs FxFS smoke before component threads");
+    let later = &body[fxfs + "fxfs::smoke_test()".len()..];
+    assert!(
+        later.contains("component::smoke_runtime()"),
+        "testsc must start component launchers after FxFS smoke"
+    );
+    assert!(
+        !later.contains("fxfs::smoke_test()"),
+        "testsc must not persist FxFS again after bootstrap component threads share virtio"
+    );
+    assert!(
+        !body.contains("component::smoke_test()"),
+        "testsc must not use the combined component smoke that repeats FxFS persist"
     );
 }
 
@@ -273,11 +333,7 @@ fn linux_mqueue_wait_accepts_any_cpu() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let runtime = std::fs::read_to_string(repository.join("src/syscall/linux_mqueue.rs"))
         .expect("read Linux mqueue runtime");
-    let wait = braced_body(
-        &runtime[runtime
-            .find("pub(crate) fn wait(")
-            .expect("mqueue wait")..],
-    );
+    let wait = braced_body(&runtime[runtime.find("pub(crate) fn wait(").expect("mqueue wait")..]);
     assert!(
         !wait.contains("current_cpu_id() != 0"),
         "blocking mq_send/mq_receive must work on every CPU so AArch64 SMP campaigns can drain a full queue"
@@ -290,7 +346,9 @@ fn linux_mqueue_wake_leaves_outcome_if_waiter_has_not_blocked() {
     let runtime = std::fs::read_to_string(repository.join("src/syscall/linux_mqueue.rs"))
         .expect("read Linux mqueue runtime");
     let wake = braced_body(
-        &runtime[runtime.find("fn wake_identity(").expect("mqueue wake helper")..],
+        &runtime[runtime
+            .find("fn wake_identity(")
+            .expect("mqueue wake helper")..],
     );
     assert!(wake.contains("linux_task::wake_blocked("));
     assert!(
@@ -308,9 +366,7 @@ fn linux_futex_accepts_any_cpu() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let futex = std::fs::read_to_string(repository.join("src/syscall/linux_futex.rs"))
         .expect("read Linux futex runtime");
-    let entry = braced_body(
-        &futex[futex.find("pub(crate) fn sys_futex(").expect("sys_futex")..],
-    );
+    let entry = braced_body(&futex[futex.find("pub(crate) fn sys_futex(").expect("sys_futex")..]);
     assert!(
         !entry.contains("current_cpu_id() != 0"),
         "private condvar futex waits must be allowed on secondary CPUs"
@@ -330,9 +386,9 @@ fn linux_timer_settime_arms_hardware_deadline() {
     let armed = settime
         .find("timer.arm(")
         .expect("POSIX timer is armed in software");
-    let hardware = settime
-        .find("arm_at_nanoseconds")
-        .expect("timer_settime must program a hardware compare so RISC-V 30ms timers fire during nanosleep");
+    let hardware = settime.find("arm_at_nanoseconds").expect(
+        "timer_settime must program a hardware compare so RISC-V 30ms timers fire during nanosleep",
+    );
     assert!(armed < hardware);
 }
 
@@ -2345,6 +2401,54 @@ fn aarch64_warning_gate_is_strict_and_target_scoped() {
     ));
     assert!(docs.contains("make aarch64-warning-check"));
     assert!(docs.contains("x86_64 and RISC-V64 warning policy is unchanged"));
+    assert!(makefile.contains("SMOKE_QEMU_MEMORY ?= 2G"));
+    assert!(makefile.contains(
+        "QEMU_MEMORY='$(SMOKE_QEMU_MEMORY)' QEMU_BLOCK_DEVICE='$(QEMU_BLOCK_DEVICE)' QEMU_NET_DEVICE='$(QEMU_NET_DEVICE)' FXFS_DISK='$(FXFS_DISK)' SMROS_ST_LOG='$(SMROS_ST_LOG)' ./scripts/smoke-qemu.sh"
+    ));
+}
+
+#[test]
+fn testsc_uses_in_process_linux_syscalls_from_kernel_shell() {
+    let shell = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/user_shell.rs"
+    ));
+    let syscall = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/syscall.rs"
+    ));
+    let docs = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/USER_SHELL.md"
+    ));
+
+    let start = shell.find("fn cmd_test_syscall(").expect("testsc command");
+    let end = shell[start..]
+        .find("fn cmd_fuzz_syscall(")
+        .map(|offset| start + offset)
+        .expect("fuzzsc command");
+    let cmd = &shell[start..end];
+    assert!(cmd.contains("KernelSyscallTestGuard::enter()"));
+    assert!(shell.contains("struct TestCompleteGuard"));
+    assert!(cmd.contains("complete.finish(ctx)"));
+    assert!(cmd.contains("crate::syscall::sys_write(1, msg.as_ptr() as usize, msg.len())"));
+    assert!(!cmd.contains("test_write("));
+    assert!(!cmd.contains("svc #0"));
+    assert!(syscall.contains("pub fn prepare_kernel_thread_linux()"));
+    assert!(syscall.contains("linux_process::ensure_dispatch_identity()?"));
+    assert!(syscall.contains("linux_process_memory::ensure_dispatch_memory(pid)"));
+    let exception_start = syscall
+        .find("pub fn sys_create_exception_channel(")
+        .expect("exception channel");
+    let exception_end = syscall[exception_start..]
+        .find("pub fn sys_exception_get_thread(")
+        .map(|offset| exception_start + offset)
+        .expect("exception get thread");
+    let exception = &syscall[exception_start..exception_end];
+    assert!(exception.contains("compat::create_object(ObjectType::Exception)"));
+    assert!(exception.contains("sys_channel_write("));
+    assert!(docs.contains("in-process `sys_write()`"));
+    assert!(!docs.contains("`test_write()`"));
 }
 
 #[test]
@@ -6086,6 +6190,34 @@ fn aarch64_kernel_threads_reserve_fork_transaction_headroom() {
 }
 
 #[test]
+fn riscv64_kernel_threads_reserve_fuzzsc_headroom() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let thread = std::fs::read_to_string(repository.join("src/kernel_lowlevel/RISCV64/thread.rs"))
+        .expect("read RISC-V thread runtime");
+    let declaration = thread
+        .lines()
+        .find(|line| {
+            line.trim_start()
+                .starts_with("pub const DEFAULT_STACK_SIZE:")
+        })
+        .expect("RISC-V default kernel stack size");
+    let value = declaration
+        .split_once('=')
+        .map(|(_, value)| value.trim().trim_end_matches(';').replace('_', ""))
+        .expect("RISC-V default kernel stack value");
+    let stack_size = value
+        .strip_prefix("0x")
+        .map(|value| usize::from_str_radix(value, 16))
+        .unwrap_or_else(|| value.parse())
+        .expect("numeric RISC-V default kernel stack value");
+
+    assert!(
+        stack_size == 0x4_0000,
+        "RISC-V hermes fuzzsc needs the 256 KiB kernel stack; 32 KiB overflows into the heap; got {stack_size:#x}"
+    );
+}
+
+#[test]
 fn aarch64_el0_context_abi_is_complete() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let boot = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/boot.rs"))
@@ -6383,11 +6515,15 @@ fn hermes_host_tests_use_fixed_enum_jobs_and_protocol() {
     assert!(client.contains("enum HermesHostTestJob"));
     assert!(client.contains("Self::Ut => \"ut\""));
     assert!(client.contains("Self::It => \"it\""));
-    assert!(client.contains("Self::St => \"st\""));
+    assert!(!client.contains("Self::St"));
+    assert!(!client.contains("Self::Skt"));
     assert!(client.contains("SMROS_TEST_RUN 1\\njob="));
-    assert!(launcher.contains("if job not in {\"ut\", \"it\", \"st\"}"));
+    assert!(launcher.contains("if job not in {\"ut\", \"it\"}"));
     assert!(!launcher.contains("shell=True"));
-    assert!(starter.contains("REQUIRED_VERSION=6"));
+    assert!(client.contains("HERMES_TEST_WAIT_NANOS"));
+    assert!(client.contains("read_response_until"));
+    assert!(client.contains("socket.keepalive()"));
+    assert!(starter.contains("REQUIRED_VERSION=8"));
     assert!(starter.contains("fields.get(\"hermes_test_jobs\") != \"1\""));
 }
 
@@ -6427,13 +6563,11 @@ fn hermes_test_orchestration_is_documented_and_smoke_wired() {
             .count(),
         1
     );
-    for job in [
-        "HermesHostTestJob::Ut",
-        "HermesHostTestJob::It",
-        "HermesHostTestJob::St",
-    ] {
+    for job in ["HermesHostTestJob::Ut", "HermesHostTestJob::It"] {
         assert_eq!(test_all.matches(job).count(), 1);
     }
+    assert!(!test_all.contains("HermesHostTestJob::St"));
+    assert!(!test_all.contains("HermesHostTestJob::Skt"));
     assert!(test_all.contains("campaign_report_omitted_rounds(options.iterations)"));
     for command in ["hermes exec", "hermes random", "hermes test-all"] {
         assert!(readme.contains(command));
@@ -6445,9 +6579,58 @@ fn hermes_test_orchestration_is_documented_and_smoke_wired() {
     assert!(!shell.contains("iterations=<1..64>"));
     assert!(!docs.contains("iterations=<1..64>"));
     assert!(docs.contains("permanently forbidden"));
+    assert!(smoke.contains("testsc"));
+    assert!(smoke.contains("fuzzsc seed=1 iterations=1"));
     assert!(smoke.contains("hermes random seed=1 iterations=1"));
     assert!(smoke.contains("hermes exec reboot"));
     assert!(smoke.contains("Hermes denied forbidden command: reboot"));
+    assert!(smoke.contains("=== Test Complete ==="));
+    assert!(smoke.contains("[OK] syscall and POSIX fuzz completed"));
+}
+
+#[test]
+fn fuzzsc_success_path_uses_live_mprotect_and_names_posix_errors() {
+    let fuzz = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/fuzz.rs"
+    ));
+    let shell = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/user_shell.rs"
+    ));
+    let catalog = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/hermes_shell_logic_shared.rs"
+    ));
+    assert!(fuzz.contains("226 => {\n            let addr = state.transient_mapping();"));
+    assert!(!fuzz.contains(
+        "226 => out = [state.mapping(), PAGE_SIZE, MmapProt::READ.bits(), 0, 0, 0]"
+    ));
+    assert!(fuzz.contains("fn untrack_mapping("));
+    assert!(fuzz.contains(r#"fxfs::set_attrs("/dev/shm", 0o40777, 0, 0)"#));
+    assert!(fuzz.contains(r#"fxfs::unlink_file("/dev/shm/fz")"#));
+    assert!(fuzz.contains("fn record_posix_err_api("));
+    assert!(fuzz.contains("posix_err_apis"));
+    assert!(shell.contains("posix_err_list="));
+    assert!(shell.contains("print_posix_fuzz_error_buckets"));
+    assert!(catalog.contains(r#"campaign_case_const("fuzzsc", "seed=1", "iterations=1", 2)"#));
+    let test_all_start = shell
+        .find("fn run_hermes_test_all(")
+        .expect("test-all function");
+    let test_all_end = shell[test_all_start..]
+        .find("fn run_hermes_random_campaign(")
+        .map(|offset| test_all_start + offset)
+        .expect("random campaign function");
+    let test_all = &shell[test_all_start..test_all_end];
+    assert!(test_all.contains("execute_hermes_campaign_round"));
+    assert!(test_all.contains("HermesHostTestJob::Ut"));
+    assert!(test_all.contains("HermesHostTestJob::It"));
+    let process = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/linux_process.rs"
+    ));
+    assert!(process.contains("if root_pid == Some(LINUX_DISPATCH_PID)"));
+    assert!(process.contains("switch_user_address_space(0)"));
 }
 
 #[test]
@@ -7420,6 +7603,9 @@ fn virtio_block_completion_wait_uses_a_monotonic_deadline() {
     assert!(submit.contains("let completion_deadline ="));
     assert!(submit.contains("get_nanoseconds()"));
     assert!(submit.contains("driver_logic::virtio_completion_timed_out("));
+    assert!(submit.contains("let start_used ="));
+    assert!(submit.contains("if used != start_used"));
+    assert!(!submit.contains("last_used_idx.wrapping_add(1)"));
     assert!(!submit.contains("for _ in 0..VIRTIO_TIMEOUT_SPINS"));
 }
 
@@ -7753,11 +7939,47 @@ fn kernel_heap_covers_embedded_posix_share_and_thread_stress() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let logic = std::fs::read_to_string(repository.join("src/main_logic.rs"))
         .expect("read kernel allocator configuration");
+    let main =
+        std::fs::read_to_string(repository.join("src/main.rs")).expect("read kernel allocator");
+    let cargo = std::fs::read_to_string(repository.join("Cargo.toml")).expect("read cargo profile");
 
     assert!(
         logic.contains("pub(crate) const KERNEL_HEAP_SIZE: usize = 0x1000_0000;"),
         "embedded POSIX metadata plus 1024-thread stress needs a 256 MiB kernel heap"
     );
+    assert!(
+        !main.contains("[0; main_logic::KERNEL_HEAP_SIZE]"),
+        "a 256 MiB [0; N] static makes release rustc stall on smros(bin)"
+    );
+    assert!(main.contains("extern \"C\" {"));
+    assert!(main.contains("static mut __heap_start: u8;"));
+    assert!(main.contains("fn kernel_heap_bounds()"));
+    let boot = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/boot.rs"))
+        .expect("read AArch64 boot image header");
+    assert!(boot.contains(".quad   __kernel_image_end - _start"));
+    assert!(!boot.contains(".quad   __kernel_end - _start"));
+    assert!(boot.contains("b.hs    5f"));
+    assert!(cargo.contains("lto = false"));
+    assert!(cargo.contains("incremental = true"));
+    assert!(!cargo.contains("lto = true"));
+    for script in [
+        "linker/kernel.ld",
+        "linker/kernel-riscv64.ld",
+        "linker/kernel-x86_64.ld",
+    ] {
+        let linker = std::fs::read_to_string(repository.join(script)).expect("read linker script");
+        assert!(
+            linker.contains(".heap (NOLOAD)"),
+            "{script} must reserve the kernel heap outside rustc constants"
+        );
+        assert!(linker.contains(". += 0x10000000;"));
+        assert!(linker.contains("__heap_start = .;"));
+        assert!(
+            linker.contains(". = ALIGN(16);\n        __bss_end = .;"),
+            "{script} must 16-byte-align __bss_end so the AArch64 boot clear terminates"
+        );
+        assert!(linker.contains("__kernel_image_end = .;"));
+    }
 }
 
 #[test]
