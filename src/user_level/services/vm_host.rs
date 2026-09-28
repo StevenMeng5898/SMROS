@@ -18,6 +18,12 @@ const RESPONSE_READ_ATTEMPTS: usize = 8;
 /// Host ST can take the full smoke timeout plus kernel build. Keep the TCP
 /// session open until that completes instead of reporting UNAVAILABLE.
 const HERMES_TEST_WAIT_NANOS: u64 = 6 * 60 * 1_000_000_000;
+/// After guest reset, virtio-net and QEMU slirp need a bounded wait before the
+/// launcher handshake succeeds.
+const HERMES_HOST_READY_WAIT_NANOS: u64 = 15 * 1_000_000_000;
+/// Nested Linux boot can take tens of seconds; keep the wait-boot TCP session
+/// open until the launcher sees the initramfs banner or times out.
+const HERMES_VM_BOOT_WAIT_NANOS: u64 = 60 * 1_000_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmHostError {
@@ -60,19 +66,21 @@ pub struct HermesHostTestResult {
     pub summary: String,
 }
 
+pub fn wait_for_host_transport() -> Result<(), VmHostError> {
+    let mut socket = connect_launcher(DEFAULT_LAUNCHER_PORT)?;
+    let _ = socket.close();
+    Ok(())
+}
+
 pub fn run_hermes_test(job: HermesHostTestJob) -> Result<HermesHostTestResult, VmHostError> {
     let request = build_hermes_test_request(job);
-    let mut socket = net::tcp_connect(NetworkSocketAddr {
-        ip: net::QEMU_USER_GATEWAY,
-        port: DEFAULT_LAUNCHER_PORT,
-    })
-    .map_err(map_connect_error)?;
+    let mut socket = connect_launcher(DEFAULT_LAUNCHER_PORT)?;
     socket
         .write(request.as_bytes())
         .map_err(VmHostError::Write)?;
     let mut response = [0u8; MAX_RESPONSE_BYTES];
-    let deadline = crate::kernel_lowlevel::timer::get_nanoseconds()
-        .saturating_add(HERMES_TEST_WAIT_NANOS);
+    let deadline =
+        crate::kernel_lowlevel::timer::get_nanoseconds().saturating_add(HERMES_TEST_WAIT_NANOS);
     let bytes = read_response_until(&mut socket, &mut response, deadline)?;
     let _ = socket.close();
     parse_hermes_test_response(job, &response[..bytes])
@@ -105,14 +113,24 @@ fn parse_hermes_test_response(
     })
 }
 
+pub fn wait_for_linux_boot(name: &str) -> Result<bool, VmHostError> {
+    let request = build_wait_boot_request(name)?;
+    let mut socket = connect_launcher(DEFAULT_LAUNCHER_PORT)?;
+    socket
+        .write(request.as_bytes())
+        .map_err(VmHostError::Write)?;
+    let mut response = [0u8; MAX_RESPONSE_BYTES];
+    let deadline =
+        crate::kernel_lowlevel::timer::get_nanoseconds().saturating_add(HERMES_VM_BOOT_WAIT_NANOS);
+    let bytes = read_response_until(&mut socket, &mut response, deadline)?;
+    let _ = socket.close();
+    parse_wait_boot_response(&response[..bytes])
+}
+
 pub fn launch(vm: &VmRecord) -> Result<VmHostLaunch, VmHostError> {
     let host = vm.host.as_ref().ok_or(VmHostError::NoHostConfig)?;
     let request = build_launch_request(vm, host)?;
-    let mut socket = net::tcp_connect(NetworkSocketAddr {
-        ip: net::QEMU_USER_GATEWAY,
-        port: host.launcher_port,
-    })
-    .map_err(map_connect_error)?;
+    let mut socket = connect_launcher(host.launcher_port)?;
     socket
         .write(request.as_bytes())
         .map_err(VmHostError::Write)?;
@@ -131,11 +149,7 @@ pub fn stop(vm: &VmRecord) -> Result<(), VmHostError> {
         return Ok(());
     }
     let request = build_stop_request(vm, host)?;
-    let mut socket = net::tcp_connect(NetworkSocketAddr {
-        ip: net::QEMU_USER_GATEWAY,
-        port: host.launcher_port,
-    })
-    .map_err(map_connect_error)?;
+    let mut socket = connect_launcher(host.launcher_port)?;
     socket
         .write(request.as_bytes())
         .map_err(VmHostError::Write)?;
@@ -148,11 +162,7 @@ pub fn stop(vm: &VmRecord) -> Result<(), VmHostError> {
 
 pub fn sync_trace(path: &str, trace: &[u8]) -> Result<(), VmHostError> {
     let request = build_trace_sync_request(path, trace.len())?;
-    let mut socket = net::tcp_connect(NetworkSocketAddr {
-        ip: net::QEMU_USER_GATEWAY,
-        port: DEFAULT_LAUNCHER_PORT,
-    })
-    .map_err(map_connect_error)?;
+    let mut socket = connect_launcher(DEFAULT_LAUNCHER_PORT)?;
     socket
         .write(request.as_bytes())
         .map_err(VmHostError::Write)?;
@@ -161,6 +171,26 @@ pub fn sync_trace(path: &str, trace: &[u8]) -> Result<(), VmHostError> {
     let bytes = read_response(&mut socket, &mut response, RESPONSE_READ_ATTEMPTS)?;
     let _ = socket.close();
     parse_stop_response(&response[..bytes])
+}
+
+fn connect_launcher(port: u16) -> Result<net::TcpSocket, VmHostError> {
+    let deadline = crate::kernel_lowlevel::timer::get_nanoseconds()
+        .saturating_add(HERMES_HOST_READY_WAIT_NANOS);
+    let _ = net::wait_until_ready(deadline);
+    loop {
+        match net::tcp_connect(NetworkSocketAddr {
+            ip: net::QEMU_USER_GATEWAY,
+            port,
+        }) {
+            Ok(socket) => return Ok(socket),
+            Err(err) => {
+                if crate::kernel_lowlevel::timer::get_nanoseconds() >= deadline {
+                    return Err(map_connect_error(err));
+                }
+                crate::kernel_objects::scheduler::yield_now();
+            }
+        }
+    }
 }
 
 fn map_connect_error(err: NetError) -> VmHostError {
@@ -244,6 +274,27 @@ fn build_trace_sync_request(path: &str, trace_len: usize) -> Result<String, VmHo
         return Err(VmHostError::RequestTooLarge);
     }
     Ok(request)
+}
+
+fn build_wait_boot_request(name: &str) -> Result<String, VmHostError> {
+    if !wire_value_valid(name) {
+        return Err(VmHostError::InvalidConfig);
+    }
+    let mut request = String::from("SMROS_VM_WAIT_BOOT 1\n");
+    push_kv(&mut request, "name", name)?;
+    request.push_str("end\n");
+    if request.len() > MAX_REQUEST_BYTES {
+        return Err(VmHostError::RequestTooLarge);
+    }
+    Ok(request)
+}
+
+fn parse_wait_boot_response(response: &[u8]) -> Result<bool, VmHostError> {
+    let text = core::str::from_utf8(response).map_err(|_| VmHostError::ResponseInvalid)?;
+    if !text.starts_with("OK ") {
+        return Err(VmHostError::LaunchDenied);
+    }
+    Ok(text.contains("boot=1"))
 }
 
 fn build_stop_request(vm: &VmRecord, host: &VmHostConfig) -> Result<String, VmHostError> {

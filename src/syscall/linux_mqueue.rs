@@ -120,6 +120,9 @@ pub(crate) fn wait(
     if deadline.is_some_and(|deadline| deadline.ticks <= now) {
         return Err(SysError::ETIMEDOUT);
     }
+    if linux_task::kernel_dispatch_active() {
+        return Err(SysError::EAGAIN);
+    }
 
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let result = (|| {

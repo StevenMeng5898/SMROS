@@ -61,6 +61,28 @@ class HermesHostTestProtocolTests(unittest.TestCase):
         self.assertNotIn("st", args[0])
         self.assertIn("OK job=it status=0", response)
 
+    def test_linux_boot_marker_matches_initramfs_banner(self) -> None:
+        self.assertGreaterEqual(LAUNCHER.LAUNCHER_VERSION, 9)
+        self.assertIn("linux_boot=1", LAUNCHER.launcher_status())
+        self.assertTrue(
+            LAUNCHER.linux_boot_seen_text("\nSMROS Linux VM initramfs\nKernel: Linux")
+        )
+        self.assertFalse(LAUNCHER.linux_boot_seen_text("qemu started"))
+
+    def test_vc_serial_tees_console_to_logfile(self) -> None:
+        args = LAUNCHER.qemu_serial_args("linux-demo", "vc")
+        joined = " ".join(args)
+        self.assertIn("logfile=", joined)
+        self.assertIn("chardev:smros-serial", joined)
+        self.assertNotEqual(args, ["-serial", "vc"])
+
+    def test_wait_boot_request_is_accepted(self) -> None:
+        header, values = LAUNCHER.parse_request(
+            b"SMROS_VM_WAIT_BOOT 1\nname=linux-demo\nend\n"
+        )
+        self.assertEqual(header, "SMROS_VM_WAIT_BOOT 1")
+        self.assertEqual(values["name"], "linux-demo")
+
 
 if __name__ == "__main__":
     unittest.main()

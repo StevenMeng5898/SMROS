@@ -10444,7 +10444,6 @@ fn hermes_shell_policy_permanently_denies_dangerous_commands() {
     for (command, args) in [
         ("rm", &[][..]),
         ("kill", &["1"][..]),
-        ("reboot", &[][..]),
         ("exit", &[][..]),
         ("clear", &[][..]),
         ("vi", &["/tmp/a"][..]),
@@ -10454,9 +10453,9 @@ fn hermes_shell_policy_permanently_denies_dangerous_commands() {
         ("mv", &["a", "b"][..]),
         ("cp", &["a", "b"][..]),
         ("mount", &[][..]),
-        ("vm", &["-k", "demo"][..]),
-        ("docker", &["rm", "smros0001"][..]),
-        ("docker", &["stop", "smros0001"][..]),
+        ("vm", &["-c", "/tmp/vm-demo.xml"][..]),
+        ("docker", &["load", "-i", "/tmp/ubuntu-alpineamr64.tar"][..]),
+        ("docker", &["pull", "alpine"][..]),
     ] {
         assert_eq!(classify(command, args), HermesShellPolicy::Forbidden);
     }
@@ -10473,11 +10472,25 @@ fn hermes_shell_policy_allows_only_bounded_safe_forms() {
         ("meminfo", &[][..]),
         ("testsc", &[][..]),
         ("fuzzsc", &["seed=7", "iterations=4"][..]),
+        ("reboot", &[][..]),
         ("vm", &["-s"][..]),
+        ("vm", &["-c", "/shared/vm-demo.xml"][..]),
+        ("vm", &["-k"][..]),
+        ("vm", &["-k", "linux-demo"][..]),
         ("docker", &["images"][..]),
         ("docker", &["ps", "-a"][..]),
         ("docker", &["inspect", "smros0001"][..]),
         ("docker", &["logs", "smros0001"][..]),
+        (
+            "docker",
+            &["load", "-i", "/shared/ubuntu-alpineamr64.tar"][..],
+        ),
+        ("docker", &["run"][..]),
+        ("docker", &["run", "ubuntu-alpineamr64:latest"][..]),
+        ("docker", &["stop"][..]),
+        ("docker", &["stop", "smros0001"][..]),
+        ("docker", &["rm"][..]),
+        ("docker", &["rm", "smros0001"][..]),
     ] {
         assert_eq!(classify(command, args), HermesShellPolicy::Allowed);
     }
@@ -10489,7 +10502,11 @@ fn hermes_shell_policy_allows_only_bounded_safe_forms() {
     );
     assert_eq!(classify("unknown", &[]), HermesShellPolicy::Forbidden);
     assert_eq!(
-        classify("fuzzsc", &["iterations=999"]),
+        classify("fuzzsc", &["seed=42", "iterations=100"]),
+        HermesShellPolicy::Allowed
+    );
+    assert_eq!(
+        classify("fuzzsc", &["iterations=101"]),
         HermesShellPolicy::Invalid
     );
 }
@@ -10586,7 +10603,233 @@ fn hermes_campaign_selection_is_reproducible_and_bounded() {
     }
 }
 
+#[test]
+fn hermes_resume_state_round_trips_and_continues_after_reboot() {
+    use hermes_shell_logic::{
+        campaign_case_for_mode, campaign_case_index_for_mode, campaign_case_is_reboot, classify,
+        format_resume_state, parse_resume_state, resume_should_continue, HermesCampaignMode,
+        HermesResumeKind, HermesResumeState, HermesShellPolicy, HERMES_RESUME_TEXT_CAPACITY,
+    };
+
+    assert_eq!(classify("reboot", &[]), HermesShellPolicy::Allowed);
+    assert_eq!(
+        classify("vm", &["-c", "/shared/vm-demo.xml"]),
+        HermesShellPolicy::Allowed
+    );
+    assert_eq!(
+        classify("vm", &["-k", "linux-demo"]),
+        HermesShellPolicy::Allowed
+    );
+    let mut saw_reboot = false;
+    let mut saw_vm_create = false;
+    let mut saw_vm_kill = false;
+    for index in 0..hermes_shell_logic::HERMES_CAMPAIGN_CASES {
+        let case = campaign_case_for_mode(HermesCampaignMode::Ops, index).expect("ops catalog");
+        if campaign_case_is_reboot(case.command) {
+            saw_reboot = true;
+        }
+        if hermes_shell_logic::campaign_case_is_vm_create(&case) {
+            saw_vm_create = true;
+            assert_eq!(case.args[0], "-c");
+            assert_eq!(case.args[1], "/shared/vm-demo.xml");
+        }
+        if case.command == "vm" && case.arg_count >= 1 && case.args[0] == "-k" {
+            saw_vm_kill = true;
+        }
+        assert_eq!(
+            classify(case.command, &case.args[..case.arg_count]),
+            HermesShellPolicy::Allowed
+        );
+    }
+    assert!(saw_reboot, "ops catalog must include reboot");
+    assert!(
+        saw_vm_create,
+        "ops catalog must include vm -c /shared/vm-demo.xml"
+    );
+    assert!(
+        !saw_vm_kill,
+        "ops catalog must not independently select vm -k; create must recycle it"
+    );
+    let first = campaign_case_for_mode(
+        HermesCampaignMode::Ops,
+        campaign_case_index_for_mode(1, 0, HermesCampaignMode::Ops),
+    )
+    .expect("seed=1 round=0");
+    assert!(
+        !campaign_case_is_reboot(first.command),
+        "smoke hermes random seed=1 iterations=1 must not reboot"
+    );
+    assert!(
+        !hermes_shell_logic::campaign_case_is_vm_create(&first),
+        "smoke hermes random seed=1 iterations=1 must not launch nested QEMU"
+    );
+
+    let state = HermesResumeState {
+        kind: HermesResumeKind::TestAll,
+        seed: 7,
+        iterations: 8,
+        mode: HermesCampaignMode::Ops,
+        next_round: 3,
+        native_ok: true,
+        completed: 3,
+        denied: 0,
+        invalid: 0,
+        unknown: 0,
+        host_ut_pass: 3,
+        host_ut_fail: 0,
+        host_it_pass: 2,
+        host_it_fail: 1,
+        host_jobs_pending: true,
+    };
+    let mut buf = [0u8; HERMES_RESUME_TEXT_CAPACITY];
+    let written = format_resume_state(&state, &mut buf).expect("format resume");
+    let text = core::str::from_utf8(&buf[..written]).expect("utf8 resume");
+    assert!(text.contains("kind=test-all"));
+    assert!(text.contains("next_round=3"));
+    assert!(text.contains("host_jobs_pending=1"));
+    assert_eq!(parse_resume_state(text), Some(state));
+    assert_eq!(
+        hermes_shell_logic::resume_pending_host_iteration(&state),
+        Some(3)
+    );
+    assert!(resume_should_continue(&state));
+    let finished = HermesResumeState {
+        next_round: 8,
+        host_jobs_pending: false,
+        ..state
+    };
+    assert!(!resume_should_continue(&finished));
+    assert_eq!(
+        hermes_shell_logic::resume_pending_host_iteration(&finished),
+        None
+    );
+    let legacy = "kind=test-all\nseed=7\niterations=8\nmode=ops\nnext_round=3\nnative=pass\ncompleted=3\ndenied=0\ninvalid=0\nunknown=0\nhost_ut_pass=3\nhost_ut_fail=0\nhost_it_pass=2\nhost_it_fail=1\n";
+    let parsed_legacy = parse_resume_state(legacy).expect("legacy resume without pending flag");
+    assert!(!parsed_legacy.host_jobs_pending);
+    assert_eq!(parse_resume_state("kind=test-all\nseed=1\n"), None);
+}
+
+#[test]
+fn hermes_campaign_vm_create_recycles_after_linux_boot() {
+    use hermes_shell_logic::{
+        campaign_case_for_mode, campaign_case_index_for_mode, campaign_case_is_reboot,
+        campaign_case_is_vm_create, campaign_case_is_vm_kill, campaign_vm_recycle_name, classify,
+        HermesCampaignMode, HermesShellPolicy, HERMES_CAMPAIGN_CASES, HERMES_CAMPAIGN_VM_NAME,
+        HERMES_CAMPAIGN_VM_XML,
+    };
+
+    assert_eq!(HERMES_CAMPAIGN_CASES, 15);
+    assert_eq!(HERMES_CAMPAIGN_VM_NAME, "linux-demo");
+    assert_eq!(HERMES_CAMPAIGN_VM_XML, "/shared/vm-demo.xml");
+    assert_eq!(campaign_vm_recycle_name(), "linux-demo");
+    assert_eq!(
+        classify("vm", &["-k", "linux-demo"]),
+        HermesShellPolicy::Allowed
+    );
+
+    let mut saw_create = false;
+    let mut saw_kill = false;
+    let mut saw_uptime = false;
+    for index in 0..HERMES_CAMPAIGN_CASES {
+        let case = campaign_case_for_mode(HermesCampaignMode::Ops, index).expect("ops catalog");
+        if campaign_case_is_vm_create(&case) {
+            saw_create = true;
+            assert_eq!(case.args[0], "-c");
+            assert_eq!(case.args[1], HERMES_CAMPAIGN_VM_XML);
+        }
+        if campaign_case_is_vm_kill(&case) {
+            saw_kill = true;
+        }
+        if case.command == "uptime" {
+            saw_uptime = true;
+        }
+    }
+    assert!(
+        saw_create,
+        "ops catalog must include vm -c /shared/vm-demo.xml"
+    );
+    assert!(
+        !saw_kill,
+        "vm -k must be coupled with create after Linux boots, not independently selected"
+    );
+    assert!(
+        saw_uptime,
+        "replacing independent vm -k must keep catalog length 15 with a cheap status case"
+    );
+
+    let first = campaign_case_for_mode(
+        HermesCampaignMode::Ops,
+        campaign_case_index_for_mode(1, 0, HermesCampaignMode::Ops),
+    )
+    .expect("seed=1 round=0");
+    assert!(
+        !campaign_case_is_reboot(first.command),
+        "smoke hermes random seed=1 iterations=1 must not reboot"
+    );
+    assert!(
+        !campaign_case_is_vm_create(&first),
+        "smoke hermes random seed=1 iterations=1 must not launch nested QEMU"
+    );
+}
+
+#[test]
+fn hermes_campaign_fuzzsc_uses_campaign_seed_and_hundred_iterations() {
+    use hermes_shell_logic::{
+        campaign_case_for_mode, campaign_fuzzsc_seed_arg, classify, HermesCampaignMode,
+        HermesShellPolicy, HERMES_CAMPAIGN_CASES, HERMES_CAMPAIGN_FUZZSC_ITERATIONS,
+        HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG, HERMES_SYSCALL_CAMPAIGN_CASES,
+    };
+
+    assert_eq!(HERMES_CAMPAIGN_FUZZSC_ITERATIONS, 100);
+    assert_eq!(HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG, "iterations=100");
+    let mut buf = [0u8; 32];
+    assert_eq!(campaign_fuzzsc_seed_arg(1, &mut buf), Some("seed=1"));
+    assert_eq!(campaign_fuzzsc_seed_arg(1234, &mut buf), Some("seed=1234"));
+    assert_eq!(
+        classify("fuzzsc", &["seed=1234", "iterations=100"]),
+        HermesShellPolicy::Allowed
+    );
+    assert_eq!(
+        classify("fuzzsc", &["iterations=101"]),
+        HermesShellPolicy::Invalid
+    );
+
+    let mut saw_ops = false;
+    for index in 0..HERMES_CAMPAIGN_CASES {
+        let case = campaign_case_for_mode(HermesCampaignMode::Ops, index).expect("ops");
+        if case.command == "fuzzsc" {
+            saw_ops = true;
+            assert!(
+                case.args[..case.arg_count]
+                    .iter()
+                    .any(|arg| *arg == "iterations=100"),
+                "ops catalog fuzzsc must request 100 iterations"
+            );
+            assert!(
+                !case.args[..case.arg_count]
+                    .iter()
+                    .any(|arg| *arg == "iterations=1"),
+                "ops catalog fuzzsc must not hard-code iterations=1"
+            );
+        }
+    }
+    assert!(saw_ops);
+
+    let mut saw_syscall = false;
+    for index in 0..HERMES_SYSCALL_CAMPAIGN_CASES {
+        let case = campaign_case_for_mode(HermesCampaignMode::Syscall, index).expect("syscall");
+        if case.command == "fuzzsc" {
+            saw_syscall = true;
+            assert!(case.args[..case.arg_count]
+                .iter()
+                .any(|arg| *arg == "iterations=100"));
+        }
+    }
+    assert!(saw_syscall);
+}
+
 mod syscall_bridge_logic {
+
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/syscall/syscall_bridge_shared.rs"

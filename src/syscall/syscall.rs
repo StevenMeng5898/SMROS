@@ -7108,6 +7108,9 @@ fn linux_sleep_until(wait: LinuxSleepWait, rem: usize) -> SysResult {
     if wait.deadline <= now {
         return Ok(0);
     }
+    if linux_task::kernel_dispatch_active() {
+        return Ok(0);
+    }
     if wait.relative.is_some()
         && rem != 0
         && !linux_sleep_user_range_writable(rem, core::mem::size_of::<LinuxTimespec>())

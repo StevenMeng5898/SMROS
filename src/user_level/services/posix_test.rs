@@ -2275,7 +2275,9 @@ mod tests {
             "conformance/interfaces/mlockall/speculative/15-1.c"
         ));
         assert!(!requires_regular_user("conformance/interfaces/mmap/27-1.c"));
-        assert!(!requires_regular_user("conformance/interfaces/sched_setparam/27-1.c"));
+        assert!(!requires_regular_user(
+            "conformance/interfaces/sched_setparam/27-1.c"
+        ));
     }
 
     #[test]

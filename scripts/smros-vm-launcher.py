@@ -27,10 +27,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 7070
 MAX_REQUEST = 4096
-LAUNCHER_VERSION = 8
+LAUNCHER_VERSION = 9
 DEFAULT_LAUNCH_STABLE_SECONDS = 2.0
+DEFAULT_LINUX_BOOT_SECONDS = 45.0
 DEFAULT_TERMINATE_TIMEOUT_SECONDS = 3.0
 DEFAULT_TEST_TIMEOUT_SECONDS = 300.0
+LINUX_BOOT_MARKERS = ("SMROS Linux VM initramfs",)
 MAX_TEST_LOG_BYTES = 64 * 1024
 
 LOCK = threading.Lock()
@@ -47,6 +49,7 @@ def parse_request(data: bytes) -> tuple[str, dict[str, str]]:
         "SMROS_VM_LAUNCH 1",
         "SMROS_VM_STOP 1",
         "SMROS_VM_PING 1",
+        "SMROS_VM_WAIT_BOOT 1",
         "SMROS_TRACE_SYNC 1",
         "SMROS_TEST_RUN 1",
     }:
@@ -101,8 +104,7 @@ def launch_qemu(values: dict[str, str]) -> str:
         values.get("display", "gtk"),
         "-monitor",
         "none",
-        "-serial",
-        values.get("serial", "vc:1024x768"),
+        *qemu_serial_args(name, values.get("serial", "vc")),
         "-kernel",
         str(kernel),
         "-append",
@@ -134,6 +136,10 @@ def launch_qemu(values: dict[str, str]) -> str:
             terminate_process(old)
         for pid in terminate_qemu_by_name(name):
             print(f"smros-vm-launcher: terminated stale VM {name} pid={pid}", flush=True)
+        try:
+            serial_log_path(name).write_bytes(b"")
+        except OSError:
+            pass
         log_file = log_path.open("ab", buffering=0)
         log_file.write(f"\n--- launch {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode())
         log_file.write(("qemu " + shlex.join(cmd[1:]) + "\n").encode())
@@ -184,7 +190,7 @@ def stop_qemu(values: dict[str, str]) -> str:
 def launcher_status() -> str:
     return (
         f"OK version={LAUNCHER_VERSION} monitor_none=1 stale_qemu_cleanup=1 "
-        "trace_sync=1 stable_launch=1 vm_log=1 hermes_test_jobs=1\n"
+        "trace_sync=1 stable_launch=1 vm_log=1 hermes_test_jobs=1 linux_boot=1\n"
     )
 
 
@@ -305,11 +311,19 @@ def launch_stable_seconds() -> float:
     return env_float("SMROS_VM_LAUNCH_STABLE_SECONDS", DEFAULT_LAUNCH_STABLE_SECONDS)
 
 
+def linux_boot_seconds() -> float:
+    return env_float(
+        "SMROS_VM_LINUX_BOOT_SECONDS",
+        DEFAULT_LINUX_BOOT_SECONDS,
+        maximum=120.0,
+    )
+
+
 def terminate_timeout_seconds() -> float:
     return env_float("SMROS_VM_TERMINATE_TIMEOUT_SECONDS", DEFAULT_TERMINATE_TIMEOUT_SECONDS)
 
 
-def env_float(name: str, default: float) -> float:
+def env_float(name: str, default: float, maximum: float = 30.0) -> float:
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -319,9 +333,66 @@ def env_float(name: str, default: float) -> float:
         return default
     if value < 0.1:
         return 0.1
-    if value > 30.0:
-        return 30.0
+    if value > maximum:
+        return maximum
     return value
+
+
+def serial_log_path(name: str) -> Path:
+    return vm_log_path(name).with_suffix(".serial")
+
+
+def qemu_serial_args(name: str, serial: str) -> list[str]:
+    if serial == "vc" or serial.startswith("vc:"):
+        path = serial_log_path(name)
+        chardev = f"vc,id=smros-serial,logfile={path},logappend=off"
+        if serial.startswith("vc:") and "x" in serial:
+            geom = serial.split(":", 1)[1]
+            width, _, height = geom.partition("x")
+            if width.isdigit() and height.isdigit():
+                chardev = (
+                    f"vc,id=smros-serial,width={width},height={height},"
+                    f"logfile={path},logappend=off"
+                )
+        return ["-chardev", chardev, "-serial", "chardev:smros-serial"]
+    return ["-serial", serial]
+
+
+def linux_boot_seen_text(text: str) -> bool:
+    return any(marker in text for marker in LINUX_BOOT_MARKERS)
+
+
+def linux_boot_seen(path: Path) -> bool:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    return linux_boot_seen_text(data.decode("utf-8", errors="replace"))
+
+
+def wait_for_linux_boot(values: dict[str, str]) -> str:
+    name = values.get("name", "")
+    if not name:
+        raise ValueError("missing name")
+    serial_path = serial_log_path(name)
+    with LOCK:
+        proc = PROCS.get(name)
+    deadline = time.monotonic() + linux_boot_seconds()
+    while time.monotonic() < deadline:
+        if proc is not None and proc.poll() is not None:
+            raise RuntimeError(
+                f"qemu exited before linux boot status={proc.returncode} "
+                f"serial={serial_path.name} tail={log_tail(serial_path)}"
+            )
+        if linux_boot_seen(serial_path):
+            print(f"smros-vm-launcher: linux boot OK {name}", flush=True)
+            return "OK boot=1 marker=initramfs\n"
+        time.sleep(0.1)
+    if linux_boot_seen(serial_path):
+        print(f"smros-vm-launcher: linux boot OK {name}", flush=True)
+        return "OK boot=1 marker=initramfs\n"
+    print(f"smros-vm-launcher: linux boot timed out {name}", flush=True)
+    return "OK boot=0 timed_out=1\n"
 
 
 def wait_for_stable_launch(name: str, proc: subprocess.Popen[bytes], log_path: Path) -> None:
@@ -427,6 +498,8 @@ class Handler(socketserver.BaseRequestHandler):
                 action = "launch"
             elif header == "SMROS_VM_STOP 1":
                 action = "stop"
+            elif header == "SMROS_VM_WAIT_BOOT 1":
+                action = "wait-boot"
             elif header == "SMROS_TRACE_SYNC 1":
                 action = "trace-sync"
             elif header == "SMROS_TEST_RUN 1":
@@ -441,6 +514,8 @@ class Handler(socketserver.BaseRequestHandler):
                 response = launch_qemu(values)
             elif header == "SMROS_VM_STOP 1":
                 response = stop_qemu(values)
+            elif header == "SMROS_VM_WAIT_BOOT 1":
+                response = wait_for_linux_boot(values)
             elif header == "SMROS_TRACE_SYNC 1":
                 response = sync_trace(values)
             elif header == "SMROS_TEST_RUN 1":

@@ -175,9 +175,7 @@ fn testsc_does_not_repeat_fxfs_smoke_after_starting_component_threads() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let shell = std::fs::read_to_string(repository.join("src/user_level/services/user_shell.rs"))
         .expect("read user shell");
-    let start = shell
-        .find("fn cmd_test_syscall(")
-        .expect("testsc command");
+    let start = shell.find("fn cmd_test_syscall(").expect("testsc command");
     let body = braced_body(&shell[start..]);
     let fxfs = body
         .find("fxfs::smoke_test()")
@@ -6476,6 +6474,194 @@ fn x86_system_reset_uses_hardware_reset_ports_before_halting() {
 }
 
 #[test]
+fn hermes_owns_reboot_and_cmd_skills() {
+    let agent = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/hermes_agent.rs"
+    ));
+    let policy = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/hermes_shell_logic_shared.rs"
+    ));
+    let docs = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/USER_SHELL.md"
+    ));
+
+    assert!(agent.contains("slug: \"reboot\""));
+    assert!(agent.contains("/data/hermes/skills/reboot/SKILL.md"));
+    assert!(agent.contains("slug: \"cmd\""));
+    assert!(agent.contains("/data/hermes/skills/cmd/SKILL.md"));
+    assert!(agent.contains("vm -c /shared/vm-demo.xml"));
+    assert!(agent.contains("vm -k"));
+    assert!(agent.contains("vm -s"));
+    assert!(agent.contains("docker load -i /shared/ubuntu-alpineamr64.tar"));
+    assert!(agent.contains("docker run"));
+    assert!(agent.contains("docker stop"));
+    assert!(agent.contains("docker rm"));
+    assert!(agent.contains("hermes exec reboot"));
+    assert!(docs.contains("`reboot` skill"));
+    assert!(docs.contains("`cmd` skill"));
+    assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../host_shared/vm-demo.xml")
+        .is_file());
+    assert!(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../host_shared/ubuntu-alpineamr64.tar")
+        .is_file());
+    assert!(policy.contains("\"reboot\" => no_args(args)"));
+    assert!(policy.contains("valid_vm_xml_path"));
+    assert!(policy.contains("docker_run_args_allowed"));
+    let catalog_start = policy
+        .find("const CAMPAIGN_CATALOG")
+        .expect("campaign catalog");
+    let catalog_end = policy.find("pub fn classify(").expect("classify");
+    let catalogs = &policy[catalog_start..catalog_end];
+    assert!(catalogs.contains("reboot"));
+    assert!(catalogs.contains("\"-c\""));
+    assert!(catalogs.contains("/shared/vm-demo.xml"));
+    assert!(!catalogs.contains("campaign_case_const(\"vm\", \"-k\""));
+    assert!(policy.contains("HERMES_CAMPAIGN_VM_NAME"));
+    assert!(policy.contains("linux-demo"));
+    let syscall_start = policy
+        .find("const SYSCALL_CAMPAIGN_CATALOG")
+        .expect("syscall catalog");
+    let syscall = &policy[syscall_start..catalog_end];
+    assert!(!syscall.contains("reboot"));
+    assert!(!syscall.contains("/shared/vm-demo.xml"));
+    assert!(!catalogs.contains("docker load"));
+    assert!(!catalogs.contains("docker run"));
+    assert!(!catalogs.contains("docker stop"));
+    assert!(!catalogs.contains("docker rm"));
+}
+
+#[test]
+fn hermes_test_resumes_after_reboot() {
+    let shell = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/user_shell.rs"
+    ));
+    let agent = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/hermes_agent.rs"
+    ));
+    let policy = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/hermes_shell_logic_shared.rs"
+    ));
+    let docs = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/USER_SHELL.md"
+    ));
+
+    let run_start = shell
+        .find("/// Run the shell main loop")
+        .expect("shell main loop");
+    let run = &shell[run_start..];
+    let run_fn = run
+        .find("pub fn run(&mut self) -> ! {")
+        .expect("UserShell::run");
+    let run_body = braced_body(&run[run_fn..]);
+    assert!(run_body.contains("maybe_resume_hermes_campaign"));
+
+    let reboot_start = shell.find("fn cmd_reboot(").expect("cmd_reboot");
+    let reboot = braced_body(&shell[reboot_start..]);
+    let persist_pos = reboot.find("flush_persist()").expect("reboot flushes FxFS");
+    let reset_pos = reboot.find("system_reset()").expect("reboot resets");
+    assert!(persist_pos < reset_pos);
+
+    assert!(agent.contains("pub fn persist_resume_state("));
+    assert!(agent.contains("pub fn load_resume_state("));
+    assert!(agent.contains("pub fn clear_resume_state("));
+    assert!(policy.contains("HERMES_RESUME_PATH"));
+    assert!(policy.contains("campaign_case_const(\"reboot\", \"\", \"\", 0)"));
+    assert!(policy.contains("host_jobs_pending"));
+    assert!(policy.contains("resume_pending_host_iteration"));
+    assert!(shell.contains("Hermes resume test-all"));
+    assert!(shell.contains("wait_for_host_transport"));
+    let resume_start = shell
+        .find("fn maybe_resume_hermes_campaign(")
+        .expect("maybe_resume_hermes_campaign");
+    let resume_body = braced_body(&shell[resume_start..]);
+    assert!(resume_body.contains("resume_pending_host_iteration"));
+    assert!(resume_body.contains("run_hermes_host_jobs"));
+    assert!(resume_body.contains("wait_for_host_transport"));
+    let test_all_start = shell
+        .find("fn run_hermes_test_all_inner(")
+        .expect("test-all inner");
+    let test_all_end = shell[test_all_start..]
+        .find("fn run_hermes_random_campaign(")
+        .map(|offset| test_all_start + offset)
+        .expect("random campaign function");
+    let test_all = &shell[test_all_start..test_all_end];
+    let reboot_pos = test_all
+        .find("if campaign_case_is_reboot(case.command)")
+        .expect("reboot campaign branch");
+    let reboot_if = braced_body(&test_all[reboot_pos..]);
+    assert!(reboot_if.contains("host_jobs_pending: true"));
+    assert!(!reboot_if.contains("run_hermes_host_jobs("));
+    assert!(docs.contains("resume after reboot"));
+    assert!(docs.contains("nested"));
+}
+
+#[test]
+fn hermes_campaign_vm_create_waits_for_linux_boot_then_kills() {
+    let shell = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/user_shell.rs"
+    ));
+    let policy = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/hermes_shell_logic_shared.rs"
+    ));
+    let docs = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/USER_SHELL.md"
+    ));
+    let testing = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/TESTING.md"
+    ));
+
+    let catalog_start = policy
+        .find("const CAMPAIGN_CATALOG")
+        .expect("campaign catalog");
+    let catalog_end = policy.find("pub fn classify(").expect("classify");
+    let catalogs = &policy[catalog_start..catalog_end];
+    assert!(catalogs.contains("/shared/vm-demo.xml"));
+    assert!(!catalogs.contains("campaign_case_const(\"vm\", \"-k\""));
+    assert!(policy.contains("pub fn campaign_case_is_vm_create("));
+    assert!(policy.contains("pub fn campaign_case_is_vm_kill("));
+    assert!(policy.contains("pub fn campaign_vm_recycle_name("));
+    assert!(policy.contains("HERMES_CAMPAIGN_VM_NAME"));
+
+    let execute_start = shell
+        .find("fn execute_bound_hermes_campaign_case(")
+        .expect("execute_bound_hermes_campaign_case");
+    let execute_body = braced_body(&shell[execute_start..]);
+    assert!(execute_body.contains("campaign_case_is_vm_create"));
+    assert!(
+        execute_body.contains("recycle_hermes_campaign_vm")
+            || shell.contains("fn recycle_hermes_campaign_vm(")
+    );
+    let recycle_start = shell
+        .find("fn recycle_hermes_campaign_vm(")
+        .expect("recycle_hermes_campaign_vm");
+    let recycle_body = braced_body(&shell[recycle_start..]);
+    let wait_pos = recycle_body
+        .find("wait_for_linux_boot")
+        .expect("wait until guest Linux boots");
+    let kill_pos = recycle_body.find("\"-k\"").expect("recycle with vm -k");
+    assert!(
+        wait_pos < kill_pos,
+        "campaign must wait for Linux boot OK before vm -k"
+    );
+    assert!(recycle_body.contains("HERMES_CAMPAIGN_VM_NAME"));
+    assert!(docs.contains("boot OK"));
+    assert!(docs.contains("recycl"));
+    assert!(testing.contains("boot OK") || testing.contains("recycl"));
+}
+
+#[test]
 fn hermes_safe_gateway_authorizes_before_shell_dispatch() {
     let shell = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -6521,10 +6707,26 @@ fn hermes_host_tests_use_fixed_enum_jobs_and_protocol() {
     assert!(launcher.contains("if job not in {\"ut\", \"it\"}"));
     assert!(!launcher.contains("shell=True"));
     assert!(client.contains("HERMES_TEST_WAIT_NANOS"));
+    assert!(client.contains("HERMES_HOST_READY_WAIT_NANOS"));
+    assert!(client.contains("fn wait_for_host_transport("));
+    assert!(client.contains("fn connect_launcher("));
     assert!(client.contains("read_response_until"));
     assert!(client.contains("socket.keepalive()"));
-    assert!(starter.contains("REQUIRED_VERSION=8"));
+    let run_test = client
+        .find("pub fn run_hermes_test(")
+        .expect("run_hermes_test");
+    let run_body = braced_body(&client[run_test..]);
+    assert!(run_body.contains("connect_launcher("));
+    let launch = client.find("pub fn launch(").expect("launch");
+    let launch_body = braced_body(&client[launch..]);
+    assert!(launch_body.contains("connect_launcher("));
+    assert!(starter.contains("REQUIRED_VERSION=9"));
     assert!(starter.contains("fields.get(\"hermes_test_jobs\") != \"1\""));
+    assert!(starter.contains("fields.get(\"linux_boot\") != \"1\""));
+    assert!(launcher.contains("SMROS_VM_WAIT_BOOT 1"));
+    assert!(launcher.contains("SMROS Linux VM initramfs"));
+    assert!(client.contains("fn wait_for_linux_boot("));
+    assert!(client.contains("HERMES_VM_BOOT_WAIT_NANOS"));
 }
 
 #[test]
@@ -6552,23 +6754,24 @@ fn hermes_test_orchestration_is_documented_and_smoke_wired() {
         .map(|offset| test_all_start + offset)
         .expect("random campaign function");
     let test_all = &shell[test_all_start..test_all_end];
-    let round_loop = "for round in 0..options.iterations {";
+    let round_loop = "for round in start_round..options.iterations {";
     let round_pos = test_all.find(round_loop).expect("test-all iteration loop");
     let round_body = braced_body(&test_all[round_pos..]);
     assert!(test_all[..round_pos].contains("run_hermes_agent_tests(ctx)"));
     assert!(round_body.contains("execute_hermes_campaign_round"));
-    assert_eq!(
-        round_body
-            .matches("for (job_index, job) in jobs.iter().copied().enumerate()")
-            .count(),
-        1
-    );
-    for job in ["HermesHostTestJob::Ut", "HermesHostTestJob::It"] {
-        assert_eq!(test_all.matches(job).count(), 1);
-    }
+    assert!(round_body.contains("campaign_case_is_reboot"));
+    assert!(round_body.contains("persist_hermes_resume_state"));
+    assert!(round_body.contains("run_hermes_host_jobs"));
+    assert!(shell.contains("print_vm_host_error"));
+    let host_jobs = shell
+        .find("fn run_hermes_host_jobs(")
+        .expect("run_hermes_host_jobs");
+    let host_jobs_body = braced_body(&shell[host_jobs..]);
+    assert!(host_jobs_body.contains("print_vm_host_error"));
+    assert!(host_jobs_body.contains("UNAVAILABLE"));
     assert!(!test_all.contains("HermesHostTestJob::St"));
     assert!(!test_all.contains("HermesHostTestJob::Skt"));
-    assert!(test_all.contains("campaign_report_omitted_rounds(options.iterations)"));
+    assert!(shell.contains("campaign_report_omitted_rounds("));
     for command in ["hermes exec", "hermes random", "hermes test-all"] {
         assert!(readme.contains(command));
         assert!(docs.contains(command));
@@ -6579,11 +6782,14 @@ fn hermes_test_orchestration_is_documented_and_smoke_wired() {
     assert!(!shell.contains("iterations=<1..64>"));
     assert!(!docs.contains("iterations=<1..64>"));
     assert!(docs.contains("permanently forbidden"));
+    assert!(docs.contains("`reboot` skill"));
+    assert!(docs.contains("`cmd` skill"));
     assert!(smoke.contains("testsc"));
     assert!(smoke.contains("fuzzsc seed=1 iterations=1"));
     assert!(smoke.contains("hermes random seed=1 iterations=1"));
-    assert!(smoke.contains("hermes exec reboot"));
-    assert!(smoke.contains("Hermes denied forbidden command: reboot"));
+    assert!(smoke.contains("hermes exec kill"));
+    assert!(smoke.contains("Hermes denied forbidden command: kill"));
+    assert!(!smoke.contains("hermes exec reboot"));
     assert!(smoke.contains("=== Test Complete ==="));
     assert!(smoke.contains("[OK] syscall and POSIX fuzz completed"));
 }
@@ -6603,9 +6809,9 @@ fn fuzzsc_success_path_uses_live_mprotect_and_names_posix_errors() {
         "/../../src/user_level/services/hermes_shell_logic_shared.rs"
     ));
     assert!(fuzz.contains("226 => {\n            let addr = state.transient_mapping();"));
-    assert!(!fuzz.contains(
-        "226 => out = [state.mapping(), PAGE_SIZE, MmapProt::READ.bits(), 0, 0, 0]"
-    ));
+    assert!(
+        !fuzz.contains("226 => out = [state.mapping(), PAGE_SIZE, MmapProt::READ.bits(), 0, 0, 0]")
+    );
     assert!(fuzz.contains("fn untrack_mapping("));
     assert!(fuzz.contains(r#"fxfs::set_attrs("/dev/shm", 0o40777, 0, 0)"#));
     assert!(fuzz.contains(r#"fxfs::unlink_file("/dev/shm/fz")"#));
@@ -6613,7 +6819,10 @@ fn fuzzsc_success_path_uses_live_mprotect_and_names_posix_errors() {
     assert!(fuzz.contains("posix_err_apis"));
     assert!(shell.contains("posix_err_list="));
     assert!(shell.contains("print_posix_fuzz_error_buckets"));
-    assert!(catalog.contains(r#"campaign_case_const("fuzzsc", "seed=1", "iterations=1", 2)"#));
+    assert!(catalog.contains(r#"campaign_case_const("fuzzsc", "iterations=100""#));
+    assert!(!catalog.contains(r#"campaign_case_const("fuzzsc", "seed=1", "iterations=1""#));
+    assert!(shell.contains("campaign_fuzzsc_seed_arg"));
+    assert!(shell.contains("HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG"));
     let test_all_start = shell
         .find("fn run_hermes_test_all(")
         .expect("test-all function");
@@ -6623,14 +6832,73 @@ fn fuzzsc_success_path_uses_live_mprotect_and_names_posix_errors() {
         .expect("random campaign function");
     let test_all = &shell[test_all_start..test_all_end];
     assert!(test_all.contains("execute_hermes_campaign_round"));
-    assert!(test_all.contains("HermesHostTestJob::Ut"));
-    assert!(test_all.contains("HermesHostTestJob::It"));
+    assert!(test_all.contains("run_hermes_host_jobs"));
+    assert!(shell.contains("HermesHostTestJob::Ut"));
+    assert!(shell.contains("HermesHostTestJob::It"));
     let process = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/syscall/linux_process.rs"
     ));
-    assert!(process.contains("if root_pid == Some(LINUX_DISPATCH_PID)"));
+    assert!(process.contains("root_pid == Some(LINUX_DISPATCH_PID)"));
     assert!(process.contains("switch_user_address_space(0)"));
+}
+
+#[test]
+fn fuzzsc_kernel_dispatch_does_not_block_the_shell() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fuzz = std::fs::read_to_string(repository.join("src/syscall/fuzz.rs"))
+        .expect("read syscall fuzzer");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall runtime");
+    let mqueue = std::fs::read_to_string(repository.join("src/syscall/linux_mqueue.rs"))
+        .expect("read mqueue runtime");
+    let futex = std::fs::read_to_string(repository.join("src/syscall/linux_futex.rs"))
+        .expect("read futex runtime");
+    let process = std::fs::read_to_string(repository.join("src/syscall/linux_process.rs"))
+        .expect("read process runtime");
+    let riscv_cpu = std::fs::read_to_string(repository.join("src/kernel_lowlevel/RISCV64/cpu.rs"))
+        .expect("read RISC-V cpu");
+
+    assert!(fuzz.contains("sleep_timespec: LinuxTimespec"));
+    assert!(fuzz.contains("fn sleep_timespec_ptr("));
+    assert!(fuzz.contains("101 => out = [state.arena.sleep_timespec_ptr(), 0, 0, 0, 0, 0]"));
+    assert!(fuzz.contains("115 => out = [1, 0, state.arena.sleep_timespec_ptr(), 0, 0, 0]"));
+    assert!(!fuzz.contains("101 => out = [state.arena.timespec_ptr(), 0, 0, 0, 0, 0]"));
+    assert!(!fuzz.contains("115 => out = [1, 0, state.arena.timespec_ptr(), 0, 0, 0]"));
+    assert!(fuzz.contains("[fd, buf, 64, 0, state.arena.sleep_timespec_ptr(), 0]"));
+
+    let sleep_start = syscall
+        .find("fn linux_sleep_until(")
+        .expect("linux_sleep_until");
+    let sleep = braced_body(&syscall[sleep_start..]);
+    assert!(
+        sleep.contains("linux_task::kernel_dispatch_active()"),
+        "fuzzsc/hermes kernel dispatch must not block the shell on nanosleep"
+    );
+
+    let wait_start = mqueue.find("pub(crate) fn wait(").expect("mqueue wait");
+    let wait = braced_body(&mqueue[wait_start..]);
+    assert!(
+        wait.contains("linux_task::kernel_dispatch_active()"),
+        "fuzzsc kernel dispatch must not block on mq_timedreceive"
+    );
+
+    assert!(futex.contains("if linux_task::kernel_dispatch_active()"));
+    assert!(process.contains(
+        "if linux_task::kernel_dispatch_active() || root_pid == Some(LINUX_DISPATCH_PID)"
+    ));
+
+    let switch_start = riscv_cpu
+        .find("pub fn switch_user_address_space(root: u64)")
+        .expect("RISC-V address space switch");
+    let switch = braced_body(&riscv_cpu[switch_start..]);
+    assert!(
+        switch.contains("if root == 0")
+            && switch.contains("deactivate_user_address_space();")
+            && switch.contains("csrw satp, {satp}")
+            && switch.contains("satp = in(reg) 0usize"),
+        "returning to a kernel thread must restore bare satp, not leave a user page table installed"
+    );
 }
 
 #[test]

@@ -206,6 +206,7 @@ struct FuzzArena {
     wait_items: [ZxWaitItem; 2],
     packet: PortPacket,
     timespec: LinuxTimespec,
+    sleep_timespec: LinuxTimespec,
     timeval: LinuxTimeval,
     itimer: LinuxItimerval,
     cap_header: LinuxCapUserHeader,
@@ -265,6 +266,10 @@ impl FuzzArena {
                 data3: seed.rotate_left(29),
             },
             timespec: LinuxTimespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            sleep_timespec: LinuxTimespec {
                 tv_sec: 0,
                 tv_nsec: 0,
             },
@@ -364,6 +369,10 @@ impl FuzzArena {
             tv_sec: 0,
             tv_nsec: 1,
         };
+        self.sleep_timespec = LinuxTimespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         self.timeval = LinuxTimeval {
             tv_sec: 0,
             tv_usec: 1,
@@ -456,6 +465,10 @@ impl FuzzArena {
 
     fn timespec_ptr(&self) -> usize {
         &self.timespec as *const LinuxTimespec as usize
+    }
+
+    fn sleep_timespec_ptr(&self) -> usize {
+        &self.sleep_timespec as *const LinuxTimespec as usize
     }
 
     fn timeval_ptr(&self) -> usize {
@@ -2079,6 +2092,10 @@ fn fuzz_posix_round(state: &mut FuzzState) -> bool {
             tv_sec: 0,
             tv_nsec: 0,
         };
+        arena.sleep_timespec = LinuxTimespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         arena.futex = 0;
     }
 
@@ -2088,6 +2105,7 @@ fn fuzz_posix_round(state: &mut FuzzState) -> bool {
     let attr_ptr = state.arena.scratch_ptr();
     let msg_ptr = state.arena.scratch_ptr_offset(POSIX_MQ_ATTR_BYTES);
     let timespec_ptr = state.arena.timespec_ptr();
+    let sleep_timespec_ptr = state.arena.sleep_timespec_ptr();
     let futex_ptr = state.arena.futex_ptr();
     let poll_ptr = state.arena.poll_ptr();
     let sigset_ptr = state.arena.scratch_ptr_offset(192);
@@ -2133,7 +2151,7 @@ fn fuzz_posix_round(state: &mut FuzzState) -> bool {
             "nanosleep" => {
                 let _ = state.call_posix(
                     super::ARM64_SYS_NANOSLEEP,
-                    [timespec_ptr, timespec_ptr, 0, 0, 0, 0],
+                    [sleep_timespec_ptr, 0, 0, 0, 0, 0],
                 );
             }
             "kill" => {
@@ -2171,13 +2189,13 @@ fn fuzz_posix_round(state: &mut FuzzState) -> bool {
             "mq_receive" => {
                 let _ = state.call_posix(
                     super::ARM64_SYS_MQ_TIMEDRECEIVE,
-                    [mqd, msg_ptr, 64, 0, 0, 0],
+                    [mqd, msg_ptr, 64, 0, sleep_timespec_ptr, 0],
                 );
             }
             "mq_timedsend" => {
                 let _ = state.call_posix(
                     super::ARM64_SYS_MQ_TIMEDSEND,
-                    [mqd, msg_ptr, 8, 0, timespec_ptr, 0],
+                    [mqd, msg_ptr, 8, 0, sleep_timespec_ptr, 0],
                 );
             }
             "mq_timedreceive" => {
@@ -2187,13 +2205,13 @@ fn fuzz_posix_round(state: &mut FuzzState) -> bool {
                 );
                 let _ = state.call_posix(
                     super::ARM64_SYS_MQ_TIMEDRECEIVE,
-                    [mqd, msg_ptr, 64, 0, timespec_ptr, 0],
+                    [mqd, msg_ptr, 64, 0, sleep_timespec_ptr, 0],
                 );
             }
             "mq_setattr" => {
                 let _ = state.call_posix(
                     super::ARM64_SYS_MQ_GETSETATTR,
-                    [mqd, attr_ptr, attr_ptr, 0, 0, 0],
+                    [mqd, 0, attr_ptr, 0, 0, 0],
                 );
             }
             "mq_close" => {
@@ -2352,7 +2370,7 @@ fn fuzz_posix_round(state: &mut FuzzState) -> bool {
                 state.arena.poll[0].events = 0x0001 | 0x0004;
                 state.arena.poll[0].revents = 0;
                 let _ =
-                    state.call_posix(super::ARM64_SYS_PPOLL, [poll_ptr, 1, timespec_ptr, 0, 0, 0]);
+                    state.call_posix(super::ARM64_SYS_PPOLL, [poll_ptr, 1, sleep_timespec_ptr, 0, 0, 0]);
             }
             _ => {}
         }
@@ -2458,12 +2476,12 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         70 | 287 => out = [state.transient_file_fd(), state.arena.iov_ptr(), 2, 0, 0, 0],
         67 => out = [file_fd, ptr, len, 0, 0, 0],
         68 => out = [state.transient_file_fd(), ptr, len, 0, 0, 0],
-        72 => out = [0, 0, 0, 0, state.arena.timespec_ptr(), 0],
+        72 => out = [0, 0, 0, 0, state.arena.sleep_timespec_ptr(), 0],
         73 => {
             out = [
                 state.arena.poll_ptr(),
                 2,
-                state.arena.timespec_ptr(),
+                state.arena.sleep_timespec_ptr(),
                 0,
                 0,
                 0,
@@ -2568,8 +2586,8 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         }
         99 => out = [ptr, len, 0, 0, 0, 0],
         100 => out = [0, state.arena.words_ptr(), state.arena.words_ptr(), 0, 0, 0],
-        101 => out = [state.arena.timespec_ptr(), 0, 0, 0, 0, 0],
-        115 => out = [1, 0, state.arena.timespec_ptr(), 0, 0, 0],
+        101 => out = [state.arena.sleep_timespec_ptr(), 0, 0, 0, 0, 0],
+        115 => out = [1, 0, state.arena.sleep_timespec_ptr(), 0, 0, 0],
         102 | 103 => out = [0, state.arena.itimer_ptr(), ptr, 0, 0, 0],
         107 => out = [0, 0, state.arena.words_ptr(), 0, 0, 0],
         108 | 109 => {
@@ -2617,7 +2635,7 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
                 super::ARM64_SYS_MQ_TIMEDSEND,
                 [fd, buf, 8, 0, 0, 0],
             );
-            out = [fd, buf, 64, 0, 0, 0];
+            out = [fd, buf, 64, 0, state.arena.sleep_timespec_ptr(), 0];
         }
         184 => out = [state.ensure_mq_fd(), 0, 0, 0, 0, 0],
         185 => out = [state.ensure_mq_fd(), 0, state.arena.scratch_ptr(), 0, 0, 0],
@@ -2735,7 +2753,7 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         202 | 242 => out = [socket_fd, ptr, state.arena.words_ptr(), 0, 0, 0],
         206 => out = [state.socketpair_fd(), ptr, len.max(1), 0, 0, 0],
         207 => out = [state.socket_peer_fd(), ptr, len.max(1), 0, 0, 0],
-        211 | 212 | 243 => out = [socket_fd, ptr, 1, 0, state.arena.timespec_ptr(), 0],
+        211 | 212 | 243 => out = [socket_fd, ptr, 1, 0, state.arena.sleep_timespec_ptr(), 0],
         213 | 223 => out = [file_fd, 0, FUZZ_IO_BYTES, 0, 0, 0],
         215 => out = [state.transient_mapping(), PAGE_SIZE, 0, 0, 0, 0],
         216 => out = [state.attached_shm_mapping(), PAGE_SIZE, PAGE_SIZE, 0, 0, 0],

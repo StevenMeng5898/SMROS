@@ -338,7 +338,7 @@ pub(crate) fn switch_riscv_process_address_space(scheduler_thread: usize) {
     // fuzzsc/hermes dispatch a fake Linux pid on the kernel shell thread.
     // RISC-V has one satp; installing that process root unmaps UART/virtio
     // MMIO and hangs after the first schedule. Keep dispatch in bare mode.
-    if root_pid == Some(LINUX_DISPATCH_PID) {
+    if linux_task::kernel_dispatch_active() || root_pid == Some(LINUX_DISPATCH_PID) {
         crate::kernel_lowlevel::cpu::switch_user_address_space(0);
         return;
     }

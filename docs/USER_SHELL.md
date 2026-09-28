@@ -361,6 +361,14 @@ docker run my/image:latest
 hermes info
 hermes test
 hermes exec meminfo
+hermes exec reboot
+hermes exec vm -c /shared/vm-demo.xml
+hermes exec vm -k
+hermes exec vm -s
+hermes exec docker load -i /shared/ubuntu-alpineamr64.tar
+hermes exec docker run ubuntu-alpineamr64:latest
+hermes exec docker stop
+hermes exec docker rm
 hermes random seed=1234 iterations=8
 hermes test-all seed=1234 iterations=8
 hermes test-all mode=syscall seed=1 iterations=1
@@ -397,12 +405,25 @@ under `/data/hermes`.
 
 Hermes installs native SMROS skills under `/data/hermes/skills`:
 `smros-kernel`, `hermes-web-ui`, `smros-ops`, `hermes-memory`, plus the
-syscall/POSIX control-plane skills `ut`, `it`, `skt`, and `fuzzing`. Prompt
+syscall/POSIX control-plane skills `ut`, `it`, `skt`, and `fuzzing`, and the
+owned lifecycle skills `reboot` and `cmd`. Prompt
 routing reports the matched skills in the shell response. `ut` is
 `make posix-tool-test` (and `make ut` when the host crate compiles). `it`
 adds launcher identity checks. `skt` documents the host-only smoke test
 (`make skt`); Hermes test-all does not run it because the guest cannot boot
-another SMROS from the command line. `fuzzing` is bounded `fuzzsc`. The web UI renderer
+another SMROS from the command line. `fuzzing` is bounded `fuzzsc`. The `reboot` skill
+owns `hermes exec reboot` and keeps an active `hermes test-all` or `hermes random`
+campaign resumable: the guest writes `/data/hermes/tests/resume.cfg`, flushes FxFS,
+resets, then continues remaining iterations to resume after reboot. Host `ut`/`it`
+jobs for a reboot round wait for virtio-net after reset instead of reporting
+UNAVAILABLE during PSCI reset. The ops campaign catalog includes
+`vm -c /shared/vm-demo.xml` so `hermes test-all` can open a nested GTK QEMU
+window running guest Linux (`linux-demo`). That create is coupled with a wait
+until guest Linux boot OK, then `vm -k linux-demo`, so nested QEMU/GTK is
+recycled instead of leaking. `vm -k` is not an independent random catalog case.
+The `cmd` skill owns `vm -c /shared/vm-demo.xml`,
+`vm -k`, `vm -s`, `docker load -i /shared/ubuntu-alpineamr64.tar`, `docker run`,
+`docker stop`, and `docker rm`. The web UI renderer
 writes a static HTML model to `/data/hermes/web/index.html`. By default,
 `hermes web` parses that HTML and renders a richer CPU-drawn native UI surface:
 panels, status tiles, buttons, text, and skill rows are rasterized into
@@ -459,15 +480,21 @@ sched perfetto 128
 
 `hermes exec <command> [args...]` passes a structured request through a strict
 positive allowlist before invoking the existing shell handler. Unknown forms
-default to denial. These commands are permanently forbidden to Hermes: `rm`,
-`kill`, `reboot`, `exit`, `clear`, `vi`,
-`run`, `write`, `mkdir`, `mv`, `cp`, and `mount`, plus `vm -k`, `docker rm`,
-`docker stop`, and equivalent destructive lifecycle operations. Gemma-generated
-text is never executed directly.
+default to denial. Hermes owns the `reboot` skill (`hermes exec reboot`) and the
+`cmd` skill (`vm -c /shared/vm-demo.xml`, `vm -k`, `vm -s`,
+`docker load -i /shared/ubuntu-alpineamr64.tar`, `docker run`, `docker stop`,
+`docker rm`). These commands are permanently forbidden to Hermes: `rm`,
+`kill`, `exit`, `clear`, `vi`,
+`run`, `write`, `mkdir`, `mv`, `cp`, and `mount`. Ops campaigns may select `reboot`; syscall campaigns do not. Interactive
+`docker run` stays out of random catalogs. Campaign `vm -c /shared/vm-demo.xml`
+waits for guest Linux boot OK and then runs `vm -k linux-demo` to recycle the
+nested QEMU window.
+After a Hermes reboot the shell resumes the checkpointed campaign so the test
+can continue. Gemma-generated text is never executed directly.
 
 `hermes random [seed=<n>] [iterations=<positive-n>] [mode=ops|syscall]` selects
 bounded safe test and status operations deterministically. `mode=syscall`
-uses the syscall catalog (`testsc`, `fuzzsc seed=1 iterations=1`,
+uses the syscall catalog (`testsc`, `fuzzsc` with the campaign seed and `iterations=100`,
 `hermes test`). Hermes may also `exec posixtest status` or
 `exec posixtest test getpid/1-1.c`; `posixtest all` stays forbidden.
 The finite iteration count has no

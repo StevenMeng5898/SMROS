@@ -420,6 +420,21 @@ fn ensure_ready() -> Result<(), NetError> {
     }
 }
 
+pub fn wait_until_ready(deadline_ns: u64) -> Result<(), NetError> {
+    loop {
+        match ensure_ready() {
+            Ok(()) => return Ok(()),
+            Err(NetError::NotReady) => {
+                if crate::kernel_lowlevel::timer::get_nanoseconds() >= deadline_ns {
+                    return Err(NetError::NotReady);
+                }
+                crate::kernel_objects::scheduler::yield_now();
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 fn config_state() -> NetConfigState {
     unsafe { CONFIG_STATE }
 }

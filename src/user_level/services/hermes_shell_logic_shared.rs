@@ -1,8 +1,12 @@
 pub const HERMES_MAX_ARGS: usize = 8;
 pub const HERMES_MAX_ARG_LEN: usize = 96;
-pub const HERMES_CAMPAIGN_CASES: usize = 12;
+pub const HERMES_CAMPAIGN_CASES: usize = 15;
 pub const HERMES_SYSCALL_CAMPAIGN_CASES: usize = 12;
 pub const HERMES_REPORT_DETAIL_LIMIT: usize = 64;
+pub const HERMES_CAMPAIGN_FUZZSC_ITERATIONS: u64 = 100;
+pub const HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG: &str = "iterations=100";
+pub const HERMES_CAMPAIGN_VM_NAME: &str = "linux-demo";
+pub const HERMES_CAMPAIGN_VM_XML: &str = "/shared/vm-demo.xml";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HermesShellPolicy {
@@ -42,13 +46,16 @@ const CAMPAIGN_CATALOG: [HermesCampaignCase; HERMES_CAMPAIGN_CASES] = [
     campaign_case_const("svc", "", "", 0),
     campaign_case_const("sched", "status", "", 1),
     campaign_case_const("vm", "-s", "", 1),
+    campaign_case_const("vm", "-c", "/shared/vm-demo.xml", 2),
+    campaign_case_const("uptime", "", "", 0),
     campaign_case_const("docker", "images", "", 1),
-    campaign_case_const("fuzzsc", "seed=1", "iterations=1", 2),
+    campaign_case_const("fuzzsc", "iterations=100", "", 1),
+    campaign_case_const("reboot", "", "", 0),
 ];
 
 const SYSCALL_CAMPAIGN_CATALOG: [HermesCampaignCase; HERMES_SYSCALL_CAMPAIGN_CASES] = [
     campaign_case_const("testsc", "", "", 0),
-    campaign_case_const("fuzzsc", "seed=1", "iterations=1", 2),
+    campaign_case_const("fuzzsc", "iterations=100", "", 1),
     campaign_case_const("hermes", "test", "", 1),
     campaign_case_const("version", "", "", 0),
     campaign_case_const("meminfo", "", "", 0),
@@ -86,10 +93,11 @@ pub fn classify(command: &str, args: &[&str]) -> HermesShellPolicy {
     }
 
     match command {
-        "rm" | "kill" | "reboot" | "exit" | "clear" | "vi" | "run" | "write" | "mkdir" | "mv"
-        | "cp" | "mount" | "cd" | "cd.." => HermesShellPolicy::Forbidden,
+        "rm" | "kill" | "exit" | "clear" | "vi" | "run" | "write" | "mkdir" | "mv" | "cp"
+        | "mount" | "cd" | "cd.." => HermesShellPolicy::Forbidden,
         "help" | "version" | "meminfo" | "components" | "fxfs" | "drivers" | "ifconfig" | "pwd"
         | "ls" | "svc" | "uptime" => no_args(args),
+        "reboot" => no_args(args),
         "testsc" => no_args(args),
         "ps" => optional_exact_arg(args, "-a"),
         "top" => no_args(args),
@@ -138,17 +146,29 @@ fn loglevel_policy(args: &[&str]) -> HermesShellPolicy {
 }
 
 fn vm_policy(args: &[&str]) -> HermesShellPolicy {
-    if args == ["-s"] {
-        HermesShellPolicy::Allowed
-    } else {
-        HermesShellPolicy::Forbidden
+    match args {
+        ["-s"] | ["-k"] => HermesShellPolicy::Allowed,
+        ["-c", path] if valid_vm_xml_path(path) => HermesShellPolicy::Allowed,
+        ["-k", name] if valid_identifier(name) => HermesShellPolicy::Allowed,
+        _ => HermesShellPolicy::Forbidden,
     }
 }
 
 fn docker_policy(args: &[&str]) -> HermesShellPolicy {
     match args {
-        ["images"] | ["ps"] | ["ps", "-a"] => HermesShellPolicy::Allowed,
-        ["inspect", id] | ["logs", id] if valid_identifier(id) => HermesShellPolicy::Allowed,
+        ["images"] | ["ps"] | ["ps", "-a"] | ["run"] | ["stop"] | ["rm"] => {
+            HermesShellPolicy::Allowed
+        }
+        ["inspect", id] | ["logs", id] | ["stop", id] | ["rm", id] if valid_identifier(id) => {
+            HermesShellPolicy::Allowed
+        }
+        ["load", path] if valid_shared_archive_path(docker_load_flag_path(path)) => {
+            HermesShellPolicy::Allowed
+        }
+        ["load", "-i", path] | ["load", "--input", path] if valid_shared_archive_path(path) => {
+            HermesShellPolicy::Allowed
+        }
+        _ if docker_run_args_allowed(args) => HermesShellPolicy::Allowed,
         _ => HermesShellPolicy::Forbidden,
     }
 }
@@ -171,11 +191,86 @@ fn posix_policy(args: &[&str]) -> HermesShellPolicy {
 }
 
 fn valid_identifier(value: &str) -> bool {
+    valid_token(value, false)
+}
+
+fn valid_image_ref(value: &str) -> bool {
+    valid_token(value, true)
+}
+
+fn valid_token(value: &str, allow_slash: bool) -> bool {
     !value.is_empty()
         && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+        && !value.contains("..")
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_' | b'.' | b':')
+                || (allow_slash && byte == b'/')
+        })
+}
+
+fn valid_guest_path(value: &str, prefixes: &[&str], suffix: &str) -> bool {
+    if value.is_empty()
+        || value.len() > HERMES_MAX_ARG_LEN
+        || value.contains("..")
+        || !value.ends_with(suffix)
+        || !prefixes.iter().any(|prefix| value.starts_with(prefix))
+    {
+        return false;
+    }
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/'))
+}
+
+fn valid_vm_xml_path(value: &str) -> bool {
+    valid_guest_path(value, &["/shared/", "/config/"], ".xml")
+}
+
+fn valid_shared_archive_path(value: &str) -> bool {
+    valid_guest_path(value, &["/shared/"], ".tar")
+}
+
+fn docker_load_flag_path(value: &str) -> &str {
+    value.strip_prefix("--input=").unwrap_or(value)
+}
+
+fn docker_run_args_allowed(args: &[&str]) -> bool {
+    if args.first().copied() != Some("run") {
+        return false;
+    }
+    if args.len() == 1 {
+        return true;
+    }
+
+    let mut index = 1usize;
+    while index < args.len() {
+        match args[index] {
+            "-i" | "--interactive" | "-t" | "--tty" | "-it" | "-ti" | "--rm" => {
+                index += 1;
+            }
+            "--name" => {
+                if index + 1 >= args.len() || !valid_identifier(args[index + 1]) {
+                    return false;
+                }
+                index += 2;
+            }
+            value if value.starts_with("--name=") => {
+                if !valid_identifier(&value["--name=".len()..]) {
+                    return false;
+                }
+                index += 1;
+            }
+            value if value.starts_with('-') => return false,
+            _ => break,
+        }
+    }
+    if index >= args.len() || !valid_image_ref(args[index]) {
+        return false;
+    }
+    args[index + 1..]
+        .iter()
+        .all(|arg| valid_image_ref(arg) || valid_identifier(arg))
 }
 
 fn posix_canary_id(value: &str) -> bool {
@@ -203,7 +298,7 @@ fn fuzz_policy(args: &[&str]) -> HermesShellPolicy {
         };
         match key {
             "seed" => {}
-            "iterations" if number > 0 && number <= 16 => {}
+            "iterations" if number > 0 && number <= HERMES_CAMPAIGN_FUZZSC_ITERATIONS => {}
             "time" if number > 0 && number <= 5 => {}
             _ => return HermesShellPolicy::Invalid,
         }
@@ -321,4 +416,244 @@ pub fn next_random(state: &mut u64) -> u64 {
     value ^= value << 17;
     *state = value;
     value
+}
+
+pub const HERMES_RESUME_PATH: &str = "/data/hermes/tests/resume.cfg";
+pub const HERMES_RESUME_TEXT_CAPACITY: usize = 768;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HermesResumeKind {
+    TestAll,
+    Random,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HermesResumeState {
+    pub kind: HermesResumeKind,
+    pub seed: u64,
+    pub iterations: usize,
+    pub mode: HermesCampaignMode,
+    pub next_round: usize,
+    pub native_ok: bool,
+    pub completed: usize,
+    pub denied: usize,
+    pub invalid: usize,
+    pub unknown: usize,
+    pub host_ut_pass: usize,
+    pub host_ut_fail: usize,
+    pub host_it_pass: usize,
+    pub host_it_fail: usize,
+    pub host_jobs_pending: bool,
+}
+
+pub fn resume_should_continue(state: &HermesResumeState) -> bool {
+    state.next_round < state.iterations
+}
+
+pub fn campaign_case_is_reboot(command: &str) -> bool {
+    command == "reboot"
+}
+
+pub fn campaign_case_is_fuzzsc(command: &str) -> bool {
+    command == "fuzzsc"
+}
+
+pub fn campaign_fuzzsc_seed_arg(seed: u64, out: &mut [u8]) -> Option<&str> {
+    let mut written = 0usize;
+    push_bytes(out, &mut written, b"seed=")?;
+    push_u64(out, &mut written, seed)?;
+    core::str::from_utf8(&out[..written]).ok()
+}
+
+pub fn campaign_case_is_vm_create(case: &HermesCampaignCase) -> bool {
+    case.command == "vm" && case.arg_count == 2 && case.args[0] == "-c"
+}
+
+pub fn campaign_case_is_vm_kill(case: &HermesCampaignCase) -> bool {
+    case.command == "vm" && case.arg_count >= 1 && case.args[0] == "-k"
+}
+
+pub fn campaign_vm_recycle_name() -> &'static str {
+    HERMES_CAMPAIGN_VM_NAME
+}
+
+pub fn resume_pending_host_iteration(state: &HermesResumeState) -> Option<usize> {
+    if state.host_jobs_pending {
+        Some(state.next_round)
+    } else {
+        None
+    }
+}
+
+pub fn format_resume_state(state: &HermesResumeState, out: &mut [u8]) -> Option<usize> {
+    let mut written = 0usize;
+    push_bytes(out, &mut written, b"kind=")?;
+    push_bytes(
+        out,
+        &mut written,
+        match state.kind {
+            HermesResumeKind::TestAll => b"test-all",
+            HermesResumeKind::Random => b"random",
+        },
+    )?;
+    push_bytes(out, &mut written, b"\nseed=")?;
+    push_u64(out, &mut written, state.seed)?;
+    push_bytes(out, &mut written, b"\niterations=")?;
+    push_u64(out, &mut written, state.iterations as u64)?;
+    push_bytes(out, &mut written, b"\nmode=")?;
+    push_bytes(
+        out,
+        &mut written,
+        match state.mode {
+            HermesCampaignMode::Ops => b"ops",
+            HermesCampaignMode::Syscall => b"syscall",
+        },
+    )?;
+    push_bytes(out, &mut written, b"\nnext_round=")?;
+    push_u64(out, &mut written, state.next_round as u64)?;
+    push_bytes(out, &mut written, b"\nnative=")?;
+    push_bytes(
+        out,
+        &mut written,
+        if state.native_ok { b"pass" } else { b"fail" },
+    )?;
+    push_bytes(out, &mut written, b"\ncompleted=")?;
+    push_u64(out, &mut written, state.completed as u64)?;
+    push_bytes(out, &mut written, b"\ndenied=")?;
+    push_u64(out, &mut written, state.denied as u64)?;
+    push_bytes(out, &mut written, b"\ninvalid=")?;
+    push_u64(out, &mut written, state.invalid as u64)?;
+    push_bytes(out, &mut written, b"\nunknown=")?;
+    push_u64(out, &mut written, state.unknown as u64)?;
+    push_bytes(out, &mut written, b"\nhost_ut_pass=")?;
+    push_u64(out, &mut written, state.host_ut_pass as u64)?;
+    push_bytes(out, &mut written, b"\nhost_ut_fail=")?;
+    push_u64(out, &mut written, state.host_ut_fail as u64)?;
+    push_bytes(out, &mut written, b"\nhost_it_pass=")?;
+    push_u64(out, &mut written, state.host_it_pass as u64)?;
+    push_bytes(out, &mut written, b"\nhost_it_fail=")?;
+    push_u64(out, &mut written, state.host_it_fail as u64)?;
+    push_bytes(out, &mut written, b"\nhost_jobs_pending=")?;
+    push_bytes(
+        out,
+        &mut written,
+        if state.host_jobs_pending { b"1" } else { b"0" },
+    )?;
+    push_bytes(out, &mut written, b"\n")?;
+    Some(written)
+}
+
+pub fn parse_resume_state(text: &str) -> Option<HermesResumeState> {
+    let mut kind = None;
+    let mut seed = None;
+    let mut iterations = None;
+    let mut mode = HermesCampaignMode::Ops;
+    let mut next_round = None;
+    let mut native_ok = true;
+    let mut completed = 0usize;
+    let mut denied = 0usize;
+    let mut invalid = 0usize;
+    let mut unknown = 0usize;
+    let mut host_ut_pass = 0usize;
+    let mut host_ut_fail = 0usize;
+    let mut host_it_pass = 0usize;
+    let mut host_it_fail = 0usize;
+    let mut host_jobs_pending = false;
+
+    for line in text.split('\n') {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (key, value) = line.split_once('=')?;
+        match key {
+            "kind" => {
+                kind = Some(match value {
+                    "test-all" => HermesResumeKind::TestAll,
+                    "random" => HermesResumeKind::Random,
+                    _ => return None,
+                });
+            }
+            "seed" => seed = Some(parse_decimal(value)?),
+            "iterations" => iterations = Some(parse_decimal(value)? as usize),
+            "mode" => {
+                mode = match value {
+                    "ops" => HermesCampaignMode::Ops,
+                    "syscall" => HermesCampaignMode::Syscall,
+                    _ => return None,
+                };
+            }
+            "next_round" => next_round = Some(parse_decimal(value)? as usize),
+            "native" => {
+                native_ok = match value {
+                    "pass" => true,
+                    "fail" => false,
+                    _ => return None,
+                };
+            }
+            "completed" => completed = parse_decimal(value)? as usize,
+            "denied" => denied = parse_decimal(value)? as usize,
+            "invalid" => invalid = parse_decimal(value)? as usize,
+            "unknown" => unknown = parse_decimal(value)? as usize,
+            "host_ut_pass" => host_ut_pass = parse_decimal(value)? as usize,
+            "host_ut_fail" => host_ut_fail = parse_decimal(value)? as usize,
+            "host_it_pass" => host_it_pass = parse_decimal(value)? as usize,
+            "host_it_fail" => host_it_fail = parse_decimal(value)? as usize,
+            "host_jobs_pending" => {
+                host_jobs_pending = match value {
+                    "1" => true,
+                    "0" => false,
+                    _ => return None,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    let iterations = iterations?;
+    if iterations == 0 {
+        return None;
+    }
+    Some(HermesResumeState {
+        kind: kind?,
+        seed: seed?,
+        iterations,
+        mode,
+        next_round: next_round?,
+        native_ok,
+        completed,
+        denied,
+        invalid,
+        unknown,
+        host_ut_pass,
+        host_ut_fail,
+        host_it_pass,
+        host_it_fail,
+        host_jobs_pending,
+    })
+}
+
+fn push_bytes(buf: &mut [u8], written: &mut usize, bytes: &[u8]) -> Option<()> {
+    let next = written.checked_add(bytes.len())?;
+    if next > buf.len() {
+        return None;
+    }
+    buf[*written..next].copy_from_slice(bytes);
+    *written = next;
+    Some(())
+}
+
+fn push_u64(buf: &mut [u8], written: &mut usize, value: u64) -> Option<()> {
+    let mut digits = [0u8; 20];
+    let mut remaining = value;
+    let mut index = digits.len();
+    loop {
+        index -= 1;
+        digits[index] = b'0' + (remaining % 10) as u8;
+        remaining /= 10;
+        if remaining == 0 {
+            break;
+        }
+    }
+    push_bytes(buf, written, &digits[index..])
 }

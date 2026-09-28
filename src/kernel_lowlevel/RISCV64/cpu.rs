@@ -145,6 +145,14 @@ pub fn flush_tlb() {
 pub fn switch_user_address_space(root: u64) {
     if root == 0 {
         deactivate_user_address_space();
+        unsafe {
+            core::arch::asm!(
+                "csrw satp, {satp}",
+                "sfence.vma",
+                satp = in(reg) 0usize,
+                options(nostack),
+            );
+        }
         return;
     }
     set_user_address_space_active(true);

@@ -48,7 +48,9 @@ const HERMES_MEMORY_SKILL: &str = "# Hermes Memory Skill\n\nUse Hermes memory, s
 const HERMES_UT_SKILL: &str = "# UT Skill\n\nRun `make ut` when the host crate compiles. Until then, `make posix-tool-test` is the SMROS syscall and POSIX unit gate. No QEMU.\n";
 const HERMES_IT_SKILL: &str = "# IT Skill\n\nRun `make it` when the host crate compiles, plus `make posix-tool-test` and `make launcher-test`. Hermes host jobs stay {ut,it}. SKT/smoke stays host-only `make skt`.\n";
 const HERMES_SKT_SKILL: &str = "# SKT Skill\n\nSKT is the host-side SMROS smoke test (`make skt`). Hermes test-all does not run SKT because the guest cannot boot another SMROS from the command line. Official POSIX is host-controlled `make posix-run`, never guest `posixtest all`.\n";
-const HERMES_FUZZING_SKILL: &str = "# Fuzzing Skill\n\nRun bounded `fuzzsc` through Hermes (iterations<=16, time<=5). Pointers stay in kernel scratch. Skip clone/exit/exec. Do not execute Gemma text.\n";
+const HERMES_FUZZING_SKILL: &str = "# Fuzzing Skill\n\nRun bounded `fuzzsc` through Hermes (campaign seed, iterations=100, time<=5). Pointers stay in kernel scratch. Skip clone/exit/exec. Do not execute Gemma text.\n";
+const HERMES_REBOOT_SKILL: &str = "# Reboot Skill\n\nHermes owns SMROS guest reboot. Run `reboot` with `hermes exec reboot`. Persist the active hermes test checkpoint first so test-all and random resume after reset.\n";
+const HERMES_CMD_SKILL: &str = "# Cmd Skill\n\nHermes owns these SMROS VM and Docker commands:\n- `vm -c /shared/vm-demo.xml`\n- `vm -k`\n- `vm -s`\n- `docker load -i /shared/ubuntu-alpineamr64.tar`\n- `docker run`\n- `docker stop`\n- `docker rm`\n\nUse `hermes exec` with complete arguments when a VM name, image, or container id is required. After load, run `ubuntu-alpineamr64:latest`. Campaigns couple `vm -c /shared/vm-demo.xml` with a wait until guest Linux boot OK, then `vm -k linux-demo` so nested QEMU is recycled.\n";
 const HERMES_CRON: &str =
     "name: nightly-smros-hermes-smoke\nschedule: '0 3 * * *'\ncommand: hermes test\n";
 
@@ -134,6 +136,24 @@ const HERMES_SKILLS: &[HermesSkillDefinition] = &[
         description: "Bounded fuzzsc syscall and POSIX dispatcher coverage",
         body: HERMES_FUZZING_SKILL,
         keywords: &["fuzzsc", "fuzzing", "syzkaller"],
+    },
+    HermesSkillDefinition {
+        name: "Reboot",
+        slug: "reboot",
+        dir: "/data/hermes/skills/reboot",
+        path: "/data/hermes/skills/reboot/SKILL.md",
+        description: "Guest reboot through hermes exec reboot",
+        body: HERMES_REBOOT_SKILL,
+        keywords: &["reboot"],
+    },
+    HermesSkillDefinition {
+        name: "Cmd",
+        slug: "cmd",
+        dir: "/data/hermes/skills/cmd",
+        path: "/data/hermes/skills/cmd/SKILL.md",
+        description: "VM and Docker lifecycle commands",
+        body: HERMES_CMD_SKILL,
+        keywords: &["cmd", "vm", "docker", "vm-demo", "ubuntu-alpineamr64"],
     },
 ];
 
@@ -307,6 +327,51 @@ pub fn persist_campaign_report(report: &str) -> Result<usize, HermesAgentError> 
         return Err(HermesAgentError::Tool);
     }
     fxfs::write_file(HERMES_LATEST_TEST_PATH, report.as_bytes()).map_err(|_| HermesAgentError::Tool)
+}
+
+pub fn persist_resume_state(
+    state: &crate::user_level::services::hermes_shell_logic_shared::HermesResumeState,
+) -> Result<(), HermesAgentError> {
+    use crate::user_level::services::hermes_shell_logic_shared::{
+        format_resume_state, HERMES_RESUME_PATH, HERMES_RESUME_TEXT_CAPACITY,
+    };
+
+    prepare_storage()?;
+    let mut buf = [0u8; HERMES_RESUME_TEXT_CAPACITY];
+    let written = format_resume_state(state, &mut buf).ok_or(HermesAgentError::Tool)?;
+    fxfs::write_file(HERMES_RESUME_PATH, &buf[..written]).map_err(|_| HermesAgentError::Tool)?;
+    fxfs::flush_persist();
+    Ok(())
+}
+
+pub fn load_resume_state() -> Result<
+    Option<crate::user_level::services::hermes_shell_logic_shared::HermesResumeState>,
+    HermesAgentError,
+> {
+    use crate::user_level::services::hermes_shell_logic_shared::{
+        parse_resume_state, HERMES_RESUME_PATH,
+    };
+
+    prepare_storage()?;
+    if !fxfs::exists(HERMES_RESUME_PATH) {
+        return Ok(None);
+    }
+    let text = read_text_file(HERMES_RESUME_PATH)?;
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(parse_resume_state(text.as_str()))
+}
+
+pub fn clear_resume_state() -> Result<(), HermesAgentError> {
+    use crate::user_level::services::hermes_shell_logic_shared::HERMES_RESUME_PATH;
+
+    prepare_storage()?;
+    if fxfs::exists(HERMES_RESUME_PATH) {
+        fxfs::delete_file(HERMES_RESUME_PATH).map_err(|_| HermesAgentError::Tool)?;
+        fxfs::flush_persist();
+    }
+    Ok(())
 }
 
 pub fn info() -> Result<HermesAgentInfo, HermesAgentError> {

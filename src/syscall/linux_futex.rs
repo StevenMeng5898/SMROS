@@ -114,6 +114,9 @@ fn wait(
     if !futex_bitset_valid(bitset) {
         return Err(SysError::EINVAL);
     }
+    if linux_task::kernel_dispatch_active() {
+        return Err(SysError::EAGAIN);
+    }
 
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     if !linux_user_range_readable(uaddr, core::mem::size_of::<u32>()) {

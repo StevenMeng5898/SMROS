@@ -3568,7 +3568,9 @@ with tempfile.TemporaryDirectory() as temporary:
             "HERMES_UT_SKILL": agent[agent.index("const HERMES_UT_SKILL"):agent.index("const HERMES_IT_SKILL")],
             "HERMES_IT_SKILL": agent[agent.index("const HERMES_IT_SKILL"):agent.index("const HERMES_SKT_SKILL")],
             "HERMES_SKT_SKILL": agent[agent.index("const HERMES_SKT_SKILL"):agent.index("const HERMES_FUZZING_SKILL")],
-            "HERMES_FUZZING_SKILL": agent[agent.index("const HERMES_FUZZING_SKILL"):agent.index("const HERMES_CRON:")],
+            "HERMES_FUZZING_SKILL": agent[agent.index("const HERMES_FUZZING_SKILL"):agent.index("const HERMES_REBOOT_SKILL")],
+            "HERMES_REBOOT_SKILL": agent[agent.index("const HERMES_REBOOT_SKILL"):agent.index("const HERMES_CMD_SKILL")],
+            "HERMES_CMD_SKILL": agent[agent.index("const HERMES_CMD_SKILL"):agent.index("const HERMES_CRON:")],
         }
         for name, body in bodies.items():
             lower = body.lower()
@@ -3579,7 +3581,7 @@ with tempfile.TemporaryDirectory() as temporary:
         agent = Path("src/user_level/services/hermes_agent.rs").read_text(encoding="utf-8")
         skills_start = agent.index("const HERMES_SKILLS")
         skills = agent[skills_start:agent.index("pub enum HermesAgentError")]
-        for slug in ("ut", "it", "skt", "fuzzing"):
+        for slug in ("ut", "it", "skt", "fuzzing", "reboot", "cmd"):
             self.assertIn('slug: "' + slug + '"', skills)
             self.assertIn("/data/hermes/skills/" + slug + "/SKILL.md", skills)
         self.assertIn("make ut", skills)
@@ -3593,9 +3595,11 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertIn("hermes-web-ui", skills)
         self.assertIn("smros-ops", skills)
         self.assertIn("hermes-memory", skills)
+        self.assertIn("vm -c /shared/vm-demo.xml", agent)
+        self.assertIn("docker load -i /shared/ubuntu-alpineamr64.tar", agent)
         docs = Path("docs/USER_SHELL.md").read_text(encoding="utf-8")
         testing = Path("docs/TESTING.md").read_text(encoding="utf-8")
-        for slug in ("ut", "it", "skt", "fuzzing"):
+        for slug in ("ut", "it", "skt", "fuzzing", "reboot", "cmd"):
             self.assertIn(slug, docs)
             self.assertIn(slug, testing)
 
@@ -3614,7 +3618,10 @@ with tempfile.TemporaryDirectory() as temporary:
         policy = Path("src/user_level/services/hermes_shell_logic_shared.rs").read_text(
             encoding="utf-8"
         )
-        self.assertIn('campaign_case_const("fuzzsc", "seed=1", "iterations=1", 2)', policy)
+        self.assertIn('campaign_case_const("fuzzsc", "iterations=100"', policy)
+        self.assertNotIn(
+            'campaign_case_const("fuzzsc", "seed=1", "iterations=1"', policy
+        )
         self.assertIn('campaign_case_const("testsc", "", "", 0)', policy)
         self.assertIn('campaign_case_const("hermes", "test", "", 1)', policy)
         self.assertIn("HermesCampaignMode", policy)
@@ -3622,8 +3629,23 @@ with tempfile.TemporaryDirectory() as temporary:
         catalogs = policy[
             policy.index("const CAMPAIGN_CATALOG") : policy.index("pub fn classify(")
         ]
+        ops = policy[
+            policy.index("const CAMPAIGN_CATALOG") : policy.index(
+                "const SYSCALL_CAMPAIGN_CATALOG"
+            )
+        ]
         self.assertNotIn("posixtest", catalogs)
-        self.assertNotIn("reboot", catalogs)
+        self.assertIn('campaign_case_const("reboot", "", "", 0)', catalogs)
+        self.assertIn(
+            'campaign_case_const("vm", "-c", "/shared/vm-demo.xml", 2)', catalogs
+        )
+        self.assertNotIn('campaign_case_const("vm", "-k", "linux-demo", 2)', ops)
+        self.assertIn('campaign_case_const("uptime", "", "", 0)', ops)
+        syscall = policy[
+            policy.index("const SYSCALL_CAMPAIGN_CATALOG") : policy.index("pub fn classify(")
+        ]
+        self.assertNotIn('campaign_case_const("reboot"', syscall)
+        self.assertNotIn("/shared/vm-demo.xml", syscall)
 
     def test_hermes_classify_allows_syscall_canaries_and_forbids_posixtest_all(self) -> None:
         policy = Path("src/user_level/services/hermes_shell_logic_shared.rs").read_text(
@@ -3633,7 +3655,9 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertIn('"testsc" => no_args(args)', classify)
         self.assertIn('"fuzzsc" => fuzz_policy(args)', classify)
         self.assertIn('"posixtest" => posix_policy(args)', classify)
-        self.assertIn('"rm" | "kill" | "reboot"', classify)
+        self.assertIn('"rm" | "kill" | "exit"', classify)
+        self.assertIn('"reboot" => no_args(args)', classify)
+        self.assertNotIn('"reboot" |', classify)
         posix_start = policy.index("fn posix_policy(")
         posix = policy[posix_start:policy.index("fn valid_identifier(")]
         self.assertIn('["status"]', posix)
@@ -3644,7 +3668,7 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertNotIn("group", posix)
         fuzz = policy[policy.index("fn fuzz_policy(") : policy.index("fn parse_decimal(")]
         self.assertIn("iterations", fuzz)
-        self.assertIn("number <= 16", fuzz)
+        self.assertIn("HERMES_CAMPAIGN_FUZZSC_ITERATIONS", fuzz)
         self.assertIn("number <= 5", fuzz)
 
     def test_hermes_functions_are_all_wired(self) -> None:
@@ -3656,6 +3680,9 @@ with tempfile.TemporaryDirectory() as temporary:
         for name in (
             "pub fn init()",
             "pub fn persist_campaign_report(",
+            "pub fn persist_resume_state(",
+            "pub fn load_resume_state(",
+            "pub fn clear_resume_state(",
             "pub fn info()",
             "pub fn run_prompt(",
             "pub fn render_web_ui()",
@@ -3701,6 +3728,15 @@ with tempfile.TemporaryDirectory() as temporary:
             "pub fn campaign_case_for_mode(",
             "pub fn parse_campaign_options(",
             "pub fn next_random(",
+            "pub fn parse_resume_state(",
+            "pub fn format_resume_state(",
+            "pub fn resume_should_continue(",
+            "pub fn campaign_case_is_vm_create(",
+            "pub fn campaign_case_is_vm_kill(",
+            "pub fn campaign_vm_recycle_name(",
+            "pub fn resume_pending_host_iteration(",
+            "pub fn campaign_fuzzsc_seed_arg(",
+            "pub fn campaign_case_is_fuzzsc(",
         ):
             self.assertIn(name, policy)
         for name in (
@@ -3710,7 +3746,11 @@ with tempfile.TemporaryDirectory() as temporary:
             "fn run_hermes_test_all(",
             "fn run_hermes_random_campaign(",
             "fn execute_hermes_campaign_round(",
+            "fn execute_bound_hermes_campaign_case(",
+            "fn recycle_hermes_campaign_vm(",
             "fn count_hermes_command_status(",
+            "fn maybe_resume_hermes_campaign(",
+            "fn persist_hermes_resume_state(",
             "fn run_hermes_ui_entry(",
             "fn hermes_ui_submit(",
             "fn hermes_ui_run_test(",
@@ -3765,10 +3805,11 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertIn("testsc", smoke)
         self.assertIn("fuzzsc seed=1 iterations=1", smoke)
         self.assertIn("hermes random seed=1 iterations=1", smoke)
-        self.assertIn("hermes exec reboot", smoke)
+        self.assertIn("hermes exec kill", smoke)
+        self.assertNotIn("hermes exec reboot", smoke)
         self.assertIn("=== Test Complete ===", smoke)
         self.assertIn("[OK] syscall and POSIX fuzz completed", smoke)
-        self.assertIn("Hermes denied forbidden command: reboot", smoke)
+        self.assertIn("Hermes denied forbidden command: kill", smoke)
         posix = Path("docs/POSIX_CONFORMANCE.md").read_text(encoding="utf-8")
         self.assertIn("posixtest all", posix)
         self.assertIn("Hermes", posix)

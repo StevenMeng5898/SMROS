@@ -713,6 +713,7 @@ impl UserShell {
     /// Run the shell main loop
     pub fn run(&mut self) -> ! {
         self.print_welcome();
+        maybe_resume_hermes_campaign(&mut self.context);
 
         loop {
             self.print_prompt();
@@ -3686,20 +3687,16 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         return;
     }
     let mut copy_readback = [0u8; 10];
-    let verify_fd = match crate::syscall::sys_openat(
-        usize::MAX - 99,
-        copy_path.as_ptr() as usize,
-        0,
-        0,
-    ) {
-        Ok(fd) => fd,
-        Err(e) => {
-            print_linux_error(ctx, "open creat/trunc copy destination for read", e);
-            let _ = crate::syscall::sys_close(file_fd);
-            let _ = crate::syscall::sys_close(dir_fd);
-            return;
-        }
-    };
+    let verify_fd =
+        match crate::syscall::sys_openat(usize::MAX - 99, copy_path.as_ptr() as usize, 0, 0) {
+            Ok(fd) => fd,
+            Err(e) => {
+                print_linux_error(ctx, "open creat/trunc copy destination for read", e);
+                let _ = crate::syscall::sys_close(file_fd);
+                let _ = crate::syscall::sys_close(dir_fd);
+                return;
+            }
+        };
     let read_ok = crate::syscall::sys_read(
         verify_fd,
         copy_readback.as_mut_ptr() as usize,
@@ -3983,20 +3980,23 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         return;
     }
     ctx.serial.write_str("[OK] FxFS smoke\n");
-    ctx.serial.write_str("[TEST] Testing component bootstrap... ");
+    ctx.serial
+        .write_str("[TEST] Testing component bootstrap... ");
     if !crate::user_level::component::start_bootstrap() {
         ctx.serial.write_str("[FAIL] component bootstrap failed\n");
         return;
     }
     ctx.serial.write_str("[OK] component bootstrap\n");
-    ctx.serial.write_str("[TEST] Testing component launchers... ");
+    ctx.serial
+        .write_str("[TEST] Testing component launchers... ");
     if !crate::user_level::component::start_boot_component_threads() {
         ctx.serial.write_str("[FAIL] component launchers failed\n");
         return;
     }
     ctx.serial.write_str("[OK] component launchers\n");
     if !crate::user_level::component::smoke_runtime() {
-        ctx.serial.write_str("[FAIL] component framework smoke failed\n");
+        ctx.serial
+            .write_str("[FAIL] component framework smoke failed\n");
         return;
     }
     ctx.serial.write_str("[OK] component framework smoke\n");
@@ -4440,7 +4440,10 @@ fn print_fuzz_usage(ctx: &mut ShellContext) {
         .write_str("       each iteration fuzzes Linux/Zircon syscalls and POSIX APIs\n");
 }
 
-fn print_posix_fuzz_error_buckets(ctx: &mut ShellContext, report: &crate::syscall::SyscallFuzzReport) {
+fn print_posix_fuzz_error_buckets(
+    ctx: &mut ShellContext,
+    report: &crate::syscall::SyscallFuzzReport,
+) {
     let names = crate::syscall::POSIX_API_FUZZ_NAMES;
     let mut index = 0;
     while index < report.posix_err_api_count
@@ -5352,9 +5355,6 @@ fn print_hermes_usage(ctx: &mut ShellContext) {
 }
 
 fn run_hermes_test_all(ctx: &mut ShellContext, args: &[&str]) {
-    use crate::user_level::services::hermes_shell_logic_shared::campaign_report_omitted_rounds;
-    use crate::user_level::services::vm_host::HermesHostTestJob;
-
     let Some(options) =
         crate::user_level::services::hermes_shell_logic_shared::parse_campaign_options(args)
     else {
@@ -5364,9 +5364,44 @@ fn run_hermes_test_all(ctx: &mut ShellContext, args: &[&str]) {
         return;
     };
     let seed = options.seed.unwrap_or(1);
-    ctx.serial
-        .write_str("\n=== Hermes Full Test Orchestration ===\n");
-    let native_ok = run_hermes_agent_tests(ctx);
+    run_hermes_test_all_inner(ctx, seed, options, None);
+}
+
+fn run_hermes_test_all_inner(
+    ctx: &mut ShellContext,
+    seed: u64,
+    options: crate::user_level::services::hermes_shell_logic_shared::HermesCampaignOptions,
+    resume: Option<crate::user_level::services::hermes_shell_logic_shared::HermesResumeState>,
+) {
+    use crate::user_level::services::hermes_shell_logic_shared::{
+        campaign_case_is_reboot, HermesResumeKind, HermesResumeState,
+    };
+
+    let resumed = resume.is_some();
+    ctx.serial.write_str(if resumed {
+        "\n=== Hermes Full Test Orchestration (resumed) ===\n"
+    } else {
+        "\n=== Hermes Full Test Orchestration ===\n"
+    });
+    if resumed {
+        ctx.serial.write_str("Hermes resume test-all seed=");
+        print_u64(&mut ctx.serial, seed);
+        ctx.serial.write_str(" from iteration ");
+        print_usize(
+            &mut ctx.serial,
+            resume
+                .map(|state| state.next_round.saturating_add(1))
+                .unwrap_or(1),
+        );
+        ctx.serial.write_str("/");
+        print_usize(&mut ctx.serial, options.iterations);
+        ctx.serial.write_str("\n");
+    }
+
+    let native_ok = match resume {
+        Some(state) => state.native_ok,
+        None => run_hermes_agent_tests(ctx),
+    };
 
     let mut report = String::from("Hermes test-all\nseed=");
     append_usize_shell(&mut report, seed as usize);
@@ -5376,21 +5411,79 @@ fn run_hermes_test_all(ctx: &mut ShellContext, args: &[&str]) {
     report.push_str(hermes_campaign_mode_name(options.mode));
     report.push_str("\nnative=");
     report.push_str(if native_ok { "pass\n" } else { "fail\n" });
-    let jobs = [HermesHostTestJob::Ut, HermesHostTestJob::It];
-    let mut random_completed = 0usize;
-    let mut random_denied = 0usize;
-    let mut random_invalid = 0usize;
-    let mut random_unknown = 0usize;
-    let mut host_passes = [0usize; 2];
-    let mut host_failures = [0usize; 2];
+    if let Some(state) = resume {
+        report.push_str("resumed_from=");
+        append_usize_shell(&mut report, state.next_round);
+        report.push('\n');
+    }
 
-    for round in 0..options.iterations {
+    let mut random_completed = resume.map(|state| state.completed).unwrap_or(0);
+    let mut random_denied = resume.map(|state| state.denied).unwrap_or(0);
+    let mut random_invalid = resume.map(|state| state.invalid).unwrap_or(0);
+    let mut random_unknown = resume.map(|state| state.unknown).unwrap_or(0);
+    let mut host_passes = [
+        resume.map(|state| state.host_ut_pass).unwrap_or(0),
+        resume.map(|state| state.host_it_pass).unwrap_or(0),
+    ];
+    let mut host_failures = [
+        resume.map(|state| state.host_ut_fail).unwrap_or(0),
+        resume.map(|state| state.host_it_fail).unwrap_or(0),
+    ];
+    let start_round = resume.map(|state| state.next_round).unwrap_or(0);
+
+    for round in start_round..options.iterations {
         ctx.serial.write_str("Hermes test-all iteration ");
         print_usize(&mut ctx.serial, round.saturating_add(1));
         ctx.serial.write_str("/");
         print_usize(&mut ctx.serial, options.iterations);
         ctx.serial.write_str("\n");
 
+        let Some(case) = hermes_campaign_round_case(seed, round, options.mode) else {
+            random_unknown = random_unknown.saturating_add(1);
+            continue;
+        };
+
+        if campaign_case_is_reboot(case.command) {
+            record_hermes_campaign_round(round, seed, &case, &mut report);
+            random_completed = random_completed.saturating_add(1);
+            persist_hermes_resume_state(&HermesResumeState {
+                kind: HermesResumeKind::TestAll,
+                seed,
+                iterations: options.iterations,
+                mode: options.mode,
+                next_round: round.saturating_add(1),
+                native_ok,
+                completed: random_completed,
+                denied: random_denied,
+                invalid: random_invalid,
+                unknown: random_unknown,
+                host_ut_pass: host_passes[0],
+                host_ut_fail: host_failures[0],
+                host_it_pass: host_passes[1],
+                host_it_fail: host_failures[1],
+                host_jobs_pending: true,
+            });
+            let _ = execute_hermes_command(ctx, case.command, &case.args[..case.arg_count]);
+            return;
+        }
+
+        persist_hermes_resume_state(&HermesResumeState {
+            kind: HermesResumeKind::TestAll,
+            seed,
+            iterations: options.iterations,
+            mode: options.mode,
+            next_round: round.saturating_add(1),
+            native_ok,
+            completed: random_completed,
+            denied: random_denied,
+            invalid: random_invalid,
+            unknown: random_unknown,
+            host_ut_pass: host_passes[0],
+            host_ut_fail: host_failures[0],
+            host_it_pass: host_passes[1],
+            host_it_fail: host_failures[1],
+            host_jobs_pending: false,
+        });
         let status = execute_hermes_campaign_round(ctx, seed, round, options.mode, &mut report);
         count_hermes_command_status(
             status,
@@ -5399,94 +5492,33 @@ fn run_hermes_test_all(ctx: &mut ShellContext, args: &[&str]) {
             &mut random_invalid,
             &mut random_unknown,
         );
-
-        for (job_index, job) in jobs.iter().copied().enumerate() {
-            ctx.serial.write_str("Host test ");
-            ctx.serial.write_str(job.as_str());
-            ctx.serial.write_str(" iteration=");
-            print_usize(&mut ctx.serial, round.saturating_add(1));
-            ctx.serial.write_str(": ");
-            match crate::user_level::services::vm_host::run_hermes_test(job) {
-                Ok(result) if result.passed => {
-                    host_passes[job_index] += 1;
-                    ctx.serial.write_str("PASS ");
-                    ctx.serial.write_str(result.summary.as_str());
-                }
-                Ok(result) => {
-                    host_failures[job_index] += 1;
-                    ctx.serial.write_str("FAIL ");
-                    ctx.serial.write_str(result.summary.as_str());
-                }
-                Err(_) => {
-                    host_failures[job_index] += 1;
-                    ctx.serial.write_str("UNAVAILABLE");
-                }
-            }
-            ctx.serial.write_str("\n");
-        }
+        run_hermes_host_jobs(
+            ctx,
+            round.saturating_add(1),
+            &mut host_passes,
+            &mut host_failures,
+        );
     }
 
-    let omitted = campaign_report_omitted_rounds(options.iterations);
-    if omitted > 0 {
-        report.push_str("details_omitted=");
-        append_usize_shell(&mut report, omitted);
-        report.push('\n');
-    }
-    report.push_str("random completed=");
-    append_usize_shell(&mut report, random_completed);
-    report.push_str(" denied=");
-    append_usize_shell(&mut report, random_denied);
-    report.push_str(" invalid=");
-    append_usize_shell(&mut report, random_invalid);
-    report.push_str(" unknown=");
-    append_usize_shell(&mut report, random_unknown);
-    report.push('\n');
-    for (job_index, job) in jobs.iter().copied().enumerate() {
-        report.push_str("host-");
-        report.push_str(job.as_str());
-        report.push_str(" pass=");
-        append_usize_shell(&mut report, host_passes[job_index]);
-        report.push_str(" fail=");
-        append_usize_shell(&mut report, host_failures[job_index]);
-        report.push('\n');
-    }
-
-    let overall = native_ok
-        && random_completed == options.iterations
-        && host_passes
-            .iter()
-            .all(|passes| *passes == options.iterations);
-    report.push_str("overall=");
-    report.push_str(if overall { "pass\n" } else { "fail\n" });
-    match crate::user_level::hermes_agent::persist_campaign_report(report.as_str()) {
-        Ok(_) => {
-            ctx.serial.write_str("Report: ");
-            ctx.serial
-                .write_str(crate::user_level::hermes_agent::HERMES_LATEST_TEST_PATH);
-            ctx.serial.write_str("\n");
-        }
-        Err(err) => {
-            ctx.serial.write_str("Hermes report persistence failed: ");
-            ctx.serial.write_str(err.as_str());
-            ctx.serial.write_str("\n");
-        }
-    }
-    ctx.serial.write_str("Replay: hermes test-all seed=");
-    print_u64(&mut ctx.serial, seed);
-    ctx.serial.write_str(" iterations=");
-    print_usize(&mut ctx.serial, options.iterations);
-    ctx.serial.write_str("\n");
-    ctx.serial.write_str("Hermes test-all result: ");
-    ctx.serial
-        .write_str(if overall { "PASS\n" } else { "FAIL\n" });
+    finish_hermes_test_all(
+        ctx,
+        seed,
+        options.iterations,
+        native_ok,
+        random_completed,
+        random_denied,
+        random_invalid,
+        random_unknown,
+        &host_passes,
+        &host_failures,
+        &mut report,
+    );
 }
 
 fn run_hermes_random_campaign(ctx: &mut ShellContext, args: &[&str]) {
-    use crate::user_level::services::hermes_shell_logic_shared::{
-        campaign_report_omitted_rounds, parse_campaign_options,
-    };
-
-    let Some(options) = parse_campaign_options(args) else {
+    let Some(options) =
+        crate::user_level::services::hermes_shell_logic_shared::parse_campaign_options(args)
+    else {
         ctx.serial.write_str(
             "usage: hermes random [seed=<n>] [iterations=<positive-n>] [mode=ops|syscall]\n",
         );
@@ -5498,6 +5530,18 @@ fn run_hermes_random_campaign(ctx: &mut ShellContext, args: &[&str]) {
             .wrapping_add(ctx.command_count as u64)
             .wrapping_add(0x534d_524f_53)
     });
+    run_hermes_random_inner(ctx, seed, options, None);
+}
+
+fn run_hermes_random_inner(
+    ctx: &mut ShellContext,
+    seed: u64,
+    options: crate::user_level::services::hermes_shell_logic_shared::HermesCampaignOptions,
+    resume: Option<crate::user_level::services::hermes_shell_logic_shared::HermesResumeState>,
+) {
+    use crate::user_level::services::hermes_shell_logic_shared::{
+        campaign_case_is_reboot, HermesResumeKind, HermesResumeState,
+    };
 
     let mut report = String::from("Hermes random campaign\nseed=");
     append_usize_shell(&mut report, seed as usize);
@@ -5506,13 +5550,85 @@ fn run_hermes_random_campaign(ctx: &mut ShellContext, args: &[&str]) {
     report.push_str("\nmode=");
     report.push_str(hermes_campaign_mode_name(options.mode));
     report.push('\n');
+    if let Some(state) = resume {
+        report.push_str("resumed_from=");
+        append_usize_shell(&mut report, state.next_round);
+        report.push('\n');
+        ctx.serial.write_str("Hermes resume random seed=");
+        print_u64(&mut ctx.serial, seed);
+        ctx.serial.write_str(" from iteration ");
+        print_usize(&mut ctx.serial, state.next_round.saturating_add(1));
+        ctx.serial.write_str("/");
+        print_usize(&mut ctx.serial, options.iterations);
+        ctx.serial.write_str("\n");
+    }
 
-    let mut completed = 0usize;
-    let mut denied = 0usize;
-    let mut invalid = 0usize;
-    let mut unknown = 0usize;
-    for round in 0..options.iterations {
-        let status = execute_hermes_campaign_round(ctx, seed, round, options.mode, &mut report);
+    let mut completed = resume.map(|state| state.completed).unwrap_or(0);
+    let mut denied = resume.map(|state| state.denied).unwrap_or(0);
+    let mut invalid = resume.map(|state| state.invalid).unwrap_or(0);
+    let mut unknown = resume.map(|state| state.unknown).unwrap_or(0);
+    let start_round = resume.map(|state| state.next_round).unwrap_or(0);
+
+    for round in start_round..options.iterations {
+        let Some(case) = hermes_campaign_round_case(seed, round, options.mode) else {
+            unknown = unknown.saturating_add(1);
+            continue;
+        };
+        record_hermes_campaign_round(round, seed, &case, &mut report);
+
+        if campaign_case_is_reboot(case.command) {
+            completed = completed.saturating_add(1);
+            persist_hermes_resume_state(&HermesResumeState {
+                kind: HermesResumeKind::Random,
+                seed,
+                iterations: options.iterations,
+                mode: options.mode,
+                next_round: round.saturating_add(1),
+                native_ok: true,
+                completed,
+                denied,
+                invalid,
+                unknown,
+                host_ut_pass: 0,
+                host_ut_fail: 0,
+                host_it_pass: 0,
+                host_it_fail: 0,
+                host_jobs_pending: false,
+            });
+            if round.saturating_add(1) >= options.iterations {
+                finish_hermes_random_campaign(
+                    ctx,
+                    seed,
+                    options.iterations,
+                    completed,
+                    denied,
+                    invalid,
+                    unknown,
+                    &mut report,
+                );
+            }
+            let _ = execute_hermes_command(ctx, case.command, &case.args[..case.arg_count]);
+            return;
+        }
+
+        persist_hermes_resume_state(&HermesResumeState {
+            kind: HermesResumeKind::Random,
+            seed,
+            iterations: options.iterations,
+            mode: options.mode,
+            next_round: round.saturating_add(1),
+            native_ok: true,
+            completed,
+            denied,
+            invalid,
+            unknown,
+            host_ut_pass: 0,
+            host_ut_fail: 0,
+            host_it_pass: 0,
+            host_it_fail: 0,
+            host_jobs_pending: false,
+        });
+        let status = execute_bound_hermes_campaign_case(ctx, seed, &case);
         count_hermes_command_status(
             status,
             &mut completed,
@@ -5521,49 +5637,17 @@ fn run_hermes_random_campaign(ctx: &mut ShellContext, args: &[&str]) {
             &mut unknown,
         );
     }
-    let omitted = campaign_report_omitted_rounds(options.iterations);
-    if omitted > 0 {
-        report.push_str("details_omitted=");
-        append_usize_shell(&mut report, omitted);
-        report.push('\n');
-    }
 
-    report.push_str("completed=");
-    append_usize_shell(&mut report, completed);
-    report.push_str(" denied=");
-    append_usize_shell(&mut report, denied);
-    report.push_str(" invalid=");
-    append_usize_shell(&mut report, invalid);
-    report.push_str(" unknown=");
-    append_usize_shell(&mut report, unknown);
-    report.push('\n');
-
-    ctx.serial
-        .write_str("Hermes random campaign complete seed=");
-    print_u64(&mut ctx.serial, seed);
-    ctx.serial.write_str(" iterations=");
-    print_usize(&mut ctx.serial, options.iterations);
-    ctx.serial.write_str(" completed=");
-    print_usize(&mut ctx.serial, completed);
-    ctx.serial.write_str("\nReplay: hermes random seed=");
-    print_u64(&mut ctx.serial, seed);
-    ctx.serial.write_str(" iterations=");
-    print_usize(&mut ctx.serial, options.iterations);
-    ctx.serial.write_str("\n");
-
-    match crate::user_level::hermes_agent::persist_campaign_report(report.as_str()) {
-        Ok(_) => {
-            ctx.serial.write_str("Report: ");
-            ctx.serial
-                .write_str(crate::user_level::hermes_agent::HERMES_LATEST_TEST_PATH);
-            ctx.serial.write_str("\n");
-        }
-        Err(err) => {
-            ctx.serial.write_str("Hermes report persistence failed: ");
-            ctx.serial.write_str(err.as_str());
-            ctx.serial.write_str("\n");
-        }
-    }
+    finish_hermes_random_campaign(
+        ctx,
+        seed,
+        options.iterations,
+        completed,
+        denied,
+        invalid,
+        unknown,
+        &mut report,
+    );
 }
 
 fn hermes_campaign_mode_name(
@@ -5584,25 +5668,73 @@ fn execute_hermes_campaign_round(
     report: &mut String,
 ) -> HermesCommandStatus {
     use crate::user_level::services::hermes_shell_logic_shared::{
-        campaign_case_for_mode, campaign_case_index_for_mode, campaign_report_includes_round,
+        campaign_case_for_mode, campaign_case_index_for_mode,
     };
 
     let index = campaign_case_index_for_mode(seed, round, mode);
     let Some(case) = campaign_case_for_mode(mode, index) else {
         return HermesCommandStatus::Unknown;
     };
-    if campaign_report_includes_round(round) {
-        report.push_str("case=");
-        append_usize_shell(report, round);
-        report.push(' ');
-        report.push_str(case.command);
-        for arg in &case.args[..case.arg_count] {
-            report.push(' ');
-            report.push_str(arg);
-        }
-        report.push('\n');
+    record_hermes_campaign_round(round, seed, &case, report);
+    execute_bound_hermes_campaign_case(ctx, seed, &case)
+}
+
+fn execute_bound_hermes_campaign_case(
+    ctx: &mut ShellContext,
+    seed: u64,
+    case: &crate::user_level::services::hermes_shell_logic_shared::HermesCampaignCase,
+) -> HermesCommandStatus {
+    use crate::user_level::services::hermes_shell_logic_shared::campaign_case_is_vm_create;
+
+    let mut seed_buf = [0u8; 32];
+    let (command, args, arg_count) = bound_hermes_campaign_argv(case, seed, &mut seed_buf);
+    let status = execute_hermes_command(ctx, command, &args[..arg_count]);
+    if campaign_case_is_vm_create(case) {
+        recycle_hermes_campaign_vm(ctx);
     }
-    execute_hermes_command(ctx, case.command, &case.args[..case.arg_count])
+    status
+}
+
+fn recycle_hermes_campaign_vm(ctx: &mut ShellContext) {
+    use crate::user_level::services::hermes_shell_logic_shared::HERMES_CAMPAIGN_VM_NAME;
+
+    ctx.serial
+        .write_str("Hermes waiting for nested Linux boot: ");
+    ctx.serial.write_str(HERMES_CAMPAIGN_VM_NAME);
+    ctx.serial.write_str("\n");
+    match crate::user_level::vm_host::wait_for_linux_boot(HERMES_CAMPAIGN_VM_NAME) {
+        Ok(true) => ctx.serial.write_str("Hermes nested Linux boot OK\n"),
+        Ok(false) => ctx
+            .serial
+            .write_str("Hermes nested Linux boot timed out; recycling anyway\n"),
+        Err(err) => {
+            ctx.serial
+                .write_str("Hermes nested Linux boot wait failed: ");
+            print_vm_host_error(ctx, err);
+            ctx.serial.write_str("\n");
+        }
+    }
+    let _ = execute_hermes_command(ctx, "vm", &["-k", HERMES_CAMPAIGN_VM_NAME]);
+}
+
+fn bound_hermes_campaign_argv<'a>(
+    case: &'a crate::user_level::services::hermes_shell_logic_shared::HermesCampaignCase,
+    seed: u64,
+    seed_buf: &'a mut [u8],
+) -> (&'a str, [&'a str; 2], usize) {
+    use crate::user_level::services::hermes_shell_logic_shared::{
+        campaign_case_is_fuzzsc, campaign_fuzzsc_seed_arg, HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG,
+    };
+    if campaign_case_is_fuzzsc(case.command) {
+        if let Some(seed_arg) = campaign_fuzzsc_seed_arg(seed, seed_buf) {
+            return (
+                case.command,
+                [seed_arg, HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG],
+                2,
+            );
+        }
+    }
+    (case.command, case.args, case.arg_count)
 }
 
 fn count_hermes_command_status(
@@ -5618,6 +5750,375 @@ fn count_hermes_command_status(
         HermesCommandStatus::Invalid => *invalid += 1,
         HermesCommandStatus::Unknown => *unknown += 1,
     }
+}
+
+fn maybe_resume_hermes_campaign(ctx: &mut ShellContext) {
+    use crate::user_level::services::hermes_shell_logic_shared::{
+        resume_pending_host_iteration, resume_should_continue, HermesCampaignOptions,
+        HermesResumeKind,
+    };
+
+    match crate::user_level::hermes_agent::load_resume_state() {
+        Ok(Some(mut state)) => {
+            let _ = crate::user_level::vm_host::wait_for_host_transport();
+            if let Some(iteration) = resume_pending_host_iteration(&state) {
+                let mut host_passes = [state.host_ut_pass, state.host_it_pass];
+                let mut host_failures = [state.host_ut_fail, state.host_it_fail];
+                run_hermes_host_jobs(ctx, iteration, &mut host_passes, &mut host_failures);
+                state.host_ut_pass = host_passes[0];
+                state.host_ut_fail = host_failures[0];
+                state.host_it_pass = host_passes[1];
+                state.host_it_fail = host_failures[1];
+                state.host_jobs_pending = false;
+                persist_hermes_resume_state(&state);
+            }
+            let options = HermesCampaignOptions {
+                seed: Some(state.seed),
+                iterations: state.iterations,
+                mode: state.mode,
+            };
+            if resume_should_continue(&state) {
+                match state.kind {
+                    HermesResumeKind::TestAll => {
+                        run_hermes_test_all_inner(ctx, state.seed, options, Some(state))
+                    }
+                    HermesResumeKind::Random => {
+                        run_hermes_random_inner(ctx, state.seed, options, Some(state))
+                    }
+                }
+            } else {
+                match state.kind {
+                    HermesResumeKind::TestAll => finish_hermes_test_all_from_resume(ctx, state),
+                    HermesResumeKind::Random => finish_hermes_random_from_resume(ctx, state),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn persist_hermes_resume_state(
+    state: &crate::user_level::services::hermes_shell_logic_shared::HermesResumeState,
+) {
+    let _ = crate::user_level::hermes_agent::persist_resume_state(state);
+}
+
+fn clear_hermes_resume_state() {
+    let _ = crate::user_level::hermes_agent::clear_resume_state();
+}
+
+fn hermes_campaign_round_case(
+    seed: u64,
+    round: usize,
+    mode: crate::user_level::services::hermes_shell_logic_shared::HermesCampaignMode,
+) -> Option<crate::user_level::services::hermes_shell_logic_shared::HermesCampaignCase> {
+    use crate::user_level::services::hermes_shell_logic_shared::{
+        campaign_case_for_mode, campaign_case_index_for_mode,
+    };
+    campaign_case_for_mode(mode, campaign_case_index_for_mode(seed, round, mode))
+}
+
+fn record_hermes_campaign_round(
+    round: usize,
+    seed: u64,
+    case: &crate::user_level::services::hermes_shell_logic_shared::HermesCampaignCase,
+    report: &mut String,
+) {
+    use crate::user_level::services::hermes_shell_logic_shared::campaign_report_includes_round;
+    if campaign_report_includes_round(round) {
+        let mut seed_buf = [0u8; 32];
+        let (command, args, arg_count) = bound_hermes_campaign_argv(case, seed, &mut seed_buf);
+        report.push_str("case=");
+        append_usize_shell(report, round);
+        report.push(' ');
+        report.push_str(command);
+        for arg in &args[..arg_count] {
+            report.push(' ');
+            report.push_str(arg);
+        }
+        report.push('\n');
+    }
+}
+
+fn run_hermes_host_jobs(
+    ctx: &mut ShellContext,
+    iteration: usize,
+    host_passes: &mut [usize; 2],
+    host_failures: &mut [usize; 2],
+) {
+    use crate::user_level::services::vm_host::HermesHostTestJob;
+    let jobs = [HermesHostTestJob::Ut, HermesHostTestJob::It];
+    for (job_index, job) in jobs.iter().copied().enumerate() {
+        ctx.serial.write_str("Host test ");
+        ctx.serial.write_str(job.as_str());
+        ctx.serial.write_str(" iteration=");
+        print_usize(&mut ctx.serial, iteration);
+        ctx.serial.write_str(": ");
+        match crate::user_level::services::vm_host::run_hermes_test(job) {
+            Ok(result) if result.passed => {
+                host_passes[job_index] += 1;
+                ctx.serial.write_str("PASS ");
+                ctx.serial.write_str(result.summary.as_str());
+            }
+            Ok(result) => {
+                host_failures[job_index] += 1;
+                ctx.serial.write_str("FAIL ");
+                ctx.serial.write_str(result.summary.as_str());
+            }
+            Err(err) => {
+                host_failures[job_index] += 1;
+                ctx.serial.write_str("UNAVAILABLE ");
+                print_vm_host_error(ctx, err);
+            }
+        }
+        ctx.serial.write_str(
+            "
+",
+        );
+    }
+}
+
+fn finish_hermes_test_all_from_resume(
+    ctx: &mut ShellContext,
+    state: crate::user_level::services::hermes_shell_logic_shared::HermesResumeState,
+) {
+    let mut report = String::from(
+        "Hermes test-all
+seed=",
+    );
+    append_usize_shell(&mut report, state.seed as usize);
+    report.push_str(
+        "
+iterations=",
+    );
+    append_usize_shell(&mut report, state.iterations);
+    report.push_str(
+        "
+mode=",
+    );
+    report.push_str(hermes_campaign_mode_name(state.mode));
+    report.push_str(
+        "
+native=",
+    );
+    report.push_str(if state.native_ok {
+        "pass
+"
+    } else {
+        "fail
+"
+    });
+    report.push_str("resumed_from=");
+    append_usize_shell(&mut report, state.next_round);
+    report.push('\n');
+    finish_hermes_test_all(
+        ctx,
+        state.seed,
+        state.iterations,
+        state.native_ok,
+        state.completed,
+        state.denied,
+        state.invalid,
+        state.unknown,
+        &[state.host_ut_pass, state.host_it_pass],
+        &[state.host_ut_fail, state.host_it_fail],
+        &mut report,
+    );
+}
+
+fn finish_hermes_test_all(
+    ctx: &mut ShellContext,
+    seed: u64,
+    iterations: usize,
+    native_ok: bool,
+    random_completed: usize,
+    random_denied: usize,
+    random_invalid: usize,
+    random_unknown: usize,
+    host_passes: &[usize; 2],
+    host_failures: &[usize; 2],
+    report: &mut String,
+) {
+    use crate::user_level::services::hermes_shell_logic_shared::campaign_report_omitted_rounds;
+    use crate::user_level::services::vm_host::HermesHostTestJob;
+
+    let omitted = campaign_report_omitted_rounds(iterations);
+    if omitted > 0 {
+        report.push_str("details_omitted=");
+        append_usize_shell(report, omitted);
+        report.push('\n');
+    }
+    report.push_str("random completed=");
+    append_usize_shell(report, random_completed);
+    report.push_str(" denied=");
+    append_usize_shell(report, random_denied);
+    report.push_str(" invalid=");
+    append_usize_shell(report, random_invalid);
+    report.push_str(" unknown=");
+    append_usize_shell(report, random_unknown);
+    report.push('\n');
+    let jobs = [HermesHostTestJob::Ut, HermesHostTestJob::It];
+    for (job_index, job) in jobs.iter().copied().enumerate() {
+        report.push_str("host-");
+        report.push_str(job.as_str());
+        report.push_str(" pass=");
+        append_usize_shell(report, host_passes[job_index]);
+        report.push_str(" fail=");
+        append_usize_shell(report, host_failures[job_index]);
+        report.push('\n');
+    }
+
+    let overall = native_ok
+        && random_completed == iterations
+        && host_passes.iter().all(|passes| *passes == iterations);
+    report.push_str("overall=");
+    report.push_str(if overall {
+        "pass
+"
+    } else {
+        "fail
+"
+    });
+    match crate::user_level::hermes_agent::persist_campaign_report(report.as_str()) {
+        Ok(_) => {
+            ctx.serial.write_str("Report: ");
+            ctx.serial
+                .write_str(crate::user_level::hermes_agent::HERMES_LATEST_TEST_PATH);
+            ctx.serial.write_str(
+                "
+",
+            );
+        }
+        Err(err) => {
+            ctx.serial.write_str("Hermes report persistence failed: ");
+            ctx.serial.write_str(err.as_str());
+            ctx.serial.write_str(
+                "
+",
+            );
+        }
+    }
+    clear_hermes_resume_state();
+    ctx.serial.write_str("Replay: hermes test-all seed=");
+    print_u64(&mut ctx.serial, seed);
+    ctx.serial.write_str(" iterations=");
+    print_usize(&mut ctx.serial, iterations);
+    ctx.serial.write_str(
+        "
+",
+    );
+    ctx.serial.write_str("Hermes test-all result: ");
+    ctx.serial.write_str(if overall {
+        "PASS
+"
+    } else {
+        "FAIL
+"
+    });
+}
+
+fn finish_hermes_random_from_resume(
+    ctx: &mut ShellContext,
+    state: crate::user_level::services::hermes_shell_logic_shared::HermesResumeState,
+) {
+    let mut report = String::from(
+        "Hermes random campaign
+seed=",
+    );
+    append_usize_shell(&mut report, state.seed as usize);
+    report.push_str(
+        "
+iterations=",
+    );
+    append_usize_shell(&mut report, state.iterations);
+    report.push_str(
+        "
+mode=",
+    );
+    report.push_str(hermes_campaign_mode_name(state.mode));
+    report.push('\n');
+    report.push_str("resumed_from=");
+    append_usize_shell(&mut report, state.next_round);
+    report.push('\n');
+    finish_hermes_random_campaign(
+        ctx,
+        state.seed,
+        state.iterations,
+        state.completed,
+        state.denied,
+        state.invalid,
+        state.unknown,
+        &mut report,
+    );
+}
+
+fn finish_hermes_random_campaign(
+    ctx: &mut ShellContext,
+    seed: u64,
+    iterations: usize,
+    completed: usize,
+    denied: usize,
+    invalid: usize,
+    unknown: usize,
+    report: &mut String,
+) {
+    use crate::user_level::services::hermes_shell_logic_shared::campaign_report_omitted_rounds;
+
+    let omitted = campaign_report_omitted_rounds(iterations);
+    if omitted > 0 {
+        report.push_str("details_omitted=");
+        append_usize_shell(report, omitted);
+        report.push('\n');
+    }
+    report.push_str("completed=");
+    append_usize_shell(report, completed);
+    report.push_str(" denied=");
+    append_usize_shell(report, denied);
+    report.push_str(" invalid=");
+    append_usize_shell(report, invalid);
+    report.push_str(" unknown=");
+    append_usize_shell(report, unknown);
+    report.push('\n');
+
+    ctx.serial
+        .write_str("Hermes random campaign complete seed=");
+    print_u64(&mut ctx.serial, seed);
+    ctx.serial.write_str(" iterations=");
+    print_usize(&mut ctx.serial, iterations);
+    ctx.serial.write_str(" completed=");
+    print_usize(&mut ctx.serial, completed);
+    ctx.serial.write_str(
+        "
+Replay: hermes random seed=",
+    );
+    print_u64(&mut ctx.serial, seed);
+    ctx.serial.write_str(" iterations=");
+    print_usize(&mut ctx.serial, iterations);
+    ctx.serial.write_str(
+        "
+",
+    );
+
+    match crate::user_level::hermes_agent::persist_campaign_report(report.as_str()) {
+        Ok(_) => {
+            ctx.serial.write_str("Report: ");
+            ctx.serial
+                .write_str(crate::user_level::hermes_agent::HERMES_LATEST_TEST_PATH);
+            ctx.serial.write_str(
+                "
+",
+            );
+        }
+        Err(err) => {
+            ctx.serial.write_str("Hermes report persistence failed: ");
+            ctx.serial.write_str(err.as_str());
+            ctx.serial.write_str(
+                "
+",
+            );
+        }
+    }
+    clear_hermes_resume_state();
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9378,6 +9879,7 @@ fn cmd_clear(_ctx: &mut ShellContext, _args: &[&str]) {
 
 /// Command: reboot - Reset machine through PSCI
 fn cmd_reboot(ctx: &mut ShellContext, _args: &[&str]) {
+    crate::user_level::fxfs::flush_persist();
     ctx.serial.write_str("Rebooting...\n");
     crate::kernel_lowlevel::smp::system_reset();
 }

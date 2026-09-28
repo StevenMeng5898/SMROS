@@ -157,10 +157,18 @@ make skt
 
 This builds the kernel, starts QEMU in non-interactive mode, captures serial
 output in `target/smros-smoke-qemu.log`, sends `testsc`, `fuzzsc seed=1
-iterations=1`, `hermes random seed=1 iterations=1`, and `hermes exec reboot`,
+iterations=1`, `hermes random seed=1 iterations=1`, and `hermes exec kill`,
 and passes when the syscall smoke and bounded fuzz complete, the safe campaign
-completes, reboot is denied, and the required boot milestones are seen.
-The Hermes skills `ut`, `it`, `skt`, and `fuzzing` map onto this stack:
+completes, `kill` is denied, and the required boot milestones are seen.
+Hermes owns the `reboot` skill (`hermes exec reboot`) and the `cmd` skill for
+VM/Docker lifecycle commands; smoke does not execute them. When a Hermes campaign
+does reboot, it persists `/data/hermes/tests/resume.cfg` and continues remaining
+iterations after reset. Reboot-round host `ut`/`it` jobs run after that resume
+once the guest network can reach the host launcher. The ops catalog includes
+`vm -c /shared/vm-demo.xml` so a nested GTK QEMU Linux window can appear during
+`hermes test-all`. Campaign create waits until guest Linux boot OK, then
+`vm -k linux-demo` recycles the nested QEMU process. The Hermes skills
+`ut`, `it`, `skt`, `fuzzing`, `reboot`, and `cmd` map onto this stack:
 `make posix-tool-test` is the current syscall/POSIX unit/integration gate while
 `tests/host` is uncompilable, `make skt` is the fast guest smoke test (SKT),
 and official POSIX remains host-controlled `make posix-run`. `make st` remains

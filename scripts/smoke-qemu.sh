@@ -47,12 +47,12 @@ QEMU_MEMORY="${QEMU_MEMORY:-2G}"
 SMROS_ST_TIMEOUT="${SMROS_ST_TIMEOUT:-180}"
 SMROS_ST_LOG="${SMROS_ST_LOG:-$REPO_ROOT/target/smros-smoke-qemu.log}"
 SMROS_ST_PROMPT="${SMROS_ST_PROMPT:-smros:/>}"
-DEFAULT_SMROS_ST_REQUIRED_PATTERNS="SMROS-A Distributed AI-Native Operating System|[OK] Kernel initialized successfully!|[OK] Serial console initialized|[SYSCALL] Syscall handler initialized|[CHANNEL] Channel subsystem initialized|[INFO] Fast boot complete. Starting shell|[SHELL] Starting shell as scheduled thread...|=== Test Complete ===|[OK] syscall and POSIX fuzz completed|Hermes random campaign complete seed=1 iterations=1|Hermes denied forbidden command: reboot|$SMROS_ST_PROMPT"
+DEFAULT_SMROS_ST_REQUIRED_PATTERNS="SMROS-A Distributed AI-Native Operating System|[OK] Kernel initialized successfully!|[OK] Serial console initialized|[SYSCALL] Syscall handler initialized|[CHANNEL] Channel subsystem initialized|[INFO] Fast boot complete. Starting shell|[SHELL] Starting shell as scheduled thread...|=== Test Complete ===|[OK] syscall and POSIX fuzz completed|Hermes random campaign complete seed=1 iterations=1|Hermes denied forbidden command: kill|$SMROS_ST_PROMPT"
 SMROS_ST_REQUIRED_PATTERNS="${SMROS_ST_REQUIRED_PATTERNS:-$DEFAULT_SMROS_ST_REQUIRED_PATTERNS}"
 SMROS_ST_COMMANDS="${SMROS_ST_COMMANDS:-testsc
 fuzzsc seed=1 iterations=1
 hermes random seed=1 iterations=1
-hermes exec reboot}"
+hermes exec kill}"
 
 if ! command -v "$QEMU_SYSTEM" >/dev/null 2>&1; then
     echo "error: $QEMU_SYSTEM not found" >&2
