@@ -5443,9 +5443,26 @@ fn run_hermes_test_all_inner(
             continue;
         };
 
+        random_completed = random_completed.saturating_add(1);
+        persist_hermes_resume_state(&HermesResumeState {
+            kind: HermesResumeKind::TestAll,
+            seed,
+            iterations: options.iterations,
+            mode: options.mode,
+            next_round: round.saturating_add(1),
+            native_ok,
+            completed: random_completed,
+            denied: random_denied,
+            invalid: random_invalid,
+            unknown: random_unknown,
+            host_ut_pass: host_passes[0],
+            host_ut_fail: host_failures[0],
+            host_it_pass: host_passes[1],
+            host_it_fail: host_failures[1],
+            host_jobs_pending: true,
+        });
         if campaign_case_is_reboot(case.command) {
             record_hermes_campaign_round(round, seed, &case, &mut report);
-            random_completed = random_completed.saturating_add(1);
             persist_hermes_resume_state(&HermesResumeState {
                 kind: HermesResumeKind::TestAll,
                 seed,
@@ -5482,22 +5499,38 @@ fn run_hermes_test_all_inner(
             host_ut_fail: host_failures[0],
             host_it_pass: host_passes[1],
             host_it_fail: host_failures[1],
-            host_jobs_pending: false,
+            host_jobs_pending: true,
         });
         let status = execute_hermes_campaign_round(ctx, seed, round, options.mode, &mut report);
-        count_hermes_command_status(
-            status,
-            &mut random_completed,
-            &mut random_denied,
-            &mut random_invalid,
-            &mut random_unknown,
-        );
+        match status {
+            HermesCommandStatus::Completed => {}
+            HermesCommandStatus::Denied => random_denied = random_denied.saturating_add(1),
+            HermesCommandStatus::Invalid => random_invalid = random_invalid.saturating_add(1),
+            HermesCommandStatus::Unknown => random_unknown = random_unknown.saturating_add(1),
+        }
         run_hermes_host_jobs(
             ctx,
             round.saturating_add(1),
             &mut host_passes,
             &mut host_failures,
         );
+        persist_hermes_resume_state(&HermesResumeState {
+            kind: HermesResumeKind::TestAll,
+            seed,
+            iterations: options.iterations,
+            mode: options.mode,
+            next_round: round.saturating_add(1),
+            native_ok,
+            completed: random_completed,
+            denied: random_denied,
+            invalid: random_invalid,
+            unknown: random_unknown,
+            host_ut_pass: host_passes[0],
+            host_ut_fail: host_failures[0],
+            host_it_pass: host_passes[1],
+            host_it_fail: host_failures[1],
+            host_jobs_pending: false,
+        });
     }
 
     finish_hermes_test_all(
@@ -5696,23 +5729,41 @@ fn execute_bound_hermes_campaign_case(
 }
 
 fn recycle_hermes_campaign_vm(ctx: &mut ShellContext) {
+    use crate::kernel_objects::hypervisor::VmState;
     use crate::user_level::services::hermes_shell_logic_shared::HERMES_CAMPAIGN_VM_NAME;
 
-    ctx.serial
-        .write_str("Hermes waiting for nested Linux boot: ");
-    ctx.serial.write_str(HERMES_CAMPAIGN_VM_NAME);
-    ctx.serial.write_str("\n");
-    match crate::user_level::vm_host::wait_for_linux_boot(HERMES_CAMPAIGN_VM_NAME) {
-        Ok(true) => ctx.serial.write_str("Hermes nested Linux boot OK\n"),
-        Ok(false) => ctx
-            .serial
-            .write_str("Hermes nested Linux boot timed out; recycling anyway\n"),
-        Err(err) => {
-            ctx.serial
-                .write_str("Hermes nested Linux boot wait failed: ");
-            print_vm_host_error(ctx, err);
-            ctx.serial.write_str("\n");
+    let launched = {
+        let tick = scheduler::scheduler().get_tick_count();
+        crate::kernel_objects::hypervisor::hypervisor()
+            .status(tick)
+            .vms
+            .iter()
+            .any(|vm| {
+                vm.name.as_str() == HERMES_CAMPAIGN_VM_NAME
+                    && vm.host_qemu_pid != 0
+                    && vm.state == VmState::Running
+            })
+    };
+    if launched {
+        ctx.serial
+            .write_str("Hermes waiting for nested Linux boot: ");
+        ctx.serial.write_str(HERMES_CAMPAIGN_VM_NAME);
+        ctx.serial.write_str("\n");
+        match crate::user_level::vm_host::wait_for_linux_boot(HERMES_CAMPAIGN_VM_NAME) {
+            Ok(true) => ctx.serial.write_str("Hermes nested Linux boot OK\n"),
+            Ok(false) => ctx
+                .serial
+                .write_str("Hermes nested Linux boot timed out; recycling anyway\n"),
+            Err(err) => {
+                ctx.serial
+                    .write_str("Hermes nested Linux boot wait failed: ");
+                print_vm_host_error(ctx, err);
+                ctx.serial.write_str("\n");
+            }
         }
+    } else {
+        ctx.serial
+            .write_str("Hermes skipping nested Linux boot wait (host qemu not launched)\n");
     }
     let _ = execute_hermes_command(ctx, "vm", &["-k", HERMES_CAMPAIGN_VM_NAME]);
 }
@@ -5760,7 +5811,20 @@ fn maybe_resume_hermes_campaign(ctx: &mut ShellContext) {
 
     match crate::user_level::hermes_agent::load_resume_state() {
         Ok(Some(mut state)) => {
-            let _ = crate::user_level::vm_host::wait_for_host_transport();
+            ctx.serial
+                .write_str("Hermes resume: waiting for host launcher\n");
+            if let Err(err) = crate::user_level::vm_host::wait_for_host_transport() {
+                ctx.serial
+                    .write_str("Hermes resume: host launcher not ready (");
+                print_vm_host_error(ctx, err);
+                ctx.serial.write_str("); retrying\n");
+                if let Err(err) = crate::user_level::vm_host::wait_for_host_transport() {
+                    ctx.serial
+                        .write_str("Hermes resume: host launcher still not ready: ");
+                    print_vm_host_error(ctx, err);
+                    ctx.serial.write_str("\n");
+                }
+            }
             if let Some(iteration) = resume_pending_host_iteration(&state) {
                 let mut host_passes = [state.host_ut_pass, state.host_it_pass];
                 let mut host_failures = [state.host_ut_fail, state.host_it_fail];
@@ -5871,10 +5935,7 @@ fn run_hermes_host_jobs(
                 print_vm_host_error(ctx, err);
             }
         }
-        ctx.serial.write_str(
-            "
-",
-        );
+        ctx.serial.write_str("\n");
     }
 }
 

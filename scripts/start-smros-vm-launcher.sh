@@ -10,7 +10,7 @@ HOST="${SMROS_VM_LAUNCHER_HOST:-0.0.0.0}"
 PROBE_HOST="${SMROS_VM_LAUNCHER_PROBE_HOST:-127.0.0.1}"
 LOG_FILE="${SMROS_VM_LAUNCHER_LOG:-$ROOT_DIR/smros-vm-launcher.log}"
 PID_FILE="${SMROS_VM_LAUNCHER_PID:-$ROOT_DIR/smros-vm-launcher.pid}"
-REQUIRED_VERSION=9
+REQUIRED_VERSION=10
 
 cd "$ROOT_DIR"
 
@@ -28,7 +28,7 @@ try:
         sock.settimeout(0.2)
         sock.connect((host, port))
         sock.sendall(request)
-        response = sock.recv(128)
+        response = sock.recv(256)
 except OSError:
     raise SystemExit(1)
 text = response.decode("utf-8", errors="replace")
@@ -52,6 +52,8 @@ if fields.get("vm_log") != "1":
 if fields.get("hermes_test_jobs") != "1":
     raise SystemExit(1)
 if fields.get("linux_boot") != "1":
+    raise SystemExit(1)
+if fields.get("launch_retry") != "1":
     raise SystemExit(1)
 PY
 }

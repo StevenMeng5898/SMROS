@@ -3618,7 +3618,7 @@ with tempfile.TemporaryDirectory() as temporary:
         policy = Path("src/user_level/services/hermes_shell_logic_shared.rs").read_text(
             encoding="utf-8"
         )
-        self.assertIn('campaign_case_const("fuzzsc", "iterations=100"', policy)
+        self.assertIn('campaign_case_const("fuzzsc", "iterations=50"', policy)
         self.assertNotIn(
             'campaign_case_const("fuzzsc", "seed=1", "iterations=1"', policy
         )

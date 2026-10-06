@@ -644,6 +644,9 @@ pub(crate) fn block_current(reason: LinuxBlockReason) -> Result<LinuxTaskCore, S
     if reason == LinuxBlockReason::None {
         return Err(SysError::EINVAL);
     }
+    if kernel_dispatch_active() {
+        return Err(SysError::EAGAIN);
+    }
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let result = (|| {
         let scheduler_thread = scheduler::scheduler().current();

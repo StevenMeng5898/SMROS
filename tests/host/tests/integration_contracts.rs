@@ -6585,6 +6585,14 @@ fn hermes_test_resumes_after_reboot() {
     assert!(resume_body.contains("resume_pending_host_iteration"));
     assert!(resume_body.contains("run_hermes_host_jobs"));
     assert!(resume_body.contains("wait_for_host_transport"));
+    assert!(resume_body.contains("Hermes resume: waiting for host launcher"));
+    let wait_pos = resume_body
+        .find("wait_for_host_transport")
+        .expect("wait before jobs");
+    let jobs_pos = resume_body
+        .find("run_hermes_host_jobs")
+        .expect("host jobs after wait");
+    assert!(wait_pos < jobs_pos);
     let test_all_start = shell
         .find("fn run_hermes_test_all_inner(")
         .expect("test-all inner");
@@ -6662,6 +6670,127 @@ fn hermes_campaign_vm_create_waits_for_linux_boot_then_kills() {
 }
 
 #[test]
+fn hermes_campaign_vm_create_skips_boot_wait_when_host_launch_fails() {
+    let shell = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/user_shell.rs"
+    ));
+    let launcher = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/smros-vm-launcher.py"
+    ));
+    let starter = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/start-smros-vm-launcher.sh"
+    ));
+    let docs = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/USER_SHELL.md"
+    ));
+
+    let recycle_start = shell
+        .find("fn recycle_hermes_campaign_vm(")
+        .expect("recycle_hermes_campaign_vm");
+    let recycle_body = braced_body(&shell[recycle_start..]);
+    assert!(
+        recycle_body.contains("host_qemu_pid"),
+        "recycle must inspect host_qemu_pid before waiting for Linux boot"
+    );
+    assert!(
+        recycle_body.contains("skipping nested Linux boot wait"),
+        "failed host launch must skip WAIT_BOOT instead of stalling the campaign"
+    );
+    let wait_pos = recycle_body
+        .find("wait_for_linux_boot")
+        .expect("successful create still waits for Linux boot");
+    let skip_pos = recycle_body
+        .find("skipping nested Linux boot wait")
+        .expect("skip wait message");
+    let kill_pos = recycle_body.find("\"-k\"").expect("recycle with vm -k");
+    assert!(
+        wait_pos < kill_pos && skip_pos < kill_pos,
+        "both boot-wait and skip paths must still recycle with vm -k"
+    );
+    assert!(launcher.contains("LAUNCHER_VERSION = 10"));
+    assert!(launcher.contains("launch_retry=1"));
+    assert!(launcher.contains("retrying_launch("));
+    assert!(starter.contains("REQUIRED_VERSION=10"));
+    assert!(starter.contains("fields.get(\"launch_retry\") != \"1\""));
+    assert!(docs.contains("skip") || docs.contains("not launched"));
+}
+
+#[test]
+fn hermes_host_jobs_retry_after_launcher_contention() {
+    let shell = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/user_shell.rs"
+    ));
+    let client = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/vm_host.rs"
+    ));
+    let fuzz = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/fuzz.rs"
+    ));
+    let launcher = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/smros-vm-launcher.py"
+    ));
+
+    let wait_start = client
+        .find("pub fn wait_for_host_transport(")
+        .expect("wait_for_host_transport");
+    let wait_body = braced_body(&client[wait_start..]);
+    assert!(
+        wait_body.contains("SMROS_VM_PING"),
+        "resume probe must PING instead of connect-and-close"
+    );
+    assert!(
+        wait_body.contains("yield_now"),
+        "resume PING must retry until the host launcher answers OK"
+    );
+
+    let run_start = client
+        .find("pub fn run_hermes_test(")
+        .expect("run_hermes_test");
+    let run_body = braced_body(&client[run_start..]);
+    assert!(
+        run_body.contains("HERMES_TEST_JOB_ATTEMPTS"),
+        "host ut/it must retry failed or unavailable jobs"
+    );
+    assert!(client.contains("const HERMES_TEST_JOB_ATTEMPTS"));
+
+    let test_all_start = shell
+        .find("fn run_hermes_test_all_inner(")
+        .expect("test-all inner");
+    let test_all_end = shell[test_all_start..]
+        .find("fn run_hermes_random_campaign(")
+        .map(|offset| test_all_start + offset)
+        .expect("random campaign function");
+    let test_all = &shell[test_all_start..test_all_end];
+    assert!(
+        test_all.matches("host_jobs_pending: true").count() >= 2,
+        "every campaign round must persist pending host jobs before execute"
+    );
+    assert!(
+        test_all.contains("host_jobs_pending: false"),
+        "successful host jobs must clear the pending flag"
+    );
+
+    let destructive_start = fuzz
+        .find("fn linux_fuzz_is_destructive(")
+        .expect("linux_fuzz_is_destructive");
+    let destructive = braced_body(&fuzz[destructive_start..]);
+    assert!(
+        destructive.contains("ARM64_SYS_REBOOT"),
+        "fuzzsc must not issue reboot and drop campaign rounds"
+    );
+    assert!(launcher.contains("TEST_JOB_LOCK"));
+    assert!(launcher.contains("test_job_attempts()"));
+}
+
+#[test]
 fn hermes_safe_gateway_authorizes_before_shell_dispatch() {
     let shell = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -6708,19 +6837,34 @@ fn hermes_host_tests_use_fixed_enum_jobs_and_protocol() {
     assert!(!launcher.contains("shell=True"));
     assert!(client.contains("HERMES_TEST_WAIT_NANOS"));
     assert!(client.contains("HERMES_HOST_READY_WAIT_NANOS"));
+    assert!(client.contains("HERMES_HOST_RESUME_WAIT_NANOS"));
+    assert!(client.contains("HERMES_TEST_CONNECT_ATTEMPTS"));
     assert!(client.contains("fn wait_for_host_transport("));
     assert!(client.contains("fn connect_launcher("));
+    assert!(client.contains("fn connect_launcher_wait("));
     assert!(client.contains("read_response_until"));
     assert!(client.contains("socket.keepalive()"));
+    let wait_transport = client
+        .find("pub fn wait_for_host_transport(")
+        .expect("wait_for_host_transport");
+    let wait_body = braced_body(&client[wait_transport..]);
+    assert!(wait_body.contains("HERMES_HOST_RESUME_WAIT_NANOS"));
     let run_test = client
         .find("pub fn run_hermes_test(")
         .expect("run_hermes_test");
     let run_body = braced_body(&client[run_test..]);
-    assert!(run_body.contains("connect_launcher("));
+    assert!(run_body.contains("HERMES_TEST_JOB_ATTEMPTS"));
+    let run_once = client
+        .find("fn run_hermes_test_once(")
+        .expect("run_hermes_test_once");
+    let once_body = braced_body(&client[run_once..]);
+    assert!(once_body.contains("connect_launcher("));
+    assert!(once_body.contains("HERMES_TEST_CONNECT_ATTEMPTS"));
+    assert!(once_body.contains("retryable_host_connect"));
     let launch = client.find("pub fn launch(").expect("launch");
     let launch_body = braced_body(&client[launch..]);
     assert!(launch_body.contains("connect_launcher("));
-    assert!(starter.contains("REQUIRED_VERSION=9"));
+    assert!(starter.contains("REQUIRED_VERSION=10"));
     assert!(starter.contains("fields.get(\"hermes_test_jobs\") != \"1\""));
     assert!(starter.contains("fields.get(\"linux_boot\") != \"1\""));
     assert!(launcher.contains("SMROS_VM_WAIT_BOOT 1"));
@@ -6819,7 +6963,7 @@ fn fuzzsc_success_path_uses_live_mprotect_and_names_posix_errors() {
     assert!(fuzz.contains("posix_err_apis"));
     assert!(shell.contains("posix_err_list="));
     assert!(shell.contains("print_posix_fuzz_error_buckets"));
-    assert!(catalog.contains(r#"campaign_case_const("fuzzsc", "iterations=100""#));
+    assert!(catalog.contains(r#"campaign_case_const("fuzzsc", "iterations=50""#));
     assert!(!catalog.contains(r#"campaign_case_const("fuzzsc", "seed=1", "iterations=1""#));
     assert!(shell.contains("campaign_fuzzsc_seed_arg"));
     assert!(shell.contains("HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG"));
@@ -6898,6 +7042,61 @@ fn fuzzsc_kernel_dispatch_does_not_block_the_shell() {
             && switch.contains("csrw satp, {satp}")
             && switch.contains("satp = in(reg) 0usize"),
         "returning to a kernel thread must restore bare satp, not leave a user page table installed"
+    );
+}
+
+#[test]
+fn fuzzsc_second_invocation_does_not_block_on_leftover_linux_state() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fuzz = std::fs::read_to_string(repository.join("src/syscall/fuzz.rs"))
+        .expect("read syscall fuzzer");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall runtime");
+
+    let fuzz_fn_start = fuzz
+        .find("pub fn fuzz_syscalls_with_config(")
+        .expect("fuzz_syscalls_with_config");
+    let fuzz_fn = braced_body(&fuzz[fuzz_fn_start..]);
+    let first_reset = fuzz_fn
+        .find("reset_linux_process_state()")
+        .expect("fuzzsc must reset leftover Linux process state");
+    let prepare = fuzz_fn
+        .find("prepare_fuzz_linux_context()")
+        .expect("prepare_fuzz_linux_context");
+    assert!(
+        first_reset < prepare,
+        "a second campaign fuzzsc must drop leftover Linux identity/fds/timers before reseeding"
+    );
+    let last_reset = fuzz_fn
+        .rfind("reset_linux_process_state()")
+        .expect("fuzzsc must reset leftover Linux process state");
+    assert!(
+        last_reset > prepare,
+        "fuzzsc must not leave Linux dispatch identity/fds/timers behind for the next campaign round"
+    );
+    assert!(
+        fuzz.contains("thread_schedule_info") && fuzz.contains("set_thread_priority"),
+        "fuzzsc must restore the kernel shell scheduler priority after sched_setparam"
+    );
+
+    let block_start = task
+        .find("pub(crate) fn block_current(")
+        .expect("block_current");
+    let block = braced_body(&task[block_start..]);
+    assert!(
+        block.contains("kernel_dispatch_active()") && block.contains("SysError::EAGAIN"),
+        "kernel dispatch must not park the shell on SIGSTOP, record locks, or child waits"
+    );
+
+    let read_start = syscall
+        .find("pub(crate) fn linux_fd_read_bytes(")
+        .expect("linux_fd_read_bytes");
+    let read = braced_body(&syscall[read_start..]);
+    assert!(
+        read.contains("linux_task::kernel_dispatch_active()"),
+        "blocking pipe reads must not schedule() forever during fuzzsc"
     );
 }
 

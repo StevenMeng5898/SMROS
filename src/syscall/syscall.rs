@@ -6372,7 +6372,9 @@ pub(crate) fn linux_fd_read_bytes(fd: usize, out: &mut [u8]) -> SysResult {
         match compat::table().read_bytes(HandleValue(handle), out) {
             Ok(read) => return Ok(read),
             Err(ZxError::ErrShouldWait) if record.object_type == ObjectType::LinuxPipe => {
-                if record.status_flags & LINUX_O_NONBLOCK != 0 {
+                if record.status_flags & LINUX_O_NONBLOCK != 0
+                    || linux_task::kernel_dispatch_active()
+                {
                     return Err(SysError::EAGAIN);
                 }
                 scheduler::schedule();

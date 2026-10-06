@@ -186,6 +186,29 @@ impl KernelDispatchGuard {
     }
 }
 
+struct FuzzSchedulerGuard {
+    thread: crate::kernel_lowlevel::thread::ThreadId,
+    priority: u8,
+}
+
+impl FuzzSchedulerGuard {
+    fn capture() -> Self {
+        let thread = crate::kernel_objects::scheduler::scheduler().current();
+        let priority = crate::kernel_objects::scheduler::scheduler()
+            .thread_schedule_info(thread)
+            .map(|info| info.priority)
+            .unwrap_or(16);
+        Self { thread, priority }
+    }
+}
+
+impl Drop for FuzzSchedulerGuard {
+    fn drop(&mut self) {
+        let _ = crate::kernel_objects::scheduler::scheduler()
+            .set_thread_priority(self.thread, self.priority);
+    }
+}
+
 impl Drop for KernelDispatchGuard {
     fn drop(&mut self) {
         linux_task::leave_kernel_dispatch();
@@ -1665,7 +1688,9 @@ pub fn fuzz_syscalls_with_config(config: SyscallFuzzConfig) -> SyscallFuzzReport
     };
     let start_tick = timer::get_tick_count();
     let mut state = FuzzState::new(config.seed, iterations, config.time_limit_ticks, start_tick);
+    let _sched = FuzzSchedulerGuard::capture();
     let _dispatch = KernelDispatchGuard::enter(&state);
+    super::reset_linux_process_state();
     prepare_fuzz_linux_context();
 
     seed_fuzz_state(&mut state);
@@ -1698,6 +1723,7 @@ pub fn fuzz_syscalls_with_config(config: SyscallFuzzConfig) -> SyscallFuzzReport
     }
 
     state.cleanup();
+    super::reset_linux_process_state();
     state.report.elapsed_ticks = timer::get_tick_count().saturating_sub(state.start_tick);
     state.report
 }
@@ -1989,6 +2015,7 @@ fn linux_fuzz_is_destructive(num: u32) -> bool {
             | super::ARM64_SYS_RT_SIGRETURN
             | super::ARM64_SYS_RT_SIGSUSPEND
             | super::ARM64_SYS_RT_SIGTIMEDWAIT
+            | super::ARM64_SYS_REBOOT
     )
 }
 

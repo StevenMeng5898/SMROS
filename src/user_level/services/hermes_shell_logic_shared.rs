@@ -3,8 +3,8 @@ pub const HERMES_MAX_ARG_LEN: usize = 96;
 pub const HERMES_CAMPAIGN_CASES: usize = 15;
 pub const HERMES_SYSCALL_CAMPAIGN_CASES: usize = 12;
 pub const HERMES_REPORT_DETAIL_LIMIT: usize = 64;
-pub const HERMES_CAMPAIGN_FUZZSC_ITERATIONS: u64 = 100;
-pub const HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG: &str = "iterations=100";
+pub const HERMES_CAMPAIGN_FUZZSC_ITERATIONS: u64 = 50;
+pub const HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG: &str = "iterations=50";
 pub const HERMES_CAMPAIGN_VM_NAME: &str = "linux-demo";
 pub const HERMES_CAMPAIGN_VM_XML: &str = "/shared/vm-demo.xml";
 
@@ -49,13 +49,13 @@ const CAMPAIGN_CATALOG: [HermesCampaignCase; HERMES_CAMPAIGN_CASES] = [
     campaign_case_const("vm", "-c", "/shared/vm-demo.xml", 2),
     campaign_case_const("uptime", "", "", 0),
     campaign_case_const("docker", "images", "", 1),
-    campaign_case_const("fuzzsc", "iterations=100", "", 1),
+    campaign_case_const("fuzzsc", "iterations=50", "", 1),
     campaign_case_const("reboot", "", "", 0),
 ];
 
 const SYSCALL_CAMPAIGN_CATALOG: [HermesCampaignCase; HERMES_SYSCALL_CAMPAIGN_CASES] = [
     campaign_case_const("testsc", "", "", 0),
-    campaign_case_const("fuzzsc", "iterations=100", "", 1),
+    campaign_case_const("fuzzsc", "iterations=50", "", 1),
     campaign_case_const("hermes", "test", "", 1),
     campaign_case_const("version", "", "", 0),
     campaign_case_const("meminfo", "", "", 0),

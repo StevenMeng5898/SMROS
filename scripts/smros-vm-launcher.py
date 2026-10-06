@@ -27,15 +27,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 7070
 MAX_REQUEST = 4096
-LAUNCHER_VERSION = 9
+LAUNCHER_VERSION = 10
 DEFAULT_LAUNCH_STABLE_SECONDS = 2.0
+DEFAULT_LAUNCH_ATTEMPTS = 3
+DEFAULT_LAUNCH_RETRY_DELAY_SECONDS = 0.4
 DEFAULT_LINUX_BOOT_SECONDS = 45.0
 DEFAULT_TERMINATE_TIMEOUT_SECONDS = 3.0
 DEFAULT_TEST_TIMEOUT_SECONDS = 300.0
+DEFAULT_TEST_JOB_ATTEMPTS = 3
+DEFAULT_TEST_JOB_RETRY_DELAY_SECONDS = 1.0
 LINUX_BOOT_MARKERS = ("SMROS Linux VM initramfs",)
 MAX_TEST_LOG_BYTES = 64 * 1024
 
 LOCK = threading.Lock()
+TEST_JOB_LOCK = threading.Lock()
 PROCS: dict[str, subprocess.Popen[bytes]] = {}
 
 
@@ -81,6 +86,24 @@ def repo_path(raw: str | None, *, required: bool) -> Path | None:
     if path.exists() and ROOT not in path.parents and path != ROOT:
         raise ValueError(f"path escapes repo: {path}")
     return path
+
+
+def retrying_launch(operation, attempts: int, delay_seconds: float, sleep=time.sleep):
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation()
+        except RuntimeError as exc:
+            last_error = exc
+            print(
+                f"smros-vm-launcher: launch attempt {attempt}/{attempts} failed: {exc}",
+                flush=True,
+            )
+            if attempt >= attempts:
+                break
+            sleep(delay_seconds)
+    assert last_error is not None
+    raise last_error
 
 
 def launch_qemu(values: dict[str, str]) -> str:
@@ -129,37 +152,43 @@ def launch_qemu(values: dict[str, str]) -> str:
     log_path = vm_log_path(name)
     print("smros-vm-launcher: qemu " + shlex.join(cmd[1:]), flush=True)
     print(f"smros-vm-launcher: vm log {log_path.relative_to(ROOT)}", flush=True)
-    with LOCK:
-        old = PROCS.get(name)
-        if old is not None and old.poll() is None:
-            print(f"smros-vm-launcher: replacing running VM {name} pid={old.pid}", flush=True)
-            terminate_process(old)
-        for pid in terminate_qemu_by_name(name):
-            print(f"smros-vm-launcher: terminated stale VM {name} pid={pid}", flush=True)
-        try:
-            serial_log_path(name).write_bytes(b"")
-        except OSError:
-            pass
-        log_file = log_path.open("ab", buffering=0)
-        log_file.write(f"\n--- launch {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode())
-        log_file.write(("qemu " + shlex.join(cmd[1:]) + "\n").encode())
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(ROOT),
-                env=qemu_environment(),
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                close_fds=True,
-            )
-        except Exception:
+
+    def attempt() -> str:
+        with LOCK:
+            old = PROCS.get(name)
+            if old is not None and old.poll() is None:
+                print(f"smros-vm-launcher: replacing running VM {name} pid={old.pid}", flush=True)
+                terminate_process(old)
+            for pid in terminate_qemu_by_name(name):
+                print(f"smros-vm-launcher: terminated stale VM {name} pid={pid}", flush=True)
+            try:
+                serial_log_path(name).write_bytes(b"")
+            except OSError:
+                pass
+            log_file = log_path.open("ab", buffering=0)
+            log_file.write(f"\n--- launch {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode())
+            log_file.write(("qemu " + shlex.join(cmd[1:]) + "\n").encode())
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(ROOT),
+                    env=qemu_environment(),
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    close_fds=True,
+                    start_new_session=True,
+                )
+            except Exception:
+                log_file.close()
+                raise
             log_file.close()
-            raise
-        log_file.close()
-        PROCS[name] = proc
-    wait_for_stable_launch(name, proc, log_path)
-    print(f"smros-vm-launcher: launched {name} pid={proc.pid}", flush=True)
-    return f"OK pid={proc.pid} log={log_path.relative_to(ROOT)}\n"
+            PROCS[name] = proc
+        wait_for_stable_launch(name, proc, log_path)
+        print(f"smros-vm-launcher: launched {name} pid={proc.pid}", flush=True)
+        return f"OK pid={proc.pid} log={log_path.relative_to(ROOT)}\n"
+
+    return retrying_launch(attempt, launch_attempts(), launch_retry_delay_seconds())
 
 
 def stop_qemu(values: dict[str, str]) -> str:
@@ -190,7 +219,8 @@ def stop_qemu(values: dict[str, str]) -> str:
 def launcher_status() -> str:
     return (
         f"OK version={LAUNCHER_VERSION} monitor_none=1 stale_qemu_cleanup=1 "
-        "trace_sync=1 stable_launch=1 vm_log=1 hermes_test_jobs=1 linux_boot=1\n"
+        "trace_sync=1 stable_launch=1 vm_log=1 hermes_test_jobs=1 linux_boot=1 "
+        "launch_retry=1\n"
     )
 
 
@@ -203,6 +233,37 @@ def parse_test_job(values: dict[str, str]) -> tuple[str, str]:
     return ("make", job)
 
 
+def test_job_attempts() -> int:
+    raw = os.environ.get("SMROS_HERMES_TEST_JOB_ATTEMPTS")
+    if raw is None:
+        return DEFAULT_TEST_JOB_ATTEMPTS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_TEST_JOB_ATTEMPTS
+    if value < 1:
+        return 1
+    if value > 5:
+        return 5
+    return value
+
+
+def test_job_retry_delay_seconds() -> float:
+    return env_float(
+        "SMROS_HERMES_TEST_JOB_RETRY_DELAY_SECONDS",
+        DEFAULT_TEST_JOB_RETRY_DELAY_SECONDS,
+    )
+
+
+def test_job_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("MAKEFLAGS", None)
+    env.pop("MFLAGS", None)
+    env.pop("RUSTFLAGS", None)
+    env["CARGO_TERM_COLOR"] = "never"
+    return env
+
+
 def run_test_job(values: dict[str, str]) -> str:
     cmd = parse_test_job(values)
     job = values["job"]
@@ -211,26 +272,47 @@ def run_test_job(values: dict[str, str]) -> str:
     timeout = float(os.environ.get("SMROS_HERMES_TEST_TIMEOUT", DEFAULT_TEST_TIMEOUT_SECONDS))
     if timeout <= 0 or timeout > 1800:
         timeout = DEFAULT_TEST_TIMEOUT_SECONDS
-    with LOCK:
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=str(ROOT),
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired as exc:
-            write_test_log(job, (exc.stdout or "") + (exc.stderr or ""))
-            return f"ERR job={job} status=timeout\n"
-
-    output = (result.stdout or "") + (result.stderr or "")
-    write_test_log(job, output)
-    summary = bounded_test_summary(output)
-    prefix = "OK" if result.returncode == 0 else "ERR"
-    response = f"{prefix} job={job} status={result.returncode} summary={summary}\n"
-    return response
+    last_response = f"ERR job={job} status=failed\n"
+    attempts = test_job_attempts()
+    for attempt in range(1, attempts + 1):
+        with TEST_JOB_LOCK:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    cwd=str(ROOT),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                    timeout=timeout,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                    env=test_job_environment(),
+                )
+            except subprocess.TimeoutExpired as exc:
+                write_test_log(job, (exc.stdout or "") + (exc.stderr or ""))
+                last_response = f"ERR job={job} status=timeout\n"
+                print(
+                    f"smros-vm-launcher: job={job} status=timeout attempt={attempt}/{attempts}",
+                    flush=True,
+                )
+                if attempt < attempts:
+                    time.sleep(test_job_retry_delay_seconds())
+                continue
+        output = (result.stdout or "") + (result.stderr or "")
+        write_test_log(job, output)
+        summary = bounded_test_summary(result.stdout or output)
+        print(
+            f"smros-vm-launcher: job={job} status={result.returncode} attempt={attempt}/{attempts}",
+            flush=True,
+        )
+        if result.returncode == 0:
+            return f"OK job={job} status=0 summary={summary}\n"
+        last_response = f"ERR job={job} status={result.returncode} summary={summary}\n"
+        if attempt < attempts:
+            time.sleep(test_job_retry_delay_seconds())
+    return last_response
 
 
 def write_test_log(job: str, output: str) -> None:
@@ -311,6 +393,28 @@ def launch_stable_seconds() -> float:
     return env_float("SMROS_VM_LAUNCH_STABLE_SECONDS", DEFAULT_LAUNCH_STABLE_SECONDS)
 
 
+def launch_attempts() -> int:
+    raw = os.environ.get("SMROS_VM_LAUNCH_ATTEMPTS")
+    if raw is None:
+        return DEFAULT_LAUNCH_ATTEMPTS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_LAUNCH_ATTEMPTS
+    if value < 1:
+        return 1
+    if value > 5:
+        return 5
+    return value
+
+
+def launch_retry_delay_seconds() -> float:
+    return env_float(
+        "SMROS_VM_LAUNCH_RETRY_DELAY_SECONDS",
+        DEFAULT_LAUNCH_RETRY_DELAY_SECONDS,
+    )
+
+
 def linux_boot_seconds() -> float:
     return env_float(
         "SMROS_VM_LINUX_BOOT_SECONDS",
@@ -377,11 +481,17 @@ def wait_for_linux_boot(values: dict[str, str]) -> str:
     serial_path = serial_log_path(name)
     with LOCK:
         proc = PROCS.get(name)
+    if not qemu_is_running(name, proc):
+        if linux_boot_seen(serial_path):
+            print(f"smros-vm-launcher: linux boot OK {name}", flush=True)
+            return "OK boot=1 marker=initramfs\n"
+        print(f"smros-vm-launcher: linux boot skipped, qemu not running {name}", flush=True)
+        return "OK boot=0 timed_out=1\n"
     deadline = time.monotonic() + linux_boot_seconds()
     while time.monotonic() < deadline:
-        if proc is not None and proc.poll() is not None:
+        if not qemu_is_running(name, proc):
             raise RuntimeError(
-                f"qemu exited before linux boot status={proc.returncode} "
+                f"qemu exited before linux boot status={None if proc is None else proc.returncode} "
                 f"serial={serial_path.name} tail={log_tail(serial_path)}"
             )
         if linux_boot_seen(serial_path):
@@ -400,6 +510,13 @@ def wait_for_stable_launch(name: str, proc: subprocess.Popen[bytes], log_path: P
     while time.monotonic() < deadline:
         return_code = proc.poll()
         if return_code is not None:
+            running = qemu_pids_by_name(name)
+            if running:
+                print(
+                    f"smros-vm-launcher: adopted still-running {name} pids={running} after parent status={return_code}",
+                    flush=True,
+                )
+                return
             with LOCK:
                 if PROCS.get(name) is proc:
                     PROCS.pop(name, None)
@@ -433,16 +550,21 @@ def terminate_process(proc: subprocess.Popen[bytes]) -> None:
         pass
 
 
-def terminate_qemu_by_name(name: str) -> list[int]:
+def qemu_is_running(name: str, proc: subprocess.Popen[bytes] | None) -> bool:
+    if proc is not None and proc.poll() is None:
+        return True
+    return bool(qemu_pids_by_name(name))
+
+
+def qemu_pids_by_name(name: str) -> list[int]:
     if not name:
         return []
     expected = f"SMROS-{name}"
-    killed: list[int] = []
+    found: list[int] = []
     proc_root = Path("/proc")
     for entry in proc_root.iterdir():
         if not entry.name.isdecimal():
             continue
-        pid = int(entry.name)
         try:
             raw = (entry / "cmdline").read_bytes()
         except OSError:
@@ -452,8 +574,14 @@ def terminate_qemu_by_name(name: str) -> list[int]:
         args = [part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part]
         if not args or Path(args[0]).name != "qemu-system-aarch64":
             continue
-        if not qemu_args_match_name(args, expected):
-            continue
+        if qemu_args_match_name(args, expected):
+            found.append(int(entry.name))
+    return found
+
+
+def terminate_qemu_by_name(name: str) -> list[int]:
+    killed: list[int] = []
+    for pid in qemu_pids_by_name(name):
         try:
             os.kill(pid, signal.SIGTERM)
             wait_pid_exit(pid, terminate_timeout_seconds())

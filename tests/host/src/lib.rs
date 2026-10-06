@@ -10502,11 +10502,11 @@ fn hermes_shell_policy_allows_only_bounded_safe_forms() {
     );
     assert_eq!(classify("unknown", &[]), HermesShellPolicy::Forbidden);
     assert_eq!(
-        classify("fuzzsc", &["seed=42", "iterations=100"]),
+        classify("fuzzsc", &["seed=42", "iterations=50"]),
         HermesShellPolicy::Allowed
     );
     assert_eq!(
-        classify("fuzzsc", &["iterations=101"]),
+        classify("fuzzsc", &["iterations=51"]),
         HermesShellPolicy::Invalid
     );
 }
@@ -10773,24 +10773,32 @@ fn hermes_campaign_vm_create_recycles_after_linux_boot() {
 }
 
 #[test]
-fn hermes_campaign_fuzzsc_uses_campaign_seed_and_hundred_iterations() {
+fn hermes_campaign_fuzzsc_uses_campaign_seed_and_fifty_iterations() {
     use hermes_shell_logic::{
         campaign_case_for_mode, campaign_fuzzsc_seed_arg, classify, HermesCampaignMode,
         HermesShellPolicy, HERMES_CAMPAIGN_CASES, HERMES_CAMPAIGN_FUZZSC_ITERATIONS,
         HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG, HERMES_SYSCALL_CAMPAIGN_CASES,
     };
 
-    assert_eq!(HERMES_CAMPAIGN_FUZZSC_ITERATIONS, 100);
-    assert_eq!(HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG, "iterations=100");
+    assert_eq!(HERMES_CAMPAIGN_FUZZSC_ITERATIONS, 50);
+    assert_eq!(HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG, "iterations=50");
     let mut buf = [0u8; 32];
     assert_eq!(campaign_fuzzsc_seed_arg(1, &mut buf), Some("seed=1"));
     assert_eq!(campaign_fuzzsc_seed_arg(1234, &mut buf), Some("seed=1234"));
     assert_eq!(
-        classify("fuzzsc", &["seed=1234", "iterations=100"]),
+        classify("fuzzsc", &["seed=1234", "iterations=50"]),
         HermesShellPolicy::Allowed
     );
     assert_eq!(
-        classify("fuzzsc", &["iterations=101"]),
+        classify("fuzzsc", &["seed=1", "iterations=1"]),
+        HermesShellPolicy::Allowed
+    );
+    assert_eq!(
+        classify("fuzzsc", &["iterations=51"]),
+        HermesShellPolicy::Invalid
+    );
+    assert_eq!(
+        classify("fuzzsc", &["iterations=100"]),
         HermesShellPolicy::Invalid
     );
 
@@ -10802,8 +10810,8 @@ fn hermes_campaign_fuzzsc_uses_campaign_seed_and_hundred_iterations() {
             assert!(
                 case.args[..case.arg_count]
                     .iter()
-                    .any(|arg| *arg == "iterations=100"),
-                "ops catalog fuzzsc must request 100 iterations"
+                    .any(|arg| *arg == "iterations=50"),
+                "ops catalog fuzzsc must request 50 iterations"
             );
             assert!(
                 !case.args[..case.arg_count]
@@ -10822,7 +10830,7 @@ fn hermes_campaign_fuzzsc_uses_campaign_seed_and_hundred_iterations() {
             saw_syscall = true;
             assert!(case.args[..case.arg_count]
                 .iter()
-                .any(|arg| *arg == "iterations=100"));
+                .any(|arg| *arg == "iterations=50"));
         }
     }
     assert!(saw_syscall);

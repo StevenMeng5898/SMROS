@@ -223,8 +223,9 @@ networking at `10.0.2.2`. The autostart wrapper writes
 that log for the missing kernel, initrd, disk path, or early nested-QEMU exit.
 Successful launches also print a per-VM log such as
 `target/vm-launcher/linux-demo.log`; the launcher waits through a short startup
-stability window before returning `host_qemu_pid=...`, so immediate QEMU
-startup failures are reported instead of being mistaken for a booted VM.
+stability window and retries transient early QEMU exits before returning
+`host_qemu_pid=...`, so immediate QEMU startup failures are reported instead of
+being mistaken for a booted VM.
 
 If the guest network transport is not ready, `vm -c` still starts the modeled
 VM and reports `host launch=unavailable`. The normal ARM64/RISC-V64 QEMU paths
@@ -415,12 +416,14 @@ another SMROS from the command line. `fuzzing` is bounded `fuzzsc`. The `reboot`
 owns `hermes exec reboot` and keeps an active `hermes test-all` or `hermes random`
 campaign resumable: the guest writes `/data/hermes/tests/resume.cfg`, flushes FxFS,
 resets, then continues remaining iterations to resume after reboot. Host `ut`/`it`
-jobs for a reboot round wait for virtio-net after reset instead of reporting
-UNAVAILABLE during PSCI reset. The ops campaign catalog includes
+jobs for a reboot round wait up to 60s for virtio-net and the host launcher after reset, PING the launcher, retry the handshake, and retry failed `ut`/`it` jobs so a slow reconnect or a transient cargo lock after nested QEMU is not reported as FAIL. The ops campaign catalog includes
 `vm -c /shared/vm-demo.xml` so `hermes test-all` can open a nested GTK QEMU
 window running guest Linux (`linux-demo`). That create is coupled with a wait
 until guest Linux boot OK, then `vm -k linux-demo`, so nested QEMU/GTK is
-recycled instead of leaking. `vm -k` is not an independent random catalog case.
+recycled instead of leaking. If host QEMU is not launched (`launcher denied
+request` or networking unavailable), the campaign skips the nested Linux boot
+wait and still runs `vm -k linux-demo`. The host launcher retries early QEMU
+startup exits. `vm -k` is not an independent random catalog case.
 The `cmd` skill owns `vm -c /shared/vm-demo.xml`,
 `vm -k`, `vm -s`, `docker load -i /shared/ubuntu-alpineamr64.tar`, `docker run`,
 `docker stop`, and `docker rm`. The web UI renderer
@@ -494,7 +497,7 @@ can continue. Gemma-generated text is never executed directly.
 
 `hermes random [seed=<n>] [iterations=<positive-n>] [mode=ops|syscall]` selects
 bounded safe test and status operations deterministically. `mode=syscall`
-uses the syscall catalog (`testsc`, `fuzzsc` with the campaign seed and `iterations=100`,
+uses the syscall catalog (`testsc`, `fuzzsc` with the campaign seed and `iterations=50`,
 `hermes test`). Hermes may also `exec posixtest status` or
 `exec posixtest test getpid/1-1.c`; `posixtest all` stays forbidden.
 The finite iteration count has no

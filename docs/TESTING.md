@@ -167,7 +167,8 @@ iterations after reset. Reboot-round host `ut`/`it` jobs run after that resume
 once the guest network can reach the host launcher. The ops catalog includes
 `vm -c /shared/vm-demo.xml` so a nested GTK QEMU Linux window can appear during
 `hermes test-all`. Campaign create waits until guest Linux boot OK, then
-`vm -k linux-demo` recycles the nested QEMU process. The Hermes skills
+`vm -k linux-demo` recycles the nested QEMU process. If nested QEMU never
+launched, the campaign skips the boot wait and still recycles. The Hermes skills
 `ut`, `it`, `skt`, `fuzzing`, `reboot`, and `cmd` map onto this stack:
 `make posix-tool-test` is the current syscall/POSIX unit/integration gate while
 `tests/host` is uncompilable, `make skt` is the fast guest smoke test (SKT),
