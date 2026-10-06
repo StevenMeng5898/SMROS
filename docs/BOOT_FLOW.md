@@ -214,7 +214,7 @@ accounting; full LAPIC timer programming is still future work.
 | 10 | `kernel_lowlevel::mmu::init()` | MMU/page-table helper initialization |
 | 11 | `crate::syscall::init()` | Called again, logged as "syscall handler" |
 | 12 | `crate::kernel_objects::channel::init()` | Channel subsystem init log |
-| 13 | `crate::user_level::init()` | user-process state, user-level VirtIO drivers, FxFS, build-time `/shared` snapshot, component topology, and `/svc` init |
+| 13 | `crate::user_level::init()` | user-process state, Linux user-space DDK, VirtIO/hello/dummy/edu driver demos, FxFS, build-time `/shared` snapshot, component topology, and `/svc` init |
 | 14 | `scheduler().init()` | Creates idle thread and resets scheduler state |
 | 15 | defer bootstrap component launchers | Keeps normal boot on the fast path |
 | 16 | `interrupt::enable_timer_interrupt()` | Logical enable step |
@@ -262,7 +262,7 @@ default boot avoids paying its startup cost before the shell.
 
 ## 6. User-Level Drivers, FxFS, And Bootstrap ELF Loading
 
-`user_level::init()` first initializes the user process table and then probes user-level VirtIO drivers. On the standard ARM64/RISC-V64 `make run` QEMU command this binds VirtIO-MMIO devices; on the x86_64 QEMU command this binds VirtIO-PCI devices:
+`user_level::init()` first initializes the user process table, then the Linux-shaped user-space DDK, then probes VirtIO, hello/dummy, and the Linux C EDU PCI driver. On the standard ARM64/RISC-V64 `make run` QEMU command this binds VirtIO-MMIO devices; on the x86_64 QEMU command this binds VirtIO-PCI devices:
 
 - virtio-blk backed by `smros-fxfs.img`
 - virtio-net backed by QEMU user networking

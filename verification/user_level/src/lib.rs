@@ -6,6 +6,7 @@ verus! {
 
 include!("../../../src/main_logic_shared.rs");
 include!("../../../src/user_level/drivers/driver_logic_shared.rs");
+include!("../../../src/user_level/drivers/linux_logic_shared.rs");
 include!("../../../src/user_level/services/user_logic_shared.rs");
 
 pub const KERNEL_HEAP_SIZE: usize = 0x0400_0000;
@@ -65,6 +66,17 @@ pub const USER_DRIVER_VIRTIO_BLK_F_FLUSH: u64 = 1u64 << 9;
 pub const USER_DRIVER_VIRTIO_BLK_F_CONFIG_WCE: u64 = 1u64 << 11;
 pub const USER_DRIVER_VIRTIO_NET_F_MAC: u64 = 1u64 << 5;
 pub const USER_DRIVER_VIRTIO_NET_F_STATUS: u64 = 1u64 << 16;
+pub const USER_LINUX_PCI_ANY_ID: u32 = 0xffff_ffff;
+pub const USER_LINUX_VIRTIO_ID_ANY: u32 = 0xffff_ffff;
+pub const USER_LINUX_MISC_DYNAMIC_MINOR: u32 = 255;
+pub const USER_LINUX_CHRDEV_MINOR_MAX: u32 = 256;
+pub const USER_LINUX_IRQF_SHARED: u32 = 0x80;
+pub const USER_LINUX_IRQ_MAX: u32 = 1024;
+pub const USER_LINUX_IOREMAP_MAX: usize = 0x1000_0000;
+pub const USER_LINUX_DMA_MAX: usize = 0x0001_0000;
+pub const USER_LINUX_BUS_PLATFORM: u32 = 1;
+pub const USER_LINUX_BUS_VIRTIO: u32 = 2;
+pub const USER_LINUX_BUS_PCI: u32 = 3;
 
 pub const SYS_WRITE: u32 = 64;
 pub const SYS_EXIT: u32 = 93;
@@ -329,6 +341,69 @@ spec fn driver_net_rx_frame_len_spec(packet_len: int, header_len: int) -> Option
 
 spec fn driver_net_rx_output_len_valid_spec(frame_len: int, out_len: int) -> bool {
     frame_len <= out_len
+}
+
+spec fn linux_id_match_spec(id: int, table_id: int, any_id: int) -> bool {
+    table_id == any_id || id == table_id
+}
+
+spec fn linux_pci_id_match_spec(
+    vendor: int,
+    device: int,
+    table_vendor: int,
+    table_device: int,
+    any_id: int,
+) -> bool {
+    (table_vendor == any_id || vendor == table_vendor) && (table_device == any_id
+        || device == table_device)
+}
+
+spec fn linux_of_match_spec(equal: bool, wildcard: bool) -> bool {
+    wildcard || equal
+}
+
+spec fn linux_virtio_device_present_spec(device_id: int) -> bool {
+    device_id != 0
+}
+
+spec fn linux_id_table_end_spec(vendor: int, device: int) -> bool {
+    vendor == 0 && device == 0
+}
+
+spec fn linux_module_license_ok_spec(len: int) -> bool {
+    len != 0
+}
+
+spec fn linux_chrdev_minor_valid_spec(minor: int, max: int, dynamic: int) -> bool {
+    minor == dynamic || minor < max
+}
+
+spec fn linux_irq_number_valid_spec(irq: int, max: int) -> bool {
+    irq != 0 && irq < max
+}
+
+spec fn linux_ioremap_len_valid_spec(len: int, max: int) -> bool {
+    len != 0 && len <= max
+}
+
+spec fn linux_dma_size_valid_spec(size: int, max: int) -> bool {
+    size != 0 && size <= max
+}
+
+spec fn linux_file_copy_len_spec(count: int, remaining: int) -> int {
+    if count <= remaining {
+        count
+    } else {
+        remaining
+    }
+}
+
+spec fn linux_bus_kind_valid_spec(kind: int, platform: int, virtio: int, pci: int) -> bool {
+    kind == platform || kind == virtio || kind == pci
+}
+
+spec fn linux_probe_status_ok_spec(code: int) -> bool {
+    code == 0
 }
 
 spec fn ascii_shell_input_spec(byte: int) -> bool {
@@ -1021,6 +1096,123 @@ fn driver_net_rx_output_len_valid(frame_len: usize, out_len: usize) -> (out: boo
         out == driver_net_rx_output_len_valid_spec(frame_len as int, out_len as int),
 {
     smros_driver_net_rx_output_len_valid_body!(frame_len, out_len)
+}
+
+fn linux_id_match(id: u32, table_id: u32, any_id: u32) -> (out: bool)
+    ensures
+        out == linux_id_match_spec(id as int, table_id as int, any_id as int),
+{
+    smros_linux_id_match_body!(id, table_id, any_id)
+}
+
+fn linux_pci_id_match(
+    vendor: u32,
+    device: u32,
+    table_vendor: u32,
+    table_device: u32,
+    any_id: u32,
+) -> (out: bool)
+    ensures
+        out == linux_pci_id_match_spec(
+            vendor as int,
+            device as int,
+            table_vendor as int,
+            table_device as int,
+            any_id as int,
+        ),
+{
+    smros_linux_pci_id_match_body!(vendor, device, table_vendor, table_device, any_id)
+}
+
+fn linux_of_match(equal: bool, wildcard: bool) -> (out: bool)
+    ensures
+        out == linux_of_match_spec(equal, wildcard),
+{
+    smros_linux_of_match_body!(equal, wildcard)
+}
+
+fn linux_virtio_id_match(device_id: u32, table_id: u32, any_id: u32) -> (out: bool)
+    ensures
+        out == linux_id_match_spec(device_id as int, table_id as int, any_id as int),
+{
+    smros_linux_virtio_id_match_body!(device_id, table_id, any_id)
+}
+
+fn linux_virtio_device_present(device_id: u32) -> (out: bool)
+    ensures
+        out == linux_virtio_device_present_spec(device_id as int),
+{
+    smros_linux_virtio_device_present_body!(device_id)
+}
+
+fn linux_id_table_end(vendor: u32, device: u32) -> (out: bool)
+    ensures
+        out == linux_id_table_end_spec(vendor as int, device as int),
+{
+    smros_linux_id_table_end_body!(vendor, device)
+}
+
+fn linux_module_license_ok(len: usize) -> (out: bool)
+    ensures
+        out == linux_module_license_ok_spec(len as int),
+{
+    smros_linux_module_license_ok_body!(len)
+}
+
+fn linux_chrdev_minor_valid(minor: u32, max: u32, dynamic: u32) -> (out: bool)
+    ensures
+        out == linux_chrdev_minor_valid_spec(minor as int, max as int, dynamic as int),
+{
+    smros_linux_chrdev_minor_valid_body!(minor, max, dynamic)
+}
+
+fn linux_irq_number_valid(irq: u32, max: u32) -> (out: bool)
+    ensures
+        out == linux_irq_number_valid_spec(irq as int, max as int),
+{
+    smros_linux_irq_number_valid_body!(irq, max)
+}
+
+fn linux_irq_shared(flags: u32, shared: u32) -> (out: bool)
+    ensures
+        out == (flags & shared != 0),
+{
+    smros_linux_irq_shared_body!(flags, shared)
+}
+
+fn linux_ioremap_len_valid(len: usize, max: usize) -> (out: bool)
+    ensures
+        out == linux_ioremap_len_valid_spec(len as int, max as int),
+{
+    smros_linux_ioremap_len_valid_body!(len, max)
+}
+
+fn linux_dma_size_valid(size: usize, max: usize) -> (out: bool)
+    ensures
+        out == linux_dma_size_valid_spec(size as int, max as int),
+{
+    smros_linux_dma_size_valid_body!(size, max)
+}
+
+fn linux_file_copy_len(count: usize, remaining: usize) -> (out: usize)
+    ensures
+        out as int == linux_file_copy_len_spec(count as int, remaining as int),
+{
+    smros_linux_file_copy_len_body!(count, remaining)
+}
+
+fn linux_bus_kind_valid(kind: u32, platform: u32, virtio: u32, pci: u32) -> (out: bool)
+    ensures
+        out == linux_bus_kind_valid_spec(kind as int, platform as int, virtio as int, pci as int),
+{
+    smros_linux_bus_kind_valid_body!(kind, platform, virtio, pci)
+}
+
+fn linux_probe_status_ok(code: i32) -> (out: bool)
+    ensures
+        out == linux_probe_status_ok_spec(code as int),
+{
+    smros_linux_probe_status_ok_body!(code)
 }
 
 fn user_el0_thread_state() -> (out: u64)
@@ -1797,6 +1989,123 @@ fn user_driver_logic_smoke() {
     assert(rx_frame_bad == Option::<usize>::None);
     assert(rx_out_ok);
     assert(!rx_out_bad);
+}
+
+fn user_linux_ddk_logic_smoke() {
+    let id_ok = linux_id_match(2, 2, USER_LINUX_VIRTIO_ID_ANY);
+    let id_any = linux_id_match(2, USER_LINUX_VIRTIO_ID_ANY, USER_LINUX_VIRTIO_ID_ANY);
+    let id_bad = linux_id_match(1, 2, USER_LINUX_VIRTIO_ID_ANY);
+    let pci_ok = linux_pci_id_match(0x1af4, 0x1042, 0x1af4, 0x1042, USER_LINUX_PCI_ANY_ID);
+    let pci_vendor_any = linux_pci_id_match(
+        0x1af4,
+        0x1042,
+        USER_LINUX_PCI_ANY_ID,
+        0x1042,
+        USER_LINUX_PCI_ANY_ID,
+    );
+    let pci_device_any = linux_pci_id_match(
+        0x1af4,
+        0x1042,
+        0x1af4,
+        USER_LINUX_PCI_ANY_ID,
+        USER_LINUX_PCI_ANY_ID,
+    );
+    let pci_bad = linux_pci_id_match(0x1af4, 0x1041, 0x1af4, 0x1042, USER_LINUX_PCI_ANY_ID);
+    let of_ok = linux_of_match(true, false);
+    let of_wild = linux_of_match(false, true);
+    let of_bad = linux_of_match(false, false);
+    let virtio_ok = linux_virtio_id_match(2, 2, USER_LINUX_VIRTIO_ID_ANY);
+    let virtio_present = linux_virtio_device_present(2);
+    let virtio_missing = linux_virtio_device_present(0);
+    let table_end = linux_id_table_end(0, 0);
+    let table_live = linux_id_table_end(0x1af4, 0);
+    let license_ok = linux_module_license_ok(3);
+    let license_bad = linux_module_license_ok(0);
+    let minor_dyn = linux_chrdev_minor_valid(
+        USER_LINUX_MISC_DYNAMIC_MINOR,
+        USER_LINUX_CHRDEV_MINOR_MAX,
+        USER_LINUX_MISC_DYNAMIC_MINOR,
+    );
+    let minor_ok = linux_chrdev_minor_valid(
+        1,
+        USER_LINUX_CHRDEV_MINOR_MAX,
+        USER_LINUX_MISC_DYNAMIC_MINOR,
+    );
+    let minor_bad = linux_chrdev_minor_valid(
+        300,
+        USER_LINUX_CHRDEV_MINOR_MAX,
+        USER_LINUX_MISC_DYNAMIC_MINOR,
+    );
+    let irq_ok = linux_irq_number_valid(32, USER_LINUX_IRQ_MAX);
+    let irq_zero = linux_irq_number_valid(0, USER_LINUX_IRQ_MAX);
+    let irq_hi = linux_irq_number_valid(USER_LINUX_IRQ_MAX, USER_LINUX_IRQ_MAX);
+    let irq_shared_ok = linux_irq_shared(USER_LINUX_IRQF_SHARED, USER_LINUX_IRQF_SHARED);
+    let irq_shared_bad = linux_irq_shared(0, USER_LINUX_IRQF_SHARED);
+    let ioremap_ok = linux_ioremap_len_valid(16, USER_LINUX_IOREMAP_MAX);
+    let ioremap_zero = linux_ioremap_len_valid(0, USER_LINUX_IOREMAP_MAX);
+    let ioremap_big = linux_ioremap_len_valid(
+        USER_LINUX_IOREMAP_MAX + 1,
+        USER_LINUX_IOREMAP_MAX,
+    );
+    let dma_ok = linux_dma_size_valid(64, USER_LINUX_DMA_MAX);
+    let dma_zero = linux_dma_size_valid(0, USER_LINUX_DMA_MAX);
+    let dma_big = linux_dma_size_valid(USER_LINUX_DMA_MAX + 1, USER_LINUX_DMA_MAX);
+    let copy_ok = linux_file_copy_len(8, 16);
+    let copy_clip = linux_file_copy_len(16, 8);
+    let bus_ok = linux_bus_kind_valid(
+        USER_LINUX_BUS_VIRTIO,
+        USER_LINUX_BUS_PLATFORM,
+        USER_LINUX_BUS_VIRTIO,
+        USER_LINUX_BUS_PCI,
+    );
+    let bus_bad = linux_bus_kind_valid(
+        0,
+        USER_LINUX_BUS_PLATFORM,
+        USER_LINUX_BUS_VIRTIO,
+        USER_LINUX_BUS_PCI,
+    );
+    let probe_ok = linux_probe_status_ok(0);
+    let probe_bad = linux_probe_status_ok(-5);
+
+    assert(id_ok);
+    assert(id_any);
+    assert(!id_bad);
+    assert(pci_ok);
+    assert(pci_vendor_any);
+    assert(pci_device_any);
+    assert(!pci_bad);
+    assert(of_ok);
+    assert(of_wild);
+    assert(!of_bad);
+    assert(virtio_ok);
+    assert(virtio_present);
+    assert(!virtio_missing);
+    assert(table_end);
+    assert(!table_live);
+    assert(license_ok);
+    assert(!license_bad);
+    assert(minor_dyn);
+    assert(minor_ok);
+    assert(!minor_bad);
+    assert(irq_ok);
+    assert(!irq_zero);
+    assert(!irq_hi);
+    assert((USER_LINUX_IRQF_SHARED & USER_LINUX_IRQF_SHARED) != 0u32) by(bit_vector);
+    assert(irq_shared_ok);
+    assert((0u32 & USER_LINUX_IRQF_SHARED) == 0u32) by(bit_vector);
+    assert(!irq_shared_bad);
+    assert(ioremap_ok);
+    assert(!ioremap_zero);
+    assert(!ioremap_big);
+    assert(dma_ok);
+    assert(!dma_zero);
+    assert(!dma_big);
+    assert(copy_ok == 8);
+    assert(copy_clip == 8);
+    assert(bus_ok);
+    assert(!bus_bad);
+    assert(probe_ok);
+    assert(!probe_bad);
 }
 
 proof fn user_shell_logic_smoke() {

@@ -45,6 +45,7 @@ The shell currently registers these commands:
 - `components`
 - `fxfs`
 - `drivers`
+- `ddk`
 - `ifconfig`
 - `dns`
 - `dhcp`
@@ -108,6 +109,10 @@ This is another reason it should be considered a kernel shell in the current tre
 
 ## Command Behavior Notes
 
+### `drivers` / `ddk`
+
+`drivers` prints the user-space device tree, Linux DDK registry (modules, buses, char devices), and bound drivers. `ddk` summarizes the DDK; `ddk hello` reads the Linux misc hello demo; `ddk edu` shows the QEMU EDU PCI ident.
+
 ### `posixtest`
 
 The current shell forms are:
@@ -156,7 +161,7 @@ It currently:
 - directly exercises Linux memory calls and memory accounting
 - directly exercises Zircon VMO/VMAR, handle/object, signal/wait, port, channel, socket, FIFO, futex, process/thread, time/debug/system/exception, and hypervisor helpers
 - directly exercises Linux signal, IPC, networking, misc, file, directory, fd, poll, and stat helpers
-- directly checks the minimal component framework, FxFS-shaped object-store paths, and `/svc` fixed-message IPC
+- directly checks the minimal component framework, FxFS-shaped object-store paths, `/svc` fixed-message IPC, and the Linux DDK hello/dummy demos
 - runs compatibility-app, Docker/runc, Gemma, Hermes, LVGL, and Qt/QML cluster smoke checks
 
 So it mixes the future-facing syscall helper path with direct kernel function calls.

@@ -1,8 +1,8 @@
-//! User-space driver framework for SMROS bring-up.
+//! User-space Linux driver framework for SMROS bring-up.
 //!
-//! SMROS does not pass QEMU's live FDT into userspace yet, so this module keeps
-//! a Linux-device-tree-shaped table for QEMU `virt` devices and binds drivers
-//! against it. Device-specific drivers live under this module.
+//! Device discovery still uses a Linux-device-tree-shaped table for QEMU
+//! `virt` plus PCI on x86_64. Drivers now register through the Linux-shaped
+//! DDK (`module_init` / bus matching / `probe`) in `linux.rs`.
 
 #![allow(dead_code)]
 #![allow(static_mut_refs)]
@@ -13,7 +13,12 @@ use core::sync::atomic::AtomicBool;
 use core::sync::atomic::Ordering;
 
 pub mod block;
+pub mod ddk;
+pub mod demos;
 pub(crate) mod driver_logic;
+pub mod linux;
+pub(crate) mod linux_logic;
+pub mod linuxcompat;
 pub mod net;
 pub mod pci;
 
@@ -27,6 +32,11 @@ pub enum UserDriverError {
     Unsupported,
     Io,
     Timeout,
+    Busy,
+    Exists,
+    NoDev,
+    BadIrq,
+    NoMemory,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +49,9 @@ pub enum UserDeviceKind {
     VirtioMmio,
     Block,
     Network,
+    Platform,
+    Char,
+    Pci,
 }
 
 impl UserDeviceKind {
@@ -52,6 +65,9 @@ impl UserDeviceKind {
             UserDeviceKind::VirtioMmio => "virtio-mmio",
             UserDeviceKind::Block => "block",
             UserDeviceKind::Network => "network",
+            UserDeviceKind::Platform => "platform",
+            UserDeviceKind::Char => "char",
+            UserDeviceKind::Pci => "pci",
         }
     }
 }
@@ -115,6 +131,15 @@ pub struct UserDriverStats {
     pub net_rx_bytes: u64,
     pub net_tx_bytes: u64,
     pub net_dropped_packets: u64,
+    pub ddk_api_version: u32,
+    pub ddk_modules: usize,
+    pub ddk_buses: usize,
+    pub ddk_devices: usize,
+    pub ddk_drivers: usize,
+    pub ddk_chrdevs: usize,
+    pub hello_ready: bool,
+    pub dummy_ready: bool,
+    pub edu_ready: bool,
 }
 
 struct UserDriverFramework {
@@ -135,14 +160,21 @@ impl UserDriverFramework {
     #[inline(never)]
     fn init(&mut self) -> bool {
         if self.initialized {
-            return true;
+            return block::ready() || net::ready();
         }
         self.nodes.clear();
         self.bindings.clear();
+        linux::init();
         self.install_qemu_virt_tree();
-        self.probe();
+        demos::register();
+        block::register_linux_driver();
+        net::register_linux_driver();
+        self.discover_linux_devices();
+        linuxcompat::init();
+        linux::attach();
+        self.sync_bindings();
         let ready = block::ready() || net::ready();
-        self.initialized = ready;
+        self.initialized = true;
         #[cfg(target_arch = "x86_64")]
         if ready && !DRIVER_INIT_LOGGED.swap(true, Ordering::AcqRel) {
             let mut serial = crate::kernel_lowlevel::serial::Serial::new();
@@ -228,6 +260,30 @@ impl UserDriverFramework {
             reg: None,
             irq: None,
         });
+        self.nodes.push(UserDeviceNode {
+            path: "/smros-dummy",
+            name: "smros-dummy",
+            compatible: demos::DUMMY_COMPATIBLE,
+            status: "okay",
+            kind: UserDeviceKind::Platform,
+            reg: Some(UserDeviceReg {
+                base: demos::dummy_reg_base(),
+                size: demos::dummy_reg_size(),
+            }),
+            irq: Some(demos::DUMMY_IRQ),
+        });
+        self.nodes.push(UserDeviceNode {
+            path: linuxcompat::EDU_NODE,
+            name: linuxcompat::EDU_NAME,
+            compatible: "qemu,edu",
+            status: "okay",
+            kind: UserDeviceKind::Pci,
+            reg: Some(UserDeviceReg {
+                base: linuxcompat::bar0_start(),
+                size: linuxcompat::bar0_size(),
+            }),
+            irq: Some(linuxcompat::EDU_IRQ),
+        });
         for index in 0..crate::kernel_lowlevel::drivers::virtio_mmio_count() {
             let Some(reg) = crate::kernel_lowlevel::drivers::virtio_mmio_reg(index) else {
                 continue;
@@ -247,88 +303,122 @@ impl UserDriverFramework {
         }
     }
 
-    fn probe(&mut self) {
-        #[cfg(target_arch = "x86_64")]
-        {
-            if block::bind_pci().is_ok() {
-                self.bindings.push(UserDriverBinding {
-                    node_path: "/pci/virtio-block",
-                    driver: "qemu-virtio-pci-block",
-                    device_name: "vblk0",
-                    kind: UserDeviceKind::Block,
-                    block_size: block::BLOCK_SIZE,
-                    block_count: block::capacity_blocks(),
-                    mtu: 0,
-                    mac: [0; 6],
+    fn discover_linux_devices(&mut self) {
+        for node in &self.nodes {
+            if node.kind == UserDeviceKind::Platform && node.compatible == demos::DUMMY_COMPATIBLE {
+                let _ = linux::register_platform_device(linux::PlatformDevice {
+                    name: node.name,
+                    node_path: node.path,
+                    compatible: node.compatible,
+                    mmio: node.reg,
+                    irq: node.irq,
+                    driver: None,
                 });
             }
-            if net::bind_pci().is_ok() {
-                self.bindings.push(UserDriverBinding {
-                    node_path: "/pci/virtio-net",
-                    driver: "qemu-virtio-pci-net",
-                    device_name: "eth0",
-                    kind: UserDeviceKind::Network,
-                    block_size: 0,
-                    block_count: 0,
-                    mtu: net::ETHERNET_MTU,
-                    mac: net::mac(),
-                });
+            if node.kind != UserDeviceKind::VirtioMmio {
+                continue;
             }
-            return;
+            let Some(reg) = node.reg else {
+                continue;
+            };
+            if node.compatible != "virtio,mmio" || node.status != "okay" {
+                continue;
+            }
+            let Some(device_id) = linux::virtio_mmio_device_id(reg.base as usize) else {
+                continue;
+            };
+            let _ = linux::register_virtio_mmio_device(
+                virtio_device_name(device_id),
+                node.path,
+                reg.base as usize,
+                reg.size,
+                node.irq,
+            );
         }
 
-        #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+        #[cfg(target_arch = "x86_64")]
         {
-            let mut block_bound = false;
-            let mut net_bound = false;
-            for node in &self.nodes {
-                let Some(reg) = node.reg else {
-                    continue;
-                };
-                let base = reg.base as usize;
-                if node.compatible == "virtio,mmio"
-                    && node.status == "okay"
-                    && node.kind == UserDeviceKind::VirtioMmio
-                    && !block_bound
-                    && block::bind_at(base).is_ok()
-                {
-                    block_bound = true;
-                    self.bindings.push(UserDriverBinding {
-                        node_path: node.path,
-                        driver: "qemu-virtio-mmio-block",
-                        device_name: "vblk0",
-                        kind: UserDeviceKind::Block,
-                        block_size: block::BLOCK_SIZE,
-                        block_count: block::capacity_blocks(),
-                        mtu: 0,
-                        mac: [0; 6],
-                    });
+            if let Some(transport) = pci::find_virtio_block_transport() {
+                let _ = linux::register_virtio_pci_device(
+                    "vblk0",
+                    "/pci/virtio-block",
+                    linux::VIRTIO_ID_BLOCK,
+                    transport,
+                );
+            }
+            if let Some(transport) = pci::find_virtio_net_transport() {
+                let _ = linux::register_virtio_pci_device(
+                    "eth0",
+                    "/pci/virtio-net",
+                    linux::VIRTIO_ID_NET,
+                    transport,
+                );
+            }
+            for (index, hw) in pci::enumerate_devices().into_iter().enumerate() {
+                let mut bars = [linux::PciBar::empty(); 6];
+                for (bar_index, bar) in hw.bars.iter().enumerate() {
+                    bars[bar_index] = linux::PciBar {
+                        start: bar.start,
+                        size: bar.size,
+                        flags: if bar.io {
+                            linux::IORESOURCE_IO
+                        } else if bar.size != 0 {
+                            linux::IORESOURCE_MEM
+                        } else {
+                            0
+                        },
+                    };
                 }
+                let name = linux::intern_name(&alloc::format!("pci{index}")).unwrap_or("pci");
+                let path = linux::intern_name(&alloc::format!(
+                    "/pci/{:02x}:{:02x}.{}",
+                    hw.bus,
+                    hw.device,
+                    hw.function
+                ))
+                .unwrap_or("/pci");
+                let _ = linux::register_pci_device(linux::PciDevice {
+                    name,
+                    node_path: path,
+                    vendor: hw.vendor as u32,
+                    device: hw.device_id as u32,
+                    class: hw.class,
+                    revision: hw.revision,
+                    irq: if hw.irq == 0 {
+                        None
+                    } else {
+                        Some(hw.irq as u32)
+                    },
+                    bars,
+                    bus: hw.bus,
+                    devfn: ((hw.device & 0x1f) << 3) | (hw.function & 0x7),
+                    subsystem_vendor: hw.subsystem_vendor as u32,
+                    subsystem_device: hw.subsystem_device as u32,
+                    driver: None,
+                });
+            }
+        }
+    }
 
-                if node.compatible == "virtio,mmio"
-                    && node.status == "okay"
-                    && node.kind == UserDeviceKind::VirtioMmio
-                    && !net_bound
-                    && net::bind_at(base).is_ok()
-                {
-                    net_bound = true;
-                    self.bindings.push(UserDriverBinding {
-                        node_path: node.path,
-                        driver: "qemu-virtio-mmio-net",
-                        device_name: "eth0",
-                        kind: UserDeviceKind::Network,
-                        block_size: 0,
-                        block_count: 0,
-                        mtu: net::ETHERNET_MTU,
-                        mac: net::mac(),
-                    });
-                }
+    fn sync_bindings(&mut self) {
+        self.bindings = linux::bindings();
+        for binding in &mut self.bindings {
+            if binding.kind == UserDeviceKind::Block {
+                binding.device_name = "vblk0";
+                binding.block_size = block::BLOCK_SIZE;
+                binding.block_count = block::capacity_blocks();
+            }
+            if binding.kind == UserDeviceKind::Network {
+                binding.device_name = "eth0";
+                binding.mtu = net::ETHERNET_MTU;
+                binding.mac = net::mac();
             }
         }
     }
 
     fn stats(&self) -> UserDriverStats {
         let block_count = block::capacity_blocks();
+        let ddk = linux::stats();
         UserDriverStats {
             initialized: self.initialized,
             machine: crate::kernel_lowlevel::drivers::architecture_name(),
@@ -358,6 +448,15 @@ impl UserDriverFramework {
             net_rx_bytes: net::rx_bytes(),
             net_tx_bytes: net::tx_bytes(),
             net_dropped_packets: net::dropped_packets(),
+            ddk_api_version: ddk.api_version,
+            ddk_modules: ddk.modules,
+            ddk_buses: ddk.buses,
+            ddk_devices: ddk.platform_devices + ddk.virtio_devices + ddk.pci_devices,
+            ddk_drivers: ddk.platform_drivers + ddk.virtio_drivers + ddk.pci_drivers,
+            ddk_chrdevs: ddk.chrdevs,
+            hello_ready: demos::hello_ready(),
+            dummy_ready: demos::dummy_ready(),
+            edu_ready: linuxcompat::ready(),
         }
     }
 }
@@ -371,6 +470,14 @@ fn framework() -> &'static mut UserDriverFramework {
             DRIVER_FRAMEWORK = Some(UserDriverFramework::new());
         }
         DRIVER_FRAMEWORK.as_mut().unwrap()
+    }
+}
+
+fn virtio_device_name(device_id: u32) -> &'static str {
+    match device_id {
+        linux::VIRTIO_ID_BLOCK => "vblk0",
+        linux::VIRTIO_ID_NET => "eth0",
+        _ => "virtio",
     }
 }
 
@@ -487,7 +594,43 @@ pub fn net_receive_frame_timeout(
     net::receive_frame_timeout(out, timeout_spins)
 }
 
+pub fn ddk_smoke_test() -> bool {
+    if !framework().initialized {
+        let _ = framework().init();
+    }
+    demos::smoke() && linuxcompat::ready()
+}
+
+pub fn edu_ready() -> bool {
+    linuxcompat::ready()
+}
+
+pub fn edu_ident() -> u32 {
+    linuxcompat::ident()
+}
+
+pub fn hello_read(out: &mut [u8]) -> Result<usize, UserDriverError> {
+    if !framework().initialized {
+        let _ = framework().init();
+    }
+    let mut pos = 0i64;
+    linux::chrdev_open(demos::HELLO_NAME)?;
+    linux::chrdev_read(demos::HELLO_NAME, out, &mut pos)
+}
+
+pub fn hello_write(data: &[u8]) -> Result<usize, UserDriverError> {
+    if !framework().initialized {
+        let _ = framework().init();
+    }
+    let mut pos = 0i64;
+    linux::chrdev_open(demos::HELLO_NAME)?;
+    linux::chrdev_write(demos::HELLO_NAME, data, &mut pos)
+}
+
 pub fn smoke_test() -> bool {
+    if !ddk_smoke_test() {
+        return false;
+    }
     if !init() || !block_ready() || block_count() < 2 {
         return false;
     }

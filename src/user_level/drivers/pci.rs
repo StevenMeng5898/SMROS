@@ -452,6 +452,168 @@ mod arch {
             options(nomem, nostack, preserves_flags),
         );
     }
+
+    pub fn enable_function(bus: u8, device: u8, function: u8) {
+        if bus == 0xff {
+            return;
+        }
+        enable_device(bus, device, function);
+    }
+
+    pub fn config_read(bus: u8, device: u8, function: u8, offset: u16, size: u8) -> Option<u32> {
+        if bus == 0xff {
+            return None;
+        }
+        Some(match size {
+            1 => config_read_u8(bus, device, function, offset) as u32,
+            2 => config_read_u16(bus, device, function, offset) as u32,
+            4 => config_read_u32(bus, device, function, offset),
+            _ => return None,
+        })
+    }
+
+    pub fn config_write(
+        bus: u8,
+        device: u8,
+        function: u8,
+        offset: u16,
+        size: u8,
+        value: u32,
+    ) -> bool {
+        if bus == 0xff {
+            return false;
+        }
+        match size {
+            1 => {
+                let aligned = offset & !0x3;
+                let shift = ((offset & 0x3) * 8) as u32;
+                let old = config_read_u32(bus, device, function, aligned);
+                let new = (old & !(0xff << shift)) | ((value & 0xff) << shift);
+                config_write_u32(bus, device, function, aligned, new);
+                true
+            }
+            2 => {
+                config_write_u16(bus, device, function, offset, value as u16);
+                true
+            }
+            4 => {
+                config_write_u32(bus, device, function, offset, value);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn enumerate_devices() -> alloc::vec::Vec<super::PciHwDevice> {
+        let mut devices = alloc::vec::Vec::new();
+        for bus in 0..PCI_BUSES {
+            for device in 0..PCI_DEVICES {
+                let bus = bus as u8;
+                if config_read_u16(bus, device, 0, 0) == PCI_VENDOR_INVALID {
+                    continue;
+                }
+                let header = config_read_u8(bus, device, 0, PCI_HEADER_TYPE);
+                let functions = if header & PCI_HEADER_TYPE_MULTI_FUNCTION != 0 {
+                    PCI_FUNCTIONS
+                } else {
+                    1
+                };
+                for function in 0..functions {
+                    if let Some(hw) = read_function(bus, device, function) {
+                        devices.push(hw);
+                    }
+                }
+            }
+        }
+        devices
+    }
+
+    fn read_function(bus: u8, device: u8, function: u8) -> Option<super::PciHwDevice> {
+        let vendor = config_read_u16(bus, device, function, 0);
+        if vendor == PCI_VENDOR_INVALID {
+            return None;
+        }
+        let device_id = config_read_u16(bus, device, function, 2);
+        if vendor == VIRTIO_VENDOR_ID
+            || (vendor == super::EDU_VENDOR_ID && device_id == super::EDU_DEVICE_ID)
+        {
+            return None;
+        }
+        let class_reg = config_read_u32(bus, device, function, 0x08);
+        let revision = (class_reg & 0xff) as u8;
+        let class = class_reg >> 8;
+        if class >> 16 == 0x06 {
+            return None;
+        }
+        assign_bars(bus, device, function);
+        Some(super::PciHwDevice {
+            bus,
+            device,
+            function,
+            vendor,
+            device_id,
+            class,
+            revision,
+            irq: config_read_u8(bus, device, function, 0x3c),
+            subsystem_vendor: config_read_u16(bus, device, function, 0x2c),
+            subsystem_device: config_read_u16(bus, device, function, PCI_SUBSYSTEM_ID),
+            bars: read_bars(bus, device, function),
+        })
+    }
+
+    fn read_bars(bus: u8, device: u8, function: u8) -> [super::PciHwBar; 6] {
+        let mut bars = [super::PciHwBar::empty(); 6];
+        let mut bar = 0u8;
+        while bar < PCI_BAR_COUNT {
+            let offset = PCI_BAR0 + (bar as u16 * 4);
+            let original = config_read_u32(bus, device, function, offset);
+            config_write_u32(bus, device, function, offset, 0xffff_ffff);
+            let mask = config_read_u32(bus, device, function, offset);
+            config_write_u32(bus, device, function, offset, original);
+            if mask == 0 || mask == 0xffff_ffff {
+                bar += 1;
+                continue;
+            }
+            if mask & 1 != 0 {
+                let size = (!(mask & !0x3)).wrapping_add(1);
+                bars[bar as usize] = super::PciHwBar {
+                    start: (original & !0x3) as u64,
+                    size: size as u64,
+                    io: true,
+                };
+                bar += 1;
+                continue;
+            }
+            let is_64 = mask & 0x6 == 0x4;
+            if is_64 && bar + 1 < PCI_BAR_COUNT {
+                let high_offset = offset + 4;
+                let original_high = config_read_u32(bus, device, function, high_offset);
+                config_write_u32(bus, device, function, offset, 0xffff_ffff);
+                config_write_u32(bus, device, function, high_offset, 0xffff_ffff);
+                let low_mask = config_read_u32(bus, device, function, offset);
+                let high_mask = config_read_u32(bus, device, function, high_offset);
+                config_write_u32(bus, device, function, offset, original);
+                config_write_u32(bus, device, function, high_offset, original_high);
+                let mask64 = ((high_mask as u64) << 32) | ((low_mask & !0xf) as u64);
+                let size = (!mask64).wrapping_add(1);
+                bars[bar as usize] = super::PciHwBar {
+                    start: memory_bar_base(original, Some(original_high)),
+                    size,
+                    io: false,
+                };
+                bar += 2;
+            } else {
+                let size = (!(mask & !0xf)).wrapping_add(1) as u64;
+                bars[bar as usize] = super::PciHwBar {
+                    start: memory_bar_base(original, None),
+                    size,
+                    io: false,
+                };
+                bar += 1;
+            }
+        }
+        bars
+    }
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -465,6 +627,33 @@ mod arch {
     pub fn find_virtio_block_transport() -> Option<VirtioPciTransport> {
         None
     }
+
+    pub fn enable_function(_bus: u8, _device: u8, _function: u8) {}
+
+    pub fn config_read(
+        _bus: u8,
+        _device: u8,
+        _function: u8,
+        _offset: u16,
+        _size: u8,
+    ) -> Option<u32> {
+        None
+    }
+
+    pub fn config_write(
+        _bus: u8,
+        _device: u8,
+        _function: u8,
+        _offset: u16,
+        _size: u8,
+        _value: u32,
+    ) -> bool {
+        false
+    }
+
+    pub fn enumerate_devices() -> alloc::vec::Vec<super::PciHwDevice> {
+        alloc::vec::Vec::new()
+    }
 }
 
 pub fn find_virtio_net_transport() -> Option<VirtioPciTransport> {
@@ -473,4 +662,61 @@ pub fn find_virtio_net_transport() -> Option<VirtioPciTransport> {
 
 pub fn find_virtio_block_transport() -> Option<VirtioPciTransport> {
     arch::find_virtio_block_transport()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PciHwBar {
+    pub start: u64,
+    pub size: u64,
+    pub io: bool,
+}
+
+impl PciHwBar {
+    pub const fn empty() -> Self {
+        Self {
+            start: 0,
+            size: 0,
+            io: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PciHwDevice {
+    pub bus: u8,
+    pub device: u8,
+    pub function: u8,
+    pub vendor: u16,
+    pub device_id: u16,
+    pub class: u32,
+    pub revision: u8,
+    pub irq: u8,
+    pub subsystem_vendor: u16,
+    pub subsystem_device: u16,
+    pub bars: [PciHwBar; 6],
+}
+
+pub const EDU_VENDOR_ID: u16 = 0x1234;
+pub const EDU_DEVICE_ID: u16 = 0x11e8;
+
+pub fn enumerate_devices() -> alloc::vec::Vec<PciHwDevice> {
+    arch::enumerate_devices()
+}
+
+pub fn enable_function(bus: u8, device: u8, function: u8) {
+    arch::enable_function(bus, device, function);
+}
+
+pub fn config_read(bus: u8, device: u8, function: u8, offset: u16, size: u8) -> Option<u32> {
+    if bus == 0xff {
+        return None;
+    }
+    arch::config_read(bus, device, function, offset, size)
+}
+
+pub fn config_write(bus: u8, device: u8, function: u8, offset: u16, size: u8, value: u32) -> bool {
+    if bus == 0xff {
+        return false;
+    }
+    arch::config_write(bus, device, function, offset, size, value)
 }

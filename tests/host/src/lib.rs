@@ -10491,9 +10491,15 @@ fn hermes_shell_policy_allows_only_bounded_safe_forms() {
         ("docker", &["stop", "smros0001"][..]),
         ("docker", &["rm"][..]),
         ("docker", &["rm", "smros0001"][..]),
+        ("ddk", &[][..]),
+        ("ddk", &["hello"][..]),
+        ("ddk", &["help"][..]),
+        ("ddk", &["edu"][..]),
     ] {
         assert_eq!(classify(command, args), HermesShellPolicy::Allowed);
     }
+
+    assert_eq!(classify("ddk", &["probe"]), HermesShellPolicy::Invalid);
 
     let oversized = "x".repeat(HERMES_MAX_ARG_LEN + 1);
     assert_eq!(
@@ -11545,3 +11551,123 @@ mod linux_child_exit_lifecycle_logic {
 #[cfg(test)]
 #[path = "../../../src/user_level/services/posix_test.rs"]
 mod posix_test_guest;
+
+mod linux_ddk_logic {
+    #![allow(dead_code, unused_macros)]
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/drivers/linux_logic_shared.rs"
+    ));
+
+    #[test]
+    fn linux_ddk_id_tables_match_linux_wildcard_rules() {
+        const ANY: u32 = 0xffff_ffff;
+        assert!(smros_linux_id_match_body!(2u32, 2u32, ANY));
+        assert!(smros_linux_id_match_body!(7u32, ANY, ANY));
+        assert!(!smros_linux_id_match_body!(1u32, 2u32, ANY));
+
+        assert!(smros_linux_pci_id_match_body!(
+            0x1af4u32, 0x1042u32, 0x1af4u32, 0x1042u32, ANY
+        ));
+        assert!(smros_linux_pci_id_match_body!(
+            0x1234u32, 0x11e8u32, 0x1234u32, 0x11e8u32, ANY
+        ));
+        assert!(smros_linux_pci_id_match_body!(
+            0x1af4u32, 0x1042u32, ANY, 0x1042u32, ANY
+        ));
+        assert!(smros_linux_pci_id_match_body!(
+            0x1af4u32, 0x1042u32, 0x1af4u32, ANY, ANY
+        ));
+        assert!(smros_linux_pci_id_match_body!(
+            0x1u32, 0x2u32, ANY, ANY, ANY
+        ));
+        assert!(!smros_linux_pci_id_match_body!(
+            0x1af4u32, 0x1041u32, 0x1af4u32, 0x1042u32, ANY
+        ));
+        assert!(!smros_linux_pci_id_match_body!(
+            0x1234u32, 0x1042u32, 0x1af4u32, 0x1042u32, ANY
+        ));
+
+        assert!(smros_linux_virtio_id_match_body!(2u32, 2u32, ANY));
+        assert!(smros_linux_virtio_id_match_body!(1u32, ANY, ANY));
+        assert!(!smros_linux_virtio_id_match_body!(1u32, 2u32, ANY));
+        assert!(smros_linux_virtio_device_present_body!(2u32));
+        assert!(!smros_linux_virtio_device_present_body!(0u32));
+        assert!(smros_linux_id_table_end_body!(0u32, 0u32));
+        assert!(!smros_linux_id_table_end_body!(0x1af4u32, 0u32));
+        assert!(!smros_linux_id_table_end_body!(0u32, 1u32));
+    }
+
+    #[test]
+    fn linux_ddk_of_chrdev_irq_and_copy_helpers_cover_bounds() {
+        assert!(smros_linux_of_match_body!(true, false));
+        assert!(smros_linux_of_match_body!(false, true));
+        assert!(smros_linux_of_match_body!(true, true));
+        assert!(!smros_linux_of_match_body!(false, false));
+
+        assert!(smros_linux_module_license_ok_body!(3usize));
+        assert!(!smros_linux_module_license_ok_body!(0usize));
+
+        assert!(smros_linux_chrdev_minor_valid_body!(255u32, 256u32, 255u32));
+        assert!(smros_linux_chrdev_minor_valid_body!(0u32, 256u32, 255u32));
+        assert!(!smros_linux_chrdev_minor_valid_body!(
+            256u32, 256u32, 255u32
+        ));
+        assert!(!smros_linux_chrdev_minor_valid_body!(
+            300u32, 256u32, 255u32
+        ));
+
+        assert!(smros_linux_irq_number_valid_body!(1u32, 1024u32));
+        assert!(smros_linux_irq_number_valid_body!(1023u32, 1024u32));
+        assert!(!smros_linux_irq_number_valid_body!(0u32, 1024u32));
+        assert!(!smros_linux_irq_number_valid_body!(1024u32, 1024u32));
+        assert!(smros_linux_irq_shared_body!(0x80u32, 0x80u32));
+        assert!(!smros_linux_irq_shared_body!(0u32, 0x80u32));
+
+        assert_eq!(smros_linux_file_copy_len_body!(4usize, 8usize), 4);
+        assert_eq!(smros_linux_file_copy_len_body!(8usize, 8usize), 8);
+        assert_eq!(smros_linux_file_copy_len_body!(16usize, 8usize), 8);
+        assert_eq!(smros_linux_file_copy_len_body!(0usize, 8usize), 0);
+    }
+
+    #[test]
+    fn linux_ddk_mmio_dma_bus_and_probe_predicates() {
+        assert!(smros_linux_ioremap_len_valid_body!(
+            1usize,
+            0x1000_0000usize
+        ));
+        assert!(smros_linux_ioremap_len_valid_body!(
+            0x1000_0000usize,
+            0x1000_0000usize
+        ));
+        assert!(!smros_linux_ioremap_len_valid_body!(
+            0usize,
+            0x1000_0000usize
+        ));
+        assert!(!smros_linux_ioremap_len_valid_body!(
+            0x1000_0001usize,
+            0x1000_0000usize
+        ));
+
+        assert!(smros_linux_dma_size_valid_body!(64usize, 0x0001_0000usize));
+        assert!(smros_linux_dma_size_valid_body!(
+            0x0001_0000usize,
+            0x0001_0000usize
+        ));
+        assert!(!smros_linux_dma_size_valid_body!(0usize, 0x0001_0000usize));
+        assert!(!smros_linux_dma_size_valid_body!(
+            0x0001_0001usize,
+            0x0001_0000usize
+        ));
+
+        assert!(smros_linux_bus_kind_valid_body!(1u32, 1u32, 2u32, 3u32));
+        assert!(smros_linux_bus_kind_valid_body!(2u32, 1u32, 2u32, 3u32));
+        assert!(smros_linux_bus_kind_valid_body!(3u32, 1u32, 2u32, 3u32));
+        assert!(!smros_linux_bus_kind_valid_body!(0u32, 1u32, 2u32, 3u32));
+        assert!(!smros_linux_bus_kind_valid_body!(4u32, 1u32, 2u32, 3u32));
+
+        assert!(smros_linux_probe_status_ok_body!(0i32));
+        assert!(!smros_linux_probe_status_ok_body!(-5i32));
+        assert!(!smros_linux_probe_status_ok_body!(1i32));
+    }
+}

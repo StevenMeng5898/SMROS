@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(static_mut_refs)]
 
-use super::{driver_logic, pci, UserDriverError};
+use super::{driver_logic, linux, pci, UserDriverError};
 
 pub const MMIO_BASE: usize = 0x0a00_0000;
 pub const MMIO_STRIDE: usize = 0x200;
@@ -875,4 +875,39 @@ fn pci_write_u64(addr: usize, value: u64) {
 
 fn memory_barrier() {
     crate::kernel_lowlevel::cpu::mmio_barrier();
+}
+
+const VIRTIO_NET_ID_TABLE: [linux::VirtioDeviceId; 1] = [linux::VirtioDeviceId {
+    device: VIRTIO_DEVICE_ID_NET,
+}];
+
+const VIRTIO_NET_DRIVER: linux::VirtioDriver = linux::VirtioDriver {
+    name: "virtio_net",
+    id_table: &VIRTIO_NET_ID_TABLE,
+    probe: virtio_net_probe,
+    remove: None,
+};
+
+const VIRTIO_NET_MODULE: linux::LinuxModule = linux::LinuxModule {
+    name: "virtio_net",
+    license: "GPL",
+    author: "SMROS",
+    description: "Linux virtio-net driver demo",
+    init: virtio_net_init,
+    exit: None,
+};
+
+pub fn register_linux_driver() {
+    let _ = linux::register_module(VIRTIO_NET_MODULE);
+}
+
+fn virtio_net_init() -> Result<(), UserDriverError> {
+    linux::register_virtio_driver(&VIRTIO_NET_DRIVER)
+}
+
+fn virtio_net_probe(dev: &linux::VirtioDevice) -> Result<(), UserDriverError> {
+    match dev.transport {
+        linux::VirtioTransport::Mmio => bind_at(dev.mmio_base),
+        linux::VirtioTransport::Pci => bind_pci(),
+    }
 }

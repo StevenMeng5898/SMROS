@@ -11,6 +11,7 @@ The short version is:
 - a minimal component framework and FxFS-shaped object store now initialize during user-level setup
 - a minimal ELF64/AArch64 loader parses boot component binaries from FxFS
 - a minimal `/svc` service directory uses Zircon channels and fixed message structs for component-manager, runner, and filesystem requests
+- a Linux-shaped user-space DDK initializes platform/virtio/pci buses and hosts virtio-blk, virtio-net, hello, dummy, and Linux C EDU PCI driver demos
 - user-level VirtIO-MMIO block and net drivers initialize under QEMU `virt` on both ARM64 and RISC-V64
 - x86_64 boots on QEMU `q35` through PVH and binds VirtIO-PCI block and networking
 - FxFS is block-backed by `smros-fxfs.img` when a supported virtio-blk transport is present, including the default x86_64 PCI path
@@ -33,6 +34,9 @@ The short version is:
 - `src/user_level/services/host_share.rs`
 - `src/user_level/services/run_elf.rs`
 - `src/user_level/services/svc.rs`
+- `src/user_level/drivers/linux.rs`
+- `src/user_level/drivers/ddk.rs`
+- `src/user_level/drivers/demos.rs`
 - `src/user_level/drivers/block.rs`
 - `src/user_level/drivers/net.rs`
 - `src/user_level/services/user_shell.rs`
@@ -183,7 +187,8 @@ No part of the normal boot path:
 | Live test process in EL0 | explicit helper | normal boot skips it; the helper still drops to EL0 and returns through the active exception path |
 | Minimal ELF loader | active | parses FxFS ELF files and records entry/segment metadata |
 | Shell dynamic PIE launcher | active bring-up path | maps executable/interpreter into the Linux mmap window and enters loader at EL0 |
-| User-level VirtIO drivers | active on all kernel architectures | block and net bind under standard ARM64/RISC-V64 VirtIO-MMIO targets and under the x86_64 VirtIO-PCI target |
+| User-level Linux DDK | active on all kernel architectures | platform/virtio/pci matching plus hello/dummy/edu demos |
+| User-level VirtIO drivers | active on all kernel architectures | virtio_blk and virtio_net register as Linux virtio_driver demos under VirtIO-MMIO and VirtIO-PCI |
 | Block-backed FxFS | active when supported virtio-blk is present | `make clean` keeps `smros-fxfs.img`; `make clean-fxfs` resets it; the default ARM64, RISC-V64, and x86_64 QEMU targets all attach a supported virtio-blk device |
 | `/svc` fixed-message IPC | active | service connections use Zircon channels and fixed request/reply structs |
 | Full register-frame EL0 syscall handler | not active | current vectors use `handle_syscall_simple()` |

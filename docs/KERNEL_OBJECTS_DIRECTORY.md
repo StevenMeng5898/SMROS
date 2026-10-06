@@ -223,7 +223,7 @@ The current boot path directly uses:
 - `src/user_level/services/fxfs.rs` for a block-backed-when-available FxFS-shaped object store used by the component namespace scaffold
 - `src/user_level/services/host_share.rs` for the build-time `/shared` snapshot
 - `src/user_level/services/run_elf.rs` for the shell dynamic PIE launcher
-- `src/user_level/drivers/` for user-level VirtIO block/net drivers
+- `src/user_level/drivers/` for the Linux-shaped user-space DDK and VirtIO/hello/dummy/edu driver demos
 - `src/user_level/services/svc.rs` for a minimal `/svc` directory using Zircon channels and fixed request/reply structs
 
 ## Current Design Reality

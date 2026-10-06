@@ -11,7 +11,7 @@ SMROS is an experimental bare-metal multi-architecture kernel written in Rust fo
 - Keeps the live shell as an EL1 scheduler thread; the banner is aspirational, not proof of an isolated shell process.
 - Provides modeled Linux and Zircon syscall coverage for memory, handles, IPC, object, timer/debug, hypervisor, networking, file-descriptor, and compatibility-object paths.
 - Initializes a Fuchsia-inspired user-level scaffold with component instances, namespace entries, generated boot ELF metadata, `/svc` fixed-message IPC, an FxFS-shaped object store, and compatibility-app/Docker/runc smoke surfaces.
-- Binds QEMU VirtIO-MMIO block and net devices from user-level driver modules on ARM64/RISC-V64, and binds QEMU VirtIO-PCI block and net devices on x86_64. On RISC-V64, UART, hart, timer, and VirtIO-MMIO resources are discovered from the firmware-provided FDT instead of hard-coded board addresses.
+- Hosts a Linux-shaped user-space DDK (`docs/DDK.md`) and binds QEMU VirtIO-MMIO block/net devices from `virtio_blk`/`virtio_net` driver demos on ARM64/RISC-V64, plus VirtIO-PCI on x86_64. On RISC-V64, UART, hart, timer, and VirtIO-MMIO resources are discovered from the firmware-provided FDT instead of hard-coded board addresses.
 - Uses `smros-fxfs.img` as a persistent 128 MiB block-backed FxFS image on ARM64, RISC-V64, and x86_64.
 - Embeds repository-local `host_shared/` files into the kernel at build time and installs them under `/shared` during FxFS initialization.
 - Supports `run <elf>` for dynamic PIE AArch64 ELF files stored in FxFS. The dynamic loader and C library are resolved from `/shared/lib` or `/lib`. RISC-V64 and x86_64 kernel boot support is present, but external user ELF loading for those ABIs is still future work.
@@ -485,9 +485,11 @@ SMROS/
 │   ├── syscall/                # Syscall definitions, dispatch, and handler helpers
 │   └── user_level/
 │       ├── apps/               # EL0 process/test scaffolding
-│       ├── drivers/            # User-level VirtIO block/net drivers and verified helper logic
+│       ├── drivers/            # Linux-shaped user-space DDK, VirtIO, hello/dummy, Linux PCI EDU C
 │       └── services/           # Component, FxFS, /svc, ELF, run_elf, shell, networking, compat apps
-├── docs/                       # Design and status documents
+├── docs/                       # Design and status documents, including docs/DDK.md
+├── include/smros/              # Linux user-space DDK C API and driver examples
+├── include/linux/              # Linux-compatible headers for PCI driver C
 ├── host_shared/                # Build-time snapshot exposed as /shared
 ├── scripts/                    # Helper scripts
 └── verification/               # Standalone Verus harnesses
@@ -522,6 +524,8 @@ SMROS/
 
 ### User-Level Storage And Drivers
 
+- Linux-shaped user-space DDK (`docs/DDK.md`, `include/smros/ddk.h`) with platform/virtio/pci matching, misc char devices, ioremap, IRQ, and DMA helpers
+- Linux driver demos moved onto the DDK: `virtio_blk`, `virtio_net`, `hello`, `dummy`, and the stock Linux C `edu` PCI driver
 - User-level VirtIO-MMIO block driver for QEMU `virt`
 - User-level VirtIO-MMIO network driver and simple IPv4/UDP/DNS/ICMP/TCP/HTTP/FTP service layer
 - FxFS-shaped object store with object ids, attributes, directory entries, journal records, read/write/append/truncate/seek support, and block-image persistence
@@ -540,6 +544,7 @@ SMROS/
 - `docs/BOOT_FLOW.md`: current boot path from QEMU entry to shell prompt
 - `docs/KERNEL_OBJECTS_DIRECTORY.md`: current `src/kernel_objects/` layout
 - `docs/MEMORY_SYSCALLS_IMPLEMENTED.md`: status of memory-related syscalls
+- `docs/DDK.md`: Linux-shaped user-space driver framework, DDK API, and driver demos
 - `docs/NETWORKING.md`: VirtIO net driver and user-level network service status
 - `docs/POSIX_CONFORMANCE.md`: pinned suite workflow, metrics, evidence, and limitations
 - `docs/SYSCALL_COMPATIBILITY.md`: syscall entry points and dispatch reality

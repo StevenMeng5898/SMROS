@@ -144,8 +144,13 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
     },
     ShellCommand {
         name: "drivers",
-        description: "Show user-space device tree and driver bindings",
+        description: "Show user-space Linux DDK, device tree, and driver bindings",
         handler: cmd_drivers,
+    },
+    ShellCommand {
+        name: "ddk",
+        description: "Linux DDK status and hello/edu driver demos",
+        handler: cmd_ddk,
     },
     ShellCommand {
         name: "ifconfig",
@@ -3980,6 +3985,13 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
         return;
     }
     ctx.serial.write_str("[OK] FxFS smoke\n");
+    ctx.serial
+        .write_str("[TEST] Testing Linux DDK hello/dummy/edu demos... ");
+    if !crate::user_level::drivers::ddk_smoke_test() {
+        ctx.serial.write_str("[FAIL] Linux DDK smoke failed\n");
+        return;
+    }
+    ctx.serial.write_str("[OK] Linux DDK smoke\n");
     ctx.serial
         .write_str("[TEST] Testing component bootstrap... ");
     if !crate::user_level::component::start_bootstrap() {
@@ -8592,6 +8604,11 @@ fn print_driver_error(ctx: &mut ShellContext, err: crate::user_level::drivers::U
         crate::user_level::drivers::UserDriverError::Unsupported => "unsupported",
         crate::user_level::drivers::UserDriverError::Io => "io error",
         crate::user_level::drivers::UserDriverError::Timeout => "timeout",
+        crate::user_level::drivers::UserDriverError::Busy => "busy",
+        crate::user_level::drivers::UserDriverError::Exists => "exists",
+        crate::user_level::drivers::UserDriverError::NoDev => "no device",
+        crate::user_level::drivers::UserDriverError::BadIrq => "bad irq",
+        crate::user_level::drivers::UserDriverError::NoMemory => "no memory",
     };
     ctx.serial.write_str(label);
 }
@@ -9662,7 +9679,146 @@ fn cmd_drivers(ctx: &mut ShellContext, _args: &[&str]) {
         }
         ctx.serial.write_str("\n");
     }
+    ctx.serial.write_str("\nLinux DDK v");
+    print_number(&mut ctx.serial, stats.ddk_api_version);
+    ctx.serial.write_str("  modules=");
+    print_number(&mut ctx.serial, stats.ddk_modules as u32);
+    ctx.serial.write_str("  buses=");
+    print_number(&mut ctx.serial, stats.ddk_buses as u32);
+    ctx.serial.write_str("  devices=");
+    print_number(&mut ctx.serial, stats.ddk_devices as u32);
+    ctx.serial.write_str("  drivers=");
+    print_number(&mut ctx.serial, stats.ddk_drivers as u32);
+    ctx.serial.write_str("  chrdevs=");
+    print_number(&mut ctx.serial, stats.ddk_chrdevs as u32);
+    ctx.serial.write_str("\nhello: ");
+    ctx.serial.write_str(if stats.hello_ready {
+        "ready"
+    } else {
+        "not ready"
+    });
+    ctx.serial.write_str("  dummy: ");
+    ctx.serial.write_str(if stats.dummy_ready {
+        "ready"
+    } else {
+        "not ready"
+    });
+    ctx.serial.write_str("  edu: ");
+    ctx.serial.write_str(if stats.edu_ready {
+        "ready"
+    } else {
+        "not ready"
+    });
+    ctx.serial.write_str("\n\nModules:\n");
+    for module in crate::user_level::drivers::linux::modules() {
+        ctx.serial.write_str("  ");
+        ctx.serial.write_str(module.name);
+        ctx.serial.write_str("  license=");
+        ctx.serial.write_str(module.license);
+        ctx.serial.write_str("  ");
+        ctx.serial.write_str(module.description);
+        ctx.serial.write_str("\n");
+    }
+    ctx.serial.write_str("\nBuses:\n");
+    for bus in crate::user_level::drivers::linux::buses() {
+        ctx.serial.write_str("  ");
+        ctx.serial.write_str(bus.name);
+        ctx.serial.write_str("  devices=");
+        print_number(&mut ctx.serial, bus.devices as u32);
+        ctx.serial.write_str("  drivers=");
+        print_number(&mut ctx.serial, bus.drivers as u32);
+        ctx.serial.write_str("\n");
+    }
+    ctx.serial.write_str("\nChar devices:\n");
+    for chrdev in crate::user_level::drivers::linux::chrdevs() {
+        ctx.serial.write_str("  /dev/");
+        ctx.serial.write_str(chrdev.name);
+        ctx.serial.write_str("  minor=");
+        print_number(&mut ctx.serial, chrdev.minor);
+        ctx.serial.write_str("\n");
+    }
     ctx.serial.write_str("\n");
+}
+
+/// Command: ddk - Linux DDK status and hello/edu driver demos
+fn cmd_ddk(ctx: &mut ShellContext, args: &[&str]) {
+    if args.is_empty() || args[0] == "help" {
+        let stats = crate::user_level::drivers::stats();
+        ctx.serial.write_str("\nSMROS Linux DDK v");
+        print_number(&mut ctx.serial, stats.ddk_api_version);
+        ctx.serial.write_str("\nModules=");
+        print_number(&mut ctx.serial, stats.ddk_modules as u32);
+        ctx.serial.write_str(" devices=");
+        print_number(&mut ctx.serial, stats.ddk_devices as u32);
+        ctx.serial.write_str(" drivers=");
+        print_number(&mut ctx.serial, stats.ddk_drivers as u32);
+        ctx.serial.write_str(" chrdevs=");
+        print_number(&mut ctx.serial, stats.ddk_chrdevs as u32);
+        ctx.serial.write_str("\nhello=");
+        ctx.serial.write_str(if stats.hello_ready {
+            "ready"
+        } else {
+            "not ready"
+        });
+        ctx.serial.write_str(" dummy=");
+        ctx.serial.write_str(if stats.dummy_ready {
+            "ready"
+        } else {
+            "not ready"
+        });
+        ctx.serial.write_str(" edu=");
+        ctx.serial.write_str(if stats.edu_ready {
+            "ready"
+        } else {
+            "not ready"
+        });
+        ctx.serial.write_str("\nUsage: ddk [hello|edu]\n\n");
+        return;
+    }
+    if args[0] == "hello" {
+        let mut buf = [0u8; 64];
+        match crate::user_level::drivers::hello_read(&mut buf) {
+            Ok(len) => {
+                ctx.serial.write_str("\n/dev/hello: ");
+                if let Ok(text) = core::str::from_utf8(&buf[..len]) {
+                    ctx.serial.write_str(text);
+                    if !bytes_end_with_newline(&buf[..len]) {
+                        ctx.serial.write_str("\n");
+                    }
+                } else {
+                    ctx.serial.write_str("[binary]\n");
+                }
+            }
+            Err(err) => {
+                ctx.serial.write_str("\n/dev/hello read failed: ");
+                print_driver_error(ctx, err);
+                ctx.serial.write_str("\n");
+            }
+        }
+        return;
+    }
+    if args[0] == "edu" {
+        ctx.serial.write_str("\nedu: ");
+        ctx.serial
+            .write_str(if crate::user_level::drivers::edu_ready() {
+                "ready"
+            } else {
+                "not ready"
+            });
+        ctx.serial.write_str("  ident=0x");
+        print_hex(
+            &mut ctx.serial,
+            crate::user_level::drivers::edu_ident() as u64,
+        );
+        ctx.serial.write_str("\n\n");
+        return;
+    }
+    ctx.serial
+        .write_str("\nUnknown ddk subcommand. Try `ddk`, `ddk hello`, or `ddk edu`.\n\n");
+}
+
+fn bytes_end_with_newline(bytes: &[u8]) -> bool {
+    bytes.last().copied() == Some(b'\n')
 }
 
 /// Command: ifconfig - Show network interface state

@@ -21,9 +21,10 @@ Use `ARCH=x86_64-unknown-none` for the x86_64 QEMU path; QEMU attaches PCI
 virtio devices there, and SMROS binds `virtio-blk-pci` as `vblk0` and
 `virtio-net-pci` as `eth0`.
 
-The driver binds the QEMU VirtIO net device as `eth0`, reads the device MAC,
-posts receive buffers, and exposes raw Ethernet send/receive through
-`crate::user_level::drivers`.
+The Linux-shaped DDK publishes the QEMU VirtIO net device on the virtio bus.
+`virtio_net` probes it as `eth0`, reads the device MAC, posts receive buffers,
+and exposes raw Ethernet send/receive through `crate::user_level::drivers`.
+See `docs/DDK.md` for the driver-model API.
 
 The driver path now shares verified pure helper logic for MMIO slot address computation, VirtIO identity/version/queue validation, feature-mask selection, TX frame length checks, and RX packet/frame bounds. Hardware MMIO and volatile queue operations remain runtime-only.
 

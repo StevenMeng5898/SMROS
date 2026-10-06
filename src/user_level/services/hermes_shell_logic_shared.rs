@@ -97,6 +97,7 @@ pub fn classify(command: &str, args: &[&str]) -> HermesShellPolicy {
         | "mount" | "cd" | "cd.." => HermesShellPolicy::Forbidden,
         "help" | "version" | "meminfo" | "components" | "fxfs" | "drivers" | "ifconfig" | "pwd"
         | "ls" | "svc" | "uptime" => no_args(args),
+        "ddk" => ddk_policy(args),
         "reboot" => no_args(args),
         "testsc" => no_args(args),
         "ps" => optional_exact_arg(args, "-a"),
@@ -110,6 +111,13 @@ pub fn classify(command: &str, args: &[&str]) -> HermesShellPolicy {
         "hermes" => hermes_policy(args),
         "posixtest" => posix_policy(args),
         _ => HermesShellPolicy::Forbidden,
+    }
+}
+
+fn ddk_policy(args: &[&str]) -> HermesShellPolicy {
+    match args {
+        [] | ["hello"] | ["help"] | ["edu"] => HermesShellPolicy::Allowed,
+        _ => HermesShellPolicy::Invalid,
     }
 }
 

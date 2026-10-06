@@ -128,8 +128,15 @@ unsupported case.
 - `src/user_level/apps/user_process.rs`
 - `src/user_level/apps/user_test.rs`
 - `src/user_level/drivers/block.rs`
+- `src/user_level/drivers/ddk.rs`
+- `src/user_level/drivers/demos.rs`
 - `src/user_level/drivers/driver_logic.rs`
 - `src/user_level/drivers/driver_logic_shared.rs`
+- `src/user_level/drivers/linux.rs`
+- `src/user_level/drivers/linux_logic.rs`
+- `src/user_level/drivers/linux_logic_shared.rs`
+- `src/user_level/drivers/linux_pci.rs`
+- `src/user_level/drivers/linuxcompat/mod.rs`
 - `src/user_level/drivers/mod.rs`
 - `src/user_level/drivers/net.rs`
 - `src/user_level/drivers/pci.rs`

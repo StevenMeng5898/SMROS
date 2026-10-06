@@ -11026,3 +11026,67 @@ fn posix_process_runtime_results_separate_campaign_and_merge_head_evidence() {
          `c0a513e75f7762b90e1e6de6ef27051e1add801d` as a historical baseline."
     ));
 }
+
+#[test]
+fn linux_user_space_ddk_hosts_virtio_and_hello_demos() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let linux = std::fs::read_to_string(repository.join("src/user_level/drivers/linux.rs"))
+        .expect("read Linux DDK");
+    let block = std::fs::read_to_string(repository.join("src/user_level/drivers/block.rs"))
+        .expect("read virtio-blk demo");
+    let net = std::fs::read_to_string(repository.join("src/user_level/drivers/net.rs"))
+        .expect("read virtio-net demo");
+    let demos = std::fs::read_to_string(repository.join("src/user_level/drivers/demos.rs"))
+        .expect("read Linux driver demos");
+    let framework = std::fs::read_to_string(repository.join("src/user_level/drivers/mod.rs"))
+        .expect("read user driver framework");
+    let header =
+        std::fs::read_to_string(repository.join("include/smros/ddk.h")).expect("read C DDK header");
+    let docs = std::fs::read_to_string(repository.join("docs/DDK.md")).expect("read DDK docs");
+
+    assert!(linux.contains("pub fn register_virtio_driver"));
+    assert!(linux.contains("pub fn register_platform_driver"));
+    assert!(linux.contains("pub fn misc_register"));
+    assert!(linux.contains("pub extern \"C\" fn smros_ddk_ioremap"));
+    assert!(block.contains("name: \"virtio_blk\""));
+    assert!(block.contains("fn virtio_blk_probe"));
+    assert!(net.contains("name: \"virtio_net\""));
+    assert!(net.contains("fn virtio_net_probe"));
+    assert!(demos.contains("name: \"hello\""));
+    assert!(demos.contains("compatible: &DUMMY_COMPAT_TABLE"));
+    assert!(framework.contains("linux::attach()"));
+    assert!(framework.contains("block::register_linux_driver()"));
+    assert!(framework.contains("net::register_linux_driver()"));
+    assert!(header.contains("smros_ddk_chrdev_read"));
+    assert!(header.contains("SMROS_DDK_VIRTIO_ID_BLOCK"));
+    assert!(docs.contains("Rust DDK API"));
+    assert!(docs.contains("C DDK API"));
+}
+
+#[test]
+fn linux_pci_c_driver_keeps_stock_linux_source() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let edu = std::fs::read_to_string(repository.join("src/user_level/drivers/linuxcompat/edu.c"))
+        .expect("read EDU PCI driver");
+    let pci_header =
+        std::fs::read_to_string(repository.join("include/linux/pci.h")).expect("read linux/pci.h");
+    let docs = std::fs::read_to_string(repository.join("docs/DDK.md")).expect("read DDK docs");
+    let framework = std::fs::read_to_string(repository.join("src/user_level/drivers/mod.rs"))
+        .expect("read user driver framework");
+
+    assert!(!edu.contains("smros/ddk.h"));
+    assert!(!edu.contains("smros_ddk_"));
+    assert!(edu.contains("#include <linux/pci.h>"));
+    assert!(edu.contains("#include <linux/module.h>"));
+    assert!(edu.contains("PCI_DEVICE(EDU_VENDOR_ID, EDU_DEVICE_ID)"));
+    assert!(edu.contains("module_pci_driver(edu_driver)"));
+    assert!(edu.contains("pci_enable_device"));
+    assert!(edu.contains("pci_request_regions"));
+    assert!(edu.contains("pci_iomap"));
+    assert!(edu.contains("ioread32"));
+    assert!(edu.contains("kzalloc"));
+    assert!(pci_header.contains("module_pci_driver"));
+    assert!(pci_header.contains("struct pci_dev"));
+    assert!(framework.contains("linuxcompat::init()"));
+    assert!(docs.contains("Linux PCI C driver"));
+}
