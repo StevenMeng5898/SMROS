@@ -310,6 +310,10 @@ It is deliberately a safe interactive fuzzer:
   invalid addresses
 - non-returning and shell-destructive calls are skipped
 - clone-style process creation is skipped in the default round
+- reboot, `setitimer`, and posix `timer_*` arming are skipped so SIGALRM cannot
+  terminate the kernel shell's fake Linux dispatch pid
+- kernel-mode timer IRQ delivery and preemption are suppressed while dispatch is
+  active, so a campaign `fuzzsc` cannot schedule away from or kill the shell
 - each run closes tracked handles, fds, and mappings before returning
 
 The command prints call, success, `ENOSYS`, unsupported, error, and object-count

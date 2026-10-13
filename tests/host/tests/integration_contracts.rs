@@ -7101,6 +7101,130 @@ fn fuzzsc_second_invocation_does_not_block_on_leftover_linux_state() {
 }
 
 #[test]
+fn fuzzsc_kernel_dispatch_must_not_die_on_linux_timers() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fuzz = std::fs::read_to_string(repository.join("src/syscall/fuzz.rs"))
+        .expect("read syscall fuzzer");
+    let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
+        .expect("read syscall runtime");
+    let main = std::fs::read_to_string(repository.join("src/main.rs"))
+        .expect("read kernel timer/preemption entry");
+
+    let destructive_start = fuzz
+        .find("fn linux_fuzz_is_destructive(")
+        .expect("linux_fuzz_is_destructive");
+    let destructive = braced_body(&fuzz[destructive_start..]);
+    for syscall_name in [
+        "ARM64_SYS_REBOOT",
+        "ARM64_SYS_SETITIMER",
+        "ARM64_SYS_TIMER_CREATE",
+        "ARM64_SYS_TIMER_SETTIME",
+        "ARM64_SYS_TIMER_GETTIME",
+        "ARM64_SYS_TIMER_GETOVERRUN",
+        "ARM64_SYS_TIMER_DELETE",
+    ] {
+        assert!(
+            destructive.contains(syscall_name),
+            "fuzzsc must not arm Linux interval/posix timers or reboot the campaign shell; missing {syscall_name}"
+        );
+    }
+
+    assert!(
+        fuzz.contains(
+            "self.itimer = LinuxItimerval {\n            it_interval: LinuxTimeval {\n                tv_sec: 0,\n                tv_usec: 0,\n            },\n            it_value: LinuxTimeval {\n                tv_sec: 0,\n                tv_usec: 0,"
+        ),
+        "fuzz itimers must stay disarmed so a stray setitimer cannot queue SIGALRM on the kernel shell"
+    );
+    assert!(
+        !fuzz.contains(
+            "self.itimer = LinuxItimerval {\n            it_interval: LinuxTimeval {\n                tv_sec: 0,\n                tv_usec: 0,\n            },\n            it_value: LinuxTimeval {\n                tv_sec: 0,\n                tv_usec: 1,"
+        ),
+        "fuzz it_value must not be 1usec; that expires on the next tick and can terminate LINUX_DISPATCH_PID"
+    );
+
+    let expire_start = syscall
+        .find("pub fn expire_linux_real_timers_from_irq(")
+        .expect("expire_linux_real_timers_from_irq");
+    let expire = braced_body(&syscall[expire_start..]);
+    assert!(
+        expire.contains("linux_task::kernel_dispatch_active()"),
+        "kernel-mode fuzzsc must not queue SIGALRM on the shell from timer IRQ"
+    );
+
+    let posix_start = syscall
+        .find("pub fn deliver_linux_posix_timer_signals_from_irq(")
+        .expect("deliver_linux_posix_timer_signals_from_irq");
+    let posix = braced_body(&syscall[posix_start..]);
+    assert!(
+        posix.contains("linux_task::kernel_dispatch_active()"),
+        "kernel-mode fuzzsc must not queue posix-timer signals on the shell from timer IRQ"
+    );
+
+    let deliver_start = syscall
+        .find("pub extern \"C\" fn deliver_linux_timer_signal_from_irq(")
+        .expect("deliver_linux_timer_signal_from_irq");
+    let deliver = braced_body(&syscall[deliver_start..]);
+    assert!(
+        deliver.contains("linux_task::kernel_dispatch_active()"),
+        "timer IRQ must not deliver default-terminate SIGALRM while the kernel shell is fuzzing"
+    );
+
+    let finish_signal = braced_body(
+        &syscall[syscall
+            .find("fn terminate_linux_process_by_signal(")
+            .expect("signal termination completion")..],
+    );
+    let guard = finish_signal
+        .find("linux_task::kernel_dispatch_active()")
+        .expect("dispatch must refuse to kill the kernel shell");
+    let finish = finish_signal
+        .find("linux_task::finish_current_without_el0_return()")
+        .expect("EL0 processes still finish without returning");
+    assert!(
+        guard < finish,
+        "kernel dispatch must skip finish_current_without_el0_return so fuzzsc cannot halt the shell"
+    );
+
+    let resched_start = syscall
+        .find("fn linux_reschedule_after_sched_change(")
+        .expect("linux_reschedule_after_sched_change");
+    let resched = braced_body(&syscall[resched_start..]);
+    assert!(
+        resched.contains("linux_task::kernel_dispatch_active()") && resched.contains("yield_now()"),
+        "sched_setparam must not yield the kernel shell away during fuzzsc"
+    );
+
+    let yield_start = syscall
+        .find("pub fn sys_sched_yield(")
+        .expect("sys_sched_yield");
+    let yield_body = braced_body(&syscall[yield_start..]);
+    assert!(
+        yield_body.contains("linux_task::kernel_dispatch_active()")
+            && yield_body.contains("yield_now()"),
+        "sched_yield must not preempt the kernel shell during fuzzsc"
+    );
+
+    let preempt_start = main
+        .find("extern \"C\" fn check_preemption(")
+        .expect("check_preemption");
+    let preempt = braced_body(&main[preempt_start..]);
+    assert!(
+        preempt.contains("linux_task::kernel_dispatch_active()"),
+        "ARM64 kernel IRQ must not preempt the shell while fuzzsc mutates unsynchronized Linux timer state"
+    );
+
+    let timer_start = main
+        .find("extern \"C\" fn timer_interrupt_handler(")
+        .expect("ARM64 timer_interrupt_handler");
+    let timer = braced_body(&main[timer_start..]);
+    assert!(
+        timer.contains("linux_task::kernel_dispatch_active()")
+            && timer.contains("schedule_on_cpu("),
+        "precision-sleeper wakeups must not schedule away from kernel-mode fuzzsc"
+    );
+}
+
+#[test]
 fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let task_logic =

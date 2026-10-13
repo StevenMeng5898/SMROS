@@ -714,7 +714,7 @@ pub(crate) fn reconcile_riscv_trap_owner(saved_regs: usize) {
 #[cfg(not(target_arch = "riscv64"))]
 #[no_mangle]
 extern "C" fn timer_interrupt_handler() {
-    if timer_interrupt_handler_common() {
+    if timer_interrupt_handler_common() && !crate::syscall::linux_task::kernel_dispatch_active() {
         crate::kernel_objects::scheduler::schedule_on_cpu(current_cpu_id() as usize);
     }
 }
@@ -761,6 +761,9 @@ extern "C" fn riscv64_timer_interrupt_handler(saved_regs: usize) {
 /// Check if preemption is needed
 #[no_mangle]
 extern "C" fn check_preemption() {
+    if crate::syscall::linux_task::kernel_dispatch_active() {
+        return;
+    }
     let cpu_id = current_cpu_id();
     if cpu_id != 0 {
         return;

@@ -5733,6 +5733,9 @@ pub extern "C" fn complete_linux_signal_syscall_return(saved_regs: usize) {
 }
 
 pub fn expire_linux_real_timers_from_irq() {
+    if linux_task::kernel_dispatch_active() {
+        return;
+    }
     let now = crate::kernel_lowlevel::timer::get_tick_count();
     let has_active_timer = with_initialized_memory_state(|state| {
         syscall_logic::linux_real_timer_scan_needed(
@@ -5802,6 +5805,9 @@ pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) -> bool
     if linux_task::current_task().is_err() {
         return false;
     }
+    if linux_task::kernel_dispatch_active() {
+        return false;
+    }
 
     expire_linux_real_timers_from_irq();
     let diagnostic_tick = LINUX_TIMER_SIGNAL_DIAGNOSTIC_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -5839,6 +5845,9 @@ pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) -> bool
 }
 
 pub fn deliver_linux_posix_timer_signals_from_irq() {
+    if linux_task::kernel_dispatch_active() {
+        return;
+    }
     let now_monotonic = monotonic_nanos();
     let Ok(now_realtime) = linux_realtime_nanos() else {
         return;
@@ -9987,6 +9996,11 @@ fn linux_reschedule_after_sched_change() {
     // The target may be a different process, so the current-thread priority
     // snapshot can be stale when the update completes. Yield unconditionally
     // to make a newly runnable higher-priority target observable immediately.
+    // fuzzsc/hermes dispatch on the kernel shell; yielding there can schedule
+    // away from the campaign thread after sched_setparam lowers its priority.
+    if linux_task::kernel_dispatch_active() {
+        return;
+    }
     scheduler::yield_now();
 }
 
@@ -11577,6 +11591,9 @@ fn exit_current_linux_process(
 }
 
 fn terminate_linux_process_by_signal(tgid: usize, signum: usize) -> SysResult {
+    if linux_task::kernel_dispatch_active() {
+        return Ok(0);
+    }
     let terminating_current = linux_task::current_task().is_ok_and(|task| task.tgid == tgid);
     let outcome = linux_process::terminate_by_signal(tgid, signum)?;
     crate::kobj_debug!(
@@ -11949,6 +11966,9 @@ pub fn sys_get_robust_list(_pid: isize, head_ptr: usize, len_ptr: usize) -> SysR
 }
 
 pub fn sys_sched_yield() -> SysResult {
+    if linux_task::kernel_dispatch_active() {
+        return Ok(0);
+    }
     scheduler::yield_now();
     Ok(0)
 }

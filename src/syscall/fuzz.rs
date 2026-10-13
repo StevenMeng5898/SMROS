@@ -407,7 +407,7 @@ impl FuzzArena {
             },
             it_value: LinuxTimeval {
                 tv_sec: 0,
-                tv_usec: 1,
+                tv_usec: 0,
             },
         };
         self.cap_header.version = LINUX_CAPABILITY_VERSION_3;
@@ -2016,6 +2016,12 @@ fn linux_fuzz_is_destructive(num: u32) -> bool {
             | super::ARM64_SYS_RT_SIGSUSPEND
             | super::ARM64_SYS_RT_SIGTIMEDWAIT
             | super::ARM64_SYS_REBOOT
+            | super::ARM64_SYS_SETITIMER
+            | super::ARM64_SYS_TIMER_CREATE
+            | super::ARM64_SYS_TIMER_GETTIME
+            | super::ARM64_SYS_TIMER_GETOVERRUN
+            | super::ARM64_SYS_TIMER_SETTIME
+            | super::ARM64_SYS_TIMER_DELETE
     )
 }
 
