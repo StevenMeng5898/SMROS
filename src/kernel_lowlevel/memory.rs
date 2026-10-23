@@ -639,7 +639,7 @@ impl ProcessManager {
                 || self.processes[i].state == ProcessState::Terminated
             {
                 if self.processes[i].state == ProcessState::Terminated {
-                    self.release_dynamic_name(self.processes[i].name);
+                    self.reclaim_process_slot(i);
                 }
                 let pid = self.next_pid.load(Ordering::Relaxed) as usize;
                 let parent_pid = 1; // Init is parent
@@ -649,6 +649,7 @@ impl ProcessManager {
                     self.active_processes += 1;
                     return Some(pid);
                 }
+                self.reclaim_process_slot(i);
             }
         }
 
@@ -710,20 +711,35 @@ impl ProcessManager {
             if pcb.state == ProcessState::Empty {
                 return false;
             }
-            // Free all pages
-            for i in 0..pcb.address_space.valid_page_count {
-                if pcb.address_space.pages[i].valid {
-                    PageFrameAllocator::free(pcb.address_space.pages[i].pfn);
-                    pcb.address_space.pages[i] = PageEntry::invalid();
-                }
-            }
-
+            Self::free_process_pages(pcb);
+            let name = pcb.name;
+            pcb.address_space = ProcessAddressSpace::new();
+            pcb.thread_count = 0;
+            pcb.name = "";
             pcb.state = ProcessState::Terminated;
             self.active_processes = self.active_processes.saturating_sub(1);
+            self.release_dynamic_name(name);
             true
         } else {
             false
         }
+    }
+
+    fn reclaim_process_slot(&mut self, index: usize) {
+        let name = self.processes[index].name;
+        Self::free_process_pages(&mut self.processes[index]);
+        self.processes[index] = ProcessControlBlock::new();
+        self.release_dynamic_name(name);
+    }
+
+    fn free_process_pages(pcb: &mut ProcessControlBlock) {
+        for page_index in 0..pcb.address_space.valid_page_count {
+            if pcb.address_space.pages[page_index].valid {
+                PageFrameAllocator::free(pcb.address_space.pages[page_index].pfn);
+                pcb.address_space.pages[page_index] = PageEntry::invalid();
+            }
+        }
+        pcb.address_space.valid_page_count = 0;
     }
 
     fn alloc_vm_process_name(&mut self, vm_name: &str) -> Option<&'static str> {

@@ -24,10 +24,17 @@ pub fn restore_interrupts(state: IrqState) {
     unsafe {
         core::arch::asm!(
             "msr daif, {state}",
+            "isb",
             state = in(reg) state,
             options(nomem, nostack, preserves_flags),
         );
     }
+}
+
+#[inline(always)]
+pub fn irq_state_enabled(state: IrqState) -> bool {
+    // DAIF.I is bit 7. Clear means IRQs are enabled after restore.
+    state & 0x80 == 0
 }
 
 #[inline(always)]
@@ -42,6 +49,7 @@ pub fn unmask_timer_interrupts() {
         let daif = daif & !0x80;
         core::arch::asm!(
             "msr daif, {daif}",
+            "isb",
             daif = in(reg) daif,
             options(nomem, nostack, preserves_flags),
         );
@@ -50,12 +58,24 @@ pub fn unmask_timer_interrupts() {
 
 #[inline(always)]
 pub fn wait_for_interrupt() {
-    cortex_a::asm::wfi();
+    // ISB makes a preceding DAIF/CNTP update visible. ARM64 QEMU TCG will
+    // otherwise keep WFI asleep and freeze virtio/timer waits.
+    unsafe {
+        core::arch::asm!(
+            "dsb sy",
+            "isb",
+            "wfi",
+            options(nomem, nostack, preserves_flags),
+        );
+    }
 }
 
 #[inline(always)]
 pub fn wait_for_event() {
-    cortex_a::asm::wfe();
+    // WFE without SEV never returns on ARM64 TCG. Component launcher
+    // leftovers after Memory Syscall Test used this idle path and froze
+    // virtio/timer progress on later host TCP jobs.
+    wait_for_interrupt();
 }
 
 #[inline(always)]
@@ -238,14 +258,19 @@ pub fn read_user_tls() -> u64 {
 #[inline(always)]
 pub unsafe fn switch_to_user(entry_point: u64, user_stack: u64, ttbr0: u64, state: u64) -> ! {
     let _interrupt_state = mask_interrupts();
-    core::arch::asm!(
-        "msr ttbr0_el1, {ttbr0}",
-        "tlbi vmalle1is",
-        "dsb ish",
-        "isb",
-        ttbr0 = in(reg) ttbr0,
-        options(nostack),
-    );
+    // TTBR0=0 is the architectural empty translation table. Installing it
+    // unmaps kernel code/stacks on ARM64 QEMU, then later Memory Syscall
+    // Test virtio/TCP waits hang because WFI never sees a live timer.
+    if ttbr0 != 0 {
+        core::arch::asm!(
+            "msr ttbr0_el1, {ttbr0}",
+            "tlbi vmalle1is",
+            "dsb ish",
+            "isb",
+            ttbr0 = in(reg) ttbr0,
+            options(nostack),
+        );
+    }
     core::arch::asm!("msr sp_el0, {sp}", sp = in(reg) user_stack, options(nostack));
     core::arch::asm!("msr elr_el1, {entry}", entry = in(reg) entry_point, options(nostack));
     core::arch::asm!("msr spsr_el1, {state}", state = in(reg) state, options(nostack));

@@ -27,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 7070
 MAX_REQUEST = 4096
-LAUNCHER_VERSION = 10
+LAUNCHER_VERSION = 11
 DEFAULT_LAUNCH_STABLE_SECONDS = 2.0
 DEFAULT_LAUNCH_ATTEMPTS = 3
 DEFAULT_LAUNCH_RETRY_DELAY_SECONDS = 0.4
@@ -41,6 +41,10 @@ MAX_TEST_LOG_BYTES = 64 * 1024
 
 LOCK = threading.Lock()
 TEST_JOB_LOCK = threading.Lock()
+JOBS_LOCK = threading.Lock()
+JOBS: dict[str, dict[str, object]] = {}
+NEXT_JOB_TOKEN = 1
+MAX_JOB_RECORDS = 32
 PROCS: dict[str, subprocess.Popen[bytes]] = {}
 
 
@@ -57,6 +61,7 @@ def parse_request(data: bytes) -> tuple[str, dict[str, str]]:
         "SMROS_VM_WAIT_BOOT 1",
         "SMROS_TRACE_SYNC 1",
         "SMROS_TEST_RUN 1",
+        "SMROS_TEST_STATUS 1",
     }:
         raise ValueError("bad header")
     values: dict[str, str] = {}
@@ -220,7 +225,7 @@ def launcher_status() -> str:
     return (
         f"OK version={LAUNCHER_VERSION} monitor_none=1 stale_qemu_cleanup=1 "
         "trace_sync=1 stable_launch=1 vm_log=1 hermes_test_jobs=1 linux_boot=1 "
-        "launch_retry=1\n"
+        "launch_retry=1 async_test_jobs=1\n"
     )
 
 
@@ -264,6 +269,75 @@ def test_job_environment() -> dict[str, str]:
     return env
 
 
+def next_job_token() -> str:
+    global NEXT_JOB_TOKEN
+    token = str(NEXT_JOB_TOKEN)
+    NEXT_JOB_TOKEN += 1
+    if NEXT_JOB_TOKEN > 1_000_000:
+        NEXT_JOB_TOKEN = 1
+    return token
+
+
+def prune_jobs_locked() -> None:
+    done = [token for token, rec in JOBS.items() if rec.get("state") != "running"]
+    overflow = max(0, len(JOBS) - MAX_JOB_RECORDS)
+    for token in done[:overflow]:
+        JOBS.pop(token, None)
+
+
+def start_test_job(values: dict[str, str]) -> str:
+    parse_test_job(values)
+    job = values["job"]
+    with JOBS_LOCK:
+        prune_jobs_locked()
+        for token, rec in JOBS.items():
+            if rec.get("job") == job and rec.get("state") == "running":
+                return f"OK job={job} accepted=1 token={token}\n"
+        token = next_job_token()
+        JOBS[token] = {"job": job, "state": "running", "response": None}
+    thread = threading.Thread(
+        target=execute_test_job,
+        args=(token, job),
+        name=f"smros-test-{job}-{token}",
+        daemon=True,
+    )
+    thread.start()
+    print(f"smros-vm-launcher: job={job} accepted token={token}", flush=True)
+    return f"OK job={job} accepted=1 token={token}\n"
+
+
+def execute_test_job(token: str, job: str) -> None:
+    try:
+        response = run_test_job({"job": job})
+    except Exception as exc:  # Keep daemon alive; report concise cause.
+        response = f"ERR {type(exc).__name__}: {exc}\n"
+        print(
+            f"smros-vm-launcher: job={job} token={token} {response.strip()}",
+            flush=True,
+        )
+    with JOBS_LOCK:
+        rec = JOBS.get(token)
+        if rec is not None:
+            rec["state"] = "done"
+            rec["response"] = response
+
+
+def test_job_status(values: dict[str, str]) -> str:
+    token = values.get("token", "")
+    if not token or not token.isdigit() or len(token) > 16:
+        raise ValueError("bad token")
+    job = values.get("job")
+    with JOBS_LOCK:
+        rec = JOBS.get(token)
+        if rec is None:
+            raise ValueError(f"unknown token: {token}")
+        if job is not None and rec.get("job") != job:
+            raise ValueError("token job mismatch")
+        if rec.get("state") == "running":
+            return f"OK job={rec['job']} token={token} running=1\n"
+        return str(rec.get("response") or f"ERR job={rec['job']} status=failed\n")
+
+
 def run_test_job(values: dict[str, str]) -> str:
     cmd = parse_test_job(values)
     job = values["job"]
@@ -291,6 +365,8 @@ def run_test_job(values: dict[str, str]) -> str:
                     env=test_job_environment(),
                 )
             except subprocess.TimeoutExpired as exc:
+                if exc.pid is not None:
+                    terminate_process_group(exc.pid)
                 write_test_log(job, (exc.stdout or "") + (exc.stderr or ""))
                 last_response = f"ERR job={job} status=timeout\n"
                 print(
@@ -302,7 +378,7 @@ def run_test_job(values: dict[str, str]) -> str:
                 continue
         output = (result.stdout or "") + (result.stderr or "")
         write_test_log(job, output)
-        summary = bounded_test_summary(result.stdout or output)
+        summary = bounded_test_summary(output)
         print(
             f"smros-vm-launcher: job={job} status={result.returncode} attempt={attempt}/{attempts}",
             flush=True,
@@ -324,7 +400,23 @@ def write_test_log(job: str, output: str) -> None:
 
 def bounded_test_summary(output: str) -> str:
     lines = [line.strip() for line in output.splitlines() if line.strip()]
-    summary = lines[-1] if lines else "no-output"
+    preferred = []
+    usable = []
+    for line in lines:
+        lowered = line.lower()
+        if "leaving directory" in lowered or "entering directory" in lowered:
+            continue
+        usable.append(line)
+        if (
+            "panicked at" in line
+            or line.startswith("---- ")
+            or line.startswith("failures:")
+            or "FAILED" in line
+            or line.startswith("error:")
+            or "assertion" in lowered
+        ):
+            preferred.append(line)
+    summary = preferred[-1] if preferred else (usable[-1] if usable else "no-output")
     safe = "".join(char if char.isalnum() or char in ".:_-" else "_" for char in summary)
     return safe[:160] or "no-output"
 
@@ -537,17 +629,30 @@ def log_tail(path: Path, limit: int = 600) -> str:
 
 
 def terminate_process(proc: subprocess.Popen[bytes]) -> None:
-    proc.terminate()
+    terminate_process_group(proc.pid)
     deadline = time.monotonic() + terminate_timeout_seconds()
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             return
         time.sleep(0.05)
-    proc.kill()
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
     try:
         proc.wait(timeout=1.0)
     except subprocess.TimeoutExpired:
         pass
+
+
+def terminate_process_group(pid: int | None) -> None:
+    if pid is None or pid <= 0:
+        return
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    wait_pid_exit(pid, terminate_timeout_seconds())
 
 
 def qemu_is_running(name: str, proc: subprocess.Popen[bytes] | None) -> bool:
@@ -619,7 +724,12 @@ class Handler(socketserver.BaseRequestHandler):
             self.request.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         except OSError:
             pass
-        data = self.request.recv(MAX_REQUEST)
+        data = b""
+        while b"\nend\n" not in data and len(data) < MAX_REQUEST:
+            chunk = self.request.recv(MAX_REQUEST - len(data))
+            if not chunk:
+                break
+            data += chunk
         try:
             header, values = parse_request(data)
             if header == "SMROS_VM_LAUNCH 1":
@@ -632,6 +742,8 @@ class Handler(socketserver.BaseRequestHandler):
                 action = "trace-sync"
             elif header == "SMROS_TEST_RUN 1":
                 action = "test-run"
+            elif header == "SMROS_TEST_STATUS 1":
+                action = "test-status"
             else:
                 action = "ping"
             print(
@@ -647,7 +759,9 @@ class Handler(socketserver.BaseRequestHandler):
             elif header == "SMROS_TRACE_SYNC 1":
                 response = sync_trace(values)
             elif header == "SMROS_TEST_RUN 1":
-                response = run_test_job(values)
+                response = start_test_job(values)
+            elif header == "SMROS_TEST_STATUS 1":
+                response = test_job_status(values)
             else:
                 response = launcher_status()
         except Exception as exc:  # Keep daemon alive; report concise cause.

@@ -181,11 +181,12 @@ Run the constrained host-launcher protocol tests separately with:
 make launcher-test
 ```
 
-The protocol accepts only named `ut` and `it` jobs. `hermes test-all` does not
+The protocol accepts only named `ut` and `it` jobs. `SMROS_TEST_RUN` returns a token immediately and `SMROS_TEST_STATUS` is polled until the host job finishes, so a long `make ut` cannot stall the guest TCP stack. Guest `tcp_connect` always honors its deadline even when leftover virtio RX frames keep arriving, and it RSTs leftover IPv4 TCP frames (including unmatched SYN-ACKs) so ARM64 slirp delayed packets cannot hang a later host-job handshake. ARM64 `arm_at_nanoseconds` rewrites CNTP_CVAL when the cached compare is already behind CNTPCT, because GICv3/TCG will not raise a new edge from a stale past deadline. Lone-thread `yield_now()` programs a 1ms CNTP wakeup, restores IRQs with ISB, then DSB/ISB/WFI so ARM64 TCG can retire virtio completions and advance CNTPCT. Memory Syscall Test component launchers keep a live TTBR0 instead of installing 0, leftover exception VMARs are closed, leftover virtio RX is drained before host `ut`/`it`, leftover launchers ERET into a user-mapped SVC trampoline at `0x10000000` instead of kernel `.text` (ARM64 UXN/`ESR=8200000e`), and ARM64 `wait_for_event()` WFI so leftover EL0 threads cannot freeze CNTPCT after `testsc`. Failed `it` summaries ignore Make `Leaving directory` lines, including as the last fallback line, and read combined stdout/stderr. `hermes test-all` does not
 request ST/SKT: a nested command-line SMROS boot from the guest cannot run.
 `make skt` remains the host-only QEMU smoke test. `hermes test-all` runs its
 native check once, then one random operation and the `ut`/`it` host jobs in
-every iteration. Its positive `iterations=<n>` value therefore controls both
+every iteration. The default catalog already includes LVGL, QML, syscall
+smoke, POSIX canaries, and ops APIs. Its positive `iterations=<n>` value therefore controls both
 the guest operations and the number of `ut` and `it` requests. Reports keep
 aggregate totals and no more than 64 round details. Host logs are bounded
 under `target/hermes-tests/`.

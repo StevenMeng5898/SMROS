@@ -130,6 +130,11 @@ impl UserProcess {
         ) {
             return false;
         }
+        if !install_el0_trampoline(code_pfn) {
+            return false;
+        }
+        self.entry_point = code_vaddr;
+        self.loaded_entry_point = Some(code_vaddr as u64);
 
         // Map data segment (read-write, user-accessible)
         let data_pfn = match PageFrameAllocator::alloc() {
@@ -325,6 +330,19 @@ pub fn user_stack_top(pid: usize) -> Option<u64> {
     Some(process.user_stack_vaddr as u64)
 }
 
+/// Physical TTBR0/SATP root for a user process. ARM64 must keep a live
+/// translation table across EL0; installing 0 unmaps the kernel.
+pub fn user_root_paddr(pid: usize) -> Option<u64> {
+    let process = get_user_process(pid)?;
+    if !process.initialized {
+        return None;
+    }
+    process
+        .page_table
+        .as_ref()
+        .map(PageTableManager::root_paddr)
+}
+
 /// Bind a scheduler thread to a user process record.
 pub fn bind_primary_thread(pid: usize, thread_id: ThreadId) -> bool {
     let Some(process) = get_user_process_mut(pid) else {
@@ -346,8 +364,9 @@ pub fn set_loaded_elf(pid: usize, image: &ElfImage) -> bool {
         return false;
     };
 
-    process.entry_point = image.entry as usize;
-    process.loaded_entry_point = Some(image.entry);
+    let entry = canonical_user_entry(image.entry);
+    process.entry_point = entry as usize;
+    process.loaded_entry_point = Some(entry);
     process.loaded_segments = [None, None, None, None];
     process.loaded_segment_count = image.segments.len();
 
@@ -369,6 +388,76 @@ pub fn set_loaded_elf(pid: usize, image: &ElfImage) -> bool {
 
 pub fn loaded_entry_point(pid: usize) -> Option<u64> {
     get_user_process(pid)?.loaded_entry_point
+}
+
+/// Canonical EL0 entry. Kernel `.text` is UXN for EL0 on ARM64, so leftover
+/// component launchers must never ERET into `component_el0_entry`.
+pub fn canonical_user_entry(entry: u64) -> u64 {
+    if entry_in_user_window(entry) {
+        entry
+    } else {
+        user_logic::USER_CODE_VADDR as u64
+    }
+}
+
+fn entry_in_user_window(entry: u64) -> bool {
+    let start = user_logic::USER_CODE_VADDR as u64;
+    let end = match (user_logic::USER_STACK_VADDR as u64)
+        .checked_add((user_logic::USER_STACK_PAGES * PAGE_SIZE) as u64)
+    {
+        Some(end) => end,
+        None => return false,
+    };
+    entry >= start && entry < end
+}
+
+fn install_el0_trampoline(code_pfn: u64) -> bool {
+    let Some(dest) = PageFrameAllocator::pfn_address(code_pfn) else {
+        return false;
+    };
+    let trampoline = el0_syscall_trampoline();
+    if trampoline.len() > PAGE_SIZE {
+        return false;
+    }
+    unsafe {
+        core::ptr::write_bytes(dest as *mut u8, 0, PAGE_SIZE);
+        core::ptr::copy_nonoverlapping(trampoline.as_ptr(), dest as *mut u8, trampoline.len());
+    }
+    crate::kernel_lowlevel::cpu::sync_instruction_cache();
+    true
+}
+
+fn el0_syscall_trampoline() -> &'static [u8] {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // getpid (172) then exit(0). A later WFI keeps leftover EL0 idle
+        // without executing kernel text marked UXN.
+        &[
+            0x88, 0x15, 0x80, 0xd2, // mov x8, #172
+            0x01, 0x00, 0x00, 0xd4, // svc #0
+            0xa8, 0x0b, 0x80, 0xd2, // mov x8, #93
+            0x00, 0x00, 0x80, 0xd2, // mov x0, #0
+            0x01, 0x00, 0x00, 0xd4, // svc #0
+            0x7f, 0x20, 0x03, 0xd5, // wfi
+            0xff, 0xff, 0xff, 0x17, // b wfi
+        ]
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        &[
+            0x93, 0x08, 0xc0, 0x0a, // addi a7, zero, 172
+            0x73, 0x00, 0x00, 0x00, // ecall
+            0x93, 0x08, 0xd0, 0x05, // addi a7, zero, 93
+            0x13, 0x05, 0x00, 0x00, // addi a0, zero, 0
+            0x73, 0x00, 0x00, 0x00, // ecall
+            0x73, 0x00, 0x50, 0x10, // wfi
+            0x6f, 0xf0, 0xdf, 0xff, // jal zero, -4
+        ]
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        &[0xf4, 0xeb, 0xfd]
+    }
 }
 
 pub fn loaded_segment_count(pid: usize) -> Option<usize> {

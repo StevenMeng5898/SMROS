@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 #![allow(static_mut_refs)]
 
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -387,6 +388,8 @@ fn fxfs_checksum(data: &[u8]) -> u32 {
 
 struct PersistPlan {
     object_ids: Vec<u64>,
+    object_id_set: BTreeSet<u64>,
+    shm_ids: BTreeSet<u64>,
     dirent_count: usize,
     image_len: usize,
 }
@@ -445,7 +448,10 @@ impl BlockImageSink {
         if self.filled == 0 {
             return Ok(());
         }
-        let start = self.pos.checked_sub(self.filled).ok_or(FxfsError::NoSpace)?;
+        let start = self
+            .pos
+            .checked_sub(self.filled)
+            .ok_or(FxfsError::NoSpace)?;
         drivers::block_write_at(self.slot_offset + start, &self.buf[..self.filled])
             .map_err(|_| FxfsError::StorageUnavailable)?;
         self.filled = 0;
@@ -465,10 +471,7 @@ impl FxfsImageSink for BlockImageSink {
             self.buf[self.filled..self.filled + n].copy_from_slice(chunk);
             for (index, byte) in chunk.iter().enumerate() {
                 if self.pos.saturating_add(index) >= FXFS_BLOCK_HEADER_LEN as usize {
-                    self.checksum = self
-                        .checksum
-                        .rotate_left(5)
-                        .wrapping_add(*byte as u32);
+                    self.checksum = self.checksum.rotate_left(5).wrapping_add(*byte as u32);
                 }
             }
             self.filled += n;
@@ -601,10 +604,6 @@ fn fxfs_path_is_shared(path: &str) -> bool {
             .strip_prefix(FXFS_SHARED_ROOT)
             .map(|suffix| suffix.starts_with('/'))
             .unwrap_or(false)
-}
-
-fn fxfs_id_in_list(ids: &[u64], object_id: u64) -> bool {
-    ids.iter().any(|id| *id == object_id)
 }
 
 fn fxfs_host_share_file_exists(relative: &str) -> bool {
@@ -763,6 +762,10 @@ impl FxfsState {
         }
     }
 
+    fn forget_pending_persist(&mut self) {
+        self.persist_pending = false;
+    }
+
     fn make_object(
         &mut self,
         object_id: u64,
@@ -870,51 +873,49 @@ impl FxfsState {
 
     fn collect_persist_plan(&self) -> Result<PersistPlan, FxfsError> {
         let mut persist_object_ids = Vec::new();
+        let mut persist_object_id_set = BTreeSet::new();
         try_reserve_vec(&mut persist_object_ids, self.objects.len())?;
         if let Some(root_index) = self.find_object_index(FXFS_ROOT_OBJECT_ID) {
             persist_object_ids.push(self.objects[root_index].object_id);
+            persist_object_id_set.insert(self.objects[root_index].object_id);
         }
-        let shared_id = self.child_object_id(FXFS_ROOT_OBJECT_ID, "shared");
+        let shm_ids = self.ephemeral_shm_descendant_ids();
+        let shared_ids = self.shared_object_ids();
         let mut index = 0usize;
         while index < persist_object_ids.len() {
             let parent_id = persist_object_ids[index];
-            if shared_id
-                .map(|id| parent_id == id || self.object_is_under_shared(parent_id))
-                .unwrap_or(false)
-            {
+            if shared_ids.contains(&parent_id) {
                 index += 1;
                 continue;
             }
-            for dirent in &self.dirents {
-                if dirent.parent_id != parent_id {
+            for dirent in self.dirents_for_parent(parent_id) {
+                if shm_ids.contains(&dirent.object_id) {
                     continue;
                 }
-                if parent_id == FXFS_ROOT_OBJECT_ID && dirent.name == "shared" {
-                    if !fxfs_id_in_list(&persist_object_ids, dirent.object_id) {
-                        persist_object_ids.push(dirent.object_id);
-                    }
-                    continue;
-                }
-                if self.object_is_under_ephemeral_shm(dirent.object_id) {
-                    continue;
-                }
-                if !fxfs_id_in_list(&persist_object_ids, dirent.object_id) {
+                if persist_object_id_set.insert(dirent.object_id) {
                     persist_object_ids.push(dirent.object_id);
                 }
             }
             index += 1;
         }
-        if let Some(shared_id) = shared_id {
-            self.collect_shared_persist_ids(shared_id, "", &mut persist_object_ids)?;
+        if let Some(shared_id) = self.child_object_id(FXFS_ROOT_OBJECT_ID, "shared") {
+            let mut visiting = BTreeSet::new();
+            self.collect_shared_persist_ids(
+                shared_id,
+                "",
+                &mut persist_object_ids,
+                &mut persist_object_id_set,
+                &mut visiting,
+            )?;
         }
 
         let persist_dirent_count = self
             .dirents
             .iter()
             .filter(|dirent| {
-                fxfs_id_in_list(&persist_object_ids, dirent.parent_id)
-                    && fxfs_id_in_list(&persist_object_ids, dirent.object_id)
-                    && !self.object_is_under_ephemeral_shm(dirent.object_id)
+                persist_object_id_set.contains(&dirent.parent_id)
+                    && persist_object_id_set.contains(&dirent.object_id)
+                    && !shm_ids.contains(&dirent.object_id)
             })
             .count();
 
@@ -928,9 +929,9 @@ impl FxfsState {
             image_len = checked_add_len(image_len, object.data.len())?;
         }
         for dirent in &self.dirents {
-            if !fxfs_id_in_list(&persist_object_ids, dirent.parent_id)
-                || !fxfs_id_in_list(&persist_object_ids, dirent.object_id)
-                || self.object_is_under_ephemeral_shm(dirent.object_id)
+            if !persist_object_id_set.contains(&dirent.parent_id)
+                || !persist_object_id_set.contains(&dirent.object_id)
+                || shm_ids.contains(&dirent.object_id)
             {
                 continue;
             }
@@ -952,6 +953,8 @@ impl FxfsState {
 
         Ok(PersistPlan {
             object_ids: persist_object_ids,
+            object_id_set: persist_object_id_set,
+            shm_ids,
             dirent_count: persist_dirent_count,
             image_len,
         })
@@ -962,7 +965,12 @@ impl FxfsState {
         object_id: u64,
         relative: &str,
         persist_object_ids: &mut Vec<u64>,
+        persist_object_id_set: &mut BTreeSet<u64>,
+        visiting: &mut BTreeSet<u64>,
     ) -> Result<bool, FxfsError> {
+        if !visiting.insert(object_id) {
+            return Ok(true);
+        }
         let index = self
             .find_object_index(object_id)
             .ok_or(FxfsError::NotFound)?;
@@ -974,13 +982,13 @@ impl FxfsState {
             },
             FxfsNodeKind::Directory => {
                 let mut has_persisted_child = false;
-                for dirent in self
-                    .dirents
-                    .iter()
-                    .filter(|entry| entry.parent_id == object_id)
-                {
+                for dirent in self.dirents_for_parent(object_id) {
                     let mut child_relative = String::new();
-                    let extra = if relative.is_empty() { 0 } else { relative.len() + 1 };
+                    let extra = if relative.is_empty() {
+                        0
+                    } else {
+                        relative.len() + 1
+                    };
                     child_relative
                         .try_reserve_exact(extra + dirent.name.len())
                         .map_err(|_| FxfsError::NoSpace)?;
@@ -993,6 +1001,8 @@ impl FxfsState {
                         dirent.object_id,
                         child_relative.as_str(),
                         persist_object_ids,
+                        persist_object_id_set,
+                        visiting,
                     )? {
                         has_persisted_child = true;
                     }
@@ -1000,7 +1010,7 @@ impl FxfsState {
                 relative.is_empty() || !fxfs_host_share_dir_exists(relative) || has_persisted_child
             }
         };
-        if should_persist && !fxfs_id_in_list(persist_object_ids, object_id) {
+        if should_persist && persist_object_id_set.insert(object_id) {
             try_reserve_vec(persist_object_ids, 1)?;
             persist_object_ids.push(object_id);
         }
@@ -1053,9 +1063,9 @@ impl FxfsState {
             sink.write_bytes(&object.data)?;
         }
         for dirent in &self.dirents {
-            if !fxfs_id_in_list(&plan.object_ids, dirent.parent_id)
-                || !fxfs_id_in_list(&plan.object_ids, dirent.object_id)
-                || self.object_is_under_ephemeral_shm(dirent.object_id)
+            if !plan.object_id_set.contains(&dirent.parent_id)
+                || !plan.object_id_set.contains(&dirent.object_id)
+                || plan.shm_ids.contains(&dirent.object_id)
             {
                 continue;
             }
@@ -1359,8 +1369,7 @@ impl FxfsState {
     }
 
     fn sort_objects(&mut self) {
-        self.objects
-            .sort_unstable_by_key(|object| object.object_id);
+        self.objects.sort_unstable_by_key(|object| object.object_id);
     }
 
     fn find_object_index(&self, object_id: u64) -> Option<usize> {
@@ -1407,6 +1416,49 @@ impl FxfsState {
             .map(|index| self.dirents[index].object_id)
     }
 
+    fn dirents_for_parent(&self, parent_id: u64) -> &[FxfsDirectoryEntry] {
+        let start = self
+            .dirents
+            .partition_point(|entry| entry.parent_id < parent_id);
+        let end =
+            start + self.dirents[start..].partition_point(|entry| entry.parent_id == parent_id);
+        &self.dirents[start..end]
+    }
+
+    fn descendant_object_ids(&self, root_id: u64, include_root: bool) -> BTreeSet<u64> {
+        let mut ids = BTreeSet::new();
+        if include_root {
+            ids.insert(root_id);
+        }
+        let mut stack = Vec::new();
+        stack.push(root_id);
+        while let Some(parent_id) = stack.pop() {
+            for dirent in self.dirents_for_parent(parent_id) {
+                if ids.insert(dirent.object_id) {
+                    stack.push(dirent.object_id);
+                }
+            }
+        }
+        ids
+    }
+
+    fn shared_object_ids(&self) -> BTreeSet<u64> {
+        match self.child_object_id(FXFS_ROOT_OBJECT_ID, "shared") {
+            Some(shared_id) => self.descendant_object_ids(shared_id, true),
+            None => BTreeSet::new(),
+        }
+    }
+
+    fn ephemeral_shm_descendant_ids(&self) -> BTreeSet<u64> {
+        let Some(dev_id) = self.child_object_id(FXFS_ROOT_OBJECT_ID, "dev") else {
+            return BTreeSet::new();
+        };
+        let Some(shm_id) = self.child_object_id(dev_id, "shm") else {
+            return BTreeSet::new();
+        };
+        self.descendant_object_ids(shm_id, false)
+    }
+
     fn resolve_object_id(&self, path: &str) -> Result<u64, FxfsError> {
         self.ensure_mounted()?;
         if path == "/" {
@@ -1438,56 +1490,11 @@ impl FxfsState {
     }
 
     fn object_is_under_shared(&self, object_id: u64) -> bool {
-        let Some(shared_id) = self.child_object_id(FXFS_ROOT_OBJECT_ID, "shared") else {
-            return false;
-        };
-        if object_id == shared_id {
-            return true;
-        }
-
-        let mut current = object_id;
-        loop {
-            let Some(dirent) = self.dirents.iter().find(|entry| entry.object_id == current) else {
-                return false;
-            };
-            if dirent.parent_id == shared_id {
-                return true;
-            }
-            if dirent.parent_id == FXFS_ROOT_OBJECT_ID {
-                return false;
-            }
-            current = dirent.parent_id;
-        }
+        self.shared_object_ids().contains(&object_id)
     }
 
     fn object_is_under_ephemeral_shm(&self, object_id: u64) -> bool {
-        let Some(dev_id) = self.child_object_id(FXFS_ROOT_OBJECT_ID, "dev") else {
-            return false;
-        };
-        let Some(shm_id) = self.child_object_id(dev_id, "shm") else {
-            return false;
-        };
-        if object_id == shm_id {
-            return false;
-        }
-
-        let mut current = object_id;
-        loop {
-            let Some(dirent) = self
-                .dirents
-                .iter()
-                .find(|entry| entry.object_id == current)
-            else {
-                return false;
-            };
-            if dirent.parent_id == shm_id {
-                return true;
-            }
-            if dirent.parent_id == FXFS_ROOT_OBJECT_ID {
-                return false;
-            }
-            current = dirent.parent_id;
-        }
+        self.ephemeral_shm_descendant_ids().contains(&object_id)
     }
 
     fn purge_ephemeral_shm(&mut self) -> Result<bool, FxfsError> {
@@ -1498,11 +1505,7 @@ impl FxfsState {
             return Ok(false);
         };
         let mut paths = Vec::new();
-        for dirent in self
-            .dirents
-            .iter()
-            .filter(|entry| entry.parent_id == shm_id)
-        {
+        for dirent in self.dirents_for_parent(shm_id) {
             let mut path = String::from("/dev/shm/");
             path.push_str(dirent.name.as_str());
             paths.push(path);
@@ -2470,6 +2473,10 @@ pub fn release_unlinked_file(object_id: u64) -> Result<(), FxfsError> {
 pub fn suspend_persist() -> FxfsPersistGuard {
     state().suspend_persist();
     FxfsPersistGuard { active: true }
+}
+
+pub fn forget_pending_persist() {
+    state().forget_pending_persist();
 }
 
 pub fn force_persist() -> Result<(), FxfsError> {

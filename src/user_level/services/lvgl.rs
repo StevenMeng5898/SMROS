@@ -578,35 +578,40 @@ pub fn render_scheduler_trace(samples: usize) -> Result<LvglSchedulerTraceRender
 }
 
 pub fn run_full_test() -> Result<LvglTestReport, LvglError> {
-    let port = info();
-    let render = render_demo()?;
-    let port_ok = port.name == LVGL_PORT_NAME
-        && port.display_backend == "fxfs-ppm-flush"
-        && port.input_backend == "serial-keypad-pointer";
-    let display_flush_ok = render.width == LVGL_DEMO_WIDTH
-        && render.height == LVGL_DEMO_HEIGHT
-        && render.image_bytes > render.pixel_bytes
-        && render.preview.contains("SMROS LVGL Workbench");
-    let input_ok = serial_input_kind("pointer") == "pointer"
-        && serial_input_kind("keypad") == "keypad"
-        && serial_input_kind("wheel") == "encoder";
-    let widgets_ok = render.widgets >= 9 && render.preview.contains("Arc Meter");
-    let fxfs_ok = fxfs::attrs(LVGL_DEMO_PPM_PATH)
-        .map(|attrs| attrs.size == render.image_bytes)
-        .unwrap_or(false);
+    let _persist_guard = fxfs::suspend_persist();
+    let result = (|| {
+        let port = info();
+        let render = render_demo()?;
+        let port_ok = port.name == LVGL_PORT_NAME
+            && port.display_backend == "fxfs-ppm-flush"
+            && port.input_backend == "serial-keypad-pointer";
+        let display_flush_ok = render.width == LVGL_DEMO_WIDTH
+            && render.height == LVGL_DEMO_HEIGHT
+            && render.image_bytes > render.pixel_bytes
+            && render.preview.contains("SMROS LVGL Workbench");
+        let input_ok = serial_input_kind("pointer") == "pointer"
+            && serial_input_kind("keypad") == "keypad"
+            && serial_input_kind("wheel") == "encoder";
+        let widgets_ok = render.widgets >= 9 && render.preview.contains("Arc Meter");
+        let fxfs_ok = fxfs::attrs(LVGL_DEMO_PPM_PATH)
+            .map(|attrs| attrs.size == render.image_bytes)
+            .unwrap_or(false);
 
-    if !(port_ok && display_flush_ok && input_ok && widgets_ok && fxfs_ok) {
-        return Err(LvglError::Render);
-    }
+        if !(port_ok && display_flush_ok && input_ok && widgets_ok && fxfs_ok) {
+            return Err(LvglError::Render);
+        }
 
-    Ok(LvglTestReport {
-        port_ok,
-        display_flush_ok,
-        input_ok,
-        widgets_ok,
-        fxfs_ok,
-        render,
-    })
+        Ok(LvglTestReport {
+            port_ok,
+            display_flush_ok,
+            input_ok,
+            widgets_ok,
+            fxfs_ok,
+            render,
+        })
+    })();
+    fxfs::forget_pending_persist();
+    result
 }
 
 pub fn smoke_test() -> bool {

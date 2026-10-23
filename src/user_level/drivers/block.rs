@@ -33,6 +33,7 @@ const VIRTIO_BLK_T_OUT: u32 = 1;
 const VIRTIO_BLK_T_FLUSH: u32 = 4;
 const VIRTIO_BLK_S_OK: u8 = 0;
 const VIRTIO_QUEUE_SIZE: u16 = 8;
+const VIRTIO_TX_WAIT_LIMIT: usize = 4_096;
 const VIRTIO_COMPLETION_TIMEOUT_NANOS: u64 = 5_000_000_000;
 
 const REG_MAGIC_VALUE: usize = 0x000;
@@ -779,6 +780,7 @@ impl QemuVirtBlockDriver {
 
             let completion_deadline = crate::kernel_lowlevel::timer::get_nanoseconds()
                 .saturating_add(VIRTIO_COMPLETION_TIMEOUT_NANOS);
+            let mut waits = 0usize;
             loop {
                 memory_barrier();
                 let used = core::ptr::read_volatile(&raw const VIRTIO_QUEUE.used.idx);
@@ -793,12 +795,16 @@ impl QemuVirtBlockDriver {
                         Err(UserDriverError::Io)
                     };
                 }
-                if driver_logic::virtio_completion_timed_out(
-                    crate::kernel_lowlevel::timer::get_nanoseconds(),
-                    completion_deadline,
-                ) {
+                if waits >= VIRTIO_TX_WAIT_LIMIT
+                    || driver_logic::virtio_completion_timed_out(
+                        crate::kernel_lowlevel::timer::get_nanoseconds(),
+                        completion_deadline,
+                    )
+                {
                     break;
                 }
+                waits = waits.saturating_add(1);
+                crate::kernel_objects::scheduler::yield_now();
             }
         }
         Err(UserDriverError::Timeout)

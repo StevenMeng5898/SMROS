@@ -283,6 +283,11 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_lvgl,
     },
     ShellCommand {
+        name: "qml",
+        description: "Render the Qt/QML LVGL vehicle cluster",
+        handler: cmd_qml,
+    },
+    ShellCommand {
         name: "uptime",
         description: "Show system uptime",
         handler: cmd_uptime,
@@ -2889,6 +2894,7 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     let _ = crate::syscall::sys_handle_close(exception_thread);
     let _ = crate::syscall::sys_handle_close(exception_process);
     let _ = crate::syscall::sys_handle_close(exception_proc);
+    let _ = crate::syscall::sys_handle_close(exception_vmar);
     let _ = crate::syscall::sys_handle_close(exception_job);
     ctx.serial
         .write_str("[OK] time/debug/system/exception tests completed\n");
@@ -4042,6 +4048,8 @@ fn cmd_test_syscall(ctx: &mut ShellContext, _args: &[&str]) {
     if !run_qml_cluster_tests(ctx) {
         return;
     }
+
+    crate::user_level::net::drain_receive_queue();
 
     ctx.serial.write_str("[TEST] Closing VMO handle... ");
     match crate::syscall::sys_handle_close(vmo_handle) {
@@ -5268,6 +5276,99 @@ fn print_lvgl_sched_trace(
     ctx.serial.write_str("\n");
 }
 
+fn cmd_qml(ctx: &mut ShellContext, args: &[&str]) {
+    if args.is_empty() {
+        match crate::user_level::qml_cluster::render_cluster() {
+            Ok(render) => print_qml_render(ctx, &render),
+            Err(err) => {
+                ctx.serial.write_str("qml: ");
+                ctx.serial.write_str(err.as_str());
+                ctx.serial.write_str("\n");
+            }
+        }
+        return;
+    }
+
+    match args[0] {
+        "info" | "status" => match crate::user_level::qml_cluster::info() {
+            Ok(info) => print_qml_info(ctx, &info),
+            Err(err) => {
+                ctx.serial.write_str("qml: ");
+                ctx.serial.write_str(err.as_str());
+                ctx.serial.write_str("\n");
+            }
+        },
+        "render" | "show" | "demo" => match crate::user_level::qml_cluster::render_cluster() {
+            Ok(render) => print_qml_render(ctx, &render),
+            Err(err) => {
+                ctx.serial.write_str("qml: ");
+                ctx.serial.write_str(err.as_str());
+                ctx.serial.write_str("\n");
+            }
+        },
+        "test" | "smoke" => {
+            ctx.serial
+                .write_str("\n=== SMROS Qt/QML Cluster Test ===\n\n");
+            let _ = run_qml_cluster_tests(ctx);
+            ctx.serial.write_str("\n");
+        }
+        _ => print_qml_usage(ctx),
+    }
+}
+
+fn print_qml_usage(ctx: &mut ShellContext) {
+    ctx.serial.write_str("usage: qml [info|render|test]\n");
+}
+
+fn print_qml_info(ctx: &mut ShellContext, info: &crate::user_level::qml_cluster::QmlClusterInfo) {
+    ctx.serial.write_str("SMROS Qt/QML cluster\n");
+    ctx.serial.write_str("  title: ");
+    ctx.serial.write_str(info.title.as_str());
+    ctx.serial.write_str("\n  qml: ");
+    ctx.serial.write_str(info.qml_path);
+    ctx.serial.write_str(" bytes=");
+    print_usize(&mut ctx.serial, info.qml_bytes);
+    ctx.serial.write_str("\n  window: ");
+    ctx.serial.write_str(info.window_path);
+    ctx.serial.write_str("\n  backend: ");
+    ctx.serial.write_str(info.backend);
+    ctx.serial.write_str(" runtime=");
+    ctx.serial.write_str(info.qt_runtime);
+    ctx.serial.write_str("\n  lvgl: ");
+    ctx.serial.write_str(info.lvgl_port);
+    ctx.serial.write_str(" display=");
+    ctx.serial.write_str(info.display_backend);
+    ctx.serial.write_str("\n  speed=");
+    print_usize(&mut ctx.serial, info.speed_kph);
+    ctx.serial.write_str("kph rpm=");
+    print_usize(&mut ctx.serial, info.rpm);
+    ctx.serial.write_str(" gear=");
+    ctx.serial.write_str(info.gear.as_str());
+    ctx.serial.write_str(" mode=");
+    ctx.serial.write_str(info.drive_mode.as_str());
+    ctx.serial.write_str("\n");
+}
+
+fn print_qml_render(
+    ctx: &mut ShellContext,
+    render: &crate::user_level::qml_cluster::QmlClusterRender,
+) {
+    ctx.serial.write_str(render.preview.as_str());
+    ctx.serial.write_str("\nimage=");
+    ctx.serial.write_str(render.image_path);
+    ctx.serial.write_str(" size=");
+    print_usize(&mut ctx.serial, render.width);
+    ctx.serial.write_str("x");
+    print_usize(&mut ctx.serial, render.height);
+    ctx.serial.write_str(" bytes=");
+    print_usize(&mut ctx.serial, render.image_bytes);
+    ctx.serial.write_str(" widgets=");
+    print_usize(&mut ctx.serial, render.widgets);
+    ctx.serial.write_str(" renderer=");
+    ctx.serial.write_str(render.renderer);
+    ctx.serial.write_str("\n");
+}
+
 fn print_perfetto_sched_trace(
     ctx: &mut ShellContext,
     export: &crate::user_level::perfetto::PerfettoSchedulerTraceExport,
@@ -5363,7 +5464,9 @@ fn print_hermes_usage(ctx: &mut ShellContext) {
         .write_str("       hermes ui  # LVGL-styled keyboard/mouse UI\n");
     ctx.serial.write_str("       hermes web [text|source]\n");
     ctx.serial
-        .write_str("       mode=syscall selects testsc/fuzzsc/hermes test\n");
+        .write_str("       default test-all includes lvgl/qml/testsc/posixtest and ops APIs\n");
+    ctx.serial
+        .write_str("       mode=syscall selects testsc/fuzzsc/hermes test/posixtest\n");
 }
 
 fn run_hermes_test_all(ctx: &mut ShellContext, args: &[&str]) {
@@ -5784,20 +5887,27 @@ fn bound_hermes_campaign_argv<'a>(
     case: &'a crate::user_level::services::hermes_shell_logic_shared::HermesCampaignCase,
     seed: u64,
     seed_buf: &'a mut [u8],
-) -> (&'a str, [&'a str; 2], usize) {
+) -> (&'a str, [&'a str; 3], usize) {
     use crate::user_level::services::hermes_shell_logic_shared::{
         campaign_case_is_fuzzsc, campaign_fuzzsc_seed_arg, HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG,
+        HERMES_CAMPAIGN_FUZZSC_TIME_ARG,
     };
     if campaign_case_is_fuzzsc(case.command) {
         if let Some(seed_arg) = campaign_fuzzsc_seed_arg(seed, seed_buf) {
             return (
                 case.command,
-                [seed_arg, HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG],
-                2,
+                [
+                    seed_arg,
+                    HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG,
+                    HERMES_CAMPAIGN_FUZZSC_TIME_ARG,
+                ],
+                3,
             );
         }
     }
-    (case.command, case.args, case.arg_count)
+    let mut args = [""; 3];
+    args[..case.arg_count].copy_from_slice(&case.args[..case.arg_count]);
+    (case.command, args, case.arg_count)
 }
 
 fn count_hermes_command_status(
@@ -6707,7 +6817,7 @@ fn hermes_ui_run_test(ctx: &mut ShellContext, state: &mut HermesUiState) {
     match crate::user_level::hermes_agent::run_full_test() {
         Ok(report) if report.passed() => {
             state.last_answer = String::from(
-                "Hermes smoke test passed. Config, model route, skills, memory, tools, delegation, Gemma, cron, transcript, /svc, and web UI are healthy.",
+                "Hermes smoke test passed. Config, model route, skills, memory, tools, delegation, Gemma, cron, transcript, /svc, web UI, LVGL, and QML are healthy.",
             );
             state.activity.clear();
             state.activity.push_str("test: pass\ntools=");
@@ -7741,6 +7851,12 @@ fn run_hermes_agent_tests(ctx: &mut ShellContext) -> bool {
             ctx.serial.write_str(" web=");
             ctx.serial
                 .write_str(if report.web_ui_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" lvgl=");
+            ctx.serial
+                .write_str(if report.lvgl_ok { "yes" } else { "no" });
+            ctx.serial.write_str(" qml=");
+            ctx.serial
+                .write_str(if report.qml_ok { "yes" } else { "no" });
             ctx.serial.write_str("\n");
             true
         }
@@ -10132,7 +10248,7 @@ fn cmd_ps(ctx: &mut ShellContext, args: &[&str]) {
     let mut count = 0;
     for i in 0..crate::kernel_lowlevel::memory::MAX_PROCESSES {
         if let Some(pcb) = pm.get_process(i) {
-            if pcb.state != ProcessState::Empty {
+            if pcb.state != ProcessState::Empty && pcb.state != ProcessState::Terminated {
                 print_number(&mut ctx.serial, pcb.pid as u32);
                 ctx.serial.write_str("    ");
                 ctx.serial.write_str(pcb.state.as_str());
@@ -10296,7 +10412,7 @@ fn print_ps_process_memory_table(
         let Some(pcb) = pm.get_process(i) else {
             continue;
         };
-        if pcb.state == ProcessState::Empty {
+        if pcb.state == ProcessState::Empty || pcb.state == ProcessState::Terminated {
             continue;
         }
 
@@ -10357,7 +10473,7 @@ fn print_ps_segment_table(
         let Some(pcb) = pm.get_process(i) else {
             continue;
         };
-        if pcb.state == ProcessState::Empty {
+        if pcb.state == ProcessState::Empty || pcb.state == ProcessState::Terminated {
             continue;
         }
 
@@ -10406,7 +10522,7 @@ fn print_ps_page_table(
         let Some(pcb) = pm.get_process(i) else {
             continue;
         };
-        if pcb.state == ProcessState::Empty {
+        if pcb.state == ProcessState::Empty || pcb.state == ProcessState::Terminated {
             continue;
         }
 
@@ -11065,7 +11181,7 @@ fn cmd_top(ctx: &mut ShellContext, _args: &[&str]) {
 
     for i in 0..crate::kernel_lowlevel::memory::MAX_PROCESSES {
         if let Some(pcb) = pm.get_process(i) {
-            if pcb.state != ProcessState::Empty {
+            if pcb.state != ProcessState::Empty && pcb.state != ProcessState::Terminated {
                 ctx.serial.write_str("│  ");
                 print_padded_number(&mut ctx.serial, pcb.pid as u32, 3);
                 ctx.serial.write_str(" │ ");

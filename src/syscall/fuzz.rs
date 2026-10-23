@@ -1681,6 +1681,13 @@ pub fn fuzz_syscalls(seed: u64, requested_iterations: usize) -> SyscallFuzzRepor
 }
 
 pub fn fuzz_syscalls_with_config(config: SyscallFuzzConfig) -> SyscallFuzzReport {
+    let _persist_guard = fxfs::suspend_persist();
+    let report = fuzz_syscalls_with_config_inner(config);
+    fxfs::forget_pending_persist();
+    report
+}
+
+fn fuzz_syscalls_with_config_inner(config: SyscallFuzzConfig) -> SyscallFuzzReport {
     let iterations = if config.iterations == 0 {
         FUZZ_DEFAULT_ITERATIONS
     } else {

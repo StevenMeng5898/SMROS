@@ -435,11 +435,11 @@ pub fn load_from_fxfs(path: &str) -> Result<ElfImage, ElfError> {
     parse(&image)
 }
 
-/// Build a tiny valid ELF image whose entry is the current SMROS EL0 trampoline.
+/// Build a tiny valid ELF image whose entry is the SMROS EL0 trampoline.
 ///
-/// The PT_LOAD range describes the image bytes for loader metadata. It is not
-/// a real userspace text mapping yet; component launch remains on the trusted
-/// trampoline until segment copying and TTBR0-backed execution are implemented.
+/// The PT_LOAD range describes the image bytes for loader metadata. Component
+/// launch executes the user-mapped trampoline at `USER_CODE_VADDR`; kernel
+/// `.text` is UXN for EL0 on ARM64 and must not be used as the entry.
 pub fn build_trampoline_elf(entry: u64) -> Vec<u8> {
     let size = ELF_HEADER_SIZE + ELF_PHDR_SIZE;
     let mut image = Vec::new();

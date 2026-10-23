@@ -61,11 +61,8 @@ pub fn arm_next_tick() {
         PRECISION_COMPARE.store(0, Ordering::Release);
         0
     };
-    let compare_value = lowlevel_logic::timer_program_compare(
-        periodic_compare,
-        precision_compare,
-        0,
-    );
+    let compare_value =
+        lowlevel_logic::timer_program_compare(periodic_compare, precision_compare, 0);
     PROGRAMMED_COMPARE.store(compare_value, Ordering::Release);
     set_timer(compare_value);
 }
@@ -81,8 +78,7 @@ pub fn arm_at_nanoseconds(deadline: u64) {
     // Reserve several scheduler periods to re-arm the exact compare after a
     // periodic tick. Without this guard, a late periodic interrupt can pass
     // the exact deadline before the precision compare is programmed.
-    let current_nanoseconds =
-        lowlevel_logic::timer_counter_nanoseconds(current, frequency);
+    let current_nanoseconds = lowlevel_logic::timer_counter_nanoseconds(current, frequency);
     let tick_period = TICK_PERIOD.load(Ordering::Relaxed);
     let tick_nanoseconds = lowlevel_logic::timer_counter_nanoseconds(tick_period, frequency);
     let precision_guard = tick_nanoseconds.saturating_mul(5);
@@ -92,9 +88,7 @@ pub fn arm_at_nanoseconds(deadline: u64) {
         deadline
     };
     let scaled = (precision_deadline as u128).saturating_mul(frequency as u128);
-    let target = scaled
-        .saturating_add(999_999_999)
-        / 1_000_000_000u128;
+    let target = scaled.saturating_add(999_999_999) / 1_000_000_000u128;
     let target = target
         .min(u64::MAX as u128)
         .max((current as u128).saturating_add(1)) as u64;
@@ -105,14 +99,21 @@ pub fn arm_at_nanoseconds(deadline: u64) {
         target
     };
     PRECISION_COMPARE.store(precision_compare, Ordering::Release);
-    let periodic_compare = NEXT_PERIODIC_COMPARE.load(Ordering::Acquire);
+    let stored_periodic = NEXT_PERIODIC_COMPARE.load(Ordering::Acquire);
+    let periodic_compare = if stored_periodic > current {
+        stored_periodic
+    } else {
+        0
+    };
     let armed_compare = PROGRAMMED_COMPARE.load(Ordering::Acquire);
-    let programmed_compare = lowlevel_logic::timer_program_compare(
-        periodic_compare,
-        armed_compare,
-        target,
-    );
-    if programmed_compare != armed_compare {
+    let live_armed = if armed_compare > current {
+        armed_compare
+    } else {
+        0
+    };
+    let programmed_compare =
+        lowlevel_logic::timer_program_compare(periodic_compare, live_armed, target);
+    if programmed_compare != armed_compare || programmed_compare <= current {
         PROGRAMMED_COMPARE.store(programmed_compare, Ordering::Release);
         set_timer(programmed_compare);
     }

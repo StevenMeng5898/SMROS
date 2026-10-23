@@ -150,43 +150,49 @@ pub fn generate(
 }
 
 pub fn run_full_test() -> Result<GemmaTestReport, GemmaError> {
-    prepare_storage()?;
-    let manifest = read_text_file(GEMMA_MANIFEST_PATH)?;
-    let manifest_ok = manifest_valid(manifest.as_str());
-    if !manifest_ok {
-        return Err(GemmaError::Manifest);
-    }
+    let _persist_guard = fxfs::suspend_persist();
+    let result = (|| {
+        prepare_storage()?;
+        reset_generation_log()?;
+        let manifest = read_text_file(GEMMA_MANIFEST_PATH)?;
+        let manifest_ok = manifest_valid(manifest.as_str());
+        if !manifest_ok {
+            return Err(GemmaError::Manifest);
+        }
 
-    let prompt = "explain how Hermes should answer through Gemma on SMROS";
-    let context = "tools=shell,fxfs,svc; memory=enabled; tests=qemu";
-    let prompt_ok = prompt_valid(prompt) && build_prompt(prompt, context).is_ok();
-    if !prompt_ok {
-        return Err(GemmaError::Prompt);
-    }
+        let prompt = "explain how Hermes should answer through Gemma on SMROS";
+        let context = "tools=shell,fxfs,svc; memory=enabled; tests=qemu";
+        let prompt_ok = prompt_valid(prompt) && build_prompt(prompt, context).is_ok();
+        if !prompt_ok {
+            return Err(GemmaError::Prompt);
+        }
 
-    let generation = generate(prompt, context, 64)?;
-    let generation_ok = generation.text.contains("Gemma")
-        && generation.text.contains("SMROS")
-        && generation.text.contains("Hermes");
-    if !generation_ok {
-        return Err(GemmaError::Generate);
-    }
+        let generation = generate(prompt, context, 64)?;
+        let generation_ok = generation.text.contains("Gemma")
+            && generation.text.contains("SMROS")
+            && generation.text.contains("Hermes");
+        if !generation_ok {
+            return Err(GemmaError::Generate);
+        }
 
-    let log = read_text_file(GEMMA_GENERATION_LOG)?;
-    let log_ok = log.contains("model=gemma/gemma-3n-e2b-smros")
-        && log.contains("prompt_tokens=")
-        && log.contains("generated_tokens=");
-    if !log_ok {
-        return Err(GemmaError::FxfsPrepare);
-    }
+        let log = read_text_file(GEMMA_GENERATION_LOG)?;
+        let log_ok = log.contains("model=gemma/gemma-3n-e2b-smros")
+            && log.contains("prompt_tokens=")
+            && log.contains("generated_tokens=");
+        if !log_ok {
+            return Err(GemmaError::FxfsPrepare);
+        }
 
-    Ok(GemmaTestReport {
-        manifest_ok,
-        prompt_ok,
-        generation_ok,
-        log_ok,
-        generation,
-    })
+        Ok(GemmaTestReport {
+            manifest_ok,
+            prompt_ok,
+            generation_ok,
+            log_ok,
+            generation,
+        })
+    })();
+    fxfs::forget_pending_persist();
+    result
 }
 
 pub fn smoke_test() -> bool {
@@ -219,6 +225,12 @@ fn ensure_file(path: &str, data: &str) -> Result<(), GemmaError> {
         return Ok(());
     }
     fxfs::write_file(path, data.as_bytes())
+        .map(|_| ())
+        .map_err(|_| GemmaError::FxfsPrepare)
+}
+
+fn reset_generation_log() -> Result<(), GemmaError> {
+    fxfs::write_file(GEMMA_GENERATION_LOG, b"")
         .map(|_| ())
         .map_err(|_| GemmaError::FxfsPrepare)
 }
@@ -522,6 +534,7 @@ fn truncate_to_token_budget(text: &mut String, max_tokens: usize) {
 }
 
 fn append_generation_log(prompt: &str, generation: &GemmaGeneration) -> Result<(), GemmaError> {
+    const GEMMA_LOG_MAX_BYTES: usize = 16 * 1024;
     let mut line = String::from("model=");
     line.push_str(generation.model);
     line.push_str(" backend=");
@@ -533,6 +546,12 @@ fn append_generation_log(prompt: &str, generation: &GemmaGeneration) -> Result<(
     line.push_str(" prompt=");
     push_sanitized(&mut line, prompt);
     line.push('\n');
+    if let Ok(attrs) = fxfs::attrs(GEMMA_GENERATION_LOG) {
+        if attrs.size.saturating_add(line.len()) > GEMMA_LOG_MAX_BYTES {
+            let _ = fxfs::write_file(GEMMA_GENERATION_LOG, line.as_bytes());
+            return Ok(());
+        }
+    }
     fxfs::append_file(GEMMA_GENERATION_LOG, line.as_bytes())
         .map(|_| ())
         .map_err(|_| GemmaError::FxfsPrepare)

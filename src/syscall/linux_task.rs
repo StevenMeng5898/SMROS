@@ -39,12 +39,20 @@ impl LinuxTaskRuntime {
 static LINUX_TASK_RUNTIME: LinuxRuntimeLock<LinuxTaskRuntime> =
     LinuxRuntimeLock::new(LinuxTaskRuntime::new());
 static KERNEL_DISPATCH_THREAD: AtomicUsize = AtomicUsize::new(usize::MAX);
+static KERNEL_DISPATCH_DEPTH: AtomicUsize = AtomicUsize::new(0);
 static KERNEL_DISPATCH_RANGE_BASE: AtomicUsize = AtomicUsize::new(0);
 static KERNEL_DISPATCH_RANGE_END: AtomicUsize = AtomicUsize::new(0);
 const KERNEL_DISPATCH_INACTIVE: usize = usize::MAX;
 
 pub(crate) fn enter_kernel_dispatch() {
-    KERNEL_DISPATCH_THREAD.store(scheduler::scheduler().current().0, Ordering::Relaxed);
+    let current = scheduler::scheduler().current().0;
+    let previous = KERNEL_DISPATCH_THREAD.load(Ordering::Relaxed);
+    if previous == current {
+        let _ = KERNEL_DISPATCH_DEPTH.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    KERNEL_DISPATCH_THREAD.store(current, Ordering::Relaxed);
+    KERNEL_DISPATCH_DEPTH.store(1, Ordering::Relaxed);
 }
 
 pub(crate) fn register_kernel_dispatch_range(base: usize, len: usize) {
@@ -54,18 +62,18 @@ pub(crate) fn register_kernel_dispatch_range(base: usize, len: usize) {
 
 pub(crate) fn leave_kernel_dispatch() {
     let current = scheduler::scheduler().current().0;
-    if KERNEL_DISPATCH_THREAD
-        .compare_exchange(
-            current,
-            KERNEL_DISPATCH_INACTIVE,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        )
-        .is_ok()
-    {
-        KERNEL_DISPATCH_RANGE_BASE.store(0, Ordering::Relaxed);
-        KERNEL_DISPATCH_RANGE_END.store(0, Ordering::Relaxed);
+    if KERNEL_DISPATCH_THREAD.load(Ordering::Relaxed) != current {
+        return;
     }
+    let depth = KERNEL_DISPATCH_DEPTH.load(Ordering::Relaxed);
+    if depth > 1 {
+        KERNEL_DISPATCH_DEPTH.store(depth - 1, Ordering::Relaxed);
+        return;
+    }
+    KERNEL_DISPATCH_DEPTH.store(0, Ordering::Relaxed);
+    KERNEL_DISPATCH_THREAD.store(KERNEL_DISPATCH_INACTIVE, Ordering::Relaxed);
+    KERNEL_DISPATCH_RANGE_BASE.store(0, Ordering::Relaxed);
+    KERNEL_DISPATCH_RANGE_END.store(0, Ordering::Relaxed);
 }
 
 pub(crate) fn kernel_dispatch_active() -> bool {
@@ -112,7 +120,6 @@ pub(crate) fn ensure_dispatch_task(pid: usize, scheduler_thread: usize) -> Resul
         Ok(pid)
     })
 }
-
 
 fn with_runtime<R>(operation: impl FnOnce(&mut LinuxTaskRuntime) -> R) -> R {
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
@@ -193,10 +200,7 @@ pub(crate) fn by_scheduler(scheduler_thread: usize) -> Option<LinuxTaskCore> {
     with_runtime(|runtime| runtime.tasks.by_scheduler(scheduler_thread))
 }
 
-pub(crate) fn sched_param(
-    tid: usize,
-    scheduler_thread: usize,
-) -> Option<LinuxTaskSchedParam> {
+pub(crate) fn sched_param(tid: usize, scheduler_thread: usize) -> Option<LinuxTaskSchedParam> {
     with_runtime(|runtime| runtime.tasks.sched_param(tid, scheduler_thread))
 }
 
@@ -738,9 +742,7 @@ enum LinuxTaskRetirementScope {
     },
 }
 
-fn retire_tasks(
-    scope: LinuxTaskRetirementScope,
-) -> (Vec<LinuxChildExitTransition>, usize, bool) {
+fn retire_tasks(scope: LinuxTaskRetirementScope) -> (Vec<LinuxChildExitTransition>, usize, bool) {
     let mut retired = Vec::new();
     let (retired_count, process_empty) = with_runtime(|runtime| {
         let candidates: Vec<(usize, LinuxTaskCore)> = runtime
@@ -760,8 +762,7 @@ fn retire_tasks(
                         && (entire_group || task.scheduler_thread == current_scheduler)
                 }
                 LinuxTaskRetirementScope::LaunchDescendants { root_tgid } => {
-                    task.tgid != root_tgid
-                        && LinuxTaskTable::<LINUX_TASK_LIMIT>::is_live(*task)
+                    task.tgid != root_tgid && LinuxTaskTable::<LINUX_TASK_LIMIT>::is_live(*task)
                 }
             })
             .collect();
@@ -843,7 +844,8 @@ fn complete_task_retirements(
             );
         }
         if transition.task.scheduler_thread != current_scheduler.0 {
-            let _ = scheduler::scheduler().terminate_thread(ThreadId(transition.task.scheduler_thread));
+            let _ =
+                scheduler::scheduler().terminate_thread(ThreadId(transition.task.scheduler_thread));
         }
     }
 }
@@ -922,7 +924,8 @@ pub(crate) fn on_timer_tick(now: u64) {
 pub(crate) fn on_precision_timer(now_nanoseconds: u64) -> bool {
     let mut woke_task = false;
     loop {
-        let identity = with_runtime(|runtime| runtime.tasks.expire_precision_sleep(now_nanoseconds));
+        let identity =
+            with_runtime(|runtime| runtime.tasks.expire_precision_sleep(now_nanoseconds));
         let Some((tid, scheduler_thread, reason)) = identity else {
             break;
         };
@@ -1337,7 +1340,7 @@ pub(crate) use aarch64_clone::{
 
 #[cfg(target_arch = "riscv64")]
 mod riscv64_clone {
-    use crate::kernel_lowlevel::thread::{ThreadState, ThreadId};
+    use crate::kernel_lowlevel::thread::{ThreadId, ThreadState};
     use crate::syscall::linux_process::RiscvProcessStart;
     use crate::syscall::linux_riscv_syscall_context::LinuxRiscvSyscallFrameRef;
 
@@ -1634,13 +1637,21 @@ mod riscv64_clone {
                 reservation.scheduler_thread,
                 clear_child_tid,
             ) {
-                let _ = runtime.tasks.exit(reservation.tid, reservation.scheduler_thread);
-                let _ = runtime.tasks.retire(reservation.tid, reservation.scheduler_thread);
+                let _ = runtime
+                    .tasks
+                    .exit(reservation.tid, reservation.scheduler_thread);
+                let _ = runtime
+                    .tasks
+                    .retire(reservation.tid, reservation.scheduler_thread);
                 return Err(SysError::EAGAIN);
             }
             if !scheduler::scheduler().publish_suspended_thread(scheduler_id) {
-                let _ = runtime.tasks.exit(reservation.tid, reservation.scheduler_thread);
-                let _ = runtime.tasks.retire(reservation.tid, reservation.scheduler_thread);
+                let _ = runtime
+                    .tasks
+                    .exit(reservation.tid, reservation.scheduler_thread);
+                let _ = runtime
+                    .tasks
+                    .retire(reservation.tid, reservation.scheduler_thread);
                 return Err(SysError::EAGAIN);
             }
             runtime.clone_slots[reservation.slot].committed = true;

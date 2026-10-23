@@ -196,68 +196,73 @@ pub fn render_cluster() -> Result<QmlClusterRender, QmlClusterError> {
 }
 
 pub fn run_full_test() -> Result<QmlClusterTestReport, QmlClusterError> {
-    prepare_storage()?;
-    let qml = read_text_file(QML_CLUSTER_QML_PATH)?;
-    let window_qml = read_text_file(QML_CLUSTER_WINDOW_PATH)?;
-    let qml_ok = qml.contains("Item")
-        && qml.contains("import QtQuick")
-        && qml.contains("property int speedKph")
-        && qml.contains("property string gear")
-        && qml.contains("Canvas")
-        && window_qml.contains("Window")
-        && window_qml.contains("import QtQuick.Window")
-        && window_qml.contains("InstrumentCluster");
-    if !qml_ok {
-        return Err(QmlClusterError::Qml);
-    }
+    let _persist_guard = fxfs::suspend_persist();
+    let result = (|| {
+        prepare_storage()?;
+        let qml = read_text_file(QML_CLUSTER_QML_PATH)?;
+        let window_qml = read_text_file(QML_CLUSTER_WINDOW_PATH)?;
+        let qml_ok = qml.contains("Item")
+            && qml.contains("import QtQuick")
+            && qml.contains("property int speedKph")
+            && qml.contains("property string gear")
+            && qml.contains("Canvas")
+            && window_qml.contains("Window")
+            && window_qml.contains("import QtQuick.Window")
+            && window_qml.contains("InstrumentCluster");
+        if !qml_ok {
+            return Err(QmlClusterError::Qml);
+        }
 
-    let state = parse_qml_state(qml.as_str())?;
-    let parse_ok = state.width == 1280
-        && state.height == 720
-        && state.speed_kph == 88
-        && state.rpm == 3200
-        && state.battery_percent == 78
-        && state.range_km == 326
-        && state.gear == "D"
-        && state.drive_mode == "Comfort"
-        && state.warning == "ADAS ready";
-    if !parse_ok {
-        return Err(QmlClusterError::Qml);
-    }
+        let state = parse_qml_state(qml.as_str())?;
+        let parse_ok = state.width == 1280
+            && state.height == 720
+            && state.speed_kph == 88
+            && state.rpm == 3200
+            && state.battery_percent == 78
+            && state.range_km == 326
+            && state.gear == "D"
+            && state.drive_mode == "Comfort"
+            && state.warning == "ADAS ready";
+        if !parse_ok {
+            return Err(QmlClusterError::Qml);
+        }
 
-    let render = render_cluster()?;
-    let render_ok = render.width == CLUSTER_RENDER_WIDTH
-        && render.height == CLUSTER_RENDER_HEIGHT
-        && render.image_bytes > render.pixel_bytes
-        && render.preview.contains("SMROS Qt/QML Vehicle Cluster")
-        && render.preview.contains("LVGL")
-        && render.preview.contains("Speed 88 km/h");
-    if !render_ok {
-        return Err(QmlClusterError::Render);
-    }
+        let render = render_cluster()?;
+        let render_ok = render.width == CLUSTER_RENDER_WIDTH
+            && render.height == CLUSTER_RENDER_HEIGHT
+            && render.image_bytes > render.pixel_bytes
+            && render.preview.contains("SMROS Qt/QML Vehicle Cluster")
+            && render.preview.contains("LVGL")
+            && render.preview.contains("Speed 88 km/h");
+        if !render_ok {
+            return Err(QmlClusterError::Render);
+        }
 
-    let fxfs_ok = fxfs::attrs(QML_CLUSTER_QML_PATH).is_ok()
-        && fxfs::attrs(QML_CLUSTER_PPM_PATH)
-            .map(|attrs| attrs.size == render.image_bytes)
-            .unwrap_or(false);
-    if !fxfs_ok {
-        return Err(QmlClusterError::FxfsPrepare);
-    }
+        let fxfs_ok = fxfs::attrs(QML_CLUSTER_QML_PATH).is_ok()
+            && fxfs::attrs(QML_CLUSTER_PPM_PATH)
+                .map(|attrs| attrs.size == render.image_bytes)
+                .unwrap_or(false);
+        if !fxfs_ok {
+            return Err(QmlClusterError::FxfsPrepare);
+        }
 
-    let lvgl_ok = lvgl::info().name == render.renderer && lvgl::init();
-    if !lvgl_ok {
-        return Err(QmlClusterError::Render);
-    }
+        let lvgl_ok = lvgl::info().name == render.renderer && lvgl::init();
+        if !lvgl_ok {
+            return Err(QmlClusterError::Render);
+        }
 
-    Ok(QmlClusterTestReport {
-        qml_ok,
-        parse_ok,
-        render_ok,
-        fxfs_ok,
-        lvgl_ok,
-        state,
-        render,
-    })
+        Ok(QmlClusterTestReport {
+            qml_ok,
+            parse_ok,
+            render_ok,
+            fxfs_ok,
+            lvgl_ok,
+            state,
+            render,
+        })
+    })();
+    fxfs::forget_pending_persist();
+    result
 }
 
 pub fn smoke_test() -> bool {

@@ -15,8 +15,8 @@ pub const DEFAULT_LAUNCHER_PORT: u16 = 7070;
 const MAX_REQUEST_BYTES: usize = 2048;
 const MAX_RESPONSE_BYTES: usize = 512;
 const RESPONSE_READ_ATTEMPTS: usize = 8;
-/// Host ST can take the full smoke timeout plus kernel build. Keep the TCP
-/// session open until that completes instead of reporting UNAVAILABLE.
+/// Host ST can take the full smoke timeout plus kernel build. Keep polling
+/// until that completes instead of reporting UNAVAILABLE.
 const HERMES_TEST_WAIT_NANOS: u64 = 6 * 60 * 1_000_000_000;
 /// After guest reset, virtio-net and QEMU slirp need a bounded wait before the
 /// launcher handshake succeeds.
@@ -26,6 +26,10 @@ const HERMES_HOST_READY_WAIT_NANOS: u64 = 30 * 1_000_000_000;
 const HERMES_HOST_RESUME_WAIT_NANOS: u64 = 60 * 1_000_000_000;
 const HERMES_TEST_CONNECT_ATTEMPTS: usize = 3;
 const HERMES_TEST_JOB_ATTEMPTS: usize = 3;
+const HERMES_TEST_POLL_NANOS: u64 = 250_000_000;
+/// Status polls and short launcher RPCs must fail fast. A 30s connect wait
+/// on every poll freezes ARM64 TCG while `make ut` is already running.
+const HERMES_TEST_TRANSACT_WAIT_NANOS: u64 = 3 * 1_000_000_000;
 /// Nested Linux boot can take tens of seconds; keep the wait-boot TCP session
 /// open until the launcher sees the initramfs banner or times out.
 const HERMES_VM_BOOT_WAIT_NANOS: u64 = 60 * 1_000_000_000;
@@ -84,13 +88,13 @@ pub fn wait_for_host_transport() -> Result<(), VmHostError> {
         match connect_launcher_wait(DEFAULT_LAUNCHER_PORT, deadline - now) {
             Ok(mut socket) => {
                 if let Err(err) = socket.write(PING) {
-                    let _ = socket.close();
+                    let _ = socket.abort();
                     last_err = VmHostError::Write(err);
                 } else {
                     let mut response = [0u8; MAX_RESPONSE_BYTES];
-                    match read_response(&mut socket, &mut response, RESPONSE_READ_ATTEMPTS) {
+                    match read_response_until(&mut socket, &mut response, deadline) {
                         Ok(bytes) => {
-                            let _ = socket.close();
+                            let _ = socket.abort();
                             match core::str::from_utf8(&response[..bytes]) {
                                 Ok(text) if text.starts_with("OK ") => return Ok(()),
                                 Ok(_) => last_err = VmHostError::HostUnavailable,
@@ -98,7 +102,7 @@ pub fn wait_for_host_transport() -> Result<(), VmHostError> {
                             }
                         }
                         Err(err) => {
-                            let _ = socket.close();
+                            let _ = socket.abort();
                             last_err = err;
                         }
                     }
@@ -132,30 +136,35 @@ pub fn run_hermes_test(job: HermesHostTestJob) -> Result<HermesHostTestResult, V
 }
 
 fn run_hermes_test_once(job: HermesHostTestJob) -> Result<HermesHostTestResult, VmHostError> {
+    let token = accept_hermes_test(job)?;
+    let deadline =
+        crate::kernel_lowlevel::timer::get_nanoseconds().saturating_add(HERMES_TEST_WAIT_NANOS);
+    loop {
+        match poll_hermes_test(job, token.as_str()) {
+            Ok(Some(result)) => return Ok(result),
+            Ok(None) => {
+                if crate::kernel_lowlevel::timer::get_nanoseconds() >= deadline {
+                    return Err(VmHostError::Read(NetError::Timeout));
+                }
+                wait_poll_interval(deadline);
+            }
+            Err(err) if retryable_host_job(&err) => {
+                if crate::kernel_lowlevel::timer::get_nanoseconds() >= deadline {
+                    return Err(err);
+                }
+                wait_poll_interval(deadline);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn accept_hermes_test(job: HermesHostTestJob) -> Result<String, VmHostError> {
     let request = build_hermes_test_request(job);
     let mut last_err = VmHostError::HostUnavailable;
     for attempt in 0..HERMES_TEST_CONNECT_ATTEMPTS {
-        match connect_launcher(DEFAULT_LAUNCHER_PORT) {
-            Ok(mut socket) => {
-                if let Err(err) = socket.write(request.as_bytes()) {
-                    let _ = socket.close();
-                    last_err = VmHostError::Write(err);
-                    continue;
-                }
-                let mut response = [0u8; MAX_RESPONSE_BYTES];
-                let deadline = crate::kernel_lowlevel::timer::get_nanoseconds()
-                    .saturating_add(HERMES_TEST_WAIT_NANOS);
-                match read_response_until(&mut socket, &mut response, deadline) {
-                    Ok(bytes) => {
-                        let _ = socket.close();
-                        return parse_hermes_test_response(job, &response[..bytes]);
-                    }
-                    Err(err) => {
-                        let _ = socket.close();
-                        return Err(err);
-                    }
-                }
-            }
+        match transact_launcher(request.as_bytes()) {
+            Ok(response) => return parse_hermes_test_accept(job, &response),
             Err(err) if retryable_host_connect(&err) => {
                 last_err = err;
                 if attempt + 1 < HERMES_TEST_CONNECT_ATTEMPTS {
@@ -166,6 +175,51 @@ fn run_hermes_test_once(job: HermesHostTestJob) -> Result<HermesHostTestResult, 
         }
     }
     Err(last_err)
+}
+
+fn poll_hermes_test(
+    job: HermesHostTestJob,
+    token: &str,
+) -> Result<Option<HermesHostTestResult>, VmHostError> {
+    let request = build_hermes_test_status_request(job, token)?;
+    let response = transact_launcher(request.as_bytes())?;
+    parse_hermes_test_status(job, &response)
+}
+
+fn transact_launcher(request: &[u8]) -> Result<[u8; MAX_RESPONSE_BYTES], VmHostError> {
+    let mut socket = connect_launcher_wait(DEFAULT_LAUNCHER_PORT, HERMES_TEST_TRANSACT_WAIT_NANOS)?;
+    if let Err(err) = socket.write(request) {
+        let _ = socket.abort();
+        return Err(VmHostError::Write(err));
+    }
+    let mut response = [0u8; MAX_RESPONSE_BYTES];
+    let deadline = crate::kernel_lowlevel::timer::get_nanoseconds()
+        .saturating_add(HERMES_TEST_TRANSACT_WAIT_NANOS);
+    match read_response_until(&mut socket, &mut response, deadline) {
+        Ok(bytes) => {
+            let _ = socket.abort();
+            let mut bounded = [0u8; MAX_RESPONSE_BYTES];
+            bounded[..bytes].copy_from_slice(&response[..bytes]);
+            Ok(bounded)
+        }
+        Err(err) => {
+            let _ = socket.abort();
+            Err(err)
+        }
+    }
+}
+
+fn wait_poll_interval(deadline_ns: u64) {
+    let now = crate::kernel_lowlevel::timer::get_nanoseconds();
+    let wait_until = now.saturating_add(HERMES_TEST_POLL_NANOS).min(deadline_ns);
+    let mut polls = 0usize;
+    while crate::kernel_lowlevel::timer::get_nanoseconds() < wait_until {
+        if polls >= 32 {
+            break;
+        }
+        polls = polls.saturating_add(1);
+        crate::kernel_objects::scheduler::yield_now();
+    }
 }
 
 fn retryable_host_connect(err: &VmHostError) -> bool {
@@ -188,6 +242,53 @@ fn build_hermes_test_request(job: HermesHostTestJob) -> String {
     request.push_str(job.as_str());
     request.push_str("\nend\n");
     request
+}
+
+fn build_hermes_test_status_request(
+    job: HermesHostTestJob,
+    token: &str,
+) -> Result<String, VmHostError> {
+    if !wire_value_valid(token) {
+        return Err(VmHostError::InvalidConfig);
+    }
+    let mut request = String::from("SMROS_TEST_STATUS 1\njob=");
+    request.push_str(job.as_str());
+    request.push_str("\ntoken=");
+    request.push_str(token);
+    request.push_str("\nend\n");
+    Ok(request)
+}
+
+fn parse_hermes_test_accept(
+    job: HermesHostTestJob,
+    response: &[u8],
+) -> Result<String, VmHostError> {
+    let text = core::str::from_utf8(response).map_err(|_| VmHostError::ResponseInvalid)?;
+    let text = text.trim_matches('\0');
+    if !text.starts_with("OK ") || !text.contains("accepted=1") {
+        return Err(VmHostError::ResponseInvalid);
+    }
+    let token = text
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("token="))
+        .ok_or(VmHostError::ResponseInvalid)?;
+    if token.is_empty() || !wire_value_valid(token) {
+        return Err(VmHostError::ResponseInvalid);
+    }
+    let _ = job;
+    Ok(token.to_string())
+}
+
+fn parse_hermes_test_status(
+    job: HermesHostTestJob,
+    response: &[u8],
+) -> Result<Option<HermesHostTestResult>, VmHostError> {
+    let text = core::str::from_utf8(response).map_err(|_| VmHostError::ResponseInvalid)?;
+    let text = text.trim_matches('\0');
+    if text.starts_with("OK ") && text.contains("running=1") {
+        return Ok(None);
+    }
+    parse_hermes_test_response(job, text.as_bytes()).map(Some)
 }
 
 fn parse_hermes_test_response(
@@ -213,28 +314,43 @@ fn parse_hermes_test_response(
 pub fn wait_for_linux_boot(name: &str) -> Result<bool, VmHostError> {
     let request = build_wait_boot_request(name)?;
     let mut socket = connect_launcher(DEFAULT_LAUNCHER_PORT)?;
-    socket
-        .write(request.as_bytes())
-        .map_err(VmHostError::Write)?;
+    if let Err(err) = socket.write(request.as_bytes()) {
+        let _ = socket.abort();
+        return Err(VmHostError::Write(err));
+    }
     let mut response = [0u8; MAX_RESPONSE_BYTES];
     let deadline =
         crate::kernel_lowlevel::timer::get_nanoseconds().saturating_add(HERMES_VM_BOOT_WAIT_NANOS);
-    let bytes = read_response_until(&mut socket, &mut response, deadline)?;
-    let _ = socket.close();
-    parse_wait_boot_response(&response[..bytes])
+    match read_response_until(&mut socket, &mut response, deadline) {
+        Ok(bytes) => {
+            let _ = socket.abort();
+            parse_wait_boot_response(&response[..bytes])
+        }
+        Err(err) => {
+            let _ = socket.abort();
+            Err(err)
+        }
+    }
 }
 
 pub fn launch(vm: &VmRecord) -> Result<VmHostLaunch, VmHostError> {
     let host = vm.host.as_ref().ok_or(VmHostError::NoHostConfig)?;
     let request = build_launch_request(vm, host)?;
     let mut socket = connect_launcher(host.launcher_port)?;
-    socket
-        .write(request.as_bytes())
-        .map_err(VmHostError::Write)?;
+    if let Err(err) = socket.write(request.as_bytes()) {
+        let _ = socket.abort();
+        return Err(VmHostError::Write(err));
+    }
 
     let mut response = [0u8; MAX_RESPONSE_BYTES];
-    let bytes = read_response(&mut socket, &mut response, RESPONSE_READ_ATTEMPTS)?;
-    let _ = socket.close();
+    let bytes = match read_response(&mut socket, &mut response, RESPONSE_READ_ATTEMPTS) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            let _ = socket.abort();
+            return Err(err);
+        }
+    };
+    let _ = socket.abort();
     parse_launch_response(&response[..bytes])
 }
 
@@ -247,26 +363,40 @@ pub fn stop(vm: &VmRecord) -> Result<(), VmHostError> {
     }
     let request = build_stop_request(vm, host)?;
     let mut socket = connect_launcher(host.launcher_port)?;
-    socket
-        .write(request.as_bytes())
-        .map_err(VmHostError::Write)?;
+    if let Err(err) = socket.write(request.as_bytes()) {
+        let _ = socket.abort();
+        return Err(VmHostError::Write(err));
+    }
 
     let mut response = [0u8; MAX_RESPONSE_BYTES];
-    let bytes = read_response(&mut socket, &mut response, RESPONSE_READ_ATTEMPTS)?;
-    let _ = socket.close();
+    let bytes = match read_response(&mut socket, &mut response, RESPONSE_READ_ATTEMPTS) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            let _ = socket.abort();
+            return Err(err);
+        }
+    };
+    let _ = socket.abort();
     parse_stop_response(&response[..bytes])
 }
 
 pub fn sync_trace(path: &str, trace: &[u8]) -> Result<(), VmHostError> {
     let request = build_trace_sync_request(path, trace.len())?;
     let mut socket = connect_launcher(DEFAULT_LAUNCHER_PORT)?;
-    socket
-        .write(request.as_bytes())
-        .map_err(VmHostError::Write)?;
+    if let Err(err) = socket.write(request.as_bytes()) {
+        let _ = socket.abort();
+        return Err(VmHostError::Write(err));
+    }
 
     let mut response = [0u8; MAX_RESPONSE_BYTES];
-    let bytes = read_response(&mut socket, &mut response, RESPONSE_READ_ATTEMPTS)?;
-    let _ = socket.close();
+    let bytes = match read_response(&mut socket, &mut response, RESPONSE_READ_ATTEMPTS) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            let _ = socket.abort();
+            return Err(err);
+        }
+    };
+    let _ = socket.abort();
     parse_stop_response(&response[..bytes])
 }
 
@@ -277,6 +407,7 @@ fn connect_launcher(port: u16) -> Result<net::TcpSocket, VmHostError> {
 fn connect_launcher_wait(port: u16, wait_nanos: u64) -> Result<net::TcpSocket, VmHostError> {
     let deadline = crate::kernel_lowlevel::timer::get_nanoseconds().saturating_add(wait_nanos);
     let _ = net::wait_until_ready(deadline);
+    let mut polls = 0usize;
     loop {
         match net::tcp_connect(NetworkSocketAddr {
             ip: net::QEMU_USER_GATEWAY,
@@ -284,9 +415,10 @@ fn connect_launcher_wait(port: u16, wait_nanos: u64) -> Result<net::TcpSocket, V
         }) {
             Ok(socket) => return Ok(socket),
             Err(err) => {
-                if crate::kernel_lowlevel::timer::get_nanoseconds() >= deadline {
+                if crate::kernel_lowlevel::timer::get_nanoseconds() >= deadline || polls >= 16 {
                     return Err(map_connect_error(err));
                 }
+                polls = polls.saturating_add(1);
                 crate::kernel_objects::scheduler::yield_now();
             }
         }
@@ -328,15 +460,17 @@ fn read_response_until(
     response: &mut [u8],
     deadline_ns: u64,
 ) -> Result<usize, VmHostError> {
+    let mut polls = 0usize;
     loop {
-        match socket.read(response) {
+        match socket.read_short(response) {
             Ok(0) => return Err(VmHostError::ResponseInvalid),
             Ok(bytes) => return Ok(bytes),
             Err(NetError::Timeout) => {
-                if crate::kernel_lowlevel::timer::get_nanoseconds() >= deadline_ns {
+                if crate::kernel_lowlevel::timer::get_nanoseconds() >= deadline_ns || polls >= 64 {
                     return Err(VmHostError::Read(NetError::Timeout));
                 }
-                let _ = socket.keepalive();
+                polls = polls.saturating_add(1);
+                crate::kernel_objects::scheduler::yield_now();
             }
             Err(err) => return Err(VmHostError::Read(err)),
         }

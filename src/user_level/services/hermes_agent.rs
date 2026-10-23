@@ -10,7 +10,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::user_level::{fxfs, gemma, html_ui, svc};
+use crate::user_level::{fxfs, gemma, html_ui, lvgl, qml_cluster, svc};
 
 const HERMES_ROOT: &str = "/data/hermes";
 const HERMES_SKILL_DIR: &str = "/data/hermes/skills";
@@ -51,6 +51,7 @@ const HERMES_SKT_SKILL: &str = "# SKT Skill\n\nSKT is the host-side SMROS smoke 
 const HERMES_FUZZING_SKILL: &str = "# Fuzzing Skill\n\nRun bounded `fuzzsc` through Hermes (campaign seed, iterations=50, time<=5). Pointers stay in kernel scratch. Skip clone/exit/exec. Do not execute Gemma text.\n";
 const HERMES_REBOOT_SKILL: &str = "# Reboot Skill\n\nHermes owns SMROS guest reboot. Run `reboot` with `hermes exec reboot`. Persist the active hermes test checkpoint first so test-all and random resume after reset.\n";
 const HERMES_CMD_SKILL: &str = "# Cmd Skill\n\nHermes owns these SMROS VM and Docker commands:\n- `vm -c /shared/vm-demo.xml`\n- `vm -k`\n- `vm -s`\n- `docker load -i /shared/ubuntu-alpineamr64.tar`\n- `docker run`\n- `docker stop`\n- `docker rm`\n\nUse `hermes exec` with complete arguments when a VM name, image, or container id is required. After load, run `ubuntu-alpineamr64:latest`. Campaigns couple `vm -c /shared/vm-demo.xml` with a wait until guest Linux boot OK, then `vm -k linux-demo` so nested QEMU is recycled. If host QEMU is not launched, campaigns skip the boot wait and still recycle.\n";
+const HERMES_UI_SKILL: &str = "# SMROS UI Skill\n\nValidate product UI APIs with `lvgl test`, `lvgl render`, `lvgl sched`, `qml test`, `qml render`, `hermes web`, and `hermes test`. Default `hermes test-all` includes LVGL, QML, syscall, and POSIX canary cases.\n";
 const HERMES_CRON: &str =
     "name: nightly-smros-hermes-smoke\nschedule: '0 3 * * *'\ncommand: hermes test\n";
 
@@ -155,6 +156,15 @@ const HERMES_SKILLS: &[HermesSkillDefinition] = &[
         body: HERMES_CMD_SKILL,
         keywords: &["cmd", "vm", "docker", "vm-demo", "ubuntu-alpineamr64"],
     },
+    HermesSkillDefinition {
+        name: "SMROS UI",
+        slug: "smros-ui",
+        dir: "/data/hermes/skills/smros-ui",
+        path: "/data/hermes/skills/smros-ui/SKILL.md",
+        description: "LVGL, QML cluster, and Hermes product UI APIs",
+        body: HERMES_UI_SKILL,
+        keywords: &["lvgl", "qml", "widget", "cluster", "workbench"],
+    },
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,6 +181,8 @@ pub enum HermesAgentError {
     Cron,
     Transcript,
     Svc,
+    Lvgl,
+    Qml,
 }
 
 impl HermesAgentError {
@@ -188,6 +200,8 @@ impl HermesAgentError {
             HermesAgentError::Cron => "cron",
             HermesAgentError::Transcript => "transcript",
             HermesAgentError::Svc => "svc",
+            HermesAgentError::Lvgl => "lvgl",
+            HermesAgentError::Qml => "qml",
         }
     }
 }
@@ -239,6 +253,8 @@ pub struct HermesAgentTestReport {
     pub transcript_ok: bool,
     pub svc_ok: bool,
     pub web_ui_ok: bool,
+    pub lvgl_ok: bool,
+    pub qml_ok: bool,
     pub turn: HermesAgentTurn,
 }
 
@@ -255,6 +271,8 @@ impl HermesAgentTestReport {
             && self.transcript_ok
             && self.svc_ok
             && self.web_ui_ok
+            && self.lvgl_ok
+            && self.qml_ok
     }
 }
 
@@ -493,123 +511,139 @@ pub fn list_skills() -> Result<Vec<HermesSkillInfo>, HermesAgentError> {
 }
 
 pub fn run_full_test() -> Result<HermesAgentTestReport, HermesAgentError> {
-    prepare_storage()?;
     let _persist_guard = fxfs::suspend_persist();
+    let result = (|| {
+        prepare_storage()?;
 
-    let config = load_config()?;
-    let config_ok = config.provider == HERMES_PROVIDER_GEMMA
-        && config.model == HERMES_MODEL_DEFAULT
-        && config.personality == HERMES_PERSONALITY
-        && config.tools.iter().any(|tool| tool == HERMES_TOOL_SHELL)
-        && config.tools.iter().any(|tool| tool == HERMES_TOOL_FXFS)
-        && config.tools.iter().any(|tool| tool == HERMES_TOOL_SVC)
-        && config.skills_dir == HERMES_SKILL_DIR
-        && config.memory_dir == HERMES_MEMORY_DIR;
-    if !config_ok {
-        return Err(HermesAgentError::Config);
-    }
+        let config = load_config()?;
+        let config_ok = config.provider == HERMES_PROVIDER_GEMMA
+            && config.model == HERMES_MODEL_DEFAULT
+            && config.personality == HERMES_PERSONALITY
+            && config.tools.iter().any(|tool| tool == HERMES_TOOL_SHELL)
+            && config.tools.iter().any(|tool| tool == HERMES_TOOL_FXFS)
+            && config.tools.iter().any(|tool| tool == HERMES_TOOL_SVC)
+            && config.skills_dir == HERMES_SKILL_DIR
+            && config.memory_dir == HERMES_MEMORY_DIR;
+        if !config_ok {
+            return Err(HermesAgentError::Config);
+        }
 
-    let model_route_ok = route_model(config.provider.as_str(), config.model.as_str());
-    if !model_route_ok {
-        return Err(HermesAgentError::ModelRoute);
-    }
+        let model_route_ok = route_model(config.provider.as_str(), config.model.as_str());
+        if !model_route_ok {
+            return Err(HermesAgentError::ModelRoute);
+        }
 
-    let skills = list_skills()?;
-    let core_hits =
-        matching_skills("Use the SMROS kernel, web UI, ops, and memory skills to test Hermes")?;
-    let skill_ok = skills.len() == HERMES_SKILLS.len()
-        && core_hits.iter().any(|skill| skill.slug == "smros-kernel")
-        && core_hits.iter().any(|skill| skill.slug == "hermes-web-ui")
-        && core_hits.iter().any(|skill| skill.slug == "smros-ops")
-        && core_hits.iter().any(|skill| skill.slug == "hermes-memory");
-    if !skill_ok {
-        return Err(HermesAgentError::Skill);
-    }
+        let skills = list_skills()?;
+        let core_hits =
+            matching_skills("Use the SMROS kernel, web UI, ops, and memory skills to test Hermes")?;
+        let skill_ok = skills.len() == HERMES_SKILLS.len()
+            && core_hits.iter().any(|skill| skill.slug == "smros-kernel")
+            && core_hits.iter().any(|skill| skill.slug == "hermes-web-ui")
+            && core_hits.iter().any(|skill| skill.slug == "smros-ops")
+            && core_hits.iter().any(|skill| skill.slug == "hermes-memory");
+        if !skill_ok {
+            return Err(HermesAgentError::Skill);
+        }
 
-    let memory_before = memory_item_count()?;
-    let turn = run_prompt("test hermes web ui on SMROS with tools, memory, skills, and /svc")?;
-    let memory_after = memory_item_count()?;
-    let memory_ok = memory_after > memory_before && turn.memory_writes > 0;
-    if !memory_ok {
-        return Err(HermesAgentError::Memory);
-    }
+        let memory_before = memory_item_count()?;
+        let turn = run_prompt("test hermes web ui on SMROS with tools, memory, skills, and /svc")?;
+        let memory_after = memory_item_count()?;
+        let memory_ok = memory_after > memory_before && turn.memory_writes > 0;
+        if !memory_ok {
+            return Err(HermesAgentError::Memory);
+        }
 
-    let tool_ok = turn.tool_calls == 3
-        && turn.skill_hits >= 4
-        && turn.skill_summary.contains("smros-kernel")
-        && tool_audit_valid()?;
-    if !tool_ok {
-        return Err(HermesAgentError::Tool);
-    }
+        let tool_ok = turn.tool_calls == 3
+            && turn.skill_hits >= 4
+            && turn.skill_summary.contains("smros-kernel")
+            && tool_audit_valid()?;
+        if !tool_ok {
+            return Err(HermesAgentError::Tool);
+        }
 
-    let delegate_ok = turn.delegated_agents == 2 && turn.answer.contains("delegate=2");
-    if !delegate_ok {
-        return Err(HermesAgentError::Delegate);
-    }
+        let delegate_ok = turn.delegated_agents == 2 && turn.answer.contains("delegate=2");
+        if !delegate_ok {
+            return Err(HermesAgentError::Delegate);
+        }
 
-    let gemma_ok = turn.model_backend == "smros-native"
-        && turn.model_tokens > 0
-        && turn.answer.contains("Gemma on SMROS");
-    if !gemma_ok {
-        return Err(HermesAgentError::Gemma);
-    }
+        let gemma_ok = turn.model_backend == "smros-native"
+            && turn.model_tokens > 0
+            && turn.answer.contains("Gemma on SMROS");
+        if !gemma_ok {
+            return Err(HermesAgentError::Gemma);
+        }
 
-    let cron_ok = cron_ready()?;
-    if !cron_ok {
-        return Err(HermesAgentError::Cron);
-    }
+        let cron_ok = cron_ready()?;
+        if !cron_ok {
+            return Err(HermesAgentError::Cron);
+        }
 
-    let transcript_ok = transcript_valid(turn.transcript_bytes)?;
-    if !transcript_ok {
-        return Err(HermesAgentError::Transcript);
-    }
+        let transcript_ok = transcript_valid(turn.transcript_bytes)?;
+        if !transcript_ok {
+            return Err(HermesAgentError::Transcript);
+        }
 
-    let svc_ok = svc::smoke_test();
-    if !svc_ok {
-        return Err(HermesAgentError::Svc);
-    }
+        let svc_ok = svc::smoke_test();
+        if !svc_ok {
+            return Err(HermesAgentError::Svc);
+        }
 
-    let web = render_web_ui()?;
-    let web_ui_ok = web.bytes > 0
-        && web.html.contains("<!doctype html>")
-        && web.html.contains("Hermes Agent")
-        && web.html.contains("Prompt Composer")
-        && web.html.contains("SMROS Kernel")
-        && web.html.contains("Hermes Web UI");
-    let native = render_native_ui(78)?;
-    let native_ui_ok = native.rendered.contains("Native HTML UI")
-        && native.rendered.contains("Prompt Composer")
-        && native.rendered.contains("SMROS Kernel");
-    let cpu = render_cpu_ui()?;
-    let cpu_ui_ok = cpu.width == 720
-        && cpu.height == 420
-        && cpu.image_bytes > cpu.pixel_bytes
-        && cpu.preview.contains("CPU-rendered native Hermes UI")
-        && cpu.preview.contains("Prompt Composer");
-    if !web_ui_ok {
-        return Err(HermesAgentError::Transcript);
-    }
-    if !native_ui_ok {
-        return Err(HermesAgentError::Tool);
-    }
-    if !cpu_ui_ok {
-        return Err(HermesAgentError::Tool);
-    }
+        let web = render_web_ui()?;
+        let web_ui_ok = web.bytes > 0
+            && web.html.contains("<!doctype html>")
+            && web.html.contains("Hermes Agent")
+            && web.html.contains("Prompt Composer")
+            && web.html.contains("SMROS Kernel")
+            && web.html.contains("Hermes Web UI");
+        let native = render_native_ui(78)?;
+        let native_ui_ok = native.rendered.contains("Native HTML UI")
+            && native.rendered.contains("Prompt Composer")
+            && native.rendered.contains("SMROS Kernel");
+        let cpu = render_cpu_ui()?;
+        let cpu_ui_ok = cpu.width == 720
+            && cpu.height == 420
+            && cpu.image_bytes > cpu.pixel_bytes
+            && cpu.preview.contains("CPU-rendered native Hermes UI")
+            && cpu.preview.contains("Prompt Composer");
+        if !web_ui_ok {
+            return Err(HermesAgentError::Transcript);
+        }
+        if !native_ui_ok {
+            return Err(HermesAgentError::Tool);
+        }
+        if !cpu_ui_ok {
+            return Err(HermesAgentError::Tool);
+        }
 
-    Ok(HermesAgentTestReport {
-        config_ok,
-        model_route_ok,
-        skill_ok,
-        memory_ok,
-        tool_ok,
-        delegate_ok,
-        gemma_ok,
-        cron_ok,
-        transcript_ok,
-        svc_ok,
-        web_ui_ok,
-        turn,
-    })
+        let lvgl_ok = lvgl::info().name == lvgl::LVGL_PORT_NAME && lvgl::init();
+        if !lvgl_ok {
+            return Err(HermesAgentError::Lvgl);
+        }
+
+        let qml_ok = qml_cluster::init();
+        if !qml_ok {
+            return Err(HermesAgentError::Qml);
+        }
+
+        Ok(HermesAgentTestReport {
+            config_ok,
+            model_route_ok,
+            skill_ok,
+            memory_ok,
+            tool_ok,
+            delegate_ok,
+            gemma_ok,
+            cron_ok,
+            transcript_ok,
+            svc_ok,
+            web_ui_ok,
+            lvgl_ok,
+            qml_ok,
+            turn,
+        })
+    })();
+    fxfs::forget_pending_persist();
+    result
 }
 
 pub fn smoke_test() -> bool {

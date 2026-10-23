@@ -116,6 +116,11 @@ pub fn restore_interrupts(state: IrqState) {
 }
 
 #[inline(always)]
+pub fn irq_state_enabled(state: IrqState) -> bool {
+    state & SSTATUS_SIE != 0
+}
+
+#[inline(always)]
 pub fn unmask_timer_interrupts() {
     unsafe {
         core::arch::asm!(

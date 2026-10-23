@@ -254,7 +254,7 @@ impl ComponentManager {
             root.state = ComponentState::Started;
             root.pid = Some(1);
             root.thread_id = None;
-            root.loaded_entry = Some(component_el0_entry as *const () as u64);
+            root.loaded_entry = Some(user_logic::USER_CODE_VADDR as u64);
             root.loaded_segments = 1;
         }
 
@@ -290,7 +290,7 @@ impl ComponentManager {
 
     fn install_boot_elfs() -> bool {
         let _guard = fxfs::suspend_persist();
-        let image = elf::build_trampoline_elf(component_el0_entry as *const () as u64);
+        let image = elf::build_trampoline_elf(user_logic::USER_CODE_VADDR as u64);
         fxfs::write_file("/pkg/bin/component_manager", &image).is_ok()
             && fxfs::write_file("/pkg/bin/fxfs", &image).is_ok()
             && fxfs::write_file("/pkg/bin/user-init", &image).is_ok()
@@ -389,7 +389,24 @@ impl ComponentManager {
         }
 
         self.launchers_started = all_started;
+        if all_started {
+            Self::drain_component_launchers();
+        }
         all_started
+    }
+
+    fn drain_component_launchers() {
+        // Let each launcher ERET into the user trampoline and exit so leftover
+        // EL0 threads cannot later execute kernel `.text` (ARM64 UXN).
+        let deadline = crate::kernel_lowlevel::timer::get_nanoseconds().saturating_add(20_000_000);
+        let mut spins = 0;
+        while spins < 16 {
+            if crate::kernel_lowlevel::timer::get_nanoseconds() >= deadline {
+                break;
+            }
+            crate::kernel_objects::scheduler::yield_now();
+            spins += 1;
+        }
     }
 }
 
@@ -446,9 +463,11 @@ extern "C" fn component_launcher_entry() -> ! {
         let user_stack = user_process::user_stack_top(pid).unwrap_or(
             user_logic::USER_STACK_VADDR as u64 + (user_logic::USER_STACK_PAGES * 4096) as u64,
         );
-        let entry = user_process::loaded_entry_point(pid)
-            .unwrap_or(component_el0_entry as *const () as u64);
-        user_process::switch_to_el0(entry, user_stack, 0);
+        let entry = user_process::canonical_user_entry(
+            user_process::loaded_entry_point(pid).unwrap_or(user_logic::USER_CODE_VADDR as u64),
+        );
+        let root_paddr = user_process::user_root_paddr(pid).unwrap_or(0);
+        user_process::switch_to_el0(entry, user_stack, root_paddr);
     }
 }
 

@@ -606,6 +606,18 @@ impl PageTableManager {
         unsafe { self.kernel_root.add(idx) }
     }
 
+    /// Physical root used as TTBR0/SATP for this address space.
+    pub fn root_paddr(&self) -> u64 {
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.user_address_space.root_paddr()
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            self.user_root as u64
+        }
+    }
+
     /// Switch to this address space
     pub fn switch_to(&self) {
         arch_switch_to(self.user_root as u64, self.kernel_root as u64);

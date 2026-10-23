@@ -71,6 +71,7 @@ The shell currently registers these commands:
 - `docker`
 - `hermes`
 - `lvgl`
+- `qml`
 - `uptime`
 - `dhrystone`
 - `sched`
@@ -391,6 +392,9 @@ lvgl info
 lvgl render
 lvgl sched
 lvgl test
+qml info
+qml render
+qml test
 ```
 
 FxFS installs `/shared` from the snapshot compiled into the current kernel image during boot, then layers persistent local `/shared` changes from `smros-fxfs.img` on top. `share` lists the live FxFS view, so copied or edited `/shared` files appear there even when they were not part of the embedded `host_shared/` seed. `mount share` refreshes missing embedded seed files while preserving that local overlay. These commands do not read or write the host directory live while QEMU is already running. To see files added to the host `host_shared/` directory after boot, rebuild and restart with `make run`; then use `share` or `ls /shared`.
@@ -414,7 +418,7 @@ skill lookup, memory updates, tool calls, subagent delegation, cron metadata,
 under `/data/hermes`.
 
 Hermes installs native SMROS skills under `/data/hermes/skills`:
-`smros-kernel`, `hermes-web-ui`, `smros-ops`, `hermes-memory`, plus the
+`smros-kernel`, `hermes-web-ui`, `smros-ops`, `hermes-memory`, `smros-ui`, plus the
 syscall/POSIX control-plane skills `ut`, `it`, `skt`, and `fuzzing`, and the
 owned lifecycle skills `reboot` and `cmd`. Prompt
 routing reports the matched skills in the shell response. `ut` is
@@ -425,7 +429,7 @@ another SMROS from the command line. `fuzzing` is bounded `fuzzsc`. The `reboot`
 owns `hermes exec reboot` and keeps an active `hermes test-all` or `hermes random`
 campaign resumable: the guest writes `/data/hermes/tests/resume.cfg`, flushes FxFS,
 resets, then continues remaining iterations to resume after reboot. Host `ut`/`it`
-jobs for a reboot round wait up to 60s for virtio-net and the host launcher after reset, PING the launcher, retry the handshake, and retry failed `ut`/`it` jobs so a slow reconnect or a transient cargo lock after nested QEMU is not reported as FAIL. The ops campaign catalog includes
+jobs for a reboot round wait up to 60s for virtio-net and the host launcher after reset, PING the launcher, retry the handshake, and retry failed `ut`/`it` jobs so a slow reconnect or a transient cargo lock after nested QEMU is not reported as FAIL. Host `ut`/`it` jobs are accepted immediately by the launcher and polled over short TCP sessions so a long `make ut` cannot pin a guest slirp connection through TIME_WAIT reuse on ARM64. Guest `tcp_connect` always honors its deadline even when leftover virtio RX frames keep arriving, and it RSTs leftover IPv4 TCP frames (including unmatched SYN-ACKs) so ARM64 slirp delayed packets cannot hang a later host-job handshake. ARM64 `arm_at_nanoseconds` rewrites CNTP_CVAL when the cached compare is already behind CNTPCT, because GICv3/TCG will not raise a new timer edge from a stale past deadline. Lone-thread `yield_now()` WFI after restoring IRQs so ARM64 TCG can retire virtio completions and advance CNTPCT; RISC-V SBI timers still tick during a busy yield, which is why the hang is ARM64-only. Memory Syscall Test component launchers keep a live TTBR0, close leftover exception VMARs, drain leftover virtio RX before host `ut`/`it`, and ERET leftover component threads into a user-mapped SVC trampoline at `0x10000000` so ARM64 UXN cannot halt on kernel `.text` after `testsc`. Failed host `it` summaries ignore Make `Leaving directory` lines and combine stdout with stderr so the panic, not the Makefile footer, is reported. The ops campaign catalog includes
 `vm -c /shared/vm-demo.xml` so `hermes test-all` can open a nested GTK QEMU
 window running guest Linux (`linux-demo`). That create is coupled with a wait
 until guest Linux boot OK, then `vm -k linux-demo`, so nested QEMU/GTK is
@@ -463,6 +467,11 @@ flushes until a framebuffer device is available. `lvgl render` writes
 for the current kernel heap. `lvgl test` validates the port, display flush,
 input mapping, widget scene, and FxFS output.
 
+`qml` exposes the Qt/QML vehicle cluster on the same LVGL widget layer.
+`qml info` reports cluster properties, `qml render` writes
+`/data/qml-cluster/cluster.ppm`, and `qml test` runs the full QML/LVGL cluster
+smoke.
+
 ### Perfetto Trace Export
 
 `sched perfetto [samples]` writes `/shared/trace.pftrace` in native Perfetto
@@ -486,6 +495,9 @@ hermes ask test hermes agent on SMROS
 lvgl info
 lvgl render
 lvgl test
+qml info
+qml render
+qml test
 sched sample 8
 sched perfetto 128
 ```
@@ -505,9 +517,14 @@ After a Hermes reboot the shell resumes the checkpointed campaign so the test
 can continue. Gemma-generated text is never executed directly.
 
 `hermes random [seed=<n>] [iterations=<positive-n>] [mode=ops|syscall]` selects
-bounded safe test and status operations deterministically. `mode=syscall`
-uses the syscall catalog (`testsc`, `fuzzsc` with the campaign seed and `iterations=50`,
-`hermes test`). Hermes may also `exec posixtest status` or
+bounded safe test and status operations deterministically. The default ops
+catalog used by `hermes test-all` includes product APIs across layers: `lvgl`
+info/render/sched/test, `qml` info/render/test, `hermes` info/test/skills/web,
+`testsc`, POSIX canaries, DDK hello, Docker status, scheduler trace, and the
+existing ops/status commands. `mode=syscall` keeps a focused syscall/POSIX
+catalog (`testsc`, `fuzzsc` with the campaign seed, `iterations=50`, and `time=5`,
+`hermes test`, and the POSIX canary).
+Hermes may also `exec posixtest status` or
 `exec posixtest test getpid/1-1.c`; `posixtest all` stays forbidden.
 The finite iteration count has no
 policy maximum but must fit the platform `usize`. The command prints the
@@ -516,11 +533,13 @@ effective seed for replay and persists a bounded report at
 64 round details, then record how many details were omitted. `hermes test-all`
 runs the native Hermes check once, then executes one deterministic random guest
 operation and each host job once per iteration. Optional `mode=syscall` keeps
-the same host jobs but selects the syscall/POSIX guest catalog. Thus `iterations=1000`
+the same host jobs but selects the focused syscall/POSIX guest catalog.
+Default `hermes test-all` already includes LVGL, QML, syscall smoke, and POSIX
+canaries, so it does not take a UI mode. Thus `iterations=1000`
 requests `ut` and `it` 1000 times each through
 `scripts/smros-vm-launcher.py`. The launcher maps those two identifiers to
-fixed Make argv, runs one job at a time with a timeout, and does not accept
-arbitrary command strings.
+fixed Make argv, accepts the job immediately, runs one job at a time with a timeout, and does not accept
+arbitrary command strings. The guest polls `SMROS_TEST_STATUS` until the job finishes.
 
 ### Qt/QML Vehicle Cluster Port
 

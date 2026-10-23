@@ -1,10 +1,12 @@
 pub const HERMES_MAX_ARGS: usize = 8;
 pub const HERMES_MAX_ARG_LEN: usize = 96;
-pub const HERMES_CAMPAIGN_CASES: usize = 15;
-pub const HERMES_SYSCALL_CAMPAIGN_CASES: usize = 12;
+pub const HERMES_CAMPAIGN_CASES: usize = 34;
+pub const HERMES_SYSCALL_CAMPAIGN_CASES: usize = 14;
 pub const HERMES_REPORT_DETAIL_LIMIT: usize = 64;
 pub const HERMES_CAMPAIGN_FUZZSC_ITERATIONS: u64 = 50;
 pub const HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG: &str = "iterations=50";
+pub const HERMES_CAMPAIGN_FUZZSC_TIME_SECONDS: u64 = 5;
+pub const HERMES_CAMPAIGN_FUZZSC_TIME_ARG: &str = "time=5";
 pub const HERMES_CAMPAIGN_VM_NAME: &str = "linux-demo";
 pub const HERMES_CAMPAIGN_VM_XML: &str = "/shared/vm-demo.xml";
 
@@ -49,7 +51,26 @@ const CAMPAIGN_CATALOG: [HermesCampaignCase; HERMES_CAMPAIGN_CASES] = [
     campaign_case_const("vm", "-c", "/shared/vm-demo.xml", 2),
     campaign_case_const("uptime", "", "", 0),
     campaign_case_const("docker", "images", "", 1),
+    campaign_case_const("docker", "ps", "", 1),
     campaign_case_const("fuzzsc", "iterations=50", "", 1),
+    campaign_case_const("lvgl", "test", "", 1),
+    campaign_case_const("qml", "test", "", 1),
+    campaign_case_const("ddk", "hello", "", 1),
+    campaign_case_const("posixtest", "status", "", 1),
+    campaign_case_const("hermes", "info", "", 1),
+    campaign_case_const("ls", "", "", 0),
+    campaign_case_const("top", "", "", 0),
+    campaign_case_const("testsc", "", "", 0),
+    campaign_case_const("hermes", "test", "", 1),
+    campaign_case_const("hermes", "skills", "", 1),
+    campaign_case_const("hermes", "web", "", 1),
+    campaign_case_const("lvgl", "info", "", 1),
+    campaign_case_const("lvgl", "render", "", 1),
+    campaign_case_const("lvgl", "sched", "", 1),
+    campaign_case_const("qml", "info", "", 1),
+    campaign_case_const("qml", "render", "", 1),
+    campaign_case_const("sched", "trace", "", 1),
+    campaign_case_const("posixtest", "test", "getpid/1-1.c", 2),
     campaign_case_const("reboot", "", "", 0),
 ];
 
@@ -66,6 +87,8 @@ const SYSCALL_CAMPAIGN_CATALOG: [HermesCampaignCase; HERMES_SYSCALL_CAMPAIGN_CAS
     campaign_case_const("uptime", "", "", 0),
     campaign_case_const("drivers", "", "", 0),
     campaign_case_const("ifconfig", "", "", 0),
+    campaign_case_const("posixtest", "status", "", 1),
+    campaign_case_const("posixtest", "test", "getpid/1-1.c", 2),
 ];
 
 const POSIX_CANARY_IDS: [&str; 1] = ["getpid/1-1.c"];
@@ -96,7 +119,7 @@ pub fn classify(command: &str, args: &[&str]) -> HermesShellPolicy {
         "rm" | "kill" | "exit" | "clear" | "vi" | "run" | "write" | "mkdir" | "mv" | "cp"
         | "mount" | "cd" | "cd.." => HermesShellPolicy::Forbidden,
         "help" | "version" | "meminfo" | "components" | "fxfs" | "drivers" | "ifconfig" | "pwd"
-        | "ls" | "svc" | "uptime" => no_args(args),
+        | "ls" | "svc" | "uptime" | "tls" | "share" => no_args(args),
         "ddk" => ddk_policy(args),
         "reboot" => no_args(args),
         "testsc" => no_args(args),
@@ -110,6 +133,8 @@ pub fn classify(command: &str, args: &[&str]) -> HermesShellPolicy {
         "docker" => docker_policy(args),
         "hermes" => hermes_policy(args),
         "posixtest" => posix_policy(args),
+        "lvgl" => lvgl_policy(args),
+        "qml" => qml_policy(args),
         _ => HermesShellPolicy::Forbidden,
     }
 }
@@ -182,10 +207,37 @@ fn docker_policy(args: &[&str]) -> HermesShellPolicy {
 }
 
 fn hermes_policy(args: &[&str]) -> HermesShellPolicy {
-    if args == ["test"] || args == ["info"] {
-        HermesShellPolicy::Allowed
-    } else {
-        HermesShellPolicy::Forbidden
+    match args {
+        ["test"] | ["smoke"] | ["info"] | ["status"] | ["skills"] | ["web"] => {
+            HermesShellPolicy::Allowed
+        }
+        _ => HermesShellPolicy::Forbidden,
+    }
+}
+
+fn lvgl_policy(args: &[&str]) -> HermesShellPolicy {
+    match args {
+        []
+        | ["info"]
+        | ["status"]
+        | ["render"]
+        | ["show"]
+        | ["demo"]
+        | ["sched"]
+        | ["schedule"]
+        | ["trace"]
+        | ["test"]
+        | ["smoke"] => HermesShellPolicy::Allowed,
+        _ => HermesShellPolicy::Invalid,
+    }
+}
+
+fn qml_policy(args: &[&str]) -> HermesShellPolicy {
+    match args {
+        [] | ["info"] | ["status"] | ["render"] | ["show"] | ["demo"] | ["test"] | ["smoke"] => {
+            HermesShellPolicy::Allowed
+        }
+        _ => HermesShellPolicy::Invalid,
     }
 }
 
@@ -307,7 +359,7 @@ fn fuzz_policy(args: &[&str]) -> HermesShellPolicy {
         match key {
             "seed" => {}
             "iterations" if number > 0 && number <= HERMES_CAMPAIGN_FUZZSC_ITERATIONS => {}
-            "time" if number > 0 && number <= 5 => {}
+            "time" if number > 0 && number <= HERMES_CAMPAIGN_FUZZSC_TIME_SECONDS => {}
             _ => return HermesShellPolicy::Invalid,
         }
     }
@@ -588,6 +640,7 @@ pub fn parse_resume_state(text: &str) -> Option<HermesResumeState> {
                 mode = match value {
                     "ops" => HermesCampaignMode::Ops,
                     "syscall" => HermesCampaignMode::Syscall,
+                    "ui" => HermesCampaignMode::Ops,
                     _ => return None,
                 };
             }

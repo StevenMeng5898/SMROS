@@ -32,8 +32,10 @@ const VIRTIO_QUEUE_SIZE: u16 = 8;
 const VIRTIO_NET_HDR_LEN: usize = 10;
 const VIRTIO_NET_HDR_MRG_LEN: usize = 12;
 const NET_BUFFER_SIZE: usize = 2048;
-const NET_TX_TIMEOUT_SPINS: usize = 10_000_000;
-const NET_POLL_TIMEOUT_SPINS: usize = 1_000_000;
+const NET_POLL_TIMEOUT_SPINS: usize = 2_048;
+const VIRTIO_RX_YIELD_SPINS: usize = 64;
+const VIRTIO_TX_WAIT_LIMIT: usize = 4_096;
+const VIRTIO_COMPLETION_TIMEOUT_NANOS: u64 = 5_000_000_000;
 const VIRTIO_NET_S_LINK_UP: u16 = 1;
 
 const REG_MAGIC_VALUE: usize = 0x000;
@@ -610,19 +612,34 @@ impl QemuVirtNetDriver {
             memory_barrier();
             TX_QUEUE.avail.idx = TX_QUEUE.avail.idx.wrapping_add(1);
             memory_barrier();
+            let start_used = core::ptr::read_volatile(&raw const TX_QUEUE.used.idx);
             self.notify_queue(1);
 
-            let target = self.tx_last_used_idx.wrapping_add(1);
-            for _ in 0..NET_TX_TIMEOUT_SPINS {
+            let completion_deadline = crate::kernel_lowlevel::timer::get_nanoseconds()
+                .saturating_add(VIRTIO_COMPLETION_TIMEOUT_NANOS);
+            let mut waits = 0usize;
+            loop {
                 memory_barrier();
-                if core::ptr::read_volatile(&raw const TX_QUEUE.used.idx) == target {
-                    self.tx_last_used_idx = target;
+                let used = core::ptr::read_volatile(&raw const TX_QUEUE.used.idx);
+                if used != start_used {
+                    self.tx_last_used_idx = used;
                     self.ack_interrupt();
                     self.tx_packets = self.tx_packets.saturating_add(1);
                     self.tx_bytes = self.tx_bytes.saturating_add(tx_frame_len as u64);
                     self.last_error = None;
                     return Ok(frame.len());
                 }
+                if waits >= VIRTIO_TX_WAIT_LIMIT
+                    || driver_logic::virtio_completion_timed_out(
+                        crate::kernel_lowlevel::timer::get_nanoseconds(),
+                        completion_deadline,
+                    )
+                {
+                    self.tx_last_used_idx = used;
+                    break;
+                }
+                waits = waits.saturating_add(1);
+                crate::kernel_objects::scheduler::yield_now();
             }
         }
 
@@ -642,11 +659,16 @@ impl QemuVirtNetDriver {
         if !self.rx_posted {
             self.post_receive_buffers();
         }
-        for _ in 0..timeout_spins {
+        for spin in 0..timeout_spins {
             unsafe {
-                memory_barrier();
+                if spin % 8 == 0 {
+                    memory_barrier();
+                }
                 let used_idx = core::ptr::read_volatile(&raw const RX_QUEUE.used.idx);
                 if used_idx == self.rx_last_used_idx {
+                    if spin % VIRTIO_RX_YIELD_SPINS == VIRTIO_RX_YIELD_SPINS - 1 {
+                        crate::kernel_objects::scheduler::yield_now();
+                    }
                     continue;
                 }
 

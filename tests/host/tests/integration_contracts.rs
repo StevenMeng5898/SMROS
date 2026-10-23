@@ -104,8 +104,12 @@ fn fxfs_serialization_excludes_ephemeral_shared_memory_entries() {
         .expect("FxFS persist planner");
     let plan = braced_body(&fxfs[plan_start..]);
     assert!(
-        plan.contains("object_is_under_ephemeral_shm"),
+        plan.contains("ephemeral_shm_descendant_ids"),
         "FxFS serialization must omit ephemeral shared-memory descendants"
+    );
+    assert!(
+        plan.contains("persist_object_id_set"),
+        "FxFS persist planning must index selected objects instead of scanning linearly"
     );
     let sync_start = fxfs
         .find("fn sync_to_block(&mut self)")
@@ -6347,6 +6351,30 @@ fn aarch64_context_switch_preserves_irq_mask_until_the_resumed_owner_restores_it
         .expect("read AArch64 thread context");
     let cpu = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/cpu.rs"))
         .expect("read AArch64 CPU helpers");
+    assert!(cpu.contains("pub fn irq_state_enabled(state: IrqState) -> bool"));
+    assert!(cpu.contains("state & 0x80 == 0"));
+    let restore_start = cpu
+        .find("pub fn restore_interrupts(state: IrqState)")
+        .expect("restore_interrupts");
+    let restore = braced_body(&cpu[restore_start..]);
+    assert!(
+        restore.contains("isb"),
+        "DAIF restore must ISB before a later WFI on ARM64 TCG"
+    );
+    assert!(
+        cpu.contains("isb") && cpu.contains("wfi"),
+        "ARM64 WFI must ISB first so DAIF/CNTP updates are visible to TCG"
+    );
+    let timer = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/timer.rs"))
+        .expect("read AArch64 timer");
+    let cval_start = timer
+        .find("fn write_cntp_cval_el0(value: u64)")
+        .expect("CNTP compare writer");
+    let cval = braced_body(&timer[cval_start..]);
+    assert!(
+        cval.contains("isb"),
+        "CNTP compare writes must ISB before a later cooperative WFI"
+    );
 
     let switch_start = switch
         .find("context_switch_start:")
@@ -6459,6 +6487,67 @@ fn scheduler_handoffs_mask_interrupts_before_observing_global_state() {
         .find("s.charge_current_runtime(1)")
         .expect("yield scheduler mutation");
     assert!(mask < mutation);
+    assert!(
+        yield_body.contains("highest_ready_priority(Some(cpu_id)).is_none()"),
+        "cooperative yield must not park on idle while IRQs are still masked"
+    );
+    assert!(
+        yield_body.contains("ThreadId::IDLE"),
+        "idle itself may still WFI; only non-idle cooperative yields must stay runnable"
+    );
+    assert!(
+        yield_body.contains("irq_state_enabled(interrupt_state)"),
+        "lone-thread yield must only WFI after restoring the caller's IRQ state"
+    );
+    assert!(
+        yield_body.contains("wait_for_interrupt()"),
+        "lone-thread ARM64 yield must WFI so virtio/timer IRQs and CNTPCT can advance"
+    );
+    assert!(
+        yield_body.contains("arm_at_nanoseconds(wake_ns)"),
+        "lone-thread ARM64 yield must arm a near-term CNTP compare before WFI"
+    );
+    let timer = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/timer.rs"))
+        .expect("read ARM64 timer");
+    let arm_start = timer
+        .find("pub fn arm_at_nanoseconds(deadline: u64)")
+        .expect("arm_at_nanoseconds");
+    let arm = braced_body(&timer[arm_start..]);
+    assert!(
+        arm.contains("live_compare("),
+        "ARM64 CNTP arming must drop expired compares or GICv3 never raises a new edge"
+    );
+    assert!(
+        arm.contains("programmed_compare <= current_count"),
+        "ARM64 CNTP must rewrite CVAL when the cached compare is already in the past"
+    );
+    let cpu = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/cpu.rs"))
+        .expect("read ARM64 cpu");
+    let wfi_start = cpu
+        .find("pub fn wait_for_interrupt()")
+        .expect("wait_for_interrupt");
+    let wfi = braced_body(&cpu[wfi_start..]);
+    assert!(
+        wfi.contains("dsb sy"),
+        "ARM64 WFI must DSB so CNTP/DAIF updates are globally visible to TCG"
+    );
+
+    let yield_cpu_start = scheduler
+        .find("pub fn yield_now_on_cpu(cpu_id: usize)")
+        .expect("scheduler cpu yield");
+    let yield_cpu = braced_body(&scheduler[yield_cpu_start..]);
+    assert!(
+        yield_cpu.contains("highest_ready_priority(Some(cpu_id)).is_none()"),
+        "CPU-directed cooperative yield must also keep a lone runnable thread off idle WFI"
+    );
+    assert!(
+        yield_cpu.contains("wait_for_interrupt()"),
+        "CPU-directed lone-thread yield must WFI instead of busy-returning"
+    );
+    assert!(
+        yield_cpu.contains("arm_at_nanoseconds(wake_ns)"),
+        "CPU-directed lone-thread yield must arm CNTP before WFI"
+    );
 }
 
 #[test]
@@ -6711,10 +6800,10 @@ fn hermes_campaign_vm_create_skips_boot_wait_when_host_launch_fails() {
         wait_pos < kill_pos && skip_pos < kill_pos,
         "both boot-wait and skip paths must still recycle with vm -k"
     );
-    assert!(launcher.contains("LAUNCHER_VERSION = 10"));
+    assert!(launcher.contains("LAUNCHER_VERSION = 11"));
     assert!(launcher.contains("launch_retry=1"));
     assert!(launcher.contains("retrying_launch("));
-    assert!(starter.contains("REQUIRED_VERSION=10"));
+    assert!(starter.contains("REQUIRED_VERSION=11"));
     assert!(starter.contains("fields.get(\"launch_retry\") != \"1\""));
     assert!(docs.contains("skip") || docs.contains("not launched"));
 }
@@ -6833,17 +6922,26 @@ fn hermes_host_tests_use_fixed_enum_jobs_and_protocol() {
     assert!(!client.contains("Self::St"));
     assert!(!client.contains("Self::Skt"));
     assert!(client.contains("SMROS_TEST_RUN 1\\njob="));
+    assert!(client.contains("SMROS_TEST_STATUS 1\\njob="));
     assert!(launcher.contains("if job not in {\"ut\", \"it\"}"));
     assert!(!launcher.contains("shell=True"));
+    assert!(launcher.contains("async_test_jobs=1"));
+    assert!(launcher.contains("def start_test_job"));
+    assert!(launcher.contains("def test_job_status"));
     assert!(client.contains("HERMES_TEST_WAIT_NANOS"));
+    assert!(client.contains("HERMES_TEST_POLL_NANOS"));
     assert!(client.contains("HERMES_HOST_READY_WAIT_NANOS"));
     assert!(client.contains("HERMES_HOST_RESUME_WAIT_NANOS"));
     assert!(client.contains("HERMES_TEST_CONNECT_ATTEMPTS"));
     assert!(client.contains("fn wait_for_host_transport("));
     assert!(client.contains("fn connect_launcher("));
     assert!(client.contains("fn connect_launcher_wait("));
+    assert!(client.contains("fn accept_hermes_test("));
+    assert!(client.contains("fn poll_hermes_test("));
+    assert!(client.contains("fn transact_launcher("));
+    assert!(client.contains("socket.abort()"));
     assert!(client.contains("read_response_until"));
-    assert!(client.contains("socket.keepalive()"));
+    assert!(!client.contains("socket.keepalive()"));
     let wait_transport = client
         .find("pub fn wait_for_host_transport(")
         .expect("wait_for_host_transport");
@@ -6858,15 +6956,31 @@ fn hermes_host_tests_use_fixed_enum_jobs_and_protocol() {
         .find("fn run_hermes_test_once(")
         .expect("run_hermes_test_once");
     let once_body = braced_body(&client[run_once..]);
-    assert!(once_body.contains("connect_launcher("));
-    assert!(once_body.contains("HERMES_TEST_CONNECT_ATTEMPTS"));
-    assert!(once_body.contains("retryable_host_connect"));
+    assert!(once_body.contains("accept_hermes_test("));
+    assert!(once_body.contains("poll_hermes_test("));
+    assert!(once_body.contains("HERMES_TEST_WAIT_NANOS"));
+    let accept = client
+        .find("fn accept_hermes_test(")
+        .expect("accept_hermes_test");
+    let accept_body = braced_body(&client[accept..]);
+    assert!(accept_body.contains("transact_launcher("));
+    assert!(accept_body.contains("HERMES_TEST_CONNECT_ATTEMPTS"));
+    assert!(accept_body.contains("retryable_host_connect"));
+    let transact = client
+        .find("fn transact_launcher(")
+        .expect("transact_launcher");
+    let transact_body = braced_body(&client[transact..]);
+    assert!(transact_body.contains("connect_launcher_wait("));
+    assert!(transact_body.contains("HERMES_TEST_TRANSACT_WAIT_NANOS"));
+    assert!(transact_body.contains("read_response_until"));
+    assert!(transact_body.contains("socket.abort()"));
     let launch = client.find("pub fn launch(").expect("launch");
     let launch_body = braced_body(&client[launch..]);
     assert!(launch_body.contains("connect_launcher("));
-    assert!(starter.contains("REQUIRED_VERSION=10"));
+    assert!(starter.contains("REQUIRED_VERSION=11"));
     assert!(starter.contains("fields.get(\"hermes_test_jobs\") != \"1\""));
     assert!(starter.contains("fields.get(\"linux_boot\") != \"1\""));
+    assert!(starter.contains("fields.get(\"async_test_jobs\") != \"1\""));
     assert!(launcher.contains("SMROS_VM_WAIT_BOOT 1"));
     assert!(launcher.contains("SMROS Linux VM initramfs"));
     assert!(client.contains("fn wait_for_linux_boot("));
@@ -6939,6 +7053,63 @@ fn hermes_test_orchestration_is_documented_and_smoke_wired() {
 }
 
 #[test]
+fn hermes_product_api_campaigns_cover_lvgl_and_qml() {
+    let policy = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/hermes_shell_logic_shared.rs"
+    ));
+    let shell = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/user_shell.rs"
+    ));
+    let agent = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/hermes_agent.rs"
+    ));
+    let docs = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/USER_SHELL.md"
+    ));
+
+    let catalog_start = policy
+        .find("const CAMPAIGN_CATALOG")
+        .expect("default campaign catalog");
+    let catalog_end = policy
+        .find("const SYSCALL_CAMPAIGN_CATALOG")
+        .expect("syscall catalog");
+    let default_catalog = &policy[catalog_start..catalog_end];
+    assert!(!policy.contains("HermesCampaignMode::Ui"));
+    assert!(!policy.contains("const UI_CAMPAIGN_CATALOG"));
+    assert!(default_catalog.contains("campaign_case_const(\"lvgl\", \"test\""));
+    assert!(default_catalog.contains("campaign_case_const(\"lvgl\", \"render\""));
+    assert!(default_catalog.contains("campaign_case_const(\"qml\", \"test\""));
+    assert!(default_catalog.contains("campaign_case_const(\"qml\", \"render\""));
+    assert!(default_catalog.contains("campaign_case_const(\"testsc\""));
+    assert!(
+        default_catalog.contains("campaign_case_const(\"posixtest\", \"test\", \"getpid/1-1.c\"")
+    );
+    assert!(default_catalog.contains("campaign_case_const(\"hermes\", \"web\""));
+    assert!(policy.contains("\"lvgl\" => lvgl_policy(args)"));
+    assert!(policy.contains("\"qml\" => qml_policy(args)"));
+    assert!(shell.contains("name: \"qml\""));
+    assert!(shell.contains("fn cmd_qml("));
+    assert!(shell.contains("mode=ops|syscall"));
+    assert!(!shell.contains("mode=ops|syscall|ui"));
+    assert!(!shell.contains("HermesCampaignMode::Ui => \"ui\""));
+    assert!(shell.contains("default test-all includes lvgl/qml/testsc/posixtest"));
+    assert!(agent.contains("slug: \"smros-ui\""));
+    assert!(agent.contains("lvgl::init()"));
+    assert!(agent.contains("qml_cluster::init()"));
+    assert!(!agent.contains("lvgl::run_full_test()"));
+    assert!(!agent.contains("qml_cluster::run_full_test()"));
+    assert!(agent.contains("pub lvgl_ok: bool"));
+    assert!(agent.contains("pub qml_ok: bool"));
+    assert!(docs.contains("mode=ops|syscall"));
+    assert!(!docs.contains("mode=ui"));
+    assert!(docs.contains("`qml test`"));
+}
+
+#[test]
 fn fuzzsc_success_path_uses_live_mprotect_and_names_posix_errors() {
     let fuzz = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -6967,6 +7138,8 @@ fn fuzzsc_success_path_uses_live_mprotect_and_names_posix_errors() {
     assert!(!catalog.contains(r#"campaign_case_const("fuzzsc", "seed=1", "iterations=1""#));
     assert!(shell.contains("campaign_fuzzsc_seed_arg"));
     assert!(shell.contains("HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG"));
+    assert!(shell.contains("HERMES_CAMPAIGN_FUZZSC_TIME_ARG"));
+    assert!(shell.contains("HERMES_CAMPAIGN_FUZZSC_TIME_ARG,"));
     let test_all_start = shell
         .find("fn run_hermes_test_all(")
         .expect("test-all function");
@@ -7003,6 +7176,8 @@ fn fuzzsc_kernel_dispatch_does_not_block_the_shell() {
     let riscv_cpu = std::fs::read_to_string(repository.join("src/kernel_lowlevel/RISCV64/cpu.rs"))
         .expect("read RISC-V cpu");
 
+    assert!(fuzz.contains("fxfs::suspend_persist()"));
+    assert!(fuzz.contains("fxfs::forget_pending_persist()"));
     assert!(fuzz.contains("sleep_timespec: LinuxTimespec"));
     assert!(fuzz.contains("fn sleep_timespec_ptr("));
     assert!(fuzz.contains("101 => out = [state.arena.sleep_timespec_ptr(), 0, 0, 0, 0, 0]"));
@@ -7055,9 +7230,20 @@ fn fuzzsc_second_invocation_does_not_block_on_leftover_linux_state() {
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
         .expect("read syscall runtime");
 
-    let fuzz_fn_start = fuzz
+    let wrapper_start = fuzz
         .find("pub fn fuzz_syscalls_with_config(")
         .expect("fuzz_syscalls_with_config");
+    let wrapper = braced_body(&fuzz[wrapper_start..]);
+    assert!(
+        wrapper.contains("fxfs::suspend_persist()")
+            && wrapper.contains("fuzz_syscalls_with_config_inner(config)")
+            && wrapper.contains("fxfs::forget_pending_persist()"),
+        "campaign fuzzsc must batch FxFS persist around leftover Linux reset"
+    );
+
+    let fuzz_fn_start = fuzz
+        .find("fn fuzz_syscalls_with_config_inner(")
+        .expect("fuzz_syscalls_with_config_inner");
     let fuzz_fn = braced_body(&fuzz[fuzz_fn_start..]);
     let first_reset = fuzz_fn
         .find("reset_linux_process_state()")
@@ -8181,6 +8367,49 @@ fn linux_sync_syscalls_force_fxfs_persistence() {
 }
 
 #[test]
+fn process_create_reclaims_terminated_slots_before_reuse() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let memory = std::fs::read_to_string(repository.join("src/kernel_lowlevel/memory.rs"))
+        .expect("read process manager");
+    let create_start = memory
+        .find("pub fn create_process(")
+        .expect("create_process");
+    let create = braced_body(&memory[create_start..]);
+    assert!(create.contains("ProcessState::Terminated"));
+    assert!(create.contains("self.reclaim_process_slot(i)"));
+    assert!(memory.contains("fn reclaim_process_slot("));
+    assert!(memory.contains("fn free_process_pages("));
+    let reclaim_start = memory
+        .find("fn reclaim_process_slot(")
+        .expect("reclaim_process_slot");
+    let reclaim = braced_body(&memory[reclaim_start..]);
+    assert!(reclaim.contains("Self::free_process_pages("));
+    assert!(reclaim.contains("ProcessControlBlock::new()"));
+    assert!(reclaim.contains("self.release_dynamic_name(name)"));
+}
+
+#[test]
+fn virtio_net_tx_completion_wait_uses_a_monotonic_deadline() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let net = std::fs::read_to_string(repository.join("src/user_level/drivers/net.rs"))
+        .expect("read VirtIO net driver");
+
+    assert!(net.contains("const VIRTIO_COMPLETION_TIMEOUT_NANOS: u64 = 5_000_000_000;"));
+    let send_start = net
+        .find("fn send_frame(&mut self, frame: &[u8])")
+        .expect("VirtIO net TX path");
+    let send = braced_body(&net[send_start..]);
+    assert!(send.contains("let completion_deadline ="));
+    assert!(send.contains("get_nanoseconds()"));
+    assert!(send.contains("driver_logic::virtio_completion_timed_out("));
+    assert!(send.contains("let start_used ="));
+    assert!(send.contains("if used != start_used"));
+    assert!(send.contains("scheduler::yield_now()"));
+    assert!(!send.contains("tx_last_used_idx.wrapping_add(1)"));
+    assert!(!send.contains("NET_TX_TIMEOUT_SPINS"));
+}
+
+#[test]
 fn virtio_block_completion_wait_uses_a_monotonic_deadline() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let block = std::fs::read_to_string(repository.join("src/user_level/drivers/block.rs"))
@@ -8196,6 +8425,7 @@ fn virtio_block_completion_wait_uses_a_monotonic_deadline() {
     assert!(submit.contains("driver_logic::virtio_completion_timed_out("));
     assert!(submit.contains("let start_used ="));
     assert!(submit.contains("if used != start_used"));
+    assert!(submit.contains("scheduler::yield_now()"));
     assert!(!submit.contains("last_used_idx.wrapping_add(1)"));
     assert!(!submit.contains("for _ in 0..VIRTIO_TIMEOUT_SPINS"));
 }
@@ -8247,6 +8477,474 @@ fn aarch64_directory_open_flags_match_staged_glibc() {
     assert!(compact_shell
         .contains("crate::syscall::sys_openat(usize::MAX-99,dir_path.as_ptr()asusize,0o40000,0)"));
     assert!(verification.contains("pub const LINUX_O_DIRECTORY: usize = 0o40000;"));
+}
+
+#[test]
+fn testsc_component_launchers_keep_a_live_arm64_page_table() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let cpu = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/cpu.rs"))
+        .expect("read AArch64 CPU module");
+    let process = std::fs::read_to_string(repository.join("src/user_level/apps/user_process.rs"))
+        .expect("read user process manager");
+    let component =
+        std::fs::read_to_string(repository.join("src/user_level/services/component.rs"))
+            .expect("read component manager");
+    let shell = std::fs::read_to_string(repository.join("src/user_level/services/user_shell.rs"))
+        .expect("read user shell");
+    let docker =
+        std::fs::read_to_string(repository.join("src/user_level/services/docker_compat.rs"))
+            .expect("read Docker compatibility service");
+    let net = std::fs::read_to_string(repository.join("src/user_level/services/net.rs"))
+        .expect("read guest TCP stack");
+
+    let user_start = cpu
+        .find("pub unsafe fn switch_to_user(")
+        .expect("generic EL0 transfer");
+    let user = braced_body(&cpu[user_start..]);
+    assert!(
+        user.contains("if ttbr0 != 0"),
+        "ARM64 EL0 transfer must not install TTBR0=0 or Memory Syscall Test virtio/timer waits hang"
+    );
+    let wait_start = cpu.find("pub fn wait_for_event()").expect("wait_for_event");
+    let wait = braced_body(&cpu[wait_start..]);
+    assert!(
+        wait.contains("wait_for_interrupt()"),
+        "ARM64 leftover component threads must WFI, not WFE, after Memory Syscall Test"
+    );
+
+    assert!(process.contains("pub fn user_root_paddr(pid: usize)"));
+    assert!(
+        process.contains("fn install_el0_trampoline(code_pfn: u64)"),
+        "Memory Syscall Test user processes must install an EL0-executable trampoline"
+    );
+    assert!(
+        process.contains("pub fn canonical_user_entry(entry: u64)"),
+        "component launchers must rewrite kernel `.text` entries before EL0"
+    );
+    assert!(
+        process.contains("mov x8, #172"),
+        "ARM64 leftover launchers must SVC getpid/exit from user-mapped text"
+    );
+    let launcher_start = component
+        .find("extern \"C\" fn component_launcher_entry()")
+        .expect("component launcher");
+    let launcher = braced_body(&component[launcher_start..]);
+    assert!(
+        launcher.contains("user_process::user_root_paddr(pid)"),
+        "component launchers must install the process page table before EL0"
+    );
+    assert!(
+        launcher.contains("user_process::canonical_user_entry("),
+        "component launchers must not ERET into kernel `.text` marked UXN"
+    );
+    assert!(
+        !launcher.contains("component_el0_entry as *const () as u64"),
+        "leftover Memory Syscall Test launchers must use USER_CODE_VADDR, not kernel text"
+    );
+    assert!(
+        !launcher.contains("switch_to_el0(entry, user_stack, 0)"),
+        "component launchers must not drop to EL0 with TTBR0=0"
+    );
+    assert!(
+        component.contains("build_trampoline_elf(user_logic::USER_CODE_VADDR as u64)"),
+        "boot trampoline ELF must advertise the user-mapped EL0 entry"
+    );
+    let start_launchers = component
+        .find("fn start_component_launchers(")
+        .expect("start_component_launchers");
+    let start_body = braced_body(&component[start_launchers..]);
+    assert!(
+        start_body.contains("Self::drain_component_launchers()"),
+        "Memory Syscall Test must drain leftover EL0 launchers before later host jobs"
+    );
+
+    let testsc_start = shell.find("fn cmd_test_syscall(").expect("testsc command");
+    let testsc = braced_body(&shell[testsc_start..]);
+    assert!(
+        testsc.contains("sys_handle_close(exception_vmar)"),
+        "Memory Syscall Test must close the exception process VMAR"
+    );
+    assert!(
+        testsc.contains("net::drain_receive_queue()"),
+        "Memory Syscall Test must drain leftover virtio RX before host TCP jobs"
+    );
+
+    let port_start = docker
+        .find("pub fn run_docker_runtime_port()")
+        .expect("Docker/runc smoke entry");
+    let port = braced_body(&docker[port_start..]);
+    assert!(
+        port.contains("sys_handle_close(result.process_handle)"),
+        "Docker/runc smoke must close the modeled runtime process so VMARs do not leak"
+    );
+    assert!(net.contains("pub fn drain_receive_queue()"));
+}
+
+#[test]
+fn hermes_host_status_polls_use_short_tcp_waits() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let net = std::fs::read_to_string(repository.join("src/user_level/services/net.rs"))
+        .expect("read guest TCP stack");
+    let client = std::fs::read_to_string(repository.join("src/user_level/services/vm_host.rs"))
+        .expect("read host launcher client");
+    let launcher = std::fs::read_to_string(repository.join("scripts/smros-vm-launcher.py"))
+        .expect("read host launcher");
+
+    assert!(
+        net.contains("const TCP_POLL_SPINS: usize = 2_048;"),
+        "ARM64 TCG cannot busy-poll 1M virtio spins per TCP wait"
+    );
+    assert!(
+        net.contains("const NET_POLL_SPINS: usize = 2_048;"),
+        "ARP/DHCP must not busy-poll 1M virtio MMIO barriers on ARM64 TCG"
+    );
+    assert!(net.contains("const TCP_CONNECT_MAX_POLLS: usize = 64;"));
+    let arp_start = net.find("fn resolve_mac(").expect("resolve_mac");
+    let arp = braced_body(&net[arp_start..]);
+    assert!(
+        arp.contains("scheduler::yield_now()"),
+        "ARP waits must yield so ARM64 TCG can retire virtio RX"
+    );
+    assert!(
+        !arp.contains("1_000_000"),
+        "ARP must not restore the 1M-spin busy wait"
+    );
+    assert!(net.contains("const TCP_CONNECT_WAIT_NANOS"));
+    assert!(net.contains("const TCP_CONNECT_RETRY_NANOS"));
+    assert!(net.contains("const TCP_DRAIN_FRAMES: usize = 64;"));
+    let connect_start = net.find("pub fn tcp_connect(").expect("tcp_connect");
+    let connect = braced_body(&net[connect_start..]);
+    assert!(connect.contains("TCP_POLL_SPINS"));
+    assert!(connect.contains("scheduler::yield_now()"));
+    let scheduler = std::fs::read_to_string(repository.join("src/kernel_objects/scheduler.rs"))
+        .expect("read scheduler");
+    let yield_start = scheduler
+        .find("pub fn yield_now()")
+        .expect("scheduler yield");
+    let yield_body = braced_body(&scheduler[yield_start..]);
+    assert!(
+        yield_body.contains("wait_for_interrupt()"),
+        "ARM64 TCP waits must WFI on lone-thread yield or CNTPCT never advances"
+    );
+    assert!(
+        yield_body.contains("arm_at_nanoseconds(wake_ns)"),
+        "ARM64 TCP waits must arm CNTP before WFI or TCG never retires virtio"
+    );
+    assert!(!connect.contains("NET_POLL_SPINS"));
+    let deadline_pos = connect
+        .find("now >= deadline")
+        .expect("tcp_connect must check the connect deadline");
+    let receive_pos = connect
+        .find("net_receive_frame_timeout")
+        .expect("tcp_connect must poll virtio RX");
+    assert!(
+        deadline_pos < receive_pos,
+        "ARM64 leftover virtio frames must not skip the TCP connect deadline"
+    );
+    assert!(
+        connect.contains("TCP_FLAG_RST"),
+        "stale ARM64 slirp SYN-ACKs must be RST instead of pinning connect"
+    );
+    assert!(connect.contains("leftover_ipv4_tcp_frame"));
+    assert!(connect.contains("rst_leftover_ipv4_tcp_frame"));
+    assert!(connect.contains("rst_unmatched_tcp_segment"));
+    assert!(connect.contains("segment.ack"));
+    assert!(connect.contains("TCP_CONNECT_RETRY_NANOS"));
+    assert!(net.contains("fn leftover_ipv4_tcp_frame("));
+    assert!(net.contains("fn rst_leftover_ipv4_tcp_frame("));
+    let drain_start = net
+        .find("fn drain_pending_frames(")
+        .expect("drain leftover frames");
+    let drain = braced_body(&net[drain_start..]);
+    assert!(
+        drain.contains("rst_leftover_ipv4_tcp_frame"),
+        "leftover slirp TCP frames must be RST, not dropped, before a later connect"
+    );
+
+    let abort_start = net.find("pub fn abort(").expect("tcp abort");
+    let abort = braced_body(&net[abort_start..]);
+    assert!(
+        !abort.contains("if !self.connected"),
+        "FIN from the launcher must not skip the guest RST teardown"
+    );
+    assert!(abort.contains("TCP_FLAG_RST"));
+    assert!(net.contains("impl Drop for TcpSocket"));
+
+    let read_start = net
+        .find("fn read_with_attempts(")
+        .expect("read_with_attempts");
+    let read = braced_body(&net[read_start..]);
+    assert!(read.contains("TCP_POLL_SPINS"));
+    assert!(read.contains("scheduler::yield_now()"));
+    assert!(!read.contains("NET_POLL_SPINS"));
+
+    let wait_start = client
+        .find("fn wait_poll_interval(")
+        .expect("wait_poll_interval");
+    let wait = braced_body(&client[wait_start..]);
+    assert!(
+        wait.contains("polls >= 32"),
+        "host-job poll waits must bound WFI loops if CNTPCT stalls"
+    );
+    assert!(client.contains("HERMES_TEST_TRANSACT_WAIT_NANOS"));
+    let transact_start = client
+        .find("fn transact_launcher(")
+        .expect("transact_launcher");
+    let transact = braced_body(&client[transact_start..]);
+    assert!(transact.contains("HERMES_TEST_TRANSACT_WAIT_NANOS"));
+    assert!(transact.contains("read_response_until"));
+    assert!(!transact.contains("connect_launcher(DEFAULT_LAUNCHER_PORT)"));
+
+    let timeout_start = launcher
+        .find("except subprocess.TimeoutExpired as exc:")
+        .expect("job timeout handler");
+    let timeout = &launcher[timeout_start..timeout_start + 400];
+    assert!(
+        timeout.contains("terminate_process_group(exc.pid)"),
+        "timed-out make ut must kill its process group"
+    );
+    assert!(launcher.contains("def terminate_process_group("));
+}
+
+#[test]
+fn docker_runc_smoke_batches_fxfs_persistence() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let docker =
+        std::fs::read_to_string(repository.join("src/user_level/services/docker_compat.rs"))
+            .expect("read Docker compatibility service");
+
+    let port_start = docker
+        .find("pub fn run_docker_runtime_port()")
+        .expect("Docker/runc smoke entry");
+    let port = braced_body(&docker[port_start..]);
+    let port_suspend = port
+        .find("let _persist_guard = fxfs::suspend_persist();")
+        .expect("runc smoke must batch FxFS persistence");
+    let port_install = port
+        .find("install_sample_oci_bundle()?")
+        .expect("runc smoke installs the sample OCI bundle");
+    let port_forget = port
+        .find("fxfs::forget_pending_persist();")
+        .expect("runc smoke must not persist ephemeral OCI fixtures");
+    assert!(
+        port_suspend < port_install && port_install < port_forget,
+        "runc smoke must suspend FxFS persist before installing the OCI bundle"
+    );
+
+    let install_start = docker
+        .find("fn install_sample_oci_bundle()")
+        .expect("sample OCI bundle installer");
+    let install = braced_body(&docker[install_start..]);
+    let install_suspend = install
+        .find("let _persist_guard = fxfs::suspend_persist();")
+        .expect("sample OCI bundle install must batch persistence");
+    let install_create = install
+        .find("fxfs::create_dir")
+        .expect("sample OCI bundle creates directories");
+    assert!(
+        install_suspend < install_create,
+        "sample OCI bundle install must suspend persist before creating directories"
+    );
+
+    let prepare_start = docker
+        .find("fn prepare_docker_pseudo_files(")
+        .expect("Docker pseudo-file setup");
+    let prepare = braced_body(&docker[prepare_start..]);
+    let prepare_suspend = prepare
+        .find("let _persist_guard = fxfs::suspend_persist();")
+        .expect("Docker pseudo-file setup must batch persistence");
+    let prepare_create = prepare
+        .find("fxfs::create_dir")
+        .expect("Docker pseudo-file setup creates directories");
+    assert!(
+        prepare_suspend < prepare_create,
+        "Docker pseudo-file setup must suspend persist before creating directories"
+    );
+}
+
+#[test]
+fn testsc_model_and_ui_smokes_skip_fxfs_persist() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let gemma = std::fs::read_to_string(repository.join("src/user_level/services/gemma.rs"))
+        .expect("read Gemma service");
+    let hermes =
+        std::fs::read_to_string(repository.join("src/user_level/services/hermes_agent.rs"))
+            .expect("read Hermes agent");
+    let lvgl = std::fs::read_to_string(repository.join("src/user_level/services/lvgl.rs"))
+        .expect("read LVGL port");
+    let qml = std::fs::read_to_string(repository.join("src/user_level/services/qml_cluster.rs"))
+        .expect("read QML cluster");
+
+    for (label, source, marker) in [
+        ("Gemma", gemma.as_str(), "pub fn run_full_test()"),
+        ("Hermes", hermes.as_str(), "pub fn run_full_test()"),
+        ("LVGL", lvgl.as_str(), "pub fn run_full_test()"),
+        ("QML", qml.as_str(), "pub fn run_full_test()"),
+    ] {
+        let start = source
+            .find(marker)
+            .unwrap_or_else(|| panic!("{label} run_full_test"));
+        let body = braced_body(&source[start..]);
+        let suspend = body
+            .find("let _persist_guard = fxfs::suspend_persist();")
+            .unwrap_or_else(|| panic!("{label} smoke must batch FxFS persistence"));
+        let forget = body
+            .find("fxfs::forget_pending_persist();")
+            .unwrap_or_else(|| {
+                panic!("{label} smoke must not persist testsc fixtures after Docker/runc")
+            });
+        assert!(
+            suspend < forget,
+            "{label} smoke must suspend persist before forgetting the batched write"
+        );
+        assert!(
+            !body[..suspend].contains("prepare_storage()?")
+                && !body[..suspend].contains("info()")
+                && !body[..suspend].contains("render_demo()?")
+                && !body[..suspend].contains("render_cluster()?"),
+            "{label} smoke must suspend persist before the first FxFS write"
+        );
+    }
+
+    let gemma_test_start = gemma
+        .find("pub fn run_full_test()")
+        .expect("Gemma run_full_test");
+    let gemma_test = braced_body(&gemma[gemma_test_start..]);
+    assert!(
+        gemma_test.contains("reset_generation_log()?"),
+        "Gemma smoke must truncate generation.log instead of appending forever"
+    );
+    assert!(gemma.contains("fn reset_generation_log()"));
+    assert!(gemma.contains("GEMMA_LOG_MAX_BYTES"));
+}
+
+#[test]
+fn kernel_dispatch_enter_leave_is_nested() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let task = std::fs::read_to_string(repository.join("src/syscall/linux_task.rs"))
+        .expect("read Linux task runtime");
+
+    assert!(
+        task.contains("static KERNEL_DISPATCH_DEPTH: AtomicUsize"),
+        "kernel dispatch must track nested enter/leave depth"
+    );
+    let enter_start = task
+        .find("pub(crate) fn enter_kernel_dispatch()")
+        .expect("enter_kernel_dispatch");
+    let enter = braced_body(&task[enter_start..]);
+    assert!(
+        enter.contains("KERNEL_DISPATCH_DEPTH.fetch_add(1, Ordering::Relaxed)"),
+        "nested enter_kernel_dispatch must increment depth"
+    );
+
+    let leave_start = task
+        .find("pub(crate) fn leave_kernel_dispatch()")
+        .expect("leave_kernel_dispatch");
+    let leave = braced_body(&task[leave_start..]);
+    assert!(
+        leave.contains("if depth > 1"),
+        "nested leave_kernel_dispatch must keep the outer dispatch active"
+    );
+    assert!(
+        leave.contains("KERNEL_DISPATCH_INACTIVE"),
+        "outer leave_kernel_dispatch must still clear the dispatch thread"
+    );
+}
+
+#[test]
+fn hermes_campaign_fuzzsc_bounds_runtime_and_skips_fxfs_persist() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let shell = std::fs::read_to_string(repository.join("src/user_level/services/user_shell.rs"))
+        .expect("read user shell");
+    let catalog = std::fs::read_to_string(
+        repository.join("src/user_level/services/hermes_shell_logic_shared.rs"),
+    )
+    .expect("read hermes catalog");
+    let fuzz = std::fs::read_to_string(repository.join("src/syscall/fuzz.rs")).expect("read fuzz");
+
+    assert!(catalog.contains("HERMES_CAMPAIGN_FUZZSC_TIME_ARG: &str = \"time=5\""));
+    let bound_start = shell
+        .find("fn bound_hermes_campaign_argv")
+        .expect("bound campaign argv");
+    let bound = braced_body(&shell[bound_start..]);
+    assert!(bound.contains("HERMES_CAMPAIGN_FUZZSC_TIME_ARG"));
+    assert!(bound.contains("3,"));
+    assert!(fuzz.contains("let _persist_guard = fxfs::suspend_persist();"));
+    assert!(fuzz.contains("fxfs::forget_pending_persist();"));
+}
+
+#[test]
+fn fxfs_shared_persist_breaks_dirent_cycles() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fxfs = std::fs::read_to_string(repository.join("src/user_level/services/fxfs.rs"))
+        .expect("read fxfs");
+    let collect_start = fxfs
+        .find("fn collect_shared_persist_ids(")
+        .expect("collect_shared_persist_ids");
+    let collect = braced_body(&fxfs[collect_start..]);
+    assert!(
+        collect.contains("if !visiting.insert(object_id)"),
+        "shared persist must ignore already-visiting dirent cycles"
+    );
+}
+
+#[test]
+fn process_create_rolls_back_failed_init_slots() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let memory = std::fs::read_to_string(repository.join("src/kernel_lowlevel/memory.rs"))
+        .expect("read process manager");
+    let create_start = memory
+        .find("pub fn create_process(")
+        .expect("create_process");
+    let create = braced_body(&memory[create_start..]);
+    assert!(
+        create.contains("self.reclaim_process_slot(i)"),
+        "failed process init must reclaim the slot instead of leaving a Ready PCB behind"
+    );
+    let reclaim_start = memory
+        .find("fn reclaim_process_slot(")
+        .expect("reclaim_process_slot");
+    let reclaim = braced_body(&memory[reclaim_start..]);
+    assert!(
+        reclaim.contains("self.processes[index] = ProcessControlBlock::new();"),
+        "failed process init must not leave a Ready PCB behind"
+    );
+    assert!(
+        reclaim.contains("Self::free_process_pages("),
+        "failed process init must free any pages allocated before the failure"
+    );
+
+    let terminate_start = memory
+        .find("pub fn terminate_process(")
+        .expect("terminate_process");
+    let terminate = braced_body(&memory[terminate_start..]);
+    assert!(
+        terminate.contains("release_dynamic_name"),
+        "VM recycle must free dynamic process names instead of leaving terminated slots aliased"
+    );
+    assert!(
+        terminate.contains("pcb.name = \"\""),
+        "terminated process slots must not keep a dangling name pointer"
+    );
+}
+
+#[test]
+fn hermes_top_skips_terminated_vm_slots() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let shell = std::fs::read_to_string(repository.join("src/user_level/services/user_shell.rs"))
+        .expect("read user shell");
+    let top_start = shell.find("fn cmd_top(").expect("cmd_top");
+    let top = braced_body(&shell[top_start..]);
+    assert!(
+        top.contains("pcb.state != ProcessState::Terminated"),
+        "top must not walk terminated VM process slots after nested qemu recycle"
+    );
+    let ps_start = shell.find("fn cmd_ps(").expect("cmd_ps");
+    let ps = braced_body(&shell[ps_start..]);
+    assert!(
+        ps.contains("pcb.state != ProcessState::Terminated"),
+        "ps must not print recycled VM names from terminated slots"
+    );
 }
 
 #[test]

@@ -331,6 +331,7 @@ pub struct DockerRunResult {
 }
 
 pub fn run_docker_runtime_port() -> Result<DockerCompatResult, DockerCompatError> {
+    let _persist_guard = fxfs::suspend_persist();
     install_sample_oci_bundle()?;
 
     let mut config_bytes = [0u8; OCI_CONFIG_MAX_BYTES];
@@ -339,7 +340,12 @@ pub fn run_docker_runtime_port() -> Result<DockerCompatResult, DockerCompatError
     let config = core::str::from_utf8(&config_bytes[..config_len])
         .map_err(|_| DockerCompatError::OciParse)?;
     let request = parse_oci_runtime_config(config)?;
-    run_oci_runtime_request(&request, config_len)
+    let result = run_oci_runtime_request(&request, config_len)?;
+    let _ = syscall::sys_handle_close(result.thread_handle);
+    let _ = syscall::sys_handle_close(result.process_handle);
+    let _ = syscall::sys_handle_close(result.job_handle);
+    fxfs::forget_pending_persist();
+    Ok(result)
 }
 
 pub fn smoke_test() -> bool {
@@ -1639,10 +1645,8 @@ fn run_oci_runtime_request(
     {
         return Err(DockerCompatError::StateMismatch);
     }
-
     prepare_docker_pseudo_files(request)?;
     let runtime = create_runc_runtime_task()?;
-
     syscall::reset_linux_container_state();
     syscall::sys_unshare(request.namespace_flags).map_err(DockerCompatError::Namespace)?;
     let ns_fd = syscall::sys_openat(AT_FDCWD, ROOT_PATH.as_ptr() as usize, O_DIRECTORY, 0)
@@ -1651,7 +1655,6 @@ fn run_oci_runtime_request(
         syscall::sys_setns(ns_fd, CLONE_NEWNET).map_err(DockerCompatError::Namespace);
     let _ = syscall::sys_close(ns_fd);
     setns_result?;
-
     apply_oci_mounts(request.mount_count)?;
     syscall::sys_pivot_root(ROOT_PATH.as_ptr() as usize, OLD_ROOT_PATH.as_ptr() as usize)
         .map_err(DockerCompatError::PivotRoot)?;
@@ -1660,7 +1663,6 @@ fn run_oci_runtime_request(
         .map_err(DockerCompatError::Uts)?;
     syscall::sys_setdomainname(DOMAIN.as_ptr() as usize, DOMAIN.len())
         .map_err(DockerCompatError::Uts)?;
-
     syscall::sys_prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0).map_err(DockerCompatError::NoNewPrivs)?;
     if syscall::sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0).ok() != Some(1) {
         return Err(DockerCompatError::StateMismatch);
@@ -1668,7 +1670,6 @@ fn run_oci_runtime_request(
     syscall::sys_seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, 1)
         .map_err(DockerCompatError::Seccomp)?;
     apply_capabilities(request.cap_effective, request.cap_permitted)?;
-
     let cgroup_path = cgroup_procs_path(request.cgroups_path);
     let cgroup_cstr = c_string(&cgroup_path);
     let cgroup_bytes = write_linux_file(
@@ -1733,6 +1734,7 @@ fn install_sample_oci_bundle() -> Result<(), DockerCompatError> {
     if !fxfs::init() {
         return Err(DockerCompatError::FxfsInit);
     }
+    let _persist_guard = fxfs::suspend_persist();
     let _ = fxfs::create_dir("/oci");
     let _ = fxfs::create_dir("/docker");
     let _ = fxfs::create_dir(DOCKER_CONTAINER_ROOT);
@@ -1912,6 +1914,7 @@ fn prepare_docker_pseudo_files(request: &OciRuntimeRequest<'_>) -> Result<(), Do
     if !fxfs::init() {
         return Err(DockerCompatError::FxfsInit);
     }
+    let _persist_guard = fxfs::suspend_persist();
     let cgroup_dir = cgroup_dir_path(request.cgroups_path);
     let cgroup_procs = cgroup_procs_path(request.cgroups_path);
     let apparmor_payload = apparmor_enforce_payload(request.apparmor_profile);

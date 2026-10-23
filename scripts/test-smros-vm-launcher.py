@@ -2,6 +2,8 @@
 
 import importlib.util
 import subprocess
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -16,7 +18,8 @@ SPEC.loader.exec_module(LAUNCHER)
 
 class HermesHostTestProtocolTests(unittest.TestCase):
     def test_launcher_protocol_version_covers_host_jobs(self) -> None:
-        self.assertGreaterEqual(LAUNCHER.LAUNCHER_VERSION, 8)
+        self.assertGreaterEqual(LAUNCHER.LAUNCHER_VERSION, 11)
+        self.assertIn("async_test_jobs=1", LAUNCHER.launcher_status())
 
     def test_only_fixed_test_jobs_are_accepted(self) -> None:
         self.assertEqual(LAUNCHER.parse_test_job({"job": "ut"}), ("make", "ut"))
@@ -62,6 +65,40 @@ class HermesHostTestProtocolTests(unittest.TestCase):
         self.assertNotIn("st", args[0])
         self.assertIn("OK job=it status=0", response)
 
+    def test_failed_it_summary_prefers_the_test_panic(self) -> None:
+        output = (
+            "test process_create_rolls_back_failed_init_slots ... FAILED\n"
+            "make[1]: Leaving directory '/home/steven/workspace/SMROS'\n"
+            "error: test failed, to rerun pass `--test integration_contracts`\n"
+            "thread 'process_create_rolls_back_failed_init_slots' panicked at tests/integration_contracts.rs:8605:5:\n"
+        )
+        summary = LAUNCHER.bounded_test_summary(output)
+        self.assertIn("panicked_at", summary)
+        self.assertNotIn("Leaving_directory", summary)
+
+    def test_failed_it_summary_ignores_make_leaving_directory_when_stdout_only(self) -> None:
+        stdout = (
+            "test process_create_rolls_back_failed_init_slots ... FAILED\n"
+            "make[1]: Leaving directory '/home/steven/workspace/SMROS'\n"
+        )
+        stderr = (
+            "thread 'process_create_rolls_back_failed_init_slots' panicked at tests/integration_contracts.rs:8605:5:\n"
+        )
+        summary = LAUNCHER.bounded_test_summary(stdout)
+        self.assertNotIn("Leaving_directory", summary)
+        self.assertIn("FAILED", summary)
+        only_make = LAUNCHER.bounded_test_summary(
+            "make[1]: Leaving directory '/home/steven/workspace/SMROS'\n"
+        )
+        self.assertNotIn("Leaving_directory", only_make)
+        combined = LAUNCHER.bounded_test_summary(stdout + stderr)
+        self.assertIn("panicked_at", combined)
+        src = MODULE_PATH.read_text()
+        run_start = src.index("def run_test_job")
+        run_end = src.index("def write_test_log")
+        self.assertIn("bounded_test_summary(output)", src[run_start:run_end])
+        self.assertNotIn("bounded_test_summary(result.stdout or output)", src[run_start:run_end])
+
     def test_linux_boot_marker_matches_initramfs_banner(self) -> None:
         self.assertGreaterEqual(LAUNCHER.LAUNCHER_VERSION, 9)
         self.assertIn("linux_boot=1", LAUNCHER.launcher_status())
@@ -84,6 +121,13 @@ class HermesHostTestProtocolTests(unittest.TestCase):
         self.assertEqual(header, "SMROS_VM_WAIT_BOOT 1")
         self.assertEqual(values["name"], "linux-demo")
 
+    def test_handler_assembles_split_tcp_requests(self) -> None:
+        src = MODULE_PATH.read_text()
+        handle_start = src.index("class Handler")
+        handle_end = src.index("class LauncherServer")
+        body = src[handle_start:handle_end]
+        self.assertIn('while b"\\nend\\n" not in data', body)
+        self.assertIn("self.request.recv(MAX_REQUEST - len(data))", body)
 
 
 
@@ -168,6 +212,50 @@ class LaunchRetryTests(unittest.TestCase):
         self.assertIn("start_new_session=True", body)
         args, kwargs = run.call_args
         self.assertTrue(kwargs.get("start_new_session"))
+
+
+    def test_start_test_job_accepts_immediately_and_status_polls(self) -> None:
+        started = threading.Event()
+        finished = threading.Event()
+
+        def blocking(*args, **kwargs):
+            started.set()
+            finished.wait(timeout=2)
+            return subprocess.CompletedProcess(
+                args=["make", "ut"],
+                returncode=0,
+                stdout="test result: ok. 1 passed\n",
+                stderr="",
+            )
+
+        with mock.patch.object(LAUNCHER.subprocess, "run", side_effect=blocking):
+            response = LAUNCHER.start_test_job({"job": "ut"})
+            self.assertIn("accepted=1", response)
+            token = [
+                field.split("=", 1)[1]
+                for field in response.split()
+                if field.startswith("token=")
+            ][0]
+            status = LAUNCHER.test_job_status({"job": "ut", "token": token})
+            self.assertIn("running=1", status)
+            self.assertTrue(started.wait(timeout=1))
+            finished.set()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                status = LAUNCHER.test_job_status({"job": "ut", "token": token})
+                if "status=0" in status:
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail(status)
+            self.assertIn("OK job=ut status=0", status)
+
+        src = MODULE_PATH.read_text()
+        self.assertIn("SMROS_TEST_STATUS 1", src)
+        self.assertIn("response = start_test_job(values)", src)
+        self.assertIn("response = test_job_status(values)", src)
+        self.assertIn("terminate_process_group(exc.pid)", src)
+        self.assertIn("def terminate_process_group(", src)
 
 
 if __name__ == "__main__":

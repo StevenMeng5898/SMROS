@@ -10,6 +10,7 @@ use crate::user_level::{
 pub const QEMU_USER_IP: [u8; 4] = [10, 0, 2, 15];
 pub const QEMU_USER_GATEWAY: [u8; 4] = [10, 0, 2, 2];
 pub const QEMU_USER_DNS: [u8; 4] = [10, 0, 2, 3];
+const TCP_CONNECT_MAX_POLLS: usize = 64;
 pub const DEFAULT_DNS_HOST: &str = "example.com";
 
 const ETH_TYPE_IPV4: u16 = 0x0800;
@@ -27,7 +28,12 @@ const DNS_SOURCE_PORT_BASE: u16 = 49152;
 const DNS_MAX_MESSAGE: usize = 512;
 const DNS_QUERY_ATTEMPTS: usize = 3;
 const DNS_RECV_ATTEMPTS: usize = 96;
-const NET_POLL_SPINS: usize = 1_000_000;
+const NET_POLL_SPINS: usize = 2_048;
+const ARP_RECV_ATTEMPTS: usize = 8;
+const TCP_POLL_SPINS: usize = 2_048;
+const TCP_CONNECT_WAIT_NANOS: u64 = 2_000_000_000;
+const TCP_CONNECT_RETRY_NANOS: u64 = 250_000_000;
+const TCP_DRAIN_FRAMES: usize = 64;
 const DHCP_CLIENT_PORT: u16 = 68;
 const DHCP_SERVER_PORT: u16 = 67;
 const DHCP_XID: u32 = 0x534d_4450;
@@ -41,6 +47,7 @@ const ICMP_ECHO_REPLY: u8 = 0;
 const ICMP_IDENTIFIER: u16 = 0x534d;
 const ICMP_SEQUENCE: u16 = 1;
 const TCP_SOURCE_PORT_BASE: u16 = 41000;
+const TCP_SOURCE_PORT_SPAN: u16 = 16384;
 const TCP_FLAG_FIN: u16 = 0x01;
 const TCP_FLAG_SYN: u16 = 0x02;
 const TCP_FLAG_RST: u16 = 0x04;
@@ -147,12 +154,14 @@ pub struct TcpSocket {
     seq: u32,
     ack: u32,
     connected: bool,
+    released: bool,
 }
 
 static mut CONFIG_STATE: NetConfigState = NetConfigState::new();
 static mut NEXT_DNS_QUERY_ID: u16 = DNS_QUERY_ID_BASE;
 static mut NEXT_DNS_SOURCE_PORT: u16 = DNS_SOURCE_PORT_BASE;
 static mut NEXT_TCP_PORT: u16 = TCP_SOURCE_PORT_BASE;
+static mut CACHED_GATEWAY_MAC: Option<[u8; 6]> = None;
 
 pub fn config() -> NetConfig {
     let state = config_state();
@@ -334,6 +343,11 @@ pub fn smoke_test() -> Result<[u8; 4], NetError> {
 }
 
 fn resolve_mac(target_ip: [u8; 4], out: &mut [u8; 6]) -> Result<(), NetError> {
+    if let Some(cached) = cached_gateway_mac(target_ip) {
+        *out = cached;
+        return Ok(());
+    }
+
     let source_mac = drivers::net_mac();
     let mut frame = [0u8; ETHERNET_FRAME_MAX];
     let mut rx = [0u8; ETHERNET_FRAME_MAX];
@@ -342,20 +356,39 @@ fn resolve_mac(target_ip: [u8; 4], out: &mut [u8; 6]) -> Result<(), NetError> {
         let len = build_arp_request(&mut frame, source_mac, source_ip(), target_ip)?;
         drivers::net_send_frame(&frame[..len]).map_err(NetError::Driver)?;
 
-        for _ in 0..16 {
+        for _ in 0..ARP_RECV_ATTEMPTS {
             match drivers::net_receive_frame_timeout(&mut rx, NET_POLL_SPINS) {
                 Ok(len) => {
                     if parse_arp_reply(&rx[..len], target_ip, out) {
+                        cache_gateway_mac(target_ip, *out);
                         return Ok(());
                     }
                 }
-                Err(UserDriverError::Timeout) => break,
+                Err(UserDriverError::Timeout) => {
+                    crate::kernel_objects::scheduler::yield_now();
+                    break;
+                }
                 Err(err) => return Err(NetError::Driver(err)),
             }
         }
     }
 
     Err(NetError::Timeout)
+}
+
+fn cached_gateway_mac(target_ip: [u8; 4]) -> Option<[u8; 6]> {
+    if target_ip != QEMU_USER_GATEWAY {
+        return None;
+    }
+    unsafe { CACHED_GATEWAY_MAC }
+}
+
+fn cache_gateway_mac(target_ip: [u8; 4], mac: [u8; 6]) {
+    if target_ip == QEMU_USER_GATEWAY {
+        unsafe {
+            CACHED_GATEWAY_MAC = Some(mac);
+        }
+    }
 }
 
 fn dns_lookup_with_routes(
@@ -421,13 +454,17 @@ fn ensure_ready() -> Result<(), NetError> {
 }
 
 pub fn wait_until_ready(deadline_ns: u64) -> Result<(), NetError> {
+    let mut polls = 0usize;
     loop {
         match ensure_ready() {
             Ok(()) => return Ok(()),
             Err(NetError::NotReady) => {
-                if crate::kernel_lowlevel::timer::get_nanoseconds() >= deadline_ns {
+                if crate::kernel_lowlevel::timer::get_nanoseconds() >= deadline_ns
+                    || polls >= TCP_CONNECT_MAX_POLLS
+                {
                     return Err(NetError::NotReady);
                 }
+                polls = polls.saturating_add(1);
                 crate::kernel_objects::scheduler::yield_now();
             }
             Err(err) => return Err(err),
@@ -832,6 +869,7 @@ fn receive_icmp_echo_reply(expected_ip: [u8; 4]) -> Result<PingReply, NetError> 
 
 pub fn tcp_connect(peer: NetworkSocketAddr) -> Result<TcpSocket, NetError> {
     ensure_ready()?;
+    drain_pending_frames();
     let mut route_mac = [0u8; 6];
     resolve_mac(route_ip_for(peer.ip), &mut route_mac)?;
     let local_port = next_tcp_port();
@@ -839,8 +877,21 @@ pub fn tcp_connect(peer: NetworkSocketAddr) -> Result<TcpSocket, NetError> {
     send_tcp_segment(peer, route_mac, local_port, seq, 0, TCP_FLAG_SYN, &[])?;
 
     let mut rx = [0u8; ETHERNET_FRAME_MAX];
-    for _ in 0..48 {
-        match drivers::net_receive_frame_timeout(&mut rx, NET_POLL_SPINS) {
+    let mut now = crate::kernel_lowlevel::timer::get_nanoseconds();
+    let deadline = now.saturating_add(TCP_CONNECT_WAIT_NANOS);
+    let mut last_syn = now;
+    let mut polls = 0usize;
+    loop {
+        now = crate::kernel_lowlevel::timer::get_nanoseconds();
+        if now >= deadline || polls >= TCP_CONNECT_MAX_POLLS {
+            return Err(NetError::Timeout);
+        }
+        polls = polls.saturating_add(1);
+        if now.saturating_sub(last_syn) >= TCP_CONNECT_RETRY_NANOS {
+            let _ = send_tcp_segment(peer, route_mac, local_port, seq, 0, TCP_FLAG_SYN, &[]);
+            last_syn = now;
+        }
+        match drivers::net_receive_frame_timeout(&mut rx, TCP_POLL_SPINS) {
             Ok(len) => {
                 if let Some(segment) = parse_tcp_segment(&rx[..len], peer.ip, peer.port, local_port)
                 {
@@ -868,16 +919,26 @@ pub fn tcp_connect(peer: NetworkSocketAddr) -> Result<TcpSocket, NetError> {
                             seq: seq.wrapping_add(1),
                             ack,
                             connected: true,
+                            released: false,
                         });
                     }
+                    rst_unmatched_tcp_segment(peer, route_mac, local_port, &segment);
+                    crate::kernel_objects::scheduler::yield_now();
+                    continue;
                 }
+                if leftover_ipv4_tcp_frame(&rx[..len]) {
+                    rst_leftover_ipv4_tcp_frame(&rx[..len]);
+                    crate::kernel_objects::scheduler::yield_now();
+                    continue;
+                }
+                crate::kernel_objects::scheduler::yield_now();
             }
-            Err(UserDriverError::Timeout) => {}
+            Err(UserDriverError::Timeout) => {
+                crate::kernel_objects::scheduler::yield_now();
+            }
             Err(err) => return Err(NetError::Driver(err)),
         }
     }
-
-    Err(NetError::Timeout)
 }
 
 impl TcpSocket {
@@ -916,16 +977,41 @@ impl TcpSocket {
         )
     }
 
+    pub fn abort(&mut self) -> Result<(), NetError> {
+        if self.released {
+            return Ok(());
+        }
+        self.released = true;
+        self.connected = false;
+        send_tcp_segment(
+            self.peer,
+            self.route_mac,
+            self.local_port,
+            self.seq,
+            self.ack,
+            TCP_FLAG_RST | TCP_FLAG_ACK,
+            &[],
+        )
+    }
+
     pub fn read(&mut self, out: &mut [u8]) -> Result<usize, NetError> {
+        let attempts = core::cmp::max(64, core::cmp::min(4096, out.len() / 256 + 64));
+        self.read_with_attempts(out, attempts)
+    }
+
+    pub fn read_short(&mut self, out: &mut [u8]) -> Result<usize, NetError> {
+        self.read_with_attempts(out, 24)
+    }
+
+    fn read_with_attempts(&mut self, out: &mut [u8], attempts: usize) -> Result<usize, NetError> {
         if !self.connected {
             return Err(NetError::NotReady);
         }
         let mut rx = [0u8; ETHERNET_FRAME_MAX];
         let mut total = 0usize;
-        let attempts = core::cmp::max(64, core::cmp::min(4096, out.len() / 256 + 64));
 
         for _ in 0..attempts {
-            match drivers::net_receive_frame_timeout(&mut rx, NET_POLL_SPINS) {
+            match drivers::net_receive_frame_timeout(&mut rx, TCP_POLL_SPINS) {
                 Ok(len) => {
                     if let Some(segment) =
                         parse_tcp_segment(&rx[..len], self.peer.ip, self.peer.port, self.local_port)
@@ -973,6 +1059,7 @@ impl TcpSocket {
                     if total > 0 {
                         return Ok(total);
                     }
+                    crate::kernel_objects::scheduler::yield_now();
                 }
                 Err(err) => return Err(NetError::Driver(err)),
             }
@@ -986,9 +1073,11 @@ impl TcpSocket {
     }
 
     pub fn close(&mut self) -> Result<(), NetError> {
-        if !self.connected {
+        if self.released {
             return Ok(());
         }
+        self.released = true;
+        self.connected = false;
         send_tcp_segment(
             self.peer,
             self.route_mac,
@@ -999,8 +1088,13 @@ impl TcpSocket {
             &[],
         )?;
         self.seq = self.seq.wrapping_add(1);
-        self.connected = false;
         Ok(())
+    }
+}
+
+impl Drop for TcpSocket {
+    fn drop(&mut self) {
+        let _ = self.abort();
     }
 }
 
@@ -1096,13 +1190,104 @@ struct TcpSegment<'a> {
 fn next_tcp_port() -> u16 {
     unsafe {
         let port = NEXT_TCP_PORT;
-        NEXT_TCP_PORT = if NEXT_TCP_PORT >= TCP_SOURCE_PORT_BASE + 1024 {
+        NEXT_TCP_PORT = if NEXT_TCP_PORT >= TCP_SOURCE_PORT_BASE + TCP_SOURCE_PORT_SPAN - 1 {
             TCP_SOURCE_PORT_BASE
         } else {
             NEXT_TCP_PORT + 1
         };
         port
     }
+}
+
+pub fn drain_receive_queue() {
+    drain_pending_frames();
+}
+
+fn drain_pending_frames() {
+    let mut rx = [0u8; ETHERNET_FRAME_MAX];
+    for _ in 0..TCP_DRAIN_FRAMES {
+        match drivers::net_receive_frame_timeout(&mut rx, 64) {
+            Ok(len) => rst_leftover_ipv4_tcp_frame(&rx[..len]),
+            Err(_) => break,
+        }
+    }
+}
+
+fn leftover_ipv4_tcp_frame(frame: &[u8]) -> bool {
+    ipv4_packet(frame, IP_PROTO_TCP).is_some()
+}
+
+fn rst_leftover_ipv4_tcp_frame(frame: &[u8]) {
+    let Some((ip, ihl)) = ipv4_packet(frame, IP_PROTO_TCP) else {
+        return;
+    };
+    let total_len = get_u16(frame, ip + 2) as usize;
+    let tcp = ip + ihl;
+    if total_len < ihl + 20 || frame.len() < tcp + 20 {
+        return;
+    }
+    let data_offset = ((frame[tcp + 12] >> 4) as usize) * 4;
+    if data_offset < 20 || total_len < ihl + data_offset {
+        return;
+    }
+    let payload_start = tcp + data_offset;
+    let payload_end = ip + total_len;
+    if payload_end > frame.len() || payload_start > payload_end {
+        return;
+    }
+    let mut peer_ip = [0u8; 4];
+    peer_ip.copy_from_slice(&frame[ip + 12..ip + 16]);
+    let peer = NetworkSocketAddr {
+        ip: peer_ip,
+        port: get_u16(frame, tcp),
+    };
+    let local_port = get_u16(frame, tcp + 2);
+    let mut route_mac = [0u8; 6];
+    route_mac.copy_from_slice(&frame[6..12]);
+    let segment = TcpSegment {
+        seq: get_u32(frame, tcp + 4),
+        ack: get_u32(frame, tcp + 8),
+        flags: (frame[tcp + 13] as u16) | (((frame[tcp + 12] & 0x01) as u16) << 8),
+        payload: &frame[payload_start..payload_end],
+    };
+    rst_unmatched_tcp_segment(peer, route_mac, local_port, &segment);
+}
+
+fn rst_unmatched_tcp_segment(
+    peer: NetworkSocketAddr,
+    route_mac: [u8; 6],
+    local_port: u16,
+    segment: &TcpSegment<'_>,
+) {
+    let syn_len = if segment.flags & TCP_FLAG_SYN != 0 {
+        1
+    } else {
+        0
+    };
+    let fin_len = if segment.flags & TCP_FLAG_FIN != 0 {
+        1
+    } else {
+        0
+    };
+    let rst_ack = segment
+        .seq
+        .wrapping_add(syn_len)
+        .wrapping_add(fin_len)
+        .wrapping_add(segment.payload.len() as u32);
+    let (rst_seq, rst_flags) = if segment.flags & TCP_FLAG_ACK != 0 {
+        (segment.ack, TCP_FLAG_RST)
+    } else {
+        (0, TCP_FLAG_RST | TCP_FLAG_ACK)
+    };
+    let _ = send_tcp_segment(
+        peer,
+        route_mac,
+        local_port,
+        rst_seq,
+        rst_ack,
+        rst_flags,
+        &[],
+    );
 }
 
 fn next_dns_query_token() -> (u16, u16) {

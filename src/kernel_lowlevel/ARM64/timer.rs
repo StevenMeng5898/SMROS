@@ -67,10 +67,12 @@ fn read_cntpct_el0() -> u64 {
 /// Write the Counter-timer Physical Timer CompareValue Register
 fn write_cntp_cval_el0(value: u64) {
     // SAFETY: Writing CNTP_CVAL_EL0 sets the timer compare value.
-    // This is safe because we own the timer and are single-threaded during init.
+    // ISB is required so a later WFI observes the new compare; ARM64 TCG
+    // otherwise keeps the previous deadline and never wakes cooperative waits.
     unsafe {
         core::arch::asm!(
             "msr cntp_cval_el0, {value}",
+            "isb",
             value = in(reg) value,
             options(nomem, nostack, preserves_flags),
         );
@@ -80,10 +82,11 @@ fn write_cntp_cval_el0(value: u64) {
 /// Write the Counter-timer Physical Timer Control Register
 fn write_cntp_ctl_el0(value: u64) {
     // SAFETY: Writing CNTP_CTL_EL0 controls the physical timer.
-    // This is safe because we own the timer and are single-threaded during init.
+    // ISB makes ENABLE/IMASK visible before a later WFI.
     unsafe {
         core::arch::asm!(
             "msr cntp_ctl_el0, {value}",
+            "isb",
             value = in(reg) value,
             options(nomem, nostack, preserves_flags),
         );
@@ -163,13 +166,21 @@ pub fn arm_next_tick() {
         PRECISION_COMPARE.store(0, Ordering::Release);
         0
     };
-    let compare_value = lowlevel_logic::timer_program_compare(
-        periodic_compare,
-        precision_compare,
-        0,
-    );
+    let compare_value =
+        lowlevel_logic::timer_program_compare(periodic_compare, precision_compare, 0);
     PROGRAMMED_COMPARE.store(compare_value, Ordering::Release);
     write_cntp_cval_el0(compare_value);
+}
+
+fn live_compare(value: u64, current_count: u64) -> u64 {
+    // A compare at or behind CNTPCT has already fired. GICv3/TCG will not
+    // raise a new edge until CVAL is rewritten to a future count, so a later
+    // WFI would sleep forever on the stale value.
+    if value > current_count {
+        value
+    } else {
+        0
+    }
 }
 
 /// Arm the physical timer for an absolute monotonic deadline.
@@ -180,9 +191,7 @@ pub fn arm_at_nanoseconds(deadline: u64) {
     }
     let current_count = read_cntpct_el0();
     let scaled = (deadline as u128).saturating_mul(frequency as u128);
-    let target_count = scaled
-        .saturating_add(999_999_999)
-        / 1_000_000_000u128;
+    let target_count = scaled.saturating_add(999_999_999) / 1_000_000_000u128;
     let target_count = target_count
         .min(u64::MAX as u128)
         .max((current_count as u128).saturating_add(1)) as u64;
@@ -193,11 +202,15 @@ pub fn arm_at_nanoseconds(deadline: u64) {
         target_count
     };
     PRECISION_COMPARE.store(precision_compare, Ordering::Release);
-    let periodic_compare = NEXT_PERIODIC_COMPARE.load(Ordering::Acquire);
+    let periodic_compare =
+        live_compare(NEXT_PERIODIC_COMPARE.load(Ordering::Acquire), current_count);
     let armed_compare = PROGRAMMED_COMPARE.load(Ordering::Acquire);
-    let programmed_compare =
-        lowlevel_logic::timer_program_compare(periodic_compare, armed_compare, target_count);
-    if programmed_compare != armed_compare {
+    let programmed_compare = lowlevel_logic::timer_program_compare(
+        periodic_compare,
+        live_compare(armed_compare, current_count),
+        target_count,
+    );
+    if programmed_compare != armed_compare || programmed_compare <= current_count {
         write_cntp_cval_el0(programmed_compare);
         PROGRAMMED_COMPARE.store(programmed_compare, Ordering::Release);
     }

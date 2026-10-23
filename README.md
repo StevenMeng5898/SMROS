@@ -395,7 +395,7 @@ future full-weight runner can replace.
 SMROS does not execute the original package directly yet. Hermes now routes
 `ask` through the SMROS Gemma provider (`gemma/gemma-3n-e2b-smros`) and validates
 config, provider/model routing, skills, memory, tool calls, delegated subagents,
-cron metadata, `/svc`, Gemma generation, and transcript persistence under
+cron metadata, `/svc`, Gemma generation, transcript persistence, LVGL, and QML under
 `/data/hermes`. `hermes test` and `testsc` cover the path. Use `hermes ui` for
 the LVGL-styled full-screen keyboard/mouse terminal UI.
 
@@ -406,8 +406,10 @@ seed, and writes its bounded report to `/data/hermes/tests/latest.log`.
 `hermes test-all` runs the native Hermes test once and then runs one random
 guest operation plus each host job once per iteration: `make ut` and
 `make it`. It does not run ST/SKT, because the guest cannot boot another
-SMROS from the command line. `mode=syscall` keeps those host jobs and selects the guest
-catalog of `testsc`, bounded `fuzzsc`, and `hermes test`. Reports keep
+SMROS from the command line. `mode=syscall` keeps those host jobs and selects the focused guest
+catalog of `testsc`, bounded `fuzzsc`, POSIX canaries, and `hermes test`.
+Default `hermes test-all` already includes LVGL, QML, syscall smoke, POSIX
+canaries, and ops APIs. Reports keep
 aggregate totals and at most 64 round details, so large iteration counts remain persistable. The host jobs require
 `scripts/smros-vm-launcher.py`; the guest can request only those two jobs and
 cannot supply host command text. Destructive commands remain unavailable to

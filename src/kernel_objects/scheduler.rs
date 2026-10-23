@@ -2343,6 +2343,28 @@ pub fn yield_now() {
     let s = scheduler();
     s.charge_current_runtime(1);
     let current = s.current_thread;
+    if current.0 != ThreadId::IDLE.0 {
+        let cpu_id = current_logical_cpu(s);
+        s.rebuild_ready_index();
+        if s.highest_ready_priority(Some(cpu_id)).is_none() {
+            if let Some(tcb) = s.get_thread_mut(current) {
+                tcb.time_slice = 0;
+            }
+            // Keep this thread runnable, then WFI so ARM64 TCG can retire
+            // virtio/timer work and advance CNTPCT. RISC-V SBI timers still
+            // tick during a busy yield, which is why the hang is ARM64-only.
+            // Arm a near-term precision compare so WFI cannot sleep past the
+            // virtio/TCP poll deadline when leftover slirp frames stall CNTPCT.
+            let wake_ns =
+                crate::kernel_lowlevel::timer::get_nanoseconds().saturating_add(1_000_000);
+            crate::kernel_lowlevel::timer::arm_at_nanoseconds(wake_ns);
+            crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+            if crate::kernel_lowlevel::cpu::irq_state_enabled(interrupt_state) {
+                crate::kernel_lowlevel::cpu::wait_for_interrupt();
+            }
+            return;
+        }
+    }
     if let Some(tcb) = s.get_thread_mut(current) {
         tcb.time_slice = 0;
         if tcb.state == ThreadState::Running {
@@ -2368,6 +2390,22 @@ pub fn yield_now_on_cpu(cpu_id: usize) {
     let s = scheduler();
     s.charge_current_runtime(1);
     let current = s.current_thread;
+    if current.0 != ThreadId::IDLE.0 {
+        s.rebuild_ready_index();
+        if s.highest_ready_priority(Some(cpu_id)).is_none() {
+            if let Some(tcb) = s.get_thread_mut(current) {
+                tcb.time_slice = 0;
+            }
+            let wake_ns =
+                crate::kernel_lowlevel::timer::get_nanoseconds().saturating_add(1_000_000);
+            crate::kernel_lowlevel::timer::arm_at_nanoseconds(wake_ns);
+            crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+            if crate::kernel_lowlevel::cpu::irq_state_enabled(interrupt_state) {
+                crate::kernel_lowlevel::cpu::wait_for_interrupt();
+            }
+            return;
+        }
+    }
     if let Some(tcb) = s.get_thread_mut(current) {
         tcb.time_slice = 0;
         if tcb.state == ThreadState::Running {

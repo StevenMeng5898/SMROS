@@ -10495,6 +10495,25 @@ fn hermes_shell_policy_allows_only_bounded_safe_forms() {
         ("ddk", &["hello"][..]),
         ("ddk", &["help"][..]),
         ("ddk", &["edu"][..]),
+        ("lvgl", &[][..]),
+        ("lvgl", &["info"][..]),
+        ("lvgl", &["test"][..]),
+        ("lvgl", &["render"][..]),
+        ("lvgl", &["sched"][..]),
+        ("qml", &[][..]),
+        ("qml", &["info"][..]),
+        ("qml", &["test"][..]),
+        ("qml", &["render"][..]),
+        ("hermes", &["info"][..]),
+        ("hermes", &["test"][..]),
+        ("hermes", &["skills"][..]),
+        ("hermes", &["web"][..]),
+        ("tls", &[][..]),
+        ("top", &[][..]),
+        ("share", &[][..]),
+        ("ls", &[][..]),
+        ("posixtest", &["status"][..]),
+        ("posixtest", &["test", "getpid/1-1.c"][..]),
     ] {
         assert_eq!(classify(command, args), HermesShellPolicy::Allowed);
     }
@@ -10724,7 +10743,7 @@ fn hermes_campaign_vm_create_recycles_after_linux_boot() {
         HERMES_CAMPAIGN_VM_XML,
     };
 
-    assert_eq!(HERMES_CAMPAIGN_CASES, 15);
+    assert_eq!(HERMES_CAMPAIGN_CASES, 34);
     assert_eq!(HERMES_CAMPAIGN_VM_NAME, "linux-demo");
     assert_eq!(HERMES_CAMPAIGN_VM_XML, "/shared/vm-demo.xml");
     assert_eq!(campaign_vm_recycle_name(), "linux-demo");
@@ -10781,13 +10800,15 @@ fn hermes_campaign_vm_create_recycles_after_linux_boot() {
 #[test]
 fn hermes_campaign_fuzzsc_uses_campaign_seed_and_fifty_iterations() {
     use hermes_shell_logic::{
-        campaign_case_for_mode, campaign_fuzzsc_seed_arg, classify, HermesCampaignMode,
-        HermesShellPolicy, HERMES_CAMPAIGN_CASES, HERMES_CAMPAIGN_FUZZSC_ITERATIONS,
-        HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG, HERMES_SYSCALL_CAMPAIGN_CASES,
+        campaign_case_for_mode, campaign_case_index_for_mode, campaign_fuzzsc_seed_arg, classify,
+        HermesCampaignMode, HermesShellPolicy, HERMES_CAMPAIGN_CASES,
+        HERMES_CAMPAIGN_FUZZSC_ITERATIONS, HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG,
+        HERMES_CAMPAIGN_FUZZSC_TIME_ARG, HERMES_SYSCALL_CAMPAIGN_CASES,
     };
 
     assert_eq!(HERMES_CAMPAIGN_FUZZSC_ITERATIONS, 50);
     assert_eq!(HERMES_CAMPAIGN_FUZZSC_ITERATIONS_ARG, "iterations=50");
+    assert_eq!(HERMES_CAMPAIGN_FUZZSC_TIME_ARG, "time=5");
     let mut buf = [0u8; 32];
     assert_eq!(campaign_fuzzsc_seed_arg(1, &mut buf), Some("seed=1"));
     assert_eq!(campaign_fuzzsc_seed_arg(1234, &mut buf), Some("seed=1234"));
@@ -10807,6 +10828,20 @@ fn hermes_campaign_fuzzsc_uses_campaign_seed_and_fifty_iterations() {
         classify("fuzzsc", &["iterations=100"]),
         HermesShellPolicy::Invalid
     );
+    assert_eq!(
+        classify("fuzzsc", &["seed=93938", "iterations=50", "time=5"]),
+        HermesShellPolicy::Allowed
+    );
+    assert_eq!(
+        classify("fuzzsc", &["seed=93938", "iterations=50", "time=6"]),
+        HermesShellPolicy::Invalid
+    );
+    let crash_round = campaign_case_for_mode(
+        HermesCampaignMode::Ops,
+        campaign_case_index_for_mode(93938, 143, HermesCampaignMode::Ops),
+    )
+    .expect("seed 93938 iteration 144");
+    assert_eq!(crash_round.command, "top");
 
     let mut saw_ops = false;
     for index in 0..HERMES_CAMPAIGN_CASES {
@@ -10840,6 +10875,133 @@ fn hermes_campaign_fuzzsc_uses_campaign_seed_and_fifty_iterations() {
         }
     }
     assert!(saw_syscall);
+}
+
+#[test]
+fn hermes_campaign_covers_product_api_levels() {
+    use hermes_shell_logic::{
+        campaign_case_for_mode, campaign_catalog_len, classify, format_resume_state,
+        parse_campaign_options, parse_resume_state, HermesCampaignMode, HermesCampaignOptions,
+        HermesResumeKind, HermesResumeState, HermesShellPolicy, HERMES_CAMPAIGN_CASES,
+        HERMES_SYSCALL_CAMPAIGN_CASES,
+    };
+
+    assert_eq!(HERMES_CAMPAIGN_CASES, 34);
+    assert_eq!(HERMES_SYSCALL_CAMPAIGN_CASES, 14);
+    assert_eq!(parse_campaign_options(&["mode=ui"]), None);
+    assert_eq!(
+        parse_campaign_options(&["seed=3", "iterations=4", "mode=ops"]),
+        Some(HermesCampaignOptions {
+            seed: Some(3),
+            iterations: 4,
+            mode: HermesCampaignMode::Ops,
+        })
+    );
+    assert_eq!(
+        campaign_catalog_len(HermesCampaignMode::Ops),
+        HERMES_CAMPAIGN_CASES
+    );
+    assert_eq!(
+        campaign_catalog_len(HermesCampaignMode::Syscall),
+        HERMES_SYSCALL_CAMPAIGN_CASES
+    );
+
+    assert_eq!(classify("lvgl", &["probe"]), HermesShellPolicy::Invalid);
+    assert_eq!(classify("qml", &["sched"]), HermesShellPolicy::Invalid);
+    assert_eq!(
+        classify("hermes", &["random"]),
+        HermesShellPolicy::Forbidden
+    );
+    assert_eq!(classify("share", &["refresh"]), HermesShellPolicy::Invalid);
+
+    assert!(catalog_has(HermesCampaignMode::Ops, "lvgl", &["test"]));
+    assert!(catalog_has(HermesCampaignMode::Ops, "qml", &["test"]));
+    assert!(catalog_has(HermesCampaignMode::Ops, "ddk", &["hello"]));
+    assert!(catalog_has(
+        HermesCampaignMode::Ops,
+        "posixtest",
+        &["status"]
+    ));
+    assert!(catalog_has(HermesCampaignMode::Ops, "hermes", &["info"]));
+    assert!(catalog_has(HermesCampaignMode::Ops, "docker", &["ps"]));
+    assert!(catalog_has(HermesCampaignMode::Ops, "ls", &[]));
+    assert!(catalog_has(HermesCampaignMode::Ops, "top", &[]));
+    assert!(catalog_has(HermesCampaignMode::Syscall, "testsc", &[]));
+    assert!(catalog_has(
+        HermesCampaignMode::Syscall,
+        "posixtest",
+        &["status"]
+    ));
+    assert!(catalog_has(
+        HermesCampaignMode::Syscall,
+        "posixtest",
+        &["test", "getpid/1-1.c"]
+    ));
+    assert!(catalog_has(HermesCampaignMode::Ops, "lvgl", &["info"]));
+    assert!(catalog_has(HermesCampaignMode::Ops, "lvgl", &["render"]));
+    assert!(catalog_has(HermesCampaignMode::Ops, "lvgl", &["sched"]));
+    assert!(catalog_has(HermesCampaignMode::Ops, "qml", &["info"]));
+    assert!(catalog_has(HermesCampaignMode::Ops, "qml", &["render"]));
+    assert!(catalog_has(HermesCampaignMode::Ops, "hermes", &["web"]));
+    assert!(catalog_has(HermesCampaignMode::Ops, "hermes", &["skills"]));
+    assert!(catalog_has(HermesCampaignMode::Ops, "hermes", &["test"]));
+    assert!(catalog_has(HermesCampaignMode::Ops, "testsc", &[]));
+    assert!(catalog_has(
+        HermesCampaignMode::Ops,
+        "posixtest",
+        &["test", "getpid/1-1.c"]
+    ));
+    assert!(catalog_has(HermesCampaignMode::Ops, "sched", &["trace"]));
+    assert!(!catalog_has(HermesCampaignMode::Syscall, "lvgl", &["test"]));
+
+    for mode in [HermesCampaignMode::Ops, HermesCampaignMode::Syscall] {
+        for index in 0..campaign_catalog_len(mode) {
+            let case = campaign_case_for_mode(mode, index).expect("catalog index");
+            assert_eq!(
+                classify(case.command, &case.args[..case.arg_count]),
+                HermesShellPolicy::Allowed,
+                "{mode:?}[{index}] {} {:?}",
+                case.command,
+                &case.args[..case.arg_count]
+            );
+        }
+    }
+
+    let resume = HermesResumeState {
+        kind: HermesResumeKind::Random,
+        seed: 9,
+        iterations: 4,
+        mode: HermesCampaignMode::Ops,
+        next_round: 1,
+        native_ok: true,
+        completed: 1,
+        denied: 0,
+        invalid: 0,
+        unknown: 0,
+        host_ut_pass: 0,
+        host_ut_fail: 0,
+        host_it_pass: 0,
+        host_it_fail: 0,
+        host_jobs_pending: false,
+    };
+    let mut buf = [0u8; 768];
+    let written = format_resume_state(&resume, &mut buf).expect("format resume");
+    let text = core::str::from_utf8(&buf[..written]).expect("utf8 resume");
+    assert!(text.contains("mode=ops"));
+    assert_eq!(parse_resume_state(text), Some(resume));
+    assert_eq!(
+        parse_resume_state(&text.replace("mode=ops", "mode=ui")).map(|state| state.mode),
+        Some(HermesCampaignMode::Ops)
+    );
+}
+
+#[cfg(test)]
+fn catalog_has(mode: hermes_shell_logic::HermesCampaignMode, command: &str, args: &[&str]) -> bool {
+    use hermes_shell_logic::{campaign_case_for_mode, campaign_catalog_len};
+    (0..campaign_catalog_len(mode)).any(|index| {
+        campaign_case_for_mode(mode, index)
+            .is_some_and(|case| case.command == command && case.args[..case.arg_count] == *args)
+    })
 }
 
 mod syscall_bridge_logic {
