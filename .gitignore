@@ -13,3 +13,14 @@
 /.worktrees/
 /tests/host/target/
 /verification/*/target/
+
+# Host-built pthread/futex demo binary
+/src/user_level/apps/pthread_mutex_futex
+
+# Host-built ARM NEON tensor-mul demo binaries
+/src/user_level/apps/tensor_neon_mul
+/src/user_level/apps/tensor_neon_mul.host
+/src/user_level/apps/pthread_mutex_futex.elf
+/src/user_level/apps/tensor_neon_mul.elf
+/src/user_level/apps/epoll_coro.elf
+/src/user_level/apps/epoll_coro.a

@@ -335,6 +335,10 @@ ls /shared
 vi /shared/test
 rm /shared/test
 run hello.elf
+run pthread_mutex_futex.elf uncontended
+run pthread_mutex_futex.elf contended
+run tensor_neon_mul.elf
+run epoll_coro.elf
 testsc
 fuzzsc
 sched set fair

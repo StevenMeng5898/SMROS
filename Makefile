@@ -53,7 +53,7 @@ export POSIX_QEMU_MEMORY
 export POSIX_SYSROOT
 export POSIX_QUALITY_EVIDENCE
 
-.PHONY: all build build-test aarch64-warning-check host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report coverage-ut coverage-it coverage-host coverage-st coverage skt st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
+.PHONY: all apps build build-test aarch64-warning-check host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report coverage-ut coverage-it coverage-host coverage-st coverage skt st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
 
 all: build
 
@@ -201,6 +201,10 @@ qemu-icmp:
 vm-launcher:
 	@./scripts/start-smros-vm-launcher.sh
 
+# Build SMROS guest ELF demos into host_shared/ (then rebuild the kernel).
+apps:
+	@$(MAKE) -C src/user_level/apps smros
+
 # Run with QEMU (simple mode)
 run: build $(FXFS_DISK) qemu-icmp vm-launcher
 	@echo "Starting QEMU..."
@@ -334,6 +338,7 @@ help:
 	@echo "  st        - Compatibility alias for skt"
 	@echo "  test      - Run fast local tests (format + scripts + ut + it + offline POSIX tools + build-test)"
 	@echo "  verify    - Run test + skt + all Verus proof harnesses"
+	@echo "  apps      - Build guest ELF demos into host_shared/"
 	@echo "  run       - Build and run with QEMU"
 	@echo "  debug     - Run with QEMU in debug mode"
 	@echo "  gdb       - Run with QEMU GDB server"

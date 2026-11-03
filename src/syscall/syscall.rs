@@ -4233,6 +4233,7 @@ pub fn reset_linux_process_state() {
     let pid = linux_process::current_pid().ok();
     linux_futex::reset();
     linux_mqueue::reset();
+    linux_epoll_reset();
     // Stop all user scheduler threads before tearing down their address space.
     linux_task::reset();
     if let Some(pid) = pid {
@@ -7488,23 +7489,174 @@ pub fn sys_eventfd2(_initval: usize, flags: usize) -> SysResult {
     Ok(memory_state().alloc_fd(handle.0, true, true))
 }
 
+const LINUX_EPOLL_CTL_ADD: usize = 1;
+const LINUX_EPOLL_CTL_DEL: usize = 2;
+const LINUX_EPOLL_CTL_MOD: usize = 3;
+const LINUX_EPOLLIN: u32 = 0x0001;
+const LINUX_EPOLLOUT: u32 = 0x0004;
+const LINUX_EPOLL_MAX_SETS: usize = 8;
+const LINUX_EPOLL_MAX_ITEMS: usize = 8;
+const LINUX_EPOLL_EVENT_BYTES: usize = 16;
+
+#[derive(Clone, Copy)]
+struct LinuxEpollItem {
+    fd: i32,
+    events: u32,
+    data: u64,
+}
+
+#[derive(Clone, Copy)]
+struct LinuxEpollSet {
+    epfd: usize,
+    used: bool,
+    count: usize,
+    items: [LinuxEpollItem; LINUX_EPOLL_MAX_ITEMS],
+}
+
+impl LinuxEpollSet {
+    const EMPTY: Self = Self {
+        epfd: 0,
+        used: false,
+        count: 0,
+        items: [LinuxEpollItem {
+            fd: -1,
+            events: 0,
+            data: 0,
+        }; LINUX_EPOLL_MAX_ITEMS],
+    };
+}
+
+static mut LINUX_EPOLL_SETS: [LinuxEpollSet; LINUX_EPOLL_MAX_SETS] =
+    [LinuxEpollSet::EMPTY; LINUX_EPOLL_MAX_SETS];
+
+#[allow(static_mut_refs)]
+fn linux_epoll_sets() -> &'static mut [LinuxEpollSet; LINUX_EPOLL_MAX_SETS] {
+    unsafe { &mut LINUX_EPOLL_SETS }
+}
+
+fn linux_epoll_reset() {
+    *linux_epoll_sets() = [LinuxEpollSet::EMPTY; LINUX_EPOLL_MAX_SETS];
+}
+
+fn linux_epoll_find_set(sets: &[LinuxEpollSet], epfd: usize) -> Option<usize> {
+    sets.iter()
+        .position(|set| set.used && set.epfd == epfd)
+}
+
+fn linux_epoll_alloc_set(epfd: usize) -> Result<usize, SysError> {
+    let sets = linux_epoll_sets();
+    if let Some(index) = linux_epoll_find_set(sets, epfd) {
+        sets[index] = LinuxEpollSet {
+            epfd,
+            used: true,
+            count: 0,
+            items: LinuxEpollSet::EMPTY.items,
+        };
+        return Ok(index);
+    }
+    let index = sets.iter().position(|set| !set.used).unwrap_or(0);
+    sets[index] = LinuxEpollSet {
+        epfd,
+        used: true,
+        count: 0,
+        items: LinuxEpollSet::EMPTY.items,
+    };
+    Ok(index)
+}
+
+fn linux_read_user_epoll_event(address: usize) -> Result<(u32, u64), SysError> {
+    let mut bytes = [0u8; LINUX_EPOLL_EVENT_BYTES];
+    linux_copy_from_user(address, &mut bytes)?;
+    let mut events_bytes = [0u8; 4];
+    events_bytes.copy_from_slice(&bytes[0..4]);
+    let mut data_bytes = [0u8; 8];
+    data_bytes.copy_from_slice(&bytes[8..16]);
+    Ok((u32::from_ne_bytes(events_bytes), u64::from_ne_bytes(data_bytes)))
+}
+
+fn linux_write_user_epoll_event(address: usize, events: u32, data: u64) -> Result<(), SysError> {
+    let mut bytes = [0u8; LINUX_EPOLL_EVENT_BYTES];
+    bytes[0..4].copy_from_slice(&events.to_ne_bytes());
+    bytes[8..16].copy_from_slice(&data.to_ne_bytes());
+    linux_copy_to_user(address, &bytes)
+}
+
+fn linux_epoll_fd_revents(fd: usize, requested: u32) -> u32 {
+    let Some(record) = memory_state().get_fd(fd) else {
+        return 0x0008; // EPOLLERR
+    };
+    let queued = compat::queued_bytes(HandleValue(record.handle)).unwrap_or(0);
+    let mut revents = 0u32;
+    if requested & LINUX_EPOLLIN != 0 && record.readable && queued > 0 {
+        revents |= LINUX_EPOLLIN;
+    }
+    if requested & LINUX_EPOLLOUT != 0 && record.writable {
+        revents |= LINUX_EPOLLOUT;
+    }
+    revents
+}
+
 pub fn sys_epoll_create1(flags: usize) -> SysResult {
     const LINUX_EPOLL_ALLOWED_FLAGS: usize = 0x80000;
     if !syscall_logic::linux_memfd_flags_valid(flags, LINUX_EPOLL_ALLOWED_FLAGS) {
         return Err(SysError::EINVAL);
     }
     let handle = compat::create_object(ObjectType::Port).map_err(|_| SysError::ENOMEM)?;
-    Ok(memory_state().alloc_fd(handle.0, true, true))
+    let epfd = memory_state().alloc_fd(handle.0, true, true);
+    linux_epoll_alloc_set(epfd)?;
+    Ok(epfd)
 }
 
-pub fn sys_epoll_ctl(epfd: usize, _op: usize, fd: usize, event: usize) -> SysResult {
-    if !linux_fd_known(epfd) || !linux_fd_known(fd) {
+pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: usize) -> SysResult {
+    if !linux_fd_known(epfd) || (op != LINUX_EPOLL_CTL_DEL && !linux_fd_known(fd)) {
         return Err(SysError::ENODEV);
     }
-    if event == 0 {
+    if op != LINUX_EPOLL_CTL_DEL && event == 0 {
         return Err(SysError::EFAULT);
     }
-    Ok(0)
+    let sets = linux_epoll_sets();
+    let set_index = linux_epoll_find_set(sets, epfd).ok_or(SysError::ENODEV)?;
+    let set = &mut sets[set_index];
+    let existing = set.items[..set.count].iter().position(|item| item.fd == fd as i32);
+    match op {
+        LINUX_EPOLL_CTL_ADD => {
+            if existing.is_some() {
+                return Err(SysError::EEXIST);
+            }
+            if set.count >= LINUX_EPOLL_MAX_ITEMS {
+                return Err(SysError::ENOMEM);
+            }
+            let (events, data) = linux_read_user_epoll_event(event)?;
+            set.items[set.count] = LinuxEpollItem {
+                fd: fd as i32,
+                events,
+                data,
+            };
+            set.count += 1;
+            Ok(0)
+        }
+        LINUX_EPOLL_CTL_MOD => {
+            let index = existing.ok_or(SysError::ENOENT)?;
+            let (events, data) = linux_read_user_epoll_event(event)?;
+            set.items[index].events = events;
+            set.items[index].data = data;
+            Ok(0)
+        }
+        LINUX_EPOLL_CTL_DEL => {
+            let index = existing.ok_or(SysError::ENOENT)?;
+            set.count -= 1;
+            if index < set.count {
+                set.items[index] = set.items[set.count];
+            }
+            set.items[set.count] = LinuxEpollItem {
+                fd: -1,
+                events: 0,
+                data: 0,
+            };
+            Ok(0)
+        }
+        _ => Err(SysError::EINVAL),
+    }
 }
 
 pub fn sys_epoll_pwait(
@@ -7517,10 +7669,40 @@ pub fn sys_epoll_pwait(
     if !linux_fd_known(epfd) {
         return Err(SysError::ENODEV);
     }
-    if maxevents != 0 && events == 0 {
+    if maxevents == 0 {
+        return Err(SysError::EINVAL);
+    }
+    if events == 0 {
         return Err(SysError::EFAULT);
     }
-    Ok(0)
+    let byte_len = maxevents
+        .checked_mul(LINUX_EPOLL_EVENT_BYTES)
+        .ok_or(SysError::EINVAL)?;
+    if !linux_user_buffer_writable(events, byte_len) {
+        return Err(SysError::EFAULT);
+    }
+    let sets = linux_epoll_sets();
+    let set_index = linux_epoll_find_set(sets, epfd).ok_or(SysError::ENODEV)?;
+    let set = sets[set_index];
+    let mut filled = 0usize;
+    for item in set.items[..set.count].iter() {
+        if filled >= maxevents {
+            break;
+        }
+        let revents = linux_epoll_fd_revents(item.fd as usize, item.events);
+        if revents == 0 {
+            continue;
+        }
+        linux_write_user_epoll_event(
+            events
+                .checked_add(filled * LINUX_EPOLL_EVENT_BYTES)
+                .ok_or(SysError::EFAULT)?,
+            revents,
+            item.data,
+        )?;
+        filled += 1;
+    }
+    Ok(filled)
 }
 
 /// Linux sys_open wrapper.

@@ -235,6 +235,13 @@ impl CompatObjectTable {
             .map(|object| object.signals)
     }
 
+    pub fn queued_bytes(&self, handle: HandleValue) -> Option<usize> {
+        self.objects
+            .iter()
+            .find(|object| object.handle == handle && !object.closed)
+            .map(|object| object.queue.len())
+    }
+
     pub fn update_signals(
         &mut self,
         handle: HandleValue,
@@ -435,6 +442,10 @@ pub fn create_object_with_rights(obj_type: ObjectType, rights: u32) -> ZxResult<
 
 pub fn create_pair(obj_type: ObjectType) -> ZxResult<(HandleValue, HandleValue)> {
     table().create_pair(obj_type)
+}
+
+pub fn queued_bytes(handle: HandleValue) -> Option<usize> {
+    table().queued_bytes(handle)
 }
 
 pub fn handle_known(handle: HandleValue) -> bool {

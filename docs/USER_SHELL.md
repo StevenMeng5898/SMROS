@@ -364,6 +364,10 @@ vi /shared/test
 rm /shared/test
 run hello.elf
 run /shared/hello.elf
+run pthread_mutex_futex.elf uncontended
+run pthread_mutex_futex.elf contended
+run tensor_neon_mul.elf
+run epoll_coro.elf
 docker images
 docker pull smros/hello
 docker pull http://10.0.2.2:8000/my-image.tar
@@ -562,6 +566,8 @@ The `run` command loads a dynamic PIE ELF from FxFS, parses `PT_INTERP` and `DT_
 This shell command is still an AArch64 external-user-binary path. The RISC-V64
 kernel can boot to the shell, but RISC-V64 dynamic PIE loading and RISC-V Linux
 syscall numbering are not complete yet.
+
+Guest samples in `src/user_level/apps` install as `/shared/pthread_mutex_futex.elf`, `/shared/tensor_neon_mul.elf`, and `/shared/epoll_coro.elf`. Rebuild the kernel after `make apps` so the `/shared` snapshot contains them. The futex demo prints `FUTEX_WAIT_PRIVATE` / `FUTEX_WAKE_PRIVATE` itself because SMROS has no `strace`. The tensor demo uses ARM NEON FMLA on AArch64 QEMU. `epoll_coro.elf` runs two Rust async tasks over Linux epoll (pipe writer/reader).
 
 The launcher currently supports dynamic PIE binaries (`ET_DYN`) with a dynamic interpreter. Static `ET_EXEC` execution is still reported as unsupported. The implementation maps PT_LOAD bytes for the main executable and interpreter into the Linux mmap window and uses the current identity-mapped EL0 bring-up model, not a process-owned TTBR0 address space.
 
