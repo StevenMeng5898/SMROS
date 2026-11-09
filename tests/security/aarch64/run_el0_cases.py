@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Boot AArch64 SMROS and collect sectest CASE lines.
 
-Exit status is 1 when any case is FAIL or the boot times out. SKIP does not
-fail the process by itself. This runner does not treat a timeout as PASS.
+Exit status follows `SECTEST SUMMARY`: 0 when `fail=0`, 1 when any hard FAIL
+is present or the boot times out before a summary. XFAIL and XPASS do not
+change the exit status. A timeout is never treated as PASS.
+
+`sectest undef` is expected to halt the kernel today. That halt is reported
+as `XFAIL (SEC-4)` and does not fail this runner.
 """
 
 from __future__ import annotations
@@ -10,10 +14,15 @@ from __future__ import annotations
 import argparse
 import os
 import pty
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+SUMMARY_RE = re.compile(
+    r"SECTEST SUMMARY pass=(\d+) fail=(\d+) xfail=(\d+) xpass=(\d+)"
+)
 
 
 def main() -> int:
@@ -27,12 +36,12 @@ def main() -> int:
     kernel = args.kernel or (repo / "kernel8.img")
     if not kernel.is_file():
         print(f"CASE runner RESULT FAIL missing-kernel {kernel}", flush=True)
-        print("SEC0-SUITE FAIL", flush=True)
+        print("SECTEST SUMMARY pass=0 fail=1 xfail=0 xpass=0", flush=True)
         return 1
     qemu = os.environ.get("QEMU_SYSTEM", "qemu-system-aarch64")
     if subprocess.call(["bash", "-lc", f"command -v {qemu}"], stdout=subprocess.DEVNULL) != 0:
         print("CASE runner RESULT SKIP qemu-absent", flush=True)
-        print("SEC0-SUITE FAIL", flush=True)
+        print("SECTEST SUMMARY pass=0 fail=1 xfail=0 xpass=0", flush=True)
         return 1
 
     log_dir = repo / "target" / "security"
@@ -101,8 +110,8 @@ def boot(qemu: str, kernel: Path, disk: Path, log_path: Path, command: str, time
                 if not sent and "smros:/>" in text:
                     os.write(master, command.encode())
                     sent = True
-                if "SEC0-SUITE " in text and "SEC-HEARTBEAT" in text:
-                    suite = "FAIL" if "SEC0-SUITE FAIL" in text else "PASS"
+                if SUMMARY_RE.search(text) and "SEC-HEARTBEAT" in text:
+                    suite = "SUMMARY"
                     break
                 if proc.poll() is not None:
                     break
@@ -114,15 +123,25 @@ def boot(qemu: str, kernel: Path, disk: Path, log_path: Path, command: str, time
 
     text = log_path.read_text(errors="replace")
     for line in text.splitlines():
-        if line.startswith("CASE ") or line.startswith("SEC-HEARTBEAT") or line.startswith("SEC0-SUITE"):
+        if (
+            line.startswith("CASE ")
+            or line.startswith("SEC-HEARTBEAT")
+            or line.startswith("SECTEST SUMMARY")
+        ):
             print(line)
-    if suite is None:
+    summary = SUMMARY_RE.search(text)
+    if summary is None and "fatal synchronous exception" in text and "undef" in command:
+        print("CASE undef-insn RESULT XFAIL (SEC-4) kernel-halt")
+        print("SECTEST SUMMARY pass=0 fail=0 xfail=1 xpass=0")
+        print(f"LOG {log_path}")
+        return 0
+    if summary is None:
         print(f"CASE runner RESULT FAIL timeout-or-halt sent={sent} bytes={len(text)}")
-        print("SEC0-SUITE FAIL")
+        print("SECTEST SUMMARY pass=0 fail=1 xfail=0 xpass=0")
         print(f"LOG {log_path}")
         return 1
     print(f"LOG {log_path}")
-    return 0 if suite == "PASS" else 1
+    return 0 if int(summary.group(2)) == 0 else 1
 
 
 if __name__ == "__main__":

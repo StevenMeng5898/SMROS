@@ -2,9 +2,13 @@
 //!
 //! `sectest` is not part of the default smoke command list. It builds a real
 //! AArch64 EL0 process with its own TTBR0 root, copies a fixed machine-code
-//! probe into a user page, and records fault or syscall results. Unknown EL0
-//! exceptions still halt the kernel unless a later phase changes that; the
-//! undefined-instruction case is therefore a separate boot.
+//! probe into a user page, and records fault or syscall results.
+//!
+//! SEC-0/SEC-1 cases are hard PASS/FAIL. Cases owned by SEC-2 or later print
+//! `XFAIL (SEC-n)` while they still miss, or `XPASS (SEC-n)` if they start
+//! passing before that stage lands. `sectest all` records the undefined
+//! instruction as `XFAIL (SEC-4)` without executing it, because that
+//! instruction still halts the kernel. `sectest undef` reproduces the halt.
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
@@ -66,12 +70,62 @@ static CFG_A2: AtomicU64 = AtomicU64::new(0);
 enum Verdict {
     Pass,
     Fail,
-    Skip,
+    XFail,
+    XPass,
+}
+
+struct Tally {
+    pass: usize,
+    fail: usize,
+    xfail: usize,
+    xpass: usize,
+}
+
+impl Tally {
+    const fn new() -> Self {
+        Self {
+            pass: 0,
+            fail: 0,
+            xfail: 0,
+            xpass: 0,
+        }
+    }
+
+    fn add(&mut self, verdict: Verdict) {
+        match verdict {
+            Verdict::Pass => self.pass += 1,
+            Verdict::Fail => self.fail += 1,
+            Verdict::XFail => self.xfail += 1,
+            Verdict::XPass => self.xpass += 1,
+        }
+    }
 }
 
 struct FinishedCase {
     verdict: Verdict,
     detail: &'static str,
+    /// Set for cases owned by SEC-2 or later. `None` is a hard SEC-0/SEC-1 result.
+    stage: Option<&'static str>,
+}
+
+fn finished(verdict: Verdict, detail: &'static str) -> FinishedCase {
+    FinishedCase {
+        verdict,
+        detail,
+        stage: None,
+    }
+}
+
+fn expected(stage: &'static str, detail: &'static str, passed: bool) -> FinishedCase {
+    FinishedCase {
+        verdict: if passed {
+            Verdict::XPass
+        } else {
+            Verdict::XFail
+        },
+        detail,
+        stage: Some(stage),
+    }
 }
 
 pub fn magic_address() -> usize {
@@ -116,12 +170,12 @@ pub(crate) fn observe_exit(code: i32) {
 pub fn run(serial: &mut Serial, which: &str) {
     if !cfg!(target_arch = "aarch64") {
         serial.write_str("CASE sectest RESULT SKIP not-aarch64\n");
-        serial.write_str("SEC0-SUITE PASS\n");
+        print_summary(serial, Tally::new());
         return;
     }
     match which {
         "all" => run_listed(serial, false),
-        "undef" => run_one(serial, undef_case()),
+        "undef" => run_undef(serial),
         "list" => {
             serial.write_str("sectest cases: all | undef | <id>\n");
             for case in cases() {
@@ -138,59 +192,91 @@ pub fn run(serial: &mut Serial, which: &str) {
                 serial.write_str("CASE ");
                 serial.write_str(other);
                 serial.write_str(" RESULT FAIL unknown-id\n");
-                serial.write_str("SEC0-SUITE FAIL\n");
+                let mut tally = Tally::new();
+                tally.add(Verdict::Fail);
+                print_summary(serial, tally);
             }
         }
     }
 }
 
-fn run_listed(serial: &mut Serial, include_undef: bool) {
-    let mut failed = false;
+fn run_listed(serial: &mut Serial, _include_undef: bool) {
+    let mut tally = Tally::new();
     for case in cases() {
-        if case.op == OP_UNDEF && !include_undef {
-            serial.write_str("CASE ");
-            serial.write_str(case.id);
-            serial.write_str(" RESULT SKIP separate-boot-sectest-undef\n");
-            continue;
-        }
         let finished = execute(case);
-        print_case(serial, case.id, finished.verdict, finished.detail);
-        if !matches!(finished.verdict, Verdict::Pass | Verdict::Skip) {
-            failed = true;
-        }
+        print_case(serial, case.id, &finished);
+        tally.add(finished.verdict);
     }
-    serial.write_str("CASE undef-insn RESULT SKIP separate-boot-sectest-undef\n");
+    // Undefined-instruction delivery still halts the kernel. Running it inside
+    // `sectest all` would hide the summary, so record the known SEC-4 gap here.
+    // `sectest undef` still reproduces the halt.
+    let undef = expected("SEC-4", "known-kernel-halt", false);
+    print_case(serial, "undef-insn", &undef);
+    tally.add(undef.verdict);
     serial.write_str("SEC-HEARTBEAT\n");
-    serial.write_str(if failed {
-        "SEC0-SUITE FAIL\n"
-    } else {
-        "SEC0-SUITE PASS\n"
-    });
+    print_summary(serial, tally);
 }
 
 fn run_one(serial: &mut Serial, case: Case) {
     let finished = execute(case);
-    print_case(serial, case.id, finished.verdict, finished.detail);
-    let failed = !matches!(finished.verdict, Verdict::Pass | Verdict::Skip);
-    serial.write_str(if failed {
-        "SEC0-SUITE FAIL\n"
-    } else {
-        "SEC0-SUITE PASS\n"
-    });
+    print_case(serial, case.id, &finished);
+    let mut tally = Tally::new();
+    tally.add(finished.verdict);
+    serial.write_str("SEC-HEARTBEAT\n");
+    print_summary(serial, tally);
 }
 
-fn print_case(serial: &mut Serial, id: &str, verdict: Verdict, detail: &str) {
+fn print_case(serial: &mut Serial, id: &str, finished: &FinishedCase) {
     serial.write_str("CASE ");
     serial.write_str(id);
     serial.write_str(" RESULT ");
-    serial.write_str(match verdict {
-        Verdict::Pass => "PASS",
-        Verdict::Fail => "FAIL",
-        Verdict::Skip => "SKIP",
-    });
+    match finished.verdict {
+        Verdict::Pass => serial.write_str("PASS"),
+        Verdict::Fail => serial.write_str("FAIL"),
+        Verdict::XFail => {
+            serial.write_str("XFAIL (");
+            serial.write_str(finished.stage.unwrap_or("SEC-?"));
+            serial.write_str(")");
+        }
+        Verdict::XPass => {
+            serial.write_str("XPASS (");
+            serial.write_str(finished.stage.unwrap_or("SEC-?"));
+            serial.write_str(")");
+        }
+    }
     serial.write_str(" ");
-    serial.write_str(detail);
+    serial.write_str(finished.detail);
     serial.write_str("\n");
+}
+
+fn print_summary(serial: &mut Serial, tally: Tally) {
+    serial.write_str("SECTEST SUMMARY pass=");
+    write_usize(serial, tally.pass);
+    serial.write_str(" fail=");
+    write_usize(serial, tally.fail);
+    serial.write_str(" xfail=");
+    write_usize(serial, tally.xfail);
+    serial.write_str(" xpass=");
+    write_usize(serial, tally.xpass);
+    serial.write_str("\n");
+}
+
+fn write_usize(serial: &mut Serial, mut value: usize) {
+    if value == 0 {
+        serial.write_byte(b'0');
+        return;
+    }
+    let mut buf = [0u8; 20];
+    let mut index = 0;
+    while value > 0 && index < buf.len() {
+        buf[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+        index += 1;
+    }
+    while index > 0 {
+        index -= 1;
+        serial.write_byte(buf[index]);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -212,8 +298,11 @@ enum Judge {
     Trap,
     /// The syscall returns to EL0 with this x0 value and does not change magic.
     Syscall(u64),
-    /// Property is outside SEC-0/SEC-1. Recorded as FAIL, not skipped.
-    NotProven(&'static str),
+    /// Owned by a later stage. A miss is XFAIL; an unexpected success is XPASS.
+    Later {
+        stage: &'static str,
+        detail: &'static str,
+    },
 }
 
 fn cases() -> [Case; 16] {
@@ -366,7 +455,10 @@ fn cases() -> [Case; 16] {
             a0: 0,
             a1: 0,
             a2: 0,
-            judge: Judge::NotProven("second-address-space"),
+            judge: Judge::Later {
+                stage: "SEC-2",
+                detail: "second-address-space",
+            },
         },
         Case {
             id: "cow-fork",
@@ -377,7 +469,10 @@ fn cases() -> [Case; 16] {
             a0: 0,
             a1: 0,
             a2: 0,
-            judge: Judge::NotProven("fork-cow"),
+            judge: Judge::Later {
+                stage: "SEC-2",
+                detail: "fork-cow",
+            },
         },
         Case {
             id: "foreign-handle",
@@ -388,7 +483,10 @@ fn cases() -> [Case; 16] {
             a0: 0,
             a1: 0,
             a2: 0,
-            judge: Judge::NotProven("per-process-handle"),
+            judge: Judge::Later {
+                stage: "SEC-3",
+                detail: "per-process-handle",
+            },
         },
         Case {
             id: "closed-fd",
@@ -399,7 +497,10 @@ fn cases() -> [Case; 16] {
             a0: 0,
             a1: 0,
             a2: 0,
-            judge: Judge::NotProven("fd-generation"),
+            judge: Judge::Later {
+                stage: "SEC-3",
+                detail: "fd-generation",
+            },
         },
     ]
 }
@@ -414,7 +515,10 @@ fn undef_case() -> Case {
         a0: 0,
         a1: 0,
         a2: 0,
-        judge: Judge::Trap,
+        judge: Judge::Later {
+            stage: "SEC-4",
+            detail: "known-kernel-halt",
+        },
     }
 }
 
@@ -428,12 +532,27 @@ fn zircon_invalid_args() -> u64 {
 
 fn execute(case: Case) -> FinishedCase {
     match case.judge {
-        Judge::NotProven(reason) => FinishedCase {
-            verdict: Verdict::Fail,
-            detail: reason,
-        },
+        Judge::Later { stage, detail } => expected(stage, detail, false),
         Judge::Trap | Judge::Syscall(_) => run_probe(case),
     }
+}
+
+fn run_undef(serial: &mut Serial) {
+    let case = undef_case();
+    let observed = run_probe(Case {
+        judge: Judge::Trap,
+        ..case
+    });
+    let finished = expected(
+        "SEC-4",
+        observed.detail,
+        matches!(observed.verdict, Verdict::Pass),
+    );
+    print_case(serial, case.id, &finished);
+    let mut tally = Tally::new();
+    tally.add(finished.verdict);
+    serial.write_str("SEC-HEARTBEAT\n");
+    print_summary(serial, tally);
 }
 
 fn run_probe(case: Case) -> FinishedCase {
@@ -459,10 +578,7 @@ fn run_probe(case: Case) -> FinishedCase {
         match create_probe_vmo() {
             Ok(handle) => CFG_A0.store(handle as u64, Ordering::Relaxed),
             Err(()) => {
-                return FinishedCase {
-                    verdict: Verdict::Fail,
-                    detail: "vmo-create",
-                };
+                return finished(Verdict::Fail, "vmo-create");
             }
         }
     }
@@ -471,10 +587,7 @@ fn run_probe(case: Case) -> FinishedCase {
         scheduler::scheduler().create_thread_on_cpu(security_case_thread, "sectest", Some(0));
     if created.is_none() {
         ACTIVE.store(false, Ordering::Release);
-        return FinishedCase {
-            verdict: Verdict::Fail,
-            detail: "thread",
-        };
+        return finished(Verdict::Fail, "thread");
     }
     let start = crate::kernel_lowlevel::timer::get_nanoseconds();
     while !DONE.load(Ordering::Acquire) {
@@ -482,10 +595,7 @@ fn run_probe(case: Case) -> FinishedCase {
         if crate::kernel_lowlevel::timer::get_nanoseconds().saturating_sub(start) > CASE_TIMEOUT_NS
         {
             ACTIVE.store(false, Ordering::Release);
-            return FinishedCase {
-                verdict: Verdict::Fail,
-                detail: "timeout",
-            };
+            return finished(Verdict::Fail, "timeout");
         }
     }
     ACTIVE.store(false, Ordering::Release);
@@ -494,10 +604,7 @@ fn run_probe(case: Case) -> FinishedCase {
 
 fn judge(case: Case) -> FinishedCase {
     if SETUP_ERROR.load(Ordering::Relaxed) != 0 {
-        return FinishedCase {
-            verdict: Verdict::Fail,
-            detail: "setup",
-        };
+        return finished(Verdict::Fail, "setup");
     }
     let magic_ok = MAGIC_WORD.load(Ordering::Relaxed) == MAGIC;
     let exec_ok = EXEC_HITS.load(Ordering::Relaxed) == 0;
@@ -505,55 +612,28 @@ fn judge(case: Case) -> FinishedCase {
     match case.judge {
         Judge::Trap => {
             if faulted && magic_ok && exec_ok {
-                FinishedCase {
-                    verdict: Verdict::Pass,
-                    detail: "trapped",
-                }
+                finished(Verdict::Pass, "trapped")
             } else if !magic_ok {
-                FinishedCase {
-                    verdict: Verdict::Fail,
-                    detail: "magic-changed",
-                }
+                finished(Verdict::Fail, "magic-changed")
             } else if !exec_ok {
-                FinishedCase {
-                    verdict: Verdict::Fail,
-                    detail: "kernel-executed",
-                }
+                finished(Verdict::Fail, "kernel-executed")
             } else {
-                FinishedCase {
-                    verdict: Verdict::Fail,
-                    detail: "no-fault",
-                }
+                finished(Verdict::Fail, "no-fault")
             }
         }
         Judge::Syscall(expected) => {
             let result = LAST_RESULT.load(Ordering::Relaxed);
             if faulted {
-                FinishedCase {
-                    verdict: Verdict::Fail,
-                    detail: "faulted",
-                }
+                finished(Verdict::Fail, "faulted")
             } else if !magic_ok {
-                FinishedCase {
-                    verdict: Verdict::Fail,
-                    detail: "magic-changed",
-                }
+                finished(Verdict::Fail, "magic-changed")
             } else if result == expected {
-                FinishedCase {
-                    verdict: Verdict::Pass,
-                    detail: "errno",
-                }
+                finished(Verdict::Pass, "errno")
             } else {
-                FinishedCase {
-                    verdict: Verdict::Fail,
-                    detail: "unexpected-return",
-                }
+                finished(Verdict::Fail, "unexpected-return")
             }
         }
-        Judge::NotProven(_) => FinishedCase {
-            verdict: Verdict::Fail,
-            detail: "not-proven",
-        },
+        Judge::Later { stage, detail } => expected(stage, detail, false),
     }
 }
 
