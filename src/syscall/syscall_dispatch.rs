@@ -96,6 +96,7 @@ pub extern "C" fn handle_syscall_simple(
     };
 
     crate::user_level::user_test::record_el0_kernel_syscall_result(syscall_num as u32, result);
+    crate::user_level::services::security_case::observe_syscall(syscall_num as u32, result);
     // The RISC-V trap return hook must run after the result has been written
     // to the saved frame; it owns signal delivery and sigreturn restoration.
     // The assembly handler clears the per-thread context after that hook.

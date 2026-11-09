@@ -1347,6 +1347,15 @@ mod syscall_logic {
         ));
     }
 
+    /// Documents the current predicate. A passing result is not evidence that
+    /// EL0 is unable to name kernel memory; `0x4000_0000` is a kernel RAM
+    /// address and is still accepted.
+    #[test]
+    fn weak_user_buffer_check_is_not_a_security_proof() {
+        assert!(smros_syscall_user_buffer_valid_body!(0x4000_0000usize, 8));
+        assert!(smros_syscall_user_buffer_valid_body!(0xFFFF_0000_0000_0000usize, 1));
+    }
+
     #[test]
     fn signal_updates_and_allowed_masks_are_exact() {
         assert_eq!(
