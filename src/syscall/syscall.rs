@@ -5561,6 +5561,7 @@ pub(crate) fn deliver_linux_synchronous_memory_fault(
     fault_address: u64,
     access: LinuxMemoryFaultAccess,
 ) -> Result<(), SysError> {
+    crate::user_level::services::security_case::observe_fault(fault_address);
     if saved_regs == 0 {
         return Err(SysError::EFAULT);
     }
@@ -11765,6 +11766,9 @@ fn exit_current_linux_process(
         entire_group,
     )?;
     if outcome == linux_process::LinuxProcessExitOutcome::LaunchRoot {
+        if crate::user_level::services::security_case::case_active() {
+            linux_task::finish_current_without_el0_return();
+        }
         return crate::user_level::run_elf::prepare_run_elf_return(exit_code)
             .map(Some)
             .ok_or(SysError::ESRCH);
@@ -11787,6 +11791,9 @@ fn terminate_linux_process_by_signal(tgid: usize, signum: usize) -> SysResult {
         outcome
     );
     if outcome == linux_process::LinuxProcessExitOutcome::LaunchRoot {
+        if crate::user_level::services::security_case::case_active() {
+            linux_task::finish_current_without_el0_return();
+        }
         let exit_code = 128 + signum as i32;
         let launch_id = crate::user_level::run_elf::prepare_run_elf_return(exit_code);
         crate::kobj_debug!(
@@ -11805,6 +11812,7 @@ fn terminate_linux_process_by_signal(tgid: usize, signum: usize) -> SysResult {
 
 /// Linux sys_exit implementation
 pub fn sys_exit(exit_code: i32) -> SysResult {
+    crate::user_level::services::security_case::observe_exit(exit_code);
     let exit_code = syscall_logic::linux_exit_status(exit_code);
     info!("exit: code={}", exit_code);
     crate::kobj_debug!(
@@ -11830,6 +11838,7 @@ pub fn sys_exit(exit_code: i32) -> SysResult {
 
 /// Linux sys_exit_group implementation
 pub fn sys_exit_group(exit_code: i32) -> SysResult {
+    crate::user_level::services::security_case::observe_exit(exit_code);
     let exit_code = syscall_logic::linux_exit_status(exit_code);
     info!("exit_group: code={}", exit_code);
     crate::kobj_debug!(
