@@ -40,7 +40,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
-use core::sync::atomic::{compiler_fence, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{compiler_fence, AtomicI64, AtomicU64, Ordering};
 
 use super::address_logic::{
     checked_end, fixed_linux_mmap_request_ok as shared_fixed_linux_mmap_request_ok,
@@ -904,6 +904,7 @@ struct LinuxShmCachedHandle {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct ZxWaitItem {
     handle: u32,
     waitfor: u32,
@@ -1218,34 +1219,7 @@ fn linux_write_user_timespec(address: usize, value: LinuxTimespec) -> SysResult 
 
 fn linux_write_user_timespec_clock_gettime(address: usize, value: LinuxTimespec) -> SysResult {
     let bytes = linux_encode_flat_timespec(value)?;
-    let Ok(pid) = linux_process::current_pid() else {
-        return linux_copy_to_user(address, &bytes).map(|_| 0);
-    };
-    let generation = linux_process_memory::memory_generation();
-    if LINUX_CLOCK_GETTIME_CACHE_PID.load(Ordering::Relaxed) == pid
-        && LINUX_CLOCK_GETTIME_CACHE_GENERATION.load(Ordering::Relaxed) == generation
-        && LINUX_CLOCK_GETTIME_CACHE_ADDRESS.load(Ordering::Relaxed) == address
-    {
-        let physical = LINUX_CLOCK_GETTIME_CACHE_PHYSICAL.load(Ordering::Relaxed);
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), physical as *mut u8, bytes.len());
-        }
-        return Ok(0);
-    }
-
-    match linux_process_memory::current_writable_contiguous_physical(address, bytes.len()) {
-        Ok((translated_pid, translated_generation, physical)) => {
-            unsafe {
-                core::ptr::copy_nonoverlapping(bytes.as_ptr(), physical as *mut u8, bytes.len());
-            }
-            LINUX_CLOCK_GETTIME_CACHE_PHYSICAL.store(physical, Ordering::Relaxed);
-            LINUX_CLOCK_GETTIME_CACHE_ADDRESS.store(address, Ordering::Relaxed);
-            LINUX_CLOCK_GETTIME_CACHE_GENERATION.store(translated_generation, Ordering::Relaxed);
-            LINUX_CLOCK_GETTIME_CACHE_PID.store(translated_pid, Ordering::Relaxed);
-            Ok(0)
-        }
-        Err(_) => linux_copy_to_user(address, &bytes).map(|_| 0),
-    }
+    linux_copy_to_user(address, &bytes).map(|_| 0)
 }
 
 fn linux_encode_timeval(
@@ -3875,11 +3849,6 @@ static LINUX_CPU_CLOCK_OFFSET_NANOS: AtomicI64 = AtomicI64::new(0);
 pub(crate) fn linux_realtime_offset_nanoseconds() -> i64 {
     LINUX_REALTIME_OFFSET_NANOS.load(Ordering::SeqCst)
 }
-static LINUX_CLOCK_GETTIME_CACHE_PID: AtomicUsize = AtomicUsize::new(usize::MAX);
-static LINUX_CLOCK_GETTIME_CACHE_GENERATION: AtomicUsize = AtomicUsize::new(usize::MAX);
-static LINUX_CLOCK_GETTIME_CACHE_ADDRESS: AtomicUsize = AtomicUsize::new(0);
-static LINUX_CLOCK_GETTIME_CACHE_PHYSICAL: AtomicUsize = AtomicUsize::new(0);
-
 const LINUX_SIGNAL_TRAMPOLINE_BYTES: usize = PAGE_SIZE;
 fn memory_state() -> &'static mut MemorySyscallState {
     unsafe {
@@ -4012,6 +3981,80 @@ fn linux_copy_to_user(address: usize, bytes: &[u8]) -> Result<(), SysError> {
         }
         Ok(())
     }
+}
+
+fn read_user_bytes(ptr: usize, len: usize) -> Result<Vec<u8>, SysError> {
+    let mut bytes = Vec::new();
+    if len == 0 {
+        return Ok(bytes);
+    }
+    bytes.try_reserve_exact(len).map_err(|_| SysError::ENOMEM)?;
+    bytes.resize(len, 0);
+    linux_copy_from_user(ptr, &mut bytes)?;
+    Ok(bytes)
+}
+
+fn write_user_bytes(ptr: usize, bytes: &[u8]) -> Result<(), SysError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    linux_copy_to_user(ptr, bytes)
+}
+
+fn read_user_pod<T: Copy>(ptr: usize) -> Result<T, SysError> {
+    let size = core::mem::size_of::<T>();
+    let mut raw = [0u8; 256];
+    if size > raw.len() {
+        return Err(SysError::EINVAL);
+    }
+    linux_copy_from_user(ptr, &mut raw[..size])?;
+    let mut value = core::mem::MaybeUninit::<T>::uninit();
+    unsafe {
+        core::ptr::copy_nonoverlapping(raw.as_ptr(), value.as_mut_ptr() as *mut u8, size);
+        Ok(value.assume_init())
+    }
+}
+
+fn write_user_pod<T: Copy>(ptr: usize, value: &T) -> Result<(), SysError> {
+    let size = core::mem::size_of::<T>();
+    let bytes = unsafe { core::slice::from_raw_parts(value as *const T as *const u8, size) };
+    linux_copy_to_user(ptr, bytes)
+}
+
+fn zx_from_sys(error: SysError) -> ZxError {
+    match error {
+        SysError::ENOMEM => ZxError::ErrNoMemory,
+        SysError::ESRCH | SysError::EBADF | SysError::ENOENT => ZxError::ErrNotFound,
+        _ => ZxError::ErrInvalidArgs,
+    }
+}
+
+fn zx_read_bytes(ptr: usize, len: usize) -> ZxResult<Vec<u8>> {
+    read_user_bytes(ptr, len).map_err(zx_from_sys)
+}
+
+fn zx_write_bytes(ptr: usize, bytes: &[u8]) -> ZxResult {
+    write_user_bytes(ptr, bytes).map_err(zx_from_sys)
+}
+
+fn zx_zero(ptr: usize, len: usize) -> ZxResult {
+    let zeros = [0u8; 64];
+    let mut offset = 0usize;
+    while offset < len {
+        let address = ptr.checked_add(offset).ok_or(ZxError::ErrInvalidArgs)?;
+        let count = core::cmp::min(zeros.len(), len - offset);
+        zx_write_bytes(address, &zeros[..count])?;
+        offset += count;
+    }
+    Ok(())
+}
+
+fn zx_read_pod<T: Copy>(ptr: usize) -> ZxResult<T> {
+    read_user_pod(ptr).map_err(zx_from_sys)
+}
+
+fn zx_write_pod<T: Copy>(ptr: usize, value: &T) -> ZxResult {
+    write_user_pod(ptr, value).map_err(zx_from_sys)
 }
 
 fn linux_user_cstr(ptr: usize, max_len: usize) -> Result<String, SysError> {
@@ -4733,6 +4776,8 @@ fn ensure_linux_signal_trampoline() -> Result<usize, SysError> {
     let instructions = [0xd63f_0200u32, 0xd280_1168, 0xd400_0001, 0xd420_0000];
     #[cfg(target_arch = "riscv64")]
     let instructions = [0x08b0_0893u32, 0x0000_0073, 0x0010_0073, 0x0000_0013];
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    let instructions = [0u32; 4];
     let mut instruction_bytes = [0u8; 16];
     for (index, instruction) in instructions.iter().enumerate() {
         instruction_bytes[index * 4..index * 4 + 4].copy_from_slice(&instruction.to_ne_bytes());
@@ -10698,7 +10743,7 @@ fn zircon_read_iovec(vector: usize, index: usize) -> ZxResult<ZirconIovec> {
         .checked_mul(core::mem::size_of::<ZirconIovec>())
         .ok_or(ZxError::ErrInvalidArgs)?;
     let address = vector.checked_add(offset).ok_or(ZxError::ErrInvalidArgs)?;
-    Ok(unsafe { core::ptr::read_unaligned(address as *const ZirconIovec) })
+    zx_read_pod(address)
 }
 
 fn zircon_read_iovecs(vector: usize, vector_size: usize) -> ZxResult<Vec<ZirconIovec>> {
@@ -10740,9 +10785,7 @@ fn zircon_iov_write_compat(handle: u32, vector: usize, vector_size: usize) -> Zx
                 .base
                 .checked_add(offset)
                 .ok_or(ZxError::ErrInvalidArgs)?;
-            unsafe {
-                core::ptr::copy_nonoverlapping(source as *const u8, staging.as_mut_ptr(), chunk);
-            }
+            linux_copy_from_user(source, &mut staging[..chunk]).map_err(zx_from_sys)?;
             let written = match compat::table().write_bytes(HandleValue(handle), &staging[..chunk])
             {
                 Ok(written) => written,
@@ -10773,13 +10816,7 @@ fn zircon_iov_read_compat(handle: u32, vector: usize, vector_size: usize) -> ZxR
                         .base
                         .checked_add(offset)
                         .ok_or(ZxError::ErrInvalidArgs)?;
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            staging.as_ptr(),
-                            destination as *mut u8,
-                            read,
-                        );
-                    }
+                    linux_copy_to_user(destination, &staging[..read]).map_err(zx_from_sys)?;
                     total = total.saturating_add(read);
                     offset += read;
                     if read < chunk {
@@ -12577,7 +12614,7 @@ fn process_profile_from_user_name(
 
     if name_ptr != 0 && name_len != 0 {
         let len = name_len.min(right::MAX_PROCESS_NAME_BYTES);
-        let bytes = unsafe { core::slice::from_raw_parts(name_ptr as *const u8, len) };
+        let bytes = zx_read_bytes(name_ptr, len)?;
         let end = bytes
             .iter()
             .position(|byte| *byte == 0)
@@ -12783,9 +12820,7 @@ pub fn sys_thread_read_state(
     }
 
     if buffer_size >= core::mem::size_of::<u64>() {
-        unsafe {
-            core::ptr::write(buffer as *mut u64, thread_handle as u64);
-        }
+        zx_write_pod(buffer, &(thread_handle as u64))?;
     }
     Ok(())
 }
@@ -12892,7 +12927,7 @@ pub fn sys_process_read_memory(
     len: usize,
 ) -> ZxResult<usize> {
     let state = memory_state();
-    if !state.process_handle_known(proc_handle) || !syscall_logic::user_buffer_valid(buffer, len) {
+    if !state.process_handle_known(proc_handle) {
         return Err(ZxError::ErrInvalidArgs);
     }
     if !state.handle_has_rights(proc_handle, Rights::Read as u32) {
@@ -12900,8 +12935,10 @@ pub fn sys_process_read_memory(
     }
 
     if len != 0 {
-        let out = unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, len) };
-        out.fill(0);
+        let mut zeros = Vec::new();
+        zeros.try_reserve_exact(len).map_err(|_| ZxError::ErrNoMemory)?;
+        zeros.resize(len, 0);
+        zx_write_bytes(buffer, &zeros)?;
     }
     Ok(len)
 }
@@ -12914,13 +12951,15 @@ pub fn sys_process_write_memory(
     len: usize,
 ) -> ZxResult<usize> {
     let state = memory_state();
-    if !state.process_handle_known(proc_handle) || !syscall_logic::user_buffer_valid(buffer, len) {
+    if !state.process_handle_known(proc_handle) {
         return Err(ZxError::ErrInvalidArgs);
     }
     if !state.handle_has_rights(proc_handle, Rights::Write as u32) {
         return Err(ZxError::ErrAccessDenied);
     }
-
+    if len != 0 {
+        let _bytes = zx_read_bytes(buffer, len)?;
+    }
     Ok(len)
 }
 
@@ -13102,9 +13141,13 @@ pub fn sys_handle_close_many(handles_ptr: usize, num_handles: usize) -> ZxResult
         return Err(ZxError::ErrInvalidArgs);
     }
 
-    let handles = unsafe { core::slice::from_raw_parts(handles_ptr as *const u32, num_handles) };
-    for handle in handles {
-        sys_handle_close(*handle)?;
+    let bytes = zx_read_bytes(handles_ptr, num_handles.saturating_mul(core::mem::size_of::<u32>()))?;
+    if bytes.len() != num_handles * core::mem::size_of::<u32>() {
+        return Err(ZxError::ErrInvalidArgs);
+    }
+    for chunk in bytes.chunks_exact(core::mem::size_of::<u32>()) {
+        let handle = u32::from_ne_bytes(chunk.try_into().map_err(|_| ZxError::ErrInvalidArgs)?);
+        sys_handle_close(handle)?;
     }
 
     Ok(())
@@ -13234,22 +13277,26 @@ pub fn sys_object_wait_many(items_ptr: usize, count: usize, deadline: u64) -> Zx
     if count == 0 {
         return Ok(());
     }
-    if !syscall_logic::user_buffer_valid(
-        items_ptr,
-        count.saturating_mul(core::mem::size_of::<ZxWaitItem>()),
-    ) {
-        return Err(ZxError::ErrInvalidArgs);
+    let mut items = Vec::new();
+    items.try_reserve_exact(count).map_err(|_| ZxError::ErrNoMemory)?;
+    for index in 0..count {
+        let address = items_ptr
+            .checked_add(index * core::mem::size_of::<ZxWaitItem>())
+            .ok_or(ZxError::ErrInvalidArgs)?;
+        items.push(zx_read_pod::<ZxWaitItem>(address)?);
     }
-
-    let items = unsafe { core::slice::from_raw_parts_mut(items_ptr as *mut ZxWaitItem, count) };
     let mut satisfied = false;
 
-    for item in items.iter_mut() {
+    for (index, item) in items.iter_mut().enumerate() {
         if !handle_has_rights(item.handle, Rights::Wait as u32) {
             return Err(ZxError::ErrAccessDenied);
         }
         let observed = object_signal_state(item.handle)?;
         item.pending = observed;
+        let address = items_ptr
+            .checked_add(index * core::mem::size_of::<ZxWaitItem>())
+            .ok_or(ZxError::ErrInvalidArgs)?;
+        zx_write_pod(address, item)?;
         if syscall_logic::wait_satisfied(observed, item.waitfor) {
             satisfied = true;
         }
@@ -13411,18 +13458,14 @@ pub fn sys_object_get_info(
         let info_size = core::mem::size_of::<socket::SocketInfo>();
         *out_actual_size = info_size;
         if buffer_size >= info_size {
-            unsafe {
-                core::ptr::write(buffer as *mut socket::SocketInfo, info);
-            }
+            zx_write_pod(buffer, &info)?;
         }
         return Ok(());
     }
 
     *out_actual_size = core::mem::size_of::<u64>();
     if buffer_size >= core::mem::size_of::<u64>() {
-        unsafe {
-            core::ptr::write(buffer as *mut u64, ((topic as u64) << 32) | handle as u64);
-        }
+        zx_write_pod(buffer, &(((topic as u64) << 32) | handle as u64))?;
     }
     Ok(())
 }
@@ -13453,9 +13496,7 @@ pub fn sys_object_get_property(
         .property(HandleValue(handle), prop_id)
         .or_else(|| compat::table().property(HandleValue(handle)))
         .unwrap_or_else(|| memory_state().get_property_value(handle));
-    unsafe {
-        core::ptr::write(buffer as *mut u64, value);
-    }
+    zx_write_pod(buffer, &value)?;
     Ok(())
 }
 
@@ -13481,7 +13522,7 @@ pub fn sys_object_set_property(
         return Err(ZxError::ErrAccessDenied);
     }
 
-    let value = unsafe { core::ptr::read(buffer as *const u64) };
+    let value = zx_read_pod::<u64>(buffer)?;
     match socket::socket_table().set_property(HandleValue(handle), prop_id, value) {
         Ok(true) => return Ok(()),
         Ok(false) => {}
@@ -13543,15 +13584,11 @@ pub fn sys_socket_write(
     len: usize,
     out_actual: &mut usize,
 ) -> ZxResult {
-    if options != 0 || !syscall_logic::user_buffer_valid(buffer, len) {
+    if options != 0 {
         return Err(ZxError::ErrInvalidArgs);
     }
-    let bytes = if len == 0 {
-        &[][..]
-    } else {
-        unsafe { core::slice::from_raw_parts(buffer as *const u8, len) }
-    };
-    *out_actual = socket::socket_table().write(HandleValue(handle), bytes)?;
+    let bytes = zx_read_bytes(buffer, len)?;
+    *out_actual = socket::socket_table().write(HandleValue(handle), &bytes)?;
     Ok(())
 }
 
@@ -13562,15 +13599,13 @@ pub fn sys_socket_read(
     len: usize,
     out_actual: &mut usize,
 ) -> ZxResult {
-    if !syscall_logic::user_buffer_valid(buffer, len) {
-        return Err(ZxError::ErrInvalidArgs);
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| ZxError::ErrNoMemory)?;
+    out.resize(len, 0);
+    *out_actual = socket::socket_table().read(HandleValue(handle), options, &mut out)?;
+    if *out_actual != 0 {
+        zx_write_bytes(buffer, &out[..*out_actual])?;
     }
-    let out = if len == 0 {
-        &mut [][..]
-    } else {
-        unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, len) }
-    };
-    *out_actual = socket::socket_table().read(HandleValue(handle), options, out)?;
     Ok(())
 }
 
@@ -13608,15 +13643,11 @@ pub fn sys_fifo_write(
     out_actual: &mut usize,
 ) -> ZxResult {
     let byte_len = fifo_logic::transfer_bytes(elem_size, count).ok_or(ZxError::ErrOutOfRange)?;
-    if elem_size == 0 || !syscall_logic::user_buffer_valid(buffer, byte_len) {
+    if elem_size == 0 {
         return Err(ZxError::ErrInvalidArgs);
     }
-    let bytes = if byte_len == 0 {
-        &[][..]
-    } else {
-        unsafe { core::slice::from_raw_parts(buffer as *const u8, byte_len) }
-    };
-    *out_actual = fifo::fifo_table().write(HandleValue(handle), elem_size, bytes)?;
+    let bytes = zx_read_bytes(buffer, byte_len)?;
+    *out_actual = fifo::fifo_table().write(HandleValue(handle), elem_size, &bytes)?;
     Ok(())
 }
 
@@ -13628,15 +13659,17 @@ pub fn sys_fifo_read(
     out_actual: &mut usize,
 ) -> ZxResult {
     let byte_len = fifo_logic::transfer_bytes(elem_size, count).ok_or(ZxError::ErrOutOfRange)?;
-    if elem_size == 0 || !syscall_logic::user_buffer_valid(buffer, byte_len) {
+    if elem_size == 0 {
         return Err(ZxError::ErrInvalidArgs);
     }
-    let out = if byte_len == 0 {
-        &mut [][..]
-    } else {
-        unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, byte_len) }
-    };
-    *out_actual = fifo::fifo_table().read(HandleValue(handle), elem_size, out)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(byte_len).map_err(|_| ZxError::ErrNoMemory)?;
+    out.resize(byte_len, 0);
+    *out_actual = fifo::fifo_table().read(HandleValue(handle), elem_size, &mut out)?;
+    let written = (*out_actual).saturating_mul(elem_size);
+    if written != 0 {
+        zx_write_bytes(buffer, &out[..written.min(out.len())])?;
+    }
     Ok(())
 }
 
@@ -13652,7 +13685,7 @@ pub fn sys_port_queue(port_handle: u32, packet: usize) -> ZxResult {
     {
         return Err(ZxError::ErrInvalidArgs);
     }
-    let queued = unsafe { core::ptr::read(packet as *const port::PortPacket) };
+    let queued = zx_read_pod::<port::PortPacket>(packet)?;
     port::port_table().queue(HandleValue(port_handle), queued)?;
     Ok(())
 }
@@ -13665,9 +13698,7 @@ pub fn sys_port_wait(port_handle: u32, deadline: u64, packet: usize) -> ZxResult
         return Err(ZxError::ErrInvalidArgs);
     }
     let received = port::port_table().wait(HandleValue(port_handle), deadline)?;
-    unsafe {
-        core::ptr::write(packet as *mut port::PortPacket, received);
-    }
+    zx_write_pod(packet, &received)?;
     Ok(())
 }
 
@@ -13750,32 +13781,28 @@ pub fn sys_debuglog_create(_resource: u32, options: u32, out_handle: &mut u32) -
 pub fn sys_debuglog_write(handle: u32, options: u32, buffer: usize, len: usize) -> ZxResult {
     if !syscall_logic::zircon_debuglog_io_options_valid(options, ZX_DEBUGLOG_OPTIONS_MASK)
         || !compat::table().is_type(HandleValue(handle), ObjectType::DebugLog)
-        || !syscall_logic::user_buffer_valid(buffer, len)
     {
         return Err(ZxError::ErrInvalidArgs);
     }
-    let bytes = if len == 0 {
-        &[][..]
-    } else {
-        unsafe { core::slice::from_raw_parts(buffer as *const u8, len) }
-    };
-    let _ = compat::table().write_bytes(HandleValue(handle), bytes)?;
+    let bytes = zx_read_bytes(buffer, len)?;
+    let _ = compat::table().write_bytes(HandleValue(handle), &bytes)?;
     Ok(())
 }
 
 pub fn sys_debuglog_read(handle: u32, options: u32, buffer: usize, len: usize) -> ZxResult<usize> {
     if !syscall_logic::zircon_debuglog_io_options_valid(options, ZX_DEBUGLOG_OPTIONS_MASK)
         || !compat::table().is_type(HandleValue(handle), ObjectType::DebugLog)
-        || !syscall_logic::user_buffer_valid(buffer, len)
     {
         return Err(ZxError::ErrInvalidArgs);
     }
-    let out = if len == 0 {
-        &mut [][..]
-    } else {
-        unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, len) }
-    };
-    compat::table().read_bytes(HandleValue(handle), out)
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| ZxError::ErrNoMemory)?;
+    out.resize(len, 0);
+    let read = compat::table().read_bytes(HandleValue(handle), &mut out)?;
+    if read != 0 {
+        zx_write_bytes(buffer, &out[..read.min(out.len())])?;
+    }
+    Ok(read)
 }
 
 pub fn sys_resource_create(
@@ -13798,19 +13825,19 @@ pub fn sys_resource_create(
 }
 
 pub fn sys_cprng_draw_once(buffer: usize, len: usize) -> ZxResult {
-    if !syscall_logic::user_buffer_valid(buffer, len) {
-        return Err(ZxError::ErrInvalidArgs);
+    if len == 0 {
+        return Ok(());
     }
-    if len != 0 {
-        let seed = monotonic_nanos() as u8;
-        let out = unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, len) };
-        for (index, byte) in out.iter_mut().enumerate() {
-            *byte = seed
-                .wrapping_add((index as u8).wrapping_mul(17))
-                .wrapping_add(0x5A);
-        }
+    let seed = monotonic_nanos() as u8;
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| ZxError::ErrNoMemory)?;
+    for index in 0..len {
+        out.push(
+            seed.wrapping_add((index as u8).wrapping_mul(17))
+                .wrapping_add(0x5A),
+        );
     }
-    Ok(())
+    zx_write_bytes(buffer, &out)
 }
 
 pub fn sys_cprng_add_entropy(buffer: usize, len: usize) -> ZxResult {
@@ -13822,13 +13849,11 @@ pub fn sys_cprng_add_entropy(buffer: usize, len: usize) -> ZxResult {
 }
 
 pub fn sys_debug_read(buffer: usize, len: usize) -> ZxResult<usize> {
-    if !syscall_logic::user_buffer_valid(buffer, len) {
-        return Err(ZxError::ErrInvalidArgs);
-    }
     if len != 0 {
-        unsafe {
-            core::ptr::write_bytes(buffer as *mut u8, 0, len);
-        }
+        let mut zeros = Vec::new();
+        zeros.try_reserve_exact(len).map_err(|_| ZxError::ErrNoMemory)?;
+        zeros.resize(len, 0);
+        zx_write_bytes(buffer, &zeros)?;
     }
     Ok(0)
 }
@@ -13989,12 +14014,10 @@ pub fn sys_bti_pin(
         return Err(ZxError::ErrInvalidArgs);
     }
     for index in 0..addrs_count {
-        unsafe {
-            core::ptr::write(
-                (addrs as *mut u64).add(index),
-                (offset + index * PAGE_SIZE) as u64,
-            );
-        }
+        let slot = addrs
+            .checked_add(index.saturating_mul(core::mem::size_of::<u64>()))
+            .ok_or(ZxError::ErrInvalidArgs)?;
+        zx_write_pod(slot, &((offset + index * PAGE_SIZE) as u64))?;
     }
     *out_handle = compat::create_object(ObjectType::Pmt)?.0;
     Ok(())
@@ -14014,14 +14037,10 @@ pub fn sys_bti_release_quarantine(bti: u32) -> ZxResult {
 
 pub fn sys_pc_firmware_tables(_resource: u32, acpi_rsdp_ptr: usize, smbios_ptr: usize) -> ZxResult {
     if acpi_rsdp_ptr != 0 {
-        unsafe {
-            core::ptr::write(acpi_rsdp_ptr as *mut u64, 0);
-        }
+        zx_write_pod(acpi_rsdp_ptr, &0u64)?;
     }
     if smbios_ptr != 0 {
-        unsafe {
-            core::ptr::write(smbios_ptr as *mut u64, 0);
-        }
+        zx_write_pod(smbios_ptr, &0u64)?;
     }
     Ok(())
 }
@@ -14030,9 +14049,7 @@ pub fn sys_framebuffer_get_info(info: usize) -> ZxResult {
     if info == 0 {
         return Err(ZxError::ErrInvalidArgs);
     }
-    unsafe {
-        core::ptr::write_bytes(info as *mut u8, 0, 32);
-    }
+    zx_zero(info, 32)?;
     Ok(())
 }
 
@@ -14095,9 +14112,7 @@ pub fn sys_interrupt_wait(interrupt: u32, out_timestamp: usize) -> ZxResult {
         return Err(ZxError::ErrNotFound);
     }
     if out_timestamp != 0 {
-        unsafe {
-            core::ptr::write(out_timestamp as *mut i64, monotonic_nanos() as i64);
-        }
+        zx_write_pod(out_timestamp, &(monotonic_nanos() as i64))?;
     }
     Ok(())
 }
@@ -14141,9 +14156,7 @@ pub fn sys_pci_get_nth_device(
     out_handle: &mut u32,
 ) -> ZxResult {
     if out_info != 0 {
-        unsafe {
-            core::ptr::write_bytes(out_info as *mut u8, 0, 64);
-        }
+        zx_zero(out_info, 64)?;
     }
     *out_handle = compat::create_object(ObjectType::PciDevice)?.0;
     Ok(())
@@ -14159,9 +14172,7 @@ pub fn sys_pci_get_bar(
         return Err(ZxError::ErrNotFound);
     }
     if out_bar != 0 {
-        unsafe {
-            core::ptr::write_bytes(out_bar as *mut u8, 0, 24);
-        }
+        zx_zero(out_bar, 24)?;
     }
     let mut vmo = 0u32;
     sys_vmo_create(PAGE_SIZE as u64, 0, &mut vmo)?;
@@ -14182,9 +14193,7 @@ pub fn sys_pci_query_irq_mode(handle: u32, _mode: u32, out_max_irqs: usize) -> Z
         return Err(ZxError::ErrNotFound);
     }
     if out_max_irqs != 0 {
-        unsafe {
-            core::ptr::write(out_max_irqs as *mut u32, 1);
-        }
+        zx_write_pod(out_max_irqs, &1u32)?;
     }
     Ok(())
 }
@@ -14210,9 +14219,7 @@ pub fn sys_pci_config_read(handle: u32, _offset: usize, _width: usize, out_val: 
         return Err(ZxError::ErrNotFound);
     }
     if out_val != 0 {
-        unsafe {
-            core::ptr::write(out_val as *mut u32, 0);
-        }
+        zx_write_pod(out_val, &0u32)?;
     }
     Ok(())
 }
@@ -14234,9 +14241,7 @@ pub fn sys_smc_call(handle: u32, parameters: usize, out_smc_result: usize) -> Zx
     {
         return Err(ZxError::ErrInvalidArgs);
     }
-    unsafe {
-        core::ptr::write_bytes(out_smc_result as *mut u8, 0, ZX_SMC_RESULT_SIZE);
-    }
+    zx_zero(out_smc_result, ZX_SMC_RESULT_SIZE)?;
     Ok(())
 }
 
@@ -14325,9 +14330,7 @@ pub fn sys_vcpu_resume(handle: u32, user_packet: usize) -> ZxResult {
         return Err(ZxError::ErrInvalidArgs);
     }
     if user_packet != 0 {
-        unsafe {
-            core::ptr::write_bytes(user_packet as *mut u8, 0, ZX_VCPU_PACKET_SIZE);
-        }
+        zx_zero(user_packet, ZX_VCPU_PACKET_SIZE)?;
     }
     Ok(())
 }
@@ -14364,9 +14367,7 @@ pub fn sys_vcpu_read_state(
         return Err(ZxError::ErrInvalidArgs);
     }
     if buffer_size != 0 {
-        unsafe {
-            core::ptr::write_bytes(user_buffer as *mut u8, 0, buffer_size);
-        }
+        zx_zero(user_buffer, buffer_size)?;
     }
     Ok(())
 }
@@ -14485,9 +14486,7 @@ pub fn sys_stream_writev(
     }
     let written = zircon_iov_write_compat(handle, vector, vector_size)?;
     if actual_count != 0 {
-        unsafe {
-            core::ptr::write(actual_count as *mut usize, written);
-        }
+        zx_write_pod(actual_count, &written)?;
     }
     Ok(())
 }
@@ -14518,9 +14517,7 @@ pub fn sys_stream_readv(
     }
     let read = zircon_iov_read_compat(handle, vector, vector_size)?;
     if actual_count != 0 {
-        unsafe {
-            core::ptr::write(actual_count as *mut usize, read);
-        }
+        zx_write_pod(actual_count, &read)?;
     }
     Ok(())
 }
@@ -14606,9 +14603,7 @@ pub fn sys_clock_get(clock_id: u32, out_time: usize) -> ZxResult {
     if !syscall_logic::zircon_clock_id_supported(clock_id) || out_time == 0 {
         return Err(ZxError::ErrInvalidArgs);
     }
-    unsafe {
-        core::ptr::write(out_time as *mut u64, monotonic_nanos());
-    }
+    zx_write_pod(out_time, &monotonic_nanos())?;
     Ok(())
 }
 
@@ -14620,9 +14615,7 @@ pub fn sys_clock_read(handle: u32, out_time: usize) -> ZxResult {
         .state_value(HandleValue(handle))
         .unwrap_or(0);
     let value = stored.max(monotonic_nanos());
-    unsafe {
-        core::ptr::write(out_time as *mut u64, value);
-    }
+    zx_write_pod(out_time, &value)?;
     Ok(())
 }
 
@@ -15766,25 +15759,23 @@ pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<u
             sys_vmo_create(args[0] as u64, args[1] as u32, &mut out).map(|_| out as usize)
         }
         num if num == ZirconSyscall::VmoRead as u32 => {
-            if !syscall_logic::user_buffer_valid(args[1], args[2]) {
-                return Err(ZxError::ErrInvalidArgs);
-            }
             if args[2] == 0 {
                 sys_vmo_read(args[0] as u32, &mut [], args[3] as u64)
             } else {
-                let buf = unsafe { core::slice::from_raw_parts_mut(args[1] as *mut u8, args[2]) };
-                sys_vmo_read(args[0] as u32, buf, args[3] as u64)
+                let mut buf = Vec::new();
+                buf.try_reserve_exact(args[2]).map_err(|_| ZxError::ErrNoMemory)?;
+                buf.resize(args[2], 0);
+                let read = sys_vmo_read(args[0] as u32, &mut buf, args[3] as u64)?;
+                zx_write_bytes(args[1], &buf[..read])?;
+                Ok(read)
             }
         }
         num if num == ZirconSyscall::VmoWrite as u32 => {
-            if !syscall_logic::user_buffer_valid(args[1], args[2]) {
-                return Err(ZxError::ErrInvalidArgs);
-            }
             if args[2] == 0 {
                 sys_vmo_write(args[0] as u32, &[], args[3] as u64)
             } else {
-                let buf = unsafe { core::slice::from_raw_parts(args[1] as *const u8, args[2]) };
-                sys_vmo_write(args[0] as u32, buf, args[3] as u64)
+                let buf = zx_read_bytes(args[1], args[2])?;
+                sys_vmo_write(args[0] as u32, &buf, args[3] as u64)
             }
         }
         num if num == ZirconSyscall::VmoGetSize as u32 => {

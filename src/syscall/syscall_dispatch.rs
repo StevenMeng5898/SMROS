@@ -61,6 +61,8 @@ pub extern "C" fn handle_syscall_simple(
     arg4: u64,
     arg5: u64,
 ) -> u64 {
+    #[cfg(target_arch = "aarch64")]
+    let _el0_syscall = crate::syscall::uaccess::El0SyscallGuard::enter();
     let args = linux_args_from_u64s(arg0, arg1, arg2, arg3, arg4, arg5);
 
     #[cfg(target_arch = "riscv64")]

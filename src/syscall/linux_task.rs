@@ -885,6 +885,7 @@ pub(crate) fn retire_launch_descendants(root_tgid: usize) {
 }
 
 pub(crate) fn finish_current_without_el0_return() -> ! {
+    crate::syscall::uaccess::clear_el0_syscall();
     scheduler::scheduler().finish_current_without_stack_free();
     #[cfg(target_arch = "riscv64")]
     crate::kernel_lowlevel::cpu::unmask_timer_interrupts();

@@ -334,6 +334,12 @@ pub(crate) fn wake_address(address: usize, requested: usize, bitset: u32) -> Sys
     )
 }
 
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+pub(crate) fn wake_address(address: usize, requested: usize, bitset: u32) -> SysResult {
+    let _ = (address, requested, bitset);
+    Ok(0)
+}
+
 pub(crate) fn reset() {
     with_queue(|queue| {
         let _ = queue.reset();

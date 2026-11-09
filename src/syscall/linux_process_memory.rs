@@ -2506,12 +2506,29 @@ fn kernel_resident_copy_allowed(address: usize, len: usize) -> bool {
 }
 
 fn in_process_kernel_copy_allowed(address: usize, len: usize) -> bool {
+    // EL0 SVC must not raw-copy kernel memory, even when this thread has no
+    // Linux pid or a kernel dispatch range is registered.
+    #[cfg(target_arch = "aarch64")]
+    if crate::syscall::uaccess::el0_syscall_active() {
+        return false;
+    }
     kernel_dispatch_copy_allowed(address, len) || kernel_resident_copy_allowed(address, len)
 }
 
 pub(crate) fn copy_from_current(address: usize, out: &mut [u8]) -> Result<(), SysError> {
     if out.is_empty() {
         return Ok(());
+    }
+    #[cfg(target_arch = "aarch64")]
+    if crate::syscall::uaccess::el0_syscall_active()
+        && !crate::syscall::uaccess::el0_user_range_plausible(
+            address,
+            out.len(),
+            LINUX_USER_BASE,
+            LINUX_USER_LIMIT,
+        )
+    {
+        return Err(SysError::EFAULT);
     }
     if in_process_kernel_copy_allowed(address, out.len()) {
         unsafe {
@@ -2525,6 +2542,17 @@ pub(crate) fn copy_from_current(address: usize, out: &mut [u8]) -> Result<(), Sy
 pub(crate) fn copy_to_current(address: usize, bytes: &[u8]) -> Result<(), SysError> {
     if bytes.is_empty() {
         return Ok(());
+    }
+    #[cfg(target_arch = "aarch64")]
+    if crate::syscall::uaccess::el0_syscall_active()
+        && !crate::syscall::uaccess::el0_user_range_plausible(
+            address,
+            bytes.len(),
+            LINUX_USER_BASE,
+            LINUX_USER_LIMIT,
+        )
+    {
+        return Err(SysError::EFAULT);
     }
     if in_process_kernel_copy_allowed(address, bytes.len()) {
         unsafe {
@@ -2542,6 +2570,7 @@ pub(crate) fn ensure_dispatch_memory(pid: usize) -> Result<(), SysError> {
     register_root(pid).map(|_| ())
 }
 
+#[allow(dead_code)]
 pub(crate) fn current_writable_contiguous_physical(
     address: usize,
     len: usize,
@@ -3365,6 +3394,7 @@ impl LinuxProcessMemory {
         self.copy_to_mapped_pages(address, bytes)
     }
 
+    #[allow(dead_code)]
     fn writable_contiguous_physical(
         &mut self,
         address: usize,
@@ -4286,6 +4316,7 @@ impl LinuxProcessMemory {
             let mapping = self.mappings.remove(index);
             self.next_addr = core::cmp::min(self.next_addr, address);
             Self::free_backings(&mapping.pages);
+            self.bump_generation();
             return Ok(Vec::new());
         }
         let pages = self.try_mapped_pages_overlapping(address, len)?;

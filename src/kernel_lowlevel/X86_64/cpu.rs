@@ -79,6 +79,10 @@ pub fn read_exception_return_pc() -> u64 {
     0
 }
 
+pub fn read_exception_return_state() -> u64 {
+    0
+}
+
 #[inline(always)]
 pub fn read_user_stack_pointer() -> u64 {
     0

@@ -467,7 +467,8 @@ fn run_probe(case: Case) -> FinishedCase {
         }
     }
     ACTIVE.store(true, Ordering::Release);
-    let created = scheduler::scheduler().create_thread_on_cpu(security_case_thread, "sectest", Some(0));
+    let created =
+        scheduler::scheduler().create_thread_on_cpu(security_case_thread, "sectest", Some(0));
     if created.is_none() {
         ACTIVE.store(false, Ordering::Release);
         return FinishedCase {
@@ -478,7 +479,8 @@ fn run_probe(case: Case) -> FinishedCase {
     let start = crate::kernel_lowlevel::timer::get_nanoseconds();
     while !DONE.load(Ordering::Acquire) {
         yield_now();
-        if crate::kernel_lowlevel::timer::get_nanoseconds().saturating_sub(start) > CASE_TIMEOUT_NS {
+        if crate::kernel_lowlevel::timer::get_nanoseconds().saturating_sub(start) > CASE_TIMEOUT_NS
+        {
             ACTIVE.store(false, Ordering::Release);
             return FinishedCase {
                 verdict: Verdict::Fail,
