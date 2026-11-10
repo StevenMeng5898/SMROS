@@ -61,6 +61,8 @@ pub extern "C" fn handle_syscall_simple(
     arg4: u64,
     arg5: u64,
 ) -> u64 {
+    #[cfg(target_arch = "aarch64")]
+    let _el0_syscall = crate::syscall::uaccess::El0SyscallGuard::enter();
     let args = linux_args_from_u64s(arg0, arg1, arg2, arg3, arg4, arg5);
 
     #[cfg(target_arch = "riscv64")]
@@ -96,6 +98,7 @@ pub extern "C" fn handle_syscall_simple(
     };
 
     crate::user_level::user_test::record_el0_kernel_syscall_result(syscall_num as u32, result);
+    crate::user_level::services::security_case::observe_syscall(syscall_num as u32, result);
     // The RISC-V trap return hook must run after the result has been written
     // to the saved frame; it owns signal delivery and sigreturn restoration.
     // The assembly handler clears the per-thread context after that hook.

@@ -323,6 +323,11 @@ const SHELL_COMMANDS: &[ShellCommand] = &[
         handler: cmd_test_syscall,
     },
     ShellCommand {
+        name: "sectest",
+        description: "Run EL0 kernel-security negative cases",
+        handler: cmd_security_case,
+    },
+    ShellCommand {
         name: "fuzzsc",
         description: "Fuzz Linux/Zircon syscalls and POSIX APIs",
         handler: cmd_fuzz_syscall,
@@ -4501,6 +4506,11 @@ fn print_fuzz_error_buckets(
         print_usize(&mut ctx.serial, counts[index]);
         index += 1;
     }
+}
+
+fn cmd_security_case(ctx: &mut ShellContext, args: &[&str]) {
+    let which = args.first().copied().unwrap_or("all");
+    super::security_case::run(&mut ctx.serial, which);
 }
 
 /// Command: echo - Echo arguments

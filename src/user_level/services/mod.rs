@@ -17,6 +17,7 @@ pub mod posix_test;
 pub(crate) mod posix_test_logic_shared;
 pub mod qml_cluster;
 pub mod run_elf;
+pub mod security_case;
 pub mod svc;
 pub(crate) mod user_logic;
 pub mod user_shell;

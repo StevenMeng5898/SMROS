@@ -787,6 +787,10 @@ mod syscall_logic {
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/syscall/syscall_logic_shared.rs"
     ));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/uaccess_logic_shared.rs"
+    ));
 
     #[test]
     fn expired_real_timer_scan_includes_processes_not_currently_scheduled() {
@@ -1336,9 +1340,26 @@ mod syscall_logic {
 
     #[test]
     fn buffer_validation_allows_null_only_for_zero_length_buffers() {
-        assert!(smros_syscall_user_buffer_valid_body!(0usize, 0usize));
-        assert!(!smros_syscall_user_buffer_valid_body!(0usize, 1usize));
-        assert!(smros_syscall_user_buffer_valid_body!(0x1000usize, 1usize));
+        const BASE: usize = 0x1000_0000;
+        const LIMIT: usize = 0x2000_0000;
+        assert!(el0_user_range_plausible(0, 0, BASE, LIMIT));
+        assert!(!el0_user_range_plausible(0, 1, BASE, LIMIT));
+        assert!(!el0_user_range_plausible(0x1000, 1, BASE, LIMIT));
+        assert!(!el0_user_range_plausible(0x4000_0000, 8, BASE, LIMIT));
+        assert!(el0_user_range_plausible(0x1200_0000, 8, BASE, LIMIT));
+        assert!(!el0_user_range_plausible(usize::MAX, 1, BASE, LIMIT));
+    }
+
+    /// Documents the current predicate. A passing result is not evidence that
+    /// EL0 is unable to name kernel memory; `0x4000_0000` is a kernel RAM
+    /// address and is still accepted.
+    #[test]
+    fn weak_user_buffer_check_is_not_a_security_proof() {
+        assert!(smros_syscall_user_buffer_valid_body!(0x4000_0000usize, 8));
+        assert!(smros_syscall_user_buffer_valid_body!(
+            0xFFFF_0000_0000_0000usize,
+            1
+        ));
         assert!(smros_syscall_channel_buffers_valid_body!(
             0x1000usize,
             4usize,

@@ -24,6 +24,7 @@ pub(crate) mod syscall_bridge;
 pub mod syscall_dispatch;
 pub mod syscall_handler;
 pub(crate) mod syscall_logic;
+pub(crate) mod uaccess;
 
 pub use syscall::*;
 
