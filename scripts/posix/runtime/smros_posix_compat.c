@@ -6323,6 +6323,19 @@ static int smros_mq_send_poll(
             errno = EAGAIN;
             return -1;
         }
+        /* POSIX requires EINVAL when the send would block and tv_nsec is
+         * negative or not strictly less than one second. The immediate
+         * probe above uses a valid timeout, so check the caller's value
+         * before polling or reporting ETIMEDOUT. */
+        if (
+            abs_timeout != NULL &&
+            (abs_timeout->tv_nsec < 0 ||
+             abs_timeout->tv_nsec >= SMROS_NSEC_PER_SEC)
+        ) {
+            smros_mq_send_poll_restore_mask(watch_signals, &old_mask);
+            errno = EINVAL;
+            return -1;
+        }
         if (watch_signals) {
             struct timespec slice = {
                 .tv_sec = 0,

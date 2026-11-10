@@ -457,6 +457,10 @@ pub(crate) struct LinuxPosixTimerCore {
     notification_pending: bool,
     overrun: u64,
     precision_deadline_consumed: bool,
+    /// Monotonic time until which a timer that was already due at `timer_settime`
+    /// must not raise a precision interrupt. Publishing that signal while the
+    /// caller is still returning to userspace consumes it before `sleep`.
+    defer_until: Option<u64>,
 }
 
 impl LinuxPosixTimerCore {
@@ -477,6 +481,7 @@ impl LinuxPosixTimerCore {
             notification_pending: false,
             overrun: 0,
             precision_deadline_consumed: false,
+            defer_until: None,
         }
     }
 
@@ -500,6 +505,7 @@ impl LinuxPosixTimerCore {
             self.interval = 0;
             self.notification_pending = false;
             self.overrun = 0;
+            self.defer_until = None;
             return Some(());
         }
         let (deadline_clock, deadline) = if absolute {
@@ -516,7 +522,38 @@ impl LinuxPosixTimerCore {
         self.notification_pending = false;
         self.overrun = 0;
         self.precision_deadline_consumed = false;
+        self.defer_until = None;
         Some(())
+    }
+
+    /// Suppress an immediate precision interrupt when the armed deadline has
+    /// already passed. `expire` still reports the timer due once the deferral
+    /// is cleared or its monotonic window elapses.
+    pub(crate) fn defer_if_already_due(
+        &mut self,
+        now_monotonic: u64,
+        now_realtime: u64,
+        defer_nanoseconds: u64,
+    ) {
+        let Some(deadline) = self.deadline else {
+            self.defer_until = None;
+            return;
+        };
+        let now = Self::now_for(self.deadline_clock, now_monotonic, now_realtime);
+        self.defer_until = if now >= deadline {
+            Some(now_monotonic.saturating_add(defer_nanoseconds))
+        } else {
+            None
+        };
+    }
+
+    pub(crate) fn running_delivery_deferred(&self, now_monotonic: u64) -> bool {
+        self.defer_until
+            .is_some_and(|until| now_monotonic < until)
+    }
+
+    pub(crate) fn clear_running_deferral(&mut self) {
+        self.defer_until = None;
     }
 
     pub(crate) fn snapshot(&self, now_monotonic: u64, now_realtime: u64) -> LinuxPosixTimerSpec {
@@ -543,6 +580,9 @@ impl LinuxPosixTimerCore {
         tick_nanoseconds: u64,
     ) -> Option<u64> {
         if self.notification_pending {
+            return None;
+        }
+        if self.defer_until.is_some() {
             return None;
         }
         if self.interval != 0

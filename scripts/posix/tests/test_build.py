@@ -3851,6 +3851,12 @@ with tempfile.TemporaryDirectory() as temporary:
         # mq_timedsend/12-1.c interrupts a blocking send with SIGUSR1, not SIGABRT.
         self.assertIn("SIGUSR1", body)
         self.assertIn("time(", body)
+        # mq_timedsend/19-1.c fills the queue and then requires EINVAL for
+        # every out-of-range tv_nsec. The poll path must not turn that into
+        # ETIMEDOUT after the immediate probe.
+        self.assertIn("abs_timeout->tv_nsec < 0", body)
+        self.assertIn("SMROS_NSEC_PER_SEC", body)
+        self.assertIn("errno = EINVAL", body)
 
     def test_smros_posix_compat_version_script_exports_compatibility_symbols(self) -> None:
         version_script = Path(
