@@ -275,9 +275,10 @@ impl SocketTable {
     }
 
     fn index(&self, handle: HandleValue) -> Option<usize> {
-        self.endpoints
-            .iter()
-            .position(|endpoint| endpoint.active && endpoint.handle == handle)
+        let resolved = crate::syscall::el0_resolve_handle(handle.0)?;
+        self.endpoints.iter().position(|endpoint| {
+            endpoint.active && endpoint.handle.0 == resolved
+        })
     }
 
     fn free_index(&self) -> Option<usize> {
@@ -323,6 +324,22 @@ impl SocketTable {
         let right = self.alloc_handle().ok_or(ZxError::ErrNoMemory)?;
         self.endpoints[left_index].activate(left, right, options);
         self.endpoints[right_index].activate(right, left, options);
+        if crate::syscall::publish_created_handle(left.0, crate::kernel_objects::ObjectType::Socket)
+            .is_err()
+            || crate::syscall::publish_created_handle(
+                right.0,
+                crate::kernel_objects::ObjectType::Socket,
+            )
+            .is_err()
+        {
+            crate::syscall::revoke_created_handle(left.0);
+            crate::syscall::revoke_created_handle(right.0);
+            let _ = crate::syscall::with_raw_object_close(|| {
+                let _ = self.close(left);
+                let _ = self.close(right);
+            });
+            return Err(ZxError::ErrNoMemory);
+        }
         Ok((left, right))
     }
 

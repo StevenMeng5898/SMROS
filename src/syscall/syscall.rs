@@ -40,7 +40,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
-use core::sync::atomic::{compiler_fence, AtomicI64, AtomicU64, Ordering};
+use core::sync::atomic::{compiler_fence, AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 use super::address_logic::{
     checked_end, fixed_linux_mmap_request_ok as shared_fixed_linux_mmap_request_ok,
@@ -102,6 +102,22 @@ pub use crate::kernel_objects::{
     VmarFlags, Vmo, VmoCloneFlags, VmoOpType, VmoType, ZxError, ZxResult, INVALID_HANDLE,
     RIGHT_SAME_RIGHTS,
 };
+
+include!("handle_namespace_logic_shared.rs");
+
+const LINUX_MAX_PROCESS_FDS: usize = 1024;
+
+#[derive(Clone, Copy)]
+struct ProcessHandleObject {
+    object: u32,
+    obj_type: ObjectType,
+    rights: u32,
+    owns_object: bool,
+}
+
+fn process_object_id(object: &ProcessHandleObject) -> u32 {
+    object.object
+}
 
 // Simple logging macros (placeholder for real logging)
 macro_rules! info {
@@ -830,6 +846,7 @@ impl LinuxProcessContainerState {
 struct LinuxProcessResources {
     pid: usize,
     descriptors: Vec<LinuxDescriptorEntry>,
+    handles: HandleNamespace<ProcessHandleObject>,
     next_fd: usize,
     fd_hint_needs_scan: bool,
     objects: Vec<u32>,
@@ -857,6 +874,7 @@ impl LinuxProcessResources {
         Self {
             pid,
             descriptors: Vec::new(),
+            handles: HandleNamespace::new(PROCESS_HANDLE_SLOTS),
             next_fd: COMPAT_FD_START,
             fd_hint_needs_scan: false,
             objects: Vec::new(),
@@ -890,6 +908,7 @@ pub(crate) struct LinuxProcessForkState {
     scheduler_policy: usize,
     scheduler_priority: i32,
     rlimit_memlock: LinuxRlimit64,
+    handles: HandleNamespace<ProcessHandleObject>,
 }
 
 #[derive(Clone)]
@@ -2136,9 +2155,8 @@ impl MemorySyscallState {
     }
 
     fn alloc_object_handle(&mut self, obj_type: ObjectType) -> u32 {
-        let handle = self.alloc_handle();
-        let _ = self.register_object_handle(handle, obj_type);
-        handle
+        self.alloc_object_handle_with_rights(obj_type, default_rights_for_object(obj_type))
+            .unwrap_or(0)
     }
 
     fn ensure_root_vmar_handle(&mut self) {
@@ -2189,6 +2207,12 @@ impl MemorySyscallState {
         obj_type: ObjectType,
         rights: u32,
     ) -> ZxResult<u32> {
+        if crate::syscall::uaccess::el0_syscall_active() {
+            let pid = linux_process::current_pid().map_err(|_| ZxError::ErrBadHandle)?;
+            return self
+                .insert_owned_process_handle(pid, obj_type, rights)
+                .map_err(|_| ZxError::ErrNoMemory);
+        }
         let handle = self.alloc_handle();
         if self.register_object_handle_with_rights(handle, obj_type, rights) {
             Ok(handle)
@@ -2197,7 +2221,163 @@ impl MemorySyscallState {
         }
     }
 
+    fn process_handles_mut(&mut self, pid: usize) -> Option<&mut HandleNamespace<ProcessHandleObject>> {
+        self.process_resources_mut_if_exists(pid)
+            .map(|resources| &mut resources.handles)
+    }
+
+    fn lookup_process_handle(&self, pid: usize, handle: u32) -> Option<ProcessHandleObject> {
+        self.process_resources(pid)?
+            .handles
+            .lookup(handle, process_object_id)
+            .copied()
+    }
+
+    fn insert_owned_process_handle(
+        &mut self,
+        pid: usize,
+        obj_type: ObjectType,
+        rights: u32,
+    ) -> Result<u32, HandleNamespaceError> {
+        let Some(handles) = self.process_handles_mut(pid) else {
+            return Err(HandleNamespaceError::Missing);
+        };
+        handles.insert_encoded(|user| ProcessHandleObject {
+            object: user,
+            obj_type,
+            rights,
+            owns_object: true,
+        })
+    }
+
+    fn insert_process_alias(
+        &mut self,
+        pid: usize,
+        object: u32,
+        obj_type: ObjectType,
+        rights: u32,
+        owns_object: bool,
+    ) -> Result<u32, HandleNamespaceError> {
+        let Some(handles) = self.process_handles_mut(pid) else {
+            return Err(HandleNamespaceError::Missing);
+        };
+        handles.insert_encoded(|_user| ProcessHandleObject {
+            object,
+            obj_type,
+            rights,
+            owns_object,
+        })
+    }
+
+    fn adopt_process_object(
+        &mut self,
+        pid: usize,
+        object: u32,
+        obj_type: ObjectType,
+        rights: u32,
+        owns_object: bool,
+    ) -> Result<(), HandleNamespaceError> {
+        if self.lookup_process_handle(pid, object).is_some() {
+            return Ok(());
+        }
+        let Some(handles) = self.process_handles_mut(pid) else {
+            return Err(HandleNamespaceError::Missing);
+        };
+        handles.insert_external(ProcessHandleObject {
+            object,
+            obj_type,
+            rights,
+            owns_object,
+        })
+    }
+
+    fn drop_object_aliases(&mut self, object: u32) {
+        for resources in &mut self.linux_process_resources {
+            let stale = resources
+                .handles
+                .slots()
+                .iter()
+                .enumerate()
+                .filter_map(|(index, slot)| {
+                    let value = slot.value.as_ref()?;
+                    if value.object != object {
+                        return None;
+                    }
+                    encode_process_handle(index, slot.generation).or(Some(value.object))
+                })
+                .collect::<Vec<_>>();
+            for handle in stale {
+                let _ = resources.handles.close(handle, process_object_id);
+            }
+        }
+    }
+
+    fn forget_user_handle(&mut self, handle: u32) {
+        if crate::syscall::uaccess::el0_syscall_active() {
+            if let Ok(pid) = linux_process::current_pid() {
+                if let Some(handles) = self.process_handles_mut(pid) {
+                    let _ = handles.close(handle, process_object_id);
+                }
+            }
+            return;
+        }
+        if let Some(index) = self.handles.iter().position(|entry| entry.handle == handle) {
+            self.handles.swap_remove(index);
+        }
+    }
+
+    fn object_reference_count(&self, object_handle: u32) -> usize {
+        let kernel = self
+            .handles
+            .iter()
+            .filter(|entry| entry.object_handle == object_handle)
+            .count();
+        let processes = self
+            .linux_process_resources
+            .iter()
+            .map(|resources| {
+                resources
+                    .handles
+                    .slots()
+                    .iter()
+                    .filter(|slot| {
+                        slot.value
+                            .as_ref()
+                            .is_some_and(|value| value.object == object_handle)
+                    })
+                    .count()
+            })
+            .sum::<usize>();
+        kernel + processes
+    }
+
+    fn require_process_object(
+        &self,
+        handle: u32,
+        obj_type: ObjectType,
+        rights: u32,
+    ) -> ZxResult<u32> {
+        let record = self.handle_record(handle).ok_or(ZxError::ErrBadHandle)?;
+        authorize_handle_use(true, record.obj_type as u8, obj_type as u8, record.rights, rights)
+            .map_err(|error| match error {
+                HandleNamespaceError::WrongType => ZxError::ErrWrongType,
+                HandleNamespaceError::AccessDenied => ZxError::ErrAccessDenied,
+                _ => ZxError::ErrBadHandle,
+            })?;
+        Ok(record.object_handle)
+    }
+
     fn handle_record(&self, handle: u32) -> Option<KernelHandleRecord> {
+        if crate::syscall::uaccess::el0_syscall_active() {
+            let pid = linux_process::current_pid().ok()?;
+            let object = self.lookup_process_handle(pid, handle)?;
+            return Some(KernelHandleRecord {
+                handle,
+                object_handle: object.object,
+                obj_type: object.obj_type,
+                rights: object.rights,
+            });
+        }
         self.handles
             .iter()
             .find(|record| record.handle == handle)
@@ -2225,7 +2405,7 @@ impl MemorySyscallState {
     }
 
     fn duplicate_handle(&mut self, handle: u32, requested_rights: u32) -> ZxResult<u32> {
-        let record = self.handle_record(handle).ok_or(ZxError::ErrNotFound)?;
+        let record = self.handle_record(handle).ok_or(ZxError::ErrBadHandle)?;
         if !crate::kernel_objects::object_logic::duplicate_rights_allowed(
             record.rights,
             requested_rights,
@@ -2241,6 +2421,12 @@ impl MemorySyscallState {
         } else {
             requested_rights
         };
+        if crate::syscall::uaccess::el0_syscall_active() {
+            let pid = linux_process::current_pid().map_err(|_| ZxError::ErrBadHandle)?;
+            return self
+                .insert_process_alias(pid, record.object_handle, record.obj_type, rights, false)
+                .map_err(|_| ZxError::ErrNoMemory);
+        }
         let new_handle = self.alloc_handle();
         if self.register_handle(new_handle, record.object_handle, record.obj_type, rights) {
             Ok(new_handle)
@@ -2250,7 +2436,7 @@ impl MemorySyscallState {
     }
 
     fn replace_handle(&mut self, handle: u32, requested_rights: u32) -> ZxResult<u32> {
-        let record = self.handle_record(handle).ok_or(ZxError::ErrNotFound)?;
+        let record = self.handle_record(handle).ok_or(ZxError::ErrBadHandle)?;
         if !crate::kernel_objects::object_logic::replace_rights_allowed(
             record.rights,
             requested_rights,
@@ -2265,6 +2451,17 @@ impl MemorySyscallState {
         } else {
             requested_rights
         };
+        if crate::syscall::uaccess::el0_syscall_active() {
+            let pid = linux_process::current_pid().map_err(|_| ZxError::ErrBadHandle)?;
+            let new_handle = self
+                .insert_process_alias(pid, record.object_handle, record.obj_type, rights, false)
+                .map_err(|_| ZxError::ErrNoMemory)?;
+            if self.forget_process_handle(pid, handle) {
+                return Ok(new_handle);
+            }
+            let _ = self.forget_process_handle(pid, new_handle);
+            return Err(ZxError::ErrBadHandle);
+        }
         let new_handle = self.alloc_handle();
         if !self.register_handle(new_handle, record.object_handle, record.obj_type, rights) {
             return Err(ZxError::ErrNoMemory);
@@ -2274,6 +2471,113 @@ impl MemorySyscallState {
         }
         let _ = self.release_handle(new_handle);
         Err(ZxError::ErrNotFound)
+    }
+
+    fn forget_process_handle(&mut self, pid: usize, handle: u32) -> bool {
+        let Some(handles) = self.process_handles_mut(pid) else {
+            return false;
+        };
+        handles.close(handle, process_object_id).is_ok()
+    }
+
+    fn pid_owning_object(&self, object: u32) -> Option<usize> {
+        self.linux_process_resources.iter().find_map(|resources| {
+            resources
+                .handles
+                .lookup(object, process_object_id)
+                .map(|_| resources.pid)
+        })
+    }
+
+    fn move_user_handles(
+        &mut self,
+        src: usize,
+        peer_object: u32,
+        handles: &[u32],
+    ) -> ZxResult<Vec<u32>> {
+        for handle in handles {
+            let record = self
+                .lookup_process_handle(src, *handle)
+                .ok_or(ZxError::ErrBadHandle)?;
+            if !crate::kernel_objects::rights_contain(record.rights, Rights::Transfer as u32) {
+                return Err(ZxError::ErrAccessDenied);
+            }
+        }
+        match self.pid_owning_object(peer_object) {
+            Some(dest) if dest == src => self.transfer_within_pid(src, handles),
+            Some(dest) => self.transfer_between_pids(src, dest, handles),
+            None => {
+                let mut out = Vec::new();
+                out.try_reserve_exact(handles.len())
+                    .map_err(|_| ZxError::ErrNoMemory)?;
+                for handle in handles {
+                    let record = self
+                        .lookup_process_handle(src, *handle)
+                        .ok_or(ZxError::ErrBadHandle)?;
+                    out.push(record.object);
+                }
+                for handle in handles {
+                    if !self.forget_process_handle(src, *handle) {
+                        return Err(ZxError::ErrBadHandle);
+                    }
+                }
+                Ok(out)
+            }
+        }
+    }
+
+    fn reborn_process_object(value: &ProcessHandleObject, _user: u32) -> ProcessHandleObject {
+        ProcessHandleObject {
+            object: value.object,
+            obj_type: value.obj_type,
+            rights: value.rights,
+            owns_object: value.owns_object,
+        }
+    }
+
+    fn transfer_within_pid(&mut self, pid: usize, handles: &[u32]) -> ZxResult<Vec<u32>> {
+        let table = self
+            .process_handles_mut(pid)
+            .ok_or(ZxError::ErrBadHandle)?;
+        table
+            .transfer_within(handles, process_object_id, Self::reborn_process_object)
+            .map_err(namespace_error)
+    }
+
+    fn transfer_between_pids(
+        &mut self,
+        src: usize,
+        dest: usize,
+        handles: &[u32],
+    ) -> ZxResult<Vec<u32>> {
+        let src_index = self
+            .linux_process_resources
+            .iter()
+            .position(|resources| resources.pid == src)
+            .ok_or(ZxError::ErrBadHandle)?;
+        let dest_index = self
+            .linux_process_resources
+            .iter()
+            .position(|resources| resources.pid == dest)
+            .ok_or(ZxError::ErrBadHandle)?;
+        if src_index == dest_index {
+            return self.transfer_within_pid(src, handles);
+        }
+        let (src_handles, dest_handles) = if src_index < dest_index {
+            let (left, right) = self.linux_process_resources.split_at_mut(dest_index);
+            (&mut left[src_index].handles, &mut right[0].handles)
+        } else {
+            let (left, right) = self.linux_process_resources.split_at_mut(src_index);
+            (&mut right[0].handles, &mut left[dest_index].handles)
+        };
+        src_handles
+            .transfer_to(
+                dest_handles,
+                handles,
+                process_object_id,
+                Self::reborn_process_object,
+            )
+            .map_err(namespace_error)
     }
 
     fn stats(&self) -> MemorySyscallStats {
@@ -2709,11 +3013,8 @@ impl MemorySyscallState {
         }
 
         let object_handle = record.object_handle;
-        let shared = self
-            .handles
-            .iter()
-            .any(|entry| entry.handle != handle && entry.object_handle == object_handle);
-        self.handles.retain(|entry| entry.handle != handle);
+        let shared = self.object_reference_count(object_handle) > 1;
+        self.forget_user_handle(handle);
         self.signals.retain(|signal| signal.handle != handle);
         if shared {
             return true;
@@ -2758,6 +3059,7 @@ impl MemorySyscallState {
         let mut record = self.vmars.swap_remove(index);
         record.vmar.destroy().ok();
         self.handles.retain(|entry| entry.object_handle != handle);
+        self.drop_object_aliases(handle);
         self.signals.retain(|signal| signal.handle != handle);
 
         if let Some(parent_handle) = parent_handle {
@@ -2786,11 +3088,8 @@ impl MemorySyscallState {
             self.ensure_root_vmar_handle();
             return true;
         }
-        let shared = self
-            .handles
-            .iter()
-            .any(|entry| entry.handle != handle && entry.object_handle == object_handle);
-        self.handles.retain(|entry| entry.handle != handle);
+        let shared = self.object_reference_count(object_handle) > 1;
+        self.forget_user_handle(handle);
         self.signals.retain(|signal| signal.handle != handle);
         if shared {
             return true;
@@ -2808,11 +3107,8 @@ impl MemorySyscallState {
         }
 
         let object_handle = record.object_handle;
-        let shared = self
-            .handles
-            .iter()
-            .any(|entry| entry.handle != handle && entry.object_handle == object_handle);
-        self.handles.retain(|entry| entry.handle != handle);
+        let shared = self.object_reference_count(object_handle) > 1;
+        self.forget_user_handle(handle);
         self.signals.retain(|signal| signal.handle != handle);
         if shared {
             return true;
@@ -2847,11 +3143,8 @@ impl MemorySyscallState {
         }
 
         let object_handle = record.object_handle;
-        let shared = self
-            .handles
-            .iter()
-            .any(|entry| entry.handle != handle && entry.object_handle == object_handle);
-        self.handles.retain(|entry| entry.handle != handle);
+        let shared = self.object_reference_count(object_handle) > 1;
+        self.forget_user_handle(handle);
         self.signals.retain(|signal| signal.handle != handle);
         if shared {
             return true;
@@ -2899,11 +3192,8 @@ impl MemorySyscallState {
         }
 
         let object_handle = record.object_handle;
-        let shared = self
-            .handles
-            .iter()
-            .any(|entry| entry.handle != handle && entry.object_handle == object_handle);
-        self.handles.retain(|entry| entry.handle != handle);
+        let shared = self.object_reference_count(object_handle) > 1;
+        self.forget_user_handle(handle);
         self.signals.retain(|signal| signal.handle != handle);
         if shared {
             return true;
@@ -3035,7 +3325,7 @@ impl MemorySyscallState {
         Some(removed)
     }
 
-    fn alloc_fd(&mut self, handle: u32, readable: bool, writable: bool) -> usize {
+    fn alloc_fd(&mut self, handle: u32, readable: bool, writable: bool) -> Result<usize, SysError> {
         let status_flags = match (readable, writable) {
             (true, true) => LINUX_O_RDWR,
             (false, true) => LINUX_O_WRONLY,
@@ -3049,7 +3339,7 @@ impl MemorySyscallState {
         handle: u32,
         status_flags: usize,
         close_on_exec: bool,
-    ) -> usize {
+    ) -> Result<usize, SysError> {
         let description_id = self
             .linux_open_descriptions
             .iter()
@@ -3069,8 +3359,15 @@ impl MemorySyscallState {
         description_id: u32,
         _status_flags: usize,
         close_on_exec: bool,
-    ) -> usize {
-        let pid = linux_resource_pid();
+    ) -> Result<usize, SysError> {
+        let pid = linux_resource_pid()?;
+        let open = self
+            .process_resources(pid)
+            .map(|resources| resources.descriptors.len())
+            .unwrap_or(0);
+        if !fd_slot_available(open, LINUX_MAX_PROCESS_FDS, false) {
+            return Err(SysError::EMFILE);
+        }
         let mut fd = self
             .process_resources(pid)
             .map(|resources| resources.next_fd.max(COMPAT_FD_START))
@@ -3081,7 +3378,9 @@ impl MemorySyscallState {
         {
             fd = fd.saturating_add(1);
         }
-        let _ = self.acquire_open_description(description_id);
+        if !self.acquire_open_description(description_id) {
+            return Err(SysError::EBADF);
+        }
         let resources = self.process_resources_mut(pid);
         resources.next_fd = fd.saturating_add(1);
         resources.fd_hint_needs_scan = false;
@@ -3090,7 +3389,26 @@ impl MemorySyscallState {
             description_id,
             close_on_exec,
         });
-        fd
+        if pid != linux_process::LINUX_KERNEL_PRIVATE_PID {
+            if let Some(description) = self.open_description(description_id).copied() {
+                let rights = default_rights_for_object(description.object_type);
+                if self
+                    .adopt_process_object(
+                        pid,
+                        description.handle,
+                        description.object_type,
+                        rights,
+                        false,
+                    )
+                    .is_err()
+                {
+                    let _ = self.remove_fd_entry(fd);
+                    let _ = self.release_open_description(description_id);
+                    return Err(SysError::EMFILE);
+                }
+            }
+        }
+        Ok(fd)
     }
 
     fn update_fd_access(&mut self, fd: usize, readable: bool, writable: bool) -> bool {
@@ -3115,8 +3433,15 @@ impl MemorySyscallState {
         handle: u32,
         readable: bool,
         writable: bool,
-    ) -> usize {
-        let pid = linux_resource_pid();
+    ) -> Result<usize, SysError> {
+        let pid = linux_resource_pid()?;
+        let open = self
+            .process_resources(pid)
+            .map(|resources| resources.descriptors.len())
+            .unwrap_or(0);
+        if !fd_slot_available(open, LINUX_MAX_PROCESS_FDS, false) {
+            return Err(SysError::EMFILE);
+        }
         let mut fd = self
             .process_resources(pid)
             .map(|resources| resources.next_fd.max(min_fd).max(COMPAT_FD_START))
@@ -3135,7 +3460,9 @@ impl MemorySyscallState {
         else {
             return self.alloc_fd(handle, readable, writable);
         };
-        let _ = self.acquire_open_description(description_id);
+        if !self.acquire_open_description(description_id) {
+            return Err(SysError::EBADF);
+        }
         let resources = self.process_resources_mut(pid);
         resources.next_fd = fd.saturating_add(1);
         resources.fd_hint_needs_scan = false;
@@ -3144,14 +3471,27 @@ impl MemorySyscallState {
             description_id,
             close_on_exec: false,
         });
-        fd
+        Ok(fd)
     }
 
     fn install_fd(&mut self, fd: usize, description_id: u32, close_on_exec: bool) -> bool {
+        let Ok(pid) = linux_resource_pid() else {
+            return false;
+        };
+        let replacing = self
+            .process_resources(pid)
+            .is_some_and(|resources| resources.descriptors.iter().any(|entry| entry.fd == fd));
+        let open = self
+            .process_resources(pid)
+            .map(|resources| resources.descriptors.len())
+            .unwrap_or(0);
+        if !fd_slot_available(open, LINUX_MAX_PROCESS_FDS, replacing) {
+            return false;
+        }
         if !self.acquire_open_description(description_id) {
             return false;
         }
-        let resources = self.process_resources_mut(linux_resource_pid());
+        let resources = self.process_resources_mut(pid);
         if fd <= resources.next_fd {
             resources.fd_hint_needs_scan = true;
         }
@@ -3165,7 +3505,7 @@ impl MemorySyscallState {
 
     fn get_fd(&self, fd: usize) -> Option<LinuxFdRecord> {
         let entry = self
-            .process_resources(linux_resource_pid())?
+            .process_resources(linux_resource_pid().ok()?)?
             .descriptors
             .iter()
             .find(|entry| entry.fd == fd)?;
@@ -3198,7 +3538,7 @@ impl MemorySyscallState {
     }
 
     fn remove_fd_entry(&mut self, fd: usize) -> Option<LinuxDescriptorEntry> {
-        let resources = self.process_resources_mut(linux_resource_pid());
+        let resources = self.process_resources_mut(linux_resource_pid().ok()?);
         let index = resources
             .descriptors
             .iter()
@@ -3222,7 +3562,10 @@ impl MemorySyscallState {
     }
 
     fn set_fd_close_on_exec(&mut self, fd: usize, close_on_exec: bool) -> bool {
-        let resources = self.process_resources_mut(linux_resource_pid());
+        let Ok(pid) = linux_resource_pid() else {
+            return false;
+        };
+        let resources = self.process_resources_mut(pid);
         let Some(entry) = resources
             .descriptors
             .iter_mut()
@@ -3256,9 +3599,11 @@ impl MemorySyscallState {
         if !self.acquire_open_description(description_id) {
             return None;
         }
-        self.process_resources_mut(linux_resource_pid())
-            .objects
-            .push(description_id);
+        let Some(pid) = linux_resource_pid().ok() else {
+            let _ = self.release_open_description(description_id);
+            return None;
+        };
+        self.process_resources_mut(pid).objects.push(description_id);
         Some(description_id)
     }
 
@@ -3277,6 +3622,7 @@ impl MemorySyscallState {
                 scheduler_policy: parent.scheduler_policy,
                 scheduler_priority: parent.scheduler_priority,
                 rlimit_memlock: parent.rlimit_memlock,
+                handles: parent.handles.clone(),
             });
         }
         Ok(LinuxProcessForkState {
@@ -3288,6 +3634,7 @@ impl MemorySyscallState {
             scheduler_policy: 0,
             scheduler_priority: 0,
             rlimit_memlock: LINUX_RLIMIT64_UNLIMITED,
+            handles: HandleNamespace::new(PROCESS_HANDLE_SLOTS),
         })
     }
 
@@ -3498,6 +3845,7 @@ impl MemorySyscallState {
         self.linux_process_resources.push(LinuxProcessResources {
             pid,
             descriptors: core::mem::take(descriptors),
+            handles: process_state.handles,
             next_fd,
             fd_hint_needs_scan: false,
             objects: core::mem::take(objects),
@@ -3535,7 +3883,58 @@ impl MemorySyscallState {
         debug_assert_eq!(resources.timer_handles.len(), resources.posix_timers.len());
         let mut released = self.release_resource_clone(&resources.descriptors, &resources.objects);
         released.extend(resources.timer_handles);
+        self.destroy_unshared_owned(resources.handles);
         Some(released)
+    }
+
+    fn destroy_unshared_owned(&mut self, handles: HandleNamespace<ProcessHandleObject>) {
+        for slot in handles.slots() {
+            let Some(value) = slot.value else {
+                continue;
+            };
+            if !value.owns_object || self.object_reference_count(value.object) > 0 {
+                continue;
+            }
+            self.destroy_owned_object(value.object, value.obj_type);
+        }
+    }
+
+    fn destroy_owned_object(&mut self, object: u32, obj_type: ObjectType) {
+        match obj_type {
+            ObjectType::Vmo => {
+                if let Some(index) = self.vmos.iter().position(|record| record.handle == object) {
+                    let mut record = self.vmos.swap_remove(index);
+                    record.vmo.release_pages();
+                }
+            }
+            ObjectType::Vmar if object != self.root_vmar_handle => {
+                let _ = self.destroy_vmar_recursive(object);
+            }
+            ObjectType::Job => {
+                if let Some(index) = self.jobs.iter().position(|record| record.handle == object) {
+                    self.jobs.swap_remove(index);
+                }
+            }
+            ObjectType::Process => {
+                if let Some(index) = self
+                    .processes
+                    .iter()
+                    .position(|record| record.handle == object)
+                {
+                    self.processes.swap_remove(index);
+                }
+            }
+            ObjectType::Thread => {
+                if let Some(index) = self.threads.iter().position(|record| record.handle == object)
+                {
+                    self.threads.swap_remove(index);
+                }
+            }
+            ObjectType::Channel => {
+                let _ = channel::channel_table().remove_channel(HandleValue(object));
+            }
+            _ => {}
+        }
     }
 
     fn rollback_fork_process_resources(&mut self, pid: usize) -> bool {
@@ -3654,7 +4053,9 @@ impl MemorySyscallState {
 
     fn apply_linux_namespace_flags(&mut self, flags: usize) {
         let namespace_flags = flags & LINUX_CONTAINER_NAMESPACE_FLAGS;
-        let pid = linux_resource_pid();
+        let Ok(pid) = linux_resource_pid() else {
+            return;
+        };
         self.process_resources_mut(pid).container.namespace_flags |= namespace_flags;
     }
 
@@ -3758,16 +4159,17 @@ impl MemorySyscallState {
     }
 
     fn record_linux_setns(&mut self, namespace: usize) {
-        let container = &mut self.process_resources_mut(linux_resource_pid()).container;
+        let Ok(pid) = linux_resource_pid() else {
+            return;
+        };
+        let container = &mut self.process_resources_mut(pid).container;
         container.namespace_flags |= namespace & LINUX_CONTAINER_NAMESPACE_FLAGS;
         container.setns_count = container.setns_count.saturating_add(1);
     }
 
     fn record_linux_mount(&mut self, flags: usize) -> SysResult {
-        let mounts = &mut self
-            .process_resources_mut(linux_resource_pid())
-            .container
-            .mounts;
+        let pid = linux_resource_pid()?;
+        let mounts = &mut self.process_resources_mut(pid).container.mounts;
         if mounts.len() >= LINUX_MAX_MOUNTS {
             return Err(SysError::EBUSY);
         }
@@ -3777,11 +4179,10 @@ impl MemorySyscallState {
     }
 
     fn record_linux_umount(&mut self) {
-        let _ = self
-            .process_resources_mut(linux_resource_pid())
-            .container
-            .mounts
-            .pop();
+        let Ok(pid) = linux_resource_pid() else {
+            return;
+        };
+        let _ = self.process_resources_mut(pid).container.mounts.pop();
     }
 
     fn reset_linux_process_state(&mut self) -> Vec<u32> {
@@ -3870,8 +4271,110 @@ fn with_initialized_memory_state<R>(
     unsafe { MEMORY_SYSCALL_STATE.as_mut().map(operation) }
 }
 
-fn linux_resource_pid() -> usize {
-    linux_process::current_pid().unwrap_or(linux_process::LINUX_ROOT_PID)
+static EL0_RAW_OBJECT_CLOSE: AtomicBool = AtomicBool::new(false);
+
+struct RawObjectCloseGuard;
+
+impl RawObjectCloseGuard {
+    fn enter() -> Self {
+        EL0_RAW_OBJECT_CLOSE.store(true, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for RawObjectCloseGuard {
+    fn drop(&mut self) {
+        EL0_RAW_OBJECT_CLOSE.store(false, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn el0_resolve_handle(handle: u32) -> Option<u32> {
+    if !crate::syscall::uaccess::el0_syscall_active()
+        || EL0_RAW_OBJECT_CLOSE.load(Ordering::Relaxed)
+    {
+        return Some(handle);
+    }
+    let pid = linux_process::current_pid().ok()?;
+    memory_state()
+        .lookup_process_handle(pid, handle)
+        .map(|object| object.object)
+}
+
+pub(crate) fn publish_created_handle(handle: u32, obj_type: ObjectType) -> ZxResult<()> {
+    if !crate::syscall::uaccess::el0_syscall_active() {
+        return Ok(());
+    }
+    let pid = linux_process::current_pid().map_err(|_| ZxError::ErrBadHandle)?;
+    let rights = default_rights_for_object(obj_type);
+    memory_state()
+        .adopt_process_object(pid, handle, obj_type, rights, false)
+        .map_err(|_| ZxError::ErrNoMemory)
+}
+
+pub(crate) fn with_raw_object_close<R>(operation: impl FnOnce() -> R) -> R {
+    let _guard = RawObjectCloseGuard::enter();
+    operation()
+}
+
+pub(crate) fn transfer_channel_handles(endpoint_user: u32, handles: &[u32]) -> ZxResult<Vec<u32>> {
+    let src = linux_process::current_pid().map_err(|_| ZxError::ErrBadHandle)?;
+    let endpoint = el0_resolve_handle(endpoint_user).ok_or(ZxError::ErrBadHandle)?;
+    let peer = channel::channel_table()
+        .peer_endpoint(HandleValue(endpoint))
+        .ok_or(ZxError::ErrBadHandle)?;
+    memory_state().move_user_handles(src, peer.0, handles)
+}
+
+fn namespace_error(error: HandleNamespaceError) -> ZxError {
+    match error {
+        HandleNamespaceError::Full => ZxError::ErrNoMemory,
+        HandleNamespaceError::AccessDenied => ZxError::ErrAccessDenied,
+        HandleNamespaceError::WrongType => ZxError::ErrWrongType,
+        HandleNamespaceError::Missing | HandleNamespaceError::Invalid => ZxError::ErrBadHandle,
+    }
+}
+
+pub(crate) fn revoke_created_handle(handle: u32) {
+    if !crate::syscall::uaccess::el0_syscall_active() {
+        return;
+    }
+    if let Ok(pid) = linux_process::current_pid() {
+        let _ = memory_state().forget_process_handle(pid, handle);
+    }
+}
+
+pub(crate) fn security_create_process_vmo(pid: usize, rights: u32) -> Result<u32, ()> {
+    let state = memory_state();
+    let _ = state.process_resources_mut(pid);
+    let handle = state
+        .insert_owned_process_handle(pid, ObjectType::Vmo, rights)
+        .map_err(|_| ())?;
+    let mut vmo = Vmo::new_paged_with_resizable(false, 1).ok_or(())?;
+    vmo.handle = HandleValue(handle);
+    state.vmos.push(VmoRecord { handle, vmo });
+    Ok(handle)
+}
+
+pub(crate) fn security_close_process_handle(pid: usize, handle: u32) -> Result<(), ()> {
+    let state = memory_state();
+    let object = state.lookup_process_handle(pid, handle).ok_or(())?;
+    if !state.forget_process_handle(pid, handle) {
+        return Err(());
+    }
+    if object.owns_object && state.object_reference_count(object.object) == 0 {
+        state.destroy_owned_object(object.object, object.obj_type);
+    }
+    Ok(())
+}
+
+fn linux_resource_pid() -> Result<usize, SysError> {
+    if let Ok(pid) = linux_process::current_pid() {
+        return Ok(pid);
+    }
+    if crate::syscall::uaccess::el0_syscall_active() {
+        return Err(SysError::ESRCH);
+    }
+    Ok(linux_process::LINUX_KERNEL_PRIVATE_PID)
 }
 
 pub(crate) fn reserve_linux_resource_clone(
@@ -3911,6 +4414,7 @@ pub(crate) fn release_linux_process_resources(pid: usize) -> bool {
     let Some(released_handles) = memory_state().release_process_resources(pid) else {
         return false;
     };
+    let _raw_close = RawObjectCloseGuard::enter();
     for handle in released_handles {
         let _ = sys_handle_close(handle);
     }
@@ -4141,8 +4645,11 @@ fn linux_shm_path_error(path: &str) -> Option<SysError> {
 }
 
 fn linux_shm_current_credentials() -> (LinuxCredentialsCore, usize) {
+    let Ok(pid) = linux_resource_pid() else {
+        return (LinuxCredentialsCore::default(), 0o022);
+    };
     memory_state()
-        .process_resources(linux_resource_pid())
+        .process_resources(pid)
         .map(|resources| (resources.credentials, resources.umask))
         .unwrap_or((LinuxCredentialsCore::default(), 0o022))
 }
@@ -4262,12 +4769,20 @@ fn linux_prepare_fxfs_cursor(
 }
 
 pub fn linux_container_stats() -> LinuxContainerStats {
-    let pid = linux_resource_pid();
+    let Ok(pid) = linux_resource_pid() else {
+        return LinuxContainerStats {
+            cap_effective: LINUX_CAP_FULL_SET,
+            cap_permitted: LINUX_CAP_FULL_SET,
+            ..LinuxContainerStats::default()
+        };
+    };
     memory_state().linux_container_stats(pid)
 }
 
 pub fn reset_linux_container_state() {
-    let pid = linux_resource_pid();
+    let Ok(pid) = linux_resource_pid() else {
+        return;
+    };
     memory_state().process_resources_mut(pid).container = LinuxProcessContainerState::new();
 }
 
@@ -4590,7 +5105,7 @@ fn linux_process_elapsed_ticks(pid: usize) -> isize {
 }
 
 fn linux_current_cpu_clock_nanos() -> Result<u64, SysError> {
-    let pid = linux_resource_pid();
+    let pid = linux_resource_pid()?;
     let Some(resources) = memory_state().process_resources(pid) else {
         return linux_cpu_clock_nanos();
     };
@@ -4600,7 +5115,7 @@ fn linux_current_cpu_clock_nanos() -> Result<u64, SysError> {
 }
 
 fn set_linux_current_cpu_clock_nanos(requested_nanos: u64) -> Result<(), SysError> {
-    let pid = linux_resource_pid();
+    let pid = linux_resource_pid()?;
     let start_nanos = memory_state()
         .process_resources(pid)
         .map(|resources| resources.cpu_start_nanos);
@@ -4748,7 +5263,7 @@ fn linux_signal_disposition_for(
 }
 
 fn store_linux_signal_action(signum: usize, action: LinuxKernelSigaction) -> Result<(), SysError> {
-    let tgid = linux_resource_pid();
+    let tgid = linux_resource_pid()?;
     with_linux_process_signal_state(|actions, _| {
         actions[signum] = LinuxKernelSigaction {
             mask: action.mask & !linux_uncatchable_signal_mask(),
@@ -4888,7 +5403,7 @@ fn with_linux_process_signal_state<R>(
     }
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     compiler_fence(Ordering::SeqCst);
-    let pid = linux_resource_pid();
+    let pid = linux_resource_pid()?;
     let result = linux_process::with_signal_state(pid, operation);
     compiler_fence(Ordering::SeqCst);
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
@@ -6015,7 +6530,10 @@ fn fixed_linux_mmap_request_ok(addr: usize, len: usize) -> bool {
 }
 
 fn linux_mlock_future_mapping_exceeds_limit(len: usize) -> bool {
-    let Some(resources) = memory_state().process_resources(linux_resource_pid()) else {
+    let Ok(pid) = linux_resource_pid() else {
+        return false;
+    };
+    let Some(resources) = memory_state().process_resources(pid) else {
         return false;
     };
     if !resources.mlock_future || resources.rlimit_memlock.rlim_cur == u64::MAX {
@@ -6288,13 +6806,13 @@ pub fn sys_mlockall(flags: usize) -> SysResult {
     if flags == 0 || flags & !LINUX_MCL_ALLOWED_FLAGS != 0 {
         return Err(SysError::EINVAL);
     }
-    let resources = memory_state().process_resources_mut(linux_resource_pid());
+    let resources = memory_state().process_resources_mut(linux_resource_pid()?);
     resources.mlock_future = flags & LINUX_MCL_FUTURE != 0;
     Ok(0)
 }
 
 pub fn sys_munlockall() -> SysResult {
-    let resources = memory_state().process_resources_mut(linux_resource_pid());
+    let resources = memory_state().process_resources_mut(linux_resource_pid()?);
     resources.mlock_future = false;
     Ok(0)
 }
@@ -6664,17 +7182,22 @@ pub fn sys_pipe2(fds_ptr: usize, flags: usize) -> SysResult {
 
     let (read_handle, write_handle) =
         compat::create_pair(ObjectType::LinuxPipe).map_err(|_| SysError::ENOMEM)?;
-    let state = memory_state();
-    let read_fd = state.alloc_fd_with_flags(
+    let read_fd = memory_state().alloc_fd_with_flags(
         read_handle.0,
         LINUX_O_RDONLY | (flags & LINUX_O_NONBLOCK),
         flags & LINUX_O_CLOEXEC != 0,
-    );
-    let write_fd = state.alloc_fd_with_flags(
+    )?;
+    let write_fd = match memory_state().alloc_fd_with_flags(
         write_handle.0,
         LINUX_O_WRONLY | (flags & LINUX_O_NONBLOCK),
         flags & LINUX_O_CLOEXEC != 0,
-    );
+    ) {
+        Ok(fd) => fd,
+        Err(error) => {
+            let _ = sys_close(read_fd);
+            return Err(error);
+        }
+    };
 
     if let Err(error) = linux_write_user_i32_pair(fds_ptr, read_fd as i32, write_fd as i32) {
         let _ = sys_close(read_fd);
@@ -6687,7 +7210,7 @@ pub fn sys_pipe2(fds_ptr: usize, flags: usize) -> SysResult {
 
 pub fn sys_dup(fd: usize) -> SysResult {
     let record = memory_state().get_fd(fd).ok_or(SysError::EBUSY)?;
-    Ok(memory_state().alloc_fd(record.handle, record.readable, record.writable))
+    memory_state().alloc_fd(record.handle, record.readable, record.writable)
 }
 
 fn close_linux_fd_for_current_process(fd: usize) -> bool {
@@ -6711,6 +7234,9 @@ fn close_linux_fd_for_current_process(fd: usize) -> bool {
     let final_reference = memory_state().release_open_description(entry.description_id);
     if let Some(description) = final_reference {
         let handle = description.handle;
+        if let Some(owner) = owner {
+            let _ = memory_state().forget_process_handle(owner, handle);
+        }
         linux_mqueue::close_handle(handle);
         memory_state().remove_linux_fxfs_file(handle);
         let _ = sys_handle_close(handle);
@@ -7559,7 +8085,7 @@ pub fn sys_eventfd2(_initval: usize, flags: usize) -> SysResult {
         return Err(SysError::EINVAL);
     }
     let handle = compat::create_object(ObjectType::EventFd).map_err(|_| SysError::ENOMEM)?;
-    Ok(memory_state().alloc_fd(handle.0, true, true))
+    memory_state().alloc_fd(handle.0, true, true)
 }
 
 const LINUX_EPOLL_CTL_ADD: usize = 1;
@@ -7675,7 +8201,7 @@ pub fn sys_epoll_create1(flags: usize) -> SysResult {
         return Err(SysError::EINVAL);
     }
     let handle = compat::create_object(ObjectType::Port).map_err(|_| SysError::ENOMEM)?;
-    let epfd = memory_state().alloc_fd(handle.0, true, true);
+    let epfd = memory_state().alloc_fd(handle.0, true, true)?;
     linux_epoll_alloc_set(epfd)?;
     Ok(epfd)
 }
@@ -7844,7 +8370,7 @@ pub fn sys_openat(dirfd: usize, path: usize, flags: usize, mode: usize) -> SysRe
         return Err(SysError::ENOENT);
     }
     if memory_state()
-        .process_resources(linux_resource_pid())
+        .process_resources(linux_resource_pid()?)
         .is_some_and(|resources| resources.descriptors.len() >= LINUX_MAX_OPEN_FDS)
     {
         return Err(SysError::EMFILE);
@@ -7865,9 +8391,9 @@ pub fn sys_openat(dirfd: usize, path: usize, flags: usize, mode: usize) -> SysRe
     let close_on_exec = flags & LINUX_O_CLOEXEC != 0;
     let fd = match cached_handle {
         Some((_, description_id, _)) => {
-            state.alloc_fd_for_description(description_id, status_flags, close_on_exec)
+            state.alloc_fd_for_description(description_id, status_flags, close_on_exec)?
         }
-        None => state.alloc_fd_with_flags(handle.0, status_flags, close_on_exec),
+        None => state.alloc_fd_with_flags(handle.0, status_flags, close_on_exec)?,
     };
     if let Some(cursor) = fxfs_cursor {
         state.bind_linux_fxfs_file(handle.0, String::from(path_str.as_str()), cursor);
@@ -7936,7 +8462,7 @@ pub fn sys_path_noop(path: usize) -> SysResult {
 }
 
 pub fn sys_getcwd(buf: usize, len: usize) -> SysResult {
-    let pid = linux_resource_pid();
+    let pid = linux_resource_pid()?;
     let cwd = memory_state()
         .process_resources(pid)
         .map(|resources| resources.cwd.as_bytes())
@@ -7947,7 +8473,7 @@ pub fn sys_getcwd(buf: usize, len: usize) -> SysResult {
 pub fn sys_chdir(path: usize) -> SysResult {
     let path = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
     memory_state()
-        .process_resources_mut(linux_resource_pid())
+        .process_resources_mut(linux_resource_pid()?)
         .cwd = path;
     Ok(0)
 }
@@ -7958,7 +8484,7 @@ pub fn sys_fchdir(fd: usize) -> SysResult {
     }
     if let Ok(path) = linux_fxfs_path_for_fd(fd, false) {
         memory_state()
-            .process_resources_mut(linux_resource_pid())
+            .process_resources_mut(linux_resource_pid()?)
             .cwd = path;
     }
     Ok(0)
@@ -7966,7 +8492,7 @@ pub fn sys_fchdir(fd: usize) -> SysResult {
 
 pub fn sys_chroot(path: usize) -> SysResult {
     let root = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
-    let resources = memory_state().process_resources_mut(linux_resource_pid());
+    let resources = memory_state().process_resources_mut(linux_resource_pid()?);
     resources.root = root;
     resources.container.chrooted = true;
     Ok(0)
@@ -8008,7 +8534,7 @@ pub fn sys_pivot_root(new_root: usize, put_old: usize) -> SysResult {
         return Err(SysError::EFAULT);
     }
     memory_state()
-        .process_resources_mut(linux_resource_pid())
+        .process_resources_mut(linux_resource_pid()?)
         .container
         .pivot_rooted = true;
     Ok(0)
@@ -8360,12 +8886,12 @@ pub fn sys_signalfd4(_fd: usize, mask: usize, sizemask: usize, flags: usize) -> 
         return Err(SysError::EFAULT);
     }
     let handle = compat::create_object(ObjectType::SignalFd).map_err(|_| SysError::ENOMEM)?;
-    Ok(memory_state().alloc_fd(handle.0, true, false))
+    memory_state().alloc_fd(handle.0, true, false)
 }
 
 pub fn sys_inotify_init1(_flags: usize) -> SysResult {
     let handle = compat::create_object(ObjectType::Inotify).map_err(|_| SysError::ENOMEM)?;
-    Ok(memory_state().alloc_fd(handle.0, true, false))
+    memory_state().alloc_fd(handle.0, true, false)
 }
 
 pub fn sys_inotify_add_watch(fd: usize, path: usize, _mask: usize) -> SysResult {
@@ -8547,8 +9073,12 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SysResult {
         F_GETLK | F_SETLK | F_SETLKW => linux_fcntl_record_lock(fd, cmd, arg),
         F_DUPFD | F_DUPFD_CLOEXEC => {
             let record = memory_state().get_fd(fd).ok_or(SysError::EBADF)?;
-            let duplicated =
-                memory_state().alloc_fd_from(arg, record.handle, record.readable, record.writable);
+            let duplicated = memory_state().alloc_fd_from(
+                arg,
+                record.handle,
+                record.readable,
+                record.writable,
+            )?;
             if cmd == F_DUPFD_CLOEXEC {
                 let _ = memory_state().set_fd_close_on_exec(duplicated, true);
             }
@@ -9021,7 +9551,7 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> SysResu
     }
     let handle = compat::create_object(linux_socket_object_type(domain, socket_type, protocol))
         .map_err(|_| SysError::ENOMEM)?;
-    Ok(memory_state().alloc_fd(handle.0, true, true))
+    memory_state().alloc_fd(handle.0, true, true)
 }
 
 pub fn sys_socketpair(
@@ -9053,9 +9583,14 @@ pub fn sys_socketpair(
         compat::create_pair(linux_socket_object_type(domain, socket_type, protocol))
             .map_err(|_| SysError::ENOMEM)?
     };
-    let state = memory_state();
-    let left_fd = state.alloc_fd(left.0, true, true);
-    let right_fd = state.alloc_fd(right.0, true, true);
+    let left_fd = memory_state().alloc_fd(left.0, true, true)?;
+    let right_fd = match memory_state().alloc_fd(right.0, true, true) {
+        Ok(fd) => fd,
+        Err(error) => {
+            let _ = sys_close(left_fd);
+            return Err(error);
+        }
+    };
 
     if let Err(error) = linux_write_user_i32_pair(fds_ptr, left_fd as i32, right_fd as i32) {
         let _ = sys_close(left_fd);
@@ -9094,7 +9629,7 @@ pub fn sys_accept(sockfd: usize, addr: usize, addrlen: usize) -> SysResult {
         linux_zero_user(addr, 16)?;
     }
     let record = memory_state().get_fd(sockfd).ok_or(SysError::ENODEV)?;
-    Ok(memory_state().alloc_fd(handle, record.readable, record.writable))
+    memory_state().alloc_fd(handle, record.readable, record.writable)
 }
 
 pub fn sys_getsockname(sockfd: usize, addr: usize, addrlen: usize) -> SysResult {
@@ -9323,7 +9858,7 @@ pub fn sys_mq_open(name: usize, flags: usize, _mode: usize, attr: usize) -> SysR
         handle.0,
         flags & (LINUX_O_ACCMODE | LINUX_O_NONBLOCK),
         flags & LINUX_O_CLOEXEC != 0,
-    );
+    )?;
     Ok(fd)
 }
 
@@ -10127,7 +10662,9 @@ fn linux_sched_target_pid(pid: usize) -> Result<usize, SysError> {
 }
 
 fn linux_sched_permission_allowed(requested_pid: usize, target: LinuxSchedTarget) -> bool {
-    let sender_pid = linux_resource_pid();
+    let Ok(sender_pid) = linux_resource_pid() else {
+        return false;
+    };
     let sender = memory_state()
         .process_resources(sender_pid)
         .map(|resources| resources.credentials)
@@ -10165,7 +10702,9 @@ fn linux_sched_write_permission_allowed(
     current: LinuxTaskSchedParam,
     requested: LinuxTaskSchedParam,
 ) -> bool {
-    let sender_pid = linux_resource_pid();
+    let Ok(sender_pid) = linux_resource_pid() else {
+        return false;
+    };
     let sender = memory_state()
         .process_resources(sender_pid)
         .map(|resources| resources.credentials)
@@ -10406,7 +10945,7 @@ pub fn sys_getitimer(which: usize, curr_value: usize) -> SysResult {
         },
     };
     if which == LINUX_ITIMER_REAL {
-        let deadline = memory_state().linux_real_timer_deadline(linux_resource_pid());
+        let deadline = memory_state().linux_real_timer_deadline(linux_resource_pid()?);
         if deadline != LINUX_TIMER_DISABLED {
             let now = crate::kernel_lowlevel::timer::get_tick_count();
             let remaining_ticks = deadline.saturating_sub(now);
@@ -10429,7 +10968,7 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> SysRes
     }
     let timer = linux_read_user_itimerval(new_value)?;
     if which == LINUX_ITIMER_REAL {
-        let pid = linux_resource_pid();
+        let pid = linux_resource_pid()?;
         if linux_timeval_is_zero(timer.it_value) {
             memory_state().set_linux_real_timer_deadline(pid, LINUX_TIMER_DISABLED);
         } else {
@@ -10455,7 +10994,7 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> SysRes
 
 pub fn sys_timerfd_create(_clockid: usize, _flags: usize) -> SysResult {
     let handle = compat::create_object(ObjectType::TimerFd).map_err(|_| SysError::ENOMEM)?;
-    Ok(memory_state().alloc_fd(handle.0, true, true))
+    memory_state().alloc_fd(handle.0, true, true)
 }
 
 pub fn sys_timerfd_settime(
@@ -10513,7 +11052,7 @@ pub fn sys_linux_timer_create(clockid: usize, sevp: usize, timerid: usize) -> Sy
     };
     let handle = compat::create_object(ObjectType::Timer).map_err(|_| SysError::ENOMEM)?;
     let timer_id = handle.0 & i32::MAX as u32;
-    let pid = linux_resource_pid();
+    let pid = linux_resource_pid()?;
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let registered =
         memory_state().register_linux_timer(pid, handle.0, timer_id, clock, signal, signal_value);
@@ -10538,7 +11077,7 @@ pub fn sys_linux_timer_settime(
     new_value: usize,
     old_value: usize,
 ) -> SysResult {
-    let pid = linux_resource_pid();
+    let pid = linux_resource_pid()?;
     let handle = memory_state().linux_timer_handle(pid, timerid as u32);
     if !memory_state().linux_timer_owned(pid, timerid as u32)
         || !handle.is_some_and(|handle| compat::handle_known(HandleValue(handle)))
@@ -10602,7 +11141,7 @@ pub fn sys_linux_timer_settime(
 }
 
 pub fn sys_linux_timer_gettime(timerid: usize, curr_value: usize) -> SysResult {
-    let pid = linux_resource_pid();
+    let pid = linux_resource_pid()?;
     let handle = memory_state().linux_timer_handle(pid, timerid as u32);
     if !memory_state().linux_timer_owned(pid, timerid as u32)
         || !handle.is_some_and(|handle| compat::handle_known(HandleValue(handle)))
@@ -10635,7 +11174,7 @@ pub fn sys_linux_timer_gettime(timerid: usize, curr_value: usize) -> SysResult {
 }
 
 pub fn sys_linux_timer_getoverrun(timerid: usize) -> SysResult {
-    let pid = linux_resource_pid();
+    let pid = linux_resource_pid()?;
     let handle = memory_state().linux_timer_handle(pid, timerid as u32);
     if memory_state().linux_timer_owned(pid, timerid as u32)
         && handle.is_some_and(|handle| compat::handle_known(HandleValue(handle)))
@@ -10651,7 +11190,7 @@ pub fn sys_linux_timer_getoverrun(timerid: usize) -> SysResult {
 }
 
 pub fn sys_linux_timer_delete(timerid: usize) -> SysResult {
-    let pid = linux_resource_pid();
+    let pid = linux_resource_pid()?;
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let handle = memory_state().linux_timer_handle(pid, timerid as u32);
     let result = if !memory_state().linux_timer_owned(pid, timerid as u32) {
@@ -10902,8 +11441,15 @@ pub fn sys_vmo_create(size: u64, options: u32, out_handle: &mut u32) -> ZxResult
 
     let state = memory_state();
     let handle = state.alloc_object_handle(ObjectType::Vmo);
-    vmo.handle = HandleValue(handle);
-    state.vmos.push(VmoRecord { handle, vmo });
+    if handle == 0 {
+        return Err(ZxError::ErrNoMemory);
+    }
+    let object = state
+        .handle_record(handle)
+        .map(|record| record.object_handle)
+        .unwrap_or(handle);
+    vmo.handle = HandleValue(object);
+    state.vmos.push(VmoRecord { handle: object, vmo });
     *out_handle = handle;
     Ok(())
 }
@@ -10915,8 +11461,15 @@ pub fn sys_vmo_create_sparse(size: usize, out_handle: &mut u32) -> ZxResult {
     let mut vmo = Vmo::new_sparse(size).ok_or(ZxError::ErrNoMemory)?;
     let state = memory_state();
     let handle = state.alloc_object_handle(ObjectType::Vmo);
-    vmo.handle = HandleValue(handle);
-    state.vmos.push(VmoRecord { handle, vmo });
+    if handle == 0 {
+        return Err(ZxError::ErrNoMemory);
+    }
+    let object = state
+        .handle_record(handle)
+        .map(|record| record.object_handle)
+        .unwrap_or(handle);
+    vmo.handle = HandleValue(object);
+    state.vmos.push(VmoRecord { handle: object, vmo });
     *out_handle = handle;
     Ok(())
 }
@@ -10926,10 +11479,8 @@ pub fn sys_vmo_read(handle: u32, buf: &mut [u8], offset: u64) -> ZxResult<usize>
     info!("vmo.read: handle={:#x?}, offset={:#x?}", handle, offset);
 
     let state = memory_state();
-    if !state.handle_has_rights(handle, Rights::Read as u32) {
-        return Err(ZxError::ErrAccessDenied);
-    }
-    let vmo = state.get_vmo(handle).ok_or(ZxError::ErrNotFound)?;
+    let _ = state.require_process_object(handle, ObjectType::Vmo, Rights::Read as u32)?;
+    let vmo = state.get_vmo(handle).ok_or(ZxError::ErrBadHandle)?;
     vmo.read(offset as usize, buf)?;
     Ok(buf.len())
 }
@@ -10939,10 +11490,8 @@ pub fn sys_vmo_write(handle: u32, buf: &[u8], offset: u64) -> ZxResult<usize> {
     info!("vmo.write: handle={:#x?}, offset={:#x?}", handle, offset);
 
     let state = memory_state();
-    if !state.handle_has_rights(handle, Rights::Write as u32) {
-        return Err(ZxError::ErrAccessDenied);
-    }
-    let vmo = state.get_vmo_mut(handle).ok_or(ZxError::ErrNotFound)?;
+    let _ = state.require_process_object(handle, ObjectType::Vmo, Rights::Write as u32)?;
+    let vmo = state.get_vmo_mut(handle).ok_or(ZxError::ErrBadHandle)?;
     vmo.write(offset as usize, buf)?;
     Ok(buf.len())
 }
@@ -11071,10 +11620,17 @@ pub fn sys_vmo_create_child(
 
     let state = memory_state();
     let child_handle = state.alloc_object_handle(ObjectType::Vmo);
+    if child_handle == 0 {
+        return Err(ZxError::ErrNoMemory);
+    }
+    let object = state
+        .handle_record(child_handle)
+        .map(|record| record.object_handle)
+        .unwrap_or(child_handle);
     let mut child = child;
-    child.handle = HandleValue(child_handle);
+    child.handle = HandleValue(object);
     state.vmos.push(VmoRecord {
-        handle: child_handle,
+        handle: object,
         vmo: child,
     });
     *out_handle = child_handle;
@@ -11082,25 +11638,22 @@ pub fn sys_vmo_create_child(
 }
 
 /// Zircon sys_vmo_create_physical implementation.
+///
+/// No resource object in this kernel grants the right to name an arbitrary
+/// physical address. The call is denied before any PFN is recorded.
 pub fn sys_vmo_create_physical(
-    _resource: u32,
-    paddr: u64,
+    resource: u32,
+    _paddr: u64,
     size: usize,
-    out_handle: &mut u32,
+    _out_handle: &mut u32,
 ) -> ZxResult {
-    info!("vmo.create_physical: paddr={:#x}, size={:#x}", paddr, size);
-
     if size == 0 {
         return Err(ZxError::ErrInvalidArgs);
     }
-
-    let mut vmo = Vmo::new_physical(paddr, size).ok_or(ZxError::ErrNoMemory)?;
-    let state = memory_state();
-    let handle = state.alloc_object_handle(ObjectType::Vmo);
-    vmo.handle = HandleValue(handle);
-    state.vmos.push(VmoRecord { handle, vmo });
-    *out_handle = handle;
-    Ok(())
+    if crate::syscall::uaccess::el0_syscall_active() {
+        let _ = memory_state().require_process_object(resource, ObjectType::Resource, 0)?;
+    }
+    Err(ZxError::ErrAccessDenied)
 }
 
 /// Zircon sys_vmo_create_contiguous implementation.
@@ -11119,8 +11672,15 @@ pub fn sys_vmo_create_contiguous(
     let mut vmo = Vmo::new_contiguous(size).ok_or(ZxError::ErrNoMemory)?;
     let state = memory_state();
     let handle = state.alloc_object_handle(ObjectType::Vmo);
-    vmo.handle = HandleValue(handle);
-    state.vmos.push(VmoRecord { handle, vmo });
+    if handle == 0 {
+        return Err(ZxError::ErrNoMemory);
+    }
+    let object = state
+        .handle_record(handle)
+        .map(|record| record.object_handle)
+        .unwrap_or(handle);
+    vmo.handle = HandleValue(object);
+    state.vmos.push(VmoRecord { handle: object, vmo });
     *out_handle = handle;
     Ok(())
 }
@@ -11926,7 +12486,13 @@ pub fn sys_exit_group(exit_code: i32) -> SysResult {
 
 /// Linux sys_getpid implementation
 pub fn sys_getpid() -> SysResult {
-    Ok(linux_process::current_pid().unwrap_or(linux_process::LINUX_ROOT_PID))
+    if let Ok(pid) = linux_process::current_pid() {
+        return Ok(pid);
+    }
+    if crate::syscall::uaccess::el0_syscall_active() {
+        return Err(SysError::ESRCH);
+    }
+    Ok(linux_process::LINUX_KERNEL_PRIVATE_PID)
 }
 
 /// Linux sys_getppid implementation
@@ -11936,40 +12502,46 @@ pub fn sys_getppid() -> SysResult {
 
 /// Linux sys_gettid implementation
 pub fn sys_gettid() -> SysResult {
-    Ok(linux_task::current_tid().unwrap_or(linux_process::LINUX_ROOT_PID))
+    if let Ok(tid) = linux_task::current_tid() {
+        return Ok(tid);
+    }
+    if crate::syscall::uaccess::el0_syscall_active() {
+        return Err(SysError::ESRCH);
+    }
+    Ok(linux_process::LINUX_KERNEL_PRIVATE_PID)
 }
 
 pub fn sys_getuid() -> SysResult {
     Ok(memory_state()
-        .process_resources(linux_resource_pid())
+        .process_resources(linux_resource_pid()?)
         .map(|resources| resources.credentials.real_uid)
         .unwrap_or(0))
 }
 
 pub fn sys_geteuid() -> SysResult {
     Ok(memory_state()
-        .process_resources(linux_resource_pid())
+        .process_resources(linux_resource_pid()?)
         .map(|resources| resources.credentials.effective_uid)
         .unwrap_or(0))
 }
 
 pub fn sys_getgid() -> SysResult {
     Ok(memory_state()
-        .process_resources(linux_resource_pid())
+        .process_resources(linux_resource_pid()?)
         .map(|resources| resources.credentials.real_gid)
         .unwrap_or(0))
 }
 
 pub fn sys_getegid() -> SysResult {
     Ok(memory_state()
-        .process_resources(linux_resource_pid())
+        .process_resources(linux_resource_pid()?)
         .map(|resources| resources.credentials.effective_gid)
         .unwrap_or(0))
 }
 
 pub fn sys_setuid(uid: usize) -> SysResult {
     let credentials = &mut memory_state()
-        .process_resources_mut(linux_resource_pid())
+        .process_resources_mut(linux_resource_pid()?)
         .credentials;
     credentials.set_resuid(uid, uid, uid);
     Ok(0)
@@ -11977,7 +12549,7 @@ pub fn sys_setuid(uid: usize) -> SysResult {
 
 pub fn sys_setgid(gid: usize) -> SysResult {
     let credentials = &mut memory_state()
-        .process_resources_mut(linux_resource_pid())
+        .process_resources_mut(linux_resource_pid()?)
         .credentials;
     credentials.set_resgid(gid, gid, gid);
     Ok(0)
@@ -11985,7 +12557,7 @@ pub fn sys_setgid(gid: usize) -> SysResult {
 
 pub fn sys_setreuid(ruid: usize, euid: usize) -> SysResult {
     let credentials = &mut memory_state()
-        .process_resources_mut(linux_resource_pid())
+        .process_resources_mut(linux_resource_pid()?)
         .credentials;
     let real = linux_id_or_current(ruid, credentials.real_uid);
     let effective = linux_id_or_current(euid, credentials.effective_uid);
@@ -11995,7 +12567,7 @@ pub fn sys_setreuid(ruid: usize, euid: usize) -> SysResult {
 
 pub fn sys_setregid(rgid: usize, egid: usize) -> SysResult {
     let credentials = &mut memory_state()
-        .process_resources_mut(linux_resource_pid())
+        .process_resources_mut(linux_resource_pid()?)
         .credentials;
     let real = linux_id_or_current(rgid, credentials.real_gid);
     let effective = linux_id_or_current(egid, credentials.effective_gid);
@@ -12005,7 +12577,7 @@ pub fn sys_setregid(rgid: usize, egid: usize) -> SysResult {
 
 pub fn sys_setresuid(ruid: usize, euid: usize, suid: usize) -> SysResult {
     let credentials = &mut memory_state()
-        .process_resources_mut(linux_resource_pid())
+        .process_resources_mut(linux_resource_pid()?)
         .credentials;
     let real = linux_id_or_current(ruid, credentials.real_uid);
     let effective = linux_id_or_current(euid, credentials.effective_uid);
@@ -12016,7 +12588,7 @@ pub fn sys_setresuid(ruid: usize, euid: usize, suid: usize) -> SysResult {
 
 pub fn sys_getresuid(ruid: usize, euid: usize, suid: usize) -> SysResult {
     let credentials = memory_state()
-        .process_resources(linux_resource_pid())
+        .process_resources(linux_resource_pid()?)
         .map(|resources| resources.credentials)
         .unwrap_or_default();
     if ruid != 0 {
@@ -12033,7 +12605,7 @@ pub fn sys_getresuid(ruid: usize, euid: usize, suid: usize) -> SysResult {
 
 pub fn sys_setresgid(rgid: usize, egid: usize, sgid: usize) -> SysResult {
     let credentials = &mut memory_state()
-        .process_resources_mut(linux_resource_pid())
+        .process_resources_mut(linux_resource_pid()?)
         .credentials;
     let real = linux_id_or_current(rgid, credentials.real_gid);
     let effective = linux_id_or_current(egid, credentials.effective_gid);
@@ -12044,7 +12616,7 @@ pub fn sys_setresgid(rgid: usize, egid: usize, sgid: usize) -> SysResult {
 
 pub fn sys_getresgid(rgid: usize, egid: usize, sgid: usize) -> SysResult {
     let credentials = memory_state()
-        .process_resources(linux_resource_pid())
+        .process_resources(linux_resource_pid()?)
         .map(|resources| resources.credentials)
         .unwrap_or_default();
     if rgid != 0 {
@@ -12061,14 +12633,14 @@ pub fn sys_getresgid(rgid: usize, egid: usize, sgid: usize) -> SysResult {
 
 pub fn sys_setfsuid(uid: usize) -> SysResult {
     Ok(memory_state()
-        .process_resources_mut(linux_resource_pid())
+        .process_resources_mut(linux_resource_pid()?)
         .credentials
         .set_filesystem_uid(uid))
 }
 
 pub fn sys_setfsgid(gid: usize) -> SysResult {
     Ok(memory_state()
-        .process_resources_mut(linux_resource_pid())
+        .process_resources_mut(linux_resource_pid()?)
         .credentials
         .set_filesystem_gid(gid))
 }
@@ -12119,7 +12691,7 @@ fn linux_kill_targets(pid: isize) -> Result<Vec<usize>, SysError> {
 }
 
 fn linux_kill_permission(target_pid: usize) -> Result<(), SysError> {
-    let sender_pid = linux_resource_pid();
+    let sender_pid = linux_resource_pid()?;
     let sender = memory_state()
         .process_resources(sender_pid)
         .map(|resources| resources.credentials)
@@ -12205,6 +12777,7 @@ pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
 pub fn sys_set_tid_address(tidptr: usize) -> SysResult {
     match linux_task::set_current_clear_child_tid(tidptr) {
         Ok(tid) => Ok(tid),
+        Err(SysError::ESRCH) if crate::syscall::uaccess::el0_syscall_active() => Err(SysError::ESRCH),
         Err(SysError::ESRCH) => Ok(linux_process::LINUX_ROOT_PID),
         Err(error) => Err(error),
     }
@@ -12235,7 +12808,7 @@ pub fn sys_sched_yield() -> SysResult {
 }
 
 pub fn sys_umask(mask: usize) -> SysResult {
-    let resources = memory_state().process_resources_mut(linux_resource_pid());
+    let resources = memory_state().process_resources_mut(linux_resource_pid()?);
     let previous = resources.umask;
     resources.umask = mask & 0o777;
     Ok(previous)
@@ -12257,6 +12830,9 @@ pub fn sys_getpgid(pid: usize) -> SysResult {
     let target = if pid == 0 {
         match linux_process::current_pid() {
             Ok(pid) => pid,
+            Err(SysError::ESRCH) if crate::syscall::uaccess::el0_syscall_active() => {
+                return Err(SysError::ESRCH);
+            }
             Err(SysError::ESRCH) => return Ok(linux_process::LINUX_ROOT_PID),
             Err(error) => return Err(error),
         }
@@ -12265,6 +12841,7 @@ pub fn sys_getpgid(pid: usize) -> SysResult {
     };
     match linux_process::by_pid(target) {
         Some(process) => Ok(process.process_group),
+        None if crate::syscall::uaccess::el0_syscall_active() => Err(SysError::ESRCH),
         None if linux_process::current_pid().is_err() => Ok(linux_process::LINUX_ROOT_PID),
         None => Err(SysError::ESRCH),
     }
@@ -12344,7 +12921,7 @@ pub fn sys_capset(header: usize, data: usize) -> SysResult {
             .ok_or(SysError::EFAULT)?,
     )?;
     let container = &mut memory_state()
-        .process_resources_mut(linux_resource_pid())
+        .process_resources_mut(linux_resource_pid()?)
         .container;
     container.cap_effective =
         (((hi.effective as u64) << 32) | lo.effective as u64) & LINUX_CAP_FULL_SET;
@@ -12360,7 +12937,7 @@ pub fn sys_sethostname(name: usize, len: usize) -> SysResult {
         return Err(SysError::EFAULT);
     }
     memory_state()
-        .process_resources_mut(linux_resource_pid())
+        .process_resources_mut(linux_resource_pid()?)
         .container
         .hostname_set = true;
     Ok(0)
@@ -12371,7 +12948,7 @@ pub fn sys_setdomainname(name: usize, len: usize) -> SysResult {
         return Err(SysError::EFAULT);
     }
     memory_state()
-        .process_resources_mut(linux_resource_pid())
+        .process_resources_mut(linux_resource_pid()?)
         .container
         .domainname_set = true;
     Ok(0)
@@ -12401,7 +12978,7 @@ pub fn sys_prctl(
                 return Err(SysError::EINVAL);
             }
             memory_state()
-                .process_resources_mut(linux_resource_pid())
+                .process_resources_mut(linux_resource_pid()?)
                 .container
                 .no_new_privs = arg2 != 0;
             Ok(0)
@@ -12478,7 +13055,7 @@ pub fn sys_memfd_create(name: usize, flags: usize) -> SysResult {
         return Err(SysError::EINVAL);
     }
     let handle = compat::create_object(ObjectType::MemFd).map_err(|_| SysError::ENOMEM)?;
-    Ok(memory_state().alloc_fd(handle.0, true, true))
+    memory_state().alloc_fd(handle.0, true, true)
 }
 
 pub fn sys_membarrier(_cmd: usize, flags: usize, _cpu_id: usize) -> SysResult {
@@ -12535,14 +13112,14 @@ fn sys_seccomp_mode(mode: usize, _filter: usize) -> SysResult {
     match mode {
         LINUX_SECCOMP_MODE_STRICT => {
             memory_state()
-                .process_resources_mut(linux_resource_pid())
+                .process_resources_mut(linux_resource_pid()?)
                 .container
                 .seccomp_mode = LINUX_SECCOMP_MODE_STRICT;
             Ok(0)
         }
         LINUX_SECCOMP_MODE_FILTER => {
             let container = &mut memory_state()
-                .process_resources_mut(linux_resource_pid())
+                .process_resources_mut(linux_resource_pid()?)
                 .container;
             container.seccomp_mode = LINUX_SECCOMP_MODE_FILTER;
             container.seccomp_filters = container.seccomp_filters.saturating_add(1);
@@ -13139,6 +13716,7 @@ pub fn sys_handle_close(handle: u32) -> ZxResult {
     }
 
     if memory_state().release_handle(handle) {
+        revoke_created_handle(handle);
         return Ok(());
     }
 
@@ -13148,12 +13726,14 @@ pub fn sys_handle_close(handle: u32) -> ZxResult {
         || socket::socket_table().close(HandleValue(handle))
     {
         memory_state().clear_external_handle_state(handle);
+        revoke_created_handle(handle);
         return Ok(());
     }
 
     if compat::close_handle(HandleValue(handle)) {
         memory_state().release_compat_handle(handle);
         memory_state().clear_external_handle_state(handle);
+        revoke_created_handle(handle);
         return Ok(());
     }
 
@@ -14734,7 +15314,7 @@ pub fn sys_gettimeofday(tv: usize, _tz: usize) -> SysResult {
 pub fn sys_times(buf: usize) -> SysResult {
     let ticks = scheduler::scheduler().get_tick_count() as isize;
     if buf != 0 {
-        let pid = linux_resource_pid();
+        let pid = linux_resource_pid()?;
         let process_ticks = linux_process_elapsed_ticks(pid);
         let (child_user_ticks, child_system_ticks) = memory_state()
             .process_resources(pid)
@@ -14780,7 +15360,7 @@ pub fn sys_prlimit64(
 ) -> SysResult {
     let old = match resource {
         LINUX_RLIMIT_MEMLOCK => memory_state()
-            .process_resources(linux_resource_pid())
+            .process_resources(linux_resource_pid()?)
             .map(|resources| resources.rlimit_memlock)
             .unwrap_or(LINUX_RLIMIT64_UNLIMITED),
         _ => LINUX_RLIMIT64_UNLIMITED,
@@ -14799,7 +15379,7 @@ pub fn sys_prlimit64(
     }
     if let Some(new) = new {
         if resource == LINUX_RLIMIT_MEMLOCK {
-            let resources = memory_state().process_resources_mut(linux_resource_pid());
+            let resources = memory_state().process_resources_mut(linux_resource_pid()?);
             resources.rlimit_memlock = new;
         }
     }

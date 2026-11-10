@@ -12102,3 +12102,133 @@ mod linux_ddk_logic {
         assert!(!smros_linux_probe_status_ok_body!(1i32));
     }
 }
+
+mod handle_namespace {
+    use std::vec::Vec;
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/handle_namespace_logic_shared.rs"
+    ));
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Object {
+        object: u32,
+        obj_type: u8,
+        rights: u32,
+    }
+
+    fn object_id(object: &Object) -> u32 {
+        object.object
+    }
+
+    fn reborn(value: &Object, _user: u32) -> Object {
+        *value
+    }
+
+    #[test]
+    fn reused_slot_rejects_the_previous_handle_value() {
+        let mut table = HandleNamespace::new(4);
+        let first = table
+            .insert_encoded(|user| Object {
+                object: user,
+                obj_type: 1,
+                rights: 0b111,
+            })
+            .unwrap();
+        assert!(table.lookup(first, object_id).is_some());
+        table.close(first, object_id).unwrap();
+        assert!(table.lookup(first, object_id).is_none());
+        let second = table
+            .insert_encoded(|user| Object {
+                object: user,
+                obj_type: 1,
+                rights: 0b111,
+            })
+            .unwrap();
+        assert_ne!(first, second);
+        assert!(table.lookup(first, object_id).is_none());
+        assert_eq!(table.lookup(second, object_id).unwrap().object, second);
+    }
+
+    #[test]
+    fn another_process_table_does_not_authorize_a_handle() {
+        let mut owner = HandleNamespace::new(4);
+        let mut foreign = HandleNamespace::new(4);
+        let handle = owner
+            .insert_encoded(|user| Object {
+                object: user,
+                obj_type: 1,
+                rights: 0b111,
+            })
+            .unwrap();
+        assert!(owner.lookup(handle, object_id).is_some());
+        assert!(foreign.lookup(handle, object_id).is_none());
+        assert!(foreign.lookup(0x1000, object_id).is_none());
+    }
+
+    #[test]
+    fn transfer_into_a_full_table_leaves_the_source_unchanged() {
+        let mut source = HandleNamespace::new(2);
+        let mut dest = HandleNamespace::new(1);
+        let handle = source
+            .insert_encoded(|user| Object {
+                object: user,
+                obj_type: 3,
+                rights: 0b111,
+            })
+            .unwrap();
+        let _filled = dest
+            .insert_encoded(|user| Object {
+                object: user,
+                obj_type: 1,
+                rights: 1,
+            })
+            .unwrap();
+        let before = source.clone();
+        let error = source
+            .transfer_to(&mut dest, &[handle], object_id, reborn)
+            .unwrap_err();
+        assert_eq!(error, HandleNamespaceError::Full);
+        assert_eq!(source, before);
+        assert!(source.lookup(handle, object_id).is_some());
+    }
+
+    #[test]
+    fn same_table_transfer_keeps_the_source_when_no_free_slot_exists() {
+        let mut table = HandleNamespace::new(1);
+        let handle = table
+            .insert_encoded(|user| Object {
+                object: user,
+                obj_type: 3,
+                rights: 0b111,
+            })
+            .unwrap();
+        let before = table.clone();
+        let error = table
+            .transfer_within(&[handle], object_id, reborn)
+            .unwrap_err();
+        assert_eq!(error, HandleNamespaceError::Full);
+        assert_eq!(table, before);
+    }
+
+    #[test]
+    fn type_is_checked_before_rights() {
+        let error = authorize_handle_use(true, 2, 1, 0, 1 << 2).unwrap_err();
+        assert_eq!(error, HandleNamespaceError::WrongType);
+        let error = authorize_handle_use(true, 1, 1, 1, 1 << 2).unwrap_err();
+        assert_eq!(error, HandleNamespaceError::AccessDenied);
+        assert!(authorize_handle_use(true, 1, 1, 1 << 2, 1 << 2).is_ok());
+        assert_eq!(
+            authorize_handle_use(false, 1, 1, 0, 0).unwrap_err(),
+            HandleNamespaceError::Missing
+        );
+    }
+
+    #[test]
+    fn fd_capacity_preserves_a_replacement_and_rejects_a_new_slot() {
+        assert!(!fd_slot_available(4, 4, false));
+        assert!(fd_slot_available(4, 4, true));
+        assert!(fd_slot_available(3, 4, false));
+    }
+}

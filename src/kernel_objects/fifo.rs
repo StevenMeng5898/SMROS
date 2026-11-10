@@ -158,9 +158,10 @@ impl FifoTable {
     }
 
     fn index(&self, handle: HandleValue) -> Option<usize> {
+        let resolved = crate::syscall::el0_resolve_handle(handle.0)?;
         self.endpoints
             .iter()
-            .position(|endpoint| endpoint.active && endpoint.handle == handle)
+            .position(|endpoint| endpoint.active && endpoint.handle.0 == resolved)
     }
 
     fn free_pair_indices(&self) -> Option<(usize, usize)> {
@@ -219,6 +220,19 @@ impl FifoTable {
 
         self.endpoints[left_index].activate(left, right, elem_count, elem_size);
         self.endpoints[right_index].activate(right, left, elem_count, elem_size);
+        if crate::syscall::publish_created_handle(left.0, crate::kernel_objects::ObjectType::Fifo)
+            .is_err()
+            || crate::syscall::publish_created_handle(right.0, crate::kernel_objects::ObjectType::Fifo)
+                .is_err()
+        {
+            crate::syscall::revoke_created_handle(left.0);
+            crate::syscall::revoke_created_handle(right.0);
+            let _ = crate::syscall::with_raw_object_close(|| {
+                let _ = self.close(left);
+                let _ = self.close(right);
+            });
+            return Err(ZxError::ErrNoMemory);
+        }
         Ok((left, right))
     }
 

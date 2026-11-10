@@ -10,7 +10,7 @@
 //! undefined instruction as `XFAIL (SEC-4)` without executing it, because that
 //! instruction still halts the kernel. `sectest undef` reproduces the halt.
 
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use alloc::vec;
 
@@ -95,6 +95,12 @@ static WATCH_PAGE: AtomicUsize = AtomicUsize::new(0);
 static WATCH_WORD: AtomicU64 = AtomicU64::new(0);
 static WATCH_VALID: AtomicBool = AtomicBool::new(false);
 static SETUP_OTHER: AtomicBool = AtomicBool::new(false);
+static PREPARE: AtomicU8 = AtomicU8::new(0);
+const PREPARE_NONE: u8 = 0;
+const PREPARE_LIVE_VMO: u8 = 1;
+const PREPARE_STALE: u8 = 2;
+const PREPARE_RIGHTS: u8 = 3;
+const PREPARE_CLOSED_FD: u8 = 4;
 static FOREIGN_PHYS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(target_arch = "aarch64")]
 static mut FOREIGN_SPACE: Option<crate::kernel_lowlevel::Aarch64AddressSpace> = None;
@@ -367,9 +373,19 @@ enum Judge {
     CowFork,
     /// Store after mprotect(PROT_READ) must fault instead of using a stale TLB.
     MprotectStore,
+    /// A handle that belongs to another table, including the kernel root VMAR.
+    ForeignHandle,
+    /// A handle value from before its slot was closed and reused.
+    StaleHandle,
+    /// A same-type handle whose rights do not include the operation.
+    BadRights,
+    /// An FD number that this process has already closed.
+    ClosedFd,
+    /// EL0 getpid with no Linux process returns ESRCH.
+    GetpidAbsent,
 }
 
-fn cases() -> [Case; 17] {
+fn cases() -> [Case; 20] {
     let magic = magic_address() as u64;
     let marker = security_case_exec_marker as *const () as u64;
     // QEMU virt identity addresses. The probe runs only on AArch64.
@@ -545,31 +561,58 @@ fn cases() -> [Case; 17] {
         },
         Case {
             id: "foreign-handle",
-            op: 0,
+            op: OP_SYSCALL,
             target: 0,
             value: 0,
-            sysno: 0,
+            sysno: 1069,
+            a0: 0x1000,
+            a1: DATA_PAGE as u64,
+            a2: 8,
+            judge: Judge::ForeignHandle,
+        },
+        Case {
+            id: "stale-handle",
+            op: OP_SYSCALL,
+            target: 0,
+            value: 0,
+            sysno: 1069,
             a0: 0,
-            a1: 0,
-            a2: 0,
-            judge: Judge::Later {
-                stage: "SEC-3",
-                detail: "per-process-handle",
-            },
+            a1: DATA_PAGE as u64,
+            a2: 8,
+            judge: Judge::StaleHandle,
+        },
+        Case {
+            id: "bad-type-rights",
+            op: OP_SYSCALL,
+            target: 0,
+            value: 0,
+            sysno: 1069,
+            a0: 0,
+            a1: DATA_PAGE as u64,
+            a2: 8,
+            judge: Judge::BadRights,
         },
         Case {
             id: "closed-fd",
+            op: OP_SYSCALL,
+            target: 0,
+            value: 0,
+            sysno: 63,
+            a0: 0,
+            a1: DATA_PAGE as u64,
+            a2: 1,
+            judge: Judge::ClosedFd,
+        },
+        Case {
+            id: "getpid-no-process",
             op: 0,
             target: 0,
             value: 0,
-            sysno: 0,
+            sysno: 172,
             a0: 0,
             a1: 0,
             a2: 0,
-            judge: Judge::Later {
-                stage: "SEC-3",
-                detail: "fd-generation",
-            },
+            judge: Judge::GetpidAbsent,
         },
     ]
 }
@@ -596,17 +639,26 @@ fn errno_u64(errno: u64) -> u64 {
 }
 
 fn zircon_invalid_args() -> u64 {
-    -10i64 as u64
+    zircon_status(-10)
+}
+
+fn zircon_status(status: i32) -> u64 {
+    status as i64 as u64
 }
 
 fn execute(case: Case) -> FinishedCase {
     match case.judge {
         Judge::Later { stage, detail } => expected(stage, detail, false),
+        Judge::GetpidAbsent => judge_getpid_absent(),
         Judge::Trap
         | Judge::Syscall(_)
         | Judge::OtherProcess
         | Judge::CowFork
-        | Judge::MprotectStore => run_probe(case),
+        | Judge::MprotectStore
+        | Judge::ForeignHandle
+        | Judge::StaleHandle
+        | Judge::BadRights
+        | Judge::ClosedFd => run_probe(case),
     }
 }
 
@@ -659,14 +711,16 @@ fn run_probe(case: Case) -> FinishedCase {
     CFG_A0.store(case.a0, Ordering::Relaxed);
     CFG_A1.store(case.a1, Ordering::Relaxed);
     CFG_A2.store(case.a2, Ordering::Relaxed);
-    if case.sysno == 1069 {
-        match create_probe_vmo() {
-            Ok(handle) => CFG_A0.store(handle as u64, Ordering::Relaxed),
-            Err(()) => {
-                return finished(Verdict::Fail, "vmo-create");
-            }
-        }
-    }
+    PREPARE.store(
+        match case.judge {
+            Judge::StaleHandle => PREPARE_STALE,
+            Judge::BadRights => PREPARE_RIGHTS,
+            Judge::ClosedFd => PREPARE_CLOSED_FD,
+            Judge::Syscall(_) if case.sysno == 1069 => PREPARE_LIVE_VMO,
+            _ => PREPARE_NONE,
+        },
+        Ordering::Relaxed,
+    );
     ACTIVE.store(true, Ordering::Release);
     let created =
         scheduler::scheduler().create_thread_on_cpu(security_case_thread, "sectest", Some(0));
@@ -723,6 +777,38 @@ fn judge(case: Case) -> FinishedCase {
         Judge::OtherProcess => judge_other_process(),
         Judge::CowFork => judge_cow_fork(),
         Judge::MprotectStore => judge_mprotect_store(),
+        Judge::ForeignHandle => judge_status(zircon_status(-11), "bad-handle"),
+        Judge::StaleHandle => judge_status(zircon_status(-11), "stale"),
+        Judge::BadRights => judge_status(zircon_status(-12), "rights"),
+        Judge::ClosedFd => judge_status(errno_u64(9), "ebadf"),
+        Judge::GetpidAbsent => judge_getpid_absent(),
+    }
+}
+
+fn judge_status(expected_result: u64, detail: &'static str) -> FinishedCase {
+    if SETUP_ERROR.load(Ordering::Relaxed) != 0 {
+        return finished(Verdict::Fail, "setup");
+    }
+    if FAULTED.load(Ordering::Relaxed) {
+        return finished(Verdict::Fail, "faulted");
+    }
+    if MAGIC_WORD.load(Ordering::Relaxed) != MAGIC {
+        return finished(Verdict::Fail, "magic-changed");
+    }
+    if LAST_RESULT.load(Ordering::Relaxed) == expected_result {
+        finished(Verdict::Pass, detail)
+    } else {
+        finished(Verdict::Fail, "unexpected-return")
+    }
+}
+
+fn judge_getpid_absent() -> FinishedCase {
+    linux_task::reset();
+    linux_process::reset_launch();
+    let _guard = crate::syscall::uaccess::El0SyscallGuard::enter();
+    match crate::syscall::sys_getpid() {
+        Err(SysError::ESRCH) => finished(Verdict::Pass, "esrch"),
+        _ => finished(Verdict::Fail, "not-esrch"),
     }
 }
 
@@ -849,13 +935,40 @@ fn install_foreign_page() -> Result<(), u64> {
     Err(4)
 }
 
-fn create_probe_vmo() -> Result<u32, ()> {
-    let mut handle = 0u32;
-    crate::syscall::sys_vmo_create(4096, 0, &mut handle).map_err(|_| ())?;
-    if handle == 0 {
-        return Err(());
+fn prepare_handle_case(pid: usize) -> Result<(), u64> {
+    let prepare = PREPARE.load(Ordering::Relaxed);
+    if prepare == PREPARE_NONE {
+        return Ok(());
     }
-    Ok(handle)
+    let vmo_rights = crate::kernel_objects::default_rights_for_object(
+        crate::kernel_objects::ObjectType::Vmo,
+    );
+    let handle = match prepare {
+        PREPARE_LIVE_VMO => {
+            crate::syscall::security_create_process_vmo(pid, vmo_rights).map_err(|_| 8u64)?
+        }
+        PREPARE_STALE => {
+            let stale =
+                crate::syscall::security_create_process_vmo(pid, vmo_rights).map_err(|_| 8u64)?;
+            crate::syscall::security_close_process_handle(pid, stale).map_err(|_| 9u64)?;
+            let _reused =
+                crate::syscall::security_create_process_vmo(pid, vmo_rights).map_err(|_| 8u64)?;
+            stale
+        }
+        PREPARE_RIGHTS => crate::syscall::security_create_process_vmo(
+            pid,
+            crate::kernel_objects::Rights::Duplicate as u32,
+        )
+        .map_err(|_| 8u64)?,
+        PREPARE_CLOSED_FD => {
+            let fd = crate::syscall::sys_eventfd2(0, 0).map_err(|_| 8u64)?;
+            crate::syscall::sys_close(fd).map_err(|_| 9u64)?;
+            fd as u32
+        }
+        _ => return Ok(()),
+    };
+    CFG_A0.store(handle as u64, Ordering::Relaxed);
+    Ok(())
 }
 
 extern "C" fn security_case_thread() -> ! {
@@ -869,6 +982,7 @@ extern "C" fn security_case_thread() -> ! {
 fn launch_probe() -> Result<(), u64> {
     let thread = scheduler::scheduler().current();
     let pid = linux_task::register_root(thread).map_err(error_code)?;
+    prepare_handle_case(pid)?;
     let root = match linux_process_memory::register_root(pid) {
         Ok(root) => root,
         Err(error) => {

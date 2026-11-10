@@ -306,14 +306,32 @@ impl ChannelTable {
     }
 
     /// Get channel by handle
+    pub fn peer_endpoint(&self, handle: HandleValue) -> Option<HandleValue> {
+        let resolved = crate::syscall::el0_resolve_handle(handle.0)?;
+        self.channels.iter().find_map(|channel| {
+            if channel.handle0.0 == resolved {
+                Some(channel.handle1)
+            } else if channel.handle1.0 == resolved {
+                Some(channel.handle0)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn get_channel(&mut self, handle: HandleValue) -> Option<&mut Channel> {
-        self.channels
-            .iter_mut()
-            .find(|c| c.handle0 == handle || c.handle1 == handle)
+        let resolved = crate::syscall::el0_resolve_handle(handle.0)?;
+        self.channels.iter_mut().find(|channel| {
+            channel.handle0.0 == resolved || channel.handle1.0 == resolved
+        })
     }
 
     /// Remove a channel
     pub fn remove_channel(&mut self, handle: HandleValue) -> bool {
+        let Some(resolved) = crate::syscall::el0_resolve_handle(handle.0) else {
+            return false;
+        };
+        let handle = HandleValue(resolved);
         if let Some(pos) = self
             .channels
             .iter()
@@ -355,11 +373,15 @@ impl ChannelTable {
         requested_rights: u32,
         replace: bool,
     ) -> ZxResult {
+        let Some(resolved) = crate::syscall::el0_resolve_handle(handle.0) else {
+            return Err(ZxError::ErrBadHandle);
+        };
+        let handle = HandleValue(resolved);
         let index = self
             .channels
             .iter()
             .position(|channel| channel.handle0 == handle || channel.handle1 == handle)
-            .ok_or(ZxError::ErrNotFound)?;
+            .ok_or(ZxError::ErrBadHandle)?;
         let existing_rights = self.channels[index]
             .endpoint_rights(handle)
             .ok_or(ZxError::ErrNotFound)?;
@@ -426,13 +448,21 @@ pub fn sys_channel_create(
         return Err(ZxError::ErrInvalidArgs);
     }
 
-    if let Some((h0, h1)) = channel_table().create_channel() {
-        *out_handle0 = h0.0;
-        *out_handle1 = h1.0;
-        Ok(())
-    } else {
-        Err(ZxError::ErrNoMemory)
+    let Some((h0, h1)) = channel_table().create_channel() else {
+        return Err(ZxError::ErrNoMemory);
+    };
+    if crate::syscall::publish_created_handle(h0.0, ObjectType::Channel).is_err()
+        || crate::syscall::publish_created_handle(h1.0, ObjectType::Channel).is_err()
+    {
+        crate::syscall::revoke_created_handle(h0.0);
+        crate::syscall::revoke_created_handle(h1.0);
+        let _ = channel_table().remove_channel(h0);
+        let _ = channel_table().remove_channel(h1);
+        return Err(ZxError::ErrNoMemory);
     }
+    *out_handle0 = h0.0;
+    *out_handle1 = h1.0;
+    Ok(())
 }
 
 /// Zircon sys_channel_read implementation
@@ -453,7 +483,10 @@ pub fn sys_channel_read(
         return Err(ZxError::ErrInvalidArgs);
     }
 
-    let h = HandleValue(handle);
+    let Some(resolved) = crate::syscall::el0_resolve_handle(handle) else {
+        return Err(ZxError::ErrBadHandle);
+    };
+    let h = HandleValue(resolved);
 
     match channel_table().get_channel(h) {
         Some(channel) => {
@@ -514,7 +547,10 @@ pub fn sys_channel_write(
         return Err(ZxError::ErrInvalidArgs);
     }
 
-    let h = HandleValue(handle);
+    let Some(resolved) = crate::syscall::el0_resolve_handle(handle) else {
+        return Err(ZxError::ErrBadHandle);
+    };
+    let h = HandleValue(resolved);
     let data = if bytes_count == 0 {
         &[][..]
     } else {
@@ -525,10 +561,16 @@ pub fn sys_channel_write(
     } else {
         unsafe { core::slice::from_raw_parts(handles_ptr as *const u32, handles_count) }
     };
+    let transferred = if crate::syscall::uaccess::el0_syscall_active() && !handles.is_empty() {
+        Some(crate::syscall::transfer_channel_handles(handle, handles)?)
+    } else {
+        None
+    };
+    let handles = transferred.as_deref().unwrap_or(handles);
 
     match channel_table().get_channel(h) {
         Some(channel) => channel.write(h, data, handles),
-        None => Err(ZxError::ErrNotFound),
+        None => Err(ZxError::ErrBadHandle),
     }
 }
 
