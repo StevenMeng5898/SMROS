@@ -862,6 +862,7 @@ fn posix_clock_timer_syscalls_copy_validate_and_publish_owned_state() {
     assert!(timer_settime.contains("linux_read_user_itimerspec(new_value)?"));
     assert!(timer_settime.contains("linux_posix_timespec_nanoseconds("));
     assert!(timer_settime.contains("timer.arm("));
+    assert!(timer_settime.contains("timer.defer_if_already_due("));
     assert!(timer_gettime.contains("timer.snapshot("));
     assert!(timer_delete.contains("remove_linux_timer(pid, timerid as u32)"));
     assert!(reset.contains("resources.posix_timers"));
@@ -958,9 +959,17 @@ fn posix_clock_timer_cpu0_expiry_queues_process_signals() {
     assert!(timer.contains("if current_cpu_id() == 0"));
     assert!(timer.contains("deliver_linux_posix_timer_signals_from_irq()"));
     assert!(expiry.contains("linux_realtime_nanos()"));
+    assert!(expiry.contains("timer.running_delivery_deferred(now_monotonic)"));
     assert!(expiry.contains("timer.expire(now_monotonic, now_realtime)"));
     assert!(expiry.contains("queue_process_linux_signal_and_wake("));
     assert!(expiry.contains("linux_timer_signal_record("));
+    let sleep = braced_body(
+        &syscall[syscall
+            .find("fn linux_sleep_until(")
+            .expect("interruptible sleep")..],
+    );
+    assert!(sleep.contains("release_current_posix_timer_running_deferrals()"));
+    assert!(sleep.contains("deliver_linux_posix_timer_signals_from_irq()"));
 
     assert!(timer.contains("scheduler().on_timer_tick()"));
     assert!(timer.contains("linux_task::on_timer_tick(now)"));

@@ -627,6 +627,10 @@ const LINUX_SA_ONSTACK: u64 = 0x0800_0000;
 const LINUX_SA_RESETHAND: u64 = 0x8000_0000;
 const LINUX_NANOS_PER_SECOND: u64 = 1_000_000_000;
 const LINUX_SIGNAL_TICK_NANOS: u64 = 10_000_000;
+/// Keep an already-due timer from raising a precision interrupt until the
+/// caller can reach an interruptible sleep. One second covers the userspace
+/// gap between `timer_settime` and `sleep`, including a scheduler yield.
+const LINUX_ALREADY_DUE_TIMER_DEFER_NANOS: u64 = 1_000_000_000;
 // RISC-V uses the SBI compare for precision wakeups. Keep waits through the
 // hybrid range on that platform in the precision path so a coarse 100 Hz wake
 // cannot consume the entire tail and return a sleep late by multiple ticks.
@@ -5891,6 +5895,19 @@ pub extern "C" fn deliver_linux_timer_signal_from_irq(saved_regs: usize) -> bool
     frame_rewritten || !matches!(outcome, LinuxSignalDeliveryOutcome::Idle)
 }
 
+fn release_current_posix_timer_running_deferrals() {
+    let Ok(pid) = linux_process::current_pid() else {
+        return;
+    };
+    let _ = with_initialized_memory_state(|state| {
+        if let Some(resources) = state.process_resources_mut_if_exists(pid) {
+            for timer in &mut resources.posix_timers {
+                timer.clear_running_deferral();
+            }
+        }
+    });
+}
+
 pub fn deliver_linux_posix_timer_signals_from_irq() {
     if linux_task::kernel_dispatch_active() {
         return;
@@ -5903,6 +5920,10 @@ pub fn deliver_linux_posix_timer_signals_from_irq() {
         let expired = with_initialized_memory_state(|state| {
             for resources in &mut state.linux_process_resources {
                 for timer in &mut resources.posix_timers {
+                    if timer.running_delivery_deferred(now_monotonic) {
+                        continue;
+                    }
+                    timer.clear_running_deferral();
                     if !timer.expire(now_monotonic, now_realtime) || timer.signal == 0 {
                         continue;
                     }
@@ -7177,6 +7198,12 @@ fn linux_sleep_until(wait: LinuxSleepWait, rem: usize) -> SysResult {
     }
 
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    // A timer armed with an already-expired absolute time stays deferred so
+    // its signal is not consumed on the way out of timer_settime. Publish it
+    // here, before deciding to block, so sleep returns EINTR and the handler
+    // runs on the syscall return path.
+    release_current_posix_timer_running_deferrals();
+    deliver_linux_posix_timer_signals_from_irq();
     let pending = match linux_sleep_has_deliverable_pending_signal() {
         Ok(pending) => pending,
         Err(error) => {
@@ -10552,8 +10579,14 @@ pub fn sys_linux_timer_settime(
             linux_write_user_itimerspec(old_value, linux_itimerspec_from_timer_spec(previous))?;
         }
         let arm_now_monotonic = monotonic_nanos();
+        let arm_now_realtime = linux_realtime_nanos()?;
         let arm_result = timer.arm(flags & LINUX_TIMER_ABSTIME != 0, arm_now_monotonic, spec);
         arm_result.ok_or(SysError::EOVERFLOW)?;
+        timer.defer_if_already_due(
+            arm_now_monotonic,
+            arm_now_realtime,
+            LINUX_ALREADY_DUE_TIMER_DEFER_NANOS,
+        );
         *memory_state()
             .linux_timer_mut(pid, timerid as u32)
             .ok_or(SysError::EINVAL)? = timer;

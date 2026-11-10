@@ -1129,6 +1129,46 @@ mod syscall_logic {
     }
 
     #[test]
+    fn already_due_absolute_timer_defers_precision_delivery_until_released() {
+        let mut timer = LinuxPosixTimerCore::new(21, LinuxPosixClock::Realtime, 14, 0);
+        timer
+            .arm(
+                true,
+                5_000,
+                LinuxPosixTimerSpec {
+                    interval: 0,
+                    value: 1_000,
+                },
+            )
+            .unwrap();
+        timer.defer_if_already_due(5_000, 1_500, 1_000);
+        assert!(timer.running_delivery_deferred(5_000));
+        assert!(timer.running_delivery_deferred(5_999));
+        assert!(!timer.running_delivery_deferred(6_000));
+        assert_eq!(timer.next_hardware_deadline(0, 10), None);
+
+        timer.clear_running_deferral();
+        assert_eq!(timer.next_hardware_deadline(0, 10), Some(1_000));
+        assert!(timer.expire(6_000, 1_500));
+        assert_eq!(timer.overrun(), 0);
+
+        let mut future = LinuxPosixTimerCore::new(22, LinuxPosixClock::Realtime, 14, 0);
+        future
+            .arm(
+                true,
+                5_000,
+                LinuxPosixTimerSpec {
+                    interval: 0,
+                    value: 9_000,
+                },
+            )
+            .unwrap();
+        future.defer_if_already_due(5_000, 1_500, 1_000);
+        assert!(!future.running_delivery_deferred(5_000));
+        assert_eq!(future.next_hardware_deadline(0, 10), Some(9_000));
+    }
+
+    #[test]
     fn posix_timer_remaining_rounds_up_to_effective_resolution() {
         assert_eq!(
             linux_posix_timer_remaining_rounded(35_202_800, 10_000_000),
