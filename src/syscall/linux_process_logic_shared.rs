@@ -1,4 +1,7 @@
 pub(crate) const LINUX_ROOT_PID: usize = 1;
+/// FD and handle identity for the EL1 shell and in-kernel tests. This pid is
+/// outside the range `register_root` assigns, so it never aliases an EL0 process.
+pub(crate) const LINUX_KERNEL_PRIVATE_PID: usize = (i32::MAX as usize) + 1;
 pub(crate) const LINUX_LAUNCH_REAPER_PID: usize = usize::MAX;
 pub(crate) const LINUX_MAX_PID: usize = i32::MAX as usize;
 pub(crate) const LINUX_SIGCHLD: usize = 17;

@@ -2578,7 +2578,7 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         129 => out = [0, 0, 0, 0, 0, 0],
         130 => {
             out = [
-                linux_task::current_tid().unwrap_or(linux_process::LINUX_ROOT_PID),
+                linux_task::current_tid().unwrap_or(0),
                 0,
                 0,
                 0,
@@ -2587,8 +2587,8 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
             ]
         }
         131 => {
-            let tid = linux_task::current_tid().unwrap_or(linux_process::LINUX_ROOT_PID);
-            let tgid = linux_process::current_pid().unwrap_or(linux_process::LINUX_ROOT_PID);
+            let tid = linux_task::current_tid().unwrap_or(0);
+            let tgid = linux_process::current_pid().unwrap_or(0);
             out = [tgid, tid, 0, 0, 0, 0];
         }
         90 => {
@@ -2720,12 +2720,12 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
             ]
         }
         138 => {
-            let pid = linux_process::current_pid().unwrap_or(linux_process::LINUX_ROOT_PID);
+            let pid = linux_process::current_pid().unwrap_or(0);
             out = [pid, 0, 0, 0, 0, 0];
         }
         240 => {
-            let tid = linux_task::current_tid().unwrap_or(linux_process::LINUX_ROOT_PID);
-            let tgid = linux_process::current_pid().unwrap_or(linux_process::LINUX_ROOT_PID);
+            let tid = linux_task::current_tid().unwrap_or(0);
+            let tgid = linux_process::current_pid().unwrap_or(0);
             out = [tgid, tid, 0, 0, 0, 0];
         }
         140 | 141 | 143 | 144 | 145 | 147 | 149 | 151 | 152 | 154 | 156 | 157 | 159 => {

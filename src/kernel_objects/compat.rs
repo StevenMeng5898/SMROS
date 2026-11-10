@@ -115,6 +115,10 @@ impl CompatObjectTable {
         let mut object = CompatObject::new(handle, obj_type, None, rights);
         object.options = options;
         self.objects.push(object);
+        if crate::syscall::publish_created_handle(handle.0, obj_type).is_err() {
+            self.objects.pop();
+            return Err(ZxError::ErrNoMemory);
+        }
         Ok(handle)
     }
 
@@ -130,19 +134,28 @@ impl CompatObjectTable {
             .push(CompatObject::new(left, obj_type, Some(right), rights));
         self.objects
             .push(CompatObject::new(right, obj_type, Some(left), rights));
+        if crate::syscall::publish_created_handle(left.0, obj_type).is_err()
+            || crate::syscall::publish_created_handle(right.0, obj_type).is_err()
+        {
+            crate::syscall::revoke_created_handle(left.0);
+            crate::syscall::revoke_created_handle(right.0);
+            self.objects.pop();
+            self.objects.pop();
+            return Err(ZxError::ErrNoMemory);
+        }
         Ok((left, right))
     }
 
     pub fn contains(&self, handle: HandleValue) -> bool {
         self.objects
             .iter()
-            .any(|object| object.handle == handle && !object.closed)
+            .any(|object| crate::syscall::el0_resolve_handle(handle.0) == Some(object.handle.0) && !object.closed)
     }
 
     pub fn object_type(&self, handle: HandleValue) -> Option<ObjectType> {
         self.objects
             .iter()
-            .find(|object| object.handle == handle && !object.closed)
+            .find(|object| crate::syscall::el0_resolve_handle(handle.0) == Some(object.handle.0) && !object.closed)
             .map(|object| object.obj_type)
     }
 
@@ -153,7 +166,7 @@ impl CompatObjectTable {
     pub fn rights(&self, handle: HandleValue) -> Option<u32> {
         self.objects
             .iter()
-            .find(|object| object.handle == handle && !object.closed)
+            .find(|object| crate::syscall::el0_resolve_handle(handle.0) == Some(object.handle.0) && !object.closed)
             .map(|object| object.rights)
     }
 
@@ -166,7 +179,7 @@ impl CompatObjectTable {
     pub fn options(&self, handle: HandleValue) -> Option<u32> {
         self.objects
             .iter()
-            .find(|object| object.handle == handle && !object.closed)
+            .find(|object| crate::syscall::el0_resolve_handle(handle.0) == Some(object.handle.0) && !object.closed)
             .map(|object| object.options)
     }
 
@@ -174,7 +187,7 @@ impl CompatObjectTable {
         if let Some(object) = self
             .objects
             .iter_mut()
-            .find(|object| object.handle == handle && !object.closed)
+            .find(|object| crate::syscall::el0_resolve_handle(handle.0) == Some(object.handle.0) && !object.closed)
         {
             object.state_value = value;
             true
@@ -186,7 +199,7 @@ impl CompatObjectTable {
     pub fn state_value(&self, handle: HandleValue) -> Option<u64> {
         self.objects
             .iter()
-            .find(|object| object.handle == handle && !object.closed)
+            .find(|object| crate::syscall::el0_resolve_handle(handle.0) == Some(object.handle.0) && !object.closed)
             .map(|object| object.state_value)
     }
 
@@ -204,7 +217,7 @@ impl CompatObjectTable {
         let Some(index) = self
             .objects
             .iter()
-            .position(|object| object.handle == handle && !object.closed)
+            .position(|object| crate::syscall::el0_resolve_handle(handle.0) == Some(object.handle.0) && !object.closed)
         else {
             return false;
         };
@@ -231,14 +244,14 @@ impl CompatObjectTable {
     pub fn signals(&self, handle: HandleValue) -> Option<u32> {
         self.objects
             .iter()
-            .find(|object| object.handle == handle && !object.closed)
+            .find(|object| crate::syscall::el0_resolve_handle(handle.0) == Some(object.handle.0) && !object.closed)
             .map(|object| object.signals)
     }
 
     pub fn queued_bytes(&self, handle: HandleValue) -> Option<usize> {
         self.objects
             .iter()
-            .find(|object| object.handle == handle && !object.closed)
+            .find(|object| crate::syscall::el0_resolve_handle(handle.0) == Some(object.handle.0) && !object.closed)
             .map(|object| object.queue.len())
     }
 
@@ -250,7 +263,7 @@ impl CompatObjectTable {
     ) -> Option<u32> {
         self.objects
             .iter_mut()
-            .find(|object| object.handle == handle && !object.closed)
+            .find(|object| crate::syscall::el0_resolve_handle(handle.0) == Some(object.handle.0) && !object.closed)
             .map(|object| {
                 object.signals = object_logic::signal_update(object.signals, clear_mask, set_mask);
                 object.signals
@@ -280,7 +293,7 @@ impl CompatObjectTable {
         let (peer, allowed_mask) = self
             .objects
             .iter()
-            .find(|object| object.handle == handle && !object.closed)
+            .find(|object| crate::syscall::el0_resolve_handle(handle.0) == Some(object.handle.0) && !object.closed)
             .map(|object| {
                 let allowed_mask = match object.obj_type {
                     ObjectType::EventPair => crate::syscall::syscall_logic::eventpair_signal_mask(),
@@ -301,7 +314,7 @@ impl CompatObjectTable {
     pub fn property(&self, handle: HandleValue) -> Option<u64> {
         self.objects
             .iter()
-            .find(|object| object.handle == handle && !object.closed)
+            .find(|object| crate::syscall::el0_resolve_handle(handle.0) == Some(object.handle.0) && !object.closed)
             .map(|object| object.property_value)
     }
 
@@ -309,7 +322,7 @@ impl CompatObjectTable {
         if let Some(object) = self
             .objects
             .iter_mut()
-            .find(|object| object.handle == handle && !object.closed)
+            .find(|object| crate::syscall::el0_resolve_handle(handle.0) == Some(object.handle.0) && !object.closed)
         {
             object.property_value = value;
             true
@@ -326,7 +339,7 @@ impl CompatObjectTable {
             let object = self
                 .objects
                 .iter()
-                .find(|object| object.handle == handle && !object.closed)
+                .find(|object| crate::syscall::el0_resolve_handle(handle.0) == Some(object.handle.0) && !object.closed)
                 .ok_or(ZxError::ErrNotFound)?;
             object.peer.unwrap_or(handle)
         };
@@ -358,7 +371,7 @@ impl CompatObjectTable {
         let object = self
             .objects
             .iter_mut()
-            .find(|object| object.handle == handle && !object.closed)
+            .find(|object| crate::syscall::el0_resolve_handle(handle.0) == Some(object.handle.0) && !object.closed)
             .ok_or(ZxError::ErrNotFound)?;
 
         if object.queue.is_empty() {
@@ -387,7 +400,7 @@ impl CompatObjectTable {
         let Some(object) = self
             .objects
             .iter_mut()
-            .find(|object| object.handle == handle && !object.closed)
+            .find(|object| crate::syscall::el0_resolve_handle(handle.0) == Some(object.handle.0) && !object.closed)
         else {
             return false;
         };

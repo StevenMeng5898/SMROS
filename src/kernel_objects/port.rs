@@ -269,9 +269,10 @@ impl PortTable {
     }
 
     fn index(&self, handle: HandleValue) -> Option<usize> {
+        let resolved = crate::syscall::el0_resolve_handle(handle.0)?;
         self.ports
             .iter()
-            .position(|port| port.active && port.handle == handle)
+            .position(|port| port.active && port.handle.0 == resolved)
     }
 
     fn free_index(&self) -> Option<usize> {
@@ -289,6 +290,15 @@ impl PortTable {
         let index = self.free_index().ok_or(ZxError::ErrNoMemory)?;
         let handle = self.alloc_handle().ok_or(ZxError::ErrNoMemory)?;
         self.ports[index].activate(handle);
+        if crate::syscall::publish_created_handle(handle.0, crate::kernel_objects::ObjectType::Port)
+            .is_err()
+        {
+            crate::syscall::revoke_created_handle(handle.0);
+            let _ = crate::syscall::with_raw_object_close(|| {
+                let _ = self.close(handle);
+            });
+            return Err(ZxError::ErrNoMemory);
+        }
         Ok(handle)
     }
 
