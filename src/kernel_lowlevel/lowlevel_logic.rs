@@ -89,6 +89,8 @@ pub(crate) fn ascii_printable(byte: u8) -> bool {
 }
 
 #[cfg(target_arch = "aarch64")]
+// Unused while SEC-2 refuses to call PSCI. SEC-7 secondary boot is the caller.
+#[allow(dead_code)]
 pub(crate) fn hex_digit(nibble: u8) -> u8 {
     smros_ll_hex_digit_body!(nibble)
 }
@@ -217,11 +219,15 @@ pub(crate) fn valid_cpu_id(cpu_id: u32, max_cpus: usize) -> bool {
 }
 
 #[cfg(target_arch = "aarch64")]
+// Unused while SEC-2 refuses to call PSCI. SEC-7 secondary boot is the caller.
+#[allow(dead_code)]
 pub(crate) fn display_mpidr(cpu_id: u32) -> u64 {
     smros_ll_display_mpidr_body!(cpu_id)
 }
 
 #[cfg(target_arch = "aarch64")]
+// Unused while SEC-2 refuses to call PSCI. SEC-7 secondary boot is the caller.
+#[allow(dead_code)]
 pub(crate) fn psci_success(result: i64, success: i64, on_pending: i64) -> bool {
     smros_ll_psci_success_body!(result, success, on_pending)
 }

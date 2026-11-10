@@ -421,6 +421,32 @@ macro_rules! smros_user_elf_segment_mapping_range_body {
     }};
 }
 
+pub(crate) fn run_elf_page_spans_write_and_exec(
+    page_start: usize,
+    page_size: usize,
+    segments: &[(usize, usize, usize)],
+) -> bool {
+    let Some(page_end) = page_start.checked_add(page_size).filter(|_| page_size != 0) else {
+        return false;
+    };
+    let mut writable = false;
+    let mut executable = false;
+    for (segment_start, segment_len, segment_protection) in segments {
+        let Some(segment_end) = segment_start.checked_add(*segment_len) else {
+            return false;
+        };
+        if *segment_len != 0 && *segment_start < page_end && page_start < segment_end {
+            if *segment_protection & 2 != 0 {
+                writable = true;
+            }
+            if *segment_protection & 4 != 0 {
+                executable = true;
+            }
+        }
+    }
+    writable && executable
+}
+
 pub(crate) fn run_elf_page_protection(
     page_start: usize,
     page_size: usize,
@@ -434,7 +460,13 @@ pub(crate) fn run_elf_page_protection(
             protection = Some(protection.unwrap_or(0) | *segment_protection);
         }
     }
-    protection
+    let mut protection = protection?;
+    // A page that is both writable and executable is installed read-write and
+    // execute-never. Do not restore W+X if a loader later fails because of this.
+    if protection & 2 != 0 && protection & 4 != 0 {
+        protection = (protection | 1 | 2) & !4;
+    }
+    Some(protection)
 }
 
 pub(crate) fn run_elf_environment_entry_valid(entry: &str, max_entry_bytes: usize) -> bool {

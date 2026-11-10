@@ -30,6 +30,10 @@ pub(crate) fn aarch64_user_page_descriptor(
     writable: bool,
     executable: bool,
 ) -> u64 {
+    // Writable implies UXN. Executable implies read-only and PXN. A request
+    // for both is installed read-write and UXN, never writable and executable.
+    // Every user page is PXN. nG stays clear: these PTEs remain global.
+    let executable = executable && !writable;
     let user_access = if readable || writable || executable {
         AARCH64_DESC_AP_USER
     } else {
@@ -189,6 +193,13 @@ pub(crate) trait Aarch64AddressSpaceBackend {
         self.pfn_address(pfn).is_some()
     }
 
+    /// Page-table pages and kernel-image PFNs must not be installed as user
+    /// pages. The production backend rejects both; tests override this when
+    /// they model those PFNs.
+    fn user_data_pfn_allowed(&self, _pfn: u64) -> bool {
+        true
+    }
+
     fn publish_user_mapping(&mut self, _vaddr: usize) {}
     fn break_user_mapping(&mut self, _vaddr: usize) {}
     fn complete_user_mapping(&mut self) {}
@@ -252,10 +263,7 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
             return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
         }
         self.ensure_private_existing_path(vaddr)?;
-        let paddr = self
-            .backend
-            .pfn_address(pfn)
-            .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+        let paddr = self.user_page_physical(pfn)?;
         if let Ok((table_pfn, index)) = self.leaf_location(vaddr) {
             let descriptor = self
                 .backend
@@ -391,10 +399,7 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
                 self.rollback_mapping_transaction(&mapped, &created);
                 return Err(Aarch64AddressSpaceCoreError::AlreadyMapped);
             }
-            let paddr = self
-                .backend
-                .pfn_address(pfn_at(page_index))
-                .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+            let paddr = self.user_page_physical(pfn_at(page_index))?;
             let (readable, writable, executable) = protection_at(page_index);
             let descriptor = aarch64_user_page_descriptor(
                 paddr,
@@ -432,10 +437,7 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         mapped
             .try_reserve(1)
             .map_err(|_| Aarch64AddressSpaceCoreError::OutOfMemory)?;
-        let paddr = self
-            .backend
-            .pfn_address(pfn)
-            .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+        let paddr = self.user_page_physical(pfn)?;
         let indices =
             aarch64_table_indices(vaddr).ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
         let table_pfn = self.ensure_leaf_table(indices, created)?;
@@ -508,10 +510,7 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         if !aarch64_user_range_valid(vaddr, AARCH64_PAGE_SIZE) {
             return Err(Aarch64AddressSpaceCoreError::InvalidAddress);
         }
-        let replacement_paddr = self
-            .backend
-            .pfn_address(pfn)
-            .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+        let replacement_paddr = self.user_page_physical(pfn)?;
         self.ensure_private_existing_path(vaddr)?;
         let (table_pfn, index) = self.leaf_location(vaddr)?;
         let descriptor = self
@@ -578,7 +577,22 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         {
             return None;
         }
+        let pfn = (descriptor & AARCH64_DESC_ADDR_MASK) / AARCH64_PAGE_SIZE as u64;
+        if !self.backend.user_data_pfn_allowed(pfn) {
+            return None;
+        }
         Some((descriptor & AARCH64_DESC_ADDR_MASK) as usize | (vaddr & (AARCH64_PAGE_SIZE - 1)))
+    }
+
+    fn user_page_physical(&self, pfn: u64) -> Result<usize, Aarch64AddressSpaceCoreError> {
+        let paddr = self
+            .backend
+            .pfn_address(pfn)
+            .ok_or(Aarch64AddressSpaceCoreError::InvalidAddress)?;
+        if !self.backend.user_data_pfn_allowed(pfn) {
+            return Err(Aarch64AddressSpaceCoreError::PermissionDenied);
+        }
+        Ok(paddr)
     }
 
     pub(crate) fn copy_to_user(
@@ -1252,6 +1266,7 @@ struct Aarch64TestAllocatorState {
     table_references: alloc::collections::BTreeMap<u64, usize>,
     data_pages: alloc::collections::BTreeMap<u64, alloc::boxed::Box<[u8; AARCH64_PAGE_SIZE]>>,
     maintenance_events: alloc::vec::Vec<Aarch64MaintenanceEvent>,
+    forbidden_user_pfn: Option<u64>,
 }
 
 #[cfg(test)]
@@ -1271,6 +1286,7 @@ impl Aarch64TestAllocator {
                 table_references: alloc::collections::BTreeMap::new(),
                 data_pages: alloc::collections::BTreeMap::new(),
                 maintenance_events: alloc::vec::Vec::new(),
+                forbidden_user_pfn: None,
             })),
         }
     }
@@ -1300,6 +1316,14 @@ impl Aarch64TestAllocator {
 
     pub(crate) fn clear_maintenance_events(&mut self) {
         self.state.borrow_mut().maintenance_events.clear();
+    }
+
+    pub(crate) fn forbid_user_pfn(&mut self, pfn: u64) {
+        self.state.borrow_mut().forbidden_user_pfn = Some(pfn);
+    }
+
+    pub(crate) fn table_word(&self, pfn: u64, index: usize) -> u64 {
+        self.state.borrow().pages[&pfn][index]
     }
 
     pub(crate) fn set_l3_descriptor(&mut self, root_pfn: u64, vaddr: usize, descriptor: u64) {
@@ -1402,6 +1426,14 @@ impl Aarch64AddressSpaceBackend for Aarch64TestBackend {
             .get(&pfn)
             .copied()
             .is_some_and(|references| references > 1)
+    }
+
+    fn user_data_pfn_allowed(&self, pfn: u64) -> bool {
+        let state = self.allocator.state.borrow();
+        if state.table_references.contains_key(&pfn) || state.forbidden_user_pfn == Some(pfn) {
+            return false;
+        }
+        true
     }
 
     fn pfn_address(&self, pfn: u64) -> Option<usize> {

@@ -4,13 +4,13 @@
 //! AArch64 EL0 process with its own TTBR0 root, copies a fixed machine-code
 //! probe into a user page, and records fault or syscall results.
 //!
-//! SEC-0/SEC-1 cases are hard PASS/FAIL. Cases owned by SEC-2 or later print
-//! `XFAIL (SEC-n)` while they still miss, or `XPASS (SEC-n)` if they start
-//! passing before that stage lands. `sectest all` records the undefined
-//! instruction as `XFAIL (SEC-4)` without executing it, because that
+//! SEC-0, SEC-1, and SEC-2 cases are hard PASS/FAIL. Cases owned by SEC-3 or
+//! later print `XFAIL (SEC-n)` while they still miss, or `XPASS (SEC-n)` if
+//! they start passing before that stage lands. `sectest all` records the
+//! undefined instruction as `XFAIL (SEC-4)` without executing it, because that
 //! instruction still halts the kernel. `sectest undef` reproduces the halt.
 
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 
 use alloc::vec;
 
@@ -29,22 +29,47 @@ const OP_WRITE: u64 = 2;
 const OP_EXEC: u64 = 3;
 const OP_SYSCALL: u64 = 4;
 const OP_UNDEF: u64 = 5;
+const OP_MPROTECT: u64 = 6;
+const OP_COW: u64 = 7;
+const OTHER_PAGE: usize = 0x1300_0000;
+const OTHER_MAGIC: u64 = 0x4F54;
+const COW_PAGE: usize = 0x1400_0000;
+const COW_PARENT: u64 = 0x1111;
+const COW_CHILD: u64 = 0x2222;
+const MPROTECT_PAGE: usize = 0x1500_0000;
+const MPROTECT_FIRST: u64 = 0x2222;
+const MPROTECT_SECOND: u64 = 0x3333;
 const MAGIC: u64 = 0x5345_434d_4147_4943;
 const CASE_TIMEOUT_NS: u64 = 2_000_000_000;
 
 /// Bytes of `tests/security/aarch64/el0_probe.S` (`.text` only).
 const PROBE_CODE: &[u8] = &[
     0x14, 0x00, 0x80, 0xd2, 0x14, 0x40, 0xa2, 0xf2, 0x95, 0x02, 0x40, 0xf9, 0x96, 0x06, 0x40, 0xf9,
-    0xbf, 0x06, 0x00, 0xf1, 0x60, 0x01, 0x00, 0x54, 0xbf, 0x0a, 0x00, 0xf1, 0xa0, 0x01, 0x00, 0x54,
-    0xbf, 0x0e, 0x00, 0xf1, 0xe0, 0x01, 0x00, 0x54, 0xbf, 0x12, 0x00, 0xf1, 0xc0, 0x01, 0x00, 0x54,
-    0xbf, 0x16, 0x00, 0xf1, 0x20, 0x03, 0x00, 0x54, 0x60, 0x0c, 0x80, 0xd2, 0x18, 0x00, 0x00, 0x14,
-    0xc0, 0x02, 0x40, 0xf9, 0x80, 0x1e, 0x00, 0xf9, 0x00, 0x00, 0x80, 0xd2, 0x14, 0x00, 0x00, 0x14,
-    0x80, 0x0a, 0x40, 0xf9, 0xc0, 0x02, 0x00, 0xf9, 0x00, 0x00, 0x80, 0xd2, 0x10, 0x00, 0x00, 0x14,
-    0xc0, 0x02, 0x1f, 0xd6, 0x88, 0x0e, 0x40, 0xf9, 0x80, 0x12, 0x40, 0xf9, 0x81, 0x16, 0x40, 0xf9,
-    0x82, 0x1a, 0x40, 0xf9, 0x83, 0x22, 0x40, 0xf9, 0x84, 0x26, 0x40, 0xf9, 0x85, 0x2a, 0x40, 0xf9,
-    0x01, 0x00, 0x00, 0xd4, 0x14, 0x00, 0x80, 0xd2, 0x14, 0x40, 0xa2, 0xf2, 0x80, 0x1e, 0x00, 0xf9,
-    0x00, 0x00, 0x80, 0xd2, 0x02, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0xa8, 0x0b, 0x80, 0xd2,
-    0x01, 0x00, 0x00, 0xd4, 0xfe, 0xff, 0xff, 0x17,
+    0xbf, 0x06, 0x00, 0xf1, 0xe0, 0x01, 0x00, 0x54, 0xbf, 0x0a, 0x00, 0xf1, 0x00, 0x02, 0x00, 0x54,
+    0xbf, 0x0e, 0x00, 0xf1, 0x40, 0x02, 0x00, 0x54, 0xbf, 0x12, 0x00, 0xf1, 0x20, 0x02, 0x00, 0x54,
+    0xbf, 0x16, 0x00, 0xf1, 0x80, 0x03, 0x00, 0x54, 0xbf, 0x1a, 0x00, 0xf1, 0x60, 0x03, 0x00, 0x54,
+    0xbf, 0x1e, 0x00, 0xf1, 0xe0, 0x04, 0x00, 0x54, 0x60, 0x0c, 0x80, 0xd2, 0x4f, 0x00, 0x00, 0x14,
+    0xc0, 0x02, 0x40, 0xf9, 0x80, 0x1e, 0x00, 0xf9, 0x4c, 0x00, 0x00, 0x14, 0x80, 0x0a, 0x40, 0xf9,
+    0xc0, 0x02, 0x00, 0xf9, 0x00, 0x00, 0x80, 0xd2, 0x48, 0x00, 0x00, 0x14, 0xc0, 0x02, 0x1f, 0xd6,
+    0x88, 0x0e, 0x40, 0xf9, 0x80, 0x12, 0x40, 0xf9, 0x81, 0x16, 0x40, 0xf9, 0x82, 0x1a, 0x40, 0xf9,
+    0x83, 0x22, 0x40, 0xf9, 0x84, 0x26, 0x40, 0xf9, 0x85, 0x2a, 0x40, 0xf9, 0x01, 0x00, 0x00, 0xd4,
+    0x14, 0x00, 0x80, 0xd2, 0x14, 0x40, 0xa2, 0xf2, 0x80, 0x1e, 0x00, 0xf9, 0x00, 0x00, 0x80, 0xd2,
+    0x3a, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x80, 0x0a, 0x40, 0xf9, 0xc0, 0x02, 0x00, 0xf9,
+    0xe0, 0x03, 0x16, 0xaa, 0x01, 0x00, 0x82, 0xd2, 0x22, 0x00, 0x80, 0xd2, 0x48, 0x1c, 0x80, 0xd2,
+    0x01, 0x00, 0x00, 0xd4, 0x14, 0x00, 0x80, 0xd2, 0x14, 0x40, 0xa2, 0xf2, 0x96, 0x06, 0x40, 0xf9,
+    0x80, 0x22, 0x40, 0xf9, 0xc0, 0x02, 0x00, 0xf9, 0x00, 0x00, 0x80, 0xd2, 0x2b, 0x00, 0x00, 0x14,
+    0x20, 0x02, 0x80, 0xd2, 0x01, 0x00, 0x80, 0xd2, 0x02, 0x00, 0x80, 0xd2, 0x03, 0x00, 0x80, 0xd2,
+    0x04, 0x00, 0x80, 0xd2, 0x88, 0x1b, 0x80, 0xd2, 0x01, 0x00, 0x00, 0xd4, 0x14, 0x00, 0x80, 0xd2,
+    0x14, 0x40, 0xa2, 0xf2, 0x96, 0x06, 0x40, 0xf9, 0xc0, 0x03, 0xf8, 0xb7, 0xe0, 0x02, 0x00, 0xb4,
+    0x00, 0x00, 0x80, 0x92, 0x01, 0x0b, 0x80, 0xd2, 0x81, 0x02, 0x01, 0x8b, 0x02, 0x00, 0x80, 0xd2,
+    0x03, 0x00, 0x80, 0xd2, 0x88, 0x20, 0x80, 0xd2, 0x01, 0x00, 0x00, 0xd4, 0x14, 0x00, 0x80, 0xd2,
+    0x14, 0x40, 0xa2, 0xf2, 0x96, 0x06, 0x40, 0xf9, 0x40, 0x02, 0xf8, 0xb7, 0x20, 0x02, 0x00, 0xb4,
+    0x80, 0x5a, 0x40, 0xb9, 0x01, 0x40, 0x85, 0x52, 0x1f, 0x00, 0x01, 0x6b, 0xa1, 0x01, 0x00, 0x54,
+    0xc0, 0x02, 0x40, 0xf9, 0x81, 0x12, 0x40, 0xf9, 0x1f, 0x00, 0x01, 0xeb, 0xe1, 0x00, 0x00, 0x54,
+    0x20, 0x00, 0x80, 0xd2, 0x09, 0x00, 0x00, 0x14, 0x80, 0x0a, 0x40, 0xf9, 0xc0, 0x02, 0x00, 0xf9,
+    0x40, 0x05, 0x80, 0xd2, 0x05, 0x00, 0x00, 0x14, 0x40, 0x00, 0x80, 0xd2, 0x03, 0x00, 0x00, 0x14,
+    0x60, 0x00, 0x80, 0xd2, 0x01, 0x00, 0x00, 0x14, 0xa8, 0x0b, 0x80, 0xd2, 0x01, 0x00, 0x00, 0xd4,
+    0xfe, 0xff, 0xff, 0x17,
 ];
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -65,6 +90,14 @@ static CFG_SYSNO: AtomicU64 = AtomicU64::new(0);
 static CFG_A0: AtomicU64 = AtomicU64::new(0);
 static CFG_A1: AtomicU64 = AtomicU64::new(0);
 static CFG_A2: AtomicU64 = AtomicU64::new(0);
+static PROBE_THREAD: AtomicUsize = AtomicUsize::new(usize::MAX);
+static WATCH_PAGE: AtomicUsize = AtomicUsize::new(0);
+static WATCH_WORD: AtomicU64 = AtomicU64::new(0);
+static WATCH_VALID: AtomicBool = AtomicBool::new(false);
+static SETUP_OTHER: AtomicBool = AtomicBool::new(false);
+static FOREIGN_PHYS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(target_arch = "aarch64")]
+static mut FOREIGN_SPACE: Option<crate::kernel_lowlevel::Aarch64AddressSpace> = None;
 
 #[derive(Clone, Copy)]
 enum Verdict {
@@ -145,26 +178,51 @@ pub(crate) fn observe_syscall(number: u32, result: u64) {
     if !ACTIVE.load(Ordering::Acquire) || number == 93 || number == 94 {
         return;
     }
+    if !probe_thread_is_current() {
+        return;
+    }
     LAST_SYSCALL.store(number as u64, Ordering::Relaxed);
     LAST_RESULT.store(result, Ordering::Relaxed);
 }
 
 pub(crate) fn observe_fault(address: u64) {
-    if !ACTIVE.load(Ordering::Acquire) {
+    if !ACTIVE.load(Ordering::Acquire) || !probe_thread_is_current() {
         return;
     }
+    snapshot_watch();
     FAULTED.store(true, Ordering::Relaxed);
     let _ = address;
     DONE.store(true, Ordering::Release);
 }
 
 pub(crate) fn observe_exit(code: i32) {
-    if !ACTIVE.load(Ordering::Acquire) {
+    if !ACTIVE.load(Ordering::Acquire) || !probe_thread_is_current() {
         return;
     }
+    snapshot_watch();
     EXITED.store(true, Ordering::Relaxed);
     EXIT_CODE.store(code, Ordering::Relaxed);
     DONE.store(true, Ordering::Release);
+}
+
+fn probe_thread_is_current() -> bool {
+    let probe = PROBE_THREAD.load(Ordering::Relaxed);
+    probe != usize::MAX && scheduler::scheduler().current().0 == probe
+}
+
+fn snapshot_watch() {
+    let page = WATCH_PAGE.load(Ordering::Relaxed);
+    if page == 0 {
+        return;
+    }
+    let Ok(pid) = linux_process::current_pid() else {
+        return;
+    };
+    let mut buf = [0u8; 8];
+    if linux_process_memory::copy_from_process(pid, page, &mut buf).is_ok() {
+        WATCH_WORD.store(u64::from_le_bytes(buf), Ordering::Relaxed);
+        WATCH_VALID.store(true, Ordering::Relaxed);
+    }
 }
 
 pub fn run(serial: &mut Serial, which: &str) {
@@ -303,9 +361,15 @@ enum Judge {
         stage: &'static str,
         detail: &'static str,
     },
+    /// Read of another process's VA must not return that process's magic.
+    OtherProcess,
+    /// Child store after fork must leave the parent's page unchanged.
+    CowFork,
+    /// Store after mprotect(PROT_READ) must fault instead of using a stale TLB.
+    MprotectStore,
 }
 
-fn cases() -> [Case; 16] {
+fn cases() -> [Case; 17] {
     let magic = magic_address() as u64;
     let marker = security_case_exec_marker as *const () as u64;
     // QEMU virt identity addresses. The probe runs only on AArch64.
@@ -448,31 +512,36 @@ fn cases() -> [Case; 16] {
         },
         Case {
             id: "el0-other-process",
-            op: 0,
-            target: 0,
+            op: OP_READ,
+            target: OTHER_PAGE as u64,
             value: 0,
             sysno: 0,
             a0: 0,
             a1: 0,
             a2: 0,
-            judge: Judge::Later {
-                stage: "SEC-2",
-                detail: "second-address-space",
-            },
+            judge: Judge::OtherProcess,
         },
         Case {
             id: "cow-fork",
-            op: 0,
-            target: 0,
-            value: 0,
+            op: OP_COW,
+            target: COW_PAGE as u64,
+            value: COW_CHILD,
+            sysno: 0,
+            a0: COW_PARENT,
+            a1: 0,
+            a2: 0,
+            judge: Judge::CowFork,
+        },
+        Case {
+            id: "mprotect-after-store",
+            op: OP_MPROTECT,
+            target: MPROTECT_PAGE as u64,
+            value: MPROTECT_FIRST,
             sysno: 0,
             a0: 0,
             a1: 0,
             a2: 0,
-            judge: Judge::Later {
-                stage: "SEC-2",
-                detail: "fork-cow",
-            },
+            judge: Judge::MprotectStore,
         },
         Case {
             id: "foreign-handle",
@@ -533,7 +602,11 @@ fn zircon_invalid_args() -> u64 {
 fn execute(case: Case) -> FinishedCase {
     match case.judge {
         Judge::Later { stage, detail } => expected(stage, detail, false),
-        Judge::Trap | Judge::Syscall(_) => run_probe(case),
+        Judge::Trap
+        | Judge::Syscall(_)
+        | Judge::OtherProcess
+        | Judge::CowFork
+        | Judge::MprotectStore => run_probe(case),
     }
 }
 
@@ -558,6 +631,18 @@ fn run_undef(serial: &mut Serial) {
 fn run_probe(case: Case) -> FinishedCase {
     linux_task::reset();
     linux_process_memory::reset_launch();
+    PROBE_THREAD.store(usize::MAX, Ordering::Relaxed);
+    WATCH_PAGE.store(0, Ordering::Relaxed);
+    WATCH_WORD.store(0, Ordering::Relaxed);
+    WATCH_VALID.store(false, Ordering::Relaxed);
+    SETUP_OTHER.store(false, Ordering::Relaxed);
+    drop_foreign_space();
+    if matches!(case.judge, Judge::OtherProcess) {
+        SETUP_OTHER.store(true, Ordering::Relaxed);
+    }
+    if matches!(case.judge, Judge::MprotectStore) {
+        WATCH_PAGE.store(MPROTECT_PAGE, Ordering::Relaxed);
+    }
     MAGIC_WORD.store(MAGIC, Ordering::Relaxed);
     EXEC_HITS.store(0, Ordering::Relaxed);
     DONE.store(false, Ordering::Relaxed);
@@ -585,10 +670,11 @@ fn run_probe(case: Case) -> FinishedCase {
     ACTIVE.store(true, Ordering::Release);
     let created =
         scheduler::scheduler().create_thread_on_cpu(security_case_thread, "sectest", Some(0));
-    if created.is_none() {
+    let Some(created) = created else {
         ACTIVE.store(false, Ordering::Release);
         return finished(Verdict::Fail, "thread");
-    }
+    };
+    PROBE_THREAD.store(created.0, Ordering::Relaxed);
     let start = crate::kernel_lowlevel::timer::get_nanoseconds();
     while !DONE.load(Ordering::Acquire) {
         yield_now();
@@ -634,7 +720,133 @@ fn judge(case: Case) -> FinishedCase {
             }
         }
         Judge::Later { stage, detail } => expected(stage, detail, false),
+        Judge::OtherProcess => judge_other_process(),
+        Judge::CowFork => judge_cow_fork(),
+        Judge::MprotectStore => judge_mprotect_store(),
     }
+}
+
+fn judge_other_process() -> FinishedCase {
+    let isolated = foreign_page_intact();
+    drop_foreign_space();
+    if SETUP_ERROR.load(Ordering::Relaxed) != 0 {
+        return finished(Verdict::Fail, "setup");
+    }
+    if FAULTED.load(Ordering::Relaxed) {
+        return finished(Verdict::Fail, "faulted");
+    }
+    let code = EXIT_CODE.load(Ordering::Relaxed) as u32 as u64;
+    if code == OTHER_MAGIC {
+        return finished(Verdict::Fail, "saw-foreign");
+    }
+    if code != 0 {
+        return finished(Verdict::Fail, "unexpected-read");
+    }
+    if isolated {
+        finished(Verdict::Pass, "second-address-space")
+    } else {
+        finished(Verdict::Fail, "foreign-mutated")
+    }
+}
+
+fn judge_cow_fork() -> FinishedCase {
+    if SETUP_ERROR.load(Ordering::Relaxed) != 0 {
+        return finished(Verdict::Fail, "setup");
+    }
+    if FAULTED.load(Ordering::Relaxed) {
+        return finished(Verdict::Fail, "faulted");
+    }
+    match EXIT_CODE.load(Ordering::Relaxed) {
+        1 => finished(Verdict::Pass, "fork-cow"),
+        2 => finished(Verdict::Fail, "parent-changed"),
+        3 => finished(Verdict::Fail, "fork-failed"),
+        _ => finished(Verdict::Fail, "unexpected-exit"),
+    }
+}
+
+fn judge_mprotect_store() -> FinishedCase {
+    if SETUP_ERROR.load(Ordering::Relaxed) != 0 {
+        return finished(Verdict::Fail, "setup");
+    }
+    let word = WATCH_WORD.load(Ordering::Relaxed);
+    let valid = WATCH_VALID.load(Ordering::Relaxed);
+    if !FAULTED.load(Ordering::Relaxed) {
+        if valid && word == MPROTECT_SECOND {
+            return finished(Verdict::Fail, "stale-store");
+        }
+        return finished(Verdict::Fail, "no-fault");
+    }
+    if !valid {
+        return finished(Verdict::Fail, "no-snapshot");
+    }
+    if word == MPROTECT_SECOND {
+        finished(Verdict::Fail, "stale-store")
+    } else if word != MPROTECT_FIRST {
+        finished(Verdict::Fail, "missing-first-store")
+    } else {
+        finished(Verdict::Pass, "faulted")
+    }
+}
+
+fn foreign_page_intact() -> bool {
+    let phys = FOREIGN_PHYS.load(Ordering::Relaxed);
+    if phys == 0 {
+        return false;
+    }
+    let magic = unsafe { core::ptr::read_volatile(phys as *const u64) };
+    if magic != OTHER_MAGIC {
+        return false;
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let space = &*core::ptr::addr_of!(FOREIGN_SPACE);
+        return space.as_ref().is_some_and(|space| {
+            space.translate_user(OTHER_PAGE, false) == Some(phys & !(PAGE_SIZE - 1))
+        });
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    false
+}
+
+fn drop_foreign_space() {
+    FOREIGN_PHYS.store(0, Ordering::Relaxed);
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        (*core::ptr::addr_of_mut!(FOREIGN_SPACE)).take();
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn install_foreign_page() -> Result<(), u64> {
+    use crate::kernel_lowlevel::memory::PageFrameAllocator;
+    let mut space = crate::kernel_lowlevel::Aarch64AddressSpace::new_with_kernel_map()
+        .map_err(|_| 4u64)?;
+    let pfn = PageFrameAllocator::alloc().ok_or(5u64)?;
+    let Some(phys) = PageFrameAllocator::pfn_address(pfn) else {
+        PageFrameAllocator::free(pfn);
+        return Err(6);
+    };
+    unsafe {
+        core::ptr::write_bytes(phys as *mut u8, 0, PAGE_SIZE);
+        core::ptr::write(phys as *mut u64, OTHER_MAGIC);
+    }
+    if space
+        .map_user_page(OTHER_PAGE, pfn, true, false, false)
+        .is_err()
+    {
+        PageFrameAllocator::free(pfn);
+        return Err(7);
+    }
+    FOREIGN_PHYS.store(phys, Ordering::Relaxed);
+    unsafe {
+        core::ptr::addr_of_mut!(FOREIGN_SPACE).write(Some(space));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn install_foreign_page() -> Result<(), u64> {
+    Err(4)
 }
 
 fn create_probe_vmo() -> Result<u32, ()> {
@@ -689,6 +901,9 @@ fn launch_probe() -> Result<(), u64> {
     put_u64(&mut data, 32, CFG_A0.load(Ordering::Relaxed));
     put_u64(&mut data, 40, CFG_A1.load(Ordering::Relaxed));
     put_u64(&mut data, 48, CFG_A2.load(Ordering::Relaxed));
+    if CFG_OP.load(Ordering::Relaxed) == OP_MPROTECT {
+        put_u64(&mut data, 64, MPROTECT_SECOND);
+    }
     linux_process_memory::map_current_with_contents(
         Some(DATA_PAGE),
         PAGE_SIZE,
@@ -710,6 +925,47 @@ fn launch_probe() -> Result<(), u64> {
         &ro,
     )
     .map_err(abort_setup)?;
+    if SETUP_OTHER.load(Ordering::Relaxed) {
+        install_foreign_page()?;
+        let zeros = [0u8; PAGE_SIZE];
+        linux_process_memory::map_current_with_contents(
+            Some(OTHER_PAGE),
+            PAGE_SIZE,
+            prot_rw,
+            flags,
+            linux_process_memory::LinuxMappingSource::Anonymous,
+            false,
+            &zeros,
+        )
+        .map_err(abort_setup)?;
+    }
+    if CFG_OP.load(Ordering::Relaxed) == OP_COW {
+        let mut cow = [0u8; PAGE_SIZE];
+        put_u64(&mut cow, 0, COW_PARENT);
+        linux_process_memory::map_current_with_contents(
+            Some(COW_PAGE),
+            PAGE_SIZE,
+            prot_rw,
+            flags,
+            linux_process_memory::LinuxMappingSource::Anonymous,
+            false,
+            &cow,
+        )
+        .map_err(abort_setup)?;
+    }
+    if CFG_OP.load(Ordering::Relaxed) == OP_MPROTECT {
+        let page = [0u8; PAGE_SIZE];
+        linux_process_memory::map_current_with_contents(
+            Some(MPROTECT_PAGE),
+            PAGE_SIZE,
+            prot_rw,
+            flags,
+            linux_process_memory::LinuxMappingSource::Anonymous,
+            false,
+            &page,
+        )
+        .map_err(abort_setup)?;
+    }
     let stack_len = STACK_PAGES * PAGE_SIZE;
     let stack = vec![0u8; stack_len];
     linux_process_memory::map_current_with_contents(

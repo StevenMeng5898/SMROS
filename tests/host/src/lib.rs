@@ -5543,6 +5543,28 @@ mod linux_process_memory_logic {
             linux_page_protection_for_backing(ordinary_shared, LINUX_PROT_READ | LINUX_PROT_WRITE),
             LINUX_PROT_READ | LINUX_PROT_WRITE
         );
+        assert!(linux_shared_mapping_must_be_non_executable(ordinary_shared));
+        assert!(!linux_shared_mapping_must_be_non_executable(cow));
+        assert!(!linux_shared_mapping_must_be_non_executable(
+            LinuxPageBacking::Private { pfn: 17 }
+        ));
+        let shared_exec = LINUX_PROT_READ | LINUX_PROT_WRITE | LINUX_PROT_EXEC;
+        assert_eq!(
+            linux_page_protection_for_install(ordinary_shared, shared_exec, true),
+            LINUX_PROT_READ | LINUX_PROT_WRITE
+        );
+        assert_eq!(
+            linux_page_protection_for_install(cow, LINUX_PROT_READ | LINUX_PROT_EXEC, true),
+            LINUX_PROT_READ | LINUX_PROT_EXEC
+        );
+        assert_eq!(
+            linux_page_protection_for_install(
+                cow,
+                LINUX_PROT_READ | LINUX_PROT_WRITE | LINUX_PROT_EXEC,
+                true
+            ),
+            LINUX_PROT_READ | LINUX_PROT_EXEC
+        );
     }
 
     #[test]
@@ -8856,12 +8878,15 @@ mod aarch64_vm_logic {
 
         let supervisor = aarch64_supervisor_block_descriptor(paddr, false, true);
         assert_eq!(supervisor & AARCH64_DESC_TABLE_OR_PAGE, 0);
+        assert_eq!(supervisor & AARCH64_DESC_AP_USER, 0);
+        assert_eq!(supervisor & AARCH64_DESC_UXN, AARCH64_DESC_UXN);
         assert_eq!(supervisor & AARCH64_DESC_AF, AARCH64_DESC_AF);
         assert_eq!(
             supervisor & AARCH64_DESC_INNER_SHAREABLE,
             AARCH64_DESC_INNER_SHAREABLE
         );
         let device = aarch64_supervisor_block_descriptor(paddr, true, false);
+        assert_eq!(device & AARCH64_DESC_AP_USER, 0);
         assert_eq!(device & (1 << 2), 1 << 2);
         assert_eq!(
             device & AARCH64_DESC_INNER_SHAREABLE,
@@ -8884,10 +8909,18 @@ mod aarch64_vm_logic {
         let read_write = aarch64_user_page_descriptor(paddr, true, true, false);
         assert_eq!(read_write & AARCH64_DESC_AP_READ_ONLY, 0);
         assert_eq!(read_write & AARCH64_DESC_UXN, AARCH64_DESC_UXN);
+        assert_eq!(read_write & AARCH64_DESC_PXN, AARCH64_DESC_PXN);
         assert_eq!(
             read_write & AARCH64_DESC_TABLE_OR_PAGE,
             AARCH64_DESC_TABLE_OR_PAGE
         );
+
+        let writable_executable = aarch64_user_page_descriptor(paddr, true, true, true);
+        assert_eq!(writable_executable & AARCH64_DESC_AP_USER, AARCH64_DESC_AP_USER);
+        assert_eq!(writable_executable & AARCH64_DESC_AP_READ_ONLY, 0);
+        assert_eq!(writable_executable & AARCH64_DESC_UXN, AARCH64_DESC_UXN);
+        assert_eq!(writable_executable & AARCH64_DESC_PXN, AARCH64_DESC_PXN);
+        assert_eq!(writable_executable & (1 << 11), 0);
 
         let no_access = aarch64_user_page_descriptor(paddr, false, false, false);
         assert_eq!(no_access & AARCH64_DESC_AP_USER, 0);
@@ -9292,6 +9325,165 @@ mod aarch64_vm_logic {
         assert_eq!(child.translate_user(&allocator, 0x1000_0000, true), None);
     }
 
+    #[cfg(test)]
+    fn supervisor_block(allocator: &Aarch64TestAllocator, root: u64, vaddr: usize) -> u64 {
+        let indices = aarch64_table_indices(vaddr).expect("supervisor indices");
+        let level_one = allocator.table_word(root, indices[0]);
+        let level_one_pfn = (level_one & AARCH64_DESC_ADDR_MASK) / AARCH64_PAGE_SIZE as u64;
+        allocator.table_word(level_one_pfn, indices[1])
+    }
+
+    #[test]
+    fn user_mapping_rejects_page_table_and_kernel_image_pfns() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let mut address_space = Aarch64AddressSpaceModel::new(&mut allocator).expect("root");
+        let root = address_space.root_pfn();
+        assert!(address_space
+            .map_user_page(&mut allocator, 0x1000_0000, root, true, true, false)
+            .is_err());
+        allocator.forbid_user_pfn(0x9000);
+        assert!(address_space
+            .map_user_page(&mut allocator, 0x1000_0000, 0x9000, true, true, false)
+            .is_err());
+        address_space
+            .map_user_page(&mut allocator, 0x1000_0000, 0x9001, true, true, false)
+            .expect("ordinary user page");
+        assert_eq!(
+            address_space.translate_user(&allocator, 0x1000_0000, true),
+            Some(0x9001_000)
+        );
+    }
+
+    #[test]
+    fn fork_user_pte_updates_detach_without_mutating_supervisor_tables() {
+        let mut allocator = Aarch64TestAllocator::new(0x8000);
+        let mut parent = Aarch64AddressSpaceModel::new(&mut allocator).expect("parent");
+        parent
+            .map_supervisor_ram_range(0x4000_0000, 0x20_0000)
+            .expect("supervisor ram");
+        parent
+            .map_user_page(&mut allocator, 0x1000_0000, 0x9000, true, true, false)
+            .expect("parent user page");
+        let mut child = Aarch64AddressSpaceModel::new(&mut allocator).expect("child");
+        child
+            .clone_shared_mappings_from(&parent)
+            .expect("child shares tables");
+        let mut sibling = Aarch64AddressSpaceModel::new(&mut allocator).expect("sibling");
+        sibling
+            .clone_shared_mappings_from(&parent)
+            .expect("sibling shares tables");
+
+        let parent_supervisor = supervisor_block(&allocator, parent.root_pfn(), 0x4000_0000);
+        let child_supervisor = supervisor_block(&allocator, child.root_pfn(), 0x4000_0000);
+        let sibling_supervisor = supervisor_block(&allocator, sibling.root_pfn(), 0x4000_0000);
+        assert_eq!(parent_supervisor, child_supervisor);
+        assert_eq!(parent_supervisor, sibling_supervisor);
+        assert_eq!(parent_supervisor & AARCH64_DESC_AP_USER, 0);
+
+        let supervisors_unchanged = |allocator: &Aarch64TestAllocator,
+                                     parent: &Aarch64AddressSpaceModel,
+                                     child: &Aarch64AddressSpaceModel,
+                                     sibling: &Aarch64AddressSpaceModel| {
+            assert_eq!(
+                supervisor_block(allocator, parent.root_pfn(), 0x4000_0000),
+                parent_supervisor
+            );
+            assert_eq!(
+                supervisor_block(allocator, child.root_pfn(), 0x4000_0000),
+                child_supervisor
+            );
+            assert_eq!(
+                supervisor_block(allocator, sibling.root_pfn(), 0x4000_0000),
+                sibling_supervisor
+            );
+        };
+
+        allocator.clear_maintenance_events();
+        assert_eq!(
+            parent.replace_user_page(&mut allocator, 0x1000_0000, 0x9001, true, true, false),
+            Ok(0x9000)
+        );
+        assert!(allocator
+            .maintenance_events()
+            .contains(&Aarch64MaintenanceEvent::Break(0x1000_0000)));
+        assert_eq!(
+            parent.translate_user(&allocator, 0x1000_0000, true),
+            Some(0x9001_000)
+        );
+        assert_eq!(
+            child.translate_user(&allocator, 0x1000_0000, true),
+            Some(0x9000_000)
+        );
+        assert_eq!(
+            sibling.translate_user(&allocator, 0x1000_0000, true),
+            Some(0x9000_000)
+        );
+        supervisors_unchanged(&allocator, &parent, &child, &sibling);
+
+        allocator.clear_maintenance_events();
+        assert_eq!(
+            child.replace_user_page(&mut allocator, 0x1000_0000, 0x9002, true, true, false),
+            Ok(0x9000)
+        );
+        assert!(allocator
+            .maintenance_events()
+            .contains(&Aarch64MaintenanceEvent::Break(0x1000_0000)));
+        assert_eq!(
+            parent.translate_user(&allocator, 0x1000_0000, true),
+            Some(0x9001_000)
+        );
+        assert_eq!(
+            child.translate_user(&allocator, 0x1000_0000, true),
+            Some(0x9002_000)
+        );
+        assert_eq!(
+            sibling.translate_user(&allocator, 0x1000_0000, true),
+            Some(0x9000_000)
+        );
+        supervisors_unchanged(&allocator, &parent, &child, &sibling);
+
+        allocator.clear_maintenance_events();
+        parent
+            .protect_user_page(&mut allocator, 0x1000_0000, true, false, false)
+            .expect("parent mprotect");
+        assert!(allocator
+            .maintenance_events()
+            .contains(&Aarch64MaintenanceEvent::Break(0x1000_0000)));
+        assert_eq!(parent.translate_user(&allocator, 0x1000_0000, true), None);
+        assert_eq!(
+            parent.translate_user(&allocator, 0x1000_0000, false),
+            Some(0x9001_000)
+        );
+        assert_eq!(
+            child.translate_user(&allocator, 0x1000_0000, true),
+            Some(0x9002_000)
+        );
+        assert_eq!(
+            sibling.translate_user(&allocator, 0x1000_0000, true),
+            Some(0x9000_000)
+        );
+        supervisors_unchanged(&allocator, &parent, &child, &sibling);
+
+        allocator.clear_maintenance_events();
+        child
+            .unmap_user_page(&mut allocator, 0x1000_0000)
+            .expect("child munmap");
+        assert_eq!(
+            allocator.maintenance_events(),
+            vec![Aarch64MaintenanceEvent::Break(0x1000_0000)]
+        );
+        assert_eq!(child.translate_user(&allocator, 0x1000_0000, false), None);
+        assert_eq!(
+            parent.translate_user(&allocator, 0x1000_0000, false),
+            Some(0x9001_000)
+        );
+        assert_eq!(
+            sibling.translate_user(&allocator, 0x1000_0000, true),
+            Some(0x9000_000)
+        );
+        supervisors_unchanged(&allocator, &parent, &child, &sibling);
+    }
+
     #[test]
     fn shared_mapping_clone_rolls_back_references_after_a_later_root_failure() {
         let mut allocator = Aarch64TestAllocator::new(0x8000);
@@ -9622,6 +9814,22 @@ mod user_logic {
         assert_eq!(run_elf_page_protection(0x3000, 0x1000, &segments), None);
         assert_eq!(
             run_elf_page_protection(0x4000, 0x1000, &segments),
+            Some(READ | WRITE)
+        );
+        assert!(!run_elf_page_spans_write_and_exec(0x1000, 0x1000, &segments));
+        let overlapping = [
+            (0x5000usize, 0x800usize, READ | EXEC),
+            (0x5800usize, 0x800usize, READ | WRITE),
+        ];
+        assert!(run_elf_page_spans_write_and_exec(
+            0x5000, 0x1000, &overlapping
+        ));
+        assert_eq!(
+            run_elf_page_protection(0x5000, 0x1000, &overlapping),
+            Some(READ | WRITE)
+        );
+        assert_eq!(
+            run_elf_page_protection(0x5000, 0x1000, &[(0x5000, 0x1000, READ | WRITE | EXEC)]),
             Some(READ | WRITE)
         );
         assert_eq!(run_elf_page_protection(usize::MAX, 0x1000, &segments), None);

@@ -5606,7 +5606,6 @@ pub(crate) fn deliver_linux_synchronous_memory_fault(
     fault_address: u64,
     access: LinuxMemoryFaultAccess,
 ) -> Result<(), SysError> {
-    crate::user_level::services::security_case::observe_fault(fault_address);
     if saved_regs == 0 {
         return Err(SysError::EFAULT);
     }
@@ -5630,6 +5629,7 @@ pub(crate) fn deliver_linux_synchronous_memory_fault(
             return Ok(());
         }
     }
+    crate::user_level::services::security_case::observe_fault(fault_address);
     let current = linux_task::current_task()?;
     let (signum, code) =
         match linux_process_memory::classify_current_memory_fault(fault_address as usize, access) {
