@@ -17,6 +17,106 @@ pub enum HermesShellPolicy {
     Invalid,
 }
 
+/// Shell verbs `hermes` accepts before the shared allowlist runs.
+/// `test-all` and `random` are shell verbs. They are not `hermes exec`
+/// targets, so a campaign cannot nest another campaign or start SKT.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HermesShellVerb {
+    Exec,
+    Random,
+    TestAll,
+    Info,
+    Test,
+    Skills,
+    Web,
+    Ask,
+    Usage,
+}
+
+/// Names printed by `help`, in shell-table order.
+pub const SHELL_COMMAND_NAMES: &[&str] = &[
+    "help",
+    "version",
+    "ps",
+    "top",
+    "meminfo",
+    "components",
+    "fxfs",
+    "drivers",
+    "ddk",
+    "ifconfig",
+    "dns",
+    "dhcp",
+    "ping",
+    "curl",
+    "ftp",
+    "tls",
+    "pwd",
+    "ls",
+    "cd",
+    "cd..",
+    "mkdir",
+    "write",
+    "cat",
+    "cp",
+    "mv",
+    "rm",
+    "run",
+    "posixtest",
+    "vi",
+    "mount",
+    "share",
+    "svc",
+    "docker",
+    "hermes",
+    "lvgl",
+    "qml",
+    "uptime",
+    "dhrystone",
+    "sched",
+    "vm",
+    "loglevel",
+    "kill",
+    "testsc",
+    "sectest",
+    "fuzzsc",
+    "echo",
+    "clear",
+    "reboot",
+    "exit",
+];
+
+pub fn parse_hermes_shell_verb(args: &[&str]) -> HermesShellVerb {
+    match args.first().copied() {
+        Some("exec") => HermesShellVerb::Exec,
+        Some("random") => HermesShellVerb::Random,
+        Some("test-all") => HermesShellVerb::TestAll,
+        Some("info") | Some("status") => HermesShellVerb::Info,
+        Some("test") | Some("smoke") => HermesShellVerb::Test,
+        Some("skills") => HermesShellVerb::Skills,
+        Some("web") | Some("ui") => HermesShellVerb::Web,
+        Some("ask") | Some("run") => HermesShellVerb::Ask,
+        _ => HermesShellVerb::Usage,
+    }
+}
+
+/// Host jobs a guest may request. SKT, smoke, and `posixtest all` are absent.
+pub fn host_job_name(name: &str) -> Option<&'static str> {
+    match name {
+        "ut" => Some("ut"),
+        "it" => Some("it"),
+        _ => None,
+    }
+}
+
+pub fn shell_catalog_aligned(names: &[&str]) -> bool {
+    names.len() == SHELL_COMMAND_NAMES.len()
+        && names
+            .iter()
+            .zip(SHELL_COMMAND_NAMES.iter())
+            .all(|(live, expected)| live == expected)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HermesCampaignMode {
     Ops,

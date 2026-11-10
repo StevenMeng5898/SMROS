@@ -11273,6 +11273,196 @@ fn catalog_has(mode: hermes_shell_logic::HermesCampaignMode, command: &str, args
     })
 }
 
+#[test]
+fn shell_and_hermes_command_surface_rejects_illegal_forms() {
+    use hermes_shell_logic::{
+        campaign_case_for_mode, campaign_catalog_len, classify, host_job_name,
+        parse_campaign_options, parse_hermes_shell_verb, shell_catalog_aligned, HermesCampaignMode,
+        HermesShellPolicy, HermesShellVerb, HERMES_MAX_ARGS, HERMES_MAX_ARG_LEN,
+        SHELL_COMMAND_NAMES,
+    };
+
+    assert!(shell_catalog_aligned(SHELL_COMMAND_NAMES));
+    assert!(!shell_catalog_aligned(&["help"]));
+
+    for name in SHELL_COMMAND_NAMES {
+        let expected = match *name {
+            "help" | "version" | "meminfo" | "components" | "fxfs" | "drivers" | "ifconfig"
+            | "pwd" | "ls" | "svc" | "uptime" | "tls" | "share" | "reboot" | "testsc" | "top"
+            | "echo" | "ps" | "sched" | "ddk" | "lvgl" | "qml" | "loglevel" => {
+                HermesShellPolicy::Allowed
+            }
+            "fuzzsc" => HermesShellPolicy::Invalid,
+            _ => HermesShellPolicy::Forbidden,
+        };
+        assert_eq!(classify(name, &[]), expected, "bare `{name}`");
+    }
+
+    for (command, args) in [
+        ("help", &[][..]),
+        ("version", &[][..]),
+        ("ps", &["-a"][..]),
+        ("testsc", &[][..]),
+        ("ddk", &["hello"][..]),
+        ("ddk", &["edu"][..]),
+        ("sched", &["status"][..]),
+        ("sched", &["trace"][..]),
+        ("vm", &["-s"][..]),
+        ("vm", &["-k", "linux-demo"][..]),
+        ("docker", &["images"][..]),
+        ("hermes", &["test"][..]),
+        ("hermes", &["skills"][..]),
+        ("hermes", &["info"][..]),
+        ("hermes", &["web"][..]),
+        ("lvgl", &["test"][..]),
+        ("qml", &["test"][..]),
+        ("posixtest", &["status"][..]),
+        ("posixtest", &["test", "getpid/1-1.c"][..]),
+        ("fuzzsc", &["seed=1", "iterations=1"][..]),
+        ("echo", &["ok"][..]),
+    ] {
+        assert_eq!(
+            classify(command, args),
+            HermesShellPolicy::Allowed,
+            "{command} {args:?}"
+        );
+    }
+
+    for (command, args) in [
+        ("rm", &["/shared/a"][..]),
+        ("kill", &["1"][..]),
+        ("exit", &[][..]),
+        ("clear", &[][..]),
+        ("vi", &["/shared/a"][..]),
+        ("run", &["hello.elf"][..]),
+        ("write", &["/shared/a", "b"][..]),
+        ("mkdir", &["/shared/a"][..]),
+        ("mv", &["a", "b"][..]),
+        ("cp", &["a", "b"][..]),
+        ("mount", &["share"][..]),
+        ("cd", &["/shared"][..]),
+        ("cd..", &[][..]),
+        ("dns", &["example"][..]),
+        ("dhcp", &[][..]),
+        ("ping", &["10.0.2.2"][..]),
+        ("curl", &["http://10.0.2.2/"][..]),
+        ("ftp", &["10.0.2.2"][..]),
+        ("cat", &["/shared/a"][..]),
+        ("dhrystone", &["10"][..]),
+        ("sectest", &[][..]),
+        ("skt", &[][..]),
+        ("st", &[][..]),
+        ("posixtest", &["all"][..]),
+        ("posixtest", &["group", "pthread"][..]),
+        ("hermes", &["test-all"][..]),
+        ("hermes", &["random"][..]),
+        ("hermes", &["exec"][..]),
+        ("hermes", &["ask"][..]),
+        ("sched", &["set", "rr"][..]),
+        ("loglevel", &["debug"][..]),
+        ("vm", &["-c", "/tmp/vm-demo.xml"][..]),
+    ] {
+        assert_eq!(
+            classify(command, args),
+            HermesShellPolicy::Forbidden,
+            "{command} {args:?}"
+        );
+    }
+
+    for (command, args) in [
+        ("help", &["-h"][..]),
+        ("version", &["1"][..]),
+        ("ddk", &["probe"][..]),
+        ("lvgl", &["probe"][..]),
+        ("qml", &["sched"][..]),
+        ("fuzzsc", &["iterations=51"][..]),
+        ("fuzzsc", &["time=6"][..]),
+        ("ps", &["-x"][..]),
+        ("", &[][..]),
+    ] {
+        assert_eq!(
+            classify(command, args),
+            HermesShellPolicy::Invalid,
+            "{command} {args:?}"
+        );
+    }
+
+    let oversized = "x".repeat(HERMES_MAX_ARG_LEN + 1);
+    assert_eq!(
+        classify("echo", &[oversized.as_str()]),
+        HermesShellPolicy::Invalid
+    );
+    let mut too_many = Vec::new();
+    for _ in 0..=HERMES_MAX_ARGS {
+        too_many.push("a");
+    }
+    assert_eq!(classify("echo", &too_many), HermesShellPolicy::Invalid);
+
+    let line = "  hermes \t test-all seed=1 iterations=1 mode=syscall  ";
+    let words: Vec<&str> = line.split_whitespace().collect();
+    assert_eq!(
+        words,
+        [
+            "hermes",
+            "test-all",
+            "seed=1",
+            "iterations=1",
+            "mode=syscall"
+        ]
+    );
+    assert_eq!(
+        parse_hermes_shell_verb(&words[1..]),
+        HermesShellVerb::TestAll
+    );
+    assert_eq!(parse_hermes_shell_verb(&[]), HermesShellVerb::Usage);
+    assert_eq!(parse_hermes_shell_verb(&["nope"]), HermesShellVerb::Usage);
+    assert_eq!(
+        parse_hermes_shell_verb(&["exec", "help"]),
+        HermesShellVerb::Exec
+    );
+    assert_eq!(
+        parse_hermes_shell_verb(&["random"]),
+        HermesShellVerb::Random
+    );
+    assert_eq!(
+        parse_hermes_shell_verb(&["skills"]),
+        HermesShellVerb::Skills
+    );
+    assert_eq!(parse_hermes_shell_verb(&["test"]), HermesShellVerb::Test);
+    assert_eq!(parse_hermes_shell_verb(&["smoke"]), HermesShellVerb::Test);
+    assert_eq!(parse_hermes_shell_verb(&["ui"]), HermesShellVerb::Web);
+    assert_eq!(
+        parse_hermes_shell_verb(&["ask", "hi"]),
+        HermesShellVerb::Ask
+    );
+    let options = parse_campaign_options(&words[2..]).expect("test-all options");
+    assert_eq!(options.seed, Some(1));
+    assert_eq!(options.iterations, 1);
+    assert_eq!(options.mode, HermesCampaignMode::Syscall);
+    assert_eq!(parse_campaign_options(&["iterations=0"]), None);
+    assert_eq!(parse_campaign_options(&["mode=skt"]), None);
+
+    assert_eq!(host_job_name("ut"), Some("ut"));
+    assert_eq!(host_job_name("it"), Some("it"));
+    for rejected in ["skt", "st", "posixtest", "verify", "ut ", ""] {
+        assert_eq!(host_job_name(rejected), None, "{rejected}");
+    }
+
+    for mode in [HermesCampaignMode::Ops, HermesCampaignMode::Syscall] {
+        for index in 0..campaign_catalog_len(mode) {
+            let case = campaign_case_for_mode(mode, index).expect("catalog case");
+            assert_ne!(case.command, "skt");
+            assert_ne!(case.command, "st");
+            assert!(!(case.command == "posixtest" && case.args[..case.arg_count].contains(&"all")));
+            assert_eq!(
+                classify(case.command, &case.args[..case.arg_count]),
+                HermesShellPolicy::Allowed,
+                "{mode:?} must not select a denied command"
+            );
+        }
+    }
+}
+
 mod syscall_bridge_logic {
 
     include!(concat!(

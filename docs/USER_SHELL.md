@@ -76,8 +76,10 @@ The shell currently registers these commands:
 - `dhrystone`
 - `sched`
 - `vm`
+- `loglevel`
 - `kill`
 - `testsc`
+- `sectest`
 - `posixtest`
 - `fuzzsc`
 - `echo`
@@ -425,8 +427,9 @@ Hermes installs native SMROS skills under `/data/hermes/skills`:
 `smros-kernel`, `hermes-web-ui`, `smros-ops`, `hermes-memory`, `smros-ui`, plus the
 syscall/POSIX control-plane skills `ut`, `it`, `skt`, and `fuzzing`, and the
 owned lifecycle skills `reboot` and `cmd`. Prompt
-routing reports the matched skills in the shell response. `ut` is
-`make posix-tool-test` (and `make ut` when the host crate compiles). `it`
+routing reports the matched skills in the shell response. `ut` is the
+host job `make ut`. `make posix-tool-test` remains the offline POSIX tool
+gate and does not replace `make ut`. `it` is the host job `make it` and
 adds launcher identity checks. `skt` documents the host-only smoke test
 (`make skt`); Hermes test-all does not run it because the guest cannot boot
 another SMROS from the command line. `fuzzing` is bounded `fuzzsc`. The `reboot` skill
