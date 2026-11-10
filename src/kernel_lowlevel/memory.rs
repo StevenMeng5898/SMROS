@@ -450,10 +450,22 @@ impl PageFrameAllocator {
         allocator.core.alloc()
     }
 
-    /// Free a page frame
+    /// Free a page frame.
+    ///
+    /// On AArch64 a private page is zeroed here, which is the return to the
+    /// allocator. Shared pages and page-table pages reach `free` only after
+    /// their last reference drops, so they are zeroed then and not before.
     pub fn free(pfn: u64) {
         let _guard = AllocatorGuard::acquire();
         let allocator = unsafe { &mut *ALLOCATOR.get() };
+        #[cfg(target_arch = "aarch64")]
+        if allocator.core.is_allocated(pfn) {
+            if let Some(address) = allocator.core.pfn_address(pfn, PAGE_SIZE) {
+                unsafe {
+                    core::ptr::write_bytes(address as *mut u8, 0, PAGE_SIZE);
+                }
+            }
+        }
         let _ = allocator.core.free(pfn);
     }
 
@@ -529,6 +541,15 @@ impl PageFrameAllocator {
             return false;
         };
         TABLE_REFERENCES[index].load(Ordering::Acquire) > 1
+    }
+
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+    pub fn is_table_page(pfn: u64) -> bool {
+        let allocator = unsafe { &*ALLOCATOR.get() };
+        let Some(index) = allocator.core.pfn_index(pfn) else {
+            return false;
+        };
+        TABLE_REFERENCES[index].load(Ordering::Acquire) != 0
     }
 
     pub fn pfn_address(pfn: u64) -> Option<usize> {

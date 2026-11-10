@@ -201,6 +201,20 @@ impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
         None
     }
 
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+    pub(crate) fn is_allocated(&self, pfn: u64) -> bool {
+        let Some(page_index) = pfn
+            .checked_sub(self.base_pfn)
+            .filter(|index| *index < self.total_pages as u64)
+            .map(|index| index as usize)
+        else {
+            return false;
+        };
+        let word_index = page_index / 64;
+        let mask = 1u64 << (page_index % 64);
+        self.bitmap[word_index] & mask != 0
+    }
+
     pub(crate) fn free(&mut self, pfn: u64) -> bool {
         let Some(page_index) = pfn
             .checked_sub(self.base_pfn)

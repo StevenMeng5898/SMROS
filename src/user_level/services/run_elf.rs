@@ -600,6 +600,11 @@ fn map_elf_page_runs(image: &elf::ElfImage, base: usize) -> Result<Vec<ElfPageRu
     let mut page = min_addr;
     while page < max_addr {
         let prot = user_logic::run_elf_page_protection(page, PAGE_SIZE, &segments);
+        if user_logic::run_elf_page_spans_write_and_exec(page, PAGE_SIZE, &segments) {
+            if let Some(address) = base.checked_add(page) {
+                log_write_exec_page(address);
+            }
+        }
         if let Some(prot) = prot {
             if let Some(previous) = runs.last_mut() {
                 if previous.prot == prot && previous.start.checked_add(previous.len) == Some(page) {
@@ -640,6 +645,14 @@ fn map_elf_page_runs(image: &elf::ElfImage, base: usize) -> Result<Vec<ElfPageRu
 
 fn sync_instruction_cache() {
     crate::kernel_lowlevel::cpu::sync_instruction_cache();
+}
+
+fn log_write_exec_page(vaddr: usize) {
+    let mut serial = crate::kernel_lowlevel::serial::Serial::new();
+    serial.init();
+    serial.write_str("sec2: elf overlapping write+exec page installed RW+UXN va=0x");
+    serial.write_hex(vaddr as u64);
+    serial.write_str("\n");
 }
 
 struct StackBuilder {

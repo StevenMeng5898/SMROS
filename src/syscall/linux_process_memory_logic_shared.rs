@@ -333,15 +333,38 @@ pub(crate) const fn linux_page_backing_is_cow(backing: LinuxPageBacking) -> bool
     )
 }
 
+pub(crate) const fn linux_shared_mapping_must_be_non_executable(
+    backing: LinuxPageBacking,
+) -> bool {
+    match backing {
+        LinuxPageBacking::Shared { object_id, .. } => object_id != LINUX_FORK_PRIVATE_OBJECT_ID,
+        LinuxPageBacking::Private { .. } => false,
+    }
+}
+
 pub(crate) const fn linux_page_protection_for_backing(
     backing: LinuxPageBacking,
     prot: usize,
 ) -> usize {
-    if linux_page_backing_is_cow(backing) {
+    linux_page_protection_for_install(backing, prot, cfg!(target_arch = "aarch64"))
+}
+
+/// `deny_shared_exec` is set on AArch64. MAP_SHARED and shm stay non-executable
+/// there. Fork COW pages keep execute permission and lose write instead.
+pub(crate) const fn linux_page_protection_for_install(
+    backing: LinuxPageBacking,
+    prot: usize,
+    deny_shared_exec: bool,
+) -> usize {
+    let mut prot = if linux_page_backing_is_cow(backing) {
         prot & !LINUX_PROT_WRITE
     } else {
         prot
+    };
+    if deny_shared_exec && linux_shared_mapping_must_be_non_executable(backing) {
+        prot &= !LINUX_PROT_EXEC;
     }
+    prot
 }
 
 #[cfg(not(target_os = "none"))]

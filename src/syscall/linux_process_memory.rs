@@ -991,6 +991,17 @@ fn with_shared_pages<R>(operation: impl FnOnce(&mut LinuxSharedPageRuntime) -> R
     result
 }
 
+fn shared_backing_installable(page: LinuxPageBacking) -> bool {
+    match page {
+        LinuxPageBacking::Private { .. } => true,
+        LinuxPageBacking::Shared {
+            object_id,
+            page_index,
+            pfn,
+        } => shared_page(object_id, page_index).is_some_and(|record| record.pfn == pfn),
+    }
+}
+
 fn shared_page(object_id: u32, page_index: usize) -> Option<LinuxSharedPageRecord> {
     with_shared_pages(|runtime| {
         let index = runtime
@@ -3745,6 +3756,11 @@ impl LinuxProcessMemory {
         pages: &[LinuxPageBacking],
         mut protection: impl FnMut(usize) -> usize,
     ) -> Result<(), SysError> {
+        for page in pages {
+            if !shared_backing_installable(*page) {
+                return Err(SysError::EFAULT);
+            }
+        }
         let private_count = if self.private_page_tracking_enabled {
             pages
                 .iter()

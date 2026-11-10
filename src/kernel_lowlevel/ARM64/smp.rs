@@ -249,99 +249,13 @@ fn psci_system_reset_smc() -> i64 {
     x0 as i64
 }
 
-/// Boot a secondary CPU
+/// Boot a secondary CPU.
 ///
-/// # Arguments
-/// * `cpu_id` - CPU ID (0-63 for the default QEMU virt configuration)
-/// * `stack_ptr` - Stack pointer for the new CPU
+/// SEC-2 keeps the machine single-core. This returns an error and does not
+/// call PSCI until a later single-core security release is complete.
 pub fn boot_secondary_cpu(cpu_id: u32, stack_ptr: u64) -> Result<(), &'static str> {
-    if !lowlevel_logic::valid_cpu_id(cpu_id, MAX_CPUS) {
-        return Err("Invalid CPU ID");
-    }
-
-    // Get the MPIDR for the target CPU
-    // For PSCI CPU_ON, we need the MPIDR affinity fields without the U bit
-    // QEMU virt machine uses simple CPU IDs in affinity level 0
-    // PSCI expects the MPIDR with proper affinity format
-    let target_mpidr = cpu_id as u64; // Simple CPU ID for PSCI
-
-    // Get the secondary CPU entry point (physical address)
-    let entry_point = secondary_entry_address();
-
-    // Pass the stack pointer as context_id so the assembly code can use it
-    let result = psci_cpu_on(target_mpidr, entry_point, stack_ptr);
-
-    // For display purposes, add the U bit
-    let display_mpidr = lowlevel_logic::display_mpidr(cpu_id);
-
-    // Debug: print PSCI result
-    let mut serial = Serial::new();
-    serial.init();
-    serial.write_str("[PSCI_DEBUG] CPU");
-    print_number(&mut serial, cpu_id);
-    serial.write_str(" PSCI result: 0x");
-    // Print result in hex
-    for i in 0..16 {
-        let nibble = (((result as u64) >> (60 - i * 4)) & 0xF) as u8;
-        serial.write_byte(lowlevel_logic::hex_digit(nibble));
-    }
-    serial.write_str("\n");
-
-    match result {
-        result if lowlevel_logic::psci_success(result, PSCI_RET_SUCCESS, PSCI_RET_ON_PENDING) => {
-            // Update CPU state
-            let per_cpu = unsafe { &mut *per_cpu_mut() };
-            per_cpu.cpu_info[cpu_id as usize].cpu_id = cpu_id;
-            per_cpu.cpu_info[cpu_id as usize].state = CpuState::Booting;
-            per_cpu.cpu_info[cpu_id as usize].mpidr = display_mpidr;
-            per_cpu.cpu_info[cpu_id as usize].stack_ptr = stack_ptr;
-            Ok(())
-        }
-        PSCI_RET_INTERNAL_FAILURE => Err("PSCI internal failure"),
-        PSCI_RET_NOT_PRESENT => Err("CPU not present"),
-        PSCI_RET_DENIED => Err("PSCI call denied"),
-        PSCI_RET_INVALID_ADDRESS => Err("Invalid address"),
-        #[allow(unused_assignments)]
-        _ => {
-            let mut buf = [0u8; 10];
-            let mut i = 0;
-            let mut num = result as u32;
-            if num == 0 {
-                buf[i] = b'0';
-                i += 1;
-            } else {
-                while num > 0 && i < 10 {
-                    buf[i] = b'0' + (num % 10) as u8;
-                    num /= 10;
-                    i += 1;
-                }
-            }
-            let mut msg = [0u8; 30];
-            msg[0] = b'U';
-            msg[1] = b'n';
-            msg[2] = b'k';
-            msg[3] = b'n';
-            msg[4] = b'o';
-            msg[5] = b'w';
-            msg[6] = b'n';
-            msg[7] = b' ';
-            msg[8] = b'e';
-            msg[9] = b'r';
-            msg[10] = b'r';
-            msg[11] = b'o';
-            msg[12] = b'r';
-            msg[13] = b' ';
-            msg[14] = b'(';
-            let mut j = 15;
-            for k in (0..i).rev() {
-                msg[j] = buf[k];
-                j += 1;
-            }
-            msg[j] = b')';
-            msg[j + 1] = b'\n';
-            Err("Unknown error")
-        }
-    }
+    let _ = (cpu_id, stack_ptr);
+    Err("single-core security release is not complete")
 }
 
 /// Get the physical address of the secondary CPU entry point
@@ -375,34 +289,34 @@ pub fn init() {
     serial.write_hex(per_cpu.cpu_info[0].mpidr);
     serial.write_str("\n");
 
-    serial.write_str("[SMP] Booting secondary CPUs...\n");
+    serial.write_str("[SMP] Only the boot CPU is hardware-online\n");
 }
 
-/// Initialize all logical CPUs.
+/// Record that only the boot CPU is hardware-online.
+///
+/// Unstarted CPUs stay offline so the scheduler cannot bind a runnable thread
+/// to a CPU that will never enter the kernel. QEMU `-smp` greater than 1 is
+/// not multiprocessor safety.
 pub fn boot_all_cpus() {
     let mut serial = Serial::new();
     serial.init();
 
-    serial.write_str("[SMP] Multi-core initialization...\n");
-    serial.write_str("[SMP] Note: Using logical CPU affinity model\n");
-    serial.write_str("[SMP] Scheduler will distribute threads across ");
-    print_number(&mut serial, MAX_CPUS as u32);
-    serial.write_str(" logical CPUs\n");
+    serial.write_str("[SMP] Single-core security gate\n");
+    serial.write_str("[SMP] Only the boot CPU is hardware-online\n");
 
-    // Initialize all CPUs as online for scheduling purposes
     let per_cpu = unsafe { &mut *per_cpu_mut() };
-    for i in 0..MAX_CPUS {
+    per_cpu.cpu_info[0].cpu_id = 0;
+    per_cpu.cpu_info[0].state = CpuState::Online;
+    per_cpu.cpu_info[0].mpidr = read_mpidr();
+    for i in 1..MAX_CPUS {
         per_cpu.cpu_info[i].cpu_id = i as u32;
-        per_cpu.cpu_info[i].state = CpuState::Online;
-        per_cpu.cpu_info[i].mpidr = lowlevel_logic::display_mpidr(i as u32);
+        per_cpu.cpu_info[i].state = CpuState::Offline;
+        per_cpu.cpu_info[i].mpidr = 0;
+        per_cpu.cpu_info[i].stack_ptr = 0;
     }
-    per_cpu
-        .online_count
-        .store(MAX_CPUS as u32, Ordering::Relaxed);
+    per_cpu.online_count.store(1, Ordering::Relaxed);
 
-    serial.write_str("[SMP] All ");
-    print_number(&mut serial, MAX_CPUS as u32);
-    serial.write_str(" logical CPUs initialized\n");
+    serial.write_str("[SMP] Hardware-online CPUs: 1 (boot CPU only)\n");
 }
 
 /// Mark the current CPU as online (called from secondary CPU entry)
@@ -562,15 +476,14 @@ pub extern "C" fn secondary_cpu_entry() -> ! {
     print_number(&mut serial, cpu_id);
     serial.write_str("] Interrupts unmasked\n");
 
-    // Mark this CPU as online
-    mark_cpu_online();
-
+    // SEC-2: a second hardware CPU must not become runnable or enter the
+    // scheduler. Only the boot CPU is hardware-online.
     serial.write_str("[CPU");
     print_number(&mut serial, cpu_id);
-    serial.write_str("] CPU online! Starting scheduler for this CPU...\n");
-
-    // Start the scheduler for this CPU and run threads bound to it
-    crate::kernel_objects::scheduler::start_first_thread_for_cpu(cpu_id as usize);
+    serial.write_str("] halted before scheduler; only the boot CPU is hardware-online\n");
+    loop {
+        crate::kernel_lowlevel::cpu::wait_for_event();
+    }
 }
 
 /// CPU idle loop - each CPU runs this when it has no work

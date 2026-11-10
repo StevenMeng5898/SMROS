@@ -133,6 +133,10 @@ impl Aarch64AddressSpaceBackend for PageFrameBackend {
         PageFrameAllocator::table_is_shared(pfn)
     }
 
+    fn user_data_pfn_allowed(&self, pfn: u64) -> bool {
+        !PageFrameAllocator::is_table_page(pfn) && !kernel_image_contains_pfn(pfn)
+    }
+
     fn publish_user_mapping(&mut self, _vaddr: usize) {
         if !self.defer_user_updates {
             cpu::complete_user_page_update();
@@ -306,6 +310,26 @@ impl Aarch64AddressSpace {
     pub fn copy_from_user(&self, vaddr: usize, out: &mut [u8]) -> Result<(), AddressSpaceError> {
         self.core.copy_from_user(vaddr, out).map_err(map_core_error)
     }
+}
+
+fn kernel_image_contains_pfn(pfn: u64) -> bool {
+    unsafe extern "C" {
+        static _start: u8;
+        static __kernel_end: u8;
+    }
+    let image_start = core::ptr::addr_of!(_start) as usize;
+    let image_end = core::ptr::addr_of!(__kernel_end) as usize;
+    let page = match PageFrameAllocator::pfn_address(pfn) {
+        Some(address) => address,
+        None => {
+            let Ok(pfn) = usize::try_from(pfn) else {
+                return true;
+            };
+            pfn.saturating_mul(crate::kernel_lowlevel::memory::PAGE_SIZE)
+        }
+    };
+    let page_end = page.saturating_add(crate::kernel_lowlevel::memory::PAGE_SIZE);
+    page < image_end && page_end > image_start
 }
 
 fn map_core_error(error: Aarch64AddressSpaceCoreError) -> AddressSpaceError {
