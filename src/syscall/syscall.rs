@@ -4799,7 +4799,9 @@ pub fn reset_linux_process_state() {
     // Stop all user scheduler threads before tearing down their address space.
     linux_task::reset();
     if let Some(pid) = pid {
-        let _ = linux_process_memory::unregister(pid);
+        // This thread is still on its kernel stack. The address space is
+        // freed after the next context switch.
+        let _ = linux_process_memory::unregister_after_switch(pid);
     }
     linux_process_memory::reset_launch();
     linux_record_lock::reset();
@@ -6060,7 +6062,19 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> LinuxSignalDe
                 }
                 return LinuxSignalDeliveryOutcome::Idle;
             }
-            linux_process::LinuxSignalDeliveryRoute::Handle => {}
+            linux_process::LinuxSignalDeliveryRoute::Handle => {
+            if !linux_user_handler_executable(action.handler) {
+                if commit_linux_signal(deliverable).is_err() {
+                    return LinuxSignalDeliveryOutcome::Idle;
+                }
+                if let Ok(current) = linux_task::current_task() {
+                    if terminate_linux_process_by_signal(current.tgid, signum).is_ok() {
+                        return LinuxSignalDeliveryOutcome::Idle;
+                    }
+                }
+                return LinuxSignalDeliveryOutcome::Idle;
+            }
+        }
         }
         match disposition {
             LinuxSignalDisposition::Stop => {
@@ -6164,6 +6178,7 @@ pub(crate) fn deliver_linux_synchronous_memory_fault(
     if linux_task::linux_signal_disposition(action.handler, signum)
         == LinuxSignalDisposition::Handled
         && !blocked
+        && linux_user_handler_executable(action.handler)
         && install_linux_signal_handler(saved_regs, return_pc, pending, action, None, fault_address)
             .is_ok()
     {
@@ -7601,6 +7616,39 @@ fn linux_copy_file_rollback_read(
     } else {
         linux_fd_rollback_read_bytes(fd, bytes)
     }
+}
+
+fn linux_user_handler_executable(handler: u64) -> bool {
+    // SIG_DFL is 0 and SIG_IGN is 1. On AArch64 any other address must be one
+    // of this process's executable user pages. Other architectures keep the
+    // previous handler acceptance so this change does not alter them.
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::kernel_lowlevel::aarch64_exception_logic_shared::el0_signal_handler_may_run(
+            handler,
+            linux_process_memory::current_user_executable(handler as usize),
+        )
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        handler > 1
+    }
+}
+
+/// Terminate the current EL0 thread after an undefined instruction, an
+/// alignment fault, or any other synchronous exception that is not a
+/// deliverable memory fault. Returns false when there is no Linux task, in
+/// which case the caller must abandon the EL0 frame without halting.
+///
+/// A `true` return means an EL1 resume was prepared (the launch path) and the
+/// exception return should use it. Process death of the current thread does
+/// not return.
+pub fn terminate_el0_synchronous_fault(signum: usize) -> bool {
+    let Ok(task) = linux_task::current_task() else {
+        return false;
+    };
+    crate::user_level::services::security_case::observe_fault(0);
+    terminate_linux_process_by_signal(task.tgid, signum).is_ok()
 }
 
 fn linux_signal_user_range_readable(address: usize, len: usize) -> bool {
@@ -12422,6 +12470,7 @@ fn terminate_linux_process_by_signal(tgid: usize, signum: usize) -> SysResult {
     );
     if outcome == linux_process::LinuxProcessExitOutcome::LaunchRoot {
         if crate::user_level::services::security_case::case_active() {
+            crate::user_level::services::security_case::observe_terminated();
             linux_task::finish_current_without_el0_return();
         }
         let exit_code = 128 + signum as i32;

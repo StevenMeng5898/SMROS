@@ -36,6 +36,9 @@ pub(crate) enum LinuxProcessState {
     Reserved,
     Publishing,
     Running,
+    /// Teardown has started. The pid stays reserved until the zombie is reaped,
+    /// and wait cannot observe this state.
+    Exiting,
     Zombie,
 }
 
@@ -516,12 +519,38 @@ impl<const N: usize> LinuxProcessTable<N> {
         })
     }
 
-    pub(crate) fn exit(&mut self, pid: usize, wait_status: i32) -> bool {
+    pub(crate) fn begin_exit(&mut self, pid: usize) -> bool {
         let Some(process) = self
             .processes
             .iter_mut()
             .find(|process| process.pid == pid && process.state == LinuxProcessState::Running)
         else {
+            return false;
+        };
+        process.state = LinuxProcessState::Exiting;
+        true
+    }
+
+    pub(crate) fn abort_exit(&mut self, pid: usize) -> bool {
+        let Some(process) = self
+            .processes
+            .iter_mut()
+            .find(|process| process.pid == pid && process.state == LinuxProcessState::Exiting)
+        else {
+            return false;
+        };
+        process.state = LinuxProcessState::Running;
+        true
+    }
+
+    pub(crate) fn exit(&mut self, pid: usize, wait_status: i32) -> bool {
+        let Some(process) = self.processes.iter_mut().find(|process| {
+            process.pid == pid
+                && matches!(
+                    process.state,
+                    LinuxProcessState::Running | LinuxProcessState::Exiting
+                )
+        }) else {
             return false;
         };
         process.state = LinuxProcessState::Zombie;
@@ -569,10 +598,13 @@ impl<const N: usize> LinuxProcessTable<N> {
         wait_status: i32,
         policy: LinuxSigchldExitPolicy,
     ) -> Option<LinuxTerminalChildTransition> {
-        let process =
-            self.processes.iter().copied().find(|process| {
-                process.pid == pid && process.state == LinuxProcessState::Running
-            })?;
+        let process = self.processes.iter().copied().find(|process| {
+            process.pid == pid
+                && matches!(
+                    process.state,
+                    LinuxProcessState::Running | LinuxProcessState::Exiting
+                )
+        })?;
         if !self.exit(pid, wait_status) {
             return None;
         }
@@ -690,6 +722,7 @@ impl<const N: usize> LinuxProcessTable<N> {
             .fold((0, 0), |(running, zombies), process| match process.state {
                 LinuxProcessState::Running => (running + 1, zombies),
                 LinuxProcessState::Zombie => (running, zombies + 1),
+                LinuxProcessState::Exiting => (running, zombies),
                 _ => (running, zombies),
             })
     }
@@ -772,7 +805,9 @@ impl<const N: usize> LinuxProcessTable<N> {
     fn is_visible(process: LinuxProcessCore) -> bool {
         matches!(
             process.state,
-            LinuxProcessState::Running | LinuxProcessState::Zombie
+            LinuxProcessState::Running
+                | LinuxProcessState::Exiting
+                | LinuxProcessState::Zombie
         )
     }
 

@@ -1675,6 +1675,12 @@ pub(crate) fn register_root(pid: usize) -> Result<u64, SysError> {
     if linux_process::current_pid()? != pid {
         return Err(SysError::ESRCH);
     }
+    // A pid whose page tables are still waiting for the previous owner to
+    // leave its kernel stack cannot be given to a new address space.
+    reclaim_deferred_except_current();
+    if deferred_address_space_holds_pid(pid) {
+        return Err(SysError::EBUSY);
+    }
     with_runtime(|runtime| {
         if runtime.memories.iter().any(|memory| memory.pid == pid) {
             return Err(SysError::EBUSY);
@@ -1765,6 +1771,9 @@ pub(crate) fn reset_launch() {
     bump_memory_generation();
     #[cfg(target_arch = "riscv64")]
     reset_riscv_page_tables();
+    // Address spaces parked by a thread that has already switched away are
+    // not this thread's page tables.
+    reclaim_deferred_except_current();
     with_runtime(|runtime| {
         runtime.memories.clear();
     });
@@ -1778,14 +1787,120 @@ pub(crate) fn reset_launch() {
 }
 
 pub(crate) fn unregister(pid: usize) -> bool {
+    let Some(memory) = detach_process_memory(pid) else {
+        return false;
+    };
+    bump_memory_generation();
+    drop(memory);
+    true
+}
+
+/// Detach `pid`'s address space and free it only after `schedule` has switched
+/// off the calling thread. Used when the caller is still running on that
+/// thread's kernel stack.
+pub(crate) fn unregister_after_switch(pid: usize) -> bool {
+    let Some(memory) = detach_process_memory(pid) else {
+        return false;
+    };
+    bump_memory_generation();
+    let owner = crate::kernel_objects::scheduler::scheduler().current().0;
+    defer_address_space(owner, memory);
+    true
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn current_user_executable(vaddr: usize) -> bool {
+    with_current(|memory| Ok(memory.address_space.user_executable(vaddr))).unwrap_or(false)
+}
+
+fn detach_process_memory(pid: usize) -> Option<LinuxProcessMemory> {
     with_runtime(|runtime| {
-        let Some(index) = runtime.memories.iter().position(|memory| memory.pid == pid) else {
-            return false;
-        };
-        runtime.memories.remove(index);
-        bump_memory_generation();
-        true
+        let index = runtime.memories.iter().position(|memory| memory.pid == pid)?;
+        Some(runtime.memories.swap_remove(index))
     })
+}
+
+struct DeferredAddressSpace {
+    owner_thread: usize,
+    memory: LinuxProcessMemory,
+}
+
+const DEFERRED_ADDRESS_SPACE_SLOTS: usize = 8;
+
+struct DeferredAddressSpaces {
+    slots: [Option<DeferredAddressSpace>; DEFERRED_ADDRESS_SPACE_SLOTS],
+}
+
+static mut DEFERRED_ADDRESS_SPACES: DeferredAddressSpaces = DeferredAddressSpaces {
+    slots: [None, None, None, None, None, None, None, None],
+};
+
+fn deferred_address_spaces() -> &'static mut DeferredAddressSpaces {
+    unsafe { &mut *core::ptr::addr_of_mut!(DEFERRED_ADDRESS_SPACES) }
+}
+
+fn defer_address_space(owner_thread: usize, memory: LinuxProcessMemory) {
+    reclaim_deferred_except_current();
+    let spaces = deferred_address_spaces();
+    if let Some(slot) = spaces.slots.iter_mut().find(|slot| slot.is_none()) {
+        *slot = Some(DeferredAddressSpace {
+            owner_thread,
+            memory,
+        });
+        return;
+    }
+    // Every slot belongs to a thread that has not switched yet. Keep the new
+    // space parked by dropping the caller's previous space only when that
+    // previous owner is no longer current; otherwise leak this one rather
+    // than freeing page tables on the current stack.
+    let current = crate::kernel_objects::scheduler::scheduler().current().0;
+    if let Some(slot) = spaces
+        .slots
+        .iter_mut()
+        .find(|slot| slot.as_ref().is_some_and(|space| space.owner_thread != current))
+    {
+        *slot = Some(DeferredAddressSpace {
+            owner_thread,
+            memory,
+        });
+        return;
+    }
+    core::mem::forget(memory);
+}
+
+pub(crate) fn reclaim_deferred_address_space(owner_thread: usize, current_thread: usize) {
+    if owner_thread == 0 || owner_thread == current_thread {
+        return;
+    }
+    let spaces = deferred_address_spaces();
+    for slot in &mut spaces.slots {
+        if slot
+            .as_ref()
+            .is_some_and(|space| space.owner_thread == owner_thread)
+        {
+            slot.take();
+        }
+    }
+}
+
+fn deferred_address_space_holds_pid(pid: usize) -> bool {
+    deferred_address_spaces().slots.iter().any(|slot| {
+        slot.as_ref()
+            .is_some_and(|space| space.memory.pid == pid)
+    })
+}
+
+fn reclaim_deferred_except_current() {
+    let current = crate::kernel_objects::scheduler::scheduler().current().0;
+    let spaces = deferred_address_spaces();
+    for slot in &mut spaces.slots {
+        if slot
+            .as_ref()
+            .is_some_and(|space| space.owner_thread != current)
+        {
+            slot.take();
+        }
+    }
 }
 
 pub(crate) fn deactivate_current_address_space() -> Result<(), SysError> {

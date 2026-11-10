@@ -5,8 +5,8 @@ Exit status follows `SECTEST SUMMARY`: 0 when `fail=0`, 1 when any hard FAIL
 is present or the boot times out before a summary. XFAIL and XPASS do not
 change the exit status. A timeout is never treated as PASS.
 
-`sectest undef` is expected to halt the kernel today. That halt is reported
-as `XFAIL (SEC-4)` and does not fail this runner.
+SEC-4 cases, including `sectest undef`, are real PASS/FAIL results. A fatal
+synchronous exception or a missing summary is FAIL.
 """
 
 from __future__ import annotations
@@ -130,11 +130,11 @@ def boot(qemu: str, kernel: Path, disk: Path, log_path: Path, command: str, time
         ):
             print(line)
     summary = SUMMARY_RE.search(text)
-    if summary is None and "fatal synchronous exception" in text and "undef" in command:
-        print("CASE undef-insn RESULT XFAIL (SEC-4) kernel-halt")
-        print("SECTEST SUMMARY pass=0 fail=0 xfail=1 xpass=0")
+    if summary is None and "fatal synchronous exception" in text:
+        print("CASE runner RESULT FAIL kernel-halt")
+        print("SECTEST SUMMARY pass=0 fail=1 xfail=0 xpass=0")
         print(f"LOG {log_path}")
-        return 0
+        return 1
     if summary is None:
         print(f"CASE runner RESULT FAIL timeout-or-halt sent={sent} bytes={len(text)}")
         print("SECTEST SUMMARY pass=0 fail=1 xfail=0 xpass=0")

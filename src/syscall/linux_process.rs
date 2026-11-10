@@ -472,8 +472,17 @@ pub(crate) fn exit_current_process(
         wait_status,
         entire_group
     );
+    if !with_runtime(|runtime| runtime.processes.begin_exit(process.pid)) {
+        return Err(SysError::ESRCH);
+    }
     super::linux_process_memory::deactivate_current_address_space()?;
-    let process_empty = linux_task::retire_process_tasks(process.pid, entire_group)?;
+    let process_empty = match linux_task::retire_process_tasks(process.pid, entire_group) {
+        Ok(process_empty) => process_empty,
+        Err(error) => {
+            let _ = with_runtime(|runtime| runtime.processes.abort_exit(process.pid));
+            return Err(error);
+        }
+    };
     crate::kobj_debug!(
         "posix-exit",
         "retired pid={} process_empty={}",
@@ -484,7 +493,9 @@ pub(crate) fn exit_current_process(
         return Ok(LinuxProcessExitOutcome::TaskOnly);
     }
 
-    let _ = super::linux_process_memory::unregister(process.pid);
+    // The caller is still on this process's kernel stack. Drop the address
+    // space only after schedule switches away.
+    let _ = super::linux_process_memory::unregister_after_switch(process.pid);
     super::record_linux_child_cpu_usage(process.parent_pid, process.pid);
     let _ = super::release_linux_process_resources(process.pid);
     finish_terminal_process(process.pid, wait_status)
@@ -505,7 +516,12 @@ fn finish_terminal_process(
             let process = runtime
                 .processes
                 .by_pid(pid)
-                .filter(|process| process.state == LinuxProcessState::Running)
+                .filter(|process| {
+                    matches!(
+                        process.state,
+                        LinuxProcessState::Running | LinuxProcessState::Exiting
+                    )
+                })
                 .ok_or(SysError::ESRCH)?;
             let parent_pid = process.parent_pid;
             let child_slot = process_slot(runtime, pid)?;
@@ -609,13 +625,22 @@ pub(crate) fn terminate_by_signal(
     signum: usize,
 ) -> Result<LinuxProcessExitOutcome, SysError> {
     let parent_pid = running_parent_pid(tgid)?;
-    if linux_task::current_task().is_ok_and(|task| task.tgid == tgid) {
+    if !with_runtime(|runtime| runtime.processes.begin_exit(tgid)) {
+        return Err(SysError::ESRCH);
+    }
+    let terminating_current = linux_task::current_task().is_ok_and(|task| task.tgid == tgid);
+    if terminating_current {
         super::linux_process_memory::deactivate_current_address_space()?;
     }
     if !linux_task::terminate_process_tasks(tgid) {
+        let _ = with_runtime(|runtime| runtime.processes.abort_exit(tgid));
         return Err(SysError::ESRCH);
     }
-    let _ = super::linux_process_memory::unregister(tgid);
+    if terminating_current {
+        let _ = super::linux_process_memory::unregister_after_switch(tgid);
+    } else {
+        let _ = super::linux_process_memory::unregister(tgid);
+    }
     super::record_linux_child_cpu_usage(parent_pid, tgid);
     let _ = super::release_linux_process_resources(tgid);
     let wait_status = linux_wait_status_signal(signum, false).ok_or(SysError::EINVAL)?;

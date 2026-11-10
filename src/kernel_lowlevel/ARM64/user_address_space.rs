@@ -303,6 +303,10 @@ impl Aarch64AddressSpace {
         self.core.translate_user(vaddr, write)
     }
 
+    pub fn user_executable(&self, vaddr: usize) -> bool {
+        self.core.user_page_executable(vaddr)
+    }
+
     pub fn copy_to_user(&self, vaddr: usize, bytes: &[u8]) -> Result<(), AddressSpaceError> {
         self.core.copy_to_user(vaddr, bytes).map_err(map_core_error)
     }

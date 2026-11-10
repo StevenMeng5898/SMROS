@@ -536,6 +536,17 @@ pub fn smoke_test() -> bool {
     fxfs::smoke_test() && smoke_runtime()
 }
 
+/// An EL0 component fault with no Linux task. Mark the component stopped when
+/// one is active, then leave EL0. This does not halt the kernel.
+pub fn abandon_faulting_el0() -> ! {
+    let pid = ACTIVE_COMPONENT_PID.swap(0, Ordering::SeqCst);
+    if pid != 0 {
+        let _ = manager().mark_component_exited(pid, 128 + 4);
+    }
+    crate::user_level::services::security_case::observe_fault_if_new(0);
+    crate::syscall::linux_task::finish_current_without_el0_return();
+}
+
 pub fn prepare_component_return(exit_code: i32) -> bool {
     let pid = ACTIVE_COMPONENT_PID.load(Ordering::SeqCst);
     if !user_logic::component_return_active(pid) {

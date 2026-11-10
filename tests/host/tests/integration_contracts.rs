@@ -1867,18 +1867,34 @@ fn aarch64_synchronous_exception_vectors_are_origin_specific_and_fail_closed() {
     let bridge = braced_body(&dispatch[bridge_start..]);
     for token in [
         "aarch64_lower_el_sync(esr)",
-        "Aarch64LowerElSync::MemoryFault(fault)",
+        "Aarch64LowerElAction::DeliverMemoryFault(fault)",
         "Aarch64El0MemoryAccess::Read => LinuxMemoryFaultAccess::Read",
         "Aarch64El0MemoryAccess::Write => LinuxMemoryFaultAccess::Write",
         "Aarch64El0MemoryAccess::Execute => LinuxMemoryFaultAccess::Execute",
         "deliver_linux_synchronous_memory_fault(",
         "fatal_aarch64_sync_exception(esr, far, return_pc)",
+        "aarch64_saved_state_is_el0",
+        "Aarch64LowerElAction::HaltKernel",
+        "Aarch64LowerElAction::TerminateProcess",
+        "abandon_faulting_el0",
+        "terminate_el0_synchronous_fault",
     ] {
         assert!(
             bridge.contains(token),
             "exception bridge is missing {token}"
         );
     }
+    let halt_at = bridge
+        .find("Aarch64LowerElAction::HaltKernel")
+        .expect("non-EL0 halt arm");
+    let fatal_at = bridge
+        .find("fatal_aarch64_sync_exception")
+        .expect("fatal diagnostic stays available for EL1");
+    let terminate_at = bridge
+        .find("Aarch64LowerElAction::TerminateProcess")
+        .expect("EL0 terminate arm");
+    assert!(halt_at < fatal_at && fatal_at < terminate_at);
+    assert!(!bridge[terminate_at..].contains("fatal_aarch64_sync_exception"));
     let delivery = bridge
         .find("deliver_linux_synchronous_memory_fault(")
         .expect("synchronous fault delivery call");

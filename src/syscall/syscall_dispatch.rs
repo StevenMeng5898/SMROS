@@ -151,24 +151,55 @@ pub extern "C" fn handle_aarch64_lower_el_sync(
     return_pc: u64,
 ) {
     use crate::kernel_lowlevel::aarch64_exception_logic_shared::{
-        aarch64_lower_el_sync, Aarch64El0MemoryAccess, Aarch64LowerElSync,
+        aarch64_lower_el_action, aarch64_lower_el_sync, aarch64_saved_state_is_el0,
+        Aarch64El0MemoryAccess, Aarch64LowerElAction,
     };
     use crate::syscall::linux_process_memory::LinuxMemoryFaultAccess;
 
-    let access = match aarch64_lower_el_sync(esr) {
-        Aarch64LowerElSync::MemoryFault(fault) => {
+    // SPSR selects the action. A non-EL0 saved state halts. Every EL0 class
+    // either delivers a memory fault or terminates the process. Unknown EL0
+    // exceptions, undefined instructions, and alignment faults are not ignored
+    // and do not halt the kernel.
+    let from_el0 = aarch64_saved_state_is_el0(
+        crate::kernel_lowlevel::cpu::read_exception_return_state(),
+    );
+    let class = aarch64_lower_el_sync(esr);
+    match aarch64_lower_el_action(from_el0, class) {
+        Aarch64LowerElAction::HaltKernel => {
+            crate::kernel_lowlevel::boot::fatal_aarch64_sync_exception(esr, far, return_pc);
+        }
+        Aarch64LowerElAction::DeliverMemoryFault(fault) => {
             let _ = fault.kind;
-            match fault.access {
+            let access = match fault.access {
                 Aarch64El0MemoryAccess::Read => LinuxMemoryFaultAccess::Read,
                 Aarch64El0MemoryAccess::Write => LinuxMemoryFaultAccess::Write,
                 Aarch64El0MemoryAccess::Execute => LinuxMemoryFaultAccess::Execute,
+            };
+            if crate::syscall::deliver_linux_synchronous_memory_fault(
+                saved_frame,
+                return_pc,
+                far,
+                access,
+            )
+            .is_err()
+            {
+                // No Linux task, or the fault could not be delivered. Do not halt.
+                crate::user_level::services::component::abandon_faulting_el0();
             }
         }
-        _ => crate::kernel_lowlevel::boot::fatal_aarch64_sync_exception(esr, far, return_pc),
-    };
-    if crate::syscall::deliver_linux_synchronous_memory_fault(saved_frame, return_pc, far, access)
-        .is_err()
-    {
-        crate::kernel_lowlevel::boot::fatal_aarch64_sync_exception(esr, far, return_pc);
+        Aarch64LowerElAction::TerminateProcess => {
+            // Undefined instructions, alignment faults, SVC appearing on this
+            // path, and every other unknown lower-EL class. None of these are
+            // ignored and none of them resume the faulting EL0 instruction.
+            let signum = match class {
+                crate::kernel_lowlevel::aarch64_exception_logic_shared::Aarch64LowerElSync::AlignmentFault => {
+                    7 // SIGBUS
+                }
+                _ => 4, // SIGILL
+            };
+            if !crate::syscall::terminate_el0_synchronous_fault(signum) {
+                crate::user_level::services::component::abandon_faulting_el0();
+            }
+        }
     }
 }

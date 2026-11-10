@@ -1283,6 +1283,12 @@ impl Scheduler {
         if idx >= MAX_THREADS {
             return;
         }
+        // The retired thread has switched away. Free its user page tables
+        // before reusing its kernel stack, and never from that stack.
+        crate::syscall::linux_process_memory::reclaim_deferred_address_space(
+            idx,
+            self.current_thread.0,
+        );
 
         let thread = &self.threads[idx];
         let action = scheduler_retired_slot_reuse_action(
@@ -2213,6 +2219,10 @@ pub fn schedule() {
         unsafe {
             thread::switch_context(current_tcb_ptr, next_tcb_ptr);
         }
+        // Now on the destination stack. Reap the thread we just left before
+        // this thread runs more process code, so its page tables are released
+        // before a new process can be forked.
+        s.reap_deferred_thread_for_cpu(executing_cpu);
     }
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
 }
@@ -2481,6 +2491,10 @@ pub fn schedule_on_cpu(cpu_id: usize) {
         unsafe {
             thread::switch_context(current_tcb_ptr, next_tcb_ptr);
         }
+        // Now on the destination stack. Reap the thread we just left before
+        // this thread runs more process code, so its page tables are released
+        // before a new process can be forked.
+        s.reap_deferred_thread_for_cpu(executing_cpu);
     }
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
 }
