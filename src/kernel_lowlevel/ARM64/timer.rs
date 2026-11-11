@@ -64,6 +64,20 @@ fn read_cntpct_el0() -> u64 {
     val
 }
 
+/// Read the compare value currently programmed in the CPU, not the cached copy.
+fn read_cntp_cval_el0() -> u64 {
+    let val: u64;
+    // SAFETY: CNTP_CVAL_EL0 is the architectural physical timer compare register.
+    unsafe {
+        core::arch::asm!(
+            "mrs {val}, cntp_cval_el0",
+            val = out(reg) val,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    val
+}
+
 /// Write the Counter-timer Physical Timer CompareValue Register
 fn write_cntp_cval_el0(value: u64) {
     // SAFETY: Writing CNTP_CVAL_EL0 sets the timer compare value.
@@ -170,6 +184,7 @@ pub fn arm_next_tick() {
         lowlevel_logic::timer_program_compare(periodic_compare, precision_compare, 0);
     PROGRAMMED_COMPARE.store(compare_value, Ordering::Release);
     write_cntp_cval_el0(compare_value);
+    ensure_hardware_compare_can_wake();
 }
 
 fn live_compare(value: u64, current_count: u64) -> u64 {
@@ -214,6 +229,33 @@ pub fn arm_at_nanoseconds(deadline: u64) {
         write_cntp_cval_el0(programmed_compare);
         PROGRAMMED_COMPARE.store(programmed_compare, Ordering::Release);
     }
+    // The cache can claim a future compare while the register itself is still
+    // in the past (a skipped write, or CNTPCT advancing past the value we just
+    // computed). Re-read the hardware register and force a future edge.
+    ensure_hardware_compare_can_wake();
+}
+
+/// `(CNTPCT, hardware CNTP_CVAL)` for campaign timeout diagnostics.
+pub fn debug_compare_snapshot() -> (u64, u64) {
+    (read_cntpct_el0(), read_cntp_cval_el0())
+}
+
+/// Make sure the next WFI has a timer edge to wake on.
+///
+/// AArch64 TCG/GICv3 will not re-raise the physical timer from a compare that
+/// is already <= CNTPCT. Callers that trust `PROGRAMMED_COMPARE` can skip the
+/// MSR and then sleep forever. This reads the register itself.
+pub fn ensure_hardware_compare_can_wake() {
+    let now = read_cntpct_el0();
+    let hardware = read_cntp_cval_el0();
+    if !lowlevel_logic::timer_compare_needs_rearm(hardware, now) {
+        return;
+    }
+    let period = TICK_PERIOD.load(Ordering::Relaxed);
+    let next = lowlevel_logic::timer_rearm_compare(now, period);
+    NEXT_PERIODIC_COMPARE.store(next, Ordering::Release);
+    PROGRAMMED_COMPARE.store(next, Ordering::Release);
+    write_cntp_cval_el0(next);
 }
 
 /// Clear timer interrupt by re-arming the timer

@@ -604,6 +604,40 @@ pub struct HermesResumeState {
     pub host_it_pass: usize,
     pub host_it_fail: usize,
     pub host_jobs_pending: bool,
+    /// Guest op began and had not finished when the checkpoint was written.
+    /// A reboot that still sees this flag counts the op as a timeout.
+    pub op_running: bool,
+    pub op_timeouts: usize,
+    pub pending_op_len: u8,
+    pub pending_op: [u8; 64],
+}
+
+impl HermesResumeState {
+    pub fn set_pending_op(&mut self, op: &str) {
+        let bytes = op.as_bytes();
+        let len = bytes.len().min(self.pending_op.len());
+        self.pending_op[..len].copy_from_slice(&bytes[..len]);
+        self.pending_op_len = len as u8;
+    }
+
+    pub fn pending_op_str(&self) -> &str {
+        let len = self.pending_op_len as usize;
+        let len = len.min(self.pending_op.len());
+        core::str::from_utf8(&self.pending_op[..len]).unwrap_or("?")
+    }
+}
+
+pub fn format_op_label(command: &str, args: &[&str], out: &mut [u8]) -> Option<usize> {
+    let mut written = 0usize;
+    push_bytes(out, &mut written, command.as_bytes())?;
+    for arg in args {
+        if arg.is_empty() {
+            continue;
+        }
+        push_bytes(out, &mut written, b" ")?;
+        push_bytes(out, &mut written, arg.as_bytes())?;
+    }
+    Some(written)
 }
 
 pub fn resume_should_continue(state: &HermesResumeState) -> bool {
@@ -699,6 +733,16 @@ pub fn format_resume_state(state: &HermesResumeState, out: &mut [u8]) -> Option<
         &mut written,
         if state.host_jobs_pending { b"1" } else { b"0" },
     )?;
+    push_bytes(out, &mut written, b"\nop_running=")?;
+    push_bytes(
+        out,
+        &mut written,
+        if state.op_running { b"1" } else { b"0" },
+    )?;
+    push_bytes(out, &mut written, b"\nop_timeouts=")?;
+    push_u64(out, &mut written, state.op_timeouts as u64)?;
+    push_bytes(out, &mut written, b"\npending_op=")?;
+    push_bytes(out, &mut written, state.pending_op_str().as_bytes())?;
     push_bytes(out, &mut written, b"\n")?;
     Some(written)
 }
@@ -719,6 +763,10 @@ pub fn parse_resume_state(text: &str) -> Option<HermesResumeState> {
     let mut host_it_pass = 0usize;
     let mut host_it_fail = 0usize;
     let mut host_jobs_pending = false;
+    let mut op_running = false;
+    let mut op_timeouts = 0usize;
+    let mut pending_op = [0u8; 64];
+    let mut pending_op_len = 0u8;
 
     for line in text.split('\n') {
         let line = line.trim();
@@ -767,6 +815,20 @@ pub fn parse_resume_state(text: &str) -> Option<HermesResumeState> {
                     _ => return None,
                 };
             }
+            "op_running" => {
+                op_running = match value {
+                    "1" => true,
+                    "0" => false,
+                    _ => return None,
+                };
+            }
+            "op_timeouts" => op_timeouts = parse_decimal(value)? as usize,
+            "pending_op" => {
+                let bytes = value.as_bytes();
+                let len = bytes.len().min(pending_op.len());
+                pending_op[..len].copy_from_slice(&bytes[..len]);
+                pending_op_len = len as u8;
+            }
             _ => {}
         }
     }
@@ -791,6 +853,10 @@ pub fn parse_resume_state(text: &str) -> Option<HermesResumeState> {
         host_it_pass,
         host_it_fail,
         host_jobs_pending,
+        op_running,
+        op_timeouts,
+        pending_op_len,
+        pending_op,
     })
 }
 

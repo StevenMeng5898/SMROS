@@ -58,6 +58,12 @@ pub fn unmask_timer_interrupts() {
 
 #[inline(always)]
 pub fn wait_for_interrupt() {
+    // A stale CNTP_CVAL (already <= CNTPCT) does not produce another GICv3
+    // edge. Rewrite it before WFI or this wait never returns.
+    super::timer::ensure_hardware_compare_can_wake();
+    if crate::kernel_objects::campaign_watch::exceeded(super::timer::get_nanoseconds()) {
+        return;
+    }
     // ISB makes a preceding DAIF/CNTP update visible. ARM64 QEMU TCG will
     // otherwise keep WFI asleep and freeze virtio/timer waits.
     unsafe {

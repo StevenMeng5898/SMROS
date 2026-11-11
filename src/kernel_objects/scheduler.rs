@@ -2348,6 +2348,11 @@ fn print_i32(serial: &mut crate::kernel_lowlevel::serial::Serial, value: i32) {
 
 /// Yield the current thread's time slice voluntarily
 pub fn yield_now() {
+    if crate::kernel_objects::campaign_watch::exceeded(
+        crate::kernel_lowlevel::timer::get_nanoseconds(),
+    ) {
+        crate::kernel_objects::campaign_watch::expire_and_reset();
+    }
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     // Reset time slice to force preemption
     let s = scheduler();
@@ -2368,6 +2373,12 @@ pub fn yield_now() {
             let wake_ns =
                 crate::kernel_lowlevel::timer::get_nanoseconds().saturating_add(1_000_000);
             crate::kernel_lowlevel::timer::arm_at_nanoseconds(wake_ns);
+            if crate::kernel_objects::campaign_watch::exceeded(
+                crate::kernel_lowlevel::timer::get_nanoseconds(),
+            ) {
+                crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+                crate::kernel_objects::campaign_watch::expire_and_reset();
+            }
             crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
             if crate::kernel_lowlevel::cpu::irq_state_enabled(interrupt_state) {
                 crate::kernel_lowlevel::cpu::wait_for_interrupt();
@@ -2396,6 +2407,11 @@ pub fn yield_now() {
 
 /// Yield the current thread's time slice on a specific CPU
 pub fn yield_now_on_cpu(cpu_id: usize) {
+    if crate::kernel_objects::campaign_watch::exceeded(
+        crate::kernel_lowlevel::timer::get_nanoseconds(),
+    ) {
+        crate::kernel_objects::campaign_watch::expire_and_reset();
+    }
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let s = scheduler();
     s.charge_current_runtime(1);
