@@ -4,6 +4,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=smros-cargo.sh
+. "$SCRIPT_DIR/smros-cargo.sh"
 cd "$SCRIPT_DIR"
 
 echo "Building SMROS ARM64 Kernel..."
@@ -24,7 +26,8 @@ if ! command -v qemu-system-aarch64 &> /dev/null; then
 fi
 
 # Build the kernel
-SMROS_LOGICAL_CPUS="$SMROS_LOGICAL_CPUS" cargo build --release
+smros_print_build_jobs
+SMROS_LOGICAL_CPUS="$SMROS_LOGICAL_CPUS" smros_cargo build --release
 
 # Emit a raw AArch64 Linux Image for QEMU's -kernel loader.
 aarch64-linux-gnu-objcopy -O binary target/aarch64-unknown-none/release/smros kernel8.img

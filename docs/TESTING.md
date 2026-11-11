@@ -112,6 +112,31 @@ make script-check
 `host-fmt-check` checks formatting for the host-side unit-test crate.
 `script-check` runs `bash -n` over the shell scripts in `scripts/`.
 
+## Kernel build parallelism
+
+Kernel builds use `SMROS_BUILD_JOBS` for both Cargo's jobserver (`cargo -j`)
+and the kernel crate's LLVM codegen units
+(`CARGO_PROFILE_RELEASE_CODEGEN_UNITS` and `CARGO_PROFILE_DEV_CODEGEN_UNITS`).
+The default is 4. `panic = "abort"`, `opt-level = "s"`, `lto = false`, and
+incremental compilation stay as they are. Host tests in `tests/host` keep
+their own Cargo profile; `make ut` and `make it` only pass `-j`.
+
+`make build` prints the chosen value once:
+
+```text
+SMROS build jobs: 4 (cargo -j 4, codegen-units 4)
+```
+
+Override it for a build or a QEMU run:
+
+```bash
+make build SMROS_BUILD_JOBS=8
+make run SMROS_BUILD_JOBS=8
+```
+
+`./scripts/build.sh` reads the same variable. `./scripts/run.sh` and
+`./scripts/run-simple.sh` boot a kernel image that is already built.
+
 ## Build Test
 
 Run:

@@ -14,10 +14,13 @@ tock-registers = "0.8"
 
 [profile.dev]
 panic = "abort"
+incremental = true
+# Default matches SMROS_BUILD_JOBS. `make` overrides both profiles from that knob.
+codegen-units = 4
 
 [profile.release]
 panic = "abort"
 lto = false
 incremental = true
-codegen-units = 1
+codegen-units = 4
 opt-level = "s"
