@@ -53,7 +53,7 @@ export POSIX_QEMU_MEMORY
 export POSIX_SYSROOT
 export POSIX_QUALITY_EVIDENCE
 
-.PHONY: all apps build build-test aarch64-warning-check host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report coverage-ut coverage-it coverage-host coverage-st coverage skt st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
+.PHONY: all apps build build-test aarch64-warning-check host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report coverage-ut coverage-it coverage-host coverage-st coverage skt st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher vm-launcher-restart help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
 
 all: build
 
@@ -201,6 +201,11 @@ qemu-icmp:
 vm-launcher:
 	@./scripts/start-smros-vm-launcher.sh
 
+# Stop whatever is on port 7070 and start the on-disk launcher. `make run`
+# keeps a reachable daemon, including one started before the current script.
+vm-launcher-restart:
+	@SMROS_VM_LAUNCHER_RESTART=1 ./scripts/start-smros-vm-launcher.sh
+
 # Build SMROS guest ELF demos into host_shared/ (then rebuild the kernel).
 apps:
 	@$(MAKE) -C src/user_level/apps smros
@@ -344,6 +349,7 @@ help:
 	@echo "  gdb       - Run with QEMU GDB server"
 	@echo "  qemu-icmp - Persist/apply Linux host ICMP setup for QEMU user networking"
 	@echo "  vm-launcher - Start the host daemon used by shell vm -c Linux launches"
+	@echo "  vm-launcher-restart - Replace a running host daemon with this checkout"
 	@echo "  clean     - Clean build artifacts, keeping $(FXFS_DISK)"
 	@echo "  clean-fxfs - Remove the persistent FxFS disk image"
 	@echo "  verus-setup   - Install the pinned Verus toolchain locally"

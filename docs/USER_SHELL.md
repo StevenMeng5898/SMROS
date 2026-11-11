@@ -215,7 +215,11 @@ The parser recognizes `<name>`, `<cpu>`, `<memory>`, `<priority>` or
 If the config also includes a `<linux kernel="...">` tag, `vm -c` asks the
 host-side launcher daemon to open a separate QEMU window and boot that Linux
 kernel. `make run`, `make debug`, and `make gdb` start the host daemon
-automatically for the Makefile architecture targets. The legacy
+automatically for the Makefile architecture targets. `make vm-launcher`
+keeps a daemon that is already listening only when its PING fingerprint
+matches `scripts/smros-vm-launcher.py` (script sha256, git HEAD, and dirty
+flag). After `git pull`, run `make vm-launcher-restart` if a guest host-job
+summary still looks like an older launcher. The legacy
 `scripts/run.sh` and `scripts/run-simple.sh` helpers also start it, but those
 helpers are ARM64-only. For a manual QEMU
 boot, start it yourself first:

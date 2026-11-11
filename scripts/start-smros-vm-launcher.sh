@@ -10,25 +10,28 @@ HOST="${SMROS_VM_LAUNCHER_HOST:-0.0.0.0}"
 PROBE_HOST="${SMROS_VM_LAUNCHER_PROBE_HOST:-127.0.0.1}"
 LOG_FILE="${SMROS_VM_LAUNCHER_LOG:-$ROOT_DIR/smros-vm-launcher.log}"
 PID_FILE="${SMROS_VM_LAUNCHER_PID:-$ROOT_DIR/smros-vm-launcher.pid}"
-REQUIRED_VERSION=11
+REQUIRED_VERSION=12
 
 cd "$ROOT_DIR"
+COMMIT="$(git -C "$ROOT_DIR" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 
 probe_launcher() {
-python3 - "$PROBE_HOST" "$PORT" "$REQUIRED_VERSION" <<'PY'
+python3 - "$PROBE_HOST" "$PORT" "$REQUIRED_VERSION" "$SCRIPT_DIR/smros-vm-launcher.py" <<'PY'
+import importlib.util
 import socket
 import sys
 
 host = sys.argv[1]
 port = int(sys.argv[2])
 required_version = int(sys.argv[3])
+module_path = sys.argv[4]
 request = b"SMROS_VM_PING 1\nname=__smros_probe__\nend\n"
 try:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.2)
         sock.connect((host, port))
         sock.sendall(request)
-        response = sock.recv(256)
+        response = sock.recv(2048)
 except OSError:
     raise SystemExit(1)
 text = response.decode("utf-8", errors="replace")
@@ -40,6 +43,13 @@ fields = dict(
     if "=" in part
 )
 if int(fields.get("version", "0")) < required_version:
+    raise SystemExit(2)
+spec = importlib.util.spec_from_file_location("smros_vm_launcher_probe", module_path)
+if spec is None or spec.loader is None:
+    raise SystemExit(2)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+if not module.accept_running_launcher(text):
     raise SystemExit(2)
 if fields.get("monitor_none") != "1":
     raise SystemExit(1)
@@ -81,19 +91,63 @@ stop_stale_launcher() {
     fi
 }
 
-if probe_launcher
-then
-    echo "SMROS VM launcher already reachable on $PROBE_HOST:$PORT"
-    exit 0
+launcher_action() {
+    python3 "$SCRIPT_DIR/smros-vm-launcher.py" --action "$PROBE_HOST" "$PORT"
+}
+
+drain_host_jobs() {
+    local attempt action
+    attempt=1
+    while [ "$attempt" -le 360 ]; do
+        action="$(launcher_action || echo down)"
+        if [ "$action" != "drain" ]; then
+            return 0
+        fi
+        echo "Draining in-flight Hermes host jobs before replacing the launcher"
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    echo "SMROS VM launcher still has in-flight host jobs; not replacing it" >&2
+    exit 1
+}
+
+if [ "${SMROS_VM_LAUNCHER_RESTART:-0}" != "1" ]; then
+    action="$(launcher_action || echo down)"
+    if [ "$action" = "keep" ]; then
+        echo "SMROS VM launcher already reachable on $PROBE_HOST:$PORT (fingerprint matches)"
+        exit 0
+    fi
 fi
 
+drain_host_jobs
+if [ "${SMROS_VM_LAUNCHER_RESTART:-0}" = "1" ]; then
+    echo "Restarting SMROS VM launcher on $HOST:$PORT"
+else
+    echo "Replacing SMROS VM launcher on $HOST:$PORT (missing, old, or fingerprint mismatch)"
+fi
 stop_stale_launcher
 
+# Drop the parent make's directory and locale. `make run` otherwise leaves
+# MAKEFLAGS/MAKELEVEL on this daemon, and a zh_CN make then reports host jobs
+# in Chinese.
+LAUNCHER_ENV=(
+    env
+    -u MAKEFLAGS
+    -u MFLAGS
+    -u MAKELEVEL
+    -u GNUMAKEFLAGS
+    -u MAKEFILES
+    -u MAKEOVERRIDES
+    -u CURDIR
+    LC_ALL=C
+    LANG=C
+    LANGUAGE=C
+)
 echo "Starting SMROS VM launcher on $HOST:$PORT"
 if command -v setsid >/dev/null 2>&1; then
-    nohup setsid python3 scripts/smros-vm-launcher.py --host "$HOST" --port "$PORT" >"$LOG_FILE" 2>&1 < /dev/null &
+    nohup setsid "${LAUNCHER_ENV[@]}" python3 scripts/smros-vm-launcher.py --host "$HOST" --port "$PORT" >"$LOG_FILE" 2>&1 < /dev/null &
 else
-    nohup python3 scripts/smros-vm-launcher.py --host "$HOST" --port "$PORT" >"$LOG_FILE" 2>&1 < /dev/null &
+    nohup "${LAUNCHER_ENV[@]}" python3 scripts/smros-vm-launcher.py --host "$HOST" --port "$PORT" >"$LOG_FILE" 2>&1 < /dev/null &
 fi
 echo "$!" > "$PID_FILE"
 

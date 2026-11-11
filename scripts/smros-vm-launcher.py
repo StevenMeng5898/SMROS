@@ -12,6 +12,8 @@ asks this daemon to spawn a real QEMU process for Linux VM configs.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import shlex
 import signal
@@ -27,7 +29,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 7070
 MAX_REQUEST = 4096
-LAUNCHER_VERSION = 11
+LAUNCHER_VERSION = 12
 DEFAULT_LAUNCH_STABLE_SECONDS = 2.0
 DEFAULT_LAUNCH_ATTEMPTS = 3
 DEFAULT_LAUNCH_RETRY_DELAY_SECONDS = 0.4
@@ -221,12 +223,131 @@ def stop_qemu(values: dict[str, str]) -> str:
     return "OK stopped=none\n"
 
 
+def git_commit() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    commit = result.stdout.strip()
+    if result.returncode == 0 and commit:
+        return commit
+    return "unknown"
+
+
+def git_dirty() -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(ROOT),
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def script_sha256() -> str:
+    digest = hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest()
+    return digest
+
+
+def code_fingerprint() -> str:
+    """Identity of the on-disk launcher.
+
+    `make run` used to keep any version>=11 daemon. The fingerprint changes
+    when this file changes or the git checkout is dirty, so the start script
+    replaces that process instead of leaving the old sanitizer in place.
+    """
+    dirty = "-dirty" if git_dirty() else ""
+    return wire_token(f"{git_commit()}{dirty}:{script_sha256()}")
+
+
+def wire_token(value: str, limit: int = 180) -> str:
+    chars = []
+    for char in value:
+        if char.isascii() and char.isprintable() and not char.isspace():
+            chars.append(char)
+        else:
+            chars.append("_")
+    token = "".join(chars)
+    return token[:limit] or "unknown"
+
+
+def argv_token(job: str) -> str:
+    return wire_token(",".join(host_make_command(job)), limit=220)
+
+
+COMMIT = git_commit()
+FINGERPRINT = code_fingerprint()
+
+
 def launcher_status() -> str:
     return (
-        f"OK version={LAUNCHER_VERSION} monitor_none=1 stale_qemu_cleanup=1 "
+        f"OK version={LAUNCHER_VERSION} commit={wire_token(COMMIT)} "
+        f"fingerprint={FINGERPRINT} "
+        f"root={wire_token(str(ROOT))} argv_ut={argv_token('ut')} "
+        f"host_jobs_inflight={host_jobs_inflight()} "
+        "monitor_none=1 stale_qemu_cleanup=1 "
         "trace_sync=1 stable_launch=1 vm_log=1 hermes_test_jobs=1 linux_boot=1 "
         "launch_retry=1 async_test_jobs=1\n"
     )
+
+
+def accept_running_launcher(status_text: str) -> bool:
+    """True only for a current daemon bound to this checkout.
+
+    Version 11 daemons already advertised hermes_test_jobs=1, so `make run`
+    used to leave a pre-fix process in place. That process kept the old
+    summary sanitizer (Unicode letters preserved, so zh_CN make errors stayed
+    Chinese and punctuation became underscores).
+    """
+    if not status_text.startswith("OK "):
+        return False
+    fields = {
+        part.split("=", 1)[0]: part.split("=", 1)[1]
+        for part in status_text.split()
+        if "=" in part
+    }
+    try:
+        version = int(fields.get("version", "0"))
+    except ValueError:
+        return False
+    if version < LAUNCHER_VERSION:
+        return False
+    for key in (
+        "monitor_none",
+        "trace_sync",
+        "stable_launch",
+        "vm_log",
+        "hermes_test_jobs",
+        "linux_boot",
+        "launch_retry",
+        "async_test_jobs",
+    ):
+        if fields.get(key) != "1":
+            return False
+    if fields.get("root") != wire_token(str(ROOT)):
+        return False
+    if fields.get("fingerprint") != FINGERPRINT:
+        return False
+    if fields.get("argv_ut") != argv_token("ut"):
+        return False
+    return True
 
 
 def parse_test_job(values: dict[str, str]) -> tuple[str, ...]:
@@ -298,8 +419,93 @@ def next_job_token() -> str:
     return token
 
 
+def jobs_state_path() -> Path:
+    return ROOT / "target" / "hermes-tests" / "host-jobs.json"
+
+
+def persist_jobs_locked() -> None:
+    path = jobs_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"next": NEXT_JOB_TOKEN, "jobs": JOBS}
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload), encoding="utf-8")
+    temporary.replace(path)
+
+
+def load_jobs() -> None:
+    global NEXT_JOB_TOKEN
+    path = jobs_state_path()
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    jobs = payload.get("jobs")
+    if isinstance(jobs, dict):
+        JOBS.clear()
+        JOBS.update(jobs)
+    try:
+        NEXT_JOB_TOKEN = int(payload.get("next", NEXT_JOB_TOKEN))
+    except (TypeError, ValueError):
+        return
+
+
+def reset_jobs_for_tests() -> None:
+    global NEXT_JOB_TOKEN
+    with JOBS_LOCK:
+        JOBS.clear()
+        NEXT_JOB_TOKEN = 1
+        path = jobs_state_path()
+        if path.exists():
+            path.unlink()
+
+
+def host_jobs_inflight() -> int:
+    with JOBS_LOCK:
+        return sum(1 for rec in JOBS.values() if rec.get("state") == "running")
+
+
+def classify_launcher(status_text: str) -> str:
+    """keep the daemon, drain a live host job, or replace it.
+
+    Guest reboot never calls this. Only the host start script does, and it
+    waits out `drain` before stopping the process so an accepted ut/it job
+    can still be polled.
+    """
+    if accept_running_launcher(status_text):
+        return "keep"
+    fields = {
+        part.split("=", 1)[0]: part.split("=", 1)[1]
+        for part in status_text.split()
+        if "=" in part
+    }
+    try:
+        inflight = int(fields.get("host_jobs_inflight", "0"))
+    except ValueError:
+        inflight = 0
+    if inflight > 0:
+        return "drain"
+    return "replace"
+
+
+def reusable_job_locked(job: str) -> str | None:
+    for token, rec in reversed(list(JOBS.items())):
+        if rec.get("job") != job:
+            continue
+        if rec.get("state") == "running" or (
+            rec.get("state") == "done" and not rec.get("acked")
+        ):
+            return str(token)
+    return None
+
+
 def prune_jobs_locked() -> None:
-    done = [token for token, rec in JOBS.items() if rec.get("state") != "running"]
+    done = [
+        token
+        for token, rec in JOBS.items()
+        if rec.get("state") != "running" and rec.get("acked")
+    ]
     overflow = max(0, len(JOBS) - MAX_JOB_RECORDS)
     for token in done[:overflow]:
         JOBS.pop(token, None)
@@ -310,11 +516,18 @@ def start_test_job(values: dict[str, str]) -> str:
     job = values["job"]
     with JOBS_LOCK:
         prune_jobs_locked()
-        for token, rec in JOBS.items():
-            if rec.get("job") == job and rec.get("state") == "running":
-                return f"OK job={job} accepted=1 token={token}\n"
-        token = next_job_token()
-        JOBS[token] = {"job": job, "state": "running", "response": None}
+        token = reusable_job_locked(job)
+        if token is None:
+            token = next_job_token()
+            JOBS[token] = {
+                "job": job,
+                "state": "running",
+                "response": None,
+                "acked": False,
+            }
+            persist_jobs_locked()
+        else:
+            return f"OK job={job} accepted=1 token={token}\n"
     thread = threading.Thread(
         target=execute_test_job,
         args=(token, job),
@@ -340,6 +553,8 @@ def execute_test_job(token: str, job: str) -> None:
         if rec is not None:
             rec["state"] = "done"
             rec["response"] = response
+            rec["acked"] = False
+            persist_jobs_locked()
 
 
 def test_job_status(values: dict[str, str]) -> str:
@@ -355,6 +570,8 @@ def test_job_status(values: dict[str, str]) -> str:
             raise ValueError("token job mismatch")
         if rec.get("state") == "running":
             return f"OK job={rec['job']} token={token} running=1\n"
+        rec["acked"] = True
+        persist_jobs_locked()
         return str(rec.get("response") or f"ERR job={rec['job']} status=failed\n")
 
 
@@ -400,12 +617,14 @@ def run_test_job(values: dict[str, str]) -> str:
         write_test_log(job, output)
         summary = bounded_test_summary(output)
         print(
-            f"smros-vm-launcher: job={job} status={result.returncode} attempt={attempt}/{attempts}",
+            f"smros-vm-launcher: job={job} status={result.returncode} "
+            f"attempt={attempt}/{attempts} commit={COMMIT} root={ROOT} argv={cmd}",
             flush=True,
         )
         if result.returncode == 0:
             return f"OK job={job} status=0 summary={summary}\n"
-        last_response = f"ERR job={job} status={result.returncode} summary={summary}\n"
+        identified = f"{summary}{job_identity_suffix(job)}"
+        last_response = f"ERR job={job} status={result.returncode} summary={identified}\n"
         if attempt < attempts:
             time.sleep(test_job_retry_delay_seconds())
     return last_response
@@ -445,6 +664,15 @@ def bounded_test_summary(output: str) -> str:
             safe_chars.append("_")
     safe = "".join(safe_chars)
     return safe[:160] or "no-output"
+
+
+def job_identity_suffix(job: str) -> str:
+    return (
+        f"@fingerprint={FINGERPRINT}"
+        f"@commit={wire_token(COMMIT)}"
+        f"@root={wire_token(str(ROOT))}"
+        f"@argv={argv_token(job)}"
+    )
 
 
 def sync_trace(values: dict[str, str]) -> str:
@@ -804,15 +1032,47 @@ class LauncherServer(socketserver.ThreadingTCPServer):
         super().server_bind()
 
 
+def probe_launcher_action(host: str, port: int) -> str:
+    request = b"SMROS_VM_PING 1\nname=__smros_probe__\nend\n"
+    try:
+        with socket.create_connection((host, port), timeout=0.2) as sock:
+            sock.sendall(request)
+            data = sock.recv(4096)
+    except OSError:
+        return "down"
+    return classify_launcher(data.decode("utf-8", errors="replace"))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="SMROS host VM launcher")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument(
+        "--action",
+        nargs=2,
+        metavar=("HOST", "PORT"),
+        help="Print keep, drain, replace, or down for the launcher on HOST:PORT",
+    )
     args = parser.parse_args()
+    if args.action:
+        print(probe_launcher_action(args.action[0], int(args.action[1])), flush=True)
+        return 0
 
+    load_jobs()
     with LauncherServer((args.host, args.port), Handler) as server:
-        print(f"smros-vm-launcher: listening on {args.host}:{args.port}", flush=True)
-        print("smros-vm-launcher: paths are resolved relative to repo root", flush=True)
+        print(
+            f"smros-vm-launcher: listening on {args.host}:{args.port} "
+            f"version={LAUNCHER_VERSION} commit={COMMIT} fingerprint={FINGERPRINT} root={ROOT}",
+            flush=True,
+        )
+        print(
+            "smros-vm-launcher: argv_ut=" + " ".join(host_make_command("ut")),
+            flush=True,
+        )
+        print(
+            "smros-vm-launcher: argv_it=" + " ".join(host_make_command("it")),
+            flush=True,
+        )
         try:
             server.serve_forever()
         except KeyboardInterrupt:
