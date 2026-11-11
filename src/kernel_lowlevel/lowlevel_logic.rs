@@ -112,6 +112,16 @@ pub(crate) fn timer_program_compare(periodic: u64, armed: u64, requested: u64) -
     smros_ll_timer_program_compare_body!(periodic, armed, requested)
 }
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn timer_compare_needs_rearm(hardware: u64, now: u64) -> bool {
+    smros_ll_timer_compare_needs_rearm_body!(hardware, now)
+}
+
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn timer_rearm_compare(now: u64, period: u64) -> u64 {
+    smros_ll_timer_rearm_compare_body!(now, period)
+}
+
 pub(crate) fn timer_tick_count(counter: u64, period: u64) -> u64 {
     smros_ll_timer_tick_count_body!(counter, period)
 }

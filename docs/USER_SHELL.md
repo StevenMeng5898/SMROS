@@ -538,7 +538,13 @@ catalog (`testsc`, `fuzzsc` with the campaign seed, `iterations=50`, and `time=5
 Hermes may also `exec posixtest status` or
 `exec posixtest test getpid/1-1.c`; `posixtest all` stays forbidden.
 The finite iteration count has no
-policy maximum but must fit the platform `usize`. The command prints the
+policy maximum but must fit the platform `usize`. Each iteration prints
+`Hermes test-all iteration N/M op=<name>` before the guest operation runs, so a
+stall names the operation. The guest op has a 120s deadline. If it is still
+running, the kernel prints `FAIL iteration=N op=<name> reason=timeout` plus the
+timer compare, resets, and the resumed campaign counts that op as a timeout and
+continues with the remaining iterations and their host jobs. Reboot rounds
+still flush FxFS and resume rather than counting as timeouts. The command prints the
 effective seed for replay and persists a bounded report at
 `/data/hermes/tests/latest.log`. Reports retain aggregate totals and the first
 64 round details, then record how many details were omitted. `hermes test-all`

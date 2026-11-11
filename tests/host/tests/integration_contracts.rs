@@ -6699,6 +6699,10 @@ fn hermes_test_resumes_after_reboot() {
     assert!(policy.contains("host_jobs_pending"));
     assert!(policy.contains("resume_pending_host_iteration"));
     assert!(shell.contains("Hermes resume test-all"));
+    assert!(shell.contains(" op="));
+    assert!(shell.contains("reason=timeout"));
+    assert!(shell.contains("campaign_watch::arm"));
+    assert!(shell.contains("op_running"));
     assert!(shell.contains("wait_for_host_transport"));
     let resume_start = shell
         .find("fn maybe_resume_hermes_campaign(")

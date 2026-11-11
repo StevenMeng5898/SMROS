@@ -42,3 +42,7 @@ pub fn arm_next_tick() {}
 pub fn arm_at_nanoseconds(_deadline: u64) {}
 
 pub fn clear_interrupt() {}
+
+pub fn debug_compare_snapshot() -> (u64, u64) {
+    (get_nanoseconds(), 0)
+}

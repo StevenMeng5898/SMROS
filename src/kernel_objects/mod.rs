@@ -16,6 +16,7 @@
 #![allow(static_mut_refs)]
 
 // Module declarations
+pub mod campaign_watch;
 pub mod channel;
 pub mod compat;
 pub mod fifo;

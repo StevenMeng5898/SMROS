@@ -500,6 +500,24 @@ macro_rules! smros_ll_timer_program_compare_body {
     }};
 }
 
+/// GICv3 delivers the physical timer as an edge. A compare that is already
+/// behind CNTPCT does not raise that edge again until software writes a
+/// strictly later value, so WFI would sleep forever on the stale CVAL.
+#[allow(unused_macros)]
+macro_rules! smros_ll_timer_compare_needs_rearm_body {
+    ($hardware:expr, $now:expr) => {{
+        $hardware <= $now
+    }};
+}
+
+#[allow(unused_macros)]
+macro_rules! smros_ll_timer_rearm_compare_body {
+    ($now:expr, $period:expr) => {{
+        let period = if $period == 0 { 1 } else { $period };
+        $now.saturating_add(period)
+    }};
+}
+
 macro_rules! smros_ll_timer_tick_count_body {
     ($counter:expr, $period:expr) => {{
         if $period == 0 {

@@ -124,6 +124,10 @@ pub fn clear_interrupt() {
     arm_next_tick();
 }
 
+pub fn debug_compare_snapshot() -> (u64, u64) {
+    (read_time(), PROGRAMMED_COMPARE.load(Ordering::Acquire))
+}
+
 #[inline(always)]
 fn read_time() -> u64 {
     crate::kernel_lowlevel::cpu::read_cycle_counter()

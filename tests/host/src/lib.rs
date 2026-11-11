@@ -8442,6 +8442,14 @@ mod lowlevel_logic {
         smros_ll_timer_program_compare_body!(periodic, armed, requested)
     }
 
+    pub(crate) fn timer_compare_needs_rearm(hardware: u64, now: u64) -> bool {
+        smros_ll_timer_compare_needs_rearm_body!(hardware, now)
+    }
+
+    pub(crate) fn timer_rearm_compare(now: u64, period: u64) -> u64 {
+        smros_ll_timer_rearm_compare_body!(now, period)
+    }
+
     #[test]
     fn lowlevel_alignment_and_segments_reject_overflow() {
         assert_eq!(smros_ll_align_up_body!(5usize, 4usize), Some(8));
@@ -8495,6 +8503,16 @@ mod lowlevel_logic {
         assert_eq!(timer_program_compare(1_000, 900, 950), 900);
         assert_eq!(timer_program_compare(1_000, 0, 950), 950);
         assert_eq!(timer_program_compare(2_000, 1_500, 0), 1_500);
+    }
+
+    #[test]
+    fn stale_timer_compare_must_be_rewritten_before_wfi() {
+        assert!(timer_compare_needs_rearm(1_000, 1_000));
+        assert!(timer_compare_needs_rearm(1_000, 1_001));
+        assert!(!timer_compare_needs_rearm(1_001, 1_000));
+        assert_eq!(timer_rearm_compare(1_000, 10), 1_010);
+        assert_eq!(timer_rearm_compare(1_000, 0), 1_001);
+        assert_eq!(timer_rearm_compare(u64::MAX, 50), u64::MAX);
     }
 
     #[test]
@@ -11054,6 +11072,10 @@ fn hermes_resume_state_round_trips_and_continues_after_reboot() {
         host_it_pass: 2,
         host_it_fail: 1,
         host_jobs_pending: true,
+        op_running: false,
+        op_timeouts: 0,
+        pending_op_len: 0,
+        pending_op: [0; 64],
     };
     let mut buf = [0u8; HERMES_RESUME_TEXT_CAPACITY];
     let written = format_resume_state(&state, &mut buf).expect("format resume");
@@ -11080,7 +11102,29 @@ fn hermes_resume_state_round_trips_and_continues_after_reboot() {
     let legacy = "kind=test-all\nseed=7\niterations=8\nmode=ops\nnext_round=3\nnative=pass\ncompleted=3\ndenied=0\ninvalid=0\nunknown=0\nhost_ut_pass=3\nhost_ut_fail=0\nhost_it_pass=2\nhost_it_fail=1\n";
     let parsed_legacy = parse_resume_state(legacy).expect("legacy resume without pending flag");
     assert!(!parsed_legacy.host_jobs_pending);
+    assert!(!parsed_legacy.op_running);
+    assert_eq!(parsed_legacy.op_timeouts, 0);
+    assert_eq!(parsed_legacy.pending_op_str(), "");
     assert_eq!(parse_resume_state("kind=test-all\nseed=1\n"), None);
+
+    let iteration_87 = campaign_case_for_mode(
+        HermesCampaignMode::Ops,
+        campaign_case_index_for_mode(1, 86, HermesCampaignMode::Ops),
+    )
+    .expect("default seed iteration 87");
+    assert_eq!(iteration_87.command, "hermes");
+    assert_eq!(iteration_87.args[0], "test");
+    let mut label = [0u8; 64];
+    let len = hermes_shell_logic::format_op_label(
+        iteration_87.command,
+        &iteration_87.args[..iteration_87.arg_count],
+        &mut label,
+    )
+    .expect("op label");
+    assert_eq!(
+        core::str::from_utf8(&label[..len]).unwrap(),
+        "hermes test"
+    );
 }
 
 #[test]
@@ -11332,6 +11376,10 @@ fn hermes_campaign_covers_product_api_levels() {
         host_it_pass: 0,
         host_it_fail: 0,
         host_jobs_pending: false,
+        op_running: false,
+        op_timeouts: 0,
+        pending_op_len: 0,
+        pending_op: [0; 64],
     };
     let mut buf = [0u8; 768];
     let written = format_resume_state(&resume, &mut buf).expect("format resume");

@@ -5572,21 +5572,45 @@ fn run_hermes_test_all_inner(
         resume.map(|state| state.host_it_fail).unwrap_or(0),
     ];
     let start_round = resume.map(|state| state.next_round).unwrap_or(0);
+    let mut op_timeouts = resume.map(|state| state.op_timeouts).unwrap_or(0);
 
     for round in start_round..options.iterations {
-        ctx.serial.write_str("Hermes test-all iteration ");
-        print_usize(&mut ctx.serial, round.saturating_add(1));
-        ctx.serial.write_str("/");
-        print_usize(&mut ctx.serial, options.iterations);
-        ctx.serial.write_str("\n");
-
+        let iteration = round.saturating_add(1);
         let Some(case) = hermes_campaign_round_case(seed, round, options.mode) else {
+            ctx.serial.write_str("Hermes test-all iteration ");
+            print_usize(&mut ctx.serial, iteration);
+            ctx.serial.write_str("/");
+            print_usize(&mut ctx.serial, options.iterations);
+            ctx.serial.write_str(" op=unknown\n");
             random_unknown = random_unknown.saturating_add(1);
             continue;
         };
+        let mut seed_buf = [0u8; 32];
+        let mut label_buf = [0u8; 96];
+        let (command, args, arg_count) = bound_hermes_campaign_argv(&case, seed, &mut seed_buf);
+        let label_len = crate::user_level::services::hermes_shell_logic_shared::format_op_label(
+            command,
+            &args[..arg_count],
+            &mut label_buf,
+        )
+        .unwrap_or(0);
+        let op_label = core::str::from_utf8(&label_buf[..label_len]).unwrap_or(command);
+        ctx.serial.write_str("Hermes test-all iteration ");
+        print_usize(&mut ctx.serial, iteration);
+        ctx.serial.write_str("/");
+        print_usize(&mut ctx.serial, options.iterations);
+        ctx.serial.write_str(" op=");
+        ctx.serial.write_str(op_label);
+        ctx.serial.write_str("\n");
 
         random_completed = random_completed.saturating_add(1);
-        persist_hermes_resume_state(&HermesResumeState {
+        let op_started = crate::kernel_lowlevel::timer::get_nanoseconds();
+        crate::kernel_objects::campaign_watch::arm(
+            op_started.saturating_add(crate::kernel_objects::campaign_watch::OP_DEADLINE_NANOS),
+            iteration,
+            op_label,
+        );
+        let mut checkpoint = HermesResumeState {
             kind: HermesResumeKind::TestAll,
             seed,
             iterations: options.iterations,
@@ -5602,30 +5626,41 @@ fn run_hermes_test_all_inner(
             host_it_pass: host_passes[1],
             host_it_fail: host_failures[1],
             host_jobs_pending: true,
-        });
+            op_running: !campaign_case_is_reboot(case.command),
+            op_timeouts,
+            pending_op_len: 0,
+            pending_op: [0; 64],
+        };
+        if !campaign_case_is_reboot(case.command) {
+            checkpoint.set_pending_op(op_label);
+        }
+        persist_hermes_resume_state(&checkpoint);
         if campaign_case_is_reboot(case.command) {
             record_hermes_campaign_round(round, seed, &case, &mut report);
             persist_hermes_resume_state(&HermesResumeState {
-                kind: HermesResumeKind::TestAll,
-                seed,
-                iterations: options.iterations,
-                mode: options.mode,
-                next_round: round.saturating_add(1),
-                native_ok,
-                completed: random_completed,
-                denied: random_denied,
-                invalid: random_invalid,
-                unknown: random_unknown,
-                host_ut_pass: host_passes[0],
-                host_ut_fail: host_failures[0],
-                host_it_pass: host_passes[1],
-                host_it_fail: host_failures[1],
                 host_jobs_pending: true,
+                op_running: false,
+                pending_op_len: 0,
+                ..checkpoint
             });
+            crate::kernel_objects::campaign_watch::clear();
             let _ = execute_hermes_command(ctx, case.command, &case.args[..case.arg_count]);
             return;
         }
 
+        let status = execute_hermes_campaign_round(ctx, seed, round, options.mode, &mut report);
+        let op_late = crate::kernel_lowlevel::timer::get_nanoseconds().saturating_sub(op_started)
+            >= crate::kernel_objects::campaign_watch::OP_DEADLINE_NANOS;
+        crate::kernel_objects::campaign_watch::clear();
+        if op_late {
+            ctx.serial.write_str("FAIL iteration=");
+            print_usize(&mut ctx.serial, iteration);
+            ctx.serial.write_str(" op=");
+            ctx.serial.write_str(op_label);
+            ctx.serial.write_str(" reason=timeout\n");
+            op_timeouts = op_timeouts.saturating_add(1);
+            random_completed = random_completed.saturating_sub(1);
+        }
         persist_hermes_resume_state(&HermesResumeState {
             kind: HermesResumeKind::TestAll,
             seed,
@@ -5642,8 +5677,11 @@ fn run_hermes_test_all_inner(
             host_it_pass: host_passes[1],
             host_it_fail: host_failures[1],
             host_jobs_pending: true,
+            op_running: false,
+            op_timeouts,
+            pending_op_len: 0,
+            pending_op: [0; 64],
         });
-        let status = execute_hermes_campaign_round(ctx, seed, round, options.mode, &mut report);
         match status {
             HermesCommandStatus::Completed => {}
             HermesCommandStatus::Denied => random_denied = random_denied.saturating_add(1),
@@ -5672,6 +5710,10 @@ fn run_hermes_test_all_inner(
             host_it_pass: host_passes[1],
             host_it_fail: host_failures[1],
             host_jobs_pending: false,
+            op_running: false,
+            op_timeouts,
+            pending_op_len: 0,
+            pending_op: [0; 64],
         });
     }
 
@@ -5686,6 +5728,7 @@ fn run_hermes_test_all_inner(
         random_unknown,
         &host_passes,
         &host_failures,
+        op_timeouts,
         &mut report,
     );
 }
@@ -5769,6 +5812,10 @@ fn run_hermes_random_inner(
                 host_it_pass: 0,
                 host_it_fail: 0,
                 host_jobs_pending: false,
+                op_running: false,
+                op_timeouts: 0,
+                pending_op_len: 0,
+                pending_op: [0; 64],
             });
             if round.saturating_add(1) >= options.iterations {
                 finish_hermes_random_campaign(
@@ -5802,6 +5849,10 @@ fn run_hermes_random_inner(
             host_it_pass: 0,
             host_it_fail: 0,
             host_jobs_pending: false,
+            op_running: false,
+            op_timeouts: 0,
+            pending_op_len: 0,
+            pending_op: [0; 64],
         });
         let status = execute_bound_hermes_campaign_case(ctx, seed, &case);
         count_hermes_command_status(
@@ -5974,6 +6025,18 @@ fn maybe_resume_hermes_campaign(ctx: &mut ShellContext) {
                     ctx.serial.write_str("\n");
                 }
             }
+            if state.op_running {
+                ctx.serial.write_str("FAIL iteration=");
+                print_usize(&mut ctx.serial, state.next_round);
+                ctx.serial.write_str(" op=");
+                ctx.serial.write_str(state.pending_op_str());
+                ctx.serial.write_str(" reason=timeout\n");
+                state.op_timeouts = state.op_timeouts.saturating_add(1);
+                state.completed = state.completed.saturating_sub(1);
+                state.op_running = false;
+                state.pending_op_len = 0;
+                persist_hermes_resume_state(&state);
+            }
             if let Some(iteration) = resume_pending_host_iteration(&state) {
                 let mut host_passes = [state.host_ut_pass, state.host_it_pass];
                 let mut host_failures = [state.host_ut_fail, state.host_it_fail];
@@ -6140,6 +6203,7 @@ native=",
         state.unknown,
         &[state.host_ut_pass, state.host_it_pass],
         &[state.host_ut_fail, state.host_it_fail],
+        state.op_timeouts,
         &mut report,
     );
 }
@@ -6155,6 +6219,7 @@ fn finish_hermes_test_all(
     random_unknown: usize,
     host_passes: &[usize; 2],
     host_failures: &[usize; 2],
+    op_timeouts: usize,
     report: &mut String,
 ) {
     use crate::user_level::services::hermes_shell_logic_shared::campaign_report_omitted_rounds;
@@ -6174,6 +6239,8 @@ fn finish_hermes_test_all(
     append_usize_shell(report, random_invalid);
     report.push_str(" unknown=");
     append_usize_shell(report, random_unknown);
+    report.push_str(" op_timeouts=");
+    append_usize_shell(report, op_timeouts);
     report.push('\n');
     let jobs = [HermesHostTestJob::Ut, HermesHostTestJob::It];
     for (job_index, job) in jobs.iter().copied().enumerate() {
@@ -6187,6 +6254,7 @@ fn finish_hermes_test_all(
     }
 
     let overall = native_ok
+        && op_timeouts == 0
         && random_completed == iterations
         && host_passes.iter().all(|passes| *passes == iterations);
     report.push_str("overall=");
