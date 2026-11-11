@@ -229,13 +229,27 @@ def launcher_status() -> str:
     )
 
 
-def parse_test_job(values: dict[str, str]) -> tuple[str, str]:
+def parse_test_job(values: dict[str, str]) -> tuple[str, ...]:
     if set(values) != {"job"}:
         raise ValueError("test request requires exactly one job field")
     job = values["job"]
     if job not in {"ut", "it"}:
         raise ValueError(f"unsupported test job: {job}")
-    return ("make", job)
+    return tuple(host_make_command(job))
+
+
+def host_make_command(job: str) -> list[str]:
+    """Always build the repo-root ut/it rules, independent of the caller's cwd."""
+    if job not in {"ut", "it"}:
+        raise ValueError(f"unsupported test job: {job}")
+    return [
+        "make",
+        "-C",
+        str(ROOT),
+        "-f",
+        str(ROOT / "Makefile"),
+        job,
+    ]
 
 
 def test_job_attempts() -> int:
@@ -262,10 +276,16 @@ def test_job_retry_delay_seconds() -> float:
 
 def test_job_environment() -> dict[str, str]:
     env = os.environ.copy()
-    env.pop("MAKEFLAGS", None)
-    env.pop("MFLAGS", None)
-    env.pop("RUSTFLAGS", None)
+    for name in list(env):
+        # A parent `make -C somewhere` stores that directory in MAKEFLAGS /
+        # GNUMAKEFLAGS and CURDIR. Leaving it set makes `make ut` miss the
+        # repo-root rules (`make[1]: *** No rule to make target 'ut'`).
+        if name.startswith("MAKE") or name in {"MFLAGS", "GNUMAKEFLAGS", "CURDIR", "RUSTFLAGS"}:
+            env.pop(name, None)
     env["CARGO_TERM_COLOR"] = "never"
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    env["LANGUAGE"] = "C"
     return env
 
 
@@ -417,7 +437,13 @@ def bounded_test_summary(output: str) -> str:
         ):
             preferred.append(line)
     summary = preferred[-1] if preferred else (usable[-1] if usable else "no-output")
-    safe = "".join(char if char.isalnum() or char in ".:_-" else "_" for char in summary)
+    safe_chars = []
+    for char in summary:
+        if char.isascii() and char.isprintable() and not char.isspace():
+            safe_chars.append(char)
+        else:
+            safe_chars.append("_")
+    safe = "".join(safe_chars)
     return safe[:160] or "no-output"
 
 

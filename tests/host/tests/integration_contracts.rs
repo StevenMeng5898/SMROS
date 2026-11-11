@@ -4528,8 +4528,15 @@ fn linux_root_task_and_syscall_frame_have_bounded_owners() {
         .find("linux_task::reset()")
         .expect("Linux task reset");
     let unregister = reset_body
-        .find("linux_process_memory::unregister(pid)")
+        .find("linux_process_memory::unregister_after_switch(pid)")
         .expect("process address-space unregister");
+    let launch_reset = reset_body
+        .find("linux_process_memory::reset_launch()")
+        .expect("remaining address spaces are cleared after detach");
+    assert!(
+        !reset_body.contains("linux_process_memory::unregister(pid)"),
+        "reset still runs on this thread's kernel stack and must defer page-table free"
+    );
     let reset = &syscall[reset..];
     let descriptors = reset.find("sys_close(fd)").expect("descriptor reset");
     let mappings = reset
@@ -4538,7 +4545,8 @@ fn linux_root_task_and_syscall_frame_have_bounded_owners() {
     let signals = reset
         .find("reset_linux_signal_timer_state()")
         .expect("signal reset");
-    assert!(tasks < unregister && tasks < descriptors && tasks < mappings && tasks < signals);
+    assert!(tasks < unregister && unregister < launch_reset);
+    assert!(tasks < descriptors && tasks < mappings && tasks < signals);
 
     assert!(syscall.contains("linux_process::current_pid()"));
     assert!(syscall.contains("linux_process::current_parent_pid()"));
@@ -9791,6 +9799,7 @@ fn linux_process_memory_review_paths_are_checked_and_reversible() {
         .expect("read ELF launcher");
 
     assert!(process_memory.contains("pub(crate) fn unregister(pid: usize)"));
+    assert!(process_memory.contains("pub(crate) fn unregister_after_switch(pid: usize)"));
     assert!(process_memory.contains(".position(|memory| memory.pid == pid)"));
 
     for (start_marker, end_marker) in [
@@ -10004,7 +10013,11 @@ fn linux_user_struct_paths_use_process_checked_copies() {
         .find("pub fn reset_linux_process_state(")
         .expect("Linux process reset");
     let reset = braced_body(&syscall[reset_start..]);
-    assert!(reset.contains("linux_process_memory::unregister("));
+    assert!(reset.contains("linux_process_memory::unregister_after_switch(pid)"));
+    assert!(
+        !reset.contains("linux_process_memory::unregister(pid)"),
+        "reset must not free the live address space before the thread switches away"
+    );
     assert!(reset.contains("linux_process_memory::reset_launch("));
 }
 
@@ -11352,10 +11365,63 @@ fn linux_wait_and_exit_runtime_own_blocking_reaping_and_safe_teardown() {
         .find("retire_process_tasks(")
         .expect("current process tasks are retired");
     let unregister = exit
-        .find("linux_process_memory::unregister(process.pid)")
+        .find("linux_process_memory::unregister_after_switch(process.pid)")
         .expect("exiting memory is unregistered");
+    assert!(
+        !exit.contains("linux_process_memory::unregister(process.pid)"),
+        "the exiting thread is still on its kernel stack"
+    );
     assert!(deactivate < retire_tasks && retire_tasks < unregister);
     assert!(memory.contains("mmu::activate_bootstrap_on_current_cpu()"));
+
+    let deferred = braced_body(
+        &memory[memory
+            .find("pub(crate) fn unregister_after_switch(pid: usize)")
+            .expect("deferred unregister")..],
+    );
+    assert!(deferred.contains("detach_process_memory(pid)"));
+    assert!(deferred.contains("defer_address_space(owner, memory)"));
+    assert!(
+        !deferred.contains("drop(memory)"),
+        "deferred unregister must not free page tables on the caller's stack"
+    );
+    let immediate = braced_body(
+        &memory[memory
+            .find("pub(crate) fn unregister(pid: usize)")
+            .expect("immediate unregister")..],
+    );
+    assert!(immediate.contains("detach_process_memory(pid)"));
+    assert!(immediate.contains("drop(memory)"));
+    assert!(!immediate.contains("defer_address_space"));
+
+    let signal = braced_body(
+        &process[process
+            .find("pub(crate) fn terminate_by_signal(")
+            .expect("signal teardown")..],
+    );
+    let deferred_signal = signal
+        .find("linux_process_memory::unregister_after_switch(tgid)")
+        .expect("current thread defers its own address space");
+    let immediate_signal = signal
+        .find("linux_process_memory::unregister(tgid)")
+        .expect("a non-current target is freed immediately");
+    assert!(deferred_signal < immediate_signal);
+    assert!(process.contains("linux_process_memory::unregister(pid)"));
+
+    let scheduler = std::fs::read_to_string(repository.join("src/kernel_objects/scheduler.rs"))
+        .expect("read scheduler");
+    let reap = braced_body(
+        &scheduler[scheduler
+            .find("fn reap_deferred_thread_for_cpu(")
+            .expect("deferred thread reclaim")..],
+    );
+    let reclaim = reap
+        .find("reclaim_deferred_address_space(")
+        .expect("page tables are reclaimed after the switch");
+    let stack = reap
+        .find("thread.stack")
+        .expect("kernel stack is examined after address-space reclaim");
+    assert!(reclaim < stack);
 
     assert!(task.contains("fn retire_tasks("));
     let retire_process = braced_body(
