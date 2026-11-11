@@ -3818,6 +3818,24 @@ impl MemorySyscallState {
         released_handles
     }
 
+    fn ensure_root_resources(&mut self, pid: usize) -> Result<(), SysError> {
+        if self.process_resources(pid).is_some() {
+            return Ok(());
+        }
+        if self.linux_process_resources.try_reserve(1).is_err() {
+            return Err(SysError::ENOMEM);
+        }
+        let mut descriptors = Vec::new();
+        let mut objects = Vec::new();
+        // No parent namespace exists for the first ELF task. Clone builds the
+        // same empty credential, cwd, and handle table a fork would use.
+        let process_state = self.clone_linux_process_state(usize::MAX, 0)?;
+        if !self.install_process_resources(pid, &mut descriptors, &mut objects, process_state) {
+            return Err(SysError::ENOMEM);
+        }
+        Ok(())
+    }
+
     fn install_process_resources(
         &mut self,
         pid: usize,
@@ -4388,6 +4406,15 @@ pub(crate) fn reserve_linux_resource_clone(
 
 pub(crate) fn release_linux_resource_clone(descriptors: &[LinuxDescriptorEntry], objects: &[u32]) {
     memory_state().release_reserved_fork_resources(descriptors, objects);
+}
+
+/// Give the root ELF task a handle namespace before its first `open`.
+///
+/// Forked children inherit this table. The initial `run` / `posixtest` task is
+/// not a fork, so nothing else installs one. Without it, adopting the
+/// compatibility object for a library returns `ENOMEM` and `ld.so` exits 127.
+pub(crate) fn ensure_linux_root_resources(pid: usize) -> Result<(), SysError> {
+    memory_state().ensure_root_resources(pid)
 }
 
 pub(crate) fn install_linux_resource_clone(
