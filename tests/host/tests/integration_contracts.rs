@@ -6833,10 +6833,14 @@ fn hermes_campaign_vm_create_skips_boot_wait_when_host_launch_fails() {
         wait_pos < kill_pos && skip_pos < kill_pos,
         "both boot-wait and skip paths must still recycle with vm -k"
     );
-    assert!(launcher.contains("LAUNCHER_VERSION = 11"));
+    assert!(launcher.contains("LAUNCHER_VERSION = 12"));
     assert!(launcher.contains("launch_retry=1"));
     assert!(launcher.contains("retrying_launch("));
-    assert!(starter.contains("REQUIRED_VERSION=11"));
+    assert!(launcher.contains("def code_fingerprint("));
+    assert!(starter.contains("REQUIRED_VERSION=12"));
+    assert!(starter.contains("accept_running_launcher"));
+    assert!(starter.contains("-u MAKEFLAGS"));
+    assert!(starter.contains("LC_ALL=C"));
     assert!(starter.contains("fields.get(\"launch_retry\") != \"1\""));
     assert!(docs.contains("skip") || docs.contains("not launched"));
 }
@@ -6949,6 +6953,7 @@ fn hermes_host_tests_use_fixed_enum_jobs_and_protocol() {
         env!("CARGO_MANIFEST_DIR"),
         "/../../scripts/start-smros-vm-launcher.sh"
     ));
+    let makefile = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Makefile"));
 
     assert!(client.contains("enum HermesHostTestJob"));
     assert!(client.contains("Self::Ut => \"ut\""));
@@ -7011,7 +7016,9 @@ fn hermes_host_tests_use_fixed_enum_jobs_and_protocol() {
     let launch = client.find("pub fn launch(").expect("launch");
     let launch_body = braced_body(&client[launch..]);
     assert!(launch_body.contains("connect_launcher("));
-    assert!(starter.contains("REQUIRED_VERSION=11"));
+    assert!(starter.contains("REQUIRED_VERSION=12"));
+    assert!(starter.contains("SMROS_VM_LAUNCHER_RESTART"));
+    assert!(makefile.contains("vm-launcher-restart:"));
     assert!(starter.contains("fields.get(\"hermes_test_jobs\") != \"1\""));
     assert!(starter.contains("fields.get(\"linux_boot\") != \"1\""));
     assert!(starter.contains("fields.get(\"async_test_jobs\") != \"1\""));

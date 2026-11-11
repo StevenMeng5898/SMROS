@@ -208,6 +208,119 @@ class HermesHostTestProtocolTests(unittest.TestCase):
             self.assertNotEqual(bare.returncode, 0)
             self.assertIn("No rule to make target", bare.stderr)
 
+    def test_version_11_and_fingerprint_mismatch_do_not_count_as_current(self) -> None:
+        old = (
+            "OK version=11 monitor_none=1 stale_qemu_cleanup=1 "
+            "trace_sync=1 stable_launch=1 vm_log=1 hermes_test_jobs=1 linux_boot=1 "
+            "launch_retry=1 async_test_jobs=1\n"
+        )
+        self.assertFalse(LAUNCHER.accept_running_launcher(old))
+        self.assertEqual(LAUNCHER.classify_launcher(old), "replace")
+        current = LAUNCHER.launcher_status()
+        self.assertTrue(LAUNCHER.accept_running_launcher(current))
+        self.assertEqual(LAUNCHER.classify_launcher(current), "keep")
+        self.assertIn(LAUNCHER.FINGERPRINT, current)
+        self.assertIn(LAUNCHER.script_sha256(), current)
+        stale = current.replace(LAUNCHER.FINGERPRINT, "stale-fingerprint")
+        self.assertFalse(LAUNCHER.accept_running_launcher(stale))
+        busy = stale.replace("host_jobs_inflight=0", "host_jobs_inflight=1")
+        self.assertEqual(LAUNCHER.classify_launcher(busy), "drain")
+        self.assertNotEqual(LAUNCHER.classify_launcher(busy), "replace")
+
+    def test_chinese_make_error_is_ascii_and_names_the_launcher(self) -> None:
+        chinese = "make[1]: *** 没有规则可制作目标 'ut'。 停止。\n"
+        summary = LAUNCHER.bounded_test_summary(chinese)
+        self.assertIn("make[1]", summary)
+        self.assertNotIn("没有", summary)
+        self.assertNotIn("make_1_", summary)
+        failed = subprocess.CompletedProcess(
+            args=["make", "ut"], returncode=2, stdout="", stderr=chinese
+        )
+        with mock.patch.object(LAUNCHER.subprocess, "run", return_value=failed):
+            with mock.patch.object(LAUNCHER, "test_job_attempts", return_value=1):
+                response = LAUNCHER.run_test_job({"job": "ut"})
+        self.assertIn("status=2", response)
+        self.assertIn(f"@fingerprint={LAUNCHER.FINGERPRINT}", response)
+        self.assertIn("@argv=", response)
+        self.assertIn(",ut", response)
+        self.assertNotIn("没有", response)
+
+    def test_resume_after_reboot_reuses_an_unacked_host_job(self) -> None:
+        LAUNCHER.reset_jobs_for_tests()
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking(*_args, **_kwargs):
+            started.set()
+            self.assertTrue(release.wait(timeout=2))
+            return subprocess.CompletedProcess(
+                args=["make", "ut"], returncode=0, stdout="ut ok\n", stderr=""
+            )
+
+        with mock.patch.object(LAUNCHER.subprocess, "run", side_effect=blocking) as run:
+            first = LAUNCHER.start_test_job({"job": "ut"})
+            self.assertTrue(started.wait(timeout=1))
+            self.assertIn("host_jobs_inflight=1", LAUNCHER.launcher_status())
+            self.assertEqual(LAUNCHER.classify_launcher(LAUNCHER.launcher_status()), "keep")
+            resumed = LAUNCHER.start_test_job({"job": "ut"})
+            self.assertEqual(first, resumed)
+            self.assertEqual(run.call_count, 1)
+            release.set()
+            token = [
+                field.split("=", 1)[1]
+                for field in first.split()
+                if field.startswith("token=")
+            ][0]
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with LAUNCHER.JOBS_LOCK:
+                    state = LAUNCHER.JOBS[token].get("state")
+                if state == "done":
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("host job did not finish")
+            replay = LAUNCHER.start_test_job({"job": "ut"})
+            self.assertEqual(replay, first)
+            self.assertEqual(run.call_count, 1)
+            status = LAUNCHER.test_job_status({"job": "ut", "token": token})
+            self.assertIn("status=0", status)
+            self.assertIn("ut_ok", status)
+            LAUNCHER.JOBS.clear()
+            LAUNCHER.load_jobs()
+            reloaded = LAUNCHER.test_job_status({"job": "ut", "token": token})
+            self.assertEqual(reloaded, status)
+            again = LAUNCHER.start_test_job({"job": "ut"})
+            self.assertNotEqual(again, first)
+            next_token = [
+                field.split("=", 1)[1]
+                for field in again.split()
+                if field.startswith("token=")
+            ][0]
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with LAUNCHER.JOBS_LOCK:
+                    state = LAUNCHER.JOBS[next_token].get("state")
+                if state == "done":
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("follow-up host job did not finish")
+        LAUNCHER.reset_jobs_for_tests()
+
+    def test_start_script_scrubs_make_env_and_restarts_only_from_the_host(self) -> None:
+        starter = Path(__file__).with_name("start-smros-vm-launcher.sh").read_text()
+        makefile = Path(__file__).resolve().parents[1].joinpath("Makefile").read_text()
+        self.assertIn("REQUIRED_VERSION=12", starter)
+        self.assertIn("-u MAKEFLAGS", starter)
+        self.assertIn("-u MAKELEVEL", starter)
+        self.assertIn("-u GNUMAKEFLAGS", starter)
+        self.assertIn("LC_ALL=C", starter)
+        self.assertIn("drain_host_jobs", starter)
+        self.assertIn('launcher_action', starter)
+        self.assertIn("vm-launcher-restart:", makefile)
+        self.assertIn("SMROS_VM_LAUNCHER_RESTART=1", makefile)
+
 
 class FakeQemuProc:
     def __init__(self, pid: int, returncode: int | None) -> None:
