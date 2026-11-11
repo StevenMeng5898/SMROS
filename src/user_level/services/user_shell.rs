@@ -9321,7 +9321,7 @@ fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
 
     let usage = |ctx: &mut ShellContext| {
         ctx.serial.write_str(
-            "usage: posixtest all | group <group> | api <api> | test <test-id> | status\n",
+            "usage: posixtest all [timeout=<ms>] | group <group> [timeout=<ms>] | api <api> [timeout=<ms>] | test <test-id> [timeout=<ms>] | status\n",
         );
     };
 
@@ -9396,11 +9396,20 @@ fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
         print_usize(&mut ctx.serial, status.status_counts.untested);
         ctx.serial.write_str(" launch_errors=");
         print_usize(&mut ctx.serial, status.status_counts.launch_errors);
+        ctx.serial.write_str(" timeout=");
+        print_usize(&mut ctx.serial, status.status_counts.timeouts);
         ctx.serial.write_str(" scope=selected\n");
         return;
     }
 
-    let filter = match posix_test::parse_filter(args) {
+    let (filter_args, timeout_override_ms) = match posix_test::split_timeout_option(args) {
+        Ok(split) => split,
+        Err(_) => {
+            usage(ctx);
+            return;
+        }
+    };
+    let filter = match posix_test::parse_filter(filter_args) {
         Ok(filter) => filter,
         Err(_) => {
             usage(ctx);
@@ -9408,7 +9417,7 @@ fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
         }
     };
 
-    match posix_test::start(filter) {
+    match posix_test::start(filter, timeout_override_ms) {
         Ok(()) => {
             let status = posix_test::status_snapshot();
             if status.status_counts.launch_errors > 0 {

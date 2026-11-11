@@ -489,7 +489,14 @@ pub(crate) fn exit_current_process(
         process.pid,
         process_empty
     );
+    // POSIX thread exit (sys_exit, not exit_group) retires only the calling
+    // thread. begin_exit marked the whole process Exiting so a later child
+    // exit_group looks up a Running parent, fails with ESRCH, and never
+    // becomes a zombie. wait4 then sleeps forever. Restore Running while any
+    // thread in the group is still alive. glibc SIGEV_THREAD does this: the
+    // one-shot notifier calls sys_exit while the test thread is in wait4.
     if !process_empty {
+        let _ = with_runtime(|runtime| runtime.processes.abort_exit(process.pid));
         return Ok(LinuxProcessExitOutcome::TaskOnly);
     }
 

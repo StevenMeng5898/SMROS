@@ -6473,7 +6473,15 @@ pub fn deliver_linux_posix_timer_signals_from_irq() {
     let Ok(now_realtime) = linux_realtime_nanos() else {
         return;
     };
+    let mut deliveries = 0usize;
     loop {
+        crate::user_level::services::posix_test::poll_timeout(
+            crate::kernel_lowlevel::timer::get_tick_count(),
+        );
+        if deliveries >= 32 || linux_task::root_timeout_armed() {
+            break;
+        }
+        deliveries = deliveries.saturating_add(1);
         let expired = with_initialized_memory_state(|state| {
             for resources in &mut state.linux_process_resources {
                 for timer in &mut resources.posix_timers {
@@ -7786,6 +7794,13 @@ fn linux_sleep_has_deliverable_pending_signal() -> Result<bool, SysError> {
 
 fn linux_sleep_until(wait: LinuxSleepWait, rem: usize) -> SysResult {
     let now = crate::kernel_lowlevel::timer::get_tick_count();
+    crate::user_level::services::posix_test::poll_timeout(now);
+    if linux_task::root_timeout_armed()
+        && linux_task::current_task()
+            .is_ok_and(|task| task.tgid == linux_process::LINUX_ROOT_PID)
+    {
+        return Err(SysError::EINTR);
+    }
     if wait.deadline <= now {
         return Ok(0);
     }
@@ -12531,6 +12546,59 @@ fn exit_current_linux_process(
             .ok_or(SysError::ESRCH);
     }
     linux_task::finish_current_without_el0_return();
+}
+
+/// Exit the launch root when the guest POSIX runner's per-test deadline fired.
+///
+/// Only the launch root may take this path. A descendant exit would reach
+/// `finish_current_without_el0_return` and never come back to the trap frame.
+pub(crate) fn abort_armed_posix_timeout() -> Option<usize> {
+    if !linux_task::root_timeout_armed() {
+        return None;
+    }
+    let task = linux_task::current_task().ok()?;
+    if task.tgid != linux_process::LINUX_ROOT_PID {
+        return None;
+    }
+    match exit_current_linux_process(0, true) {
+        Ok(Some(launch_id)) => Some(launch_id),
+        _ => None,
+    }
+}
+
+/// User-mode timer return hook. Patches the trap frame so `eret`/`sret`
+/// enters the ELF launcher with the launch id instead of resuming the hung test.
+#[no_mangle]
+pub extern "C" fn abort_posix_test_timeout_from_user(saved_regs: usize) {
+    if saved_regs == 0 || linux_task::kernel_dispatch_active() {
+        return;
+    }
+    let Some(launch_id) = abort_armed_posix_timeout() else {
+        return;
+    };
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        (saved_regs as *mut u64).write(launch_id as u64);
+    }
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        let mut sepc: u64;
+        let mut sstatus: u64;
+        core::arch::asm!("csrr {sepc}, sepc", sepc = out(reg) sepc, options(nomem, nostack));
+        core::arch::asm!(
+            "csrr {sstatus}, sstatus",
+            sstatus = out(reg) sstatus,
+            options(nomem, nostack)
+        );
+        let frame = saved_regs as *mut u64;
+        frame.add(8).write(launch_id as u64);
+        frame.add(30).write(sepc);
+        frame.add(32).write(sstatus);
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        let _ = launch_id;
+    }
 }
 
 fn terminate_linux_process_by_signal(tgid: usize, signum: usize) -> SysResult {

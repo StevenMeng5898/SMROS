@@ -3398,8 +3398,8 @@ fn run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared() {
         launcher
             .matches("syscall::reset_linux_process_state()")
             .count(),
-        4,
-        "start, prepare-return, completion, and explicit clear must share cleanup",
+        5,
+        "start, prepare-return, completion, explicit clear, and timeout abandon must share cleanup",
     );
     assert!(!launcher.contains("syscall::reset_linux_signal_timer_state()"));
     assert!(launcher.contains("posix_test::on_run_outcome(outcome)"));
@@ -3475,7 +3475,7 @@ fn posix_guest_runner_is_serialized_bounded_and_fail_closed() {
         "pub const POSIX_EVENT_SCHEMA: u32 = 1;",
         "struct RunnerStateCell(UnsafeCell<Option<RunnerState>>);",
         "static RUNNER_STATE: RunnerStateCell",
-        "pub fn start(filter: PosixFilter) -> Result<(), PosixTestError>",
+        "pub fn start(filter: PosixFilter, timeout_override_ms: Option<u32>) -> Result<(), PosixTestError>",
         "AlreadyRunning",
         "EmptySelection",
         "pub status_counts: PosixStatusCounts",
@@ -3743,8 +3743,9 @@ fn posix_test_shell_command_is_strictly_wired_to_the_runner() {
     let handler = braced_body(&shell[handler_start..]);
     assert!(handler.contains("[\"status\"]"));
     assert!(handler.contains("posix_test::status_snapshot()"));
-    assert!(handler.contains("posix_test::parse_filter(args)"));
-    assert!(handler.contains("posix_test::start(filter)"));
+    assert!(handler.contains("posix_test::split_timeout_option(args)"));
+    assert!(handler.contains("posix_test::parse_filter(filter_args)"));
+    assert!(handler.contains("posix_test::start(filter, timeout_override_ms)"));
     for field in [
         " tests=",
         " apis-complete=",
@@ -3759,7 +3760,7 @@ fn posix_test_shell_command_is_strictly_wired_to_the_runner() {
     assert_eq!(
         handler
             .matches(
-                "usage: posixtest all | group <group> | api <api> | test <test-id> | status\\n"
+                "usage: posixtest all [timeout=<ms>] | group <group> [timeout=<ms>] | api <api> [timeout=<ms>] | test <test-id> [timeout=<ms>] | status\\n"
             )
             .count(),
         1,
@@ -3827,7 +3828,7 @@ fn posix_test_shell_command_is_strictly_wired_to_the_runner() {
     );
 
     let start_start = runner
-        .find("pub fn start(filter: PosixFilter)")
+        .find("pub fn start(filter: PosixFilter, timeout_override_ms: Option<u32>)")
         .expect("runner start");
     let start = braced_body(&runner[start_start..]);
     assert!(start.contains("let launch_result = launch_current_test(false)"));
@@ -11467,6 +11468,16 @@ fn linux_wait_and_exit_runtime_own_blocking_reaping_and_safe_teardown() {
         "the exiting thread is still on its kernel stack"
     );
     assert!(deactivate < retire_tasks && retire_tasks < unregister);
+    let thread_exit = exit
+        .find("if !process_empty")
+        .expect("thread-only exit keeps the process alive");
+    let restored = exit[thread_exit..]
+        .find("abort_exit(")
+        .expect("thread-only exit restores Running");
+    let task_only = exit[thread_exit..]
+        .find("LinuxProcessExitOutcome::TaskOnly")
+        .expect("thread-only exit outcome");
+    assert!(restored < task_only);
     assert!(memory.contains("mmu::activate_bootstrap_on_current_cpu()"));
 
     let deferred = braced_body(

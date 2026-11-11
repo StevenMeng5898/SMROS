@@ -58,6 +58,11 @@ pub fn unmask_timer_interrupts() {
 
 #[inline(always)]
 pub fn wait_for_interrupt() {
+    // A POSIX interval timer can publish a far CNTP_CVAL and leave the 10ms
+    // scheduler compare in the past. GICv3 then waits for that far edge, so
+    // tick-based sleeps and the per-test deadline never run. Re-arm the
+    // periodic tick first; a sooner precision compare is kept.
+    super::timer::arm_next_tick();
     // A stale CNTP_CVAL (already <= CNTPCT) does not produce another GICv3
     // edge. Rewrite it before WFI or this wait never returns.
     super::timer::ensure_hardware_compare_can_wake();

@@ -601,6 +601,9 @@ fn acknowledge_timer_interrupt() -> u32 {
 
 fn process_timer_work() -> bool {
     let now = kernel_lowlevel::timer::get_tick_count();
+    // Poll before POSIX timer delivery. A catch-up loop must not delay the
+    // per-test deadline, and the tick count comes from the hardware counter.
+    crate::user_level::services::posix_test::poll_timeout(now);
     let now_nanoseconds = kernel_lowlevel::timer::get_nanoseconds();
     let next_posix_timer_deadline = crate::syscall::next_linux_posix_timer_deadline();
     let posix_timer_deadline_due = next_posix_timer_deadline
@@ -639,6 +642,7 @@ fn process_timer_work() -> bool {
                 crate::syscall::linux_mqueue::on_timer_tick(now);
             }
             crate::kernel_objects::scheduler::scheduler().record_trace_sample(0);
+            crate::user_level::services::posix_test::poll_timeout(now);
         }
     }
 
@@ -756,6 +760,7 @@ extern "C" fn riscv64_timer_interrupt_handler(saved_regs: usize) {
             check_preemption();
         }
     }
+    crate::syscall::abort_posix_test_timeout_from_user(saved_regs);
 }
 
 /// Check if preemption is needed

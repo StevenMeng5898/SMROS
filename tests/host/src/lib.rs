@@ -12189,6 +12189,7 @@ mod posix_test_logic_shared {
             PosixCoverageResult::Unsupported,
             PosixCoverageResult::Untested,
             PosixCoverageResult::LaunchError,
+            PosixCoverageResult::Timeout,
         ];
         for result in cases {
             let mut tracker = PosixCoverageTracker::default();
@@ -12215,6 +12216,15 @@ mod posix_test_logic_shared {
         assert!(should_emit_progress(26, 1598, true));
         assert!(should_emit_progress(1598, 1598, true));
         assert!(should_emit_progress(1, 1, true));
+    }
+
+    #[test]
+    fn timeout_deadlines_round_up_to_a_later_tick() {
+        assert_eq!(timeout_deadline_tick(10, 1), 11);
+        assert_eq!(timeout_deadline_tick(10, 10), 11);
+        assert_eq!(timeout_deadline_tick(10, 11), 12);
+        assert_eq!(timeout_deadline_tick(10, 30_000), 3010);
+        assert_eq!(timeout_deadline_tick(u64::MAX - 1, u32::MAX), u64::MAX);
     }
 
     #[test]

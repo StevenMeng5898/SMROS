@@ -10,6 +10,8 @@ pub const POSIX_STATUS_INTERRUPTED: u8 = 5;
 
 pub const POSIX_STAGE_BIN_PREFIX: &str = "/shared/posixtest/bin/";
 pub const POSIX_PROGRESS_INTERVAL: usize = 25;
+/// Scheduler tick period. `get_tick_count` advances once per 100 Hz tick.
+pub const POSIX_TICK_PERIOD_MS: u64 = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PosixCoverageResult {
@@ -19,6 +21,7 @@ pub enum PosixCoverageResult {
     Unsupported,
     Untested,
     LaunchError,
+    Timeout,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +40,7 @@ pub struct PosixCoverageStatusCounts {
     pub unsupported: usize,
     pub untested: usize,
     pub launch_errors: usize,
+    pub timeouts: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -84,6 +88,7 @@ impl PosixCoverageStatusCounts {
             PosixCoverageResult::Unsupported => &mut next.unsupported,
             PosixCoverageResult::Untested => &mut next.untested,
             PosixCoverageResult::LaunchError => &mut next.launch_errors,
+            PosixCoverageResult::Timeout => &mut next.timeouts,
         };
         *counter = counter
             .checked_add(1)
@@ -219,6 +224,16 @@ fn unit_summary(units: &BTreeMap<String, PosixCoverageUnit>) -> (usize, usize, u
         }
     }
     (complete, pass, units.len())
+}
+
+/// First tick at which a test that started at `started_tick` has used its budget.
+///
+/// The budget rounds up to a whole scheduler tick and is never zero, so a test
+/// is not expired on the same tick that launched it.
+pub fn timeout_deadline_tick(started_tick: u64, timeout_ms: u32) -> u64 {
+    let timeout_ms = u64::from(timeout_ms).max(1);
+    let ticks = timeout_ms.saturating_add(POSIX_TICK_PERIOD_MS - 1) / POSIX_TICK_PERIOD_MS;
+    started_tick.saturating_add(ticks.max(1))
 }
 
 pub fn coverage_percent_hundredths(numerator: usize, denominator: usize) -> usize {

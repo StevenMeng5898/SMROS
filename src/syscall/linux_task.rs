@@ -1,5 +1,5 @@
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::kernel_lowlevel::thread::{self, ThreadId};
 use crate::kernel_objects::scheduler;
@@ -38,6 +38,10 @@ impl LinuxTaskRuntime {
 
 static LINUX_TASK_RUNTIME: LinuxRuntimeLock<LinuxTaskRuntime> =
     LinuxRuntimeLock::new(LinuxTaskRuntime::new());
+/// Set by the guest POSIX runner when the active launch root exceeds its
+/// per-test deadline. Checked by blocking syscalls and the user-mode timer
+/// return so the root process group can exit and the runner can continue.
+static POSIX_ROOT_TIMEOUT_ARMED: AtomicBool = AtomicBool::new(false);
 static KERNEL_DISPATCH_THREAD: AtomicUsize = AtomicUsize::new(usize::MAX);
 static KERNEL_DISPATCH_DEPTH: AtomicUsize = AtomicUsize::new(0);
 static KERNEL_DISPATCH_RANGE_BASE: AtomicUsize = AtomicUsize::new(0);
@@ -644,9 +648,66 @@ pub(crate) fn discard_signal(tgid: usize, signum: usize) {
     });
 }
 
+pub(crate) fn arm_root_timeout() {
+    POSIX_ROOT_TIMEOUT_ARMED.store(true, Ordering::Release);
+    let _ = wake_tgid_blocked(super::linux_process::LINUX_ROOT_PID);
+}
+
+pub(crate) fn root_has_live_task() -> bool {
+    with_runtime(|runtime| {
+        runtime.tasks.tasks.iter().copied().any(|task| {
+            task.tgid == super::linux_process::LINUX_ROOT_PID
+                && LinuxTaskTable::<LINUX_TASK_LIMIT>::is_live(task)
+        })
+    })
+}
+
+pub(crate) fn clear_root_timeout() {
+    POSIX_ROOT_TIMEOUT_ARMED.store(false, Ordering::Release);
+}
+
+pub(crate) fn root_timeout_armed() -> bool {
+    POSIX_ROOT_TIMEOUT_ARMED.load(Ordering::Acquire)
+}
+
+pub(crate) fn wake_tgid_blocked(tgid: usize) -> usize {
+    let tasks = with_runtime(|runtime| {
+        let mut tasks = Vec::new();
+        for task in runtime.tasks.tasks.iter().copied() {
+            if task.tgid == tgid && LinuxTaskTable::<LINUX_TASK_LIMIT>::is_live(task) {
+                tasks.push(task);
+            }
+        }
+        tasks
+    });
+    let mut woken = 0usize;
+    for task in tasks {
+        if task.state == LinuxTaskState::Blocked
+            && task.block_reason != LinuxBlockReason::None
+            && wake_blocked(task.tid, task.scheduler_thread, task.block_reason)
+        {
+            woken = woken.saturating_add(1);
+            continue;
+        }
+        let scheduler_id = ThreadId(task.scheduler_thread);
+        let blocked = scheduler::scheduler()
+            .get_thread(scheduler_id)
+            .is_some_and(|thread| thread.state == thread::ThreadState::Blocked);
+        if blocked && scheduler::scheduler().wake_thread(scheduler_id) {
+            woken = woken.saturating_add(1);
+        }
+    }
+    woken
+}
+
 pub(crate) fn block_current(reason: LinuxBlockReason) -> Result<LinuxTaskCore, SysError> {
     if reason == LinuxBlockReason::None {
         return Err(SysError::EINVAL);
+    }
+    if root_timeout_armed()
+        && current_task().is_ok_and(|task| task.tgid == super::linux_process::LINUX_ROOT_PID)
+    {
+        return Err(SysError::EINTR);
     }
     if kernel_dispatch_active() {
         return Err(SysError::EAGAIN);

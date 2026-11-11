@@ -2158,7 +2158,18 @@ extern "C" fn idle_thread_entry() -> ! {
         // This prevents deadlocks and ensures cooperative scheduling
         schedule();
 
-        // If we returned here, no other threads were ready
+        // If we returned here, no other threads were ready.
+        // A lost timer edge must not pin a timed-out POSIX test in its sleep:
+        // the deadline is a hardware-counter tick, so check it before WFI.
+        crate::user_level::services::posix_test::poll_timeout(
+            crate::kernel_lowlevel::timer::get_tick_count(),
+        );
+        if crate::user_level::services::posix_test::complete_orphan_timeout() {
+            continue;
+        }
+        if crate::syscall::linux_task::root_timeout_armed() {
+            continue;
+        }
         // Wait for interrupt (timer will trigger scheduler check)
         thread::wait_for_interrupt();
     }
