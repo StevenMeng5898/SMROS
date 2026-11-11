@@ -1003,3 +1003,84 @@ macro_rules! smros_zircon_syscall_interface_known_body {
         $syscall_num <= 154 || (183 <= $syscall_num && $syscall_num <= 211)
     }};
 }
+
+/// How an fd relates to an epoll instance. `Missing` is not an open fd.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxEpollFdClass {
+    Missing,
+    Other,
+    Epoll,
+}
+
+/// Errno chosen before an epoll call mutates its interest list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxEpollReject {
+    Ebadf,
+    Efault,
+    Einval,
+}
+
+const LINUX_EPOLL_CTL_ADD: usize = 1;
+const LINUX_EPOLL_CTL_DEL: usize = 2;
+const LINUX_EPOLL_CTL_MOD: usize = 3;
+
+/// Linux epoll_ctl preflight. A missing fd is `EBADF`. A live fd that is not
+/// an epoll instance, `epfd == fd`, or an unknown op is `EINVAL`. A null
+/// event pointer on ADD/MOD is `EFAULT`.
+pub(crate) fn linux_epoll_ctl_reject(
+    epfd: LinuxEpollFdClass,
+    target_known: bool,
+    same_fd: bool,
+    op: usize,
+    event: usize,
+) -> Option<LinuxEpollReject> {
+    if epfd == LinuxEpollFdClass::Missing || !target_known {
+        return Some(LinuxEpollReject::Ebadf);
+    }
+    if epfd != LinuxEpollFdClass::Epoll
+        || same_fd
+        || (op != LINUX_EPOLL_CTL_ADD && op != LINUX_EPOLL_CTL_DEL && op != LINUX_EPOLL_CTL_MOD)
+    {
+        return Some(LinuxEpollReject::Einval);
+    }
+    if op != LINUX_EPOLL_CTL_DEL && event == 0 {
+        return Some(LinuxEpollReject::Efault);
+    }
+    None
+}
+
+/// Linux epoll_pwait / epoll_pwait2 preflight for the fd and the event buffer.
+/// `maxevents == 0` is `EINVAL`. A null `events` pointer is `EFAULT`.
+pub(crate) fn linux_epoll_pwait_reject(
+    epfd: LinuxEpollFdClass,
+    events: usize,
+    maxevents: usize,
+) -> Option<LinuxEpollReject> {
+    if epfd == LinuxEpollFdClass::Missing {
+        return Some(LinuxEpollReject::Ebadf);
+    }
+    if epfd != LinuxEpollFdClass::Epoll || maxevents == 0 {
+        return Some(LinuxEpollReject::Einval);
+    }
+    if events == 0 {
+        return Some(LinuxEpollReject::Efault);
+    }
+    None
+}
+
+/// `timeout == NULL` means block forever and is valid. A present timespec with
+/// a negative second or an out-of-range nanosecond is `EINVAL`. Unreadable
+/// pointers are `EFAULT` and are checked by the caller before this.
+pub(crate) fn linux_epoll_pwait2_timeout_reject(
+    timeout_null: bool,
+    seconds: i64,
+    nanoseconds: i64,
+) -> Option<LinuxEpollReject> {
+    if timeout_null {
+        return None;
+    }
+    if linux_posix_timespec_nanoseconds(seconds, nanoseconds).is_none() {
+        return Some(LinuxEpollReject::Einval);
+    }
+    None
+}

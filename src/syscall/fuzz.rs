@@ -56,16 +56,20 @@ const FUZZ_STREAM_HANDLE_INDEX: usize = 32;
 const FUZZ_PROFILE_HANDLE_INDEX: usize = 33;
 const FUZZ_EXCEPTION_HANDLE_INDEX: usize = 34;
 
+/// Success-shaped Zircon calls. 107 (`vmo_create_physical`) is omitted: every
+/// nonzero size is `ZX_ERR_ACCESS_DENIED` because no resource may name an
+/// arbitrary physical address. That denial is expected and must stay an error
+/// if the call is made; it is not a success-path case.
 const ZIRCON_SUCCESS_SYSCALLS: &[u32] = &[
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
     26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
     50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73,
     74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
-    98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116,
-    117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135,
-    136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154,
-    183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201,
-    202, 203, 204, 205, 206, 207, 208, 209, 210, 211,
+    98, 99, 100, 101, 102, 103, 104, 105, 106, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117,
+    118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136,
+    137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 183,
+    184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202,
+    203, 204, 205, 206, 207, 208, 209, 210, 211,
 ];
 
 #[derive(Clone, Copy, Default)]
@@ -490,6 +494,25 @@ impl FuzzArena {
         &self.timespec as *const LinuxTimespec as usize
     }
 
+    fn zero_timespec_ptr(&mut self) -> usize {
+        self.timespec.tv_sec = 0;
+        self.timespec.tv_nsec = 0;
+        self.timespec_ptr()
+    }
+
+    /// epoll_event at the start of scratch: EPOLLIN, data left zero.
+    fn epoll_event_ptr(&mut self) -> usize {
+        self.scratch[..16].fill(0);
+        self.scratch[0..4].copy_from_slice(&1u32.to_ne_bytes());
+        self.scratch_ptr()
+    }
+
+    /// sched_param priority 0, away from the epoll_event bytes.
+    fn sched_param_ptr(&mut self) -> usize {
+        self.scratch[128..132].fill(0);
+        self.scratch_ptr_offset(128)
+    }
+
     fn sleep_timespec_ptr(&self) -> usize {
         &self.sleep_timespec as *const LinuxTimespec as usize
     }
@@ -549,6 +572,8 @@ struct FuzzState {
     zircon_mappings: [usize; 32],
     zircon_mapping_count: usize,
     mq_fd: usize,
+    epoll_fd: usize,
+    epoll_added: bool,
     linux_timer_id: usize,
     posix_api: &'static str,
     start_tick: u64,
@@ -581,6 +606,8 @@ impl FuzzState {
             zircon_mappings: [0; 32],
             zircon_mapping_count: 0,
             mq_fd: 0,
+            epoll_fd: 0,
+            epoll_added: false,
             linux_timer_id: 0,
             posix_api: "",
             start_tick,
@@ -781,6 +808,22 @@ impl FuzzState {
 
     fn event_fd(&self) -> usize {
         self.fd_at(2, self.file_fd())
+    }
+
+    /// One epoll instance kept out of the transient fd table so round cleanup
+    /// does not close it. Later ctl/pwait calls reuse it.
+    fn ensure_epoll_fd(&mut self) -> usize {
+        if self.epoll_fd > 2 {
+            return self.epoll_fd;
+        }
+        match dispatch_linux_syscall(super::ARM64_SYS_EPOLL_CREATE1, [0, 0, 0, 0, 0, 0]) {
+            Ok(fd) if fd > 2 => {
+                self.epoll_fd = fd;
+                self.epoll_added = false;
+                fd
+            }
+            _ => 0,
+        }
     }
 
     fn timer_fd(&self) -> usize {
@@ -1433,6 +1476,7 @@ impl FuzzState {
     fn capture_linux_result(&mut self, num: u32, value: usize, args: &[usize; 6]) {
         match num {
             19 | 20 | 26 | 56 | 74 | 85 | 198 | 279 | 437 => self.track_fd(value),
+            21 if args[1] == 1 => self.epoll_added = true,
             180 => {
                 self.mq_fd = value;
                 self.track_fd(value);
@@ -1665,6 +1709,11 @@ impl FuzzState {
             let _ = sys_close(self.fds[index]);
         }
         self.fd_count = 0;
+        if self.epoll_fd > 2 {
+            let _ = sys_close(self.epoll_fd);
+            self.epoll_fd = 0;
+            self.epoll_added = false;
+        }
 
         for index in 0..self.handle_count {
             let handle = self.handles[index];
@@ -2461,8 +2510,40 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         17 => out = [state.arena.scratch_ptr(), FUZZ_SCRATCH_BYTES, 0, 0, 0, 0],
         19 => out = [state.rng.below(4), variant * LINUX_O_CLOEXEC, 0, 0, 0, 0],
         20 => out = [0, 0, 0, 0, 0, 0],
-        21 => out = [fd, variant, state.fd(), ptr, 0, 0],
-        22 | 441 => out = [fd, ptr, state.small_count(), 0, 0, 0],
+        21 => {
+            let epfd = state.ensure_epoll_fd();
+            let mut target = state.event_fd();
+            if target == epfd {
+                target = state.file_fd();
+            }
+            let op = if state.epoll_added { 3 } else { 1 };
+            out = [epfd, op, target, state.arena.epoll_event_ptr(), 0, 0];
+        }
+        22 => {
+            out = [
+                state.ensure_epoll_fd(),
+                state.arena.scratch_ptr_offset(64),
+                4,
+                0,
+                0,
+                0,
+            ];
+        }
+        441 => {
+            let timeout = if variant == 0 {
+                0
+            } else {
+                state.arena.zero_timespec_ptr()
+            };
+            out = [
+                state.ensure_epoll_fd(),
+                state.arena.scratch_ptr_offset(64),
+                4,
+                timeout,
+                0,
+                0,
+            ];
+        }
         23 => out = [file_fd, 0, 0, 0, 0, 0],
         24 => out = [file_fd, state.new_fd(), variant * LINUX_O_CLOEXEC, 0, 0, 0],
         25 => out = [file_fd, if variant == 0 { 3 } else { 4 }, 0, 0, 0, 0],
@@ -2679,8 +2760,8 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         }
         184 => out = [state.ensure_mq_fd(), 0, 0, 0, 0, 0],
         185 => out = [state.ensure_mq_fd(), 0, state.arena.scratch_ptr(), 0, 0, 0],
-        118 => out = [0, ptr, 0, 0, 0, 0],
-        119 => out = [0, 0, ptr, 0, 0, 0],
+        118 => out = [0, state.arena.sched_param_ptr(), 0, 0, 0, 0],
+        119 => out = [0, 0, state.arena.sched_param_ptr(), 0, 0, 0],
         120 => out = [0, 0, 0, 0, 0, 0],
         121 => out = [0, ptr, 0, 0, 0, 0],
         122 => {
@@ -3553,6 +3634,8 @@ fn zircon_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 8] {
         192 => out = [stream_handle as usize, 0, 0, 0, 0, 0, 0, 0],
         92 | 93 | 94 => out = [0, 0, 0, ptr, 0, 0, 0, 0],
         106 => out = [0, PAGE_SIZE, 1, 0, 0, 0, 0, 0],
+        // Kept for a direct call. The success sweep does not use 107:
+        // vmo_create_physical returns ACCESS_DENIED for every nonzero size.
         107 => out = [0, 0, PAGE_SIZE, 0, 0, 0, 0, 0],
         113 => out = [ptr, 0, 0, 0, 0, 0, 0, 0],
         129 => out = [0, 0, 0, len, state.arena.name_ptr(), 10, 0, 0],

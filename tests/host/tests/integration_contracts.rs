@@ -7207,6 +7207,81 @@ fn fuzzsc_success_path_uses_live_mprotect_and_names_posix_errors() {
 }
 
 #[test]
+fn fuzzsc_epoll_success_args_and_physical_vmo_stay_denied() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fuzz = std::fs::read_to_string(repository.join("src/syscall/fuzz.rs")).expect("read fuzzer");
+    let syscall =
+        std::fs::read_to_string(repository.join("src/syscall/syscall.rs")).expect("read syscall");
+
+    let list_at = fuzz
+        .find("const ZIRCON_SUCCESS_SYSCALLS")
+        .expect("zircon success list");
+    let list_end = fuzz[list_at..]
+        .find("];")
+        .map(|offset| list_at + offset)
+        .expect("end of zircon success list");
+    let success_list = &fuzz[list_at..list_end];
+    assert!(
+        !success_list.contains("107"),
+        "vmo_create_physical must stay off the success sweep"
+    );
+    assert!(success_list.contains("106, 108"));
+    assert!(fuzz.contains("fn ensure_epoll_fd("));
+    assert!(fuzz.contains("let op = if state.epoll_added { 3 } else { 1 };"));
+    assert!(fuzz.contains("118 => out = [0, state.arena.sched_param_ptr(), 0, 0, 0, 0]"));
+    assert!(fuzz.contains("119 => out = [0, 0, state.arena.sched_param_ptr(), 0, 0, 0]"));
+    assert!(fuzz.contains("state.arena.zero_timespec_ptr()"));
+    assert!(!fuzz.contains("22 | 441 => out = [fd, ptr, state.small_count(), 0, 0, 0]"));
+
+    let physical = syscall
+        .find("pub fn sys_vmo_create_physical(")
+        .expect("physical vmo");
+    let physical_end = syscall[physical..]
+        .find("pub fn sys_vmo_create_contiguous(")
+        .map(|offset| physical + offset)
+        .expect("next vmo function");
+    let physical_fn = &syscall[physical..physical_end];
+    assert!(physical_fn.contains("Err(ZxError::ErrAccessDenied)"));
+    assert!(physical_fn.contains("Err(ZxError::ErrInvalidArgs)"));
+
+    let ctl = syscall
+        .find("pub fn sys_epoll_ctl(")
+        .expect("epoll_ctl");
+    let ctl_end = syscall[ctl..]
+        .find("pub fn sys_epoll_pwait(")
+        .map(|offset| ctl + offset)
+        .expect("epoll_pwait");
+    let ctl_fn = &syscall[ctl..ctl_end];
+    assert!(ctl_fn.contains("linux_epoll_ctl_reject"));
+    assert!(!ctl_fn.contains("SysError::ENODEV"));
+
+    let pwait2 = syscall
+        .find("pub fn sys_epoll_pwait2(")
+        .expect("epoll_pwait2");
+    let pwait2_end = syscall[pwait2..]
+        .find("pub fn sys_open(")
+        .map(|offset| pwait2 + offset)
+        .expect("sys_open");
+    let pwait2_fn = &syscall[pwait2..pwait2_end];
+    assert!(pwait2_fn.contains("linux_read_user_timespec"));
+    assert!(pwait2_fn.contains("linux_epoll_pwait2_timeout_reject"));
+    assert!(syscall.contains(
+        "ARM64_SYS_EPOLL_PWAIT2 => sys_epoll_pwait2(args[0], args[1], args[2], args[3], args[4])"
+    ));
+
+    let alloc = syscall
+        .find("fn linux_epoll_alloc_set(")
+        .expect("epoll alloc");
+    let alloc_end = syscall[alloc..]
+        .find("fn linux_epoll_release(")
+        .map(|offset| alloc + offset)
+        .expect("epoll release");
+    assert!(!syscall[alloc..alloc_end].contains("unwrap_or(0)"));
+    assert!(syscall[alloc..alloc_end].contains("SysError::ENOMEM"));
+    assert!(syscall.contains("linux_epoll_release(fd);"));
+}
+
+#[test]
 fn fuzzsc_kernel_dispatch_does_not_block_the_shell() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let fuzz = std::fs::read_to_string(repository.join("src/syscall/fuzz.rs"))
