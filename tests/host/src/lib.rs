@@ -1,4 +1,4 @@
-#![allow(unused_comparisons, unused_macros)]
+#![allow(dead_code, unused_comparisons, unused_macros)]
 
 mod alloc {
     #[allow(unused_imports)]
@@ -12424,7 +12424,7 @@ mod handle_namespace {
     #[test]
     fn another_process_table_does_not_authorize_a_handle() {
         let mut owner = HandleNamespace::new(4);
-        let mut foreign = HandleNamespace::new(4);
+        let foreign = HandleNamespace::new(4);
         let handle = owner
             .insert_encoded(|user| Object {
                 object: user,

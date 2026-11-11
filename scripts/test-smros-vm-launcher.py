@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import os
 import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -22,8 +24,16 @@ class HermesHostTestProtocolTests(unittest.TestCase):
         self.assertIn("async_test_jobs=1", LAUNCHER.launcher_status())
 
     def test_only_fixed_test_jobs_are_accepted(self) -> None:
-        self.assertEqual(LAUNCHER.parse_test_job({"job": "ut"}), ("make", "ut"))
-        self.assertEqual(LAUNCHER.parse_test_job({"job": "it"}), ("make", "it"))
+        self.assertEqual(
+            LAUNCHER.parse_test_job({"job": "ut"}),
+            tuple(LAUNCHER.host_make_command("ut")),
+        )
+        self.assertEqual(
+            LAUNCHER.parse_test_job({"job": "it"}),
+            tuple(LAUNCHER.host_make_command("it")),
+        )
+        self.assertIn(str(LAUNCHER.ROOT), LAUNCHER.host_make_command("ut"))
+        self.assertIn(str(LAUNCHER.ROOT / "Makefile"), LAUNCHER.host_make_command("it"))
 
         for values in (
             {"job": "verify"},
@@ -49,8 +59,12 @@ class HermesHostTestProtocolTests(unittest.TestCase):
 
         run.assert_called_once()
         args, kwargs = run.call_args
-        self.assertEqual(args[0], ("make", "ut"))
+        self.assertEqual(list(args[0]), LAUNCHER.host_make_command("ut"))
+        self.assertEqual(kwargs.get("cwd"), str(LAUNCHER.ROOT))
         self.assertNotIn("shell", kwargs)
+        self.assertEqual(kwargs["env"].get("LC_ALL"), "C")
+        self.assertNotIn("MAKEFLAGS", kwargs["env"])
+        self.assertNotIn("MAKELEVEL", kwargs["env"])
         self.assertTrue(kwargs.get("start_new_session"))
         self.assertIn("OK job=ut status=0", response)
 
@@ -63,7 +77,7 @@ class HermesHostTestProtocolTests(unittest.TestCase):
         response = LAUNCHER.run_test_job({"job": "it"})
 
         args, _ = run.call_args
-        self.assertEqual(args[0], ("make", "it"))
+        self.assertEqual(list(args[0]), LAUNCHER.host_make_command("it"))
         self.assertNotIn("skt", args[0])
         self.assertNotIn("st", args[0])
         self.assertIn("OK job=it status=0", response)
@@ -108,6 +122,13 @@ class HermesHostTestProtocolTests(unittest.TestCase):
         )
         self.assertEqual(only_footer, "ordinary_status_line")
         self.assertNotIn("Leaving", only_footer)
+        english = LAUNCHER.bounded_test_summary(
+            "make[1]: *** No rule to make target 'ut'. Stop.\n"
+        )
+        self.assertIn("make[1]", english)
+        self.assertIn("No_rule_to_make_target", english)
+        self.assertIn("'ut'", english)
+        self.assertNotIn(" ", english)
         src = MODULE_PATH.read_text()
         run_start = src.index("def run_test_job")
         run_end = src.index("def write_test_log")
@@ -144,6 +165,48 @@ class HermesHostTestProtocolTests(unittest.TestCase):
         self.assertIn('while b"\\nend\\n" not in data', body)
         self.assertIn("self.request.recv(MAX_REQUEST - len(data))", body)
 
+
+
+    def test_host_job_targets_repo_makefile_from_a_hostile_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dummy = Path(tmp)
+            (dummy / "Makefile").write_text("all:\n\t@echo dummy\n", encoding="utf-8")
+            hostile = os.environ.copy()
+            hostile["MAKEFLAGS"] = f"-C {dummy}"
+            hostile["GNUMAKEFLAGS"] = f"--directory={dummy}"
+            hostile["MAKELEVEL"] = "1"
+            hostile["CURDIR"] = str(dummy)
+            hostile["LANG"] = "zh_CN.UTF-8"
+            hostile["LC_ALL"] = "zh_CN.UTF-8"
+            with mock.patch.dict(os.environ, hostile, clear=True):
+                env = LAUNCHER.test_job_environment()
+                command = list(LAUNCHER.parse_test_job({"job": "ut"}))
+            self.assertEqual(env.get("LC_ALL"), "C")
+            self.assertEqual(env.get("LANG"), "C")
+            for leaked in ("MAKEFLAGS", "GNUMAKEFLAGS", "MAKELEVEL", "CURDIR", "MFLAGS"):
+                self.assertNotIn(leaked, env)
+            self.assertEqual(command, LAUNCHER.host_make_command("ut"))
+            self.assertIn(str(LAUNCHER.ROOT / "Makefile"), command)
+            dry = subprocess.run(
+                [*command, "-n"],
+                cwd=dummy,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(dry.returncode, 0, dry.stderr + dry.stdout)
+            self.assertNotIn("No rule to make target", dry.stderr)
+            bare = subprocess.run(
+                ["make", "ut"],
+                cwd=dummy,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(bare.returncode, 0)
+            self.assertIn("No rule to make target", bare.stderr)
 
 
 class FakeQemuProc:
