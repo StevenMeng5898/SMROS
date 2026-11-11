@@ -40,6 +40,7 @@ class StageSelectionTests(unittest.TestCase):
         self.environment.update(
             CARGO_MANIFEST_DIR=str(self.root), OUT_DIR=str(self.out),
             CARGO_ENCODED_RUSTFLAGS="",
+            SMROS_HOST_SHARE_EMIT_HOST="1",
         )
 
     def stage(self, path, architecture):
@@ -59,18 +60,21 @@ class StageSelectionTests(unittest.TestCase):
         )
 
     def snapshot(self):
-        # Compile include_bytes! entries too: a right-looking path with the
-        # wrong contents must fail just as it would inside the kernel.
+        # Link the same symbol table the kernel uses. A right-looking path with
+        # the wrong bytes must fail here, just as it would inside the guest.
         source = self.out / "probe.rs"
         source.write_text(
+            'extern crate alloc;\n'
             'include!("host_share.rs");\n'
             'fn main() { for f in HOST_SHARE_FILES { '
             'println!("{}={}", f.path, String::from_utf8_lossy(f.data)); } }\n'
         )
         binary = self.out / "probe"
-        subprocess.run(
-            ["rustc", str(source), "-o", str(binary)], check=True, capture_output=True,
-        )
+        command = ["rustc", "--edition=2021", str(source), "-o", str(binary)]
+        host_lib = self.out / "libsmros_host_share_host.a"
+        if host_lib.is_file():
+            command.extend(["-L", str(self.out), "-l", "static=smros_host_share_host"])
+        subprocess.run(command, check=True, capture_output=True)
         return subprocess.check_output([str(binary)], text=True)
 
     def test_switching_targets_embeds_only_the_selected_stage(self):
@@ -137,6 +141,11 @@ class StageSelectionTests(unittest.TestCase):
         result = self.build("riscv64gc-unknown-none-elf")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.snapshot(), "")
+        missing = self.root / "target/posix/riscv64/stage"
+        self.assertFalse(missing.exists())
+        self.assertNotIn(f"cargo:rerun-if-changed={missing}", result.stdout)
+        legacy = self.root / "host_shared/posixtest"
+        self.assertNotIn(f"cargo:rerun-if-changed={legacy}", result.stdout)
 
     def test_cli_runner_uses_the_same_target_stage_as_the_kernel(self):
         runner_result = mock.Mock(attempts=(), complete=True, restart_count=0, result_path="results")
