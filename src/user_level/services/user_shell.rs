@@ -762,7 +762,23 @@ impl UserShell {
 // ============================================================================
 
 /// Command: help - Show available commands
+fn shell_catalog_matches() -> bool {
+    use crate::user_level::services::hermes_shell_logic_shared::SHELL_COMMAND_NAMES;
+    if SHELL_COMMANDS.len() != SHELL_COMMAND_NAMES.len() {
+        return false;
+    }
+    let mut names = ["help"; SHELL_COMMAND_NAMES.len()];
+    for (index, command) in SHELL_COMMANDS.iter().enumerate() {
+        names[index] = command.name;
+    }
+    crate::user_level::services::hermes_shell_logic_shared::shell_catalog_aligned(&names)
+}
+
 fn cmd_help(ctx: &mut ShellContext, _args: &[&str]) {
+    if !shell_catalog_matches() {
+        ctx.serial.write_str("shell command catalog mismatch\n");
+        return;
+    }
     ctx.serial.write_str("\nAvailable commands:\n\n");
 
     // Find longest command for alignment
@@ -5035,13 +5051,15 @@ fn cmd_docker(ctx: &mut ShellContext, args: &[&str]) {
 
 /// Command: hermes - Run the native Hermes agent compatibility port
 fn cmd_hermes(ctx: &mut ShellContext, args: &[&str]) {
-    if args.is_empty() {
-        print_hermes_usage(ctx);
-        return;
-    }
+    use crate::user_level::services::hermes_shell_logic_shared::{
+        parse_hermes_shell_verb, HermesShellVerb,
+    };
 
-    match args[0] {
-        "exec" => {
+    match parse_hermes_shell_verb(args) {
+        HermesShellVerb::Usage => {
+            print_hermes_usage(ctx);
+        }
+        HermesShellVerb::Exec => {
             if args.len() < 2 {
                 ctx.serial
                     .write_str("usage: hermes exec <safe-command> [args...]\n");
@@ -5049,9 +5067,9 @@ fn cmd_hermes(ctx: &mut ShellContext, args: &[&str]) {
             }
             let _ = execute_hermes_command(ctx, args[1], &args[2..]);
         }
-        "random" => run_hermes_random_campaign(ctx, &args[1..]),
-        "test-all" => run_hermes_test_all(ctx, &args[1..]),
-        "info" | "status" => match crate::user_level::hermes_agent::info() {
+        HermesShellVerb::Random => run_hermes_random_campaign(ctx, &args[1..]),
+        HermesShellVerb::TestAll => run_hermes_test_all(ctx, &args[1..]),
+        HermesShellVerb::Info => match crate::user_level::hermes_agent::info() {
             Ok(info) => print_hermes_info(ctx, &info),
             Err(err) => {
                 ctx.serial.write_str("hermes: ");
@@ -5059,12 +5077,12 @@ fn cmd_hermes(ctx: &mut ShellContext, args: &[&str]) {
                 ctx.serial.write_str("\n");
             }
         },
-        "test" | "smoke" => {
+        HermesShellVerb::Test => {
             ctx.serial.write_str("\n=== Hermes Agent Port Test ===\n\n");
             let _ = run_hermes_agent_tests(ctx);
             ctx.serial.write_str("\n");
         }
-        "skills" => match crate::user_level::hermes_agent::list_skills() {
+        HermesShellVerb::Skills => match crate::user_level::hermes_agent::list_skills() {
             Ok(skills) => {
                 ctx.serial.write_str("Hermes skills\n");
                 for skill in skills {
@@ -5083,7 +5101,7 @@ fn cmd_hermes(ctx: &mut ShellContext, args: &[&str]) {
                 ctx.serial.write_str("\n");
             }
         },
-        "web" | "ui" => {
+        HermesShellVerb::Web => {
             if args[0] == "ui" && args.len() == 1 {
                 run_hermes_ui_entry(ctx);
             } else if args.get(1).copied() == Some("source") || args.get(1).copied() == Some("html")
@@ -5143,7 +5161,7 @@ fn cmd_hermes(ctx: &mut ShellContext, args: &[&str]) {
                 }
             }
         }
-        "ask" | "run" => {
+        HermesShellVerb::Ask => {
             if args.len() < 2 {
                 ctx.serial.write_str("usage: hermes ask <prompt>\n");
                 return;
@@ -5175,7 +5193,6 @@ fn cmd_hermes(ctx: &mut ShellContext, args: &[&str]) {
                 }
             }
         }
-        _ => print_hermes_usage(ctx),
     }
 }
 
@@ -6045,8 +6062,16 @@ fn run_hermes_host_jobs(
     use crate::user_level::services::vm_host::HermesHostTestJob;
     let jobs = [HermesHostTestJob::Ut, HermesHostTestJob::It];
     for (job_index, job) in jobs.iter().copied().enumerate() {
+        let Some(job_name) =
+            crate::user_level::services::hermes_shell_logic_shared::host_job_name(job.as_str())
+        else {
+            host_failures[job_index] = host_failures[job_index].saturating_add(1);
+            ctx.serial
+                .write_str("Host test UNAVAILABLE unsupported-host-job\n");
+            continue;
+        };
         ctx.serial.write_str("Host test ");
-        ctx.serial.write_str(job.as_str());
+        ctx.serial.write_str(job_name);
         ctx.serial.write_str(" iteration=");
         print_usize(&mut ctx.serial, iteration);
         ctx.serial.write_str(": ");

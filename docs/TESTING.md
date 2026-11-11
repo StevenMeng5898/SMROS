@@ -170,8 +170,9 @@ once the guest network can reach the host launcher. The ops catalog includes
 `vm -k linux-demo` recycles the nested QEMU process. If nested QEMU never
 launched, the campaign skips the boot wait and still recycles. The Hermes skills
 `ut`, `it`, `skt`, `fuzzing`, `reboot`, and `cmd` map onto this stack:
-`make posix-tool-test` is the current syscall/POSIX unit/integration gate while
-`tests/host` is uncompilable, `make skt` is the fast guest smoke test (SKT),
+`make ut` and `make it` compile and run `tests/host`. `make posix-tool-test`
+is the offline POSIX host-tool gate and does not replace those host tests.
+`make skt` is the fast guest smoke test (SKT),
 and official POSIX remains host-controlled `make posix-run`. `make st` remains
 a compatibility alias for `make skt`.
 

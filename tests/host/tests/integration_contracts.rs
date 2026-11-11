@@ -6922,7 +6922,8 @@ fn hermes_safe_gateway_authorizes_before_shell_dispatch() {
         .expect("gateway must use the existing command registry");
 
     assert!(policy < dispatch);
-    assert!(shell.contains("\"exec\" =>"));
+    assert!(shell.contains("parse_hermes_shell_verb"));
+    assert!(shell.contains("HermesShellVerb::Exec"));
     assert!(shell.contains("Hermes denied forbidden command: "));
 }
 
@@ -7028,7 +7029,7 @@ fn hermes_test_orchestration_is_documented_and_smoke_wired() {
         "/../../scripts/smoke-qemu.sh"
     ));
 
-    assert!(shell.contains("\"test-all\" => run_hermes_test_all"));
+    assert!(shell.contains("HermesShellVerb::TestAll => run_hermes_test_all"));
     let test_all_start = shell
         .find("fn run_hermes_test_all(")
         .expect("test-all function");
@@ -10047,19 +10048,23 @@ fn linux_resource_copyouts_preflight_and_rollback_transactionally() {
         let failed_copyout = body
             .find("if let Err(error) = linux_write_user_i32_pair(")
             .expect("fallible atomic descriptor-pair copyout");
-        let first_rollback = body
+        let copyout_failure = &body[failed_copyout..];
+        let first_rollback = copyout_failure
             .find(&format!("sys_close({first_fd})"))
-            .expect("first descriptor rollback");
-        let second_rollback = body
+            .expect("first descriptor rollback after copyout failure");
+        let second_rollback = copyout_failure
             .find(&format!("sys_close({second_fd})"))
-            .expect("second descriptor rollback");
+            .expect("second descriptor rollback after copyout failure");
+        let allocation_rollback = body[..failed_copyout]
+            .find(&format!("sys_close({first_fd})"))
+            .expect("second descriptor allocation failure closes the first descriptor");
 
         assert!(body.contains("core::mem::size_of::<[i32; 2]>()"));
         assert!(preflight < create);
-        assert!(create < failed_copyout);
-        assert!(failed_copyout < first_rollback);
-        assert!(failed_copyout < second_rollback);
-        assert!(body[failed_copyout..].contains("return Err(error)"));
+        assert!(create < allocation_rollback);
+        assert!(allocation_rollback < failed_copyout);
+        assert!(first_rollback < second_rollback);
+        assert!(copyout_failure.contains("return Err(error)"));
         assert!(!body.contains("linux_write_user_i32(fds_ptr"));
     }
 
@@ -10341,7 +10346,7 @@ fn linux_vectored_io_preflights_every_entry_before_io() {
 }
 
 #[test]
-fn native_zircon_stream_iov_is_bounded_and_independent_of_linux_process_memory() {
+fn native_zircon_stream_iov_is_bounded_and_copied_through_checked_user_access() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let syscall = std::fs::read_to_string(repository.join("src/syscall/syscall.rs"))
         .expect("read syscall implementation");
@@ -10359,18 +10364,20 @@ fn native_zircon_stream_iov_is_bounded_and_independent_of_linux_process_memory()
     assert!(snapshot.contains("zircon_read_iovec(vector, index)?"));
     assert!(snapshot.contains("iov.base.checked_add(iov.len)"));
 
-    for (start_marker, end_marker, io_call, copy_call) in [
+    for (start_marker, end_marker, io_call, copy_call, copy_before_io) in [
         (
             "fn zircon_iov_write_compat(",
             "fn zircon_iov_read_compat(",
             "compat::table().write_bytes(",
-            "core::ptr::copy_nonoverlapping(",
+            "linux_copy_from_user(",
+            true,
         ),
         (
             "fn zircon_iov_read_compat(",
             "// Zircon VMO Syscalls",
             "compat::table().read_bytes(",
-            "core::ptr::copy_nonoverlapping(",
+            "linux_copy_to_user(",
+            false,
         ),
     ] {
         let start = syscall
@@ -10386,15 +10393,36 @@ fn native_zircon_stream_iov_is_bounded_and_independent_of_linux_process_memory()
             .find("zircon_read_iovecs(vector, vector_size)?")
             .expect("complete native iovec snapshot before I/O");
         let io = body.find(io_call).expect("native backend I/O");
+        let copy = body.find(copy_call).expect("checked user copy");
         assert!(snapshot < io);
+        if copy_before_io {
+            assert!(snapshot < copy && copy < io);
+        } else {
+            assert!(snapshot < io && io < copy);
+        }
         assert!(body.contains("ZIRCON_IO_STAGING_BYTES"));
         assert!(body.contains(io_call));
-        assert!(body.contains(copy_call));
+        assert!(
+            !body.contains("core::ptr::"),
+            "raw user pointer in {start_marker}"
+        );
         assert!(!body.contains("zircon_read_iovec(vector, index)"));
         assert!(!body.contains("linux_read_user_iovec"));
-        assert!(!body.contains("linux_copy_"));
         assert!(!body.contains("linux_kernel_buffer"));
     }
+
+    let copy_from = braced_body(
+        &syscall[syscall
+            .find("fn linux_copy_from_user(")
+            .expect("checked copy-in")..],
+    );
+    let copy_to = braced_body(
+        &syscall[syscall
+            .find("fn linux_copy_to_user(")
+            .expect("checked copy-out")..],
+    );
+    assert!(copy_from.contains("linux_process_memory::copy_from_current"));
+    assert!(copy_to.contains("linux_process_memory::copy_to_current"));
 
     let native_write_start = syscall
         .find("fn zircon_iov_write_compat(")
@@ -11936,4 +11964,131 @@ fn linux_pci_c_driver_keeps_stock_linux_source() {
     assert!(pci_header.contains("struct pci_dev"));
     assert!(framework.contains("linuxcompat::init()"));
     assert!(docs.contains("Linux PCI C driver"));
+}
+
+#[test]
+fn cli_command_surface_and_host_job_protocol_are_closed() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let shell = std::fs::read_to_string(repository.join("src/user_level/services/user_shell.rs"))
+        .expect("read user shell");
+    let policy = std::fs::read_to_string(
+        repository.join("src/user_level/services/hermes_shell_logic_shared.rs"),
+    )
+    .expect("read hermes shell policy");
+    let launcher =
+        std::fs::read_to_string(repository.join("scripts/smros-vm-launcher.py")).expect("launcher");
+    let docs = std::fs::read_to_string(repository.join("docs/USER_SHELL.md")).expect("shell docs");
+    let agent = std::fs::read_to_string(repository.join("src/user_level/services/hermes_agent.rs"))
+        .expect("hermes agent");
+
+    let table = shell
+        .find("const SHELL_COMMANDS:")
+        .expect("shell command table");
+    let table_end = shell[table..].find("];").expect("shell command table end") + table;
+    let mut names = Vec::new();
+    for line in shell[table..table_end].lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("name: \"") {
+            names.push(rest.split('"').next().expect("command name").to_string());
+        }
+    }
+    let expected = policy
+        .find("pub const SHELL_COMMAND_NAMES:")
+        .expect("shared command catalog");
+    let expected_end = policy[expected..]
+        .find("];")
+        .expect("shared command catalog end")
+        + expected;
+    let mut catalog = Vec::new();
+    for line in policy[expected..expected_end].lines() {
+        let line = line.trim().trim_end_matches(',');
+        if let Some(name) = line
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+        {
+            catalog.push(name.to_string());
+        }
+    }
+    assert_eq!(names, catalog, "help catalog must match the shell table");
+    assert!(shell.contains("fn shell_catalog_matches("));
+    assert!(shell.contains("shell command catalog mismatch"));
+    assert!(shell.contains("line.split_whitespace()"));
+    assert!(shell.contains("Unknown command: "));
+    assert!(shell.contains("Type 'help' for available commands."));
+    for name in &names {
+        assert!(
+            docs.contains(&format!("- `{name}`")),
+            "USER_SHELL.md is missing `{name}`"
+        );
+    }
+
+    let help = braced_body(&shell[shell.find("fn cmd_help(").expect("help")..]);
+    assert!(help.contains("for cmd in SHELL_COMMANDS"));
+    assert!(help.contains("shell_catalog_matches()"));
+
+    let hermes = braced_body(&shell[shell.find("fn cmd_hermes(").expect("hermes")..]);
+    assert!(hermes.contains("parse_hermes_shell_verb"));
+    assert!(hermes.contains("HermesShellVerb::TestAll => run_hermes_test_all"));
+    assert!(hermes.contains("HermesShellVerb::Random => run_hermes_random_campaign"));
+    assert!(hermes.contains("HermesShellVerb::Exec"));
+    assert!(hermes.contains("HermesShellVerb::Skills"));
+    assert!(hermes.contains("HermesShellVerb::Test"));
+    assert!(!hermes.contains("posixtest all"));
+    assert!(!hermes.contains("make skt"));
+
+    let test_all = braced_body(
+        &shell[shell
+            .find("fn run_hermes_test_all_inner(")
+            .expect("test-all inner")..],
+    );
+    assert!(test_all.contains("run_hermes_host_jobs"));
+    assert!(!test_all.contains("posixtest all"));
+    assert!(!test_all.contains("make skt"));
+    assert!(!test_all.contains("HermesHostTestJob::Skt"));
+    assert!(!test_all.contains("job=skt"));
+
+    let host_jobs =
+        braced_body(&shell[shell.find("fn run_hermes_host_jobs(").expect("host jobs")..]);
+    assert!(host_jobs.contains("HermesHostTestJob::Ut, HermesHostTestJob::It"));
+    assert!(host_jobs.contains("host_job_name(job.as_str())"));
+    assert!(host_jobs.contains("unsupported-host-job"));
+    assert!(!host_jobs.contains("HermesHostTestJob::Skt"));
+    assert!(!host_jobs.contains("HermesHostTestJob::St"));
+
+    assert!(policy.contains("\"ut\" => Some(\"ut\")"));
+    assert!(policy.contains("\"it\" => Some(\"it\")"));
+    assert!(!policy.contains("\"skt\" => Some"));
+    assert!(launcher.contains("if job not in {\"ut\", \"it\"}"));
+    assert!(launcher.contains("def bounded_test_summary"));
+    assert!(launcher.contains("leaving directory"));
+    assert!(agent.contains("Hermes host jobs stay {ut,it}"));
+    assert!(agent.contains("does not run SKT"));
+    assert!(agent.contains("never guest `posixtest all`"));
+    for line in agent.lines() {
+        let Some(rest) = line.split("_SKILL: &str = \"").nth(1) else {
+            continue;
+        };
+        let body = rest.trim_end_matches(';').replace("\\n", "\n");
+        let lower = body.to_ascii_lowercase();
+        assert!(
+            lower.contains("skill"),
+            "skill file must name itself a skill: {line}"
+        );
+        assert!(
+            lower.contains("hermes") || lower.contains("smros"),
+            "skill file must name Hermes or SMROS: {line}"
+        );
+    }
+
+    let output = std::process::Command::new("python3")
+        .arg("scripts/test-smros-vm-launcher.py")
+        .current_dir(&repository)
+        .output()
+        .expect("run launcher protocol tests");
+    assert!(
+        output.status.success(),
+        "launcher protocol tests failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

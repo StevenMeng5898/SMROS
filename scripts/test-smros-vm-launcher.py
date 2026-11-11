@@ -29,8 +29,11 @@ class HermesHostTestProtocolTests(unittest.TestCase):
             {"job": "verify"},
             {"job": "st"},
             {"job": "skt"},
+            {"job": "posixtest"},
+            {"job": "posixtest all"},
             {"job": "ut", "command": "make clean"},
             {"command": "make ut"},
+            {"job": ""},
             {},
         ):
             with self.assertRaises(ValueError):
@@ -93,6 +96,18 @@ class HermesHostTestProtocolTests(unittest.TestCase):
         self.assertNotIn("Leaving_directory", only_make)
         combined = LAUNCHER.bounded_test_summary(stdout + stderr)
         self.assertIn("panicked_at", combined)
+        last_line = LAUNCHER.bounded_test_summary(
+            "thread 'cli_contract' panicked at tests/integration_contracts.rs:1:1:\n"
+            "assertion failed: host job\n"
+            "make[1]: Leaving directory '/repo'\n"
+        )
+        self.assertIn("assertion", last_line)
+        self.assertNotIn("Leaving", last_line)
+        only_footer = LAUNCHER.bounded_test_summary(
+            "ordinary status line\nmake: Leaving directory '/repo'\n"
+        )
+        self.assertEqual(only_footer, "ordinary_status_line")
+        self.assertNotIn("Leaving", only_footer)
         src = MODULE_PATH.read_text()
         run_start = src.index("def run_test_job")
         run_end = src.index("def write_test_log")
@@ -250,12 +265,36 @@ class LaunchRetryTests(unittest.TestCase):
                 self.fail(status)
             self.assertIn("OK job=ut status=0", status)
 
+        with self.assertRaises(ValueError):
+            LAUNCHER.test_job_status({"job": "it", "token": token})
+        with self.assertRaises(ValueError):
+            LAUNCHER.test_job_status({"job": "ut", "token": "999999"})
+        with self.assertRaises(ValueError):
+            LAUNCHER.test_job_status({"token": "not-a-token"})
+
         src = MODULE_PATH.read_text()
         self.assertIn("SMROS_TEST_STATUS 1", src)
         self.assertIn("response = start_test_job(values)", src)
         self.assertIn("response = test_job_status(values)", src)
         self.assertIn("terminate_process_group(exc.pid)", src)
         self.assertIn("def terminate_process_group(", src)
+
+    def test_run_test_job_reports_timeout_without_passing(self) -> None:
+        def expire(*_args, **kwargs):
+            expired = subprocess.TimeoutExpired(
+                cmd=["make", "it"], timeout=kwargs.get("timeout", 1)
+            )
+            expired.pid = 4321
+            raise expired
+
+        with mock.patch.object(LAUNCHER.subprocess, "run", side_effect=expire):
+            with mock.patch.object(LAUNCHER, "terminate_process_group") as kill:
+                with mock.patch.object(LAUNCHER.time, "sleep"):
+                    with mock.patch.object(LAUNCHER, "test_job_attempts", return_value=1):
+                        response = LAUNCHER.run_test_job({"job": "it"})
+        self.assertIn("ERR job=it status=timeout", response)
+        self.assertNotIn("status=0", response)
+        kill.assert_called_once_with(4321)
 
 
 if __name__ == "__main__":

@@ -45,8 +45,8 @@ const HERMES_KERNEL_SKILL: &str = "# SMROS Kernel Skill\n\nUse FxFS, /svc, and s
 const HERMES_WEB_SKILL: &str = "# Hermes Web UI Skill\n\nBuild and review the Hermes web console, dashboard HTML, prompt composer, skills list, and transcript surface for SMROS.\n";
 const HERMES_OPS_SKILL: &str = "# SMROS Ops Skill\n\nRun Gemma, Hermes, Docker, network, QEMU, and shell smoke tests; summarize failures with concrete SMROS commands.\n";
 const HERMES_MEMORY_SKILL: &str = "# Hermes Memory Skill\n\nUse Hermes memory, session transcripts, user notes, and FxFS persistence to keep agent context visible and auditable.\n";
-const HERMES_UT_SKILL: &str = "# UT Skill\n\nRun `make ut` when the host crate compiles. Until then, `make posix-tool-test` is the SMROS syscall and POSIX unit gate. No QEMU.\n";
-const HERMES_IT_SKILL: &str = "# IT Skill\n\nRun `make it` when the host crate compiles, plus `make posix-tool-test` and `make launcher-test`. Hermes host jobs stay {ut,it}. SKT/smoke stays host-only `make skt`.\n";
+const HERMES_UT_SKILL: &str = "# UT Skill\n\nRun `make ut` for the SMROS host crate in `tests/host`. `make posix-tool-test` remains the offline POSIX tool gate and does not replace `make ut`. No QEMU.\n";
+const HERMES_IT_SKILL: &str = "# IT Skill\n\nRun `make it` for `tests/host/tests`, plus `make launcher-test`. Hermes host jobs stay {ut,it}. SKT/smoke stays host-only `make skt`. Do not run guest `posixtest all`.\n";
 const HERMES_SKT_SKILL: &str = "# SKT Skill\n\nSKT is the host-side SMROS smoke test (`make skt`). Hermes test-all does not run SKT because the guest cannot boot another SMROS from the command line. Official POSIX is host-controlled `make posix-run`, never guest `posixtest all`.\n";
 const HERMES_FUZZING_SKILL: &str = "# Fuzzing Skill\n\nRun bounded `fuzzsc` through Hermes (campaign seed, iterations=50, time<=5). Pointers stay in kernel scratch. Skip clone/exit/exec. Do not execute Gemma text.\n";
 const HERMES_REBOOT_SKILL: &str = "# Reboot Skill\n\nHermes owns SMROS guest reboot. Run `reboot` with `hermes exec reboot`. Persist the active hermes test checkpoint first so test-all and random resume after reset.\n";
