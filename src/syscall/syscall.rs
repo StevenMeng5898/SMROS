@@ -7246,6 +7246,7 @@ fn close_linux_fd_for_current_process(fd: usize) -> bool {
     if let (Some(owner), Some(file_id)) = (owner, file_id) {
         linux_record_lock::release_owner_file(owner, file_id);
     }
+    linux_epoll_release(fd);
     let final_reference = memory_state().release_open_description(entry.description_id);
     if let Some(description) = final_reference {
         let handle = description.handle;
@@ -8201,7 +8202,9 @@ fn linux_epoll_alloc_set(epfd: usize) -> Result<usize, SysError> {
         };
         return Ok(index);
     }
-    let index = sets.iter().position(|set| !set.used).unwrap_or(0);
+    let Some(index) = sets.iter().position(|set| !set.used) else {
+        return Err(SysError::ENOMEM);
+    };
     sets[index] = LinuxEpollSet {
         epfd,
         used: true,
@@ -8209,6 +8212,32 @@ fn linux_epoll_alloc_set(epfd: usize) -> Result<usize, SysError> {
         items: LinuxEpollSet::EMPTY.items,
     };
     Ok(index)
+}
+
+fn linux_epoll_release(epfd: usize) {
+    let sets = linux_epoll_sets();
+    if let Some(index) = linux_epoll_find_set(sets, epfd) {
+        sets[index] = LinuxEpollSet::EMPTY;
+    }
+}
+
+fn linux_epoll_fd_class(fd: usize) -> syscall_logic::LinuxEpollFdClass {
+    if !linux_fd_known(fd) {
+        return syscall_logic::LinuxEpollFdClass::Missing;
+    }
+    if linux_epoll_find_set(linux_epoll_sets(), fd).is_some() {
+        syscall_logic::LinuxEpollFdClass::Epoll
+    } else {
+        syscall_logic::LinuxEpollFdClass::Other
+    }
+}
+
+fn linux_epoll_reject_error(reject: syscall_logic::LinuxEpollReject) -> SysError {
+    match reject {
+        syscall_logic::LinuxEpollReject::Ebadf => SysError::EBADF,
+        syscall_logic::LinuxEpollReject::Efault => SysError::EFAULT,
+        syscall_logic::LinuxEpollReject::Einval => SysError::EINVAL,
+    }
 }
 
 fn linux_read_user_epoll_event(address: usize) -> Result<(u32, u64), SysError> {
@@ -8255,14 +8284,17 @@ pub fn sys_epoll_create1(flags: usize) -> SysResult {
 }
 
 pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: usize) -> SysResult {
-    if !linux_fd_known(epfd) || (op != LINUX_EPOLL_CTL_DEL && !linux_fd_known(fd)) {
-        return Err(SysError::ENODEV);
-    }
-    if op != LINUX_EPOLL_CTL_DEL && event == 0 {
-        return Err(SysError::EFAULT);
+    if let Some(reject) = syscall_logic::linux_epoll_ctl_reject(
+        linux_epoll_fd_class(epfd),
+        linux_fd_known(fd),
+        epfd == fd,
+        op,
+        event,
+    ) {
+        return Err(linux_epoll_reject_error(reject));
     }
     let sets = linux_epoll_sets();
-    let set_index = linux_epoll_find_set(sets, epfd).ok_or(SysError::ENODEV)?;
+    let set_index = linux_epoll_find_set(sets, epfd).ok_or(SysError::EINVAL)?;
     let set = &mut sets[set_index];
     let existing = set.items[..set.count].iter().position(|item| item.fd == fd as i32);
     match op {
@@ -8313,14 +8345,10 @@ pub fn sys_epoll_pwait(
     _timeout: isize,
     _sigmask: usize,
 ) -> SysResult {
-    if !linux_fd_known(epfd) {
-        return Err(SysError::ENODEV);
-    }
-    if maxevents == 0 {
-        return Err(SysError::EINVAL);
-    }
-    if events == 0 {
-        return Err(SysError::EFAULT);
+    if let Some(reject) =
+        syscall_logic::linux_epoll_pwait_reject(linux_epoll_fd_class(epfd), events, maxevents)
+    {
+        return Err(linux_epoll_reject_error(reject));
     }
     let byte_len = maxevents
         .checked_mul(LINUX_EPOLL_EVENT_BYTES)
@@ -8329,7 +8357,7 @@ pub fn sys_epoll_pwait(
         return Err(SysError::EFAULT);
     }
     let sets = linux_epoll_sets();
-    let set_index = linux_epoll_find_set(sets, epfd).ok_or(SysError::ENODEV)?;
+    let set_index = linux_epoll_find_set(sets, epfd).ok_or(SysError::EINVAL)?;
     let set = sets[set_index];
     let mut filled = 0usize;
     for item in set.items[..set.count].iter() {
@@ -8350,6 +8378,30 @@ pub fn sys_epoll_pwait(
         filled += 1;
     }
     Ok(filled)
+}
+
+/// Linux epoll_pwait2. `timeout == 0` is a NULL timespec (wait indefinitely).
+/// A present timespec is checked for `EINVAL` / `EFAULT`, then the call
+/// reports events that are already ready. This kernel does not sleep in the
+/// dispatcher, matching epoll_pwait's modeled timeout.
+pub fn sys_epoll_pwait2(
+    epfd: usize,
+    events: usize,
+    maxevents: usize,
+    timeout: usize,
+    sigmask: usize,
+) -> SysResult {
+    if timeout != 0 {
+        let requested = linux_read_user_timespec(timeout)?;
+        if let Some(reject) = syscall_logic::linux_epoll_pwait2_timeout_reject(
+            false,
+            requested.tv_sec,
+            requested.tv_nsec,
+        ) {
+            return Err(linux_epoll_reject_error(reject));
+        }
+    }
+    sys_epoll_pwait(epfd, events, maxevents, 0, sigmask)
 }
 
 /// Linux sys_open wrapper.
@@ -16014,9 +16066,10 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_EVENTFD2 => sys_eventfd2(args[0], args[1]),
         ARM64_SYS_EPOLL_CREATE1 => sys_epoll_create1(args[0]),
         ARM64_SYS_EPOLL_CTL => sys_epoll_ctl(args[0], args[1], args[2], args[3]),
-        ARM64_SYS_EPOLL_PWAIT | ARM64_SYS_EPOLL_PWAIT2 => {
+        ARM64_SYS_EPOLL_PWAIT => {
             sys_epoll_pwait(args[0], args[1], args[2], args[3] as isize, args[4])
         }
+        ARM64_SYS_EPOLL_PWAIT2 => sys_epoll_pwait2(args[0], args[1], args[2], args[3], args[4]),
         ARM64_SYS_INOTIFY_INIT1 => sys_inotify_init1(args[0]),
         ARM64_SYS_INOTIFY_ADD_WATCH => sys_inotify_add_watch(args[0], args[1], args[2]),
         ARM64_SYS_INOTIFY_RM_WATCH => sys_inotify_rm_watch(args[0], args[1]),

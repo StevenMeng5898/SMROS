@@ -793,6 +793,57 @@ mod syscall_logic {
     ));
 
     #[test]
+    fn epoll_preflight_matches_linux_errno_classes() {
+        use LinuxEpollFdClass::{Epoll, Missing, Other};
+        use LinuxEpollReject::{Ebadf, Efault, Einval};
+
+        assert_eq!(
+            linux_epoll_ctl_reject(Missing, true, false, 1, 0x1000),
+            Some(Ebadf)
+        );
+        assert_eq!(
+            linux_epoll_ctl_reject(Epoll, false, false, 1, 0x1000),
+            Some(Ebadf)
+        );
+        assert_eq!(
+            linux_epoll_ctl_reject(Other, true, false, 1, 0x1000),
+            Some(Einval)
+        );
+        assert_eq!(
+            linux_epoll_ctl_reject(Epoll, true, true, 1, 0x1000),
+            Some(Einval)
+        );
+        assert_eq!(
+            linux_epoll_ctl_reject(Epoll, true, false, 0, 0x1000),
+            Some(Einval)
+        );
+        assert_eq!(
+            linux_epoll_ctl_reject(Epoll, true, false, 1, 0),
+            Some(Efault)
+        );
+        assert_eq!(linux_epoll_ctl_reject(Epoll, true, false, 2, 0), None);
+        assert_eq!(linux_epoll_ctl_reject(Epoll, true, false, 1, 0x1000), None);
+        assert_eq!(linux_epoll_ctl_reject(Epoll, true, false, 3, 0x1000), None);
+
+        assert_eq!(linux_epoll_pwait_reject(Missing, 0x1000, 4), Some(Ebadf));
+        assert_eq!(linux_epoll_pwait_reject(Other, 0x1000, 4), Some(Einval));
+        assert_eq!(linux_epoll_pwait_reject(Epoll, 0x1000, 0), Some(Einval));
+        assert_eq!(linux_epoll_pwait_reject(Epoll, 0, 4), Some(Efault));
+        assert_eq!(linux_epoll_pwait_reject(Epoll, 0x1000, 4), None);
+
+        assert_eq!(linux_epoll_pwait2_timeout_reject(true, -1, -1), None);
+        assert_eq!(linux_epoll_pwait2_timeout_reject(false, 0, 0), None);
+        assert_eq!(
+            linux_epoll_pwait2_timeout_reject(false, 0, 1_000_000_000),
+            Some(Einval)
+        );
+        assert_eq!(
+            linux_epoll_pwait2_timeout_reject(false, -1, 0),
+            Some(Einval)
+        );
+    }
+
+    #[test]
     fn expired_real_timer_scan_includes_processes_not_currently_scheduled() {
         const DISABLED: u64 = u64::MAX;
         let deadlines = [(7usize, 100u64), (8, DISABLED), (9, 99), (10, 101)];
