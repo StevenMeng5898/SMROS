@@ -4712,12 +4712,16 @@ fn aarch64_clone_child_is_validated_before_publication() {
     let prepare = launcher
         .find("prepare_dynamic_loader(&request)")
         .expect("loader preparation");
+    let root_resources = launcher
+        .find("ensure_linux_root_resources(pid)")
+        .expect("root ELF task installs a handle namespace before EL0");
     let root_paddr = launcher
         .find("linux_process_memory::current_root_paddr()")
         .expect("process root selection");
     let enter_el0 = launcher
         .find("user_process::switch_to_el0(")
         .expect("EL0 entry");
+    assert!(register_memory < root_resources && root_resources < prepare);
     assert!(register_memory < prepare && prepare < root_paddr && root_paddr < enter_el0);
     let prepare_start = run_elf
         .find("fn prepare_dynamic_loader(")

@@ -259,6 +259,12 @@ extern "C" fn run_elf_launcher_entry() -> ! {
         });
         finish_launcher_thread();
     }
+    if syscall::ensure_linux_root_resources(pid).is_err() {
+        complete_active_run(cpu, launch_id, |_| {
+            RunTermination::LaunchError(RunElfError::Thread)
+        });
+        finish_launcher_thread();
+    }
     let preparation = prepare_dynamic_loader(&request);
 
     match preparation {
