@@ -584,6 +584,26 @@ impl<B: Aarch64AddressSpaceBackend> Aarch64AddressSpaceCore<B> {
         Some((descriptor & AARCH64_DESC_ADDR_MASK) as usize | (vaddr & (AARCH64_PAGE_SIZE - 1)))
     }
 
+    pub(crate) fn user_page_executable(&self, vaddr: usize) -> bool {
+        if !(AARCH64_USER_BASE..AARCH64_USER_LIMIT).contains(&vaddr) {
+            return false;
+        }
+        let Ok((table_pfn, index)) = self.leaf_location(vaddr) else {
+            return false;
+        };
+        let Some(descriptor) = self.backend.read_table_entry(table_pfn, index) else {
+            return false;
+        };
+        if !aarch64_l3_page_descriptor_valid(descriptor)
+            || descriptor & AARCH64_DESC_AP_USER == 0
+            || descriptor & AARCH64_DESC_UXN != 0
+        {
+            return false;
+        }
+        let pfn = (descriptor & AARCH64_DESC_ADDR_MASK) / AARCH64_PAGE_SIZE as u64;
+        self.backend.user_data_pfn_allowed(pfn)
+    }
+
     fn user_page_physical(&self, pfn: u64) -> Result<usize, Aarch64AddressSpaceCoreError> {
         let paddr = self
             .backend

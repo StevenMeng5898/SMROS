@@ -4747,6 +4747,42 @@ mod linux_process_logic {
     }
 
     #[test]
+    fn exiting_child_is_waited_once_and_its_pid_stays_reserved() {
+        let mut processes = LinuxProcessTable::<4>::new();
+        processes.register_root(7).unwrap();
+        let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert!(processes.publish(child));
+        assert!(processes.begin_exit(child.pid));
+        assert_eq!(
+            processes.by_pid(child.pid).map(|process| process.state),
+            Some(LinuxProcessState::Exiting)
+        );
+        assert!(matches!(
+            processes.wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Any, false),
+            LinuxWaitOutcome::WouldBlock
+        ));
+        assert_eq!(
+            processes.reserve_child_with_pid(LINUX_ROOT_PID, 9, child.pid, 0),
+            Err(LinuxProcessError::Exhausted)
+        );
+        let status = linux_wait_status_exit(0);
+        assert!(processes.exit(child.pid, status));
+        assert_eq!(
+            processes.wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Pid(child.pid), false),
+            LinuxWaitOutcome::Ready {
+                pid: child.pid,
+                status
+            }
+        );
+        assert!(processes.reap(LINUX_ROOT_PID, child.pid).is_some());
+        assert!(processes.reap(LINUX_ROOT_PID, child.pid).is_none());
+        assert!(matches!(
+            processes.wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Pid(child.pid), false),
+            LinuxWaitOutcome::NoChildren
+        ));
+    }
+
+    #[test]
     fn pid_allocator_exhaustion_remains_permanent_across_launch_reset() {
         let max_pid = i32::MAX as usize;
         let mut processes = LinuxProcessTable::<3>::with_next_pid(max_pid);
@@ -8881,12 +8917,56 @@ mod aarch64_exception_logic {
         assert_eq!(aarch64_lower_el_sync(esr(0x15, 0)), Aarch64LowerElSync::Svc);
         assert_eq!(
             aarch64_lower_el_sync(esr(0x24, 0x21)),
-            Aarch64LowerElSync::Unsupported
+            Aarch64LowerElSync::AlignmentFault
+        );
+        assert_eq!(
+            aarch64_lower_el_sync(esr(0x00, 0)),
+            Aarch64LowerElSync::UndefinedInstruction
+        );
+        assert_eq!(
+            aarch64_lower_el_sync(esr(0x22, 0)),
+            Aarch64LowerElSync::AlignmentFault
         );
         assert_eq!(
             aarch64_lower_el_sync(esr(0x3c, 0)),
             Aarch64LowerElSync::Unsupported
         );
+    }
+
+    #[test]
+    fn el0_unknown_exceptions_terminate_and_non_el0_still_halts() {
+        assert_eq!(
+            aarch64_lower_el_action(false, Aarch64LowerElSync::UndefinedInstruction),
+            Aarch64LowerElAction::HaltKernel
+        );
+        for class in [
+            Aarch64LowerElSync::UndefinedInstruction,
+            Aarch64LowerElSync::AlignmentFault,
+            Aarch64LowerElSync::Unsupported,
+            Aarch64LowerElSync::Svc,
+        ] {
+            assert_eq!(
+                aarch64_lower_el_action(true, class),
+                Aarch64LowerElAction::TerminateProcess,
+                "EL0 class {class:?} must terminate, not be ignored"
+            );
+        }
+        assert!(matches!(
+            aarch64_lower_el_action(
+                true,
+                Aarch64LowerElSync::MemoryFault(Aarch64El0MemoryFault {
+                    access: Aarch64El0MemoryAccess::Read,
+                    kind: Aarch64El0AbortKind::Translation,
+                })
+            ),
+            Aarch64LowerElAction::DeliverMemoryFault(_)
+        ));
+        assert!(aarch64_saved_state_is_el0(0));
+        assert!(!aarch64_saved_state_is_el0(0x5));
+        assert!(!el0_signal_handler_may_run(0, true));
+        assert!(!el0_signal_handler_may_run(1, true));
+        assert!(!el0_signal_handler_may_run(0x1200_1000, false));
+        assert!(el0_signal_handler_may_run(0x1200_1000, true));
     }
 }
 
