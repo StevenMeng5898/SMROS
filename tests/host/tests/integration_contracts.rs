@@ -2420,12 +2420,17 @@ fn aarch64_warning_gate_is_strict_and_target_scoped() {
     assert!(makefile.contains("AARCH64_RUSTFLAGS = $(strip $(RUSTFLAGS) -D warnings)"));
     assert!(makefile
         .contains("aarch64-warning-check:\n\t@$(MAKE) build-test ARCH=aarch64-unknown-none"));
+    assert!(makefile.contains("SMROS_BUILD_JOBS ?= 4"));
     assert!(makefile.contains(
-        "RUSTFLAGS='$(AARCH64_RUSTFLAGS)' SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' cargo build --release --target $(TARGET)"
+        "SMROS build jobs: $(SMROS_BUILD_JOBS) (cargo -j $(SMROS_BUILD_JOBS), codegen-units $(SMROS_BUILD_JOBS))"
     ));
     assert!(makefile.contains(
-        "SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' cargo build --release --target $(TARGET)"
+        "RUSTFLAGS='$(AARCH64_RUSTFLAGS)' SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' CARGO_PROFILE_RELEASE_CODEGEN_UNITS='$(SMROS_BUILD_JOBS)' CARGO_PROFILE_DEV_CODEGEN_UNITS='$(SMROS_BUILD_JOBS)' cargo build --release --target $(TARGET) -j $(SMROS_BUILD_JOBS)"
     ));
+    assert!(makefile.contains(
+        "SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' CARGO_PROFILE_RELEASE_CODEGEN_UNITS='$(SMROS_BUILD_JOBS)' CARGO_PROFILE_DEV_CODEGEN_UNITS='$(SMROS_BUILD_JOBS)' cargo build --release --target $(TARGET) -j $(SMROS_BUILD_JOBS)"
+    ));
+    assert!(docs.contains("make run SMROS_BUILD_JOBS=8"));
     assert!(docs.contains("make aarch64-warning-check"));
     assert!(docs.contains("x86_64 and RISC-V64 warning policy is unchanged"));
     assert!(makefile.contains("SMOKE_QEMU_MEMORY ?= 2G"));

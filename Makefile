@@ -35,6 +35,10 @@ OBJCOPY = $(if $(filter riscv64gc-unknown-none-elf,$(TARGET)),$(OBJCOPY_RISCV64)
 SMROS_CPUS ?= 8
 QEMU_SMP ?= $(SMROS_CPUS)
 SMROS_LOGICAL_CPUS ?= $(QEMU_SMP)
+# Cargo jobserver slots and LLVM codegen units for the kernel crate.
+# Host tests receive only -j; their Cargo profile stays untouched.
+SMROS_BUILD_JOBS ?= 4
+export SMROS_BUILD_JOBS
 QEMU_MEMORY ?= 2G
 SMOKE_QEMU_SMP ?= 4
 SMOKE_QEMU_MEMORY ?= 2G
@@ -59,11 +63,15 @@ all: build
 
 # Build the kernel
 build:
+	@case '$(SMROS_BUILD_JOBS)' in \
+		''|*[!0-9]*|0*) echo "SMROS_BUILD_JOBS must be a positive integer" >&2; exit 1 ;; \
+	esac
+	@echo "SMROS build jobs: $(SMROS_BUILD_JOBS) (cargo -j $(SMROS_BUILD_JOBS), codegen-units $(SMROS_BUILD_JOBS))"
 	@echo "Building SMROS kernel for $(TARGET)..."
 	@if [ "$(TARGET)" = "aarch64-unknown-none" ]; then \
-		RUSTFLAGS='$(AARCH64_RUSTFLAGS)' SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' cargo build --release --target $(TARGET); \
+		RUSTFLAGS='$(AARCH64_RUSTFLAGS)' SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' CARGO_PROFILE_RELEASE_CODEGEN_UNITS='$(SMROS_BUILD_JOBS)' CARGO_PROFILE_DEV_CODEGEN_UNITS='$(SMROS_BUILD_JOBS)' cargo build --release --target $(TARGET) -j $(SMROS_BUILD_JOBS); \
 	else \
-		SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' cargo build --release --target $(TARGET); \
+		SMROS_LOGICAL_CPUS='$(SMROS_LOGICAL_CPUS)' CARGO_PROFILE_RELEASE_CODEGEN_UNITS='$(SMROS_BUILD_JOBS)' CARGO_PROFILE_DEV_CODEGEN_UNITS='$(SMROS_BUILD_JOBS)' cargo build --release --target $(TARGET) -j $(SMROS_BUILD_JOBS); \
 	fi
 	@if [ "$(TARGET)" = "riscv64gc-unknown-none-elf" ]; then \
 		echo "Using RISC-V ELF payload directly for QEMU: $(KERNEL)"; \
@@ -369,6 +377,7 @@ help:
 	@echo "  make st       - Alias for make skt"
 	@echo "  make verify   - Run unit, integration, build, QEMU smoke (skt), and Verus checks"
 	@echo "  make run      - Build and run in QEMU"
+	@echo "  make run SMROS_BUILD_JOBS=8 - Build with 8 cargo jobs and codegen units"
 	@echo "  make run ARCH=riscv64gc-unknown-none-elf - Run RISC-V64"
 	@echo "  make run ARCH=x86_64-unknown-none - Run x86_64"
 	@echo "  make debug    - Run with debug logging"
