@@ -286,7 +286,18 @@ extern "C" fn run_elf_launcher_entry() -> ! {
 
 #[no_mangle]
 pub extern "C" fn run_elf_launcher_resume(id_raw: usize) -> ! {
-    let Some(launch_id) = user_logic::RunElfLaunchId::from_usize(id_raw) else {
+    // Exception returns restore the interrupted x0, so a signal or fault exit
+    // can arrive here with a userspace register instead of the launch id.
+    // A pending return has one active launch; that id is authoritative.
+    let launch_id = with_run_state(|state| {
+        if state.return_pending() {
+            if let Some(active) = state.active_id() {
+                return Some(active);
+            }
+        }
+        user_logic::RunElfLaunchId::from_usize(id_raw)
+    });
+    let Some(launch_id) = launch_id else {
         print_infrastructure_diagnostic(RunInfrastructureError::MissingRequest);
         finish_launcher_thread();
     };
@@ -318,6 +329,13 @@ fn take_active_request(
         })
     });
     (taken.completion, taken.exit_code)
+}
+
+pub fn abandon_active_launch() {
+    let cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
+    RUN_CPU_BINDINGS.force_clear(cpu);
+    with_run_state(|state| state.abandon_active());
+    syscall::reset_linux_process_state();
 }
 
 fn clear_launch_state_without_outcome(cpu: usize, launch_id: user_logic::RunElfLaunchId) {

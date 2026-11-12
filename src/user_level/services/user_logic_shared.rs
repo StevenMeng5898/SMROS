@@ -851,6 +851,12 @@ impl<const N: usize> RunElfCpuBindings<N> {
         RunElfLaunchId::from_raw(raw)
     }
 
+    pub(crate) fn force_clear(&self, cpu: usize) {
+        if let Some(slot) = self.slots.get(cpu) {
+            slot.store(Self::EMPTY, core::sync::atomic::Ordering::Release);
+        }
+    }
+
     pub(crate) fn clear(&self, cpu: usize, expected: RunElfLaunchId) -> bool {
         let Some(slot) = self.slots.get(cpu) else {
             return false;
@@ -894,6 +900,19 @@ impl<T> RunElfLifecycleState<T> {
 
     pub(crate) const fn active_id(&self) -> Option<RunElfLaunchId> {
         self.active_id
+    }
+
+    pub(crate) const fn return_pending(&self) -> bool {
+        self.return_pending
+    }
+
+    pub(crate) fn abandon_active(&mut self) {
+        self.request = None;
+        self.return_pending = false;
+        self.exit_code = 0;
+        if let Some(active) = self.active_id.take() {
+            self.last_terminal_id = Some(active);
+        }
     }
 
     pub(crate) fn request_for(&self, expected: RunElfLaunchId) -> Option<&T> {

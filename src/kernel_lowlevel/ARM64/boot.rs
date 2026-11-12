@@ -482,6 +482,11 @@ irq_handler_lower:
     bl      deliver_linux_timer_signal_from_irq
     bl      check_preemption
 
+    // A timed-out POSIX test is still at EL0. Exit its process group and
+    // return to the ELF launcher instead of the hung userspace thread.
+    mov     x0, sp
+    bl      abort_posix_test_timeout_from_user
+
     // Restore registers
     ldr     x16, [sp, #0x300]
     msr     fpcr, x16

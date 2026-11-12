@@ -246,6 +246,7 @@ enum PosixRuntimeStatus {
     Unsupported,
     Untested,
     LaunchError,
+    Timeout,
 }
 
 impl PosixRuntimeStatus {
@@ -257,6 +258,7 @@ impl PosixRuntimeStatus {
             PosixRuntimeStatus::Unsupported => "unsupported",
             PosixRuntimeStatus::Untested => "untested",
             PosixRuntimeStatus::LaunchError => "launch-error",
+            PosixRuntimeStatus::Timeout => "timeout",
         }
     }
 }
@@ -335,6 +337,7 @@ fn coverage_result(status: PosixRuntimeStatus) -> PosixCoverageResult {
         PosixRuntimeStatus::Unsupported => PosixCoverageResult::Unsupported,
         PosixRuntimeStatus::Untested => PosixCoverageResult::Untested,
         PosixRuntimeStatus::LaunchError => PosixCoverageResult::LaunchError,
+        PosixRuntimeStatus::Timeout => PosixCoverageResult::Timeout,
     }
 }
 
@@ -350,6 +353,9 @@ struct RunnerState {
     next_index: usize,
     current_index: Option<usize>,
     current_started_tick: u64,
+    timeout_override_ms: Option<u32>,
+    timeout_deadline_tick: u64,
+    timeout_pending: bool,
     resource_before: PosixResourceSnapshot,
     coverage: PosixCoverageTracker,
 }
@@ -368,6 +374,22 @@ static RUNNER_STATE: RunnerStateCell = RunnerStateCell(UnsafeCell::new(None));
 fn with_runner_state<R>(operation: impl FnOnce(&mut Option<RunnerState>) -> R) -> R {
     // SAFETY: `start` and the pinned ELF completion callback are scheduler-serialized.
     unsafe { operation(&mut *RUNNER_STATE.0.get()) }
+}
+
+/// Split an optional trailing `timeout=<ms>` from a posixtest command.
+///
+/// The value uses the manifest timeout rules. When it is absent, each test
+/// keeps the timeout recorded in the manifest.
+pub fn split_timeout_option<'a>(
+    args: &'a [&'a str],
+) -> Result<(&'a [&'a str], Option<u32>), PosixTestError> {
+    let Some((option, filter_args)) = args.split_last() else {
+        return Ok((args, None));
+    };
+    let Some(value) = option.strip_prefix("timeout=") else {
+        return Ok((args, None));
+    };
+    Ok((filter_args, Some(parse_timeout(value)?)))
 }
 
 pub fn parse_filter(args: &[&str]) -> Result<PosixFilter, PosixTestError> {
@@ -514,7 +536,80 @@ fn make_run_id(build_id: &str, tick: u64) -> String {
 }
 
 #[cfg(not(test))]
-pub fn start(filter: PosixFilter) -> Result<(), PosixTestError> {
+pub fn poll_timeout(now_tick: u64) {
+    let wake = with_runner_state(|slot| {
+        let Some(state) = slot.as_mut() else {
+            return false;
+        };
+        if state.current_index.is_none() {
+            return false;
+        }
+        if !state.timeout_pending && now_tick < state.timeout_deadline_tick {
+            return false;
+        }
+        state.timeout_pending = true;
+        true
+    });
+    if wake {
+        // Wake on every poll. A single wake can lose the race with a sleep
+        // that blocks after the first attempt.
+        crate::syscall::linux_task::arm_root_timeout();
+    }
+}
+
+/// Finish a test whose process is already gone.
+///
+/// `timer_getoverrun/2-1.c` can tear down the launch (the launcher then
+/// reports `missing-request`) without delivering an outcome. The runner would
+/// otherwise wait forever. Called from the idle thread, not from an IRQ.
+#[cfg(not(test))]
+pub fn complete_orphan_timeout() -> bool {
+    let ready = with_runner_state(|slot| {
+        slot.as_ref()
+            .is_some_and(|state| state.timeout_pending && state.current_index.is_some())
+    });
+    if !ready || crate::syscall::linux_task::root_has_live_task() {
+        return false;
+    }
+    let path = with_runner_state(|slot| {
+        let state = slot.as_ref()?;
+        let index = state.current_index?;
+        state.selected.get(index)?.binary_path.clone()
+    });
+    let Some(path) = path else {
+        return false;
+    };
+    run_elf::abandon_active_launch();
+    let elapsed = with_runner_state(|slot| {
+        slot.as_ref().map_or(0, |state| {
+            crate::kernel_lowlevel::timer::get_tick_count()
+                .saturating_sub(state.current_started_tick)
+        })
+    });
+    let outcome = RunOutcome {
+        path,
+        termination: RunTermination::Exit(0),
+        elapsed_ticks: elapsed,
+    };
+    if !record_run_outcome(&outcome, true) {
+        infrastructure_error("runner-outcome-invariant");
+        return false;
+    }
+    crate::syscall::linux_task::clear_root_timeout();
+    launch_current_test(true);
+    true
+}
+
+#[cfg(test)]
+pub fn complete_orphan_timeout() -> bool {
+    false
+}
+
+#[cfg(test)]
+pub fn poll_timeout(_now_tick: u64) {}
+
+#[cfg(not(test))]
+pub fn start(filter: PosixFilter, timeout_override_ms: Option<u32>) -> Result<(), PosixTestError> {
     if with_runner_state(|slot| slot.is_some()) {
         return Err(PosixTestError::AlreadyRunning);
     }
@@ -561,6 +656,9 @@ pub fn start(filter: PosixFilter) -> Result<(), PosixTestError> {
         next_index: 0,
         current_index: None,
         current_started_tick: 0,
+        timeout_override_ms,
+        timeout_deadline_tick: u64::MAX,
+        timeout_pending: false,
         resource_before: resource_snapshot(false),
         coverage,
     };
@@ -616,6 +714,15 @@ fn launch_current_test(harness_launcher_active: bool) -> PosixLaunchLoopResult {
             state.next_index += 1;
             state.current_index = Some(index);
             state.current_started_tick = crate::kernel_lowlevel::timer::get_tick_count();
+            state.timeout_pending = false;
+            let timeout_ms = state
+                .timeout_override_ms
+                .unwrap_or(state.selected[index].timeout_ms);
+            state.timeout_deadline_tick = posix_test_logic_shared::timeout_deadline_tick(
+                state.current_started_tick,
+                timeout_ms,
+            );
+            crate::syscall::linux_task::clear_root_timeout();
             state.resource_before = resource_snapshot(harness_launcher_active);
             let test = state.selected[index].clone();
             emit_test_start(state, &test);
@@ -736,10 +843,19 @@ fn record_run_outcome(outcome: &RunOutcome, harness_launcher_active: bool) -> bo
         {
             return false;
         }
-        let status = match outcome.termination {
-            RunTermination::Exit(exit_code) => pts_status(exit_code),
-            RunTermination::LaunchError(_) => PosixRuntimeStatus::LaunchError,
-            RunTermination::InfrastructureError(_) => return false,
+        let timed_out = state.timeout_pending;
+        if timed_out {
+            state.timeout_pending = false;
+            crate::syscall::linux_task::clear_root_timeout();
+        }
+        let status = if timed_out {
+            PosixRuntimeStatus::Timeout
+        } else {
+            match outcome.termination {
+                RunTermination::Exit(exit_code) => pts_status(exit_code),
+                RunTermination::LaunchError(_) => PosixRuntimeStatus::LaunchError,
+                RunTermination::InfrastructureError(_) => return false,
+            }
         };
         emit_test_end(state, &test, &outcome, status, after);
         let update = match state.coverage.record(
@@ -788,6 +904,7 @@ fn finish_suite() {
         }
         *slot = None;
     });
+    crate::syscall::linux_task::clear_root_timeout();
 }
 
 #[cfg(not(test))]
@@ -798,6 +915,7 @@ fn infrastructure_error(message: &str) {
         };
         emit_infrastructure_error(state, message);
         *slot = None;
+        crate::syscall::linux_task::clear_root_timeout();
         true
     });
     if !emitted {
@@ -883,6 +1001,8 @@ fn emit_progress(snapshot: PosixCoverageSnapshot) {
     write_u64(&mut serial, snapshot.status_counts.untested as u64);
     serial.write_str(" launch-errors=");
     write_u64(&mut serial, snapshot.status_counts.launch_errors as u64);
+    serial.write_str(" timeout=");
+    write_u64(&mut serial, snapshot.status_counts.timeouts as u64);
     serial.write_str(" scope=selected\n");
 }
 
@@ -915,20 +1035,26 @@ fn emit_test_end(
     write_test_identity(&mut serial, test);
     serial.write_str(",\"status\":");
     write_json_string(&mut serial, status.as_str());
-    match outcome.termination {
-        RunTermination::Exit(exit_code) => {
-            serial.write_str(",\"pts_status\":");
-            write_json_string(&mut serial, status.as_str());
-            serial.write_str(",\"launch_status\":\"launched\",\"exit_code\":");
-            write_i64(&mut serial, exit_code as i64);
+    if status == PosixRuntimeStatus::Timeout {
+        // Host schema: timeout has no PTS exit code. The process tree was killed.
+        serial.write_str(",\"pts_status\":null,\"launch_status\":\"launched\",\"timed_out\":true");
+    } else {
+        match outcome.termination {
+            RunTermination::Exit(exit_code) => {
+                serial.write_str(",\"pts_status\":");
+                write_json_string(&mut serial, status.as_str());
+                serial.write_str(",\"launch_status\":\"launched\",\"exit_code\":");
+                write_i64(&mut serial, exit_code as i64);
+            }
+            RunTermination::LaunchError(error) => {
+                serial.write_str(",\"launch_status\":\"launch-error\",\"launch_error\":");
+                write_json_string(&mut serial, error.as_str());
+            }
+            RunTermination::InfrastructureError(_) => return,
         }
-        RunTermination::LaunchError(error) => {
-            serial.write_str(",\"launch_status\":\"launch-error\",\"launch_error\":");
-            write_json_string(&mut serial, error.as_str());
-        }
-        RunTermination::InfrastructureError(_) => return,
+        serial.write_str(",\"timed_out\":false");
     }
-    serial.write_str(",\"timed_out\":false,\"elapsed_ticks\":");
+    serial.write_str(",\"elapsed_ticks\":");
     write_u64(&mut serial, outcome.elapsed_ticks);
     serial.write_str(",\"resource_deltas\":{");
     write_resource_deltas(&mut serial, state.resource_before, after);
@@ -1241,6 +1367,7 @@ fn write_status_counts(
         ("unresolved", counts.unresolved),
         ("unsupported", counts.unsupported),
         ("untested", counts.untested),
+        ("timeout", counts.timeouts),
     ];
     let mut first = true;
     for (name, count) in entries {
@@ -2149,6 +2276,13 @@ mod tests {
             Err(PosixTestError::ManifestTooLarge)
         );
 
+        assert_eq!(
+            split_timeout_option(&["all", "timeout=30000"]),
+            Ok((["all"].as_slice(), Some(30_000)))
+        );
+        assert_eq!(split_timeout_option(&["all"]), Ok((["all"].as_slice(), None)));
+        assert!(split_timeout_option(&["all", "timeout=0"]).is_err());
+        assert!(split_timeout_option(&["test", "fork/18-1.c", "timeout=10ms"]).is_err());
         assert_eq!(parse_filter(&["all"]), Ok(PosixFilter::All));
         assert_eq!(
             parse_filter(&["api", "getpid"]),

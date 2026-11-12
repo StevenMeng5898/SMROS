@@ -97,6 +97,9 @@ pub extern "C" fn handle_syscall_simple(
         sys_error_to_u64(SysError::ENOSYS)
     };
 
+    if let Some(launch_id) = crate::syscall::abort_armed_posix_timeout() {
+        return launch_id as u64;
+    }
     crate::user_level::user_test::record_el0_kernel_syscall_result(syscall_num as u32, result);
     crate::user_level::services::security_case::observe_syscall(syscall_num as u32, result);
     // The RISC-V trap return hook must run after the result has been written
