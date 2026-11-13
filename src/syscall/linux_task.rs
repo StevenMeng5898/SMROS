@@ -774,6 +774,25 @@ pub(crate) fn wake_blocked(tid: usize, scheduler_thread: usize, reason: LinuxBlo
     result
 }
 
+pub(crate) fn wake_stopped_group(tgid: usize) -> usize {
+    let stopped = with_runtime(|runtime| {
+        let mut stopped = Vec::new();
+        for task in runtime.tasks.tasks.iter().copied() {
+            if task.tgid == tgid
+                && task.state == LinuxTaskState::Blocked
+                && task.block_reason == LinuxBlockReason::Stopped
+            {
+                stopped.push(task);
+            }
+        }
+        stopped
+    });
+    stopped
+        .into_iter()
+        .filter(|task| wake_blocked(task.tid, task.scheduler_thread, LinuxBlockReason::Stopped))
+        .count()
+}
+
 pub(crate) fn wake_process_waiters(tgid: usize) -> usize {
     let waiters = with_runtime(|runtime| runtime.tasks.child_waiters(tgid));
     let count = waiters

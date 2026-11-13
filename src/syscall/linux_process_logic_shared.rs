@@ -7,9 +7,12 @@ pub(crate) const LINUX_MAX_PID: usize = i32::MAX as usize;
 pub(crate) const LINUX_SIGCHLD: usize = 17;
 pub(crate) const LINUX_WAIT_WNOHANG: u32 = 1;
 pub(crate) const LINUX_WAIT_WUNTRACED: u32 = 2;
+/// Linux `WCONTINUED`. A continued child is reported as status `0xffff`.
+pub(crate) const LINUX_WAIT_WCONTINUED: u32 = 8;
+pub(crate) const LINUX_WAIT_STATUS_CONTINUED: i32 = 0xffff;
 
 pub(crate) const fn linux_wait_options_valid(options: u32) -> bool {
-    options & !(LINUX_WAIT_WNOHANG | LINUX_WAIT_WUNTRACED) == 0
+    options & !(LINUX_WAIT_WNOHANG | LINUX_WAIT_WUNTRACED | LINUX_WAIT_WCONTINUED) == 0
 }
 
 pub(crate) const fn linux_child_exit_notification(exit_signal: usize) -> Option<usize> {
@@ -49,6 +52,9 @@ pub(crate) struct LinuxProcessCore {
     pub process_group: usize,
     pub root_scheduler_thread: usize,
     pub state: LinuxProcessState,
+    /// Job-control stop. Independent of `wait_status`, which is only the
+    /// pending wait notification and is cleared after the parent collects it.
+    pub stopped: bool,
     pub wait_status: i32,
     pub exit_signal: usize,
 }
@@ -60,6 +66,7 @@ impl LinuxProcessCore {
         process_group: 0,
         root_scheduler_thread: 0,
         state: LinuxProcessState::Empty,
+        stopped: false,
         wait_status: 0,
         exit_signal: 0,
     };
@@ -222,6 +229,7 @@ pub(crate) fn complete_linux_wait<const N: usize, E>(
         pid,
         status,
         false,
+        false,
         copy_status,
     )
 }
@@ -233,9 +241,10 @@ pub(crate) fn complete_linux_wait_with_options<const N: usize, E>(
     pid: usize,
     status: i32,
     include_stopped: bool,
+    include_continued: bool,
     copy_status: impl FnOnce(i32) -> Result<(), E>,
 ) -> Result<Option<usize>, LinuxWaitCompletionError<E>> {
-    let revalidated = processes.wait_outcome_with_options(parent_pid, selector, include_stopped);
+    let revalidated = processes.wait_outcome_with_options(parent_pid, selector, include_stopped, include_continued);
     if revalidated != (LinuxWaitOutcome::Ready { pid, status }) {
         return Ok(None);
     }
@@ -279,6 +288,10 @@ pub(crate) fn linux_wait_status_stopped(signum: usize) -> Option<i32> {
 
 pub(crate) const fn linux_wait_status_is_stopped(status: i32) -> bool {
     status & 0xff == 0x7f
+}
+
+pub(crate) const fn linux_wait_status_is_continued(status: i32) -> bool {
+    status == LINUX_WAIT_STATUS_CONTINUED
 }
 
 pub(crate) fn linux_sigchld_exit_policy(
@@ -362,6 +375,7 @@ impl<const N: usize> LinuxProcessTable<N> {
             process_group: LINUX_ROOT_PID,
             root_scheduler_thread: scheduler_thread,
             state: LinuxProcessState::Running,
+            stopped: false,
             wait_status: 0,
             exit_signal: 0,
         };
@@ -422,6 +436,7 @@ impl<const N: usize> LinuxProcessTable<N> {
             process_group: parent.process_group,
             root_scheduler_thread: scheduler_thread,
             state: LinuxProcessState::Reserved,
+            stopped: false,
             wait_status: 0,
             exit_signal,
         };
@@ -554,6 +569,7 @@ impl<const N: usize> LinuxProcessTable<N> {
             return false;
         };
         process.state = LinuxProcessState::Zombie;
+        process.stopped = false;
         process.wait_status = wait_status;
         true
     }
@@ -568,6 +584,7 @@ impl<const N: usize> LinuxProcessTable<N> {
             .processes
             .iter_mut()
             .find(|process| process.pid == pid && process.state == LinuxProcessState::Running)?;
+        process.stopped = true;
         process.wait_status = status;
         Some(LinuxChildStateTransition {
             parent_pid: process.parent_pid,
@@ -581,10 +598,11 @@ impl<const N: usize> LinuxProcessTable<N> {
             .processes
             .iter_mut()
             .find(|process| process.pid == pid && process.state == LinuxProcessState::Running)?;
-        if !linux_wait_status_is_stopped(process.wait_status) {
+        if !process.stopped {
             return None;
         }
-        process.wait_status = 0;
+        process.stopped = false;
+        process.wait_status = LINUX_WAIT_STATUS_CONTINUED;
         Some(LinuxChildStateTransition {
             parent_pid: process.parent_pid,
             child_pid: process.pid,
@@ -632,7 +650,7 @@ impl<const N: usize> LinuxProcessTable<N> {
         parent_pid: usize,
         selector: LinuxWaitSelector,
     ) -> Option<LinuxProcessCore> {
-        self.select_waitable_with_options(parent_pid, selector, false)
+        self.select_waitable_with_options(parent_pid, selector, false, false)
     }
 
     pub(crate) fn select_waitable_with_options(
@@ -640,6 +658,7 @@ impl<const N: usize> LinuxProcessTable<N> {
         parent_pid: usize,
         selector: LinuxWaitSelector,
         include_stopped: bool,
+        include_continued: bool,
     ) -> Option<LinuxProcessCore> {
         self.processes
             .iter()
@@ -650,7 +669,10 @@ impl<const N: usize> LinuxProcessTable<N> {
                     && (process.state == LinuxProcessState::Zombie
                         || include_stopped
                             && process.state == LinuxProcessState::Running
-                            && linux_wait_status_is_stopped(process.wait_status))
+                            && linux_wait_status_is_stopped(process.wait_status)
+                        || include_continued
+                            && process.state == LinuxProcessState::Running
+                            && linux_wait_status_is_continued(process.wait_status))
             })
             .min_by_key(|process| process.pid)
     }
@@ -673,7 +695,7 @@ impl<const N: usize> LinuxProcessTable<N> {
         parent_pid: usize,
         selector: LinuxWaitSelector,
     ) -> LinuxWaitOutcome {
-        self.wait_outcome_with_options(parent_pid, selector, false)
+        self.wait_outcome_with_options(parent_pid, selector, false, false)
     }
 
     pub(crate) fn wait_outcome_with_options(
@@ -681,10 +703,14 @@ impl<const N: usize> LinuxProcessTable<N> {
         parent_pid: usize,
         selector: LinuxWaitSelector,
         include_stopped: bool,
+        include_continued: bool,
     ) -> LinuxWaitOutcome {
-        if let Some(process) =
-            self.select_waitable_with_options(parent_pid, selector, include_stopped)
-        {
+        if let Some(process) = self.select_waitable_with_options(
+            parent_pid,
+            selector,
+            include_stopped,
+            include_continued,
+        ) {
             return LinuxWaitOutcome::Ready {
                 pid: process.pid,
                 status: process.wait_status,
@@ -708,7 +734,8 @@ impl<const N: usize> LinuxProcessTable<N> {
                 && process.parent_pid == parent_pid
                 && process.state == LinuxProcessState::Running
                 && process.wait_status == status
-                && linux_wait_status_is_stopped(status)
+                && (linux_wait_status_is_stopped(status)
+                    || linux_wait_status_is_continued(status))
         }) else {
             return false;
         };

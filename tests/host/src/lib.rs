@@ -2686,6 +2686,50 @@ mod linux_task_logic {
         );
     }
 
+    #[test]
+    fn nonexecutable_handler_terminates_only_catchable_default_terminate_signals() {
+        use crate::linux_process_logic::{
+            linux_signal_delivery_route, LinuxSignalDeliveryRoute,
+        };
+
+        // Red team: SIG_DFL SIGSTOP was routed through Handle and then killed
+        // because the default handler is not executable. The raw status was
+        // 0x13 (WIFSIGNALED, WTERMSIG 19) and the following SIGCONT got ESRCH.
+        for signum in [19, 20, 21, 22] {
+            let disposition = linux_signal_disposition(0, signum);
+            assert_eq!(disposition, LinuxSignalDisposition::Stop);
+            assert_eq!(
+                linux_signal_delivery_route(
+                    disposition,
+                    LinuxSignalDisposition::Ignore,
+                    LinuxSignalDisposition::Terminate,
+                ),
+                LinuxSignalDeliveryRoute::Handle
+            );
+            assert!(
+                !linux_nonexecutable_handler_terminates(signum),
+                "default stop signal {signum} must not die on SIG_DFL"
+            );
+        }
+        let sigcont = linux_signal_disposition(0, 18);
+        assert_eq!(sigcont, LinuxSignalDisposition::Continue);
+        assert_eq!(
+            linux_signal_delivery_route(
+                sigcont,
+                LinuxSignalDisposition::Ignore,
+                LinuxSignalDisposition::Terminate,
+            ),
+            LinuxSignalDeliveryRoute::Handle
+        );
+        assert!(!linux_nonexecutable_handler_terminates(18));
+        assert!(!linux_signal_is_catchable(9));
+        assert!(!linux_signal_is_catchable(19));
+        assert!(!linux_nonexecutable_handler_terminates(9));
+        assert!(!linux_nonexecutable_handler_terminates(17));
+        assert!(linux_nonexecutable_handler_terminates(15));
+        assert!(linux_nonexecutable_handler_terminates(10));
+    }
+
     #[cfg(test)]
     fn three_live_tasks() -> (
         LinuxTaskTable<3>,
@@ -4127,6 +4171,7 @@ mod linux_process_logic {
                 process_group: LINUX_ROOT_PID,
                 root_scheduler_thread: 7,
                 state: LinuxProcessState::Running,
+                stopped: false,
                 wait_status: 0,
                 exit_signal: 0,
             })
@@ -4469,7 +4514,7 @@ mod linux_process_logic {
             "plain waitpid must not consume a stopped child without WUNTRACED"
         );
         let selected =
-            processes.wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Any, true);
+            processes.wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Any, true, false);
         assert_eq!(
             selected,
             LinuxWaitOutcome::Ready {
@@ -4488,6 +4533,7 @@ mod linux_process_logic {
             pid,
             status,
             true,
+            false,
             |_status| Ok::<(), u8>(()),
         );
         assert_eq!(completed, Ok(Some(pid)));
@@ -4497,10 +4543,91 @@ mod linux_process_logic {
             "reporting a stopped child must not reap the live process"
         );
         assert_eq!(
-            processes.wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Any, true),
+            processes.wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Any, true, false),
             LinuxWaitOutcome::WouldBlock,
             "a stopped child report is one-shot until a later stop event"
         );
+    }
+
+    #[test]
+    fn sigstop_reports_0x137f_and_sigcont_reports_0xffff_without_reaping() {
+        let mut processes = LinuxProcessTable::<4>::new();
+        processes.register_root(7).unwrap();
+        let child = processes.reserve_child(LINUX_ROOT_PID, 8).unwrap();
+        assert!(processes.publish(child));
+
+        let signaled = linux_wait_status_signal(19, false).expect("fatal SIGSTOP encoding");
+        assert_eq!(signaled, 0x13, "WIFSIGNALED SIGSTOP is the bug encoding");
+        let stopped = linux_wait_status_stopped(19).expect("stopped SIGSTOP encoding");
+        assert_eq!(stopped, 0x137f);
+        assert!(linux_wait_status_is_stopped(stopped));
+        assert!(!linux_wait_status_is_stopped(signaled));
+
+        processes
+            .stop_child(child.pid, 19)
+            .expect("SIGSTOP leaves a live stopped child");
+        assert_eq!(
+            processes.by_pid(child.pid).map(|process| process.state),
+            Some(LinuxProcessState::Running),
+            "SIGSTOP must not turn the child into a zombie"
+        );
+        assert_eq!(
+            processes
+                .wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Pid(child.pid), true, false),
+            LinuxWaitOutcome::Ready {
+                pid: child.pid,
+                status: 0x137f,
+            }
+        );
+        assert_eq!(
+            complete_linux_wait_with_options(
+                &mut processes,
+                LINUX_ROOT_PID,
+                LinuxWaitSelector::Pid(child.pid),
+                child.pid,
+                0x137f,
+                true,
+                false,
+                |_status| Ok::<(), u8>(()),
+            ),
+            Ok(Some(child.pid))
+        );
+        assert!(
+            processes.by_pid(child.pid).is_some(),
+            "WUNTRACED must not reap, so a later SIGCONT is not ESRCH"
+        );
+        assert_eq!(
+            processes.by_pid(child.pid).map(|process| process.stopped),
+            Some(true),
+            "collecting the stop notification must leave the child stopped"
+        );
+
+        let continued = processes
+            .continue_child(child.pid)
+            .expect("SIGCONT resumes the stopped child");
+        assert_eq!(continued.child_pid, child.pid);
+        assert_eq!(
+            processes.by_pid(child.pid).map(|process| process.state),
+            Some(LinuxProcessState::Running)
+        );
+        assert_eq!(
+            processes.by_pid(child.pid).map(|process| process.wait_status),
+            Some(LINUX_WAIT_STATUS_CONTINUED)
+        );
+        assert_eq!(LINUX_WAIT_STATUS_CONTINUED, 0xffff);
+        assert_eq!(
+            processes.wait_outcome_with_options(
+                LINUX_ROOT_PID,
+                LinuxWaitSelector::Pid(child.pid),
+                false,
+                true
+            ),
+            LinuxWaitOutcome::Ready {
+                pid: child.pid,
+                status: 0xffff,
+            }
+        );
+        assert!(processes.by_pid(child.pid).is_some());
     }
 
     #[test]
@@ -4648,6 +4775,7 @@ mod linux_process_logic {
         assert!(linux_wait_options_valid(
             LINUX_WAIT_WNOHANG | LINUX_WAIT_WUNTRACED
         ));
+        assert!(linux_wait_options_valid(LINUX_WAIT_WCONTINUED));
         assert!(!linux_wait_options_valid(1 << 2));
     }
 
@@ -4809,7 +4937,7 @@ mod linux_process_logic {
             Some(LinuxProcessState::Exiting)
         );
         assert!(matches!(
-            processes.wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Any, false),
+            processes.wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Any, false, false),
             LinuxWaitOutcome::WouldBlock
         ));
         assert_eq!(
@@ -4819,7 +4947,12 @@ mod linux_process_logic {
         let status = linux_wait_status_exit(0);
         assert!(processes.exit(child.pid, status));
         assert_eq!(
-            processes.wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Pid(child.pid), false),
+            processes.wait_outcome_with_options(
+                LINUX_ROOT_PID,
+                LinuxWaitSelector::Pid(child.pid),
+                false,
+                false
+            ),
             LinuxWaitOutcome::Ready {
                 pid: child.pid,
                 status
@@ -4828,7 +4961,12 @@ mod linux_process_logic {
         assert!(processes.reap(LINUX_ROOT_PID, child.pid).is_some());
         assert!(processes.reap(LINUX_ROOT_PID, child.pid).is_none());
         assert!(matches!(
-            processes.wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Pid(child.pid), false),
+            processes.wait_outcome_with_options(
+                LINUX_ROOT_PID,
+                LinuxWaitSelector::Pid(child.pid),
+                false,
+                false
+            ),
             LinuxWaitOutcome::NoChildren
         ));
     }

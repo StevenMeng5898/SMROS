@@ -149,6 +149,7 @@ pub(crate) fn ensure_dispatch_process(pid: usize, scheduler_thread: usize) -> Re
             process_group: pid,
             root_scheduler_thread: scheduler_thread,
             state: LinuxProcessState::Running,
+            stopped: false,
             wait_status: 0,
             exit_signal: 0,
         };
@@ -352,13 +353,17 @@ pub(crate) fn wait_current(
     selector: LinuxWaitSelector,
     nohang: bool,
     include_stopped: bool,
+    include_continued: bool,
 ) -> Result<LinuxWaitOutcome, SysError> {
     let parent = current()?;
     loop {
         let outcome = with_runtime(|runtime| {
-            runtime
-                .processes
-                .wait_outcome_with_options(parent.pid, selector, include_stopped)
+            runtime.processes.wait_outcome_with_options(
+                parent.pid,
+                selector,
+                include_stopped,
+                include_continued,
+            )
         });
         crate::kobj_debug!(
             "posix-wait",
@@ -382,9 +387,12 @@ pub(crate) fn wait_current(
         );
         let blocked = linux_task::block_current(LinuxBlockReason::ChildWait)?;
         let rechecked = with_runtime(|runtime| {
-            runtime
-                .processes
-                .wait_outcome_with_options(parent.pid, selector, include_stopped)
+            runtime.processes.wait_outcome_with_options(
+                parent.pid,
+                selector,
+                include_stopped,
+                include_continued,
+            )
         });
         if rechecked != LinuxWaitOutcome::WouldBlock {
             let _ = linux_task::wake_blocked(
@@ -412,6 +420,7 @@ pub(crate) fn complete_wait_current(
     status: i32,
     wstatus: usize,
     include_stopped: bool,
+    include_continued: bool,
 ) -> Result<Option<usize>, SysError> {
     let parent = current()?;
     with_runtime(|runtime| {
@@ -422,6 +431,7 @@ pub(crate) fn complete_wait_current(
             pid,
             status,
             include_stopped,
+            include_continued,
             |status| {
                 if wstatus != 0 {
                     super::linux_process_memory::copy_to_process(

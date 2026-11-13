@@ -5545,7 +5545,9 @@ fn linux_stop_continue_signals_report_sigchld_and_resume_stopped_tasks() {
     assert!(
         wait4.contains("let include_stopped = options & linux_process::LINUX_WAIT_WUNTRACED != 0")
     );
-    assert!(wait4.contains("linux_process::wait_current(selector, nohang, include_stopped)"));
+    assert!(wait4.contains(
+        "linux_process::wait_current(selector, nohang, include_stopped, include_continued)"
+    ));
     assert!(wait4.contains("linux_process::complete_wait_current("));
     assert!(wait4.contains("include_stopped"));
 
@@ -5571,6 +5573,7 @@ fn linux_stop_continue_signals_report_sigchld_and_resume_stopped_tasks() {
             .expect("signal delivery")..],
     );
     assert!(delivery.contains("LinuxSignalDisposition::Stop"));
+    assert!(delivery.contains("linux_nonexecutable_handler_terminates(signum)"));
     assert!(delivery.contains("stop_current_linux_process_for_signal(signum)"));
     assert!(delivery.contains("linux_task::block_current(LinuxBlockReason::Stopped)"));
     assert!(delivery.contains("scheduler::schedule()"));
@@ -7577,8 +7580,8 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
     let pending = braced_body(&syscall[pending_start..]);
     assert!(pending.contains("linux_task::current_task()?"));
     assert!(pending.contains("linux_task::with_current_signal_state("));
-    assert!(pending.contains("peek_unblocked().is_some()"));
-    assert!(pending.contains("with_linux_process_pending("));
+    assert!(pending.contains("linux_pending_signal_interrupts_sleep"));
+    assert!(pending.contains("with_linux_process_signal_state("));
     assert!(pending.contains("peek_eligible("));
     assert!(pending
         .contains("linux_task::process_signal_target(current.tgid, signum) == Some(current)"));
@@ -11291,7 +11294,7 @@ fn linux_wait_reaps_one_real_child_status() {
         "pub(crate) const LINUX_WAIT_WNOHANG: u32 = 1;",
         "pub(crate) const LINUX_WAIT_WUNTRACED: u32 = 2;",
         "pub(crate) const fn linux_wait_options_valid(options: u32) -> bool",
-        "options & !(LINUX_WAIT_WNOHANG | LINUX_WAIT_WUNTRACED) == 0",
+        "options & !(LINUX_WAIT_WNOHANG | LINUX_WAIT_WUNTRACED | LINUX_WAIT_WCONTINUED) == 0",
     ] {
         assert!(
             process.contains(required) || process_logic.contains(required),
@@ -11328,7 +11331,7 @@ fn linux_wait_reaps_one_real_child_status() {
         .expect("shared wait transaction");
     let transaction = braced_body(&process_logic[transaction_start..]);
     let revalidate = transaction
-        .find("wait_outcome_with_options(parent_pid, selector, include_stopped)")
+        .find("wait_outcome_with_options(parent_pid, selector, include_stopped, include_continued)")
         .expect("ready child revalidation");
     let copy = transaction
         .find("copy_status(status)")
