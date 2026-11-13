@@ -354,6 +354,23 @@ pub(crate) const fn linux_signal_interrupts_sleep(
     )
 }
 
+/// `SIGKILL` and `SIGSTOP` cannot be caught. Every other signal can.
+pub(crate) const fn linux_signal_is_catchable(signum: usize) -> bool {
+    signum != 9 && signum != LINUX_STOP_SIGNAL_FIRST
+}
+
+/// A handler address that cannot run may terminate the process only when the
+/// signal is catchable and its default action is termination. `SIG_DFL` is
+/// not a user handler, so this must not turn `SIGSTOP` into a fatal signal
+/// or let default `SIGCONT` die with `WTERMSIG`.
+pub(crate) fn linux_nonexecutable_handler_terminates(signum: usize) -> bool {
+    linux_signal_is_catchable(signum)
+        && matches!(
+            linux_signal_disposition(LINUX_DEFAULT_SIGNAL_HANDLER, signum),
+            LinuxSignalDisposition::Terminate
+        )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxPendingSignal {
     pub signum: usize,
@@ -1137,6 +1154,7 @@ impl LinuxTaskSignalState {
         self.suspend_restore_mask = None;
     }
 
+    #[cfg_attr(target_os = "none", allow(dead_code))]
     pub(crate) fn peek_unblocked(&self) -> Option<LinuxPendingSignal> {
         self.pending
             .peek_eligible(|signum| self.mask & linux_signal_bit(signum) == 0)

@@ -5773,6 +5773,12 @@ pub(crate) fn queue_process_linux_signal_and_wake(
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let result = (|| {
         cancel_opposing_linux_stop_continue_signals(tgid, record.signum);
+        if record.signum == LINUX_SIGCONT {
+            // Continue even when SIGCONT is blocked. The signal stays pending
+            // until it is unblocked; the default action is never termination.
+            let _ = continue_linux_process_for_signal(tgid);
+            linux_task::wake_stopped_group(tgid);
+        }
         if let Some(target) = linux_task::signal_wait_target(tgid, record.signum) {
             match target.block_reason {
                 LinuxBlockReason::SignalWait => {
@@ -6039,6 +6045,13 @@ fn install_linux_signal_handler(
 fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> LinuxSignalDeliveryOutcome {
     const LINUX_SA_RESTART: u64 = 0x1000_0000;
     let mut default_stopped = false;
+    // Another thread in this process may already have stopped the group.
+    // Do not return to userspace until SIGCONT resumes it.
+    if linux_process::current().ok().is_some_and(|process| process.stopped)
+        && linux_task::block_current(LinuxBlockReason::Stopped).is_ok()
+    {
+        scheduler::schedule();
+    }
     while let Some(deliverable) = take_unblocked_linux_signal() {
         let pending = deliverable.record;
         let signum = pending.signum;
@@ -6090,16 +6103,31 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> LinuxSignalDe
                 return LinuxSignalDeliveryOutcome::Idle;
             }
             linux_process::LinuxSignalDeliveryRoute::Handle => {
+            // SIG_DFL is not a user handler. Killing the process for that
+            // reason is only valid for a catchable signal whose default
+            // action is termination. SIGSTOP must stop, and SIGCONT must
+            // continue; neither may become WIFSIGNALED.
             if !linux_user_handler_executable(action.handler) {
-                if commit_linux_signal(deliverable).is_err() {
-                    return LinuxSignalDeliveryOutcome::Idle;
-                }
-                if let Ok(current) = linux_task::current_task() {
-                    if terminate_linux_process_by_signal(current.tgid, signum).is_ok() {
+                if linux_task::linux_nonexecutable_handler_terminates(signum) {
+                    if commit_linux_signal(deliverable).is_err() {
                         return LinuxSignalDeliveryOutcome::Idle;
                     }
+                    if let Ok(current) = linux_task::current_task() {
+                        if terminate_linux_process_by_signal(current.tgid, signum).is_ok() {
+                            return LinuxSignalDeliveryOutcome::Idle;
+                        }
+                    }
+                    return LinuxSignalDeliveryOutcome::Idle;
                 }
-                return LinuxSignalDeliveryOutcome::Idle;
+                if !matches!(
+                    disposition,
+                    LinuxSignalDisposition::Stop | LinuxSignalDisposition::Continue
+                ) {
+                    if commit_linux_signal(deliverable).is_err() {
+                        return LinuxSignalDeliveryOutcome::Idle;
+                    }
+                    continue;
+                }
             }
         }
         }
@@ -7777,15 +7805,45 @@ fn wake_linux_sleep_outcomes(
     }
 }
 
+fn linux_pending_signal_interrupts_sleep(signum: usize) -> bool {
+    linux_signal_disposition(signum).is_ok_and(linux_task::linux_signal_interrupts_sleep)
+}
+
 fn linux_sleep_has_deliverable_pending_signal() -> Result<bool, SysError> {
     let current = linux_task::current_task()?;
-    if linux_task::with_current_signal_state(|state| state.peek_unblocked().is_some())? {
-        return Ok(true);
+    // Stop and continue are handled by parking and resuming the same deadline.
+    // Only a terminating or caught signal makes nanosleep return EINTR.
+    // Disposition reads the process signal lock, so collect candidates first.
+    // Calling it inside either runtime lock nests that lock and deadlocks.
+    let mut candidates = [0usize; 64];
+    let mut count = 0usize;
+    linux_task::with_current_signal_state(|state| {
+        let mut pending = state.pending_mask();
+        while pending != 0 && count < candidates.len() {
+            let signum = pending.trailing_zeros() as usize + 1;
+            let bit = linux_signal_bit(signum);
+            if bit == 0 {
+                break;
+            }
+            if state.mask & bit == 0 {
+                candidates[count] = signum;
+                count += 1;
+            }
+            pending &= !bit;
+        }
+    })?;
+    for signum in candidates[..count].iter().copied() {
+        if linux_pending_signal_interrupts_sleep(signum) {
+            return Ok(true);
+        }
     }
-    Ok(with_linux_process_pending(|pending| {
+    Ok(with_linux_process_signal_state(|actions, pending| {
         pending
             .peek_eligible(|signum| {
-                linux_task::process_signal_target(current.tgid, signum) == Some(current)
+                linux_task::linux_signal_interrupts_sleep(linux_task::linux_signal_disposition(
+                    actions[signum].handler,
+                    signum,
+                )) && linux_task::process_signal_target(current.tgid, signum) == Some(current)
             })
             .is_some()
     })
@@ -7885,6 +7943,7 @@ fn linux_sleep_until(wait: LinuxSleepWait, rem: usize) -> SysResult {
         }
     }
 }
+
 
 fn linux_high_resolution_relative_sleep_until(deadline: u64, rem: usize) -> SysResult {
     if rem != 0 && !linux_sleep_user_range_writable(rem, core::mem::size_of::<LinuxTimespec>()) {
@@ -12470,6 +12529,7 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
         linux_process::linux_wait_selector(pid, process.process_group).ok_or(SysError::EINVAL)?;
     let nohang = options & linux_process::LINUX_WAIT_WNOHANG != 0;
     let include_stopped = options & linux_process::LINUX_WAIT_WUNTRACED != 0;
+    let include_continued = options & linux_process::LINUX_WAIT_WCONTINUED != 0;
     crate::kobj_debug!(
         "posix-wait",
         "enter parent={} selector={} options={:#x}",
@@ -12478,7 +12538,7 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
         options
     );
     loop {
-        match linux_process::wait_current(selector, nohang, include_stopped)? {
+        match linux_process::wait_current(selector, nohang, include_stopped, include_continued)? {
             linux_process::LinuxWaitOutcome::Ready { pid, status } => {
                 crate::kobj_debug!(
                     "posix-wait",
@@ -12493,6 +12553,7 @@ pub fn sys_wait4(pid: i32, wstatus: usize, options: u32) -> SysResult {
                     status,
                     wstatus,
                     include_stopped,
+                    include_continued,
                 )? {
                     crate::kobj_debug!(
                         "posix-wait",
