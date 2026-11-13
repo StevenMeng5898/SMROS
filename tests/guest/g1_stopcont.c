@@ -1,60 +1,46 @@
 /*
- * Red-team regression: default SIGSTOP must stop the child, not kill it.
- *
- * kill(child, SIGSTOP) + waitpid(WUNTRACED) must return raw status 0x137f
- * (WIFSTOPPED, WSTOPSIG == SIGSTOP). The old path returned 0x13
- * (WIFSIGNALED, WTERMSIG == 19) and the following kill(SIGCONT) failed
- * with ESRCH. After SIGCONT, waitpid(WCONTINUED) must return 0xffff.
+ * Red team: after a real SIGSTOP, SIGCONT must resume the same child.
+ * waitpid(WCONTINUED) raw status must be 0xffff, and the child must run again.
+ * The old kernel had already reaped it, so kill(SIGCONT) returned ESRCH.
  */
-#include <errno.h>
-#include <signal.h>
-#include <stdio.h>
-#include <unistd.h>
-#include <sys/wait.h>
+#include "poc_common.h"
 
 int main(void)
 {
-	pid_t child;
-	pid_t got;
-	int status;
-
-	child = fork();
-	if (child < 0) {
-		perror("fork");
-		return 1;
-	}
-	if (child == 0) {
-		for (;;)
-			pause();
-	}
+	volatile unsigned *progress = poc_shared_progress();
+	pid_t child = poc_fork_spinning_child(progress);
+	unsigned stopped_at;
+	unsigned continued;
 
 	if (kill(child, SIGSTOP) != 0) {
 		perror("kill SIGSTOP");
 		return 1;
 	}
-	status = 0;
-	got = waitpid(child, &status, WUNTRACED);
-	printf("stop waitpid=%d status=0x%x errno=%d\n", got, status, errno);
-	if (got != child || status != 0x137f) {
-		printf("FAIL stop status, want 0x137f\n");
+	if (poc_expect_status(child, WUNTRACED, 0x137f, "stop") != 0)
 		return 1;
-	}
 
 	errno = 0;
 	if (kill(child, SIGCONT) != 0) {
 		printf("FAIL SIGCONT errno=%d\n", errno);
 		return 1;
 	}
-	status = 0;
-	got = waitpid(child, &status, WCONTINUED);
-	printf("cont waitpid=%d status=0x%x errno=%d\n", got, status, errno);
-	if (got != child || status != 0xffff) {
-		printf("FAIL continue status, want 0xffff\n");
+	if (poc_expect_status(child, WCONTINUED, 0xffff, "cont") != 0)
+		return 1;
+
+	stopped_at = *progress;
+	usleep(50000);
+	continued = *progress;
+	if (continued == stopped_at) {
+		printf("FAIL child did not run after SIGCONT (%u)\n", stopped_at);
 		return 1;
 	}
-
+	errno = 0;
+	if (kill(child, 0) != 0) {
+		printf("FAIL child is gone errno=%d\n", errno);
+		return 1;
+	}
+	printf("PASS continued %u -> %u\n", stopped_at, continued);
 	kill(child, SIGKILL);
-	waitpid(child, &status, 0);
-	printf("PASS\n");
+	waitpid(child, NULL, 0);
 	return 0;
 }
