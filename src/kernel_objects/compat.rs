@@ -110,6 +110,12 @@ impl CompatObjectTable {
         if !rights_are_valid(rights) {
             return Err(ZxError::ErrInvalidArgs);
         }
+        if !crate::kernel_lowlevel::kernel_budget::heap_room_for(
+            crate::kernel_lowlevel::kernel_budget::object_bytes(),
+        ) || self.objects.try_reserve(1).is_err()
+        {
+            return Err(ZxError::ErrNoMemory);
+        }
 
         let handle = self.alloc_handle().ok_or(ZxError::ErrNoMemory)?;
         let mut object = CompatObject::new(handle, obj_type, None, rights);
@@ -124,6 +130,12 @@ impl CompatObjectTable {
 
     pub fn create_pair(&mut self, obj_type: ObjectType) -> ZxResult<(HandleValue, HandleValue)> {
         if self.objects.len() + 2 > MAX_COMPAT_OBJECTS {
+            return Err(ZxError::ErrNoMemory);
+        }
+        if !crate::kernel_lowlevel::kernel_budget::heap_room_for(
+            crate::kernel_lowlevel::kernel_budget::object_bytes().saturating_mul(2),
+        ) || self.objects.try_reserve(2).is_err()
+        {
             return Err(ZxError::ErrNoMemory);
         }
 

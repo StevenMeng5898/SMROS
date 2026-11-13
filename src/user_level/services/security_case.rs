@@ -12,6 +12,7 @@
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::kernel_lowlevel::serial::Serial;
 use crate::kernel_objects::scheduler::{self, yield_now};
@@ -321,8 +322,10 @@ pub fn run(serial: &mut Serial, which: &str) {
     match which {
         "all" => run_listed(serial, false),
         "undef" => run_undef(serial),
+        "heap-fork" => run_heap_fork(serial),
+        "elf-memsz" => run_elf_memsz(serial),
         "list" => {
-            serial.write_str("sectest cases: all | undef | <id>\n");
+            serial.write_str("sectest cases: all | undef | heap-fork | elf-memsz | <id>\n");
             for case in cases() {
                 serial.write_str(case.id);
                 serial.write_str("\n");
@@ -352,8 +355,98 @@ fn run_listed(serial: &mut Serial, _include_undef: bool) {
         print_case(serial, case.id, &finished);
         tally.add(finished.verdict);
     }
+    record_kernel_case(serial, &mut tally, "heap-fork", run_heap_fork_case());
+    record_kernel_case(serial, &mut tally, "elf-memsz", run_elf_memsz_case());
     serial.write_str("SEC-HEARTBEAT\n");
     print_summary(serial, tally);
+}
+
+fn record_kernel_case(serial: &mut Serial, tally: &mut Tally, id: &str, pass: bool) {
+    let finished = FinishedCase {
+        verdict: if pass { Verdict::Pass } else { Verdict::Fail },
+        stage: None,
+        detail: if pass { "ok" } else { "budget" },
+    };
+    print_case(serial, id, &finished);
+    tally.add(finished.verdict);
+}
+
+fn run_heap_fork(serial: &mut Serial) {
+    let pass = run_heap_fork_case();
+    let mut tally = Tally::new();
+    record_kernel_case(serial, &mut tally, "heap-fork", pass);
+    serial.write_str("SEC-HEARTBEAT\n");
+    print_summary(serial, tally);
+}
+
+fn run_elf_memsz(serial: &mut Serial) {
+    let pass = run_elf_memsz_case();
+    let mut tally = Tally::new();
+    record_kernel_case(serial, &mut tally, "elf-memsz", pass);
+    serial.write_str("SEC-HEARTBEAT\n");
+    print_summary(serial, tally);
+}
+
+extern "C" fn heap_budget_thread() -> ! {
+    loop {
+        crate::kernel_lowlevel::cpu::wait_for_interrupt();
+    }
+}
+
+fn run_heap_fork_case() -> bool {
+    let before = crate::kernel_lowlevel::kernel_budget::heap_allocated();
+    let mut ids = Vec::new();
+    if ids.try_reserve_exact(2048).is_err() {
+        return false;
+    }
+    loop {
+        if ids.len() >= 2048 {
+            break;
+        }
+        match scheduler::scheduler().create_suspended_thread(heap_budget_thread, "sectest-heap") {
+            Some(id) => ids.push(id),
+            None => break,
+        }
+    }
+    let created = ids.len();
+    let mut probe: Vec<u8> = Vec::new();
+    let reserved = probe.try_reserve_exact(40960).is_ok();
+    drop(probe);
+    for id in ids.drain(..) {
+        let _ = scheduler::scheduler().terminate_thread(id);
+    }
+    drop(ids);
+    let after = crate::kernel_lowlevel::kernel_budget::heap_allocated();
+    created > 32 && created < 2000 && reserved && after <= before.saturating_add(64 * 1024)
+}
+
+fn run_elf_memsz_case() -> bool {
+    use crate::user_level::services::elf_load_logic_shared::{
+        plan_elf_load, ElfLoadSegment, ELF_LOAD_ENOMEM,
+    };
+    let window_start = 0x1000_0000u64;
+    let window_end = 0x2000_0000u64;
+    let page = 0x1000u64;
+    let huge = ElfLoadSegment {
+        vaddr: 0,
+        mem_size: 1 << 44,
+        file_size: 0,
+        prot: 1,
+    };
+    if plan_elf_load(&[huge], window_start, window_start, window_end, page) != Err(ELF_LOAD_ENOMEM)
+    {
+        return false;
+    }
+    let bss = ElfLoadSegment {
+        vaddr: 0x2000,
+        mem_size: page * 8,
+        file_size: 0,
+        prot: 1,
+    };
+    let Ok(runs) = plan_elf_load(&[bss], window_start, window_start, window_end, page) else {
+        return false;
+    };
+    runs.len() == 1 && runs[0].len == (page as usize) * 8
 }
 
 fn run_one(serial: &mut Serial, case: Case) {

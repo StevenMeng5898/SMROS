@@ -920,6 +920,14 @@ impl LinuxForkOwnershipOps for Aarch64LinuxForkOps {
             });
             return Err(error);
         }
+        if !crate::kernel_lowlevel::kernel_budget::bind_thread_pid(scheduler_thread.0, process.pid)
+        {
+            with_runtime(|runtime| {
+                runtime.signal_states[process.slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
+                let _ = runtime.processes.rollback(process);
+            });
+            return Err(SysError::EAGAIN);
+        }
         Ok(process)
     }
 
@@ -1284,6 +1292,14 @@ impl LinuxForkOwnershipOps for RiscvLinuxForkOps {
                 let _ = runtime.processes.rollback(process);
             });
             return Err(error);
+        }
+        if !crate::kernel_lowlevel::kernel_budget::bind_thread_pid(scheduler_thread.0, process.pid)
+        {
+            with_runtime(|runtime| {
+                runtime.signal_states[process.slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
+                let _ = runtime.processes.rollback(process);
+            });
+            return Err(SysError::EAGAIN);
         }
         Ok(process)
     }

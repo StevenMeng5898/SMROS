@@ -11403,6 +11403,28 @@ fn cmd_meminfo(ctx: &mut ShellContext, _args: &[&str]) {
         .write_str("└─────────────────────────────────────────┘\n");
 
     let stats = crate::syscall::memory_syscall_stats();
+    ctx.serial.write_str("  Kernel heap: allocated=");
+    print_number(
+        &mut ctx.serial,
+        crate::kernel_lowlevel::kernel_budget::heap_allocated() as u32,
+    );
+    ctx.serial.write_str(" reserve=");
+    print_number(
+        &mut ctx.serial,
+        crate::kernel_lowlevel::kernel_budget::reserve_bytes() as u32,
+    );
+    ctx.serial.write_str(" limit=");
+    print_number(
+        &mut ctx.serial,
+        crate::kernel_lowlevel::kernel_budget::heap_limit_bytes() as u32,
+    );
+    ctx.serial.write_str(" accounted=");
+    print_number(
+        &mut ctx.serial,
+        crate::kernel_lowlevel::kernel_budget::accounted_total() as u32,
+    );
+    ctx.serial.write_str("\n");
+
     ctx.serial.write_str("  Linux VM: maps=");
     print_number(&mut ctx.serial, stats.linux_mapping_count as u32);
     ctx.serial.write_str(", bytes=");
@@ -12526,6 +12548,14 @@ fn cmd_kill(ctx: &mut ShellContext, args: &[&str]) {
         return;
     }
 
+    if args[0] == "-1" {
+        match crate::syscall::sys_kill(-1, 9) {
+            Ok(_) => ctx.serial.write_str("Signaled processes\n"),
+            Err(_) => ctx.serial.write_str("Failed to signal processes\n"),
+        }
+        return;
+    }
+
     // Parse PID from argument
     let pid_str = args[0];
     let pid: usize = match parse_number(pid_str) {
@@ -12543,6 +12573,10 @@ fn cmd_kill(ctx: &mut ShellContext, args: &[&str]) {
         ctx.serial.write_str("Process ");
         print_number(&mut ctx.serial, pid as u32);
         ctx.serial.write_str(" terminated\n");
+    } else if crate::syscall::sys_kill(pid as isize, 9).is_ok() {
+        ctx.serial.write_str("Process ");
+        print_number(&mut ctx.serial, pid as u32);
+        ctx.serial.write_str(" signaled\n");
     } else {
         ctx.serial.write_str("Failed to terminate process ");
         print_number(&mut ctx.serial, pid as u32);

@@ -151,7 +151,16 @@ pub(crate) fn register_root(scheduler_thread: ThreadId) -> Result<usize, SysErro
             })
     });
     match task {
-        Ok(tid) if tid == process_pid => Ok(tid),
+        Ok(tid) if tid == process_pid => {
+            if !crate::kernel_lowlevel::kernel_budget::bind_thread_pid(
+                scheduler_thread.0,
+                process_pid,
+            ) {
+                super::linux_process::reset_launch();
+                return Err(SysError::EAGAIN);
+            }
+            Ok(tid)
+        }
         Ok(_) => {
             super::linux_process::reset_launch();
             Err(SysError::EINVAL)

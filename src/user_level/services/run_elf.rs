@@ -6,7 +6,6 @@
 //! thread.
 
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::kernel_lowlevel::{memory::PAGE_SIZE, timer};
@@ -61,6 +60,8 @@ pub enum RunElfError {
     Map,
     Stack,
     Thread,
+    Invalid,
+    NoMemory,
 }
 
 impl RunElfError {
@@ -75,6 +76,8 @@ impl RunElfError {
             RunElfError::Map => "map",
             RunElfError::Stack => "stack",
             RunElfError::Thread => "thread",
+            RunElfError::Invalid => "EINVAL",
+            RunElfError::NoMemory => "ENOMEM",
         }
     }
 }
@@ -500,6 +503,8 @@ fn read_fxfs_file(path: &str) -> Result<Vec<u8>, RunElfError> {
         Err(_) => return Err(RunElfError::Storage),
     };
     let mut out = Vec::new();
+    out.try_reserve_exact(attrs.size)
+        .map_err(|_| RunElfError::NoMemory)?;
     out.resize(attrs.size, 0);
     let size = fxfs::read_file(path, &mut out).map_err(|_| RunElfError::Storage)?;
     out.truncate(size);
@@ -560,17 +565,18 @@ fn map_elf_image(image: &elf::ElfImage, bytes: &[u8], base: usize) -> Result<(),
         let dest = base
             .checked_add(segment.vaddr as usize)
             .ok_or(RunElfError::Map)?;
-        let mem_size = usize::try_from(segment.mem_size).map_err(|_| RunElfError::Map)?;
         let file_size = usize::try_from(segment.file_size).map_err(|_| RunElfError::Map)?;
         let file_offset = usize::try_from(segment.file_offset).map_err(|_| RunElfError::Map)?;
         let file_end = file_offset
             .checked_add(file_size)
             .filter(|end| *end <= bytes.len())
             .ok_or(RunElfError::Map)?;
-        syscall::linux_process_memory::zero_current(dest, mem_size)
-            .map_err(|_| RunElfError::Map)?;
-        syscall::linux_process_memory::copy_to_current(dest, &bytes[file_offset..file_end])
-            .map_err(|_| RunElfError::Map)?;
+        // Anonymous pages from mmap are already zero-filled, so the BSS tail
+        // (mem_size - file_size) is not walked byte by byte.
+        if file_size != 0 {
+            syscall::linux_process_memory::copy_to_current(dest, &bytes[file_offset..file_end])
+                .map_err(|_| RunElfError::Map)?;
+        }
     }
 
     for run in page_runs {
@@ -588,65 +594,76 @@ struct ElfPageRun {
     prot: usize,
 }
 
-fn map_elf_page_runs(image: &elf::ElfImage, base: usize) -> Result<Vec<ElfPageRun>, RunElfError> {
-    let mut segments = Vec::new();
-    let mut min_addr = usize::MAX;
-    let mut max_addr = 0usize;
+fn elf_segment_prot(flags: u32) -> usize {
+    let mut prot = 0usize;
+    if flags & 4 != 0 {
+        prot |= 0x1;
+    }
+    if flags & 2 != 0 {
+        prot |= 0x2;
+    }
+    if flags & 1 != 0 {
+        prot |= 0x4;
+    }
+    prot
+}
 
+fn map_elf_page_runs(image: &elf::ElfImage, base: usize) -> Result<Vec<ElfPageRun>, RunElfError> {
+    let mut load_segments = Vec::new();
+    load_segments
+        .try_reserve_exact(image.segments.len())
+        .map_err(|_| RunElfError::NoMemory)?;
+    let mut segments = Vec::new();
+    segments
+        .try_reserve_exact(image.segments.len())
+        .map_err(|_| RunElfError::NoMemory)?;
     for segment in &image.segments {
         if segment.mem_size == 0 {
             continue;
         }
-        let vaddr = usize::try_from(segment.vaddr).map_err(|_| RunElfError::Map)?;
-        let mem_size = usize::try_from(segment.mem_size).map_err(|_| RunElfError::Map)?;
-        let (start, end) = user_logic::elf_segment_mapping_range(vaddr, mem_size, PAGE_SIZE)
-            .ok_or(RunElfError::Map)?;
-        let mut prot = 0usize;
-        if segment.flags & 4 != 0 {
-            prot |= 0x1;
-        }
-        if segment.flags & 2 != 0 {
-            prot |= 0x2;
-        }
-        if segment.flags & 1 != 0 {
-            prot |= 0x4;
-        }
+        let prot = elf_segment_prot(segment.flags);
+        load_segments.push(super::elf_load_logic_shared::ElfLoadSegment {
+            vaddr: segment.vaddr,
+            mem_size: segment.mem_size,
+            file_size: segment.file_size,
+            prot,
+        });
+        let vaddr = usize::try_from(segment.vaddr).unwrap_or(usize::MAX);
+        let mem_size = usize::try_from(segment.mem_size).unwrap_or(usize::MAX);
         segments.push((vaddr, mem_size, prot));
-        min_addr = core::cmp::min(min_addr, start);
-        max_addr = core::cmp::max(max_addr, end);
     }
 
-    if min_addr == usize::MAX || max_addr <= min_addr {
-        return Err(RunElfError::Map);
-    }
+    let planned = super::elf_load_logic_shared::plan_elf_load(
+        &load_segments,
+        base as u64,
+        syscall::linux_process_memory::LINUX_USER_BASE as u64,
+        syscall::linux_process_memory::LINUX_USER_LIMIT as u64,
+        PAGE_SIZE as u64,
+    )
+    .map_err(|code| {
+        if code == super::elf_load_logic_shared::ELF_LOAD_ENOMEM {
+            RunElfError::NoMemory
+        } else {
+            RunElfError::Invalid
+        }
+    })?;
 
     let mut runs: Vec<ElfPageRun> = Vec::new();
-    let mut page = min_addr;
-    while page < max_addr {
-        let prot = user_logic::run_elf_page_protection(page, PAGE_SIZE, &segments);
-        if user_logic::run_elf_page_spans_write_and_exec(page, PAGE_SIZE, &segments) {
-            if let Some(address) = base.checked_add(page) {
+    runs.try_reserve_exact(planned.len())
+        .map_err(|_| RunElfError::NoMemory)?;
+    for run in planned {
+        let prot = user_logic::run_elf_page_protection(run.start, PAGE_SIZE, &segments)
+            .unwrap_or(run.prot);
+        if user_logic::run_elf_page_spans_write_and_exec(run.start, PAGE_SIZE, &segments) {
+            if let Some(address) = base.checked_add(run.start) {
                 log_write_exec_page(address);
             }
         }
-        if let Some(prot) = prot {
-            if let Some(previous) = runs.last_mut() {
-                if previous.prot == prot && previous.start.checked_add(previous.len) == Some(page) {
-                    previous.len = previous
-                        .len
-                        .checked_add(PAGE_SIZE)
-                        .ok_or(RunElfError::Map)?;
-                    page = page.checked_add(PAGE_SIZE).ok_or(RunElfError::Map)?;
-                    continue;
-                }
-            }
-            runs.push(ElfPageRun {
-                start: page,
-                len: PAGE_SIZE,
-                prot,
-            });
-        }
-        page = page.checked_add(PAGE_SIZE).ok_or(RunElfError::Map)?;
+        runs.push(ElfPageRun {
+            start: run.start,
+            len: run.len,
+            prot,
+        });
     }
 
     for run in &runs {
@@ -687,8 +704,16 @@ struct StackBuilder {
 
 impl StackBuilder {
     fn new(base: usize, size: usize) -> Result<Self, RunElfError> {
+        if !crate::kernel_lowlevel::kernel_budget::heap_room_for(size) {
+            return Err(RunElfError::NoMemory);
+        }
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(size)
+            .map_err(|_| RunElfError::NoMemory)?;
+        bytes.resize(size, 0);
         Ok(Self {
-            bytes: vec![0; size],
+            bytes,
             base,
             sp: base.checked_add(size).ok_or(RunElfError::Stack)?,
         })

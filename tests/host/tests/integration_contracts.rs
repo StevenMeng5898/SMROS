@@ -8248,7 +8248,11 @@ fn linux_memory_and_loader_are_process_owned() {
 
     assert!(run_elf.contains("linux_process_memory::register_root"));
     assert!(run_elf.contains("linux_process_memory::copy_to_current"));
-    assert!(run_elf.contains("linux_process_memory::zero_current"));
+    assert!(
+        !run_elf.contains("linux_process_memory::zero_current"),
+        "BSS must stay the zero-filled anonymous mapping instead of a byte walk"
+    );
+    assert!(run_elf.contains("plan_elf_load("));
     assert!(run_elf.contains("linux_process_memory::current_root_paddr"));
     assert!(!run_elf.contains("core::ptr::write_bytes(dest as *mut u8"));
     assert!(!run_elf.contains("core::ptr::copy_nonoverlapping(\n                bytes.as_ptr()"));
@@ -9957,6 +9961,7 @@ fn linux_process_memory_review_paths_are_checked_and_reversible() {
         .expect("ELF page-run mapper");
     let page_runs = braced_body(&run_elf[page_runs_start..]);
     assert!(page_runs.contains("run_elf_page_protection("));
+    assert!(page_runs.contains("plan_elf_load("));
 }
 
 #[test]
