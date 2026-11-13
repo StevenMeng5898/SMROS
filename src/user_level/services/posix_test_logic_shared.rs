@@ -236,6 +236,42 @@ pub fn timeout_deadline_tick(started_tick: u64, timeout_ms: u32) -> u64 {
     started_tick.saturating_add(ticks.max(1))
 }
 
+/// What to do once a launched POSIX test has reached its deadline.
+///
+/// The user-mode timer return can only rewrite the trap frame of the thread
+/// that was interrupted. A root blocked in the kernel, or a shell thread
+/// waiting on that root, must retire the launch from supervisor context or
+/// the runner waits forever.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PosixTimeoutDisposition {
+    /// Deadline has not been reached.
+    Idle,
+    /// The launch root is already gone. Record the timeout outcome.
+    CompleteOrphan,
+    /// The interrupted thread is the launch root. The EL0 return path exits it.
+    AbortInterruptedRoot,
+    /// Some other thread is current. Retire the blocked root from supervisor mode.
+    RetireBlockedRoot,
+}
+
+pub fn posix_timeout_disposition(
+    deadline_reached: bool,
+    current_is_launch_root: bool,
+    root_is_live: bool,
+) -> PosixTimeoutDisposition {
+    if !deadline_reached {
+        return PosixTimeoutDisposition::Idle;
+    }
+    if !root_is_live {
+        return PosixTimeoutDisposition::CompleteOrphan;
+    }
+    if current_is_launch_root {
+        PosixTimeoutDisposition::AbortInterruptedRoot
+    } else {
+        PosixTimeoutDisposition::RetireBlockedRoot
+    }
+}
+
 pub fn coverage_percent_hundredths(numerator: usize, denominator: usize) -> usize {
     if denominator == 0 {
         0
@@ -293,7 +329,14 @@ macro_rules! smros_posix_filter_matches_body {
             PosixFilterKind::All => $runnable && $complete,
             PosixFilterKind::Group => $value == $group,
             PosixFilterKind::Api => $value == $api,
-            PosixFilterKind::Test => $value == $test_id,
+            PosixFilterKind::Test => {
+                // Hermes canaries use the trailing id (`getpid/1-1.c`). The
+                // staged manifest stores the full conformance path.
+                $value == $test_id
+                    || $test_id
+                        .strip_suffix($value)
+                        .is_some_and(|prefix| prefix.ends_with('/'))
+            }
         }
     }};
 }

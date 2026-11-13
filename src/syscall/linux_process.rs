@@ -637,6 +637,21 @@ fn finish_terminal_process(
     Ok(LinuxProcessExitOutcome::LaunchRoot)
 }
 
+/// Stop a launch root that is blocked under some other thread.
+///
+/// The EL0 timer return can only abort the thread it interrupted. Hermes
+/// waits on the shell, so a root stuck in the kernel would otherwise pin
+/// the runner until the campaign reset.
+pub(crate) fn terminate_launch_root_for_timeout() -> bool {
+    let signaled = terminate_by_signal(LINUX_ROOT_PID, 9).is_ok();
+    if linux_task::root_has_live_task() {
+        let _ = linux_task::terminate_process_tasks(LINUX_ROOT_PID);
+        let _ = super::linux_process_memory::unregister(LINUX_ROOT_PID);
+        let _ = super::release_linux_process_resources(LINUX_ROOT_PID);
+    }
+    signaled || !linux_task::root_has_live_task()
+}
+
 pub(crate) fn terminate_by_signal(
     tgid: usize,
     signum: usize,

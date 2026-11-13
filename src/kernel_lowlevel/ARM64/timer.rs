@@ -93,6 +93,19 @@ fn write_cntp_cval_el0(value: u64) {
     }
 }
 
+/// Write CNTP_TVAL_EL0. Hardware sets CVAL to CNTPCT + value atomically, so a
+/// host scheduling gap cannot leave an absolute compare already in the past.
+fn write_cntp_tval_el0(value: u64) {
+    unsafe {
+        core::arch::asm!(
+            "msr cntp_tval_el0, {value}",
+            "isb",
+            value = in(reg) value,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
 /// Write the Counter-timer Physical Timer Control Register
 fn write_cntp_ctl_el0(value: u64) {
     // SAFETY: Writing CNTP_CTL_EL0 controls the physical timer.
@@ -238,6 +251,35 @@ pub fn arm_at_nanoseconds(deadline: u64) {
 /// `(CNTPCT, hardware CNTP_CVAL)` for campaign timeout diagnostics.
 pub fn debug_compare_snapshot() -> (u64, u64) {
     (read_cntpct_el0(), read_cntp_cval_el0())
+}
+
+/// Arm a near periodic compare relative to the current counter.
+///
+/// Also forces the physical timer enabled and unmasked. A compare that is
+/// already behind CNTPCT does not raise another GICv3 edge, and a disabled
+/// or masked control register never raises one at all.
+pub fn arm_periodic_from_now() {
+    let period = TICK_PERIOD.load(Ordering::Relaxed);
+    let period = if period == 0 {
+        1
+    } else {
+        period.min(i32::MAX as u64)
+    };
+    write_cntp_ctl_el0(lowlevel_logic::timer_ctl(CNTP_CTL_ENABLE, CNTP_CTL_IMASK));
+    write_cntp_tval_el0(period);
+    let now = read_cntpct_el0();
+    let mut hardware = read_cntp_cval_el0();
+    let precision = PRECISION_COMPARE.load(Ordering::Acquire);
+    if precision > now && (hardware <= now || precision < hardware) {
+        write_cntp_cval_el0(precision);
+        hardware = precision;
+    }
+    if hardware <= now {
+        write_cntp_tval_el0(period);
+        hardware = read_cntp_cval_el0();
+    }
+    NEXT_PERIODIC_COMPARE.store(hardware, Ordering::Release);
+    PROGRAMMED_COMPARE.store(hardware, Ordering::Release);
 }
 
 /// Make sure the next WFI has a timer edge to wake on.

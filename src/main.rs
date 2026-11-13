@@ -103,14 +103,15 @@ static DEFERRED_RISCV_TIMER_WORK: AtomicBool = AtomicBool::new(false);
 #[cfg(target_arch = "riscv64")]
 static RISCV_SCHEDULER_TICK_PENDING: AtomicBool = AtomicBool::new(false);
 
-fn claim_timer_tick(now: u64) -> bool {
-    if now == 0 {
-        return false;
-    }
+fn claim_timer_tick(now: u64) -> u64 {
     let mut last = LAST_ACCEPTED_TIMER_TICK.load(Ordering::Acquire);
     loop {
         if !kernel_lowlevel::lowlevel_logic::timer_tick_is_new(last, now) {
-            return false;
+            return 0;
+        }
+        let elapsed = kernel_lowlevel::lowlevel_logic::timer_elapsed_ticks(last, now);
+        if elapsed == 0 {
+            return 0;
         }
         match LAST_ACCEPTED_TIMER_TICK.compare_exchange_weak(
             last,
@@ -118,7 +119,7 @@ fn claim_timer_tick(now: u64) -> bool {
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            Ok(_) => return true,
+            Ok(_) => return elapsed,
             Err(observed) => last = observed,
         }
     }
@@ -478,6 +479,53 @@ unsafe impl alloc::alloc::GlobalAlloc for KernelAllocator {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct KernelHeapStats {
+    pub capacity: usize,
+    pub free_bytes: usize,
+    pub used_bytes: usize,
+    pub largest_free: usize,
+    pub free_blocks: usize,
+}
+
+/// Walk the kernel heap free list. `used_bytes` is capacity minus free-list
+/// bytes, so a per-round increase is memory that was allocated and not returned.
+#[allow(dead_code)]
+pub fn kernel_heap_stats() -> KernelHeapStats {
+    let _guard = allocator_lock();
+    unsafe { kernel_heap_stats_locked(&*ALLOC_STATE.get()) }
+}
+
+unsafe fn kernel_heap_stats_locked(state: &KernelAllocatorState) -> KernelHeapStats {
+    let mut free_bytes = 0usize;
+    let mut largest_free = 0usize;
+    let mut free_blocks = 0usize;
+    let mut current = state.free_head;
+    let mut guard = 0usize;
+    while !current.is_null() && guard < 1_000_000 {
+        guard = guard.saturating_add(1);
+        let size = (*current).size;
+        free_bytes = free_bytes.saturating_add(size);
+        if size > largest_free {
+            largest_free = size;
+        }
+        free_blocks = free_blocks.saturating_add(1);
+        let next = (*current).next;
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    let capacity = main_logic::KERNEL_HEAP_SIZE;
+    KernelHeapStats {
+        capacity,
+        free_bytes,
+        used_bytes: capacity.saturating_sub(free_bytes),
+        largest_free,
+        free_blocks,
+    }
+}
+
 /// Kernel version
 const KERNEL_VERSION: &str = "1.2.0";
 
@@ -638,7 +686,9 @@ fn process_timer_work() -> bool {
         crate::syscall::deliver_linux_posix_timer_signals_from_irq();
     }
     if current_cpu_id() == 0 {
-        if claim_timer_tick(now) {
+        let elapsed = claim_timer_tick(now);
+        if elapsed != 0 {
+            crate::kernel_objects::scheduler::note_hardware_tick_elapsed(elapsed);
             #[cfg(target_arch = "riscv64")]
             RISCV_SCHEDULER_TICK_PENDING.store(true, Ordering::Release);
             #[cfg(not(target_arch = "riscv64"))]

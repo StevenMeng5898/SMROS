@@ -58,26 +58,39 @@ pub fn unmask_timer_interrupts() {
 
 #[inline(always)]
 pub fn wait_for_interrupt() {
-    // A POSIX interval timer can publish a far CNTP_CVAL and leave the 10ms
-    // scheduler compare in the past. GICv3 then waits for that far edge, so
-    // tick-based sleeps and the per-test deadline never run. Re-arm the
-    // periodic tick first; a sooner precision compare is kept.
-    super::timer::arm_next_tick();
-    // A stale CNTP_CVAL (already <= CNTPCT) does not produce another GICv3
-    // edge. Rewrite it before WFI or this wait never returns.
-    super::timer::ensure_hardware_compare_can_wake();
-    if crate::kernel_objects::campaign_watch::exceeded(super::timer::get_nanoseconds()) {
-        return;
+    // Hold IRQs off between the compare write and WFI. A tick that expires in
+    // that window is delivered as an edge the GIC will not raise again, and
+    // this wait would never return. CNTP_TVAL is relative to the write.
+    let irq_state = mask_interrupts();
+    let mut armed = false;
+    for _ in 0..4 {
+        super::timer::arm_periodic_from_now();
+        let (now, compare) = super::timer::debug_compare_snapshot();
+        if compare > now {
+            armed = true;
+            break;
+        }
     }
-    // ISB makes a preceding DAIF/CNTP update visible. ARM64 QEMU TCG will
-    // otherwise keep WFI asleep and freeze virtio/timer waits.
-    unsafe {
-        core::arch::asm!(
-            "dsb sy",
-            "isb",
-            "wfi",
-            options(nomem, nostack, preserves_flags),
-        );
+    let expired_before = crate::kernel_objects::campaign_watch::exceeded(
+        super::timer::get_nanoseconds(),
+    );
+    if armed && !expired_before {
+        // ISB makes a preceding DAIF/CNTP update visible. ARM64 QEMU TCG will
+        // otherwise keep WFI asleep and freeze virtio/timer waits.
+        unsafe {
+            core::arch::asm!(
+                "dsb sy",
+                "isb",
+                "wfi",
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+    }
+    restore_interrupts(irq_state);
+    if expired_before
+        || crate::kernel_objects::campaign_watch::exceeded(super::timer::get_nanoseconds())
+    {
+        crate::kernel_objects::campaign_watch::expire_and_reset();
     }
 }
 

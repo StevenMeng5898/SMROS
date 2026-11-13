@@ -8165,6 +8165,19 @@ mod scheduler_logic {
     }
 
     #[test]
+    fn elapsed_timer_periods_drain_the_slice_and_credit() {
+        assert_eq!(smros_sched_time_slice_after_elapsed_body!(5u32, 1u64), 4);
+        assert_eq!(smros_sched_time_slice_after_elapsed_body!(5u32, 5u64), 0);
+        assert_eq!(smros_sched_time_slice_after_elapsed_body!(5u32, 47u64), 0);
+        assert_eq!(smros_sched_time_slice_after_elapsed_body!(0u32, 4u64), 0);
+        assert_eq!(smros_sched_credit_after_elapsed_body!(8i32, 3u64), 5);
+        assert_eq!(smros_sched_credit_after_elapsed_body!(8i32, 8u64), 0);
+        assert_eq!(smros_sched_credit_after_elapsed_body!(8i32, 40u64), 0);
+        assert_eq!(smros_sched_credit_after_elapsed_body!(0i32, 4u64), 0);
+        assert_eq!(smros_sched_credit_after_elapsed_body!(-2i32, 4u64), -2);
+    }
+
+    #[test]
     #[rustfmt::skip]
     fn preemption_policy_follows_active_thread_and_policy_rules() {
         let rr = 1u8;
@@ -8623,6 +8636,14 @@ mod lowlevel_logic {
         smros_ll_timer_tick_is_new_body!(last, current)
     }
 
+    pub(crate) fn timer_elapsed_ticks(last: u64, now: u64) -> u64 {
+        smros_ll_timer_elapsed_ticks_body!(last, now)
+    }
+
+    pub(crate) fn gic_ppi_level_clear_mask(irq: u32) -> Option<u32> {
+        smros_ll_gic_ppi_level_clear_mask_body!(irq)
+    }
+
     pub(crate) fn timer_earliest_compare(periodic: u64, precision: u64) -> u64 {
         smros_ll_timer_earliest_compare_body!(periodic, precision)
     }
@@ -8702,6 +8723,26 @@ mod lowlevel_logic {
         assert_eq!(timer_rearm_compare(1_000, 10), 1_010);
         assert_eq!(timer_rearm_compare(1_000, 0), 1_001);
         assert_eq!(timer_rearm_compare(u64::MAX, 50), u64::MAX);
+    }
+
+    #[test]
+    fn late_timer_irq_counts_every_missed_period() {
+        assert_eq!(timer_elapsed_ticks(0, 0), 0);
+        assert_eq!(timer_elapsed_ticks(10, 10), 0);
+        assert_eq!(timer_elapsed_ticks(10, 9), 0);
+        assert_eq!(timer_elapsed_ticks(10, 11), 1);
+        assert_eq!(timer_elapsed_ticks(2_500, 2_547), 47);
+        assert_eq!(timer_elapsed_ticks(0, 2_547), 2_547);
+    }
+
+    #[test]
+    fn timer_ppi_is_level_triggered_so_a_held_line_wakes_wfi() {
+        assert_eq!(gic_ppi_level_clear_mask(15), None);
+        assert_eq!(gic_ppi_level_clear_mask(32), None);
+        assert_eq!(gic_ppi_level_clear_mask(16), Some(0b11));
+        // Non-secure physical timer PPI 14 is INTID 30. Two config bits at
+        // shift 28 must be cleared; leaving them set keeps the PPI edge-only.
+        assert_eq!(gic_ppi_level_clear_mask(30), Some(3u32 << 28));
     }
 
     #[test]
@@ -12201,6 +12242,33 @@ mod posix_test_logic_shared {
             true
         ));
         assert!(filter_matches(
+            PosixFilterKind::Test,
+            "mmap/1-1",
+            test_id,
+            group,
+            api,
+            true,
+            true
+        ));
+        assert!(filter_matches(
+            PosixFilterKind::Test,
+            "getpid/1-1.c",
+            "conformance/interfaces/getpid/1-1.c",
+            "base",
+            "getpid",
+            true,
+            true
+        ));
+        assert!(!filter_matches(
+            PosixFilterKind::Test,
+            "pid/1-1.c",
+            "conformance/interfaces/getpid/1-1.c",
+            "base",
+            "getpid",
+            true,
+            true
+        ));
+        assert!(filter_matches(
             PosixFilterKind::Group,
             group,
             test_id,
@@ -12363,6 +12431,27 @@ mod posix_test_logic_shared {
         assert_eq!(timeout_deadline_tick(10, 11), 12);
         assert_eq!(timeout_deadline_tick(10, 30_000), 3010);
         assert_eq!(timeout_deadline_tick(u64::MAX - 1, u32::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn blocked_root_is_retired_when_the_shell_is_current() {
+        use PosixTimeoutDisposition::{
+            AbortInterruptedRoot, CompleteOrphan, Idle, RetireBlockedRoot,
+        };
+        assert_eq!(posix_timeout_disposition(false, false, true), Idle);
+        assert_eq!(posix_timeout_disposition(false, true, true), Idle);
+        assert_eq!(
+            posix_timeout_disposition(true, false, false),
+            CompleteOrphan
+        );
+        assert_eq!(
+            posix_timeout_disposition(true, true, true),
+            AbortInterruptedRoot
+        );
+        assert_eq!(
+            posix_timeout_disposition(true, false, true),
+            RetireBlockedRoot
+        );
     }
 
     #[test]

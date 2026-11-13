@@ -74,6 +74,30 @@ fn set_priority(base: usize, size: usize, priority_base: usize, irq: u32) {
     write_reg(base, size, priority_offset, priorities);
 }
 
+const GICR_ICFGR0: usize = GICR_SGI_BASE + 0x0C00;
+
+const GICD_ICFGR: usize = 0xC00;
+
+fn configure_gicd_ppi_level(gicd_base: usize, gicd_size: usize, irq: u32) {
+    let Some(clear_mask) = lowlevel_logic::gic_ppi_level_clear_mask(irq) else {
+        return;
+    };
+    let offset = GICD_ICFGR + ((irq as usize / 16) * 4);
+    let mut config = read_reg(gicd_base, gicd_size, offset);
+    config &= !clear_mask;
+    write_reg(gicd_base, gicd_size, offset, config);
+}
+
+fn configure_ppi_level(gicr_base: usize, gicr_size: usize, irq: u32) {
+    let Some(clear_mask) = lowlevel_logic::gic_ppi_level_clear_mask(irq) else {
+        return;
+    };
+    let offset = GICR_ICFGR0 + ((irq as usize / 16) * 4);
+    let mut config = read_reg(gicr_base, gicr_size, offset);
+    config &= !clear_mask;
+    write_reg(gicr_base, gicr_size, offset, config);
+}
+
 fn enable_irq(base: usize, size: usize, enable_base: usize, irq: u32) {
     let enable_offset = lowlevel_logic::gic_reg_offset(enable_base, irq, 32);
     let enable_bit = lowlevel_logic::gic_enable_bit(irq);
@@ -99,6 +123,7 @@ fn init_gicv2() {
     write_reg(gicd_base, gicd_size, target_offset, targets);
 
     enable_irq(gicd_base, gicd_size, GICD_ISENABLER, timer_irq);
+    configure_gicd_ppi_level(gicd_base, gicd_size, timer_irq);
 
     write_reg(gicc_base, gicc_size, GICC_CTLR, GICC_CTLR_ENABLE);
     write_reg(gicc_base, gicc_size, GICC_PMR, 0xff);
@@ -125,6 +150,7 @@ fn init_gicv3_v4() {
     if timer_irq < 32 {
         write_reg(gicr_base, gicr_size, GICR_IGROUPR0, 0xffff_ffff);
         set_priority(gicr_base, gicr_size, GICR_IPRIORITYR, timer_irq);
+        configure_ppi_level(gicr_base, gicr_size, timer_irq);
         enable_irq(gicr_base, gicr_size, GICR_ISENABLER0, timer_irq);
     } else {
         set_priority(gicd_base, gicd_size, GICD_IPRIORITYR, timer_irq);

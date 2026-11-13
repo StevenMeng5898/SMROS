@@ -9427,7 +9427,12 @@ fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
             }
             if status.running {
                 ctx.serial.write_str("posixtest: started\n");
-                scheduler::yield_now();
+                // Stay here until the runner records an exit or its per-test
+                // deadline retires the launch. One yield lets Hermes start
+                // the next op, and a blocked root never sees the EL0 abort.
+                while posix_test::status_snapshot().running {
+                    scheduler::yield_now();
+                }
             } else {
                 ctx.serial.write_str("posixtest: completed\n");
             }
