@@ -4,6 +4,7 @@ pub mod compat_apps;
 pub mod component;
 pub mod docker_compat;
 pub mod elf;
+pub(crate) mod elf_load_logic_shared;
 pub mod fxfs;
 pub mod gemma;
 pub mod hermes_agent;

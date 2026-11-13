@@ -3270,8 +3270,20 @@ impl MemorySyscallState {
         handle: u32,
         object_type: ObjectType,
         status_flags: usize,
-    ) -> u32 {
+    ) -> Option<u32> {
         let id = self.next_open_description_id;
+        let index_len = (id as usize).checked_add(1)?;
+        if self.linux_open_descriptions.try_reserve(1).is_err() {
+            return None;
+        }
+        if self.linux_open_description_indices.len() < index_len
+            && self
+                .linux_open_description_indices
+                .try_reserve(index_len - self.linux_open_description_indices.len())
+                .is_err()
+        {
+            return None;
+        }
         self.next_open_description_id = id.checked_add(1).unwrap_or(1);
         let index = self.linux_open_descriptions.len();
         self.linux_open_descriptions.push(LinuxOpenDescription {
@@ -3282,12 +3294,12 @@ impl MemorySyscallState {
             offset: 0,
             references: 0,
         });
-        if self.linux_open_description_indices.len() <= id as usize {
+        if self.linux_open_description_indices.len() < index_len {
             self.linux_open_description_indices
-                .resize(id as usize + 1, usize::MAX);
+                .resize(index_len, usize::MAX);
         }
         self.linux_open_description_indices[id as usize] = index;
-        id
+        Some(id)
     }
 
     fn acquire_open_description(&mut self, id: u32) -> bool {
@@ -3344,13 +3356,17 @@ impl MemorySyscallState {
             .linux_open_descriptions
             .iter()
             .find(|description| description.handle == handle)
-            .map(|description| description.id)
-            .unwrap_or_else(|| {
+            .map(|description| description.id);
+        let description_id = match description_id {
+            Some(id) => id,
+            None => {
                 let object_type = compat::table()
                     .object_type(HandleValue(handle))
                     .unwrap_or(ObjectType::LinuxFile);
                 self.create_open_description(handle, object_type, status_flags)
-            });
+                    .ok_or(SysError::ENOMEM)?
+            }
+        };
         self.alloc_fd_for_description(description_id, status_flags, close_on_exec)
     }
 
@@ -3382,6 +3398,10 @@ impl MemorySyscallState {
             return Err(SysError::EBADF);
         }
         let resources = self.process_resources_mut(pid);
+        if resources.descriptors.try_reserve(1).is_err() {
+            let _ = self.release_open_description(description_id);
+            return Err(SysError::ENOMEM);
+        }
         resources.next_fd = fd.saturating_add(1);
         resources.fd_hint_needs_scan = false;
         resources.descriptors.push(LinuxDescriptorEntry {
@@ -3464,6 +3484,10 @@ impl MemorySyscallState {
             return Err(SysError::EBADF);
         }
         let resources = self.process_resources_mut(pid);
+        if resources.descriptors.try_reserve(1).is_err() {
+            let _ = self.release_open_description(description_id);
+            return Err(SysError::ENOMEM);
+        }
         resources.next_fd = fd.saturating_add(1);
         resources.fd_hint_needs_scan = false;
         resources.descriptors.push(LinuxDescriptorEntry {
@@ -3492,6 +3516,10 @@ impl MemorySyscallState {
             return false;
         }
         let resources = self.process_resources_mut(pid);
+        if resources.descriptors.try_reserve(1).is_err() {
+            let _ = self.release_open_description(description_id);
+            return false;
+        }
         if fd <= resources.next_fd {
             resources.fd_hint_needs_scan = true;
         }
@@ -3595,7 +3623,7 @@ impl MemorySyscallState {
     }
 
     fn register_process_object(&mut self, handle: u32, object_type: ObjectType) -> Option<u32> {
-        let description_id = self.create_open_description(handle, object_type, 0);
+        let description_id = self.create_open_description(handle, object_type, 0)?;
         if !self.acquire_open_description(description_id) {
             return None;
         }
@@ -3603,7 +3631,12 @@ impl MemorySyscallState {
             let _ = self.release_open_description(description_id);
             return None;
         };
-        self.process_resources_mut(pid).objects.push(description_id);
+        let resources = self.process_resources_mut(pid);
+        if resources.objects.try_reserve(1).is_err() {
+            let _ = self.release_open_description(description_id);
+            return None;
+        }
+        resources.objects.push(description_id);
         Some(description_id)
     }
 
@@ -3622,7 +3655,7 @@ impl MemorySyscallState {
                 scheduler_policy: parent.scheduler_policy,
                 scheduler_priority: parent.scheduler_priority,
                 rlimit_memlock: parent.rlimit_memlock,
-                handles: parent.handles.clone(),
+                handles: parent.handles.try_clone().map_err(|_| SysError::ENOMEM)?,
             });
         }
         Ok(LinuxProcessForkState {
@@ -6768,6 +6801,16 @@ pub fn sys_mmap(
     }
 
     let len = roundup_pages(len);
+    let mmap_pages = len / crate::kernel_lowlevel::memory::PAGE_SIZE;
+    let mmap_heap_cost = if anonymous {
+        crate::kernel_lowlevel::kernel_budget::mmap_metadata_cost(mmap_pages)
+            .ok_or(SysError::ENOMEM)?
+    } else {
+        len
+    };
+    if !crate::kernel_lowlevel::kernel_budget::heap_room_for(mmap_heap_cost) {
+        return Err(SysError::ENOMEM);
+    }
     let requested = if flags.contains(MmapFlags::FIXED) {
         if !fixed_linux_mmap_request_ok(addr, len) {
             return Err(SysError::ENOMEM);
@@ -7256,6 +7299,11 @@ pub fn sys_pipe2(fds_ptr: usize, flags: usize) -> SysResult {
     }
     if !linux_user_buffer_writable(fds_ptr, core::mem::size_of::<[i32; 2]>()) {
         return Err(SysError::EFAULT);
+    }
+    if !crate::kernel_lowlevel::kernel_budget::heap_room_for(
+        crate::kernel_lowlevel::kernel_budget::object_bytes().saturating_mul(2),
+    ) {
+        return Err(SysError::ENOMEM);
     }
 
     let (read_handle, write_handle) =
@@ -9750,6 +9798,11 @@ pub fn sys_socket(domain: usize, socket_type: usize, protocol: usize) -> SysResu
     if !linux_socket_args_valid(domain, socket_type) {
         return Err(SysError::EINVAL);
     }
+    if !crate::kernel_lowlevel::kernel_budget::heap_room_for(
+        crate::kernel_lowlevel::kernel_budget::object_bytes(),
+    ) {
+        return Err(SysError::ENOMEM);
+    }
     let handle = compat::create_object(linux_socket_object_type(domain, socket_type, protocol))
         .map_err(|_| SysError::ENOMEM)?;
     memory_state().alloc_fd(handle.0, true, true)
@@ -9766,6 +9819,11 @@ pub fn sys_socketpair(
     }
     if !linux_socket_args_valid(domain, socket_type) {
         return Err(SysError::EINVAL);
+    }
+    if !crate::kernel_lowlevel::kernel_budget::heap_room_for(
+        crate::kernel_lowlevel::kernel_budget::object_bytes().saturating_mul(2),
+    ) {
+        return Err(SysError::ENOMEM);
     }
     let socket_kind = socket_type & LINUX_SOCK_TYPE_MASK;
     let (left, right) = if (domain == LINUX_AF_UNIX || domain == LINUX_AF_LOCAL)
@@ -11227,6 +11285,11 @@ pub fn sys_linux_timer_create(clockid: usize, sevp: usize, timerid: usize) -> Sy
     if !linux_user_buffer_writable(timerid, core::mem::size_of::<i32>()) {
         return Err(SysError::EFAULT);
     }
+    if !crate::kernel_lowlevel::kernel_budget::heap_room_for(
+        crate::kernel_lowlevel::kernel_budget::object_bytes(),
+    ) {
+        return Err(SysError::ENOMEM);
+    }
     let clock = linux_posix_timer_clock_for_current(clockid).ok_or(SysError::EINVAL)?;
     let (signal, signal_value) = if sevp == 0 {
         (LINUX_SIGALRM, 0)
@@ -12368,6 +12431,12 @@ pub fn sys_clone(
                 return Err(SysError::EAGAIN);
             }
         };
+        if let Ok(pid) = linux_process::current_pid() {
+            if !crate::kernel_lowlevel::kernel_budget::bind_thread_pid(scheduler_id.0, pid) {
+                let _ = scheduler::scheduler().terminate_thread(scheduler_id);
+                return Err(SysError::EAGAIN);
+            }
+        }
         let reservation = match linux_task::reserve_clone(scheduler_id, request, context) {
             Ok(reservation) => reservation,
             Err(error) => {
@@ -14596,6 +14665,11 @@ pub fn sys_profile_create(
 pub fn sys_timer_create(options: u32, _clock_id: u32, out_handle: &mut u32) -> ZxResult {
     if !syscall_logic::zircon_timer_options_valid(options, ZX_TIMER_OPTIONS_MASK) {
         return Err(ZxError::ErrInvalidArgs);
+    }
+    if !crate::kernel_lowlevel::kernel_budget::heap_room_for(
+        crate::kernel_lowlevel::kernel_budget::object_bytes(),
+    ) {
+        return Err(ZxError::ErrNoMemory);
     }
     *out_handle = compat::create_object_with_options(ObjectType::Timer, options)?.0;
     Ok(())

@@ -858,8 +858,20 @@ impl Scheduler {
         // Find an empty slot
         for i in 1..MAX_THREADS {
             if self.threads[i].state == ThreadState::Empty {
+                if !crate::kernel_lowlevel::kernel_budget::try_reserve_thread(i, DEFAULT_STACK_SIZE)
+                {
+                    crate::kobj_debug!(
+                        "scheduler",
+                        "thread-stack-budget-denied active_threads={} slot={} stack_size={}",
+                        self.active_threads,
+                        i,
+                        DEFAULT_STACK_SIZE
+                    );
+                    return None;
+                }
                 // Allocate stack
                 let Some(stack) = ThreadStack::alloc(DEFAULT_STACK_SIZE) else {
+                    crate::kernel_lowlevel::kernel_budget::discharge_thread(i);
                     crate::kobj_debug!(
                         "scheduler",
                         "thread-stack-alloc-failed active_threads={} slot={} stack_size={}",
@@ -1016,6 +1028,7 @@ impl Scheduler {
 
         let stack = self.threads[id.0].stack.0;
         let stack_size = self.threads[id.0].stack_size;
+        crate::kernel_lowlevel::kernel_budget::discharge_thread(id.0);
         self.threads[id.0] = ThreadControlBlock::new();
         self.threads[id.0].id = id;
         self.schedule_info[id.0] = ThreadScheduleInfo::empty();
@@ -1315,6 +1328,7 @@ impl Scheduler {
             }
         }
 
+        crate::kernel_lowlevel::kernel_budget::discharge_thread(idx);
         self.threads[idx] = ThreadControlBlock::new();
         self.threads[idx].id = ThreadId(idx);
         self.schedule_info[idx] = ThreadScheduleInfo::empty();

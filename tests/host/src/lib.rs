@@ -12749,3 +12749,188 @@ mod handle_namespace {
         assert!(fd_slot_available(3, 4, false));
     }
 }
+
+mod kernel_budget_logic {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/kernel_lowlevel/kernel_budget_logic_shared.rs"
+    ));
+
+    #[test]
+    fn watermark_keeps_a_shell_reserve_before_the_40960_byte_failure() {
+        let heap = KERNEL_BUDGET_HEAP_BYTES;
+        let reserve = KERNEL_BUDGET_RESERVE_BYTES;
+        let allocated = heap - reserve - 40960;
+        assert!(admit_heap(allocated, heap, reserve, 40960));
+        assert!(!admit_heap(allocated + 1, heap, reserve, 40960));
+        assert!(!admit_heap(heap - reserve, heap, reserve, 1));
+        assert!(admit_heap(0, heap, reserve, heap - reserve));
+        assert!(!admit_heap(usize::MAX - 10, heap, reserve, 16));
+    }
+
+    #[test]
+    fn process_cap_and_uncharge_do_not_wrap() {
+        let limit = KERNEL_BUDGET_PROCESS_LIMIT_BYTES;
+        assert!(admit_process(limit - 4096, limit, 4096));
+        assert!(!admit_process(limit - 4095, limit, 4096));
+        assert!(!admit_process(usize::MAX - 8, limit, 16));
+        assert_eq!(uncharge(100, 40), 60);
+        assert_eq!(uncharge(10, 40), 0);
+        assert!(admit_process(0, limit, KERNEL_BUDGET_ADDRESS_SPACE_BYTES));
+        assert_eq!(
+            mmap_metadata_bytes(10),
+            Some(10 * KERNEL_BUDGET_MMAP_PER_PAGE_BYTES)
+        );
+        assert_eq!(mmap_metadata_bytes(usize::MAX), None);
+    }
+
+    #[test]
+    fn fork_admission_stops_before_the_heap_that_halted_at_965_tasks() {
+        let heap = KERNEL_BUDGET_HEAP_BYTES;
+        let reserve = KERNEL_BUDGET_RESERVE_BYTES;
+        let stack = 0x4_0000usize;
+        let mut allocated = 0usize;
+        let mut admitted = 0usize;
+        while admit_heap(allocated, heap, reserve, stack) {
+            allocated += stack;
+            admitted += 1;
+            if admitted > 4000 {
+                break;
+            }
+        }
+        assert!(admitted < 965, "admitted {admitted} stacks");
+        assert!(admitted > 64, "admitted only {admitted} stacks");
+        assert!(heap - allocated >= reserve);
+        assert!(!admit_heap(allocated, heap, reserve, 40960));
+    }
+}
+
+mod elf_load_logic {
+    extern crate alloc;
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/elf_load_logic_shared.rs"
+    ));
+
+    const WINDOW_START: u64 = 0x1000_0000;
+    const WINDOW_END: u64 = 0x2000_0000;
+    const PAGE: u64 = 0x1000;
+
+    #[test]
+    fn huge_bss_is_rejected_before_any_page_walk() {
+        let segment = ElfLoadSegment {
+            vaddr: 0,
+            mem_size: 1 << 44,
+            file_size: 0,
+            prot: 1,
+        };
+        assert_eq!(
+            plan_elf_load(&[segment], WINDOW_START, WINDOW_START, WINDOW_END, PAGE),
+            Err(ELF_LOAD_ENOMEM)
+        );
+        assert_eq!(
+            admit_elf_segment(&segment, WINDOW_START, WINDOW_START, WINDOW_END, PAGE),
+            Err(ELF_LOAD_ENOMEM)
+        );
+        let overflow = ElfLoadSegment {
+            vaddr: u64::MAX - 16,
+            mem_size: 32,
+            file_size: 0,
+            prot: 1,
+        };
+        assert_eq!(
+            plan_elf_load(&[overflow], 0, WINDOW_START, WINDOW_END, PAGE),
+            Err(ELF_LOAD_EINVAL)
+        );
+    }
+
+    #[test]
+    fn bss_is_one_run_and_a_hole_is_not_filled_page_by_page() {
+        let bss = ElfLoadSegment {
+            vaddr: 0x2000,
+            mem_size: PAGE * 8,
+            file_size: 0,
+            prot: 1,
+        };
+        let runs = plan_elf_load(&[bss], WINDOW_START, WINDOW_START, WINDOW_END, PAGE).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].start, 0x2000);
+        assert_eq!(runs[0].len, (PAGE as usize) * 8);
+        assert_eq!(runs[0].prot, 1);
+
+        let text = ElfLoadSegment {
+            vaddr: 0,
+            mem_size: 0x89c,
+            file_size: 0x89c,
+            prot: 1 | 4,
+        };
+        let data = ElfLoadSegment {
+            vaddr: 0x1fd90,
+            mem_size: 0x288,
+            file_size: 0x280,
+            prot: 1 | 2,
+        };
+        let runs = plan_elf_load(&[text, data], WINDOW_START, WINDOW_START, WINDOW_END, PAGE)
+            .unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), 0x3000);
+        assert!(runs[0].start + runs[0].len < runs[1].start);
+        assert!(runs.iter().all(|run| run.len % PAGE as usize == 0));
+    }
+
+    #[test]
+    fn overlapping_write_exec_is_one_interval_and_drops_exec() {
+        let exec = ElfLoadSegment {
+            vaddr: 0x5000,
+            mem_size: 0x800,
+            file_size: 0x800,
+            prot: 1 | 4,
+        };
+        let write = ElfLoadSegment {
+            vaddr: 0x5800,
+            mem_size: 0x800,
+            file_size: 0x800,
+            prot: 1 | 2,
+        };
+        let runs = plan_elf_load(&[exec, write], WINDOW_START, WINDOW_START, WINDOW_END, PAGE)
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].prot, 1 | 2);
+        assert_eq!(runs[0].len, PAGE as usize);
+    }
+
+    #[test]
+    fn bounded_segment_space_stays_inside_the_window() {
+        for mem_pages in 1..32 {
+            for file_pages in 0..32 {
+                for gap_pages in 0..16 {
+                    let mem_size = mem_pages * PAGE;
+                    let file_size = core::cmp::min(file_pages, mem_pages) * PAGE;
+                    let vaddr = gap_pages * PAGE;
+                    let segment = ElfLoadSegment {
+                        vaddr,
+                        mem_size,
+                        file_size,
+                        prot: 1,
+                    };
+                    let runs = plan_elf_load(
+                        &[segment],
+                        WINDOW_START,
+                        WINDOW_START,
+                        WINDOW_END,
+                        PAGE,
+                    )
+                    .unwrap();
+                    let covered: usize = runs.iter().map(|run| run.len).sum();
+                    assert!(covered <= (mem_size as usize) + PAGE as usize);
+                    assert!(runs.len() <= 2);
+                    for run in &runs {
+                        let end = (run.start as u64) + run.len as u64;
+                        assert!(WINDOW_START + end <= WINDOW_END);
+                    }
+                }
+            }
+        }
+    }
+}

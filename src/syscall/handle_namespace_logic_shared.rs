@@ -68,6 +68,19 @@ impl<T> HandleNamespace<T> {
     pub fn slots(&self) -> &[HandleSlot<T>] {
         &self.slots
     }
+
+    pub fn try_clone(&self) -> Result<Self, ()>
+    where
+        T: Clone,
+    {
+        let mut slots = Vec::new();
+        slots.try_reserve_exact(self.slots.len()).map_err(|_| ())?;
+        slots.extend_from_slice(&self.slots);
+        Ok(Self {
+            slots,
+            limit: self.limit,
+        })
+    }
 }
 
 impl<T: Copy> HandleNamespace<T> {

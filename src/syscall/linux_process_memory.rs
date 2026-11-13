@@ -341,6 +341,10 @@ struct LinuxPrivatePageHint {
 pub(crate) struct LinuxProcessMemory {
     pub pid: usize,
     generation: usize,
+    /// Address-space metadata charged to `pid` until this object is dropped.
+    address_space_accounted: usize,
+    /// mmap page-metadata charged to `pid` and released by munmap.
+    mapping_accounted: usize,
     private_page_tracking_enabled: bool,
     private_page_hints: Vec<LinuxPrivatePageHint>,
     #[cfg(target_arch = "aarch64")]
@@ -1708,9 +1712,18 @@ pub(crate) fn register_root(pid: usize) -> Result<u64, SysError> {
         if root_paddr == 0 {
             return Err(SysError::ENOMEM);
         }
+        runtime.memories.try_reserve(1).map_err(|_| SysError::ENOMEM)?;
+        let address_space_accounted =
+            crate::kernel_lowlevel::kernel_budget::address_space_bytes();
+        if !crate::kernel_lowlevel::kernel_budget::try_account_process(pid, address_space_accounted)
+        {
+            return Err(SysError::ENOMEM);
+        }
         runtime.memories.push(LinuxProcessMemory {
             pid,
             generation: memory_generation(),
+            address_space_accounted,
+            mapping_accounted: 0,
             private_page_tracking_enabled: false,
             private_page_hints: Vec::new(),
             address_space,
@@ -2027,9 +2040,19 @@ pub(crate) fn clone_for_fork(
             return Err(SysError::ENOMEM);
         }
 
+        let address_space_accounted =
+            crate::kernel_lowlevel::kernel_budget::address_space_bytes();
+        if !crate::kernel_lowlevel::kernel_budget::try_account_process(
+            child_pid,
+            address_space_accounted,
+        ) {
+            return Err(SysError::ENOMEM);
+        }
         let mut child = LinuxProcessMemory {
             pid: child_pid,
             generation: memory_generation(),
+            address_space_accounted,
+            mapping_accounted: 0,
             private_page_tracking_enabled: true,
             private_page_hints: Vec::new(),
             address_space,
@@ -2711,6 +2734,7 @@ pub(crate) fn current_writable_contiguous_physical(
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn zero_current(address: usize, len: usize) -> Result<(), SysError> {
     let mut offset = 0usize;
     let zeros = [0u8; 256];
@@ -4302,6 +4326,15 @@ impl LinuxProcessMemory {
         } else {
             self.allocate_unmapped_pages(len, contents)?
         };
+        let mapping_cost =
+            crate::kernel_lowlevel::kernel_budget::mmap_metadata_cost(pages.len())
+                .ok_or(SysError::ENOMEM)?;
+        if mapping_cost != 0
+            && !crate::kernel_lowlevel::kernel_budget::try_account_process(self.pid, mapping_cost)
+        {
+            Self::free_backings(&pages);
+            return Err(SysError::ENOMEM);
+        }
         let mapping = LinuxProcessMapping {
             addr: address,
             len,
@@ -4313,9 +4346,13 @@ impl LinuxProcessMemory {
         if let Err(error) =
             self.map_mapping_pages(address, &mapping.pages, &mapping.source, mapping.prot, 0)
         {
+            if mapping_cost != 0 {
+                crate::kernel_lowlevel::kernel_budget::forget_process(self.pid, mapping_cost);
+            }
             Self::free_backings(&mapping.pages);
             return Err(error);
         }
+        self.mapping_accounted = self.mapping_accounted.saturating_add(mapping_cost);
         self.mappings.insert(index, mapping);
         if flags & LINUX_MAP_SHARED != 0 && (0x1222_0000..0x1222_2000).contains(&address) {
             let mapping = &self.mappings[index];
@@ -4446,6 +4483,7 @@ impl LinuxProcessMemory {
             self.unmap_exact_mapping_pages_transactionally(index)?;
             let mapping = self.mappings.remove(index);
             self.next_addr = core::cmp::min(self.next_addr, address);
+            self.release_mapping_charge(mapping.pages.len());
             Self::free_backings(&mapping.pages);
             self.bump_generation();
             return Ok(Vec::new());
@@ -4460,8 +4498,18 @@ impl LinuxProcessMemory {
         plan.reconcile_shared_attachments();
         self.unmap_pages_transactionally(&pages)?;
         let (removed, detached) = self.commit_mapping_metadata(plan);
+        self.release_mapping_charge(removed.len());
         Self::free_backings(&removed);
         Ok(detached)
+    }
+
+    fn release_mapping_charge(&mut self, pages: usize) {
+        let Some(cost) = crate::kernel_lowlevel::kernel_budget::mmap_metadata_cost(pages) else {
+            return;
+        };
+        let cost = cost.min(self.mapping_accounted);
+        self.mapping_accounted -= cost;
+        crate::kernel_lowlevel::kernel_budget::forget_process(self.pid, cost);
     }
 
     fn update_brk(&mut self, new_brk: usize) -> Result<usize, SysError> {
@@ -4807,6 +4855,12 @@ impl LinuxProcessMemory {
 
 impl Drop for LinuxProcessMemory {
     fn drop(&mut self) {
+        let accounted = self
+            .address_space_accounted
+            .saturating_add(self.mapping_accounted);
+        self.address_space_accounted = 0;
+        self.mapping_accounted = 0;
+        crate::kernel_lowlevel::kernel_budget::forget_process(self.pid, accounted);
         self.release_all_pages();
         for attachment in self.shared_attachments.drain(..).rev() {
             let _ = super::release_shared_memory_attachment_reference(attachment.object_id);

@@ -86,6 +86,7 @@ static ALLOC_STATE: SyncUnsafeCell<KernelAllocatorState> =
     });
 static ALLOC_LOCK: AtomicBool = AtomicBool::new(false);
 static ALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);
+static HEAP_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 static ALLOC_SCAN_STEPS: AtomicUsize = AtomicUsize::new(0);
 static ALLOC_LOCK_CONTENTION_REPORTS: AtomicUsize = AtomicUsize::new(0);
 static ALLOC_SCAN_REPORTS: AtomicUsize = AtomicUsize::new(0);
@@ -444,10 +445,19 @@ unsafe fn insert_free_block(
 // SAFETY: The heap buffer is exclusively managed behind a global spin lock.
 // Freed allocations are returned to a coalescing free list stored inside the
 // heap itself, so large temporary Vec buffers do not permanently consume heap.
+pub(crate) fn kernel_heap_allocated() -> usize {
+    HEAP_ALLOCATED.load(Ordering::Relaxed)
+}
+
 unsafe impl alloc::alloc::GlobalAlloc for KernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let _guard = allocator_lock();
-        alloc_from_free_list(&mut *ALLOC_STATE.get(), layout)
+        let ptr = alloc_from_free_list(&mut *ALLOC_STATE.get(), layout);
+        if !ptr.is_null() {
+            let header = (ptr as usize - size_of::<AllocationHeader>()) as *const AllocationHeader;
+            HEAP_ALLOCATED.fetch_add((*header).block_size, Ordering::Relaxed);
+        }
+        ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
@@ -456,11 +466,15 @@ unsafe impl alloc::alloc::GlobalAlloc for KernelAllocator {
         }
         let _guard = allocator_lock();
         let header = (ptr as usize - size_of::<AllocationHeader>()) as *const AllocationHeader;
+        let block_size = (*header).block_size;
         insert_free_block(
             &mut *ALLOC_STATE.get(),
             (*header).block_start,
-            (*header).block_size,
+            block_size,
         );
+        let _ = HEAP_ALLOCATED.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_sub(block_size))
+        });
     }
 }
 
@@ -585,6 +599,7 @@ pub extern "C" fn kernel_main(fdt_base: usize) -> ! {
     );
     crate::user_level::user_shell::start_user_shell();
     serial.write_str("[KERNEL] Starting scheduler - jumping to shell thread...\n\n");
+    crate::kernel_lowlevel::kernel_budget::enable_user_budget();
     crate::kernel_objects::scheduler::start_first_thread();
 }
 
@@ -843,6 +858,9 @@ fn halt_forever() -> ! {
     }
 }
 
+/// Early-boot allocations are infallible: there is no caller to return
+/// ENOMEM to. After `enable_user_budget`, syscall paths reserve with
+/// `try_reserve` or the heap watermark and must not reach this handler.
 #[alloc_error_handler]
 fn alloc_error_handler(layout: Layout) -> ! {
     let mut serial = Serial::new();

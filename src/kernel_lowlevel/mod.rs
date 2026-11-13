@@ -27,6 +27,8 @@ pub(crate) mod aarch64_exception_logic_shared;
 #[cfg(target_arch = "aarch64")]
 #[path = "aarch64_vm_logic_shared.rs"]
 pub(crate) mod aarch64_vm_logic_shared;
+pub(crate) mod kernel_budget;
+mod kernel_budget_logic_shared;
 pub(crate) mod lowlevel_logic;
 pub mod memory;
 pub mod mmu;
