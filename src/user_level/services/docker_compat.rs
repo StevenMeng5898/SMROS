@@ -39,7 +39,10 @@ const MS_REC: usize = 0x4000;
 const MS_PRIVATE: usize = 0x40000;
 const PR_SET_NO_NEW_PRIVS: usize = 38;
 const PR_GET_NO_NEW_PRIVS: usize = 39;
+const PR_SET_SECCOMP: usize = 22;
+const PR_GET_SECCOMP: usize = 21;
 const SECCOMP_SET_MODE_FILTER: usize = 1;
+const SECCOMP_MODE_FILTER: usize = 2;
 const SECCOMP_FILTER_FLAG_TSYNC: usize = 1;
 const CAP_VERSION_3: u32 = 0x2008_0522;
 const O_WRONLY_CREATE_TRUNC: usize = 0o1 | 0o100 | 0o1000;
@@ -1667,8 +1670,21 @@ fn run_oci_runtime_request(
     if syscall::sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0).ok() != Some(1) {
         return Err(DockerCompatError::StateMismatch);
     }
-    syscall::sys_seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, 1)
-        .map_err(DockerCompatError::Seccomp)?;
+    // Seccomp is not implemented. A successful return would tell runc the
+    // filter is installed. Require the kernel refusal and a still-disabled mode.
+    match syscall::sys_seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, 1) {
+        Err(syscall::SysError::ENOSYS) => {}
+        Ok(_) => return Err(DockerCompatError::StateMismatch),
+        Err(err) => return Err(DockerCompatError::Seccomp(err)),
+    }
+    match syscall::sys_prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, 0, 0, 0) {
+        Err(syscall::SysError::EINVAL) => {}
+        Ok(_) => return Err(DockerCompatError::StateMismatch),
+        Err(err) => return Err(DockerCompatError::Seccomp(err)),
+    }
+    if syscall::sys_prctl(PR_GET_SECCOMP, 0, 0, 0, 0).ok() != Some(0) {
+        return Err(DockerCompatError::StateMismatch);
+    }
     apply_capabilities(request.cap_effective, request.cap_permitted)?;
     let cgroup_path = cgroup_procs_path(request.cgroups_path);
     let cgroup_cstr = c_string(&cgroup_path);
@@ -1698,8 +1714,8 @@ fn run_oci_runtime_request(
         || !stats.pivot_rooted
         || !stats.chrooted
         || !stats.no_new_privs
-        || stats.seccomp_mode != 2
-        || stats.seccomp_filters == 0
+        || stats.seccomp_mode != 0
+        || stats.seccomp_filters != 0
         || stats.cap_effective != request.cap_effective
         || stats.cap_permitted != request.cap_permitted
         || !stats.hostname_set

@@ -793,6 +793,145 @@ mod syscall_logic {
     ));
 
     #[test]
+    fn security_stubs_fail_closed_and_queries_match_real_state() {
+        use LinuxAuditedStub::{FailClosed, Harmless, Personality, Uncertain};
+        use LinuxPrctlDecision::{
+            CapbsetDrop, CapbsetRead, GetDumpable, GetName, GetNoNewPrivs, GetSeccomp, Reject,
+            SetDumpable, SetName, SetNoNewPrivs, SetSeccomp,
+        };
+
+        let mut fail_closed = 0usize;
+        let mut harmless = 0usize;
+        let mut uncertain = 0usize;
+        let mut personality = 0usize;
+        for num in 0..=600u32 {
+            match linux_audited_stub(num) {
+                Some(FailClosed(errno)) => {
+                    assert!(
+                        errno == LINUX_ERRNO_EPERM
+                            || errno == LINUX_ERRNO_EINVAL
+                            || errno == LINUX_ERRNO_ENOSYS,
+                        "syscall {num} errno {errno}"
+                    );
+                    assert_ne!(errno, 0);
+                    fail_closed += 1;
+                }
+                Some(Harmless) => harmless += 1,
+                Some(Uncertain) => uncertain += 1,
+                Some(Personality) => personality += 1,
+                None => {}
+            }
+        }
+        assert_eq!(fail_closed, 51);
+        assert_eq!(harmless, 3);
+        assert_eq!(uncertain, 19);
+        assert_eq!(personality, 1);
+
+        assert_eq!(linux_audited_stub(117), Some(FailClosed(LINUX_ERRNO_EPERM)));
+        assert_eq!(
+            linux_audited_stub(270),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(271),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(280),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(288),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(289),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(290),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(425),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(426),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(427),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(444),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(445),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(446),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(442),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(282),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(linux_audited_stub(31), Some(Harmless));
+        assert_eq!(linux_audited_stub(128), Some(Harmless));
+        assert_eq!(linux_audited_stub(284), Some(Harmless));
+        assert_eq!(linux_audited_stub(293), Some(Uncertain));
+        assert_eq!(linux_audited_stub(277), None);
+
+        assert_eq!(linux_personality_errno(0), None);
+        assert_eq!(linux_personality_errno(0xffff_ffff), None);
+        assert_eq!(
+            linux_personality_errno(0x0040_0000),
+            Some(LINUX_ERRNO_EINVAL)
+        );
+        assert_eq!(
+            linux_personality_errno(0x0400_0000),
+            Some(LINUX_ERRNO_EINVAL)
+        );
+
+        assert_eq!(linux_prctl_decision(38), SetNoNewPrivs);
+        assert_eq!(linux_prctl_decision(39), GetNoNewPrivs);
+        assert_eq!(linux_prctl_decision(22), SetSeccomp);
+        assert_eq!(linux_prctl_decision(21), GetSeccomp);
+        assert_eq!(linux_prctl_decision(15), SetName);
+        assert_eq!(linux_prctl_decision(16), GetName);
+        assert_eq!(linux_prctl_decision(23), CapbsetRead);
+        assert_eq!(linux_prctl_decision(24), CapbsetDrop);
+        assert_eq!(linux_prctl_decision(4), SetDumpable);
+        assert_eq!(linux_prctl_decision(3), GetDumpable);
+        assert_eq!(linux_prctl_decision(65), Reject);
+        assert_eq!(
+            linux_prctl_reject_errno(SetSeccomp),
+            Some(LINUX_ERRNO_EINVAL)
+        );
+        assert_eq!(linux_prctl_reject_errno(GetSeccomp), None);
+        assert_eq!(linux_prctl_reject_errno(SetNoNewPrivs), None);
+        assert_eq!(linux_prctl_reject_errno(GetNoNewPrivs), None);
+        assert_eq!(
+            linux_prctl_reject_errno(CapbsetDrop),
+            Some(LINUX_ERRNO_EPERM)
+        );
+        assert_eq!(
+            linux_prctl_reject_errno(SetDumpable),
+            Some(LINUX_ERRNO_EINVAL)
+        );
+        assert_eq!(linux_prctl_reject_errno(GetDumpable), None);
+        assert_eq!(linux_prctl_reject_errno(Reject), Some(LINUX_ERRNO_EINVAL));
+    }
+
+    #[test]
     fn epoll_preflight_matches_linux_errno_classes() {
         use LinuxEpollFdClass::{Epoll, Missing, Other};
         use LinuxEpollReject::{Ebadf, Efault, Einval};
