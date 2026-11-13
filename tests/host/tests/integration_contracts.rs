@@ -11416,6 +11416,26 @@ fn posix_resources_include_linux_process_page_lifecycle() {
     assert!(process.contains("pub(crate) struct LinuxProcessResourceCounts"));
     assert!(process.contains("pub(crate) fn resource_counts("));
     assert!(process.contains("runtime.processes.running_pids_match("));
+    let counts_fn = process
+        .find("pub(crate) fn resource_counts()")
+        .expect("resource_counts");
+    let counts_body = braced_body(&process[counts_fn..]);
+    assert!(
+        !counts_body.contains("spin_loop"),
+        "a POSIX resource snapshot holds the process lock with IRQs masked and must not spin"
+    );
+    let shared = std::fs::read_to_string(
+        repository.join("src/syscall/linux_process_logic_shared.rs"),
+    )
+    .expect("read Linux process logic");
+    let match_fn = shared
+        .find("pub(crate) fn running_pids_match(")
+        .expect("running_pids_match");
+    let match_body = braced_body(&shared[match_fn..]);
+    assert!(
+        match_body.contains("LINUX_DISPATCH_PID"),
+        "the kernel dispatch identity is not an EL0 address space"
+    );
     assert!(memory.contains("pub(crate) fn resource_counts("));
     assert!(syscall.contains("let linux_process_counts = linux_process::resource_counts()"));
     assert!(!syscall.contains("let linux_memory_counts = linux_process_memory::resource_counts()"));

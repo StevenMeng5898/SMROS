@@ -490,7 +490,6 @@ pub struct KernelHeapStats {
 
 /// Walk the kernel heap free list. `used_bytes` is capacity minus free-list
 /// bytes, so a per-round increase is memory that was allocated and not returned.
-#[allow(dead_code)]
 pub fn kernel_heap_stats() -> KernelHeapStats {
     let _guard = allocator_lock();
     unsafe { kernel_heap_stats_locked(&*ALLOC_STATE.get()) }

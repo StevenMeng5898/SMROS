@@ -4814,6 +4814,41 @@ mod linux_process_logic {
     }
 
     #[test]
+    fn kernel_dispatch_identity_is_not_a_userspace_resource() {
+        let mut processes = LinuxProcessTable::<3>::new();
+        processes.register_root(7).unwrap();
+        processes.processes[1] = LinuxProcessCore {
+            pid: LINUX_DISPATCH_PID,
+            parent_pid: 0,
+            process_group: LINUX_DISPATCH_PID,
+            root_scheduler_thread: 1,
+            state: LinuxProcessState::Running,
+            wait_status: 0,
+            exit_signal: 0,
+        };
+        assert_eq!(processes.resource_counts(), (1, 0));
+        assert!(processes.running_pids_match(&[LINUX_ROOT_PID]));
+        assert!(processes.running_pids_match(&[
+            LINUX_ROOT_PID,
+            LINUX_DISPATCH_PID
+        ]));
+        assert!(!processes.running_pids_match(&[]));
+
+        let mut only_dispatch = LinuxProcessTable::<2>::new();
+        only_dispatch.processes[0] = LinuxProcessCore {
+            pid: LINUX_DISPATCH_PID,
+            parent_pid: 0,
+            process_group: LINUX_DISPATCH_PID,
+            root_scheduler_thread: 1,
+            state: LinuxProcessState::Running,
+            wait_status: 0,
+            exit_signal: 0,
+        };
+        assert_eq!(only_dispatch.resource_counts(), (0, 0));
+        assert!(only_dispatch.running_pids_match(&[]));
+    }
+
+    #[test]
     fn zombies_are_reaped_once_without_reusing_their_pid() {
         let mut processes = LinuxProcessTable::<2>::new();
         processes.register_root(7).unwrap();

@@ -1836,7 +1836,11 @@ fn zircon_success_call_cases() -> usize {
 
 fn prepare_fuzz_linux_context() {
     if let Ok(pid) = linux_process::ensure_dispatch_identity() {
-        let _ = linux_process_memory::ensure_dispatch_memory(pid);
+        if linux_process_memory::ensure_dispatch_memory(pid).is_err()
+            && pid == linux_process::LINUX_DISPATCH_PID
+        {
+            linux_process::abandon_dispatch_identity();
+        }
     }
 }
 

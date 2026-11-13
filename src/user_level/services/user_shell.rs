@@ -5601,6 +5601,13 @@ fn run_hermes_test_all_inner(
         print_usize(&mut ctx.serial, options.iterations);
         ctx.serial.write_str(" op=");
         ctx.serial.write_str(op_label);
+        let heap = crate::kernel_heap_stats();
+        ctx.serial.write_str(" heap_used=");
+        print_usize(&mut ctx.serial, heap.used_bytes);
+        ctx.serial.write_str(" heap_free=");
+        print_usize(&mut ctx.serial, heap.free_bytes);
+        ctx.serial.write_str(" heap_largest=");
+        print_usize(&mut ctx.serial, heap.largest_free);
         ctx.serial.write_str("\n");
 
         random_completed = random_completed.saturating_add(1);

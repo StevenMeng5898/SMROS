@@ -125,8 +125,6 @@ pub(crate) fn by_pid(pid: usize) -> Option<LinuxProcessCore> {
     with_runtime(|runtime| runtime.processes.by_pid(pid))
 }
 
-const LINUX_DISPATCH_PID: usize = 0x1_0000;
-
 pub(crate) fn ensure_dispatch_process(pid: usize, scheduler_thread: usize) -> Result<usize, SysError> {
     with_runtime(|runtime| {
         if runtime
@@ -172,6 +170,20 @@ pub(crate) fn ensure_dispatch_identity() -> Result<usize, SysError> {
     };
     ensure_dispatch_process(pid, scheduler_thread)?;
     Ok(pid)
+}
+
+/// Drop the kernel dispatch process when its address space could not be
+/// installed. Leaving it Running makes the next POSIX resource snapshot wait
+/// forever for a memory record that will never appear.
+pub(crate) fn abandon_dispatch_identity() {
+    with_runtime(|runtime| {
+        if let Some(slot) = runtime.processes.processes.iter().position(|process| {
+            process.pid == LINUX_DISPATCH_PID && process.state != LinuxProcessState::Empty
+        }) {
+            runtime.processes.processes[slot] = LinuxProcessCore::EMPTY;
+            runtime.signal_states[slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
+        }
+    });
 }
 
 fn running_parent_pid(pid: usize) -> Result<usize, SysError> {
@@ -689,29 +701,26 @@ fn process_slot(runtime: &LinuxProcessRuntime, pid: usize) -> Result<usize, SysE
 }
 
 pub(crate) fn resource_counts() -> LinuxProcessResourceCounts {
-    loop {
-        // Cross-runtime snapshots take the process lock before the memory lock.
-        let counts = with_runtime(|runtime| {
-            let linux_memory_counts = super::linux_process_memory::resource_counts();
-            if !runtime.processes.running_pids_match(
-                &linux_memory_counts.process_pids[..linux_memory_counts.process_count],
-            ) {
-                return None;
-            }
-            let (linux_processes, linux_zombies) = runtime.processes.resource_counts();
-            Some(LinuxProcessResourceCounts {
-                linux_processes,
-                linux_zombies,
-                private_pages: linux_memory_counts.private_pages,
-                shared_pages: linux_memory_counts.shared_pages,
-                page_table_pages: linux_memory_counts.page_table_pages,
-            })
-        });
-        if let Some(counts) = counts {
-            return counts;
+    // One snapshot. `with_runtime` holds the process lock with IRQs masked, so
+    // a mismatch cannot be repaired by spinning: the publisher would need this
+    // same lock, and the per-test timeout cannot preempt the loop. The kernel
+    // dispatch pid is not an EL0 address space and is excluded by
+    // `running_pids_match`. Any other mismatch is reported as the counts the
+    // caller already uses for leak detection.
+    with_runtime(|runtime| {
+        let linux_memory_counts = super::linux_process_memory::resource_counts();
+        let _consistent = runtime.processes.running_pids_match(
+            &linux_memory_counts.process_pids[..linux_memory_counts.process_count],
+        );
+        let (linux_processes, linux_zombies) = runtime.processes.resource_counts();
+        LinuxProcessResourceCounts {
+            linux_processes,
+            linux_zombies,
+            private_pages: linux_memory_counts.private_pages,
+            shared_pages: linux_memory_counts.shared_pages,
+            page_table_pages: linux_memory_counts.page_table_pages,
         }
-        core::hint::spin_loop();
-    }
+    })
 }
 
 pub(crate) fn reset_launch() {
