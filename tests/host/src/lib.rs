@@ -4823,6 +4823,7 @@ mod linux_process_logic {
             process_group: LINUX_DISPATCH_PID,
             root_scheduler_thread: 1,
             state: LinuxProcessState::Running,
+            stopped: false,
             wait_status: 0,
             exit_signal: 0,
         };
@@ -4841,6 +4842,7 @@ mod linux_process_logic {
             process_group: LINUX_DISPATCH_PID,
             root_scheduler_thread: 1,
             state: LinuxProcessState::Running,
+            stopped: false,
             wait_status: 0,
             exit_signal: 0,
         };
