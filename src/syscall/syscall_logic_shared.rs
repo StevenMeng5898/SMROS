@@ -171,9 +171,7 @@ pub(crate) const fn linux_mode_access_allowed(
 
 const LINUX_POSIX_NANOS_PER_SECOND: u64 = 1_000_000_000;
 
-pub(crate) const fn linux_hybrid_sleep_uses_precision_tail(
-    requested_nanoseconds: u64,
-) -> bool {
+pub(crate) const fn linux_hybrid_sleep_uses_precision_tail(requested_nanoseconds: u64) -> bool {
     requested_nanoseconds != 0 && requested_nanoseconds < LINUX_POSIX_NANOS_PER_SECOND
 }
 
@@ -548,8 +546,7 @@ impl LinuxPosixTimerCore {
     }
 
     pub(crate) fn running_delivery_deferred(&self, now_monotonic: u64) -> bool {
-        self.defer_until
-            .is_some_and(|until| now_monotonic < until)
+        self.defer_until.is_some_and(|until| now_monotonic < until)
     }
 
     pub(crate) fn clear_running_deferral(&mut self) {
@@ -1083,4 +1080,152 @@ pub(crate) fn linux_epoll_pwait2_timeout_reject(
         return Some(LinuxEpollReject::Einval);
     }
     None
+}
+
+pub(crate) const LINUX_ERRNO_EPERM: i32 = 1;
+pub(crate) const LINUX_ERRNO_EINVAL: i32 = 22;
+pub(crate) const LINUX_ERRNO_ENOSYS: i32 = 38;
+
+pub(crate) const LINUX_PR_GET_DUMPABLE: usize = 3;
+pub(crate) const LINUX_PR_SET_DUMPABLE: usize = 4;
+pub(crate) const LINUX_PR_SET_NAME: usize = 15;
+pub(crate) const LINUX_PR_GET_NAME: usize = 16;
+pub(crate) const LINUX_PR_GET_SECCOMP: usize = 21;
+pub(crate) const LINUX_PR_SET_SECCOMP: usize = 22;
+pub(crate) const LINUX_PR_CAPBSET_READ: usize = 23;
+pub(crate) const LINUX_PR_CAPBSET_DROP: usize = 24;
+pub(crate) const LINUX_PR_SET_NO_NEW_PRIVS: usize = 38;
+pub(crate) const LINUX_PR_GET_NO_NEW_PRIVS: usize = 39;
+
+/// How an audited “return 0 without doing the operation” syscall is treated.
+///
+/// `FailClosed` is a protection, privilege, isolation, or memory-protection
+/// entry that must not report success. `Harmless` is an advisory or
+/// bookkeeping entry whose success does not grant authority. `Uncertain` is
+/// left unchanged. `Personality` has its own Linux-compatible rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxAuditedStub {
+    FailClosed(i32),
+    Harmless,
+    Uncertain,
+    Personality,
+}
+
+/// Classification of the syscall-table stubs that previously returned `Ok(0)`
+/// with no effect. `None` means the number is not one of those stubs.
+pub(crate) fn linux_audited_stub(syscall_num: u32) -> Option<LinuxAuditedStub> {
+    use LinuxAuditedStub::{FailClosed, Harmless, Personality, Uncertain};
+    const EPERM: i32 = LINUX_ERRNO_EPERM;
+    const ENOSYS: i32 = LINUX_ERRNO_ENOSYS;
+    Some(match syscall_num {
+        // Linux AIO. A fake context is a correctness bug, not a sandbox grant.
+        0 | 1 | 2 | 3 | 4 | 292 => Uncertain,
+        18 => Uncertain,          // lookup_dcookie
+        30 => FailClosed(EPERM),  // ioprio_set
+        31 => Harmless,           // ioprio_get, default class
+        42 => Uncertain,          // nfsservctl
+        58 => FailClosed(EPERM),  // vhangup
+        60 => FailClosed(ENOSYS), // quotactl
+        89 => FailClosed(EPERM),  // acct
+        92 => Personality,
+        104 | 105 | 106 | 273 | 294 => FailClosed(ENOSYS), // kexec/module load
+        116 => FailClosed(EPERM),                          // syslog / klogctl
+        117 => FailClosed(EPERM),                          // ptrace
+        128 => Harmless,                                   // restart_syscall
+        142 => FailClosed(EPERM),                          // reboot
+        170 | 171 | 266 => Uncertain,                      // settimeofday, adjtimex, clock_adjtime
+        217 | 218 | 219 => FailClosed(ENOSYS),             // keyring
+        224 | 225 => FailClosed(EPERM),                    // swapon, swapoff
+        234 => Uncertain,                                  // remap_file_pages
+        235 | 236 | 237 => Uncertain,                      // mbind, get/set_mempolicy
+        238 | 239 => FailClosed(EPERM),                    // migrate_pages, move_pages
+        241 => FailClosed(ENOSYS),                         // perf_event_open
+        262 | 263 => FailClosed(EPERM),                    // fanotify
+        264 | 265 => FailClosed(ENOSYS),                   // name_to_handle_at, open_by_handle_at
+        267 | 269 => Uncertain,                            // syncfs, sendmmsg
+        270 | 271 => FailClosed(ENOSYS),                   // process_vm_readv/writev
+        272 => FailClosed(EPERM),                          // kcmp
+        274 => FailClosed(EPERM),                          // sched_setattr
+        275 => Uncertain,                                  // sched_getattr
+        280 => FailClosed(ENOSYS),                         // bpf
+        281 => FailClosed(ENOSYS),                         // execveat
+        282 => FailClosed(ENOSYS),                         // userfaultfd
+        284 => Harmless,                                   // mlock2
+        288 | 289 | 290 => FailClosed(ENOSYS),             // pkey
+        293 => Uncertain,                                  // rseq
+        424 => FailClosed(EPERM),                          // pidfd_send_signal
+        425 | 426 | 427 => FailClosed(ENOSYS),             // io_uring
+        428 | 429 | 430 | 431 | 432 | 433 | 442 => FailClosed(ENOSYS), // new mount API
+        434 => FailClosed(ENOSYS),                         // pidfd_open
+        438 => FailClosed(EPERM),                          // pidfd_getfd
+        440 => FailClosed(EPERM),                          // process_madvise
+        444 | 445 | 446 => FailClosed(ENOSYS),             // landlock
+        _ => return None,
+    })
+}
+
+/// `personality(2)` without an execution-domain change.
+///
+/// `0xffffffff` is Linux's query value and returns the current personality.
+/// `PER_LINUX` (0) is already the process personality. Any other persona,
+/// including `ADDR_NO_RANDOMIZE` and `READ_IMPLIES_EXEC`, is rejected with
+/// `EINVAL` so the caller cannot believe ASLR or executable-read was changed.
+pub(crate) fn linux_personality_errno(persona: u32) -> Option<i32> {
+    if persona == 0 || persona == 0xffff_ffff {
+        None
+    } else {
+        Some(LINUX_ERRNO_EINVAL)
+    }
+}
+
+/// `prctl` options this kernel actually tracks, plus the security options that
+/// must fail instead of reporting that a setting was applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxPrctlDecision {
+    SetNoNewPrivs,
+    GetNoNewPrivs,
+    SetSeccomp,
+    GetSeccomp,
+    SetName,
+    GetName,
+    CapbsetRead,
+    CapbsetDrop,
+    SetDumpable,
+    GetDumpable,
+    Reject,
+}
+
+pub(crate) fn linux_prctl_decision(option: usize) -> LinuxPrctlDecision {
+    match option {
+        LINUX_PR_SET_NO_NEW_PRIVS => LinuxPrctlDecision::SetNoNewPrivs,
+        LINUX_PR_GET_NO_NEW_PRIVS => LinuxPrctlDecision::GetNoNewPrivs,
+        LINUX_PR_SET_SECCOMP => LinuxPrctlDecision::SetSeccomp,
+        LINUX_PR_GET_SECCOMP => LinuxPrctlDecision::GetSeccomp,
+        LINUX_PR_SET_NAME => LinuxPrctlDecision::SetName,
+        LINUX_PR_GET_NAME => LinuxPrctlDecision::GetName,
+        LINUX_PR_CAPBSET_READ => LinuxPrctlDecision::CapbsetRead,
+        LINUX_PR_CAPBSET_DROP => LinuxPrctlDecision::CapbsetDrop,
+        LINUX_PR_SET_DUMPABLE => LinuxPrctlDecision::SetDumpable,
+        LINUX_PR_GET_DUMPABLE => LinuxPrctlDecision::GetDumpable,
+        _ => LinuxPrctlDecision::Reject,
+    }
+}
+
+/// Errno for a prctl decision that must not succeed. `None` means the caller
+/// applies the real state (no-new-privs, name, capability read, dumpable read,
+/// seccomp mode read).
+pub(crate) fn linux_prctl_reject_errno(decision: LinuxPrctlDecision) -> Option<i32> {
+    match decision {
+        // prctl(2): PR_SET_SECCOMP returns EINVAL when CONFIG_SECCOMP is off.
+        LinuxPrctlDecision::SetSeccomp => Some(LINUX_ERRNO_EINVAL),
+        // Dropping the bounding set requires CAP_SETPCAP. This kernel does not
+        // drop it, so success would leave the bit set while claiming it was removed.
+        LinuxPrctlDecision::CapbsetDrop => Some(LINUX_ERRNO_EPERM),
+        // SUID_DUMP_DISABLE is a ptrace/core-dump control. It is not stored.
+        LinuxPrctlDecision::SetDumpable => Some(LINUX_ERRNO_EINVAL),
+        // prctl(2): an unrecognized option is EINVAL. This covers PR_SET_MDWE
+        // and the other security options that have no implementation.
+        LinuxPrctlDecision::Reject => Some(LINUX_ERRNO_EINVAL),
+        _ => None,
+    }
 }
