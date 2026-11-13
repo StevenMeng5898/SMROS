@@ -102,6 +102,22 @@ macro_rules! smros_sched_time_slice_after_tick_body {
     }};
 }
 
+/// Apply every hardware tick that passed since the previous scheduler IRQ.
+/// A late interrupt must not charge only one slice while `sched status`
+/// keeps a tick count that stopped advancing.
+macro_rules! smros_sched_time_slice_after_elapsed_body {
+    ($time_slice:expr, $elapsed:expr) => {{
+        let elapsed = $elapsed;
+        if elapsed == 0 || $time_slice == 0 {
+            $time_slice
+        } else if elapsed >= u64::from($time_slice) {
+            0
+        } else {
+            $time_slice - elapsed as u32
+        }
+    }};
+}
+
 #[allow(unused_macros)]
 macro_rules! smros_sched_credit_after_tick_body {
     ($credit:expr) => {{
@@ -109,6 +125,19 @@ macro_rules! smros_sched_credit_after_tick_body {
             $credit - 1
         } else {
             $credit
+        }
+    }};
+}
+
+macro_rules! smros_sched_credit_after_elapsed_body {
+    ($credit:expr, $elapsed:expr) => {{
+        let elapsed = $elapsed;
+        if $credit <= 0 || elapsed == 0 {
+            $credit
+        } else if elapsed >= $credit as u64 {
+            0
+        } else {
+            $credit - elapsed as i32
         }
     }};
 }

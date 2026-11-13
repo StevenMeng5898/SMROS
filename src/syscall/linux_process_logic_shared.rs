@@ -2,6 +2,10 @@ pub(crate) const LINUX_ROOT_PID: usize = 1;
 /// FD and handle identity for the EL1 shell and in-kernel tests. This pid is
 /// outside the range `register_root` assigns, so it never aliases an EL0 process.
 pub(crate) const LINUX_KERNEL_PRIVATE_PID: usize = (i32::MAX as usize) + 1;
+/// Kernel-thread Linux identity (`testsc` / `fuzzsc`). It is not an EL0
+/// address space. Resource snapshots must not wait for a memory record it
+/// does not own, and must not count it as a leaked userspace process.
+pub(crate) const LINUX_DISPATCH_PID: usize = 0x1_0000;
 pub(crate) const LINUX_LAUNCH_REAPER_PID: usize = usize::MAX;
 pub(crate) const LINUX_MAX_PID: usize = i32::MAX as usize;
 pub(crate) const LINUX_SIGCHLD: usize = 17;
@@ -746,11 +750,16 @@ impl<const N: usize> LinuxProcessTable<N> {
     pub(crate) fn resource_counts(&self) -> (usize, usize) {
         self.processes
             .iter()
-            .fold((0, 0), |(running, zombies), process| match process.state {
-                LinuxProcessState::Running => (running + 1, zombies),
-                LinuxProcessState::Zombie => (running, zombies + 1),
-                LinuxProcessState::Exiting => (running, zombies),
-                _ => (running, zombies),
+            .fold((0, 0), |(running, zombies), process| {
+                if process.pid == LINUX_DISPATCH_PID {
+                    return (running, zombies);
+                }
+                match process.state {
+                    LinuxProcessState::Running => (running + 1, zombies),
+                    LinuxProcessState::Zombie => (running, zombies + 1),
+                    LinuxProcessState::Exiting => (running, zombies),
+                    _ => (running, zombies),
+                }
             })
     }
 
@@ -758,11 +767,19 @@ impl<const N: usize> LinuxProcessTable<N> {
         let running_count = self
             .processes
             .iter()
-            .filter(|process| process.state == LinuxProcessState::Running)
+            .filter(|process| {
+                process.state == LinuxProcessState::Running && process.pid != LINUX_DISPATCH_PID
+            })
             .count();
-        running_count == memory_pids.len()
+        let memory_count = memory_pids
+            .iter()
+            .filter(|pid| **pid != LINUX_DISPATCH_PID)
+            .count();
+        running_count == memory_count
             && self.processes.iter().all(|process| {
-                process.state != LinuxProcessState::Running || memory_pids.contains(&process.pid)
+                process.state != LinuxProcessState::Running
+                    || process.pid == LINUX_DISPATCH_PID
+                    || memory_pids.contains(&process.pid)
             })
     }
 

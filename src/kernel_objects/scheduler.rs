@@ -14,6 +14,7 @@ use crate::kernel_objects::object_logic;
 use crate::syscall::linux_syscall_context;
 use core::cell::UnsafeCell;
 use core::ptr;
+use core::sync::atomic::{AtomicU64, Ordering};
 include!("scheduler_logic_shared.rs");
 
 /// A Sync wrapper around UnsafeCell that is safe to use as a static.
@@ -258,10 +259,18 @@ struct SchedulerCell(UnsafeCell<Scheduler>);
 unsafe impl Sync for SchedulerCell {}
 
 static SCHEDULER: SchedulerCell = SchedulerCell(UnsafeCell::new(Scheduler::new()));
+/// Hardware ticks to apply on the next `on_timer_tick`. One IRQ can observe
+/// many 10ms periods when the previous compare was late.
+static ELAPSED_TIMER_TICKS: AtomicU64 = AtomicU64::new(1);
 
 /// Get a mutable reference to the global scheduler.
 // SAFETY: This is safe because we only access the scheduler from one thread at a time
 // and we ensure no references are held across context switches.
+/// Record how many hardware ticks `claim_timer_tick` observed for this IRQ.
+pub fn note_hardware_tick_elapsed(elapsed: u64) {
+    ELAPSED_TIMER_TICKS.store(elapsed.max(1), Ordering::Release);
+}
+
 pub fn scheduler() -> &'static mut Scheduler {
     unsafe { &mut *SCHEDULER.0.get() }
 }
@@ -1985,22 +1994,21 @@ impl Scheduler {
 
     /// Handle timer tick (called from interrupt handler)
     pub fn on_timer_tick(&mut self) {
+        let elapsed = ELAPSED_TIMER_TICKS.swap(1, Ordering::AcqRel).max(1);
         let current_cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
         self.reap_deferred_thread_for_cpu(current_cpu);
-        self.tick_count += 1;
+        self.tick_count = self.tick_count.saturating_add(elapsed);
 
-        // Decrement current thread's time slice
+        // Decrement current thread's time slice by every missed period.
         let current = self.current_thread;
         let policy = self.policy;
         let tick_count = self.tick_count;
         let mut advance_deadline = false;
         let mut force_preempt = false;
         if let Some(tcb) = self.get_thread_mut(current) {
-            if tcb.time_slice > 0 {
-                tcb.time_slice = smros_sched_time_slice_after_tick_body!(tcb.time_slice);
-            }
-
-            tcb.total_ticks = tcb.total_ticks.saturating_add(1);
+            tcb.time_slice = smros_sched_time_slice_after_elapsed_body!(tcb.time_slice, elapsed);
+            let add = elapsed.min(u32::MAX as u64) as u32;
+            tcb.total_ticks = tcb.total_ticks.saturating_add(add);
             if current.0 != 0 && policy == SchedulePolicy::Edf && tcb.time_slice == 0 {
                 force_preempt = true;
             }
@@ -2019,7 +2027,7 @@ impl Scheduler {
                 SchedulePolicy::Credit => {
                     let exhausted = {
                         let info = &mut self.schedule_info[current.0];
-                        info.credit = smros_sched_credit_after_tick_body!(info.credit);
+                        info.credit = smros_sched_credit_after_elapsed_body!(info.credit, elapsed);
                         info.credit <= 0
                     };
                     if exhausted {
@@ -2175,12 +2183,9 @@ extern "C" fn idle_thread_entry() -> ! {
         // If we returned here, no other threads were ready.
         // A lost timer edge must not pin a timed-out POSIX test in its sleep:
         // the deadline is a hardware-counter tick, so check it before WFI.
-        crate::user_level::services::posix_test::poll_timeout(
-            crate::kernel_lowlevel::timer::get_tick_count(),
-        );
-        if crate::user_level::services::posix_test::complete_orphan_timeout() {
-            continue;
-        }
+        // Retire a blocked launch root here. The EL0 IRQ return can only abort
+        // the thread it interrupted, and Hermes waits on the shell thread.
+        crate::user_level::services::posix_test::enforce_timeout();
         if crate::syscall::linux_task::root_timeout_armed() {
             continue;
         }
@@ -2373,6 +2378,9 @@ fn print_i32(serial: &mut crate::kernel_lowlevel::serial::Serial, value: i32) {
 
 /// Yield the current thread's time slice voluntarily
 pub fn yield_now() {
+    // Bound a POSIX test before this thread WFIs. The shell is not the launch
+    // root, so the user-mode abort path will not see it.
+    crate::user_level::services::posix_test::enforce_timeout();
     if crate::kernel_objects::campaign_watch::exceeded(
         crate::kernel_lowlevel::timer::get_nanoseconds(),
     ) {

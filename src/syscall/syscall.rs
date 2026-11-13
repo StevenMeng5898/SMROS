@@ -13409,7 +13409,12 @@ pub fn leave_kernel_service_copy() {
 pub fn prepare_kernel_thread_linux() -> SysResult {
     enter_kernel_service_copy();
     let pid = linux_process::ensure_dispatch_identity()?;
-    linux_process_memory::ensure_dispatch_memory(pid)?;
+    if let Err(error) = linux_process_memory::ensure_dispatch_memory(pid) {
+        if pid == linux_process::LINUX_DISPATCH_PID {
+            linux_process::abandon_dispatch_identity();
+        }
+        return Err(error);
+    }
     Ok(pid)
 }
 

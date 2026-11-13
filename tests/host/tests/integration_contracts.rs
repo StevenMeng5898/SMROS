@@ -3507,7 +3507,8 @@ fn posix_guest_runner_is_serialized_bounded_and_fail_closed() {
     assert!(shared.contains("PosixFilterKind::All => $runnable && $complete"));
     assert!(shared.contains("PosixFilterKind::Group => $value == $group"));
     assert!(shared.contains("PosixFilterKind::Api => $value == $api"));
-    assert!(shared.contains("PosixFilterKind::Test => $value == $test_id"));
+    assert!(shared.contains("$value == $test_id"));
+    assert!(shared.contains("prefix.ends_with('/')"));
 
     let action_start = runner
         .find("fn selected_test_action(")
@@ -11415,6 +11416,26 @@ fn posix_resources_include_linux_process_page_lifecycle() {
     assert!(process.contains("pub(crate) struct LinuxProcessResourceCounts"));
     assert!(process.contains("pub(crate) fn resource_counts("));
     assert!(process.contains("runtime.processes.running_pids_match("));
+    let counts_fn = process
+        .find("pub(crate) fn resource_counts()")
+        .expect("resource_counts");
+    let counts_body = braced_body(&process[counts_fn..]);
+    assert!(
+        !counts_body.contains("spin_loop"),
+        "a POSIX resource snapshot holds the process lock with IRQs masked and must not spin"
+    );
+    let shared = std::fs::read_to_string(
+        repository.join("src/syscall/linux_process_logic_shared.rs"),
+    )
+    .expect("read Linux process logic");
+    let match_fn = shared
+        .find("pub(crate) fn running_pids_match(")
+        .expect("running_pids_match");
+    let match_body = braced_body(&shared[match_fn..]);
+    assert!(
+        match_body.contains("LINUX_DISPATCH_PID"),
+        "the kernel dispatch identity is not an EL0 address space"
+    );
     assert!(memory.contains("pub(crate) fn resource_counts("));
     assert!(syscall.contains("let linux_process_counts = linux_process::resource_counts()"));
     assert!(!syscall.contains("let linux_memory_counts = linux_process_memory::resource_counts()"));
@@ -12271,4 +12292,51 @@ fn cli_command_surface_and_host_job_protocol_are_closed() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn hermes_posixtest_timeout_retires_a_blocked_root() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let shell = std::fs::read_to_string(repository.join("src/user_level/services/user_shell.rs"))
+        .expect("read shell");
+    let runner = std::fs::read_to_string(repository.join("src/user_level/services/posix_test.rs"))
+        .expect("read posix runner");
+    let scheduler = std::fs::read_to_string(repository.join("src/kernel_objects/scheduler.rs"))
+        .expect("read scheduler");
+    let interrupt = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/interrupt.rs"))
+        .expect("read gic");
+    let cpu = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/cpu.rs"))
+        .expect("read cpu");
+    let main = std::fs::read_to_string(repository.join("src/main.rs")).expect("read main");
+
+    let handler_at = shell
+        .find("fn cmd_posix_test(")
+        .expect("posixtest shell handler");
+    let handler = &shell[handler_at..];
+    assert!(
+        handler.contains("while posix_test::status_snapshot().running"),
+        "hermes must wait out the per-test deadline instead of overlapping the next op"
+    );
+    assert!(
+        handler.contains("scheduler::yield_now()"),
+        "the wait must yield so the launch root and the timeout path can run"
+    );
+    assert!(runner.contains("pub fn enforce_timeout("));
+    assert!(runner.contains("terminate_launch_root_for_timeout"));
+    assert!(runner.contains("PosixTimeoutDisposition::RetireBlockedRoot"));
+    assert!(scheduler.contains("posix_test::enforce_timeout()"));
+    let idle_at = scheduler
+        .find("extern \"C\" fn idle_thread_entry()")
+        .expect("idle thread");
+    let idle = braced_body(&scheduler[idle_at..]);
+    assert!(
+        idle.contains("posix_test::enforce_timeout()"),
+        "idle must retire a timed-out root that is not the interrupted EL0 thread"
+    );
+    assert!(cpu.contains("arm_periodic_from_now()"));
+    assert!(cpu.contains("dsb sy"));
+    assert!(interrupt.contains("configure_ppi_level("));
+    assert!(interrupt.contains("gic_ppi_level_clear_mask"));
+    assert!(main.contains("note_hardware_tick_elapsed(elapsed)"));
+    assert!(main.contains("scheduler().on_timer_tick()"));
 }

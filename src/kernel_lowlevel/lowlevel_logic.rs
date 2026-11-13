@@ -108,6 +108,14 @@ pub(crate) fn timer_tick_is_new(last: u64, current: u64) -> bool {
     smros_ll_timer_tick_is_new_body!(last, current)
 }
 
+pub(crate) fn timer_elapsed_ticks(last: u64, now: u64) -> u64 {
+    smros_ll_timer_elapsed_ticks_body!(last, now)
+}
+
+pub(crate) fn gic_ppi_level_clear_mask(irq: u32) -> Option<u32> {
+    smros_ll_gic_ppi_level_clear_mask_body!(irq)
+}
+
 pub(crate) fn timer_program_compare(periodic: u64, armed: u64, requested: u64) -> u64 {
     smros_ll_timer_program_compare_body!(periodic, armed, requested)
 }

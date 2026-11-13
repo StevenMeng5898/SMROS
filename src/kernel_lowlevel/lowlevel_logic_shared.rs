@@ -465,6 +465,35 @@ macro_rules! smros_ll_timer_tick_is_new_body {
     }};
 }
 
+/// Hardware ticks elapsed since the last accepted scheduler tick.
+/// Zero means this IRQ is a duplicate of a tick already accounted.
+macro_rules! smros_ll_timer_elapsed_ticks_body {
+    ($last:expr, $now:expr) => {{
+        let last = $last;
+        let now = $now;
+        if now == 0 || now <= last {
+            0
+        } else {
+            now - last
+        }
+    }};
+}
+
+/// PPI configuration bits to clear so `irq` is level-sensitive.
+/// The architectural timer line stays asserted while CNTPCT >= CVAL.
+/// An edge-triggered PPI drops that line after one delivery, and a missed
+/// edge leaves WFI asleep with the scheduler tick frozen.
+macro_rules! smros_ll_gic_ppi_level_clear_mask_body {
+    ($irq:expr) => {{
+        let irq = $irq;
+        if (16..32).contains(&irq) {
+            Some(3u32 << ((irq - 16) * 2))
+        } else {
+            None
+        }
+    }};
+}
+
 #[allow(unused_macros)]
 macro_rules! smros_ll_timer_earliest_compare_body {
     ($periodic:expr, $precision:expr) => {{

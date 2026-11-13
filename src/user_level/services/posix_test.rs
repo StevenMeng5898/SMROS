@@ -605,6 +605,35 @@ pub fn complete_orphan_timeout() -> bool {
     false
 }
 
+#[cfg(not(test))]
+pub fn enforce_timeout() {
+    let now = crate::kernel_lowlevel::timer::get_tick_count();
+    poll_timeout(now);
+    let current_is_root = crate::syscall::linux_task::current_task()
+        .ok()
+        .is_some_and(|task| task.tgid == crate::syscall::linux_process::LINUX_ROOT_PID);
+    let root_live = crate::syscall::linux_task::root_has_live_task();
+    let deadline = crate::syscall::linux_task::root_timeout_armed();
+    match posix_test_logic_shared::posix_timeout_disposition(
+        deadline,
+        current_is_root,
+        root_live,
+    ) {
+        posix_test_logic_shared::PosixTimeoutDisposition::Idle => {}
+        posix_test_logic_shared::PosixTimeoutDisposition::CompleteOrphan => {
+            complete_orphan_timeout();
+        }
+        posix_test_logic_shared::PosixTimeoutDisposition::AbortInterruptedRoot => {}
+        posix_test_logic_shared::PosixTimeoutDisposition::RetireBlockedRoot => {
+            let _ = crate::syscall::linux_process::terminate_launch_root_for_timeout();
+            complete_orphan_timeout();
+        }
+    }
+}
+
+#[cfg(test)]
+pub fn enforce_timeout() {}
+
 #[cfg(test)]
 pub fn poll_timeout(_now_tick: u64) {}
 

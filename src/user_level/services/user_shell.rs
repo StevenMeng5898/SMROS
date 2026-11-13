@@ -5601,6 +5601,13 @@ fn run_hermes_test_all_inner(
         print_usize(&mut ctx.serial, options.iterations);
         ctx.serial.write_str(" op=");
         ctx.serial.write_str(op_label);
+        let heap = crate::kernel_heap_stats();
+        ctx.serial.write_str(" heap_used=");
+        print_usize(&mut ctx.serial, heap.used_bytes);
+        ctx.serial.write_str(" heap_free=");
+        print_usize(&mut ctx.serial, heap.free_bytes);
+        ctx.serial.write_str(" heap_largest=");
+        print_usize(&mut ctx.serial, heap.largest_free);
         ctx.serial.write_str("\n");
 
         random_completed = random_completed.saturating_add(1);
@@ -8767,6 +8774,12 @@ fn resolve_run_library_path(name_or_path: &str) -> Option<String> {
     let name = basename(name_or_path);
     let _ = crate::user_level::fxfs::ensure_host_share();
 
+    let mut posix = String::from("/shared/posixtest/lib/");
+    posix.push_str(name);
+    if fxfs_path_exists(posix.as_str()) {
+        return Some(posix);
+    }
+
     let mut shared = String::from("/shared/lib/");
     shared.push_str(name);
     if fxfs_path_exists(shared.as_str()) {
@@ -9427,7 +9440,12 @@ fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
             }
             if status.running {
                 ctx.serial.write_str("posixtest: started\n");
-                scheduler::yield_now();
+                // Stay here until the runner records an exit or its per-test
+                // deadline retires the launch. One yield lets Hermes start
+                // the next op, and a blocked root never sees the EL0 abort.
+                while posix_test::status_snapshot().running {
+                    scheduler::yield_now();
+                }
             } else {
                 ctx.serial.write_str("posixtest: completed\n");
             }
