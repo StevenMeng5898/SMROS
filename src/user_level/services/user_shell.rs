@@ -9222,29 +9222,9 @@ fn cmd_rm(ctx: &mut ShellContext, args: &[&str]) {
 }
 
 fn cmd_run(ctx: &mut ShellContext, args: &[&str]) {
-    let mut env_count = 0usize;
-    while env_count < args.len() {
-        let Some((key, value)) = args[env_count].split_once('=') else {
-            break;
-        };
-        if key.is_empty()
-            || value.is_empty()
-            || !key
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
-            break;
-        }
-        env_count += 1;
-    }
-    let mut env = Vec::new();
-    for entry in &args[..env_count] {
-        env.push(String::from(*entry));
-    }
-    let args = &args[env_count..];
     let Some(target) = args.first() else {
         ctx.serial.write_str("run: missing elf path\n");
-        ctx.serial.write_str("usage: run [KEY=VALUE]... <elf-path> [args...]\n");
+        ctx.serial.write_str("usage: run <elf-path> [args...]\n");
         return;
     };
     let Some(path) = resolve_run_path(ctx.cwd.as_str(), target) else {
@@ -9319,12 +9299,7 @@ fn cmd_run(ctx: &mut ShellContext, args: &[&str]) {
         argv.push(String::from(*arg));
     }
 
-    match crate::user_level::run_elf::spawn_observed(
-        path.clone(),
-        argv,
-        env,
-        crate::user_level::run_elf::RunObserver::Shell,
-    ) {
+    match crate::user_level::run_elf::spawn(path.clone(), argv) {
         Ok(()) => {
             ctx.serial.write_str("run: started dynamic loader thread\n");
             ctx.serial
