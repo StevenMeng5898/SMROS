@@ -9341,6 +9341,15 @@ fn linux_shm_open_honors_mode_umask_permissions_and_name_limits() {
     assert!(syscall.contains("linux_shm_check_unlink_permissions"));
     assert!(syscall.contains("SysError::ENAMETOOLONG"));
     assert!(!umask.contains("Ok(0o022)"));
+    let unlink = braced_body(
+        &syscall[syscall
+            .find("fn linux_shm_check_unlink_permissions(")
+            .expect("shm unlink permission check")..],
+    );
+    assert!(
+        unlink.contains("attrs.uid as usize == credentials.effective_uid"),
+        "the creator of a POSIX shm object must be able to unlink it"
+    );
 }
 
 #[test]

@@ -4751,8 +4751,17 @@ fn linux_shm_check_unlink_permissions(path: &str) -> Result<(), SysError> {
     if !path.starts_with(LINUX_SHM_ROOT_PATH) {
         return Ok(());
     }
-    let attrs = fxfs::attrs("/dev/shm").map_err(linux_fxfs_error)?;
     let (credentials, _) = linux_shm_current_credentials();
+    if let Ok(attrs) = fxfs::attrs(path) {
+        // The creator can remove the object even when /dev/shm is 0755.
+        // shm_open of a new name does not require directory write, so a
+        // non-root test can create a mode-0 object and then fail to unlink
+        // it. The name stays, and the next boot's shm_open returns EACCES.
+        if credentials.effective_uid == 0 || attrs.uid as usize == credentials.effective_uid {
+            return Ok(());
+        }
+    }
+    let attrs = fxfs::attrs("/dev/shm").map_err(linux_fxfs_error)?;
     if !syscall_logic::linux_mode_access_allowed(
         attrs.mode,
         attrs.uid as usize,
