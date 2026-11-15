@@ -7375,12 +7375,19 @@ fn close_linux_fd_for_current_process(fd: usize) -> bool {
     let final_reference = memory_state().release_open_description(entry.description_id);
     if let Some(description) = final_reference {
         let handle = description.handle;
+        linux_mqueue::close_handle(handle);
+        memory_state().remove_linux_fxfs_file(handle);
+        // The process slot is what EL0 uses to resolve this object id.
+        // Dropping it before sys_handle_close makes the compatibility
+        // record unreachable, so every explicit close leaks one slot.
+        // ld.so closes each library fd; after MAX_COMPAT_OBJECTS (4096)
+        // fills, the next library open returns ENOMEM and ld.so exits 127.
+        // Named POSIX queues stay in the mqueue table until mq_unlink;
+        // only the fd's compatibility object is released here.
+        let _ = sys_handle_close(handle);
         if let Some(owner) = owner {
             let _ = memory_state().forget_process_handle(owner, handle);
         }
-        linux_mqueue::close_handle(handle);
-        memory_state().remove_linux_fxfs_file(handle);
-        let _ = sys_handle_close(handle);
     }
     true
 }
@@ -10054,9 +10061,18 @@ pub fn sys_semget(_key: usize, nsems: usize, _flags: usize) -> SysResult {
     if !syscall_logic::linux_ipc_count_valid(nsems, LINUX_MAX_SEMAPHORES) {
         return Err(SysError::EINVAL);
     }
-    Ok(compat::create_object(ObjectType::Semaphore)
-        .map_err(|_| SysError::ENOMEM)?
-        .0 as usize)
+    let handle = compat::create_object(ObjectType::Semaphore).map_err(|_| SysError::ENOMEM)?;
+    // System V semaphore ids have no separate reap table. Tie the object to
+    // the caller the same way msgget does, so the last process exit releases
+    // it instead of leaving it in the compatibility table forever.
+    if memory_state()
+        .register_process_object(handle.0, ObjectType::Semaphore)
+        .is_none()
+    {
+        let _ = sys_handle_close(handle.0);
+        return Err(SysError::ENOMEM);
+    }
+    Ok(handle.0 as usize)
 }
 
 pub fn sys_semctl(id: usize, _num: usize, _cmd: usize, _arg: usize) -> SysResult {
@@ -10129,11 +10145,18 @@ pub fn sys_mq_open(name: usize, flags: usize, _mode: usize, attr: usize) -> SysR
     };
     let _ = (opened.created, opened.attr);
 
-    let fd = memory_state().alloc_fd_with_flags(
+    let fd = match memory_state().alloc_fd_with_flags(
         handle.0,
         flags & (LINUX_O_ACCMODE | LINUX_O_NONBLOCK),
         flags & LINUX_O_CLOEXEC != 0,
-    )?;
+    ) {
+        Ok(fd) => fd,
+        Err(error) => {
+            linux_mqueue::close_handle(handle.0);
+            let _ = sys_handle_close(handle.0);
+            return Err(error);
+        }
+    };
     Ok(fd)
 }
 
