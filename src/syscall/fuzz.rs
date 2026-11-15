@@ -2909,6 +2909,8 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         268 => out = [file_fd, LINUX_CONTAINER_NAMESPACE_FLAGS, 0, 0, 0, 0],
         276 => out = [LINUX_AT_FDCWD, path, LINUX_AT_FDCWD, path2, 0, 0],
         277 => {
+            // seccomp is fail-closed (ENOSYS). These arguments only exercise
+            // the refusal; they are not expected to land in linux_ok.
             out = [
                 if variant == 0 {
                     LINUX_SECCOMP_GET_NOTIF_SIZES

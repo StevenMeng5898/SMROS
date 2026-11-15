@@ -568,7 +568,26 @@ enum Judge {
     NoLinuxTask,
 }
 
-fn cases() -> [Case; 27] {
+macro_rules! syscall_case {
+    ($id:literal, $sysno:expr, $a0:expr, $a1:expr, $a2:expr, $expect:expr) => {
+        Case {
+            id: $id,
+            op: OP_SYSCALL,
+            target: 0,
+            value: 0,
+            sysno: $sysno,
+            a0: $a0,
+            a1: $a1,
+            a2: $a2,
+            judge: Judge::Syscall($expect),
+        }
+    };
+}
+
+fn cases() -> [Case; 51] {
+    let enosys = errno_u64(38);
+    let eperm = errno_u64(1);
+    let einval = errno_u64(22);
     let magic = magic_address() as u64;
     let marker = security_case_exec_marker as *const () as u64;
     // QEMU virt identity addresses. The probe runs only on AArch64.
@@ -874,6 +893,30 @@ fn cases() -> [Case; 27] {
             a2: 0,
             judge: Judge::NoLinuxTask,
         },
+        syscall_case!("seccomp-strict", 277, 0, 0, 0, enosys),
+        syscall_case!("seccomp-filter", 277, 1, 0, 1, enosys),
+        syscall_case!("seccomp-action-avail", 277, 2, 0, 1, enosys),
+        syscall_case!("prctl-set-seccomp", 167, 22, 1, 0, einval),
+        syscall_case!("prctl-get-seccomp", 167, 21, 0, 0, 0),
+        syscall_case!("prctl-set-no-new-privs", 167, 38, 1, 0, 0),
+        syscall_case!("prctl-set-no-new-privs-bad", 167, 38, 2, 0, einval),
+        syscall_case!("prctl-get-no-new-privs", 167, 39, 0, 0, 0),
+        syscall_case!("prctl-capbset-drop", 167, 24, 0, 0, eperm),
+        syscall_case!("prctl-set-mdwe", 167, 65, 1, 0, einval),
+        syscall_case!("prctl-get-dumpable", 167, 3, 0, 0, 1),
+        syscall_case!("landlock-create", 444, 0, 0, 0, enosys),
+        syscall_case!("landlock-add", 445, 0, 0, 0, enosys),
+        syscall_case!("landlock-restrict", 446, 0, 0, 0, enosys),
+        syscall_case!("pkey-alloc", 289, 0, 0, 0, enosys),
+        syscall_case!("pkey-free", 290, 0, 0, 0, enosys),
+        syscall_case!("pkey-mprotect", 288, 0, 0, 0, enosys),
+        syscall_case!("iouring-setup", 425, 8, 0, 0, enosys),
+        syscall_case!("iouring-enter", 426, 0, 0, 0, enosys),
+        syscall_case!("iouring-register", 427, 0, 0, 0, enosys),
+        syscall_case!("ptrace-traceme", 117, 0, 0, 0, eperm),
+        syscall_case!("process-vm-readv", 270, 0, 0, 0, enosys),
+        syscall_case!("process-vm-writev", 271, 0, 0, 0, enosys),
+        syscall_case!("bpf", 280, 0, 0, 0, enosys),
     ]
 }
 
@@ -1203,8 +1246,8 @@ fn drop_foreign_space() {
 #[cfg(target_arch = "aarch64")]
 fn install_foreign_page() -> Result<(), u64> {
     use crate::kernel_lowlevel::memory::PageFrameAllocator;
-    let mut space = crate::kernel_lowlevel::Aarch64AddressSpace::new_with_kernel_map()
-        .map_err(|_| 4u64)?;
+    let mut space =
+        crate::kernel_lowlevel::Aarch64AddressSpace::new_with_kernel_map().map_err(|_| 4u64)?;
     let pfn = PageFrameAllocator::alloc().ok_or(5u64)?;
     let Some(phys) = PageFrameAllocator::pfn_address(pfn) else {
         PageFrameAllocator::free(pfn);
@@ -1238,9 +1281,8 @@ fn prepare_handle_case(pid: usize) -> Result<(), u64> {
     if prepare == PREPARE_NONE {
         return Ok(());
     }
-    let vmo_rights = crate::kernel_objects::default_rights_for_object(
-        crate::kernel_objects::ObjectType::Vmo,
-    );
+    let vmo_rights =
+        crate::kernel_objects::default_rights_for_object(crate::kernel_objects::ObjectType::Vmo);
     let handle = match prepare {
         PREPARE_LIVE_VMO => {
             crate::syscall::security_create_process_vmo(pid, vmo_rights).map_err(|_| 8u64)?
@@ -1519,8 +1561,8 @@ fn launch_orphan_el0() -> Result<(), u64> {
     #[cfg(target_arch = "aarch64")]
     {
         use crate::kernel_lowlevel::memory::PageFrameAllocator;
-        let mut space = crate::kernel_lowlevel::Aarch64AddressSpace::new_with_kernel_map()
-            .map_err(|_| 4u64)?;
+        let mut space =
+            crate::kernel_lowlevel::Aarch64AddressSpace::new_with_kernel_map().map_err(|_| 4u64)?;
         let code_pfn = PageFrameAllocator::alloc().ok_or(5u64)?;
         let Some(code_phys) = PageFrameAllocator::pfn_address(code_pfn) else {
             PageFrameAllocator::free(code_pfn);

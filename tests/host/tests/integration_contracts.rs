@@ -744,15 +744,14 @@ fn arm64_posix_mqueue_syscalls_are_real_handlers_not_compat_noops() {
     ] {
         assert!(dispatch.contains(route), "missing dispatch route {route}");
     }
-    let unsupported_start = dispatch
-        .find("ARM64_SYS_LOOKUP_DCOOKIE")
-        .expect("compatibility unsupported cluster");
-    let unsupported_end = dispatch[unsupported_start..]
-        .find("=> Ok(0)")
-        .expect("unsupported cluster end")
-        + unsupported_start;
-    let unsupported = &dispatch[unsupported_start..unsupported_end];
-    assert!(!unsupported.contains("ARM64_SYS_MQ_"));
+    assert!(
+        dispatch.contains("linux_audited_stub_result"),
+        "unimplemented table stubs are classified instead of a success cluster"
+    );
+    assert!(
+        !dispatch.contains("=> Ok(0)"),
+        "the Linux dispatcher must not return success from an unclassified stub"
+    );
 
     let close = braced_body(&syscall[syscall.find("pub fn sys_close(").expect("close syscall")..]);
     assert!(close.contains("Err(SysError::EBADF)"));

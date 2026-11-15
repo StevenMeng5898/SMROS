@@ -91,7 +91,10 @@ use crate::user_level::fxfs;
 
 #[path = "fuzz.rs"]
 mod fuzz;
-pub use fuzz::{fuzz_syscalls, fuzz_syscalls_with_config, POSIX_API_FUZZ_NAMES, SyscallFuzzConfig, SyscallFuzzReport};
+pub use fuzz::{
+    fuzz_syscalls, fuzz_syscalls_with_config, SyscallFuzzConfig, SyscallFuzzReport,
+    POSIX_API_FUZZ_NAMES,
+};
 
 // Re-export kernel objects for convenience
 pub use crate::kernel_objects::channel::{
@@ -2221,7 +2224,10 @@ impl MemorySyscallState {
         }
     }
 
-    fn process_handles_mut(&mut self, pid: usize) -> Option<&mut HandleNamespace<ProcessHandleObject>> {
+    fn process_handles_mut(
+        &mut self,
+        pid: usize,
+    ) -> Option<&mut HandleNamespace<ProcessHandleObject>> {
         self.process_resources_mut_if_exists(pid)
             .map(|resources| &mut resources.handles)
     }
@@ -2358,12 +2364,18 @@ impl MemorySyscallState {
         rights: u32,
     ) -> ZxResult<u32> {
         let record = self.handle_record(handle).ok_or(ZxError::ErrBadHandle)?;
-        authorize_handle_use(true, record.obj_type as u8, obj_type as u8, record.rights, rights)
-            .map_err(|error| match error {
-                HandleNamespaceError::WrongType => ZxError::ErrWrongType,
-                HandleNamespaceError::AccessDenied => ZxError::ErrAccessDenied,
-                _ => ZxError::ErrBadHandle,
-            })?;
+        authorize_handle_use(
+            true,
+            record.obj_type as u8,
+            obj_type as u8,
+            record.rights,
+            rights,
+        )
+        .map_err(|error| match error {
+            HandleNamespaceError::WrongType => ZxError::ErrWrongType,
+            HandleNamespaceError::AccessDenied => ZxError::ErrAccessDenied,
+            _ => ZxError::ErrBadHandle,
+        })?;
         Ok(record.object_handle)
     }
 
@@ -2536,9 +2548,7 @@ impl MemorySyscallState {
     }
 
     fn transfer_within_pid(&mut self, pid: usize, handles: &[u32]) -> ZxResult<Vec<u32>> {
-        let table = self
-            .process_handles_mut(pid)
-            .ok_or(ZxError::ErrBadHandle)?;
+        let table = self.process_handles_mut(pid).ok_or(ZxError::ErrBadHandle)?;
         table
             .transfer_within(handles, process_object_id, Self::reborn_process_object)
             .map_err(namespace_error)
@@ -3976,7 +3986,10 @@ impl MemorySyscallState {
                 }
             }
             ObjectType::Thread => {
-                if let Some(index) = self.threads.iter().position(|record| record.handle == object)
+                if let Some(index) = self
+                    .threads
+                    .iter()
+                    .position(|record| record.handle == object)
                 {
                     self.threads.swap_remove(index);
                 }
@@ -6080,7 +6093,9 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> LinuxSignalDe
     let mut default_stopped = false;
     // Another thread in this process may already have stopped the group.
     // Do not return to userspace until SIGCONT resumes it.
-    if linux_process::current().ok().is_some_and(|process| process.stopped)
+    if linux_process::current()
+        .ok()
+        .is_some_and(|process| process.stopped)
         && linux_task::block_current(LinuxBlockReason::Stopped).is_ok()
     {
         scheduler::schedule();
@@ -6136,33 +6151,33 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> LinuxSignalDe
                 return LinuxSignalDeliveryOutcome::Idle;
             }
             linux_process::LinuxSignalDeliveryRoute::Handle => {
-            // SIG_DFL is not a user handler. Killing the process for that
-            // reason is only valid for a catchable signal whose default
-            // action is termination. SIGSTOP must stop, and SIGCONT must
-            // continue; neither may become WIFSIGNALED.
-            if !linux_user_handler_executable(action.handler) {
-                if linux_task::linux_nonexecutable_handler_terminates(signum) {
-                    if commit_linux_signal(deliverable).is_err() {
-                        return LinuxSignalDeliveryOutcome::Idle;
-                    }
-                    if let Ok(current) = linux_task::current_task() {
-                        if terminate_linux_process_by_signal(current.tgid, signum).is_ok() {
+                // SIG_DFL is not a user handler. Killing the process for that
+                // reason is only valid for a catchable signal whose default
+                // action is termination. SIGSTOP must stop, and SIGCONT must
+                // continue; neither may become WIFSIGNALED.
+                if !linux_user_handler_executable(action.handler) {
+                    if linux_task::linux_nonexecutable_handler_terminates(signum) {
+                        if commit_linux_signal(deliverable).is_err() {
                             return LinuxSignalDeliveryOutcome::Idle;
                         }
-                    }
-                    return LinuxSignalDeliveryOutcome::Idle;
-                }
-                if !matches!(
-                    disposition,
-                    LinuxSignalDisposition::Stop | LinuxSignalDisposition::Continue
-                ) {
-                    if commit_linux_signal(deliverable).is_err() {
+                        if let Ok(current) = linux_task::current_task() {
+                            if terminate_linux_process_by_signal(current.tgid, signum).is_ok() {
+                                return LinuxSignalDeliveryOutcome::Idle;
+                            }
+                        }
                         return LinuxSignalDeliveryOutcome::Idle;
                     }
-                    continue;
+                    if !matches!(
+                        disposition,
+                        LinuxSignalDisposition::Stop | LinuxSignalDisposition::Continue
+                    ) {
+                        if commit_linux_signal(deliverable).is_err() {
+                            return LinuxSignalDeliveryOutcome::Idle;
+                        }
+                        continue;
+                    }
                 }
             }
-        }
         }
         match disposition {
             LinuxSignalDisposition::Stop => {
@@ -7018,7 +7033,6 @@ pub fn sys_mremap(
         flags & MREMAP_DONTUNMAP != 0,
     )
 }
-
 
 pub(crate) fn linux_fd_write_bytes(fd: usize, buf: &[u8]) -> SysResult {
     match fd {
@@ -7902,8 +7916,7 @@ fn linux_sleep_until(wait: LinuxSleepWait, rem: usize) -> SysResult {
     let now = crate::kernel_lowlevel::timer::get_tick_count();
     crate::user_level::services::posix_test::poll_timeout(now);
     if linux_task::root_timeout_armed()
-        && linux_task::current_task()
-            .is_ok_and(|task| task.tgid == linux_process::LINUX_ROOT_PID)
+        && linux_task::current_task().is_ok_and(|task| task.tgid == linux_process::LINUX_ROOT_PID)
     {
         return Err(SysError::EINTR);
     }
@@ -7991,7 +8004,6 @@ fn linux_sleep_until(wait: LinuxSleepWait, rem: usize) -> SysResult {
         }
     }
 }
-
 
 fn linux_high_resolution_relative_sleep_until(deadline: u64, rem: usize) -> SysResult {
     if rem != 0 && !linux_sleep_user_range_writable(rem, core::mem::size_of::<LinuxTimespec>()) {
@@ -8336,8 +8348,7 @@ fn linux_epoll_reset() {
 }
 
 fn linux_epoll_find_set(sets: &[LinuxEpollSet], epfd: usize) -> Option<usize> {
-    sets.iter()
-        .position(|set| set.used && set.epfd == epfd)
+    sets.iter().position(|set| set.used && set.epfd == epfd)
 }
 
 fn linux_epoll_alloc_set(epfd: usize) -> Result<usize, SysError> {
@@ -8396,7 +8407,10 @@ fn linux_read_user_epoll_event(address: usize) -> Result<(u32, u64), SysError> {
     events_bytes.copy_from_slice(&bytes[0..4]);
     let mut data_bytes = [0u8; 8];
     data_bytes.copy_from_slice(&bytes[8..16]);
-    Ok((u32::from_ne_bytes(events_bytes), u64::from_ne_bytes(data_bytes)))
+    Ok((
+        u32::from_ne_bytes(events_bytes),
+        u64::from_ne_bytes(data_bytes),
+    ))
 }
 
 fn linux_write_user_epoll_event(address: usize, events: u32, data: u64) -> Result<(), SysError> {
@@ -8445,7 +8459,9 @@ pub fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event: usize) -> SysResu
     let sets = linux_epoll_sets();
     let set_index = linux_epoll_find_set(sets, epfd).ok_or(SysError::EINVAL)?;
     let set = &mut sets[set_index];
-    let existing = set.items[..set.count].iter().position(|item| item.fd == fd as i32);
+    let existing = set.items[..set.count]
+        .iter()
+        .position(|item| item.fd == fd as i32);
     match op {
         LINUX_EPOLL_CTL_ADD => {
             if existing.is_some() {
@@ -11713,7 +11729,10 @@ pub fn sys_vmo_create(size: u64, options: u32, out_handle: &mut u32) -> ZxResult
         .map(|record| record.object_handle)
         .unwrap_or(handle);
     vmo.handle = HandleValue(object);
-    state.vmos.push(VmoRecord { handle: object, vmo });
+    state.vmos.push(VmoRecord {
+        handle: object,
+        vmo,
+    });
     *out_handle = handle;
     Ok(())
 }
@@ -11733,7 +11752,10 @@ pub fn sys_vmo_create_sparse(size: usize, out_handle: &mut u32) -> ZxResult {
         .map(|record| record.object_handle)
         .unwrap_or(handle);
     vmo.handle = HandleValue(object);
-    state.vmos.push(VmoRecord { handle: object, vmo });
+    state.vmos.push(VmoRecord {
+        handle: object,
+        vmo,
+    });
     *out_handle = handle;
     Ok(())
 }
@@ -11944,7 +11966,10 @@ pub fn sys_vmo_create_contiguous(
         .map(|record| record.object_handle)
         .unwrap_or(handle);
     vmo.handle = HandleValue(object);
-    state.vmos.push(VmoRecord { handle: object, vmo });
+    state.vmos.push(VmoRecord {
+        handle: object,
+        vmo,
+    });
     *out_handle = handle;
     Ok(())
 }
@@ -13103,7 +13128,9 @@ pub fn sys_kill(pid: isize, signum: usize) -> SysResult {
 pub fn sys_set_tid_address(tidptr: usize) -> SysResult {
     match linux_task::set_current_clear_child_tid(tidptr) {
         Ok(tid) => Ok(tid),
-        Err(SysError::ESRCH) if crate::syscall::uaccess::el0_syscall_active() => Err(SysError::ESRCH),
+        Err(SysError::ESRCH) if crate::syscall::uaccess::el0_syscall_active() => {
+            Err(SysError::ESRCH)
+        }
         Err(SysError::ESRCH) => Ok(linux_process::LINUX_ROOT_PID),
         Err(error) => Err(error),
     }
@@ -13287,19 +13314,14 @@ pub fn sys_prctl(
     _arg4: usize,
     _arg5: usize,
 ) -> SysResult {
-    const PR_SET_NO_NEW_PRIVS: usize = 38;
-    const PR_GET_NO_NEW_PRIVS: usize = 39;
-    const PR_SET_SECCOMP: usize = 22;
-    const PR_GET_SECCOMP: usize = 21;
-    const PR_SET_NAME: usize = 15;
-    const PR_GET_NAME: usize = 16;
-    const PR_CAPBSET_READ: usize = 23;
-    const PR_CAPBSET_DROP: usize = 24;
-    const PR_SET_DUMPABLE: usize = 4;
-    const PR_GET_DUMPABLE: usize = 3;
+    use syscall_logic::{linux_prctl_decision, linux_prctl_reject_errno, LinuxPrctlDecision};
 
-    match option {
-        PR_SET_NO_NEW_PRIVS => {
+    let decision = linux_prctl_decision(option);
+    if let Some(errno) = linux_prctl_reject_errno(decision) {
+        return linux_errno_result(errno);
+    }
+    match decision {
+        LinuxPrctlDecision::SetNoNewPrivs => {
             if arg2 > 1 {
                 return Err(SysError::EINVAL);
             }
@@ -13309,27 +13331,30 @@ pub fn sys_prctl(
                 .no_new_privs = arg2 != 0;
             Ok(0)
         }
-        PR_GET_NO_NEW_PRIVS => Ok(linux_container_stats().no_new_privs as usize),
-        PR_SET_SECCOMP => sys_seccomp_mode(arg2, 0),
-        PR_GET_SECCOMP => Ok(linux_container_stats().seccomp_mode),
-        PR_SET_NAME => {
+        LinuxPrctlDecision::GetNoNewPrivs => Ok(linux_container_stats().no_new_privs as usize),
+        // The mode stays disabled. A query must not report a filter that was never installed.
+        LinuxPrctlDecision::GetSeccomp => Ok(linux_container_stats().seccomp_mode),
+        LinuxPrctlDecision::SetName => {
             if arg2 == 0 {
                 Err(SysError::EFAULT)
             } else {
                 Ok(0)
             }
         }
-        PR_GET_NAME => linux_write_cstr(arg2, 16, b"smros-docker").map(|_| 0),
-        PR_CAPBSET_READ => {
+        LinuxPrctlDecision::GetName => linux_write_cstr(arg2, 16, b"smros-docker").map(|_| 0),
+        LinuxPrctlDecision::CapbsetRead => {
             if arg2 > LINUX_CAP_LAST_CAP as usize {
                 Err(SysError::EINVAL)
             } else {
                 Ok(1)
             }
         }
-        PR_CAPBSET_DROP | PR_SET_DUMPABLE => Ok(0),
-        PR_GET_DUMPABLE => Ok(1),
-        _ => Ok(0),
+        // Dumpable stays at the Linux default. SET is rejected above.
+        LinuxPrctlDecision::GetDumpable => Ok(1),
+        LinuxPrctlDecision::SetSeccomp
+        | LinuxPrctlDecision::CapbsetDrop
+        | LinuxPrctlDecision::SetDumpable
+        | LinuxPrctlDecision::Reject => Err(SysError::EINVAL),
     }
 }
 
@@ -13439,58 +13464,10 @@ pub fn sys_setns(fd: usize, nstype: usize) -> SysResult {
     Ok(0)
 }
 
-fn sys_seccomp_mode(mode: usize, _filter: usize) -> SysResult {
-    match mode {
-        LINUX_SECCOMP_MODE_STRICT => {
-            memory_state()
-                .process_resources_mut(linux_resource_pid()?)
-                .container
-                .seccomp_mode = LINUX_SECCOMP_MODE_STRICT;
-            Ok(0)
-        }
-        LINUX_SECCOMP_MODE_FILTER => {
-            let container = &mut memory_state()
-                .process_resources_mut(linux_resource_pid()?)
-                .container;
-            container.seccomp_mode = LINUX_SECCOMP_MODE_FILTER;
-            container.seccomp_filters = container.seccomp_filters.saturating_add(1);
-            Ok(0)
-        }
-        _ => Err(SysError::EINVAL),
-    }
-}
-
-pub fn sys_seccomp(operation: usize, flags: usize, args: usize) -> SysResult {
-    match operation {
-        LINUX_SECCOMP_SET_MODE_STRICT => {
-            if flags != 0 {
-                Err(SysError::EINVAL)
-            } else {
-                sys_seccomp_mode(LINUX_SECCOMP_MODE_STRICT, args)
-            }
-        }
-        LINUX_SECCOMP_SET_MODE_FILTER => {
-            if flags & !LINUX_SECCOMP_FILTER_ALLOWED_FLAGS != 0 {
-                Err(SysError::EINVAL)
-            } else {
-                sys_seccomp_mode(LINUX_SECCOMP_MODE_FILTER, args)
-            }
-        }
-        LINUX_SECCOMP_GET_ACTION_AVAIL => {
-            if args == 0 {
-                Err(SysError::EFAULT)
-            } else {
-                Ok(0)
-            }
-        }
-        LINUX_SECCOMP_GET_NOTIF_SIZES => {
-            if args == 0 {
-                return Err(SysError::EFAULT);
-            }
-            linux_zero_user(args, 6)
-        }
-        _ => Err(SysError::EINVAL),
-    }
+pub fn sys_seccomp(_operation: usize, _flags: usize, _args: usize) -> SysResult {
+    // seccomp(2): ENOSYS when the kernel has no seccomp implementation.
+    // Do not record a mode or report that an action is available.
+    Err(SysError::ENOSYS)
 }
 
 pub fn sys_statx(
@@ -13877,7 +13854,9 @@ pub fn sys_process_read_memory(
 
     if len != 0 {
         let mut zeros = Vec::new();
-        zeros.try_reserve_exact(len).map_err(|_| ZxError::ErrNoMemory)?;
+        zeros
+            .try_reserve_exact(len)
+            .map_err(|_| ZxError::ErrNoMemory)?;
         zeros.resize(len, 0);
         zx_write_bytes(buffer, &zeros)?;
     }
@@ -14085,7 +14064,10 @@ pub fn sys_handle_close_many(handles_ptr: usize, num_handles: usize) -> ZxResult
         return Err(ZxError::ErrInvalidArgs);
     }
 
-    let bytes = zx_read_bytes(handles_ptr, num_handles.saturating_mul(core::mem::size_of::<u32>()))?;
+    let bytes = zx_read_bytes(
+        handles_ptr,
+        num_handles.saturating_mul(core::mem::size_of::<u32>()),
+    )?;
     if bytes.len() != num_handles * core::mem::size_of::<u32>() {
         return Err(ZxError::ErrInvalidArgs);
     }
@@ -14222,7 +14204,9 @@ pub fn sys_object_wait_many(items_ptr: usize, count: usize, deadline: u64) -> Zx
         return Ok(());
     }
     let mut items = Vec::new();
-    items.try_reserve_exact(count).map_err(|_| ZxError::ErrNoMemory)?;
+    items
+        .try_reserve_exact(count)
+        .map_err(|_| ZxError::ErrNoMemory)?;
     for index in 0..count {
         let address = items_ptr
             .checked_add(index * core::mem::size_of::<ZxWaitItem>())
@@ -14544,7 +14528,8 @@ pub fn sys_socket_read(
     out_actual: &mut usize,
 ) -> ZxResult {
     let mut out = Vec::new();
-    out.try_reserve_exact(len).map_err(|_| ZxError::ErrNoMemory)?;
+    out.try_reserve_exact(len)
+        .map_err(|_| ZxError::ErrNoMemory)?;
     out.resize(len, 0);
     *out_actual = socket::socket_table().read(HandleValue(handle), options, &mut out)?;
     if *out_actual != 0 {
@@ -14607,7 +14592,8 @@ pub fn sys_fifo_read(
         return Err(ZxError::ErrInvalidArgs);
     }
     let mut out = Vec::new();
-    out.try_reserve_exact(byte_len).map_err(|_| ZxError::ErrNoMemory)?;
+    out.try_reserve_exact(byte_len)
+        .map_err(|_| ZxError::ErrNoMemory)?;
     out.resize(byte_len, 0);
     *out_actual = fifo::fifo_table().read(HandleValue(handle), elem_size, &mut out)?;
     let written = (*out_actual).saturating_mul(elem_size);
@@ -14745,7 +14731,8 @@ pub fn sys_debuglog_read(handle: u32, options: u32, buffer: usize, len: usize) -
         return Err(ZxError::ErrInvalidArgs);
     }
     let mut out = Vec::new();
-    out.try_reserve_exact(len).map_err(|_| ZxError::ErrNoMemory)?;
+    out.try_reserve_exact(len)
+        .map_err(|_| ZxError::ErrNoMemory)?;
     out.resize(len, 0);
     let read = compat::table().read_bytes(HandleValue(handle), &mut out)?;
     if read != 0 {
@@ -14779,7 +14766,8 @@ pub fn sys_cprng_draw_once(buffer: usize, len: usize) -> ZxResult {
     }
     let seed = monotonic_nanos() as u8;
     let mut out = Vec::new();
-    out.try_reserve_exact(len).map_err(|_| ZxError::ErrNoMemory)?;
+    out.try_reserve_exact(len)
+        .map_err(|_| ZxError::ErrNoMemory)?;
     for index in 0..len {
         out.push(
             seed.wrapping_add((index as u8).wrapping_mul(17))
@@ -14800,7 +14788,9 @@ pub fn sys_cprng_add_entropy(buffer: usize, len: usize) -> ZxResult {
 pub fn sys_debug_read(buffer: usize, len: usize) -> ZxResult<usize> {
     if len != 0 {
         let mut zeros = Vec::new();
-        zeros.try_reserve_exact(len).map_err(|_| ZxError::ErrNoMemory)?;
+        zeros
+            .try_reserve_exact(len)
+            .map_err(|_| ZxError::ErrNoMemory)?;
         zeros.resize(len, 0);
         zx_write_bytes(buffer, &zeros)?;
     }
@@ -16218,73 +16208,38 @@ pub enum ZirconSyscall {
 // Syscall Dispatcher
 // ============================================================================
 
+fn linux_errno_result(errno: i32) -> SysResult {
+    match errno {
+        1 => Err(SysError::EPERM),
+        22 => Err(SysError::EINVAL),
+        _ => Err(SysError::ENOSYS),
+    }
+}
+
+fn sys_personality(persona: usize) -> SysResult {
+    match syscall_logic::linux_personality_errno(persona as u32) {
+        Some(errno) => linux_errno_result(errno),
+        None => Ok(0),
+    }
+}
+
+/// Audited table stubs. Security entries fail closed. Harmless and uncertain
+/// entries still return 0; an unclassified number in this path is ENOSYS.
+fn linux_audited_stub_result(syscall_num: u32) -> SysResult {
+    match syscall_logic::linux_audited_stub(syscall_num) {
+        Some(syscall_logic::LinuxAuditedStub::FailClosed(errno)) => linux_errno_result(errno),
+        // personality(2) is dispatched with its argument. Reaching here means
+        // the persona was not checked, so refuse it.
+        Some(syscall_logic::LinuxAuditedStub::Personality) => Err(SysError::EINVAL),
+        Some(syscall_logic::LinuxAuditedStub::Harmless)
+        | Some(syscall_logic::LinuxAuditedStub::Uncertain) => Ok(0),
+        None => Err(SysError::ENOSYS),
+    }
+}
+
 /// Dispatch a Linux syscall
 pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
     let result = match syscall_num {
-        ARM64_SYS_IO_SETUP
-        | ARM64_SYS_IO_DESTROY
-        | ARM64_SYS_IO_SUBMIT
-        | ARM64_SYS_IO_CANCEL
-        | ARM64_SYS_IO_GETEVENTS => Ok(0),
-        ARM64_SYS_LOOKUP_DCOOKIE
-        | ARM64_SYS_IOPRIO_SET
-        | ARM64_SYS_IOPRIO_GET
-        | ARM64_SYS_VHANGUP
-        | ARM64_SYS_ACCT
-        | ARM64_SYS_PERSONALITY
-        | ARM64_SYS_KEXEC_LOAD
-        | ARM64_SYS_INIT_MODULE
-        | ARM64_SYS_DELETE_MODULE
-        | ARM64_SYS_SYSLOG
-        | ARM64_SYS_PTRACE
-        | ARM64_SYS_RESTART_SYSCALL
-        | ARM64_SYS_REBOOT
-        | ARM64_SYS_SETTIMEOFDAY
-        | ARM64_SYS_ADJTIMEX
-        | ARM64_SYS_ADD_KEY
-        | ARM64_SYS_REQUEST_KEY
-        | ARM64_SYS_KEYCTL
-        | ARM64_SYS_SWAPON
-        | ARM64_SYS_SWAPOFF
-        | ARM64_SYS_MBIND
-        | ARM64_SYS_GET_MEMPOLICY
-        | ARM64_SYS_SET_MEMPOLICY
-        | ARM64_SYS_MIGRATE_PAGES
-        | ARM64_SYS_MOVE_PAGES
-        | ARM64_SYS_PERF_EVENT_OPEN
-        | ARM64_SYS_FANOTIFY_INIT
-        | ARM64_SYS_FANOTIFY_MARK
-        | ARM64_SYS_NAME_TO_HANDLE_AT
-        | ARM64_SYS_OPEN_BY_HANDLE_AT
-        | ARM64_SYS_CLOCK_ADJTIME
-        | ARM64_SYS_SYNCFS
-        | ARM64_SYS_SENDMMSG
-        | ARM64_SYS_PROCESS_VM_READV
-        | ARM64_SYS_PROCESS_VM_WRITEV
-        | ARM64_SYS_KCMP
-        | ARM64_SYS_FINIT_MODULE
-        | ARM64_SYS_SCHED_SETATTR
-        | ARM64_SYS_SCHED_GETATTR
-        | ARM64_SYS_BPF
-        | ARM64_SYS_EXECVEAT
-        | ARM64_SYS_USERFAULTFD
-        | ARM64_SYS_MLOCK2
-        | ARM64_SYS_PKEY_MPROTECT
-        | ARM64_SYS_PKEY_ALLOC
-        | ARM64_SYS_PKEY_FREE
-        | ARM64_SYS_IO_PGETEVENTS
-        | ARM64_SYS_KEXEC_FILE_LOAD
-        | ARM64_SYS_PIDFD_SEND_SIGNAL
-        | ARM64_SYS_IO_URING_SETUP
-        | ARM64_SYS_IO_URING_ENTER
-        | ARM64_SYS_IO_URING_REGISTER
-        | ARM64_SYS_FSPICK
-        | ARM64_SYS_PIDFD_GETFD
-        | ARM64_SYS_PROCESS_MADVISE
-        | ARM64_SYS_LANDLOCK_CREATE_RULESET
-        | ARM64_SYS_LANDLOCK_ADD_RULE
-        | ARM64_SYS_LANDLOCK_RESTRICT_SELF => Ok(0),
-        ARM64_SYS_RSEQ => Ok(0),
         ARM64_SYS_SETXATTR | ARM64_SYS_LSETXATTR => {
             sys_xattr_path(args[0], args[1], args[2], args[3])
         }
@@ -16322,7 +16277,6 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_UMOUNT2 => sys_umount2(args[0], args[1]),
         ARM64_SYS_MOUNT => sys_mount(args[0], args[1], args[2], args[3], args[4]),
         ARM64_SYS_PIVOT_ROOT => sys_pivot_root(args[0], args[1]),
-        ARM64_SYS_NFSSERVCTL => Ok(0),
         ARM64_SYS_STATFS => sys_statfs(args[0], args[1]),
         ARM64_SYS_FSTATFS => sys_fstatfs(args[0], args[1]),
         ARM64_SYS_TRUNCATE => sys_truncate(args[0], args[1]),
@@ -16485,7 +16439,6 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_MUNLOCKALL => sys_munlockall(),
         ARM64_SYS_MINCORE => sys_mincore(args[0], args[1], args[2]),
         ARM64_SYS_MADVISE => sys_madvise(args[0], args[1], args[2]),
-        ARM64_SYS_REMAP_FILE_PAGES => Ok(0),
         ARM64_SYS_WAIT4 => sys_wait4(args[0] as i32, args[1], args[2] as u32),
         ARM64_SYS_PRLIMIT64 => sys_prlimit64(args[0], args[1], args[2], args[3]),
         ARM64_SYS_GETRANDOM => sys_getrandom(args[0], args[1], args[2] as u32),
@@ -16495,14 +16448,6 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_CAPGET => sys_capget(args[0], args[1]),
         ARM64_SYS_CAPSET => sys_capset(args[0], args[1]),
         ARM64_SYS_SETNS => sys_setns(args[0], args[1]),
-        ARM64_SYS_QUOTACTL
-        | ARM64_SYS_OPEN_TREE
-        | ARM64_SYS_MOVE_MOUNT
-        | ARM64_SYS_FSOPEN
-        | ARM64_SYS_FSCONFIG
-        | ARM64_SYS_FSMOUNT
-        | ARM64_SYS_PIDFD_OPEN
-        | ARM64_SYS_MOUNT_SETATTR => Ok(0),
         ARM64_SYS_COPY_FILE_RANGE => {
             sys_copy_file_range(args[0], args[1], args[2], args[3], args[4], args[5])
         }
@@ -16536,9 +16481,15 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_GETCPU => sys_getcpu(args[0], args[1], args[2]),
         num if num == LinuxSyscall::Fork as u32 => sys_fork(),
         num if num == LinuxSyscall::Vfork as u32 => sys_vfork(),
+        num if syscall_logic::linux_audited_stub(num)
+            == Some(syscall_logic::LinuxAuditedStub::Personality) =>
+        {
+            sys_personality(args[0])
+        }
+        num if syscall_logic::linux_audited_stub(num).is_some() => linux_audited_stub_result(num),
         num if syscall_logic::linux_syscall_interface_known(num) => {
-            warn!("Compatibility Linux syscall interface: {}", syscall_num);
-            Ok(0)
+            warn!("Unimplemented Linux syscall interface: {}", syscall_num);
+            Err(SysError::ENOSYS)
         }
         _ => {
             warn!("Unimplemented Linux syscall: {}", syscall_num);
@@ -16713,7 +16664,8 @@ pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<u
                 sys_vmo_read(args[0] as u32, &mut [], args[3] as u64)
             } else {
                 let mut buf = Vec::new();
-                buf.try_reserve_exact(args[2]).map_err(|_| ZxError::ErrNoMemory)?;
+                buf.try_reserve_exact(args[2])
+                    .map_err(|_| ZxError::ErrNoMemory)?;
                 buf.resize(args[2], 0);
                 let read = sys_vmo_read(args[0] as u32, &mut buf, args[3] as u64)?;
                 zx_write_bytes(args[1], &buf[..read])?;
