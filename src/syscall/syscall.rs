@@ -7630,6 +7630,28 @@ fn linux_user_buffer_writable(address: usize, len: usize) -> bool {
     true
 }
 
+/// A buffer that can be copied without taking a fatal kernel fault.
+///
+/// On a kernel thread with no Linux process, any non-null pointer otherwise
+/// looks like a resident kernel buffer. Fuzzed pointers such as `3` are not
+/// mapped. Only the registered dispatch arena, or a real user mapping, is
+/// copied.
+fn linux_copy_range_is_resident(address: usize, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    if address == 0 || address.checked_add(len).is_none() {
+        return false;
+    }
+    if linux_task::kernel_dispatch_range_contains(address, len) {
+        return true;
+    }
+    if linux_process::current_pid().is_err() {
+        return false;
+    }
+    linux_user_buffer_writable(address, len)
+}
+
 fn linux_zero_user(ptr: usize, len: usize) -> SysResult {
     if !syscall_logic::user_buffer_valid(ptr, len) {
         return Err(SysError::EFAULT);
@@ -10079,7 +10101,7 @@ pub fn sys_sendmmsg(sockfd: usize, msgvec: usize, vlen: usize, flags: usize) -> 
         let entry = msgvec
             .checked_add(index * LINUX_MMSGHDR_BYTES)
             .ok_or(SysError::EFAULT)?;
-        if !linux_user_buffer_writable(entry, LINUX_MMSGHDR_BYTES) {
+        if !linux_copy_range_is_resident(entry, LINUX_MMSGHDR_BYTES) {
             if sent == 0 {
                 return Err(SysError::EFAULT);
             }
@@ -11243,7 +11265,7 @@ pub fn sys_sched_getattr(pid: usize, attr: usize, size: usize, flags: usize) -> 
     if let Some(errno) = syscall_logic::linux_sched_getattr_reject(pid, attr, size, flags) {
         return linux_errno_result(errno);
     }
-    if !linux_user_buffer_writable(attr, size) {
+    if !linux_copy_range_is_resident(attr, size) {
         return Err(SysError::EFAULT);
     }
     let pid = (pid as u32) as usize;
@@ -11688,7 +11710,7 @@ fn linux_timex_unsynchronized(modes: u32, realtime_nanos: u64) -> [u8; LINUX_TIM
 }
 
 fn sys_adjtimex_common(clock_id: usize, tx: usize) -> SysResult {
-    if tx == 0 || !linux_user_buffer_writable(tx, LINUX_TIMEX_BYTES) {
+    if tx == 0 || !linux_copy_range_is_resident(tx, LINUX_TIMEX_BYTES) {
         return Err(SysError::EFAULT);
     }
     if let Some(errno) = syscall_logic::linux_clock_adjtime_reject(clock_id) {
@@ -11717,12 +11739,18 @@ pub fn sys_settimeofday(tv: usize, tz: usize) -> SysResult {
         return Ok(0);
     }
     if tv != 0 {
+        if !linux_copy_range_is_resident(tv, core::mem::size_of::<LinuxTimeval>()) {
+            return Err(SysError::EFAULT);
+        }
         let requested = linux_read_user_timeval(tv)?;
         if requested.tv_sec < 0 || !(0..1_000_000).contains(&requested.tv_usec) {
             return Err(SysError::EINVAL);
         }
     }
     if tz != 0 {
+        if !linux_copy_range_is_resident(tz, 8) {
+            return Err(SysError::EFAULT);
+        }
         let mut zone = [0u8; 8];
         linux_copy_from_user(tz, &mut zone)?;
     }
