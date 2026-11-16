@@ -744,7 +744,7 @@ pub(crate) fn block_current(reason: LinuxBlockReason) -> Result<LinuxTaskCore, S
                         .note_signal_wait(scheduler_thread.0)
                 });
                 if held {
-                    crate::kobj_info!(
+                    crate::kobj_debug!(
                         "posix-timer",
                         "notify-gate clear reason=sigwait thread={}",
                         scheduler_thread.0
@@ -918,7 +918,7 @@ fn retire_tasks(scope: LinuxTaskRetirementScope) -> (Vec<LinuxChildExitTransitio
         (retired_count, process_empty)
     });
     for thread in notify_gate_cleared {
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-timer",
             "notify-gate clear reason=exit thread={}",
             thread
@@ -1036,7 +1036,7 @@ fn note_timer_notify_deferral(now_tick: u64) -> bool {
         (cleared, not_before, held_before)
     });
     if !held_before {
-        crate::kobj_info!(
+        crate::kobj_debug!(
             "posix-timer",
             "notify-gate defer sleep now_tick={} gate_ns={}",
             now_tick,
@@ -1044,7 +1044,7 @@ fn note_timer_notify_deferral(now_tick: u64) -> bool {
         );
     }
     if cleared {
-        crate::kobj_info!("posix-timer", "notify-gate clear reason=cap");
+        crate::kobj_debug!("posix-timer", "notify-gate clear reason=cap");
     }
     cleared
 }
