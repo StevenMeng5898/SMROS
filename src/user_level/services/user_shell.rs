@@ -5545,15 +5545,24 @@ fn run_hermes_posixtest_phase(
             ..HermesPosixPhase::legacy()
         };
     }
-    let status = posix_test::status_snapshot();
+    // finish_suite drops the runner slot before the shell observes completion,
+    // so status_snapshot is empty. last_completed keeps the final counts.
+    let Some(done) = posix_test::last_completed() else {
+        ctx.serial
+            .write_str("Hermes test-all phase posixtest missing final counts\n");
+        return HermesPosixPhase {
+            disposition: HermesSuiteDisposition::Done,
+            ..HermesPosixPhase::legacy()
+        };
+    };
     let phase = HermesPosixPhase {
         disposition: HermesSuiteDisposition::Done,
-        selected: status.selected,
-        passed: status.status_counts.passed,
-        failed: status.status_counts.failed,
-        unresolved: status.status_counts.unresolved,
-        timeouts: status.status_counts.timeouts,
-        launch_errors: status.status_counts.launch_errors,
+        selected: done.selected,
+        passed: done.passed,
+        failed: done.failed,
+        unresolved: done.unresolved,
+        timeouts: done.timeouts,
+        launch_errors: done.launch_errors,
     };
     ctx.serial.write_str("Hermes phase posixtest ");
     print_hermes_posix_counts(ctx, &phase);
