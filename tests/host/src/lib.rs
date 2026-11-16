@@ -1874,6 +1874,30 @@ mod linux_mqueue_logic {
     }
 
     #[test]
+    fn named_queue_outlives_last_handle_close_until_unlinked() {
+        let mut state = LinuxMqueueState::<4, 8, 4>::new();
+        state
+            .open("/smros-mq", 101, true, false, Some(attr(2, 8)))
+            .unwrap();
+        state.send(101, b"keep", 1).unwrap();
+
+        assert!(state.close_handle(101));
+        assert_eq!(state.getattr(101, 0), Err(LinuxMqueueError::BadDescriptor));
+
+        let reopened = state.open("/smros-mq", 202, false, false, None).unwrap();
+        assert!(!reopened.created);
+        assert_eq!(state.getattr(202, 0).unwrap().curmsgs, 1);
+        assert_eq!(state.receive(202, 8).unwrap().message.bytes, b"keep");
+
+        state.unlink("/smros-mq").unwrap();
+        assert!(state.close_handle(202));
+        assert_eq!(
+            state.open("/smros-mq", 303, false, false, None),
+            Err(LinuxMqueueError::NotFound)
+        );
+    }
+
+    #[test]
     fn waiters_wake_by_operation_and_report_timeout_or_interrupt() {
         let mut state = LinuxMqueueState::<4, 8, 4>::new();
         state

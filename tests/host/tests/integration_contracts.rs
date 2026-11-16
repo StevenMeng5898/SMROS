@@ -529,6 +529,16 @@ fn linux_record_locks_follow_process_associated_lifecycle() {
         .find("release_open_description(entry.description_id)")
         .expect("open-description release");
     assert!(object_id < remove && remove < release_lock && release_lock < release_description);
+    let close_object = close_helper
+        .find("sys_handle_close(handle)")
+        .expect("compatibility object close");
+    let forget_slot = close_helper
+        .find("forget_process_handle(owner, handle)")
+        .expect("process slot drop");
+    assert!(
+        release_description < close_object && close_object < forget_slot,
+        "closing a descriptor must destroy the compatibility object before dropping its process slot"
+    );
 
     let close_start = syscall.find("pub fn sys_close(").expect("close syscall");
     let close = braced_body(&syscall[close_start..]);
@@ -9331,6 +9341,15 @@ fn linux_shm_open_honors_mode_umask_permissions_and_name_limits() {
     assert!(syscall.contains("linux_shm_check_unlink_permissions"));
     assert!(syscall.contains("SysError::ENAMETOOLONG"));
     assert!(!umask.contains("Ok(0o022)"));
+    let unlink = braced_body(
+        &syscall[syscall
+            .find("fn linux_shm_check_unlink_permissions(")
+            .expect("shm unlink permission check")..],
+    );
+    assert!(
+        unlink.contains("attrs.uid as usize == credentials.effective_uid"),
+        "the creator of a POSIX shm object must be able to unlink it"
+    );
 }
 
 #[test]
