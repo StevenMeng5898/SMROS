@@ -178,6 +178,41 @@ struct Tally {
     xpass: usize,
 }
 
+/// Counts from the latest `run` summary. Hermes reads this after `sectest all`
+/// without parsing serial text. Case bodies do not touch it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SectestSummary {
+    pub pass: usize,
+    pub fail: usize,
+    pub xfail: usize,
+    pub xpass: usize,
+    pub skipped: bool,
+}
+
+static SUMMARY_PASS: AtomicUsize = AtomicUsize::new(0);
+static SUMMARY_FAIL: AtomicUsize = AtomicUsize::new(0);
+static SUMMARY_XFAIL: AtomicUsize = AtomicUsize::new(0);
+static SUMMARY_XPASS: AtomicUsize = AtomicUsize::new(0);
+static SUMMARY_SKIPPED: AtomicBool = AtomicBool::new(false);
+
+fn publish_summary(tally: &Tally, skipped: bool) {
+    SUMMARY_PASS.store(tally.pass, Ordering::Relaxed);
+    SUMMARY_FAIL.store(tally.fail, Ordering::Relaxed);
+    SUMMARY_XFAIL.store(tally.xfail, Ordering::Relaxed);
+    SUMMARY_XPASS.store(tally.xpass, Ordering::Relaxed);
+    SUMMARY_SKIPPED.store(skipped, Ordering::Relaxed);
+}
+
+pub fn last_summary() -> SectestSummary {
+    SectestSummary {
+        pass: SUMMARY_PASS.load(Ordering::Relaxed),
+        fail: SUMMARY_FAIL.load(Ordering::Relaxed),
+        xfail: SUMMARY_XFAIL.load(Ordering::Relaxed),
+        xpass: SUMMARY_XPASS.load(Ordering::Relaxed),
+        skipped: SUMMARY_SKIPPED.load(Ordering::Relaxed),
+    }
+}
+
 impl Tally {
     const fn new() -> Self {
         Self {
@@ -314,9 +349,10 @@ fn snapshot_watch() {
 }
 
 pub fn run(serial: &mut Serial, which: &str) {
+    publish_summary(&Tally::new(), false);
     if !cfg!(target_arch = "aarch64") {
         serial.write_str("CASE sectest RESULT SKIP not-aarch64\n");
-        print_summary(serial, Tally::new());
+        print_summary(serial, Tally::new(), true);
         return;
     }
     match which {
@@ -342,7 +378,7 @@ pub fn run(serial: &mut Serial, which: &str) {
                 serial.write_str(" RESULT FAIL unknown-id\n");
                 let mut tally = Tally::new();
                 tally.add(Verdict::Fail);
-                print_summary(serial, tally);
+                print_summary(serial, tally, false);
             }
         }
     }
@@ -358,7 +394,7 @@ fn run_listed(serial: &mut Serial, _include_undef: bool) {
     record_kernel_case(serial, &mut tally, "heap-fork", run_heap_fork_case());
     record_kernel_case(serial, &mut tally, "elf-memsz", run_elf_memsz_case());
     serial.write_str("SEC-HEARTBEAT\n");
-    print_summary(serial, tally);
+    print_summary(serial, tally, false);
 }
 
 fn record_kernel_case(serial: &mut Serial, tally: &mut Tally, id: &str, pass: bool) {
@@ -376,7 +412,7 @@ fn run_heap_fork(serial: &mut Serial) {
     let mut tally = Tally::new();
     record_kernel_case(serial, &mut tally, "heap-fork", pass);
     serial.write_str("SEC-HEARTBEAT\n");
-    print_summary(serial, tally);
+    print_summary(serial, tally, false);
 }
 
 fn run_elf_memsz(serial: &mut Serial) {
@@ -384,7 +420,7 @@ fn run_elf_memsz(serial: &mut Serial) {
     let mut tally = Tally::new();
     record_kernel_case(serial, &mut tally, "elf-memsz", pass);
     serial.write_str("SEC-HEARTBEAT\n");
-    print_summary(serial, tally);
+    print_summary(serial, tally, false);
 }
 
 extern "C" fn heap_budget_thread() -> ! {
@@ -455,7 +491,7 @@ fn run_one(serial: &mut Serial, case: Case) {
     let mut tally = Tally::new();
     tally.add(finished.verdict);
     serial.write_str("SEC-HEARTBEAT\n");
-    print_summary(serial, tally);
+    print_summary(serial, tally, false);
 }
 
 fn print_case(serial: &mut Serial, id: &str, finished: &FinishedCase) {
@@ -481,7 +517,8 @@ fn print_case(serial: &mut Serial, id: &str, finished: &FinishedCase) {
     serial.write_str("\n");
 }
 
-fn print_summary(serial: &mut Serial, tally: Tally) {
+fn print_summary(serial: &mut Serial, tally: Tally, skipped: bool) {
+    publish_summary(&tally, skipped);
     serial.write_str("SECTEST SUMMARY pass=");
     write_usize(serial, tally.pass);
     serial.write_str(" fail=");

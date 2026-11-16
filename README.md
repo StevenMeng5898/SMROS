@@ -407,13 +407,15 @@ Hermes can execute explicitly allowlisted guest commands with `hermes exec`,
 or run a deterministic safe campaign with `hermes random`. Each campaign
 accepts any positive, platform-representable `iterations=<n>`, prints a replay
 seed, and writes its bounded report to `/data/hermes/tests/latest.log`.
-`hermes test-all` runs the native Hermes test once and then runs one random
+`hermes test-all` runs the native Hermes test once, then `posixtest all` and
+`sectest all` once, and then runs one random
 guest operation plus each host job once per iteration: `make ut` and
 `make it`. It does not run ST/SKT, because the guest cannot boot another
 SMROS from the command line. `mode=syscall` keeps those host jobs and selects the focused guest
 catalog of `testsc`, bounded `fuzzsc`, POSIX canaries, and `hermes test`.
 Default `hermes test-all` already includes LVGL, QML, syscall smoke, POSIX
-canaries, and ops APIs. Reports keep
+canaries, and ops APIs. `posixtest=skip` and `sectest=skip` omit the two opening
+phases. Any new test item must also be orchestrated into `hermes test-all` in the same change. Reports keep
 aggregate totals and at most 64 round details, so large iteration counts remain persistable. The host jobs require
 `scripts/smros-vm-launcher.py`; the guest can request only those two jobs and
 cannot supply host command text. Destructive commands remain unavailable to

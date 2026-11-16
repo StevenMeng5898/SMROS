@@ -5484,16 +5484,200 @@ fn print_hermes_usage(ctx: &mut ShellContext) {
         "       hermes random [seed=<n>] [iterations=<positive-n>] [mode=ops|syscall]\n",
     );
     ctx.serial.write_str(
-        "       hermes test-all [seed=<n>] [iterations=<positive-n>] [mode=ops|syscall]\n",
+        "       hermes test-all [seed=<n>] [iterations=<positive-n>] [mode=ops|syscall] [posixtest=run|skip] [sectest=run|skip]\n",
     );
     ctx.serial.write_str("       hermes ask <prompt>\n");
     ctx.serial
         .write_str("       hermes ui  # LVGL-styled keyboard/mouse UI\n");
     ctx.serial.write_str("       hermes web [text|source]\n");
-    ctx.serial
-        .write_str("       default test-all includes lvgl/qml/testsc/posixtest and ops APIs\n");
+    ctx.serial.write_str(
+        "       default test-all includes lvgl/qml/testsc/posixtest and runs posixtest all plus sectest all once\n",
+    );
     ctx.serial
         .write_str("       mode=syscall selects testsc/fuzzsc/hermes test/posixtest\n");
+}
+
+fn run_hermes_opening_phases(
+    ctx: &mut ShellContext,
+    options: &crate::user_level::services::hermes_shell_logic_shared::HermesCampaignOptions,
+) -> crate::user_level::services::hermes_shell_logic_shared::HermesSuitePhases {
+    use crate::user_level::services::hermes_shell_logic_shared::{
+        HermesPosixPhase, HermesSectestPhase, HermesSuitePhases,
+    };
+
+    // `posixtest all` must see a clean `/dev/shm` (mode 040755). `fuzzsc` in the
+    // later random loop chmods that directory to 0777 and the mode is persisted,
+    // which leaves shm_unlink/8-1.c and 9-1.c unresolved. Run the full POSIX
+    // suite once, before any fuzzsc, then sectest, then the iterations. A second
+    // pass at the end would run after that pollution, so it is not a gate.
+    let posix = if options.run_posixtest {
+        run_hermes_posixtest_phase(ctx)
+    } else {
+        ctx.serial
+            .write_str("Hermes test-all phase posixtest skip\n");
+        HermesPosixPhase::skipped()
+    };
+    let sectest = if options.run_sectest {
+        run_hermes_sectest_phase(ctx)
+    } else {
+        ctx.serial
+            .write_str("Hermes test-all phase sectest skip\n");
+        HermesSectestPhase::skipped()
+    };
+    HermesSuitePhases { posix, sectest }
+}
+
+fn run_hermes_posixtest_phase(
+    ctx: &mut ShellContext,
+) -> crate::user_level::services::hermes_shell_logic_shared::HermesPosixPhase {
+    use crate::user_level::services::hermes_shell_logic_shared::{
+        HermesPosixPhase, HermesSuiteDisposition,
+    };
+    use crate::user_level::services::posix_test;
+
+    ctx.serial
+        .write_str("Hermes test-all phase posixtest all\n");
+    if !run_posix_command(ctx, &["all"]) {
+        ctx.serial
+            .write_str("Hermes test-all phase posixtest failed to start\n");
+        return HermesPosixPhase {
+            disposition: HermesSuiteDisposition::Done,
+            ..HermesPosixPhase::legacy()
+        };
+    }
+    let status = posix_test::status_snapshot();
+    let phase = HermesPosixPhase {
+        disposition: HermesSuiteDisposition::Done,
+        selected: status.selected,
+        passed: status.status_counts.passed,
+        failed: status.status_counts.failed,
+        unresolved: status.status_counts.unresolved,
+        timeouts: status.status_counts.timeouts,
+        launch_errors: status.status_counts.launch_errors,
+    };
+    ctx.serial.write_str("Hermes phase posixtest ");
+    print_hermes_posix_counts(ctx, &phase);
+    phase
+}
+
+fn run_hermes_sectest_phase(
+    ctx: &mut ShellContext,
+) -> crate::user_level::services::hermes_shell_logic_shared::HermesSectestPhase {
+    use crate::user_level::services::hermes_shell_logic_shared::{
+        HermesSectestPhase, HermesSuiteDisposition,
+    };
+
+    ctx.serial.write_str("Hermes test-all phase sectest all\n");
+    cmd_security_case(ctx, &["all"]);
+    let summary = crate::user_level::services::security_case::last_summary();
+    let phase = HermesSectestPhase {
+        disposition: HermesSuiteDisposition::Done,
+        pass: summary.pass,
+        fail: summary.fail,
+        xfail: summary.xfail,
+        xpass: summary.xpass,
+        arch_skipped: summary.skipped,
+    };
+    ctx.serial.write_str("Hermes phase sectest ");
+    print_hermes_sectest_counts(ctx, &phase);
+    phase
+}
+
+fn print_hermes_suite_lines(
+    ctx: &mut ShellContext,
+    suites: &crate::user_level::services::hermes_shell_logic_shared::HermesSuitePhases,
+) {
+    ctx.serial.write_str("Hermes phase posixtest ");
+    print_hermes_posix_counts(ctx, &suites.posix);
+    ctx.serial.write_str("Hermes phase sectest ");
+    print_hermes_sectest_counts(ctx, &suites.sectest);
+}
+
+fn print_hermes_posix_counts(
+    ctx: &mut ShellContext,
+    phase: &crate::user_level::services::hermes_shell_logic_shared::HermesPosixPhase,
+) {
+    use crate::user_level::services::hermes_shell_logic_shared::suite_disposition_name;
+
+    ctx.serial.write_str("phase=");
+    ctx.serial
+        .write_str(suite_disposition_name(phase.disposition));
+    ctx.serial.write_str(" selected=");
+    print_usize(&mut ctx.serial, phase.selected);
+    ctx.serial.write_str(" pass=");
+    print_usize(&mut ctx.serial, phase.passed);
+    ctx.serial.write_str(" fail=");
+    print_usize(&mut ctx.serial, phase.failed);
+    ctx.serial.write_str(" unresolved=");
+    print_usize(&mut ctx.serial, phase.unresolved);
+    ctx.serial.write_str(" timeout=");
+    print_usize(&mut ctx.serial, phase.timeouts);
+    ctx.serial.write_str(" launch_errors=");
+    print_usize(&mut ctx.serial, phase.launch_errors);
+    ctx.serial.write_str("\n");
+}
+
+fn print_hermes_sectest_counts(
+    ctx: &mut ShellContext,
+    phase: &crate::user_level::services::hermes_shell_logic_shared::HermesSectestPhase,
+) {
+    use crate::user_level::services::hermes_shell_logic_shared::suite_disposition_name;
+
+    ctx.serial.write_str("phase=");
+    ctx.serial
+        .write_str(suite_disposition_name(phase.disposition));
+    ctx.serial.write_str(" pass=");
+    print_usize(&mut ctx.serial, phase.pass);
+    ctx.serial.write_str(" fail=");
+    print_usize(&mut ctx.serial, phase.fail);
+    ctx.serial.write_str(" xfail=");
+    print_usize(&mut ctx.serial, phase.xfail);
+    ctx.serial.write_str(" xpass=");
+    print_usize(&mut ctx.serial, phase.xpass);
+    if phase.arch_skipped {
+        ctx.serial.write_str(" arch_skipped=1");
+    }
+    ctx.serial.write_str("\n");
+}
+
+fn append_hermes_suite_report(
+    report: &mut String,
+    suites: &crate::user_level::services::hermes_shell_logic_shared::HermesSuitePhases,
+) {
+    use crate::user_level::services::hermes_shell_logic_shared::suite_disposition_name;
+
+    let posix = &suites.posix;
+    report.push_str("posixtest phase=");
+    report.push_str(suite_disposition_name(posix.disposition));
+    report.push_str(" selected=");
+    append_usize_shell(report, posix.selected);
+    report.push_str(" pass=");
+    append_usize_shell(report, posix.passed);
+    report.push_str(" fail=");
+    append_usize_shell(report, posix.failed);
+    report.push_str(" unresolved=");
+    append_usize_shell(report, posix.unresolved);
+    report.push_str(" timeout=");
+    append_usize_shell(report, posix.timeouts);
+    report.push_str(" launch_errors=");
+    append_usize_shell(report, posix.launch_errors);
+    report.push('\n');
+
+    let sectest = &suites.sectest;
+    report.push_str("sectest phase=");
+    report.push_str(suite_disposition_name(sectest.disposition));
+    report.push_str(" pass=");
+    append_usize_shell(report, sectest.pass);
+    report.push_str(" fail=");
+    append_usize_shell(report, sectest.fail);
+    report.push_str(" xfail=");
+    append_usize_shell(report, sectest.xfail);
+    report.push_str(" xpass=");
+    append_usize_shell(report, sectest.xpass);
+    if sectest.arch_skipped {
+        report.push_str(" arch_skipped=1");
+    }
+    report.push('\n');
 }
 
 fn run_hermes_test_all(ctx: &mut ShellContext, args: &[&str]) {
@@ -5501,7 +5685,7 @@ fn run_hermes_test_all(ctx: &mut ShellContext, args: &[&str]) {
         crate::user_level::services::hermes_shell_logic_shared::parse_campaign_options(args)
     else {
         ctx.serial.write_str(
-            "usage: hermes test-all [seed=<n>] [iterations=<positive-n>] [mode=ops|syscall]\n",
+            "usage: hermes test-all [seed=<n>] [iterations=<positive-n>] [mode=ops|syscall] [posixtest=run|skip] [sectest=run|skip]\n",
         );
         return;
     };
@@ -5540,9 +5724,40 @@ fn run_hermes_test_all_inner(
         ctx.serial.write_str("\n");
     }
 
-    let native_ok = match resume {
-        Some(state) => state.native_ok,
-        None => run_hermes_agent_tests(ctx),
+    let (native_ok, phases) = match resume {
+        Some(state) => {
+            ctx.serial
+                .write_str("Hermes resume kept opening phases\n");
+            print_hermes_suite_lines(ctx, &state.suites);
+            (state.native_ok, state.suites)
+        }
+        None => {
+            let native_ok = run_hermes_agent_tests(ctx);
+            let phases = run_hermes_opening_phases(ctx, &options);
+            persist_hermes_resume_state(&HermesResumeState {
+                kind: HermesResumeKind::TestAll,
+                seed,
+                iterations: options.iterations,
+                mode: options.mode,
+                next_round: 0,
+                native_ok,
+                completed: 0,
+                denied: 0,
+                invalid: 0,
+                unknown: 0,
+                host_ut_pass: 0,
+                host_ut_fail: 0,
+                host_it_pass: 0,
+                host_it_fail: 0,
+                host_jobs_pending: false,
+                op_running: false,
+                op_timeouts: 0,
+                pending_op_len: 0,
+                pending_op: [0; 64],
+                suites: phases,
+            });
+            (native_ok, phases)
+        }
     };
 
     let mut report = String::from("Hermes test-all\nseed=");
@@ -5637,6 +5852,7 @@ fn run_hermes_test_all_inner(
             op_timeouts,
             pending_op_len: 0,
             pending_op: [0; 64],
+            suites: phases,
         };
         if !campaign_case_is_reboot(case.command) {
             checkpoint.set_pending_op(op_label);
@@ -5688,6 +5904,7 @@ fn run_hermes_test_all_inner(
             op_timeouts,
             pending_op_len: 0,
             pending_op: [0; 64],
+            suites: phases,
         });
         match status {
             HermesCommandStatus::Completed => {}
@@ -5721,6 +5938,7 @@ fn run_hermes_test_all_inner(
             op_timeouts,
             pending_op_len: 0,
             pending_op: [0; 64],
+            suites: phases,
         });
     }
 
@@ -5736,6 +5954,7 @@ fn run_hermes_test_all_inner(
         &host_passes,
         &host_failures,
         op_timeouts,
+        phases,
         &mut report,
     );
 }
@@ -5823,6 +6042,7 @@ fn run_hermes_random_inner(
                 op_timeouts: 0,
                 pending_op_len: 0,
                 pending_op: [0; 64],
+                suites: crate::user_level::services::hermes_shell_logic_shared::HermesSuitePhases::legacy(),
             });
             if round.saturating_add(1) >= options.iterations {
                 finish_hermes_random_campaign(
@@ -5860,6 +6080,7 @@ fn run_hermes_random_inner(
             op_timeouts: 0,
             pending_op_len: 0,
             pending_op: [0; 64],
+            suites: crate::user_level::services::hermes_shell_logic_shared::HermesSuitePhases::legacy(),
         });
         let status = execute_bound_hermes_campaign_case(ctx, seed, &case);
         count_hermes_command_status(
@@ -6059,6 +6280,8 @@ fn maybe_resume_hermes_campaign(ctx: &mut ShellContext) {
                 seed: Some(state.seed),
                 iterations: state.iterations,
                 mode: state.mode,
+                run_posixtest: false,
+                run_sectest: false,
             };
             if resume_should_continue(&state) {
                 match state.kind {
@@ -6211,6 +6434,7 @@ native=",
         &[state.host_ut_pass, state.host_it_pass],
         &[state.host_ut_fail, state.host_it_fail],
         state.op_timeouts,
+        state.suites,
         &mut report,
     );
 }
@@ -6227,9 +6451,12 @@ fn finish_hermes_test_all(
     host_passes: &[usize; 2],
     host_failures: &[usize; 2],
     op_timeouts: usize,
+    suites: crate::user_level::services::hermes_shell_logic_shared::HermesSuitePhases,
     report: &mut String,
 ) {
-    use crate::user_level::services::hermes_shell_logic_shared::campaign_report_omitted_rounds;
+    use crate::user_level::services::hermes_shell_logic_shared::{
+        campaign_report_omitted_rounds, test_all_overall_pass,
+    };
     use crate::user_level::services::vm_host::HermesHostTestJob;
 
     let omitted = campaign_report_omitted_rounds(iterations);
@@ -6259,11 +6486,16 @@ fn finish_hermes_test_all(
         append_usize_shell(report, host_failures[job_index]);
         report.push('\n');
     }
+    append_hermes_suite_report(report, &suites);
 
-    let overall = native_ok
-        && op_timeouts == 0
-        && random_completed == iterations
-        && host_passes.iter().all(|passes| *passes == iterations);
+    let overall = test_all_overall_pass(
+        native_ok,
+        op_timeouts,
+        random_completed,
+        iterations,
+        [host_passes[0], host_passes[1]],
+        &suites,
+    );
     report.push_str("overall=");
     report.push_str(if overall {
         "pass
@@ -6292,6 +6524,7 @@ fn finish_hermes_test_all(
         }
     }
     clear_hermes_resume_state();
+    print_hermes_suite_lines(ctx, &suites);
     ctx.serial.write_str("Replay: hermes test-all seed=");
     print_u64(&mut ctx.serial, seed);
     ctx.serial.write_str(" iterations=");
@@ -9330,6 +9563,10 @@ fn print_posix_coverage_ratio(serial: &mut Serial, numerator: usize, denominator
 }
 
 fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
+    let _ = run_posix_command(ctx, args);
+}
+
+fn run_posix_command(ctx: &mut ShellContext, args: &[&str]) -> bool {
     use crate::user_level::services::posix_test::{self, PosixTestError};
 
     let usage = |ctx: &mut ShellContext| {
@@ -9412,21 +9649,21 @@ fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
         ctx.serial.write_str(" timeout=");
         print_usize(&mut ctx.serial, status.status_counts.timeouts);
         ctx.serial.write_str(" scope=selected\n");
-        return;
+        return false;
     }
 
     let (filter_args, timeout_override_ms) = match posix_test::split_timeout_option(args) {
         Ok(split) => split,
         Err(_) => {
             usage(ctx);
-            return;
+            return false;
         }
     };
     let filter = match posix_test::parse_filter(filter_args) {
         Ok(filter) => filter,
         Err(_) => {
             usage(ctx);
-            return;
+            return false;
         }
     };
 
@@ -9449,24 +9686,36 @@ fn cmd_posix_test(ctx: &mut ShellContext, args: &[&str]) {
             } else {
                 ctx.serial.write_str("posixtest: completed\n");
             }
+            true
         }
-        Err(PosixTestError::AlreadyRunning) => ctx.serial.write_str("posixtest: busy\n"),
+        Err(PosixTestError::AlreadyRunning) => {
+            ctx.serial.write_str("posixtest: busy\n");
+            false
+        }
         Err(PosixTestError::FxfsPrepare(_) | PosixTestError::FxfsRead(_)) => {
             ctx.serial.write_str("posixtest: manifest unavailable\n");
+            false
         }
         Err(PosixTestError::EmptySelection) => {
             ctx.serial.write_str("posixtest: empty selection\n");
+            false
         }
         Err(PosixTestError::LaunchError) => {
             ctx.serial.write_str("posixtest: launch-error\n");
+            false
         }
         Err(PosixTestError::InfrastructureError) => {
             ctx.serial.write_str("posixtest: infrastructure-error\n");
+            false
         }
-        Err(PosixTestError::InvalidFilter) => usage(ctx),
+        Err(PosixTestError::InvalidFilter) => {
+            usage(ctx);
+            false
+        }
         Err(_) => {
             ctx.serial
                 .write_str("posixtest: manifest checksum/schema invalid\n");
+            false
         }
     }
 }

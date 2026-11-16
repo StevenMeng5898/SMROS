@@ -3750,6 +3750,14 @@ fn posix_test_shell_command_is_strictly_wired_to_the_runner() {
     let handler_start = shell
         .find("fn cmd_posix_test(")
         .expect("posixtest handler must exist");
+    let command = braced_body(&shell[handler_start..]);
+    assert!(
+        command.contains("run_posix_command"),
+        "shell posixtest must keep calling the runner command"
+    );
+    let handler_start = shell
+        .find("fn run_posix_command(")
+        .expect("posixtest runner command");
     let handler = braced_body(&shell[handler_start..]);
     assert!(handler.contains("[\"status\"]"));
     assert!(handler.contains("posix_test::status_snapshot()"));
@@ -7053,6 +7061,66 @@ fn hermes_host_tests_use_fixed_enum_jobs_and_protocol() {
     assert!(launcher.contains("SMROS Linux VM initramfs"));
     assert!(client.contains("fn wait_for_linux_boot("));
     assert!(client.contains("HERMES_VM_BOOT_WAIT_NANOS"));
+}
+
+#[test]
+fn hermes_test_all_runs_posix_and_sectest_before_random_iterations() {
+    let shell = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/user_shell.rs"
+    ));
+    let policy = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/hermes_shell_logic_shared.rs"
+    ));
+    let docs = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/USER_SHELL.md"
+    ));
+    let testing = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/TESTING.md"
+    ));
+
+    let test_all_start = shell
+        .find("fn run_hermes_test_all_inner(")
+        .expect("test-all inner");
+    let test_all_end = shell[test_all_start..]
+        .find("fn run_hermes_random_campaign(")
+        .map(|offset| test_all_start + offset)
+        .expect("random campaign function");
+    let test_all = &shell[test_all_start..test_all_end];
+    let round_pos = test_all
+        .find("for round in start_round..options.iterations {")
+        .expect("iteration loop");
+    let native_pos = test_all
+        .find("run_hermes_agent_tests(ctx)")
+        .expect("native check");
+    let phase_pos = test_all
+        .find("run_hermes_opening_phases(")
+        .expect("opening phases");
+    assert!(
+        native_pos < phase_pos && phase_pos < round_pos,
+        "posixtest all and sectest all run once after the native check and before fuzzsc iterations"
+    );
+    assert!(test_all.contains("suites: phases"));
+    assert!(shell.contains("Hermes test-all phase posixtest all"));
+    assert!(shell.contains("Hermes test-all phase sectest all"));
+    assert!(shell.contains("posixtest phase="));
+    assert!(shell.contains("sectest phase="));
+    assert!(shell.contains("test_all_overall_pass"));
+    assert!(shell.contains("Hermes resume kept opening phases"));
+    assert!(policy.contains("HERMES_POSIXTEST_ALL_EXPECTED: usize = 1600"));
+    assert!(policy.contains("\"skip\" => false"));
+    assert!(
+        policy.contains("[\"test\", \"getpid/1-1.c\"] => HermesShellPolicy::Allowed"),
+        "posixtest all stays off the hermes exec allowlist"
+    );
+    let rule = "Any new test item must also be orchestrated into `hermes test-all`";
+    assert!(docs.contains(rule));
+    assert!(testing.contains(rule));
+    assert!(docs.contains("040755"));
+    assert!(docs.contains("does not run the phases again"));
 }
 
 #[test]
