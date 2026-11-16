@@ -2305,10 +2305,8 @@ fn fuzz_posix_round(state: &mut FuzzState) -> bool {
                 );
             }
             "mq_setattr" => {
-                let _ = state.call_posix(
-                    super::ARM64_SYS_MQ_GETSETATTR,
-                    [mqd, 0, attr_ptr, 0, 0, 0],
-                );
+                let _ =
+                    state.call_posix(super::ARM64_SYS_MQ_GETSETATTR, [mqd, 0, attr_ptr, 0, 0, 0]);
             }
             "mq_close" => {
                 if mqd != 0 {
@@ -2359,10 +2357,8 @@ fn fuzz_posix_round(state: &mut FuzzState) -> bool {
             }
             "munmap" => {
                 if mapping != 0 {
-                    let _ = state.call_posix(
-                        super::ARM64_SYS_MUNMAP,
-                        [mapping, PAGE_SIZE, 0, 0, 0, 0],
-                    );
+                    let _ =
+                        state.call_posix(super::ARM64_SYS_MUNMAP, [mapping, PAGE_SIZE, 0, 0, 0, 0]);
                     mapping = 0;
                 } else if let Ok(addr) = state.call_posix(
                     super::ARM64_SYS_MMAP,
@@ -2465,8 +2461,10 @@ fn fuzz_posix_round(state: &mut FuzzState) -> bool {
                 state.arena.poll[0].fd = fd as i32;
                 state.arena.poll[0].events = 0x0001 | 0x0004;
                 state.arena.poll[0].revents = 0;
-                let _ =
-                    state.call_posix(super::ARM64_SYS_PPOLL, [poll_ptr, 1, sleep_timespec_ptr, 0, 0, 0]);
+                let _ = state.call_posix(
+                    super::ARM64_SYS_PPOLL,
+                    [poll_ptr, 1, sleep_timespec_ptr, 0, 0, 0],
+                );
             }
             _ => {}
         }
@@ -2568,7 +2566,10 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         44 => out = [file_fd, state.arena.scratch_ptr(), 0, 0, 0, 0],
         46 => out = [file_fd, FUZZ_IO_BYTES, 0, 0, 0, 0],
         47 => out = [file_fd, 0, 0, FUZZ_IO_BYTES, 0, 0],
-        52 | 55 | 82 | 83 | 84 => out = [file_fd, 0, 0, 0, 0, 0],
+        // Mode 0644 matches the seed file created by `write_file`. A real
+        // chmod of 0 would clear those bits and `sync` would store them.
+        52 => out = [file_fd, 0o644, 0, 0, 0, 0],
+        55 | 82 | 83 | 84 => out = [file_fd, 0, 0, 0, 0, 0],
         50 => out = [dir_fd, 0, 0, 0, 0, 0],
         57 => out = [state.linux_close_fd(), 0, 0, 0, 0, 0],
         62 => out = [file_fd, 0, 0, 0, 0, 0],
@@ -2664,16 +2665,7 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         127 => out = [0, ptr, 0, 0, 0, 0],
         128 => out = [0, 0, 0, 0, 0, 0],
         129 => out = [0, 0, 0, 0, 0, 0],
-        130 => {
-            out = [
-                linux_task::current_tid().unwrap_or(0),
-                0,
-                0,
-                0,
-                0,
-                0,
-            ]
-        }
+        130 => out = [linux_task::current_tid().unwrap_or(0), 0, 0, 0, 0, 0],
         131 => {
             let tid = linux_task::current_tid().unwrap_or(0);
             let tgid = linux_process::current_pid().unwrap_or(0);
@@ -2759,10 +2751,7 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         183 => {
             let fd = state.ensure_mq_fd();
             let buf = state.arena.scratch_ptr();
-            let _ = dispatch_linux_syscall(
-                super::ARM64_SYS_MQ_TIMEDSEND,
-                [fd, buf, 8, 0, 0, 0],
-            );
+            let _ = dispatch_linux_syscall(super::ARM64_SYS_MQ_TIMEDSEND, [fd, buf, 8, 0, 0, 0]);
             out = [fd, buf, 64, 0, state.arena.sleep_timespec_ptr(), 0];
         }
         184 => out = [state.ensure_mq_fd(), 0, 0, 0, 0, 0],
@@ -2771,16 +2760,7 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         119 => out = [0, 0, state.arena.sched_param_ptr(), 0, 0, 0],
         120 => out = [0, 0, 0, 0, 0, 0],
         121 => out = [0, ptr, 0, 0, 0, 0],
-        122 => {
-            out = [
-                0,
-                8,
-                state.arena.write_cpu0_affinity_mask(),
-                0,
-                0,
-                0,
-            ]
-        }
+        122 => out = [0, 8, state.arena.write_cpu0_affinity_mask(), 0, 0, 0],
         123 => out = [0, FUZZ_IO_BYTES, state.arena.scratch_ptr(), 0, 0, 0],
         125 | 126 => out = [0, 0, 0, 0, 0, 0],
         132 => out = [0, state.arena.scratch_ptr(), 0, 0, 0, 0],
@@ -2974,7 +2954,9 @@ fn linux_path_args(
             ]
         }
         38 => [fd, path, fd, path2, 0, 0],
-        45 => [path, FUZZ_IO_BYTES, 0, 0, 0, 0],
+        // Same length as the bytes `prepare_fuzz_paths` just wrote, so a real
+        // truncate does not grow the seed file before `sync`.
+        45 => [visible_path, b"smros syscall fuzz seed\n".len(), 0, 0, 0, 0],
         48 | 439 => [fd, visible_path, 0, 0, 0, 0],
         49 => [state.arena.path_dir_ptr(), 0, 0, 0, 0, 0],
         51 => [state.arena.path_root_ptr(), 0, 0, 0, 0, 0],
@@ -2996,7 +2978,17 @@ fn linux_path_args(
         ],
         78 => [fd, visible_path, ptr, FUZZ_IO_BYTES, 0, 0],
         79 => [fd, visible_path, ptr, 0, 0, 0],
-        88 => [fd, path, state.arena.timespec_ptr(), 0, 0, 0],
+        53 => [LINUX_AT_FDCWD, visible_path, 0o644, 0, 0, 0],
+        88 => {
+            // Both timestamps are UTIME_OMIT, so the call succeeds without
+            // writing the seed file's atime or mtime into the image.
+            let omit = 0x3fff_fffei64;
+            let mut bytes = [0u8; 32];
+            bytes[8..16].copy_from_slice(&omit.to_ne_bytes());
+            bytes[24..32].copy_from_slice(&omit.to_ne_bytes());
+            state.arena.scratch[..32].copy_from_slice(&bytes);
+            [fd, visible_path, state.arena.scratch_ptr(), 0, 0, 0]
+        }
         291 => [fd, visible_path, 0, 0x7ff, ptr, 0],
         437 => [fd, visible_path, ptr, 0, 0, 0],
         _ => [fd, path, variant, ptr, FUZZ_IO_BYTES, 0],

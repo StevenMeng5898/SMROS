@@ -5,7 +5,10 @@
  *      6 mprotect-after-store, 7 cow-fork, 8 unaligned ldxr,
  *      9 exit-group while another thread is in futex_wait,
  *      10 wait twice, 11 fork again after the first child exits,
- *      12 SIGSEGV handler that is not an executable user page
+ *      12 SIGSEGV handler that is not an executable user page,
+ *      13 owner chmod then non-owner EPERM
+ *   Path for op 13 is planted at 0x400. The fd is saved at 0x480.
+ *   stat buffer is 0x500.
  *   8  target
  *  16  value
  *  24  syscall number
@@ -52,6 +55,8 @@ el0_probe_entry:
     b.eq do_exit_refork
     cmp x21, #12
     b.eq do_bad_handler
+    cmp x21, #13
+    b.eq do_chmod
     mov x0, #99
     b exit_now
 do_read:
@@ -322,6 +327,104 @@ do_bad_handler:
     b exit_now
 bad_handler_fail:
     mov x0, #5
+    b exit_now
+do_chmod:
+    /* Become uid 1, create /dev/shm/smros-sec-chmod, chmod 0600, stat it,
+       then become uid 2 and confirm fchmod is EPERM and the mode is unchanged. */
+    mov x0, #1
+    mov x1, #1
+    mov x2, #1
+    movz x8, #147
+    svc #0
+    tbnz x0, #63, chmod_uid
+    movn x0, #99
+    movz x1, #0x400
+    movk x1, #0x1200, lsl #16
+    movz x2, #0x242
+    movz x3, #0x1a4
+    movz x8, #56
+    svc #0
+    tbnz x0, #63, chmod_open
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    str x0, [x20, #0x480]
+    ldr x0, [x20, #0x480]
+    movz x1, #0x180
+    movz x8, #52
+    svc #0
+    tbnz x0, #63, chmod_own
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    ldr x0, [x20, #0x480]
+    movz x1, #0x500
+    movk x1, #0x1200, lsl #16
+    movz x8, #80
+    svc #0
+    tbnz x0, #63, chmod_stat
+    movz x1, #0x500
+    movk x1, #0x1200, lsl #16
+    ldr w0, [x1, #16]
+    and w0, w0, #0xfff
+    movz w1, #0x180
+    cmp w0, w1
+    b.ne chmod_mode
+    mov x0, #2
+    mov x1, #2
+    mov x2, #2
+    movz x8, #147
+    svc #0
+    tbnz x0, #63, chmod_uid2
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    ldr x0, [x20, #0x480]
+    movz x1, #0x1a0
+    movz x8, #52
+    svc #0
+    cmn x0, #1
+    b.ne chmod_eperm
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    ldr x0, [x20, #0x480]
+    movz x1, #0x500
+    movk x1, #0x1200, lsl #16
+    movz x8, #80
+    svc #0
+    tbnz x0, #63, chmod_stat2
+    movz x1, #0x500
+    movk x1, #0x1200, lsl #16
+    ldr w0, [x1, #16]
+    and w0, w0, #0xfff
+    movz w1, #0x180
+    cmp w0, w1
+    b.ne chmod_kept
+    mov x0, #0
+    b exit_now
+chmod_uid:
+    mov x0, #11
+    b exit_now
+chmod_open:
+    mov x0, #12
+    b exit_now
+chmod_own:
+    mov x0, #13
+    b exit_now
+chmod_stat:
+    mov x0, #14
+    b exit_now
+chmod_mode:
+    mov x0, #15
+    b exit_now
+chmod_uid2:
+    mov x0, #16
+    b exit_now
+chmod_eperm:
+    mov x0, #17
+    b exit_now
+chmod_stat2:
+    mov x0, #18
+    b exit_now
+chmod_kept:
+    mov x0, #19
     b exit_now
 exit_now:
     movz x8, #93

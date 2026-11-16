@@ -156,6 +156,30 @@ pub(crate) const fn linux_mode_access_allowed(
     read: bool,
     write: bool,
 ) -> bool {
+    linux_mode_permission_allowed(
+        mode,
+        owner_uid,
+        owner_gid,
+        effective_uid,
+        effective_gid,
+        read,
+        write,
+        false,
+    )
+}
+
+/// Directory search uses the execute bit. `euid == 0` bypasses it, matching
+/// `CAP_DAC_OVERRIDE` / `CAP_DAC_READ_SEARCH` for this kernel.
+pub(crate) const fn linux_mode_permission_allowed(
+    mode: u32,
+    owner_uid: usize,
+    owner_gid: usize,
+    effective_uid: usize,
+    effective_gid: usize,
+    read: bool,
+    write: bool,
+    execute: bool,
+) -> bool {
     if effective_uid == 0 {
         return true;
     }
@@ -166,7 +190,159 @@ pub(crate) const fn linux_mode_access_allowed(
     } else {
         mode & 0o7
     };
-    (!read || permission_bits & 0o4 != 0) && (!write || permission_bits & 0o2 != 0)
+    (!read || permission_bits & 0o4 != 0)
+        && (!write || permission_bits & 0o2 != 0)
+        && (!execute || permission_bits & 0o1 != 0)
+}
+
+pub(crate) const LINUX_S_IFMT: u32 = 0o170000;
+pub(crate) const LINUX_S_IFREG: u32 = 0o100000;
+pub(crate) const LINUX_S_IFDIR: u32 = 0o040000;
+pub(crate) const LINUX_S_ISUID: u32 = 0o4000;
+pub(crate) const LINUX_S_ISGID: u32 = 0o2000;
+pub(crate) const LINUX_S_ISVTX: u32 = 0o1000;
+/// Permission bits plus set-user-ID, set-group-ID, and sticky.
+pub(crate) const LINUX_S_IALLUGO: u32 = LINUX_S_ISUID | LINUX_S_ISGID | LINUX_S_ISVTX | 0o777;
+/// `uid_t`/`gid_t` value `-1`: leave that id unchanged.
+pub(crate) const LINUX_CHOWN_UNCHANGED: usize = u32::MAX as usize;
+pub(crate) const LINUX_UTIME_NOW: i64 = 0x3fff_ffff;
+pub(crate) const LINUX_UTIME_OMIT: i64 = 0x3fff_fffe;
+
+pub(crate) const fn linux_chmod_allowed(owner_uid: u32, effective_uid: usize) -> bool {
+    effective_uid == 0 || owner_uid as usize == effective_uid
+}
+
+/// Linux `chmod` clears `S_ISGID` when the caller lacks `CAP_FSETID` and is
+/// not in the file's group. Here `euid == 0` stands in for that capability.
+pub(crate) const fn linux_chmod_clear_setgid(
+    owner_gid: u32,
+    effective_gid: usize,
+    effective_uid: usize,
+) -> bool {
+    effective_uid != 0 && owner_gid as usize != effective_gid
+}
+
+pub(crate) const fn linux_chmod_mode(current: u32, requested: u32, clear_setgid: bool) -> u32 {
+    let mut mode = (current & !LINUX_S_IALLUGO) | (requested & LINUX_S_IALLUGO);
+    if clear_setgid {
+        mode &= !LINUX_S_ISGID;
+    }
+    mode
+}
+
+pub(crate) const fn linux_metadata_flags_valid(flags: usize, allowed: usize) -> bool {
+    flags & !allowed == 0
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxChownReject {
+    Eperm,
+    Einval,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxChownUpdate {
+    pub uid: u32,
+    pub gid: u32,
+    pub mode: u32,
+}
+
+/// POSIX `chown`: only the owner or `euid == 0` may change the ids. A
+/// non-owner request that names the ids the inode already has is a no-op.
+/// Non-root group changes must land on the caller's effective gid. Non-root
+/// changes clear set-user-ID, and clear set-group-ID on non-directories.
+pub(crate) fn linux_chown_update(
+    current_uid: u32,
+    current_gid: u32,
+    current_mode: u32,
+    requested_uid: usize,
+    requested_gid: usize,
+    effective_uid: usize,
+    effective_gid: usize,
+) -> Result<LinuxChownUpdate, LinuxChownReject> {
+    let new_uid = if requested_uid == LINUX_CHOWN_UNCHANGED || requested_uid == usize::MAX {
+        current_uid
+    } else {
+        u32::try_from(requested_uid).map_err(|_| LinuxChownReject::Einval)?
+    };
+    let new_gid = if requested_gid == LINUX_CHOWN_UNCHANGED || requested_gid == usize::MAX {
+        current_gid
+    } else {
+        u32::try_from(requested_gid).map_err(|_| LinuxChownReject::Einval)?
+    };
+    let uid_changed = new_uid != current_uid;
+    let gid_changed = new_gid != current_gid;
+    let owner = effective_uid == 0 || current_uid as usize == effective_uid;
+    if uid_changed && effective_uid != 0 {
+        return Err(LinuxChownReject::Eperm);
+    }
+    if gid_changed && effective_uid != 0 && (!owner || new_gid as usize != effective_gid) {
+        return Err(LinuxChownReject::Eperm);
+    }
+    if (uid_changed || gid_changed) && !owner {
+        return Err(LinuxChownReject::Eperm);
+    }
+    let mut mode = current_mode;
+    if (uid_changed || gid_changed) && effective_uid != 0 {
+        mode &= !LINUX_S_ISUID;
+        if current_mode & LINUX_S_IFMT != LINUX_S_IFDIR {
+            mode &= !LINUX_S_ISGID;
+        }
+    }
+    Ok(LinuxChownUpdate {
+        uid: new_uid,
+        gid: new_gid,
+        mode,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxUtimeField {
+    Set(u64),
+    Now,
+    Omit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxUtimeReject {
+    Einval,
+    Eperm,
+    Eacces,
+}
+
+pub(crate) const fn linux_utime_field(
+    seconds: i64,
+    nanoseconds: i64,
+) -> Result<LinuxUtimeField, LinuxUtimeReject> {
+    if nanoseconds == LINUX_UTIME_OMIT {
+        return Ok(LinuxUtimeField::Omit);
+    }
+    if nanoseconds == LINUX_UTIME_NOW {
+        return Ok(LinuxUtimeField::Now);
+    }
+    if seconds < 0 || nanoseconds < 0 || nanoseconds >= 1_000_000_000 {
+        return Err(LinuxUtimeReject::Einval);
+    }
+    Ok(LinuxUtimeField::Set(seconds as u64))
+}
+
+/// A specific timestamp needs the owner or `euid == 0`. "Set to now" also
+/// accepts write permission. `UTIME_OMIT` does not.
+pub(crate) const fn linux_utime_reject(
+    atime: LinuxUtimeField,
+    mtime: LinuxUtimeField,
+    owner_or_root: bool,
+    writable: bool,
+) -> Option<LinuxUtimeReject> {
+    let specific = matches!(atime, LinuxUtimeField::Set(_)) || matches!(mtime, LinuxUtimeField::Set(_));
+    let now = matches!(atime, LinuxUtimeField::Now) || matches!(mtime, LinuxUtimeField::Now);
+    if specific && !owner_or_root {
+        return Some(LinuxUtimeReject::Eperm);
+    }
+    if now && !owner_or_root && !writable {
+        return Some(LinuxUtimeReject::Eacces);
+    }
+    None
 }
 
 const LINUX_POSIX_NANOS_PER_SECOND: u64 = 1_000_000_000;
