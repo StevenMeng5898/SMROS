@@ -174,6 +174,7 @@ pub enum SysError {
     EOVERFLOW = 75,
     ENOTSOCK = 88,
     EMSGSIZE = 90,
+    EOPNOTSUPP = 95,
     ETIMEDOUT = 110,
 }
 
@@ -7629,6 +7630,28 @@ fn linux_user_buffer_writable(address: usize, len: usize) -> bool {
     true
 }
 
+/// A buffer that can be copied without taking a fatal kernel fault.
+///
+/// On a kernel thread with no Linux process, any non-null pointer otherwise
+/// looks like a resident kernel buffer. Fuzzed pointers such as `3` are not
+/// mapped. Only the registered dispatch arena, or a real user mapping, is
+/// copied.
+fn linux_copy_range_is_resident(address: usize, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    if address == 0 || address.checked_add(len).is_none() {
+        return false;
+    }
+    if linux_task::kernel_dispatch_range_contains(address, len) {
+        return true;
+    }
+    if linux_process::current_pid().is_err() {
+        return false;
+    }
+    linux_user_buffer_writable(address, len)
+}
+
 fn linux_zero_user(ptr: usize, len: usize) -> SysResult {
     if !syscall_logic::user_buffer_valid(ptr, len) {
         return Err(SysError::EFAULT);
@@ -9127,6 +9150,16 @@ pub fn sys_sync() -> SysResult {
     Ok(0)
 }
 
+/// `syncfs(2)` persists the one filesystem when `fd` is open. A missing fd is
+/// `EBADF`. The old stub returned 0 for every argument, including a bad fd.
+pub fn sys_syncfs(fd: usize) -> SysResult {
+    if !linux_fd_known(fd) {
+        return Err(SysError::EBADF);
+    }
+    let _ = fxfs::force_persist();
+    Ok(0)
+}
+
 pub fn sys_fsync(fd: usize) -> SysResult {
     if !linux_fd_known(fd) {
         return Err(SysError::EBADF);
@@ -10049,6 +10082,50 @@ pub fn sys_sendmsg(sockfd: usize, msg: usize, _flags: usize) -> SysResult {
     } else {
         Ok(0)
     }
+}
+
+const LINUX_MSGHDR_BYTES: usize = 56;
+const LINUX_MMSGHDR_BYTES: usize = 64;
+const LINUX_UIO_MAXIOV: usize = 1024;
+
+/// `sendmmsg(2)` as a loop over `sendmsg`. The return value is the number of
+/// messages accepted. A missing socket fd fails the same way `sendmsg` fails,
+/// instead of reporting that zero messages were sent.
+pub fn sys_sendmmsg(sockfd: usize, msgvec: usize, vlen: usize, flags: usize) -> SysResult {
+    let vlen = (vlen as u32) as usize;
+    let flags = (flags as u32) as usize;
+    linux_socket_fd_handle(sockfd)?;
+    let vlen = core::cmp::min(vlen, LINUX_UIO_MAXIOV);
+    let mut sent = 0usize;
+    for index in 0..vlen {
+        let entry = msgvec
+            .checked_add(index * LINUX_MMSGHDR_BYTES)
+            .ok_or(SysError::EFAULT)?;
+        if !linux_copy_range_is_resident(entry, LINUX_MMSGHDR_BYTES) {
+            if sent == 0 {
+                return Err(SysError::EFAULT);
+            }
+            break;
+        }
+        let nbytes = match sys_sendmsg(sockfd, entry, flags) {
+            Ok(nbytes) => nbytes,
+            Err(error) => {
+                if sent == 0 {
+                    return Err(error);
+                }
+                break;
+            }
+        };
+        let msg_len = u32::try_from(nbytes).unwrap_or(u32::MAX);
+        if linux_write_user_u32(entry + LINUX_MSGHDR_BYTES, msg_len).is_err() {
+            if sent == 0 {
+                return Err(SysError::EFAULT);
+            }
+            break;
+        }
+        sent += 1;
+    }
+    Ok(sent)
 }
 
 pub fn sys_recvmmsg(
@@ -11167,6 +11244,44 @@ pub fn sys_sched_getscheduler(pid: usize) -> SysResult {
     Ok(linux_sched_target_param(target).policy)
 }
 
+fn linux_sched_attr_bytes(policy: usize, priority: i32) -> [u8; 48] {
+    let mut bytes = [0u8; 48];
+    bytes[0..4].copy_from_slice(&48u32.to_ne_bytes());
+    let policy_bits = u32::try_from(policy).unwrap_or(0);
+    bytes[4..8].copy_from_slice(&policy_bits.to_ne_bytes());
+    let rt_priority = if policy == 0 {
+        0u32
+    } else {
+        u32::try_from(priority).unwrap_or(0)
+    };
+    bytes[20..24].copy_from_slice(&rt_priority.to_ne_bytes());
+    bytes
+}
+
+/// `sched_getattr(2)` reads the policy and priority `sched_getscheduler` /
+/// `sched_getparam` already store. A zero-sized or null buffer is `EINVAL`,
+/// not a successful empty query.
+pub fn sys_sched_getattr(pid: usize, attr: usize, size: usize, flags: usize) -> SysResult {
+    if let Some(errno) = syscall_logic::linux_sched_getattr_reject(pid, attr, size, flags) {
+        return linux_errno_result(errno);
+    }
+    if !linux_copy_range_is_resident(attr, size) {
+        return Err(SysError::EFAULT);
+    }
+    let pid = (pid as u32) as usize;
+    let target = linux_sched_target_task(pid)?;
+    if !linux_sched_permission_allowed(pid, target) {
+        return Err(SysError::EPERM);
+    }
+    let param = linux_sched_target_param(target);
+    let bytes = linux_sched_attr_bytes(param.policy, param.priority);
+    linux_copy_to_user(attr, &bytes)?;
+    if size > bytes.len() {
+        linux_zero_user(attr + bytes.len(), size - bytes.len())?;
+    }
+    Ok(0)
+}
+
 pub fn sys_sched_setscheduler(pid: usize, policy: usize, param: usize) -> SysResult {
     let priority = linux_read_user_sched_param(param)?;
     if !syscall_logic::linux_sched_priority_valid(policy, priority) {
@@ -11554,6 +11669,100 @@ pub fn sys_clock_settime(clockid: usize, tp: usize) -> SysResult {
         linux_task::refresh_realtime_sleep_deadlines(now, offset, LINUX_SIGNAL_TICK_NANOS);
     wake_linux_sleep_outcomes(expired);
     Ok(0)
+}
+
+const LINUX_TIMEX_BYTES: usize = 208;
+const LINUX_ADJ_NANO: u32 = 0x2000;
+const LINUX_STA_UNSYNC: i32 = 0x0040;
+
+fn linux_put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+}
+
+fn linux_put_i32(bytes: &mut [u8], offset: usize, value: i32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+}
+
+fn linux_put_i64(bytes: &mut [u8], offset: usize, value: i64) {
+    bytes[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+}
+
+/// Unsynchronized `timex` image. Adjustment fields stay zero because this
+/// kernel does not steer the clock. `time` is the current realtime clock.
+fn linux_timex_unsynchronized(modes: u32, realtime_nanos: u64) -> [u8; LINUX_TIMEX_BYTES] {
+    let mut bytes = [0u8; LINUX_TIMEX_BYTES];
+    let seconds = (realtime_nanos / 1_000_000_000) as i64;
+    let nanos = (realtime_nanos % 1_000_000_000) as i64;
+    let fraction = if modes & LINUX_ADJ_NANO != 0 {
+        nanos
+    } else {
+        nanos / 1000
+    };
+    linux_put_u32(&mut bytes, 0, modes);
+    linux_put_i64(&mut bytes, 24, 16_000_000);
+    linux_put_i64(&mut bytes, 32, 16_000_000);
+    linux_put_i32(&mut bytes, 40, LINUX_STA_UNSYNC);
+    linux_put_i64(&mut bytes, 56, 1);
+    linux_put_i64(&mut bytes, 72, seconds);
+    linux_put_i64(&mut bytes, 80, fraction);
+    linux_put_i64(&mut bytes, 88, 10_000);
+    bytes
+}
+
+fn sys_adjtimex_common(clock_id: usize, tx: usize) -> SysResult {
+    if tx == 0 || !linux_copy_range_is_resident(tx, LINUX_TIMEX_BYTES) {
+        return Err(SysError::EFAULT);
+    }
+    if let Some(errno) = syscall_logic::linux_clock_adjtime_reject(clock_id) {
+        return match errno {
+            syscall_logic::LINUX_ERRNO_EOPNOTSUPP => Err(SysError::EOPNOTSUPP),
+            _ => Err(SysError::EINVAL),
+        };
+    }
+    let modes = linux_read_user_u32(tx)?;
+    match syscall_logic::linux_adjtimex_effect(modes) {
+        syscall_logic::LinuxAdjtimexEffect::Read => {
+            let image = linux_timex_unsynchronized(modes, linux_realtime_nanos()?);
+            linux_copy_to_user(tx, &image)?;
+            Ok(syscall_logic::LINUX_TIME_ERROR as usize)
+        }
+        syscall_logic::LinuxAdjtimexEffect::Eperm => Err(SysError::EPERM),
+        syscall_logic::LinuxAdjtimexEffect::Einval => Err(SysError::EINVAL),
+    }
+}
+
+/// `settimeofday(2)`. Both pointers null is the Linux no-op. A timeval or
+/// timezone would require `CAP_SYS_TIME`, which this kernel does not grant,
+/// so the clock is left unchanged and the call returns `EPERM`.
+pub fn sys_settimeofday(tv: usize, tz: usize) -> SysResult {
+    if tv == 0 && tz == 0 {
+        return Ok(0);
+    }
+    if tv != 0 {
+        if !linux_copy_range_is_resident(tv, core::mem::size_of::<LinuxTimeval>()) {
+            return Err(SysError::EFAULT);
+        }
+        let requested = linux_read_user_timeval(tv)?;
+        if requested.tv_sec < 0 || !(0..1_000_000).contains(&requested.tv_usec) {
+            return Err(SysError::EINVAL);
+        }
+    }
+    if tz != 0 {
+        if !linux_copy_range_is_resident(tz, 8) {
+            return Err(SysError::EFAULT);
+        }
+        let mut zone = [0u8; 8];
+        linux_copy_from_user(tz, &mut zone)?;
+    }
+    Err(SysError::EPERM)
+}
+
+pub fn sys_adjtimex(tx: usize) -> SysResult {
+    sys_adjtimex_common(CLOCK_REALTIME, tx)
+}
+
+pub fn sys_clock_adjtime(clock_id: usize, tx: usize) -> SysResult {
+    sys_adjtimex_common(clock_id, tx)
 }
 
 pub fn sys_clock_nanosleep(clockid: usize, flags: usize, req: usize, rem: usize) -> SysResult {
@@ -16265,8 +16474,9 @@ fn sys_personality(persona: usize) -> SysResult {
     }
 }
 
-/// Audited table stubs. Security entries fail closed. Harmless and uncertain
-/// entries still return 0; an unclassified number in this path is ENOSYS.
+/// Audited table stubs. Security entries fail closed. Harmless entries still
+/// return 0. An uncertain entry would too, but none remain. An unclassified
+/// number in this path is ENOSYS.
 fn linux_audited_stub_result(syscall_num: u32) -> SysResult {
     match syscall_logic::linux_audited_stub(syscall_num) {
         Some(syscall_logic::LinuxAuditedStub::FailClosed(errno)) => linux_errno_result(errno),
@@ -16523,6 +16733,12 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_GETCPU => sys_getcpu(args[0], args[1], args[2]),
         num if num == LinuxSyscall::Fork as u32 => sys_fork(),
         num if num == LinuxSyscall::Vfork as u32 => sys_vfork(),
+        ARM64_SYS_SETTIMEOFDAY => sys_settimeofday(args[0], args[1]),
+        ARM64_SYS_ADJTIMEX => sys_adjtimex(args[0]),
+        ARM64_SYS_CLOCK_ADJTIME => sys_clock_adjtime(args[0], args[1]),
+        ARM64_SYS_SYNCFS => sys_syncfs(args[0]),
+        ARM64_SYS_SENDMMSG => sys_sendmmsg(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_SCHED_GETATTR => sys_sched_getattr(args[0], args[1], args[2], args[3]),
         num if syscall_logic::linux_audited_stub(num)
             == Some(syscall_logic::LinuxAuditedStub::Personality) =>
         {

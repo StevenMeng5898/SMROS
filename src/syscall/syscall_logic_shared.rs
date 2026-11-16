@@ -1125,6 +1125,11 @@ pub(crate) fn linux_epoll_pwait2_timeout_reject(
 pub(crate) const LINUX_ERRNO_EPERM: i32 = 1;
 pub(crate) const LINUX_ERRNO_EINVAL: i32 = 22;
 pub(crate) const LINUX_ERRNO_ENOSYS: i32 = 38;
+pub(crate) const LINUX_ERRNO_EOPNOTSUPP: i32 = 95;
+
+/// `adjtimex(2)` / `clock_adjtime(2)` success value for an unsynchronized clock.
+/// This is not an errno. `TIME_OK` is 0; `STA_UNSYNC` reports `TIME_ERROR`.
+pub(crate) const LINUX_TIME_ERROR: i32 = 5;
 
 pub(crate) const LINUX_PR_GET_DUMPABLE: usize = 3;
 pub(crate) const LINUX_PR_SET_DUMPABLE: usize = 4;
@@ -1139,14 +1144,17 @@ pub(crate) const LINUX_PR_GET_NO_NEW_PRIVS: usize = 39;
 
 /// How an audited “return 0 without doing the operation” syscall is treated.
 ///
-/// `FailClosed` is a protection, privilege, isolation, or memory-protection
-/// entry that must not report success. `Harmless` is an advisory or
+/// `FailClosed` must not report success. `Harmless` is an advisory or
 /// bookkeeping entry whose success does not grant authority. `Uncertain` is
-/// left unchanged. `Personality` has its own Linux-compatible rule.
+/// reserved for a stub whose Linux result is still deliberately deferred;
+/// none of the audited numbers use it. `Personality` has its own rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxAuditedStub {
     FailClosed(i32),
     Harmless,
+    /// Kept so a later stub can be deferred without changing the dispatcher.
+    /// No audited number is classified this way.
+    #[allow(dead_code)]
     Uncertain,
     Personality,
 }
@@ -1154,16 +1162,16 @@ pub(crate) enum LinuxAuditedStub {
 /// Classification of the syscall-table stubs that previously returned `Ok(0)`
 /// with no effect. `None` means the number is not one of those stubs.
 pub(crate) fn linux_audited_stub(syscall_num: u32) -> Option<LinuxAuditedStub> {
-    use LinuxAuditedStub::{FailClosed, Harmless, Personality, Uncertain};
+    use LinuxAuditedStub::{FailClosed, Harmless, Personality};
     const EPERM: i32 = LINUX_ERRNO_EPERM;
     const ENOSYS: i32 = LINUX_ERRNO_ENOSYS;
     Some(match syscall_num {
-        // Linux AIO. A fake context is a correctness bug, not a sandbox grant.
-        0 | 1 | 2 | 3 | 4 | 292 => Uncertain,
-        18 => Uncertain,          // lookup_dcookie
+        // Linux AIO has no context table. A zero return is a fake context id.
+        0 | 1 | 2 | 3 | 4 | 292 => FailClosed(ENOSYS),
+        18 => FailClosed(ENOSYS), // lookup_dcookie
         30 => FailClosed(EPERM),  // ioprio_set
         31 => Harmless,           // ioprio_get, default class
-        42 => Uncertain,          // nfsservctl
+        42 => FailClosed(ENOSYS), // nfsservctl
         58 => FailClosed(EPERM),  // vhangup
         60 => FailClosed(ENOSYS), // quotactl
         89 => FailClosed(EPERM),  // acct
@@ -1173,35 +1181,107 @@ pub(crate) fn linux_audited_stub(syscall_num: u32) -> Option<LinuxAuditedStub> {
         117 => FailClosed(EPERM),                          // ptrace
         128 => Harmless,                                   // restart_syscall
         142 => FailClosed(EPERM),                          // reboot
-        170 | 171 | 266 => Uncertain,                      // settimeofday, adjtimex, clock_adjtime
-        217 | 218 | 219 => FailClosed(ENOSYS),             // keyring
-        224 | 225 => FailClosed(EPERM),                    // swapon, swapoff
-        234 => Uncertain,                                  // remap_file_pages
-        235 | 236 | 237 => Uncertain,                      // mbind, get/set_mempolicy
-        238 | 239 => FailClosed(EPERM),                    // migrate_pages, move_pages
-        241 => FailClosed(ENOSYS),                         // perf_event_open
-        262 | 263 => FailClosed(EPERM),                    // fanotify
-        264 | 265 => FailClosed(ENOSYS),                   // name_to_handle_at, open_by_handle_at
-        267 | 269 => Uncertain,                            // syncfs, sendmmsg
-        270 | 271 => FailClosed(ENOSYS),                   // process_vm_readv/writev
-        272 => FailClosed(EPERM),                          // kcmp
-        274 => FailClosed(EPERM),                          // sched_setattr
-        275 => Uncertain,                                  // sched_getattr
-        280 => FailClosed(ENOSYS),                         // bpf
-        281 => FailClosed(ENOSYS),                         // execveat
-        282 => FailClosed(ENOSYS),                         // userfaultfd
-        284 => Harmless,                                   // mlock2
-        288 | 289 | 290 => FailClosed(ENOSYS),             // pkey
-        293 => Uncertain,                                  // rseq
-        424 => FailClosed(EPERM),                          // pidfd_send_signal
-        425 | 426 | 427 => FailClosed(ENOSYS),             // io_uring
+        // 170, 171, 266 are real handlers: settimeofday, adjtimex, clock_adjtime.
+        217 | 218 | 219 => FailClosed(ENOSYS), // keyring
+        224 | 225 => FailClosed(EPERM),        // swapon, swapoff
+        234 => FailClosed(ENOSYS),             // remap_file_pages
+        // No CONFIG_NUMA. Linux returns ENOSYS for the query as well as the writes.
+        235 | 236 | 237 => FailClosed(ENOSYS),
+        238 | 239 => FailClosed(EPERM), // migrate_pages, move_pages
+        241 => FailClosed(ENOSYS),      // perf_event_open
+        262 | 263 => FailClosed(EPERM), // fanotify
+        264 | 265 => FailClosed(ENOSYS), // name_to_handle_at, open_by_handle_at
+        // 267 syncfs and 269 sendmmsg are real handlers.
+        270 | 271 => FailClosed(ENOSYS), // process_vm_readv/writev
+        272 => FailClosed(EPERM),        // kcmp
+        274 => FailClosed(EPERM),        // sched_setattr
+        // 275 sched_getattr is a real query.
+        280 => FailClosed(ENOSYS), // bpf
+        281 => FailClosed(ENOSYS), // execveat
+        282 => FailClosed(ENOSYS), // userfaultfd
+        284 => Harmless,           // mlock2
+        288 | 289 | 290 => FailClosed(ENOSYS), // pkey
+        // glibc/musl treat ENOSYS as "rseq unavailable" and keep starting.
+        293 => FailClosed(ENOSYS),
+        424 => FailClosed(EPERM),              // pidfd_send_signal
+        425 | 426 | 427 => FailClosed(ENOSYS), // io_uring
         428 | 429 | 430 | 431 | 432 | 433 | 442 => FailClosed(ENOSYS), // new mount API
-        434 => FailClosed(ENOSYS),                         // pidfd_open
-        438 => FailClosed(EPERM),                          // pidfd_getfd
-        440 => FailClosed(EPERM),                          // process_madvise
-        444 | 445 | 446 => FailClosed(ENOSYS),             // landlock
+        434 => FailClosed(ENOSYS),             // pidfd_open
+        438 => FailClosed(EPERM),              // pidfd_getfd
+        440 => FailClosed(EPERM),              // process_madvise
+        444 | 445 | 446 => FailClosed(ENOSYS), // landlock
         _ => return None,
     })
+}
+
+/// What `adjtimex(2)` does with `timex.modes` when `CAP_SYS_TIME` is absent.
+///
+/// `modes == 0` and `ADJ_OFFSET_SS_READ` (`0xa001`) are reads. `ADJ_ADJTIME`
+/// without the offset bit is `EINVAL`. Every other non-zero mode would change
+/// the clock, so it is `EPERM` instead of a successful no-op.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxAdjtimexEffect {
+    Read,
+    Eperm,
+    Einval,
+}
+
+pub(crate) const fn linux_adjtimex_effect(modes: u32) -> LinuxAdjtimexEffect {
+    const ADJ_OFFSET: u32 = 0x0001;
+    const ADJ_NANO: u32 = 0x2000;
+    const ADJ_ADJTIME: u32 = 0x8000;
+    if modes & ADJ_ADJTIME != 0 {
+        if modes & ADJ_OFFSET == 0 {
+            return LinuxAdjtimexEffect::Einval;
+        }
+        if modes & ADJ_NANO != 0 {
+            return LinuxAdjtimexEffect::Read;
+        }
+        return LinuxAdjtimexEffect::Eperm;
+    }
+    if modes == 0 {
+        LinuxAdjtimexEffect::Read
+    } else {
+        LinuxAdjtimexEffect::Eperm
+    }
+}
+
+/// `clock_adjtime(2)` clock id. `CLOCK_REALTIME` continues into `adjtimex`.
+/// A known clock that cannot be steered is `EOPNOTSUPP`. An unknown id is
+/// `EINVAL`.
+pub(crate) const fn linux_clock_adjtime_reject(clock_id: usize) -> Option<i32> {
+    if clock_id == 0 {
+        return None;
+    }
+    if clock_id <= 7 || linux_cpu_clock_id_supported(clock_id) {
+        Some(LINUX_ERRNO_EOPNOTSUPP)
+    } else {
+        Some(LINUX_ERRNO_EINVAL)
+    }
+}
+
+pub(crate) const LINUX_SCHED_ATTR_SIZE_VER0: usize = 48;
+
+/// `sched_getattr(2)` rejects a null buffer, a short or huge size, nonzero
+/// flags, and a negative pid before it looks up a task. `None` means those
+/// arguments are shaped like a real query.
+pub(crate) const fn linux_sched_getattr_reject(
+    pid: usize,
+    attr: usize,
+    size: usize,
+    flags: usize,
+) -> Option<i32> {
+    let negative_pid = (pid as u32 as i32) < 0;
+    if flags != 0
+        || attr == 0
+        || size < LINUX_SCHED_ATTR_SIZE_VER0
+        || size > 4096
+        || negative_pid
+    {
+        Some(LINUX_ERRNO_EINVAL)
+    } else {
+        None
+    }
 }
 
 /// `personality(2)` without an execution-domain change.
