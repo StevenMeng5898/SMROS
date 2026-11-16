@@ -239,6 +239,144 @@ impl LinuxSleepWait {
             precision_deadline_nanoseconds: None,
         }
     }
+
+    /// Monotonic time at which this sleep is allowed to return.
+    ///
+    /// Tick sleeps are quantized by the scheduler period. Precision sleeps
+    /// already store an absolute monotonic deadline.
+    pub(crate) const fn wake_monotonic_nanos(self, tick_nanos: u64) -> u64 {
+        if let Some(deadline) = self.precision_deadline_nanoseconds {
+            deadline
+        } else {
+            self.deadline.saturating_mul(tick_nanos)
+        }
+    }
+}
+
+/// Threads that must run a SIGEV_THREAD notification before later sleeps return.
+///
+/// A catch-up interrupt can observe a 0.5s timer and a 1s `sleep` as both due.
+/// Waking the sleeper in that same interrupt lets it exit, and the parent can
+/// leave `waitpid` before glibc's helper has created the notification thread.
+/// The gate keeps those later sleeps blocked until the helper and any thread
+/// it creates have finished, or until a bounded number of scans have passed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TimerNotifyGate {
+    active: bool,
+    not_before_nanos: u64,
+    threads: [usize; TIMER_NOTIFY_GATE_THREADS],
+    len: usize,
+    deferrals: u16,
+    held_sleep: bool,
+}
+
+const TIMER_NOTIFY_GATE_THREADS: usize = 8;
+/// Safety valve if a notification callback blocks on the sleeper it is holding.
+const TIMER_NOTIFY_GATE_DEFER_CAP: u16 = 200;
+
+impl TimerNotifyGate {
+    pub(crate) const EMPTY: Self = Self {
+        active: false,
+        not_before_nanos: 0,
+        threads: [0; TIMER_NOTIFY_GATE_THREADS],
+        len: 0,
+        deferrals: 0,
+        held_sleep: false,
+    };
+
+    pub(crate) const fn not_before_nanos(self) -> u64 {
+        self.not_before_nanos
+    }
+
+    pub(crate) const fn held_sleep(self) -> bool {
+        self.held_sleep
+    }
+
+    pub(crate) fn arm(&mut self, scheduler_thread: usize, not_before_nanos: u64) {
+        if scheduler_thread == 0 {
+            return;
+        }
+        if !self.active {
+            *self = Self::EMPTY;
+            self.active = true;
+            self.not_before_nanos = not_before_nanos;
+        } else if not_before_nanos < self.not_before_nanos {
+            self.not_before_nanos = not_before_nanos;
+        }
+        let _ = self.insert(scheduler_thread);
+    }
+
+    pub(crate) fn note_spawn(&mut self, creator: usize, child: usize) {
+        if self.contains(creator) {
+            let _ = self.insert(child);
+        }
+    }
+
+    /// The helper returning to `sigwait` has finished this notification.
+    /// Futex and sleep blocks inside `pthread_create` must keep the gate.
+    pub(crate) fn note_signal_wait(&mut self, scheduler_thread: usize) -> bool {
+        self.remove_if_idle(scheduler_thread)
+    }
+
+    pub(crate) fn note_exit(&mut self, scheduler_thread: usize) -> bool {
+        self.remove_if_idle(scheduler_thread)
+    }
+
+    /// Returns whether the safety cap opened the gate.
+    pub(crate) fn note_deferred_scan(&mut self) -> bool {
+        if !self.active {
+            return false;
+        }
+        self.held_sleep = true;
+        self.deferrals = self.deferrals.saturating_add(1);
+        if self.deferrals >= TIMER_NOTIFY_GATE_DEFER_CAP {
+            *self = Self::EMPTY;
+            return true;
+        }
+        false
+    }
+
+    pub(crate) const fn blocks_sleep(self, sleep_wake_nanos: u64) -> bool {
+        self.active && sleep_wake_nanos >= self.not_before_nanos
+    }
+
+    fn contains(&self, scheduler_thread: usize) -> bool {
+        self.active && self.threads[..self.len].contains(&scheduler_thread)
+    }
+
+    fn insert(&mut self, scheduler_thread: usize) -> bool {
+        if !self.active || scheduler_thread == 0 || self.contains(scheduler_thread) {
+            return self.active && scheduler_thread != 0;
+        }
+        if self.len >= self.threads.len() {
+            return false;
+        }
+        self.threads[self.len] = scheduler_thread;
+        self.len += 1;
+        true
+    }
+
+    /// True when this removal emptied a gate that had held a sleeper.
+    fn remove_if_idle(&mut self, scheduler_thread: usize) -> bool {
+        if !self.contains(scheduler_thread) {
+            return false;
+        }
+        let Some(index) = self.threads[..self.len]
+            .iter()
+            .position(|thread| *thread == scheduler_thread)
+        else {
+            return false;
+        };
+        self.threads[index] = self.threads[self.len - 1];
+        self.threads[self.len - 1] = 0;
+        self.len -= 1;
+        if self.len != 0 {
+            return false;
+        }
+        let held = self.held_sleep;
+        *self = Self::EMPTY;
+        held
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2027,14 +2165,29 @@ impl<const N: usize> LinuxTaskTable<N> {
         expired
     }
 
+    #[allow(dead_code)]
     pub(crate) fn expire_one_sleep(
         &mut self,
         now: u64,
     ) -> Option<(usize, usize, LinuxBlockReason)> {
+        self.expire_one_sleep_gated(now, &TimerNotifyGate::EMPTY, 10_000_000)
+            .0
+    }
+
+    /// Expire one coarse sleep, skipping waits the notification gate still holds.
+    ///
+    /// The boolean is true when at least one due sleep was left blocked.
+    pub(crate) fn expire_one_sleep_gated(
+        &mut self,
+        now: u64,
+        gate: &TimerNotifyGate,
+        tick_nanos: u64,
+    ) -> (Option<(usize, usize, LinuxBlockReason)>, bool) {
         if N == 0 {
-            return None;
+            return (None, false);
         }
         let start = self.sleep_expiry_cursor % N;
+        let mut deferred = false;
         for offset in 0..N {
             let index = (start + offset) % N;
             let task = self.tasks[index];
@@ -2047,21 +2200,39 @@ impl<const N: usize> LinuxTaskTable<N> {
                 && wait.precision_deadline_nanoseconds.is_none()
                 && wait.deadline <= now
             {
+                if gate.blocks_sleep(wait.wake_monotonic_nanos(tick_nanos)) {
+                    deferred = true;
+                    continue;
+                }
                 wait.outcome = LinuxSleepOutcome::Completed;
                 self.sleep_expiry_cursor = (index + 1) % N;
-                return Some((task.tid, task.scheduler_thread, task.block_reason));
+                return (
+                    Some((task.tid, task.scheduler_thread, task.block_reason)),
+                    deferred,
+                );
             }
         }
-        None
+        (None, deferred)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn expire_precision_sleep(
         &mut self,
         now_nanoseconds: u64,
     ) -> Option<(usize, usize, LinuxBlockReason)> {
+        self.expire_precision_sleep_gated(now_nanoseconds, &TimerNotifyGate::EMPTY)
+            .0
+    }
+
+    pub(crate) fn expire_precision_sleep_gated(
+        &mut self,
+        now_nanoseconds: u64,
+        gate: &TimerNotifyGate,
+    ) -> (Option<(usize, usize, LinuxBlockReason)>, bool) {
         if N == 0 {
-            return None;
+            return (None, false);
         }
+        let mut deferred = false;
         for index in 0..N {
             let task = self.tasks[index];
             let Some(wait) = self.sleep_waits[index].as_mut() else {
@@ -2076,10 +2247,18 @@ impl<const N: usize> LinuxTaskTable<N> {
             {
                 continue;
             }
+            let deadline = wait.precision_deadline_nanoseconds.unwrap_or(0);
+            if gate.blocks_sleep(deadline) {
+                deferred = true;
+                continue;
+            }
             wait.outcome = LinuxSleepOutcome::Completed;
-            return Some((task.tid, task.scheduler_thread, task.block_reason));
+            return (
+                Some((task.tid, task.scheduler_thread, task.block_reason)),
+                deferred,
+            );
         }
-        None
+        (None, deferred)
     }
 
     pub(crate) fn next_precision_sleep_deadline(&self) -> Option<u64> {

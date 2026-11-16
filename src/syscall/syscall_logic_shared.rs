@@ -751,6 +751,24 @@ impl LinuxPosixTimerCore {
         self.overrun
     }
 
+    /// Monotonic time of the armed deadline, before `expire` consumes it.
+    pub(crate) fn due_monotonic_nanos(&self, realtime_offset_nanoseconds: i64) -> Option<u64> {
+        let deadline = self.deadline?;
+        match self.deadline_clock {
+            LinuxPosixClock::Monotonic
+            | LinuxPosixClock::ProcessCpu
+            | LinuxPosixClock::ThreadCpu => Some(deadline),
+            LinuxPosixClock::Realtime => {
+                let monotonic = i128::from(deadline) - i128::from(realtime_offset_nanoseconds);
+                if monotonic <= 0 {
+                    Some(0)
+                } else {
+                    u64::try_from(monotonic).ok()
+                }
+            }
+        }
+    }
+
     pub(crate) fn next_hardware_deadline(
         &self,
         realtime_offset_nanoseconds: i64,
