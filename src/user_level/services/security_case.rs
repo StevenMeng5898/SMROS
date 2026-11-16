@@ -181,6 +181,8 @@ const PREPARE_STALE: u8 = 2;
 const PREPARE_RIGHTS: u8 = 3;
 const PREPARE_CLOSED_FD: u8 = 4;
 static FOREIGN_PHYS: AtomicUsize = AtomicUsize::new(0);
+static UACCESS_PEER_DONE: AtomicBool = AtomicBool::new(false);
+static UACCESS_CANARY: AtomicU64 = AtomicU64::new(0x00C0_FFEE);
 #[cfg(target_arch = "aarch64")]
 static mut FOREIGN_SPACE: Option<crate::kernel_lowlevel::Aarch64AddressSpace> = None;
 #[cfg(target_arch = "aarch64")]
@@ -612,6 +614,10 @@ enum Judge {
     ClosedFd,
     /// EL0 getpid with no Linux process returns ESRCH.
     GetpidAbsent,
+    /// EL0 copies follow the saved SPSR. A user pointer is translated. A kernel
+    /// address or an illegal range returns EFAULT, including after another
+    /// thread has entered and left its own syscall.
+    El0Uaccess,
     /// Undefined instruction or unaligned access kills only this process.
     /// A second thread must finish after the fault is observed.
     PeerTrap,
@@ -646,7 +652,7 @@ macro_rules! syscall_case {
     };
 }
 
-fn cases() -> [Case; 82] {
+fn cases() -> [Case; 83] {
     let enosys = errno_u64(38);
     let eperm = errno_u64(1);
     let einval = errno_u64(22);
@@ -886,6 +892,17 @@ fn cases() -> [Case; 82] {
             judge: Judge::GetpidAbsent,
         },
         Case {
+            id: "el0-uaccess",
+            op: 0,
+            target: 0,
+            value: 0,
+            sysno: 0,
+            a0: 0,
+            a1: 0,
+            a2: 0,
+            judge: Judge::El0Uaccess,
+        },
+        Case {
             id: "undef-insn",
             op: OP_UNDEF,
             target: 0,
@@ -1080,6 +1097,7 @@ fn execute(case: Case) -> FinishedCase {
     match case.judge {
         Judge::Later { stage, detail } => expected(stage, detail, false),
         Judge::GetpidAbsent => judge_getpid_absent(),
+        Judge::El0Uaccess => judge_el0_uaccess(),
         Judge::NoLinuxTask => run_no_linux_task(),
         Judge::Trap
         | Judge::Syscall(_)
@@ -1218,6 +1236,7 @@ fn judge(case: Case) -> FinishedCase {
         Judge::BadRights => judge_status(zircon_status(-12), "rights"),
         Judge::ClosedFd => judge_status(errno_u64(9), "ebadf"),
         Judge::GetpidAbsent => judge_getpid_absent(),
+        Judge::El0Uaccess => finished(Verdict::Fail, "wrong-path"),
         Judge::PeerTrap => judge_peer_trap(magic_ok, exec_ok, faulted),
         Judge::ExitFutex => judge_exit_code(0, "exit-group"),
         Judge::WaitOnce => judge_exit_code(1, "wait-once"),
@@ -1311,11 +1330,147 @@ fn judge_status(expected_result: u64, detail: &'static str) -> FinishedCase {
 fn judge_getpid_absent() -> FinishedCase {
     linux_task::reset();
     linux_process::reset_launch();
-    let _guard = crate::syscall::uaccess::El0SyscallGuard::enter();
+    // SPSR 0 is EL0t. This thread is not inside the exception vector.
+    let _guard = crate::syscall::uaccess::El0SyscallGuard::enter_saved_spsr(0);
     match crate::syscall::sys_getpid() {
         Err(SysError::ESRCH) => finished(Verdict::Pass, "esrch"),
         _ => finished(Verdict::Fail, "not-esrch"),
     }
+}
+
+fn judge_el0_uaccess() -> FinishedCase {
+    let finished = judge_el0_uaccess_body();
+    linux_task::reset();
+    linux_process_memory::reset_launch();
+    finished
+}
+
+fn judge_el0_uaccess_body() -> FinishedCase {
+    linux_task::reset();
+    linux_process_memory::reset_launch();
+    UACCESS_CANARY.store(0x00C0_FFEE, Ordering::Relaxed);
+    UACCESS_PEER_DONE.store(false, Ordering::Relaxed);
+
+    {
+        // EL1h is not an EL0 entry, even though a per-thread slot is occupied.
+        let _el1 = crate::syscall::uaccess::El0SyscallGuard::enter_saved_spsr(0x3C5);
+        if crate::syscall::uaccess::el0_syscall_active() {
+            return finished(Verdict::Fail, "el1-spsr");
+        }
+    }
+
+    let thread = scheduler::scheduler().current();
+    let Ok(pid) = linux_task::register_root(thread) else {
+        return finished(Verdict::Fail, "register");
+    };
+    if linux_process_memory::register_root(pid).is_err() {
+        return finished(Verdict::Fail, "address-space");
+    }
+    let mut page = [0u8; PAGE_SIZE];
+    let pattern = [0xE1u8, 0x0A, 0x5C, 0xE5, 0xA5, 0x5A, 0x11, 0x22];
+    page[..pattern.len()].copy_from_slice(&pattern);
+    let prot = linux_process_memory::LINUX_PROT_READ | linux_process_memory::LINUX_PROT_WRITE;
+    let mapped = linux_process_memory::map_current_with_contents(
+        Some(DATA_PAGE),
+        PAGE_SIZE,
+        prot,
+        1usize << 1,
+        linux_process_memory::LinuxMappingSource::Anonymous,
+        false,
+        &page,
+    );
+    let Ok(mapped) = mapped else {
+        return finished(Verdict::Fail, "map");
+    };
+    if mapped != DATA_PAGE {
+        return finished(Verdict::Fail, "map-addr");
+    }
+
+    let el0 = crate::syscall::uaccess::El0SyscallGuard::enter_saved_spsr(0);
+    if !crate::syscall::uaccess::el0_syscall_active() {
+        return finished(Verdict::Fail, "el0-spsr");
+    }
+    if scheduler::scheduler()
+        .create_thread_on_cpu(uaccess_peer_thread, "uaccess-peer", Some(0))
+        .is_none()
+    {
+        return finished(Verdict::Fail, "peer");
+    }
+    let start = crate::kernel_lowlevel::timer::get_nanoseconds();
+    while !UACCESS_PEER_DONE.load(Ordering::Acquire) {
+        yield_now();
+        if crate::kernel_lowlevel::timer::get_nanoseconds().saturating_sub(start) > CASE_TIMEOUT_NS
+        {
+            return finished(Verdict::Fail, "peer-timeout");
+        }
+    }
+    if !crate::syscall::uaccess::el0_syscall_active() {
+        return finished(Verdict::Fail, "mark-cleared");
+    }
+
+    let mut got = [0u8; 8];
+    if linux_process_memory::copy_from_current(DATA_PAGE, &mut got).is_err() {
+        return finished(Verdict::Fail, "user-fault");
+    }
+    if got != pattern {
+        return finished(Verdict::Fail, "user-mismatch");
+    }
+
+    let canary_addr = &UACCESS_CANARY as *const AtomicU64 as usize;
+    let poison = [0xFFu8; 8];
+    if linux_process_memory::copy_from_current(magic_address(), &mut got).is_ok() {
+        return finished(Verdict::Fail, "kernel-read");
+    }
+    if linux_process_memory::copy_to_current(canary_addr, &poison).is_ok()
+        || UACCESS_CANARY.load(Ordering::Relaxed) != 0x00C0_FFEE
+    {
+        UACCESS_CANARY.store(0x00C0_FFEE, Ordering::Relaxed);
+        return finished(Verdict::Fail, "kernel-write");
+    }
+    if linux_process_memory::copy_from_current(0, &mut got[..1]).is_ok() {
+        return finished(Verdict::Fail, "null");
+    }
+    if linux_process_memory::copy_from_current(0x1FFF_FFFC, &mut got).is_ok() {
+        return finished(Verdict::Fail, "overflow");
+    }
+    if linux_process_memory::copy_from_current(0x1800_0000, &mut got).is_ok() {
+        return finished(Verdict::Fail, "unmapped");
+    }
+
+    // No Linux pid. The peer already dropped its own entry. A single global
+    // slot would now raw-copy the kernel address.
+    linux_task::reset();
+    linux_process_memory::reset_launch();
+    if !crate::syscall::uaccess::el0_syscall_active() {
+        return finished(Verdict::Fail, "mark-cleared");
+    }
+    if linux_process_memory::copy_from_current(magic_address(), &mut got).is_ok() {
+        return finished(Verdict::Fail, "bypassed");
+    }
+    if linux_process_memory::copy_to_current(canary_addr, &poison).is_ok()
+        || UACCESS_CANARY.load(Ordering::Relaxed) != 0x00C0_FFEE
+    {
+        UACCESS_CANARY.store(0x00C0_FFEE, Ordering::Relaxed);
+        return finished(Verdict::Fail, "bypassed-write");
+    }
+    drop(el0);
+    if crate::syscall::uaccess::el0_syscall_active() {
+        return finished(Verdict::Fail, "still-el0");
+    }
+    if linux_process_memory::copy_from_current(canary_addr, &mut got).is_err()
+        || got != 0x00C0_FFEEu64.to_ne_bytes()
+    {
+        return finished(Verdict::Fail, "kernel-path");
+    }
+    finished(Verdict::Pass, "spsr-translated")
+}
+
+extern "C" fn uaccess_peer_thread() -> ! {
+    {
+        let _guard = crate::syscall::uaccess::El0SyscallGuard::enter_saved_spsr(0);
+    }
+    UACCESS_PEER_DONE.store(true, Ordering::Release);
+    linux_task::finish_current_without_el0_return();
 }
 
 fn judge_other_process() -> FinishedCase {

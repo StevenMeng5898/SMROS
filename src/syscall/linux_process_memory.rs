@@ -864,24 +864,36 @@ impl FallbackAddressSpace {
     }
 
     fn copy_to_user(&self, vaddr: usize, bytes: &[u8]) -> Result<(), SysError> {
-        if !super::syscall_logic::user_buffer_valid(vaddr, bytes.len()) {
-            return Err(SysError::EFAULT);
-        }
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), vaddr as *mut u8, bytes.len());
-        }
-        Ok(())
+        x86_64_raw_copy_to_user(vaddr, bytes)
     }
 
     fn copy_from_user(&self, vaddr: usize, out: &mut [u8]) -> Result<(), SysError> {
-        if !super::syscall_logic::user_buffer_valid(vaddr, out.len()) {
-            return Err(SysError::EFAULT);
-        }
-        unsafe {
-            core::ptr::copy_nonoverlapping(vaddr as *const u8, out.as_mut_ptr(), out.len());
-        }
-        Ok(())
+        x86_64_raw_copy_from_user(vaddr, out)
     }
+}
+
+/// Weak x86_64 copy. aarch64 does not compile these functions; a call from an
+/// aarch64 target is a compile error rather than a silent raw-pointer fallback.
+#[cfg(target_arch = "x86_64")]
+fn x86_64_raw_copy_to_user(vaddr: usize, bytes: &[u8]) -> Result<(), SysError> {
+    if !super::syscall_logic::user_buffer_valid(vaddr, bytes.len()) {
+        return Err(SysError::EFAULT);
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), vaddr as *mut u8, bytes.len());
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
+fn x86_64_raw_copy_from_user(vaddr: usize, out: &mut [u8]) -> Result<(), SysError> {
+    if !super::syscall_logic::user_buffer_valid(vaddr, out.len()) {
+        return Err(SysError::EFAULT);
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(vaddr as *const u8, out.as_mut_ptr(), out.len());
+    }
+    Ok(())
 }
 
 pub(crate) struct LinuxMemoryStats {
@@ -2647,21 +2659,46 @@ fn kernel_dispatch_copy_allowed(address: usize, len: usize) -> bool {
         && syscall_logic::user_buffer_valid(address, len)
 }
 
+fn el0_entry_forbids_raw_copy() -> bool {
+    // aarch64 decides from the per-thread saved SPSR. Other architectures keep
+    // their existing weak copy behavior.
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::syscall::uaccess::el0_syscall_active()
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        false
+    }
+}
+
 fn kernel_resident_copy_allowed(address: usize, len: usize) -> bool {
     // Kernel-thread callers (docker/runc, the user shell) pass kernel C strings
     // and stack buffers into Linux syscalls. There is no Linux process address
     // space on that scheduler thread, so walking user mappings returns ESRCH.
+    // An EL0 entry must not use that raw path, even when current_pid() fails
+    // after the thread was scheduled out.
+    if el0_entry_forbids_raw_copy() {
+        return false;
+    }
     syscall_logic::user_buffer_valid(address, len) && linux_process::current_pid().is_err()
 }
 
 fn in_process_kernel_copy_allowed(address: usize, len: usize) -> bool {
     // EL0 SVC must not raw-copy kernel memory, even when this thread has no
     // Linux pid or a kernel dispatch range is registered.
-    #[cfg(target_arch = "aarch64")]
-    if crate::syscall::uaccess::el0_syscall_active() {
+    if el0_entry_forbids_raw_copy() {
         return false;
     }
     kernel_dispatch_copy_allowed(address, len) || kernel_resident_copy_allowed(address, len)
+}
+
+fn el0_translation_error(error: SysError) -> SysError {
+    if error == SysError::ESRCH && el0_entry_forbids_raw_copy() {
+        SysError::EFAULT
+    } else {
+        error
+    }
 }
 
 pub(crate) fn copy_from_current(address: usize, out: &mut [u8]) -> Result<(), SysError> {
@@ -2685,7 +2722,7 @@ pub(crate) fn copy_from_current(address: usize, out: &mut [u8]) -> Result<(), Sy
         }
         return Ok(());
     }
-    with_current(|memory| memory.copy_from_user(address, out))
+    with_current(|memory| memory.copy_from_user(address, out)).map_err(el0_translation_error)
 }
 
 pub(crate) fn copy_to_current(address: usize, bytes: &[u8]) -> Result<(), SysError> {
@@ -2709,7 +2746,7 @@ pub(crate) fn copy_to_current(address: usize, bytes: &[u8]) -> Result<(), SysErr
         }
         return Ok(());
     }
-    with_current(|memory| memory.copy_to_user(address, bytes))
+    with_current(|memory| memory.copy_to_user(address, bytes)).map_err(el0_translation_error)
 }
 
 pub(crate) fn ensure_dispatch_memory(pid: usize) -> Result<(), SysError> {
@@ -3572,8 +3609,7 @@ impl LinuxProcessMemory {
                 .writable_physical(address)
                 .ok_or(SysError::EFAULT);
         }
-        #[cfg(not(target_arch = "aarch64"))]
-        #[cfg(not(target_arch = "riscv64"))]
+        #[cfg(target_arch = "x86_64")]
         {
             Ok(address)
         }
@@ -3585,7 +3621,9 @@ impl LinuxProcessMemory {
             .address_space
             .copy_to_user(address, bytes)
             .map_err(map_copy_address_error);
-        #[cfg(not(target_arch = "aarch64"))]
+        // x86_64's FallbackAddressSpace copy is a different function, compiled
+        // only for that target. Removing the aarch64 return does not select it.
+        #[cfg(any(target_arch = "riscv64", target_arch = "x86_64"))]
         self.address_space.copy_to_user(address, bytes)
     }
 
@@ -3598,7 +3636,7 @@ impl LinuxProcessMemory {
             .address_space
             .copy_from_user(address, out)
             .map_err(map_copy_address_error);
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(any(target_arch = "riscv64", target_arch = "x86_64"))]
         self.address_space.copy_from_user(address, out)
     }
 
