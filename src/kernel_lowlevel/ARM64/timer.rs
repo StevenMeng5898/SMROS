@@ -293,6 +293,22 @@ pub fn ensure_hardware_compare_can_wake() {
     if !lowlevel_logic::timer_compare_needs_rearm(hardware, now) {
         return;
     }
+    let precision = PRECISION_COMPARE.load(Ordering::Acquire);
+    // A stale compare does not raise another GICv3 edge. If a precision
+    // deadline is still ahead, program that instead of jumping a full
+    // scheduler tick past it. If it is already due, fire on the next count
+    // so the sleeper is not postponed by 10 ms.
+    if precision > now {
+        PROGRAMMED_COMPARE.store(precision, Ordering::Release);
+        write_cntp_cval_el0(precision);
+        return;
+    }
+    if precision != 0 {
+        let next = now.saturating_add(1);
+        PROGRAMMED_COMPARE.store(next, Ordering::Release);
+        write_cntp_cval_el0(next);
+        return;
+    }
     let period = TICK_PERIOD.load(Ordering::Relaxed);
     let next = lowlevel_logic::timer_rearm_compare(now, period);
     NEXT_PERIODIC_COMPARE.store(next, Ordering::Release);

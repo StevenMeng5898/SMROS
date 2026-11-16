@@ -170,9 +170,13 @@ pub(crate) const fn linux_mode_access_allowed(
 }
 
 const LINUX_POSIX_NANOS_PER_SECOND: u64 = 1_000_000_000;
+/// Covers `nanosleep(2s)` used by `timer_getoverrun/2-3.c`. A pure 100 Hz
+/// sleep of that length is late by up to one 10 ms tick, and the test's 1%
+/// overrun window is about 10 ms, so the tick wake sits on the failure edge.
+const LINUX_HYBRID_SLEEP_TAIL_MAX_NANOS: u64 = 2_100_000_000;
 
 pub(crate) const fn linux_hybrid_sleep_uses_precision_tail(requested_nanoseconds: u64) -> bool {
-    requested_nanoseconds != 0 && requested_nanoseconds < LINUX_POSIX_NANOS_PER_SECOND
+    requested_nanoseconds != 0 && requested_nanoseconds <= LINUX_HYBRID_SLEEP_TAIL_MAX_NANOS
 }
 
 pub(crate) const fn linux_clock_resolution_nanoseconds() -> i64 {
@@ -605,6 +609,42 @@ impl LinuxPosixTimerCore {
 
     pub(crate) fn acknowledge_notification(&mut self) {
         self.notification_pending = false;
+    }
+
+    /// Fold expirations since the last 100 Hz scan into the overrun count.
+    ///
+    /// Interval timers are otherwise sampled only on the scheduler tick. A
+    /// precision sleep can return between ticks, and delivering the blocked
+    /// signal clears `notification_pending` before `timer_getoverrun`, so the
+    /// read must account for that gap without arming another notification.
+    pub(crate) fn catch_up_overrun(&mut self, now_monotonic: u64, now_realtime: u64) {
+        if self.interval == 0 || (!self.notification_pending && !self.precision_deadline_consumed) {
+            return;
+        }
+        let Some(deadline) = self.deadline else {
+            return;
+        };
+        let now = Self::now_for(self.deadline_clock, now_monotonic, now_realtime);
+        if now < deadline {
+            return;
+        }
+        let Some(expirations) = now
+            .saturating_sub(deadline)
+            .checked_div(self.interval)
+            .and_then(|periods| periods.checked_add(1))
+        else {
+            self.overrun = u64::MAX;
+            self.deadline = None;
+            self.interval = 0;
+            return;
+        };
+        self.overrun = self.overrun.saturating_add(expirations);
+        self.deadline = expirations
+            .checked_mul(self.interval)
+            .and_then(|advance| deadline.checked_add(advance));
+        if self.deadline.is_none() {
+            self.interval = 0;
+        }
     }
 
     pub(crate) fn expire(&mut self, now_monotonic: u64, now_realtime: u64) -> bool {

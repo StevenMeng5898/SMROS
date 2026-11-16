@@ -1040,10 +1040,13 @@ mod syscall_logic {
     }
 
     #[test]
-    fn hybrid_sleep_precision_tail_is_reserved_for_subsecond_waits() {
+    fn hybrid_sleep_precision_tail_covers_two_second_overrun_sleep() {
         assert!(linux_hybrid_sleep_uses_precision_tail(100_000_001));
-        assert!(!linux_hybrid_sleep_uses_precision_tail(1_000_000_000));
-        assert!(!linux_hybrid_sleep_uses_precision_tail(2_100_000_000));
+        assert!(linux_hybrid_sleep_uses_precision_tail(1_000_000_000));
+        assert!(linux_hybrid_sleep_uses_precision_tail(2_000_000_000));
+        assert!(linux_hybrid_sleep_uses_precision_tail(2_100_000_000));
+        assert!(!linux_hybrid_sleep_uses_precision_tail(0));
+        assert!(!linux_hybrid_sleep_uses_precision_tail(2_100_000_001));
     }
 
     #[test]

@@ -5710,8 +5710,11 @@ fn acknowledge_linux_timer_notification(record: LinuxPendingSignal) {
 }
 
 fn acknowledge_linux_timer_identity((pid, timer_id): (usize, u32)) {
+    let now_monotonic = monotonic_nanos();
+    let now_realtime = linux_realtime_nanos().unwrap_or(now_monotonic);
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     if let Some(timer) = memory_state().linux_timer_mut(pid, timer_id) {
+        timer.catch_up_overrun(now_monotonic, now_realtime);
         timer.acknowledge_notification();
     }
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
@@ -11491,10 +11494,17 @@ pub fn sys_linux_timer_getoverrun(timerid: usize) -> SysResult {
     if memory_state().linux_timer_owned(pid, timerid as u32)
         && handle.is_some_and(|handle| compat::handle_known(HandleValue(handle)))
     {
+        let now_monotonic = monotonic_nanos();
+        let now_realtime = linux_realtime_nanos()?;
+        let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
         let overrun = memory_state()
-            .linux_timer(pid, timerid as u32)
-            .map(|timer| timer.overrun())
-            .ok_or(SysError::EINVAL)?;
+            .linux_timer_mut(pid, timerid as u32)
+            .map(|timer| {
+                timer.catch_up_overrun(now_monotonic, now_realtime);
+                timer.overrun()
+            });
+        crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+        let overrun = overrun.ok_or(SysError::EINVAL)?;
         Ok(overrun.min(i32::MAX as u64) as usize)
     } else {
         Err(SysError::EINVAL)
