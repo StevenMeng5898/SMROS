@@ -4147,28 +4147,67 @@ static int smros_pthread_cond_attr_clock(
     return target(attr, clock_id);
 }
 
-static void smros_pthread_private_cond_park(smros_pthread_cond_record *record) {
+static void smros_pthread_private_cond_park(
+    smros_pthread_cond_record *record,
+    const struct timespec *deadline,
+    int timed
+) {
     /*
      * Private condvars used to poll with nanosleep(50ms). That both delayed
      * broadcast (pthread_cond_broadcast/1-1.c) and spun a huge waiter set
      * through the high-resolution sleep path (1-2.c). Block on the sequence
      * word so signal/broadcast can FUTEX_WAKE immediately.
+     *
+     * CLOCK_REALTIME timed waits use an absolute FUTEX_CLOCK_REALTIME timeout
+     * capped at 50 ms so cancellation is still polled. clock_settime then
+     * wakes every waiter whose absolute timeout is already in the past,
+     * instead of leaving them on a relative monotonic slice.
      */
     uint32_t seq = __sync_fetch_and_add(&record->seq, 0);
-    const struct timespec pause = {
-        .tv_sec = 0,
-        .tv_nsec = 50000000L,
-    };
     int saved_errno = errno;
-    long waited = syscall(
-        SYS_futex,
-        &record->seq,
-        FUTEX_WAIT_PRIVATE,
-        seq,
-        &pause,
-        NULL,
-        0
-    );
+    long waited;
+    if (timed && deadline != NULL && record->clock_id == CLOCK_REALTIME) {
+        struct timespec until;
+        if (clock_gettime(CLOCK_REALTIME, &until) != 0) {
+            errno = saved_errno;
+            (void)sched_yield();
+            return;
+        }
+        until.tv_nsec += 50000000L;
+        if (until.tv_nsec >= SMROS_NSEC_PER_SEC) {
+            until.tv_nsec -= SMROS_NSEC_PER_SEC;
+            until.tv_sec++;
+        }
+        if (
+            deadline->tv_sec < until.tv_sec ||
+            (deadline->tv_sec == until.tv_sec && deadline->tv_nsec < until.tv_nsec)
+        ) {
+            until = *deadline;
+        }
+        waited = syscall(
+            SYS_futex,
+            &record->seq,
+            FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME,
+            seq,
+            &until,
+            NULL,
+            FUTEX_BITSET_MATCH_ANY
+        );
+    } else {
+        const struct timespec pause = {
+            .tv_sec = 0,
+            .tv_nsec = 50000000L,
+        };
+        waited = syscall(
+            SYS_futex,
+            &record->seq,
+            FUTEX_WAIT_PRIVATE,
+            seq,
+            &pause,
+            NULL,
+            0
+        );
+    }
     if (waited != 0) {
         int error = errno;
         if (error != EAGAIN && error != EINTR && error != ETIMEDOUT) {
@@ -4545,9 +4584,6 @@ static int smros_pthread_private_cond_wait_common(
             waiter_registered = 1;
             continue;
         }
-        if (smros_pthread_private_cond_consume_wakeup(record, self)) {
-            break;
-        }
         if (timed) {
             int clock_error = 0;
             if (
@@ -4562,7 +4598,10 @@ static int smros_pthread_private_cond_wait_common(
                 break;
             }
         }
-        smros_pthread_private_cond_park(record);
+        if (smros_pthread_private_cond_consume_wakeup(record, self)) {
+            break;
+        }
+        smros_pthread_private_cond_park(record, timed ? deadline : NULL, timed);
     }
 
     if (waiter_registered) {

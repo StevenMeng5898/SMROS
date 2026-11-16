@@ -139,14 +139,35 @@ fn wait(
     let restart_timeout = linux_task::current_restart_timeout();
     let deadline = match restart_timeout {
         Some(LinuxRestartTimeout::Infinite) => None,
-        Some(LinuxRestartTimeout::Deadline { ticks, realtime }) => Some(FutexDeadline {
+        Some(LinuxRestartTimeout::Deadline {
             ticks,
-            clock: if realtime {
-                FutexClock::Realtime
+            realtime,
+            absolute_realtime_nanoseconds,
+        }) => {
+            if let Some(absolute) = absolute_realtime_nanoseconds {
+                let ticks = futex_realtime_ticks_from_nanoseconds(
+                    absolute,
+                    super::syscall::linux_realtime_offset_nanoseconds(),
+                    LINUX_FUTEX_TICK_NANOS,
+                )
+                .unwrap_or(0);
+                Some(FutexDeadline {
+                    ticks,
+                    clock: FutexClock::Monotonic,
+                    absolute_realtime_nanoseconds: Some(absolute),
+                })
             } else {
-                FutexClock::Monotonic
-            },
-        }),
+                Some(FutexDeadline {
+                    ticks,
+                    clock: if realtime {
+                        FutexClock::Realtime
+                    } else {
+                        FutexClock::Monotonic
+                    },
+                    absolute_realtime_nanoseconds: None,
+                })
+            }
+        }
         Some(LinuxRestartTimeout::Unset) | None => {
             let deadline = match read_deadline(
                 timeout_pointer,
@@ -164,7 +185,9 @@ fn wait(
             let restart_timeout = deadline
                 .map(|deadline| LinuxRestartTimeout::Deadline {
                     ticks: deadline.ticks,
-                    realtime: deadline.clock == FutexClock::Realtime,
+                    realtime: deadline.absolute_realtime_nanoseconds.is_some()
+                        || deadline.clock == FutexClock::Realtime,
+                    absolute_realtime_nanoseconds: deadline.absolute_realtime_nanoseconds,
                 })
                 .unwrap_or(LinuxRestartTimeout::Infinite);
             let _ = linux_task::set_current_restart_timeout(restart_timeout);
@@ -294,6 +317,26 @@ fn wake(address: usize, requested: usize, bitset: u32) -> SysResult {
     }
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     Ok(woken)
+}
+
+pub(crate) fn refresh_realtime_waiters(now_monotonic: u64, realtime_offset_nanoseconds: i64) {
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    {
+        with_queue(|queue| {
+            queue.retarget_realtime_deadlines(realtime_offset_nanoseconds, LINUX_FUTEX_TICK_NANOS)
+        });
+        while let Some((tid, scheduler_thread)) =
+            with_queue(|queue| queue.expire_realtime_one(now_monotonic))
+        {
+            if !linux_task::wake_blocked(tid, scheduler_thread, LinuxBlockReason::Futex) {
+                let _ = with_queue(|queue| queue.take_outcome(tid, scheduler_thread));
+            }
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        let _ = (now_monotonic, realtime_offset_nanoseconds);
+    }
 }
 
 pub(crate) fn on_timer_tick(now_monotonic: u64, now_realtime: u64) {

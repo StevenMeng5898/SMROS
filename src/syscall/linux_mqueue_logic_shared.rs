@@ -61,6 +61,27 @@ pub(crate) struct LinuxMqueueNotification {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxMqueueDeadline {
     pub ticks: u64,
+    /// Absolute `CLOCK_REALTIME` nanoseconds. `ticks` is recomputed when that
+    /// clock jumps. Waits without this anchor stay on the monotonic tick clock.
+    pub absolute_realtime_nanoseconds: Option<u64>,
+}
+
+fn mqueue_realtime_deadline_ticks(
+    realtime_nanoseconds: u64,
+    realtime_offset_nanoseconds: i64,
+    tick_nanoseconds: u64,
+) -> Option<u64> {
+    if tick_nanoseconds == 0 {
+        return None;
+    }
+    let monotonic = i128::from(realtime_nanoseconds) - i128::from(realtime_offset_nanoseconds);
+    let monotonic = if monotonic <= 0 {
+        0
+    } else {
+        u64::try_from(monotonic).ok()?
+    };
+    let ticks = monotonic / tick_nanoseconds;
+    ticks.checked_add(u64::from(monotonic % tick_nanoseconds != 0))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -356,7 +377,10 @@ impl<const Q: usize, const H: usize, const W: usize> LinuxMqueueState<Q, H, W> {
             .best_message_index(index)
             .ok_or(LinuxMqueueError::WouldBlock)?;
         let queue_id = self.queues[index].id;
-        let message = self.queues[index].messages.swap_remove(message_index).message;
+        let message = self.queues[index]
+            .messages
+            .swap_remove(message_index)
+            .message;
         let sender = self.wake_one(queue_id, LinuxMqueueWaitKind::Send);
         Ok(LinuxMqueueReceiveOutcome { message, sender })
     }
@@ -433,7 +457,9 @@ impl<const Q: usize, const H: usize, const W: usize> LinuxMqueueState<Q, H, W> {
             }) else {
                 break;
             };
-            let waiter = self.waiters[index].as_mut().expect("selected mqueue waiter");
+            let waiter = self.waiters[index]
+                .as_mut()
+                .expect("selected mqueue waiter");
             waiter.outcome = LinuxMqueueWaitOutcome::TimedOut;
             identities[selected_count] = Some((waiter.tid, waiter.scheduler_thread));
             selected_count += 1;
@@ -447,6 +473,48 @@ impl<const Q: usize, const H: usize, const W: usize> LinuxMqueueState<Q, H, W> {
                 && waiter
                     .deadline
                     .is_some_and(|deadline| deadline.ticks <= now)
+        })?;
+        let waiter = self.waiters[index]
+            .as_mut()
+            .expect("selected mqueue waiter");
+        waiter.outcome = LinuxMqueueWaitOutcome::TimedOut;
+        Some((waiter.tid, waiter.scheduler_thread))
+    }
+
+    pub(crate) fn retarget_realtime_deadlines(
+        &mut self,
+        realtime_offset_nanoseconds: i64,
+        tick_nanoseconds: u64,
+    ) {
+        for slot in &mut self.waiters {
+            let Some(waiter) = slot.as_mut() else {
+                continue;
+            };
+            if waiter.outcome != LinuxMqueueWaitOutcome::Waiting {
+                continue;
+            }
+            let Some(deadline) = waiter.deadline.as_mut() else {
+                continue;
+            };
+            let Some(absolute) = deadline.absolute_realtime_nanoseconds else {
+                continue;
+            };
+            if let Some(ticks) = mqueue_realtime_deadline_ticks(
+                absolute,
+                realtime_offset_nanoseconds,
+                tick_nanoseconds,
+            ) {
+                deadline.ticks = ticks;
+            }
+        }
+    }
+
+    pub(crate) fn expire_realtime_one(&mut self, now: u64) -> Option<(usize, usize)> {
+        let index = self.oldest_waiter_index(|waiter| {
+            waiter.outcome == LinuxMqueueWaitOutcome::Waiting
+                && waiter.deadline.is_some_and(|deadline| {
+                    deadline.absolute_realtime_nanoseconds.is_some() && deadline.ticks <= now
+                })
         })?;
         let waiter = self.waiters[index]
             .as_mut()
@@ -507,7 +575,9 @@ impl<const Q: usize, const H: usize, const W: usize> LinuxMqueueState<Q, H, W> {
     }
 
     fn validate_new_handle(&self, handle: u32) -> Result<(), LinuxMqueueError> {
-        if handle == 0 || self.open_handle_count() >= H || self.queue_index_by_handle(handle).is_some()
+        if handle == 0
+            || self.open_handle_count() >= H
+            || self.queue_index_by_handle(handle).is_some()
         {
             return Err(LinuxMqueueError::Capacity);
         }
@@ -562,17 +632,15 @@ impl<const Q: usize, const H: usize, const W: usize> LinuxMqueueState<Q, H, W> {
         selected
     }
 
-    fn wake_one(
-        &mut self,
-        queue_id: u64,
-        kind: LinuxMqueueWaitKind,
-    ) -> Option<(usize, usize)> {
+    fn wake_one(&mut self, queue_id: u64, kind: LinuxMqueueWaitKind) -> Option<(usize, usize)> {
         let index = self.oldest_waiter_index(|waiter| {
             waiter.queue_id == queue_id
                 && waiter.kind == kind
                 && waiter.outcome == LinuxMqueueWaitOutcome::Waiting
         })?;
-        let waiter = self.waiters[index].as_mut().expect("selected mqueue waiter");
+        let waiter = self.waiters[index]
+            .as_mut()
+            .expect("selected mqueue waiter");
         waiter.outcome = LinuxMqueueWaitOutcome::Woken;
         Some((waiter.tid, waiter.scheduler_thread))
     }

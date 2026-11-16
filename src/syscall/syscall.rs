@@ -7899,7 +7899,10 @@ fn linux_mqueue_deadline(
     };
     let ticks = target_monotonic / LINUX_SIGNAL_TICK_NANOS
         + u64::from(target_monotonic % LINUX_SIGNAL_TICK_NANOS != 0);
-    Ok(Some(linux_mqueue::LinuxMqueueDeadline { ticks }))
+    Ok(Some(linux_mqueue::LinuxMqueueDeadline {
+        ticks,
+        absolute_realtime_nanoseconds: Some(requested_realtime),
+    }))
 }
 
 fn linux_write_sleep_remaining(address: usize, wait: LinuxSleepWait) -> SysResult {
@@ -12018,6 +12021,21 @@ pub fn sys_clock_settime(clockid: usize, tp: usize) -> SysResult {
     let expired =
         linux_task::refresh_realtime_sleep_deadlines(now, offset, LINUX_SIGNAL_TICK_NANOS);
     wake_linux_sleep_outcomes(expired);
+    // Absolute CLOCK_REALTIME waits keep a monotonic tick deadline so the
+    // scheduler can expire them. A forward jump must wake them now, and a
+    // backward jump must push the deadline out, before the next 10 ms tick.
+    linux_futex::refresh_realtime_waiters(now, offset);
+    linux_mqueue::refresh_realtime_timeouts(now, offset, LINUX_SIGNAL_TICK_NANOS);
+    deliver_linux_posix_timer_signals_from_irq();
+    // Re-arm only a deadline that is already due or due within one tick.
+    // A far CLOCK_REALTIME deadline must not replace a stale periodic compare:
+    // that programs the timer for the far value and stops the 100 Hz tick.
+    if let Some(deadline) = next_linux_posix_timer_deadline() {
+        let now_ns = monotonic_nanos();
+        if deadline <= now_ns.saturating_add(LINUX_SIGNAL_TICK_NANOS) {
+            crate::kernel_lowlevel::timer::arm_at_nanoseconds(deadline);
+        }
+    }
     Ok(0)
 }
 
