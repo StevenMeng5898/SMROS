@@ -760,6 +760,7 @@ pub fn test_all_overall_pass(
     iterations: usize,
     host_passes: [usize; 2],
     suites: &HermesSuitePhases,
+    shm_mode_ok: bool,
 ) -> bool {
     native_ok
         && op_timeouts == 0
@@ -767,6 +768,7 @@ pub fn test_all_overall_pass(
         && host_passes.iter().all(|passes| *passes == iterations)
         && posix_phase_pass(&suites.posix)
         && sectest_phase_pass(&suites.sectest)
+        && shm_mode_ok
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

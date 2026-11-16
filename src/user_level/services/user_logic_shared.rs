@@ -263,6 +263,19 @@ pub(crate) const fn fxfs_unlinked_object_reclaimable(
     link_count == 0 && open_references == 0
 }
 
+/// Boot directories whose mode is part of the POSIX contract. `/dev/shm` must
+/// stay `040755`: mode `0777` lets a non-owner `shm_unlink` succeed, and
+/// Open POSIX `shm_unlink/8-1.c` / `9-1.c` then return unresolved.
+pub(crate) const FXFS_SYSTEM_DIRECTORY_MODE: u32 = 0o040755;
+
+pub(crate) fn fxfs_system_directory_mode_locked(path: &str) -> bool {
+    path == "/" || path == "/dev" || path == "/dev/shm"
+}
+
+pub(crate) fn fxfs_system_directory_mode_change_allowed(path: &str, new_mode: u32) -> bool {
+    !fxfs_system_directory_mode_locked(path) || new_mode == FXFS_SYSTEM_DIRECTORY_MODE
+}
+
 macro_rules! smros_user_fxfs_append_size_body {
     ($old_size:expr, $append_len:expr) => {{
         $old_size.checked_add($append_len)

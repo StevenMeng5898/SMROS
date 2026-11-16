@@ -32,7 +32,7 @@ const FXFS_BLOCK_SLOT_COUNT: usize = 2;
 const FXFS_MIN_SLOT_BYTES: usize = 64 * 1024;
 const FXFS_DEFAULT_UID: u32 = 0;
 const FXFS_DEFAULT_GID: u32 = 0;
-const FXFS_DIR_MODE: u32 = 0o040755;
+const FXFS_DIR_MODE: u32 = user_logic::FXFS_SYSTEM_DIRECTORY_MODE;
 const FXFS_FILE_MODE: u32 = 0o100644;
 const FXFS_ROOT_LINK_COUNT: u32 = 2;
 const FXFS_FILE_LINK_COUNT: u32 = 1;
@@ -92,6 +92,7 @@ pub enum FxfsError {
     InvalidOffset,
     StorageUnavailable,
     StorageCorrupt,
+    PermissionDenied,
 }
 
 impl FxfsError {
@@ -108,6 +109,7 @@ impl FxfsError {
             FxfsError::InvalidOffset => "invalid-offset",
             FxfsError::StorageUnavailable => "storage-unavailable",
             FxfsError::StorageCorrupt => "storage-corrupt",
+            FxfsError::PermissionDenied => "permission-denied",
         }
     }
 }
@@ -804,6 +806,7 @@ impl FxfsState {
                     self.suspend_persist();
                     let result = (|| {
                         self.ensure_dir_tree("/dev/shm")?;
+                        self.restore_locked_directory_modes()?;
                         self.ensure_dir_tree(FXFS_SHARED_ROOT)?;
                         let purged_ephemeral_shm = self.purge_ephemeral_shm()?;
                         self.install_default_configs()?;
@@ -1891,6 +1894,24 @@ impl FxfsState {
         Ok(())
     }
 
+    /// Put `/`, `/dev`, and `/dev/shm` back to mode `040755` when a previous
+    /// image stored something else. `set_attrs` allows this exact mode and
+    /// rejects every other mode on those paths.
+    fn restore_locked_directory_modes(&mut self) -> Result<(), FxfsError> {
+        for path in ["/", "/dev", "/dev/shm"] {
+            let Ok(index) = self.resolve_path(path) else {
+                continue;
+            };
+            if self.objects[index].attrs.mode == user_logic::FXFS_SYSTEM_DIRECTORY_MODE {
+                continue;
+            }
+            let uid = self.objects[index].attrs.uid;
+            let gid = self.objects[index].attrs.gid;
+            self.set_attrs(path, user_logic::FXFS_SYSTEM_DIRECTORY_MODE, uid, gid)?;
+        }
+        Ok(())
+    }
+
     fn ensure_dir_tree(&mut self, path: &str) -> Result<(), FxfsError> {
         self.ensure_mounted()?;
         if path == "/" {
@@ -2275,6 +2296,14 @@ impl FxfsState {
         uid: u32,
         gid: u32,
     ) -> Result<FxfsAttributes, FxfsError> {
+        // `/`, `/dev`, and `/dev/shm` are kernel-owned. A caller with no
+        // credential check (the syscall fuzzer's direct setattr) must not
+        // widen them. The mode is stored on the inode and the next full-image
+        // persist, including `sync` while ordinary persists are suspended,
+        // writes it to the block device.
+        if !user_logic::fxfs_system_directory_mode_change_allowed(path, mode) {
+            return Err(FxfsError::PermissionDenied);
+        }
         let index = self.resolve_path(path)?;
         let sequence = self.next_sequence();
         self.objects[index].attrs.mode = mode;

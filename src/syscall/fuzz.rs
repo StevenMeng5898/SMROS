@@ -1848,7 +1848,10 @@ fn prepare_fuzz_paths() {
     let _ = fxfs::create_dir("/tmp");
     let _ = fxfs::create_dir("/dev");
     let _ = fxfs::create_dir("/dev/shm");
-    let _ = fxfs::set_attrs("/dev/shm", 0o40777, 0, 0);
+    // Leave `/dev/shm` at 040755. The dispatch identity is uid 0, and
+    // shm_open/shm_unlink of an object it owns does not need a world-writable
+    // directory. setattr of this path is rejected and would otherwise be
+    // stored in the next FxFS image.
     let _ = fxfs::unlink_file("/dev/shm/fz");
     let _ = fxfs::write_file("/tmp/smros-fuzz", b"smros syscall fuzz seed\n");
     let _ = fxfs::write_file("/tmp/smros-fuzz-alt", b"smros syscall fuzz alt\n");

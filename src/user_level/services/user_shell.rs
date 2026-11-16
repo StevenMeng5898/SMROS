@@ -5505,11 +5505,9 @@ fn run_hermes_opening_phases(
         HermesPosixPhase, HermesSectestPhase, HermesSuitePhases,
     };
 
-    // `posixtest all` must see a clean `/dev/shm` (mode 040755). `fuzzsc` in the
-    // later random loop chmods that directory to 0777 and the mode is persisted,
-    // which leaves shm_unlink/8-1.c and 9-1.c unresolved. Run the full POSIX
-    // suite once, before any fuzzsc, then sectest, then the iterations. A second
-    // pass at the end would run after that pollution, so it is not a gate.
+    // `posixtest all` runs once before the random loop. It is about 127k ticks,
+    // so it is not repeated. `/dev/shm` must stay mode 040755: the closing
+    // shm-mode phase runs a bounded fuzzsc and fails the campaign otherwise.
     let posix = if options.run_posixtest {
         run_hermes_posixtest_phase(ctx)
     } else {
@@ -5525,6 +5523,31 @@ fn run_hermes_opening_phases(
         HermesSectestPhase::skipped()
     };
     HermesSuitePhases { posix, sectest }
+}
+
+fn run_hermes_shm_mode_phase(ctx: &mut ShellContext) -> u32 {
+    ctx.serial.write_str(
+        "Hermes test-all phase shm-mode fuzzsc seed=1 iterations=1 time=1\n",
+    );
+    let _report = crate::syscall::fuzz_syscalls_with_config(crate::syscall::SyscallFuzzConfig {
+        seed: 1,
+        iterations: 1,
+        time_limit_ticks: FUZZ_TICKS_PER_SECOND,
+    });
+    let mode = crate::user_level::fxfs::attrs("/dev/shm")
+        .map(|attrs| attrs.mode)
+        .unwrap_or(0);
+    let ok = mode == crate::user_level::user_logic::FXFS_SYSTEM_DIRECTORY_MODE;
+    ctx.serial.write_str("Hermes phase shm-mode ");
+    ctx.serial.write_str(if ok { "pass" } else { "fail" });
+    ctx.serial.write_str(" mode=");
+    print_mode_octal(&mut ctx.serial, mode);
+    ctx.serial.write_str("\n");
+    mode
+}
+
+fn hermes_shm_mode_ok(mode: u32) -> bool {
+    mode == crate::user_level::user_logic::FXFS_SYSTEM_DIRECTORY_MODE
 }
 
 fn run_hermes_posixtest_phase(
@@ -5951,6 +5974,7 @@ fn run_hermes_test_all_inner(
         });
     }
 
+    let shm_mode = run_hermes_shm_mode_phase(ctx);
     finish_hermes_test_all(
         ctx,
         seed,
@@ -5964,6 +5988,7 @@ fn run_hermes_test_all_inner(
         &host_failures,
         op_timeouts,
         phases,
+        shm_mode,
         &mut report,
     );
 }
@@ -6431,6 +6456,7 @@ native=",
     report.push_str("resumed_from=");
     append_usize_shell(&mut report, state.next_round);
     report.push('\n');
+    let shm_mode = run_hermes_shm_mode_phase(ctx);
     finish_hermes_test_all(
         ctx,
         state.seed,
@@ -6444,6 +6470,7 @@ native=",
         &[state.host_ut_fail, state.host_it_fail],
         state.op_timeouts,
         state.suites,
+        shm_mode,
         &mut report,
     );
 }
@@ -6461,6 +6488,7 @@ fn finish_hermes_test_all(
     host_failures: &[usize; 2],
     op_timeouts: usize,
     suites: crate::user_level::services::hermes_shell_logic_shared::HermesSuitePhases,
+    shm_mode: u32,
     report: &mut String,
 ) {
     use crate::user_level::services::hermes_shell_logic_shared::{
@@ -6496,6 +6524,12 @@ fn finish_hermes_test_all(
         report.push('\n');
     }
     append_hermes_suite_report(report, &suites);
+    let shm_mode_ok = hermes_shm_mode_ok(shm_mode);
+    report.push_str("shm-mode phase=");
+    report.push_str(if shm_mode_ok { "pass" } else { "fail" });
+    report.push_str(" mode=");
+    append_mode_octal(report, shm_mode);
+    report.push('\n');
 
     let overall = test_all_overall_pass(
         native_ok,
@@ -6504,6 +6538,7 @@ fn finish_hermes_test_all(
         iterations,
         [host_passes[0], host_passes[1]],
         &suites,
+        shm_mode_ok,
     );
     report.push_str("overall=");
     report.push_str(if overall {
@@ -6534,6 +6569,12 @@ fn finish_hermes_test_all(
     }
     clear_hermes_resume_state();
     print_hermes_suite_lines(ctx, &suites);
+    ctx.serial.write_str("Hermes phase shm-mode ");
+    ctx.serial
+        .write_str(if shm_mode_ok { "pass" } else { "fail" });
+    ctx.serial.write_str(" mode=");
+    print_mode_octal(&mut ctx.serial, shm_mode);
+    ctx.serial.write_str("\n");
     ctx.serial.write_str("Replay: hermes test-all seed=");
     print_u64(&mut ctx.serial, seed);
     ctx.serial.write_str(" iterations=");
@@ -9060,6 +9101,7 @@ fn print_fxfs_error(ctx: &mut ShellContext, err: crate::user_level::fxfs::FxfsEr
         crate::user_level::fxfs::FxfsError::InvalidOffset => "invalid offset",
         crate::user_level::fxfs::FxfsError::StorageUnavailable => "storage unavailable",
         crate::user_level::fxfs::FxfsError::StorageCorrupt => "storage corrupt",
+        crate::user_level::fxfs::FxfsError::PermissionDenied => "permission denied",
     };
     ctx.serial.write_str(label);
 }
@@ -13181,6 +13223,32 @@ fn print_fixed_hex_byte(serial: &mut Serial, byte: u8) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     serial.write_byte(HEX[(byte >> 4) as usize]);
     serial.write_byte(HEX[(byte & 0x0f) as usize]);
+}
+
+fn print_mode_octal(serial: &mut Serial, mode: u32) {
+    let mut digits = [b'0'; 6];
+    let mut value = mode;
+    let mut index = digits.len();
+    while index > 0 {
+        index -= 1;
+        digits[index] = b'0' + (value & 7) as u8;
+        value >>= 3;
+    }
+    for digit in digits {
+        serial.write_byte(digit);
+    }
+}
+
+fn append_mode_octal(out: &mut String, mode: u32) {
+    let mut digits = [b'0'; 6];
+    let mut value = mode;
+    let mut index = digits.len();
+    while index > 0 {
+        index -= 1;
+        digits[index] = b'0' + (value & 7) as u8;
+        value >>= 3;
+    }
+    out.push_str(core::str::from_utf8(&digits).unwrap_or("000000"));
 }
 
 fn print_octal(serial: &mut Serial, mut num: u32) {

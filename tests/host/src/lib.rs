@@ -10425,6 +10425,30 @@ mod user_logic {
     }
 
     #[test]
+    fn system_directories_keep_mode_040755() {
+        assert_eq!(FXFS_SYSTEM_DIRECTORY_MODE, 0o040755);
+        assert!(fxfs_system_directory_mode_locked("/"));
+        assert!(fxfs_system_directory_mode_locked("/dev"));
+        assert!(fxfs_system_directory_mode_locked("/dev/shm"));
+        assert!(!fxfs_system_directory_mode_locked("/dev/shm/fz"));
+        assert!(!fxfs_system_directory_mode_locked("/tmp"));
+        assert!(fxfs_system_directory_mode_change_allowed(
+            "/dev/shm",
+            FXFS_SYSTEM_DIRECTORY_MODE
+        ));
+        assert!(!fxfs_system_directory_mode_change_allowed(
+            "/dev/shm",
+            0o40777
+        ));
+        assert!(!fxfs_system_directory_mode_change_allowed("/", 0o40777));
+        assert!(!fxfs_system_directory_mode_change_allowed("/dev", 0o40777));
+        assert!(fxfs_system_directory_mode_change_allowed(
+            "/tmp/smros-fuzz",
+            0o100777
+        ));
+    }
+
+    #[test]
     fn fxfs_hard_link_counts_retain_the_inode_until_the_last_name_is_removed() {
         assert_eq!(fxfs_link_count_after_link(1), Some(2));
         assert_eq!(fxfs_link_count_after_unlink(2), Some(1));
@@ -11710,7 +11734,24 @@ fn hermes_opening_suites_gate_test_all_and_round_trip() {
     };
     assert!(posix_phase_pass(&posix_ok));
     assert!(sectest_phase_pass(&sectest_ok));
-    assert!(test_all_overall_pass(true, 0, 100, 100, [100, 100], &suites_ok));
+    assert!(test_all_overall_pass(
+        true,
+        0,
+        100,
+        100,
+        [100, 100],
+        &suites_ok,
+        true
+    ));
+    assert!(!test_all_overall_pass(
+        true,
+        0,
+        100,
+        100,
+        [100, 100],
+        &suites_ok,
+        false
+    ));
     assert!(posix_phase_pass(&HermesPosixPhase::skipped()));
     assert!(sectest_phase_pass(&HermesSectestPhase::skipped()));
     assert!(posix_phase_pass(&HermesPosixPhase::legacy()));
@@ -11720,7 +11761,8 @@ fn hermes_opening_suites_gate_test_all_and_round_trip() {
         8,
         8,
         [8, 8],
-        &HermesSuitePhases::legacy()
+        &HermesSuitePhases::legacy(),
+        true
     ));
 
     let mut short = posix_ok;
@@ -11748,7 +11790,8 @@ fn hermes_opening_suites_gate_test_all_and_round_trip() {
         &HermesSuitePhases {
             posix: unresolved,
             sectest: sectest_ok,
-        }
+        },
+        true
     ));
 
     let mut xpass = sectest_ok;
@@ -11770,7 +11813,8 @@ fn hermes_opening_suites_gate_test_all_and_round_trip() {
         &HermesSuitePhases {
             posix: posix_ok,
             sectest: xpass,
-        }
+        },
+        true
     ));
     assert!(!test_all_overall_pass(
         true,
@@ -11778,7 +11822,8 @@ fn hermes_opening_suites_gate_test_all_and_round_trip() {
         100,
         100,
         [100, 100],
-        &suites_ok
+        &suites_ok,
+        true
     ));
     assert!(!test_all_overall_pass(
         true,
@@ -11786,7 +11831,8 @@ fn hermes_opening_suites_gate_test_all_and_round_trip() {
         99,
         100,
         [100, 100],
-        &suites_ok
+        &suites_ok,
+        true
     ));
 
     let mut pending = [0u8; 64];
