@@ -2016,7 +2016,10 @@ mod linux_mqueue_logic {
                 LinuxMqueueWaitKind::Receive,
                 11,
                 12,
-                Some(LinuxMqueueDeadline { ticks: 50 }),
+                Some(LinuxMqueueDeadline {
+                    ticks: 50,
+                    absolute_realtime_nanoseconds: None,
+                }),
             )
             .unwrap();
         assert_eq!(
@@ -2034,7 +2037,10 @@ mod linux_mqueue_logic {
                 LinuxMqueueWaitKind::Send,
                 21,
                 22,
-                Some(LinuxMqueueDeadline { ticks: 70 }),
+                Some(LinuxMqueueDeadline {
+                    ticks: 70,
+                    absolute_realtime_nanoseconds: None,
+                }),
             )
             .unwrap();
         assert_eq!(state.expire(69), [None, None, None, None]);
@@ -2066,7 +2072,10 @@ mod linux_mqueue_logic {
                 LinuxMqueueWaitKind::Receive,
                 11,
                 12,
-                Some(LinuxMqueueDeadline { ticks: 70 }),
+                Some(LinuxMqueueDeadline {
+                    ticks: 70,
+                    absolute_realtime_nanoseconds: None,
+                }),
             )
             .unwrap();
 
@@ -2845,6 +2854,7 @@ mod linux_task_logic {
             timeout: LinuxRestartTimeout::Deadline {
                 ticks: 99,
                 realtime: true,
+                absolute_realtime_nanoseconds: None,
             },
         };
         assert_eq!(
@@ -4172,6 +4182,7 @@ mod linux_task_logic {
         let deadline = LinuxRestartTimeout::Deadline {
             ticks: 91,
             realtime: false,
+            absolute_realtime_nanoseconds: None,
         };
         assert!(state.set_restart_timeout(deadline));
         let attached = state.take_restart_for_signal(true);
@@ -8175,6 +8186,7 @@ mod linux_futex_logic {
                 Some(FutexDeadline {
                     ticks: 5,
                     clock: FutexClock::Monotonic,
+                    absolute_realtime_nanoseconds: None,
                 }),
             ))
             .unwrap();
@@ -8187,6 +8199,7 @@ mod linux_futex_logic {
                 Some(FutexDeadline {
                     ticks: 12,
                     clock: FutexClock::Realtime,
+                    absolute_realtime_nanoseconds: None,
                 }),
             ))
             .unwrap();
@@ -8212,6 +8225,7 @@ mod linux_futex_logic {
                 Some(FutexDeadline {
                     ticks: 5,
                     clock: FutexClock::Monotonic,
+                    absolute_realtime_nanoseconds: None,
                 }),
             ))
             .unwrap();
@@ -8233,6 +8247,7 @@ mod linux_futex_logic {
             Some(FutexDeadline {
                 ticks: now,
                 clock: FutexClock::Monotonic,
+                absolute_realtime_nanoseconds: None,
             })
         );
         assert_eq!(
@@ -8248,6 +8263,7 @@ mod linux_futex_logic {
             Some(FutexDeadline {
                 ticks: 103,
                 clock: FutexClock::Monotonic,
+                absolute_realtime_nanoseconds: None,
             })
         );
         assert_eq!(
@@ -8263,6 +8279,7 @@ mod linux_futex_logic {
             Some(FutexDeadline {
                 ticks: 2,
                 clock: FutexClock::Monotonic,
+                absolute_realtime_nanoseconds: None,
             })
         );
         assert_eq!(
@@ -8278,8 +8295,65 @@ mod linux_futex_logic {
             Some(FutexDeadline {
                 ticks: 2,
                 clock: FutexClock::Monotonic,
+                absolute_realtime_nanoseconds: Some(20_000_000),
             })
         );
+    }
+
+    #[test]
+    fn realtime_futex_deadlines_follow_clock_offset_changes() {
+        let tick_nanoseconds = 10_000_000;
+        let mut queue = FutexQueue::<2>::new();
+        let realtime = futex_deadline_from_timeout(
+            FutexCommand::WaitBitset,
+            true,
+            100,
+            5,
+            0,
+            tick_nanoseconds,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            realtime.absolute_realtime_nanoseconds,
+            Some(5_000_000_000)
+        );
+        assert_eq!(realtime.ticks, 500);
+        queue
+            .push(waiter(
+                2,
+                8,
+                0x1000,
+                FUTEX_BITSET_MATCH_ANY,
+                Some(realtime),
+            ))
+            .unwrap();
+        queue
+            .push(waiter(
+                4,
+                9,
+                0x2000,
+                FUTEX_BITSET_MATCH_ANY,
+                Some(FutexDeadline {
+                    ticks: 40,
+                    clock: FutexClock::Monotonic,
+                    absolute_realtime_nanoseconds: None,
+                }),
+            ))
+            .unwrap();
+
+        queue.retarget_realtime_deadlines(-1_000_000_000, tick_nanoseconds);
+        assert_eq!(
+            queue.waiters[0].unwrap().deadline.unwrap().ticks,
+            600
+        );
+        assert_eq!(queue.waiters[1].unwrap().deadline.unwrap().ticks, 40);
+        assert_eq!(queue.expire_realtime_one(100), None);
+
+        queue.retarget_realtime_deadlines(7_000_000_000, tick_nanoseconds);
+        assert_eq!(queue.expire_realtime_one(100), Some((2, 8)));
+        assert_eq!(queue.expire_realtime_one(100), None);
+        assert_eq!(queue.waiters[1].unwrap().deadline.unwrap().ticks, 40);
     }
 
     #[test]

@@ -146,8 +146,8 @@ pub(crate) fn futex_realtime_deadline_ticks(
     let realtime_nanoseconds = i128::from(seconds)
         .checked_mul(i128::from(NANOS_PER_SECOND))?
         .checked_add(i128::from(nanoseconds))?;
-    let monotonic_nanoseconds = realtime_nanoseconds
-        .checked_sub(i128::from(realtime_offset_nanoseconds))?;
+    let monotonic_nanoseconds =
+        realtime_nanoseconds.checked_sub(i128::from(realtime_offset_nanoseconds))?;
     let monotonic_nanoseconds = if monotonic_nanoseconds <= 0 {
         0
     } else {
@@ -170,6 +170,37 @@ pub(crate) enum FutexClock {
 pub(crate) struct FutexDeadline {
     pub ticks: u64,
     pub clock: FutexClock,
+    /// Absolute `CLOCK_REALTIME` nanoseconds when this wait must move with
+    /// `clock_settime`. `ticks` is the monotonic deadline for the offset that
+    /// was current when the wait was last evaluated.
+    pub absolute_realtime_nanoseconds: Option<u64>,
+}
+
+pub(crate) fn futex_timespec_nanoseconds(seconds: i64, nanoseconds: i64) -> Option<u64> {
+    if !futex_timespec_valid(seconds, nanoseconds) {
+        return None;
+    }
+    u64::try_from(
+        i128::from(seconds)
+            .checked_mul(i128::from(NANOS_PER_SECOND))?
+            .checked_add(i128::from(nanoseconds))?,
+    )
+    .ok()
+}
+
+pub(crate) fn futex_realtime_ticks_from_nanoseconds(
+    absolute_realtime_nanoseconds: u64,
+    realtime_offset_nanoseconds: i64,
+    tick_nanoseconds: u64,
+) -> Option<u64> {
+    let seconds = i64::try_from(absolute_realtime_nanoseconds / NANOS_PER_SECOND).ok()?;
+    let nanoseconds = i64::try_from(absolute_realtime_nanoseconds % NANOS_PER_SECOND).ok()?;
+    futex_realtime_deadline_ticks(
+        seconds,
+        nanoseconds,
+        realtime_offset_nanoseconds,
+        tick_nanoseconds,
+    )
 }
 
 pub(crate) fn futex_deadline_from_timeout(
@@ -185,10 +216,12 @@ pub(crate) fn futex_deadline_from_timeout(
         (FutexCommand::Wait, false) => Some(FutexDeadline {
             ticks: futex_relative_deadline(now_monotonic, seconds, nanoseconds, tick_nanoseconds)?,
             clock: FutexClock::Monotonic,
+            absolute_realtime_nanoseconds: None,
         }),
         (FutexCommand::WaitBitset, false) => Some(FutexDeadline {
             ticks: futex_timespec_to_ticks_ceil(seconds, nanoseconds, tick_nanoseconds)?,
             clock: FutexClock::Monotonic,
+            absolute_realtime_nanoseconds: None,
         }),
         (FutexCommand::WaitBitset, true) => Some(FutexDeadline {
             ticks: futex_realtime_deadline_ticks(
@@ -198,6 +231,7 @@ pub(crate) fn futex_deadline_from_timeout(
                 tick_nanoseconds,
             )?,
             clock: FutexClock::Monotonic,
+            absolute_realtime_nanoseconds: Some(futex_timespec_nanoseconds(seconds, nanoseconds)?),
         }),
         _ => None,
     }
@@ -355,15 +389,60 @@ impl<const N: usize> FutexQueue<N> {
     ) -> Option<(usize, usize)> {
         let index = self.oldest_matching(|waiter| {
             waiter.outcome == FutexWaitOutcome::Waiting
-                && waiter.deadline.is_some_and(|deadline| match deadline.clock {
-                    FutexClock::Monotonic => smros_linux_futex_deadline_expired_body!(
-                        now_monotonic,
-                        deadline.ticks
-                    ),
-                    FutexClock::Realtime => smros_linux_futex_deadline_expired_body!(
-                        now_realtime,
-                        deadline.ticks
-                    ),
+                && waiter
+                    .deadline
+                    .is_some_and(|deadline| match deadline.clock {
+                        FutexClock::Monotonic => {
+                            smros_linux_futex_deadline_expired_body!(now_monotonic, deadline.ticks)
+                        }
+                        FutexClock::Realtime => {
+                            smros_linux_futex_deadline_expired_body!(now_realtime, deadline.ticks)
+                        }
+                    })
+        })?;
+        let waiter = self.waiters[index].as_mut().expect("selected futex waiter");
+        waiter.outcome = FutexWaitOutcome::TimedOut;
+        Some((waiter.tid, waiter.scheduler_thread))
+    }
+
+    /// Recompute monotonic tick deadlines for waits anchored to
+    /// `CLOCK_REALTIME` after `clock_settime` changes the realtime offset.
+    /// Monotonic and relative waits are left alone.
+    pub(crate) fn retarget_realtime_deadlines(
+        &mut self,
+        realtime_offset_nanoseconds: i64,
+        tick_nanoseconds: u64,
+    ) {
+        for slot in &mut self.waiters {
+            let Some(waiter) = slot.as_mut() else {
+                continue;
+            };
+            if waiter.outcome != FutexWaitOutcome::Waiting {
+                continue;
+            }
+            let Some(deadline) = waiter.deadline.as_mut() else {
+                continue;
+            };
+            let Some(absolute) = deadline.absolute_realtime_nanoseconds else {
+                continue;
+            };
+            if let Some(ticks) = futex_realtime_ticks_from_nanoseconds(
+                absolute,
+                realtime_offset_nanoseconds,
+                tick_nanoseconds,
+            ) {
+                deadline.ticks = ticks;
+                deadline.clock = FutexClock::Monotonic;
+            }
+        }
+    }
+
+    pub(crate) fn expire_realtime_one(&mut self, now_monotonic: u64) -> Option<(usize, usize)> {
+        let index = self.oldest_matching(|waiter| {
+            waiter.outcome == FutexWaitOutcome::Waiting
+                && waiter.deadline.is_some_and(|deadline| {
+                    deadline.absolute_realtime_nanoseconds.is_some()
+                        && smros_linux_futex_deadline_expired_body!(now_monotonic, deadline.ticks)
                 })
         })?;
         let waiter = self.waiters[index].as_mut().expect("selected futex waiter");

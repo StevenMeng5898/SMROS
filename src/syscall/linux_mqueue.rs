@@ -162,6 +162,26 @@ pub(crate) fn wait(
     result
 }
 
+pub(crate) fn refresh_realtime_timeouts(
+    now: u64,
+    realtime_offset_nanoseconds: i64,
+    tick_nanoseconds: u64,
+) {
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    {
+        with_state(|state| {
+            state.retarget_realtime_deadlines(realtime_offset_nanoseconds, tick_nanoseconds)
+        });
+        while let Some(identity) = with_state(|state| state.expire_realtime_one(now)) {
+            wake_identity(Some(identity));
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        let _ = (now, realtime_offset_nanoseconds, tick_nanoseconds);
+    }
+}
+
 pub(crate) fn on_timer_tick(now: u64) {
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     if crate::kernel_lowlevel::smp::current_cpu_id() == 0 {
