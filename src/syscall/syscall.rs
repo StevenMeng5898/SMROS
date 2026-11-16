@@ -4541,33 +4541,55 @@ pub(crate) fn release_shared_memory_attachment_reference(id: u32) -> bool {
 }
 
 fn linux_copy_from_user(address: usize, out: &mut [u8]) -> Result<(), SysError> {
+    #[cfg(target_arch = "x86_64")]
+    return x86_64_raw_copy_from_user(address, out);
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     return linux_process_memory::copy_from_current(address, out);
-    #[cfg(target_arch = "x86_64")]
-    {
-        if !syscall_logic::user_buffer_valid(address, out.len()) {
-            return Err(SysError::EFAULT);
-        }
-        unsafe {
-            core::ptr::copy_nonoverlapping(address as *const u8, out.as_mut_ptr(), out.len());
-        }
-        Ok(())
-    }
+    // aarch64 does not compile `x86_64_raw_copy_from_user`. Naming it from this
+    // architecture is a compile error, not a runtime fallback to the raw copy.
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )))]
+    compile_error!("user copy has no backend for this architecture");
 }
 
 fn linux_copy_to_user(address: usize, bytes: &[u8]) -> Result<(), SysError> {
+    #[cfg(target_arch = "x86_64")]
+    return x86_64_raw_copy_to_user(address, bytes);
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     return linux_process_memory::copy_to_current(address, bytes);
-    #[cfg(target_arch = "x86_64")]
-    {
-        if !syscall_logic::user_buffer_valid(address, bytes.len()) {
-            return Err(SysError::EFAULT);
-        }
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), address as *mut u8, bytes.len());
-        }
-        Ok(())
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )))]
+    compile_error!("user copy has no backend for this architecture");
+}
+
+/// Weak x86_64 copy-in. The symbol exists only for that architecture.
+#[cfg(target_arch = "x86_64")]
+fn x86_64_raw_copy_from_user(address: usize, out: &mut [u8]) -> Result<(), SysError> {
+    if !syscall_logic::user_buffer_valid(address, out.len()) {
+        return Err(SysError::EFAULT);
     }
+    unsafe {
+        core::ptr::copy_nonoverlapping(address as *const u8, out.as_mut_ptr(), out.len());
+    }
+    Ok(())
+}
+
+/// Weak x86_64 copy-out. The symbol exists only for that architecture.
+#[cfg(target_arch = "x86_64")]
+fn x86_64_raw_copy_to_user(address: usize, bytes: &[u8]) -> Result<(), SysError> {
+    if !syscall_logic::user_buffer_valid(address, bytes.len()) {
+        return Err(SysError::EFAULT);
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), address as *mut u8, bytes.len());
+    }
+    Ok(())
 }
 
 fn read_user_bytes(ptr: usize, len: usize) -> Result<Vec<u8>, SysError> {

@@ -1025,6 +1025,9 @@ impl Scheduler {
 
         #[cfg(target_arch = "aarch64")]
         linux_syscall_context::retire_owner(id.0);
+        // The thread will not return through its syscall guard. Drop the
+        // per-thread entry SPSR before this id can be reused.
+        crate::syscall::uaccess::clear_owner(id.0);
 
         self.suspended_threads[id.0] = false;
         self.set_ready_bit(id.0, false);
