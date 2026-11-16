@@ -2320,6 +2320,60 @@ impl FxfsState {
         Ok(self.objects[index].attrs)
     }
 
+    /// Change mode, owner, or timestamps on an existing inode and persist the
+    /// same way as `set_attrs`. `None` leaves that field alone. A mode or
+    /// owner change that does not supply `modified_at` bumps it so `stat`
+    /// ctime moves. `/`, `/dev`, and `/dev/shm` still refuse any mode other
+    /// than `040755`, and refuse a different owner.
+    fn patch_attrs(
+        &mut self,
+        path: &str,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        accessed_at: Option<u64>,
+        modified_at: Option<u64>,
+    ) -> Result<FxfsAttributes, FxfsError> {
+        let index = self.resolve_path(path)?;
+        let current = self.objects[index].attrs;
+        let new_mode = mode.unwrap_or(current.mode);
+        let new_uid = uid.unwrap_or(current.uid);
+        let new_gid = gid.unwrap_or(current.gid);
+        if !user_logic::fxfs_system_directory_mode_change_allowed(path, new_mode) {
+            return Err(FxfsError::PermissionDenied);
+        }
+        if user_logic::fxfs_system_directory_mode_locked(path)
+            && (new_uid != current.uid || new_gid != current.gid)
+        {
+            return Err(FxfsError::PermissionDenied);
+        }
+        let owner_or_mode_changed =
+            new_mode != current.mode || new_uid != current.uid || new_gid != current.gid;
+        let sequence = if owner_or_mode_changed && modified_at.is_none() {
+            Some(self.next_sequence())
+        } else {
+            modified_at
+        };
+        self.objects[index].attrs.mode = new_mode;
+        self.objects[index].attrs.uid = new_uid;
+        self.objects[index].attrs.gid = new_gid;
+        if let Some(accessed_at) = accessed_at {
+            self.objects[index].attrs.accessed_at = accessed_at;
+        }
+        if let Some(modified_at) = sequence {
+            self.objects[index].attrs.modified_at = modified_at;
+        }
+        if owner_or_mode_changed || accessed_at.is_some() || modified_at.is_some() {
+            let object_id = self.objects[index].object_id;
+            let size = self.objects[index].attrs.size;
+            self.record(FxfsJournalOp::SetAttributes, object_id, 0, size);
+            if !is_ephemeral_shm_path(path) {
+                self.persist();
+            }
+        }
+        Ok(self.objects[index].attrs)
+    }
+
     fn exists(&mut self, path: &str) -> bool {
         self.resolve_path(path).is_ok()
     }
@@ -2578,6 +2632,17 @@ pub fn cursor_attrs(cursor: FxfsCursor) -> Result<FxfsAttributes, FxfsError> {
 
 pub fn set_attrs(path: &str, mode: u32, uid: u32, gid: u32) -> Result<FxfsAttributes, FxfsError> {
     state().set_attrs(path, mode, uid, gid)
+}
+
+pub fn patch_attrs(
+    path: &str,
+    mode: Option<u32>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    accessed_at: Option<u64>,
+    modified_at: Option<u64>,
+) -> Result<FxfsAttributes, FxfsError> {
+    state().patch_attrs(path, mode, uid, gid, accessed_at, modified_at)
 }
 
 pub fn entries(path: &str) -> Result<Vec<FxfsDirEntry>, FxfsError> {

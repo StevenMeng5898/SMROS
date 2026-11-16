@@ -247,6 +247,9 @@ const ARM64_SYS_FCHDIR: u32 = 50;
 const ARM64_SYS_CHROOT: u32 = 51;
 const ARM64_SYS_FCHMOD: u32 = 52;
 const ARM64_SYS_FCHMODAT: u32 = 53;
+/// Linux 6.6 `fchmodat2`. aarch64 number 452. `fchmodat` (53) stays the
+/// historical 3-argument call and ignores the fourth register.
+const ARM64_SYS_FCHMODAT2: u32 = 452;
 const ARM64_SYS_FCHOWNAT: u32 = 54;
 const ARM64_SYS_FCHOWN: u32 = 55;
 const ARM64_SYS_LSEEK: u32 = 62;
@@ -592,6 +595,8 @@ const LINUX_RENAME_ALLOWED_FLAGS: usize =
     LINUX_RENAME_NOREPLACE | LINUX_RENAME_EXCHANGE | LINUX_RENAME_WHITEOUT;
 const LINUX_AT_SYMLINK_NOFOLLOW: usize = 0x100;
 const LINUX_AT_EMPTY_PATH: usize = 0x1000;
+const LINUX_AT_FDCWD: usize = usize::MAX - 99;
+const LINUX_AT_METADATA_FLAGS: usize = LINUX_AT_SYMLINK_NOFOLLOW | LINUX_AT_EMPTY_PATH;
 const LINUX_STAT_ALLOWED_FLAGS: usize = LINUX_AT_SYMLINK_NOFOLLOW | LINUX_AT_EMPTY_PATH;
 const LINUX_STATX_BASIC_STATS: usize = 0x7ff;
 const LINUX_SEEK_MAX_WHENCE: usize = 5;
@@ -9052,12 +9057,310 @@ pub fn sys_fstatfs(fd: usize, buf: usize) -> SysResult {
     linux_write_statfs(buf)
 }
 
-pub fn sys_truncate(path: usize, _len: usize) -> SysResult {
-    if path == 0 {
-        Err(SysError::EFAULT)
-    } else {
-        Ok(0)
+struct LinuxMetaCred {
+    euid: usize,
+    egid: usize,
+}
+
+fn linux_meta_cred() -> LinuxMetaCred {
+    let (credentials, _) = linux_shm_current_credentials();
+    LinuxMetaCred {
+        euid: credentials.effective_uid,
+        egid: credentials.effective_gid,
     }
+}
+
+fn linux_normalize_path(path: &str) -> Result<String, SysError> {
+    if path.is_empty() || path.len() > LINUX_PATH_MAX_BYTES || !path.starts_with('/') {
+        return Err(SysError::ENOENT);
+    }
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            parts.pop();
+            continue;
+        }
+        if part.len() > LINUX_NAME_MAX_BYTES {
+            return Err(SysError::ENAMETOOLONG);
+        }
+        parts.push(part);
+    }
+    if parts.is_empty() {
+        return Ok(String::from("/"));
+    }
+    let mut out = String::new();
+    for part in parts {
+        out.push('/');
+        out.push_str(part);
+    }
+    if out.len() > LINUX_PATH_MAX_BYTES {
+        return Err(SysError::ENAMETOOLONG);
+    }
+    Ok(out)
+}
+
+fn linux_join_dir(dir: &str, relative: &str) -> Result<String, SysError> {
+    if relative.starts_with('/') {
+        return linux_normalize_path(relative);
+    }
+    let mut combined = String::from(if dir.is_empty() { "/" } else { dir });
+    if !combined.ends_with('/') {
+        combined.push('/');
+    }
+    combined.push_str(relative);
+    linux_normalize_path(&combined)
+}
+
+fn linux_cwd_path() -> Result<String, SysError> {
+    let pid = linux_resource_pid()?;
+    Ok(memory_state()
+        .process_resources(pid)
+        .map(|resources| resources.cwd.clone())
+        .filter(|cwd| !cwd.is_empty())
+        .unwrap_or_else(|| String::from("/")))
+}
+
+fn linux_dirfd_directory(dirfd: usize) -> Result<String, SysError> {
+    if dirfd == LINUX_AT_FDCWD {
+        return linux_cwd_path();
+    }
+    if memory_state().get_fd(dirfd).is_none() {
+        return Err(SysError::EBADF);
+    }
+    if !linux_fd_is_dir(dirfd) {
+        return Err(SysError::ENOTDIR);
+    }
+    linux_fxfs_path_for_fd(dirfd, false).map_err(|_| SysError::EBADF)
+}
+
+fn linux_fd_inode_path(fd: usize) -> Result<String, SysError> {
+    if fd == LINUX_AT_FDCWD || memory_state().get_fd(fd).is_none() {
+        return Err(SysError::EBADF);
+    }
+    linux_fxfs_path_for_fd(fd, false).map_err(|_| SysError::EINVAL)
+}
+
+/// Resolve `dirfd` + `path`. Absolute paths ignore `dirfd`. An empty path, or
+/// a null path when `empty_path` is set, names the inode already open on `dirfd`.
+fn linux_at_path(dirfd: usize, path: usize, flags: usize) -> Result<String, SysError> {
+    let empty_path = flags & LINUX_AT_EMPTY_PATH != 0;
+    if path == 0 {
+        if empty_path {
+            return linux_fd_inode_path(dirfd);
+        }
+        return Err(SysError::EFAULT);
+    }
+    let text = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
+    if text.is_empty() {
+        if empty_path {
+            return linux_fd_inode_path(dirfd);
+        }
+        return Err(SysError::ENOENT);
+    }
+    if text.starts_with('/') {
+        return linux_normalize_path(&text);
+    }
+    linux_join_dir(&linux_dirfd_directory(dirfd)?, &text)
+}
+
+fn linux_metadata_lookup(path: &str) -> Result<(String, fxfs::FxfsAttributes), SysError> {
+    let normalized = linux_normalize_path(path)?;
+    let cred = linux_meta_cred();
+    let root = fxfs::attrs("/").map_err(linux_fxfs_error)?;
+    if !syscall_logic::linux_mode_permission_allowed(
+        root.mode,
+        root.uid as usize,
+        root.gid as usize,
+        cred.euid,
+        cred.egid,
+        false,
+        false,
+        true,
+    ) {
+        return Err(SysError::EACCES);
+    }
+    if normalized == "/" {
+        return Ok((normalized, root));
+    }
+    let mut walked = String::new();
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    for (index, part) in parts.iter().enumerate() {
+        walked.push('/');
+        walked.push_str(part);
+        let attrs = fxfs::attrs(&walked).map_err(linux_fxfs_error)?;
+        if index + 1 == parts.len() {
+            return Ok((walked, attrs));
+        }
+        if attrs.mode & syscall_logic::LINUX_S_IFMT != syscall_logic::LINUX_S_IFDIR {
+            return Err(SysError::ENOTDIR);
+        }
+        if !syscall_logic::linux_mode_permission_allowed(
+            attrs.mode,
+            attrs.uid as usize,
+            attrs.gid as usize,
+            cred.euid,
+            cred.egid,
+            false,
+            false,
+            true,
+        ) {
+            return Err(SysError::EACCES);
+        }
+    }
+    Err(SysError::ENOENT)
+}
+
+fn linux_apply_chmod(path: &str, mode: usize) -> SysResult {
+    let (path, attrs) = linux_metadata_lookup(path)?;
+    let cred = linux_meta_cred();
+    if !syscall_logic::linux_chmod_allowed(attrs.uid, cred.euid) {
+        return Err(SysError::EPERM);
+    }
+    let clear_setgid = syscall_logic::linux_chmod_clear_setgid(attrs.gid, cred.egid, cred.euid);
+    let new_mode = syscall_logic::linux_chmod_mode(attrs.mode, mode as u32, clear_setgid);
+    // ctime and mtime share one inode field. Skip an unchanged mode so a
+    // no-op chmod does not move the reported mtime or rewrite the image.
+    if new_mode == attrs.mode {
+        return Ok(0);
+    }
+    fxfs::patch_attrs(&path, Some(new_mode), None, None, None, None).map_err(linux_fxfs_error)?;
+    Ok(0)
+}
+
+fn linux_apply_chown(path: &str, uid: usize, gid: usize) -> SysResult {
+    let (path, attrs) = linux_metadata_lookup(path)?;
+    let cred = linux_meta_cred();
+    let update = syscall_logic::linux_chown_update(
+        attrs.uid, attrs.gid, attrs.mode, uid, gid, cred.euid, cred.egid,
+    )
+    .map_err(|reject| match reject {
+        syscall_logic::LinuxChownReject::Eperm => SysError::EPERM,
+        syscall_logic::LinuxChownReject::Einval => SysError::EINVAL,
+    })?;
+    if update.uid == attrs.uid && update.gid == attrs.gid && update.mode == attrs.mode {
+        return Ok(0);
+    }
+    fxfs::patch_attrs(
+        &path,
+        Some(update.mode),
+        Some(update.uid),
+        Some(update.gid),
+        None,
+        None,
+    )
+    .map_err(linux_fxfs_error)?;
+    Ok(0)
+}
+
+fn linux_utime_error(reject: syscall_logic::LinuxUtimeReject) -> SysError {
+    match reject {
+        syscall_logic::LinuxUtimeReject::Einval => SysError::EINVAL,
+        syscall_logic::LinuxUtimeReject::Eperm => SysError::EPERM,
+        syscall_logic::LinuxUtimeReject::Eacces => SysError::EACCES,
+    }
+}
+
+fn linux_apply_utimens(path: &str, times: usize) -> SysResult {
+    let (path, attrs) = linux_metadata_lookup(path)?;
+    let (atime_field, mtime_field) = if times == 0 {
+        (
+            syscall_logic::LinuxUtimeField::Now,
+            syscall_logic::LinuxUtimeField::Now,
+        )
+    } else {
+        let atime = linux_read_user_timespec(times)?;
+        let mtime_addr = times
+            .checked_add(core::mem::size_of::<LinuxTimespec>())
+            .ok_or(SysError::EFAULT)?;
+        let mtime = linux_read_user_timespec(mtime_addr)?;
+        (
+            syscall_logic::linux_utime_field(atime.tv_sec, atime.tv_nsec)
+                .map_err(linux_utime_error)?,
+            syscall_logic::linux_utime_field(mtime.tv_sec, mtime.tv_nsec)
+                .map_err(linux_utime_error)?,
+        )
+    };
+    let cred = linux_meta_cred();
+    let owner_or_root = cred.euid == 0 || attrs.uid as usize == cred.euid;
+    let writable = syscall_logic::linux_mode_permission_allowed(
+        attrs.mode,
+        attrs.uid as usize,
+        attrs.gid as usize,
+        cred.euid,
+        cred.egid,
+        false,
+        true,
+        false,
+    );
+    if let Some(reject) =
+        syscall_logic::linux_utime_reject(atime_field, mtime_field, owner_or_root, writable)
+    {
+        return Err(linux_utime_error(reject));
+    }
+    let needs_now = matches!(atime_field, syscall_logic::LinuxUtimeField::Now)
+        || matches!(mtime_field, syscall_logic::LinuxUtimeField::Now);
+    let now = if needs_now {
+        Some(linux_realtime_nanos()? / 1_000_000_000)
+    } else {
+        None
+    };
+    let accessed_at = match atime_field {
+        syscall_logic::LinuxUtimeField::Set(seconds) => Some(seconds),
+        syscall_logic::LinuxUtimeField::Now => now,
+        syscall_logic::LinuxUtimeField::Omit => None,
+    };
+    let modified_at = match mtime_field {
+        syscall_logic::LinuxUtimeField::Set(seconds) => Some(seconds),
+        syscall_logic::LinuxUtimeField::Now => now,
+        syscall_logic::LinuxUtimeField::Omit => None,
+    };
+    if accessed_at.is_none() && modified_at.is_none() {
+        return Ok(0);
+    }
+    fxfs::patch_attrs(&path, None, None, None, accessed_at, modified_at)
+        .map_err(linux_fxfs_error)?;
+    Ok(0)
+}
+
+pub fn sys_truncate(path: usize, len: usize) -> SysResult {
+    if path == 0 {
+        return Err(SysError::EFAULT);
+    }
+    if len > i64::MAX as usize {
+        return Err(SysError::EINVAL);
+    }
+    let path = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
+    let (path, attrs) = linux_metadata_lookup(&path)?;
+    if attrs.mode & syscall_logic::LINUX_S_IFMT == syscall_logic::LINUX_S_IFDIR {
+        return Err(SysError::EISDIR);
+    }
+    if attrs.mode & syscall_logic::LINUX_S_IFMT != syscall_logic::LINUX_S_IFREG {
+        return Err(SysError::EINVAL);
+    }
+    let cred = linux_meta_cred();
+    if !syscall_logic::linux_mode_permission_allowed(
+        attrs.mode,
+        attrs.uid as usize,
+        attrs.gid as usize,
+        cred.euid,
+        cred.egid,
+        false,
+        true,
+        false,
+    ) {
+        return Err(SysError::EACCES);
+    }
+    if attrs.size == len {
+        return Ok(0);
+    }
+    fxfs::truncate_file(&path, len).map_err(linux_fxfs_error)?;
+    Ok(0)
 }
 
 pub fn sys_ftruncate(fd: usize, len: usize) -> SysResult {
@@ -9092,58 +9395,79 @@ pub fn sys_ftruncate(fd: usize, len: usize) -> SysResult {
     }
 }
 
-pub fn sys_fallocate(fd: usize, _mode: usize, _offset: usize, _len: usize) -> SysResult {
-    if linux_fd_is_file(fd) {
-        Ok(0)
-    } else {
-        Err(SysError::ENODEV)
+pub fn sys_fallocate(fd: usize, mode: usize, offset: usize, len: usize) -> SysResult {
+    if !linux_fd_is_file(fd) {
+        return Err(SysError::ENODEV);
     }
-}
-
-pub fn sys_chmod(path: usize, _mode: usize) -> SysResult {
-    if path == 0 {
-        Err(SysError::EFAULT)
-    } else {
-        Ok(0)
+    // Hole punch, collapse, and zero-range are not implemented. Reporting
+    // success would claim the range had been punched.
+    if mode != 0 {
+        return Err(SysError::EOPNOTSUPP);
     }
-}
-
-pub fn sys_fchmod(fd: usize, _mode: usize) -> SysResult {
-    if linux_fd_is_file(fd) {
-        Ok(0)
-    } else {
-        Err(SysError::ENODEV)
+    let end = offset.checked_add(len).ok_or(SysError::EINVAL)?;
+    if end > i64::MAX as usize {
+        return Err(SysError::EINVAL);
     }
-}
-
-pub fn sys_fchmodat(_dirfd: usize, path: usize, mode: usize, _flags: usize) -> SysResult {
-    sys_chmod(path, mode)
-}
-
-pub fn sys_chown(path: usize, _uid: usize, _gid: usize) -> SysResult {
-    if path == 0 {
-        Err(SysError::EFAULT)
-    } else {
-        Ok(0)
+    let path = linux_fd_inode_path(fd)?;
+    let attrs = fxfs::attrs(&path).map_err(linux_fxfs_error)?;
+    if attrs.mode & syscall_logic::LINUX_S_IFMT == syscall_logic::LINUX_S_IFDIR {
+        return Err(SysError::EISDIR);
     }
-}
-
-pub fn sys_fchown(fd: usize, _uid: usize, _gid: usize) -> SysResult {
-    if linux_fd_is_file(fd) {
-        Ok(0)
-    } else {
-        Err(SysError::ENODEV)
+    if end > attrs.size {
+        fxfs::truncate_file(&path, end).map_err(linux_fxfs_error)?;
     }
+    Ok(0)
 }
 
-pub fn sys_fchownat(
-    _dirfd: usize,
+pub fn sys_chmod(path: usize, mode: usize) -> SysResult {
+    sys_fchmodat(LINUX_AT_FDCWD, path, mode, 0)
+}
+
+pub fn sys_fchmod(fd: usize, mode: usize) -> SysResult {
+    linux_apply_chmod(&linux_fd_inode_path(fd)?, mode)
+}
+
+/// `fchmodat` (53) is the historical 3-argument syscall. glibc leaves the
+/// fourth register uninitialized when `flag == 0`, so those bits are ignored.
+/// `fchmodat2` validates them.
+pub fn sys_fchmodat(dirfd: usize, path: usize, mode: usize, flags: usize) -> SysResult {
+    linux_fchmodat(dirfd, path, mode, flags, false)
+}
+
+pub fn sys_fchmodat2(dirfd: usize, path: usize, mode: usize, flags: usize) -> SysResult {
+    linux_fchmodat(dirfd, path, mode, flags, true)
+}
+
+fn linux_fchmodat(
+    dirfd: usize,
     path: usize,
-    uid: usize,
-    gid: usize,
-    _flags: usize,
+    mode: usize,
+    flags: usize,
+    check_flags: bool,
 ) -> SysResult {
-    sys_chown(path, uid, gid)
+    if check_flags && !syscall_logic::linux_metadata_flags_valid(flags, LINUX_AT_METADATA_FLAGS) {
+        return Err(SysError::EINVAL);
+    }
+    let flags = if check_flags { flags } else { 0 };
+    linux_apply_chmod(&linux_at_path(dirfd, path, flags)?, mode)
+}
+
+pub fn sys_chown(path: usize, uid: usize, gid: usize) -> SysResult {
+    sys_fchownat(LINUX_AT_FDCWD, path, uid, gid, 0)
+}
+
+pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> SysResult {
+    linux_apply_chown(&linux_fd_inode_path(fd)?, uid, gid)
+}
+
+/// `lchown` has no aarch64 number. glibc calls `fchownat` with
+/// `AT_SYMLINK_NOFOLLOW`. This filesystem has no symlink inodes, so that flag
+/// names the same inode as a following lookup.
+pub fn sys_fchownat(dirfd: usize, path: usize, uid: usize, gid: usize, flags: usize) -> SysResult {
+    if !syscall_logic::linux_metadata_flags_valid(flags, LINUX_AT_METADATA_FLAGS) {
+        return Err(SysError::EINVAL);
+    }
+    linux_apply_chown(&linux_at_path(dirfd, path, flags)?, uid, gid)
 }
 
 pub fn sys_sync() -> SysResult {
@@ -9180,16 +9504,19 @@ pub fn sys_sync_file_range(fd: usize, _offset: usize, _nbytes: usize, _flags: us
     sys_fsync(fd)
 }
 
-pub fn sys_utimensat(_dirfd: usize, path: usize, times: usize, _flags: usize) -> SysResult {
-    if path == 0 {
-        return Err(SysError::EFAULT);
+/// `utimes` and `futimes` have no aarch64 numbers. glibc turns them into
+/// `utimensat`. A null path names the inode open on `dirfd` (the historical
+/// `futimens` shape) and is not a bad pointer.
+pub fn sys_utimensat(dirfd: usize, path: usize, times: usize, flags: usize) -> SysResult {
+    if !syscall_logic::linux_metadata_flags_valid(flags, LINUX_AT_METADATA_FLAGS) {
+        return Err(SysError::EINVAL);
     }
-    if times != 0
-        && !syscall_logic::user_buffer_valid(times, 2 * core::mem::size_of::<LinuxTimespec>())
-    {
-        return Err(SysError::EFAULT);
-    }
-    Ok(0)
+    let resolved = if path == 0 {
+        linux_fd_inode_path(dirfd)?
+    } else {
+        linux_at_path(dirfd, path, flags)?
+    };
+    linux_apply_utimens(&resolved, times)
 }
 
 pub fn sys_signalfd4(_fd: usize, mask: usize, sizemask: usize, flags: usize) -> SysResult {
@@ -16542,6 +16869,7 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         ARM64_SYS_CHROOT => sys_chroot(args[0]),
         ARM64_SYS_FCHMOD => sys_fchmod(args[0], args[1]),
         ARM64_SYS_FCHMODAT => sys_fchmodat(args[0], args[1], args[2], args[3]),
+        ARM64_SYS_FCHMODAT2 => sys_fchmodat2(args[0], args[1], args[2], args[3]),
         ARM64_SYS_FCHOWN => sys_fchown(args[0], args[1], args[2]),
         ARM64_SYS_FCHOWNAT => sys_fchownat(args[0], args[1], args[2], args[3], args[4]),
         ARM64_SYS_LSEEK => sys_lseek(args[0], args[1] as i64, args[2]),

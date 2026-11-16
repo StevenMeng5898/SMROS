@@ -1038,6 +1038,54 @@ mod syscall_logic {
     }
 
     #[test]
+    fn chmod_keeps_file_type_and_chown_follows_owner_rules() {
+        use LinuxChownReject::Eperm;
+        use LinuxUtimeField::{Now, Omit, Set};
+        use LinuxUtimeReject::{Eacces, Einval, Eperm as UtimeEperm};
+
+        let file = 0o100644;
+        assert!(linux_chmod_allowed(7, 7));
+        assert!(linux_chmod_allowed(7, 0));
+        assert!(!linux_chmod_allowed(7, 8));
+        assert_eq!(linux_chmod_mode(file, 0o7777, false), 0o107777);
+        assert_eq!(linux_chmod_mode(file, 0o2755, false), 0o102755);
+        assert_eq!(linux_chmod_mode(file, 0o2755, true), 0o100755);
+        assert!(!linux_chmod_clear_setgid(4, 4, 7));
+        assert!(!linux_chmod_clear_setgid(4, 4, 0));
+        assert!(linux_chmod_clear_setgid(4, 9, 7));
+        assert!(linux_metadata_flags_valid(0x100, 0x1100));
+        assert!(!linux_metadata_flags_valid(0x1, 0x1100));
+
+        let same = linux_chown_update(1, 2, 0o104755, usize::MAX, u32::MAX as usize, 9, 9).unwrap();
+        assert_eq!((same.uid, same.gid, same.mode), (1, 2, 0o104755));
+        assert_eq!(linux_chown_update(1, 2, 0o104755, 3, 2, 9, 9), Err(Eperm));
+        let owned = linux_chown_update(9, 2, 0o104755, 9, 9, 9, 9).unwrap();
+        assert_eq!((owned.uid, owned.gid, owned.mode), (9, 9, 0o100755));
+        let directory = linux_chown_update(9, 2, 0o042755, 9, 9, 9, 9).unwrap();
+        assert_eq!(directory.mode, 0o042755);
+        let root = linux_chown_update(1, 2, 0o104755, 3, 4, 0, 0).unwrap();
+        assert_eq!((root.uid, root.gid, root.mode), (3, 4, 0o104755));
+        assert_eq!(
+            linux_chown_update(1, 2, file, 1, 2, 9, 9).unwrap().mode,
+            file
+        );
+
+        assert_eq!(linux_utime_field(5, 0), Ok(Set(5)));
+        assert_eq!(linux_utime_field(0, 0x3fff_ffff), Ok(Now));
+        assert_eq!(linux_utime_field(0, 0x3fff_fffe), Ok(Omit));
+        assert_eq!(linux_utime_field(-1, 0), Err(Einval));
+        assert_eq!(linux_utime_field(0, 1_000_000_000), Err(Einval));
+        assert_eq!(
+            linux_utime_reject(Set(1), Omit, false, true),
+            Some(UtimeEperm)
+        );
+        assert_eq!(linux_utime_reject(Now, Omit, false, false), Some(Eacces));
+        assert_eq!(linux_utime_reject(Now, Omit, false, true), None);
+        assert_eq!(linux_utime_reject(Omit, Omit, false, false), None);
+        assert_eq!(linux_utime_reject(Set(1), Now, true, false), None);
+    }
+
+    #[test]
     fn expired_real_timer_scan_includes_processes_not_currently_scheduled() {
         const DISABLED: u64 = u64::MAX;
         let deadlines = [(7usize, 100u64), (8, DISABLED), (9, 99), (10, 101)];
@@ -10437,8 +10485,7 @@ mod user_logic {
             FXFS_SYSTEM_DIRECTORY_MODE
         ));
         assert!(!fxfs_system_directory_mode_change_allowed(
-            "/dev/shm",
-            0o40777
+            "/dev/shm", 0o40777
         ));
         assert!(!fxfs_system_directory_mode_change_allowed("/", 0o40777));
         assert!(!fxfs_system_directory_mode_change_allowed("/dev", 0o40777));
