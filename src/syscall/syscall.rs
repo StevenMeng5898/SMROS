@@ -4811,6 +4811,7 @@ fn linux_fxfs_error(err: fxfs::FxfsError) -> SysError {
         fxfs::FxfsError::NotFile => SysError::EISDIR,
         fxfs::FxfsError::InvalidOffset => SysError::EINVAL,
         fxfs::FxfsError::StorageUnavailable | fxfs::FxfsError::StorageCorrupt => SysError::EIO,
+        fxfs::FxfsError::PermissionDenied => SysError::EPERM,
     }
 }
 

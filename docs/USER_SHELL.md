@@ -557,22 +557,28 @@ Default `hermes test-all` already includes LVGL, QML, syscall smoke, and POSIX
 canaries, so it does not take a UI mode. `posixtest=skip` and `sectest=skip`
 omit those two opening phases for a short debug run; the default is to run both.
 `posixtest all` is on the order of 127k scheduler ticks, so it is not repeated
-on every iteration. It also has to run while `/dev/shm` is still mode `040755`.
-A later `fuzzsc` catalog case changes that directory to `0777` and persists the
-mode, after which `shm_unlink/8-1.c` and `shm_unlink/9-1.c` stay unresolved.
-Running the full POSIX suite again at the end of `test-all`, or every N
-iterations, would execute after that pollution, so it is not a second gate
-until `fuzzsc` stops rewriting `/dev/shm`. The opening phases are checkpointed
+on every iteration. It has to run while `/dev/shm` is still mode `040755`.
+`fuzzsc` used to setattr that directory to `0777` with `fxfs::set_attrs`. The
+directory is not an ephemeral `/dev/shm/` object, so the new mode stayed on the
+live inode and was written by the next full-image persist. `sync` during the
+fuzzer force-persists even while ordinary persists are suspended, which is why
+the mode survived onto the disk. `shm_unlink/8-1.c` and `shm_unlink/9-1.c` then
+stay unresolved, because a non-root unlink succeeds when the directory is
+world-writable. Setattr of `/`, `/dev`, and `/dev/shm` now rejects any mode
+other than `040755`, and `fuzzsc` no longer issues that setattr. After the
+iteration loop, `hermes test-all` runs bounded `fuzzsc seed=1 iterations=1 time=1`
+and fails unless the mode is still `040755`. The opening phases are checkpointed
 in `/data/hermes/tests/resume.cfg` before the iteration loop. A reboot after
 they finish restores pass/fail/unresolved/timeout and sectest
 pass/fail/xfail/xpass and does not run the phases again. `hermes exec posixtest all`
 stays denied; only the test-all opening phase invokes that shell command.
 Any new test item must also be orchestrated into `hermes test-all` in the same change.
-The persisted report records `posixtest phase=... pass= fail= unresolved= timeout=`
-and `sectest phase=... pass= fail= xfail= xpass=`. Overall `PASS` requires the
+The persisted report records `posixtest phase=... pass= fail= unresolved= timeout=`,
+`sectest phase=... pass= fail= xfail= xpass=`, and `shm-mode phase=... mode=`.
+Overall `PASS` requires the
 native check, zero op timeouts, every random iteration, every host `ut`/`it`,
 `posixtest` at 1600/1600 with fail/unresolved/timeout/launch-errors all zero,
-and `sectest` with fail and xpass both zero. Thus `iterations=1000`
+`sectest` with fail and xpass both zero, and `shm-mode` at `040755`. Thus `iterations=1000`
 requests `ut` and `it` 1000 times each through
 `scripts/smros-vm-launcher.py`. The launcher maps those two identifiers to
 fixed Make argv, accepts the job immediately, runs one job at a time with a timeout, and does not accept

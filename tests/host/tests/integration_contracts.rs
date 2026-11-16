@@ -7103,6 +7103,13 @@ fn hermes_test_all_runs_posix_and_sectest_before_random_iterations() {
         native_pos < phase_pos && phase_pos < round_pos,
         "posixtest all and sectest all run once after the native check and before fuzzsc iterations"
     );
+    let shm_pos = test_all
+        .find("run_hermes_shm_mode_phase(ctx)")
+        .expect("shm-mode phase");
+    assert!(
+        round_pos < shm_pos,
+        "shm-mode runs bounded fuzzsc after the random iterations and checks /dev/shm"
+    );
     assert!(test_all.contains("suites: phases"));
     assert!(shell.contains("Hermes test-all phase posixtest all"));
     assert!(shell.contains("Hermes test-all phase sectest all"));
@@ -7121,6 +7128,11 @@ fn hermes_test_all_runs_posix_and_sectest_before_random_iterations() {
     assert!(testing.contains(rule));
     assert!(docs.contains("040755"));
     assert!(docs.contains("does not run the phases again"));
+    assert!(docs.contains("shm-mode"));
+    assert!(testing.contains("shm-mode"));
+    assert!(shell.contains("fn run_hermes_shm_mode_phase("));
+    assert!(shell.contains("Hermes phase shm-mode "));
+    assert!(policy.contains("shm_mode_ok"));
 }
 
 #[test]
@@ -7264,8 +7276,17 @@ fn fuzzsc_success_path_uses_live_mprotect_and_names_posix_errors() {
         !fuzz.contains("226 => out = [state.mapping(), PAGE_SIZE, MmapProt::READ.bits(), 0, 0, 0]")
     );
     assert!(fuzz.contains("fn untrack_mapping("));
-    assert!(fuzz.contains(r#"fxfs::set_attrs("/dev/shm", 0o40777, 0, 0)"#));
+    assert!(
+        !fuzz.contains("set_attrs(\"/dev/shm\""),
+        "fuzzsc must not setattr /dev/shm"
+    );
     assert!(fuzz.contains(r#"fxfs::unlink_file("/dev/shm/fz")"#));
+    let fxfs = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/fxfs.rs"
+    ));
+    assert!(fxfs.contains("fxfs_system_directory_mode_change_allowed"));
+    assert!(fxfs.contains("restore_locked_directory_modes"));
     assert!(fuzz.contains("fn record_posix_err_api("));
     assert!(fuzz.contains("posix_err_apis"));
     assert!(shell.contains("posix_err_list="));
