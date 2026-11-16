@@ -822,9 +822,9 @@ mod syscall_logic {
                 None => {}
             }
         }
-        assert_eq!(fail_closed, 51);
+        assert_eq!(fail_closed, 64);
         assert_eq!(harmless, 3);
-        assert_eq!(uncertain, 19);
+        assert_eq!(uncertain, 0);
         assert_eq!(personality, 1);
 
         assert_eq!(linux_audited_stub(117), Some(FailClosed(LINUX_ERRNO_EPERM)));
@@ -887,8 +887,63 @@ mod syscall_logic {
         assert_eq!(linux_audited_stub(31), Some(Harmless));
         assert_eq!(linux_audited_stub(128), Some(Harmless));
         assert_eq!(linux_audited_stub(284), Some(Harmless));
-        assert_eq!(linux_audited_stub(293), Some(Uncertain));
+        assert_eq!(linux_audited_stub(0), Some(FailClosed(LINUX_ERRNO_ENOSYS)));
+        assert_eq!(linux_audited_stub(4), Some(FailClosed(LINUX_ERRNO_ENOSYS)));
+        assert_eq!(
+            linux_audited_stub(292),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(linux_audited_stub(18), Some(FailClosed(LINUX_ERRNO_ENOSYS)));
+        assert_eq!(linux_audited_stub(42), Some(FailClosed(LINUX_ERRNO_ENOSYS)));
+        assert_eq!(
+            linux_audited_stub(234),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(235),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(236),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(237),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(
+            linux_audited_stub(293),
+            Some(FailClosed(LINUX_ERRNO_ENOSYS))
+        );
+        assert_eq!(linux_audited_stub(170), None);
+        assert_eq!(linux_audited_stub(171), None);
+        assert_eq!(linux_audited_stub(266), None);
+        assert_eq!(linux_audited_stub(267), None);
+        assert_eq!(linux_audited_stub(269), None);
+        assert_eq!(linux_audited_stub(275), None);
         assert_eq!(linux_audited_stub(277), None);
+        assert_eq!(linux_adjtimex_effect(0), LinuxAdjtimexEffect::Read);
+        assert_eq!(linux_adjtimex_effect(0xa001), LinuxAdjtimexEffect::Read);
+        assert_eq!(linux_adjtimex_effect(0x8001), LinuxAdjtimexEffect::Eperm);
+        assert_eq!(linux_adjtimex_effect(0x8000), LinuxAdjtimexEffect::Einval);
+        assert_eq!(linux_adjtimex_effect(4), LinuxAdjtimexEffect::Eperm);
+        assert_eq!(linux_clock_adjtime_reject(0), None);
+        assert_eq!(linux_clock_adjtime_reject(1), Some(LINUX_ERRNO_EOPNOTSUPP));
+        assert_eq!(linux_clock_adjtime_reject(99), Some(LINUX_ERRNO_EINVAL));
+        assert_eq!(
+            linux_sched_getattr_reject(0, 0, 0, 0),
+            Some(LINUX_ERRNO_EINVAL)
+        );
+        assert_eq!(linux_sched_getattr_reject(0, 1, 48, 0), None);
+        assert_eq!(
+            linux_sched_getattr_reject(0, 1, 48, 1),
+            Some(LINUX_ERRNO_EINVAL)
+        );
+        assert_eq!(
+            linux_sched_getattr_reject(0, 1, 47, 0),
+            Some(LINUX_ERRNO_EINVAL)
+        );
+        assert_eq!(LINUX_TIME_ERROR, 5);
 
         assert_eq!(linux_personality_errno(0), None);
         assert_eq!(linux_personality_errno(0xffff_ffff), None);
@@ -2854,9 +2909,7 @@ mod linux_task_logic {
 
     #[test]
     fn nonexecutable_handler_terminates_only_catchable_default_terminate_signals() {
-        use crate::linux_process_logic::{
-            linux_signal_delivery_route, LinuxSignalDeliveryRoute,
-        };
+        use crate::linux_process_logic::{linux_signal_delivery_route, LinuxSignalDeliveryRoute};
 
         // Red team: SIG_DFL SIGSTOP was routed through Handle and then killed
         // because the default handler is not executable. The raw status was
@@ -4679,8 +4732,12 @@ mod linux_process_logic {
             LinuxWaitOutcome::WouldBlock,
             "plain waitpid must not consume a stopped child without WUNTRACED"
         );
-        let selected =
-            processes.wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Any, true, false);
+        let selected = processes.wait_outcome_with_options(
+            LINUX_ROOT_PID,
+            LinuxWaitSelector::Any,
+            true,
+            false,
+        );
         assert_eq!(
             selected,
             LinuxWaitOutcome::Ready {
@@ -4709,7 +4766,12 @@ mod linux_process_logic {
             "reporting a stopped child must not reap the live process"
         );
         assert_eq!(
-            processes.wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Any, true, false),
+            processes.wait_outcome_with_options(
+                LINUX_ROOT_PID,
+                LinuxWaitSelector::Any,
+                true,
+                false
+            ),
             LinuxWaitOutcome::WouldBlock,
             "a stopped child report is one-shot until a later stop event"
         );
@@ -4738,8 +4800,12 @@ mod linux_process_logic {
             "SIGSTOP must not turn the child into a zombie"
         );
         assert_eq!(
-            processes
-                .wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Pid(child.pid), true, false),
+            processes.wait_outcome_with_options(
+                LINUX_ROOT_PID,
+                LinuxWaitSelector::Pid(child.pid),
+                true,
+                false
+            ),
             LinuxWaitOutcome::Ready {
                 pid: child.pid,
                 status: 0x137f,
@@ -4777,7 +4843,9 @@ mod linux_process_logic {
             Some(LinuxProcessState::Running)
         );
         assert_eq!(
-            processes.by_pid(child.pid).map(|process| process.wait_status),
+            processes
+                .by_pid(child.pid)
+                .map(|process| process.wait_status),
             Some(LINUX_WAIT_STATUS_CONTINUED)
         );
         assert_eq!(LINUX_WAIT_STATUS_CONTINUED, 0xffff);
@@ -4995,10 +5063,7 @@ mod linux_process_logic {
         };
         assert_eq!(processes.resource_counts(), (1, 0));
         assert!(processes.running_pids_match(&[LINUX_ROOT_PID]));
-        assert!(processes.running_pids_match(&[
-            LINUX_ROOT_PID,
-            LINUX_DISPATCH_PID
-        ]));
+        assert!(processes.running_pids_match(&[LINUX_ROOT_PID, LINUX_DISPATCH_PID]));
         assert!(!processes.running_pids_match(&[]));
 
         let mut only_dispatch = LinuxProcessTable::<2>::new();
@@ -5140,7 +5205,12 @@ mod linux_process_logic {
             Some(LinuxProcessState::Exiting)
         );
         assert!(matches!(
-            processes.wait_outcome_with_options(LINUX_ROOT_PID, LinuxWaitSelector::Any, false, false),
+            processes.wait_outcome_with_options(
+                LINUX_ROOT_PID,
+                LinuxWaitSelector::Any,
+                false,
+                false
+            ),
             LinuxWaitOutcome::WouldBlock
         ));
         assert_eq!(
@@ -9487,7 +9557,10 @@ mod aarch64_vm_logic {
         );
 
         let writable_executable = aarch64_user_page_descriptor(paddr, true, true, true);
-        assert_eq!(writable_executable & AARCH64_DESC_AP_USER, AARCH64_DESC_AP_USER);
+        assert_eq!(
+            writable_executable & AARCH64_DESC_AP_USER,
+            AARCH64_DESC_AP_USER
+        );
         assert_eq!(writable_executable & AARCH64_DESC_AP_READ_ONLY, 0);
         assert_eq!(writable_executable & AARCH64_DESC_UXN, AARCH64_DESC_UXN);
         assert_eq!(writable_executable & AARCH64_DESC_PXN, AARCH64_DESC_PXN);
@@ -9951,23 +10024,24 @@ mod aarch64_vm_logic {
         assert_eq!(parent_supervisor, sibling_supervisor);
         assert_eq!(parent_supervisor & AARCH64_DESC_AP_USER, 0);
 
-        let supervisors_unchanged = |allocator: &Aarch64TestAllocator,
-                                     parent: &Aarch64AddressSpaceModel,
-                                     child: &Aarch64AddressSpaceModel,
-                                     sibling: &Aarch64AddressSpaceModel| {
-            assert_eq!(
-                supervisor_block(allocator, parent.root_pfn(), 0x4000_0000),
-                parent_supervisor
-            );
-            assert_eq!(
-                supervisor_block(allocator, child.root_pfn(), 0x4000_0000),
-                child_supervisor
-            );
-            assert_eq!(
-                supervisor_block(allocator, sibling.root_pfn(), 0x4000_0000),
-                sibling_supervisor
-            );
-        };
+        let supervisors_unchanged =
+            |allocator: &Aarch64TestAllocator,
+             parent: &Aarch64AddressSpaceModel,
+             child: &Aarch64AddressSpaceModel,
+             sibling: &Aarch64AddressSpaceModel| {
+                assert_eq!(
+                    supervisor_block(allocator, parent.root_pfn(), 0x4000_0000),
+                    parent_supervisor
+                );
+                assert_eq!(
+                    supervisor_block(allocator, child.root_pfn(), 0x4000_0000),
+                    child_supervisor
+                );
+                assert_eq!(
+                    supervisor_block(allocator, sibling.root_pfn(), 0x4000_0000),
+                    sibling_supervisor
+                );
+            };
 
         allocator.clear_maintenance_events();
         assert_eq!(
@@ -10387,13 +10461,17 @@ mod user_logic {
             run_elf_page_protection(0x4000, 0x1000, &segments),
             Some(READ | WRITE)
         );
-        assert!(!run_elf_page_spans_write_and_exec(0x1000, 0x1000, &segments));
+        assert!(!run_elf_page_spans_write_and_exec(
+            0x1000, 0x1000, &segments
+        ));
         let overlapping = [
             (0x5000usize, 0x800usize, READ | EXEC),
             (0x5800usize, 0x800usize, READ | WRITE),
         ];
         assert!(run_elf_page_spans_write_and_exec(
-            0x5000, 0x1000, &overlapping
+            0x5000,
+            0x1000,
+            &overlapping
         ));
         assert_eq!(
             run_elf_page_protection(0x5000, 0x1000, &overlapping),
@@ -11554,10 +11632,7 @@ fn hermes_resume_state_round_trips_and_continues_after_reboot() {
         &mut label,
     )
     .expect("op label");
-    assert_eq!(
-        core::str::from_utf8(&label[..len]).unwrap(),
-        "hermes test"
-    );
+    assert_eq!(core::str::from_utf8(&label[..len]).unwrap(), "hermes test");
 }
 
 #[test]
@@ -13163,8 +13238,8 @@ mod elf_load_logic {
             file_size: 0x280,
             prot: 1 | 2,
         };
-        let runs = plan_elf_load(&[text, data], WINDOW_START, WINDOW_START, WINDOW_END, PAGE)
-            .unwrap();
+        let runs =
+            plan_elf_load(&[text, data], WINDOW_START, WINDOW_START, WINDOW_END, PAGE).unwrap();
         assert_eq!(runs.len(), 2);
         assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), 0x3000);
         assert!(runs[0].start + runs[0].len < runs[1].start);
@@ -13185,8 +13260,8 @@ mod elf_load_logic {
             file_size: 0x800,
             prot: 1 | 2,
         };
-        let runs = plan_elf_load(&[exec, write], WINDOW_START, WINDOW_START, WINDOW_END, PAGE)
-            .unwrap();
+        let runs =
+            plan_elf_load(&[exec, write], WINDOW_START, WINDOW_START, WINDOW_END, PAGE).unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].prot, 1 | 2);
         assert_eq!(runs[0].len, PAGE as usize);
@@ -13206,14 +13281,9 @@ mod elf_load_logic {
                         file_size,
                         prot: 1,
                     };
-                    let runs = plan_elf_load(
-                        &[segment],
-                        WINDOW_START,
-                        WINDOW_START,
-                        WINDOW_END,
-                        PAGE,
-                    )
-                    .unwrap();
+                    let runs =
+                        plan_elf_load(&[segment], WINDOW_START, WINDOW_START, WINDOW_END, PAGE)
+                            .unwrap();
                     let covered: usize = runs.iter().map(|run| run.len).sum();
                     assert!(covered <= (mem_size as usize) + PAGE as usize);
                     assert!(runs.len() <= 2);

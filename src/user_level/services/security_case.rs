@@ -584,10 +584,17 @@ macro_rules! syscall_case {
     };
 }
 
-fn cases() -> [Case; 51] {
+fn cases() -> [Case; 75] {
     let enosys = errno_u64(38);
     let eperm = errno_u64(1);
     let einval = errno_u64(22);
+    let efault = errno_u64(14);
+    let ebadf = errno_u64(9);
+    let enodev = errno_u64(19);
+    let eopnotsupp = errno_u64(95);
+    let timeval = DATA_PAGE as u64;
+    let timex = (DATA_PAGE + 64) as u64;
+    let bad_fd = 0x1_0000u64;
     let magic = magic_address() as u64;
     let marker = security_case_exec_marker as *const () as u64;
     // QEMU virt identity addresses. The probe runs only on AArch64.
@@ -917,6 +924,30 @@ fn cases() -> [Case; 51] {
         syscall_case!("process-vm-readv", 270, 0, 0, 0, enosys),
         syscall_case!("process-vm-writev", 271, 0, 0, 0, enosys),
         syscall_case!("bpf", 280, 0, 0, 0, enosys),
+        syscall_case!("io-setup", 0, 1, 0, 0, enosys),
+        syscall_case!("io-destroy", 1, 0, 0, 0, enosys),
+        syscall_case!("io-submit", 2, 0, 0, 0, enosys),
+        syscall_case!("io-cancel", 3, 0, 0, 0, enosys),
+        syscall_case!("io-getevents", 4, 0, 0, 0, enosys),
+        syscall_case!("io-pgetevents", 292, 0, 0, 0, enosys),
+        syscall_case!("lookup-dcookie", 18, 0, 0, 0, enosys),
+        syscall_case!("nfsservctl", 42, 0, 0, 0, enosys),
+        syscall_case!("settimeofday-noop", 170, 0, 0, 0, 0),
+        syscall_case!("settimeofday-write", 170, timeval, 0, 0, eperm),
+        syscall_case!("adjtimex-fault", 171, 0, 0, 0, efault),
+        syscall_case!("adjtimex-read", 171, timex, 0, 0, 5),
+        syscall_case!("adjtimex-write", 171, timeval, 0, 0, eperm),
+        syscall_case!("clock-adjtime-fault", 266, 0, 0, 0, efault),
+        syscall_case!("clock-adjtime-read", 266, 0, timex, 0, 5),
+        syscall_case!("clock-adjtime-monotonic", 266, 1, timex, 0, eopnotsupp),
+        syscall_case!("remap-file-pages", 234, 0, 0, 0, enosys),
+        syscall_case!("mbind", 235, 0, 0, 0, enosys),
+        syscall_case!("get-mempolicy", 236, 0, 0, 0, enosys),
+        syscall_case!("set-mempolicy", 237, 0, 0, 0, enosys),
+        syscall_case!("syncfs-badfd", 267, bad_fd, 0, 0, ebadf),
+        syscall_case!("sendmmsg-badfd", 269, bad_fd, timex, 1, enodev),
+        syscall_case!("sched-getattr-inval", 275, 0, 0, 0, einval),
+        syscall_case!("rseq", 293, 0, 0, 0, enosys),
     ]
 }
 
