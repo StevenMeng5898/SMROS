@@ -11441,6 +11441,8 @@ fn hermes_campaign_selection_is_reproducible_and_bounded() {
             seed: Some(9393),
             iterations: 65,
             mode: HermesCampaignMode::Ops,
+            run_posixtest: true,
+            run_sectest: true,
         })
     );
     let maximum = format!("iterations={}", usize::MAX);
@@ -11450,6 +11452,8 @@ fn hermes_campaign_selection_is_reproducible_and_bounded() {
             seed: None,
             iterations: usize::MAX,
             mode: HermesCampaignMode::Ops,
+            run_posixtest: true,
+            run_sectest: true,
         })
     );
     assert_eq!(parse_campaign_options(&["iterations=0"]), None);
@@ -11477,6 +11481,8 @@ fn hermes_campaign_selection_is_reproducible_and_bounded() {
             seed: Some(1),
             iterations: 2,
             mode: HermesCampaignMode::Syscall,
+            run_posixtest: true,
+            run_sectest: true,
         })
     );
     assert_eq!(parse_campaign_options(&["mode=unknown"]), None);
@@ -11587,6 +11593,7 @@ fn hermes_resume_state_round_trips_and_continues_after_reboot() {
         op_timeouts: 0,
         pending_op_len: 0,
         pending_op: [0; 64],
+        suites: hermes_shell_logic::HermesSuitePhases::legacy(),
     };
     let mut buf = [0u8; HERMES_RESUME_TEXT_CAPACITY];
     let written = format_resume_state(&state, &mut buf).expect("format resume");
@@ -11616,6 +11623,10 @@ fn hermes_resume_state_round_trips_and_continues_after_reboot() {
     assert!(!parsed_legacy.op_running);
     assert_eq!(parsed_legacy.op_timeouts, 0);
     assert_eq!(parsed_legacy.pending_op_str(), "");
+    assert_eq!(
+        parsed_legacy.suites,
+        hermes_shell_logic::HermesSuitePhases::legacy()
+    );
     assert_eq!(parse_resume_state("kind=test-all\nseed=1\n"), None);
 
     let iteration_87 = campaign_case_for_mode(
@@ -11633,6 +11644,201 @@ fn hermes_resume_state_round_trips_and_continues_after_reboot() {
     )
     .expect("op label");
     assert_eq!(core::str::from_utf8(&label[..len]).unwrap(), "hermes test");
+}
+
+#[test]
+fn hermes_opening_suites_gate_test_all_and_round_trip() {
+    use hermes_shell_logic::{
+        format_resume_state, parse_campaign_options, parse_resume_state, posix_phase_pass,
+        sectest_phase_pass, test_all_overall_pass, HermesCampaignMode, HermesPosixPhase,
+        HermesResumeKind, HermesResumeState, HermesSectestPhase, HermesSuiteDisposition,
+        HermesSuitePhases, HERMES_POSIXTEST_ALL_EXPECTED, HERMES_RESUME_TEXT_CAPACITY,
+    };
+
+    assert_eq!(HERMES_POSIXTEST_ALL_EXPECTED, 1600);
+    assert_eq!(
+        parse_campaign_options(&["seed=1", "iterations=100"]),
+        Some(hermes_shell_logic::HermesCampaignOptions {
+            seed: Some(1),
+            iterations: 100,
+            mode: HermesCampaignMode::Ops,
+            run_posixtest: true,
+            run_sectest: true,
+        })
+    );
+    assert_eq!(
+        parse_campaign_options(&["posixtest=skip", "sectest=skip", "iterations=1"]),
+        Some(hermes_shell_logic::HermesCampaignOptions {
+            seed: None,
+            iterations: 1,
+            mode: HermesCampaignMode::Ops,
+            run_posixtest: false,
+            run_sectest: false,
+        })
+    );
+    assert_eq!(parse_campaign_options(&["posixtest=later"]), None);
+    assert_eq!(parse_campaign_options(&["sectest=1"]), None);
+    assert_eq!(
+        parse_campaign_options(&["posixtest=run", "posixtest=skip"]),
+        None
+    );
+    assert_eq!(
+        parse_campaign_options(&["sectest=skip", "sectest=run"]),
+        None
+    );
+
+    let posix_ok = HermesPosixPhase {
+        disposition: HermesSuiteDisposition::Done,
+        selected: 1600,
+        passed: 1600,
+        failed: 0,
+        unresolved: 0,
+        timeouts: 0,
+        launch_errors: 0,
+    };
+    let sectest_ok = HermesSectestPhase {
+        disposition: HermesSuiteDisposition::Done,
+        pass: 40,
+        fail: 0,
+        xfail: 3,
+        xpass: 0,
+        arch_skipped: false,
+    };
+    let suites_ok = HermesSuitePhases {
+        posix: posix_ok,
+        sectest: sectest_ok,
+    };
+    assert!(posix_phase_pass(&posix_ok));
+    assert!(sectest_phase_pass(&sectest_ok));
+    assert!(test_all_overall_pass(true, 0, 100, 100, [100, 100], &suites_ok));
+    assert!(posix_phase_pass(&HermesPosixPhase::skipped()));
+    assert!(sectest_phase_pass(&HermesSectestPhase::skipped()));
+    assert!(posix_phase_pass(&HermesPosixPhase::legacy()));
+    assert!(test_all_overall_pass(
+        true,
+        0,
+        8,
+        8,
+        [8, 8],
+        &HermesSuitePhases::legacy()
+    ));
+
+    let mut short = posix_ok;
+    short.passed = 1599;
+    short.failed = 1;
+    assert!(!posix_phase_pass(&short));
+    let mut unresolved = posix_ok;
+    unresolved.passed = 1599;
+    unresolved.unresolved = 1;
+    assert!(!posix_phase_pass(&unresolved));
+    let mut timed_out = posix_ok;
+    timed_out.passed = 1599;
+    timed_out.timeouts = 1;
+    assert!(!posix_phase_pass(&timed_out));
+    let mut launched = posix_ok;
+    launched.passed = 1599;
+    launched.launch_errors = 1;
+    assert!(!posix_phase_pass(&launched));
+    assert!(!test_all_overall_pass(
+        true,
+        0,
+        100,
+        100,
+        [100, 100],
+        &HermesSuitePhases {
+            posix: unresolved,
+            sectest: sectest_ok,
+        }
+    ));
+
+    let mut xpass = sectest_ok;
+    xpass.xpass = 1;
+    assert!(!sectest_phase_pass(&xpass));
+    let mut failed = sectest_ok;
+    failed.fail = 1;
+    assert!(!sectest_phase_pass(&failed));
+    let mut arch = sectest_ok;
+    arch.arch_skipped = true;
+    assert!(!sectest_phase_pass(&arch));
+    assert!(sectest_phase_pass(&sectest_ok));
+    assert!(!test_all_overall_pass(
+        true,
+        0,
+        100,
+        100,
+        [100, 100],
+        &HermesSuitePhases {
+            posix: posix_ok,
+            sectest: xpass,
+        }
+    ));
+    assert!(!test_all_overall_pass(
+        true,
+        1,
+        100,
+        100,
+        [100, 100],
+        &suites_ok
+    ));
+    assert!(!test_all_overall_pass(
+        true,
+        0,
+        99,
+        100,
+        [100, 100],
+        &suites_ok
+    ));
+
+    let mut pending = [0u8; 64];
+    pending.fill(b'a');
+    let huge = HermesResumeState {
+        kind: HermesResumeKind::TestAll,
+        seed: u64::MAX,
+        iterations: usize::MAX,
+        mode: HermesCampaignMode::Syscall,
+        next_round: usize::MAX,
+        native_ok: false,
+        completed: usize::MAX,
+        denied: usize::MAX,
+        invalid: usize::MAX,
+        unknown: usize::MAX,
+        host_ut_pass: usize::MAX,
+        host_ut_fail: usize::MAX,
+        host_it_pass: usize::MAX,
+        host_it_fail: usize::MAX,
+        host_jobs_pending: true,
+        op_running: true,
+        op_timeouts: usize::MAX,
+        pending_op_len: 64,
+        pending_op: pending,
+        suites: HermesSuitePhases {
+            posix: HermesPosixPhase {
+                disposition: HermesSuiteDisposition::Done,
+                selected: usize::MAX,
+                passed: usize::MAX,
+                failed: usize::MAX,
+                unresolved: usize::MAX,
+                timeouts: usize::MAX,
+                launch_errors: usize::MAX,
+            },
+            sectest: HermesSectestPhase {
+                disposition: HermesSuiteDisposition::Done,
+                pass: usize::MAX,
+                fail: usize::MAX,
+                xfail: usize::MAX,
+                xpass: usize::MAX,
+                arch_skipped: true,
+            },
+        },
+    };
+    let mut buf = [0u8; HERMES_RESUME_TEXT_CAPACITY];
+    let written = format_resume_state(&huge, &mut buf).expect("worst-case resume fits");
+    let text = core::str::from_utf8(&buf[..written]).expect("utf8 resume");
+    assert!(text.contains("posix=done"));
+    assert!(text.contains("sectest=done"));
+    assert!(text.contains("posix_pass="));
+    assert!(text.contains("sectest_xpass="));
+    assert_eq!(parse_resume_state(text), Some(huge));
 }
 
 #[test]
@@ -11796,6 +12002,8 @@ fn hermes_campaign_covers_product_api_levels() {
             seed: Some(3),
             iterations: 4,
             mode: HermesCampaignMode::Ops,
+            run_posixtest: true,
+            run_sectest: true,
         })
     );
     assert_eq!(
@@ -11888,8 +12096,9 @@ fn hermes_campaign_covers_product_api_levels() {
         op_timeouts: 0,
         pending_op_len: 0,
         pending_op: [0; 64],
+        suites: hermes_shell_logic::HermesSuitePhases::legacy(),
     };
-    let mut buf = [0u8; 768];
+    let mut buf = [0u8; hermes_shell_logic::HERMES_RESUME_TEXT_CAPACITY];
     let written = format_resume_state(&resume, &mut buf).expect("format resume");
     let text = core::str::from_utf8(&buf[..written]).expect("utf8 resume");
     assert!(text.contains("mode=ops"));

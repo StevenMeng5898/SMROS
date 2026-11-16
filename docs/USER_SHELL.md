@@ -393,6 +393,7 @@ hermes exec docker rm
 hermes random seed=1234 iterations=8
 hermes test-all seed=1234 iterations=8
 hermes test-all mode=syscall seed=1 iterations=1
+hermes test-all seed=1 iterations=1 posixtest=skip sectest=skip
 hermes skills
 hermes ui
 hermes web
@@ -548,11 +549,30 @@ still flush FxFS and resume rather than counting as timeouts. The command prints
 effective seed for replay and persists a bounded report at
 `/data/hermes/tests/latest.log`. Reports retain aggregate totals and the first
 64 round details, then record how many details were omitted. `hermes test-all`
-runs the native Hermes check once, then executes one deterministic random guest
+runs the native Hermes check once, then `posixtest all` and `sectest all` once,
+then executes one deterministic random guest
 operation and each host job once per iteration. Optional `mode=syscall` keeps
 the same host jobs but selects the focused syscall/POSIX guest catalog.
 Default `hermes test-all` already includes LVGL, QML, syscall smoke, and POSIX
-canaries, so it does not take a UI mode. Thus `iterations=1000`
+canaries, so it does not take a UI mode. `posixtest=skip` and `sectest=skip`
+omit those two opening phases for a short debug run; the default is to run both.
+`posixtest all` is on the order of 127k scheduler ticks, so it is not repeated
+on every iteration. It also has to run while `/dev/shm` is still mode `040755`.
+A later `fuzzsc` catalog case changes that directory to `0777` and persists the
+mode, after which `shm_unlink/8-1.c` and `shm_unlink/9-1.c` stay unresolved.
+Running the full POSIX suite again at the end of `test-all`, or every N
+iterations, would execute after that pollution, so it is not a second gate
+until `fuzzsc` stops rewriting `/dev/shm`. The opening phases are checkpointed
+in `/data/hermes/tests/resume.cfg` before the iteration loop. A reboot after
+they finish restores pass/fail/unresolved/timeout and sectest
+pass/fail/xfail/xpass and does not run the phases again. `hermes exec posixtest all`
+stays denied; only the test-all opening phase invokes that shell command.
+Any new test item must also be orchestrated into `hermes test-all` in the same change.
+The persisted report records `posixtest phase=... pass= fail= unresolved= timeout=`
+and `sectest phase=... pass= fail= xfail= xpass=`. Overall `PASS` requires the
+native check, zero op timeouts, every random iteration, every host `ut`/`it`,
+`posixtest` at 1600/1600 with fail/unresolved/timeout/launch-errors all zero,
+and `sectest` with fail and xpass both zero. Thus `iterations=1000`
 requests `ut` and `it` 1000 times each through
 `scripts/smros-vm-launcher.py`. The launcher maps those two identifiers to
 fixed Make argv, accepts the job immediately, runs one job at a time with a timeout, and does not accept

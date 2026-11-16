@@ -128,6 +128,10 @@ pub struct HermesCampaignOptions {
     pub seed: Option<u64>,
     pub iterations: usize,
     pub mode: HermesCampaignMode,
+    /// Run `posixtest all` once before random iterations. Default is on.
+    pub run_posixtest: bool,
+    /// Run `sectest all` once before random iterations. Default is on.
+    pub run_sectest: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -528,6 +532,10 @@ pub fn parse_campaign_options(args: &[&str]) -> Option<HermesCampaignOptions> {
     let mut iterations_seen = false;
     let mut mode = HermesCampaignMode::Ops;
     let mut mode_seen = false;
+    let mut run_posixtest = true;
+    let mut posixtest_seen = false;
+    let mut run_sectest = true;
+    let mut sectest_seen = false;
 
     for arg in args {
         let (key, value) = arg.split_once('=')?;
@@ -541,6 +549,30 @@ pub fn parse_campaign_options(args: &[&str]) -> Option<HermesCampaignOptions> {
                 _ => return None,
             };
             mode_seen = true;
+            continue;
+        }
+        if key == "posixtest" {
+            if posixtest_seen {
+                return None;
+            }
+            run_posixtest = match value {
+                "run" => true,
+                "skip" => false,
+                _ => return None,
+            };
+            posixtest_seen = true;
+            continue;
+        }
+        if key == "sectest" {
+            if sectest_seen {
+                return None;
+            }
+            run_sectest = match value {
+                "run" => true,
+                "skip" => false,
+                _ => return None,
+            };
+            sectest_seen = true;
             continue;
         }
         let number = parse_decimal(value)?;
@@ -559,6 +591,8 @@ pub fn parse_campaign_options(args: &[&str]) -> Option<HermesCampaignOptions> {
             seed,
             iterations,
             mode,
+            run_posixtest,
+            run_sectest,
         })
     } else {
         None
@@ -579,12 +613,160 @@ pub fn next_random(state: &mut u64) -> u64 {
 }
 
 pub const HERMES_RESUME_PATH: &str = "/data/hermes/tests/resume.cfg";
-pub const HERMES_RESUME_TEXT_CAPACITY: usize = 768;
+/// Resume text includes opening-suite counts. A full `usize` on every counter
+/// plus a 64-byte pending op still has to fit, or a reboot checkpoint is dropped.
+pub const HERMES_RESUME_TEXT_CAPACITY: usize = 1536;
+/// `posixtest all` on the current manifest. The opening phase passes only at
+/// this count with fail, unresolved, timeout, and launch-error all zero.
+pub const HERMES_POSIXTEST_ALL_EXPECTED: usize = 1600;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HermesResumeKind {
     TestAll,
     Random,
+}
+
+/// Opening `posixtest all` / `sectest all` checkpoint.
+/// `Legacy` is a resume file written before those phases existed: do not
+/// re-run them on top of a campaign that may already have run `fuzzsc`, and
+/// do not fail the old checkpoint for counts it never stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HermesSuiteDisposition {
+    Legacy,
+    Done,
+    Skip,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HermesPosixPhase {
+    pub disposition: HermesSuiteDisposition,
+    pub selected: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub unresolved: usize,
+    pub timeouts: usize,
+    pub launch_errors: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HermesSectestPhase {
+    pub disposition: HermesSuiteDisposition,
+    pub pass: usize,
+    pub fail: usize,
+    pub xfail: usize,
+    pub xpass: usize,
+    /// `sectest` printed SKIP because this kernel is not AArch64.
+    pub arch_skipped: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HermesSuitePhases {
+    pub posix: HermesPosixPhase,
+    pub sectest: HermesSectestPhase,
+}
+
+impl HermesPosixPhase {
+    pub const fn legacy() -> Self {
+        Self {
+            disposition: HermesSuiteDisposition::Legacy,
+            selected: 0,
+            passed: 0,
+            failed: 0,
+            unresolved: 0,
+            timeouts: 0,
+            launch_errors: 0,
+        }
+    }
+
+    pub const fn skipped() -> Self {
+        Self {
+            disposition: HermesSuiteDisposition::Skip,
+            selected: 0,
+            passed: 0,
+            failed: 0,
+            unresolved: 0,
+            timeouts: 0,
+            launch_errors: 0,
+        }
+    }
+}
+
+impl HermesSectestPhase {
+    pub const fn legacy() -> Self {
+        Self {
+            disposition: HermesSuiteDisposition::Legacy,
+            pass: 0,
+            fail: 0,
+            xfail: 0,
+            xpass: 0,
+            arch_skipped: false,
+        }
+    }
+
+    pub const fn skipped() -> Self {
+        Self {
+            disposition: HermesSuiteDisposition::Skip,
+            pass: 0,
+            fail: 0,
+            xfail: 0,
+            xpass: 0,
+            arch_skipped: false,
+        }
+    }
+}
+
+impl HermesSuitePhases {
+    pub const fn legacy() -> Self {
+        Self {
+            posix: HermesPosixPhase::legacy(),
+            sectest: HermesSectestPhase::legacy(),
+        }
+    }
+}
+
+pub fn suite_disposition_name(disposition: HermesSuiteDisposition) -> &'static str {
+    match disposition {
+        HermesSuiteDisposition::Legacy => "legacy",
+        HermesSuiteDisposition::Done => "done",
+        HermesSuiteDisposition::Skip => "skip",
+    }
+}
+
+pub fn posix_phase_pass(phase: &HermesPosixPhase) -> bool {
+    match phase.disposition {
+        HermesSuiteDisposition::Legacy | HermesSuiteDisposition::Skip => true,
+        HermesSuiteDisposition::Done => {
+            phase.selected == HERMES_POSIXTEST_ALL_EXPECTED
+                && phase.passed == HERMES_POSIXTEST_ALL_EXPECTED
+                && phase.failed == 0
+                && phase.unresolved == 0
+                && phase.timeouts == 0
+                && phase.launch_errors == 0
+        }
+    }
+}
+
+pub fn sectest_phase_pass(phase: &HermesSectestPhase) -> bool {
+    match phase.disposition {
+        HermesSuiteDisposition::Legacy | HermesSuiteDisposition::Skip => true,
+        HermesSuiteDisposition::Done => !phase.arch_skipped && phase.fail == 0 && phase.xpass == 0,
+    }
+}
+
+pub fn test_all_overall_pass(
+    native_ok: bool,
+    op_timeouts: usize,
+    completed: usize,
+    iterations: usize,
+    host_passes: [usize; 2],
+    suites: &HermesSuitePhases,
+) -> bool {
+    native_ok
+        && op_timeouts == 0
+        && completed == iterations
+        && host_passes.iter().all(|passes| *passes == iterations)
+        && posix_phase_pass(&suites.posix)
+        && sectest_phase_pass(&suites.sectest)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -610,6 +792,10 @@ pub struct HermesResumeState {
     pub op_timeouts: usize,
     pub pending_op_len: u8,
     pub pending_op: [u8; 64],
+    /// Opening suites. Copied into every iteration checkpoint so a reboot
+    /// after `posixtest all` / `sectest all` keeps the counts and does not
+    /// run those commands again.
+    pub suites: HermesSuitePhases,
 }
 
 impl HermesResumeState {
@@ -743,6 +929,48 @@ pub fn format_resume_state(state: &HermesResumeState, out: &mut [u8]) -> Option<
     push_u64(out, &mut written, state.op_timeouts as u64)?;
     push_bytes(out, &mut written, b"\npending_op=")?;
     push_bytes(out, &mut written, state.pending_op_str().as_bytes())?;
+    push_bytes(out, &mut written, b"\nposix=")?;
+    push_bytes(
+        out,
+        &mut written,
+        suite_disposition_name(state.suites.posix.disposition).as_bytes(),
+    )?;
+    push_bytes(out, &mut written, b"\nposix_selected=")?;
+    push_u64(out, &mut written, state.suites.posix.selected as u64)?;
+    push_bytes(out, &mut written, b"\nposix_pass=")?;
+    push_u64(out, &mut written, state.suites.posix.passed as u64)?;
+    push_bytes(out, &mut written, b"\nposix_fail=")?;
+    push_u64(out, &mut written, state.suites.posix.failed as u64)?;
+    push_bytes(out, &mut written, b"\nposix_unresolved=")?;
+    push_u64(out, &mut written, state.suites.posix.unresolved as u64)?;
+    push_bytes(out, &mut written, b"\nposix_timeout=")?;
+    push_u64(out, &mut written, state.suites.posix.timeouts as u64)?;
+    push_bytes(out, &mut written, b"\nposix_launch=")?;
+    push_u64(out, &mut written, state.suites.posix.launch_errors as u64)?;
+    push_bytes(out, &mut written, b"\nsectest=")?;
+    push_bytes(
+        out,
+        &mut written,
+        suite_disposition_name(state.suites.sectest.disposition).as_bytes(),
+    )?;
+    push_bytes(out, &mut written, b"\nsectest_pass=")?;
+    push_u64(out, &mut written, state.suites.sectest.pass as u64)?;
+    push_bytes(out, &mut written, b"\nsectest_fail=")?;
+    push_u64(out, &mut written, state.suites.sectest.fail as u64)?;
+    push_bytes(out, &mut written, b"\nsectest_xfail=")?;
+    push_u64(out, &mut written, state.suites.sectest.xfail as u64)?;
+    push_bytes(out, &mut written, b"\nsectest_xpass=")?;
+    push_u64(out, &mut written, state.suites.sectest.xpass as u64)?;
+    push_bytes(out, &mut written, b"\nsectest_arch=")?;
+    push_bytes(
+        out,
+        &mut written,
+        if state.suites.sectest.arch_skipped {
+            b"1"
+        } else {
+            b"0"
+        },
+    )?;
     push_bytes(out, &mut written, b"\n")?;
     Some(written)
 }
@@ -767,6 +995,10 @@ pub fn parse_resume_state(text: &str) -> Option<HermesResumeState> {
     let mut op_timeouts = 0usize;
     let mut pending_op = [0u8; 64];
     let mut pending_op_len = 0u8;
+    let mut posix = HermesPosixPhase::legacy();
+    let mut sectest = HermesSectestPhase::legacy();
+    let mut saw_posix = false;
+    let mut saw_sectest = false;
 
     for line in text.split('\n') {
         let line = line.trim();
@@ -829,8 +1061,36 @@ pub fn parse_resume_state(text: &str) -> Option<HermesResumeState> {
                 pending_op[..len].copy_from_slice(&bytes[..len]);
                 pending_op_len = len as u8;
             }
+            "posix" => {
+                posix.disposition = parse_suite_disposition(value)?;
+                saw_posix = true;
+            }
+            "posix_selected" => posix.selected = parse_decimal(value)? as usize,
+            "posix_pass" => posix.passed = parse_decimal(value)? as usize,
+            "posix_fail" => posix.failed = parse_decimal(value)? as usize,
+            "posix_unresolved" => posix.unresolved = parse_decimal(value)? as usize,
+            "posix_timeout" => posix.timeouts = parse_decimal(value)? as usize,
+            "posix_launch" => posix.launch_errors = parse_decimal(value)? as usize,
+            "sectest" => {
+                sectest.disposition = parse_suite_disposition(value)?;
+                saw_sectest = true;
+            }
+            "sectest_pass" => sectest.pass = parse_decimal(value)? as usize,
+            "sectest_fail" => sectest.fail = parse_decimal(value)? as usize,
+            "sectest_xfail" => sectest.xfail = parse_decimal(value)? as usize,
+            "sectest_xpass" => sectest.xpass = parse_decimal(value)? as usize,
+            "sectest_arch" => {
+                sectest.arch_skipped = match value {
+                    "1" => true,
+                    "0" => false,
+                    _ => return None,
+                };
+            }
             _ => {}
         }
+    }
+    if saw_posix != saw_sectest {
+        return None;
     }
 
     let iterations = iterations?;
@@ -857,7 +1117,17 @@ pub fn parse_resume_state(text: &str) -> Option<HermesResumeState> {
         op_timeouts,
         pending_op_len,
         pending_op,
+        suites: HermesSuitePhases { posix, sectest },
     })
+}
+
+fn parse_suite_disposition(value: &str) -> Option<HermesSuiteDisposition> {
+    match value {
+        "legacy" => Some(HermesSuiteDisposition::Legacy),
+        "done" => Some(HermesSuiteDisposition::Done),
+        "skip" => Some(HermesSuiteDisposition::Skip),
+        _ => None,
+    }
 }
 
 fn push_bytes(buf: &mut [u8], written: &mut usize, bytes: &[u8]) -> Option<()> {

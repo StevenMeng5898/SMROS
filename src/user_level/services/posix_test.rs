@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
 use crate::alloc::collections::BTreeSet;
 use crate::alloc::string::String;
 use crate::alloc::vec::Vec;
@@ -443,6 +445,62 @@ pub fn status_snapshot() -> PosixRunnerStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PosixCompletedCounts {
+    pub selected: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub unresolved: usize,
+    pub unsupported: usize,
+    pub untested: usize,
+    pub launch_errors: usize,
+    pub timeouts: usize,
+}
+
+static LAST_VALID: AtomicBool = AtomicBool::new(false);
+static LAST_SELECTED: AtomicUsize = AtomicUsize::new(0);
+static LAST_PASSED: AtomicUsize = AtomicUsize::new(0);
+static LAST_FAILED: AtomicUsize = AtomicUsize::new(0);
+static LAST_UNRESOLVED: AtomicUsize = AtomicUsize::new(0);
+static LAST_UNSUPPORTED: AtomicUsize = AtomicUsize::new(0);
+static LAST_UNTESTED: AtomicUsize = AtomicUsize::new(0);
+static LAST_LAUNCH_ERRORS: AtomicUsize = AtomicUsize::new(0);
+static LAST_TIMEOUTS: AtomicUsize = AtomicUsize::new(0);
+
+fn clear_last_completed() {
+    LAST_VALID.store(false, Ordering::Release);
+}
+
+fn publish_last_completed(snapshot: &PosixCoverageSnapshot) {
+    LAST_SELECTED.store(snapshot.tests_selected, Ordering::Relaxed);
+    LAST_PASSED.store(snapshot.status_counts.passed, Ordering::Relaxed);
+    LAST_FAILED.store(snapshot.status_counts.failed, Ordering::Relaxed);
+    LAST_UNRESOLVED.store(snapshot.status_counts.unresolved, Ordering::Relaxed);
+    LAST_UNSUPPORTED.store(snapshot.status_counts.unsupported, Ordering::Relaxed);
+    LAST_UNTESTED.store(snapshot.status_counts.untested, Ordering::Relaxed);
+    LAST_LAUNCH_ERRORS.store(snapshot.status_counts.launch_errors, Ordering::Relaxed);
+    LAST_TIMEOUTS.store(snapshot.status_counts.timeouts, Ordering::Relaxed);
+    LAST_VALID.store(true, Ordering::Release);
+}
+
+/// Counts from the run that just finished. `status_snapshot` is empty once
+/// `finish_suite` drops the runner slot.
+pub fn last_completed() -> Option<PosixCompletedCounts> {
+    if !LAST_VALID.load(Ordering::Acquire) {
+        return None;
+    }
+    Some(PosixCompletedCounts {
+        selected: LAST_SELECTED.load(Ordering::Relaxed),
+        passed: LAST_PASSED.load(Ordering::Relaxed),
+        failed: LAST_FAILED.load(Ordering::Relaxed),
+        unresolved: LAST_UNRESOLVED.load(Ordering::Relaxed),
+        unsupported: LAST_UNSUPPORTED.load(Ordering::Relaxed),
+        untested: LAST_UNTESTED.load(Ordering::Relaxed),
+        launch_errors: LAST_LAUNCH_ERRORS.load(Ordering::Relaxed),
+        timeouts: LAST_TIMEOUTS.load(Ordering::Relaxed),
+    })
+}
+
 #[cfg(not(test))]
 pub fn status_snapshot() -> PosixRunnerStatus {
     with_runner_state(|slot| match slot.as_ref() {
@@ -642,6 +700,9 @@ pub fn start(filter: PosixFilter, timeout_override_ms: Option<u32>) -> Result<()
     if with_runner_state(|slot| slot.is_some()) {
         return Err(PosixTestError::AlreadyRunning);
     }
+    // Drop the previous run before this one can fail, so a caller cannot
+    // treat a stale 1600/1600 as the result of a run that never finished.
+    clear_last_completed();
 
     let manifest = match load_manifest() {
         Ok(manifest) => manifest,
@@ -922,6 +983,9 @@ fn finish_suite() {
     with_runner_state(|slot| {
         if let Some(state) = slot.as_mut() {
             let snapshot = state.coverage.snapshot();
+            // The slot is cleared below. Keep the final counts for the shell,
+            // which only observes `running == false` after this returns.
+            publish_last_completed(&snapshot);
             if snapshot.tests_completed == state.selected.len() {
                 emit_suite_end(state);
                 let mut serial = crate::kernel_lowlevel::serial::Serial::new();
