@@ -1298,6 +1298,17 @@ mod syscall_logic {
         );
         assert_eq!(linux_realtime_from_offset(1, -2), None);
         assert_eq!(linux_realtime_from_offset(u64::MAX, 1), None);
+
+        // Clock id 0 is settable, but that decision carries no credential.
+        // CAP_SYS_TIME plus euid 0 is the separate realtime privilege check.
+        let sys_time = 1u64 << LINUX_CAP_SYS_TIME;
+        let full = (1u64 << 41) - 1;
+        assert!(linux_can_set_system_time(0, full));
+        assert!(linux_can_set_system_time(0, sys_time));
+        assert!(!linux_can_set_system_time(1, full));
+        assert!(!linux_can_set_system_time(1, sys_time));
+        assert!(!linux_can_set_system_time(0, full & !sys_time));
+        assert!(!linux_can_set_system_time(0, 0));
     }
 
     #[test]
@@ -3508,6 +3519,43 @@ mod linux_task_logic {
                 absolute_realtime_nanoseconds: Some(TARGET_REALTIME_NANOS),
                 precision_deadline_nanoseconds: None,
             })
+        );
+    }
+
+    #[test]
+    fn clock_settime_sleep_wake_respects_the_timer_notify_gate() {
+        const TICK_NANOS: u64 = 10_000_000;
+        const TARGET_REALTIME_NANOS: u64 = 5_000_000_000;
+
+        let mut tasks = LinuxTaskTable::<3>::new();
+        tasks.register_root(7).unwrap();
+        let child = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
+        assert!(tasks.publish(child));
+        assert!(tasks.install_sleep(
+            child.tid,
+            8,
+            LinuxSleepWait::absolute_realtime_waiting(500, TARGET_REALTIME_NANOS),
+        ));
+        assert!(tasks.block(child.tid, 8, LinuxBlockReason::Sleep));
+
+        tasks.retarget_realtime_sleep_deadlines(7_000_000_000, TICK_NANOS);
+        let wake_nanos = tasks.sleep_waits[child.slot]
+            .unwrap()
+            .wake_monotonic_nanos(TICK_NANOS);
+        assert!(wake_nanos <= 100 * TICK_NANOS);
+        let mut gate = TimerNotifyGate::EMPTY;
+        gate.arm(4, wake_nanos);
+        assert_eq!(
+            tasks.complete_due_realtime_sleeps(100, &gate, TICK_NANOS),
+            [None, None, None]
+        );
+        assert_eq!(
+            tasks.sleep_waits[child.slot].unwrap().outcome,
+            LinuxSleepOutcome::Waiting
+        );
+        assert_eq!(
+            tasks.complete_due_realtime_sleeps(100, &TimerNotifyGate::EMPTY, TICK_NANOS)[0],
+            Some((child.tid, 8, LinuxBlockReason::Sleep))
         );
     }
 
@@ -8355,19 +8403,10 @@ mod linux_futex_logic {
             0,
         )
         .unwrap();
-        assert_eq!(
-            realtime.absolute_realtime_nanoseconds,
-            Some(5_000_000_000)
-        );
+        assert_eq!(realtime.absolute_realtime_nanoseconds, Some(5_000_000_000));
         assert_eq!(realtime.ticks, 500);
         queue
-            .push(waiter(
-                2,
-                8,
-                0x1000,
-                FUTEX_BITSET_MATCH_ANY,
-                Some(realtime),
-            ))
+            .push(waiter(2, 8, 0x1000, FUTEX_BITSET_MATCH_ANY, Some(realtime)))
             .unwrap();
         queue
             .push(waiter(
@@ -8384,10 +8423,7 @@ mod linux_futex_logic {
             .unwrap();
 
         queue.retarget_realtime_deadlines(-1_000_000_000, tick_nanoseconds);
-        assert_eq!(
-            queue.waiters[0].unwrap().deadline.unwrap().ticks,
-            600
-        );
+        assert_eq!(queue.waiters[0].unwrap().deadline.unwrap().ticks, 600);
         assert_eq!(queue.waiters[1].unwrap().deadline.unwrap().ticks, 40);
         assert_eq!(queue.expire_realtime_one(100), None);
 

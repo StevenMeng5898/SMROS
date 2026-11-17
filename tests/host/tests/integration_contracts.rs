@@ -821,7 +821,33 @@ fn posix_clock_timer_clock_runtime_applies_checked_realtime_offsets() {
     assert!(settime.contains("linux_posix_clock_settable_for_current(clockid)"));
     assert!(settime.contains("linux_read_user_timespec(tp)?"));
     assert!(settime.contains("linux_realtime_offset_for_set("));
-    assert!(settime.contains("LINUX_REALTIME_OFFSET_NANOS.store("));
+    assert!(settime.contains("linux_current_can_set_system_time()"));
+    assert!(settime.contains("Err(SysError::EPERM)"));
+    assert!(settime.contains("apply_linux_realtime_offset(offset)"));
+    let apply = braced_body(
+        &syscall[syscall
+            .find("fn apply_linux_realtime_offset(")
+            .expect("shared realtime settime publish")..],
+    );
+    assert!(apply.contains("LINUX_REALTIME_OFFSET_NANOS.store("));
+    let deliver = apply
+        .find("deliver_linux_posix_timer_signals_from_irq()")
+        .expect("timer delivery before sleep wake");
+    let wake = apply
+        .find("complete_due_realtime_sleeps_gated(")
+        .expect("gated realtime sleep wake");
+    assert!(
+        deliver < wake,
+        "clock_settime must arm the SIGEV_THREAD gate before waking due sleeps"
+    );
+    let settimeofday = braced_body(
+        &syscall[syscall
+            .find("pub fn sys_settimeofday(")
+            .expect("settimeofday")..],
+    );
+    assert!(settimeofday.contains("linux_current_can_set_system_time()"));
+    assert!(settimeofday.contains("apply_linux_realtime_offset(offset)"));
+    assert!(settimeofday.contains("Err(SysError::EPERM)"));
     assert!(gettime.contains("linux_clock_nanoseconds(clock)?"));
     assert!(time.contains("linux_realtime_nanos()?"));
     assert!(gettimeofday.contains("linux_realtime_nanos()?"));
@@ -7335,7 +7361,8 @@ fn fuzzsc_success_path_uses_live_mprotect_and_names_posix_errors() {
 #[test]
 fn fuzzsc_epoll_success_args_and_physical_vmo_stay_denied() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let fuzz = std::fs::read_to_string(repository.join("src/syscall/fuzz.rs")).expect("read fuzzer");
+    let fuzz =
+        std::fs::read_to_string(repository.join("src/syscall/fuzz.rs")).expect("read fuzzer");
     let syscall =
         std::fs::read_to_string(repository.join("src/syscall/syscall.rs")).expect("read syscall");
 
@@ -7370,9 +7397,7 @@ fn fuzzsc_epoll_success_args_and_physical_vmo_stay_denied() {
     assert!(physical_fn.contains("Err(ZxError::ErrAccessDenied)"));
     assert!(physical_fn.contains("Err(ZxError::ErrInvalidArgs)"));
 
-    let ctl = syscall
-        .find("pub fn sys_epoll_ctl(")
-        .expect("epoll_ctl");
+    let ctl = syscall.find("pub fn sys_epoll_ctl(").expect("epoll_ctl");
     let ctl_end = syscall[ctl..]
         .find("pub fn sys_epoll_pwait(")
         .map(|offset| ctl + offset)
@@ -11547,10 +11572,9 @@ fn posix_resources_include_linux_process_page_lifecycle() {
         !counts_body.contains("spin_loop"),
         "a POSIX resource snapshot holds the process lock with IRQs masked and must not spin"
     );
-    let shared = std::fs::read_to_string(
-        repository.join("src/syscall/linux_process_logic_shared.rs"),
-    )
-    .expect("read Linux process logic");
+    let shared =
+        std::fs::read_to_string(repository.join("src/syscall/linux_process_logic_shared.rs"))
+            .expect("read Linux process logic");
     let match_fn = shared
         .find("pub(crate) fn running_pids_match(")
         .expect("running_pids_match");
@@ -12426,8 +12450,9 @@ fn hermes_posixtest_timeout_retires_a_blocked_root() {
         .expect("read posix runner");
     let scheduler = std::fs::read_to_string(repository.join("src/kernel_objects/scheduler.rs"))
         .expect("read scheduler");
-    let interrupt = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/interrupt.rs"))
-        .expect("read gic");
+    let interrupt =
+        std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/interrupt.rs"))
+            .expect("read gic");
     let cpu = std::fs::read_to_string(repository.join("src/kernel_lowlevel/ARM64/cpu.rs"))
         .expect("read cpu");
     let main = std::fs::read_to_string(repository.join("src/main.rs")).expect("read main");

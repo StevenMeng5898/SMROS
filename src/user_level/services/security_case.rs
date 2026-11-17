@@ -170,6 +170,9 @@ static CFG_A0: AtomicU64 = AtomicU64::new(0);
 static CFG_A1: AtomicU64 = AtomicU64::new(0);
 static CFG_A2: AtomicU64 = AtomicU64::new(0);
 static PROBE_THREAD: AtomicUsize = AtomicUsize::new(usize::MAX);
+static CLOCK_SNAPSHOT_VALID: AtomicBool = AtomicBool::new(false);
+static CLOCK_SNAPSHOT_DENIED: AtomicBool = AtomicBool::new(false);
+static CLOCK_SNAPSHOT_APPLIED: AtomicBool = AtomicBool::new(false);
 static WATCH_PAGE: AtomicUsize = AtomicUsize::new(0);
 static WATCH_WORD: AtomicU64 = AtomicU64::new(0);
 static WATCH_VALID: AtomicBool = AtomicBool::new(false);
@@ -348,6 +351,12 @@ pub(crate) fn observe_exit(code: i32) {
         return;
     }
     snapshot_watch();
+    // Process exit resets tasks, futexes, and mqueues. Capture the clock
+    // probe before that teardown, while foreign waits are still in place.
+    let (denied, applied) = crate::syscall::security_snapshot_clock_probe();
+    CLOCK_SNAPSHOT_DENIED.store(denied, Ordering::Relaxed);
+    CLOCK_SNAPSHOT_APPLIED.store(applied, Ordering::Relaxed);
+    CLOCK_SNAPSHOT_VALID.store(true, Ordering::Release);
     EXITED.store(true, Ordering::Relaxed);
     EXIT_CODE.store(code, Ordering::Relaxed);
     DONE.store(true, Ordering::Release);
@@ -634,6 +643,11 @@ enum Judge {
     NoLinuxTask,
     /// The file owner chmod is visible to a later stat. Another uid gets EPERM.
     ChmodRoundtrip,
+    /// An unprivileged `clock_settime` or `settimeofday` returns `EPERM` and
+    /// leaves the realtime offset and any foreign absolute waits alone.
+    ClockDenied,
+    /// A privileged realtime set succeeds and is visible to `clock_gettime`.
+    ClockPrivileged,
 }
 
 macro_rules! syscall_case {
@@ -652,7 +666,7 @@ macro_rules! syscall_case {
     };
 }
 
-fn cases() -> [Case; 83] {
+fn cases() -> [Case; 88] {
     let enosys = errno_u64(38);
     let eperm = errno_u64(1);
     let einval = errno_u64(22);
@@ -1012,7 +1026,17 @@ fn cases() -> [Case; 83] {
         syscall_case!("lookup-dcookie", 18, 0, 0, 0, enosys),
         syscall_case!("nfsservctl", 42, 0, 0, 0, enosys),
         syscall_case!("settimeofday-noop", 170, 0, 0, 0, 0),
-        syscall_case!("settimeofday-write", 170, timeval, 0, 0, eperm),
+        Case {
+            id: "settimeofday-write",
+            op: OP_SYSCALL,
+            target: 0,
+            value: 1,
+            sysno: 170,
+            a0: timeval,
+            a1: 0,
+            a2: 0,
+            judge: Judge::ClockDenied,
+        },
         syscall_case!("adjtimex-fault", 171, 0, 0, 0, efault),
         syscall_case!("adjtimex-read", 171, timex, 0, 0, 5),
         syscall_case!("adjtimex-write", 171, timeval, 0, 0, eperm),
@@ -1078,6 +1102,61 @@ fn cases() -> [Case; 83] {
             a2: 0,
             judge: Judge::ChmodRoundtrip,
         },
+        Case {
+            id: "clock-settime-unpriv",
+            op: OP_SYSCALL,
+            target: 0,
+            value: 1,
+            sysno: 112,
+            a0: 0,
+            a1: (DATA_PAGE + 0x300) as u64,
+            a2: 1,
+            judge: Judge::ClockDenied,
+        },
+        Case {
+            id: "clock-settime-root-no-cap",
+            op: OP_SYSCALL,
+            target: 0,
+            value: 2,
+            sysno: 112,
+            a0: 0,
+            a1: (DATA_PAGE + 0x300) as u64,
+            a2: 1,
+            judge: Judge::ClockDenied,
+        },
+        Case {
+            id: "clock-settime-priv",
+            op: OP_SYSCALL,
+            target: 0,
+            value: 0,
+            sysno: 112,
+            a0: 0,
+            a1: (DATA_PAGE + 0x300) as u64,
+            a2: 2,
+            judge: Judge::ClockPrivileged,
+        },
+        Case {
+            id: "clock-settime-foreign-waits",
+            op: OP_SYSCALL,
+            target: 1,
+            value: 1,
+            sysno: 112,
+            a0: 0,
+            a1: (DATA_PAGE + 0x300) as u64,
+            a2: 1,
+            judge: Judge::ClockDenied,
+        },
+        Case {
+            id: "settimeofday-privileged",
+            op: OP_SYSCALL,
+            target: 0,
+            value: 0,
+            sysno: 170,
+            a0: (DATA_PAGE + 0x340) as u64,
+            a1: 0,
+            a2: 3,
+            judge: Judge::ClockPrivileged,
+        },
     ]
 }
 
@@ -1113,7 +1192,9 @@ fn execute(case: Case) -> FinishedCase {
         | Judge::WaitOnce
         | Judge::ExitRefork
         | Judge::BadHandler
-        | Judge::ChmodRoundtrip => run_probe(case),
+        | Judge::ChmodRoundtrip
+        | Judge::ClockDenied
+        | Judge::ClockPrivileged => run_probe(case),
     }
 }
 
@@ -1124,6 +1205,8 @@ fn run_undef(serial: &mut Serial) {
 }
 
 fn run_probe(case: Case) -> FinishedCase {
+    crate::syscall::security_finish_clock_probe();
+    CLOCK_SNAPSHOT_VALID.store(false, Ordering::Relaxed);
     linux_task::reset();
     linux_process_memory::reset_launch();
     PROBE_THREAD.store(usize::MAX, Ordering::Relaxed);
@@ -1189,6 +1272,7 @@ fn run_probe(case: Case) -> FinishedCase {
         {
             PEER_STOP.store(true, Ordering::Release);
             ACTIVE.store(false, Ordering::Release);
+            crate::syscall::security_finish_clock_probe();
             return finished(Verdict::Fail, "timeout");
         }
     }
@@ -1198,6 +1282,7 @@ fn run_probe(case: Case) -> FinishedCase {
 
 fn judge(case: Case) -> FinishedCase {
     if SETUP_ERROR.load(Ordering::Relaxed) != 0 {
+        crate::syscall::security_finish_clock_probe();
         return finished(Verdict::Fail, "setup");
     }
     let magic_ok = MAGIC_WORD.load(Ordering::Relaxed) == MAGIC;
@@ -1244,6 +1329,52 @@ fn judge(case: Case) -> FinishedCase {
         Judge::BadHandler => judge_bad_handler(),
         Judge::ChmodRoundtrip => judge_chmod(),
         Judge::NoLinuxTask => finished(Verdict::Fail, "wrong-path"),
+        Judge::ClockDenied => judge_clock_denied(),
+        Judge::ClockPrivileged => judge_clock_privileged(),
+    }
+}
+
+fn clock_probe_denied() -> bool {
+    if CLOCK_SNAPSHOT_VALID.load(Ordering::Acquire) {
+        CLOCK_SNAPSHOT_DENIED.load(Ordering::Relaxed)
+    } else {
+        crate::syscall::security_clock_change_denied()
+    }
+}
+
+fn clock_probe_applied() -> bool {
+    if CLOCK_SNAPSHOT_VALID.load(Ordering::Acquire) {
+        CLOCK_SNAPSHOT_APPLIED.load(Ordering::Relaxed)
+    } else {
+        crate::syscall::security_clock_change_applied()
+    }
+}
+
+fn judge_clock_denied() -> FinishedCase {
+    let denied = !FAULTED.load(Ordering::Relaxed)
+        && LAST_RESULT.load(Ordering::Relaxed) == errno_u64(1)
+        && clock_probe_denied();
+    crate::syscall::security_finish_clock_probe();
+    if denied {
+        finished(Verdict::Pass, "eperm-clock-held")
+    } else if LAST_RESULT.load(Ordering::Relaxed) != errno_u64(1) {
+        finished(Verdict::Fail, "unexpected-return")
+    } else {
+        finished(Verdict::Fail, "clock-moved")
+    }
+}
+
+fn judge_clock_privileged() -> FinishedCase {
+    let applied = !FAULTED.load(Ordering::Relaxed)
+        && LAST_RESULT.load(Ordering::Relaxed) == 0
+        && clock_probe_applied();
+    crate::syscall::security_finish_clock_probe();
+    if applied {
+        finished(Verdict::Pass, "clock-set")
+    } else if LAST_RESULT.load(Ordering::Relaxed) != 0 {
+        finished(Verdict::Fail, "unexpected-return")
+    } else {
+        finished(Verdict::Fail, "clock-unchanged")
     }
 }
 
@@ -1687,6 +1818,7 @@ fn launch_probe() -> Result<(), u64> {
     data[0x600..0x600 + shm_path.len()].copy_from_slice(shm_path);
     let missing_path = b"/no/such/smros-chmod\0";
     data[0x620..0x620 + missing_path.len()].copy_from_slice(missing_path);
+    prepare_clock_request(&mut data).map_err(abort_setup)?;
     linux_process_memory::map_current_with_contents(
         Some(DATA_PAGE),
         PAGE_SIZE,
@@ -1776,9 +1908,51 @@ fn launch_probe() -> Result<(), u64> {
     )
     .map_err(abort_setup)?;
     let stack_top = (STACK_PAGE + stack_len) as u64;
+    if let Err(error) = prepare_clock_identity() {
+        crate::syscall::security_finish_clock_probe();
+        return Err(abort_setup(error));
+    }
     unsafe {
         crate::user_level::user_process::switch_to_el0(CODE_PAGE as u64, stack_top, root);
     }
+}
+
+fn prepare_clock_request(data: &mut [u8]) -> Result<(), SysError> {
+    let sysno = CFG_SYSNO.load(Ordering::Relaxed);
+    if sysno != 112 && sysno != 170 {
+        return Ok(());
+    }
+    crate::syscall::security_note_clock_probe();
+    let kind = CFG_A2.load(Ordering::Relaxed);
+    if kind != 1 && kind != 2 && kind != 3 {
+        return Ok(());
+    }
+    let address = if kind == 3 {
+        CFG_A0.load(Ordering::Relaxed)
+    } else {
+        CFG_A1.load(Ordering::Relaxed)
+    };
+    let offset = (address as usize)
+        .checked_sub(DATA_PAGE)
+        .ok_or(SysError::EINVAL)?;
+    crate::syscall::security_fill_clock_request(data, offset, kind).map_err(|_| SysError::EINVAL)
+}
+
+fn prepare_clock_identity() -> Result<(), SysError> {
+    let sysno = CFG_SYSNO.load(Ordering::Relaxed);
+    if sysno != 112 && sysno != 170 {
+        return Ok(());
+    }
+    if CFG_TARGET.load(Ordering::Relaxed) == 1
+        && !crate::syscall::security_plant_foreign_realtime_waits()
+    {
+        return Err(SysError::EAGAIN);
+    }
+    let mode = CFG_VALUE.load(Ordering::Relaxed);
+    if (mode == 1 || mode == 2) && !crate::syscall::security_set_clock_credentials(mode) {
+        return Err(SysError::EPERM);
+    }
+    Ok(())
 }
 
 fn put_u64(buf: &mut [u8], offset: usize, value: u64) {
