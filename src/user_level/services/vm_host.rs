@@ -15,9 +15,10 @@ pub const DEFAULT_LAUNCHER_PORT: u16 = 7070;
 const MAX_REQUEST_BYTES: usize = 2048;
 const MAX_RESPONSE_BYTES: usize = 512;
 const RESPONSE_READ_ATTEMPTS: usize = 8;
-/// Host ST can take the full smoke timeout plus kernel build. Keep polling
-/// until that completes instead of reporting UNAVAILABLE.
+/// Per-iteration `ut`/`it` and other short host jobs.
 const HERMES_TEST_WAIT_NANOS: u64 = 6 * 60 * 1_000_000_000;
+/// `skt`, `posix-run`, and Verus can each take much longer than a host unit test.
+const HERMES_TEST_LONG_WAIT_NANOS: u64 = 2 * 60 * 60 * 1_000_000_000;
 /// After guest reset, virtio-net and QEMU slirp need a bounded wait before the
 /// launcher handshake succeeds.
 const HERMES_HOST_READY_WAIT_NANOS: u64 = 30 * 1_000_000_000;
@@ -57,6 +58,19 @@ pub struct VmHostLaunch {
 pub enum HermesHostTestJob {
     Ut,
     It,
+    El0,
+    Skt,
+    St,
+    PosixTool,
+    PosixFetch,
+    PosixAudit,
+    PosixBuild,
+    PosixStage,
+    PosixBaseline,
+    PosixRun,
+    PosixReport,
+    Launcher,
+    Verus,
 }
 
 impl HermesHostTestJob {
@@ -64,6 +78,47 @@ impl HermesHostTestJob {
         match self {
             Self::Ut => "ut",
             Self::It => "it",
+            Self::El0 => "el0",
+            Self::Skt => "skt",
+            Self::St => "st",
+            Self::PosixTool => "posix-tool-test",
+            Self::PosixFetch => "posix-fetch",
+            Self::PosixAudit => "posix-audit",
+            Self::PosixBuild => "posix-build",
+            Self::PosixStage => "posix-stage",
+            Self::PosixBaseline => "posix-baseline",
+            Self::PosixRun => "posix-run",
+            Self::PosixReport => "posix-report",
+            Self::Launcher => "launcher-test",
+            Self::Verus => "verus",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "ut" => Self::Ut,
+            "it" => Self::It,
+            "el0" => Self::El0,
+            "skt" => Self::Skt,
+            "st" => Self::St,
+            "posix-tool-test" => Self::PosixTool,
+            "posix-fetch" => Self::PosixFetch,
+            "posix-audit" => Self::PosixAudit,
+            "posix-build" => Self::PosixBuild,
+            "posix-stage" => Self::PosixStage,
+            "posix-baseline" => Self::PosixBaseline,
+            "posix-run" => Self::PosixRun,
+            "posix-report" => Self::PosixReport,
+            "launcher-test" => Self::Launcher,
+            "verus" => Self::Verus,
+            _ => return None,
+        })
+    }
+
+    pub fn wait_nanos(self) -> u64 {
+        match self {
+            Self::Ut | Self::It | Self::PosixTool | Self::Launcher => HERMES_TEST_WAIT_NANOS,
+            _ => HERMES_TEST_LONG_WAIT_NANOS,
         }
     }
 }
@@ -72,6 +127,8 @@ impl HermesHostTestJob {
 pub struct HermesHostTestResult {
     pub job: HermesHostTestJob,
     pub passed: bool,
+    /// Toolchain or runner missing. Distinct from a failing test.
+    pub unavailable: bool,
     pub summary: String,
 }
 
@@ -137,8 +194,7 @@ pub fn run_hermes_test(job: HermesHostTestJob) -> Result<HermesHostTestResult, V
 
 fn run_hermes_test_once(job: HermesHostTestJob) -> Result<HermesHostTestResult, VmHostError> {
     let token = accept_hermes_test(job)?;
-    let deadline =
-        crate::kernel_lowlevel::timer::get_nanoseconds().saturating_add(HERMES_TEST_WAIT_NANOS);
+    let deadline = crate::kernel_lowlevel::timer::get_nanoseconds().saturating_add(job.wait_nanos());
     loop {
         match poll_hermes_test(job, token.as_str()) {
             Ok(Some(result)) => return Ok(result),
@@ -297,16 +353,24 @@ fn parse_hermes_test_response(
 ) -> Result<HermesHostTestResult, VmHostError> {
     let text = core::str::from_utf8(response).map_err(|_| VmHostError::ResponseInvalid)?;
     let passed = text.starts_with("OK ") && text.contains("status=0");
-    if !passed && !text.starts_with("ERR ") {
+    let unavailable = text.contains("status=unavailable");
+    if !passed && !unavailable && !text.starts_with("ERR ") {
         return Err(VmHostError::ResponseInvalid);
     }
     let summary = text
         .split_whitespace()
         .find_map(|field| field.strip_prefix("summary="))
-        .unwrap_or(if passed { "passed" } else { "failed" });
+        .unwrap_or(if passed {
+            "passed"
+        } else if unavailable {
+            "UNAVAILABLE"
+        } else {
+            "failed"
+        });
     Ok(HermesHostTestResult {
         job,
         passed,
+        unavailable,
         summary: summary.to_string(),
     })
 }

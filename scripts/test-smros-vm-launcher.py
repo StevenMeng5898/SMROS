@@ -34,11 +34,17 @@ class HermesHostTestProtocolTests(unittest.TestCase):
         )
         self.assertIn(str(LAUNCHER.ROOT), LAUNCHER.host_make_command("ut"))
         self.assertIn(str(LAUNCHER.ROOT / "Makefile"), LAUNCHER.host_make_command("it"))
+        skt = LAUNCHER.parse_test_job({"job": "skt"})
+        self.assertIn("skt", skt)
+        self.assertIn("SMROS_HERMES_ISOLATED=1", skt)
+        self.assertIn("verus", LAUNCHER.parse_test_job({"job": "verus"}))
+        self.assertIn(
+            "run_el0_cases.py",
+            " ".join(LAUNCHER.parse_test_job({"job": "el0"})),
+        )
 
         for values in (
             {"job": "verify"},
-            {"job": "st"},
-            {"job": "skt"},
             {"job": "posixtest"},
             {"job": "posixtest all"},
             {"job": "ut", "command": "make clean"},
@@ -311,7 +317,7 @@ class HermesHostTestProtocolTests(unittest.TestCase):
     def test_start_script_scrubs_make_env_and_restarts_only_from_the_host(self) -> None:
         starter = Path(__file__).with_name("start-smros-vm-launcher.sh").read_text()
         makefile = Path(__file__).resolve().parents[1].joinpath("Makefile").read_text()
-        self.assertIn("REQUIRED_VERSION=12", starter)
+        self.assertIn("REQUIRED_VERSION=13", starter)
         self.assertIn("-u MAKEFLAGS", starter)
         self.assertIn("-u MAKELEVEL", starter)
         self.assertIn("-u GNUMAKEFLAGS", starter)

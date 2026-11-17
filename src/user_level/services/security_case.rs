@@ -270,6 +270,35 @@ struct Tally {
     xpass: usize,
 }
 
+/// Probes in `cases()`. `sectest all` also runs heap-fork and elf-memsz.
+pub const LISTED_CASE_COUNT: usize = 89;
+pub const SECTEST_ALL_CASE_COUNT: usize = LISTED_CASE_COUNT + 2;
+
+static COVERED_LO: AtomicU64 = AtomicU64::new(0);
+static COVERED_HI: AtomicU64 = AtomicU64::new(0);
+
+pub fn reset_case_coverage() {
+    COVERED_LO.store(0, Ordering::Relaxed);
+    COVERED_HI.store(0, Ordering::Relaxed);
+}
+
+pub fn note_case_coverage(index: usize) {
+    if index >= 128 {
+        return;
+    }
+    let bit = 1u64 << (index % 64);
+    if index < 64 {
+        COVERED_LO.fetch_or(bit, Ordering::Relaxed);
+    } else {
+        COVERED_HI.fetch_or(bit, Ordering::Relaxed);
+    }
+}
+
+pub fn case_coverage_ran() -> usize {
+    COVERED_LO.load(Ordering::Relaxed).count_ones() as usize
+        + COVERED_HI.load(Ordering::Relaxed).count_ones() as usize
+}
+
 /// Counts from the latest `run` summary. Hermes reads this after `sectest all`
 /// without parsing serial text. Case bodies do not touch it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -484,12 +513,15 @@ pub fn run(serial: &mut Serial, which: &str) {
 
 fn run_listed(serial: &mut Serial, _include_undef: bool) {
     let mut tally = Tally::new();
-    for case in cases() {
+    for (index, case) in cases().into_iter().enumerate() {
+        note_case_coverage(index);
         let finished = execute(case);
         print_case(serial, case.id, &finished);
         tally.add(finished.verdict);
     }
+    note_case_coverage(LISTED_CASE_COUNT);
     record_kernel_case(serial, &mut tally, "heap-fork", run_heap_fork_case());
+    note_case_coverage(LISTED_CASE_COUNT + 1);
     record_kernel_case(serial, &mut tally, "elf-memsz", run_elf_memsz_case());
     serial.write_str("SEC-HEARTBEAT\n");
     print_summary(serial, tally, false);
@@ -733,7 +765,7 @@ macro_rules! syscall_case {
     };
 }
 
-fn cases() -> [Case; 89] {
+fn cases() -> [Case; LISTED_CASE_COUNT] {
     let enosys = errno_u64(38);
     let eperm = errno_u64(1);
     let einval = errno_u64(22);

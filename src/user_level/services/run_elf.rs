@@ -7,6 +7,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 
 use crate::kernel_lowlevel::{memory::PAGE_SIZE, timer};
 use crate::kernel_objects::scheduler;
@@ -86,6 +87,36 @@ impl RunElfError {
 pub enum RunObserver {
     Shell,
     PosixTest,
+    /// Hermes guest cases. The waiter polls `take_captured_exit`.
+    Captured,
+}
+
+const CAPTURE_IDLE: u8 = 0;
+const CAPTURE_RUNNING: u8 = 1;
+const CAPTURE_EXIT: u8 = 2;
+const CAPTURE_LAUNCH: u8 = 3;
+const CAPTURE_INFRA: u8 = 4;
+
+static CAPTURE_STATE: AtomicU8 = AtomicU8::new(CAPTURE_IDLE);
+static CAPTURE_CODE: AtomicI32 = AtomicI32::new(0);
+
+pub fn begin_capture() {
+    CAPTURE_CODE.store(0, Ordering::Relaxed);
+    CAPTURE_STATE.store(CAPTURE_RUNNING, Ordering::Release);
+}
+
+pub fn end_capture() {
+    CAPTURE_STATE.store(CAPTURE_IDLE, Ordering::Release);
+}
+
+/// `Ok(code)` when the process exited. `Err` is a launch or infrastructure failure.
+pub fn take_captured_exit() -> Option<Result<i32, &'static str>> {
+    match CAPTURE_STATE.load(Ordering::Acquire) {
+        CAPTURE_IDLE | CAPTURE_RUNNING => None,
+        CAPTURE_EXIT => Some(Ok(CAPTURE_CODE.load(Ordering::Relaxed))),
+        CAPTURE_LAUNCH => Some(Err("launch")),
+        _ => Some(Err("infrastructure")),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -383,6 +414,21 @@ fn dispatch_outcome(observer: RunObserver, outcome: RunOutcome) {
     match observer {
         RunObserver::Shell => print_shell_outcome(&outcome),
         RunObserver::PosixTest => posix_test::on_run_outcome(outcome),
+        RunObserver::Captured => {
+            match outcome.termination {
+                RunTermination::Exit(code) => {
+                    CAPTURE_CODE.store(code, Ordering::Relaxed);
+                    CAPTURE_STATE.store(CAPTURE_EXIT, Ordering::Release);
+                }
+                RunTermination::LaunchError(_) => {
+                    CAPTURE_STATE.store(CAPTURE_LAUNCH, Ordering::Release);
+                }
+                RunTermination::InfrastructureError(_) => {
+                    CAPTURE_STATE.store(CAPTURE_INFRA, Ordering::Release);
+                }
+            }
+            print_shell_outcome(&outcome);
+        }
     }
 }
 

@@ -435,9 +435,8 @@ owned lifecycle skills `reboot` and `cmd`. Prompt
 routing reports the matched skills in the shell response. `ut` is the
 host job `make ut`. `make posix-tool-test` remains the offline POSIX tool
 gate and does not replace `make ut`. `it` is the host job `make it` and
-adds launcher identity checks. `skt` documents the host-only smoke test
-(`make skt`); Hermes test-all does not run it because the guest cannot boot
-another SMROS from the command line. `fuzzing` is bounded `fuzzsc`. The `reboot` skill
+adds launcher identity checks. `skt` is `make skt`. Hermes test-all runs it once as an isolated host stage
+on a private disk, because the guest cannot boot another SMROS on the live image. `fuzzing` is bounded `fuzzsc`. The `reboot` skill
 owns `hermes exec reboot` and keeps an active `hermes test-all` or `hermes random`
 campaign resumable: the guest writes `/data/hermes/tests/resume.cfg`, flushes FxFS,
 resets, then continues remaining iterations to resume after reboot. Host `ut`/`it`
@@ -549,13 +548,18 @@ still flush FxFS and resume rather than counting as timeouts. The command prints
 effective seed for replay and persists a bounded report at
 `/data/hermes/tests/latest.log`. Reports retain aggregate totals and the first
 64 round details, then record how many details were omitted. `hermes test-all`
-runs the native Hermes check once, then `posixtest all` and `sectest all` once,
+runs the native Hermes check once, then `posixtest all` and `sectest all` once
+(`sectest undef`, one case id, and a full case-id coverage check are part of that phase),
+then the guest ELFs `f1_seccomp`, `f2_landlock`, `f3_pkey`, `f4_iouring`, `f5_ptrace`, `g1_stopcont`, and `g1b_stop` (each must exit 0),
 then executes one deterministic random guest
-operation and each host job once per iteration. Optional `mode=syscall` keeps
-the same host jobs but selects the focused syscall/POSIX guest catalog.
+operation and each host job once per iteration (`make ut` and `make it`). Optional `mode=syscall` keeps
+the same per-iteration host jobs but selects the focused syscall/POSIX guest catalog.
 Default `hermes test-all` already includes LVGL, QML, syscall smoke, and POSIX
-canaries, so it does not take a UI mode. `posixtest=skip` and `sectest=skip`
-omit those two opening phases for a short debug run; the default is to run both.
+canaries, so it does not take a UI mode. `posixtest=skip`, `sectest=skip`, and
+`<stage>=skip` (`guest`, `el0`, `skt`, `st`, `posix-tool-test`, `posix-fetch`,
+`posix-audit`, `posix-build`, `posix-stage`, `posix-baseline`, `posix-run`,
+`posix-report`, `launcher-test`, `verus`, `testsc`, `fuzzsc`)
+omit that stage for a short debug run; the default is to run every stage.
 `posixtest all` is on the order of 127k scheduler ticks, so it is not repeated
 on every iteration. It has to run while `/dev/shm` is still mode `040755`.
 `fuzzsc` used to setattr that directory to `0777` with `fxfs::set_attrs`. The
@@ -566,22 +570,27 @@ the mode survived onto the disk. `shm_unlink/8-1.c` and `shm_unlink/9-1.c` then
 stay unresolved, because a non-root unlink succeeds when the directory is
 world-writable. Setattr of `/`, `/dev`, and `/dev/shm` now rejects any mode
 other than `040755`, and `fuzzsc` no longer issues that setattr. After the
-iteration loop, `hermes test-all` runs bounded `fuzzsc seed=1 iterations=1 time=1`
-and fails unless the mode is still `040755`. The opening phases are checkpointed
+iteration loop, `hermes test-all` runs the once-per-campaign host stages
+(`el0`, `make skt`, `make st`, every `make posix-*` target, `make launcher-test`,
+and `make verus`), then mandatory `testsc` and bounded `fuzzsc seed=1 iterations=1 time=1`,
+then another bounded `fuzzsc seed=1 iterations=1 time=1`
+and fails unless `/dev/shm` is still mode `040755`. `skt`/`st`/`posix-run` are isolated from the live guest disk.
+The opening phases are checkpointed
 in `/data/hermes/tests/resume.cfg` before the iteration loop. A reboot after
-they finish restores pass/fail/unresolved/timeout and sectest
-pass/fail/xfail/xpass and does not run the phases again. `hermes exec posixtest all`
+they finish restores pass/fail/unresolved/timeout, sectest
+pass/fail/xfail/xpass plus id/undef/one counts, guest ELF counts, and the pending host-stage dispositions, and does not run the phases again. `hermes exec posixtest all`
 stays denied; only the test-all opening phase invokes that shell command.
 Any new test item must also be orchestrated into `hermes test-all` in the same change.
-The persisted report records `posixtest phase=... pass= fail= unresolved= timeout=`,
-`sectest phase=... pass= fail= xfail= xpass=`, and `shm-mode phase=... mode=`.
+The persisted report and the final `Hermes test-all summary` line record every stage with counts.
 Overall `PASS` requires the
 native check, zero op timeouts, every random iteration, every host `ut`/`it`,
 `posixtest` at 1600/1600 with fail/unresolved/timeout/launch-errors all zero,
-`sectest` with fail and xpass both zero, and `shm-mode` at `040755`. Thus `iterations=1000`
+`sectest` with fail and xpass both zero, every sectest id ran, `sectest undef` and the single-id path passed,
+every guest ELF passed, every other mandatory stage passed with `unavailable=0`,
+and `shm-mode` at `040755`. A missing Verus toolchain is reported as `verus=0/0/1` (`pass/fail/unavailable`) and does not by itself fail the campaign; a Verus proof failure does. Any other `UNAVAILABLE` fails the campaign. Thus `iterations=1000`
 requests `ut` and `it` 1000 times each through
-`scripts/smros-vm-launcher.py`. The launcher maps those two identifiers to
-fixed Make argv, accepts the job immediately, runs one job at a time with a timeout, and does not accept
+`scripts/smros-vm-launcher.py`. The launcher maps each accepted job name to
+fixed argv, accepts the job immediately, runs one job at a time with a timeout, and does not accept
 arbitrary command strings. The guest polls `SMROS_TEST_STATUS` until the job finishes.
 
 ### Qt/QML Vehicle Cluster Port

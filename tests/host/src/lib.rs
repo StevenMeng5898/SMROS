@@ -11777,6 +11777,7 @@ fn hermes_campaign_selection_is_reproducible_and_bounded() {
             mode: HermesCampaignMode::Ops,
             run_posixtest: true,
             run_sectest: true,
+            skip_extra: 0,
         })
     );
     let maximum = format!("iterations={}", usize::MAX);
@@ -11788,6 +11789,7 @@ fn hermes_campaign_selection_is_reproducible_and_bounded() {
             mode: HermesCampaignMode::Ops,
             run_posixtest: true,
             run_sectest: true,
+            skip_extra: 0,
         })
     );
     assert_eq!(parse_campaign_options(&["iterations=0"]), None);
@@ -11817,6 +11819,7 @@ fn hermes_campaign_selection_is_reproducible_and_bounded() {
             mode: HermesCampaignMode::Syscall,
             run_posixtest: true,
             run_sectest: true,
+            skip_extra: 0,
         })
     );
     assert_eq!(parse_campaign_options(&["mode=unknown"]), None);
@@ -11987,6 +11990,7 @@ fn hermes_opening_suites_gate_test_all_and_round_trip() {
         sectest_phase_pass, test_all_overall_pass, HermesCampaignMode, HermesPosixPhase,
         HermesResumeKind, HermesResumeState, HermesSectestPhase, HermesSuiteDisposition,
         HermesSuitePhases, HERMES_POSIXTEST_ALL_EXPECTED, HERMES_RESUME_TEXT_CAPACITY,
+        HERMES_SECTEST_ALL_CASES,
     };
 
     assert_eq!(HERMES_POSIXTEST_ALL_EXPECTED, 1600);
@@ -11998,6 +12002,7 @@ fn hermes_opening_suites_gate_test_all_and_round_trip() {
             mode: HermesCampaignMode::Ops,
             run_posixtest: true,
             run_sectest: true,
+            skip_extra: 0,
         })
     );
     assert_eq!(
@@ -12008,6 +12013,7 @@ fn hermes_opening_suites_gate_test_all_and_round_trip() {
             mode: HermesCampaignMode::Ops,
             run_posixtest: false,
             run_sectest: false,
+            skip_extra: 0,
         })
     );
     assert_eq!(parse_campaign_options(&["posixtest=later"]), None);
@@ -12037,10 +12043,18 @@ fn hermes_opening_suites_gate_test_all_and_round_trip() {
         xfail: 3,
         xpass: 0,
         arch_skipped: false,
+        ids_expected: HERMES_SECTEST_ALL_CASES,
+        ids_ran: HERMES_SECTEST_ALL_CASES,
+        undef_pass: 1,
+        undef_fail: 0,
+        one_pass: 1,
+        one_fail: 0,
     };
     let suites_ok = HermesSuitePhases {
         posix: posix_ok,
         sectest: sectest_ok,
+        extra: [hermes_shell_logic::HermesCountedPhase::legacy();
+            hermes_shell_logic::HERMES_EXTRA_STAGE_COUNT],
     };
     assert!(posix_phase_pass(&posix_ok));
     assert!(sectest_phase_pass(&sectest_ok));
@@ -12100,6 +12114,8 @@ fn hermes_opening_suites_gate_test_all_and_round_trip() {
         &HermesSuitePhases {
             posix: unresolved,
             sectest: sectest_ok,
+            extra: [hermes_shell_logic::HermesCountedPhase::legacy();
+                hermes_shell_logic::HERMES_EXTRA_STAGE_COUNT],
         },
         true
     ));
@@ -12123,6 +12139,8 @@ fn hermes_opening_suites_gate_test_all_and_round_trip() {
         &HermesSuitePhases {
             posix: posix_ok,
             sectest: xpass,
+            extra: [hermes_shell_logic::HermesCountedPhase::legacy();
+                hermes_shell_logic::HERMES_EXTRA_STAGE_COUNT],
         },
         true
     ));
@@ -12184,7 +12202,19 @@ fn hermes_opening_suites_gate_test_all_and_round_trip() {
                 xfail: usize::MAX,
                 xpass: usize::MAX,
                 arch_skipped: true,
+                ids_expected: usize::MAX,
+                ids_ran: usize::MAX,
+                undef_pass: usize::MAX,
+                undef_fail: usize::MAX,
+                one_pass: usize::MAX,
+                one_fail: usize::MAX,
             },
+            extra: [hermes_shell_logic::HermesCountedPhase {
+                disposition: HermesSuiteDisposition::Done,
+                pass: usize::MAX,
+                fail: usize::MAX,
+                unavailable: usize::MAX,
+            }; hermes_shell_logic::HERMES_EXTRA_STAGE_COUNT],
         },
     };
     let mut buf = [0u8; HERMES_RESUME_TEXT_CAPACITY];
@@ -12360,6 +12390,7 @@ fn hermes_campaign_covers_product_api_levels() {
             mode: HermesCampaignMode::Ops,
             run_posixtest: true,
             run_sectest: true,
+            skip_extra: 0,
         })
     );
     assert_eq!(

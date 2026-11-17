@@ -57,12 +57,17 @@ export POSIX_QEMU_MEMORY
 export POSIX_SYSROOT
 export POSIX_QUALITY_EVIDENCE
 
-.PHONY: all apps build build-test aarch64-warning-check host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report coverage-ut coverage-it coverage-host coverage-st coverage skt st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher vm-launcher-restart help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
+GUEST_CC ?= aarch64-linux-gnu-gcc
+GUEST_CFLAGS ?= -O2 -Wall -Wextra -fPIE
+GUEST_LDFLAGS ?= -pie -Wl,-dynamic-linker,/lib/ld-linux-aarch64.so.1 -Wl,-z,now
+GUEST_CASE_SRCS := tests/guest/f1_seccomp.c tests/guest/f2_landlock.c tests/guest/f3_pkey.c tests/guest/f4_iouring.c tests/guest/f5_ptrace.c tests/guest/g1_stopcont.c tests/guest/g1b_stop.c
+
+.PHONY: all apps build build-test aarch64-warning-check host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report coverage-ut coverage-it coverage-host coverage-st coverage skt st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher vm-launcher-restart help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services guest-cases
 
 all: build
 
 # Build the kernel
-build:
+build: guest-cases
 	@case '$(SMROS_BUILD_JOBS)' in \
 		''|*[!0-9]*|0*) echo "SMROS_BUILD_JOBS must be a positive integer" >&2; exit 1 ;; \
 	esac
@@ -147,9 +152,14 @@ target/posix/%/smros-fxfs.img:
 	@echo "Creating POSIX FxFS disk image: $@"
 	@qemu-img create -f raw "$@" $(FXFS_DISK_SIZE) >/dev/null
 
-# Run the staged suite in SMROS under QEMU system emulation
+# Run the staged suite in SMROS under QEMU system emulation.
+# Isolated Hermes host stages reuse the kernel the live guest already booted.
 posix-run: posix-stage $(POSIX_DISK)
+ifneq ($(SMROS_HERMES_ISOLATED),1)
 	@$(MAKE) build ARCH=$(TARGET)
+else
+	@test -f '$(KERNEL)' || { echo "kernel image missing: $(KERNEL)" >&2; exit 1; }
+endif
 	@PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli run-smros --arch $(POSIX_ARCH) --qemu-memory "$${POSIX_QEMU_MEMORY}"
 
 # Publish all seven report artifacts; quality evidence is optional and separate
@@ -188,9 +198,15 @@ coverage-st:
 # SKT remains a QEMU milestone smoke because guest line coverage is not wired.
 coverage: coverage-host coverage-st
 
-# QEMU system smoke test (SKT): boot until required milestones and the shell prompt appear
+# QEMU system smoke test (SKT): boot until required milestones and the shell prompt appear.
+# Hermes host stages set SMROS_HERMES_ISOLATED=1 so a second QEMU uses its own
+# disk and does not rebuild over the kernel the live guest already mapped.
 skt: $(FXFS_DISK)
+ifneq ($(SMROS_HERMES_ISOLATED),1)
 	@$(MAKE) build ARCH='$(TARGET)' QEMU_SMP='$(SMOKE_QEMU_SMP)'
+else
+	@test -f '$(KERNEL)' || { echo "kernel image missing: $(KERNEL)" >&2; exit 1; }
+endif
 	@ARCH='$(TARGET)' QEMU_SYSTEM='$(QEMU_SYSTEM)' KERNEL_IMAGE='$(KERNEL)' QEMU_MACHINE='$(QEMU_MACHINE)' QEMU_CPU='$(QEMU_CPU)' QEMU_SMP='$(SMOKE_QEMU_SMP)' QEMU_MEMORY='$(SMOKE_QEMU_MEMORY)' QEMU_BLOCK_DEVICE='$(QEMU_BLOCK_DEVICE)' QEMU_NET_DEVICE='$(QEMU_NET_DEVICE)' FXFS_DISK='$(FXFS_DISK)' SMROS_ST_LOG='$(SMROS_ST_LOG)' ./scripts/smoke-qemu.sh
 
 # Compatibility alias for the SKT smoke test
@@ -200,6 +216,7 @@ st: skt
 test: host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test build-test
 
 $(FXFS_DISK):
+	@mkdir -p "$(dir $(FXFS_DISK))"
 	@echo "Creating persistent FxFS disk image: $(FXFS_DISK)"
 	@qemu-img create -f raw $(FXFS_DISK) $(FXFS_DISK_SIZE) >/dev/null
 
@@ -215,8 +232,17 @@ vm-launcher-restart:
 	@SMROS_VM_LAUNCHER_RESTART=1 ./scripts/start-smros-vm-launcher.sh
 
 # Build SMROS guest ELF demos into host_shared/ (then rebuild the kernel).
-apps:
+apps: guest-cases
 	@$(MAKE) -C src/user_level/apps smros
+
+# Fail-closed guest cases. They land in host_shared/ and are embedded at /shared.
+guest-cases:
+	@mkdir -p host_shared
+	@set -e; for src in $(GUEST_CASE_SRCS); do \
+		base=$$(basename "$$src" .c); \
+		echo "guest-cases: $$base.elf"; \
+		$(GUEST_CC) $(GUEST_CFLAGS) -I tests/guest $(GUEST_LDFLAGS) -o "host_shared/$$base.elf" "$$src"; \
+	done
 
 # Run with QEMU (simple mode)
 run: build $(FXFS_DISK) qemu-icmp vm-launcher
@@ -352,6 +378,7 @@ help:
 	@echo "  test      - Run fast local tests (format + scripts + ut + it + offline POSIX tools + build-test)"
 	@echo "  verify    - Run test + skt + all Verus proof harnesses"
 	@echo "  apps      - Build guest ELF demos into host_shared/"
+	@echo "  guest-cases - Build tests/guest fail-closed ELFs into host_shared/"
 	@echo "  run       - Build and run with QEMU"
 	@echo "  debug     - Run with QEMU in debug mode"
 	@echo "  gdb       - Run with QEMU GDB server"
