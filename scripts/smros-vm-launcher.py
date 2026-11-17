@@ -416,7 +416,7 @@ def host_job_command(job: str) -> list[str]:
         ]
     if job in {"skt", "st"}:
         disk = ROOT / "target" / "hermes-tests" / f"{job}-fxfs.img"
-        log = ROOT / "target" / "hermes-tests" / f"{job}.log"
+        log = ROOT / "target" / "hermes-tests" / f"{job}-serial.log"
         return make_job_command(
             job,
             [
