@@ -569,10 +569,11 @@ fuzzer force-persists even while ordinary persists are suspended, which is why
 the mode survived onto the disk. `shm_unlink/8-1.c` and `shm_unlink/9-1.c` then
 stay unresolved, because a non-root unlink succeeds when the directory is
 world-writable. Setattr of `/`, `/dev`, and `/dev/shm` now rejects any mode
-other than `040755`, and `fuzzsc` no longer issues that setattr. After the
+other than `040755`, and `fuzzsc` no longer issues that setattr. Mandatory `testsc` runs once before `posixtest all`, while the shell thread still
+owns a Linux brk. After the
 iteration loop, `hermes test-all` runs the once-per-campaign host stages
 (`el0`, `make skt`, `make st`, every `make posix-*` target, `make launcher-test`,
-and `make verus`), then mandatory `testsc` and bounded `fuzzsc seed=1 iterations=1 time=1`,
+and `make verus`), then bounded `fuzzsc seed=1 iterations=1 time=1`,
 then another bounded `fuzzsc seed=1 iterations=1 time=1`
 and fails unless `/dev/shm` is still mode `040755`. `skt`/`st`/`posix-run` are isolated from the live guest disk.
 The opening phases are checkpointed

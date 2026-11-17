@@ -5516,6 +5516,23 @@ fn run_hermes_opening_phases(
     // `posixtest all` runs once before the random loop. It is about 127k ticks,
     // so it is not repeated. `/dev/shm` must stay mode 040755: the closing
     // shm-mode phase runs a bounded fuzzsc and fails the campaign otherwise.
+    let mut extra = crate::user_level::services::hermes_shell_logic_shared::fresh_extra_stages(
+        options.skip_extra,
+    );
+    // `testsc` uses the shell thread's Linux brk. Later EL0 suites detach
+    // that context, so this stage runs before `posixtest all`.
+    {
+        use crate::user_level::services::hermes_shell_logic_shared::{
+            HermesExtraStage, HermesSuiteDisposition,
+        };
+        let testsc = HermesExtraStage::Testsc.index();
+        if extra[testsc].disposition == HermesSuiteDisposition::Pending {
+            extra[testsc] = run_hermes_testsc_phase(ctx);
+        } else if extra[testsc].disposition == HermesSuiteDisposition::Skip {
+            ctx.serial
+                .write_str("Hermes test-all phase testsc skip\n");
+        }
+    }
     let posix = if options.run_posixtest {
         run_hermes_posixtest_phase(ctx)
     } else {
@@ -5530,9 +5547,6 @@ fn run_hermes_opening_phases(
             .write_str("Hermes test-all phase sectest skip\n");
         HermesSectestPhase::skipped()
     };
-    let mut extra = crate::user_level::services::hermes_shell_logic_shared::fresh_extra_stages(
-        options.skip_extra,
-    );
     let guest = crate::user_level::services::hermes_shell_logic_shared::HermesExtraStage::Guest
         .index();
     if extra[guest].disposition

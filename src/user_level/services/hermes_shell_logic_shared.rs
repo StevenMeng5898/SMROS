@@ -177,7 +177,7 @@ pub const HERMES_SECTEST_ONE_ID: &str = "el0-read-kernel-ram";
 
 /// Closing stages run after the random loop and before the shm-mode check.
 /// `testsc` and bounded `fuzzsc` are last so shm-mode still observes `/dev/shm`.
-pub const HERMES_CLOSING_STAGE_ORDER: [HermesExtraStage; 15] = [
+pub const HERMES_CLOSING_STAGE_ORDER: [HermesExtraStage; 14] = [
     HermesExtraStage::El0,
     HermesExtraStage::Skt,
     HermesExtraStage::St,
@@ -191,7 +191,6 @@ pub const HERMES_CLOSING_STAGE_ORDER: [HermesExtraStage; 15] = [
     HermesExtraStage::PosixReport,
     HermesExtraStage::Launcher,
     HermesExtraStage::Verus,
-    HermesExtraStage::Testsc,
     HermesExtraStage::Fuzzsc,
 ];
 
