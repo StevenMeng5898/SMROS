@@ -4425,6 +4425,285 @@ pub(crate) fn security_create_process_vmo(pid: usize, rights: u32) -> Result<u32
     Ok(handle)
 }
 
+#[derive(Clone, Copy)]
+struct SecurityForeignWaits {
+    sleep_tid: usize,
+    sleep_thread: usize,
+    sleep_deadline: u64,
+    futex_tid: usize,
+    futex_thread: usize,
+    futex_ticks: u64,
+    mqueue_tid: usize,
+    mqueue_thread: usize,
+    mqueue_ticks: u64,
+    mqueue_handle: u32,
+    absolute: u64,
+}
+
+struct SecurityClockProbe {
+    noted: bool,
+    offset: i64,
+    request_nanos: u64,
+    request_valid: bool,
+    credential_pid: Option<usize>,
+    foreign: Option<SecurityForeignWaits>,
+}
+
+static mut SECURITY_CLOCK_PROBE: SecurityClockProbe = SecurityClockProbe {
+    noted: false,
+    offset: 0,
+    request_nanos: 0,
+    request_valid: false,
+    credential_pid: None,
+    foreign: None,
+};
+
+fn security_clock_probe() -> &'static mut SecurityClockProbe {
+    unsafe { &mut *core::ptr::addr_of_mut!(SECURITY_CLOCK_PROBE) }
+}
+
+/// Remember the realtime offset before a sectest clock probe.
+pub fn security_note_clock_probe() {
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let probe = security_clock_probe();
+    probe.noted = true;
+    probe.offset = LINUX_REALTIME_OFFSET_NANOS.load(Ordering::SeqCst);
+    probe.request_valid = false;
+    probe.request_nanos = 0;
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+}
+
+/// Write the absolute time a sectest `clock_settime` or `settimeofday` asks for.
+/// `kind` 1 is one day ahead. `kind` 2 and 3 are three seconds ahead.
+pub fn security_fill_clock_request(buf: &mut [u8], offset: usize, kind: u64) -> Result<(), ()> {
+    let realtime = linux_realtime_nanos().map_err(|_| ())?;
+    let delta_seconds: u64 = if kind == 1 { 86_400 } else { 3 };
+    let seconds = (realtime / 1_000_000_000).saturating_add(delta_seconds);
+    if seconds > i64::MAX as u64 {
+        return Err(());
+    }
+    let end = offset.checked_add(16).ok_or(())?;
+    if end > buf.len() {
+        return Err(());
+    }
+    buf[offset..offset + 8].copy_from_slice(&(seconds as i64).to_le_bytes());
+    buf[offset + 8..end].copy_from_slice(&0i64.to_le_bytes());
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let probe = security_clock_probe();
+    probe.request_valid = true;
+    probe.request_nanos = seconds.saturating_mul(1_000_000_000);
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    Ok(())
+}
+
+/// `mode` 1 drops to euid 1 and clears `CAP_SYS_TIME`. `mode` 2 keeps euid 0
+/// and clears the capability. Either one must make a realtime settime fail.
+pub fn security_set_clock_credentials(mode: u64) -> bool {
+    let Ok(pid) = linux_process::current_pid() else {
+        return false;
+    };
+    let resources = memory_state().process_resources_mut(pid);
+    let bit = 1u64 << syscall_logic::LINUX_CAP_SYS_TIME;
+    if mode == 1 {
+        resources.credentials.set_resuid(1, 1, 1);
+    }
+    resources.container.cap_effective &= !bit;
+    resources.container.cap_permitted &= !bit;
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    security_clock_probe().credential_pid = Some(pid);
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    true
+}
+
+const SECURITY_SLEEP_THREAD: usize = 3_000_001;
+const SECURITY_FUTEX_THREAD: usize = 3_000_002;
+const SECURITY_MQUEUE_THREAD: usize = 3_000_003;
+const SECURITY_FUTEX_ADDRESS: usize = 0x1200_0300;
+const SECURITY_MQUEUE_HANDLE: u32 = 0x51ec;
+
+/// Plant another process's absolute-realtime sleep, futex, and mqueue waits
+/// one day ahead, so a successful `clock_settime` to that instant would wake them.
+pub fn security_plant_foreign_realtime_waits() -> bool {
+    let Ok(realtime) = linux_realtime_nanos() else {
+        return false;
+    };
+    let seconds = (realtime / 1_000_000_000).saturating_add(86_400);
+    if seconds > i64::MAX as u64 {
+        return false;
+    }
+    let absolute = seconds.saturating_mul(1_000_000_000);
+    let Some(ticks) = linux_task::linux_sleep_realtime_deadline_ticks(
+        absolute,
+        LINUX_REALTIME_OFFSET_NANOS.load(Ordering::SeqCst),
+        LINUX_SIGNAL_TICK_NANOS,
+    ) else {
+        return false;
+    };
+    let Some((sleep_tid, sleep_thread)) = linux_task::security_plant_blocked_task(
+        SECURITY_SLEEP_THREAD,
+        linux_task::LinuxBlockReason::Sleep,
+        Some(linux_task::LinuxSleepWait::absolute_realtime_waiting(
+            ticks, absolute,
+        )),
+    ) else {
+        return false;
+    };
+    let Some((futex_tid, futex_thread)) = linux_task::security_plant_blocked_task(
+        SECURITY_FUTEX_THREAD,
+        linux_task::LinuxBlockReason::Futex,
+        None,
+    ) else {
+        linux_task::security_retire_task(sleep_tid, sleep_thread);
+        return false;
+    };
+    if !linux_futex::security_plant_realtime_waiter(
+        futex_tid,
+        futex_thread,
+        SECURITY_FUTEX_ADDRESS,
+        ticks,
+        absolute,
+    ) {
+        linux_task::security_retire_task(sleep_tid, sleep_thread);
+        linux_task::security_retire_task(futex_tid, futex_thread);
+        return false;
+    }
+    let Some((mqueue_tid, mqueue_thread)) = linux_task::security_plant_blocked_task(
+        SECURITY_MQUEUE_THREAD,
+        linux_task::LinuxBlockReason::Mqueue,
+        None,
+    ) else {
+        linux_futex::security_clear_waiter(futex_tid, futex_thread);
+        linux_task::security_retire_task(sleep_tid, sleep_thread);
+        linux_task::security_retire_task(futex_tid, futex_thread);
+        return false;
+    };
+    if !linux_mqueue::security_plant_realtime_receive(
+        mqueue_tid,
+        mqueue_thread,
+        SECURITY_MQUEUE_HANDLE,
+        ticks,
+        absolute,
+    ) {
+        linux_futex::security_clear_waiter(futex_tid, futex_thread);
+        linux_task::security_retire_task(sleep_tid, sleep_thread);
+        linux_task::security_retire_task(futex_tid, futex_thread);
+        linux_task::security_retire_task(mqueue_tid, mqueue_thread);
+        return false;
+    }
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    security_clock_probe().foreign = Some(SecurityForeignWaits {
+        sleep_tid,
+        sleep_thread,
+        sleep_deadline: ticks,
+        futex_tid,
+        futex_thread,
+        futex_ticks: ticks,
+        mqueue_tid,
+        mqueue_thread,
+        mqueue_ticks: ticks,
+        mqueue_handle: SECURITY_MQUEUE_HANDLE,
+        absolute,
+    });
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    true
+}
+
+pub fn security_clock_change_denied() -> bool {
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let probe = security_clock_probe();
+    let unchanged =
+        probe.noted && LINUX_REALTIME_OFFSET_NANOS.load(Ordering::SeqCst) == probe.offset;
+    let foreign_ok = match probe.foreign {
+        None => true,
+        Some(foreign) => {
+            linux_task::security_realtime_sleep_intact(
+                foreign.sleep_tid,
+                foreign.sleep_thread,
+                foreign.sleep_deadline,
+                foreign.absolute,
+            ) && linux_task::security_blocked_task_intact(
+                foreign.futex_tid,
+                foreign.futex_thread,
+                linux_task::LinuxBlockReason::Futex,
+            ) && linux_futex::security_realtime_waiter_intact(
+                foreign.futex_tid,
+                foreign.futex_thread,
+                foreign.futex_ticks,
+                foreign.absolute,
+            ) && linux_task::security_blocked_task_intact(
+                foreign.mqueue_tid,
+                foreign.mqueue_thread,
+                linux_task::LinuxBlockReason::Mqueue,
+            ) && linux_mqueue::security_realtime_receive_intact(
+                foreign.mqueue_tid,
+                foreign.mqueue_thread,
+                foreign.mqueue_ticks,
+                foreign.absolute,
+            )
+        }
+    };
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    unchanged && foreign_ok
+}
+
+/// Sample the clock probe before `exit` tears the wait records down.
+pub fn security_snapshot_clock_probe() -> (bool, bool) {
+    (
+        security_clock_change_denied(),
+        security_clock_change_applied(),
+    )
+}
+
+pub fn security_clock_change_applied() -> bool {
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let probe = security_clock_probe();
+    let changed = probe.noted && LINUX_REALTIME_OFFSET_NANOS.load(Ordering::SeqCst) != probe.offset;
+    let request = probe.request_nanos;
+    let request_valid = probe.request_valid;
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    if !changed || !request_valid {
+        return false;
+    }
+    let Ok(realtime) = linux_realtime_nanos() else {
+        return false;
+    };
+    realtime.abs_diff(request) < 2_000_000_000
+}
+
+/// Drop planted waits, put the probe credentials back, and undo a clock change.
+pub fn security_finish_clock_probe() {
+    let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let probe = security_clock_probe();
+    let foreign = probe.foreign.take();
+    let credential_pid = probe.credential_pid.take();
+    let noted = probe.noted;
+    let saved_offset = probe.offset;
+    probe.noted = false;
+    probe.request_valid = false;
+    probe.request_nanos = 0;
+    crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    if let Some(foreign) = foreign {
+        linux_futex::security_clear_waiter(foreign.futex_tid, foreign.futex_thread);
+        linux_mqueue::security_clear_realtime_receive(
+            foreign.mqueue_handle,
+            foreign.mqueue_tid,
+            foreign.mqueue_thread,
+        );
+        linux_task::security_retire_task(foreign.sleep_tid, foreign.sleep_thread);
+        linux_task::security_retire_task(foreign.futex_tid, foreign.futex_thread);
+        linux_task::security_retire_task(foreign.mqueue_tid, foreign.mqueue_thread);
+    }
+    if let Some(pid) = credential_pid {
+        let resources = memory_state().process_resources_mut(pid);
+        resources.credentials.set_resuid(0, 0, 0);
+        resources.container.cap_effective = LINUX_CAP_FULL_SET;
+        resources.container.cap_permitted = LINUX_CAP_FULL_SET;
+    }
+    if noted && LINUX_REALTIME_OFFSET_NANOS.load(Ordering::SeqCst) != saved_offset {
+        apply_linux_realtime_offset(saved_offset);
+    }
+}
+
 pub(crate) fn security_close_process_handle(pid: usize, handle: u32) -> Result<(), ()> {
     let state = memory_state();
     let object = state.lookup_process_handle(pid, handle).ok_or(())?;
@@ -5290,6 +5569,23 @@ fn linux_posix_clock_settable_for_current(clock_id: usize) -> bool {
         return syscall_logic::linux_posix_clock_settable_for_current_ids(clock_id, 0, 0);
     };
     syscall_logic::linux_posix_clock_settable_for_current_ids(clock_id, current_pid, current_tid)
+}
+
+/// `CLOCK_REALTIME` may move only for a root caller who still holds
+/// `CAP_SYS_TIME`. A missing process record is the default root credential
+/// (`euid == 0` and the full capability set), matching `geteuid` and `capget`.
+fn linux_current_can_set_system_time() -> bool {
+    let Ok(pid) = linux_resource_pid() else {
+        return false;
+    };
+    let (effective_uid, cap_effective) = match memory_state().process_resources(pid) {
+        Some(resources) => (
+            resources.credentials.effective_uid,
+            resources.container.cap_effective,
+        ),
+        None => (0, LINUX_CAP_FULL_SET),
+    };
+    syscall_logic::linux_can_set_system_time(effective_uid, cap_effective)
 }
 
 fn linux_posix_timer_clock_for_current(clock_id: usize) -> Option<LinuxPosixClock> {
@@ -12033,17 +12329,31 @@ pub fn sys_clock_settime(clockid: usize, tp: usize) -> SysResult {
         requested.tv_nsec,
     )
     .ok_or(SysError::EOVERFLOW)?;
+    if !linux_current_can_set_system_time() {
+        return Err(SysError::EPERM);
+    }
+    apply_linux_realtime_offset(offset);
+    Ok(0)
+}
+
+/// Publish a new realtime offset and move the waits that are anchored to it.
+///
+/// Timer signals are delivered before due sleeps are woken. A forward jump
+/// can make a `SIGEV_THREAD` timer and a later absolute sleep due together;
+/// the timer-tick path arms the notify gate first, and this path does too.
+/// Sleeps the gate still holds keep their new deadline and stay blocked.
+fn apply_linux_realtime_offset(offset: i64) {
     LINUX_REALTIME_OFFSET_NANOS.store(offset, Ordering::SeqCst);
+    deliver_linux_posix_timer_signals_from_irq();
     let now = crate::kernel_lowlevel::timer::get_tick_count();
-    let expired =
-        linux_task::refresh_realtime_sleep_deadlines(now, offset, LINUX_SIGNAL_TICK_NANOS);
-    wake_linux_sleep_outcomes(expired);
+    linux_task::retarget_realtime_sleep_deadlines(offset, LINUX_SIGNAL_TICK_NANOS);
     // Absolute CLOCK_REALTIME waits keep a monotonic tick deadline so the
     // scheduler can expire them. A forward jump must wake them now, and a
     // backward jump must push the deadline out, before the next 10 ms tick.
     linux_futex::refresh_realtime_waiters(now, offset);
     linux_mqueue::refresh_realtime_timeouts(now, offset, LINUX_SIGNAL_TICK_NANOS);
-    deliver_linux_posix_timer_signals_from_irq();
+    let expired = linux_task::complete_due_realtime_sleeps_gated(now, LINUX_SIGNAL_TICK_NANOS);
+    wake_linux_sleep_outcomes(expired);
     // Re-arm only a deadline that is already due or due within one tick.
     // A far CLOCK_REALTIME deadline must not replace a stale periodic compare:
     // that programs the timer for the far value and stops the 100 Hz tick.
@@ -12053,7 +12363,6 @@ pub fn sys_clock_settime(clockid: usize, tp: usize) -> SysResult {
             crate::kernel_lowlevel::timer::arm_at_nanoseconds(deadline);
         }
     }
-    Ok(0)
 }
 
 const LINUX_TIMEX_BYTES: usize = 208;
@@ -12116,14 +12425,15 @@ fn sys_adjtimex_common(clock_id: usize, tx: usize) -> SysResult {
     }
 }
 
-/// `settimeofday(2)`. Both pointers null is the Linux no-op. A timeval or
-/// timezone would require `CAP_SYS_TIME`, which this kernel does not grant,
-/// so the clock is left unchanged and the call returns `EPERM`.
+/// `settimeofday(2)`. Both pointers null is the Linux no-op. A timeval uses
+/// the same `CAP_SYS_TIME` check as `clock_settime(CLOCK_REALTIME)`. This
+/// kernel does not store a timezone; a privileged timezone-only call succeeds
+/// without moving the clock.
 pub fn sys_settimeofday(tv: usize, tz: usize) -> SysResult {
     if tv == 0 && tz == 0 {
         return Ok(0);
     }
-    if tv != 0 {
+    let requested = if tv != 0 {
         if !linux_copy_range_is_resident(tv, core::mem::size_of::<LinuxTimeval>()) {
             return Err(SysError::EFAULT);
         }
@@ -12131,7 +12441,10 @@ pub fn sys_settimeofday(tv: usize, tz: usize) -> SysResult {
         if requested.tv_sec < 0 || !(0..1_000_000).contains(&requested.tv_usec) {
             return Err(SysError::EINVAL);
         }
-    }
+        Some(requested)
+    } else {
+        None
+    };
     if tz != 0 {
         if !linux_copy_range_is_resident(tz, 8) {
             return Err(SysError::EFAULT);
@@ -12139,7 +12452,20 @@ pub fn sys_settimeofday(tv: usize, tz: usize) -> SysResult {
         let mut zone = [0u8; 8];
         linux_copy_from_user(tz, &mut zone)?;
     }
-    Err(SysError::EPERM)
+    if !linux_current_can_set_system_time() {
+        return Err(SysError::EPERM);
+    }
+    if let Some(requested) = requested {
+        let nanos = (requested.tv_usec as u64).saturating_mul(1_000);
+        let offset = syscall_logic::linux_realtime_offset_for_set(
+            monotonic_nanos(),
+            requested.tv_sec,
+            nanos as i64,
+        )
+        .ok_or(SysError::EOVERFLOW)?;
+        apply_linux_realtime_offset(offset);
+    }
+    Ok(0)
 }
 
 pub fn sys_adjtimex(tx: usize) -> SysResult {

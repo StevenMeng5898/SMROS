@@ -366,18 +366,113 @@ pub(crate) fn cancel_sleep(tid: usize, scheduler_thread: usize) -> bool {
     with_runtime(|runtime| runtime.tasks.cancel_sleep(tid, scheduler_thread))
 }
 
-pub(crate) fn refresh_realtime_sleep_deadlines(
-    now: u64,
+pub(crate) fn retarget_realtime_sleep_deadlines(
     realtime_offset_nanoseconds: i64,
+    tick_nanoseconds: u64,
+) {
+    with_runtime(|runtime| {
+        runtime
+            .tasks
+            .retarget_realtime_sleep_deadlines(realtime_offset_nanoseconds, tick_nanoseconds);
+    });
+}
+
+pub(crate) fn complete_due_realtime_sleeps_gated(
+    now: u64,
     tick_nanoseconds: u64,
 ) -> [Option<(usize, usize, LinuxBlockReason)>; LINUX_TASK_LIMIT] {
     with_runtime(|runtime| {
-        runtime.tasks.refresh_realtime_sleep_deadlines(
-            now,
-            realtime_offset_nanoseconds,
-            tick_nanoseconds,
+        let gate = runtime.timer_notify_gate;
+        runtime
+            .tasks
+            .complete_due_realtime_sleeps(now, &gate, tick_nanoseconds)
+    })
+}
+
+/// Block a fresh task in its own thread group. The scheduler id is not a
+/// real thread; `wake_blocked` refuses it, and the security case reads the
+/// wait record directly.
+pub(crate) fn security_plant_blocked_task(
+    scheduler_thread: usize,
+    reason: LinuxBlockReason,
+    sleep: Option<LinuxSleepWait>,
+) -> Option<(usize, usize)> {
+    with_runtime(|runtime| {
+        let reservation = runtime.tasks.reserve_child(0, scheduler_thread)?;
+        runtime.tasks.tasks[reservation.slot].tgid = reservation.tid;
+        if !runtime.tasks.publish(reservation) {
+            let _ = runtime.tasks.rollback(reservation);
+            return None;
+        }
+        if let Some(wait) = sleep {
+            if !runtime
+                .tasks
+                .install_sleep(reservation.tid, scheduler_thread, wait)
+            {
+                let _ = runtime.tasks.exit(reservation.tid, scheduler_thread);
+                let _ = runtime.tasks.retire(reservation.tid, scheduler_thread);
+                return None;
+            }
+        }
+        if !runtime
+            .tasks
+            .block(reservation.tid, scheduler_thread, reason)
+        {
+            let _ = runtime.tasks.exit(reservation.tid, scheduler_thread);
+            let _ = runtime.tasks.retire(reservation.tid, scheduler_thread);
+            return None;
+        }
+        Some((reservation.tid, scheduler_thread))
+    })
+}
+
+pub(crate) fn security_realtime_sleep_intact(
+    tid: usize,
+    scheduler_thread: usize,
+    deadline: u64,
+    absolute: u64,
+) -> bool {
+    with_runtime(|runtime| {
+        let Some(slot) = runtime.tasks.task_slot(tid, scheduler_thread) else {
+            return false;
+        };
+        let task = runtime.tasks.tasks[slot];
+        if task.state != LinuxTaskState::Blocked
+            || task.block_reason != LinuxBlockReason::Sleep
+            || task.tgid != tid
+        {
+            return false;
+        }
+        matches!(
+            runtime.tasks.sleep_waits[slot],
+            Some(wait)
+                if wait.outcome == LinuxSleepOutcome::Waiting
+                    && wait.deadline == deadline
+                    && wait.absolute_realtime_nanoseconds == Some(absolute)
         )
     })
+}
+
+pub(crate) fn security_blocked_task_intact(
+    tid: usize,
+    scheduler_thread: usize,
+    reason: LinuxBlockReason,
+) -> bool {
+    with_runtime(|runtime| {
+        let Some(slot) = runtime.tasks.task_slot(tid, scheduler_thread) else {
+            return false;
+        };
+        let task = runtime.tasks.tasks[slot];
+        task.state == LinuxTaskState::Blocked && task.block_reason == reason && task.tgid == tid
+    })
+}
+
+pub(crate) fn security_retire_task(tid: usize, scheduler_thread: usize) {
+    with_runtime(|runtime| {
+        if runtime.tasks.exit(tid, scheduler_thread) {
+            let _ = runtime.tasks.retire(tid, scheduler_thread);
+        }
+    });
 }
 
 pub(crate) fn interrupt_sleep(tid: usize, scheduler_thread: usize, signum: usize) -> bool {

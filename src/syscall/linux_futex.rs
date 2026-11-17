@@ -388,3 +388,54 @@ pub(crate) fn reset() {
         let _ = queue.reset();
     });
 }
+
+pub(crate) fn security_plant_realtime_waiter(
+    tid: usize,
+    scheduler_thread: usize,
+    address: usize,
+    ticks: u64,
+    absolute: u64,
+) -> bool {
+    with_queue(|queue| {
+        queue
+            .push(FutexWaiter {
+                address,
+                bitset: u32::MAX,
+                tid,
+                scheduler_thread,
+                deadline: Some(FutexDeadline {
+                    ticks,
+                    clock: FutexClock::Monotonic,
+                    absolute_realtime_nanoseconds: Some(absolute),
+                }),
+                sequence: 0,
+                outcome: FutexWaitOutcome::Waiting,
+            })
+            .is_ok()
+    })
+}
+
+pub(crate) fn security_realtime_waiter_intact(
+    tid: usize,
+    scheduler_thread: usize,
+    ticks: u64,
+    absolute: u64,
+) -> bool {
+    with_queue(|queue| {
+        queue.waiters.iter().flatten().any(|waiter| {
+            waiter.tid == tid
+                && waiter.scheduler_thread == scheduler_thread
+                && waiter.outcome == FutexWaitOutcome::Waiting
+                && waiter.deadline.is_some_and(|deadline| {
+                    deadline.ticks == ticks
+                        && deadline.absolute_realtime_nanoseconds == Some(absolute)
+                })
+        })
+    })
+}
+
+pub(crate) fn security_clear_waiter(tid: usize, scheduler_thread: usize) {
+    with_queue(|queue| {
+        let _ = queue.remove_task(tid, scheduler_thread);
+    });
+}

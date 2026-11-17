@@ -483,9 +483,7 @@ pub(crate) fn linux_signal_disposition(handler: u64, signum: usize) -> LinuxSign
     }
 }
 
-pub(crate) const fn linux_signal_interrupts_sleep(
-    disposition: LinuxSignalDisposition,
-) -> bool {
+pub(crate) const fn linux_signal_interrupts_sleep(disposition: LinuxSignalDisposition) -> bool {
     matches!(
         disposition,
         LinuxSignalDisposition::Terminate | LinuxSignalDisposition::Handled
@@ -1067,9 +1065,7 @@ pub(crate) fn linux_sleep_realtime_deadline_ticks(
         u64::try_from(monotonic_nanoseconds).ok()?
     };
     let ticks = monotonic_nanoseconds / tick_nanoseconds;
-    ticks.checked_add(u64::from(
-        monotonic_nanoseconds % tick_nanoseconds != 0,
-    ))
+    ticks.checked_add(u64::from(monotonic_nanoseconds % tick_nanoseconds != 0))
 }
 
 pub(crate) fn linux_sleep_timespec_nanoseconds(seconds: i64, nanoseconds: i64) -> Option<u64> {
@@ -2279,10 +2275,37 @@ impl<const N: usize> LinuxTaskTable<N> {
             .min()
     }
 
-    pub(crate) fn refresh_realtime_sleep_deadlines(
+    pub(crate) fn retarget_realtime_sleep_deadlines(
+        &mut self,
+        realtime_offset_nanoseconds: i64,
+        tick_nanoseconds: u64,
+    ) {
+        for wait in &mut self.sleep_waits {
+            let Some(wait) = wait.as_mut() else {
+                continue;
+            };
+            let Some(realtime_nanoseconds) = wait.absolute_realtime_nanoseconds else {
+                continue;
+            };
+            if let Some(deadline) = linux_sleep_realtime_deadline_ticks(
+                realtime_nanoseconds,
+                realtime_offset_nanoseconds,
+                tick_nanoseconds,
+            ) {
+                wait.deadline = deadline;
+            }
+        }
+    }
+
+    /// Complete due absolute-realtime sleeps the notification gate does not hold.
+    ///
+    /// A forward clock jump can make a timer and a later sleep due together.
+    /// The gate keeps that later sleep blocked until the `SIGEV_THREAD`
+    /// helper has run, matching the timer-tick path.
+    pub(crate) fn complete_due_realtime_sleeps(
         &mut self,
         now: u64,
-        realtime_offset_nanoseconds: i64,
+        gate: &TimerNotifyGate,
         tick_nanoseconds: u64,
     ) -> [Option<(usize, usize, LinuxBlockReason)>; N] {
         let mut expired = [None; N];
@@ -2292,28 +2315,34 @@ impl<const N: usize> LinuxTaskTable<N> {
             let Some(wait) = self.sleep_waits[index].as_mut() else {
                 continue;
             };
-            let Some(realtime_nanoseconds) = wait.absolute_realtime_nanoseconds else {
+            if wait.absolute_realtime_nanoseconds.is_none() {
                 continue;
-            };
-            let Some(deadline) = linux_sleep_realtime_deadline_ticks(
-                realtime_nanoseconds,
-                realtime_offset_nanoseconds,
-                tick_nanoseconds,
-            ) else {
-                continue;
-            };
-            wait.deadline = deadline;
+            }
             if task.state == LinuxTaskState::Blocked
                 && task.block_reason == LinuxBlockReason::Sleep
                 && wait.outcome == LinuxSleepOutcome::Waiting
                 && wait.deadline <= now
             {
+                if gate.blocks_sleep(wait.wake_monotonic_nanos(tick_nanoseconds)) {
+                    continue;
+                }
                 wait.outcome = LinuxSleepOutcome::Completed;
                 expired[expired_len] = Some((task.tid, task.scheduler_thread, task.block_reason));
                 expired_len += 1;
             }
         }
         expired
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn refresh_realtime_sleep_deadlines(
+        &mut self,
+        now: u64,
+        realtime_offset_nanoseconds: i64,
+        tick_nanoseconds: u64,
+    ) -> [Option<(usize, usize, LinuxBlockReason)>; N] {
+        self.retarget_realtime_sleep_deadlines(realtime_offset_nanoseconds, tick_nanoseconds);
+        self.complete_due_realtime_sleeps(now, &TimerNotifyGate::EMPTY, tick_nanoseconds)
     }
 
     #[cfg(not(target_os = "none"))]

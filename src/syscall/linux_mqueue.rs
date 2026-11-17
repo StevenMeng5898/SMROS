@@ -214,3 +214,69 @@ pub(crate) fn close_handle(handle: u32) -> bool {
 pub(crate) fn reset() {
     with_state(|state| state.reset());
 }
+
+const SECURITY_MQUEUE_NAME: &str = "smros-sec-clock";
+
+pub(crate) fn security_plant_realtime_receive(
+    tid: usize,
+    scheduler_thread: usize,
+    handle: u32,
+    ticks: u64,
+    absolute: u64,
+) -> bool {
+    with_state(|state| {
+        let _ = state.unlink(SECURITY_MQUEUE_NAME);
+        if state
+            .open(SECURITY_MQUEUE_NAME, handle, true, true, None)
+            .is_err()
+        {
+            return false;
+        }
+        if state
+            .push_waiter(
+                handle,
+                LinuxMqueueWaitKind::Receive,
+                tid,
+                scheduler_thread,
+                Some(LinuxMqueueDeadline {
+                    ticks,
+                    absolute_realtime_nanoseconds: Some(absolute),
+                }),
+            )
+            .is_err()
+        {
+            let _ = state.unlink(SECURITY_MQUEUE_NAME);
+            let _ = state.close_handle(handle);
+            return false;
+        }
+        true
+    })
+}
+
+pub(crate) fn security_realtime_receive_intact(
+    tid: usize,
+    scheduler_thread: usize,
+    ticks: u64,
+    absolute: u64,
+) -> bool {
+    with_state(|state| {
+        state.waiters.iter().flatten().any(|waiter| {
+            waiter.tid == tid
+                && waiter.scheduler_thread == scheduler_thread
+                && waiter.kind == LinuxMqueueWaitKind::Receive
+                && waiter.outcome == LinuxMqueueWaitOutcome::Waiting
+                && waiter.deadline.is_some_and(|deadline| {
+                    deadline.ticks == ticks
+                        && deadline.absolute_realtime_nanoseconds == Some(absolute)
+                })
+        })
+    })
+}
+
+pub(crate) fn security_clear_realtime_receive(handle: u32, tid: usize, scheduler_thread: usize) {
+    with_state(|state| {
+        let _ = state.remove_task(tid, scheduler_thread);
+        let _ = state.unlink(SECURITY_MQUEUE_NAME);
+        let _ = state.close_handle(handle);
+    });
+}

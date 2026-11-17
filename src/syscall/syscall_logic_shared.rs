@@ -334,7 +334,8 @@ pub(crate) const fn linux_utime_reject(
     owner_or_root: bool,
     writable: bool,
 ) -> Option<LinuxUtimeReject> {
-    let specific = matches!(atime, LinuxUtimeField::Set(_)) || matches!(mtime, LinuxUtimeField::Set(_));
+    let specific =
+        matches!(atime, LinuxUtimeField::Set(_)) || matches!(mtime, LinuxUtimeField::Set(_));
     let now = matches!(atime, LinuxUtimeField::Now) || matches!(mtime, LinuxUtimeField::Now);
     if specific && !owner_or_root {
         return Some(LinuxUtimeReject::Eperm);
@@ -544,6 +545,20 @@ pub(crate) const fn linux_posix_clock_settable_for_current_ids(
         || clock_id == 2
         || clock_id == 3
         || linux_cpu_clock_id_valid_for_current_ids(clock_id, current_pid, current_tid)
+}
+
+/// Linux `CAP_SYS_TIME`. Setting `CLOCK_REALTIME` requires it.
+pub(crate) const LINUX_CAP_SYS_TIME: u32 = 25;
+
+/// Whether this caller may move the system realtime clock.
+///
+/// `clock_settime(CLOCK_REALTIME)` and `settimeofday` both use this check.
+/// `euid == 0` is the privilege boundary the rest of the kernel uses, and the
+/// effective set must still contain `CAP_SYS_TIME`. `setuid` does not clear
+/// capability bits, so a nonzero euid is denied even when the bit remains.
+/// A root caller who dropped the bit with `capset` is denied too.
+pub(crate) const fn linux_can_set_system_time(effective_uid: usize, cap_effective: u64) -> bool {
+    effective_uid == 0 && cap_effective & (1u64 << LINUX_CAP_SYS_TIME) != 0
 }
 
 pub(crate) fn linux_posix_timespec_nanoseconds(seconds: i64, nanoseconds: i64) -> Option<u64> {
@@ -1381,19 +1396,19 @@ pub(crate) fn linux_audited_stub(syscall_num: u32) -> Option<LinuxAuditedStub> {
         234 => FailClosed(ENOSYS),             // remap_file_pages
         // No CONFIG_NUMA. Linux returns ENOSYS for the query as well as the writes.
         235 | 236 | 237 => FailClosed(ENOSYS),
-        238 | 239 => FailClosed(EPERM), // migrate_pages, move_pages
-        241 => FailClosed(ENOSYS),      // perf_event_open
-        262 | 263 => FailClosed(EPERM), // fanotify
+        238 | 239 => FailClosed(EPERM),  // migrate_pages, move_pages
+        241 => FailClosed(ENOSYS),       // perf_event_open
+        262 | 263 => FailClosed(EPERM),  // fanotify
         264 | 265 => FailClosed(ENOSYS), // name_to_handle_at, open_by_handle_at
         // 267 syncfs and 269 sendmmsg are real handlers.
         270 | 271 => FailClosed(ENOSYS), // process_vm_readv/writev
         272 => FailClosed(EPERM),        // kcmp
         274 => FailClosed(EPERM),        // sched_setattr
         // 275 sched_getattr is a real query.
-        280 => FailClosed(ENOSYS), // bpf
-        281 => FailClosed(ENOSYS), // execveat
-        282 => FailClosed(ENOSYS), // userfaultfd
-        284 => Harmless,           // mlock2
+        280 => FailClosed(ENOSYS),             // bpf
+        281 => FailClosed(ENOSYS),             // execveat
+        282 => FailClosed(ENOSYS),             // userfaultfd
+        284 => Harmless,                       // mlock2
         288 | 289 | 290 => FailClosed(ENOSYS), // pkey
         // glibc/musl treat ENOSYS as "rseq unavailable" and keep starting.
         293 => FailClosed(ENOSYS),
@@ -1466,12 +1481,7 @@ pub(crate) const fn linux_sched_getattr_reject(
     flags: usize,
 ) -> Option<i32> {
     let negative_pid = (pid as u32 as i32) < 0;
-    if flags != 0
-        || attr == 0
-        || size < LINUX_SCHED_ATTR_SIZE_VER0
-        || size > 4096
-        || negative_pid
-    {
+    if flags != 0 || attr == 0 || size < LINUX_SCHED_ATTR_SIZE_VER0 || size > 4096 || negative_pid {
         Some(LINUX_ERRNO_EINVAL)
     } else {
         None
