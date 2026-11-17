@@ -3527,34 +3527,48 @@ mod linux_task_logic {
         const TICK_NANOS: u64 = 10_000_000;
         const TARGET_REALTIME_NANOS: u64 = 5_000_000_000;
 
-        let mut tasks = LinuxTaskTable::<3>::new();
+        let mut tasks = LinuxTaskTable::<4>::new();
         tasks.register_root(7).unwrap();
         let child = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
+        let other = tasks.reserve_child(3, 9).unwrap();
         assert!(tasks.publish(child));
+        assert!(tasks.publish(other));
         assert!(tasks.install_sleep(
             child.tid,
             8,
             LinuxSleepWait::absolute_realtime_waiting(500, TARGET_REALTIME_NANOS),
         ));
+        assert!(tasks.install_sleep(
+            other.tid,
+            9,
+            LinuxSleepWait::absolute_realtime_waiting(500, TARGET_REALTIME_NANOS),
+        ));
         assert!(tasks.block(child.tid, 8, LinuxBlockReason::Sleep));
+        assert!(tasks.block(other.tid, 9, LinuxBlockReason::Sleep));
 
         tasks.retarget_realtime_sleep_deadlines(7_000_000_000, TICK_NANOS);
         let wake_nanos = tasks.sleep_waits[child.slot]
             .unwrap()
             .wake_monotonic_nanos(TICK_NANOS);
         assert!(wake_nanos <= 100 * TICK_NANOS);
-        let mut gate = TimerNotifyGate::EMPTY;
-        gate.arm(4, wake_nanos);
-        assert_eq!(
-            tasks.complete_due_realtime_sleeps(100, &gate, TICK_NANOS),
-            [None, None, None]
-        );
+        let mut gates = TimerNotifyGateSet::EMPTY;
+        gates.arm(LINUX_ROOT_TID, 4, wake_nanos);
+        let expired = tasks.complete_due_realtime_sleeps(100, &gates, TICK_NANOS);
+        assert!(expired.contains(&Some((other.tid, 9, LinuxBlockReason::Sleep))));
+        assert!(!expired.contains(&Some((child.tid, 8, LinuxBlockReason::Sleep))));
         assert_eq!(
             tasks.sleep_waits[child.slot].unwrap().outcome,
             LinuxSleepOutcome::Waiting
         );
         assert_eq!(
-            tasks.complete_due_realtime_sleeps(100, &TimerNotifyGate::EMPTY, TICK_NANOS)[0],
+            tasks.sleep_waits[other.slot].unwrap().outcome,
+            LinuxSleepOutcome::Completed
+        );
+        assert_eq!(
+            tasks
+                .complete_due_realtime_sleeps(100, &TimerNotifyGateSet::EMPTY, TICK_NANOS)
+                .into_iter()
+                .find_map(|item| item),
             Some((child.tid, 8, LinuxBlockReason::Sleep))
         );
     }
@@ -3719,13 +3733,13 @@ mod linux_task_logic {
 
     #[test]
     fn timer_notify_gate_holds_later_sleep_until_the_spawned_thread_exits() {
-        let mut gate = TimerNotifyGate::EMPTY;
-        gate.arm(4, 500);
-        assert!(gate.blocks_sleep(1_000));
-        assert!(!gate.blocks_sleep(499));
-        gate.note_spawn(4, 9);
-        assert!(!gate.note_signal_wait(4));
-        assert!(gate.blocks_sleep(1_000));
+        let mut gates = TimerNotifyGateSet::EMPTY;
+        gates.arm(LINUX_ROOT_TID, 4, 500);
+        assert!(gates.blocks_sleep(LINUX_ROOT_TID, 1_000));
+        assert!(!gates.blocks_sleep(LINUX_ROOT_TID, 499));
+        gates.note_spawn(4, 9);
+        assert!(!gates.note_signal_wait(4));
+        assert!(gates.blocks_sleep(LINUX_ROOT_TID, 1_000));
 
         let mut tasks = LinuxTaskTable::<4>::new();
         tasks.register_root(7).unwrap();
@@ -3734,28 +3748,126 @@ mod linux_task_logic {
         assert!(tasks.install_sleep(sleeper.tid, 8, LinuxSleepWait::waiting(100)));
         assert!(tasks.block(sleeper.tid, 8, LinuxBlockReason::Sleep));
 
-        let (expired, deferred) = tasks.expire_one_sleep_gated(100, &gate, 10_000_000);
-        assert_eq!(expired, None);
-        assert!(deferred);
-        assert!(!gate.note_deferred_scan());
-        assert!(gate.note_exit(9));
-        assert!(!gate.blocks_sleep(1_000));
+        let expiry = tasks.expire_one_sleep_gated(100, &gates, 10_000_000);
+        assert_eq!(expiry.identity, None);
+        assert!(expiry.deferred());
+        assert!(!gates.note_deferred_scans(&[LINUX_ROOT_TID]));
+        assert!(gates.note_exit(9));
+        assert!(!gates.blocks_sleep(LINUX_ROOT_TID, 1_000));
         assert_eq!(
-            tasks.expire_one_sleep_gated(100, &gate, 10_000_000).0,
+            tasks
+                .expire_one_sleep_gated(100, &gates, 10_000_000)
+                .identity,
             Some((sleeper.tid, 8, LinuxBlockReason::Sleep))
         );
     }
 
     #[test]
+    fn timer_notify_gate_defers_only_the_arming_process() {
+        let mut gates = TimerNotifyGateSet::EMPTY;
+        // The attacker keeps moving its own threshold earlier than every
+        // pending sleep. That must not create a threshold for anyone else.
+        gates.arm(2, 4, 50_000_000);
+        gates.arm(2, 4, 1);
+        gates.arm(2, 4, 0);
+        assert_eq!(gates.not_before_nanos(2), Some(0));
+        assert_eq!(gates.not_before_nanos(3), None);
+        assert!(gates.blocks_sleep(2, 1_000_000_000));
+        assert!(!gates.blocks_sleep(3, 0));
+        assert!(!gates.blocks_sleep(9, 1_000_000_000));
+
+        let mut tasks = LinuxTaskTable::<4>::new();
+        tasks.register_root(7).unwrap();
+        let attacker = tasks.reserve_child(2, 4).unwrap();
+        let victim = tasks.reserve_child(3, 5).unwrap();
+        assert!(tasks.publish(attacker));
+        assert!(tasks.publish(victim));
+        assert!(tasks.install_sleep(attacker.tid, 4, LinuxSleepWait::waiting(100)));
+        assert!(tasks.install_sleep(victim.tid, 5, LinuxSleepWait::waiting(100)));
+        assert!(tasks.block(attacker.tid, 4, LinuxBlockReason::Sleep));
+        assert!(tasks.block(victim.tid, 5, LinuxBlockReason::Sleep));
+
+        let expiry = tasks.expire_one_sleep_gated(100, &gates, 10_000_000);
+        assert_eq!(
+            expiry.identity,
+            Some((victim.tid, 5, LinuxBlockReason::Sleep))
+        );
+        assert_eq!(expiry.deferred_len, 1);
+        assert_eq!(expiry.deferred_tgids[0], 2);
+        let still_held = tasks.expire_one_sleep_gated(100, &gates, 10_000_000);
+        assert_eq!(still_held.identity, None);
+        assert_eq!(still_held.deferred_tgids[0], 2);
+
+        let mut precision = LinuxTaskTable::<4>::new();
+        precision.register_root(7).unwrap();
+        let attacker = precision.reserve_child(2, 4).unwrap();
+        let victim = precision.reserve_child(3, 5).unwrap();
+        assert!(precision.publish(attacker));
+        assert!(precision.publish(victim));
+        let mut attacker_wait = LinuxSleepWait::waiting(1);
+        attacker_wait.precision_deadline_nanoseconds = Some(1_000_000_000);
+        let mut victim_wait = LinuxSleepWait::waiting(1);
+        victim_wait.precision_deadline_nanoseconds = Some(1_000_000_000);
+        assert!(precision.install_sleep(attacker.tid, 4, attacker_wait));
+        assert!(precision.install_sleep(victim.tid, 5, victim_wait));
+        assert!(precision.block(attacker.tid, 4, LinuxBlockReason::Sleep));
+        assert!(precision.block(victim.tid, 5, LinuxBlockReason::Sleep));
+        let precision_expiry = precision.expire_precision_sleep_gated(1_000_000_000, &gates);
+        assert_eq!(
+            precision_expiry.identity,
+            Some((victim.tid, 5, LinuxBlockReason::Sleep))
+        );
+        assert_eq!(precision_expiry.deferred_tgids[0], 2);
+
+        // A second process can arm without moving the attacker's threshold,
+        // and lowering the attacker again does not move the second process.
+        gates.arm(3, 6, 5_000);
+        gates.arm(2, 4, 0);
+        assert_eq!(gates.not_before_nanos(2), Some(0));
+        assert_eq!(gates.not_before_nanos(3), Some(5_000));
+        assert!(!gates.blocks_sleep(3, 4_999));
+        assert!(gates.blocks_sleep(3, 5_000));
+        assert!(!gates.blocks_sleep(9, 5_000));
+
+        // Burning the attacker's cap must not open the other process's gate.
+        for _ in 0..199 {
+            assert!(!gates.note_deferred_scans(&[2]));
+        }
+        assert!(gates.note_deferred_scans(&[2]));
+        assert!(!gates.blocks_sleep(2, 10_000));
+        assert!(gates.blocks_sleep(3, 5_000));
+        assert!(gates.release_process(3));
+        assert!(!gates.blocks_sleep(3, 5_000));
+        assert!(!gates.release_process(3));
+    }
+
+    #[test]
+    fn timer_notify_gate_refuses_to_attach_a_process_when_the_table_is_full() {
+        let mut gates = TimerNotifyGateSet::EMPTY;
+        for tgid in 1..=TIMER_NOTIFY_GATE_SLOTS {
+            gates.arm(tgid, tgid, 1_000);
+        }
+        gates.arm(TIMER_NOTIFY_GATE_SLOTS + 1, 100, 1);
+        assert_eq!(gates.not_before_nanos(1), Some(1_000));
+        assert!(gates.blocks_sleep(1, 1_000));
+        assert!(!gates.blocks_sleep(TIMER_NOTIFY_GATE_SLOTS + 1, 10_000));
+        // A later arm from an occupant still only lowers that occupant.
+        gates.arm(1, 1, 1);
+        assert_eq!(gates.not_before_nanos(1), Some(1));
+        assert_eq!(gates.not_before_nanos(2), Some(1_000));
+    }
+
+    #[test]
     fn timer_notify_gate_cap_releases_a_stuck_notification() {
         let mut gate = TimerNotifyGate::EMPTY;
-        gate.arm(3, 10);
+        gate.arm(1, 3, 10);
         assert!(!gate.note_deferred_scan());
         for _ in 0..198 {
             assert!(!gate.note_deferred_scan());
         }
         assert!(gate.note_deferred_scan());
-        assert!(!gate.blocks_sleep(10));
+        assert!(!gate.blocks_sleep(1, 10));
+        assert!(!gate.blocks_sleep(2, 10));
     }
 
     #[test]
