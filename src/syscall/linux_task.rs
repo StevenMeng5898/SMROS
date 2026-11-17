@@ -18,6 +18,7 @@ const LINUX_SCHED_RR: usize = 2;
 
 struct LinuxTaskRuntime {
     tasks: LinuxTaskTable<LINUX_TASK_LIMIT>,
+    timer_notify_gate: TimerNotifyGate,
     #[cfg(target_arch = "aarch64")]
     clone_slots: [aarch64_clone::LinuxCloneSlot; LINUX_TASK_LIMIT],
     #[cfg(target_arch = "riscv64")]
@@ -28,6 +29,7 @@ impl LinuxTaskRuntime {
     const fn new() -> Self {
         Self {
             tasks: LinuxTaskTable::new(),
+            timer_notify_gate: TimerNotifyGate::EMPTY,
             #[cfg(target_arch = "aarch64")]
             clone_slots: [aarch64_clone::LinuxCloneSlot::EMPTY; LINUX_TASK_LIMIT],
             #[cfg(target_arch = "riscv64")]
@@ -735,6 +737,20 @@ pub(crate) fn block_current(reason: LinuxBlockReason) -> Result<LinuxTaskCore, S
             Ok(task)
         })?;
         if scheduler::scheduler().block_thread(scheduler_thread) {
+            if reason == LinuxBlockReason::SignalWait {
+                let held = with_runtime(|runtime| {
+                    runtime
+                        .timer_notify_gate
+                        .note_signal_wait(scheduler_thread.0)
+                });
+                if held {
+                    crate::kobj_debug!(
+                        "posix-timer",
+                        "notify-gate clear reason=sigwait thread={}",
+                        scheduler_thread.0
+                    );
+                }
+            }
             return Ok(task);
         }
         let _ = with_runtime(|runtime| runtime.tasks.wake(task.tid, scheduler_thread.0));
@@ -833,6 +849,7 @@ enum LinuxTaskRetirementScope {
 
 fn retire_tasks(scope: LinuxTaskRetirementScope) -> (Vec<LinuxChildExitTransition>, usize, bool) {
     let mut retired = Vec::new();
+    let mut notify_gate_cleared = Vec::new();
     let (retired_count, process_empty) = with_runtime(|runtime| {
         let candidates: Vec<(usize, LinuxTaskCore)> = runtime
             .tasks
@@ -864,6 +881,9 @@ fn retire_tasks(scope: LinuxTaskRetirementScope) -> (Vec<LinuxChildExitTransitio
             };
             if !runtime.tasks.retire(task.tid, task.scheduler_thread) {
                 return false;
+            }
+            if runtime.timer_notify_gate.note_exit(task.scheduler_thread) {
+                notify_gate_cleared.push(task.scheduler_thread);
             }
             #[cfg(target_arch = "aarch64")]
             if let Some(clone_slot) = runtime.clone_slots.get_mut(slot) {
@@ -897,6 +917,13 @@ fn retire_tasks(scope: LinuxTaskRetirementScope) -> (Vec<LinuxChildExitTransitio
         };
         (retired_count, process_empty)
     });
+    for thread in notify_gate_cleared {
+        crate::kobj_debug!(
+            "posix-timer",
+            "notify-gate clear reason=exit thread={}",
+            thread
+        );
+    }
     (retired, retired_count, process_empty)
 }
 
@@ -987,6 +1014,41 @@ pub(crate) fn finish_current_without_el0_return() -> ! {
     }
 }
 
+pub(crate) fn arm_timer_notify_gate(scheduler_thread: usize, not_before_nanos: u64) {
+    with_runtime(|runtime| {
+        runtime
+            .timer_notify_gate
+            .arm(scheduler_thread, not_before_nanos);
+    });
+    crate::kobj_debug!(
+        "posix-timer",
+        "notify-gate arm thread={} deadline={}",
+        scheduler_thread,
+        not_before_nanos
+    );
+}
+
+fn note_timer_notify_deferral(now_tick: u64) -> bool {
+    let (cleared, not_before, held_before) = with_runtime(|runtime| {
+        let held_before = runtime.timer_notify_gate.held_sleep();
+        let not_before = runtime.timer_notify_gate.not_before_nanos();
+        let cleared = runtime.timer_notify_gate.note_deferred_scan();
+        (cleared, not_before, held_before)
+    });
+    if !held_before {
+        crate::kobj_debug!(
+            "posix-timer",
+            "notify-gate defer sleep now_tick={} gate_ns={}",
+            now_tick,
+            not_before
+        );
+    }
+    if cleared {
+        crate::kobj_debug!("posix-timer", "notify-gate clear reason=cap");
+    }
+    cleared
+}
+
 pub(crate) fn on_timer_tick(now: u64) {
     if crate::kernel_lowlevel::smp::current_cpu_id() == 0 {
         while let Some(identity) = with_runtime(|runtime| runtime.tasks.expire_one_signal_wait(now))
@@ -1002,8 +1064,23 @@ pub(crate) fn on_timer_tick(now: u64) {
             }
         }
 
-        while let Some(identity) = with_runtime(|runtime| runtime.tasks.expire_one_sleep(now)) {
-            let (tid, scheduler_thread, reason) = identity;
+        loop {
+            let (identity, deferred) = with_runtime(|runtime| {
+                let gate = runtime.timer_notify_gate;
+                runtime.tasks.expire_one_sleep_gated(now, &gate, 10_000_000)
+            });
+            if deferred {
+                let opened = note_timer_notify_deferral(now);
+                if identity.is_none() {
+                    if opened {
+                        continue;
+                    }
+                    break;
+                }
+            }
+            let Some((tid, scheduler_thread, reason)) = identity else {
+                break;
+            };
             if !wake_blocked(tid, scheduler_thread, reason) {
                 let _ = cancel_sleep(tid, scheduler_thread);
             }
@@ -1014,8 +1091,22 @@ pub(crate) fn on_timer_tick(now: u64) {
 pub(crate) fn on_precision_timer(now_nanoseconds: u64) -> bool {
     let mut woke_task = false;
     loop {
-        let identity =
-            with_runtime(|runtime| runtime.tasks.expire_precision_sleep(now_nanoseconds));
+        let (identity, deferred) = with_runtime(|runtime| {
+            let gate = runtime.timer_notify_gate;
+            runtime
+                .tasks
+                .expire_precision_sleep_gated(now_nanoseconds, &gate)
+        });
+        if deferred {
+            let opened =
+                note_timer_notify_deferral(crate::kernel_lowlevel::timer::get_tick_count());
+            if identity.is_none() {
+                if opened {
+                    continue;
+                }
+                break;
+            }
+        }
         let Some((tid, scheduler_thread, reason)) = identity else {
             break;
         };
@@ -1051,6 +1142,7 @@ pub(crate) fn reset() {
             .clone_slots
             .fill(riscv64_clone::LinuxCloneSlot::EMPTY);
         runtime.tasks.reset();
+        runtime.timer_notify_gate = TimerNotifyGate::EMPTY;
     });
     super::linux_process::reset_launch();
     #[cfg(target_arch = "aarch64")]
@@ -1389,6 +1481,10 @@ mod aarch64_clone {
                 return Err(SysError::EAGAIN);
             }
             runtime.clone_slots[reservation.slot].committed = true;
+            let creator = scheduler::scheduler().current().0;
+            runtime
+                .timer_notify_gate
+                .note_spawn(creator, reservation.scheduler_thread);
             Ok(())
         })
     }
@@ -1745,6 +1841,10 @@ mod riscv64_clone {
                 return Err(SysError::EAGAIN);
             }
             runtime.clone_slots[reservation.slot].committed = true;
+            let creator = scheduler::scheduler().current().0;
+            runtime
+                .timer_notify_gate
+                .note_spawn(creator, reservation.scheduler_thread);
             Ok(())
         })
     }

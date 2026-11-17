@@ -670,19 +670,23 @@ fn process_timer_work() -> bool {
     let next_posix_timer_deadline = crate::syscall::next_linux_posix_timer_deadline();
     let posix_timer_deadline_due = next_posix_timer_deadline
         .is_some_and(|deadline| deadline <= now_nanoseconds);
+    // Deliver an overdue POSIX timer before waking sleepers. A catch-up
+    // interrupt can make a 0.5s SIGEV_THREAD timer and a later sleep due
+    // together; the helper must run before that sleep returns.
+    if posix_timer_deadline_due {
+        crate::syscall::deliver_linux_posix_timer_signals_from_irq();
+    }
     // SBI timers are per-hart, so a precision sleeper may be woken by any
     // CPU's compare interrupt. The shared task table makes this idempotent.
     let precision_woke_task = crate::syscall::linux_task::on_precision_timer(now_nanoseconds);
     let next_sleep_deadline = crate::syscall::linux_task::next_precision_sleep_deadline();
+    let next_posix_timer_deadline = crate::syscall::next_linux_posix_timer_deadline();
     if let Some(deadline) = next_sleep_deadline
         .into_iter()
         .chain(next_posix_timer_deadline)
         .min()
     {
         kernel_lowlevel::timer::arm_at_nanoseconds(deadline);
-    }
-    if posix_timer_deadline_due {
-        crate::syscall::deliver_linux_posix_timer_signals_from_irq();
     }
     if current_cpu_id() == 0 {
         let elapsed = claim_timer_tick(now);
@@ -694,12 +698,12 @@ fn process_timer_work() -> bool {
             {
                 crate::kernel_objects::scheduler::scheduler().on_timer_tick();
             }
-            crate::syscall::expire_linux_real_timers_from_irq();
-            #[cfg(not(target_arch = "riscv64"))]
-            crate::syscall::linux_task::on_timer_tick(now);
             if !posix_timer_deadline_due {
                 crate::syscall::deliver_linux_posix_timer_signals_from_irq();
             }
+            crate::syscall::expire_linux_real_timers_from_irq();
+            #[cfg(not(target_arch = "riscv64"))]
+            crate::syscall::linux_task::on_timer_tick(now);
             #[cfg(not(target_arch = "riscv64"))]
             {
                 crate::syscall::linux_futex::on_timer_tick(now, now);

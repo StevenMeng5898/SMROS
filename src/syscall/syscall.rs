@@ -5857,6 +5857,14 @@ pub(crate) fn queue_process_linux_signal_and_wake(
     tgid: usize,
     record: LinuxPendingSignal,
 ) -> Result<(), SysError> {
+    queue_process_linux_signal_and_wake_at(tgid, record, None)
+}
+
+fn queue_process_linux_signal_and_wake_at(
+    tgid: usize,
+    record: LinuxPendingSignal,
+    timer_deadline_nanos: Option<u64>,
+) -> Result<(), SysError> {
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let result = (|| {
         cancel_opposing_linux_stop_continue_signals(tgid, record.signum);
@@ -5886,6 +5894,12 @@ pub(crate) fn queue_process_linux_signal_and_wake(
                                 target.scheduler_thread,
                                 reason,
                             );
+                            if let Some(deadline) = timer_deadline_nanos {
+                                linux_task::arm_timer_notify_gate(
+                                    target.scheduler_thread,
+                                    deadline,
+                                );
+                            }
                             return Ok(());
                         }
                         with_linux_process_signal_state_for(tgid, |_, pending| {
@@ -6606,6 +6620,8 @@ pub fn deliver_linux_posix_timer_signals_from_irq() {
                         continue;
                     }
                     timer.clear_running_deferral();
+                    let timer_deadline = timer
+                        .due_monotonic_nanos(LINUX_REALTIME_OFFSET_NANOS.load(Ordering::SeqCst));
                     if !timer.expire(now_monotonic, now_realtime) || timer.signal == 0 {
                         continue;
                     }
@@ -6615,6 +6631,7 @@ pub fn deliver_linux_posix_timer_signals_from_irq() {
                     let signal_value = timer.signal_value;
                     return Some((
                         resources.pid,
+                        timer_deadline,
                         linux_timer_signal_record(
                             signal,
                             resources.pid,
@@ -6627,10 +6644,10 @@ pub fn deliver_linux_posix_timer_signals_from_irq() {
             }
             None
         });
-        let Some(Some((pid, record))) = expired else {
+        let Some(Some((pid, timer_deadline, record))) = expired else {
             break;
         };
-        let _ = queue_process_linux_signal_and_wake(pid, record);
+        let _ = queue_process_linux_signal_and_wake_at(pid, record, timer_deadline);
     }
 }
 

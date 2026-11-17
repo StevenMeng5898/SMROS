@@ -3670,6 +3670,47 @@ mod linux_task_logic {
     }
 
     #[test]
+    fn timer_notify_gate_holds_later_sleep_until_the_spawned_thread_exits() {
+        let mut gate = TimerNotifyGate::EMPTY;
+        gate.arm(4, 500);
+        assert!(gate.blocks_sleep(1_000));
+        assert!(!gate.blocks_sleep(499));
+        gate.note_spawn(4, 9);
+        assert!(!gate.note_signal_wait(4));
+        assert!(gate.blocks_sleep(1_000));
+
+        let mut tasks = LinuxTaskTable::<4>::new();
+        tasks.register_root(7).unwrap();
+        let sleeper = tasks.reserve_child(LINUX_ROOT_TID, 8).unwrap();
+        assert!(tasks.publish(sleeper));
+        assert!(tasks.install_sleep(sleeper.tid, 8, LinuxSleepWait::waiting(100)));
+        assert!(tasks.block(sleeper.tid, 8, LinuxBlockReason::Sleep));
+
+        let (expired, deferred) = tasks.expire_one_sleep_gated(100, &gate, 10_000_000);
+        assert_eq!(expired, None);
+        assert!(deferred);
+        assert!(!gate.note_deferred_scan());
+        assert!(gate.note_exit(9));
+        assert!(!gate.blocks_sleep(1_000));
+        assert_eq!(
+            tasks.expire_one_sleep_gated(100, &gate, 10_000_000).0,
+            Some((sleeper.tid, 8, LinuxBlockReason::Sleep))
+        );
+    }
+
+    #[test]
+    fn timer_notify_gate_cap_releases_a_stuck_notification() {
+        let mut gate = TimerNotifyGate::EMPTY;
+        gate.arm(3, 10);
+        assert!(!gate.note_deferred_scan());
+        for _ in 0..198 {
+            assert!(!gate.note_deferred_scan());
+        }
+        assert!(gate.note_deferred_scan());
+        assert!(!gate.blocks_sleep(10));
+    }
+
+    #[test]
     fn linux_sleep_timer_expiry_resumes_scan_after_last_expired_slot() {
         let mut tasks = LinuxTaskTable::<4>::new();
         tasks.register_root(7).unwrap();

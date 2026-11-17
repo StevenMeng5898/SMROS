@@ -970,7 +970,7 @@ fn posix_clock_timer_cpu0_expiry_queues_process_signals() {
     assert!(expiry.contains("linux_realtime_nanos()"));
     assert!(expiry.contains("timer.running_delivery_deferred(now_monotonic)"));
     assert!(expiry.contains("timer.expire(now_monotonic, now_realtime)"));
-    assert!(expiry.contains("queue_process_linux_signal_and_wake("));
+    assert!(expiry.contains("queue_process_linux_signal_and_wake_at("));
     assert!(expiry.contains("linux_timer_signal_record("));
     let sleep = braced_body(
         &syscall[syscall
@@ -983,6 +983,21 @@ fn posix_clock_timer_cpu0_expiry_queues_process_signals() {
     assert!(timer.contains("scheduler().on_timer_tick()"));
     assert!(timer.contains("linux_task::on_timer_tick(now)"));
     assert!(timer.contains("linux_futex::on_timer_tick(now, now)"));
+    let deliver = timer
+        .find("deliver_linux_posix_timer_signals_from_irq()")
+        .expect("POSIX timer delivery");
+    let precision = timer
+        .find("on_precision_timer(")
+        .expect("precision sleep wake");
+    let task_tick = timer
+        .find("linux_task::on_timer_tick(now)")
+        .expect("tick sleep wake");
+    assert!(
+        deliver < precision && precision < task_tick,
+        "a due SIGEV_THREAD timer must arm its gate before later sleeps are woken"
+    );
+    assert!(syscall.contains("arm_timer_notify_gate("));
+    assert!(syscall.contains("queue_process_linux_signal_and_wake_at("));
 }
 
 #[test]
@@ -7694,7 +7709,8 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
     let timer = braced_body(&task[timer_start..]);
     let cpu0 = timer.find("current_cpu_id() == 0").expect("CPU0 guard");
     let expire = timer
-        .find("expire_one_sleep(now)")
+        .find("expire_one_sleep_gated(now")
+        .or_else(|| timer.find("expire_one_sleep(now)"))
         .or_else(|| timer.find("expire_sleeps(now)"))
         .expect("sleep expiry");
     assert!(cpu0 < expire);
@@ -7728,7 +7744,7 @@ fn linux_sleeps_expire_or_interrupt_only_the_matching_task() {
     assert!(interrupt_sleep < wake_blocked && wake_blocked < cancel_sleep);
 
     let process_start = syscall
-        .find("fn queue_process_linux_signal_and_wake(")
+        .find("fn queue_process_linux_signal_and_wake_at(")
         .expect("process signal routing caller");
     let process = braced_body(&syscall[process_start..]);
     let queue_process = process
@@ -8015,7 +8031,7 @@ fn linux_stop_signals_restart_sleep_syscalls_after_continue() {
 
     let process = braced_body(
         &syscall[syscall
-            .find("fn queue_process_linux_signal_and_wake(")
+            .find("fn queue_process_linux_signal_and_wake_at(")
             .expect("process signal queue")..],
     );
     assert!(process.contains("cancel_opposing_linux_stop_continue_signals(tgid, record.signum)"));
@@ -11895,7 +11911,7 @@ fn linux_signal_termination_reports_wait_status_and_sigchld() {
 
     let process_queue = braced_body(
         &syscall[syscall
-            .find("fn queue_process_linux_signal_and_wake(")
+            .find("fn queue_process_linux_signal_and_wake_at(")
             .expect("process signal queue")..],
     );
     assert!(
