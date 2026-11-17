@@ -7,6 +7,8 @@
  *      10 wait twice, 11 fork again after the first child exits,
  *      12 SIGSEGV handler that is not an executable user page,
  *      13 owner chmod then non-owner EPERM
+ *      14 SIGEV_THREAD notify-gate: process A re-arms a near deadline while
+ *         process B's nanosleep and clock_nanosleep must return within 200ms
  *   Path for op 13 is planted at 0x400. The fd is saved at 0x480.
  *   stat buffer is 0x500.
  *   8  target
@@ -57,6 +59,8 @@ el0_probe_entry:
     b.eq do_bad_handler
     cmp x21, #13
     b.eq do_chmod
+    cmp x21, #14
+    b.eq do_notify_gate
     mov x0, #99
     b exit_now
 do_read:
@@ -425,6 +429,291 @@ chmod_stat2:
     b exit_now
 chmod_kept:
     mov x0, #19
+    b exit_now
+
+/* Process A arms a one-shot SIGEV_THREAD timer, waits for it in sigwait so
+ * the kernel gate is armed, then forks. The child measures a 50ms nanosleep
+ * and a 50ms clock_nanosleep. The parent keeps re-arming a 1ms deadline and
+ * then wait4s without returning to sigwait, so the gate stays armed. Exit 0
+ * only when both of the child's sleeps finish in under 200ms.
+ *
+ * Data page:
+ *   0x200 sigevent, 0x240 itimerspec, 0x260 sleep request,
+ *   0x270/0x280 timespec samples, 0x290 sigset, 0x298 timer id,
+ *   0x2A0 wait status, 0x2A8 sigwait timeout, 0x2C0 arm-loop count.
+ */
+do_notify_gate:
+    movz x0, #0
+    movk x0, #2, lsl #32
+    str x0, [x20, #0x290]
+    str xzr, [x20, #0x200]
+    movz w0, #34
+    str w0, [x20, #0x208]
+    movz w0, #2
+    str w0, [x20, #0x20c]
+    str xzr, [x20, #0x2A8]
+    movz x0, #0x8400
+    movk x0, #0x17D7, lsl #16
+    str x0, [x20, #0x2B0]
+    mov x0, #0
+    add x1, x20, #0x290
+    mov x2, #0
+    mov x3, #8
+    movz x8, #135
+    svc #0
+    tbnz x0, #63, ng_mask
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    mov x0, #1
+    add x1, x20, #0x200
+    add x2, x20, #0x298
+    movz x8, #107
+    svc #0
+    tbnz x0, #63, ng_create
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    mov x0, #3
+    str x0, [x20, #0x2C0]
+ng_arm_loop:
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    str xzr, [x20, #0x240]
+    str xzr, [x20, #0x248]
+    str xzr, [x20, #0x250]
+    movz x0, #0xE100
+    movk x0, #0x05F5, lsl #16
+    str x0, [x20, #0x258]
+    ldr w0, [x20, #0x298]
+    mov x1, #0
+    add x2, x20, #0x240
+    mov x3, #0
+    movz x8, #110
+    svc #0
+    tbnz x0, #63, ng_settime
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    add x0, x20, #0x290
+    mov x1, #0
+    add x2, x20, #0x2A8
+    mov x3, #8
+    movz x8, #137
+    svc #0
+    tbnz x0, #63, ng_sigwait
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    ldr x21, [x20, #0x2C0]
+    sub x21, x21, #1
+    str x21, [x20, #0x2C0]
+    cbnz x21, ng_arm_loop
+    mov x0, #17
+    mov x1, #0
+    mov x2, #0
+    mov x3, #0
+    mov x4, #0
+    movz x8, #220
+    svc #0
+    tbnz x0, #63, ng_fork
+    cbz x0, ng_child
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    mov x0, #1
+    add x1, x20, #0x270
+    movz x8, #113
+    svc #0
+    tbnz x0, #63, ng_clock
+ng_hold:
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    str xzr, [x20, #0x240]
+    str xzr, [x20, #0x248]
+    str xzr, [x20, #0x250]
+    movz x0, #0x4240
+    movk x0, #0x000F, lsl #16
+    str x0, [x20, #0x258]
+    ldr w0, [x20, #0x298]
+    mov x1, #0
+    add x2, x20, #0x240
+    mov x3, #0
+    movz x8, #110
+    svc #0
+    tbnz x0, #63, ng_settime
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    mov x0, #1
+    add x1, x20, #0x280
+    movz x8, #113
+    svc #0
+    tbnz x0, #63, ng_clock
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    ldr x1, [x20, #0x270]
+    ldr x2, [x20, #0x280]
+    ldr x3, [x20, #0x278]
+    ldr x4, [x20, #0x288]
+    sub x2, x2, x1
+    subs x4, x4, x3
+    b.ge ng_hold_delta
+    sub x2, x2, #1
+    movz x5, #0xCA00
+    movk x5, #0x3B9A, lsl #16
+    add x4, x4, x5
+ng_hold_delta:
+    cbnz x2, ng_wait_child
+    movz x5, #0xA300
+    movk x5, #0x11E1, lsl #16
+    cmp x4, x5
+    b.lo ng_hold
+ng_wait_child:
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    movn x0, #0
+    add x1, x20, #0x2A0
+    mov x2, #0
+    movz x8, #260
+    svc #0
+    tbnz x0, #63, ng_wait_fail
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    ldr w0, [x20, #0x2A0]
+    cbz w0, ng_parent_ok
+    and w1, w0, #0xff
+    cbnz w1, ng_child_signal
+    lsr w0, w0, #8
+    b exit_now
+ng_parent_ok:
+    mov x0, #0
+    b exit_now
+ng_child:
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    str xzr, [x20, #0x260]
+    movz x0, #0xF080
+    movk x0, #0x02FA, lsl #16
+    str x0, [x20, #0x268]
+    mov x0, #1
+    add x1, x20, #0x270
+    movz x8, #113
+    svc #0
+    tbnz x0, #63, ng_child_clock
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    add x0, x20, #0x260
+    mov x1, #0
+    movz x8, #101
+    svc #0
+    tbnz x0, #63, ng_child_nano
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    mov x0, #1
+    add x1, x20, #0x280
+    movz x8, #113
+    svc #0
+    tbnz x0, #63, ng_child_clock
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    ldr x1, [x20, #0x270]
+    ldr x2, [x20, #0x280]
+    ldr x3, [x20, #0x278]
+    ldr x4, [x20, #0x288]
+    sub x2, x2, x1
+    subs x4, x4, x3
+    b.ge ng_nano_delta
+    sub x2, x2, #1
+    movz x5, #0xCA00
+    movk x5, #0x3B9A, lsl #16
+    add x4, x4, x5
+ng_nano_delta:
+    cbnz x2, ng_child_slow_nano
+    movz x5, #0xC200
+    movk x5, #0x0BEB, lsl #16
+    cmp x4, x5
+    b.hs ng_child_slow_nano
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    str xzr, [x20, #0x260]
+    movz x0, #0xF080
+    movk x0, #0x02FA, lsl #16
+    str x0, [x20, #0x268]
+    mov x0, #1
+    add x1, x20, #0x270
+    movz x8, #113
+    svc #0
+    tbnz x0, #63, ng_child_clock
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    mov x0, #1
+    mov x1, #0
+    add x2, x20, #0x260
+    mov x3, #0
+    movz x8, #115
+    svc #0
+    tbnz x0, #63, ng_child_cns
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    mov x0, #1
+    add x1, x20, #0x280
+    movz x8, #113
+    svc #0
+    tbnz x0, #63, ng_child_clock
+    movz x20, #0
+    movk x20, #0x1200, lsl #16
+    ldr x1, [x20, #0x270]
+    ldr x2, [x20, #0x280]
+    ldr x3, [x20, #0x278]
+    ldr x4, [x20, #0x288]
+    sub x2, x2, x1
+    subs x4, x4, x3
+    b.ge ng_cns_delta
+    sub x2, x2, #1
+    movz x5, #0xCA00
+    movk x5, #0x3B9A, lsl #16
+    add x4, x4, x5
+ng_cns_delta:
+    cbnz x2, ng_child_slow_clock
+    movz x5, #0xC200
+    movk x5, #0x0BEB, lsl #16
+    cmp x4, x5
+    b.hs ng_child_slow_clock
+    mov x0, #0
+    b exit_now
+ng_mask:
+    mov x0, #21
+    b exit_now
+ng_create:
+    mov x0, #22
+    b exit_now
+ng_settime:
+    mov x0, #23
+    b exit_now
+ng_sigwait:
+    mov x0, #24
+    b exit_now
+ng_fork:
+    mov x0, #25
+    b exit_now
+ng_clock:
+    mov x0, #26
+    b exit_now
+ng_wait_fail:
+    mov x0, #27
+    b exit_now
+ng_child_signal:
+    mov x0, #29
+    b exit_now
+ng_child_clock:
+    mov x0, #31
+    b exit_now
+ng_child_nano:
+    mov x0, #32
+    b exit_now
+ng_child_slow_nano:
+    mov x0, #33
+    b exit_now
+ng_child_cns:
+    mov x0, #34
+    b exit_now
+ng_child_slow_clock:
+    mov x0, #35
     b exit_now
 exit_now:
     movz x8, #93

@@ -18,7 +18,7 @@ const LINUX_SCHED_RR: usize = 2;
 
 struct LinuxTaskRuntime {
     tasks: LinuxTaskTable<LINUX_TASK_LIMIT>,
-    timer_notify_gate: TimerNotifyGate,
+    timer_notify_gates: TimerNotifyGateSet,
     #[cfg(target_arch = "aarch64")]
     clone_slots: [aarch64_clone::LinuxCloneSlot; LINUX_TASK_LIMIT],
     #[cfg(target_arch = "riscv64")]
@@ -29,7 +29,7 @@ impl LinuxTaskRuntime {
     const fn new() -> Self {
         Self {
             tasks: LinuxTaskTable::new(),
-            timer_notify_gate: TimerNotifyGate::EMPTY,
+            timer_notify_gates: TimerNotifyGateSet::EMPTY,
             #[cfg(target_arch = "aarch64")]
             clone_slots: [aarch64_clone::LinuxCloneSlot::EMPTY; LINUX_TASK_LIMIT],
             #[cfg(target_arch = "riscv64")]
@@ -382,10 +382,10 @@ pub(crate) fn complete_due_realtime_sleeps_gated(
     tick_nanoseconds: u64,
 ) -> [Option<(usize, usize, LinuxBlockReason)>; LINUX_TASK_LIMIT] {
     with_runtime(|runtime| {
-        let gate = runtime.timer_notify_gate;
+        let gates = runtime.timer_notify_gates;
         runtime
             .tasks
-            .complete_due_realtime_sleeps(now, &gate, tick_nanoseconds)
+            .complete_due_realtime_sleeps(now, &gates, tick_nanoseconds)
     })
 }
 
@@ -835,7 +835,7 @@ pub(crate) fn block_current(reason: LinuxBlockReason) -> Result<LinuxTaskCore, S
             if reason == LinuxBlockReason::SignalWait {
                 let held = with_runtime(|runtime| {
                     runtime
-                        .timer_notify_gate
+                        .timer_notify_gates
                         .note_signal_wait(scheduler_thread.0)
                 });
                 if held {
@@ -977,7 +977,7 @@ fn retire_tasks(scope: LinuxTaskRetirementScope) -> (Vec<LinuxChildExitTransitio
             if !runtime.tasks.retire(task.tid, task.scheduler_thread) {
                 return false;
             }
-            if runtime.timer_notify_gate.note_exit(task.scheduler_thread) {
+            if runtime.timer_notify_gates.note_exit(task.scheduler_thread) {
                 notify_gate_cleared.push(task.scheduler_thread);
             }
             #[cfg(target_arch = "aarch64")]
@@ -1010,6 +1010,21 @@ fn retire_tasks(scope: LinuxTaskRetirementScope) -> (Vec<LinuxChildExitTransitio
             }
             LinuxTaskRetirementScope::LaunchDescendants { .. } => true,
         };
+        // A killed or fully exited process must not leave its gate armed.
+        // Another process's gate is left alone while that process is still live.
+        let owners = runtime.timer_notify_gates.active_owners();
+        for tgid in owners {
+            if tgid == 0 {
+                continue;
+            }
+            let live =
+                runtime.tasks.tasks.iter().copied().any(|task| {
+                    task.tgid == tgid && LinuxTaskTable::<LINUX_TASK_LIMIT>::is_live(task)
+                });
+            if !live {
+                runtime.timer_notify_gates.release_process(tgid);
+            }
+        }
         (retired_count, process_empty)
     });
     for thread in notify_gate_cleared {
@@ -1110,24 +1125,39 @@ pub(crate) fn finish_current_without_el0_return() -> ! {
 }
 
 pub(crate) fn arm_timer_notify_gate(scheduler_thread: usize, not_before_nanos: u64) {
-    with_runtime(|runtime| {
-        runtime
-            .timer_notify_gate
-            .arm(scheduler_thread, not_before_nanos);
+    let tgid = with_runtime(|runtime| {
+        let tgid = runtime
+            .tasks
+            .by_scheduler(scheduler_thread)
+            .map(|task| task.tgid)
+            .unwrap_or(0);
+        if tgid != 0 {
+            runtime
+                .timer_notify_gates
+                .arm(tgid, scheduler_thread, not_before_nanos);
+        }
+        tgid
     });
     crate::kobj_debug!(
         "posix-timer",
-        "notify-gate arm thread={} deadline={}",
+        "notify-gate arm thread={} tgid={} deadline={}",
         scheduler_thread,
+        tgid,
         not_before_nanos
     );
 }
 
-fn note_timer_notify_deferral(now_tick: u64) -> bool {
+fn note_timer_notify_deferrals(now_tick: u64, tgids: &[usize]) -> bool {
+    if tgids.is_empty() {
+        return false;
+    }
     let (cleared, not_before, held_before) = with_runtime(|runtime| {
-        let held_before = runtime.timer_notify_gate.held_sleep();
-        let not_before = runtime.timer_notify_gate.not_before_nanos();
-        let cleared = runtime.timer_notify_gate.note_deferred_scan();
+        let held_before = runtime.timer_notify_gates.held_sleep(tgids[0]);
+        let not_before = runtime
+            .timer_notify_gates
+            .not_before_nanos(tgids[0])
+            .unwrap_or(0);
+        let cleared = runtime.timer_notify_gates.note_deferred_scans(tgids);
         (cleared, not_before, held_before)
     });
     if !held_before {
@@ -1160,20 +1190,23 @@ pub(crate) fn on_timer_tick(now: u64) {
         }
 
         loop {
-            let (identity, deferred) = with_runtime(|runtime| {
-                let gate = runtime.timer_notify_gate;
-                runtime.tasks.expire_one_sleep_gated(now, &gate, 10_000_000)
+            let expiry = with_runtime(|runtime| {
+                let gates = runtime.timer_notify_gates;
+                runtime
+                    .tasks
+                    .expire_one_sleep_gated(now, &gates, 10_000_000)
             });
-            if deferred {
-                let opened = note_timer_notify_deferral(now);
-                if identity.is_none() {
+            if expiry.deferred() {
+                let opened =
+                    note_timer_notify_deferrals(now, &expiry.deferred_tgids[..expiry.deferred_len]);
+                if expiry.identity.is_none() {
                     if opened {
                         continue;
                     }
                     break;
                 }
             }
-            let Some((tid, scheduler_thread, reason)) = identity else {
+            let Some((tid, scheduler_thread, reason)) = expiry.identity else {
                 break;
             };
             if !wake_blocked(tid, scheduler_thread, reason) {
@@ -1186,23 +1219,25 @@ pub(crate) fn on_timer_tick(now: u64) {
 pub(crate) fn on_precision_timer(now_nanoseconds: u64) -> bool {
     let mut woke_task = false;
     loop {
-        let (identity, deferred) = with_runtime(|runtime| {
-            let gate = runtime.timer_notify_gate;
+        let expiry = with_runtime(|runtime| {
+            let gates = runtime.timer_notify_gates;
             runtime
                 .tasks
-                .expire_precision_sleep_gated(now_nanoseconds, &gate)
+                .expire_precision_sleep_gated(now_nanoseconds, &gates)
         });
-        if deferred {
-            let opened =
-                note_timer_notify_deferral(crate::kernel_lowlevel::timer::get_tick_count());
-            if identity.is_none() {
+        if expiry.deferred() {
+            let opened = note_timer_notify_deferrals(
+                crate::kernel_lowlevel::timer::get_tick_count(),
+                &expiry.deferred_tgids[..expiry.deferred_len],
+            );
+            if expiry.identity.is_none() {
                 if opened {
                     continue;
                 }
                 break;
             }
         }
-        let Some((tid, scheduler_thread, reason)) = identity else {
+        let Some((tid, scheduler_thread, reason)) = expiry.identity else {
             break;
         };
         if !wake_blocked(tid, scheduler_thread, reason) {
@@ -1237,7 +1272,7 @@ pub(crate) fn reset() {
             .clone_slots
             .fill(riscv64_clone::LinuxCloneSlot::EMPTY);
         runtime.tasks.reset();
-        runtime.timer_notify_gate = TimerNotifyGate::EMPTY;
+        runtime.timer_notify_gates = TimerNotifyGateSet::EMPTY;
     });
     super::linux_process::reset_launch();
     #[cfg(target_arch = "aarch64")]
@@ -1578,7 +1613,7 @@ mod aarch64_clone {
             runtime.clone_slots[reservation.slot].committed = true;
             let creator = scheduler::scheduler().current().0;
             runtime
-                .timer_notify_gate
+                .timer_notify_gates
                 .note_spawn(creator, reservation.scheduler_thread);
             Ok(())
         })
@@ -1938,7 +1973,7 @@ mod riscv64_clone {
             runtime.clone_slots[reservation.slot].committed = true;
             let creator = scheduler::scheduler().current().0;
             runtime
-                .timer_notify_gate
+                .timer_notify_gates
                 .note_spawn(creator, reservation.scheduler_thread);
             Ok(())
         })
