@@ -588,7 +588,7 @@ native check, zero op timeouts, every random iteration, every host `ut`/`it`,
 `posixtest` at 1600/1600 with fail/unresolved/timeout/launch-errors all zero,
 `sectest` with fail and xpass both zero, every sectest id ran, `sectest undef` and the single-id path passed,
 every guest ELF passed, every other mandatory stage passed with `unavailable=0`,
-and `shm-mode` at `040755`. A missing Verus toolchain, or a coverage audit that stops `make verus` before any harness runs, is reported as `verus=0/0/1` (`pass/fail/unavailable`) and does not by itself fail the campaign; a Verus proof failure does. Any other `UNAVAILABLE` fails the campaign. Thus `iterations=1000`
+and `shm-mode` at `040755`. `posix-baseline` passes when the qemu-user reference run completes; its summary counts are reference passes and non-passes, and those non-passes do not fail the campaign. A missing Verus toolchain, or a coverage audit that stops `make verus` before any harness runs, is reported as `verus=0/0/1` (`pass/fail/unavailable`) and does not by itself fail the campaign; a Verus proof failure does. Any other `UNAVAILABLE` fails the campaign. Thus `iterations=1000`
 requests `ut` and `it` 1000 times each through
 `scripts/smros-vm-launcher.py`. The launcher maps each accepted job name to
 fixed argv, accepts the job immediately, runs one job at a time with a timeout, and does not accept

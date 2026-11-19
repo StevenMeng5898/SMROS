@@ -263,6 +263,13 @@ pub fn extra_stage_allows_unavailable(stage: HermesExtraStage) -> bool {
     matches!(stage, HermesExtraStage::Verus)
 }
 
+/// `posix-baseline` publishes the qemu-user failure baseline. A completed run
+/// with some non-passing reference tests still passes this stage. The in-guest
+/// `posixtest all` remains the 1600/1600 SMROS gate. A harness error does not.
+pub fn extra_stage_allows_reference_misses(stage: HermesExtraStage) -> bool {
+    matches!(stage, HermesExtraStage::PosixBaseline)
+}
+
 /// Host stages the launcher may run once. Per-iteration jobs stay `ut` and `it`.
 const HOST_STAGE_NAMES: &[&str] = &[
     "el0",
@@ -1011,13 +1018,14 @@ pub fn counted_phase_pass(
     phase: &HermesCountedPhase,
     min_pass: usize,
     allow_unavailable: bool,
+    allow_reference_misses: bool,
 ) -> bool {
     match phase.disposition {
         HermesSuiteDisposition::Legacy | HermesSuiteDisposition::Skip => true,
         HermesSuiteDisposition::Pending => false,
         HermesSuiteDisposition::Done => {
             if phase.fail != 0 {
-                return false;
+                return allow_reference_misses && phase.pass > 0 && phase.unavailable == 0;
             }
             if phase.unavailable > 0 {
                 return allow_unavailable && phase.pass == 0;
@@ -1036,6 +1044,7 @@ pub fn extra_phases_pass(extra: &[HermesCountedPhase; HERMES_EXTRA_STAGE_COUNT])
             &extra[index],
             extra_stage_min_pass(stage),
             extra_stage_allows_unavailable(stage),
+            extra_stage_allows_reference_misses(stage),
         )
     })
 }

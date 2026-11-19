@@ -5848,6 +5848,40 @@ fn run_hermes_fuzzsc_phase(
     phase
 }
 
+fn hermes_summary_usize(summary: &str, key: &str) -> Option<usize> {
+    let rest = summary.split(key).nth(1)?;
+    let mut value = 0usize;
+    let mut digits = 0usize;
+    for ch in rest.chars() {
+        let Some(digit) = ch.to_digit(10) else {
+            break;
+        };
+        value = value.checked_mul(10)?.checked_add(digit as usize)?;
+        digits = digits.saturating_add(1);
+    }
+    if digits == 0 {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn hermes_host_stage_counts(
+    stage: crate::user_level::services::hermes_shell_logic_shared::HermesExtraStage,
+    summary: &str,
+) -> (usize, usize) {
+    use crate::user_level::services::hermes_shell_logic_shared::HermesExtraStage;
+    if stage == HermesExtraStage::PosixBaseline {
+        if let (Some(passed), Some(nonpass)) = (
+            hermes_summary_usize(summary, "reference_passed="),
+            hermes_summary_usize(summary, "reference_nonpass="),
+        ) {
+            return (passed, nonpass);
+        }
+    }
+    (1, 0)
+}
+
 fn run_hermes_host_stage(
     ctx: &mut ShellContext,
     stage: crate::user_level::services::hermes_shell_logic_shared::HermesExtraStage,
@@ -5886,10 +5920,11 @@ fn run_hermes_host_stage(
             ctx.serial.write_str("Host stage PASS ");
             ctx.serial.write_str(result.summary.as_str());
             ctx.serial.write_str("\n");
+            let (pass, fail) = hermes_host_stage_counts(stage, result.summary.as_str());
             HermesCountedPhase {
                 disposition: HermesSuiteDisposition::Done,
-                pass: 1,
-                fail: 0,
+                pass,
+                fail,
                 unavailable: 0,
             }
         }
