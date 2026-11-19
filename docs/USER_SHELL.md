@@ -557,8 +557,8 @@ the same per-iteration host jobs but selects the focused syscall/POSIX guest cat
 Default `hermes test-all` already includes LVGL, QML, syscall smoke, and POSIX
 canaries, so it does not take a UI mode. `posixtest=skip`, `sectest=skip`, and
 `<stage>=skip` (`guest`, `el0`, `skt`, `st`, `posix-tool-test`, `posix-fetch`,
-`posix-audit`, `posix-build`, `posix-stage`, `posix-baseline`, `posix-run`,
-`posix-report`, `launcher-test`, `verus`, `testsc`, `fuzzsc`)
+`posix-audit`, `posix-build`, `posix-stage`, `posix-baseline`,
+`launcher-test`, `verus`, `testsc`, `fuzzsc`)
 omit that stage for a short debug run; the default is to run every stage.
 `posixtest all` is on the order of 127k scheduler ticks, so it is not repeated
 on every iteration. It has to run while `/dev/shm` is still mode `040755`.
@@ -572,10 +572,10 @@ world-writable. Setattr of `/`, `/dev`, and `/dev/shm` now rejects any mode
 other than `040755`, and `fuzzsc` no longer issues that setattr. Mandatory `testsc` runs once before `posixtest all`, while the shell thread still
 owns a Linux brk. After the
 iteration loop, `hermes test-all` runs the once-per-campaign host stages
-(`el0`, `make skt`, `make st`, every `make posix-*` target, `make launcher-test`,
+(`el0`, `make skt`, `make st`, `posix-tool-test` through `posix-baseline`, `make launcher-test`,
 and `make verus`), then bounded `fuzzsc seed=1 iterations=1 time=1`,
 then another bounded `fuzzsc seed=1 iterations=1 time=1`
-and fails unless `/dev/shm` is still mode `040755`. `skt`/`st`/`posix-run` are isolated from the live guest disk.
+and fails unless `/dev/shm` is still mode `040755`. `skt` and `st` are isolated from the live guest disk. `make posix-run` and `make posix-report` are not part of this campaign: they boot a second SMROS for the same 1600-test manifest the opening `posixtest all` already executed.
 The opening phases are checkpointed
 in `/data/hermes/tests/resume.cfg` before the iteration loop. A reboot after
 they finish restores pass/fail/unresolved/timeout, sectest
@@ -588,7 +588,7 @@ native check, zero op timeouts, every random iteration, every host `ut`/`it`,
 `posixtest` at 1600/1600 with fail/unresolved/timeout/launch-errors all zero,
 `sectest` with fail and xpass both zero, every sectest id ran, `sectest undef` and the single-id path passed,
 every guest ELF passed, every other mandatory stage passed with `unavailable=0`,
-and `shm-mode` at `040755`. A missing Verus toolchain is reported as `verus=0/0/1` (`pass/fail/unavailable`) and does not by itself fail the campaign; a Verus proof failure does. Any other `UNAVAILABLE` fails the campaign. Thus `iterations=1000`
+and `shm-mode` at `040755`. A missing Verus toolchain, or a coverage audit that stops `make verus` before any harness runs, is reported as `verus=0/0/1` (`pass/fail/unavailable`) and does not by itself fail the campaign; a Verus proof failure does. Any other `UNAVAILABLE` fails the campaign. Thus `iterations=1000`
 requests `ut` and `it` 1000 times each through
 `scripts/smros-vm-launcher.py`. The launcher maps each accepted job name to
 fixed argv, accepts the job immediately, runs one job at a time with a timeout, and does not accept

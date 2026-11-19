@@ -17,7 +17,7 @@ const MAX_RESPONSE_BYTES: usize = 512;
 const RESPONSE_READ_ATTEMPTS: usize = 8;
 /// Per-iteration `ut`/`it` and other short host jobs.
 const HERMES_TEST_WAIT_NANOS: u64 = 6 * 60 * 1_000_000_000;
-/// `skt`, `posix-run`, and Verus can each take much longer than a host unit test.
+/// `skt`, `st`, and the POSIX host stages can each take much longer than a host unit test.
 const HERMES_TEST_LONG_WAIT_NANOS: u64 = 2 * 60 * 60 * 1_000_000_000;
 /// After guest reset, virtio-net and QEMU slirp need a bounded wait before the
 /// launcher handshake succeeds.
@@ -67,8 +67,6 @@ pub enum HermesHostTestJob {
     PosixBuild,
     PosixStage,
     PosixBaseline,
-    PosixRun,
-    PosixReport,
     Launcher,
     Verus,
 }
@@ -87,8 +85,6 @@ impl HermesHostTestJob {
             Self::PosixBuild => "posix-build",
             Self::PosixStage => "posix-stage",
             Self::PosixBaseline => "posix-baseline",
-            Self::PosixRun => "posix-run",
-            Self::PosixReport => "posix-report",
             Self::Launcher => "launcher-test",
             Self::Verus => "verus",
         }
@@ -107,8 +103,6 @@ impl HermesHostTestJob {
             "posix-build" => Self::PosixBuild,
             "posix-stage" => Self::PosixStage,
             "posix-baseline" => Self::PosixBaseline,
-            "posix-run" => Self::PosixRun,
-            "posix-report" => Self::PosixReport,
             "launcher-test" => Self::Launcher,
             "verus" => Self::Verus,
             _ => return None,

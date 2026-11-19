@@ -407,10 +407,10 @@ Hermes can execute explicitly allowlisted guest commands with `hermes exec`,
 or run a deterministic safe campaign with `hermes random`. Each campaign
 accepts any positive, platform-representable `iterations=<n>`, prints a replay
 seed, and writes its bounded report to `/data/hermes/tests/latest.log`.
-`hermes test-all` runs the native Hermes test once, then `posixtest all` and
+`hermes test-all` runs the native Hermes test once, then mandatory `testsc`, then `posixtest all` and
 `sectest all` (plus `sectest undef`, one case id, and full case-id coverage) once, then the seven `tests/guest` ELFs, and then runs one random
 guest operation plus each host job once per iteration: `make ut` and
-`make it`. After the iterations it runs host stages `el0`, `make skt`, `make st`, the `make posix-*` targets, `make launcher-test`, and `make verus`, then mandatory `testsc` and bounded `fuzzsc`, then the `shm-mode` check. `skt` and `st` boot a second QEMU on a private disk. `mode=syscall` keeps those host jobs and selects the focused guest
+`make it`. After the iterations it runs host stages `el0`, `make skt`, `make st`, `posix-tool-test` through `posix-baseline`, `make launcher-test`, and `make verus`, then bounded `fuzzsc`, then the `shm-mode` check. `make posix-run` and `make posix-report` stay outside the campaign because they boot a second SMROS for the same manifest. `skt` and `st` boot a second QEMU on a private disk. `mode=syscall` keeps those host jobs and selects the focused guest
 catalog of `testsc`, bounded `fuzzsc`, POSIX canaries, and `hermes test`.
 Default `hermes test-all` already includes LVGL, QML, syscall smoke, POSIX
 canaries, and ops APIs. `posixtest=skip`, `sectest=skip`, and `<stage>=skip` omit that stage.

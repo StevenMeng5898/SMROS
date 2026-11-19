@@ -151,15 +151,13 @@ pub enum HermesExtraStage {
     PosixBuild = 7,
     PosixStage = 8,
     PosixBaseline = 9,
-    PosixRun = 10,
-    PosixReport = 11,
-    Launcher = 12,
-    Verus = 13,
-    Testsc = 14,
-    Fuzzsc = 15,
+    Launcher = 10,
+    Verus = 11,
+    Testsc = 12,
+    Fuzzsc = 13,
 }
 
-pub const HERMES_EXTRA_STAGE_COUNT: usize = 16;
+pub const HERMES_EXTRA_STAGE_COUNT: usize = 14;
 pub const HERMES_GUEST_CASE_COUNT: usize = 7;
 /// `sectest all` listed probes plus the heap-fork and elf-memsz kernel cases.
 pub const HERMES_SECTEST_ALL_CASES: usize = 91;
@@ -176,8 +174,11 @@ pub const HERMES_GUEST_CASES: [&str; HERMES_GUEST_CASE_COUNT] = [
 pub const HERMES_SECTEST_ONE_ID: &str = "el0-read-kernel-ram";
 
 /// Closing stages run after the random loop and before the shm-mode check.
-/// `testsc` and bounded `fuzzsc` are last so shm-mode still observes `/dev/shm`.
-pub const HERMES_CLOSING_STAGE_ORDER: [HermesExtraStage; 14] = [
+/// Bounded `fuzzsc` is last so shm-mode still observes `/dev/shm`.
+/// `make posix-run` and `make posix-report` stay out of this list: they boot a
+/// second SMROS for the same 1600-test manifest the opening `posixtest all`
+/// already executed, and that runner's guest-start check cannot share this VM.
+pub const HERMES_CLOSING_STAGE_ORDER: [HermesExtraStage; 12] = [
     HermesExtraStage::El0,
     HermesExtraStage::Skt,
     HermesExtraStage::St,
@@ -187,8 +188,6 @@ pub const HERMES_CLOSING_STAGE_ORDER: [HermesExtraStage; 14] = [
     HermesExtraStage::PosixBuild,
     HermesExtraStage::PosixStage,
     HermesExtraStage::PosixBaseline,
-    HermesExtraStage::PosixRun,
-    HermesExtraStage::PosixReport,
     HermesExtraStage::Launcher,
     HermesExtraStage::Verus,
     HermesExtraStage::Fuzzsc,
@@ -211,12 +210,10 @@ impl HermesExtraStage {
             7 => Self::PosixBuild,
             8 => Self::PosixStage,
             9 => Self::PosixBaseline,
-            10 => Self::PosixRun,
-            11 => Self::PosixReport,
-            12 => Self::Launcher,
-            13 => Self::Verus,
-            14 => Self::Testsc,
-            15 => Self::Fuzzsc,
+            10 => Self::Launcher,
+            11 => Self::Verus,
+            12 => Self::Testsc,
+            13 => Self::Fuzzsc,
             _ => return None,
         })
     }
@@ -234,8 +231,6 @@ pub fn extra_stage_name(stage: HermesExtraStage) -> &'static str {
         HermesExtraStage::PosixBuild => "posix-build",
         HermesExtraStage::PosixStage => "posix-stage",
         HermesExtraStage::PosixBaseline => "posix-baseline",
-        HermesExtraStage::PosixRun => "posix-run",
-        HermesExtraStage::PosixReport => "posix-report",
         HermesExtraStage::Launcher => "launcher-test",
         HermesExtraStage::Verus => "verus",
         HermesExtraStage::Testsc => "testsc",
@@ -279,8 +274,6 @@ const HOST_STAGE_NAMES: &[&str] = &[
     "posix-build",
     "posix-stage",
     "posix-baseline",
-    "posix-run",
-    "posix-report",
     "launcher-test",
     "verus",
 ];

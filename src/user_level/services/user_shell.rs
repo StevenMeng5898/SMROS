@@ -5499,7 +5499,7 @@ fn print_hermes_usage(ctx: &mut ShellContext) {
         "       default test-all includes lvgl/qml/testsc/posixtest and runs posixtest all plus sectest all once\n",
     );
     ctx.serial.write_str(
-        "       stage skip switches: guest el0 skt st posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report launcher-test verus testsc fuzzsc\n",
+        "       stage skip switches: guest el0 skt st posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline launcher-test verus testsc fuzzsc\n",
     );
     ctx.serial
         .write_str("       mode=syscall selects testsc/fuzzsc/hermes test/posixtest\n");

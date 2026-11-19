@@ -1841,6 +1841,11 @@ def _resolve_qemu(qemu: str | Path) -> Path:
     return path
 
 
+# posix-build compiles this preload and stages it. It is not a toolchain
+# sysroot library, so baseline provisions the snapshot from the stage.
+_STAGE_PRODUCED_RUNTIME = frozenset({"lib/libsmros-posix-compat.so"})
+
+
 def _validate_prerequisites_impl(
     stage: Path,
     sysroot: Path,
@@ -1866,6 +1871,8 @@ def _validate_prerequisites_impl(
             executable=True,
         ) != digest:
             raise ValueError(f"manifest runtime file checksum mismatch: {relative}")
+        if relative in _STAGE_PRODUCED_RUNTIME:
+            continue
         sysroot_digest = _sha256_open_regular(
             sysroot_path,
             f"configured sysroot runtime file {relative}",
@@ -2025,6 +2032,7 @@ def _copy_runtime_file(
 
 
 def _snapshot_sysroot(
+    stage: Path,
     configured_sysroot: Path,
     destination: Path,
     identity: _StageIdentity,
@@ -2036,10 +2044,21 @@ def _snapshot_sysroot(
         for length in range(1, len(path.parts)):
             directory_modes[PurePosixPath(*path.parts[:length]).as_posix()] = 0o755
         executable = path.name.startswith("ld-linux-")
+        stage_produced = relative in _STAGE_PRODUCED_RUNTIME
+        source = (
+            stage.joinpath(*path.parts)
+            if stage_produced
+            else configured_sysroot.joinpath(*path.parts)
+        )
+        label = (
+            f"staged runtime file {relative}"
+            if stage_produced
+            else f"configured sysroot runtime file {relative}"
+        )
         actual_sha256, mode = _copy_runtime_file(
-            configured_sysroot.joinpath(*path.parts),
+            source,
             destination.joinpath(*path.parts),
-            label=f"configured sysroot runtime file {relative}",
+            label=label,
             expected_sha256=expected_sha256,
             executable=executable,
         )
@@ -2133,11 +2152,12 @@ def _verify_sysroot_snapshot(
 
 
 def _snapshot_prerequisites(
+    stage: Path,
     configured_sysroot: Path,
     destination: Path,
     identity: _StageIdentity,
 ) -> str:
-    return _snapshot_sysroot(configured_sysroot, destination, identity)
+    return _snapshot_sysroot(stage, configured_sysroot, destination, identity)
 
 
 def _bind_runtime_snapshot(
@@ -2375,7 +2395,7 @@ def run_baseline(
         ) as sysroot_temporary:
             execution_sysroot = Path(sysroot_temporary)
             runtime_snapshot_sha256 = _snapshot_prerequisites(
-                sysroot, execution_sysroot, verified_identity
+                stage, sysroot, execution_sysroot, verified_identity
             )
             _verify_sysroot_snapshot(execution_sysroot, verified_identity)
             verified_identity = _bind_runtime_snapshot(

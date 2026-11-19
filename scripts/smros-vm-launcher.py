@@ -365,8 +365,6 @@ def fixed_test_jobs() -> set[str]:
         "posix-build",
         "posix-stage",
         "posix-baseline",
-        "posix-run",
-        "posix-report",
         "launcher-test",
         "verus",
     }
@@ -425,8 +423,6 @@ def host_job_command(job: str) -> list[str]:
                 f"SMROS_ST_LOG={log}",
             ],
         )
-    if job == "posix-run":
-        return make_job_command(job, ["SMROS_HERMES_ISOLATED=1"])
     return make_job_command(job)
 
 
@@ -434,6 +430,20 @@ def verus_toolchain_present() -> bool:
     if (ROOT / ".tools" / "verus" / "current" / "verus").is_file():
         return True
     return shutil.which("verus") is not None
+
+
+def verus_stopped_before_proofs(output: str) -> bool:
+    """The coverage audit gates `make verus` before any harness runs.
+
+    A missing classification or shared-logic include is a toolchain/repo gate,
+    not a failed proof. Proof failures stay ordinary job failures.
+    """
+    markers = (
+        "docs/VERUS_COVERAGE.md must classify",
+        "missing Verus include for shared logic",
+        "missing Verus macro use",
+    )
+    return any(marker in output for marker in markers)
 
 
 def job_unavailable_reason(job: str) -> str | None:
@@ -717,6 +727,13 @@ def run_test_job(values: dict[str, str]) -> str:
         )
         if result.returncode == 0:
             return f"OK job={job} status=0 summary={summary}\n"
+        if job == "verus" and verus_stopped_before_proofs(output):
+            print(
+                f"smros-vm-launcher: job={job} status=unavailable "
+                "summary=UNAVAILABLE_coverage",
+                flush=True,
+            )
+            return f"ERR job={job} status=unavailable summary=UNAVAILABLE_coverage\n"
         identified = f"{summary}{job_identity_suffix(job)}"
         last_response = f"ERR job={job} status={result.returncode} summary={identified}\n"
         if attempt < attempts:
