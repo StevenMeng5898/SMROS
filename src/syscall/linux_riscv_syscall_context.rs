@@ -3,6 +3,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::kernel_lowlevel::thread::MAX_THREADS;
 use crate::kernel_objects::scheduler;
 
+include!("linux_riscv_syscall_context_logic_shared.rs");
+
 /// Context of a RISC-V trap being dispatched by one scheduler thread. The
 /// frame lives on the dedicated trap stack; per-thread slots keep a blocked
 /// syscall's return state independent from another process on the hart.
@@ -25,13 +27,13 @@ fn current_slot() -> usize {
 }
 
 pub(crate) fn install(saved_frame: usize) -> bool {
-    if saved_frame == 0 || saved_frame & (core::mem::align_of::<u64>() - 1) != 0 {
+    if !smros_riscv_frame_aligned_body!(saved_frame) {
         return false;
     }
     // Trap entry stores the CSRs in slots 30..32 before any scheduler switch.
     let frame_ptr = saved_frame as *mut u64;
     let saved_pc = unsafe { frame_ptr.add(30).read() };
-    let return_pc = saved_pc.saturating_add(4);
+    let return_pc = smros_riscv_syscall_return_pc_body!(saved_pc);
     let pstate = unsafe { frame_ptr.add(32).read() };
     let user_sp = unsafe { frame_ptr.add(31).read() as usize };
     if user_sp == 0 {
@@ -49,7 +51,7 @@ pub(crate) fn install(saved_frame: usize) -> bool {
 /// Install a trap frame for a synchronous user exception.  Unlike a syscall,
 /// the saved `sepc` is the faulting instruction and must not be advanced.
 pub(crate) fn install_fault(saved_frame: usize) -> bool {
-    if saved_frame == 0 || saved_frame & (core::mem::align_of::<u64>() - 1) != 0 {
+    if !smros_riscv_frame_aligned_body!(saved_frame) {
         return false;
     }
     let frame_ptr = saved_frame as *mut u64;
@@ -73,7 +75,7 @@ pub(crate) fn install_fault(saved_frame: usize) -> bool {
 /// user mode. Signal delivery needs the same per-thread frame context as a
 /// syscall, but the interrupted instruction must be resumed unchanged.
 pub(crate) fn install_interrupt(saved_frame: usize) -> bool {
-    if saved_frame == 0 || saved_frame & (core::mem::align_of::<u64>() - 1) != 0 {
+    if !smros_riscv_frame_aligned_body!(saved_frame) {
         return false;
     }
     let frame_ptr = saved_frame as *mut u64;
@@ -82,7 +84,7 @@ pub(crate) fn install_interrupt(saved_frame: usize) -> bool {
     let pstate = unsafe { frame_ptr.add(32).read() };
     // SSTATUS.SPP is set when the trap interrupted supervisor mode. Such a
     // frame has a kernel stack and must not be used for a user signal frame.
-    if pstate & (1 << 8) != 0 || user_sp == 0 {
+    if smros_riscv_sstatus_spp_set_body!(pstate) || user_sp == 0 {
         return false;
     }
     let slot = current_slot();

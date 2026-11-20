@@ -2487,4 +2487,11 @@ proof fn user_test_syscall_smoke() {
     assert(0u64 == smros_user_syscall_should_advance_elr_body!());
 }
 
+fn verified_virtio_completion_timed_out(now: u64, deadline: u64) -> (out: bool)
+    ensures
+        out == (now >= deadline),
+{
+    smros_driver_virtio_completion_timed_out_body!(now, deadline)
+}
+
 } // verus!

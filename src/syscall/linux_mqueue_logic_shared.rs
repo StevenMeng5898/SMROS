@@ -66,6 +66,28 @@ pub(crate) struct LinuxMqueueDeadline {
     pub absolute_realtime_nanoseconds: Option<u64>,
 }
 
+macro_rules! smros_linux_mqueue_attr_valid_body {
+    ($maxmsg:expr, $msgsize:expr, $maxmsg_limit:expr, $msgsize_limit:expr) => {{
+        $maxmsg != 0
+            && $msgsize != 0
+            && $maxmsg <= $maxmsg_limit
+            && $msgsize <= $msgsize_limit
+    }};
+}
+
+/// `0` accept the component, `1` empty or contains `/`, `2` longer than the cap.
+macro_rules! smros_linux_mqueue_name_shape_body {
+    ($component_len:expr, $has_slash:expr, $max_len:expr) => {{
+        if $component_len == 0 || $has_slash {
+            1u8
+        } else if $component_len > $max_len {
+            2u8
+        } else {
+            0u8
+        }
+    }};
+}
+
 fn mqueue_realtime_deadline_ticks(
     realtime_nanoseconds: u64,
     realtime_offset_nanoseconds: i64,
@@ -674,26 +696,23 @@ impl<const Q: usize, const H: usize, const W: usize> LinuxMqueueState<Q, H, W> {
 
 pub(crate) fn linux_mqueue_name_component(name: &str) -> Result<&str, LinuxMqueueError> {
     let component = name.strip_prefix('/').unwrap_or(name);
-    if component.is_empty() {
-        return Err(LinuxMqueueError::Invalid);
+    let has_slash = component.as_bytes().iter().any(|byte| *byte == b'/');
+    match smros_linux_mqueue_name_shape_body!(component.len(), has_slash, LINUX_MQ_NAME_MAX) {
+        0 => Ok(component),
+        2 => Err(LinuxMqueueError::NameTooLong),
+        _ => Err(LinuxMqueueError::Invalid),
     }
-    if component.len() > LINUX_MQ_NAME_MAX {
-        return Err(LinuxMqueueError::NameTooLong);
-    }
-    if component.as_bytes().iter().any(|byte| *byte == b'/') {
-        return Err(LinuxMqueueError::Invalid);
-    }
-    Ok(component)
 }
 
 pub(crate) fn validate_linux_mqueue_attr(
     attr: LinuxMqueueAttr,
 ) -> Result<LinuxMqueueAttr, LinuxMqueueError> {
-    if attr.maxmsg == 0
-        || attr.msgsize == 0
-        || attr.maxmsg > LINUX_MQ_MAXMSG_LIMIT
-        || attr.msgsize > LINUX_MQ_MSGSIZE_LIMIT
-    {
+    if !smros_linux_mqueue_attr_valid_body!(
+        attr.maxmsg,
+        attr.msgsize,
+        LINUX_MQ_MAXMSG_LIMIT,
+        LINUX_MQ_MSGSIZE_LIMIT
+    ) {
         return Err(LinuxMqueueError::Invalid);
     }
     Ok(LinuxMqueueAttr {

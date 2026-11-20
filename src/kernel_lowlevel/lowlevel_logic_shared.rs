@@ -483,6 +483,7 @@ macro_rules! smros_ll_timer_elapsed_ticks_body {
 /// The architectural timer line stays asserted while CNTPCT >= CVAL.
 /// An edge-triggered PPI drops that line after one delivery, and a missed
 /// edge leaves WFI asleep with the scheduler tick frozen.
+#[allow(unused_macros)]
 macro_rules! smros_ll_gic_ppi_level_clear_mask_body {
     ($irq:expr) => {{
         let irq = $irq;
@@ -507,6 +508,7 @@ macro_rules! smros_ll_timer_earliest_compare_body {
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_timer_program_compare_body {
     ($periodic:expr, $armed:expr, $requested:expr) => {{
         let periodic = $periodic;
@@ -557,6 +559,7 @@ macro_rules! smros_ll_timer_tick_count_body {
     }};
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_ll_timer_counter_nanoseconds_body {
     ($counter:expr, $frequency:expr) => {{
         if $frequency == 0 {

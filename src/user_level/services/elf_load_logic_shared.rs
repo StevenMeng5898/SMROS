@@ -25,19 +25,49 @@ pub struct ElfLoadRun {
     pub prot: usize,
 }
 
+macro_rules! smros_elf_page_down_body {
+    ($value:expr, $page_size:expr) => {{
+        if $page_size == 0 {
+            None
+        } else {
+            let remainder = $value % $page_size;
+            if remainder <= $value {
+                Some($value - remainder)
+            } else {
+                None
+            }
+        }
+    }};
+}
+
+macro_rules! smros_elf_page_up_body {
+    ($value:expr, $page_size:expr) => {{
+        if $page_size == 0 {
+            None
+        } else if $value == 0 {
+            Some(0u64)
+        } else {
+            match $page_size.checked_sub(1).and_then(|bias| $value.checked_add(bias)) {
+                Some(adjusted) => {
+                    let remainder = adjusted % $page_size;
+                    if remainder <= adjusted {
+                        Some(adjusted - remainder)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        }
+    }};
+}
+
 fn page_down(value: u64, page_size: u64) -> Option<u64> {
-    if page_size == 0 {
-        return None;
-    }
-    Some(value - value % page_size)
+    smros_elf_page_down_body!(value, page_size)
 }
 
 fn page_up(value: u64, page_size: u64) -> Option<u64> {
-    if page_size == 0 || value == 0 {
-        return if page_size == 0 { None } else { Some(0) };
-    }
-    let adjusted = value.checked_add(page_size - 1)?;
-    Some(adjusted - adjusted % page_size)
+    smros_elf_page_up_body!(value, page_size)
 }
 
 fn segment_pages(segment: &ElfLoadSegment, page_size: u64) -> Option<(u64, u64)> {
@@ -53,6 +83,75 @@ fn segment_pages(segment: &ElfLoadSegment, page_size: u64) -> Option<(u64, u64)>
     Some((start, aligned_end))
 }
 
+macro_rules! smros_elf_admit_segment_body {
+    (
+        $vaddr:expr,
+        $mem_size:expr,
+        $file_size:expr,
+        $base:expr,
+        $window_start:expr,
+        $window_end:expr,
+        $page_size:expr,
+        $einval:expr,
+        $enomem:expr
+    ) => {{
+        if $page_size == 0 || $window_end <= $window_start {
+            Err($einval)
+        } else if $mem_size == 0 {
+            Ok(())
+        } else if $file_size > $mem_size {
+            Err($einval)
+        } else if $mem_size > $window_end - $window_start {
+            Err($enomem)
+        } else {
+            match $base.checked_add($vaddr) {
+                None => Err($einval),
+                Some(abs_start) => match abs_start.checked_add($mem_size) {
+                    None => Err($einval),
+                    Some(abs_end) => {
+                        if abs_start < $window_start || abs_end > $window_end {
+                            Err($einval)
+                        } else {
+                            match smros_elf_page_down_body!($vaddr, $page_size) {
+                                None => Err($einval),
+                                Some(start) => match $vaddr.checked_add($mem_size) {
+                                    None => Err($einval),
+                                    Some(end) => match smros_elf_page_up_body!(end, $page_size) {
+                                        None => Err($einval),
+                                        Some(aligned_end) => {
+                                            if aligned_end <= start {
+                                                Err($einval)
+                                            } else {
+                                                match $base.checked_add(start) {
+                                                    None => Err($einval),
+                                                    Some(aligned_lo) => {
+                                                        match $base.checked_add(aligned_end) {
+                                                            None => Err($einval),
+                                                            Some(aligned_hi) => {
+                                                                if aligned_lo < $window_start
+                                                                    || aligned_hi > $window_end
+                                                                {
+                                                                    Err($einval)
+                                                                } else {
+                                                                    Ok(())
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                                },
+                            }
+                        }
+                    }
+                },
+            }
+        }
+    }};
+}
+
 /// Reject a segment that cannot be placed in the EL0 window, or whose
 /// `mem_size` is larger than that window.
 pub fn admit_elf_segment(
@@ -62,33 +161,17 @@ pub fn admit_elf_segment(
     window_end: u64,
     page_size: u64,
 ) -> Result<(), u8> {
-    if page_size == 0 || window_end <= window_start {
-        return Err(ELF_LOAD_EINVAL);
-    }
-    if segment.mem_size == 0 {
-        return Ok(());
-    }
-    if segment.file_size > segment.mem_size {
-        return Err(ELF_LOAD_EINVAL);
-    }
-    let window = window_end - window_start;
-    if segment.mem_size > window {
-        return Err(ELF_LOAD_ENOMEM);
-    }
-    let abs_start = base.checked_add(segment.vaddr).ok_or(ELF_LOAD_EINVAL)?;
-    let abs_end = abs_start
-        .checked_add(segment.mem_size)
-        .ok_or(ELF_LOAD_EINVAL)?;
-    if abs_start < window_start || abs_end > window_end {
-        return Err(ELF_LOAD_EINVAL);
-    }
-    let (start, end) = segment_pages(segment, page_size).ok_or(ELF_LOAD_EINVAL)?;
-    let aligned_lo = base.checked_add(start).ok_or(ELF_LOAD_EINVAL)?;
-    let aligned_hi = base.checked_add(end).ok_or(ELF_LOAD_EINVAL)?;
-    if aligned_lo < window_start || aligned_hi > window_end {
-        return Err(ELF_LOAD_EINVAL);
-    }
-    Ok(())
+    smros_elf_admit_segment_body!(
+        segment.vaddr,
+        segment.mem_size,
+        segment.file_size,
+        base,
+        window_start,
+        window_end,
+        page_size,
+        ELF_LOAD_EINVAL,
+        ELF_LOAD_ENOMEM
+    )
 }
 
 fn page_protection(page: u64, page_size: u64, segments: &[ElfLoadSegment]) -> Option<usize> {
